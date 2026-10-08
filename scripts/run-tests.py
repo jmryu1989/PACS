@@ -120,7 +120,10 @@ def worker(path):
             json.dump(plan, stream)
     suite = collect(plan)
     print("EXACT_TESTS " + json.dumps([test.id() for test in suite]), flush=True)
-    with gate.live_run() if plan["mode"] == "live" else nullcontext():
+    files = {(ROOT / item["file"]).resolve().relative_to(ROOT).as_posix() for item in plan["tests"]}
+    module = next(iter(files)) if len(files) == 1 else "plan:" + claim["plan_sha256"]
+    with gate.live_run(unit=plan["unit"], module=module, plan_sha256=claim["plan_sha256"],
+                       attempt=len(ledger["attempts"])) if plan["mode"] == "live" else nullcontext():
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         # A failed live run retains the inspection marker, even if it appears
         # to have cleaned up. Do not retry against uncertain shared fixtures.
@@ -157,7 +160,8 @@ def execute(path):
         with frozen.open("x", encoding="utf-8") as stream:
             json.dump(plan, stream)
         ticket = secrets.token_hex(32)
-        row = {"status": "running", "plan_sha256": hashlib.sha256(frozen.read_bytes()).hexdigest(), "started": time.time(),
+        row = {"status": "running", "attempt": len(ledger["attempts"]) + 1,
+               "plan_sha256": hashlib.sha256(frozen.read_bytes()).hexdigest(), "started": time.time(),
                "ticket_sha256": hashlib.sha256(ticket.encode()).hexdigest()}
         ledger["attempts"].append(row)
         write_json(ledger_path, ledger)

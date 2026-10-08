@@ -42,6 +42,9 @@ const CURSOR = /^[A-Za-z0-9_-]+$/;
 const CONTROL = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/;
 
 export type RequestCaller = Caller & { name?: string };
+type CreateRequest = { requestId: string; expectedOwner: unknown; kind: 'external-image' | 'image-transfer';
+  counterparty: string; counterpartyInstitutionId: string | null; reason: string };
+type ListQuery = { view?: string; state?: string; kind?: string; cursor?: string };
 type Scope = 'all' | 'own';
 
 const fingerprint = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -203,7 +206,7 @@ export class ImageRequestService {
   }
 
   /** #7 목록. view=mine은 clinician 역할의 자기 요청, view=queue는 판독의·방사선사·관리자의 기관 대기열. 총개수는 싣지 않는다. */
-  async list(c: RequestCaller, q: any) {
+  async list(c: RequestCaller, q: ListQuery) {
     this.member(c);
     const query = object(q) ? q : {};
     if (Object.keys(query).some(k => !['view', 'state', 'kind', 'cursor'].includes(k)) || Object.values(query).some(v => typeof v !== 'string')
@@ -276,7 +279,7 @@ export class ImageRequestService {
    * #10 요청 등록. 요청자·기관·역할 표지는 토큰에서만 오고 body에는 정확히 여섯 키만 받는다. 상대 기관 id는 키가
    * 반드시 있고 값은 null 또는 등록된 다른 기관이다. 같은 검사·종류·요청자의 활성 요청은 하나다(OQ-7 a).
    */
-  async create(uid: string, c: RequestCaller, b: any) {
+  async create(uid: string, c: RequestCaller, b: CreateRequest) {
     this.member(c);
     if (!holds(c, CLINICIAN_ROLE)) throw roleRequired();
     if (!studyUid(uid)) throw invalid('검사 UID를 확인하세요');
