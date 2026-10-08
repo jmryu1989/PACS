@@ -5,6 +5,7 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -46,6 +47,36 @@ def file_snapshot(paths, cwd):
     return result
 
 
+def tree_snapshot(trees, cwd):
+    def regular_files(directory):
+        # scandir propagates traversal failures instead of silently omitting inputs.
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    yield from regular_files(Path(entry.path))
+                elif entry.is_file(follow_symlinks=False):
+                    yield Path(entry.path)
+
+    result = []
+    for requested in trees:
+        path = Path(requested)
+        if not path.is_absolute():
+            path = cwd / path
+        item = {"requested": requested, "path": str(path.resolve()), "tree": requested}
+        try:
+            files = sorted(regular_files(path), key=lambda file: file.as_posix())
+        except FileNotFoundError:
+            item.update(status="missing", sha256=None, lf_sha256=None)
+            result.append(item)
+        except OSError as error:
+            item.update(status="unreadable", sha256=None, lf_sha256=None, error=str(error))
+            result.append(item)
+        else:
+            names = [(Path(requested) / file.relative_to(path)).as_posix() for file in files]
+            result.extend(dict(file, tree=requested) for file in file_snapshot(names, cwd))
+    return result
+
+
 def git_head(cwd):
     try:
         result = subprocess.run(
@@ -74,6 +105,10 @@ def main(argv=None):
     parser.add_argument("--file", action="append", default=[], help=(
         "File to hash before and after the command; repeat as needed; relative to --cwd"
     ))
+    parser.add_argument("--tree", action="append", default=[], help=(
+        "Directory of regular files to hash recursively before and after the command; "
+        "repeat as needed; relative to --cwd"
+    ))
     parser.add_argument("command", nargs=argparse.REMAINDER, help="-- executable argument ...")
     args = parser.parse_args(argv)
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -93,7 +128,7 @@ def main(argv=None):
         "status": "preparing", "started_at_utc": None, "ended_at_utc": None,
         "exit_code": None, "recorder_exit_code": None, "launch_error": None,
         "git_head_before": git_head(cwd), "git_head_after": None,
-        "files_before": file_snapshot(args.file, cwd), "files_after": None,
+        "files_before": file_snapshot(args.file, cwd) + tree_snapshot(args.tree, cwd), "files_after": None,
         "stdout": "stdout.log", "stderr": "stderr.log", "log_files": None,
     }
     metadata = run_dir / "run.json"
@@ -118,7 +153,8 @@ def main(argv=None):
                 wrapper_exit = 127
             record.update(ended_at_utc=utc_now(), duration_seconds=time.monotonic() - started)
         record.update(
-            git_head_after=git_head(cwd), files_after=file_snapshot(args.file, cwd),
+            git_head_after=git_head(cwd),
+            files_after=file_snapshot(args.file, cwd) + tree_snapshot(args.tree, cwd),
             log_files=file_snapshot(["stdout.log", "stderr.log"], run_dir),
         )
         # A successful child is not proof of complete evidence if a requested hash failed.

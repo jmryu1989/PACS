@@ -51,6 +51,45 @@ class MeasurementCiTests(unittest.TestCase):
                 self.assertNotEqual(profile['out'], other['out'])
                 self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
 
+    def test_validate_attribution_record_binds_exact_scanner_inputs(self):
+        import argparse
+        import shlex
+        import yaml
+
+        test_file = 'tests/admin_audit_attribution_test.cjs'
+        workflow = yaml.safe_load((ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8'))
+        commands = [shlex.split(step['run']) for job in workflow['jobs'].values()
+                    for step in job.get('steps', []) if test_file in step.get('run', '')]
+        self.assertEqual(len(commands), 1, 'one recorded attribution test invocation')
+        command = commands[0]
+        self.assertEqual(command[:2], ['python3', 'scripts/record-run.py'])
+        boundary = command.index('--')
+        self.assertEqual(command[-3:], ['node', '--test', test_file])
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--run-dir', required=True)
+        parser.add_argument('--cwd', default='.')
+        parser.add_argument('--file', action='append', default=[])
+        parser.add_argument('--tree', action='append', default=[])
+        args = parser.parse_args(command[2:boundary])
+        cwd = ci.ROOT / args.cwd
+        recorded = [(cwd / name).resolve() for name in args.file]
+        for name in args.tree:
+            directory = cwd / name
+            self.assertTrue(directory.is_dir(), name)
+            recorded.extend(file.resolve() for file in directory.rglob('*') if file.is_file())
+
+        # The scanner's stated corpus, plus its fixtures and compiler/generator inputs.
+        # Expand the checked-out directories independently of the recorder options so
+        # adding a source or accidentally recording an unrelated file cannot pass.
+        read = set()
+        for name in ('api/src', 'tests/fixtures/admin-audit-checker', 'tests/fixtures/admin_audit_completeness'):
+            read.update(file.resolve() for file in (ci.ROOT / name).rglob('*') if file.is_file())
+        read.update(file.resolve() for file in (ci.ROOT / 'api/prisma').glob('*.cjs') if file.is_file())
+        read.update((ci.ROOT / name).resolve() for name in (
+            'api/prisma/schema.prisma', 'api/tsconfig.json', 'api/package-lock.json', test_file))
+        self.assertEqual(len(recorded), len(set(recorded)), 'no duplicate recorded inputs')
+        self.assertSetEqual(set(recorded), read, 'recorded inputs must equal scanner inputs in both directions')
+
     def test_validate_workflow_runs_cell_merge_in_its_own_bounded_job(self):
         text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
         jobs = text.split('\n  cell-merge:\n')
