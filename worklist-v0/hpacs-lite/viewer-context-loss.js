@@ -81,7 +81,9 @@
     function coverArea(element) {
       if (!element?.isConnected || covers.has(element)) return;
       const box = root.document.createElement('section'); box.setAttribute('aria-label', 'Viewer Recovery');
-      box.style.cssText = 'position:absolute;inset:0;z-index:100;background:#13202b;color:white;overflow:auto;padding:12px;box-sizing:border-box;font:14px/1.5 system-ui';
+      // Inactive OHIF panes disable pointer events; recovery actions must still
+      // accept input when their failed renderer cannot become interactive.
+      box.style.cssText = 'position:absolute;inset:0;z-index:100;pointer-events:auto;background:#13202b;color:white;overflow:auto;padding:12px;box-sizing:border-box;font:14px/1.5 system-ui';
       const heading = root.document.createElement('h2'); heading.textContent = 'Viewer Recovery';
       const text = root.document.createElement('p'); text.textContent = NOTICE; text.style.whiteSpace = 'pre-line';
       const repeated = root.document.createElement('p'); repeated.textContent = repeat > 1 ? REPEAT : '';
@@ -171,7 +173,12 @@
     function workState() {
       if (!['writer', 'read-only'].includes(session.state())) return { reason: 'guard-unavailable' };
       const readers = ['kinViewerHistoryWorkspaceState'];
-      if (session.writer()) readers.push('kinViewerJobWorkspaceState', 'kinViewerTechNoteWorkspaceState');
+      if (session.writer()) {
+        readers.push('kinViewerJobWorkspaceState');
+        // Embedded Tech Note belongs to the parent worklist, which this reload
+        // keeps alive. Only a standalone viewer owns the note being unloaded.
+        if (root.top === root) readers.push('kinViewerTechNoteWorkspaceState');
+      }
       let dirty = false;
       try {
         for (const name of readers) {

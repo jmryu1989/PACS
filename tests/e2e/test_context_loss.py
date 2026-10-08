@@ -1,8 +1,8 @@
 # coding: utf-8
 """REQ-S8-CTX / D549 -> RISK-CTX-BLANK/WORK -> CTX-HOSTED.
 
-Requires the isolated synthetic LiveStack through run-tests.py. No local execution
-is authorized for S8-CTX. Known voxels and source identity are the recovery oracle.
+Requires an explicitly authorized isolated synthetic LiveStack through run-tests.py.
+Known voxels and source identity are the recovery oracle.
 """
 import unittest
 from playwright.sync_api import expect
@@ -26,10 +26,11 @@ class ContextLossE2E(mip.VolumeMipE2E):
 
     def recover(self, viewer):
         expect(viewer.get_by_role('heading', name='Viewer Recovery').last).to_be_visible()
-        # Observe navigation before testing readiness, so the old document's
-        # loaded stack cannot satisfy the recovery check ahead of the reload.
-        with viewer.expect_navigation(wait_until='domcontentloaded', timeout=60000):
-            viewer.get_by_role('button', name='Reload Viewer', exact=True).last.click()
+        # Recovery also replaces history state before reload. Wait for a new
+        # document so that same-document navigation cannot admit the old stack.
+        previous = viewer.evaluate('performance.timeOrigin')
+        viewer.get_by_role('button', name='Reload Viewer', exact=True).last.click()
+        viewer.wait_for_function('previous => performance.timeOrigin !== previous', arg=previous, timeout=60000)
         self.recovery_ready(viewer)
 
     def assert_original_stack(self, viewer, study):

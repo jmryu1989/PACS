@@ -322,6 +322,44 @@ class ViewerContextLossDOMTest(unittest.TestCase):
         self.assertEqual(separate.evaluate('KinViewerSessionBoundary.session()'), 'S1')
         expect(parent.locator('#parent-report')).to_have_value('parent text')
 
+    def test_embedded_writer_reload_preserves_parent_work_without_standalone_note_panel(self):
+        # The worklist owns the embedded viewer's Tech Note; reloading only the
+        # frame must preserve parent work without requiring a standalone panel.
+        parent = self.context.new_page(); parent.goto(BASE + '/parent')
+        parent.evaluate('''url => {
+          const note=document.createElement('textarea');note.setAttribute('aria-label','Tech Note');
+          note.value='unsaved parent note';document.body.append(note);
+          window.noteSave={busy:true,unknown:true};
+          const frame=document.createElement('iframe');frame.src=url;
+          frame.style='width:1100px;height:750px';document.body.append(frame);
+        }''', BASE + SCOPE)
+        frame = parent.locator('iframe').element_handle().content_frame()
+        frame.wait_for_function('() => !!window.boot'); frame.evaluate('boot')
+        frame.evaluate('role="writer";delete window.kinViewerTechNoteWorkspaceState')
+        self.lose(page=frame)
+        previous = frame.evaluate('performance.timeOrigin')
+        self.click_reload(frame)
+        frame.wait_for_function('previous => performance.timeOrigin !== previous', arg=previous, timeout=5000)
+        frame.wait_for_function('() => !!window.boot')
+        frame.evaluate('boot')
+        self.assertEqual(frame.evaluate('KinViewerSessionBoundary.session()'), 'S1')
+        expect(parent.locator('#parent-report')).to_have_value('parent text')
+        expect(parent.locator('#dictation')).to_have_value('spoken')
+        expect(parent.get_by_label('Tech Note')).to_have_value('unsaved parent note')
+        self.assertEqual(parent.evaluate('noteSave'), {'busy': True, 'unknown': True})
+
+    def test_inactive_viewport_recovery_button_accepts_pointer_input(self):
+        # OHIF leaves inactive image panes non-interactive. Recovery remains a
+        # user action on that pane even while its renderer cannot be activated.
+        p = self.page
+        p.locator('#image0').evaluate('element => {element.style.pointerEvents="none"}')
+        self.lose()
+        previous = p.evaluate('performance.timeOrigin')
+        p.get_by_role('button', name='Reload Viewer', exact=True).click(timeout=2000)
+        p.wait_for_function('previous => performance.timeOrigin !== previous', arg=previous, timeout=5000)
+        p.wait_for_function('() => !!window.boot'); p.evaluate('boot')
+        self.assertEqual(p.evaluate('KinViewerSessionBoundary.session()'), 'S1')
+
     def mount_mip(self, wait=True):
         for name in ('volume-mip.js', 'volume-voi.js', 'volume-mip-job.js', 'volume-mip-batch.js', 'viewer-volume-mip.js'):
             self.page.add_script_tag(url=BASE + '/worklist/hpacs-lite/' + name)
@@ -800,7 +838,11 @@ class ViewerContextLossDOMTest(unittest.TestCase):
         p.remove_listener('dialog', self.accept_dialog)
         dismiss = lambda d: d.dismiss()
         p.on('dialog', dismiss)
-        self.click_reload()
+        # An absent marker is already true before the async reload asks to leave.
+        # Observe the actual cancelled prompt before issuing another navigation.
+        with p.expect_event('dialog') as prompt:
+            self.click_reload()
+        self.assertEqual(prompt.value.type, 'beforeunload')
         p.wait_for_function('!sessionStorage.getItem("kin-viewer-recovery") && !history.state.kinViewerRecovery')
         self.assertIsNone(p.evaluate('sessionStorage.getItem("kin-viewer-recovery-departure")'))
         self.assertIn('kinFinding=once', p.url)
@@ -824,7 +866,10 @@ class ViewerContextLossDOMTest(unittest.TestCase):
         p.evaluate('window.block=true;addEventListener("beforeunload",e=>{if(block){e.preventDefault();e.returnValue=""}})')
         p.remove_listener('dialog', self.accept_dialog)
         dismiss = lambda d: d.dismiss()
-        p.on('dialog', dismiss); self.click_reload()
+        p.on('dialog', dismiss)
+        with p.expect_event('dialog') as prompt:
+            self.click_reload()
+        self.assertEqual(prompt.value.type, 'beforeunload')
         p.wait_for_function('!sessionStorage.getItem("kin-viewer-recovery")')
         p.remove_listener('dialog', dismiss); p.on('dialog', self.accept_dialog)
         p.evaluate('block=false'); p.goto(BASE + '/other'); p.go_back(); p.evaluate('boot')
