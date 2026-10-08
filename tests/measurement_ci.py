@@ -1,9 +1,11 @@
 # coding: utf-8
 """Fresh GitHub-hosted runner only; owned synthetic local stack CI profiles."""
 import argparse, json, os, re, secrets, shutil, ssl, subprocess, sys, time
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.request import urlopen
 from live_admin_credential import ensure_imported_admin_credential
+import live_test_gate as gate
 
 ROOT = Path(__file__).resolve().parents[1]
 SUITES = ['viewer_api_test.py', 'e2e/test_measurement_readback.py',
@@ -610,6 +612,31 @@ def seed_source():
         ds.save_as(dest / f'{z}.dcm', write_like_original=False)
 
 
+def inspect_failed_module(run, out, compose, unit, suite, result):
+    """The disposable stack owner records current state before admitting another module."""
+    name = 'inspection-' + Path(suite).stem
+    stack = {}
+    artifacts = [result['name'] + '.log', 'results.json']
+    for kind, command in (('compose-ps', compose + ['ps', '--all']),
+                          ('daemon-containers', ['docker', 'ps', '-a', '--format', '{{json .}}'])):
+        log = name + '-' + kind
+        code = run(log, command, timeout=30, finalizing=True)
+        artifacts.append(log + '.log')
+        stack[kind] = {'exit': code, 'output': (out / (log + '.log')).read_text(encoding='utf-8')}
+    record = out / (name + '.json')
+    with record.open('x', encoding='utf-8') as stream:
+        json.dump({'unit': unit, 'module': suite, 'exit': result['exit'],
+                   'artifacts': artifacts, 'result': result, 'stack': stack,
+                   'inspected_at': datetime.now(timezone.utc).isoformat(),
+                   'inspector': 'measurement_ci:' + compose[3]}, stream, indent=2)
+    if any(row['exit'] for row in stack.values()):
+        raise RuntimeError(suite + ' fixture inspection failed; gate remains closed')
+    # A plan refused before its live run (lease, selection) leaves no marker: nothing to release,
+    # the record still documents the failure and the next module may proceed.
+    if (gate.STATE / 'live-needs-inspection.json').is_file():
+        gate.release_after_inspection(record)
+
+
 def main(profile_name, credential_provider=None):
     if profile_name not in PROFILES:
         raise RuntimeError('Unknown CI profile')
@@ -698,6 +725,9 @@ def main(profile_name, credential_provider=None):
             # Cleanup still runs once, after all attempted modules, in the finally below.
             if run(Path(suite).stem, command, timeout=outer_timeout, fail_fast=False):
                 failures.append(suite)
+                result = results[-1].copy()
+                (out/'results.json').write_text(json.dumps(results, indent=2), encoding='utf-8')
+                inspect_failed_module(run, out, compose, unit, suite, result)
         if failures:
             raise RuntimeError(', '.join(failures) + ' failed; see sanitized artifact')
         if evidence_stage is not None:

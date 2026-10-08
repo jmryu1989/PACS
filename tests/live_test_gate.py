@@ -4,6 +4,9 @@ This is an accident barrier, not a sandbox against code that edits the gate.
 Neither an environment variable nor importing a live TestCase grants permission.
 """
 from contextlib import contextmanager
+from datetime import datetime, timezone
+import hashlib
+import json
 from pathlib import Path
 import os
 
@@ -39,6 +42,39 @@ def preflight_live():
     with exclusive(STATE / "live.lock"):
         if (STATE / "live-needs-inspection.json").exists():
             raise Refused("Previous live run needs fixture inspection: " + str(STATE))
+
+
+def release_after_inspection(record):
+    """Reopen a failed run only after its executor has retained an inspection."""
+    with exclusive(STATE / "live.lock"):
+        marker = STATE / "live-needs-inspection.json"
+        if not marker.is_file():
+            raise Refused("No live inspection marker to release")
+        try:
+            path = Path(record).resolve()
+            raw = path.read_bytes()
+            inspection = json.loads(raw)
+            marker_contents = json.loads(marker.read_bytes())
+        except (OSError, ValueError, TypeError) as error:
+            raise Refused("Inspection requires a readable JSON record and marker") from error
+        if (not isinstance(inspection, dict)
+                or any(not isinstance(inspection.get(key), str) or not inspection[key].strip()
+                       for key in ("unit", "module", "inspected_at", "inspector"))
+                or type(inspection.get("exit")) is not int
+                or not isinstance(inspection.get("artifacts"), list) or not inspection["artifacts"]
+                or any(not isinstance(item, str) or not item.strip() for item in inspection["artifacts"])
+                or not isinstance(inspection.get("stack"), dict) or not inspection["stack"]):
+            raise Refused("Incomplete or malformed fixture inspection record")
+        entry = {"marker": marker_contents, "record_path": str(path),
+                 "record_sha256": hashlib.sha256(raw).hexdigest(),
+                 "released_at": datetime.now(timezone.utc).isoformat()}
+        # Persist the attestation before releasing the marker; a write failure
+        # must leave the gate closed. Never truncate the account's audit trail.
+        with (STATE / "inspections.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(entry) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        marker.unlink()
 
 
 @contextmanager

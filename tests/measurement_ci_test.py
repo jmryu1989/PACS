@@ -3,7 +3,9 @@ import json, os, tempfile, unittest
 import contextlib
 import csv
 import io
+import hashlib
 import shlex
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import measurement_ci as ci
@@ -47,14 +49,41 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertIn('measurements', checked)
         self.assertIn('s7-u5-session-contracts', checked)
 
-    def exercise_profile_failures(self, exhaust_deadline=False):
-        """Run the real driver with process/HTTP boundaries replaced; observe its public artifacts."""
+    def exercise_profile_failures(self, exhaust_deadline=False, real_runner=False, inspection_failure=False):
+        """Only the real-runner variant proves module bodies execute across a retained marker."""
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
+            state = root / 'gate-state'
             suites = ('first_failure.py', 'passing.py', 'second_failure.py')
             profile = {**ci.PROFILES['measurements'], 'out': root / 'artifacts',
-                       'suites': tuple((s, None, 'ci-' + Path(s).stem) for s in suites)}
+                       'suites': tuple((s, None, 'ci-' + Path(s).stem.replace('_', '-')) for s in suites)}
             clock, live, commands = [0.0], [], []
+            subprocess_run = ci.subprocess.run
+            if real_runner:
+                (root / 'tests').mkdir()
+                (root / 'scripts').mkdir()
+                # The existing runner executes in both supervisor and worker processes.
+                # Only its test root and gate STATE are redirected, never the account's ledger.
+                bootstrap = root / 'scripts/run-tests.py'
+                bootstrap.write_text(
+                    'import importlib.util\nfrom pathlib import Path\n'
+                    'spec=importlib.util.spec_from_file_location("runner", '
+                    + repr(str(ci.ROOT / 'scripts/run-tests.py')) + ')\n'
+                    'runner=importlib.util.module_from_spec(spec);spec.loader.exec_module(runner)\n'
+                    'runner.ROOT=Path(' + repr(str(root)) + ')\n'
+                    'runner.gate.STATE=Path(' + repr(str(state)) + ')\n'
+                    'runner.__file__=__file__\nraise SystemExit(runner.main())\n', encoding='utf-8')
+                for suite in suites:
+                    (root / 'tests' / suite).write_text(
+                        'import unittest\nfrom pathlib import Path\n'
+                        'from live_test_gate import require_live_run\n'
+                        'class Probe(unittest.TestCase):\n'
+                        ' def test_body(self):\n'
+                        '  require_live_run()\n'
+                        '  with (Path(__file__).parent / "executed.txt").open("a") as stream:\n'
+                        '   stream.write(' + repr(suite + '\n') + ')\n'
+                        + ('  self.fail("intentional synthetic failure")\n' if 'failure' in suite else ''),
+                        encoding='utf-8')
             response = MagicMock()
             response.__enter__.return_value.status = 200
             response.__enter__.return_value.read.return_value = b'{"memberRights":"ready"}'
@@ -66,17 +95,33 @@ class MeasurementCiTests(unittest.TestCase):
                     module = command[command.index('--module') + 1]
                     live.append(module)
                     self.assertGreater(kwargs['timeout'], 0)
+                    if real_runner:
+                        result = subprocess_run(command, **kwargs)
+                        clock[0] += 0.25
+                        if exhaust_deadline:
+                            clock[0] = 1501
+                        return result
+                    if 'failure' in module:
+                        with self.assertRaises(RuntimeError):
+                            with ci.gate.live_run():
+                                raise RuntimeError('synthetic module failure')
                     if exhaust_deadline:
                         clock[0] = 1501
                         raise ci.subprocess.TimeoutExpired(command, kwargs['timeout'], output=b'timed out')
                     clock[0] += 0.25
                     code = 1 if 'failure' in module else 0
+                if '--all' in command or '{{json .}}' in command:
+                    # Inspection must retain its own bound after the profile deadline.
+                    self.assertEqual(kwargs['timeout'], 30)
+                    if inspection_failure:
+                        code = 1
                 return MagicMock(returncode=code, stdout=b'module output', stderr=b'')
 
             with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted',
                                           'RUNNER_TEMP': folder}, clear=True), \
                     patch.object(ci, 'ROOT', root), patch.dict(ci.PROFILES, {'measurements': profile}), \
-                    patch.object(ci, 'seed_source'), patch.object(ci.time, 'monotonic', side_effect=lambda: clock[0]), \
+                    patch.object(ci.gate, 'STATE', state), \
+                    patch.object(ci, 'seed_source'), patch.object(ci, 'time', SimpleNamespace(monotonic=lambda: clock[0])), \
                     patch.object(ci.subprocess, 'check_output', side_effect=[b'', b'', b'unix:///runner.sock']), \
                     patch.object(ci.subprocess, 'run', side_effect=execute), \
                     patch.object(ci.ssl, '_create_unverified_context', return_value=None), \
@@ -86,9 +131,13 @@ class MeasurementCiTests(unittest.TestCase):
                 # An uncaught driver error is the CLI's non-zero exit contract.
                 with self.assertRaises(RuntimeError) as error:
                     ci.main('measurements')
+            if real_runner:
+                for module in live:
+                    print((profile['out'] / (Path(module).stem + '.log')).read_text(encoding='utf-8'))
             self.assertIn(Path(suites[0]).stem, str(error.exception))
-            self.assertEqual(live, ['tests/' + s for s in (suites[:1] if exhaust_deadline else suites)])
-            if not exhaust_deadline:
+            attempted = suites[:1] if exhaust_deadline or inspection_failure else suites
+            self.assertEqual(live, ['tests/' + s for s in attempted])
+            if not exhaust_deadline and not inspection_failure:
                 self.assertIn(Path(suites[2]).stem, str(error.exception))
             rows = json.loads((profile['out'] / 'results.json').read_text(encoding='utf-8'))
             self.assertEqual(rows[-1]['name'], 'cleanup')
@@ -97,17 +146,59 @@ class MeasurementCiTests(unittest.TestCase):
                 summary = list(csv.DictReader(stream, delimiter='\t'))
             modules = [row for row in summary if row['module'] in [Path(s).stem for s in suites]]
             self.assertEqual([row['module'] for row in modules], [Path(s).stem for s in live])
-            expected = ['FAIL (124)'] if exhaust_deadline else ['FAIL (1)', 'PASS (0)', 'FAIL (1)']
+            failed_code = 125 if real_runner else (124 if exhaust_deadline else 1)
+            expected = [f'FAIL ({failed_code})'] if len(attempted) == 1 else [f'FAIL ({failed_code})', 'PASS (0)', f'FAIL ({failed_code})']
             self.assertEqual([row['status'] for row in modules], expected)
             for row in modules:
                 self.assertGreater(float(row['duration_seconds']), 0)
                 self.assertTrue((profile['out'] / row['log']).is_file())
+            if inspection_failure:
+                self.assertTrue((state / 'live-needs-inspection.json').is_file())
+                self.assertFalse((state / 'inspections.jsonl').exists())
+                self.assertIn('fixture inspection failed', str(error.exception))
+            if real_runner:
+                executed = (root / 'tests/executed.txt').read_text().splitlines()
+                self.assertEqual(executed, list(attempted))
+                ledger = [json.loads(line) for line in (state / 'inspections.jsonl').read_text().splitlines()]
+                failures = [s for s in attempted if 'failure' in s]
+                self.assertEqual(len(ledger), len(failures))
+                self.assertFalse((state / 'live-needs-inspection.json').exists())
+                self.assertEqual(len(list(profile['out'].glob('inspection-*.json'))), len(failures))
+                for entry, suite in zip(ledger, failures):
+                    record_path = Path(entry['record_path'])
+                    self.assertEqual(record_path.parent, profile['out'])
+                    raw = record_path.read_bytes()
+                    self.assertEqual(entry['record_sha256'], hashlib.sha256(raw).hexdigest())
+                    record = json.loads(raw)
+                    self.assertEqual(record['module'], suite)
+                    self.assertEqual(record['unit'], 'ci-' + Path(suite).stem.replace('_', '-'))
+                    self.assertEqual(record['exit'], failed_code)
+                    self.assertIn(record['result'], rows)
+                    self.assertTrue(record['inspected_at'])
+                    self.assertTrue(record['inspector'])
+                    for artifact in record['artifacts']:
+                        self.assertTrue((profile['out'] / artifact).is_file())
+                    self.assertEqual(set(record['stack']), {'compose-ps', 'daemon-containers'})
+                    self.assertTrue(all(row['exit'] == 0 for row in record['stack'].values()))
+                    print('REAL_RUNNER_INSPECTION ' + json.dumps(record))
+                print('REAL_RUNNER_RESULT ' + json.dumps({'executed': executed, 'failures': failures,
+                      'ledger_lines': len(ledger), 'error': str(error.exception), 'cleanup': rows[-1]}))
+                print('REAL_RUNNER_LEDGER ' + json.dumps(ledger))
 
     def test_live_profile_runs_all_modules_and_reports_each_failure(self):
         self.exercise_profile_failures()
 
     def test_live_profile_deadline_stops_remaining_modules_and_still_cleans_up(self):
         self.exercise_profile_failures(exhaust_deadline=True)
+
+    def test_real_runner_executes_fail_pass_fail_after_recorded_inspections(self):
+        self.exercise_profile_failures(real_runner=True)
+
+    def test_real_runner_failure_then_deadline_skips_remaining_and_cleans_up(self):
+        self.exercise_profile_failures(real_runner=True, exhaust_deadline=True)
+
+    def test_failed_inspection_preserves_marker_and_still_cleans_up(self):
+        self.exercise_profile_failures(inspection_failure=True)
 
     def test_image_text_profile_is_exact_and_separate(self):
         profile=ci.PROFILES['image-text']
@@ -2673,6 +2764,9 @@ class MeasurementCiTests(unittest.TestCase):
                 seen.append(tuple(map(str, command)))
                 if 'run-tests.py' in ' '.join(seen[-1]):
                     (profile['out']/ci.GATEWAY_HANDOFF).write_text(json.dumps({'project': project}), encoding='utf-8')
+                    with self.assertRaises(RuntimeError):
+                        with ci.gate.live_run():
+                            raise RuntimeError('synthetic module failure')
                     raise ci.subprocess.TimeoutExpired(command, kwargs['timeout'])
                 return MagicMock(returncode=0, stdout=listings.get(seen[-1], b''), stderr=b'')
 
@@ -2681,6 +2775,7 @@ class MeasurementCiTests(unittest.TestCase):
             with patch.dict(os.environ, {'GITHUB_ACTIONS':'true', 'RUNNER_ENVIRONMENT':'github-hosted'}, clear=True), \
                  patch.object(ci, 'ROOT', root), \
                  patch.dict(ci.PROFILES, {'gateway-e2e': profile}), \
+                 patch.object(ci.gate, 'STATE', root / 'gate-state'), \
                  patch.object(ci, 'seed_source'), \
                  patch.object(ci.subprocess, 'check_output', side_effect=[b'', b'', b'unix:///var/run/docker.sock']), \
                  patch.object(ci.subprocess, 'run', side_effect=fake_run), \

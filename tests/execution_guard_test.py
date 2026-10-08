@@ -2,6 +2,7 @@
 import ast
 from collections import namedtuple
 import functools
+import hashlib
 import importlib.util
 import json
 import os
@@ -13,6 +14,7 @@ import textwrap
 import time
 import unittest
 from unittest.mock import patch
+import live_test_gate as gate
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / 'scripts/run-tests.py'
@@ -438,6 +440,90 @@ def compose_selection_violations(sources, excluded=TG02_EXCLUDED):
     violations += [Violation('TG02-STALE-EXCLUSION', rel, 0, excluded[rel])
                    for rel in sorted(excluded) if rel not in sources]
     return sorted(violations, key=lambda item: (item.file, item.line, item.rule))
+
+
+class InspectionReleaseTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='pacs-inspection-test-')
+        self.addCleanup(temporary.cleanup)
+        self.state = Path(temporary.name)
+        state = patch.object(gate, 'STATE', self.state)
+        state.start()
+        self.addCleanup(state.stop)
+        self.marker = self.state / 'live-needs-inspection.json'
+        self.ledger = self.state / 'inspections.jsonl'
+        self.record = self.state / 'inspection.json'
+        self.inspection = {'unit': 'owned-probe', 'module': 'probe.py', 'exit': 125,
+                           'artifacts': ['probe.log'], 'stack': {'containers': []},
+                           'inspected_at': '2026-10-08T02:00:00+00:00', 'inspector': 'fixture-owner'}
+        self.record.write_text(json.dumps(self.inspection), encoding='utf-8')
+
+    def fail_live_run(self):
+        with self.assertRaisesRegex(RuntimeError, 'synthetic failure'):
+            with gate.live_run():
+                raise RuntimeError('synthetic failure')
+        self.assertTrue(self.marker.is_file())
+
+    def test_inspection_requires_a_marker(self):
+        with self.assertRaises(gate.Refused):
+            gate.release_after_inspection(self.record)
+        self.assertFalse(self.ledger.exists())
+
+    def test_missing_and_malformed_records_keep_gate_closed(self):
+        self.fail_live_run()
+        original = self.marker.read_bytes()
+        self.record.unlink()
+        invalid = [None, '{', '[]']
+        invalid += [json.dumps({k: v for k, v in self.inspection.items() if k != key})
+                    for key in self.inspection]
+        invalid += [json.dumps({**self.inspection, key: value}) for key, value in (
+            ('unit', ''), ('module', []), ('exit', True), ('artifacts', 'probe.log'),
+            ('artifacts', [None]), ('stack', []), ('inspected_at', None), ('inspector', ''))]
+        for value in invalid:
+            with self.subTest(record=value):
+                if value is not None:
+                    self.record.write_text(value, encoding='utf-8')
+                with self.assertRaises(gate.Refused):
+                    gate.release_after_inspection(self.record)
+                self.assertEqual(self.marker.read_bytes(), original)
+                self.assertFalse(self.ledger.exists())
+                with self.assertRaises(gate.Refused):
+                    with gate.live_run():
+                        self.fail('Uninspected gate admitted a run')
+
+    def test_inspection_appends_evidence_then_admits_following_live_run(self):
+        previous = b''
+        for index in range(2):
+            self.fail_live_run()
+            marker = json.loads(self.marker.read_bytes())
+            gate.release_after_inspection(self.record)
+            self.assertFalse(self.marker.exists())
+            current = self.ledger.read_bytes()
+            self.assertTrue(current.startswith(previous))
+            rows = [json.loads(line) for line in current.splitlines()]
+            self.assertEqual(len(rows), index + 1)
+            self.assertEqual(rows[-1]['marker'], marker)
+            self.assertEqual(Path(rows[-1]['record_path']), self.record.resolve())
+            self.assertEqual(rows[-1]['record_sha256'], hashlib.sha256(self.record.read_bytes()).hexdigest())
+            self.assertTrue(rows[-1]['released_at'])
+            with gate.live_run():
+                gate.require_live_run()
+            self.assertEqual(self.ledger.read_bytes(), current)
+            previous = current
+
+    def test_active_lease_prevents_inspection_release(self):
+        with gate.live_run():
+            with self.assertRaises(gate.Refused):
+                gate.release_after_inspection(self.record)
+            self.assertTrue(self.marker.exists())
+            self.assertFalse(self.ledger.exists())
+
+    def test_ledger_write_failure_keeps_marker(self):
+        self.fail_live_run()
+        self.ledger.mkdir()
+        with self.assertRaises(OSError):
+            gate.release_after_inspection(self.record)
+        self.assertTrue(self.marker.exists())
 
 
 class ExecutionGuardTests(unittest.TestCase):
