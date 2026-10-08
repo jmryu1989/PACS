@@ -645,7 +645,7 @@ def main(profile_name, credential_provider=None):
     env['COMPOSE_PROJECT_NAME'] = project
     compose = ['docker','compose','-p',project]
     results = []; deadline = time.monotonic()+25*60
-    def run(name, command, timeout=600, finalizing=False):
+    def run(name, command, timeout=600, finalizing=False, fail_fast=True):
         started = time.monotonic()
         if not finalizing: timeout = max(.1, min(timeout, deadline-started))
         try:
@@ -657,7 +657,7 @@ def main(profile_name, credential_provider=None):
         (out/(name+'.log')).write_text(output, encoding='utf-8')
         results.append(dict(name=name, exit=code, seconds=time.monotonic()-started))
         print(name+': '+str(code), flush=True)
-        if code and not finalizing: raise RuntimeError(name+' failed; see sanitized artifact')
+        if code and not finalizing and fail_fast: raise RuntimeError(name+' failed; see sanitized artifact')
         return code
     try:
         seed_source()
@@ -686,10 +686,20 @@ def main(profile_name, credential_provider=None):
         values['KIN_LIVE_IMPORTED_ADMIN_PASSWORD'] = password
         env['KIN_LIVE_IMPORTED_ADMIN_PASSWORD'] = password
         run('ports', compose+['ps'])
+        failures = []
         for suite, class_name, unit in profile['suites']:
-            command, outer_timeout = guarded_profile_run(
-                profile, suite, class_name, unit, deadline-time.monotonic())
-            run(Path(suite).stem, command, timeout=outer_timeout)
+            try:
+                command, outer_timeout = guarded_profile_run(
+                    profile, suite, class_name, unit, deadline-time.monotonic())
+            except RuntimeError as error:
+                failures.append(suite + ': ' + str(error))
+                break
+            # Keep the deadline and supervisor margin even after a failed module.
+            # Cleanup still runs once, after all attempted modules, in the finally below.
+            if run(Path(suite).stem, command, timeout=outer_timeout, fail_fast=False):
+                failures.append(suite)
+        if failures:
+            raise RuntimeError(', '.join(failures) + ' failed; see sanitized artifact')
         if evidence_stage is not None:
             publish_vr_evidence(evidence_stage, out)
     finally:
@@ -709,6 +719,10 @@ def main(profile_name, credential_provider=None):
                 if cleanup and not failed: raise RuntimeError('CI cleanup failed; see sanitized artifact')
             finally:
                 (out/'results.json').write_text(json.dumps(results, indent=2), encoding='utf-8')
+                (out/'summary.tsv').write_text(
+                    'module\tstatus\tduration_seconds\tlog\n' + ''.join(
+                        f"{row['name']}\t{'PASS' if row['exit'] == 0 else 'FAIL'} ({row['exit']})\t"
+                        f"{row['seconds']:.3f}\t{row['name']}.log\n" for row in results), encoding='utf-8')
                 if evidence_stage is not None:
                     shutil.rmtree(evidence_stage)
 

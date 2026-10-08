@@ -1,5 +1,9 @@
 """D-MEASURE2 B1: runner refusal and public artifact secret redaction."""
 import json, os, tempfile, unittest
+import contextlib
+import csv
+import io
+import shlex
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import measurement_ci as ci
@@ -7,6 +11,104 @@ from live_admin_credential_test import ImportedAdminCredentialTests
 
 
 class MeasurementCiTests(unittest.TestCase):
+    def test_browser_install_cache_and_budgets_cover_pinned_dependencies(self):
+        import yaml
+        workflow = yaml.safe_load((ci.ROOT / '.github/workflows/validate.yml').read_text(encoding='utf-8'))
+        checked = []
+        for name, job in workflow['jobs'].items():
+            for index, install in enumerate(job['steps']):
+                if 'playwright install --with-deps chromium' not in install.get('run', ''):
+                    continue
+                with self.subTest(job=name):
+                    checked.append(name)
+                    self.assertEqual(install['timeout-minutes'], 15)
+                    cache = job['steps'][index - 1]
+                    self.assertRegex(cache['uses'], r'^actions/cache@[0-9a-f]{40}$')
+                    self.assertEqual(cache['with']['path'], '~/.cache/pip')
+                    self.assertEqual(cache.get('if'), install.get('if'))
+                    requirements = []
+                    for line in install['run'].splitlines():
+                        if ' -m pip install ' not in line:
+                            continue
+                        args = shlex.split(line)
+                        requirements.extend(args[i + 1] for i, arg in enumerate(args) if arg == '-r')
+                    self.assertTrue(requirements)
+                    for requirement in requirements:
+                        self.assertTrue((ci.ROOT / requirement).is_file())
+                    self.assertEqual(cache['with']['key'], '${{ runner.os }}-pip-${{ hashFiles('
+                                     + ', '.join(repr(r) for r in requirements) + ') }}')
+                    run_budgets = [s['timeout-minutes'] for s in job['steps'] if
+                                   'measurement_ci.py --profile' in s.get('run', '') or
+                                   'tests/report_dictation_capture_dom_test.py' in s.get('run', '')]
+                    self.assertEqual(len(run_budgets), 1)
+                    self.assertGreater(job['timeout-minutes'], install['timeout-minutes'] + run_budgets[0])
+        self.assertIn('study-arrivals', checked)
+        self.assertIn('volume-slab', checked)
+        self.assertIn('measurements', checked)
+        self.assertIn('s7-u5-session-contracts', checked)
+
+    def exercise_profile_failures(self, exhaust_deadline=False):
+        """Run the real driver with process/HTTP boundaries replaced; observe its public artifacts."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            suites = ('first_failure.py', 'passing.py', 'second_failure.py')
+            profile = {**ci.PROFILES['measurements'], 'out': root / 'artifacts',
+                       'suites': tuple((s, None, 'ci-' + Path(s).stem) for s in suites)}
+            clock, live, commands = [0.0], [], []
+            response = MagicMock()
+            response.__enter__.return_value.status = 200
+            response.__enter__.return_value.read.return_value = b'{"memberRights":"ready"}'
+
+            def execute(command, **kwargs):
+                commands.append(command)
+                code = 0
+                if '--module' in command:
+                    module = command[command.index('--module') + 1]
+                    live.append(module)
+                    self.assertGreater(kwargs['timeout'], 0)
+                    if exhaust_deadline:
+                        clock[0] = 1501
+                        raise ci.subprocess.TimeoutExpired(command, kwargs['timeout'], output=b'timed out')
+                    clock[0] += 0.25
+                    code = 1 if 'failure' in module else 0
+                return MagicMock(returncode=code, stdout=b'module output', stderr=b'')
+
+            with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted',
+                                          'RUNNER_TEMP': folder}, clear=True), \
+                    patch.object(ci, 'ROOT', root), patch.dict(ci.PROFILES, {'measurements': profile}), \
+                    patch.object(ci, 'seed_source'), patch.object(ci.time, 'monotonic', side_effect=lambda: clock[0]), \
+                    patch.object(ci.subprocess, 'check_output', side_effect=[b'', b'', b'unix:///runner.sock']), \
+                    patch.object(ci.subprocess, 'run', side_effect=execute), \
+                    patch.object(ci.ssl, '_create_unverified_context', return_value=None), \
+                    patch.object(ci, 'urlopen', return_value=response), \
+                    patch.object(ci, 'ensure_imported_admin_credential', return_value='synthetic-secret'), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                # An uncaught driver error is the CLI's non-zero exit contract.
+                with self.assertRaises(RuntimeError) as error:
+                    ci.main('measurements')
+            self.assertIn(Path(suites[0]).stem, str(error.exception))
+            self.assertEqual(live, ['tests/' + s for s in (suites[:1] if exhaust_deadline else suites)])
+            if not exhaust_deadline:
+                self.assertIn(Path(suites[2]).stem, str(error.exception))
+            rows = json.loads((profile['out'] / 'results.json').read_text(encoding='utf-8'))
+            self.assertEqual(rows[-1]['name'], 'cleanup')
+            self.assertEqual(sum('down' in c for c in commands), 1)
+            with (profile['out'] / 'summary.tsv').open(encoding='utf-8', newline='') as stream:
+                summary = list(csv.DictReader(stream, delimiter='\t'))
+            modules = [row for row in summary if row['module'] in [Path(s).stem for s in suites]]
+            self.assertEqual([row['module'] for row in modules], [Path(s).stem for s in live])
+            expected = ['FAIL (124)'] if exhaust_deadline else ['FAIL (1)', 'PASS (0)', 'FAIL (1)']
+            self.assertEqual([row['status'] for row in modules], expected)
+            for row in modules:
+                self.assertGreater(float(row['duration_seconds']), 0)
+                self.assertTrue((profile['out'] / row['log']).is_file())
+
+    def test_live_profile_runs_all_modules_and_reports_each_failure(self):
+        self.exercise_profile_failures()
+
+    def test_live_profile_deadline_stops_remaining_modules_and_still_cleans_up(self):
+        self.exercise_profile_failures(exhaust_deadline=True)
+
     def test_image_text_profile_is_exact_and_separate(self):
         profile=ci.PROFILES['image-text']
         self.assertEqual(profile['suites'],(('e2e/test_viewer_image_text.py','ViewerImageTextE2E','ci-image-text'),))
@@ -62,7 +164,6 @@ class MeasurementCiTests(unittest.TestCase):
             body.append(line)
         job = '\n'.join(body)
         for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
                          'persist-credentials: false',
                          'tests/measurement_ci.py --profile cell-merge',
                          'tests/execution_selection_test.py',
@@ -136,7 +237,8 @@ class MeasurementCiTests(unittest.TestCase):
                      patch.object(ci.subprocess, 'run', side_effect=fake_run), \
                      patch.object(ci.ssl, '_create_unverified_context', return_value=None), \
                      patch.object(ci, 'urlopen', return_value=response), \
-                     patch.object(ci, 'ensure_imported_admin_credential', return_value='stub-imported-password'):
+                     patch.object(ci, 'ensure_imported_admin_credential', return_value='stub-imported-password'), \
+                 contextlib.redirect_stdout(io.StringIO()):
                     ci.main('u2b-regressions')
                 self.assertTrue((root/'artifacts'/'results.json').exists())
             return granted
@@ -209,7 +311,7 @@ class MeasurementCiTests(unittest.TestCase):
         job = workflow['jobs']['u2b-regressions']
         steps = job['steps']
         self.assertEqual(job['runs-on'], 'ubuntu-24.04')
-        self.assertEqual(int(job['timeout-minutes']), 40)
+        self.assertGreater(int(job['timeout-minutes']), 15 + 28)
         checkout = [step for step in steps if str(step.get('uses', '')).startswith('actions/checkout@')]
         self.assertEqual(len(checkout), 1)
         self.assertEqual(str(checkout[0]['with']['persist-credentials']).lower(), 'false')
@@ -424,7 +526,6 @@ class MeasurementCiTests(unittest.TestCase):
             body.append(line)
         job = '\n'.join(body)
         for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
                          'persist-credentials: false',
                          'tests/measurement_ci.py --profile hanging-protocols',
                          'tests/execution_selection_test.py',
@@ -861,7 +962,6 @@ class MeasurementCiTests(unittest.TestCase):
             body.append(line)
         job = '\n'.join(body)
         for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
                          'persist-credentials: false',
                          'tests/measurement_ci.py --profile volume-slab',
                          'tests/execution_selection_test.py',
@@ -997,7 +1097,6 @@ class MeasurementCiTests(unittest.TestCase):
             body.append(line)
         job = '\n'.join(body)
         for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
                          'persist-credentials: false',
                          'tests/measurement_ci.py --profile volume-path',
                          'tests/measurement_ci_test.py',
@@ -1112,7 +1211,6 @@ class MeasurementCiTests(unittest.TestCase):
             body.append(line)
         job = '\n'.join(body)
         for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
                          'persist-credentials: false',
                          'tests/measurement_ci.py --profile volume-batch',
                          'tests/measurement_ci_test.py',
@@ -1231,7 +1329,6 @@ class MeasurementCiTests(unittest.TestCase):
             body.append(line)
         job = '\n'.join(body)
         for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
                          'persist-credentials: false',
                          'tests/measurement_ci.py --profile volume-sync-preferences',
                          'tests/measurement_ci_test.py',
@@ -1348,7 +1445,6 @@ class MeasurementCiTests(unittest.TestCase):
             body.append(line)
         job = '\n'.join(body)
         for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
                          'persist-credentials: false',
                          'tests/measurement_ci.py --profile volume-marks',
                          'tests/measurement_ci_test.py',
@@ -1466,7 +1562,6 @@ class MeasurementCiTests(unittest.TestCase):
             body.append(line)
         job = '\n'.join(body)
         for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
                          'persist-credentials: false',
                          'python3 -B tests/measurement_ci_test.py',
                          'tests/execution_selection_test.py',
@@ -1568,7 +1663,6 @@ class MeasurementCiTests(unittest.TestCase):
             body.append(line)
         job = '\n'.join(body)
         for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
                          'persist-credentials: false',
                          'python3 -B tests/measurement_ci_test.py',
                          'tests/execution_selection_test.py',
@@ -1678,7 +1772,6 @@ class MeasurementCiTests(unittest.TestCase):
             body.append(line)
         job = '\n'.join(body)
         for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
                          'persist-credentials: false',
                          'python3 -B tests/measurement_ci_test.py',
                          'tests/execution_selection_test.py',
@@ -1793,7 +1886,6 @@ class MeasurementCiTests(unittest.TestCase):
             body.append(line)
         job = '\n'.join(body)
         for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
                          'persist-credentials: false',
                          'python3 -B tests/measurement_ci_test.py',
                          'tests/execution_selection_test.py',
@@ -1898,7 +1990,6 @@ class MeasurementCiTests(unittest.TestCase):
             body.append(line)
         job = '\n'.join(body)
         for required in ['runs-on: ubuntu-24.04',
-                         'timeout-minutes: 40',
                          'persist-credentials: false',
                          'python3 -B tests/measurement_ci_test.py',
                          'tests/execution_selection_test.py',
@@ -2262,7 +2353,8 @@ class MeasurementCiTests(unittest.TestCase):
                  patch.object(ci.ssl, '_create_unverified_context', return_value=None), \
                  patch.object(ci,'urlopen',return_value=response), \
                  patch.object(ci,'publish_vr_evidence'), \
-                 patch.object(ci, 'ensure_imported_admin_credential', return_value='stub-imported-password'):
+                 patch.object(ci, 'ensure_imported_admin_credential', return_value='stub-imported-password'), \
+                 contextlib.redirect_stdout(io.StringIO()):
                 ci.main('volume-rendering')
             invocation=next(call for call in run.call_args_list
                             if 'run-tests.py' in ' '.join(map(str,call.args[0])))
@@ -2594,8 +2686,9 @@ class MeasurementCiTests(unittest.TestCase):
                  patch.object(ci.subprocess, 'run', side_effect=fake_run), \
                  patch.object(ci.ssl, '_create_unverified_context', return_value=None), \
                  patch.object(ci, 'urlopen', return_value=response), \
-                 patch.object(ci, 'ensure_imported_admin_credential', return_value='stub-imported-password'):
-                with self.assertRaisesRegex(RuntimeError, 'gateway_pipeline_live failed'):
+                 patch.object(ci, 'ensure_imported_admin_credential', return_value='stub-imported-password'), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(RuntimeError, 'gateway_pipeline_live'):
                     ci.main('gateway-e2e')
             logs = next(index for index, command in enumerate(seen) if 'logs' in command and '--timestamps' in command)
             down = next(index for index, command in enumerate(seen) if 'down' in command and '--remove-orphans' in command)

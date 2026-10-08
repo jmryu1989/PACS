@@ -84,15 +84,47 @@ class CandidateCiTests(unittest.TestCase):
             self.assertEqual(len(selected), 112)
 
     def test_workflow_keeps_tool_and_candidate_checkouts_separate(self):
+        import yaml
         source = (candidate.TOOLS_ROOT / ".github/workflows/candidate.yml").read_text(encoding="utf-8")
-        self.assertIn("candidate_sha:", source)
-        self.assertIn("ref: ${{ github.sha }}", source)
-        self.assertIn("path: tools", source)
-        self.assertIn("ref: ${{ inputs.candidate_sha }}", source)
-        self.assertIn("path: target", source)
-        self.assertIn("tools/tests/candidate_ci.py", source)
-        self.assertIn("target/tests/e2e/artifacts/candidate-ci/", source)
+        workflow = yaml.safe_load(source)
+        triggers = workflow.get('on', workflow.get(True)) # YAML 1.1 spells `on` as a boolean.
+        self.assertEqual(set(triggers), {'pull_request', 'workflow_dispatch'})
+        self.assertIsNone(triggers['pull_request'])
+        self.assertEqual(triggers['workflow_dispatch']['inputs']['candidate_sha']['required'], True)
+        job = workflow['jobs']['candidate']
+        self.assertEqual(job.get('name', 'candidate'), 'candidate')
+        # GitHub's || selects the required dispatch input, otherwise the PR head (never the merge ref).
+        resolved = '${{ inputs.candidate_sha || github.event.pull_request.head.sha }}'
+        self.assertEqual(job['env']['CANDIDATE_SHA'], resolved)
+        self.assertEqual(workflow['concurrency'], {'group': 'candidate-' + resolved, 'cancel-in-progress': False})
+        checkouts = {s['with']['path']: s for s in job['steps'] if s.get('uses', '').startswith('actions/checkout@')}
+        self.assertEqual(set(checkouts), {'tools', 'target'})
+        self.assertEqual(checkouts['tools']['with']['ref'], '${{ github.sha }}')
+        self.assertEqual(checkouts['target']['with']['ref'], '${{ env.CANDIDATE_SHA }}')
+        for checkout in checkouts.values():
+            self.assertEqual(checkout['with']['persist-credentials'], False)
+        validation = next(s for s in job['steps'] if '--check-sha' in s.get('run', ''))
+        self.assertEqual(validation['run'], 'python3 -B tools/tests/candidate_ci.py --check-sha "$CANDIDATE_SHA"')
+        self.assertLess(job['steps'].index(validation), job['steps'].index(checkouts['target']))
+        artifact = next(s for s in job['steps'] if s.get('uses', '').startswith('actions/upload-artifact@'))
+        self.assertEqual(artifact['with']['name'], 'candidate-${{ env.CANDIDATE_SHA }}')
+        self.assertEqual(artifact['with']['path'], 'target/tests/e2e/artifacts/candidate-ci/')
         self.assertNotIn("docker compose", source.lower())
+
+    def test_candidate_install_is_cached_and_fits_the_job_budget(self):
+        import yaml
+        workflow = yaml.safe_load((candidate.TOOLS_ROOT / '.github/workflows/candidate.yml').read_text(encoding='utf-8'))
+        job = workflow['jobs']['candidate']
+        install = next(s for s in job['steps'] if 'playwright install' in s.get('run', ''))
+        self.assertEqual(install['timeout-minutes'], 15)
+        cache = job['steps'][job['steps'].index(install) - 1]
+        self.assertRegex(cache['uses'], r'^actions/cache@[0-9a-f]{40}$')
+        self.assertEqual(cache['with']['path'], '~/.cache/pip')
+        self.assertEqual(cache['with']['key'], "${{ runner.os }}-pip-${{ hashFiles('target/tests/e2e/requirements.txt', 'target/gateway/agent/requirements.txt') }}")
+        run = next(s for s in job['steps'] if '--candidate-sha' in s.get('run', ''))
+        self.assertIn('--candidate-sha "$CANDIDATE_SHA"', run['run'])
+        self.assertEqual(run['timeout-minutes'], 26)
+        self.assertGreater(job['timeout-minutes'], install['timeout-minutes'] + run['timeout-minutes'])
 
     def exercise_live_driver(self, ci, profile_name, failure=None):
         """Observe actual child environments/artifacts with Docker and HTTP replaced."""
@@ -151,7 +183,7 @@ class CandidateCiTests(unittest.TestCase):
                 else:
                     ci.main(profile_name)
                 helper.assert_called_once()
-            self.assertEqual(len(live), 1 if failure else len(ci.PROFILES[profile_name]['suites']))
+            self.assertEqual(len(live), len(ci.PROFILES[profile_name]['suites']))
             for artifact in out.rglob('*'):
                 if artifact.is_file():
                     self.assertNotIn(secret, artifact.read_text(encoding='utf-8'))
@@ -159,7 +191,10 @@ class CandidateCiTests(unittest.TestCase):
             rows = json.loads((out / 'results.json').read_text(encoding='utf-8'))
             self.assertEqual(rows[-1]['name'], 'cleanup')
             if failure:
-                self.assertEqual(rows[-3]['exit'], 124 if failure == 'timeout' else 1)
+                modules = {Path(suite).stem for suite, _, _ in ci.PROFILES[profile_name]['suites']}
+                failed = [row for row in rows if row['name'] in modules]
+                self.assertEqual(len(failed), len(live))
+                self.assertTrue(all(row['exit'] == (124 if failure == 'timeout' else 1) for row in failed))
 
     def test_every_candidate_live_step_receives_credential_and_redacts_artifacts(self):
         ci = candidate.load(candidate.TOOLS_ROOT / 'tests/measurement_ci.py', 'candidate_delivery_ci')
