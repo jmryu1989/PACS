@@ -496,11 +496,11 @@ export async function run(tx: Prisma.TransactionClient, actor: string, uid: stri
   await tx.$executeRaw`INSERT INTO "AuditLog" (actor, ${column}, target) VALUES (${actor}, 'syn.allowed', ${uid})`; // expect: unresolved an interpolation where a column goes
 }
 
-// ==== case: f03-the-table-from-a-fragment | verdict: unresolved ====
+// ==== case: f03-the-table-from-a-fragment | verdict: unlisted syn.unlisted-fragment ====
 import { Prisma } from '@prisma/client';
 export async function run(tx: Prisma.TransactionClient, actor: string, uid: string) {
-  const table = Prisma.sql`"AuditLog"`; // expect: unresolved names AuditLog but is not the fixed SQL of a raw call
-  await tx.$executeRaw`INSERT INTO ${table} (actor, action, target) VALUES (${actor}, 'syn.allowed', ${uid})`; // expect: proven_non_audit its SQL names no AuditLog
+  const table = Prisma.sql`"AuditLog"`; // Local literal composition is now followed (RAW-PROVENANCE).
+  await tx.$executeRaw`INSERT INTO ${table} (actor, action, target) VALUES (${actor}, 'syn.unlisted-fragment', ${uid})`; // expect: resolved syn.unlisted-fragment
 }
 
 // ==== case: f03-an-action-expression | verdict: unresolved ====

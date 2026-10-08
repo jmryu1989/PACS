@@ -40,6 +40,8 @@ const READ = { isolationLevel: 'RepeatableRead' as const, maxWait: 4000, timeout
 const WRITE = { maxWait: 4000, timeout: 8000 };
 
 export type CriticalCaller = Caller & { name?: string };
+type CreateRequest = { requestId: string; expectedOwner: unknown; recipientSub: string; sourceVersion: number; message: string };
+type ListQuery = { view?: string; state?: string; cursor?: string };
 
 const MESSAGES: Record<string, string> = {
   [CODE.INPUT_INVALID]: '중요 결과 요청의 형식을 확인하세요',
@@ -386,7 +388,7 @@ export class CriticalResultService {
   // ── #2 생성 ──
 
   /** POST studies/:uid/critical-results. 발신자는 인증된 요청, 수신자 자격·귀속은 DB 회원에서 온다. */
-  async create(uid: string, c: CriticalCaller, b: any) {
+  async create(uid: string, c: CriticalCaller, b: CreateRequest) {
     this.member(c);
     if (!holds(c.roles, RADIOLOGIST)) throw roleRequired();
     if (!studyUidValue(uid)) throw invalid('검사 UID를 확인하세요');
@@ -633,7 +635,7 @@ export class CriticalResultService {
    * 기관이 caller 기관이거나 지금 통로가 caller 기관인 검사 — 통로가 닫히면 다음 읽기부터 목록과 pending에서 함께 빠진다.
    * 총계는 없고 pending(확인 대기 수)만 한 쪽과 같은 스냅샷에서 센다(RISK-S7-CVR-COUNT-LEAK).
    */
-  async list(c: CriticalCaller, q: any) {
+  async list(c: CriticalCaller, q: ListQuery) {
     this.member(c);
     const cls = recipientClass(c.roles);
     if (!cls) throw roleRequired();
