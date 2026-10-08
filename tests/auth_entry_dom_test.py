@@ -547,7 +547,11 @@ class AuthEntryDOMTest(unittest.TestCase):
                 if destination == "clinician.html":
                     self.page.wait_for_url("**/index.html")
                 else:
-                    self.page.wait_for_function("KinAuth.endState().reason !== null")
+                    # endState() is null while nothing blocks the landing (its documented
+                    # open state); poll until a closed state with a reason exists instead
+                    # of dereferencing null on a slow runner (hosted CI, 2026-10-08).
+                    self.page.wait_for_function(
+                        "(() => { const end = KinAuth.endState(); return end !== null && end.reason !== null; })()")
                     self.assertEqual(self.page.evaluate("KinWorkContext.state()"), "unknown")
                     expect(self.page.locator("#work")).to_be_hidden()
                 self.assertEqual(self.requests, [("/api/auth/entry", None), ("/api/me", SESSION)])
