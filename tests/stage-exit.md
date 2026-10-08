@@ -27,8 +27,11 @@ Suspend/Approve/Change/Cancel/Activate는 DB 권한을 바꾸며 명부 게시�
 권한을 결정하지 않는다. 초안은 프로세스 메모리 순번이 아니라 DB revision/epoch/CAS를 쓴다.
 `auth_session_service_test.cjs`의 CORE 명령·감사 원자성·진입 거절은 컴파일된 서비스와
 실제 PostgreSQL/가짜 IdP 수준이다. 실제 IdP 경계는 `SessionEndLive`가 맡는다.
-그 클래스 09~11의 오래된 메서드 이름은 그대로지만 현재 본문은 DB Suspend/Activate,
-provider SSO 보존, 명시적 Log out 뒤 sid 재사용을 검사한다. 이름만으로 수준을 높이지 않는다.
+그 클래스의 SE-10·11은 U5 re-cut 뒤 이름과 본문이 달라 필수 목록에서 제외했다.
+D621에 따라 provider reconciliation은 U5b 범위다. DB Suspend 뒤 살아 있는 provider SSO로도
+제품 세션/토큰을 쓰지 못하고 Activate 뒤 옛 인증이 거절되는 동작은 SE-09가 맡는다.
+명시적 Log out 뒤 같은 sid의 새 SSO 허용과 옛 토큰 거절은 SE-03b·03c가 맡는다.
+정확한 ID·제외 사유·대체 근거의 한계는 `stage7-exit.json`의 `left_out`에 적었다.
 전체 파일을 실행하는 CI와 이 목록의 필수 사례 부분집합은 다르다.
 같은 Node 파일이나 보존 시험을 두 요구사항이 쓰더라도 같은 실행 결과를 재사용한다.
 
@@ -43,9 +46,9 @@ provider SSO 보존, 명시적 Log out 뒤 sid 재사용을 검사한다. 이름
 대체한다. 기준 main의 `viewer-session-dom` 끝에는 `-v`가 없고 파일도 `unittest.main()`을
 쓴다. 이 landing은 그 명령 끝에만 `-v`를 추가한다. 후속 별도 패치는 필요 없다.
 위의 다른 DOM 파일은 `verbosity=2`이고, 목록의 Node 파일 일곱 개는 각각 필터 없는
-단일 파일 실행으로 기록된다. 원본 lean-exit의 workflow 4줄은 실제로 backup-safety와
-production-image를 기록기로 감싸던 두 hunk였다. 이번 CI 소유 범위 밖이므로 이식에서
-제외했으며, 아래에 두 증거 공백과 실행 명령을 남긴다.
+단일 파일 실행으로 기록된다. 최종 workflow는 backup-safety와 production-image도
+`record-run.py`로 감싼다. 두 기록은 `tmp/runtime-ci/`에서
+`synthetic-runtime-record-runs` artifact에 포함되므로 아래 기본 CI 입력으로 읽는다.
 도구는 job/계획 이름을 고정하지 않는다. `run.json`·unittest/TAP 및 G3 산출물 형식은 그대로 쓴다.
 
 `tests/measurement_ci.py` PROFILES와 `s7-u5-session-contracts` matrix의 여덟 항목은 다음과 같다.
@@ -75,6 +78,9 @@ production-image를 기록기로 감싸던 두 hunk였다. 이번 CI 소유 범�
 최종 main을 깨끗하게 checkout한 **원본과 분리된 합성 환경**에서 다음 PowerShell 명령을 쓴다.
 이 문서의 실행 예시는 환경 기동이나 원본 연결을 허가하지 않는다. `record-run.py`는 HEAD와
 파일 해시를 기록하지만 dirty tree 자체를 증명하지 않으므로 실행 전에 수정 상태를 확인한다.
+기본 입력은 동일 SHA의 validate `synthetic-runtime-record-runs`와
+`synthetic-workspace-dom-results`, G3 `candidate-<sha>` artifact다.
+`$validateRun`과 `$candidateRun`에는 해당 SHA의 실행 ID를 지정한다.
 
 ```powershell
 $sha = (git rev-parse HEAD).Trim()
@@ -82,6 +88,18 @@ if ($sha -ne (git rev-parse main).Trim()) { throw '최종 main checkout 필요' 
 if (git status --porcelain -- . ':(exclude)tmp') { throw '실행할 소스의 수정 상태 확인 필요' }
 $shortSha = $sha.Substring(0, 12)
 $out = "tmp/stage7-final-$shortSha"
+```
+
+| artifact | 업로드 원래 경로 | 수령 명령 |
+|---|---|---|
+| `synthetic-runtime-record-runs` | `tmp/runtime-ci/` | `gh run download $validateRun -n synthetic-runtime-record-runs -D "$out/validate/runtime"` |
+| `synthetic-workspace-dom-results` | `tmp/workspace-ui-ci/` | `gh run download $validateRun -n synthetic-workspace-dom-results -D "$out/validate/workspace"` |
+| `candidate-<sha>` | `target/tests/e2e/artifacts/candidate-ci/` | `gh run download $candidateRun -n "candidate-$sha" -D "$out/candidate"` |
+
+위 artifact를 받은 뒤 아래 기록기 loop는 필요한 live 클래스만 보충한다.
+기존 동일 SHA의 적격 기록은 재사용한다.
+
+```powershell
 $live = @(
   @('tests/e2e/test_critical_result.py', 'CriticalResultE2E'),
   @('tests/e2e/test_critical_result.py', 'CriticalResultScreensE2E'),
@@ -122,38 +140,27 @@ foreach ($item in $live) {
 클래스의 뷰어 사례에는 `KIN_U5_DICOM_SOURCE` 공개 CT 입력도 필요하다(`tests/README.md`).
 실행기는 `--class`에 그 클래스가 직접 선언한 사례를 고정하므로 상속한 worklist 시험은 추가하지 않는다.
 
-동일 SHA의 validate 및 G3 실행 artifact를 받아 각각 `$out/validate`, `$out/candidate`에 푼다.
-validate에서는 `synthetic-runtime-record-runs`와 `synthetic-workspace-dom-results`가 필요하다.
-Node service/scope, DOM, AuditStore DB, integrity를 그 안의 `run.json`에서 읽는다.
+앞서 받은 validate artifact의 `run.json`에서 Node service/scope, DOM, AuditStore DB,
+integrity, backup-safety, production-image를 읽는다.
 여덟 U5 artifact는 위 표의 보조 원문으로 보존하되 SHA 없는 `results.json`만으로 위 live
 기록을 대체하지 않는다. G3 artifact 이름은 `candidate-<최종 40자리 SHA>`이며,
 `--candidate`에는 `candidate-provenance.json`이 바로 들어 있는 폴더를 지정한다.
 
-현재 workflow의 Backup safety / Production image 단계는 직접 Python 실행이다.
-따라서 runtime artifact에 `backup-safety/run.json`과 `production-image/run.json`이 없으며,
-그대로 판정하면 `REQ-S7-AUDIT-STORE`는 누락이다. 실행 담당자는 최종 SHA의 격리 환경에서
-다음 기존 명령을 기록기로 실행해 `$out/runtime`을 추가 입력으로 제공해야 한다.
-Production image는 해당 SHA로 만든 `kin-api:ci` 이미지가 먼저 있어야 한다.
-이미 성공한 같은 SHA 기록이 있으면 재실행하지 않는다. 이 landing은 해당 CI 단계를 바꾸지 않는다.
+기본 판정에는 별도 runtime 실행이 필요 없다. 같은 SHA의 별도 runtime 실행 기록이 실제로
+`$out/runtime`에 있을 때만 아래 명령에 `--runs "$out/runtime"`을 추가한다.
+존재하지 않는 폴더나 `run.json`이 없는 폴더를 `--runs`로 넘기면
+`scripts/stage-exit.py:178`에서 입력 오류(`run.json 없음`)로 기록되며 PASS가 될 수 없다.
+CI 기록의 누락·실패도 성공으로 간주하지 않는다.
 
 ```powershell
-python scripts/record-run.py --run-dir "$out/runtime/backup-safety" --cwd . --file scripts/ops_backup.py --file scripts/ops_audit_integrity.py --file scripts/ops_monitor.py --file tests/ops_audit_integrity_test.py --file tests/ops_backup_test.py -- python -B tests/ops_backup_test.py
-if ($LASTEXITCODE -ne 0) { throw 'Backup safety 기록 실패' }
-$env:KIN_TEST_API_IMAGE = 'kin-api:ci'
-$env:KIN_EXPECTED_REVISION = $sha
-python scripts/record-run.py --run-dir "$out/runtime/production-image" --cwd . --file api/Dockerfile --file api/prisma/schema.prisma --file scripts/ops_backup.py --file tests/production_image_test.py -- python -B tests/production_image_test.py
-if ($LASTEXITCODE -ne 0) { throw 'Production image 기록 실패' }
-```
-
-```powershell
-python scripts/stage-exit.py --list tests/stage7-exit.json --sha $sha --runs "$out/validate" --runs "$out/live" --runs "$out/runtime" --candidate "$out/candidate" --output "$out/verdict.json"
+python scripts/stage-exit.py --list tests/stage7-exit.json --sha $sha --runs "$out/validate" --runs "$out/live" --candidate "$out/candidate" --output "$out/verdict.json"
 $LASTEXITCODE
 ```
 
 도구 자체의 대표 시험은 Python만 실행한다. TAP은 합성 원문을 공급하고 실제 Python 시험
 자식 강제종료 **한 번**을 포함한다. ID 검사는 `run-tests.py`의 수집기만 호출하며
-live/e2e/DOM의 setup이나 본문은 실행하지 않는다. 수집 import에는 기존 e2e requirements,
-PyYAML 및 CI와 같은 pydicom/numpy/pynetdicom Python 패키지가 필요하다(브라우저 설치 불필요).
+live/e2e/DOM의 setup이나 본문은 실행하지 않는다. 수집 import에는 PyYAML을 포함한
+e2e requirements와 CI와 같은 pydicom/numpy/pynetdicom Python 패키지가 필요하다(브라우저 설치 불필요).
 없는 module/class/method/Node 파일이나 필터 실행을 전체 파일로 쓴 경우 시험이 실패한다.
 `tmp/lean-exit-land/id-resolution.json`은 수집 증거이며 제품 시험의 PASS 기록이 아니다.
 
