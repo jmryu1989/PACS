@@ -685,7 +685,9 @@ class AuthAuditLive(unittest.TestCase):
                 self.assertLessEqual(stored, after + timedelta(seconds=1), "stored at is not in the future")
                 stored_times.append(stored)
         self.assertLess(stored_times[0], stored_times[1], "login precedes logout by stored at")
-        visible = [r for r in self.admin_rows("A", limit=2) if r["target"] == self.members["mt"]["id"]]
+        # The console also lists the member's approval row (its target is the same account); only the
+        # two access rows of this case are compared, in the console's own order.
+        visible = [r for r in self.admin_rows("A", limit=2) if r["target"] == self.members["mt"]["id"] and r["action"] in AUTH]
         self.assertEqual([r["action"] for r in visible], ["auth.logout", "auth.login"], "console returns newest first")
         read_times = []
         for read, stored in zip(visible, reversed(rows)):
