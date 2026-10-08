@@ -1,0 +1,254 @@
+{
+  "stage": 7,
+  "scope": "자동 시험 충족 판정만 한다. 의사 사용 확인·실제 운영 복구·위험 처분·출시 승인은 별도이며 이 표의 PASS로 대신하지 않는다.",
+  "basis": [
+    "tests/README.md",
+    ".github/workflows/validate.yml",
+    "tests/candidate_ci.py"
+  ],
+  "test_names": "Python은 실행기의 module.Class.test_method; node:파일은 validate.yml의 필터 없는 node --test 파일 전체; candidate-ci는 candidate.yml artifact 전체.",
+  "requirements": [
+    {
+      "id": "REQ-S7-CANDIDATE",
+      "statement": "권한·판독 이력·저장·재열람과 누적 업무 흐름은 최종 commit의 G3 전체 선택을 통과한다.",
+      "tests": [
+        "candidate-ci"
+      ]
+    },
+    {
+      "id": "REQ-S7-U1a-RECORD",
+      "statement": "중요 결과는 확정 판독 버전에 묶여 보존되고 재전송·ACK/취소 경합은 중복이나 이력 손실을 만들지 않는다.",
+      "tests": [
+        "node:tests/critical_result_service_test.cjs",
+        "test_critical_result.CriticalResultE2E.test_cr_e2e_02_head_moved_stub_and_supersede_s_su",
+        "test_critical_result.CriticalResultE2E.test_cr_e2e_03_reset_stub_and_cancel_s_rs",
+        "test_critical_result.CriticalResultE2E.test_cr_e2e_05_request_id_replay_sequence_s_cr",
+        "test_critical_result.CriticalResultE2E.test_cr_e2e_06_ack_cancel_race_single_winner"
+      ]
+    },
+    {
+      "id": "REQ-S7-U1a-AUTHZ",
+      "statement": "발신·수신·ACK 권한과 철회된 계정을 서버가 검사하며 다른 기관/검사의 정보를 노출하지 않는다.",
+      "tests": [
+        "test_critical_result.CriticalResultE2E.test_cr_e2e_07_revocation_token_window_and_keycloak_recheck",
+        "test_critical_result.CriticalResultE2E.test_cr_e2e_08_identity_original_tags_plus_live_overlay",
+        "test_critical_result.CriticalResultE2E.test_cr_e2e_09_applied_write_survives_sender_access_loss",
+        "test_critical_result.CriticalResultE2E.test_cr_e2e_11_candidates_follow_the_create_rules"
+      ]
+    },
+    {
+      "id": "REQ-S7-U1c-TELE",
+      "statement": "원격 판독 통로가 열린 동안만 수신 기관이 원소유 기관에 전달하며 닫힘·재개에도 기록과 감사 귀속을 보존한다.",
+      "tests": [
+        "critical_result_live.CriticalResultTeleLiveTests.test_tl01_send_while_open_both_institutions_audit_sides_and_the_close",
+        "critical_result_live.CriticalResultTeleLiveTests.test_tl02_product_close_leaves_records_alone_and_ends_b",
+        "critical_result_live.CriticalResultTeleLiveTests.test_tl03_source_moves_supersede_and_cancel_keep_both_institutions",
+        "critical_result_live.CriticalResultTeleLiveTests.test_tl04_reopened_channel_reads_by_class_and_late_requests_in_order",
+        "critical_result_live.CriticalResultTeleLiveTests.test_tl05_no_channel_is_the_unknown_study_answer"
+      ]
+    },
+    {
+      "id": "REQ-S7-U2b-E2E",
+      "statement": "두 실제 사용자 화면에서 명시적 발신·ACK·대체·취소를 연결하고 불명확한 응답·계정 전환은 성공으로 오인하지 않는다.",
+      "tests": [
+        "test_critical_result.CriticalResultScreensE2E.test_crs01_two_sessions_send_list_refuse_acknowledge_replay_supersede_cancel",
+        "test_critical_result.CriticalResultScreensE2E.test_crs02_revoked_recipient_old_session_cannot_acknowledge_new_session_sees_nothing",
+        "test_critical_result.CriticalResultScreensE2E.test_crs03_wrong_role_and_other_institution_are_offered_nothing",
+        "test_critical_result.CriticalResultScreensE2E.test_crs04_lost_answers_stay_unknown_until_a_read_or_check_again_proves_them",
+        "test_critical_result.CriticalResultScreensE2E.test_crs05_moved_head_before_send_is_refused_and_the_dialog_rereads_the_version",
+        "test_critical_result.CriticalResultScreensE2E.test_crs06_account_switch_in_one_browser_keeps_nothing_of_the_first_recipient"
+      ]
+    },
+    {
+      "id": "REQ-S7-U1b-ABA",
+      "statement": "검사/계정 변경과 세션 종료 뒤 늦은 발신 응답은 현재 화면을 바꾸지 않는다.",
+      "tests": [
+        "critical_result_sender_dom_test.CriticalResultSenderDOMTest.test_sd06b_late_dialog_answers_never_paint_another_study",
+        "critical_result_sender_dom_test.CriticalResultSenderDOMTest.test_sd06c_a_session_end_ends_the_area_first_and_paints_nothing_later",
+        "critical_result_sender_dom_test.CriticalResultSenderDOMTest.test_sd06d_another_account_locks_the_area_and_drops_its_requests",
+        "critical_result_sender_dom_test.CriticalResultSenderDOMTest.test_sd12e_a_late_re_read_never_paints_a_dialog_opened_again"
+      ]
+    },
+    {
+      "id": "REQ-S7-U2a-EXPLICIT-ACK",
+      "statement": "열람이나 시간 경과는 ACK가 아니며 본문 접근 상실·응답 유실 뒤에도 서버가 확인한 상태만 표시한다.",
+      "tests": [
+        "test_critical_result.CriticalResultE2E.test_cr_e2e_01_c2_create_read_explicit_ack_and_reads_never_acknowledge",
+        "critical_result_recipient_dom_test.CriticalResultRecipientDOMTest.test_rd02_c3_stub_shows_no_message_or_body_and_reads_nothing_more",
+        "critical_result_recipient_dom_test.CriticalResultRecipientDOMTest.test_rd03_c4_reset_stub",
+        "critical_result_recipient_dom_test.CriticalResultRecipientDOMTest.test_rd10b_a_timed_out_ack_ends_only_on_evidence_in_either_order",
+        "critical_result_recipient_dom_test.CriticalResultRecipientDOMTest.test_rx23_an_ack_result_does_not_bring_back_a_removed_body"
+      ]
+    },
+    {
+      "id": "REQ-S7-U3a-TELE-ASSIGN",
+      "statement": "기관별 판독 배정·후보·이력은 분리되고 통로 종료와 배정 종료가 원자적으로 적용되며 재개는 새 revision을 쓴다.",
+      "tests": [
+        "node:tests/reader_assignment_scope_test.cjs",
+        "test_reader_assignment.ReaderAssignmentE2E.test_assignment_06_tele_receiver_owner_and_third_institution",
+        "test_reader_assignment.ReaderAssignmentE2E.test_assignment_07_receiver_chip_and_owner_chip",
+        "test_reader_assignment.ReaderAssignmentE2E.test_assignment_08_every_close_gives_the_receiver_a_new_revision"
+      ]
+    },
+    {
+      "id": "REQ-S7-U3b-HOSPITAL-COLUMN",
+      "statement": "목록은 실제 소유 기관·원격 여부와 입력된 긴급도만 표시하고 기관/세션 전환 시 오래된 행을 지운다.",
+      "tests": [
+        "multi_institution_worklist_dom_test.MultiInstitutionWorklist.test_mi01_hospital_cell_owner_name_and_tele",
+        "multi_institution_worklist_dom_test.MultiInstitutionWorklist.test_mi02_hospital_filter_compound_and_hidden_column",
+        "multi_institution_worklist_dom_test.MultiInstitutionWorklist.test_mi05_routing_factors_legend_infers_nothing",
+        "multi_institution_worklist_dom_test.MultiInstitutionWorklist.test_mi06_urgency_is_the_server_em_and_nothing_changes_with_time",
+        "multi_institution_worklist_dom_test.MultiInstitutionWorklist.test_dr02_session_end_empties_the_list_in_both_entries",
+        "multi_institution_worklist_dom_test.MultiInstitutionWorklist.test_mi11_refresh_closed_renamed_and_late_answers"
+      ]
+    },
+    {
+      "id": "REQ-S7-U4a-CONTEXT-API",
+      "statement": "임상 정보는 동일 환자·권한의 확정 자료와 출처만 제공하며 조회 중 권한 변경·오류를 감추지 않고 미승인 order 자료는 제외한다.",
+      "tests": [
+        "node:tests/clinical_context_service_test.cjs",
+        "clinical_context_live.ClinicalContextLive.test_cc_l02_institution_and_tele",
+        "clinical_context_live.ClinicalContextLive.test_cc_l03_study_access",
+        "clinical_context_live.ClinicalContextLive.test_cc_l04_signed_heads_only",
+        "clinical_context_live.ClinicalContextLive.test_cc_l05_same_key_conflict_and_name_trap",
+        "clinical_context_live.ClinicalContextLive.test_cc_l06_order_values_excluded",
+        "clinical_context_live.ClinicalContextLive.test_cc_l09_read_only",
+        "clinical_context_live.ClinicalContextLive.test_cc_l10_provenance_and_permission_basis",
+        "clinical_context_live.ClinicalContextLive.test_cc_l11_no_patient_key"
+      ]
+    },
+    {
+      "id": "REQ-S7-U4b-PANEL",
+      "statement": "출처·시각과 없음/실패/오래됨을 구별하고 검사 전환·세션 종료의 늦은 정보는 표시하지 않는다.",
+      "tests": [
+        "clinical_context_dom_test.ClinicalContextDOMTest.test_cd02_failed_unread_and_stale_are_never_no_information",
+        "clinical_context_dom_test.ClinicalContextDOMTest.test_cd03_path_na_late_answers_reach_api_and_are_refused_by_generation",
+        "clinical_context_dom_test.ClinicalContextDOMTest.test_cd05_every_item_carries_its_source_times_and_permission_basis",
+        "clinical_context_dom_test.ClinicalContextDOMTest.test_cd07_access_loss_on_a_reread_clears_the_items",
+        "clinical_context_dom_test.ClinicalContextDOMTest.test_cd12_path_na_answers_that_arrive_after_the_end_paint_nothing",
+        "clinical_context_dom_test.ClinicalContextDOMTest.test_cd17_an_answer_about_another_study_changes_nothing"
+      ]
+    },
+    {
+      "id": "REQ-S7-AUDIT-STORE",
+      "statement": "접속기록 변경·삭제를 거절하고 변조·보존기한 내 유실과 복원본 불일치를 발견하며 이력과 가드를 복원한다.",
+      "tests": [
+        "audit_store_db_test.AuditStoreDB.test_as01_insert_kept_update_delete_truncate_refused_42501",
+        "audit_store_db_test.AuditStoreDB.test_as05_dump_restore_carries_rows_and_guard",
+        "audit_store_db_test.AuditStoreDB.test_as06_boot_migration_on_existing_rows_applies_one_and_later_updates_stop",
+        "audit_store_db_test.AuditStoreDB.test_iv02_one_column_of_one_row_changed_is_reported",
+        "audit_store_db_test.AuditStoreDB.test_iv03_deleted_rows_are_reported_smallest_first",
+        "audit_store_db_test.AuditStoreDB.test_iv07_guard_disabled_dropped_or_emptied_is_detected",
+        "audit_store_db_test.AuditStoreDB.test_iv11_restored_copy_changed_after_the_restore_is_reported",
+        "ops_audit_integrity_test.AuditIntegrityPure.test_pv04_retention_expected_list_comes_from_the_ledger",
+        "ops_audit_integrity_test.AuditIntegrityPure.test_pv06_calendar_retention_and_plan_years",
+        "ops_backup_test.BackupSafetyTests.test_22_ob05_rehearse_verifies_the_export_of_its_own_restored_copy",
+        "production_image_test.ProductionImageTests.test_02_migrate_boot_restart_preserves_data_and_history"
+      ]
+    },
+    {
+      "id": "REQ-S7-U5-AUTH-AUDIT",
+      "statement": "로그인·진입·로그아웃·만료와 DB 회원 권한 명령은 주체·기관·결과를 감사와 함께 확정하고 자격증명은 기록하지 않는다. 접속 IP는 프록시에서 오며 보존 체크포인트의 retain_until은 최소 달력 2년이다.",
+      "tests": [
+        "node:tests/auth_session_service_test.cjs",
+        "auth_audit_live.AuthAuditLive.test_01_login_success_row_and_no_secret",
+        "auth_audit_live.AuthAuditLive.test_02_the_address_is_the_proxys_not_a_forwarded_header",
+        "auth_audit_live.AuthAuditLive.test_03_logout_row_csrf_and_absence",
+        "auth_audit_live.AuthAuditLive.test_04_login_starts_record_their_declared_cause",
+        "auth_audit_live.AuthAuditLive.test_05_idle_row",
+        "auth_audit_live.AuthAuditLive.test_06_refused_refresh_row",
+        "auth_audit_live.AuthAuditLive.test_07_admins_read_record_time_institutions_only",
+        "auth_audit_live.AuthAuditLive.test_08_login_failures_of_this_servers_logins_only",
+        "auth_audit_live.AuthAuditLive.test_10_a_session_ended_on_the_dicom_path_records_the_proxys_address",
+        "admin_audit_dom_test.AdminAuditDOMTest.test_ad01_access_rows_are_drawn_like_any_field_row",
+        "admin_audit_dom_test.AdminAuditDOMTest.test_ad02_the_access_history_sentence_follows_what_this_page_session_painted",
+        "ops_audit_integrity_test.AuditIntegrityPure.test_pv06_calendar_retention_and_plan_years"
+      ]
+    },
+    {
+      "id": "REQ-S7-U5-SESSION-END",
+      "statement": "Suspend/Approve/Change/Cancel/Activate와 진입 허용은 DB 권한으로 결정하고 옛 인증은 새 권한을 얻지 못한다. 로그아웃은 IdP 호출 전에 서버 폐기와 감사를 확정한다. 끝난 세션은 401 AUTH_SESSION_ENDED로 거절하고 다른 세션과 구분하며 nginx까지 문서 결속을 유지한다. 일시적인 IdP 실패는 세션을 끝내지 않는다.",
+      "tests": [
+        "node:tests/auth_session_service_test.cjs",
+        "node:tests/session_work_gate_test.cjs",
+        "logout_order_live.LogoutOrderLive.test_revocation_and_audit_visible_before_real_idp_fetch",
+        "report_draft_cas_live.ReportDraftCasLive.test_d05_ended_session_write_refused_preserves_draft_and_one_termination_audit",
+        "session_proxy_live.SessionProxyLive.test_s12_all_protected_locations_binding_and_browser_headers",
+        "report_draft_cas_live.ReportDraftCasLive.test_refresh_timeout_preserves_session_then_real_invalid_grant_ends_it",
+        "session_end_live.SessionEndLive.test_01_log_out_ends_the_provider_session_and_login_meets_the_form",
+        "session_end_live.SessionEndLive.test_02_provider_frozen_during_log_out_cannot_be_ridden_back_in",
+        "session_end_live.SessionEndLive.test_03_next_person_at_an_unfinished_logout_logs_in_as_themselves",
+        "session_end_live.SessionEndLive.test_03b_next_person_in_a_profile_that_kept_an_abandoned_login_page",
+        "session_end_live.SessionEndLive.test_03c_the_same_doctor_logs_in_again_in_a_tab_that_opened_the_app_twice",
+        "session_end_live.SessionEndLive.test_04_switch_account_shows_an_editable_name",
+        "session_end_live.SessionEndLive.test_05_the_same_doctors_other_pc_keeps_working",
+        "session_end_live.SessionEndLive.test_07_a_provider_end_racing_a_refresh_still_ends_the_session",
+        "session_end_live.SessionEndLive.test_09_an_isolated_member_cannot_come_back_until_activated"
+      ]
+    },
+    {
+      "id": "REQ-S7-U5-SESSION-UI",
+      "statement": "일회용 진입 증명과 현재 역할 확인 전에는 업무를 열지 않는다. 401 AUTH_SESSION_ENDED·계정 변경 뒤 옛 응답은 목록·판독 편집기·뷰어·관리·임상의 문서를 되살리지 않고 새 세션을 바꾸지 않는다. 일반 실패는 종료로 오인하지 않는다.",
+      "tests": [
+        "auth_logout_dom_test.LogoutDOMTest.test_br01_main_log_out_closes_before_the_post_and_shares_it",
+        "auth_logout_dom_test.LogoutDOMTest.test_br01_a_401_that_names_the_session_ended_confirms_without_a_post",
+        "auth_logout_dom_test.LogoutDOMTest.test_am5_a_failure_that_proves_no_end_closes_nothing",
+        "auth_logout_dom_test.LogoutDOMTest.test_br06_a_late_session_answer_restores_nothing",
+        "auth_logout_dom_test.LogoutDOMTest.test_s03_the_session_ending_during_the_preparation_closes_at_once_and_quarantines_the_text",
+        "viewer_session_dom_test.ViewerSessionDOMTest.test_end_cuts_headers_body_stream_and_error_finally_with_navigation_held",
+        "viewer_session_dom_test.ViewerSessionDOMTest.test_reload_does_not_adopt_the_openers_replacement_session",
+        "admin_session_dom_test.PageSessionDOMTest.test_admin_end_cuts_across_all_panels",
+        "admin_session_dom_test.PageSessionDOMTest.test_clinician_report_question_request_and_inbox_end_cuts",
+        "admin_session_dom_test.PageSessionDOMTest.test_s1_late_answer_and_notice_leave_s2_document_unchanged",
+        "admin_session_dom_test.PageSessionDOMTest.test_pending_admin_bootstrap_never_reads_protected_panels",
+        "auth_entry_dom_test.AuthEntryDOMTest.test_replay_opens_nothing_and_reload_never_reuses_proof",
+        "auth_entry_dom_test.AuthEntryDOMTest.test_role_change_cannot_activate_or_forward_to_another_document",
+        "auth_entry_dom_test.AuthEntryDOMTest.test_pending_and_invalid_membership_display_no_work",
+        "auth_entry_dom_test.AuthEntryDOMTest.test_no_work_before_entry_answer_and_concurrent_init_consumes_once",
+        "session_entry_dom_test.SessionEntry.test_main_entry_retries_in_place_without_landing_or_login",
+        "session_entry_dom_test.SessionEntry.test_end_notice_during_retry_does_not_adopt_the_late_session",
+        "test_session_draft_boundaries.SessionDraftBoundaries.test_entry_proof_consumed_automatically_once"
+      ]
+    },
+    {
+      "id": "REQ-S7-U5-DRAFT-SAFETY",
+      "statement": "초안 변경은 DB revision/epoch와 작성자 결속으로 충돌·늦은 쓰기를 거절한다. Save/Approve·버리기·종료·Recover Draft의 순서와 미확인 결과에서 새 글과 확보본을 보존하고 확인한 글만 지운다. 준비 취소를 가로지른 Tech Note 저장은 다시 읽어 다음 저장의 기준 판을 정한다.",
+      "tests": [
+        "node:tests/report_draft_cas_service_test.cjs",
+        "node:tests/report_draft_owner_test.cjs",
+        "report_draft_cas_live.ReportDraftCasLive.test_d01_concurrent_first_create_has_one_winner_and_authoritative_conflict_read",
+        "report_draft_cas_live.ReportDraftCasLive.test_d03_delete_and_approval_advance_boundary_and_reject_late_write",
+        "report_draft_cas_live.ReportDraftCasLive.test_d04_force_discard_rotates_epoch_even_without_a_draft",
+        "report_draft_cas_live.ReportDraftCasLive.test_d07_same_content_conflict_converges_by_full_read_without_second_write",
+        "report_session_page_dom_test.ReportSessionPageTest.test_another_documents_newer_draft_is_not_overwritten_and_local_text_stays",
+        "auth_logout_dom_test.LogoutDOMTest.test_dp15_d12_a_cut_off_write_finishing_late_never_replaces_the_recovery",
+        "auth_logout_dom_test.LogoutDOMTest.test_s10_recover_draft_discards_the_capture_only_on_an_exact_match",
+        "auth_logout_dom_test.LogoutDOMTest.test_s10_d12_a_differing_owner_or_snapshot_retains_the_capture",
+        "report_text_boundaries_dom_test.ReportTextBoundaries.test_text_typed_while_a_save_or_approve_is_out_is_kept_when_the_server_accepts_it",
+        "report_text_boundaries_dom_test.ReportTextBoundaries.test_a_save_or_approve_accepted_after_the_study_was_left_puts_no_draft_back",
+        "report_text_boundaries_dom_test.ReportTextBoundaries.test_a_save_whose_answer_was_lost_is_not_written_again_as_a_draft",
+        "report_text_boundaries_dom_test.ReportTextBoundaries.test_a_discard_accepted_after_the_study_was_left_does_not_store_the_discarded_text",
+        "report_text_boundaries_dom_test.ReportTextBoundaries.test_recover_draft_goes_on_past_a_study_the_server_refuses",
+        "auth_logout_dom_test.LogoutDOMTest.test_note_stored_across_cancel_confirms_itself_before_the_next_save",
+        "auth_logout_dom_test.LogoutDOMTest.test_note_not_stored_across_cancel_keeps_input_and_the_next_save_works",
+        "viewer_session_dom_test.ViewerSessionDOMTest.test_tech_note_save_across_cancel_is_confirmed_by_read_without_a_repair_click",
+        "test_session_draft_boundaries.SessionDraftBoundaries.test_one_click_logout_saves_draft_and_ends_the_second_tab",
+        "test_session_draft_boundaries.SessionDraftBoundaries.test_failed_preparation_back_to_editing_preserves_text_and_session"
+      ]
+    }
+  ],
+  "left_out": [
+    "63c4fb2e 재결속 당시 원래 ID는 모두 현행 수집에 존재하여 삭제·이름 치환하지 않았다. 네 U5 요구에 현행 동작 사례를 추가했다. round 2에서는 아래 이름/본문 불일치 두 ID를 필수 목록에서 제외하며 시험 자체의 이름은 바꾸지 않는다.",
+    "PRE-RECUT의 provider 격리 성공을 회원 권한의 근거로 삼는 주장과 처리기 메모리 draftOrder 순서 계약은 제외한다. D621에 따라 provider reconciliation은 U5b 범위이며, D623의 DB 권한과 DB revision/epoch/CAS가 기준이다.",
+    "session_end_live.SessionEndLive.test_10_a_member_disabled_at_the_provider_gets_nothing_from_a_live_provider_session: U5 re-cut 뒤 이름/본문 불일치로 제외한다. 이름은 provider에서 disabled된 회원을 주장하지만 본문은 DB Suspend 뒤 두 브라우저를 거절하고 provider가 enabled이며 SSO가 살아 있음을 단언한다. D621의 provider reconciliation은 U5b 범위다. DB에서 격리된 회원이 살아 있는 provider 세션으로 접근하지 못한다는 요구는 기존 session_end_live.SessionEndLive.test_09_an_isolated_member_cannot_come_back_until_activated가 맡는다(기존 제품 세션/토큰 거절, provider SSO 보존, Activate 뒤 옛 인증 거절). SE-10의 두 PC 시나리오 전체를 대체했다고 세지 않는다.",
+    "session_end_live.SessionEndLive.test_11_an_isolation_ends_each_provider_session_by_its_id_and_the_next_sso_given_that_id_lives: U5 re-cut 뒤 이름/본문 불일치로 제외한다. 이름은 isolation에 따른 provider 세션 종료를 주장하지만 본문은 명시적 /auth/logout을 호출한다. D621의 provider reconciliation은 U5b 범위이며 isolation이 각 provider 세션을 종료한다는 근거로 세지 않는다. 명시적 Log out 뒤 같은 sid를 받은 새 SSO 허용과 옛 토큰 거절은 기존 session_end_live.SessionEndLive.test_03b_next_person_in_a_profile_that_kept_an_abandoned_login_page 및 session_end_live.SessionEndLive.test_03c_the_same_doctor_logs_in_again_in_a_tab_that_opened_the_app_twice가 맡는다. SE-11의 후속 refresh/provider 삭제 시나리오 전체를 대체했다고 세지 않는다.",
+    "auth_session_service_test.cjs의 CORE_*는 컴파일된 서비스·실제 DB와 가짜 IdP의 동작 시험이다. Suspend/Approve/Change/Cancel/Activate의 모든 경합을 실제 IdP e2e로 실행했다고 세지 않는다.",
+    "u5-session-regression·u5-session-mutants·u5-session-browser·u5-fixups의 추가 회귀/결함 대조는 기존 PR CI에 유지한다. 이 명시 목록에 전수 복제하지 않으며 G3는 자기 실제 선택으로 별도 판정한다. measurement_ci의 SHA 없는 results.json/로그를 record-run 결과로 승격하지 않는다.",
+    "A/B/C의 의무 전수표·맞춤 판독기·재귀 수집·해시/영수증 사슬: 시험의 실제 통과 여부에 필요한 입력이 아니다.",
+    "S9-U2 예약·위조 방어·전수 반례: 정직한 누락·오래된 결과·잘못된 SHA만 다루는 범위 밖이다.",
+    "D-NW 봉인·바이트 핀·문서 형식·과거 승인 순서: 제품 동작 요구가 아니며 기존 CI를 축소하거나 삭제하지 않는다.",
+    "U3c 자동 배정·외부 메일/SMS·미승인 order 제공: Stage 7 구현 범위가 아니다.",
+    "중복된 정적 배선/문구/행렬 항목: 위 실제 권한·보존·화면 흐름과 전체 G3로 묶었다; 기존 시험 자체는 유지한다.",
+    "의사 채택·허가/위험 기록·실제 운영 백업/복원·최종 출시 승인: 자동 판정에서만 제외하며 그 완료 의무는 남는다."
+  ]
+}
