@@ -1,9 +1,11 @@
 # coding: utf-8
 """Fresh GitHub-hosted runner only; owned synthetic local stack CI profiles."""
 import argparse, json, os, re, secrets, shutil, ssl, subprocess, sys, time
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.request import urlopen
 from live_admin_credential import ensure_imported_admin_credential
+import live_test_gate as gate
 
 ROOT = Path(__file__).resolve().parents[1]
 SUITES = ['viewer_api_test.py', 'e2e/test_measurement_readback.py',
@@ -524,14 +526,20 @@ def profile_environment(profile_name, out, values, evidence_stage=None):
     return env
 
 
+# The VR suite's declared evidence: the rendered VR (vr_01) and the covered VR under a failed access refresh (vr_22).
+# Exactly these files, each a PNG; anything else in private staging is refused so no raw text leaves the runner.
+VR_EVIDENCE = ['volume-rendering.png', 'vr-access-covered.png']
+
+
 def publish_vr_evidence(stage, out):
-    expected = stage/'volume-rendering.png'
     files = sorted(path.relative_to(stage).as_posix() for path in stage.rglob('*') if path.is_file())
-    if files != ['volume-rendering.png']:
+    if files != sorted(VR_EVIDENCE):
         raise RuntimeError('Unexpected or missing VR suite evidence: '+', '.join(files))
-    if expected.read_bytes()[:8] != b'\x89PNG\r\n\x1a\n':
-        raise RuntimeError('VR suite evidence is not a PNG')
-    shutil.copyfile(expected, out/expected.name)
+    for name in VR_EVIDENCE:
+        if (stage/name).read_bytes()[:8] != b'\x89PNG\r\n\x1a\n':
+            raise RuntimeError('VR suite evidence is not a PNG: '+name)
+    for name in VR_EVIDENCE:
+        shutil.copyfile(stage/name, out/name)
 
 
 def gateway_listing(run, out, name, command):
@@ -616,6 +624,67 @@ def seed_source():
         ds.save_as(dest / f'{z}.dcm', write_like_original=False)
 
 
+def stack_capture_commands(compose):
+    """Keep stack observation injectable without replacing runner or gate behavior."""
+    return (('compose-ps', compose + ['ps', '--all']),
+            ('daemon-containers', ['docker', 'ps', '-a', '--format', '{{json .}}']))
+
+
+def inspect_failed_module(run, out, compose, unit, suite, result):
+    """The disposable stack owner records current state before admitting another module."""
+    name = 'inspection-' + Path(suite).stem
+    module = (ROOT / 'tests' / suite).resolve().relative_to(ROOT).as_posix()
+    plan_result = None
+    binding_error = None
+    try:
+        lines = (out / (result['name'] + '.log')).read_text(encoding='utf-8').splitlines()
+        rows = [json.loads(line[len('PLAN_RESULT '):]) for line in lines if line.startswith('PLAN_RESULT ')]
+        if len(rows) != 1 or not isinstance(rows[0], dict):
+            raise ValueError('Expected one PLAN_RESULT')
+        plan_result = rows[0]
+    except (OSError, ValueError) as error:
+        binding_error = 'Cannot read this run\'s PLAN_RESULT: ' + str(error)
+    marker_path = gate.STATE / 'live-needs-inspection.json'
+    marker = None
+    if marker_path.exists():
+        try:
+            marker = json.loads(marker_path.read_bytes())
+            gate.validate_identity(marker)
+            if (plan_result is None or type(plan_result.get('attempt')) is not int
+                    or marker['unit'] != unit or marker['module'] != module
+                    or any(marker[key] != plan_result.get(key) for key in ('attempt', 'plan_sha256'))
+                    or plan_result.get('exit_code') != result['exit']):
+                raise ValueError('Marker does not match this command and PLAN_RESULT')
+        except (OSError, ValueError, gate.Refused) as error:
+            binding_error = str(error)
+    stack = {}
+    artifacts = [result['name'] + '.log', 'results.json']
+    for kind, command in stack_capture_commands(compose):
+        log = name + '-' + kind
+        code = run(log, command, timeout=30, finalizing=True)
+        artifacts.append(log + '.log')
+        stack[kind] = {'exit': code, 'output': (out / (log + '.log')).read_text(encoding='utf-8')}
+    record = out / (name + '.json')
+    with record.open('x', encoding='utf-8') as stream:
+        json.dump({'unit': unit, 'module': module, 'exit': result['exit'],
+                   'attempt': plan_result.get('attempt') if plan_result else None,
+                   'plan_sha256': plan_result.get('plan_sha256') if plan_result else None,
+                   'pid': marker.get('pid') if isinstance(marker, dict) else None,
+                   'started_at': marker.get('started_at') if isinstance(marker, dict) else None,
+                   'plan_result': plan_result, 'binding_error': binding_error,
+                   'artifacts': artifacts, 'result': result, 'stack': stack,
+                   'inspected_at': datetime.now(timezone.utc).isoformat(),
+                   'inspector': 'measurement_ci:' + compose[3]}, stream, indent=2)
+    if any(row['exit'] for row in stack.values()):
+        raise RuntimeError(suite + ' fixture inspection failed; gate remains closed')
+    # A plan refused before its live run (lease, selection) leaves no marker: nothing to release,
+    # the record still documents the failure and the next module may proceed.
+    if marker_path.exists():
+        if binding_error:
+            raise RuntimeError(suite + ' fixture inspection binding failed; gate remains closed: ' + binding_error)
+        gate.release_after_inspection(record)
+
+
 def main(profile_name, credential_provider=None):
     if profile_name not in PROFILES:
         raise RuntimeError('Unknown CI profile')
@@ -651,7 +720,7 @@ def main(profile_name, credential_provider=None):
     env['COMPOSE_PROJECT_NAME'] = project
     compose = ['docker','compose','-p',project]
     results = []; deadline = time.monotonic()+25*60
-    def run(name, command, timeout=600, finalizing=False):
+    def run(name, command, timeout=600, finalizing=False, fail_fast=True):
         started = time.monotonic()
         if not finalizing: timeout = max(.1, min(timeout, deadline-started))
         try:
@@ -663,7 +732,7 @@ def main(profile_name, credential_provider=None):
         (out/(name+'.log')).write_text(output, encoding='utf-8')
         results.append(dict(name=name, exit=code, seconds=time.monotonic()-started))
         print(name+': '+str(code), flush=True)
-        if code and not finalizing: raise RuntimeError(name+' failed; see sanitized artifact')
+        if code and not finalizing and fail_fast: raise RuntimeError(name+' failed; see sanitized artifact')
         return code
     try:
         seed_source()
@@ -692,10 +761,28 @@ def main(profile_name, credential_provider=None):
         values['KIN_LIVE_IMPORTED_ADMIN_PASSWORD'] = password
         env['KIN_LIVE_IMPORTED_ADMIN_PASSWORD'] = password
         run('ports', compose+['ps'])
+        failures = []
         for suite, class_name, unit in profile['suites']:
-            command, outer_timeout = guarded_profile_run(
-                profile, suite, class_name, unit, deadline-time.monotonic())
-            run(Path(suite).stem, command, timeout=outer_timeout)
+            unit = unit or 'ci-' + Path(suite).stem.replace('_', '-')
+            try:
+                command, outer_timeout = guarded_profile_run(
+                    profile, suite, class_name, unit, deadline-time.monotonic())
+            except RuntimeError as error:
+                failures.append(suite + ': ' + str(error))
+                break
+            # Keep the deadline and supervisor margin even after a failed module.
+            # Cleanup still runs once, after all attempted modules, in the finally below.
+            if run(Path(suite).stem, command, timeout=outer_timeout, fail_fast=False):
+                failures.append(suite)
+                result = results[-1].copy()
+                (out/'results.json').write_text(json.dumps(results, indent=2), encoding='utf-8')
+                try:
+                    inspect_failed_module(run, out, compose, unit, suite, result)
+                except (RuntimeError, OSError, ValueError) as error:
+                    failures.append(suite + ': ' + str(error))
+                    break
+        if failures:
+            raise RuntimeError(', '.join(failures) + ' failed; see sanitized artifact')
         if evidence_stage is not None:
             publish_vr_evidence(evidence_stage, out)
     finally:
@@ -715,6 +802,10 @@ def main(profile_name, credential_provider=None):
                 if cleanup and not failed: raise RuntimeError('CI cleanup failed; see sanitized artifact')
             finally:
                 (out/'results.json').write_text(json.dumps(results, indent=2), encoding='utf-8')
+                (out/'summary.tsv').write_text(
+                    'module\tstatus\tduration_seconds\tlog\n' + ''.join(
+                        f"{row['name']}\t{'PASS' if row['exit'] == 0 else 'FAIL'} ({row['exit']})\t"
+                        f"{row['seconds']:.3f}\t{row['name']}.log\n" for row in results), encoding='utf-8')
                 if evidence_stage is not None:
                     shutil.rmtree(evidence_stage)
 
