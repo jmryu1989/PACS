@@ -47,18 +47,19 @@ function kinCreateSessionBoundary() {
     const boundary = window.KinViewerSession.connect(window, KIN_VIEWER_EXPECTED_SESSION);
     // S7-U5 A006 (added): what this viewer holds unsaved, read from the guards its modules already keep for window
     // reuse and close - marks (kinViewerHistoryHasUnsaved), finding text (kinViewerFindingsState), Job / MIP edits
-    // (kinViewerJobWorkspaceState), the Tech Note dialog (kinViewerTechNoteState). Log Out reads it before the real end
+    // (kinViewerJobWorkspaceState), the Tech Note dialog (kinViewerTechNoteWorkspaceState). Log Out reads it before the real end
     // and asks only when something is there. A save still out counts as unsaved in each of these (the logout preparation
     // pauses this document, so its answer cannot arrive before the real end): marks count a busy entry, findings count a
     // pending/busy entry (set only by a save), Jobs count the kept request body from its build until the save is confirmed,
-    // the note counts a save not yet confirmed. Their `busy` is not read here: for Jobs it is also a restore or a list read,
-    // which is not unsaved work. A guard that is missing or throws says nothing: unreadable is not unsaved.
+    // the note counts input that differs from its last confirmed version or a save whose result is not confirmed (dirty or
+    // unknown). Their `busy` is not read here: for Jobs it is also a restore or a list read, for the note a note or history
+    // read, which is not unsaved work. A guard that is missing or throws says nothing: unreadable is not unsaved.
     boundary.unsaved(() => {
       const kinds = [], holds = (kind, read) => { try { if (read() === true) kinds.push(kind); } catch (_) {} };
       holds('marks', () => window.kinViewerHistoryHasUnsaved?.());
       holds('findings', () => window.kinViewerFindingsState?.().dirty);
       holds('jobs', () => window.kinViewerJobWorkspaceState?.().dirty);
-      holds('note', () => window.kinViewerTechNoteState?.().dirty);
+      holds('note', () => { const s = window.kinViewerTechNoteWorkspaceState?.(); return s?.dirty === true || s?.unknown === true; });
       return kinds;
     });
     boundary.onEnd(() => {
@@ -3851,8 +3852,32 @@ function kinCreateSeriesMetadataRecovery() {
   };
 }
 
+function kinCreateContextLoss() {
+  let ready, current, epoch = 0;
+  return { id: 'kin.context-loss', preRegistration({ servicesManager }) {
+    ready = new Promise((resolve, reject) => {
+      const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/viewer-context-loss.js';
+      const timeout = setTimeout(() => reject(Error('Viewer recovery loading timeout')), 20000);
+      script.onload = () => { clearTimeout(timeout); resolve(); };
+      script.onerror = () => { clearTimeout(timeout); reject(Error('Viewer recovery loading failed')); }; document.head.append(script);
+    }).then(() => {
+      current = window.KinViewerContextLoss.create({ services: servicesManager.services, session: kinViewerSession });
+      window.kinViewerContextLoss = current;
+      window.dispatchEvent(new Event('kin-context-recovery-ready'));
+    }); ready.catch(() => {});
+  }, onModeEnter() {
+    const ticket = ++epoch;
+    ready?.then(() => { if (ticket === epoch) current.start(); }).catch(() => {
+      if (ticket !== epoch) return;
+      try { current?.stop(); } catch (_) {}
+      const status = document.querySelector('#kin-viewer-layout-status');
+      if (status) status.textContent = '영상 복구 도구를 연결하지 못했습니다. 영상 작업을 저장한 뒤 뷰어를 다시 여세요.';
+    });
+  }, onModeExit() { epoch++; current?.stop(); } };
+}
+
 window.config = {
-  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery()],
+  extensions: [kinCreateSessionBoundary(), kinStackPrecision, kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor(), kinCreateSeriesMetadataRecovery(), kinCreateContextLoss()],
   // REQ-D-3D-CURSOR. 평가 빌드에 커밋되는 리터럴은 false다. 활성화는 체크리스트 12조건과
   // B10(허용된 분리 환경의 실제 CT 확인) 뒤의 별도 결정이며, === true 하나만 ON이다.
   kinThreeDCursor: { enabled: false },

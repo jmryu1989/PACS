@@ -7,6 +7,34 @@ from live_admin_credential_test import ImportedAdminCredentialTests
 
 
 class MeasurementCiTests(unittest.TestCase):
+    def test_context_loss_profile_selects_only_its_declared_cases_on_a_fresh_runner(self):
+        import ast
+        import yaml
+        profile = ci.PROFILES['context-loss']
+        self.assertEqual(profile['suites'], (('e2e/test_context_loss.py', 'ContextLossE2E', 'ci-context-loss'),))
+        command, timeout = ci.guarded_profile_run(profile, *profile['suites'][0], 1500)
+        self.assertEqual(command[command.index('--class') + 1], 'ContextLossE2E')
+        self.assertLessEqual(timeout, 1235)
+        module = ast.parse((ci.ROOT / 'tests/e2e/test_context_loss.py').read_text(encoding='utf-8'))
+        cls = next(n for n in module.body if isinstance(n, ast.ClassDef) and n.name == 'ContextLossE2E')
+        cases = [n.name for n in cls.body if isinstance(n, ast.FunctionDef) and n.name.startswith('test_')]
+        self.assertEqual(cases, [
+            'test_context_01_mip_manual_reload_known_source_and_projection_pixels',
+            'test_context_02_embedded_2d_reload_keeps_report_and_session',
+            'test_context_03_mpr_batch_late_blob_does_not_commit',
+            'test_context_04_mip_batch_late_blob_keeps_job_inputs',
+        ])
+        workflow = yaml.safe_load((ci.ROOT / '.github/workflows/validate.yml').read_text(encoding='utf-8'))
+        job = workflow['jobs']['context-loss']
+        self.assertEqual(job['runs-on'], 'ubuntu-24.04')
+        self.assertEqual(job['timeout-minutes'], 40)
+        runs = [s for s in job['steps'] if '--profile context-loss' in s.get('run', '')]
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]['timeout-minutes'], 28)
+        uploads = [s for s in job['steps'] if s.get('uses', '').startswith('actions/upload-artifact@')]
+        self.assertEqual(len(uploads), 1)
+        self.assertEqual(uploads[0]['with']['path'], 'tests/e2e/artifacts/context-loss-ci/')
+
     def test_image_text_profile_is_exact_and_separate(self):
         profile=ci.PROFILES['image-text']
         self.assertEqual(profile['suites'],(('e2e/test_viewer_image_text.py','ViewerImageTextE2E','ci-image-text'),))
@@ -584,7 +612,7 @@ class MeasurementCiTests(unittest.TestCase):
 
     def test_profiles_are_exact_and_use_separate_owned_artifacts(self):
         self.assertEqual(set(ci.PROFILES),
-                         {'measurements', 'volume-rendering', 'output-integration',
+                         {'context-loss', 'measurements', 'volume-rendering', 'output-integration',
                           'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text',
                           'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient', 'cell-merge', 'u2b-regressions',
                           'gateway-e2e', 'critical-result-screens',

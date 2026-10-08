@@ -33,7 +33,7 @@ class VolumeStudyWorkflowE2E(VolumePatientCopyE2E):
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);v.screenshot(path=str(folder/'mpr-study-note-return.png'))
  def test_volume_study_02_technician_save_and_reopen(self):
   a,b=self.pair();original=self.originals();v=self.launch(self.login('tech'),[a]);self.ready(v);self.mpr(v);self.choose_volume(v,v,2);before=self.volume_state(v)
-  self.open_note(v);expect(v.locator('#tech-note-text')).to_be_editable();v.locator('#tech-note-text').fill('MPR TECHNICIAN SOURCE NOTE');v.locator('#tech-note-save').click();expect(v.locator('#tech-note-status')).to_contain_text('저장되었습니다. v1');v.locator('#tech-note-close').click()
+  self.open_note(v);expect(v.locator('#tech-note-text')).to_be_editable();v.locator('#tech-note-text').fill('MPR TECHNICIAN SOURCE NOTE');v.locator('#tech-note-save').click();expect(v.locator('#tech-note-status')).to_have_text('입력이 v1로 저장되었습니다.');v.locator('#tech-note-close').click()
   self.choose_volume(v,v,1);self.open_note(v);expect(v.locator('#tech-note-text')).to_have_value('MPR TECHNICIAN SOURCE NOTE');v.locator('#tech-note-history').click();expect(v.locator('#tech-note-history-items section')).to_have_count(1);v.locator('#tech-note-close').click();self.preserved_volume(before,self.volume_state(v));self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1);self.assertEqual(self.jobs(a),[])
  def test_volume_study_03_embedded_source_scope_and_incomplete_refusal(self):
   a,b=self.pair();self.note(a,'EMBEDDED SOURCE NOTE');p,f=EmbeddedPatientCopyE2E.opened(self,a);self.mpr(f);self.choose_volume(p,f,1);p.locator('#findings').fill('KEEP EMBEDDED MPR REPORT');before=self.volume_state(f)

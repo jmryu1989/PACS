@@ -4,14 +4,14 @@
   "legacy_roles": ["radiologist", "technician", "admin"],
   "clinician_role": "clinician",
   "session_routes": ["GET me", "POST auth/logout"],
-  "business_routes": ["GET authz/dicom", "POST dicom/lookup", "GET studies/:uid/viewer-items", "GET clinician/studies", "GET clinician/studies/:uid/report", "GET clinician/studies/:uid/timeline",
+  "business_routes": ["POST studies/:uid/viewer-context-events", "GET authz/dicom", "POST dicom/lookup", "GET studies/:uid/viewer-items", "GET clinician/studies", "GET clinician/studies/:uid/report", "GET clinician/studies/:uid/timeline",
     "GET questions", "GET questions/:id", "GET studies/:uid/questions", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close",
     "GET image-requests", "GET image-requests/:id", "GET studies/:uid/image-requests", "POST studies/:uid/image-requests", "POST image-requests/:id",
     "GET critical-results", "GET critical-results/:id", "POST critical-results/:id/ack"],
   "allowed_additions": ["GET clinician/studies", "GET clinician/studies/:uid/report", "GET clinician/studies/:uid/timeline",
     "GET questions", "GET questions/:id", "GET studies/:uid/questions", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close",
     "GET image-requests", "GET image-requests/:id", "GET studies/:uid/image-requests", "POST studies/:uid/image-requests", "POST image-requests/:id",
-    "GET critical-results", "GET critical-results/:id", "POST critical-results/:id/ack"],
+    "GET critical-results", "GET critical-results/:id", "POST critical-results/:id/ack", "POST studies/:uid/viewer-context-events"],
   "must_stay_denied": [
     "GET studies", "GET bootstrap", "GET prefs", "GET audit", "GET studies/:uid/report-preview",
     "GET studies/:uid/report/versions", "GET studies/:uid/report/citations", "GET studies/:uid/report/structure",
@@ -52,6 +52,7 @@
     {"id": "gateway-no-group", "method": "bearer", "azp": "gw-kin-center", "groups": [], "roles": ["gateway"], "valid": false}
   ],
   "route_metadata_cases": [
+    {"method": 1, "controller": "/", "handler": "studies/:uid/viewer-context-events", "key": "POST studies/:uid/viewer-context-events", "allowed": true},
     {"method": 0, "controller": "/", "handler": "me", "key": "GET me", "allowed": true},
     {"method": 1, "controller": "auth", "handler": "logout", "key": "POST auth/logout", "allowed": true},
     {"method": 0, "controller": "/", "handler": "health", "key": "GET health", "allowed": false},
@@ -143,7 +144,7 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 137, "public": 7, "session": 2, "business": 20, "denied": 108},
+    "counts": {"routes": 138, "public": 7, "session": 2, "business": 21, "denied": 108},
     "basis_legend": {
       "report": "reading/report workflow: writes the report, drafts, hold, dictation or study state, or reads drafts, history, citations, structure, the worklist/bootstrap payload or a body at every RS. The clinician reads are GET clinician/studies and GET clinician/studies/:uid/report (S5-U1b).",
       "viewer": "viewer annotations, findings, manual SR and viewer jobs: writes, or reads revisions, hidden rows and authors. The clinician's final-only item read is GET studies/:uid/viewer-items (S5-U1b).",
@@ -208,6 +209,7 @@
       ]
     },
     "post_baseline": {
+      "POST studies/:uid/viewer-context-events": {"decision": "business", "unit": "S8-CTX", "commit": "56e19e0", "basis": "finite diagnostic event after image permission and institution admission; server attributes the audit row; declared in allowed_additions"},
       "GET clinician/studies": {"decision": "business", "unit": "S5-U1b", "commit": "dc270a0", "basis": "narrow clinician worklist read: listStudies scope, one-snapshot report status, no drafts, bodies or writer fields; declared in allowed_additions"},
       "GET clinician/studies/:uid/report": {"decision": "business", "unit": "S5-U1b", "commit": "dc270a0", "basis": "the final head's body and key images only at RS A with an approve/addendum head, status otherwise; declared in allowed_additions"},
       "POST studies/:uid/dictation": {"decision": "denied", "unit": "S3-ASR", "commit": "7bc6ffc", "basis": "report writer path: dictationGate runs the report-draft write refusals and every attempt is audited; a clinician writes no report text"},
@@ -505,6 +507,11 @@
       "cinvalid": "run-created identity whose two-institution rights command is refused; no DB institution or roles, so it remains pending"
     },
     "rows": {
+      "POST studies/:uid/viewer-context-events": {
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 403, "code": null}
+      },
       "GET me": {
         "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
         "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다"},

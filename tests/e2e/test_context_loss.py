@@ -1,0 +1,122 @@
+# coding: utf-8
+"""REQ-S8-CTX / D549 -> RISK-CTX-BLANK/WORK -> CTX-HOSTED.
+
+Requires the isolated synthetic LiveStack through run-tests.py. No local execution
+is authorized for S8-CTX. Known voxels and source identity are the recovery oracle.
+"""
+import unittest
+from playwright.sync_api import expect
+import test_volume_mip as mip
+
+LOSS = '''() => {
+ const view=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getState().activeViewportId);
+ const gl=view.getRenderingEngine().offscreenMultiRenderWindow.getOpenGLRenderWindow().getContext();
+ const extension=gl.getExtension('WEBGL_lose_context');if(!extension)throw Error('WEBGL_lose_context unavailable');
+ extension.loseContext();return true;
+}'''
+
+
+class ContextLossE2E(mip.VolumeMipE2E):
+    def recover(self, viewer):
+        expect(viewer.get_by_role('heading', name='Viewer Recovery').last).to_be_visible()
+        viewer.get_by_role('button', name='Reload Viewer', exact=True).last.click()
+        viewer.wait_for_function('!!window.kinViewerContextLoss && !!window.cornerstone && cornerstone.getEnabledElements().some(e=>e.viewport.type==="stack"&&e.viewport.csImage)', timeout=60000)
+        self.ready(viewer)
+
+    def assert_original_stack(self, viewer, study):
+        state = viewer.evaluate('''() => {
+          const v=cornerstone.getEnabledElements().map(e=>e.viewport).find(v=>v.type==='stack'&&v.csImage);
+          const image=v.csImage,m=cornerstone.metaData.get('instance',v.getCurrentImageId()),canvas=v.getCanvas();
+          return {study:m.StudyInstanceUID,series:m.SeriesInstanceUID,z:Number(m.ImagePositionPatient[2])/2.5,
+            raw:image.getPixelData()[32*64+32],voi:v.getProperties().voiRange,
+            pixel:canvas.getContext('2d').getImageData(Math.floor(canvas.width/2),Math.floor(canvas.height/2),1,1).data[0],
+            lost:v.getRenderingEngine().offscreenMultiRenderWindow.getOpenGLRenderWindow().getContext().isContextLost()};
+        }''')
+        self.assertEqual(state['study'], study.uid)
+        self.assertFalse(state['lost'])
+        expected = mip.BASE + mip.Z[mip.band(round(state['z']), 33)]
+        self.assertEqual(state['raw'], expected)
+        self.near(state['pixel'], expected, (state['voi']['lower'], state['voi']['upper']), 'reloaded 2D known voxel')
+        return state
+
+    def test_context_01_mip_manual_reload_known_source_and_projection_pixels(self):
+        study, parent, viewer, voi = self.opened_mip_study()
+        original = self.originals()
+        session = viewer.evaluate('KinViewerSessionBoundary.session()')
+        series = viewer.evaluate("cornerstone.metaData.get('instance',cornerstone.cache.getVolume(projectionVP.getVolumeId()).imageIds[0]).SeriesInstanceUID")
+        dialog = self.open_mip(viewer)
+        before = self.final(viewer, 'MIP', 'Axial')
+        self.near(before['pixels'][0], mip.expected_hu('MIP', 'Axial'), voi, 'before loss')
+        viewer.evaluate(LOSS)
+        expect(dialog).to_have_attribute('data-kin-mip-state', 'stopped')
+        self.recover(viewer)
+        source = self.assert_original_stack(viewer, study)
+        self.assertEqual(viewer.evaluate('KinViewerSessionBoundary.session()'), session)
+        self.mpr(viewer); self.choose_volume(viewer, viewer, 0)
+        viewer.evaluate('''([lower,upper])=>{for(const id of services.viewportGridService.getState().viewports.keys()){
+          const v=services.cornerstoneViewportService.getCornerstoneViewport(id);v.setProperties({voiRange:{lower,upper},VOILUTFunction:'LINEAR',interpolationType:0,invert:false});v.render();}}''', list(voi))
+        viewer.evaluate(mip.HELPERS)
+        self.open_mip(viewer)
+        after = self.final(viewer, 'MIP', 'Axial')
+        self.near(after['pixels'][0], mip.expected_hu('MIP', 'Axial'), voi, 'after manual recovery')
+        self.assertEqual(source['series'], series)
+        self.assertEqual(self.originals(), original)
+
+    def test_context_02_embedded_2d_reload_keeps_report_and_session(self):
+        study = mip.mip_phantom(self.stack)
+        self.seed_report(study)
+        parent = self.login(); viewer = self.workspace(parent, study, count=1)
+        self.ready(viewer)
+        parent.locator('#findings').fill('SYN retained report after viewer recovery')
+        before = self.assert_original_stack(viewer, study)
+        binding = viewer.evaluate('KinViewerSessionBoundary.session()')
+        viewer.evaluate(LOSS); self.recover(viewer)
+        after = self.assert_original_stack(viewer, study)
+        self.assertEqual(before['series'], after['series'])
+        self.assertEqual(viewer.evaluate('KinViewerSessionBoundary.session()'), binding)
+        expect(parent.locator('#findings')).to_have_value('SYN retained report after viewer recovery')
+
+    def held_batch(self, viewer, selector):
+        viewer.evaluate('''selector=>{
+          const encode=HTMLCanvasElement.prototype.toBlob;
+          HTMLCanvasElement.prototype.toBlob=function(callback,...args){
+            if(!this.closest(selector))return encode.call(this,callback,...args);
+            HTMLCanvasElement.prototype.toBlob=encode;
+            window.releaseContextBlob=()=>encode.call(this,callback,...args);
+          };
+        }''', selector)
+
+    def test_context_03_mpr_batch_late_blob_does_not_commit(self):
+        study, parent, viewer, voi = self.opened_mip_study()
+        self.held_batch(viewer, '[data-kin-batch-render]')
+        for label, value in [('Batch Start Offset', '0'), ('Batch Interval', '1'), ('Batch Number', '2')]:
+            viewer.get_by_label(label, exact=True).fill(value)
+        viewer.get_by_role('button', name='Make Batch', exact=True).click()
+        viewer.wait_for_function('!!window.releaseContextBlob')
+        viewer.evaluate(LOSS); viewer.evaluate('releaseContextBlob()')
+        expect(viewer.locator('#kin-volume-batch [role=status]')).to_contain_text('취소')
+        expect(viewer.locator('#kin-volume-batch .result')).to_be_hidden()
+        self.recover(viewer); self.assert_original_stack(viewer, study)
+
+    def test_context_04_mip_batch_late_blob_keeps_job_inputs(self):
+        study, parent, viewer, voi = self.opened_mip_study()
+        dialog = self.open_mip(viewer)
+        dialog.get_by_label('MIP Job Title', exact=True).fill('SYN preserved title')
+        self.held_batch(viewer, '[data-kin-mip-batch-render]')
+        dialog.get_by_label('MIP Batch Number', exact=True).fill('2')
+        dialog.get_by_role('button', name='Make MIP Batch', exact=True).click()
+        viewer.wait_for_function('!!window.releaseContextBlob')
+        viewer.evaluate(LOSS); viewer.evaluate('releaseContextBlob()')
+        expect(dialog.locator('.kin-mip-batch-result')).to_be_hidden()
+        expect(dialog.get_by_label('MIP Job Title', exact=True)).to_have_value('SYN preserved title')
+        viewer.get_by_role('button', name='Reload Viewer', exact=True).last.click()
+        expect(viewer.get_by_role('button', name='Discard Viewer Changes & Reload').last).to_be_visible()
+
+
+def load_tests(loader, tests, pattern):
+    return unittest.TestSuite(ContextLossE2E(name) for name in loader.getTestCaseNames(ContextLossE2E)
+                              if name in ContextLossE2E.__dict__ and name.startswith('test_context_'))
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)

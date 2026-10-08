@@ -2,6 +2,7 @@ import { BadRequestException, ConflictException, Controller, Get, HttpCode, Para
 import { randomBytes } from 'node:crypto';
 import { Caller, PacsService } from './pacs.service';
 import { ViewerService } from './viewer.service';
+import { ViewerContextEventService } from './viewer-context-event.service';
 import { CLINICIAN_VIEWER_CHANGED, clinicianOnly, clinicianViewerContinuation, clinicianViewerContinues, clinicianViewerPage,
   clinicianViewerPinned, clinicianViewerQuery, clinicianViewerWithheld } from './clinician-policy';
 
@@ -16,7 +17,13 @@ const changed = (message = '판독 상태가 바뀌었습니다. 새로고침하
 
 @Controller()
 export class ViewerController {
-  constructor(private svc: ViewerService, private pacs: PacsService) {}
+  constructor(private svc: ViewerService, private pacs: PacsService, private contextEvents: ViewerContextEventService) {}
+
+  @Post('studies/:uid/viewer-context-events')
+  @HttpCode(200)
+  contextEvent(@Param('uid') uid: string, @Req() req: any) {
+    return this.contextEvents.record(uid, req.rawBody, caller(req));
+  }
 
   @Get('studies/:uid/viewer-items')
   list(@Param('uid') uid: string, @Query() query: any, @Req() req: any) {

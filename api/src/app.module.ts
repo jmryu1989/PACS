@@ -27,6 +27,7 @@ import { AdminController } from './admin.controller';
 import { AdminService } from './admin.service';
 import { ViewerController } from './viewer.controller';
 import { ViewerService } from './viewer.service';
+import { ViewerContextEventService } from './viewer-context-event.service';
 import { FindingController } from './finding.controller';
 import { FindingService } from './finding.service';
 import { ViewerJobController } from './viewer-job.controller';
@@ -51,6 +52,7 @@ function adminNoStore(_req: any, res: any, next: () => void) {
 @Module({
   controllers: [DictationController, PacsController, AuthController, AdminController, ViewerController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController],
   providers: [
+    ViewerContextEventService,
     AsrService, StudyAccessService, PrismaService, PacsService, OrthancService, KeycloakService, AuthService, AdminService, ViewerService, FindingService, ViewerJobService, ConnectService, ManualSrService, FavoriteService, StudyTagsService, ReaderAssignmentService, ConsultationService, ClinicianQuestionService, ImageRequestService, ClinicalContextService, CriticalResultService,
     { provide: APP_GUARD, useClass: AuthGuard },
     { provide: APP_INTERCEPTOR, useClass: StudyAccessInterceptor },

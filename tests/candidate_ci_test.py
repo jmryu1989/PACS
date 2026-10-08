@@ -40,9 +40,9 @@ class CandidateCiTests(unittest.TestCase):
         runner = importlib.util.module_from_spec(spec);spec.loader.exec_module(runner)
         rows, selected = candidate.exact_selection(target, runner)
         self.assertEqual([row[2] for row in rows[:2]], ["candidate-invariants", "candidate-worklist"])
-        # S7-U1a: 89 invariants (six CriticalResultInvariantTests) + 15 worklist + 8 flows
-        self.assertEqual(len(selected), 112)
-        self.assertEqual([item["case"] for item in selected[-8:]],
+        # S7-U1a: 89 invariants (six CriticalResultInvariantTests) + 15 worklist + 8 flows; S8-CTX: + 2 Tech Note flows
+        self.assertEqual(len(selected), 114)
+        self.assertEqual([item["case"] for item in selected[-10:]],
             [class_name + "." + method for _, class_name, method, _ in candidate.FLOWS])
         for filename, class_name, method, prefix in candidate.FLOWS:
             module = runner.load_module(target / "tests" / filename)
@@ -74,14 +74,14 @@ class CandidateCiTests(unittest.TestCase):
             out, selected = candidate.configure(candidate.TOOLS_ROOT, FakeCi, FakeRunner(), plans)
             profile = FakeCi.PROFILES["measurements"]
             self.assertEqual(profile["suite_timeout"], 540)
-            self.assertEqual(len(profile["suites"]), 10)
+            self.assertEqual(len(profile["suites"]), 12)
             command, timeout = FakeCi.guarded_profile_run(profile, *profile["suites"][2], 1000)
             self.assertEqual(Path(command[1]), candidate.TOOLS_ROOT / "scripts/run-tests.py")
             self.assertEqual(command[2], "--plan")
             self.assertEqual(timeout, 575)
             env = FakeCi.profile_environment("measurements", out, {"ORTHANC_PASS": "synthetic"})
             self.assertEqual(env["KIN_EVIDENCE_DIR"], str(out / "screens"))
-            self.assertEqual(len(selected), 112)
+            self.assertEqual(len(selected), 114)
 
     def test_workflow_keeps_tool_and_candidate_checkouts_separate(self):
         source = (candidate.TOOLS_ROOT / ".github/workflows/candidate.yml").read_text(encoding="utf-8")

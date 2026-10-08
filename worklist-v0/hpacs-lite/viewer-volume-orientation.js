@@ -167,6 +167,23 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
   const startTimer=setInterval(observe,500);observe();
   for(const name of ['pointerdown','wheel','keydown'])document.addEventListener(name,early,{capture:true,passive:true});
   const vrButton=document.createElement('button');vrButton.textContent='Open Volume Rendering';panel.append(vrButton);let vr=null,vrLoading=false;
+  let vrRecovery=null,releaseVrRecovery=null;
+  const vrLostEngines=new Set();
+  const bindVrRecovery=()=>{
+    const recovery=window.kinViewerContextLoss;
+    if(!vr||!recovery||vrRecovery===recovery)return;
+    releaseVrRecovery?.();vrRecovery=recovery;vrLostEngines.clear();
+    releaseVrRecovery=recovery.onContextLoss(({engine})=>{
+      const t=target(true,true,{requireRenderReady:false});
+      if(t?.views.some(v=>v.getRenderingEngine()===engine)){
+        vrLostEngines.add(engine);vr.setContextLoss?.('영상 표시가 중단되었습니다. Close VR로 돌아간 뒤 Reload Viewer를 누르세요.');
+      }
+    },({engine})=>{
+      vrLostEngines.delete(engine);
+      if(!vrLostEngines.size)vr.setContextLoss?.(null);
+    });
+  };
+  window.addEventListener('kin-context-recovery-ready',bindVrRecovery);
   vrButton.onclick=async()=>{
     if(vrLoading||!alive()||busy||!permitted()||workspaceBusy())return;vrLoading=true;vrButton.disabled=true;
     try{
@@ -176,7 +193,7 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
         const timer=setTimeout(()=>finish(Error('VR 도구를 불러오지 못했습니다. 다시 누르세요.')),30000);
         script.onload=()=>finish(window[name]?null:Error('VR 도구를 확인하지 못했습니다.'));script.onerror=()=>finish(Error('VR 도구를 불러오지 못했습니다. 다시 누르세요.'));document.head.append(script);
       });
-      if(!alive())return;vr||=window.kinCreateVolumeRendering({target,permitted:()=>!busy&&permitted(),alive,owner,notice:message=>{if(alive())status.textContent=message;}});await vr.open();
+      if(!alive())return;vr||=window.kinCreateVolumeRendering({target,permitted:()=>!busy&&permitted(),alive,owner,notice:message=>{if(alive())status.textContent=message;}});await vr.open();vrRecovery=null;bindVrRecovery();
     }catch(error){if(alive())status.textContent=error.message;}finally{vrLoading=false;vrButton.disabled=!alive();}
   };
   // Placed before the VR button so existing callers that open VR as the panel's last button keep that target.
@@ -230,5 +247,5 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
   window.kinVolumeMipJob=mipJob;
   const cineTarget=(v,verify=false)=>{if(verify&&(busy||!permitted()))throw Error('다른 작업을 마친 뒤 MPR을 재생하세요.');const t=target(verify);if(!t||t.source.viewportId!==v?.id||!t.views.includes(v))return null;return {key:JSON.stringify([t.group,t.selection]),contentKey:JSON.stringify([t.group,v.id]),allowed:!busy&&permitted(),volume:cornerstone.cache.getVolume(v.getVolumeId())};};
   window.kinGetVolumeCineTarget=cineTarget;
-  return {dispose(){ended=true;path?.dispose();curved?.dispose();vr?.dispose();if(window.kinVolumeMipJob===mipJob)delete window.kinVolumeMipJob;mip?.dispose();if(window.kinGetVolumeCineTarget===cineTarget){delete window.kinGetVolumeCineTarget;window.dispatchEvent(new Event('kin-volume-cine-target-ended'));}batch?.dispose();marks?.dispose();progressive?.dispose();preferences?.dispose();synchronization?.dispose();display?.dispose();crosshair?.dispose();clearInterval(timer);clearInterval(startTimer);panel.remove();for(const name of ['pointerdown','wheel','keydown']){document.removeEventListener(name,guard,true);document.removeEventListener(name,early,true);}}};
+  return {dispose(){ended=true;releaseVrRecovery?.();window.removeEventListener('kin-context-recovery-ready',bindVrRecovery);path?.dispose();curved?.dispose();vr?.dispose();if(window.kinVolumeMipJob===mipJob)delete window.kinVolumeMipJob;mip?.dispose();if(window.kinGetVolumeCineTarget===cineTarget){delete window.kinGetVolumeCineTarget;window.dispatchEvent(new Event('kin-volume-cine-target-ended'));}batch?.dispose();marks?.dispose();progressive?.dispose();preferences?.dispose();synchronization?.dispose();display?.dispose();crosshair?.dispose();clearInterval(timer);clearInterval(startTimer);panel.remove();for(const name of ['pointerdown','wheel','keydown']){document.removeEventListener(name,guard,true);document.removeEventListener(name,early,true);}}};
 };

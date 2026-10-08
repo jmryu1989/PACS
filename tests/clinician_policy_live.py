@@ -394,6 +394,11 @@ class ClinicianPolicyLive(unittest.TestCase):
             self.assertTrue(isinstance(body, list) and body, "no DICOM metadata behind the passed auth_request")
         elif route == "POST dicom/lookup":
             self.assertEqual(body, {"id": instance})
+        elif route == "POST studies/:uid/viewer-context-events":
+            self.assertEqual(set(body), {"recorded", "eventId", "receivedAt"})
+            self.assertIs(body["recorded"], True)
+            self.assertEqual(body["eventId"], sent["eventId"])
+            self.assertTrue(body["receivedAt"])
         elif route == "GET studies/:uid/viewer-items":
             self.assertEqual(body, {"uid": uid, "final": False, "items": None, "nextCursor": None})
         elif route == "GET clinician/studies":
@@ -557,6 +562,11 @@ class ClinicianPolicyLive(unittest.TestCase):
             path = "/" + template.replace(":uid", quote(values[":uid"])).replace(":id", quote(values[":id"]))
             query = LIVE_MATRIX["rows"][route].get("query")
             sent = fill(route, WRITES[route]["body"], identity) if route in WRITES else lookup if route == "POST dicom/lookup" else None
+            if route == "POST studies/:uid/viewer-context-events":
+                sent = {"eventId": str(uuid.uuid4()), "faultId": str(uuid.uuid4()),
+                        "stage": "loss", "occurredAt": "2026-10-08T00:00:00.000Z",
+                        "engine": "webgl", "viewport": "stack", "cause": "context-lost",
+                        "repeatCount": 1, "attempt": 0, "reason": "none", "result": "unknown"}
             return self.bearer(method, path + ("?" + query if query else ""), token, sent), sent
 
         observed: dict[str, list] = {}
@@ -586,11 +596,19 @@ class ClinicianPolicyLive(unittest.TestCase):
                                          "another institution lists it")
                     if name == "positive" and route in WRITES:
                         self.assert_audit(WRITES[route], written, values, sent)
+                    elif name == "positive" and route == "POST studies/:uid/viewer-context-events":
+                        self.assertEqual(len(written), 1)
+                        receipt = written[0]
+                        self.assertEqual((receipt["actor"], receipt["action"], receipt["target"]),
+                                         (clinician, "viewer-context.event", uid))
+                        detail = json.loads(receipt["detail"])
+                        self.assertEqual({key: detail[key] for key in sent}, sent)
+                        self.assertEqual(detail["institution"], "hallym")
                     else:
                         self.assertEqual(written, [], "a read or a refusal writes no audit row")
         self.assertEqual(len(observed), 3 * len(ALLOWED))
         # the prepared question's and image request's rows and each write row's declared rows, and no other clinician row
-        declared = 2 + sum(write["audit"]["rows"] for write in WRITES.values())
+        declared = 3 + sum(write["audit"]["rows"] for write in WRITES.values())  # two prepared records + one context event
         self.assertEqual(len(audit_since(start)), declared)
         self.assertEqual(psql(f'SELECT count(*) FROM "AuditLog" WHERE actor={lit(clinician)}'), [str(declared)],
                          "the reads and the refusals wrote no audit row")

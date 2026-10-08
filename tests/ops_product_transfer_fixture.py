@@ -80,6 +80,7 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261004120000_draft_revision_session_entry/migration.sql',
               'api/prisma/migrations/20261005120000_idp_session_end/migration.sql',
               'api/prisma/migrations/20261005130000_member_isolation/migration.sql',
+              'api/prisma/migrations/20261006000000_tech_note_attempt_id/migration.sql',
               'api/prisma/migrations/20261006120000_member_isolation_call/migration.sql',
               'api/prisma/migrations/20261007120000_provider_change/migration.sql',
               'api/prisma/migrations/20261007170000_member_db_rights/migration.sql',
@@ -147,7 +148,10 @@ def expected_rows(uid):
         bindings=dict(shortcuts,report=report),updatedAt=STAMP) for institution,subject,revision,report in
         [('SYNTHETIC-hospital','SYNTHETIC-sub',2,'KeyR'), ('SYNTHETIC-tele','SYNTHETIC-sub',3,'KeyT'),
          ('SYNTHETIC-hospital','SYNTHETIC-other',4,'KeyY')]]
-    rows['TechNoteRevision'] = [dict(studyUid=uid, version=1, text='SYNTHETIC tech note', reason='', author='SYNTHETIC-tech', authorSub='SYNTHETIC-sub', institutionId='SYNTHETIC-hospital', createdAt=STAMP)]
+    # S8-CTX: a revision from before save attempts had ids (attemptId NULL) and one written by an attempt (a UUID); both
+    # must transfer and restore as they are.
+    rows['TechNoteRevision'] = [dict(studyUid=uid, version=1, text='SYNTHETIC tech note', reason='', author='SYNTHETIC-tech', authorSub='SYNTHETIC-sub', institutionId='SYNTHETIC-hospital', createdAt=STAMP, attemptId=None),
+        dict(studyUid=uid, version=2, text='SYNTHETIC tech note v2', reason='SYNTHETIC correction', author='SYNTHETIC-tech', authorSub='SYNTHETIC-sub', institutionId='SYNTHETIC-hospital', createdAt=STAMP, attemptId='00000000-0000-4000-8000-000000000d01')]
     rows['Institution'] = [dict(id='SYNTHETIC-'+kind, name='SYNTHETIC '+kind, type=kind,
         dicomNames='SYNTHETIC', createdAt=STAMP) for kind in ('hospital', 'tele')]
     rows['StudyState'] = [dict(uid=uid, institutionId='SYNTHETIC-hospital', teleInstitutionId='SYNTHETIC-tele',
