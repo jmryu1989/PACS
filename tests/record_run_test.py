@@ -41,14 +41,79 @@ class RecordRunTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.run_dir = self.root / "evidence" / "first"
 
-    def run_command(self, command, files=()):
+    def run_command(self, command, files=(), trees=()):
         args = [sys.executable, "-B", str(RECORDER), "--run-dir", str(self.run_dir), "--cwd", str(self.root)]
         for path in files:
             args.extend(["--file", path])
+        for path in trees:
+            args.extend(["--tree", path])
         return subprocess.run(args + ["--"] + command, capture_output=True, shell=False)
 
     def record(self):
         return json.loads((self.run_dir / "run.json").read_text(encoding="utf-8"))
+
+    def test_trees_record_nested_regular_files_in_posix_order_with_hashes(self):
+        payloads = {"source/z.txt": b"last\r\n", "source/nested/b.bin": b"\x00\xff\r\n",
+                    "source/a.txt": b"first\n", "other/c.txt": b"other"}
+        for name, raw in payloads.items():
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(raw)
+        (self.root / "source/empty").mkdir()
+        result = self.run_command([sys.executable, "-c", "pass"],
+                                  files=["source/a.txt"], trees=["source", "other"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = self.record()
+        self.assertEqual(record["files_before"], record["files_after"])
+        explicit, *items = record["files_before"]
+        self.assertNotIn("tree", explicit)
+        self.assertEqual([item["requested"] for item in items],
+                         ["source/a.txt", "source/nested/b.bin", "source/z.txt", "other/c.txt"])
+        for item in items:
+            name = item["requested"]
+            raw = payloads[name]
+            self.assertEqual(item, {
+                "requested": name, "path": str((self.root / name).resolve()),
+                "status": "present", "sha256": hashlib.sha256(raw).hexdigest(),
+                "lf_sha256": hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest(),
+                "tree": name.split("/")[0],
+            })
+        self.assertEqual(explicit, {key: value for key, value in items[0].items() if key != "tree"})
+
+    def test_missing_tree_records_one_missing_directory(self):
+        result = self.run_command([sys.executable, "-c", "pass"], trees=["absent"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for field in ["files_before", "files_after"]:
+            self.assertEqual(self.record()[field], [{
+                "requested": "absent", "path": str((self.root / "absent").resolve()),
+                "status": "missing", "sha256": None, "lf_sha256": None, "tree": "absent",
+            }])
+
+    def test_unreadable_tree_does_not_record_success(self):
+        (self.root / "not-a-directory").write_bytes(b"file")
+        result = self.run_command([sys.executable, "-c", "pass"], trees=["not-a-directory"])
+        self.assertEqual(result.returncode, 125, result.stderr)
+        for field in ["files_before", "files_after"]:
+            items = self.record()[field]
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["requested"], "not-a-directory")
+            self.assertEqual(items[0]["tree"], "not-a-directory")
+            self.assertEqual(items[0]["status"], "unreadable")
+            self.assertIsNone(items[0]["sha256"])
+            self.assertIsNone(items[0]["lf_sha256"])
+
+    def test_file_added_to_tree_changes_the_recorded_set(self):
+        (self.root / "source").mkdir()
+        (self.root / "source/old.txt").write_bytes(b"old")
+        result = self.run_command([
+            sys.executable, "-c", "from pathlib import Path; Path('source/new.txt').write_bytes(b'new')",
+        ], trees=["source"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        before, after = (self.record()[field] for field in ["files_before", "files_after"])
+        self.assertEqual([item["requested"] for item in before], ["source/old.txt"])
+        self.assertEqual([item["requested"] for item in after], ["source/new.txt", "source/old.txt"])
+        self.assertEqual(before[0], after[1])
+        self.assertEqual(after[0]["sha256"], hashlib.sha256(b"new").hexdigest())
 
     def test_success_preserves_raw_bytes_and_arguments(self):
         payload = "import os; os.write(1, bytes([0, 13, 10, 255])); os.write(2, b'err\\r\\n')"
