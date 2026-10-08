@@ -25,6 +25,8 @@
  * each symbol the identifier stands for is resolved and the strongest answer (decorator, unresolved, package, project)
  * is given. A module under node_modules that does not resolve (typescript or @nestjs/common not installed) is an answer
  * {"error": ...}, and the test fails on it.
+ * EMR-A-LAND OL-01: contracts also reports relative loader resolutions and fixed-list prototype comparisons by
+ * code-point offset, using this same program and its AST. The closed source contract decides which forms to accept.
  */
 const path = require('path');
 const readline = require('readline');
@@ -148,6 +150,60 @@ function binding(checker, node, decorator, known, files) {
   return answer;
 }
 
+// Relative loaders are followed with the same compiler host as the inventory, including virtual fixtures.
+// Merely starting with './' is insufficient: missing/out-of-scope files and decorator exports stay closed.
+function relativeLoad(node, file, program, checker, known, files) {
+  let argument, callee;
+  if (ts.isCallExpression(node) && node.arguments.length === 1 &&
+      (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+       ts.isIdentifier(node.expression) && node.expression.text === 'require')) {
+    argument = node.arguments[0];
+    callee = node.expression;
+  } else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) {
+    argument = node.argument.literal;
+    callee = node.getChildren(file).find(child => child.kind === ts.SyntaxKind.ImportKeyword);
+    if (!callee) return null;
+  } else return null;
+  if (!ts.isStringLiteral(argument) || !/^\.\.?\//.test(argument.text)) return null;
+  const offset = codePoint(file, callee.getStart(file));
+  const resolved = ts.resolveModuleName(argument.text, file.fileName, options, host).resolvedModule;
+  const destination = resolved && absolute(resolved.resolvedFileName);
+  if (!destination || !files.has(destination) || !underSrc(destination) || destination.endsWith('.d.ts')) {
+    return [offset, 'relative module is missing or outside the checked api/src scope'];
+  }
+  const source = program.getSourceFile(destination);
+  const symbol = source && checker.getSymbolAtLocation(source);
+  if (!symbol || program.getSyntacticDiagnostics(source).length) return [offset, 'relative module has no readable exports'];
+  const seen = new Set();
+  const exposesDecorator = symbol => {
+    symbol = target(checker, symbol);
+    if (!symbol || seen.has(symbol)) return false;
+    seen.add(symbol);
+    return known.has(symbol) || Boolean(symbol.flags & ts.SymbolFlags.Module) &&
+      checker.getExportsOfModule(symbol).some(exposesDecorator);
+  };
+  if (exposesDecorator(symbol)) return [offset, 'relative module exports a route or public metadata decorator'];
+  return [offset, 'followed'];
+}
+
+function fixedPrototypeComparison(node, file) {
+  // An inline fixed list consumes the prototype only as an identity comparison, never hands it to a writer.
+  // Use the TS AST, not another source-text parser (D73); expressions, spreads and assigned results are refused.
+  if (!ts.isCallExpression(node) || node.arguments.length !== 1 || node.questionDotToken ||
+      !ts.isPropertyAccessExpression(node.expression) || node.expression.questionDotToken ||
+      !ts.isIdentifier(node.expression.expression) || node.expression.expression.text !== 'Object' ||
+      node.expression.name.text !== 'getPrototypeOf') return null;
+  const call = node.parent;
+  if (!ts.isCallExpression(call) || call.questionDotToken || call.arguments.length !== 1 || call.arguments[0] !== node ||
+      !ts.isPropertyAccessExpression(call.expression) || call.expression.questionDotToken ||
+      call.expression.name.text !== 'includes' || !ts.isArrayLiteralExpression(call.expression.expression)) return null;
+  const elements = call.expression.expression.elements;
+  if (!elements.length || !elements.every(element => element.kind === ts.SyntaxKind.NullKeyword ||
+      ts.isPropertyAccessExpression(element) && !element.questionDotToken && element.name.text === 'prototype' &&
+      ts.isIdentifier(element.expression) && ['Object', 'Array'].includes(element.expression.text))) return null;
+  return codePoint(file, node.expression.name.getStart(file));
+}
+
 function answer(request) {
   if (loadError) throw loadError;
   const set = new Map();
@@ -172,13 +228,20 @@ function answer(request) {
   const decorator = decorators(program, checker, request.names);
   const known = new Set([...decorator.values()].filter(Boolean));
   const files = new Set(texts.keys());
-  const out = {};
+  const out = {}, contracts = {};
   for (const at of texts.keys()) {
     const file = program.getSourceFile(at);
     if (!file) continue;
     const broken = program.getSyntacticDiagnostics(file).length > 0;
     const found = [];
+    const loads = [], comparisons = [];
     const visit = node => {
+      if (!broken) {
+        const load = relativeLoad(node, file, program, checker, known, files);
+        if (load) loads.push(load);
+        const comparison = fixedPrototypeComparison(node, file);
+        if (comparison !== null) comparisons.push(comparison);
+      }
       if (ts.isIdentifier(node) && names.has(node.text)) {
         const start = node.getStart(file);
         if (file.text.slice(start, node.end) === node.text) {
@@ -189,13 +252,14 @@ function answer(request) {
     };
     visit(file);
     if (found.length) out[at.slice(SRC.length + 1)] = found;
+    contracts[at.slice(SRC.length + 1)] = { relative_loads: loads, prototype_comparisons: comparisons };
   }
   const declared = {};
   for (const [name, symbol] of decorator) {
     const where = symbol && symbol.declarations && symbol.declarations[0];
     declared[name] = where ? path.relative(API, where.getSourceFile().fileName).split(path.sep).join('/') : null;
   }
-  return { typescript: ts.version, node: process.version, decorators: declared, files: out };
+  return { typescript: ts.version, node: process.version, decorators: declared, files: out, contracts };
 }
 
 try {
