@@ -148,7 +148,7 @@
     },
     {
       "id": "REQ-S7-U5-AUTH-AUDIT",
-      "statement": "로그인·진입·로그아웃·만료와 DB 회원 권한 명령은 주체·기관·결과를 감사와 함께 확정하고 자격증명은 기록하지 않는다. 접속 IP는 프록시에서 오며 보존 체크포인트의 retain_until은 최소 달력 2년이다.",
+      "statement": "로그인·진입·로그아웃·만료와 DB 회원 권한 명령은 주체·기관·결과와 서버 시각을 감사에 남기고 조회 시 시간대를 명시하며 자격증명은 기록하지 않는다. 로그인·로그아웃의 저장 시각은 서버 관측 시각 및 사건 순서와 일치한다. 접속 IP는 프록시에서 오며 보존 체크포인트의 retain_until은 최소 달력 2년이다.",
       "tests": [
         "node:tests/auth_session_service_test.cjs",
         "auth_audit_live.AuthAuditLive.test_01_login_success_row_and_no_secret",
@@ -160,6 +160,7 @@
         "auth_audit_live.AuthAuditLive.test_07_admins_read_record_time_institutions_only",
         "auth_audit_live.AuthAuditLive.test_08_login_failures_of_this_servers_logins_only",
         "auth_audit_live.AuthAuditLive.test_10_a_session_ended_on_the_dicom_path_records_the_proxys_address",
+        "auth_audit_live.AuthAuditLive.test_11b_login_logout_server_time_and_timezone",
         "admin_audit_dom_test.AdminAuditDOMTest.test_ad01_access_rows_are_drawn_like_any_field_row",
         "admin_audit_dom_test.AdminAuditDOMTest.test_ad02_the_access_history_sentence_follows_what_this_page_session_painted",
         "ops_audit_integrity_test.AuditIntegrityPure.test_pv06_calendar_retention_and_plan_years"
@@ -183,7 +184,9 @@
         "session_end_live.SessionEndLive.test_04_switch_account_shows_an_editable_name",
         "session_end_live.SessionEndLive.test_05_the_same_doctors_other_pc_keeps_working",
         "session_end_live.SessionEndLive.test_07_a_provider_end_racing_a_refresh_still_ends_the_session",
-        "session_end_live.SessionEndLive.test_09_an_isolated_member_cannot_come_back_until_activated"
+        "session_end_live.SessionEndLive.test_09_an_isolated_member_cannot_come_back_until_activated",
+        "session_end_live.SessionEndLive.test_10_db_suspension_refuses_both_browsers_while_provider_sso_stays_alive",
+        "session_end_live.SessionEndLive.test_11_explicit_logout_ends_its_provider_session_and_the_next_same_sid_sso_lives"
       ]
     },
     {
@@ -238,10 +241,9 @@
     }
   ],
   "left_out": [
-    "63c4fb2e 재결속 당시 원래 ID는 모두 현행 수집에 존재하여 삭제·이름 치환하지 않았다. 네 U5 요구에 현행 동작 사례를 추가했다. round 2에서는 아래 이름/본문 불일치 두 ID를 필수 목록에서 제외하며 시험 자체의 이름은 바꾸지 않는다.",
+    "63c4fb2e 재결속 당시 원래 ID는 모두 현행 수집에 존재하여 삭제·이름 치환하지 않았다. 네 U5 요구에 현행 동작 사례를 추가했다. round 2에서 제외했던 이름/본문 불일치 두 ID(SE-10·SE-11)는 S7-U5-HYGIENE의 이름 변경 뒤 해소되어 필수 목록에 다시 들어갔다(아래 기록 메모).",
     "PRE-RECUT의 provider 격리 성공을 회원 권한의 근거로 삼는 주장과 처리기 메모리 draftOrder 순서 계약은 제외한다. D621에 따라 provider reconciliation은 U5b 범위이며, D623의 DB 권한과 DB revision/epoch/CAS가 기준이다.",
-    "session_end_live.SessionEndLive.test_10_a_member_disabled_at_the_provider_gets_nothing_from_a_live_provider_session: U5 re-cut 뒤 이름/본문 불일치로 제외한다. 이름은 provider에서 disabled된 회원을 주장하지만 본문은 DB Suspend 뒤 두 브라우저를 거절하고 provider가 enabled이며 SSO가 살아 있음을 단언한다. D621의 provider reconciliation은 U5b 범위다. DB에서 격리된 회원이 살아 있는 provider 세션으로 접근하지 못한다는 요구는 기존 session_end_live.SessionEndLive.test_09_an_isolated_member_cannot_come_back_until_activated가 맡는다(기존 제품 세션/토큰 거절, provider SSO 보존, Activate 뒤 옛 인증 거절). SE-10의 두 PC 시나리오 전체를 대체했다고 세지 않는다.",
-    "session_end_live.SessionEndLive.test_11_an_isolation_ends_each_provider_session_by_its_id_and_the_next_sso_given_that_id_lives: U5 re-cut 뒤 이름/본문 불일치로 제외한다. 이름은 isolation에 따른 provider 세션 종료를 주장하지만 본문은 명시적 /auth/logout을 호출한다. D621의 provider reconciliation은 U5b 범위이며 isolation이 각 provider 세션을 종료한다는 근거로 세지 않는다. 명시적 Log out 뒤 같은 sid를 받은 새 SSO 허용과 옛 토큰 거절은 기존 session_end_live.SessionEndLive.test_03b_next_person_in_a_profile_that_kept_an_abandoned_login_page 및 session_end_live.SessionEndLive.test_03c_the_same_doctor_logs_in_again_in_a_tab_that_opened_the_app_twice가 맡는다. SE-11의 후속 refresh/provider 삭제 시나리오 전체를 대체했다고 세지 않는다.",
+    "SE-10·SE-11은 round 2에서 이름/본문 불일치(옛 이름 test_10_a_member_disabled_at_the_provider_…, test_11_an_isolation_ends_each_provider_session_…)로 제외했으나, S7-U5-HYGIENE가 본문이 단언하는 사실대로 이름을 바꾼 뒤(test_10_db_suspension_refuses_both_browsers_while_provider_sso_stays_alive, test_11_explicit_logout_ends_its_provider_session_and_the_next_same_sid_sso_lives) 제외 사유가 사라져 REQ-S7-U5-SESSION-END의 필수 목록에 다시 넣었다. 둘 다 D621/D623의 DB 결정 사실(DB Suspend 뒤 두 브라우저 거절·provider SSO 보존, 명시적 Log out 뒤 같은 sid의 새 SSO 허용과 옛 토큰 거절)을 단언하며 provider reconciliation(U5b)의 근거로 세지 않는다.",
     "auth_session_service_test.cjs의 CORE_*는 컴파일된 서비스·실제 DB와 가짜 IdP의 동작 시험이다. Suspend/Approve/Change/Cancel/Activate의 모든 경합을 실제 IdP e2e로 실행했다고 세지 않는다.",
     "u5-session-regression·u5-session-mutants·u5-session-browser·u5-fixups의 추가 회귀/결함 대조는 기존 PR CI에 유지한다. 이 명시 목록에 전수 복제하지 않으며 G3는 자기 실제 선택으로 별도 판정한다. measurement_ci의 SHA 없는 results.json/로그를 record-run 결과로 승격하지 않는다.",
     "A/B/C의 의무 전수표·맞춤 판독기·재귀 수집·해시/영수증 사슬: 시험의 실제 통과 여부에 필요한 입력이 아니다.",

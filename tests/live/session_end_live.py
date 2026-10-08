@@ -1,8 +1,8 @@
-"""TEST-S7-U5-END-LIVE (SE-01..SE-10, SE-03b, SE-03c): the session end on the real stack - real BFF, nginx, PostgreSQL and the real
+"""TEST-S7-U5-END-LIVE (SE-01..SE-11, SE-03b, SE-03c): the session end on the real stack - real BFF, nginx, PostgreSQL and the real
 Keycloak login form driven by a browser. No mock of the form, the authorization endpoint or the callback.
 
-REQ-S7-U5-SESSION-END (R1: whenever the product ends a product session the provider session ends too, and a provider
-session the product decided to end never produces a product session again; R2: a login started to leave, to switch, or
+REQ-S7-U5-SESSION-END (R1 under D621: explicit Log out ends its provider session too, and an ended provider
+authentication never produces a product session again; R2: a login started to leave, to switch, or
 from a browser that cannot say whether the person left, makes a session only from credentials entered after that press)
   -> RISK-S7-U5-SILENT-REENTRY -> TEST-S7-U5-END-LIVE (this file; the ordered races are tests/auth_session_service_test.cjs
   U5E-01..U5E-10, the landing table is tests/auth_entry_dom_test.py).
@@ -71,8 +71,8 @@ CASES = (
     "test_07_a_provider_end_racing_a_refresh_still_ends_the_session",
     "test_08_what_auth_time_does_across_a_refresh",
     "test_09_an_isolated_member_cannot_come_back_until_activated",
-    "test_10_a_member_disabled_at_the_provider_gets_nothing_from_a_live_provider_session",
-    "test_11_an_isolation_ends_each_provider_session_by_its_id_and_the_next_sso_given_that_id_lives",
+    "test_10_db_suspension_refuses_both_browsers_while_provider_sso_stays_alive",
+    "test_11_explicit_logout_ends_its_provider_session_and_the_next_same_sid_sso_lives",
 )
 APP = "/worklist/hpacs-lite/"
 STORAGE_DENIED = """(() => { for (const name of ['localStorage']) Object.defineProperty(window, name,
@@ -98,8 +98,8 @@ WATCH_NOTICE = """() => { window.kinTestNoticeWritten = false;
   new MutationObserver(() => { window.kinTestNoticeWritten = true; })
     .observe(document.querySelector('#msg'), { childList: true, characterData: true, subtree: true }); }"""
 ANSWERED = """() => !/\\/index\\.html$/.test(location.pathname) || window.kinTestNoticeWritten === true"""
-# The provider answered a credentials submit: it left its form, or showed its form again with a message (SE-09/SE-10:
-# a disabled account). The form's own field ids and Keycloak's message element - not its wording.
+# The provider answered a credentials submit: it left its form, or showed its form again with a message.
+# The form's own field ids and Keycloak's message element - not its wording.
 SUBMITTED = """() => !location.pathname.startsWith('/auth/realms/kin/login-actions/authenticate')
   || (document.readyState === 'complete' && !!document.querySelector('#input-error, .kc-feedback-text'))"""
 
@@ -142,7 +142,7 @@ class SessionEndLive(unittest.TestCase):
         if owned:
             psql('DELETE FROM "IdpSessionEnd" WHERE "idpSid" IN (' + ",".join(f"'{value}'" for value in owned) + ");")
             psql('DELETE FROM "ProviderChange" WHERE kind = \'end_session\' AND target IN (' + ",".join(f"'{value}'" for value in owned) + ");")
-        # The provider change records of A's and B's isolation and re-activation (SE-09, SE-11).
+        # Remove any provider change records owned by the test identities, including after a failed case.
         psql('DELETE FROM "ProviderChange" WHERE sub IN (' + ",".join(f"'{value}'" for value in cls.ids.values()) + ");")
         # SE-09's isolation fact of A (an Activate clears it; a case that stopped before it leaves it).
         psql('DELETE FROM "MemberIsolation" WHERE sub IN (' + ",".join(f"'{value}'" for value in cls.ids.values()) + ");")
@@ -624,8 +624,8 @@ class SessionEndLive(unittest.TestCase):
         finally:
             self.stack.set_member_rights(self.ids["A"], enabled=True)
 
-    def test_10_a_member_disabled_at_the_provider_gets_nothing_from_a_live_provider_session(self):
-        """Core: two retained browser credentials are refused by DB suspension while their provider SSO stays alive."""
+    def test_10_db_suspension_refuses_both_browsers_while_provider_sso_stays_alive(self):
+        """SE-10 / D621 core: DB suspension refuses both browsers while their provider remains enabled and SSO stays alive."""
         first, page1 = self.profile()
         second, page2 = self.profile()
         self.sign_in(page1, "A")
@@ -655,8 +655,8 @@ class SessionEndLive(unittest.TestCase):
     def activate(self, who: str):
         return self.admin_sets_enabled(who, True)
 
-    def test_11_an_isolation_ends_each_provider_session_by_its_id_and_the_next_sso_given_that_id_lives(self):
-        """C10/D598: explicit Log out ends its own sid; the next person's SSO with that sid survives."""
+    def test_11_explicit_logout_ends_its_provider_session_and_the_next_same_sid_sso_lives(self):
+        """SE-11 / C10/D598: explicit Log out ends its own sid; the next person's SSO with that sid survives."""
         context, page = self.profile()
         spare = context.new_page()
         spare.goto(self.stack.proxy + "/api/auth/login")
