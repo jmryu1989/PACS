@@ -1083,7 +1083,10 @@ test('TEST-F-07 incident_scope: not-a-leak follow-up and immediate MOHW notice r
   const facts = incidentFacts({ status: 'not-a-leak', determinationAt: '2026-10-11T02:00:00.000Z',
     priorPossibleNotice: { noticeId: 'notice-1', sentAt: '2026-10-09T04:00:00.000Z' },
     medicalIncident: { occurredAt: '2026-10-09T00:00:00.000Z', discoveredAt: '2026-10-09T02:00:00.000Z' } });
-  const result = F.planIncidentResponse(auditor, scope, facts);
+  const previous = F.planIncidentResponse(auditor, scope, incidentFacts(), { asOf: facts.priorPossibleNotice.sentAt, notices: [
+    { kind: 'possible-leak', triggeredAt: facts.awarenessAt, ...facts.priorPossibleNotice },
+  ] });
+  const result = F.planIncidentResponse(auditor, scope, facts, { previous });
   assert.deepEqual(result.obligations.map(n => [n.kind, n.recipient, n.timing, n.dueAt, n.status]), [
     ['possible-leak', 'all-possibly-affected-subjects', 'without-delay-within-72-hours', '2026-10-12T02:00:00.000Z', 'met'],
     ['not-a-leak', 'previously-notified-subjects', 'immediate', '2026-10-11T02:00:00.000Z', 'pending'],
@@ -1106,7 +1109,9 @@ test('TEST-F-07 incident_scope: a late no-breach verdict permanently retains the
   assert.deepEqual([missed.triggeredAt, missed.dueAt, missed.notice], [facts.awarenessAt, '2026-10-12T02:00:00.000Z', null]);
   assert.deepEqual(missed.basis, ['privacy:34.2', 'privacy-decree:39-2', 'privacy-decree:39-3.1']);
   const lateNotice = { noticeId: 'late-notice', sentAt: '2026-10-14T02:00:00.000Z' };
-  const next = F.planIncidentResponse(auditor, scope, { ...facts, priorPossibleNotice: lateNotice }, { previous: result });
+  const next = F.planIncidentResponse(auditor, scope, facts, { previous: result, notices: [
+    { kind: 'possible-leak', triggeredAt: facts.awarenessAt, ...lateNotice },
+  ] });
   assert.equal(next.obligations[0].status, 'missed', 'a late notice cannot repair the missed deadline');
   assert.deepEqual(next.obligations[0].notice, lateNotice);
   const retrospect = F.planIncidentResponse(auditor, scope, facts, { previous: result, notices: [
@@ -1115,7 +1120,7 @@ test('TEST-F-07 incident_scope: a late no-breach verdict permanently retains the
   assert.equal(retrospect.obligations[0].status, 'missed', 'a recorded missed status is never relabelled by subsequently supplied evidence');
   const later = F.planIncidentResponse(auditor, scope, { ...facts, determinationAt: '2026-10-20T02:00:00.000Z' }, { previous: next });
   assert.deepEqual(later.obligations[0], next.obligations[0]);
-  assert.equal(later.obligations.find(o => o.kind === 'not-a-leak').status, 'missed', 'follow-up notice history is retained too');
+  assert.equal(later.obligations.some(o => o.kind === 'not-a-leak'), false, 'missed is not a met possibility notice');
   assert.deepEqual(facts, before);
 });
 
@@ -1136,7 +1141,9 @@ test('TEST-F-07 incident_scope: a no-breach verdict before the deadline makes th
 test('TEST-F-07 incident_scope: met notices and prior confirmed obligations remain bound across a later verdict', async () => {
   const { auditor, scope } = await incidentForResponse();
   const notice = { noticeId: 'on-time', sentAt: '2026-10-09T02:30:00.000Z' };
-  const initial = F.planIncidentResponse(auditor, scope, incidentFacts({ priorPossibleNotice: notice }));
+  const initial = F.planIncidentResponse(auditor, scope, incidentFacts(), { notices: [
+    { kind: 'possible-leak', triggeredAt: incidentFacts().awarenessAt, ...notice },
+  ] });
   assert.equal(initial.obligations[0].status, 'met');
   assert.deepEqual(initial.obligations[0].notice, notice);
   const facts = incidentFacts({ status: 'confirmed', determinationAt: '2026-10-10T02:00:00.000Z', detailsComplete: true,
@@ -1148,10 +1155,84 @@ test('TEST-F-07 incident_scope: met notices and prior confirmed obligations rema
   const final = F.planIncidentResponse(auditor, scope, finalFacts, { previous: confirmed });
   assert.deepEqual(final.obligations.map(o => [o.kind, o.status]),
     [['possible-leak', 'met'], ['confirmed-leak', 'met'], ['pipc-kisa-report', 'missed'], ['not-a-leak', 'pending']]);
+  const later = F.planIncidentResponse(auditor, scope, finalFacts, { previous: final, asOf: '2026-10-20T02:00:00.000Z' });
+  assert.equal(later.obligations.find(o => o.kind === 'not-a-leak').status, 'missed', 'follow-up notice history is retained too');
   refused(() => F.planIncidentResponse(auditor, scope, { ...finalFacts, incidentId: 'other' }, { previous: final }),
     'IncidentResponseRefused', 'another incident cannot inherit this history');
   refused(() => F.planIncidentResponse(auditor, scope, facts, { previous: final }),
     'IncidentResponseRefused', 'history cannot move backwards');
+});
+
+test('TEST-F-07 incident_scope: stored met possibility notice automatically requires no-breach follow-up without an input flag', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const notice = { kind: 'possible-leak', triggeredAt: incidentFacts().awarenessAt,
+    noticeId: 'synthetic-notice', sentAt: '2026-10-09T02:30:00.000Z' };
+  const previous = F.planIncidentResponse(auditor, scope, incidentFacts(), { notices: [notice] });
+  const facts = incidentFacts({ status: 'not-a-leak', determinationAt: '2026-10-11T02:00:00.000Z' });
+  delete facts.priorPossibleNotice;
+  const before = clone({ facts, previous });
+  const result = F.planIncidentResponse(auditor, scope, facts, { previous });
+  const followup = result.obligations.find(o => o.kind === 'not-a-leak');
+  assert.ok(followup, 'M-F-R3-001: stored met notice requires follow-up without a caller flag');
+  assert.deepEqual([followup.recipient, followup.triggeredAt, followup.dueAt, followup.timing, followup.status, followup.notice],
+    ['previously-notified-subjects', facts.determinationAt, facts.determinationAt, 'immediate', 'pending', null]);
+  assert.deepEqual(followup.requiredFields, ['no-leak-confirmed', 'prior-possible-notice-reference']);
+  assert.deepEqual(followup.basis, ['privacy-decree:39-3.3']);
+  assert.deepEqual(result.obligations[0], previous.obligations[0]);
+  assert.deepEqual({ facts, previous }, before);
+});
+
+test('TEST-F-07 incident_scope: contradictory prior notice assertions refuse without producing or changing a plan', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const notice = { noticeId: 'synthetic-notice', sentAt: '2026-10-09T02:30:00.000Z' };
+  const previous = F.planIncidentResponse(auditor, scope, incidentFacts(), { notices: [
+    { kind: 'possible-leak', triggeredAt: incidentFacts().awarenessAt, ...notice },
+  ] });
+  const facts = incidentFacts({ status: 'not-a-leak', determinationAt: '2026-10-11T02:00:00.000Z' });
+  for (const assertion of [null, { ...notice, noticeId: 'other' }, { ...notice, sentAt: '2026-10-09T02:40:00.000Z' }]) {
+    const input = { ...facts, priorPossibleNotice: assertion }, before = clone({ input, previous });
+    let produced = null;
+    refused(() => { produced = F.planIncidentResponse(auditor, scope, input, { previous }); },
+      'IncidentResponseRefused', 'a caller cannot contradict the recorded notice');
+    assert.equal(produced, null);
+    assert.deepEqual({ input, previous }, before);
+  }
+  const claimed = { ...facts, priorPossibleNotice: notice }, before = clone(claimed);
+  let produced = null;
+  refused(() => { produced = F.planIncidentResponse(auditor, scope, claimed); },
+    'IncidentResponseRefused', 'a caller notice assertion cannot create notice history');
+  assert.equal(produced, null);
+  assert.deepEqual(claimed, before);
+  const matching = F.planIncidentResponse(auditor, scope, claimed, { previous });
+  assert.equal(matching.obligations.find(o => o.kind === 'not-a-leak').status, 'pending');
+});
+
+test('TEST-F-07 incident_scope: no prior met notice leaves the no-breach path without a follow-up obligation', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const pending = F.planIncidentResponse(auditor, scope, incidentFacts());
+  const facts = incidentFacts({ status: 'not-a-leak', determinationAt: '2026-10-11T02:00:00.000Z' });
+  for (const previous of [undefined, pending]) {
+    for (const omit of [false, true]) {
+      const input = clone(facts);
+      if (omit) delete input.priorPossibleNotice;
+      const before = clone({ input, previous });
+      const result = F.planIncidentResponse(auditor, scope, input, { previous });
+      assert.deepEqual(result.obligations.map(o => [o.kind, o.status, o.notice]), [['possible-leak', 'moot', null]]);
+      assert.deepEqual({ input, previous }, before);
+    }
+  }
+});
+
+test('TEST-F-05 followup: a null inspection step gives a typed refusal and leaves the cycle unchanged', () => {
+  const inspector = authorityFor('r3-inspector'), cycle = reportedCycle([]), before = clone(cycle);
+  let produced = null;
+  refused(() => { produced = F.recordInspectionStep(inspector, cycle, null); },
+    'InspectionStepRefused', 'M-F-R3-002: null step returns the typed refusal');
+  assert.equal(produced, null);
+  assert.deepEqual(cycle, before);
+  const next = F.recordInspectionStep(inspector, cycle, { kind: 'reviewed', at: '2026-11-02T01:00:00.000Z',
+    conclusion: 'no-anomaly', note: 'review after refused input' });
+  assert.equal(F.inspectionStatus(next).state, 'ready-to-close');
 });
 
 function resolvedInspection() {

@@ -509,7 +509,8 @@ export interface IncidentResponseFacts {
   incidentId: string; awarenessAt: string; determinationAt: string;
   status: 'possible' | 'confirmed' | 'not-a-leak';
   possibleGround: 'illegal-access-unidentifiable' | 'other-subjects-at-risk' | null;
-  priorPossibleNotice: { noticeId: string; sentAt: string } | null;
+  /** Optional consistency assertion only; notice state comes from the preceding plan's obligation history. */
+  priorPossibleNotice?: { noticeId: string; sentAt: string } | null;
   detailsComplete: boolean; newlyConfirmedAt: string | null;
   reportTriggers: readonly ('1000-subjects' | 'sensitive-or-unique' | 'external-illegal-access')[];
   medicalIncident: { occurredAt: string; discoveredAt: string } | null;
@@ -542,7 +543,8 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
   if (!incidentScopes.has(scope)) refuse('IncidentScopeRequired');
   if (scope.institutionId !== authority.institutionId) refuse('AuditScopeNotGranted');
   const f = guarded('IncidentResponseRefused', () => {
-    const v = object(input, ['incidentId', 'awarenessAt', 'determinationAt', 'status', 'possibleGround', 'priorPossibleNotice',
+    const hasNoticeAssertion = input !== null && typeof input === 'object' && Object.prototype.hasOwnProperty.call(input, 'priorPossibleNotice');
+    const v = object(input, ['incidentId', 'awarenessAt', 'determinationAt', 'status', 'possibleGround', ...(hasNoticeAssertion ? ['priorPossibleNotice'] : []),
       'detailsComplete', 'newlyConfirmedAt', 'reportTriggers', 'medicalIncident']);
     string(v.incidentId); utc(v.awarenessAt); utc(v.determinationAt);
     choice(v.status, ['possible', 'confirmed', 'not-a-leak']);
@@ -550,7 +552,7 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
     if (v.possibleGround !== null) choice(v.possibleGround, ['illegal-access-unidentifiable', 'other-subjects-at-risk']);
     if (v.status === 'possible' && (v.possibleGround === null ||
         (v.possibleGround === 'illegal-access-unidentifiable' && scope.subjectsIdentifiable))) throw new Error('Possible-leak ground required');
-    if (v.priorPossibleNotice !== null) {
+    if (hasNoticeAssertion && v.priorPossibleNotice !== null) {
       const n = object(v.priorPossibleNotice, ['noticeId', 'sentAt']); string(n.noticeId); utc(n.sentAt);
       if (n.sentAt < v.awarenessAt || n.sentAt > v.determinationAt || v.possibleGround === null) throw new Error('Notice outside investigation');
     }
@@ -570,6 +572,10 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
         previous.institutionId !== authority.institutionId || previous.awarenessAt !== f.awarenessAt ||
         previous.asOf > asOf || previous.determinationAt > f.determinationAt))) refuse('IncidentResponseRefused');
   const obligations: IncidentObligation[] = (previous?.obligations ?? []).map(o => ({ ...o }));
+  const priorPossibleNotice = obligations.find(o => o.kind === 'possible-leak' && o.status === 'met' && o.notice !== null)?.notice ?? null;
+  if (f.priorPossibleNotice !== undefined && (f.priorPossibleNotice === null ? priorPossibleNotice !== null :
+      priorPossibleNotice === null || f.priorPossibleNotice.noticeId !== priorPossibleNotice.noticeId ||
+      f.priorPossibleNotice.sentAt !== priorPossibleNotice.sentAt)) refuse('IncidentResponseRefused');
   const hours72 = (at: string) => new Date(Date.parse(at) + 72 * 3_600_000).toISOString();
   const add = (kind: IncidentObligation['kind'], recipient: IncidentObligation['recipient'], dueAt: string,
     timing: IncidentObligation['timing'], requiredFields: readonly string[], basis: readonly string[]) => {
@@ -586,7 +592,7 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
   if (f.status === 'confirmed') {
     // Confirmation within the possibility window replaces that notice without restarting its deadline (39-3.2).
     const confirmationDue = hours72(f.determinationAt);
-    const dueAt = f.possibleGround !== null && f.priorPossibleNotice === null && f.determinationAt <= hours72(f.awarenessAt)
+    const dueAt = f.possibleGround !== null && priorPossibleNotice === null && f.determinationAt <= hours72(f.awarenessAt)
       ? hours72(f.awarenessAt) : confirmationDue;
     add(f.detailsComplete ? 'confirmed-leak' : 'confirmed-priority', 'affected-subjects', dueAt, 'without-delay-within-72-hours',
       f.detailsComplete ? LEAK_NOTICE_FIELDS : ['leak-confirmed', 'facts-known-so-far', ...LEAK_NOTICE_FIELDS.slice(2)],
@@ -600,7 +606,7 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
       if (f.newlyConfirmedAt !== null) add('pipc-kisa-additional', 'PIPC-or-KISA', f.newlyConfirmedAt, 'immediate',
         ['newly-confirmed-facts'], ['privacy-decree:40.2']);
     }
-  } else if (f.status === 'not-a-leak' && f.priorPossibleNotice !== null) {
+  } else if (f.status === 'not-a-leak' && priorPossibleNotice !== null) {
     add('not-a-leak', 'previously-notified-subjects', f.determinationAt, 'immediate',
       ['no-leak-confirmed', 'prior-possible-notice-reference'], ['privacy-decree:39-3.3']);
   }
@@ -608,8 +614,7 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
     ['institution-name', 'incident-time', 'damage-details', 'technical-support-request'], ['medical:23-3.1', 'medical-rules:16-2.1']);
   const notices = guarded('IncidentResponseRefused', () => {
     if (history.notices !== undefined && !Array.isArray(history.notices)) throw new Error('Notice list required');
-    return [...(history.notices ?? []), ...(f.priorPossibleNotice ?
-      [{ kind: 'possible-leak' as const, triggeredAt: f.awarenessAt, ...f.priorPossibleNotice }] : [])].map(input => {
+    return (history.notices ?? []).map(input => {
       const n = object(input, ['kind', 'triggeredAt', 'noticeId', 'sentAt']);
       string(n.noticeId); utc(n.triggeredAt); utc(n.sentAt);
       if (!obligations.some(o => o.kind === n.kind && o.triggeredAt === n.triggeredAt) ||
@@ -1166,6 +1171,7 @@ export function recordInspectionStep(authority: AuditAuthority, cycle: Inspectio
   if (cycle?.institutionId !== authority.institutionId) refuse('AuditScopeNotGranted');
   const before = inspectionStatus(cycle);
   if (before.state === 'closed') refuse('InspectionClosed');
+  guarded('InspectionStepRefused', () => object(step, Object.keys(step ?? {})));
   if (step?.kind === 'report-generated' || (step && Object.prototype.hasOwnProperty.call(step, 'by'))) refuse('InspectionStepRefused');
   if (before.state === 'awaiting-report') refuse('InspectionReportRequired');
   const events = [...cycle.events];

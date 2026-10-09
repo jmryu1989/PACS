@@ -197,7 +197,23 @@ MUTANTS += [
         "expect": "M-F-R2-003-time: contradictory signature refuses the package",
     },
 ]
-# The exact round-1 selection including repair round 2, written by hand (never generated from a run). The
+MUTANTS += [
+    {
+        "id": "M-F-R3-001", "title": "trust the input notice flag instead of recorded obligation history", "file": "contract.ts",
+        "old": "  const priorPossibleNotice = obligations.find(o => o.kind === 'possible-leak' && o.status === 'met' && o.notice !== null)?.notice ?? null;\n",
+        "new": "  const priorPossibleNotice = f.priorPossibleNotice ?? null;\n",
+        "case": "TEST-F-07 incident_scope: stored met possibility notice automatically requires no-breach follow-up without an input flag",
+        "expect": "M-F-R3-001: stored met notice requires follow-up without a caller flag",
+    },
+    {
+        "id": "M-F-R3-002", "title": "read a null inspection step before validating it", "file": "contract.ts",
+        "old": "  guarded('InspectionStepRefused', () => object(step, Object.keys(step ?? {})));\n",
+        "new": "",
+        "case": "TEST-F-05 followup: a null inspection step gives a typed refusal and leaves the cycle unchanged",
+        "expect": "M-F-R3-002: null step returns the typed refusal",
+    },
+]
+# The exact round-1 selection including repair round 3, written by hand (never generated from a run). The
 # baseline must collect exactly these cases, each once, all passing; R2 moves the declaration into emr/units/f.json.
 DECLARED_CASES = [
     "TEST-F-01 roster_scope: a designated auditor gets exactly the granted scopes and a general admin without a grant gets none",
@@ -251,6 +267,10 @@ DECLARED_CASES = [
     "TEST-F-03 lawful_issue: signature content hash must equal the stored fixed version",
     "TEST-F-03 lawful_issue: signature signed-at time must equal the stored fixed version",
     "TEST-F-03 lawful_issue: signature predecessor hash must equal the stored fixed version",
+    "TEST-F-07 incident_scope: stored met possibility notice automatically requires no-breach follow-up without an input flag",
+    "TEST-F-07 incident_scope: contradictory prior notice assertions refuse without producing or changing a plan",
+    "TEST-F-07 incident_scope: no prior met notice leaves the no-breach path without a follow-up obligation",
+    "TEST-F-05 followup: a null inspection step gives a typed refusal and leaves the cycle unchanged",
 ]
 NOT_RUN = [
     {"id": "M-F-01-live", "status": "not_run", "reason": "the server roster check over B1 storage and the B2 caller context is round 2 "
