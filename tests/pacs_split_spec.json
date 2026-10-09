@@ -1,0 +1,4176 @@
+{
+  "schema": 1,
+  "phase": "relist",
+  "base_sha": "6ff5ecf76ccf31effa1fb766e809269c6f32e1e8",
+  "preparation_sha": "04e50ab4524d59b82444fbe765034c9fa759fa30",
+  "module_map_sha256": "6b67159af281ca8280afb1843de792bfa365f8f1aa438e3833f2b783d579fed0",
+  "service_sha256": "016505bd74cd0ab5623759cb710303482aa4764294b82acf48b9aeff09f03950",
+  "typescript": "5.9.3",
+  "targets": [
+    "api/src/pacs/values.ts",
+    "api/src/pacs/access.ts",
+    "api/src/pacs/institutions.ts",
+    "api/src/pacs/worklist.ts",
+    "api/src/pacs/dicom-gateway.ts",
+    "api/src/pacs/preferences.ts",
+    "api/src/pacs/filters.ts",
+    "api/src/pacs/study-state.ts",
+    "api/src/pacs/tech-note.ts",
+    "api/src/pacs/report-draft.ts",
+    "api/src/pacs/report-evidence.ts",
+    "api/src/pacs/report-commit.ts",
+    "api/src/pacs/hold.ts",
+    "api/src/pacs/clinician.ts",
+    "api/src/pacs/audit.ts",
+    "api/src/pacs/metrics.ts"
+  ],
+  "entries": [
+    {
+      "id": "member:constructor:Constructor",
+      "category": "member",
+      "name": "constructor",
+      "kind": "Constructor",
+      "target": "api/src/pacs.service.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "constructor",
+        "kind": "Constructor"
+      },
+      "baseline": {
+        "text_sha256": "dc0c9081a8a7af863d8a1248783e02b51e610c5bdc3a174cc58ac06e043def2f",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:institutions:PropertyDeclaration",
+      "category": "member",
+      "name": "institutions",
+      "kind": "PropertyDeclaration",
+      "target": "api/src/pacs/institutions.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "institutions",
+        "kind": "PropertyDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "40f4d9eeceacb1fc315db3cda0e6ca81163de22c122fe0607b79024ae6b7a65c",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:structureCatalogValue:PropertyDeclaration",
+      "category": "member",
+      "name": "structureCatalogValue",
+      "kind": "PropertyDeclaration",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "structureCatalogValue",
+        "kind": "PropertyDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "26397785bcb3ea703837abb4303e0ae1847d87e1103ead9507806371571fb6ff",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:structureCatalog:GetAccessor",
+      "category": "member",
+      "name": "structureCatalog",
+      "kind": "GetAccessor",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "structureCatalog",
+        "kind": "GetAccessor"
+      },
+      "baseline": {
+        "text_sha256": "01f9a81be3f22aa4fb9413ea8969392561a4e93a48258d59cf834b95b5418993",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:structureCatalog:SetAccessor",
+      "category": "member",
+      "name": "structureCatalog",
+      "kind": "SetAccessor",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "structureCatalog",
+        "kind": "SetAccessor"
+      },
+      "baseline": {
+        "text_sha256": "1b34982dc61f4374cec32d7ead45e4b36c5d589b2b3d1f7b901e6488f48e15cf",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:onModuleInit:MethodDeclaration",
+      "category": "member",
+      "name": "onModuleInit",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/institutions.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "onModuleInit",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "3e43616e1df671937a8cf0faed667daf94a1ff995efd2577d768906834cd2362",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:reloadInstitutions:MethodDeclaration",
+      "category": "member",
+      "name": "reloadInstitutions",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/institutions.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "reloadInstitutions",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "8ecd5b5713bb9601f52f3ac8951a10f1312519c88750deecc6529ae7b1876b8c",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:resolveInstitution:MethodDeclaration",
+      "category": "member",
+      "name": "resolveInstitution",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/institutions.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "resolveInstitution",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "c1b46fd64172999b14d99cf1865fde5a83a2fff26e0ae25daafbf3e3db40094e",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:instName:MethodDeclaration",
+      "category": "member",
+      "name": "instName",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/institutions.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "instName",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "40ebd904aea3ea686d663d0d372ec31c21edf37c90f9ca5273b38a2f3b0777a0",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:institutionName:MethodDeclaration",
+      "category": "member",
+      "name": "institutionName",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/institutions.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "institutionName",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "1add88a89e8fefaae5d98bb0f4e754839189f27a71ecde19621d2833a38b4ab8",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:audit:MethodDeclaration",
+      "category": "member",
+      "name": "audit",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/audit.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "audit",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "0f1249cc1f6209566e6e3f21f9c5cd0f65d5d2322d3709fedef90d944761d59c",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:visible:MethodDeclaration",
+      "category": "member",
+      "name": "visible",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/access.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "visible",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "e35cdf913acf56ef2a1c354719316800aa00f38c2d27e51f3ff06ba586146215",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:unassigned:MethodDeclaration",
+      "category": "member",
+      "name": "unassigned",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/institutions.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "unassigned",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "c2d2d34779b7dfca7c4cbcd9e71f8cd6aadd5fd23372f6b3d358ea48985e212d",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:assignInstitution:MethodDeclaration",
+      "category": "member",
+      "name": "assignInstitution",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/institutions.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "assignInstitution",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "3ef1a9bee903ba2d609b89a85435eb30eb3604ec7e829885788d090d8971fe0c",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:metricsTimeoutMs:PropertyDeclaration",
+      "category": "member",
+      "name": "metricsTimeoutMs",
+      "kind": "PropertyDeclaration",
+      "target": "api/src/pacs/metrics.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "metricsTimeoutMs",
+        "kind": "PropertyDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "61c8d8954750f408bdd2cc98731a524c8f4718c2c2ab44d971d2fe3bdbe151c9",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:metricsClock:PropertyDeclaration",
+      "category": "member",
+      "name": "metricsClock",
+      "kind": "PropertyDeclaration",
+      "target": "api/src/pacs/metrics.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "metricsClock",
+        "kind": "PropertyDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "0ba1c7c28e52dd0d06169c675264d09daf2e3c26bffc21b5fde3d603900ba2b3",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:adminMetrics:MethodDeclaration",
+      "category": "member",
+      "name": "adminMetrics",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/metrics.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "adminMetrics",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "1b72d9f68e7e7479b17ea638aae83a28a8f976a1ead2605480bae477bb2ea887",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:metricsStorage:MethodDeclaration",
+      "category": "member",
+      "name": "metricsStorage",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/metrics.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "metricsStorage",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "7e478c8d6e69e2a1b3aef104351394aa7fcb27afa4be5627b8fe5e6c1414171d",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:metricsStudies:MethodDeclaration",
+      "category": "member",
+      "name": "metricsStudies",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/metrics.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "metricsStudies",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "8ae43c8f888dfc026944ca0f6573b203c05e4e19824cea1d27e85ffeecaccfd4",
+        "sql": [
+          {
+            "receiver": "this.prisma.$queryRaw",
+            "raw": [
+              "\n        SELECT v.uid, MIN(v.at) AS \"firstApprovedAt\"\n        FROM \"ReportVersion\" v JOIN \"StudyState\" s ON s.uid = v.uid\n        WHERE v.action = 'approve' AND (s.\"institutionId\" = ",
+              " OR s.\"teleInstitutionId\" = ",
+              ")\n        GROUP BY v.uid"
+            ],
+            "cooked": [
+              "\n        SELECT v.uid, MIN(v.at) AS \"firstApprovedAt\"\n        FROM \"ReportVersion\" v JOIN \"StudyState\" s ON s.uid = v.uid\n        WHERE v.action = 'approve' AND (s.\"institutionId\" = ",
+              " OR s.\"teleInstitutionId\" = ",
+              ")\n        GROUP BY v.uid"
+            ],
+            "expressions": [
+              {
+                "expression": "me",
+                "bindings": [
+                  {
+                    "name": "me",
+                    "declarations": [
+                      {
+                        "kind": "Parameter",
+                        "text_sha256": "2d84a425a4219cd2d0a385ba3fa6cb3d0997080fde2693db97684e5ab5374f4b"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "expression": "me",
+                "bindings": [
+                  {
+                    "name": "me",
+                    "declarations": [
+                      {
+                        "kind": "Parameter",
+                        "text_sha256": "2d84a425a4219cd2d0a385ba3fa6cb3d0997080fde2693db97684e5ab5374f4b"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "member:metricsScopeHeld:MethodDeclaration",
+      "category": "member",
+      "name": "metricsScopeHeld",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/metrics.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "metricsScopeHeld",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "1f54906839d70c0d3dba81c1a40f1234d33477ebcc48f202f28d18dbe9cb3841",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:authzDicom:MethodDeclaration",
+      "category": "member",
+      "name": "authzDicom",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/dicom-gateway.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "authzDicom",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "7d03f36a64fa189b0f7a2d5a0900d67663725318621789abd79076f9a55a85aa",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:announceStudy:MethodDeclaration",
+      "category": "member",
+      "name": "announceStudy",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/dicom-gateway.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "announceStudy",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "ca534d2ef7943092034c58777952984dae896467399a2c52bc05b95233646473",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:gatewayReceipt:MethodDeclaration",
+      "category": "member",
+      "name": "gatewayReceipt",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/dicom-gateway.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "gatewayReceipt",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "853d7e651e08800b376d840161ed146e284fdee307d0189c07ba2696185bd689",
+        "sql": [
+          {
+            "receiver": "tx.$executeRaw",
+            "raw": [
+              "SET LOCAL lock_timeout = '3s'"
+            ],
+            "cooked": [
+              "SET LOCAL lock_timeout = '3s'"
+            ],
+            "expressions": []
+          },
+          {
+            "receiver": "tx.$queryRaw",
+            "raw": [
+              "SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(",
+              ", 0))"
+            ],
+            "cooked": [
+              "SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(",
+              ", 0))"
+            ],
+            "expressions": [
+              {
+                "expression": "'kin.gateway-receipt:' + uid",
+                "bindings": [
+                  {
+                    "name": "uid",
+                    "declarations": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "text_sha256": "71613586abf869687833b930041700cc3eb3bbe940a8776aee66b9c25f0bdda1"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "member:requestGatewayRetry:MethodDeclaration",
+      "category": "member",
+      "name": "requestGatewayRetry",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/dicom-gateway.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "requestGatewayRetry",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "0fe1e2a0ec3a44126f2b007a9768739b563ed4c2961dea42748afcf48d4ba2ec",
+        "sql": [
+          {
+            "receiver": "tx.$executeRaw",
+            "raw": [
+              "SET LOCAL lock_timeout = '3s'"
+            ],
+            "cooked": [
+              "SET LOCAL lock_timeout = '3s'"
+            ],
+            "expressions": []
+          },
+          {
+            "receiver": "tx.$queryRaw",
+            "raw": [
+              "SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(",
+              ", 0))"
+            ],
+            "cooked": [
+              "SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(",
+              ", 0))"
+            ],
+            "expressions": [
+              {
+                "expression": "'kin.gateway-receipt:' + uid",
+                "bindings": [
+                  {
+                    "name": "uid",
+                    "declarations": [
+                      {
+                        "kind": "Parameter",
+                        "text_sha256": "6f74805e6794bdda220794c53026fe192e09ce2a5cf8fd5578399f21cd105cc4"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "member:gatewayRetryRequests:MethodDeclaration",
+      "category": "member",
+      "name": "gatewayRetryRequests",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/dicom-gateway.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "gatewayRetryRequests",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "e87a1d27a9718048cb089daa68512b23f4a9f85986e8781d45e1968414d7c555",
+        "sql": [
+          {
+            "receiver": "this.prisma.$queryRaw",
+            "raw": [
+              "SELECT q.\"studyUid\" FROM \"GatewayRetryRequest\" q\n      JOIN \"GatewayReceipt\" r ON r.\"studyUid\" = q.\"studyUid\" AND r.epoch = q.epoch AND r.seq = q.seq\n      JOIN \"StudyState\" s ON s.uid = q.\"studyUid\"\n      WHERE q.epoch = ",
+              "::uuid AND r.phase = 'retry' AND r.\"institutionId\" = ",
+              " AND s.\"institutionId\" = ",
+              "\n      ORDER BY q.\"requestedAt\", q.\"studyUid\" LIMIT 100"
+            ],
+            "cooked": [
+              "SELECT q.\"studyUid\" FROM \"GatewayRetryRequest\" q\n      JOIN \"GatewayReceipt\" r ON r.\"studyUid\" = q.\"studyUid\" AND r.epoch = q.epoch AND r.seq = q.seq\n      JOIN \"StudyState\" s ON s.uid = q.\"studyUid\"\n      WHERE q.epoch = ",
+              "::uuid AND r.phase = 'retry' AND r.\"institutionId\" = ",
+              " AND s.\"institutionId\" = ",
+              "\n      ORDER BY q.\"requestedAt\", q.\"studyUid\" LIMIT 100"
+            ],
+            "expressions": [
+              {
+                "expression": "epoch",
+                "bindings": [
+                  {
+                    "name": "epoch",
+                    "declarations": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "text_sha256": "2f4963387f706c773e71b0613383ef6d8adc905cf3918fa423e98eb9878c351e"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "expression": "me",
+                "bindings": [
+                  {
+                    "name": "me",
+                    "declarations": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "text_sha256": "80eb5de2f4f242be192f7f702c652a261bbb1b15f98037621e4dd325d37f0f6a"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "expression": "me",
+                "bindings": [
+                  {
+                    "name": "me",
+                    "declarations": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "text_sha256": "80eb5de2f4f242be192f7f702c652a261bbb1b15f98037621e4dd325d37f0f6a"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "member:dicomLookup:MethodDeclaration",
+      "category": "member",
+      "name": "dicomLookup",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/dicom-gateway.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "dicomLookup",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "c2d9fe27daf0ce729b7f7ea4cea633afaff359995727607806929556169a575f",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:myDraft:MethodDeclaration",
+      "category": "member",
+      "name": "myDraft",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/access.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "myDraft",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "2285f27cc70e074d27b9183280332f5280634537583168201019d28053210263",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:scopeWrite:MethodDeclaration",
+      "category": "member",
+      "name": "scopeWrite",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/access.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "scopeWrite",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "b5e8f048a2351449e9181a9244b1b2c1e28121cd56b89965312d7dfa0c7a0963",
+        "sql": [
+          {
+            "receiver": "tx.$executeRaw",
+            "raw": [
+              "SET LOCAL lock_timeout = '3s'"
+            ],
+            "cooked": [
+              "SET LOCAL lock_timeout = '3s'"
+            ],
+            "expressions": []
+          }
+        ]
+      }
+    },
+    {
+      "id": "member:gate:MethodDeclaration",
+      "category": "member",
+      "name": "gate",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/access.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "gate",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "fe30f4b141e319fdec64b348a3de7570b574e2cdbbb88d2b7e5532faace3c00d",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:noteScope:MethodDeclaration",
+      "category": "member",
+      "name": "noteScope",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/tech-note.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "noteScope",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "e358aa072cc43eede0bdb09474c7eac5a026efa75d7b1e511b8af8a3b4f01025",
+        "sql": [
+          {
+            "receiver": "tx.$queryRaw",
+            "raw": [
+              "SELECT * FROM \"StudyState\" WHERE uid = ",
+              " FOR UPDATE"
+            ],
+            "cooked": [
+              "SELECT * FROM \"StudyState\" WHERE uid = ",
+              " FOR UPDATE"
+            ],
+            "expressions": [
+              {
+                "expression": "uid",
+                "bindings": [
+                  {
+                    "name": "uid",
+                    "declarations": [
+                      {
+                        "kind": "Parameter",
+                        "text_sha256": "6f74805e6794bdda220794c53026fe192e09ce2a5cf8fd5578399f21cd105cc4"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "receiver": "tx.$queryRaw",
+            "raw": [
+              "SELECT * FROM \"StudyState\" WHERE uid = ",
+              " FOR SHARE"
+            ],
+            "cooked": [
+              "SELECT * FROM \"StudyState\" WHERE uid = ",
+              " FOR SHARE"
+            ],
+            "expressions": [
+              {
+                "expression": "uid",
+                "bindings": [
+                  {
+                    "name": "uid",
+                    "declarations": [
+                      {
+                        "kind": "Parameter",
+                        "text_sha256": "6f74805e6794bdda220794c53026fe192e09ce2a5cf8fd5578399f21cd105cc4"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "member:techNote:MethodDeclaration",
+      "category": "member",
+      "name": "techNote",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/tech-note.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "techNote",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "b0b84678faa580141fc94235a66d5b1d76b263a4dc4f7f445ae85008c613ce23",
+        "sql": [
+          {
+            "receiver": "tx.$executeRaw",
+            "raw": [
+              "SET LOCAL lock_timeout = '3s'"
+            ],
+            "cooked": [
+              "SET LOCAL lock_timeout = '3s'"
+            ],
+            "expressions": []
+          }
+        ]
+      }
+    },
+    {
+      "id": "member:saveTechNote:MethodDeclaration",
+      "category": "member",
+      "name": "saveTechNote",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/tech-note.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "saveTechNote",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "7df26a59fb8e52ce1f7d58444d3b0c2cfa81f333e94cc6bde9495142989ce7e3",
+        "sql": [
+          {
+            "receiver": "tx.$executeRaw",
+            "raw": [
+              "SET LOCAL lock_timeout = '3s'"
+            ],
+            "cooked": [
+              "SET LOCAL lock_timeout = '3s'"
+            ],
+            "expressions": []
+          }
+        ]
+      }
+    },
+    {
+      "id": "member:listStudies:MethodDeclaration",
+      "category": "member",
+      "name": "listStudies",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/worklist.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "listStudies",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "fc33b6753907846c1bfd142230c60b3792b17d831fa27b8ae9f6d25f77778a80",
+        "sql": [
+          {
+            "receiver": "this.prisma.$queryRaw",
+            "raw": [
+              "\n      SELECT DISTINCT ON (n.\"studyUid\") n.\"studyUid\", n.version, (n.text <> '') AS present\n      FROM \"TechNoteRevision\" n JOIN \"StudyState\" s ON s.uid = n.\"studyUid\"\n      WHERE (s.\"institutionId\" = ",
+              " OR s.\"teleInstitutionId\" = ",
+              ")\n        AND n.\"studyUid\" IN (",
+              ")\n      ORDER BY n.\"studyUid\", n.version DESC"
+            ],
+            "cooked": [
+              "\n      SELECT DISTINCT ON (n.\"studyUid\") n.\"studyUid\", n.version, (n.text <> '') AS present\n      FROM \"TechNoteRevision\" n JOIN \"StudyState\" s ON s.uid = n.\"studyUid\"\n      WHERE (s.\"institutionId\" = ",
+              " OR s.\"teleInstitutionId\" = ",
+              ")\n        AND n.\"studyUid\" IN (",
+              ")\n      ORDER BY n.\"studyUid\", n.version DESC"
+            ],
+            "expressions": [
+              {
+                "expression": "me",
+                "bindings": [
+                  {
+                    "name": "me",
+                    "declarations": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "text_sha256": "80eb5de2f4f242be192f7f702c652a261bbb1b15f98037621e4dd325d37f0f6a"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "expression": "me",
+                "bindings": [
+                  {
+                    "name": "me",
+                    "declarations": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "text_sha256": "80eb5de2f4f242be192f7f702c652a261bbb1b15f98037621e4dd325d37f0f6a"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "expression": "Prisma.join(pageUids)",
+                "bindings": [
+                  {
+                    "name": "Prisma",
+                    "declarations": [
+                      {
+                        "kind": "ModuleDeclaration",
+                        "text_sha256": "1c17ef6d0e2a26712201153935d506315d7fc22ff6a60a745978a6910210a49c"
+                      }
+                    ]
+                  },
+                  {
+                    "name": "pageUids",
+                    "declarations": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "text_sha256": "279c3f3828e6ee25837f4202a402780bd4d470b1a69980f9afac45ff34f34cbe"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "member:notObserved:MethodDeclaration",
+      "category": "member",
+      "name": "notObserved",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/worklist.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "notObserved",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "f45e4d6d77fdc047880028cd50578a66acc467fd35e71959ccf4de7303b41d30",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:orderSide:MethodDeclaration",
+      "category": "member",
+      "name": "orderSide",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/worklist.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "orderSide",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "0bee271c6cba075faa7cde9ac8554def7b052365ec0749e034d2822f796f4192",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:orderReconciliation:MethodDeclaration",
+      "category": "member",
+      "name": "orderReconciliation",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/worklist.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "orderReconciliation",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "6b0b78cfb566226b0ccdcc5b825225d93c6095f33de2908139df0a19eb829729",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:bootstrap:MethodDeclaration",
+      "category": "member",
+      "name": "bootstrap",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/worklist.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "bootstrap",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "5a82e7b2baa3294262d71c5efe6868e461555de50ed1d95c2833fed8ba5b105f",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:prefs:MethodDeclaration",
+      "category": "member",
+      "name": "prefs",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "prefs",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "201081bab173f0d50e70b85689c978d36bc96bea580b3587159dc1ff107127ce",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:workspaceOwner:MethodDeclaration",
+      "category": "member",
+      "name": "workspaceOwner",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "workspaceOwner",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "b809f6f7c3c241ff6f3716496fd0fe600ef947425b767790438c1f52281a3e01",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:workspaceValue:MethodDeclaration",
+      "category": "member",
+      "name": "workspaceValue",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "workspaceValue",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "c3e6027a95942c0f8c895ba29c5657bc9eb449b846e2887583c86a7dafbd5b39",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:readingPreferencesResult:MethodDeclaration",
+      "category": "member",
+      "name": "readingPreferencesResult",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "readingPreferencesResult",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "1084c2250133bab5673d70b3449013144e37dba6627dc8ceb62879c5c7d1845f",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:readingPreferences:MethodDeclaration",
+      "category": "member",
+      "name": "readingPreferences",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "readingPreferences",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "1f2f75408ed1d1a4af26117ac34fdccc54e38a4f924900afbf3675f63fc827b4",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:saveReadingPreferences:MethodDeclaration",
+      "category": "member",
+      "name": "saveReadingPreferences",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "saveReadingPreferences",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "85230643ec0aa9732a461a04797b73b2df9560b2f635a96209b5bbe28f8b475e",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:siteOwner:MethodDeclaration",
+      "category": "member",
+      "name": "siteOwner",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "siteOwner",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "f1745316d9d11cfa8f32e2d3c883d2b01f7805a0e7cb7e4151ba52fac900e897",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:hangingProtocolResult:MethodDeclaration",
+      "category": "member",
+      "name": "hangingProtocolResult",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "hangingProtocolResult",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "3a46c002ceaf52bd4e814d2855f113fc358237524ae1887ead2917ecf08e6e5e",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:hangingProtocols:MethodDeclaration",
+      "category": "member",
+      "name": "hangingProtocols",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "hangingProtocols",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "a91a4f18be51873dd2ac20f370bef7387ba43e6014084c812829b2b3b6ef9055",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:hangingProtocolRequest:MethodDeclaration",
+      "category": "member",
+      "name": "hangingProtocolRequest",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "hangingProtocolRequest",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "224c56d66a2f5b0d5f7390b98845e7c4a80b316d6a0134a6154a6588e6856ca7",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:writeHangingProtocol:MethodDeclaration",
+      "category": "member",
+      "name": "writeHangingProtocol",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "writeHangingProtocol",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "c1a1833b5ea2e4d8ab2da66fb908f874ad48ac5557ce9bc1de81c8aedcbf2fbc",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:saveHangingProtocols:MethodDeclaration",
+      "category": "member",
+      "name": "saveHangingProtocols",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "saveHangingProtocols",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "bc23658af201522156e3dfdc9b199dbf21da1761105964ab36883e299323ed68",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:siteHangingProtocolResult:MethodDeclaration",
+      "category": "member",
+      "name": "siteHangingProtocolResult",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "siteHangingProtocolResult",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "007efa61cf27d8a29fef2bf7d5246d6c568125c5785b21aa20ff2932fad066e4",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:siteHangingProtocols:MethodDeclaration",
+      "category": "member",
+      "name": "siteHangingProtocols",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "siteHangingProtocols",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "8b5f399b3b6ce70e7d47329a90e0d8a0f4927122c2c8526793574bc95aee3165",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:saveSiteHangingProtocols:MethodDeclaration",
+      "category": "member",
+      "name": "saveSiteHangingProtocols",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "saveSiteHangingProtocols",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "2e2d35434ce1633b663aecfecd30581b8e96af05a4d85c8590860deba8508861",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:validShortcutBindings:MethodDeclaration",
+      "category": "member",
+      "name": "validShortcutBindings",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "validShortcutBindings",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "49e957ce85af4e96275adb7c10cd5d21b133ed9451c1d091fc2cb7d31d92a38f",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:shortcutPreferencesResult:MethodDeclaration",
+      "category": "member",
+      "name": "shortcutPreferencesResult",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "shortcutPreferencesResult",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "322f94cfb8a36b5e2b5291596347f6d082386bbd811fac891203839a84e8ef1b",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:workspaceShortcuts:MethodDeclaration",
+      "category": "member",
+      "name": "workspaceShortcuts",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "workspaceShortcuts",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "23f8b8301733311f3a40e6a4483cf4adebe5947cb501a1415c7697fc8b42b5ee",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:saveWorkspaceShortcuts:MethodDeclaration",
+      "category": "member",
+      "name": "saveWorkspaceShortcuts",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "saveWorkspaceShortcuts",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "26b9254c3d84d70799678dda9450ab91fbd127572fa346cfee01cf4d2ffe5fc7",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:appearanceResult:MethodDeclaration",
+      "category": "member",
+      "name": "appearanceResult",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "appearanceResult",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "58fe133b6ef2a691b2c7392ce2055e8df5e1619c9b414181699d88225d3737be",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:readingAppearance:MethodDeclaration",
+      "category": "member",
+      "name": "readingAppearance",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "readingAppearance",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "56c2b3ec8aefb74b9bca9bebc17bba6cc3027ad4a766bdc03ba88386efaa2044",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:saveReadingAppearance:MethodDeclaration",
+      "category": "member",
+      "name": "saveReadingAppearance",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "saveReadingAppearance",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "a2e8e54fafa3965a332ebd16ce443850889a7943f7dced702d554abe2fe653ac",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:workspaceResult:MethodDeclaration",
+      "category": "member",
+      "name": "workspaceResult",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "workspaceResult",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "413c65e2d0ccc2b67d78e3be372cf37d3631769e6bdd95111a6c6de1c869d976",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:workspaceLayout:MethodDeclaration",
+      "category": "member",
+      "name": "workspaceLayout",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "workspaceLayout",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "414533223cb218f1fb758f904c3b8f834573beded1f43f88a869fd32f07de25e",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:writeWorkspaceLayout:MethodDeclaration",
+      "category": "member",
+      "name": "writeWorkspaceLayout",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "writeWorkspaceLayout",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "c5f4fa350b12bafd8591e977f3a7221f500584a62bd4a2a8e01d97e25656328d",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:columnsResult:MethodDeclaration",
+      "category": "member",
+      "name": "columnsResult",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "columnsResult",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "2077db01060f24904810cc03376b3fa5ad249be55765121cce8c4d5e4c35aa05",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:worklistColumns:MethodDeclaration",
+      "category": "member",
+      "name": "worklistColumns",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "worklistColumns",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "b05e814283e3cd324a10034c1ab94dfd3cb9dd69191c7366acb10245a30400cc",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:writeWorklistColumns:MethodDeclaration",
+      "category": "member",
+      "name": "writeWorklistColumns",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "writeWorklistColumns",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "fe00a952eef6c24448b6d848a07964f8726a590ea53f9cfec2c5903f96158e81",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:saveFilter:MethodDeclaration",
+      "category": "member",
+      "name": "saveFilter",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/filters.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "saveFilter",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "4206b9243b54697f034083c99ff11c56e3413f4fbd76b0938ef4033ed8194a43",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:setDefaultFilter:MethodDeclaration",
+      "category": "member",
+      "name": "setDefaultFilter",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/filters.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "setDefaultFilter",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "64b55b95cf50098e3a532a824e10cedd0c9181a448493260bbfc608ad6826c01",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:deleteFilter:MethodDeclaration",
+      "category": "member",
+      "name": "deleteFilter",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/filters.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "deleteFilter",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "8194ad02ef206c00a56430bc1c4804c4d0cc9adb7a812886fcbba6cdf159562c",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:lockFilterCollection:MethodDeclaration",
+      "category": "member",
+      "name": "lockFilterCollection",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/filters.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "lockFilterCollection",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "af8738056e893019b80b3c18527c86236940dfe93b9119a53f59c296bec26e04",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:filterCollectionOwner:MethodDeclaration",
+      "category": "member",
+      "name": "filterCollectionOwner",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/filters.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "filterCollectionOwner",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "542437d769830f283a7c96eb8690a3dc643ba4c67327fff32ca2ee2bb913e23b",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:filterCollectionSnapshot:MethodDeclaration",
+      "category": "member",
+      "name": "filterCollectionSnapshot",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/filters.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "filterCollectionSnapshot",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "cb25649a40b19f11ddd2321173081bee8a1ad5ad663c207bba3a25f03552d85e",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:readFilterFolders:MethodDeclaration",
+      "category": "member",
+      "name": "readFilterFolders",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/filters.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "readFilterFolders",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "a8034ac0107e9bc719c7f6160be03dadb6ffc76fbfd58fd9bd14570e707dce4c",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:writeFilterFolders:MethodDeclaration",
+      "category": "member",
+      "name": "writeFilterFolders",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/filters.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "writeFilterFolders",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "99c19f6f80694ef8a4cf73c0a5083cb1aadf8313e4928b8eec14fe34363e7349",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:lockSharedFilters:MethodDeclaration",
+      "category": "member",
+      "name": "lockSharedFilters",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/filters.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "lockSharedFilters",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "dbd49cd654aca249a10e87e70cbd462ed4136b6ffb2f308f3ad49f5a86bbc8f2",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:sharedFilterSnapshot:MethodDeclaration",
+      "category": "member",
+      "name": "sharedFilterSnapshot",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/filters.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "sharedFilterSnapshot",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "e2523454eb76b12214bfbdc875e1917fa6afa6b5f34c2d0d95b440f6b1938040",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:readSharedFilters:MethodDeclaration",
+      "category": "member",
+      "name": "readSharedFilters",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/filters.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "readSharedFilters",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "6dc4a67a2bd0bee6b3e8d5f7a6ed88b47db9b51591beded13a797702da75ec75",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:sharedFilterRequest:MethodDeclaration",
+      "category": "member",
+      "name": "sharedFilterRequest",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/filters.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "sharedFilterRequest",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "acb3f5bf93d41df608e8909e0cdeddcd295557b97f026dbba41745c9ca205698",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:writeSharedFilters:MethodDeclaration",
+      "category": "member",
+      "name": "writeSharedFilters",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/filters.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "writeSharedFilters",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "c0f21b42f6e1174577f46a01da110bafe0bc79436dc6768c53f9bc3fa87e62a0",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:copySharedFilters:MethodDeclaration",
+      "category": "member",
+      "name": "copySharedFilters",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/filters.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "copySharedFilters",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "eef99e4560670cbb676176319d2d296695ccd7aca826642d4fba835639ca3116",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:nextTemplateOrd:MethodDeclaration",
+      "category": "member",
+      "name": "nextTemplateOrd",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "nextTemplateOrd",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "a42757995c2eede18eb490ef79c1ecbe1a085046787e134979e3d89003a573f0",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:saveTemplate:MethodDeclaration",
+      "category": "member",
+      "name": "saveTemplate",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "saveTemplate",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "78b58826637030c3d5c46a5a04d15eec1dcdb703be2f1dcebd253548c5843f04",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:deleteTemplate:MethodDeclaration",
+      "category": "member",
+      "name": "deleteTemplate",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/preferences.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "deleteTemplate",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "39322de32dac2deaa0ff25c36c63e530b13528f48a2eb3ba57ea4abf44dee5ea",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:patchState:MethodDeclaration",
+      "category": "member",
+      "name": "patchState",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/study-state.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "patchState",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "72833c50b00df72677725057c850982c8062b8f2ddff3ea0164b1e774f6501be",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:reportDraftRules:MethodDeclaration",
+      "category": "member",
+      "name": "reportDraftRules",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-draft.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "reportDraftRules",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "6a7fa1fd51917bc0c00d8a5f83ae3a93a678fa6a24f1ba4e94ab3becbd2342ee",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:reportDraftGate:MethodDeclaration",
+      "category": "member",
+      "name": "reportDraftGate",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-draft.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "reportDraftGate",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "1ce2f4ad20d25263d215869b3a792e7ded82f0f1e9bdbe3f69577382c29eadef",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:draftTransaction:MethodDeclaration",
+      "category": "member",
+      "name": "draftTransaction",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-draft.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "draftTransaction",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "b3d068380ae38583c8a2d76edc3dbe27462555f236f71d07d2743c493d619d03",
+        "sql": [
+          {
+            "receiver": "tx.$executeRaw",
+            "raw": [
+              "SET LOCAL lock_timeout = '3s'"
+            ],
+            "cooked": [
+              "SET LOCAL lock_timeout = '3s'"
+            ],
+            "expressions": []
+          },
+          {
+            "receiver": "tx.$queryRaw",
+            "raw": [
+              "SELECT 1 AS held FROM \"AuthSession\" WHERE sid = ",
+              " FOR KEY SHARE"
+            ],
+            "cooked": [
+              "SELECT 1 AS held FROM \"AuthSession\" WHERE sid = ",
+              " FOR KEY SHARE"
+            ],
+            "expressions": [
+              {
+                "expression": "session",
+                "bindings": [
+                  {
+                    "name": "session",
+                    "declarations": [
+                      {
+                        "kind": "Parameter",
+                        "text_sha256": "db6a6e4cfcca431dede5b173dbec6f300f3784c83900fcb0284ad552b8c89550"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "receiver": "tx.$queryRaw",
+            "raw": [
+              "SELECT * FROM \"StudyState\" WHERE uid = ",
+              " FOR UPDATE"
+            ],
+            "cooked": [
+              "SELECT * FROM \"StudyState\" WHERE uid = ",
+              " FOR UPDATE"
+            ],
+            "expressions": [
+              {
+                "expression": "uid",
+                "bindings": [
+                  {
+                    "name": "uid",
+                    "declarations": [
+                      {
+                        "kind": "Parameter",
+                        "text_sha256": "6f74805e6794bdda220794c53026fe192e09ce2a5cf8fd5578399f21cd105cc4"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "member:ownDraft:MethodDeclaration",
+      "category": "member",
+      "name": "ownDraft",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-draft.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "ownDraft",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "4cb6c04bda7d1361e8d29c63a98fb6012e93762ecc3321babcbd05939e37112d",
+        "sql": [
+          {
+            "receiver": "tx.$queryRaw",
+            "raw": [
+              "\n      SELECT uid, author, findings, conclusion, recommendation, \"baseVersion\", citations, structured, revision, present, \"updatedAt\"\n      FROM \"ReportDraft\" WHERE uid = ",
+              " AND author = ",
+              " FOR UPDATE"
+            ],
+            "cooked": [
+              "\n      SELECT uid, author, findings, conclusion, recommendation, \"baseVersion\", citations, structured, revision, present, \"updatedAt\"\n      FROM \"ReportDraft\" WHERE uid = ",
+              " AND author = ",
+              " FOR UPDATE"
+            ],
+            "expressions": [
+              {
+                "expression": "uid",
+                "bindings": [
+                  {
+                    "name": "uid",
+                    "declarations": [
+                      {
+                        "kind": "Parameter",
+                        "text_sha256": "6f74805e6794bdda220794c53026fe192e09ce2a5cf8fd5578399f21cd105cc4"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "expression": "c.actor",
+                "bindings": [
+                  {
+                    "name": "c",
+                    "declarations": [
+                      {
+                        "kind": "Parameter",
+                        "text_sha256": "20ff357436d55bc69464d44170ba7aedbbb713f51d0dcbd55f59a4ece617ebe1"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "member:storeDraft:MethodDeclaration",
+      "category": "member",
+      "name": "storeDraft",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-draft.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "storeDraft",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "d41af1996b0ce6727ce59bcb151613b7e28208620674462aaee6145f4472d9b8",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:readDraft:MethodDeclaration",
+      "category": "member",
+      "name": "readDraft",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-draft.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "readDraft",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "b46d2df66acc98d47a560b0c5d564e1e34d04bd45455d4a87fc938685a4d3ec0",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:dictationGate:MethodDeclaration",
+      "category": "member",
+      "name": "dictationGate",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-draft.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "dictationGate",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "00afd8539a3baa0a58cb6215b45e8b4ccad14b01ac40cc93a272465c979d0530",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:dictationAudit:MethodDeclaration",
+      "category": "member",
+      "name": "dictationAudit",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-draft.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "dictationAudit",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "b7e13fa58bc6e153de9c6e3239ad70d80f710d11d105d7e06686edca75844bdb",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:putReport:MethodDeclaration",
+      "category": "member",
+      "name": "putReport",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-draft.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "putReport",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "7d24b8e86486f9a735d2cdca67cbbc2b104e26385b42f1307ca5da6c5c083531",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:draftCitations:MethodDeclaration",
+      "category": "member",
+      "name": "draftCitations",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "draftCitations",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "fbc67adaf2678110525b31ff3cf84f11ecfa45621f53ee73075966b0e5bf6794",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:draftStructure:MethodDeclaration",
+      "category": "member",
+      "name": "draftStructure",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "draftStructure",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "39bb8f42b92c13d192218ab238cdaa74eb34e76b8d910168f5d4952748a77e3a",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:versionStructured:MethodDeclaration",
+      "category": "member",
+      "name": "versionStructured",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "versionStructured",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "9fa19394fd264cbf1c0230b989a60ad02a0ee4b0a77fb7b4b299a8020bf7cf00",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:structureBudget:MethodDeclaration",
+      "category": "member",
+      "name": "structureBudget",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "structureBudget",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "9e4333725ad962204e218c342f9d9fcedfcc168272abca795d9609a13fb20934",
+        "sql": [
+          {
+            "receiver": "tx.$queryRaw",
+            "raw": [
+              "\n      SELECT octet_length(convert_to(",
+              "::jsonb::text, 'UTF8')) AS bytes"
+            ],
+            "cooked": [
+              "\n      SELECT octet_length(convert_to(",
+              "::jsonb::text, 'UTF8')) AS bytes"
+            ],
+            "expressions": [
+              {
+                "expression": "canonical(entries)",
+                "bindings": [
+                  {
+                    "name": "canonical",
+                    "declarations": [
+                      {
+                        "kind": "FunctionDeclaration",
+                        "text_sha256": "1526419d57a108971ea6514ba3d38cad122c34af48073208b23a9114cc4d6d03"
+                      }
+                    ]
+                  },
+                  {
+                    "name": "entries",
+                    "declarations": [
+                      {
+                        "kind": "Parameter",
+                        "text_sha256": "7b79d09929e38d040edad764e885ee8b249a6ab02d4c64f8eadeb41ab6c68a6d"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "member:structureKeys:MethodDeclaration",
+      "category": "member",
+      "name": "structureKeys",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "structureKeys",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "6c6c57786116325be9068ab0507305c16d60b5e4456256a49725ae20d5d2f0e8",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:structureInput:MethodDeclaration",
+      "category": "member",
+      "name": "structureInput",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "structureInput",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "95f7e89fd14c0b587839b05c48c0eef03eb8cb75b34cbe7e95721adb323d28ac",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:verifiedInsertion:MethodDeclaration",
+      "category": "member",
+      "name": "verifiedInsertion",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "verifiedInsertion",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "88136d8069c77712df442b5a748add9c131538a79170c7d0908fc3751583f982",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:versionCitations:MethodDeclaration",
+      "category": "member",
+      "name": "versionCitations",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "versionCitations",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "58cbc6a0a193f0b52fbbb8d175c2858c5c5aef0e435259faea3cace9d9d262db",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:citationBudget:MethodDeclaration",
+      "category": "member",
+      "name": "citationBudget",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "citationBudget",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "ec103f1308c031ca66e3c2aa2f9be8afc9128c5f4072b9f067b79b98092cb067",
+        "sql": [
+          {
+            "receiver": "tx.$queryRaw",
+            "raw": [
+              "\n      SELECT octet_length(convert_to(",
+              "::jsonb::text, 'UTF8')) AS bytes"
+            ],
+            "cooked": [
+              "\n      SELECT octet_length(convert_to(",
+              "::jsonb::text, 'UTF8')) AS bytes"
+            ],
+            "expressions": [
+              {
+                "expression": "canonical(entries)",
+                "bindings": [
+                  {
+                    "name": "canonical",
+                    "declarations": [
+                      {
+                        "kind": "FunctionDeclaration",
+                        "text_sha256": "1526419d57a108971ea6514ba3d38cad122c34af48073208b23a9114cc4d6d03"
+                      }
+                    ]
+                  },
+                  {
+                    "name": "entries",
+                    "declarations": [
+                      {
+                        "kind": "Parameter",
+                        "text_sha256": "7b79d09929e38d040edad764e885ee8b249a6ab02d4c64f8eadeb41ab6c68a6d"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "member:citationKeys:MethodDeclaration",
+      "category": "member",
+      "name": "citationKeys",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "citationKeys",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "2d5f1cbcb684454109475b3c04ae4550555454b5f16a7bb555d7aa69b2922c0e",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:citationInput:MethodDeclaration",
+      "category": "member",
+      "name": "citationInput",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "citationInput",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "5e89061e8fcfbae9075087250578c0f9abaa386579f89a6008217579982a8cb9",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:reportLimitChecked:MethodDeclaration",
+      "category": "member",
+      "name": "reportLimitChecked",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "reportLimitChecked",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "383a7193efce8720e04fe8f7229284fc7405cdddec737967859498debb564469",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:discardDraft:MethodDeclaration",
+      "category": "member",
+      "name": "discardDraft",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-draft.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "discardDraft",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "1535faefc4353ec34541eb6c319f9456ae6bc5a54839c170d585b301dcd26971",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:forceDiscardDrafts:MethodDeclaration",
+      "category": "member",
+      "name": "forceDiscardDrafts",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-draft.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "forceDiscardDrafts",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "0e23c3bbd22f4ae35cd4a121d2fadb597e76fce1d38c5374f37386bf205faa88",
+        "sql": [
+          {
+            "receiver": "tx.$queryRaw",
+            "raw": [
+              "\n        SELECT uid, author, findings, conclusion, recommendation, \"baseVersion\", citations, structured, revision, present, \"updatedAt\"\n        FROM \"ReportDraft\"\n        WHERE uid = ",
+              " AND present\n        ORDER BY author\n        FOR UPDATE\n      "
+            ],
+            "cooked": [
+              "\n        SELECT uid, author, findings, conclusion, recommendation, \"baseVersion\", citations, structured, revision, present, \"updatedAt\"\n        FROM \"ReportDraft\"\n        WHERE uid = ",
+              " AND present\n        ORDER BY author\n        FOR UPDATE\n      "
+            ],
+            "expressions": [
+              {
+                "expression": "uid",
+                "bindings": [
+                  {
+                    "name": "uid",
+                    "declarations": [
+                      {
+                        "kind": "Parameter",
+                        "text_sha256": "6f74805e6794bdda220794c53026fe192e09ce2a5cf8fd5578399f21cd105cc4"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "member:commitReport:MethodDeclaration",
+      "category": "member",
+      "name": "commitReport",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-commit.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "commitReport",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "71d1bade19d36f36aca8b2aac22ce7e65da07afc990f047c08b0873266ab536b",
+        "sql": [
+          {
+            "receiver": "tx.$queryRaw",
+            "raw": [
+              "\n          SELECT version, \"updatedBy\", findings, conclusion, recommendation\n          FROM \"Report\" WHERE uid = ",
+              " FOR UPDATE"
+            ],
+            "cooked": [
+              "\n          SELECT version, \"updatedBy\", findings, conclusion, recommendation\n          FROM \"Report\" WHERE uid = ",
+              " FOR UPDATE"
+            ],
+            "expressions": [
+              {
+                "expression": "uid",
+                "bindings": [
+                  {
+                    "name": "uid",
+                    "declarations": [
+                      {
+                        "kind": "Parameter",
+                        "text_sha256": "6f74805e6794bdda220794c53026fe192e09ce2a5cf8fd5578399f21cd105cc4"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "member:hold:MethodDeclaration",
+      "category": "member",
+      "name": "hold",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/hold.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "hold",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "570ec7d9d0c303f2ec9d0df38082ec8bc1a8cab98febe1036cf5accf5effe2c1",
+        "sql": [
+          {
+            "receiver": "tx.$executeRaw",
+            "raw": [
+              "SET LOCAL lock_timeout = '3s'"
+            ],
+            "cooked": [
+              "SET LOCAL lock_timeout = '3s'"
+            ],
+            "expressions": []
+          },
+          {
+            "receiver": "tx.$queryRaw",
+            "raw": [
+              "SELECT * FROM \"StudyState\" WHERE uid=",
+              " FOR UPDATE"
+            ],
+            "cooked": [
+              "SELECT * FROM \"StudyState\" WHERE uid=",
+              " FOR UPDATE"
+            ],
+            "expressions": [
+              {
+                "expression": "uid",
+                "bindings": [
+                  {
+                    "name": "uid",
+                    "declarations": [
+                      {
+                        "kind": "Parameter",
+                        "text_sha256": "6f74805e6794bdda220794c53026fe192e09ce2a5cf8fd5578399f21cd105cc4"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "member:release:MethodDeclaration",
+      "category": "member",
+      "name": "release",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/hold.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "release",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "3bc376e4b052953c4db5dc0aeb7ed0f152701c67301057202c0e86a06faa35ae",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:forceRelease:MethodDeclaration",
+      "category": "member",
+      "name": "forceRelease",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/hold.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "forceRelease",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "26683747de949b7146b19c69b34b7a5f7b600aa25e3bc3b8d86a529742f9169e",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:versions:MethodDeclaration",
+      "category": "member",
+      "name": "versions",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "versions",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "322104add0bf09519a836791e5dd219e454ca9da8335bf7c2afd78e74c972e49",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:reportCitations:MethodDeclaration",
+      "category": "member",
+      "name": "reportCitations",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "reportCitations",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "a56254db42de50d277b4f707b926856f9b647f94d15d5844d68df52b8236ea93",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:reportStructure:MethodDeclaration",
+      "category": "member",
+      "name": "reportStructure",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "reportStructure",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "31b2487cf477582997f33f9872b6888f483dc67e37fd2c66d0367c5815b5eaa6",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:reportVersionCitations:MethodDeclaration",
+      "category": "member",
+      "name": "reportVersionCitations",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "reportVersionCitations",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "23d9d9deb15f5cac555d1578e5508e158fc52c9288d96e7a4a8582b1d1a8b9a7",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:clinicianStudies:MethodDeclaration",
+      "category": "member",
+      "name": "clinicianStudies",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/clinician.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "clinicianStudies",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "c846242f26d9ebb1afbcf32b226f42274717213250fb9b7045950cdb8299e898",
+        "sql": [
+          {
+            "receiver": "this.prisma.$queryRaw",
+            "raw": [
+              "\n      SELECT s.uid, s.\"institutionId\", s.\"teleInstitutionId\", s.rs, s.\"repDoc\", s.confirm,\n        COALESCE(r.version, 0) AS version, v.action\n      FROM \"StudyState\" s\n      LEFT JOIN \"Report\" r ON r.uid = s.uid\n      LEFT JOIN \"ReportVersion\" v ON v.uid = r.uid AND v.version = r.version\n      WHERE s.uid IN (",
+              ")"
+            ],
+            "cooked": [
+              "\n      SELECT s.uid, s.\"institutionId\", s.\"teleInstitutionId\", s.rs, s.\"repDoc\", s.confirm,\n        COALESCE(r.version, 0) AS version, v.action\n      FROM \"StudyState\" s\n      LEFT JOIN \"Report\" r ON r.uid = s.uid\n      LEFT JOIN \"ReportVersion\" v ON v.uid = r.uid AND v.version = r.version\n      WHERE s.uid IN (",
+              ")"
+            ],
+            "expressions": [
+              {
+                "expression": "Prisma.join(uids)",
+                "bindings": [
+                  {
+                    "name": "Prisma",
+                    "declarations": [
+                      {
+                        "kind": "ModuleDeclaration",
+                        "text_sha256": "1c17ef6d0e2a26712201153935d506315d7fc22ff6a60a745978a6910210a49c"
+                      }
+                    ]
+                  },
+                  {
+                    "name": "uids",
+                    "declarations": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "text_sha256": "cad93a476f1d796d6eaaac520952b4492b3dac7d2f19085dab9ce8a5eb857ac7"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "member:clinicianReportRead:MethodDeclaration",
+      "category": "member",
+      "name": "clinicianReportRead",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/clinician.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "clinicianReportRead",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "c09e2c2bfd0a337e568a12f381c459aec6bdb0723689901b29ea96df5604da1e",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:clinicianViewerHead:MethodDeclaration",
+      "category": "member",
+      "name": "clinicianViewerHead",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/clinician.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "clinicianViewerHead",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "c5cdece5d83be8022e67798d90ffdb60af731c85bd634251ac292fe25a6e4e5e",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:clinicianCaller:MethodDeclaration",
+      "category": "member",
+      "name": "clinicianCaller",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/clinician.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "clinicianCaller",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "8132b9d73a4770c3bb46f9b53dcc0d7ba3b9ef1b6296563544843680e9677fc1",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:clinicianScope:MethodDeclaration",
+      "category": "member",
+      "name": "clinicianScope",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/clinician.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "clinicianScope",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "8558f320bfbadf65ae0f57d7fc061328c1f95b17a729d43b19ba200170d893c7",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:clinicianTimeline:MethodDeclaration",
+      "category": "member",
+      "name": "clinicianTimeline",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/clinician.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "clinicianTimeline",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "cc0a71eb32999e3f8d96bb20c29b96a8c14004bf6dc52aeee85d48d645cfd0c9",
+        "sql": [
+          {
+            "receiver": "this.prisma.$queryRaw",
+            "raw": [
+              "\n      SELECT s.uid, s.\"institutionId\", s.\"teleInstitutionId\", s.rs, s.\"repDoc\", s.confirm,\n        COALESCE(r.version, 0) AS version, v.action\n      FROM \"StudyState\" s\n      LEFT JOIN \"Report\" r ON r.uid = s.uid\n      LEFT JOIN \"ReportVersion\" v ON v.uid = r.uid AND v.version = r.version\n      WHERE s.uid IN (",
+              ")"
+            ],
+            "cooked": [
+              "\n      SELECT s.uid, s.\"institutionId\", s.\"teleInstitutionId\", s.rs, s.\"repDoc\", s.confirm,\n        COALESCE(r.version, 0) AS version, v.action\n      FROM \"StudyState\" s\n      LEFT JOIN \"Report\" r ON r.uid = s.uid\n      LEFT JOIN \"ReportVersion\" v ON v.uid = r.uid AND v.version = r.version\n      WHERE s.uid IN (",
+              ")"
+            ],
+            "expressions": [
+              {
+                "expression": "Prisma.join(uids)",
+                "bindings": [
+                  {
+                    "name": "Prisma",
+                    "declarations": [
+                      {
+                        "kind": "ModuleDeclaration",
+                        "text_sha256": "1c17ef6d0e2a26712201153935d506315d7fc22ff6a60a745978a6910210a49c"
+                      }
+                    ]
+                  },
+                  {
+                    "name": "uids",
+                    "declarations": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "text_sha256": "2cc0443637dedc82e2ce6114370bdaf6d286bbd369f6b926f5d896ff4f895d82"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "member:colleagues:MethodDeclaration",
+      "category": "member",
+      "name": "colleagues",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/institutions.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "colleagues",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "d62498970d261a4951e9c2f3a9dc6622e71aa84e6c01fabde3ba1358be4e00fd",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:match:MethodDeclaration",
+      "category": "member",
+      "name": "match",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/study-state.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "match",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "f1b20f4899d9364fa40b961d85d8f2e4c708de7b298e4f42bfbe76b9ee9621da",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:unmatch:MethodDeclaration",
+      "category": "member",
+      "name": "unmatch",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/study-state.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "unmatch",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "d80937a5f5c3ac183a10b442d572b546c5577a1e502e826c997704b4e1fb4b3d",
+        "sql": []
+      }
+    },
+    {
+      "id": "member:removeState:MethodDeclaration",
+      "category": "member",
+      "name": "removeState",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/study-state.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "removeState",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "40d2e320041acaba8872af1094e70d916fff7fc942b33a355ef6bae1e0668873",
+        "sql": [
+          {
+            "receiver": "tx.$executeRaw",
+            "raw": [
+              "SET LOCAL lock_timeout = '3s'"
+            ],
+            "cooked": [
+              "SET LOCAL lock_timeout = '3s'"
+            ],
+            "expressions": []
+          },
+          {
+            "receiver": "tx.$executeRaw",
+            "raw": [
+              "SET LOCAL statement_timeout = '5s'"
+            ],
+            "cooked": [
+              "SET LOCAL statement_timeout = '5s'"
+            ],
+            "expressions": []
+          },
+          {
+            "receiver": "tx.$queryRaw",
+            "raw": [
+              "SELECT * FROM \"StudyState\" WHERE uid = ",
+              " FOR UPDATE"
+            ],
+            "cooked": [
+              "SELECT * FROM \"StudyState\" WHERE uid = ",
+              " FOR UPDATE"
+            ],
+            "expressions": [
+              {
+                "expression": "uid",
+                "bindings": [
+                  {
+                    "name": "uid",
+                    "declarations": [
+                      {
+                        "kind": "Parameter",
+                        "text_sha256": "6f74805e6794bdda220794c53026fe192e09ce2a5cf8fd5578399f21cd105cc4"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "member:audits:MethodDeclaration",
+      "category": "member",
+      "name": "audits",
+      "kind": "MethodDeclaration",
+      "target": "api/src/pacs/audit.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": "PacsService",
+        "name": "audits",
+        "kind": "MethodDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "a0cb3514afcef1d9e9171af99023d03f7855c372e7ccf2824ef1368312fbc983",
+        "sql": [
+          {
+            "receiver": "tx.$executeRaw",
+            "raw": [
+              "SET LOCAL lock_timeout = '3s'"
+            ],
+            "cooked": [
+              "SET LOCAL lock_timeout = '3s'"
+            ],
+            "expressions": []
+          },
+          {
+            "receiver": "tx.$queryRaw",
+            "raw": [
+              "SELECT \"institutionId\", \"teleInstitutionId\" FROM \"StudyState\" WHERE uid = ",
+              " FOR SHARE"
+            ],
+            "cooked": [
+              "SELECT \"institutionId\", \"teleInstitutionId\" FROM \"StudyState\" WHERE uid = ",
+              " FOR SHARE"
+            ],
+            "expressions": [
+              {
+                "expression": "uid",
+                "bindings": [
+                  {
+                    "name": "uid",
+                    "declarations": [
+                      {
+                        "kind": "Parameter",
+                        "text_sha256": "ac17104da6d35a112c2178e715166df2c31f3eeafa78c5a4f4c6d3c7f0a0d802"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "receiver": "tx.$queryRaw",
+            "raw": [
+              "SELECT a.* FROM \"AuditLog\" a LEFT JOIN \"StudyState\" s ON s.uid = a.target\n          WHERE a.target = ",
+              "\n            AND CASE WHEN a.action = ANY(",
+              "::text[])\n                     THEN s.\"institutionId\" = ",
+              " AND (a.detail::jsonb ->> 'institution') = ",
+              "\n                     WHEN a.action = ANY(",
+              "::text[])\n                     THEN (a.detail::jsonb ->> 'institution') = ",
+              "\n                     ELSE TRUE END\n          ORDER BY a.at DESC, a.id DESC LIMIT ",
+              ""
+            ],
+            "cooked": [
+              "SELECT a.* FROM \"AuditLog\" a LEFT JOIN \"StudyState\" s ON s.uid = a.target\n          WHERE a.target = ",
+              "\n            AND CASE WHEN a.action = ANY(",
+              "::text[])\n                     THEN s.\"institutionId\" = ",
+              " AND (a.detail::jsonb ->> 'institution') = ",
+              "\n                     WHEN a.action = ANY(",
+              "::text[])\n                     THEN (a.detail::jsonb ->> 'institution') = ",
+              "\n                     ELSE TRUE END\n          ORDER BY a.at DESC, a.id DESC LIMIT ",
+              ""
+            ],
+            "expressions": [
+              {
+                "expression": "uid",
+                "bindings": [
+                  {
+                    "name": "uid",
+                    "declarations": [
+                      {
+                        "kind": "Parameter",
+                        "text_sha256": "ac17104da6d35a112c2178e715166df2c31f3eeafa78c5a4f4c6d3c7f0a0d802"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "expression": "OWNER_ONLY_AUDIT_ACTIONS",
+                "bindings": [
+                  {
+                    "name": "OWNER_ONLY_AUDIT_ACTIONS",
+                    "declarations": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "text_sha256": "28b1de1eacef0a8b0a1c083ee7ff77fa42da3b166b8b398c995e08024b03d9f3"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "expression": "me",
+                "bindings": [
+                  {
+                    "name": "me",
+                    "declarations": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "text_sha256": "80eb5de2f4f242be192f7f702c652a261bbb1b15f98037621e4dd325d37f0f6a"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "expression": "me",
+                "bindings": [
+                  {
+                    "name": "me",
+                    "declarations": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "text_sha256": "80eb5de2f4f242be192f7f702c652a261bbb1b15f98037621e4dd325d37f0f6a"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "expression": "INSTITUTION_AUDIT_ACTIONS",
+                "bindings": [
+                  {
+                    "name": "INSTITUTION_AUDIT_ACTIONS",
+                    "declarations": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "text_sha256": "0b887b925b9cd10337b27289b80a20fb60a10960bd4f15ec172dbeea8ac27d3e"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "expression": "me",
+                "bindings": [
+                  {
+                    "name": "me",
+                    "declarations": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "text_sha256": "80eb5de2f4f242be192f7f702c652a261bbb1b15f98037621e4dd325d37f0f6a"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "expression": "limit",
+                "bindings": [
+                  {
+                    "name": "limit",
+                    "declarations": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "text_sha256": "a5e3eca811aaf50431bcfd2ed5cf91d632cf5491eb2652921df7455dca7b491b"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "receiver": "this.prisma.$queryRaw",
+            "raw": [
+              "SELECT a.* FROM \"AuditLog\" a LEFT JOIN \"StudyState\" s ON s.uid = a.target\n      WHERE a.target = ANY(",
+              "::text[])\n        AND (s.\"institutionId\" = ",
+              " OR s.\"teleInstitutionId\" = ",
+              ")\n        AND CASE WHEN a.action = ANY(",
+              "::text[])\n                 THEN s.\"institutionId\" = ",
+              " AND (a.detail::jsonb ->> 'institution') = ",
+              "\n                 WHEN a.action = ANY(",
+              "::text[])\n                 THEN (a.detail::jsonb ->> 'institution') = ",
+              "\n                 ELSE TRUE END\n      ORDER BY a.at DESC, a.id DESC LIMIT ",
+              ""
+            ],
+            "cooked": [
+              "SELECT a.* FROM \"AuditLog\" a LEFT JOIN \"StudyState\" s ON s.uid = a.target\n      WHERE a.target = ANY(",
+              "::text[])\n        AND (s.\"institutionId\" = ",
+              " OR s.\"teleInstitutionId\" = ",
+              ")\n        AND CASE WHEN a.action = ANY(",
+              "::text[])\n                 THEN s.\"institutionId\" = ",
+              " AND (a.detail::jsonb ->> 'institution') = ",
+              "\n                 WHEN a.action = ANY(",
+              "::text[])\n                 THEN (a.detail::jsonb ->> 'institution') = ",
+              "\n                 ELSE TRUE END\n      ORDER BY a.at DESC, a.id DESC LIMIT ",
+              ""
+            ],
+            "expressions": [
+              {
+                "expression": "allowed",
+                "bindings": [
+                  {
+                    "name": "allowed",
+                    "declarations": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "text_sha256": "b39932caea85e117aeb45b089aa140c6c6e845ff4d0ab090519a8725474cd0ae"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "expression": "me",
+                "bindings": [
+                  {
+                    "name": "me",
+                    "declarations": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "text_sha256": "80eb5de2f4f242be192f7f702c652a261bbb1b15f98037621e4dd325d37f0f6a"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "expression": "me",
+                "bindings": [
+                  {
+                    "name": "me",
+                    "declarations": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "text_sha256": "80eb5de2f4f242be192f7f702c652a261bbb1b15f98037621e4dd325d37f0f6a"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "expression": "OWNER_ONLY_AUDIT_ACTIONS",
+                "bindings": [
+                  {
+                    "name": "OWNER_ONLY_AUDIT_ACTIONS",
+                    "declarations": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "text_sha256": "28b1de1eacef0a8b0a1c083ee7ff77fa42da3b166b8b398c995e08024b03d9f3"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "expression": "me",
+                "bindings": [
+                  {
+                    "name": "me",
+                    "declarations": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "text_sha256": "80eb5de2f4f242be192f7f702c652a261bbb1b15f98037621e4dd325d37f0f6a"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "expression": "me",
+                "bindings": [
+                  {
+                    "name": "me",
+                    "declarations": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "text_sha256": "80eb5de2f4f242be192f7f702c652a261bbb1b15f98037621e4dd325d37f0f6a"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "expression": "INSTITUTION_AUDIT_ACTIONS",
+                "bindings": [
+                  {
+                    "name": "INSTITUTION_AUDIT_ACTIONS",
+                    "declarations": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "text_sha256": "0b887b925b9cd10337b27289b80a20fb60a10960bd4f15ec172dbeea8ac27d3e"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "expression": "me",
+                "bindings": [
+                  {
+                    "name": "me",
+                    "declarations": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "text_sha256": "80eb5de2f4f242be192f7f702c652a261bbb1b15f98037621e4dd325d37f0f6a"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "expression": "limit",
+                "bindings": [
+                  {
+                    "name": "limit",
+                    "declarations": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "text_sha256": "a5e3eca811aaf50431bcfd2ed5cf91d632cf5491eb2652921df7455dca7b491b"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "declaration:Caller:InterfaceDeclaration",
+      "category": "declaration",
+      "name": "Caller",
+      "kind": "InterfaceDeclaration",
+      "target": "api/src/pacs/access.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "Caller",
+        "kind": "InterfaceDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "05efe8cbdb6b77e965258c685ad81276ba65f40489344f35cc3a51049794596d",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:need:FunctionDeclaration",
+      "category": "declaration",
+      "name": "need",
+      "kind": "FunctionDeclaration",
+      "target": "api/src/pacs/access.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "need",
+        "kind": "FunctionDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "fbe8f907e7c6556b16f6ffb3aed10bf45bbdb6b5e00e4555f5004514c87197e6",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:qidoCount:FunctionDeclaration",
+      "category": "declaration",
+      "name": "qidoCount",
+      "kind": "FunctionDeclaration",
+      "target": "api/src/pacs/values.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "qidoCount",
+        "kind": "FunctionDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "d891025f3d8cc85d164e7922cd86398a9fa89b9ca8d84bf4659e95f8a8ce788e",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:needExact:FunctionDeclaration",
+      "category": "declaration",
+      "name": "needExact",
+      "kind": "FunctionDeclaration",
+      "target": "api/src/pacs/access.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "needExact",
+        "kind": "FunctionDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "5924791d72313f4935c5e49c2544ec44301e4238b96226023e01dfaab76c323f",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:inst:FunctionDeclaration",
+      "category": "declaration",
+      "name": "inst",
+      "kind": "FunctionDeclaration",
+      "target": "api/src/pacs/access.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "inst",
+        "kind": "FunctionDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "7c9766eb1ab46c7bba25bd6bc609a2c2dc11a641eb430507e2ca906b5eb82790",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:TECHNICIAN_FIELDS:VariableDeclaration",
+      "category": "declaration",
+      "name": "TECHNICIAN_FIELDS",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/study-state.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "TECHNICIAN_FIELDS",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "e807b5b1e88577f13ea5535c98fa6ad5f610c4d5f40d3e10b63e5851b2b33827",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:OWNER_ONLY_AUDIT_ACTIONS:VariableDeclaration",
+      "category": "declaration",
+      "name": "OWNER_ONLY_AUDIT_ACTIONS",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/audit.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "OWNER_ONLY_AUDIT_ACTIONS",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "28b1de1eacef0a8b0a1c083ee7ff77fa42da3b166b8b398c995e08024b03d9f3",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:INSTITUTION_AUDIT_ACTIONS:VariableDeclaration",
+      "category": "declaration",
+      "name": "INSTITUTION_AUDIT_ACTIONS",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/audit.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "INSTITUTION_AUDIT_ACTIONS",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "0b887b925b9cd10337b27289b80a20fb60a10960bd4f15ec172dbeea8ac27d3e",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:NOTE_PUBLIC_FIELDS:VariableDeclaration",
+      "category": "declaration",
+      "name": "NOTE_PUBLIC_FIELDS",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/tech-note.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "NOTE_PUBLIC_FIELDS",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "700c6c80332812bf5c667c95466ca5ed83656effa91c736875aefd5340bb7b34",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:NOTE_READ_FIELDS:VariableDeclaration",
+      "category": "declaration",
+      "name": "NOTE_READ_FIELDS",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/tech-note.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "NOTE_READ_FIELDS",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "60c7f6d983ad23e98a82a960cc6222ba48b5aa1a0a15b2e6bca8e167c7f12a8b",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:noteForCaller:FunctionDeclaration",
+      "category": "declaration",
+      "name": "noteForCaller",
+      "kind": "FunctionDeclaration",
+      "target": "api/src/pacs/tech-note.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "noteForCaller",
+        "kind": "FunctionDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "d1434a5cc50c7e9eef947ac88aa341839a0f6fe81252da20352cf802149bda5a",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:noteTransactionError:FunctionDeclaration",
+      "category": "declaration",
+      "name": "noteTransactionError",
+      "kind": "FunctionDeclaration",
+      "target": "api/src/pacs/values.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "noteTransactionError",
+        "kind": "FunctionDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "5046029a97da784adf5f491efbeabcf7c4b81c97b5cf6bedbe2d19fec69b8322",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:parse:VariableDeclaration",
+      "category": "declaration",
+      "name": "parse",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/values.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "parse",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "09c4bbc91da3a7d8c78d0f10edefc3dcef51fbef413d743516cac0bb9fec3298",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:dump:VariableDeclaration",
+      "category": "declaration",
+      "name": "dump",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/values.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "dump",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "63857f6e37983ea0a62fd732f2413b0692f25211d85391b139109753524f3aa3",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:HOLD_TTL_MS:VariableDeclaration",
+      "category": "declaration",
+      "name": "HOLD_TTL_MS",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/values.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "HOLD_TTL_MS",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "0e2fbe30058721bf2ceab5f03ee2ec346013e7d8dd2871b4197e15dd9bd47822",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:holdAlive:VariableDeclaration",
+      "category": "declaration",
+      "name": "holdAlive",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/values.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "holdAlive",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "3d0a74c9b5ccd6c05a78e8df7a70b22b327ff77a2f13203a49fdb61aa93497e3",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:toClient:FunctionDeclaration",
+      "category": "declaration",
+      "name": "toClient",
+      "kind": "FunctionDeclaration",
+      "target": "api/src/pacs/values.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "toClient",
+        "kind": "FunctionDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "f0c732c14de81ccb7fc4197a82614626c553b56cf3133b725478fa8d82b9f388",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:DRAFT_EPOCH:VariableDeclaration",
+      "category": "declaration",
+      "name": "DRAFT_EPOCH",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/values.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "DRAFT_EPOCH",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "ce433a050a3fa167edb748c774b18ebaa156c6e813408d7ac995ee4fe5ce6244",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:DRAFT_TOKEN:VariableDeclaration",
+      "category": "declaration",
+      "name": "DRAFT_TOKEN",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/values.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "DRAFT_TOKEN",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "aaa8fb23bd617d696a625cff1c284ced26d1cb0cc830d55b8d61a4758814412d",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:DRAFT_PREPARE_MS:VariableDeclaration",
+      "category": "declaration",
+      "name": "DRAFT_PREPARE_MS",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/values.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "DRAFT_PREPARE_MS",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "6300edad2443be84be5ec225a684598cef98e183cf30b3ff68f0f0c628d9df7d",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:draftToken:VariableDeclaration",
+      "category": "declaration",
+      "name": "draftToken",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/values.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "draftToken",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "3c3b1a6bfd25327e4d97b4e1527b6666544598d05c59ec74c8d86499e975e66e",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:draftRequired:VariableDeclaration",
+      "category": "declaration",
+      "name": "draftRequired",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/values.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "draftRequired",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "f0f889da5881fc891779f8c623ca1fb89d5b61e328ec7e2d68d792c99703b3a6",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:draftInvalid:VariableDeclaration",
+      "category": "declaration",
+      "name": "draftInvalid",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/values.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "draftInvalid",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "9f7e029269e5ccce934cb4334eab547112127e4a0d2cdc4d5c976718cb68383e",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:draftConflict:VariableDeclaration",
+      "category": "declaration",
+      "name": "draftConflict",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/values.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "draftConflict",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "630a1411ebd964eb9ce77ee66161baeefec5607d4bdc252110535f755e66f25f",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:draftUnavailable:VariableDeclaration",
+      "category": "declaration",
+      "name": "draftUnavailable",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/values.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "draftUnavailable",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "a6286228d6a1e719c8fa20e55dfca1c525357de76ee444316e94d5e8ac848eaf",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:DraftOwner:InterfaceDeclaration",
+      "category": "declaration",
+      "name": "DraftOwner",
+      "kind": "InterfaceDeclaration",
+      "target": "api/src/pacs/values.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "DraftOwner",
+        "kind": "InterfaceDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "32833ccca210c285a442293ed538b62b9f188ff553df2ab3056f5a31eaa1792d",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:draftOwner:FunctionDeclaration",
+      "category": "declaration",
+      "name": "draftOwner",
+      "kind": "FunctionDeclaration",
+      "target": "api/src/pacs/values.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "draftOwner",
+        "kind": "FunctionDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "0f3f77a129352e951b8edc200c51dc530b45b2283812c18d544a0f3a2cc51e90",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:draftEpochOf:FunctionDeclaration",
+      "category": "declaration",
+      "name": "draftEpochOf",
+      "kind": "FunctionDeclaration",
+      "target": "api/src/pacs/values.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "draftEpochOf",
+        "kind": "FunctionDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "24ab75df1cdac0c951a0a07a9a2cfc899beb53242025cf95522e7df6fa4b62b7",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:draftExpected:FunctionDeclaration",
+      "category": "declaration",
+      "name": "draftExpected",
+      "kind": "FunctionDeclaration",
+      "target": "api/src/pacs/values.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "draftExpected",
+        "kind": "FunctionDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "9642007cb60e74a5e610f0f78b0243ea4a3dcf6ec062d15a8b68fc94d8a999a4",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:draftSnapshotInput:FunctionDeclaration",
+      "category": "declaration",
+      "name": "draftSnapshotInput",
+      "kind": "FunctionDeclaration",
+      "target": "api/src/pacs/values.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "draftSnapshotInput",
+        "kind": "FunctionDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "1804be759fee3e1cc92f73192d155dced7270322996ef92ed30ee1d700565d43",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:draftSnapshot:FunctionDeclaration",
+      "category": "declaration",
+      "name": "draftSnapshot",
+      "kind": "FunctionDeclaration",
+      "target": "api/src/pacs/values.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "draftSnapshot",
+        "kind": "FunctionDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "3f6112e134ca21e547bbfe02bc9e53dec0ec797156b3ae288efc3e2176082bd4",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:draftEnvelope:FunctionDeclaration",
+      "category": "declaration",
+      "name": "draftEnvelope",
+      "kind": "FunctionDeclaration",
+      "target": "api/src/pacs/values.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "draftEnvelope",
+        "kind": "FunctionDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "9381cad73f3f3d546d1dfc09717ef097654a52c230b8951292aefa4a836fc58e",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:draftTransactionError:FunctionDeclaration",
+      "category": "declaration",
+      "name": "draftTransactionError",
+      "kind": "FunctionDeclaration",
+      "target": "api/src/pacs/values.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "draftTransactionError",
+        "kind": "FunctionDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "a87f869eec834ceb57c311f793a8223a7e238c1562b0084b4962c535b965f5b2",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:draftBounded:FunctionDeclaration",
+      "category": "declaration",
+      "name": "draftBounded",
+      "kind": "FunctionDeclaration",
+      "target": "api/src/pacs/values.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "draftBounded",
+        "kind": "FunctionDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "ca5b8dcc04df4722fb6299b702b2945acbf9dc8415832086280740bce3be1814",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:citationLimit:VariableDeclaration",
+      "category": "declaration",
+      "name": "citationLimit",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "citationLimit",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "83dcd61a94c2a2253445723e6a359a511494f4c9d711ad69ee437ca8c260f749",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:CITATION_CHECKS:VariableDeclaration",
+      "category": "declaration",
+      "name": "CITATION_CHECKS",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "CITATION_CHECKS",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "8696acf5a382fcca7531c3561ef6b5bb22d5d40abf24f6c9a4dba17911fded06",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:STRUCTURE_CHECKS:VariableDeclaration",
+      "category": "declaration",
+      "name": "STRUCTURE_CHECKS",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "STRUCTURE_CHECKS",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "d221dad2f37048e2d6e2b392e10b056a2cc7ce3dfa235176949a8156e0d775ad",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:structureLimit:VariableDeclaration",
+      "category": "declaration",
+      "name": "structureLimit",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "structureLimit",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "26d33aa78b75bbda727904635f4182b2f9fed19790f8f5af4833081204f29985",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:isStructureCheck:FunctionDeclaration",
+      "category": "declaration",
+      "name": "isStructureCheck",
+      "kind": "FunctionDeclaration",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "isStructureCheck",
+        "kind": "FunctionDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "7f85eb209b8baff10f17256efdca0584b19108054c07e79f4f55aa2ddd04029a",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:isCitationCheck:FunctionDeclaration",
+      "category": "declaration",
+      "name": "isCitationCheck",
+      "kind": "FunctionDeclaration",
+      "target": "api/src/pacs/report-evidence.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "isCitationCheck",
+        "kind": "FunctionDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "9a26cf7c07fdaf9edd1a6bc7f9884dc07e1b2f1de00ce8fd2afe9148b3d2bb2d",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:STATE_FIELDS:VariableDeclaration",
+      "category": "declaration",
+      "name": "STATE_FIELDS",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/study-state.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "STATE_FIELDS",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "9cba8beb7b2ca17c678d19ada2518b6a7a9d34ddf60b0a7f87fbd477c9c097b9",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:REPORT_OWNED_FIELDS:VariableDeclaration",
+      "category": "declaration",
+      "name": "REPORT_OWNED_FIELDS",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/study-state.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "REPORT_OWNED_FIELDS",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "6f6f492e71a82835d40971c72ef33cd8a85a311332139747210d27df79e6ed95",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:TELE_BY_OWNER:VariableDeclaration",
+      "category": "declaration",
+      "name": "TELE_BY_OWNER",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/study-state.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "TELE_BY_OWNER",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "96564f26604040578284ac1db11f4f7c277e74ce98b8a96d2fb507b63bb50143",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:TELE_BY_RECEIVER:VariableDeclaration",
+      "category": "declaration",
+      "name": "TELE_BY_RECEIVER",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/study-state.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "TELE_BY_RECEIVER",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "8c4b4210b348c0e786f2882bf7ac877adb250346a95046af85bd61c5ce0c361a",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:TELE_CLOSED:VariableDeclaration",
+      "category": "declaration",
+      "name": "TELE_CLOSED",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/study-state.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "TELE_CLOSED",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "284c815932e4c9d3b5a5ea18946761456c5212da8d23b2b0afb5dc609764982d",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:TELE_NEXT:VariableDeclaration",
+      "category": "declaration",
+      "name": "TELE_NEXT",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/study-state.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "TELE_NEXT",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "2956729d2f21246dc5176be3530c5abde658fe158068a3ebfeff005356990062",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:ADMIN_METRIC_KEYS:VariableDeclaration",
+      "category": "declaration",
+      "name": "ADMIN_METRIC_KEYS",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/metrics.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "ADMIN_METRIC_KEYS",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "decdb9682eb53f2574f5402c4ebbc2cdadfe13eb3057152b35c33c9ab4002a22",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:ADMIN_METRIC_DAY_MS:VariableDeclaration",
+      "category": "declaration",
+      "name": "ADMIN_METRIC_DAY_MS",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/metrics.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "ADMIN_METRIC_DAY_MS",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "d847db506b86cc168c6f668fde425ddcb10163e2af0624c67033acfd47285aed",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:ADMIN_METRIC_WEEK_MS:VariableDeclaration",
+      "category": "declaration",
+      "name": "ADMIN_METRIC_WEEK_MS",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/metrics.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "ADMIN_METRIC_WEEK_MS",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "011c9507d4ee975d5acf0d2d7c91a85f392c0f82530ac96403232fd55d296eaf",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:ADMIN_METRIC_WAITING_RS:VariableDeclaration",
+      "category": "declaration",
+      "name": "ADMIN_METRIC_WAITING_RS",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/metrics.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "ADMIN_METRIC_WAITING_RS",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "4d88de9740f4d3de28fc5c7ba939d481288e54b7a221701a0a9ab0c4f06ed9ff",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:AdminMetricFailure:TypeAliasDeclaration",
+      "category": "declaration",
+      "name": "AdminMetricFailure",
+      "kind": "TypeAliasDeclaration",
+      "target": "api/src/pacs/metrics.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "AdminMetricFailure",
+        "kind": "TypeAliasDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "3a7bae437a8dd2ee0be2bbf8be9c51c4a953d09b81d2cac4a2c9e26761910337",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:AdminMetricStorage:InterfaceDeclaration",
+      "category": "declaration",
+      "name": "AdminMetricStorage",
+      "kind": "InterfaceDeclaration",
+      "target": "api/src/pacs/metrics.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "AdminMetricStorage",
+        "kind": "InterfaceDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "a35a015bec9b9f376f4fc766bc5fc29dfb116d67ceb96f42f84500c08248520b",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:AdminMetricStudies:InterfaceDeclaration",
+      "category": "declaration",
+      "name": "AdminMetricStudies",
+      "kind": "InterfaceDeclaration",
+      "target": "api/src/pacs/metrics.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "AdminMetricStudies",
+        "kind": "InterfaceDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "0241fcb342ba385c14a5692e9f93bbdf9d1a74c0ebf3d854da38d7076166028d",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:orthancDiskBytes:FunctionDeclaration",
+      "category": "declaration",
+      "name": "orthancDiskBytes",
+      "kind": "FunctionDeclaration",
+      "target": "api/src/pacs/metrics.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "orthancDiskBytes",
+        "kind": "FunctionDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "724693f19db5f4c0ff2ddb8f9cbc11de946c60f9fdf81cccc984e40914c25613",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:metricTime:VariableDeclaration",
+      "category": "declaration",
+      "name": "metricTime",
+      "kind": "VariableDeclaration",
+      "target": "api/src/pacs/metrics.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "metricTime",
+        "kind": "VariableDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "b3572c816cbdcbba9048ac60dea5338ee897eb32832c3ca00475b79a38407579",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:metricDurations:FunctionDeclaration",
+      "category": "declaration",
+      "name": "metricDurations",
+      "kind": "FunctionDeclaration",
+      "target": "api/src/pacs/metrics.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "metricDurations",
+        "kind": "FunctionDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "76e831cd309d96f72480946c68a2bc4256b41cbccbb5dc2faf42e008775f512b",
+        "sql": []
+      }
+    },
+    {
+      "id": "declaration:adminMetricRows:FunctionDeclaration",
+      "category": "declaration",
+      "name": "adminMetricRows",
+      "kind": "FunctionDeclaration",
+      "target": "api/src/pacs/metrics.ts",
+      "live": {
+        "file": "api/src/pacs.service.ts",
+        "owner": null,
+        "name": "adminMetricRows",
+        "kind": "FunctionDeclaration"
+      },
+      "baseline": {
+        "text_sha256": "c7ba665d4bc8fa922e353a011ef118ef49275f135b86317c75d927aa90366510",
+        "sql": []
+      }
+    }
+  ],
+  "allocation_sha256": "f94104ae6e05dfe8e4aaf0a2f8a1fda01c00c1de1177917512ab9d1674ce79ee"
+}

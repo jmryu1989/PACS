@@ -17,6 +17,11 @@ database to see:
 
 Pure: reads source files, no stack, no container, no network, no database.
 """
+# S9-U0b RELIST: PACS permission/data assertions run compiled suites through pacs_source.
+# Remaining non-PACS source checks are unchanged U0f carry-over.
+# Byte pins are confined to the explicit move/SQL provenance contract (pacs_split_contract.cjs);
+# real PostgreSQL locking and constraint behaviour still require the existing hosted suites.
+from pacs_source import assert_behaviour
 import pathlib
 import re
 import sys
@@ -29,7 +34,6 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 MIGRATION_NAME = "20260920120000_report_citations"
 MIGRATION = ROOT / "api" / "prisma" / "migrations" / MIGRATION_NAME / "migration.sql"
 SCHEMA = ROOT / "api" / "prisma" / "schema.prisma"
-SERVICE = ROOT / "api" / "src" / "pacs.service.ts"
 PURE = ROOT / "api" / "src" / "report-citation.ts"
 IMAGE_TEST = ROOT / "tests" / "production_image_test.py"
 TRANSFER = ROOT / "tests" / "ops_product_transfer_fixture.py"
@@ -57,7 +61,6 @@ class SourceCase(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.sql = MIGRATION.read_text(encoding="utf-8")
         cls.schema = SCHEMA.read_text(encoding="utf-8")
-        cls.service = SERVICE.read_text(encoding="utf-8")
         cls.pure = PURE.read_text(encoding="utf-8")
 
     def constraint(self, table: str) -> str:
@@ -110,11 +113,7 @@ class MigrationTests(SourceCase):
                 self.assertIn('octet_length(convert_to("citations"::text, \'UTF8\')) <= 65536', clause)
 
     def test_the_service_maps_exactly_these_constraint_names(self) -> None:
-        names = re.search(r"const CITATION_CHECKS = \[([^\]]*)\]", self.service)
-        self.assertIsNotNone(names, "the service no longer names the constraints it maps")
-        mapped = set(re.findall(r"'([^']+)'", names.group(1)))
-        self.assertEqual(mapped, {f"{table}_citations_check" for table in COLUMNS},
-                         "a renamed constraint turns the named 409 back into a 500")
+        assert_behaviour('report_citation_test.cjs', '^a citation CHECK')
 
     def test_the_application_limits_equal_the_database_bounds(self) -> None:
         limits = re.search(r"REPORT_CITATION_LIMITS = Object\.freeze\((\{[^}]*\})\)", self.pure)
@@ -125,18 +124,10 @@ class MigrationTests(SourceCase):
     def test_the_limit_is_measured_by_the_database(self) -> None:
         # The one place the service decides whether a citation array fits has to ask PostgreSQL,
         # because that is the only measure the CHECK agrees with.
-        budget = body_of(self.service, "private async citationBudget(")
-        self.assertIn("octet_length(convert_to(", budget)
-        self.assertIn("::jsonb::text, 'UTF8')", budget)
-        self.assertNotIn("JSON.stringify", budget)
-        self.assertNotIn("Buffer.byteLength", budget)
+        assert_behaviour('report_citation_test.cjs', '^the byte bound')
 
     def test_the_refusal_is_named_and_never_routes_an_old_tab_into_the_reload_branch(self) -> None:
-        limit = body_of(self.service, "const citationLimit = () =>")
-        self.assertIn("REPORT_CITATION_LIMIT", limit)
-        # An old tab branches on this substring and then overwrites the editor from the server.
-        self.assertNotIn("저장했습니다", limit)
-        self.assertIn("제거", limit, "the message has to name the way out")
+        assert_behaviour('report_citation_test.cjs', '^the only new refusal')
 
 
 class SchemaTests(SourceCase):
@@ -169,63 +160,37 @@ class SchemaTests(SourceCase):
 
 class LeakBoundaryTests(SourceCase):
     def test_versions_selects_its_columns_explicitly_and_omits_citations(self) -> None:
-        versions = body_of(self.service, "async versions(")
-        self.assertIn("select: {", versions, "a whole-row history response would carry citations")
-        self.assertNotIn("citations", versions)
+        assert_behaviour('report_citation_test.cjs', '^the history response')
 
     def test_to_client_is_untouched(self) -> None:
         # The 30-second poll and the bootstrap payload both go through here. Nothing about
         # citations - not the bodies and not a count - may enter it.
-        self.assertNotIn("citations", body_of(self.service, "function toClient("))
+        assert_behaviour('pacs_source_behavior_test.cjs', '^U0B-PROJECTION')
 
     def test_the_draft_projection_still_lists_its_fields(self) -> None:
-        to_client = body_of(self.service, "function toClient(")
-        for field in ("findings: d.findings", "baseVersion: d.baseVersion"):
-            self.assertIn(field, to_client)
+        assert_behaviour('pacs_source_behavior_test.cjs', '^U0B-PROJECTION')
 
     def test_the_dedicated_read_regates_finding_readability(self) -> None:
-        read = body_of(self.service, "async reportCitations(")
-        self.assertIn("canReadPrelim", read, "the report gate has to be re-applied here")
-        self.assertIn("readableFindings", read, "the narrower finding gate is the point of this read")
-        self.assertIn("RepeatableRead", read, "head and draft must come from one snapshot")
-        self.assertIn("studyAccess.prepare(c)", read,
-                      "lineage authorization has to be prepared before the transaction")
+        assert_behaviour('report_citation_test.cjs', '^(the dedicated read|the citation read|the historical read runs)')
 
     def test_the_read_asks_one_row_at_a_time(self) -> None:
         # head + draft can name 128 distinct findings while each row is individually legal. Asking
         # for all of them at once trips the 64 cap of the very query that lists the cids, so the
         # signer told to "remove some" cannot see what to remove.
-        read = body_of(self.service, "async reportCitations(")
-        self.assertNotIn("entries * 2", read, "one call for both rows can ask for 128 ids and trip the 64 cap")
-        self.assertIn("for (const ids of [findingIds(head), findingIds(mine)])", read)
+        assert_behaviour('report_citation_test.cjs', '^the over-limit state')
 
     def test_the_commit_locks_the_draft_row_it_deletes(self) -> None:
         # Reading the draft's citations unlocked and emptying the row later loses a same-author
         # insertion that lands in between - the user's own confirmed work.
         # S7-U5: the lock is `ownDraft`, the one read of the caller's row every draft mutation takes.
-        commit = body_of(self.service, "async commitReport(")
-        own = body_of(self.service, "private async ownDraft(")
-        statement = 'FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE'
-        # assertIn first: a missing lock has to read as this failure, not as a ValueError from index().
-        self.assertIn(statement, own, "the row lock the insertion also takes")
-        self.assertIn("this.ownDraft(", commit, "the commit must take that lock")
-        self.assertIn("this.ownDraft(", body_of(self.service, "async putReport("), "and so must the insertion")
-        lock = commit.index("this.ownDraft(")
-        self.assertLess(lock, commit.index("this.storeDraft("))
-        self.assertLess(commit.index('FROM "Report" WHERE uid = ${uid} FOR UPDATE'), lock,
-                        "one lock order for every path: StudyState, Report, then my draft")
+        assert_behaviour('pacs_split_test.cjs', '^U0B-STRUCT-NORMAL')
 
     def test_the_forced_release_retry_is_inside_the_same_mapping(self) -> None:
         # S3-structured-report renamed this wrapper to `reportLimitChecked` because it now maps two
         # CHECK families, not one. A CHECK raised by the release must sit INSIDE the mapping.
         # S7-U5: the release and the commit stand in line on the study row, so the version race and its retry leg are
         # gone - there is one attempt, and it is the one inside the mapping.
-        force = body_of(self.service, "async forceDiscardDrafts(")
-        self.assertIn("this.reportLimitChecked(", force)
-        self.assertNotIn("this.citationChecked(", force, "the old name must not survive anywhere")
-        self.assertNotIn("P2002", force, "no retry leg that could answer differently")
-        self.assertLess(force.index("this.reportLimitChecked("), force.index("this.draftTransaction("),
-                        "a CHECK raised by the release would otherwise surface as a 500")
+        assert_behaviour('report_citation_test.cjs', '^a forced release runs once')
     def test_both_counts_use_one_equivalence(self) -> None:
         counts = body_of(self.pure, "export function sameTextCounts(")
         self.assertIn("comparisonKey(", counts)
@@ -252,14 +217,7 @@ class LeakBoundaryTests(SourceCase):
 
     def test_the_insertion_prepares_access_outside_the_transaction(self) -> None:
         # S7-U5: the preparation is the callback `draftTransaction` runs (bounded) before it opens its transaction.
-        put = body_of(self.service, "async putReport(")
-        prepare = put.index("studyAccess.prepare(c)")
-        work = put.index("async (tx, state, audit) =>")
-        self.assertLess(put.index("this.draftTransaction("), prepare)
-        self.assertLess(prepare, work,
-                        "inside the transaction `allowed` cannot prepare and answers 409 instead")
-        runner = body_of(self.service, "private async draftTransaction<T>(")
-        self.assertLess(runner.index("await draftBounded(prepare())"), runner.index("this.prisma.$transaction("))
+        assert_behaviour('report_citation_test.cjs', '^lineage authorization')
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
