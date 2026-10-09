@@ -7,7 +7,7 @@
   const SOP = Object.freeze({ xa: '1.2.840.10008.5.1.4.1.1.12.1', enhancedXa: '1.2.840.10008.5.1.4.1.1.12.1.1' });
   const TAG = Object.freeze({
     sopClass: '00080016', sop: '00080018', study: '0020000D', series: '0020000E', frames: '00280008', pointer: '00280009',
-    frameTime: '00181063', frameTimeVector: '00181065', rows: '00280010', columns: '00280011', samples: '00280002',
+    frameTime: '00181063', frameTimeVector: '00181065', frameDelay: '00181066', rows: '00280010', columns: '00280011', samples: '00280002',
     bitsAllocated: '00280100', bitsStored: '00280101', highBit: '00280102', pixelRepresentation: '00280103',
     viewingMode: '00281090', maskSubtraction: '00286100', perFrame: '52009230', frameContent: '00209111',
     referenceTime: '00189151', acquisitionTime: '00189074', dimensionIndex: '00209222', dimensionPointer: '00209165',
@@ -31,48 +31,75 @@
   const integer = v => { const n = number(v); return Number.isSafeInteger(n) ? n : NaN; };
   const hex = v => typeof v === 'string' && /^[0-9A-Fa-f]{8}$/.test(v) ? v.toUpperCase() : null;
   const refuse = (reason, extra) => Object.freeze({ ok: false, reason, ...extra });
-  const unverified = reason => Object.freeze({ source: 'unverified', verified: false, reason, offsets: null });
+  const unverified = reason => Object.freeze({ source: 'unverified', verified: false, reason, offsets: null, basis: null });
+  // `offsets` are the playback timeline from frame 1; `basis` keeps the source's own time reference as data.
+  const verifiedTimeline = (source, offsets, basis) => Object.freeze({ source, verified: true, reason: null,
+    offsets: Object.freeze(offsets), basis: Object.freeze({ ...basis, relative: Object.freeze(basis.relative) }) });
 
   /* Cine Module C.7.6.5 with the X-Ray Image Module C.8.7.1 pointer rule: the Frame Increment Pointer names Frame Time
-     or Frame Time Vector. Relative times are kept from frame 1, so Frame Delay (a shared offset from Content Time) does
-     not change any interval. Anything missing or contradictory is Unverified, never a guessed normal speed. */
+     or Frame Time Vector. Playback intervals come from `offsets` (frame 1 = 0); the source basis keeps Frame Delay and
+     the C.7.6.5 relative time of every frame from Content Time (Frame Delay + Frame Time x (n-1), or Frame Delay + the
+     summed vector). Anything missing or contradictory is Unverified, never a guessed normal speed. */
   function cineTiming(json, frames) {
     const pointers = values(json, TAG.pointer);
     if (!Array.isArray(pointers) || pointers.length !== 1) return unverified('pointer');
+    const rawDelay = one(json, TAG.frameDelay);
+    const frameDelay = rawDelay === undefined ? 0 : number(rawDelay);
+    if (!Number.isFinite(frameDelay)) return unverified('frame-delay');
     const pointer = hex(pointers[0]);
+    let source, offsets;
     if (pointer === TAG.frameTime) {
       const step = number(one(json, TAG.frameTime));
       if (!Number.isFinite(step) || step <= 0) return unverified('frame-time');
-      const offsets = Array.from({ length: frames }, (_, i) => i * step);
+      offsets = Array.from({ length: frames }, (_, i) => i * step);
       if (!Number.isFinite(offsets[frames - 1])) return unverified('frame-time');
-      return Object.freeze({ source: 'frame-time', verified: true, reason: null, offsets: Object.freeze(offsets) });
-    }
-    if (pointer === TAG.frameTimeVector) {
+      source = 'frame-time';
+    } else if (pointer === TAG.frameTimeVector) {
       const vector = values(json, TAG.frameTimeVector);
       if (!Array.isArray(vector) || vector.length !== frames) return unverified('vector-length');
       const steps = vector.map(number);
       // The first frame always has an increment of 0; a later increment must be a real, positive time.
       if (steps[0] !== 0) return unverified('vector-first');
       if (steps.slice(1).some(n => !Number.isFinite(n) || n <= 0)) return unverified('vector-value');
-      const offsets = [0];
+      offsets = [0];
       for (let i = 1; i < frames; i++) offsets.push(offsets[i - 1] + steps[i]);
       if (!Number.isFinite(offsets[frames - 1])) return unverified('vector-value');
-      return Object.freeze({ source: 'frame-time-vector', verified: true, reason: null, offsets: Object.freeze(offsets) });
-    }
-    return unverified('pointer-target');
+      source = 'frame-time-vector';
+    } else return unverified('pointer-target');
+    const relative = offsets.map(o => frameDelay + o);
+    if (!relative.every(Number.isFinite)) return unverified('frame-delay');
+    return verifiedTimeline(source, offsets, { reference: 'content-time', frameDelay, frameDelayPresent: rawDelay !== undefined, origin: null, relative });
   }
 
-  // DT "YYYYMMDDHHMMSS[.F{1,6}][&ZZXX]" to milliseconds (fraction kept). Shorter DT values cannot order frames.
+  /* DT per PS3.5 6.2: "YYYYMMDDHHMMSS[.F{1,6}][&ZZXX]" to milliseconds, fraction kept. Ordering frames needs the full
+     date and time to the second. Hour 00-23, minute 00-59, second 00-60 (60 only as a leap second, which closes 23:59
+     UTC on 30 June or 31 December); a real calendar date; the offset has 4 digits, minutes 00-59, lies within -1200 to
+     +1400 and is never -0000. Anything else is not a time, so the timeline is Unverified. */
   function dateTime(v) {
     const m = typeof v === 'string' && v.trim().match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(?:\.(\d{1,6}))?(?:([+-])(\d{2})(\d{2}))?$/);
     if (!m) return null;
     const [y, mo, d, h, mi, s] = m.slice(1, 7).map(Number);
-    const at = Date.UTC(y, mo - 1, d, h, mi, s);
-    const check = new Date(at);
-    if (check.getUTCFullYear() !== y || check.getUTCMonth() !== mo - 1 || check.getUTCDate() !== d || h > 23 || mi > 59 || s > 59) return null;
-    const zone = m[8] ? (m[8] === '-' ? -1 : 1) * (Number(m[9]) * 60 + Number(m[10])) * 60000 : 0;
-    return { ms: at + (m[7] ? Number('0.' + m[7]) * 1000 : 0) - zone, zoned: !!m[8] };
+    if (mo < 1 || mo > 12 || d < 1 || h > 23 || mi > 59 || s > 60) return null;
+    const day = new Date(0);
+    day.setUTCFullYear(y, mo - 1, d); day.setUTCHours(h, mi, Math.min(s, 59), 0);
+    if (day.getUTCFullYear() !== y || day.getUTCMonth() !== mo - 1 || day.getUTCDate() !== d) return null;
+    let zone = 0;
+    if (m[8]) {
+      const minutes = Number(m[10]);
+      if (minutes > 59) return null;
+      zone = (m[8] === '-' ? -1 : 1) * (Number(m[9]) * 60 + minutes);
+      if (zone < -720 || zone > 840 || (m[8] === '-' && zone === 0)) return null;
+    }
+    const utc = day.getTime() - zone * 60000;
+    if (s === 60) {
+      const at = new Date(utc);
+      const end = (at.getUTCMonth() === 5 && at.getUTCDate() === 30) || (at.getUTCMonth() === 11 && at.getUTCDate() === 31);
+      if (!end || at.getUTCHours() !== 23 || at.getUTCMinutes() !== 59) return null;
+    }
+    // Whole UTC seconds and the fraction apart, so a difference keeps its microseconds.
+    return { seconds: (utc / 1000) + (s === 60 ? 1 : 0), fraction: m[7] ? Number('0.' + m[7]) * 1000 : 0, zoned: !!m[8], leap: s === 60 };
   }
+  const between = (a, b) => (a.seconds - b.seconds) * 1000 + (a.fraction - b.fraction);
 
   /* Enhanced XA (A.47-1) carries no Cine Module: top-level Frame Time / Frame Time Vector are not its timing. Its
      timing is the per-frame Frame Content: Frame Reference DateTime for every frame, else Frame Acquisition DateTime
@@ -85,9 +112,12 @@
       if (raw.some(v => v === undefined)) continue;
       const times = raw.map(dateTime);
       if (times.some(t => !t) || new Set(times.map(t => t.zoned)).size !== 1) return unverified('content-time');
-      const offsets = times.map(t => t.ms - times[0].ms);
+      // A leap second is a legal DT, but intervals across it are unknowable without a leap-second table.
+      if (times.some(t => t.leap)) return unverified('leap-second');
+      const offsets = times.map(t => between(t, times[0]));
       for (let i = 1; i < frames; i++) if (!(offsets[i] > offsets[i - 1]) || !Number.isFinite(offsets[i])) return unverified('content-order');
-      return Object.freeze({ source: 'frame-content', verified: true, reason: null, offsets: Object.freeze(offsets) });
+      return verifiedTimeline('frame-content', offsets, { reference: 'frame-content', attribute: tag, frameDelay: null,
+        frameDelayPresent: false, origin: raw[0].trim(), relative: offsets.slice() });
     }
     return unverified('content-time');
   }
@@ -124,7 +154,7 @@
     const raw = one(json, TAG.frames);
     const frames = raw === undefined ? 1 : integer(raw);
     if (!Number.isSafeInteger(frames) || frames < 1) return refuse('frames', { kind });
-    const timing = frames < 2 ? Object.freeze({ source: 'still', verified: false, reason: 'still', offsets: null })
+    const timing = frames < 2 ? Object.freeze({ source: 'still', verified: false, reason: 'still', offsets: null, basis: null })
       : kind === 'enhanced-xa' ? contentTiming(json, frames) : cineTiming(json, frames);
     // A classic XA multi-frame is a time run by its IOD (its pointer may only name Frame Time or Frame Time Vector),
     // even when the values are missing; an Enhanced XA must show its time dimension.
@@ -218,7 +248,9 @@
 
   /* One budget for every XA viewport of the document. A reservation is taken before the fetch starts and is keyed by
      the source frame, so two viewports of the same frame share one reservation and one decode. A viewport only ever
-     releases its own hold; a frame another viewport holds or pins stays. A failed load ends the reservation for all. */
+     releases its own hold; a frame another viewport holds or pins stays. A load nobody wants any more, or one that timed
+     out, is `retiring`: asking it to stop is not the same as it having stopped, so its bytes and its decode slot stay
+     counted until the load itself ends (drop), and nobody can join it meanwhile. A failed load ends the reservation. */
   function createBudget(limits = LIMITS) {
     const entries = new Map();
     let bytes = 0, loading = 0, peakBytes = 0, peakLoading = 0, peakPrepared = 0;
@@ -227,6 +259,7 @@
       if (!owner || typeof key !== 'string' || !key || !Number.isSafeInteger(size) || size <= 0) return no('invalid');
       const held = entries.get(key);
       if (held) {
+        if (held.state === 'retiring') return no('busy');
         if (held.size !== size) return no('invalid');
         held.owners.add(owner);
         return { ok: true, shared: true, state: held.state };
@@ -246,36 +279,61 @@
       held.state = 'ready'; loading--;
       return true;
     }
+    // The frame's load has ended (or a ready frame left the last viewport): only now do its bytes and slot come back.
     function drop(key) {
       const held = entries.get(key);
       if (!held) return false;
       entries.delete(key); bytes -= held.size;
-      if (held.state === 'loading') loading--;
+      if (held.state === 'loading' || held.state === 'retiring') loading--;
       return true;
     }
+    // true when this was the last holder. A frame still loading then retires; a ready frame is gone.
     function release(owner, key) {
       const held = entries.get(key);
       if (!held || !held.owners.has(owner)) return false;
       held.owners.delete(owner); held.pins.delete(owner);
       if (held.owners.size) return false;
+      if (held.state === 'loading') { held.state = 'retiring'; return true; }
       return drop(key);
+    }
+    // A timed-out load: every holder is let go at once, the reservation stays until the load ends.
+    function retire(key) {
+      const held = entries.get(key);
+      if (!held || held.state === 'ready') return false;
+      held.owners.clear(); held.pins.clear(); held.state = 'retiring';
+      return true;
     }
     function pin(owner, key) { const held = entries.get(key); if (!held?.owners.has(owner)) return false; held.pins.add(owner); return true; }
     function unpin(owner, key) { const held = entries.get(key); return !!held && held.pins.delete(owner); }
     const holds = (owner, key) => !!entries.get(key)?.owners.has(owner);
     const pinned = key => (entries.get(key)?.pins.size || 0) > 0;
     const state = key => entries.get(key)?.state || null;
-    const snapshot = () => ({ bytes, loading, prepared: entries.size, peakBytes, peakLoading, peakPrepared, limit: limits.bytes });
-    return Object.freeze({ reserve, ready, drop, release, pin, unpin, holds, pinned, state, snapshot, limits });
+    const snapshot = () => ({ bytes, loading, prepared: entries.size, retiring: [...entries.values()].filter(e => e.state === 'retiring').length,
+      peakBytes, peakLoading, peakPrepared, limit: limits.bytes, decodes: limits.decodes });
+    return Object.freeze({ reserve, ready, drop, release, retire, pin, unpin, holds, pinned, state, snapshot, limits });
   }
 
-  /* An opening is the account, the institution, the object and the opening sequence. Another account or no session
-     ends playback; the same object opened again (A -> B -> A) is a new opening, so the old one's answers are stale. */
+  /* An opening is the account, the institution, the object (Study/Series/SOP) and the opening sequence; when the host
+     also gives a login session, that too. Each must be present: a missing field never matches by being equally missing.
+     Another account, another session or no session ends playback; the same object opened again (A -> B -> A) is a new
+     opening, so the old one's answers are stale. */
+  const complete = o => !!o && typeof o === 'object' && typeof o.account === 'string' && o.account !== '' &&
+    typeof o.institution === 'string' && o.institution !== '' && [o.study, o.series, o.sop].every(uid) &&
+    (Number.isSafeInteger(o.sequence) || (typeof o.sequence === 'string' && o.sequence !== ''));
   function sameOpening(opened, now) {
-    if (!now || typeof now !== 'object') return 'ended';
+    if (!complete(opened) || !complete(now)) return 'ended';
     if (now.account !== opened.account || now.institution !== opened.institution) return 'ended';
+    if (opened.session !== undefined && now.session !== opened.session) return 'ended';
     if (now.study !== opened.study || now.series !== opened.series || now.sop !== opened.sop || now.sequence !== opened.sequence) return 'stale';
     return 'current';
+  }
+
+  // The opening the host made must be the object the source will supply, before anything is fetched or drawn.
+  function openingMatches(key, d) {
+    if (!complete(key)) return Object.freeze({ ok: false, reason: 'opening' });
+    if (!d?.ok) return Object.freeze({ ok: false, reason: d?.reason || 'metadata' });
+    if (key.study !== d.study || key.series !== d.series || key.sop !== d.sop) return Object.freeze({ ok: false, reason: 'manifest' });
+    return Object.freeze({ ok: true, reason: null });
   }
 
   /* What a failed frame means for the reader: refused access hides the image, a transfer cut/codec/timeout keeps the
@@ -300,6 +358,6 @@
   }
 
   const api = Object.freeze({ SOP, LIMITS, MODES, describe, route, frame, step, speedOptions, defaultSpeed, interval,
-    windowPlan, aheadFor, createBudget, sameOpening, failureKind, createCoverage });
+    windowPlan, aheadFor, createBudget, sameOpening, openingMatches, failureKind, createCoverage });
   if (typeof module === 'object' && module.exports) module.exports = api; else root.KinXaPlaybackModel = api;
 })(globalThis);

@@ -31,15 +31,16 @@ HARNESS = r'''<!doctype html><meta charset="utf-8">
 <div id="host0"></div><canvas id="view0" width="32" height="32"></canvas>
 <div id="host1"></div><canvas id="view1" width="32" height="32"></canvas>
 <div id="host2"></div><canvas id="view2" width="32" height="32"></canvas>
+<div id="host3"></div><canvas id="view3" width="32" height="32"></canvas>
 <script src="/worklist/hpacs-lite/xa-playback-model.js"></script>
 <script src="/worklist/hpacs-lite/viewer-xa-playback.js"></script>
 <script>
 const XA = '1.2.840.10008.5.1.4.1.1.12.1';
 const el = (vr, ...Value) => ({ vr, Value });
 window.events = []; window.views = []; window.identities = [];
-window.metadata = ({ frames = 10, sop = '2.25.13', rows = 32, cols = 32, frameTime = 20, vector, missingTime = false } = {}) => {
+window.metadata = ({ frames = 10, sop = '2.25.13', rows = 32, cols = 32, frameTime = 20, vector, missingTime = false, manifestStudy = '2.25.11' } = {}) => {
   const json = {
-    '00080016': el('UI', XA), '00080018': el('UI', sop), '0020000D': el('UI', '2.25.11'), '0020000E': el('UI', '2.25.12'),
+    '00080016': el('UI', XA), '00080018': el('UI', sop), '0020000D': el('UI', manifestStudy), '0020000E': el('UI', '2.25.12'),
     '00280008': el('IS', frames), '00280010': el('US', rows), '00280011': el('US', cols), '00280002': el('US', 1),
     '00280100': el('US', 8), '00280101': el('US', 8), '00280102': el('US', 7), '00280103': el('US', 0),
     '00280009': el('AT', vector ? '00181065' : '00181063'),
@@ -49,44 +50,73 @@ window.metadata = ({ frames = 10, sop = '2.25.13', rows = 32, cols = 32, frameTi
 };
 window.openRun = (slot, options = {}) => {
   const md = metadata(options);
-  const log = { loads: [], aborts: [], releases: [], inflight: 0, maxInflight: 0, held: new Map(), images: new Map(), failures: new Map() };
-  const hold = new Set(options.hold || []);
+  const log = { loads: [], aborts: [], releases: [], inflight: 0, maxInflight: 0, held: new Map(), images: new Map(), failures: new Map(),
+    abortPending: [], renders: new Map() };
+  const holdAll = options.hold === 'all', hold = new Set(holdAll ? [] : options.hold || []);
   const source = {
     metadata: md,
     load(index, { signal }) {
       log.loads.push(index); log.inflight++; log.maxInflight = Math.max(log.maxInflight, log.inflight);
       return new Promise((resolve, reject) => {
         let done = false;
+        // inflight counts a load until its promise settles, aborted or not: that is what still holds decoder memory.
         const settle = (ok, value) => { if (done) return; done = true; log.inflight--; (ok ? resolve : reject)(value); };
-        signal.addEventListener('abort', () => { log.aborts.push(index); settle(false, new DOMException('aborted', 'AbortError')); }, { once: true });
+        signal.addEventListener('abort', () => {
+          log.aborts.push(index);
+          const end = () => settle(false, new DOMException('aborted', 'AbortError'));
+          if (options.lateAbort) log.abortPending.push(end); else end();
+        }, { once: true });
         const image = { frame: index + 1, pixels: new Uint8Array(16).fill(index % 251) };
         log.images.set(index, image);
         const failure = log.failures.get(index);
         if (failure) { setTimeout(() => settle(false, failure()), 0); return; }
-        if (hold.has(index)) { hold.delete(index); log.held.set(index, () => settle(true, image)); return; }
+        if (holdAll || hold.has(index)) { hold.delete(index); log.held.set(index, () => settle(true, image)); return; }
         setTimeout(() => settle(true, image), options.delay || 0);
       });
     },
     release(index) { log.releases.push(index); },
   };
   const canvas = document.getElementById('view' + slot), context = canvas.getContext('2d');
-  const shown = [], covers = [];
+  const shown = [], covers = [], calls = [], renderHold = new Set(options.holdRender || []), screen = { frame: null };
+  let latest = 0;
   const viewport = {
     current: () => options.current ?? 0,
     show(index, image) {
-      context.fillStyle = 'rgb(' + (image.frame % 256) + ',0,0)'; context.fillRect(0, 0, canvas.width, canvas.height);
-      shown.push({ index, frame: image.frame, same: image === log.images.get(index), at: performance.now(), loads: log.loads.length });
-      return Promise.resolve({ index });
+      // Like the real renderer, only the latest request reaches the screen; an older render that answers later is superseded.
+      const mine = ++latest;
+      calls.push(index + 1);
+      const finish = () => {
+        if (mine === latest) {
+          context.fillStyle = 'rgb(' + (image.frame % 256) + ',0,0)'; context.fillRect(0, 0, canvas.width, canvas.height);
+          screen.frame = image.frame;
+          shown.push({ index, frame: image.frame, same: image === log.images.get(index), at: performance.now(), loads: log.loads.length });
+        }
+        return { index };
+      };
+      if (renderHold.has(index)) { renderHold.delete(index); return new Promise(resolve => log.renders.set(index, () => resolve(finish()))); }
+      return Promise.resolve(finish());
     },
     cover(on) { covers.push(on); canvas.style.visibility = on ? 'hidden' : 'visible'; },
   };
   identities[slot] = { account: 'reader', institution: 'hospital', study: '2.25.11', series: '2.25.12', sop: md['00080018'].Value[0], sequence: options.sequence || 1 };
+  const key = { ...identities[slot] };
+  if (options.currentNull) identities[slot] = null;
   const controller = KinViewerXaPlayback.mount({ host: document.getElementById('host' + slot), source, viewport,
-    identity: { key: { ...identities[slot] }, current: () => identities[slot] }, events: { emit: e => events.push({ slot, ...e }) } });
-  views[slot] = { controller, log, shown, covers };
+    identity: { key, current: () => identities[slot] }, events: { emit: e => events.push({ slot, ...e }) } });
+  views[slot] = { controller, log, shown, covers, calls, renderHold, screen, canvas };
   return true;
 };
 window.releaseHeld = (slot, index) => views[slot].log.held.get(index)();
+window.holdRender = (slot, index) => views[slot].renderHold.add(index);
+window.releaseRender = (slot, index) => views[slot].log.renders.get(index)();
+// What the reader sees, what the status line says, and the last displayed fact must name the same frame.
+window.agree = slot => {
+  // The newest panel in the host is the current mount's (a stale one may still sit before it).
+  const text = [...document.querySelectorAll('#host' + slot + ' [role=status]')].at(-1).textContent, label = text.match(/Frame (\d+|-) \//);
+  const shownEvents = events.filter(e => e.slot === slot && e.type === 'displayed');
+  return { screen: views[slot].screen.frame, label: label && label[1] !== '-' ? Number(label[1]) : null,
+    displayed: shownEvents.length ? shownEvents.at(-1).frame : null, hidden: views[slot].canvas.style.visibility === 'hidden' };
+};
 // A failing frame keeps failing (as look-ahead and when it is needed) until the test heals it.
 window.failFrame = (slot, index, status) => views[slot].log.failures.set(index, () => Object.assign(new Error('frame decode failed'), status ? { status } : {}));
 window.healFrame = (slot, index) => views[slot].log.failures.delete(index);
@@ -356,7 +386,7 @@ class XaPlaybackDomTest(unittest.TestCase):
         self.js('releaseHeld(0, 2)')
         self.tick(100)
         self.assertEqual(self.frames(), [1, 2], 'the old opening\'s late frame is not drawn into the new one')
-        self.assertEqual(self.js('views[0].covers'), [], 'a viewport that now belongs to another opening is left alone')
+        self.assertTrue(self.js('agree(0).hidden'), 'the old opening stops and hides what it showed')
         self.assertEqual(self.state()['phase'], 'stale')
         expect(self.control('Play')).to_be_disabled()
         self.open(1, frames=10, frameTime=20, hold=[3], sop='2.25.51')
@@ -367,7 +397,7 @@ class XaPlaybackDomTest(unittest.TestCase):
         self.js('releaseHeld(1, 3)')
         self.tick(100)
         self.assertEqual(self.frames(1), [1, 2, 3])
-        self.assertEqual(self.js('views[1].covers'), [True], 'an ended session hides the pixels')
+        self.assertTrue(self.js('agree(1).hidden'), 'an ended session hides the pixels')
         expect(self.status(1)).to_contain_text('Stopped')
         self.assertIn(4, self.js('views[1].log.aborts.concat(views[1].log.releases)'), 'the window of the ended opening is given back')
 
@@ -398,7 +428,7 @@ class XaPlaybackDomTest(unittest.TestCase):
         self.tick(300)
         self.assertEqual(self.frames(), [1, 2, 3])
         expect(self.status()).to_contain_text('Access Denied')
-        self.assertEqual(self.js('views[0].covers'), [True], 'refused access hides the image')
+        self.assertTrue(self.js('agree(0).hidden'), 'refused access hides the image')
         self.assertNotIn('All Shown', self.status().inner_text())
         self.open(1, frames=12, frameTime=20, sop='2.25.61')
         self.control('Play', 1).click()
@@ -422,6 +452,164 @@ class XaPlaybackDomTest(unittest.TestCase):
         self.assertEqual(self.frames(2), [1])
         self.assertEqual(self.state(2)['failure'], {'frame': 2, 'kind': 'failed'})
         self.assertFalse(self.state(2)['coverage']['all'])
+
+    # -- round 2 (Astra EXA-R1-01..03) -------------------------------------------------------------------------------
+    def agree(self, slot=0):
+        return self.js('slot => agree(slot)', slot)
+
+    def assert_agree(self, frame, message, slot=0):
+        seen = self.agree(slot)
+        self.assertEqual((seen['screen'], seen['label'], seen['displayed']), (frame, frame, frame), message + ' ' + str(seen))
+
+    def test_xa04_cancelled_loads_hold_their_budget_until_the_abort_settles(self):
+        # 2048 x 1024 frames reserve 16 MiB each. The source answers an abort only when the test lets it, like a decoder
+        # that is still busy with the bytes it already has.
+        self.open(1, frames=4, frameTime=20, rows=2048, cols=1024, sop='2.25.71')
+        self.control('First Frame', 1).click()
+        self.tick(1)
+        self.assertEqual(self.frames(1), [1])
+        self.open(0, frames=20, frameTime=20, rows=2048, cols=1024, sop='2.25.72', hold='all', lateAbort=True)
+        seen = []
+        for n in range(10):
+            self.control('Last Frame' if n % 2 else 'First Frame').click()
+            self.tick(1)
+            seen.append(self.js('({ budget: KinViewerXaPlayback.budget(), active: views[0].log.inflight + 1, aborted: views[0].log.abortPending.length })'))
+        for step in seen:
+            budget, active = step['budget'], step['active']
+            self.assertLessEqual(budget['bytes'], 128 * MIB, step)
+            self.assertLessEqual(budget['loading'], 4, step)
+            self.assertLessEqual(active - 1, 4, 'XA-X17: cancelled loads still decoding keep their slot, so no more than four run %s' % step)
+            self.assertGreaterEqual(budget['bytes'], active * 16 * MIB, 'XA-X17: the budget counts every load that has not ended %s' % step)
+        self.assertGreater(seen[-1]['aborted'], 0, 'aborts were asked for and are still unanswered')
+        self.assertEqual(self.js('views[1].log.releases'), [], 'the other viewport keeps its frame')
+        self.js('views[0].log.abortPending.splice(0).forEach(end => end())')
+        self.tick(1)
+        self.assertEqual(self.js('KinViewerXaPlayback.budget().retiring'), 0)
+        self.js('releaseHeld(0, 19)')  # the latest request (Last Frame) now gets its load
+        self.tick(1)
+        self.assert_agree(20, 'after the aborts end, the latest request is the one shown')
+        self.assertEqual(self.js('KinViewerXaPlayback.budget().bytes'), 2 * 16 * MIB, 'one frame per viewport stays reserved')
+        self.assertEqual(self.js('views[1].log.releases'), [])
+
+    def test_xa05_render_races_follow_only_the_latest_render_request(self):
+        self.open(frames=10, frameTime=20)
+        host = self.page.locator('#host0')
+        host.get_by_label('Loop').uncheck()
+        # Pause while frame 3 is still being drawn: nothing newer was asked, so its render stands and the label follows.
+        self.js('holdRender(0, 2)')
+        self.control('Play').click()
+        self.tick(45)
+        self.assertEqual(self.frames(), [1, 2])
+        self.control('Pause').click()
+        self.js('releaseRender(0, 2)')
+        self.tick(1)
+        self.assert_agree(3, 'a render that finishes after Pause is still the latest request')
+        self.tick(200)
+        self.assertEqual(self.frames(), [1, 2, 3], 'Pause still stops playback')
+        # Seek while a render is in flight: First Frame is pending when Last Frame answers.
+        self.js('holdRender(0, 0)')
+        self.control('First Frame').click()
+        self.tick(1)
+        self.control('Last Frame').click()
+        self.tick(1)
+        self.assert_agree(10, 'the newer request is shown')
+        self.js('releaseRender(0, 0)')
+        self.tick(1)
+        self.assert_agree(10, 'XA-X15: an older render answering late never moves the label or the displayed record')
+        # Frame n + 1 finishes before frame n.
+        self.js('holdRender(0, 4)')
+        for start in ('5', '6'):
+            host.get_by_label('Range Start').fill(start)
+            host.get_by_label('Range End').fill('10')
+            self.control('Apply Range').click()
+            self.control('First Frame').click()
+            self.tick(1)
+        self.assert_agree(6, 'frame 6 was the latest request')
+        self.js('releaseRender(0, 4)')
+        self.tick(1)
+        self.assert_agree(6, 'XA-X15: an older render answering late never moves the label or the displayed record')
+        self.assertNotIn(5, self.js('events.filter(e => e.type === "displayed").map(e => e.frame)'))
+
+    def test_xa05_mismatched_or_ended_openings_load_and_render_nothing(self):
+        # A source that is not the opened object: nothing is fetched or drawn and the viewport is covered.
+        self.open(0, frames=10, frameTime=20, manifestStudy='2.25.999')
+        self.js('(() => { const c = views[0].controller; c.first(); c.play(); c.last(); })()')
+        self.tick(200)
+        self.assertEqual(self.js('views[0].log.loads'), [], 'XA-X18: a source that is not the opened object is never fetched')
+        self.assertEqual(self.js('views[0].calls'), [], 'XA-X18: a source that is not the opened object is never fetched')
+        self.assertTrue(self.agree(0)['hidden'], 'XA-X18: a source that is not the opened object is never fetched')
+        expect(self.status(0)).to_contain_text('Unavailable')
+        expect(self.control('Play', 0)).to_be_disabled()
+        # A session that had already ended when the module mounted.
+        self.open(1, frames=10, frameTime=20, sop='2.25.81', currentNull=True)
+        self.js('(() => { const c = views[1].controller; c.first(); c.play(); })()')
+        self.tick(200)
+        self.assertEqual((self.js('views[1].log.loads'), self.js('views[1].calls')), ([], []))
+        self.assertTrue(self.agree(1)['hidden'])
+        # The session ends while look-ahead answers are still arriving: from that point no load and no render.
+        self.open(2, frames=30, frameTime=1000, sop='2.25.82', hold=[3, 4, 5, 6])
+        self.control('Play', 2).click()
+        self.tick(5)
+        self.assertEqual(self.frames(2), [1])
+        before = self.js('views[2].log.loads.length')
+        self.js('identities[2] = null')
+        self.js('releaseHeld(2, 3)')  # a look-ahead answer arrives and pumps before any playback tick
+        self.tick(1)
+        self.assertEqual(self.js('views[2].log.loads.length'), before, 'XA-X19: after the session ends no further frame is fetched')
+        self.tick(3000)
+        self.assertEqual((self.js('views[2].log.loads.length'), self.js('views[2].calls')), (before, [1]))
+        self.assertTrue(self.agree(2)['hidden'])
+        # A -> B -> A with an identical-looking series: the same Study/Series/SOP opened again is a new opening.
+        self.open(3, frames=10, frameTime=20, sop='2.25.83', sequence=1, hold=[2])
+        self.control('Play', 3).click()
+        self.tick(30)
+        self.js('window.oldView = views[3]')
+        old_loads = self.js('oldView.log.loads.length')
+        self.js('identities[3] = { ...identities[3], sequence: 3 }')
+        self.js('releaseHeld(3, 2)')
+        self.tick(200)
+        self.assertEqual(self.js('oldView.shown.map(s => s.frame)'), [1, 2], 'the old opening draws nothing more')
+        self.assertEqual(self.js('oldView.log.loads.length'), old_loads, 'the old opening fetches nothing more')
+        self.assertEqual(self.js('oldView.controller.state().phase'), 'stale')
+        self.assertTrue(self.agree(3)['hidden'], 'the old opening hides what it showed')
+        self.open(3, frames=10, frameTime=20, sop='2.25.83', sequence=3)
+        # The stale panel is still mounted next to the new one; use the new opening's own controls.
+        self.page.locator('#host3 [role=group]').last.get_by_role('button', name='First Frame', exact=True).click()
+        self.tick(1)
+        seen = self.agree(3)
+        self.assertEqual((seen['screen'], seen['label'], seen['hidden']), (1, 1, False), 'the new opening of the same object plays normally')
+        self.assertEqual(self.js('oldView.shown.map(s => s.frame)'), [1, 2])
+
+    def test_xa06_render_timeout_fails_until_a_render_is_confirmed(self):
+        self.open(frames=10, frameTime=20)
+        self.page.locator('#host0').get_by_label('Loop').uncheck()
+        self.js('holdRender(0, 3)')
+        self.control('Play').click()
+        self.tick(70)
+        self.assertEqual(self.frames(), [1, 2, 3])
+        self.tick(20000)
+        expect(self.status()).to_contain_text('Failed')
+        self.assert_agree(3, 'an unconfirmed render shows and records nothing new')
+        self.assertEqual(self.state()['failure'], {'frame': 4, 'kind': 'render'})
+        expect(self.control('Retry')).to_be_visible()
+        self.js('releaseRender(0, 3)')  # still the latest request: when it does confirm, the label follows the screen
+        self.tick(1)
+        self.assert_agree(4, 'a late confirmation of the latest request is shown and recorded')
+        self.assertIsNone(self.state()['failure'])
+        self.assertFalse(self.state()['playing'], 'it does not restart playback on its own')
+        # A timed-out render that a newer request superseded changes nothing when it finally answers.
+        self.js('holdRender(0, 9)')
+        self.control('Last Frame').click()
+        self.tick(20001)
+        expect(self.status()).to_contain_text('Failed')
+        self.assert_agree(4, 'still the last confirmed frame')
+        self.control('First Frame').click()
+        self.tick(1)
+        self.assert_agree(1, 'the newer request')
+        self.js('releaseRender(0, 9)')
+        self.tick(1)
+        self.assert_agree(1, 'the superseded render stays superseded')
+        self.assertNotIn(10, self.js('events.filter(e => e.type === "displayed").map(e => e.frame)'))
 
 
 if __name__ == '__main__':

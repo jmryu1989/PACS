@@ -444,7 +444,7 @@
    "rows": 64,
    "columns": 64,
    "bits": 8,
-   "timing": "Frame Increment Pointer -> Frame Time 33.3 ms",
+   "timing": "Frame Increment Pointer -> Frame Time 33.3 ms, Frame Delay 250 ms",
    "covers": [
     "XA01-DICOM-ALLOW",
     "XA01-DICOM-REJECT",
@@ -460,7 +460,7 @@
    "rows": 64,
    "columns": 64,
    "bits": "16 allocated / 12 stored",
-   "timing": "Frame Increment Pointer -> non-uniform Frame Time Vector",
+   "timing": "Frame Increment Pointer -> non-uniform Frame Time Vector, Frame Delay 120.5 ms",
    "covers": [
     "XA01-DICOM-ALLOW",
     "XA02-DICOM-ALLOW"

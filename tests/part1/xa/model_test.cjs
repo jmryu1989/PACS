@@ -156,6 +156,54 @@ test('XA02 reject: wrong length, NaN, negative, non-zero first, missing value or
   assert.throws(() => M.interval(M.describe(fixed(4, 33)).timing, { kind: 'manual', fps: 7 }, 0, 1, { first: 0, last: 3 }), RangeError);
 });
 
+test('XA02 allow: the source time basis (Frame Delay, Frame Content origin) is kept apart from the playback intervals; DT at the PS3.5 bounds is a time', () => {
+  // C.7.6.5: relative time of frame n = Frame Delay + Frame Time x (n - 1); with a vector, Frame Delay + the summed increments.
+  const ft = M.describe(fixed(3, 40, { extra: { '00181066': el('DS', 250) } })).timing;
+  assert.deepEqual([...ft.offsets], [0, 40, 80], 'playback intervals start at frame 1');
+  assert.deepEqual([...ft.basis.relative], [250, 290, 330], 'XA-X20: Frame Delay stays in the source timeline as data');
+  assert.deepEqual([ft.basis.reference, ft.basis.frameDelay, ft.basis.frameDelayPresent], ['content-time', 250, true]);
+  const fv = M.describe(timed([0, 20, 80, 40], { extra: { '00181066': el('DS', '120.5') } })).timing;
+  assert.deepEqual([...fv.offsets], [0, 20, 100, 140]);
+  assert.deepEqual([...fv.basis.relative], [120.5, 140.5, 220.5, 260.5], 'XA-X20: Frame Delay stays in the source timeline as data');
+  assert.equal(M.interval(fv, { kind: 'source', rate: 1 }, 1, 2, { first: 0, last: 3 }), 80, 'Frame Delay never changes an interval');
+  const none = M.describe(fixed(3, 40)).timing;
+  assert.deepEqual([[...none.basis.relative], none.basis.frameDelay, none.basis.frameDelayPresent], [[0, 40, 80], 0, false]);
+  // PS3.5 6.2 bounds: -1200 and +1400, +0000, six fraction digits, a day boundary.
+  const enhancedTimes = (times, tag) => M.describe(run({ frames: times.length, sopClass: ENHANCED, extra: { '52009230': perFrame(times, tag), '00209222': dimension('00189151') } })).timing;
+  const west = enhancedTimes(['20261009000000.000000-1200', '20261009000000.040000-1200', '20261009000000.100000-1200']);
+  assert.deepEqual([west.verified, [...west.offsets].map(Math.round)], [true, [0, 40, 100]]);
+  const east = enhancedTimes(['20261009235959.900+1400', '20261010000000.000+1400', '20261010000000.250+1400']);
+  assert.deepEqual([east.verified, [...east.offsets].map(Math.round)], [true, [0, 100, 350]]);
+  assert.equal(east.basis.origin, '20261009235959.900+1400');
+  const utc = enhancedTimes(['20261231235959.500000+0000', '20270101000000.000001+0000']);
+  assert.deepEqual([utc.verified, utc.offsets[1]], [true, 500.001], 'across a year boundary, microseconds kept');
+  const acquisition = enhancedTimes(['20261009120000', '20261009120001'], '00189074');
+  assert.deepEqual([acquisition.verified, acquisition.basis.attribute, [...acquisition.basis.relative]], [true, '00189074', [0, 1000]]);
+});
+
+test('XA02 reject: an unreadable Frame Delay, or a DT outside PS3.5 (offset beyond -1200..+1400, offset minutes over 59, -0000, impossible date or second), is Unverified', () => {
+  for (const delay of ['abc', 'NaN', '']) {
+    const t = M.describe(fixed(3, 40, { extra: { '00181066': el('DS', delay) } })).timing;
+    assert.deepEqual([t.verified, t.reason, t.basis], [false, 'frame-delay', null], JSON.stringify(delay));
+  }
+  const timeline = times => M.describe(run({ frames: times.length, sopClass: ENHANCED, extra: { '52009230': perFrame(times), '00209222': dimension('00189151') } })).timing;
+  const zoned = suffix => timeline(['20261009120000.000' + suffix, '20261009120000.040' + suffix]);
+  for (const suffix of ['+1500', '-1300', '+1401', '-1201']) {
+    assert.equal(zoned(suffix).verified, false, 'XA-X21: a DT offset outside -1200..+1400 is not a time (' + suffix + ')');
+  }
+  for (const suffix of ['+9960', '+0960', '-0000', '+090', '+09000']) {
+    assert.equal(zoned(suffix).verified, false, suffix);
+  }
+  for (const bad of [['20261302120000', '20261302120001'], ['20260230120000', '20260230120001'], ['20261009240000', '20261009240001'],
+    ['20261009126000', '20261009126001'], ['20261009120061', '20261009120062'], ['20261009120060', '20261009120061'],
+    ['2026100912', '2026100913'], ['20261009120000.1234567', '20261009120001']]) {
+    assert.equal(timeline(bad).verified, false, JSON.stringify(bad));
+  }
+  // A legal leap second (23:59:60 UTC on 31 December) cannot be turned into intervals without a leap-second table.
+  const leap = timeline(['20161231235959.500+0000', '20161231235960.000+0000', '20170101000000.500+0000']);
+  assert.deepEqual([leap.verified, leap.reason], [false, 'leap-second']);
+});
+
 test('XA03 allow: forward, reverse, yoyo, ranges and loops visit every frame of the range, the last included, endpoints once', () => {
   const all = { first: 0, last: 5, loop: true };
   assert.deepEqual(walk(0, 7, { ...all, mode: 'forward' }), [0, 1, 2, 3, 4, 5, 0, 1], 'XA-X4: forward play must reach the last stored frame before it loops');
@@ -255,6 +303,7 @@ test('XA04 reject: in-flight frames count, decoding stays at four, too-large or 
   assert.deepEqual(budget.reserve(A, 'sop#7', 100), { ok: true, shared: false, state: 'loading' });
   assert.deepEqual(budget.reserve(B, 'sop#7', 100), { ok: true, shared: true, state: 'loading' });
   assert.equal(budget.snapshot().bytes, 100, 'one decode, one reservation');
+  assert.equal(budget.ready('sop#7'), true);
   assert.equal(budget.release(B, 'sop#7'), false, 'XA-X9: another viewport\'s frame stays when one viewport lets go');
   assert.equal(budget.holds(A, 'sop#7'), true, 'XA-X9: another viewport\'s frame stays when one viewport lets go');
   assert.equal(budget.snapshot().bytes, 100, 'XA-X9: another viewport\'s frame stays when one viewport lets go');
@@ -264,6 +313,37 @@ test('XA04 reject: in-flight frames count, decoding stays at four, too-large or 
   budget.reserve(A, 'sop#8', 50); budget.reserve(B, 'sop#8', 50);
   assert.equal(budget.drop('sop#8'), true, 'a failed load ends the reservation for every holder');
   assert.equal(budget.holds(A, 'sop#8') || budget.holds(B, 'sop#8'), false);
+});
+
+test('XA04 reject: a cancelled or timed-out load keeps its bytes and decode slot until the load itself ends, and nobody joins it', () => {
+  const A = {}, B = {};
+  const small = M.createBudget({ bytes: 10, decodes: 4, prepared: 500, ahead: 8 });
+  small.reserve(A, 'a', 4);
+  assert.equal(small.release(A, 'a'), true, 'A was the last holder');
+  assert.equal(small.snapshot().bytes, 4, 'XA-X16: a cancelled load still decoding keeps its reservation until it ends');
+  assert.equal(small.state('a'), 'retiring', 'XA-X16: a cancelled load still decoding keeps its reservation until it ends');
+  small.reserve(A, 'b', 4);
+  assert.deepEqual(small.reserve(A, 'c', 4), { ok: false, reason: 'bytes' }, 'XA-X16: a cancelled load still decoding keeps its reservation until it ends');
+  assert.deepEqual(small.reserve(B, 'a', 4), { ok: false, reason: 'busy' }, 'an ending load cannot be joined or restarted');
+  assert.equal(small.ready('a'), false, 'a late answer of a cancelled load does not become a held frame');
+  assert.equal(small.drop('a'), true, 'the load has ended');
+  assert.equal(small.reserve(A, 'c', 4).ok, true);
+  assert.equal(small.snapshot().bytes, 8);
+  // Many cancels in flight never open more decode slots than four.
+  const slots = M.createBudget({ bytes: 1000, decodes: 4, prepared: 500, ahead: 8 });
+  for (const key of ['1', '2', '3', '4']) { slots.reserve(A, key, 1); slots.release(A, key); }
+  assert.deepEqual(slots.snapshot().loading, 4);
+  assert.deepEqual(slots.reserve(A, '5', 1), { ok: false, reason: 'decodes' }, 'XA-X16: a cancelled load still decoding keeps its reservation until it ends');
+  slots.drop('1');
+  assert.equal(slots.reserve(A, '5', 1).ok, true);
+  // A timeout lets every holder go at once; the reservation stays until the load really ends.
+  const timed = M.createBudget({ bytes: 100, decodes: 4, prepared: 500, ahead: 8 });
+  timed.reserve(A, 't', 30); timed.reserve(B, 't', 30);
+  assert.equal(timed.retire('t'), true);
+  assert.deepEqual([timed.holds(A, 't'), timed.holds(B, 't'), timed.snapshot().bytes, timed.snapshot().loading, timed.snapshot().retiring], [false, false, 30, 1, 1]);
+  assert.equal(timed.release(A, 't'), false, 'nobody holds a retiring load any more');
+  timed.drop('t');
+  assert.deepEqual([timed.snapshot().bytes, timed.snapshot().loading], [0, 0]);
 });
 
 test('XA05 allow: the same opening stays current, and a late frame keeps its place and its source interval', () => {
@@ -287,6 +367,23 @@ test('XA05 reject: another account, no session or the same object opened again (
   assert.equal(M.sameOpening(opened, { ...opened, sop: '2.25.9' }), 'stale');
   assert.equal(M.sameOpening(opened, { ...opened, study: '2.25.9' }), 'stale');
   assert.equal(M.sameOpening(opened, { ...opened, sequence: 6 }), 'stale', 'XA-X11: the same object opened again is a new opening');
+  // A missing field never matches by being equally missing; a new login session of the same person is not this opening.
+  assert.equal(M.sameOpening({}, {}), 'ended');
+  assert.equal(M.sameOpening({ account: 'reader' }, { account: 'reader' }), 'ended');
+  for (const field of ['account', 'institution', 'study', 'series', 'sop', 'sequence']) {
+    const partial = { ...opened }; delete partial[field];
+    assert.equal(M.sameOpening(partial, partial), 'ended', field);
+    assert.equal(M.sameOpening(opened, partial), 'ended', field);
+  }
+  assert.equal(M.sameOpening({ ...opened, session: 'old' }, { ...opened, session: 'new' }), 'ended');
+  assert.equal(M.sameOpening({ ...opened, session: 'old' }, { ...opened }), 'ended');
+  // The opening must name the very object the source supplies.
+  const d = M.describe(fixed(4, 33));
+  const key = { ...opened, study: d.study, series: d.series, sop: d.sop };
+  assert.deepEqual({ ...M.openingMatches(key, d) }, { ok: true, reason: null });
+  for (const field of ['study', 'series', 'sop']) assert.deepEqual({ ...M.openingMatches({ ...key, [field]: '2.25.999' }, d) }, { ok: false, reason: 'manifest' }, field);
+  assert.equal(M.openingMatches({ ...key, account: '' }, d).reason, 'opening');
+  assert.equal(M.openingMatches(key, M.describe(null)).ok, false);
 });
 
 test('XA06 allow: a frame is shown only after its render; after a middle failure the retried frame completes the range', () => {

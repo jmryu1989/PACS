@@ -4,14 +4,14 @@
    mount({host, source, viewport, identity, events, clock}):
      source    {metadata: DICOM JSON of the one instance, load(index, {signal}) -> image, release(index, image)}
      viewport  {show(index, image) -> {index} once that frame is rendered, current() -> index, cover(on)}
-     identity  {key: {account, institution, study, series, sop, sequence}, current() -> the same shape or null}
+     identity  {key: {account, institution, study, series, sop, sequence[, session]}, current() -> the same shape or null}
      events    {emit(event)}: requested / provided / displayed / failed / cancelled stay separate facts
      clock     {now, setTimeout, clearTimeout}; the document's own timers when omitted. */
 (function (root) {
   'use strict';
   const LOAD_TIMEOUT_MS = 20000;
   // One budget, one frame registry and one memory queue per document: the limit is the sum over all XA viewports.
-  const shared = { budget: null, frames: new Map(), controllers: new Set(), queue: [], pumping: false };
+  const shared = { budget: null, model: null, frames: new Map(), controllers: new Set(), queue: [], pumping: false };
 
   const PHASE = { ready: 'Ready', loading: 'Loading', playing: 'Playing', buffering: 'Buffering', paused: 'Paused',
     failed: 'Failed', denied: 'Access Denied', ended: 'Stopped', stale: 'Stopped', unavailable: 'Unavailable',
@@ -28,6 +28,8 @@
     'one-frame': '한 프레임 영상이라 시간 재생이 없습니다.',
     'no-time-dimension': '여러 차원으로 저장된 영상이라 시간 재생으로 이어 붙이지 않습니다. First Frame·Last Frame과 스크롤로 프레임을 보세요.',
     generic: '저장된 XA 재생 대상이 아닙니다.',
+    opening: '열린 검사·계정 정보를 확인하지 못해 이 영상을 표시하지 않습니다.',
+    manifest: '열린 검사와 영상의 Study·Series·SOP가 일치하지 않아 이 영상을 표시하지 않습니다.',
   };
 
   function schedulePump() {
@@ -41,6 +43,38 @@
     });
   }
   const dequeue = c => { const i = shared.queue.indexOf(c); if (i >= 0) shared.queue.splice(i, 1); };
+  function releaseImage(entry, image) { try { entry.source.release?.(entry.index, image); } catch (_) {} }
+
+  /* A frame load has two ends that are kept apart. Cancelling (no viewport wants it) or timing out ends the WAIT at once:
+     the waiters are answered and the source is asked to abort. The load itself ends only when the source's promise
+     settles; until then its bytes and its decode slot stay reserved (budget state `retiring`), so any number of cancels
+     in flight can never take the shared budget past 128 MiB or four decodes. */
+  function retireEntry(entry, reason) {
+    entry.time.clearTimeout(entry.timer);
+    entry.state = 'retiring';
+    shared.budget.retire(entry.key);
+    for (const c of shared.controllers) c.forget(entry.key);
+    try { entry.controller.abort(); } catch (_) {}
+    entry.reject(reason);
+  }
+  function settleEntry(entry, image, error) {
+    entry.time.clearTimeout(entry.timer);
+    const key = entry.key, ok = !error && image !== undefined && image !== null;
+    if (entry.state === 'loading' && ok) {
+      entry.state = 'ready'; entry.image = image; shared.budget.ready(key); entry.resolve(entry); schedulePump();
+      return;
+    }
+    if (ok) releaseImage(entry, image);  // the answer of a load nobody waits for any more goes straight back
+    const wanted = entry.state === 'loading';
+    entry.state = 'gone';
+    shared.budget.drop(key);
+    if (shared.frames.get(key) === entry) shared.frames.delete(key);
+    if (wanted) {
+      for (const c of shared.controllers) c.forget(key);
+      entry.reject({ kind: shared.model.failureKind(error || Error('empty frame')), status: Number(error?.status) || null });
+    }
+    schedulePump();
+  }
 
   function mount({ host, source, viewport, identity, events, clock } = {}) {
     const Model = root.KinXaPlaybackModel;
@@ -52,16 +86,20 @@
     const opened = Object.freeze({ ...identity.key });
     const meta = Model.describe(source.metadata);
     const path = Model.route(meta);
+    // The opening must be complete and name exactly the object this source supplies, before anything is fetched.
+    const binding = Model.openingMatches(opened, meta);
+    shared.model = Model;
     const budget = shared.budget || (shared.budget = Model.createBudget(Model.LIMITS));
     const total = meta.ok ? meta.frames : 0;
     const navigable = path.path === 'xa' || path.path === 'xa-frames';
 
-    let gen = 0, playing = false, shown = null, target = null, direction = 1, mode = 'forward', loop = true;
+    // shown = last confirmed frame; target = the frame being brought; drawing = the frame of the latest render in flight.
+    let gen = 0, renderSeq = 0, playing = false, shown = null, target = null, drawing = null, direction = 1, mode = 'forward', loop = true;
     let range = total ? { first: 0, last: total - 1 } : null;
     let coverage = range ? Model.createCoverage(range.first, range.last) : null;
     let speed = meta.ok ? Model.defaultSpeed(meta.timing) : null;
     let failure = null, message = '', lastDue = 0, late = 0, sleeper = null, waiter = null;
-    let ended = false, disposed = false, covered = false, memoryWait = false;
+    let ended = false, disposed = false, covered = false, fresh = true, memoryWait = false;
     const own = new Set(), skip = new Set(), told = new Set(), listeners = [];
     let phase = !meta.ok ? 'unavailable' : path.path === 'xa' ? 'ready' : path.path === 'xa-frames' ? 'frames' : path.path === 'still' ? 'still' : 'unavailable';
     if (phase !== 'ready') message = REASON[path.path === 'generic' ? 'generic' : path.reason || meta.reason] || REASON.metadata;
@@ -114,7 +152,7 @@
     function paint() {
       if (disposed) return;
       const parts = [PHASE[phase]];
-      if (path.path === 'xa' && speed) parts.push(speed.kind === 'source' ? speedName(speed) : 'Manual ' + speed.fps + ' fps' + (meta.timing.verified ? '' : ' · Timing Unverified'));
+      if (path.path === 'xa' && speed && !ended) parts.push(speed.kind === 'source' ? speedName(speed) : 'Manual ' + speed.fps + ' fps' + (meta.timing.verified ? '' : ' · Timing Unverified'));
       if (total) parts.push('Frame ' + (shown === null ? '-' : shown + 1) + ' / ' + total);
       if (navigable && coverage) { const c = coverage.snapshot(); parts.push(c.all ? 'All Shown' : 'Shown ' + c.shown + ' / ' + c.total); }
       if (late > 0 && playing) parts.push(speed.kind === 'source' ? 'Slower Than Source' : 'Slower Than Set Speed');
@@ -131,22 +169,25 @@
       directionSelect.value = mode; loopBox.checked = loop;
     }
 
-    // ---- opening checks: before every write to the viewport ----
+    // ---- opening checks: before every request and every write to the viewport, and after every await ----
     function opening() { let now = null; try { now = identity.current(); } catch (_) {} return Model.sameOpening(opened, now); }
     function checkOpening() {
+      if (ended || disposed) return false;
       const state = opening();
       if (state === 'current') return true;
-      if (state === 'ended') finish('ended', '로그인 상태가 바뀌어 재생을 멈추고 영상을 가렸습니다.', true);
-      else finish('stale', '이 화면에 다른 영상이 열려 이전 재생을 멈췄습니다.', false);
+      // Another session or account, or this viewport now holding another opening (A -> B -> A): stop and hide.
+      if (state === 'ended') finish('ended', '로그인 상태가 바뀌어 재생을 멈추고 영상을 가렸습니다.');
+      else finish('stale', '이 화면에 다른 영상 열기가 있어 이전 재생을 멈추고 가렸습니다.');
       return false;
     }
-    function finish(next, text, hide) {
+    function finish(next, text) {
       if (ended || disposed) return;
-      ended = true; gen++; playing = false; target = null; failure = null; cancelSleep(); self.wake(); dequeue(self);
+      ended = true; gen++; renderSeq++; playing = false; target = null; drawing = null; failure = null; memoryWait = false;
+      cancelSleep(); self.wake(); dequeue(self);
       for (const i of [...own]) letGo(i);
       phase = next; message = text;
-      // A changed or ended session hides the pixels; a viewport now showing another object is left to its new owner.
-      if (hide) { try { viewport.cover?.(true); covered = true; } catch (_) {} }
+      // The cover belongs to this mount; the next verified opening's first render lifts it.
+      try { viewport.cover?.(true); covered = true; } catch (_) {}
       emit({ type: 'stopped', index: shown ?? -1, reason: next });
       paint();
     }
@@ -155,63 +196,36 @@
     function request(index, needed) {
       const key = keyOf(index);
       if (own.has(index)) return { entry: shared.frames.get(key) };
-      const joining = budget.state(key) !== null;
+      const state = budget.state(key), joining = state === 'loading' || state === 'ready';
       if (!joining && shared.queue.length && (shared.queue[0] !== self || !needed)) return { refused: 'queued' };
       const r = budget.reserve(self, key, meta.frameBytes);
       if (!r.ok) return { refused: r.reason };
       own.add(index); told.delete(index);
       emit({ type: 'requested', index, shared: r.shared });
-      return { entry: shared.frames.get(key) || startLoad(index, key) };
+      return { entry: r.shared ? shared.frames.get(key) : startLoad(index, key) };
     }
     function startLoad(index, key) {
       const controller = new AbortController();
-      const entry = { key, index, source, state: 'loading', image: null, error: null, controller, timedOut: false, timer: null, halt: null };
-      shared.frames.set(key, entry);
-      const halted = new Promise((_, reject) => { entry.halt = reject; });
-      const timeout = new Promise((_, reject) => {
-        entry.timer = time.setTimeout(() => { entry.timedOut = true; controller.abort(); reject(Object.assign(Error('frame timeout'), { name: 'TimeoutError' })); }, LOAD_TIMEOUT_MS);
-      });
-      const load = Promise.resolve().then(() => source.load(index, { signal: controller.signal }));
-      entry.promise = (async () => {
-        let image;
-        try {
-          image = await Promise.race([load, timeout, halted]);
-          if (image === undefined || image === null) throw Error('empty frame');
-        } catch (error) {
-          time.clearTimeout(entry.timer);
-          // A source that answers after its load was cancelled or timed out still gets its image back.
-          load.then(late => { if (late !== undefined && late !== null) release(entry, late); }, () => {});
-          const cancelled = shared.frames.get(key) !== entry;
-          entry.error = { kind: Model.failureKind(error, { cancelled, timedOut: entry.timedOut }), status: Number(error?.status) || null };
-          if (!cancelled) {
-            shared.frames.delete(key); budget.drop(key); entry.state = 'failed';
-            for (const c of shared.controllers) c.forget(key);
-            schedulePump();
-          }
-          throw entry.error;
-        }
-        time.clearTimeout(entry.timer);
-        // Answered in the same turn it was let go: nobody holds it any more, so the image goes straight back.
-        if (shared.frames.get(key) !== entry) { release(entry, image); entry.error = { kind: 'cancelled', status: null }; throw entry.error; }
-        entry.state = 'ready'; entry.image = image; budget.ready(key);
-        schedulePump();
-        return entry;
-      })();
+      const entry = { key, index, source, time, state: 'loading', image: null, controller, timer: null, resolve: null, reject: null };
+      entry.promise = new Promise((resolve, reject) => { entry.resolve = resolve; entry.reject = reject; });
       entry.promise.catch(() => {});
+      shared.frames.set(key, entry);
+      entry.timer = time.setTimeout(() => { if (entry.state === 'loading') retireEntry(entry, { kind: 'timeout', status: null }); }, LOAD_TIMEOUT_MS);
+      Promise.resolve().then(() => source.load(index, { signal: controller.signal }))
+        .then(image => settleEntry(entry, image, null), error => settleEntry(entry, null, error || Error('load failed')));
       return entry;
     }
-    function release(entry, image) { try { entry.source.release?.(entry.index, image); } catch (_) {} }
     function letGo(index) {
       if (!own.delete(index)) return;
       const key = keyOf(index);
       if (!budget.release(self, key)) return;
       const entry = shared.frames.get(key);
-      shared.frames.delete(key);
       if (entry?.state === 'loading') {
-        time.clearTimeout(entry.timer); entry.controller.abort(); entry.halt({ kind: 'cancelled' });
+        retireEntry(entry, { kind: 'cancelled', status: null });
         emit({ type: 'cancelled', index });
-      } else if (entry?.state === 'ready') release(entry, entry.image);
-      schedulePump();
+      } else if (entry?.state === 'ready') {
+        entry.state = 'gone'; shared.frames.delete(key); releaseImage(entry, entry.image); schedulePump();
+      }
     }
     function watch(index, entry) {
       entry.promise.then(() => {
@@ -231,8 +245,9 @@
     }
     function fill() {
       if (ended || disposed || !navigable) return;
+      if (!checkOpening()) return;
       const want = plan();
-      for (const i of [...own]) if (!want.includes(i) && i !== shown && i !== target) letGo(i);
+      for (const i of [...own]) if (!want.includes(i) && i !== shown && i !== target && i !== drawing) letGo(i);
       for (const i of want) {
         if (own.has(i)) continue;
         const needed = i === target;
@@ -244,7 +259,7 @@
     }
     async function need(g, index) {
       for (;;) {
-        if (!live(g)) throw { kind: 'cancelled' };
+        if (!live(g) || !checkOpening()) throw { kind: 'cancelled' };
         let entry = own.has(index) ? shared.frames.get(keyOf(index)) : null;
         if (!entry) {
           own.delete(index);
@@ -256,7 +271,8 @@
           }
           if (r.refused) {
             if (r.refused === 'too-large' || r.refused === 'invalid') throw { kind: 'refused' };
-            if (!shared.queue.includes(self)) shared.queue.push(self);
+            // `busy`: the same frame's earlier load is still ending; it frees itself and pumps when it settles.
+            if (r.refused !== 'busy' && !shared.queue.includes(self)) shared.queue.push(self);
             memoryWait = r.refused === 'bytes' || r.refused === 'queued' || r.refused === 'prepared';
             paint();
             await new Promise(resolve => { waiter = resolve; });
@@ -271,32 +287,60 @@
     // A renderer that never confirms is a failed frame, not an endless Playing.
     function rendered(promise) {
       return new Promise((resolve, reject) => {
-        const id = time.setTimeout(() => reject(Error('render timeout')), LOAD_TIMEOUT_MS);
-        Promise.resolve(promise).then(value => { time.clearTimeout(id); resolve(value); }, error => { time.clearTimeout(id); reject(error); });
+        const id = time.setTimeout(() => reject(Object.assign(Error('render timeout'), { renderTimeout: true })), LOAD_TIMEOUT_MS);
+        promise.then(value => { time.clearTimeout(id); resolve(value); }, error => { time.clearTimeout(id); reject(error); });
       });
     }
 
-    // ---- display: one frame at a time, the label follows only a confirmed render ----
-    async function bring(g, index) {
-      target = index;
-      fill();
-      if (shared.frames.get(keyOf(index))?.state !== 'ready' || !own.has(index)) { phase = playing ? 'buffering' : 'loading'; paint(); }
-      let entry;
-      try { entry = await need(g, index); } catch (error) { return live(g) ? fail(index, error) : false; }
-      if (!live(g) || !checkOpening()) return false;
-      if (covered) { try { viewport.cover?.(false); } catch (_) {} covered = false; }
-      let result;
-      try { result = await rendered(viewport.show(index, entry.image)); } catch (_) { return live(g) ? fail(index, { kind: 'render' }) : false; }
-      if (ended || disposed || !checkOpening()) return false;
-      if (!result || result.index !== index) return live(g) ? fail(index, { kind: 'render' }) : false;
-      // The screen now shows this frame even when playback was paused meanwhile, so the label follows it.
+    // ---- display: a render is a job; only the latest job of this opening may move the label ----
+    // Pause does not make a render stale (nothing newer was asked of the viewport), a seek or a newer frame does.
+    function current(job) { return job === renderSeq && !ended && !disposed && checkOpening(); }
+    function displayed(index) {
       shown = index;
       if (target === index) target = null;
       coverage.mark(index);
       emit({ type: 'displayed', index });
+    }
+    async function bring(g, index) {
+      if (!checkOpening()) return false;
+      target = index;
+      fill();
+      if (ended) return false;
+      if (shared.frames.get(keyOf(index))?.state !== 'ready' || !own.has(index)) { phase = playing ? 'buffering' : 'loading'; paint(); }
+      let entry;
+      try { entry = await need(g, index); } catch (error) { return live(g) ? fail(index, error) : false; }
+      if (!live(g) || !checkOpening()) return false;
+      if (covered || fresh) { try { viewport.cover?.(false); } catch (_) {} covered = false; fresh = false; }
+      const job = ++renderSeq;
+      drawing = index;  // the image under render keeps its reservation until the render answers or is superseded
+      let showing;
+      try { showing = Promise.resolve(viewport.show(index, entry.image)); } catch (error) { showing = Promise.reject(error); }
+      let result;
+      try { result = await rendered(showing); } catch (error) {
+        if (job !== renderSeq || ended || disposed) return false;
+        // Still the latest request: if the renderer confirms after all, the label follows the screen then.
+        if (error?.renderTimeout) showing.then(late => lateRender(job, index, late), () => {});
+        else drawing = null;
+        return live(g) ? fail(index, { kind: 'render' }) : false;
+      }
+      if (!current(job)) return false;
+      drawing = null;
+      if (!result || result.index !== index) return live(g) ? fail(index, { kind: 'render' }) : false;
+      displayed(index);
       if (!live(g)) { fill(); paint(); return false; }
       failure = null; fill(); paint();
       return true;
+    }
+    function lateRender(job, index, result) {
+      if (!current(job)) return;
+      drawing = null;
+      if (!result || result.index !== index) { fill(); return; }
+      displayed(index);
+      if (failure?.index === index && failure.kind === 'render') {
+        failure = null; phase = path.path === 'xa' ? 'paused' : 'frames';
+        message = '프레임 ' + (index + 1) + '의 표시가 늦게 확인되었습니다. Play로 이어서 재생하세요.';
+      }
+      fill(); paint();
     }
     function fail(index, error) {
       const kind = error?.kind || 'failed';
@@ -379,6 +423,7 @@
       if (playing) { lastDue = time.now(); await run(g); } else { phase = path.path === 'xa' ? 'paused' : 'frames'; paint(); }
     }
     function setRange() {
+      if (ended || disposed) return false;
       const parse = v => /^\d+$/.test(v) ? Number(v) : NaN, a = parse(rangeStart.value), b = parse(rangeEnd.value);
       if (!Number.isSafeInteger(a) || !Number.isSafeInteger(b) || a < 1 || a >= b || b > total) {
         message = '재생 범위는 1~' + total + ' 안에서 시작이 끝보다 작아야 합니다.'; paint(); return false;
@@ -398,6 +443,7 @@
     listen(retry, 'click', () => { void again(); });
     listen(apply, 'click', setRange);
     const changed = () => {
+      if (ended || disposed) return;
       mode = directionSelect.value; loop = loopBox.checked; direction = mode === 'reverse' ? -1 : 1;
       failure = null;
       halt(phase === 'ready' ? 'ready' : 'paused', '설정을 바꿨습니다. Play로 다시 시작하세요.');
@@ -414,6 +460,11 @@
 
     if (range) { rangeStart.value = '1'; rangeEnd.value = String(total); }
     shared.controllers.add(self);
+    if (meta.ok && !binding.ok) {
+      // Nothing of a source that is not this opening's object is fetched or drawn.
+      phase = 'unavailable'; message = REASON[binding.reason] || REASON.opening; ended = true;
+      try { viewport.cover?.(true); covered = true; } catch (_) {}
+    } else checkOpening();
     paint();
 
     return Object.freeze({
@@ -425,7 +476,7 @@
         failure: failure ? { frame: failure.index + 1, kind: failure.kind } : null, subtractionRecommended: !!meta.subtractionRecommended }),
       dispose() {
         if (disposed) return;
-        gen++; playing = false; target = null; cancelSleep(); self.wake(); dequeue(self);
+        gen++; renderSeq++; playing = false; target = null; drawing = null; cancelSleep(); self.wake(); dequeue(self);
         for (const i of [...own]) letGo(i);
         disposed = true; shared.controllers.delete(self);
         for (const off of listeners.splice(0)) off();

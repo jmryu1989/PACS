@@ -1,5 +1,6 @@
 # coding: utf-8
-"""E-XA R1 mutants X1..X14 (order e-xa-order.md section 5) and the case declaration check.
+"""E-XA mutants X1..X14 (order e-xa-order.md section 5), X15..X21 (round 2: one per Astra finding EXA-R1-01..05,
+two for EXA-R1-02 - model and viewer), and the case declaration check.
 
 Each mutant breaks the shipped module in a COPY (the source tree is never written) and must be killed by a behaviour
 failure: the named case fails on an assertion that carries that mutant's own token (XA-Xn:), the child exits non-zero
@@ -9,7 +10,7 @@ The clean copies must first pass the same runs through the same overrides, or no
   --check-cases   compare tests/part1/xa/cases.json with the cases the runners actually collect, both ways, and with
                   the mutant table below; a declared case that does not run or a running case that is not declared fails
   --anchors-only  check that every anchor occurs exactly once and every token is asserted in its named case, then stop
-  (default)       --check-cases, anchors, clean baseline, then the 14 mutants
+  (default)       --check-cases, anchors, clean baseline, then every mutant (X1..X21)
 
 The anchors are source text on purpose: this runner rewrites a copy of the code, so it has to find the code. They bind
 the mutation tool only; no test case asserts source text (AGENTS 1-B). stdlib only; browsers and node run as children.
@@ -103,6 +104,35 @@ MUTANTS = [
      'title': 'a prepared frame is counted as shown',
      'old': "        if (own.has(index) && !told.has(index)) { told.add(index); emit({ type: 'provided', index }); }",
      'new': "        if (own.has(index) && !told.has(index)) { told.add(index); coverage.mark(index); emit({ type: 'provided', index }); }"},
+    # Round 2 (Astra review of 585c66f): each one puts back the defect a finding named.
+    {'id': 'X15', 'file': 'viewer', 'suite': 'dom', 'case': 'XA05-DOM-RENDER-RACE', 'token': 'XA-X15:',
+     'title': 'EXA-R1-01: a render answer moves the label without being the latest render request',
+     'old': '    function current(job) { return job === renderSeq && !ended && !disposed && checkOpening(); }',
+     'new': '    function current(job) { return !ended && !disposed && checkOpening(); }'},
+    {'id': 'X16', 'file': 'model', 'suite': 'model', 'case': 'XA04-MODEL-RETIRING', 'token': 'XA-X16:',
+     'title': 'EXA-R1-02: letting go of a load still decoding frees its bytes and slot at once',
+     'old': "      if (held.state === 'loading') { held.state = 'retiring'; return true; }",
+     'new': '      // retiring removed: the reservation ends with the request'},
+    {'id': 'X17', 'file': 'viewer', 'suite': 'dom', 'case': 'XA04-DOM-LATE-ABORT', 'token': 'XA-X17:',
+     'title': 'EXA-R1-02: a cancelled load gives its reservation back before its abort has settled',
+     'old': '    shared.budget.retire(entry.key);',
+     'new': '    shared.budget.drop(entry.key);'},
+    {'id': 'X18', 'file': 'model', 'suite': 'dom', 'case': 'XA05-DOM-OPENING-BINDING', 'token': 'XA-X18:',
+     'title': 'EXA-R1-03: the opening is not compared with the Study/Series/SOP the source supplies',
+     'old': "    if (key.study !== d.study || key.series !== d.series || key.sop !== d.sop) return Object.freeze({ ok: false, reason: 'manifest' });",
+     'new': '    void d.study;'},
+    {'id': 'X19', 'file': 'viewer', 'suite': 'dom', 'case': 'XA05-DOM-OPENING-BINDING', 'token': 'XA-X19:',
+     'title': 'EXA-R1-03: an async completion requests more frames without re-checking the current opening',
+     'old': '      if (!checkOpening()) return;',
+     'new': '      // opening re-check removed'},
+    {'id': 'X20', 'file': 'model', 'suite': 'model', 'case': 'XA02-MODEL-BASIS', 'token': 'XA-X20:',
+     'title': 'EXA-R1-04: Frame Delay is dropped from the source timeline',
+     'old': '    const relative = offsets.map(o => frameDelay + o);',
+     'new': '    const relative = offsets.slice();'},
+    {'id': 'X21', 'file': 'model', 'suite': 'model', 'case': 'XA02-MODEL-DT', 'token': 'XA-X21:',
+     'title': 'EXA-R1-05: a DT offset outside -1200..+1400 is accepted',
+     'old': "      if (zone < -720 || zone > 840 || (m[8] === '-' && zone === 0)) return null;",
+     'new': "      if (m[8] === '-' && zone === 0) return null;"},
 ]
 
 

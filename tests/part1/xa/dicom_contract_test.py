@@ -52,7 +52,8 @@ process.stdin.on('end', () => {
   const out = JSON.parse(input).map(job => {
     const list = job.metadata.map(m => M.describe(m));
     const shape = d => ({ ok: d.ok, reason: d.reason || null, kind: d.kind || null, frames: d.frames ?? null, playback: d.playback ?? null,
-      timing: d.timing ? { source: d.timing.source, verified: d.timing.verified, reason: d.timing.reason, offsets: d.timing.offsets ? [...d.timing.offsets] : null } : null,
+      timing: d.timing ? { source: d.timing.source, verified: d.timing.verified, reason: d.timing.reason, offsets: d.timing.offsets ? [...d.timing.offsets] : null,
+        basis: d.timing.basis ? { ...d.timing.basis, relative: [...d.timing.basis.relative] } : null } : null,
       frameBytes: d.frameBytes ?? null, subtractionRecommended: d.subtractionRecommended ?? null,
       keys: d.ok ? Array.from({ length: d.frames }, (_, i) => M.frame(d, i).key) : null, sop: d.sop || null });
     const result = { describe: list.map(shape), route: { ...M.route(list.length === 1 ? list[0] : list) } };
@@ -110,7 +111,7 @@ def frames_for(count, rows, cols, dtype=np.uint8, stored=8):
 
 
 def dataset(path, sop_class, frames_count, rows, cols, *, bits=8, stored=8, modality='XA', pointer=FRAME_TIME,
-            frame_time=None, vector=None):
+            frame_time=None, vector=None, frame_delay=None):
     meta = FileMetaDataset()
     meta.MediaStorageSOPClassUID = sop_class
     meta.MediaStorageSOPInstanceUID = generate_uid()
@@ -130,6 +131,8 @@ def dataset(path, sop_class, frames_count, rows, cols, *, bits=8, stored=8, moda
         ds.FrameTime = frame_time
     if vector is not None:
         ds.FrameTimeVector = vector
+    if frame_delay is not None:
+        ds.FrameDelay = frame_delay
     return ds
 
 
@@ -215,11 +218,11 @@ class Contract(unittest.TestCase):
         cls.public_before = {sid: (sha256(s['path']) if s['path'].is_file() else None) for sid, s in cls.public.items()}
         t = cls.tmp
         cls.syn = {}
-        cls.syn['jpeg_ft'] = save_jpeg(dataset(t / 'jpeg_ft.dcm', XA, 24, 64, 64, frame_time=33.3), frames_for(24, 64, 64))
+        cls.syn['jpeg_ft'] = save_jpeg(dataset(t / 'jpeg_ft.dcm', XA, 24, 64, 64, frame_time=33.3, frame_delay=250), frames_for(24, 64, 64))
         vector = [0, 33.3, 33.4, 66.6, 16.7, 50, 33.3, 100, 16.7, 33.3, 25, 41.7]
         cls.vector = vector
-        cls.syn['rle_ftv'] = save_rle(dataset(t / 'rle_ftv.dcm', XA, 12, 64, 64, bits=16, stored=12, pointer=FRAME_TIME_VECTOR, vector=vector),
-                                      frames_for(12, 64, 64, np.uint16, 12))
+        cls.syn['rle_ftv'] = save_rle(dataset(t / 'rle_ftv.dcm', XA, 12, 64, 64, bits=16, stored=12, pointer=FRAME_TIME_VECTOR, vector=vector,
+                                              frame_delay=120.5), frames_for(12, 64, 64, np.uint16, 12))
         cls.syn['rle_601'] = save_rle(dataset(t / 'rle_601.dcm', XA, 601, 32, 32, frame_time=33.3), frames_for(601, 32, 32))
         cls.syn['jpeg_130mib'] = save_jpeg(dataset(t / 'jpeg_130mib.dcm', XA, 130, 1024, 1024, frame_time=66.7), frames_for(130, 1024, 1024))
         sub = dataset(t / 'rle_sub.dcm', XA, 8, 32, 32, frame_time=66.7)
@@ -327,12 +330,18 @@ class XaDicomContractTest(Contract):
         self.assertEqual(d['timing']['source'], 'frame-time')
         for n, offset in enumerate(d['timing']['offsets']):
             self.assertAlmostEqual(offset, n * 33.3, places=6)
+        # C.7.6.5: relative time of frame n = Frame Delay + Frame Time x (n - 1), kept as the source basis.
+        header = pydicom.dcmread(str(self.syn['jpeg_ft']), stop_before_pixels=True)
+        self.assertEqual(float(header.FrameDelay), 250.0)
+        self.assertEqual(d['timing']['basis']['frameDelay'], 250)
+        np.testing.assert_allclose(d['timing']['basis']['relative'], [float(header.FrameDelay) + n * float(header.FrameTime) for n in range(24)], atol=1e-9)
         header = pydicom.dcmread(str(self.syn['rle_ftv']), stop_before_pixels=True)
         self.assertEqual(header.FrameIncrementPointer, FRAME_TIME_VECTOR)
         d = self.ask(metadata(self.syn['rle_ftv']))['describe'][0]
         self.assertEqual(d['timing']['source'], 'frame-time-vector')
         expected = np.cumsum([float(v) for v in header.FrameTimeVector])
         np.testing.assert_allclose(d['timing']['offsets'], expected, rtol=0, atol=1e-9)
+        np.testing.assert_allclose(d['timing']['basis']['relative'], float(header.FrameDelay) + expected, rtol=0, atol=1e-9)
         steps = np.diff(d['timing']['offsets'])
         self.assertGreater(steps.max() - steps.min(), 50, 'the vector is non-uniform and stays so')
         # Real public RF Cine Module (regression on real files, not XA evidence): Frame Increment Pointer -> Frame Time.
