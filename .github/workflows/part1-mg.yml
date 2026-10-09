@@ -1,0 +1,280 @@
+name: Part 1 MG module contracts
+
+# R1 only. R2 adds the live job here; shared profiles and G3 stay unchanged.
+# Sample bytes are never uploaded as artifacts; the shared MG rule table is committed.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: part1-mg-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  part1-mg:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      PART1_UNIT: mg
+      TARGET_SHA: ${{ github.sha }}
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/part1-mg-browsers
+      PYTHONDONTWRITEBYTECODE: '1'
+      KIN_MG_SAMPLE_ROOT: ${{ runner.temp }}/part1-mg-samples/base
+      KIN_MG_PAIRED_ROOT: ${{ runner.temp }}/part1-mg-samples/paired
+      KIN_MG_RULE_CASES: tests/emr/e/rule-cases.json
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          persist-credentials: false
+      - name: Checked-out source is the event SHA
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/sha --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml -- python3 -c "import os,subprocess; assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip() == os.environ['TARGET_SHA']"
+      - name: Create the isolated Python environment
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/venv --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml --file tests/e2e/requirements.txt -- python3 -m venv "$RUNNER_TEMP/part1-mg-python"
+      - name: Install the versions used by the unit tests
+        if: ${{ !cancelled() }}
+        timeout-minutes: 15
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/dependencies --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml --file tests/e2e/requirements.txt -- "$RUNNER_TEMP/part1-mg-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4
+      - name: Prepare the hosted browser package repositories
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/browser-apt --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml --file scripts/ci_browser_apt.py -- sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Install full Chromium with its Linux libraries
+        if: ${{ !cancelled() }}
+        timeout-minutes: 15
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/browser --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml -- "$RUNNER_TEMP/part1-mg-python/bin/python" -m playwright install --with-deps chromium
+      - name: Fetch public DICOM series and verify every pinned file hash
+        if: ${{ !cancelled() }}
+        timeout-minutes: 40
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/samples --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml -- python3 -c "$(cat <<'PY'
+          import hashlib, json, os, shutil, tempfile, urllib.request, zipfile
+          from pathlib import Path
+          unit = os.environ["PART1_UNIT"]
+          manifest = json.loads(Path("tests/part1/" + unit + "/samples.json").read_text())
+          rows = manifest["used"] if unit == "mg" else manifest["public"]
+          def digest(path):
+              h = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for block in iter(lambda: stream.read(1024 * 1024), b""):
+                      h.update(block)
+              return h.hexdigest()
+          groups = {}
+          for row in rows:
+              relative = Path(row["path"] if unit == "mg" else row["relpath"])
+              key = manifest["sets"][row["set"]]["root_env"] if unit == "mg" else manifest["root_env"]
+              target = Path(os.environ[key]) / relative
+              target.parent.mkdir(parents=True, exist_ok=True)
+              if target.is_file():
+                  if digest(target) != row["sha256"]:
+                      raise RuntimeError("cached sample hash mismatch: " + row["id"])
+                  print("verified", row["id"], row["sha256"], flush=True)
+                  continue
+              groups.setdefault(relative.parent.name, []).append((row, target))
+          for series, requested in groups.items():
+              # The collection downloads used this public NBIA endpoint. Match archive members
+              # by the pinned FILE digest, never by a server-side ordering or a rewritten header.
+              url = "https://services.cancerimagingarchive.net/nbia-api/services/v1/getImage?SeriesInstanceUID=" + series
+              print("fetch", url, flush=True)
+              with tempfile.TemporaryFile() as archive:
+                  request = urllib.request.Request(url, headers={"User-Agent": "PACS-part1-CI/1.0"})
+                  with urllib.request.urlopen(request, timeout=180) as response:
+                      shutil.copyfileobj(response, archive, 1024 * 1024)
+                  archive.seek(0)
+                  pending = {row["sha256"]: (row, target) for row, target in requested}
+                  with zipfile.ZipFile(archive) as zipped:
+                      for member in zipped.infolist():
+                          if member.is_dir() or member.file_size not in {r["bytes"] for r, _ in pending.values()}:
+                              continue
+                          h = hashlib.sha256()
+                          with zipped.open(member) as stream:
+                              for block in iter(lambda: stream.read(1024 * 1024), b""):
+                                  h.update(block)
+                          match = pending.pop(h.hexdigest(), None)
+                          if match:
+                              row, target = match
+                              # Only a manifest-named destination is written, no archive extraction paths.
+                              with zipped.open(member) as source, target.open("xb") as output:
+                                  shutil.copyfileobj(source, output, 1024 * 1024)
+                              if digest(target) != row["sha256"]:
+                                  raise RuntimeError("downloaded sample hash mismatch: " + row["id"])
+                              print("verified", row["id"], row["sha256"], flush=True)
+                          if not pending:
+                              break
+                  if pending:
+                      raise RuntimeError("NOT RUN: public source lacks pinned samples " + ", ".join(r["id"] for r, _ in pending.values()))
+          print("all public samples verified:", len(rows))
+          PY
+          )"
+      - name: Verify the committed hash-pinned D744-2 rule table
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/rule-table --cwd . --file "$KIN_MG_RULE_CASES" --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml -- python3 -c "$(cat <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          spec = json.loads(Path("tests/part1/mg/cases.json").read_text())["suites"][0]["rule_table"]
+          target = Path(os.environ["KIN_MG_RULE_CASES"])
+          raw = target.read_bytes().replace(b"\r\n", b"\n")
+          if hashlib.sha256(raw).hexdigest() != spec["sha256"]:
+              raise SystemExit("D744-2 rule table hash mismatch")
+          print("verified D744-2", spec["sha256"])
+          PY
+          )"
+      - name: Model behaviour cases
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/model --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml --file "$KIN_MG_RULE_CASES" -- node --test --test-reporter=tap --test-reporter-destination=tmp/part1-mg-ci/model.tap --test-reporter=spec --test-reporter-destination=stdout tests/part1/mg/model_test.cjs
+      - name: Model declared cases equal the cases that passed
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/model-selection --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml --file "$KIN_MG_RULE_CASES" --file tmp/part1-mg-ci/model.tap -- python3 -c "$(cat <<'PY'
+          import collections, json, os, re
+          from pathlib import Path
+          unit = os.environ["PART1_UNIT"]
+          declaration = json.loads(Path("tests/part1/" + unit + "/cases.json").read_text())
+          body = declaration["suites"][0] if unit == "mg" else declaration["suites"]["model"]
+          expected = [c["name"] for c in body["cases"]]
+          if unit == "mg":
+              table = json.loads(Path(os.environ["KIN_MG_RULE_CASES"]).read_text())
+              expected += ["D744 rule table is the pinned one"] + [c["testId"] for c in table["cases"]]
+              assert len(expected) == body["expected"]
+          tap = Path("tmp/part1-" + unit + "-ci/model.tap").read_text(encoding="utf-8")
+          results = re.findall(r"^(ok|not ok) [0-9]+ - (.*)$", tap, re.M)
+          actual = [name for status, name in results]
+          assert collections.Counter(actual) == collections.Counter(expected), {"declared": expected, "collected": actual}
+          assert all(status == "ok" for status, _ in results), results
+          assert re.search(r"^# (?:skip|skipped) 0$", tap, re.M), "no skipped cases allowed"
+          assert re.search(r"^# todo 0$", tap, re.M), "no TODO cases allowed"
+          print(json.dumps({"declared": len(expected), "collected": len(actual), "passed": len(actual), "names": actual}, indent=2))
+          PY
+          )"
+      - name: DICOM contract cases with exact collection and no silent skips
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/dicom --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml -- "$RUNNER_TEMP/part1-mg-python/bin/python" -c "$(cat <<'PY'
+          import importlib.util, json, os, sys, unittest
+          from pathlib import Path
+          unit, name = os.environ["PART1_UNIT"], sys.argv[1]
+          declaration = json.loads(Path("tests/part1/" + unit + "/cases.json").read_text())
+          if unit == "mg":
+              body = next(s for s in declaration["suites"] if s["id"] == name)
+              filename, klass = body["file"], body["class"]
+              expected = [c["name"] for c in body["cases"]]
+          else:
+              body = declaration["suites"][name]
+              filename = body["path"]
+              klass = "XaDicomContractTest" if name == "dicom" else "XaPlaybackDomTest"
+              expected = [c["method"] for c in body["cases"]]
+          spec = importlib.util.spec_from_file_location("part1_" + unit + "_" + name, filename)
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          suite = unittest.defaultTestLoader.loadTestsFromModule(module)
+          def flatten(suite):
+              for test in suite:
+                  if isinstance(test, unittest.TestSuite):
+                      yield from flatten(test)
+                  else:
+                      yield test
+          collected = list(flatten(suite))
+          actual = [(t.__class__.__name__, t._testMethodName) for t in collected]
+          want = [(klass, method) for method in expected]
+          if len(actual) != len(want) or sorted(actual) != sorted(want):
+              raise SystemExit("declared != collected: " + repr({"declared": want, "collected": actual}))
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          report = {"declared": len(want), "collected": actual, "run": result.testsRun,
+                    "not_run": [{"case": test.id(), "reason": reason} for test, reason in result.skipped],
+                    "errors": [test.id() for test, _ in result.errors], "failures": [test.id() for test, _ in result.failures]}
+          print(json.dumps(report, indent=2))
+          if os.environ.get("GITHUB_STEP_SUMMARY"):
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+                  summary.write("### " + unit.upper() + " " + name + "\n\n")
+                  summary.write("Declared/collected: %d/%d; errors: %d; failures: %d; not run: %d.\n" %
+                                (len(want), len(actual), len(result.errors), len(result.failures), len(result.skipped)))
+                  for entry in report["not_run"]:
+                      summary.write("- NOT RUN `" + entry["case"] + "`: " + entry["reason"] + "\n")
+          if result.skipped:
+              print("::error::Required cases NOT RUN; see exact case names and reasons in this step record.")
+          sys.exit(0 if result.wasSuccessful() and not result.skipped and result.testsRun == len(want) else 1)
+          PY
+          )" dicom
+      - name: Full Chromium DOM cases with exact collection and no silent skips
+        if: ${{ !cancelled() }}
+        timeout-minutes: 20
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/dom --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml -- "$RUNNER_TEMP/part1-mg-python/bin/python" -c "$(cat <<'PY'
+          import importlib.util, json, os, sys, unittest
+          from pathlib import Path
+          unit, name = os.environ["PART1_UNIT"], sys.argv[1]
+          declaration = json.loads(Path("tests/part1/" + unit + "/cases.json").read_text())
+          if unit == "mg":
+              body = next(s for s in declaration["suites"] if s["id"] == name)
+              filename, klass = body["file"], body["class"]
+              expected = [c["name"] for c in body["cases"]]
+          else:
+              body = declaration["suites"][name]
+              filename = body["path"]
+              klass = "XaDicomContractTest" if name == "dicom" else "XaPlaybackDomTest"
+              expected = [c["method"] for c in body["cases"]]
+          spec = importlib.util.spec_from_file_location("part1_" + unit + "_" + name, filename)
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          suite = unittest.defaultTestLoader.loadTestsFromModule(module)
+          def flatten(suite):
+              for test in suite:
+                  if isinstance(test, unittest.TestSuite):
+                      yield from flatten(test)
+                  else:
+                      yield test
+          collected = list(flatten(suite))
+          actual = [(t.__class__.__name__, t._testMethodName) for t in collected]
+          want = [(klass, method) for method in expected]
+          if len(actual) != len(want) or sorted(actual) != sorted(want):
+              raise SystemExit("declared != collected: " + repr({"declared": want, "collected": actual}))
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          report = {"declared": len(want), "collected": actual, "run": result.testsRun,
+                    "not_run": [{"case": test.id(), "reason": reason} for test, reason in result.skipped],
+                    "errors": [test.id() for test, _ in result.errors], "failures": [test.id() for test, _ in result.failures]}
+          print(json.dumps(report, indent=2))
+          if os.environ.get("GITHUB_STEP_SUMMARY"):
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+                  summary.write("### " + unit.upper() + " " + name + "\n\n")
+                  summary.write("Declared/collected: %d/%d; errors: %d; failures: %d; not run: %d.\n" %
+                                (len(want), len(actual), len(result.errors), len(result.failures), len(result.skipped)))
+                  for entry in report["not_run"]:
+                      summary.write("- NOT RUN `" + entry["case"] + "`: " + entry["reason"] + "\n")
+          if result.skipped:
+              print("::error::Required cases NOT RUN; see exact case names and reasons in this step record.")
+          sys.exit(0 if result.wasSuccessful() and not result.skipped and result.testsRun == len(want) else 1)
+          PY
+          )" dom
+      - name: Mutants against an exact unmutated baseline
+        if: ${{ !cancelled() }}
+        timeout-minutes: 60
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/mutants --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml --file "$KIN_MG_RULE_CASES" -- "$RUNNER_TEMP/part1-mg-python/bin/python" -B tests/part1/mg/mutants.py --out tmp/part1-mg-ci/mutants-result
+      - name: R1 evidence including failures and not-run reasons
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: part1-mg-results
+          path: tmp/part1-mg-ci/
+          if-no-files-found: error
+          retention-days: 7

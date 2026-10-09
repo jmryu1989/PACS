@@ -243,7 +243,7 @@
     }
    ],
    "rule_table": {
-    "path": "C:/Users/norne/PACS/tmp/astra-control/evidence/mg-classification-consult-20261009/v2/rule-cases.json",
+    "path": "tests/emr/e/rule-cases.json",
     "sha256": "a60b86b6267853615872a915d66a59150062afdbfe5d8725ca7a55f578c984d0",
     "schema": "D744-2",
     "cases": 273,

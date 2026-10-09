@@ -63,11 +63,11 @@ const PARTIAL_MEDIAL={'00281352':seq({'00080102':v('SH','SCT'),'00080100':v('SH'
 // named by its testId; every provided expected key is compared with model.contract(). The table is input
 // data from the consult; nothing here is generated from this model's output.
 const fs=require('node:fs'),crypto=require('node:crypto');
-const RULE_TABLE=process.env.KIN_MG_RULE_CASES||'C:/Users/norne/PACS/tmp/astra-control/evidence/mg-classification-consult-20261009/v2/rule-cases.json';
+const RULE_TABLE=process.env.KIN_MG_RULE_CASES||path.join(__dirname,'..','..','emr','e','rule-cases.json');
 const RULE_TABLE_SHA256='a60b86b6267853615872a915d66a59150062afdbfe5d8725ca7a55f578c984d0';
-// This byte pin is required only to bind both products to the identical shared input contract.
+// This LF-normalised byte pin binds both products to the same input contract across Git checkout line endings.
 // A missing required table fails collection, rather than silently passing a smaller suite.
-const raw=fs.readFileSync(RULE_TABLE),table=JSON.parse(raw);
+const raw=fs.readFileSync(RULE_TABLE,'utf8').replace(/\r\n/g,'\n'),table=JSON.parse(raw);
 {
   test('D744 rule table is the pinned one',()=>{
     assert.equal(crypto.createHash('sha256').update(raw).digest('hex'),RULE_TABLE_SHA256);

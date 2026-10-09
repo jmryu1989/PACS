@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       candidate_sha:
-        description: Full lowercase 40-character commit SHA to validate (default: the dispatched ref)
+        description: "Full lowercase 40-character commit SHA to validate (default: the dispatched ref)"
         required: false
         type: string
 
