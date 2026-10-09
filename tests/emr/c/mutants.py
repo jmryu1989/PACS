@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # coding: utf-8
-"""EMR-C1 existing 49 variants plus D739 CM01-CM12 over an exact baseline.
+"""EMR-C1 existing 61 variants plus D768 I13-I17 over an exact baseline.
 
 The C1 sources, the A contract they import and the C1 tests are copied into a fresh temporary tree; the originals are
 never written (their hashes are compared before and after). In the copy the baseline must pass exactly: every declared
@@ -88,19 +88,6 @@ MUTANTS = {'M01': ('api/src/emr-report/commands.ts',
                    "['adopt-signed-original', 'sign-new-version']);\n",
                    ''),
  'M10-queue': ('api/src/emr-report/offline-queue.ts',
-               '      const blockedRecords = new Set<string>();\n'
-               '      for (const row of list) {\n'
-               '        if (!active()) break;\n'
-               '        if (!row.entry || row.blocked) continue;\n'
-               '        const record = JSON.stringify([row.entry.access.target.studyId, '
-               'row.entry.access.target.recordId]);\n'
-               "        if (['conflict', 'refused', 'corrupt'].includes(state.get(row.eventId)!)) { "
-               'blockedRecords.add(record); continue; }\n'
-               "        if (state.get(row.eventId) === 'committed') continue;\n"
-               '        // Time/evidence holds are not automatically adopted. Technical predecessor holds are '
-               'reevaluated each pass.\n'
-               "        if (row.state === 'held' && row.evidence?.reason && row.evidence.reason !== "
-               "'predecessor-unresolved') { blockedRecords.add(record); continue; }\n"
                "        if (blockedRecords.has(record)) { await set(row.eventId, 'held', { reason: "
                "'predecessor-unresolved' }); continue; }\n"
                '        control?.changed(row.entry, state.get(row.eventId)!, row.evidence);\n'
@@ -127,19 +114,6 @@ MUTANTS = {'M01': ('api/src/emr-report/commands.ts',
                "'corrupt'].includes(state.get(r.eventId)!))) retry.add(row.eventId);\n"
                '          blockedRecords.add(record); continue;\n'
                '        }\n',
-               '      const blockedRecords = new Set<string>();\n'
-               '      for (const row of list) {\n'
-               '        if (!active()) break;\n'
-               '        if (!row.entry || row.blocked) continue;\n'
-               '        const record = JSON.stringify([row.entry.access.target.studyId, '
-               'row.entry.access.target.recordId]);\n'
-               "        if (['conflict', 'refused', 'corrupt'].includes(state.get(row.eventId)!)) { "
-               'blockedRecords.add(record); continue; }\n'
-               "        if (state.get(row.eventId) === 'committed') continue;\n"
-               '        // Time/evidence holds are not automatically adopted. Technical predecessor holds are '
-               'reevaluated each pass.\n'
-               "        if (row.state === 'held' && row.evidence?.reason && row.evidence.reason !== "
-               "'predecessor-unresolved') { blockedRecords.add(record); continue; }\n"
                "        if (false) { await set(row.eventId, 'held', { reason: 'predecessor-unresolved' }); continue; "
                '}\n'
                '        control?.changed(row.entry, state.get(row.eventId)!, row.evidence);\n'
@@ -180,8 +154,8 @@ MUTANTS = {'M01': ('api/src/emr-report/commands.ts',
                      'view.readText().conclusion; }, get recommendation() { return view.readText().recommendation; } '
                      '};'),
  'M12-aba': ('worklist-v0/hpacs-lite/offline-report.js',
-             'if (!valid(token) || (token.screen && !visible(token))) return { stale: true };',
-             'if (!valid(token)) return { stale: true };'),
+             'opening.uid === token.uid && opening.generation === token.openingGeneration',
+             'opening.uid === token.uid'),
  'M13': ('api/src/emr-report/reads.ts',
          '  return provideAfterDurableEvent(ledger, plan.event, sendBody);',
          '  const body = await sendBody({ eventId: plan.event.eventId, durableAt: plan.event.occurredAt });\n'
@@ -259,8 +233,8 @@ MUTANTS = {'M01': ('api/src/emr-report/commands.ts',
          '  const readable = reader ? retainedVersions(facts) : publishedHistory(facts);',
          '  const readable = retainedVersions(facts);'),
  'M25': ('worklist-v0/hpacs-lite/offline-report.js',
-         'if (!valid(token) || (token.screen && !visible(token))) return { stale: true };',
-         'if (!valid(token)) return { stale: true };'),
+         "capture('read', { uid }, true)",
+         "capture('read', { uid }, false)"),
  'M26-sign': ('worklist-v0/hpacs-lite/offline-report.js',
               'const valid = token => !disposed &&',
               "const valid = token => token.lane.includes('approval') || !disposed &&"),
@@ -268,7 +242,7 @@ MUTANTS = {'M01': ('api/src/emr-report/commands.ts',
               'const valid = token => !disposed &&',
               "const valid = token => token.lane.includes('drain') || !disposed &&"),
  'M26-reply': ('worklist-v0/hpacs-lite/offline-report.js',
-               'if (!selection || entry.deviceSequence > selection.sequence) {',
+               'if (!selection || !ownedProjection(selection) || entry.deviceSequence >= selection.sequence) {',
                'if (true) {'),
  'M27': ('api/src/emr-report/reconcile.ts',
          "  if (actor.sessionState !== 'active') return fail('SessionEnded', null);",
@@ -326,12 +300,11 @@ MUTANTS = {'M01': ('api/src/emr-report/commands.ts',
          ''),
  'M37': ('worklist-v0/hpacs-lite/offline-report.js', 'lanes.get(token.lane) === token.jobGeneration;', 'true;'),
  'M38': ('worklist-v0/hpacs-lite/offline-report.js',
-         "if (saved?.status !== 'pending-offline' || saved.receipt?.eventId !== entry.eventId) throw new Error('no "
-         "durable receipt');",
-         ''),
+         "if (saved?.status !== 'pending-offline' || saved.receipt?.eventId !== entry.eventId)",
+         "if (saved?.status !== 'pending-offline')"),
  'M39': ('worklist-v0/hpacs-lite/offline-report.js',
-         'if (!valid(token) || (token.screen && !visible(token))) return { stale: true };',
-         'if (!valid(token)) return { stale: true };'),
+         "capture('print', { uid: v.uid, recordId: v.recordId, versionId: v.versionId }, true)",
+         "capture('print', { uid: v.uid, recordId: v.recordId, versionId: v.versionId }, false)"),
  'M40': ('worklist-v0/hpacs-lite/offline-report.js',
          'const t = sendToken(entry);',
          'const t = sendToken(entry);\n'
@@ -344,8 +317,36 @@ MUTANTS = {'M01': ('api/src/emr-report/commands.ts',
  'M43': ('api/src/emr-report/offline-queue.ts',
          'const kept = new Map((await keptCommits()).map(a => [a.eventId, a]));',
          'const kept = new Map((await keptCommits()).filter(a => list.some(r => r.eventId === a.eventId)).map(a => '
-         '[a.eventId, a]));')}
-
+         '[a.eventId, a]));'),
+ 'M44': ('worklist-v0/hpacs-lite/offline-report.js',
+         'const ownedProjection = projection => !!projection && valid(projection.token);',
+         'const ownedProjection = projection => !!projection;'),
+ 'M45': ('worklist-v0/hpacs-lite/offline-report.js',
+         '        apply(token, () => {\n'
+         '          if (retryable) retryLater(token); else retryCount = 0;\n'
+         '          // No await/microtask between the final dirty check and relinquishing the handle.\n'
+         '          if (drain === handle) drain = null;\n'
+         '        });\n'
+         "        return { status: 'drained' };\n"
+         '      };\n'
+         '      // Start on a microtask so concurrent callers always see the same promise.\n'
+         '      handle.promise = Promise.resolve().then(run);\n',
+         '        apply(token, () => {\n'
+         '          if (retryable) retryLater(token); else retryCount = 0;\n'
+         '          // No await/microtask between the final dirty check and relinquishing the handle.\n'
+         '        });\n'
+         "        return { status: 'drained' };\n"
+         '      };\n'
+         '      // Start on a microtask so concurrent callers always see the same promise.\n'
+         '      handle.promise = Promise.resolve().then(run).finally(() => apply(token, () => { if (drain === handle) '
+         'drain = null; }));\n'),
+ 'M46': ('api/src/emr-report/offline-queue.ts',
+         "const restoringEvidence = state.get(row.eventId) === 'committed';",
+         "if (state.get(row.eventId) === 'committed') continue;\n        const restoringEvidence = false;"),
+ 'M47': ('api/src/emr-report/offline-queue.ts', 'catch { continue; }', "catch { refuse('CommitEvidenceRefused'); }"),
+ 'M48': ('worklist-v0/hpacs-lite/offline-report.js',
+         'if (ownerKey(displayedOwner) !== ownerKey(nextOwner)) view.clearReport();',
+         'view.clearReport();')}
 
 def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -497,6 +498,8 @@ def main():
     declared = {v["variant"]: v for m in unit["mutants"] for v in m["variants"]}
     if set(declared) != set(MUTANTS) or [m["id"] for m in unit["mutants"]] != [f"M{n:02d}" for n in range(1, len(unit["mutants"]) + 1)]:
         result["declaration"].append("declared mutant variants differ from the implemented table")
+    if len(set(MUTANTS.values())) != len(MUTANTS):
+        result["declaration"].append("duplicate mutation transformations")
     for name, variant in declared.items():
         if name in MUTANTS and variant["file"] != MUTANTS[name][0]:
             result["declaration"].append(f"{name}: declared file {variant['file']} != {MUTANTS[name][0]}")
@@ -542,8 +545,8 @@ def main():
                 target = copy / file
                 original = target.read_bytes()
                 text = original.decode("utf-8")
-                newline = "\r\n" if "\r\n" in text else "\n"
-                anchor_n, replacement_n = anchor.replace("\n", newline), replacement.replace("\n", newline)
+                text = text.replace("\r\n", "\n")
+                anchor_n, replacement_n = anchor, replacement
                 entry = {"variant": name, "file": file, "suite": declared[name]["suite"], "case": declared[name]["case"],
                          "anchor_sha256": hashlib.sha256(anchor.encode("utf-8")).hexdigest(), "killed": False, "reason": None}
                 if text.count(anchor_n) != 1:

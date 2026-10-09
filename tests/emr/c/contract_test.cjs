@@ -589,6 +589,10 @@ test('C-C04 t0 is the first actual signing time and amendment closes at t0+24h; 
       assert.equal(got.kind, expected, 'AC02/03 full interval follows t0 in both states');
       assert.equal(JSON.stringify(paired.facts), pristine, 'AC03 rejection preserves public history and t0');
     }
+    // R4/P3: past Addendum uses the same lower-time boundary in either server state.
+    const earlyAddendum = decide(plus(T0, -MIN), { action: 'addendum' });
+    assert.equal(earlyAddendum.kind, 'refused', 'P3 past Addendum is refused in both states');
+    assert.equal(JSON.stringify(paired.facts), pristine, 'P3 refused Addendum leaves facts intact');
     const retentionEvent=offlineEntry(paired,'r1',{action:'amend',signedAt:plus(T0,MIN),grant:lowerGrant});
     const retained=retainedFor(paired,verify(retentionEvent.envelope,retentionEvent.owner.osUserId));
     assert.equal(reconcile(paired,retentionEvent,{receivedAt:plus(T0,30*H),retained:{...retained,graph:{...retained.graph,complete:false}}}).kind,'refused','AC10 incomplete retention graph cannot be admitted');
@@ -999,6 +1003,7 @@ test('C-C09 in each of the four reconnect conflicts the server state and my sign
     { ...prior, version:{ ...prior.version, recordId:'other-record' }, receipt:{...prior.receipt,recordId:'other-record'} },
     { ...prior, version:{ ...prior.version, versionId:'other-version' }, receipt:{...prior.receipt,versionId:'other-version'} },
     { ...prior, version:{ ...prior.version, sha256:sha('wrong') } },
+    { ...prior, signedAt:plus(T0,-MIN) },
     { ...prior, deviceSequence:2 }, { ...prior, ancestors:[e2.eventId], predecessorEventId:e2.eventId },
     { eventId:e1.eventId,committed:true },
   ];

@@ -1264,7 +1264,7 @@
           "file": "worklist-v0/hpacs-lite/offline-report.js",
           "suite": "dom",
           "case": "test_d01_pending_is_not_published",
-          "assertion_sha256": "4255b18a1a48fd0a7cf1b947d971c9b351a080de0cae8e472849738a1f9171df"
+          "assertion_sha256": "56223c105ba1d3cc80bb56a53460f7b6aecb027c837aa245a2694f99fd0704ec"
         }
       ]
     },
@@ -1306,7 +1306,7 @@
           "file": "worklist-v0/hpacs-lite/offline-report.js",
           "suite": "queue",
           "case": "C-Q08",
-          "assertion_sha256": "7b74ae0a774ef8f5bf2b0b71f42ca971600ae207be47fb810e485f848b5226ae"
+          "assertion_sha256": "bc0564f3c3ac1280afce163513e7577420e3f5f35aadaf325f7ff6f0b3106c41"
         }
       ]
     },
@@ -1335,6 +1335,71 @@
           "suite": "queue",
           "case": "C-Q08",
           "assertion_sha256": "ecfa796b7a6df54af07d09dd1206102985fd7f0e1c50b70277d17edae813b276"
+        }
+      ]
+    },
+    {
+      "id": "M44",
+      "invariant": "I13",
+      "variants": [
+        {
+          "variant": "M44",
+          "file": "worklist-v0/hpacs-lite/offline-report.js",
+          "suite": "queue",
+          "case": "C-Q08",
+          "assertion_sha256": "802c2a47f3143deecd90a0054ab92ad79b4046ec34dc0a213db9de38a4ac580d"
+        }
+      ]
+    },
+    {
+      "id": "M45",
+      "invariant": "I14",
+      "variants": [
+        {
+          "variant": "M45",
+          "file": "worklist-v0/hpacs-lite/offline-report.js",
+          "suite": "queue",
+          "case": "C-Q08",
+          "assertion_sha256": "b912ac416c7ab37c51ba6bd58b34003b4481268bb390957d49e33387706a5b26"
+        }
+      ]
+    },
+    {
+      "id": "M46",
+      "invariant": "I15",
+      "variants": [
+        {
+          "variant": "M46",
+          "file": "api/src/emr-report/offline-queue.ts",
+          "suite": "queue",
+          "case": "C-Q04",
+          "assertion_sha256": "a23bd09dfd8bbccaba5555eb98a840d83011397a31515f2c8dfde05076904824"
+        }
+      ]
+    },
+    {
+      "id": "M47",
+      "invariant": "I16",
+      "variants": [
+        {
+          "variant": "M47",
+          "file": "api/src/emr-report/offline-queue.ts",
+          "suite": "queue",
+          "case": "C-Q04",
+          "assertion_sha256": "586524ce30389ef7314fe4ec38ce5ea92f900b9f2c6a25b62a1704a1fa27daf6"
+        }
+      ]
+    },
+    {
+      "id": "M48",
+      "invariant": "I17",
+      "variants": [
+        {
+          "variant": "M48",
+          "file": "worklist-v0/hpacs-lite/offline-report.js",
+          "suite": "dom",
+          "case": "test_d04_end_reauth_and_other_account",
+          "assertion_sha256": "d593fe5fa2ae7834a218f4921e30799aac5e7a294ba5948e4df2e2fcce6f0b73"
         }
       ]
     }
@@ -1680,8 +1745,86 @@
           "C-Q08"
         ],
         "reason": null
+      },
+      {
+        "id": "AC37",
+        "status": "bound",
+        "tests": [
+          "C-Q08",
+          "C-D04"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC38",
+        "status": "bound",
+        "tests": [
+          "C-Q08"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC39",
+        "status": "bound",
+        "tests": [
+          "C-Q08"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC40",
+        "status": "bound",
+        "tests": [
+          "C-Q08"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC41",
+        "status": "bound",
+        "tests": [
+          "C-Q04"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC42",
+        "status": "bound",
+        "tests": [
+          "C-Q04"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC43",
+        "status": "bound",
+        "tests": [
+          "C-D04"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC44",
+        "status": "bound",
+        "tests": [
+          "C-D01",
+          "C-D03",
+          "C-D06"
+        ],
+        "reason": null
       }
     ],
-    "live_native": "not_run: C2/native adapters and isolated environment are not connected"
+    "live_native": "not_run: C2/native adapters and isolated environment are not connected",
+    "amendment": {
+      "decision": "D768",
+      "invariants": [
+        "I13",
+        "I14",
+        "I15",
+        "I16",
+        "I17"
+      ],
+      "base_head": "ea006925b231d789451c227262baaad9dfdf14b6"
+    }
   }
 }

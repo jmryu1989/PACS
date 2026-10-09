@@ -124,7 +124,7 @@ BOOT = r"""() => {
   store.queue = o => ({
     async enqueue(e) {
       try { const receipt = await store.enqueue(e); if (receipt.eventId !== e.eventId || receipt.digest !== await digest(e)) throw new Error('receipt');
-        queueStates.set(e.eventId, { state: 'pending', evidence: null }); return { status: 'pending-offline', receipt }; }
+        queueStates.set(e.eventId, { state: 'pending', evidence: null }); return { status: 'pending-offline', receipt: syn.badQueueReceipt ? {...receipt,eventId:'other-event'} : receipt }; }
       catch { return { status: 'not-saved' }; }
     },
     async send(t, session, control) {
@@ -225,6 +225,12 @@ class OfflineReportDOM(unittest.TestCase):
         self.assertEqual(1, self.js("() => syn.entries.size"))
         self.assertEqual("SYN 두번째 소견", self.page.input_value("#findings"))
         self.assertEqual([], self.js("() => syn.submits()"))
+
+        # AC44: even a nominally successful queue port must acknowledge this exact event.
+        self.js(BOOT)
+        self.js('() => { syn.badQueueReceipt = true; }')
+        mismatch = self.approve_click()
+        self.assertEqual('not-saved', mismatch['status'], 'AC44 other event receipt is not my approval')
 
         # AC26: a delayed durable receipt, including failure, never erases subsequent typing.
         for outcome in ('ok', 'throw', 'mismatch'):
@@ -459,6 +465,42 @@ class OfflineReportDOM(unittest.TestCase):
             self.js('() => syn.old')
             self.assertEqual(newest,self.js('() => syn.controller.state(syn.opening.uid)'),'AC23 stale submit leaves newest state')
             self.assertEqual(0,self.js('() => syn.timers.length'),'AC23 stale submit schedules no retry')
+
+        # AC37: authority notification alone releases abandoned progress, without a new approval.
+        for port in ('Sign', 'Put'):
+            for change in ('aba', 'session'):
+                self.js(BOOT)
+                self.page.fill('#findings', 'SYN retained input')
+                self.js("port => { syn['hold'+port]=true; syn.old=syn.approve(); }", port)
+                self.page.wait_for_function('port => syn[port.toLowerCase()+"Holds"].length===1', arg=port)
+                self.js("change => { if(change==='session'){syn.epoch++;}else{const a={...syn.owner};Object.assign(syn.owner,syn.makeOwner('r2'));syn.accountGeneration++;syn.notify();Object.assign(syn.owner,a);syn.accountGeneration++;}syn.notify(); }", change)
+                self.assertEqual('', self.status(), 'AC37 authority notification releases stale progress')
+                self.js('port => syn[port.toLowerCase()+"Holds"].shift()()', port)
+                self.js('() => syn.old')
+                self.js('() => {syn.online=true;syn.notify();}')
+                if port == 'Put':
+                    self.page.wait_for_function("() => syn.controller.state(syn.opening.uid).status==='published'")
+                    self.assertEqual('Approved', self.status(), 'AC37 recovered durable approval is visible')
+                else:
+                    self.assertEqual([], self.js('() => syn.submits()'))
+                self.assertEqual('SYN retained input', self.page.input_value('#findings'))
+                self.assertEqual(1, self.js('() => syn.signRequests.length'))
+        # AC43/P5: same doctor's session renewal wakes the queue, preserving body and subsequent typing.
+        self.js(BOOT)
+        self.js('() => {syn.online=true;}')
+        self.js('() => syn.controller.open(syn.opening.uid)')
+        body = self.page.text_content('#report')
+        self.js('() => {syn.online=false;}')
+        self.approve_click()
+        self.page.fill('#findings', 'SYN after approval')
+        self.js('() => {syn.epoch++;syn.accountGeneration++;syn.online=true;syn.notify();}')
+        self.page.wait_for_function("() => syn.controller.state(syn.opening.uid).status==='published'")
+        self.assertEqual(body, self.page.text_content('#report'), 'AC43 same owner renewal preserves report body')
+        self.assertEqual('SYN after approval', self.page.input_value('#findings'))
+        self.js('() => syn.notify()')
+        self.assertEqual(body, self.page.text_content('#report'), 'AC43 repeated notification preserves body')
+        self.js("() => {Object.assign(syn.owner,syn.makeOwner('r2'));syn.accountGeneration++;syn.notify();}")
+        self.assertEqual('', self.page.text_content('#report'), 'AC43 changed owner clears former report')
 
     def test_d05_conflict_keeps_both_versions(self):
         self.js("() => { syn.online = true; syn.submitMode = 'conflict'; }")

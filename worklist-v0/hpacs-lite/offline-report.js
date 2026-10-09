@@ -70,13 +70,16 @@
     const key = parts => JSON.stringify(parts);
     const ownerKey = owner => owner ? key(['issuer', 'subject', 'institutionId', 'deviceId', 'osUserId'].map(k => owner[k])) : null;
     const copyOwner = () => context.owner() ? Object.freeze({ ...context.owner() }) : null;
+    let displayedOwner = copyOwner();
     const idle = () => Object.freeze({ status: 'idle', eventId: null, owner: null, currentVersion: null, signedText: null, reason: null });
     const recordKey = (owner, uid, recordId) => key([ownerKey(owner), uid, recordId]);
     const eventKey = (owner, uid, recordId, eventId) => key([ownerKey(owner), uid, recordId, eventId]);
     function stateOf(uid, recordId) {
       const owner = context.owner(), rk = recordId ?? records.get(key([ownerKey(owner), uid]));
       const selection = selections.get(recordKey(owner, uid, rk));
-      return selection ? (selection.eventId === null ? selection.state : states.get(eventKey(owner, uid, rk, selection.eventId))) || idle() : idle();
+      const state = ownedProjection(selection) ?
+        (selection.eventId === null ? selection.state : states.get(eventKey(owner, uid, rk, selection.eventId))) : null;
+      return ownedProjection(state) ? state : idle();
     }
     function paint() {
       const opening = context.opening();
@@ -95,6 +98,7 @@
     const valid = token => !disposed && sameOwner(token.owner, context.owner()) &&
       token.accountGeneration === context.accountGeneration() && token.session.epoch === context.session().epoch &&
       lanes.get(token.lane) === token.jobGeneration;
+    const ownedProjection = projection => !!projection && valid(projection.token);
     const visible = token => {
       const opening = context.opening();
       return !!opening && opening.uid === token.uid && opening.generation === token.openingGeneration &&
@@ -109,10 +113,16 @@
     const currentResult = token => valid(token) ? stateOf(token.uid, token.recordId) : stale;
     function select(token, patch, sequence = Infinity) {
       const rk = recordKey(token.owner, token.uid, token.recordId);
-      const state = Object.freeze({ ...idle(), ...patch, owner: token.owner });
+      const state = Object.freeze({ ...idle(), ...patch, owner: token.owner, token });
       records.set(key([ownerKey(token.owner), token.uid]), token.recordId);
-      selections.set(rk, { eventId: state.eventId, sequence, state });
+      selections.set(rk, { eventId: state.eventId, sequence, state, token });
       if (state.eventId !== null) states.set(eventKey(token.owner, token.uid, token.recordId, state.eventId), state);
+      paint();
+    }
+    function releaseStaleSelections() {
+      // Only a current owner write calls this; a stale continuation never cleans up a newer job.
+      for (const [rk, selection] of selections) if (!ownedProjection(selection)) selections.delete(rk);
+      for (const [ek, state] of states) if (!ownedProjection(state)) states.delete(ek);
       paint();
     }
     function queueFor(token) {
@@ -129,11 +139,11 @@
         if (prior?.status === 'published' && state !== 'committed') return;
         const status = { pending: 'pending-offline', 'sent-unknown': 'pending-offline', committed: 'published',
           'awaiting-reauth': 'awaiting-reauth', conflict: 'conflict', held: 'held', refused: 'refused', corrupt: 'held' }[state];
-        states.set(ek, Object.freeze({ ...idle(), ...prior, owner: token.owner, eventId: entry.eventId, signedText: signedText(entry),
+        states.set(ek, Object.freeze({ ...idle(), ...prior, owner: token.owner, token, eventId: entry.eventId, signedText: signedText(entry),
           status, currentVersion: evidence?.currentVersion ?? prior?.currentVersion ?? null, reason: evidence?.reason ?? null }));
         const rk = recordKey(token.owner, token.uid, token.recordId), selection = selections.get(rk);
-        if (!selection || entry.deviceSequence > selection.sequence) {
-          selections.set(rk, { eventId: entry.eventId, sequence: entry.deviceSequence });
+        if (!selection || !ownedProjection(selection) || entry.deviceSequence >= selection.sequence) {
+          selections.set(rk, { eventId: entry.eventId, sequence: entry.deviceSequence, token });
           records.set(key([ownerKey(token.owner), token.uid]), token.recordId);
         }
         paint();
@@ -161,6 +171,7 @@
       const token = capture('drain'), handle = { token, dirty: false, promise: null };
       apply(token, () => {
         if (retry) { scheduler.cancel(retry.id); retry = null; }
+        releaseStaleSelections();
         drain = handle;
       });
       const run = async () => {
@@ -207,11 +218,13 @@
         } while (handle.dirty && valid(token));
         apply(token, () => {
           if (retryable) retryLater(token); else retryCount = 0;
+          // No await/microtask between the final dirty check and relinquishing the handle.
+          if (drain === handle) drain = null;
         });
         return { status: 'drained' };
       };
       // Start on a microtask so concurrent callers always see the same promise.
-      handle.promise = Promise.resolve().then(run).finally(() => apply(token, () => { if (drain === handle) drain = null; }));
+      handle.promise = Promise.resolve().then(run);
       return handle.promise;
     }
     async function observe(token, observation) {
@@ -223,13 +236,15 @@
     function render() {
       if (disposed || !context.owner()) { view.status.textContent = ''; return; }
       const token = capture('render');
-      apply(token, paint);
+      apply(token, releaseStaleSelections);
     }
     const unsubscribe = context.subscribe(() => {
       if (disposed) return;
       if (retry) { scheduler.cancel(retry.id); retry = null; }
-      // W6 keeps each owner's editor draft; only the displayed report projection is cleared here.
-      view.clearReport();
+      // Re-authentication by the same clinician must preserve the report and the editor's work.
+      const nextOwner = copyOwner();
+      if (ownerKey(displayedOwner) !== ownerKey(nextOwner)) view.clearReport();
+      displayedOwner = nextOwner;
       render();
       sync();
     });

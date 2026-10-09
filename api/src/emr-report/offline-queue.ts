@@ -116,7 +116,14 @@ export function createOfflineQueue(options: { store: DurableQueuePort; owner: Qu
   async function keptCommits(): Promise<Readonly<AdoptedEvent>[]> {
     const listed = await store.commitEvidence(owner);
     if (!Array.isArray(listed)) refuse('CommitEvidenceRefused');
-    return listed.map(parseAdoptedEvent);
+    const verified: Readonly<AdoptedEvent>[] = [];
+    for (const raw of listed) {
+      try { verified.push(parseAdoptedEvent(raw)); }
+      // Preserve the damaged row in the store. Its dependants have no proof and wait for authenticated recovery;
+      // unrelated signed chains do not depend on this row and can still proceed.
+      catch { continue; }
+    }
+    return verified;
   }
 
   const payloadOf = (entry: Readonly<QueueEntry>) => JSON.parse(Buffer.from(entry.envelope.payload, 'base64url').toString('utf8'));
@@ -169,6 +176,7 @@ export function createOfflineQueue(options: { store: DurableQueuePort; owner: Qu
       const list = await rows();
       if (!active()) return [];
       const state = new Map(list.map(r => [r.eventId, r.state]));
+      for (const row of list) if (row.state === 'committed') committed.add(row.eventId);
       const kept = new Map((await keptCommits()).map(a => [a.eventId, a]));
       if (!active()) return [];
       const retry = new Set<string>();
@@ -196,7 +204,11 @@ export function createOfflineQueue(options: { store: DurableQueuePort; owner: Qu
         if (!row.entry || row.blocked) continue;
         const record = JSON.stringify([row.entry.access.target.studyId, row.entry.access.target.recordId]);
         if (['conflict', 'refused', 'corrupt'].includes(state.get(row.eventId)!)) { blockedRecords.add(record); continue; }
-        if (state.get(row.eventId) === 'committed') continue;
+        const restoringEvidence = state.get(row.eventId) === 'committed';
+        if (restoringEvidence && kept.has(row.eventId)) {
+          try { ownAdoption(kept.get(row.eventId), row.entry); continue; }
+          catch { kept.delete(row.eventId); }
+        }
         // Time/evidence holds are not automatically adopted. Technical predecessor holds are reevaluated each pass.
         if (row.state === 'held' && row.evidence?.reason && row.evidence.reason !== 'predecessor-unresolved') { blockedRecords.add(record); continue; }
         if (blockedRecords.has(record)) { await set(row.eventId, 'held', { reason: 'predecessor-unresolved' }); continue; }
@@ -222,7 +234,7 @@ export function createOfflineQueue(options: { store: DurableQueuePort; owner: Qu
         }
         const attempt = (attempts.get(row.eventId) ?? 0) + 1;
         attempts.set(row.eventId, attempt);
-        const currentAttempt = () => active() && attempts.get(row.eventId) === attempt && !committed.has(row.eventId);
+        const currentAttempt = () => active() && attempts.get(row.eventId) === attempt && (restoringEvidence || !committed.has(row.eventId));
         let answer: Record<string, any>;
         try { const reply = await transport.submit(row.entry); answer = object(reply, ['eventId', 'status', 'reason', 'recoveryRef', 'currentVersion', 'times', ...(Object.prototype.hasOwnProperty.call(reply, 'adoption') ? ['adoption'] : [])]); }
         catch (signal) {
@@ -252,7 +264,7 @@ export function createOfflineQueue(options: { store: DurableQueuePort; owner: Qu
           }
         } else {
           blockedRecords.add(record);
-          if (next === 'pending' || (next === 'held' && answer.reason === 'predecessor-unresolved')) retry.add(row.eventId);
+          if (restoringEvidence || next === 'pending' || (next === 'held' && answer.reason === 'predecessor-unresolved')) retry.add(row.eventId);
         }
         await set(row.eventId, next, answer);
       }

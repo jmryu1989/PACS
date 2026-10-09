@@ -61,8 +61,8 @@ const ownerOf = id => ({ issuer: ISS, subject: 'sub-' + id, institutionId: 'inst
 const sessionOf = (id, state = 'active') => ({ state, ...ownerOf(id) });
 
 // ---- the synthetic server: real planning (reconcile + executeCommit), synthetic storage ----
-function server() {
-  const srv = { facts: L.newReportFacts(next('report'), STUDY), record: null, receipts: new Map(), adoptions: new Map(), commits: [], submitted: [] };
+function server(studyId = STUDY) {
+  const srv = { facts: L.newReportFacts(next('report'), studyId), record: null, receipts: new Map(), adoptions: new Map(), commits: [], submitted: [] };
   return srv;
 }
 function claim(srv, id, at) {
@@ -73,9 +73,9 @@ function grantFor(srv, id, issuedAt) {
   const anchor = { anchorId: next('grant-anchor'), deviceId: 'dev-' + id, bootId: 'boot-1', serverTime: issuedAt, validUntil: plus(issuedAt, 48 * H) };
   anchorRows.set(anchor.anchorId, anchor);
   const key = keyRows.get('kid-' + id), part = name => ({ part: name, sha256: sha(name), verifiedSha256: sha(name), bytes: 10 });
-  const readiness = G.offlineReadiness({ manifestId: 'm', studies: [{ studyId: STUDY, role: 'current', parts: G.MANIFEST_PARTS.map(part) }], requiredComparisonIds: [] },
+  const readiness = G.offlineReadiness({ manifestId: 'm', studies: [{ studyId: srv.facts.studyId, role: 'current', parts: G.MANIFEST_PARTS.map(part) }], requiredComparisonIds: [] },
     offlinePolicy, { bytes: offlinePolicy.reserveBytesJ });
-  const issued = G.issueOfflineGrant({ grantId: next('grant'), deviceId: key.deviceId, kid: key.kid, studies: [{ studyId: STUDY, recordId: srv.facts.recordId,
+  const issued = G.issueOfflineGrant({ grantId: next('grant'), deviceId: key.deviceId, kid: key.kid, studies: [{ studyId: srv.facts.studyId, recordId: srv.facts.recordId,
     claimGeneration: srv.facts.claimGeneration, role: 'current' }], actions: ['approve-sign', 'amend', 'addendum'], issuedAt, anchorId: anchor.anchorId }, actor(id), key, offlinePolicy, readiness);
   grantRows.set(issued.grant.grantId, issued.grant);
   return { ...issued, anchor };
@@ -89,7 +89,7 @@ function entry(srv, id, o) {
     signBootId: o.signBoot ?? 'boot-1', signTickMs: 1000 + ms(signedAt) - ms(serverTime), wallClockEvents: [], interval: { earliest: plus(signedAt, -2000), latest: plus(signedAt, 2000) } };
   const previous = o.previous !== undefined ? o.previous : action === 'approve-sign' ? null : srv.facts.bodyVersion;
   const p = { formatVersion: 'emr-signature/2', text: { kind: 'report', findings: o.findings ?? 'SYN Q 소견', conclusion: '', recommendation: '' }, patient: { ...patient },
-    managingInstitutionId: 'inst-a', actingInstitutionId: 'inst-a', studyId: STUDY, recordKind: 'report-version', recordId: srv.facts.recordId, versionId: next('version'),
+    managingInstitutionId: 'inst-a', actingInstitutionId: 'inst-a', studyId: srv.facts.studyId, recordKind: 'report-version', recordId: srv.facts.recordId, versionId: next('version'),
     previousVersion: previous, attachments: [], author: who(id), signer: who(id), identityRegistrationId: 'reg-' + id, action, reason: null,
     eventId: o.eventId ?? next('event'), deviceId: key.deviceId, kid: key.kid, grant: { grantId: o.grant.grant.grantId, digest: o.grant.digest },
     claimGeneration: o.claimGeneration ?? o.grant.grant.studies[0].claimGeneration, draftRevision: null, deviceSequence: o.sequence ?? 1, predecessorEventId: o.predecessor ?? null,
@@ -99,7 +99,7 @@ function entry(srv, id, o) {
     signature: crypto.sign('sha256', Buffer.from(header + '.' + body), { key: privateKeys.get(key.kid), dsaEncoding: 'ieee-p1363' }).toString('base64url') };
   return { formatVersion: 'emr-offline-queue/1', eventId: p.eventId, owner: ownerOf(id), deviceSequence: p.deviceSequence, predecessorEventId: p.predecessorEventId, envelope,
     access: { formatVersion: 'emr-offline-access/1', eventId: p.eventId, relatedEventId: null, deviceId: key.deviceId, deviceSequence: p.deviceSequence, kid: key.kid, identity: who(id),
-      actingInstitutionId: 'inst-a', managingInstitutionId: 'inst-a', action, target: { patient: { ...patient }, studyId: STUDY, recordId: p.recordId, versionId: p.versionId },
+      actingInstitutionId: 'inst-a', managingInstitutionId: 'inst-a', action, target: { patient: { ...patient }, studyId: srv.facts.studyId, recordId: p.recordId, versionId: p.versionId },
       occurredAt: signedAt, timeBasis: basis, ip: { status: 'unresolved', reason: 'not-observed' }, network: 'offline', physicalOutput: null },
     baseVersionId: previous ? previous.versionId : null };
 }
@@ -123,7 +123,7 @@ function transport(srv, { receivedAt = plus(T0, 2 * H), lose = 0, fail = null, e
     let retained = null;
     try { retained = retainedFor(srv, V.verifySignatureV2(e.envelope, ports, { osUserId: e.owner.osUserId })); } catch { retained = null; }
     const predecessor = srv.adoptions.get(p.predecessorEventId) ?? null;
-    const decision = REC.reconcileOfflineEvent({ actor: actor(p.signer.id), study: study(), facts: srv.facts, author: who(p.author.id), ownDraftRevision: null, attachments: [],
+    const decision = REC.reconcileOfflineEvent({ actor: actor(p.signer.id), study: { ...study(), studyId: srv.facts.studyId }, facts: srv.facts, author: who(p.author.id), ownDraftRevision: null, attachments: [],
       retained, receivedAt, ingress, verification: ports, grants: { load: id => grantRows.get(id) ?? null }, existingReceipt: srv.receipts.get(e.eventId) ?? null,
       predecessor, existingAdoption: srv.adoptions.get(e.eventId) ?? null, adoptDivergedDraft: false }, e);
     let response = decision.response;
@@ -171,17 +171,18 @@ const sent = async (queue, t, session) => { let value; await assert.doesNotRejec
 
 const UI = require(path.join(root,'worklist-v0/hpacs-lite/offline-report.js'));
 const deferred = () => { let resolve,reject; const promise=new Promise((a,b)=>{resolve=a;reject=b;}); return {promise,resolve,reject}; };
-function pageFor(store, queue, serverTransport, own = ownerOf('r1')) {
+function pageFor(store, queue, serverTransport, own = ownerOf('r1'), options = {}) {
   const timers=[], ctx={owner:own,epoch:1,generation:1,online:true,opening:{uid:STUDY,generation:1}}, view={status:{textContent:''},
-    readText:()=>({findings:'SYN',conclusion:'',recommendation:''}), showReport:()=>{},clearReport:()=>{},print:async()=>{}};
-  const controller=UI.create({view, store:{queue:()=>queue,observe:async()=>{},cached:async()=>null}, signer:{sign:async()=>{throw Error('unused');}},
+    readText:()=>({findings:'SYN Q 소견',conclusion:'',recommendation:''}), showReport:()=>{},clearReport:()=>{},print:async()=>{}, ...options.view};
+  let notify = () => {};
+  const controller=UI.create({view, store:{queue:()=>queue,observe:async()=>{},cached:async()=>null}, signer:{sign:options.sign || (async()=>{throw Error('unused');})},
     transport:{...serverTransport,read:async()=>null}, context:{owner:()=>ctx.owner,session:()=>({epoch:ctx.epoch}),accountGeneration:()=>ctx.generation,
-      online:()=>ctx.online,opening:()=>ctx.opening,subscribe:()=>()=>{}}, scheduler:{schedule:(fn,ms)=>{const t={fn,ms};timers.push(t);return t;},
+      online:()=>ctx.online,opening:()=>ctx.opening,subscribe:fn=>{notify=fn;return()=>{notify=()=>{};};}}, scheduler:{schedule:(fn,ms)=>{const t={fn,ms};timers.push(t);return t;},
       cancel:t=>{const i=timers.indexOf(t);if(i>=0)timers.splice(i,1);}}});
-  return {controller,timers,ctx,view};
+  return {controller,timers,ctx,view,notify:()=>notify()};
 }
-async function chainFixture() {
-  const srv=server();claim(srv,'r1',plus(T0,-H));const grant=grantFor(srv,'r1',plus(T0,-30*MIN));
+async function chainFixture(studyId = STUDY) {
+  const srv=server(studyId);claim(srv,'r1',plus(T0,-H));const grant=grantFor(srv,'r1',plus(T0,-30*MIN));
   const first=entry(srv,'r1',{signedAt:T0,grant,sequence:1});
   const sig=V.verifySignatureV2(first.envelope,ports,{osUserId:first.owner.osUserId});
   const child=entry(srv,'r1',{action:'amend',signedAt:plus(T0,MIN),grant,sequence:2,predecessor:first.eventId,
@@ -364,6 +365,8 @@ test('C-Q04 a conflicting approval stays as conflict with its original kept, and
     assert.deepEqual(missing.srv.commits,[]);
   }
 
+  await evidenceRecoveryCases();
+
 });
 
 test('C-Q05 a disconnection keeps the queue pending, a real session end pauses it for re-authentication, another account cannot send it and the owner\'s new session resumes it', async () => {
@@ -469,22 +472,23 @@ test('C-Q08 at every commit, receipt and answer cut the queue keeps a state it c
   assert.equal((await Q.createOfflineQueue({ store: s2, owner: ownerOf('r1') }).enqueue(lost)).status, 'not-saved');
   assert.deepEqual(await sent(Q.createOfflineQueue({ store: s2, owner: ownerOf('r1') }), transport(srv), sessionOf('r1')), []);
   assert.equal(srv.submitted.includes(lost.eventId), false);
-  // AC28/29: concurrent reconnect joins one drain, and an enqueue while listing marks another pass dirty.
-  const c=await chainFixture(), d=memoryStore(), qu=Q.createOfflineQueue({store:d,owner:ownerOf('r1')});await qu.enqueue(c.first);
-  const listing=deferred(), release=deferred(), originalList=d.list;let lists=0;
-  d.list=async owner=>{const result=await originalList(owner);if(++lists===1){listing.resolve();await release.promise;}return result;};
-  const ui=pageFor(d,qu,transport(c.srv));const sync1=ui.controller.sync();await listing.promise;
-  const sync2=ui.controller.sync();assert.equal(sync1===sync2,true,'AC28 reconnect shares one drain promise');
-  await qu.enqueue(c.child);ui.controller.sync();release.resolve();await sync1;
-  assert.deepEqual(c.srv.submitted,[c.first.eventId,c.child.eventId],'AC29 dirty pass discovers child');
-  assert.equal(ui.controller.state(STUDY).eventId,c.child.eventId);ui.controller.dispose();
   // AC28 at the submit cut too, with latest event already queued.
   const cut=await chainFixture(), ds=memoryStore(), qs=Q.createOfflineQueue({store:ds,owner:ownerOf('r1')});await qs.enqueue(cut.first);await qs.enqueue(cut.child);
   const began=deferred(), finish=deferred(), tr=transport(cut.srv);let dispatches=0;
   const pu=pageFor(ds,qs,{submit:async e=>{dispatches++;if(e.eventId===cut.first.eventId){began.resolve();await finish.promise;}return tr.submit(e);}});
   const p1=pu.controller.sync();await began.promise;const p2=pu.controller.sync();
-  assert.equal(p1===p2,true,'AC28 submit overlap is single flight');assert.equal(dispatches,1,'AC28 no concurrent duplicate dispatch');finish.resolve();await p1;
+  await microtasks(30);
+  assert.equal(dispatches,1,'AC39 no concurrent duplicate dispatch');finish.resolve();await Promise.all([p1,p2]);
   assert.deepEqual(cut.srv.commits,[cut.first.eventId,cut.child.eventId]);pu.controller.dispose();
+  // AC28/29: concurrent reconnect joins one drain, and an enqueue while listing marks another pass dirty.
+  const c=await chainFixture(), d=memoryStore(), qu=Q.createOfflineQueue({store:d,owner:ownerOf('r1')});await qu.enqueue(c.first);
+  const listing=deferred(), release=deferred(), originalList=d.list;let lists=0;
+  d.list=async owner=>{const result=await originalList(owner);if(++lists===1){listing.resolve();await release.promise;}return result;};
+  const ui=pageFor(d,qu,transport(c.srv));const sync1=ui.controller.sync();await listing.promise;
+  const sync2=ui.controller.sync();
+  await qu.enqueue(c.child);ui.controller.sync();release.resolve();await Promise.all([sync1,sync2]);
+  assert.deepEqual(c.srv.submitted,[c.first.eventId,c.child.eventId],'AC29 dirty pass discovers child');
+  assert.equal(ui.controller.state(STUDY).eventId,c.child.eventId);ui.controller.dispose();
   // AC32: newer attempt commits first; a delayed failure/held/session-end must not regress it.
   for(const outcome of ['failed','held','ended']) {
     const c=await chainFixture(), d=memoryStore(), q=Q.createOfflineQueue({store:d,owner:ownerOf('r1')});await q.enqueue(c.first);
@@ -502,4 +506,83 @@ test('C-Q08 at every commit, receipt and answer cut the queue keeps a state it c
   const dp=du.controller.sync();await lookupStarted.promise;du.controller.dispose();const beforeCalls=dst.calls.slice();found.resolve(dc.srv.adoptions.get(dc.first.eventId));await dp;
   assert.deepEqual(dst.calls,beforeCalls,'AC36 disposed lookup has no storage effect');assert.equal(dst.evidence.size,0);
 
+  await ownershipRecoveryCases();
+  await drainHandoffCases();
+
 });
+
+
+const microtasks = async (n = 1) => { for (let i=0;i<n;i++) await Promise.resolve(); };
+async function ownershipRecoveryCases() {
+  // AC37/P1b: no second approval is allowed to mask an abandoned signing selection.
+  for (const authority of ['aba','session']) for (const cut of ['sign','enqueue']) for (const outcome of ['ok','throw']) {
+    const c=await chainFixture(), d=memoryStore(), q=Q.createOfflineQueue({store:d,owner:ownerOf('r1')});
+    const gate=deferred(), began=deferred();
+    const wrapped={...q,enqueue:async e=>{if(cut==='enqueue'){began.resolve();await gate.promise;if(outcome==='throw')throw Error('put failed');}return q.enqueue(e);}};
+    const pg=pageFor(d,wrapped,transport(c.srv),undefined,{sign:async()=>{if(cut==='sign'){began.resolve();await gate.promise;if(outcome==='throw')throw Error('sign failed');}return {entry:c.first};}});
+    const old=pg.controller.approve({uid:STUDY,recordId:c.srv.facts.recordId});await began.promise;
+    if(authority==='session')pg.ctx.epoch++;
+    else {pg.ctx.owner=ownerOf('r2');pg.ctx.generation++;pg.ctx.owner=ownerOf('r1');pg.ctx.generation++;}
+    gate.resolve();await old;await pg.controller.sync();pg.controller.render();
+    const expected=cut==='enqueue'&&outcome==='ok'?'published':'idle';
+    assert.equal(pg.controller.state(STUDY).status,expected,'AC37 stale selection releases without another approval');
+    assert.equal(pg.view.status.textContent,expected==='published'?'Approved':'','AC37 screen has no abandoned Approving');
+    assert.deepEqual(c.srv.commits,expected==='published'?[c.first.eventId]:[],'AC37 original event adopted at most once');
+    pg.controller.dispose();
+  }
+  // AC38/P1: the real queue recovers in a new authority; every old submit outcome is harmless.
+  for(const outcome of ['duplicate','failed','network','ended']) {
+    const c=await chainFixture(),d=memoryStore(),q=Q.createOfflineQueue({store:d,owner:ownerOf('r1')});
+    await q.enqueue(c.first);await q.enqueue(c.child);
+    const gate=deferred(),began=deferred(),real=transport(c.srv);let n=0;
+    const pg=pageFor(d,q,{submit:async e=>{if(++n===1){began.resolve();await gate.promise;
+      if(outcome==='network')throw {kind:'network'};
+      if(outcome==='ended')throw {status:401,code:'AUTH_SESSION_ENDED'};
+      if(outcome==='failed')return {eventId:e.eventId,status:'failed',reason:'temporary',recoveryRef:null,currentVersion:null,times:{signedAt:null,receivedAt:T0,committedAt:null,publishedAt:null}};
+    }return real.submit(e);}});
+    const old=pg.controller.sync();await began.promise;pg.ctx.generation+=2;
+    await pg.controller.sync();gate.resolve();await old;
+    assert.deepEqual([pg.controller.state(STUDY).eventId,pg.controller.state(STUDY).status,pg.view.status.textContent,pg.timers.length],
+      [c.child.eventId,'published','Approved',0],'AC38 old outcome cannot regress recovered screen');
+    assert.deepEqual(c.srv.commits,[c.first.eventId,c.child.eventId]);pg.controller.dispose();
+  }
+}
+async function drainHandoffCases() {
+  // AC40/P2b: deterministic microtask cuts include the review's finishing-drain gap (11/12).
+  for(let k=0;k<=400;k++) {
+    const c=await chainFixture(),d=memoryStore(),q=Q.createOfflineQueue({store:d,owner:ownerOf('r1')});await q.enqueue(c.first);
+    const gate=deferred(),began=deferred(),real=transport(c.srv);let first=true;
+    const pg=pageFor(d,q,{submit:async e=>{if(first){first=false;began.resolve();await gate.promise;}return real.submit(e);}});
+    const p1=pg.controller.sync();await began.promise;await q.enqueue(c.child);
+    let p2=null;const fire=n=>{if(n===0){p2=pg.controller.sync();return;}Promise.resolve().then(()=>fire(n-1));};
+    gate.resolve();fire(k);await p1;while(!p2)await microtasks();await p2;await microtasks(10);
+    assert.equal(d.rows.get(c.child.eventId).state,'committed','AC40 finishing drain never loses child wakeup');
+    assert.deepEqual([pg.controller.state(STUDY).eventId,pg.view.status.textContent,pg.timers.length],[c.child.eventId,'Approved',0]);
+    pg.controller.dispose();
+  }
+}
+async function evidenceRecoveryCases() {
+  // AC41/P4a: committed status is insufficient; recover exact evidence with the original still present.
+  for(const restart of [false,true]) for(const fail of [false,true]) {
+    const c=await chainFixture(),d=memoryStore(),q=Q.createOfflineQueue({store:d,owner:ownerOf('r1')});
+    await q.enqueue(c.first);await q.send(transport(c.srv),sessionOf('r1'));d.evidence.clear();await q.enqueue(c.child);
+    const recovered=restart?Q.createOfflineQueue({store:d,owner:ownerOf('r1')}):q;
+    if(fail){await recovered.send(transport(c.srv,{fail:{kind:'network'}}),sessionOf('r1'));
+      assert.equal(d.rows.get(c.first.eventId).state,'committed','AC41 proof recovery failure never regresses committed');}
+    const pg=pageFor(d,recovered,transport(c.srv));await pg.controller.sync();
+    assert.equal(d.rows.get(c.child.eventId).state,'committed','AC41 committed original restores missing evidence and releases child');
+    assert.deepEqual(c.srv.commits,[c.first.eventId,c.child.eventId]);
+    assert.deepEqual(c.srv.submitted.filter(id=>id===c.first.eventId),Array(fail?3:2).fill(c.first.eventId),'AC41 same event ID resend');
+    assert.equal(pg.view.status.textContent,'Approved');assert(d.evidence.has(c.first.eventId));pg.controller.dispose();
+  }
+  // AC42/P4b: damaged proof remains stored and holds its dependent; independent signed work continues.
+  const broken=await chainFixture(), independent=await chainFixture('1.2.840.99999.3'),d=memoryStore(),q=Q.createOfflineQueue({store:d,owner:ownerOf('r1')});
+  await q.enqueue(broken.child);await q.enqueue(independent.first);
+  d.evidence.set(broken.first.eventId,{eventId:broken.first.eventId});
+  const pg=pageFor(d,q,transport(independent.srv));await pg.controller.sync();
+  assert.equal(d.rows.get(independent.first.eventId).state,'committed','AC42 malformed evidence cannot block independent work');
+  assert.equal(d.rows.get(broken.child.eventId).state,'held');assert(d.evidence.has(broken.first.eventId));
+  assert.deepEqual(independent.srv.commits,[independent.first.eventId]);assert(d.rows.has(broken.child.eventId));
+  pg.ctx.opening={uid:independent.srv.facts.studyId,generation:2};pg.controller.render();
+  assert.equal(pg.view.status.textContent,'Approved','AC42 independent study screen is published');pg.controller.dispose();
+}
