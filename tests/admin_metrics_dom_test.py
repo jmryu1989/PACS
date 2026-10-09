@@ -84,6 +84,7 @@ units as the Operations row (KinAdminMetrics.formatBytes).
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case, as does a page error or a browser dialog.
 """
+from page_source import read_page_source
 from copy import deepcopy
 import json
 from pathlib import Path
@@ -1061,7 +1062,7 @@ class AdminMetricsDOMTest(unittest.TestCase):
 
 # ── S5-U6b-F02: the worklist menubar storage figure (main.html #storage) ──
 
-MAIN_HTML = lf_text(HPACS / "main.html")
+MAIN_HTML = read_page_source(HPACS / "main.html")
 ARRIVALS_JS = lf_text(HPACS / "study-arrivals.js")
 MODEL_OPEN = '<script id="admin-metrics-model">'
 METRICS_MODEL = ADMIN_HTML[ADMIN_HTML.index(MODEL_OPEN) + len(MODEL_OPEN):ADMIN_HTML.index("</script>", ADMIN_HTML.index(MODEL_OPEN))]

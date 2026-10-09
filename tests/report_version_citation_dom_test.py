@@ -18,6 +18,7 @@ belong to the live suite and stay unverified. No LiveStack, no database, no Orth
 
 Hosted only: this file has never run anywhere but the hosted runner's measurement step.
 """
+from page_source import read_page_source
 import json
 import os
 import unittest
@@ -29,8 +30,8 @@ ROOT = Path(__file__).resolve().parents[1]
 # Named override, like tests/report_citation_dom_test.py:28. The mutant runner points this at a
 # copy of main.html; the BASELINE goes through the same override so a broken override cannot
 # manufacture kills.
-MAIN = Path(os.environ.get("KIN_HISTORY_CITATION_MAIN",
-                           ROOT / "worklist-v0" / "hpacs-lite" / "main.html")).read_text(encoding="utf-8")
+MAIN = read_page_source(Path(os.environ.get("KIN_HISTORY_CITATION_MAIN",
+                           ROOT / "worklist-v0" / "hpacs-lite" / "main.html")))
 CITATION_JS = (ROOT / "worklist-v0" / "hpacs-lite" / "report-citation.js").read_text(encoding="utf-8")
 PAPER_JS = (ROOT / "worklist-v0" / "hpacs-lite" / "report-preview.js").read_text(encoding="utf-8")
 

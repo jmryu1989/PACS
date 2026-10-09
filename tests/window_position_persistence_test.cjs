@@ -1,5 +1,6 @@
+const { readPageSource } = require('./page_source.cjs');
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
-const source=fs.readFileSync(require('node:path').join(__dirname,'../worklist-v0/hpacs-lite/main.html'),'utf8');
+const source=readPageSource(require('node:path').join(__dirname,'../worklist-v0/hpacs-lite/main.html'));
 function fixture(){
   const context=vm.createContext({});
   vm.runInContext(`const ohifPlacementWrites=new WeakMap(),ohifPopupSlots=new WeakMap();let ohifPopupHandle=null;const OHIF_RECT_KEY='rect',writes=[];const localStorage={setItem:(key,value)=>writes.push([key,JSON.parse(value)])};

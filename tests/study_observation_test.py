@@ -14,6 +14,7 @@ Pure stdlib, no browser, no Node, no stack. Three kinds of evidence and nothing 
      beside this file by the same CI step.
 """
 from __future__ import annotations
+from page_source import read_page_source
 
 import hashlib
 import json
@@ -305,7 +306,7 @@ class SourcePins(unittest.TestCase):
     def setUpClass(cls):
         cls.arrivals = ARRIVALS.read_text(encoding="utf-8").replace("\r\n", "\n")
         cls.pages = PAGES.read_text(encoding="utf-8").replace("\r\n", "\n")
-        cls.main = MAIN.read_text(encoding="utf-8").replace("\r\n", "\n")
+        cls.main = read_page_source(MAIN).replace("\r\n", "\n")
         cls.service = SERVICE.read_text(encoding="utf-8").replace("\r\n", "\n")
 
     def test_module_carries_the_rules_the_model_mirrors(self):
@@ -676,7 +677,7 @@ def extract_function(source, name):
 
 class Stage3Anchors(unittest.TestCase):
     def test_pre_s4_inventory_is_intact_and_only_named_additions_appear(self):
-        current = inventory(MAIN.read_text(encoding="utf-8"))
+        current = inventory(read_page_source(MAIN))
         for kind, (keys, digest) in BASE.items():
             with self.subTest(kind):
                 rest = Counter(current[kind])
@@ -687,11 +688,11 @@ class Stage3Anchors(unittest.TestCase):
                     rest[key] = before
                 self.assertEqual(keys, len(rest))
                 self.assertEqual(digest, hashlib.sha256(json.dumps(sorted(rest.items()), ensure_ascii=False).encode()).hexdigest())
-        main = MAIN.read_text(encoding="utf-8")
+        main = read_page_source(MAIN)
         self.assertEqual(1, main.count('id="b-print"'))
 
     def test_the_poll_harness_slices_the_shipped_functions_whole(self):
-        main = MAIN.read_text(encoding="utf-8").replace("\r\n", "\n")
+        main = read_page_source(MAIN).replace("\r\n", "\n")
         for name, last in (("startPolling", "}, seconds * 1000);"), ("applyObservation", "renderObservation();"),
                            ("markObservationUnavailable", "renderObservation();"),
                            ("renderObservation", '$("#receipt-gateway").title = labels.gateway.title;')):

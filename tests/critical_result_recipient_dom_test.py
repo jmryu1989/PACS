@@ -94,6 +94,7 @@ the origin's storage or in what the origin's storage holds (contract §13's writ
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case.
 """
+from page_source import read_page_source
 import copy
 import json
 import re
@@ -119,7 +120,7 @@ def lf_text(path):
     return path.read_bytes().decode("utf-8").replace("\r\n", "\n")
 
 
-MAIN = lf_text(HPACS / "main.html")
+MAIN = read_page_source(HPACS / "main.html")
 INBOX_JS = lf_text(HPACS / INBOX)
 HOME_FILES = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js", "work-context.js", "session-transport.js", INBOX)}
 ORIGIN = "https://recipient.test"

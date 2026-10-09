@@ -1,4 +1,5 @@
 """REQ-D01-COLUMNS-ROAM -> RISK-OWNER/LOST-UPDATE/DISPLAY-ONLY -> TEST-D01-COLUMNS-API."""
+from page_source import read_page_source
 import copy,json,re,threading,unittest,uuid
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -80,7 +81,7 @@ class WorklistColumnsLive(unittest.TestCase):
             self.assertEqual(self.stack.bearer_request(method,'/worklist-columns',token,payload).status,403)
 
     def test_06_server_allowlist_matches_current_browser_columns(self):
-        source=(Path(__file__).resolve().parents[1]/'worklist-v0/hpacs-lite/main.html').read_text(encoding='utf-8')
+        source=read_page_source(Path(__file__).resolve().parents[1]/'worklist-v0/hpacs-lite/main.html')
         declaration=source.split('const COLS = {',1)[1].split('\n    };',1)[0]
         body=self.body()
         for mode in body['columns']['modes']:body['columns']['modes'][mode]=dict(order=[],hidden=[])

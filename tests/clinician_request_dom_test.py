@@ -89,6 +89,7 @@ block cut from main.html and run over small stand-ins):
        paints nothing, nothing more is read or sent (another reading study, a later session end). A 403 locks only its
        own area. Controls: each block without the list call leaves the other area open and paints its late receipt.
 """
+from page_source import read_page_source
 import copy
 import json
 import re
@@ -121,7 +122,7 @@ def lf_text(path):
 ORIGIN = "https://clinician.test"
 BASE = "/worklist/hpacs-lite/"
 SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "auth.js", "work-context.js", "session-transport.js", "critical-result-inbox.js")}
-MAIN = lf_text(HPACS / "main.html")
+MAIN = read_page_source(HPACS / "main.html")
 
 # The commit this unit (and S5-U4b) started from (main after S5-UI3) and the main commit that merged the S5-U4b/U4c
 # integration (PR #108, the branch head 6293365), with their files' LF-normalized UTF-8 sha256. s01 reads them with

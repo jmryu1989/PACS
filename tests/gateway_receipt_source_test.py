@@ -6,6 +6,7 @@ Named wrong rules must each fail a vector, so the vectors are not decoration. Th
 literals are read by AST (agent.py is never imported: it needs `requests`), and the pins the hosted
 runs depend on - route, migration, restore bookkeeping, counts, workflow steps - are checked as text.
 """
+from page_source import read_page_source
 import ast
 import json
 from pathlib import Path
@@ -33,7 +34,7 @@ SCHEMA = text("api", "prisma", "schema.prisma")
 MIGRATION_NAME = "20260924130000_gateway_receipt"
 MIGRATION_PATH = ROOT / "api" / "prisma" / "migrations" / MIGRATION_NAME / "migration.sql"
 MIGRATION = text("api", "prisma", "migrations", MIGRATION_NAME, "migration.sql")
-MAIN = text("worklist-v0", "hpacs-lite", "main.html")
+MAIN = read_page_source(ROOT.joinpath("worklist-v0", "hpacs-lite", "main.html"))
 INVARIANTS = text("tests", "invariants_live.py")
 WORKFLOW = text(".github", "workflows", "validate.yml")
 OBSERVATION = json.loads(text("tests", "study_observation_vectors.json"))

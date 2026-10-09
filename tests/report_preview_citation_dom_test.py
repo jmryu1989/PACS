@@ -19,6 +19,7 @@ section (that needs the DICOM lookup/digest/tag stubs and a decodable frame, whi
 cost). Structure is asserted on the serialized paper instead. The AbortError/15 s budget rethrow is
 reviewed statically only - a timer-driven case is not worth its cost.
 """
+from page_source import read_page_source
 import json
 import os
 import unittest
@@ -29,7 +30,7 @@ from report_page_contract import install_contract
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
-MAIN = Path(os.environ.get("KIN_PREVIEW_MAIN", ROOT / "worklist-v0" / "hpacs-lite" / "main.html")).read_text(encoding="utf-8")
+MAIN = read_page_source(Path(os.environ.get("KIN_PREVIEW_MAIN", ROOT / "worklist-v0" / "hpacs-lite" / "main.html")))
 # KIN_PREVIEW_JS is the override the mutant runner needs: every browser mutant of this unit mutates
 # report-preview.js, so a main.html-only hook could not serve any of them. The default is always the
 # shipped file, and the runner only ever points this at a temporary COPY - never at the tree.
