@@ -449,6 +449,48 @@ MUTANTS += [
 ]
 # The exact round-1 selection including repair round 6, authored as requirements (never generated from a run). The
 # baseline must collect exactly these cases, each once, all passing; R2 moves the declaration into emr/units/f.json.
+MUTANTS += [
+    {"id": "M-F-R7-001", "title": "discard pre-cutover user notice causes", "file": "contract.ts",
+     "old": "if (isp.userImpact) causes.push({ family: 'isp-user',",
+     "new": "if (isp.userImpact && ispAssessments.find(x => x.eventId === isp.eventId)?.userNotice.applicability !== 'not-applicable') causes.push({ family: 'isp-user',",
+     "case": "TEST-F-07 R7-I01 voluntary pre-cutover user notice is preserved without a duty",
+     "expect": "M-F-R7-001: voluntary pre-cutover notice remains admissible evidence"},
+    {"id": "M-F-R7-002", "title": "discard user notices before an applicability decision", "file": "contract.ts",
+     "old": "if (isp.userImpact) causes.push({ family: 'isp-user',",
+     "new": "if (isp.userImpact && ispAssessments.find(x => x.eventId === isp.eventId)?.userNotice.applicability !== 'decision-required') causes.push({ family: 'isp-user',",
+     "case": "TEST-F-07 R7-I02 user notice before an applicability decision replays after the decision",
+     "expect": "M-F-R7-002: a notice before the applicability decision is preserved"},
+    {"id": "M-F-R7-003", "title": "reject prior user delivery after an inapplicability decision", "file": "contract.ts",
+     "old": "(['isp-user', 'isp-user-additional'].includes(c.family) && !ispUserApplicable(c.fact.ispIncident.eventId))))) throw new Error('Unbound notice scope');",
+     "new": "false))) throw new Error('Unbound notice scope');",
+     "case": "TEST-F-07 R7-I03 true to false applicability re-decision preserves sent user notice",
+     "expect": "M-F-R7-003: a negative re-decision never invalidates a prior actual notice"},
+    {"id": "M-F-R7-004", "title": "give the ISP operator the processor privacy duties", "file": "contract.ts",
+     "old": "if (owner.kind !== 'operator') {", "new": "if (true) {",
+     "case": "TEST-F-07 R7-I04 operator causes are ISP-only while processor privacy duties remain separate",
+     "expect": "M-F-R7-004: operator owns only the ISP duty structure"},
+    {"id": "M-F-R7-005", "title": "show an applicable deadline for a verified non-ISP", "file": "contract.ts",
+     "old": "initialReport: { dueAt: status === true ? reportDueAt : null,",
+     "new": "initialReport: { dueAt: status !== 'unknown' ? reportDueAt : null,",
+     "case": "TEST-F-07 R7-I05 verified non-ISP assessment has no applicable report deadline",
+     "expect": "M-F-R7-005: verified non-ISP assessment has no due date"},
+    {"id": "M-F-R7-006", "title": "label an unknown ISP assessment as verified", "file": "contract.ts",
+     "old": "applicability: status === true ? 'verified' : status === false ? 'not-applicable' : 'unverified',",
+     "new": "applicability: status !== false ? 'verified' : 'not-applicable',",
+     "case": "TEST-F-07 R7-I06 unknown ISP assessment labels its original deadline provisional",
+     "expect": "M-F-R7-006: unknown assessment exposes a provisional deadline only"},
+    {"id": "M-F-R7-007", "title": "refuse evidence until the officer decides in the same call", "file": "contract.ts",
+     "old": "const needsRedecision = !uncertain && !!latest && latest.applies !== definite;",
+     "new": "const needsRedecision = !uncertain && !!latest && latest.applies !== definite;\n      if (needsRedecision) throw new Error('Decision contradicts occurrence evidence');",
+     "case": "TEST-F-07 R7-I07 contradictory occurrence evidence is accepted pending a reasoned re-decision",
+     "expect": "M-F-R7-007: contradictory occurrence evidence is accepted before re-decision"},
+    {"id": "M-F-R7-008", "title": "discard supplementary delivery when no user duty applies", "file": "contract.ts",
+     "old": "if (isp.userImpact) causes.push({ family: 'isp-user-additional',",
+     "new": "if (isp.userImpact && ispUserApplicable(isp.eventId)) causes.push({ family: 'isp-user-additional',",
+     "case": "TEST-F-07 R7-I08 supplementary user notices persist outside applicable duties",
+     "expect": "M-F-R7-008: supplementary user delivery remains evidence without applicability"},
+]
+
 DECLARED_CASES = [
     "TEST-F-01 roster_scope: a designated auditor gets exactly the granted scopes and a general admin without a grant gets none",
     "TEST-F-01 roster_scope: a revoked, expired, not-yet-valid or moved auditor gets no authority and nothing is read",
@@ -578,6 +620,14 @@ DECLARED_CASES = [
     "TEST-F-07 R6 INSTALL-FACTS D25V3-N5 operator types are alternatives and deployment is only a clue",
     "TEST-F-07 R6 INSTALL-FACTS D25V3-N5 false requires verified non-applicability evidence",
     "TEST-F-07 R6 INSTALL-FACTS I-6 verified designation includes category and Annex 1 qualifications",
+    "TEST-F-07 R7-I01 voluntary pre-cutover user notice is preserved without a duty",
+    "TEST-F-07 R7-I02 user notice before an applicability decision replays after the decision",
+    "TEST-F-07 R7-I03 true to false applicability re-decision preserves sent user notice",
+    "TEST-F-07 R7-I04 operator causes are ISP-only while processor privacy duties remain separate",
+    "TEST-F-07 R7-I05 verified non-ISP assessment has no applicable report deadline",
+    "TEST-F-07 R7-I06 unknown ISP assessment labels its original deadline provisional",
+    "TEST-F-07 R7-I07 contradictory occurrence evidence is accepted pending a reasoned re-decision",
+    "TEST-F-07 R7-I08 supplementary user notices persist outside applicable duties",
 ]
 NOT_RUN = [
     {"id": "M-F-01-live", "status": "not_run", "reason": "the server roster check over B1 storage and the B2 caller context is round 2 "
