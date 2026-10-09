@@ -281,7 +281,12 @@ class SessionEndLive(unittest.TestCase):
                 directory.mkdir(parents=True, exist_ok=True)
                 (directory / (self._testMethodName + "-" + wait + ".json")).write_text(encoded + "\n", encoding="utf-8")
         except Exception:
-            print("S7-U5-WAIT-DIAGNOSTIC unavailable", flush=True)
+            # The fallback line can fail too (a closed stdout pipe on a hosted runner); it must not replace the
+            # caller's original wait failure, which is re-raised right after this returns.
+            try:
+                print("S7-U5-WAIT-DIAGNOSTIC unavailable", flush=True)
+            except Exception:
+                pass
 
     def settle(self, page) -> str:
         try:
