@@ -4,7 +4,7 @@ name: EMR-B access ledger
 # commit, the same checkout runs: the declaration against files, migrations, catalog, compose, profile and candidate
 # selection; the ledger contracts C01-C10 and C13-C18; the production API image of this commit; the emr-b live profile (L01-L08 and L17-L19 in
 # their own disposable PostgreSQL and API containers, beside the synthetic stack on an empty hosted daemon); then the
-# twenty-eight declared mutants in a separate copy. Synthetic data and generated credentials only; no hospital or production
+# thirty-two declared mutants in a separate copy. Synthetic data and generated credentials only; no hospital or production
 # system is reached. validate.yml keeps its own jobs and adds only the declaration and contract check.
 on:
   push:
@@ -34,11 +34,15 @@ jobs:
           npm ci --prefix api --ignore-scripts --no-audit --no-fund
           (cd api && ./node_modules/.bin/prisma generate)
       - name: EMR-B1 declaration against files, migrations, ledger catalog, compose, profile and candidate selection
-        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/declaration --cwd . --file emr/units/b.json --file scripts/emr-compose.py --file docker-compose.yml --file docker-compose.prod.yml --file tests/measurement_ci.py --file tests/candidate_ci.py --file tests/emr/b/live.py --file tests/production_image_test.py --file tests/ops_product_transfer_fixture.py --file api/prisma/migrations/20261008120000_emr_b/migration.sql -- python3 -B scripts/emr-compose.py check
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/declaration --cwd . --file emr/units/b.json --file scripts/emr-compose.py --file docker-compose.yml --file docker-compose.prod.yml --file tests/measurement_ci.py --file tests/candidate_ci.py --file tests/emr/b/live.py --file tests/production_image_test.py --file tests/ops_product_transfer_fixture.py --file api/prisma/migrations/20261008120000_emr_b/migration.sql --file api/prisma/migrations/20261010120000_emr_seal_attempts/migration.sql -- python3 -B scripts/emr-compose.py check
       - name: EMR-B1 access ledger contracts C01-C10 and C13-C18, exactly the declared cases each passed once
         run: |
-          python3 scripts/record-run.py --run-dir tmp/emr-b-ci/contract --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json --file emr/units/b.json --file scripts/emr-compose.py --file tests/emr/b/contract_test.cjs -- env KIN_EMR_PYTHON=python3 node --test --test-reporter=tap tests/emr/b/contract_test.cjs
+          python3 scripts/record-run.py --run-dir tmp/emr-b-ci/contract --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json --file emr/units/b.json --file scripts/emr-compose.py --file tests/emr/b/contract_test.cjs --file tests/emr/b/seal_checker.cjs -- env KIN_EMR_PYTHON=python3 node --test --test-reporter=tap tests/emr/b/contract_test.cjs
           python3 -B scripts/emr-compose.py check-run --kind node --cases-from contract --run-dir tmp/emr-b-ci/contract
+      - name: D867 bounded exhaustive seal concurrency graph (180 second process budget)
+        timeout-minutes: 4
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/emr-b-ci/seal-checker --cwd . --tree api/src/emr-runtime --tree api/src/emr-contract --file api/package-lock.json --file tests/emr/b/seal_checker.cjs -- python3 -c "import subprocess,sys; sys.exit(subprocess.run(sys.argv[1:],timeout=180).returncode)" node tests/emr/b/seal_checker.cjs . api/node_modules/typescript tmp/emr-b-ci/seal-checker/checker.json
       - name: Mutant verdicts distinguish behavioural failures from harness errors
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/mutant-verdict --cwd . --file tests/emr/b/mutants.py -- python3 -B tests/emr/b/mutants.py --self-test
       - name: Production API image of this commit
@@ -55,11 +59,11 @@ jobs:
         timeout-minutes: 28
         env:
           KIN_TEST_API_IMAGE: kin-emrb-ci:${{ github.sha }}
-        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/live --cwd . --file tests/emr/b/live.py --file tests/emr/b/contract_test.cjs --file scripts/emr-compose.py --file tests/measurement_ci.py --file scripts/run-tests.py --file tests/live_test_gate.py --file docker-compose.yml --file api/prisma/migrations/20261008120000_emr_b/migration.sql -- "$RUNNER_TEMP/emr-b-python/bin/python" tests/measurement_ci.py --profile emr-b
-      - name: EMR-B1 mutants M01-M08, M11, M12, M14-M31 in a separate copy of this commit
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/live --cwd . --file tests/emr/b/live.py --file tests/emr/b/contract_test.cjs --file tests/emr/b/seal_checker.cjs --file scripts/emr-compose.py --file tests/measurement_ci.py --file scripts/run-tests.py --file tests/live_test_gate.py --file docker-compose.yml --file api/prisma/migrations/20261008120000_emr_b/migration.sql --file api/prisma/migrations/20261010120000_emr_seal_attempts/migration.sql -- "$RUNNER_TEMP/emr-b-python/bin/python" tests/measurement_ci.py --profile emr-b
+      - name: EMR-B1 mutants M01-M08, M11, M12, M14-M35 in a separate copy of this commit
         if: ${{ !cancelled() }}
         timeout-minutes: 80
-        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/mutants-run --cwd . --tree api/src --file api/prisma/migrations/20261008120000_emr_b/migration.sql --file emr/units/b.json --file scripts/emr-compose.py --file scripts/run-tests.py --file tests/live_test_gate.py --file tests/emr/b/mutants.py --file tests/emr/b/live.py --file tests/emr/b/contract_test.cjs -- python3 -B tests/emr/b/mutants.py --out tmp/emr-b-ci/mutants
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/mutants-run --cwd . --tree api/src --file api/prisma/migrations/20261008120000_emr_b/migration.sql --file api/prisma/migrations/20261010120000_emr_seal_attempts/migration.sql --file emr/units/b.json --file scripts/emr-compose.py --file scripts/run-tests.py --file tests/live_test_gate.py --file tests/emr/b/mutants.py --file tests/emr/b/live.py --file tests/emr/b/contract_test.cjs --file tests/emr/b/seal_checker.cjs -- python3 -B tests/emr/b/mutants.py --out tmp/emr-b-ci/mutants
       - name: EMR-B evidence (synthetic, sanitized)
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
