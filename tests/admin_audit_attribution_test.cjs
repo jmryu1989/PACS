@@ -35,9 +35,10 @@
  * request or not read, a helper or callback that leaves the program, and an object whose origin or holders are not fixed
  * stay unresolved; the SQL rules are unchanged. The product is not shaped for it (AGENTS 1-B, D73).
  * REQ-AUDIT-CLOSED-WORLD -> RISK-AUDIT-UNRESOLVED / RISK-AUDIT-ATTACKER-ACTION / RISK-AUDIT-OBJECT-ESCAPE /
- *   RISK-AUDIT-SQL-PROVENANCE -> TEST-AUDIT-CLOSED-WORLD CW01-CW18 (tests/fixtures/admin-audit-checker/closed-world).
- *   Rule B′ (every member projection proved, Astra consult 2) closes erased references within the named limits L1-L4,
- *   which stay limits (see the completeness section): no completeness is claimed beyond what the check proves.
+ *   RISK-AUDIT-SQL-PROVENANCE -> TEST-AUDIT-CLOSED-WORLD CW01-CW20 (tests/fixtures/admin-audit-checker/closed-world).
+ *   Rule B′ (every member projection proved, Astra consult 2) closes erased references within the named limits L1-L8,
+ *   which stay limits, each with its review rule (see the completeness section): no completeness is claimed beyond what
+ *   the check proves. Decorators in a holder chain: only @nestjs/common's Injectable() (L5, commander D847).
  *
  * Module: KIN_ADMIN_AUDIT_MODULE, default api/src/admin-audit.ts loaded through Node type stripping (Node >= 22.18);
  * the compiled /app/dist/admin-audit (kin-api:ci) is the same rule. The completeness cases read api/src and api/prisma/*.cjs and use
@@ -947,7 +948,10 @@ test('the query takes limit (1-100, default 25) and the sealed after only', () =
 //    to a declaration. A use that only writes (`=`, a destructuring or for-in/of target, `delete`) is counted as a write
 //    (objectWrites, slotWrites); a read-modify-write meets both. A failed obligation hands the object on, so every writer,
 //    client flow or SQL value that depends on it is unresolved where it stands. This closes the class of erased references
-//    inside the trust boundary above; it does not lift the named limits L1-L4.
+//    inside the trust boundary above; it does not lift the named limits L1-L8. The receiver is read at its apparent type,
+//    so the polymorphic `this` (`this as this`) is its class (Astra review 3 F02). A slot's holder chain carries no
+//    decorator but @nestjs/common's Injectable() on a class (L5): a decorator elsewhere there may install a method body
+//    no call the check reads would show (review 3 F01).
 //  F02 SQL values, before any raw classification: an interpolation is a value (Prisma binds it) when it is a literal, a
 //    result the language makes a primitive (template, arithmetic, comparison, `!`, `typeof`), each side of ?:, ||, ?? and
 //    &&, `new Date()`, an array literal (one parameter), a const or let through its initializer and every assignment, a W3
@@ -988,6 +992,33 @@ test('the query takes limit (1-100, default 25) and the sealed after only', () =
 //    it); L4 an SQL function that executes a text argument inside an ordinary query (dblink_exec and the like). That
 //    none of them is used today is an observation, not a proof: a change that introduces one of these shapes reopens
 //    the limit. The cases are kept as comments beside the negative table (LIMIT L1-L3) so that they are not rediscovered.
+//    The closed world (W3-C, W4-C, rule B′; AUDIT-CHECKER-U0B, commander D844/D847) names four more, so that a shape
+//    outside them is a limit and a review item, not another hardening round. Each limit with the review rule that keeps
+//    product code out of it (the U0b round-2 review checklist and every later change to these files):
+//      L1 Prisma namespace as a value — review: the namespace is only called (`Prisma.sql`, `Prisma.join` ...), never
+//         held, aliased or handed on.
+//      L2 ambient `declare` any from outside the program — review: no new ambient `declare` value in api/src.
+//      L3 code that does not compile — the API image build (tsc) refuses it; review: the build passes.
+//      L4 SQL that runs a text argument (dblink_exec, a database function that executes its argument) — review: no
+//         such function called from product SQL.
+//      L5 @nestjs/common's `Injectable` is trusted as metadata only: it does not rewrite the class's prototype methods.
+//         It is the one class decorator a holder chain (the facade, the DI services it hands on, the modules) may carry,
+//         resolved to that package's declaration with no or literal options; any other decorator there is refused.
+//         Review: no other class decorator, no member, property or parameter decorator and no program-defined decorator
+//         on facade, concern or DI classes; the concern modules carry no decorator at all.
+//      L6 the closed world is api/src and the Prisma CJS entry points: a module, script or test outside it that imports
+//         a concern module and creates or calls it at runtime is not seen (an export alone proves nothing inside, but
+//         nothing outside is read). Review: concern modules are created only by the facade (`new` into its private
+//         readonly fields) and imported at runtime only inside api/src.
+//      L7 the framework's runtime reflection and decorators outside holder chains are taken as Nest metadata: Nest
+//         calling handlers and lifecycle hooks by name, route and guard decorators on controllers, the program's
+//         metadata decorator `Public` (SetMetadata). W3-C refuses any decorated class or method, so these reach only
+//         W3 private helpers of Nest classes. Review: a program-defined decorator only sets metadata (SetMetadata,
+//         applyDecorators of Nest decorators) and never installs or replaces a method or a descriptor.
+//      L8 code built at runtime or patched under the program: `new Function`, an indirect eval, `vm`, a `require` of a
+//         computed path, and a patched prototype of a built-in or library class (Function.prototype.call, PrismaClient,
+//         Object.prototype) are outside what the TypeScript program shows. Review: none of these in product code; a
+//         dynamic member access on a holder (a computed key, a key widened by an assertion) is refused, not a limit.
 //  Closure (Astra S7-U3a-AUDIT-SPEC-C-R-001-F03, the conditions of S7-U3a-G-R-001): (a) W1-W6 alone resolve every write of
 //    the baseline and give every other candidate its classification, with no writer left out, no exception by place and
 //    no product change; (b) each enumerated counterexample, alone next to the baseline, leaves its write unresolved and
@@ -1851,7 +1882,9 @@ function scanAuditWrites(sources = auditSources()) {
     }
     const parent = node.parent;
     if (!asserted || !isAccess(parent) || parent.expression !== node || mutated(outer(parent))) return null;
-    const type = checker.getNonNullableType(checker.getTypeAtLocation(node));
+    // The polymorphic `this` type (`this as this`, `<this>this`) is a type parameter: read at its constraint, as the
+    // projection reads every receiver (Astra review 3 F02).
+    const type = checker.getApparentType(checker.getNonNullableType(checker.getTypeAtLocation(node)));
     const target = type.objectFlags & ts.ObjectFlags.Reference ? type.target : type;
     const instance = !!(target.objectFlags & ts.ObjectFlags.Class);
     const family = object.kind === 'instance' ? familyOf(object.declaration) : new Set([object.declaration]);
@@ -1943,9 +1976,48 @@ function scanAuditWrites(sources = auditSources()) {
     }
     return [...found];
   }
+  // Decorators in a holder chain (Astra review 3 F01, commander D847): a decorator runs program or library code with the
+  // class or a member's descriptor in hand and may install another method body, which no call the check reads would show.
+  // The one class decorator taken as metadata only (named limit L5) is @nestjs/common's Injectable.
+  const NEST_COMMON = /[\\/]node_modules[\\/]@nestjs[\\/]common[\\/]/;
+  const literalValue = node => ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isNumericLiteral(node)
+    || node.kind === K.TrueKeyword || node.kind === K.FalseKeyword || node.kind === K.NullKeyword;
+  /** Whether a class decorator is `@Injectable()` of @nestjs/common: its callee resolves through every import and
+   *  re-export (getAliasedSymbol) to the function that package declares, called with no argument or with one object
+   *  literal of literal values. A program decorator, another package's, a local alias or a variable holding it, a call
+   *  that returns a decorator and computed options are not. */
+  function nestInjectable(decorator) {
+    const call = bare(decorator.expression);
+    if (!ts.isCallExpression(call)) return false;
+    const callee = bare(call.expression);
+    const name = ts.isIdentifier(callee) ? callee : ts.isPropertyAccessExpression(callee) ? callee.name : null;
+    const symbol = name ? resolve(checker.getSymbolAtLocation(name)) : null, declarations = symbol?.declarations ?? [];
+    if (symbol?.name !== 'Injectable' || !declarations.length
+      || !declarations.every(declaration => declaration.getSourceFile().isDeclarationFile && NEST_COMMON.test(declaration.getSourceFile().fileName))) return false;
+    if (!call.arguments.length) return true;
+    const options = bare(call.arguments[0]);
+    return call.arguments.length === 1 && ts.isObjectLiteralExpression(options) && options.properties.every(property => ts.isPropertyAssignment(property)
+      && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) && literalValue(bare(property.initializer)));
+  }
+  const decoratorOf = node => (ts.canHaveDecorators(node) ? ts.getDecorators(node)?.[0] : undefined);
+  /** Why a class of a W4-C holder chain — a slot's owner, or the class of what it holds — or one of its program family
+   *  may run code through a decorator, else null: on the class only nestInjectable, on no member, accessor, property or
+   *  parameter any decorator. */
+  function chainDecoratorIssue(declaration) {
+    for (const member of familyOf(declaration)) {
+      const strange = (ts.canHaveDecorators(member) ? ts.getDecorators(member) ?? [] : []).find(decorator => !nestInjectable(decorator));
+      if (strange) return `\`${className(member)}\` is decorated by \`${snippet(strange.expression)}\` at ${where(strange)}, not @nestjs/common's Injectable() (named limit L5)`;
+      for (const item of member.members) {
+        const found = decoratorOf(item) ?? (item.parameters ?? []).map(decoratorOf).find(Boolean);
+        if (found) return `\`${className(member)}\` has the decorator \`${snippet(found.expression)}\` at ${where(found)} on a member, accessor, property or parameter`;
+      }
+    }
+    return null;
+  }
   /** Why a field or parameter property of `owner` is no slot W4-C owns for an instance of `object`'s family, else null:
    *  private, readonly, neither static, optional nor decorated, typed as a class of the family by a name W4-C reads,
-   *  written nowhere but at `allowed`, and the instances of `owner` keep to W4. */
+   *  written nowhere but at `allowed`, the classes of the chain decorated by nothing but nestInjectable on the class,
+   *  and the instances of `owner` keep to W4. */
   function slotIssue(declaration, owner, object, allowed = null) {
     const flags = ts.getCombinedModifierFlags(declaration);
     const what = `\`${declaration.name.getText()}\` of \`${className(owner)}\``;
@@ -1959,6 +2031,8 @@ function scanAuditWrites(sources = auditSources()) {
     }
     const written = slotWrites(declaration, owner).filter(node => node !== allowed);
     if (written.length) return `${what} is written at ${where(written[0])}`;
+    const chained = chainDecoratorIssue(owner) || chainDecoratorIssue(typed);
+    if (chained) return `${what}: ${chained}`;
     const escape = objectUse({ kind: 'instance', declaration: owner }).escape;
     return escape ? `${what} is held by an instance of \`${className(owner)}\`, which ${escape}` : null;
   }
@@ -4619,13 +4693,13 @@ test('checker self-test: every positive mark reclassified.json replaces is refus
     + `${entry.now.map(item => `${item.status} ${item.detail}`).join(' + ')} (${entry.rule}${entry.moved_to ? `; alone in ${entry.moved_to}` : ''})`)));
 });
 
-// ── the closed world, W3-C and W4-C (Astra S9-U0b audit consult D4): CW01-CW18 ──
+// ── the closed world, W3-C and W4-C (Astra S9-U0b audit consult D4): CW01-CW20 ──
 // REQ-AUDIT-CLOSED-WORLD -> RISK-AUDIT-UNRESOLVED / RISK-AUDIT-ATTACKER-ACTION / RISK-AUDIT-OBJECT-ESCAPE /
-// RISK-AUDIT-SQL-PROVENANCE -> TEST-AUDIT-CLOSED-WORLD CW01-CW18. tests/fixtures/admin-audit-checker/closed-world holds
+// RISK-AUDIT-SQL-PROVENANCE -> TEST-AUDIT-CLOSED-WORLD CW01-CW20. tests/fixtures/admin-audit-checker/closed-world holds
 // writer.ts (the three helper shapes of the S9-U0b modules, each a public member), callers.ts (the modules calling them from
 // another file), composition.ts (the facade creating and owning them, and the DI service it hands on), monolith.ts (the
 // same writes in one class before the split, CW04) and cases.json (the contract table, what CW01-CW03 expect, and every
-// mutant of CW05-CW18 as exact text edits with the verdict it must give). The fixtures are data read here and placed side by
+// mutant of CW05-CW20 as exact text edits with the verdict it must give). The fixtures are data read here and placed side by
 // side under api/src/syn-fixture/closed-world/ for these scans only; the product corpus never holds them. Each mutant runs
 // after the unedited corpus passes, alone, and must fail by exactly the classes and entries cases.json names — an unresolved
 // entry by its tagged line (`@cw:<tag>`) and a part of its reason, every other class as named or empty — and parse (a file
@@ -4675,6 +4749,11 @@ function closedVariant(id, variant) {
   const label = `${id} ${variant.name}`, sources = closedCorpus(variant.edits), scan = scanAuditWrites(sources);
   const found = verdict(scan, closedTable());
   assert.deepEqual(scan.candidates.filter(entry => entry.kind === 'source file'), [], `${label}: every file parses`);
+  if (variant.expect.pass) {
+    // A must-pass control (CW19, CW20): a normal shape the rules keep, every class empty.
+    assert.deepEqual(found, EMPTY_VERDICT, `${label} must pass: ${JSON.stringify(found)}`);
+    return { variant: variant.name, failing: [], verdict: found };
+  }
   assert.ok(failing(found).length > 0, `${label} is not detected: ${JSON.stringify(found)}`);
   if (variant.expect.unresolved_includes) {
     // A bound counterexample (CW18): the write it attacks is itself unresolved, with the obligation it fails; what else
@@ -4748,12 +4827,13 @@ test('CW04 the split and wired modules give the writers, actions, prefixes and S
   console.log('ADMIN_AUDIT_CLOSED_WORLD ' + JSON.stringify({ case: 'CW04', writers: writers(after), sql: sql(after) }));
 });
 
-// CW05-CW18, in cases.json's order: the ids are fixed before any is registered (one test each, nothing merged or dropped).
+// CW05-CW20, in cases.json's order: the ids are fixed before any is registered (one test each, nothing merged or dropped).
 // CW17 is Astra's AUDIT-CHECKER-U0B review F01 (a slot read through an assertion, an element access or a closure); CW18
 // binds the 43 closed-world counterexamples of her second consult (X01-X08, N01-N15, K01-K05, E01-E15, edits verbatim),
-// whose P01-P02 are the `u0b-r3-*` cases of tests/fixtures/admin-audit-checker/violations.txt.
+// whose P01-P02 are the `u0b-r3-*` cases of tests/fixtures/admin-audit-checker/violations.txt; CW19 binds her 17 review-3
+// inputs as she classified them (A01-A13 refused, P03-P06 must pass); CW20 the decorator allowlist of D847 (L5).
 const CLOSED_MUTANTS = CLOSED_CASES.cases;
-assert.deepEqual(CLOSED_MUTANTS.map(entry => entry.id), Array.from({ length: 14 }, (_, n) => `CW${String(n + 5).padStart(2, '0')}`));
+assert.deepEqual(CLOSED_MUTANTS.map(entry => entry.id), Array.from({ length: 16 }, (_, n) => `CW${String(n + 5).padStart(2, '0')}`));
 for (const entry of CLOSED_MUTANTS) {
   test(`${entry.id} ${entry.title}`, () => {
     closedBase();

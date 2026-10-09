@@ -4,7 +4,7 @@
 // provenance. Read alone; `// expect:` marks as in the other fixtures.
 import { Prisma, PrismaClient } from '@prisma/client';
 
-const Injectable = (): ClassDecorator => () => undefined;
+import { Injectable } from '@nestjs/common';
 
 export class SynMonoPrisma extends PrismaClient {}
 export interface SynMonoCaller { actor: string; institution: string | null; }

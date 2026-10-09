@@ -142,7 +142,7 @@
       "variants": [
         { "name": "the facade hands the audit module to an opaque consumer",
           "edits": [
-            { "file": "composition.ts", "find": "const Injectable = (): ClassDecorator => () => undefined;", "replace": "const Injectable = (): ClassDecorator => () => undefined;\ndeclare function synRegister(value: unknown): void;" },
+            { "file": "composition.ts", "find": "import { Injectable } from '@nestjs/common';", "replace": "import { Injectable } from '@nestjs/common';\ndeclare function synRegister(value: unknown): void;" },
             { "file": "composition.ts", "find": "    this.commitConcern = new SynCommit(this.draftConcern); // @cw:last-wiring",
               "replace": "    this.commitConcern = new SynCommit(this.draftConcern); // @cw:last-wiring\n    synRegister(this.auditConcern);" }],
           "expect": { "unresolved": [{ "tag": "audit-member", "reason": "the class `SynAuditWriter`, which is reached through an instance, which is handed on at" }],
@@ -154,7 +154,7 @@
             "unwritten_rows": ["study.arrived", "match"] } },
         { "name": "the facade hands the DI service to an opaque consumer",
           "edits": [
-            { "file": "composition.ts", "find": "const Injectable = (): ClassDecorator => () => undefined;", "replace": "const Injectable = (): ClassDecorator => () => undefined;\ndeclare function synRegister(value: unknown): void;" },
+            { "file": "composition.ts", "find": "import { Injectable } from '@nestjs/common';", "replace": "import { Injectable } from '@nestjs/common';\ndeclare function synRegister(value: unknown): void;" },
             { "file": "composition.ts", "find": "    this.commitConcern = new SynCommit(this.draftConcern); // @cw:last-wiring",
               "replace": "    this.commitConcern = new SynCommit(this.draftConcern); // @cw:last-wiring\n    synRegister(this.scope);" }],
           "expect": { "unresolved": [{ "tag": "scope-require", "reason": "a client value handed to `this.scope.require`, which this check does not follow" }] } }
@@ -185,7 +185,7 @@
           "expect": { "unresolved": [{ "tag": "audit-member", "reason": "`auditConcern` of `SynFacade` is written at" }], "unwritten_rows": ["study.arrived", "match"] } },
         { "name": "the facade that owns the modules handed to an opaque consumer",
           "edits": [
-            { "file": "composition.ts", "find": "const Injectable = (): ClassDecorator => () => undefined;", "replace": "const Injectable = (): ClassDecorator => () => undefined;\ndeclare function synRegister(value: unknown): void;" },
+            { "file": "composition.ts", "find": "import { Injectable } from '@nestjs/common';", "replace": "import { Injectable } from '@nestjs/common';\ndeclare function synRegister(value: unknown): void;" },
             { "file": "composition.ts", "find": "    this.commitConcern = new SynCommit(this.draftConcern); // @cw:last-wiring",
               "replace": "    this.commitConcern = new SynCommit(this.draftConcern); // @cw:last-wiring\n    synRegister(this);" }],
           "expect": { "unresolved": [
@@ -358,7 +358,7 @@
               "report.draft.discard", "report.save", "report.approve"] } },
         { "name": "the slot captured by a closure handed out of the class",
           "edits": [
-            { "file": "composition.ts", "find": "const Injectable = (): ClassDecorator => () => undefined;", "replace": "const Injectable = (): ClassDecorator => () => undefined;\ndeclare function synLater(run: () => unknown): void;" },
+            { "file": "composition.ts", "find": "import { Injectable } from '@nestjs/common';", "replace": "import { Injectable } from '@nestjs/common';\ndeclare function synLater(run: () => unknown): void;" },
             { "file": "composition.ts", "find": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward",
               "replace": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward\n  attack() { synLater(() => this.auditConcern); }" }],
           "expect": { "unresolved": [{ "tag": "audit-member", "reason": "the class `SynAuditWriter`, which is reached through an instance, which is handed on at" }],
@@ -638,6 +638,160 @@
             { "file": "composition.ts", "find": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward",
               "replace": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward\n  attack(body: any) { return (this as unknown as {auditConcern: SynAuditWriter} | {auditConcern: any}).auditConcern.audit(\"attacker\", body.action, \"uid\"); }" }],
           "expect": { "unresolved_includes": [{ "tag": "audit-member", "reason": "" }] } }
+      ]
+    },
+    {
+      "id": "CW19",
+      "title": "Astra's review-3 inputs as she classified them: A01-A13 leave the write they attack unresolved (decorators, an in-narrowed receiver, back-casts, keyof this), P03-P06 pass (a polymorphic this, satisfies, a typed back-cast, a declared slot initialized once)",
+      "source": "tmp/astra-control/evidence/audit-checker-u0b-r3-review-e2e6e91/new.json + additional.json (edits verbatim)",
+      "variants": [
+        { "name": "A01-generic-keyof-this",
+          "edits": [
+            { "file": "composition.ts", "find": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward",
+              "replace": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward\n  get<K extends keyof this>(k: K): this[K] { return this[k]; }\n  attack(body: any) { body.sink = this.get(\"arrived\"); }" }],
+          "expect": { "unresolved_includes": [{ "tag": "audit-member", "reason": "" }] } },
+        { "name": "A02-object-entries",
+          "edits": [
+            { "file": "composition.ts", "find": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward",
+              "replace": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward\n  attack(body: any) { body.sink = Object.entries(this); }" }],
+          "expect": { "unresolved_includes": [{ "tag": "audit-member", "reason": "" }] } },
+        { "name": "A03-structured-clone",
+          "edits": [
+            { "file": "composition.ts", "find": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward",
+              "replace": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward\n  attack(body: any) { body.sink = structuredClone(this); }" }],
+          "expect": { "unresolved_includes": [{ "tag": "audit-member", "reason": "" }] } },
+        { "name": "A04-holder-spread",
+          "edits": [
+            { "file": "composition.ts", "find": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward",
+              "replace": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward\n  attack(body: any) { body.sink = { ...this }; }" }],
+          "expect": { "unresolved_includes": [{ "tag": "audit-member", "reason": "" }] } },
+        { "name": "A05-subclass-getter",
+          "edits": [
+            { "file": "composition.ts", "find": "// end of composition.ts",
+              "replace": "export class SynFacadeSub extends SynFacade { get exposed() { return this; } }\n// end of composition.ts" }],
+          "expect": { "unresolved_includes": [{ "tag": "audit-member", "reason": "" }] } },
+        { "name": "A06-declare-no-new",
+          "edits": [
+            { "file": "composition.ts", "find": "  private readonly auditConcern: SynAuditWriter = new SynAuditWriter(this.prisma); // @cw:audit-field",
+              "replace": "  declare private readonly auditConcern: SynAuditWriter; // @cw:audit-field" }],
+          "expect": { "unresolved_includes": [{ "tag": "audit-member", "reason": "" }] } },
+        { "name": "A07-backcast-action",
+          "edits": [
+            { "file": "composition.ts", "find": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward",
+              "replace": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward\n  attack(body: any) { return (this as unknown as SynFacade).auditConcern.audit(\"attacker\", body.action, \"uid\"); }" }],
+          "expect": { "unresolved_includes": [{ "tag": "audit-member", "reason": "" }] } },
+        { "name": "A08-backcast-escape",
+          "edits": [
+            { "file": "composition.ts", "find": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward",
+              "replace": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward\n  attack(body: any) { body.sink = (this as unknown as SynFacade).auditConcern; }" }],
+          "expect": { "unresolved_includes": [{ "tag": "audit-member", "reason": "" }] } },
+        { "name": "A09-decorator-holder-method",
+          "edits": [
+            { "file": "composition.ts", "find": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward",
+              "replace": "  @hijack\n  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward" },
+            { "file": "composition.ts", "find": "// end of composition.ts",
+              "replace": "function hijack(_target: object, _key: string, d: PropertyDescriptor) {\n  d.value = function(this: any, uid: string) { return this.auditConcern.audit(\"attacker\", \"evil.audit\", uid); };\n}\n// end of composition.ts" }],
+          "expect": { "unresolved_includes": [{ "tag": "audit-member", "reason": "on a member, accessor, property or parameter" }] } },
+        { "name": "A10-decorator-writer-method",
+          "edits": [
+            { "file": "writer.ts", "find": "  audit(actor: string, action: string, target: string) {",
+              "replace": "  @decorate\n  audit(actor: string, action: string, target: string) {" },
+            { "file": "writer.ts", "find": "// end of writer.ts",
+              "replace": "function decorate(_target: object, _key: string, d: PropertyDescriptor) { d.value = function() {}; }\n// end of writer.ts" }],
+          "expect": { "unresolved_includes": [{ "tag": "audit-member", "reason": "it is decorated" }] } },
+        { "name": "A11-union-narrowed-holder",
+          "edits": [
+            { "file": "composition.ts", "find": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward",
+              "replace": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward\n  attack() { if (\"surprise\" in this) return this.arrived(\"uid\"); }" }],
+          "expect": { "unresolved_includes": [{ "tag": "audit-member", "reason": "(W4 projection: receiver)" }] } },
+        { "name": "A12-intersection-assertion",
+          "edits": [
+            { "file": "composition.ts", "find": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward",
+              "replace": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward\n  attack() { return (this as SynFacade & {extra?: string}).arrived(\"uid\"); }" }],
+          "expect": { "unresolved_includes": [{ "tag": "audit-member", "reason": "" }] } },
+        { "name": "A13-type-predicate-extract",
+          "edits": [
+            { "file": "writer.ts", "find": "  audit(actor: string, action: string, target: string) {",
+              "replace": "  isLoose(): this is this & {audit: any} { return true; }\n  leak(body: any) { if (this.isLoose()) body.sink = this[\"audit\" as any]; }\n  audit(actor: string, action: string, target: string) {" }],
+          "expect": { "unresolved_includes": [{ "tag": "audit-member", "reason": "" }] } },
+        { "name": "P03-backcast-literal",
+          "edits": [
+            { "file": "composition.ts", "find": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward",
+              "replace": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward\n  safe() { return (this as unknown as SynFacade).auditConcern.audit(\"actor\", \"study.arrived\", \"uid\"); }" }],
+          "expect": { "pass": true } },
+        { "name": "P04-declare-initialized",
+          "edits": [
+            { "file": "composition.ts", "find": "  private readonly auditConcern: SynAuditWriter = new SynAuditWriter(this.prisma); // @cw:audit-field",
+              "replace": "  declare private readonly auditConcern: SynAuditWriter; // @cw:audit-field" },
+            { "file": "composition.ts", "find": "    this.accessConcern = new SynAccess(this.prisma, this.scope);",
+              "replace": "    this.auditConcern = new SynAuditWriter(this.prisma);\n    this.accessConcern = new SynAccess(this.prisma, this.scope);" }],
+          "expect": { "pass": true } },
+        { "name": "P05-polymorphic-this",
+          "edits": [
+            { "file": "composition.ts", "find": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward",
+              "replace": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward\n  safe(uid: string) { return (this as this).arrived(uid); }" }],
+          "expect": { "pass": true } },
+        { "name": "P06-this-satisfies",
+          "edits": [
+            { "file": "composition.ts", "find": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward",
+              "replace": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward\n  safe(uid: string) { return (this satisfies SynFacade).arrived(uid); }" }],
+          "expect": { "pass": true } }
+      ]
+    },
+    {
+      "id": "CW20",
+      "title": "decorators in a holder chain (commander D847, named limit L5): only @nestjs/common's Injectable() on a class, resolved through its imports, with no or literal options; any other class decorator, a fake or aliased Injectable, computed options and any member, property or parameter decorator leave what the chain holds unresolved",
+      "variants": [
+        { "name": "D01 a program-defined class decorator on the facade that installs a method",
+          "edits": [
+            { "file": "composition.ts", "find": "export class SynFacade {", "replace": "@synSeal()\nexport class SynFacade {" },
+            { "file": "composition.ts", "find": "// end of composition.ts",
+              "replace": "function synSeal(): ClassDecorator { return target => { (target as any).prototype.arrived = function (this: any, uid: string) { return this.auditConcern.audit('attacker', 'evil.audit', uid); }; }; }\n// end of composition.ts" }],
+          "expect": { "unresolved_includes": [{ "tag": "audit-member", "reason": "is decorated by `synSeal()`" }, { "tag": "scope-write", "reason": "is decorated by `synSeal()`" },
+            { "tag": "draft-transaction", "reason": "is decorated by `synSeal()`" }] } },
+        { "name": "D02 a fake Injectable of a local module",
+          "edits": [
+            { "file": "writer.ts", "find": "// end of writer.ts", "replace": "export function Injectable(): ClassDecorator { return () => undefined; }\n// end of writer.ts" },
+            { "file": "composition.ts", "find": "import { Injectable } from '@nestjs/common';", "replace": "import { Injectable } from './writer';" }],
+          "expect": { "unresolved_includes": [{ "tag": "audit-member", "reason": "is decorated by `Injectable()`" }, { "tag": "scope-write", "reason": "" },
+            { "tag": "draft-transaction", "reason": "" }] } },
+        { "name": "D03 the real Injectable held by a variable of the program",
+          "edits": [
+            { "file": "composition.ts", "find": "import { Injectable } from '@nestjs/common';", "replace": "import { Injectable as NestInjectable } from '@nestjs/common';\nconst Injectable = NestInjectable;" }],
+          "expect": { "unresolved_includes": [{ "tag": "audit-member", "reason": "is decorated by `Injectable()`" }, { "tag": "scope-write", "reason": "" },
+            { "tag": "draft-transaction", "reason": "" }] } },
+        { "name": "D04 the real Injectable with computed options",
+          "edits": [
+            { "file": "composition.ts", "find": "@Injectable()\nexport class SynFacade {", "replace": "@Injectable({ durable: SYN_DURABLE })\nexport class SynFacade {" },
+            { "file": "composition.ts", "find": "import { Injectable } from '@nestjs/common';", "replace": "import { Injectable } from '@nestjs/common';\nconst SYN_DURABLE = true;" }],
+          "expect": { "unresolved_includes": [{ "tag": "audit-member", "reason": "is decorated by `Injectable({ durable: SYN_DURABLE })`" }, { "tag": "scope-write", "reason": "" },
+            { "tag": "draft-transaction", "reason": "" }] } },
+        { "name": "D05 a method decorator on the DI service handed to a module",
+          "edits": [
+            { "file": "composition.ts", "find": "  async require(uid: string, tx: Prisma.TransactionClient) {", "replace": "  @synTrace()\n  async require(uid: string, tx: Prisma.TransactionClient) {" },
+            { "file": "composition.ts", "find": "import { Injectable } from '@nestjs/common';", "replace": "import { Injectable } from '@nestjs/common';\ndeclare function synTrace(): MethodDecorator;" }],
+          "expect": { "unresolved_includes": [{ "tag": "scope-require", "reason": "a client value handed to `this.scope.require`, which this check does not follow" }] } },
+        { "name": "D06 a parameter decorator on the facade's constructor",
+          "edits": [
+            { "file": "composition.ts", "find": "  constructor(private prisma: SynClosedPrisma, private scope: SynScopeService) {",
+              "replace": "  constructor(private prisma: SynClosedPrisma, @synInject() private scope: SynScopeService) {" },
+            { "file": "composition.ts", "find": "import { Injectable } from '@nestjs/common';", "replace": "import { Injectable } from '@nestjs/common';\ndeclare function synInject(): ParameterDecorator;" }],
+          "expect": { "unresolved_includes": [{ "tag": "audit-member", "reason": "has the decorator `synInject()`" }, { "tag": "scope-write", "reason": "" },
+            { "tag": "draft-transaction", "reason": "" }] } },
+        { "name": "D07 a property decorator on a module",
+          "edits": [
+            { "file": "writer.ts", "find": "export class SynAuditWriter {", "replace": "export class SynAuditWriter {\n  @synWatch() private hits = 0;" },
+            { "file": "writer.ts", "find": "// end of writer.ts", "replace": "declare function synWatch(): PropertyDecorator;\n// end of writer.ts" }],
+          "expect": { "unresolved_includes": [{ "tag": "audit-member", "reason": "has the decorator `synWatch()`" }] } },
+        { "name": "P07 the real Injectable through a local re-export and a renamed import",
+          "edits": [
+            { "file": "writer.ts", "find": "// end of writer.ts", "replace": "export { Injectable as SynInjectable } from '@nestjs/common';\n// end of writer.ts" },
+            { "file": "composition.ts", "find": "import { Injectable } from '@nestjs/common';", "replace": "import { SynInjectable as Injectable } from './writer';" }],
+          "expect": { "pass": true } },
+        { "name": "P08 the real Injectable with literal options",
+          "edits": [
+            { "file": "composition.ts", "find": "@Injectable()\nexport class SynFacade {", "replace": "@Injectable({ durable: true })\nexport class SynFacade {" }],
+          "expect": { "pass": true } }
       ]
     }
   ]

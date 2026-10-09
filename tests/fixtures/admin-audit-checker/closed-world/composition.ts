@@ -7,7 +7,7 @@ import { SynAccess, SynAuditWriter, SynDraft } from './writer';
 import type { SynCaller, SynClosedPrisma } from './writer';
 import { SynCommit, SynHold, SynStudyState, SynWorklist } from './callers';
 
-const Injectable = (): ClassDecorator => () => undefined;
+import { Injectable } from '@nestjs/common';
 
 // An existing DI service: the framework creates it and hands it to the facade.
 @Injectable()
