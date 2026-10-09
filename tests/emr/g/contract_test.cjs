@@ -367,6 +367,9 @@ if (process.argv.includes('--emr-g-inventory-generator')) {
     const orphan = newStore(), orphanJournal = drive(startRun(plan, orphan), plan, orphan, { units: 1 });
     orphan.items.set(plan.items[3].itemKey, { itemKey: plan.items[3].itemKey, rowSha256: plan.items[3].rowSha256, runId: 'run-1', unitId: 'unit:orphan' });
     assert.equal(refusal(() => G.resumeLegacyRun(orphanJournal, plan, storedOf(orphan), tick())), 'JournalStoreDiverged');
+    const racing = newStore(), racingJournal = drive(startRun(plan, racing), plan, racing, { units: 1 });
+    racing.items.set(plan.items[4].itemKey, { itemKey: plan.items[4].itemKey, rowSha256: plan.items[4].rowSha256, runId: 'run-other', unitId: 'unit:other' });
+    assert.equal(refusal(() => G.resumeLegacyRun(racingJournal, plan, storedOf(racing), tick())), 'JournalStoreDiverged', 'a row another writer migrated meanwhile is not written twice');
     assert.equal(refusal(() => G.resumeLegacyRun(orphanJournal, plan, { ...storedOf(orphan), complete: false }, tick())), 'StoredFactsIncomplete');
     const twice = storedOf(orphan); twice.items.push({ ...twice.items[0] });
     assert.equal(refusal(() => G.resumeLegacyRun(orphanJournal, plan, twice, tick())), 'JournalStoreDiverged');

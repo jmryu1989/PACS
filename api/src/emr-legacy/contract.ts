@@ -491,7 +491,11 @@ function progress(j: MigrationJournal, p: MigrationPlan, s: StoredFacts): Migrat
   if (j.checkpoint.through > through) refuse('CheckpointAheadOfBody');
   if (through !== j.checkpoint.through && through !== j.pending?.through) refuse('JournalStoreDiverged');
   for (let n = 0; n < through; n++) if (!byKey.has(p.items[n].itemKey)) refuse('CheckpointAheadOfBody');
-  if (p.items.slice(through).some(i => byKey.get(i.itemKey)?.runId === j.runId)) refuse('JournalStoreDiverged');
+  // Beyond the checkpoint only rows acknowledged at start may exist: a body of this run without its checkpoint, or a row
+  // another writer migrated meanwhile, would otherwise be written twice.
+  const pre = new Set(j.preexisting);
+  if (p.items.slice(through).some(i => byKey.has(i.itemKey) && (byKey.get(i.itemKey).runId === j.runId || !pre.has(i.itemKey))))
+    refuse('JournalStoreDiverged');
   const last = mine.find(c => c.through === through);
   return { through, lastItemKey: through ? p.items[through - 1].itemKey : null, unitId: last ? last.unitId : null };
 }
