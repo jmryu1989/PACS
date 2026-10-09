@@ -7,6 +7,7 @@ LiveStack, no Orthanc, no database and no original DICOM. Only the refusal body
 the test hands back can become the approved report shown to the user.
 """
 from page_source import read_page_source
+from main_split_harness import REPORT_FIXTURE, fixture_block
 import json
 import os
 import unittest
@@ -17,7 +18,8 @@ from report_page_contract import install_contract
 from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
-MAIN = read_page_source(Path(os.environ.get("KIN_REBASE_MAIN", ROOT / "worklist-v0" / "hpacs-lite" / "main.html")))
+MAIN_PATH = Path(os.environ.get("KIN_REBASE_MAIN", ROOT / "worklist-v0" / "hpacs-lite" / "main.html"))
+MAIN = read_page_source(MAIN_PATH)
 # S3-U2b put the citation state, the dedicated read and the insertion pane inside the same
 # contiguous product region this harness slices, so the real module has to be here too. The
 # citation behaviour itself is asserted in report_citation_dom_test.py.
@@ -99,10 +101,10 @@ PANE_HTML = slice_between(MAIN, '<div class="modal" id="stalemodal"', "\n  </div
 STRUCT_HTML = slice_between(MAIN, '<div class="modal" id="structmodal"', "\n  </div>") + "\n  </div>"
 CITE_HTML = slice_between(MAIN, '<div class="modal" id="cite-preview"', "\n  </div>") + "\n  </div>"
 MODAL_CSS = slice_between(MAIN, ".modal { display: none;", "/* ══ 클릭 피드백")
-BASE_BLOCK = slice_between(MAIN, "    let selectionSeq = 0;", "    function reportSource()")
-# One contiguous region: report source, loadReport, the draft bar, the rebase pane,
-# stashReport and commitReport, exactly as they sit in the file.
-REPORT_BLOCK = slice_between(MAIN, "    function reportSource() {", "    function heldByOther(s)")
+# The two script runs by the TypeScript-AST fixture projection (S9-U0a-PRE moved some of their declarations ahead of
+# their first callers): selectionSeq up to reportSource, and the region of report source, loadReport, the draft bar,
+# the rebase pane, stashReport and commitReport, in the order they sat in the file.
+# (Computed where the page is built, not at import: main_split_harness.fixture_block.)
 API_FN = extract_function(MAIN, "api")
 WRITE_BLOCK_FN = extract_function(MAIN, "reportWriteBlock")
 # S3-U2b moved the shared "may a script write into the editor" check into one function that the
@@ -231,8 +233,8 @@ def harness(state):
             .replace("APIFN", API_FN)
             .replace("WRITEBLOCKFN", WRITE_BLOCK_FN)
             .replace("EDITORBLOCKFN", EDITOR_BLOCK_FN)
-            .replace("BASEBLOCK", BASE_BLOCK)
-            .replace("REPORTBLOCK", REPORT_BLOCK)
+            .replace("BASEBLOCK", fixture_block(MAIN_PATH, REPORT_FIXTURE, "BASE_BLOCK"))
+            .replace("REPORTBLOCK", fixture_block(MAIN_PATH, REPORT_FIXTURE, "REPORT_BLOCK"))
             .replace("INITIALSTATE", json.dumps(state, ensure_ascii=False))
             .replace("UIDVALUE", UID)
             .replace("OTHERVALUE", OTHER))

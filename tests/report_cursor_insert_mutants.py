@@ -29,6 +29,7 @@ Rules this runner holds itself to:
 stdlib only. It launches the browser test as a child process; it never drives a browser itself.
 """
 from page_source import read_page_bytes, read_source
+from main_split_harness import REPORT_FIXTURE, fixture_blocks
 import argparse
 import hashlib
 import json
@@ -56,13 +57,10 @@ CASE = "ReportCursorInsertDOMTest"
 # kill into a survivor.
 CRASH_MARKERS = ("playwright._impl._errors", "ModuleNotFoundError")
 
-# The harness slices these out of main.html; if one of them moves, the browser file compiles into
-# something else and no case means what it says.
-SLICE_MARKERS = (
-    "    let selectionSeq = 0;",
-    "    function reportSource()",
-    "    function heldByOther(s)",
-)
+# The harness takes its two script runs by the fixture projection (main_split_harness.REPORT_FIXTURE); if a run does
+# not resolve, the browser file compiles into something else and no case means what it says. (No marker cut of this
+# harness reaches the code the mutants change.)
+SLICE_MARKERS = ()
 
 MUTANTS = [
     {
@@ -188,6 +186,14 @@ def main():
     if args.anchors_only:
         print("anchors ok (no browser run requested)")
         return 0
+    # The DOM test takes its two script runs by the fixture projection (node and the api TypeScript, which CI installs
+    # after the anchors-only step); a run that does not resolve is a harness failure, not a survivor.
+    try:
+        fixture_blocks(SOURCES["main"], REPORT_FIXTURE)
+        print("fixture runs resolve: %s" % ", ".join(REPORT_FIXTURE))
+    except Exception as error:
+        print("ANCHOR FAILURE: harness fixture runs do not resolve: %s" % error)
+        return 1
 
     scratch = pathlib.Path(tempfile.mkdtemp(prefix="u6-mutants-"))
     results = []

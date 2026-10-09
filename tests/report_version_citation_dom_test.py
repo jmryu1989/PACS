@@ -19,6 +19,7 @@ belong to the live suite and stay unverified. No LiveStack, no database, no Orth
 Hosted only: this file has never run anywhere but the hosted runner's measurement step.
 """
 from page_source import read_page_source
+from main_split_harness import fixture_block
 import json
 import os
 import unittest
@@ -30,8 +31,8 @@ ROOT = Path(__file__).resolve().parents[1]
 # Named override, like tests/report_citation_dom_test.py:28. The mutant runner points this at a
 # copy of main.html; the BASELINE goes through the same override so a broken override cannot
 # manufacture kills.
-MAIN = read_page_source(Path(os.environ.get("KIN_HISTORY_CITATION_MAIN",
-                           ROOT / "worklist-v0" / "hpacs-lite" / "main.html")))
+MAIN_PATH = Path(os.environ.get("KIN_HISTORY_CITATION_MAIN", ROOT / "worklist-v0" / "hpacs-lite" / "main.html"))
+MAIN = read_page_source(MAIN_PATH)
 CITATION_JS = (ROOT / "worklist-v0" / "hpacs-lite" / "report-citation.js").read_text(encoding="utf-8")
 PAPER_JS = (ROOT / "worklist-v0" / "hpacs-lite" / "report-preview.js").read_text(encoding="utf-8")
 
@@ -98,11 +99,11 @@ def extract_function(source, name):
     raise ValueError(name)
 
 
-# The end marker is the two-line composite: the following line in main.html is the bare "    /**"
-# opener of the next comment, so a single-line marker would leave an unterminated block comment
-# and every case would die before its first assertion.
-HISTORY_BLOCK = slice_between(MAIN, "    // ── 판독문 이력 ──",
-                              "    /**\n     * 판독문 textarea를 **스크립트로**")
+# The shipped history block - the f1d5406 statements from the history state up to reportWriteBlock - by the
+# TypeScript-AST fixture projection (main_split_harness): S9-U0a-PRE moved reportWriteBlock, whose comment ended the
+# old text cut, ahead of its first caller.
+# (Computed where the page is built, not at import: main_split_harness.fixture_block.)
+HISTORY_FIXTURE = {"HISTORY_BLOCK": ("historyEpoch", "reportWriteBlock")}
 HIST_HTML = slice_between(MAIN, '<div class="modal" id="histmodal"', "\n  </div>") + "\n  </div>"
 DISPLAY_ACTOR_FN = extract_function(MAIN, "displayActor")
 # S7-U5: the history block applies its answers through the page's work-context gate. The shipped gate is loaded as it is,
@@ -187,7 +188,7 @@ def harness():
             .replace("CITATIONJS", CITATION_JS)
             .replace("PAPERJS", PAPER_JS)
             .replace("DISPLAYACTORFN", DISPLAY_ACTOR_FN)
-            .replace("HISTORYBLOCK", HISTORY_BLOCK)
+            .replace("HISTORYBLOCK", fixture_block(MAIN_PATH, HISTORY_FIXTURE, "HISTORY_BLOCK"))
             .replace("SESSIONACTOR", SESSION_ACTOR)
             .replace("UIDVALUE", UID))
 
