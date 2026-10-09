@@ -1,6 +1,7 @@
 """REQ-SITE-NOTICE → RISK-FALSE-FACT/OMISSION/UNVERIFIED-CITATION → TEST-LEGAL-PAGES.
 
-The user requires the approved public wording and headings to be preserved. Compare
+The user requires the approved public wording and headings to be preserved, with
+the D-11 effective-date amendment reflected in the public fixture. Compare
 rendered text, not HTML layout or implementation strings. The public fixture holds
 only publishable wording and statute identifiers, not the private review document.
 No browser, server, network or third-party Python dependency is used.
@@ -239,7 +240,13 @@ class LegalPagesTest(unittest.TestCase):
                 self.assertEqual(next(doc.root.all('html')).attrs.get('lang'), 'ko')
                 self.assertEqual(len(list(doc.root.all('main'))), 1)
                 self.assertEqual(len(list(doc.root.all('h1'))), 1)
-                self.assertFalse(list(doc.root.all('script', 'iframe', 'form')))
+                self.assertFalse(list(doc.root.all('iframe', 'form')))
+                scripts = list(doc.root.all('script'))
+                if name != 'privacy.html':
+                    self.assertFalse(scripts)
+                for script in scripts:
+                    self.assertTrue(script.attrs.get('src'))
+                    self.assertFalse(script.text().strip())
                 ids = [node.attrs['id'] for node in doc.root.all() if 'id' in node.attrs]
                 self.assertEqual(len(ids), len(set(ids)))
                 for node in doc.root.all():
@@ -333,7 +340,7 @@ class LegalPagesTest(unittest.TestCase):
 
     def test_local_links_and_public_contact_anchors_resolve(self):
         for name, doc in self.docs.items():
-            for node in doc.root.all('a', 'link', 'img'):
+            for node in doc.root.all('a', 'link', 'img', 'script'):
                 value = node.attrs.get('href', node.attrs.get('src', ''))
                 parsed = urlsplit(value)
                 self.assertFalse(parsed.scheme or parsed.netloc, value)
