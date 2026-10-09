@@ -3223,14 +3223,15 @@ function kinCreateViewerJobs() {
   // A later successful role check may resolve an initially unconfirmed mount.
   // Clinician-only transitions remove authoring; the page boundary disposes every module at an end.
   kinViewerSession.onChange(next => { if (next === 'writer') { connect(); return; } epoch++; if (next === 'read-only') { current?.stop(); current = null; } });
-  return { id: 'kin.viewer-jobs', preRegistration({ servicesManager }) {
+  return { id: 'kin.viewer-jobs', preRegistration({ servicesManager, extensionManager }) {
     const load = name => new Promise((resolve, reject) => {
       const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/' + name;
       script.onload = resolve;
       script.onerror = () => reject(new Error('비교 작업 화면을 불러오지 못했습니다.')); document.head.append(script);
     });
-    ready = load('viewer-volume-job.js').catch(() => {}).then(() => load('viewer-jobs.js'))
-      .then(() => window.kinViewerJobs(servicesManager.services, kinViewerLayoutModel, kinViewerSession.writeModule));
+    ready = load('viewer-volume-job.js').catch(() => {}).then(() => load('viewer-stack-restore.js')).then(() => load('viewer-jobs.js'))
+      .then(() => window.kinViewerJobs(servicesManager.services, kinViewerLayoutModel, kinViewerSession.writeModule,
+        () => extensionManager.getActiveDataSource()[0]));
     ready.catch(() => {});
   }, onModeEnter() {
     const ticket = ++epoch; active = true;

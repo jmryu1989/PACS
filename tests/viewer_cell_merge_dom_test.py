@@ -11,6 +11,7 @@ from playwright.sync_api import Error as PlaywrightError, expect, sync_playwrigh
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = (ROOT / "worklist-v0" / "hpacs-lite" / "viewer-cell-merge.js").read_text(encoding="utf-8")
 VOLUME_JOB = (ROOT / "worklist-v0" / "hpacs-lite" / "viewer-volume-job.js").read_text(encoding="utf-8")
+STACK_RESTORE = (ROOT / "worklist-v0" / "hpacs-lite" / "viewer-stack-restore.js").read_text(encoding="utf-8")
 JOBS = (ROOT / "worklist-v0" / "hpacs-lite" / "viewer-jobs.js").read_text(encoding="utf-8")
 CONFIG = (ROOT / "config" / "ohif.js").read_text(encoding="utf-8")
 URL = "https://cellmerge.test/ohif/viewer?StudyInstanceUIDs=1.2.1"
@@ -166,9 +167,33 @@ const frameable=viewport=>Object.assign(viewport,{
   setImageIdIndex(value){if(window.failNextImageLoad){window.failNextImageLoad=false;return Promise.reject(Error('native frame load failed'));}
     this.index=value;return Promise.resolve();}});
 nativeViewports.forEach(frameable);
+const E={ELEMENT_ENABLED:'enabled',ELEMENT_DISABLED:'disabled',IMAGE_RENDERED:'render'};
+cornerstone.Enums={Events:E};cornerstone.eventTarget=new EventTarget();
+const infos=new Map(),dataEvents=new EventTarget(),cs=services.cornerstoneViewportService;
+cs.EVENTS={VIEWPORT_DATA_CHANGED:'data'};
+cs.subscribe=(name,fn)=>{const handler=e=>fn(e.detail);dataEvents.addEventListener(name,handler);return {unsubscribe:()=>dataEvents.removeEventListener(name,handler)}};
+cs.getViewportInfo=id=>infos.get(id);
+services.cornerstoneCacheService={createViewportData:async sets=>({viewportType:'stack',data:sets.map(set=>({displaySetInstanceUID:set.displaySetInstanceUID,
+ imageIds:Array.from({length:frames},(_,n)=>'img:'+set.displaySetInstanceUID+':'+n)}))})};
+Object.assign(grid.EVENTS,{LAYOUT_CHANGED:'grid',GRID_STATE_CHANGED:'grid'});
+const subscribeGrid=grid.subscribe.bind(grid);grid.subscribe=(name,fn)=>subscribeGrid(name,()=>fn({}));
+const setGrid=grid.setLayout.bind(grid);
+grid.setLayout=payload=>{
+ const old=new Set(nativeViewports.keys()),result=setGrid(payload);
+ for(const [id,g] of gridState.viewports){
+  if(old.has(id)||!g.displaySetInstanceUIDs.length)continue;
+  const v=nativeViewports.get(id);v.index=g.viewportOptions.initialImageOptions?.index??0;
+  v.render=()=>{v.renders++;requestAnimationFrame(()=>v.element.dispatchEvent(new CustomEvent(E.IMAGE_RENDERED,{detail:{viewportId:id,element:v.element}})))};
+  const data={viewportType:'stack',data:[{displaySetInstanceUID:g.displaySetInstanceUIDs[0],imageIds:v.getImageIds()}]};
+  infos.set(id,{getViewportData:()=>data});cornerstone.eventTarget.dispatchEvent(new CustomEvent(E.ELEMENT_ENABLED,{detail:{viewportId:id,element:v.element}}));
+  if(window.failNextImageLoad){window.failNextImageLoad=false;throw Error('native frame load failed');}
+  queueMicrotask(()=>dataEvents.dispatchEvent(new CustomEvent('data',{detail:{viewportId:id,viewportData:data}})));
+ }
+ return result;
+};
 const make=makeViewport;window.makeViewport=(id,seed)=>frameable(make(id,seed));
 window.mountJobs=()=>{document.querySelector('#kin-viewer-layout').prepend(document.createElement('summary'));
-  window.kinViewerJobs(services,{scope:()=>'study'}).mount();};
+  window.kinViewerJobs(services,{scope:()=>'study'},null,()=>({})).mount();};
 window.frameOf=id=>nativeViewports.get(id)?.getCurrentImageId?.()||null;
 window.shownFrames=()=>[...gridState.viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x).map(v=>frameOf(v.viewportId));
 // A click with no pointer event, so an in-flight merge cannot read it as user input.
@@ -241,6 +266,7 @@ class ViewerCellMergeDOMTest(unittest.TestCase):
         page.route("https://cellmerge.test/api/**", api)
         page.add_script_tag(content=JOB_FIXTURE)
         page.add_script_tag(content=VOLUME_JOB)
+        page.add_script_tag(content=STACK_RESTORE)
         page.add_script_tag(content=JOBS)
         self.assertTrue(page.evaluate("mountDirect()"))
         page.evaluate("mountJobs()")
