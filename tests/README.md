@@ -770,9 +770,10 @@ Every `scripts/record-run.py --run-dir` in `validate.yml` sits under a path of a
 | `measurements` | `tmp/workspace-ui-ci/narrow-image-layout` | `synthetic-workspace-dom-results` | Narrow worklist row and image control hit targets |
 | `measurements` | `tmp/workspace-ui-ci/worklist-header` | `synthetic-workspace-dom-results` | S5-UI1 worklist header keeps Log out on screen and keyboard reachable |
 | `measurements` | `tmp/workspace-ui-ci/main-move` | `synthetic-workspace-dom-results` | S9-U0a A1 byte move map, loss, duplication and order mutants |
+| `measurements` | `tmp/workspace-ui-ci/main-split-static` and `main-split-static.json` | `synthetic-workspace-dom-results` | S9-U0a C2 AST declaration/execution order and C6 shared classic-script Program |
 | `measurements` | `tmp/workspace-ui-ci/pre-fixture-reference` | `synthetic-workspace-dom-results` | S9-U0a-PRE report harness fixture statements equal the f1d5406 page |
 | `measurements` | `tmp/workspace-ui-ci/pre-early-input-dom` | `synthetic-workspace-dom-results` | S9-U0a-PRE early input, pagehide and registration order on 18/30/45-part pages against the f1d5406 page |
-| `measurements` | `tmp/workspace-ui-ci/pre-mutants` | `synthetic-workspace-dom-results` | S9-U0a-PRE 37 mutants killed by their own cases |
+| `measurements` | `tmp/workspace-ui-ci/pre-mutants` | `synthetic-workspace-dom-results` | S9-U0a PRE/F2/F3/S1/H178/S2: 75 cumulative mutants, each checked by its designated oracle |
 | `measurements` | `tmp/workspace-ui-ci/worklist-toolbar` | `synthetic-workspace-dom-results` | S5-UI2 worklist toolbar keeps one row of groups, every control and the page script |
 | `measurements` | `tmp/workspace-ui-ci/report-actions` | `synthetic-workspace-dom-results` | S5-UI3 report button rows keep every button in its declared section and the page script |
 | `measurements` | `tmp/workspace-ui-ci/study-arrivals` | `synthetic-workspace-dom-results` | Existing study arrivals and preserved reading inputs |
@@ -2283,7 +2284,7 @@ request-object occurrences and reverse release, independent shown range/total co
 Registration includes all instrumented event types. Dispatch excludes exactly mousemove, pointermove, pointerrawupdate,
 mouseover, mouseout, pointerover, pointerout, mouseenter, mouseleave, pointerenter and pointerleave; click/input/keydown/
 focus/scroll/resize remain compared. This does not claim coverage of every browser event.
-The existing mutant driver retains 55 PRE/F2/F3 mutants and adds S1-M01–M06 and H178-M01–M08 (69 distinct IDs);
+The existing mutant driver retains 55 PRE/F2/F3 mutants and adds S1-M01–M06, H178-M01–M08 and S2-M01–M06 (75 distinct IDs);
 byte mutants are C1 evidence, while response-hash and registration/dispatch mutants exercise browser harness oracles.
 `LoadBudget` uses uninstrumented full Chromium, five alternating baseline/candidate cold pairs and five repeated-navigation
 pairs. Playwright routing disables HTTP cache: repeated samples are explicitly not warm-cache evidence. Hosted HTTP
@@ -2292,3 +2293,9 @@ the hosted warm limit is max(100 ms, 10% baseline), for navigation→auth and au
 Raw samples, maxima, transfer sizes and all failed/partial traces are retained under the existing measurements artifact.
 No new controls, prompts or user actions are introduced. PR CI, G3 and independent review bind the commander's final
 CI integration SHA; pure/DOM checks do not replace hosted HTTPS/MIME/CSP/cache checks or doctor confirmation.
+
+Part 2 preserves the first 18 modules and extracts statements 264–479 into files 19–30; 182 statements remain inline.
+Its C3 gate uses the real 30-file layout and the unchanged full registration/dispatch oracle. D883 assigns the
+PermissionStatus partial-order refinement and PERM mutants to part 3; generated 45-file diagnostics are not part-2 acceptance.
+S2-M01–M04 exercise C1 boundary loss/tag order/trivia/duplication; S2-M05 removes the actual draft-save response;
+S2-M06 reverses real report input listeners in an externalized 30-file copy. Consumed mutant assets are hashed individually.
