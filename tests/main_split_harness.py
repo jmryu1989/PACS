@@ -26,6 +26,7 @@ What a case asserts is browser-observed behaviour (registrations, dispatch outco
 implementation strings (AGENTS 1-B). Statement names appear only in the manifest, to tell a reader where a
 registration came from.
 """
+import hashlib
 import json
 import shutil
 import subprocess
@@ -45,6 +46,9 @@ _HELPER = Path(__file__).with_name("main_split_harness.cjs")
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8"}
 # TRACE_SCRIPT passes every console.error call of page code on with this first argument (browser notices lack it).
 CONSOLE_MARK = "[kin-page-console]"
+# Registration includes these types; only dispatch comparison excludes pointer/mouse motion and crossing.
+NOISY_EVENTS = ("mousemove", "pointermove", "pointerrawupdate", "mouseover", "mouseout", "pointerover",
+                "pointerout", "mouseenter", "mouseleave", "pointerenter", "pointerleave")
 
 
 def build(count, out_dir, page=None, spec=None):
@@ -104,8 +108,18 @@ class ScratchPages:
 
     def layout(self, count):
         if count not in self.layouts:
-            directory = self.root / f"parts-{count}"
-            self.layouts[count] = (directory, build(count, directory, self.page, self.spec))
+            if count == "actual":
+                page = Path(self.page or PRODUCT_DIR / "main.html")
+                args = ["node", str(_HELPER), "actual", str(page)]
+                if self.spec:
+                    args.append(str(self.spec))
+                manifest = json.loads(subprocess.check_output(args, text=True, encoding="utf-8", cwd=ROOT))
+                self.layouts[count] = (page.parent, manifest)
+            else:
+                directory = self.root / f"parts-{count}"
+                self.layouts[count] = (directory, build(count, directory, self.page, self.spec))
+        if hasattr(self, "side"):
+            self.layouts[count][1]["side"] = self.side
         return self.layouts[count]
 
     def close(self):
@@ -149,7 +163,14 @@ class Delivery:
         if hold is not None and hold not in self.order:
             raise ValueError(f"{hold} is not a script of this layout")
         self.pending, self.arrival, self.delivered = {}, {}, {}
+        self.disposed = False
         self.requests = []
+        self.bodies = []
+        self.expected = dict(manifest.get("inputs", {}))
+        for name in self.order:
+            if name not in self.expected:
+                body = self.body(name)
+                self.expected[name] = {"bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
 
     def install(self, context):
         context.route(lambda url: urlparse(url).path.startswith(self.base), self._handle)
@@ -157,10 +178,15 @@ class Delivery:
 
     def body(self, name):
         if name == "main.html" or name in self.parts:
-            return (self.dir / name).read_bytes()
+            return (self.dir / (self.manifest["page"] if name == "main.html" else name)).read_bytes()
         return self.others(name)
 
     def _handle(self, route, request):
+        if self.disposed:
+            try:
+                return route.abort()
+            except PlaywrightError:
+                return
         name = urlparse(request.url).path[len(self.base):]
         if name == "main.html":
             return self._fulfill(route, name)
@@ -173,13 +199,22 @@ class Delivery:
         self.pump()
 
     def _fulfill(self, route, name):
+        body = self.body(name)
+        digest = hashlib.sha256(body).hexdigest()
+        record = {"name": name, "bytes": len(body), "sha256": digest}
+        self.bodies.append(record)
+        expected = self.expected[self.manifest["page"] if name == "main.html" else name]
+        if digest != expected["sha256"] or len(body) != expected["bytes"]:
+            raise AssertionError(f"delivered asset hash differs: {name}")
         try:
-            route.fulfill(status=200, body=self.body(name), content_type=TYPES[Path(name).suffix],
+            route.fulfill(status=200, body=body, content_type=TYPES[Path(name).suffix],
                           headers=dict(self.headers))
         except PlaywrightError:
             pass  # the page has gone
 
     def pump(self):
+        if self.disposed:
+            return
         now = time.monotonic()
         for index, name in enumerate(self.order):
             if name in self.delivered or name not in self.pending:
@@ -192,7 +227,12 @@ class Delivery:
                     continue
                 if now < max(self.arrival[name], self.delivered[previous]) + self.delay:
                     continue
-            self._fulfill(self.pending.pop(name), name)
+            route = self.pending.pop(name)
+            try:
+                self._fulfill(route, name)
+            except BaseException:
+                self.pending[name] = route
+                raise
             self.delivered[name] = now
 
     def release(self):
@@ -201,13 +241,14 @@ class Delivery:
 
     def dispose(self):
         """Answer nothing more: abort what is still waiting (before the context closes)."""
-        self.holding = True
-        for route in self.pending.values():
+        self.holding = self.disposed = True
+        pending = list(self.pending.values())
+        self.pending.clear()
+        for route in pending:
             try:
                 route.abort()
             except PlaywrightError:
                 pass
-        self.pending.clear()
 
     def wait(self, page, predicate, what, timeout=15.0):
         """Drive deliveries until `predicate()` holds (a callable, or a JS expression evaluated in the page)."""
@@ -533,7 +574,7 @@ TRACE_SCRIPT = r"""(() => {
     return pending;
   }
   Object.defineProperty(window, '__kinTrace', { value: Object.freeze({ registrations, dispatches, executed, errors,
-    rendering,
+    rendering, excludedDispatchTypes: [...NOISY],
     unresolved, objectsFor, parsed: () => parsed.slice(), created: () => objects.length,
     mark(label) { const item = { seq: ++seq, label: String(label) }; dispatches.push(item); return item.seq; },
     now: () => seq }) });
@@ -552,7 +593,8 @@ def snapshot(page, since=0):
       const registrations = pick(t.registrations), dispatches = pick(t.dispatches);
       const ids = [...registrations.flatMap(r => [r.object, r.signalObject]), ...dispatches.map(d => d.object)];
       return { registrations, dispatches, errors: pick(t.errors), executed: t.executed.slice(), now: t.now(),
-               objects: t.objectsFor(ids), unresolved: t.unresolved.slice() }; }""", since)
+               objects: t.objectsFor(ids), unresolved: t.unresolved.slice(),
+               excluded_dispatch_types: t.excludedDispatchTypes.slice() }; }""", since)
 
 
 def attribute(manifest, registration):
@@ -661,12 +703,17 @@ LEDGER_SCRIPT = r"""(() => {
   const fetches = [], timers = new Map(), answers = new WeakMap();
   let count = 0;
   const realFetch = window.fetch;
+  const canonical = query => [...new URLSearchParams(query)].sort((a, b) =>
+    a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0);
   window.fetch = function (input, init) {
     let path = '', query = '';
     try { const url = new URL(typeof input === 'string' ? input : input.url, location.href); path = url.pathname; query = url.search; } catch (_) {}
     const entry = { n: ++count, method: String((init && init.method) || (input && input.method) || 'GET').toUpperCase(), path, query,
       at: Date.now(), state: 'pending', status: null, body: 'unread' };
-    entry.occurrence = 1 + fetches.filter(f => f.method === entry.method && f.path === path && f.query === query).length;
+    entry.canonicalQuery = canonical(query);
+    entry.occurrence = 1 + fetches.filter(f => f.method === entry.method && f.path === path &&
+      JSON.stringify(f.canonicalQuery) === JSON.stringify(entry.canonicalQuery)).length;
+    entry.key = [entry.method, entry.path, entry.canonicalQuery, entry.occurrence];
     fetches.push(entry);
     return realFetch.apply(this, arguments).then(response => {
       entry.state = 'answered'; entry.answeredAt = Date.now(); entry.status = response.status; answers.set(response, entry); return response;
@@ -677,8 +724,7 @@ LEDGER_SCRIPT = r"""(() => {
     Response.prototype[name] = function () {
       const entry = answers.get(this), reading = read.call(this);
       if (!entry) return reading;
-      const query = [...new URLSearchParams(entry.query)].sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
-      const key = JSON.stringify([entry.method, entry.path, query, entry.occurrence]);
+      const key = JSON.stringify(entry.key);
       const holds = window.__synBodyHolds, held = holds && holds.has(key);
       const finish = promise => promise.then(value => { entry.body = 'read'; entry.consumedAt = Date.now(); return value; }, error => { entry.body = 'failed'; throw error; });
       if (!held) { entry.body = 'reading'; return finish(reading); }

@@ -33,6 +33,8 @@ observation of its own case, after the same cases passed unmutated; the 37 above
 
 stdlib only; it launches the browser test as a child process (one per mutant) and never drives a browser itself.
 --anchors-only writes every mutant and its layout (no browser) and stops.
+Part 1 retains those 55 ids and adds five C1 byte/tag/file mutants, one actual delivered-asset hash mutant,
+and eight ledger-178 oracle mutants. Every generated Python override is compiled before browser execution.
 """
 import argparse
 import concurrent.futures
@@ -175,8 +177,8 @@ F3_MUTANTS = [
      "new": '            return lambda phase, raw: setattr(self, "late_raw", getattr(self, "late_raw", []) + [(base / phase, f"{side}.raw.json", raw)])'},
     {"id": "F3-M05", "case": "HarnessSelfChecks.test_full_dispatch_includes_events_before_the_action_mark",
      "expect": "AssertionError not raised", "file": DOM,
-     "old": '                    sent = (sh.dispatch_order(a, Pages.provenance("original")),\n                            sh.dispatch_order(b, Pages.provenance("current")))',
-     "new": '                    sent = (sh.dispatch_order(a, Pages.provenance("original"), original[name].get("since", 0)),\n                            sh.dispatch_order(b, Pages.provenance("current"), candidate[name].get("since", 0)))'},
+     "old": '                    sent = (sh.dispatch_order(a, original_provenance),\n                            sh.dispatch_order(b, candidate_provenance))',
+     "new": '                    sent = (sh.dispatch_order(a, original_provenance, original[name].get("since", 0)),\n                            sh.dispatch_order(b, candidate_provenance, candidate[name].get("since", 0)))'},
     {"id": "F3-M06", "case": "HarnessSelfChecks.test_raw_sides_are_kept_before_a_failed_comparison",
      "expect": "comparison.json kept before the assertion", "file": DOM,
      "old": '            sh.keep(base / name, "comparison.json", comparison)\n            for side in ("original", "candidate"):',
@@ -184,9 +186,58 @@ F3_MUTANTS = [
 ]
 
 
+S1_BYTE = [
+    {"id": "S1-M01", "expect": "Moved bytes: page-core.js"},
+    {"id": "S1-M02", "expect": "ENOENT"},
+    {"id": "S1-M03", "expect": "No dropped, duplicated, reordered or changed statement/trivia"},
+    {"id": "S1-M04", "expect": "Moved script load order differs"},
+    {"id": "S1-M05", "expect": "Moved files must use ordinary blocking classic script tags"},
+]
+PART1_MUTANTS = [
+    {"id": "S1-M06", "case": "ActualLayout.test_delivered_asset_hash_is_bound_to_the_actual_body",
+     "expect": "AssertionError not raised", "file": HARNESS,
+     "old": '        if digest != expected["sha256"] or len(body) != expected["bytes"]:',
+     "new": '        if False and (digest != expected["sha256"] or len(body) != expected["bytes"]):'},
+    {"id": "H178-M01", "case": "HarnessSelfChecks.test_raw_sides_are_kept_before_a_failed_comparison",
+     "expect": "only the unstarted peer is not_run", "file": DOM,
+     "old": '                    keeper(side)(canonical, raw)',
+     "new": '                    keeper(side)(canonical, raw)\n                    if side == "candidate" and canonical == "P3":\n                        keeper("original")(canonical, {"phase": canonical, "status": "not_started", "reason": "mutant overwrote completed peer"})'},
+    {"id": "H178-M02", "case": "HarnessSelfChecks.test_request_occurrences_release_the_exact_request_and_canonical_query",
+     "expect": "occurrence 1 must remain held", "file": DOM,
+     "old": '            record = self.request_rows[request]',
+     "new": '            record = next(row for row in self.ledger if row["key"][:3] == self.request_rows[request]["key"][:3] and "released_at" not in row)'},
+    {"id": "H178-M03", "case": "HarnessSelfChecks.test_saved_rows_preserve_order_duplicates_extras_and_shown_count",
+     "expect": "detect shown", "file": DOM,
+     "old": 'state["rows"]["shown"] = int(shown.group(2)) - int(shown.group(1)) + 1 if shown and int(shown.group(1)) else 0',
+     "new": 'state["rows"]["shown"] = state["rows"]["row_count"]'},
+    {"id": "H178-M04", "case": "HarnessSelfChecks.test_saved_rows_preserve_order_duplicates_extras_and_shown_count",
+     "expect": "detect total", "file": DOM,
+     "old": 'state["rows"]["total"] = int(shown.group(3)) if shown else None',
+     "new": 'state["rows"]["total"] = state["rows"]["row_count"]'},
+    *[{"id": ident, "case": f"HarnessSelfChecks.test_{event}_dispatch_is_compared_before_the_mark",
+       "expect": "AssertionError not raised", "file": HARNESS,
+       "old": 'if "registration" in d and d["seq"] > since]',
+       "new": f'if "registration" in d and d["seq"] > since and d["type"] != "{event}"]'}
+      for ident, event in (("H178-M05", "scroll"), ("H178-M06", "resize"))],
+    {"id": "H178-M07", "case": "HarnessSelfChecks.test_only_the_eleven_motion_crossing_dispatch_types_are_excluded",
+     "expect": "exact eleven dispatch exclusions", "file": HARNESS,
+     "old": "const NOISY = new Set(['mousemove'", "new": "const NOISY = new Set(['click', 'mousemove'"},
+    {"id": "H178-M08", "case": "HarnessSelfChecks.test_raw_sides_are_kept_before_a_failed_comparison",
+     "expect": "failure child reached its named assertion", "file": DOM,
+     "old": '            if self.host_clock() > deadline:', "new": '            if False and self.host_clock() > deadline:'},
+]
+
+
+def source_hashes():
+    files = [*PAGE.parent.glob("*.js"), *PAGE.parent.glob("*.html"), PAGE, HELPER, DOM_TEST,
+             ROOT / HARNESS, ROOT / "tests/main_move_spec.json", ROOT / "tests/main_split_harness_fixture.json"]
+    return {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(set(files))}
+
+
 def scratch_copy(scratch, mutant):
     """The mutated copy and how the DOM test runs with it: {script, page, assets, pythonpath}."""
-    source = (ROOT / mutant["file"]).read_bytes().decode("utf-8")
+    source = (subprocess.check_output(["node", str(ROOT / "tests/page_source.cjs"), "source", str(PAGE)], cwd=ROOT).decode("utf-8")
+              if mutant["file"] == PAGE_FILE else (ROOT / mutant["file"]).read_bytes().decode("utf-8"))
     newline = "\r\n" if "\r\n" in source else "\n"
     body = source.replace("\r\n", "\n")
     if body.count(mutant["old"]) != 1:
@@ -205,11 +256,13 @@ def scratch_copy(scratch, mutant):
         dom = mutated if mutant["file"] == DOM else DOM_TEST.read_bytes().decode("utf-8")
         dom = dom.replace("ROOT = Path(__file__).resolve().parents[1]", "ROOT = " + root, 1)
         (folder / "main_early_input_dom_test.py").write_bytes(dom.encode("utf-8"))
+        compile(dom, str(folder / "main_early_input_dom_test.py"), "exec")
         if mutant["file"] == HARNESS:
             harness = mutated.replace("ROOT = Path(__file__).resolve().parents[1]", "ROOT = " + root, 1).replace(
                 '_HELPER = Path(__file__).with_name("main_split_harness.cjs")',
                 "_HELPER = %s / 'tests' / 'main_split_harness.cjs'" % root, 1)
             (folder / "main_split_harness.py").write_bytes(harness.encode("utf-8"))
+            compile(harness, str(folder / "main_split_harness.py"), "exec")
         run.update(script=folder / "main_early_input_dom_test.py", pythonpath=str(ROOT / "tests"))
     elif mutant["file"] == PAGE_FILE:
         (folder / "main.html").write_bytes(mutated.encode("utf-8"))
@@ -241,10 +294,17 @@ def run_cases(page, cases, timeout, boundary=(), spec=None, script=None, assets=
     evidence.mkdir(parents=True, exist_ok=True)
     environment["KIN_PRE_TRACE_DIR"] = str(evidence / "traces")
     command = [sys.executable, "-B", str(script or DOM_TEST), *cases]
+    inputs = source_hashes()
+    for candidate in (pathlib.Path(page), pathlib.Path(script or DOM_TEST)):
+        inputs[str(candidate)] = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    if assets:
+        inputs.update({str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in pathlib.Path(assets).glob("*") if p.is_file()})
     done = subprocess.run(command, cwd=str(ROOT), env=environment, capture_output=True, text=True,
                           encoding="utf-8", errors="replace", timeout=timeout)
     (evidence / "stdout.log").write_text(done.stdout or "", encoding="utf-8")
     (evidence / "stderr.log").write_text(done.stderr or "", encoding="utf-8")
+    (evidence / "run.json").write_text(json.dumps({"command": command, "exit": done.returncode, "inputs": inputs,
+        "overrides": {key: environment.get(key) for key in ("KIN_PRE_PAGE", "KIN_PRE_SPEC", "KIN_PRE_BOUNDARY", "KIN_PRE_ASSETS")}}, indent=2), encoding="utf-8")
     return done, (done.stdout or "") + (done.stderr or "")
 
 
@@ -306,12 +366,14 @@ def main():
     parser.add_argument("--timeout", type=int, default=600, help="Seconds per child run")
     parser.add_argument("--jobs", type=int, default=2, help="Mutant children at a time")
     parser.add_argument("--anchors-only", action="store_true", help="Write every mutant and its layout (no browser) and stop")
-    parser.add_argument("only", nargs="*", help="Mutant ids (default: M01-M37, F2-M01-M12, F3-M01-M06)")
+    parser.add_argument("only", nargs="*", help="Mutant ids (default: all 69 PRE/F2/F3/S1/H178 ids)")
     args = parser.parse_args()
     os.environ["KIN_PRE_MUTANT_EVIDENCE"] = str(pathlib.Path(args.out).resolve().parent / "mutant-children"
         if args.out else pathlib.Path(tempfile.mkdtemp(prefix="kin-pre-mutant-evidence-")))
     selected = [m for m in MUTANTS if not args.only or m["id"] in args.only]
-    selected_f2 = [m for m in F2_MUTANTS + F3_MUTANTS if not args.only or m["id"] in args.only]
+    selected_f2 = [m for m in F2_MUTANTS + F3_MUTANTS + PART1_MUTANTS if not args.only or m["id"] in args.only]
+    selected_byte = [m for m in S1_BYTE if not args.only or m["id"] in args.only]
+    inputs_before = source_hashes()
     before = hashlib.sha256(PAGE.read_bytes()).hexdigest()
     print("%s sha256 %s" % (PAGE.name, before))
     scratch = pathlib.Path(tempfile.mkdtemp(prefix="kin-pre-split-mutants-"))
@@ -340,6 +402,7 @@ def main():
                 problems.append(str(error))
             if ("def %s(" % mutant["case"].split(".")[-1]) not in dom_source:
                 problems.append("%s names a case that does not exist: %s" % (mutant["id"], mutant["case"]))
+        byte_pages = {m["id"]: node("split-mutant", PAGE, m["id"], scratch / m["id"]) for m in selected_byte}
         if problems:
             for problem in problems:
                 print("ANCHOR FAILURE:", problem)
@@ -347,7 +410,7 @@ def main():
         for mutant in prepared:
             print("%s case=%s layout=%s" % (mutant["id"], mutant["case"], json.dumps(mutant.get("layout"))))
         if args.anchors_only:
-            print("all %d mutants and layouts and %d F2 mutants written (no browser run requested)" % (len(prepared), len(f2_runs)))
+            print("all %d mutants and layouts and %d harness/page mutants + %d byte mutants written (no browser run requested)" % (len(prepared), len(f2_runs), len(byte_pages)))
             return 0
         boundary, cases = baseline_cases(prepared)
         cases += sorted({m["case"] for m in selected_f2} - set(cases))
@@ -362,6 +425,30 @@ def main():
             print("BASELINE FAILED - refusing to report kills:")
             print(output[-4000:])
             return 1
+
+        if selected_byte:
+            byte_baseline = node("split-mutant", PAGE, "BASELINE", scratch / "byte-baseline")
+            for mutant in [{"id": "BYTE-BASELINE"}, *selected_byte]:
+                target = byte_baseline["page"] if mutant["id"] == "BYTE-BASELINE" else byte_pages[mutant["id"]]["page"]
+                environment = dict(os.environ, KIN_SPLIT_BYTE_PAGE=target)
+                command = ["node", "--test", "--test-name-pattern=S1 candidate byte contract", str(ROOT / "tests/main_move_test.cjs")]
+                done = subprocess.run(command, cwd=ROOT, env=environment, capture_output=True, text=True, encoding="utf-8", errors="replace")
+                output = done.stdout + done.stderr
+                evidence = pathlib.Path(os.environ["KIN_PRE_MUTANT_EVIDENCE"]) / mutant["id"]
+                evidence.mkdir(parents=True, exist_ok=True)
+                (evidence / "stdout.log").write_text(done.stdout, encoding="utf-8")
+                (evidence / "stderr.log").write_text(done.stderr, encoding="utf-8")
+                hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in pathlib.Path(target).parent.iterdir() if p.is_file()}
+                if mutant["id"] == "BYTE-BASELINE":
+                    if done.returncode:
+                        raise AssertionError("byte baseline must pass before mutation results: " + output[-1500:])
+                    continue
+                killed = done.returncode != 0 and mutant["expect"] in output and "S1 candidate byte contract" in output
+                row = {"id": mutant["id"], "oracle": "C1", "child_exit": done.returncode, "killed": killed,
+                       "expect_matched": mutant["expect"] if killed else "", "inputs": hashes}
+                results.append(row)
+                (evidence / "run.json").write_text(json.dumps(row, indent=2), encoding="utf-8")
+                print("%s C1 exit=%d killed=%s" % (mutant["id"], done.returncode, killed))
 
         def judge(mutant):
             page = pathlib.Path(mutant["page"])
@@ -412,7 +499,7 @@ def main():
         shutil.rmtree(scratch, ignore_errors=True)
     after = hashlib.sha256(PAGE.read_bytes()).hexdigest()
     summary = {"page": str(PAGE), "page_sha256_before": before, "page_sha256_after": after,
-               "page_unchanged": before == after, "results": results}
+               "page_unchanged": before == after, "inputs_before": inputs_before, "inputs_after": source_hashes(), "results": results}
     if args.out:
         out = pathlib.Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -425,7 +512,7 @@ def main():
     print("M01-M37: %d/%d killed; F2-M01..M12: %d/%d killed" % (
         sum(r["killed"] for r in results if r["id"].startswith("M")), sum(1 for r in results if r["id"].startswith("M")),
         sum(r["killed"] for r in f2), len(f2)))
-    if survivors or before != after:
+    if survivors or before != after or summary["inputs_before"] != summary["inputs_after"]:
         print("SURVIVORS: %s" % ", ".join(survivors) if survivors else "the page changed during the run")
         return 1
     print("all %d mutants killed on their own case" % (len(results) - 1))
