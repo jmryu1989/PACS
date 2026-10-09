@@ -655,7 +655,7 @@
    ]
   }
  ],
- "total_expected": 39,
+ "total_expected": 263,
  "mutants": {
   "M1": {
    "file": "model",

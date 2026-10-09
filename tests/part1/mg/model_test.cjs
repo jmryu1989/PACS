@@ -92,13 +92,13 @@ test('MG01-allow conventional, device synthetic 2D and DBT are told apart by sta
   assert.equal(biopsy.kind,'generated2d','biopsy Value 3 takes precedence and Value 4 still marks the generated 2D view');assert.equal(biopsy.biopsy,'POSTBIOPSY');
   const slices=model.classify(dbt());
   assert.equal(slices.kind,'dbt');assert.equal(slices.sliceKind,'slices');assert.equal(slices.laterality,'L');assert.equal(slices.view,'CC');
-  const slab=model.classify(dbt({technique:'MAX_IP',volumetric:'SAMPLED',thickness:10}));
-  assert.equal(slab.kind,'dbt');assert.equal(slab.sliceKind,'mip-slab','a MIP slab is reported as what is stored, not as thin slices');assert.equal(slab.sliceThickness,10);
   // Slices vs slab follow thickness and contiguous positions together with the tags (ruling D730).
   const sampledThin=model.classify(dbt({volumetric:'SAMPLED',thickness:1}));
   const volumeThick=model.classify(dbt({positions:[0,5,10,15],technique:'MAX_IP',volumetric:'VOLUME',thickness:10}));
   assert.deepEqual([sampledThin.sliceKind,volumeThick.sliceKind],['slices','mip-slab'],
     'MG01 M23: slices vs slab follow thickness and contiguous positions, not Volumetric Properties alone');
+  const slab=model.classify(dbt({technique:'MAX_IP',volumetric:'SAMPLED',thickness:10}));
+  assert.equal(slab.kind,'dbt');assert.equal(slab.sliceKind,'mip-slab','a MIP slab is reported as what is stored, not as thin slices');assert.equal(slab.sliceThickness,10);
   // Thin MAX_IP sections are slices only within the verified Hologic 1 mm profile, never for any device.
   assert.equal(model.classify(dbt({technique:'MAX_IP',volumetric:'VOLUME',thickness:1,extra:HOLOGIC})).sliceKind,'slices');
   assert.equal(model.classify(dbt({technique:'MAX_IP',volumetric:'VOLUME',thickness:1})).status,'unverified');
