@@ -94,7 +94,9 @@ once(pins, pins +
 
 # 4. The report harness steps that compile BASE_BLOCK/REPORT_BLOCK now take them by the fixture projection.
 for run_dir in ("report-rebase", "report-citation-dom", "report-cursor-insert-dom", "report-cursor-insert-mutants",
-                "report-dictation-input-dom", "report-dictation-host-dom", "report-structure-dom", "report-structure-mutants"):
+                "report-dictation-input-dom", "report-dictation-host-dom", "report-structure-dom", "report-structure-mutants",
+                # HISTORY_BLOCK (M06 moved its old text end marker, reportWriteBlock's comment).
+                "report-version-citation-dom", "report-version-citation-mutants"):
     pattern = re.compile(r"(python3 scripts/record-run\.py --run-dir tmp/workspace-ui-ci/" + re.escape(run_dir) + r" [^\n]*?) -- ")
     found = pattern.findall(text)
     assert len(found) == 1, (run_dir, len(found))
