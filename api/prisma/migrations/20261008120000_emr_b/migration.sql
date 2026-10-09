@@ -15,14 +15,16 @@
 -- the ledger, kin_emr_retention can only call expire_prefix. A role found with an elevated attribute or a membership
 -- stops the migration instead of being trusted.
 --
--- Chain. append_access computes sequence, previousHash and SHA-256 under the chain-head row lock, over exactly the bytes
--- A's chainEntry hashes: '{"sequence":N,"previousHash":"<hex>","payload":' || payload || '}'. The payload text is the
--- server's JSON.stringify of A's parsed event and is stored verbatim (text, not jsonb, so the hashed bytes survive).
--- Retries of the same event ID with the same payload return the stored entry; the same ID with other content is refused.
--- Deletion exists only in expire_prefix: an expired, unheld prefix and its non-personal checkpoint commit together.
--- Retention (commander 2026-10-09, legal register D-1): no deadline is stored. It is computed when destruction is
--- considered, by one rule over the entry's own time and the retention of the EMR records it is about (bound in
--- access_target); an entry about no record ends at the floor declared once below (access_retention_floor).
+-- Chains. Two streams (D-1): 'viewing' (every event, its own floor, prefix expiry) and 'history' (record changes, kept
+-- with the changed record). append_access computes sequence, previousHash and SHA-256 under the stream's head row lock,
+-- over exactly the bytes A's chainEntry hashes: '{"sequence":N,"previousHash":"<hex>","payload":' || payload || '}'. The
+-- payload text is the server's JSON.stringify of A's parsed event and is stored verbatim (text, not jsonb, so the hashed
+-- bytes survive). Retries of the same event ID with the same payload return the stored entry; the same ID with other
+-- content is refused. Deletion exists only in expire_prefix, for the viewing stream: an expired, unheld prefix and its
+-- non-personal checkpoint commit together; the history stream goes with its record's destruction set (unit H).
+-- Retention (commander D727, legal register §5-11): no deadline is stored. It is computed when destruction is considered,
+-- by one rule (contract.ts accessDeadline) over the entry's own time - a viewing entry ends at the floor declared once
+-- below (access_retention_floor) unless held - and, for a history entry, the retention of the records bound in access_target.
 BEGIN;
 
 DO $$
@@ -79,39 +81,55 @@ END $$;
 SET LOCAL ROLE kin_emr_owner;
 ALTER DEFAULT PRIVILEGES IN SCHEMA emr_access REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 
+-- Two streams (D-1, legal register 2026-10-09 §5-11, commander D727). 'viewing' holds every access event for its own floor
+-- (열람 events, events about no EMR record, and the floor remainder of every change) and is the only stream with prefix
+-- expiry. 'history' holds the change history of EMR records - a succeeded 기재·추가기재·수정 about at least one record - kept
+-- with the changed record and removed only with that record's destruction set (unit H; this unit has no such deletion).
+-- Each stream is its own chain with its own head and identity.
 CREATE TABLE emr_access.chain_head (
-  id smallint PRIMARY KEY CHECK (id = 1),
-  chain_id uuid NOT NULL,
+  stream text PRIMARY KEY CHECK (stream IN ('viewing', 'history')),
+  chain_id uuid NOT NULL UNIQUE,
   sequence bigint NOT NULL CHECK (sequence >= 0),
   hash text NOT NULL CHECK (hash ~ '^[0-9a-f]{64}$')
 );
-INSERT INTO emr_access.chain_head (id, chain_id, sequence, hash) VALUES (1, pg_catalog.gen_random_uuid(), 0, pg_catalog.repeat('0', 64));
+INSERT INTO emr_access.chain_head (stream, chain_id, sequence, hash) VALUES
+  ('viewing', pg_catalog.gen_random_uuid(), 0, pg_catalog.repeat('0', 64)),
+  ('history', pg_catalog.gen_random_uuid(), 0, pg_catalog.repeat('0', 64));
 
+-- No deadline is stored: it is computed when destruction is considered (api/src/emr-runtime/contract.ts accessDeadline).
+-- statutory_act is A's 의료법 제23조④ mapping of the event's action, bound with it.
 CREATE TABLE emr_access.access_entry (
-  sequence bigint PRIMARY KEY CHECK (sequence >= 1),
+  stream text NOT NULL CHECK (stream IN ('viewing', 'history')),
+  sequence bigint NOT NULL CHECK (sequence >= 1),
   previous_hash text NOT NULL CHECK (previous_hash ~ '^[0-9a-f]{64}$'),
   hash text NOT NULL UNIQUE CHECK (hash ~ '^[0-9a-f]{64}$'),
-  kind text NOT NULL CHECK (kind IN ('access', 'expiry')),
-  event_id text UNIQUE CHECK (event_id IS NULL OR (pg_catalog.length(event_id) BETWEEN 1 AND 200)),
+  kind text NOT NULL CHECK (kind IN ('access', 'expiry', 'history')),
+  statutory_act text CHECK (statutory_act IN ('기재', '추가기재', '수정', '열람', 'none')),
+  event_id text CHECK (event_id IS NULL OR (pg_catalog.length(event_id) BETWEEN 1 AND 200)),
   payload text NOT NULL CHECK (pg_catalog.octet_length(payload) <= 65536),
   content_sha256 text NOT NULL CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
   occurred_at timestamptz NOT NULL,
   stored_at timestamptz NOT NULL,
-  CHECK ((kind = 'access') = (event_id IS NOT NULL))
+  PRIMARY KEY (stream, sequence),
+  UNIQUE (stream, event_id),
+  CHECK ((stream = 'viewing' AND kind IN ('access', 'expiry')) OR (stream = 'history' AND kind = 'history')),
+  CHECK ((kind = 'expiry') = (event_id IS NULL)),
+  CHECK ((kind = 'expiry') = (statutory_act IS NULL)),
+  CHECK (stream = 'viewing' OR statutory_act IN ('기재', '추가기재', '수정'))
 );
 
--- No deadline is stored on an entry: it is computed only when destruction is considered, from one rule
--- (api/src/emr-runtime/contract.ts accessDeadline) over the entry's own time and, for an event about an EMR record
--- (기재·추가기재·수정·열람), that record's retention. Each such record target of an event is bound here, derived by
--- append_access from the chained payload itself: every target A did not mark as a non-record target, in payload order.
+-- Each record target of an event (every target A did not mark non-record, in payload order), derived by append_access from
+-- the chained payload itself: the record and version an event is about, which unit H reads to build a destruction set.
 CREATE TABLE emr_access.access_target (
-  sequence bigint NOT NULL REFERENCES emr_access.access_entry (sequence),
+  stream text NOT NULL,
+  sequence bigint NOT NULL,
   target_index integer NOT NULL CHECK (target_index >= 0),
   event_id text NOT NULL,
   target_kind text NOT NULL CHECK (pg_catalog.length(target_kind) BETWEEN 1 AND 100),
   record_id text CHECK (record_id IS NULL OR pg_catalog.length(record_id) BETWEEN 1 AND 200),
   version_id text CHECK (version_id IS NULL OR pg_catalog.length(version_id) BETWEEN 1 AND 200),
-  PRIMARY KEY (sequence, target_index)
+  PRIMARY KEY (stream, sequence, target_index),
+  FOREIGN KEY (stream, sequence) REFERENCES emr_access.access_entry (stream, sequence)
 );
 CREATE INDEX access_target_record ON emr_access.access_target (record_id, version_id);
 
@@ -192,8 +210,9 @@ CREATE TRIGGER duty_request_event_truncate BEFORE TRUNCATE ON emr_access.duty_re
 CREATE TRIGGER clause_version_guard BEFORE UPDATE OR DELETE ON emr_access.clause_version FOR EACH ROW EXECUTE FUNCTION emr_access.refuse_change();
 CREATE TRIGGER clause_version_truncate BEFORE TRUNCATE ON emr_access.clause_version FOR EACH STATEMENT EXECUTE FUNCTION emr_access.refuse_change();
 
--- A's civilPeriodEnd: Asia/Seoul civil days at the fixed +09:00 offset; the first day counts only from 00:00; a 29 February
--- start falls on 1 March of a non-leap target year (Civil Act 157/159/160). The exclusive boundary, in UTC.
+-- A's civilPeriodEnd: Asia/Seoul civil days at the fixed +09:00 offset; the first day is the starting event's civil day
+-- (D-21, 행정기본법 제6조②1); the period ends with the day before the corresponding day of the last year, weekends and
+-- holidays included; a 29 February start ends with 28 February (민법 제159·160조). The exclusive boundary, in UTC.
 CREATE FUNCTION emr_access.civil_period_end(p_at timestamptz, p_years integer) RETURNS timestamptz
   LANGUAGE plpgsql IMMUTABLE STRICT SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
@@ -203,7 +222,8 @@ DECLARE
   y integer; m integer; d integer; target date;
 BEGIN
   IF p_years < 1 THEN RAISE EXCEPTION 'Whole positive calendar years required' USING ERRCODE = 'invalid_parameter_value'; END IF;
-  start_day := (midnight + CASE WHEN local_time = midnight THEN interval '0 days' ELSE interval '1 day' END)::date;
+  -- D-21 (행정기본법 제6조②1): the first day is the civil day of the starting event, whatever its time.
+  start_day := midnight::date;
   y := extract(year FROM start_day)::integer + p_years;
   m := extract(month FROM start_day)::integer;
   d := extract(day FROM start_day)::integer;
@@ -254,7 +274,7 @@ CREATE FUNCTION emr_access.chain_hash(p_sequence bigint, p_previous text, p_payl
   SELECT encode(sha256(convert_to('{"sequence":' || p_sequence::text || ',"previousHash":"' || p_previous || '","payload":' || p_payload || '}', 'UTF8')), 'hex');
 $$;
 
-CREATE FUNCTION emr_access.append_access(p_event_id text, p_payload text)
+CREATE FUNCTION emr_access.append_access(p_stream text, p_event_id text, p_payload text, p_statutory_act text)
   RETURNS TABLE (chain_id uuid, sequence bigint, previous_hash text, hash text, stored_at timestamptz, replay boolean)
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
@@ -262,6 +282,7 @@ DECLARE
   existing emr_access.access_entry%ROWTYPE;
   doc json;
   occurred timestamptz;
+  entry_kind text := CASE p_stream WHEN 'viewing' THEN 'access' WHEN 'history' THEN 'history' END;
   next_sequence bigint;
   next_hash text;
   stored timestamptz := clock_timestamp();
@@ -273,16 +294,22 @@ BEGIN
   EXCEPTION WHEN others THEN
     RAISE EXCEPTION 'AccessPayloadInvalid' USING ERRCODE = 'EB003';
   END;
-  IF p_event_id IS NULL OR doc ->> 'kind' IS DISTINCT FROM 'access' OR doc -> 'event' ->> 'eventId' IS DISTINCT FROM p_event_id
+  IF entry_kind IS NULL OR p_event_id IS NULL OR doc ->> 'kind' IS DISTINCT FROM entry_kind
+     OR doc -> 'event' ->> 'eventId' IS DISTINCT FROM p_event_id
      OR occurred IS NULL OR pg_catalog.json_typeof(doc -> 'event' -> 'targets') IS DISTINCT FROM 'array'
      OR EXISTS (SELECT 1 FROM pg_catalog.json_array_elements(doc -> 'event' -> 'targets') t(value)
-                WHERE pg_catalog.json_typeof(t.value) IS DISTINCT FROM 'object' OR t.value ->> 'kind' IS NULL) THEN
+                WHERE pg_catalog.json_typeof(t.value) IS DISTINCT FROM 'object' OR t.value ->> 'kind' IS NULL)
+     OR p_statutory_act IS NULL OR p_statutory_act NOT IN ('기재', '추가기재', '수정', '열람', 'none')
+     -- The history stream is a record's change history: a change act about at least one record target.
+     OR (p_stream = 'history' AND (p_statutory_act NOT IN ('기재', '추가기재', '수정') OR NOT EXISTS (
+           SELECT 1 FROM pg_catalog.json_array_elements(doc -> 'event' -> 'targets') t(value)
+           WHERE (t.value -> 'recordId' ->> 'status') IS DISTINCT FROM 'not-applicable'))) THEN
     RAISE EXCEPTION 'AccessPayloadInvalid' USING ERRCODE = 'EB003';
   END IF;
-  SELECT * INTO head FROM emr_access.chain_head h WHERE h.id = 1 FOR UPDATE;
-  SELECT * INTO existing FROM emr_access.access_entry e WHERE e.event_id = p_event_id;
+  SELECT * INTO head FROM emr_access.chain_head h WHERE h.stream = p_stream FOR UPDATE;
+  SELECT * INTO existing FROM emr_access.access_entry e WHERE e.stream = p_stream AND e.event_id = p_event_id;
   IF FOUND THEN
-    IF existing.payload = p_payload THEN
+    IF existing.payload = p_payload AND existing.statutory_act = p_statutory_act THEN
       RETURN QUERY SELECT head.chain_id, existing.sequence, existing.previous_hash, existing.hash, existing.stored_at, true;
       RETURN;
     END IF;
@@ -290,59 +317,55 @@ BEGIN
   END IF;
   next_sequence := head.sequence + 1;
   next_hash := emr_access.chain_hash(next_sequence, head.hash, p_payload);
-  INSERT INTO emr_access.access_entry (sequence, previous_hash, hash, kind, event_id, payload, content_sha256, occurred_at, stored_at)
-    VALUES (next_sequence, head.hash, next_hash, 'access', p_event_id, p_payload, encode(sha256(convert_to(p_payload, 'UTF8')), 'hex'),
-            occurred, stored);
+  INSERT INTO emr_access.access_entry (stream, sequence, previous_hash, hash, kind, statutory_act, event_id, payload, content_sha256, occurred_at, stored_at)
+    VALUES (p_stream, next_sequence, head.hash, next_hash, entry_kind, p_statutory_act, p_event_id, p_payload,
+            encode(sha256(convert_to(p_payload, 'UTF8')), 'hex'), occurred, stored);
   -- Its record targets, from the same bytes: A marks a non-record target's record fact 'not-applicable'; every other
   -- target is about an EMR record (its record and version IDs when known, NULL when the event could not resolve them).
-  INSERT INTO emr_access.access_target (sequence, target_index, event_id, target_kind, record_id, version_id)
-  SELECT next_sequence, (t.position - 1)::integer, p_event_id, t.value ->> 'kind',
+  INSERT INTO emr_access.access_target (stream, sequence, target_index, event_id, target_kind, record_id, version_id)
+  SELECT p_stream, next_sequence, (t.position - 1)::integer, p_event_id, t.value ->> 'kind',
          CASE WHEN t.value -> 'recordId' ->> 'status' = 'known' THEN t.value -> 'recordId' ->> 'value' END,
          CASE WHEN t.value -> 'versionId' ->> 'status' = 'known' THEN t.value -> 'versionId' ->> 'value' END
   FROM pg_catalog.json_array_elements(doc -> 'event' -> 'targets') WITH ORDINALITY AS t(value, position)
   WHERE (t.value -> 'recordId' ->> 'status') IS DISTINCT FROM 'not-applicable';
   PERFORM set_config('kin.emr_append', 'head', true);
-  UPDATE emr_access.chain_head h SET sequence = next_sequence, hash = next_hash WHERE h.id = 1;
+  UPDATE emr_access.chain_head h SET sequence = next_sequence, hash = next_hash WHERE h.stream = p_stream;
   PERFORM set_config('kin.emr_append', '', true);
   RETURN QUERY SELECT head.chain_id, next_sequence, head.hash, next_hash, stored, false;
 END
 $$;
 
-CREATE FUNCTION emr_access.chain_tail() RETURNS TABLE (chain_id uuid, sequence bigint, hash text)
+CREATE FUNCTION emr_access.chain_tail(p_stream text) RETURNS TABLE (chain_id uuid, sequence bigint, hash text)
   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-  SELECT h.chain_id, h.sequence, h.hash FROM emr_access.chain_head h WHERE h.id = 1;
+  SELECT h.chain_id, h.sequence, h.hash FROM emr_access.chain_head h WHERE h.stream = p_stream;
 $$;
-CREATE FUNCTION emr_access.entries_after(p_after bigint, p_limit integer)
-  RETURNS TABLE (sequence bigint, previous_hash text, hash text, kind text, event_id text, payload text, content_sha256 text, stored_at timestamptz)
+CREATE FUNCTION emr_access.entries_after(p_stream text, p_after bigint, p_limit integer)
+  RETURNS TABLE (sequence bigint, previous_hash text, hash text, kind text, statutory_act text, event_id text, payload text, content_sha256 text, stored_at timestamptz)
   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-  SELECT e.sequence, e.previous_hash, e.hash, e.kind, e.event_id, e.payload, e.content_sha256, e.stored_at
-  FROM emr_access.access_entry e WHERE e.sequence > p_after ORDER BY e.sequence LIMIT least(greatest(p_limit, 1), 1000);
+  SELECT e.sequence, e.previous_hash, e.hash, e.kind, e.statutory_act, e.event_id, e.payload, e.content_sha256, e.stored_at
+  FROM emr_access.access_entry e WHERE e.stream = p_stream AND e.sequence > p_after ORDER BY e.sequence LIMIT least(greatest(p_limit, 1), 1000);
 $$;
-CREATE FUNCTION emr_access.entry_for_event(p_event_id text)
-  RETURNS TABLE (sequence bigint, previous_hash text, hash text, kind text, event_id text, payload text, content_sha256 text, stored_at timestamptz)
+CREATE FUNCTION emr_access.entry_for_event(p_stream text, p_event_id text)
+  RETURNS TABLE (sequence bigint, previous_hash text, hash text, kind text, statutory_act text, event_id text, payload text, content_sha256 text, stored_at timestamptz)
   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-  SELECT e.sequence, e.previous_hash, e.hash, e.kind, e.event_id, e.payload, e.content_sha256, e.stored_at
-  FROM emr_access.access_entry e WHERE e.event_id = p_event_id;
+  SELECT e.sequence, e.previous_hash, e.hash, e.kind, e.statutory_act, e.event_id, e.payload, e.content_sha256, e.stored_at
+  FROM emr_access.access_entry e WHERE e.stream = p_stream AND e.event_id = p_event_id;
 $$;
 
--- What the retention job may know: positions, each entry's own time, its record targets (identifiers only) and whether
--- an unreleased hold exists - no payload. The job computes each deadline from these with the one retention rule.
+-- What the retention job may know of the viewing stream: positions, each entry's own time and whether an unreleased hold
+-- exists - no payload. The job computes each end with the one retention rule.
 CREATE FUNCTION emr_access.retention_view(p_after bigint, p_limit integer)
-  RETURNS TABLE (sequence bigint, hash text, kind text, occurred_at timestamptz, targets json, held boolean)
+  RETURNS TABLE (sequence bigint, hash text, kind text, occurred_at timestamptz, held boolean)
   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-  SELECT e.sequence, e.hash, e.kind, e.occurred_at, COALESCE((
-    SELECT pg_catalog.json_agg(pg_catalog.json_build_object('index', t.target_index, 'kind', t.target_kind, 'recordId', t.record_id,
-      'versionId', t.version_id) ORDER BY t.target_index)
-    FROM emr_access.access_target t WHERE t.sequence = e.sequence), '[]'::json), EXISTS (
+  SELECT e.sequence, e.hash, e.kind, e.occurred_at, EXISTS (
     SELECT 1 FROM emr_access.legal_hold_event placed WHERE placed.record_id = e.event_id AND placed.phase = 'placed'
       AND NOT EXISTS (SELECT 1 FROM emr_access.legal_hold_event released WHERE released.hold_id = placed.hold_id AND released.phase = 'released'))
-  FROM emr_access.access_entry e WHERE e.sequence > p_after ORDER BY e.sequence LIMIT least(greatest(p_limit, 1), 1000);
+  FROM emr_access.access_entry e WHERE e.stream = 'viewing' AND e.sequence > p_after ORDER BY e.sequence LIMIT least(greatest(p_limit, 1), 1000);
 $$;
 
--- Retention role only. The prefix up to p_through must be past every entry's retention floor, hold no entry about an EMR
--- record (its end is the target record's retention, which this unit does not hold: unit H supplies it and replaces this
--- refusal) and be free of any unreleased hold; it, its targets and projections are deleted and the checkpoint appended in
--- this one transaction, or nothing happens.
+-- Retention role only; the viewing stream only. The prefix up to p_through must be past every entry's floor and free of any
+-- unreleased hold; it, its targets and projections are deleted and the checkpoint appended in this one transaction, or
+-- nothing happens. The history stream is never touched here.
 CREATE FUNCTION emr_access.expire_prefix(p_through bigint)
   RETURNS TABLE (deleted_count bigint, checkpoint_sequence bigint, checkpoint_hash text)
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
@@ -357,37 +380,37 @@ DECLARE
   next_hash text;
 BEGIN
   PERFORM emr_access.require_placement();
-  SELECT * INTO head FROM emr_access.chain_head h WHERE h.id = 1 FOR UPDATE;
-  SELECT * INTO anchor FROM emr_access.access_entry e WHERE e.sequence = p_through;
+  SELECT * INTO head FROM emr_access.chain_head h WHERE h.stream = 'viewing' FOR UPDATE;
+  SELECT * INTO anchor FROM emr_access.access_entry e WHERE e.stream = 'viewing' AND e.sequence = p_through;
   IF NOT FOUND THEN RAISE EXCEPTION 'ExpiryPrefixInvalid' USING ERRCODE = 'EB006'; END IF;
-  IF EXISTS (SELECT 1 FROM emr_access.access_entry e WHERE e.sequence <= p_through AND emr_access.access_retention_floor(e.occurred_at) > now_at) THEN
+  IF EXISTS (SELECT 1 FROM emr_access.access_entry e WHERE e.stream = 'viewing' AND e.sequence <= p_through
+             AND emr_access.access_retention_floor(e.occurred_at) > now_at) THEN
     RAISE EXCEPTION 'RetentionNotElapsed' USING ERRCODE = 'EB004';
-  END IF;
-  IF EXISTS (SELECT 1 FROM emr_access.access_target t WHERE t.sequence <= p_through) THEN
-    RAISE EXCEPTION 'RecordRetentionRequired' USING ERRCODE = 'EB008';
   END IF;
   IF EXISTS (SELECT 1 FROM emr_access.access_entry e JOIN emr_access.legal_hold_event placed
                ON placed.record_id = e.event_id AND placed.phase = 'placed'
-             WHERE e.sequence <= p_through AND NOT EXISTS (
+             WHERE e.stream = 'viewing' AND e.sequence <= p_through AND NOT EXISTS (
                SELECT 1 FROM emr_access.legal_hold_event released WHERE released.hold_id = placed.hold_id AND released.phase = 'released')) THEN
     RAISE EXCEPTION 'LegalHoldActive' USING ERRCODE = 'EB005';
   END IF;
-  SELECT count(*) INTO removed FROM emr_access.access_entry e WHERE e.sequence <= p_through;
+  SELECT count(*) INTO removed FROM emr_access.access_entry e WHERE e.stream = 'viewing' AND e.sequence <= p_through;
   PERFORM set_config('kin.emr_expiry', 'prefix', true);
-  DELETE FROM emr_access.audit_projection p USING emr_access.access_entry e WHERE e.sequence <= p_through AND p.event_id = e.event_id;
-  DELETE FROM emr_access.access_target t WHERE t.sequence <= p_through;
-  DELETE FROM emr_access.access_entry e WHERE e.sequence <= p_through;
+  -- A projection belongs to the event's viewing entry; an event still in the history stream keeps no projection.
+  DELETE FROM emr_access.audit_projection p USING emr_access.access_entry e
+    WHERE e.stream = 'viewing' AND e.sequence <= p_through AND p.event_id = e.event_id;
+  DELETE FROM emr_access.access_target t WHERE t.stream = 'viewing' AND t.sequence <= p_through;
+  DELETE FROM emr_access.access_entry e WHERE e.stream = 'viewing' AND e.sequence <= p_through;
   PERFORM set_config('kin.emr_expiry', '', true);
   at_text := to_char(now_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"');
   checkpoint := '{"kind":"expiry","at":"' || at_text || '","deletedThrough":' || p_through::text || ',"deletedCount":' || removed::text ||
                 ',"anchorHash":"' || anchor.hash || '"}';
   next_sequence := head.sequence + 1;
   next_hash := emr_access.chain_hash(next_sequence, head.hash, checkpoint);
-  INSERT INTO emr_access.access_entry (sequence, previous_hash, hash, kind, event_id, payload, content_sha256, occurred_at, stored_at)
-    VALUES (next_sequence, head.hash, next_hash, 'expiry', NULL, checkpoint, encode(sha256(convert_to(checkpoint, 'UTF8')), 'hex'),
+  INSERT INTO emr_access.access_entry (stream, sequence, previous_hash, hash, kind, statutory_act, event_id, payload, content_sha256, occurred_at, stored_at)
+    VALUES ('viewing', next_sequence, head.hash, next_hash, 'expiry', NULL, NULL, checkpoint, encode(sha256(convert_to(checkpoint, 'UTF8')), 'hex'),
             now_at, clock_timestamp());
   PERFORM set_config('kin.emr_append', 'head', true);
-  UPDATE emr_access.chain_head h SET sequence = next_sequence, hash = next_hash WHERE h.id = 1;
+  UPDATE emr_access.chain_head h SET sequence = next_sequence, hash = next_hash WHERE h.stream = 'viewing';
   PERFORM set_config('kin.emr_append', '', true);
   RETURN QUERY SELECT removed, next_sequence, next_hash;
 END
@@ -410,7 +433,7 @@ CREATE FUNCTION emr_access.record_projection(p_event_id text, p_audit_log_id int
 DECLARE existing integer;
 BEGIN
   PERFORM emr_access.require_placement();
-  IF NOT EXISTS (SELECT 1 FROM emr_access.access_entry e WHERE e.event_id = p_event_id) THEN
+  IF NOT EXISTS (SELECT 1 FROM emr_access.access_entry e WHERE e.stream = 'viewing' AND e.event_id = p_event_id) THEN
     RAISE EXCEPTION 'ProjectionWithoutEvent' USING ERRCODE = 'EB007';
   END IF;
   SELECT p.audit_log_id INTO existing FROM emr_access.audit_projection p WHERE p.event_id = p_event_id;
@@ -522,18 +545,18 @@ SET LOCAL default_tablespace = '';
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA emr_access FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA emr_access FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION
-  emr_access.append_access(text, text), emr_access.chain_tail(), emr_access.entries_after(bigint, integer),
-  emr_access.entry_for_event(text), emr_access.storage_placement(), emr_access.civil_period_end(timestamptz, integer),
+  emr_access.append_access(text, text, text, text), emr_access.chain_tail(text), emr_access.entries_after(text, bigint, integer),
+  emr_access.entry_for_event(text, text), emr_access.storage_placement(), emr_access.civil_period_end(timestamptz, integer),
   emr_access.resolve_member_identity(text, text), emr_access.record_projection(text, integer),
   emr_access.place_hold(text, text, text), emr_access.release_hold(text, text), emr_access.holds_for(text),
   emr_access.record_duty_request(text, text, text, text), emr_access.duty_requests(text, text), emr_access.clause_versions(text)
   TO kin_runtime;
 GRANT SELECT ON ALL TABLES IN SCHEMA emr_access TO kin_emr_reader;
 GRANT EXECUTE ON FUNCTION
-  emr_access.chain_tail(), emr_access.entries_after(bigint, integer), emr_access.entry_for_event(text), emr_access.storage_placement(),
+  emr_access.chain_tail(text), emr_access.entries_after(text, bigint, integer), emr_access.entry_for_event(text, text), emr_access.storage_placement(),
   emr_access.civil_period_end(timestamptz, integer), emr_access.holds_for(text), emr_access.duty_requests(text, text),
   emr_access.clause_versions(text)
   TO kin_emr_reader;
-GRANT EXECUTE ON FUNCTION emr_access.expire_prefix(bigint), emr_access.retention_view(bigint, integer), emr_access.chain_tail(),
+GRANT EXECUTE ON FUNCTION emr_access.expire_prefix(bigint), emr_access.retention_view(bigint, integer), emr_access.chain_tail(text),
   emr_access.storage_placement() TO kin_emr_retention;
 COMMIT;

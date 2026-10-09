@@ -1,32 +1,37 @@
 import { createHash, randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { ChainPosition } from '../emr-contract/access-event';
-import { ContractError, integer, object, refuse, sha256, string, utc } from '../emr-contract/validation';
+import { ACCESS_STREAMS, AccessStream, ChainPosition } from '../emr-contract/access-event';
+import { ContractError, choice, integer, object, refuse, sha256, string, utc } from '../emr-contract/validation';
 import { ChainTail, StoredEntry, chainViolation, retainedAnchor } from './contract';
 import { FailureJournal, protectedDirectory, syncDirectory } from './failure-journal';
 import type { PrismaLedgerSql } from './store';
 
 /**
- * The trusted tail outside the database (REQ-EMR-06/19): the last chain position this server has proven committed, kept
- * on the API's protected state volume where no database role can write. Before an append commits, its intent (event ID
- * and content hash) is written here; the seal moves only after the entries up to its new position were read back,
- * re-hashed from the previous seal and each matched to an intent. A commit not yet sealed is therefore found at start and
- * recovered from stored facts; an intent with no stored entry proves that commit never happened. A missing or damaged
- * seal, or a database end behind it, is never replaced by the database's current end - start is refused.
+ * The trusted tails outside the database (REQ-EMR-06/19): for each stream of the access ledger (D-1: viewing, history), the
+ * last chain position this server has proven committed, kept on the API's protected state volume where no database role can
+ * write. Before an append commits, its intent (stream, event ID and content hash) is written here; a stream's seal moves
+ * only after the entries up to its new position were read back, re-hashed from the previous seal and each matched to an
+ * intent. A commit not yet sealed is therefore found at start and recovered from stored facts; an intent with no stored
+ * entry proves that commit never happened. A missing or damaged seal, or a database end behind it, is never replaced by the
+ * database's current end - start is refused.
  */
-export interface SealState extends ChainPosition { chainId: string; sealedAt: string }
+export interface StreamSeal extends ChainPosition { chainId: string }
+export interface SealState { streams: Readonly<Record<AccessStream, StreamSeal>>; sealedAt: string }
 export type SealRefusal = 'SealMissing' | 'SealCorrupt' | 'SealChainMismatch' | 'LedgerBehindSeal' | 'SealTailMismatch' |
   'LedgerChainBroken' | 'UnsealedEntryUnexplained' | 'SealUnavailable';
 export class SealRefused extends Error {
   constructor(readonly code: SealRefusal, readonly detail: string | null = null) { super(detail ? `${code}: ${detail}` : code); this.name = 'SealRefused'; }
 }
+export interface RecoveryCount { recovered: number; notCommitted: number }
 const PAGE = 1000;
 
-function digest(state: SealState): string {
-  return createHash('sha256').update(JSON.stringify({ chainId: state.chainId, sequence: state.sequence, hash: state.hash, sealedAt: state.sealedAt })).digest('hex');
+function canonical(state: SealState): string {
+  return JSON.stringify({ streams: Object.fromEntries(ACCESS_STREAMS.map(s => [s, { chainId: state.streams[s].chainId,
+    sequence: state.streams[s].sequence, hash: state.streams[s].hash }])), sealedAt: state.sealedAt });
 }
-const intentName = (eventId: string) => createHash('sha256').update(eventId).digest('hex') + '.json';
+const digest = (state: SealState) => createHash('sha256').update(canonical(state)).digest('hex');
+const intentName = (stream: AccessStream, eventId: string) => createHash('sha256').update(`${stream}\0${eventId}`).digest('hex') + '.json';
 
 export class AccessSeal {
   private readonly file: string;
@@ -42,7 +47,7 @@ export class AccessSeal {
     else if (!info.isDirectory() || info.isSymbolicLink()) throw new SealRefused('SealUnavailable');
   }
 
-  /** The stored seal, or 'absent'. A damaged seal is refused, never repaired from the database. */
+  /** The stored seal of both streams, or 'absent'. A damaged seal is refused, never repaired from the database. */
   read(): SealState | 'absent' {
     let raw: string;
     try { raw = fs.readFileSync(this.file, 'utf8'); } catch (error: any) {
@@ -50,9 +55,14 @@ export class AccessSeal {
       throw new SealRefused('SealUnavailable');
     }
     try {
-      const v = object(JSON.parse(raw), ['format', 'chainId', 'sequence', 'hash', 'sealedAt', 'digest']);
-      if (v.format !== 1) throw new Error('format');
-      const state: SealState = { chainId: string(v.chainId), sequence: integer(v.sequence), hash: sha256(v.hash), sealedAt: utc(v.sealedAt) };
+      const v = object(JSON.parse(raw), ['format', 'streams', 'sealedAt', 'digest']);
+      if (v.format !== 2) throw new Error('format');
+      const s = object(v.streams, [...ACCESS_STREAMS]);
+      const streams = Object.fromEntries(ACCESS_STREAMS.map(stream => {
+        const p = object(s[stream], ['chainId', 'sequence', 'hash']);
+        return [stream, Object.freeze({ chainId: string(p.chainId), sequence: integer(p.sequence), hash: sha256(p.hash) })];
+      })) as Record<AccessStream, StreamSeal>;
+      const state: SealState = { streams: Object.freeze(streams), sealedAt: utc(v.sealedAt) };
       if (digest(state) !== v.digest) throw new Error('digest');
       return state;
     } catch { throw new SealRefused('SealCorrupt'); }
@@ -73,16 +83,20 @@ export class AccessSeal {
       throw new SealRefused('SealUnavailable');
     }
   }
-  private write(state: SealState): void { this.writeDurably(this.file, JSON.stringify({ format: 1, ...state, digest: digest(state) })); }
+  private write(state: SealState): void {
+    this.writeDurably(this.file, JSON.stringify({ format: 2, ...JSON.parse(canonical(state)), digest: digest(state) }));
+  }
 
   /**
    * Durable before the business transaction commits; a failure here must abort that transaction. Created only if absent
    * (a hard link of a synced temporary file): a resend of the same content finds its own intent, another content under
-   * the same event ID is refused before it reaches the database and can never replace the first attempt's intent.
+   * the same event ID in the same stream is refused before it reaches the database and can never replace the first
+   * attempt's intent.
    */
-  recordIntent(eventId: string, contentSha256: string): void {
-    const target = path.join(this.pending, intentName(string(eventId)));
-    const text = JSON.stringify({ eventId, contentSha256: sha256(contentSha256) });
+  recordIntent(stream: AccessStream, eventId: string, contentSha256: string): void {
+    choice(stream, ACCESS_STREAMS);
+    const target = path.join(this.pending, intentName(stream, string(eventId)));
+    const text = JSON.stringify({ stream, eventId, contentSha256: sha256(contentSha256) });
     const temporary = path.join(this.pending, `.tmp-${randomBytes(8).toString('hex')}`);
     let fd: number | undefined;
     try {
@@ -102,17 +116,18 @@ export class AccessSeal {
     }
   }
   /** The intent of an attempt that is settled (sealed, or proven rolled back). Leftovers are harmless and cleared at start. */
-  clearIntent(eventId: string): void {
-    try { fs.rmSync(path.join(this.pending, intentName(eventId)), { force: true }); } catch { /* cleared at the next start */ }
+  clearIntent(stream: AccessStream, eventId: string): void {
+    try { fs.rmSync(path.join(this.pending, intentName(stream, eventId)), { force: true }); } catch { /* cleared at the next start */ }
   }
-  private intents(): Map<string, string> {
-    const found = new Map<string, string>();
+  private intents(): Record<AccessStream, Map<string, string>> {
+    const found = Object.fromEntries(ACCESS_STREAMS.map(s => [s, new Map<string, string>()])) as Record<AccessStream, Map<string, string>>;
     for (const name of fs.readdirSync(this.pending)) {
       if (name.startsWith('.tmp-')) continue; // an intent never renamed into place was never durable
       try {
-        const v = object(JSON.parse(fs.readFileSync(path.join(this.pending, name), 'utf8')), ['eventId', 'contentSha256']);
-        if (intentName(string(v.eventId)) !== name) throw new Error('name');
-        found.set(v.eventId, sha256(v.contentSha256));
+        const v = object(JSON.parse(fs.readFileSync(path.join(this.pending, name), 'utf8')), ['stream', 'eventId', 'contentSha256']);
+        const stream = choice(v.stream, ACCESS_STREAMS);
+        if (intentName(stream, string(v.eventId)) !== name) throw new Error('name');
+        found[stream].set(v.eventId, sha256(v.contentSha256));
       } catch { throw new SealRefused('SealCorrupt', 'intent'); }
     }
     return found;
@@ -124,10 +139,10 @@ export class AccessSeal {
     return next;
   }
 
-  private async range(after: number, through: number): Promise<StoredEntry[]> {
+  private async range(stream: AccessStream, after: number, through: number): Promise<StoredEntry[]> {
     const entries: StoredEntry[] = [];
     while (after < through) {
-      const page = await this.sql.entriesAfter(after, Math.min(PAGE, through - after));
+      const page = await this.sql.entriesAfter(stream, after, Math.min(PAGE, through - after));
       if (!page.length) break;
       for (const entry of page) if (entry.sequence <= through) entries.push(entry);
       const last = page[page.length - 1].sequence;
@@ -137,80 +152,93 @@ export class AccessSeal {
     return entries;
   }
 
-  /** Every unsealed access entry must be one this server recorded an intent for before committing it. */
+  /** Every unsealed event entry must be one this server recorded an intent for, in its stream, before committing it. */
   private explain(entries: readonly StoredEntry[], intents: Map<string, string>): void {
     for (const entry of entries) {
-      if (entry.kind !== 'access') continue; // expiry checkpoints are written by the retention role's own function
+      if (entry.kind === 'expiry') continue; // expiry checkpoints are written by the retention role's own function
       if (intents.get(entry.eventId!) !== entry.contentSha256) throw new SealRefused('UnsealedEntryUnexplained', String(entry.sequence));
     }
   }
 
-  /** Move the seal to a committed position, proving every entry between the current seal and it first. */
-  advance(target: ChainPosition): Promise<SealState> {
+  /** Move one stream's seal to a committed position, proving every entry between its current seal and it first. */
+  advance(stream: AccessStream, target: ChainPosition): Promise<SealState> {
     return this.serial(async () => {
-      const current = this.read();
-      if (current === 'absent') throw new SealRefused('SealMissing');
-      if (target.sequence <= current.sequence) return current;
-      const entries = await this.range(current.sequence, target.sequence);
-      const violation = chainViolation(current, entries, target);
-      if (violation) throw new SealRefused('LedgerChainBroken', violation);
-      this.explain(entries, this.intents());
-      const next: SealState = { chainId: current.chainId, sequence: target.sequence, hash: target.hash, sealedAt: new Date().toISOString() };
+      const state = this.read();
+      if (state === 'absent') throw new SealRefused('SealMissing');
+      const current = state.streams[choice(stream, ACCESS_STREAMS)];
+      if (target.sequence <= current.sequence) return state;
+      const entries = await this.range(stream, current.sequence, target.sequence);
+      const violation = chainViolation(current, entries, target, stream);
+      if (violation) throw new SealRefused('LedgerChainBroken', `${stream}:${violation}`);
+      this.explain(entries, this.intents()[stream]);
+      const next: SealState = { streams: Object.freeze({ ...state.streams, [stream]: Object.freeze({ chainId: current.chainId,
+        sequence: target.sequence, hash: target.hash }) }), sealedAt: new Date().toISOString() };
       this.write(next);
-      for (const entry of entries) if (entry.eventId) this.clearIntent(entry.eventId);
+      for (const entry of entries) if (entry.eventId) this.clearIntent(stream, entry.eventId);
       return next;
     });
   }
 
   /**
-   * Start-up check and recovery, before any HTTP or job. The retained chain is verified from its justified start; the
-   * seal must lie on it; an unsealed tail is adopted only when every entry in it is explained by an intent; an intent
+   * Start-up check and recovery, before any HTTP or job. Each stream's retained chain is verified from its justified start;
+   * its seal must lie on it; an unsealed tail is adopted only when every entry in it is explained by an intent; an intent
    * without a stored entry is journaled as a commit that never happened (the client resends the same event ID).
    */
-  recover(): Promise<{ seal: SealState; recovered: number; notCommitted: number }> {
+  recover(): Promise<{ seal: SealState; recovered: number; notCommitted: number; streams: Record<AccessStream, RecoveryCount> }> {
     return this.serial(async () => {
-      const tail: ChainTail = await this.sql.tail();
+      const tails = {} as Record<AccessStream, ChainTail>;
+      for (const stream of ACCESS_STREAMS) tails[stream] = await this.sql.tail(stream);
       const intents = this.intents();
       const found = this.read();
-      let current: SealState;
+      let state: SealState;
       if (found === 'absent') {
-        // Only an empty chain may start a seal; a missing seal over stored entries is never re-created from the database.
-        if (tail.sequence !== 0) throw new SealRefused('SealMissing');
-        current = { chainId: tail.chainId, sequence: 0, hash: tail.hash, sealedAt: new Date().toISOString() };
-        this.write(current);
-      } else current = found;
-      if (current.chainId !== tail.chainId) throw new SealRefused('SealChainMismatch');
-      if (tail.sequence < current.sequence) throw new SealRefused('LedgerBehindSeal');
-      const entries = await this.range(0, tail.sequence);
-      if (tail.sequence > 0) {
-        const anchor = retainedAnchor(entries);
-        if (!anchor) throw new SealRefused('LedgerChainBroken', 'unjustified-start');
-        const violation = chainViolation(anchor, entries, tail);
-        if (violation) throw new SealRefused('LedgerChainBroken', violation);
-        const sealed = entries.find(e => e.sequence === current!.sequence);
-        if (sealed ? sealed.hash !== current.hash : current.sequence > anchor.sequence || (current.sequence === anchor.sequence && current.hash !== anchor.hash))
-          throw new SealRefused('SealTailMismatch');
-      } else if (current.hash !== tail.hash) throw new SealRefused('SealTailMismatch');
-      const unsealed = entries.filter(e => e.sequence > current!.sequence);
-      this.explain(unsealed, intents);
-      let recovered = 0;
-      if (unsealed.length) {
-        this.journal.record(`seal-recovered:${current.sequence}-${tail.sequence}`, 'seal-recovered',
-          { chainId: current.chainId, fromSequence: current.sequence, toSequence: tail.sequence, toHash: tail.hash });
-        current = { chainId: current.chainId, sequence: tail.sequence, hash: tail.hash, sealedAt: new Date().toISOString() };
-        this.write(current);
-        recovered = unsealed.length;
+        // Only empty chains may start a seal; a missing seal over stored entries is never re-created from the database.
+        if (ACCESS_STREAMS.some(s => tails[s].sequence !== 0)) throw new SealRefused('SealMissing');
+        state = { streams: Object.freeze(Object.fromEntries(ACCESS_STREAMS.map(s => [s, Object.freeze({ chainId: tails[s].chainId,
+          sequence: 0, hash: tails[s].hash })]))) as Record<AccessStream, StreamSeal>, sealedAt: new Date().toISOString() };
+        this.write(state);
+      } else state = found;
+      const counts = {} as Record<AccessStream, RecoveryCount>;
+      for (const stream of ACCESS_STREAMS) {
+        const tail = tails[stream];
+        let current = state.streams[stream];
+        if (current.chainId !== tail.chainId) throw new SealRefused('SealChainMismatch', stream);
+        if (tail.sequence < current.sequence) throw new SealRefused('LedgerBehindSeal', stream);
+        const entries = await this.range(stream, 0, tail.sequence);
+        if (tail.sequence > 0) {
+          const anchor = retainedAnchor(entries);
+          if (!anchor) throw new SealRefused('LedgerChainBroken', `${stream}:unjustified-start`);
+          const violation = chainViolation(anchor, entries, tail, stream);
+          if (violation) throw new SealRefused('LedgerChainBroken', `${stream}:${violation}`);
+          const sealed = entries.find(e => e.sequence === current.sequence);
+          if (sealed ? sealed.hash !== current.hash : current.sequence > anchor.sequence || (current.sequence === anchor.sequence && current.hash !== anchor.hash))
+            throw new SealRefused('SealTailMismatch', stream);
+        } else if (current.hash !== tail.hash) throw new SealRefused('SealTailMismatch', stream);
+        const unsealed = entries.filter(e => e.sequence > current.sequence);
+        this.explain(unsealed, intents[stream]);
+        let recovered = 0;
+        if (unsealed.length) {
+          this.journal.record(`seal-recovered:${stream}:${current.sequence}-${tail.sequence}`, 'seal-recovered',
+            { chainId: current.chainId, fromSequence: current.sequence, toSequence: tail.sequence, toHash: tail.hash });
+          current = Object.freeze({ chainId: current.chainId, sequence: tail.sequence, hash: tail.hash });
+          state = { streams: Object.freeze({ ...state.streams, [stream]: current }), sealedAt: new Date().toISOString() };
+          this.write(state);
+          recovered = unsealed.length;
+        }
+        let notCommitted = 0;
+        for (const [eventId, contentSha256] of intents[stream]) {
+          const stored = await this.sql.entryForEvent(stream, eventId);
+          if (stored && stored.sequence <= current.sequence) { this.clearIntent(stream, eventId); continue; }
+          if (stored) throw new SealRefused('UnsealedEntryUnexplained', `${stream}:${stored.sequence}`);
+          this.journal.record(`commit-not-found:${stream}:${eventId}`, 'commit-not-found', { eventId, contentSha256 });
+          this.clearIntent(stream, eventId);
+          notCommitted++;
+        }
+        counts[stream] = { recovered, notCommitted };
       }
-      let notCommitted = 0;
-      for (const [eventId, contentSha256] of intents) {
-        const stored = await this.sql.entryForEvent(eventId);
-        if (stored && stored.sequence <= current.sequence) { this.clearIntent(eventId); continue; }
-        if (stored) throw new SealRefused('UnsealedEntryUnexplained', String(stored.sequence));
-        this.journal.record(`commit-not-found:${eventId}`, 'commit-not-found', { eventId, contentSha256 });
-        this.clearIntent(eventId);
-        notCommitted++;
-      }
-      return { seal: current, recovered, notCommitted };
+      return { seal: state, streams: counts,
+        recovered: ACCESS_STREAMS.reduce((n, s) => n + counts[s].recovered, 0),
+        notCommitted: ACCESS_STREAMS.reduce((n, s) => n + counts[s].notCommitted, 0) };
     });
   }
 }

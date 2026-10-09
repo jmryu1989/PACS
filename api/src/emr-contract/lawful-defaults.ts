@@ -78,13 +78,18 @@ export type StatutoryClass = keyof typeof STATUTORY_MINIMUM;
 const DAY_MS = 86_400_000;
 const SEOUL_MS = 9 * 3_600_000;
 
-/** Exclusive boundary: the last civil day has fully ended at this instant. */
+/**
+ * Exclusive boundary of a statutory period counted from `startedAt` (Asia/Seoul civil days): the last civil day has fully
+ * ended at this instant. D-21 (legal register §5-46): a period during which a duty imposed by law continues counts its
+ * first day - the civil day of the starting event, whatever its time (행정기본법 제6조②1, not the Civil Act 157 rule) - and
+ * ends at the end of the day before the corresponding day of the last year (민법 제159조·제160조①②), on a Saturday or
+ * holiday too (행정기본법 제6조②2: no business-day shift). A 29 February start without one in the last year ends at the
+ * end of 28 February (민법 제160조③), so the boundary is 1 March 00:00.
+ */
 export function civilPeriodEnd(startedAt: string, years: number): string {
   if (!Number.isSafeInteger(years) || years < 1) throw new Error('Whole positive calendar years required');
   const local = new Date(Date.parse(utc(startedAt)) + SEOUL_MS);
-  const midnight = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate());
-  // Civil Act 157: only a period starting at 00:00 includes the initial day.
-  const start = new Date(midnight + (local.getTime() === midnight ? 0 : DAY_MS));
+  const start = new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate()));
   start.setUTCFullYear(start.getUTCFullYear() + years); // Feb 29 -> Mar 1 boundary (160(3)).
   if (!Number.isFinite(start.getTime()) || start.getUTCFullYear() > 9999) throw new Error('Unsupported period');
   return new Date(start.getTime() - SEOUL_MS).toISOString();
@@ -150,13 +155,34 @@ function yearsFor(recordKinds: readonly RecordKind[]): number {
 function partDeadline(record: Pick<RetentionRecord, 'kinds' | 'parts'>): string {
   return record.parts.map(p => civilPeriodEnd(p.startedAt, yearsFor(record.kinds))).sort().slice(-1)[0];
 }
+/**
+ * D-21 starting events (legal register §5-46, pinned): the event each statutory period of a part counts from. A part's
+ * startedAt is the time of one of its row's acts - for a signed act that time is the signature's signedAt
+ * (resolveStoredRecord binds the two) - and the first day of the period is that event's civil day (civilPeriodEnd).
+ */
+export const PERIOD_START = freeze({
+  signed: { acts: ['entry', 'additional-entry', 'correction'], from: 'the signed version (report, Addendum, every signed clinical entry): its signedAt' },
+  'received-order': { acts: ['receipt'], from: 'the verified receipt' },
+  'critical-result-ack': { acts: ['handoff-ack'], from: 'the acknowledgment' },
+  'access-audit': { acts: ['access'], from: 'the access event time' },
+  'delivery-receipt': { acts: ['delivery'], from: 'the delivery event time' },
+  acquired: { acts: ['acquisition', 'correction'], from: 'the image or its metadata: acquisition or receipt (a correction is its own part)' },
+  other: { acts: ['creation', 'entry', 'additional-entry', 'correction'], from: 'the stored creation or entry (Tech Note, measurement, roster link event, chart incorporation)' },
+  extension: { acts: [], from: 'the continuing-treatment decision, made before the base expiry (extendRetention)' },
+  hold: { acts: [], from: 'the hold basis validity, from..until (placeLegalHold)' },
+} as const);
+export type PeriodStartRow = keyof typeof PERIOD_START;
+/** Which PERIOD_START row a stored part's kinds select. */
+export function periodStartRow(source: ResolvedRecord): PeriodStartRow {
+  const s = verifiedRecord(source);
+  if (s.kinds.some(k => RECORD_CLASSIFICATION[k].signature.rule === 'required') || s.row.clinicalEntry === true) return 'signed';
+  for (const kind of ['received-order', 'critical-result-ack', 'access-audit', 'delivery-receipt'] as const) if (s.kinds.includes(kind)) return kind;
+  return s.kinds.some(k => ['image', 'external-sr-seg', 'study-metadata'].includes(k)) ? 'acquired' : 'other';
+}
 function lawfulPart(source: ResolvedRecord): RetentionPart {
   const s = verifiedRecord(source), e = s.event;
-  const signature = s.kinds.some(k => RECORD_CLASSIFICATION[k].signature.rule === 'required') || s.row.clinicalEntry === true;
-  const allowed = signature ? ['entry', 'additional-entry', 'correction'] :
-    s.kinds.includes('received-order') ? ['receipt'] : s.kinds.includes('critical-result-ack') ? ['handoff-ack'] :
-    s.kinds.includes('access-audit') ? ['access'] : s.kinds.includes('delivery-receipt') ? ['delivery'] :
-    s.kinds.some(k => ['image', 'external-sr-seg', 'study-metadata'].includes(k)) ? ['acquisition', 'correction'] : ['creation', 'entry', 'additional-entry', 'correction'];
+  const row = periodStartRow(s), signature = row === 'signed';
+  const allowed: readonly string[] = PERIOD_START[row].acts;
   if (!signature && ['receipt', 'acquisition', 'handoff-ack', 'access', 'delivery'].includes(e.act) && e.signature !== null) refuse('ProductSignatureRefused');
   if (!allowed.includes(e.act) || (signature && !e.signature)) refuse('NewLawfulRecordEventRequired');
   return { partId: e.versionId, startedAt: e.at, evidence: s };
@@ -512,8 +538,9 @@ export interface DestructionReceipt { completedAt: string; method: 'irreversible
 function seoulDay(at: string): string { return new Date(Date.parse(utc(at)) + SEOUL_MS).toISOString().slice(0, 10); }
 function dueBy(at: string): string {
   const local = new Date(Date.parse(utc(at)) + SEOUL_MS);
-  // The five-day outside bound is no grace period: the job is due immediately.
-  return new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() + (local.getUTCHours() === 0 && local.getUTCMinutes() === 0 && local.getUTCSeconds() === 0 && local.getUTCMilliseconds() === 0 ? 5 : 6)) - SEOUL_MS).toISOString();
+  // The five-day outside bound is no grace period: the job is due immediately. D-21: the duty's first day is the civil day
+  // the record became destructible, whatever the time (행정기본법 제6조②1); the window ends with its fifth day.
+  return new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() + 5) - SEOUL_MS).toISOString();
 }
 type DestructionDetails = Pick<DestructionRecord, 'disposalUnitId' | 'classes' | 'clauseIds' | 'partCount' | 'expiryDay' | 'extensionUsed'>;
 function destructionJournal(store: Pick<DisposalAuditStore, 'append'>, eligibleAt: string, details: DestructionDetails) {

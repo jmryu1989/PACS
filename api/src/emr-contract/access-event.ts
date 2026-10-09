@@ -50,6 +50,8 @@ export interface AccessEventV1 {
   occurredAt: string;
   trustedProxyIp: EvidenceFact<{ address: string; source: 'trusted-proxy' }>;
   cause: CauseKind;
+  /** D-18: the business context the server bound to this access (one-line reason only out of context). */
+  context: Readonly<WorkContext>;
   executor: 'member' | 'service' | 'unauthenticated';
   targets: readonly AccessTarget[];
   action: AccessAction;
@@ -93,7 +95,7 @@ export function newAuditLinkId(): string { return `audit:${randomUUID()}`; }
 const servedManifests = new WeakMap<object, readonly ResolvedRecord[]>();
 /** On mixed surfaces B supplies the rows actually served, in target order, from its bound storage capability.
  * Rehydrating a persisted mixed event likewise requires its server-verified row manifest.
- * formatVersion 1 keeps its original fields, rules and chain bytes; 2 is the closed EMR-B branch set below.
+ * formatVersion 1 keeps its original fields and rules, plus D-18's required work context; 2 is the closed EMR-B branch set below.
  */
 export function parseAccessEvent(input: unknown, served?: readonly ResolvedRecord[]): Readonly<AccessEvent> {
   // Read the discriminator without running a getter; the selected parser validates the whole object.
@@ -132,7 +134,7 @@ function parseTargets(input: unknown, surfaceKinds: readonly RecordKind[], manif
 }
 function parseAccessEventV1(input: unknown, served?: readonly ResolvedRecord[]): Readonly<AccessEventV1> {
   const v = object(input, ['formatVersion', 'surface', 'eventId', 'userId', 'rolesAtTime', 'actingInstitution', 'managingInstitution', 'occurredAt',
-    'trustedProxyIp', 'cause', 'executor', 'targets', 'action', 'result', 'requestId', 'auditLinkId', 'relatedEventId']);
+    'trustedProxyIp', 'cause', 'context', 'executor', 'targets', 'action', 'result', 'requestId', 'auditLinkId', 'relatedEventId']);
   if (v.formatVersion !== 1) throw new Error('Unknown access format');
   const surface = string(v.surface);
   const surfaceKinds = surfaceKindsOf(surface);
@@ -164,6 +166,7 @@ function parseAccessEventV1(input: unknown, served?: readonly ResolvedRecord[]):
       (executor === 'unauthenticated' && (action !== 'auth-refused' || userId.status !== 'unresolved')) ||
       (action === 'auth-refused' && executor !== 'unauthenticated') ||
       (cause === 'service-job' && executor !== 'service')) throw new Error('Unresolved or inconsistent actor context');
+  const context = workContext(v.context, cause, action === 'auth-refused');
   const targets = parseTargets(v.targets, surfaceKinds, manifest, failure);
   const auditLinkId = string(v.auditLinkId);
   if (!AUDIT_LINK.test(auditLinkId)) throw new Error('Invalid audit link ID');
@@ -171,9 +174,41 @@ function parseAccessEventV1(input: unknown, served?: readonly ResolvedRecord[]):
   if ((readFollowups.includes(action) || action === 'print-done') && relatedEventId === null) throw new Error('Preceding event reference required');
   if (relatedEventId === v.eventId) throw new Error('Event cannot reference itself');
   const parsed = freeze({ formatVersion: 1 as const, surface, eventId: string(v.eventId), userId, rolesAtTime, actingInstitution, managingInstitution,
-    occurredAt: utc(v.occurredAt), trustedProxyIp, cause, executor, targets, action, result, requestId: string(v.requestId), auditLinkId, relatedEventId });
+    occurredAt: utc(v.occurredAt), trustedProxyIp, cause, context, executor, targets, action, result, requestId: string(v.requestId), auditLinkId, relatedEventId });
   if (manifest) servedManifests.set(parsed, Object.freeze([...manifest]));
   return parsed;
+}
+/**
+ * D-18 (legal register / delta map MAP-D18) [PREDICTED-CONSERVATIVE]: every access event names the business context the
+ * server observed, bound from the work context - reading an assigned study, comparing a same-patient prior, a clinical
+ * request, the worklist, a background fetch for the current work, an in-process job, authentication. Nothing is typed in
+ * the normal flow. Only an access outside every context carries one explicit line of reason (break-glass). The context is
+ * part of the hashed event and is never a permission: authorization is decided before and apart from it.
+ */
+export const WORK_CONTEXTS = freeze(['assigned-reading', 'same-patient-comparison', 'clinical-request', 'worklist',
+  'background-fetch', 'service-job', 'authentication', 'out-of-context'] as const);
+export type WorkContextBasis = typeof WORK_CONTEXTS[number];
+export interface WorkContext { basis: WorkContextBasis; studyId: string | null; relatedStudyId: string | null; reason: string | null }
+export const OUT_OF_CONTEXT_REASON_MAX = 200;
+const MEMBER_CONTEXTS: readonly WorkContextBasis[] = freeze(['assigned-reading', 'same-patient-comparison', 'clinical-request', 'worklist', 'out-of-context']);
+function workContext(input: unknown, cause: CauseKind, authentication: boolean): Readonly<WorkContext> {
+  const c = object(input, ['basis', 'studyId', 'relatedStudyId', 'reason']);
+  const basis = choice(c.basis, WORK_CONTEXTS);
+  const studyId = c.studyId === null ? null : string(c.studyId);
+  const relatedStudyId = c.relatedStudyId === null ? null : string(c.relatedStudyId);
+  const reason = c.reason === null ? null : string(c.reason);
+  // The cause and the context name the same fact; an authentication step has its own context.
+  const expected: readonly WorkContextBasis[] = cause === 'service-job' ? ['service-job'] : cause === 'background-fetch' ? ['background-fetch'] :
+    authentication ? ['authentication'] : MEMBER_CONTEXTS;
+  if (!expected.includes(basis)) refuse('WorkContextMismatch');
+  if (basis === 'out-of-context') {
+    if (reason === null || reason !== reason.trim() || /[\r\n\u2028\u2029]/.test(reason) || reason.length > OUT_OF_CONTEXT_REASON_MAX)
+      refuse('OutOfContextReasonRequired');
+  } else if (reason !== null) refuse('ReasonOnlyOutOfContext');
+  if ((basis === 'assigned-reading' || basis === 'clinical-request') && (studyId === null || relatedStudyId !== null)) refuse('WorkContextStudyRequired');
+  if (basis === 'same-patient-comparison' && (studyId === null || relatedStudyId === null || studyId === relatedStudyId)) refuse('WorkContextStudyRequired');
+  if (basis !== 'same-patient-comparison' && relatedStudyId !== null) refuse('WorkContextStudyRequired');
+  return freeze({ basis, studyId, relatedStudyId, reason });
 }
 const AUDIT_LINK = /^audit:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const UUID4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -182,7 +217,7 @@ const UUID4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{
 // Two closed branches. `online-auth` is a U5 authentication fact; it never names clinical targets and never passes as a
 // clinical write. `verified-offline` is a clinical act that happened on a registered device while disconnected; it is
 // admitted only through the verification capability composed at server start (none until C ships real key/signature
-// verification, so the branch is refused as unsupported). v1 parsing, results and chain bytes are unchanged.
+// verification, so the branch is refused as unsupported). v1 parsing and results are unchanged apart from D-18's context.
 export const AUTH_ACTIONS = freeze(['auth.login', 'auth.entry', 'auth.logout', 'auth.session.expired'] as const);
 export type AuthAction = typeof AUTH_ACTIONS[number];
 /** 의료법 제23조④ 대상 행위가 아니라 접속·인증 사실이다. none은 사건 생략이 아니다. */
@@ -220,6 +255,8 @@ export interface AuthAccessEventV2 {
   occurredAt: string;
   trustedProxyIp: EvidenceFactV2<{ address: string; source: 'trusted-proxy' }>;
   cause: CauseKind;
+  /** D-18: 'authentication', or 'service-job' for an in-process sweep. */
+  context: Readonly<WorkContext>;
   executor: 'member' | 'service' | 'unauthenticated';
   /** Whose authentication this event is about (the ended member of a sweep, the isolated member of an administrator). */
   affectedIdentity: EvidenceFactV2<ImmutableIdentity>;
@@ -247,6 +284,8 @@ export interface OfflineAccessEventV2 {
   /** Always `unresolved: offline`; the reconnecting IP belongs to the related reception event. */
   trustedProxyIp: EvidenceFactV2<{ address: string; source: 'trusted-proxy' }>;
   cause: 'user-view'; executor: 'member';
+  /** D-18: the device's work context at the act (or an out-of-context reason). */
+  context: Readonly<WorkContext>;
   targets: readonly AccessTarget[];
   action: AccessAction; result: AccessEventV1['result'];
   offline: Readonly<OfflineFactsV2>;
@@ -300,7 +339,7 @@ function parseAccessEventV2(input: unknown, served?: readonly ResolvedRecord[]):
 }
 function parseAuthEventV2(input: unknown): Readonly<AuthAccessEventV2> {
   const v = object(input, ['formatVersion', 'branch', 'surface', 'eventId', 'userId', 'rolesAtTime', 'rightsVersion', 'actingInstitution',
-    'managingInstitution', 'occurredAt', 'trustedProxyIp', 'cause', 'executor', 'affectedIdentity', 'session', 'targets', 'action', 'result',
+    'managingInstitution', 'occurredAt', 'trustedProxyIp', 'cause', 'context', 'executor', 'affectedIdentity', 'session', 'targets', 'action', 'result',
     'auth', 'requestId', 'auditLinkId', 'relatedEventId']);
   const eventId = string(v.eventId);
   if (!UUID4.test(eventId)) throw new Error('Original event ID must be a server-generated UUID');
@@ -324,6 +363,7 @@ function parseAuthEventV2(input: unknown): Readonly<AuthAccessEventV2> {
   if (!authSurfaces(action, endCause).includes(surface)) throw new Error('Authentication fact does not belong to this surface');
   const cause = choice(v.cause, ['user-view', 'background-fetch', 'service-job']);
   if (!surfaceCauses(surface).includes(cause)) throw new Error('Cause does not belong to the server surface');
+  const context = workContext(v.context, cause, true);
   const executor = choice(v.executor, ['member', 'service', 'unauthenticated']);
   const userId = factV2(v.userId, identity, ['not-authenticated'], []);
   const affectedIdentity = factV2(v.affectedIdentity, identity, ['not-authenticated'], []);
@@ -366,7 +406,7 @@ function parseAuthEventV2(input: unknown): Readonly<AuthAccessEventV2> {
   const relatedEventId = v.relatedEventId === null ? null : string(v.relatedEventId);
   if (relatedEventId === eventId) throw new Error('Event cannot reference itself');
   return freeze({ formatVersion: 2 as const, branch: 'online-auth' as const, surface, eventId, userId, rolesAtTime, rightsVersion,
-    actingInstitution, managingInstitution, occurredAt: utc(v.occurredAt), trustedProxyIp, cause, executor, affectedIdentity, session,
+    actingInstitution, managingInstitution, occurredAt: utc(v.occurredAt), trustedProxyIp, cause, context, executor, affectedIdentity, session,
     targets: [] as [], action, result, auth: { endCause, failureCause, trigger }, requestId, auditLinkId, relatedEventId });
 }
 
@@ -388,7 +428,7 @@ function offlineFacts(value: unknown): Readonly<OfflineFactsV2> {
 }
 function parseOfflineEventV2(input: unknown, served?: readonly ResolvedRecord[]): Readonly<OfflineAccessEventV2> {
   const v = object(input, ['formatVersion', 'branch', 'surface', 'eventId', 'userId', 'rolesAtTime', 'actingInstitution', 'managingInstitution',
-    'occurredAt', 'trustedProxyIp', 'cause', 'executor', 'targets', 'action', 'result', 'offline', 'requestId', 'auditLinkId', 'relatedEventId']);
+    'occurredAt', 'trustedProxyIp', 'cause', 'context', 'executor', 'targets', 'action', 'result', 'offline', 'requestId', 'auditLinkId', 'relatedEventId']);
   // A body flag never admits an offline fact: only the composed verifier's stored result does.
   if (!offlineVerifier) refuse('OfflineVerificationUnsupported');
   const offline = offlineFacts(v.offline);
@@ -403,6 +443,7 @@ function parseOfflineEventV2(input: unknown, served?: readonly ResolvedRecord[])
   const result = choice(v.result, ['prepared', 'succeeded', 'aborted', 'refused', 'failed', 'reported']);
   if (result !== expectedResult(action)) throw new Error('Event result does not describe the observed stage');
   if (v.cause !== 'user-view' || v.executor !== 'member') throw new Error('An offline original is a member act');
+  const context = workContext(v.context, 'user-view', false);
   const userId = factV2(v.userId, identity, [], []);
   const rolesAtTime = factV2(v.rolesAtTime, value => { const roles = roleList(value); if (!roles.length) throw new Error('Roles missing'); return roles; }, [], []);
   const actingInstitution = factV2(v.actingInstitution, value => string(value), [], []);
@@ -419,7 +460,7 @@ function parseOfflineEventV2(input: unknown, served?: readonly ResolvedRecord[])
   const occurredAt = utc(v.occurredAt);
   if (offline.signedAt !== null && offline.signedAt !== occurredAt) throw new Error('The signed act and its event time are one fact');
   return freeze({ formatVersion: 2 as const, branch: 'verified-offline' as const, surface, eventId, userId, rolesAtTime, actingInstitution,
-    managingInstitution, occurredAt, trustedProxyIp, cause: 'user-view' as const, executor: 'member' as const, targets, action, result,
+    managingInstitution, occurredAt, trustedProxyIp, cause: 'user-view' as const, context, executor: 'member' as const, targets, action, result,
     offline, requestId, auditLinkId, relatedEventId });
 }
 
@@ -429,7 +470,7 @@ export interface DurableAccessReceipt { eventId: string; durableAt: string }
  */
 export interface AppendOnlyAccessStore { append(event: Readonly<AccessEvent>): Promise<DurableAccessReceipt> }
 
-/** 제8조①2: each event has its own two-year clock. */
+/** 제8조①2: each event's viewing-stream entry has its own two-year clock (the history stream follows the changed record). */
 export function accessRetention(input: AccessEvent) { return newAccessRetentionRecord(resolveAccessRecord(input)); }
 export function deliveryRetention(source: ResolvedRecord) { return newAccessRetentionRecord(source); }
 
@@ -448,9 +489,9 @@ export const ACCESS_INVARIANTS = freeze({
   mutation: 'append-only-while-retained; runtime-insert-only-not-owner-or-superuser; no-update-delete',
   store: 'separate-from-business-records; privacy-21.3-segregation-and-medical-23.4-access-store',
   integrity: 'server-sequence-and-previous-hash-in-same-append; trusted-tail-seal-detects-omissions',
-  deletion: 'retention-job-only; expired-prefix-only; atomic-chain-checkpoint-with-nonpersonal-anchor; never-runtime',
+  deletion: 'retention-job-only; viewing-stream: expired-prefix-only, atomic-chain-checkpoint-with-nonpersonal-anchor; history-stream: with-the-changed-record-destruction-set-only (H); never-runtime',
   liveVerification: 'B: runtime-update-delete-disable-trigger-denied; tamper-gap-tail-detected; expiry-role-no-unexpired-delete; crash-checkpoint-rollback',
-  retention: 'each-event-2-years; independent-of-source-record; no-last-access-reset-or-institution-override',
+  retention: 'two-streams (D-1): viewing = each-event-floor-2-years, longer-only-under-hold-or-legal-basis; history = changes (기재·추가기재·수정) as-long-as-the-changed-record; no-stored-expiry; no-last-access-reset-or-institution-override',
   retentionBasis: '안전성 확보조치 기준 제8조① 본문(정보주체 제외)·①2; 개인정보 보호법 제3조①②·제21조①',
   expiry: 'destroy-irreversibly-when-the-two-year-security-purpose-ends; no-automatic-longer-retention',
   successfulWrite: 'record, signature, publication reference and access event commit atomically',
@@ -458,17 +499,48 @@ export const ACCESS_INVARIANTS = freeze({
   failure: 'independent transaction or protected failure journal; business rollback cannot erase failure',
   correlation: 'followups retain the prepared event target/version set; ACK never migrates to a new version',
   link: 'random audit-only ID; never a session ID, cookie, bearer token, or authentication credential',
+  context: 'D-18: server-bound work context in every event (hashed); one-line reason only out of context; never a permission',
   emptyTargets: 'only an actually empty result or non-record operation; never omitted discovered targets',
   proxy: 'B supplies verified proxy context, never an untrusted forwarded header',
   exports: 'print-done/pdf/copy describe client reports only, not proof of physical output or OS completion',
 });
 
+/**
+ * D-1 (legal register 2026-10-09 §5-11, commander D727): the access ledger is two streams.
+ *  - `viewing`: every access event, kept for its own floor (안전성 확보조치 기준 제8조①, counted from the event; longer only
+ *    under a hold or another legal basis). It holds 열람 events, events about no EMR record, and the floor remainder of
+ *    every change, so a change made shortly before its record is destroyed stays here for its own floor. An expired
+ *    prefix is deleted with a chained checkpoint (`sealAccessExpiry`) behind B's external seal.
+ *  - `history`: the change history of EMR records - a succeeded 기재·추가기재·수정 act about at least one record target
+ *    (의료법 제23조④, 시행규칙 제16조①2·②) - kept as long as the record it changed and destroyed with that record's
+ *    destruction set (unit H). It has no prefix expiry.
+ */
+export const ACCESS_STREAMS = freeze(['viewing', 'history'] as const);
+export type AccessStream = typeof ACCESS_STREAMS[number];
+export type StatutoryAct = '기재' | '추가기재' | '수정' | '열람' | 'none';
+const CHANGE_ACTS: readonly StatutoryAct[] = freeze(['기재', '추가기재', '수정']);
+/** The 의료법 제23조④ act of an event (A's closed tables; authentication acts are none). */
+export function statutoryAct(input: unknown, served?: readonly ResolvedRecord[]): StatutoryAct {
+  const event = parseAccessEvent(input, served);
+  return event.formatVersion === 2 && event.branch === 'online-auth' ? AUTH_STATUTORY_ACT[event.action] :
+    STATUTORY_ACT[(event as AccessEventV1 | OfflineAccessEventV2).action];
+}
+/** The streams an event is recorded in: always the viewing stream; also the history stream when it changed a record. */
+export function accessStreams(input: unknown, served?: readonly ResolvedRecord[]): readonly AccessStream[] {
+  const event = parseAccessEvent(input, served);
+  const changed = CHANGE_ACTS.includes(statutoryAct(event, served)) && event.result === 'succeeded' &&
+    (event.targets as readonly AccessTarget[]).some(target => !NON_RECORD_TARGETS.includes(target.kind));
+  return changed ? ACCESS_STREAMS : freeze(['viewing'] as const);
+}
+
 /** Hash input is the ordered parsed payload plus monotonic position, never caller-supplied chain fields. */
 export interface ChainPosition { sequence: number; hash: string }
 export interface AccessExpiryCheckpoint { kind: 'expiry'; at: string; deletedThrough: number; deletedCount: number; anchorHash: string }
 export interface AccessChainEntry extends ChainPosition {
-  previousHash: string; payload: { kind: 'access'; event: Readonly<AccessEvent> } | AccessExpiryCheckpoint;
+  previousHash: string;
+  payload: { kind: 'access'; event: Readonly<AccessEvent> } | { kind: 'history'; event: Readonly<AccessEvent> } | AccessExpiryCheckpoint;
 }
+/** Each stream is its own chain from this genesis. */
 export const ACCESS_CHAIN_GENESIS: Readonly<ChainPosition> = freeze({ sequence: 0, hash: '0'.repeat(64) });
 function chainEntry(previous: ChainPosition, payload: AccessChainEntry['payload']): Readonly<AccessChainEntry> {
   object(previous, ['sequence', 'hash']); integer(previous.sequence); sha256(previous.hash);
@@ -476,25 +548,34 @@ function chainEntry(previous: ChainPosition, payload: AccessChainEntry['payload'
   const hash = createHash('sha256').update(JSON.stringify({ sequence, previousHash, payload })).digest('hex');
   return freeze({ sequence, previousHash, payload, hash });
 }
-export function sealAccessEvent(previous: ChainPosition, input: AccessEvent): Readonly<AccessChainEntry> {
-  return chainEntry(previous, { kind: 'access', event: parseAccessEvent(input) });
+/** The viewing stream's entry keeps the v1 payload kind 'access'; the history stream's is 'history', so an entry can never
+ * be moved between the streams unnoticed. Only an event that changed a record may enter the history stream. */
+export function sealAccessEvent(previous: ChainPosition, input: AccessEvent, stream: AccessStream = 'viewing'): Readonly<AccessChainEntry> {
+  choice(stream, ACCESS_STREAMS);
+  const event = parseAccessEvent(input);
+  if (stream === 'history' && !accessStreams(event).includes('history')) refuse('HistoryStreamRefused');
+  return chainEntry(previous, stream === 'history' ? { kind: 'history', event } : { kind: 'access', event });
 }
-/** Through is the last deleted prefix entry; B checks every event's deadline and legal holds before invoking. */
+/** Viewing stream only. Through is the last deleted prefix entry; B checks every entry's end and the legal holds first. */
 export function sealAccessExpiry(previous: ChainPosition, through: ChainPosition, deletedCount: number, at: string): Readonly<AccessChainEntry> {
   object(through, ['sequence', 'hash']); integer(through.sequence, 1); integer(deletedCount, 1); sha256(through.hash);
   if (through.sequence > previous.sequence || deletedCount > through.sequence) throw new Error('Invalid expired prefix');
   return chainEntry(previous, { kind: 'expiry', at: utc(at), deletedThrough: through.sequence, deletedCount, anchorHash: through.hash });
 }
-/** Verification starts at a sealed prefix anchor and must reach an independently protected expected tail. */
-export function verifyAccessChain(anchor: ChainPosition, entries: readonly AccessChainEntry[], expectedTail: ChainPosition): boolean {
+/** Verification of one stream starts at a sealed anchor and must reach an independently protected expected tail. */
+export function verifyAccessChain(anchor: ChainPosition, entries: readonly AccessChainEntry[], expectedTail: ChainPosition,
+  stream: AccessStream = 'viewing'): boolean {
   try {
+    choice(stream, ACCESS_STREAMS);
     let previous = anchor;
     for (const entry of entries) {
       object(entry, ['sequence', 'previousHash', 'payload', 'hash']);
       let expected: Readonly<AccessChainEntry>;
-      if (entry.payload.kind === 'access') {
-        object(entry.payload, ['kind', 'event']); expected = sealAccessEvent(previous, entry.payload.event);
+      if (entry.payload.kind === 'access' || entry.payload.kind === 'history') {
+        if ((entry.payload.kind === 'history') !== (stream === 'history')) return false;
+        object(entry.payload, ['kind', 'event']); expected = sealAccessEvent(previous, entry.payload.event, stream);
       } else {
+        if (stream !== 'viewing') return false;
         const p = object(entry.payload, ['kind', 'at', 'deletedThrough', 'deletedCount', 'anchorHash']); choice(p.kind, ['expiry']);
         expected = sealAccessExpiry(previous, { sequence: p.deletedThrough, hash: p.anchorHash }, p.deletedCount, p.at);
       }

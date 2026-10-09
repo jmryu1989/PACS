@@ -590,7 +590,7 @@ const { PrismaService } = require('/app/dist/prisma.service');
                           " has_table_privilege('kin_runtime', 'public.\"AuditLog\"', 'TRIGGER'),"
                           " has_parameter_privilege('kin_runtime', 'session_replication_role', 'SET'),"
                           " (SELECT rolsuper FROM pg_roles WHERE rolname = 'kin_runtime'))", db)
-        self.assertEqual(line, "true,true,false,false,false,false,false,false")
+        self.assertEqual(line, "t,t,f,f,f,f,f,f")  # psql's text form of the eight booleans
         self.ok("SET ROLE kin_runtime; INSERT INTO \"AuditLog\" (actor, action, target) VALUES ('syn-runtime', 'syn.runtime', 'syn')", db)
         for statement in ('SET ROLE kin_runtime; UPDATE "AuditLog" SET detail = \'x\'',
                           'SET ROLE kin_runtime; DELETE FROM "AuditLog"',

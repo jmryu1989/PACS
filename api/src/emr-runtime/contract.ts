@@ -1,20 +1,21 @@
 import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
 import {
-  AccessEvent, AccessExpiryCheckpoint, ACCESS_CHAIN_GENESIS, ChainPosition, DurableAccessReceipt, AppendOnlyAccessStore,
-  ImmutableIdentity, NON_RECORD_TARGETS, parseAccessEvent, provideAfterDurableEvent,
+  ACCESS_STREAMS, AccessEvent, AccessExpiryCheckpoint, AccessStream, ACCESS_CHAIN_GENESIS, ChainPosition, DurableAccessReceipt,
+  AppendOnlyAccessStore, ImmutableIdentity, NON_RECORD_TARGETS, StatutoryAct, parseAccessEvent, provideAfterDurableEvent,
 } from '../emr-contract/access-event';
 import { RECORD_CLASSIFICATION, ResolvedRecord } from '../emr-contract/classification';
 import { civilPeriodEnd } from '../emr-contract/lawful-defaults';
-import { freeze, integer, object, refuse, sha256, string, utc } from '../emr-contract/validation';
+import { choice, freeze, integer, object, refuse, sha256, string, utc } from '../emr-contract/validation';
 
 /**
  * B's binding of the A contract to stored facts. Everything here is a pure rule over values the storage adapter read; the
- * adapter itself (store.ts, PrismaLedgerSql) is the only code that talks to the database.
+ * adapter itself (store.ts, PrismaLedgerSql) is the only code that talks to the database. The ledger is two streams
+ * (A ACCESS_STREAMS, D-1): each is its own chain, read and sealed on its own.
  */
 
 export interface StoredEntry {
-  sequence: number; previousHash: string; hash: string; kind: 'access' | 'expiry';
+  sequence: number; previousHash: string; hash: string; kind: 'access' | 'expiry' | 'history'; statutoryAct: StatutoryAct | null;
   eventId: string | null; payload: string; contentSha256: string; storedAt: string;
 }
 export interface ChainTail { chainId: string; sequence: number; hash: string }
@@ -28,7 +29,6 @@ export interface PlacementRow { relation: string; relkind: string; tablespace: s
 export const LEDGER_ERRORS = freeze({
   EB001: 'EmrStoragePlacementRequired', EB002: 'AccessEventIdConflict', EB003: 'AccessPayloadInvalid',
   EB004: 'RetentionNotElapsed', EB005: 'LegalHoldActive', EB006: 'ExpiryPrefixInvalid', EB007: 'ProjectionWithoutEvent',
-  EB008: 'RecordRetentionRequired',
 } as const);
 
 // ── chain bytes ──
@@ -37,20 +37,25 @@ export const LEDGER_ERRORS = freeze({
 export function entryHash(sequence: number, previousHash: string, payload: string): string {
   return createHash('sha256').update(`{"sequence":${integer(sequence, 1)},"previousHash":"${sha256(previousHash)}","payload":${payload}}`).digest('hex');
 }
-/** The server's canonical text of one access event: A's parse, then A's payload shape, serialized once. */
-export function canonicalPayload(input: unknown, served?: readonly ResolvedRecord[]): { event: Readonly<AccessEvent>; text: string; contentSha256: string } {
+/** The payload kind of an event entry in each stream (A sealAccessEvent): 'access' in the viewing stream, 'history' in the other. */
+export const STREAM_ENTRY_KIND: Readonly<Record<AccessStream, 'access' | 'history'>> = freeze({ viewing: 'access', history: 'history' });
+/** The server's canonical text of one access event in one stream: A's parse, then A's payload shape, serialized once. */
+export function canonicalPayload(input: unknown, served?: readonly ResolvedRecord[], stream: AccessStream = 'viewing'):
+  { event: Readonly<AccessEvent>; text: string; contentSha256: string } {
   const event = parseAccessEvent(input, served);
-  const text = JSON.stringify({ kind: 'access', event });
+  const text = JSON.stringify({ kind: STREAM_ENTRY_KIND[choice(stream, ACCESS_STREAMS)], event });
   return freeze({ event, text, contentSha256: createHash('sha256').update(text).digest('hex') });
 }
 const genesis = (): ChainPosition => ({ sequence: ACCESS_CHAIN_GENESIS.sequence, hash: ACCESS_CHAIN_GENESIS.hash });
 
 /**
- * Stored entries from `anchor` must reach `expectedTail` with no gap, repeat or changed byte: each entry's hash is
- * recomputed over its stored payload and links to its predecessor; access entries carry their event ID; a checkpoint
- * names a deleted prefix that ends before it. Returns the closed reason of the first violation, or null.
+ * Stored entries of one stream from `anchor` must reach `expectedTail` with no gap, repeat or changed byte: each entry's
+ * hash is recomputed over its stored payload and links to its predecessor; an event entry carries its event ID and its
+ * stream's payload kind; a checkpoint (viewing stream only) names a deleted prefix that ends before it. Returns the closed
+ * reason of the first violation, or null.
  */
-export function chainViolation(anchor: ChainPosition, entries: readonly StoredEntry[], expectedTail: ChainPosition): string | null {
+export function chainViolation(anchor: ChainPosition, entries: readonly StoredEntry[], expectedTail: ChainPosition, stream: AccessStream = 'viewing'): string | null {
+  choice(stream, ACCESS_STREAMS);
   let previous = { sequence: anchor.sequence, hash: anchor.hash };
   for (const entry of entries) {
     if (entry.sequence !== previous.sequence + 1) return entry.sequence <= previous.sequence ? 'repeated-sequence' : 'missing-entry';
@@ -60,7 +65,8 @@ export function chainViolation(anchor: ChainPosition, entries: readonly StoredEn
     let payload: any;
     try { payload = JSON.parse(entry.payload); } catch { return 'changed-entry'; }
     if (payload?.kind !== entry.kind) return 'changed-entry';
-    if (entry.kind === 'access' && payload.event?.eventId !== entry.eventId) return 'changed-entry';
+    if (entry.kind === 'expiry' ? stream !== 'viewing' : entry.kind !== STREAM_ENTRY_KIND[stream]) return 'foreign-stream';
+    if (entry.kind !== 'expiry' && payload.event?.eventId !== entry.eventId) return 'changed-entry';
     if (entry.kind === 'expiry' && !(Number.isSafeInteger(payload.deletedThrough) && payload.deletedThrough < entry.sequence)) return 'changed-entry';
     previous = { sequence: entry.sequence, hash: entry.hash };
   }
@@ -87,19 +93,19 @@ export function retainedAnchor(entries: readonly StoredEntry[]): ChainPosition |
 // ── retention ──
 
 /**
- * B's one access-retention rule (commander 2026-10-09, legal register D-1; pending Astra's cross-check). No deadline is
+ * B's one access-retention rule (commander D727; legal register 2026-10-09 §5-11, D-1, cross-checked). No deadline is
  * stored with an entry: it is computed only when destruction is considered, here and nowhere else.
- *  - An entry about no EMR record (login, entry, logout, session end, a refusal without a record, an expiry checkpoint)
- *    ends at the floor: A's classification period for access records (RECORD_CLASSIFICATION['access-audit'].retention,
- *    from A's statutory table) counted from the entry's own time.
- *  - An event about EMR records (의료법 제23조④ 기재·추가기재·수정·열람; every target A did not mark non-record) ends at the
- *    later of that floor and the retention end of each record it is about. While a record's end is unknown the event has
- *    no deadline and is never destroyed.
+ *  - viewing stream: every event ends at the floor - A's classification period for access records
+ *    (RECORD_CLASSIFICATION['access-audit'].retention, from A's statutory table) counted from the event's own day (D-21) -
+ *    and later only while a legal hold (or another verified legal basis) keeps it. This covers 열람 events, events about no
+ *    record, and the floor remainder of every change.
+ *  - history stream: a change of EMR records (기재·추가기재·수정) ends with the retention of every record it changed; while a
+ *    record's end is unknown it has no end. Unit H destroys it with that record's destruction set; B1 has no such path.
  * The database holds the same floor once (emr_access.access_retention_floor, kept equal by C10 and L05) and binds each
  * event's record targets from its chained payload (emr_access.access_target).
  */
 export const ACCESS_RETENTION = freeze({ kind: 'access-audit' as const, years: RECORD_CLASSIFICATION['access-audit'].retention.years });
-/** The end of an entry about no EMR record that started at `at`; the least end of any entry. */
+/** The end of a viewing-stream entry that started at `at` (and of an expiry checkpoint). */
 export function accessRetentionFloor(at: string): string {
   return civilPeriodEnd(utc(at), ACCESS_RETENTION.years);
 }
@@ -108,40 +114,42 @@ export interface RecordTarget { index: number; kind: string; recordId: string | 
 /** The record targets of a parsed event, in target order: what append_access binds from the same payload. */
 export function recordTargets(input: unknown, served?: readonly ResolvedRecord[]): RecordTarget[] {
   const event = parseAccessEvent(input, served);
-  return event.targets.flatMap((target, index) => NON_RECORD_TARGETS.includes(target.kind) ? [] : [{
-    index, kind: target.kind, recordId: target.recordId.status === 'known' ? target.recordId.value : null,
-    versionId: target.versionId.status === 'known' ? target.versionId.value : null }]);
+  return (event.targets as readonly { kind: any; recordId: any; versionId: any }[]).flatMap((target, index) =>
+    NON_RECORD_TARGETS.includes(target.kind) ? [] : [{ index, kind: target.kind,
+      recordId: target.recordId.status === 'known' ? target.recordId.value : null,
+      versionId: target.versionId.status === 'known' ? target.versionId.value : null }]);
 }
-/** The target record's retention end (the record's own A retention, unit H), or null when it cannot be established. */
+/** The target record's retention end (the record's own A retention, from unit H), or null when it cannot be established. */
 export type RecordRetentionEnd = (target: RecordTarget) => string | null;
-/** No record store is composed in B1: every record-bound event stays (fail closed) until unit H supplies record ends. */
+/** No record store is composed in B1: no history entry has an end until unit H supplies record ends. */
 export const RECORD_RETENTION_UNAVAILABLE: RecordRetentionEnd = () => null;
-/** The rule itself: an entry's end, or null when it has none yet. */
-export function accessDeadline(entry: { occurredAt: string; targets: readonly RecordTarget[] }, recordEnd: RecordRetentionEnd): string | null {
-  let deadline = accessRetentionFloor(entry.occurredAt);
+/** The rule itself: an entry's end in its stream, or null when it has none yet. */
+export function accessDeadline(stream: AccessStream, entry: { occurredAt: string; targets: readonly RecordTarget[] },
+  recordEnd: RecordRetentionEnd = RECORD_RETENTION_UNAVAILABLE): string | null {
+  if (choice(stream, ACCESS_STREAMS) === 'viewing') return accessRetentionFloor(entry.occurredAt);
+  if (!entry.targets.length) return null;
+  let deadline: string | null = null;
   for (const target of entry.targets) {
     const end = target.recordId === null ? null : recordEnd(target);
     if (end === null) return null;
-    if (utc(end) > deadline) deadline = end;
+    if (deadline === null || utc(end) > deadline) deadline = utc(end);
   }
   return deadline;
 }
-export interface RetentionRow { sequence: number; hash: string; kind: 'access' | 'expiry'; occurredAt: string; targets: readonly RecordTarget[]; held: boolean }
+export interface RetentionRow { sequence: number; hash: string; kind: 'access' | 'expiry'; occurredAt: string; held: boolean }
 /**
- * The longest retained prefix whose every entry is past its end under the rule above and carries no unreleased hold.
- * Returns the last sequence of that prefix and its hash, or null when the first retained entry may not go. Reading an
- * entry never moves its end: only its own time, its bound records' retention and holds count. The database re-checks
- * the floor, the record binding and the holds.
+ * Viewing stream only: the longest retained prefix whose every entry is past its end under the rule above and carries no
+ * unreleased hold. Returns the last sequence of that prefix and its hash, or null when the first retained entry may not go.
+ * Reading an entry never moves its end: only its own time and holds count. The database re-checks the floor and the holds.
  */
-export function planExpiryPrefix(rows: readonly RetentionRow[], now: string, recordEnd: RecordRetentionEnd = RECORD_RETENTION_UNAVAILABLE):
-  { through: number; hash: string; count: number } | null {
+export function planExpiryPrefix(rows: readonly RetentionRow[], now: string): { through: number; hash: string; count: number } | null {
   utc(now);
   let plan: { through: number; hash: string; count: number } | null = null;
   let previous: number | null = null;
   for (const row of rows) {
     if (previous !== null && row.sequence !== previous + 1) refuse('RetentionViewIncomplete');
     previous = row.sequence;
-    const deadline = accessDeadline(row, recordEnd);
+    const deadline = accessDeadline('viewing', { occurredAt: row.occurredAt, targets: [] });
     if (deadline === null || deadline > now || row.held) break;
     plan = { through: row.sequence, hash: row.hash, count: (plan?.count ?? 0) + 1 };
   }

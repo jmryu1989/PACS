@@ -51,18 +51,24 @@ const clinical = signed('의료인이 진료에 관한 사항·의견을 작성�
 
 /** Classify actual content, not every referenced record. Source evidence has no independent retention clock. */
 export const RECORD_CLASSIFICATION = freeze({
-  'report-head': record('Report.updatedBy; immutable ReportVersion projection', clinical, [...images, FLOOR.chart]),
-  'report-version': record('ReportVersion.author; immutable author/signer identity', clinical, [...images, FLOOR.chart]),
+  // D-19 (legal register §5-02): a reading report and the clinical records attached to it are the image's 소견서 or\r
+  // 검사소견 (시행규칙 제15조①6·5, 5 years); 진료기록부 (10 years) applies only through a recorded chart incorporation.
+  'report-head': record('Report.updatedBy; immutable ReportVersion projection', clinical, images),
+  'report-version': record('ReportVersion.author; immutable author/signer identity', clinical, images),
   'private-draft': record('ReportDraft.author; private to (uid, author)', conditional('개인 작업 초안 자체의 별도 서명 의무는 명시되지 않음; 진료기록으로 기재/사용할 때 서명, 적용 보유기간 중 모든 저장판 보존'), [], 'emr-candidate', 'purpose', ['result-version-signed', 'intent-superseded', 'explicit-discard']),
   'report-evidence': record('Pinned ReportVersion/ReportDraft provenance', source('첨부·인용 해시 보존; 임상 기재를 담은 문서는 해당 작성자의 서명 보존'), [], 'emr-candidate', 'source-record'),
-  'tech-note': record('TechNoteRevision.authorSub/author', conditional('촬영기사의 업무 메모 자체의 전자서명 의무는 명시되지 않음; 의료인의 진료 기재이면 제22조①·제23조① 적용'), [FLOOR.examination]),
-  'clinical-question': record('StudyQuestion/StudyQuestionEntry.authorSub', clinical, chart),
-  'clinical-answer': record('StudyQuestionEntry answer author', clinical, chart),
-  consultation: record('StudyConsultation requester/recipient/changedBy', clinical, chart),
-  'critical-result': record('CriticalResult.senderSub; pinned report version', clinical, chart),
-  'critical-result-ack': record('CriticalResultEvent.actorSub; pinned acknowledgment', conditional('임상 인계 완료는 CVR의 일부; 별도 접속/전송 영수증과 구별; 임상 판단/조치 기재가 더해지면 서명'), chart),
+  // D-3 (delta map MAP-D03): a radiographer's own Tech Note is a signed entry of its author - every version signed with the
+  // author's own key, never standing in for a physician's record duty; an administrator's note on the same surface is
+  // unsigned operational text (operational-note), never presented as a signed clinical entry. C wires the signature.
+  'tech-note': record('TechNoteRevision.authorSub/author (radiographer)', signed('방사선사 본인의 촬영 기록 메모; 각 작성·수정판에 작성자 본인 키로 서명; 의료인의 진료기록 의무를 대체하지 않음'), [FLOOR.examination]),
+  'operational-note': record('TechNoteRevision.authorSub (administrator)', unsigned('관리자의 운영 메모; 의료인의 서명 기재로 표시하지 않음; 환자 임상 문구는 해당 임상 종류로 분류'), [], 'operational-record', 'purpose', ['owner-deleted']),
+  'clinical-question': record('StudyQuestion/StudyQuestionEntry.authorSub', clinical, images),
+  'clinical-answer': record('StudyQuestionEntry answer author', clinical, images),
+  consultation: record('StudyConsultation requester/recipient/changedBy', clinical, images),
+  'critical-result': record('CriticalResult.senderSub; pinned report version', clinical, images),
+  'critical-result-ack': record('CriticalResultEvent.actorSub; pinned acknowledgment', conditional('임상 인계 완료는 CVR의 일부; 별도 접속/전송 영수증과 구별; 임상 판단/조치 기재가 더해지면 서명'), images),
   'image-request': record('StudyImageRequest requester/handler/changedBy', conditional('영상 전달 요청 자체에 별도 서명 의무는 명시되지 않음; 진료 지시/의견 기재이면 서명'), [FLOOR.patientRegister]),
-  finding: record('Finding/FindingRevision author/actor', clinical, chart),
+  finding: record('Finding/FindingRevision author/actor', clinical, images),
   measurement: record('ViewerItem/ViewerRevision author/actor', source('수동 점·ROI·수치 자체의 개별 서명 의무는 명시되지 않음; 이를 진료 소견으로 기록한 문서에는 서명'), images),
   'key-image': record('ViewerItem author; SOP/frame reference', source('원영상/선택 이력 보존; 별도 영상 선택 서명 의무는 명시되지 않음'), images),
   'manual-sr': record('ManualSr.authorSub; immutable DICOM bytes', clinical, images),
@@ -97,8 +103,13 @@ export const RECORD_CLASSIFICATION = freeze({
   'system-operation': record('System process; health/statistics/accounting', unsigned('운영 상태'), [], 'operational-record', 'purpose', ['operation-completed']),
   // EMR-B1 (D596): an approval actually signed on a registered device while disconnected is the signed record itself, kept
   // from its actual signedAt; its recovery/review working copy is a separate purpose record that cannot outlive its purpose.
-  'offline-signed-original': record('Device signer; registered device key and its own kid; exact signed bytes at the actual signedAt', signed('단말에서 실제 서명한 임상 기재 원본; 수신·재인증 시각으로 다시 서명하거나 기산하지 않음'), [...images, FLOOR.chart]),
+  'offline-signed-original': record('Device signer; registered device key and its own kid; exact signed bytes at the actual signedAt', signed('단말에서 실제 서명한 임상 기재 원본; 수신·재인증 시각으로 다시 서명하거나 기산하지 않음'), images),
   'recovery-working-copy': record('Owner; its original event or conflict record; purpose ID', conditional('복구·재검토 작업본 자체의 별도 서명 의무는 명시되지 않음; 진료기록으로 기재·채택할 때 새 서명판'), [], 'emr-candidate', 'purpose', ['original-received', 'explicit-discard']),
+  // D-19 (legal register §5-02): the 10-year 진료기록부 class applies only through this recorded fact - a hospital EMR
+  // incorporation event or the treating physician's chart entry that incorporates the pinned versions (its component
+  // manifest; relation 'incorporation'). A comparison or navigation link never counts. Its period counts from the
+  // incorporation, and the incorporated versions are kept while it is (retainingUnits).
+  'chart-incorporation': record('Hospital EMR incorporation event or treating physician chart entry; pinned incorporated versions', source('편입 사건 자체에 새 서명 의무는 명시되지 않음; 편입된 판의 원서명·바이트 보존'), chart),
   // EMR-B1 storage of legal duties and the reviewed clause history: evidence attached to the records they concern.
   'legal-duty': record('Verified legal duty adapter; order/request, authority, scope, validity and release', unsigned('법적 보존 의무·요청 증빙; 진료기록 서명과 구분'), [], 'evidence-record', 'source-record'),
   'legal-reference': record('Reviewed statute clause history (unit I); publication and effective dates', unsigned('검토된 조문 판본 이력; 환자·개인 자료 없음'), [], 'evidence-record', 'source-record'),
@@ -121,6 +132,12 @@ export const TERMINAL_RECORD_BOUNDARY = freeze({
   states: ['pending-transmission', 'received-unverified', 'verified', 'verification-refused'],
   original: 'owned by its immutable signer; retention from the actual signedAt; never ended by a private-draft purpose end; reception and re-authentication are separate events',
   recovery: 'owned by the same member; references its original event; a purpose ID; ends at verified reception of the original or the owner discard',
+});
+/** D-19 storage boundary: chart incorporation facts come from the hospital EMR or the treating physician's chart (C/H). */
+export const CHART_INCORPORATION_BOUNDARY = freeze({
+  storage: 'chart-incorporation-facts',
+  models: { ChartIncorporation: ['chart-incorporation'] } as Record<string, readonly RecordKind[]>,
+  sources: ['hospital-emr-incorporation', 'treating-physician-chart-entry'],
 });
 export type TerminalState = 'pending-transmission' | 'received-unverified' | 'verified' | 'verification-refused';
 export interface TerminalRecordFacts {
@@ -145,7 +162,7 @@ export const MODEL_CLASSIFICATION: Readonly<Record<string, readonly RecordKind[]
   ProviderChange: ['system-operation'], MemberRights: ['identity-access'], MemberRightsImport: ['system-operation'],
   StudyState: ['study-metadata', 'study-correction', 'patient-match', 'assignment'],
   GatewayReceipt: ['delivery-receipt'], GatewayRetryRequest: ['delivery-receipt'],
-  TechNoteRevision: ['tech-note'], TransferBasis: ['transfer-governance'], ProcessingAgreement: ['transfer-governance'], Transfer: ['transfer-governance', 'patient-match'],
+  TechNoteRevision: ['tech-note', 'operational-note'], TransferBasis: ['transfer-governance'], ProcessingAgreement: ['transfer-governance'], Transfer: ['transfer-governance', 'patient-match'],
   Report: ['report-head'], ReportDraft: ['private-draft', 'report-evidence'], ReportVersion: ['report-version', 'report-evidence'], Order: ['order', 'received-order', 'patient-match'],
   UserFilterCollection: ['preferences'], SharedFilterLibrary: ['preferences'], UserFilter: ['preferences'], ReadingTemplate: ['reading-template'],
   AuditLog: ['access-audit'], ViewerItem: ['measurement', 'key-image'], ViewerRevision: ['measurement', 'key-image'], ManualSr: ['manual-sr'],
@@ -192,6 +209,12 @@ function rowKinds(model: string, row: Record<string, any>, event: RecordEvent): 
     const [kind] = TERMINAL_RECORD_BOUNDARY.models[model];
     terminalFacts(kind, row, event); return [kind];
   }
+  if (Object.prototype.hasOwnProperty.call(CHART_INCORPORATION_BOUNDARY.models, model)) {
+    // An incorporation names its source and incorporates at least one pinned version; a link without content is not one.
+    choice(row.source, CHART_INCORPORATION_BOUNDARY.sources);
+    if (!event.components.length) refuse('ChartIncorporationRequired');
+    return CHART_INCORPORATION_BOUNDARY.models[model];
+  }
   if (Object.prototype.hasOwnProperty.call(SQL_STORAGE_CLASSIFICATION, model))
     return SQL_STORAGE_CLASSIFICATION[model].filter(k => RECORD_CLASSIFICATION[k].retention.mode !== 'source-record');
   const possible = classifyModel(model);
@@ -220,6 +243,8 @@ function rowKinds(model: string, row: Record<string, any>, event: RecordEvent): 
       if (row.clinicalEntry && !(row.title.trim() || row.description.trim())) refuse('RowFactsRequired');
       return row.clinicalEntry ? ['comparison-description'] : ['comparison-layout'];
     case 'StudyQuestionEntry': return [choice(row.kind, ['question', 'answer']) === 'answer' ? 'clinical-answer' : 'clinical-question'];
+    // D-3: who wrote the note decides what it is, read from the stored author role, never from a request flag.
+    case 'TechNoteRevision': return [choice(row.authorRole, ['radiographer', 'administrator']) === 'administrator' ? 'operational-note' : 'tech-note'];
     case 'CriticalResult': return ['critical-result'];
     case 'CriticalResultEvent':
       string(row.recordId);
