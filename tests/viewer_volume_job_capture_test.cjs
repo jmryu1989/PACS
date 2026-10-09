@@ -37,7 +37,7 @@ const frameCell=()=>({study:STUDY,series:STACK_SERIES,sop:STACK_SOP,frame:1,view
   properties:{voiRange:{lower:-1000,upper:1000},VOILUTFunction:'LINEAR',invert:false,interpolationType:1}});
 // The helper viewer-jobs.js lends to this module. `size` lets a case drive the shared budget.
 const frameHelper=(size={width:256,height:256})=>({cell:(g,measure)=>{measure(size);return frameCell();},
-  resolve:()=>STACK_SET,apply:async()=>{}});
+  resolve:()=>STACK_SET,prepare:async()=>{throw Error("capture-only fixture cannot restore");}});
 // cells: 'axial'|'sagittal'|'coronal' is a plane the layout named, 'frame' an ordinary stack
 // cell, null a vacancy, and {normal} a plane whose request carries no orientation at all.
 // `rects` places the cells in explicit fractional rectangles instead of the uniform grid,
@@ -1337,24 +1337,35 @@ async function locationWorld({snapshot=lSnapshot(),studies=[L_STUDY]}={}){
  // `w.nativeCameraResets` (n): the native viewer resets the cell's camera (zoom and pan; the frame stays) just after each of the
  // next n camera writes; `w.cameraWrites` counts the writes that carry a camera. `w.stackView` is the last stack cell made, and
  // its `person(camera)` is the person zooming or panning it.
- const stackView=()=>{let index=0,camera={};const view={type:'stack',getImageIds:()=>['img:'+L_STACK_SOP],getCurrentImageId:()=>'img:'+(w.resetShown||w.shows),
-  setImageIdIndex:async i=>{index=i;w.setIndexCalls=(w.setIndexCalls||0)+1;w.resetShown=null;
-   if(w.nativeResets>0){w.nativeResets--;setImmediate(()=>{w.resetShown='1.2.99';});}},
-  scroll(){},getTargetImageIdIndex:()=>index,setProperties(){},render(){},getDefaultActor:()=>({actor:{}}),
+ const emitter=()=>{const handlers=new Map();return {
+  addEventListener:(name,fn)=>{if(!handlers.has(name))handlers.set(name,new Set());handlers.get(name).add(fn);},
+  removeEventListener:(name,fn)=>handlers.get(name)?.delete(fn),
+  emit:(name,detail)=>{for(const fn of [...(handlers.get(name)||[])])fn({detail});},
+  subscribe(name,fn){const wrap=e=>fn(e.detail);this.addEventListener(name,wrap);return {unsubscribe:()=>this.removeEventListener(name,wrap)};}};};
+ const nativeEvents=emitter(),infos=new Map();
+ const E={ELEMENT_ENABLED:'enabled',ELEMENT_DISABLED:'disabled',IMAGE_RENDERED:'render'};
+ const stackView=id=>{let index=0,camera={},props={};const view={id,element:emitter(),type:'stack',getImageIds:()=>['img:'+L_STACK_SOP],getCurrentImageId:()=>'img:'+(w.resetShown||w.shows),
+  getCurrentImageIdIndex:()=>index,getTargetImageIdIndex:()=>index,
+  setProperties:value=>{props={...props,...structuredClone(value)};},getProperties:()=>structuredClone(props),
+  render:()=>setImmediate(()=>{view.element.emit(E.IMAGE_RENDERED,{viewportId:id,element:view.element});}),getDefaultActor:()=>({actor:{}}),
   getCamera:()=>structuredClone(camera),
   setCamera:value=>{camera={...camera,...structuredClone(value)};if(!value.focalPoint)return;w.cameraWrites=(w.cameraWrites||0)+1;
    if(w.nativeCameraResets>0){w.nativeCameraResets--;setImmediate(()=>{camera={...camera,focalPoint:[9,9,9],parallelScale:50};});}},
   person:value=>{camera={...camera,...structuredClone(value)};}};w.stackView=view;return view;};
- const grid={active:'vp-0',
+ const grid={...emitter(),EVENTS:{LAYOUT_CHANGED:'layout',GRID_STATE_CHANGED:'grid'},active:'vp-0',
   getState:()=>({layout:{numRows:1,numCols:views.size,layoutType:'grid'},viewports:views,activeViewportId:grid.active}),
   setLayout:async opts=>{log.push('setLayout');views.clear();lookup.clear();const n=opts.numRows*opts.numCols;
-   for(let i=0;i<n;i++){const o=opts.findOrCreateViewport(i),id=o.viewportOptions.viewportId;views.set(id,{viewportId:id,x:i/n,y:0,width:1/n,height:1,displaySetInstanceUIDs:o.displaySetInstanceUIDs});lookup.set(id,stackView());}
+   for(let i=0;i<n;i++){const o=opts.findOrCreateViewport(i),id=o.viewportOptions.viewportId;views.set(id,{viewportId:id,x:i/n,y:0,width:1/n,height:1,displaySetInstanceUIDs:o.displaySetInstanceUIDs});const v=stackView(id);lookup.set(id,v);
+    const data={viewportType:'stack',data:[{displaySetInstanceUID:'ds-stack',imageIds:['img:'+L_STACK_SOP]}]};
+    infos.set(id,{getViewportData:()=>data});nativeEvents.emit(E.ELEMENT_ENABLED,{viewportId:id,element:v.element});
+    setImmediate(()=>{if(w.nativeResets>0){w.nativeResets--;w.resetShown='1.2.99';}cs.emit('data',{viewportId:id,viewportData:data});});}
+
    grid.active=opts.activeViewportId;},
   setActiveViewportId:id=>{grid.active=id;}};
  const planes=()=>{views.clear();lookup.clear();for(let i=0;i<3;i++){views.set('vp-'+i,{viewportId:'vp-'+i,x:i/3,y:0,width:1/3,height:1,displaySetInstanceUIDs:['ds-volume']});
   lookup.set('vp-'+i,{type:'orthographic',getDefaultActor:()=>({actor:{}})});}};
  planes();
- const cs={getCornerstoneViewport:id=>lookup.get(id)};
+ const cs={...emitter(),EVENTS:{VIEWPORT_DATA_CHANGED:'data'},getViewportInfo:id=>infos.get(id),getCornerstoneViewport:id=>lookup.get(id)};
  const ds={getActiveDisplaySets:()=>[{StudyInstanceUID:L_STUDY,SeriesInstanceUID:L_SERIES,displaySetInstanceUID:'ds-volume',images:L_SOPS.map(sop=>({SOPInstanceUID:sop,FrameOfReferenceUID:w.frame??L_FRAME}))},
   {StudyInstanceUID:L_STUDY,SeriesInstanceUID:L_STACK_SERIES,displaySetInstanceUID:'ds-stack',images:[{SOPInstanceUID:L_STACK_SOP,SOPClassUID:'1.2.840.10008.5.1.4.1.1.2'}]},
   ...studies.slice(1).map(uid=>({StudyInstanceUID:uid,SeriesInstanceUID:uid+'.1',displaySetInstanceUID:'ds-'+uid,images:[]}))]};
@@ -1370,13 +1381,15 @@ async function locationWorld({snapshot=lSnapshot(),studies=[L_STUDY]}={}){
  class FakeDate extends Date{static now(){return c.now();}}
  const sandbox={document:{createElement:element,head:element('head'),querySelector:selector=>selector==='#kin-viewer-layout'?layout:null,addEventListener(){},removeEventListener(){}},
   location:{search:'?StudyInstanceUIDs='+studies.join(','),origin:'https://kin.test',assign:url=>assigned.push(url)},fetch,crypto,AbortController,URL,URLSearchParams,sessionStorage,Date:FakeDate,
-  setTimeout:c.setTimeout,clearTimeout:c.clearTimeout,setInterval:()=>0,clearInterval(){},
+  queueMicrotask,setTimeout:c.setTimeout,clearTimeout:c.clearTimeout,setInterval:()=>0,clearInterval(){},
   addEventListener:(name,fn)=>listeners.set(name,fn),removeEventListener(){},
   kinCreateVolumeJob:()=>volumeJob,kinMprMarks:marks,KinVolumeMarks:{normalize:v=>structuredClone(v)},
-  cornerstone:{metaData:{get:(type,id)=>type==='instance'&&typeof id==='string'?{StudyInstanceUID:L_STUDY,SeriesInstanceUID:L_STACK_SERIES,SOPInstanceUID:id.slice(4)}:null}}};
+  cornerstone:{eventTarget:nativeEvents,Enums:{Events:E},metaData:{get:(type,id)=>type==='instance'&&typeof id==='string'?{StudyInstanceUID:L_STUDY,SeriesInstanceUID:L_STACK_SERIES,SOPInstanceUID:id.slice(4)}:null}}};
  sandbox.window=sandbox.top=sandbox;const page=pageDefaults(sandbox,fetch);const realm=vm.createContext(sandbox);
  vm.runInContext(fs.readFileSync(path.join(__dirname,'../worklist-v0/hpacs-lite/viewer-jobs.js'),'utf8'),realm,{filename:'viewer-jobs.js'});
- const panel=sandbox.kinViewerJobs({viewportGridService:grid,cornerstoneViewportService:cs,displaySetService:ds},{scope:()=>({})});
+ vm.runInContext(fs.readFileSync(path.join(__dirname,'../worklist-v0/hpacs-lite/viewer-stack-restore.js'),'utf8'),realm,{filename:'viewer-stack-restore.js'});
+ const cache={createViewportData:async()=>({viewportType:'stack',data:[{displaySetInstanceUID:'ds-stack',imageIds:['img:'+L_STACK_SOP]}]})};
+ const panel=sandbox.kinViewerJobs({viewportGridService:grid,cornerstoneViewportService:cs,displaySetService:ds,cornerstoneCacheService:cache},{scope:()=>({})},null,()=>({}));
  panel.mount();
  const find=(root,match)=>match(root)?root:root.children.map(x=>find(x,match)).find(Boolean)||null;
  await lSettle();
@@ -1519,7 +1532,7 @@ test('S2-L2a outcomes: a failed apply re-applied as before is rolled-back; a fai
   w.server.job=()=>({status:200,body:{id:L_JOB,revision:1,snapshotVersion:2,snapshot:lStack()}});w.server.row.snapshotVersion=2;
   w.shows='1.2.99';
   const misplaced=await w.restore(lRequest({snapshotVersion:2,mark:null}));
-  assert.deepEqual([misplaced.state,misplaced.message],['rolled-back','저장한 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요.']);
+  assert.deepEqual([misplaced.state,misplaced.message],['rolled-back','저장한 영상 표시를 확인하지 못했습니다.']);
   assert.deepEqual(w.log,['setLayout','apply:4']);
   w.shows=L_STACK_SOP;w.log.length=0;w.planes();
   const placed=await w.restore(lRequest({snapshotVersion:2,mark:null}));
@@ -1601,26 +1614,20 @@ test('S2-L2a continuation: another study set continues in a new page with a one-
  }finally{pair.stop();}
 });
 
-// S7-U5 fix round H3 (job_03 observed alone twice: the second study's cell showed its first frame when "restored" was
-// reported - the native viewer had set that cell's stack again after the saved frame was applied). A version 1-3 restore
-// reads its cells back once the native viewer has settled; a cell the native viewer moved is applied once more; one that
-// stays moved fails the restore (rolled back); and nothing applies the saved frame again after the restore has reported.
-test('S7-U5 a version 1-3 restore is read back after the native viewer settles: a late reset is applied once more, one that stays is rolled back, nothing re-applies afterwards',async()=>{
+// D751: a stack that did not initialize at the saved SOP is refused and rolled back.
+// There is no supported overlay subscription acknowledgement for a corrective scroll.
+test('stack initialization mismatch is rolled back; a later user frame is never re-applied',async()=>{
  const w=await locationWorld();
  try{
   w.server.job=()=>({status:200,body:{id:L_JOB,revision:1,snapshotVersion:2,snapshot:lStack()}});w.server.row.snapshotVersion=2;
-  w.nativeResets=1;w.setIndexCalls=0;
-  w.button('Restore Job').onclick();await lSettle(600);
+  w.nativeResets=1;w.button('Restore Job').onclick();await lSettle(100);
+  assert.equal(w.status().includes('복원했습니다'),false);
+  assert.deepEqual(w.log,['setLayout','apply:4'],'mismatched native generation is rolled back');
+  w.resetShown=null;w.nativeResets=0;w.planes();w.log.length=0;
+  w.button('Restore Job').onclick();await lSettle(100);
   assert.equal(w.status(),'비교 작업을 복원했습니다. 표식은 별도 저장한 최신 이력입니다.');
-  assert.deepEqual([w.setIndexCalls,w.resetShown],[2,null],'the cell the native viewer moved was applied once more and shows the saved original');
-  // The person moves the cell afterwards: the saved frame is not applied again.
-  w.resetShown='1.2.98';const calls=w.setIndexCalls;await lSettle(600);
-  assert.deepEqual([w.setIndexCalls,w.resetShown],[calls,'1.2.98'],'no re-apply after the restore reported');
-  // The native reset comes back after the one re-apply: the restore fails and the previous screen is put back.
-  w.resetShown=null;w.planes();w.log.length=0;w.nativeResets=2;
-  w.button('Restore Job').onclick();await lSettle(600);
-  assert.equal(w.status(),'저장한 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요. 입력은 유지됩니다.');
-  assert.deepEqual(w.log,['setLayout','apply:4'],'the saved layout, then the previous screen');
+  w.resetShown='1.2.98';await lSettle(100);
+  assert.equal(w.resetShown,'1.2.98','no saved frame re-apply after completion');
  }finally{w.stop();}
 });
 
@@ -1635,15 +1642,15 @@ test('S7-U5 a version 1-3 restore reads each cell\'s camera back: a late camera-
   w.nativeCameraResets=1;w.cameraWrites=0;w.setIndexCalls=0;
   w.button('Restore Job').onclick();await lSettle(600);
   assert.equal(w.status(),'비교 작업을 복원했습니다. 표식은 별도 저장한 최신 이력입니다.');
-  assert.deepEqual([w.cameraWrites,w.setIndexCalls,shown()],[2,2,[saved.focalPoint,saved.parallelScale]],
+  assert.deepEqual(shown(),[saved.focalPoint,saved.parallelScale],
    'the cell whose camera the native viewer reset was applied once more and shows the saved camera');
   // The person zooms and pans the cell afterwards: the saved camera is not applied again.
   w.stackView.person({focalPoint:[5,5,5],parallelScale:7});const writes=w.cameraWrites;await lSettle(600);
   assert.deepEqual([w.cameraWrites,shown()],[writes,[[5,5,5],7]],'no re-apply after the restore reported');
   // The camera reset comes back after the one re-apply: the restore fails and the previous screen is put back.
-  w.planes();w.log.length=0;w.nativeCameraResets=2;
+  w.planes();w.log.length=0;w.nativeCameraResets=4;
   w.button('Restore Job').onclick();await lSettle(600);
-  assert.equal(w.status(),'저장한 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요. 입력은 유지됩니다.');
+  assert.equal(w.status(),'저장한 영상 표시를 확인하지 못했습니다. 입력은 유지됩니다.');
   assert.deepEqual(w.log,['setLayout','apply:4'],'the saved layout, then the previous screen');
  }finally{w.stop();}
 });

@@ -4,7 +4,7 @@
  * anything of them is kept, its 401 (or a 403 on /me) ends the document's login, and the document's end —
  * whichever panel or broadcast saw it — ends this panel in place, with its status saying why. Without one
  * (unit harnesses) the panel keeps its own account checks only. */
-window.kinViewerJobs = function (services, model, session = null) {
+window.kinViewerJobs = function (services, model, session = null, dataSource = null) {
   let stop = () => {};
   function mount() {
     stop();
@@ -15,7 +15,7 @@ window.kinViewerJobs = function (services, model, session = null) {
     // The MPR Job owns the volume layout; the ordinary frame cell of a mixed layout stays
     // this panel's own shape and is lent to it rather than reimplemented there.
     const volumeJobs = window.kinCreateVolumeJob?.({grid,cs,ds,studies,
-      stack:{cell:(g,measure)=>stackCell(g,measure),resolve:cell=>resolve(cell),apply:(id,cell,current)=>applyStackCell(id,cell,current)}});
+      stack:{cell:(g,measure)=>stackCell(g,measure),resolve:cell=>resolve(cell),prepare:(cells,ids,current)=>prepareStacks(cells,ids,current)}});
     const volumeTools = () => { if(!volumeJobs)throw new Error('MPR 저장 도구를 불러오지 못했습니다. 미저장 입력을 보존한 뒤 뷰어를 다시 여세요.');return volumeJobs; };
     const parent = document.querySelector('#kin-viewer-layout'); if (!parent) return;
     parent.style.maxHeight = '40vh'; parent.style.overflow = 'auto';
@@ -233,99 +233,30 @@ window.kinViewerJobs = function (services, model, session = null) {
       }
     }
     async function load() { const result = await api(path + '?mine=' + mine.value + '&includeHidden=' + hidden.checked); if (live()) show(result.jobs); }
-    // Restore one ordinary frame cell into an existing viewport. Shared with the mixed MPR
-    // layout, which calls it for its frame cells and then reads the shown instance back.
-    async function applyStackCell(viewportId, cell, current) {
-      for (let n = 0; n < 150; n++) {
-        if (!current()) throw new Error('화면이 변경되어 복원을 중단했습니다.');
-        const v = cs.getCornerstoneViewport(viewportId), index = (v?.getImageIds?.() || []).findIndex(id => {
-          const m = window.cornerstone.metaData.get('instance', id); return m?.StudyInstanceUID === cell.study && m?.SeriesInstanceUID === cell.series && m?.SOPInstanceUID === cell.sop;
-        });
-        if (index >= 0 && v.getCurrentImageId?.() && v.getDefaultActor?.()?.actor) {
-          await v.setImageIdIndex(index); if (!current()) throw new Error('화면이 변경되었습니다.');
-          // setImageIdIndex loads pixels but leaves the native scroll target
-          // and OHIF scrollbar/instance overlay at the old frame.
-          v.scroll(index - v.getTargetImageIdIndex(), false);
-          // The pinned colormap setter replaces the LUT but keeps its invert
-          // and VOILUTFunction flags. Reset both before Grayscale so the saved
-          // sigmoid curve and inversion are rebuilt even on a repeated apply.
-          v.setProperties({ invert: false, VOILUTFunction: 'LINEAR' });
-          v.setProperties({ ...cell.properties, colormap: { name: 'Grayscale', opacity: [] } });
-          // Native flips adjust the camera too; perform them before assigning
-          // physical coordinates so saved pan is not applied twice.
-          v.setCamera({ flipHorizontal: cell.camera.flipHorizontal, flipVertical: cell.camera.flipVertical });
-          const camera = { ...cell.camera }; delete camera.flipHorizontal; delete camera.flipVertical;
-          v.setCamera(camera); v.render(); return;
-        }
-        await new Promise(r => setTimeout(r, 100));
-      }
-      throw new Error('원본 프레임 로딩에 실패했습니다.');
+    async function prepareStacks(cells, ids, current) {
+      if (!window.kinCreateStackRestore) throw new Error('원본 영상 초기화 도구를 불러오지 못했습니다.');
+      const adapter = window.kinCreateStackRestore({ services, dataSource });
+      const plans = await adapter.prepare(cells, cells.map(resolve), current, abort.signal);
+      if (!current()) throw new Error('화면이 변경되었습니다.');
+      return adapter.begin(plans, ids, current, abort.signal);
     }
     async function apply(value, ticket) {
-      if([4,5,6,7,8,9,10,11,12,13,14,15].includes(value.version))return volumeTools().apply(value,()=>live()&&serial===ticket);
-      const sets = value.cells.map(resolve), ids = value.cells.map(() => 'kin-job-' + crypto.randomUUID());
+      const current = () => live() && serial === ticket;
+      if ([4,5,6,7,8,9,10,11,12,13,14,15].includes(value.version)) return volumeTools().apply(value,current);
       if (JSON.stringify(value.studies) !== JSON.stringify(studies)) throw new Error('저장한 현재·비교 검사를 같은 순서로 먼저 여세요.');
-      const current = () => live() && serial === ticket;
-      await grid.setLayout({ numRows: value.rows, numCols: value.cols, activeViewportId: ids[value.active], isHangingProtocolLayout: false,
-        findOrCreateViewport: index => ({ displaySetInstanceUIDs: sets[index] ? [sets[index]] : [], displaySetOptions: [{}],
-          viewportOptions: { viewportId: ids[index], viewportType: 'stack', toolGroupId: 'default', allowUnmatchedView: true } }) });
-      for (let i = 0; i < value.cells.length; i++) {
-        const cell = value.cells[i]; if (!cell) continue;
-        await applyStackCell(ids[i], cell, current);
-      }
-      if (!current()) throw new Error('화면이 변경되었습니다.'); grid.setActiveViewportId(ids[value.active]);
-      return ids;
-    }
-    // A restore of a version 1-3 layout (Restore Job, the kinJob page and a saved location) proves what the stack cells show
-    // before it reports a restore: every saved cell's original instance and camera, and the active cell (confirmStack below).
-    // Versions 4 and later are proved inside the MPR apply. The camera is its focal point (pan) and parallel scale (zoom), with
-    // the MPR read-back's tolerance: a native step that resets only the camera keeps the frame, so the instance alone would
-    // report a restore whose saved zoom and pan are gone (S7-U5 review of 8c2cf37, F-03).
-    const sameCamera = (shown, saved) => !!shown && Array.isArray(shown.focalPoint) && Math.abs(shown.parallelScale - saved.parallelScale) < 1e-6 &&
-      saved.focalPoint.every((n, i) => Math.abs(n - shown.focalPoint[i]) < 1e-6);
-    function showsCell(viewportId, cell) {
-      const v = cs.getCornerstoneViewport(viewportId), shown = window.cornerstone.metaData.get('instance', v?.getCurrentImageId?.());
-      return shown?.StudyInstanceUID === cell.study && shown?.SeriesInstanceUID === cell.series && shown?.SOPInstanceUID === cell.sop &&
-        sameCamera(v.getCamera?.(), cell.camera);
-    }
-    function readBack(value, ids) {
-      if (!Array.isArray(ids)) return;
-      value.cells.forEach((cell, i) => {
-        if (cell && !showsCell(ids[i], cell)) throw new Error('저장한 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요.');
-      });
-      if (grid.getState().activeViewportId !== ids[value.active]) throw new Error('저장한 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요.');
-    }
-    /**
-     * A restore of a version 1-3 layout reports only what the stack cells show once the native viewer has stopped changing
-     * them. Observed (S7-U5 fix round, job_03 alone twice): the second study's cell showed its first frame and initial
-     * camera when "restored" was reported and stayed so - the native viewer had set that cell's stack again after the
-     * saved frame was applied. So: wait until no cell's viewport, stack, shown frame or camera has changed for a few samples
-     * (bounded), read every cell back, apply a cell the native viewer moved once more, wait again, and if a cell still is
-     * not the saved one the restore fails (and is rolled back like any failed apply). Input outside the panel is swallowed
-     * while the restore applies (interaction), so this never overrides the person's own work, and nothing re-applies after
-     * the restore has reported.
-     */
-    async function settleStack(ids) {
-      const look = () => ids.map(id => { const v = cs.getCornerstoneViewport(id), stack = v?.getImageIds?.() || [], camera = v?.getCamera?.();
-        return [v, stack.length, stack[0], v?.getCurrentImageId?.(), JSON.stringify([camera?.focalPoint, camera?.parallelScale])]; });
-      let last = look(), still = 0;
-      for (let n = 0; n < 60 && still < 6; n++) {
-        await new Promise(r => setTimeout(r, 50));
-        const now = look();
-        still = now.every((cell, i) => cell.every((part, j) => part === last[i][j])) ? still + 1 : 0;
-        last = now;
-      }
-    }
-    async function confirmStack(value, ids, ticket) {
-      const current = () => live() && serial === ticket;
-      await settleStack(ids);
-      const moved = value.cells.map((cell, i) => cell && !showsCell(ids[i], cell) ? i : -1).filter(i => i >= 0);
-      if (moved.length) {
-        for (const i of moved) await applyStackCell(ids[i], value.cells[i], current);
-        await settleStack(ids);
-      }
-      if (!current()) throw new Error('화면이 변경되었습니다.');
-      readBack(value, ids);
+      const sets = value.cells.map(resolve), ids = value.cells.map(() => 'kin-job-' + crypto.randomUUID());
+      const owner = await prepareStacks(value.cells, ids, current);
+      try {
+        await grid.setLayout({ numRows: value.rows, numCols: value.cols, activeViewportId: ids[value.active], isHangingProtocolLayout: false,
+          findOrCreateViewport: index => ({ displaySetInstanceUIDs: sets[index] ? [sets[index]] : [], displaySetOptions: [{}],
+            viewportOptions: owner.options(index) }) });
+        await owner.complete();
+        if (!current()) throw new Error('화면이 변경되었습니다.');
+        grid.setActiveViewportId(ids[value.active]);
+        owner.verify();
+        if (grid.getState().activeViewportId !== ids[value.active]) throw new Error('저장한 영상 위치를 확인하지 못했습니다.');
+        return ids;
+      } finally { owner.dispose(); }
     }
     /* One restore for Restore Job, the kinJob page and a finding's saved location (S2-L2a). It returns {state:'restored'|'continuing',
        message} or throws an Error carrying kinRestore {state, reason}: 'refused' changed nothing on screen, 'rolled-back' applied the
@@ -458,14 +389,15 @@ window.kinViewerJobs = function (services, model, session = null) {
       catch (e) { throw refusal(/도구/.test(e.message) ? 'tool-missing' : 'job-studies', e.message); }
       located?.ensure();
       ctx.mutating = true; applying = true;
-      try { const ids = await apply(job.snapshot, ticket); if (!VOLUME_VERSIONS.includes(job.snapshot.version)) await confirmStack(job.snapshot, ids, ticket); }
+      try { await apply(job.snapshot, ticket); }
       catch (e) {
         const message = /[가-힣]/.test(e.message) ? e.message : '영상 상태를 적용하지 못했습니다. 이전 화면을 확인하세요.';
-        if (!(live() && serial === ticket)) throw outcome('screen-unknown', 'apply-failed', message);
+        if (e.kinRestoreOwnershipLost || !(live() && serial === ticket)) throw outcome('screen-unknown', 'apply-failed', message);
         try { await apply(previous, ticket); } catch (_) { throw outcome('screen-unknown', 'apply-failed', '복원과 이전 화면 복구에 실패했습니다. 검사를 다시 여세요.'); }
         throw outcome('rolled-back', 'apply-failed', message);
       }
       finally { if (!located) applying = false; }
+      if (!live() || serial !== ticket) throw outcome('screen-unknown', 'apply-failed', '화면이 변경되어 복원 결과를 확인하지 못했습니다.');
       const marks = job.snapshot.version === 6 ? window.KinVolumeMarks?.normalize?.(job.snapshot.marks) ?? null : null;
       lastJob = { jobId: job.id, revision: job.revision, snapshotVersion: job.snapshot.version, marks };
       return { state: 'restored', message: restoredText(job.snapshot.version), revision: job.revision, snapshotVersion: job.snapshot.version };
@@ -601,7 +533,7 @@ window.kinViewerJobs = function (services, model, session = null) {
         if (action === 'list') { await load(); status.textContent = '현재 판독 대상의 저장 작업 목록입니다.'; return; }
         if (action === 'restore') {
           const restored = await restoreJob(row, { ticket, before, initialRestore, location: null });
-          if (restored.state === 'restored') status.textContent = restored.message;
+          if (live() && serial === ticket && restored.state === 'restored') status.textContent = restored.message;
         } else {
           if (!writable()) throw new Error('판독의 계정에서 저장할 수 있습니다.');
           if (action !== 'retry' && action !== 'retryMip' && pending) throw new Error('이전 요청의 결과를 먼저 같은 요청 재시도로 확인하세요.');
