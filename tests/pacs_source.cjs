@@ -1,5 +1,7 @@
 'use strict';
 // AST locations and provenance only. Never reconstruct a virtual monolithic service.
+// Every file and text hash here is taken over the LF form (`lf`): Git stores LF and a Windows autocrlf checkout
+// shows CRLF, so a raw-byte hash would pin the checkout, not the source (CI on Linux disagreed with Windows).
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -163,7 +165,7 @@ function createSource(options = {}) {
   }
   function sourceFiles() {
     return sources.map(file => ({ file: 'api/src/' + slash(path.relative(apiSrc, file.fileName)),
-      sha256: sha256(host.readFile(file.fileName)) })).sort((a, b) => a.file.localeCompare(b.file));
+      sha256: sha256(lf(host.readFile(file.fileName))) })).sort((a, b) => a.file.localeCompare(b.file));
   }
   function callsTo(file, name) {
     const source = program.getSourceFile(filename(file));
@@ -178,7 +180,7 @@ function createSource(options = {}) {
           let symbol = checker.getSymbolAtLocation(callee);
           if (symbol?.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol);
           if (symbol === wanted) calls.push({ file: 'api/src/' + slash(path.relative(apiSrc, sf.fileName)),
-            start: node.getStart(sf), text: node.getText(sf) });
+            start: node.getStart(sf), text: lf(node.getText(sf)) });
         }
         ts.forEachChild(node, walk);
       }

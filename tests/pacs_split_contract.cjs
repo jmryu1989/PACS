@@ -2,6 +2,7 @@
 // D73 byte pins are intentional here: S9-U0b is an explicitly behaviour-preserving move.
 // These are provenance/equivalence checks, not permission or business-rule assertions.
 // Round 2 must review each receiver/wiring correspondence; never regenerate baselines from moved code.
+// Text, SQL literal and binding hashes use the LF form (`lf`) so a CRLF checkout and the LF CI pin the same content.
 const assert = require('node:assert/strict');
 const { ts, sha256, lf } = require('./pacs_source.cjs');
 
