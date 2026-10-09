@@ -1,15 +1,16 @@
-// Hosted compiled API, synthetic byte arrays and injected fetch only: no engine/DB/audio files.
+// Hosted compiled API, synthetic byte arrays and injected ASR transport: no engine/DB/audio files.
 const { test, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { Readable } = require('node:stream');
+const transport = require('/app/dist/asr-destination');
 const { AsrService, asrConfiguration, ASR_ENGINE_PIN, ASR_MODEL_PIN, ASR_RESPONSE_CAP } = require('/app/dist/asr.service');
 const { DictationController, dictationDisconnect } = require('/app/dist/dictation.controller');
 const { dictationParser } = require('/app/dist/dictation-parser');
 const { PacsService } = require('/app/dist/pacs.service');
-const originalFetch = global.fetch;
+const originalFetch = transport.asrFetch;
 const originalEnv = { ...process.env };
-afterEach(() => { global.fetch = originalFetch; for (const k of Object.keys(process.env)) if (!(k in originalEnv)) delete process.env[k]; Object.assign(process.env, originalEnv); });
+afterEach(() => { transport.asrFetch = originalFetch; for (const k of Object.keys(process.env)) if (!(k in originalEnv)) delete process.env[k]; Object.assign(process.env, originalEnv); });
 function configure(extra = {}) {
   Object.assign(process.env, { KIN_ASR_URL: 'http://engine/inference', KIN_ASR_ENGINE: ASR_ENGINE_PIN,
     KIN_ASR_MODEL: ASR_MODEL_PIN, KIN_ASR_LANGUAGE: 'ko', KIN_ASR_TIMEOUT_MS: '1000' }, extra);
@@ -39,7 +40,7 @@ test('configuration is optional, strictly pinned, bounded and keeps URL private'
 });
 test('multipart allowlist, exact WAV identity, exact transcript including trailing LF', async () => {
   configure(); const bytes = wav(); const text = ' 합성 검사\r\n'; let called = 0;
-  global.fetch = async (url, options) => {
+  transport.asrFetch = async (url, options) => {
     called++; assert.equal(url, 'http://engine/inference'); assert.equal(options.redirect, 'error');
     assert.equal(options.credentials, 'omit'); assert.equal(options.headers, undefined);
     assert.deepEqual([...options.body.keys()], ['file', 'response_format', 'language']);
@@ -52,56 +53,56 @@ test('multipart allowlist, exact WAV identity, exact transcript including traili
   assert.equal(result.text, text); assert.equal(result.seconds, 2 / 16000); assert.equal(called, 1);
 });
 test('invalid audio and pre-aborted channel never reach upstream', async () => {
-  configure(); global.fetch = async () => assert.fail('upstream reached'); const svc = new AsrService();
+  configure(); transport.asrFetch = async () => assert.fail('upstream reached'); const svc = new AsrService();
   await assert.rejects(svc.transcribe(Buffer.from('invalid'), signal()), code('DICTATION_AUDIO_INVALID'));
   await assert.rejects(svc.transcribe(Buffer.alloc(1048577), signal()), code('DICTATION_AUDIO_TOO_LARGE'));
   const abort = new AbortController(); abort.abort();
   await assert.rejects(svc.transcribe(wav(), abort.signal), code('DICTATION_ENGINE_FAILED'));
 });
 test('unconfigured engine never reaches upstream', async () => {
-  configure({ KIN_ASR_ENGINE: 'wrong' }); global.fetch = async () => assert.fail('upstream reached');
+  configure({ KIN_ASR_ENGINE: 'wrong' }); transport.asrFetch = async () => assert.fail('upstream reached');
   await assert.rejects(new AsrService().transcribe(wav(), signal()), code('DICTATION_NOT_CONFIGURED'));
 });
 test('engine failures are generic; invalid/blank/oversize/malformed/invalid UTF8 results are rejected', async () => {
   configure();
   for (const body of ['{secret', JSON.stringify({ text: '' }), JSON.stringify({ text: ' \r\n' }),
     JSON.stringify({ text: 'x'.repeat(16385) }), JSON.stringify({ text: 3 }), Buffer.from([0xff])]) {
-    global.fetch = async () => new Response(body);
+    transport.asrFetch = async () => new Response(body);
     await assert.rejects(new AsrService().transcribe(wav(), signal()), code('DICTATION_ENGINE_FAILED'));
   }
-  global.fetch = async () => new Response('SECRET', { status: 500 });
+  transport.asrFetch = async () => new Response('SECRET', { status: 500 });
   await assert.rejects(new AsrService().transcribe(wav(), signal()), e => !JSON.stringify(e.getResponse()).includes('SECRET'));
 });
 test('UTF16 exact ceiling is accepted without normalization', async () => {
-  configure(); const text = '😀'.repeat(8192); global.fetch = async () => new Response(JSON.stringify({ text }));
+  configure(); const text = '😀'.repeat(8192); transport.asrFetch = async () => new Response(JSON.stringify({ text }));
   assert.equal((await new AsrService().transcribe(wav(), signal())).text, text);
 });
 test('upstream byte cap applies to declared and streamed bodies and cancels reader', async () => {
   configure(); const svc = new AsrService();
-  global.fetch = async () => new Response('{}', { headers: { 'content-length': String(ASR_RESPONSE_CAP + 1) } });
+  transport.asrFetch = async () => new Response('{}', { headers: { 'content-length': String(ASR_RESPONSE_CAP + 1) } });
   await assert.rejects(svc.transcribe(wav(), signal()), code('DICTATION_ENGINE_FAILED'));
   let cancelled = false;
-  global.fetch = async () => new Response(new ReadableStream({ start(c) { c.enqueue(new Uint8Array(ASR_RESPONSE_CAP)); c.enqueue(new Uint8Array(1)); }, cancel() { cancelled = true; } }));
+  transport.asrFetch = async () => new Response(new ReadableStream({ start(c) { c.enqueue(new Uint8Array(ASR_RESPONSE_CAP)); c.enqueue(new Uint8Array(1)); }, cancel() { cancelled = true; } }));
   await assert.rejects(svc.transcribe(wav(), signal()), code('DICTATION_ENGINE_FAILED')); assert.equal(cancelled, true);
 });
 test('busy slot covers pending body, abort frees slot, next request succeeds', async () => {
   configure(); const abort = new AbortController(); let entered;
   const ready = new Promise(r => entered = r);
-  global.fetch = async (_url, options) => new Response(new ReadableStream({ start(c) {
+  transport.asrFetch = async (_url, options) => new Response(new ReadableStream({ start(c) {
     options.signal.addEventListener('abort', () => c.error(new Error('aborted')), { once: true }); entered();
   } }));
   const svc = new AsrService(); const first = svc.transcribe(wav(), abort.signal);
   await ready;
   await assert.rejects(svc.transcribe(wav(), signal()), code('DICTATION_BUSY'));
   abort.abort(); await assert.rejects(first, code('DICTATION_ENGINE_FAILED'));
-  global.fetch = async () => new Response('{"text":"next"}');
+  transport.asrFetch = async () => new Response('{"text":"next"}');
   assert.equal((await svc.transcribe(wav(), signal())).text, 'next');
 });
 test('timeout settles KIN request and frees slot without claiming native inference stopped', async () => {
   configure({ KIN_ASR_TIMEOUT_MS: '15' }); const svc = new AsrService();
-  global.fetch = (_url, options) => new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(new Error('stalled')), { once: true }));
+  transport.asrFetch = (_url, options) => new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(new Error('stalled')), { once: true }));
   await assert.rejects(svc.transcribe(wav(), signal()), code('DICTATION_TIMEOUT'));
-  global.fetch = async () => new Response('{"text":"next"}');
+  transport.asrFetch = async () => new Response('{"text":"next"}');
   assert.equal((await svc.transcribe(wav(), signal())).text, 'next');
 });
 test('four disconnect cases and duplicate cleanup distinguish normal completion from loss', () => {
@@ -118,7 +119,7 @@ test('four disconnect cases and duplicate cleanup distinguish normal completion 
 test('controller rechecks gate, emits metadata-only single audit and never writes report', async () => {
   configure(); const calls = []; const ch = channel();
   const pacs = { dictationGate: async () => calls.push('gate'), dictationAudit: async (_uid, _c, detail) => calls.push(detail) };
-  const asr = new AsrService(); global.fetch = async () => new Response('{"text":"SECRET TRANSCRIPT"}');
+  const asr = new AsrService(); transport.asrFetch = async () => new Response('{"text":"SECRET TRANSCRIPT"}');
   const result = await new DictationController(pacs, asr).dictate('1.2.3', ch.req, ch.res);
   assert.equal(result.text, 'SECRET TRANSCRIPT'); assert.equal(calls.length, 3);
   assert.deepEqual(calls.slice(0, 2), ['gate', 'gate']);
@@ -129,10 +130,10 @@ test('controller rechecks gate, emits metadata-only single audit and never write
 test('gate refusal prevents inference; post-inference revocation refuses result with one audit', async () => {
   configure(); let gates = 0, audits = 0; const refusal = new Error('refused');
   const pacs = { dictationGate: async () => { if (++gates === 2) throw refusal; }, dictationAudit: async () => audits++ };
-  global.fetch = async () => new Response('{"text":"SECRET"}');
+  transport.asrFetch = async () => new Response('{"text":"SECRET"}');
   let ch = channel(); await assert.rejects(new DictationController(pacs, new AsrService()).dictate('1.2.3', ch.req, ch.res), e => e === refusal);
   assert.equal(audits, 1);
-  pacs.dictationGate = async () => { throw refusal; }; global.fetch = async () => assert.fail('inference after refusal');
+  pacs.dictationGate = async () => { throw refusal; }; transport.asrFetch = async () => assert.fail('inference after refusal');
   ch = channel(); await assert.rejects(new DictationController(pacs, new AsrService()).dictate('1.2.3', ch.req, ch.res), e => e === refusal);
   assert.equal(audits, 1);
 });
