@@ -59,6 +59,7 @@ Each scenario that follows a logout runs in a new browser context: the end state
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case. The service half is tests/clinician_read_live.py (hosted synthetic stack only).
 """
+from page_source import read_page_source
 import copy
 from pathlib import Path
 import re
@@ -83,7 +84,7 @@ ORIGIN = "https://clinician.test"
 BASE = "/worklist/hpacs-lite/"
 SHIPPED = {name: lf_text(HPACS / name) for name in ("clinician.html", "clinician.js", "index.html", "auth.js", "work-context.js", "session-transport.js",
                                                     "critical-result-inbox.js")}
-MAIN_HTML = lf_text(HPACS / "main.html")
+MAIN_HTML = read_page_source(HPACS / "main.html")
 AUTH_CONTROLLER = lf_text(ROOT / "api" / "src" / "auth.controller.ts")
 EMBLEM = (HPACS / "kin-emblem-j1.svg").read_bytes()
 

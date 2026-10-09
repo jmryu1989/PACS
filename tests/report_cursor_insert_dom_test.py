@@ -16,6 +16,7 @@ person read is the position that is sent. Nothing here talks to a server, a data
 Two files may be replaced through KIN_CURSOR_MAIN / KIN_CURSOR_CITATION_JS so the mutant runner can
 break the product on purpose without ever touching the source tree.
 """
+from page_source import read_page_source
 import json
 import os
 import re
@@ -29,7 +30,7 @@ from playwright.sync_api import sync_playwright
 ROOT = Path(__file__).resolve().parents[1]
 MAIN_PATH = Path(os.environ.get("KIN_CURSOR_MAIN", ROOT / "worklist-v0" / "hpacs-lite" / "main.html"))
 CITATION_PATH = Path(os.environ.get("KIN_CURSOR_CITATION_JS", ROOT / "worklist-v0" / "hpacs-lite" / "report-citation.js"))
-MAIN = MAIN_PATH.read_text(encoding="utf-8")
+MAIN = read_page_source(MAIN_PATH)
 CITATION_JS = CITATION_PATH.read_text(encoding="utf-8")
 # S3-structured-report put its block inside REPORT_BLOCK, and that block builds its form object and
 # registers its listeners at the top level. Without this module and its markup the sliced script

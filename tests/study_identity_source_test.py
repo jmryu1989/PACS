@@ -20,6 +20,7 @@ What this file proves, and nothing more (review M-2):
      Client behaviour is covered by study_identity_test.cjs and study_identity_dom_test.py, not source pins here.
 What it cannot see: whether TypeScript compiles, the browser renders, or PostgreSQL/Orthanc behave as the source says.
 """
+from page_source import read_page_source
 import importlib.util
 import json
 import math
@@ -57,7 +58,7 @@ CONTROLLER = text("api", "src", "pacs.controller.ts")
 U2_RULE = text("api", "src", "order-reconciliation.ts")
 U2_CLIENT = text("worklist-v0", "hpacs-lite", "order-reconciliation.js")
 CLIENT = text("worklist-v0", "hpacs-lite", "study-identity.js")
-MAIN = text("worklist-v0", "hpacs-lite", "main.html")
+MAIN = read_page_source(ROOT / "worklist-v0" / "hpacs-lite" / "main.html")
 WORKFLOW = text(".github", "workflows", "validate.yml")
 LIVE = text("tests", "invariants_live.py")
 SEED = text("api", "src", "seed.ts")

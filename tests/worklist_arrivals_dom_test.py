@@ -1,5 +1,6 @@
 # coding: utf-8
 """IF-V11 polling integration coverage with the real main.html startPolling body."""
+from page_source import read_page_source
 import json
 import os
 from pathlib import Path
@@ -8,7 +9,7 @@ import unittest
 from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
-MAIN = Path(os.environ.get("KIN_ARRIVALS_MAIN", ROOT / "worklist-v0" / "hpacs-lite" / "main.html")).read_text(encoding="utf-8")
+MAIN = read_page_source(Path(os.environ.get("KIN_ARRIVALS_MAIN", ROOT / "worklist-v0" / "hpacs-lite" / "main.html")))
 ARRIVALS = (ROOT / "worklist-v0" / "hpacs-lite" / "study-arrivals.js").read_text(encoding="utf-8")
 
 

@@ -63,6 +63,7 @@ states, Korean explanations, which requests are sent and their bodies - never th
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case. The server half is tests/critical_result_service_test.cjs and tests/critical_result_live.py.
 """
+from page_source import read_page_source
 import base64
 import copy
 import json
@@ -85,7 +86,7 @@ def lf_text(path):
     return path.read_bytes().decode("utf-8").replace("\r\n", "\n")
 
 
-MAIN = lf_text(HPACS / "main.html")
+MAIN = read_page_source(HPACS / "main.html")
 SHIPPED_JS = lf_text(HPACS / JS_NAME)
 ORIGIN = "https://reader.test"
 BASE = "/worklist/hpacs-lite/"

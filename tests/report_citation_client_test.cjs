@@ -1,3 +1,4 @@
+const { movedFiles } = require('./page_source.cjs');
 // TEST-S3-U2b-CITATION-CLIENT: the shipped client comparator, the R5 template and the per-study
 // citation state, held against the same vector file the compiled server validator answers to.
 //
@@ -337,6 +338,7 @@ test('TEST-S3-U2b-BYTES: neither the module nor this file carries a control byte
   // An invisible NUL in a record-bearing module makes every later diff and review unreliable, and
   // an HTML inline script turns it into U+FFFD, so the harness would not even run the same bytes.
   for (const file of [MODULE_PATH, __filename, join(ROOT, 'worklist-v0/hpacs-lite/main.html'),
+                      ...movedFiles(join(ROOT, 'worklist-v0/hpacs-lite/main.html')),
                       join(ROOT, 'worklist-v0/hpacs-lite/reading-findings.js')]) {
     const bytes = readFileSync(file);
     assert.equal(bytes.indexOf(0), -1, `${file} contains a NUL byte`);

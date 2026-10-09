@@ -1,5 +1,6 @@
 # coding: utf-8
 """REQ-D-WORKSPACE-WINDOWS / RISK-D-WORKSPACE-IDENTITY/UNSAVED/STALE / TEST-VIEWER-WINDOW-MANAGER-DOM."""
+from page_source import read_page_bytes
 from pathlib import Path
 import hashlib
 import os
@@ -166,7 +167,7 @@ class ViewerWindowManagerDOMTest(unittest.TestCase):
         main_lf = main_bytes.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
         print(f"MAIN_SOURCE path={cls.main_path} raw_sha256={hashlib.sha256(main_bytes).hexdigest()} "
               f"lf_sha256={hashlib.sha256(main_lf).hexdigest()}")
-        cls.main_source = main_bytes.decode("utf-8-sig")
+        cls.main_source = read_page_bytes(cls.main_path).decode("utf-8-sig")
         cls.manager_source = extract_function(cls.main_source, "mountViewerWindows")
         cls.windows_source = WINDOWS.read_text(encoding="utf-8")
         # openOhifWindow runs with the page functions it calls, found from its body rather than named here: a helper of

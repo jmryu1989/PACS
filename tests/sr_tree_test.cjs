@@ -1,5 +1,6 @@
+const { readPageSource } = require('./page_source.cjs');
 const {test}=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
-const html=fs.readFileSync('worklist-v0/hpacs-lite/main.html','utf8');
+const html=readPageSource('worklist-v0/hpacs-lite/main.html');
 const tree=vm.runInNewContext(html.slice(html.indexOf('function srTree('),html.indexOf('// SR reader UI:'))+';srTree');
 const attr=(vr,...Value)=>({vr,Value});
 const expected={study:'1.2.3',series:'1.2.4',sop:'1.2.5',sopClass:'1.2.840.10008.5.1.4.1.1.88.33'};

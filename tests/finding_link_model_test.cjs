@@ -1,3 +1,4 @@
+const { readPageSource } = require('./page_source.cjs');
 const {install} = require('./module_session_harness.cjs');
 'use strict';
 /* TEST-S2-PURE-NAV / TEST-S2-PURE-STORE (REQ-S2-NAVIGATE, REQ-S2-FRESHNESS, REQ-S2-IDEMPOTENT).
@@ -774,7 +775,7 @@ const viewerOnEnd = source.slice(source.indexOf('function kinViewerOnEnd'), sour
 // Each consumer decision runs from its shipped text: Next Study/retarget, window reuse/close,
 // Hanging Protocol Apply, cell merge, and the mark-only Job guard.
 function consumers(win) {
-  const rw = shippedFile('reading-workspace.js'), html = shippedFile('main.html'), hp = shippedFile('viewer-hanging-protocol.js'), merge = shippedFile('viewer-cell-merge.js');
+  const rw = shippedFile('reading-workspace.js'), html = readPageSource(path.join(__dirname, '..', 'worklist-v0', 'hpacs-lite', 'main.html')), hp = shippedFile('viewer-hanging-protocol.js'), merge = shippedFile('viewer-cell-merge.js');
   const anchor = "for (const name of ['kinViewerJobWorkspaceState', 'kinViewerHistoryWorkspaceState']) {";
   const cuts = [[rw, rw.indexOf('  function viewerState() {'), rw.indexOf('  function request(uid, prior = null, series = null) {')],
     [html, html.indexOf('    function ohifPopupState(popup) {'), html.indexOf('    function openOhifWindow(')],
