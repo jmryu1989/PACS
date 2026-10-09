@@ -78,6 +78,12 @@ CASES = (
     "test_09_an_isolated_member_cannot_come_back_until_activated",
     "test_10_db_suspension_refuses_both_browsers_while_provider_sso_stays_alive",
     "test_11_explicit_logout_ends_its_provider_session_and_the_next_same_sid_sso_lives",
+    # S7-U5-LOGIN-RECOVERY-2 (ledger 159/159a). LR2-L1 is the proving case for the login-recovery fix and is
+    # expected-red on the current product (the recovery branch pins the next person to the previous doctor). LR2-L4 is a
+    # design-independent regression guard that must stay green before and after the fix. test_13 is a behaviour test.
+    "test_12_next_person_after_a_confirmed_end_gets_an_editable_form",
+    "test_13_a_live_session_landing_enters_automatically",
+    "test_14_covered_but_unconfirmed_end_stays_end_unconfirmed",
 )
 APP = "/worklist/hpacs-lite/"
 STORAGE_DENIED = """(() => { for (const name of ['localStorage']) Object.defineProperty(window, name,
@@ -793,7 +799,10 @@ class SessionEndLive(unittest.TestCase):
         # This direct API logout has no browser fresh-flow proof. Separate its confirmed end from the
         # next plain authentication's whole second; U5E-21 tests same-second admission with a fresh proof.
         time.sleep(1.05)
-        page.goto(self.stack.proxy + APP + "index.html")
+        # The landing can leave by itself (automatic sign-in) before its load event fires, so this goto completes once the
+        # new document starts (Playwright's commit contract) and the arrival is judged by WHERE/settle below, not by the
+        # landing's load event.
+        page.goto(self.stack.proxy + APP + "index.html", wait_until="commit")
         at = self.settle(page)
         if at == "landing":
             at = self.press(page, "#signin")
@@ -818,6 +827,126 @@ class SessionEndLive(unittest.TestCase):
         psql(f'UPDATE "AuthSession" SET "atExpiresAt" = now() - interval \'1 minute\' WHERE sub=\'{self.ids["B"]}\';')
         self.assertEqual((premise.status, self.provider_alive("B"), self.me(context)), (204, 0, (401, None)))
         self.report("SE-11", same_sid=True, ended_old_bearer_refused=True, held_end_released_after_new_sso="not coverable here")
+
+    # ── S7-U5-LOGIN-RECOVERY-2 (ledger 159/159a) ──
+    def confirmed_end_with_live_sso(self, context, page):
+        """The hosted-failure precondition, built from owned synthetic rows: the previous doctor A's provider SSO is still
+        alive in Keycloak while the product's end of that SSO is CONFIRMED and A's product session is gone. A's provider
+        SSO is deliberately NOT torn down - the two facts the SE-11 hosted failure had, without the flaky server-side
+        resurrection. Returns (A's provider session id, A's stored access token). Asserts the precondition so a broken
+        setup cannot pass silently."""
+        self.sign_in(page, "A")
+        a_sid, a_token = self.provider_session_and_token("A")
+        self.assertEqual(self.provider_alive("A"), 1, "precondition: A's provider SSO is alive")
+        # auth_time is whole seconds; the confirmed end must be a later second so markCovers covers A's authentication.
+        time.sleep(1.1)
+        psql(f'DELETE FROM "AuthSession" WHERE sub=\'{self.ids["A"]}\';')
+        psql('INSERT INTO "IdpSessionEnd" ("idpSid", cause, "decidedAt", "confirmedAt", attempts, "nextAttemptAt") '
+             f"VALUES ('{a_sid}', 'logout', now(), now(), 0, now()) "
+             'ON CONFLICT ("idpSid") DO UPDATE SET "confirmedAt" = now(), cause = \'logout\';')
+        context.clear_cookies(name="kin_sid")
+        # Read the precondition back rather than trusting the write: the product's end of A's SSO is confirmed, and A's
+        # provider SSO is still alive.
+        self.assertIn(("logout", "true"), self.marks("A"), "precondition: the product's end of A's SSO is confirmed")
+        self.assertEqual(self.provider_alive("A"), 1,
+                         "precondition: A's provider SSO is still alive after the product's confirmed end")
+        return a_sid, a_token
+
+    def save_form(self, page, form: dict) -> None:
+        root = os.environ.get("KIN_EVIDENCE_DIR")
+        if root:
+            directory = Path(root)
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / (self._testMethodName + ".json")).write_text(
+                json.dumps({"url": urlparse(page.url).path, "form": form}, ensure_ascii=True) + "\n", encoding="utf-8")
+
+    @unittest.expectedFailure  # EXPECTED-RED on the current product (ledger 159a); the recovery fix (phase 2b) makes it pass.
+    def test_12_next_person_after_a_confirmed_end_gets_an_editable_form(self):
+        """LR2-L1 (REQ-LR2-EDITABLE -> RISK-S7-U5-SILENT-REENTRY). The proving case for the login-recovery fix. After a
+        CONFIRMED end whose provider SSO is still alive (confirmed_end_with_live_sso), the next person's ordinary Login
+        must reach an EDITABLE, empty username with a visible password and no attempted previous doctor - never a Keycloak
+        logout confirmation or notice page - enters with ONE credential entry as themselves (B), gets B's /api/me and one
+        success audit row, and A's old Bearer stays refused. Expected-red now: the current product restarts as fresh
+        (prompt=login) while A's SSO is alive, so Keycloak pins the form to A (username hidden) and B cannot type their
+        name. When phase 2b clears the browser SSO before the fresh step, every assertion below passes and this flips to an
+        unexpected success - the signal to remove the expectedFailure marker. No assertion is weakened to go green early."""
+        context, page = self.profile()
+        _, a_token = self.confirmed_end_with_live_sso(context, page)
+        del context.asked[:]
+        page.goto(self.stack.proxy + APP + "index.html", wait_until="commit")
+        at = self.settle(page)
+        if at == "landing":
+            at = self.press(page, "#signin")
+        # Not a Keycloak logout confirmation / notice page: the recovery lands on the login form. settle() returns
+        # 'keycloak' for any /auth/realms/kin/ page, so the logout endpoint is excluded explicitly and the editable-form
+        # check below would also refuse a confirmation page (it has no user-name field).
+        self.assertEqual(at, "keycloak", "the recovery lands on a provider page")
+        self.assertNotIn("/protocol/openid-connect/logout", urlparse(page.url).path,
+                         "the recovery does not stop on a provider logout confirmation / notice page")
+        self.save_form(page, page.evaluate(FORM))
+        # The core requirement: the next person can type their own name. This is the assertion that is red today.
+        self.assert_editable_form(page, "the next person's Login after a confirmed end with a surviving SSO")
+        # And one credential entry enters as B, with B's identity and exactly one success record - no second form.
+        asked = len(context.asked)
+        self.assertEqual(self.credentials(page, "B"), "main", "B enters with one credential entry")
+        self.assertEqual(context.asked[asked:], [], "no second credential form, no extra restart")
+        self.assertEqual(self.me(context), (200, self.ids["B"]))
+        self.assertEqual((self.product_sessions("A"), self.product_sessions("B")), (0, 1))
+        self.assertEqual(int(psql(f'SELECT count(*) FROM "AuditLog" WHERE target=\'{self.ids["B"]}\' '
+                                  f"AND action='auth.login' AND id > {self.audit_floor} "
+                                  "AND detail::json->>'outcome' = 'success';")[0]), 1, "one success audit for B")
+        # The previous doctor's authentication stays ended on the Bearer path (its auth_time precedes the confirmed end).
+        self.assertEqual(self.bearer_me(a_token), (401, "AUTH_SESSION_ENDED"), "A's old Bearer stays refused")
+
+    def test_13_a_live_session_landing_enters_automatically(self):
+        """LR2 behaviour: opening the landing with a live product session enters the work screen by itself (index.html
+        boot() -> location.replace), with no credential prompt. The landing goto uses wait_until='commit' (its Playwright
+        contract: the navigation is complete once the new document starts) so the existing WHERE/settle predicate judges
+        the real arrival state instead of the landing's load event, which the document may never reach when it replaces
+        itself. SE-11 uses the same commit goto for the same reason."""
+        context, page = self.profile()
+        self.sign_in(page, "A")
+        page.goto(self.stack.proxy + APP + "index.html", wait_until="commit")
+        self.assertEqual(self.settle(page), "main",
+                         "a live-session landing enters the work screen automatically, with no credential prompt")
+
+    def test_14_covered_but_unconfirmed_end_stays_end_unconfirmed(self):
+        """LR2-L4 (design-independent regression guard; must stay green before and after the recovery fix). When the
+        product cannot CONFIRM the end of the previous SSO (a held end request keeps the mark unconfirmed, D600/U5E-24),
+        the next person's Login stays on the end_unconfirmed landing: no product session is created, there is no fresh
+        prompt=login restart and no provider logout confirmation page. The recovery must never turn an unconfirmed end
+        into a silent entry or an extra loop. Built with an owned lingering 'unknown' ProviderChange so confirmEndIfSettled
+        cannot settle the mark even though this login's own end request answers."""
+        context, page = self.profile()
+        self.sign_in(page, "A")
+        a_sid, _ = self.provider_session_and_token("A")
+        time.sleep(1.1)
+        psql(f'DELETE FROM "AuthSession" WHERE sub=\'{self.ids["A"]}\';')
+        # Unconfirmed mark + a lingering unanswered end request for this sid: confirmEndIfSettled refuses to confirm while
+        # any end_session request of the sid is still 'unknown', so this login's own request answering cannot settle it.
+        # nextAttemptAt is in the future so the API's periodic retry (resumeIdpEnds picks marks whose nextAttemptAt has
+        # come) does not end A's SSO before the Login: the case needs A's SSO alive so the plain authorize answers
+        # silently and the callback meets the covered-but-unconfirmed mark.
+        psql('INSERT INTO "IdpSessionEnd" ("idpSid", cause, "decidedAt", attempts, "nextAttemptAt") '
+             f"VALUES ('{a_sid}', 'logout', now(), 0, now() + interval '1 hour') "
+             'ON CONFLICT ("idpSid") DO UPDATE SET "confirmedAt" = NULL, cause = \'logout\', '
+             '"nextAttemptAt" = now() + interval \'1 hour\';')
+        psql('INSERT INTO "ProviderChange" (kind, target, sub, generation, state, "createdAt") '
+             f"VALUES ('end_session', '{a_sid}', '{self.ids['A']}', 0, 'unknown', now());")
+        context.clear_cookies(name="kin_sid")
+        del context.asked[:]
+        page.goto(self.stack.proxy + APP + "index.html", wait_until="commit")
+        at = self.settle(page)
+        # Exactly one Login attempt. With no end record in this profile the landing signs in by itself once; that
+        # attempt already comes back with the notice, and pressing again would be a second attempt against an SSO the
+        # first attempt's end request has since ended. Press only when the landing is still waiting for a press.
+        if at == "landing" and "이전 로그인 종료를 확인하지 못했습니다" not in page.inner_text("#msg"):
+            at = self.press(page, "#signin")
+        self.assertEqual(at, "landing", "an unconfirmed end keeps the person on the landing, not a provider page")
+        self.assertIn("이전 로그인 종료를 확인하지 못했습니다", page.inner_text("#msg"))
+        self.assertNotIn(("authorize", "login"), context.asked, "no fresh prompt=login restart on an unconfirmed end")
+        self.assertEqual((self.product_sessions("A"), self.product_sessions("B")), (0, 0), "no session from an unconfirmed end")
+        self.report("LR2-L4", authorizes=[item for item in context.asked if item[0] == "authorize"])
 
 
 if __name__ == "__main__":
