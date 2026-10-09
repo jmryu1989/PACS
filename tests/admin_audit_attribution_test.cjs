@@ -35,7 +35,9 @@
  * request or not read, a helper or callback that leaves the program, and an object whose origin or holders are not fixed
  * stay unresolved; the SQL rules are unchanged. The product is not shaped for it (AGENTS 1-B, D73).
  * REQ-AUDIT-CLOSED-WORLD -> RISK-AUDIT-UNRESOLVED / RISK-AUDIT-ATTACKER-ACTION / RISK-AUDIT-OBJECT-ESCAPE /
- *   RISK-AUDIT-SQL-PROVENANCE -> TEST-AUDIT-CLOSED-WORLD CW01-CW17 (tests/fixtures/admin-audit-checker/closed-world).
+ *   RISK-AUDIT-SQL-PROVENANCE -> TEST-AUDIT-CLOSED-WORLD CW01-CW18 (tests/fixtures/admin-audit-checker/closed-world).
+ *   Rule B′ (every member projection proved, Astra consult 2) closes erased references within the named limits L1-L4,
+ *   which stay limits (see the completeness section): no completeness is claimed beyond what the check proves.
  *
  * Module: KIN_ADMIN_AUDIT_MODULE, default api/src/admin-audit.ts loaded through Node type stripping (Node >= 22.18);
  * the compiled /app/dist/admin-audit (kin-api:ci) is the same rule. The completeness cases read api/src and api/prisma/*.cjs and use
@@ -937,6 +939,15 @@ test('the query takes limit (1-100, default 25) and the sealed after only', () =
 //    structural type) hands the object on — neither that call nor what the read gives is typed as the object's, so no
 //    call, slot or escape after it would be traced. A member key W1 fixes reads the same member by a dot or an element
 //    access; `!`, parentheses and `satisfies` keep the type.
+//  Rule B′ (Astra AUDIT-CHECKER-U0B consult 2, after a second NEEDS_FIX on a key widened by an assertion or a wider const,
+//    `this['slot' as any]`): the holders and typed calls the check indexes are a search, not the proof. Every member read
+//    through a holder of every W4 object proves, after every other use is read: the receiver typed there is a class of
+//    the family; the member found by the W1 key there is the one the holder's type declares; a member not declared any or
+//    unknown is not read as any or unknown (W1 fixing the key does not fix what the read gives); a member called resolves
+//    to a declaration. A use that only writes (`=`, a destructuring or for-in/of target, `delete`) is counted as a write
+//    (objectWrites, slotWrites); a read-modify-write meets both. A failed obligation hands the object on, so every writer,
+//    client flow or SQL value that depends on it is unresolved where it stands. This closes the class of erased references
+//    inside the trust boundary above; it does not lift the named limits L1-L4.
 //  F02 SQL values, before any raw classification: an interpolation is a value (Prisma binds it) when it is a literal, a
 //    result the language makes a primitive (template, arithmetic, comparison, `!`, `typeof`), each side of ?:, ||, ?? and
 //    &&, `new Date()`, an array literal (one parameter), a const or let through its initializer and every assignment, a W3
@@ -1767,8 +1778,63 @@ function scanAuditWrites(sources = auditSources()) {
       result.escape = assertedRead(object, node);
       if (result.escape) break;
     }
+    // Then every member projection is proved (Astra AUDIT-CHECKER-U0B consult 2, rule B′ I2), the earlier reasons kept.
+    for (const node of result.escape ? [] : new Set(holdersOf(object))) {
+      result.escape = projectionIssue(object, node);
+      if (result.escape) break;
+    }
     memo.set(object.declaration, result);
     return result;
+  }
+  /** A use that only writes the member it names: the target of `=`, of a destructuring or a for-in/of, or `delete`'s
+   *  operand. A compound assignment or `++`/`--` reads it too. */
+  const writeOnly = held => {
+    const parent = held.parent;
+    return (ts.isBinaryExpression(parent) && parent.left === held && parent.operatorToken.kind === K.EqualsToken)
+      || ts.isDeleteExpression(parent) || ((ts.isForInStatement(parent) || ts.isForOfStatement(parent)) && parent.initializer === held)
+      || destructured(held);
+  };
+  /**
+   * W4, rule B′ I2 (Astra AUDIT-CHECKER-U0B consult 2): why a member read through a holder is not proved to project the
+   * member its holder declares, with a result the check still follows, else null. W1 fixing the key, TypeScript fixing
+   * the receiver and the member, and the read's value staying in the search are separate obligations: (1) the receiver,
+   * typed where the member is read, is a class of the object's family (not any, unknown, an error or a union); (2) the
+   * member found there by the W1 key — the name's symbol for a dot, the receiver type's property for an element access —
+   * is the one the holder's own type has; (3) a member not declared any or unknown is not read as any or unknown — a key
+   * widened by an assertion or a wider const (`this['slot' as any]`, a `string` key) keeps W1's key while the value read
+   * leaves every holder and call the check follows; (4) a member called there resolves to a declaration. A use that only
+   * writes is counted by holderUse, objectWrites and slotWrites; a key W1 does not fix was refused before this runs.
+   */
+  function projectionIssue(object, start) {
+    let node = start;
+    while (WRAPPERS.has(node.parent.kind)) node = node.parent;
+    const access = node.parent;
+    if (!isAccess(access) || access.expression !== node) return null;   // every other use: holderUse
+    const held = outer(access), { key } = w1(access);
+    if (writeOnly(held)) return null;
+    const at = `at ${where(access)} (\`${snippet(access)}\`)`;
+    if (key === undefined) return `is read by a key the program does not fix ${at}`;
+    const apparent = value => checker.getApparentType(checker.getNonNullableType(checker.getTypeAtLocation(value)));
+    const source = apparent(start), receiver = apparent(node);
+    const family = object.kind === 'instance' ? familyOf(object.declaration) : new Set([object.declaration]);
+    const target = receiver.objectFlags & ts.ObjectFlags.Reference ? receiver.target : receiver;
+    if (receiver.flags & (TF.Any | TF.Unknown) || receiver.isUnion() || !(target.symbol?.declarations ?? []).some(declaration => family.has(declaration))) {
+      return `is read ${at} through a receiver typed \`${typeText(receiver)}\`, not \`${className(object.declaration)}\` (W4 projection: receiver)`;
+    }
+    const expected = resolve(checker.getPropertyOfType(source, key));
+    const observed = resolve(ts.isPropertyAccessExpression(access) ? checker.getSymbolAtLocation(access.name) : checker.getPropertyOfType(receiver, key));
+    if (!expected || !observed || !same(expected, observed)) {
+      return `is read ${at} as a member \`${key}\` that is not the one its holder declares (W4 projection: member)`;
+    }
+    const declared = checker.getTypeOfSymbolAtLocation(expected, start), actual = checker.getTypeAtLocation(access);
+    if (!(declared.flags & (TF.Any | TF.Unknown)) && actual.flags & (TF.Any | TF.Unknown)) {
+      return `is read ${at} as \`${typeText(actual)}\` where \`${key}\` is declared \`${typeText(declared)}\`: what it gives is followed no further (W4 projection: result)`;
+    }
+    const use = held.parent;
+    if (ts.isCallExpression(use) && use.expression === held && !checker.getResolvedSignature(use)?.declaration) {
+      return `is called ${at} without a declaration the check reads (W4 projection: call)`;
+    }
+    return null;
   }
   /**
    * W4 (Astra AUDIT-CHECKER-U0B review F01): why a holder read through an assertion (`as`, `<T>`) hands the object on,
@@ -4553,13 +4619,13 @@ test('checker self-test: every positive mark reclassified.json replaces is refus
     + `${entry.now.map(item => `${item.status} ${item.detail}`).join(' + ')} (${entry.rule}${entry.moved_to ? `; alone in ${entry.moved_to}` : ''})`)));
 });
 
-// ── the closed world, W3-C and W4-C (Astra S9-U0b audit consult D4): CW01-CW17 ──
+// ── the closed world, W3-C and W4-C (Astra S9-U0b audit consult D4): CW01-CW18 ──
 // REQ-AUDIT-CLOSED-WORLD -> RISK-AUDIT-UNRESOLVED / RISK-AUDIT-ATTACKER-ACTION / RISK-AUDIT-OBJECT-ESCAPE /
-// RISK-AUDIT-SQL-PROVENANCE -> TEST-AUDIT-CLOSED-WORLD CW01-CW17. tests/fixtures/admin-audit-checker/closed-world holds
+// RISK-AUDIT-SQL-PROVENANCE -> TEST-AUDIT-CLOSED-WORLD CW01-CW18. tests/fixtures/admin-audit-checker/closed-world holds
 // writer.ts (the three helper shapes of the S9-U0b modules, each a public member), callers.ts (the modules calling them from
 // another file), composition.ts (the facade creating and owning them, and the DI service it hands on), monolith.ts (the
 // same writes in one class before the split, CW04) and cases.json (the contract table, what CW01-CW03 expect, and every
-// mutant of CW05-CW17 as exact text edits with the verdict it must give). The fixtures are data read here and placed side by
+// mutant of CW05-CW18 as exact text edits with the verdict it must give). The fixtures are data read here and placed side by
 // side under api/src/syn-fixture/closed-world/ for these scans only; the product corpus never holds them. Each mutant runs
 // after the unedited corpus passes, alone, and must fail by exactly the classes and entries cases.json names — an unresolved
 // entry by its tagged line (`@cw:<tag>`) and a part of its reason, every other class as named or empty — and parse (a file
@@ -4610,6 +4676,16 @@ function closedVariant(id, variant) {
   const found = verdict(scan, closedTable());
   assert.deepEqual(scan.candidates.filter(entry => entry.kind === 'source file'), [], `${label}: every file parses`);
   assert.ok(failing(found).length > 0, `${label} is not detected: ${JSON.stringify(found)}`);
+  if (variant.expect.unresolved_includes) {
+    // A bound counterexample (CW18): the write it attacks is itself unresolved, with the obligation it fails; what else
+    // the escape takes with it is recorded, never counted instead (an unlisted or unwritten row alone is no refusal).
+    for (const item of variant.expect.unresolved_includes) {
+      const at = closedTag(sources, item.tag), there = found.unresolved.filter(entry => entry.startsWith(`${at.file}:${at.line} `));
+      assert.ok(there.length > 0, `${label}: @cw:${item.tag} is not unresolved at all: ${JSON.stringify(found.unresolved)}`);
+      assert.ok(there.some(entry => entry.includes(item.reason)), `${label}: @cw:${item.tag} is unresolved, not for ${JSON.stringify(item.reason)}: ${JSON.stringify(there)}`);
+    }
+    return { variant: variant.name, failing: failing(found), verdict: found };
+  }
   for (const name of Object.keys(VERDICT)) {
     if (name !== 'unresolved') { assert.deepEqual(found[name], variant.expect[name] ?? [], `${label}: ${name}`); continue; }
     const wanted = (variant.expect.unresolved ?? []).map(item => ({ ...item, at: closedTag(sources, item.tag) }));
@@ -4672,10 +4748,12 @@ test('CW04 the split and wired modules give the writers, actions, prefixes and S
   console.log('ADMIN_AUDIT_CLOSED_WORLD ' + JSON.stringify({ case: 'CW04', writers: writers(after), sql: sql(after) }));
 });
 
-// CW05-CW17, in cases.json's order: the ids are fixed before any is registered (one test each, nothing merged or dropped).
-// CW17 is Astra's AUDIT-CHECKER-U0B review F01 (a slot read through an assertion, an element access or a closure).
+// CW05-CW18, in cases.json's order: the ids are fixed before any is registered (one test each, nothing merged or dropped).
+// CW17 is Astra's AUDIT-CHECKER-U0B review F01 (a slot read through an assertion, an element access or a closure); CW18
+// binds the 43 closed-world counterexamples of her second consult (X01-X08, N01-N15, K01-K05, E01-E15, edits verbatim),
+// whose P01-P02 are the `u0b-r3-*` cases of tests/fixtures/admin-audit-checker/violations.txt.
 const CLOSED_MUTANTS = CLOSED_CASES.cases;
-assert.deepEqual(CLOSED_MUTANTS.map(entry => entry.id), Array.from({ length: 13 }, (_, n) => `CW${String(n + 5).padStart(2, '0')}`));
+assert.deepEqual(CLOSED_MUTANTS.map(entry => entry.id), Array.from({ length: 14 }, (_, n) => `CW${String(n + 5).padStart(2, '0')}`));
 for (const entry of CLOSED_MUTANTS) {
   test(`${entry.id} ${entry.title}`, () => {
     closedBase();
