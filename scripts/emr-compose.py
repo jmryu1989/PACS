@@ -205,7 +205,7 @@ def check(root, declaration_path):
     # Every ledger table the declared migration creates is declared and classified, and nothing declared is absent.
     tables = sorted(declaration["deployment"]["tables"])
     try:
-        sql = (root / "api/prisma/migrations" / spec["added"][-1] / "migration.sql").read_text(encoding="utf-8")
+        sql = "\n".join((root / "api/prisma/migrations" / name / "migration.sql").read_text(encoding="utf-8") for name in spec["added"])
         created = sorted(set(re.findall(r"^\s*CREATE TABLE (?:IF NOT EXISTS )?emr_access\.(\w+)", sql, re.M)))
     except OSError:
         created = None

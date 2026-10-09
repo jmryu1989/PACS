@@ -1,335 +1,297 @@
-import { createHash, randomBytes } from 'node:crypto';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
+import { createHash } from 'node:crypto';
 import { ACCESS_STREAMS, AccessStream, ChainPosition } from '../emr-contract/access-event';
-import { ContractError, choice, integer, object, refuse, sha256, string, utc } from '../emr-contract/validation';
+import { integer, refuse } from '../emr-contract/validation';
 import { ChainTail, StoredEntry, chainViolation, retainedAnchor } from './contract';
-import { FailureJournal, protectedDirectory, syncDirectory } from './failure-journal';
+import { FailureJournal } from './failure-journal';
+import { ExternalState } from './external-writer';
 import type { PrismaLedgerSql } from './store';
 
-/**
- * The trusted tails outside the database (REQ-EMR-06/19): for each stream of the access ledger (D-1: viewing, history), the
- * last chain position this server has proven committed, kept on the API's protected state volume where no database role can
- * write. Before an append commits, its intent (stream, event ID and content hash) is written here; a stream's seal moves
- * only after the entries up to its new position were read back, re-hashed from the previous seal and each matched to an
- * intent. A commit not yet sealed is therefore found at start and recovered from stored facts; an intent with no stored
- * entry proves that commit never happened. A missing or damaged seal, or a database end behind it, is never replaced by the
- * database's current end - start is refused.
- */
 export interface StreamSeal extends ChainPosition { chainId: string }
-export interface SealState { streams: Readonly<Record<AccessStream, StreamSeal>>; sealedAt: string }
+export interface SealState { streams: Readonly<Record<AccessStream, StreamSeal>>; sealedAt: string; generation: number }
 export type SealRefusal = 'SealMissing' | 'SealCorrupt' | 'SealChainMismatch' | 'LedgerBehindSeal' | 'SealTailMismatch' |
-  'LedgerChainBroken' | 'UnsealedEntryUnexplained' | 'SealUnavailable';
+  'LedgerChainBroken' | 'UnsealedEntryUnexplained' | 'SealUnavailable' | 'SealUpgradeRequired';
 export class SealRefused extends Error {
   constructor(readonly code: SealRefusal, readonly detail: string | null = null) { super(detail ? `${code}: ${detail}` : code); this.name = 'SealRefused'; }
 }
 export interface RecoveryCount { recovered: number; notCommitted: number }
-interface ExpiryIntent {
-  chainId: string; seal: ChainPosition; anchor: ChainPosition; count: number; checkpointSequence: number;
+export interface CommitBinding {
+  stream: AccessStream; chainId: string; attemptId: string; bundleId: string; kind: string; eventId: string | null;
+  sequence: number; previousHash: string; hash: string; contentSha256: string; generation: number; proofDigest: string | null;
 }
-const PAGE = 1000;
-
-function canonical(state: SealState): string {
-  return JSON.stringify({ streams: Object.fromEntries(ACCESS_STREAMS.map(s => [s, { chainId: state.streams[s].chainId,
-    sequence: state.streams[s].sequence, hash: state.streams[s].hash }])), sealedAt: state.sealedAt });
+export interface ExpiryCore {
+  format: 1; binding: Omit<CommitBinding, 'proofDigest'>; seal: StreamSeal; anchor: ChainPosition; count: number;
 }
-const digest = (state: SealState) => createHash('sha256').update(canonical(state)).digest('hex');
-const intentName = (stream: AccessStream, eventId: string) => createHash('sha256').update(`${stream}\0${eventId}`).digest('hex') + '.json';
+const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const slot = (stream: AccessStream, sequence: number) => `${stream}:${sequence}`;
+const key = (stream: AccessStream, attempt: string) => `${stream}:${attempt}`;
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
+/** DB finality is trusted for response-unknown recovery, never described as independent proof.
+ * The protected settlement frontier authorizes exact reservations and detects tail-only rollback.
+ * Whole DB plus protected-state rollback requires an independent off-host witness (Stage 9).
+ */
 export class AccessSeal {
-  private readonly file: string;
-  private readonly pending: string;
-  private readonly expiry: string;
-  private queue: Promise<unknown> = Promise.resolve();
-
-  constructor(stateDirectory: string | undefined, private readonly sql: PrismaLedgerSql, private readonly journal: FailureJournal) {
-    const dir = protectedDirectory(stateDirectory, 'seal');
-    this.file = path.join(dir, 'tail.json');
-    this.pending = path.join(dir, 'pending');
-    const info = fs.lstatSync(this.pending, { throwIfNoEntry: false });
-    if (!info) { fs.mkdirSync(this.pending, { mode: 0o700 }); syncDirectory(dir); }
-    else if (!info.isDirectory() || info.isSymbolicLink()) throw new SealRefused('SealUnavailable');
-    this.expiry = protectedDirectory(stateDirectory, 'expiry-evidence');
+  constructor(_directory: string | undefined, private readonly sql: PrismaLedgerSql, private readonly journal: FailureJournal) {}
+  private load(): ExternalState {
+    try { return this.journal.coordinator.call('read'); }
+    catch (error: any) { throw new SealRefused(/^Seal|^Ledger|^Unsealed/.test(error.code || '') ? error.code : 'SealUnavailable', error.detail); }
+  }
+  private publish(state: ExternalState): boolean {
+    const before = state.revision;
+    state.revision++;
+    try { return this.journal.coordinator.call('compare-and-set', { before, state }).changed; }
+    catch (error: any) { throw new SealRefused(/^Seal|^Ledger|^Unsealed/.test(error.code || '') ? error.code : 'SealUnavailable', error.detail); }
+  }
+  private change<T>(work: (state: ExternalState) => T): T {
+    for (;;) { const state = this.load(), result = work(state); if (this.publish(state)) return result; }
+  }
+  read(): SealState | 'absent' { return this.load().tail ?? 'absent'; }
+  recordIntent(stream: AccessStream, attemptId: string, eventId: string | null, contentSha256: string | null, bundleId: string): void {
+    this.change(state => {
+      const id = key(stream, attemptId), value = { stream, attemptId, eventId, contentSha256, bundleId };
+      if (state.intents[id] && !same(state.intents[id], value)) refuse('AccessEventIdConflict');
+      if (state.terminal[id]) refuse('AttemptAlreadySettled');
+      state.intents[id] = value;
+    });
   }
 
-  /** The stored seal of both streams, or 'absent'. A damaged seal is refused, never repaired from the database. */
-  read(): SealState | 'absent' {
-    let raw: string;
-    try { raw = fs.readFileSync(this.file, 'utf8'); } catch (error: any) {
-      if (error?.code === 'ENOENT') return 'absent';
-      throw new SealRefused('SealUnavailable');
-    }
-    try {
-      const v = object(JSON.parse(raw), ['format', 'streams', 'sealedAt', 'digest']);
-      if (v.format !== 2) throw new Error('format');
-      const s = object(v.streams, [...ACCESS_STREAMS]);
-      const streams = Object.fromEntries(ACCESS_STREAMS.map(stream => {
-        const p = object(s[stream], ['chainId', 'sequence', 'hash']);
-        return [stream, Object.freeze({ chainId: string(p.chainId), sequence: integer(p.sequence), hash: sha256(p.hash) })];
-      })) as Record<AccessStream, StreamSeal>;
-      const state: SealState = { streams: Object.freeze(streams), sealedAt: utc(v.sealedAt) };
-      if (digest(state) !== v.digest) throw new Error('digest');
-      return state;
-    } catch { throw new SealRefused('SealCorrupt'); }
-  }
-
-  private writeDurably(target: string, text: string): void {
-    const temporary = path.join(path.dirname(target), `.tmp-${randomBytes(8).toString('hex')}`);
-    let fd: number | undefined;
-    try {
-      fd = fs.openSync(temporary, 'wx', 0o600);
-      fs.writeSync(fd, text);
-      fs.fsyncSync(fd); fs.closeSync(fd); fd = undefined;
-      fs.renameSync(temporary, target);
-      syncDirectory(path.dirname(target));
-    } catch {
-      if (fd !== undefined) try { fs.closeSync(fd); } catch { /* already failing */ }
-      try { fs.rmSync(temporary, { force: true }); } catch { /* the target itself was not replaced */ }
-      throw new SealRefused('SealUnavailable');
-    }
-  }
-  private write(state: SealState): void {
-    this.writeDurably(this.file, JSON.stringify({ format: 2, ...JSON.parse(canonical(state)), digest: digest(state) }));
-  }
-
-  /**
-   * Durable before the business transaction commits; a failure here must abort that transaction. Created only if absent
-   * (a hard link of a synced temporary file): a resend of the same content finds its own intent, another content under
-   * the same event ID in the same stream is refused before it reaches the database and can never replace the first
-   * attempt's intent.
+  /** Only called with the stream's DB head lock, after staging the exact row and before COMMIT.
+   * Reusing a slot proves that its old reservation's transaction has ended without committing.
    */
-  recordIntent(stream: AccessStream, eventId: string, contentSha256: string): void {
-    choice(stream, ACCESS_STREAMS);
-    const target = path.join(this.pending, intentName(stream, string(eventId)));
-    const text = JSON.stringify({ stream, eventId, contentSha256: sha256(contentSha256) });
-    const temporary = path.join(this.pending, `.tmp-${randomBytes(8).toString('hex')}`);
-    let fd: number | undefined;
-    try {
-      fd = fs.openSync(temporary, 'wx', 0o600);
-      fs.writeSync(fd, text); fs.fsyncSync(fd); fs.closeSync(fd); fd = undefined;
-      try { fs.linkSync(temporary, target); } catch (error: any) {
-        if (error?.code !== 'EEXIST') throw error;
-        if (fs.readFileSync(target, 'utf8') !== text) refuse('AccessEventIdConflict');
+  reserve(binding: Omit<CommitBinding, 'generation' | 'proofDigest'>, prefix?: { seal: StreamSeal; anchor: ChainPosition; count: number }): CommitBinding {
+    return this.change(state => {
+      const id = key(binding.stream, binding.attemptId), position = slot(binding.stream, binding.sequence);
+      if (!state.intents[id]) throw new SealRefused('UnsealedEntryUnexplained', 'intent-missing');
+      const prior = state.slots[position];
+      if (prior?.attemptId === binding.attemptId) return prior;
+      if (prior) {
+        const old = key(prior.stream, prior.attemptId);
+        state.terminal[old] = { phase: 'superseded', generation: prior.generation };
+        delete state.proofs[old]; delete state.intents[old];
       }
-      syncDirectory(this.pending);
-    } catch (error) {
-      if (error instanceof ContractError) throw error;
-      throw new SealRefused('SealUnavailable');
-    } finally {
-      if (fd !== undefined) try { fs.closeSync(fd); } catch { /* already failing */ }
-      try { fs.rmSync(temporary, { force: true }); } catch { /* a leftover temporary is ignored at start */ }
-    }
+      const next = { ...binding, generation: ++state.generation, proofDigest: null } as CommitBinding;
+      if (prefix) {
+        const { proofDigest: _, ...identity } = next;
+        const core: ExpiryCore = { format: 1, binding: identity, ...prefix };
+        next.proofDigest = digest(core);
+        state.proofs[id] = core;
+      }
+      state.slots[position] = next;
+      return next;
+    });
   }
-  /** The intent of an attempt that is settled (sealed, or proven rolled back). Leftovers are harmless and cleared at start. */
-  clearIntent(stream: AccessStream, eventId: string): void {
-    try { fs.rmSync(path.join(this.pending, intentName(stream, eventId)), { force: true }); } catch { /* cleared at the next start */ }
+  /** A proven callback rollback settles only its own attempt; unknown responses keep their evidence. */
+  abort(stream: AccessStream, attemptId: string): void {
+    this.change(state => {
+      const id = key(stream, attemptId), reservation = Object.values(state.slots).find(q => key(q.stream, q.attemptId) === id);
+      if (state.terminal[id]?.phase === 'committed') throw new SealRefused('SealTailMismatch', 'abort-committed');
+      state.terminal[id] = { phase: 'aborted', generation: reservation?.generation ?? state.generation };
+      if (reservation) delete state.slots[slot(stream, reservation.sequence)];
+      delete state.proofs[id]; delete state.intents[id];
+    });
   }
-  private intents(): Record<AccessStream, Map<string, string>> {
-    const found = Object.fromEntries(ACCESS_STREAMS.map(s => [s, new Map<string, string>()])) as Record<AccessStream, Map<string, string>>;
-    for (const name of fs.readdirSync(this.pending)) {
-      if (name.startsWith('.tmp-')) continue; // an intent never renamed into place was never durable
-      try {
-        const v = object(JSON.parse(fs.readFileSync(path.join(this.pending, name), 'utf8')), ['stream', 'eventId', 'contentSha256']);
-        const stream = choice(v.stream, ACCESS_STREAMS);
-        if (intentName(stream, string(v.eventId)) !== name) throw new Error('name');
-        found[stream].set(v.eventId, sha256(v.contentSha256));
-      } catch { throw new SealRefused('SealCorrupt', 'intent'); }
-    }
-    return found;
+  recordExpiryFailure(attemptId: string, rolledBack: boolean): void {
+    const kind = rolledBack ? 'append-rolled-back' : 'ledger-unavailable';
+    this.journal.record(`${kind}:viewing:${attemptId}`, kind,
+      { eventId: `expiry:${attemptId}`, cause: rolledBack ? 'ledger-refused' : 'commit-unknown' });
   }
-
-  private serial<T>(work: () => Promise<T>): Promise<T> {
-    const next = this.queue.then(work, work);
-    this.queue = next.catch(() => undefined);
-    return next;
-  }
-
-  private async range(stream: AccessStream, after: number, through: number): Promise<StoredEntry[]> {
-    const entries: StoredEntry[] = [];
+  private async range(sql: PrismaLedgerSql, stream: AccessStream, through: number): Promise<StoredEntry[]> {
+    const entries: StoredEntry[] = []; let after = 0;
     while (after < through) {
-      const page = await this.sql.entriesAfter(stream, after, Math.min(PAGE, through - after));
+      const page = await sql.entriesAfter(stream, after, 1000);
       if (!page.length) break;
-      for (const entry of page) if (entry.sequence <= through) entries.push(entry);
+      entries.push(...page.filter(e => e.sequence <= through));
       const last = page[page.length - 1].sequence;
-      if (last <= after) break;
+      if (last <= after) throw new SealRefused('LedgerChainBroken');
       after = last;
     }
     return entries;
   }
-
-  /** Every unsealed event entry must be one this server recorded an intent for, in its stream, before committing it. */
-  private async explain(stream: AccessStream, entries: readonly StoredEntry[], intents: Map<string, string>, chainId: string): Promise<void> {
-    for (const entry of entries) {
-      if (entry.kind === 'expiry') {
-        if (this.expiryProof(entry)?.chainId !== chainId) throw new SealRefused('UnsealedEntryUnexplained', String(entry.sequence));
-        continue;
-      }
-      if (intents.get(entry.eventId!) !== entry.contentSha256) throw new SealRefused('UnsealedEntryUnexplained', String(entry.sequence));
-    }
-    // An interrupted expiry proof cannot explain away an append replaced by a checkpoint at the unsealed tail.
-    // Until every outstanding append is stored or explicitly settled, that collision is ambiguous: retain its intent.
-    if (entries.some(entry => entry.kind === 'expiry')) {
-      for (const eventId of intents.keys()) {
-        if (!await this.sql.entryForEvent(stream, eventId)) throw new SealRefused('UnsealedEntryUnexplained', 'expiry-append-conflict');
-      }
-    }
+  private proof(state: ExternalState, entry: StoredEntry, chainId: string): ExpiryCore | null {
+    const q: CommitBinding = state.slots[slot('viewing', entry.sequence)];
+    const core: ExpiryCore = q && state.proofs[key('viewing', q.attemptId)];
+    if (!core || q.chainId !== chainId || q.kind !== 'expiry' || q.sequence !== entry.sequence || q.hash !== entry.hash ||
+        q.previousHash !== entry.previousHash || q.contentSha256 !== entry.contentSha256 || (q.proofDigest !== digest(core) && !(q.attemptId === `legacy:${q.stream}:${q.sequence}` && q.proofDigest === null && q.sequence <= state.retired[q.stream])) ||
+        !same(core.binding, (({ proofDigest: _, ...rest }) => rest)(q))) return null;
+    const p = JSON.parse(entry.payload);
+    if (p.kind !== 'expiry' || p.deletedThrough !== core.anchor.sequence || p.anchorHash !== core.anchor.hash ||
+        p.deletedCount !== core.count || core.seal.sequence + 1 !== entry.sequence || core.seal.hash !== entry.previousHash ||
+        core.anchor.sequence > core.seal.sequence) return null;
+    return core;
   }
-
-  private expiryProof(entry: StoredEntry): ExpiryIntent | null {
-    let p: Record<string, any>;
-    try {
-      p = object(JSON.parse(entry.payload), ['kind', 'at', 'deletedThrough', 'deletedCount', 'anchorHash']);
-      if (p.kind !== 'expiry') throw new Error('kind');
-      utc(p.at); integer(p.deletedThrough, 1); integer(p.deletedCount, 1); sha256(p.anchorHash);
-    } catch { throw new SealRefused('LedgerChainBroken', 'expiry-payload'); }
-    try {
-      const target = path.join(this.expiry, `${integer(entry.sequence, 1)}-${integer(p.deletedThrough, 1)}-${sha256(p.anchorHash)}.json`);
-      if (!fs.existsSync(target)) return null;
-      const proof = object(JSON.parse(fs.readFileSync(target, 'utf8')), ['chainId', 'seal', 'anchor', 'count', 'checkpointSequence']);
-      const seal = object(proof.seal, ['sequence', 'hash']), anchor = object(proof.anchor, ['sequence', 'hash']);
-      string(proof.chainId); integer(seal.sequence); sha256(seal.hash); integer(anchor.sequence, 1); sha256(anchor.hash);
-      if (p.kind !== 'expiry' || proof.checkpointSequence !== entry.sequence || seal.sequence + 1 !== entry.sequence ||
-          seal.hash !== entry.previousHash || anchor.sequence !== p.deletedThrough || anchor.hash !== p.anchorHash ||
-          integer(proof.count, 1) !== p.deletedCount || anchor.sequence > seal.sequence) return null;
-      return proof as ExpiryIntent;
-    } catch { throw new SealRefused('SealCorrupt', 'expiry-evidence'); }
+  private async explain(sql: PrismaLedgerSql, state: ExternalState, stream: AccessStream, entry: StoredEntry, chainId: string): Promise<void> {
+    const q: CommitBinding = state.slots[slot(stream, entry.sequence)];
+    const marker = await sql.markerForSlot(stream, entry.sequence);
+    if (!q || !marker || !same(q, marker) || q.chainId !== chainId || q.sequence !== entry.sequence || q.eventId !== entry.eventId ||
+        q.hash !== entry.hash || q.previousHash !== entry.previousHash || q.contentSha256 !== entry.contentSha256 || q.kind !== entry.kind ||
+        ['aborted', 'superseded'].includes(state.terminal[key(stream, q.attemptId)]?.phase) ||
+        (entry.kind === 'expiry' && !this.proof(state, entry, chainId)))
+      throw new SealRefused('UnsealedEntryUnexplained', `${stream}:${entry.sequence}`);
   }
-
-  /** The database alone cannot justify a deleted prefix, even if it also supplies a valid-looking checkpoint. */
-  private verifyRetained(stream: AccessStream, entries: readonly StoredEntry[], current: StreamSeal, tail: ChainTail): void {
-    const anchor = retainedAnchor(entries);
-    if (!anchor) throw new SealRefused('LedgerChainBroken', `${stream}:unjustified-start`);
+  private async verify(sql: PrismaLedgerSql, state: ExternalState, stream: AccessStream, tail: ChainTail): Promise<StoredEntry[]> {
+    const current = state.tail.streams[stream];
+    if (tail.chainId !== current.chainId) throw new SealRefused('SealChainMismatch', stream);
+    if (tail.sequence < current.sequence) throw new SealRefused('LedgerBehindSeal', stream);
+    const entries = await this.range(sql, stream, tail.sequence), anchor = retainedAnchor(entries);
+    if (tail.sequence === 0) {
+      if (tail.hash !== current.hash) throw new SealRefused('SealTailMismatch', stream);
+      return entries;
+    }
+    if (!anchor) throw new SealRefused('LedgerChainBroken', 'unjustified-start');
     if (anchor.sequence > current.sequence) throw new SealRefused('SealTailMismatch', stream);
     if (anchor.sequence > 0) {
-      const proof = entries.filter(e => e.kind === 'expiry').map(e => this.expiryProof(e)).find(p => p &&
-        p.chainId === current.chainId && p.anchor.sequence === anchor.sequence && p.anchor.hash === anchor.hash);
-      if (!proof) throw new SealRefused('UnsealedEntryUnexplained', 'expiry-anchor');
+      const checkpoint = entries.find(e => e.kind === 'expiry' && same(this.proof(state, e, current.chainId)?.anchor, anchor));
+      if (!checkpoint) throw new SealRefused('UnsealedEntryUnexplained', 'expiry-anchor');
+      await this.explain(sql, state, stream, checkpoint, current.chainId);
     }
     const violation = chainViolation(anchor, entries, tail, stream);
     if (violation) throw new SealRefused('LedgerChainBroken', `${stream}:${violation}`);
-    const sealed = entries.find(e => e.sequence === current.sequence);
-    if (sealed ? sealed.hash !== current.hash : current.sequence !== anchor.sequence || current.hash !== anchor.hash)
-      throw new SealRefused('SealTailMismatch', stream);
+    const sealed = entries.find(e => e.sequence === current.sequence) ?? anchor;
+    if (sealed.sequence !== current.sequence || sealed.hash !== current.hash) throw new SealRefused('SealTailMismatch', stream);
+    return entries;
   }
+  /** Positive facts only. An unrelated pending intent is never a receipt prerequisite. */
+  async reconcileCommitted(stream: AccessStream, target?: ChainPosition, reader = this.sql, recovering = false): Promise<SealState> {
+    for (;;) {
+      const state = this.load();
+      if (!state.tail) throw new SealRefused('SealMissing');
+      let result: {current: StreamSeal; end: ChainPosition; entries: StoredEntry[]; unsealed: StoredEntry[]};
+      try { result = await reader.snapshot(async sql => {
+        const tail = await sql.tail(stream), entries = await this.verify(sql, state, stream, tail);
+        const end = target ?? tail, own = entries.find(e => e.sequence === end.sequence);
+        if (end.sequence > tail.sequence || (end.sequence > 0 && (!own || own.hash !== end.hash)))
+          throw new SealRefused('SealTailMismatch', 'target');
+        const current = state.tail.streams[stream];
+        const unsealed = entries.filter(e => e.sequence > current.sequence && e.sequence <= end.sequence);
+        for (const entry of unsealed) await this.explain(sql, state, stream, entry, current.chainId);
+        return { current, end, entries, unsealed };
+      }); } catch(error) {
+        // A concurrent expiry may replace the prefix after this frontier was read. Re-read
+        // under a new DB snapshot only when the protected writer actually advanced its revision.
+        if(this.load().revision!==state.revision)continue;
+        throw error;
+      }
+      if (result.end.sequence > result.current.sequence) {
+        if (recovering) this.journal.record(`seal-recovered:${stream}:${result.current.sequence}-${result.end.sequence}`, 'seal-recovered',
+          { chainId: result.current.chainId, fromSequence: result.current.sequence, toSequence: result.end.sequence, toHash: result.end.hash });
+        state.tail = { streams: { ...state.tail.streams, [stream]: { chainId: result.current.chainId, ...result.end } },
+          sealedAt: new Date().toISOString(), generation: ++state.generation };
+      }
+      for (const entry of result.unsealed) {
+        const q = state.slots[slot(stream, entry.sequence)], id = key(stream, q.attemptId);
+        state.terminal[id] = { phase: 'committed', generation: q.generation, binding: q };
+        delete state.intents[id];
+      }
+      // The sealed frontier replaces terminal per-event authority. Keep only retained checkpoint lineage and unresolved slots.
+      const retained = new Set(result.entries.filter(e => e.kind === 'expiry').map(e => e.sequence));
+      for (const [position, q] of Object.entries(state.slots)) {
+        if (q.stream !== stream || q.sequence > state.tail.streams[stream].sequence || retained.has(q.sequence)) continue;
+        delete state.slots[position]; delete state.proofs[key(stream, q.attemptId)];
+        state.retired[stream] = Math.max(state.retired[stream], q.generation);
+      }
+      for (const [id, t] of Object.entries(state.terminal)) if (id.startsWith(stream + ':') && t.phase !== 'committed' && t.generation <= state.retired[stream]) delete state.terminal[id];
+      if (this.publish(state)) return state.tail;
+    }
+  }
+  advance(stream: AccessStream, target: ChainPosition): Promise<SealState> { return this.reconcileCommitted(stream, target); }
 
-  /**
-   * Retention's external intent, before the deleting transaction commits. The whole retained chain must reach the last
-   * trusted seal, which must already cover the prefix. Only positions/hashes/counts survive here, never deleted bodies.
-   * The caller must roll back if the returned checkpoint sequence differs (a concurrent append advanced the DB head).
-   * Only a proven rollback may remove its proof; an unknown commit keeps it for start-up recovery.
+  /** A helper may seal and expire a row while its COMMIT response is in flight. This temporary
+   * metadata contains no payload and survives until that attempt acknowledges. Another process's
+   * startup fences DB transactions, not responses already in flight, so it must retain these bindings.
    */
-  prepareExpiry(through: number): Promise<{ count: number; checkpointSequence: number; rollback: () => void }> {
-    return this.serial(async () => {
-      const state = this.read();
-      if (state === 'absent') throw new SealRefused('SealMissing');
-      const current = state.streams.viewing, tail = await this.sql.tail('viewing');
-      if (tail.chainId !== current.chainId || tail.sequence !== current.sequence || tail.hash !== current.hash)
-        throw new SealRefused('SealTailMismatch', 'unsealed-tail');
-      const entries = await this.range('viewing', 0, tail.sequence);
-      this.verifyRetained('viewing', entries, current, tail);
-      const prefix = entries.filter(e => e.sequence <= integer(through, 1)), last = prefix[prefix.length - 1];
-      if (!last || last.sequence !== through) throw new SealRefused('LedgerChainBroken', 'expiry-prefix');
-      const proof: ExpiryIntent = { chainId: current.chainId, seal: { sequence: current.sequence, hash: current.hash },
-        anchor: { sequence: through, hash: last.hash }, count: prefix.length, checkpointSequence: current.sequence + 1 };
-      const target = path.join(this.expiry, `${proof.checkpointSequence}-${through}-${last.hash}.json`);
-      const text = JSON.stringify(proof);
-      // Claim exclusively: another worker must not reuse (or later remove) an unresolved attempt's proof.
-      const temporary = path.join(this.expiry, `.tmp-${randomBytes(8).toString('hex')}`);
-      this.writeDurably(temporary, text);
-      try { fs.linkSync(temporary, target); syncDirectory(this.expiry); }
-      catch { throw new SealRefused('SealUnavailable', 'expiry-pending'); }
-      finally { fs.rmSync(temporary, { force: true }); }
-      return { count: proof.count, checkpointSequence: proof.checkpointSequence, rollback: () => {
-        try { fs.unlinkSync(target); syncDirectory(this.expiry); }
-        catch { throw new SealRefused('SealUnavailable', 'expiry-rollback'); }
-      } };
+  committedReceipt(stream: AccessStream, attemptId: string, eventId: string, entry: StoredEntry): SealState | null {
+    const state = this.load(), q: CommitBinding = state.terminal[key(stream, attemptId)]?.binding;
+    if (!q || q.eventId !== eventId || q.hash !== entry.hash || q.sequence !== entry.sequence ||
+        q.contentSha256 !== entry.contentSha256 || q.previousHash !== entry.previousHash ||
+        q.chainId !== state.tail.streams[stream].chainId || q.sequence > state.tail.streams[stream].sequence) return null;
+    return state.tail;
+  }
+  acknowledge(stream: AccessStream, attemptId: string): void {
+    this.change(state => {
+      const id = key(stream, attemptId);
+      if (state.terminal[id]?.phase === 'committed') delete state.terminal[id];
     });
   }
 
-  /** Move one stream's seal to a committed position, proving every entry between its current seal and it first. */
-  advance(stream: AccessStream, target: ChainPosition): Promise<SealState> {
-    return this.serial(async () => {
-      const state = this.read();
-      if (state === 'absent') throw new SealRefused('SealMissing');
-      const current = state.streams[choice(stream, ACCESS_STREAMS)];
-      if (target.sequence <= current.sequence) return state;
-      const entries = await this.range(stream, current.sequence, target.sequence);
-      const violation = chainViolation(current, entries, target, stream);
-      if (violation) throw new SealRefused('LedgerChainBroken', `${stream}:${violation}`);
-      await this.explain(stream, entries, this.intents()[stream], current.chainId);
-      const next: SealState = { streams: Object.freeze({ ...state.streams, [stream]: Object.freeze({ chainId: current.chainId,
-        sequence: target.sequence, hash: target.hash }) }), sealedAt: new Date().toISOString() };
-      this.write(next);
-      for (const entry of entries) if (entry.eventId) this.clearIntent(stream, entry.eventId);
-      return next;
-    });
+  /** Called in the deleting transaction, with its head lock held, before staging deletion. */
+  async expiryPrefix(through: number): Promise<{ seal: StreamSeal; anchor: ChainPosition; count: number }> {
+    const sql = this.sql;
+    await this.reconcileCommitted('viewing', undefined, sql);
+    const state = this.load(), tail = await sql.tail('viewing');
+    const entries = await this.verify(sql, state, 'viewing', tail), prefix = entries.filter(e => e.sequence <= integer(through, 1));
+    const last = prefix[prefix.length - 1];
+    if (!last || last.sequence !== through) throw new SealRefused('LedgerChainBroken', 'expiry-prefix');
+    return { seal: state.tail.streams.viewing, anchor: { sequence: through, hash: last.hash }, count: prefix.length };
   }
 
-  /**
-   * Start-up check and recovery, before any HTTP or job. Each stream's retained chain is verified from its justified start;
-   * its seal must lie on it; an unsealed tail is adopted only when every entry in it is explained by an intent; an intent
-   * without a stored entry is journaled as a commit that never happened (the client resends the same event ID).
+  private async upgradeAtStart(sql: PrismaLedgerSql): Promise<void> {
+    const legacy = this.journal.coordinator.call('legacy'), tail=legacy.tail;
+    const canonical={streams:Object.fromEntries(ACCESS_STREAMS.map(stream=>[stream,{chainId:tail.streams[stream].chainId,
+      sequence:tail.streams[stream].sequence,hash:tail.streams[stream].hash}])),sealedAt:tail.sealedAt};
+    if (digest(canonical)!==tail.digest) throw new SealRefused('SealCorrupt','legacy');
+    const generation=Math.max(...ACCESS_STREAMS.map(s=>tail.streams[s].sequence))+1;
+    const state:ExternalState={version:1,revision:1,generation,tail:{...canonical,generation},intents:{},slots:{},proofs:{},terminal:{},retired:{viewing:0,history:0}};
+    for(const stream of ACCESS_STREAMS){
+      const actual=await sql.tail(stream),current=tail.streams[stream];
+      if(actual.chainId!==current.chainId||actual.sequence!==current.sequence||actual.hash!==current.hash)
+        throw new SealRefused('SealTailMismatch','legacy-must-be-fully-sealed');
+      const entries=await this.range(sql,stream,actual.sequence),anchor=retainedAnchor(entries);
+      if(actual.sequence && (!anchor||chainViolation(anchor,entries,actual,stream)))throw new SealRefused('LedgerChainBroken','legacy');
+      for(const entry of entries.filter(e=>e.kind==='expiry')){
+        const body=JSON.parse(entry.payload),old=legacy.proofs.find(p=>p.chainId===current.chainId&&p.checkpointSequence===entry.sequence&&
+          p.seal.sequence+1===entry.sequence&&p.seal.hash===entry.previousHash&&p.anchor.sequence===body.deletedThrough&&
+          p.anchor.hash===body.anchorHash&&p.count===body.deletedCount&&p.anchor.sequence<=p.seal.sequence);
+        if(!old)throw new SealRefused('UnsealedEntryUnexplained','legacy-prefix');
+        const marker=await sql.markerForSlot(stream,entry.sequence);
+        if(!marker||marker.attemptId!==`legacy:${stream}:${entry.sequence}`||marker.hash!==entry.hash||marker.contentSha256!==entry.contentSha256)
+          throw new SealRefused('UnsealedEntryUnexplained','legacy-marker');
+        // Immutable v2 checkpoint bytes are already sealed. The converted proof retains that authority;
+        // its DB marker has no proof digest, so upgraded checkpoints are identified separately below.
+        const {proofDigest:_,...binding}=marker;
+        const core:ExpiryCore={format:1,binding,seal:{chainId:current.chainId,...old.seal},anchor:old.anchor,count:old.count};
+        state.slots[slot(stream,entry.sequence)]=marker;state.proofs[key(stream,marker.attemptId)]=core;
+      }
+      if(anchor?.sequence>0&&!entries.some(e=>e.kind==='expiry'&&same(state.proofs[key(stream,`legacy:${stream}:${e.sequence}`)]?.anchor,anchor)))
+        throw new SealRefused('UnsealedEntryUnexplained','legacy-anchor');
+      state.retired[stream]=current.sequence;
+    }
+    for(const intent of legacy.intents){
+      if(!ACCESS_STREAMS.includes(intent.stream)||typeof intent.eventId!=='string')throw new SealRefused('SealCorrupt','legacy-intent');
+      const entry=await sql.entryForEvent(intent.stream,intent.eventId);
+      if(entry&&entry.contentSha256!==intent.contentSha256)throw new SealRefused('UnsealedEntryUnexplained','legacy-intent');
+      if(!entry)this.journal.record(`legacy-not-found:${intent.stream}:${intent.eventId}`,'commit-not-found',
+        {eventId:intent.eventId,contentSha256:intent.contentSha256});
+    }
+    this.journal.coordinator.call('upgrade',{legacy:tail,state});
+  }
+
+  /** The DB exclusive writer fence is held through both positive verification and negative settlement.
+   * Every append/expiry must take its shared transaction fence before publishing an intent.
    */
-  recover(): Promise<{ seal: SealState; recovered: number; notCommitted: number; streams: Record<AccessStream, RecoveryCount> }> {
-    return this.serial(async () => {
+  recoverAtStart(): Promise<{ seal: SealState; recovered: number; notCommitted: number; streams: Record<AccessStream, RecoveryCount> }> {
+    return this.sql.withWriterFence(async sql => {
+      try { this.read(); } catch(error:any) { if(error.code!=='SealUpgradeRequired')throw error; await this.upgradeAtStart(sql); }
       const tails = {} as Record<AccessStream, ChainTail>;
-      for (const stream of ACCESS_STREAMS) tails[stream] = await this.sql.tail(stream);
-      const intents = this.intents();
-      const found = this.read();
-      let state: SealState;
-      if (found === 'absent') {
-        // Only empty chains may start a seal; a missing seal over stored entries is never re-created from the database.
+      for (const stream of ACCESS_STREAMS) tails[stream] = await sql.tail(stream);
+      if (this.read() === 'absent') {
         if (ACCESS_STREAMS.some(s => tails[s].sequence !== 0)) throw new SealRefused('SealMissing');
-        state = { streams: Object.freeze(Object.fromEntries(ACCESS_STREAMS.map(s => [s, Object.freeze({ chainId: tails[s].chainId,
-          sequence: 0, hash: tails[s].hash })]))) as Record<AccessStream, StreamSeal>, sealedAt: new Date().toISOString() };
-        this.write(state);
-      } else state = found;
+        this.change(state => { if (!state.tail) state.tail = { streams: tails, sealedAt: new Date().toISOString(), generation: ++state.generation }; });
+      }
       const counts = {} as Record<AccessStream, RecoveryCount>;
       for (const stream of ACCESS_STREAMS) {
-        const tail = tails[stream];
-        let current = state.streams[stream];
-        if (current.chainId !== tail.chainId) throw new SealRefused('SealChainMismatch', stream);
-        if (tail.sequence < current.sequence) throw new SealRefused('LedgerBehindSeal', stream);
-        const entries = await this.range(stream, 0, tail.sequence);
-        if (tail.sequence > 0) {
-          this.verifyRetained(stream, entries, current, tail);
-        } else if (current.hash !== tail.hash) throw new SealRefused('SealTailMismatch', stream);
-        const unsealed = entries.filter(e => e.sequence > current.sequence);
-        await this.explain(stream, unsealed, intents[stream], current.chainId);
-        let recovered = 0;
-        if (unsealed.length) {
-          this.journal.record(`seal-recovered:${stream}:${current.sequence}-${tail.sequence}`, 'seal-recovered',
-            { chainId: current.chainId, fromSequence: current.sequence, toSequence: tail.sequence, toHash: tail.hash });
-          current = Object.freeze({ chainId: current.chainId, sequence: tail.sequence, hash: tail.hash });
-          state = { streams: Object.freeze({ ...state.streams, [stream]: current }), sealedAt: new Date().toISOString() };
-          this.write(state);
-          recovered = unsealed.length;
-        }
+        const before = (this.read() as SealState).streams[stream].sequence;
+        await this.reconcileCommitted(stream, undefined, sql, true);
         let notCommitted = 0;
-        for (const [eventId, contentSha256] of intents[stream]) {
-          const stored = await this.sql.entryForEvent(stream, eventId);
-          if (stored && stored.sequence <= current.sequence) { this.clearIntent(stream, eventId); continue; }
-          if (stored) throw new SealRefused('UnsealedEntryUnexplained', `${stream}:${stored.sequence}`);
-          this.journal.record(`commit-not-found:${stream}:${eventId}`, 'commit-not-found', { eventId, contentSha256 });
-          this.clearIntent(stream, eventId);
-          notCommitted++;
+        for (const intent of Object.values(this.load().intents).filter(i => i.stream === stream)) {
+          const marker = await sql.markerForAttempt(stream, intent.attemptId);
+          if (marker) throw new SealRefused('UnsealedEntryUnexplained', 'unsettled-marker');
+          this.journal.record(`commit-not-found:${stream}:${intent.attemptId}`, 'commit-not-found',
+            { eventId: intent.eventId ?? `expiry:${intent.attemptId}`, contentSha256: intent.contentSha256 ?? digest(intent) });
+          this.abort(stream, intent.attemptId); notCommitted++;
         }
-        counts[stream] = { recovered, notCommitted };
+        counts[stream] = { recovered: tails[stream].sequence - before, notCommitted };
       }
-      // Only this quiescent start can prove a pending expiry never committed. Active jobs must keep unknown commits.
-      for (const name of fs.readdirSync(this.expiry)) {
-        if (name.startsWith('.tmp-')) continue;
-        const target = path.join(this.expiry, name);
-        let proof: any;
-        try { proof = JSON.parse(fs.readFileSync(target, 'utf8')); integer(proof.checkpointSequence, 1); }
-        catch { throw new SealRefused('SealCorrupt', 'expiry-evidence'); }
-        if (proof.chainId === tails.viewing.chainId && proof.checkpointSequence > tails.viewing.sequence) {
-          try { fs.unlinkSync(target); syncDirectory(this.expiry); }
-          catch { throw new SealRefused('SealUnavailable', 'expiry-rollback'); }
-        }
-      }
-      return { seal: state, streams: counts,
-        recovered: ACCESS_STREAMS.reduce((n, s) => n + counts[s].recovered, 0),
+      return { seal: this.read() as SealState, streams: counts, recovered: ACCESS_STREAMS.reduce((n, s) => n + counts[s].recovered, 0),
         notCommitted: ACCESS_STREAMS.reduce((n, s) => n + counts[s].notCommitted, 0) };
     });
   }

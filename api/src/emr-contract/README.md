@@ -164,6 +164,14 @@ B의 SQL 전용 저장(schema `emr_access`, 전용 tablespace)은 Prisma 모델�
 
 **접속기록 보존 규칙(지휘 D727/D731, 법령 등록부 최종 §5-11·D-1, Astra 교차 확인 이견 0):** 원장은 두 스트림이다. 열람 스트림은 모든 사건(열람·비기록 사건·변경 사건의 2년 잔여)을 사건일부터 2년(첫날 산입) 보존하고 hold·법적 근거가 있을 때만 더 길게 두며, 기존 prefix 삭제·checkpoint·외부 seal을 쓴다. 변경 이력 스트림은 기록을 바꾼 기재·추가기재·수정 사건을 대상 기록의 보존 종료까지 두고 그 기록의 파기 묶음에서 H가 함께 파기한다(B1에는 그 삭제 경로가 없다). 행에는 만료 시각을 저장하지 않고 `statutory_act`와 대상 기록·판 ID(`emr_access.access_target`)를 결속하며, 기한은 파기 검토 때 `accessDeadline(stream, …)` 하나로 계산한다. A의 `accessStreams`·`statutoryAct`·`sealAccessEvent(…, stream)`·`verifyAccessChain(…, stream)`이 스트림 경계를 고정한다(history payload kind는 `history`). 권한 이력 3년은 B1 저장이 아니다(D-8).
 
+**B1 seal 동시성 신뢰 계약(D867):** 사건 ID와 transaction attempt ID를 분리하고, COMMIT 전 외부의 정확한 chain/slot/hash/generation 예약을 같은 transaction의 `commit_marker`와 대조한다. 실행 중 `reconcileCommitted()`는 확정 사실만 봉인하며, 부재 판정은 모든 API·retention writer가 공유하는 DB fence 뒤 `recoverAtStart()`에서 수행한다. expiry는 자기 checkpoint 봉인 후 성공하고 다음 job은 restart 없이 실행한다. 두 stream과 실패 journal은 같은 커널 잠금 소유 writer가 기록한다. 폐기·대체 proof 및 tail-only replay는 settlement frontier의 generation/high-water로 거절한다. 응답 전달 전에 정상 만료된 사건은 본문 없는 임시 확정 결속으로 receipt를 확인하고 응답 확인 시 정리한다. 다른 프로세스의 시작 fence는 이미 COMMIT된 응답의 전달을 취소하지 않으므로 아직 응답하지 않은 최소 hash/위치 결속은 유지한다. 본문·환자/판독 내용은 이 결속에 복제하지 않는다.
+
+**명명된 한계 B1-ROLLBACK-WITNESS:** B1은 외부에 확정된 history의 변경·삭제·재순서화, 예약되지 않은 unsealed history와 폐기·대체된 proof의 재생을 거절하며, 응답 불명 복구에는 정직한 DB의 transaction finality를 사용한다. DB marker는 독립 COMMIT 증거가 아니다. 특권 공격자가 COMMIT 행·head·marker까지 포함한 DB 전체를 되돌리는 공격(보호 상태 전체를 함께 되돌리는 경우 포함)은 B1 보장 밖이다. 필요한 대책은 독립적이고 rollback 불가능한 finality witness 또는 off-host monotonic high-water이며 Stage 9 운영 강화로 보류한다. 외부 백업은 계속 OFF다.
+
+**명명된 한계 B1-PRESERVE-REFUSE:** 진전 보장은 유한 장애 이후의 정상 도달 상태에 적용한다. F02의 journal·격리 원문 합산 64 MiB 초과, 중간 journal 손상, 외부 seal 소실과 변조는 원문 보존 후 거절하며 관리자·개인정보 보호책임자에게만 알린다. 의사 확인창과 자동 삭제는 추가하지 않는다. Windows 순수 모델은 Linux 커널 잠금·fsync·다중 프로세스 내구성을 대신 증명하지 않는다.
+
+REQ-EMR-06/19 → RISK-EMR-06/19 → C05/C06/C07/C13, `tests/emr/b/seal_checker.cjs` I1–I4 및 L02/L03/L04/L05/L08/L18/L19. 새 migration은 기존 적용 migration을 고치지 않고 marker/ACL을 추가하며 같은 pause의 DB·roles·tablespace·보호 상태 복원에 포함한다.
+
 **D-18 업무 문맥(예측 의존):** 모든 접속사건은 서버가 업무 문맥(배정 판독·동일 환자 과거 비교·임상 요청·worklist·background fetch·서비스 작업·인증)에서 자동 결속한 `context`를 가지며 해시 대상이다. 문맥 밖 접근만 한 줄 사유(`out-of-context`, 200자 이하, 줄바꿈 금지)를 요구한다. 사유는 권한이 아니다.
 
 **D-3 Tech Note:** 방사선사 본인 Tech Note는 작성자 본인 키 서명판(`tech-note`, 서명 필수)이고 관리자 메모는 서명 없는 운영 문구(`operational-note`)다. 저장 행의 작성자 역할(`authorRole`)로 구분하고 요청 플래그로 정하지 않는다. 서명 연결은 C다.

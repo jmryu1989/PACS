@@ -263,6 +263,9 @@ class EmrBLedgerLive(unittest.TestCase):
         statements = [
             "INSERT INTO emr_access.access_entry SELECT * FROM emr_access.access_entry LIMIT 0",
             "UPDATE emr_access.access_entry SET payload = payload", "DELETE FROM emr_access.access_entry",
+            "INSERT INTO emr_access.commit_marker SELECT * FROM emr_access.commit_marker LIMIT 0",
+            "UPDATE emr_access.commit_marker SET generation = 0", "DELETE FROM emr_access.commit_marker",
+            "SELECT emr_access.append_access('viewing','x','{}','none')",
             "TRUNCATE emr_access.access_entry", "UPDATE emr_access.chain_head SET sequence = 0",
             "SELECT count(*) FROM emr_access.access_entry",
             "ALTER TABLE emr_access.access_entry DISABLE TRIGGER ALL", "DROP TABLE emr_access.access_entry",
@@ -270,7 +273,7 @@ class EmrBLedgerLive(unittest.TestCase):
             "ALTER TABLE \"AuditLog\" DISABLE TRIGGER USER", "UPDATE \"AuditLog\" SET detail = detail", "DELETE FROM \"AuditLog\"",
             "SET session_replication_role = replica", "SET ROLE kin_emr_owner", "SET ROLE kin", "GRANT kin_emr_owner TO kin_runtime",
             "ALTER ROLE kin_runtime SUPERUSER", "ALTER ROLE kin_runtime CREATEROLE", "CREATE ROLE syn_probe",
-            "SELECT emr_access.expire_prefix(1)",
+            "SELECT emr_access.expire_reserved(1, 'live-attempt-00000003', 'live-bundle-00000003')",
             "SELECT emr_access.record_clause_version('syn', 'syn', 'syn', 'syn', '2026-01-01', '2026-01-01')",
         ]
         for statement in statements:
@@ -302,7 +305,7 @@ class EmrBLedgerLive(unittest.TestCase):
         self.assertEqual(rows(), count0 + 1)
         self.assertEqual(self.ok("SELECT count(*) FROM emr_access.access_entry WHERE event_id = '%s'" % failed["eventId"]), ["0"])
         journal = self.driver("journal")
-        self.assertIn("append-rolled-back:%s:business-rollback" % failed["eventId"], [record["id"] for record in journal])
+        self.assertTrue(any(record["kind"] == "append-rolled-back" and record["body"] == {"eventId": failed["eventId"], "cause": "business-rollback"} for record in journal), journal)
         self.assertEqual(self.driver("seal")["sequence"], seal["sequence"])
         # The ledger refuses (its storage moved off the dedicated tablespace): the business change rolls back with it.
         self.ok("ALTER TABLE emr_access.member_identity SET TABLESPACE pg_default")
@@ -312,13 +315,13 @@ class EmrBLedgerLive(unittest.TestCase):
         finally:
             self.ok("ALTER TABLE emr_access.member_identity SET TABLESPACE kin_emr_access")
         self.assertEqual(rows(), count0 + 1)
-        self.assertIn("append-rolled-back:%s:ledger-refused" % broken["eventId"], [record["id"] for record in self.driver("journal")])
+        self.assertTrue(any(record["kind"] == "append-rolled-back" and record["body"] == {"eventId": broken["eventId"], "cause": "ledger-refused"} for record in self.driver("journal")))
         # The intent cannot be made durable: the transaction aborts before its commit, and that is journaled.
-        self.as_root(self.state, "chmod 500 %s/seal/pending" % STATE)
+        self.as_root(self.state, "chmod 500 %s/seal" % STATE)
         try:
             no_intent = self.driver("business")
         finally:
-            self.as_root(self.state, "chmod 700 %s/seal/pending" % STATE)
+            self.as_root(self.state, "chmod 700 %s/seal" % STATE)
         self.assertEqual(no_intent["error"], "SealUnavailable", no_intent)
         self.assertEqual(rows(), count0 + 1)
         # The journal itself fails: the failure is reported as such and nothing claims success.
@@ -355,6 +358,20 @@ class EmrBLedgerLive(unittest.TestCase):
         conflict = self.driver("append", {"events": [changed]})["results"][0]
         self.assertIn(conflict["error"], ("AccessEventIdConflict", "EB002"), conflict)
         self.assertEqual(self.ok("SELECT count(*) FROM emr_access.access_entry WHERE event_id = '%s'" % event["eventId"]), ["1"])
+        # Independent processes share the native external writer, including both streams and journal IDs.
+        from concurrent.futures import ThreadPoolExecutor
+        same = self.auth_event()
+        with ThreadPoolExecutor(max_workers=3) as workers:
+            receipts = list(workers.map(lambda _: self.driver("append", {"events": [same]}), range(3)))
+        self.assertTrue(all("receipt" in r.get("results", [{}])[0] for r in receipts), receipts)
+        self.assertEqual(self.ok("SELECT count(*) FROM emr_access.commit_marker WHERE event_id='%s'" % same["eventId"]), ["1"])
+        with ThreadPoolExecutor(max_workers=3) as workers:
+            jobs = list(workers.map(lambda n: self.driver("journal-add", {"id": "L03-native-writer-"+str(n)}), range(6)))
+        self.assertEqual(len(jobs), 6)
+        self.assertEqual(sum(r["id"].startswith("L03-native-writer-") for r in self.driver("journal")), 6)
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            mixed=list(workers.map(lambda event:self.driver("append",{"events":[event]}),[self.change_event(),self.auth_event()]))
+        self.assertTrue(all("receipt" in r.get("results",[{}])[0] for r in mixed),mixed)
         # One verified issuer+subject, one immutable ID; namesakes and other issuers are other members.
         pairs = [["https://identity.example.test", "sub-a"]] * 4 + [["https://identity.example.test", "sub-b"], ["https://other.example.test", "sub-a"]]
         ids = self.driver("identity", {"pairs": pairs})
@@ -374,6 +391,11 @@ class EmrBLedgerLive(unittest.TestCase):
         self.assertIn("receipt", self.driver("append", {"events": [change]})["results"][0])
         self.assertEqual(self.ok("SELECT stream || ':' || count(*) FROM emr_access.access_entry WHERE event_id = '%s' GROUP BY stream ORDER BY stream" % change["eventId"]),
                          ["history:1", "viewing:1"])
+        fenced = self.driver("writer-fence")
+        self.assertTrue(fenced.get("waiting"), fenced)
+        self.assertEqual(fenced.get("notCommitted"), 0, fenced)
+        self.assertIn("receipt", fenced, fenced)
+        self.assertTrue(fenced.get("staleWriterRefused"), fenced)
 
     # ── L04 ──
     def test_b04_chain_tail_and_crash_recovery(self):
@@ -398,12 +420,21 @@ class EmrBLedgerLive(unittest.TestCase):
         self.assertEqual(self.driver("business", {"exit": "before-commit", "event": event}, db=db, volume=state), {"exited": True})
         before = self.driver("recover", db=db, volume=state)
         self.assertEqual((before["recovered"], before["notCommitted"]), (0, 1), before)
-        self.assertIn("commit-not-found:viewing:" + event["eventId"], [r["id"] for r in self.driver("journal", db=db, volume=state)])
+        self.assertTrue(any(r["kind"] == "commit-not-found" and r["body"]["eventId"] == event["eventId"] for r in self.driver("journal", db=db, volume=state)))
         resent = self.driver("append", {"events": [event]}, db=db, volume=state)["results"][0]
         self.assertIn("receipt", resent)
         self.assertEqual(self.ok("SELECT count(*) FROM emr_access.access_entry WHERE event_id = '%s'" % event["eventId"], db=db), ["1"])
         base = self.entries(db=db, volume=state)
         self.chain_ok(base)
+        self.assertEqual(self.ok("SELECT count(*) FROM emr_access.commit_marker m JOIN emr_access.access_entry e USING(stream,sequence) "
+            "WHERE m.chain_id = (SELECT chain_id FROM emr_access.chain_head WHERE stream=m.stream) AND m.hash=e.hash AND m.content_sha256=e.content_sha256 AND m.generation>0", db=db), [str(len(base))])
+        changed = self.change_event()
+        self.assertEqual(self.driver("business", {"event": changed, "exit": "after-viewing-seal"}, db=db, volume=state), {"exited": True})
+        split = self.driver("recover", db=db, volume=state)
+        self.assertEqual(split["streams"]["viewing"]["recovered"], 0, split)
+        self.assertEqual(split["streams"]["history"]["recovered"], 1, split)
+        self.assertIn("receipt", self.driver("append", {"events": [changed]}, db=db, volume=state)["results"][0])
+        base = self.entries(db=db, volume=state)
         # Each tamper on its own copy of the database and of the state volume.
         def copy(name):
             self.ok("CREATE DATABASE %s TEMPLATE kin" % name, db=db)
@@ -429,7 +460,7 @@ class EmrBLedgerLive(unittest.TestCase):
                 self.assertEqual(self.driver("recover", db=db, volume=volume, url=self.url(database=name)).get("error"), expected)
         # A lost or damaged seal is never rebuilt from the database's end.
         for name, command, expected in (("l04_noseal", "rm %s/seal/tail.json" % STATE, "SealMissing"),
-                                        ("l04_badseal", "sed -i 's/\"sequence\":/\"sequence\":1/' %s/seal/tail.json" % STATE, "SealCorrupt")):
+                                        ("l04_badseal", "sed -i 's/\"sequence\":/\"sequence\":1/' %s/seal/tail.json" % STATE, "SealTailMismatch")):
             with self.subTest(case=name):
                 volume = copy(name)
                 self.as_root(volume, command)
@@ -481,7 +512,7 @@ class EmrBLedgerLive(unittest.TestCase):
                           "validity": {"from": "2026-10-01T00:00:00.000Z", "until": None, "condition": "order-in-force"}}}
         self.driver("holds", {"place": [hold]}, db=db, volume=state)
         retention = self.url("kin_emr_retention")
-        self.assertEqual(self.refused("SELECT emr_access.expire_prefix(2)", user="kin_emr_retention", db=db), "EB005")
+        self.assertEqual(self.refused("SELECT emr_access.expire_reserved(2, 'live-attempt-00000001', 'live-bundle-00000001')", user="kin_emr_retention", db=db), "EB005")
         first = self.driver("expire", url=retention, db=db, volume=state)
         self.assertIsInstance(first, dict)
         self.assertNotIn("error", first, "L05 expiry must return a committed deletion result")
@@ -489,9 +520,9 @@ class EmrBLedgerLive(unittest.TestCase):
         self.assertEqual(first["deleted"], 1, first)
         # Unexpired, held, middle and runtime deletions are refused; nothing moved.
         snapshot = self.ok("SELECT string_agg(sequence::text, ',' ORDER BY sequence) FROM emr_access.access_entry", db=db)
-        self.assertEqual(self.refused("SELECT emr_access.expire_prefix(%d)" % (first["checkpointSequence"]), user="kin_emr_retention", db=db), "EB004")
+        self.assertEqual(self.refused("SELECT emr_access.expire_reserved(%d, 'live-attempt-00000001', 'live-bundle-00000001')" % (first["checkpointSequence"]), user="kin_emr_retention", db=db), "EB004")
         self.assertEqual(self.refused("DELETE FROM emr_access.access_entry WHERE sequence = 5", user="kin_emr_retention", db=db), REFUSED)
-        self.assertEqual(self.refused("SELECT emr_access.expire_prefix(2)", user="kin_runtime", db=db), REFUSED)
+        self.assertEqual(self.refused("SELECT emr_access.expire_reserved(2, 'live-attempt-00000001', 'live-bundle-00000001')", user="kin_runtime", db=db), REFUSED)
         self.assertEqual(self.ok("SELECT string_agg(sequence::text, ',' ORDER BY sequence) FROM emr_access.access_entry", db=db), snapshot)
         # The retention view never shows the payload.
         self.assertEqual(self.refused("SELECT * FROM emr_access.entries_after('viewing', 0, 10)", user="kin_emr_retention", db=db), REFUSED)
@@ -501,7 +532,7 @@ class EmrBLedgerLive(unittest.TestCase):
         self.driver("holds", {"release": [released]}, db=db, volume=state)
         session = subprocess.Popen(["docker", "exec", "-i", db, "psql", "-X", "-q", "-A", "-t", "-U", "kin_emr_retention", "-d", "kin"],
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        session.stdin.write(b"BEGIN;\nSELECT deleted_count FROM emr_access.expire_prefix(3);\nSELECT pg_sleep(30);\n"); session.stdin.flush()
+        session.stdin.write(b"BEGIN;\nSELECT deleted_count FROM emr_access.expire_reserved(3, 'live-attempt-00000002', 'live-bundle-00000002');\nSELECT pg_sleep(30);\n"); session.stdin.flush()
         for _ in range(100):
             if self.ok("SELECT count(*) FROM pg_stat_activity WHERE usename = 'kin_emr_retention' AND query LIKE '%pg_sleep%'", db=db) == ["1"]:
                 break
@@ -511,9 +542,8 @@ class EmrBLedgerLive(unittest.TestCase):
         self.assertEqual(self.ok("SELECT string_agg(sequence::text, ',' ORDER BY sequence) FROM emr_access.access_entry", db=db), snapshot)
         # After the release the rest of the expired prefix goes with its own checkpoint - the old change's viewing copy too, at
         # its floor - while that change stays in the history stream, which no retention call touches; the chains stay verifiable.
-        # The next worker starts with no active writers. Expiry itself must never perform this start-only recovery.
-        restarted = self.driver("recover", db=db, volume=state)
-        self.assertEqual((restarted.get("recovered"), restarted.get("seal", {}).get("sequence")), (1, first["checkpointSequence"]), restarted)
+        sealed_first = self.driver("seal", db=db, volume=state)
+        self.assertEqual(sealed_first["sequence"], first["checkpointSequence"], "job seals before success, without a quiet restart")
         second = self.driver("expire", url=retention, db=db, volume=state)
         self.assertIsInstance(second, dict)
         self.assertNotIn("error", second, "L05 released prefix must expire successfully")
@@ -530,7 +560,7 @@ class EmrBLedgerLive(unittest.TestCase):
         for checkpoint in (e for e in remaining if e["kind"] == "expiry"):
             self.assertNotIn("sub-", checkpoint["payload"])
         recovered = self.driver("recover", db=db, volume=state)
-        self.assertEqual((recovered["recovered"], recovered["seal"]["sequence"]), (1, remaining[-1]["sequence"]), recovered)
+        self.assertEqual((recovered["recovered"], recovered["seal"]["sequence"]), (0, remaining[-1]["sequence"]), recovered)
 
     # ── L06 ──
     def test_b06_complete_reload_and_clause_history(self):
@@ -585,10 +615,12 @@ class EmrBLedgerLive(unittest.TestCase):
         trusted tail; a restore without roles, off its tablespace, with a stale or missing state, or without the
         migration is refused; the source never changes."""
         history = self.ok("SELECT migration_name || ':' || (finished_at IS NOT NULL) FROM _prisma_migrations ORDER BY migration_name COLLATE \"C\"")
-        self.assertEqual(len(history), 43)
-        self.assertEqual(history[-1], "20261008120000_emr_b:true")
+        self.assertEqual(len(history), 44)
+        self.assertEqual(history[-1], "20261010120000_emr_seal_attempts:true")
         self.driver("append", {"count": 3})
         source_entries = self.entries()
+        marker_sql = "SELECT md5(string_agg(row_to_json(m)::text, E'\\n' ORDER BY stream,sequence)) FROM emr_access.commit_marker m"
+        source_markers = self.ok(marker_sql)
         catalog_sql = ("SELECT string_agg(x, '|' ORDER BY x) FROM ("
                        "SELECT c.relname::text || ':' || pg_get_userbyid(c.relowner)::text || ':' || COALESCE(t.spcname::text, 'default') || ':' || "
                        "COALESCE((SELECT string_agg(a.acl::text, ',' ORDER BY a.acl::text) FROM unnest(c.relacl) AS a(acl)), '') AS x "
@@ -619,13 +651,14 @@ class EmrBLedgerLive(unittest.TestCase):
             self.provision(target)
             self.assertEqual(restore(target).returncode, 0)
             self.assertEqual(self.ok(catalog_sql, db=target), source_catalog)
+            self.assertEqual(self.ok(marker_sql, db=target), source_markers)
             restored_state = self.copy_volume(backup_state, "l07-restored")
             self.assertEqual(self.driver("entries", db=target, volume=restored_state), source_entries)
             recovered = self.driver("recover", db=target, volume=restored_state)
             self.assertEqual((recovered["recovered"], recovered["notCommitted"]), (0, 0), recovered)
             self.assertEqual(self.driver("verify-runtime", db=target, volume=restored_state)["role"], "kin_runtime")
             self.assertIn("receipt", self.driver("append", {"count": 1}, db=target, volume=restored_state)["results"][0])
-            self.assertEqual(self.refused("SELECT emr_access.expire_prefix(1)", user="kin_emr_retention", db=target), "EB004")
+            self.assertEqual(self.refused("SELECT emr_access.expire_reserved(1, 'live-attempt-00000003', 'live-bundle-00000003')", user="kin_emr_retention", db=target), "EB004")
             self.assertEqual(self.refused("DELETE FROM emr_access.access_entry", user="kin_runtime", db=target), REFUSED)
             # Refused: no roles in the target cluster; the ledger off its tablespace; a state ahead of the restored data;
             # no state at all; and a database without the EMR migration.
@@ -646,7 +679,7 @@ class EmrBLedgerLive(unittest.TestCase):
         partial = self.start_db("l07-partial")
         self.provision(partial)
         for path in sorted((ROOT / "api/prisma/migrations").glob("*/migration.sql")):
-            if path.parent.name != "20261008120000_emr_b":
+            if path.parent.name not in {"20261008120000_emr_b", "20261010120000_emr_seal_attempts"}:
                 self.ok(path.read_text(encoding="utf-8"), db=partial)
         self.assertIn("ledger-missing", self.driver("verify-runtime", db=partial, volume=self.volume("l07-partial")).get("problems") or [])
         # The source's data is unchanged by its backup (only the deliberate later append moved it on, by exactly one).
@@ -666,9 +699,8 @@ class EmrBLedgerLive(unittest.TestCase):
         self.assertIn("error", unreachable)
         self.assertEqual(unreachable.get("order", []), [])
         # The seal cannot be written: the provision is committed, no body leaves; the resend seals it and sends once.
-        self.as_root(self.state, "chmod 500 %s/seal" % STATE)
         try:
-            stuck = self.driver("provide")
+            stuck = self.driver("provide", {"sealAfterCommit": True})
         finally:
             self.as_root(self.state, "chmod 700 %s/seal" % STATE)
         self.assertEqual((stuck.get("error"), stuck.get("order")), ("SealUnavailable", []), stuck)
@@ -724,12 +756,21 @@ class EmrBLedgerLive(unittest.TestCase):
 
     def test_b18_external_expiry_proof_and_torn_journal_restarts(self):
         """The two review counterexamples on real persisted storage, independent of the in-memory contract model."""
+        crash_db = self.start_db("l18-finality"); self.provision(crash_db); self.migrate(crash_db)
+        crash_state = self.volume("l18-finality")
+        self.assertIn("receipt", self.driver("append", {"events": [self.auth_event(OLD[0])]}, db=crash_db, volume=crash_state)["results"][0])
+        for cut, expected in (("before-commit", (0, 1)), ("after-commit", (1, 0))):
+            self.assertEqual(self.driver("expire", {"exit": cut}, url=self.url("kin_emr_retention"), db=crash_db, volume=crash_state), {"exited": True})
+            recovered = self.driver("recover", db=crash_db, volume=crash_state)
+            self.assertEqual((recovered["recovered"], recovered["notCommitted"]), expected, recovered)
+        self.assertIsNone(self.driver("expire", url=self.url("kin_emr_retention"), db=crash_db, volume=crash_state))
         db = self.start_db("l18"); self.provision(db); self.migrate(db); state = self.volume("l18")
         first = self.driver("append", {"events": [self.auth_event(OLD[0])]}, db=db, volume=state)
         self.assertIn("receipt", first["results"][0], first)
         # Record 2 commits with an external append intent, but the last trusted seal is still 1.
         self.assertEqual(self.driver("business", {"event": self.auth_event(OLD[1]), "exit": "after-commit"}, db=db, volume=state), {"exited": True})
-        self.ok("SELECT * FROM emr_access.expire_prefix(2)", user="kin_emr_retention", db=db)
+        self.assertEqual(self.refused("SELECT * FROM emr_access.expire_prefix(2)", user="kin_emr_retention", db=db), REFUSED)
+        self.tamper("SELECT * FROM emr_access.expire_prefix(2)", "kin", db=db)
         rejected = self.driver("recover", db=db, volume=state)
         self.assertEqual(rejected.get("error"), "SealTailMismatch", rejected)
         self.assertEqual(self.driver("seal", db=db, volume=state)["sequence"], 1)

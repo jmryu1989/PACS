@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
 import {
   ACCESS_STREAMS, AccessEvent, AccessStream, AppendOnlyAccessStore, DurableAccessReceipt, StatutoryAct, accessStreams, statutoryAct,
@@ -11,7 +12,7 @@ import {
 import { EmrSnapshot, SnapshotRequest, snapshotFromRows } from './context';
 import { FailureJournal, JournalUnavailable } from './failure-journal';
 import { RawQuery } from './manifest';
-import { AccessSeal, SealRefused, SealState } from './seal';
+import { AccessSeal, SealRefused, SealState, CommitBinding } from './seal';
 
 /**
  * The protected access ledger store (EMR-B1). A ledger fact commits in the same PostgreSQL transaction as the business
@@ -31,7 +32,7 @@ export class LedgerFailure extends Error {
   }
 }
 /** In-transaction positions of an append, one per stream. Not durable and never handed out as a receipt. */
-export interface ProvisionalEntry { readonly stream: AccessStream; readonly sequence: number; readonly hash: string; readonly contentSha256: string }
+export interface ProvisionalEntry { readonly stream: AccessStream; readonly sequence: number; readonly hash: string; readonly contentSha256: string; readonly attemptId: string; readonly previousHash: string; readonly payload: string; readonly storedAt: string }
 export interface ProvisionalAppend { readonly provisional: true; readonly eventId: string; readonly entries: readonly ProvisionalEntry[] }
 
 /** The SQLSTATE a schema emr_access function raised, read from Prisma's raw-query error. */
@@ -59,7 +60,35 @@ function entry(row: any): StoredEntry {
 
 /** Committed-fact reads of one stream's chain (outside any business transaction): what the seal proves itself against. */
 export class PrismaLedgerSql {
-  constructor(private readonly db: PrismaClient) {}
+  constructor(private readonly db: any, private readonly inSnapshot = false) {}
+
+  async snapshot<T>(work: (sql: PrismaLedgerSql) => Promise<T>): Promise<T> {
+    if (this.inSnapshot) return work(this);
+    return this.db.$transaction(async tx => {
+      await tx.$queryRaw`SELECT emr_access.enter_writer()::text`;
+      return work(new PrismaLedgerSql(tx, true));
+    }, { isolationLevel: 'RepeatableRead', timeout: 15000 });
+  }
+  async withWriterFence<T>(work: (sql: PrismaLedgerSql) => Promise<T>): Promise<T> {
+    return this.db.$transaction(async tx => {
+      await tx.$queryRaw`SELECT emr_access.fence_writers()::text`;
+      return work(new PrismaLedgerSql(tx, true));
+    }, { timeout: 30000 });
+  }
+  private marker(row: any): CommitBinding | null {
+    if (!row) return null;
+    return { stream: row.stream, chainId: row.chain_id, attemptId: row.attempt_id, bundleId: row.bundle_id, kind: row.kind,
+      eventId: row.event_id, sequence: toNumber(row.sequence), previousHash: row.previous_hash, hash: row.hash,
+      contentSha256: row.content_sha256, generation: toNumber(row.generation), proofDigest: row.proof_digest };
+  }
+  async markerForSlot(stream: AccessStream, sequence: number): Promise<CommitBinding | null> {
+    const rows = await this.db.$queryRaw`SELECT * FROM emr_access.commit_marker_for_slot(${stream}::text, ${sequence}::bigint)`;
+    return this.marker(rows[0]);
+  }
+  async markerForAttempt(stream: AccessStream, attemptId: string): Promise<CommitBinding | null> {
+    const rows = await this.db.$queryRaw`SELECT * FROM emr_access.commit_marker_for_attempt(${stream}::text, ${attemptId}::text)`;
+    return this.marker(rows[0]);
+  }
 
   async tail(stream: AccessStream): Promise<ChainTail> {
     const [row] = await this.db.$queryRaw<any[]>`SELECT chain_id::text AS chain_id, sequence, hash FROM emr_access.chain_tail(${choice(stream, ACCESS_STREAMS)}::text)`;
@@ -79,6 +108,7 @@ export class PrismaLedgerSql {
 }
 
 export class AccessLedgerStore implements AppendOnlyAccessStore {
+  private readonly attempts = new WeakMap<object, { attemptId: string; streams: readonly AccessStream[] }>();
   constructor(private readonly db: PrismaClient, readonly sql: PrismaLedgerSql, readonly seal: AccessSeal, readonly journal: FailureJournal) {}
 
   /**
@@ -89,15 +119,34 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
    */
   async appendInTransaction(tx: object, input: AccessEvent, served?: readonly ResolvedRecord[]): Promise<ProvisionalAppend> {
     const act = statutoryAct(input, served), entries: ProvisionalEntry[] = [];
+    const attemptId = randomUUID(), bundleId = randomUUID();
+    await this.enterWriter(tx);
+    this.attempts.set(tx, { attemptId, streams: accessStreams(input, served) });
     let eventId = '';
     for (const stream of accessStreams(input, served)) {
       const { event, text, contentSha256 } = canonicalPayload(input, served, stream);
       eventId = event.eventId;
-      this.seal.recordIntent(stream, event.eventId, contentSha256);
-      const result: AppendResult = await this.appendRow(tx, stream, event.eventId, text, act);
-      entries.push(Object.freeze({ stream, sequence: result.sequence, hash: result.hash, contentSha256 }));
+      this.seal.recordIntent(stream, attemptId, event.eventId, contentSha256, bundleId);
+      let result: AppendResult;
+      try { result = await this.appendRow(tx, stream, event.eventId, text, act, attemptId, bundleId); }
+      catch (error) { if (ledgerErrorCode(error) === 'EB002') refuse('AccessEventIdConflict'); throw error; }
+      if (result.replay) this.seal.abort(stream, attemptId);
+      else {
+        const binding = this.seal.reserve({ stream, chainId: result.chainId, attemptId, bundleId,
+          kind: stream === 'viewing' ? 'access' : 'history', eventId, sequence: result.sequence,
+          previousHash: result.previousHash, hash: result.hash, contentSha256 });
+        await this.bindCommit(tx, binding);
+      }
+      entries.push(Object.freeze({ stream, sequence: result.sequence, hash: result.hash, contentSha256, attemptId, previousHash: result.previousHash, payload: text, storedAt: result.storedAt }));
     }
     return Object.freeze({ provisional: true as const, eventId, entries: Object.freeze(entries) });
+  }
+  async enterWriter(tx: object): Promise<void> {
+    await (tx as RawQuery).$queryRaw`SELECT emr_access.enter_writer()::text`;
+  }
+  async bindCommit(tx: object, binding: CommitBinding): Promise<void> {
+    await (tx as RawQuery).$queryRaw`SELECT emr_access.bind_commit(${binding.stream}::text, ${binding.attemptId}::text,
+      ${binding.generation}::bigint, ${binding.proofDigest}::text)::text`;
   }
 
   /** After the caller's commit: prove every entry from storage, seal each stream, and only then mint the receipt. */
@@ -106,30 +155,43 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
     for (const provisional of appended.entries) {
       let stored: StoredEntry | null;
       try { stored = await this.sql.entryForEvent(provisional.stream, appended.eventId); } catch {
-        this.note(appended.eventId, 'ledger-unavailable', 'commit-unknown');
+        this.note(appended.eventId, 'ledger-unavailable', 'commit-unknown', provisional.attemptId, provisional.stream);
         throw new LedgerFailure('CommitUnknown');
       }
-      if (!stored) throw new LedgerFailure('AppendNotCommitted');
+      let covered: SealState | null = null;
+      if (!stored) {
+        const candidate: StoredEntry = { sequence: provisional.sequence, hash: provisional.hash, previousHash: provisional.previousHash,
+          payload: provisional.payload, contentSha256: provisional.contentSha256, storedAt: provisional.storedAt,
+          kind: provisional.stream === 'viewing' ? 'access' : 'history', eventId: appended.eventId, statutoryAct: null };
+        covered = this.seal.committedReceipt(provisional.stream, provisional.attemptId, appended.eventId, candidate);
+        if (!covered) throw new LedgerFailure('AppendNotCommitted');
+        stored = candidate;
+      }
       if (stored.sequence !== provisional.sequence || stored.hash !== provisional.hash || stored.contentSha256 !== provisional.contentSha256) refuse('DurableReceiptRefused');
       let sealed: SealState;
-      try { sealed = await this.seal.advance(provisional.stream, { sequence: stored.sequence, hash: stored.hash }); } catch (error) {
+      try { sealed = covered ?? await this.seal.advance(provisional.stream, { sequence: stored.sequence, hash: stored.hash }); } catch (error) {
         // Committed but not sealed: no receipt. The same event resent, or the next start, seals it; nothing is appended twice.
-        this.note(appended.eventId, 'ledger-unavailable', 'seal-unavailable');
+        this.note(appended.eventId, 'ledger-unavailable', 'seal-unavailable', provisional.attemptId, provisional.stream);
         throw error instanceof SealRefused && error.code !== 'SealUnavailable' ? error : new LedgerFailure('SealUnavailable');
       }
       if (provisional.stream === 'viewing') receipt = mintDurableReceipt(stored, sealed.streams.viewing);
     }
     if (!receipt) refuse('DurableReceiptRefused');
+    for (const p of appended.entries) this.seal.acknowledge(p.stream, p.attemptId);
     return receipt;
   }
 
   /** One standalone ledger fact (a provision before its body, a refusal, an end without a business change). */
   async append(input: AccessEvent, served?: readonly ResolvedRecord[]): Promise<DurableAccessReceipt> {
-    let appended: ProvisionalAppend;
+    let appended: ProvisionalAppend, callbackFailed = false, transaction: object;
     try {
-      appended = await this.db.$transaction(tx => this.appendInTransaction(tx, input, served), { timeout: 15000, maxWait: 10000 });
+      appended = await this.db.$transaction(async tx => {
+        transaction = tx;
+        try { return await this.appendInTransaction(tx, input, served); }
+        catch (error) { callbackFailed = true; throw error; }
+      }, { timeout: 15000, maxWait: 10000 });
     } catch (error) {
-      await this.settle(input, error, served);
+      await this.settleTransaction(transaction, input, error, callbackFailed, served);
       throw error;
     }
     return this.confirm(appended);
@@ -142,8 +204,15 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
    * success, never a new event. Another content stored under this ID: this attempt was refused; the first attempt's
    * intents stay.
    */
-  async settle(input: AccessEvent, error: unknown, served?: readonly ResolvedRecord[]): Promise<void> {
+  async settle(input: AccessEvent, error: unknown, served?: readonly ResolvedRecord[], rolledBack = false, attempt?: {attemptId: string; streams: readonly AccessStream[]}): Promise<void> {
     const streams = accessStreams(input, served);
+    if (rolledBack) {
+      const eventId = canonicalPayload(input, served, streams[0]).event.eventId;
+      const cause = error instanceof SealRefused ? 'seal-unavailable' : ledgerErrorCode(error) || error instanceof ContractError ? 'ledger-refused' : isConnectionError(error) ? 'ledger-unreachable' : 'business-rollback';
+      this.note(eventId, 'append-rolled-back', cause, attempt?.attemptId);
+      if (attempt) for (const stream of attempt.streams) this.seal.abort(stream, attempt.attemptId);
+      return;
+    }
     let eventId = '', unknown = false, other = false;
     for (const stream of streams) {
       const { event, contentSha256 } = canonicalPayload(input, served, stream);
@@ -153,16 +222,23 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
       if (stored === undefined || (stored && stored.contentSha256 === contentSha256)) unknown = true;
       else if (stored) other = true;
     }
-    if (unknown) { this.note(eventId, 'ledger-unavailable', 'commit-unknown'); return; }
-    if (other) { this.note(eventId, 'append-rolled-back', 'ledger-refused'); return; }
-    const cause = error instanceof SealRefused ? 'seal-unavailable' : ledgerErrorCode(error) ? 'ledger-refused' :
-      isConnectionError(error) ? 'ledger-unreachable' : 'business-rollback';
-    this.note(eventId, 'append-rolled-back', cause);
-    if (!(error instanceof ContractError && error.code === 'AccessEventIdConflict')) for (const stream of streams) this.seal.clearIntent(stream, eventId);
+    if (unknown) { this.note(eventId, 'ledger-unavailable', 'commit-unknown', attempt?.attemptId); return; }
+    if (other) { this.note(eventId, 'append-rolled-back', 'ledger-refused', attempt?.attemptId); return; }
+    // The caller may have lost COMMIT's response. Only startup's global writer fence decides absence.
+    this.note(eventId, 'ledger-unavailable', 'commit-unknown', attempt?.attemptId);
   }
 
-  private note(eventId: string, kind: 'append-rolled-back' | 'ledger-unavailable', cause: string): void {
-    try { this.journal.record(`${kind}:${eventId}:${cause}`, kind, { eventId, cause }); }
+  /** A caller that observed its callback reject can settle exactly that transaction's own attempt.
+   * A failed/unknown COMMIT response never uses this negative path merely because a SELECT is empty.
+   */
+  async settleTransaction(tx: object, input: AccessEvent, error: unknown, callbackFailed: boolean, served?: readonly ResolvedRecord[]): Promise<void> {
+    const attempt = tx && this.attempts.get(tx);
+    await this.settle(input, error, served, callbackFailed, attempt);
+    if (tx && callbackFailed) this.attempts.delete(tx);
+  }
+
+  private note(eventId: string, kind: 'append-rolled-back' | 'ledger-unavailable', cause: string, attemptId = `unassigned:${eventId}`, stream: AccessStream | 'transaction' = 'transaction'): void {
+    try { this.journal.record(`${kind}:${stream}:${attemptId}:${cause}`, kind, { eventId, cause }); }
     catch (error) {
       // Without the journal there is no surviving record of this failure: surface that, never a success.
       if (error instanceof JournalUnavailable) throw new LedgerFailure('LedgerUnreachable', error.code);
@@ -235,10 +311,10 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
   }
 
   // ── the schema functions under the caller's transaction (each value bound as a parameter) ──
-  async appendRow(tx: object, stream: AccessStream, eventId: string, payload: string, act: StatutoryAct): Promise<AppendResult> {
+  async appendRow(tx: object, stream: AccessStream, eventId: string, payload: string, act: StatutoryAct, attemptId: string, bundleId: string): Promise<AppendResult> {
     const run = tx as RawQuery;
     const [row] = await run.$queryRaw<any[]>`SELECT chain_id::text AS chain_id, sequence, previous_hash, hash, stored_at, replay
-      FROM emr_access.append_access(${choice(stream, ACCESS_STREAMS)}::text, ${eventId}::text, ${payload}::text, ${act}::text)`;
+      FROM emr_access.append_reserved(${choice(stream, ACCESS_STREAMS)}::text, ${eventId}::text, ${payload}::text, ${act}::text, ${attemptId}::text, ${bundleId}::text)`;
     return { chainId: string(row.chain_id), sequence: toNumber(row.sequence), previousHash: sha256(row.previous_hash), hash: sha256(row.hash),
       storedAt: toIso(row.stored_at), replay: row.replay === true };
   }
@@ -297,21 +373,30 @@ export async function expireAccessPrefix(retention: PrismaClient, seal: AccessSe
   }
   const plan = planExpiryPrefix(rows, now);
   if (!plan) return null;
-  const through = plan.through;
-  const proof = await seal.prepareExpiry(through);
+  const through = plan.through, attemptId = randomUUID(), bundleId = randomUUID();
   let callbackFailed = false;
+  let result: { deleted: number; checkpointSequence: number; checkpointHash: string };
   try {
-    return await retention.$transaction(async tx => {
+    result = await retention.$transaction(async tx => {
       try {
-        const [row] = await tx.$queryRaw<any[]>`SELECT deleted_count, checkpoint_sequence, checkpoint_hash FROM emr_access.expire_prefix(${through}::bigint)`;
-        if (toNumber(row.checkpoint_sequence) !== proof.checkpointSequence || toNumber(row.deleted_count) !== proof.count)
-          refuse('ExpirySnapshotChanged');
+        await tx.$queryRaw`SELECT emr_access.enter_writer()::text`;
+        await tx.$queryRaw`SELECT emr_access.lock_chain('viewing'::text)::text`;
+        const prefix = await seal.expiryPrefix(through);
+        seal.recordIntent('viewing', attemptId, null, null, bundleId);
+        const [row] = await tx.$queryRaw<any[]>`SELECT * FROM emr_access.expire_reserved(${through}::bigint, ${attemptId}::text, ${bundleId}::text)`;
+        const binding = seal.reserve({ stream: 'viewing', chainId: string(row.chain_id), attemptId, bundleId, kind: 'expiry', eventId: null,
+          sequence: toNumber(row.checkpoint_sequence), previousHash: sha256(row.previous_hash), hash: sha256(row.checkpoint_hash),
+          contentSha256: sha256(row.content_sha256) }, prefix);
+        if (toNumber(row.deleted_count) !== prefix.count) refuse('ExpirySnapshotChanged');
+        await tx.$queryRaw`SELECT emr_access.bind_commit('viewing'::text, ${attemptId}::text, ${binding.generation}::bigint, ${binding.proofDigest}::text)::text`;
         return { deleted: toNumber(row.deleted_count), checkpointSequence: toNumber(row.checkpoint_sequence), checkpointHash: sha256(row.checkpoint_hash) };
       } catch (error) { callbackFailed = true; throw error; }
-    });
+    }, { timeout: 15000 });
   } catch (error) {
-    // A rejected callback cannot COMMIT. A failure after it returns may be an unknown COMMIT: keep that proof.
-    if (callbackFailed) proof.rollback();
+    seal.recordExpiryFailure(attemptId, callbackFailed);
+    if (callbackFailed) seal.abort('viewing', attemptId);
     throw error;
   }
+  await seal.reconcileCommitted('viewing', { sequence: result.checkpointSequence, hash: result.checkpointHash });
+  return result;
 }

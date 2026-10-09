@@ -603,7 +603,7 @@ class MigrationPins(unittest.TestCase):
         provider_change = "20261007120000_provider_change"
         attempt_ids = "20261006000000_tech_note_attempt_id"
         self.assertEqual(names[names.index(U3_MIGRATION):], [U3_MIGRATION, MIGRATION_NAME, questions, image_requests, critical, assignment_scope,
-                                       audit_guard, draft_boundary, session_end, isolation, attempt_ids, isolation_call, provider_change, '20261007170000_member_db_rights', '20261007200000_designation_subjects', '20261008120000_emr_b'],
+                                       audit_guard, draft_boundary, session_end, isolation, attempt_ids, isolation_call, provider_change, '20261007170000_member_db_rights', '20261007200000_designation_subjects', '20261008120000_emr_b', '20261010120000_emr_seal_attempts'],
                          "U3 immediately before U4, U4 immediately before S5-U4a's study_questions, then S5-U4c's "
                          "study_image_requests, S7-U1a's critical_result, S7-U3a's reader_assignment_scope and "
                          "S7-AUDIT-STORE's audit_log_append_only, S7-U5's draft_revision_session_entry and its "

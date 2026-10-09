@@ -283,13 +283,13 @@ class Pure(unittest.TestCase):
         # EMR-B1 added schema emr_access (43 files): still 51 public tables and the same public rows; its 8 tables are
         # observed schema-qualified beside them with 8 synthetic rows (two chained viewing entries, the heads of both streams, a placed and
         # released hold, a reviewed clause version, an identity binding; no record target, projection or request yet).
-        self.assertEqual(len(transfer.MIGRATIONS), 43)
+        self.assertEqual(len(transfer.MIGRATIONS), 44)
         self.assertEqual(len(transfer.TABLES), 51)
         self.assertEqual(set(rows), set(transfer.TABLES))
         emr = transfer.expected_emr_rows()
         self.assertEqual(sorted(emr), transfer.EMR_TABLES)
         self.assertEqual({name: len(value) for name, value in emr.items()},
-                         {'access_entry': 2, 'access_target': 0, 'audit_projection': 0, 'chain_head': 2, 'clause_version': 1,
+                         {'access_entry': 2, 'access_target': 0, 'audit_projection': 0, 'chain_head': 2, 'clause_version': 1, 'commit_marker': 2,
                           'duty_request_event': 0, 'legal_hold_event': 2, 'member_identity': 1, 'order_fact': 1})
         first, second = emr['access_entry']
         self.assertEqual((first['previous_hash'], second['previous_hash']), ('0'*64, first['hash']))
@@ -531,7 +531,7 @@ class Pure(unittest.TestCase):
             self.assertLess(state, report)
             # EMR-B1: every expected ledger fact is seeded too, schema-qualified, and the head names the last entry.
             for table, rows in transfer.expected_emr_rows().items():
-                inserted = [text for text in sql if text.startswith('INSERT INTO emr_access.'+table+' ')]
+                inserted = [text for text in sql if 'INSERT INTO emr_access.'+table+' ' in text]
                 self.assertEqual(len(inserted), 0 if table == 'chain_head' else len(rows), table)
             [head] = [text for text in sql if 'UPDATE emr_access.chain_head' in text]
             self.assertIn(transfer.expected_emr_rows()['chain_head'][0]['hash'], head)

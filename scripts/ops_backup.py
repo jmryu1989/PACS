@@ -532,7 +532,7 @@ const {PrismaLedgerSql}=require('/app/dist/emr-runtime/store');
 const {AccessSeal}=require('/app/dist/emr-runtime/seal');
 const {FailureJournal}=require('/app/dist/emr-runtime/failure-journal');
 const db=new PrismaClient(); const dir='/var/lib/kin-emr';
-new AccessSeal(dir,new PrismaLedgerSql(db),new FailureJournal(dir)).recover()
+new AccessSeal(dir,new PrismaLedgerSql(db),new FailureJournal(dir)).recoverAtStart()
 .then(()=>console.log('EMR_RESTORE_VERIFIED')).catch(()=>{process.exitCode=1}).finally(()=>db.$disconnect());"""
             # The optional reader login may correctly be disabled in the source catalog. Use the disposable restore
             # administrator for this read-only ledger check; do not alter the preserved source role attributes.

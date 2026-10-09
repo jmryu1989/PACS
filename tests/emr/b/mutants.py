@@ -55,10 +55,8 @@ MUTANTS = {
     "M02": ("the runtime login may switch triggers off with session_replication_role", [
         (MIGRATION, END_OF_MIGRATION,
          "  emr_access.storage_placement() TO kin_emr_retention;\nGRANT SET ON PARAMETER session_replication_role TO kin_runtime;\nCOMMIT;\n")]),
-    "M03": ("the business transaction commits without its ledger fact: no receipt, no projection join", [
-        ("api/src/emr-runtime/store.ts",
-         "      const result: AppendResult = await this.appendRow(tx, stream, event.eventId, text, act);\n",
-         "      const result = { chainId: '', sequence: 0, previousHash: '', hash: '', storedAt: '', replay: false } as AppendResult;\n")]),
+    "M03": ("business COMMIT loses its original ledger append", [
+        ("api/src/emr-runtime/store.ts", "    const act = statutoryAct(input, served), entries: ProvisionalEntry[] = [];", "    return Object.freeze({provisional: true, eventId: input.eventId, entries: []});\n    const act = statutoryAct(input, served), entries: ProvisionalEntry[] = [];")]),
     "M04": ("body bytes leave before the durable receipt (and with no receipt at all)", [
         ("api/src/emr-runtime/contract.ts",
          "  return provideAfterDurableEvent(store, input, async receipt => {\n"
@@ -69,7 +67,7 @@ MUTANTS = {
          "  try { await provideAfterDurableEvent(store, input, async receipt => receipt); } catch { /* sent anyway */ }\n"
          "  return early;\n")]),
     "M05": ("a rolled-back business change leaves no failure journal record", [
-        ("api/src/emr-runtime/store.ts", "    this.note(eventId, 'append-rolled-back', cause);\n", "")]),
+        ("api/src/emr-runtime/store.ts", "      this.note(eventId, 'append-rolled-back', cause, attempt?.attemptId);\n", "")]),
     "M06": ("one display name joins two verified subjects into one member", [
         ("api/src/emr-runtime/contract.ts",
          "  const id = string(await resolve(claims.issuer, claims.subject));\n",
@@ -78,21 +76,17 @@ MUTANTS = {
         ("api/src/emr-runtime/contract.ts", "/^(audit|authref):/i.test(value.trim())", "/^(?!)/.test(value.trim())")]),
     "M08": ("a forwarded address header is believed from any peer", [
         ("api/src/emr-runtime/contract.ts", "if (!peer || !trustedPeers.has(peer) || typeof real", "if (!peer || typeof real")]),
-    "M11": ("start-up never compares the database chain with the trusted seal", [
-        ("api/src/emr-runtime/seal.ts", "        if (tail.sequence < current.sequence) throw new SealRefused('LedgerBehindSeal', stream);\n", ""),
-        ("api/src/emr-runtime/seal.ts",
-         "    const sealed = entries.find(e => e.sequence === current.sequence);\n"
-         "    if (sealed ? sealed.hash !== current.hash : current.sequence !== anchor.sequence || current.hash !== anchor.hash)\n"
-         "      throw new SealRefused('SealTailMismatch', stream);\n", "")]),
+    "M11": ("the sealed tail may be rolled back", [
+        ("api/src/emr-runtime/seal.ts", "    if (tail.sequence < current.sequence) throw new SealRefused('LedgerBehindSeal', stream);\n", ""),
+        ("api/src/emr-runtime/seal.ts", "    if (sealed.sequence !== current.sequence || sealed.hash !== current.hash) throw new SealRefused('SealTailMismatch', stream);\n", "")]),
     "M12": ("an entry before its end under the retention rule (unexpired, or bound to a record whose end is unknown) is planned into the expired prefix", [
         ("api/src/emr-runtime/contract.ts", "    if (deadline === null || deadline > now || row.held) break;\n", "    if (row.held) break;\n")]),
     "M14": ("a declared live case missing from (or added to) its test file is accepted", [
         ("scripts/emr-compose.py", "    if live != expected_live:\n", "    if live is None:\n")]),
-    "M15": ("expiry checkpoints are trusted without durable external expiry evidence", [
-        ("api/src/emr-runtime/seal.ts", "        if (this.expiryProof(entry)?.chainId !== chainId) throw new SealRefused('UnsealedEntryUnexplained', String(entry.sequence));\n", ""),
-        ("api/src/emr-runtime/seal.ts", "      if (!proof) throw new SealRefused('UnsealedEntryUnexplained', 'expiry-anchor');\n", "")]),
+    "M15": ("checkpoint authority does not require preserved external prefix proof", [
+        ("api/src/emr-runtime/seal.ts", "    if (!core || q.chainId !== chainId", "    if (!core) { const p=JSON.parse(entry.payload); return {anchor:{sequence:p.deletedThrough,hash:p.anchorHash}} as ExpiryCore; }\n    if (!core || q.chainId !== chainId")]),
     "M16": ("torn bytes remain in the good journal after quarantine", [
-        ("api/src/emr-runtime/failure-journal.ts", "fs.ftruncateSync(fd, goodLength);", "/* missing repair */")]),
+        ("api/src/emr-runtime/journal-file.ts", "fs.ftruncateSync(fd, goodLength);", "/* missing repair */")]),
     "M17": ("native clinical directions get only five years", [
         ("api/src/emr-contract/classification.ts", "original decision, including a code-only direction', clinical, chart)", "original decision, including a code-only direction', clinical, images)")]),
     "M18": ("registration with no original direction is accepted", [
@@ -113,9 +107,9 @@ MUTANTS = {
          "    if (previous.event.versionId !== e.versionId && (e.predecessor?.recordId !== previous.recordId ||\n"
          "        e.predecessor?.partId !== previous.event.versionId || e.predecessor?.sha256 !== previous.event.sha256)) refuse('OrderHistoryIncomplete');\n", "")]),
     "M25": ("expiry settles an in-flight append as absent and permanently loses its intent", [
-        ("api/src/emr-runtime/store.ts", "  const rows: RetentionRow[] = [];\n", "  await seal.recover();\n  const rows: RetentionRow[] = [];\n")]),
+        ("api/src/emr-runtime/store.ts", "  const rows: RetentionRow[] = [];\n", "  await seal.recoverAtStart();\n  const rows: RetentionRow[] = [];\n")]),
     "M26": ("a rolled-back expiry leaves reusable proof for a forged checkpoint", [
-        ("api/src/emr-runtime/store.ts", "    if (callbackFailed) proof.rollback();\n", "")]),
+        ("api/src/emr-runtime/store.ts", "    if (callbackFailed) seal.abort('viewing', attemptId);\n", "")]),
     "M27": ("a second calendar owner as a class method goes undetected", [
         ("api/src/emr-runtime/contract.ts", "export interface ChainTail", "export class DuplicateCalendar { end(at: string) { return civilPeriodEnd(at, 2); } }\nexport interface ChainTail")]),
     "M28": ("a second calendar owner as an exported arrow goes undetected", [
@@ -124,8 +118,21 @@ MUTANTS = {
         ("api/src/emr-runtime/contract.ts", "export interface ChainTail", "export const duplicateCalendar = function(at: string) { return civilPeriodEnd(at, 2); };\nexport interface ChainTail")]),
     "M30": ("a second calendar owner at module scope goes undetected", [
         ("api/src/emr-runtime/contract.ts", "export interface ChainTail", "export const duplicateCalendar = civilPeriodEnd('2026-01-01T00:00:00.000Z', 2);\nexport interface ChainTail")]),
-    "M31": ("an unresolved append may be replaced by a checkpoint using an interrupted expiry proof", [
-        ("api/src/emr-runtime/seal.ts", "        if (!await this.sql.entryForEvent(stream, eventId)) throw new SealRefused('UnsealedEntryUnexplained', 'expiry-append-conflict');\n", "")]),
+    "M31": ("stale prepared expiry proof supersedes the latest exact reservation", [
+        ("api/src/emr-runtime/seal.ts", "const core: ExpiryCore = q && state.proofs[key('viewing', q.attemptId)];",
+         "const core: ExpiryCore = Object.values(state.proofs).find((p:any)=>p.binding.sequence===entry.sequence); if(core)return core;"),
+        ("api/src/emr-runtime/seal.ts", "    const marker = await sql.markerForSlot(stream, entry.sequence);", "    if(entry.kind==='expiry')return;\n    const marker = await sql.markerForSlot(stream, entry.sequence);")]),
+    "M32": ("I1: prepared expiry proof is authoritative without marker/slot/generation binding (X-STALE)", [
+        ("api/src/emr-runtime/seal.ts", "const core: ExpiryCore = q && state.proofs[key('viewing', q.attemptId)];",
+         "const core: ExpiryCore = Object.values(state.proofs).find((p:any)=>p.binding.sequence===entry.sequence); if(core)return core;"),
+        ("api/src/emr-runtime/seal.ts", "    const marker = await sql.markerForSlot(stream, entry.sequence);", "    if(entry.kind==='expiry')return;\n    const marker = await sql.markerForSlot(stream, entry.sequence);")]),
+    "M33": ("I2: startup vetoes pending before negative settlement", [
+        ("api/src/emr-runtime/seal.ts", "    return this.sql.withWriterFence(async sql => {", "    return this.sql.withWriterFence(async sql => {\n      if(Object.keys(this.load().intents).length)throw new SealRefused('UnsealedEntryUnexplained','pending-conflict');")]),
+    "M34": ("I3: a healthy own COMMIT waits for every unrelated pending event", [
+        ("api/src/emr-runtime/seal.ts", "      try { result = await reader.snapshot(async sql => {", "      try { result = await reader.snapshot(async sql => {\n        for(const i of Object.values(state.intents))if(i.eventId&&!await sql.entryForEvent(i.stream,i.eventId))throw new SealRefused('UnsealedEntryUnexplained','pending-conflict');")]),
+    "M35": ("I4: job reports success before its own checkpoint seal", [
+        ("api/src/emr-runtime/store.ts", "  await seal.reconcileCommitted('viewing', { sequence: result.checkpointSequence, hash: result.checkpointHash });\n", "")]),
+
 }
 
 
@@ -233,6 +240,31 @@ def contract_kills(copy, cases, out, name, env):
     text = log.read_text(encoding="utf-8", errors="replace")
     return {"kind": "contract", "cases": cases, "exit": code, "seconds": seconds, "log": str(log),
             **contract_verdict(text, cases, code)}
+
+
+def invariant_witness(copy, out, name, env):
+    """Keep the designated invariant's concrete trace, not only C13's assertion exit."""
+    expected = {"M32": "I1-stale-proof", "M33": "I2", "M34": "I3", "M35": "I4"}[name]
+    result_file, log = out / (name + "-checker.json"), out / (name + "-checker.log")
+    code, seconds = run(["node", "tests/emr/b/seal_checker.cjs", str(copy),
+        str(copy / "api/node_modules/typescript"), str(result_file), "named"],
+        cwd=copy, env=env, timeout=180, log=log)
+    try:
+        result = json.loads(result_file.read_text(encoding="utf-8"))
+        witness = result["witnesses"].get(expected)
+        if name == "M33":
+            # I2's designated control is a normal E -> open A/B -> crash/start,
+            # not an incidental refusal while preparing an unrelated tamper probe.
+            restart = result["named"]["RACE-3"]
+            witness = {"trace": ["E:COMMIT", "E:success", "A:open", "B:open", "crash", "recoverAtStart"],
+                       "detail": restart} if restart.get("found") is True else None
+        healthy = name != "M32" or (not result["named"]["RACE-1"]["found"]
+            and result["named"]["RACE-2"]["restart"] == "ok" and not result["named"]["RACE-3"]["found"])
+    except (OSError, ValueError, KeyError, TypeError):
+        witness, healthy = None, False
+    return {"kind": "invariant-witness", "expected": expected, "exit": code, "seconds": seconds,
+        "killed": code == 1 and bool(witness) and healthy, "witness": witness,
+        "healthy_control": healthy, "result": str(result_file), "log": str(log)}
 
 
 def leftovers():
@@ -389,6 +421,8 @@ def main(argv=None):
                     live = [case for case in kill if case.startswith("L")]
                     if contract:
                         runs.append(contract_kills(copy, contract, out, name, env))
+                    if name in {"M32", "M33", "M34", "M35"}:
+                        runs.append(invariant_witness(copy, out, name, env))
                     if live and args.contract_only:
                         runs.append({"kind": "live", "cases": live, "killed": None, "status": "not_run", "reason": "--contract-only"})
                     elif live:

@@ -15,8 +15,8 @@ const os = require('node:os');
 const { createHash, randomUUID } = require('node:crypto');
 
 if (process.argv.includes('--emr-b-live')) {
-  liveDriver().then(result => { process.stdout.write('EMR_B_RESULT ' + JSON.stringify(result) + '\n'); process.exit(0); },
-    error => { process.stdout.write('EMR_B_RESULT ' + JSON.stringify({ error: errorCode(error), name: error?.name ?? null, problems: error?.problems ?? null }) + '\n'); process.exit(0); });
+  liveDriver().then(result => { fs.writeSync(1, 'EMR_B_RESULT ' + JSON.stringify(result) + '\n'); process.exit(0); },
+    error => { fs.writeSync(1, 'EMR_B_RESULT ' + JSON.stringify({ error: errorCode(error), name: error?.name ?? null, problems: error?.problems ?? null }) + '\n'); process.exit(0); });
 } else {
   contractSuite();
 }
@@ -85,7 +85,19 @@ async function liveDriver() {
       try {
         const journal = new FailureJournal(process.env.KIN_EMR_STATE_DIR);
         const seal = new AccessSeal(process.env.KIN_EMR_STATE_DIR, new RT.PrismaLedgerSql(reader), journal);
-        return await RT.expireAccessPrefix(prisma, seal, args.now ?? new Date().toISOString());
+        const retention = args.exit ? {
+          $queryRaw: prisma.$queryRaw.bind(prisma),
+          $transaction: async (work, options) => {
+            const result = await prisma.$transaction(async tx => {
+              const value = await work(tx);
+              if (args.exit === 'before-commit') process.exit(0);
+              return value;
+            }, options);
+            if (args.exit === 'after-commit') process.exit(0);
+            return result;
+          },
+        } : prisma;
+        return await RT.expireAccessPrefix(retention, seal, args.now ?? new Date().toISOString());
       } finally { await reader.$disconnect(); }
     }
     if (operation === 'civil') return args.at.map(at => C.accessRetentionFloor(at));
@@ -93,16 +105,52 @@ async function liveDriver() {
     const sql = new RT.PrismaLedgerSql(prisma);
     const journal = new FailureJournal(state);
     const seal = new AccessSeal(state, sql, journal);
-    const store = new RT.AccessLedgerStore(prisma, sql, seal, journal);
+    const transactions = operation === 'provide' && args.sealAfterCommit ? {
+      $transaction: async (work, options) => {
+        const result = await prisma.$transaction(work, options);
+        fs.chmodSync(path.join(state,'seal'),0o500);
+        return result;
+      },
+    } : prisma;
+    const store = new RT.AccessLedgerStore(transactions, sql, seal, journal);
     // The viewing stream's seal flattened beside both streams, so a caller reads the stream every event is in directly.
     const flat = s => s === 'absent' ? 'absent' : { ...s.streams.viewing, streams: s.streams, sealedAt: s.sealedAt };
-    if (operation === 'recover') { const r = await seal.recover(); return { ...r, seal: flat(r.seal) }; }
+    if (operation === 'recover') { const r = await seal.recoverAtStart(); return { ...r, seal: flat(r.seal) }; }
     // A process that writes ledger facts is a started server: its start-up check runs first (B2 calls it before listen).
-    if (['append', 'business', 'provide'].includes(operation)) await seal.recover();
+    if (['append', 'business', 'writer-fence'].includes(operation)) await seal.recoverAtStart();
     if (operation === 'seal') return flat(seal.read());
     if (operation === 'journal-add') return journal.record(args.id, 'append-rolled-back', { eventId: args.id, cause: 'business-rollback' });
     if (operation === 'journal') return journal.all().map(record => ({ id: record.id, kind: record.kind, body: record.body }));
     const stream = args.stream ?? 'viewing';
+    if (operation === 'writer-fence') {
+      let release, staged, provisional;
+      const held = new Promise(resolve => { release = resolve; });
+      const ready = new Promise(resolve => { staged = resolve; });
+      const writing = prisma.$transaction(async tx => {
+        provisional = await store.appendInTransaction(tx, authEvent(A));
+        staged(); await held;
+      }, { timeout: 15000 });
+      await Promise.race([ready, writing]);
+      const recovering = seal.recoverAtStart();
+      let waiting = false;
+      try {
+        const deadline = Date.now() + 5000;
+        while (!waiting && Date.now() < deadline) {
+          const [row] = await prisma.$queryRaw`SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=77104 AND objid=1 AND mode='ExclusiveLock' AND NOT granted) AS waiting`;
+          waiting = row.waiting;
+        }
+      } finally { release(); }
+      await writing;
+      const recovery = await recovering;
+      const receipt = await store.confirm(provisional);
+      const first = journal.coordinator, second = new FailureJournal(state).coordinator;
+      const stale = first.call('read'), revision = stale.revision;
+      stale.revision++;
+      const installed = second.call('compare-and-set', {before:revision,state:stale});
+      const replay = first.call('compare-and-set', {before:revision,state:stale});
+      return { waiting, notCommitted: recovery.notCommitted, receipt,
+        staleWriterRefused: installed.changed && !replay.changed };
+    }
     if (operation === 'tail') return await sql.tail(stream);
     if (operation === 'entries') {
       const entries = [];
@@ -119,9 +167,11 @@ async function liveDriver() {
     if (operation === 'business') {
       // A business change (the legacy AuditLog row) and its ledger fact in one transaction; `fail` injects a failure.
       const event = args.event ?? authEvent(A);
-      let appended;
+      let appended, transaction, callbackFailed = false;
       try {
         appended = await prisma.$transaction(async tx => {
+          transaction = tx;
+          try {
           const [row] = await tx.$queryRaw`INSERT INTO "AuditLog" (actor, action, target, detail) VALUES ('SYNTHETIC-emr-b', 'auth.login', 'SYNTHETIC-sub', ${'{"synthetic":true}'}) RETURNING id`;
           if (args.fail === 'business-before-append') throw Object.assign(new Error('synthetic business refusal'), { code: 'SyntheticBusinessRefusal' });
           const made = await store.appendInTransaction(tx, event);
@@ -129,13 +179,19 @@ async function liveDriver() {
           if (args.fail === 'business-after-append') throw Object.assign(new Error('synthetic business refusal'), { code: 'SyntheticBusinessRefusal' });
           if (args.exit === 'before-commit') process.exit(0);
           return made;
+          } catch (error) { callbackFailed = true; throw error; }
         }, { timeout: 15000, maxWait: 10000 });
       } catch (error) {
         let settled = null;
-        try { await store.settle(event, error); } catch (settleError) { settled = errorCode(settleError); }
+        try { await store.settleTransaction(transaction, event, error, callbackFailed); } catch (settleError) { settled = errorCode(settleError); }
         return { eventId: event.eventId, error: errorCode(error), settled };
       }
       if (args.exit === 'after-commit') process.exit(0);
+      if (args.exit === 'after-viewing-seal') {
+        const first = appended.entries.find(entry => entry.stream === 'viewing');
+        await seal.advance('viewing', {sequence:first.sequence,hash:first.hash});
+        process.exit(0);
+      }
       try { return { eventId: event.eventId, receipt: await store.confirm(appended) }; }
       catch (error) { return { eventId: event.eventId, committed: true, error: errorCode(error) }; }
     }
@@ -144,6 +200,7 @@ async function liveDriver() {
       const event = args.event ?? provideEvent(A);
       const order = [];
       try {
+        await seal.recoverAtStart();
         const body = await C.provideAfterReceipt(store, event, async receipt => {
           const stored = await sql.entryForEvent('viewing', event.eventId);
           const sealed = seal.read();
@@ -218,7 +275,9 @@ function contractSuite() {
   const M = load('emr-contract/composition.ts'), Cl = load('emr-contract/classification.ts'), R = load('emr-contract/routes.ts');
   const D = load('emr-contract/lawful-defaults.ts'), A = load('emr-contract/access-event.ts'), V = load('emr-contract/validation.ts');
   const C = load('emr-runtime/contract.ts'), CTX = load('emr-runtime/context.ts'), RT = load('emr-runtime/store.ts');
-  const J = load('emr-runtime/failure-journal.ts'), S = load('emr-runtime/seal.ts'), MF = load('emr-runtime/manifest.ts');
+  const J0 = load('emr-runtime/failure-journal.ts'), CO = load('emr-runtime/coordinator.ts'), EW = load('emr-runtime/external-writer.ts');
+  const J = {...J0, FailureJournal: class extends J0.FailureJournal { constructor(dir) { super(dir, new CO.StateCoordinator(dir, EW.executeExternal)); } }};
+  const S = load('emr-runtime/seal.ts'), MF = load('emr-runtime/manifest.ts');
   const declaration = JSON.parse(fs.readFileSync(path.join(root, 'emr/units/b.json'), 'utf8'));
   const python = process.env.KIN_EMR_PYTHON || 'python3';
 
@@ -247,19 +306,19 @@ function contractSuite() {
   class MemoryLedger {
     constructor() {
       this.streams = Object.fromEntries(A.ACCESS_STREAMS.map(s => [s, { chainId: randomUUID(), head: { sequence: 0, hash: '0'.repeat(64) }, entries: [] }]));
-      this.holdRowsList = []; this.requests = []; this.clauses = []; this.down = false;
+      this.markers = []; this.holdRowsList = []; this.requests = []; this.clauses = []; this.down = false;
     }
     get entries() { return this.streams.viewing.entries; } set entries(value) { this.streams.viewing.entries = value; }
     get head() { return this.streams.viewing.head; } set head(value) { this.streams.viewing.head = value; }
     get chainId() { return this.streams.viewing.chainId; }
-    begin() { return { staged: { viewing: [], history: [] }, head: {}, holds: [], requests: [] }; }
+    begin() { return { staged: { viewing: [], history: [] }, head: {}, holds: [], requests: [], markers: [] }; }
     commit(tx) {
       for (const s of A.ACCESS_STREAMS) { this.streams[s].entries.push(...tx.staged[s]); if (tx.head[s]) this.streams[s].head = tx.head[s]; }
-      this.holdRowsList.push(...tx.holds); this.requests.push(...tx.requests);
+      this.markers.push(...tx.markers); this.holdRowsList.push(...tx.holds); this.requests.push(...tx.requests);
     }
     visible(tx, stream = 'viewing') { return tx ? [...this.streams[stream].entries, ...tx.staged[stream]] : this.streams[stream].entries; }
     guard() { if (this.down) throw Object.assign(new Error("Can't reach database server"), { code: 'P1001' }); }
-    append(tx, stream, eventId, payload, act) {
+    append(tx, stream, eventId, payload, act, attemptId, bundleId) {
       this.guard();
       const doc = JSON.parse(payload), kind = stream === 'history' ? 'history' : 'access';
       const targets = Array.isArray(doc.event?.targets) ? doc.event.targets.flatMap((t, index) => t.recordId?.status === 'not-applicable' ? [] : [{ index, kind: t.kind,
@@ -276,12 +335,15 @@ function contractSuite() {
       tx.staged[stream].push({ sequence, previousHash: head.hash, hash, kind, statutoryAct: act, eventId, payload,
         contentSha256: createHash('sha256').update(payload).digest('hex'), storedAt, occurredAt: doc.event.occurredAt, targets });
       tx.head[stream] = { sequence, hash };
+      if (attemptId) tx.markers.push({stream, chainId:chain.chainId, attemptId, bundleId, kind, eventId, sequence,
+        previousHash:head.hash, hash, contentSha256:createHash('sha256').update(payload).digest('hex'), generation:0, proofDigest:null});
       return { chainId: chain.chainId, sequence, previousHash: head.hash, hash, storedAt, replay: false };
     }
     checkpoint(through, at) {
       const anchor = this.entries.find(e => e.sequence === through);
       const count = this.entries.filter(e => e.sequence <= through).length;
       this.entries = this.entries.filter(e => e.sequence > through);
+      this.markers = this.markers.filter(m => m.stream !== "viewing" || m.sequence > through);
       const payload = C.checkpointPayload(at, through, count, anchor.hash), sequence = this.head.sequence + 1;
       const hash = C.entryHash(sequence, this.head.hash, payload);
       this.entries.push({ sequence, previousHash: this.head.hash, hash, kind: 'expiry', statutoryAct: null, eventId: null, payload, contentSha256: createHash('sha256').update(payload).digest('hex'), storedAt: at, occurredAt: at, targets: [] });
@@ -290,19 +352,25 @@ function contractSuite() {
     stored(e) { return { sequence: e.sequence, previousHash: e.previousHash, hash: e.hash, kind: e.kind, statutoryAct: e.statutoryAct, eventId: e.eventId, payload: e.payload, contentSha256: e.contentSha256, storedAt: e.storedAt }; }
   }
   function memorySql(ledger) {
-    return {
+    const sql = {
+      snapshot: async work => work(sql), withWriterFence: async work => work(sql),
+      markerForSlot: async (stream, sequence) => ledger.markers.find(m => m.stream === stream && m.sequence === sequence) ?? null,
+      markerForAttempt: async (stream, attemptId) => ledger.markers.find(m => m.stream === stream && m.attemptId === attemptId) ?? null,
       tail: async stream => { ledger.guard(); return { chainId: ledger.streams[stream].chainId, ...ledger.streams[stream].head }; },
       entriesAfter: async (stream, after, limit) => { ledger.guard(); return ledger.streams[stream].entries.filter(e => e.sequence > after).sort((a, b) => a.sequence - b.sequence).slice(0, limit).map(e => ledger.stored(e)); },
       entryForEvent: async (stream, eventId) => { ledger.guard(); const e = ledger.streams[stream].entries.find(x => x.eventId === eventId); return e ? ledger.stored(e) : null; },
       placement: async () => [],
     };
+    return sql;
   }
   class MemoryStore extends RT.AccessLedgerStore {
     constructor(ledger, seal, journal) {
       super({ $transaction: async work => { const tx = ledger.begin(); const value = await work(tx); ledger.commit(tx); return value; } }, memorySql(ledger), seal, journal);
       this.ledger = ledger;
     }
-    async appendRow(tx, stream, eventId, payload, act) { return this.ledger.append(tx, stream, eventId, payload, act); }
+    async enterWriter() {}
+    async bindCommit(tx, binding) { const m=tx.markers.find(m=>m.attemptId===binding.attemptId&&m.stream===binding.stream);Object.assign(m,binding); }
+    async appendRow(tx, stream, eventId, payload, act, attemptId, bundleId) { return this.ledger.append(tx, stream, eventId, payload, act, attemptId, bundleId); }
     async holdRows(tx, recordId) { this.ledger.guard(); return [...this.ledger.holdRowsList, ...(tx.holds ?? [])].filter(r => r.recordId === recordId).map(({ holdId, phase, body }) => ({ holdId, phase, body })); }
     async placeHoldRow(tx, holdId, recordId, body) { tx.holds.push({ holdId, phase: 'placed', recordId, body }); }
     async releaseHoldRow(tx, holdId, body) { const placed = [...this.ledger.holdRowsList, ...tx.holds].find(r => r.holdId === holdId && r.phase === 'placed'); tx.holds.push({ holdId, phase: 'released', recordId: placed.recordId, body }); }
@@ -316,7 +384,7 @@ function contractSuite() {
     const state = fs.mkdtempSync(path.join(os.tmpdir(), 'emr-b-state-'));
     const ledger = new MemoryLedger(), journal = new J.FailureJournal(state);
     const seal = new S.AccessSeal(state, memorySql(ledger), journal);
-    const started = await seal.recover();
+    const started = await seal.recoverAtStart();
     assert.deepEqual([started.seal, started.recovered, started.notCommitted], [seal.read(), 0, 0]);
     return { state, ledger, journal, seal, store: new MemoryStore(ledger, seal, journal),
       restart() { const j = new J.FailureJournal(state); const s = new S.AccessSeal(state, memorySql(ledger), j); return { journal: j, seal: s, store: new MemoryStore(ledger, s, j) }; },
@@ -541,7 +609,7 @@ function contractSuite() {
       let previous = A.ACCESS_CHAIN_GENESIS;
       for (const entry of entries) { const sealed = A.sealAccessEvent(previous, JSON.parse(entry.payload).event); assert.equal(sealed.hash, entry.hash); previous = { sequence: sealed.sequence, hash: sealed.hash }; }
       assert.deepEqual(w.seal.read() && { sequence: w.seal.read().streams.viewing.sequence, hash: w.seal.read().streams.viewing.hash }, tail);
-      assert.deepEqual((await w.restart().seal.recover()).recovered, 0);
+      assert.deepEqual((await w.restart().seal.recoverAtStart()).recovered, 0);
       const drop = (list, sequence) => list.filter(e => e.sequence !== sequence);
       assert.equal(C.chainViolation(A.ACCESS_CHAIN_GENESIS, drop(entries, 3), tail), 'missing-entry');
       assert.equal(C.chainViolation(A.ACCESS_CHAIN_GENESIS, drop(entries, 5), tail), 'missing-tail');
@@ -552,26 +620,26 @@ function contractSuite() {
       // The database end behind the trusted tail (a deleted tail) refuses start.
       const saved = w.ledger.entries.slice(), head = { ...w.ledger.head };
       w.ledger.entries = saved.slice(0, 4); w.ledger.head = { sequence: 4, hash: saved[3].hash };
-      await rejects(w.restart().seal.recover(), 'LedgerBehindSeal');
+      await rejects(w.restart().seal.recoverAtStart(), 'LedgerBehindSeal');
       w.ledger.entries = saved.filter(e => e.sequence !== 3); w.ledger.head = head;
-      await rejects(w.restart().seal.recover(), 'LedgerChainBroken');
+      await rejects(w.restart().seal.recoverAtStart(), 'LedgerChainBroken');
       w.ledger.entries = saved; w.ledger.head = head;
       // A commit without its seal: an explained entry is recovered once; an unexplained one refuses start.
       const pending = authEvent(A), tx = w.ledger.begin();
       await w.store.appendInTransaction(tx, pending); w.ledger.commit(tx);
-      const restarted = w.restart(), recovered = await restarted.seal.recover();
+      const restarted = w.restart(), recovered = await restarted.seal.recoverAtStart();
       assert.equal(recovered.recovered, 1); assert.equal(restarted.seal.read().streams.viewing.sequence, 6);
       assert(restarted.journal.all().some(r => r.kind === 'seal-recovered' && r.body.toSequence === 6));
       const forged = authEvent(A), forgedTx = w.ledger.begin();
       w.ledger.append(forgedTx, 'viewing', forged.eventId, C.canonicalPayload(forged).text, 'none'); w.ledger.commit(forgedTx);
-      await rejects(w.restart().seal.recover(), 'UnsealedEntryUnexplained');
+      await rejects(w.restart().seal.recoverAtStart(), 'UnsealedEntryUnexplained');
       w.ledger.entries.pop(); w.ledger.head = { sequence: 6, hash: w.ledger.entries.at(-1).hash };
       // A damaged or missing seal is never rebuilt from the database end.
       const sealFile = path.join(w.state, 'seal', 'tail.json'), good = fs.readFileSync(sealFile, 'utf8');
       fs.writeFileSync(sealFile, good.replace(/"sequence":6/, '"sequence":7'));
-      await rejects(w.restart().seal.recover(), 'SealCorrupt');
+      await rejects(w.restart().seal.recoverAtStart(), 'SealTailMismatch');
       fs.rmSync(sealFile);
-      await rejects(w.restart().seal.recover(), 'SealMissing');
+      await rejects(w.restart().seal.recoverAtStart(), 'SealMissing');
       assert.equal(fs.existsSync(sealFile), false);
     } finally { w.cleanup(); }
   });
@@ -625,14 +693,13 @@ function contractSuite() {
       const through = w.ledger.entries[1], previous = { ...w.ledger.head };
       const expected = A.sealAccessExpiry(previous, { sequence: through.sequence, hash: through.hash }, 2, at);
       assert.equal(C.checkpointPayload(at, 2, 2, through.hash), JSON.stringify(expected.payload));
-      await w.seal.prepareExpiry(2);
-      w.ledger.checkpoint(2, at);
+      await stageExpiry(w,2,at);
       assert.equal(w.ledger.entries.at(-1).hash, expected.hash);
       const entries = w.ledger.entries.map(e => w.ledger.stored(e));
       assert.deepEqual(C.retainedAnchor(entries), { sequence: 2, hash: through.hash });
       assert.equal(C.chainViolation(C.retainedAnchor(entries), entries, w.ledger.head), null);
       assert.equal(C.chainViolation(C.retainedAnchor(entries), entries, w.ledger.head, 'history'), 'foreign-stream', 'a viewing entry never verifies as history');
-      assert.equal((await w.restart().seal.recover()).recovered, 1, 'the retention checkpoint is sealed like any committed entry');
+      assert.equal((await w.restart().seal.recoverAtStart()).recovered, 1, 'the retention checkpoint is sealed like any committed entry');
       // A middle entry removed without its checkpoint is a deletion, not an expiry.
       const middle = entries.filter(e => e.sequence !== 4);
       assert.equal(C.chainViolation(C.retainedAnchor(middle), middle, w.ledger.head), 'missing-entry');
@@ -738,133 +805,89 @@ function contractSuite() {
   });
 
   test('C13 expiry recovery needs external proof of the deleted prefix and its trusted seal, including interrupted recovery', async () => {
-    const at = '2035-01-01T00:00:00.000Z';
-    for (const interrupt of ['before-delete', 'after-delete', 'after-seal']) {
-      const w = await world();
-      try {
-        await w.store.append(authEvent(A)); await w.store.append(authEvent(A));
-        await w.seal.prepareExpiry(1);
-        if (interrupt === 'before-delete') {
-          assert.equal((await w.restart().seal.recover()).recovered, 0);
-          await w.seal.prepareExpiry(1);
-        }
-        w.ledger.checkpoint(1, at);
-        if (interrupt === 'after-seal') await w.seal.advance('viewing', w.ledger.head);
-        const restarted = w.restart();
-        assert.equal((await restarted.seal.recover()).recovered, interrupt === 'after-seal' ? 0 : 1);
-        assert.equal((await w.restart().seal.recover()).recovered, 0);
-        // Successive expiries may remove the old checkpoint only after its replacement proof is durable.
-        await restarted.seal.prepareExpiry(2); w.ledger.checkpoint(2, at);
-        assert.equal((await w.restart().seal.recover()).recovered, 1);
-      } finally { w.cleanup(); }
-    }
-    // Review's counterexample: trusted seal 1; an attacker supplies DB anchor 2 / checkpoint 3.
-    const w = await world();
-    try {
-      await w.store.append(authEvent(A));
-      const tx = w.ledger.begin(), forged = authEvent(A);
-      w.ledger.append(tx, 'viewing', forged.eventId, C.canonicalPayload(forged).text, 'none'); w.ledger.commit(tx);
-      w.ledger.checkpoint(2, at);
-      await rejects(w.restart().seal.recover(), 'SealTailMismatch');
-      assert.equal(w.seal.read().streams.viewing.sequence, 1);
-    } finally { w.cleanup(); }
-    // Even an anchor behind the seal cannot justify a checkpoint with no external expiry intent.
-    const u = await world();
-    try {
-      await u.store.append(authEvent(A)); await u.store.append(authEvent(A));
-      u.ledger.checkpoint(1, at);
-      await rejects(u.restart().seal.recover(), 'UnsealedEntryUnexplained');
-    } finally { u.cleanup(); }
-    // The transaction model exposes the two head-lock orders and rolls back only the deleting transaction.
-    const retention = (w, before = async () => {}, fail = null) => ({
-      $queryRaw: async (_sql, after) => w.ledger.entries.filter(e => e.sequence > after).map(e => ({
-        sequence: e.sequence, hash: e.hash, kind: e.kind, occurred_at: e.occurredAt, held: false })),
-      $transaction: async work => {
-        await before();
-        const entries = structuredClone(w.ledger.entries), head = { ...w.ledger.head };
-        let result;
+    const checked=spawnSync(process.execPath,[path.join(__dirname,'seal_checker.cjs'),root,path.join(api,'node_modules/typescript'),'', 'named'],{encoding:'utf8',timeout:180000});
+    if(checked.error||checked.status===2||checked.status===3)throw new Error('seal checker harness failed: '+checked.stderr);
+      assert.equal(checked.status,0,'seal invariant behaviour: '+checked.stdout);
+      // Already-applied v2 bytes must upgrade without manufacturing authority for an unsealed suffix.
+      for (const suffix of [false, true]) {
+        const w = await world();
         try {
-          result = await work({ $queryRaw: async (_sql, through) => {
-            if (fail === 'rollback') throw ledgerError('EB005');
-            const count = w.ledger.entries.filter(e => e.sequence <= through).length;
-            w.ledger.checkpoint(through, at);
-            return [{ deleted_count: count, checkpoint_sequence: w.ledger.head.sequence, checkpoint_hash: w.ledger.head.hash }];
-          } });
-        } catch (error) { w.ledger.entries = entries; w.ledger.head = head; throw error; }
-        if (fail === 'commit-unknown') throw Object.assign(new Error('lost commit response'), { code: 'P1017' });
-        return result;
-      },
-    });
-    for (const order of ['nothing-expired', 'append-first', 'expiry-first', 'unsealed-append']) {
-      const w = await world();
-      try {
-        await w.store.append(authEvent(A));
-        const event = authEvent(A), tx = w.ledger.begin();
-        let provisional;
-        if (order === 'expiry-first') {
-          const payload = C.canonicalPayload(event);
-          w.seal.recordIntent('viewing', event.eventId, payload.contentSha256);
-        } else provisional = await w.store.appendInTransaction(tx, event);
-        if (order === 'nothing-expired') {
-          assert.equal(await RT.expireAccessPrefix(retention(w), w.seal, '2026-10-10T00:00:00.000Z'), null);
-          w.ledger.commit(tx);
-        } else if (order === 'append-first') {
-          await rejects(RT.expireAccessPrefix(retention(w, async () => w.ledger.commit(tx)), w.seal, at), 'ExpirySnapshotChanged');
-          assert.equal(w.ledger.entries.length, 2, 'the deleting rollback preserves both access facts');
-        } else if (order === 'unsealed-append') {
-          w.ledger.commit(tx);
-          await rejects(RT.expireAccessPrefix(retention(w), w.seal, at), 'SealTailMismatch');
-        } else {
-          assert.equal((await RT.expireAccessPrefix(retention(w), w.seal, at)).deleted, 1);
-          await rejects(w.seal.advance('viewing', w.ledger.head), 'UnsealedEntryUnexplained');
-          provisional = await w.store.appendInTransaction(tx, event); w.ledger.commit(tx);
-        }
-        assert(!w.journal.all().some(r => r.kind === 'commit-not-found'), 'an active intent is never settled by expiry');
-        assert.equal((await w.store.confirm(provisional)).eventId, event.eventId, order);
-        assert.equal((await w.store.append(authEvent(A))).eventId !== event.eventId, true, 'later appends remain available');
-        assert.equal((await w.restart().seal.recover()).notCommitted, 0, 'restart accepts the complete chain');
-      } finally { w.cleanup(); }
-    }
-    for (const failure of ['rollback', 'commit-unknown']) {
+          await w.store.append(authEvent(A));
+          const old = w.seal.read(), canonical = {streams:old.streams,sealedAt:old.sealedAt};
+          if (suffix) {
+            const tx = w.ledger.begin();
+            await w.store.appendInTransaction(tx, authEvent(A));w.ledger.commit(tx);
+          }
+          fs.unlinkSync(path.join(w.state,'seal','settlement.json'));
+          fs.writeFileSync(path.join(w.state,'seal','tail.json'),JSON.stringify({format:2,...canonical,digest:createHash('sha256').update(JSON.stringify(canonical)).digest('hex')}));
+          if (suffix) await assert.rejects(w.restart().seal.recoverAtStart(),error=>error.code==='SealTailMismatch');
+          else {
+            assert.equal((await w.restart().seal.recoverAtStart()).recovered,0);
+            assert(C.isDurableReceipt(await w.store.append(authEvent(A))));
+            assert.equal(w.seal.read().streams.viewing.sequence,2);
+          }
+        } finally { w.cleanup(); }
+      }
+    const at = '2035-01-01T00:00:00.000Z';
+    for (const cut of ['before-delete', 'after-delete', 'after-seal']) {
       const w = await world();
       try {
         await w.store.append(authEvent(A)); await w.store.append(authEvent(A));
-        await rejects(RT.expireAccessPrefix(retention(w, undefined, failure), w.seal, at), failure === 'rollback' ? 'EB005' : 'P1017');
-        if (failure === 'rollback') {
-          const before = structuredClone(w.ledger.entries), head = { ...w.ledger.head };
-          w.ledger.checkpoint(2, at); // DB replacement must not reuse a rolled-back job's proof (X-STALE).
-          await rejects(w.restart().seal.recover(), 'UnsealedEntryUnexplained');
-          w.ledger.entries = before; w.ledger.head = head;
-          assert.equal((await RT.expireAccessPrefix(retention(w), w.seal, at)).deleted, 2, 'a fresh attempt can succeed');
-        }
-        assert.equal((await w.restart().seal.recover()).recovered, 1, 'unknown COMMIT keeps proof for recovery');
+        const saved = {entries:structuredClone(w.ledger.entries),head:{...w.ledger.head},markers:structuredClone(w.ledger.markers)};
+        await stageExpiry(w,1,at);
+        if(cut==='before-delete') Object.assign(w.ledger,saved);
+        if(cut==='after-seal') await w.seal.advance('viewing',w.ledger.head);
+        const r=await w.restart().seal.recoverAtStart();
+        assert.equal(r.recovered,cut==='after-delete'?1:0);
+        assert.equal((await w.restart().seal.recoverAtStart()).recovered,0);
+        await w.store.append(authEvent(A));
       } finally { w.cleanup(); }
     }
-    const swapped = await world();
+    for(const attack of ['missing-marker','wrong-marker','missing-proof','wrong-proof','stale-slot','different-checkpoint','chain-id','tail-replay']) {
+      const w=await world();
+      try {
+        const oldTail=fs.readFileSync(path.join(w.state,'seal','tail.json'));
+        await w.store.append(authEvent(A));await w.store.append(authEvent(A));
+        await stageExpiry(w,1,at);
+        const marker=w.ledger.markers.at(-1);
+        if(attack==='missing-marker')w.ledger.markers.pop();
+        if(attack==='wrong-marker')marker.attemptId=randomUUID();
+        if(attack==='missing-proof'||attack==='wrong-proof'||attack==='stale-slot') {
+          const co=w.journal.coordinator,state=co.call('read'),id='viewing:'+marker.attemptId;
+          if(attack==='missing-proof')delete state.proofs[id];
+          if(attack==='wrong-proof')state.proofs[id].binding.hash='f'.repeat(64);
+          if(attack==='stale-slot')state.slots['viewing:'+marker.sequence].generation++;
+          const before=state.revision++;co.call('compare-and-set',{before,state});
+        }
+        if(attack==='different-checkpoint') { const e=w.ledger.entries.at(-1);e.payload=e.payload.replace('2035','2036');e.contentSha256=createHash('sha256').update(e.payload).digest('hex');e.hash=C.entryHash(e.sequence,e.previousHash,e.payload);w.ledger.head.hash=e.hash; }
+        if(attack==='chain-id')w.ledger.streams.viewing.chainId=randomUUID();
+        if(attack==='tail-replay')fs.writeFileSync(path.join(w.state,'seal','tail.json'),oldTail);
+        const before=structuredClone(w.ledger.entries);
+        await assert.rejects(w.restart().seal.recoverAtStart(),e=>['UnsealedEntryUnexplained','SealChainMismatch','SealTailMismatch','LedgerChainBroken'].includes(e.code),attack);
+        assert.deepEqual(w.ledger.entries,before,'refusal preserves DB evidence');
+      } finally {w.cleanup();}
+    }
+    // Positive checkpoint recovery and an unrelated open request must coexist with stale-proof refusal.
+    const w=await world();
     try {
-      for (let i = 0; i < 3; i++) await swapped.store.append(authEvent(A));
-      await swapped.seal.prepareExpiry(1);
-      const before = structuredClone(swapped.ledger.entries), head = { ...swapped.ledger.head };
-      const event = authEvent(A), tx = swapped.ledger.begin();
-      await swapped.store.appendInTransaction(tx, event); swapped.ledger.commit(tx);
-      swapped.ledger.entries = before; swapped.ledger.head = head; // the DB replaces an unsealed append (X-STALE)
-      swapped.ledger.checkpoint(1, at);
-      await rejects(swapped.seal.advance('viewing', swapped.ledger.head), 'UnsealedEntryUnexplained');
-      await rejects(swapped.restart().seal.recover(), 'UnsealedEntryUnexplained');
-      assert(!swapped.journal.all().some(r => r.kind === 'commit-not-found'), 'a conflicting checkpoint is not proof of rollback');
-    } finally { swapped.cleanup(); }
-    const pending = await world();
-    try {
-      await pending.store.append(authEvent(A));
-      const proof = await pending.seal.prepareExpiry(1);
-      await rejects(pending.restart().seal.prepareExpiry(1), 'SealUnavailable');
-      proof.rollback();
-      await pending.seal.prepareExpiry(1);
-      pending.ledger.checkpoint(1, at);
-      pending.ledger.entries[0].payload = '{malformed database payload';
-      await rejects(pending.restart().seal.recover(), 'LedgerChainBroken');
-    } finally { pending.cleanup(); }
+      await w.store.append(authEvent(A)); await stageExpiry(w,1,at);
+      const open=authEvent(A),tx=w.ledger.begin();await w.store.appendInTransaction(tx,open);
+      const own=authEvent(A);assert.equal((await w.store.append(own)).eventId,own.eventId);
+      assert(!w.journal.all().some(r=>r.kind==='commit-not-found'));
+      await w.restart().seal.recoverAtStart();
+      await stageExpiry(w,2,'2036-01-01T00:00:00.000Z'); await w.seal.advance('viewing',w.ledger.head);
+      assert.equal((await w.restart().seal.recoverAtStart()).recovered,0);
+    } finally {w.cleanup();}
   });
+
+  async function stageExpiry(w,through,at) {
+    const attemptId=randomUUID(),bundleId=randomUUID(),prefix=await w.seal.expiryPrefix(through);
+    w.seal.recordIntent('viewing',attemptId,null,null,bundleId);w.ledger.checkpoint(through,at);
+    const e=w.ledger.entries.at(-1);
+    const binding=w.seal.reserve({stream:'viewing',chainId:w.ledger.chainId,attemptId,bundleId,kind:'expiry',eventId:null,
+      sequence:e.sequence,previousHash:e.previousHash,hash:e.hash,contentSha256:e.contentSha256},prefix);
+    w.ledger.markers.push(binding); return binding;
+  }
 
   test('C14 a torn journal preserves its exact damaged bytes separately and remains appendable across repeated restarts', () => {
     const state = fs.mkdtempSync(path.join(os.tmpdir(), 'emr-journal-r2-'));

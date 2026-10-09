@@ -204,6 +204,19 @@ function fixedPrototypeComparison(node, file) {
   return codePoint(file, node.expression.name.getStart(file));
 }
 
+// Reading the standard Node entry-point identity is not a loader or an evaluator. Accept
+// only the direct if guard, with Node's ambient bindings; retaining/exporting either handle remains refused.
+function nodeMainGuard(node, file, checker) {
+  if (!ts.isIfStatement(node)) return [];
+  const e=node.expression;
+  if (!ts.isBinaryExpression(e)||e.operatorToken.kind!==ts.SyntaxKind.EqualsEqualsEqualsToken ||
+      !ts.isPropertyAccessExpression(e.left)||e.left.questionDotToken||e.left.name.text!=='main'||
+      !ts.isIdentifier(e.left.expression)||e.left.expression.text!=='require'||!ts.isIdentifier(e.right)||e.right.text!=='module') return [];
+  const ids=[e.left.expression,e.right];
+  if(ids.some(id=>checker.getSymbolAtLocation(id)?.declarations?.some(d=>underSrc(absolute(d.getSourceFile().fileName)))))return [];
+  return ids.map(id=>codePoint(file,id.getStart(file)));
+}
+
 function answer(request) {
   if (loadError) throw loadError;
   const set = new Map();
@@ -234,9 +247,10 @@ function answer(request) {
     if (!file) continue;
     const broken = program.getSyntacticDiagnostics(file).length > 0;
     const found = [];
-    const loads = [], comparisons = [];
+    const loads = [], comparisons = [], mainGuards = [];
     const visit = node => {
       if (!broken) {
+        mainGuards.push(...nodeMainGuard(node,file,checker));
         const load = relativeLoad(node, file, program, checker, known, files);
         if (load) loads.push(load);
         const comparison = fixedPrototypeComparison(node, file);
@@ -252,7 +266,7 @@ function answer(request) {
     };
     visit(file);
     if (found.length) out[at.slice(SRC.length + 1)] = found;
-    contracts[at.slice(SRC.length + 1)] = { relative_loads: loads, prototype_comparisons: comparisons };
+    contracts[at.slice(SRC.length + 1)] = { relative_loads: loads, prototype_comparisons: comparisons, node_main_guards: mainGuards };
   }
   const declared = {};
   for (const [name, symbol] of decorator) {

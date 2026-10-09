@@ -7,26 +7,28 @@ import { freeze } from '../emr-contract/validation';
  * declaration emr/units/b.json lists the same sets and the contract/live tests hold both against the actual catalog.
  * Role names are fixed; secrets never appear here (provisioning supplies them from outside the repository).
  */
-export const EMR_MIGRATION = '20261008120000_emr_b';
+export const EMR_MIGRATION = '20261010120000_emr_seal_attempts';
 export const EMR_STORAGE = freeze({
   schema: 'emr_access',
   tablespace: 'kin_emr_access',
   roles: { owner: 'kin_emr_owner', runtime: 'kin_runtime', reader: 'kin_emr_reader', retention: 'kin_emr_retention' },
-  tables: ['access_entry', 'access_target', 'audit_projection', 'chain_head', 'clause_version', 'duty_request_event', 'legal_hold_event', 'member_identity', 'order_fact'],
+  tables: ['access_entry', 'access_target', 'audit_projection', 'chain_head', 'clause_version', 'commit_marker', 'duty_request_event', 'legal_hold_event', 'member_identity', 'order_fact'],
   runtimeFunctions: [
-    'append_access(text,text,text,text)', 'chain_tail(text)', 'entries_after(text,bigint,integer)', 'entry_for_event(text,text)',
+    'enter_writer()', 'fence_writers()', 'commit_marker_for_slot(text,bigint)', 'commit_marker_for_attempt(text,text)', 'bind_commit(text,text,bigint,text)',
+    'append_reserved(text,text,text,text,text,text)', 'chain_tail(text)', 'entries_after(text,bigint,integer)', 'entry_for_event(text,text)',
     'storage_placement()', 'civil_period_end(timestamptz,integer)', 'resolve_member_identity(text,text)',
     'record_projection(text,integer)', 'place_hold(text,text,text)', 'release_hold(text,text)', 'holds_for(text)',
     'record_duty_request(text,text,text,text)', 'duty_requests(text,text)', 'clause_versions(text)',
     'order_facts_for(text)', 'record_order_fact(text,text,text,text)',
   ],
   readerFunctions: [
+    'enter_writer()', 'fence_writers()', 'commit_marker_for_slot(text,bigint)', 'commit_marker_for_attempt(text,text)',
     'chain_tail(text)', 'entries_after(text,bigint,integer)', 'entry_for_event(text,text)', 'storage_placement()', 'civil_period_end(timestamptz,integer)',
     'holds_for(text)', 'duty_requests(text,text)', 'clause_versions(text)', 'order_facts_for(text)',
   ],
-  retentionFunctions: ['expire_prefix(bigint)', 'retention_view(bigint,integer)', 'chain_tail(text)', 'storage_placement()'],
+  retentionFunctions: ['enter_writer()', 'fence_writers()', 'commit_marker_for_slot(text,bigint)', 'commit_marker_for_attempt(text,text)', 'bind_commit(text,text,bigint,text)', 'lock_chain(text)', 'expire_reserved(bigint,text,text)', 'retention_view(bigint,integer)', 'chain_tail(text)', 'storage_placement()'],
   /** Never callable by the runtime: deletion and the clause history installer. */
-  forbiddenToRuntime: ['expire_prefix(bigint)', 'record_clause_version(text,text,text,text,date,date)'],
+  forbiddenToRuntime: ['expire_reserved(bigint,text,text)', 'record_clause_version(text,text,text,text,date,date)'],
   stateDirectoryVariable: 'KIN_EMR_STATE_DIR',
 });
 {
@@ -65,10 +67,10 @@ export async function verifyRuntimeConnection(db: RawQuery): Promise<{ role: str
   const [table] = await db.$queryRaw<any[]>`SELECT pg_catalog.to_regclass('emr_access.access_entry') IS NOT NULL AS present`;
   if (!table.present) throw new EmrRuntimeRefused([...problems, 'ledger-missing']);
   const [privileges] = await db.$queryRaw<any[]>`SELECT
-      (pg_catalog.has_table_privilege('emr_access.access_entry', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+      (pg_catalog.has_table_privilege('emr_access.commit_marker', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR pg_catalog.has_table_privilege('emr_access.access_entry', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
         OR pg_catalog.has_table_privilege('emr_access.access_target', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')) AS direct_write,
-      pg_catalog.has_function_privilege('emr_access.append_access(text,text,text,text)', 'EXECUTE') AS append,
-      pg_catalog.has_function_privilege('emr_access.expire_prefix(bigint)', 'EXECUTE') AS expire,
+      pg_catalog.has_function_privilege('emr_access.append_reserved(text,text,text,text,text,text)', 'EXECUTE') AS append,
+      pg_catalog.has_function_privilege('emr_access.expire_reserved(bigint,text,text)', 'EXECUTE') AS expire,
       pg_catalog.has_function_privilege('emr_access.record_clause_version(text,text,text,text,date,date)', 'EXECUTE') AS clauses,
       pg_catalog.has_schema_privilege('emr_access', 'CREATE') AS create_ledger,
       pg_catalog.has_schema_privilege('public', 'CREATE') AS create_public`;

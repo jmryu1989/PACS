@@ -3193,9 +3193,10 @@ function scanAuditWrites(sources = auditSources()) {
   // (migration 20261008120000_emr_b); a direct table write, another function or another file is unresolved where it
   // stands. No directory is skipped: the adapter's calls are read like every other raw call, interpolations included.
   const EMR_LEDGER_FILES = new Set(['api/src/emr-runtime/store.ts', 'api/src/emr-runtime/manifest.ts']);
-  const EMR_LEDGER_FUNCTIONS = new Set(['append_access', 'chain_tail', 'entries_after', 'entry_for_event', 'storage_placement',
+  const EMR_LEDGER_FUNCTIONS = new Set(['append_reserved', 'chain_tail', 'entries_after', 'entry_for_event', 'storage_placement',
     'resolve_member_identity', 'record_projection', 'place_hold', 'release_hold', 'holds_for', 'record_duty_request', 'duty_requests',
-    'clause_versions', 'expire_prefix', 'retention_view', 'record_order_fact', 'order_facts_for']);
+    'clause_versions', 'expire_reserved', 'retention_view', 'record_order_fact', 'order_facts_for',
+    'enter_writer', 'fence_writers', 'lock_chain', 'bind_commit', 'commit_marker_for_slot', 'commit_marker_for_attempt']);
   const namesLedger = tokens => tokens.some(token => (token.kind === 'word' || token.kind === 'ident') && token.name.toLowerCase() === 'emr_access');
   function ledgerShape(tokens, file) {
     if (!EMR_LEDGER_FILES.has(file)) return `emr_access SQL outside the EMR ledger adapter (${file})`;
@@ -3987,6 +3988,25 @@ function scanAuditWrites(sources = auditSources()) {
     const symbol = ts.isIdentifier(target) ? symbolAt(target) : ts.isPropertyAccessExpression(target) ? resolve(checker.getSymbolAtLocation(target.name)) : null;
     return heldClient(symbol);
   };
+  // A native, unexposed WeakMap uses its first argument only as an identity key. It cannot
+  // invoke that client. Values and escaped/replaced maps still follow the normal escape rule.
+  function identityMapKey(call, argument) {
+    if (!ts.isCallExpression(call) || call.arguments[0] !== argument) return false;
+    const method = bare(call.expression);
+    if (!ts.isPropertyAccessExpression(method) || !['set','get','has','delete'].includes(method.name.text)) return false;
+    const receiver = bare(method.expression);
+    if (!ts.isPropertyAccessExpression(receiver) || receiver.expression.kind !== K.ThisKeyword) return false;
+    const symbol = symbolAt(receiver.name), declaration = symbol?.declarations?.[0];
+    if (!declaration || !ts.isPropertyDeclaration(declaration) || memberChanged(symbol)) return false;
+    const created = declaration.initializer && bare(declaration.initializer);
+    if (!created || !ts.isNewExpression(created) || !ts.isIdentifier(created.expression) || created.expression.text !== 'WeakMap'
+      || created.arguments?.length || symbolAt(created.expression)?.declarations?.some(d => files.includes(d.getSourceFile()))) return false;
+    return memberRefs(symbol).typed.every(access => {
+      const held = outer(access), use = held.parent;
+      return ts.isPropertyAccessExpression(use) && use.expression === held && ['set','get','has','delete'].includes(use.name.text)
+        && ts.isCallExpression(use.parent) && use.parent.expression === use;
+    });
+  }
   function followClient(start) {
     let node = start;
     for (;;) {
@@ -4009,7 +4029,7 @@ function scanAuditWrites(sources = auditSources()) {
         && (clients.has(parent) || !ts.isIdentifier(parent.name)))
       || (ts.isBinaryExpression(parent) && parent.operatorToken.kind === K.EqualsToken && parent.right === node
         && (assignedClient(parent.left) || ts.isObjectLiteralExpression(bare(parent.left)) || ts.isArrayLiteralExpression(bare(parent.left))))
-      || (argument && receiving) || (owner && callsOf(owner, 'flow').escapes.length === 0) || inert(node)) return;
+      || (argument && (receiving || identityMapKey(parent,node))) || (owner && callsOf(owner, 'flow').escapes.length === 0) || inert(node)) return;
     note(start, 'client value', 'unresolved', `\`${snippet(start)}\`: ` + (argument ? `a client value handed to \`${snippet(parent.expression)}\`, which this check does not follow`
       : owner ? `a client value returned from ${describe(owner)}, which is handed on` : `a client value used in a ${K[parent.kind]}, where this check does not follow it`), 'SPEC-F01 client flow');
   }
@@ -4909,6 +4929,18 @@ export function run(tx: Prisma.TransactionClient) { tx.$queryRaw(h(Prisma.sql\`S
 });
 
 // ── EMR-B1: the protected access ledger's raw calls (no directory is skipped) ──
+test('native WeakMap transaction identity keys do not escape; map values, replacement and exposure do', () => {
+  const scan = (body, prefix='') => scanAuditWrites([{file:'api/src/syn-fixture/identity-map.ts',text:
+    `import { Prisma } from '@prisma/client'; ${prefix}
+    declare function opaque(value: any): any;
+    class Book { private readonly map = new WeakMap<object,any>();
+      run(tx: Prisma.TransactionClient) { ${body} }
+    }`}]);
+  assert.deepEqual(scan("this.map.set(tx, 'id'); this.map.get(tx); this.map.has(tx); this.map.delete(tx);").unresolved, []);
+  for (const body of ["this.map.set({}, tx);", "opaque(this.map); this.map.get(tx);",
+    "this.map.set = opaque; this.map.set(tx, 'id');"]) assert(scan(body).unresolved.length, body);
+  assert(scan("this.map.set(tx, 'id');", 'declare const WeakMap: any;').unresolved.length);
+});
 test('EMR-B1 ledger provenance: the adapter calls are read; any other emr_access SQL fails where it stands', async t => {
   const product = scanAuditWrites();
   const adapter = product.candidates.filter(entry => entry.kind === 'raw SQL naming emr_access');

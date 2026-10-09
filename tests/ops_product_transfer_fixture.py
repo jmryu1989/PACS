@@ -100,7 +100,7 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261007120000_provider_change/migration.sql',
               'api/prisma/migrations/20261007170000_member_db_rights/migration.sql',
               'api/prisma/migrations/20261007200000_designation_subjects/migration.sql',
-              'api/prisma/migrations/20261008120000_emr_b/migration.sql']
+              'api/prisma/migrations/20261008120000_emr_b/migration.sql', 'api/prisma/migrations/20261010120000_emr_seal_attempts/migration.sql']
 TABLES = sorted(['AuthSession', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
@@ -113,7 +113,7 @@ SEQUENCES = ['AuditLog_id_seq', 'ProviderChange_id_seq', 'ReadingTemplate_id_seq
 STAMP = '2026-09-06T00:00:00.123'
 PRODUCT_FIELDS = {'migrations', 'study_uid', 'catalog', 'rows', 'sequences', 'emr'}
 # EMR-B1: schema emr_access, observed schema-qualified (the public catalog above never sees it).
-EMR_TABLES = sorted(['access_entry', 'access_target', 'audit_projection', 'chain_head', 'clause_version', 'duty_request_event',
+EMR_TABLES = sorted(['access_entry', 'access_target', 'audit_projection', 'chain_head', 'clause_version', 'commit_marker', 'duty_request_event',
                      'legal_hold_event', 'member_identity', 'order_fact'])
 EMR_ROLES = ['kin_emr_owner', 'kin_emr_reader', 'kin_emr_retention', 'kin_runtime']
 # The read-only fixture container's only writable non-data mount; the compose deployment uses its own volume.
@@ -489,6 +489,10 @@ def expected_emr_rows():
             stored_at=jsonb_time(stamp)))
         previous = digest
     rows['access_entry'] = entries
+    rows['commit_marker'] = [dict(stream='viewing',chain_id=EMR_CHAIN_ID,attempt_id='SYNTHETIC-attempt-'+str(e['sequence']),
+        bundle_id='SYNTHETIC-bundle-'+str(e['sequence']),kind=e['kind'],event_id=e['event_id'],sequence=e['sequence'],
+        previous_hash=e['previous_hash'],hash=e['hash'],content_sha256=e['content_sha256'],generation=e['sequence'],
+        proof_digest=None,transaction_id=1) for e in entries]
     # D-1: two streams, each its own chain; the seeded entries are viewing entries, the history stream is empty.
     rows['chain_head'] = [dict(stream='viewing', chain_id=EMR_CHAIN_ID, sequence=2, hash=previous),
                           dict(stream='history', chain_id=EMR_HISTORY_CHAIN_ID, sequence=0, hash='0'*64)]
@@ -547,10 +551,10 @@ def provision(name):
 
 def seed_emr(name, db):
     data = expected_emr_rows()
-    for table in ('access_entry', 'legal_hold_event', 'clause_version', 'member_identity', 'order_fact'):
+    for table in ('access_entry', 'commit_marker', 'legal_hold_event', 'clause_version', 'member_identity', 'order_fact'):
         for row in data[table]:
-            execute(name, db, 'INSERT INTO emr_access.'+table+' SELECT * FROM json_populate_record(NULL::emr_access.'+table+', '+
-                    sql_literal(json.dumps(row))+')')
+            execute(name, db, 'BEGIN; SET LOCAL session_replication_role = replica; INSERT INTO emr_access.'+table+' SELECT * FROM json_populate_record(NULL::emr_access.'+table+', '+
+                    sql_literal(json.dumps(row))+'); COMMIT')
     viewing, history = data['chain_head']
     # Synthetic fixture only: the head rows are append-guarded for every role, so their fixed chain identities are set past
     # the guard as the superuser, in one statement's transaction.
@@ -578,7 +582,7 @@ def create_product(name, db, uid):
             fields = [key for key in row if not (table in ('ReportVersion', 'UserFilter', 'ProviderChange') and key == 'id')]
             quoted = ','.join('"'+key+'"' for key in fields)
             execute(name, db, 'INSERT INTO "'+table+'" ('+quoted+') SELECT '+quoted+
-                ' FROM json_populate_record(NULL::"'+table+'", '+sql_literal(json.dumps(row))+')')
+                ' FROM json_populate_record(NULL::"'+table+'", '+sql_literal(json.dumps(row))+'); COMMIT')
 
 
 CATALOG_SQL = """
@@ -651,7 +655,7 @@ def emr_catalog_contract(value):
     require([r['name'] for r in value['roles']] == EMR_ROLES and value['memberships'] == 0)
     require(not any(r[k] for r in value['roles'] for k in ('super', 'createrole', 'createdb', 'replication', 'bypassrls')))
     require(all(f['owner'] == 'kin_emr_owner' for f in value['functions']))
-    require(not any(g.startswith(('access_entry:', 'chain_head:', 'legal_hold_event:', 'clause_version:')) for g in value['runtime_grants']))
+    require(not any(g.startswith(('access_entry:', 'commit_marker:', 'chain_head:', 'legal_hold_event:', 'clause_version:')) for g in value['runtime_grants']))
 
 
 def catalog_contract(value):
@@ -984,9 +988,9 @@ def constraint_probes(name, product):
         RAISE EXCEPTION 'missing emr head guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
       BEGIN EXECUTE 'SET LOCAL ROLE kin_runtime'; INSERT INTO emr_access.access_entry SELECT * FROM emr_access.access_entry;
         RAISE EXCEPTION 'runtime writes the ledger directly'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
-      BEGIN EXECUTE 'SET LOCAL ROLE kin_runtime'; PERFORM emr_access.expire_prefix(1);
+      BEGIN EXECUTE 'SET LOCAL ROLE kin_runtime'; PERFORM emr_access.expire_reserved(1, 'SYNTHETIC-probe-attempt', 'SYNTHETIC-probe-bundle');
         RAISE EXCEPTION 'runtime reaches expiry'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
-      BEGIN EXECUTE 'SET LOCAL ROLE kin_emr_retention'; PERFORM emr_access.expire_prefix(1);
+      BEGIN EXECUTE 'SET LOCAL ROLE kin_emr_retention'; PERFORM emr_access.expire_reserved(1, 'SYNTHETIC-probe-attempt', 'SYNTHETIC-probe-bundle');
         RAISE EXCEPTION 'unexpired prefix removed'; EXCEPTION WHEN SQLSTATE 'EB004' THEN NULL; END;
       EXECUTE 'RESET ROLE';
     END $$; ROLLBACK'''.replace('UID', uid)

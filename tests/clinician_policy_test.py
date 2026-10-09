@@ -803,7 +803,8 @@ class Compiler:
             for name, contract in reply["contracts"].items():
                 self.answers[key].setdefault(API / name, {}).update(
                     relative_loads=dict(contract["relative_loads"]),
-                    prototype_comparisons=set(contract["prototype_comparisons"]))
+                    prototype_comparisons=set(contract["prototype_comparisons"]),
+                    node_main_guards=set(contract["node_main_guards"]))
         return self.answers[key]
 
 
@@ -1178,6 +1179,8 @@ def module_loads(path, source, code, bindings=None):
     found, loaded = [], []
     bindings = judged(path, source) if bindings is None else bindings
     for match in words(LOADER_NAME, code):
+        if match.start() in bindings.get("node_main_guards", ()):
+            continue
         word, at = match.group(1), match.start()
         paren = skip_gap(code, match.end())
         called = code.startswith("(", paren)
@@ -1227,7 +1230,8 @@ def contract_names(path, code, bindings=None):
     constructor reached as a property) or reaches a loader through process or module: each would put route methods
     read under one file's prefix on an instance served under another's, or load a module unread.
     """
-    found = [(line_of(code, match.start()), match.group(0)) for match in words(SEALED_WORD, code)]
+    found = [(line_of(code, match.start()), match.group(0)) for match in words(SEALED_WORD, code)
+             if match.start() not in (bindings or {}).get("node_main_guards", ())]
 
     def add(match, text):
         found.append((line_of(code, match.start()), text))
@@ -2611,7 +2615,7 @@ class ClinicianPolicySpec(unittest.TestCase):
                 {added: controller(nest + "import { Header } from '@nestjs/common';\n",
                                    "  @Header('x-read', '1')\n  @Get('read')\n  read() { return this.Header; }\n")},
                 {("GET", "bound/read"): False}),
-            # listed packages since S5-U1c-F06: an unlisted one such as node:child_process is refused in test_21
+            # listed packages since S5-U1c-F06: an unlisted one such as node:vm is refused in test_21
             "unrelated aliases and a namespace": (
                 {outside: service(inject + "import * as nodeCrypto from 'node:crypto';\nimport { createHash as digest } from 'crypto';\n")},
                 {}),
@@ -2810,6 +2814,7 @@ class ClinicianPolicySpec(unittest.TestCase):
         # controls: an unused import, Reflect's readers, packages loaded by name and a method named require still read
         accepted = {
             "an unused import of a route decorator": {tags: put + sources[tags]},
+            "Node entry-point guard": {outside: plain(inject, "if (require.main === module) { process.stdout.write('entry'); }\n")},
             "Reflect.ownKeys": {outside: plain(inject, "export const keys = (v: object) => Reflect.ownKeys(v);\n")},
             "a package by require and by import()": {outside: plain(inject, (
                 "export const raw = require('express').raw;\n"
@@ -2977,7 +2982,7 @@ class ClinicianPolicySpec(unittest.TestCase):
             "runInThisContext from node:vm": service("export const run = runInThisContext;\n",
                                                      "import { runInThisContext } from 'node:vm';\n"),
             "a namespace import of an unlisted package": service("export const read = fs.readFileSync;\n",
-                                                                 "import * as childProcess from 'node:child_process';\n"),
+                                                                 "import * as nodeVm from 'node:vm';\n"),
             "a side-effect import of an unlisted package": service("", "import 'reflect-metadata';\n"),
             "a relative import outside api/src": service("export const seed = SEED;\n",
                                                          "import { SEED } from '../prisma/seed';\n"),
