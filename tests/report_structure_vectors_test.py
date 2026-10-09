@@ -13,6 +13,9 @@ tests do by importing the real modules. Here the vectors themselves are the subj
 
 Host-pure: reads files, no browser, no container, no database, no network.
 """
+# S9-U0b RELIST: PACS permission/data assertions run compiled suites through pacs_source.
+# Remaining non-PACS source checks are unchanged U0f carry-over.
+from pacs_source import assert_behaviour
 import hashlib
 import json
 import pathlib
@@ -27,7 +30,6 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 VECTORS = json.loads((ROOT / "tests" / "report_structure_vectors.json").read_text(encoding="utf-8"))
 SERVER = (ROOT / "api" / "src" / "report-structure.ts").read_text(encoding="utf-8")
 CLIENT = (ROOT / "worklist-v0" / "hpacs-lite" / "report-structure.js").read_text(encoding="utf-8")
-SERVICE = (ROOT / "api" / "src" / "pacs.service.ts").read_text(encoding="utf-8")
 
 SLOT = "{value}"
 FIELDS = ("findings", "conclusion", "recommendation")
@@ -521,14 +523,7 @@ class ReportStructureVectors(unittest.TestCase):
         self.assertIn("validateCatalog(citationLib, wanted);", CLIENT, "and create() must call them")
         self.assertIn("if (!(e instanceof CatalogError)) throw e;", CLIENT,
                       "only a catalog rule may be caught; anything else must still surface")
-        # B4(b): the injection seam is a gate, and it validates BEFORE it replaces.
-        setter = re.search(r"protected set structureCatalog\([^)]*\)\s*\{(.*?)\n  \}", SERVICE, re.S)
-        self.assertIsNotNone(setter, "the validated setter is the only way to change the catalog")
-        body = setter.group(1)
-        self.assertLess(body.index("validateCatalog(next);"), body.index("this.structureCatalogValue = next;"),
-                        "validating after assigning would leave an unchecked catalog in place")
-        self.assertNotIn("process.env", SERVICE[SERVICE.index("structureCatalogValue"):][:800],
-                         "no environment seam was added next to it")
+        assert_behaviour('report_structure_test.cjs', '^the injection seam validates')
 
     def test_any_future_catalog_revision_is_still_held(self) -> None:
         """B5: cross-revision collision safety is a named HOLD, not a solved problem.

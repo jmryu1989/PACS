@@ -4,7 +4,7 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
   // The ordinary stack cell of a mixed layout is captured, resolved and restored by the very
   // helpers viewer-jobs.js already uses for a version 2 Job; this module never grows a second
   // copy of that shape. Without them a mixed screen refuses instead of dropping a cell.
-  const stackTools=()=>{if(!stack?.cell||!stack.resolve||!stack.apply)throw Error('일반 영상 칸이 있는 배치의 저장 도구를 불러오지 못했습니다. 미저장 입력을 보존한 뒤 뷰어를 다시 여세요.');return stack;};
+  const stackTools=()=>{if(!stack?.cell||!stack.resolve||!stack.prepare)throw Error('일반 영상 칸이 있는 배치의 저장 도구를 불러오지 못했습니다. 미저장 입력을 보존한 뒤 뷰어를 다시 여세요.');return stack;};
   const ordered=()=>[...grid.getState().viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x);
   // The Hanging Protocol whitelist (hanging-protocol-model.js:109) plus the three-plane
   // grids this Job already saved. A vacancy stays a cell, so a cell index is a viewport index.
@@ -226,16 +226,18 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     withdraw=window.KinViewerSessionBoundary?.onEnd?.(release)??null;
     return {group,tool,release};
   }
-  async function apply(value,current) {
+  async function apply(value,current,changingLayout) {
     if(JSON.stringify(value.studies)!==JSON.stringify(studies))throw Error('저장한 현재·비교 검사를 같은 순서로 먼저 여세요.');
     const set=resolve(value),ids=value.cells.map(()=> 'kin-volume-job-'+crypto.randomUUID());
     // Every stack cell of a mixed layout names its own display set; a plane cell shares the
     // single volume display set. Both are resolved before the current screen is replaced.
     const frames=value.cells.map(cell=>cell&&cell.kind==='stack'?stackTools().resolve(cell):null);
+    let stackOwner=null,crosshair=null;try{
+    stackOwner=frames.some(Boolean)?await stackTools().prepare(value.cells.map((cell,i)=>frames[i]?cell:null),ids,current):null;
     window.kinVolumeBatchState?.clear();
     // Native reset callbacks reset every linked plane while OHIF replaces one
     // viewport. Hold that propagation through both initialization and failure.
-    const crosshair=holdCrosshairReset();try{
+    crosshair=holdCrosshairReset();
     // Native position-cache keys use viewportOptions.id, not viewportId. A
     // cached oblique reference recurses through setOrientation/resetCamera on
     // a fresh axial viewport. Initialize a new presentation for this Job;
@@ -245,12 +247,13 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     // A merged layout asks native for the saved rectangles through the same layoutOptions
     // the cell merge module dispatches, so this Job drives the one native grid rather than
     // a second renderer of its own. Its cell list covers those rectangles, not the base grid.
+    changingLayout?.();
     await grid.setLayout({numRows:value.rows,numCols:value.cols,activeViewportId:ids[value.active],isHangingProtocolLayout:false,
       ...(value.version===9?{layoutOptions:value.rects.map(r=>({x:r.x,y:r.y,width:r.width,height:r.height}))}:{}),
       findOrCreateViewport:index=>value.cells[index]&&!frames[index]?({displaySetInstanceUIDs:[set],displaySetOptions:[{}],viewportOptions:{id:ids[index],viewportId:ids[index],viewportType:'volume',toolGroupId:'mpr',orientation:value.cells[index].orientation||['axial','sagittal','coronal'][index],allowUnmatchedView:true}})
         // A saved frame cell is rebuilt as the ordinary stack viewport a Hanging Protocol
         // leaves, holding its own display set; a vacancy is the same request holding none.
-        :({displaySetInstanceUIDs:frames[index]?[frames[index]]:[],displaySetOptions:[{}],viewportOptions:{viewportId:ids[index],viewportType:'stack',toolGroupId:'default',allowUnmatchedView:true}})});
+        :({displaySetInstanceUIDs:frames[index]?[frames[index]]:[],displaySetOptions:[{}],viewportOptions:stackOwner?stackOwner.options(index):{viewportId:ids[index],viewportType:'stack',toolGroupId:'default',allowUnmatchedView:true}})});
     const loaded=[],deadline=Date.now()+60000;
     for(let i=0;i<ids.length;i++){
       if(!value.cells[i]||frames[i])continue;
@@ -269,9 +272,10 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     }
     // The frame cells are restored by the same routine a version 2 Job uses, and then each
     // one is read back: a cell showing any other instance is a failed restore, not a restore.
+    await stackOwner?.complete();
     for(let i=0;i<value.cells.length;i++){
       if(!frames[i])continue;
-      const cell=value.cells[i];await stackTools().apply(ids[i],cell,current);
+      const cell=value.cells[i];
       const v=cs.getCornerstoneViewport(ids[i]),shown=v?.type==='stack'&&cornerstone.metaData.get('instance',v.getCurrentImageId?.());
       if(!shown||shown.StudyInstanceUID!==cell.study||shown.SeriesInstanceUID!==cell.series||shown.SOPInstanceUID!==cell.sop)
         throw Error('저장한 원본 프레임을 복원하지 못했습니다.');
@@ -358,7 +362,8 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     // user cancel throws into the caller's rollback, and every other Job closes an open MIP Viewer. A version 13 Job hands over its
     // MIP Batch recipe, which the viewer regenerates only after that display is Final, under its own explicit budget.
     if([12,13,14,15].includes(value.version))await window.kinVolumeMipJob.restore(value.mip,current,deadline,ids[value.active],value.mipBatch??null,value.version);else window.kinVolumeMipJob?.clearForJob();
-    }finally{crosshair.release();}
+    stackOwner?.verify();
+    }finally{stackOwner?.dispose();crosshair?.release();}
   }
   return {capture,resolve,apply};
 };
