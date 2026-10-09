@@ -6,9 +6,9 @@ import { freeze, refuse, utc } from '../emr-contract/validation';
 import type { VerifiedSignatureV2 } from '../emr-signature/contract';
 import { QueueEntry, parseQueueEntry } from '../emr-signature/native-port';
 import { SignatureVerificationPorts, verifySignatureV2 } from '../emr-signature/verify';
-import { CommitResult, envelopeDigest, expectedPreviousVersion, planReportCommand, prepareSignedCommand } from './commands';
+import { CommitResult, envelopeDigest, expectedPreviousVersion, planReportCommand, prepareSignedCommand, reportHistoryDigest } from './commands';
 import {
-  CommitPlan, IngressContext, LedgerEntry, OfflineReceiptEvent, ReportEventResponse, ReportTimes, RetainedInputs, StudyFacts, VerifiedActor,
+  AdoptedEvent, CommitPlan, IngressContext, LedgerEntry, OfflineReceiptEvent, ReportEventResponse, ReportTimes, RetainedInputs, StudyFacts, VerifiedActor,
   institutionAllows, parseCommitReceipt, parseStudyFacts, parseVerifiedActor,
 } from './contract';
 import { GrantReader, checkSignatureGrant } from './offline-grant';
@@ -27,7 +27,9 @@ export interface ReconcileContext {
   verification: SignatureVerificationPorts;
   grants: GrantReader;
   existingReceipt: unknown | null;
-  predecessor: { eventId: string; committed: boolean } | null;
+  predecessor: AdoptedEvent | null;
+  storedVersions?: readonly VersionReference[];
+  existingAdoption?: AdoptedEvent | null;
   /** The signer explicitly chose to adopt the signed original unchanged over a newer draft of their own. */
   adoptDivergedDraft: boolean;
 }
@@ -38,6 +40,11 @@ export interface LateAdmission {
   keep: { state: 'Finalized'; firstApprovedAt: string; amendUntil: string };
   ledger: readonly LedgerEntry[];
   requires: 'c2-lifecycle-late-event';
+  envelope: VerifiedSignatureV2['envelope'];
+  predecessor: AdoptedEvent | null;
+  retained: RetainedInputs;
+  expected: CommitPlan['expected'];
+  retentionAccess: ReturnType<typeof reportRetentionAccess>;
 }
 export type ReconcileDecision = Readonly<
   { kind: 'duplicate'; response: ReportEventResponse } |
@@ -83,8 +90,11 @@ export function reconcileOfflineEvent(context: ReconcileContext, entryInput: unk
   // for the exact original envelope (signed bytes and signature both); anything else under that eventId is a conflict.
   if (context.existingReceipt) {
     const receipt = parseCommitReceipt(context.existingReceipt);
-    if (receipt.eventId !== eventId || receipt.contentDigest !== signedDigest(entry)) return fail('EventIdConflict', null);
-    return freeze({ kind: 'duplicate' as const, response: { ...answer('duplicate', null, null, false), times: { signedAt: null, receivedAt, committedAt: receipt.committedAt, publishedAt: receipt.publishedAt } } });
+    if (p.recordId !== facts.recordId || p.studyId !== study.studyId || p.managingInstitutionId !== study.managingInstitutionId ||
+        p.actingInstitutionId !== actor.institutionId || JSON.stringify(p.patient) !== JSON.stringify(study.patient)) return fail('SignedPayloadBindingRefused', p.signedAt);
+    if (receipt.eventId !== eventId || receipt.recordId !== p.recordId || receipt.versionId !== p.versionId || receipt.contentDigest !== signedDigest(entry)) return fail('EventIdConflict', null);
+    return freeze({ kind: 'duplicate' as const, response: { ...answer('duplicate', null, p.signedAt, false), adoption: context.existingAdoption ?? null,
+      times: { signedAt: p.signedAt, receivedAt, committedAt: receipt.committedAt, publishedAt: receipt.publishedAt } } });
   }
   if (sig.time.status !== 'verified') return freeze({ kind: 'held' as const, reason: `time-${sig.time.reason}`, response: answer('held', `time-${sig.time.reason}`, p.signedAt, true) });
   if (sig.keyAtSigningTime !== 'active') return fail('SigningKeyInactive', p.signedAt);
@@ -94,7 +104,7 @@ export function reconcileOfflineEvent(context: ReconcileContext, entryInput: unk
     if (checked.grant.policy.epsilonMs !== context.verification.timePolicy.epsilonMs) refuse('GrantPolicyMismatch');
     grantGeneration = checked.generation;
   } catch (error) { return fail((error as any)?.code ?? 'GrantRefused', p.signedAt); }
-  if (p.predecessorEventId !== null && !(context.predecessor?.eventId === p.predecessorEventId && context.predecessor.committed))
+  if (p.predecessorEventId !== null && !context.predecessor && p.predecessorEventId !== p.eventId)
     return freeze({ kind: 'held' as const, reason: 'predecessor-unresolved', response: answer('held', 'predecessor-unresolved', p.signedAt, true) });
 
   const conflict = (kind: ConflictKind, allowed: readonly string[]) =>
@@ -115,6 +125,9 @@ export function reconcileOfflineEvent(context: ReconcileContext, entryInput: unk
   } else if (JSON.stringify(p.previousVersion) !== JSON.stringify(expectedPreviousVersion(facts, SIGNED_TO_COMMAND[p.action]))) {
     return conflict('base-changed', ['review-current-version']);
   }
+  // An intervening Addendum is a clinical branch even if the body reference stayed the same.
+  if (p.action === 'amend' && JSON.stringify(facts.bodyVersion) !== JSON.stringify(facts.publishedVersion))
+    return conflict('base-changed', ['review-current-version']);
 
   const observation: LedgerEntry = freeze({ kind: 'offline-observation' as const, act: STATUTORY_ACT[entry.access.action], event: entry.access });
   if (context.ingress.ip.status !== 'known') refuse('TrustedProxyIpRequired');
@@ -124,17 +137,25 @@ export function reconcileOfflineEvent(context: ReconcileContext, entryInput: unk
   const command = { action: SIGNED_TO_COMMAND[p.action], recordId: facts.recordId, eventId, expectedClaimGeneration: facts.claimGeneration,
     expectedPublishedVersionId: facts.publishedVersion?.versionId ?? null, draft: null, reason: p.reason, reviewerId: null, preservation: null, envelope: { ...entry.envelope } };
   const planContext = { actor, study, facts, author: context.author, ownDraftRevision, attachments: context.attachments, signature: sig,
-    retained: context.retained, receivedAt, ingress: context.ingress, mode: 'offline-reconcile' as const, grantGeneration };
+    retained: context.retained, receivedAt, ingress: context.ingress, mode: 'offline-reconcile' as const, grantGeneration,
+    predecessor: context.predecessor, storedVersions: context.storedVersions };
   // The same validation as any signed command runs first, also for an event that will only be recorded as past.
   try { prepareSignedCommand(planContext, command); }
-  catch (error) { return refused(eventId, (error as any)?.code ?? 'TransitionRefused', visible, receivedAt, p.signedAt); }
+  catch (error) {
+    if ((error as any)?.code === 'EventOrderUncertain')
+      return freeze({ kind: 'held' as const, reason: 'time-order-uncertain', response: answer('held', 'time-order-uncertain', p.signedAt, true) });
+    return refused(eventId, (error as any)?.code ?? 'TransitionRefused', visible, receivedAt, p.signedAt);
+  }
   if (p.action === 'amend' && facts.state === 'Finalized') {
     const r = context.retained;
     if (!reportRetentionAccess(facts, r.archive, null, { record: r.record, at: p.signedAt }).ordinaryClinicalAccess)
       return refused(eventId, 'HeldCorrectionAuthorityRequired', visible, receivedAt, p.signedAt);
     const admission: LateAdmission = { eventId, recordId: facts.recordId, version: { recordId: facts.recordId, versionId: p.versionId, sha256: sig.versionSha256 },
       signedAt: p.signedAt, interval: { ...sig.time.interval }, keep: { state: 'Finalized', firstApprovedAt: facts.firstApprovedAt, amendUntil: facts.amendUntil },
-      ledger: [observation, receipt], requires: 'c2-lifecycle-late-event' };
+      ledger: [observation, receipt], requires: 'c2-lifecycle-late-event', envelope: sig.envelope, predecessor: context.predecessor,
+      retained: r, retentionAccess: reportRetentionAccess(facts, r.archive, null, { record: r.record, at: p.signedAt }),
+      expected: { claimGeneration: facts.claimGeneration, publishedVersionId: facts.publishedVersion?.versionId ?? null,
+        draftRevision: context.ownDraftRevision, historyDigest: reportHistoryDigest(facts), rightsVersion: actor.rightsVersion } };
     return freeze({ kind: 'admit-late-amend' as const, admission, response: answer('held', 'late-amend-admission', p.signedAt, false) });
   }
   let plan: Readonly<CommitPlan>;
@@ -151,7 +172,8 @@ export function commitResponse(plan: Readonly<CommitPlan>, result: CommitResult)
     currentVersion: null, times: { ...plan.times } });
   return freeze({ eventId: plan.eventId, status: result.status, reason: null, recoveryRef: null,
     currentVersion: plan.facts.publishedVersion ? { ...plan.facts.publishedVersion } : null,
-    times: { signedAt: plan.times.signedAt, receivedAt: plan.times.receivedAt, committedAt: result.receipt.committedAt, publishedAt: result.receipt.publishedAt } });
+    times: { signedAt: plan.times.signedAt, receivedAt: plan.times.receivedAt, committedAt: result.receipt.committedAt, publishedAt: result.receipt.publishedAt },
+    adoption: plan.adoption ? { ...plan.adoption, receipt: result.receipt } : null });
 }
 
 function refused(eventId: string, code: string, visible: VersionReference | null, receivedAt: string, signedAt: string | null): ReconcileDecision {

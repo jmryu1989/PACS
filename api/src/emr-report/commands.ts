@@ -7,9 +7,10 @@ import type { SignatureEnvelopeV2, SignaturePayloadV2, VerifiedSignatureV2 } fro
 import { boundaryPosition } from '../emr-signature/time-basis';
 import { requireVerifiedV2 } from '../emr-signature/verify';
 import { verifiedRecord } from '../emr-contract/classification';
+import { retentionState } from '../emr-contract/lawful-defaults';
 import {
   CommitPlan, CommitReceipt, FailureJournalPort, IngressContext, LedgerEntry, ReportStorePort, RetainedInputs, StudyFacts, VerifiedActor,
-  institutionAllows, parseCommitReceipt, parseStudyFacts, parseVerifiedActor,
+  AdoptedEvent, institutionAllows, parseAdoptedEvent, parseCommitReceipt, parseStudyFacts, parseVerifiedActor,
 } from './contract';
 import { signedTransition } from './retention';
 
@@ -84,6 +85,9 @@ export interface PlanContext {
   mode: 'online' | 'offline-reconcile';
   /** Offline only: the claim generation of the grant the signature relied on (checked by checkSignatureGrant). */
   grantGeneration?: number | null;
+  /** C2 supplies all separately retained/cancelled/reserved versions too, under the same transaction lock. */
+  storedVersions?: readonly VersionReference[];
+  predecessor?: AdoptedEvent | null;
 }
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
@@ -137,6 +141,8 @@ function accessEntry(action: AccessAction, command: ReportCommand, ctx: PlanCont
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 /** Identity of the exact envelope (all three parts); part of a signed event's content digest so a resend must be byte-identical. */
 export const envelopeDigest = (e: SignatureEnvelopeV2) => digest(`${e.protected}.${e.payload}.${e.signature}`);
+/** CAS includes Finalize and non-body clinical history, not just the public head. */
+export const reportHistoryDigest = (facts: ReportFacts) => digest(JSON.stringify(facts));
 
 /**
  * Plan one report command against stored facts. Signed actions require a verified v2 signature whose signed facts
@@ -180,9 +186,43 @@ export function planReportCommand(context: PlanContext, input: unknown): Readonl
   const publish = outcome.effects.includes('publish-immediately');
   return freeze({ eventId: command.eventId, contentDigest: digest(`signed:${sig.versionSha256}:${envelopeDigest(sig.envelope)}:${command.preservation ?? 'clinical'}`),
     recordId: facts.recordId, studyId: study.studyId,
-    expected: { claimGeneration: facts.claimGeneration, publishedVersionId: facts.publishedVersion?.versionId ?? null, draftRevision: context.ownDraftRevision },
+    expected: { claimGeneration: facts.claimGeneration, publishedVersionId: facts.publishedVersion?.versionId ?? null, draftRevision: context.ownDraftRevision,
+      historyDigest: reportHistoryDigest(facts), rightsVersion: actor.rightsVersion },
     facts: outcome.facts, effects: outcome.effects, version: { ref: version, action: signedAction, envelope: { ...sig.envelope }, signedAt: p.signedAt },
-    draft: null, retention: outcome.retention, ledger, publish, times: { signedAt: p.signedAt, receivedAt, committedAt: null, publishedAt: null } });
+    draft: null, retention: outcome.retention, ledger, publish, times: { signedAt: p.signedAt, receivedAt, committedAt: null, publishedAt: null },
+    adoption: { eventId: p.eventId, studyId: p.studyId, institutionId: p.managingInstitutionId, version, signedAt: p.signedAt,
+      deviceId: p.deviceId, deviceSequence: p.deviceSequence, predecessorEventId: p.predecessorEventId,
+      ancestors: context.predecessor ? [...context.predecessor.ancestors, context.predecessor.eventId] : [] } });
+}
+
+/** Past-event validity is identical before and after Finalize. Current-branch conflicts are classified by reconcile. */
+function validatePastEvent(context: PlanContext, sig: Readonly<VerifiedSignatureV2>): void {
+  const { facts } = context, p = sig.payload;
+  if (sig.time.status !== 'verified') refuse('SignatureTimeUnverified');
+  const versions = [...facts.contentHistory.map(h => h.version), facts.bodyVersion, facts.publishedVersion,
+    ...facts.addenda.map(a => a.version), facts.cancellation?.version, ...(context.storedVersions ?? [])];
+  if (versions.some(v => v?.recordId === p.recordId && v.versionId === p.versionId) ||
+      context.retained?.record?.parts.some(part => part.evidence.event.versionId === p.versionId)) refuse('VersionIdReused');
+  let predecessorAt: string | null = null;
+  if (p.predecessorEventId !== null) {
+    if (p.predecessorEventId === p.eventId) refuse('PredecessorBindingRefused');
+    if (!context.predecessor) refuse('PredecessorUnresolved');
+    let prior: Readonly<AdoptedEvent>;
+    try { prior = parseAdoptedEvent(context.predecessor); } catch { refuse('PredecessorBindingRefused'); }
+    if (prior.eventId !== p.predecessorEventId || prior.studyId !== p.studyId || prior.institutionId !== p.managingInstitutionId ||
+        !same(prior.version, p.previousVersion) || prior.ancestors.includes(p.eventId) ||
+        (prior.deviceId === p.deviceId && prior.deviceSequence >= p.deviceSequence) ||
+        !facts.contentHistory.some(h => same(h.version, prior.version) && h.at === prior.signedAt && h.use === 'clinical'))
+      refuse('PredecessorBindingRefused');
+    predecessorAt = prior.signedAt;
+  } else if (p.previousVersion !== null) {
+    const prior = facts.contentHistory.find(h => same(h.version, p.previousVersion) && h.use === 'clinical');
+    if (!prior) refuse('PredecessorBindingRefused');
+    predecessorAt = prior.at;
+  }
+  const lower = [facts.firstApprovedAt, predecessorAt, ...facts.contentHistory.map(h => h.at)].filter((x): x is string => x !== null).sort().pop();
+  if (lower && sig.time.interval.earliest < lower)
+    refuse(sig.time.interval.latest < lower ? 'EventBeforePredecessor' : 'EventOrderUncertain');
 }
 
 /**
@@ -209,6 +249,7 @@ export function prepareSignedCommand(context: PlanContext, input: unknown): Read
   if (context.mode === 'offline-reconcile' && (sig.payload.grant === null || !Number.isSafeInteger(context.grantGeneration)))
     refuse('OnlineSignatureRequiresConnection');
   if (!actor.canSign) refuse('SigningAuthorityRequired');
+  if (!institutionAllows(actor, study) || actor.kind !== 'member' || !actor.roles.includes('radiologist')) refuse('CurrentAuthorityRefused');
   const p = sig.payload;
   if (context.author === null) refuse('AuthorRequired');
   if (command.action === 'cancel-preliminary' && (facts.state !== 'Preliminary' || facts.preliminary?.reviewerId !== actor.identity.id))
@@ -224,13 +265,23 @@ export function prepareSignedCommand(context: PlanContext, input: unknown): Read
     // Exclusive end t0+24h (A): the whole uncertainty interval must end before it; touching or crossing it is Addendum-only.
     if (facts.amendUntil === null || boundaryPosition(sig.time.interval, facts.amendUntil) !== 'before') refuse('AmendWindowClosed');
   }
+  validatePastEvent(context, sig);
   const version: VersionReference = { recordId: facts.recordId, versionId: p.versionId, sha256: sig.versionSha256 };
   const retained = context.retained;
   if (!retained) refuse('RetainedRecordRequired');
   if (command.action !== 'cancel-preliminary') {
     const e = verifiedRecord(retained.source).event;
-    if (verifiedRecord(retained.source).recordId !== facts.recordId || e.versionId !== p.versionId || e.sha256 !== sig.versionSha256 || e.at !== p.signedAt ||
+    const act = command.preservation === 'correction' || ['amend', 'cancel'].includes(command.action) ? 'correction' : command.action === 'addendum' ? 'additional-entry' : 'entry';
+    const previousPart = retained.record?.parts[retained.record.parts.length - 1];
+    if (verifiedRecord(retained.source).recordId !== facts.recordId || e.versionId !== p.versionId || e.sha256 !== sig.versionSha256 || e.at !== p.signedAt || e.act !== act ||
+        (previousPart && (e.predecessor?.recordId !== facts.recordId || e.predecessor?.partId !== previousPart.partId || e.predecessor?.sha256 !== previousPart.evidence.event.sha256)) ||
         !e.signature || (facts.contentHistory.length > 0) !== (retained.record !== null && retained.graph !== null)) refuse('RetainedRecordRequired');
+    if (retained.record) {
+      if (retained.record.recordId !== facts.recordId || retained.record.destroyedAt !== null || retained.graph.checkedAt !== p.signedAt)
+        refuse('RetainedRecordRequired');
+      // Consume A's graph/record validator without inventing a lifecycle transition or exposing a raw append plan.
+      retentionState(retained.record, retained.graph, p.signedAt);
+    }
   }
   const lifecycleActor: LifecycleActor = { id: actor.identity.id, kind: actor.kind, roles: actor.roles,
     canReadStudy: institutionAllows(actor, study), canSign: actor.canSign, canCancel: actor.canCancel };

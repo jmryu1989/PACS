@@ -62,7 +62,7 @@ const sessionOf = (id, state = 'active') => ({ state, ...ownerOf(id) });
 
 // ---- the synthetic server: real planning (reconcile + executeCommit), synthetic storage ----
 function server() {
-  const srv = { facts: L.newReportFacts(next('report'), STUDY), record: null, receipts: new Map(), commits: [], submitted: [] };
+  const srv = { facts: L.newReportFacts(next('report'), STUDY), record: null, receipts: new Map(), adoptions: new Map(), commits: [], submitted: [] };
   return srv;
 }
 function claim(srv, id, at) {
@@ -122,17 +122,17 @@ function transport(srv, { receivedAt = plus(T0, 2 * H), lose = 0, fail = null, e
     const p = JSON.parse(Buffer.from(e.envelope.payload, 'base64url').toString('utf8'));
     let retained = null;
     try { retained = retainedFor(srv, V.verifySignatureV2(e.envelope, ports, { osUserId: e.owner.osUserId })); } catch { retained = null; }
-    const predecessor = p.predecessorEventId === null ? null : { eventId: p.predecessorEventId, committed: srv.receipts.has(p.predecessorEventId) };
+    const predecessor = srv.adoptions.get(p.predecessorEventId) ?? null;
     const decision = REC.reconcileOfflineEvent({ actor: actor(p.signer.id), study: study(), facts: srv.facts, author: who(p.author.id), ownDraftRevision: null, attachments: [],
       retained, receivedAt, ingress, verification: ports, grants: { load: id => grantRows.get(id) ?? null }, existingReceipt: srv.receipts.get(e.eventId) ?? null,
-      predecessor, adoptDivergedDraft: false }, e);
+      predecessor, existingAdoption: srv.adoptions.get(e.eventId) ?? null, adoptDivergedDraft: false }, e);
     let response = decision.response;
     if (decision.kind === 'commit') {
       const store = { async findReceipt(id) { return srv.receipts.get(id) ?? null; }, async commit(plan) {
         if (commitFault) throw Object.assign(new Error('synthetic'), { code: commitFault });
         const receipt = { eventId: plan.eventId, contentDigest: plan.contentDigest, recordId: plan.recordId, versionId: plan.version.ref.versionId, committedAt: receivedAt,
           publishedAt: plan.publish ? receivedAt : null, ledgerReceipts: plan.ledger.map(x => ({ eventId: x.event.eventId, durableAt: receivedAt })) };
-        srv.facts = plan.facts; srv.record = plan.retention ?? srv.record; srv.receipts.set(plan.eventId, receipt); srv.commits.push(plan.eventId); return receipt;
+        srv.facts = plan.facts; srv.record = plan.retention ?? srv.record; srv.receipts.set(plan.eventId, receipt); srv.commits.push(plan.eventId); srv.adoptions.set(plan.eventId, { ...plan.adoption, receipt }); return receipt;
       } };
       const result = await CMD.executeCommit(decision.plan, store, { async record(f) { return { journalId: 'j-' + f.eventId, durableAt: f.at }; } }, () => receivedAt);
       response = REC.commitResponse(decision.plan, result);
@@ -143,9 +143,9 @@ function transport(srv, { receivedAt = plus(T0, 2 * H), lose = 0, fail = null, e
 }
 
 /** The protected store stand-in: rows keyed by eventId per owner, with explicit faults. */
-function memoryStore({ putFault = null, receiptOverride = null, reserveFault = false, reserveBytes = null, leakOther = null } = {}) {
-  const rows = new Map(), calls = [], evidence = new Set();
-  return { rows, calls,
+function memoryStore({ putFault = null, receiptOverride = null, reserveFault = false, reserveBytes = null, leakOther = null, faults = {} } = {}) {
+  const rows = new Map(), calls = [], evidence = new Map();
+  return { rows, calls, evidence,
     async reserve(bytes) { calls.push('reserve'); if (reserveFault) throw new Error('disk full'); return { reservationId: 'res-1', bytes: reserveBytes ?? bytes }; },
     async put(e, digest) {
       calls.push('put:' + e.eventId);
@@ -158,16 +158,36 @@ function memoryStore({ putFault = null, receiptOverride = null, reserveFault = f
       const own = [...rows.values()].filter(r => r.entry.owner.subject === owner.subject && r.entry.owner.osUserId === owner.osUserId).map(r => JSON.parse(JSON.stringify(r)));
       return leakOther ? [...own, ...leakOther] : own;
     },
-    async setState(eventId, state) { calls.push(`state:${eventId}:${state}`); rows.get(eventId).state = state; },
+    async setState(eventId, state, response) { calls.push(`state:${eventId}:${state}`); rows.get(eventId).state = state; rows.get(eventId).evidence = response; },
     async remove(eventId) { calls.push('remove:' + eventId); rows.delete(eventId); },
-    async keepCommitEvidence(eventId) { calls.push('evidence:' + eventId); evidence.add(eventId); },
-    async commitEvidence() { return [...evidence]; },
+    async keepCommitEvidence(eventId, receipt) { calls.push('evidence:' + eventId); if (faults.evidence) throw new Error('evidence store failed'); evidence.set(eventId, receipt); },
+    async commitEvidence() { return [...evidence.values()]; },
   };
 }
 const states = list => Object.fromEntries(list.map(x => [x.eventId, x.state]));
 /** An expected-success send: a rejection is an assertion failure of the case, not an unrelated error. */
 const sent = async (queue, t, session) => { let value; await assert.doesNotReject(async () => { value = await queue.send(t, session); }); return value; };
 
+
+const UI = require(path.join(root,'worklist-v0/hpacs-lite/offline-report.js'));
+const deferred = () => { let resolve,reject; const promise=new Promise((a,b)=>{resolve=a;reject=b;}); return {promise,resolve,reject}; };
+function pageFor(store, queue, serverTransport, own = ownerOf('r1')) {
+  const timers=[], ctx={owner:own,epoch:1,generation:1,online:true,opening:{uid:STUDY,generation:1}}, view={status:{textContent:''},
+    readText:()=>({findings:'SYN',conclusion:'',recommendation:''}), showReport:()=>{},clearReport:()=>{},print:async()=>{}};
+  const controller=UI.create({view, store:{queue:()=>queue,observe:async()=>{},cached:async()=>null}, signer:{sign:async()=>{throw Error('unused');}},
+    transport:{...serverTransport,read:async()=>null}, context:{owner:()=>ctx.owner,session:()=>({epoch:ctx.epoch}),accountGeneration:()=>ctx.generation,
+      online:()=>ctx.online,opening:()=>ctx.opening,subscribe:()=>()=>{}}, scheduler:{schedule:(fn,ms)=>{const t={fn,ms};timers.push(t);return t;},
+      cancel:t=>{const i=timers.indexOf(t);if(i>=0)timers.splice(i,1);}}});
+  return {controller,timers,ctx,view};
+}
+async function chainFixture() {
+  const srv=server();claim(srv,'r1',plus(T0,-H));const grant=grantFor(srv,'r1',plus(T0,-30*MIN));
+  const first=entry(srv,'r1',{signedAt:T0,grant,sequence:1});
+  const sig=V.verifySignatureV2(first.envelope,ports,{osUserId:first.owner.osUserId});
+  const child=entry(srv,'r1',{action:'amend',signedAt:plus(T0,MIN),grant,sequence:2,predecessor:first.eventId,
+    previous:{recordId:srv.facts.recordId,versionId:sig.payload.versionId,sha256:sig.versionSha256}});
+  return {srv,first,child};
+}
 test('C-Q01 an approval is pending only after the durable write of the exact entry; a failed, partial or mismatched write is not shown as saved', async () => {
   const srv = server(); claim(srv, 'r1', plus(T0, -H));
   const grant = grantFor(srv, 'r1', plus(T0, -30 * MIN));
@@ -226,7 +246,9 @@ test('C-Q03 a resend after a lost answer carries the original eventId and is app
   await queue.enqueue(e);
   assert.deepEqual(states(await sent(queue, transport(srv, { lose: 1 }), sessionOf('r1'))), { 'event-q03': 'sent-unknown' });
   assert.deepEqual(srv.commits, ['event-q03']);
-  assert.deepEqual(states(await sent(queue, transport(srv), sessionOf('r1'))), { 'event-q03': 'committed' });
+  const retried=await queue.send(transport(srv),sessionOf('r1')).catch(error=>({error:error.code}));
+  assert.deepEqual(srv.submitted,['event-q03','event-q03'],'M08 retry sends the original event ID');
+  assert.deepEqual(states(retried), { 'event-q03': 'committed' });
   assert.deepEqual(srv.submitted, ['event-q03', 'event-q03']);
   assert.deepEqual(srv.commits, ['event-q03']);
   assert.equal(srv.facts.firstApprovedAt, T0);
@@ -255,11 +277,19 @@ test('C-Q04 a conflicting approval stays as conflict with its original kept, and
   await queue.enqueue(approval); await queue.enqueue(amend);
   const result = states(await sent(queue, transport(srv), sessionOf('r1')));
   assert.equal(result[approval.eventId], 'conflict');
+  assert.deepEqual(srv.submitted, [approval.eventId], 'M10 dependency prevents dispatch');
   assert.equal(result[amend.eventId], 'held');
   assert.deepEqual(srv.submitted, [approval.eventId]);
   assert.equal(JSON.stringify(srv.facts), before);
   assert(store.rows.has(approval.eventId) && store.rows.has(amend.eventId));
   assert.equal(store.calls.filter(c => c.startsWith('remove:')).length, 0);
+  // AC33: a real clinical conflict holds its own chain; an independently verified record continues.
+  const independent=server();claim(independent,'r1',plus(T0,-H));
+  const ig=grantFor(independent,'r1',plus(T0,-30*MIN)), ie=entry(independent,'r1',{signedAt:T0,grant:ig,sequence:3});
+  await queue.enqueue(ie);
+  const unrelated=await queue.send({submit:e=>e.access.target.recordId===independent.facts.recordId?transport(independent).submit(e):transport(srv).submit(e)},sessionOf('r1'));
+  assert.equal(states(unrelated)[ie.eventId],'committed','AC33 independent record progresses beside conflict');
+  assert.equal(states(unrelated)[amend.eventId],'held');assert.equal(store.rows.has(amend.eventId),true);
   // Once a committed predecessor's original is removed after its verified retention receipt, its commit evidence
   // remains, so a dependant is sent instead of waiting forever.
   const s2 = server(); claim(s2, 'r1', plus(T0, -H));
@@ -273,6 +303,67 @@ test('C-Q04 a conflicting approval stays as conflict with its original kept, and
   await q2.enqueue(child);
   assert.equal(states(await sent(q2, transport(s2), sessionOf('r1')))[child.eventId], 'committed');
   assert.deepEqual(s2.submitted, [first.eventId, child.eventId]);
+  // AC22/27: real C queue + reconcile + UI. Latest display and reversed storage never hide the predecessor.
+  const f=await chainFixture(), st=memoryStore(), q=Q.createOfflineQueue({store:st,owner:ownerOf('r1')});
+  await q.enqueue(f.child);await q.enqueue(f.first);
+  const real=transport(f.srv), projections=[];
+  const page=pageFor(st,q,{submit:async e=>{projections.push(page.controller.state(STUDY));return real.submit(e);}});
+  page.ctx.opening={uid:'unrelated-study',generation:2};
+  await page.controller.sync();
+  assert.deepEqual(f.srv.submitted,[f.first.eventId,f.child.eventId],'AC27 displayed selection cannot block predecessor');
+  assert.equal(projections[0]?.eventId,f.child.eventId,'AC22 e2 is selected while e1 is sending');
+  assert.equal(projections[0]?.status,'pending-offline');
+  assert.equal(page.controller.state(STUDY).eventId,f.child.eventId,'AC22 latest event remains selected');
+  assert.equal(page.controller.state(STUDY).status,'published');
+  assert(st.calls.indexOf('evidence:'+f.first.eventId)<st.calls.indexOf('state:'+f.child.eventId+':committed'),'AC27 parent receipt stored before child');
+  page.controller.dispose();
+  // AC30/31: lost response and transient failure recover on a scheduled tick without reconnect or user action.
+  for(const fault of ['lost','failed','held']) {
+    const c=await chainFixture(), d=memoryStore(), qu=Q.createOfflineQueue({store:d,owner:ownerOf('r1')});
+    await qu.enqueue(c.child);await qu.enqueue(c.first);
+    let attempt=0;const good=transport(c.srv), lost=transport(c.srv,{lose:1});
+    const port={submit:async e=>{
+      if(e.eventId===c.first.eventId && attempt++===0) {
+        if(fault==='lost') return lost.submit(e);
+        return {eventId:e.eventId,status:fault==='held'?'held':'failed',reason:fault==='held'?'predecessor-unresolved':'temporary',recoveryRef:null,currentVersion:null,
+          times:{signedAt:null,receivedAt:T0,committedAt:null,publishedAt:null}};
+      } return good.submit(e);
+    }};
+    const ui=pageFor(d,qu,port);await ui.controller.sync();
+    assert.equal(c.srv.commits.includes(c.child.eventId),false,'AC30 child waits for receipt');
+    assert.equal(ui.timers.length,1,'AC31 one bounded retry is scheduled');
+    assert(ui.timers[0].ms>0 && ui.timers[0].ms<=30000,'AC31 no busy loop');
+    ui.timers.shift().fn();await ui.controller.sync();
+    assert.deepEqual(c.srv.commits,[c.first.eventId,c.child.eventId],'AC31 predecessor recovery completes both events without approval');
+    assert.equal(ui.controller.state(STUDY).eventId,c.child.eventId);
+    assert.equal(ui.controller.state(STUDY).status,'published');
+    ui.controller.dispose();
+  }
+  // AC34/36: after custody ends, restart consumes durable adoption evidence or queries the authenticated server.
+  for(const lookup of [false,true]) {
+    const c=await chainFixture(), faults={}, d=memoryStore({faults}), qu=Q.createOfflineQueue({store:d,owner:ownerOf('r1')});
+    await qu.enqueue(c.first);await qu.send(transport(c.srv),sessionOf('r1'));
+    faults.evidence=true;
+    await assert.rejects(qu.acknowledgeRetention(c.first.eventId,{eventId:c.first.eventId},{verify:()=>true}));
+    assert(d.rows.has(c.first.eventId),'AC34 receipt storage failure preserves original');
+    faults.evidence=false;
+    await qu.acknowledgeRetention(c.first.eventId,{eventId:c.first.eventId},{verify:()=>true});
+    assert.equal(d.rows.has(c.first.eventId),false);
+    if(lookup)d.evidence.clear();
+    const restarted=Q.createOfflineQueue({store:d,owner:ownerOf('r1')});await restarted.enqueue(c.child);
+    const t=transport(c.srv);t.findAdoption=async id=>c.srv.adoptions.get(id)??null;
+    const outcome=await restarted.send(t,sessionOf('r1'));
+    assert.equal(states(outcome)[c.child.eventId],'committed','AC34 restart retains predecessor adoption evidence');
+    assert.deepEqual(c.srv.commits,[c.first.eventId,c.child.eventId]);
+  }
+  const missing=await chainFixture(), msStore=memoryStore(), mq=Q.createOfflineQueue({store:msStore,owner:ownerOf('r1')});
+  await mq.enqueue(missing.child);
+  for(const found of [null,{eventId:missing.first.eventId,committed:true}]) {
+    const t=transport(missing.srv);t.findAdoption=async()=>found;
+    assert.equal(states(await mq.send(t,sessionOf('r1')))[missing.child.eventId],'held','AC36 missing or invalid receipt never invents a chain');
+    assert.deepEqual(missing.srv.commits,[]);
+  }
+
 });
 
 test('C-Q05 a disconnection keeps the queue pending, a real session end pauses it for re-authentication, another account cannot send it and the owner\'s new session resumes it', async () => {
@@ -348,6 +439,12 @@ test('C-Q07 queue space J is reserved before images load, and no eviction, logou
 });
 
 test('C-Q08 at every commit, receipt and answer cut the queue keeps a state it can recover from and the server applies the event exactly once', async () => {
+  const restartChain=await chainFixture(), restartStore=memoryStore(), firstQueue=Q.createOfflineQueue({store:restartStore,owner:ownerOf('r1')});
+  await firstQueue.enqueue(restartChain.first);await firstQueue.send(transport(restartChain.srv),sessionOf('r1'));
+  await firstQueue.acknowledgeRetention(restartChain.first.eventId,{eventId:restartChain.first.eventId},{verify:()=>true});
+  const secondQueue=Q.createOfflineQueue({store:restartStore,owner:ownerOf('r1')});await secondQueue.enqueue(restartChain.child);
+  const afterRestart=await secondQueue.send(transport(restartChain.srv),sessionOf('r1'));
+  assert.equal(states(afterRestart)[restartChain.child.eventId],'committed','AC34 restart child consumes retained predecessor evidence');
   const srv = server(); claim(srv, 'r1', plus(T0, -H));
   const grant = grantFor(srv, 'r1', plus(T0, -30 * MIN));
   // Cut 1: the device crashed after its write but before answering: the store is the truth after restart.
@@ -372,4 +469,37 @@ test('C-Q08 at every commit, receipt and answer cut the queue keeps a state it c
   assert.equal((await Q.createOfflineQueue({ store: s2, owner: ownerOf('r1') }).enqueue(lost)).status, 'not-saved');
   assert.deepEqual(await sent(Q.createOfflineQueue({ store: s2, owner: ownerOf('r1') }), transport(srv), sessionOf('r1')), []);
   assert.equal(srv.submitted.includes(lost.eventId), false);
+  // AC28/29: concurrent reconnect joins one drain, and an enqueue while listing marks another pass dirty.
+  const c=await chainFixture(), d=memoryStore(), qu=Q.createOfflineQueue({store:d,owner:ownerOf('r1')});await qu.enqueue(c.first);
+  const listing=deferred(), release=deferred(), originalList=d.list;let lists=0;
+  d.list=async owner=>{const result=await originalList(owner);if(++lists===1){listing.resolve();await release.promise;}return result;};
+  const ui=pageFor(d,qu,transport(c.srv));const sync1=ui.controller.sync();await listing.promise;
+  const sync2=ui.controller.sync();assert.equal(sync1===sync2,true,'AC28 reconnect shares one drain promise');
+  await qu.enqueue(c.child);ui.controller.sync();release.resolve();await sync1;
+  assert.deepEqual(c.srv.submitted,[c.first.eventId,c.child.eventId],'AC29 dirty pass discovers child');
+  assert.equal(ui.controller.state(STUDY).eventId,c.child.eventId);ui.controller.dispose();
+  // AC28 at the submit cut too, with latest event already queued.
+  const cut=await chainFixture(), ds=memoryStore(), qs=Q.createOfflineQueue({store:ds,owner:ownerOf('r1')});await qs.enqueue(cut.first);await qs.enqueue(cut.child);
+  const began=deferred(), finish=deferred(), tr=transport(cut.srv);let dispatches=0;
+  const pu=pageFor(ds,qs,{submit:async e=>{dispatches++;if(e.eventId===cut.first.eventId){began.resolve();await finish.promise;}return tr.submit(e);}});
+  const p1=pu.controller.sync();await began.promise;const p2=pu.controller.sync();
+  assert.equal(p1===p2,true,'AC28 submit overlap is single flight');assert.equal(dispatches,1,'AC28 no concurrent duplicate dispatch');finish.resolve();await p1;
+  assert.deepEqual(cut.srv.commits,[cut.first.eventId,cut.child.eventId]);pu.controller.dispose();
+  // AC32: newer attempt commits first; a delayed failure/held/session-end must not regress it.
+  for(const outcome of ['failed','held','ended']) {
+    const c=await chainFixture(), d=memoryStore(), q=Q.createOfflineQueue({store:d,owner:ownerOf('r1')});await q.enqueue(c.first);
+    const wait=deferred(), began=deferred();
+    const old=q.send({submit:async e=>{began.resolve();await wait.promise;if(outcome==='ended')throw {kind:'http',status:401,code:'AUTH_SESSION_ENDED'};
+      return {eventId:e.eventId,status:outcome,reason:'predecessor-unresolved',recoveryRef:null,currentVersion:null,times:{signedAt:null,receivedAt:T0,committedAt:null,publishedAt:null}};}},sessionOf('r1'));
+    await began.promise;await q.send(transport(c.srv),sessionOf('r1'));wait.resolve();await old;
+    assert.equal(d.rows.get(c.first.eventId).state,'committed','AC32 committed never regresses after old response');
+  }
+  // AC36 disposed controller: completion of a lookup cannot store evidence or update the projection.
+  const dc=await chainFixture(), dst=memoryStore(), dq=Q.createOfflineQueue({store:dst,owner:ownerOf('r1')});await dq.enqueue(dc.child);
+  const real=transport(dc.srv);await real.submit(dc.first);
+  const found=deferred(), lookupStarted=deferred();
+  const du=pageFor(dst,dq,{...real,findAdoption:async()=>{lookupStarted.resolve();return found.promise;}});
+  const dp=du.controller.sync();await lookupStarted.promise;du.controller.dispose();const beforeCalls=dst.calls.slice();found.resolve(dc.srv.adoptions.get(dc.first.eventId));await dp;
+  assert.deepEqual(dst.calls,beforeCalls,'AC36 disposed lookup has no storage effect');assert.equal(dst.evidence.size,0);
+
 });

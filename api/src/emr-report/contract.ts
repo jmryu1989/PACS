@@ -82,6 +82,25 @@ export type LedgerEntry = Readonly<
 
 export interface ReportTimes { signedAt: string | null; receivedAt: string; committedAt: string | null; publishedAt: string | null }
 
+/** Authenticated storage evidence of clinical adoption, not a custody-only acknowledgement. */
+export interface AdoptedEvent {
+  eventId: string; studyId: string; institutionId: string; version: VersionReference; signedAt: string;
+  deviceId: string; deviceSequence: number; predecessorEventId: string | null; ancestors: readonly string[];
+  receipt: CommitReceipt;
+}
+export function parseAdoptedEvent(input: unknown): Readonly<AdoptedEvent> {
+  const v = object(input, ['eventId', 'studyId', 'institutionId', 'version', 'signedAt', 'deviceId', 'deviceSequence', 'predecessorEventId', 'ancestors', 'receipt']);
+  const ref = object(v.version, ['recordId', 'versionId', 'sha256']), receipt = parseCommitReceipt(v.receipt);
+  if (!Array.isArray(v.ancestors) || new Set(v.ancestors).size !== v.ancestors.length || v.ancestors.includes(v.eventId) ||
+      (v.predecessorEventId !== null && !v.ancestors.includes(v.predecessorEventId)) ||
+      receipt.eventId !== v.eventId || receipt.recordId !== ref.recordId || receipt.versionId !== ref.versionId)
+    throw new Error('Adoption evidence binding required');
+  return freeze({ eventId: string(v.eventId), studyId: string(v.studyId), institutionId: string(v.institutionId),
+    version: { recordId: string(ref.recordId), versionId: string(ref.versionId), sha256: sha256(ref.sha256) }, signedAt: utc(v.signedAt),
+    deviceId: string(v.deviceId), deviceSequence: integer(v.deviceSequence),
+    predecessorEventId: v.predecessorEventId === null ? null : string(v.predecessorEventId), ancestors: v.ancestors.map(x => string(x)), receipt });
+}
+
 /**
  * Everything one report event commits in ONE transaction: version + exact signature bytes, report facts, publication
  * reference, retention decision, ledger entries and the idempotency receipt. A store that writes these in separate
@@ -92,7 +111,7 @@ export interface CommitPlan {
   contentDigest: string;
   recordId: string;
   studyId: string;
-  expected: { claimGeneration: number; publishedVersionId: string | null; draftRevision: string | null };
+  expected: { claimGeneration: number; publishedVersionId: string | null; draftRevision: string | null; historyDigest?: string; rightsVersion?: string };
   facts: Readonly<ReportFacts>;
   effects: LifecycleOutcome['effects'];
   version: { ref: VersionReference; action: string; envelope: SignatureEnvelopeV2; signedAt: string } | null;
@@ -101,6 +120,7 @@ export interface CommitPlan {
   ledger: readonly LedgerEntry[];
   publish: boolean;
   times: ReportTimes;
+  adoption?: Omit<AdoptedEvent, 'receipt'>;
 }
 
 export interface CommitReceipt {
@@ -131,4 +151,5 @@ export interface ReportEventResponse {
   recoveryRef: string | null;
   currentVersion: VersionReference | null;
   times: ReportTimes;
+  adoption?: Readonly<AdoptedEvent> | null;
 }

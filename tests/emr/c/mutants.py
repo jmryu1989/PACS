@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # coding: utf-8
-"""EMR-C1 mutants M01..M20 (order §8) over an exact baseline.
+"""EMR-C1 existing 49 variants plus D739 CM01-CM12 over an exact baseline.
 
 The C1 sources, the A contract they import and the C1 tests are copied into a fresh temporary tree; the originals are
 never written (their hashes are compared before and after). In the copy the baseline must pass exactly: every declared
@@ -40,83 +40,311 @@ SERVE = "  return provideAfterDurableEvent(ledger, plan.event, sendBody);"
 GRANT = "api/src/emr-report/offline-grant.ts"
 AMEND_WINDOW = "    if (facts.amendUntil === null || boundaryPosition(sig.time.interval, facts.amendUntil) !== 'before') refuse('AmendWindowClosed');"
 # variant -> (file, anchor, replacement). Each anchor must occur exactly once in its file.
-MUTANTS = {
-    "M01": (CMD, "actor: lifecycleActor, at: p.signedAt,", "actor: lifecycleActor, at: context.mode === 'offline-reconcile' ? utc(context.receivedAt) : p.signedAt,"),
-    "M02": (CMD, AMEND_WINDOW, AMEND_WINDOW.replace("boundaryPosition(sig.time.interval, facts.amendUntil) !== 'before'",
-            "(boundaryPosition(sig.time.interval, facts.amendUntil) === 'at-or-after' && sig.time.interval.earliest > facts.amendUntil)")),
-    "M03": (REC, "  if (p.action === 'amend' && facts.state === 'Finalized') {",
-            "  if (p.action === 'amend' && facts.state === 'Finalized') return refused(eventId, 'AmendWindowClosed', visible, receivedAt, p.signedAt);\n  if (false) {"),
-    "M04-signer": (CMD, "    [same(p.signer, e.signer) && p.identityRegistrationId === e.identityRegistrationId, 'signer'],\n", ""),
-    "M04-patient": (CMD, "    [same(p.patient, e.patient), 'patient'],\n", ""),
-    "M04-base-version": (CMD, "    [same(p.previousVersion, e.previousVersion), 'previousVersion'],\n", ""),
-    "M04-event-id": (CMD, "    [p.eventId === e.eventId, 'eventId'],\n", ""),
-    "M05": ("api/src/emr-signature/time-basis.ts",
-            "  if (elapsed < 0 || at(Date.parse(basis.anchorServerTime) + elapsed) !== signedAt) refuse('TimeBasisMismatch');\n", ""),
-    "M06": ("api/src/emr-signature/keys.ts", "new Set(ids).size !== ids.length || ", ""),
-    "M07-queue": (Q, "      catch (error) { return freeze({ status: 'not-saved' as const, code: codeOf(error) }); }",
-                  "      catch (error) { return freeze({ status: 'pending-offline' as const, receipt: null }); }"),
-    "M07-page": (PAGE, "throw new Error('no durable receipt');\n        } catch { setState(t.uid, { status: 'not-saved' }); return stateOf(t.uid); }",
-                 "throw new Error('no durable receipt');\n        } catch { setState(t.uid, { status: 'pending-offline', eventId: entry.eventId }); return stateOf(t.uid); }"),
-    "M08": (Q, "try { answer = object(await transport.submit(row.entry), [",
-            "try { answer = object(await transport.submit(state.get(row.eventId) === 'sent-unknown' ? { ...row.entry, eventId: row.entry.eventId + ':retry' } : row.entry), ["),
-    "M09": (CMD, "    const receipt = parseCommitReceipt(existing);\n    if (receipt.contentDigest !== plan.contentDigest) refuse('EventIdConflict');\n",
-            "    const receipt = parseCommitReceipt(existing);\n"),
-    "M10-reconcile": (REC, "      if (!context.adoptDivergedDraft) return conflict('own-draft-diverged', ['adopt-signed-original', 'sign-new-version']);\n", ""),
-    "M10-queue": (Q, "state.get(predecessor) !== 'committed' &&", "state.get(predecessor) === 'pending' &&"),
-    "M11-session": (Q, "  if (kind === 'http' && s.status === 401 && s.code === 'AUTH_SESSION_ENDED') return 'awaiting-reauth';",
-                    "  if (kind === 'network' || (kind === 'http' && s.status === 401 && s.code === 'AUTH_SESSION_ENDED')) return 'awaiting-reauth';"),
-    "M11-page": (PAGE, "const sessionEnded = signal => !!signal && ((", "const sessionEnded = signal => !!signal || (("),
-    "M12-later-input": (PAGE, "const text = textOf(view.readText());",
-                        "const text = { get findings() { return view.readText().findings; }, get conclusion() { return view.readText().conclusion; }, "
-                        "get recommendation() { return view.readText().recommendation; } };"),
-    "M12-aba": (PAGE, "if (!body || !sameOpening(start)) return false;", "if (!body) return false;"),
-    "M13": (RD, SERVE, "  const body = await sendBody({ eventId: plan.event.eventId, durableAt: plan.event.occurredAt });\n"
-                       "  await ledger.append(plan.event);\n  return body;"),
-    "M14": (REC, "act: STATUTORY_ACT[entry.access.action], event: entry.access });",
-            "act: STATUTORY_ACT[entry.access.action], event: { ...entry.access, ip: context.ingress.ip } as any });"),
-    "M15": (RT, "  return transitionRetainedReport(facts, command, r.record, source, r.graph, r.archive);",
-            "  { const outcome = transitionReport(facts, command); return freeze({ ...outcome, "
-            "retention: require('../emr-contract/lawful-defaults').recordVersionAdded(r.record, source, r.graph, false) }); }"),
-    "M16": (RD, "  const access = readRetention(facts, context.archive, context.resume, context.retained);",
-            "  const access = readRetention(facts, facts.contentHistory.some(h => h.use === 'preservation-entry') ? null : context.archive, context.resume, context.retained);"),
-    "M17": (RT, "  const read = requireRetainedRead(retained);",
-            "  if (retained === null || retained === undefined) return reportRetentionAccess(facts, archive, resume, null);\n"
-            "  const read = requireRetainedRead(retained);"),
-    "M18": (RT, "  if (cause !== 'server-retention-receipt') return false;",
-            "  if (cause === 'cache-evicted' || cause === 'draft-purpose-ended') return true;\n  if (cause !== 'server-retention-receipt') return false;"),
-    "M19-print": (RD, "  return freeze({ event: ev, physicalOutput: 'not-observed' as const, outcome });",
-                  "  return freeze({ event: ev, physicalOutput: (outcome === 'dialog-returned' ? 'printed' : 'not-observed') as any, outcome });"),
-    "M19-ack": (RD, "const current = acks.some(a => a.versionId === published.versionId) ?", "const current = acks.length > 0 ?"),
-    "M19-page": (PAGE, "relatedEventId: opened.eventId, physicalOutput: 'not-observed' });", "relatedEventId: opened.eventId, physicalOutput: 'printed' });"),
-    "M20-entry": (CMD, LEDGER, LEDGER.replace("context.mode === 'online'", "context.mode === 'online' && command.action !== 'approve'")),
-    "M20-additional-entry": (CMD, LEDGER, LEDGER.replace("context.mode === 'online'", "context.mode === 'online' && command.action !== 'addendum'")),
-    "M20-modification": (CMD, LEDGER, LEDGER.replace("context.mode === 'online'", "context.mode === 'online' && command.action !== 'amend'")),
-    "M20-read": (RD, SERVE, "  return sendBody({ eventId: plan.event.eventId, durableAt: plan.event.occurredAt });"),
-    # Round 2 (Astra review of 3521006, D734): each re-introduces one fixed defect.
-    "M21-amend-interval": (CMD, AMEND_WINDOW + "\n", ""),
-    "M21-anchor-interval": ("api/src/emr-signature/time-basis.ts", "  if (basis.interval.latest > basis.anchorValidUntil) return held(",
-                            "  if (signedAt > basis.anchorValidUntil) return held("),
-    "M22-generation": (GRANT, "  if (p.claimGeneration !== study.claimGeneration) refuse('GrantGenerationRefused');\n", ""),
-    "M22-anchor": (GRANT, "  if (p.timeBasis.anchorId !== grant.anchorId) refuse('GrantAnchorRefused');\n", ""),
-    "M22-actions": (GRANT, "  const signActions = usable ? grant.actions.filter(a => a !== 'read') : [];",
-                    "  const signActions: any = usable ? ['approve-sign', 'amend', 'addendum'] : [];"),
-    "M23": (REC, "  try { prepareSignedCommand(planContext, command); }",
-            "  try { if (!(p.action === 'amend' && facts.state === 'Finalized')) prepareSignedCommand(planContext, command); }"),
-    "M24": (RD, "  const readable = reader ? retainedVersions(facts) : publishedHistory(facts);", "  const readable = retainedVersions(facts);"),
-    "M25": (PAGE, "        if (!sameOpening(start)) return false; // ", "        if (false) return false; // "),
-    "M26-sign": (PAGE, "        if (!sameAccount(start)) { setState(t.uid, { status: 'not-saved' }); return stateOf(t.uid); }\n", ""),
-    "M26-list": (PAGE, "          if (!sameAccount(start)) return; // ", "          if (false) return; // "),
-    "M26-reply": (PAGE, "reply.eventId !== entry.eventId || stateOf(uid).eventId !== entry.eventId) return;", "reply.eventId !== entry.eventId) return;"),
-    "M27": (REC, "  if (actor.sessionState !== 'active') return fail('SessionEnded', null);",
-            "  if (context.existingReceipt && parseCommitReceipt(context.existingReceipt).eventId === eventId) return freeze({ kind: 'duplicate' as const, response: answer('duplicate', null, null, false) });\n"
-            "  if (actor.sessionState !== 'active') return fail('SessionEnded', null);"),
-    "M28": (CMD, "  if (!sameEnvelope(command.envelope, sig.envelope)) refuse('SignedEnvelopeMismatch');",
-            "  if (!command.envelope || command.envelope.payload !== sig.envelope.payload) refuse('SignedEnvelopeMismatch');"),
-    "M29": (CMD, "  if (command.action === 'cancel-preliminary' && (facts.state !== 'Preliminary' || facts.preliminary?.reviewerId !== actor.identity.id))\n    refuse('DesignatedReviewerRequired');\n", ""),
-    "M30": (Q, "state.get(predecessor) !== 'committed' && !kept.has(predecessor)", "state.get(predecessor) !== 'committed'"),
-    "M31-session": (Q, "  if (kind === 'http' && [403, 409].includes(s.status as number) && s.code === 'AUTH_SESSION_MISMATCH') return 'awaiting-reauth';\n", ""),
-    "M31-page": (PAGE, " ||\n      ([403, 409].includes(signal.status) && signal.code === 'AUTH_SESSION_MISMATCH'));", ");"),
-}
+MUTANTS = {'M01': ('api/src/emr-report/commands.ts',
+         'facts: outcome.facts, effects: outcome.effects, version: { ref: version',
+         "facts: context.mode === 'offline-reconcile' && facts.firstApprovedAt === null ? {...outcome.facts, "
+         'firstApprovedAt: receivedAt, amendUntil: new Date(Date.parse(receivedAt)+24*3600000).toISOString()} : '
+         'outcome.facts, effects: outcome.effects, version: { ref: version'),
+ 'M02': ('api/src/emr-report/commands.ts',
+         "    if (facts.amendUntil === null || boundaryPosition(sig.time.interval, facts.amendUntil) !== 'before') "
+         "refuse('AmendWindowClosed');",
+         '    if (facts.amendUntil === null || (boundaryPosition(sig.time.interval, facts.amendUntil) === '
+         "'at-or-after' && sig.time.interval.earliest > facts.amendUntil)) refuse('AmendWindowClosed');"),
+ 'M03': ('api/src/emr-report/reconcile.ts',
+         "  if (p.action === 'amend' && facts.state === 'Finalized') {",
+         "  if (p.action === 'amend' && facts.state === 'Finalized') return refused(eventId, 'AmendWindowClosed', "
+         'visible, receivedAt, p.signedAt);\n'
+         '  if (false) {'),
+ 'M04-signer': ('api/src/emr-report/commands.ts',
+                "    [same(p.signer, e.signer) && p.identityRegistrationId === e.identityRegistrationId, 'signer'],\n",
+                ''),
+ 'M04-patient': ('api/src/emr-report/commands.ts', "    [same(p.patient, e.patient), 'patient'],\n", ''),
+ 'M04-base-version': ('api/src/emr-report/commands.ts',
+                      "    [same(p.previousVersion, e.previousVersion), 'previousVersion'],\n",
+                      ''),
+ 'M04-event-id': ('api/src/emr-report/commands.ts', "    [p.eventId === e.eventId, 'eventId'],\n", ''),
+ 'M05': ('api/src/emr-signature/time-basis.ts',
+         '  if (elapsed < 0 || at(Date.parse(basis.anchorServerTime) + elapsed) !== signedAt) '
+         "refuse('TimeBasisMismatch');\n",
+         ''),
+ 'M06': ('api/src/emr-signature/keys.ts', 'new Set(ids).size !== ids.length || ', ''),
+ 'M07-queue': ('api/src/emr-report/offline-queue.ts',
+               "      catch (error) { return freeze({ status: 'not-saved' as const, code: codeOf(error) }); }",
+               "      catch (error) { return freeze({ status: 'pending-offline' as const, receipt: null }); }"),
+ 'M07-page': ('worklist-v0/hpacs-lite/offline-report.js',
+              "if (saved?.status !== 'pending-offline' || saved.receipt?.eventId !== entry.eventId) throw new "
+              "Error('no durable receipt');",
+              ''),
+ 'M08': ('api/src/emr-report/offline-queue.ts',
+         'const reply = await transport.submit(row.entry);',
+         "const reply = await transport.submit(state.get(row.eventId) === 'sent-unknown' ? { ...row.entry, eventId: "
+         "row.entry.eventId + ':retry' } : row.entry);"),
+ 'M09': ('api/src/emr-report/commands.ts',
+         '    const receipt = parseCommitReceipt(existing);\n'
+         "    if (receipt.contentDigest !== plan.contentDigest) refuse('EventIdConflict');\n",
+         '    const receipt = parseCommitReceipt(existing);\n'),
+ 'M10-reconcile': ('api/src/emr-report/reconcile.ts',
+                   "      if (!context.adoptDivergedDraft) return conflict('own-draft-diverged', "
+                   "['adopt-signed-original', 'sign-new-version']);\n",
+                   ''),
+ 'M10-queue': ('api/src/emr-report/offline-queue.ts',
+               '      const blockedRecords = new Set<string>();\n'
+               '      for (const row of list) {\n'
+               '        if (!active()) break;\n'
+               '        if (!row.entry || row.blocked) continue;\n'
+               '        const record = JSON.stringify([row.entry.access.target.studyId, '
+               'row.entry.access.target.recordId]);\n'
+               "        if (['conflict', 'refused', 'corrupt'].includes(state.get(row.eventId)!)) { "
+               'blockedRecords.add(record); continue; }\n'
+               "        if (state.get(row.eventId) === 'committed') continue;\n"
+               '        // Time/evidence holds are not automatically adopted. Technical predecessor holds are '
+               'reevaluated each pass.\n'
+               "        if (row.state === 'held' && row.evidence?.reason && row.evidence.reason !== "
+               "'predecessor-unresolved') { blockedRecords.add(record); continue; }\n"
+               "        if (blockedRecords.has(record)) { await set(row.eventId, 'held', { reason: "
+               "'predecessor-unresolved' }); continue; }\n"
+               '        control?.changed(row.entry, state.get(row.eventId)!, row.evidence);\n'
+               '        const predecessor = row.entry.predecessorEventId;\n'
+               '        if (predecessor !== null && !kept.has(predecessor) && !list.some(r => r.eventId === '
+               'predecessor) && transport.findAdoption) {\n'
+               '          try {\n'
+               '            const found = await transport.findAdoption(predecessor, row.entry);\n'
+               '            if (!active()) break;\n'
+               '            if (found) {\n'
+               '              const prior = parseAdoptedEvent(found);\n'
+               "              if (!matchesParent(row.entry, prior)) refuse('PredecessorBindingRefused');\n"
+               '              await store.keepCommitEvidence(predecessor, prior);\n'
+               '              if (!active()) break;\n'
+               '              kept.set(predecessor, prior);\n'
+               '            }\n'
+               '          } catch { if (!active()) break; }\n'
+               '        }\n'
+               '        if (predecessor !== null && (!kept.has(predecessor) || !matchesParent(row.entry, '
+               'kept.get(predecessor)!))) {\n'
+               "          await set(row.eventId, 'held', { waitingFor: predecessor, reason: 'predecessor-unresolved' "
+               '});\n'
+               "          if (!list.some(r => r.eventId === predecessor && ['conflict', 'refused', "
+               "'corrupt'].includes(state.get(r.eventId)!))) retry.add(row.eventId);\n"
+               '          blockedRecords.add(record); continue;\n'
+               '        }\n',
+               '      const blockedRecords = new Set<string>();\n'
+               '      for (const row of list) {\n'
+               '        if (!active()) break;\n'
+               '        if (!row.entry || row.blocked) continue;\n'
+               '        const record = JSON.stringify([row.entry.access.target.studyId, '
+               'row.entry.access.target.recordId]);\n'
+               "        if (['conflict', 'refused', 'corrupt'].includes(state.get(row.eventId)!)) { "
+               'blockedRecords.add(record); continue; }\n'
+               "        if (state.get(row.eventId) === 'committed') continue;\n"
+               '        // Time/evidence holds are not automatically adopted. Technical predecessor holds are '
+               'reevaluated each pass.\n'
+               "        if (row.state === 'held' && row.evidence?.reason && row.evidence.reason !== "
+               "'predecessor-unresolved') { blockedRecords.add(record); continue; }\n"
+               "        if (false) { await set(row.eventId, 'held', { reason: 'predecessor-unresolved' }); continue; "
+               '}\n'
+               '        control?.changed(row.entry, state.get(row.eventId)!, row.evidence);\n'
+               '        const predecessor = row.entry.predecessorEventId;\n'
+               '        if (predecessor !== null && !kept.has(predecessor) && !list.some(r => r.eventId === '
+               'predecessor) && transport.findAdoption) {\n'
+               '          try {\n'
+               '            const found = await transport.findAdoption(predecessor, row.entry);\n'
+               '            if (!active()) break;\n'
+               '            if (found) {\n'
+               '              const prior = parseAdoptedEvent(found);\n'
+               "              if (!matchesParent(row.entry, prior)) refuse('PredecessorBindingRefused');\n"
+               '              await store.keepCommitEvidence(predecessor, prior);\n'
+               '              if (!active()) break;\n'
+               '              kept.set(predecessor, prior);\n'
+               '            }\n'
+               '          } catch { if (!active()) break; }\n'
+               '        }\n'
+               '        if (false) {\n'
+               "          await set(row.eventId, 'held', { waitingFor: predecessor, reason: 'predecessor-unresolved' "
+               '});\n'
+               "          if (!list.some(r => r.eventId === predecessor && ['conflict', 'refused', "
+               "'corrupt'].includes(state.get(r.eventId)!))) retry.add(row.eventId);\n"
+               '          blockedRecords.add(record); continue;\n'
+               '        }\n'),
+ 'M11-session': ('api/src/emr-report/offline-queue.ts',
+                 "  if (kind === 'http' && s.status === 401 && s.code === 'AUTH_SESSION_ENDED') return "
+                 "'awaiting-reauth';",
+                 "  if (kind === 'network' || (kind === 'http' && s.status === 401 && s.code === "
+                 "'AUTH_SESSION_ENDED')) return 'awaiting-reauth';"),
+ 'M11-page': ('worklist-v0/hpacs-lite/offline-report.js',
+              "if (sessionEnded(signal)) throw { ...signal, kind: 'http' };",
+              "if (sessionEnded(signal) || signal.kind === 'network') throw "
+              "{kind:'http',status:401,code:'AUTH_SESSION_ENDED'};"),
+ 'M12-later-input': ('worklist-v0/hpacs-lite/offline-report.js',
+                     'const text = textOf(view.readText());',
+                     'const text = { get findings() { return view.readText().findings; }, get conclusion() { return '
+                     'view.readText().conclusion; }, get recommendation() { return view.readText().recommendation; } '
+                     '};'),
+ 'M12-aba': ('worklist-v0/hpacs-lite/offline-report.js',
+             'if (!valid(token) || (token.screen && !visible(token))) return { stale: true };',
+             'if (!valid(token)) return { stale: true };'),
+ 'M13': ('api/src/emr-report/reads.ts',
+         '  return provideAfterDurableEvent(ledger, plan.event, sendBody);',
+         '  const body = await sendBody({ eventId: plan.event.eventId, durableAt: plan.event.occurredAt });\n'
+         '  await ledger.append(plan.event);\n'
+         '  return body;'),
+ 'M14': ('api/src/emr-report/reconcile.ts',
+         'act: STATUTORY_ACT[entry.access.action], event: entry.access });',
+         'act: STATUTORY_ACT[entry.access.action], event: { ...entry.access, ip: context.ingress.ip } as any });'),
+ 'M15': ('api/src/emr-report/retention.ts',
+         '  return transitionRetainedReport(facts, command, r.record, source, r.graph, r.archive);',
+         '  { const outcome = transitionReport(facts, command); return freeze({ ...outcome, retention: '
+         "require('../emr-contract/lawful-defaults').recordVersionAdded(r.record, source, r.graph, false) }); }"),
+ 'M16': ('api/src/emr-report/reads.ts',
+         '  const access = readRetention(facts, context.archive, context.resume, context.retained);',
+         "  const access = readRetention(facts, facts.contentHistory.some(h => h.use === 'preservation-entry') ? null "
+         ': context.archive, context.resume, context.retained);'),
+ 'M17': ('api/src/emr-report/retention.ts',
+         '  const read = requireRetainedRead(retained);',
+         '  if (retained === null || retained === undefined) return reportRetentionAccess(facts, archive, resume, '
+         'null);\n'
+         '  const read = requireRetainedRead(retained);'),
+ 'M18': ('api/src/emr-report/retention.ts',
+         "  if (cause !== 'server-retention-receipt') return false;",
+         "  if (cause === 'cache-evicted' || cause === 'draft-purpose-ended') return true;\n"
+         "  if (cause !== 'server-retention-receipt') return false;"),
+ 'M19-print': ('api/src/emr-report/reads.ts',
+               "  return freeze({ event: ev, physicalOutput: 'not-observed' as const, outcome });",
+               "  return freeze({ event: ev, physicalOutput: (outcome === 'dialog-returned' ? 'printed' : "
+               "'not-observed') as any, outcome });"),
+ 'M19-ack': ('api/src/emr-report/reads.ts',
+             'const current = acks.some(a => a.versionId === published.versionId) ?',
+             'const current = acks.length > 0 ?'),
+ 'M19-page': ('worklist-v0/hpacs-lite/offline-report.js',
+              "relatedEventId: opened.eventId, physicalOutput: 'not-observed' })))",
+              "relatedEventId: opened.eventId, physicalOutput: 'printed' })))"),
+ 'M20-entry': ('api/src/emr-report/commands.ts',
+               "  if (context.mode === 'online') ledger.push(accessEntry(accessAction, command, ctx, p.versionId, "
+               'p.signedAt));',
+               "  if (context.mode === 'online' && command.action !== 'approve') ledger.push(accessEntry(accessAction, "
+               'command, ctx, p.versionId, p.signedAt));'),
+ 'M20-additional-entry': ('api/src/emr-report/commands.ts',
+                          "  if (context.mode === 'online') ledger.push(accessEntry(accessAction, command, ctx, "
+                          'p.versionId, p.signedAt));',
+                          "  if (context.mode === 'online' && command.action !== 'addendum') "
+                          'ledger.push(accessEntry(accessAction, command, ctx, p.versionId, p.signedAt));'),
+ 'M20-modification': ('api/src/emr-report/commands.ts',
+                      "  if (context.mode === 'online') ledger.push(accessEntry(accessAction, command, ctx, "
+                      'p.versionId, p.signedAt));',
+                      "  if (context.mode === 'online' && command.action !== 'amend') "
+                      'ledger.push(accessEntry(accessAction, command, ctx, p.versionId, p.signedAt));'),
+ 'M20-read': ('api/src/emr-report/reads.ts',
+              '  return provideAfterDurableEvent(ledger, plan.event, sendBody);',
+              '  return sendBody({ eventId: plan.event.eventId, durableAt: plan.event.occurredAt });'),
+ 'M21-amend-interval': ('api/src/emr-report/commands.ts',
+                        '    if (facts.amendUntil === null || boundaryPosition(sig.time.interval, facts.amendUntil) '
+                        "!== 'before') refuse('AmendWindowClosed');\n",
+                        ''),
+ 'M21-anchor-interval': ('api/src/emr-signature/time-basis.ts',
+                         '  if (basis.interval.latest > basis.anchorValidUntil) return held(',
+                         '  if (signedAt > basis.anchorValidUntil) return held('),
+ 'M22-generation': ('api/src/emr-report/offline-grant.ts',
+                    "  if (p.claimGeneration !== study.claimGeneration) refuse('GrantGenerationRefused');\n",
+                    ''),
+ 'M22-anchor': ('api/src/emr-report/offline-grant.ts',
+                "  if (p.timeBasis.anchorId !== grant.anchorId) refuse('GrantAnchorRefused');\n",
+                ''),
+ 'M22-actions': ('api/src/emr-report/offline-grant.ts',
+                 "  const signActions = usable ? grant.actions.filter(a => a !== 'read') : [];",
+                 "  const signActions: any = usable ? ['approve-sign', 'amend', 'addendum'] : [];"),
+ 'M23': ('api/src/emr-report/reconcile.ts',
+         '  try { prepareSignedCommand(planContext, command); }',
+         "  try { if (!(p.action === 'amend' && facts.state === 'Finalized')) prepareSignedCommand(planContext, "
+         'command); }'),
+ 'M24': ('api/src/emr-report/reads.ts',
+         '  const readable = reader ? retainedVersions(facts) : publishedHistory(facts);',
+         '  const readable = retainedVersions(facts);'),
+ 'M25': ('worklist-v0/hpacs-lite/offline-report.js',
+         'if (!valid(token) || (token.screen && !visible(token))) return { stale: true };',
+         'if (!valid(token)) return { stale: true };'),
+ 'M26-sign': ('worklist-v0/hpacs-lite/offline-report.js',
+              'const valid = token => !disposed &&',
+              "const valid = token => token.lane.includes('approval') || !disposed &&"),
+ 'M26-list': ('worklist-v0/hpacs-lite/offline-report.js',
+              'const valid = token => !disposed &&',
+              "const valid = token => token.lane.includes('drain') || !disposed &&"),
+ 'M26-reply': ('worklist-v0/hpacs-lite/offline-report.js',
+               'if (!selection || entry.deviceSequence > selection.sequence) {',
+               'if (true) {'),
+ 'M27': ('api/src/emr-report/reconcile.ts',
+         "  if (actor.sessionState !== 'active') return fail('SessionEnded', null);",
+         '  if (context.existingReceipt && parseCommitReceipt(context.existingReceipt).contentDigest === '
+         "signedDigest(entry)) return freeze({kind:'duplicate' as "
+         "const,response:answer('duplicate',null,null,false)});\n"
+         "  if (actor.sessionState !== 'active') return fail('SessionEnded', null);"),
+ 'M28': ('api/src/emr-report/commands.ts',
+         "  if (!sameEnvelope(command.envelope, sig.envelope)) refuse('SignedEnvelopeMismatch');",
+         '  if (!command.envelope || command.envelope.payload !== sig.envelope.payload) '
+         "refuse('SignedEnvelopeMismatch');"),
+ 'M29': ('api/src/emr-report/commands.ts',
+         "  if (command.action === 'cancel-preliminary' && (facts.state !== 'Preliminary' || "
+         'facts.preliminary?.reviewerId !== actor.identity.id))\n'
+         "    refuse('DesignatedReviewerRequired');\n",
+         ''),
+ 'M30': ('api/src/emr-report/offline-queue.ts',
+         'const kept = new Map((await keptCommits()).map(a => [a.eventId, a]));',
+         'const kept = new Map<string, Readonly<AdoptedEvent>>();'),
+ 'M31-session': ('api/src/emr-report/offline-queue.ts',
+                 "  if (kind === 'http' && [403, 409].includes(s.status as number) && s.code === "
+                 "'AUTH_SESSION_MISMATCH') return 'awaiting-reauth';\n",
+                 ''),
+ 'M31-page': ('worklist-v0/hpacs-lite/offline-report.js',
+              " ||\n      ([403, 409].includes(signal.status) && signal.code === 'AUTH_SESSION_MISMATCH'));",
+              ');'),
+ 'M32': ('api/src/emr-report/reconcile.ts',
+         'try { prepareSignedCommand(planContext, command); }',
+         "try { if (facts.state !== 'Finalized') prepareSignedCommand(planContext, command); }"),
+ 'M33': ('api/src/emr-report/commands.ts', 'if (lower && sig.time.interval.earliest < lower)', 'if (false)'),
+ 'M34': ('api/src/emr-report/commands.ts',
+         'if (versions.some(v => v?.recordId === p.recordId && v.versionId === p.versionId) ||\n'
+         '      context.retained?.record?.parts.some(part => part.evidence.event.versionId === p.versionId)) '
+         "refuse('VersionIdReused');",
+         "if (facts.state !== 'Finalized' && (versions.some(v => v?.recordId === p.recordId && v.versionId === "
+         'p.versionId) ||\n'
+         '      context.retained?.record?.parts.some(part => part.evidence.event.versionId === p.versionId))) '
+         "refuse('VersionIdReused');"),
+ 'M35': ('api/src/emr-report/commands.ts',
+         '    let prior: Readonly<AdoptedEvent>;\n'
+         "    try { prior = parseAdoptedEvent(context.predecessor); } catch { refuse('PredecessorBindingRefused'); }\n"
+         '    if (prior.eventId !== p.predecessorEventId || prior.studyId !== p.studyId || prior.institutionId !== '
+         'p.managingInstitutionId ||\n'
+         '        !same(prior.version, p.previousVersion) || prior.ancestors.includes(p.eventId) ||\n'
+         '        (prior.deviceId === p.deviceId && prior.deviceSequence >= p.deviceSequence) ||\n'
+         '        !facts.contentHistory.some(h => same(h.version, prior.version) && h.at === prior.signedAt && h.use '
+         "=== 'clinical'))\n"
+         "      refuse('PredecessorBindingRefused');\n"
+         '    predecessorAt = prior.signedAt;',
+         "    if (context.predecessor.eventId !== p.predecessorEventId) refuse('PredecessorBindingRefused');\n"
+         '    predecessorAt = context.predecessor.signedAt ?? null;'),
+ 'M36': ('worklist-v0/hpacs-lite/offline-report.js',
+         'token.accountGeneration === context.accountGeneration() && token.session.epoch === context.session().epoch '
+         '&&',
+         ''),
+ 'M37': ('worklist-v0/hpacs-lite/offline-report.js', 'lanes.get(token.lane) === token.jobGeneration;', 'true;'),
+ 'M38': ('worklist-v0/hpacs-lite/offline-report.js',
+         "if (saved?.status !== 'pending-offline' || saved.receipt?.eventId !== entry.eventId) throw new Error('no "
+         "durable receipt');",
+         ''),
+ 'M39': ('worklist-v0/hpacs-lite/offline-report.js',
+         'if (!valid(token) || (token.screen && !visible(token))) return { stale: true };',
+         'if (!valid(token)) return { stale: true };'),
+ 'M40': ('worklist-v0/hpacs-lite/offline-report.js',
+         'const t = sendToken(entry);',
+         'const t = sendToken(entry);\n'
+         '                  if (stateOf(t.uid, t.recordId).eventId !== entry.eventId) return '
+         "{stale:false,value:Promise.reject({kind:'network'})};"),
+ 'M41': ('worklist-v0/hpacs-lite/offline-report.js', 'if (drain && valid(drain.token)) {', 'if (false) {'),
+ 'M42': ('api/src/emr-report/offline-queue.ts',
+         "if (row.state === 'held' && row.evidence?.reason && row.evidence.reason !== 'predecessor-unresolved')",
+         "if (row.state === 'held')"),
+ 'M43': ('api/src/emr-report/offline-queue.ts',
+         'const kept = new Map((await keptCommits()).map(a => [a.eventId, a]));',
+         'const kept = new Map((await keptCommits()).filter(a => list.some(r => r.eventId === a.eventId)).map(a => '
+         '[a.eventId, a]));')}
 
 
 def sha(path):
@@ -195,6 +423,37 @@ def dom_methods(path):
     if len(classes) != 1:
         return None
     return [node.name for node in classes[0].body if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")]
+
+
+def failed_assertion(ran, variant, copy, node):
+    """Bind the runner's actual failure to a behavioural test assertion, using Python/TypeScript ASTs.
+
+    Syntax/import errors and assertions earlier than the declared target are never that mutant's kill evidence.
+    The digest binds an assertion in a test, not any product implementation text.
+    """
+    if variant["suite"] == "dom":
+        file = copy / DOM_FILE
+        locations = re.findall(r'File "[^"]*offline_report_dom_test.py", line (\d+), in ' + re.escape(variant["case"]), ran["stderr"])
+        source = file.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for line in reversed(locations):
+            for call in ast.walk(tree):
+                if (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and
+                        isinstance(call.func.value, ast.Name) and call.func.value.id == "self" and call.func.attr.startswith("assert") and
+                        call.lineno <= int(line) <= call.end_lineno):
+                    return {"file": DOM_FILE, "line": call.lineno, "source": ast.get_source_segment(source, call).replace("\r\n", "\n")}
+        return None
+    relative = NODE_FILES[variant["suite"]]
+    basename = Path(relative).name
+    locations = [[int(line), int(col)] for line, col in re.findall(re.escape(basename) + r':(\d+):(\d+)\)', ran["stdout"])]
+    if not locations:
+        return None
+    resolved = subprocess.run([node, NODE_FILES["contract"], "--assertion-at", str(copy / relative), json.dumps(locations)],
+                              cwd=str(copy), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=TIMEOUT)
+    if resolved.returncode:
+        return None
+    result = json.loads(resolved.stdout)
+    return {"file": relative, **result} if result else None
 
 
 def link_node_modules(copy):
@@ -306,6 +565,14 @@ def main():
                         killed = not ran["timed_out"] and ran["exit"] not in (0, None) and len(found) == 1 and asserted
                         entry["reason"] = "assertion failure" if killed else f"exit={ran['exit']} timed_out={ran['timed_out']} results={[(ok, skipped) for ok, skipped, _ in found]}"
                     entry.update(killed=killed, exit=ran["exit"], seconds=ran["seconds"], log=str(log.relative_to(out)))
+                    assertion = failed_assertion(ran, entry, copy, node) if killed else None
+                    if assertion:
+                        assertion["sha256"] = hashlib.sha256(assertion["source"].encode("utf-8")).hexdigest()
+                    expected_assertion = declared[name].get("assertion_sha256")
+                    entry["assertion"] = assertion
+                    entry["expected_assertion_sha256"] = expected_assertion
+                    if not assertion or not expected_assertion or assertion["sha256"] != expected_assertion:
+                        entry.update(killed=False, reason="failure did not reach the declared behavioural assertion")
                 finally:
                     target.write_bytes(original)
                     entry["restored"] = sha(target) == hashlib.sha256(original).hexdigest()

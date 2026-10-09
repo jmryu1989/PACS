@@ -12,6 +12,30 @@ const crypto = require('node:crypto');
 const root = path.resolve(__dirname, '..', '..', '..');
 const declaration = () => JSON.parse(fs.readFileSync(path.join(root, 'emr', 'units', 'c.json'), 'utf8'));
 
+// The mutant judge identifies an actual behavioural assertion from the runner's stack using the installed AST.
+// This describes test evidence only; no product bytes/names are the subject of an assertion.
+if (process.argv.includes('--assertion-at')) {
+  const at = process.argv.indexOf('--assertion-at'), file = process.argv[at + 1];
+  const compiler = require(path.join(root, 'api/node_modules/typescript'));
+  const source = compiler.createSourceFile(file, fs.readFileSync(file, 'utf8'), compiler.ScriptTarget.Latest, true, compiler.ScriptKind.JS);
+  const locations = process.argv[at + 2].startsWith('[') ? JSON.parse(process.argv[at + 2]) : [[Number(process.argv[at + 2]), Number(process.argv[at + 3])]];
+  let found = null;
+  for (const [line, column] of locations) {
+    const position = source.getPositionOfLineAndCharacter(line - 1, column - 1);
+    const visit = node => {
+      const start = node.parent && compiler.isAwaitExpression(node.parent) ? node.parent.getStart(source) : node.getStart(source);
+      if (start <= position && node.end >= position && compiler.isCallExpression(node) &&
+          (node.expression.getText(source) === 'assert' || node.expression.getText(source).startsWith('assert.')))
+        found = { source: node.getText(source).replace(/\r\n/g, '\n'), line: source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1 };
+      compiler.forEachChild(node, visit);
+    };
+    visit(source);
+    if (found) break;
+  }
+  process.stdout.write(JSON.stringify(found));
+  process.exit(found ? 0 : 1);
+}
+
 /** Top-level TAP results of `node --test --test-reporter=tap`: every declared case exactly once, `ok`, not skipped/todo. */
 function judgeTap(text, expected) {
   const problems = [], seen = new Map();
@@ -163,7 +187,7 @@ function storeFor(srv, faults = {}) {
     async commit(plan) {
       if (faults.commit) throw Object.assign(new Error('synthetic commit fault'), { code: faults.commit });
       if (srv.receipts.has(plan.eventId)) throw Object.assign(new Error('unique eventId'), { code: 'EventIdExists' });
-      if (plan.expected.claimGeneration !== srv.facts.claimGeneration || plan.expected.publishedVersionId !== (srv.facts.publishedVersion?.versionId ?? null))
+      if (plan.expected.claimGeneration !== srv.facts.claimGeneration || plan.expected.publishedVersionId !== (srv.facts.publishedVersion?.versionId ?? null) || (plan.expected.historyDigest && plan.expected.historyDigest !== CMD.reportHistoryDigest(srv.facts)))
         throw Object.assign(new Error('stale facts'), { code: 'StaleState' });
       const committedAt = plan.times.receivedAt;
       const receipt = { eventId: plan.eventId, contentDigest: plan.contentDigest, recordId: plan.recordId, versionId: plan.version ? plan.version.ref.versionId : null,
@@ -189,7 +213,7 @@ function online(srv, actorId, action, o = {}) {
   if (signedAction) {
     const p = payload({ action: signedAction, recordId: srv.facts.recordId, signer: o.signer ?? actorId, author, signedAt: at, text: o.text, patient: o.patient,
       previous: o.previous !== undefined ? o.previous : CMD.expectedPreviousVersion(srv.facts, action), claimGeneration: o.claimGeneration ?? srv.facts.claimGeneration,
-      draftRevision: o.draftRevision !== undefined ? o.draftRevision : (srv.drafts.get(actorId) ?? null), reason: o.reason, eventId: o.signedEventId, basis: o.basis });
+      draftRevision: o.draftRevision !== undefined ? o.draftRevision : (srv.drafts.get(actorId) ?? null), reason: o.reason, eventId: o.signedEventId, versionId: o.versionId, basis: o.basis });
     envelope = envelopeFor(p);
     sig = verify(envelope, keyRows.get(p.kid).osUserId);
     retained = o.retained ?? retainedFor(srv, sig, o.stored);
@@ -199,7 +223,7 @@ function online(srv, actorId, action, o = {}) {
     draft: o.draft ?? null, reason: o.reason ?? null, reviewerId: o.reviewerId ?? null, preservation: o.preservation ?? null, envelope, ...(o.extra ?? {}) };
   return CMD.planReportCommand({ actor: actor(actorId, o.actor), study: study(o.study), facts: o.facts ?? srv.facts, author: who(author),
     ownDraftRevision: srv.drafts.get(actorId) ?? null, attachments: [], signature: sig, retained, receivedAt: o.receivedAt ?? at, ingress: o.ingress ?? ingress,
-    mode: 'online' }, command);
+    mode: 'online', storedVersions: o.storedVersions }, command);
 }
 async function run(srv, actorId, action, o = {}) {
   const plan = online(srv, actorId, action, o);
@@ -245,7 +269,7 @@ function offlineEntry(srv, actorId, o) {
     previous: o.previous !== undefined ? o.previous : CMD.expectedPreviousVersion(srv.facts, COMMAND[action]),
     claimGeneration: o.claimGeneration ?? o.grant.grant.studies.find(s => s.role === 'current').claimGeneration,
     draftRevision: o.draftRevision !== undefined ? o.draftRevision : (srv.drafts.get(actorId) ?? null),
-    grant: { grantId: o.grant.grant.grantId, digest: o.grant.digest }, sequence: o.sequence, predecessor: o.predecessor, eventId: o.eventId, reason: o.reason,
+    grant: { grantId: o.grant.grant.grantId, digest: o.grant.digest }, sequence: o.sequence, predecessor: o.predecessor, eventId: o.eventId, versionId: o.versionId, reason: o.reason,
     basis: o.ownAnchor ? (o.basis ?? {}) : { anchor: o.grant.anchor, ...(o.basis ?? {}) } });
   const owner = { issuer: ISS, subject: 'sub-' + actorId, institutionId: 'inst-a', deviceId: reg.deviceId, osUserId: reg.osUserId };
   const access = { formatVersion: 'emr-offline-access/1', eventId: p.eventId, relatedEventId: null, deviceId: reg.deviceId, deviceSequence: p.deviceSequence, kid: reg.kid,
@@ -254,13 +278,20 @@ function offlineEntry(srv, actorId, o) {
   return { formatVersion: 'emr-offline-queue/1', eventId: p.eventId, owner, deviceSequence: p.deviceSequence, predecessorEventId: p.predecessorEventId,
     envelope: envelopeFor(p), access, baseVersionId: p.previousVersion ? p.previousVersion.versionId : null };
 }
+// Adversarial envelope builder: bypasses the client canonical validator to exercise server rejection.
+function alteredEntry(entry, fields) {
+  const e=structuredClone(entry), p={...JSON.parse(Buffer.from(e.envelope.payload,'base64url').toString('utf8')),...fields};
+  e.envelope.payload=Buffer.from(JSON.stringify(p)).toString('base64url');
+  e.envelope.signature=crypto.sign('sha256',Buffer.from(e.envelope.protected+'.'+e.envelope.payload),{key:privateKeys.get(p.kid),dsaEncoding:'ieee-p1363'}).toString('base64url');
+  e.access.target.versionId=p.versionId;e.predecessorEventId=p.predecessorEventId;return e;
+}
 function reconcile(srv, entry, o = {}) {
   const p = JSON.parse(Buffer.from(entry.envelope.payload, 'base64url').toString('utf8'));
   let retained = null;
   try { retained = retainedFor(srv, V.verifySignatureV2(entry.envelope, ports, { osUserId: entry.owner.osUserId })); } catch { retained = null; }
-  return REC.reconcileOfflineEvent({ actor: actor(o.submitter ?? p.signer.id, o.actor), study: study(), facts: srv.facts, author: who(p.author.id),
-    ownDraftRevision: srv.drafts.get(p.signer.id) ?? null, attachments: [], retained, receivedAt: o.receivedAt, ingress: o.ingress ?? ingress,
-    verification: ports, grants: grantReader, existingReceipt: srv.receipts.get(entry.eventId) ?? null, predecessor: o.predecessor ?? null,
+  return REC.reconcileOfflineEvent({ actor: actor(o.submitter ?? p.signer.id, o.actor), study: study(), facts: srv.facts, author: who(o.author ?? p.author.id),
+    ownDraftRevision: srv.drafts.get(p.signer.id) ?? null, attachments: [], retained: o.retained === undefined ? retained : o.retained, receivedAt: o.receivedAt, ingress: o.ingress ?? ingress,
+    verification: ports, grants: grantReader, existingReceipt: srv.receipts.get(entry.eventId) ?? null, predecessor: o.predecessor ?? null, existingAdoption: o.existingAdoption ?? null, storedVersions: o.storedVersions,
     adoptDivergedDraft: o.adopt ?? false }, entry);
 }
 async function reconcileAndCommit(srv, entry, o) {
@@ -378,8 +409,12 @@ test('C-C02 v1 envelopes re-verify unchanged, v2 binds the exact text and a radi
     ['signer', { signer: 'r2' }],
     ['previousVersion', { previous: { recordId: srv.facts.recordId, versionId: 'v-older', sha256: 'cd'.repeat(32) } }],
     ['eventId', { eventId: 'event-not-signed' }]]) {
-    assert.throws(() => online(srv, 'r1', 'approve', { at: T0, ...option }), { code: 'SignedPayloadBindingRefused' }, field);
+    if (field === 'previousVersion') assert.throws(() => online(srv, 'r1', 'approve', { at: T0, ...option }));
+    else assert.throws(() => online(srv, 'r1', 'approve', { at: T0, ...option }), { code: 'SignedPayloadBindingRefused' }, field);
   }
+  const staleBase=await approvedUnit(), oldBase=staleBase.facts.bodyVersion;
+  await run(staleBase,'r1','amend',{at:plus(T0,MIN)});
+  assert.throws(()=>online(staleBase,'r1','amend',{at:plus(T0,2*MIN),previous:oldBase}),{code:'SignedPayloadBindingRefused'},'M04-base retained old version is not the current base');
   // D-3: a radiographer signs their own Tech Note; a note written only by an administrator stays unsigned operational text.
   const tech = actor('t1', { roles: ['technician'], canCancel: false }), admin = actor('a1', { roles: ['admin'], canSign: false, canCancel: false });
   assert.equal(CMD.techNoteSigning(tech), 'author-signs');
@@ -500,6 +535,8 @@ test('C-C04 t0 is the first actual signing time and amendment closes at t0+24h; 
   const pre = offlineEntry(fin, 'r2', { action: 'amend', signedAt: plus(T0, DAY - 3000), grant: finGrant });
   const atBoundary = offlineEntry(fin, 'r2', { action: 'amend', signedAt: plus(T0, DAY + 2000), grant: finGrant });
   finalize(fin, plus(T0, DAY + H));
+  const invalidLatePatient=offlineEntry(fin,'r2',{action:'amend',signedAt:plus(T0,DAY-3000),grant:finGrant,patient:{...patient,patientId:'SYN-WRONG-LATE'}});
+  assert.equal(reconcile(fin,invalidLatePatient,{receivedAt:plus(T0,30*H)}).kind,'refused','AC10/M23 late patient binding');
   const before = JSON.stringify(fin.facts);
   const admitted = allowed(() => reconcile(fin, pre, { receivedAt: plus(T0, 30 * H) }));
   assert.equal(admitted.kind, 'admit-late-amend');
@@ -537,6 +574,79 @@ test('C-C04 t0 is the first actual signing time and amendment closes at t0+24h; 
   assert.equal(noRetained.kind, 'refused');
   assert.equal(noRetained.code, 'RetainedRecordRequired');
   assert.equal(reconcile(lateFin, good, { receivedAt: plus(T0, 30 * H) }).kind, 'admit-late-amend');
+  // D739 AC01-05/10: identical history, with only Finalize different; every rejection keeps the original facts.
+  const paired = await approvedUnit(), lowerGrant = grantFor(paired, 'r1', plus(T0, -5 * MIN));
+  const snapshots = [paired.facts];
+  finalize(paired, plus(T0, DAY)); snapshots.push(paired.facts);
+  for (const snapshot of snapshots) {
+    paired.facts = snapshot;
+    const pristine = JSON.stringify(paired.facts);
+    const decide = (at, extra = {}, context = {}) => reconcile(paired,
+      offlineEntry(paired, 'r1', { action: 'amend', signedAt: at, grant: lowerGrant, ...extra }), { receivedAt: plus(T0, 30 * H), ...context });
+    for (const seconds of [-60,-3,-1,0,1,2,3]) {
+      const got = decide(plus(T0, seconds * 1000));
+      const expected = seconds < -2 ? 'refused' : seconds < 2 ? 'held' : snapshot.state === 'Approved' ? 'commit' : 'admit-late-amend';
+      assert.equal(got.kind, expected, 'AC02/03 full interval follows t0 in both states');
+      assert.equal(JSON.stringify(paired.facts), pristine, 'AC03 rejection preserves public history and t0');
+    }
+    const retentionEvent=offlineEntry(paired,'r1',{action:'amend',signedAt:plus(T0,MIN),grant:lowerGrant});
+    const retained=retainedFor(paired,verify(retentionEvent.envelope,retentionEvent.owner.osUserId));
+    assert.equal(reconcile(paired,retentionEvent,{receivedAt:plus(T0,30*H),retained:{...retained,graph:{...retained.graph,complete:false}}}).kind,'refused','AC10 incomplete retention graph cannot be admitted');
+    const good = decide(plus(T0, MIN));
+    assert.equal(good.kind, snapshot.state === 'Approved' ? 'commit' : 'admit-late-amend', 'AC01 valid event survives Finalize-only');
+    if (good.admission) {
+      assert.equal(good.admission.keep.firstApprovedAt, T0);
+      assert.equal(good.response.status, 'held', 'AC12 late plan is not a commit receipt');
+      assert.equal(good.admission.expected.historyDigest, CMD.reportHistoryDigest(snapshot));
+      assert.equal(good.admission.version.versionId, JSON.parse(Buffer.from(good.admission.envelope.payload,'base64url').toString('utf8')).versionId);
+    }
+    const reusedBody=alteredEntry(offlineEntry(paired,'r1',{action:'amend',signedAt:plus(T0,MIN),grant:lowerGrant}),{versionId:snapshot.bodyVersion.versionId});
+    assert.equal(reconcile(paired,reusedBody,{receivedAt:plus(T0,30*H)}).kind,'refused','AC05 current body ID rejected by server');
+    for (const id of ['reserved-cancel', 'reserved-preservation']) {
+      const result = decide(plus(T0, MIN), { versionId: id }, { storedVersions: [
+        { recordId: snapshot.recordId, versionId: 'reserved-cancel', sha256: sha('cancel') },
+        { recordId: snapshot.recordId, versionId: 'reserved-preservation', sha256: sha('preserved') }] });
+      assert.equal(result.kind, 'refused', 'AC05 reused version cannot become a new past event');
+      assert.equal(result.code, 'VersionIdReused');
+    }
+    for (const [extra, context] of [
+      [{ patient: { ...patient, patientId: 'SYN-DIFFERENT' } }, {}],
+      [{ author: 'r2' }, { author: 'r1' }],
+      [{ claimGeneration: 999 }, {}],
+      [{ draftRevision: 'invented:1' }, {}],
+      [{}, { retained: null }],
+    ]) {
+      assert.equal(decide(plus(T0, MIN), extra, context).kind, 'refused', 'AC10 invalid binding cannot produce a late admission');
+      assert.equal(JSON.stringify(paired.facts), pristine);
+    }
+  }
+  // AC03 also binds the lower endpoint to the last clinical event, not Finalize processing/receipt time.
+  const chronological = await approvedUnit();
+  await run(chronological, 'r1', 'amend', { at: plus(T0, MIN) });
+  const chronoGrant = grantFor(chronological, 'r1', plus(T0, -MIN));
+  for (const final of [false,true]) {
+    if (final) finalize(chronological, plus(T0, DAY));
+    const r = reconcile(chronological, offlineEntry(chronological, 'r1', { action: 'amend', signedAt: plus(T0, MIN + 1000), grant: chronoGrant }), { receivedAt: plus(T0, 30 * H) });
+    assert.equal(r.kind, 'held', 'AC03 predecessor interval overlap is held');
+    const old = reconcile(chronological, offlineEntry(chronological, 'r1', { action: 'amend', signedAt: plus(T0, 2 * MIN), grant: chronoGrant,
+      versionId: chronological.facts.contentHistory[0].version.versionId }), { receivedAt: plus(T0, 30 * H) });
+    assert.equal(old.kind, 'refused', 'AC05 old content version is unique too');
+  }
+  // AC04: online and the two reconcile states agree at every upper boundary point.
+  const upper = await approvedUnit(), ug = grantFor(upper, 'r1', plus(T0, 20 * H));
+  const uf = upper.facts;
+  for (const final of [false,true]) {
+    if (final) finalize(upper, plus(T0, DAY));
+    for (const seconds of [-3,-2,-1,0,1]) {
+      const at = plus(T0, DAY + seconds * 1000);
+      const r = reconcile(upper, offlineEntry(upper,'r1',{ action:'amend', signedAt:at, grant:ug }),{receivedAt:plus(T0,30*H)});
+      assert.equal(r.kind, seconds === -3 ? final ? 'admit-late-amend':'commit' : 'refused', 'AC04 exclusive upper interval');
+      if (!final && seconds !== -3) assert.throws(()=>online(upper,'r1','amend',{at}),{code:'AmendWindowClosed'});
+    }
+    assert.equal(upper.facts.firstApprovedAt, uf.firstApprovedAt);
+    assert.equal(upper.facts.amendUntil, uf.amendUntil);
+  }
+
 });
 
 test('C-C05 registered device keys verify their signatures and two-operator recovery issues a new kid; another OS user, signatures after revocation and single-operator recovery are refused', async () => {
@@ -635,10 +745,11 @@ test('C-C06 finite grants over complete reserved manifests permit offline work; 
   const inside = verify(offlineEntry(srv, 'r1', { signedAt: T0, grant: issued }).envelope, 'os-r1');
   assert.equal(allowed(() => G.checkSignatureGrant(inside, grantReader)).grant.grantId, grant.grantId);
   const refusedWith = (code, entryOptions, readerOverride = grantReader) => assert.throws(() =>
-    G.checkSignatureGrant(verify(offlineEntry(srv, 'r1', { grant: issued, ...entryOptions }).envelope, 'os-r1'), readerOverride), { code });
+    G.checkSignatureGrant(verify(offlineEntry(srv, 'r1', { grant: issued, ...entryOptions }).envelope, 'os-r1'), readerOverride), { code }, 'grant rejection ' + code);
   refusedWith('GrantActionRefused', { signedAt: T0, action: 'addendum', previous: { recordId: srv.facts.recordId, versionId: 'v0', sha256: 'ab'.repeat(32) } });
   refusedWith('GrantWindowRefused', { signedAt: plus(grant.expiresAt, MIN) });
   refusedWith('GrantWindowRefused', { signedAt: plus(grant.expiresAt, -1000) });
+  refusedWith('GrantAnchorRefused', { signedAt: T0, ownAnchor: true });
   // Before issuance: refused by the grant window even when the time evidence itself is valid (another anchor).
   assert.throws(() => G.checkSignatureGrant(verify(offlineEntry(srv, 'r1', { grant: issued, signedAt: plus(issuedAt, -MIN), ownAnchor: true }).envelope, 'os-r1'),
     grantReader), { code: 'GrantAnchorRefused' });
@@ -732,9 +843,21 @@ test('C-C07 an equivalent retry with the same eventId returns the original recei
     [reconcile(off, { ...entry, envelope: { ...entry.envelope, signature: Buffer.alloc(64, 0).toString('base64url') } }, { receivedAt: plus(T0, 3 * H) }), 'SignatureIntegrityRefused'],
     [reconcile(off, { ...entry, envelope: envelopeFor(JSON.parse(Buffer.from(entry.envelope.payload, 'base64url').toString('utf8'))) }, { receivedAt: plus(T0, 3 * H) }), 'EventIdConflict']];
   for (const [r, code] of replays) {
-    assert.equal(r.kind, 'refused');
+    assert.equal(r.kind, 'refused', 'M27 replay authenticates ' + code);
     assert.equal(r.code, code);
   }
+  // AC06: exact original receipts remain idempotent across later Finalized and Cancelled states.
+  finalize(off,plus(T0,DAY));
+  for (const cancelled of [false,true]) {
+    if(cancelled) await run(off,'r1','cancel',{at:plus(T0,DAY+MIN),reason:'SYN cancellation'});
+    const before=JSON.stringify(off.facts), count=off.commits.length;
+    assert.equal(reconcile(off,entry,{receivedAt:plus(T0,30*H)}).kind,'duplicate','AC06 exact replay survives current state');
+    assert.equal(reconcile(off,impostor,{receivedAt:plus(T0,30*H)}).kind,'refused');
+    assert.equal(reconcile(off,entry,{receivedAt:plus(T0,30*H),actor:{sessionState:'ended'}}).kind,'refused');
+    assert.equal(reconcile(off,entry,{receivedAt:plus(T0,30*H),submitter:'r2'}).kind,'refused');
+    assert.equal(JSON.stringify(off.facts),before);assert.equal(off.commits.length,count);
+  }
+
 });
 
 test('C-C08 bodies are served after the durable receipt to the actual target and version, display is a separate event, each write act is ledgered once; list/409 leaks, authorisation-as-read and invented offline addresses are refused', async () => {
@@ -856,9 +979,53 @@ test('C-C09 in each of the four reconnect conflicts the server state and my sign
   // A dependent amend of a conflicted approval is held, not applied ahead of it.
   const dependent = offlineEntry(a, 'r1', { action: 'amend', signedAt: plus(T0, -55 * MIN), grant: ga, sequence: 2, predecessor: mine.eventId,
     previous: { recordId: a.facts.recordId, versionId: 'my-unadopted', sha256: 'ab'.repeat(32) } });
-  const r5 = reconcile(a, dependent, { receivedAt: T0, predecessor: { eventId: mine.eventId, committed: false } });
+  const r5 = reconcile(a, dependent, { receivedAt: T0, predecessor: null });
   assert.equal(r5.kind, 'held'); assert.equal(r5.reason, 'predecessor-unresolved');
   same(a.facts, aBefore);
+  // AC07/08: the predecessor port is an adopted event bound to the exact signed version, never a boolean.
+  const chain = server(); await run(chain,'r1','start',{at:plus(T0,-H)});
+  const cg = grantFor(chain,'r1',plus(T0,-30*MIN));
+  const e1 = offlineEntry(chain,'r1',{signedAt:T0,grant:cg,sequence:1});
+  const ps1 = verify(e1.envelope,e1.owner.osUserId);
+  const parentVersion = { recordId: chain.facts.recordId, versionId: ps1.payload.versionId, sha256: ps1.versionSha256 };
+  const e2 = offlineEntry(chain,'r1',{action:'amend',signedAt:plus(T0,MIN),grant:cg,sequence:2,predecessor:e1.eventId,previous:parentVersion});
+  assert.equal(reconcile(chain,e2,{receivedAt:plus(T0,H)}).kind,'held','AC07 missing predecessor is held');
+  const first = await reconcileAndCommit(chain,e1,{receivedAt:plus(T0,H)});
+  const prior = first.response.adoption;
+  assert.equal(reconcile(chain,e2,{receivedAt:plus(T0,H),predecessor:prior}).kind,'commit','AC07 exact predecessor resumes original event');
+  const beforeChain = JSON.stringify(chain.facts), original = JSON.stringify(e2);
+  const wrong = [
+    { ...prior, studyId:'other-study' }, { ...prior, institutionId:'other-institution' },
+    { ...prior, version:{ ...prior.version, recordId:'other-record' }, receipt:{...prior.receipt,recordId:'other-record'} },
+    { ...prior, version:{ ...prior.version, versionId:'other-version' }, receipt:{...prior.receipt,versionId:'other-version'} },
+    { ...prior, version:{ ...prior.version, sha256:sha('wrong') } },
+    { ...prior, deviceSequence:2 }, { ...prior, ancestors:[e2.eventId], predecessorEventId:e2.eventId },
+    { eventId:e1.eventId,committed:true },
+  ];
+  for (const predecessor of wrong) {
+    assert.equal(reconcile(chain,e2,{receivedAt:plus(T0,H),predecessor}).kind,'refused','AC08 wrong adopted predecessor is refused');
+    assert.equal(JSON.stringify(chain.facts),beforeChain); assert.equal(JSON.stringify(e2),original);
+  }
+  const self = alteredEntry(offlineEntry(chain,'r1',{action:'amend',signedAt:plus(T0,MIN),grant:cg,sequence:2,eventId:'self-event'}),{predecessorEventId:'self-event'});
+  assert.equal(reconcile(chain,self,{receivedAt:plus(T0,H)}).kind,'refused','AC08 self predecessor is refused');
+  // AC09: a new Addendum changes the clinical branch although bodyVersion does not change.
+  await run(chain,'r1','addendum',{at:plus(T0,2*MIN)});
+  assert.equal(reconcile(chain,e2,{receivedAt:plus(T0,H),predecessor:prior}).conflict,'base-changed','AC09 addendum is not Finalize-only');
+
+  // AC12: an old approval cannot restart an Unread/On Hold unit after its claim was released.
+  for(const state of ['Unread','On Hold']) {
+    const u=server();await run(u,'r1','start',{at:plus(T0,-H)});const g=grantFor(u,'r1',plus(T0,-30*MIN));
+    const old=offlineEntry(u,'r1',{signedAt:T0,grant:g});
+    u.facts=L.transitionReport(u.facts,{action:state==='Unread'?'release':'defer',actor:{id:'r1',kind:'member',roles:['radiologist'],canReadStudy:true,canSign:true,canCancel:true},
+      at:plus(T0,MIN),reason:'SYN defer',expectedClaimGeneration:u.facts.claimGeneration,expectedPublishedVersionId:null}).facts;
+    assert.equal(u.facts.state,state);
+    const r=reconcile(u,old,{receivedAt:plus(T0,H)});assert.equal(r.conflict,'reassigned','AC12 released claim is not reopened');assert.equal(u.facts.firstApprovedAt,null);
+  }
+  const prelim=server();await run(prelim,'r1','start',{at:plus(T0,-H)});await run(prelim,'r1','preliminary',{at:plus(T0,-MIN),reviewerId:'r2'});
+  const reviewGrant=grantFor(prelim,'r2',plus(T0,-30*1000));
+  const review=offlineEntry(prelim,'r2',{signedAt:T0,grant:reviewGrant,author:'r1'});
+  assert.equal(reconcile(prelim,review,{receivedAt:plus(T0,H)}).kind,'commit','AC12 designated independent reviewer approves');
+
 });
 
 test('C-C10 a disconnection keeps working and only the signer\'s own new authentication resumes sending; treating disconnection as an end, another account\'s queue use and session revival are refused', async () => {
@@ -1000,7 +1167,7 @@ test('C-C13 read and print requests stay on one version and an acknowledgement b
 
 test('C-C14 the C1 declaration matches the files and collected cases exactly; missing, duplicate or undeclared files, existing single-writer paths and not-run cases counted as passed are refused', () => {
   const unit = declaration();
-  assert.deepEqual(Object.keys(unit).sort(), ['base_sha', 'candidate_cases', 'cases', 'consumers', 'dependencies', 'deployment', 'expected', 'forbidden_single_writer', 'live',
+  assert.deepEqual(Object.keys(unit).sort(), ['base_sha', 'candidate_cases', 'cases', 'consult', 'consumers', 'dependencies', 'deployment', 'expected', 'forbidden_single_writer', 'live',
     'migrations', 'models', 'mutants', 'order', 'owned_paths', 'records', 'req_risk_test', 'restore', 'round', 'routes', 'unit'].sort());
   assert.equal(unit.round, 'C1');
   const owned = unit.owned_paths;

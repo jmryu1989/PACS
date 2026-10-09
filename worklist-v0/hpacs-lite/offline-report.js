@@ -1,12 +1,12 @@
 /* EMR-C1 단절 판독 승인 화면 제어 (미연결 모듈). 페이지·main.html에 아직 등록하지 않는다(C2가 W6/W4 편집기에 연결).
  *
- * 자체 fetch·전역 인증·페이지 부팅이 없다. 생성자가 받는 다섯 접점만 쓴다.
+ * 자체 fetch·전역 인증·페이지 부팅이 없다. 생성자가 받는 명시 접점만 쓴다.
  *   view      readText() → {findings, conclusion, recommendation}, status(요소), showReport(body), print() → Promise
- *   store     관리형 단말의 보호 저장(C-NATIVE): enqueue(entry), list(owner) → 그 계정의 서버 보존 영수증 전 항목,
+ *   store     관리형 단말의 보호 저장(C-NATIVE): queue(owner) → C 큐 모델의 enqueue/send adapter,
  *             observe(observation), cached(uid)
  *   signer    단말 서명(C-NATIVE): sign(request) → { entry }  — 완성된 승인 요청만 서명한다(임의 바이트 서명 없음)
  *   transport 서버: submit(entry), read(uid)
- *   context   owner(), online(), session() → {epoch}, opening() → {uid, generation}
+ *   context   owner(), online(), session() → {epoch}, opening() → {uid, generation}, accountGeneration(), subscribe(callback)
  *
  * 정상 흐름은 기존 Approve 한 번이다. 승인 순간의 본문을 고정해 서명하고, 원문·접속사건·큐가 단말에 내구 저장된
  * 뒤에만 "승인 대기(단절)"(D594)로 표시한다. 그것은 의뢰의에게 공개되었다는 뜻이 아니다. 승인 뒤 입력은 그대로
@@ -56,148 +56,266 @@
     const need = (port, name, methods) => {
       if (!port || methods.some(m => typeof port[m] !== 'function')) throw new TypeError('KinOfflineReport.create: ' + name + ' port required');
     };
-    need(view, 'view', ['readText', 'showReport', 'print']);
-    if (!view.status || typeof view.status !== 'object') throw new TypeError('KinOfflineReport.create: view.status required');
-    need(store, 'store', ['enqueue', 'list', 'observe', 'cached']);
+    need(view, 'view', ['readText', 'showReport', 'clearReport', 'print']);
+    if (!view.status || typeof view.status !== 'object') throw new TypeError('view.status required');
+    // queue(owner) implements the C queue model's enqueue/send contract. It owns eligibility, receipts and ordering.
+    need(store, 'store', ['queue', 'observe', 'cached']);
     need(signer, 'signer', ['sign']);
     need(transport, 'transport', ['submit', 'read']);
-    need(context, 'context', ['owner', 'online', 'session', 'opening']);
-
-    const states = new Map();
-    const stateOf = uid => states.get(uid) || { status: 'idle', eventId: null, owner: null, currentVersion: null, signedText: null, reason: null };
-    function setState(uid, patch) {
-      states.set(uid, Object.freeze({ ...stateOf(uid), ...patch }));
-      render();
+    need(context, 'context', ['owner', 'online', 'session', 'opening', 'accountGeneration', 'subscribe']);
+    const scheduler = options.scheduler || { schedule: (f, ms) => setTimeout(f, ms), cancel: id => clearTimeout(id) };
+    need(scheduler, 'scheduler', ['schedule', 'cancel']);
+    const states = new Map(), selections = new Map(), records = new Map(), lanes = new Map(), queues = new Map(), shown = new Map();
+    let disposed = false, drain = null, retry = null, retryCount = 0;
+    const key = parts => JSON.stringify(parts);
+    const ownerKey = owner => owner ? key(['issuer', 'subject', 'institutionId', 'deviceId', 'osUserId'].map(k => owner[k])) : null;
+    const copyOwner = () => context.owner() ? Object.freeze({ ...context.owner() }) : null;
+    const idle = () => Object.freeze({ status: 'idle', eventId: null, owner: null, currentVersion: null, signedText: null, reason: null });
+    const recordKey = (owner, uid, recordId) => key([ownerKey(owner), uid, recordId]);
+    const eventKey = (owner, uid, recordId, eventId) => key([ownerKey(owner), uid, recordId, eventId]);
+    function stateOf(uid, recordId) {
+      const owner = context.owner(), rk = recordId ?? records.get(key([ownerKey(owner), uid]));
+      const selection = selections.get(recordKey(owner, uid, rk));
+      return selection ? (selection.eventId === null ? selection.state : states.get(eventKey(owner, uid, rk, selection.eventId))) || idle() : idle();
     }
-    function render() {
+    function paint() {
       const opening = context.opening();
-      const current = opening ? stateOf(opening.uid) : stateOf(null);
-      // 표시는 현재 열린 검사와 현재 계정의 것만. 다른 계정의 승인 대기는 보이지 않는다.
-      const visible = current.owner === null || sameOwner(current.owner, context.owner());
-      view.status.textContent = STATUS_TEXT[visible ? current.status : 'idle'] || '';
+      view.status.textContent = STATUS_TEXT[opening ? stateOf(opening.uid, opening.recordId).status : 'idle'] || '';
     }
-
-    /** 작업을 시작한 계정·세션. 기다림(await) 뒤에는 같은 계정·세션일 때만 이어간다. */
-    const account = () => ({ owner: context.owner(), epoch: context.session().epoch });
-    const sameAccount = start => context.session().epoch === start.epoch && sameOwner(context.owner(), start.owner);
-    /** 화면에 쓰기 직전: 같은 검사·같은 열기(generation)·같은 계정·같은 세션인가. */
-    const sameOpening = start => {
-      const now = context.opening();
-      return !!now && now.uid === start.uid && now.generation === start.generation && sameAccount(start);
+    function capture(scope, target = {}, screen = false) {
+      const owner = copyOwner(), session = Object.freeze({ ...context.session() }), opening = context.opening();
+      const lane = key([ownerKey(owner), scope, target.uid ?? null, target.recordId ?? null, target.eventId ?? null]);
+      const jobGeneration = (lanes.get(lane) || 0) + 1;
+      lanes.set(lane, jobGeneration);
+      const accountGeneration = context.accountGeneration();
+      if (!Number.isSafeInteger(accountGeneration)) throw new TypeError('authority account generation required');
+      return Object.freeze({ owner, session, accountGeneration, lane, jobGeneration, ...target,
+        screen, openingGeneration: opening?.generation });
+    }
+    const valid = token => !disposed && sameOwner(token.owner, context.owner()) &&
+      token.accountGeneration === context.accountGeneration() && token.session.epoch === context.session().epoch &&
+      lanes.get(token.lane) === token.jobGeneration;
+    const visible = token => {
+      const opening = context.opening();
+      return !!opening && opening.uid === token.uid && opening.generation === token.openingGeneration &&
+        (!opening.recordId || !token.recordId || opening.recordId === token.recordId);
     };
-    // U5의 세션 종료 신호: 401 AUTH_SESSION_ENDED, 403/409 AUTH_SESSION_MISMATCH(다른 로그인의 쿠키). 그 밖의 실패는 종료가 아니다.
+    /** Every continuation and external effect enters here: no await between ownership check and effect. */
+    function apply(token, effect) {
+      if (!valid(token) || (token.screen && !visible(token))) return { stale: true };
+      return { stale: false, value: effect() };
+    }
+    const stale = Object.freeze({ status: 'stale' });
+    const currentResult = token => valid(token) ? stateOf(token.uid, token.recordId) : stale;
+    function select(token, patch, sequence = Infinity) {
+      const rk = recordKey(token.owner, token.uid, token.recordId);
+      const state = Object.freeze({ ...idle(), ...patch, owner: token.owner });
+      records.set(key([ownerKey(token.owner), token.uid]), token.recordId);
+      selections.set(rk, { eventId: state.eventId, sequence, state });
+      if (state.eventId !== null) states.set(eventKey(token.owner, token.uid, token.recordId, state.eventId), state);
+      paint();
+    }
+    function queueFor(token) {
+      const k = ownerKey(token.owner);
+      if (!queues.has(k)) queues.set(k, store.queue(token.owner));
+      return queues.get(k);
+    }
     const sessionEnded = signal => !!signal && ((signal.status === 401 && signal.code === 'AUTH_SESSION_ENDED') ||
       ([403, 409].includes(signal.status) && signal.code === 'AUTH_SESSION_MISMATCH'));
-
-    /**
-     * 호출자가 시작 문맥(계정·세션)을 확인한 뒤 보낸다. 응답은 같은 세션·같은 계정·그 검사의 지금 사건(eventId)일 때만
-     * 반영한다. 아니면 다음 전송이 같은 eventId로 영수증을 다시 받는다. 오래된 응답이 새 사건의 공개판 참조를 덮어쓰지 않는다.
-     */
-    async function submit(uid, entry, start) {
-      let reply;
-      try { reply = await transport.submit(entry); }
-      catch (signal) {
-        if (!sameAccount(start) || stateOf(uid).eventId !== entry.eventId) return;
-        if (sessionEnded(signal)) setState(uid, { status: 'awaiting-reauth' });
-        return; // 단절·timeout·5xx는 종료가 아니다: 승인 대기 유지
+    function updateEvent(token, entry, state, evidence) {
+      return apply(token, () => {
+        if (!sameOwner(entry.owner, token.owner) || entry.eventId !== token.eventId || entry.access.target.studyId !== token.uid || entry.access.target.recordId !== token.recordId) return;
+        const ek = eventKey(token.owner, token.uid, token.recordId, entry.eventId), prior = states.get(ek);
+        if (prior?.status === 'published' && state !== 'committed') return;
+        const status = { pending: 'pending-offline', 'sent-unknown': 'pending-offline', committed: 'published',
+          'awaiting-reauth': 'awaiting-reauth', conflict: 'conflict', held: 'held', refused: 'refused', corrupt: 'held' }[state];
+        states.set(ek, Object.freeze({ ...idle(), ...prior, owner: token.owner, eventId: entry.eventId, signedText: signedText(entry),
+          status, currentVersion: evidence?.currentVersion ?? prior?.currentVersion ?? null, reason: evidence?.reason ?? null }));
+        const rk = recordKey(token.owner, token.uid, token.recordId), selection = selections.get(rk);
+        if (!selection || entry.deviceSequence > selection.sequence) {
+          selections.set(rk, { eventId: entry.eventId, sequence: entry.deviceSequence });
+          records.set(key([ownerKey(token.owner), token.uid]), token.recordId);
+        }
+        paint();
+      });
+    }
+    function retryLater(token) {
+      apply(token, () => {
+        if (retry) scheduler.cancel(retry.id);
+        const handle = { token, id: null };
+        handle.id = scheduler.schedule(() => apply(token, () => {
+          if (retry !== handle) return;
+          retry = null;
+          sync();
+        }), Math.min(30000, 500 * (2 ** Math.min(retryCount++, 6))));
+        retry = handle;
+      });
+    }
+    function sync() {
+      if (disposed || !context.online() || !context.owner() || context.session().state === 'ended') return Promise.resolve(stale);
+      // Reconnect joins the running job; it never invalidates that job's generation.
+      if (drain && valid(drain.token)) {
+        apply(drain.token, () => { drain.dirty = true; });
+        return drain.promise;
       }
-      if (!sameAccount(start) || !reply || reply.eventId !== entry.eventId || stateOf(uid).eventId !== entry.eventId) return;
-      const next = { committed: 'published', duplicate: 'published', conflict: 'conflict', held: 'held', refused: 'refused', failed: 'pending-offline' }[reply.status];
-      if (!next) return;
-      setState(uid, { status: next, currentVersion: reply.currentVersion || null, reason: reply.reason || null });
+      const token = capture('drain'), handle = { token, dirty: false, promise: null };
+      apply(token, () => {
+        if (retry) { scheduler.cancel(retry.id); retry = null; }
+        drain = handle;
+      });
+      const run = async () => {
+        let retryable = false;
+        do {
+          if (apply(token, () => { handle.dirty = false; }).stale) return stale;
+          const sends = new Map();
+          const sendToken = entry => {
+            if (!sends.has(entry.eventId)) sends.set(entry.eventId, capture('send', { uid: entry.access.target.studyId,
+              recordId: entry.access.target.recordId, eventId: entry.eventId }));
+            return sends.get(entry.eventId);
+          };
+          try {
+            const launched = apply(token, () => queueFor(token).send({
+              submit: entry => {
+                const started = apply(token, () => {
+                  if (!sameOwner(entry.owner, token.owner)) return { stale: true };
+                  const t = sendToken(entry);
+                  return apply(t, () => transport.submit(entry, Object.freeze({ owner: t.owner, session: t.session, accountGeneration: t.accountGeneration })));
+                });
+                const dispatched = started.stale ? started : started.value;
+                return dispatched.stale ? Promise.reject({ kind: 'stale' }) : Promise.resolve(dispatched.value).catch(signal => {
+                  // Normalize the native queue signal; network failures never borrow a new session.
+                  if (sessionEnded(signal)) throw { ...signal, kind: 'http' };
+                  throw signal;
+                });
+              },
+              findAdoption: (id, entry) => {
+                const dispatched = apply(token, () => transport.findAdoption ? transport.findAdoption(id, entry, token) : null);
+                return dispatched.stale ? Promise.resolve(null) : dispatched.value;
+              },
+            }, { state: 'active', ...token.owner }, {
+              active: () => valid(token),
+              changed: (entry, state, evidence) => {
+                apply(token, () => updateEvent(sendToken(entry), entry, state, evidence));
+              },
+            }));
+            if (launched.stale) return stale;
+            const rows = await launched.value;
+            if (apply(token, () => { retryable = rows.some(r => r.retryable); }).stale) return stale;
+          } catch {
+            if (apply(token, () => { retryable = true; }).stale) return stale;
+          }
+        } while (handle.dirty && valid(token));
+        apply(token, () => {
+          if (retryable) retryLater(token); else retryCount = 0;
+        });
+        return { status: 'drained' };
+      };
+      // Start on a microtask so concurrent callers always see the same promise.
+      handle.promise = Promise.resolve().then(run).finally(() => apply(token, () => { if (drain === handle) drain = null; }));
+      return handle.promise;
     }
-
-    async function observe(observation) {
-      try { await store.observe(Object.freeze(observation)); return true; } catch { return false; }
+    async function observe(token, observation) {
+      const started = apply(token, () => store.observe(Object.freeze({ ...observation, owner: token.owner, session: token.session,
+        accountGeneration: token.accountGeneration })));
+      if (started.stale) return false;
+      try { await started.value; return !apply(token, () => true).stale; } catch { return false; }
     }
-
+    function render() {
+      if (disposed || !context.owner()) { view.status.textContent = ''; return; }
+      const token = capture('render');
+      apply(token, paint);
+    }
+    const unsubscribe = context.subscribe(() => {
+      if (disposed) return;
+      if (retry) { scheduler.cancel(retry.id); retry = null; }
+      // W6 keeps each owner's editor draft; only the displayed report projection is cleared here.
+      view.clearReport();
+      render();
+      sync();
+    });
     return Object.freeze({
-      /** 기존 Approve 한 번. 추가 확인창·재로그인·창 닫힘 없음. */
       async approve(target) {
-        const t = target || {};
-        const opening = context.opening();
+        const t = Object.freeze({ ...target }), opening = context.opening();
         if (!opening || opening.uid !== t.uid) throw new TypeError('approve: the open study is required');
-        const text = textOf(view.readText()); // 누른 순간의 본문. 이후 입력은 별도 작업본으로 남는다.
-        const start = account(), owner = start.owner;
-        if (!owner) { setState(t.uid, { status: 'locked' }); return stateOf(t.uid); }
-        setState(t.uid, { status: 'signing', owner, signedText: text, eventId: null });
+        const text = textOf(view.readText());
+        const token = capture('approval', { uid: t.uid, recordId: t.recordId });
+        if (!token.owner) return Object.freeze({ ...idle(), status: 'locked' });
+        if (apply(token, () => select(token, { status: 'signing', signedText: text })).stale) return stale;
         let entry;
         try {
-          entry = (await signer.sign(Object.freeze({ uid: t.uid, recordId: t.recordId, baseVersionId: t.baseVersionId ?? null, text, owner }))).entry;
-          if (!entry || !sameText(signedText(entry), text) || !sameOwner(entry.owner, owner)) throw new Error('signed other content');
-        } catch { setState(t.uid, { status: 'not-saved' }); return stateOf(t.uid); }
-        // 서명을 기다리는 동안 계정·세션이 바뀌었으면 이 승인은 멈춘다(저장·전송하지 않음). 처음 계정에게만 미저장으로 보인다.
-        if (!sameAccount(start)) { setState(t.uid, { status: 'not-saved' }); return stateOf(t.uid); }
-        let receipt;
-        try {
-          receipt = await store.enqueue(entry);
-          if (!receipt || receipt.eventId !== entry.eventId) throw new Error('no durable receipt');
-        } catch { setState(t.uid, { status: 'not-saved' }); return stateOf(t.uid); }
-        setState(t.uid, { status: 'pending-offline', eventId: entry.eventId });
-        // 저장을 기다리는 동안 계정이 바뀌었으면 원본은 처음 계정 영역에 남고, 지금 세션으로 보내지 않는다.
-        if (context.online() && sameAccount(start)) await submit(t.uid, entry, start);
-        return stateOf(t.uid);
-      },
-
-      /** 연결이 돌아오면 현재 계정 자신의 큐만 원래 eventId로 다시 보낸다. 목록을 기다리는 동안 계정이 바뀌면 멈춘다. */
-      async sync() {
-        if (!context.online()) return;
-        const start = account(), owner = start.owner;
-        if (!owner) return;
-        const entries = await store.list(owner);
-        for (const entry of Array.isArray(entries) ? entries : []) {
-          if (!sameAccount(start)) return; // 목록이나 앞 전송을 기다리는 동안 계정·세션이 바뀌었으면 멈춘다
-          if (!entry || !sameOwner(entry.owner, owner)) continue; // 저장소가 다른 계정 것을 돌려줘도 보내지 않는다
-          const uid = entry.access && entry.access.target && entry.access.target.studyId;
-          if (typeof uid !== 'string') continue;
-          const state = stateOf(uid);
-          // 재시작 뒤에는 화면 상태가 비어 있다: 단말이 내구 저장한 미전송 승인을 그대로 이어받는다.
-          if (state.status === 'idle') setState(uid, { status: 'pending-offline', eventId: entry.eventId, owner });
-          else if (!['pending-offline', 'awaiting-reauth'].includes(state.status) || state.eventId !== entry.eventId) continue;
-          await submit(uid, entry, start);
+          const signed = apply(token, () => signer.sign(Object.freeze({ uid: t.uid, recordId: t.recordId,
+            baseVersionId: t.baseVersionId ?? null, text, owner: token.owner, session: token.session, accountGeneration: token.accountGeneration })));
+          if (signed.stale) return stale;
+          entry = (await signed.value).entry;
+          if (!valid(token)) return stale;
+          if (!entry || !sameText(signedText(entry), text) || !sameOwner(entry.owner, token.owner) ||
+              entry.access?.target?.studyId !== t.uid || entry.access?.target?.recordId !== t.recordId) throw new Error('signed other content');
+        } catch {
+          apply(token, () => select(token, { status: 'not-saved', signedText: text }));
+          return currentResult(token);
         }
+        try {
+          const put = apply(token, () => queueFor(token).enqueue(entry));
+          if (put.stale) return stale;
+          const saved = await put.value;
+          if (!valid(token)) return stale;
+          // The queue validates the digest of the exact entry and the complete native durable receipt.
+          if (saved?.status !== 'pending-offline' || saved.receipt?.eventId !== entry.eventId) throw new Error('no durable receipt');
+        } catch {
+          apply(token, () => select(token, { status: 'not-saved', signedText: text }));
+          return currentResult(token);
+        }
+        if (apply(token, () => select(token, { status: 'pending-offline', signedText: text, eventId: entry.eventId }, entry.deviceSequence)).stale) return stale;
+        const started = apply(token, () => context.online() ? sync() : null);
+        if (!started.stale) await started.value;
+        return currentResult(token);
       },
-
-      /**
-       * 검사를 열면 본문을 자동으로 가져온다(추가 열기 클릭 없음). 기다림 뒤 화면에 쓰기 직전마다 같은 검사·같은 열기·같은
-       * 계정·같은 세션인지 다시 확인한다(A→B→A, 계정 전환 중의 늦은 본문은 쓰지 않는다).
-       */
+      sync,
       async open(uid) {
         const opening = context.opening();
         if (!opening || opening.uid !== uid) throw new TypeError('open: the selected study is required');
-        const start = { uid, generation: opening.generation, ...account() };
-        if (!start.owner) return false;
-        const online = context.online();
+        const token = capture('read', { uid }, true), online = context.online();
+        if (!token.owner) return false;
         let body;
-        try { body = online ? await transport.read(uid) : await store.cached(uid); } catch { body = null; }
-        if (!body || !sameOpening(start)) return false;
-        // 표시할 때마다 새 사건이다. 단절 중에는 IP를 관측하지 못했으므로 그렇게 기록한다.
-        const shown = { action: 'client-shown', eventId: newId(), relatedEventId: null, uid, recordId: body.recordId, versionId: body.versionId,
+        try {
+          const start = apply(token, () => online ? transport.read(uid, token) : store.cached(uid, token));
+          if (start.stale) return false;
+          body = await start.value;
+        } catch { return false; }
+        if (!body || typeof body.recordId !== 'string' || typeof body.versionId !== 'string' || (body.uid && body.uid !== uid)) return false;
+        const observation = { action: 'client-shown', eventId: newId(), relatedEventId: null, uid, recordId: body.recordId, versionId: body.versionId,
           network: online ? 'online' : 'offline', ip: online ? null : 'not-observed', physicalOutput: null };
-        // 단말 캐시의 재표시는 서버가 제공 사건을 남기지 않으므로, 기록이 저장된 뒤에만 보인다.
-        if (!online && !(await observe(shown))) return false;
-        if (!sameOpening(start)) return false; // 기록을 기다리는 동안 다른 열기·계정으로 바뀌었으면 쓰지 않는다
-        view.showReport(body);
-        render();
-        if (online) await observe(shown);
-        return true;
+        if (!online && !(await observe(token, observation))) return false;
+        const painted = apply(token, () => {
+          shown.set(recordKey(token.owner, uid, body.recordId), body.versionId);
+          view.showReport(body); paint();
+        });
+        if (painted.stale) return false;
+        if (online) await observe(token, observation);
+        return !apply(token, () => true).stale;
       },
-      /** 출력은 정확한 판에 고정한다. print()가 돌아온 것은 대화상자가 닫혔다는 보고일 뿐 종이 출력의 증거가 아니다. */
       async print(version) {
-        const v = version || {};
+        const v = Object.freeze({ ...version });
+        const token = capture('print', { uid: v.uid, recordId: v.recordId, versionId: v.versionId }, true);
+        const pinned = () => !shown.has(recordKey(token.owner, v.uid, v.recordId)) || shown.get(recordKey(token.owner, v.uid, v.recordId)) === v.versionId;
         const opened = { action: 'print-opened', eventId: newId(), relatedEventId: null, uid: v.uid, recordId: v.recordId, versionId: v.versionId,
           network: context.online() ? 'online' : 'offline', ip: context.online() ? null : 'not-observed', physicalOutput: null };
-        const start = account();
-        if (!(await observe(opened))) return 'not-recorded'; // 기록하지 못한 출력은 열지 않는다
-        if (!sameAccount(start)) return 'cancelled'; // 기록을 기다리는 동안 계정이 바뀌었으면 출력하지 않는다
-        try { await view.print(Object.freeze({ uid: v.uid, recordId: v.recordId, versionId: v.versionId })); }
-        catch { return 'cancelled'; }
-        await observe({ ...opened, action: 'print-done', eventId: newId(), relatedEventId: opened.eventId, physicalOutput: 'not-observed' });
+        if (!pinned()) return 'cancelled';
+        if (!(await observe(token, opened))) return valid(token) && visible(token) ? 'not-recorded' : 'cancelled';
+        const started = apply(token, () => pinned() ? view.print(v) : null);
+        if (started.stale || started.value === null) return 'cancelled';
+        try { await started.value; } catch { return 'cancelled'; }
+        if (!pinned() || apply(token, () => true).stale) return 'cancelled';
+        if (!(await observe(token, { ...opened, action: 'print-done', eventId: newId(), relatedEventId: opened.eventId, physicalOutput: 'not-observed' }))) return 'cancelled';
         return 'dialog-returned';
       },
-
-      state(uid) { return stateOf(uid); },
+      state: stateOf,
       render,
+      dispose() {
+        if (retry) scheduler.cancel(retry.id);
+        disposed = true;
+        if (typeof unsubscribe === 'function') unsubscribe();
+      },
     });
   }
 

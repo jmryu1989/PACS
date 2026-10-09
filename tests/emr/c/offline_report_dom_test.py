@@ -36,50 +36,58 @@ HTML = """<!doctype html><html lang="ko"><meta charset="utf-8"><title>harness</t
 <script src="offline-report.js"></script></html>"""
 
 BOOT = r"""() => {
+  if (window.syn?.controller) window.syn.controller.dispose();
+  document.querySelector('#report').textContent='';document.querySelector('#status').textContent='';
   const owner = id => ({ issuer: 'https://identity.example.test', subject: 'sub-' + id, institutionId: 'inst-a', deviceId: 'dev-' + id, osUserId: 'os-' + id });
   const b64 = value => { let s = ''; new TextEncoder().encode(JSON.stringify(value)).forEach(b => { s += String.fromCharCode(b); });
     return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); };
   const unb64 = text => JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(text.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((text.length + 3) % 4)), c => c.charCodeAt(0))));
-  const syn = window.syn = { makeOwner: owner, owner: owner('r1'), online: false, epoch: 1, opening: { uid: '1.2.840.1', generation: 1 }, entries: new Map(),
+  const syn = window.syn = { accountGeneration: 1, subscribers: [], timers: [], holdPut: false, putHolds: [], holdPrint: false, printHolds: [], session: { epoch: 1 }, makeOwner: owner, owner: owner('r1'), online: false, epoch: 1, opening: { uid: '1.2.840.1', generation: 1 }, entries: new Map(),
     observations: [], calls: [], signRequests: [], holdSign: false, signHolds: [], putFault: false, leak: false, submitMode: 'commit', holdSubmit: false,
     submitHolds: [], holdRead: false, readHolds: [], cache: {}, printMode: 'return', seq: 0, holdObserve: false, observeHolds: [], holdList: false, listHolds: [], holdCached: false, cachedHolds: [] };
   const field = id => document.querySelector('#' + id).value;
   const view = {
     readText: () => ({ findings: field('findings'), conclusion: field('conclusion'), recommendation: field('recommendation') }),
     status: document.querySelector('#status'),
+    clearReport: () => { document.querySelector('#report').textContent = ''; },
     showReport: body => { document.querySelector('#report').textContent = body.text; },
-    print: version => { syn.calls.push(['print', version.versionId]); return syn.printMode === 'return' ? Promise.resolve() : Promise.reject(new Error('cancelled')); },
+    print: version => { syn.calls.push(['print', version.versionId]); const result = () => syn.printMode === 'return' ? Promise.resolve() : Promise.reject(new Error('cancelled')); if (syn.holdPrint) return new Promise((resolve,reject) => syn.printHolds.push(() => result().then(resolve,reject))); return result(); },
   };
   // Stand-in for the native signer: it signs the request it was given, at the moment it runs.
   const build = req => {
     const n = ++syn.seq;
     return { formatVersion: 'emr-offline-queue/1', eventId: 'event-' + n, owner: { ...req.owner }, deviceSequence: n, predecessorEventId: null,
-      envelope: { protected: 'header', payload: b64({ text: { kind: 'report', findings: req.text.findings, conclusion: req.text.conclusion, recommendation: req.text.recommendation } }), signature: 'signature' },
-      access: { target: { studyId: req.uid, recordId: req.recordId, versionId: 'v-' + n } }, baseVersionId: null };
+      envelope: { protected: 'header', payload: b64({ eventId: 'event-' + n, studyId: req.uid, recordId: req.recordId, versionId: 'v-' + n, managingInstitutionId: req.owner.institutionId, deviceId: req.owner.deviceId, deviceSequence: n, predecessorEventId: null, signedAt: '2026-10-05T01:00:00.000Z', text: { kind: 'report', findings: req.text.findings, conclusion: req.text.conclusion, recommendation: req.text.recommendation } }), signature: 'signature' },
+      access: { managingInstitutionId: req.owner.institutionId, target: { studyId: req.uid, recordId: req.recordId, versionId: 'v-' + n } }, baseVersionId: null };
   };
   const signer = { sign(req) {
     syn.signRequests.push(req);
     if (!syn.holdSign) return Promise.resolve({ entry: build(req) });
-    return new Promise(resolve => syn.signHolds.push(() => resolve({ entry: build(req) })));
+    return new Promise((resolve,reject) => syn.signHolds.push(mode => mode === 'throw' ? reject(new Error('sign failed')) : resolve({ entry: mode === 'mismatch' ? build({ ...req, text: { ...req.text, findings: 'other' } }) : build(req) })));
   } };
+  const queueStates = new Map();
+  const hash = async bytes => [...new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))].map(b=>b.toString(16).padStart(2,'0')).join('');
+  const hashText = text => hash(new TextEncoder().encode(text));
+  const digest = e => hashText(JSON.stringify(e));
   const store = {
     async enqueue(entry) { syn.calls.push(['enqueue', entry.eventId]); if (syn.putFault) throw new Error('disk full'); syn.entries.set(entry.eventId, entry);
-      return { eventId: entry.eventId, entryId: 'row-' + entry.eventId, digest: 'd', durableAt: '2026-10-05T01:00:00.000Z' }; },
+      const receipt = { eventId: entry.eventId, entryId: 'row-' + entry.eventId, digest: await digest(entry), durableAt: '2026-10-05T01:00:00.000Z' };
+      if (syn.holdPut) return new Promise((resolve,reject) => syn.putHolds.push(mode => mode === 'throw' ? reject(new Error('put failed')) : resolve(mode === 'mismatch' ? { ...receipt, eventId: 'wrong' } : receipt))); return receipt; },
     async list(o) {
       syn.calls.push(['list', o.subject]);
       const pick = () => [...syn.entries.values()].filter(e => syn.leak || e.owner.subject === o.subject);
-      if (syn.holdList) return new Promise(resolve => syn.listHolds.push(() => resolve(pick())));
+      if (syn.holdList) return new Promise((resolve,reject) => syn.listHolds.push(mode => mode === 'throw' ? reject(new Error('list failed')) : resolve(pick())));
       return pick();
     },
     async observe(o) {
       if (syn.observeFault) throw new Error('store unavailable');
       syn.observations.push(JSON.parse(JSON.stringify(o)));
-      if (syn.holdObserve) await new Promise(resolve => syn.observeHolds.push(resolve));
+      if (syn.holdObserve) await new Promise((resolve,reject) => syn.observeHolds.push(mode => mode === 'throw' ? reject(new Error('observe failed')) : resolve()));
       return { ok: true };
     },
     async cached(uid) {
       syn.calls.push(['cached', uid]);
-      if (syn.holdCached) return new Promise(resolve => syn.cachedHolds.push(() => resolve(syn.cache[uid] ?? null)));
+      if (syn.holdCached) return new Promise((resolve,reject) => syn.cachedHolds.push(mode => mode === 'throw' ? reject(new Error('cached failed')) : resolve(syn.cache[uid] ?? null)));
       return syn.cache[uid] ?? null;
     },
   };
@@ -88,13 +96,19 @@ BOOT = r"""() => {
   const transport = {
     submit(entry) {
       syn.calls.push(['submit', entry.eventId, syn.epoch]);
-      const respond = () => {
+      const respond = async () => {
+        if (syn.submitMode === 'failed' || syn.submitMode === 'held') return Promise.resolve(answer(entry, syn.submitMode, { reason: 'predecessor-unresolved' }));
         if (syn.submitMode === 'ended') return Promise.reject({ status: 401, code: 'AUTH_SESSION_ENDED' });
         if (syn.submitMode === 'network') return Promise.reject({ kind: 'network' });
         if (syn.submitMode === 'mismatch') return Promise.reject({ status: 409, code: 'AUTH_SESSION_MISMATCH' });
         if (syn.submitMode === 'conflict') return Promise.resolve(answer(entry, 'conflict', { reason: 'other-approved',
           currentVersion: { recordId: 'report-x', versionId: 'server-v', sha256: 'ab'.repeat(32) } }));
-        return Promise.resolve(answer(entry, 'committed', { currentVersion: { recordId: 'report-x', versionId: 'published-' + entry.eventId, sha256: 'cd'.repeat(32) } }));
+        const payload=unb64(entry.envelope.payload), envelope=entry.envelope;
+        const version={recordId:payload.recordId,versionId:payload.versionId,sha256:await hashText(JSON.stringify(payload))};
+        const contentDigest=await hashText('signed:'+version.sha256+':'+await hashText(envelope.protected+'.'+envelope.payload+'.'+envelope.signature)+':clinical');
+        const receipt={eventId:entry.eventId,contentDigest,recordId:payload.recordId,versionId:payload.versionId,ledgerReceipts:[{eventId:'ledger-'+entry.eventId,durableAt:'2026-10-05T02:00:00.000Z'}],committedAt:'2026-10-05T02:00:00.000Z',publishedAt:'2026-10-05T02:00:00.000Z'};
+        const adoption={eventId:entry.eventId,studyId:payload.studyId,institutionId:payload.managingInstitutionId,version,signedAt:payload.signedAt,deviceId:payload.deviceId,deviceSequence:payload.deviceSequence,predecessorEventId:null,ancestors:[],receipt};
+        return answer(entry, 'committed', { currentVersion: version, adoption, times: { signedAt: payload.signedAt, receivedAt: '2026-10-05T02:00:00.000Z', committedAt: receipt.committedAt, publishedAt: receipt.publishedAt } });
       };
       if (!syn.holdSubmit) return respond();
       return new Promise((resolve, reject) => syn.submitHolds.push(() => respond().then(resolve, reject)));
@@ -103,11 +117,39 @@ BOOT = r"""() => {
       syn.calls.push(['read', uid]);
       const body = { recordId: 'report-' + uid, versionId: 'v-read-' + syn.calls.length, text: 'SYN 판독 본문 ' + syn.calls.length };
       if (!syn.holdRead) return Promise.resolve(body);
-      return new Promise(resolve => syn.readHolds.push(() => resolve(body)));
+      return new Promise((resolve,reject) => syn.readHolds.push(mode => mode === 'throw' ? reject(new Error('read failed')) : resolve(body)));
     },
   };
-  const context = { owner: () => syn.owner, online: () => syn.online, session: () => ({ epoch: syn.epoch }), opening: () => syn.opening };
-  syn.controller = KinOfflineReport.create({ view, store, signer, transport, context });
+  // Page isolation uses a queue-port stand-in; Q04/Q08 run this UI against the actual C queue and reconcile.
+  store.queue = o => ({
+    async enqueue(e) {
+      try { const receipt = await store.enqueue(e); if (receipt.eventId !== e.eventId || receipt.digest !== await digest(e)) throw new Error('receipt');
+        queueStates.set(e.eventId, { state: 'pending', evidence: null }); return { status: 'pending-offline', receipt }; }
+      catch { return { status: 'not-saved' }; }
+    },
+    async send(t, session, control) {
+      const entries = await store.list(o), result = [];
+      for (const e of entries.sort((a,b) => a.deviceSequence-b.deviceSequence)) {
+        if (!control.active()) return [];
+        if (e.owner.subject !== o.subject) continue;
+        const saved = queueStates.get(e.eventId) || { state: 'pending', evidence: null };
+        if (['committed','conflict','refused'].includes(saved.state)) continue;
+        control.changed(e, saved.state, saved.evidence);
+        let state, evidence, retryable = false;
+        try { evidence = await t.submit(e);
+          state = { committed: 'committed', duplicate: 'committed', held: 'held', refused: 'refused', conflict: 'conflict', failed: 'pending' }[evidence.status];
+          retryable = state === 'pending' || state === 'held';
+        } catch (err) { state = err.kind === 'http' && [401,403,409].includes(err.status) ? 'awaiting-reauth' : 'sent-unknown'; retryable = state === 'sent-unknown'; }
+        if (!control.active()) return [];
+        queueStates.set(e.eventId, { state, evidence }); control.changed(e, state, evidence); result.push({ eventId: e.eventId, state, retryable });
+        if (state === 'awaiting-reauth') break;
+      }
+      return result;
+    },
+  });
+  syn.notify = () => syn.subscribers.forEach(f => f());
+  const context = { accountGeneration: () => syn.accountGeneration, subscribe: f => { syn.subscribers.push(f); return () => { syn.subscribers = syn.subscribers.filter(x=>x!==f); }; }, owner: () => syn.owner, online: () => syn.online, session: () => { syn.session.epoch = syn.epoch; return syn.session; }, opening: () => syn.opening };
+  syn.controller = KinOfflineReport.create({ view, store, signer, transport, context, scheduler: { schedule: (fn, ms) => { const h = { fn, ms }; syn.timers.push(h); return h; }, cancel: h => { syn.timers = syn.timers.filter(x=>x!==h); } } });
   syn.approve = () => syn.controller.approve({ uid: syn.opening.uid, recordId: 'report-' + syn.opening.uid, baseVersionId: null });
   document.querySelector('#approve').addEventListener('click', () => { syn.lastApproval = syn.approve(); });
   syn.signedText = eventId => unb64(syn.entries.get(eventId).envelope.payload).text;
@@ -184,6 +226,19 @@ class OfflineReportDOM(unittest.TestCase):
         self.assertEqual("SYN 두번째 소견", self.page.input_value("#findings"))
         self.assertEqual([], self.js("() => syn.submits()"))
 
+        # AC26: a delayed durable receipt, including failure, never erases subsequent typing.
+        for outcome in ('ok', 'throw', 'mismatch'):
+            self.js(BOOT)
+            self.page.fill('#findings', 'SYN snapshot')
+            self.js("() => { syn.holdPut = true; syn.delayed = syn.approve(); }")
+            self.page.wait_for_function('() => syn.putHolds.length === 1')
+            self.assertNotEqual(PENDING_LABEL, self.status(), 'AC26 durable receipt precedes pending')
+            self.page.fill('#findings', 'SYN later input')
+            self.js('mode => syn.putHolds.shift()(mode)', outcome)
+            result = self.js('() => syn.delayed')
+            self.assertEqual('pending-offline' if outcome == 'ok' else 'not-saved', result['status'], 'AC26 bad receipt never means pending')
+            self.assertEqual('SYN later input', self.page.input_value('#findings'), 'AC26 later input survives')
+
     def test_d02_later_text_survives(self):
         self.js("() => { syn.holdSign = true; }")
         self.page.fill("#findings", "SYN 승인 순간")
@@ -200,6 +255,17 @@ class OfflineReportDOM(unittest.TestCase):
         self.assertEqual([state["eventId"]], [c[1] for c in self.js("() => syn.submits()")])
         self.assertNotEqual(PENDING_LABEL, self.status())
         self.assertEqual("SYN 승인 순간 그리고 이후 입력", self.page.input_value("#findings"))
+
+        # AC17: approval lanes protect even the same owner/session/UID when older jobs finish last.
+        for outcome in ('ok', 'throw', 'mismatch'):
+            self.js(BOOT)
+            self.js("() => { syn.holdSign = true; syn.old = syn.approve(); }")
+            self.page.wait_for_function('() => syn.signHolds.length === 1')
+            self.js("() => { syn.holdSign = false; syn.online = true; }")
+            newest = self.js('() => syn.approve()')
+            self.js('mode => syn.signHolds.shift()(mode)', outcome)
+            self.js('() => syn.old')
+            self.assertEqual(newest, self.js('() => syn.controller.state(syn.opening.uid)'), 'AC17 newest approval survives old job')
 
     def test_d03_aba_and_old_session_reply(self):
         self.js("""() => { syn.online = true; syn.holdRead = true; syn.opening = { uid: 'A', generation: 1 }; syn.first = syn.controller.open('A');
@@ -224,7 +290,8 @@ class OfflineReportDOM(unittest.TestCase):
         self.assertEqual(PENDING_LABEL, self.status())
         self.js("() => { syn.holdSubmit = false; }")
         self.js("() => syn.controller.sync()")
-        self.assertEqual([state["eventId"], state["eventId"]], [c[1] for c in self.js("() => syn.submits()")])
+        self.assertEqual("stale", state["status"])
+        self.assertEqual(1, len(set(c[1] for c in self.js("() => syn.submits()"))))
         self.assertNotEqual(PENDING_LABEL, self.status())
         # Account switch while a read is pending: the earlier account's body is never shown to the next account.
         self.js("""() => { syn.holdRead = true; syn.opening = { uid: 'C', generation: 10 }; syn.third = syn.controller.open('C'); }""")
@@ -252,15 +319,56 @@ class OfflineReportDOM(unittest.TestCase):
         self.page.click("#approve")
         self.page.wait_for_function("() => syn.submitHolds.length === 1")
         self.js("() => { syn.firstApproval = syn.lastApproval; syn.holdSubmit = false; }")
-        newer = self.approve_click()
-        self.assertEqual("published-" + newer["eventId"], newer["currentVersion"]["versionId"])
+        self.page.click("#approve")
+        self.page.wait_for_function("() => syn.entries.size >= 3")
         self.js("() => syn.submitHolds.shift()()")
+        newer = self.js("() => syn.lastApproval")
         self.js("() => syn.firstApproval.then(() => true)")
         latest = self.js("uid => ({ ...syn.controller.state(uid) })", "F")
         self.assertEqual(newer["eventId"], latest["eventId"])
-        self.assertEqual("published-" + newer["eventId"], latest["currentVersion"]["versionId"])
+        self.assertEqual(self.js("id => syn.entries.get(id).access.target.versionId", newer["eventId"]), latest["currentVersion"]["versionId"])
+
+        # AC20: two reads of one opening are separate jobs, including a late failure.
+        for outcome in ('ok', 'throw'):
+            self.js(BOOT)
+            self.js("() => { syn.online=true; syn.holdRead=true; syn.j1=syn.controller.open(syn.opening.uid); syn.j2=syn.controller.open(syn.opening.uid); }")
+            self.js('() => syn.readHolds.pop()()')
+            self.assertTrue(self.js('() => syn.j2'))
+            latest = self.page.text_content('#report')
+            self.js('mode => syn.readHolds.shift()(mode)', outcome)
+            self.assertFalse(self.js('() => syn.j1'), 'AC20 earlier read is stale')
+            self.assertEqual(latest, self.page.text_content('#report'), 'AC20 newest body survives old read')
+        # AC18: authority generations must catch account ABA even when epoch/owner strings are restored.
+        for port in ('Read', 'Cached'):
+            for outcome in ('ok', 'throw'):
+                self.js(BOOT)
+                self.js("port => { syn.online=port==='Read'; syn['hold'+port]=true; syn.cache[syn.opening.uid]={recordId:'report-x',versionId:'cached',text:'old body'}; syn.old=syn.controller.open(syn.opening.uid); }", port)
+                self.page.wait_for_function('port => syn[port.toLowerCase()+"Holds"].length === 1', arg=port)
+                self.js("() => { const old={...syn.owner}; Object.assign(syn.owner,syn.makeOwner('r2')); syn.accountGeneration++; syn.controller.render(); syn.hidden=syn.controller.state(syn.opening.uid); Object.assign(syn.owner,old); syn.accountGeneration++; }")
+                self.js('x => syn[x.port.toLowerCase()+"Holds"].shift()(x.outcome)', {'port':port,'outcome':outcome})
+                self.assertFalse(self.js('() => syn.old'), 'AC18 account ABA suppresses old body')
+                self.assertEqual('', self.page.text_content('#report'), 'AC18 no former account body')
+                self.assertIsNone(self.js('() => syn.hidden.signedText'), 'AC18 getter excludes another owner')
+        # AC19: offline observation continuation is subject to the same opening boundary, for resolve and reject.
+        for outcome in ('ok','throw'):
+            self.js(BOOT)
+            self.js("() => { syn.holdObserve=true; syn.cache[syn.opening.uid]={recordId:'report-x',versionId:'cached',text:'old opening'}; syn.old=syn.controller.open(syn.opening.uid); }")
+            self.page.wait_for_function('() => syn.observeHolds.length===1')
+            self.js("() => { const uid=syn.opening.uid; syn.opening={uid:'other',generation:2}; syn.opening={uid,generation:3}; }")
+            self.js('mode => syn.observeHolds.shift()(mode)',outcome)
+            self.assertFalse(self.js('() => syn.old'),'AC19 old observation cannot paint')
+            self.assertEqual('',self.page.text_content('#report'),'AC19 old opening body absent')
 
     def test_d04_end_reauth_and_other_account(self):
+        # AC13/14: ABA with no intervening job still invalidates the original authority token.
+        for change in ('aba','session'):
+            self.js(BOOT)
+            self.js('() => {syn.holdSign=true;syn.old=syn.approve();}')
+            self.page.wait_for_function('() => syn.signHolds.length===1')
+            self.js("change=>{if(change==='session'){syn.epoch++;syn.session.epoch=syn.epoch;}else{const old={...syn.owner};Object.assign(syn.owner,syn.makeOwner('r2'));syn.accountGeneration++;Object.assign(syn.owner,old);syn.accountGeneration++;}syn.signHolds.shift()();}",change)
+            self.assertEqual('stale',self.js('() => syn.old.status || syn.old.then(x=>x.status)'),'AC13 authority generation defeats account ABA')
+            self.assertEqual(0,self.js('() => syn.entries.size'),'AC13 stale signer starts no enqueue')
+        self.js(BOOT)
         self.js("() => { syn.online = true; syn.submitMode = 'network'; }")
         self.page.fill("#findings", "SYN 단절 중 승인")
         state = self.approve_click()
@@ -290,7 +398,7 @@ class OfflineReportDOM(unittest.TestCase):
         self.js("() => { syn.opening = { uid: 'G', generation: 20 }; syn.holdSign = true; syn.submitMode = 'commit'; }")
         self.page.click("#approve")
         self.page.wait_for_function("() => syn.signHolds.length === 1")
-        self.js("() => { syn.owner = syn.makeOwner('r2'); syn.epoch = 4; syn.signHolds.shift()(); syn.holdSign = false; }")
+        self.js("() => { syn.owner = syn.makeOwner('r2'); syn.epoch = 4; syn.controller.render(); syn.signHolds.shift()(); syn.holdSign = false; }")
         self.js("() => syn.lastApproval.then(() => true)")
         self.assertEqual((stored, sent), (self.js("() => syn.entries.size"), len(self.js("() => syn.submits()"))))
         self.assertEqual("", self.status())
@@ -310,6 +418,47 @@ class OfflineReportDOM(unittest.TestCase):
         self.js("() => syn.controller.sync()")
         self.assertEqual(REAUTH_LABEL, self.status())
         self.assertIn(pending["eventId"], self.js("() => [...syn.entries.keys()]"))
+
+        # AC13-16: same UID throughout; success, exception and malformed result at both asynchronous approval cuts.
+        for port in ('Sign','Put'):
+            for switch in ('account','aba','session'):
+                for outcome in ('ok','throw','mismatch'):
+                    self.js(BOOT)
+                    self.js("port => { syn['hold'+port]=true; syn.old=syn.approve(); }",port)
+                    self.page.wait_for_function('port => syn[port.toLowerCase()+"Holds"].length===1',arg=port)
+                    self.js("x => { syn['hold'+x.port]=false; const old={...syn.owner}; if(x.switch==='session') {syn.epoch++; syn.session.epoch=syn.epoch;} else {Object.assign(syn.owner,syn.makeOwner('r2')); syn.accountGeneration++; if(x.switch==='aba'){Object.assign(syn.owner,old);syn.accountGeneration++;}} syn.online=true; }",{'port':port,'switch':switch})
+                    newest=self.js('() => syn.approve()')
+                    calls=self.js('() => syn.calls.length')
+                    self.js('x => syn[x.port.toLowerCase()+"Holds"].shift()(x.outcome)',{'port':port,'outcome':outcome})
+                    result=self.js('() => syn.old')
+                    self.assertEqual('stale',result['status'],'AC13/14 old authority result is stale')
+                    self.assertEqual(newest,self.js('() => syn.controller.state(syn.opening.uid)'),'AC15/16 newer account approval is unchanged')
+                    self.assertEqual(calls,self.js('() => syn.calls.length'),'AC13/16 stale continuation starts no port call')
+                    self.assertEqual('sub-r1',self.js('() => syn.signRequests[0].owner.subject'),'AC13 owner snapshot is immutable')
+        # AC21: old queue recovery cannot repopulate or submit after another account approved the same UID.
+        for outcome in ('ok','throw'):
+            self.js(BOOT)
+            self.js('() => syn.approve()')
+            self.js('() => {syn.online=true;syn.holdList=true;syn.old=syn.controller.sync();}')
+            self.page.wait_for_function('() => syn.listHolds.length===1')
+            self.js("() => {syn.owner=syn.makeOwner('r2');syn.accountGeneration++;syn.holdList=false;}")
+            newest=self.js('() => syn.approve()')
+            sent=self.js('() => syn.submits().length')
+            self.js('mode=>syn.listHolds.shift()(mode)',outcome)
+            self.js('() => syn.old')
+            self.assertEqual(newest,self.js('() => syn.controller.state(syn.opening.uid)'),'AC21 stale list leaves current state')
+            self.assertEqual(sent,self.js('() => syn.submits().length'),'AC21 stale list dispatches nothing')
+        # AC23: all old submit outcomes have zero effect after the new owner's job.
+        for outcome in ('commit','failed','held','network','ended','mismatch'):
+            self.js(BOOT)
+            self.js('() => {syn.online=true;syn.holdSubmit=true;syn.old=syn.approve();}')
+            self.page.wait_for_function('() => syn.submitHolds.length===1')
+            self.js("() => {syn.owner=syn.makeOwner('r2');syn.accountGeneration++;syn.holdSubmit=false;}")
+            newest=self.js('() => syn.approve()')
+            self.js('mode=>{syn.submitMode=mode;syn.submitHolds.shift()();}',outcome)
+            self.js('() => syn.old')
+            self.assertEqual(newest,self.js('() => syn.controller.state(syn.opening.uid)'),'AC23 stale submit leaves newest state')
+            self.assertEqual(0,self.js('() => syn.timers.length'),'AC23 stale submit schedules no retry')
 
     def test_d05_conflict_keeps_both_versions(self):
         self.js("() => { syn.online = true; syn.submitMode = 'conflict'; }")
@@ -364,6 +513,39 @@ class OfflineReportDOM(unittest.TestCase):
         self.assertNotEqual("SYN 새 캐시 본문", self.page.text_content("#report"))
         self.assertEqual("not-recorded", self.js("v => syn.controller.print(v)", version))
         self.assertEqual(prints, len([c for c in self.js("() => syn.calls") if c[0] == "print"]))
+
+        # AC24: an opening/account change while recording print-opened never starts the old print.
+        for change in ('opening','uid','account'):
+            for outcome in ('ok','throw'):
+                self.js(BOOT)
+                self.js("() => {syn.holdObserve=true;syn.old=syn.controller.print({uid:syn.opening.uid,recordId:'report-x',versionId:'v-x'});}")
+                self.page.wait_for_function('() => syn.observeHolds.length===1')
+                self.js("change=>{if(change==='account'){syn.owner=syn.makeOwner('r2');syn.accountGeneration++;}else{syn.opening={...syn.opening,generation:2,uid:change==='uid'?'other':syn.opening.uid};}}",change)
+                self.js('async mode=>{syn.observeHolds.shift()(mode);await Promise.resolve();await Promise.resolve();}',outcome)
+                self.assertEqual([],self.js("() => syn.calls.filter(c=>c[0]==='print')"),'AC24 old print is not opened')
+                self.js('() => syn.old')
+        # AC25: already opened dialogs may finish; their stale callbacks cannot create new-owner observations.
+        for outcome in ('return','cancel'):
+            self.js(BOOT)
+            self.js("() => {syn.holdPrint=true;syn.old=syn.controller.print({uid:syn.opening.uid,recordId:'report-x',versionId:'v-x'});}")
+            self.page.wait_for_function('() => syn.printHolds.length===1')
+            observed=self.js('() => syn.observations')
+            self.js("mode=>{syn.owner=syn.makeOwner('r2');syn.accountGeneration++;syn.printMode=mode;syn.printHolds.shift()();}",outcome)
+            self.assertEqual('cancelled',self.js('() => syn.old'),'AC25 stale print callback is cancelled')
+            self.assertEqual(observed,self.js('() => syn.observations'),'AC25 stale dialog records no new observation')
+        # A second print on the same owner/opening supersedes the old callback, including cancellation.
+        for outcome in ('return','cancel'):
+            self.js(BOOT)
+            self.js("() => {syn.holdPrint=true;syn.v={uid:syn.opening.uid,recordId:'report-x',versionId:'v-x'};syn.old=syn.controller.print(syn.v);}")
+            self.page.wait_for_function('() => syn.printHolds.length===1')
+            self.js('() => {syn.newPrint=syn.controller.print(syn.v);}')
+            self.page.wait_for_function('() => syn.printHolds.length===2')
+            self.js('() => syn.printHolds.pop()()')
+            self.assertEqual('dialog-returned',self.js('() => syn.newPrint'))
+            observed=self.js('() => syn.observations')
+            self.js('mode=>{syn.printMode=mode;syn.printHolds.shift()();}',outcome)
+            self.assertEqual('cancelled',self.js('() => syn.old'),'AC25 replaced print callback is cancelled')
+            self.assertEqual(observed,self.js('() => syn.observations'),'AC25 replaced dialog records no observation')
 
 
 if __name__ == "__main__":

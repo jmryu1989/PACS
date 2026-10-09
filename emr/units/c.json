@@ -667,7 +667,8 @@
           "variant": "M01",
           "file": "api/src/emr-report/commands.ts",
           "suite": "contract",
-          "case": "C-C04"
+          "case": "C-C04",
+          "assertion_sha256": "e599dd66ddbc96b27abffe06a26082bef7ff28f2f06597a3f92970ae51e6ddfe"
         }
       ]
     },
@@ -678,7 +679,8 @@
           "variant": "M02",
           "file": "api/src/emr-report/commands.ts",
           "suite": "contract",
-          "case": "C-C04"
+          "case": "C-C04",
+          "assertion_sha256": "742350016da35a8c8f9cd817198dfb2c03b3fd457500dbbf4fcb161422b5b6dd"
         }
       ]
     },
@@ -689,7 +691,8 @@
           "variant": "M03",
           "file": "api/src/emr-report/reconcile.ts",
           "suite": "contract",
-          "case": "C-C04"
+          "case": "C-C04",
+          "assertion_sha256": "bdf250485e85b092bc2a84ff1c23811eb74319ffee3ae252b7931f98f8300622"
         }
       ]
     },
@@ -700,25 +703,29 @@
           "variant": "M04-signer",
           "file": "api/src/emr-report/commands.ts",
           "suite": "contract",
-          "case": "C-C02"
+          "case": "C-C02",
+          "assertion_sha256": "8521cdfe1a3236b10e33065909931896928c4a931bee6490f2c2ab4743ff0be4"
         },
         {
           "variant": "M04-patient",
           "file": "api/src/emr-report/commands.ts",
           "suite": "contract",
-          "case": "C-C02"
+          "case": "C-C02",
+          "assertion_sha256": "8521cdfe1a3236b10e33065909931896928c4a931bee6490f2c2ab4743ff0be4"
         },
         {
           "variant": "M04-base-version",
           "file": "api/src/emr-report/commands.ts",
           "suite": "contract",
-          "case": "C-C02"
+          "case": "C-C02",
+          "assertion_sha256": "03e31edcfb407bb79b4232d8b1aed22e14f3e26ba4c371b15c3c01898afbd03c"
         },
         {
           "variant": "M04-event-id",
           "file": "api/src/emr-report/commands.ts",
           "suite": "contract",
-          "case": "C-C02"
+          "case": "C-C02",
+          "assertion_sha256": "8521cdfe1a3236b10e33065909931896928c4a931bee6490f2c2ab4743ff0be4"
         }
       ]
     },
@@ -729,7 +736,8 @@
           "variant": "M05",
           "file": "api/src/emr-signature/time-basis.ts",
           "suite": "contract",
-          "case": "C-C03"
+          "case": "C-C03",
+          "assertion_sha256": "16e628efe784c1b9ff304aa856c9b7d66d4def62bf3f2571e148513cedcbfed7"
         }
       ]
     },
@@ -740,7 +748,8 @@
           "variant": "M06",
           "file": "api/src/emr-signature/keys.ts",
           "suite": "contract",
-          "case": "C-C05"
+          "case": "C-C05",
+          "assertion_sha256": "2294f6caeface9914f0b42564a5f364e8c9433a1b9df18eb0c8204faae4eba75"
         }
       ]
     },
@@ -751,13 +760,15 @@
           "variant": "M07-queue",
           "file": "api/src/emr-report/offline-queue.ts",
           "suite": "queue",
-          "case": "C-Q01"
+          "case": "C-Q01",
+          "assertion_sha256": "f236f2efe88eec8ab526ab6e47e819debaefa075733ab06e4ec4fdf035090480"
         },
         {
           "variant": "M07-page",
           "file": "worklist-v0/hpacs-lite/offline-report.js",
           "suite": "dom",
-          "case": "test_d01_pending_is_not_published"
+          "case": "test_d01_pending_is_not_published",
+          "assertion_sha256": "4255b18a1a48fd0a7cf1b947d971c9b351a080de0cae8e472849738a1f9171df"
         }
       ]
     },
@@ -768,7 +779,8 @@
           "variant": "M08",
           "file": "api/src/emr-report/offline-queue.ts",
           "suite": "queue",
-          "case": "C-Q03"
+          "case": "C-Q03",
+          "assertion_sha256": "d06289f8c5d05bcef54c08e6048272812bcd22a7ae7371ffa1bb0d25137d92d2"
         }
       ]
     },
@@ -779,7 +791,8 @@
           "variant": "M09",
           "file": "api/src/emr-report/commands.ts",
           "suite": "contract",
-          "case": "C-C07"
+          "case": "C-C07",
+          "assertion_sha256": "7721479f0f2c1d43cd505e8c772af38a2f80f78b7827a5b88a5782c8953967ee"
         }
       ]
     },
@@ -790,13 +803,15 @@
           "variant": "M10-reconcile",
           "file": "api/src/emr-report/reconcile.ts",
           "suite": "contract",
-          "case": "C-C09"
+          "case": "C-C09",
+          "assertion_sha256": "b38d2b85c3bd79310b6c6ae3a2fd39c07079ec33309453c74660490a376b62e5"
         },
         {
           "variant": "M10-queue",
           "file": "api/src/emr-report/offline-queue.ts",
           "suite": "queue",
-          "case": "C-Q04"
+          "case": "C-Q04",
+          "assertion_sha256": "bcbfd751f1b4ec429731ee1aa029604cbe799aa24121771c3aa79195ddb2925d"
         }
       ]
     },
@@ -807,13 +822,15 @@
           "variant": "M11-session",
           "file": "api/src/emr-report/offline-queue.ts",
           "suite": "contract",
-          "case": "C-C10"
+          "case": "C-C10",
+          "assertion_sha256": "a24c359767a33e33e1a05a95e50492e2d63394fe46582f61fbf45148e55d493b"
         },
         {
           "variant": "M11-page",
           "file": "worklist-v0/hpacs-lite/offline-report.js",
           "suite": "dom",
-          "case": "test_d04_end_reauth_and_other_account"
+          "case": "test_d04_end_reauth_and_other_account",
+          "assertion_sha256": "af72c11e04b6330ba2231dc74475eebe981c24cb5f6d41f992ff1ce6fc87bf8c"
         }
       ]
     },
@@ -824,13 +841,15 @@
           "variant": "M12-later-input",
           "file": "worklist-v0/hpacs-lite/offline-report.js",
           "suite": "dom",
-          "case": "test_d02_later_text_survives"
+          "case": "test_d02_later_text_survives",
+          "assertion_sha256": "6b2d270cb3e04bbb79785ad867ff079157799a7cb00c5570bf0f90b387b7c2fa"
         },
         {
           "variant": "M12-aba",
           "file": "worklist-v0/hpacs-lite/offline-report.js",
           "suite": "dom",
-          "case": "test_d03_aba_and_old_session_reply"
+          "case": "test_d03_aba_and_old_session_reply",
+          "assertion_sha256": "9f9b46162f7ac4bba0a7aa531415d6e694e37e4bbaa8e9cc231931c755aa8bc0"
         }
       ]
     },
@@ -841,7 +860,8 @@
           "variant": "M13",
           "file": "api/src/emr-report/reads.ts",
           "suite": "contract",
-          "case": "C-C08"
+          "case": "C-C08",
+          "assertion_sha256": "0247cbcce98ccd8933c29ffb0b980367db4230d5ae8dcf7763ad71d984d88788"
         }
       ]
     },
@@ -852,7 +872,8 @@
           "variant": "M14",
           "file": "api/src/emr-report/reconcile.ts",
           "suite": "contract",
-          "case": "C-C08"
+          "case": "C-C08",
+          "assertion_sha256": "d7187d2cceace853b7c20263a1923a3988a433b83c869ba402e00c54a070a8ad"
         }
       ]
     },
@@ -863,7 +884,8 @@
           "variant": "M15",
           "file": "api/src/emr-report/retention.ts",
           "suite": "contract",
-          "case": "C-C11"
+          "case": "C-C11",
+          "assertion_sha256": "f034872d6e6030ac1bc103177e9ed4cb7b9c39a890be72e1c879f8053a9d1ac0"
         }
       ]
     },
@@ -874,7 +896,8 @@
           "variant": "M16",
           "file": "api/src/emr-report/reads.ts",
           "suite": "contract",
-          "case": "C-C11"
+          "case": "C-C11",
+          "assertion_sha256": "755b6ed1180885ef38ecedc91faa4868d2a0d1d4071efeeedf01f6c9baf1a313"
         }
       ],
       "fixes": "C1-R1-11 (O5 only: an archived unit's preservation entry must not reopen ordinary reading)"
@@ -886,7 +909,8 @@
           "variant": "M17",
           "file": "api/src/emr-report/retention.ts",
           "suite": "contract",
-          "case": "C-C11"
+          "case": "C-C11",
+          "assertion_sha256": "697e4e9c5074a73adb28b268541760f85b014c0cb03111f2c0d8f47da07687cf"
         }
       ]
     },
@@ -897,7 +921,8 @@
           "variant": "M18",
           "file": "api/src/emr-report/retention.ts",
           "suite": "contract",
-          "case": "C-C12"
+          "case": "C-C12",
+          "assertion_sha256": "1455e0701b8bd7be42c3e0517a3e58d0c19ee55ec006e2f08feb869bf4eacaa0"
         }
       ]
     },
@@ -908,19 +933,22 @@
           "variant": "M19-print",
           "file": "api/src/emr-report/reads.ts",
           "suite": "contract",
-          "case": "C-C13"
+          "case": "C-C13",
+          "assertion_sha256": "54507f2b582439ae2581a8d47c12f16c2fe5a6a6cd28908a9a0eb2d72e61b367"
         },
         {
           "variant": "M19-ack",
           "file": "api/src/emr-report/reads.ts",
           "suite": "contract",
-          "case": "C-C13"
+          "case": "C-C13",
+          "assertion_sha256": "e93d0ecdccee643e703c4933e9b353601c5ad1e0e3da51916a4dc20c17f9c626"
         },
         {
           "variant": "M19-page",
           "file": "worklist-v0/hpacs-lite/offline-report.js",
           "suite": "dom",
-          "case": "test_d06_read_and_print_observations"
+          "case": "test_d06_read_and_print_observations",
+          "assertion_sha256": "7e4029798ae98591a8ee6f641e5b27f016df1d858d3e47620d33590c576496d2"
         }
       ]
     },
@@ -931,25 +959,29 @@
           "variant": "M20-entry",
           "file": "api/src/emr-report/commands.ts",
           "suite": "contract",
-          "case": "C-C08"
+          "case": "C-C08",
+          "assertion_sha256": "3e24f6dd93909149fb91bd3a3887c54f67f3cb5262a96b9c4823ddfdc7996f2c"
         },
         {
           "variant": "M20-additional-entry",
           "file": "api/src/emr-report/commands.ts",
           "suite": "contract",
-          "case": "C-C08"
+          "case": "C-C08",
+          "assertion_sha256": "7f0044c4fd58ef581b8866a14b59aeab81f3bbaafbae6eda2d280976e56fed75"
         },
         {
           "variant": "M20-modification",
           "file": "api/src/emr-report/commands.ts",
           "suite": "contract",
-          "case": "C-C08"
+          "case": "C-C08",
+          "assertion_sha256": "8feb3cea32d56c85b8f8458e37d266dd6ce236dd38025093b978a7f3ccca8bc6"
         },
         {
           "variant": "M20-read",
           "file": "api/src/emr-report/reads.ts",
           "suite": "contract",
-          "case": "C-C08"
+          "case": "C-C08",
+          "assertion_sha256": "0247cbcce98ccd8933c29ffb0b980367db4230d5ae8dcf7763ad71d984d88788"
         }
       ]
     },
@@ -961,13 +993,15 @@
           "variant": "M21-amend-interval",
           "file": "api/src/emr-report/commands.ts",
           "suite": "contract",
-          "case": "C-C04"
+          "case": "C-C04",
+          "assertion_sha256": "742350016da35a8c8f9cd817198dfb2c03b3fd457500dbbf4fcb161422b5b6dd"
         },
         {
           "variant": "M21-anchor-interval",
           "file": "api/src/emr-signature/time-basis.ts",
           "suite": "contract",
-          "case": "C-C03"
+          "case": "C-C03",
+          "assertion_sha256": "9e2884721241b77334c309e68676511f8bc87e9550fe37ab7165f46135f12582"
         }
       ]
     },
@@ -979,19 +1013,22 @@
           "variant": "M22-generation",
           "file": "api/src/emr-report/offline-grant.ts",
           "suite": "contract",
-          "case": "C-C06"
+          "case": "C-C06",
+          "assertion_sha256": "2183cfc3d9bf511c6fbf058545527838db627a54ec0b2c846860516f22182856"
         },
         {
           "variant": "M22-anchor",
           "file": "api/src/emr-report/offline-grant.ts",
           "suite": "contract",
-          "case": "C-C06"
+          "case": "C-C06",
+          "assertion_sha256": "2183cfc3d9bf511c6fbf058545527838db627a54ec0b2c846860516f22182856"
         },
         {
           "variant": "M22-actions",
           "file": "api/src/emr-report/offline-grant.ts",
           "suite": "contract",
-          "case": "C-C06"
+          "case": "C-C06",
+          "assertion_sha256": "5b3fff6ed5a50514d53ccd4e94b69f9b8a373e0ec5f77efd0cdea20a55d8a5cb"
         }
       ]
     },
@@ -1003,7 +1040,8 @@
           "variant": "M23",
           "file": "api/src/emr-report/reconcile.ts",
           "suite": "contract",
-          "case": "C-C04"
+          "case": "C-C04",
+          "assertion_sha256": "91c31a3b351f631fcbee91d390d2abea759e5b7bce249fd9115a44d08baba85a"
         }
       ]
     },
@@ -1015,7 +1053,8 @@
           "variant": "M24",
           "file": "api/src/emr-report/reads.ts",
           "suite": "contract",
-          "case": "C-C08"
+          "case": "C-C08",
+          "assertion_sha256": "4361723fa587c726fe5ca4c1382e459707dc5cfb61c7cf6bb189053645d2972e"
         }
       ]
     },
@@ -1027,7 +1066,8 @@
           "variant": "M25",
           "file": "worklist-v0/hpacs-lite/offline-report.js",
           "suite": "dom",
-          "case": "test_d03_aba_and_old_session_reply"
+          "case": "test_d03_aba_and_old_session_reply",
+          "assertion_sha256": "9f9b46162f7ac4bba0a7aa531415d6e694e37e4bbaa8e9cc231931c755aa8bc0"
         }
       ]
     },
@@ -1039,19 +1079,22 @@
           "variant": "M26-sign",
           "file": "worklist-v0/hpacs-lite/offline-report.js",
           "suite": "dom",
-          "case": "test_d04_end_reauth_and_other_account"
+          "case": "test_d04_end_reauth_and_other_account",
+          "assertion_sha256": "be453299dd14a7c3b14bf44767c55015ecbc3b32b528d5500ba76c6c866752b0"
         },
         {
           "variant": "M26-list",
           "file": "worklist-v0/hpacs-lite/offline-report.js",
           "suite": "dom",
-          "case": "test_d04_end_reauth_and_other_account"
+          "case": "test_d04_end_reauth_and_other_account",
+          "assertion_sha256": "bbe7b7c3168e44d8e68a6fe060150c15a11540d540dcbc16cd99b77f74f158eb"
         },
         {
           "variant": "M26-reply",
           "file": "worklist-v0/hpacs-lite/offline-report.js",
-          "suite": "dom",
-          "case": "test_d03_aba_and_old_session_reply"
+          "suite": "queue",
+          "case": "C-Q04",
+          "assertion_sha256": "920e7ded9d94cf53e85396cb63cef57ba24132afbac6c9cf1942025e314aa637"
         }
       ]
     },
@@ -1063,7 +1106,8 @@
           "variant": "M27",
           "file": "api/src/emr-report/reconcile.ts",
           "suite": "contract",
-          "case": "C-C07"
+          "case": "C-C07",
+          "assertion_sha256": "364dde88870d102725be54dbd3b6fe814093228c8f276880acd9e950112ef0e9"
         }
       ]
     },
@@ -1075,7 +1119,8 @@
           "variant": "M28",
           "file": "api/src/emr-report/commands.ts",
           "suite": "contract",
-          "case": "C-C02"
+          "case": "C-C02",
+          "assertion_sha256": "46cac6d2e8a2d7042bfdd8f07fdfa41b87edc8c0b6840c8cdcbe3d1a222cc08e"
         }
       ]
     },
@@ -1087,7 +1132,8 @@
           "variant": "M29",
           "file": "api/src/emr-report/commands.ts",
           "suite": "contract",
-          "case": "C-C01"
+          "case": "C-C01",
+          "assertion_sha256": "2e9180e1fcb43ecc64a497f86b694f2d22fe9527f9f3dd8af74d89b990006b82"
         }
       ]
     },
@@ -1099,7 +1145,8 @@
           "variant": "M30",
           "file": "api/src/emr-report/offline-queue.ts",
           "suite": "queue",
-          "case": "C-Q04"
+          "case": "C-Q04",
+          "assertion_sha256": "788dece89fb199cb5ac793008a3e6eaef1db55b05ab1b1f5f5a71b8b1bf0229c"
         }
       ]
     },
@@ -1111,13 +1158,183 @@
           "variant": "M31-session",
           "file": "api/src/emr-report/offline-queue.ts",
           "suite": "contract",
-          "case": "C-C10"
+          "case": "C-C10",
+          "assertion_sha256": "0332747c37165477dbfad5d344c01f3d26a6a496a5f11e5e5df8be889fab26ae"
         },
         {
           "variant": "M31-page",
           "file": "worklist-v0/hpacs-lite/offline-report.js",
           "suite": "dom",
-          "case": "test_d04_end_reauth_and_other_account"
+          "case": "test_d04_end_reauth_and_other_account",
+          "assertion_sha256": "65666ec2f36c6b894580cbb24c784d4037ed514617ec8faa29d2cabc264ac1fb"
+        }
+      ]
+    },
+    {
+      "id": "M32",
+      "consult_id": "CM01",
+      "invariant": "I01",
+      "variants": [
+        {
+          "variant": "M32",
+          "file": "api/src/emr-report/reconcile.ts",
+          "suite": "contract",
+          "case": "C-C04",
+          "assertion_sha256": "91c31a3b351f631fcbee91d390d2abea759e5b7bce249fd9115a44d08baba85a"
+        }
+      ]
+    },
+    {
+      "id": "M33",
+      "consult_id": "CM02",
+      "invariant": "I02",
+      "variants": [
+        {
+          "variant": "M33",
+          "file": "api/src/emr-report/commands.ts",
+          "suite": "contract",
+          "case": "C-C04",
+          "assertion_sha256": "658eebb08063aa29bcdf02906ba2967e9750e474a3f3fcc233f66dabcceef773"
+        }
+      ]
+    },
+    {
+      "id": "M34",
+      "consult_id": "CM03",
+      "invariant": "I03",
+      "variants": [
+        {
+          "variant": "M34",
+          "file": "api/src/emr-report/commands.ts",
+          "suite": "contract",
+          "case": "C-C04",
+          "assertion_sha256": "7bdeeaa58e3f9bb54d1e90d4592db7c4bf33084afe1b898a57df76e83babf24a"
+        }
+      ]
+    },
+    {
+      "id": "M35",
+      "consult_id": "CM04",
+      "invariant": "I04",
+      "variants": [
+        {
+          "variant": "M35",
+          "file": "api/src/emr-report/commands.ts",
+          "suite": "contract",
+          "case": "C-C09",
+          "assertion_sha256": "a6785118e4985c09af31b7d7b9fb720b21598ceacd80839f6c32c2f08c991292"
+        }
+      ]
+    },
+    {
+      "id": "M36",
+      "consult_id": "CM05",
+      "invariant": "I05",
+      "variants": [
+        {
+          "variant": "M36",
+          "file": "worklist-v0/hpacs-lite/offline-report.js",
+          "suite": "dom",
+          "case": "test_d04_end_reauth_and_other_account",
+          "assertion_sha256": "be453299dd14a7c3b14bf44767c55015ecbc3b32b528d5500ba76c6c866752b0"
+        }
+      ]
+    },
+    {
+      "id": "M37",
+      "consult_id": "CM06",
+      "invariant": "I06",
+      "variants": [
+        {
+          "variant": "M37",
+          "file": "worklist-v0/hpacs-lite/offline-report.js",
+          "suite": "dom",
+          "case": "test_d02_later_text_survives",
+          "assertion_sha256": "338cd435bbe3808ba424f125fb54fd831bd886638b7e7fbc8b5791752a2a9089"
+        }
+      ]
+    },
+    {
+      "id": "M38",
+      "consult_id": "CM07",
+      "invariant": "I07",
+      "variants": [
+        {
+          "variant": "M38",
+          "file": "worklist-v0/hpacs-lite/offline-report.js",
+          "suite": "dom",
+          "case": "test_d01_pending_is_not_published",
+          "assertion_sha256": "4255b18a1a48fd0a7cf1b947d971c9b351a080de0cae8e472849738a1f9171df"
+        }
+      ]
+    },
+    {
+      "id": "M39",
+      "consult_id": "CM08",
+      "invariant": "I08",
+      "variants": [
+        {
+          "variant": "M39",
+          "file": "worklist-v0/hpacs-lite/offline-report.js",
+          "suite": "dom",
+          "case": "test_d06_read_and_print_observations",
+          "assertion_sha256": "16d778416de2e779b69be3fa8e9cf4274454b2c031ff916a4bba8e013bb3e092"
+        }
+      ]
+    },
+    {
+      "id": "M40",
+      "consult_id": "CM09",
+      "invariant": "I09",
+      "variants": [
+        {
+          "variant": "M40",
+          "file": "worklist-v0/hpacs-lite/offline-report.js",
+          "suite": "queue",
+          "case": "C-Q04",
+          "assertion_sha256": "8fca5dff87fb26a8767951ce786515fc80c89149498ee38f75ad962fcc4ef02a"
+        }
+      ]
+    },
+    {
+      "id": "M41",
+      "consult_id": "CM10",
+      "invariant": "I10",
+      "variants": [
+        {
+          "variant": "M41",
+          "file": "worklist-v0/hpacs-lite/offline-report.js",
+          "suite": "queue",
+          "case": "C-Q08",
+          "assertion_sha256": "7b74ae0a774ef8f5bf2b0b71f42ca971600ae207be47fb810e485f848b5226ae"
+        }
+      ]
+    },
+    {
+      "id": "M42",
+      "consult_id": "CM11",
+      "invariant": "I11",
+      "variants": [
+        {
+          "variant": "M42",
+          "file": "api/src/emr-report/offline-queue.ts",
+          "suite": "queue",
+          "case": "C-Q04",
+          "assertion_sha256": "f451369dd0ae05bbd15c6784d797ed1214d6cac186c7b9a311e5fcfd521ae621"
+        }
+      ]
+    },
+    {
+      "id": "M43",
+      "consult_id": "CM12",
+      "invariant": "I12",
+      "variants": [
+        {
+          "variant": "M43",
+          "file": "api/src/emr-report/offline-queue.ts",
+          "suite": "queue",
+          "case": "C-Q08",
+          "assertion_sha256": "ecfa796b7a6df54af07d09dd1206102985fd7f0e1c50b70277d17edae813b276"
         }
       ]
     }
@@ -1148,5 +1365,323 @@
         "test_c01_write_sign_publish"
       ]
     }
+  },
+  "consult": {
+    "decision": "D739/D743",
+    "invariants": [
+      "I01",
+      "I02",
+      "I03",
+      "I04",
+      "I05",
+      "I06",
+      "I07",
+      "I08",
+      "I09",
+      "I10",
+      "I11",
+      "I12"
+    ],
+    "cases": [
+      {
+        "id": "AC01",
+        "status": "bound",
+        "tests": [
+          "C-C04"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC02",
+        "status": "bound",
+        "tests": [
+          "C-C04"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC03",
+        "status": "bound",
+        "tests": [
+          "C-C04"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC04",
+        "status": "bound",
+        "tests": [
+          "C-C04"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC05",
+        "status": "bound",
+        "tests": [
+          "C-C04"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC06",
+        "status": "bound",
+        "tests": [
+          "C-C07"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC07",
+        "status": "bound",
+        "tests": [
+          "C-C09"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC08",
+        "status": "bound",
+        "tests": [
+          "C-C09"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC09",
+        "status": "bound",
+        "tests": [
+          "C-C09"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC10",
+        "status": "bound",
+        "tests": [
+          "C-C04"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC11",
+        "status": "not_run",
+        "tests": [],
+        "reason": "실제 transaction 경합/CAS와 late 저장은 C2 adapter 미연결. C1은 historyDigest와 재계획 계약만 제공."
+      },
+      {
+        "id": "AC12",
+        "status": "bound",
+        "tests": [
+          "C-C01",
+          "C-C04",
+          "C-C09"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC13",
+        "status": "bound",
+        "tests": [
+          "C-D04"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC14",
+        "status": "bound",
+        "tests": [
+          "C-D03",
+          "C-D04"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC15",
+        "status": "bound",
+        "tests": [
+          "C-D04"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC16",
+        "status": "bound",
+        "tests": [
+          "C-D04"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC17",
+        "status": "bound",
+        "tests": [
+          "C-D02"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC18",
+        "status": "bound",
+        "tests": [
+          "C-D03"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC19",
+        "status": "bound",
+        "tests": [
+          "C-D03"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC20",
+        "status": "bound",
+        "tests": [
+          "C-D03"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC21",
+        "status": "bound",
+        "tests": [
+          "C-D04"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC22",
+        "status": "bound",
+        "tests": [
+          "C-Q04"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC23",
+        "status": "bound",
+        "tests": [
+          "C-D04"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC24",
+        "status": "bound",
+        "tests": [
+          "C-D06"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC25",
+        "status": "bound",
+        "tests": [
+          "C-D06"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC26",
+        "status": "bound",
+        "tests": [
+          "C-D01",
+          "C-D02",
+          "C-D05"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC27",
+        "status": "bound",
+        "tests": [
+          "C-Q04"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC28",
+        "status": "bound",
+        "tests": [
+          "C-Q08"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC29",
+        "status": "bound",
+        "tests": [
+          "C-Q08"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC30",
+        "status": "bound",
+        "tests": [
+          "C-Q03",
+          "C-Q04"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC31",
+        "status": "bound",
+        "tests": [
+          "C-Q04"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC32",
+        "status": "bound",
+        "tests": [
+          "C-Q08"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC33",
+        "status": "bound",
+        "tests": [
+          "C-Q02",
+          "C-Q04",
+          "C-Q05",
+          "C-Q06"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC34",
+        "status": "bound",
+        "tests": [
+          "C-Q04"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC35",
+        "status": "bound",
+        "tests": [
+          "C-Q01",
+          "C-Q02",
+          "C-Q08"
+        ],
+        "reason": null
+      },
+      {
+        "id": "AC36",
+        "status": "bound",
+        "tests": [
+          "C-Q04",
+          "C-Q08"
+        ],
+        "reason": null
+      }
+    ],
+    "live_native": "not_run: C2/native adapters and isolated environment are not connected"
   }
 }
