@@ -706,11 +706,13 @@ class MammographyViewerDOMTest(unittest.TestCase):
         self.cell(page2, "Current L CC").focus()
         for _ in range(5):
             page2.keyboard.press("ArrowDown")
-        page2.wait_for_function("()=>mg.loads.some(l=>l.state==='held'&&l.purpose==='display'&&l.frame===6)", timeout=WAIT)
+        page2.wait_for_timeout(300)
+        requested = page2.evaluate("()=>mg.loads.filter(l=>l.purpose==='display').map(l=>l.frame)")
+        self.assertEqual(requested[-1:], [6], "MG06 M16: a scroll burst moves from the latest intent")
         self.release_all(page2)
         self.wait_displayed(page2, sop, 6)
         self.settle(page2)
-        self.assertEqual(self.frames_shown(page2, sop), [1, 6], "MG06 M16: a scroll burst moves from the latest intent")
+        self.assertEqual(self.frames_shown(page2, sop), [1, 6], "only the last step of the burst is displayed")
         self.assertIn("Slice 6 / 16", self.label(page2, "Current L CC"))
         # Three wheel notches in a row while frames are delayed: three slices further, nothing in between.
         box = self.cell(page2, "Current L CC").bounding_box()
