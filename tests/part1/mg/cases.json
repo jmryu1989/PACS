@@ -44,7 +44,7 @@
    "id": "model",
    "file": "tests/part1/mg/model_test.cjs",
    "command": "node --test tests/part1/mg/model_test.cjs",
-   "expected": 12,
+   "expected": 236,
    "cases": [
     {
      "name": "MG01-allow conventional, device synthetic 2D and DBT are told apart by standard attributes with evidence",
@@ -157,7 +157,22 @@
      "risk": "RISK-MG-FLIP-CLIP",
      "inputs": "DICOM JSON built in the test"
     }
-   ]
+   ],
+   "rule_table": {
+    "path": "C:/Users/norne/PACS/tmp/astra-control/evidence/mg-classification-consult-20261009/rule-cases.json",
+    "sha256": "83ccf159299a551adc7937888daacb1eb5047152f82afd18da901efc579f083e",
+    "schema": "D735-1",
+    "cases": 223,
+    "test_names": "each case's testId (one node test per case) + 'D735 rule table is the pinned one'",
+    "disputed": {
+     "PUBLIC-010": "declaredSourceCount",
+     "PUBLIC-011": "declaredSourceCount",
+     "PUBLIC-012": "declaredSourceCount",
+     "PUBLIC-013": "declaredSourceCount"
+    },
+    "dispute_reason": "the embedded selected header omits X-Ray 3D Acquisition Sequence (0018,9507) that holds 9 of the 10 expected source references; the same model counts 10 on the full real files (dicom_contract_test MG01 allow)",
+    "skip_if_absent": "rule table path"
+   }
   },
   {
    "id": "dom",
@@ -845,5 +860,9 @@
    "PENDING-MG05-REAL-COMBINATION (stored-pixel level; the real renderer stays round 2)"
   ]
  },
- "round2_review": "C:/Users/norne/PACS/tmp/astra-control/evidence/astra-worker-runs/e-mg-r1-review-e3231e9-astra-20261009/last-message.md"
+ "round2_review": "C:/Users/norne/PACS/tmp/astra-control/evidence/astra-worker-runs/e-mg-r1-review-e3231e9-astra-20261009/last-message.md",
+ "d735": {
+  "rule": "C:/Users/norne/PACS/tmp/astra-control/evidence/mg-classification-consult-20261009/rule.md",
+  "table_sha256": "83ccf159299a551adc7937888daacb1eb5047152f82afd18da901efc579f083e"
+ }
 }

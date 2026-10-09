@@ -16,8 +16,8 @@
      events {requested(record), loaded(record), displayed(record)} - all optional */
 (function(root){
   'use strict';
-  const KIND_LABEL={conventional:'Conventional',generated2d:'Synthetic 2D',dbt:'DBT'};
-  const SLICE_LABEL={slices:'Slices',slab:'Slab','mip-slab':'MIP Slab',unspecified:'Slices Unspecified'};
+  const KIND_LABEL={conventional:'Conventional',generated2d:'Synthetic 2D',dbt:'DBT',projection:'Projection'};
+  const SLICE_LABEL={slices:'Slices',slab:'Slab','mip-slab':'MIP Slab','minip-slab':'MinIP Slab',unspecified:'Slices Unspecified'};
   const ROLE_LABEL={current:'Current',prior:'Prior'};
   const LAYOUTS=[['current','Current'],['compare-cc','Compare CC'],['compare-mlo','Compare MLO']];
   const CACHE_LIMIT=8,ZOOM_STEP=1.25,ZOOM_MAX=8;
@@ -48,6 +48,9 @@
     'identity-invalid':'영상 식별 정보를 확인하지 못했습니다.','wrong-study':'다른 검사의 영상입니다.','duplicate-object':'같은 영상이 두 번 들어 있습니다.',
     'frame-count-invalid':'프레임 수가 없거나 허용 범위를 벗어났습니다.','image-frame-type-conflict':'영상 종류(Image Type)와 프레임 종류(Frame Type)가 서로 다릅니다.',
     'frame-type-missing':'프레임 종류 정보가 없습니다.','partial-view-conflict':'부분 촬영 정보가 서로 다릅니다.',
+    'unsupported-device-profile':'검증된 장비 프로필이 아닌 합성 2D 표시입니다.','slice-or-slab-evidence-missing':'단면 두께와 위치로 단면·slab 여부를 확인하지 못했습니다.',
+    'unmapped-image-type-extension':'확인되지 않은 영상 종류 값이 있습니다.','presentation-intent-missing':'표시 용도 정보가 없습니다.','image-type-missing':'영상 종류 정보가 없습니다.',
+    'frame-summary-conflict':'영상 전체와 프레임의 계산 정보가 서로 다릅니다.','shared-and-per-frame-macro':'같은 정보가 공통·프레임별로 중복돼 있습니다.',
   };
 
   function mount(options){
@@ -168,6 +171,8 @@
       else{
         const o=cell.object,entry=cell.index.entries[cell.position-1];
         if(o.partial)parts.push('Partial '+(o.partialSections.join('/')||'View'));
+        // Placed without proof of a full view (no Partial View information at all): said, not hidden.
+        else if(!o.fullViewAutoMatch)parts.push('Full View Unverified');
         if(o.instanceNumber!==null)parts.push('Img '+o.instanceNumber);
         if(cell.slot.status==='ambiguous')parts.push('Chosen of '+cell.slot.candidates.length);
         if(o.kind==='dbt'){

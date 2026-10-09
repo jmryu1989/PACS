@@ -232,6 +232,9 @@ class MammographyDicomContractTest(unittest.TestCase):
             self.assertEqual(result["sliceThickness"], float(ds.SharedFunctionalGroupsSequence[0].PixelMeasuresSequence[0].SliceThickness))
             self.assertEqual((result["laterality"], result["view"]), (header_laterality(ds), header_view(ds)), sample_id)
             self.assertTrue(result["standard"], sample_id)
+        # The source references the device stored are counted from the whole header (D735 public cases).
+        counts = run_model(*[["contract", dicom_json(dataset(s))] for s in DBT_OBJECTS])
+        self.assertEqual([c["declaredSourceCount"] for c in counts], [10, 10, 10, 10], "nine X-Ray 3D acquisition sources + one derivation source")
 
     def test_mg01_description_derivation_or_secondary_capture_never_confirms_a_kind(self):
         victre, processing, specimen = (dicom_json(dataset(s)) for s in ("victre-208084664-1", "ea1141-8036458-1", "breastdx-01-0021-1"))
@@ -401,8 +404,7 @@ class MammographyDicomContractTest(unittest.TestCase):
                 self.assertEqual(result["kind"], "generated2d", "MG01: the device's synthetic 2D view is recognised from its Image Type: " + sample_id)
                 self.assertEqual(result["status"], "verified")
                 self.assertEqual((str(ds.Manufacturer), str(ds.ManufacturerModelName)), ("HOLOGIC, Inc.", "Selenia Dimensions"), sample_id)
-                self.assertIn("device-exception:hologic-selenia-dimensions-bto-generated-2d", result["notes"],
-                              "accepted only as the named device exception that conflicts with the X-Ray 3D Value 4 rule")
+                self.assertEqual(result["basis"], "hologic-selenia-dimensions-bto-generated-2d", "accepted only within the verified device profile")
             else:
                 self.assertEqual(str(frame_type.VolumetricProperties), "VOLUME", sample_id)
                 self.assertEqual(result["kind"], "dbt", sample_id)

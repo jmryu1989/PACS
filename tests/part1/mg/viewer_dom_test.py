@@ -320,13 +320,11 @@ class MammographyViewerDOMTest(unittest.TestCase):
         damaged = copy.deepcopy(item)
         damaged["00280008"] = {"vr": "IS", "Value": [17]}
         self.mount(page2, [(damaged, meta)])
-        self.wait_displayed(page2, sop, 1)
-        self.key(page2, "Current L CC", "End")
         self.settle(page2)
-        text = self.label(page2, "Current L CC")
-        self.assertIn("Frames Unverified", text, "MG02: a wrong total is shown, not hidden")
-        self.assertNotIn("Slice 17 / 17", text)
-        self.assertNotIn([sop, 17], [[s, f] for s, f, *_ in self.displayed(page2, sop)])
+        # D735: an object whose frame count contradicts its per-frame list is never placed; it stays listed.
+        self.assertIn("Missing", self.label(page2, "Current L CC"))
+        self.assertIn("Other Images (1)", page2.locator("details summary").inner_text(), "MG02: a wrong total is listed, not hidden")
+        self.assertEqual(page2.evaluate("()=>mg.loads.length"), 0, "nothing of the damaged object is loaded")
 
     # --- MG03 -------------------------------------------------------------------------------------
     def test_mg03_dom_two_dbts_scroll_independently_with_own_positions(self):
@@ -359,18 +357,19 @@ class MammographyViewerDOMTest(unittest.TestCase):
         l_cc = entry(DBT["L CC"], no_position)
         self.mount(page, [r_mlo, l_mlo, l_cc])
         sop_r, sop_l, sop_cc = (tag(x[0], "00080018") for x in (r_mlo, l_mlo, l_cc))
-        for s in (sop_r, sop_l, sop_cc):
+        for s in (sop_r, sop_l):
             self.wait_displayed(page, s, 1)
         self.key(page, "Current L MLO", "ArrowDown", times=9, sop=sop_l)
         self.settle(page)
         self.assertIn("Slice 10 / 18", self.label(page, "Current L MLO"))
         self.assertIn("Slice 1 / 18", self.label(page, "Current R MLO"), "MG03 M5: the same slice number is not forced on the other DBT")
         self.assertEqual([f for _, f, *_ in self.displayed(page, sop_r)], [1], "MG03 M5: no automatic sync by index")
+        # D735: a DBT whose positions are absent has no verified geometry; it is not placed, it is listed.
         text = self.label(page, "Current L CC")
-        self.assertIn("Pos Unverified", text, "MG03: an absent position is shown as Unverified")
+        self.assertIn("Missing", text, "MG03: a DBT without positions is not placed as slices")
         self.assertNotRegex(text, r"Pos \d", "no millimetre value is invented")
-        self.key(page, "Current L CC", "End", sop=sop_cc)
-        self.assertIn("Slice 16 / 16", self.label(page, "Current L CC"), "every frame stays reachable without positions")
+        self.assertIn("Other Images (1)", page.locator("details summary").inner_text())
+        self.assertFalse(any(l["sop"] == sop_cc for l in page.evaluate("()=>mg.loads")))
 
     # --- MG04 -------------------------------------------------------------------------------------
     def four_view(self):

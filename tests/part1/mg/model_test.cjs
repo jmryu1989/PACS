@@ -35,7 +35,7 @@ function mg({sop=next(),series='1.2.826.0.1.3680043.10.8.1',study='1.2.826.0.1.3
 // A DBT object: shared orientation/thickness, per-frame position; `positions` are mm along +z.
 function dbt({sop=next(),study='1.2.826.0.1.3680043.10.7.1',series='1.2.826.0.1.3680043.10.8.2',patient='PT-1',lat='L',view='CC',
   positions=[0,1,2,3,4],frames=null,iop=[0,-1,0,-1,0,0],technique='TOMOSYNTHESIS',volumetric='VOLUME',thickness=1,perFrame=null,
-  frameTypes=null,omitPositions=false,imageType=['ORIGINAL','PRIMARY','VOLUME','NONE'],frameType=null,frameIops=null,dimensions=null,extra={}}={}){
+  frameTypes=null,omitPositions=false,imageType=['DERIVED','PRIMARY','TOMOSYNTHESIS','NONE'],frameType=null,frameIops=null,dimensions=null,extra={}}={}){
   const count=frames===null?positions.length:frames;
   // frameTypes[i] = [Volumetric Properties, Volume Based Calculation Technique] of frame i+1;
   // frameIops[i] puts frame i+1's own Plane Orientation in its per-frame item (no shared one);
@@ -50,15 +50,34 @@ function dbt({sop=next(),study='1.2.826.0.1.3680043.10.7.1',series='1.2.826.0.1.
   const shared={'00209071':seq({'00209072':v('CS',lat)}),'00289110':seq({'00180050':v('DS',thickness),'00280030':v('DS',0.1,0.1)})};
   if(!frameIops)shared['00209116']=seq({'00200037':v('DS',...iop)});
   return Object.assign({'00080016':v('UI',DBT),'00080018':v('UI',sop),'0020000D':v('UI',study),'0020000E':v('UI',series),'00080060':v('CS','MG'),
-    '00080008':v('CS',...imageType),'00100020':v('LO',patient),'00080020':v('DA','20240105'),
+    '00080008':v('CS',...imageType),'00100020':v('LO',patient),'00080020':v('DA','20240105'),'00089206':v('CS',volumetric),'00089207':v('CS',technique),
     '00280008':v('IS',count),'00280010':v('US',120),'00280011':v('US',90),'00280004':v('CS','MONOCHROME2'),'00280101':v('US',12),
     '00540220':seq({'00080102':v('SH',VIEW[view][0]),'00080100':v('SH',VIEW[view][1])}),
     '52009229':seq(shared),'52009230':{vr:'SQ',Value:items},
     ...(dimensions?{'00209222':seq(...dimensions.pointers.map(([tag,group])=>({'00209165':v('AT',tag),...(group?{'00209167':v('AT',group)}:{})})))}:{})},extra);
 }
-const HOLOGIC={'00080070':v('LO','HOLOGIC, Inc.'),'00081090':v('LO','Selenia Dimensions')};
+const HOLOGIC={'00080070':v('LO','HOLOGIC, Inc.'),'00081090':v('LO','Selenia Dimensions'),'00181020':v('LO','AWS:1.9.1.8','ROS:2.10.4800.DRT21')};
 const GENERATED=['DERIVED','PRIMARY','TOMOSYNTHESIS','GENERATED_2D'];
 const PARTIAL_MEDIAL={'00281352':seq({'00080102':v('SH','SCT'),'00080100':v('SH','255561001'),'00080104':v('LO','Medial')})};
+// D735: the shared E-MG/EMR-E rule table, read in place and pinned by SHA-256. Every case is its own test
+// named by its testId; every provided expected key is compared with model.contract(). The table is input
+// data from the consult; nothing here is generated from this model's output.
+const fs=require('node:fs'),crypto=require('node:crypto');
+const RULE_TABLE=process.env.KIN_MG_RULE_CASES||'C:/Users/norne/PACS/tmp/astra-control/evidence/mg-classification-consult-20261009/rule-cases.json';
+const RULE_TABLE_SHA256='83ccf159299a551adc7937888daacb1eb5047152f82afd18da901efc579f083e';
+// Cases whose embedded header cannot carry the expected value; reported as disputed, never re-expected.
+const DISPUTED={'PUBLIC-010':['declaredSourceCount'],'PUBLIC-011':['declaredSourceCount'],'PUBLIC-012':['declaredSourceCount'],'PUBLIC-013':['declaredSourceCount']};
+if(fs.existsSync(RULE_TABLE)){
+  const raw=fs.readFileSync(RULE_TABLE),table=JSON.parse(raw);
+  test('D735 rule table is the pinned one',()=>{assert.equal(crypto.createHash('sha256').update(raw).digest('hex'),RULE_TABLE_SHA256);});
+  for(const k of table.cases)test(k.testId,()=>{
+    const got=model.contract(k.input.dicom,k.input.context);
+    for(const [key,expected] of Object.entries(k.expected)){
+      if((DISPUTED[k.id]||[]).includes(key))continue;
+      assert.deepEqual(got[key]===undefined?null:got[key],expected,k.id+' '+key);
+    }
+  });
+}else test('D735 rule table',{skip:'D735 rule table absent at '+RULE_TABLE+'; hosted CI needs it as a fixture (round 2 CI plan)'},()=>{});
 const study=(uid,role,instances,institution='H1')=>({uid,role,institution,instances});
 const manifest=(...studies)=>({institution:'H1',studies});
 const slot=(p,role,side,view,kind)=>p.slots[[role,side,view,kind].join('|')];
@@ -80,15 +99,16 @@ test('MG01-allow conventional, device synthetic 2D and DBT are told apart by sta
   const volumeThick=model.classify(dbt({positions:[0,5,10,15],technique:'MAX_IP',volumetric:'VOLUME',thickness:10}));
   assert.deepEqual([sampledThin.sliceKind,volumeThick.sliceKind],['slices','mip-slab'],
     'MG01 M23: slices vs slab follow thickness and contiguous positions, not Volumetric Properties alone');
-  const thin=model.classify(dbt({technique:'MAX_IP',volumetric:'VOLUME',thickness:1}));
-  assert.equal(thin.sliceKind,'slices');assert.ok(thin.notes.length>0,'the disagreeing technique is kept as a note');
+  // Thin MAX_IP sections are slices only within the verified Hologic 1 mm profile, never for any device.
+  assert.equal(model.classify(dbt({technique:'MAX_IP',volumetric:'VOLUME',thickness:1,extra:HOLOGIC})).sliceKind,'slices');
+  assert.equal(model.classify(dbt({technique:'MAX_IP',volumetric:'VOLUME',thickness:1})).status,'unverified');
   const gaps=model.classify(dbt({positions:[0,3,6,9],thickness:1}));
   assert.equal(gaps.sliceKind,'unspecified','sections with gaps between them are not claimed to be contiguous slices');
   // The named device exception: Hologic Selenia Dimensions one-frame Breast Tomosynthesis GENERATED_2D.
   const stored2d=model.classify(dbt({positions:[0],technique:'MAX_IP',volumetric:'VOLUME',thickness:54,imageType:GENERATED,extra:HOLOGIC}));
   assert.equal(stored2d.kind,'generated2d');assert.equal(stored2d.status,'verified');assert.equal(stored2d.standard,true);
-  assert.ok(stored2d.notes.some(n=>n.startsWith('device-exception:')),'the exception is named in the result');
-  assert.ok(stored2d.notes.some(n=>/Value 4 shall be NONE/.test(n)),'and its conflict with X-Ray 3D is stated');
+  assert.equal(stored2d.basis,'hologic-selenia-dimensions-bto-generated-2d','the verified device profile is named as the basis');
+  assert.equal(model.contract(dbt({positions:[0],technique:'MAX_IP',volumetric:'VOLUME',thickness:54,imageType:GENERATED,extra:HOLOGIC})).class,'device-synthetic-2d');
   const cur='1.2.826.0.1.3680043.10.7.1';
   const p=model.plan(manifest(study(cur,'current',[mg({type:['DERIVED','PRIMARY']}),mg({type:['DERIVED','PRIMARY','TOMOSYNTHESIS','GENERATED_2D']}),
     dbt({lat:'R',view:'CC',technique:'MAX_IP',volumetric:'SAMPLED',thickness:10}),dbt({lat:'R',view:'CC'})])));
@@ -125,8 +145,12 @@ test('MG01-reject DERIVED alone, a description, a contradiction or a non-mammogr
     assert.equal(c.standard,false,name);
   }
   // Exactly the named exception, nothing wider.
-  for(const [name,object] of [['another manufacturer',dbt({positions:[0],imageType:GENERATED,extra:{'00080070':v('LO','GE MEDICAL SYSTEMS'),'00081090':v('LO','Senographe Pristina')}})],
-    ['no manufacturer',dbt({positions:[0],imageType:GENERATED})],
+  // Each differs from the verified profile in one respect only (same VOLUME/MAX_IP one-frame encoding).
+  const exact={positions:[0],imageType:GENERATED,technique:'MAX_IP',volumetric:'VOLUME',thickness:54};
+  for(const [name,object] of [['another manufacturer',dbt({...exact,extra:{'00080070':v('LO','GE MEDICAL SYSTEMS'),'00081090':v('LO','Senographe Pristina'),'00181020':v('LO','AWS:1.9.1.8')}})],
+    ['a look-alike manufacturer',dbt({...exact,extra:{...HOLOGIC,'00080070':v('LO','HOLOGIC clone')}})],
+    ['another software',dbt({...exact,extra:{...HOLOGIC,'00181020':v('LO','AWS:99.0')}})],
+    ['no manufacturer',dbt({...exact})],
     ['Hologic but many frames',dbt({imageType:GENERATED,extra:HOLOGIC})],
     ['Hologic but Value 3 VOLUME',dbt({positions:[0],imageType:['DERIVED','PRIMARY','VOLUME','GENERATED_2D'],extra:HOLOGIC})]]){
     const c=model.classify(object);
@@ -184,7 +208,8 @@ test('MG02-reject a duplicate, a missing per-frame item, a gap or a wrong total 
   // A frame count outside the limit is refused before any per-frame work and never reaches a slot.
   const cur='1.2.826.0.1.3680043.10.7.1';
   for(const count of [2001,0,-1,1.5]){
-    const big=dbt({lat:'R',view:'CC',frames:count}),c=model.classify(big);
+    // 2001 frames carry a complete, otherwise valid geometry: only the limit refuses them.
+    const big=count===2001?dbt({lat:'R',view:'CC',positions:Array.from({length:2001},(_,i)=>i)}):dbt({lat:'R',view:'CC',frames:count}),c=model.classify(big);
     assert.equal(c.standard,false,'MG02 M20: a frame count outside the limit is refused before any per-frame work ('+count+')');
     assert.ok(c.issues.includes('frame-count-invalid'));
     const p=model.plan(manifest(study(cur,'current',[big])));
@@ -227,11 +252,14 @@ test('MG03-reject absent or non-finite positions stay Unverified and are never b
   assert.equal(model.frameIndex(mixed).complete,false);
   // Same frame count, one with positions and one without: the second never takes the first one's depths.
   const cur='1.2.826.0.1.3680043.10.7.1';
-  const p=model.plan(manifest(study(cur,'current',[dbt({lat:'L',view:'CC'}),dbt({lat:'R',view:'CC',omitPositions:true})])));
-  const left=model.frameIndex(slot(p,'current','L','CC','dbt').object.item),right=model.frameIndex(slot(p,'current','R','CC','dbt').object.item);
+  const withPositions=dbt({lat:'L',view:'CC'}),withoutPositions=dbt({lat:'R',view:'CC',omitPositions:true});
+  const p=model.plan(manifest(study(cur,'current',[withPositions,withoutPositions])));
+  const left=model.frameIndex(withPositions),right=model.frameIndex(withoutPositions);
   assert.equal(left.entries.length,right.entries.length);
   assert.ok(left.entries.every(e=>e.position.status==='verified'));
   assert.ok(right.entries.every(e=>e.position.status==='unverified'),'MG03: positions are per object');
+  assert.equal(slot(p,'current','L','CC','dbt').status,'ready');
+  assert.equal(slot(p,'current','R','CC','dbt').status,'missing','a DBT whose geometry cannot be verified is not placed as slices');
 });
 
 test('MG04-allow current and prior are paired per side, view and kind, and a missing slot is explicit',()=>{
