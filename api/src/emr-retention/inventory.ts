@@ -47,10 +47,10 @@ export const REASONS = freeze({
     'ContainerUnknown', 'ContainerInconsistent', 'KeyUnknown', 'PartUnknown', 'PartHashMismatch', 'OriginalMissing',
     'SignaturePayloadMissing', 'ReferenceEntryMissing', 'ReferenceNotInSnapshot', 'AccessStreamMismatch', 'AccessEventUnavailable',
     'AccessEventBindingRefused', 'HoldRequestUnavailable'],
-  retained: ['ChangeHistoryFollowsRecord', 'AccessFloorNotElapsed', 'UnresolvedRequestHold'],
+  retained: ['ChangeHistoryFollowsRecord', 'AccessFloorNotElapsed', 'UnresolvedRequestHold', 'RetentionBoundaryActive'],
   blocked: ['PendingOriginalNotDurable', 'ImmutableLocation', 'LiveIncorporator'],
   partial: ['CopyRemains', 'ContainerRemains', 'KeyRemains', 'ReplacementUnverified'],
-  failed: ['ExpiredDataInReplacement', 'ReplacementUsesErasedKey', 'LiveDataLost', 'LiveKeyLost'],
+  failed: ['ExpiredDataInReplacement', 'ReplacementUsesErasedKey', 'LiveDataLost', 'LiveKeyLost', 'RetainedCopyLost'],
 } as const);
 type ReasonCode = typeof REASONS[keyof typeof REASONS][number];
 export interface Reason { code: ReasonCode; locationId: string | null }
@@ -241,6 +241,8 @@ export function assessErasure(units: readonly RetentionRecord[], graph: Retentio
     refuse('ReferenceSnapshotStale');
   const set: ReadonlySet<string> = new Set(recordIds), reasons: Reason[] = [];
   for (const record of records) {
+    const state = retentionState(record, graph, time);
+    if (state.destroyNotBefore === null || time < state.destroyNotBefore) note(reasons, 'RetentionBoundaryActive');
     requestHolds(record, time, reasons);
     accessUnit(record, time, reasons);
   }
@@ -253,7 +255,8 @@ export function assessErasure(units: readonly RetentionRecord[], graph: Retentio
   });
   const containers: PlannedContainer[] = [...new Set(snapshot.containers.map(c => c.containerId))].sort().map(containerId => {
     const facts = snapshot.containers.filter(c => c.containerId === containerId);
-    if (facts.some(c => JSON.stringify([...c.scopeMembers].sort()) !== JSON.stringify([...facts[0].scopeMembers].sort())))
+    const members = (c: Container) => JSON.stringify([ [...c.scopeMembers].sort(), c.otherMembers, [...c.keyIds].sort() ]);
+    if (facts.some(c => members(c) !== members(facts[0])))
       note(reasons, 'ContainerInconsistent', facts[0].locationId);
     for (const c of facts) if (c.deletion === 'none') note(reasons, 'ImmutableLocation', c.locationId);
     // Live data or anything still retained inside makes the container a replacement, never a deletion.
@@ -285,9 +288,13 @@ function requestHolds(record: Readonly<RetentionRecord>, at: string, reasons: Re
       const legal = emrAdapters().legal;
       const load = hold.basis.type === 'statutory-duty' ? legal.loadCorrectionRequest : legal.loadAccessRequest;
       const r = object(load(hold.basis.requestId), ['requestId', 'recordIds', 'receivedAt', 'responseDueAt', 'resolution']);
-      if (r.requestId !== hold.basis.requestId) throw new Error('Request binding');
+      if (r.requestId !== hold.basis.requestId || !ids(r.recordIds, true).includes(record.recordId) ||
+          utc(r.receivedAt) > at || utc(r.responseDueAt) < r.receivedAt) throw new Error('Request binding');
       resolution = nullable(r.resolution, v => object(v, ['eventId', 'at', 'outcome']));
-      if (resolution) utc(resolution.at);
+      if (resolution) {
+        string(resolution.eventId); string(resolution.outcome);
+        if (utc(resolution.at) < r.receivedAt) throw new Error('Resolution before request');
+      }
     } catch { note(reasons, 'HoldRequestUnavailable'); continue; }
     if (resolution === null || resolution.at > at) note(reasons, 'UnresolvedRequestHold');
   }
@@ -359,6 +366,14 @@ async function gatedWork<T>(recordIds: readonly string[], at: string, current: R
     return state.destroyNotBefore !== null && time >= state.destroyNotBefore;
   });
   if (!due) return work(current);
+  // A calls the worker once per SCC. A shared backup cannot be split into independent per-record plans.
+  // R1 accepts one SCC; R2 must coordinate durable fences and replacements across a multi-SCC batch.
+  for (const id of recordIds) {
+    const reached = new Set([id]);
+    for (const from of reached) for (const ref of current.references)
+      if (ref.relation === 'incorporation' && ref.fromRecordId === from && recordIds.includes(ref.toRecordId)) reached.add(ref.toRecordId);
+    if (reached.size !== recordIds.length) refuse('SingleDisposalSetRequired');
+  }
   const assessment = requireErasable(assessErasure(units, current, time));
   const entry = { graph: JSON.stringify(current), assessment };
   fixedPlans.add(entry);
@@ -368,8 +383,9 @@ async function gatedWork<T>(recordIds: readonly string[], at: string, current: R
 export function fixedErasurePlan(requests: readonly Readonly<DisposalRequest>[]): Readonly<ErasureAssessment> {
   if (!Array.isArray(requests) || !requests.length) refuse('ErasurePlanRequired');
   const graph = JSON.stringify(requests[0].graph), wanted = requests.map(r => r.record.recordId);
-  if (requests.some(r => JSON.stringify(r.graph) !== graph)) refuse('ErasurePlanRequired');
-  const matches = [...fixedPlans].filter(p => p.graph === graph && wanted.every(id => p.assessment.recordIds.includes(id)));
+  if (new Set(wanted).size !== wanted.length || requests.some(r => JSON.stringify(r.graph) !== graph)) refuse('ErasurePlanRequired');
+  const matches = [...fixedPlans].filter(p => p.graph === graph && wanted.length === p.assessment.recordIds.length &&
+    wanted.every(id => p.assessment.recordIds.includes(id)));
   if (matches.length !== 1) refuse('ErasurePlanRequired');
   return matches[0].assessment;
 }
@@ -395,12 +411,16 @@ export function verifyErasure(input: ErasureAssessment, at: string): Readonly<Er
   const keptKeys = input.keys.filter(k => k.disposition !== 'erase').map(k => k.keyId);
   const snapshot = readSnapshot(freeze({ recordIds: input.recordIds, keyIds: input.keys.map(k => k.keyId), containerIds: planned, at: time }), reasons);
   const remaining: { locationId: string; id: string; kind: 'copy' | 'container' | 'key' }[] = [];
-  const ignored: Reason[] = [];
+  // A new incoming incorporation or retained original discovered after planning is still a blocker.
   for (const copy of snapshot.copies.filter(c => c.containerId === null)) {
-    const still = copy.content === 'key-material' ? erasedKeys.includes(copy.keyId) : disposition(copy, set, input.at, ignored) === 'erase';
+    const still = copy.content === 'key-material' ? erasedKeys.includes(copy.keyId) : disposition(copy, set, input.at, reasons) === 'erase';
     if (still) { remaining.push({ locationId: copy.locationId, id: copy.copyId, kind: copy.content === 'key-material' ? 'key' : 'copy' });
       note(reasons, copy.content === 'key-material' ? 'KeyRemains' : 'CopyRemains', copy.locationId); }
     if (copy.content === 'pending-original') note(reasons, 'PendingOriginalNotDurable', copy.locationId);
+  }
+  for (const item of input.items.filter(i => i.containerId === null && i.disposition !== 'erase')) {
+    if (!snapshot.copies.some(c => c.locationId === item.locationId && c.copyId === item.copyId && c.content === item.content))
+      note(reasons, 'RetainedCopyLost', item.locationId);
   }
   for (const container of snapshot.containers) {
     const members = container.scopeMembers;
@@ -412,8 +432,12 @@ export function verifyErasure(input: ErasureAssessment, at: string): Readonly<Er
     const present = snapshot.containers.some(c => c.containerId === old.containerId);
     const candidates = snapshot.containers.filter(c => c.replaces.includes(old.containerId) && !planned.includes(c.containerId));
     for (const c of candidates) if (c.keyIds.some(k => erasedKeys.includes(k))) note(reasons, 'ReplacementUsesErasedKey', c.locationId);
-    const good = candidates.some(c => restored(c.restoreCheck, input.at, time) && !c.scopeMembers.some(m => set.has(m)) && !c.keyIds.some(k => erasedKeys.includes(k)));
-    if (!good) note(reasons, present ? 'ReplacementUnverified' : 'LiveDataLost', old.locationIds[0]);
+    for (const locationId of old.locationIds) {
+      const here = candidates.filter(c => c.locationId === locationId);
+      const good = here.length > 0 && here.every(c => restored(c.restoreCheck, input.at, time) &&
+        !c.scopeMembers.some(m => set.has(m)) && !c.keyIds.some(k => erasedKeys.includes(k)));
+      if (!good) note(reasons, present ? 'ReplacementUnverified' : 'LiveDataLost', locationId);
+    }
   }
   for (const keyId of keptKeys) if (!snapshot.copies.some(c => c.content === 'key-material' && c.keyId === keyId)) note(reasons, 'LiveKeyLost');
   const status = reasons.some(r => category(r.code) === 'failed') ? 'failed' as const :

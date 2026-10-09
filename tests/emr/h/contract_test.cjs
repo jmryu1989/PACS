@@ -13,7 +13,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const assert = require('node:assert/strict');
-const { test, beforeEach } = require('node:test');
+const { test: nodeTest, beforeEach } = require('node:test');
+const declaredCases = [];
+function test(name, body) {
+  assert(!declaredCases.includes(name), 'case names must be unique');
+  declaredCases.push(name);
+  if (!process.env.KIN_EMR_H_LIST_CASES) nodeTest(name, body);
+}
 
 const root = path.resolve(__dirname, '..', '..', '..');
 const api = path.join(root, 'api');
@@ -29,6 +35,7 @@ const M = require(path.join(src, 'emr-contract/composition.ts'));
 const C = require(path.join(src, 'emr-contract/classification.ts'));
 const D = require(path.join(src, 'emr-contract/lawful-defaults.ts'));
 const A = require(path.join(src, 'emr-contract/access-event.ts'));
+const L = require(path.join(src, 'emr-contract/report-lifecycle.ts'));
 const K = require(path.join(src, 'emr-retention/contract.ts'));
 const H = require(path.join(src, 'emr-retention/inventory.ts'));
 
@@ -131,6 +138,8 @@ const REGISTRY = { formatVersion: 1, locations: [
   { locationId: 'keybackup', locationClass: 'key-backup', country: 'KR', contents: ['key-material'], deletion: 'per-object', facilityEvidenceId: null },
   { locationId: 'terminals', locationClass: 'terminal-store', country: 'KR', contents: ['derived-copy', 'pending-original'], deletion: 'per-object', facilityEvidenceId: null },
   { locationId: 'worm', locationClass: 'removable-media', country: 'KR', contents: CONTENTS_ALL, deletion: 'none', facilityEvidenceId: null },
+  ...['database-wal-archive', 'database-snapshot', 'object-store-version', 'export-archive', 'staging', 'crash-dump'].map(locationClass => ({
+    locationId: locationClass, locationClass, country: 'KR', contents: CONTENTS_ALL, deletion: 'per-object', facilityEvidenceId: 'facility-evidence-1' })),
 ] };
 const LOCATION_IDS = REGISTRY.locations.map(l => l.locationId);
 let world;
@@ -163,7 +172,7 @@ H.composeRetentionReaders({
   },
   accessEvents: { load: eventId => { if (!world.events.has(eventId)) throw new Error('event unavailable'); return clone(world.events.get(eventId)); } },
 }, REGISTRY);
-beforeEach(() => resetWorld());
+if (!process.env.KIN_EMR_H_LIST_CASES) beforeEach(() => resetWorld());
 
 const put = (locationId, copy) => { world.copies.get(locationId).push(copy); return copy; };
 const remove = (locationId, predicate) => world.copies.set(locationId, world.copies.get(locationId).filter(c => !predicate(c)));
@@ -226,12 +235,14 @@ async function destroy(records, at, graph, destroySet = worker(at), lock = {}) {
   return { result, journal, deletes };
 }
 async function refused(records, at, graph, code, message) {
+  const before = clone({ records, graph, copies: world.copies, containers: world.containers });
   const journal = []; let deletes = 0, error;
   try { await destroy(records, at, graph, async set => { deletes++; return receipt(at); }, { append: async e => { journal.push(e); return durable.append(e); } }); }
   catch (e) { error = e; }
   assert.equal(error?.code, code, message);
   assert.equal(deletes, 0, message + ' (no deletion call)');
   assert.equal(journal.filter(e => e.phase === 'started').length, 0, message + ' (no started record)');
+  assert.deepEqual({ records, graph, copies: world.copies, containers: world.containers }, before, message + ' (originals preserved)');
 }
 const reasonCodes = assessment => assessment.reasons.map(r => r.code);
 function signedReport(recordId, at = t0) {
@@ -288,10 +299,10 @@ const DEFECTS = {
   'concurrent-reference': r => { put('db', { copyId: 'db/new-ref', content: 'reference-entry', fromRecordId: 'cvr-new', fromPartId: 'c1', toRecordId: r.recordId, toPartId: r.parts[0].partId, relation: 'incorporation', containerId: null }); return 'ReferenceNotInSnapshot'; },
   'stream-mismatch': r => { put('ledger', { copyId: 'ledger/mis', content: 'access-entry', eventId: 'event-mis', stream: 'viewing', occurredAt: t0, action: 'approve-sign', result: 'succeeded', targets: [{ kind: 'report-version', recordId: r.recordId }], containerId: null }); return 'AccessStreamMismatch'; },
   'key-unknown': r => { container('backup', 'backup-k', [r], { keyIds: ['k-missing'] }); return 'KeyUnknown'; },
+  'container-members-disagree': r => { container('backup', 'same', [r]); container('offsite', 'same', [r], { others: 1 }); return 'ContainerInconsistent'; },
 };
-test('TEST-H-03/inventory_refusal: every unread, unregistered, partial or inconsistent inventory starts nothing', async () => {
-  for (const [name, apply] of Object.entries(DEFECTS)) {
-    resetWorld();
+for (const [name, apply] of Object.entries(DEFECTS)) {
+  test('TEST-H-03/inventory_refusal: ' + name + ' starts nothing', async () => {
     const report = signedReport('report-' + name);
     const at = D.retentionDeadline(report), graph = snapshotFor([report], at);
     const expected = apply(report);
@@ -299,8 +310,8 @@ test('TEST-H-03/inventory_refusal: every unread, unregistered, partial or incons
     assert.equal(assessment.status, 'incomplete', `defect ${name} must stop the set`);
     assert(reasonCodes(assessment).includes(expected), `defect ${name} must be reported as ${expected}`);
     await refused([report], at, graph, 'InventoryIncomplete', `defect ${name} must stop the set`);
-  }
-});
+  });
+}
 
 test('TEST-H-03/inventory_refusal: the index and the snapshot A checked must name the same references', async () => {
   const report = signedReport('report-indexed'), later = place(makeRecord('report-citing', 'report-version', shift(t0, 400 * DAY)));
@@ -466,7 +477,7 @@ function sharedBackup(recordId) {
 function workerDone(report, options = {}) {
   remove('db', () => true); remove('replica', () => true);
   if (options.keepOld !== true) removeContainer('backup-old', options.oldFrom ?? LOCATION_IDS);
-  if (options.replacement !== false) container('backup', 'backup-new', options.replacementMembers ?? ['live-record-1'],
+  if (options.replacement !== false) for (const where of options.replacementLocations ?? ['backup', 'offsite']) container(where, 'backup-new', options.replacementMembers ?? ['live-record-1'],
     { keyIds: options.replacementKeys ?? ['k-new'], replaces: ['backup-old'], restoreCheck: options.restoreCheck ?? restoredOk(shift(D.retentionDeadline(report), 60_000)) });
   if (options.keepOldKey !== true) for (const where of ['keys', 'keybackup']) remove(where, c => c.keyId === 'k-old');
 }
@@ -634,3 +645,93 @@ test('TEST-H-07/facility_processor: readers are composed once and assessments ca
   assert.throws(() => H.verifyErasure({ status: 'erasable', recordIds: [], at: t0 }, t0), { code: 'ErasableAssessmentRequired' });
   assert.throws(() => H.fixedErasurePlan([{ record: { recordId: 'x' }, graph: {} }]), { code: 'ErasurePlanRequired' });
 });
+
+test('TEST-H-03/inventory_refusal: the assessment itself refuses early expiry and an active hold', () => {
+  const image = place(makeRecord('assessment-early', 'image', t0), { at: 'orthanc' });
+  const at = D.retentionDeadline(image), early = shift(at, -1);
+  const earlyAssessment = H.assessErasure([image], snapshotFor([image], early), early);
+  assert.equal(earlyAssessment.status, 'retained', 'inventory completeness cannot grant early destruction');
+  assert.throws(() => H.requireErasable(earlyAssessment), { code: 'RetentionRuleActive' });
+  const held = holdRecord(image, holdFacts(image.recordId));
+  assert.equal(H.assessErasure([held], snapshotFor([held], at), at).status, 'retained', 'inventory completeness cannot override a hold');
+});
+
+test('TEST-H-03/inventory_refusal: a fixed SCC plan cannot be consumed by a subset or duplicate member', async () => {
+  const a1 = makeRecord('set-a', 'report-version', t0, 'a1');
+  const b = makeRecord('set-b', 'report-version', t0, 'b1', { event: { components: [component(a1)] } });
+  const a = addPart(a1, 'a2', t0, { event: { act: 'additional-entry', components: [component(b), component(a1)] } }, snapshotFor([a1, b], t0));
+  place(a); place(b);
+  const at = D.retentionDeadline(a), graph = snapshotFor([a, b], at);
+  await destroy([a, b], at, graph, async requests => {
+    assert.throws(() => H.fixedErasurePlan([requests[0]]), { code: 'ErasurePlanRequired' }, 'a subset cannot obtain the entire set plan');
+    assert.throws(() => H.fixedErasurePlan([requests[0], requests[0]]), { code: 'ErasurePlanRequired' });
+    return worker(at)(requests);
+  }, { batch: true });
+});
+
+test('TEST-H-03/inventory_refusal: independent sets need separate plans before any started journal', async () => {
+  const a = signedReport('independent-a'), b = signedReport('independent-b');
+  const at = D.retentionDeadline(a), graph = snapshotFor([a, b], at);
+  await refused([a, b], at, graph, 'SingleDisposalSetRequired', 'a multi-set batch requires round-2 coordination');
+});
+
+test('TEST-H-04/expired_restore_impossible: every replaced backup location must preserve and restore live records', () => {
+  const { report, at, assessment } = sharedBackup('replica-replacement');
+  workerDone(report, { replacementLocations: ['backup'] });
+  const result = H.verifyErasure(assessment, shift(at, 3_600_000));
+  assert.equal(result.status, 'failed', 'one good replacement cannot cover a lost offsite backup');
+  assert(result.reasons.some(r => r.code === 'LiveDataLost' && r.locationId === 'offsite'));
+});
+
+test('TEST-H-05/key_lifetime: verification refuses loss of evidence still needed by a live record', () => {
+  const report = signedReport('shared-evidence-lost');
+  put('db', { copyId: 'shared-evidence', content: 'identity-evidence', registrationId: 'reg-1', dependents: [report.recordId, 'live-other'], containerId: null });
+  const at = D.retentionDeadline(report), assessment = H.assessErasure([report], snapshotFor([report], at), at);
+  remove('db', () => true); remove('replica', () => true);
+  assert.equal(H.verifyErasure(assessment, at).status, 'failed', 'losing retained evidence is not successful destruction');
+});
+
+test('TEST-H-06/crash_resume: a new incoming reference discovered after planning prevents completion', () => {
+  const report = signedReport('new-reference');
+  const at = D.retentionDeadline(report), assessment = H.assessErasure([report], snapshotFor([report], at), at);
+  remove('db', () => true); remove('replica', () => true);
+  put('db', { copyId: 'new-ref', content: 'reference-entry', fromRecordId: 'live-other', fromPartId: 'v1', toRecordId: report.recordId,
+    toPartId: report.parts[0].partId, relation: 'incorporation', containerId: null });
+  const result = H.verifyErasure(assessment, at);
+  assert.notEqual(result.status, 'verified', 'a new live incorporator cannot be silently ignored');
+  assert(reasonCodes(result).includes('LiveIncorporator'));
+});
+
+for (const locationId of ['orthanc', 'cache', 'database-wal-archive', 'database-snapshot', 'object-store-version', 'export-archive', 'staging', 'crash-dump', 'terminals']) {
+  test('TEST-H-04/expired_restore_impossible: image copy at ' + locationId + ' must be absent', () => {
+    const image = place(makeRecord('image-copy-' + locationId, 'image', t0), { at: 'orthanc' });
+    const copy = { copyId: 'copy-' + locationId, content: 'derived-copy', recordId: image.recordId, partId: image.parts[0].partId, containerId: null };
+    put(locationId, copy);
+    const at = D.retentionDeadline(image), plan = H.assessErasure([image], snapshotFor([image], at), at);
+    remove('orthanc', c => c.copyId !== copy.copyId);
+    assert.equal(H.verifyErasure(plan, at).status, 'partial', 'an image copy remains at ' + locationId);
+    remove(locationId, () => true);
+    assert.equal(H.verifyErasure(plan, at).status, 'verified');
+  });
+}
+
+test('TEST-H-02/archive_and_holds: purpose end is explicit and expiry separates ordinary clinical access', () => {
+  const report = signedReport('archive-report');
+  const actor = { id: 'reader', kind: 'member', roles: ['radiologist'], canReadStudy: true, canSign: true, canCancel: true };
+  const step = (facts, action, extra = {}) => L.transitionReport(facts, { action, actor, at: t0,
+    expectedClaimGeneration: facts.claimGeneration, expectedPublishedVersionId: facts.publishedVersion?.versionId ?? null, ...extra }).facts;
+  const started = step(L.newReportFacts(report.recordId, 'study'), 'start');
+  const approved = step(started, 'approve', { version: { recordId: report.recordId, versionId: report.parts[0].partId, sha256: report.parts[0].evidence.event.sha256 } });
+  const finalized = step(approved, 'finalize', { at: shift(t0, DAY), actor: { ...actor, kind: 'service' } });
+  assert.equal(L.reportRetentionAccess(finalized, null, null, { record: report, at: shift(t0, DAY) }).ordinaryClinicalAccess, true);
+  const before = clone(finalized);
+  const archive = L.archiveFinalizedReport(finalized, { actor, at: shift(t0, DAY), reason: '진료 목적 종료 확인', purpose: 'clinical-purpose-ended',
+    expectedPublishedVersionId: finalized.publishedVersion.versionId });
+  assert.equal(L.reportRetentionAccess(finalized, archive, null, { record: report, at: shift(t0, DAY) }).ordinaryClinicalAccess, false);
+  assert.equal(L.reportRetentionAccess(finalized, null, null, { record: report, at: D.retentionDeadline(report) }).ordinaryClinicalAccess, false);
+  assert.deepEqual(finalized, before, 'separation preserves the signed original');
+  const afterExpiry = stored('report-version', report.recordId, 'too-late', D.retentionDeadline(report), { event: { act: 'additional-entry', predecessor: component(report) } });
+  assert.throws(() => D.recordVersionAdded(report, afterExpiry, snapshotFor([report], afterExpiry.event.at)), 'expiry cannot authorize a new clinical part');
+});
+
+if (process.env.KIN_EMR_H_LIST_CASES) process.stdout.write(JSON.stringify(declaredCases, null, 2) + '\n');

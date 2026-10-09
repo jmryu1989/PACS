@@ -61,10 +61,10 @@ MUTANTS = [
      "case": CASE_H04_KEYS, "expect": "a key that still opens a kept container must be retained",
      "old": "      disposition: protects.every(id => removed.includes(id)) ? 'erase' as const : 'retain-live-key' as const };",
      "new": "      disposition: protects.some(id => removed.includes(id)) ? 'erase' as const : 'retain-live-key' as const };"},
-    {"id": "M-H-04", "title": "the nonpersonal completion record keeps re-identifying source values", "file": INVENTORY,
+    {"id": "M-H-04", "title": "the nonpersonal completion record keeps the source payload hash", "file": INVENTORY,
      "case": CASE_H04_SUMMARY, "expect": "the completion record carries no identifier or digest",
      "old": "    verifiedAt: verification.at, units: assessment.recordIds.length,",
-     "new": "    verifiedAt: verification.at, units: assessment.recordIds.length, unitIds: assessment.recordIds,"},
+     "new": "    verifiedAt: verification.at, units: assessment.recordIds.length, sourceSha256: require('node:crypto').createHash('sha256').update(assessment.recordIds[0] + ':' + assessment.recordIds[0] + '-1').digest('hex'),"},
     {"id": "M-H-05", "title": "a read is accepted as a retained part and restarts the period (consumed A contract)",
      "file": "emr-contract/lawful-defaults.ts", "case": CASE_H01_READ, "expect": "a read must never become a retained part",
      "old": "['image', 'external-sr-seg', 'study-metadata'].includes(k)) ? ['acquisition', 'correction'] :",
@@ -102,11 +102,11 @@ MUTANTS = [
      "old": "  if (facts.stream === 'change-history') note(reasons, 'ChangeHistoryFollowsRecord');",
      "new": "  if (false) note(reasons, 'ChangeHistoryFollowsRecord');"},
     {"id": "M-H-14", "title": "an unregistered storage place is ignored", "file": INVENTORY,
-     "case": CASE_H03_DEFECTS, "expect": "defect unregistered-location must stop the set",
+     "case": "TEST-H-03/inventory_refusal: unregistered-location starts nothing", "expect": "defect unregistered-location must stop the set",
      "old": "      for (const id of found) if (!known.includes(id)) note(reasons, 'UnregisteredLocation', id);",
      "new": "      for (const id of found) if (false) note(reasons, 'UnregisteredLocation', id);"},
     {"id": "M-H-15", "title": "a reference added after the snapshot is ignored", "file": INVENTORY,
-     "case": CASE_H03_DEFECTS, "expect": "defect concurrent-reference must stop the set",
+     "case": "TEST-H-03/inventory_refusal: concurrent-reference starts nothing", "expect": "defect concurrent-reference must stop the set",
      "old": "  for (const k of listed) if (!expected.has(k)) note(reasons, 'ReferenceNotInSnapshot');",
      "new": "  for (const k of listed) if (false) note(reasons, 'ReferenceNotInSnapshot');"},
     {"id": "M-H-16", "title": "an expired signature payload is kept as verification evidence", "file": INVENTORY,
@@ -176,9 +176,13 @@ def main():
             (evidence / "baseline.tap").write_text(output, encoding="utf-8")
         cases = blocks(output)
         expected = count(output)
+        declaration = subprocess.run([args.node, str(TEST)], cwd=str(ROOT),
+            env={**os.environ, "KIN_EMR_RETENTION_SRC": str(base), "KIN_EMR_H_LIST_CASES": "1"},
+            capture_output=True, text=True, encoding="utf-8", timeout=args.timeout)
+        declared = json.loads(declaration.stdout) if declaration.returncode == 0 else []
         failing = sorted(name for name, (status, _block) in cases.items() if status == "not ok")
-        results["baseline"] = {"exit": code, "tests": expected, "failing": failing}
-        if code != 0 or failing or not expected:
+        results["baseline"] = {"exit": code, "tests": expected, "expected": declared, "collected": list(cases), "failing": failing}
+        if code != 0 or failing or not expected or expected != len(declared) or list(cases) != declared:
             print(json.dumps(results, ensure_ascii=False, indent=2))
             print("BASELINE FAILED: the unmutated copy must pass before any mutant counts", file=sys.stderr)
             return 2
@@ -204,7 +208,7 @@ def main():
             status, block = cases.get(mutant["case"], (None, ""))
             checks = {
                 "nonzero exit": code != 0,
-                "all cases reported": count(output) == expected,
+                "all cases reported": count(output) == expected and list(cases) == declared,
                 "target case not ok": status == "not ok",
                 "test code failure": "failureType: 'testCodeFailure'" in block,
                 "assertion error": "code: 'ERR_ASSERTION'" in block,
