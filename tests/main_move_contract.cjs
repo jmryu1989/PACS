@@ -58,6 +58,6 @@ function verify(before, page, contract = spec) {
 
 function baseline() {
   // Git applies only the checkout's existing EOL filter; actual page/chunk comparisons above are byte-exact UTF-8.
-  return execFileSync('git', ['cat-file', '--filters', `${spec.base}:${spec.page}`], { encoding: 'utf8', maxBuffer: 4e6 });
+  return execFileSync('git', ['cat-file', '--filters', `${spec.base}:${spec.page}`], { cwd: path.resolve(__dirname, '..'), encoding: 'utf8', maxBuffer: 4e6 });
 }
 module.exports = { statements, chunks, verify, baseline };
