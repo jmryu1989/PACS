@@ -27,7 +27,7 @@ Suspend/Approve/Change/Cancel/Activate는 DB 권한을 바꾸며 명부 게시�
 권한을 결정하지 않는다. 초안은 프로세스 메모리 순번이 아니라 DB revision/epoch/CAS를 쓴다.
 `auth_session_service_test.cjs`의 CORE 명령·감사 원자성·진입 거절은 컴파일된 서비스와
 실제 PostgreSQL/가짜 IdP 수준이다. 실제 IdP 경계는 `SessionEndLive`가 맡는다.
-그 클래스의 SE-10·11은 U5 re-cut 뒤 이름과 본문이 달라 필수 목록에서 제외했다.
+그 클래스의 SE-10·11은 #138 hygiene에서 현재 이름과 본문에 맞춰 필수 목록에 재포함했으며, Stage 7은 두 사례를 포함한 목록으로 판정했다.
 D621에 따라 provider reconciliation은 U5b 범위다. DB Suspend 뒤 살아 있는 provider SSO로도
 제품 세션/토큰을 쓰지 못하고 Activate 뒤 옛 인증이 거절되는 동작은 SE-09가 맡는다.
 명시적 Log out 뒤 같은 sid의 새 SSO 허용과 옛 토큰 거절은 SE-03b·03c가 맡는다.
