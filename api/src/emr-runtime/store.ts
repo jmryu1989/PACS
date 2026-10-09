@@ -126,7 +126,7 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
     for (const stream of accessStreams(input, served)) {
       const { event, text, contentSha256 } = canonicalPayload(input, served, stream);
       eventId = event.eventId;
-      this.seal.recordIntent(stream, attemptId, event.eventId, contentSha256, bundleId);
+      await this.seal.recordIntentAsync(stream, attemptId, event.eventId, contentSha256, bundleId);
       let result: AppendResult;
       try { result = await this.appendRow(tx, stream, event.eventId, text, act, attemptId, bundleId); }
       catch (error) { if (ledgerErrorCode(error) === 'EB002') refuse('AccessEventIdConflict'); throw error; }
@@ -177,7 +177,7 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
       if (provisional.stream === 'viewing') receipt = mintDurableReceipt(stored, sealed.streams.viewing);
     }
     if (!receipt) refuse('DurableReceiptRefused');
-    for (const p of appended.entries) this.seal.acknowledge(p.stream, p.attemptId);
+    await Promise.all(appended.entries.map(p => this.seal.acknowledge(p.stream, p.attemptId)));
     return receipt;
   }
 

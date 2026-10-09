@@ -80,7 +80,9 @@
       "scripts/emr-compose.py",
       "tests/emr/b/contract_test.cjs",
       "tests/emr/b/live.py",
-      "tests/emr/b/mutants.py"
+      "tests/emr/b/mutants.py",
+      "tests/emr/b/throughput.cjs",
+      "tests/emr/b/throughput_live.py"
     ]
   },
   "models": {
@@ -311,6 +313,11 @@
       "req": "REQ-EMR-01/06/07/19/20 D24-1..9",
       "risk": "RISK-EMR-01/06/07/19/20",
       "test": "TEST-EMR-B-C13 C14 C15 C16 C17 C18 L17 L18 L19"
+    },
+    {
+      "req": "REQ-D874-EMR-B-THROUGHPUT",
+      "risk": "RISK-READING-RECEIPT-LATENCY",
+      "test": "TEST-EMR-B-C19 L03 L03b M36"
     }
   ],
   "cases": {
@@ -332,6 +339,7 @@
         "C16 D24 received evidence keeps independent original, adopted, chart and receipt clocks without a duplicate restart",
         "C17 D24 finite review deadlines escalate without erasing duties or renewing on retries; four evidence-bound decisions close the procedure",
         "C18 D24 claim duties require an actual ending event and preserve an outstanding statutory obligation past internal deadlines",
+        "C19 committed receipt groups preserve every binding, ignore unrelated pending work and share durable publication; publication failure sends no receipt",
         "C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused"
       ]
     },
@@ -349,6 +357,7 @@
         "test_b01_ledger_roles_and_restart",
         "test_b02_business_commit_and_failure_journal",
         "test_b03_idempotency_and_concurrent_append",
+        "test_b03b_concurrent_48_receipts",
         "test_b04_chain_tail_and_crash_recovery",
         "test_b05_expiry_checkpoint_and_holds",
         "test_b06_complete_reload_and_clause_history",
@@ -361,9 +370,9 @@
     }
   },
   "expected": {
-    "contract": 16,
-    "live": 11,
-    "mutants": 32,
+    "contract": 17,
+    "live": 12,
+    "mutants": 33,
     "profiles": 39,
     "measurements_suites": 20,
     "validate_jobs": 22,
@@ -606,6 +615,13 @@
         "C13"
       ],
       "behaviour": "I4 expiry returns before its checkpoint seal"
+    },
+    {
+      "id": "M36",
+      "kill": [
+        "L03"
+      ],
+      "behaviour": "per-operation Node startup returns to the head-locked writer; receipt latency exceeds round-3 plus 20 percent"
     }
   ],
   "candidate_cases": [

@@ -172,6 +172,8 @@ B의 SQL 전용 저장(schema `emr_access`, 전용 tablespace)은 Prisma 모델�
 
 REQ-EMR-06/19 → RISK-EMR-06/19 → C05/C06/C07/C13, `tests/emr/b/seal_checker.cjs` I1–I4 및 L02/L03/L04/L05/L08/L18/L19. 새 migration은 기존 적용 migration을 고치지 않고 marker/ACL을 추가하며 같은 pause의 DB·roles·tablespace·보호 상태 복원에 포함한다.
 
+**동시 열람 지연(D874):** 공유 DB writer fence를 얻은 intent들은 head lock 전에 한 번의 내구 저장으로 묶는다. 정확한 슬롯 예약은 계속 각 transaction의 head lock 아래 COMMIT 전에 내구화한다. Linux writer는 `flock`에 상속한 열린 파일 설명을 직접 유지하고 동기 쓰기·fsync 후 닫으며, 예약마다 Node 프로세스를 새로 실행하지 않는다. 이미 COMMIT된 receipt 요청만 묶어 봉인하고, 검증한 stream frontier와 정확한 예약이 같을 때만 최신 외부 상태에 반영한다. 무관한 intent 변경은 재검증을 유발하지 않고, frontier가 달라졌으면 새 DB snapshot을 검증한다. 미확정 요청을 그룹에 포함하거나 완료를 기다리지 않는다. append timeout 15초·maxWait 10초는 유지한다. REQ-D874-EMR-B-THROUGHPUT → RISK-READING-RECEIPT-LATENCY → C19·L03/L03b·M36 및 그룹 응답 edge를 포함한 I1–I4 checker로 결속한다.
+
 **D-18 업무 문맥(예측 의존):** 모든 접속사건은 서버가 업무 문맥(배정 판독·동일 환자 과거 비교·임상 요청·worklist·background fetch·서비스 작업·인증)에서 자동 결속한 `context`를 가지며 해시 대상이다. 문맥 밖 접근만 한 줄 사유(`out-of-context`, 200자 이하, 줄바꿈 금지)를 요구한다. 사유는 권한이 아니다.
 
 **D-3 Tech Note:** 방사선사 본인 Tech Note는 작성자 본인 키 서명판(`tech-note`, 서명 필수)이고 관리자 메모는 서명 없는 운영 문구(`operational-note`)다. 저장 행의 작성자 역할(`authorRole`)로 구분하고 요청 플래그로 정하지 않는다. 서명 연결은 C다.

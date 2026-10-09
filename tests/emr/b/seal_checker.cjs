@@ -64,11 +64,13 @@ function modules(mem) {
   fsapi.realpathSync=Object.assign(p=>path.resolve(p),{native:p=>path.resolve(p)});
   function load(rel){
     rel=path.posix.normalize(rel);if(!rel.endsWith('.ts'))rel+='.ts';if(cache.has(rel))return cache.get(rel).exports;
-    if(!compiled.has(rel))compiled.set(rel,new Function('exports','require','module','__filename','__dirname','Date','process',
+    if(!compiled.has(rel))compiled.set(rel,new Function('exports','require','module','__filename','__dirname','Date','process','setTimeout',
       ts.transpileModule(readSource(rel),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2021,esModuleInterop:true}}).outputText));
     const m={exports:{}};cache.set(rel,m);
     const req=id=>id==='node:fs'?fsapi:id==='node:crypto'?{...crypto,randomUUID:()=>('00000000-0000-4000-8000-'+String(++fsScope.getStore().serial).padStart(12,'0'))}:id.startsWith('.')?load(path.posix.join(path.posix.dirname(rel),id)):require(id);
-    compiled.get(rel)(m.exports,req,m,path.join(root,rel),path.join(root,path.posix.dirname(rel)),FixedDate,process);return m.exports;
+    // Logical intake timer: the scheduler enumerates request/COMMIT edges, not wall
+    // time. Its callback is a separate turn; physical latency is L03/L03b's oracle.
+    compiled.get(rel)(m.exports,req,m,path.join(root,rel),path.join(root,path.posix.dirname(rel)),FixedDate,process,fn=>setImmediate(fn));return m.exports;
   }
   runtimeModules={C:load('api/src/emr-runtime/contract'),J:load('api/src/emr-runtime/failure-journal'),S:load('api/src/emr-runtime/seal'),
     CO:load('api/src/emr-runtime/coordinator'),EW:load('api/src/emr-runtime/external-writer'),RT:load('api/src/emr-runtime/store')};
@@ -82,7 +84,7 @@ function event(id, at='2020-01-02T00:00:00.000Z') {
     context:{basis:'authentication',studyId:null,relatedStudyId:null,reason:null},executor:'member',affectedIdentity:known(who),session:known('authref:00000000-0000-4000-8000-000000000002'),
     targets:[],action:'auth.login',result:'succeeded',auth:{endCause:null,failureCause:null,trigger:null},requestId:'synthetic-request',auditLinkId:'audit:00000000-0000-4000-8000-000000000003',relatedEventId:null};
 }
-const drain=async()=>{for(let i=0;i<90;i++)await Promise.resolve();};
+const drain=async()=>{for(let i=0;i<90;i++)await Promise.resolve();await new Promise(setImmediate);for(let i=0;i<90;i++)await Promise.resolve();};
 const clone=v=>JSON.parse(JSON.stringify(v));
 function create(snapshot, eligible=true, recoveryProcess=false) {
   const w={epoch:recoveryProcess?1:0,dir:path.join(root,'VIRTUAL_ONLY'),mem:new MemFS(snapshot?.files),rows:clone(snapshot?.rows||[]),truth:clone(snapshot?.truth||[]),
@@ -228,9 +230,16 @@ async function filesystemCuts(w,trace){
   }
 }
 const outcomes=['ok','failed','unknown0','unknown1'];
-function options(w){const result=[];for(const name of ['A','B','E']){const a=w.actors[name];if(!a)result.push(`${name}:start`);
+function options(w){const result=[];
+  if(!w.actors.A&&!w.actors.B)result.push('AB:start');
+  // A receipt group is an additional edge, alongside either independent response order.
+  // Both DB COMMITs must already be positive; prepared/unknown requests never enter it.
+  if(['A','B'].every(n=>w.actors[n]?.phase==='committed'&&w.actors[n]?.outcome==='ok'))result.push('AB:deliver');
+  for(const name of ['A','B','E']){const a=w.actors[name];if(!a)result.push(`${name}:start`);
   else if(a.phase==='prepared')for(const o of outcomes)result.push(`${name}:commit:${o}`);else if(a.phase==='committed')result.push(`${name}:deliver`);}return result;}
-async function act(w,s){const [n,a,o]=s.split(':');if(a==='start')await w.start(n);else if(a==='commit')await w.commit(n,o);else await w.deliver(n);}
+async function act(w,s){if(s==='AB:start'){await Promise.all(['A','B'].map(n=>w.start(n)));return;}
+  if(s==='AB:deliver'){await Promise.all(['A','B'].map(n=>w.deliver(n)));return;}
+  const [n,a,o]=s.split(':');if(a==='start')await w.start(n);else if(a==='commit')await w.commit(n,o);else await w.deliver(n);}
 function stateKey(w){return sha(JSON.stringify({snapshot:w.snapshot(),actors:Object.fromEntries(Object.entries(w.actors).sort().map(([n,a])=>[n,{phase:a.phase,outcome:a.outcome,committed:a.committed,
   staged:a.staged,callback:a.callback&&{value:a.callback.value,error:a.callback.error?.code},value:a.value,error:a.error}]))}));}
 async function enumerate(eligible){

@@ -132,6 +132,9 @@ MUTANTS = {
         ("api/src/emr-runtime/seal.ts", "      try { result = await reader.snapshot(async sql => {", "      try { result = await reader.snapshot(async sql => {\n        for(const i of Object.values(state.intents))if(i.eventId&&!await sql.entryForEvent(i.stream,i.eventId))throw new SealRefused('UnsealedEntryUnexplained','pending-conflict');")]),
     "M35": ("I4: job reports success before its own checkpoint seal", [
         ("api/src/emr-runtime/store.ts", "  await seal.reconcileCommitted('viewing', { sequence: result.checkpointSequence, hash: result.checkpointHash });\n", "")]),
+    "M36": ("per-operation Node startup returns to the head-locked writer: concurrent receipt latency exceeds the round-3 budget", [
+        ("api/src/emr-runtime/coordinator.ts", "    try { return executeExternal(request); }",
+         "    spawnSync(process.execPath, ['-e', '']); // Reintroduced per-reservation worker startup under the head lock.\n    try { return executeExternal(request); }")]),
 
 }
 

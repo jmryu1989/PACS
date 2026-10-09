@@ -336,12 +336,37 @@ class EmrBLedgerLive(unittest.TestCase):
         self.assertEqual(recovered["recovered"], 0, recovered)
 
     # ── L03 ──
+    def measured_appends(self, count):
+        # Only this owned disposable DB gets the server-clock probe. The same probe
+        # and driver measured the pinned round-3 baseline (D874).
+        self.ok("""CREATE OR REPLACE FUNCTION public.emrb_measure_lock(s text) RETURNS double precision
+            LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
+            DECLARE started timestamptz := clock_timestamp(); BEGIN
+            PERFORM 1 FROM emr_access.chain_head WHERE stream=s FOR UPDATE;
+            RETURN extract(epoch FROM clock_timestamp()-started)*1000; END $$;
+            REVOKE ALL ON FUNCTION public.emrb_measure_lock(text) FROM PUBLIC;
+            GRANT EXECUTE ON FUNCTION public.emrb_measure_lock(text) TO kin_runtime;""")
+        try:
+            data = self.driver("append", {"count": count, "concurrent": True, "measure": True, "headProbe": True})
+        finally:
+            self.ok("DROP FUNCTION public.emrb_measure_lock(text)")
+        # Raw individual errors/timings are evidence, not just a successful percentile.
+        print("EMR_THROUGHPUT " + json.dumps({"count": count, **data}), flush=True)
+        self.assertEqual(len(data.get("results", [])), count, data)
+        self.assertEqual(data["summary"]["failures"], 0, data)
+        if count == 24:
+            # REQ-D874: the observed 9a1df0d baseline is 755.975 ms on the disposable
+            # Linux environment; 20% headroom is a receipt SLO, never a DB timeout.
+            baseline = float(os.environ.get("KIN_EMR_R3_P95_MS", "755.975"))
+            self.assertLessEqual(data["summary"]["p95_ms"], baseline * 1.20, data["summary"])
+        return data["results"]
+
     def test_b03_idempotency_and_concurrent_append(self):
         """Concurrent original events are all ordered once; the same event resent is the same receipt; another content
         under its ID is refused; one verified subject is one identity however many resolve it at once. The appends run
         at once in one server process (its connection pool), the deployment's one API per state volume."""
         start = self.driver("tail")["sequence"]
-        results = self.driver("append", {"count": 24, "concurrent": True})["results"]
+        results = self.measured_appends(24)
         self.assertEqual(len(results), 24)
         self.assertTrue(all("receipt" in r for r in results), [r for r in results if "receipt" not in r][:3])
         stored = [e for e in self.entries() if e["sequence"] > start]
@@ -349,6 +374,25 @@ class EmrBLedgerLive(unittest.TestCase):
         self.assertEqual(sorted(e["eventId"] for e in stored), sorted(r["eventId"] for r in results))
         self.chain_ok(stored)
         self.assertEqual(self.driver("recover")["recovered"], 0)
+
+        # Optional D874 diagnostic control, after the candidate latency samples.
+        # It uses separate databases/state and retains inner Prisma timeout errors
+        # that the original store surfaced only as SealUnavailable.
+        reference = os.environ.get("KIN_EMR_R4_PROFILE_IMAGE")
+        if reference:
+            current = type(self).image
+            try:
+                type(self).image = json.loads(run(["docker", "image", "inspect", reference]).stdout)[0]["Id"]
+                for count in (24, 48):
+                    db = self.start_db("r4-profile-" + str(count))
+                    self.provision(db)
+                    self.migrate(db)
+                    state = self.volume("r4-profile-" + str(count))
+                    data = self.driver("append", {"count": count, "concurrent": True, "measure": True}, db=db, volume=state)
+                    print("EMR_R4_PROFILE " + json.dumps({"count": count, **data}), flush=True)
+                    self.assertEqual(len(data.get("results", [])), count, data)
+            finally:
+                type(self).image = current
         # The same event again: the same receipt, no new entry; another content under the ID: refused, still one entry.
         event = self.auth_event()
         first = self.driver("append", {"events": [event]})["results"][0]
@@ -396,6 +440,16 @@ class EmrBLedgerLive(unittest.TestCase):
         self.assertEqual(fenced.get("notCommitted"), 0, fenced)
         self.assertIn("receipt", fenced, fenced)
         self.assertTrue(fenced.get("staleWriterRefused"), fenced)
+
+    def test_b03b_concurrent_48_receipts(self):
+        """L03b: 48 simultaneous viewers receive durable receipts without failures."""
+        start = self.driver("tail")["sequence"]
+        results = self.measured_appends(48)
+        stored = [e for e in self.entries() if e["sequence"] > start]
+        self.assertEqual([e["sequence"] for e in stored], list(range(start + 1, start + 49)))
+        self.assertEqual(sorted(e["eventId"] for e in stored), sorted(r["eventId"] for r in results))
+        self.chain_ok(stored)
+        self.assertEqual(self.driver("recover")["recovered"], 0)
 
     # ── L04 ──
     def test_b04_chain_tail_and_crash_recovery(self):

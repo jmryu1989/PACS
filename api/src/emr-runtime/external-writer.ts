@@ -22,7 +22,7 @@ export interface ExternalState {
   intents: Record<string, any>; slots: Record<string, any>; proofs: Record<string, any>;
   terminal: Record<string, any>; retired: Record<string, number>;
 }
-/** Called only by the lock-owning subprocess. Tests substitute the OS/FS transport, not the state transitions. */
+/** Called only by the lock-owning writer. Tests substitute OS/FS transport, not state transitions. */
 export function executeExternal(request: WriterRequest): any {
   const { directory, operation, value } = request;
   if (operation.startsWith('journal-')) {
@@ -61,17 +61,23 @@ export function executeExternal(request: WriterRequest): any {
   }
   if (hash(tail) !== hash(envelope.state.tail)) return fail(tail === null ? 'SealMissing' : 'SealTailMismatch');
   if (operation === 'read') return envelope.state;
-  if (operation !== 'compare-and-set') return fail('SealCorrupt');
-  if (value.before !== envelope.state.revision) return { changed: false };
-  const state: ExternalState = value.state;
-  if (state.revision !== value.before + 1 || state.generation < envelope.state.generation) return fail('SealCorrupt');
+  if (operation !== 'compare-and-set' && operation !== 'update') return fail('SealCorrupt');
+  const before = envelope.state.revision, generation = envelope.state.generation;
+  if (operation === 'compare-and-set' && value.before !== before) return { changed: false };
+  // A synchronous mutation needs no optimistic read/CAS gap or second lock acquisition.
+  // DB snapshot verification still uses compare-and-set and never holds this lock across SQL.
+  const state: ExternalState = operation === 'update' ? envelope.state : value.state;
+  const result = operation === 'update' ? value(state) : undefined;
+  if (operation === 'update' && hash(state) === envelope.digest) return { changed: false, result };
+  if (operation === 'update') state.revision++;
+  if (state.revision !== before + 1 || state.generation < generation) return fail('SealCorrupt');
   const publishing = hash(tail) !== hash(state.tail);
   atomic(file, { state, publishing, digest: hash(state) });
   if (publishing) {
     atomic(tailFile, state.tail);
     atomic(file, { state, publishing: false, digest: hash(state) });
   }
-  return { changed: true };
+  return { changed: true, result };
 }
 
 if (require.main === module) {

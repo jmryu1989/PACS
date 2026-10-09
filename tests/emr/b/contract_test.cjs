@@ -15,8 +15,10 @@ const os = require('node:os');
 const { createHash, randomUUID } = require('node:crypto');
 
 if (process.argv.includes('--emr-b-live')) {
-  liveDriver().then(result => { fs.writeSync(1, 'EMR_B_RESULT ' + JSON.stringify(result) + '\n'); process.exit(0); },
-    error => { fs.writeSync(1, 'EMR_B_RESULT ' + JSON.stringify({ error: errorCode(error), name: error?.name ?? null, problems: error?.problems ?? null }) + '\n'); process.exit(0); });
+  // A 48-viewer read-back can exceed the pipe's single-write capacity. Exit only
+  // after the complete JSON line drains, retaining every row for the assertions.
+  const send = result => process.stdout.write('EMR_B_RESULT ' + JSON.stringify(result) + '\n', () => process.exit(0));
+  liveDriver().then(send, error => send({ error: errorCode(error), name: error?.name ?? null, problems: error?.problems ?? null }));
 } else {
   contractSuite();
 }
@@ -117,7 +119,10 @@ async function liveDriver() {
     const flat = s => s === 'absent' ? 'absent' : { ...s.streams.viewing, streams: s.streams, sealedAt: s.sealedAt };
     if (operation === 'recover') { const r = await seal.recoverAtStart(); return { ...r, seal: flat(r.seal) }; }
     // A process that writes ledger facts is a started server: its start-up check runs first (B2 calls it before listen).
-    if (['append', 'business', 'writer-fence'].includes(operation)) await seal.recoverAtStart();
+    if (['append', 'business', 'writer-fence'].includes(operation)) {
+      if (args.measure && !seal.recoverAtStart) await seal.recover(); // Round-3 baseline uses the original startup API.
+      else await seal.recoverAtStart();
+    }
     if (operation === 'seal') return flat(seal.read());
     if (operation === 'journal-add') return journal.record(args.id, 'append-rolled-back', { eventId: args.id, cause: 'business-rollback' });
     if (operation === 'journal') return journal.all().map(record => ({ id: record.id, kind: record.kind, body: record.body }));
@@ -160,6 +165,13 @@ async function liveDriver() {
     if (operation === 'append') {
       // Standalone facts; `concurrent` appends at once from one process.
       const events = (args.events ?? []).length ? args.events : Array.from({ length: args.count ?? 1 }, () => authEvent(A, args.overrides ?? {}));
+      if (args.measure) {
+        const T = require('./throughput.cjs'), probe = T.instrument(prisma, store, seal, { headProbe: args.headProbe === true });
+        try {
+          const results = args.concurrent ? await Promise.all(events.map(e => probe.run(e))) : await sequential(events, e => probe.run(e));
+          return { results, summary: T.summary(results) };
+        } finally { probe.restore(); }
+      }
       const run = async event => { try { return { eventId: event.eventId, receipt: await store.append(event) }; } catch (error) { return { eventId: event.eventId, error: errorCode(error) }; } };
       const results = args.concurrent ? await Promise.all(events.map(run)) : await sequential(events, run);
       return { results, events };
@@ -1076,6 +1088,49 @@ function contractSuite() {
     assert.equal(state.state, 'legal-hold'); assert.equal(state.destroyNotBefore, null);
     claim.endedAt = '2027-01-01T00:00:00.000Z';
     assert.throws(() => inSnapshot(rows, () => D.reloadLegalHolds('native')), 'an end timestamp with no actual ending event is refused');
+  });
+
+  test('C19 committed receipt groups preserve every binding, ignore unrelated pending work and share durable publication; publication failure sends no receipt', async () => {
+    for (const fail of [false, true]) {
+      const w = await world();
+      try {
+        const sync = fs.fsyncSync; let intentSyncs = 0;
+        fs.fsyncSync = function (...args) { intentSyncs++; return sync.apply(this, args); };
+        const ids = Array.from({ length: 48 }, () => randomUUID());
+        try { await Promise.all(ids.map(id => w.seal.recordIntentAsync('viewing', id, randomUUID(), 'b'.repeat(64), randomUUID()))); }
+        finally { fs.fsyncSync = sync; }
+        assert(intentSyncs <= 2, `admitted intent group disk latency budget: ${intentSyncs} fsyncs`);
+        const intents = w.journal.coordinator.call('read').intents;
+        for (const id of ids) assert(intents['viewing:' + id], 'every group member is durable before staging SQL');
+        const provisional = [];
+        for (let n = 0; n < 48; n++) {
+          const tx = w.ledger.begin(), made = await w.store.appendInTransaction(tx, authEvent(A));
+          w.ledger.commit(tx); provisional.push(made);
+        }
+        const unrelated = randomUUID();
+        w.seal.recordIntent('viewing', unrelated, randomUUID(), 'a'.repeat(64), randomUUID());
+        const originalSync = fs.fsyncSync;
+        let syncs = 0;
+        fs.fsyncSync = function (...args) { syncs++; if (fail) throw Object.assign(new Error('synthetic unavailable disk'), { code: 'EIO' }); return originalSync.apply(this, args); };
+        let results;
+        try { results = await Promise.allSettled(provisional.map(p => w.store.confirm(p))); }
+        finally { fs.fsyncSync = originalSync; }
+        if (fail) {
+          assert(results.every(r => r.status === 'rejected'), 'no receipt from an undurable group');
+          await w.seal.recoverAtStart();
+          assert.equal(w.seal.read().streams.viewing.sequence, 48);
+        } else {
+          assert(results.every(r => r.status === 'fulfilled'), 'all committed viewers progress');
+          for (let n = 0; n < 48; n++) {
+            assert.equal(results[n].value.eventId, provisional[n].eventId);
+            assert(C.isDurableReceipt(results[n].value));
+          }
+          assert.equal(w.seal.read().streams.viewing.sequence, 48);
+          assert(w.journal.coordinator.call('read').intents['viewing:' + unrelated], 'unrelated intent is preserved');
+          assert(syncs <= 16, `receipt group disk latency budget: ${syncs} fsyncs for 48 committed viewers`);
+        }
+      } finally { w.cleanup(); }
+    }
   });
 
   test('C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused', () => {
