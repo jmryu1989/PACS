@@ -1,5 +1,5 @@
 # coding: utf-8
-"""TEST-H-MUTANTS: the EMR-H round 1 mutants M-H-01..M-H-09 (order section 8) and M-H-10..M-H-16 (extra).
+"""TEST-H-MUTANTS: M-H-01..09 (order), M-H-10..16 (extra), M-H-17..21 (H-R1-SOL-01/02).
 
 Each mutant breaks one rule of api/src/emr-retention (M-H-05: of the consumed A contract) in a COPY of api/src and
 requires tests/emr/h/contract_test.cjs to fail on the named case with that case's own assertion message.
@@ -113,6 +113,31 @@ MUTANTS = [
      "case": CASE_H05, "expect": "an expired signature payload is never kept as evidence",
      "old": "    default: return 'erase';",
      "new": "    case 'signature-payload': return 'retain-shared-evidence';\n    default: return 'erase';"},
+    {"id": "M-H-17", "title": "H-R1-SOL-01 CE-1: container contents are excluded from verification", "file": INVENTORY,
+     "case": "TEST-H-04/expired_restore_impossible: CE-1 expired identity evidence inside an empty-scope replacement refuses completion",
+     "expect": "expired identity evidence inside a replacement prevents completion",
+     "old": "  for (const copy of snapshot.copies) {\n    const still =",
+     "new": "  for (const copy of snapshot.copies.filter(c => c.containerId === null)) {\n    const still ="},
+    {"id": "M-H-18", "title": "H-R1-SOL-01 CE-3: container references are excluded from verification", "file": INVENTORY,
+     "case": "TEST-H-06/crash_resume: CE-3 a new incorporation inside an empty-scope replacement refuses completion",
+     "expect": "a new incorporation inside a replacement prevents completion",
+     "old": "  for (const copy of snapshot.copies) {\n    const still =",
+     "new": "  for (const copy of snapshot.copies.filter(c => c.containerId === null)) {\n    const still ="},
+    {"id": "M-H-19", "title": "H-R1-SOL-02 CE-2: replacement keys are never checked", "file": INVENTORY,
+     "case": "TEST-H-05/key_lifetime: CE-2 a past restore cannot replace missing current replacement keys",
+     "expect": "a missing current replacement key prevents completion despite a past restore",
+     "old": "    for (const c of candidates) for (const keyId of c.keyIds) {",
+     "new": "    for (const c of candidates) for (const keyId of []) {"},
+    {"id": "M-H-20", "title": "H-R1-SOL-02: a same-name key for another container is accepted", "file": INVENTORY,
+     "case": "TEST-H-05/key_lifetime: each current key copy must protect the replacement it names",
+     "expect": "a replacement key copy for another container prevents completion",
+     "old": "!copies.length || copies.some(k => !k.protects.includes(c.containerId)) ||",
+     "new": "!copies.length ||"},
+    {"id": "M-H-21", "title": "H-R1-SOL-02: loss of the required recovery key copy is accepted", "file": INVENTORY,
+     "case": "TEST-H-05/key_lifetime: a replacement preserves the required key copy at keybackup",
+     "expect": "a missing required replacement key copy prevents completion at keybackup",
+     "old": "old.keyLocationIds.some(locationId => !copies.some(k => k.locationId === locationId))",
+     "new": "false"},
 ]
 NOT_RUN = {
     "round-2 live": "M-H-01..M-H-09 also have live sides (real DB/Orthanc/backup/key stores, worker crash, terminal "

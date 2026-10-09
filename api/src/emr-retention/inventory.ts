@@ -215,7 +215,11 @@ function disposition(copy: Copy, set: ReadonlySet<string>, at: string, reasons: 
 }
 
 export interface PlannedItem { locationId: string; locationClass: LocationClass; copyId: string; content: CopyContent; containerId: string | null; disposition: ItemDisposition }
-export interface PlannedContainer { containerId: string; locationIds: readonly string[]; locationClasses: readonly LocationClass[]; disposition: 'erase-container' | 'replace-container' }
+export interface PlannedContainer {
+  containerId: string; locationIds: readonly string[]; locationClasses: readonly LocationClass[];
+  /** Replacement keys must preserve the old container's registered key/recovery locations. */
+  keyLocationIds: readonly string[]; disposition: 'erase-container' | 'replace-container';
+}
 export interface PlannedKey { keyId: string; locationIds: readonly string[]; locationClasses: readonly LocationClass[]; disposition: 'erase' | 'retain-live-key' }
 export interface ErasureAssessment {
   formatVersion: 1; at: string; recordIds: readonly string[];
@@ -261,7 +265,9 @@ export function assessErasure(units: readonly RetentionRecord[], graph: Retentio
     for (const c of facts) if (c.deletion === 'none') note(reasons, 'ImmutableLocation', c.locationId);
     // Live data or anything still retained inside makes the container a replacement, never a deletion.
     const live = facts.some(c => c.otherMembers > 0) || items.some(i => i.containerId === containerId && i.disposition !== 'erase');
-    return { containerId, locationIds: facts.map(c => c.locationId).sort(), locationClasses: [...new Set(facts.map(c => c.locationClass))].sort(),
+    const keyLocationIds = [...new Set(snapshot.copies.filter(c => c.content === 'key-material' &&
+      facts.some(f => f.keyIds.includes(c.keyId))).map(c => c.locationId))].sort();
+    return { containerId, locationIds: facts.map(c => c.locationId).sort(), locationClasses: [...new Set(facts.map(c => c.locationClass))].sort(), keyLocationIds,
       disposition: live ? 'replace-container' as const : 'erase-container' as const };
   });
   const removed = containers.map(c => c.containerId);
@@ -411,10 +417,17 @@ export function verifyErasure(input: ErasureAssessment, at: string): Readonly<Er
   const keptKeys = input.keys.filter(k => k.disposition !== 'erase').map(k => k.keyId);
   const snapshot = readSnapshot(freeze({ recordIds: input.recordIds, keyIds: input.keys.map(k => k.keyId), containerIds: planned, at: time }), reasons);
   const remaining: { locationId: string; id: string; kind: 'copy' | 'container' | 'key' }[] = [];
-  // A new incoming incorporation or retained original discovered after planning is still a blocker.
-  for (const copy of snapshot.copies.filter(c => c.containerId === null)) {
+  // Container membership cannot hide expired evidence or a new incoming incorporation listed inside it.
+  for (const copy of snapshot.copies) {
     const still = copy.content === 'key-material' ? erasedKeys.includes(copy.keyId) : disposition(copy, set, input.at, reasons) === 'erase';
-    if (still) { remaining.push({ locationId: copy.locationId, id: copy.copyId, kind: copy.content === 'key-material' ? 'key' : 'copy' });
+    if (still && copy.containerId !== null) {
+      const container = snapshot.containers.find(c => c.containerId === copy.containerId && c.locationId === copy.locationId);
+      if (container && !container.scopeMembers.some(m => set.has(m))) note(reasons, 'ContainerInconsistent', copy.locationId);
+      if (container && !planned.includes(container.containerId) && container.replaces.some(id => planned.includes(id)))
+        note(reasons, 'ExpiredDataInReplacement', copy.locationId);
+    }
+    // Whole-container remnants are reported once below so a resumed worker does not try per-object deletion.
+    if (still && copy.containerId === null) { remaining.push({ locationId: copy.locationId, id: copy.copyId, kind: copy.content === 'key-material' ? 'key' : 'copy' });
       note(reasons, copy.content === 'key-material' ? 'KeyRemains' : 'CopyRemains', copy.locationId); }
     if (copy.content === 'pending-original') note(reasons, 'PendingOriginalNotDurable', copy.locationId);
   }
@@ -432,6 +445,13 @@ export function verifyErasure(input: ErasureAssessment, at: string): Readonly<Er
     const present = snapshot.containers.some(c => c.containerId === old.containerId);
     const candidates = snapshot.containers.filter(c => c.replaces.includes(old.containerId) && !planned.includes(c.containerId));
     for (const c of candidates) if (c.keyIds.some(k => erasedKeys.includes(k))) note(reasons, 'ReplacementUsesErasedKey', c.locationId);
+    // A prior successful restore cannot prove that today's replacement key and its recovery copies still exist.
+    for (const c of candidates) for (const keyId of c.keyIds) {
+      const copies = snapshot.copies.filter(k => k.content === 'key-material' && k.keyId === keyId);
+      if (!copies.length || copies.some(k => !k.protects.includes(c.containerId)) ||
+          old.keyLocationIds.some(locationId => !copies.some(k => k.locationId === locationId)))
+        note(reasons, 'LiveKeyLost', c.locationId);
+    }
     for (const locationId of old.locationIds) {
       const here = candidates.filter(c => c.locationId === locationId);
       const good = here.length > 0 && here.every(c => restored(c.restoreCheck, input.at, time) &&

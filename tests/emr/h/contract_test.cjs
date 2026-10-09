@@ -480,6 +480,7 @@ function workerDone(report, options = {}) {
   if (options.replacement !== false) for (const where of options.replacementLocations ?? ['backup', 'offsite']) container(where, 'backup-new', options.replacementMembers ?? ['live-record-1'],
     { keyIds: options.replacementKeys ?? ['k-new'], replaces: ['backup-old'], restoreCheck: options.restoreCheck ?? restoredOk(shift(D.retentionDeadline(report), 60_000)) });
   if (options.keepOldKey !== true) for (const where of ['keys', 'keybackup']) remove(where, c => c.keyId === 'k-old');
+  if (options.replacement !== false) for (const keyId of options.replacementKeys ?? ['k-new']) key(keyId, ['backup-new']);
 }
 test('TEST-H-04/expired_restore_impossible: shared backups are replaced and a key that opens kept data is retained', () => {
   const { assessment } = sharedBackup('report-shared');
@@ -557,6 +558,117 @@ test('TEST-H-04/expired_restore_impossible: the completion record holds kinds, c
   for (const secret of secrets) assert(!text.includes(secret), 'the completion record carries no identifier or digest');
   assert.equal(summary.units, 1); assert.equal(summary.method, 'irreversible-permanent-deletion');
   assert(summary.locations.some(l => l.locationClass === 'backup-snapshot' && l.replacedContainers === 1));
+});
+
+// H-R1-SOL-01/02: the reviewer's CE-1..3 must refuse completion without changing any listed bytes or metadata.
+function verifyWithoutWrites(assessment, at) {
+  const before = clone({ copies: world.copies, containers: world.containers });
+  const result = H.verifyErasure(assessment, at);
+  assert.deepEqual({ copies: world.copies, containers: world.containers }, before, 'verification preserves the stored copies and manifests');
+  return result;
+}
+test('TEST-H-04/expired_restore_impossible: CE-1 expired identity evidence inside an empty-scope replacement refuses completion', () => {
+  const report = signedReport('ce-1-expired-evidence');
+  const evidence = where => ({ copyId: where + '/expired-registration', content: 'identity-evidence', registrationId: 'expired-registration',
+    dependents: [report.recordId], containerId: 'backup-old' });
+  for (const where of ['backup', 'offsite']) {
+    container(where, 'backup-old', [report], { others: 1, keyIds: ['k-old', 'k-shared'] });
+    put(where, evidence(where));
+  }
+  key('k-old', ['backup-old']); key('k-shared', ['backup-old', 'backup-other']);
+  const at = D.retentionDeadline(report), assessment = H.assessErasure([report], snapshotFor([report], at), at);
+  assert.equal(assessment.status, 'erasable');
+  workerDone(report);
+  for (const where of ['backup', 'offsite']) put(where, { ...evidence(where), containerId: 'backup-new' });
+  const result = verifyWithoutWrites(assessment, shift(at, 3_600_000));
+  assert.equal(result.status, 'failed', 'expired identity evidence inside a replacement prevents completion');
+  for (const locationId of ['backup', 'offsite']) {
+    assert(result.reasons.some(r => r.code === 'ExpiredDataInReplacement' && r.locationId === locationId));
+    assert(result.reasons.some(r => r.code === 'ContainerInconsistent' && r.locationId === locationId));
+  }
+  assert.throws(() => H.erasureSummary(result), { code: 'VerifiedErasureRequired' });
+  for (const where of ['backup', 'offsite']) remove(where, c => c.content === 'identity-evidence');
+  assert.equal(verifyWithoutWrites(assessment, shift(at, 3_600_000)).status, 'verified', 'removing expired evidence permits verification');
+});
+
+test('TEST-H-06/crash_resume: CE-3 a new incorporation inside an empty-scope replacement refuses completion', () => {
+  const report = signedReport('ce-3-new-incorporation'), at = D.retentionDeadline(report);
+  container('backup', 'backup-old', [report], { others: 1 });
+  const assessment = H.assessErasure([report], snapshotFor([report], at), at);
+  assert.equal(assessment.status, 'erasable');
+  workerDone(report, { replacementLocations: ['backup'], replacementKeys: [] });
+  const ref = put('backup', { copyId: 'incoming-reference', content: 'reference-entry', fromRecordId: 'live-outside', fromPartId: 'live-part',
+    toRecordId: report.recordId, toPartId: report.parts[0].partId, relation: 'incorporation', containerId: 'backup-new' });
+  const result = verifyWithoutWrites(assessment, shift(at, 3_600_000));
+  assert.equal(result.status, 'partial', 'a new incorporation inside a replacement prevents completion');
+  assert(result.reasons.some(r => r.code === 'LiveIncorporator' && r.locationId === 'backup'));
+  assert.throws(() => H.erasureSummary(result), { code: 'VerifiedErasureRequired' });
+  ref.relation = 'navigation';
+  assert.equal(verifyWithoutWrites(assessment, shift(at, 3_600_000)).status, 'verified', 'a navigation reference does not retain the expired record');
+});
+
+test('TEST-H-05/key_lifetime: CE-2 a past restore cannot replace missing current replacement keys', () => {
+  const { report, at, assessment } = sharedBackup('ce-2-new-key');
+  workerDone(report);
+  for (const where of ['keys', 'keybackup']) remove(where, c => c.keyId === 'k-new');
+  const result = verifyWithoutWrites(assessment, shift(at, 3_600_000));
+  assert.equal(result.status, 'failed', 'a missing current replacement key prevents completion despite a past restore');
+  assert(reasonCodes(result).includes('LiveKeyLost'));
+  assert.throws(() => H.erasureSummary(result), { code: 'VerifiedErasureRequired' });
+  key('k-new', ['backup-new']);
+  const restored = verifyWithoutWrites(assessment, shift(at, 3_600_000));
+  assert.equal(restored.status, 'verified');
+  assert.equal(H.erasureSummary(restored).units, 1, 'current keys and recovery copies allow completion');
+});
+
+for (const missing of ['keys', 'keybackup']) {
+  test('TEST-H-05/key_lifetime: a replacement preserves the required key copy at ' + missing, () => {
+    const { report, at, assessment } = sharedBackup('new-key-copy-' + missing);
+    workerDone(report);
+    remove(missing, c => c.keyId === 'k-new');
+    const result = verifyWithoutWrites(assessment, shift(at, 3_600_000));
+    assert.equal(result.status, 'failed', 'a missing required replacement key copy prevents completion at ' + missing);
+    assert(reasonCodes(result).includes('LiveKeyLost'));
+    assert.throws(() => H.erasureSummary(result), { code: 'VerifiedErasureRequired' });
+    key('k-new', ['backup-new'], [missing]);
+    assert.equal(verifyWithoutWrites(assessment, shift(at, 3_600_000)).status, 'verified');
+  });
+}
+
+test('TEST-H-05/key_lifetime: each current key copy must protect the replacement it names', () => {
+  const { report, at, assessment } = sharedBackup('new-key-protection');
+  workerDone(report);
+  const recovery = world.copies.get('keybackup').find(c => c.keyId === 'k-new');
+  recovery.protects = ['unrelated-backup'];
+  const result = verifyWithoutWrites(assessment, shift(at, 3_600_000));
+  assert.equal(result.status, 'failed', 'a replacement key copy for another container prevents completion');
+  assert(reasonCodes(result).includes('LiveKeyLost'));
+  assert.throws(() => H.erasureSummary(result), { code: 'VerifiedErasureRequired' });
+  recovery.protects = ['backup-new'];
+  assert.equal(verifyWithoutWrites(assessment, shift(at, 3_600_000)).status, 'verified');
+});
+
+test('TEST-H-05/key_lifetime: every declared replacement key must exist', () => {
+  const { report, at, assessment } = sharedBackup('new-key-multiple');
+  workerDone(report, { replacementKeys: ['k-new', 'k-new-second'] });
+  for (const where of ['keys', 'keybackup']) remove(where, c => c.keyId === 'k-new-second');
+  const result = verifyWithoutWrites(assessment, shift(at, 3_600_000));
+  assert.equal(result.status, 'failed', 'one available key cannot cover a missing second replacement key');
+  assert.throws(() => H.erasureSummary(result), { code: 'VerifiedErasureRequired' });
+  key('k-new-second', ['backup-new']);
+  assert.equal(verifyWithoutWrites(assessment, shift(at, 3_600_000)).status, 'verified');
+});
+
+test('TEST-H-05/key_lifetime: a replacement can retain shared identity evidence and the viewing remainder', () => {
+  const { report, at, assessment } = sharedBackup('replacement-shared-evidence');
+  workerDone(report);
+  put('backup', { copyId: 'shared-identity', content: 'identity-evidence', registrationId: 'registration-shared',
+    dependents: [report.recordId, 'live-record-1'], containerId: 'backup-new' });
+  put('backup', { copyId: 'recent-history', content: 'access-entry', eventId: 'recent-change', stream: 'change-history', occurredAt: shift(at, -DAY),
+    action: 'approve-sign', result: 'succeeded', targets: [{ kind: 'report-version', recordId: report.recordId }], containerId: 'backup-new' });
+  const result = verifyWithoutWrites(assessment, shift(at, 3_600_000));
+  assert.equal(result.status, 'verified', 'retained shared evidence and the viewing remainder are allowed inside a replacement');
+  assert.equal(H.erasureSummary(result).units, 1);
 });
 
 // ---------------------------------------------------------------------------------------------------------------
