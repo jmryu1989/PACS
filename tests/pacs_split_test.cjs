@@ -1,5 +1,7 @@
 'use strict';
 // D73: hashes assert the explicitly ordered move equivalence, not business rules.
+// Byte pins (AGENTS §1-B.14): the service and declaration hashes are taken over the LF form of the text, so the same
+// commit hashes alike in a Windows autocrlf (CRLF) checkout and on the Linux CI (LF); only the content is pinned.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
