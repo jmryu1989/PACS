@@ -1,5 +1,6 @@
 'use strict';
-/* TEST-S9-U0b-MODULES — the PACS concern modules of api/src/pacs/ run directly (S9-U0b round 1, order §6 step 2, §8).
+/* TEST-S9-U0b-MODULES — the PACS concern modules of api/src/pacs/ run directly (S9-U0b round 1, order §6 step 2, §8), and
+ * since round 2 also through the PacsService facade that owns them (SPLIT-21..23).
  *
  * What is bound: behaviour and permission contracts (AGENTS §1, §1-B / D73) — who may read or write a study, what a refusal
  * answers (HTTP status, `code`), what is stored, which history rows are appended and which audit rows are written, and that
@@ -7,7 +8,7 @@
  * No byte pins.
  *
  * How: each concern is a plain object (PacsService builds and owns them; they are not Nest providers). The cases build the
- * same graph the facade will build, over test-owned value providers: an in-memory Prisma double with transactional
+ * same graph the facade builds, or the facade itself, over test-owned value providers: an in-memory Prisma double with transactional
  * rollback that records which client (root or transaction) every write used, StudyAccess / Orthanc / Keycloak / Findings
  * doubles. No Docker, no database, no stack. The compiled service suites over a real PostgreSQL remain the authority for
  * SQL and snapshot semantics; this file proves the moved behaviour of each concern on its own.
@@ -20,6 +21,8 @@
  *   REQ-U0B-QUERY    -> RISK-IDENTITY-LEAK      -> SPLIT-02, SPLIT-12, SPLIT-13, SPLIT-16 (M13, M14)
  *   REQ-U0B-EVIDENCE -> RISK-HIDDEN-CITATION    -> SPLIT-14, SPLIT-15 (M16, M17, M18)
  *   REQ-U0B-NOTE-GW  -> RISK-DUPLICATE-AUDIT    -> SPLIT-17, SPLIT-18 (M19, M20)
+ *   REQ-U0B-ACCESS   -> RISK-TENANT-ROLE        -> SPLIT-21 (clinician-only narrowing of the DICOMweb statistics gate)
+ *   REQ-U0B-STRUCTURE -> RISK-LOST-WIRING       -> SPLIT-22, SPLIT-23 (the facade's start, forwarding and refusals)
  *   construction: SPLIT-01 (constructors store references only: no IO, no timers, no seeding).
  *
  * Runs as `node --test tests/pacs_split_modules_test.cjs` (the installed TypeScript compiles api/src through
@@ -51,6 +54,7 @@ const { PacsReportEvidence } = require('/app/dist/pacs/report-evidence');
 const { PacsReportDraft } = require('/app/dist/pacs/report-draft');
 const { PacsReportCommit } = require('/app/dist/pacs/report-commit');
 const { STRUCTURE_CATALOG } = require('/app/dist/report-structure');
+const { PacsService } = require('/app/dist/pacs.service');
 
 // ── the Prisma double: tables in memory, transactions on a copy, every write recorded with its client ──
 
@@ -312,6 +316,8 @@ function world() {
   const commit = new PacsReportCommit(keycloak, sa, evidence, draft);
   const w = { db, sa, orthanc, keycloak, findings, access, institutions, preferences, filters, audit, metrics, worklist, gateway,
     studyState, techNote, hold, clinician, evidence, draft, commit };
+  /** The PacsService facade over the same providers: it builds and owns its own concern graph. */
+  w.facade = () => new PacsService(prisma, orthanc, keycloak, sa, findings);
   w.study = (fields = {}) => db.seed('studyState', { uid: uidOf(), institutionId: INST_A, ss: 'Verified', ...fields });
   w.audits = (action) => db.rows('auditLog').filter(row => !action || row.action === action);
   /** Starts the institutions concern as the facade's onModuleInit does: two synthetic institutions beside the seeds. */
@@ -818,4 +824,62 @@ test('SPLIT-20 metrics are administrator-only and refused to a restricted accoun
   const own = w.study();
   assert.deepEqual(await w.audit.audits(own.uid, 10, RAD_A), []);
   await refused(() => w.audit.audits(own.uid, 10, RAD_B), 404);
+});
+
+// ── SPLIT-21 the clinician-only narrowing of the DICOMweb statistics gate (replaces clinician_policy test_13's statement pin) ──
+
+test('SPLIT-21 the DICOMweb statistics gate refuses a clinician-only account; a clinician with a legacy role and a legacy role pass', async () => {
+  const w = world();
+  for (const [via, gate] of [['concern', w.gateway], ['facade', w.facade()]]) {
+    for (const method of ['GET', 'HEAD']) {
+      await refused(() => gate.authzDicom('/statistics', method, CLIN_A), 403);
+      for (const roles of [['clinician', 'radiologist'], ['clinician', 'technician'], ['clinician', 'admin'], ['radiologist'], ['technician'], ['admin']])
+        assert.equal(await gate.authzDicom('/statistics', method, { ...CLIN_A, roles }), undefined, `${via} ${method} ${roles.join('+')}`);
+    }
+  }
+  // a restricted study scope closes the same server-wide counter for every role
+  w.sa.restricted = true;
+  await refused(() => w.facade().authzDicom('/statistics', 'GET', RAD_A), 403);
+});
+
+// ── SPLIT-22/23 the facade: its start, its forwarding and its refusals over one store ──
+
+test('SPLIT-22 the facade starts its institutions concern and each public call answers what its concern does over one store', async () => {
+  const w = world();
+  w.db.seed('institution', { id: INST_A, name: 'SYN A', type: 'hospital', dicomNames: 'SYN A HOSPITAL' });
+  const facade = w.facade();
+  assert.equal(facade.institutionName(INST_A), '(미배정)', 'nothing is loaded before the start');
+  const log = console.log; console.log = () => {};
+  try { await facade.onModuleInit(); } finally { console.log = log; }
+  assert.equal(facade.institutionName(INST_A), 'SYN A');
+  const s = w.study();
+  w.orthanc.rows = [qido(s.uid, 'SYN A HOSPITAL')];
+  assert.deepEqual((await facade.listStudies(RAD_A)).studies.map(r => [r.uid, r.institutionName]), [[s.uid, 'SYN A']]);
+  assert.deepEqual(await facade.hold(s.uid, RAD_A), { holder: RAD_A.actor, mine: true, conflict: false });
+  const saved = await facade.commitReport(s.uid, commitBody(RAD_A, 'save', s.draftEpoch, 0, 0, { findings: 'via facade' }), RAD_A, null);
+  assert.deepEqual([saved.state.rs, saved.state.holder], ['T', null], 'a commit releases the hold');
+  assert.deepEqual((await facade.versions(s.uid, RAD_A)).map(v => [v.version, v.action, v.findings]), [[1, 'save', 'via facade']]);
+  const draft = await facade.putReport(s.uid, draftBody(RAD_A, s.draftEpoch, 1, { findings: 'next', baseVersion: 1 }), RAD_A, null);
+  assert.equal(draft.revision, `${s.draftEpoch}:2`);
+  assert.equal((await facade.readDraft(s.uid, RAD_A)).snapshot.findings, 'next');
+  assert.equal((await facade.saveTechNote(s.uid, { baseVersion: 0, text: 'facade note', reason: '', attemptId: randomUUID() }, TECH_A)).note.version, 1);
+  assert.equal(await facade.clinicianViewerHead(s.uid, CLIN_A), null, 'a saved (not approved) head is not final');
+  assert.deepEqual(w.audits().map(a => a.action), ['report.hold', 'report.save', 'report.draft', 'tech-note.revise']);
+  assert.deepEqual(w.db.writesBy('root').map(x => x.model).filter(m => m !== 'institution' && m !== 'order'), [],
+    'outside the start seed every write went through a transaction');
+});
+
+test('SPLIT-23 the facade passes every refusal through unchanged: status, code, and nothing written', async () => {
+  const w = world();
+  const facade = w.facade(), s = w.study();
+  await refused(() => facade.commitReport(s.uid, commitBody(TECH_A, 'save', s.draftEpoch, 0, 0), TECH_A, null), 403);
+  await refused(() => facade.patchState(s.uid, { rs: 'A' }, TECH_A), 400);
+  await refused(() => facade.putReport(s.uid, draftBody(RAD_A, randomUUID(), 0, { findings: 'x' }), RAD_A, null), 409, 'REPORT_DRAFT_CONFLICT');
+  await refused(() => facade.audits(s.uid, 10, RAD_B), 404);
+  await refused(() => facade.hold(s.uid, ADMIN_B), 404);
+  await refused(() => facade.adminMetrics(RAD_A), 403);
+  await refused(() => facade.announceStudy('1.2.3', '', ADMIN_A), 403);
+  await refused(() => facade.clinicianStudies(RAD_A), 403);
+  await refused(() => facade.saveTechNote(s.uid, { baseVersion: 0, text: 'x', reason: '' }, RAD_A), 403);
+  assert.deepEqual(w.db.writes, []);
 });

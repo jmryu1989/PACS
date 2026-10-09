@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "phase": "relist",
+  "phase": "split",
   "base_sha": "6ff5ecf76ccf31effa1fb766e809269c6f32e1e8",
   "preparation_sha": "04e50ab4524d59b82444fbe765034c9fa759fa30",
   "module_map_sha256": "4790aa21f12370c7de777f5c7a29b87da2487dd8869ef965fc92a080043b5755",
@@ -40,6 +40,9 @@
       "baseline": {
         "text_sha256": "dc0c9081a8a7af863d8a1248783e02b51e610c5bdc3a174cc58ac06e043def2f",
         "sql": []
+      },
+      "correspondence": {
+        "constructor_wiring": true
       }
     },
     {
@@ -49,14 +52,17 @@
       "kind": "PropertyDeclaration",
       "target": "api/src/pacs/institutions.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/institutions.ts",
+        "owner": "PacsInstitutions",
         "name": "institutions",
         "kind": "PropertyDeclaration"
       },
       "baseline": {
         "text_sha256": "40f4d9eeceacb1fc315db3cda0e6ca81163de22c122fe0607b79024ae6b7a65c",
         "sql": []
+      },
+      "correspondence": {
+        "private_dropped": true
       }
     },
     {
@@ -66,8 +72,8 @@
       "kind": "PropertyDeclaration",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-evidence.ts",
+        "owner": "PacsReportEvidence",
         "name": "structureCatalogValue",
         "kind": "PropertyDeclaration"
       },
@@ -83,8 +89,8 @@
       "kind": "GetAccessor",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-evidence.ts",
+        "owner": "PacsReportEvidence",
         "name": "structureCatalog",
         "kind": "GetAccessor"
       },
@@ -100,8 +106,8 @@
       "kind": "SetAccessor",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-evidence.ts",
+        "owner": "PacsReportEvidence",
         "name": "structureCatalog",
         "kind": "SetAccessor"
       },
@@ -117,8 +123,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/institutions.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/institutions.ts",
+        "owner": "PacsInstitutions",
         "name": "onModuleInit",
         "kind": "MethodDeclaration"
       },
@@ -134,8 +140,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/institutions.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/institutions.ts",
+        "owner": "PacsInstitutions",
         "name": "reloadInstitutions",
         "kind": "MethodDeclaration"
       },
@@ -151,14 +157,17 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/institutions.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/institutions.ts",
+        "owner": "PacsInstitutions",
         "name": "resolveInstitution",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "c1b46fd64172999b14d99cf1865fde5a83a2fff26e0ae25daafbf3e3db40094e",
         "sql": []
+      },
+      "correspondence": {
+        "private_dropped": true
       }
     },
     {
@@ -168,14 +177,17 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/institutions.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/institutions.ts",
+        "owner": "PacsInstitutions",
         "name": "instName",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "40ebd904aea3ea686d663d0d372ec31c21edf37c90f9ca5273b38a2f3b0777a0",
         "sql": []
+      },
+      "correspondence": {
+        "private_dropped": true
       }
     },
     {
@@ -185,8 +197,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/institutions.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/institutions.ts",
+        "owner": "PacsInstitutions",
         "name": "institutionName",
         "kind": "MethodDeclaration"
       },
@@ -202,14 +214,17 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/audit.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/audit.ts",
+        "owner": "PacsAudit",
         "name": "audit",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "0f1249cc1f6209566e6e3f21f9c5cd0f65d5d2322d3709fedef90d944761d59c",
         "sql": []
+      },
+      "correspondence": {
+        "private_dropped": true
       }
     },
     {
@@ -219,14 +234,17 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/access.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/access.ts",
+        "owner": "PacsAccess",
         "name": "visible",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "e35cdf913acf56ef2a1c354719316800aa00f38c2d27e51f3ff06ba586146215",
         "sql": []
+      },
+      "correspondence": {
+        "private_dropped": true
       }
     },
     {
@@ -236,8 +254,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/institutions.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/institutions.ts",
+        "owner": "PacsInstitutions",
         "name": "unassigned",
         "kind": "MethodDeclaration"
       },
@@ -253,14 +271,28 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/institutions.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/institutions.ts",
+        "owner": "PacsInstitutions",
         "name": "assignInstitution",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "3ef1a9bee903ba2d609b89a85435eb30eb3604ec7e829885788d090d8971fe0c",
         "sql": []
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "access",
+            "member": "myDraft",
+            "count": 1
+          },
+          {
+            "field": "access",
+            "member": "scopeWrite",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -270,8 +302,8 @@
       "kind": "PropertyDeclaration",
       "target": "api/src/pacs/metrics.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/metrics.ts",
+        "owner": "PacsMetrics",
         "name": "metricsTimeoutMs",
         "kind": "PropertyDeclaration"
       },
@@ -287,8 +319,8 @@
       "kind": "PropertyDeclaration",
       "target": "api/src/pacs/metrics.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/metrics.ts",
+        "owner": "PacsMetrics",
         "name": "metricsClock",
         "kind": "PropertyDeclaration"
       },
@@ -304,8 +336,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/metrics.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/metrics.ts",
+        "owner": "PacsMetrics",
         "name": "adminMetrics",
         "kind": "MethodDeclaration"
       },
@@ -321,8 +353,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/metrics.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/metrics.ts",
+        "owner": "PacsMetrics",
         "name": "metricsStorage",
         "kind": "MethodDeclaration"
       },
@@ -338,8 +370,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/metrics.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/metrics.ts",
+        "owner": "PacsMetrics",
         "name": "metricsStudies",
         "kind": "MethodDeclaration"
       },
@@ -390,6 +422,15 @@
             ]
           }
         ]
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "access",
+            "member": "visible",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -399,8 +440,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/metrics.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/metrics.ts",
+        "owner": "PacsMetrics",
         "name": "metricsScopeHeld",
         "kind": "MethodDeclaration"
       },
@@ -416,14 +457,23 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/dicom-gateway.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/dicom-gateway.ts",
+        "owner": "PacsDicomGateway",
         "name": "authzDicom",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "7d03f36a64fa189b0f7a2d5a0900d67663725318621789abd79076f9a55a85aa",
         "sql": []
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "access",
+            "member": "visible",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -433,14 +483,28 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/dicom-gateway.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/dicom-gateway.ts",
+        "owner": "PacsDicomGateway",
         "name": "announceStudy",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "ca534d2ef7943092034c58777952984dae896467399a2c52bc05b95233646473",
         "sql": []
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "institutions",
+            "member": "instName",
+            "count": 1
+          },
+          {
+            "field": "institutions",
+            "member": "resolveInstitution",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -450,8 +514,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/dicom-gateway.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/dicom-gateway.ts",
+        "owner": "PacsDicomGateway",
         "name": "gatewayReceipt",
         "kind": "MethodDeclaration"
       },
@@ -505,8 +569,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/dicom-gateway.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/dicom-gateway.ts",
+        "owner": "PacsDicomGateway",
         "name": "requestGatewayRetry",
         "kind": "MethodDeclaration"
       },
@@ -551,6 +615,15 @@
             ]
           }
         ]
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "access",
+            "member": "gate",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -560,8 +633,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/dicom-gateway.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/dicom-gateway.ts",
+        "owner": "PacsDicomGateway",
         "name": "gatewayRetryRequests",
         "kind": "MethodDeclaration"
       },
@@ -637,14 +710,23 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/dicom-gateway.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/dicom-gateway.ts",
+        "owner": "PacsDicomGateway",
         "name": "dicomLookup",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "c2d9fe27daf0ce729b7f7ea4cea633afaff359995727607806929556169a575f",
         "sql": []
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "access",
+            "member": "visible",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -654,14 +736,17 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/access.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/access.ts",
+        "owner": "PacsAccess",
         "name": "myDraft",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "2285f27cc70e074d27b9183280332f5280634537583168201019d28053210263",
         "sql": []
+      },
+      "correspondence": {
+        "private_dropped": true
       }
     },
     {
@@ -671,8 +756,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/access.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/access.ts",
+        "owner": "PacsAccess",
         "name": "scopeWrite",
         "kind": "MethodDeclaration"
       },
@@ -690,6 +775,9 @@
             "expressions": []
           }
         ]
+      },
+      "correspondence": {
+        "private_dropped": true
       }
     },
     {
@@ -699,14 +787,17 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/access.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/access.ts",
+        "owner": "PacsAccess",
         "name": "gate",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "fe30f4b141e319fdec64b348a3de7570b574e2cdbbb88d2b7e5532faace3c00d",
         "sql": []
+      },
+      "correspondence": {
+        "private_dropped": true
       }
     },
     {
@@ -716,8 +807,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/tech-note.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/tech-note.ts",
+        "owner": "PacsTechNote",
         "name": "noteScope",
         "kind": "MethodDeclaration"
       },
@@ -779,6 +870,15 @@
             ]
           }
         ]
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "access",
+            "member": "visible",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -788,8 +888,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/tech-note.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/tech-note.ts",
+        "owner": "PacsTechNote",
         "name": "techNote",
         "kind": "MethodDeclaration"
       },
@@ -816,8 +916,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/tech-note.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/tech-note.ts",
+        "owner": "PacsTechNote",
         "name": "saveTechNote",
         "kind": "MethodDeclaration"
       },
@@ -844,8 +944,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/worklist.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/worklist.ts",
+        "owner": "PacsWorklist",
         "name": "listStudies",
         "kind": "MethodDeclaration"
       },
@@ -921,6 +1021,30 @@
             ]
           }
         ]
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "access",
+            "member": "visible",
+            "count": 3
+          },
+          {
+            "field": "audit",
+            "member": "audit",
+            "count": 1
+          },
+          {
+            "field": "institutions",
+            "member": "instName",
+            "count": 2
+          },
+          {
+            "field": "institutions",
+            "member": "resolveInstitution",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -930,8 +1054,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/worklist.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/worklist.ts",
+        "owner": "PacsWorklist",
         "name": "notObserved",
         "kind": "MethodDeclaration"
       },
@@ -947,8 +1071,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/worklist.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/worklist.ts",
+        "owner": "PacsWorklist",
         "name": "orderSide",
         "kind": "MethodDeclaration"
       },
@@ -964,8 +1088,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/worklist.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/worklist.ts",
+        "owner": "PacsWorklist",
         "name": "orderReconciliation",
         "kind": "MethodDeclaration"
       },
@@ -981,14 +1105,33 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/worklist.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/worklist.ts",
+        "owner": "PacsWorklist",
         "name": "bootstrap",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "5a82e7b2baa3294262d71c5efe6868e461555de50ed1d95c2833fed8ba5b105f",
         "sql": []
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "institutions",
+            "member": "institutions",
+            "count": 1
+          },
+          {
+            "field": "institutions",
+            "member": "instName",
+            "count": 1
+          },
+          {
+            "field": "preferences",
+            "member": "prefs",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -998,8 +1141,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "prefs",
         "kind": "MethodDeclaration"
       },
@@ -1015,8 +1158,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "workspaceOwner",
         "kind": "MethodDeclaration"
       },
@@ -1032,8 +1175,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "workspaceValue",
         "kind": "MethodDeclaration"
       },
@@ -1049,8 +1192,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "readingPreferencesResult",
         "kind": "MethodDeclaration"
       },
@@ -1066,8 +1209,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "readingPreferences",
         "kind": "MethodDeclaration"
       },
@@ -1083,8 +1226,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "saveReadingPreferences",
         "kind": "MethodDeclaration"
       },
@@ -1100,8 +1243,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "siteOwner",
         "kind": "MethodDeclaration"
       },
@@ -1117,8 +1260,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "hangingProtocolResult",
         "kind": "MethodDeclaration"
       },
@@ -1134,8 +1277,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "hangingProtocols",
         "kind": "MethodDeclaration"
       },
@@ -1151,8 +1294,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "hangingProtocolRequest",
         "kind": "MethodDeclaration"
       },
@@ -1168,8 +1311,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "writeHangingProtocol",
         "kind": "MethodDeclaration"
       },
@@ -1185,8 +1328,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "saveHangingProtocols",
         "kind": "MethodDeclaration"
       },
@@ -1202,8 +1345,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "siteHangingProtocolResult",
         "kind": "MethodDeclaration"
       },
@@ -1219,8 +1362,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "siteHangingProtocols",
         "kind": "MethodDeclaration"
       },
@@ -1236,8 +1379,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "saveSiteHangingProtocols",
         "kind": "MethodDeclaration"
       },
@@ -1253,8 +1396,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "validShortcutBindings",
         "kind": "MethodDeclaration"
       },
@@ -1270,8 +1413,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "shortcutPreferencesResult",
         "kind": "MethodDeclaration"
       },
@@ -1287,8 +1430,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "workspaceShortcuts",
         "kind": "MethodDeclaration"
       },
@@ -1304,8 +1447,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "saveWorkspaceShortcuts",
         "kind": "MethodDeclaration"
       },
@@ -1321,8 +1464,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "appearanceResult",
         "kind": "MethodDeclaration"
       },
@@ -1338,8 +1481,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "readingAppearance",
         "kind": "MethodDeclaration"
       },
@@ -1355,8 +1498,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "saveReadingAppearance",
         "kind": "MethodDeclaration"
       },
@@ -1372,8 +1515,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "workspaceResult",
         "kind": "MethodDeclaration"
       },
@@ -1389,8 +1532,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "workspaceLayout",
         "kind": "MethodDeclaration"
       },
@@ -1406,8 +1549,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "writeWorkspaceLayout",
         "kind": "MethodDeclaration"
       },
@@ -1423,8 +1566,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "columnsResult",
         "kind": "MethodDeclaration"
       },
@@ -1440,8 +1583,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "worklistColumns",
         "kind": "MethodDeclaration"
       },
@@ -1457,8 +1600,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "writeWorklistColumns",
         "kind": "MethodDeclaration"
       },
@@ -1474,8 +1617,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/filters.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/filters.ts",
+        "owner": "PacsFilters",
         "name": "saveFilter",
         "kind": "MethodDeclaration"
       },
@@ -1491,8 +1634,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/filters.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/filters.ts",
+        "owner": "PacsFilters",
         "name": "setDefaultFilter",
         "kind": "MethodDeclaration"
       },
@@ -1508,8 +1651,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/filters.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/filters.ts",
+        "owner": "PacsFilters",
         "name": "deleteFilter",
         "kind": "MethodDeclaration"
       },
@@ -1525,8 +1668,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/filters.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/filters.ts",
+        "owner": "PacsFilters",
         "name": "lockFilterCollection",
         "kind": "MethodDeclaration"
       },
@@ -1542,8 +1685,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/filters.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/filters.ts",
+        "owner": "PacsFilters",
         "name": "filterCollectionOwner",
         "kind": "MethodDeclaration"
       },
@@ -1559,8 +1702,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/filters.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/filters.ts",
+        "owner": "PacsFilters",
         "name": "filterCollectionSnapshot",
         "kind": "MethodDeclaration"
       },
@@ -1576,8 +1719,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/filters.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/filters.ts",
+        "owner": "PacsFilters",
         "name": "readFilterFolders",
         "kind": "MethodDeclaration"
       },
@@ -1593,8 +1736,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/filters.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/filters.ts",
+        "owner": "PacsFilters",
         "name": "writeFilterFolders",
         "kind": "MethodDeclaration"
       },
@@ -1610,8 +1753,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/filters.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/filters.ts",
+        "owner": "PacsFilters",
         "name": "lockSharedFilters",
         "kind": "MethodDeclaration"
       },
@@ -1627,8 +1770,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/filters.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/filters.ts",
+        "owner": "PacsFilters",
         "name": "sharedFilterSnapshot",
         "kind": "MethodDeclaration"
       },
@@ -1644,8 +1787,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/filters.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/filters.ts",
+        "owner": "PacsFilters",
         "name": "readSharedFilters",
         "kind": "MethodDeclaration"
       },
@@ -1661,8 +1804,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/filters.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/filters.ts",
+        "owner": "PacsFilters",
         "name": "sharedFilterRequest",
         "kind": "MethodDeclaration"
       },
@@ -1678,8 +1821,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/filters.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/filters.ts",
+        "owner": "PacsFilters",
         "name": "writeSharedFilters",
         "kind": "MethodDeclaration"
       },
@@ -1695,8 +1838,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/filters.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/filters.ts",
+        "owner": "PacsFilters",
         "name": "copySharedFilters",
         "kind": "MethodDeclaration"
       },
@@ -1712,8 +1855,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "nextTemplateOrd",
         "kind": "MethodDeclaration"
       },
@@ -1729,8 +1872,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "saveTemplate",
         "kind": "MethodDeclaration"
       },
@@ -1746,8 +1889,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/preferences.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/preferences.ts",
+        "owner": "PacsPreferences",
         "name": "deleteTemplate",
         "kind": "MethodDeclaration"
       },
@@ -1763,14 +1906,38 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/study-state.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/study-state.ts",
+        "owner": "PacsStudyState",
         "name": "patchState",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "72833c50b00df72677725057c850982c8062b8f2ddff3ea0164b1e774f6501be",
         "sql": []
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "access",
+            "member": "gate",
+            "count": 1
+          },
+          {
+            "field": "access",
+            "member": "myDraft",
+            "count": 1
+          },
+          {
+            "field": "access",
+            "member": "scopeWrite",
+            "count": 1
+          },
+          {
+            "field": "institutions",
+            "member": "institutions",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -1780,8 +1947,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-draft.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-draft.ts",
+        "owner": "PacsReportDraft",
         "name": "reportDraftRules",
         "kind": "MethodDeclaration"
       },
@@ -1797,14 +1964,23 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-draft.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-draft.ts",
+        "owner": "PacsReportDraft",
         "name": "reportDraftGate",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "1ce2f4ad20d25263d215869b3a792e7ded82f0f1e9bdbe3f69577382c29eadef",
         "sql": []
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "access",
+            "member": "gate",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -1814,8 +1990,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-draft.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-draft.ts",
+        "owner": "PacsReportDraft",
         "name": "draftTransaction",
         "kind": "MethodDeclaration"
       },
@@ -1887,6 +2063,16 @@
             ]
           }
         ]
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "access",
+            "member": "visible",
+            "count": 1
+          }
+        ],
+        "private_dropped": true
       }
     },
     {
@@ -1896,8 +2082,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-draft.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-draft.ts",
+        "owner": "PacsReportDraft",
         "name": "ownDraft",
         "kind": "MethodDeclaration"
       },
@@ -1948,6 +2134,9 @@
             ]
           }
         ]
+      },
+      "correspondence": {
+        "private_dropped": true
       }
     },
     {
@@ -1957,14 +2146,17 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-draft.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-draft.ts",
+        "owner": "PacsReportDraft",
         "name": "storeDraft",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "d41af1996b0ce6727ce59bcb151613b7e28208620674462aaee6145f4472d9b8",
         "sql": []
+      },
+      "correspondence": {
+        "private_dropped": true
       }
     },
     {
@@ -1974,14 +2166,28 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-draft.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-draft.ts",
+        "owner": "PacsReportDraft",
         "name": "readDraft",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "b46d2df66acc98d47a560b0c5d564e1e34d04bd45455d4a87fc938685a4d3ec0",
         "sql": []
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "access",
+            "member": "gate",
+            "count": 1
+          },
+          {
+            "field": "access",
+            "member": "myDraft",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -1991,14 +2197,23 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-draft.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-draft.ts",
+        "owner": "PacsReportDraft",
         "name": "dictationGate",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "00afd8539a3baa0a58cb6215b45e8b4ccad14b01ac40cc93a272465c979d0530",
         "sql": []
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "access",
+            "member": "scopeWrite",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -2008,14 +2223,23 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-draft.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-draft.ts",
+        "owner": "PacsReportDraft",
         "name": "dictationAudit",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "b7e13fa58bc6e153de9c6e3239ad70d80f710d11d105d7e06686edca75844bdb",
         "sql": []
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "audit",
+            "member": "audit",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -2025,14 +2249,33 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-draft.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-draft.ts",
+        "owner": "PacsReportDraft",
         "name": "putReport",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "7d24b8e86486f9a735d2cdca67cbbc2b104e26385b42f1307ca5da6c5c083531",
         "sql": []
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "reportEvidence",
+            "member": "draftCitations",
+            "count": 1
+          },
+          {
+            "field": "reportEvidence",
+            "member": "draftStructure",
+            "count": 1
+          },
+          {
+            "field": "reportEvidence",
+            "member": "reportLimitChecked",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -2042,14 +2285,17 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-evidence.ts",
+        "owner": "PacsReportEvidence",
         "name": "draftCitations",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "fbc67adaf2678110525b31ff3cf84f11ecfa45621f53ee73075966b0e5bf6794",
         "sql": []
+      },
+      "correspondence": {
+        "private_dropped": true
       }
     },
     {
@@ -2059,14 +2305,17 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-evidence.ts",
+        "owner": "PacsReportEvidence",
         "name": "draftStructure",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "39bb8f42b92c13d192218ab238cdaa74eb34e76b8d910168f5d4952748a77e3a",
         "sql": []
+      },
+      "correspondence": {
+        "private_dropped": true
       }
     },
     {
@@ -2076,14 +2325,17 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-evidence.ts",
+        "owner": "PacsReportEvidence",
         "name": "versionStructured",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "9fa19394fd264cbf1c0230b989a60ad02a0ee4b0a77fb7b4b299a8020bf7cf00",
         "sql": []
+      },
+      "correspondence": {
+        "private_dropped": true
       }
     },
     {
@@ -2093,8 +2345,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-evidence.ts",
+        "owner": "PacsReportEvidence",
         "name": "structureBudget",
         "kind": "MethodDeclaration"
       },
@@ -2138,6 +2390,9 @@
             ]
           }
         ]
+      },
+      "correspondence": {
+        "private_dropped": true
       }
     },
     {
@@ -2147,14 +2402,17 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-evidence.ts",
+        "owner": "PacsReportEvidence",
         "name": "structureKeys",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "6c6c57786116325be9068ab0507305c16d60b5e4456256a49725ae20d5d2f0e8",
         "sql": []
+      },
+      "correspondence": {
+        "private_dropped": true
       }
     },
     {
@@ -2164,8 +2422,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-evidence.ts",
+        "owner": "PacsReportEvidence",
         "name": "structureInput",
         "kind": "MethodDeclaration"
       },
@@ -2181,8 +2439,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-evidence.ts",
+        "owner": "PacsReportEvidence",
         "name": "verifiedInsertion",
         "kind": "MethodDeclaration"
       },
@@ -2198,14 +2456,17 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-evidence.ts",
+        "owner": "PacsReportEvidence",
         "name": "versionCitations",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "58cbc6a0a193f0b52fbbb8d175c2858c5c5aef0e435259faea3cace9d9d262db",
         "sql": []
+      },
+      "correspondence": {
+        "private_dropped": true
       }
     },
     {
@@ -2215,8 +2476,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-evidence.ts",
+        "owner": "PacsReportEvidence",
         "name": "citationBudget",
         "kind": "MethodDeclaration"
       },
@@ -2260,6 +2521,9 @@
             ]
           }
         ]
+      },
+      "correspondence": {
+        "private_dropped": true
       }
     },
     {
@@ -2269,14 +2533,17 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-evidence.ts",
+        "owner": "PacsReportEvidence",
         "name": "citationKeys",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "2d5f1cbcb684454109475b3c04ae4550555454b5f16a7bb555d7aa69b2922c0e",
         "sql": []
+      },
+      "correspondence": {
+        "private_dropped": true
       }
     },
     {
@@ -2286,8 +2553,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-evidence.ts",
+        "owner": "PacsReportEvidence",
         "name": "citationInput",
         "kind": "MethodDeclaration"
       },
@@ -2303,14 +2570,17 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-evidence.ts",
+        "owner": "PacsReportEvidence",
         "name": "reportLimitChecked",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "383a7193efce8720e04fe8f7229284fc7405cdddec737967859498debb564469",
         "sql": []
+      },
+      "correspondence": {
+        "private_dropped": true
       }
     },
     {
@@ -2320,8 +2590,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-draft.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-draft.ts",
+        "owner": "PacsReportDraft",
         "name": "discardDraft",
         "kind": "MethodDeclaration"
       },
@@ -2337,8 +2607,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-draft.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-draft.ts",
+        "owner": "PacsReportDraft",
         "name": "forceDiscardDrafts",
         "kind": "MethodDeclaration"
       },
@@ -2373,6 +2643,15 @@
             ]
           }
         ]
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "reportEvidence",
+            "member": "reportLimitChecked",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -2382,8 +2661,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-commit.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-commit.ts",
+        "owner": "PacsReportCommit",
         "name": "commitReport",
         "kind": "MethodDeclaration"
       },
@@ -2418,6 +2697,55 @@
             ]
           }
         ]
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "reportDraft",
+            "member": "draftTransaction",
+            "count": 1
+          },
+          {
+            "field": "reportDraft",
+            "member": "ownDraft",
+            "count": 1
+          },
+          {
+            "field": "reportDraft",
+            "member": "storeDraft",
+            "count": 1
+          },
+          {
+            "field": "reportEvidence",
+            "member": "citationBudget",
+            "count": 1
+          },
+          {
+            "field": "reportEvidence",
+            "member": "citationKeys",
+            "count": 2
+          },
+          {
+            "field": "reportEvidence",
+            "member": "structureBudget",
+            "count": 1
+          },
+          {
+            "field": "reportEvidence",
+            "member": "structureKeys",
+            "count": 1
+          },
+          {
+            "field": "reportEvidence",
+            "member": "versionCitations",
+            "count": 1
+          },
+          {
+            "field": "reportEvidence",
+            "member": "versionStructured",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -2427,8 +2755,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/hold.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/hold.ts",
+        "owner": "PacsHold",
         "name": "hold",
         "kind": "MethodDeclaration"
       },
@@ -2473,6 +2801,15 @@
             ]
           }
         ]
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "access",
+            "member": "visible",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -2482,14 +2819,28 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/hold.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/hold.ts",
+        "owner": "PacsHold",
         "name": "release",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "3bc376e4b052953c4db5dc0aeb7ed0f152701c67301057202c0e86a06faa35ae",
         "sql": []
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "access",
+            "member": "gate",
+            "count": 1
+          },
+          {
+            "field": "access",
+            "member": "scopeWrite",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -2499,14 +2850,28 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/hold.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/hold.ts",
+        "owner": "PacsHold",
         "name": "forceRelease",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "26683747de949b7146b19c69b34b7a5f7b600aa25e3bc3b8d86a529742f9169e",
         "sql": []
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "access",
+            "member": "gate",
+            "count": 1
+          },
+          {
+            "field": "access",
+            "member": "scopeWrite",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -2516,14 +2881,23 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-evidence.ts",
+        "owner": "PacsReportEvidence",
         "name": "versions",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "322104add0bf09519a836791e5dd219e454ca9da8335bf7c2afd78e74c972e49",
         "sql": []
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "access",
+            "member": "gate",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -2533,14 +2907,23 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-evidence.ts",
+        "owner": "PacsReportEvidence",
         "name": "reportCitations",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "a56254db42de50d277b4f707b926856f9b647f94d15d5844d68df52b8236ea93",
         "sql": []
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "access",
+            "member": "gate",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -2550,14 +2933,23 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-evidence.ts",
+        "owner": "PacsReportEvidence",
         "name": "reportStructure",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "31b2487cf477582997f33f9872b6888f483dc67e37fd2c66d0367c5815b5eaa6",
         "sql": []
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "access",
+            "member": "gate",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -2567,14 +2959,23 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/report-evidence.ts",
+        "owner": "PacsReportEvidence",
         "name": "reportVersionCitations",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "23d9d9deb15f5cac555d1578e5508e158fc52c9288d96e7a4a8582b1d1a8b9a7",
         "sql": []
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "access",
+            "member": "gate",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -2584,8 +2985,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/clinician.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/clinician.ts",
+        "owner": "PacsClinician",
         "name": "clinicianStudies",
         "kind": "MethodDeclaration"
       },
@@ -2629,6 +3030,15 @@
             ]
           }
         ]
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "worklist",
+            "member": "listStudies",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -2638,8 +3048,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/clinician.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/clinician.ts",
+        "owner": "PacsClinician",
         "name": "clinicianReportRead",
         "kind": "MethodDeclaration"
       },
@@ -2655,8 +3065,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/clinician.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/clinician.ts",
+        "owner": "PacsClinician",
         "name": "clinicianViewerHead",
         "kind": "MethodDeclaration"
       },
@@ -2672,8 +3082,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/clinician.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/clinician.ts",
+        "owner": "PacsClinician",
         "name": "clinicianCaller",
         "kind": "MethodDeclaration"
       },
@@ -2689,14 +3099,23 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/clinician.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/clinician.ts",
+        "owner": "PacsClinician",
         "name": "clinicianScope",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "8558f320bfbadf65ae0f57d7fc061328c1f95b17a729d43b19ba200170d893c7",
         "sql": []
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "access",
+            "member": "gate",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -2706,8 +3125,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/clinician.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/clinician.ts",
+        "owner": "PacsClinician",
         "name": "clinicianTimeline",
         "kind": "MethodDeclaration"
       },
@@ -2751,6 +3170,15 @@
             ]
           }
         ]
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "worklist",
+            "member": "listStudies",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -2760,8 +3188,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/institutions.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/institutions.ts",
+        "owner": "PacsInstitutions",
         "name": "colleagues",
         "kind": "MethodDeclaration"
       },
@@ -2777,14 +3205,38 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/study-state.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/study-state.ts",
+        "owner": "PacsStudyState",
         "name": "match",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "f1b20f4899d9364fa40b961d85d8f2e4c708de7b298e4f42bfbe76b9ee9621da",
         "sql": []
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "access",
+            "member": "gate",
+            "count": 1
+          },
+          {
+            "field": "access",
+            "member": "myDraft",
+            "count": 1
+          },
+          {
+            "field": "audit",
+            "member": "audit",
+            "count": 1
+          },
+          {
+            "field": "institutions",
+            "member": "instName",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -2794,14 +3246,33 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/study-state.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/study-state.ts",
+        "owner": "PacsStudyState",
         "name": "unmatch",
         "kind": "MethodDeclaration"
       },
       "baseline": {
         "text_sha256": "d80937a5f5c3ac183a10b442d572b546c5577a1e502e826c997704b4e1fb4b3d",
         "sql": []
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "access",
+            "member": "gate",
+            "count": 1
+          },
+          {
+            "field": "access",
+            "member": "myDraft",
+            "count": 1
+          },
+          {
+            "field": "access",
+            "member": "scopeWrite",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -2811,8 +3282,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/study-state.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/study-state.ts",
+        "owner": "PacsStudyState",
         "name": "removeState",
         "kind": "MethodDeclaration"
       },
@@ -2867,6 +3338,20 @@
             ]
           }
         ]
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "access",
+            "member": "gate",
+            "count": 1
+          },
+          {
+            "field": "access",
+            "member": "visible",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -2876,8 +3361,8 @@
       "kind": "MethodDeclaration",
       "target": "api/src/pacs/audit.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
-        "owner": "PacsService",
+        "file": "api/src/pacs/audit.ts",
+        "owner": "PacsAudit",
         "name": "audits",
         "kind": "MethodDeclaration"
       },
@@ -3200,6 +3685,15 @@
             ]
           }
         ]
+      },
+      "correspondence": {
+        "receivers": [
+          {
+            "field": "access",
+            "member": "visible",
+            "count": 1
+          }
+        ]
       }
     },
     {
@@ -3209,7 +3703,7 @@
       "kind": "InterfaceDeclaration",
       "target": "api/src/pacs/access.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/access.ts",
         "owner": null,
         "name": "Caller",
         "kind": "InterfaceDeclaration"
@@ -3226,7 +3720,7 @@
       "kind": "FunctionDeclaration",
       "target": "api/src/pacs/access.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/access.ts",
         "owner": null,
         "name": "need",
         "kind": "FunctionDeclaration"
@@ -3234,6 +3728,9 @@
       "baseline": {
         "text_sha256": "fbe8f907e7c6556b16f6ffb3aed10bf45bbdb6b5e00e4555f5004514c87197e6",
         "sql": []
+      },
+      "correspondence": {
+        "export_added": true
       }
     },
     {
@@ -3243,7 +3740,7 @@
       "kind": "FunctionDeclaration",
       "target": "api/src/pacs/values.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/values.ts",
         "owner": null,
         "name": "qidoCount",
         "kind": "FunctionDeclaration"
@@ -3260,7 +3757,7 @@
       "kind": "FunctionDeclaration",
       "target": "api/src/pacs/access.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/access.ts",
         "owner": null,
         "name": "needExact",
         "kind": "FunctionDeclaration"
@@ -3268,6 +3765,9 @@
       "baseline": {
         "text_sha256": "5924791d72313f4935c5e49c2544ec44301e4238b96226023e01dfaab76c323f",
         "sql": []
+      },
+      "correspondence": {
+        "export_added": true
       }
     },
     {
@@ -3277,7 +3777,7 @@
       "kind": "FunctionDeclaration",
       "target": "api/src/pacs/access.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/access.ts",
         "owner": null,
         "name": "inst",
         "kind": "FunctionDeclaration"
@@ -3285,6 +3785,9 @@
       "baseline": {
         "text_sha256": "7c9766eb1ab46c7bba25bd6bc609a2c2dc11a641eb430507e2ca906b5eb82790",
         "sql": []
+      },
+      "correspondence": {
+        "export_added": true
       }
     },
     {
@@ -3294,7 +3797,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/study-state.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/study-state.ts",
         "owner": null,
         "name": "TECHNICIAN_FIELDS",
         "kind": "VariableDeclaration"
@@ -3311,7 +3814,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/audit.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/audit.ts",
         "owner": null,
         "name": "OWNER_ONLY_AUDIT_ACTIONS",
         "kind": "VariableDeclaration"
@@ -3328,7 +3831,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/audit.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/audit.ts",
         "owner": null,
         "name": "INSTITUTION_AUDIT_ACTIONS",
         "kind": "VariableDeclaration"
@@ -3345,7 +3848,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/tech-note.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/tech-note.ts",
         "owner": null,
         "name": "NOTE_PUBLIC_FIELDS",
         "kind": "VariableDeclaration"
@@ -3362,7 +3865,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/tech-note.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/tech-note.ts",
         "owner": null,
         "name": "NOTE_READ_FIELDS",
         "kind": "VariableDeclaration"
@@ -3379,7 +3882,7 @@
       "kind": "FunctionDeclaration",
       "target": "api/src/pacs/tech-note.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/tech-note.ts",
         "owner": null,
         "name": "noteForCaller",
         "kind": "FunctionDeclaration"
@@ -3396,7 +3899,7 @@
       "kind": "FunctionDeclaration",
       "target": "api/src/pacs/values.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/values.ts",
         "owner": null,
         "name": "noteTransactionError",
         "kind": "FunctionDeclaration"
@@ -3404,6 +3907,9 @@
       "baseline": {
         "text_sha256": "5046029a97da784adf5f491efbeabcf7c4b81c97b5cf6bedbe2d19fec69b8322",
         "sql": []
+      },
+      "correspondence": {
+        "export_added": true
       }
     },
     {
@@ -3413,7 +3919,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/values.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/values.ts",
         "owner": null,
         "name": "parse",
         "kind": "VariableDeclaration"
@@ -3430,7 +3936,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/values.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/values.ts",
         "owner": null,
         "name": "dump",
         "kind": "VariableDeclaration"
@@ -3447,7 +3953,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/values.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/values.ts",
         "owner": null,
         "name": "HOLD_TTL_MS",
         "kind": "VariableDeclaration"
@@ -3464,7 +3970,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/values.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/values.ts",
         "owner": null,
         "name": "holdAlive",
         "kind": "VariableDeclaration"
@@ -3481,7 +3987,7 @@
       "kind": "FunctionDeclaration",
       "target": "api/src/pacs/values.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/values.ts",
         "owner": null,
         "name": "toClient",
         "kind": "FunctionDeclaration"
@@ -3489,6 +3995,9 @@
       "baseline": {
         "text_sha256": "f0c732c14de81ccb7fc4197a82614626c553b56cf3133b725478fa8d82b9f388",
         "sql": []
+      },
+      "correspondence": {
+        "export_added": true
       }
     },
     {
@@ -3498,7 +4007,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/values.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/values.ts",
         "owner": null,
         "name": "DRAFT_EPOCH",
         "kind": "VariableDeclaration"
@@ -3515,7 +4024,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/values.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/values.ts",
         "owner": null,
         "name": "DRAFT_TOKEN",
         "kind": "VariableDeclaration"
@@ -3532,7 +4041,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/values.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/values.ts",
         "owner": null,
         "name": "DRAFT_PREPARE_MS",
         "kind": "VariableDeclaration"
@@ -3549,7 +4058,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/values.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/values.ts",
         "owner": null,
         "name": "draftToken",
         "kind": "VariableDeclaration"
@@ -3566,7 +4075,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/values.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/values.ts",
         "owner": null,
         "name": "draftRequired",
         "kind": "VariableDeclaration"
@@ -3583,7 +4092,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/values.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/values.ts",
         "owner": null,
         "name": "draftInvalid",
         "kind": "VariableDeclaration"
@@ -3600,7 +4109,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/values.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/values.ts",
         "owner": null,
         "name": "draftConflict",
         "kind": "VariableDeclaration"
@@ -3617,7 +4126,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/values.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/values.ts",
         "owner": null,
         "name": "draftUnavailable",
         "kind": "VariableDeclaration"
@@ -3634,7 +4143,7 @@
       "kind": "InterfaceDeclaration",
       "target": "api/src/pacs/values.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/values.ts",
         "owner": null,
         "name": "DraftOwner",
         "kind": "InterfaceDeclaration"
@@ -3651,7 +4160,7 @@
       "kind": "FunctionDeclaration",
       "target": "api/src/pacs/values.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/values.ts",
         "owner": null,
         "name": "draftOwner",
         "kind": "FunctionDeclaration"
@@ -3659,6 +4168,9 @@
       "baseline": {
         "text_sha256": "0f3f77a129352e951b8edc200c51dc530b45b2283812c18d544a0f3a2cc51e90",
         "sql": []
+      },
+      "correspondence": {
+        "export_added": true
       }
     },
     {
@@ -3668,7 +4180,7 @@
       "kind": "FunctionDeclaration",
       "target": "api/src/pacs/values.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/values.ts",
         "owner": null,
         "name": "draftEpochOf",
         "kind": "FunctionDeclaration"
@@ -3676,6 +4188,9 @@
       "baseline": {
         "text_sha256": "24ab75df1cdac0c951a0a07a9a2cfc899beb53242025cf95522e7df6fa4b62b7",
         "sql": []
+      },
+      "correspondence": {
+        "export_added": true
       }
     },
     {
@@ -3685,7 +4200,7 @@
       "kind": "FunctionDeclaration",
       "target": "api/src/pacs/values.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/values.ts",
         "owner": null,
         "name": "draftExpected",
         "kind": "FunctionDeclaration"
@@ -3693,6 +4208,9 @@
       "baseline": {
         "text_sha256": "9642007cb60e74a5e610f0f78b0243ea4a3dcf6ec062d15a8b68fc94d8a999a4",
         "sql": []
+      },
+      "correspondence": {
+        "export_added": true
       }
     },
     {
@@ -3702,7 +4220,7 @@
       "kind": "FunctionDeclaration",
       "target": "api/src/pacs/values.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/values.ts",
         "owner": null,
         "name": "draftSnapshotInput",
         "kind": "FunctionDeclaration"
@@ -3710,6 +4228,9 @@
       "baseline": {
         "text_sha256": "1804be759fee3e1cc92f73192d155dced7270322996ef92ed30ee1d700565d43",
         "sql": []
+      },
+      "correspondence": {
+        "export_added": true
       }
     },
     {
@@ -3719,7 +4240,7 @@
       "kind": "FunctionDeclaration",
       "target": "api/src/pacs/values.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/values.ts",
         "owner": null,
         "name": "draftSnapshot",
         "kind": "FunctionDeclaration"
@@ -3736,7 +4257,7 @@
       "kind": "FunctionDeclaration",
       "target": "api/src/pacs/values.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/values.ts",
         "owner": null,
         "name": "draftEnvelope",
         "kind": "FunctionDeclaration"
@@ -3744,6 +4265,9 @@
       "baseline": {
         "text_sha256": "9381cad73f3f3d546d1dfc09717ef097654a52c230b8951292aefa4a836fc58e",
         "sql": []
+      },
+      "correspondence": {
+        "export_added": true
       }
     },
     {
@@ -3753,7 +4277,7 @@
       "kind": "FunctionDeclaration",
       "target": "api/src/pacs/values.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/values.ts",
         "owner": null,
         "name": "draftTransactionError",
         "kind": "FunctionDeclaration"
@@ -3761,6 +4285,9 @@
       "baseline": {
         "text_sha256": "a87f869eec834ceb57c311f793a8223a7e238c1562b0084b4962c535b965f5b2",
         "sql": []
+      },
+      "correspondence": {
+        "export_added": true
       }
     },
     {
@@ -3770,7 +4297,7 @@
       "kind": "FunctionDeclaration",
       "target": "api/src/pacs/values.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/values.ts",
         "owner": null,
         "name": "draftBounded",
         "kind": "FunctionDeclaration"
@@ -3778,6 +4305,9 @@
       "baseline": {
         "text_sha256": "ca5b8dcc04df4722fb6299b702b2945acbf9dc8415832086280740bce3be1814",
         "sql": []
+      },
+      "correspondence": {
+        "export_added": true
       }
     },
     {
@@ -3787,7 +4317,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/report-evidence.ts",
         "owner": null,
         "name": "citationLimit",
         "kind": "VariableDeclaration"
@@ -3804,7 +4334,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/report-evidence.ts",
         "owner": null,
         "name": "CITATION_CHECKS",
         "kind": "VariableDeclaration"
@@ -3821,7 +4351,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/report-evidence.ts",
         "owner": null,
         "name": "STRUCTURE_CHECKS",
         "kind": "VariableDeclaration"
@@ -3838,7 +4368,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/report-evidence.ts",
         "owner": null,
         "name": "structureLimit",
         "kind": "VariableDeclaration"
@@ -3855,7 +4385,7 @@
       "kind": "FunctionDeclaration",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/report-evidence.ts",
         "owner": null,
         "name": "isStructureCheck",
         "kind": "FunctionDeclaration"
@@ -3863,6 +4393,9 @@
       "baseline": {
         "text_sha256": "7f85eb209b8baff10f17256efdca0584b19108054c07e79f4f55aa2ddd04029a",
         "sql": []
+      },
+      "correspondence": {
+        "export_added": true
       }
     },
     {
@@ -3872,7 +4405,7 @@
       "kind": "FunctionDeclaration",
       "target": "api/src/pacs/report-evidence.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/report-evidence.ts",
         "owner": null,
         "name": "isCitationCheck",
         "kind": "FunctionDeclaration"
@@ -3880,6 +4413,9 @@
       "baseline": {
         "text_sha256": "9a26cf7c07fdaf9edd1a6bc7f9884dc07e1b2f1de00ce8fd2afe9148b3d2bb2d",
         "sql": []
+      },
+      "correspondence": {
+        "export_added": true
       }
     },
     {
@@ -3889,7 +4425,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/study-state.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/study-state.ts",
         "owner": null,
         "name": "STATE_FIELDS",
         "kind": "VariableDeclaration"
@@ -3906,7 +4442,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/study-state.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/study-state.ts",
         "owner": null,
         "name": "REPORT_OWNED_FIELDS",
         "kind": "VariableDeclaration"
@@ -3923,7 +4459,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/study-state.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/study-state.ts",
         "owner": null,
         "name": "TELE_BY_OWNER",
         "kind": "VariableDeclaration"
@@ -3940,7 +4476,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/study-state.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/study-state.ts",
         "owner": null,
         "name": "TELE_BY_RECEIVER",
         "kind": "VariableDeclaration"
@@ -3957,7 +4493,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/study-state.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/study-state.ts",
         "owner": null,
         "name": "TELE_CLOSED",
         "kind": "VariableDeclaration"
@@ -3974,7 +4510,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/study-state.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/study-state.ts",
         "owner": null,
         "name": "TELE_NEXT",
         "kind": "VariableDeclaration"
@@ -3991,7 +4527,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/metrics.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/metrics.ts",
         "owner": null,
         "name": "ADMIN_METRIC_KEYS",
         "kind": "VariableDeclaration"
@@ -4008,7 +4544,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/metrics.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/metrics.ts",
         "owner": null,
         "name": "ADMIN_METRIC_DAY_MS",
         "kind": "VariableDeclaration"
@@ -4025,7 +4561,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/metrics.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/metrics.ts",
         "owner": null,
         "name": "ADMIN_METRIC_WEEK_MS",
         "kind": "VariableDeclaration"
@@ -4042,7 +4578,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/metrics.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/metrics.ts",
         "owner": null,
         "name": "ADMIN_METRIC_WAITING_RS",
         "kind": "VariableDeclaration"
@@ -4059,7 +4595,7 @@
       "kind": "TypeAliasDeclaration",
       "target": "api/src/pacs/metrics.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/metrics.ts",
         "owner": null,
         "name": "AdminMetricFailure",
         "kind": "TypeAliasDeclaration"
@@ -4076,7 +4612,7 @@
       "kind": "InterfaceDeclaration",
       "target": "api/src/pacs/metrics.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/metrics.ts",
         "owner": null,
         "name": "AdminMetricStorage",
         "kind": "InterfaceDeclaration"
@@ -4093,7 +4629,7 @@
       "kind": "InterfaceDeclaration",
       "target": "api/src/pacs/metrics.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/metrics.ts",
         "owner": null,
         "name": "AdminMetricStudies",
         "kind": "InterfaceDeclaration"
@@ -4110,7 +4646,7 @@
       "kind": "FunctionDeclaration",
       "target": "api/src/pacs/metrics.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/metrics.ts",
         "owner": null,
         "name": "orthancDiskBytes",
         "kind": "FunctionDeclaration"
@@ -4127,7 +4663,7 @@
       "kind": "VariableDeclaration",
       "target": "api/src/pacs/metrics.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/metrics.ts",
         "owner": null,
         "name": "metricTime",
         "kind": "VariableDeclaration"
@@ -4144,7 +4680,7 @@
       "kind": "FunctionDeclaration",
       "target": "api/src/pacs/metrics.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/metrics.ts",
         "owner": null,
         "name": "metricDurations",
         "kind": "FunctionDeclaration"
@@ -4161,7 +4697,7 @@
       "kind": "FunctionDeclaration",
       "target": "api/src/pacs/metrics.ts",
       "live": {
-        "file": "api/src/pacs.service.ts",
+        "file": "api/src/pacs/metrics.ts",
         "owner": null,
         "name": "adminMetricRows",
         "kind": "FunctionDeclaration"
@@ -4172,5 +4708,3521 @@
       }
     }
   ],
+  "facade": {
+    "file": "api/src/pacs.service.ts",
+    "class": "PacsService",
+    "parameters": [
+      "prisma:PrismaService",
+      "orthanc:OrthancService",
+      "keycloak:KeycloakService",
+      "studyAccess:StudyAccessService",
+      "findings:FindingService"
+    ],
+    "slots": [
+      {
+        "name": "accessConcern",
+        "class": "PacsAccess",
+        "file": "api/src/pacs/access.ts",
+        "args": [
+          "prisma",
+          "studyAccess"
+        ]
+      },
+      {
+        "name": "institutionsConcern",
+        "class": "PacsInstitutions",
+        "file": "api/src/pacs/institutions.ts",
+        "args": [
+          "prisma",
+          "orthanc",
+          "keycloak",
+          "studyAccess",
+          "accessConcern"
+        ]
+      },
+      {
+        "name": "preferencesConcern",
+        "class": "PacsPreferences",
+        "file": "api/src/pacs/preferences.ts",
+        "args": [
+          "prisma"
+        ]
+      },
+      {
+        "name": "filtersConcern",
+        "class": "PacsFilters",
+        "file": "api/src/pacs/filters.ts",
+        "args": [
+          "prisma"
+        ]
+      },
+      {
+        "name": "auditConcern",
+        "class": "PacsAudit",
+        "file": "api/src/pacs/audit.ts",
+        "args": [
+          "prisma",
+          "studyAccess",
+          "accessConcern"
+        ]
+      },
+      {
+        "name": "metricsConcern",
+        "class": "PacsMetrics",
+        "file": "api/src/pacs/metrics.ts",
+        "args": [
+          "prisma",
+          "orthanc",
+          "studyAccess",
+          "accessConcern"
+        ]
+      },
+      {
+        "name": "worklistConcern",
+        "class": "PacsWorklist",
+        "file": "api/src/pacs/worklist.ts",
+        "args": [
+          "prisma",
+          "orthanc",
+          "studyAccess",
+          "accessConcern",
+          "institutionsConcern",
+          "preferencesConcern",
+          "auditConcern"
+        ]
+      },
+      {
+        "name": "dicomGatewayConcern",
+        "class": "PacsDicomGateway",
+        "file": "api/src/pacs/dicom-gateway.ts",
+        "args": [
+          "prisma",
+          "orthanc",
+          "studyAccess",
+          "accessConcern",
+          "institutionsConcern"
+        ]
+      },
+      {
+        "name": "studyStateConcern",
+        "class": "PacsStudyState",
+        "file": "api/src/pacs/study-state.ts",
+        "args": [
+          "prisma",
+          "studyAccess",
+          "accessConcern",
+          "institutionsConcern",
+          "auditConcern"
+        ]
+      },
+      {
+        "name": "techNoteConcern",
+        "class": "PacsTechNote",
+        "file": "api/src/pacs/tech-note.ts",
+        "args": [
+          "prisma",
+          "studyAccess",
+          "accessConcern"
+        ]
+      },
+      {
+        "name": "holdConcern",
+        "class": "PacsHold",
+        "file": "api/src/pacs/hold.ts",
+        "args": [
+          "prisma",
+          "studyAccess",
+          "accessConcern"
+        ]
+      },
+      {
+        "name": "clinicianConcern",
+        "class": "PacsClinician",
+        "file": "api/src/pacs/clinician.ts",
+        "args": [
+          "prisma",
+          "studyAccess",
+          "accessConcern",
+          "worklistConcern"
+        ]
+      },
+      {
+        "name": "reportEvidenceConcern",
+        "class": "PacsReportEvidence",
+        "file": "api/src/pacs/report-evidence.ts",
+        "args": [
+          "prisma",
+          "studyAccess",
+          "findings",
+          "accessConcern"
+        ]
+      },
+      {
+        "name": "reportDraftConcern",
+        "class": "PacsReportDraft",
+        "file": "api/src/pacs/report-draft.ts",
+        "args": [
+          "prisma",
+          "studyAccess",
+          "accessConcern",
+          "auditConcern",
+          "reportEvidenceConcern"
+        ]
+      },
+      {
+        "name": "reportCommitConcern",
+        "class": "PacsReportCommit",
+        "file": "api/src/pacs/report-commit.ts",
+        "args": [
+          "keycloak",
+          "studyAccess",
+          "reportEvidenceConcern",
+          "reportDraftConcern"
+        ]
+      }
+    ],
+    "forwards": [
+      {
+        "name": "onModuleInit",
+        "slot": "institutionsConcern",
+        "signature_sha256": "99b114cdc8383ddeac8ef0b40b8446ca32d70563640ec32fbe605204fef7884c"
+      },
+      {
+        "name": "institutionName",
+        "slot": "institutionsConcern",
+        "signature_sha256": "f9ce58841cda945e731ed0474d655a8abb35a761d1fd39a3baf7638271cef6ba"
+      },
+      {
+        "name": "unassigned",
+        "slot": "institutionsConcern",
+        "signature_sha256": "55cb28d91c374b91099a553113b150e45621e2d5c3ff768f5b01f87016e32fef"
+      },
+      {
+        "name": "assignInstitution",
+        "slot": "institutionsConcern",
+        "signature_sha256": "a8db4b4af7e01c91b933c6da22ad6397339ffe28239396b834e71a7db5d45553"
+      },
+      {
+        "name": "colleagues",
+        "slot": "institutionsConcern",
+        "signature_sha256": "63fc6a5d3b6213100d561341677756324b4ecd9300a29a6f044f01b7badc987a"
+      },
+      {
+        "name": "prefs",
+        "slot": "preferencesConcern",
+        "signature_sha256": "26e00ead0a49d4d0f12b65c600b2e569a9bb775f925d5b3f3b774ae61c8a7095"
+      },
+      {
+        "name": "readingPreferences",
+        "slot": "preferencesConcern",
+        "signature_sha256": "1d9669145831ca2409fc64329cb2f0f9bf7378c40887a43e3f21dca9376f6224"
+      },
+      {
+        "name": "saveReadingPreferences",
+        "slot": "preferencesConcern",
+        "signature_sha256": "a925ca7c348fc2b682c94900b9f51164dedc702537432154d9fbf8a3c66c98c1"
+      },
+      {
+        "name": "hangingProtocols",
+        "slot": "preferencesConcern",
+        "signature_sha256": "2191904544b5076badc87a25054284cdf9a33f57f4bf8a3ab603c2eba0ea65ef"
+      },
+      {
+        "name": "saveHangingProtocols",
+        "slot": "preferencesConcern",
+        "signature_sha256": "706366bb6052000f9fd3741d378d99e761d4092fd8958180f01a1fcae17e8f17"
+      },
+      {
+        "name": "siteHangingProtocols",
+        "slot": "preferencesConcern",
+        "signature_sha256": "26995920521128a4ebb316aa09d638e0be09cb202111307dcfb82fc1d6d1d2ec"
+      },
+      {
+        "name": "saveSiteHangingProtocols",
+        "slot": "preferencesConcern",
+        "signature_sha256": "5694a1a85abe62df1da90a53fe2e28a2590b1534e3ac9e119ff6b3a8fd5b5afe"
+      },
+      {
+        "name": "workspaceShortcuts",
+        "slot": "preferencesConcern",
+        "signature_sha256": "d9a7e709df0744970311af1c58666ec0d68fe39fcc02c8eb033cb952a7e20e4f"
+      },
+      {
+        "name": "saveWorkspaceShortcuts",
+        "slot": "preferencesConcern",
+        "signature_sha256": "e28540fd6be8aae90e9a3f7cc6618db60365b08790e9b293e6061476646e3d8c"
+      },
+      {
+        "name": "readingAppearance",
+        "slot": "preferencesConcern",
+        "signature_sha256": "2f0a398f7c5b279fc8c221c14bbb2329eb196e929f58140a25e1aef787e18517"
+      },
+      {
+        "name": "saveReadingAppearance",
+        "slot": "preferencesConcern",
+        "signature_sha256": "df74d997e4809483aa5b546559dec867293ebce4baa8d9641082f2860256870b"
+      },
+      {
+        "name": "workspaceLayout",
+        "slot": "preferencesConcern",
+        "signature_sha256": "e9b1abdc8c0148d1dcac6f90b73323cf5b6bde76842d458d6ae1da1f621f93ec"
+      },
+      {
+        "name": "writeWorkspaceLayout",
+        "slot": "preferencesConcern",
+        "signature_sha256": "f41952ad0e305c7266dde19773e4778ad690b68dbaa228f0826c51beee17abd2"
+      },
+      {
+        "name": "worklistColumns",
+        "slot": "preferencesConcern",
+        "signature_sha256": "e591770737d47a0919e09e1ed8eb8ca74c50c8d63c239dcce3fee4287177df86"
+      },
+      {
+        "name": "writeWorklistColumns",
+        "slot": "preferencesConcern",
+        "signature_sha256": "e17da025ec7098d7bafa312bdb26c8e1e2fa9060b17562bf69dfac4a479aded3"
+      },
+      {
+        "name": "saveTemplate",
+        "slot": "preferencesConcern",
+        "signature_sha256": "f862d80dd750ff09e2da08fd041e811513ea96c73247268ea3f4371415690ff2"
+      },
+      {
+        "name": "deleteTemplate",
+        "slot": "preferencesConcern",
+        "signature_sha256": "cd3204a911e3134db58780f368f40de78b52d68e3b6bb6c83c96493a8cf803a9"
+      },
+      {
+        "name": "saveFilter",
+        "slot": "filtersConcern",
+        "signature_sha256": "bc91c652e2c790d70be375d028e1037751b9e1bfc9233abd920c6bcbd2036dd2"
+      },
+      {
+        "name": "setDefaultFilter",
+        "slot": "filtersConcern",
+        "signature_sha256": "3e1e8ac1a83bbb2d45db3ad96ae3427ce39c504c2dda67db05e623d4cfd756c0"
+      },
+      {
+        "name": "deleteFilter",
+        "slot": "filtersConcern",
+        "signature_sha256": "ce48b96920592bd140417daabb289264547ee652c90725a859c315aad320a5a5"
+      },
+      {
+        "name": "readFilterFolders",
+        "slot": "filtersConcern",
+        "signature_sha256": "550ace081681527a893103c1130d3211ef7583043c2837adf6489c6100cec68c"
+      },
+      {
+        "name": "writeFilterFolders",
+        "slot": "filtersConcern",
+        "signature_sha256": "a23226fac43e7394adc7e8c02ffc4cc137767049c3a9c7116ddbd33d5730d08e"
+      },
+      {
+        "name": "readSharedFilters",
+        "slot": "filtersConcern",
+        "signature_sha256": "b37d1bff20074f031893ea2390ba6610b799b5ba414109dc5c3538bb1ce57ea1"
+      },
+      {
+        "name": "writeSharedFilters",
+        "slot": "filtersConcern",
+        "signature_sha256": "fc0e3d4d011deacc6d995327c8257bb3f655250a7586fdc7ab258dc0c464836d"
+      },
+      {
+        "name": "copySharedFilters",
+        "slot": "filtersConcern",
+        "signature_sha256": "26273fa3328ded5084047b315e7f8723d6941e543de2548561f24ae1bfac68d1"
+      },
+      {
+        "name": "audits",
+        "slot": "auditConcern",
+        "signature_sha256": "a61f391d4c27588fa82129ce048605f0f307624f200407bbab71621d07ec3dee"
+      },
+      {
+        "name": "adminMetrics",
+        "slot": "metricsConcern",
+        "signature_sha256": "2ea3ae76a4aad592598aa5989eb79feebe44e4f559d041d18abd5553ca65bfdf"
+      },
+      {
+        "name": "listStudies",
+        "slot": "worklistConcern",
+        "signature_sha256": "225f272802dd41b520b1f747ab266a4fe2d8a87d321b69c4786f58b348f758a4"
+      },
+      {
+        "name": "bootstrap",
+        "slot": "worklistConcern",
+        "signature_sha256": "73263069c3fa337bff8b44e6d4c871bd5f0a27553f3566b75ca0c09379284147"
+      },
+      {
+        "name": "authzDicom",
+        "slot": "dicomGatewayConcern",
+        "signature_sha256": "ec350f437b44cfa1a606365a8471cd7b21114c7fbffcc7f1bd5f5372d020fe07"
+      },
+      {
+        "name": "announceStudy",
+        "slot": "dicomGatewayConcern",
+        "signature_sha256": "5b58ba77ff42eb49805b196632f23dbb70ba2fabdb7a601e2483e5f59af32ebc"
+      },
+      {
+        "name": "gatewayReceipt",
+        "slot": "dicomGatewayConcern",
+        "signature_sha256": "0f635d1f937f089723fc63f17f319cdb74c6dbe8affea1d60a9ef1d1a08ef44d"
+      },
+      {
+        "name": "requestGatewayRetry",
+        "slot": "dicomGatewayConcern",
+        "signature_sha256": "91cd29216d8c623c60b09446cc41ac68899cf7dc83ae0644711f6197db32d043"
+      },
+      {
+        "name": "gatewayRetryRequests",
+        "slot": "dicomGatewayConcern",
+        "signature_sha256": "b348dc524acd8167e39f779673a3cc6b5b87adce1dffd7382cacf2e37c4a1770"
+      },
+      {
+        "name": "dicomLookup",
+        "slot": "dicomGatewayConcern",
+        "signature_sha256": "1f4047f066cf8b5a1c56a4b3602fbb996567c02f3e79ff122c36273c88668287"
+      },
+      {
+        "name": "patchState",
+        "slot": "studyStateConcern",
+        "signature_sha256": "ae196d283dd5e2b5d71c6e42efe6ad8822627d0d4fb55b8c6541f0fe7590e2bf"
+      },
+      {
+        "name": "match",
+        "slot": "studyStateConcern",
+        "signature_sha256": "78d957298a9acbfda54e07ec2fa3967d1d420b5b585c618ca793df2e8484dc48"
+      },
+      {
+        "name": "unmatch",
+        "slot": "studyStateConcern",
+        "signature_sha256": "f5a8566aca618651d080bbe29bf7306bfa3882f85b3d79a57dacbc622906e43e"
+      },
+      {
+        "name": "removeState",
+        "slot": "studyStateConcern",
+        "signature_sha256": "e0f73b12b47d0a4854068a2a15e546424a003a8973a3b8dcb0a6d2d8d4e4f73a"
+      },
+      {
+        "name": "techNote",
+        "slot": "techNoteConcern",
+        "signature_sha256": "a2ab0279514bdfa6fd55a9a5279dcf05ee93e5c645e5b86de76e5aad6ab0d639"
+      },
+      {
+        "name": "saveTechNote",
+        "slot": "techNoteConcern",
+        "signature_sha256": "0f47d8dcfdfa14e410804c19926eac95678857223269b7610259972bc9333b1a"
+      },
+      {
+        "name": "hold",
+        "slot": "holdConcern",
+        "signature_sha256": "c7a48f6885b9d113da19f8a2379fd543169ba4117ac6de09d7f9759c4cbca1cf"
+      },
+      {
+        "name": "release",
+        "slot": "holdConcern",
+        "signature_sha256": "b539ea3f120dceaf2416341a7b307c5741b74b062617ffa33f2aca0446ed4457"
+      },
+      {
+        "name": "forceRelease",
+        "slot": "holdConcern",
+        "signature_sha256": "3aadd03dfc63821b21730d3ca211f8a4b95c154872b54f405c18383ec12ad411"
+      },
+      {
+        "name": "clinicianStudies",
+        "slot": "clinicianConcern",
+        "signature_sha256": "5b02148fb047a09e63bc5fe6f77b35bd5a8aef9e5e32f211229bbb5d60383dd7"
+      },
+      {
+        "name": "clinicianReportRead",
+        "slot": "clinicianConcern",
+        "signature_sha256": "789b07c90b870684db375e328ff3f95c6d3cdd5dbbc106640484488fd68e5eb7"
+      },
+      {
+        "name": "clinicianViewerHead",
+        "slot": "clinicianConcern",
+        "signature_sha256": "963a6fb0d72afed9623e986c6c8e399144a1e060a47ab570e95dc857af732148"
+      },
+      {
+        "name": "clinicianTimeline",
+        "slot": "clinicianConcern",
+        "signature_sha256": "f0ef2a47d67a293e0b909c2e132ed06bd9749a8ac132b321e42bf757ec7568ce"
+      },
+      {
+        "name": "versions",
+        "slot": "reportEvidenceConcern",
+        "signature_sha256": "a853074223da023a1f797908fd51fa193d3f0cd241c77f49b4c864ee6b40545a"
+      },
+      {
+        "name": "reportCitations",
+        "slot": "reportEvidenceConcern",
+        "signature_sha256": "82b477b9c936d24b9945b111bacfb3d5deff67a523c32258dd9e9ef46d11f3f6"
+      },
+      {
+        "name": "reportStructure",
+        "slot": "reportEvidenceConcern",
+        "signature_sha256": "be74d55042c85af251d0881f8afe504435ecd84a3b4f71ff80a704603a0f6d69"
+      },
+      {
+        "name": "reportVersionCitations",
+        "slot": "reportEvidenceConcern",
+        "signature_sha256": "103aac9a524cfaff9a280fb5e1597acb2531b0641b2f0a5efe64235ad8d9d0c0"
+      },
+      {
+        "name": "readDraft",
+        "slot": "reportDraftConcern",
+        "signature_sha256": "33d456190b1720ceffd63013536b18298cf09dbe4814c0f089cb3c22ad59eab9"
+      },
+      {
+        "name": "dictationGate",
+        "slot": "reportDraftConcern",
+        "signature_sha256": "0dac8988e166a9d2b3f07ef93927c3f73003de60778d936011a06a7b147bab5b"
+      },
+      {
+        "name": "dictationAudit",
+        "slot": "reportDraftConcern",
+        "signature_sha256": "43c293b711be39982d66258a3013ab85f53aa129a7647b13c52af91736aee116"
+      },
+      {
+        "name": "putReport",
+        "slot": "reportDraftConcern",
+        "signature_sha256": "802409b4896657bee0ddd048031701953fee2eb8050532ab062ceb9022db380b"
+      },
+      {
+        "name": "discardDraft",
+        "slot": "reportDraftConcern",
+        "signature_sha256": "9f8452acc11bba3fa3f9f248b5ed8e09ca817032795766039ebb074ceb794eba"
+      },
+      {
+        "name": "forceDiscardDrafts",
+        "slot": "reportDraftConcern",
+        "signature_sha256": "4eb142a074a0ffa164e040c432656d6a1c25829982ed8b85d2c3f058d18c5332"
+      },
+      {
+        "name": "commitReport",
+        "slot": "reportCommitConcern",
+        "signature_sha256": "886a2e45e6b8e57cfa8d2aff6bf7388b84336357f879c367b8c8a2d182cde8e1"
+      }
+    ],
+    "reexports": [
+      "Caller",
+      "qidoCount",
+      "DraftOwner",
+      "OWNER_ONLY_AUDIT_ACTIONS",
+      "INSTITUTION_AUDIT_ACTIONS",
+      "ADMIN_METRIC_KEYS",
+      "ADMIN_METRIC_DAY_MS",
+      "ADMIN_METRIC_WEEK_MS",
+      "orthancDiskBytes",
+      "adminMetricRows",
+      "AdminMetricFailure",
+      "AdminMetricStorage",
+      "AdminMetricStudies"
+    ]
+  },
+  "concerns": {
+    "api/src/pacs/values.ts": {
+      "class": null,
+      "parameters": []
+    },
+    "api/src/pacs/access.ts": {
+      "class": "PacsAccess",
+      "parameters": [
+        "prisma:PrismaService",
+        "studyAccess:StudyAccessService"
+      ]
+    },
+    "api/src/pacs/institutions.ts": {
+      "class": "PacsInstitutions",
+      "parameters": [
+        "prisma:PrismaService",
+        "orthanc:OrthancService",
+        "keycloak:KeycloakService",
+        "studyAccess:StudyAccessService",
+        "access:PacsAccess"
+      ]
+    },
+    "api/src/pacs/worklist.ts": {
+      "class": "PacsWorklist",
+      "parameters": [
+        "prisma:PrismaService",
+        "orthanc:OrthancService",
+        "studyAccess:StudyAccessService",
+        "access:PacsAccess",
+        "institutions:PacsInstitutions",
+        "preferences:PacsPreferences",
+        "audit:PacsAudit"
+      ]
+    },
+    "api/src/pacs/dicom-gateway.ts": {
+      "class": "PacsDicomGateway",
+      "parameters": [
+        "prisma:PrismaService",
+        "orthanc:OrthancService",
+        "studyAccess:StudyAccessService",
+        "access:PacsAccess",
+        "institutions:PacsInstitutions"
+      ]
+    },
+    "api/src/pacs/preferences.ts": {
+      "class": "PacsPreferences",
+      "parameters": [
+        "prisma:PrismaService"
+      ]
+    },
+    "api/src/pacs/filters.ts": {
+      "class": "PacsFilters",
+      "parameters": [
+        "prisma:PrismaService"
+      ]
+    },
+    "api/src/pacs/study-state.ts": {
+      "class": "PacsStudyState",
+      "parameters": [
+        "prisma:PrismaService",
+        "studyAccess:StudyAccessService",
+        "access:PacsAccess",
+        "institutions:PacsInstitutions",
+        "audit:PacsAudit"
+      ]
+    },
+    "api/src/pacs/tech-note.ts": {
+      "class": "PacsTechNote",
+      "parameters": [
+        "prisma:PrismaService",
+        "studyAccess:StudyAccessService",
+        "access:PacsAccess"
+      ]
+    },
+    "api/src/pacs/report-draft.ts": {
+      "class": "PacsReportDraft",
+      "parameters": [
+        "prisma:PrismaService",
+        "studyAccess:StudyAccessService",
+        "access:PacsAccess",
+        "audit:PacsAudit",
+        "reportEvidence:PacsReportEvidence"
+      ]
+    },
+    "api/src/pacs/report-evidence.ts": {
+      "class": "PacsReportEvidence",
+      "parameters": [
+        "prisma:PrismaService",
+        "studyAccess:StudyAccessService",
+        "findings:FindingService",
+        "access:PacsAccess"
+      ]
+    },
+    "api/src/pacs/report-commit.ts": {
+      "class": "PacsReportCommit",
+      "parameters": [
+        "keycloak:KeycloakService",
+        "studyAccess:StudyAccessService",
+        "reportEvidence:PacsReportEvidence",
+        "reportDraft:PacsReportDraft"
+      ]
+    },
+    "api/src/pacs/hold.ts": {
+      "class": "PacsHold",
+      "parameters": [
+        "prisma:PrismaService",
+        "studyAccess:StudyAccessService",
+        "access:PacsAccess"
+      ]
+    },
+    "api/src/pacs/clinician.ts": {
+      "class": "PacsClinician",
+      "parameters": [
+        "prisma:PrismaService",
+        "studyAccess:StudyAccessService",
+        "access:PacsAccess",
+        "worklist:PacsWorklist"
+      ]
+    },
+    "api/src/pacs/audit.ts": {
+      "class": "PacsAudit",
+      "parameters": [
+        "prisma:PrismaService",
+        "studyAccess:StudyAccessService",
+        "access:PacsAccess"
+      ]
+    },
+    "api/src/pacs/metrics.ts": {
+      "class": "PacsMetrics",
+      "parameters": [
+        "prisma:PrismaService",
+        "orthanc:OrthancService",
+        "studyAccess:StudyAccessService",
+        "access:PacsAccess"
+      ]
+    }
+  },
+  "di_source": "5f1155a27d1a134d9afd8ad5b596970044064970 (main before round 2), compiled by the same TypeScript and Nest",
+  "di": {
+    "controllers": [
+      "DictationController",
+      "PacsController",
+      "AuthController",
+      "AdminController",
+      "ViewerController",
+      "FindingController",
+      "ViewerJobController",
+      "ConnectController",
+      "ManualSrController",
+      "ReportPreviewController",
+      "FavoriteController",
+      "StudyTagsController",
+      "ReaderAssignmentController",
+      "ConsultationController",
+      "ClinicianQuestionController",
+      "ImageRequestController",
+      "ClinicalContextController",
+      "CriticalResultController",
+      "StudyAccessController"
+    ],
+    "providers": [
+      "ViewerContextEventService",
+      "AsrService",
+      "StudyAccessService",
+      "PrismaService",
+      "PacsService",
+      "OrthancService",
+      "KeycloakService",
+      "AuthService",
+      "AdminService",
+      "ViewerService",
+      "FindingService",
+      "ViewerJobService",
+      "ConnectService",
+      "ManualSrService",
+      "FavoriteService",
+      "StudyTagsService",
+      "ReaderAssignmentService",
+      "ConsultationService",
+      "ClinicianQuestionService",
+      "ImageRequestService",
+      "ClinicalContextService",
+      "CriticalResultService",
+      "APP_GUARD=AuthGuard",
+      "APP_INTERCEPTOR=StudyAccessInterceptor"
+    ],
+    "exports": [],
+    "imports": [],
+    "injectables": {
+      "DictationController": {
+        "params": [
+          "PacsService",
+          "AsrService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "PacsController": {
+        "params": [
+          "PacsService",
+          "AuthService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "AuthController": {
+        "params": [
+          "AuthService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "AdminController": {
+        "params": [
+          "AdminService",
+          "PacsService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "ViewerController": {
+        "params": [
+          "ViewerService",
+          "PacsService",
+          "ViewerContextEventService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "FindingController": {
+        "params": [
+          "FindingService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "ViewerJobController": {
+        "params": [
+          "ViewerJobService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "ConnectController": {
+        "params": [
+          "ConnectService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "ManualSrController": {
+        "params": [
+          "ManualSrService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "ReportPreviewController": {
+        "params": [
+          "PrismaService",
+          "OrthancService",
+          "StudyAccessService",
+          "PacsService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "FavoriteController": {
+        "params": [
+          "FavoriteService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "StudyTagsController": {
+        "params": [
+          "StudyTagsService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "ReaderAssignmentController": {
+        "params": [
+          "ReaderAssignmentService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "ConsultationController": {
+        "params": [
+          "ConsultationService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "ClinicianQuestionController": {
+        "params": [
+          "ClinicianQuestionService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "ImageRequestController": {
+        "params": [
+          "ImageRequestService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "ClinicalContextController": {
+        "params": [
+          "ClinicalContextService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "CriticalResultController": {
+        "params": [
+          "CriticalResultService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "StudyAccessController": {
+        "params": [
+          "StudyAccessService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "ViewerContextEventService": {
+        "params": [
+          "PrismaService",
+          "PacsService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "AsrService": {
+        "params": [],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "StudyAccessService": {
+        "params": [
+          "PrismaService",
+          "OrthancService",
+          "KeycloakService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "PrismaService": {
+        "params": [],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "PacsService": {
+        "params": [
+          "PrismaService",
+          "OrthancService",
+          "KeycloakService",
+          "StudyAccessService",
+          "FindingService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "OrthancService": {
+        "params": [],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "KeycloakService": {
+        "params": [],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "AuthService": {
+        "params": [
+          "PrismaService",
+          "KeycloakService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "AdminService": {
+        "params": [
+          "PrismaService",
+          "KeycloakService",
+          "StudyAccessService",
+          "AuthService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "ViewerService": {
+        "params": [
+          "PrismaService",
+          "OrthancService",
+          "StudyAccessService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "FindingService": {
+        "params": [
+          "PrismaService",
+          "StudyAccessService",
+          "OrthancService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "ViewerJobService": {
+        "params": [
+          "PrismaService",
+          "OrthancService",
+          "StudyAccessService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "ConnectService": {
+        "params": [
+          "PrismaService",
+          "OrthancService",
+          "StudyAccessService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "ManualSrService": {
+        "params": [
+          "PrismaService",
+          "OrthancService",
+          "StudyAccessService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "FavoriteService": {
+        "params": [
+          "PrismaService",
+          "ViewerJobService",
+          "StudyAccessService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "StudyTagsService": {
+        "params": [
+          "PrismaService",
+          "StudyAccessService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "ReaderAssignmentService": {
+        "params": [
+          "PrismaService",
+          "KeycloakService",
+          "StudyAccessService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "ConsultationService": {
+        "params": [
+          "PrismaService",
+          "KeycloakService",
+          "StudyAccessService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "ClinicianQuestionService": {
+        "params": [
+          "PrismaService",
+          "StudyAccessService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "ImageRequestService": {
+        "params": [
+          "PrismaService",
+          "StudyAccessService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "ClinicalContextService": {
+        "params": [
+          "PrismaService",
+          "OrthancService",
+          "StudyAccessService",
+          "PacsService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "CriticalResultService": {
+        "params": [
+          "PrismaService",
+          "StudyAccessService",
+          "KeycloakService",
+          "OrthancService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "AuthGuard": {
+        "params": [
+          "Reflector",
+          "AuthService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      },
+      "StudyAccessInterceptor": {
+        "params": [
+          "StudyAccessService"
+        ],
+        "scope": null,
+        "declared": [],
+        "optional": []
+      }
+    },
+    "middleware": [
+      {
+        "apply": [
+          "adminNoStore"
+        ],
+        "exclude": [],
+        "forRoutes": [
+          "AdminController",
+          "ViewerController",
+          "FindingController",
+          "ViewerJobController",
+          "ConnectController",
+          "ManualSrController",
+          "ReportPreviewController",
+          "FavoriteController",
+          "StudyTagsController",
+          "ReaderAssignmentController",
+          "ConsultationController",
+          "ClinicianQuestionController",
+          "ImageRequestController",
+          "ClinicalContextController",
+          "CriticalResultController",
+          "StudyAccessController"
+        ]
+      }
+    ],
+    "routes": [
+      {
+        "controller": "AdminController",
+        "handler": "auditEvents",
+        "method": "GET",
+        "paths": [
+          "admin|audit"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "4:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "AdminController",
+        "handler": "create",
+        "method": "POST",
+        "paths": [
+          "admin|users"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "AdminController",
+        "handler": "list",
+        "method": "GET",
+        "paths": [
+          "admin|users"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "4:0@0:\"page\":0"
+        ]
+      },
+      {
+        "controller": "AdminController",
+        "handler": "metrics",
+        "method": "GET",
+        "paths": [
+          "admin|metrics"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "AdminController",
+        "handler": "patch",
+        "method": "PATCH",
+        "paths": [
+          "admin|users/:id"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "3:1@1:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "AdminController",
+        "handler": "resetPassword",
+        "method": "POST",
+        "paths": [
+          "admin|users/:id/reset-password"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "3:1@1:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "AuthController",
+        "handler": "callback",
+        "method": "GET",
+        "paths": [
+          "auth|callback"
+        ],
+        "public": true,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "1:1@1:null:0",
+          "4:2@2:\"code\":0",
+          "4:3@3:\"state\":0",
+          "4:4@4:\"error\":0"
+        ]
+      },
+      {
+        "controller": "AuthController",
+        "handler": "entry",
+        "method": "POST",
+        "paths": [
+          "auth|entry"
+        ],
+        "public": true,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "1:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "AuthController",
+        "handler": "login",
+        "method": "GET",
+        "paths": [
+          "auth|login"
+        ],
+        "public": true,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "1:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "AuthController",
+        "handler": "logout",
+        "method": "POST",
+        "paths": [
+          "auth|logout"
+        ],
+        "public": null,
+        "status": 204,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "1:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "AuthController",
+        "handler": "register",
+        "method": "GET",
+        "paths": [
+          "auth|register"
+        ],
+        "public": true,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "1:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "AuthController",
+        "handler": "startLogin",
+        "method": "POST",
+        "paths": [
+          "auth|login"
+        ],
+        "public": true,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "1:1@1:null:0",
+          "3:2@2:null:0"
+        ]
+      },
+      {
+        "controller": "AuthController",
+        "handler": "startRegister",
+        "method": "POST",
+        "paths": [
+          "auth|register"
+        ],
+        "public": true,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "1:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "ClinicalContextController",
+        "handler": "read",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/clinical-context"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "4:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ClinicianQuestionController",
+        "handler": "close",
+        "method": "POST",
+        "paths": [
+          "/|questions/:id/close"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:2@2:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "ClinicianQuestionController",
+        "handler": "create",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/questions"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:2@2:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ClinicianQuestionController",
+        "handler": "forStudy",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/questions"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ClinicianQuestionController",
+        "handler": "list",
+        "method": "GET",
+        "paths": [
+          "/|questions"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "4:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "ClinicianQuestionController",
+        "handler": "read",
+        "method": "GET",
+        "paths": [
+          "/|questions/:id"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "ClinicianQuestionController",
+        "handler": "reply",
+        "method": "POST",
+        "paths": [
+          "/|questions/:id/entries"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:2@2:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "ConnectController",
+        "handler": "agreements",
+        "method": "GET",
+        "paths": [
+          "/|admin/agreements"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "4:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "ConnectController",
+        "handler": "basis",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/basis"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "4:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ConnectController",
+        "handler": "open",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/transfers"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "3:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ConnectController",
+        "handler": "outgoing",
+        "method": "GET",
+        "paths": [
+          "/|transfers"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "4:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "ConnectController",
+        "handler": "recordAgreement",
+        "method": "POST",
+        "paths": [
+          "/|admin/agreements"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "ConnectController",
+        "handler": "recordBasis",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/basis"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "3:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ConnectController",
+        "handler": "revoke",
+        "method": "POST",
+        "paths": [
+          "/|transfers/:id/revoke"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "3:1@1:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "ConnectController",
+        "handler": "revokeBasis",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/basis/:id/revoke"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:3@3:null:0",
+          "3:2@2:null:0",
+          "5:0@0:\"uid\":0",
+          "5:1@1:\"id\":0"
+        ]
+      },
+      {
+        "controller": "ConnectController",
+        "handler": "terminate",
+        "method": "PATCH",
+        "paths": [
+          "/|admin/agreements/:id"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "3:1@1:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "ConsultationController",
+        "handler": "candidates",
+        "method": "GET",
+        "paths": [
+          "/|consultation-candidates"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "ConsultationController",
+        "handler": "change",
+        "method": "POST",
+        "paths": [
+          "/|consultations/:id"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:2@2:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "ConsultationController",
+        "handler": "create",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/consultations"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:2@2:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ConsultationController",
+        "handler": "list",
+        "method": "GET",
+        "paths": [
+          "/|consultations"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "4:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "ConsultationController",
+        "handler": "read",
+        "method": "GET",
+        "paths": [
+          "/|consultations/:id"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "CriticalResultController",
+        "handler": "ack",
+        "method": "POST",
+        "paths": [
+          "/|critical-results/:id/ack"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:2@2:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "CriticalResultController",
+        "handler": "cancel",
+        "method": "POST",
+        "paths": [
+          "/|critical-results/:id/cancel"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:2@2:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "CriticalResultController",
+        "handler": "create",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/critical-results"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:2@2:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "CriticalResultController",
+        "handler": "forStudy",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/critical-results"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "CriticalResultController",
+        "handler": "list",
+        "method": "GET",
+        "paths": [
+          "/|critical-results"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "4:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "CriticalResultController",
+        "handler": "read",
+        "method": "GET",
+        "paths": [
+          "/|critical-results/:id"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "CriticalResultController",
+        "handler": "recipients",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/critical-result-recipients"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "CriticalResultController",
+        "handler": "supersede",
+        "method": "POST",
+        "paths": [
+          "/|critical-results/:id/supersede"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:2@2:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "DictationController",
+        "handler": "dictate",
+        "method": "POST",
+        "paths": [
+          "studies|:uid/dictation"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "1:2@2:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "FavoriteController",
+        "handler": "read",
+        "method": "GET",
+        "paths": [
+          "favorite-folders|/"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "FavoriteController",
+        "handler": "write",
+        "method": "POST",
+        "paths": [
+          "favorite-folders|/"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "FindingController",
+        "handler": "create",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/findings"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "1:2@2:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "FindingController",
+        "handler": "list",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/findings"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "1:3@3:null:0",
+          "4:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "FindingController",
+        "handler": "revise",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/findings/:id/revisions"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "1:3@3:null:0",
+          "5:0@0:\"uid\":0",
+          "5:1@1:\"id\":0"
+        ]
+      },
+      {
+        "controller": "FindingController",
+        "handler": "revisions",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/findings/:id/revisions"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:3@3:null:0",
+          "1:4@4:null:0",
+          "4:2@2:null:0",
+          "5:0@0:\"uid\":0",
+          "5:1@1:\"id\":0"
+        ]
+      },
+      {
+        "controller": "ImageRequestController",
+        "handler": "change",
+        "method": "POST",
+        "paths": [
+          "/|image-requests/:id"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:2@2:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "ImageRequestController",
+        "handler": "create",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/image-requests"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:2@2:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ImageRequestController",
+        "handler": "forStudy",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/image-requests"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ImageRequestController",
+        "handler": "list",
+        "method": "GET",
+        "paths": [
+          "/|image-requests"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "4:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "ImageRequestController",
+        "handler": "read",
+        "method": "GET",
+        "paths": [
+          "/|image-requests/:id"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "ManualSrController",
+        "handler": "prepare",
+        "method": "POST",
+        "paths": [
+          "studies/:uid/manual-sr|/"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ManualSrController",
+        "handler": "store",
+        "method": "POST",
+        "paths": [
+          "studies/:uid/manual-sr|:id/store"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "5:0@0:\"uid\":0",
+          "5:1@1:\"id\":0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "announce",
+        "method": "POST",
+        "paths": [
+          "/|gateway/announce"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "assign",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/assign"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "3:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "audit",
+        "method": "GET",
+        "paths": [
+          "/|audit"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "4:1@1:\"uid\":0",
+          "4:2@2:\"take\":0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "authzDicom",
+        "method": "GET",
+        "paths": [
+          "/|authz/dicom"
+        ],
+        "public": null,
+        "status": 204,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "bootstrap",
+        "method": "GET",
+        "paths": [
+          "/|bootstrap"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [
+          {
+            "name": "Cache-Control",
+            "value": "no-store"
+          }
+        ],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "4:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "citations",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/report/citations"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "clearWorklistColumns",
+        "method": "DELETE",
+        "paths": [
+          "/|worklist-columns"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "clearWorkspaceLayout",
+        "method": "DELETE",
+        "paths": [
+          "/|workspace-layout"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "colleagues",
+        "method": "GET",
+        "paths": [
+          "/|colleagues"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "commit",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/report/commit"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "3:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "copySharedFilters",
+        "method": "POST",
+        "paths": [
+          "/|shared-filters/copy"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "deleteFilter",
+        "method": "DELETE",
+        "paths": [
+          "/|filters/:id"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "deleteTemplate",
+        "method": "DELETE",
+        "paths": [
+          "/|templates/:id"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "dicomLookup",
+        "method": "POST",
+        "paths": [
+          "/|dicom/lookup"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "discardDraft",
+        "method": "DELETE",
+        "paths": [
+          "/|studies/:uid/draft"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "3:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "draft",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/draft"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [
+          {
+            "name": "Cache-Control",
+            "value": "no-store"
+          }
+        ],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "forceDiscardDrafts",
+        "method": "DELETE",
+        "paths": [
+          "/|studies/:uid/draft/force"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "3:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "forceRelease",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/release/force"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "gatewayReceipt",
+        "method": "POST",
+        "paths": [
+          "/|gateway/receipt"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "gatewayRetryRequests",
+        "method": "GET",
+        "paths": [
+          "/|gateway/retry-requests"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [
+          {
+            "name": "Cache-Control",
+            "value": "no-store"
+          }
+        ],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "4:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "hangingProtocols",
+        "method": "GET",
+        "paths": [
+          "/|hanging-protocols"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "health",
+        "method": "GET",
+        "paths": [
+          "/|health"
+        ],
+        "public": true,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": []
+      },
+      {
+        "controller": "PacsController",
+        "handler": "hold",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/hold"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "match",
+        "method": "POST",
+        "paths": [
+          "/|match"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "me",
+        "method": "GET",
+        "paths": [
+          "/|me"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [
+          {
+            "name": "Cache-Control",
+            "value": "no-store"
+          }
+        ],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "patch",
+        "method": "PATCH",
+        "paths": [
+          "/|studies/:uid"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "3:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "prefs",
+        "method": "GET",
+        "paths": [
+          "/|prefs"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "readFilterFolders",
+        "method": "GET",
+        "paths": [
+          "/|filter-folders"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "readingAppearance",
+        "method": "GET",
+        "paths": [
+          "/|reading-appearance"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "readingPreferences",
+        "method": "GET",
+        "paths": [
+          "/|reading-preferences"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "readSharedFilters",
+        "method": "GET",
+        "paths": [
+          "/|shared-filters"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "release",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/release"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "remove",
+        "method": "DELETE",
+        "paths": [
+          "/|studies/:uid"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "report",
+        "method": "PUT",
+        "paths": [
+          "/|studies/:uid/report"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "3:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "requestGatewayRetry",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/gateway-retry"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "3:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "saveFilter",
+        "method": "POST",
+        "paths": [
+          "/|filters"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "saveHangingProtocols",
+        "method": "PUT",
+        "paths": [
+          "/|hanging-protocols"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "saveReadingAppearance",
+        "method": "PUT",
+        "paths": [
+          "/|reading-appearance"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "saveReadingPreferences",
+        "method": "PUT",
+        "paths": [
+          "/|reading-preferences"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "saveSiteHangingProtocols",
+        "method": "PUT",
+        "paths": [
+          "/|hanging-protocols/site"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "saveTechNote",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/tech-note"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "3:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "saveTemplate",
+        "method": "POST",
+        "paths": [
+          "/|templates"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "saveWorklistColumns",
+        "method": "PUT",
+        "paths": [
+          "/|worklist-columns"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "saveWorkspaceLayout",
+        "method": "PUT",
+        "paths": [
+          "/|workspace-layout"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "saveWorkspaceShortcuts",
+        "method": "PUT",
+        "paths": [
+          "/|workspace-shortcuts"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "setDefaultFilter",
+        "method": "PATCH",
+        "paths": [
+          "/|filters/:id/default"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "3:1@1:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "siteHangingProtocols",
+        "method": "GET",
+        "paths": [
+          "/|hanging-protocols/site"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "structure",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/report/structure"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "studies",
+        "method": "GET",
+        "paths": [
+          "/|studies"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [
+          {
+            "name": "Cache-Control",
+            "value": "no-store"
+          }
+        ],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "4:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "techNote",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/tech-note"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "techNoteHistory",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/tech-note/history"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "4:1@1:\"before\":0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "unassigned",
+        "method": "GET",
+        "paths": [
+          "/|unassigned"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "unmatch",
+        "method": "POST",
+        "paths": [
+          "/|unmatch"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "versionCitations",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/report/versions/:version/citations"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "5:0@0:\"uid\":0",
+          "5:1@1:\"version\":0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "versions",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/report/versions"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "worklistColumns",
+        "method": "GET",
+        "paths": [
+          "/|worklist-columns"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "workspaceLayout",
+        "method": "GET",
+        "paths": [
+          "/|workspace-layout"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "workspaceShortcuts",
+        "method": "GET",
+        "paths": [
+          "/|workspace-shortcuts"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "writeFilterFolders",
+        "method": "POST",
+        "paths": [
+          "/|filter-folders"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "PacsController",
+        "handler": "writeSharedFilters",
+        "method": "POST",
+        "paths": [
+          "/|shared-filters"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "ReaderAssignmentController",
+        "handler": "candidates",
+        "method": "GET",
+        "paths": [
+          "/|reader-candidates"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "ReaderAssignmentController",
+        "handler": "read",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/reader-assignment"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ReaderAssignmentController",
+        "handler": "write",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/reader-assignment"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "3:2@2:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ReportPreviewController",
+        "handler": "clinicianReport",
+        "method": "GET",
+        "paths": [
+          "/|clinician/studies/:uid/report"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ReportPreviewController",
+        "handler": "clinicianStudies",
+        "method": "GET",
+        "paths": [
+          "/|clinician/studies"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "4:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "ReportPreviewController",
+        "handler": "clinicianTimeline",
+        "method": "GET",
+        "paths": [
+          "/|clinician/studies/:uid/timeline"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "4:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ReportPreviewController",
+        "handler": "read",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/report-preview"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "StudyAccessController",
+        "handler": "read",
+        "method": "GET",
+        "paths": [
+          "/|admin/users/:id/study-access"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "StudyAccessController",
+        "handler": "status",
+        "method": "GET",
+        "paths": [
+          "/|study-access"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "StudyAccessController",
+        "handler": "write",
+        "method": "POST",
+        "paths": [
+          "/|admin/users/:id/study-access"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "3:1@1:null:0",
+          "5:0@0:\"id\":0"
+        ]
+      },
+      {
+        "controller": "StudyTagsController",
+        "handler": "read",
+        "method": "GET",
+        "paths": [
+          "study-tags|/"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0"
+        ]
+      },
+      {
+        "controller": "StudyTagsController",
+        "handler": "write",
+        "method": "POST",
+        "paths": [
+          "study-tags|/"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:0@0:null:0",
+          "3:1@1:null:0"
+        ]
+      },
+      {
+        "controller": "ViewerController",
+        "handler": "contextEvent",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/viewer-context-events"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ViewerController",
+        "handler": "create",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/viewer-items"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ViewerController",
+        "handler": "list",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/viewer-items"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "4:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ViewerController",
+        "handler": "revise",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/viewer-items/:id/revisions"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "5:0@0:\"uid\":0",
+          "5:1@1:\"id\":0"
+        ]
+      },
+      {
+        "controller": "ViewerController",
+        "handler": "revisions",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/viewer-items/:id/revisions"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:3@3:null:0",
+          "4:2@2:null:0",
+          "5:0@0:\"uid\":0",
+          "5:1@1:\"id\":0"
+        ]
+      },
+      {
+        "controller": "ViewerJobController",
+        "handler": "create",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/viewer-jobs"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ViewerJobController",
+        "handler": "get",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/viewer-jobs/:id"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "5:0@0:\"uid\":0",
+          "5:1@1:\"id\":0"
+        ]
+      },
+      {
+        "controller": "ViewerJobController",
+        "handler": "list",
+        "method": "GET",
+        "paths": [
+          "/|studies/:uid/viewer-jobs"
+        ],
+        "public": null,
+        "status": null,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "4:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ViewerJobController",
+        "handler": "preview",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/viewer-jobs/preview"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:1@1:null:0",
+          "5:0@0:\"uid\":0"
+        ]
+      },
+      {
+        "controller": "ViewerJobController",
+        "handler": "revise",
+        "method": "POST",
+        "paths": [
+          "/|studies/:uid/viewer-jobs/:id/revisions"
+        ],
+        "public": null,
+        "status": 200,
+        "headers": [],
+        "guards": [],
+        "interceptors": [],
+        "args": [
+          "0:2@2:null:0",
+          "5:0@0:\"uid\":0",
+          "5:1@1:\"id\":0"
+        ]
+      }
+    ]
+  },
   "allocation_sha256": "f94104ae6e05dfe8e4aaf0a2f8a1fda01c00c1de1177917512ab9d1674ce79ee"
 }

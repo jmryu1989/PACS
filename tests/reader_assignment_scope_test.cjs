@@ -59,7 +59,18 @@ const status = n => e => typeof e?.getStatus === 'function' && e.getStatus() ===
 const response = async promise => { try { await promise; } catch (e) { return JSON.stringify(e.getResponse()); } assert.fail('expected a refusal'); };
 
 /** One store, one recording client per transaction, the real services over it. */
-function world() {
+// S9-U0b: the institution cache belongs to the institutions concern. It is filled as the API process fills it, by the
+// service's own start (onModuleInit), over a start-time view of this store: the institution list given here, and the
+// start's seed writes absorbed. The cases begin after the start and keep every refusal of their own store.
+async function start(svc,prisma,names){
+  const saved={institution:prisma.institution,order:prisma.order};
+  prisma.institution={upsert:async()=>({}),findMany:async()=>structuredClone(names)};
+  prisma.order={...prisma.order,count:async()=>1,updateMany:async()=>({count:0})};
+  const log=console.log;console.log=()=>{};
+  try{await svc.onModuleInit();}finally{console.log=log;if(saved.order)prisma.order=saved.order;else delete prisma.order;if(saved.institution)prisma.institution=saved.institution;else delete prisma.institution;}
+  return svc;
+}
+async function world() {
   // `held`: the records that keep a study from being deleted (removeState's refusals), seeded by a test; `Order`: the
   // orders a test links to a study.
   const t = { StudyState: new Map(), ReaderAssignment: new Map(), AuditLog: [], Order: new Map(),
@@ -218,7 +229,7 @@ function world() {
     // Every row the store holds, to compare before and after a call.
     snapshot: () => clone({ studies: [...t.StudyState], assignments: [...t.ReaderAssignment], audit: t.AuditLog, orders: [...t.Order], held: t.held }),
   };
-  w.pacs.institutions = INSTITUTIONS.map(i => ({ id: i, name: i }));
+  await start(w.pacs, root, INSTITUTIONS.map(i => ({ id: i, name: i })));
   return w;
 }
 
@@ -248,7 +259,7 @@ test('the boundary matrix: owner A always, receiver B only while its channel is 
   for (const state of Object.keys(EXPECTED)) {
     observed[state] = {};
     for (const [label, [manager, radiologist]] of Object.entries(ROLES)) {
-      const w = world();
+      const w = await world();
       await channel(w, state);
       const before = Object.fromEntries(INSTITUTIONS.map(i => [i, w.row(UID, i)]));
       for (const i of INSTITUTIONS)
@@ -280,7 +291,7 @@ test('the boundary matrix: owner A always, receiver B only while its channel is 
 });
 
 test('owner and receiver keep their own rows: reads, writes, history and candidates never cross', async () => {
-  const w = world();
+  const w = await world();
   await channel(w, 'open');
   await w.assign('aTech', 'aDoc');
   await w.assign('bTech', 'bDoc');
@@ -318,7 +329,7 @@ test('owner and receiver keep their own rows: reads, writes, history and candida
 });
 
 test('closing the channel closes the receiver row in the same transaction, with one audit entry; the owner row stays', async () => {
-  const w = world();
+  const w = await world();
   await channel(w, 'open');
   await w.assign('aTech', 'aDoc');
   await w.assign('bTech', 'bDoc');
@@ -357,7 +368,7 @@ test('closing the channel closes the receiver row in the same transaction, with 
   assert.deepEqual([a.revision, a.reader, a.history.map(h => h.detail.institution)], [1, reader('aDoc'), [A]]);
   // A cancel with no receiver row still moves B to a new revision (S7-U3a-R-001-F02): one closed row at revision 1 and one
   // entry for B, in the cancel's transaction. The owner, which has no row, gets none.
-  const v = world();
+  const v = await world();
   await channel(v, 'open');
   const mark = v.mark();
   await v.tele({ ts: 'cancelled' });
@@ -376,7 +387,7 @@ test('closing the channel closes the receiver row in the same transaction, with 
 });
 
 test('the close is atomic with the channel change: a failure after it leaves the channel and the row as they were', async () => {
-  const w = world();
+  const w = await world();
   await channel(w, 'open');
   await w.assign('bTech', 'bDoc');
   const before = { study: structuredClone(w.t.StudyState.get(UID)), row: w.row(UID, B), audits: w.audits().length };
@@ -395,7 +406,7 @@ test('the close is atomic with the channel change: a failure after it leaves the
 });
 
 test('a reopened channel starts at a new revision: no reader, no history and no request of the closed channel carries over', async () => {
-  const w = world();
+  const w = await world();
   await channel(w, 'open');
   await w.assign('aTech', 'aDoc');
   const first = w.body('bTech', await w.read('bTech'), 'bDoc');
@@ -428,7 +439,7 @@ test('a reopened channel starts at a new revision: no reader, no history and no 
 
 test('every close gives the ended channel a new revision: a request prepared in one channel never lands in the next (F02)', async () => {
   // (a) No row: B read revision 0 in its first channel and held a request; the owner cancelled and reopened.
-  const w = world();
+  const w = await world();
   await channel(w, 'open');
   await w.assign('aTech', 'aDoc');
   const ownerBefore = w.row(UID, A);
@@ -451,7 +462,7 @@ test('every close gives the ended channel a new revision: a request prepared in 
   // (b) A row closed by an earlier channel: Z received the study first and assigned; the owner redirected it to B, which
   //     assigned and was cancelled; in its reopened channel B prepared a request but wrote nothing, and the owner
   //     cancelled and reopened once more.
-  const v = world();
+  const v = await world();
   v.study(UID);
   await v.assign('aTech', 'aDoc');
   await v.tele({ ts: 'wait', teleTo: Z });
@@ -485,7 +496,7 @@ test('every close gives the ended channel a new revision: a request prepared in 
 test('a receiver read and a UID audit read check the channel and read their answer in one transaction (F01)', async () => {
   // Which lock that transaction holds is PostgreSQL's to show (the S7-U3a evidence realdb harness pauses a read and a
   // cancel against each other); here: no answer part is read outside the transaction that checked the channel.
-  const w = world();
+  const w = await world();
   await channel(w, 'open');
   await w.assign('bTech', 'bDoc');
   let at = w.mark();
@@ -506,7 +517,7 @@ test('a receiver read and a UID audit read check the channel and read their answ
 
 test('every path that takes the channel away closes the row: a new teleTo and a study delete; a delete without one changes nothing', async () => {
   // Redirect: the owner sends the waiting study to Z instead of B.
-  const w = world();
+  const w = await world();
   await channel(w, 'open');
   await w.assign('bTech', 'bDoc');
   await w.tele({ ts: 'sending', teleTo: Z });
@@ -514,7 +525,7 @@ test('every path that takes the channel away closes the row: a new teleTo and a 
   await assert.rejects(w.read('bTech'), status(404));
   assert.deepEqual(await w.read('zTech').then(s => [s.revision, s.reader, s.history]), [0, null, []]);
   // Delete while the channel is open: the receiver row closes in the delete's transaction; the owner row is left as before.
-  const d = world();
+  const d = await world();
   await channel(d, 'open');
   await d.assign('aTech', 'aDoc');
   await d.assign('bTech', 'bDoc');
@@ -526,13 +537,13 @@ test('every path that takes the channel away closes the row: a new teleTo and a 
     [[actorOf('aTech'), { institution: B, revision: 2, from: actorOf('bDoc'), to: null, closed: 'study-deleted' }]]);
   assert.deepEqual(d.row(UID, A), ownerBefore);
   // Delete while the channel is open but B never assigned: B still gets its closed row at revision 1 (F02).
-  const e = world();
+  const e = await world();
   await channel(e, 'open');
   await e.pacs.removeState(UID, caller('aTech'));
   assert.deepEqual([e.row(UID, B).revision, e.row(UID, B).closedRevision, e.row(UID, B).closedAt instanceof Date, e.row(UID, A)], [1, 1, true, null]);
   assert.deepEqual(e.audits().filter(a => a.action === ACTION).map(a => a.detail), [{ institution: B, revision: 1, from: null, to: null, closed: 'study-deleted' }]);
   // Delete with no channel open: no assignment call at all.
-  const n = world();
+  const n = await world();
   n.study(OTHER_UID);
   const mark = n.mark();
   await n.pacs.removeState(OTHER_UID, caller('aTech'));
@@ -540,7 +551,7 @@ test('every path that takes the channel away closes the row: a new teleTo and a 
 });
 
 test('a write whose check passed before the close cannot land after it', async () => {
-  const w = world();
+  const w = await world();
   await channel(w, 'open');
   const getUser = w.keycloak.getUser;
   let cancelled = false;
@@ -562,7 +573,7 @@ test('every assignment write and every close leave one audit row: a registered a
   // attributed to the institution whose assignment it is (the caller's for a write, the one that lost its channel for a
   // close) and to no other, names the study, and records the revision that institution's row reached. A refused or
   // replayed write leaves none. What the services call the value or how they make the call is not the claim.
-  const w = world();
+  const w = await world();
   w.study(UID);
   const seen = [];
   const step = async (label, act, expected, others = []) => {
@@ -605,7 +616,7 @@ test('every assignment write and every close leave one audit row: a registered a
 // A's study with its tele channel open to B, both institutions' assignments written and an order linked: everything a
 // delete removes, unlinks, closes or audits.
 async function deletable(oid) {
-  const w = world();
+  const w = await world();
   await channel(w, 'open');
   await w.assign('aTech', 'aDoc');
   await w.assign('bTech', 'bDoc');
@@ -695,7 +706,7 @@ test('a delete closes the receiver\'s assignment and audits it in its own transa
 });
 
 test('the existing rules hold unchanged at the receiver: replay, CAS, radiologist self only, W/H and the hold', async () => {
-  const w = world();
+  const w = await world();
   await channel(w, 'open');
   const body = w.body('bTech', await w.read('bTech'), 'bDoc');
   const first = await w.write('bTech', body);
@@ -722,7 +733,7 @@ test('the existing rules hold unchanged at the receiver: replay, CAS, radiologis
 });
 
 test('worklist rows carry the caller institution\'s own assignment on owned and tele-received rows', async () => {
-  const w = world();
+  const w = await world();
   w.study(UID, { owner: A, tele: B });
   w.study(OTHER_UID, { owner: B });
   w.study(Z_UID, { owner: Z });

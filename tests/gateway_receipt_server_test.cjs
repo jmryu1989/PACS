@@ -45,6 +45,17 @@ test('S4-U3 projection is the S4-U1b receipt shape; BIGINT and Date convert; non
 const GATEWAY={institution:'hallym',sub:'gw-sub',actor:'service-account-gw-hallym',roles:['gateway'],kind:'gateway'};
 const MEMBER={institution:'hallym',sub:'member-sub',actor:'synthetic-admin',roles:['technician','admin'],kind:'member'};
 const big=data=>({...data,seq:BigInt(data.seq),attempt:BigInt(data.attempt),successCount:BigInt(data.successCount),localCount:BigInt(data.localCount)});
+// S9-U0b: the institution cache belongs to the institutions concern. It is filled as the API process fills it, by the
+// service's own start (onModuleInit), over a start-time view of this store: the institution list given here, and the
+// start's seed writes absorbed. The cases begin after the start and keep every refusal of their own store.
+async function start(svc,prisma,names){
+  const saved={institution:prisma.institution,order:prisma.order};
+  prisma.institution={upsert:async()=>({}),findMany:async()=>structuredClone(names)};
+  prisma.order={...prisma.order,count:async()=>1,updateMany:async()=>({count:0})};
+  const log=console.log;console.log=()=>{};
+  try{await svc.onModuleInit();}finally{console.log=log;if(saved.order)prisma.order=saved.order;else delete prisma.order;if(saved.institution)prisma.institution=saved.institution;else delete prisma.institution;}
+  return svc;
+}
 function store({busy=false}={}){
   const states=new Map([['2.25.1','hallym'],['2.25.2','kin-center']]),receipts=new Map(),audits=[],log=[];let writes=0;
   const prisma={
@@ -159,13 +170,14 @@ test('S4-U3 list: only own rows carry the stored receipt; tele, stray and absent
         return structuredClone(RECEIPTS).filter(r=>arg.where.studyUid.in.includes(r.studyUid)&&r.institutionId===arg.where.institutionId);},
       create:async()=>{throw new Error('the list never writes a receipt');},update:async()=>{throw new Error('the list never writes a receipt');}},
     order:{findMany:async()=>[]},report:{findMany:async()=>[]},reportDraft:{findMany:async()=>[]},readerAssignment:{findMany:async()=>[]},
+    readingTemplate:{count:async()=>1,findMany:async()=>[]},userFilter:{findMany:async()=>[]},
     auditLog:{create:async()=>{throw new Error('no audit expected');}},$queryRaw:async()=>[],
   };
   const orthanc={studies:async()=>structuredClone(QIDO),
     studyIdentities:async()=>structuredClone(QIDO).map(r=>({'0020000D':r['0020000D'],'00080080':r['00080080']})),
     studiesByUid:async uids=>structuredClone(QIDO).filter(r=>uids.includes(r['0020000D'].Value[0]))};
   const svc=new PacsService(prisma,orthanc,{},new StudyAccessService(prisma,orthanc,{}));
-  svc.institutions=[{id:'hallym',name:'hallym'},{id:'kin-center',name:'kin-center'}];svc.prefs=async()=>({filters:[],templates:[]});
+  await start(svc,prisma,[{id:'hallym',name:'hallym'},{id:'kin-center',name:'kin-center'}]);
   const caller={institution:'hallym',sub:'synthetic-sub',actor:'synthetic-tech',roles:['technician'],kind:'member'};
   const r=await svc.listStudies(caller);
   const rows=Object.fromEntries(r.studies.map(s=>[s.uid,s]));
@@ -216,6 +228,7 @@ test('S4-F01V list: an absent own study carries only its own receipt, read befor
         return structuredClone(RECEIPTS).filter(r=>arg.where.studyUid.in.includes(r.studyUid)&&r.institutionId===arg.where.institutionId);},
       create:async()=>{throw new Error('the list never writes a receipt');},update:async()=>{throw new Error('the list never writes a receipt');}},
     order:{findMany:async()=>[]},report:{findMany:async()=>[]},reportDraft:{findMany:async()=>[]},readerAssignment:{findMany:async()=>[]},
+    readingTemplate:{count:async()=>1,findMany:async()=>[]},userFilter:{findMany:async()=>[]},
     auditLog:{create:async()=>{throw new Error('no audit expected');}},
     // The access policy snapshot is the only raw read that names StudyAccessPolicy: the first and the re-check.
     $queryRaw:async strings=>{if(strings.join('?').includes('"StudyAccessPolicy"'))log.push(['policy']);return [];},
@@ -224,7 +237,7 @@ test('S4-F01V list: an absent own study carries only its own receipt, read befor
     studyIdentities:async()=>structuredClone(qido).map(r=>({'0020000D':r['0020000D'],'00080080':r['00080080']})),
     studiesByUid:async uids=>structuredClone(qido).filter(r=>uids.includes(r['0020000D']?.Value?.[0]))};
   const svc=new PacsService(prisma,orthanc,{},new StudyAccessService(prisma,orthanc,{}));
-  svc.institutions=[{id:'hallym',name:'hallym'},{id:'kin-center',name:'kin-center'}];
+  await start(svc,prisma,[{id:'hallym',name:'hallym'},{id:'kin-center',name:'kin-center'}]);
   const caller={institution:'hallym',sub:'synthetic-sub',actor:'synthetic-tech',roles:['technician'],kind:'member'};
   const projection=(phase,successCount,localCount,errorCode,seq)=>({phase,successCount,localCount,attempt:1,errorCode,
     serverReceivedAt:'2026-09-24T01:0'+seq+':00.000Z',agentSeq:seq,epoch:V.valid.epoch});
@@ -296,13 +309,14 @@ test('S5-U6a admin view: each institution admin sees only its own receipts, ever
         return structuredClone(RECEIPTS).filter(r=>arg.where.studyUid.in.includes(r.studyUid)&&r.institutionId===arg.where.institutionId);},
       create:async()=>{throw new Error('the list never writes a receipt');},update:async()=>{throw new Error('the list never writes a receipt');}},
     order:{findMany:async()=>[]},report:{findMany:async()=>[]},reportDraft:{findMany:async()=>[]},readerAssignment:{findMany:async()=>[]},
+    readingTemplate:{count:async()=>1,findMany:async()=>[]},userFilter:{findMany:async()=>[]},
     auditLog:{create:async()=>{throw new Error('no audit expected');}},$queryRaw:async()=>[],
   };
   const orthanc={studies:async()=>structuredClone(QIDO),
     studyIdentities:async()=>structuredClone(QIDO).map(r=>({'0020000D':r['0020000D'],'00080080':r['00080080']})),
     studiesByUid:async uids=>structuredClone(QIDO).filter(r=>uids.includes(r['0020000D'].Value[0]))};
   const svc=new PacsService(prisma,orthanc,{},new StudyAccessService(prisma,orthanc,{}));
-  svc.institutions=[{id:'hallym',name:'hallym'},{id:'kin-center',name:'kin-center'}];
+  await start(svc,prisma,[{id:'hallym',name:'hallym'},{id:'kin-center',name:'kin-center'}]);
   const admin=institution=>({institution,sub:'synthetic-admin-'+institution,actor:'synthetic-admin-'+institution,roles:['admin'],kind:'member'});
   const projection=(phase,successCount,localCount,seq,epoch)=>({phase,successCount,localCount,attempt:2,errorCode:CODE[phase]??null,
     serverReceivedAt:minute(seq),agentSeq:seq,epoch});
