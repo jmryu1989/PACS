@@ -1,0 +1,303 @@
+{
+  "note": "Test-owned fixture of tests/admin_audit_attribution_test.cjs (not product code): CW01-CW16 of the closed world (W3-C, W4-C; Astra S9-U0b audit consult D4). `table` plays the part api/src/admin-audit.ts plays for api/src. `positive` is what CW01-CW03 expect of the unedited writer.ts, callers.ts and composition.ts. `cases` are the mutants CW05-CW16: each variant's `edits` replace text that occurs exactly once in its file, and `expect` names every verdict class the variant must fail by (an unresolved entry by the line of its `@cw:` tag and a part of its reason); every class it does not name stays empty. A row a mutant leaves unwritten is named as such, in the table's order.",
+  "table": {
+    "rows": ["study.arrived", "match", "study.assign", "hold.force-release", "state.patch", "unmatch", "report.draft", "report.draft.clear",
+      "report.draft.discard", "report.draft.force-discard", "report.save", "report.approve"],
+    "wildcards": []
+  },
+  "positive": {
+    "CW01": { "tag": "audit-member", "actions": ["match", "study.arrived"], "origins": ["callers.ts match", "callers.ts study.arrived"],
+      "rules": ["W3-C every call of `audit`"] },
+    "CW02": { "tag": "scope-write", "actions": ["hold.force-release", "state.patch", "study.assign", "unmatch"],
+      "origins": ["callers.ts hold.force-release", "callers.ts state.patch", "callers.ts study.assign", "callers.ts unmatch"],
+      "rules": ["W3-C every call of the function at"] },
+    "CW03": { "tag": "draft-transaction", "actions": ["report.approve", "report.draft", "report.draft.clear", "report.draft.discard", "report.save"],
+      "origins": ["writer.ts report.draft", "writer.ts report.draft.clear", "writer.ts report.draft.discard"],
+      "rules": ["W3-C every call of the function at", "W2(iv) the guard at"],
+      "direct": { "tag": "force-discard", "actions": ["report.draft.force-discard"] } }
+  },
+  "cases": [
+    {
+      "id": "CW05",
+      "title": "a request's action handed to an otherwise literal public helper leaves its write unresolved",
+      "variants": [
+        { "name": "a module method relays the request's action to the audit member",
+          "edits": [{ "file": "callers.ts", "find": "    await this.audit.audit('system', 'study.arrived', uid); // @cw:arrived-call",
+            "replace": "    await this.audit.audit('system', 'study.arrived', uid); // @cw:arrived-call\n  }\n\n  async relay(uid: string, body: any) {\n    await this.audit.audit('system', body.action, uid);" }],
+          "expect": { "unresolved": [{ "tag": "audit-member", "reason": "`body.action` is a property the program does not fix" }],
+            "unwritten_rows": ["study.arrived", "match"] } },
+        { "name": "a module method takes the action from the facade's request parameter",
+          "edits": [
+            { "file": "callers.ts", "find": "  async arrived(uid: string) {", "replace": "  async arrived(uid: string, action: string) {" },
+            { "file": "callers.ts", "find": "    await this.audit.audit('system', 'study.arrived', uid); // @cw:arrived-call", "replace": "    await this.audit.audit('system', action, uid); // @cw:arrived-call" },
+            { "file": "composition.ts", "find": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward",
+              "replace": "  arrived(uid: string, kind: string) { return this.worklistConcern.arrived(uid, kind); } // @cw:arrived-forward" }],
+          "expect": { "unresolved": [{ "tag": "audit-member", "reason": "the class `SynFacade`, which is handed to the decorator" }],
+            "unwritten_rows": ["study.arrived", "match"] } }
+      ]
+    },
+    {
+      "id": "CW06",
+      "title": "a scope callback's action from the request leaves the scope's write unresolved",
+      "variants": [
+        { "name": "the callback writes the request's action",
+          "edits": [{ "file": "callers.ts", "find": "      await audit(c.actor, 'state.patch', uid); // @cw:patch-call", "replace": "      await audit(c.actor, body.action, uid); // @cw:patch-call" }],
+          "expect": { "unresolved": [{ "tag": "scope-write", "reason": "`body.action` is a property the program does not fix" }],
+            "unwritten_rows": ["study.assign", "hold.force-release", "state.patch", "unmatch"] } },
+        { "name": "the callback's let takes the request's action on one branch",
+          "edits": [{ "file": "callers.ts", "find": "      await audit(c.actor, 'state.patch', uid); // @cw:patch-call",
+            "replace": "      let next = 'state.patch';\n      if (body.force) next = body.action;\n      await audit(c.actor, next, uid); // @cw:patch-call" }],
+          "expect": { "unresolved": [{ "tag": "scope-write", "reason": "`body.action` is a property the program does not fix" }],
+            "unwritten_rows": ["study.assign", "hold.force-release", "state.patch", "unmatch"] } }
+      ]
+    },
+    {
+      "id": "CW07",
+      "title": "the draft transaction caller's guard removed or bypassed fails by the open `report.` prefix",
+      "variants": [
+        { "name": "the guard removed",
+          "edits": [{ "file": "callers.ts", "find": "    if (!['save', 'approve'].includes(action)) throw new Error(`unknown action: ${action}`); // @cw:commit-guard",
+            "replace": "    // @cw:commit-guard: the guard is gone" }],
+          "expect": { "uncovered_prefixes": ["report."], "unwritten_rows": ["report.save", "report.approve"] } },
+        { "name": "a guard that does not exit",
+          "edits": [{ "file": "callers.ts", "find": "    if (!['save', 'approve'].includes(action)) throw new Error(`unknown action: ${action}`); // @cw:commit-guard",
+            "replace": "    if (!['save', 'approve'].includes(action)) console.warn(`unknown action: ${action}`); // @cw:commit-guard" }],
+          "expect": { "uncovered_prefixes": ["report."], "unwritten_rows": ["report.save", "report.approve"] } },
+        { "name": "the guard bypassed by a second write of the raw request",
+          "edits": [{ "file": "callers.ts", "find": "      await audit(c.actor, `report.${action}`, uid); // @cw:commit-call",
+            "replace": "      await audit(c.actor, `report.${action}`, uid); // @cw:commit-call\n      await audit(c.actor, `report.${body.next}`, uid);" }],
+          "expect": { "uncovered_prefixes": ["report."] } }
+      ]
+    },
+    {
+      "id": "CW08",
+      "title": "a closed union stated on a request's value is no evidence",
+      "variants": [
+        { "name": "an assertion to the union",
+          "edits": [{ "file": "callers.ts", "find": "    await this.audit.audit(c.actor, 'match', uid); // @cw:match-call",
+            "replace": "    await this.audit.audit(c.actor, 'match', uid); // @cw:match-call\n  }\n\n  async rematch(uid: string, body: any, c: SynCaller) {\n    await this.audit.audit(c.actor, body.kind as 'match' | 'study.arrived', uid);" }],
+          "expect": { "unresolved": [{ "tag": "audit-member", "reason": "`body.kind` is a property the program does not fix" }],
+            "unwritten_rows": ["study.arrived", "match"] } },
+        { "name": "a const annotated with the union",
+          "edits": [{ "file": "callers.ts", "find": "    await this.audit.audit(c.actor, 'match', uid); // @cw:match-call",
+            "replace": "    await this.audit.audit(c.actor, 'match', uid); // @cw:match-call\n  }\n\n  async rematch(uid: string, body: any, c: SynCaller) {\n    const kind: 'match' | 'study.arrived' = body.kind;\n    await this.audit.audit(c.actor, kind, uid);" }],
+          "expect": { "unresolved": [{ "tag": "audit-member", "reason": "`body.kind` is a property the program does not fix" }],
+            "unwritten_rows": ["study.arrived", "match"] } },
+        { "name": "the member's parameter declared as the union",
+          "edits": [
+            { "file": "writer.ts", "find": "  audit(actor: string, action: string, target: string) {", "replace": "  audit(actor: string, action: 'match' | 'study.arrived', target: string) {" },
+            { "file": "callers.ts", "find": "    await this.audit.audit(c.actor, 'match', uid); // @cw:match-call",
+              "replace": "    await this.audit.audit(c.actor, 'match', uid); // @cw:match-call\n  }\n\n  async rematch(uid: string, body: any, c: SynCaller) {\n    await this.audit.audit(c.actor, body.kind, uid);" }],
+          "expect": { "unresolved": [{ "tag": "audit-member", "reason": "`body.kind` is a property the program does not fix" }],
+            "unwritten_rows": ["study.arrived", "match"] } }
+      ]
+    },
+    {
+      "id": "CW09",
+      "title": "a public helper's last call removed: no call is not taken as safe",
+      "variants": [
+        { "name": "both calls of the audit member removed",
+          "edits": [
+            { "file": "callers.ts", "find": "    await this.audit.audit(c.actor, 'match', uid); // @cw:match-call", "replace": "    void uid; // @cw:match-call" },
+            { "file": "callers.ts", "find": "    await this.audit.audit('system', 'study.arrived', uid); // @cw:arrived-call", "replace": "    void uid; // @cw:arrived-call" }],
+          "expect": { "unresolved": [{ "tag": "audit-member", "reason": "nothing in the program calls" }], "unwritten_rows": ["study.arrived", "match"] } }
+      ]
+    },
+    {
+      "id": "CW10",
+      "title": "the audit function extracted, returned or handed out of the program fails though literal calls remain",
+      "variants": [
+        { "name": "the scope hands its audit function to an outside function",
+          "edits": [
+            { "file": "writer.ts", "find": "export class SynClosedPrisma extends PrismaClient {}", "replace": "export class SynClosedPrisma extends PrismaClient {}\ndeclare function synLeak(value: unknown): void;" },
+            { "file": "writer.ts", "find": "      return work(tx, audit); // @cw:scope-work", "replace": "      synLeak(audit);\n      return work(tx, audit); // @cw:scope-work" }],
+          "expect": { "unresolved": [{ "tag": "scope-write", "reason": "handed to `synLeak`" }],
+            "unwritten_rows": ["study.assign", "hold.force-release", "state.patch", "unmatch"] } },
+        { "name": "a callback returns the audit function",
+          "edits": [{ "file": "callers.ts", "find": "    return this.access.scopeWrite(uid, c, async (tx, audit) => { await audit(c.actor, 'study.assign', uid); }); // @cw:assign-call",
+            "replace": "    return this.access.scopeWrite(uid, c, async (tx, audit) => { await audit(c.actor, 'study.assign', uid); return audit; }); // @cw:assign-call" }],
+          "expect": { "unresolved": [{ "tag": "scope-write", "reason": "is used in a ReturnStatement" }],
+            "unwritten_rows": ["study.assign", "hold.force-release", "state.patch", "unmatch"] } },
+        { "name": "a callback keeps the audit function outside it",
+          "edits": [
+            { "file": "callers.ts", "find": "import type { SynAccess, SynAuditWriter, SynCaller, SynDraft } from './writer';",
+              "replace": "import type { SynAccess, SynAuditWriter, SynCaller, SynDraft } from './writer';\nlet synKept: unknown;" },
+            { "file": "callers.ts", "find": "      await audit(c.actor, 'hold.force-release', uid); // @cw:release-call",
+              "replace": "      synKept = audit;\n      await audit(c.actor, 'hold.force-release', uid); // @cw:release-call" }],
+          "expect": { "unresolved": [{ "tag": "scope-write", "reason": "is used in a BinaryExpression" }],
+            "unwritten_rows": ["study.assign", "hold.force-release", "state.patch", "unmatch"] } },
+        { "name": "a draft callback hands its audit function to an outside function",
+          "edits": [
+            { "file": "callers.ts", "find": "import type { SynAccess, SynAuditWriter, SynCaller, SynDraft } from './writer';",
+              "replace": "import type { SynAccess, SynAuditWriter, SynCaller, SynDraft } from './writer';\ndeclare function synLeak(value: unknown): void;" },
+            { "file": "callers.ts", "find": "      await audit(c.actor, `report.${action}`, uid); // @cw:commit-call",
+              "replace": "      synLeak(audit);\n      await audit(c.actor, `report.${action}`, uid); // @cw:commit-call" }],
+          "expect": { "unresolved": [{ "tag": "draft-transaction", "reason": "is used in a CallExpression" }],
+            "unwritten_rows": ["report.draft", "report.draft.clear", "report.draft.discard", "report.save", "report.approve"] } }
+      ]
+    },
+    {
+      "id": "CW11",
+      "title": "an instance handed to an opaque consumer or an any alias leaves its writes unresolved though the typed path remains",
+      "variants": [
+        { "name": "the facade hands the audit module to an opaque consumer",
+          "edits": [
+            { "file": "composition.ts", "find": "const Injectable = (): ClassDecorator => () => undefined;", "replace": "const Injectable = (): ClassDecorator => () => undefined;\ndeclare function synRegister(value: unknown): void;" },
+            { "file": "composition.ts", "find": "    this.commitConcern = new SynCommit(this.draftConcern); // @cw:last-wiring",
+              "replace": "    this.commitConcern = new SynCommit(this.draftConcern); // @cw:last-wiring\n    synRegister(this.auditConcern);" }],
+          "expect": { "unresolved": [{ "tag": "audit-member", "reason": "the class `SynAuditWriter`, which is reached through an instance, which is handed on at" }],
+            "unwritten_rows": ["study.arrived", "match"] } },
+        { "name": "the audit module kept in an any alias",
+          "edits": [{ "file": "composition.ts", "find": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward",
+            "replace": "  arrived(uid: string) { const loose: any = this.auditConcern; void loose; return this.worklistConcern.arrived(uid); } // @cw:arrived-forward" }],
+          "expect": { "unresolved": [{ "tag": "audit-member", "reason": "the class `SynAuditWriter`, which is reached through an instance, which is handed on at" }],
+            "unwritten_rows": ["study.arrived", "match"] } },
+        { "name": "the facade hands the DI service to an opaque consumer",
+          "edits": [
+            { "file": "composition.ts", "find": "const Injectable = (): ClassDecorator => () => undefined;", "replace": "const Injectable = (): ClassDecorator => () => undefined;\ndeclare function synRegister(value: unknown): void;" },
+            { "file": "composition.ts", "find": "    this.commitConcern = new SynCommit(this.draftConcern); // @cw:last-wiring",
+              "replace": "    this.commitConcern = new SynCommit(this.draftConcern); // @cw:last-wiring\n    synRegister(this.scope);" }],
+          "expect": { "unresolved": [{ "tag": "scope-require", "reason": "a client value handed to `this.scope.require`, which this check does not follow" }] } }
+      ]
+    },
+    {
+      "id": "CW12",
+      "title": "a constructor's storage made mutable, public or written again leaves what it holds unresolved",
+      "variants": [
+        { "name": "the facade's field not readonly",
+          "edits": [{ "file": "composition.ts", "find": "  private readonly auditConcern: SynAuditWriter = new SynAuditWriter(this.prisma); // @cw:audit-field",
+            "replace": "  private auditConcern: SynAuditWriter = new SynAuditWriter(this.prisma); // @cw:audit-field" }],
+          "expect": { "unresolved": [{ "tag": "audit-member", "reason": "`auditConcern` of `SynFacade` is not readonly" }], "unwritten_rows": ["study.arrived", "match"] } },
+        { "name": "the facade's field public",
+          "edits": [{ "file": "composition.ts", "find": "  private readonly auditConcern: SynAuditWriter = new SynAuditWriter(this.prisma); // @cw:audit-field",
+            "replace": "  readonly auditConcern: SynAuditWriter = new SynAuditWriter(this.prisma); // @cw:audit-field" }],
+          "expect": { "unresolved": [{ "tag": "audit-member", "reason": "`auditConcern` of `SynFacade` is not private" }], "unwritten_rows": ["study.arrived", "match"] } },
+        { "name": "the readonly field written again through an untyped this",
+          "edits": [{ "file": "composition.ts", "find": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward",
+            "replace": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward\n  reset() { (this as any).auditConcern = new SynAuditWriter(this.prisma); }" }],
+          "expect": { "unresolved": [{ "tag": "audit-member", "reason": "`auditConcern` of `SynFacade` is written at" }], "unwritten_rows": ["study.arrived", "match"] } },
+        { "name": "a module's parameter property not readonly",
+          "edits": [{ "file": "callers.ts", "find": "  constructor(private readonly audit: SynAuditWriter) {}", "replace": "  constructor(private audit: SynAuditWriter) {}" }],
+          "expect": { "unresolved": [{ "tag": "audit-member", "reason": "`audit` of `SynWorklist` is not readonly" }], "unwritten_rows": ["study.arrived", "match"] } },
+        { "name": "the readonly field replaced by a request value through an untyped this",
+          "edits": [{ "file": "composition.ts", "find": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward",
+            "replace": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward\n  swap(body: any) { (this as any).auditConcern = body.writer; }" }],
+          "expect": { "unresolved": [{ "tag": "audit-member", "reason": "`auditConcern` of `SynFacade` is written at" }], "unwritten_rows": ["study.arrived", "match"] } },
+        { "name": "the facade that owns the modules handed to an opaque consumer",
+          "edits": [
+            { "file": "composition.ts", "find": "const Injectable = (): ClassDecorator => () => undefined;", "replace": "const Injectable = (): ClassDecorator => () => undefined;\ndeclare function synRegister(value: unknown): void;" },
+            { "file": "composition.ts", "find": "    this.commitConcern = new SynCommit(this.draftConcern); // @cw:last-wiring",
+              "replace": "    this.commitConcern = new SynCommit(this.draftConcern); // @cw:last-wiring\n    synRegister(this);" }],
+          "expect": { "unresolved": [
+              { "tag": "audit-member", "reason": "is held by an instance of `SynFacade`, which is handed on at" },
+              { "tag": "scope-write", "reason": "is held by an instance of `SynFacade`, which is handed on at" },
+              { "tag": "draft-transaction", "reason": "is held by an instance of `SynFacade`, which is handed on at" },
+              { "tag": "scope-require", "reason": "a client value handed to `this.scope.require`, which this check does not follow" },
+              { "tag": "scope-work", "reason": "a client value handed to `work`, which this check does not follow" },
+              { "tag": "draft-work", "reason": "a client value handed to `work`, which this check does not follow" }],
+            "unwritten_rows": ["study.arrived", "match", "study.assign", "hold.force-release", "state.patch", "unmatch", "report.draft", "report.draft.clear",
+              "report.draft.discard", "report.save", "report.approve"] } }
+      ]
+    },
+    {
+      "id": "CW13",
+      "title": "a method replaced, an object read by a dynamic key or a prototype, or an override leaves the member's write unresolved",
+      "variants": [
+        { "name": "the method replaced through the prototype",
+          "edits": [{ "file": "composition.ts", "find": "// end of composition.ts",
+            "replace": "SynAuditWriter.prototype.audit = function () { return undefined as any; };\n// end of composition.ts" }],
+          "expect": { "unresolved": [{ "tag": "audit-member", "reason": "`SynAuditWriter.prototype`" }], "unwritten_rows": ["study.arrived", "match"] } },
+        { "name": "the module read by a key the program does not fix",
+          "edits": [{ "file": "composition.ts", "find": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward",
+            "replace": "  arrived(uid: string, key?: string) { if (key) (this.auditConcern as any)[key] = null; return this.worklistConcern.arrived(uid); } // @cw:arrived-forward" }],
+          "expect": { "unresolved": [{ "tag": "audit-member", "reason": "is read by a key the program does not fix" }], "unwritten_rows": ["study.arrived", "match"] } },
+        { "name": "the method replaced by a dot on its typed holder",
+          "edits": [{ "file": "composition.ts", "find": "  arrived(uid: string) { return this.worklistConcern.arrived(uid); } // @cw:arrived-forward",
+            "replace": "  arrived(uid: string) { this.auditConcern.audit = () => undefined as any; return this.worklistConcern.arrived(uid); } // @cw:arrived-forward" }],
+          "expect": { "unresolved": [{ "tag": "audit-member", "reason": "(replaced at api/src/syn-fixture/closed-world/composition.ts:" }], "unwritten_rows": ["study.arrived", "match"] } },
+        { "name": "an override in a subclass",
+          "edits": [{ "file": "writer.ts", "find": "// end of writer.ts",
+            "replace": "export class SynLouderAudit extends SynAuditWriter {\n  audit(actor: string, action: string, target: string) { return super.audit(actor, action, target); }\n}\n// end of writer.ts" }],
+          "expect": { "unresolved": [{ "tag": "audit-member", "reason": "is extended at" }], "unwritten_rows": ["study.arrived", "match"] } },
+        { "name": "the module class extending a class whose code the program does not have",
+          "edits": [
+            { "file": "writer.ts", "find": "export class SynClosedPrisma extends PrismaClient {}", "replace": "export class SynClosedPrisma extends PrismaClient {}\ndeclare class SynOutside { constructor(); }" },
+            { "file": "writer.ts", "find": "export class SynAuditWriter {\n  constructor(private readonly prisma: SynClosedPrisma) {}",
+              "replace": "export class SynAuditWriter extends SynOutside {\n  constructor(private readonly prisma: SynClosedPrisma) { super(); }" }],
+          "expect": { "unresolved": [{ "tag": "audit-member", "reason": "`SynAuditWriter` extends a class" }], "unwritten_rows": ["study.arrived", "match"] } }
+      ]
+    },
+    {
+      "id": "CW14",
+      "title": "a decorated entry, an opaque constructor consumer or a reflective callback call is not closed by the program's literal calls",
+      "variants": [
+        { "name": "the module class decorated",
+          "edits": [
+            { "file": "writer.ts", "find": "export class SynClosedPrisma extends PrismaClient {}", "replace": "export class SynClosedPrisma extends PrismaClient {}\ndeclare function synProvider(): ClassDecorator;" },
+            { "file": "writer.ts", "find": "export class SynAuditWriter {", "replace": "@synProvider()\nexport class SynAuditWriter {" }],
+          "expect": { "unresolved": [{ "tag": "audit-member", "reason": "is handed to the decorator" }], "unwritten_rows": ["study.arrived", "match"] } },
+        { "name": "the member decorated",
+          "edits": [
+            { "file": "writer.ts", "find": "export class SynClosedPrisma extends PrismaClient {}", "replace": "export class SynClosedPrisma extends PrismaClient {}\ndeclare function synEntry(): MethodDecorator;" },
+            { "file": "writer.ts", "find": "  audit(actor: string, action: string, target: string) {", "replace": "  @synEntry() audit(actor: string, action: string, target: string) {" }],
+          "expect": { "unresolved": [{ "tag": "audit-member", "reason": "it is decorated" }], "unwritten_rows": ["study.arrived", "match"] } },
+        { "name": "the class handed to an opaque constructor consumer",
+          "edits": [{ "file": "composition.ts", "find": "// end of composition.ts", "replace": "export const SYN_PROVIDERS = [SynAuditWriter];\n// end of composition.ts" }],
+          "expect": { "unresolved": [{ "tag": "audit-member", "reason": "the class `SynAuditWriter`, which is handed on at" }], "unwritten_rows": ["study.arrived", "match"] } },
+        { "name": "the callback run by Function#call",
+          "edits": [{ "file": "writer.ts", "find": "      return work(tx, audit); // @cw:scope-work", "replace": "      return work.call(undefined, tx, audit); // @cw:scope-work" }],
+          "expect": { "unresolved": [{ "tag": "scope-write", "reason": "handed to `work.call`" },
+              { "tag": "scope-work", "reason": "a client value handed to `work.call`, which this check does not follow" }],
+            "unwritten_rows": ["study.assign", "hold.force-release", "state.patch", "unmatch"] } },
+        { "name": "the callback run by Reflect.apply",
+          "edits": [{ "file": "writer.ts", "find": "      return work(tx, audit); // @cw:scope-work", "replace": "      return Reflect.apply(work, undefined, [tx, audit]); // @cw:scope-work" }],
+          "expect": { "unresolved": [{ "tag": "scope-write", "reason": "(ArrayLiteralExpression)" },
+              { "tag": "scope-work", "reason": "a client value used in a ArrayLiteralExpression" }],
+            "unwritten_rows": ["study.assign", "hold.force-release", "state.patch", "unmatch"] } }
+      ]
+    },
+    {
+      "id": "CW15",
+      "title": "SQL provenance stays the raw rules': a closed module's fragment, raw text or cast is refused as before",
+      "variants": [
+        { "name": "an SQL helper of another module, a closed public member",
+          "edits": [
+            { "file": "writer.ts", "find": "  async scopeWrite<T>(", "replace": "  predicate(uid: string) { return Prisma.sql`uid = ${uid}`; }\n\n  async scopeWrite<T>(" },
+            { "file": "callers.ts", "find": "    return this.access.scopeWrite(uid, c, async tx => tx.studyState.findMany({ where: { uid } })); // @cw:peek",
+              "replace": "    return this.access.scopeWrite(uid, c, async tx => tx.$queryRaw`SELECT uid FROM \"StudyState\" WHERE ${this.access.predicate(uid)}`); // @cw:peek" }],
+          "expect": { "unresolved": [{ "tag": "peek", "reason": "SQL helper `this.access.predicate` is not followed" }] } },
+        { "name": "Prisma.raw of a closed member's parameter a literal reaches",
+          "edits": [
+            { "file": "writer.ts", "find": "  async scopeWrite<T>(",
+              "replace": "  async readColumn(tx: Prisma.TransactionClient, column: string) { return tx.$queryRaw(Prisma.sql`SELECT ${Prisma.raw(column)} FROM \"StudyState\"`); } // @cw:raw-read\n\n  async scopeWrite<T>(" },
+            { "file": "callers.ts", "find": "    return this.access.scopeWrite(uid, c, async tx => tx.studyState.findMany({ where: { uid } })); // @cw:peek",
+              "replace": "    return this.access.scopeWrite(uid, c, async tx => this.access.readColumn(tx, 'uid')); // @cw:peek" }],
+          "expect": { "unresolved": [{ "tag": "raw-read", "reason": "SQL whose text the program does not fix" },
+            { "tag": "raw-read", "reason": "Prisma.raw text is not literal" }] } },
+        { "name": "a fragment cast to a string in a closed member",
+          "edits": [{ "file": "writer.ts", "find": "  async scopeWrite<T>(",
+            "replace": "  async readCast(tx: Prisma.TransactionClient, uid: string) { const where = Prisma.sql`uid = ${uid}` as unknown as string; return tx.$queryRaw`SELECT uid FROM \"StudyState\" WHERE ${where}`; } // @cw:cast-read\n\n  async scopeWrite<T>(" }],
+          "expect": { "unresolved": [{ "tag": "cast-read", "reason": "is asserted to `unknown`" }, { "tag": "cast-read", "reason": "is an SQL fragment" },
+            { "tag": "scope-read", "reason": "so its type is no evidence" }] } }
+      ]
+    },
+    {
+      "id": "CW16",
+      "title": "an unregistered literal action on a resolving public helper fails as unlisted alone",
+      "variants": [
+        { "name": "on the audit member",
+          "edits": [{ "file": "callers.ts", "find": "    await this.audit.audit('system', 'study.arrived', uid); // @cw:arrived-call",
+            "replace": "    await this.audit.audit('system', 'study.arrived', uid); // @cw:arrived-call\n    await this.audit.audit('system', 'study.departed', uid);" }],
+          "expect": { "unlisted": ["study.departed"] } },
+        { "name": "in a scope callback",
+          "edits": [{ "file": "callers.ts", "find": "      await audit(c.actor, 'hold.force-release', uid); // @cw:release-call",
+            "replace": "      await audit(c.actor, 'hold.force-release', uid); // @cw:release-call\n      await audit(c.actor, 'hold.renew', uid);" }],
+          "expect": { "unlisted": ["hold.renew"] } },
+        { "name": "in a draft callback across files",
+          "edits": [{ "file": "callers.ts", "find": "      await audit(c.actor, `report.${action}`, uid); // @cw:commit-call",
+            "replace": "      await audit(c.actor, `report.${action}`, uid); // @cw:commit-call\n      await audit(c.actor, 'report.sign', uid);" }],
+          "expect": { "unlisted": ["report.sign"] } }
+      ]
+    }
+  ]
+}
