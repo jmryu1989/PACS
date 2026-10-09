@@ -35,7 +35,7 @@
  * request or not read, a helper or callback that leaves the program, and an object whose origin or holders are not fixed
  * stay unresolved; the SQL rules are unchanged. The product is not shaped for it (AGENTS 1-B, D73).
  * REQ-AUDIT-CLOSED-WORLD -> RISK-AUDIT-UNRESOLVED / RISK-AUDIT-ATTACKER-ACTION / RISK-AUDIT-OBJECT-ESCAPE /
- *   RISK-AUDIT-SQL-PROVENANCE -> TEST-AUDIT-CLOSED-WORLD CW01-CW16 (tests/fixtures/admin-audit-checker/closed-world).
+ *   RISK-AUDIT-SQL-PROVENANCE -> TEST-AUDIT-CLOSED-WORLD CW01-CW17 (tests/fixtures/admin-audit-checker/closed-world).
  *
  * Module: KIN_ADMIN_AUDIT_MODULE, default api/src/admin-audit.ts loaded through Node type stripping (Node >= 22.18);
  * the compiled /app/dist/admin-audit (kin-api:ci) is the same rule. The completeness cases read api/src and api/prisma/*.cjs and use
@@ -932,7 +932,11 @@ test('the query takes limit (1-100, default 25) and the sealed after only', () =
 //    that holds it keep to W4 in turn. The DI instances a facade receives (typed constructor parameters) reach its modules
 //    by (b). Anything else — a local, an any or untyped alias, an opaque consumer, a mutable or public field, a second
 //    write, a factory's result — is still handed on. The private and readonly marks are required, never evidence: the
-//    writes are counted.
+//    writes are counted. For every W4 object (Astra AUDIT-CHECKER-U0B review F01): a member of a holder read or called
+//    through an assertion (`as`, `<T>`) to a type that is not the object's own (any, unknown, another class or a
+//    structural type) hands the object on — neither that call nor what the read gives is typed as the object's, so no
+//    call, slot or escape after it would be traced. A member key W1 fixes reads the same member by a dot or an element
+//    access; `!`, parentheses and `satisfies` keep the type.
 //  F02 SQL values, before any raw classification: an interpolation is a value (Prisma binds it) when it is a literal, a
 //    result the language makes a primitive (template, arithmetic, comparison, `!`, `typeof`), each side of ?:, ||, ?? and
 //    &&, `new Date()`, an array literal (one parameter), a const or let through its initializer and every assignment, a W3
@@ -1757,8 +1761,37 @@ function scanAuditWrites(sources = auditSources()) {
       result.escape = holderUse(object, node, result.writes);
       if (result.escape) break;
     }
+    // After every other use, so that an object that escapes otherwise keeps its first reason (Astra AUDIT-CHECKER-U0B
+    // review F01): a member read or called through an assertion.
+    for (const node of result.escape ? [] : new Set(holdersOf(object))) {
+      result.escape = assertedRead(object, node);
+      if (result.escape) break;
+    }
     memo.set(object.declaration, result);
     return result;
+  }
+  /**
+   * W4 (Astra AUDIT-CHECKER-U0B review F01): why a holder read through an assertion (`as`, `<T>`) hands the object on,
+   * else null. A member read or called there is resolved at the asserted type: when that is not the object's own (any,
+   * unknown, another or a structural type), neither the call nor what the read gives is typed as the object's, so no
+   * call, slot or escape after it is traced — the object no longer keeps to the program. A write there is counted where
+   * it stands (holderUse); `!`, parentheses and `satisfies` keep the type.
+   */
+  function assertedRead(object, start) {
+    let node = start, asserted = null;
+    while (WRAPPERS.has(node.parent.kind)) {
+      node = node.parent;
+      if (ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)) asserted = node;
+    }
+    const parent = node.parent;
+    if (!asserted || !isAccess(parent) || parent.expression !== node || mutated(outer(parent))) return null;
+    const type = checker.getNonNullableType(checker.getTypeAtLocation(node));
+    const target = type.objectFlags & ts.ObjectFlags.Reference ? type.target : type;
+    const instance = !!(target.objectFlags & ts.ObjectFlags.Class);
+    const family = object.kind === 'instance' ? familyOf(object.declaration) : new Set([object.declaration]);
+    const kept = instance === (object.kind === 'instance') && !type.isUnion()
+      && (target.symbol?.declarations ?? []).some(declaration => family.has(declaration));
+    return kept ? null : `is read through the assertion \`${snippet(asserted)}\` at ${where(asserted)}, typed \`${typeText(type)}\` there, not as \`${className(object.declaration)}\``;
   }
   /** Why the use `start` (a node holding a class or an instance) may change it or hand it on, else null; a member write is
    *  recorded in `writes` (W4: a write of a member no positive judgement reads, such as a count, stays allowed). */
@@ -4520,13 +4553,13 @@ test('checker self-test: every positive mark reclassified.json replaces is refus
     + `${entry.now.map(item => `${item.status} ${item.detail}`).join(' + ')} (${entry.rule}${entry.moved_to ? `; alone in ${entry.moved_to}` : ''})`)));
 });
 
-// ── the closed world, W3-C and W4-C (Astra S9-U0b audit consult D4): CW01-CW16 ──
+// ── the closed world, W3-C and W4-C (Astra S9-U0b audit consult D4): CW01-CW17 ──
 // REQ-AUDIT-CLOSED-WORLD -> RISK-AUDIT-UNRESOLVED / RISK-AUDIT-ATTACKER-ACTION / RISK-AUDIT-OBJECT-ESCAPE /
-// RISK-AUDIT-SQL-PROVENANCE -> TEST-AUDIT-CLOSED-WORLD CW01-CW16. tests/fixtures/admin-audit-checker/closed-world holds
+// RISK-AUDIT-SQL-PROVENANCE -> TEST-AUDIT-CLOSED-WORLD CW01-CW17. tests/fixtures/admin-audit-checker/closed-world holds
 // writer.ts (the three helper shapes of the S9-U0b modules, each a public member), callers.ts (the modules calling them from
 // another file), composition.ts (the facade creating and owning them, and the DI service it hands on), monolith.ts (the
 // same writes in one class before the split, CW04) and cases.json (the contract table, what CW01-CW03 expect, and every
-// mutant of CW05-CW16 as exact text edits with the verdict it must give). The fixtures are data read here and placed side by
+// mutant of CW05-CW17 as exact text edits with the verdict it must give). The fixtures are data read here and placed side by
 // side under api/src/syn-fixture/closed-world/ for these scans only; the product corpus never holds them. Each mutant runs
 // after the unedited corpus passes, alone, and must fail by exactly the classes and entries cases.json names — an unresolved
 // entry by its tagged line (`@cw:<tag>`) and a part of its reason, every other class as named or empty — and parse (a file
@@ -4639,9 +4672,10 @@ test('CW04 the split and wired modules give the writers, actions, prefixes and S
   console.log('ADMIN_AUDIT_CLOSED_WORLD ' + JSON.stringify({ case: 'CW04', writers: writers(after), sql: sql(after) }));
 });
 
-// CW05-CW16, in cases.json's order: the ids are fixed before any is registered (one test each, nothing merged or dropped).
+// CW05-CW17, in cases.json's order: the ids are fixed before any is registered (one test each, nothing merged or dropped).
+// CW17 is Astra's AUDIT-CHECKER-U0B review F01 (a slot read through an assertion, an element access or a closure).
 const CLOSED_MUTANTS = CLOSED_CASES.cases;
-assert.deepEqual(CLOSED_MUTANTS.map(entry => entry.id), Array.from({ length: 12 }, (_, n) => `CW${String(n + 5).padStart(2, '0')}`));
+assert.deepEqual(CLOSED_MUTANTS.map(entry => entry.id), Array.from({ length: 13 }, (_, n) => `CW${String(n + 5).padStart(2, '0')}`));
 for (const entry of CLOSED_MUTANTS) {
   test(`${entry.id} ${entry.title}`, () => {
     closedBase();
