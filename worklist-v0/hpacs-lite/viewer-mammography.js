@@ -9,13 +9,15 @@
      source.load(ref, {signal, purpose}) -> image {sop, frame, rows, columns, ...renderer data}
        ref = {study, series, sop, frame}; a permission or session loss rejects with error.refusal
        'denied' | 'ended', an abort with AbortError; anything else is treated as a passing delay.
-     viewport.attach(element, {slot}) -> {render(image, display) -> {rendered, sop, frame}, detach()}
+     viewport.attach(element, {slot}) -> {render(image, display, {current}) -> {rendered, sop, frame} | {rendered:false, superseded:true}, detach()}
+       The renderer calls current() immediately before it paints and paints nothing when it returns false:
+       the latest navigation intent always wins, also against a render already on its way.
      identity {institution, subject, sequence, studies:[uid], check() -> {institution, subject, sequence}, onEnd(fn) -> unsubscribe}
      events {requested(record), loaded(record), displayed(record)} - all optional */
 (function(root){
   'use strict';
   const KIND_LABEL={conventional:'Conventional',generated2d:'Synthetic 2D',dbt:'DBT'};
-  const SLICE_LABEL={slices:'Slices',sampled:'Sampled','mip-slab':'MIP Slab',unspecified:'Slices Unspecified'};
+  const SLICE_LABEL={slices:'Slices',slab:'Slab','mip-slab':'MIP Slab',unspecified:'Slices Unspecified'};
   const ROLE_LABEL={current:'Current',prior:'Prior'};
   const LAYOUTS=[['current','Current'],['compare-cc','Compare CC'],['compare-mlo','Compare MLO']];
   const CACHE_LIMIT=8,ZOOM_STEP=1.25,ZOOM_MAX=8;
@@ -30,6 +32,8 @@
     mismatch:'요청한 프레임과 다른 영상이 도착해 표시하지 않았습니다. Retry를 누르세요.',
     ended:'접근 권한 또는 계정이 바뀌어 영상을 닫았습니다. 뷰어를 다시 여세요.',
     ambiguous:'같은 위치의 영상이 여러 개입니다. 표시할 영상을 고르세요.',
+    partial:'이 위치에는 부분 촬영(Partial View)만 있습니다. 표시할 영상을 고르세요.',
+    unusable:'프레임 정보를 확인하지 못해 이 영상을 표시하지 않았습니다.',
   };
   // Why an object is not placed in a standard slot; every such object stays listed.
   const REASON={
@@ -42,6 +46,8 @@
     'contrast-enhanced-not-supported':'조영 유방촬영은 이 비교 화면에서 지원하지 않습니다.','tomosynthesis-projection':'단층 투영 원본 영상입니다.',
     'biopsy-image':'생검 관련 영상입니다.','mixed-frame-types':'프레임 종류가 섞여 있습니다.','presentation-intent-conflict':'표시 용도 정보가 서로 다릅니다.',
     'identity-invalid':'영상 식별 정보를 확인하지 못했습니다.','wrong-study':'다른 검사의 영상입니다.','duplicate-object':'같은 영상이 두 번 들어 있습니다.',
+    'frame-count-invalid':'프레임 수가 없거나 허용 범위를 벗어났습니다.','image-frame-type-conflict':'영상 종류(Image Type)와 프레임 종류(Frame Type)가 서로 다릅니다.',
+    'frame-type-missing':'프레임 종류 정보가 없습니다.','partial-view-conflict':'부분 촬영 정보가 서로 다릅니다.',
   };
 
   function mount(options){
@@ -109,18 +115,22 @@
 
     function slotFor(spec,k){
       const slot=plan.slots[[spec.role,spec.side,spec.view,k].join('|')]||{status:'missing'};
-      if(slot.status!=='ambiguous')return {slot,object:slot.status==='ready'?slot.object:null};
+      // Duplicates and partial-only slots are filled only by the doctor's explicit choice.
+      if(slot.status!=='ambiguous'&&slot.status!=='partial')return {slot,object:slot.status==='ready'?slot.object:null};
       const chosen=slot.candidates.find(o=>o.sop===choices.get(slot.key));
       return {slot,object:chosen||null};
     }
     function draft(spec,k){
       const {slot,object}=slotFor(spec,k),id='cell-'+(++cellSerial);
-      const cell={id,spec,kind:k,slot,object,index:null,coverage:null,position:1,shown:null,image:null,failed:null,
+      const cell={id,spec,kind:k,slot,object,index:null,coverage:null,position:1,intent:1,shown:null,reported:null,image:null,failed:null,drawing:0,
         camera:{mode:'fit',scale:null,pan:{x:0,y:0}},controllers:new Set(),queue:Promise.resolve(),disposed:false,handle:null};
       if(object){
-        cell.index=model.frameIndex(object.item);cell.coverage=model.createCoverage(cell.index);
+        cell.index=model.frameIndex(object.item);
+        // An object without any reachable frame is never handed on: the cell says so and loads nothing.
+        if(!cell.index.entries.length){cell.object=null;cell.slot={...slot,status:'unusable'};cell.index=null;build(cell);return cell;}
+        cell.coverage=model.createCoverage(cell.index);
         const kept=memory.get(object.sop);
-        if(kept){cell.position=Math.min(kept.position,cell.index.entries.length)||1;cell.camera={...kept.camera,pan:{...kept.camera.pan}};}
+        if(kept){cell.position=Math.min(kept.position,cell.index.entries.length)||1;cell.intent=cell.position;cell.camera={...kept.camera,pan:{...kept.camera.pan}};}
       }
       build(cell);return cell;
     }
@@ -135,10 +145,12 @@
       cell.element.addEventListener('keydown',event=>key(cell,event));
       cell.view.addEventListener('wheel',event=>wheel(cell,event),{passive:false});
       cell.view.addEventListener('pointerdown',event=>drag(cell,event));
-      if(cell.slot.status==='ambiguous'&&!cell.object){
-        cell.note.textContent=MESSAGE.ambiguous;
+      if(cell.slot.status==='unusable')cell.note.textContent=MESSAGE.unusable;
+      if((cell.slot.status==='ambiguous'||cell.slot.status==='partial')&&!cell.object){
+        cell.note.textContent=cell.slot.status==='partial'?MESSAGE.partial:MESSAGE.ambiguous;
         cell.slot.candidates.forEach((o,i)=>{
-          const b=el('button',{type:'button',title:o.sop,text:'Use '+(o.instanceNumber!==null?'Img '+o.instanceNumber:'Image '+(i+1))});
+          const name=o.partial?'Partial '+(o.partialSections.join('/')||'View'):o.instanceNumber!==null?'Img '+o.instanceNumber:'Image '+(i+1);
+          const b=el('button',{type:'button',title:o.sop,text:'Use '+name});
           b.onclick=()=>{choices.set(cell.slot.key,o.sop);replace(cell);};cell.note.append(' ',b);
         });
       }
@@ -151,9 +163,11 @@
       const parts=[ROLE_LABEL[s.role],...(study?[study.date||'Date Unverified']:[]),s.side+' '+s.view,KIND_LABEL[cell.kind]];
       if(cell.slot.status==='refused')parts.push('Refused');
       else if(cell.slot.status==='missing')parts.push('Missing');
-      else if(!cell.object)parts.push('Ambiguous ('+cell.slot.candidates.length+')');
+      else if(cell.slot.status==='unusable')parts.push('Frames Unverified');
+      else if(!cell.object)parts.push((cell.slot.status==='partial'?'Partial Only (':'Ambiguous (')+cell.slot.candidates.length+')');
       else{
         const o=cell.object,entry=cell.index.entries[cell.position-1];
+        if(o.partial)parts.push('Partial '+(o.partialSections.join('/')||'View'));
         if(o.instanceNumber!==null)parts.push('Img '+o.instanceNumber);
         if(cell.slot.status==='ambiguous')parts.push('Chosen of '+cell.slot.candidates.length);
         if(o.kind==='dbt'){
@@ -167,6 +181,7 @@
         if(spec.orientation.status!=='verified')parts.push('Orientation Unverified');
         if(spec.voi.status!=='verified')parts.push('VOI Unverified');
         if(cell.slot.alternatives&&cell.slot.alternatives.length)parts.push('+'+cell.slot.alternatives.length+' Alt');
+        if(cell.slot.partials&&cell.slot.partials.length)parts.push('+'+cell.slot.partials.length+' Partial');
       }
       cell.label.textContent=parts.join(' · ');
       cell.label.title=cell.object?cell.object.sop:'';
@@ -208,24 +223,37 @@
         voi:{center:spec.voi.center,width:spec.voi.width,fn:spec.voi.fn},modality:{...spec.modality},scale,pan:{...pan},
         width:box.width,height:box.height};
     }
-    // Renders of one cell run one at a time; a request is re-checked right before it reaches the viewport.
+    // Renders of one cell run one at a time. A request is checked right before it reaches the viewport,
+    // the viewport checks it again right before it paints (`current`), and it is checked once more after
+    // the render: only the latest navigation intent is painted, counted or reported as displayed.
     function draw(cell,image,entry,ticket){
+      const latest=()=>usable(cell)&&(!ticket||gate.current(ticket))&&live();
+      cell.drawing++;
       const run=cell.queue.then(async()=>{
-        if(!usable(cell)||ticket&&!gate.current(ticket)||!live())return false;
+        if(!latest())return false;
         let result=null;
-        try{result=await cell.handle.render(image,display(cell,image,entry));}catch(_){result=null;}
+        try{result=await cell.handle.render(image,display(cell,image,entry),{current:latest});}catch(_){result=null;}
         if(!usable(cell)||!live())return false;
-        if(!result||result.rendered!==true||result.sop!==entry.sop||result.frame!==entry.frame){
-          cell.failed=entry.index;cell.note.textContent=MESSAGE.renderFailed;cell.note.append(' ',retry(cell));return false;
+        if(result&&result.superseded)return false;
+        const painted=!!result&&result.rendered===true&&result.sop===entry.sop&&result.frame===entry.frame;
+        const current=!ticket||gate.current(ticket);
+        if(!painted){
+          if(current){cell.failed=entry.index;cell.intent=cell.position;cell.note.textContent=MESSAGE.renderFailed;cell.note.append(' ',retry(cell));}
+          return false;
         }
-        const fresh=!cell.shown||cell.shown.sop!==entry.sop||cell.shown.frame!==entry.frame;
-        cell.position=entry.index;cell.image=image;cell.shown={sop:entry.sop,frame:entry.frame};cell.failed=null;cell.note.textContent='';
+        // The screen now holds this frame; the labels follow the screen.
+        cell.position=entry.index;cell.image=image;cell.shown={sop:entry.sop,frame:entry.frame};
+        // Superseded while painting: kept as the screen's truth, never counted or reported; the newer
+        // request is already queued behind this one.
+        if(!current){relabel(cell);return false;}
+        const fresh=!cell.reported||cell.reported.sop!==entry.sop||cell.reported.frame!==entry.frame;
+        cell.failed=null;cell.note.textContent='';
         memory.set(cell.object.sop,{position:cell.position,camera:{...cell.camera,pan:{...cell.camera.pan}}});
-        if(fresh){cell.coverage.mark(entry);emit('displayed',record(cell,entry,'display'));}
+        if(fresh){cell.reported={sop:entry.sop,frame:entry.frame};cell.coverage.mark(entry);emit('displayed',record(cell,entry,'display'));}
         relabel(cell);
         if(fresh)prefetch(cell);
         return true;
-      });
+      }).finally(()=>{cell.drawing--;});
       cell.queue=run.catch(()=>false);
       return run;
     }
@@ -246,9 +274,15 @@
     async function go(cell,target,force){
       if(!cell||!cell.object||!usable(cell)||!live())return;
       const total=cell.index.entries.length;target=Math.max(1,Math.min(total,target));
-      if(target===cell.position&&cell.shown&&!force)return;
-      const entry=cell.index.entries[target-1],ticket=gate.begin(cell.id,entry.sop+'#'+entry.frame);
+      const entry=cell.index.entries[target-1];
+      // Every request, also one back to the slice already on screen, supersedes every older one.
+      const ticket=gate.begin(cell.id,entry.sop+'#'+entry.frame);cell.intent=target;
       for(const c of cell.controllers)if(c.display){c.abort();untrack(cell,c);}
+      if(!force&&cell.shown&&cell.shown.sop===entry.sop&&cell.shown.frame===entry.frame){
+        // Already on screen: repaint only when an older render may still land after this point.
+        if(cell.drawing)await draw(cell,cell.image,entry,ticket);
+        return;
+      }
       const c=track(cell);c.display=true;
       let image;
       try{image=await obtain(cell,entry,c.signal);}
@@ -257,7 +291,8 @@
         if(!usable(cell)||!gate.current(ticket))return;
         if(refused(error)){stop(MESSAGE.ended);return;}
         if(aborted(error)||!live())return;
-        cell.failed=target;cell.note.textContent=error&&error.name==='KinFrameMismatch'?MESSAGE.mismatch:MESSAGE.delayed;cell.note.append(' ',retry(cell));return;
+        cell.failed=target;cell.intent=cell.position;
+        cell.note.textContent=error&&error.name==='KinFrameMismatch'?MESSAGE.mismatch:MESSAGE.delayed;cell.note.append(' ',retry(cell));return;
       }
       untrack(cell,c);
       if(!usable(cell)||!gate.current(ticket)||!live())return;
@@ -267,7 +302,8 @@
       if(!cell.object||cell.index.entries.length<2)return;
       const moves={ArrowDown:1,PageDown:1,ArrowUp:-1,PageUp:-1};
       let target=null;
-      if(event.key in moves)target=cell.position+moves[event.key];
+      // Steps build on the latest intent, so a burst of keys or wheel notches moves as far as asked.
+      if(event.key in moves)target=cell.intent+moves[event.key];
       else if(event.key==='Home')target=1;else if(event.key==='End')target=cell.index.entries.length;
       if(target===null)return;
       event.preventDefault();go(cell,target);
@@ -276,7 +312,7 @@
       if(!cell.object)return;
       event.preventDefault();
       if(event.ctrlKey){zoom(cell,event.deltaY<0?ZOOM_STEP:1/ZOOM_STEP);return;}
-      if(cell.index.entries.length>1&&event.deltaY)go(cell,cell.position+(event.deltaY>0?1:-1));
+      if(cell.index.entries.length>1&&event.deltaY)go(cell,cell.intent+(event.deltaY>0?1:-1));
     }
     function scaleOf(cell){
       if(cell.camera.mode==='pixel')return 1;

@@ -51,7 +51,7 @@ HARNESS = r"""<!doctype html><html><head><meta charset="utf-8"></head>
 <script src="/mammography-model.js"></script><script src="/viewer-mammography.js"></script>
 <script>
 window.mg={loads:[],events:[],renders:[],handles:[],detached:[],violations:[],serial:0,handleSerial:0,control:{},hashing:false,
-  identityNow:{institution:'H1',subject:'reader-1',sequence:7},endListeners:[],held:new Map(),luts:new Map()};
+  identityNow:{institution:'H1',subject:'reader-1',sequence:7},endListeners:[],held:new Map(),luts:new Map(),renderHeld:[],renderRelease:[],screen:{}};
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 function lut(bits,d){
   const key=[bits,d.voi.center,d.voi.width,d.voi.fn,d.invert,d.modality.slope,d.modality.intercept].join('|');
@@ -80,14 +80,20 @@ function paint(canvas,element,image,d){
 const viewport={attach(element,info){
   const id=++mg.handleSerial,canvas=document.createElement('canvas');
   canvas.style.cssText='position:absolute;left:0;top:0;width:100%;height:100%';element.append(canvas);
-  const handle={detached:false,async render(image,d){
+  // The seam contract: current() is asked immediately before painting; a superseded render paints nothing.
+  // control.holdRender(image,'before'|'after') holds a render before its paint or after it (async renderer).
+  const hold=async(image,phase)=>{if(mg.control.holdRender&&mg.control.holdRender(image,phase)){mg.renderHeld.push(phase+':'+image.frame);await new Promise(r=>mg.renderRelease.push(r));}};
+  const handle={detached:false,async render(image,d,opts){
     const row={handle:id,sop:image&&image.sop,frame:image&&image.frame,tag:image&&image.tag,display:JSON.parse(JSON.stringify(d)),detached:handle.detached};
     mg.renders.push(row);
     if(handle.detached){mg.violations.push({handle:id,what:'render-after-detach',sop:row.sop,frame:row.frame,tag:row.tag});throw Error('detached');}
     if(!image||!image.pixels)throw Error('no image');
     if(mg.control.failRender&&mg.control.failRender(image))throw Error('render failed');
     if(mg.hashing)row.sha256=[...new Uint8Array(await crypto.subtle.digest('SHA-256',image.pixels.buffer))].map(b=>b.toString(16).padStart(2,'0')).join('');
-    paint(canvas,element,image,d);row.painted=true;
+    await hold(image,'before');
+    if(!opts||typeof opts.current!=='function'||!opts.current()){row.superseded=true;return {rendered:false,superseded:true,sop:image.sop,frame:image.frame};}
+    paint(canvas,element,image,d);row.painted=true;mg.screen[id]=image.frame;
+    await hold(image,'after');
     return {rendered:true,sop:image.sop,frame:image.frame};
   },detach(){if(handle.detached)mg.violations.push({handle:id,what:'double-detach'});handle.detached=true;mg.detached.push(id);canvas.remove();}};
   mg.handles.push({id,info,element,canvas,handle});return handle;
@@ -630,6 +636,7 @@ class MammographyViewerDOMTest(unittest.TestCase):
         page.evaluate("()=>{mg.control.ignoreAbort=true;mg.control.hold=r=>r.purpose==='display'&&r.frame===16}")
         self.key(page, "Current L CC", "End")  # A (held)
         page.wait_for_function("()=>mg.loads.filter(l=>l.state==='held').length===1", timeout=WAIT)
+        self.key(page, "Current L CC", "Home")  # back to the slice on screen
         self.key(page, "Current L CC", "ArrowDown", sop=sop)  # B (prefetched, shown at once)
         self.key(page, "Current L CC", "End")  # A again (held)
         page.wait_for_function("()=>mg.loads.filter(l=>l.state==='held').length===2", timeout=WAIT)
@@ -652,6 +659,133 @@ class MammographyViewerDOMTest(unittest.TestCase):
         self.cell(page, "Current L CC").get_by_role("button", name="Retry", exact=True).click()
         self.wait_displayed(page, sop, 14)
         self.assertIn("Slice 14 / 16", self.label(page, "Current L CC"))
+        self.assertEqual(self.violations(page), [])
+
+    def release_all(self, page):
+        """Release every held load, newest first, and wait until nothing is in flight."""
+        page.evaluate("()=>[...mg.held.keys()].sort((a,b)=>b-a).forEach(s=>mgRelease(s))")
+        self.settle(page)
+
+    def frames_shown(self, page, sop):
+        return [f for _, f, *_ in self.displayed(page, sop)]
+
+    def test_mg06_dom_latest_intent_wins_over_delayed_seek_and_scroll_bursts(self):
+        page = self.page()
+        item, meta = entry(DBT["L CC"])
+        sop = tag(item, "00080018")
+        self.mount(page, [(item, meta)])
+        self.wait_displayed(page, sop, 1)
+        page.wait_for_function("()=>mg.events.some(e=>e.name==='loaded'&&e.purpose==='prefetch'&&e.frame===2)", timeout=WAIT)
+        # End is delayed; Home asks for the slice already on screen; then End's frame arrives.
+        page.evaluate("()=>{mg.control.ignoreAbort=true;mg.control.hold=r=>r.purpose==='display'&&r.frame===16}")
+        self.key(page, "Current L CC", "End")
+        page.wait_for_function("()=>mg.loads.some(l=>l.state==='held')", timeout=WAIT)
+        self.key(page, "Current L CC", "Home")
+        self.release_all(page)
+        self.assertEqual(self.frames_shown(page, sop), [1], "MG06 M13: a request back to the current slice cancels the delayed one")
+        self.assertIn("Slice 1 / 16", self.label(page, "Current L CC"))
+        self.assertFalse(page.evaluate("s=>mg.renders.some(r=>r.sop===s&&r.frame===16&&r.painted)", sop))
+        # A seek burst End/Home/End/Home (fresh window: nothing of slice 16 cached) with every delayed
+        # load arriving afterwards, newest first.
+        page3 = self.page()
+        self.mount(page3, [(item, meta)])
+        self.wait_displayed(page3, sop, 1)
+        page3.evaluate("()=>{mg.control.ignoreAbort=true;mg.control.hold=r=>r.purpose==='display'&&r.frame===16}")
+        for key in ("End", "Home", "End", "Home"):
+            self.key(page3, "Current L CC", key)
+        page3.wait_for_function("()=>mg.loads.filter(l=>l.wasHeld).length===2", timeout=WAIT)
+        self.release_all(page3)
+        self.assertEqual(self.frames_shown(page3, sop), [1], "the last seek of the burst is what stays on screen")
+        self.assertIn("Slice 1 / 16", self.label(page3, "Current L CC"))
+        # A scroll burst: five steps down while every frame from 2 on (prefetch included) is delayed.
+        page2 = self.page()
+        page2.evaluate("()=>{mg.control.hold=r=>r.frame>=2}")
+        self.mount(page2, [(item, meta)])
+        self.wait_displayed(page2, sop, 1)
+        page2.wait_for_function("()=>mg.loads.some(l=>l.state==='held'&&l.purpose==='prefetch'&&l.frame===2)", timeout=WAIT)
+        self.cell(page2, "Current L CC").focus()
+        for _ in range(5):
+            page2.keyboard.press("ArrowDown")
+        page2.wait_for_function("()=>mg.loads.some(l=>l.state==='held'&&l.purpose==='display'&&l.frame===6)", timeout=WAIT)
+        self.release_all(page2)
+        self.wait_displayed(page2, sop, 6)
+        self.settle(page2)
+        self.assertEqual(self.frames_shown(page2, sop), [1, 6], "MG06 M16: a scroll burst moves from the latest intent")
+        self.assertIn("Slice 6 / 16", self.label(page2, "Current L CC"))
+        # Three wheel notches in a row while frames are delayed: three slices further, nothing in between.
+        box = self.cell(page2, "Current L CC").bounding_box()
+        page2.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        for _ in range(3):
+            page2.mouse.wheel(0, 100)
+        page2.wait_for_function("()=>mg.loads.some(l=>l.state==='held'&&l.purpose==='display'&&l.frame===9)", timeout=WAIT)
+        self.release_all(page2)
+        self.wait_displayed(page2, sop, 9)
+        self.settle(page2)
+        self.assertEqual(self.frames_shown(page2, sop), [1, 6, 9])
+        self.assertIn("Slice 9 / 16", self.label(page2, "Current L CC"))
+        self.assertEqual(self.violations(page2), [])
+
+    def test_mg06_dom_superseded_renders_are_neither_painted_nor_reported(self):
+        page = self.page()
+        item, meta = entry(DBT["L CC"])
+        sop = tag(item, "00080018")
+        self.mount(page, [(item, meta)])
+        self.wait_displayed(page, sop, 1)
+        page.wait_for_function("()=>mg.events.some(e=>e.name==='loaded'&&e.purpose==='prefetch'&&e.frame===2)", timeout=WAIT)
+        hid = self.handle_of(page, "Current L CC")
+        # The render of slice 16 is held before its paint; the doctor goes Home and one slice down.
+        page.evaluate("()=>{mg.control.holdRender=(i,phase)=>phase==='before'&&i.frame===16}")
+        self.key(page, "Current L CC", "End")
+        page.wait_for_function("()=>mg.renderHeld.includes('before:16')", timeout=WAIT)
+        self.key(page, "Current L CC", "Home")
+        self.key(page, "Current L CC", "ArrowDown")
+        page.evaluate("()=>{mg.control.holdRender=null;mg.renderRelease.splice(0).forEach(r=>r())}")
+        self.wait_displayed(page, sop, 2)
+        self.settle(page)
+        self.assertFalse(page.evaluate("s=>mg.renders.some(r=>r.sop===s&&r.frame===16&&r.painted)", sop),
+                         "MG06 M15: a render superseded before its paint is not painted")
+        self.assertEqual(self.frames_shown(page, sop), [1, 2])
+        self.assertIn("Slice 2 / 16", self.label(page, "Current L CC"))
+        # The render of slice 16 paints and then finishes late (an asynchronous renderer); Home follows.
+        page.evaluate("()=>{mg.control.holdRender=(i,phase)=>phase==='after'&&i.frame===16}")
+        self.key(page, "Current L CC", "End")
+        page.wait_for_function("()=>mg.renderHeld.includes('after:16')", timeout=WAIT)
+        self.key(page, "Current L CC", "Home")
+        page.evaluate("()=>{mg.control.holdRender=null;mg.renderRelease.splice(0).forEach(r=>r())}")
+        self.wait_displayed(page, sop, 1, count=2)
+        self.settle(page)
+        self.assertEqual(self.frames_shown(page, sop), [1, 2, 1], "MG06 M14: a render superseded after its paint is not reported as the current display")
+        self.assertEqual(page.evaluate("id=>mg.screen[id]", hid), 1, "the screen ends on the latest intent")
+        text = self.label(page, "Current L CC")
+        self.assertIn("Slice 1 / 16", text)
+        self.assertIn("Seen 2 / 16", text, "the superseded slice is not counted as seen")
+        self.assertEqual(self.violations(page), [])
+
+    def test_mg04_dom_partial_and_oversized_objects_are_never_auto_placed(self):
+        page = self.page()
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        current = self.four_view()
+        partial = copy.deepcopy(current["R CC"][0])
+        partial["00281352"] = {"vr": "SQ", "Value": [{"00080102": {"vr": "SH", "Value": ["SCT"]}, "00080100": {"vr": "SH", "Value": ["255561001"]},
+                                                      "00080104": {"vr": "LO", "Value": ["Medial"]}}]}
+        oversized = copy.deepcopy(current["L CC"][0])
+        oversized["00080018"] = {"vr": "UI", "Value": [new_uid(3001)]}
+        oversized["00280008"] = {"vr": "IS", "Value": [2001]}
+        rows = [(partial, current["R CC"][1]), current["L CC"], current["R MLO"], current["L MLO"], (oversized, current["L CC"][1])]
+        self.mount(page, rows)
+        for view in ("L CC", "R MLO", "L MLO"):
+            self.wait_displayed(page, tag(current[view][0], "00080018"), 1)
+        self.settle(page)
+        self.assertIn("Partial Only (1)", self.label(page, "Current R CC"), "MG04: a partial acquisition is not placed as the full R CC")
+        loads = page.evaluate("()=>mg.loads.map(l=>l.sop)")
+        self.assertNotIn(tag(partial, "00080018"), loads, "nothing is loaded for a partial view until it is chosen")
+        self.assertNotIn(new_uid(3001), loads, "MG02: an object with an impossible frame count is never loaded")
+        self.assertIn("Other Images (2)", page.locator("details summary").inner_text())
+        self.cell(page, "Current R CC").get_by_role("button", name="Use Partial Medial", exact=True).click()
+        self.wait_displayed(page, tag(partial, "00080018"), 1)
+        self.assertIn("Partial Medial", self.label(page, "Current R CC"), "a chosen partial view stays labelled as partial")
+        self.assertEqual(errors, [])
         self.assertEqual(self.violations(page), [])
 
     def test_mg06_dom_dispose_layout_switch_and_account_change_stop_late_results(self):

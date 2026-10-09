@@ -400,6 +400,9 @@ class MammographyDicomContractTest(unittest.TestCase):
                 self.assertEqual((list(ds.ImageType)[2:4], int(ds.NumberOfFrames)), (["TOMOSYNTHESIS", "GENERATED_2D"], 1), sample_id)
                 self.assertEqual(result["kind"], "generated2d", "MG01: the device's synthetic 2D view is recognised from its Image Type: " + sample_id)
                 self.assertEqual(result["status"], "verified")
+                self.assertEqual((str(ds.Manufacturer), str(ds.ManufacturerModelName)), ("HOLOGIC, Inc.", "Selenia Dimensions"), sample_id)
+                self.assertIn("device-exception:hologic-selenia-dimensions-bto-generated-2d", result["notes"],
+                              "accepted only as the named device exception that conflicts with the X-Ray 3D Value 4 rule")
             else:
                 self.assertEqual(str(frame_type.VolumetricProperties), "VOLUME", sample_id)
                 self.assertEqual(result["kind"], "dbt", sample_id)

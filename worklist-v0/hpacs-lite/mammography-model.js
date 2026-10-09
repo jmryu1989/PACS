@@ -91,15 +91,30 @@
   // Issues after which the object's kind is not trusted for display labels or automatic matching.
   const BLOCKING=new Set(['identity-invalid','laterality-conflict','laterality-invalid','view-conflict','view-multiple',
     'presentation-intent-conflict','generated-2d-on-tomosynthesis-object','generated-2d-value3-contradiction',
-    'tomosynthesis-without-generated-2d','image-type-unknown','possible-legacy-generated-2d','mixed-frame-types']);
+    'tomosynthesis-without-generated-2d','image-type-unknown','possible-legacy-generated-2d','mixed-frame-types',
+    'frame-count-invalid','image-frame-type-conflict','frame-type-missing','partial-view-conflict']);
   // Older software marked its synthetic view only in free text or private tags. Such a hint never
   // confirms a kind, but it does stop the object from being treated as a confirmed conventional view.
   // "Tomosynthesis" itself is no such hint: a 2D exposure of a combo examination is described that way.
   const LEGACY_HINT=/\bc-?view\b|synthetic|synthesi[sz]ed|\bv-?preview\b|intelligent\s*2d|\bs-?view\b|insight\s*2d|generated\s*2d|2d\s*generated/i;
 
+  // A device encoding that conflicts with the standard is accepted only as a named, verified exception.
+  // Hologic stores its synthetic 2D view (Intelligent 2D / C-View) as a one-frame Breast Tomosynthesis
+  // object whose Image Type and Frame Type are both DERIVED\PRIMARY\TOMOSYNTHESIS\GENERATED_2D; X-Ray 3D
+  // (PS3.3 C.8.21.1.1.1.4) requires Value 4 = NONE. Verified on TCIA EA1141 v2 EA1141-4339969
+  // 1945-02-13 Intelligent 2D x4 (Selenia Dimensions, AWS 1.9.1.8); commander ruling D730.
+  const DEVICE_EXCEPTIONS=[{id:'hologic-selenia-dimensions-bto-generated-2d',manufacturer:/^HOLOGIC\b/i,model:/^Selenia Dimensions$/i,
+    sopClass:SOP_DBT,frames:1,type:'DERIVED\\PRIMARY\\TOMOSYNTHESIS\\GENERATED_2D',
+    conflict:'PS3.3 C.8.21.1.1.1.4: X-Ray 3D Image Type Value 4 shall be NONE'}];
+  function deviceException(item,sopClass,type,frameType,frames){
+    const manufacturer=text(item,'00080070'),model=text(item,'00081090');
+    return DEVICE_EXCEPTIONS.find(x=>x.sopClass===sopClass&&x.frames===frames&&x.type===type&&x.type===frameType&&
+      x.manufacturer.test(manufacturer)&&x.model.test(model))||null;
+  }
+
   // The distinct X-Ray 3D frame types of an object as "FrameType|Volumetric Properties|Technique".
   // Frames without a frame type item add nothing; a frame count that does not match the per-frame
-  // list is the frame index's finding, not a second kind.
+  // list is the frame index's finding, not a second kind. Callers pass a validated frame count.
   function frameTypes(fg,frames){
     const seen=new Set();
     for(let k=1;k<=frames;k++){
@@ -108,51 +123,79 @@
     }
     return seen;
   }
-  // Volumetric Properties decides what a frame is (C.8.21.1.1.3 notes: VOLUME for regularly sampled
-  // slices, SAMPLED for slabs and MIPs). A technique that disagrees is reported, not used to relabel.
-  function dbtKind(item,fg,frames){
-    const seen=frameTypes(fg,frames);
-    if(seen.size>1)return {sliceKind:null,issue:'mixed-frame-types',notes:[],evidence:[...seen].map(s=>'Frame Type='+s)};
-    let [,volumetric,technique]=(seen.size?[...seen][0]:'||').split('|');
-    volumetric=volumetric||text(item,'00089206').toUpperCase();technique=technique||text(item,'00089207').toUpperCase();
-    const evidence=['Volumetric Properties='+(volumetric||'(absent)'),'Volume Based Calculation Technique='+(technique||'(absent)')];
-    const projection=technique==='MAX_IP'||technique==='MIN_IP';
-    if(volumetric==='VOLUME')return {sliceKind:'slices',issue:null,notes:technique&&technique!=='TOMOSYNTHESIS'?['technique-'+technique.toLowerCase()+'-on-volume']:[],evidence};
-    if(volumetric==='SAMPLED')return {sliceKind:projection?'mip-slab':'sampled',issue:null,notes:[],evidence};
-    return {sliceKind:projection?'mip-slab':'unspecified',issue:null,notes:[],evidence};
+  // What a stored DBT frame is follows its geometry and its tags together (C.8.21.1.1.2 allows both
+  // VOLUME and SAMPLED for regularly sampled slices): thin sections whose thickness equals the spacing
+  // of verified, contiguous positions are slices; thicker or overlapping frames are slabs (MIP slabs
+  // when the technique says so). Without verified geometry the kind of frame is not claimed.
+  const THIN_MAX_MM=3;
+  function sliceKindOf(volumetric,technique,thickness,index){
+    const projection=technique==='MAX_IP'||technique==='MIN_IP',notes=[];
+    if(!(thickness>0)||!(index&&index.complete&&index.spacing>0))return {sliceKind:'unspecified',notes:['slice-geometry-unverified']};
+    const spacing=index.spacing,contiguous=Math.abs(thickness-spacing)<=Math.max(0.05,0.1*spacing);
+    if(contiguous&&thickness<=THIN_MAX_MM){
+      if(projection)notes.push('technique-'+technique.toLowerCase()+'-on-thin-sections');
+      return {sliceKind:'slices',notes};
+    }
+    if(thickness>spacing*1.1||thickness>THIN_MAX_MM){
+      if(volumetric==='VOLUME')notes.push('volume-property-on-slab');
+      return {sliceKind:projection?'mip-slab':'slab',notes};
+    }
+    return {sliceKind:'unspecified',notes:['sections-not-contiguous']};
+  }
+
+  // CID 4005 Partial View Section for Mammography.
+  const PARTIAL_CODES={'255549009':'Anterior','R-404CC':'Anterior','255551008':'Posterior','R-404CE':'Posterior',
+    '264217000':'Superior','R-42191':'Superior','261089000':'Inferior','R-4094A':'Inferior','255561001':'Medial','R-404D5':'Medial',
+    '49370004':'Lateral','G-A104':'Lateral','26216008':'Central','G-A110':'Central'};
+  // A partial acquisition is told by Partial View, its section codes or its description; any one of
+  // them makes the object partial, and a flag of NO beside section evidence is a contradiction.
+  function partialView(item){
+    const flag=text(item,'00281350').toUpperCase(),description=text(item,'00281351');
+    const sections=items(item,'00281352').map(c=>{const k=code(c);return k&&PARTIAL_CODES[k]||'Unknown Section';});
+    const evident=flag==='YES'||sections.length>0||!!description;
+    const evidence=[...(flag?['Partial View='+flag]:[]),...sections.map(s=>'Partial View Section='+s),...(description?['Partial View Description present']:[])];
+    return {partial:evident,sections,issue:flag==='NO'&&(sections.length>0||!!description)?'partial-view-conflict':null,evidence};
   }
 
   function classify(item){
     const fg=groups(item),sopClass=text(item,'00080016'),type=tokens(item,'00080008');
-    const frames=values(item,'00280008').length?number(item,'00280008'):1;
+    // The frame count is validated before any per-frame work.
+    const declared=values(item,'00280008').length?number(item,'00280008'):1;
+    const framesOk=Number.isInteger(declared)&&declared>=1&&declared<=MAX_FRAMES;
     const out={sop:text(item,'00080018'),series:text(item,'0020000E'),study:text(item,'0020000D'),sopClass,
-      instanceNumber:number(item,'00200013'),seriesNumber:number(item,'00200011'),frames:Number.isInteger(frames)?frames:null,
-      kind:null,status:'unverified',presentation:null,laterality:null,view:null,modifiers:[],partial:false,biopsy:null,
-      sliceKind:null,sliceThickness:null,evidence:[],issues:[],notes:[],standard:false};
+      instanceNumber:number(item,'00200013'),seriesNumber:number(item,'00200011'),frames:framesOk?declared:null,
+      kind:null,status:'unverified',presentation:null,laterality:null,view:null,modifiers:[],partial:false,partialSections:[],biopsy:null,
+      sliceKind:null,sliceThickness:null,evidence:[],issues:[],notes:[],standard:false,partialSlot:false};
     const issue=v=>{if(v&&!out.issues.includes(v))out.issues.push(v);};
+    if(!framesOk)issue('frame-count-invalid');
     if(!uid(out.sop)||!uid(out.series)||!uid(out.study))issue('identity-invalid');
     const lat=laterality(item,fg);out.laterality=lat.value;out.evidence.push(...lat.evidence);issue(lat.issue);
     const v=view(item);out.view=v.value;out.modifiers=v.modifiers;out.evidence.push(...v.evidence);issue(v.issue);
-    out.partial=text(item,'00281350').toUpperCase()==='YES';
+    const pv=partialView(item);out.partial=pv.partial;out.partialSections=pv.sections;out.evidence.push(...pv.evidence);issue(pv.issue);
     out.evidence.push('SOP Class='+sopClass,'Image Type='+type.join('\\'));
     if(text(item,'00080060').toUpperCase()!=='MG'){out.kind='other';issue('modality-not-mg');}
     else if(sopClass===SOP_DBT){
-      const t3=type[2]||'';
-      if(type[3]==='GENERATED_2D'){
-        // A device synthetic 2D view stored in the Breast Tomosynthesis IOD: one frame whose Image Type
-        // and Frame Type both say GENERATED_2D (C.8.11.7 terms; C.8.21.1.1.3 names MAX_IP for such views).
-        // The X-Ray 3D rule that Value 4 be NONE is kept as a note, not used to overrule the device.
-        const ft=[...frameTypes(fg,out.frames||0)];
-        if(out.frames===1&&(t3==='TOMOSYNTHESIS'||TOMO_BIOPSY.has(t3))&&ft.length===1&&ft[0].split('|')[0].split('\\')[3]==='GENERATED_2D'){
-          out.kind='generated2d';out.status='verified';out.biopsy=t3==='TOMOSYNTHESIS'?null:t3;out.notes.push('x-ray-3d-value4-not-none');
-          out.evidence.push('Frame Type='+ft[0]);
-        }else issue('generated-2d-on-tomosynthesis-object');
-      }else if(type.includes('GENERATED_2D'))issue('generated-2d-on-tomosynthesis-object');
-      else{
-        const d=dbtKind(item,fg,out.frames||0);out.evidence.push(...d.evidence);out.notes.push(...d.notes);
-        if(d.issue){issue(d.issue);}else{out.kind='dbt';out.sliceKind=d.sliceKind;out.status='verified';}
+      if(framesOk){
+        const ft=[...frameTypes(fg,out.frames)],imageType=type.join('\\');
+        out.evidence.push(...ft.map(f=>'Frame Type='+f));
+        // Image Type and every Frame Type must agree before either is trusted.
+        if(ft.length>1)issue('mixed-frame-types');
+        else if(!ft.length)issue('frame-type-missing');
+        else if(ft[0].split('|')[0]!==imageType)issue('image-frame-type-conflict');
+        else if(type.includes('GENERATED_2D')){
+          const exception=deviceException(item,sopClass,imageType,ft[0].split('|')[0],out.frames);
+          if(exception){out.kind='generated2d';out.status='verified';out.notes.push('device-exception:'+exception.id,'conflicts-with:'+exception.conflict);}
+          else issue('generated-2d-on-tomosynthesis-object');
+        }else{
+          let [,volumetric,technique]=ft[0].split('|');
+          volumetric=volumetric||text(item,'00089206').toUpperCase();technique=technique||text(item,'00089207').toUpperCase();
+          out.evidence.push('Volumetric Properties='+(volumetric||'(absent)'),'Volume Based Calculation Technique='+(technique||'(absent)'));
+          const t=macro(fg,1,'00289110'),thickness=t?number(t,'00180050'):null;
+          const d=sliceKindOf(volumetric,technique,thickness,frameIndex(item));
+          out.kind='dbt';out.sliceKind=d.sliceKind;out.status='verified';out.notes.push(...d.notes);
+        }
       }
-      const t=macro(fg,1,'00289110');out.sliceThickness=t?number(t,'00180050'):null;
+      const t=framesOk?macro(fg,1,'00289110'):null;out.sliceThickness=t?number(t,'00180050'):null;
     }else if(sopClass===SOP_MG||sopClass===SOP_MG_PROCESSING){
       const v3=type[2]||'',v4=type[3]||'';
       if(v4==='GENERATED_2D'){
@@ -171,8 +214,11 @@
       else{out.presentation='presentation';if(intent&&intent!=='FOR PRESENTATION')issue('presentation-intent-conflict');}
     }else{out.kind='other';issue('sop-class-not-mammography-image');}
     if(out.issues.some(x=>BLOCKING.has(x)))out.status='unverified';
-    out.standard=out.status==='verified'&&KINDS.includes(out.kind)&&out.presentation!=='processing'&&SIDES.includes(out.laterality)&&
-      STANDARD_VIEWS.includes(out.view)&&!out.modifiers.length&&!out.partial;
+    const placeable=out.status==='verified'&&KINDS.includes(out.kind)&&out.presentation!=='processing'&&SIDES.includes(out.laterality)&&
+      STANDARD_VIEWS.includes(out.view)&&!out.modifiers.length;
+    // A partial acquisition never stands in for the full view; it gets its own, explicitly chosen slot.
+    out.standard=placeable&&!out.partial;
+    out.partialSlot=placeable&&out.partial;
     return out;
   }
 
@@ -230,6 +276,7 @@
       if(step!==null&&gaps.every(g=>Math.abs(g-step)<=Math.max(SPACING_TOLERANCE*step,POSITION_EPSILON)))spacing=step;
       else if(step!==null)issue('irregular-spacing');
     }
+    dimensionCheck(item,fg,stored,known).forEach(issue);
     const origin=known?order[0].projection:null,sign=known&&order.length>1&&order[order.length-1].projection<order[0].projection?-1:1;
     const entries=order.map((s,i)=>({sop,frame:s.frame,index:i+1,total:declared,
       position:known?{status:'verified',offset:(s.projection-origin)*sign||0,projection:s.projection,unit:'mm',basis:'Plane Position · Plane Orientation'}
@@ -237,6 +284,39 @@
     const t=macro(fg,1,'00289110');
     const informational=new Set(['reordered-by-position']);
     return {sop,total:declared,entries,complete:issues.every(x=>informational.has(x)),issues,spacing,thickness:t?number(t,'00180050'):null};
+  }
+
+  // Dimension Index Values (PS3.3 C.7.6.17) must agree with the values they index: per dimension the
+  // index and the referenced value pair one to one, and an index on Image Position follows the
+  // position order. A contradiction is reported; stored frames stay reachable but never "complete".
+  function dimensionCheck(item,fg,stored,known){
+    const dims=items(item,'00209222');
+    if(!dims.length)return [];
+    const found=[],issue=v=>{if(!found.includes(v))found.push(v);};
+    const rows=stored.map(s=>{const fc=macro(fg,s.frame,'00209111');return fc?values(fc,'00209157').map(Number):[];});
+    if(rows.some(r=>r.length!==dims.length||!r.every(n=>Number.isSafeInteger(n)&&n>=1)))return ['dimension-index-invalid'];
+    if(new Set(rows.map(r=>r.join(','))).size!==rows.length)issue('dimension-index-duplicate');
+    dims.forEach((d,k)=>{
+      const pointer=text(d,'00209165').toUpperCase(),group=text(d,'00209167').toUpperCase();
+      const referenced=stored.map(s=>{
+        if(pointer==='00200032')return known?String(Math.round(s.projection/POSITION_EPSILON)):null;
+        const holder=group?macro(fg,s.frame,group):item;
+        return holder&&values(holder,pointer).length?JSON.stringify(values(holder,pointer)):null;
+      });
+      if(referenced.some(r=>r===null)){issue('dimension-reference-missing');return;}
+      const byIndex=new Map(),byValue=new Map();
+      rows.forEach((r,i)=>{
+        const index=r[k],value=referenced[i];
+        if(byIndex.has(index)&&byIndex.get(index)!==value||byValue.has(value)&&byValue.get(value)!==index)issue('dimension-index-conflict');
+        byIndex.set(index,value);byValue.set(value,index);
+      });
+      if(pointer==='00200032'&&known){
+        const order=stored.map((s,i)=>[rows[i][k],s.projection]).sort((a,b)=>a[0]-b[0]).map(x=>x[1]);
+        const steps=order.slice(1).map((p,i)=>p-order[i]);
+        if(!(steps.every(x=>x>0)||steps.every(x=>x<0)))issue('dimension-index-conflict');
+      }
+    });
+    return found;
   }
 
   // Display coverage counts only frames the renderer confirmed; a frame outside the index never counts.
@@ -275,7 +355,7 @@
     return out;
   }
 
-  const DBT_RANK={slices:1,sampled:2,'mip-slab':3,unspecified:4};
+  const DBT_RANK={slices:1,slab:2,'mip-slab':3,unspecified:4};
   // Current/prior x side x view x kind. A duplicate is never resolved by picking one; the only order
   // applied is slices before slabs inside DBT, and every alternative stays listed.
   function plan(manifest){
@@ -302,9 +382,11 @@
       let best=found;
       if(kind==='dbt'&&found.length>1){const top=Math.min(...found.map(o=>DBT_RANK[o.sliceKind]));best=found.filter(o=>DBT_RANK[o.sliceKind]===top);}
       const alternatives=found.filter(o=>!best.includes(o));
-      slots[key]=!found.length?{key,status:'missing'}:best.length>1?{key,status:'ambiguous',candidates:best,alternatives}:{key,status:'ready',object:best[0],alternatives};
+      const partials=s.objects.filter(o=>o.partialSlot&&o.kind===kind&&o.laterality===side&&o.view===v);
+      slots[key]=!found.length?(partials.length?{key,status:'partial',candidates:partials}:{key,status:'missing'})
+        :best.length>1?{key,status:'ambiguous',candidates:best,alternatives,partials}:{key,status:'ready',object:best[0],alternatives,partials};
     }
-    const objects=[cur,...(pri?[pri]:[])].flatMap(s=>s.objects.map(o=>({...o,use:s===pri&&priorStatus!=='ok'?'refused':o.standard?'slot':'other'})));
+    const objects=[cur,...(pri?[pri]:[])].flatMap(s=>s.objects.map(o=>({...o,use:s===pri&&priorStatus!=='ok'?'refused':o.standard?'slot':o.partialSlot?'partial':'other'})));
     return {status:'ok',institution:manifest.institution,current:{uid:cur.uid,date:cur.date,patient:cur.patient},
       prior:pri?{uid:pri.uid,date:pri.date,status:priorStatus,reason:priorReason,newer:!!(pri.date&&cur.date&&pri.date>cur.date)}:null,slots,objects};
   }
@@ -318,7 +400,8 @@
 
   // Standard mammography display: right breast with the chest wall at the screen right, left breast at
   // the screen left; CC with lateral up, oblique/lateral views with superior up. A flip is derived only
-  // from Patient Orientation; without it the image is shown exactly as stored and marked Unverified.
+  // from Patient Orientation / the frame's Image Orientation; without them the image is shown exactly as
+  // stored and marked Unverified, never flipped by its screen position.
   const CC_FAMILY=new Set(['CC','XCCL','XCCM','FB']),VERTICAL_FAMILY=new Set(['MLO','ML','LM','LMO','SIO','ISO']);
   // Patient-space letters of a direction cosine (LPS: +x left, +y posterior, +z head), strongest first.
   function letters(vector){
@@ -326,14 +409,8 @@
     return [0,1,2].filter(i=>Math.abs(vector[i])>=0.2).sort((a,b)=>Math.abs(vector[b])-Math.abs(vector[a]))
       .map(i=>names[i][vector[i]>0?1:0]).join('');
   }
-  function orientationLetters(item,fg){
-    const row=text(item,'00200020',0).toUpperCase(),column=text(item,'00200020',1).toUpperCase();
-    if(row||column)return {row,column,basis:'Patient Orientation'};
-    const o=macro(fg,1,'00209116'),iop=(o?numbers(o,'00200037',6):null)||numbers(item,'00200037',6);
-    return iop?{row:letters(iop.slice(0,3)),column:letters(iop.slice(3,6)),basis:'Image Orientation (Patient)'}:{row:'',column:'',basis:null};
-  }
-  function orientation(item,c){
-    const {row,column,basis}=orientationLetters(item,groups(item));
+  // The flips for one display frame from one pair of direction letters.
+  function decide(row,column,basis,c){
     const unverified=reason=>({status:'unverified',reason,row,column,basis,flipH:false,flipV:false});
     if(!/^[APRLHF]+$/.test(row)||!/^[APRLHF]+$/.test(column))return unverified('patient-orientation-missing');
     if(!SIDES.includes(c.laterality))return unverified('laterality-unknown');
@@ -346,6 +423,23 @@
     else if(VERTICAL_FAMILY.has(c.view)){if(!has(column,'H','F'))return unverified('column-not-head-foot');flipV=column.includes('H');}
     else return unverified('view-unknown');
     return {status:'verified',row,column,basis,flipH,flipV};
+  }
+  // Orientation of the REQUESTED frame: Patient Orientation (one per object) and that frame's own
+  // Image Orientation (per-frame or shared Plane Orientation). If both decide and disagree, the frame is
+  // Unverified and shown as stored; one that cannot decide gives way to the one that can.
+  function orientation(item,c,frame){
+    const fg=groups(item),poRow=text(item,'00200020',0).toUpperCase(),poColumn=text(item,'00200020',1).toUpperCase();
+    const plane=macro(fg,frame,'00209116'),iop=(plane?numbers(plane,'00200037',6):null)||numbers(item,'00200037',6);
+    const fromPO=poRow||poColumn?decide(poRow,poColumn,'Patient Orientation',c):null;
+    const fromIOP=iop?decide(letters(iop.slice(0,3)),letters(iop.slice(3,6)),'Image Orientation (Patient), frame '+frame,c):null;
+    if(fromPO&&fromIOP&&fromPO.status==='verified'&&fromIOP.status==='verified'){
+      if(fromPO.flipH!==fromIOP.flipH||fromPO.flipV!==fromIOP.flipV)
+        return {status:'unverified',reason:'orientation-conflict',row:fromPO.row,column:fromPO.column,basis:fromPO.basis+' vs '+fromIOP.basis,flipH:false,flipV:false};
+      return {...fromPO,basis:'Patient Orientation + '+fromIOP.basis};
+    }
+    if(fromPO&&fromPO.status==='verified')return fromPO;
+    if(fromIOP&&fromIOP.status==='verified')return fromIOP;
+    return fromPO||fromIOP||decide('','',null,c);
   }
   function displaySpec(item,frame=1){
     const c=classify(item),fg=groups(item),issues=[];
@@ -372,7 +466,7 @@
     const pixel=frameSpacing?{row:frameSpacing[0],column:frameSpacing[1],basis:'Pixel Measures'}:spacing?{row:spacing[0],column:spacing[1],basis:'Pixel Spacing'}
       :imager?{row:imager[0],column:imager[1],basis:'Imager Pixel Spacing'}:null;
     return {rows:Number.isInteger(rows)&&rows>0?rows:null,columns:Number.isInteger(columns)&&columns>0?columns:null,
-      orientation:orientation(item,c),voi:{status:issues.some(x=>x.startsWith('voi'))?'unverified':status,center,width,fn,source},
+      orientation:orientation(item,c,frame),voi:{status:issues.some(x=>x.startsWith('voi'))?'unverified':status,center,width,fn,source},
       modality:{slope,intercept},invert,photometric,spacing:pixel,issues};
   }
 

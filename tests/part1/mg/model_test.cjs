@@ -1,4 +1,4 @@
-// TEST-MG-MODEL (E-MG R1): REQ-MG-01/02/03/04/06 -> RISK-MG-MISCLASS/OMIT/FALSE-ANATOMY/WRONG-STUDY/STALE.
+// TEST-MG-MODEL (E-MG R1): REQ-MG-01/02/03/04/05/06 -> RISK-MG-MISCLASS/OMIT/FALSE-ANATOMY/WRONG-STUDY/FLIP-CLIP/STALE.
 // D73: every assertion binds to the public model contract (kind, frame identity, position, slot,
 // ticket validity) for DICOM JSON inputs built here; no source text, function name or DOM is read.
 // KIN_MG_MODEL may point at a copy of the model (tests/part1/mg/mutants.py); the product tree is never edited.
@@ -35,22 +35,30 @@ function mg({sop=next(),series='1.2.826.0.1.3680043.10.8.1',study='1.2.826.0.1.3
 // A DBT object: shared orientation/thickness, per-frame position; `positions` are mm along +z.
 function dbt({sop=next(),study='1.2.826.0.1.3680043.10.7.1',series='1.2.826.0.1.3680043.10.8.2',patient='PT-1',lat='L',view='CC',
   positions=[0,1,2,3,4],frames=null,iop=[0,-1,0,-1,0,0],technique='TOMOSYNTHESIS',volumetric='VOLUME',thickness=1,perFrame=null,
-  frameTypes=null,omitPositions=false,imageType=['ORIGINAL','PRIMARY','VOLUME','NONE'],frameType=null}={}){
+  frameTypes=null,omitPositions=false,imageType=['ORIGINAL','PRIMARY','VOLUME','NONE'],frameType=null,frameIops=null,dimensions=null,extra={}}={}){
   const count=frames===null?positions.length:frames;
-  // frameTypes[i] = [Volumetric Properties, Volume Based Calculation Technique] of frame i+1.
+  // frameTypes[i] = [Volumetric Properties, Volume Based Calculation Technique] of frame i+1;
+  // frameIops[i] puts frame i+1's own Plane Orientation in its per-frame item (no shared one);
+  // dimensions = {pointers:[[tag, group]], values:[[...] per frame]} adds a Dimension Index.
   const items=(perFrame||positions.map((z,i)=>{
     const ft=frameTypes&&frameTypes[i]||[volumetric,technique];
     return {'00189504':seq({'00089007':v('CS',...(frameType||imageType)),'00089206':v('CS',ft[0]),'00089207':v('CS',ft[1])}),
-      ...(omitPositions?{}:{'00209113':seq({'00200032':v('DS',...(Array.isArray(z)?z:[-60,-10,z]))})})};
+      ...(omitPositions?{}:{'00209113':seq({'00200032':v('DS',...(Array.isArray(z)?z:[-60,-10,z]))})}),
+      ...(frameIops?{'00209116':seq({'00200037':v('DS',...frameIops[i])})}:{}),
+      ...(dimensions?{'00209111':seq({'00209157':v('UL',...dimensions.values[i])})}:{})};
   }));
-  return {'00080016':v('UI',DBT),'00080018':v('UI',sop),'0020000D':v('UI',study),'0020000E':v('UI',series),'00080060':v('CS','MG'),
+  const shared={'00209071':seq({'00209072':v('CS',lat)}),'00289110':seq({'00180050':v('DS',thickness),'00280030':v('DS',0.1,0.1)})};
+  if(!frameIops)shared['00209116']=seq({'00200037':v('DS',...iop)});
+  return Object.assign({'00080016':v('UI',DBT),'00080018':v('UI',sop),'0020000D':v('UI',study),'0020000E':v('UI',series),'00080060':v('CS','MG'),
     '00080008':v('CS',...imageType),'00100020':v('LO',patient),'00080020':v('DA','20240105'),
     '00280008':v('IS',count),'00280010':v('US',120),'00280011':v('US',90),'00280004':v('CS','MONOCHROME2'),'00280101':v('US',12),
     '00540220':seq({'00080102':v('SH',VIEW[view][0]),'00080100':v('SH',VIEW[view][1])}),
-    '52009229':seq({'00209071':seq({'00209072':v('CS',lat)}),'00209116':seq({'00200037':v('DS',...iop)}),
-      '00289110':seq({'00180050':v('DS',thickness),'00280030':v('DS',0.1,0.1)})}),
-    '52009230':{vr:'SQ',Value:items}};
+    '52009229':seq(shared),'52009230':{vr:'SQ',Value:items},
+    ...(dimensions?{'00209222':seq(...dimensions.pointers.map(([tag,group])=>({'00209165':v('AT',tag),...(group?{'00209167':v('AT',group)}:{})})))}:{})},extra);
 }
+const HOLOGIC={'00080070':v('LO','HOLOGIC, Inc.'),'00081090':v('LO','Selenia Dimensions')};
+const GENERATED=['DERIVED','PRIMARY','TOMOSYNTHESIS','GENERATED_2D'];
+const PARTIAL_MEDIAL={'00281352':seq({'00080102':v('SH','SCT'),'00080100':v('SH','255561001'),'00080104':v('LO','Medial')})};
 const study=(uid,role,instances,institution='H1')=>({uid,role,institution,instances});
 const manifest=(...studies)=>({institution:'H1',studies});
 const slot=(p,role,side,view,kind)=>p.slots[[role,side,view,kind].join('|')];
@@ -67,13 +75,20 @@ test('MG01-allow conventional, device synthetic 2D and DBT are told apart by sta
   assert.equal(slices.kind,'dbt');assert.equal(slices.sliceKind,'slices');assert.equal(slices.laterality,'L');assert.equal(slices.view,'CC');
   const slab=model.classify(dbt({technique:'MAX_IP',volumetric:'SAMPLED',thickness:10}));
   assert.equal(slab.kind,'dbt');assert.equal(slab.sliceKind,'mip-slab','a MIP slab is reported as what is stored, not as thin slices');assert.equal(slab.sliceThickness,10);
-  // Volumetric Properties VOLUME names regularly sampled slices even when the technique says MAX_IP.
-  const volume=model.classify(dbt({technique:'MAX_IP',volumetric:'VOLUME',thickness:1}));
-  assert.equal(volume.sliceKind,'slices');assert.ok(volume.notes.length>0,'the disagreeing technique is kept as a note');
-  // A device synthetic 2D view stored as a one-frame Breast Tomosynthesis object.
-  const stored2d=model.classify(dbt({positions:[0],technique:'MAX_IP',volumetric:'VOLUME',thickness:54,
-    imageType:['DERIVED','PRIMARY','TOMOSYNTHESIS','GENERATED_2D']}));
+  // Slices vs slab follow thickness and contiguous positions together with the tags (ruling D730).
+  const thin=model.classify(dbt({technique:'MAX_IP',volumetric:'VOLUME',thickness:1}));
+  assert.equal(thin.sliceKind,'slices');assert.ok(thin.notes.length>0,'the disagreeing technique is kept as a note');
+  const sampledThin=model.classify(dbt({volumetric:'SAMPLED',thickness:1}));
+  const volumeThick=model.classify(dbt({positions:[0,5,10,15],technique:'MAX_IP',volumetric:'VOLUME',thickness:10}));
+  assert.deepEqual([sampledThin.sliceKind,volumeThick.sliceKind],['slices','mip-slab'],
+    'MG01 M23: slices vs slab follow thickness and contiguous positions, not Volumetric Properties alone');
+  const gaps=model.classify(dbt({positions:[0,3,6,9],thickness:1}));
+  assert.equal(gaps.sliceKind,'unspecified','sections with gaps between them are not claimed to be contiguous slices');
+  // The named device exception: Hologic Selenia Dimensions one-frame Breast Tomosynthesis GENERATED_2D.
+  const stored2d=model.classify(dbt({positions:[0],technique:'MAX_IP',volumetric:'VOLUME',thickness:54,imageType:GENERATED,extra:HOLOGIC}));
   assert.equal(stored2d.kind,'generated2d');assert.equal(stored2d.status,'verified');assert.equal(stored2d.standard,true);
+  assert.ok(stored2d.notes.some(n=>n.startsWith('device-exception:')),'the exception is named in the result');
+  assert.ok(stored2d.notes.some(n=>/Value 4 shall be NONE/.test(n)),'and its conflict with X-Ray 3D is stated');
   const cur='1.2.826.0.1.3680043.10.7.1';
   const p=model.plan(manifest(study(cur,'current',[mg({type:['DERIVED','PRIMARY']}),mg({type:['DERIVED','PRIMARY','TOMOSYNTHESIS','GENERATED_2D']}),
     dbt({lat:'R',view:'CC',technique:'MAX_IP',volumetric:'SAMPLED',thickness:10}),dbt({lat:'R',view:'CC'})])));
@@ -100,12 +115,23 @@ test('MG01-reject DERIVED alone, a description, a contradiction or a non-mammogr
   assert.notEqual(sc.kind,'dbt');assert.notEqual(sc.kind,'generated2d');assert.equal(sc.standard,false,'a secondary capture is never a device image');
   const processing=model.classify(mg({sopClass:MG_PROCESSING,intent:'FOR PROCESSING'}));
   assert.equal(processing.presentation,'processing');assert.equal(processing.standard,false,'For Processing is not shown as For Presentation');
-  const generated=['DERIVED','PRIMARY','TOMOSYNTHESIS','GENERATED_2D'];
-  for(const [name,object] of [['many frames',dbt({imageType:generated})],
-    ['frame type disagrees',dbt({positions:[0],imageType:generated,frameType:['DERIVED','PRIMARY','TOMOSYNTHESIS','NONE']})],
-    ['Value 3 not tomosynthesis',dbt({positions:[0],imageType:['DERIVED','PRIMARY','VOLUME','GENERATED_2D']})]]){
+  // Image Type and Frame Type must agree before any kind is trusted, whichever value differs.
+  for(const [name,object] of [
+    ['Frame Type Value 3 VOLUME',dbt({positions:[0],imageType:GENERATED,frameType:['DERIVED','PRIMARY','VOLUME','GENERATED_2D'],extra:HOLOGIC})],
+    ['Image Type Value 4 NONE',dbt({positions:[0],imageType:['DERIVED','PRIMARY','TOMOSYNTHESIS','NONE'],frameType:GENERATED,extra:HOLOGIC})],
+    ['slices with a disagreeing Frame Type',dbt({frameType:['ORIGINAL','PRIMARY','TOMOSYNTHESIS','NONE']})]]){
     const c=model.classify(object);
-    assert.notEqual(c.kind,'generated2d',name);assert.equal(c.standard,false,name);
+    assert.equal(c.status,'unverified','MG01 M17: Image Type and Frame Type must agree before any kind is trusted ('+name+')');
+    assert.equal(c.standard,false,name);
+  }
+  // Exactly the named exception, nothing wider.
+  for(const [name,object] of [['another manufacturer',dbt({positions:[0],imageType:GENERATED,extra:{'00080070':v('LO','GE MEDICAL SYSTEMS'),'00081090':v('LO','Senographe Pristina')}})],
+    ['no manufacturer',dbt({positions:[0],imageType:GENERATED})],
+    ['Hologic but many frames',dbt({imageType:GENERATED,extra:HOLOGIC})],
+    ['Hologic but Value 3 VOLUME',dbt({positions:[0],imageType:['DERIVED','PRIMARY','VOLUME','GENERATED_2D'],extra:HOLOGIC})]]){
+    const c=model.classify(object);
+    assert.notEqual(c.kind,'generated2d','MG01 M18: a one-frame tomosynthesis GENERATED_2D object is synthetic 2D only as the named device exception ('+name+')');
+    assert.equal(c.standard,false,name);
   }
   const mixed=model.classify(dbt({frameTypes:[['VOLUME','TOMOSYNTHESIS'],['SAMPLED','MAX_IP'],['VOLUME','TOMOSYNTHESIS'],['VOLUME','TOMOSYNTHESIS'],['VOLUME','TOMOSYNTHESIS']]}));
   assert.equal(mixed.status,'unverified');assert.equal(mixed.standard,false);
@@ -135,6 +161,9 @@ test('MG02-allow every stored frame first to last keeps its own SOP and frame nu
   for(const e of index.entries)assert.equal(coverage.mark(e),true);
   assert.equal(coverage.mark({sop:index.sop,frame:8}),false,'a frame outside the object never counts');
   assert.deepEqual(coverage.snapshot(),{total:7,seen:7,complete:true});
+  // A Dimension Index that agrees with Image Position and In-Stack Position keeps the index complete.
+  const agreeing=model.frameIndex(dbt({positions:[0,1,2,3,4],dimensions:{pointers:[['00200032','00209113']],values:[[1],[2],[3],[4],[5]]}}));
+  assert.equal(agreeing.complete,true);
 });
 
 test('MG02-reject a duplicate, a missing per-frame item, a gap or a wrong total never reports complete',()=>{
@@ -152,6 +181,28 @@ test('MG02-reject a duplicate, a missing per-frame item, a gap or a wrong total 
   assert.equal(model.frameIndex(wrongTotal).complete,false);
   const gap=model.frameIndex(dbt({positions:[0,1,2,4,5,6]}));
   assert.equal(gap.complete,false);assert.ok(gap.issues.includes('irregular-spacing'));
+  // A frame count outside the limit is refused before any per-frame work and never reaches a slot.
+  const cur='1.2.826.0.1.3680043.10.7.1';
+  for(const count of [2001,0,-1,1.5]){
+    const big=dbt({lat:'R',view:'CC',frames:count}),c=model.classify(big);
+    assert.equal(c.standard,false,'MG02 M20: a frame count outside the limit is refused before any per-frame work ('+count+')');
+    assert.ok(c.issues.includes('frame-count-invalid'));
+    const p=model.plan(manifest(study(cur,'current',[big])));
+    assert.equal(slot(p,'current','R','CC','dbt').status,'missing','no empty frame index is handed to a slot');
+    assert.equal(model.frameIndex(big).complete,false);
+  }
+  const started=Date.now(),huge=model.classify(dbt({frames:1e9}));
+  assert.ok(Date.now()-started<1000&&huge.issues.includes('frame-count-invalid'),'an absurd frame count is refused at once');
+  // Dimension Index Values that contradict the positions they index: frames stay, completeness does not.
+  const pointers=[['00200032','00209113']];
+  for(const [name,values] of [['two positions share one index',[[1],[2],[2],[3],[4]]],['index order against position order',[[1],[3],[2],[4],[5]]]]){
+    const index=model.frameIndex(dbt({positions:[0,1,2,3,4],dimensions:{pointers,values}}));
+    assert.equal(index.complete,false,'MG02 M21: dimension index values that contradict the positions never report complete ('+name+')');
+    assert.deepEqual(index.entries.map(e=>e.frame).sort(),[1,2,3,4,5],'every stored frame stays reachable');
+    const coverage=model.createCoverage(index);for(const e of index.entries)coverage.mark(e);
+    assert.equal(coverage.snapshot().complete,false);
+  }
+  assert.equal(model.frameIndex(dbt({positions:[0,1,2],dimensions:{pointers,values:[[1],[2],[]]}})).complete,false,'a missing index value');
 });
 
 test('MG03-allow two DBTs of different length and spacing report their own positions in mm',()=>{
@@ -223,9 +274,51 @@ test('MG04-reject another patient, another institution, an ambiguous duplicate o
   const extras=model.plan(manifest(study(cur,'current',[mg({study:cur,lat:'R',view:'CC',modifiers:[['SCT','399055006']]}),
     mg({study:cur,lat:'L',view:'CC',modifiers:[['SRT','R-102D6']]}),mg({study:cur,lat:'R',view:'MLO',partial:'YES'}),
     mg({study:cur,lat:'B',view:'MLO',orientation:['P','F']}),mg({study:cur,lat:null,view:'MLO'})])));
-  for(const [lat,view] of [['R','CC'],['L','CC'],['R','MLO'],['L','MLO']])assert.equal(slot(extras,'current',lat,view,'conventional').status,'missing',lat+' '+view);
-  assert.equal(extras.objects.filter(o=>o.use==='other').length,5,'spot, magnification, partial, both-sides and unknown-side views stay listed');
+  for(const [lat,view] of [['R','CC'],['L','CC'],['L','MLO']])assert.equal(slot(extras,'current',lat,view,'conventional').status,'missing',lat+' '+view);
+  assert.equal(slot(extras,'current','R','MLO','conventional').status,'partial','a partial view gets its own slot, never the full one');
+  assert.equal(extras.objects.filter(o=>o.use==='other').length,4,'spot, magnification, both-sides and unknown-side views stay listed');
+  // Partial acquisition told by its section code alone (no Partial View flag), or by its description.
+  for(const [name,extra] of [['section code only',PARTIAL_MEDIAL],['description only',{'00281351':v('ST','medial half')}]]){
+    const part=mg({study:cur,lat:'R',view:'CC',extra});
+    const c=model.classify(part);
+    assert.equal(c.standard,false,'MG04 M19: a partial view is never matched as the full standard view ('+name+')');
+    assert.equal(c.partial,true,name);
+    const p=model.plan(manifest(study(cur,'current',[part,mg({study:cur,lat:'L',view:'CC'})])));
+    assert.equal(slot(p,'current','R','CC','conventional').status,'partial',name);
+    assert.equal(slot(p,'current','R','CC','conventional').object,undefined,'a partial slot needs an explicit choice');
+  }
+  assert.deepEqual(model.classify(mg({study:cur,lat:'R',view:'CC',extra:PARTIAL_MEDIAL})).partialSections,['Medial']);
+  const conflict=model.classify(mg({study:cur,lat:'R',view:'CC',partial:'NO',extra:PARTIAL_MEDIAL}));
+  assert.equal(conflict.status,'unverified','Partial View NO beside a section code is a contradiction');assert.equal(conflict.partialSlot,false);
+  const both=model.plan(manifest(study(cur,'current',[mg({study:cur,lat:'R',view:'CC'}),mg({study:cur,lat:'R',view:'CC',extra:PARTIAL_MEDIAL})])));
+  const full=slot(both,'current','R','CC','conventional');
+  assert.equal(full.status,'ready');assert.equal(full.object.partial,false,'the full view is the one placed');assert.equal(full.partials.length,1);
   assert.equal(model.plan(manifest(study(cur,'current',current),study(pri,'current',current))).status,'refused','two current studies');
+});
+
+// R CC standard: rows run posterior (+y), columns run toward the medial side (+x, patient left).
+const RCC_IOP=[0,1,0,1,0,0],RCC_ROW_REVERSED=[0,-1,0,1,0,0],RCC_COLUMN_REVERSED=[0,1,0,-1,0,0],RCC_BOTH_REVERSED=[0,-1,0,-1,0,0];
+test('MG05-allow the requested frame\'s own orientation decides its horizontal and vertical flips',()=>{
+  const item=dbt({lat:'R',view:'CC',positions:[0,1,2,3],frameIops:[RCC_IOP,RCC_ROW_REVERSED,RCC_COLUMN_REVERSED,RCC_BOTH_REVERSED]});
+  const flips=[1,2,3,4].map(f=>{const o=model.displaySpec(item,f).orientation;return [o.status,o.flipH,o.flipV];});
+  assert.deepEqual(flips,[['verified',false,false],['verified',true,false],['verified',false,true],['verified',true,true]],
+    'MG05 M22: the orientation of the requested frame decides its flips');
+  // Oblique view: superior must be up; a column running toward the head is turned over.
+  const c=Math.SQRT1_2,mlo=dbt({lat:'R',view:'MLO',positions:[0,1],frameIops:[[0,1,0,c,0,-c],[0,1,0,c,0,c]]});
+  assert.deepEqual([1,2].map(f=>model.displaySpec(mlo,f).orientation.flipV),[false,true]);
+  // A 2D object with only Patient Orientation keeps using it.
+  assert.equal(model.displaySpec(mg({lat:'L',view:'CC',orientation:['P','L']}),1).orientation.flipH,true);
+});
+
+test('MG05-reject a frame whose own tags disagree, or cannot decide, is shown as stored and Unverified',()=>{
+  const item=dbt({lat:'R',view:'CC',positions:[0,1],frameIops:[RCC_IOP,RCC_ROW_REVERSED],extra:{'00200020':v('CS','P','L')}});
+  const first=model.displaySpec(item,1).orientation,second=model.displaySpec(item,2).orientation;
+  assert.equal(first.status,'verified');
+  assert.deepEqual([second.status,second.flipH,second.flipV],['unverified',false,false],'Patient Orientation against this frame\'s orientation is a contradiction');
+  const sideways=dbt({lat:'R',view:'CC',positions:[0,1],frameIops:[RCC_IOP,[1,0,0,0,1,0]]});
+  const s=model.displaySpec(sideways,2).orientation;
+  assert.deepEqual([s.status,s.flipH,s.flipV],['unverified',false,false],'a frame whose rows do not run anterior-posterior is not guessed');
+  assert.equal(model.frameIndex(sideways).complete,false,'mixed per-frame orientation is reported by the index');
 });
 
 test('MG06-allow only the latest request of a slot in the live mount generation is current',()=>{
