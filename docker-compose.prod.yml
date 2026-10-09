@@ -33,7 +33,9 @@ services:
     logging: *bounded-logging
 
   keycloak:
-    command: start --import-realm
+    # 이 command가 기본 docker-compose.yml의 것을 통째로 덮어쓴다. 세션 캐시 OFF 옵션을 여기서 빠뜨리면 운영에만 끝낸 세션의
+    # 캐시 부활 경로(keycloak#51127)가 남는다 — 기본 파일과 같은 옵션을 둔다(이유·확인: keycloak/README.md).
+    command: start --import-realm --spi-user-sessions--infinispan--use-caches=false
     environment:
       KC_HOSTNAME: https://pacs.koreaimagingnetwork.com/auth
     ports: !override

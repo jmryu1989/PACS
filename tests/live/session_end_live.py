@@ -54,6 +54,7 @@ import unittest
 from collections import deque
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -78,12 +79,14 @@ CASES = (
     "test_09_an_isolated_member_cannot_come_back_until_activated",
     "test_10_db_suspension_refuses_both_browsers_while_provider_sso_stays_alive",
     "test_11_explicit_logout_ends_its_provider_session_and_the_next_same_sid_sso_lives",
-    # S7-U5-LOGIN-RECOVERY-2 (ledger 159/159a). LR2-L1 is the proving case for the login-recovery fix and is
-    # expected-red on the current product (the recovery branch pins the next person to the previous doctor). LR2-L4 is a
-    # design-independent regression guard that must stay green before and after the fix. test_13 is a behaviour test.
-    "test_12_next_person_after_a_confirmed_end_gets_an_editable_form",
+    # S7-U5-LOGIN-RECOVERY-2 (ledger 159/159a, D720). LR2-L1b (test_12) is anomaly safety in the forced state of a provider
+    # SSO alive past its confirmed end; LR2-L1a (test_15) is cause prevention after a real confirmed Log out; LR2-L4
+    # (test_14) is a design-independent guard; test_13 is a behaviour test.
+    "test_12_an_sso_alive_past_its_confirmed_end_never_admits_the_previous_doctor",
     "test_13_a_live_session_landing_enters_automatically",
     "test_14_covered_but_unconfirmed_end_stays_end_unconfirmed",
+    "test_15_a_confirmed_logout_never_hands_back_the_ended_authentication",
+    "test_16_the_running_provider_keeps_persistent_sessions_with_the_session_cache_off",
 )
 APP = "/worklist/hpacs-lite/"
 STORAGE_DENIED = """(() => { for (const name of ['localStorage']) Object.defineProperty(window, name,
@@ -860,16 +863,20 @@ class SessionEndLive(unittest.TestCase):
             (directory / (self._testMethodName + ".json")).write_text(
                 json.dumps({"url": urlparse(page.url).path, "form": form}, ensure_ascii=True) + "\n", encoding="utf-8")
 
-    @unittest.expectedFailure  # EXPECTED-RED on the current product (ledger 159a); the recovery fix (phase 2b) makes it pass.
-    def test_12_next_person_after_a_confirmed_end_gets_an_editable_form(self):
-        """LR2-L1 (REQ-LR2-EDITABLE -> RISK-S7-U5-SILENT-REENTRY). The proving case for the login-recovery fix. After a
-        CONFIRMED end whose provider SSO is still alive (confirmed_end_with_live_sso), the next person's ordinary Login
-        must reach an EDITABLE, empty username with a visible password and no attempted previous doctor - never a Keycloak
-        logout confirmation or notice page - enters with ONE credential entry as themselves (B), gets B's /api/me and one
-        success audit row, and A's old Bearer stays refused. Expected-red now: the current product restarts as fresh
-        (prompt=login) while A's SSO is alive, so Keycloak pins the form to A (username hidden) and B cannot type their
-        name. When phase 2b clears the browser SSO before the fresh step, every assertion below passes and this flips to an
-        unexpected success - the signal to remove the expectedFailure marker. No assertion is weakened to go green early."""
+    def success_logins(self, who: str) -> int:
+        """Successful login records of this account written during this case (the product's auth.login success row)."""
+        return int(psql(f'SELECT count(*) FROM "AuditLog" WHERE target=\'{self.ids[who]}\' AND action=\'auth.login\' '
+                        f"AND id > {self.audit_floor} AND detail::json->>'outcome' = 'success';")[0])
+
+    def test_12_an_sso_alive_past_its_confirmed_end_never_admits_the_previous_doctor(self):
+        """LR2-L1b (REQ-LR2-EDITABLE -> RISK-S7-U5-SILENT-REENTRY; anomaly safety, D720). The forced anomaly: the previous
+        doctor A's provider SSO is kept alive past the product's CONFIRMED end of it (confirmed_end_with_live_sso). The
+        cache-off fix (LR2-L1a) removes the known way into this state, but the product must stay safe if the provider is
+        ever in it again. The next person's ordinary Login is answered from A's SSO; the product refuses that handed-back
+        authentication, records the anomaly, and restarts once (#143). Keycloak then shows its own re-authentication form
+        for A. Required: A is never admitted; the anomaly is recorded; ONE native Keycloak action - its own restart-login
+        link on that form, which the product does not build - reaches an editable, empty user-name form; B enters with one
+        credential entry as B; A's old Bearer stays refused. Not a logout confirmation or notice page."""
         context, page = self.profile()
         _, a_token = self.confirmed_end_with_live_sso(context, page)
         del context.asked[:]
@@ -877,26 +884,32 @@ class SessionEndLive(unittest.TestCase):
         at = self.settle(page)
         if at == "landing":
             at = self.press(page, "#signin")
-        # Not a Keycloak logout confirmation / notice page: the recovery lands on the login form. settle() returns
-        # 'keycloak' for any /auth/realms/kin/ page, so the logout endpoint is excluded explicitly and the editable-form
-        # check below would also refuse a confirmation page (it has no user-name field).
         self.assertEqual(at, "keycloak", "the recovery lands on a provider page")
         self.assertNotIn("/protocol/openid-connect/logout", urlparse(page.url).path,
                          "the recovery does not stop on a provider logout confirmation / notice page")
-        self.save_form(page, page.evaluate(FORM))
-        # The core requirement: the next person can type their own name. This is the assertion that is red today.
-        self.assert_editable_form(page, "the next person's Login after a confirmed end with a surviving SSO")
-        # And one credential entry enters as B, with B's identity and exactly one success record - no second form.
+        # The product refused the authentication the provider handed back (one fresh restart, #143) and never admitted A.
+        self.assertIn(("authorize", "login"), context.asked, "the handed-back authentication was refused with one restart")
+        self.assertEqual(self.product_sessions("A"), 0, "the previous doctor is never admitted")
+        # The anomaly is on record: the recovery branch's refusal row for A's handed-back authentication.
+        self.assertEqual(self.refusals("A"), 1, "one refusal record of the authentication the provider handed back")
+        form = page.evaluate(FORM)
+        self.save_form(page, form)
+        # ONE native Keycloak action: its own restart-login link, rendered by Keycloak on this form (no product-built URL).
+        self.assertTrue(page.locator("#reset-login").is_visible(), "Keycloak offers its own restart-login link here")
         asked = len(context.asked)
+        with page.expect_navigation():
+            page.click("#reset-login")
+        self.assertEqual(self.settle(page), "keycloak")
+        self.assert_editable_form(page, "after Keycloak's own restart-login on the forced-anomaly form")
+        # B enters with one credential entry, as B - no further authorize, no second form, no extra restart.
         self.assertEqual(self.credentials(page, "B"), "main", "B enters with one credential entry")
-        self.assertEqual(context.asked[asked:], [], "no second credential form, no extra restart")
+        self.assertEqual(context.asked[asked:], [], "no further authorize after the one restart-login action")
         self.assertEqual(self.me(context), (200, self.ids["B"]))
         self.assertEqual((self.product_sessions("A"), self.product_sessions("B")), (0, 1))
-        self.assertEqual(int(psql(f'SELECT count(*) FROM "AuditLog" WHERE target=\'{self.ids["B"]}\' '
-                                  f"AND action='auth.login' AND id > {self.audit_floor} "
-                                  "AND detail::json->>'outcome' = 'success';")[0]), 1, "one success audit for B")
-        # The previous doctor's authentication stays ended on the Bearer path (its auth_time precedes the confirmed end).
+        self.assertEqual(self.success_logins("B"), 1, "one success record for B")
+        # A's authentication stays ended on the Bearer path (its auth_time precedes the confirmed end).
         self.assertEqual(self.bearer_me(a_token), (401, "AUTH_SESSION_ENDED"), "A's old Bearer stays refused")
+        self.report("LR2-L1b", pinned_before_restart=form["attempted"] is not None, refusals_A=1, entered="B")
 
     def test_13_a_live_session_landing_enters_automatically(self):
         """LR2 behaviour: opening the landing with a live product session enters the work screen by itself (index.html
@@ -947,6 +960,94 @@ class SessionEndLive(unittest.TestCase):
         self.assertNotIn(("authorize", "login"), context.asked, "no fresh prompt=login restart on an unconfirmed end")
         self.assertEqual((self.product_sessions("A"), self.product_sessions("B")), (0, 0), "no session from an unconfirmed end")
         self.report("LR2-L4", authorizes=[item for item in context.asked if item[0] == "authorize"])
+
+    def test_15_a_confirmed_logout_never_hands_back_the_ended_authentication(self):
+        """LR2-L1a (REQ-LR2-NO-SESSION-RESURRECTION -> RISK-S7-U5-SILENT-REENTRY; cause prevention, D720). The SE-11 hosted
+        failure was the provider handing back the ended authentication after a CONFIRMED explicit Log out. With the session
+        cache off (docker-compose `--spi-user-sessions--infinispan--use-caches=false`) the provider must never do that.
+        Five SE-11-style rounds, each from no sessions: A logs in (in a profile that kept an abandoned login page, as SE-11),
+        A's real explicit Log out is confirmed (provider session gone, every end request done, the mark confirmed - nothing
+        is written by hand), then the next person's ordinary Login. The proof that the ended authentication was NOT handed
+        back is the product's own behaviour: no refusal record for A and no prompt=login restart - the form the person
+        meets is the provider's fresh, editable one. B then enters with one credential entry, refreshes, and A's old Bearer
+        stays refused. A provider-list of 0 alone is not the proof; the arrival at an editable form is. Repeated under CPU
+        load by separate units; one passing run is not a proof that a race is impossible."""
+        rounds = []
+        for attempt in range(5):
+            # Each round is judged on its own records, from no sessions at all (as setUp does between cases).
+            self.audit_floor = int(psql('SELECT coalesce(max(id), 0) FROM "AuditLog";')[0])
+            self.case_sessions = {"A": [], "B": []}
+            context, page = self.profile()
+            spare = context.new_page()
+            spare.goto(self.stack.proxy + "/api/auth/login")
+            self.assertEqual(self.settle(spare), "keycloak")
+            spare.close()
+            self.sign_in(page, "A")
+            a_sid, a_token = self.provider_session_and_token("A")
+            self.assertEqual(self.me(context), (200, self.ids["A"]))
+            asked = len(context.asked)
+            self.assertEqual(context.request.post(self.stack.proxy + "/api/auth/logout", headers={
+                "X-KIN-CSRF": "1", "X-KIN-Session": page.evaluate("KinAuth.sessionId()")}).status, 204)
+            self.wait("A's provider session ended and the product's end confirmed",
+                      lambda: self.provider_alive("A") == 0 and ("logout", "true") in self.marks("A"), 30)
+            self.assertEqual(self.product_sessions("A"), 0)
+            requests = self.end_requests(a_sid)
+            self.assertTrue(requests and all(state == "done" for state in requests), requests)
+            # Separate the confirmed end from the next plain authentication's whole second (as SE-11).
+            time.sleep(1.05)
+            page.goto(self.stack.proxy + APP + "index.html", wait_until="commit")
+            at = self.settle(page)
+            if at == "landing":
+                at = self.press(page, "#signin")
+            self.assertEqual(at, "keycloak", f"round {attempt}: the next person meets the provider's form")
+            self.assert_editable_form(page, f"round {attempt}: the next person's Login after a confirmed Log out")
+            # Cause prevention: the provider did not hand back A's ended authentication on any page of this profile.
+            self.assertEqual(self.refusals("A"), 0, f"round {attempt}: the provider handed back A's ended authentication")
+            self.assertNotIn(("authorize", "login"), context.asked[asked:],
+                             f"round {attempt}: a recovery restart means the ended authentication was handed back")
+            entered = len(context.asked)
+            self.assertEqual(self.credentials(page, "B"), "main", f"round {attempt}: B enters with one credential entry")
+            self.assertEqual(context.asked[entered:], [], f"round {attempt}: no second credential form")
+            self.assertEqual(self.me(context), (200, self.ids["B"]))
+            b_sid, _ = self.provider_session_and_token("B")
+            self.assertEqual((self.product_sessions("A"), self.product_sessions("B")), (0, 1))
+            self.assertEqual(self.success_logins("B"), 1, f"round {attempt}: one success record for B")
+            # B's session refreshes: the provider keeps B's new SSO (it is not the ended one).
+            psql(f'UPDATE "AuthSession" SET "atExpiresAt" = now() - interval \'1 minute\' WHERE sub=\'{self.ids["B"]}\';')
+            self.assertEqual(self.me(context), (200, self.ids["B"]), f"round {attempt}: B's session refreshes")
+            self.assertEqual(self.bearer_me(a_token), (401, "AUTH_SESSION_ENDED"), f"round {attempt}: A's old Bearer")
+            rounds.append({"round": attempt, "same_sid": b_sid == a_sid})
+            context.close()
+            self.contexts.remove(context)
+            for user_id in self.ids.values():
+                self.stack.kc_admin("POST", f"/users/{user_id}/logout")
+            cleanup_sessions(self.stack)
+        self.report("LR2-L1a", rounds=rounds)
+
+    def provider_server_info(self) -> dict:
+        """The running Keycloak's server info (master admin, read only). Not realm-scoped, so not through kc_admin."""
+        self.stack.kc_admin("GET", "/users?max=1")  # renews the admin token when it is near expiry
+        request = Request("http://127.0.0.1:8080/auth/admin/serverinfo",
+                          headers={"Authorization": "Bearer " + str(self.stack.admin_token)})
+        with urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def test_16_the_running_provider_keeps_persistent_sessions_with_the_session_cache_off(self):
+        """LR2-C1 (REQ-LR2-EXISTING-INSTALL -> RISK-LR2-STALE-CONFIG). The fix is a Keycloak process option, so its
+        evidence is the RUNNING provider, not the option's presence in docker-compose: the user-session provider reports
+        useCaches=false (no embedded session cache, so no cache re-hydration of an ended session, keycloak#51127), the
+        persistent user sessions feature stays on (sessions still survive a restart in PostgreSQL - the cache is not
+        replaced by turning persistence off), and the version stays the pinned 26.7.3 (the 26.8.0 upgrade is a separate
+        unit). Fails if a rebind or deploy left the old command running. Reads only non-secret server-info fields."""
+        info = self.provider_server_info()
+        sessions = info["providers"]["userSessions"]["providers"]["infinispan"]["operationalInfo"]
+        persistent = [feature.get("enabled") for feature in info.get("features", [])
+                      if feature.get("name") == "PERSISTENT_USER_SESSIONS"]
+        version = info["systemInfo"]["version"]
+        self.report("LR2-C1", use_caches=sessions.get("useCaches"), persistent_user_sessions=persistent, version=version)
+        self.assertEqual(sessions.get("useCaches"), "false", "the running provider has the user-session cache off")
+        self.assertEqual(persistent, [True], "persistent user sessions stay on")
+        self.assertEqual(version, "26.7.3", "the provider stays on the pinned version")
 
 
 if __name__ == "__main__":
