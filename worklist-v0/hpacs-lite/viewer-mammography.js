@@ -19,6 +19,7 @@
   const KIND_LABEL={conventional:'Conventional',generated2d:'Synthetic 2D',dbt:'DBT',projection:'Projection'};
   const SLICE_LABEL={slices:'Slices',slab:'Slab','mip-slab':'MIP Slab','minip-slab':'MinIP Slab',unspecified:'Slices Unspecified'};
   const ROLE_LABEL={current:'Current',prior:'Prior'};
+  const partialLabel=o=>'Partial '+(o.partialSections.length&&o.partialSections.every(s=>s!=='Unknown Section')?o.partialSections.join('/'):'View');
   const LAYOUTS=[['current','Current'],['compare-cc','Compare CC'],['compare-mlo','Compare MLO']];
   const CACHE_LIMIT=8,ZOOM_STEP=1.25,ZOOM_MAX=8;
   const MESSAGE={
@@ -47,7 +48,9 @@
     'biopsy-image':'생검 관련 영상입니다.','mixed-frame-types':'프레임 종류가 섞여 있습니다.','presentation-intent-conflict':'표시 용도 정보가 서로 다릅니다.',
     'identity-invalid':'영상 식별 정보를 확인하지 못했습니다.','wrong-study':'다른 검사의 영상입니다.','duplicate-object':'같은 영상이 두 번 들어 있습니다.',
     'frame-count-invalid':'프레임 수가 없거나 허용 범위를 벗어났습니다.','image-frame-type-conflict':'영상 종류(Image Type)와 프레임 종류(Frame Type)가 서로 다릅니다.',
-    'frame-type-missing':'프레임 종류 정보가 없습니다.','partial-view-conflict':'부분 촬영 정보가 서로 다릅니다.',
+    'frame-type-missing':'프레임 종류 정보가 없습니다.','partial-view-conflict':'부분 촬영 정보가 서로 달라 자동 배치하지 않았습니다.',
+    'partial-section-code-missing':'부분 촬영 영역 정보가 없어 자동 배치하지 않았습니다.',
+    'shared-functional-groups-invalid':'공통 프레임 정보의 구조를 확인하지 못했습니다.',
     'unsupported-device-profile':'검증된 장비 프로필이 아닌 합성 2D 표시입니다.','slice-or-slab-evidence-missing':'단면 두께와 위치로 단면·slab 여부를 확인하지 못했습니다.',
     'unmapped-image-type-extension':'확인되지 않은 영상 종류 값이 있습니다.','presentation-intent-missing':'표시 용도 정보가 없습니다.','image-type-missing':'영상 종류 정보가 없습니다.',
     'frame-summary-conflict':'영상 전체와 프레임의 계산 정보가 서로 다릅니다.','shared-and-per-frame-macro':'같은 정보가 공통·프레임별로 중복돼 있습니다.',
@@ -110,6 +113,7 @@
     }
     function retire(cell){
       if(cell.disposed)return;cell.disposed=true;
+      if(cell.resize)cell.resize.disconnect();
       for(const c of cell.controllers){c.abort();controllers.delete(c);}
       try{cell.handle&&cell.handle.detach();}catch(_){}
     }
@@ -152,7 +156,7 @@
       if((cell.slot.status==='ambiguous'||cell.slot.status==='partial')&&!cell.object){
         cell.note.textContent=cell.slot.status==='partial'?MESSAGE.partial:MESSAGE.ambiguous;
         cell.slot.candidates.forEach((o,i)=>{
-          const name=o.partial?'Partial '+(o.partialSections.join('/')||'View'):o.instanceNumber!==null?'Img '+o.instanceNumber:'Image '+(i+1);
+          const name=o.partial?partialLabel(o):o.instanceNumber!==null?'Img '+o.instanceNumber:'Image '+(i+1);
           const b=el('button',{type:'button',title:o.sop,text:'Use '+name});
           b.onclick=()=>{choices.set(cell.slot.key,o.sop);replace(cell);};cell.note.append(' ',b);
         });
@@ -170,9 +174,7 @@
       else if(!cell.object)parts.push((cell.slot.status==='partial'?'Partial Only (':'Ambiguous (')+cell.slot.candidates.length+')');
       else{
         const o=cell.object,entry=cell.index.entries[cell.position-1];
-        if(o.partial)parts.push('Partial '+(o.partialSections.join('/')||'View'));
-        // Placed without proof of a full view (no Partial View information at all): said, not hidden.
-        else if(!o.fullViewAutoMatch)parts.push('Full View Unverified');
+        if(o.partial)parts.push(partialLabel(o));
         if(o.instanceNumber!==null)parts.push('Img '+o.instanceNumber);
         if(cell.slot.status==='ambiguous')parts.push('Chosen of '+cell.slot.candidates.length);
         if(o.kind==='dbt'){
@@ -228,35 +230,60 @@
         voi:{center:spec.voi.center,width:spec.voi.width,fn:spec.voi.fn},modality:{...spec.modality},scale,pan:{...pan},
         width:box.width,height:box.height};
     }
-    // Renders of one cell run one at a time. A request is checked right before it reaches the viewport,
-    // the viewport checks it again right before it paints (`current`), and it is checked once more after
-    // the render: only the latest navigation intent is painted, counted or reported as displayed.
-    function draw(cell,image,entry,ticket){
-      const latest=()=>usable(cell)&&(!ticket||gate.current(ticket))&&live();
+    // This is the only paint gate. Requests contain an opening/slot/generation/frame ticket, never
+    // a captured displayed image. Camera, recovery and resize requests resolve the latest target here.
+    // Loading may overlap, but visible renders are serial and validate again at paint and receipt.
+    function paintTicket(cell){
+      const entry=cell.index.entries[cell.intent-1];
+      return {...gate.begin(cell.id,entry.sop+'#'+entry.frame),opening:bound};
+    }
+    async function paint(cell,ticket){
+      const latest=()=>usable(cell)&&gate.current(ticket)&&ticket.opening===bound&&
+        ticket.key===cell.index.entries[cell.intent-1].sop+'#'+cell.index.entries[cell.intent-1].frame&&live();
+      if(!latest())return false;
+      const wanted=cell.index.entries[cell.intent-1];
+      if(!cell.supply||cell.supply.key!==ticket.key){
+        const c=track(cell);c.display=true;
+        const supply={key:ticket.key,promise:obtain(cell,wanted,c.signal).finally(()=>untrack(cell,c))};
+        cell.supply=supply;
+      }
+      const supply=cell.supply;
+      let image;
+      try{image=await supply.promise;}
+      catch(error){
+        if(cell.supply===supply)cell.supply=null;
+        if(!latest())return false;
+        if(refused(error)){stop(MESSAGE.ended);return false;}
+        if(aborted(error))return false;
+        cell.failed=cell.intent;
+        cell.note.textContent=error&&error.name==='KinFrameMismatch'?MESSAGE.mismatch:MESSAGE.delayed;cell.note.append(' ',retry(cell));return false;
+      }
+      if(!latest())return false;
       cell.drawing++;
       const run=cell.queue.then(async()=>{
         if(!latest())return false;
+        const entry=cell.index.entries[cell.intent-1];
+        if(!sameFrame(image,entry))return false;
         let result=null;
         try{result=await cell.handle.render(image,display(cell,image,entry),{current:latest});}catch(_){result=null;}
         if(!usable(cell)||!live())return false;
         if(result&&result.superseded)return false;
         const painted=!!result&&result.rendered===true&&result.sop===entry.sop&&result.frame===entry.frame;
-        const current=!ticket||gate.current(ticket);
+        const current=latest();
+        if(!current)return false;
         if(!painted){
-          if(current){cell.failed=entry.index;cell.intent=cell.position;cell.note.textContent=MESSAGE.renderFailed;cell.note.append(' ',retry(cell));}
+          cell.failed=entry.index;cell.note.textContent=MESSAGE.renderFailed;cell.note.append(' ',retry(cell));
           return false;
         }
-        // The screen now holds this frame; the labels follow the screen.
+        // No external observer or await separates this validation from the visible state/coverage commit.
         cell.position=entry.index;cell.image=image;cell.shown={sop:entry.sop,frame:entry.frame};
-        // Superseded while painting: kept as the screen's truth, never counted or reported; the newer
-        // request is already queued behind this one.
-        if(!current){relabel(cell);return false;}
         const fresh=!cell.reported||cell.reported.sop!==entry.sop||cell.reported.frame!==entry.frame;
         cell.failed=null;cell.note.textContent='';
         memory.set(cell.object.sop,{position:cell.position,camera:{...cell.camera,pan:{...cell.camera.pan}}});
-        if(fresh){cell.reported={sop:entry.sop,frame:entry.frame};cell.coverage.mark(entry);emit('displayed',record(cell,entry,'display'));}
+        if(fresh){cell.reported={sop:entry.sop,frame:entry.frame};cell.coverage.mark(entry);}
         relabel(cell);
-        if(fresh)prefetch(cell);
+        if(fresh&&latest())emit('displayed',record(cell,entry,'display'));
+        if(fresh&&latest())prefetch(cell);
         return true;
       }).finally(()=>{cell.drawing--;});
       cell.queue=run.catch(()=>false);
@@ -281,27 +308,15 @@
       const total=cell.index.entries.length;target=Math.max(1,Math.min(total,target));
       const entry=cell.index.entries[target-1];
       // Every request, also one back to the slice already on screen, supersedes every older one.
-      const ticket=gate.begin(cell.id,entry.sop+'#'+entry.frame);cell.intent=target;
+      cell.intent=target;const ticket=paintTicket(cell);
       for(const c of cell.controllers)if(c.display){c.abort();untrack(cell,c);}
+      cell.supply=null;
       if(!force&&cell.shown&&cell.shown.sop===entry.sop&&cell.shown.frame===entry.frame){
         // Already on screen: repaint only when an older render may still land after this point.
-        if(cell.drawing)await draw(cell,cell.image,entry,ticket);
+        if(cell.drawing)await paint(cell,ticket);
         return;
       }
-      const c=track(cell);c.display=true;
-      let image;
-      try{image=await obtain(cell,entry,c.signal);}
-      catch(error){
-        untrack(cell,c);
-        if(!usable(cell)||!gate.current(ticket))return;
-        if(refused(error)){stop(MESSAGE.ended);return;}
-        if(aborted(error)||!live())return;
-        cell.failed=target;cell.intent=cell.position;
-        cell.note.textContent=error&&error.name==='KinFrameMismatch'?MESSAGE.mismatch:MESSAGE.delayed;cell.note.append(' ',retry(cell));return;
-      }
-      untrack(cell,c);
-      if(!usable(cell)||!gate.current(ticket)||!live())return;
-      await draw(cell,image,entry,ticket);
+      return paint(cell,ticket);
     }
     function key(cell,event){
       if(!cell.object||cell.index.entries.length<2)return;
@@ -347,9 +362,8 @@
     }
     function camera(cell,next){if(!cell||!cell.object||!usable(cell))return;cell.camera=next;repaint(cell);}
     function repaint(cell){
-      if(!cell.image||!usable(cell))return;
-      const entry=cell.index.entries[cell.position-1];
-      draw(cell,cell.image,entry,null);
+      if(!cell.object||!usable(cell)||!live())return;
+      return paint(cell,paintTicket(cell));
     }
 
     function grid(list){
@@ -357,7 +371,16 @@
       g.append(...list.map(c=>c.element));return g;
     }
     function attach(cell){
-      if(cell.object)cell.handle=viewport.attach(cell.view,{slot:{role:cell.spec.role,side:cell.spec.side,view:cell.spec.view,kind:cell.kind}});
+      if(!cell.object)return;
+      cell.handle=viewport.attach(cell.view,{slot:{role:cell.spec.role,side:cell.spec.side,view:cell.spec.view,kind:cell.kind}});
+      if(typeof root.ResizeObserver==='function'){
+        let size=[cell.view.clientWidth,cell.view.clientHeight].join('|');
+        cell.resize=new root.ResizeObserver(()=>{
+          const next=[cell.view.clientWidth,cell.view.clientHeight].join('|');
+          if(size!==next){size=next;if(cell.view.clientWidth&&cell.view.clientHeight)repaint(cell);}
+        });
+        cell.resize.observe(cell.view);
+      }
     }
     function pressed(){
       for(const b of layoutButtons)b.setAttribute('aria-pressed',String(b.dataset.layout===layout));
@@ -396,7 +419,7 @@
       if(previousGrid)previousGrid.hidden=true;
       gridHolder.append(next);
       for(const cell of drafts)attach(cell);
-      const shown=await Promise.all(drafts.map((cell,i)=>cell.object?draw(cell,firstImages[i].image,cell.index.entries[cell.position-1],null):true));
+      const shown=await Promise.all(drafts.map(cell=>cell.object?go(cell,cell.intent,true):true));
       busy=false;
       if(ended||!live()){discard();return false;}
       if(shown.some(ok=>!ok)){
@@ -427,7 +450,8 @@
         const why=o.use==='refused'?MESSAGE.priorRefused:(o.issues.map(x=>REASON[x]).find(Boolean)||
           (o.modifiers.length?o.modifiers.join(', ')+' 추가 촬영입니다.':o.partial?'부분 촬영(Partial View)입니다.':o.laterality==='B'?'양측(B) 영상입니다.':'표준 4방향 영상이 아닙니다.'));
         const date=o.use==='refused'?[]:[o.date||'Date Unverified'];
-        list.append(el('li',{text:[ROLE_LABEL[o.role],...date,(o.laterality||'?')+' '+(o.view||'?'),KIND_LABEL[o.kind]||'Unverified'].join(' · ')+' — '+why}));
+        const partialStatus=o.partialState==='conflict'?'Partial View Conflict':o.issues.includes('partial-section-code-missing')?'Partial View Unverified':null;
+        list.append(el('li',{text:[ROLE_LABEL[o.role],...date,(o.laterality||'?')+' '+(o.view||'?'),KIND_LABEL[o.kind]||'Unverified',...(partialStatus?[partialStatus]:[])].join(' · ')+' — '+why}));
       }
       others.append(list);
     }

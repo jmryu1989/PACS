@@ -63,24 +63,147 @@ const PARTIAL_MEDIAL={'00281352':seq({'00080102':v('SH','SCT'),'00080100':v('SH'
 // named by its testId; every provided expected key is compared with model.contract(). The table is input
 // data from the consult; nothing here is generated from this model's output.
 const fs=require('node:fs'),crypto=require('node:crypto');
-const RULE_TABLE=process.env.KIN_MG_RULE_CASES||'C:/Users/norne/PACS/tmp/astra-control/evidence/mg-classification-consult-20261009/rule-cases.json';
-const RULE_TABLE_SHA256='83ccf159299a551adc7937888daacb1eb5047152f82afd18da901efc579f083e';
-// Cases whose embedded header cannot carry the expected value; reported as disputed, never re-expected.
-const DISPUTED={'PUBLIC-010':['declaredSourceCount'],'PUBLIC-011':['declaredSourceCount'],'PUBLIC-012':['declaredSourceCount'],'PUBLIC-013':['declaredSourceCount']};
-if(fs.existsSync(RULE_TABLE)){
-  const raw=fs.readFileSync(RULE_TABLE),table=JSON.parse(raw);
-  test('D735 rule table is the pinned one',()=>{assert.equal(crypto.createHash('sha256').update(raw).digest('hex'),RULE_TABLE_SHA256);});
+const RULE_TABLE=process.env.KIN_MG_RULE_CASES||'C:/Users/norne/PACS/tmp/astra-control/evidence/mg-classification-consult-20261009/v2/rule-cases.json';
+const RULE_TABLE_SHA256='a60b86b6267853615872a915d66a59150062afdbfe5d8725ca7a55f578c984d0';
+// This byte pin is required only to bind both products to the identical shared input contract.
+// A missing required table fails collection, rather than silently passing a smaller suite.
+const raw=fs.readFileSync(RULE_TABLE),table=JSON.parse(raw);
+{
+  test('D744 rule table is the pinned one',()=>{
+    assert.equal(crypto.createHash('sha256').update(raw).digest('hex'),RULE_TABLE_SHA256);
+    assert.equal(table.cases.length,273);assert.equal(new Set(table.cases.map(c=>c.testId)).size,273);
+  });
   for(const k of table.cases)test(k.testId,()=>{
     const got=model.contract(k.input.dicom,k.input.context);
     for(const [key,expected] of Object.entries(k.expected)){
-      if((DISPUTED[k.id]||[]).includes(key))continue;
       assert.deepEqual(got[key]===undefined?null:got[key],expected,k.id+' '+key);
     }
   });
-}else test('D735 rule table',{skip:'D735 rule table absent at '+RULE_TABLE+'; hosted CI needs it as a fixture (round 2 CI plan)'},()=>{});
+}
 const study=(uid,role,instances,institution='H1')=>({uid,role,institution,instances});
 const manifest=(...studies)=>({institution:'H1',studies});
 const slot=(p,role,side,view,kind)=>p.slots[[role,side,view,kind].join('|')];
+
+// R3 independent counterexamples: header facts and source relations, never implementation text.
+const clone=o=>JSON.parse(JSON.stringify(o));
+const concept=(scheme,value)=>({'00080102':v('SH',scheme),'00080100':v('SH',value)});
+const reference=o=>seq({'00081150':o['00080016'],'00081155':o['00080018']});
+function sourcePair(){
+  const target=dbt({lat:'R',extra:{'00281350':v('CS','NO')}});
+  const result=mg({type:GENERATED,partial:'NO',extra:{'00082112':reference(target)}});
+  return {result,target,context:{patientKey:'patient-1',institutionKey:'institution-1',storedObjects:[{dicom:target,patientKey:'patient-1',institutionKey:'institution-1'}]}};
+}
+test('MG08-reject source acceptance requires nonempty patient and institution keys on both sides',()=>{
+  const good=sourcePair();assert.equal(model.verifySources(good.result,good.context).sourceAccepted,true);
+  for(const key of ['patientKey','institutionKey'])for(const side of ['caller','target','both'])for(const value of [undefined,null,'','   ',0,{},[]]){
+    const {result,context}=sourcePair();
+    if(side!=='target')context[key]=value;
+    if(side!=='caller')context.storedObjects[0][key]=value;
+    const got=model.verifySources(result,context);
+    assert.equal(got.sourceLinkStatus,'unresolved','MG08 M25: missing context never verifies a source');
+    assert.equal(got.sourceAccepted,false);assert.equal(got.references.length,1);assert.equal(got.rawReferenceRetained,true);
+  }
+});
+test('MG08-reject partial sources require verified matching CID 4005 meanings',()=>{
+  for(const scheme of ['SRT','SNM3']){
+    const {result,target,context}=sourcePair();
+    result['00281350']=target['00281350']=v('CS','YES');
+    result['00281352']=seq(concept('SCT','255561001'));target['00281352']=seq(concept(scheme,'R-404D5'));
+    assert.equal(model.verifySources(result,context).sourceAccepted,true,'equivalent CID 4005 meanings agree across schemes');
+    target['00281352']=seq(concept('SCT','49370004'));
+    assert.equal(model.verifySources(result,context).sourceLinkStatus,'rejected','different verified sections contradict');
+  }
+  for(const c of [concept('99LOCAL','x'),concept('SCT','999999'),{},concept('SCT','R-404D5')]){
+    const {result,target,context}=sourcePair();
+    result['00281350']=target['00281350']=v('CS','YES');result['00281352']=target['00281352']=seq(c);
+    const got=model.verifySources(result,context);
+    assert.equal(got.sourceAccepted,false,'MG08 M26: identical unknown partial codes are not verified meaning');
+    assert.equal(got.sourceLinkStatus,'unresolved');assert.equal(got.references.length,1);
+  }
+});
+test('MG08-reject source modifiers and biopsy context cannot contradict the result',()=>{
+  for(const where of ['result','target']){
+    const p=sourcePair();p[where]['00540220'].Value[0]['00540222']=seq(concept('SCT','399055006'));
+    assert.equal(model.verifySources(p.result,p.context).sourceLinkStatus,'rejected','MG08 M27: plain and spot source contexts contradict');
+  }
+  const same=sourcePair();
+  for(const o of [same.result,same.target])o['00540220'].Value[0]['00540222']=seq(concept('SCT','399209000'));
+  assert.equal(model.verifySources(same.result,same.context).sourceAccepted,true,'matching verified modifiers are permitted');
+  const biopsy=sourcePair();biopsy.result['00080008']=v('CS','DERIVED','PRIMARY','TOMO_SCOUT','GENERATED_2D');
+  assert.equal(model.classify(biopsy.result).status,'verified');
+  assert.equal(model.verifySources(biopsy.result,biopsy.context).sourceLinkStatus,'rejected','MG08 M28: biopsy result cannot claim a plain source context');
+});
+test('MG08-reject cycles in the provided source graph never verify',()=>{
+  for(const length of [2,3,6]){
+    const {result,target,context}=sourcePair();let tail=target;
+    for(let i=2;i<length;i++){
+      const nextTarget=clone(target);nextTarget['00080018']=v('UI',next());
+      tail['00082112']=reference(nextTarget);tail=nextTarget;
+      context.storedObjects.push({dicom:tail,patientKey:context.patientKey,institutionKey:context.institutionKey});
+    }
+    tail['00082112']=reference(result);
+    const got=model.verifySources(result,context);
+    assert.equal(got.sourceLinkStatus,'rejected','MG08 M29: a source cycle is a contradiction');assert.equal(got.rawReferenceRetained,true);
+    tail['00082112']=reference(target);
+    assert.equal(model.verifySources(result,context).sourceLinkStatus,'rejected','reachable source-only cycle is also rejected');
+    delete tail['00082112'];assert.equal(model.verifySources(result,context).sourceAccepted,true,'acyclic supplied graph is accepted');
+  }
+});
+test('MG04-allow every DBT representation has a nonempty selection with duplicate MinIP ambiguous',()=>{
+  const make=(technique,thickness=10)=>dbt({lat:'R',positions:[0,5,10],volumetric:'SAMPLED',technique,thickness});
+  const a=make('MIN_IP'),b=make('MIN_IP'),mip=make('MAX_IP'),slab=make('TOMOSYNTHESIS');
+  slab['00080008'].Value[3]='MEAN';for(const f of slab['52009230'].Value)f['00189504'].Value[0]['00089007'].Value[3]='MEAN';
+  const thin=dbt({lat:'R'}),get=xs=>slot(model.plan(manifest(study(a['0020000D'].Value[0],'current',xs))),'current','R','CC','dbt');
+  const duplicate=get([a,b]);
+  assert.equal(duplicate.status,'ambiguous','MG04 M30: duplicate MinIP remains a nonempty explicit choice');assert.equal(duplicate.candidates.length,2);
+  assert.equal(get([a,mip]).status,'ambiguous','MinIP and MIP have equal priority, neither silently replaces the other');
+  for(const [rows,chosen] of [[[a],a],[[a,slab],slab],[[a,b,mip,slab,thin],thin]]){
+    const s=get(rows);assert.equal(s.status,'ready');assert.equal(s.object.sop,chosen['00080018'].Value[0]);
+    assert.equal(s.alternatives.length,rows.length-1);
+  }
+});
+test('MG01-reject Shared Functional Groups cardinality and shape precede first-item use',()=>{
+  const good=dbt();assert.equal(model.classify(good).status,'verified');
+  const first=good['52009229'].Value[0],forbidden={'00189504':seq({'00089007':v('CS',...GENERATED)})};
+  for(const e of [seq(first,forbidden),seq(first,{}),seq(),seq(null),seq('bad'),seq([]),null,[],{vr:'LO',Value:[first]},{vr:'SQ',Value:{}}]){
+    const o=clone(good);o['52009229']=e;
+    const got=model.classify(o);
+    assert.equal(got.status,'unverified','MG01 M31: malformed shared groups cannot verify from item zero');
+    assert.equal(got.standard,false);assert.equal(model.frameIndex(o).complete,false);
+  }
+  const perFrame=clone(good);delete perFrame['52009229'];
+  perFrame['52009230'].Value.forEach(f=>Object.assign(f,clone(first)));
+  perFrame['52009229']=seq({});assert.equal(model.classify(perFrame).status,'verified','one empty shared item with per-frame macros is valid');
+});
+test('MG01-allow v2 separates declaration and hanging while malformed partial evidence stays out',()=>{
+  for(const flag of [undefined,{vr:'CS'},v('CS'),v('CS',null),v('CS',' '),v('CS','NO')]){
+    const o=mg();if(flag!==undefined)o['00281350']=flag;
+    const c=model.classify(o),s=slot(model.plan(manifest(study(c.study,'current',[o]))),'current','R','CC','conventional');
+    assert.equal(c.fullViewAutoMatch,true,'MG01 M36: absent or empty partial view hangs automatically');
+    assert.equal(c.standard,c.fullViewAutoMatch);assert.equal(s.status,'ready');
+    assert.equal(c.partialDeclaration,flag===undefined?'ABSENT':flag.Value&&flag.Value[0]==='NO'?'NO':'EMPTY');
+    assert.equal(c.fullness,c.partialDeclaration==='NO'?'declared-not-partial':'inferred-for-hanging');
+  }
+  for(const root of [false,true]){
+    const o=mg(),holder=root?o:o['00540220'].Value[0];holder['00540222']=seq(concept('SCT','255561001'));
+    assert.equal(model.contract(o).partial,'conflict','MG01 M33: CID 4005 in a modifier container is a conflict');
+  }
+  for(const flag of [null,'NO',[],v('CS','NO','YES'),v('CS',17),v('CS',{}),{vr:'CS',Value:'NO'}]){
+    const o=mg({extra:{'00281350':flag}});
+    assert.equal(model.contract(o).partial,'conflict','MG01 M34: malformed Partial View is not absence');
+  }
+  for(const sq of [seq('bad'),seq(null),seq([]),{vr:'SQ',Value:{}},null]){
+    const o=mg({extra:{'00281352':sq}});
+    assert.equal(model.contract(o).partial,'conflict','MG01 M35: malformed partial SQ items are not filtered into absence');
+  }
+  for(const k of table.cases){
+    const o=clone(k.input.dicom);o['00100020']=v('LO','test-patient');
+    const c=model.classify(o),p=model.plan(manifest(study(c.study,'current',[o])));
+    assert.equal(c.standard,c.contract.fullViewAutoMatch,k.id+' plan eligibility matches the contract');
+    if(c.standard)assert.equal(slot(p,'current',c.laterality,c.view,c.kind).status,'ready',k.id+' eligible object really hangs');
+    else assert.ok(!Object.values(p.slots).some(s=>s.status==='ready'),k.id+' excluded object does not hang');
+  }
+});
 
 test('MG01-allow conventional, device synthetic 2D and DBT are told apart by standard attributes with evidence',()=>{
   const conventional=model.classify(mg({type:['DERIVED','PRIMARY']}));

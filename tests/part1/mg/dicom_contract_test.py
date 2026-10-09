@@ -216,6 +216,12 @@ class MammographyDicomContractTest(unittest.TestCase):
     def test_mg01_real_objects_are_classified_by_standard_attributes(self):
         calls = [["classify", dicom_json(dataset(s))] for s in CMMD_VIEWS + DBT_OBJECTS]
         results = run_model(*calls)
+        for result in results:
+            self.assertEqual(result['contract']['ruleVersion'], 'D744-2')
+            self.assertEqual(result['partialDeclaration'], 'ABSENT')
+            self.assertEqual(result['fullness'], 'inferred-for-hanging')
+            self.assertTrue(result['contract']['fullViewAutoMatch'])
+            self.assertEqual(result['standard'], result['contract']['fullViewAutoMatch'])
         for sample_id, result in zip(CMMD_VIEWS, results[:4]):
             ds = dataset(sample_id)
             self.assertEqual(list(ds.ImageType), ["DERIVED", "PRIMARY"], sample_id)

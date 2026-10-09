@@ -1,7 +1,7 @@
 {
  "version": 1,
  "unit": "E-MG",
- "round": 2,
+ "round": 3,
  "order": "C:/Users/norne/PACS/tmp/astra-control/evidence/emg-exa-prep-20261009/e-mg-order.md",
  "base_sha": "04e50ab4524d59b82444fbe765034c9fa759fa30",
  "note": "Declared before collection and compared both ways with the cases actually run; expectations are never generated from a run. A case whose sample set root is absent SKIPS with that reason (commander instruction 2026-10-09, superseding the order's no-skip line); a skip is not_run and never counted as a pass.",
@@ -44,7 +44,7 @@
    "id": "model",
    "file": "tests/part1/mg/model_test.cjs",
    "command": "node --test tests/part1/mg/model_test.cjs",
-   "expected": 236,
+   "expected": 293,
    "cases": [
     {
      "name": "MG01-allow conventional, device synthetic 2D and DBT are told apart by standard attributes with evidence",
@@ -96,21 +96,24 @@
      "test": "TEST-MG03-MODEL-ALLOW",
      "req": "REQ-MG-03",
      "risk": "RISK-MG-FALSE-ANATOMY",
-     "inputs": "DICOM JSON built in the test"
+     "inputs": "DICOM JSON built in the test",
+     "mutants": []
     },
     {
      "name": "MG03-reject absent or non-finite positions stay Unverified and are never borrowed from another DBT",
      "test": "TEST-MG03-MODEL-REJECT",
      "req": "REQ-MG-03",
      "risk": "RISK-MG-FALSE-ANATOMY",
-     "inputs": "DICOM JSON built in the test"
+     "inputs": "DICOM JSON built in the test",
+     "mutants": []
     },
     {
      "name": "MG04-allow current and prior are paired per side, view and kind, and a missing slot is explicit",
      "test": "TEST-MG04-MODEL-ALLOW",
      "req": "REQ-MG-04",
      "risk": "RISK-MG-WRONG-STUDY",
-     "inputs": "DICOM JSON built in the test"
+     "inputs": "DICOM JSON built in the test",
+     "mutants": []
     },
     {
      "name": "MG04-reject another patient, another institution, an ambiguous duplicate or a partial/modified view is never chosen",
@@ -128,7 +131,8 @@
      "test": "TEST-MG06-MODEL-ALLOW",
      "req": "REQ-MG-06",
      "risk": "RISK-MG-STALE",
-     "inputs": "none"
+     "inputs": "none",
+     "mutants": []
     },
     {
      "name": "MG06-reject A->B->A, a reset, an end or another account invalidates older tickets",
@@ -155,23 +159,97 @@
      "test": "TEST-MG05-MODEL-REJECT",
      "req": "REQ-MG-05",
      "risk": "RISK-MG-FLIP-CLIP",
-     "inputs": "DICOM JSON built in the test"
+     "inputs": "DICOM JSON built in the test",
+     "mutants": []
+    },
+    {
+     "name": "MG08-reject source acceptance requires nonempty patient and institution keys on both sides",
+     "test": "TEST-MG-R3-MODEL-SOURCE-CONTEXT",
+     "req": "REQ-MG-08",
+     "risk": "RISK-MG-FALSE-READ",
+     "inputs": "synthetic DICOM headers and read-only public pixels for DOM",
+     "mutants": [
+      "M25"
+     ]
+    },
+    {
+     "name": "MG08-reject partial sources require verified matching CID 4005 meanings",
+     "test": "TEST-MG-R3-MODEL-SOURCE-PARTIAL",
+     "req": "REQ-MG-08",
+     "risk": "RISK-MG-FALSE-READ",
+     "inputs": "synthetic DICOM headers and read-only public pixels for DOM",
+     "mutants": [
+      "M26"
+     ]
+    },
+    {
+     "name": "MG08-reject source modifiers and biopsy context cannot contradict the result",
+     "test": "TEST-MG-R3-MODEL-SOURCE-MODIFIER",
+     "req": "REQ-MG-08",
+     "risk": "RISK-MG-FALSE-READ",
+     "inputs": "synthetic DICOM headers and read-only public pixels for DOM",
+     "mutants": [
+      "M27",
+      "M28"
+     ]
+    },
+    {
+     "name": "MG08-reject cycles in the provided source graph never verify",
+     "test": "TEST-MG-R3-MODEL-SOURCE-CYCLE",
+     "req": "REQ-MG-08",
+     "risk": "RISK-MG-FALSE-READ",
+     "inputs": "synthetic DICOM headers and read-only public pixels for DOM",
+     "mutants": [
+      "M29"
+     ]
+    },
+    {
+     "name": "MG04-allow every DBT representation has a nonempty selection with duplicate MinIP ambiguous",
+     "test": "TEST-MG-R3-MODEL-MINIP",
+     "req": "REQ-MG-04",
+     "risk": "RISK-MG-WRONG-STUDY",
+     "inputs": "synthetic DICOM headers and read-only public pixels for DOM",
+     "mutants": [
+      "M30"
+     ]
+    },
+    {
+     "name": "MG01-reject Shared Functional Groups cardinality and shape precede first-item use",
+     "test": "TEST-MG-R3-MODEL-SHARED-FG",
+     "req": "REQ-MG-01",
+     "risk": "RISK-MG-MISCLASS",
+     "inputs": "synthetic DICOM headers and read-only public pixels for DOM",
+     "mutants": [
+      "M1",
+      "M2",
+      "M17",
+      "M18",
+      "M31"
+     ]
+    },
+    {
+     "name": "MG01-allow v2 separates declaration and hanging while malformed partial evidence stays out",
+     "test": "TEST-MG-R3-MODEL-V2",
+     "req": "REQ-MG-01",
+     "risk": "RISK-MG-MISCLASS",
+     "inputs": "synthetic DICOM headers and read-only public pixels for DOM",
+     "mutants": [
+      "M23",
+      "M33",
+      "M34",
+      "M35",
+      "M36"
+     ]
     }
    ],
    "rule_table": {
-    "path": "C:/Users/norne/PACS/tmp/astra-control/evidence/mg-classification-consult-20261009/rule-cases.json",
-    "sha256": "83ccf159299a551adc7937888daacb1eb5047152f82afd18da901efc579f083e",
-    "schema": "D735-1",
-    "cases": 223,
-    "test_names": "each case's testId (one node test per case) + 'D735 rule table is the pinned one'",
-    "disputed": {
-     "PUBLIC-010": "declaredSourceCount",
-     "PUBLIC-011": "declaredSourceCount",
-     "PUBLIC-012": "declaredSourceCount",
-     "PUBLIC-013": "declaredSourceCount"
-    },
-    "dispute_reason": "the embedded selected header omits X-Ray 3D Acquisition Sequence (0018,9507) that holds 9 of the 10 expected source references; the same model counts 10 on the full real files (dicom_contract_test MG01 allow)",
-    "skip_if_absent": "rule table path"
+    "path": "C:/Users/norne/PACS/tmp/astra-control/evidence/mg-classification-consult-20261009/v2/rule-cases.json",
+    "sha256": "a60b86b6267853615872a915d66a59150062afdbfe5d8725ca7a55f578c984d0",
+    "schema": "D744-2",
+    "cases": 273,
+    "test_names": "each case's testId + 'D744 rule table is the pinned one'",
+    "disputed": [],
+    "missing": "collection failure"
    }
   },
   {
@@ -179,7 +257,7 @@
    "file": "tests/part1/mg/viewer_dom_test.py",
    "class": "MammographyViewerDOMTest",
    "command": "python -B tests/part1/mg/viewer_dom_test.py",
-   "expected": 14,
+   "expected": 17,
    "cases": [
     {
      "name": "test_mg02_dom_first_to_last_frames_render_with_exact_ids",
@@ -189,7 +267,8 @@
      "samples": [
       "ea1141-3227336-310042"
      ],
-     "skip_if_absent": "tcia-20261004"
+     "skip_if_absent": "tcia-20261004",
+     "mutants": []
     },
     {
      "name": "test_mg02_dom_prefetch_wrong_frame_and_wrong_total_never_count_as_displayed",
@@ -221,7 +300,8 @@
       "ea1141-3227336-310042",
       "ea1141-3227336-319808"
      ],
-     "skip_if_absent": "tcia-20261004"
+     "skip_if_absent": "tcia-20261004",
+     "mutants": []
     },
     {
      "name": "test_mg03_dom_same_length_dbts_are_not_linked_and_missing_positions_stay_unverified",
@@ -255,7 +335,8 @@
      "test_owned_variants": [
       "same-patient prior: the four CMMD headers under new study/series/SOP UIDs dated 2009-07-18 (not a real prior)"
      ],
-     "skip_if_absent": "tcia-20261004"
+     "skip_if_absent": "tcia-20261004",
+     "mutants": []
     },
     {
      "name": "test_mg04_dom_other_patient_duplicate_and_partial_switch_are_never_applied",
@@ -314,7 +395,8 @@
       "R CC pixels mirrored with Patient Orientation A\\L",
       "L CC without Patient Orientation"
      ],
-     "skip_if_absent": "tcia-20261004"
+     "skip_if_absent": "tcia-20261004",
+     "mutants": []
     },
     {
      "name": "test_mg06_dom_late_and_stale_results_never_overwrite_the_current_slice",
@@ -324,7 +406,8 @@
      "samples": [
       "ea1141-3227336-310042"
      ],
-     "skip_if_absent": "tcia-20261004"
+     "skip_if_absent": "tcia-20261004",
+     "mutants": []
     },
     {
      "name": "test_mg06_dom_dispose_layout_switch_and_account_change_stop_late_results",
@@ -365,7 +448,8 @@
       "ea1141-4339969-1944-rmlo-dbt",
       "ea1141-4339969-1944-lmlo-dbt"
      ],
-     "skip_if_absent": "ea1141-4339969"
+     "skip_if_absent": "ea1141-4339969",
+     "mutants": []
     },
     {
      "name": "test_mg06_dom_latest_intent_wins_over_delayed_seek_and_scroll_bursts",
@@ -416,7 +500,36 @@
       "R CC with Partial View Section Medial only",
       "L CC copy with NumberOfFrames 2001"
      ],
-     "skip_if_absent": "tcia-20261004"
+     "skip_if_absent": "tcia-20261004",
+     "mutants": []
+    },
+    {
+     "name": "test_mg06_dom_camera_and_navigation_share_one_latest_paint_gate",
+     "test": "TEST-MG-R3-DOM-PAINT-GATE",
+     "req": "REQ-MG-06",
+     "risk": "RISK-MG-STALE",
+     "inputs": "synthetic DICOM headers and read-only public pixels for DOM",
+     "mutants": [
+      "M24"
+     ]
+    },
+    {
+     "name": "test_mg04_dom_duplicate_and_mixed_minip_mount_and_choose",
+     "test": "TEST-MG-R3-DOM-MINIP",
+     "req": "REQ-MG-04",
+     "risk": "RISK-MG-WRONG-STUDY",
+     "inputs": "synthetic DICOM headers and read-only public pixels for DOM",
+     "mutants": []
+    },
+    {
+     "name": "test_mg04_dom_absent_empty_and_no_partial_have_the_same_normal_flow",
+     "test": "TEST-MG-R3-DOM-V2-FLOW",
+     "req": "REQ-MG-04",
+     "risk": "RISK-MG-WRONG-STUDY",
+     "inputs": "synthetic DICOM headers and read-only public pixels for DOM",
+     "mutants": [
+      "M32"
+     ]
     }
    ]
   },
@@ -442,7 +555,8 @@
       "ea1141-3227336-310042",
       "ea1141-3227336-319808"
      ],
-     "skip_if_absent": "tcia-20261004"
+     "skip_if_absent": "tcia-20261004",
+     "mutants": []
     },
     {
      "name": "test_mg01_description_derivation_or_secondary_capture_never_confirms_a_kind",
@@ -459,7 +573,8 @@
       "CMMD R CC described as 'R CC C-View'",
       "CMMD R CC described as tomosynthesis"
      ],
-     "skip_if_absent": "tcia-20261004"
+     "skip_if_absent": "tcia-20261004",
+     "mutants": []
     },
     {
      "name": "test_mg02_real_dbt_frames_are_indexed_first_to_last_with_exact_identity",
@@ -472,7 +587,8 @@
       "ea1141-3227336-310042",
       "ea1141-3227336-319808"
      ],
-     "skip_if_absent": "tcia-20261004"
+     "skip_if_absent": "tcia-20261004",
+     "mutants": []
     },
     {
      "name": "test_mg02_damaged_copies_of_a_real_dbt_never_report_complete",
@@ -488,7 +604,8 @@
       "NumberOfFrames + 1",
       "per-frame items stored out of order"
      ],
-     "skip_if_absent": "tcia-20261004"
+     "skip_if_absent": "tcia-20261004",
+     "mutants": []
     },
     {
      "name": "test_mg04_real_four_view_series_is_split_per_object",
@@ -505,7 +622,8 @@
       "ea1141-3227336-310042",
       "ea1141-3227336-319808"
      ],
-     "skip_if_absent": "tcia-20261004"
+     "skip_if_absent": "tcia-20261004",
+     "mutants": []
     },
     {
      "name": "test_mg04_other_patients_are_never_a_prior_and_duplicates_are_not_picked",
@@ -523,7 +641,8 @@
      "test_owned_variants": [
       "duplicate R CC under a new SOP UID"
      ],
-     "skip_if_absent": "tcia-20261004"
+     "skip_if_absent": "tcia-20261004",
+     "mutants": []
     },
     {
      "name": "test_mg05_real_pixels_keep_their_orientation_and_grayscale",
@@ -540,7 +659,8 @@
       "ea1141-3227336-310042",
       "ea1141-3227336-319808"
      ],
-     "skip_if_absent": "tcia-20261004"
+     "skip_if_absent": "tcia-20261004",
+     "mutants": []
     },
     {
      "name": "test_mg05_mirrored_unlabelled_and_monochrome1_copies_are_handled_from_their_tags",
@@ -555,7 +675,8 @@
       "R CC with Patient Orientation A\\L over mirrored pixels",
       "R CC without Patient Orientation"
      ],
-     "skip_if_absent": "tcia-20261004"
+     "skip_if_absent": "tcia-20261004",
+     "mutants": []
     },
     {
      "name": "test_mg01_paired_device_synthetic_2d_and_thin_dbt_are_classified",
@@ -576,7 +697,8 @@
       "ea1141-4339969-1944-rmlo-dbt",
       "ea1141-4339969-1944-lmlo-dbt"
      ],
-     "skip_if_absent": "ea1141-4339969"
+     "skip_if_absent": "ea1141-4339969",
+     "mutants": []
     },
     {
      "name": "test_mg01_paired_synthetic_copies_without_proof_are_not_synthetic",
@@ -591,7 +713,8 @@
       "NumberOfFrames 2",
       "Frame Type Value 4 NONE"
      ],
-     "skip_if_absent": "ea1141-4339969"
+     "skip_if_absent": "ea1141-4339969",
+     "mutants": []
     },
     {
      "name": "test_mg02_paired_thin_dbt_frames_are_indexed_first_to_last",
@@ -608,7 +731,8 @@
       "ea1141-4339969-1944-rmlo-dbt",
       "ea1141-4339969-1944-lmlo-dbt"
      ],
-     "skip_if_absent": "ea1141-4339969"
+     "skip_if_absent": "ea1141-4339969",
+     "mutants": []
     },
     {
      "name": "test_mg04_paired_real_prior_is_paired_per_side_view_and_kind",
@@ -629,7 +753,8 @@
       "ea1141-4339969-1944-rmlo-dbt",
       "ea1141-4339969-1944-lmlo-dbt"
      ],
-     "skip_if_absent": "ea1141-4339969"
+     "skip_if_absent": "ea1141-4339969",
+     "mutants": []
     },
     {
      "name": "test_mg05_paired_real_pixels_are_oriented_from_their_tags",
@@ -650,163 +775,265 @@
       "ea1141-4339969-1944-rmlo-dbt",
       "ea1141-4339969-1944-lmlo-dbt"
      ],
-     "skip_if_absent": "ea1141-4339969"
+     "skip_if_absent": "ea1141-4339969",
+     "mutants": []
     }
    ]
   }
  ],
- "total_expected": 263,
+ "total_expected": 323,
  "mutants": {
   "M1": {
    "file": "model",
    "suite": "model",
    "case": "MG01-reject",
-   "expect": "MG01 M1: DERIVED pixel data is not evidence of a synthetic view"
+   "expect": "MG01 M1: DERIVED pixel data is not evidence of a synthetic view",
+   "title": "DERIVED Image Type is taken as a synthetic 2D view"
   },
   "M2": {
    "file": "model",
    "suite": "model",
    "case": "MG01-reject",
-   "expect": "MG01 M2: a series description alone never confirms a synthetic view"
+   "expect": "MG01 M2: a series description alone never confirms a synthetic view",
+   "title": "a series description alone classifies the object"
   },
   "M3": {
    "file": "model",
    "suite": "model",
    "case": "MG02-allow",
-   "expect": "MG02 M3: the first and the last stored slice are both reachable"
+   "expect": "MG02 M3: the first and the last stored slice are both reachable",
+   "title": "the last stored slice is left out of the frame index"
   },
   "M4": {
    "file": "model",
    "suite": "model",
    "case": "MG02-allow",
-   "expect": "MG02 M4: a sorted entry still names the stored frame that lies at its position"
+   "expect": "MG02 M4: a sorted entry still names the stored frame that lies at its position",
+   "title": "after a position sort the display index is reported as the stored frame"
   },
   "M5": {
    "file": "viewer",
    "suite": "dom",
    "case": "test_mg03_dom_same_length_dbts_are_not_linked_and_missing_positions_stay_unverified",
-   "expect": "MG03 M5: the same slice number is not forced on the other DBT"
+   "expect": "MG03 M5: the same slice number is not forced on the other DBT",
+   "title": "scrolling one DBT forces the same slice number on every other DBT"
   },
   "M6": {
    "file": "model",
    "suite": "dom",
    "case": "test_mg05_dom_real_pixels_fit_one_to_one_and_pan_reach_all_tissue",
-   "expect": "MG05 M6: chest wall side on screen for"
+   "expect": "MG05 M6: chest wall side on screen for",
+   "title": "right-breast images are mirrored by side instead of by Patient Orientation"
   },
   "M7": {
    "file": "model",
    "suite": "dom",
    "case": "test_mg05_dom_real_pixels_fit_one_to_one_and_pan_reach_all_tissue",
-   "expect": "MG05 M7: Fit shows the whole acquired"
+   "expect": "MG05 M7: Fit shows the whole acquired",
+   "title": "Fit fills the viewport and crops part of the acquired area"
   },
   "M8": {
    "file": "model",
    "suite": "model",
    "case": "MG04-reject",
-   "expect": "MG04 M8: a prior of another patient is refused even on the same date"
+   "expect": "MG04 M8: a prior of another patient is refused even on the same date",
+   "title": "the prior's patient identity is no longer checked"
   },
   "M9": {
    "file": "model",
    "suite": "model",
    "case": "MG06-reject",
-   "expect": "MG06 M9: returning to the same image does not revive the first request"
+   "expect": "MG06 M9: returning to the same image does not revive the first request",
+   "title": "a ticket is checked by image key instead of request sequence (A->B->A)"
   },
   "M10": {
    "file": "viewer",
    "suite": "dom",
    "case": "test_mg06_dom_dispose_layout_switch_and_account_change_stop_late_results",
-   "expect": "MG06 M10: a released viewport is never drawn into again"
+   "expect": "MG06 M10: a released viewport is never drawn into again",
+   "title": "a retired or disposed cell's viewport is still drawn into"
   },
   "M11": {
    "file": "viewer",
    "suite": "dom",
    "case": "test_mg04_dom_other_patient_duplicate_and_partial_switch_are_never_applied",
    "expect": "MG04 M11: a partly failed change is not applied",
-   "scope": "R1 kills M11 on the MG module's own arrangement change; the HP apply/rollback form of M11 (hanging-protocol-model.js / viewer-hanging-protocol.js) is R2"
+   "title": "a layout change in which some images failed is committed"
   },
   "M12": {
    "file": "viewer",
    "suite": "dom",
    "case": "test_mg02_dom_prefetch_wrong_frame_and_wrong_total_never_count_as_displayed",
    "expect": "MG02 M12: a prefetched frame is not a displayed frame",
-   "scope": "R1 kills M12 on the module's display event seam; the EMR-E durable record form of M12 is R2"
+   "title": "a prefetched frame is reported and counted as displayed"
   },
   "M13": {
    "file": "viewer",
    "suite": "dom",
    "case": "test_mg06_dom_latest_intent_wins_over_delayed_seek_and_scroll_bursts",
    "expect": "MG06 M13: a request back to the current slice cancels the delayed one",
-   "fix": "F01"
+   "title": "F01: a request back to the slice on screen does not supersede the delayed one"
   },
   "M14": {
    "file": "viewer",
    "suite": "dom",
    "case": "test_mg06_dom_superseded_renders_are_neither_painted_nor_reported",
-   "expect": "MG06 M14: a render superseded after its paint is not reported as the current display",
-   "fix": "F01"
+   "expect": "MG06 M14: a render superseded after its paint is not counted as seen",
+   "title": "F01: no sequence check after the render completes"
   },
   "M15": {
    "file": "viewer",
    "suite": "dom",
    "case": "test_mg06_dom_superseded_renders_are_neither_painted_nor_reported",
    "expect": "MG06 M15: a render superseded before its paint is not painted",
-   "fix": "F01"
+   "title": "F01: the renderer's pre-paint check always answers current"
   },
   "M16": {
    "file": "viewer",
    "suite": "dom",
    "case": "test_mg06_dom_latest_intent_wins_over_delayed_seek_and_scroll_bursts",
    "expect": "MG06 M16: a scroll burst moves from the latest intent",
-   "fix": "F01"
+   "title": "F01: a key step is taken from the slice on screen, not from the latest intent"
   },
   "M17": {
    "file": "model",
    "suite": "model",
    "case": "MG01-reject",
    "expect": "MG01 M17: Image Type and Frame Type must agree before any kind is trusted",
-   "fix": "F02"
+   "title": "F02: Image Type and Frame Type are not compared"
   },
   "M18": {
    "file": "model",
    "suite": "model",
    "case": "MG01-reject",
    "expect": "MG01 M18: a one-frame tomosynthesis GENERATED_2D object is synthetic 2D only as the named device exception",
-   "fix": "F02"
+   "title": "F02: the device exception no longer names its manufacturer and model"
   },
   "M19": {
    "file": "model",
    "suite": "model",
    "case": "MG04-reject",
    "expect": "MG04 M19: a partial view is never matched as the full standard view",
-   "fix": "F03"
+   "title": "F03: only the Partial View flag marks a partial acquisition"
   },
   "M20": {
    "file": "model",
    "suite": "model",
    "case": "MG02-reject",
    "expect": "MG02 M20: a frame count outside the limit is refused before any per-frame work",
-   "fix": "F04"
+   "title": "F04: the frame-count limit is not applied before classification"
   },
   "M21": {
    "file": "model",
    "suite": "model",
    "case": "MG02-reject",
    "expect": "MG02 M21: dimension index values that contradict the positions never report complete",
-   "fix": "F05"
+   "title": "F05: Dimension Index Values are not cross-checked"
   },
   "M22": {
    "file": "model",
    "suite": "model",
    "case": "MG05-allow",
    "expect": "MG05 M22: the orientation of the requested frame decides its flips",
-   "fix": "F06"
+   "title": "F06: every frame takes the first frame's orientation"
   },
   "M23": {
    "file": "model",
    "suite": "model",
    "case": "MG01-allow",
    "expect": "MG01 M23: slices vs slab follow thickness and contiguous positions, not Volumetric Properties alone",
-   "fix": "ruling 2"
+   "title": "ruling 2: Volumetric Properties alone decides slices vs slab"
+  },
+  "M24": {
+   "file": "viewer",
+   "suite": "dom",
+   "case": "test_mg06_dom_camera_and_navigation_share_one_latest_paint_gate",
+   "expect": "MG06 M24: a camera repaint never resubmits the old displayed frame",
+   "title": "F01: camera repaint bypasses the gate and captures the old image"
+  },
+  "M25": {
+   "file": "model",
+   "suite": "model",
+   "case": "MG08-reject source acceptance",
+   "expect": "MG08 M25: missing context never verifies a source",
+   "title": "F07: matching missing context keys approve a source"
+  },
+  "M26": {
+   "file": "model",
+   "suite": "model",
+   "case": "MG08-reject partial sources",
+   "expect": "MG08 M26: identical unknown partial codes are not verified meaning",
+   "title": "F08: identical unknown section codes verify"
+  },
+  "M27": {
+   "file": "model",
+   "suite": "model",
+   "case": "MG08-reject source modifiers",
+   "expect": "MG08 M27: plain and spot source contexts contradict",
+   "title": "F08: ignore contradictory modifiers"
+  },
+  "M28": {
+   "file": "model",
+   "suite": "model",
+   "case": "MG08-reject source modifiers",
+   "expect": "MG08 M28: biopsy result cannot claim a plain source context",
+   "title": "F08: ignore contradictory biopsy context"
+  },
+  "M29": {
+   "file": "model",
+   "suite": "model",
+   "case": "MG08-reject cycles",
+   "expect": "MG08 M29: a source cycle is a contradiction",
+   "title": "F08: accept cycles in the supplied reference graph"
+  },
+  "M30": {
+   "file": "model",
+   "suite": "model",
+   "case": "MG04-allow every DBT representation",
+   "expect": "MG04 M30: duplicate MinIP remains a nonempty explicit choice",
+   "title": "F09: MinIP has no comparable rank and produces no best candidate"
+  },
+  "M31": {
+   "file": "model",
+   "suite": "model",
+   "case": "MG01-reject Shared Functional Groups",
+   "expect": "MG01 M31: malformed shared groups cannot verify from item zero",
+   "title": "F10: accept additional Shared Functional Group items"
+  },
+  "M32": {
+   "file": "viewer",
+   "suite": "dom",
+   "case": "test_mg04_dom_absent_empty_and_no_partial_have_the_same_normal_flow",
+   "expect": "MG04 M32: absent Partial View adds no label tooltip warning or action",
+   "title": "V2-3: reintroduce an always-on warning for absent Partial View"
+  },
+  "M33": {
+   "file": "model",
+   "suite": "model",
+   "case": "MG01-allow v2",
+   "expect": "MG01 M33: CID 4005 in a modifier container is a conflict",
+   "title": "V2-2: accept CID 4005 in a modifier container"
+  },
+  "M34": {
+   "file": "model",
+   "suite": "model",
+   "case": "MG01-allow v2",
+   "expect": "MG01 M34: malformed Partial View is not absence",
+   "title": "V2-2: invalid flag becomes unknown"
+  },
+  "M35": {
+   "file": "model",
+   "suite": "model",
+   "case": "MG01-allow v2",
+   "expect": "MG01 M35: malformed partial SQ items are not filtered into absence",
+   "title": "V2-2: malformed partial SQ items disappear"
+  },
+  "M36": {
+   "file": "model",
+   "suite": "model",
+   "case": "MG01-allow v2",
+   "expect": "MG01 M36: absent or empty partial view hangs automatically",
+   "title": "V2-1: absent/empty Partial View requires manual selection again"
   }
  },
  "pending_samples": [
@@ -861,8 +1088,11 @@
   ]
  },
  "round2_review": "C:/Users/norne/PACS/tmp/astra-control/evidence/astra-worker-runs/e-mg-r1-review-e3231e9-astra-20261009/last-message.md",
- "d735": {
-  "rule": "C:/Users/norne/PACS/tmp/astra-control/evidence/mg-classification-consult-20261009/rule.md",
-  "table_sha256": "83ccf159299a551adc7937888daacb1eb5047152f82afd18da901efc579f083e"
+ "base_head": "ec657dcd8f92edef413544cbba52c3bf84cbfb00",
+ "d744": {
+  "rule": "C:\\Users\\norne\\PACS\\tmp\\astra-control\\evidence\\mg-classification-consult-20261009\\v2\\rule.md",
+  "table_sha256": "a60b86b6267853615872a915d66a59150062afdbfe5d8725ca7a55f578c984d0",
+  "cases": 273,
+  "disputed": []
  }
 }

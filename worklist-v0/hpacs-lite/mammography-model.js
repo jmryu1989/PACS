@@ -30,7 +30,12 @@
   const tokens=(item,tag)=>values(item,tag).map(v=>typeof v==='string'?v.trim().toUpperCase():'');
 
   // Functional group macros: a per-frame item overrides the shared item (PS3.3 C.7.6.16).
-  function groups(item){return {shared:items(item,'52009229')[0]||null,perFrame:items(item,'52009230')};}
+  const object=v=>!!v&&typeof v==='object'&&!Array.isArray(v);
+  function groups(item){
+    const e=item&&item['52009229'];
+    const valid=e===undefined||(object(e)&&e.vr==='SQ'&&Array.isArray(e.Value)&&e.Value.length===1&&object(e.Value[0]));
+    return {shared:valid&&e?e.Value[0]:null,perFrame:items(item,'52009230'),valid};
+  }
   function macro(fg,frame,tag){
     const own=fg.perFrame[frame-1],found=own?items(own,tag)[0]:null;
     return found||(fg.shared?items(fg.shared,tag)[0]||null:null);
@@ -92,7 +97,7 @@
   // Result fields: class, baseClass, status, partial (yes/no/unknown/conflict), presentation, representation,
   // fullViewAutoMatch, sourceClassEligible, basis, declared source references. status=verified means only
   // that the header satisfies this contract; it certifies no display, diagnosis or acquisition coverage.
-  const RULE_VERSION='D735-1';
+  const RULE_VERSION='D744-2';
   const FAMILY={[SOP_MG]:'MG-P',[SOP_MG_PROCESSING]:'MG-R',[SOP_DBT]:'BTO'};
   const BIOPSY3=new Set(['TOMO_SCOUT','PREFIRE','POSTFIRE','POSTBIOPSY','POSTMARKER']);
   const GENERATED3=new Set(['TOMOSYNTHESIS',...BIOPSY3]);
@@ -130,12 +135,28 @@
   // absence of all three proves nothing (unknown); a wrong flag, NO beside evidence, more than two codes
   // or a magnification/spot modifier beside partial evidence is a conflict.
   function partialView(item,modifiers){
-    const flagElement=item['00281350'],flag=text(item,'00281350').toUpperCase(),description=text(item,'00281351');
+    const flagElement=item['00281350'],description=text(item,'00281351');
+    let declaration='ABSENT';
+    if(Object.prototype.hasOwnProperty.call(item,'00281350')){
+      if(!object(flagElement)||flagElement.vr!=='CS'||('Value' in flagElement&&!Array.isArray(flagElement.Value)))declaration='INVALID';
+      else{
+        const vs=flagElement.Value||[];
+        if(!vs.length||vs.length===1&&(vs[0]===null||typeof vs[0]==='string'&&!vs[0].trim()))declaration='EMPTY';
+        else if(vs.length!==1||typeof vs[0]!=='string')declaration='INVALID';
+        else{const value=vs[0].trim().toUpperCase();declaration=['YES','NO'].includes(value)?value:'INVALID';}
+      }
+    }
+    const flag=['YES','NO'].includes(declaration)?declaration:'';
+    const sq=item['00281352'];
+    const malformed=Object.prototype.hasOwnProperty.call(item,'00281352')&&
+      (!object(sq)||sq.vr!=='SQ'||('Value' in sq&&(!Array.isArray(sq.Value)||!sq.Value.every(object))));
     const codeItems=items(item,'00281352');
     const sections=codeItems.map(c=>{const k=code(c);return k&&PARTIAL_CODES[k]||'Unknown Section';});
     const evidence=codeItems.length>0||!!description;
     let state;
-    if(flagElement&&flag&&flag!=='YES'&&flag!=='NO')state='conflict';
+    const modifierItems=[...items(item,'00540222'),...items(item,'00540220').flatMap(v=>items(v,'00540222'))];
+    const wrongContainer=modifierItems.some(m=>!!PARTIAL_CODES[code(m)]);
+    if(declaration==='INVALID'||malformed||wrongContainer)state='conflict';
     else if(codeItems.length>2)state='conflict';
     else if(flag==='NO'&&evidence)state='conflict';
     else if((flag==='YES'||evidence)&&modifiers.some(m=>m==='Magnification'||m==='Spot Compression'))state='conflict';
@@ -143,7 +164,7 @@
     else if(flag==='NO')state='no';
     else state='unknown';
     const notes=[...(flag?['Partial View='+flag]:[]),...sections.map(s=>'Partial View Section='+s),...(description?['Partial View Description present']:[])];
-    return {state,sections,codes:codeItems.map(c=>text(c,'00080102')+'|'+text(c,'00080100')).sort(),yesWithoutCodes:flag==='YES'&&!codeItems.length,notes};
+    return {state,declaration,sections,codes:codeItems.map(c=>text(c,'00080102')+'|'+text(c,'00080100')).sort(),yesWithoutCodes:flag==='YES'&&!codeItems.length,notes};
   }
 
   // Raw source references as the device stored them: Source Image Sequence at the top level, inside the
@@ -215,6 +236,7 @@
     if(!ids)unverified('identity-invalid');
     else if(text(item,'00080060').toUpperCase()!=='MG'){out.kind='other';unverified('modality-not-mg');}
     else if(!family){out.kind='other';out.basis='unsupported-sop';unverified('sop-class-not-mammography-image');}
+    else if(!fg.valid)unverified('shared-functional-groups-invalid');
     else if(family==='BTO')base=classifyTomosynthesis(item,fg,type,out,issue);
     else base=classifyMammography(item,fg,type,family,out,issue);
     // Header contradictions in laterality/view/partial override any class (decision row 0); a Breast
@@ -225,23 +247,22 @@
     // candidate that could not be verified; generated 2D and projection objects have none.
     if(family==='BTO'){
       const volumeCandidate=!type||type[3]!=='GENERATED_2D'&&type[2]!=='TOMO_PROJ';
-      representation=base&&base.startsWith('dbt')?out.sliceKind:!base&&volumeCandidate?'unspecified':null;
+      representation=base&&base.startsWith('dbt')?out.sliceKind:!base&&(volumeCandidate||pv.yesWithoutCodes)?'unspecified':null;
     }
     out.status=base?'verified':'unverified';
     if(!base){out.kind=out.kind==='other'?'other':null;out.sliceKind=representation;}
     if(family==='BTO')out.presentation=base==='device-synthetic-2d'||base==='projection'?'presentation':null;
     const cls=base&&pv.state==='yes'?'partial-view':base||'unverified';
-    // Automatic full-view placement needs proof of the full view (partial=no) and a plain screening view.
+    // Absent/empty partial declarations permit hanging, without claiming anatomical completeness.
     const plain=!!base&&base!=='projection'&&base!=='conventional-2d-processing'&&out.presentation!=='processing'&&
       SIDES.includes(out.laterality)&&STANDARD_VIEWS.includes(out.view)&&!out.modifiers.length&&!out.biopsy;
-    out.fullViewAutoMatch=plain&&pv.state==='no';
-    // Product placement (reported as a D735 delta): a plain view with no partial evidence at all is still
-    // placed, marked "Full View Unverified", because every real object at hand omits Partial View; partial
-    // views get their own explicitly chosen slot; conflicts and everything else stay listed only.
-    out.standard=plain&&(pv.state==='no'||pv.state==='unknown');
+    out.fullViewAutoMatch=plain&&(pv.state==='no'||pv.state==='unknown');
+    out.standard=out.fullViewAutoMatch;
+    out.partialDeclaration=pv.declaration;
+    out.fullness=pv.state==='conflict'?'conflict':pv.state==='yes'?'partial':pv.state==='no'?'declared-not-partial':out.fullViewAutoMatch?'inferred-for-hanging':'undetermined';
     out.partialSlot=plain&&pv.state==='yes';
     out.contract={ruleVersion:RULE_VERSION,class:cls,baseClass:base||'unverified',status:out.status,partial:pv.state,
-      presentation:out.presentation,representation,fullViewAutoMatch:out.fullViewAutoMatch,
+      presentation:out.presentation,representation,fullViewAutoMatch:out.fullViewAutoMatch,partialDeclaration:out.partialDeclaration,fullness:out.fullness,
       sourceClassEligible:['dbt-slices','dbt-slab','projection'].includes(base),basis:out.basis,declaredSourceCount:out.sources.length,
       sourceLinks:out.sources.length?'unresolved-not-in-input-store':null};
     return out;
@@ -331,16 +352,36 @@
   }
   const PROFILE_SYNTHETIC_TYPE='DERIVED\\PRIMARY\\TOMOSYNTHESIS\\GENERATED_2D';
 
+  // Only the supplied reference graph is knowable. Missing nodes remain unresolved; a reachable
+  // back edge is a contradiction, including a cycle that does not lead back to the result itself.
+  function sourceCycle(item,stored){
+    const nodes=new Map(stored.filter(o=>o&&o.dicom).map(o=>[text(o.dicom,'00080018'),o.dicom]));
+    const start=text(item,'00080018');nodes.set(start,item);
+    const visiting=new Set(),done=new Set(),stack=[[start,false]];
+    while(stack.length){
+      const [id,leave]=stack.pop();
+      if(leave){visiting.delete(id);done.add(id);continue;}
+      if(visiting.has(id))return true;
+      if(done.has(id)||!nodes.has(id))continue;
+      visiting.add(id);stack.push([id,true]);
+      for(const ref of declaredSources(nodes.get(id)))stack.push([ref.sop,false]);
+    }
+    return false;
+  }
+
   // Source references (D735 source contract): a verified stored target of an eligible class, of the same
   // patient, institution and study, same side and view, consistent partial scope, and the referenced SOP
   // class and frame. Raw references are always kept; unresolved and rejected are kept apart.
   function verifySources(item,context){
     const self=classify(item),refs=self.sources;
     const stored=Array.isArray(context&&context.storedObjects)?context.storedObjects:[];
+    const validKey=v=>typeof v==='string'&&v.trim().length>0;
+    const cyclic=sourceCycle(item,stored);
     const states=refs.map(ref=>{
-      if(ref.sop===self.sop)return 'rejected';
+      if(cyclic||ref.sop===self.sop)return 'rejected';
       const target=stored.find(o=>o&&o.dicom&&text(o.dicom,'00080018')===ref.sop);
       if(!target)return 'unresolved';
+      if(![context.patientKey,context.institutionKey,target.patientKey,target.institutionKey].every(validKey))return 'unresolved';
       if(text(target.dicom,'00080016')!==ref.sopClass)return 'rejected';
       if(target.patientKey!==context.patientKey||target.institutionKey!==context.institutionKey)return 'rejected';
       if(text(target.dicom,'0020000D')!==self.study)return 'rejected';
@@ -349,10 +390,16 @@
       if(ref.frames&&ref.frames.some(f=>!Number.isInteger(f)||f<1||f>(t.frames||0)))return 'rejected';
       if(!self.laterality||!t.laterality||!self.view||!t.view)return 'unresolved';
       if(self.laterality!==t.laterality||self.view!==t.view)return 'rejected';
+      if(self.modifiers.includes('Unknown Modifier')||t.modifiers.includes('Unknown Modifier'))return 'unresolved';
+      if([...new Set(self.modifiers)].sort().join('|')!==[...new Set(t.modifiers)].sort().join('|')||self.biopsy!==t.biopsy)return 'rejected';
       const a=self.partialState,b=t.partialState;
       if(a==='unknown'||b==='unknown')return 'unresolved';
       if(a!==b)return 'rejected';
-      if(a==='yes'){const ca=partialView(item,[]).codes,cb=partialView(target.dicom,[]).codes;if(!ca.length||ca.join()!==cb.join())return 'rejected';}
+      if(a==='yes'){
+        const ca=self.partialSections,cb=t.partialSections;
+        if(!ca.length||!cb.length||ca.includes('Unknown Section')||cb.includes('Unknown Section'))return 'unresolved';
+        if([...new Set(ca)].sort().join('|')!==[...new Set(cb)].sort().join('|'))return 'rejected';
+      }
       return 'verified';
     });
     const eligibleResult=self.status==='verified'&&self.contract.baseClass==='device-synthetic-2d';
@@ -374,6 +421,7 @@
   function frameIndex(item){
     const sop=text(item,'00080018'),fg=groups(item),declared=values(item,'00280008').length?number(item,'00280008'):1;
     const issues=[],issue=v=>{if(!issues.includes(v))issues.push(v);};
+    if(!fg.valid)issue('shared-functional-groups-invalid');
     if(!uid(sop))issue('identity-invalid');
     if(!Number.isInteger(declared)||declared<1||declared>MAX_FRAMES)return {sop,total:0,entries:[],complete:false,issues:['frame-count-invalid'],spacing:null,thickness:null};
     const multi=declared>1||fg.perFrame.length>0||text(item,'00080016')===SOP_DBT;
@@ -500,7 +548,7 @@
     return out;
   }
 
-  const DBT_RANK={slices:1,slab:2,'mip-slab':3,unspecified:4};
+  const DBT_RANK={slices:1,slab:2,'mip-slab':3,'minip-slab':3,unspecified:4};
   // Current/prior x side x view x kind. A duplicate is never resolved by picking one; the only order
   // applied is slices before slabs inside DBT, and every alternative stays listed.
   function plan(manifest){
@@ -525,10 +573,13 @@
       const s=usable.find(x=>x.role===role);
       const found=s.objects.filter(o=>o.standard&&o.kind===kind&&o.laterality===side&&o.view===v);
       let best=found;
-      if(kind==='dbt'&&found.length>1){const top=Math.min(...found.map(o=>DBT_RANK[o.sliceKind]));best=found.filter(o=>DBT_RANK[o.sliceKind]===top);}
+      if(kind==='dbt'&&found.length>1){
+        const rank=o=>DBT_RANK[o.sliceKind]??Infinity;
+        const top=Math.min(...found.map(rank));best=found.filter(o=>rank(o)===top);
+      }
       const alternatives=found.filter(o=>!best.includes(o));
       const partials=s.objects.filter(o=>o.partialSlot&&o.kind===kind&&o.laterality===side&&o.view===v);
-      slots[key]=!found.length?(partials.length?{key,status:'partial',candidates:partials}:{key,status:'missing'})
+      slots[key]=!best.length?(partials.length?{key,status:'partial',candidates:partials}:{key,status:'missing'})
         :best.length>1?{key,status:'ambiguous',candidates:best,alternatives,partials}:{key,status:'ready',object:best[0],alternatives,partials};
     }
     const objects=[cur,...(pri?[pri]:[])].flatMap(s=>s.objects.map(o=>({...o,use:s===pri&&priorStatus!=='ok'?'refused':o.standard?'slot':o.partialSlot?'partial':'other'})));

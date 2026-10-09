@@ -20,6 +20,7 @@ with that reason (not run, never a pass); a listed file missing or changed under
 KIN_MG_MODEL / KIN_MG_VIEWER may point at module copies (mutants.py); the product tree is never edited.
 """
 from pathlib import Path
+from contextlib import closing
 import copy
 import hashlib
 import importlib.util
@@ -29,7 +30,7 @@ import unittest
 from urllib.parse import urlparse
 
 import numpy as np
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, expect
 
 HERE = Path(__file__).resolve().parent
 # Loaded by path under its own name: a sibling unit (tests/part1/xa) uses the same file names.
@@ -91,10 +92,10 @@ const viewport={attach(element,info){
     if(mg.control.failRender&&mg.control.failRender(image))throw Error('render failed');
     if(mg.hashing)row.sha256=[...new Uint8Array(await crypto.subtle.digest('SHA-256',image.pixels.buffer))].map(b=>b.toString(16).padStart(2,'0')).join('');
     await hold(image,'before');
-    if(!opts||typeof opts.current!=='function'||!opts.current()){row.superseded=true;return {rendered:false,superseded:true,sop:image.sop,frame:image.frame};}
+    if(!opts||typeof opts.current!=='function'||!opts.current()){row.superseded=true;row.finished=true;return {rendered:false,superseded:true,sop:image.sop,frame:image.frame};}
     paint(canvas,element,image,d);row.painted=true;mg.screen[id]=image.frame;
     await hold(image,'after');
-    return {rendered:true,sop:image.sop,frame:image.frame};
+    row.finished=true;return {rendered:true,sop:image.sop,frame:image.frame};
   },detach(){if(handle.detached)mg.violations.push({handle:id,what:'double-detach'});handle.detached=true;mg.detached.push(id);canvas.remove();}};
   mg.handles.push({id,info,element,canvas,handle});return handle;
 }};
@@ -598,6 +599,7 @@ class MammographyViewerDOMTest(unittest.TestCase):
             text = self.label(page, "Current " + name)
             for fact in ("1945-02-13", name, "Synthetic 2D"):
                 self.assertIn(fact, text, "MG04: the stored synthetic view is offered and named in " + name)
+        self.assert_no_partial_friction(page)
         page.get_by_role("button", name="Compare CC", exact=True).click()
         page.wait_for_function("()=>!!document.querySelector('[aria-label=\"Prior L CC\"]')", timeout=WAIT)
         for name in ("Prior R CC", "Prior L CC"):
@@ -607,6 +609,7 @@ class MammographyViewerDOMTest(unittest.TestCase):
         page.get_by_role("button", name="DBT", exact=True).click()
         for sample_id in (_contract.CURRENT_DBT[0], _contract.CURRENT_DBT[1], _contract.PRIOR_DBT[0], _contract.PRIOR_DBT[1]):
             self.wait_displayed(page, sop[sample_id], 1)
+        self.assert_no_partial_friction(page)
         frames = {s: int(dataset(s).NumberOfFrames) for s in (_contract.CURRENT_DBT[1], _contract.PRIOR_DBT[1])}
         self.assertIn("Slice 1 / %d" % frames[_contract.CURRENT_DBT[1]], self.label(page, "Current L CC"))
         self.assertIn("Slice 1 / %d" % frames[_contract.PRIOR_DBT[1]], self.label(page, "Prior L CC"))
@@ -623,6 +626,11 @@ class MammographyViewerDOMTest(unittest.TestCase):
                       "MG03: the prior DBT keeps its own slice; frame numbers are never matched across DBTs")
         self.assertEqual([f for _, f, *_ in self.displayed(page, sop[_contract.PRIOR_DBT[1]])], [1])
         self.assertEqual(self.violations(page), [])
+        page.evaluate("()=>controller.dispose()")
+        self.mount(page, current, prior)
+        for sample_id in _contract.CURRENT_2D:
+            self.wait_displayed(page, sop[sample_id], 1, count=2)
+        self.assert_no_partial_friction(page)
 
     # --- MG06 -------------------------------------------------------------------------------------
     def test_mg06_dom_late_and_stale_results_never_overwrite_the_current_slice(self):
@@ -646,7 +654,8 @@ class MammographyViewerDOMTest(unittest.TestCase):
         page.evaluate("s=>mgRelease(s)", held[0])
         self.settle(page)
         renders16 = page.evaluate("s=>mg.renders.filter(r=>r.sop===s&&r.frame===16).map(r=>r.tag)", sop)
-        self.assertEqual(renders16, [held[1]], "MG06 M9: the first request for the same slice (A->B->A) is never drawn")
+        # Camera/resize can repaint the current resource; none may use the superseded supply.
+        self.assertEqual(set(renders16), {held[1]}, "MG06 M9: the first request for the same slice (A->B->A) is never drawn")
         self.assertIn("Slice 16 / 16", self.label(page, "Current L CC"))
         # A passing failure keeps the slice; Retry recovers it.
         page.evaluate("()=>{mg.control.hold=null;mg.control.ignoreAbort=false;mg.control.fail=r=>r.frame===14?'network':null}")
@@ -667,6 +676,148 @@ class MammographyViewerDOMTest(unittest.TestCase):
 
     def frames_shown(self, page, sop):
         return [f for _, f, *_ in self.displayed(page, sop)]
+
+    def camera_action(self, page, name, action):
+        self.cell(page, name).focus()
+        if action in ("Fit", "1:1"):
+            page.get_by_role("button", name=action, exact=True).click()
+            return
+        if action == "resize":
+            page.locator("#host").evaluate("e=>e.style.height='900px'")
+            page.wait_for_timeout(50)  # allow ResizeObserver delivery, not a success condition
+            return
+        box = self.cell(page, name).bounding_box()
+        x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+        page.mouse.move(x, y)
+        if action == "zoom":
+            page.keyboard.down("Control")
+            page.mouse.wheel(0, -100)
+            page.keyboard.up("Control")
+        else:
+            page.mouse.down()
+            page.mouse.move(x + 35, y + 20)
+            page.mouse.up()
+
+    def test_mg06_dom_camera_and_navigation_share_one_latest_paint_gate(self):
+        # Review CE: End -> delayed render -> Fit -> release used to produce [1,3,1].
+        # Every camera action crosses both delayed load and delayed paint, in both intent orders.
+        item, meta = entry(DBT["L CC"])
+        item = copy.deepcopy(item)
+        item["00280008"] = {"vr": "IS", "Value": [3]}
+        item["52009230"]["Value"] = item["52009230"]["Value"][:3]
+        sop, name = tag(item, "00080018"), "Current L CC"
+        for action in ("Fit", "zoom", "pan", "1:1", "resize"):
+            for order in ("navigation-first", "camera-first"):
+                for delayed in ("paint", "load"):
+                    with self.subTest(action=action, order=order, delayed=delayed), closing(self.page()) as page:
+                        self.mount(page, [(item, meta)])
+                        self.wait_displayed(page, sop, 1)
+                        self.settle(page)
+                        hid = self.handle_of(page, name)
+                        if order == "navigation-first":
+                            if delayed == "paint":
+                                page.evaluate("()=>{mg.control.holdRender=(i,p)=>{if(p==='before'&&i.frame===3){mg.control.holdRender=null;return true;}return false;}}")
+                            else:
+                                page.evaluate("()=>{mg.control.ignoreAbort=true;mg.control.hold=r=>r.frame===3}")
+                            self.key(page, name, "End")
+                            page.wait_for_function("mode=>mode==='paint'?mg.renderHeld.length>0:mg.held.size>0", arg=delayed, timeout=WAIT)
+                            self.camera_action(page, name, action)
+                        else:
+                            # Hold the camera render of 1, then ask End. For load-delay cases the new
+                            # target is separately held: completing the camera must still expose nothing.
+                            page.evaluate("()=>{mg.control.holdRender=(i,p)=>{if(p==='before'){mg.control.holdRender=null;return true;}return false;}}")
+                            self.camera_action(page, name, action)
+                            page.wait_for_function("()=>mg.renderHeld.length>0", timeout=WAIT)
+                            if delayed == "load":
+                                page.evaluate("()=>{mg.control.ignoreAbort=true;mg.control.hold=r=>r.frame===3}")
+                            self.key(page, name, "End")
+                            if delayed == "load":
+                                page.wait_for_function("()=>mg.held.size>0", timeout=WAIT)
+                                page.evaluate("()=>mg.renderRelease.splice(0).forEach(r=>r())")
+                                page.wait_for_function("()=>mg.renders.filter(r=>r.frame===1).every(r=>r.finished)", timeout=WAIT)
+                                self.assertEqual(page.evaluate("()=>mg.renders.filter(r=>r.painted).map(r=>r.frame)"), [1],
+                                                 "a superseded camera paint has no visible effect while the new load waits")
+                        page.evaluate("()=>{mg.control.hold=null;mg.renderRelease.splice(0).forEach(r=>r());[...mg.held.keys()].forEach(mgRelease)}")
+                        self.wait_displayed(page, sop, 3)
+                        page.wait_for_function("()=>mg.renders.every(r=>r.finished)", timeout=WAIT)
+                        self.settle(page)
+                        self.assertEqual(self.frames_shown(page, sop), [1, 3],
+                                         "MG06 M24: a camera repaint never resubmits the old displayed frame")
+                        painted = page.evaluate("()=>mg.renders.filter(r=>r.painted).map(r=>r.frame)")
+                        # Valid resize/camera paints may repeat the latest frame, but never revive an old one.
+                        changes = [f for i, f in enumerate(painted) if i == 0 or f != painted[i - 1]]
+                        self.assertEqual(changes, [1, 3],
+                                         "MG06 M24: a camera repaint never resubmits the old displayed frame")
+                        self.assertEqual(page.evaluate("id=>mg.screen[id]", hid), 3)
+                        self.assertIn("Slice 3 / 3", self.label(page, name))
+                        self.assertIn("Seen 2 / 3", self.label(page, name))
+                        last = page.evaluate("()=>mg.renders.filter(r=>r.painted).at(-1).display")
+                        if action == "pan":
+                            self.assertGreater(last["pan"]["x"], 0)
+                        elif action == "1:1":
+                            self.assertEqual(last["scale"], 1)
+                        self.assertEqual(self.violations(page), [])
+
+    def test_mg04_dom_duplicate_and_mixed_minip_mount_and_choose(self):
+        original, meta = entry(DBT["L CC"])
+        for mixed in (False, True):
+            page, errors = self.page(), []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            a, b = copy.deepcopy(original), copy.deepcopy(original)
+            b["00080018"] = {"vr": "UI", "Value": [new_uid(3901)]}
+            for item in ([a] if mixed else [a, b]):
+                item["00089207"] = {"vr": "CS", "Value": ["MIN_IP"]}
+                for f in item["52009230"]["Value"]:
+                    f["00189504"]["Value"][0]["00089207"] = {"vr": "CS", "Value": ["MIN_IP"]}
+            self.mount(page, [(a, meta), (b, meta)])
+            self.assertIn("Ambiguous (2)", self.label(page, "Current L CC"))
+            self.assertEqual(self.displayed(page), [])
+            buttons = self.cell(page, "Current L CC").get_by_role("button")
+            self.assertEqual(buttons.count(), 2)
+            buttons.first.click()
+            self.wait_displayed(page, tag(a, "00080018"), 1)
+            self.assertIn("MinIP Slab", self.label(page, "Current L CC"))
+            self.assertEqual(errors, [])
+            self.assertEqual(self.violations(page), [])
+
+    def assert_no_partial_friction(self, page):
+        visible = page.locator("body").inner_text()
+        accessible = page.evaluate("()=>[...document.querySelectorAll('[title],[aria-label],[aria-description]')].map(e=>[e.title,e.getAttribute('aria-label'),e.getAttribute('aria-description')].join(' ')).join(' ')")
+        self.assertNotRegex(visible + accessible, r"Partial|Full View|Inferred Full|전체 촬영|부분 촬영",
+                            "MG04 M32: absent Partial View adds no label tooltip warning or action")
+        self.assertEqual(page.get_by_role("button", name=re.compile(r"^Use ")).count(), 0)
+        self.assertEqual(page.get_by_role("dialog").count(), 0)
+
+    def test_mg04_dom_absent_empty_and_no_partial_have_the_same_normal_flow(self):
+        for declaration in (None, [], ["NO"]):
+            page = self.page()
+            current = list(self.four_view().values())
+            current = [(copy.deepcopy(o), m) for o, m in current]
+            for o, _ in current:
+                o.pop("00281350", None)
+                if declaration is not None:
+                    o["00281350"] = {"vr": "CS", "Value": declaration}
+            prior = [(prior_copy(o, i), m) for i, (o, m) in enumerate(current)]
+            self.mount(page, current, prior)
+            for o, _ in current:
+                self.wait_displayed(page, tag(o, "00080018"), 1)
+            self.assert_no_partial_friction(page)
+            page.get_by_role("button", name="Compare CC", exact=True).click()
+            for o, _ in (prior[0], prior[2]):
+                self.wait_displayed(page, tag(o, "00080018"), 1)
+            self.assert_no_partial_friction(page)
+            page.get_by_role("button", name="DBT", exact=True).click()
+            expect(page.get_by_role("button", name="DBT", exact=True)).to_have_attribute("aria-pressed", "true")
+            page.get_by_role("button", name="Conventional", exact=True).click()
+            for o, _ in (prior[0], prior[2]):
+                self.wait_displayed(page, tag(o, "00080018"), 1, count=2)
+            self.assert_no_partial_friction(page)
+            page.evaluate("()=>controller.dispose()")
+            self.mount(page, current, prior)
+            for o, _ in current:
+                self.wait_displayed(page, tag(o, "00080018"), 1, count=2)
+            self.settle(page)
+            self.assert_no_partial_friction(page)
 
     def test_mg06_dom_latest_intent_wins_over_delayed_seek_and_scroll_bursts(self):
         page = self.page()
@@ -759,7 +910,7 @@ class MammographyViewerDOMTest(unittest.TestCase):
         self.assertEqual(page.evaluate("id=>mg.screen[id]", hid), 1, "the screen ends on the latest intent")
         text = self.label(page, "Current L CC")
         self.assertIn("Slice 1 / 16", text)
-        self.assertIn("Seen 2 / 16", text, "the superseded slice is not counted as seen")
+        self.assertIn("Seen 2 / 16", text, "MG06 M14: a render superseded after its paint is not counted as seen")
         self.assertEqual(self.violations(page), [])
 
     def test_mg04_dom_partial_and_oversized_objects_are_never_auto_placed(self):
@@ -788,6 +939,37 @@ class MammographyViewerDOMTest(unittest.TestCase):
         self.assertIn("Partial Medial", self.label(page, "Current R CC"), "a chosen partial view stays labelled as partial")
         self.assertEqual(errors, [])
         self.assertEqual(self.violations(page), [])
+
+        # V2 exception labels are specific to actual partial evidence; absent normal images above
+        # receive none of these labels. Unknown section codes never masquerade as a verified region.
+        for variant in ("unknown-section", "conflict", "missing-bto-section"):
+            page2 = self.page()
+            if variant == "missing-bto-section":
+                obj, meta = entry(DBT["L CC"])
+                obj = copy.deepcopy(obj)
+                obj["00281350"] = {"vr": "CS", "Value": ["YES"]}
+                obj.pop("00281352", None)
+                expected = "Partial View Unverified"
+            else:
+                obj, meta = copy.deepcopy(partial), current["R CC"][1]
+                if variant == "unknown-section":
+                    obj["00281352"] = {"vr": "SQ", "Value": [{}]}
+                    expected = "Partial View"
+                else:
+                    obj["00281350"] = {"vr": "CS", "Value": ["NO"]}
+                    expected = "Partial View Conflict"
+            self.mount(page2, [(obj, meta)])
+            self.settle(page2)
+            self.assertEqual(page2.evaluate("()=>mg.loads.length"), 0, "explicit partial/contradictory objects never auto-load")
+            if variant == "unknown-section":
+                self.cell(page2, "Current R CC").get_by_role("button", name="Use Partial View", exact=True).click()
+                self.wait_displayed(page2, tag(obj, "00080018"), 1)
+                self.assertIn(expected, self.label(page2, "Current R CC"))
+                self.assertNotIn("Unknown Section", self.label(page2, "Current R CC"))
+            else:
+                page2.get_by_text(re.compile(r"^Other Images")).click()
+                self.assertIn(expected, page2.locator("body").inner_text())
+                self.assertIn("자동 배치하지 않았습니다", page2.locator("body").inner_text())
 
     def test_mg06_dom_dispose_layout_switch_and_account_change_stop_late_results(self):
         page = self.page()

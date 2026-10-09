@@ -108,13 +108,13 @@ MUTANTS = [
     {"id": "M13", "file": "viewer", "suite": "dom", "case": "test_mg06_dom_latest_intent_wins_over_delayed_seek_and_scroll_bursts",
      "title": "F01: a request back to the slice on screen does not supersede the delayed one",
      "expect": "MG06 M13: a request back to the current slice cancels the delayed one",
-     "old": "      const ticket=gate.begin(cell.id,entry.sop+'#'+entry.frame);cell.intent=target;",
-     "new": "      if(target===cell.position&&cell.shown&&!force)return;const ticket=gate.begin(cell.id,entry.sop+'#'+entry.frame);cell.intent=target;"},
+     "old": "      cell.intent=target;const ticket=paintTicket(cell);",
+     "new": "      if(target===cell.position&&cell.shown&&!force)return;cell.intent=target;const ticket=paintTicket(cell);"},
     {"id": "M14", "file": "viewer", "suite": "dom", "case": "test_mg06_dom_superseded_renders_are_neither_painted_nor_reported",
      "title": "F01: no sequence check after the render completes",
-     "expect": "MG06 M14: a render superseded after its paint is not reported as the current display",
-     "old": "        if(!current){relabel(cell);return false;}",
-     "new": "        if(false){relabel(cell);return false;}"},
+     "expect": "MG06 M14: a render superseded after its paint is not counted as seen",
+     "old": "        if(!current)return false;",
+     "new": "        if(false)return false;"},
     {"id": "M15", "file": "viewer", "suite": "dom", "case": "test_mg06_dom_superseded_renders_are_neither_painted_nor_reported",
      "title": "F01: the renderer's pre-paint check always answers current",
      "expect": "MG06 M15: a render superseded before its paint is not painted",
@@ -160,6 +160,71 @@ MUTANTS = [
      "expect": "MG01 M23: slices vs slab follow thickness and contiguous positions, not Volumetric Properties alone",
      "old": "    const tol=lengthTolerance(g.spacing),contiguous=Math.abs(g.thickness-g.spacing)<=tol;",
      "new": "    if(volumetric==='VOLUME'){out.kind='dbt';out.sliceKind='slices';return 'dbt-slices';}if(volumetric==='SAMPLED'){out.kind='dbt';out.sliceKind='slab';return 'dbt-slab';}const tol=lengthTolerance(g.spacing),contiguous=Math.abs(g.thickness-g.spacing)<=tol;"},
+    {"id": "M24", "file": "viewer", "suite": "dom", "case": "test_mg06_dom_camera_and_navigation_share_one_latest_paint_gate",
+     "title": "F01: camera repaint bypasses the gate and captures the old image",
+     "expect": "MG06 M24: a camera repaint never resubmits the old displayed frame",
+     "old": "      return paint(cell,paintTicket(cell));",
+     "new": "      const entry=cell.index.entries[cell.position-1],image=cell.image;return cell.queue.then(()=>cell.handle.render(image,display(cell,image,entry),{current:()=>true}));"},
+    {"id": "M25", "file": "model", "suite": "model", "case": "MG08-reject source acceptance",
+     "title": "F07: matching missing context keys approve a source",
+     "expect": "MG08 M25: missing context never verifies a source",
+     "old": "      if(![context.patientKey,context.institutionKey,target.patientKey,target.institutionKey].every(validKey))return 'unresolved';",
+     "new": "      void validKey;"},
+    {"id": "M26", "file": "model", "suite": "model", "case": "MG08-reject partial sources",
+     "title": "F08: identical unknown section codes verify",
+     "expect": "MG08 M26: identical unknown partial codes are not verified meaning",
+     "old": "        if(!ca.length||!cb.length||ca.includes('Unknown Section')||cb.includes('Unknown Section'))return 'unresolved';",
+     "new": "        if(!ca.length||!cb.length)return 'unresolved';"},
+    {"id": "M27", "file": "model", "suite": "model", "case": "MG08-reject source modifiers",
+     "title": "F08: ignore contradictory modifiers",
+     "expect": "MG08 M27: plain and spot source contexts contradict",
+     "old": "[...new Set(self.modifiers)].sort().join('|')!==[...new Set(t.modifiers)].sort().join('|')||self.biopsy!==t.biopsy",
+     "new": "false||self.biopsy!==t.biopsy"},
+    {"id": "M28", "file": "model", "suite": "model", "case": "MG08-reject source modifiers",
+     "title": "F08: ignore contradictory biopsy context",
+     "expect": "MG08 M28: biopsy result cannot claim a plain source context",
+     "old": "||self.biopsy!==t.biopsy",
+     "new": "||false"},
+    {"id": "M29", "file": "model", "suite": "model", "case": "MG08-reject cycles",
+     "title": "F08: accept cycles in the supplied reference graph",
+     "expect": "MG08 M29: a source cycle is a contradiction",
+     "old": "    const cyclic=sourceCycle(item,stored);",
+     "new": "    const cyclic=false;"},
+    {"id": "M30", "file": "model", "suite": "model", "case": "MG04-allow every DBT representation",
+     "title": "F09: MinIP has no comparable rank and produces no best candidate",
+     "expect": "MG04 M30: duplicate MinIP remains a nonempty explicit choice",
+     "old": "        const rank=o=>DBT_RANK[o.sliceKind]??Infinity;",
+     "new": "        const rank=o=>o.sliceKind==='minip-slab'?NaN:DBT_RANK[o.sliceKind]??Infinity;"},
+    {"id": "M31", "file": "model", "suite": "model", "case": "MG01-reject Shared Functional Groups",
+     "title": "F10: accept additional Shared Functional Group items",
+     "expect": "MG01 M31: malformed shared groups cannot verify from item zero",
+     "old": "e.Value.length===1&&object(e.Value[0])",
+     "new": "e.Value.length>=1&&object(e.Value[0])"},
+    {"id": "M32", "file": "viewer", "suite": "dom", "case": "test_mg04_dom_absent_empty_and_no_partial_have_the_same_normal_flow",
+     "title": "V2-3: reintroduce an always-on warning for absent Partial View",
+     "expect": "MG04 M32: absent Partial View adds no label tooltip warning or action",
+     "old": "        if(o.partial)parts.push(partialLabel(o));",
+     "new": "        if(o.partial)parts.push(partialLabel(o));else if(o.partialState==='unknown')parts.push('Full View Unverified');"},
+    {"id": "M33", "file": "model", "suite": "model", "case": "MG01-allow v2",
+     "title": "V2-2: accept CID 4005 in a modifier container",
+     "expect": "MG01 M33: CID 4005 in a modifier container is a conflict",
+     "old": "declaration==='INVALID'||malformed||wrongContainer",
+     "new": "false||declaration==='INVALID'||malformed"},
+    {"id": "M34", "file": "model", "suite": "model", "case": "MG01-allow v2",
+     "title": "V2-2: invalid flag becomes unknown",
+     "expect": "MG01 M34: malformed Partial View is not absence",
+     "old": "declaration==='INVALID'||malformed||wrongContainer",
+     "new": "false||malformed||wrongContainer"},
+    {"id": "M35", "file": "model", "suite": "model", "case": "MG01-allow v2",
+     "title": "V2-2: malformed partial SQ items disappear",
+     "expect": "MG01 M35: malformed partial SQ items are not filtered into absence",
+     "old": "declaration==='INVALID'||malformed||wrongContainer",
+     "new": "declaration==='INVALID'||wrongContainer"},
+    {"id": "M36", "file": "model", "suite": "model", "case": "MG01-allow v2",
+     "title": "V2-1: absent/empty Partial View requires manual selection again",
+     "expect": "MG01 M36: absent or empty partial view hangs automatically",
+     "old": "    out.fullViewAutoMatch=plain&&(pv.state==='no'||pv.state==='unknown');",
+     "new": "    out.fullViewAutoMatch=plain&&pv.state==='no';"},
 ]
 
 
@@ -175,7 +240,7 @@ def command(suite, case):
     if suite == "model":
         pattern = ["--test-name-pattern=^" + re.escape(case).replace("\\-", "-")] if case else []
         return [node(), "--test", "--test-reporter=spec"] + pattern + [str(spec["file"])]
-    return [sys.executable, "-B", str(spec["file"])] + ([spec["class"] + "." + case] if case else [])
+    return [sys.executable, "-B", str(spec["file"]), "-v"] + ([spec["class"] + "." + case] if case else [])
 
 
 def run(suite, case, overrides, timeout):
@@ -221,7 +286,7 @@ def main():
     cases = json.loads((HERE / "cases.json").read_text(encoding="utf-8"))
     declared = cases["mutants"]
     problems = []
-    if {m["id"] for m in MUTANTS} != set(declared) or len(MUTANTS) != 23:
+    if {m["id"] for m in MUTANTS} != set(declared) or len(MUTANTS) != len(declared):
         problems.append("mutant ids differ from cases.json")
     tests_text = {suite: spec["file"].read_text(encoding="utf-8") for suite, spec in SUITES.items()}
     seen = set()
