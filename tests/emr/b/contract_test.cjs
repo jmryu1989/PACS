@@ -87,6 +87,8 @@ async function liveDriver() {
     const seal = new AccessSeal(state, sql, journal);
     const store = new RT.AccessLedgerStore(prisma, sql, seal, journal);
     if (operation === 'recover') return await seal.recover();
+    // A process that writes ledger facts is a started server: its start-up check runs first (B2 calls it before listen).
+    if (['append', 'business', 'provide'].includes(operation)) await seal.recover();
     if (operation === 'seal') return seal.read();
     if (operation === 'journal') return journal.all().map(record => ({ id: record.id, kind: record.kind, body: record.body }));
     if (operation === 'tail') return await sql.tail();

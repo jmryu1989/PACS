@@ -313,20 +313,10 @@ class EmrBLedgerLive(unittest.TestCase):
     # ── L03 ──
     def test_b03_idempotency_and_concurrent_append(self):
         """Concurrent original events are all ordered once; the same event resent is the same receipt; another content
-        under its ID is refused; one verified subject is one identity however many resolve it at once."""
+        under its ID is refused; one verified subject is one identity however many resolve it at once. The appends run
+        at once in one server process (its connection pool), the deployment's one API per state volume."""
         start = self.driver("tail")["sequence"]
-        procs = []
-        for _ in range(2):
-            env = {**self.env, "DATABASE_URL": self.url()}
-            procs.append(subprocess.Popen(["docker", "run", "--rm", "--label", self.label, "--network", "container:" + self.db,
-                "-e", "DATABASE_URL", "-e", "KIN_EMR_STATE_DIR=" + STATE, "-v", self.state + ":" + STATE, "-v", str(DRIVER_DIR) + ":/emr-b:ro",
-                "--entrypoint", "node", self.image, "/emr-b/contract_test.cjs", "--emr-b-live", "append", json.dumps({"count": 12, "concurrent": True})],
-                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE))
-        outputs = [proc.communicate(timeout=300) for proc in procs]
-        results = []
-        for out, _ in outputs:
-            line = next(l for l in out.decode().splitlines() if l.startswith("EMR_B_RESULT "))
-            results += json.loads(line[len("EMR_B_RESULT "):])["results"]
+        results = self.driver("append", {"count": 24, "concurrent": True})["results"]
         self.assertEqual(len(results), 24)
         self.assertTrue(all("receipt" in r for r in results), [r for r in results if "receipt" not in r][:3])
         stored = [e for e in self.entries() if e["sequence"] > start]
@@ -529,16 +519,17 @@ class EmrBLedgerLive(unittest.TestCase):
         self.driver("append", {"count": 3})
         source_entries = self.entries()
         catalog_sql = ("SELECT string_agg(x, '|' ORDER BY x) FROM ("
-                       "SELECT c.relname || ':' || pg_get_userbyid(c.relowner) || ':' || COALESCE(t.spcname, 'default') || ':' || "
-                       "COALESCE((SELECT string_agg(a::text, ',' ORDER BY a::text) FROM unnest(c.relacl) a), '') AS x "
+                       "SELECT c.relname::text || ':' || pg_get_userbyid(c.relowner)::text || ':' || COALESCE(t.spcname::text, 'default') || ':' || "
+                       "COALESCE((SELECT string_agg(a.acl::text, ',' ORDER BY a.acl::text) FROM unnest(c.relacl) AS a(acl)), '') AS x "
                        "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_tablespace t ON t.oid = c.reltablespace "
                        "WHERE n.nspname = 'emr_access' AND c.relkind IN ('r', 'i') UNION ALL "
-                       "SELECT p.oid::regprocedure::text || ':' || pg_get_userbyid(p.proowner) || ':' || p.prosecdef || ':' || "
-                       "COALESCE(array_to_string(p.proconfig, ';'), '') || ':' || COALESCE((SELECT string_agg(a::text, ',' ORDER BY a::text) FROM unnest(p.proacl) a), '') "
+                       "SELECT p.oid::regprocedure::text || ':' || pg_get_userbyid(p.proowner)::text || ':' || p.prosecdef::text || ':' || "
+                       "COALESCE(array_to_string(p.proconfig, ';'), '') || ':' || COALESCE((SELECT string_agg(a.acl::text, ',' ORDER BY a.acl::text) FROM unnest(p.proacl) AS a(acl)), '') "
                        "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'emr_access' UNION ALL "
-                       "SELECT c.relname || ':' || g.tgname || ':' || g.tgenabled FROM pg_trigger g JOIN pg_class c ON c.oid = g.tgrelid "
+                       "SELECT c.relname::text || ':' || g.tgname::text || ':' || g.tgenabled::text FROM pg_trigger g JOIN pg_class c ON c.oid = g.tgrelid "
                        "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'emr_access' AND NOT g.tgisinternal UNION ALL "
-                       "SELECT 'grant:' || table_name || ':' || privilege_type FROM information_schema.role_table_grants WHERE grantee = 'kin_runtime') q")
+                       "SELECT 'grant:' || table_schema::text || '.' || table_name::text || ':' || privilege_type::text "
+                       "FROM information_schema.role_table_grants WHERE grantee = 'kin_runtime') q")
         source_catalog = self.ok(catalog_sql)
         before = (self.ok("SELECT count(*) || ':' || max(sequence) || ':' || (SELECT hash FROM emr_access.chain_head) FROM emr_access.access_entry"),
                   self.ok("SELECT count(*) FROM \"AuditLog\""))
@@ -573,7 +564,7 @@ class EmrBLedgerLive(unittest.TestCase):
             self.provision(loose)
             self.assertEqual(restore(loose, "--no-tablespaces").returncode, 0)
             self.assertIn("ledger-placement", self.driver("verify-runtime", db=loose, volume=self.volume("l07-loose")).get("problems") or [])
-            self.assertEqual(self.driver("append", {"count": 1}, db=loose, volume=self.volume("l07-loose2"))["results"][0]["error"], "EB001")
+            self.assertEqual(self.driver("append", {"count": 1}, db=loose, volume=self.copy_volume(backup_state, "l07-loose2"))["results"][0]["error"], "EB001")
             self.driver("append", {"count": 1})  # the source moves on after its backup
             ahead = self.copy_volume(self.state, "l07-ahead")
             stale = self.start_db("l07-stale")
