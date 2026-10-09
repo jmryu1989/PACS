@@ -471,6 +471,8 @@
         "type-literal member": "type Claim = { class: string; agrees: boolean };",
         "optional type-literal member": "type Claim = { class /* gap */ ?: string };",
         "object-literal key": "const claim = { class: value };",
+        "destructuring key": "const { class: value } = claim;",
+        "enum member": "enum Claim { class, other }",
         "member access": "const value = x.class;",
         "optional member access": "const value = x?.class;",
         "shorthand property": "const claim = { class };",

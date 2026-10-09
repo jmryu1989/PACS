@@ -216,10 +216,11 @@ function answer(request) {
     const properties = [];
     const visit = node => {
       const owner = node.parent;
-      if (ts.isIdentifier(node) && node.text === 'class' && owner && owner.name === node &&
-          (ts.isPropertySignature(owner) || ts.isPropertyAssignment(owner) || ts.isPropertyDeclaration(owner) ||
+      if (ts.isIdentifier(node) && node.text === 'class' && owner &&
+          ((ts.isBindingElement(owner) && owner.propertyName === node) || (owner.name === node &&
+          (ts.isEnumMember(owner) || ts.isPropertySignature(owner) || ts.isPropertyAssignment(owner) || ts.isPropertyDeclaration(owner) ||
            ts.isShorthandPropertyAssignment(owner) || ts.isMethodDeclaration(owner) || ts.isMethodSignature(owner) ||
-           ts.isGetAccessorDeclaration(owner) || ts.isSetAccessorDeclaration(owner) || ts.isPropertyAccessExpression(owner))) {
+           ts.isGetAccessorDeclaration(owner) || ts.isSetAccessorDeclaration(owner) || ts.isPropertyAccessExpression(owner))))) {
         properties.push(codePoint(file, node.getStart(file)));
       }
       ts.forEachChild(node, visit);

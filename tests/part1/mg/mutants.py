@@ -297,6 +297,9 @@ def command(suite, case):
     if suite == "model":
         pattern = ["--test-name-pattern=^" + re.escape(case).replace("\\-", "-")] if case else []
         return [node(), "--test", "--test-reporter=spec"] + pattern + [str(spec["file"])]
+    if case is None:
+        # Baseline uses the same declared scope and fail-closed skip checks as CI.
+        return [sys.executable, "-B", str(HERE / "ci.py"), suite]
     return [sys.executable, "-B", str(spec["file"]), "-v"] + ([spec["class"] + "." + case] if case else [])
 
 
@@ -387,7 +390,9 @@ def main():
         for name, path in SOURCES.items():
             clean[name] = scratch / ("baseline-" + path.name)
             shutil.copyfile(path, clean[name])
-        expected = {s["id"]: s["expected"] for s in cases["suites"]}
+        from ci import selection
+        expected = {s["id"]: s["expected"] if s["id"] == "model" else len(selection(s["id"])[1])
+                    for s in cases["suites"]}
         for suite in SUITES:
             done, output = run(suite, None, clean, args.timeout)
             if out:

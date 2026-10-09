@@ -1,7 +1,7 @@
 name: Part 1 XA module contracts
 
 # R1 only. R2 adds the live job here; shared profiles and G3 stay unchanged.
-# Sample bytes and the private MG rule table are never uploaded as artifacts.
+# Sample bytes are never uploaded as artifacts.
 on:
   push:
     branches: [main]
@@ -22,10 +22,16 @@ jobs:
     env:
       PART1_UNIT: xa
       TARGET_SHA: ${{ github.sha }}
-      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/part1-xa-browsers
       PYTHONDONTWRITEBYTECODE: '1'
-      KIN_XA_SAMPLE_ROOT: ${{ runner.temp }}/part1-xa-samples
     steps:
+      - name: Initialize runner-local paths
+        shell: python
+        run: |
+          import os
+          root = os.environ["RUNNER_TEMP"]
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write(f"PLAYWRIGHT_BROWSERS_PATH={root}/part1-xa-browsers\n")
+              env.write(f"KIN_XA_SAMPLE_ROOT={root}/part1-xa-samples\n")
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.TARGET_SHA }}
@@ -63,7 +69,7 @@ jobs:
           import hashlib, json, os, shutil, tempfile, urllib.request, zipfile
           from pathlib import Path
           unit = os.environ["PART1_UNIT"]
-          manifest = json.loads(Path("tests/part1/" + unit + "/samples.json").read_text())
+          manifest = json.loads(Path("tests/part1/" + unit + "/samples.json").read_text(encoding="utf-8"))
           rows = manifest["used"] if unit == "mg" else manifest["public"]
           def digest(path):
               h = hashlib.sha256()
@@ -131,11 +137,11 @@ jobs:
           import collections, json, os, re
           from pathlib import Path
           unit = os.environ["PART1_UNIT"]
-          declaration = json.loads(Path("tests/part1/" + unit + "/cases.json").read_text())
+          declaration = json.loads(Path("tests/part1/" + unit + "/cases.json").read_text(encoding="utf-8"))
           body = declaration["suites"][0] if unit == "mg" else declaration["suites"]["model"]
           expected = [c["name"] for c in body["cases"]]
           if unit == "mg":
-              table = json.loads(Path(os.environ["KIN_MG_RULE_CASES"]).read_text())
+              table = json.loads(Path(os.environ["KIN_MG_RULE_CASES"]).read_text(encoding="utf-8"))
               expected += ["D744 rule table is the pinned one"] + [c["testId"] for c in table["cases"]]
               assert len(expected) == body["expected"]
           tap = Path("tmp/part1-" + unit + "-ci/model.tap").read_text(encoding="utf-8")
@@ -156,7 +162,7 @@ jobs:
           import importlib.util, json, os, sys, unittest
           from pathlib import Path
           unit, name = os.environ["PART1_UNIT"], sys.argv[1]
-          declaration = json.loads(Path("tests/part1/" + unit + "/cases.json").read_text())
+          declaration = json.loads(Path("tests/part1/" + unit + "/cases.json").read_text(encoding="utf-8"))
           if unit == "mg":
               body = next(s for s in declaration["suites"] if s["id"] == name)
               filename, klass = body["file"], body["class"]
@@ -206,7 +212,7 @@ jobs:
           import importlib.util, json, os, sys, unittest
           from pathlib import Path
           unit, name = os.environ["PART1_UNIT"], sys.argv[1]
-          declaration = json.loads(Path("tests/part1/" + unit + "/cases.json").read_text())
+          declaration = json.loads(Path("tests/part1/" + unit + "/cases.json").read_text(encoding="utf-8"))
           if unit == "mg":
               body = next(s for s in declaration["suites"] if s["id"] == name)
               filename, klass = body["file"], body["class"]
