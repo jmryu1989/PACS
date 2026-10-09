@@ -60,7 +60,10 @@
       "api/src/emr-runtime/journal-file.ts",
       "api/prisma/migrations/20261010120000_emr_seal_attempts/migration.sql",
       "tests/emr/b/seal_checker.cjs",
-      "tests/route_inventory_ts.js"
+      "tests/route_inventory_ts.js",
+      "api/native/flock.c",
+      "api/src/emr-runtime/file-lock.ts",
+      "tests/fixtures/clinician-source-contract-loads.json"
     ],
     "B1-B2": [
       "api/src/emr-contract/README.md",
@@ -82,7 +85,13 @@
       "tests/emr/b/live.py",
       "tests/emr/b/mutants.py",
       "tests/emr/b/throughput.cjs",
-      "tests/emr/b/throughput_live.py"
+      "tests/emr/b/throughput_live.py",
+      "tests/emr/b/ab_latency.cjs",
+      "tests/emr/b/ab_sustained.cjs",
+      "tests/emr/b/journal_cost.cjs",
+      "tests/emr/b/performance.py",
+      "tests/emr/b/performance_mutants.py",
+      "tests/emr/b/lock_test.cjs"
     ]
   },
   "models": {
@@ -318,6 +327,11 @@
       "req": "REQ-D874-EMR-B-THROUGHPUT",
       "risk": "RISK-READING-RECEIPT-LATENCY",
       "test": "TEST-EMR-B-C19 L03 L03b M36"
+    },
+    {
+      "req": "REQ-D878",
+      "risk": "RISK-EMR-RECEIPT-DELAY",
+      "test": "PERF-ledger PERF-sustained PERF-concurrent-24 PERF-concurrent-48 PERF-journal LOCK-01 MP01 MP02 MP03 MP04 C13 M37"
     }
   ],
   "cases": {
@@ -372,7 +386,7 @@
   "expected": {
     "contract": 17,
     "live": 12,
-    "mutants": 33,
+    "mutants": 34,
     "profiles": 39,
     "measurements_suites": 20,
     "validate_jobs": 22,
@@ -622,6 +636,13 @@
         "L03"
       ],
       "behaviour": "per-operation Node startup returns to the head-locked writer; receipt latency exceeds round-3 plus 20 percent"
+    },
+    {
+      "id": "M37",
+      "kill": [
+        "C13"
+      ],
+      "behaviour": "in-flight verification shares the mutable coordinator index and accepts another writer changed binding"
     }
   ],
   "candidate_cases": [

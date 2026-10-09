@@ -22,5 +22,5 @@ export class FailureJournal {
     return this.invoke('journal-record', { id, kind, body, at });
   }
   all(): readonly Readonly<JournalRecord>[] { return this.invoke('journal-load').records; }
-  find(id: string): Readonly<JournalRecord> | undefined { return this.all().find(r => r.id === id); }
+  find(id: string): Readonly<JournalRecord> | undefined { return this.invoke('journal-find', id); }
 }

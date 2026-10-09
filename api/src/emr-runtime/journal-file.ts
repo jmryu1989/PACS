@@ -79,6 +79,9 @@ export class FailureJournal {
   private readonly file: string;
   private records = new Map<string, JournalRecord>();
   private bytes = 0;
+  private loadedBytes = 0;
+  private archiveBytes = 0;
+  private directoryStamp = "";
   private unavailable = false;
   /** Bytes of a torn final line, durably quarantined before the good journal is truncated. */
   readonly tornBytes: number;
@@ -89,7 +92,31 @@ export class FailureJournal {
     try { raw = fs.readFileSync(this.file); } catch (error: any) { if (error?.code !== 'ENOENT') throw new JournalUnavailable('FailureJournalUnavailable'); }
     const goodLength = raw.lastIndexOf(10) + 1;
     this.tornBytes = raw.length - goodLength;
-    for (const line of raw.subarray(0, goodLength).toString('utf8').split('\n').filter(Boolean)) {
+    this.accept(raw.subarray(0, goodLength));
+    if (this.tornBytes) this.quarantine(raw, goodLength);
+    this.bytes = this.loadedBytes = goodLength;
+    this.refreshArchives();
+  }
+
+  private refreshArchives(): void {
+    // Other processes can quarantine torn writes too. Directory changes invalidate
+    // this small archive inventory without rereading any verified journal records.
+    const directory = fs.lstatSync(path.dirname(this.file));
+    const stamp = `${directory.mtimeMs}:${directory.ctimeMs}`;
+    if (stamp === this.directoryStamp) return;
+    let archiveBytes = 0;
+    for (const name of fs.readdirSync(path.dirname(this.file)).filter(n => n.startsWith('torn-'))) {
+      const info = fs.lstatSync(path.join(path.dirname(this.file), name));
+      if (!info.isFile() || info.isSymbolicLink()) throw new JournalUnavailable('FailureJournalCorrupt');
+      archiveBytes += info.size;
+    }
+    if (archiveBytes < this.archiveBytes) throw new JournalUnavailable('FailureJournalCorrupt');
+    this.bytes += archiveBytes - this.archiveBytes;
+    this.archiveBytes = archiveBytes; this.directoryStamp = stamp;
+  }
+
+  private accept(raw: Buffer): void {
+    for (const line of raw.toString('utf8').split('\n').filter(Boolean)) {
       let record: JournalRecord;
       try {
         const v = object(JSON.parse(line), ['id', 'kind', 'at', 'body', 'sha256']);
@@ -100,14 +127,31 @@ export class FailureJournal {
       if (this.records.has(record.id)) throw new JournalUnavailable('FailureJournalCorrupt');
       this.records.set(record.id, freeze(record));
     }
-    if (this.tornBytes) this.quarantine(raw, goodLength);
-    this.bytes = goodLength;
-    // Quarantine is evidence too: a crash must not reset the volume budget.
-    for (const name of fs.readdirSync(path.dirname(this.file)).filter(n => n.startsWith('torn-'))) {
-      const info = fs.lstatSync(path.join(path.dirname(this.file), name));
-      if (!info.isFile() || info.isSymbolicLink()) throw new JournalUnavailable('FailureJournalCorrupt');
-      this.bytes += info.size;
-    }
+  }
+
+  /** Called under the shared writer lock. Only another process's new bytes need
+   * validation; the process-local ID index was checked in full at construction. */
+  refresh(): void {
+    if (this.unavailable) throw new JournalUnavailable('FailureJournalUnavailable');
+    this.refreshArchives();
+    const size = fs.lstatSync(this.file, { throwIfNoEntry: false })?.size ?? 0;
+    if (size < this.loadedBytes) throw new JournalUnavailable('FailureJournalCorrupt');
+    if (size === this.loadedBytes) return;
+    const fd = fs.openSync(this.file, 'r'), raw = Buffer.alloc(size - this.loadedBytes);
+    try {
+      let read = 0;
+      while (read < raw.length) {
+        const n = fs.readSync(fd, raw, read, raw.length - read, this.loadedBytes + read);
+        if (!n) throw new JournalUnavailable('FailureJournalCorrupt');
+        read += n;
+      }
+    } finally { fs.closeSync(fd); }
+    const good = raw.lastIndexOf(10) + 1;
+    this.accept(raw.subarray(0, good));
+    if (good < raw.length) this.quarantine(fs.readFileSync(this.file), this.loadedBytes + good);
+    this.loadedBytes += good;
+    this.bytes += good;
+    this.refreshArchives();
   }
 
   private quarantine(raw: Buffer, goodLength: number): void {
@@ -137,7 +181,7 @@ export class FailureJournal {
       const existed = fs.existsSync(this.file);
       fd = fs.openSync(this.file, 'a', 0o600);
       fs.writeFileSync(fd, text);
-      fs.fsyncSync(fd);
+      fs.fdatasyncSync(fd);
       if (!existed) syncDirectory(path.dirname(this.file));
     } catch {
       this.unavailable = true;
@@ -146,6 +190,7 @@ export class FailureJournal {
       if (fd !== undefined) try { fs.closeSync(fd); } catch { /* the record was synced or the write already failed */ }
     }
     this.bytes += Buffer.byteLength(text);
+    this.loadedBytes += Buffer.byteLength(text);
   }
 
   /** Durable before it returns; the same ID and body again is the same record, another body under that ID is refused. */

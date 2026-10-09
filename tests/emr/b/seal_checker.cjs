@@ -14,6 +14,7 @@ const ts = require(path.resolve(tsRoot)), clock = '2026-10-10T00:00:00.000Z', ze
 const sha = s => crypto.createHash('sha256').update(s).digest('hex');
 const source = new Map(), compiled = new Map(), sharedModules = new Map();
 let genesisSealText;
+const pathKeys = new Map();
 const FixedDate = class extends Date { constructor(...a) { super(...(a.length ? a : [clock])); } static now() { return Date.parse(clock); } };
 function readSource(rel) {
   if (!source.has(rel)) source.set(rel, fs.readFileSync(path.join(root,rel),'utf8'));
@@ -23,22 +24,29 @@ function errno(code) { return Object.assign(new Error(code), {code}); }
 // fsync is an atomic durable cut in this scheduler. Torn-write cases remain in the
 // separately executed Opus J1-J5 corpus; this adapter does not claim POSIX durability.
 class MemFS {
-  constructor(snapshot) { this.serial=100; this.nodes = new Map(snapshot || []); this.fds = new Map(); this.fd=3; }
-  key(p) { return path.resolve(p).toLowerCase(); }
+  constructor(snapshot) { this.statClock=0;this.statVersions=new WeakMap();this.serial=100; this.nodes = new Map(snapshot || []); this.fds = new Map(); this.fd=3; }
+  key(p) { let key=pathKeys.get(p);if(key===undefined){key=path.resolve(p).toLowerCase();pathKeys.set(p,key);}return key; }
   lstatSync(p, opt) { const n=this.nodes.get(this.key(p)); if(!n) { if(opt?.throwIfNoEntry===false)return; throw errno('ENOENT'); }
-    return {isDirectory:()=>n.dir,isFile:()=>!n.dir,isSymbolicLink:()=>false,mode:n.dir?0o700:0o600,size:n.dir?0:Buffer.byteLength(n.data)}; }
+    if(!this.statVersions.has(n))this.statVersions.set(n,++this.statClock);
+    return {dev:1,ino:this.key(p),mtimeMs:this.statVersions.get(n),ctimeMs:this.statVersions.get(n),isDirectory:()=>n.dir,isFile:()=>!n.dir,isSymbolicLink:()=>false,mode:n.dir?0o700:0o600,size:n.dir?0:Buffer.byteLength(n.data)}; }
   mkdirSync(p) { p=this.key(p); if(this.nodes.has(p))throw errno('EEXIST'); this.nodes.set(p,{dir:true}); }
   existsSync(p) { return this.nodes.has(this.key(p)); }
   realpathSync = Object.assign(p=>path.resolve(p), {native:p=>path.resolve(p)});
   openSync(p,flags) { p=this.key(p); if(flags.includes('x')&&this.nodes.has(p))throw errno('EEXIST');
     if(!this.nodes.has(p)&&!/[aw]/.test(flags))throw errno('ENOENT');
     if(!this.nodes.has(p)||flags.includes('w'))this.nodes.set(p,{dir:false,data:''});
-    const id=this.fd++; this.fds.set(id,{p,flags}); return id; }
+    const id=this.fd++; this.fds.set(id,{p,flags,position:0}); return id; }
   writeSync(fd,data) { const h=this.fds.get(fd), s=Buffer.isBuffer(data)?data.toString('utf8'):String(data);
-    const old=this.nodes.get(h.p); this.nodes.set(h.p,{dir:false,data:old.data+s}); return Buffer.byteLength(s); }
+    const old=this.nodes.get(h.p), position=h.flags.includes('a')?old.data.length:h.position;
+    this.nodes.set(h.p,{dir:false,data:old.data.slice(0,position)+s+old.data.slice(position+s.length)});
+    h.position=position+s.length;return Buffer.byteLength(s); }
   writeFileSync(p,data) { if(typeof p==='number')return this.writeSync(p,data); this.nodes.set(this.key(p),{dir:false,data:Buffer.isBuffer(data)?data.toString('utf8'):String(data)}); }
   appendFileSync(p,data) { const fd=this.openSync(p,'a'); this.writeSync(fd,data); this.closeSync(fd); }
-  fsyncSync() {} closeSync(fd) { this.fds.delete(fd); }
+  fsyncSync() {} fdatasyncSync() {} closeSync(fd) { this.fds.delete(fd); }
+  readSync(fd, buffer, offset, length, position) {
+    const data=Buffer.from(this.nodes.get(this.fds.get(fd).p).data);
+    return data.copy(buffer, offset, position, position+length);
+  }
   readFileSync(p,enc) { const n=this.nodes.get(this.key(p)); if(!n||n.dir)throw errno('ENOENT'); return enc?n.data:Buffer.from(n.data); }
   renameSync(a,b) { a=this.key(a); b=this.key(b); const n=this.nodes.get(a); if(!n)throw errno('ENOENT');this.nodes.set(b,n);this.nodes.delete(a); }
   linkSync(a,b) { a=this.key(a);b=this.key(b);if(this.nodes.has(b))throw errno('EEXIST');this.nodes.set(b,this.nodes.get(a)); }
@@ -46,7 +54,7 @@ class MemFS {
   unlinkSync(p) { this.rmSync(p); }
   readdirSync(p) { p=this.key(p); return [...this.nodes.keys()].filter(k=>path.dirname(k)===p).map(k=>path.basename(k)).sort(); }
   ftruncateSync(fd,n) { const p=this.fds.get(fd).p;this.nodes.set(p,{dir:false,data:this.nodes.get(p).data.slice(0,n)}); }
-  snapshot() { return [...this.nodes.entries()].sort(([a],[b])=>a.localeCompare(b)); }
+  snapshot() { return [...this.nodes.entries()].sort(([a],[b])=>a<b?-1:a>b?1:0); }
 }
 // One compiled product module graph; AsyncLocalStorage gives each modeled process its own FS.
 // This changes only the syscall adapter, preserves product objects/bytes, and avoids recompiling
@@ -55,11 +63,16 @@ const fsScope=new (require('node:async_hooks').AsyncLocalStorage)();
 let runtimeModules;
 function modules(mem) {
   if(runtimeModules)return runtimeModules;
-  const cache=new Map(),writes=new Set(['mkdirSync','openSync','writeSync','writeFileSync','appendFileSync','fsyncSync','renameSync','linkSync','rmSync','unlinkSync','ftruncateSync']);
+  const cache=new Map(),writes=new Set(['mkdirSync','openSync','writeSync','writeFileSync','appendFileSync','fsyncSync','fdatasyncSync','renameSync','linkSync','rmSync','unlinkSync','ftruncateSync']);
   const fsapi={};
   for(const name of Object.getOwnPropertyNames(MemFS.prototype))if(name!=='constructor'&&typeof MemFS.prototype[name]==='function')fsapi[name]=(...args)=>{
-    const mem=fsScope.getStore();assert(mem,'filesystem syscall outside a modeled process');const v=mem[name](...args);
-    if(writes.has(name)&&mem.onMutation)mem.onMutation(name);return v;
+    const mem=fsScope.getStore();assert(mem,'filesystem syscall outside a modeled process');
+    const truncating=name==='openSync'&&args[1].includes('w')&&mem.lstatSync(args[0],{throwIfNoEntry:false})?.size>0;
+    const v=mem[name](...args);
+    // This adapter treats writes/fsync as one durable cut. A second syscall with
+    // identical durable bytes adds no crash outcome; avoid hashing it repeatedly.
+    if(writes.has(name)&&!['fsyncSync','fdatasyncSync','closeSync','mkdirSync'].includes(name)&&
+       (name!=='openSync'||truncating)&&mem.onMutation)mem.onMutation(name);return v;
   };
   fsapi.realpathSync=Object.assign(p=>path.resolve(p),{native:p=>path.resolve(p)});
   function load(rel){
@@ -98,6 +111,13 @@ function create(snapshot, eligible=true, recoveryProcess=false) {
     if(w.unreadable)throw errno('P1001');
     const text=strings.join('?');
     if(/enter_writer|fence_writers|lock_chain/.test(text))return [];
+    if(text.includes('AS tail_chain_id')) {
+      const rows=v[0]==='viewing'?w.rows:[], first=rows[0], page=rows.filter(e=>e.sequence>v[3]).slice(0,v[4]);
+      const head=v[0]==='viewing'?w.head:{chainId:'history-chain',sequence:0,hash:zero};
+      return (page.length?page:[null]).map(e=>({tail_chain_id:head.chainId,tail_sequence:head.sequence,tail_hash:head.hash,
+        first_sequence:first?.sequence??null,first_previous_hash:first?.previousHash??null,
+        ...(e?rawEntry(e):{sequence:null}),commit_marker:e?rawMarker(w.markers.find(m=>m.stream===v[0]&&m.sequence===e.sequence)):null}));
+    }
     if(text.includes('chain_tail'))return [{chain_id:v[0]==='viewing'?w.head.chainId:'history-chain',sequence:v[0]==='viewing'?w.head.sequence:0,hash:v[0]==='viewing'?w.head.hash:zero}];
     if(text.includes('entries_after'))return v[0]==='viewing'?w.rows.filter(e=>e.sequence>v[1]).slice(0,v[2]).map(rawEntry):[];
     if(text.includes('entry_for_event'))return w.rows.filter(e=>e.eventId===v[1]).map(rawEntry);
@@ -108,7 +128,8 @@ function create(snapshot, eligible=true, recoveryProcess=false) {
   };
   w.sql=new w.RT.PrismaLedgerSql({$queryRaw:w.readSql},true);
   w.sql.withWriterFence=async work=>work(w.sql); // crash discards every open tx before this call
-  w.coordinator=fsScope.run(w.mem,()=>new w.CO.StateCoordinator(w.dir,request=>fsScope.run(w.mem,()=>w.EW.executeExternal(request))));
+  w.coordinator=fsScope.run(w.mem,()=>new w.CO.StateCoordinator(w.dir,request=>fsScope.run(w.mem,()=>
+    request.operation==='owner-alive' ? !recoveryProcess : w.EW.executeExternal(request))));
   w.journal=new w.J.FailureJournal(w.dir,w.coordinator);w.seal=new w.S.AccessSeal(w.dir,w.sql,w.journal);w.store=new w.RT.AccessLedgerStore(null,w.sql,w.seal,w.journal);
   w.snapshot=()=>({files:w.mem.snapshot(),rows:w.rows,markers:w.markers,head:w.head,truth:w.truth});
   w.cutSnapshots=[];w.captureCuts=false;const localCuts=new Set();
@@ -116,7 +137,7 @@ function create(snapshot, eligible=true, recoveryProcess=false) {
     counts.filesystem_cuts_observed++;
     const state=w.snapshot();state.files=state.files.filter(([p])=>!path.basename(p).startsWith('.tmp-'));
     const k=sha(JSON.stringify(state));
-    if(!cutSeen.has(k)&&!localCuts.has(k)){localCuts.add(k);w.cutSnapshots.push({operation,state:clone(state),key:k});}
+    if(!rawCutSeen.has(k)&&!localCuts.has(k)){localCuts.add(k);w.cutSnapshots.push({operation,state:clone(state),key:k});}
   }};
   w.newRow=(id,text,kind='access')=>({sequence:w.head.sequence+1,previousHash:w.head.hash,hash:w.C.entryHash(w.head.sequence+1,w.head.hash,text),kind,
     statutoryAct:kind==='expiry'?null:'none',eventId:id,payload:text,contentSha256:sha(text),storedAt:clock});
@@ -176,7 +197,8 @@ function create(snapshot, eligible=true, recoveryProcess=false) {
   return w;
 }
 const violations={}, witnesses={}, counts={states:0,edges:0,terminal_states:0,restart_probes:0,invariant_checks:0,completed_outcomes:{},duplicate_states:0,attack_checks:0,attack_base_blocked:0,filesystem_cuts_observed:0,filesystem_crash_states:0};
-const attacked=new Set(),cutSeen=new Set(),restarted=new Set(),attackCounts={};
+const attacked=new Set(),cutSeen=new Set(),rawCutSeen=new Set(),restarted=new Set(),rawRestarted=new Set(),rawAttacked=new Set(),attackCounts={};
+const attackedChains=new Set();
 function finding(id,trace,detail){violations[id]=(violations[id]||0)+1;if(!witnesses[id])witnesses[id]={trace,detail};}
 function classify(w,trace) {
   const seal=w.seal.read().streams.viewing, expected=seal.sequence?w.truth.find(e=>e.sequence===seal.sequence):{hash:zero};
@@ -187,12 +209,19 @@ function classify(w,trace) {
     if(a.phase==='done'&&a.committed&&a.outcome==='ok'&&a.error&&name!=='E')finding('I3',trace,{actor:name,error:a.error});
     if(a.phase==='done'&&name==='E'&&a.value&&seal.sequence<a.value.checkpointSequence)finding('I4',trace,{seal,result:a.value});
   }
-  const falseNotFound=w.journal.all().find(r=>r.kind==='commit-not-found'&&Object.entries(w.actors).some(([n,a])=>n!=='E'&&eventId(n)===r.body.eventId&&a.phase!=='done'));
+  // Slot reuse is a final negative fact even while its failed COMMIT response is
+  // still in flight (R4-05). An open DB transaction or any actual COMMIT may never
+  // be called not-found, including after its response has already been delivered.
+  const falseNotFound=w.journal.all().find(r=>r.kind==='commit-not-found'&&Object.entries(w.actors).some(([n,a])=>
+    n!=='E'&&eventId(n)===r.body.eventId&&(a.committed||!['committed','done'].includes(a.phase))));
   if(falseNotFound)finding('X-RACE',trace,falseNotFound);
 }
 async function restartProbe(w,trace){
-  const snap=w.snapshot(), k=sha(JSON.stringify(snap));if(restarted.has(k))return;restarted.add(k);
-  counts.restart_probes++;const r=create(snap,w.eligible,true);
+  const snap=w.snapshot(), rawKey=sha(JSON.stringify(snap));if(rawRestarted.has(rawKey))return;rawRestarted.add(rawKey);
+  const r=create(snap,w.eligible,true);
+  let comparable;try{comparable=semanticSnapshot(r);}catch{comparable=snap;}
+  const k=sha(JSON.stringify(comparable));if(restarted.has(k))return;restarted.add(k);
+  counts.restart_probes++;
   try {await r.seal.recoverAtStart();}
   catch(e){finding('I2-restart',trace,{code:e.code,detail:e.detail});return;}
   const pending=Object.keys(r.coordinator.call('read').intents);
@@ -204,8 +233,17 @@ async function restartProbe(w,trace){
   if(r.actors.E.error)finding('I2-next-expiry',trace,r.actors.E.error);
 }
 async function attackProbe(w,trace){
-  const key=sha(JSON.stringify(w.snapshot()));if(attacked.has(key))return;attacked.add(key);
-  const base=create(w.snapshot(),w.eligible);try{await base.seal.recoverAtStart();}catch{counts.attack_base_blocked++;return;}
+  const snapshot=w.snapshot(),rawKey=sha(JSON.stringify(snapshot));if(rawAttacked.has(rawKey))return;rawAttacked.add(rawKey);
+  const base=create(snapshot,w.eligible);
+  let comparable;try{comparable=semanticSnapshot(base);}catch{comparable=w.snapshot();}
+  const key=sha(JSON.stringify(comparable));if(attacked.has(key))return;attacked.add(key);
+  try{await base.seal.recoverAtStart();}catch{counts.attack_base_blocked++;return;}
+  // Quotient only fully recovered authority states. Keep exact slot/proof,
+  // marker and generation bindings: identical chain bytes alone do not prove
+  // equivalence for forged-anchor or stale-proof attacks.
+  const authority=base.coordinator.call('read'); delete authority.revision;
+  const chainKey=sha(JSON.stringify({rows:base.rows,head:base.head,markers:base.markers,authority}));
+  if(attackedChains.has(chainKey))return;attackedChains.add(chainKey);
   // Use a baseline which actually starts: an unrelated liveness refusal must not kill a tamper mutant.
   const snap=clone(base.snapshot());
   const attacks={
@@ -221,11 +259,13 @@ async function attackProbe(w,trace){
 }
 async function filesystemCuts(w,trace){
   for(const [index,cut]of w.cutSnapshots.entries()){
+    if(rawCutSeen.has(cut.key))continue;rawCutSeen.add(cut.key);
     // Product recovery deliberately ignores .tmp-* files. Quotient only that
     // unobservable namespace; retain published proof/intent/journal/seal bytes.
     const normalized={...cut.state,files:cut.state.files.filter(([p])=>!path.basename(p).startsWith('.tmp-'))};
-    const key=cut.key||sha(JSON.stringify(normalized));if(cutSeen.has(key))continue;cutSeen.add(key);counts.filesystem_crash_states++;
-    const r=create(cut.state,w.eligible),where=[...trace,`crash-after-${cut.operation}-${index}`];
+    const r=create(cut.state,w.eligible,true),where=[...trace,`crash-after-${cut.operation}-${index}`];
+    let comparable;try{comparable=semanticSnapshot(r);}catch{comparable=normalized;}
+    const key=sha(JSON.stringify(comparable));if(cutSeen.has(key))continue;cutSeen.add(key);counts.filesystem_crash_states++;
     await restartProbe(r,where);await attackProbe(r,where);
   }
 }
@@ -240,9 +280,22 @@ function options(w){const result=[];
 async function act(w,s){if(s==='AB:start'){await Promise.all(['A','B'].map(n=>w.start(n)));return;}
   if(s==='AB:deliver'){await Promise.all(['A','B'].map(n=>w.deliver(n)));return;}
   const [n,a,o]=s.split(':');if(a==='start')await w.start(n);else if(a==='commit')await w.commit(n,o);else await w.deliver(n);}
-function stateKey(w){return sha(JSON.stringify({snapshot:w.snapshot(),actors:Object.fromEntries(Object.entries(w.actors).sort().map(([n,a])=>[n,{phase:a.phase,outcome:a.outcome,committed:a.committed,
+// Different fully verified WAL histories with the same checkpointed state have
+// identical future transitions. Quotient those histories for scheduler convergence;
+// raw partial writes and publication cuts are still probed separately above.
+function semanticSnapshot(w) {
+  const snapshot=w.snapshot(), settlement=w.coordinator.call('read');
+  // No enumerated actor can observe an absolute coordinator revision; every CAS
+  // compares with its own read. Keep generation/slot/retired values and all bytes.
+  // Stale-CAS behaviour is exercised explicitly by the named and live contracts.
+  delete settlement.revision;
+  const value={...snapshot,files:snapshot.files.filter(([p])=>!['settlement.json','settlement.jsonl'].includes(path.basename(p))),settlement};
+  const ordered=v=>Array.isArray(v)?v.map(ordered):v&&typeof v==='object'?Object.fromEntries(Object.keys(v).sort().map(k=>[k,ordered(v[k])])):v;
+  return ordered(value);
+}
+function stateKey(w){return sha(JSON.stringify({snapshot:semanticSnapshot(w),actors:Object.fromEntries(Object.entries(w.actors).sort().map(([n,a])=>[n,{phase:a.phase,outcome:a.outcome,committed:a.committed,
   staged:a.staged,callback:a.callback&&{value:a.callback.value,error:a.callback.error?.code},value:a.value,error:a.error}]))}));}
-async function enumerate(eligible){
+async function enumerate(eligible, prefix=[]){
   const initial=create(undefined,eligible);await initial.seed();const seed=clone(initial.snapshot());const seen=new Map();let stopped=false;
   async function visit(trace){const w=create(seed,eligible);for(let i=0;i<trace.length;i++){w.captureCuts=i===trace.length-1;await act(w,trace[i]);}await filesystemCuts(w,trace);const k=stateKey(w);
     if(seen.has(k)){counts.duplicate_states++;return seen.get(k);}seen.set(k,null);counts.states++;classify(w,trace);await restartProbe(w,trace);await attackProbe(w,trace);
@@ -253,11 +306,85 @@ async function enumerate(eligible){
     for(const s of next){counts.edges++;const child=await visit([...trace,s]);paths.terminal+=child.terminal;paths.restart+=child.restart;if(stopped)return paths;}
     seen.set(k,paths);return paths;
   }
-  const paths=await visit([]);return {eligible,unique_states:seen.size,complete:!stopped,terminal_interleavings:paths.terminal,crash_restart_interleavings:paths.restart};
+  const paths=await visit(prefix);return {eligible,prefix,unique_states:seen.size,complete:!stopped,terminal_interleavings:paths.terminal,crash_restart_interleavings:paths.restart};
 }
 async function named(){
-  async function run(id,steps,probe){const w=create();await w.seed();for(const s of steps)await act(w,s);const d=await probe(w);console.log(JSON.stringify({case:id,...d}));return d;}
+  async function run(id,steps,probe){
+    const w=create();await w.seed();
+    for(const [index,s] of steps.entries()){
+      await act(w,s);
+      const [name,action]=s.split(':'),actor=w.actors[name];
+      // A rejected healthy preparation ends this concrete trace. Trying to
+      // COMMIT a transaction that never opened would hide the product refusal
+      // behind a scheduler assertion instead of retaining its counterexample.
+      if(action==='start'&&actor?.phase==='done'&&actor.error?.code==='UnsealedEntryUnexplained'){
+        const d={found:true,preparationRefused:true,error:actor.error,restart:'not-reached'};
+        finding('healthy-prepare',steps.slice(0,index+1),d);
+        console.log(JSON.stringify({case:id,...d}));return d;
+      }
+    }
+    const d=await probe(w);console.log(JSON.stringify({case:id,...d}));return d;
+  }
   const result={};
+  await run('R4c-fixed-target-and-unrelated-revision',['A:start','A:commit:ok','B:start'],async w=>{
+    const target={sequence:w.head.sequence,hash:w.head.hash}, read=w.sql.verificationPage.bind(w.sql);
+    let rows=0, changed=false;
+    w.sql.verificationPage=async(...args)=>{
+      if(!changed){changed=true;await w.commit('B','ok');w.seal.recordIntent('history','unrelated','unrelated','a'.repeat(64),'other-bundle');}
+      const page=await read(...args);rows+=page.entries.length+(page.first?1:0);return page;
+    };
+    try { await w.seal.advance('viewing',target); }
+    catch(error) {
+      // A valid own COMMIT rejected because another intent is open is an I3
+      // violation. Preserve that behavioural witness instead of a harness exit.
+      if(error.code!=='UnsealedEntryUnexplained')throw error;
+      finding('I3',['A:COMMIT','B:open','A:receipt'],{receiptRefused:true,code:error.code});
+      return {receiptRefused:true,code:error.code};
+    }
+    assert.equal(w.seal.read().streams.viewing.sequence,target.sequence,'a later COMMIT never extends this batch');
+    assert(rows<=2,'incremental verification reads one anchor and one new row');
+    rows=0;await w.seal.advance('viewing',target);assert.equal(rows,0,'already sealed target has no DB prerequisite');
+    await w.deliver('A');await w.deliver('B');
+    return {rowsForCoveredTarget:rows,unrelatedIntentPreserved:!!w.coordinator.call('read').intents['history:unrelated']};
+  });
+  await run('R4c-reservation-snapshot-revalidates-before-publication',['A:start','A:commit:ok'],async w=>{
+    // The DB still has A's exact marker; removing its independent protected slot
+    // after reservation must prevent a receipt even if verification began from it.
+    w.coordinator.call('update',state=>{delete state.slots['viewing:'+w.head.sequence];});
+    await w.deliver('A');
+    assert(w.actors.A.error,'publication must reload the current protected authority');
+    assert(!w.actors.A.value?.eventId,'a cached reservation cannot authorize success by itself');
+    return {receiptRefused:true};
+  });
+  await run('R4c-other-writer-cannot-mutate-in-flight-verification',['A:start','A:commit:ok'],async w=>{
+    const other=fsScope.run(w.mem,()=>new w.CO.StateCoordinator(w.dir,request=>fsScope.run(w.mem,()=>w.EW.executeExternal(request))));
+    const query=w.sql.verificationPage.bind(w.sql);let changed=false;
+    w.sql.verificationPage=async(...args)=>{
+      const page=await query(...args);
+      if(!changed){changed=true;other.call('update',state=>{state.slots['viewing:'+w.head.sequence].generation=++state.generation;});}
+      return page;
+    };
+    await w.deliver('A');
+    assert(changed,'the second writer must reach the in-flight verification');
+    const refused=!!w.actors.A.error&&!w.actors.A.value?.eventId;
+    if(!refused)finding('I1-snapshot-isolation',['A:COMMIT','verification query','other writer changes binding','A:publish'],{actor:w.actors.A.value,error:w.actors.A.error});
+    return {changedBindingRefused:refused};
+  });
+  await run('R4c-dead-owner-after-seal-before-ack',['A:start','A:commit:ok'],async w=>{
+    await w.seal.advance('viewing',w.head);
+    await w.seal.recoverAtStart();
+    assert(Object.values(w.coordinator.call('read').terminal).some(t=>t.phase==='committed'),'live response owner is retained');
+    const restart=create(w.snapshot(),true,true);await restart.seal.recoverAtStart();
+    assert.equal(Object.values(restart.coordinator.call('read').terminal).filter(t=>t.phase==='committed').length,0);
+    return {abandonedBindings:0};
+  });
+  await run('R4c-superseded-unknown-final-journal',['A:start','A:commit:unknown0','A:deliver','B:start','B:commit:ok','B:deliver'],async w=>{
+    const records=w.journal.all().filter(r=>r.kind==='commit-not-found'&&r.body.eventId===eventId('A'));
+    assert.equal(records.length,1,'slot reuse records the final negative outcome');
+    const restart=create(w.snapshot(),true,true);await restart.seal.recoverAtStart();
+    assert.equal(restart.journal.all().filter(r=>r.id===records[0].id).length,1);
+    return {terminalJournalRecords:1};
+  });
   await run('I4-own-checkpoint',['E:start','E:commit:ok','E:deliver'],async w=>{classify(w,['E:COMMIT','E:success']);return {sealed:w.seal.read().streams.viewing.sequence};});
   await run('delayed-receipt-across-other-start',['A:start','A:commit:ok','E:start','E:commit:ok','E:deliver'],async w=>{
     await w.seal.recoverAtStart();await w.deliver('A');
@@ -310,14 +437,27 @@ async function named(){
     assert.equal(JSON.stringify({rows:w.rows,markers:w.markers}),before,'attack refusal preserves raw DB facts');
   }
   if(result['RACE-1'].found)finding('I3',['E:COMMIT','A:COMMIT','B:open'],result['RACE-1']);
-  if(result['RACE-2'].restart!=='ok'||result['RACE-3'].found)finding('I2',['unknown0/E/open/start'],result);
+  if((!result['RACE-2'].preparationRefused&&result['RACE-2'].restart!=='ok')||result['RACE-3'].found)finding('I2',['unknown0/E/open/start'],result);
   if(result['X-RACE'].found)finding('X-RACE',['unexpired-E/open-A'],result['X-RACE']);
   return result;
 }
-(async()=>{const begin=performance.now();const namedResults=await named();const spaces=[];
-  if(limitText!=='named'){spaces.push(await enumerate(true));if(!limitText||counts.states<Number(limitText))spaces.push(await enumerate(false));}
+(async()=>{const begin=performance.now();
+  const shard=process.env.EMR_CHECKER_SHARD&&JSON.parse(process.env.EMR_CHECKER_SHARD);
+  const namedResults=shard?{}:await named();let spaces=[];
+  if(shard)spaces=[await enumerate(shard.eligible,[shard.edge])];
+  else if(limitText!=='named') {
+    if(limitText){spaces.push(await enumerate(true));if(counts.states<Number(limitText))spaces.push(await enumerate(false));}
+    else {
+      // One memo table per retention state shares converging scheduler prefixes.
+      // Splitting at first edges duplicates most of this graph on slower CI hosts.
+      // Enumerate both complete spaces once; crash cuts keep separate evidence keys.
+      spaces.push(await enumerate(true)); spaces.push(await enumerate(false));
+    }
+  }
   const summary={revision,source:Object.fromEntries([...source].map(([p,s])=>[p,sha(s)])),...counts,spaces,attackCounts,violations,witnesses,named:namedResults,
-    runtime_s:Number(((performance.now()-begin)/1000).toFixed(3)),bounded_exhaustive:spaces.length===2&&spaces.every(s=>s.complete)};
-  if(output)fs.writeFileSync(output,JSON.stringify(summary,null,2)+'\n');console.log(JSON.stringify({summary:{...counts,spaces,violations,runtime_s:summary.runtime_s,bounded_exhaustive:summary.bounded_exhaustive}}));
+    runtime_s:Number(((performance.now()-begin)/1000).toFixed(3)),bounded_exhaustive:(shard?spaces.length===1:spaces.length===2)&&spaces.every(s=>s.complete)};
+  if(output)fs.writeFileSync(output,JSON.stringify(summary,null,2)+'\n');
+  if(shard)console.log('SHARD_RESULT '+JSON.stringify(summary));
+  else console.log(JSON.stringify({summary:{...counts,spaces,violations,runtime_s:summary.runtime_s,bounded_exhaustive:summary.bounded_exhaustive}}));
   process.exitCode=Object.keys(violations).length?1:summary.bounded_exhaustive||limitText==='named'?0:3;
 })().catch(e=>{console.error(e.stack);process.exitCode=2;});

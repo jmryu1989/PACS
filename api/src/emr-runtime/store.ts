@@ -59,6 +59,11 @@ function entry(row: any): StoredEntry {
 }
 
 /** Committed-fact reads of one stream's chain (outside any business transaction): what the seal proves itself against. */
+export interface VerificationPage {
+  tail: ChainTail;
+  first: Pick<StoredEntry, 'sequence' | 'previousHash'> | null;
+  entries: { entry: StoredEntry; marker: CommitBinding | null }[];
+}
 export class PrismaLedgerSql {
   constructor(private readonly db: any, private readonly inSnapshot = false) {}
 
@@ -97,6 +102,23 @@ export class PrismaLedgerSql {
   async entriesAfter(stream: AccessStream, after: number, limit: number): Promise<StoredEntry[]> {
     const rows = await this.db.$queryRaw<any[]>`SELECT * FROM emr_access.entries_after(${choice(stream, ACCESS_STREAMS)}::text, ${integer(after)}::bigint, ${integer(limit, 1)}::integer)`;
     return rows.map(entry);
+  }
+  /** The same snapshot proves the retained anchor and every fetched row's exact
+   * commit marker in one round trip. The page is bounded by the receipt target. */
+  async verificationPage(stream: AccessStream, after: number, limit: number): Promise<VerificationPage> {
+    const selected = choice(stream, ACCESS_STREAMS);
+    const rows = await this.db.$queryRaw<any[]>`SELECT t.chain_id::text AS tail_chain_id,
+      t.sequence AS tail_sequence, t.hash AS tail_hash, f.sequence AS first_sequence,
+      f.previous_hash AS first_previous_hash, e.*, CASE WHEN m.sequence IS NULL THEN NULL ELSE to_jsonb(m) END AS commit_marker
+      FROM emr_access.chain_tail(${selected}::text) t
+      LEFT JOIN LATERAL emr_access.entries_after(${selected}::text, 0, 1) f ON true
+      LEFT JOIN LATERAL emr_access.entries_after(${selected}::text, ${integer(after)}::bigint, ${integer(limit, 1)}::integer) e ON true
+      LEFT JOIN LATERAL emr_access.commit_marker_for_slot(${selected}::text, e.sequence) m ON true
+      ORDER BY e.sequence`;
+    const head = rows[0];
+    return { tail: { chainId: string(head.tail_chain_id), sequence: toNumber(head.tail_sequence), hash: sha256(head.tail_hash) },
+      first: head.first_sequence === null ? null : { sequence: toNumber(head.first_sequence), previousHash: sha256(head.first_previous_hash) },
+      entries: rows.filter(row => row.sequence !== null).map(row => ({ entry: entry(row), marker: this.marker(row.commit_marker) })) };
   }
   async entryForEvent(stream: AccessStream, eventId: string): Promise<StoredEntry | null> {
     const rows = await this.db.$queryRaw<any[]>`SELECT * FROM emr_access.entry_for_event(${choice(stream, ACCESS_STREAMS)}::text, ${eventId}::text)`;
@@ -153,23 +175,35 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
   async confirm(appended: ProvisionalAppend): Promise<DurableAccessReceipt> {
     let receipt: DurableAccessReceipt | null = null;
     for (const provisional of appended.entries) {
+      const candidate: StoredEntry = { sequence: provisional.sequence, hash: provisional.hash, previousHash: provisional.previousHash,
+        payload: provisional.payload, contentSha256: provisional.contentSha256, storedAt: provisional.storedAt,
+        kind: provisional.stream === 'viewing' ? 'access' : 'history', eventId: appended.eventId, statutoryAct: null };
+      // Verification already reads the new row and its DB commit marker. Its exact
+      // protected binding supplies the receipt without a duplicate event lookup.
+      // Replays (whose new attempt owns no binding) still read the original event.
+      let covered: SealState | null = null, sealError: unknown;
+      try {
+        covered = await this.seal.advanceReceipt(provisional.stream, provisional.attemptId, appended.eventId, candidate);
+      } catch (error) { sealError = error; }
+      if (covered) {
+        if (provisional.stream === 'viewing') receipt = mintDurableReceipt(candidate, covered.streams.viewing);
+        continue;
+      }
       let stored: StoredEntry | null;
       try { stored = await this.sql.entryForEvent(provisional.stream, appended.eventId); } catch {
         this.note(appended.eventId, 'ledger-unavailable', 'commit-unknown', provisional.attemptId, provisional.stream);
         throw new LedgerFailure('CommitUnknown');
       }
-      let covered: SealState | null = null;
       if (!stored) {
-        const candidate: StoredEntry = { sequence: provisional.sequence, hash: provisional.hash, previousHash: provisional.previousHash,
-          payload: provisional.payload, contentSha256: provisional.contentSha256, storedAt: provisional.storedAt,
-          kind: provisional.stream === 'viewing' ? 'access' : 'history', eventId: appended.eventId, statutoryAct: null };
         covered = this.seal.committedReceipt(provisional.stream, provisional.attemptId, appended.eventId, candidate);
         if (!covered) throw new LedgerFailure('AppendNotCommitted');
         stored = candidate;
       }
       if (stored.sequence !== provisional.sequence || stored.hash !== provisional.hash || stored.contentSha256 !== provisional.contentSha256) refuse('DurableReceiptRefused');
       let sealed: SealState;
-      try { sealed = covered ?? await this.seal.advance(provisional.stream, { sequence: stored.sequence, hash: stored.hash }); } catch (error) {
+      try {
+        if (sealError) throw sealError;
+        sealed = covered ?? await this.seal.advance(provisional.stream, { sequence: stored.sequence, hash: stored.hash }); } catch (error) {
         // Committed but not sealed: no receipt. The same event resent, or the next start, seals it; nothing is appended twice.
         this.note(appended.eventId, 'ledger-unavailable', 'seal-unavailable', provisional.attemptId, provisional.stream);
         throw error instanceof SealRefused && error.code !== 'SealUnavailable' ? error : new LedgerFailure('SealUnavailable');
@@ -374,6 +408,9 @@ export async function expireAccessPrefix(retention: PrismaClient, seal: AccessSe
   const plan = planExpiryPrefix(rows, now);
   if (!plan) return null;
   const through = plan.through, attemptId = randomUUID(), bundleId = randomUUID();
+  // Establish the retained anchor before taking the head lock. Under that lock only
+  // commits since this frontier need verification; the deletion plan is checked again by SQL.
+  await seal.reconcileCommitted('viewing');
   let callbackFailed = false;
   let result: { deleted: number; checkpointSequence: number; checkpointHash: string };
   try {

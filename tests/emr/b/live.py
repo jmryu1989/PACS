@@ -11,17 +11,21 @@ removed by class cleanup, including setup failures. Assertions are SQLSTATEs, re
 from __future__ import annotations
 
 import hashlib
+import io
 import importlib.util
 import json
 import os
 from pathlib import Path
 import secrets
+import tarfile
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 import uuid
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from performance import BASELINE
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "tests"))
@@ -39,8 +43,8 @@ REFUSED = "42501"
 OLD = ["2020-01-0%dT00:00:00.000Z" % day for day in range(1, 10)]
 
 
-def run(args, *, env=None, input=None, timeout=300, check=True):
-    result = subprocess.run(args, input=input, capture_output=True, timeout=timeout, env=env)
+def run(args, *, env=None, input=None, timeout=300, check=True, cwd=None):
+    result = subprocess.run(args, input=input, capture_output=True, timeout=timeout, env=env, cwd=cwd)
     if check and result.returncode:
         raise RuntimeError("%s %s failed (exit %d): %s" % (args[0], args[1], result.returncode,
                                                           result.stderr.decode("utf-8", "replace")[-1500:]))
@@ -317,11 +321,13 @@ class EmrBLedgerLive(unittest.TestCase):
         self.assertEqual(rows(), count0 + 1)
         self.assertTrue(any(record["kind"] == "append-rolled-back" and record["body"] == {"eventId": broken["eventId"], "cause": "ledger-refused"} for record in self.driver("journal")))
         # The intent cannot be made durable: the transaction aborts before its commit, and that is journaled.
-        self.as_root(self.state, "chmod 500 %s/seal" % STATE)
+        # Appending an existing WAL needs file write permission, not directory
+        # write permission. Refuse the actual durable intent write.
+        self.as_root(self.state, "chmod 400 %s/seal/settlement.jsonl" % STATE)
         try:
             no_intent = self.driver("business")
         finally:
-            self.as_root(self.state, "chmod 700 %s/seal" % STATE)
+            self.as_root(self.state, "chmod 600 %s/seal/settlement.jsonl" % STATE)
         self.assertEqual(no_intent["error"], "SealUnavailable", no_intent)
         self.assertEqual(rows(), count0 + 1)
         # The journal itself fails: the failure is reported as such and nothing claims success.
@@ -336,16 +342,48 @@ class EmrBLedgerLive(unittest.TestCase):
         self.assertEqual(recovered["recovered"], 0, recovered)
 
     # ── L03 ──
+    def baseline_appends(self, count):
+        cls = type(self)
+        if not hasattr(cls, 'baseline_image'):
+            with tempfile.TemporaryDirectory(prefix='emr-live-r3-') as directory:
+                # A mutant's source snapshot has no .git directory. Read only
+                # the pinned baseline from the original checkout supplied by its driver.
+                repository = os.environ.get('KIN_EMR_BASELINE_REPOSITORY', str(ROOT))
+                archive = run(['git', 'archive', BASELINE, 'api'], timeout=30, cwd=repository).stdout
+                with tarfile.open(fileobj=io.BytesIO(archive)) as bundle:
+                    bundle.extractall(directory, filter='data')
+                tag = 'kin-emrb-r3:' + cls.token
+                run(['docker', 'build', '--target', 'production', '--label', cls.label, '--build-arg',
+                     'VCS_REF=' + BASELINE, '-t', tag, str(Path(directory) / 'api')], timeout=1800)
+                cls.created['image'].append(tag)
+                cls.baseline_image = tag
+        current = cls.image
+        try:
+            cls.image = cls.baseline_image
+            db = self.start_db('r3-relative-' + str(count))
+            self.provision(db)
+            self.migrate(db)
+            state = self.volume('r3-relative-' + str(count))
+            self.ok(self.latency_probe, db=db)
+            baseline = self.driver('append', {'count': count, 'concurrent': True, 'measure': True, 'headProbe': True}, db=db, volume=state)
+            self.assertEqual(baseline['summary']['failures'], 0, baseline)
+            self.assertEqual(len(baseline['results']), count, baseline)
+            return baseline
+        finally:
+            cls.image = current
+
+    latency_probe = """CREATE OR REPLACE FUNCTION public.emrb_measure_lock(s text) RETURNS double precision
+        LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
+        DECLARE started timestamptz := clock_timestamp(); BEGIN
+        PERFORM 1 FROM emr_access.chain_head WHERE stream=s FOR UPDATE;
+        RETURN extract(epoch FROM clock_timestamp()-started)*1000; END $$;
+        REVOKE ALL ON FUNCTION public.emrb_measure_lock(text) FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION public.emrb_measure_lock(text) TO kin_runtime;"""
+
     def measured_appends(self, count):
-        # Only this owned disposable DB gets the server-clock probe. The same probe
-        # and driver measured the pinned round-3 baseline (D874).
-        self.ok("""CREATE OR REPLACE FUNCTION public.emrb_measure_lock(s text) RETURNS double precision
-            LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
-            DECLARE started timestamptz := clock_timestamp(); BEGIN
-            PERFORM 1 FROM emr_access.chain_head WHERE stream=s FOR UPDATE;
-            RETURN extract(epoch FROM clock_timestamp()-started)*1000; END $$;
-            REVOKE ALL ON FUNCTION public.emrb_measure_lock(text) FROM PUBLIC;
-            GRANT EXECUTE ON FUNCTION public.emrb_measure_lock(text) TO kin_runtime;""")
+        # Both revisions run now, with the same SQL probe, pool and filesystem.
+        baseline = self.baseline_appends(count) if count == 24 else None
+        self.ok(self.latency_probe)
         try:
             data = self.driver("append", {"count": count, "concurrent": True, "measure": True, "headProbe": True})
         finally:
@@ -354,12 +392,14 @@ class EmrBLedgerLive(unittest.TestCase):
         print("EMR_THROUGHPUT " + json.dumps({"count": count, **data}), flush=True)
         self.assertEqual(len(data.get("results", [])), count, data)
         self.assertEqual(data["summary"]["failures"], 0, data)
-        if count == 24:
-            # REQ-D874: the observed 9a1df0d baseline is 755.975 ms on the disposable
-            # Linux environment; 20% headroom is a receipt SLO, never a DB timeout.
-            baseline = float(os.environ.get("KIN_EMR_R3_P95_MS", "755.975"))
-            self.assertLessEqual(data["summary"]["p95_ms"], baseline * 1.20, data["summary"])
+        if baseline is None:
+            baseline = self.baseline_appends(count)
+        self.latency_pair = {'count': count, 'baseline_revision': BASELINE, 'r3': baseline['summary'], 'r4c': data['summary']}
+        print('EMR_RELATIVE_LATENCY ' + json.dumps(self.latency_pair), flush=True)
         return data["results"]
+
+    def assert_relative_latency(self):
+        self.assertLessEqual(self.latency_pair['r4c']['p95_ms'], self.latency_pair['r3']['p95_ms'] * 1.20, self.latency_pair)
 
     def test_b03_idempotency_and_concurrent_append(self):
         """Concurrent original events are all ordered once; the same event resent is the same receipt; another content
@@ -440,6 +480,8 @@ class EmrBLedgerLive(unittest.TestCase):
         self.assertEqual(fenced.get("notCommitted"), 0, fenced)
         self.assertIn("receipt", fenced, fenced)
         self.assertTrue(fenced.get("staleWriterRefused"), fenced)
+        print('EMR_L03_POST_LATENCY idempotency conflict multi-process fence stale-CAS reached', flush=True)
+        self.assert_relative_latency()
 
     def test_b03b_concurrent_48_receipts(self):
         """L03b: 48 simultaneous viewers receive durable receipts without failures."""
@@ -450,6 +492,7 @@ class EmrBLedgerLive(unittest.TestCase):
         self.assertEqual(sorted(e["eventId"] for e in stored), sorted(r["eventId"] for r in results))
         self.chain_ok(stored)
         self.assertEqual(self.driver("recover")["recovered"], 0)
+        self.assert_relative_latency()
 
     # ── L04 ──
     def test_b04_chain_tail_and_crash_recovery(self):
@@ -756,7 +799,7 @@ class EmrBLedgerLive(unittest.TestCase):
         try:
             stuck = self.driver("provide", {"sealAfterCommit": True})
         finally:
-            self.as_root(self.state, "chmod 700 %s/seal" % STATE)
+            self.as_root(self.state, "chmod 600 %s/seal/tail.json" % STATE)
         self.assertEqual((stuck.get("error"), stuck.get("order")), ("SealUnavailable", []), stuck)
         self.assertEqual(self.ok("SELECT count(*) FROM emr_access.access_entry WHERE event_id = '%s'" % stuck["eventId"]), ["1"])
         stuck_event = json.loads(self.ok("SELECT payload FROM emr_access.access_entry WHERE event_id = '%s'" % stuck["eventId"])[0])["event"]

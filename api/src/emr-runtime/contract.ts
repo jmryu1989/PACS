@@ -90,7 +90,13 @@ export function chainViolation(anchor: ChainPosition, entries: readonly StoredEn
     if (payload?.kind !== entry.kind) return 'changed-entry';
     if (entry.kind === 'expiry' ? stream !== 'viewing' : entry.kind !== STREAM_ENTRY_KIND[stream]) return 'foreign-stream';
     if (entry.kind !== 'expiry' && payload.event?.eventId !== entry.eventId) return 'changed-entry';
-    if (entry.kind === 'expiry' && !(Number.isSafeInteger(payload.deletedThrough) && payload.deletedThrough < entry.sequence)) return 'changed-entry';
+    if (entry.kind === 'expiry') {
+      try {
+        object(payload, ['kind', 'at', 'deletedThrough', 'deletedCount', 'anchorHash']);
+        utc(payload.at); integer(payload.deletedThrough, 1); integer(payload.deletedCount, 1); sha256(payload.anchorHash);
+        if (payload.deletedThrough >= entry.sequence || payload.deletedCount > payload.deletedThrough) return 'changed-entry';
+      } catch { return 'changed-entry'; }
+    }
     previous = { sequence: entry.sequence, hash: entry.hash };
   }
   if (previous.sequence !== expectedTail.sequence) return previous.sequence < expectedTail.sequence ? 'missing-tail' : 'beyond-tail';

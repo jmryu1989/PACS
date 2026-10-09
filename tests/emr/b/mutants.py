@@ -1,4 +1,4 @@
-"""EMR-B1 mutants M01-M08, M11, M12, M14-M31 (emr/units/b.json `mutants`; order section 9).
+"""EMR-B1 mutants M01-M08, M11, M12, M14-M37 (emr/units/b.json `mutants`; order section 9).
 
 Each mutant is one declared change applied to a separate copy of the committed checkout (`git archive HEAD`), never to
 this working tree. Its declared kill cases run in that copy: contract cases (Cnn) through `node --test` with TAP output
@@ -121,20 +121,22 @@ MUTANTS = {
     "M31": ("stale prepared expiry proof supersedes the latest exact reservation", [
         ("api/src/emr-runtime/seal.ts", "const core: ExpiryCore = q && state.proofs[key('viewing', q.attemptId)];",
          "const core: ExpiryCore = Object.values(state.proofs).find((p:any)=>p.binding.sequence===entry.sequence); if(core)return core;"),
-        ("api/src/emr-runtime/seal.ts", "    const marker = await sql.markerForSlot(stream, entry.sequence);", "    if(entry.kind==='expiry')return;\n    const marker = await sql.markerForSlot(stream, entry.sequence);")]),
+        ("api/src/emr-runtime/seal.ts", "    const marker = suppliedMarker === undefined ? await sql.markerForSlot(stream, entry.sequence) : suppliedMarker;", "    if(entry.kind==='expiry')return;\n    const marker = suppliedMarker === undefined ? await sql.markerForSlot(stream, entry.sequence) : suppliedMarker;")]),
     "M32": ("I1: prepared expiry proof is authoritative without marker/slot/generation binding (X-STALE)", [
         ("api/src/emr-runtime/seal.ts", "const core: ExpiryCore = q && state.proofs[key('viewing', q.attemptId)];",
          "const core: ExpiryCore = Object.values(state.proofs).find((p:any)=>p.binding.sequence===entry.sequence); if(core)return core;"),
-        ("api/src/emr-runtime/seal.ts", "    const marker = await sql.markerForSlot(stream, entry.sequence);", "    if(entry.kind==='expiry')return;\n    const marker = await sql.markerForSlot(stream, entry.sequence);")]),
+        ("api/src/emr-runtime/seal.ts", "    const marker = suppliedMarker === undefined ? await sql.markerForSlot(stream, entry.sequence) : suppliedMarker;", "    if(entry.kind==='expiry')return;\n    const marker = suppliedMarker === undefined ? await sql.markerForSlot(stream, entry.sequence) : suppliedMarker;")]),
     "M33": ("I2: startup vetoes pending before negative settlement", [
         ("api/src/emr-runtime/seal.ts", "    return this.sql.withWriterFence(async sql => {", "    return this.sql.withWriterFence(async sql => {\n      if(Object.keys(this.load().intents).length)throw new SealRefused('UnsealedEntryUnexplained','pending-conflict');")]),
     "M34": ("I3: a healthy own COMMIT waits for every unrelated pending event", [
-        ("api/src/emr-runtime/seal.ts", "      try { result = await reader.snapshot(async sql => {", "      try { result = await reader.snapshot(async sql => {\n        for(const i of Object.values(state.intents))if(i.eventId&&!await sql.entryForEvent(i.stream,i.eventId))throw new SealRefused('UnsealedEntryUnexplained','pending-conflict');")]),
+        ("api/src/emr-runtime/seal.ts", "      try { result = await reader.snapshot(async sql => {", "      try { result = await reader.snapshot(async sql => {\n        for(const i of Object.values(this.load().intents))if(i.eventId&&!await sql.entryForEvent(i.stream,i.eventId))throw new SealRefused('UnsealedEntryUnexplained','pending-conflict');")]),
     "M35": ("I4: job reports success before its own checkpoint seal", [
         ("api/src/emr-runtime/store.ts", "  await seal.reconcileCommitted('viewing', { sequence: result.checkpointSequence, hash: result.checkpointHash });\n", "")]),
     "M36": ("per-operation Node startup returns to the head-locked writer: concurrent receipt latency exceeds the round-3 budget", [
         ("api/src/emr-runtime/coordinator.ts", "    try { return executeExternal(request); }",
-         "    spawnSync(process.execPath, ['-e', '']); // Reintroduced per-reservation worker startup under the head lock.\n    try { return executeExternal(request); }")]),
+         "    require('node:child_process').spawnSync(process.execPath, ['-e', '']); // Reintroduced per-reservation worker startup under the head lock.\n    try { return executeExternal(request); }")]),
+    "M37": ("a verification snapshot aliases the coordinator index and accepts another writer's changed binding", [
+        ("api/src/emr-runtime/external-writer.ts", "return { changed: true, result: clone(result) };", "return { changed: true, result };")]),
 
 }
 
@@ -334,7 +336,7 @@ def live_kills(copy, cases, out, name, head, env):
         log = out / (name + "-live.log")
         wait_for_live_gate(copy)
         code, seconds = run([sys.executable, "-B", "scripts/run-tests.py", "--plan", str(plan)], cwd=copy,
-                            env={**env, "KIN_TEST_API_IMAGE": tag}, timeout=3300, log=log)
+                        env={**env, "KIN_TEST_API_IMAGE": tag, "KIN_EMR_BASELINE_REPOSITORY": str(ROOT)}, timeout=3300, log=log)
         text = log.read_text(encoding="utf-8", errors="replace")
         # Only a behavioural assertion (FAIL) kills a mutant. KeyError, setup errors and all other ERROR sections
         # are harness failures even when their heading names the selected case.
@@ -353,9 +355,40 @@ def live_kills(copy, cases, out, name, head, env):
 
 
 def self_test():
-    """F04 behavioural verdict regression, using this driver's owned file only."""
+    """Behavioural verdicts and the pinned live baseline's source boundary, without Docker."""
     import unittest
+    import importlib.util
+    from unittest.mock import patch
     class VerdictTest(unittest.TestCase):
+        def test_live_baseline_from_gitless_mutant_copy(self):
+            spec = importlib.util.spec_from_file_location('emrb_baseline_probe', ROOT / 'tests/emr/b/live.py')
+            live = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(live)
+            clean = {k: v for k, v in os.environ.items()
+                     if not k.startswith('GIT_') and k != 'KIN_EMR_BASELINE_REPOSITORY'}
+            expected = subprocess.check_output(['git', 'show', live.BASELINE + ':api/src/emr-runtime/seal.ts'],
+                                               cwd=ROOT, env=clean).decode().replace('\r\n', '\n')
+            class BaselineReady(Exception):
+                pass
+            probe = type('ArchiveProbe', (), {'token': 'source-probe', 'label': 'kin.emrb.live=source-probe'})()
+            actual_run = live.run
+            def before_docker(args, **kwargs):
+                if args[:2] == ['docker', 'build']:
+                    self.assertEqual((Path(args[-1]) / 'src/emr-runtime/seal.ts').read_text(), expected)
+                    raise BaselineReady()
+                return actual_run(args, **kwargs)
+            with tempfile.TemporaryDirectory(prefix='emrb-gitless-') as directory, \
+                    patch.object(live, 'ROOT', Path(directory)), patch.object(live, 'run', side_effect=before_docker), \
+                    patch.dict(os.environ, clean, clear=True):
+                with self.assertRaises(RuntimeError):
+                    live.EmrBLedgerLive.baseline_appends(probe, 24)
+                with patch.dict(os.environ, {'KIN_EMR_BASELINE_REPOSITORY': str(ROOT)}):
+                    with self.assertRaises(BaselineReady):
+                        live.EmrBLedgerLive.baseline_appends(probe, 24)
+                with patch.object(live, 'ROOT', ROOT):
+                    with self.assertRaises(BaselineReady):
+                        live.EmrBLedgerLive.baseline_appends(probe, 24)
+
         def test_live_assertion_and_key_error_are_distinct(self):
             name = "test_b05_expiry_checkpoint_and_holds (live.EmrBLedgerLive)"
             self.assertTrue(live_verdict("FAIL: " + name + "\nAssertionError: expected expiry", ["L05"], 1)["killed"])
@@ -378,7 +411,7 @@ def self_test():
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out", type=Path)
-    parser.add_argument("--self-test", action="store_true", help="verify behavioural verdicts without Docker or copied source")
+    parser.add_argument("--self-test", action="store_true", help="verify verdicts and baseline source without Docker")
     parser.add_argument("--only", help="comma-separated mutant IDs")
     parser.add_argument("--worktree", action="store_true", help="snapshot tracked uncommitted inputs; preserve their hashes")
     parser.add_argument("--contract-only", action="store_true", help="run contract kill cases only (live ones are reported not_run)")

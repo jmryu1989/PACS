@@ -110,7 +110,9 @@ async function liveDriver() {
     const transactions = operation === 'provide' && args.sealAfterCommit ? {
       $transaction: async (work, options) => {
         const result = await prisma.$transaction(work, options);
-        fs.chmodSync(path.join(state,'seal'),0o500);
+        // Tail publication opens this file for writing after COMMIT. Making the
+        // directory read-only no longer blocks an append-only settlement WAL.
+        fs.chmodSync(path.join(state,'seal','tail.json'),0o400);
         return result;
       },
     } : prisma;
@@ -288,7 +290,10 @@ function contractSuite() {
   const D = load('emr-contract/lawful-defaults.ts'), A = load('emr-contract/access-event.ts'), V = load('emr-contract/validation.ts');
   const C = load('emr-runtime/contract.ts'), CTX = load('emr-runtime/context.ts'), RT = load('emr-runtime/store.ts');
   const J0 = load('emr-runtime/failure-journal.ts'), CO = load('emr-runtime/coordinator.ts'), EW = load('emr-runtime/external-writer.ts');
-  const J = {...J0, FailureJournal: class extends J0.FailureJournal { constructor(dir) { super(dir, new CO.StateCoordinator(dir, EW.executeExternal)); } }};
+  // Constructing another fixture instance models process death/restart; live process
+  // ownership and kernel locks are exercised by L03/L03b in the disposable image.
+  const J = {...J0, FailureJournal: class extends J0.FailureJournal { constructor(dir) { super(dir, new CO.StateCoordinator(dir,
+    request => request.operation === 'owner-alive' ? false : EW.executeExternal(request))); } }};
   const S = load('emr-runtime/seal.ts'), MF = load('emr-runtime/manifest.ts');
   const declaration = JSON.parse(fs.readFileSync(path.join(root, 'emr/units/b.json'), 'utf8'));
   const python = process.env.KIN_EMR_PYTHON || 'python3';
@@ -373,6 +378,8 @@ function contractSuite() {
       entryForEvent: async (stream, eventId) => { ledger.guard(); const e = ledger.streams[stream].entries.find(x => x.eventId === eventId); return e ? ledger.stored(e) : null; },
       placement: async () => [],
     };
+    sql.verificationPage = async (stream, after, limit) => ({ tail: await sql.tail(stream), first: (await sql.entriesAfter(stream, 0, 1))[0] ?? null,
+      entries: await Promise.all((await sql.entriesAfter(stream, after, limit)).map(async entry => ({ entry, marker: await sql.markerForSlot(stream, entry.sequence) }))) });
     return sql;
   }
   class MemoryStore extends RT.AccessLedgerStore {
@@ -599,9 +606,15 @@ function contractSuite() {
       const sealFile = path.join(w.state, 'seal', 'tail.json');
       fs.chmodSync(path.join(w.state, 'seal'), 0o500);
       const sealDir = path.join(w.state, 'seal');
-      const real = fs.renameSync;
-      fs.renameSync = (from, to) => { if (to === sealFile) throw Object.assign(new Error('EROFS'), { code: 'EROFS' }); return real(from, to); };
-      try { await rejects(C.provideAfterReceipt(w.store, stuck, send), 'SealUnavailable'); } finally { fs.renameSync = real; fs.chmodSync(sealDir, 0o700); }
+      const real = fs.openSync;
+      let failures = 0;
+      fs.openSync = (file, flags, ...args) => {
+        if (file === sealFile && flags === 'r+') { failures++; throw Object.assign(new Error('EROFS'), { code: 'EROFS' }); }
+        return real(file, flags, ...args);
+      };
+      try { await rejects(C.provideAfterReceipt(w.store, stuck, send), 'SealUnavailable'); }
+      finally { fs.openSync = real; fs.chmodSync(sealDir, 0o700); }
+      assert(failures > 0, 'the protected tail publication actually encountered the unavailable disk');
       assert.equal(bytes, 0);
       assert.equal(w.ledger.entries.filter(e => e.eventId === stuck.eventId).length, 1, 'the commit stands; it was never reported');
       assert.equal(await C.provideAfterReceipt(w.store, stuck, send), 'body');
@@ -831,6 +844,7 @@ function contractSuite() {
             await w.store.appendInTransaction(tx, authEvent(A));w.ledger.commit(tx);
           }
           fs.unlinkSync(path.join(w.state,'seal','settlement.json'));
+          fs.rmSync(path.join(w.state,'seal','settlement.jsonl'),{force:true});
           fs.writeFileSync(path.join(w.state,'seal','tail.json'),JSON.stringify({format:2,...canonical,digest:createHash('sha256').update(JSON.stringify(canonical)).digest('hex')}));
           if (suffix) await assert.rejects(w.restart().seal.recoverAtStart(),error=>error.code==='SealTailMismatch');
           else {
@@ -883,7 +897,11 @@ function contractSuite() {
     const w=await world();
     try {
       await w.store.append(authEvent(A)); await stageExpiry(w,1,at);
-      const open=authEvent(A),tx=w.ledger.begin();await w.store.appendInTransaction(tx,open);
+      // The unrelated transaction is admitted but has not acquired the head lock.
+      // A reserved slot holds that lock until outcome, so another writer cannot
+      // reuse it while the first transaction remains open.
+      const open=authEvent(A);
+      await w.seal.recordIntentAsync('viewing',randomUUID(),open.eventId,C.canonicalPayload(open).contentSha256,randomUUID());
       const own=authEvent(A);assert.equal((await w.store.append(own)).eventId,own.eventId);
       assert(!w.journal.all().some(r=>r.kind==='commit-not-found'));
       await w.restart().seal.recoverAtStart();
@@ -917,6 +935,16 @@ function contractSuite() {
       const third = new J.FailureJournal(state);
       assert.equal(third.tornBytes, 0); third.record('good-3', 'append-rolled-back', body);
       assert.deepEqual(new J.FailureJournal(state).all().map(r => r.id), ['good-1', 'good-2', 'good-3']);
+      // A coordinator that stayed alive imports another writer's records, keeps
+      // idempotency/conflict semantics, and accounts for that writer's quarantine.
+      assert.deepEqual(first.all().map(r => r.id), ['good-1', 'good-2', 'good-3']);
+      assert.equal(first.record('good-2', 'append-rolled-back', body).id, 'good-2');
+      code(() => first.record('good-2', 'append-rolled-back', { ...body, cause: 'ledger-refused' }), 'FailureJournalConflict');
+      const archiveFile = path.join(path.dirname(file), 'torn-synthetic-quota.bin');
+      const quotaFd = fs.openSync(archiveFile, 'wx');
+      try { fs.ftruncateSync(quotaFd, J.JOURNAL_MAX_BYTES); } finally { fs.closeSync(quotaFd); }
+      code(() => first.record('over-quota', 'append-rolled-back', body), 'FailureJournalFull');
+      fs.unlinkSync(archiveFile); // exact owned synthetic quota fixture, before restart below
       // Interruption after archive publication but before truncation: the same archive is reused without data loss.
       fs.writeFileSync(file, Buffer.concat([good, torn]));
       assert.equal(new J.FailureJournal(state).tornBytes, 18);
@@ -1094,11 +1122,12 @@ function contractSuite() {
     for (const fail of [false, true]) {
       const w = await world();
       try {
-        const sync = fs.fsyncSync; let intentSyncs = 0;
+        const sync = fs.fsyncSync, dataSync = fs.fdatasyncSync; let intentSyncs = 0;
         fs.fsyncSync = function (...args) { intentSyncs++; return sync.apply(this, args); };
+        fs.fdatasyncSync = function (...args) { intentSyncs++; return dataSync.apply(this, args); };
         const ids = Array.from({ length: 48 }, () => randomUUID());
         try { await Promise.all(ids.map(id => w.seal.recordIntentAsync('viewing', id, randomUUID(), 'b'.repeat(64), randomUUID()))); }
-        finally { fs.fsyncSync = sync; }
+        finally { fs.fsyncSync = sync; fs.fdatasyncSync = dataSync; }
         assert(intentSyncs <= 2, `admitted intent group disk latency budget: ${intentSyncs} fsyncs`);
         const intents = w.journal.coordinator.call('read').intents;
         for (const id of ids) assert(intents['viewing:' + id], 'every group member is durable before staging SQL');
@@ -1109,16 +1138,18 @@ function contractSuite() {
         }
         const unrelated = randomUUID();
         w.seal.recordIntent('viewing', unrelated, randomUUID(), 'a'.repeat(64), randomUUID());
-        const originalSync = fs.fsyncSync;
+        const originalSync = fs.fsyncSync, originalDataSync = fs.fdatasyncSync;
         let syncs = 0;
         fs.fsyncSync = function (...args) { syncs++; if (fail) throw Object.assign(new Error('synthetic unavailable disk'), { code: 'EIO' }); return originalSync.apply(this, args); };
+        fs.fdatasyncSync = function (...args) { syncs++; if (fail) throw Object.assign(new Error('synthetic unavailable disk'), { code: 'EIO' }); return originalDataSync.apply(this, args); };
         let results;
         try { results = await Promise.allSettled(provisional.map(p => w.store.confirm(p))); }
-        finally { fs.fsyncSync = originalSync; }
+        finally { fs.fsyncSync = originalSync; fs.fdatasyncSync = originalDataSync; }
         if (fail) {
           assert(results.every(r => r.status === 'rejected'), 'no receipt from an undurable group');
-          await w.seal.recoverAtStart();
-          assert.equal(w.seal.read().streams.viewing.sequence, 48);
+          const restarted = w.restart();
+          await restarted.seal.recoverAtStart();
+          assert.equal(restarted.seal.read().streams.viewing.sequence, 48);
         } else {
           assert(results.every(r => r.status === 'fulfilled'), 'all committed viewers progress');
           for (let n = 0; n < 48; n++) {
@@ -1129,6 +1160,33 @@ function contractSuite() {
           assert(w.journal.coordinator.call('read').intents['viewing:' + unrelated], 'unrelated intent is preserved');
           assert(syncs <= 16, `receipt group disk latency budget: ${syncs} fsyncs for 48 committed viewers`);
         }
+      } finally { w.cleanup(); }
+    }
+
+    for (const boundary of ['checkpoint-rename', 'log-truncate']) {
+      const w = await world(), rename = fs.renameSync, open = fs.openSync;
+      const ids = Array.from({ length: 20000 }, (_, n) => 'pending-' + n);
+      let cut = false;
+      fs.renameSync = (from, to) => {
+        if (boundary === 'checkpoint-rename' && to === path.join(w.state, 'seal', 'settlement.json')) {
+          cut = true; throw Object.assign(new Error('compaction crash'), { code: 'EIO' });
+        }
+        return rename(from, to);
+      };
+      fs.openSync = (file, flags, ...args) => {
+        if (boundary === 'log-truncate' && file === path.join(w.state, 'seal', 'settlement.jsonl') && flags === 'w') {
+          cut = true; throw Object.assign(new Error('compaction crash'), { code: 'EIO' });
+        }
+        return open(file, flags, ...args);
+      };
+      try {
+        const results = await Promise.allSettled(ids.map(id => w.seal.recordIntentAsync('viewing', id, id, 'a'.repeat(64), randomUUID())));
+        assert(cut, 'large valid intent group reaches ' + boundary);
+        assert(results.every(r => r.status === 'rejected'));
+      } finally { fs.renameSync = rename; fs.openSync = open; }
+      try {
+        const restored = w.restart().journal.coordinator.call('read');
+        assert.deepEqual(Object.keys(restored.intents).sort(), ids.map(id => 'viewing:' + id).sort(), 'every durable intent survives compaction interruption');
       } finally { w.cleanup(); }
     }
   });
