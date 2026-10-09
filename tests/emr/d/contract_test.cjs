@@ -16,7 +16,7 @@ const { randomUUID } = require('node:crypto');
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 
-const root = path.resolve(__dirname, '..', '..', '..');
+const root = process.env.KIN_EMR_D_ROOT || path.resolve(__dirname, '..', '..', '..');
 const api = path.join(root, 'api');
 const ts = require(path.join(api, 'node_modules/typescript'));
 const DSRC = path.resolve(process.env.KIN_EMR_D_SRC || path.join(api, 'src/emr-clinical'));
@@ -34,6 +34,7 @@ const Routes = require(path.join(ASRC, 'routes.ts'));
 const S = require(path.join(ASRC, 'signature.ts'));
 const C = require(path.join(DSRC, 'contract.ts'));
 const R = require(path.join(DSRC, 'records.ts'));
+const V = require(path.join(ASRC, 'validation.ts'));
 if (previousLoader) require.extensions['.ts'] = previousLoader; else delete require.extensions['.ts'];
 
 // One synthetic composition per process, as the server does once at startup (B, round 2).
@@ -103,40 +104,167 @@ function accessEvent(p, a, action, result) {
     trustedProxyIp: { status: 'known', value: { address: '10.0.0.7', source: 'trusted-proxy' } }, cause: 'user-view', executor: 'member',
     targets: p.access ? [p.access.target] : p.targets, action, result, requestId: randomUUID(), auditLinkId: `audit:${randomUUID()}`, relatedEventId: null };
 }
-function signaturePort({ failSign = false, verdict = null, signer = null, versionId = null } = {}) {
+function signaturePort({ failSign = false, failVerify = false, verdict = null, signer = null, versionId = null, versionSha256 = null,
+  beforeSign = null, beforeVerify = null } = {}) {
   const calls = { sign: 0, verify: 0 };
   return { calls, port: {
-    async sign(request) { calls.sign++; if (failSign) throw new Error('SYN signer unavailable'); return { synthetic: true, versionId: request.versionId }; },
+    async sign(request) { calls.sign++; if (beforeSign) await beforeSign(); if (failSign) throw new Error('SYN signer unavailable'); return { synthetic: true, versionId: request.versionId }; },
     async verify(envelope, request) {
       calls.verify++;
-      return { recordId: request.recordId, versionId: versionId ?? request.versionId, versionSha256: request.versionSha256,
+      if (beforeVerify) await beforeVerify(); if (failVerify) throw new Error('SYN verifier unavailable');
+      return { recordId: request.recordId, versionId: versionId ?? request.versionId, versionSha256: versionSha256 ?? request.versionSha256,
         signer: signer ?? request.author, identityRegistrationId: request.identityRegistrationId,
         verification: verdict ?? { integrity: 'valid', registeredIdentity: 'matched', keyAtSigningTime: 'active', compromise: 'not-known' } };
     } } };
 }
-function memoryStore(unit) {
-  const receipts = new Map(), key = k => JSON.stringify([k.record, k.actorId, k.requestId]);
-  const state = { unit, commits: 0, failCommit: null, failRequery: false, wrongReceipt: false, finds: 0, signatures: [], late: [] };
-  return { state, port: {
-    async findReceipt(k) { state.finds++; if (state.failRequery && state.commits) throw new Error('SYN store unavailable'); return receipts.get(key(k)) ?? null; },
-    async commit(work) {
-      state.commits++;
-      if (state.failCommit === 'before') throw new Error('SYN connection reset before commit');
-      if (state.failCommit === 'rolledback') throw new R.CommitRolledBack('SYN statement failed inside the transaction');
+/** In-memory CONTRACT MODEL ONLY. No production adapter imports this fixture. Sharing state across facades models
+ * restart; it does not demonstrate persistence, SQL isolation, OS crash recovery, or C's real signature verification.
+ * Faults/barriers are test-only. Each transition has no await inside the simulated K lock/atomic transaction.
+ */
+function memoryStore(unit, persisted = null) {
+  const key = k => JSON.stringify([k.record, k.actorId, k.requestId]);
+  const state = persisted ?? { unit, initial: structuredClone(unit), commits: 0, failCommit: null, failRequery: false,
+    failAdmit: false, failSeal: false, failAudit: false, wrongReceipt: false, hideObservation: false,
+    finds: 0, signatures: [], late: [], rows: new Map(), changes: [], observations: [], errors: [], deliveries: [], wakes: [], hooks: {} };
+  function journal(attemptId, code, originalId = null) {
+    if (!state.errors.some(e => e.attemptId === attemptId && e.code === code)) state.errors.push({ attemptId, code, originalId });
+  }
+  function rowFor(request) {
+    const row = state.rows.get(key(request.receiptKey));
+    if (row && row.original.fingerprint !== request.fingerprint) throw new V.ContractError('RequestIdReused');
+    return row;
+  }
+  function snapshot(row) {
+    if (!row) return { state: 'absent' };
+    if (row.terminal) return structuredClone(row.terminal);
+    return { state: 'pending', original: row.original, epoch: row.epoch, phase: row.checkpoint?.phase ?? 'admitted' };
+  }
+  function permitFor(row) { return Object.freeze({ original: row.original, epoch: row.epoch }); }
+  function current(permit) {
+    const row = rowFor(permit.original);
+    return row && row.original.originalId === permit.original.originalId && !row.terminal && row.epoch === permit.epoch ? row : null;
+  }
+  function execution(row) { return { permit: permitFor(row), seed: row.seed, checkpoint: row.checkpoint }; }
+  function lookup(request, attemptId, external) {
+    const row = rowFor(request);
+    if (external) state.observations.push({ attemptId, originalId: row?.original.originalId ?? null, kind: 'service-job' });
+    state.finds++;
+    if (state.failRequery) throw new Error('SYN store unavailable');
+    if (state.hideObservation) return { state: 'absent' };
+    return snapshot(row);
+  }
+  function reject(row, code, attemptId) {
+    journal(attemptId, code, row.original.originalId);
+    row.terminal = { state: 'rejected', original: row.original, epoch: row.epoch, proof: {
+      original: row.original, epoch: row.epoch, rejectionId: randomUUID(), code, fencedThrough: row.epoch, noClinicalEffects: true,
+    } };
+    if (state.hooks.onTerminal) state.hooks.onTerminal(row.terminal);
+    return snapshot(row);
+  }
+  function apply(permit, work) {
+    const row = current(permit);
+    if (!row) { journal(randomUUID(), 'PermitFenced', permit.original.originalId); return snapshot(rowFor(permit.original)); }
+    if (row.checkpoint?.phase !== 'commit-dispatched' || row.checkpoint.work !== work) throw new Error('SYN missing durable dispatch');
+    const rollback = () => {
+      row.locked = false;
+      row.rollback = { original: row.original, epoch: row.epoch, transactionId: randomUUID(), noClinicalEffects: true };
+      throw new R.CommitRolledBack('SYN original transaction rolled back', row.rollback);
+    };
+    if (state.failCommit === 'rolledback') return rollback();
+    if (state.failAudit) return rollback();
+    const next = R.applyPlan(state.unit, work.plan);
+    if (work.plan.signing) R.acceptSignature(work.plan, work.signature?.evidence);
+    const terminal = { state: 'committed', original: row.original, epoch: row.epoch, binding: work, proof: {
+      original: row.original, epoch: row.epoch, transactionId: randomUUID(), changeId: randomUUID(), receipt: work.plan.receipt,
+      version: next.head, signature: work.signature?.evidence ?? null,
+    } };
+    // These writes are one model transaction; an H failure above leaves every clinical collection unchanged.
+    state.unit = next; if (work.signature) state.signatures.push(structuredClone(work.signature));
+    state.changes.push({ originalId: row.original.originalId, versionId: work.plan.version.versionId,
+      cause: work.plan.version.reason, act: work.plan.version.act });
+    row.terminal = terminal; row.locked = false;
+    if (state.hooks.onTerminal) state.hooks.onTerminal(row.terminal);
+    return snapshot(row);
+  }
+  const port = {
+    async admitOrObserve(request, seed, attemptId) {
+      if (state.hooks.beforeAdmit) await state.hooks.beforeAdmit();
+      if (state.failAdmit) throw new Error('SYN admission unavailable');
+      let row;
+      try { row = rowFor(request); } catch (e) { journal(attemptId, e.code); throw e; }
+      if (row) return { kind: 'observer', observation: lookup(request, attemptId, true) };
+      if (state.failRequery) throw new Error('SYN admission unavailable');
+      // A-resolved attachments remain capabilities. B1 must serialize references and re-resolve them on restart.
+      const fixed = { ...structuredClone({ ...seed, attachments: [] }), attachments: [...seed.attachments] };
+      row = { original: Object.freeze({ receiptKey: request.receiptKey, fingerprint: request.fingerprint, originalId: randomUUID() }),
+        seed: fixed, epoch: 1, checkpoint: null, terminal: null, locked: false, rejection: null, rollback: null };
+      state.rows.set(key(request.receiptKey), row);
+      if (state.hooks.afterAdmit) await state.hooks.afterAdmit(row);
+      return { kind: 'owner', execution: execution(row) };
+    },
+    async observe(request, attemptId, external) {
+      if (state.hooks.beforeObserve) await state.hooks.beforeObserve();
+      try { return lookup(request, attemptId, external); } catch (e) { if (e.code) journal(attemptId, e.code); throw e; }
+    },
+    async checkpoint(permit, value) {
+      const row = current(permit); if (!row) { if (state.hooks.onFenced) state.hooks.onFenced(); return false; }
+      if (row.locked || row.rejection) return false;
+      row.checkpoint = value;
+      if (state.hooks.afterCheckpoint) await state.hooks.afterCheckpoint(value, row);
+      return !!current(permit);
+    },
+    async commitOriginal(permit, work) {
+      const row = current(permit);
+      if (!row) { journal(randomUUID(), 'PermitFenced', permit.original.originalId); return snapshot(rowFor(permit.original)); }
+      state.commits++; row.locked = true;
+      if (state.hooks.beforeCommit) await state.hooks.beforeCommit(permit, work);
+      if (state.failCommit === 'before') { row.locked = false; throw new Error('SYN commit connection reset'); }
+      if (state.failCommit === 'bare') { row.locked = false; throw new R.CommitRolledBack(); }
+      if (state.failCommit === 'foreign-rollback') {
+        row.locked = false;
+        throw new R.CommitRolledBack('SYN other epoch rollback', { original: { ...row.original, originalId: 'other' },
+          epoch: row.epoch + 1, transactionId: 'other-txn', noClinicalEffects: true });
+      }
       if (state.failCommit === 'late') {
-        // The answer is lost while the original transaction is still in flight; it becomes visible later.
-        state.late.push(() => { state.unit = R.applyPlan(state.unit, work.plan); receipts.set(key(work.plan.receiptKey), work.plan.receipt); });
-        throw new Error('SYN connection lost during COMMIT');
+        state.late.push(() => apply(permit, work));
+        throw new Error('SYN commit answer lost');
       }
-      if (state.failCommit === 'taken') {
-        // A concurrent request with the same ID and another body won the unique receipt key first.
-        receipts.set(key(work.plan.receiptKey), { ...work.plan.receipt, fingerprint: '0'.repeat(64) });
-        throw new Error('SYN unique violation on the receipt key');
+      const observation = apply(permit, work);
+      if (state.failCommit === 'after') throw new Error('SYN commit answer lost');
+      if (state.wrongReceipt) observation.proof.receipt = { ...observation.proof.receipt, versionId: 'other' };
+      return observation;
+    },
+    async sealRejected(permit, evidence, attemptId) {
+      const row = current(permit);
+      if (!row) return snapshot(rowFor(permit.original));
+      const dispatched = row.checkpoint?.phase === 'commit-dispatched';
+      const rollback = evidence.cause === 'rollback' && row.rollback &&
+        JSON.stringify(row.rollback) === JSON.stringify(evidence.rollback);
+      if (row.locked || (dispatched ? !rollback : evidence.cause !== 'not-dispatched')) return snapshot(row);
+      row.rejection = { evidence, attemptId };
+      journal(attemptId, evidence.code, row.original.originalId);
+      if (state.failSeal) throw new Error('SYN terminal persistence unavailable');
+      return reject(row, evidence.code, attemptId);
+    },
+    async recoverOriginal(request, attemptId) {
+      const row = rowFor(request);
+      if (!row || row.terminal || row.locked) return { kind: 'observer', observation: snapshot(row) };
+      if (row.rejection) return { kind: 'observer', observation: await port.sealRejected(permitFor(row), row.rejection.evidence, row.rejection.attemptId) };
+      if (row.checkpoint?.phase === 'commit-dispatched') {
+        // Only the transaction adapter's preserved rollback can close dispatched work. Mere absence stays pending.
+        if (!row.rollback) return { kind: 'observer', observation: snapshot(row) };
+        return { kind: 'observer', observation: await port.sealRejected(permitFor(row), { cause: 'rollback', code: 'StorageFailed', rollback: row.rollback }, attemptId) };
       }
-      state.unit = R.applyPlan(state.unit, work.plan); receipts.set(key(work.plan.receiptKey), work.plan.receipt); state.signatures.push(work.signature);
-      if (state.failCommit === 'after') throw new Error('SYN answer lost after commit');
-      return state.wrongReceipt ? { ...work.plan.receipt, versionId: 'other' } : work.plan.receipt;
-    } } };
+      row.epoch++;
+      return { kind: 'owner', execution: execution(row) };
+    },
+    async wakeRecovery(request) { state.wakes.push(request); },
+    async noteAttempt(event) { journal(event.attemptId, event.code, event.originalId); },
+  };
+  return { state, port, snapshot: request => snapshot(rowFor(request)), apply,
+    restart: () => memoryStore(state.unit, state),
+    cancel: request => { const row = rowFor(request); if (row.locked) throw new Error('cannot cancel a dispatched transaction');
+      return reject(row, 'RequestCancelled', randomUUID()); } };
 }
 
 // ---------------- TEST-D-01 clinical_vs_operational ----------------
@@ -530,8 +658,10 @@ test('TEST-D-04 atomic_retry: a lost commit answer is resolved by the stored rec
   assert.deepEqual([unknown.status, unknown.code], ['unknown', 'OutcomeUnknown'], 'an unreadable outcome is neither success nor failure');
   const odd = memoryStore(opened); odd.state.wrongReceipt = true;
   assert.equal((await R.commitClinicalWrite({ store: odd.port, signature: signaturePort().port }, replyInput(opened))).status, 'unknown');
-  const raced = memoryStore(opened); raced.state.failCommit = 'taken';
-  await refusedAsync(R.commitClinicalWrite({ store: raced.port, signature: signaturePort().port }, replyInput(opened)), 'RequestIdReused',
+  const raced = memoryStore(opened), original = replyInput(opened);
+  const other = { ...original, body: { ...original.body, body: 'SYN 다른 원 요청' } };
+  await raced.port.admitOrObserve(R.prepareClinicalWrite(other), other, randomUUID());
+  await refusedAsync(R.commitClinicalWrite({ store: raced.port, signature: signaturePort().port }, original), 'RequestIdReused',
     'a key another body took first is a refusal, not a success');
   assert.deepEqual(raced.state.unit, opened);
 });
@@ -539,16 +669,17 @@ test('TEST-D-04 atomic_retry: a lost commit answer is resolved by the stored rec
 test('TEST-D-04 atomic_retry: a stale revision, a forbidden transition or a regressed clock is refused before any signing', async () => {
   const unit = questionThread();
   const store = memoryStore(unit), sig = signaturePort();
-  await refusedAsync(R.commitClinicalWrite({ store: store.port, signature: sig.port },
-    input('question.reply', c1, unit, { ...replyBody(c1, unit, 'SYN 추가'), revision: 1 })), 'StaleRevision');
+  assert.equal((await R.commitClinicalWrite({ store: store.port, signature: sig.port },
+    input('question.reply', c1, unit, { ...replyBody(c1, unit, 'SYN 추가'), revision: 1 }))).code, 'StaleRevision');
   const requested = consultation();
   const accepted = step(requested, 'consultation.accept', r2, changeBody(r2, requested, 'accept', ''));
   const done = step(accepted, 'consultation.complete', r2, changeBody(r2, accepted, 'complete', ANSWER));
-  await refusedAsync(R.commitClinicalWrite({ store: store.port, signature: sig.port },
-    input('consultation.cancel', r1, done, changeBody(r1, done, 'cancel', 'SYN 취소'))), 'StateTransitionRefused');
-  await refusedAsync(R.commitClinicalWrite({ store: store.port, signature: sig.port },
-    input('question.reply', c1, unit, replyBody(c1, unit, 'SYN 추가'), { at: t(-1) })), 'ServerTimeRegressed');
+  assert.equal((await R.commitClinicalWrite({ store: store.port, signature: sig.port },
+    input('consultation.cancel', r1, done, changeBody(r1, done, 'cancel', 'SYN 취소')))).code, 'StateTransitionRefused');
+  assert.equal((await R.commitClinicalWrite({ store: store.port, signature: sig.port },
+    input('question.reply', c1, unit, replyBody(c1, unit, 'SYN 추가'), { at: t(-1) }))).code, 'ServerTimeRegressed');
   assert.deepEqual([sig.calls.sign, store.state.commits], [0, 0]);
+  assert.ok([...store.state.rows.values()].every(row => row.terminal.state === 'rejected'));
 });
 
 // ---------------- round 2: review 5457844 findings D-R1-01..06 ----------------
@@ -572,10 +703,13 @@ test('TEST-D-04 atomic_retry: an opening write replays from the re-read unit; a 
   assert.deepEqual([replay.status, replay.receipt], ['replayed', written.receipt], 'M-D-R1-01: the first Tech Note replays without a reason');
   assert.equal(noteStore.state.commits, 1);
   const amendment = { baseVersion: 1, text: 'SYN 수정', reason: '', attemptId: randomUUID() };
-  await refusedAsync(R.commitClinicalWrite(ports(noteStore), input('tech-note.write', tech, noteStore.state.unit, amendment)), 'ReasonRequired',
-    'a new amendment needs its reason');
+  const rejection = await R.commitClinicalWrite(ports(noteStore), input('tech-note.write', tech, noteStore.state.unit, amendment));
+  assert.deepEqual([rejection.status, rejection.code], ['failed', 'ReasonRequired'], 'a new amendment needs its reason');
+  assert.deepEqual(await R.commitClinicalWrite(ports(noteStore), input('tech-note.write', tech, noteStore.state.unit, amendment)), rejection);
+  await refusedAsync(R.commitClinicalWrite(ports(noteStore), input('tech-note.write', tech, noteStore.state.unit,
+    { ...amendment, reason: 'SYN 오기재' })), 'RequestIdReused', 'corrected content cannot reuse a rejected ID');
   assert.equal((await R.commitClinicalWrite(ports(noteStore), input('tech-note.write', tech, noteStore.state.unit,
-    { ...amendment, reason: 'SYN 오기재' }))).status, 'committed');
+    { ...amendment, attemptId: randomUUID(), reason: 'SYN 오기재' }))).status, 'committed');
 });
 
 // Independent of the product: the fields each service's request carries (services at 04e50ab), one refusal case per field.
@@ -647,7 +781,7 @@ test('TEST-D-04 atomic_retry: a lost answer with no visible receipt stays unknow
     'the same request ends as the real (late) outcome, appended once');
   const definite = memoryStore(unit); definite.state.failCommit = 'rolledback';
   const rolledBack = await R.commitClinicalWrite(ports(definite), replyInput(unit));
-  assert.deepEqual([rolledBack.status, rolledBack.code, definite.state.unit], ['failed', 'StorageFailed', unit], 'only a reported rollback is a failure');
+  assert.deepEqual([rolledBack.status, rolledBack.code, definite.state.unit], ['failed', 'StorageFailed', unit], 'the original rollback plus durable Er permits failure');
 });
 
 test('TEST-D-04 atomic_retry: a resend whose receipt lookup fails stays unknown until the late original is visible', async () => {
@@ -736,4 +870,522 @@ test('TEST-D-02 versions_and_sr: hide and restore in the reading context need no
   assert.deepEqual([stated.version.reasonSource, stated.signing.reason], ['stated', 'SYN 오기재'], 'a stated reason is kept as stated');
   refused(() => plan('finding.edit', r1, created, { requestId: randomUUID(), expectedRevision: 1, action: 'edit', item: {}, reason: 'SYN' },
     { content: SNAPSHOT.replace('8 mm', '9 mm') }), 'TextRefused', 'an edit carries no reason');
+});
+
+// ---------------- consult I01-I12 / C01-C56: model contract, not a live B1/C/UI acceptance ----------------
+// REQ-EMR-01/03/04/05/07/10/17 -> RISK-D-01..05. Each named schedule is independently collected.
+function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
+function barrier() {
+  const entered = deferred(), released = deferred();
+  return { entered: entered.promise, release: released.resolve, wait: async () => { entered.resolve(); await released.promise; } };
+}
+function requestFixture(sigOptions = {}) {
+  const unit = opened(), store = memoryStore(unit), sig = signaturePort(sigOptions), write = replyInput(unit);
+  return { unit, store, sig, write, request: R.prepareClinicalWrite(write), ports: ports(store, sig) };
+}
+function effects(store, expected, label) {
+  const s = store.state, versions = s.unit?.versions ?? [], old = s.initial?.versions ?? [];
+  assert.deepEqual(versions.slice(0, old.length), old, `${label}: earlier versions are unchanged`);
+  if (s.unit) assert.equal(R.projectUnit(s.unit).revision, versions.length, `${label}: projection is the history fold`);
+  assert.deepEqual([versions.length - old.length, s.signatures.length, s.changes.length, s.deliveries.length,
+    s.errors.length, s.observations.length], expected, `${label}: V/S/H/L/J/O`);
+  const committed = [...s.rows.values()].filter(r => r.terminal?.state === 'committed');
+  assert.equal(committed.length, versions.length - old.length, `${label}: each new version has exactly one C/receipt`);
+  for (const row of committed) {
+    const p = row.terminal.proof;
+    assert.ok(versions.some(v => v.versionId === p.receipt.versionId && v.sha256 === p.receipt.versionSha256));
+    assert.equal(s.changes.filter(h => h.originalId === row.original.originalId).length, 1, `${label}: one original change event`);
+  }
+}
+const noBody = result => assert.ok(!JSON.stringify(result).includes('SYN'), 'outcome contains no clinical text');
+async function pausedCommit(sigOptions = {}) {
+  const f = requestFixture(sigOptions), hold = barrier();
+  f.store.state.hooks.beforeCommit = hold.wait;
+  const original = R.commitClinicalWrite(f.ports, f.write);
+  await hold.entered;
+  return { ...f, original, release: hold.release };
+}
+async function replay(f, overrides = {}) { return R.commitClinicalWrite(f.ports, { ...f.write, ...overrides }); }
+
+test('CONSULT C01 original clinical commit has one jointly stored terminal', async () => {
+  const f = requestFixture();
+  const result = await replay(f);
+  assert.equal(result.status, 'committed'); noBody(result);
+  assert.deepEqual(result.receipt, f.store.snapshot(f.request).proof.receipt);
+  assert.deepEqual(f.sig.calls, { sign: 1, verify: 1 }); effects(f.store, [1, 1, 1, 0, 0, 0], 'C01');
+});
+test('CONSULT C02 operational acceptance never invents a medical signature', async () => {
+  const unit = consultation(), store = memoryStore(unit), sig = signaturePort({ failSign: true });
+  const result = await R.commitClinicalWrite(ports(store, sig), input('consultation.accept', r2, unit, changeBody(r2, unit, 'accept', '')));
+  assert.equal(result.status, 'committed'); assert.deepEqual(sig.calls, { sign: 0, verify: 0 });
+  effects(store, [1, 0, 1, 0, 0, 0], 'C02');
+});
+for (const [id, title, options, code, calls] of [
+  ['C03', 'original sign throw is sealed before failure', { failSign: true }, 'SignatureFailed', [1, 0]],
+  ['C04', 'original verify throw is sealed before failure', { failVerify: true }, 'SignatureFailed', [1, 1]],
+  ['C05', 'invalid verification is never adopted', { verdict: { integrity: 'invalid' } }, 'SignatureNotVerified', [1, 1]],
+  ['C06', 'another signer is never adopted', { signer: who('other') }, 'ProxySignatureRefused', [1, 1]],
+  ['C07', 'another version or hash is never adopted', { versionSha256: '00'.repeat(32) }, 'SignatureBindingRefused', [1, 1]],
+]) test(`CONSULT ${id} ${title}`, async () => {
+  const f = requestFixture(options), result = await replay(f);
+  assert.deepEqual([result.status, result.code], ['failed', code], `${id}: only the bound author version can be stored`);
+  assert.equal(f.store.snapshot(f.request).state, 'rejected');
+  assert.deepEqual([f.sig.calls.sign, f.sig.calls.verify], calls);
+  assert.equal(f.store.state.commits, 0); effects(f.store, [0, 0, 0, 0, 1, 0], id); noBody(result);
+});
+test('CONSULT C08 original rollback needs its durable fenced rejection', async () => {
+  const f = requestFixture(); f.store.state.failCommit = 'rolledback';
+  const result = await replay(f);
+  assert.deepEqual([result.status, result.code], ['failed', 'StorageFailed']);
+  const er = f.store.snapshot(f.request).proof;
+  assert.equal(er.noClinicalEffects, true); assert.ok(er.fencedThrough >= er.epoch);
+  effects(f.store, [0, 0, 0, 0, 1, 0], 'C08'); assert.deepEqual(f.sig.calls, { sign: 1, verify: 1 });
+});
+test('CONSULT C09 failed sealing stays unknown until recovery seals the original cause', async () => {
+  const f = requestFixture({ failSign: true }); f.store.state.failSeal = true;
+  assert.equal((await replay(f)).status, 'unknown'); effects(f.store, [0, 0, 0, 0, 2, 0], 'C09 pending');
+  f.store.state.failSeal = false;
+  const restart = f.store.restart();
+  await R.recoverClinicalWrite(ports(restart, f.sig), f.request);
+  const result = await R.lookupClinicalWrite(restart.port, f.write);
+  assert.deepEqual([result.status, result.code], ['failed', 'SignatureFailed']);
+  assert.deepEqual(f.sig.calls, { sign: 1, verify: 0 }); effects(restart, [0, 0, 0, 0, 2, 1], 'C09');
+});
+test('CONSULT C10 a lost commit answer reconciles the exact original success', async () => {
+  const f = requestFixture(); f.store.state.failCommit = 'after';
+  const result = await replay(f); assert.equal(result.status, 'committed');
+  assert.deepEqual(result.receipt, f.store.snapshot(f.request).proof.receipt);
+  effects(f.store, [1, 1, 1, 0, 1, 0], 'C10');
+});
+test('CONSULT C11 absent receipt never grants a second execution', async () => {
+  const f = requestFixture(); f.store.state.failCommit = 'late';
+  assert.equal((await replay(f)).status, 'unknown');
+  const poison = signaturePort({ failSign: true });
+  const result = await R.commitClinicalWrite(ports(f.store, poison), f.write);
+  assert.deepEqual([result.status, poison.calls.sign, f.store.state.commits], ['unknown', 0, 1], 'C11: pending receipt is not a new permit');
+  effects(f.store, [0, 0, 0, 0, 1, 1], 'C11 pending');
+  f.store.state.late[0](); f.store.state.failCommit = null;
+  assert.equal((await replay(f)).status, 'replayed'); effects(f.store, [1, 1, 1, 0, 1, 2], 'C11');
+});
+test('CONSULT C12 lookup outages never replace the original result', async () => {
+  const f = requestFixture(); f.store.state.failCommit = 'late'; f.store.state.failRequery = true;
+  // The first admission is reachable; the internal reconciliation read becomes unavailable only after dispatch.
+  f.store.state.failRequery = false; f.store.state.hooks.beforeCommit = async () => { f.store.state.failRequery = true; };
+  assert.equal((await replay(f)).status, 'unknown');
+  assert.equal((await R.lookupClinicalWrite(f.store.port, f.write)).status, 'unknown');
+  f.store.state.late[0](); f.store.state.failRequery = false;
+  assert.equal((await R.lookupClinicalWrite(f.store.port, f.write)).status, 'replayed');
+  assert.deepEqual(f.sig.calls, { sign: 1, verify: 1 }); effects(f.store, [1, 1, 1, 0, 3, 2], 'C12');
+});
+test('CONSULT C13 only atomic admission can establish a previously absent original', async () => {
+  const f = requestFixture(); f.store.state.failAdmit = true;
+  assert.equal((await replay(f)).status, 'unknown'); assert.equal(f.store.state.rows.size, 0);
+  assert.equal(f.sig.calls.sign, 0); effects(f.store, [0, 0, 0, 0, 1, 0], 'C13 before admission');
+  f.store.state.failAdmit = false;
+  const follow = automatic(f, async () => {}); await follow.done;
+  assert.deepEqual(follow.results.map(r => r.status), ['committed'], 'C13: automatic retry can atomically establish a never-admitted original');
+  assert.equal(f.store.state.rows.size, 1);
+  effects(f.store, [1, 1, 1, 0, 1, 0], 'C13');
+});
+test('CONSULT C14 mismatched commit evidence cannot answer success', async () => {
+  const f = requestFixture(); f.store.state.wrongReceipt = true;
+  const first = await replay(f);
+  assert.equal(first.status, 'unknown', 'C14: mismatched receipt cannot terminate the request'); noBody(first);
+  const final = await R.lookupClinicalWrite(f.store.port, f.write);
+  assert.deepEqual([final.status, final.receipt.versionId], ['replayed', f.store.state.unit.head.versionId]);
+  effects(f.store, [1, 1, 1, 0, 1, 1], 'C14');
+});
+for (const [id, title, poisonOptions, commitFault] of [
+  ['C15', 'pending resend cannot invoke a failing signer', { failSign: true }, null],
+  ['C16', 'pending resend cannot invoke a failing verifier', { failVerify: true }, null],
+  ['C17', 'pending resend cannot adopt invalid verification', { verdict: { integrity: 'invalid' } }, null],
+  ['C18', 'even successful resend ports have no execution permit', {}, null],
+  ['C20', 'resend cannot invoke its timeout transaction', {}, 'before'],
+]) test(`CONSULT ${id} ${title}`, async () => {
+  const f = await pausedCommit(), poison = signaturePort(poisonOptions);
+  let observerCommits = 0;
+  const observerStore = { ...f.store.port, commitOriginal: async (...args) => {
+    observerCommits++; if (commitFault) throw new Error('SYN resend timeout'); return f.store.port.commitOriginal(...args);
+  } };
+  const result = await R.commitClinicalWrite({ store: observerStore, signature: poison.port }, f.write);
+  assert.deepEqual([result.status, poison.calls.sign, poison.calls.verify, observerCommits], ['unknown', 0, 0, 0], `${id}: observer has no execution effects`);
+  effects(f.store, [0, 0, 0, 0, 0, 1], `${id} pending`);
+  f.release(); const first = await f.original;
+  const final = await replay(f);
+  assert.deepEqual([first.status, final.status, final.receipt], ['committed', 'replayed', first.receipt]);
+  effects(f.store, [1, 1, 1, 0, 0, 2], id); assert.deepEqual(f.sig.calls, { sign: 1, verify: 1 });
+});
+test('CONSULT C19 a bare old transaction rollback is only an attempt error', async () => {
+  const f = requestFixture(); f.store.state.failCommit = 'bare';
+  assert.equal((await replay(f)).status, 'unknown', 'C19: bare rollback cannot produce failed or R');
+  const row = [...f.store.state.rows.values()][0];
+  assert.equal(row.terminal, null);
+  assert.equal((await replay(f)).status, 'unknown');
+  f.store.state.failCommit = null;
+  f.store.apply({ original: row.original, epoch: row.epoch }, row.checkpoint.work);
+  assert.equal((await replay(f)).status, 'replayed'); effects(f.store, [1, 1, 1, 0, 1, 2], 'C19');
+});
+test('CONSULT C21 the next observation returns an already observable terminal immediately', async () => {
+  const f = await pausedCommit(), observeGate = barrier();
+  f.store.state.hooks.beforeObserve = observeGate.wait;
+  const lookup = R.lookupClinicalWrite(f.store.port, f.write); await observeGate.entered;
+  f.release(); const first = await f.original; observeGate.release();
+  const result = await lookup;
+  assert.deepEqual([result.status, result.receipt], ['replayed', first.receipt]);
+  effects(f.store, [1, 1, 1, 0, 0, 1], 'C21');
+});
+test('CONSULT C22 another original cannot supply terminal evidence', async () => {
+  const f = requestFixture(); const first = await replay(f);
+  const real = f.store.port.observe;
+  f.store.port.observe = async (...args) => {
+    const o = await real(...args); o.proof.original = { ...o.proof.original, originalId: 'other-original' }; return o;
+  };
+  const bad = await R.lookupClinicalWrite(f.store.port, f.write);
+  assert.equal(bad.status, 'unknown', 'C22: mismatched original proof cannot terminate'); noBody(bad);
+  f.store.port.observe = real;
+  const result = await R.lookupClinicalWrite(f.store.port, f.write);
+  assert.deepEqual([result.status, result.receipt], ['replayed', first.receipt]);
+  effects(f.store, [1, 1, 1, 0, 1, 2], 'C22');
+});
+test('CONSULT C23 concurrent observers add O but never duplicate H or L', async () => {
+  const f = await pausedCommit();
+  const before = await Promise.all([replay(f), replay(f)]);
+  assert.deepEqual(before.map(r => r.status), ['unknown', 'unknown']); effects(f.store, [0, 0, 0, 0, 0, 2], 'C23 pending');
+  f.release(); const first = await f.original;
+  const after = await Promise.all([replay(f), replay(f)]);
+  assert.deepEqual(after.map(r => r.receipt), [first.receipt, first.receipt]);
+  effects(f.store, [1, 1, 1, 0, 0, 4], 'C23'); assert.deepEqual(f.sig.calls, { sign: 1, verify: 1 });
+});
+test('CONSULT C24 concurrent equal admissions create exactly one original', async () => {
+  const f = requestFixture(), admissionGate = barrier(), commitGate = barrier();
+  f.store.state.hooks.beforeAdmit = admissionGate.wait; f.store.state.hooks.beforeCommit = commitGate.wait;
+  const a = replay(f), b = replay(f); await admissionGate.entered; admissionGate.release(); await commitGate.entered;
+  const early = await Promise.race([a, b]); assert.equal(early.status, 'unknown');
+  assert.equal(f.store.state.rows.size, 1); commitGate.release();
+  assert.deepEqual((await Promise.all([a, b])).map(r => r.status).sort(), ['committed', 'unknown']);
+  assert.equal((await replay(f)).status, 'replayed'); effects(f.store, [1, 1, 1, 0, 0, 2], 'C24');
+  assert.deepEqual(f.sig.calls, { sign: 1, verify: 1 });
+});
+test('CONSULT C25 concurrent different meanings cannot replace the winning original', async () => {
+  const store = memoryStore(null), sig = signaturePort(), write = input('image-request.create', c1, null, imageBody());
+  const hold = barrier(); store.state.hooks.beforeCommit = hold.wait;
+  const original = R.commitClinicalWrite(ports(store, sig), write); await hold.entered;
+  const changed = { ...write, body: { ...write.body, kind: 'image-transfer' } };
+  await refusedAsync(R.commitClinicalWrite(ports(store, sig), changed), 'RequestIdReused', 'C25: kind is bound in every pending original');
+  assert.equal([...store.state.rows.values()][0].terminal, null); hold.release();
+  assert.equal((await original).status, 'committed'); effects(store, [1, 1, 1, 0, 1, 0], 'C25');
+});
+test('CONSULT C26 committed meanings remain immutable and body free', async () => {
+  const store = memoryStore(null), sig = signaturePort(), write = input('image-request.create', c1, null, imageBody());
+  const first = await R.commitClinicalWrite(ports(store, sig), write);
+  await refusedAsync(R.commitClinicalWrite(ports(store, sig), { ...write, body: { ...write.body, kind: 'image-transfer' } }),
+    'RequestIdReused', 'C26: changed kind cannot reuse a terminal key');
+  noBody(first); assert.equal(store.snapshot(R.prepareClinicalWrite(write)).state, 'committed');
+  effects(store, [1, 1, 1, 0, 1, 0], 'C26'); assert.deepEqual(sig.calls, { sign: 1, verify: 1 });
+});
+test('CONSULT C27 another original or epoch rollback cannot seal this request', async () => {
+  const f = requestFixture(); f.store.state.failCommit = 'foreign-rollback';
+  const result = await replay(f);
+  assert.equal(result.status, 'unknown', 'C27: foreign rollback cannot produce failed');
+  const row = [...f.store.state.rows.values()][0]; assert.equal(row.rejection, null);
+  f.store.state.failCommit = null; f.store.apply({ original: row.original, epoch: row.epoch }, row.checkpoint.work);
+  assert.equal((await replay(f)).status, 'replayed'); effects(f.store, [1, 1, 1, 0, 1, 1], 'C27');
+});
+test('CONSULT C28 a rejected ID only ever looks up the same failure', async () => {
+  const f = requestFixture({ failSign: true }), first = await replay(f), nowHealthy = signaturePort();
+  for (let i = 0; i < 2; i++) assert.deepEqual(await R.commitClinicalWrite(ports(f.store, nowHealthy), f.write), first);
+  assert.deepEqual([first.status, first.code], ['failed', 'SignatureFailed']);
+  assert.deepEqual(nowHealthy.calls, { sign: 0, verify: 0 }); effects(f.store, [0, 0, 0, 0, 1, 2], 'C28');
+});
+test('CONSULT C29 a late unknown cannot erase the request terminal already applied', async () => {
+  const f = await pausedCommit(), pending = await replay(f);
+  f.release(); await f.original; const final = await replay(f);
+  assert.deepEqual(R.retainRequestOutcome(final, pending), final);
+  assert.deepEqual(R.retainRequestOutcome(final, { status: 'failed', code: 'SignatureFailed', retry: 'same-request' }), final);
+  effects(f.store, [1, 1, 1, 0, 0, 2], 'C29');
+});
+test('CONSULT C30 observer never replans current revision time or context', async () => {
+  const unit = R.applyPlan(null, plan('tech-note.write', tech, null, { baseVersion: 0, text: Q, reason: '', attemptId: randomUUID() }));
+  const write = input('tech-note.write', tech, unit, { baseVersion: 1, text: ANSWER, reason: '', attemptId: randomUUID() },
+    { workContext: { kind: 'acquisition', studyId: study.studyId, referenceId: 'exam-30' } });
+  const store = memoryStore(unit), sig = signaturePort(), hold = barrier(); store.state.hooks.beforeCommit = hold.wait;
+  const original = R.commitClinicalWrite(ports(store, sig), write); await hold.entered;
+  const newer = R.applyPlan(unit, R.planClinicalWrite(write));
+  for (const changed of [{ unit: newer }, { at: t(-1) }, { workContext: null }]) {
+    assert.equal((await outcomeOf(R.commitClinicalWrite(ports(store, sig), { ...write, ...changed }))).status, 'unknown',
+      'C30: current write rules never run for observers');
+  }
+  hold.release(); await original;
+  assert.equal((await R.commitClinicalWrite(ports(store, sig), { ...write, unit: store.state.unit, workContext: null })).status, 'replayed');
+  effects(store, [1, 1, 1, 0, 0, 4], 'C30'); assert.deepEqual(sig.calls, { sign: 1, verify: 1 });
+});
+test('CONSULT C31 first Tech Note replays after context and generated IDs change', async () => {
+  const store = memoryStore(null), sig = signaturePort(), body = { baseVersion: 0, text: Q, reason: '', attemptId: randomUUID() };
+  const first = await R.commitClinicalWrite(ports(store, sig), input('tech-note.write', tech, null, body));
+  const final = await R.commitClinicalWrite(ports(store, sig), input('tech-note.write', tech, store.state.unit, body, { at: t(200), workContext: null }));
+  assert.deepEqual([final.status, final.receipt], ['replayed', first.receipt]);
+  effects(store, [1, 1, 1, 0, 0, 1], 'C31'); assert.deepEqual(sig.calls, { sign: 1, verify: 1 });
+});
+test('CONSULT C32 an older request returns its own receipt after another commit', async () => {
+  const f = requestFixture(), a = await replay(f);
+  const b = await R.commitClinicalWrite(f.ports, replyInput(f.store.state.unit, c1));
+  assert.notEqual(a.receipt.versionId, b.receipt.versionId);
+  const result = await replay(f, { unit: f.store.state.unit });
+  assert.deepEqual([result.status, result.receipt], ['replayed', a.receipt]);
+  effects(f.store, [2, 2, 2, 0, 0, 1], 'C32'); assert.deepEqual(f.sig.calls, { sign: 2, verify: 2 });
+});
+test('CONSULT C33 restart before admission has no phantom original or effect', async () => {
+  const f = requestFixture(), restart = f.store.restart();
+  assert.equal(restart.state.rows.size, 0);
+  assert.equal((await R.commitClinicalWrite(ports(restart, f.sig), f.write)).status, 'committed');
+  assert.equal(restart.state.rows.size, 1); effects(restart, [1, 1, 1, 0, 0, 0], 'C33');
+});
+test('CONSULT C34 recovery after lost admission resumes the same original', async () => {
+  const f = requestFixture(); f.store.state.hooks.afterAdmit = async () => { throw new Error('SYN process lost after admission'); };
+  assert.equal((await replay(f)).status, 'unknown');
+  const identity = f.store.snapshot(f.request).original.originalId;
+  delete f.store.state.hooks.afterAdmit;
+  const restart = f.store.restart();
+  assert.equal((await R.recoverClinicalWrite(ports(restart, f.sig), f.request)).status, 'replayed');
+  assert.equal((await R.lookupClinicalWrite(restart.port, f.write)).status, 'replayed');
+  assert.equal(restart.snapshot(f.request).original.originalId, identity);
+  effects(restart, [1, 1, 1, 0, 1, 1], 'C34'); assert.deepEqual(f.sig.calls, { sign: 1, verify: 1 });
+});
+function noteFixture() {
+  const unit = R.applyPlan(null, plan('tech-note.write', tech, null, { baseVersion: 0, text: Q, reason: '', attemptId: randomUUID() }));
+  const write = input('tech-note.write', tech, unit, { baseVersion: 1, text: ANSWER, reason: '', attemptId: randomUUID() },
+    { workContext: { kind: 'acquisition', studyId: study.studyId, referenceId: 'fixed-exam' } });
+  const store = memoryStore(unit), sig = signaturePort();
+  return { unit, store, sig, write, request: R.prepareClinicalWrite(write), ports: ports(store, sig) };
+}
+test('CONSULT C35 prepared recovery preserves original time version text and context reason', async () => {
+  const f = noteFixture();
+  f.store.state.hooks.afterCheckpoint = async cp => { if (cp.phase === 'prepared') throw new Error('SYN process stopped'); };
+  assert.equal((await replay(f)).status, 'unknown');
+  const row = [...f.store.state.rows.values()][0], fixed = structuredClone(row.checkpoint.work.plan);
+  delete f.store.state.hooks.afterCheckpoint;
+  const restart = f.store.restart();
+  const recovered = await outcomeOf(R.recoverClinicalWrite(ports(restart, f.sig), f.request));
+  assert.equal(recovered.status, 'replayed', 'C35: recovery reuses the fixed context reason without replanning');
+  const result = await R.lookupClinicalWrite(restart.port, { ...f.write, unit: restart.state.unit, workContext: null, at: t(900) });
+  assert.equal(result.status, 'replayed');
+  assert.deepEqual(restart.state.unit.versions.at(-1), fixed.version);
+  assert.deepEqual([row.terminal.binding.plan.signing.reason, restart.state.changes[0].cause], [fixed.version.reason, fixed.version.reason]);
+  effects(restart, [1, 1, 1, 0, 1, 1], 'C35'); assert.deepEqual(f.sig.calls, { sign: 1, verify: 1 });
+});
+test('CONSULT C36 signed recovery adopts the preserved signature without signing again', async () => {
+  const f = requestFixture();
+  f.store.state.hooks.afterCheckpoint = async cp => { if (cp.phase === 'signed') throw new Error('SYN process stopped'); };
+  assert.equal((await replay(f)).status, 'unknown');
+  const fixedSignature = structuredClone([...f.store.state.rows.values()][0].checkpoint.work.signature);
+  delete f.store.state.hooks.afterCheckpoint;
+  const restart = f.store.restart(), forbiddenSigner = signaturePort({ failSign: true, failVerify: true });
+  await R.recoverClinicalWrite(ports(restart, forbiddenSigner), f.request);
+  assert.equal((await R.lookupClinicalWrite(restart.port, f.write)).status, 'replayed');
+  assert.deepEqual(restart.state.signatures, [fixedSignature]); assert.deepEqual(forbiddenSigner.calls, { sign: 0, verify: 0 });
+  effects(restart, [1, 1, 1, 0, 1, 1], 'C36');
+});
+test('CONSULT C37 restart observes the late original transaction commit', async () => {
+  const f = requestFixture(); f.store.state.failCommit = 'late';
+  assert.equal((await replay(f)).status, 'unknown');
+  const restart = f.store.restart();
+  assert.equal((await R.recoverClinicalWrite(ports(restart, f.sig), f.request)).status, 'unknown', 'a locked transaction cannot get another owner');
+  f.store.state.late[0]();
+  assert.equal((await R.lookupClinicalWrite(restart.port, f.write)).status, 'replayed');
+  effects(restart, [1, 1, 1, 0, 1, 1], 'C37');
+});
+test('CONSULT C38 restart seals only the dispatched originals proved rollback', async () => {
+  const f = requestFixture(); f.store.state.failCommit = 'late';
+  assert.equal((await replay(f)).status, 'unknown');
+  f.store.state.failCommit = 'rolledback';
+  assert.throws(() => f.store.state.late[0](), error => error instanceof R.CommitRolledBack && !!error.proof);
+  const restart = f.store.restart();
+  await R.recoverClinicalWrite(ports(restart, f.sig), f.request);
+  const result = await R.lookupClinicalWrite(restart.port, f.write);
+  assert.deepEqual([result.status, result.code], ['failed', 'StorageFailed']);
+  effects(restart, [0, 0, 0, 0, 2, 1], 'C38'); assert.deepEqual(f.sig.calls, { sign: 1, verify: 1 });
+});
+test('CONSULT C39 the recovery epoch fences a late old writer before effects', async () => {
+  const f = requestFixture();
+  f.store.state.hooks.afterCheckpoint = async cp => { if (cp.phase === 'signed') throw new Error('SYN original worker stopped'); };
+  assert.equal((await replay(f)).status, 'unknown');
+  const row = [...f.store.state.rows.values()][0], oldPermit = { original: row.original, epoch: row.epoch }, work = row.checkpoint.work;
+  const hold = barrier();
+  f.store.state.hooks.afterCheckpoint = async cp => { if (cp.phase === 'commit-dispatched') await hold.wait(); };
+  const restart = f.store.restart(), recovery = R.recoverClinicalWrite(ports(restart, f.sig), f.request);
+  await hold.entered;
+  assert.equal(row.epoch, oldPermit.epoch + 1);
+  const stale = await restart.port.commitOriginal(oldPermit, work);
+  assert.deepEqual([stale.state, restart.state.unit.revision, restart.state.signatures.length, restart.state.changes.length],
+    ['pending', f.unit.revision, 0, 0], 'C39: old epoch has zero clinical effects');
+  hold.release(); assert.equal((await recovery).status, 'replayed');
+  assert.equal((await R.lookupClinicalWrite(restart.port, f.write)).status, 'replayed');
+  effects(restart, [1, 1, 1, 0, 2, 1], 'C39'); assert.deepEqual(f.sig.calls, { sign: 1, verify: 1 });
+});
+test('CONSULT C40 elapsed time cannot discard a pending original or intent', async () => {
+  const f = await pausedCommit(), restart = f.store.restart();
+  const original = restart.snapshot(f.request).original.originalId;
+  assert.equal((await R.lookupClinicalWrite(restart.port, { ...f.write, at: '2099-01-01T00:00:00.000Z' })).status, 'unknown');
+  assert.equal(restart.state.rows.size, 1); assert.equal(restart.snapshot(f.request).original.originalId, original);
+  effects(restart, [0, 0, 0, 0, 0, 1], 'C40 pending');
+  f.release(); await f.original;
+  assert.equal((await R.lookupClinicalWrite(restart.port, f.write)).status, 'replayed');
+  effects(restart, [1, 1, 1, 0, 0, 2], 'C40');
+});
+test('CONSULT C41 lost rejection response survives a restarted healthy signer', async () => {
+  const f = requestFixture({ failSign: true }), seal = f.store.port.sealRejected;
+  f.store.port.sealRejected = async (...args) => { await seal(...args); throw new Error('SYN rejection response lost'); };
+  const first = await replay(f); assert.deepEqual([first.status, first.code], ['failed', 'SignatureFailed']);
+  const restart = f.store.restart(), healthy = signaturePort();
+  const result = await R.commitClinicalWrite(ports(restart, healthy), f.write);
+  assert.deepEqual(result, first); assert.deepEqual(healthy.calls, { sign: 0, verify: 0 });
+  effects(restart, [0, 0, 0, 0, 2, 1], 'C41');
+});
+test('CONSULT C42 a pending Tech Note keeps the original context cause in version signature and H', async () => {
+  const f = noteFixture(), hold = barrier(); f.store.state.hooks.beforeCommit = hold.wait;
+  const original = replay(f); await hold.entered;
+  const result = await replay(f, { workContext: null, at: t(1000) });
+  assert.equal(result.status, 'unknown'); hold.release(); assert.equal((await original).status, 'committed');
+  const version = f.store.state.unit.versions.at(-1), cp = [...f.store.state.rows.values()][0].checkpoint;
+  assert.deepEqual([version.reason, cp.work.plan.signing.reason, f.store.state.changes[0].cause],
+    Array(3).fill('work-context:acquisition:fixed-exam'));
+  effects(f.store, [1, 1, 1, 0, 0, 1], 'C42');
+});
+test('CONSULT C43 reading hide and restore keep automatic reasons and signed originals', async () => {
+  const unit = finding(), store = memoryStore(unit), sig = signaturePort();
+  const context = { kind: 'reading', studyId: study.studyId, referenceId: 'reading-43' };
+  for (const action of ['hide', 'restore']) {
+    const u = store.state.unit;
+    const result = await R.commitClinicalWrite(ports(store, sig), input(`finding.${action}`, r1, u,
+      { requestId: randomUUID(), expectedRevision: u.revision, action, item: {} },
+      { content: action === 'hide' ? SNAPSHOT.replace('false', 'true') : SNAPSHOT, workContext: context }));
+    assert.equal(result.status, 'committed');
+    assert.equal(store.state.unit.versions.at(-1).reason, 'work-context:reading:reading-43');
+  }
+  effects(store, [2, 2, 2, 0, 0, 0], 'C43'); assert.deepEqual(sig.calls, { sign: 2, verify: 2 });
+});
+test('CONSULT C44 acquisition amendments and clearing are signed reasoned corrections', async () => {
+  const f = noteFixture();
+  assert.equal((await replay(f)).status, 'committed');
+  const u = f.store.state.unit;
+  assert.equal((await R.commitClinicalWrite(f.ports, input('tech-note.write', tech, u,
+    { baseVersion: u.revision, text: '', reason: '', attemptId: randomUUID() }, { workContext: f.write.workContext }))).status, 'committed');
+  assert.deepEqual(f.store.state.unit.versions.slice(-2).map(v => [v.text, v.author.id, v.reason]),
+    [[ANSWER, 'tc', 'work-context:acquisition:fixed-exam'], ['', 'tc', 'work-context:acquisition:fixed-exam']]);
+  effects(f.store, [2, 2, 2, 0, 0, 0], 'C44'); assert.deepEqual(f.sig.calls, { sign: 2, verify: 2 });
+});
+test('CONSULT C45 a rejected context needs a new ID for a corrected explicit reason', async () => {
+  const f = noteFixture(), wrong = { ...f.write, workContext: { ...f.write.workContext, studyId: 'other-study' } };
+  const first = await R.commitClinicalWrite(f.ports, wrong);
+  assert.deepEqual([first.status, first.code, f.sig.calls.sign], ['failed', 'ReasonRequired', 0]);
+  const second = await R.commitClinicalWrite(f.ports, { ...wrong, body: { ...wrong.body, attemptId: randomUUID(), reason: 'SYN 명시 사유' } });
+  assert.equal(second.status, 'committed'); assert.equal(f.store.snapshot(f.request).state, 'rejected');
+  effects(f.store, [1, 1, 1, 0, 1, 0], 'C45');
+});
+test('CONSULT C46 each outcome lookup enforces current institution access', async () => {
+  const f = requestFixture(); await replay(f);
+  const foreign = { ...f.write, actor: { ...r1, institutionId: 'inst-b' }, body: { ...f.write.body, expectedOwner: ['inst-b', r1.identity.subject] } };
+  await refusedAsync(R.lookupClinicalWrite(f.store.port, foreign), 'NotFound', 'C46: another institution gets no outcome receipt or body');
+  assert.equal(f.store.snapshot(f.request).state, 'committed'); effects(f.store, [1, 1, 1, 0, 1, 0], 'C46');
+  assert.deepEqual(f.sig.calls, { sign: 1, verify: 1 });
+});
+test('CONSULT C47 an H failure rolls back every clinical effect and seals the original', async () => {
+  const f = requestFixture(); f.store.state.failAudit = true;
+  const first = await replay(f);
+  assert.deepEqual([first.status, first.code, f.store.state.signatures.length, f.store.state.changes.length, f.store.state.unit.revision],
+    ['failed', 'StorageFailed', 0, 0, f.unit.revision], 'C47: failed H stores no version signature or success');
+  f.store.state.failAudit = false;
+  assert.deepEqual(await replay(f), first);
+  effects(f.store, [0, 0, 0, 0, 1, 1], 'C47'); assert.deepEqual(f.sig.calls, { sign: 1, verify: 1 });
+});
+test('CONSULT C48 receipt observation is separate from durable body provision and display', async () => {
+  const f = requestFixture(); await replay(f);
+  const result = await replay(f); noBody(result);
+  const read = R.planClinicalRead({ actor: r1, unit: f.store.state.unit, scope: 'current' });
+  let bodies = [], fail = false;
+  const accessStore = { append: async e => {
+    if (fail) { f.store.state.errors.push({ code: 'AccessEventFailed' }); throw new V.ContractError('AccessEventFailed'); }
+    f.store.state.deliveries.push(e); return { eventId: e.eventId, durableAt: t(501) };
+  } };
+  await R.provideClinicalRead(accessStore, accessEvent(read, r1, 'provide-prepared', 'prepared'), read,
+    async provided => { bodies.push(...provided); });
+  assert.equal(bodies[0].text, ANSWER);
+  const shown = accessEvent(read, r1, 'client-shown', 'reported');
+  shown.relatedEventId = f.store.state.deliveries[0].eventId;
+  await accessStore.append(E.parseAccessEvent(shown));
+  fail = true;
+  await refusedAsync(R.provideClinicalRead(accessStore, accessEvent(read, r1, 'provide-prepared', 'prepared'), read,
+    async provided => { bodies.push(...provided); }), 'AccessEventFailed');
+  assert.equal(bodies.length, 1); effects(f.store, [1, 1, 1, 2, 1, 1], 'C48');
+});
+// Controlled automatic scheduler: no sleep, click, new ID, mutation, or synthetic UI success.
+function automatic(f, onTick) {
+  const results = [], inputSnapshot = { ...f.write }, events = { ticks: 0, published: 0 };
+  const done = R.followClinicalWrite(f.ports, () => inputSnapshot,
+    async () => { events.ticks++; await onTick(events.ticks); }, result => { results.push(result); events.published++; });
+  return { results, events, done };
+}
+test('CONSULT C49 automatic next lookup applies observable original success with no user event', async () => {
+  const f = requestFixture(); f.store.state.failCommit = 'late';
+  assert.equal((await replay(f)).status, 'unknown');
+  const follow = automatic(f, async () => { f.store.state.late[0](); });
+  await follow.done;
+  assert.deepEqual(follow.results.map(r => r.status), ['replayed'], 'C49: automatic next lookup completes without a Retry click');
+  assert.equal(follow.events.ticks, 1); assert.equal(f.store.state.commits, 1);
+  assert.equal(follow.results[0].receipt.requestId, f.write.body.requestId);
+  effects(f.store, [1, 1, 1, 0, 1, 1], 'C49');
+});
+test('CONSULT C50 automatic lookups survive two outages without guessing or prompting', async () => {
+  const f = requestFixture(); f.store.state.failCommit = 'late'; await replay(f);
+  const follow = automatic(f, async n => {
+    f.store.state.failRequery = n < 3;
+    if (n === 3) f.store.state.late[0]();
+  });
+  await follow.done;
+  assert.deepEqual(follow.results.map(r => r.status), ['unknown', 'unknown', 'replayed']);
+  assert.equal(f.store.state.commits, 1); effects(f.store, [1, 1, 1, 0, 3, 3], 'C50');
+});
+test('CONSULT C51 repeated absence keeps automatic lookup on the original ID', async () => {
+  const f = requestFixture(); f.store.state.failCommit = 'late'; await replay(f);
+  const follow = automatic(f, async n => {
+    f.store.state.hideObservation = n < 4;
+    if (n < 4) effects(f.store, [0, 0, 0, 0, 1, n - 1], 'C51 pending');
+    if (n === 4) f.store.state.late[0]();
+  });
+  await follow.done;
+  assert.deepEqual(follow.results.map(r => r.status), ['unknown', 'unknown', 'unknown', 'replayed']);
+  assert.deepEqual([f.store.state.rows.size, f.store.state.commits, f.sig.calls.sign], [1, 1, 1]);
+  effects(f.store, [1, 1, 1, 0, 1, 4], 'C51');
+});
+test('CONSULT C52 actual view ABA and account-generation application', { skip:
+  'not_run: R2 owns actual DOM UID+sequence/account generation, input preservation and zero-friction UI acceptance; R1 has no page integration' }, () => {});
+
+for (const [id, title, phase, cancel] of [
+  ['C53', 'original sign wait timeout never fails a still running original', 'sign', false],
+  ['C54', 'original verify wait timeout never fails a still running original', 'verify', false],
+  ['C55', 'fenced cancellation before late sign prevents verify and commit', 'sign', true],
+  ['C56', 'fenced cancellation before late verify prevents commit', 'verify', true],
+]) test(`CONSULT ${id} ${title}`, async () => {
+  const hold = barrier(), expired = deferred(), terminal = deferred(), fenced = deferred();
+  const f = requestFixture(phase === 'sign' ? { beforeSign: hold.wait } : { beforeVerify: hold.wait });
+  f.store.state.hooks.onTerminal = terminal.resolve; f.store.state.hooks.onFenced = fenced.resolve;
+  const firstPromise = R.commitClinicalWrite(f.ports, f.write, { waitExpired: expired.promise });
+  await hold.entered; expired.resolve();
+  assert.equal((await firstPromise).status, 'unknown');
+  if (cancel) {
+    f.store.cancel(f.request);
+    const result = await R.lookupClinicalWrite(f.store.port, f.write);
+    assert.deepEqual([result.status, result.code], ['failed', 'RequestCancelled']);
+    hold.release(); await fenced.promise;
+    assert.equal(f.store.snapshot(f.request).state, 'rejected');
+    assert.equal(f.store.state.commits, 0);
+    effects(f.store, [0, 0, 0, 0, 2, 1], id);
+    assert.deepEqual(f.sig.calls, { sign: 1, verify: phase === 'sign' ? 0 : 1 });
+  } else {
+    assert.equal((await R.lookupClinicalWrite(f.store.port, f.write)).status, 'unknown');
+    effects(f.store, [0, 0, 0, 0, 1, 1], `${id} pending`);
+    hold.release(); await terminal.promise;
+    assert.equal((await R.lookupClinicalWrite(f.store.port, f.write)).status, 'replayed');
+    effects(f.store, [1, 1, 1, 0, 1, 2], id); assert.deepEqual(f.sig.calls, { sign: 1, verify: 1 });
+  }
 });

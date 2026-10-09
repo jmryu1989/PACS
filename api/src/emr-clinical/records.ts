@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { RecordKind, ResolvedRecord, verifiedRecord } from '../emr-contract/classification';
 import { AccessEvent, AccessTarget, AppendOnlyAccessStore, DurableAccessReceipt, ImmutableIdentity, identity, parseAccessEvent,
   patientLink, provideAfterDurableEvent } from '../emr-contract/access-event';
@@ -231,7 +231,6 @@ function admit(input: WriteInput) {
     projection = projectUnit(unit);
     if (unit.record !== spec.record || unit.studyId !== study.studyId || unit.recordId !== recordId) refuse('NotFound');
   }
-  if (spec.opens === true && unit !== null) refuse('UnitExists');
   if (spec.opens === false && unit === null) refuse('NotFound');
   // The institution boundary is checked before anything about the record is revealed by a later, more specific refusal.
   const managing = unit?.managingInstitutionId ?? study.managingInstitutionId;
@@ -255,6 +254,7 @@ export function prepareClinicalWrite(input: WriteInput) {
 export function planClinicalWrite(input: WriteInput): Readonly<ClinicalWritePlan> {
   const { w, surface, spec, actor, study, unit, projection, recordId, managing, requestId, revision, b, path, fingerprint, receiptKey } = admit(input);
   const opening = unit === null, at = utc(w.at), versionId = string(w.ids.versionId);
+  if (spec.opens === true && unit !== null) refuse('UnitExists');
   const context = workContext(w.workContext);
   const { text, reason, reasonSource } = textFor(path.text ?? spec.text, b, spec, w.content, opening,
     context && context.studyId === study.studyId && (spec.contextReason ?? []).includes(context.kind) ? context : null);
@@ -346,24 +346,82 @@ export function acceptSignature(plan: ClinicalWritePlan, evidence: unknown): Rea
 }
 
 export interface SignaturePort {
-  sign(request: Readonly<SigningRequest>): Promise<unknown>;
+  /** C must reconcile this operation ID after a lost answer; recovery signs only the fixed original author/payload. */
+  sign(request: Readonly<SigningRequest>, operation?: { originalId: string }): Promise<unknown>;
   verify(envelope: unknown, request: Readonly<SigningRequest>): Promise<unknown>;
 }
 export interface UnitOfWork {
   plan: Readonly<ClinicalWritePlan>;
   signature: { envelope: unknown; evidence: Readonly<SignatureEvidence> } | null;
 }
-/**
- * Thrown by the store (R2, B1 adapter) only when it knows the transaction ended without committing, for example a
- * statement inside it failed before COMMIT. A lost connection or an error during COMMIT is not this: its outcome is unknown.
- */
-export class CommitRolledBack extends Error {
-  constructor(message = 'Clinical write rolled back') { super(message); this.name = 'CommitRolledBack'; }
+export interface RequestIdentity { receiptKey: ClinicalWritePlan['receiptKey']; fingerprint: string }
+export interface OriginalIdentity extends RequestIdentity { originalId: string }
+/** Adapter-issued capability, never decoded from an HTTP body. The DB must also enforce the epoch under its K lock. */
+declare const originalPermit: unique symbol;
+export interface OriginalPermit { readonly original: OriginalIdentity; readonly epoch: number; readonly [originalPermit]: true }
+export type OriginalPhase = 'admitted' | 'prepared' | 'signed' | 'commit-dispatched';
+export interface OriginalCheckpoint {
+  phase: Exclude<OriginalPhase, 'admitted'>; work: Readonly<UnitOfWork>;
+  /** Preserved before verification so recovery can reuse a returned envelope without another sign operation. */
+  envelope?: unknown;
 }
-/** R2: B's single PostgreSQL transaction for version, signature, projection, access event and receipt. */
+export interface OriginalExecution {
+  permit: OriginalPermit;
+  /** B1 persists the exact input/facts, with protected references re-resolved as A capabilities on recovery. */
+  seed: Readonly<WriteInput>;
+  checkpoint: Readonly<OriginalCheckpoint> | null;
+}
+export interface CommittedProof {
+  original: OriginalIdentity; epoch: number; transactionId: string; changeId: string;
+  receipt: WriteReceipt; version: VersionReference; signature: SignatureEvidence | null;
+}
+export interface RejectedProof {
+  original: OriginalIdentity; epoch: number; rejectionId: string; code: string;
+  fencedThrough: number; noClinicalEffects: true;
+}
+export type RequestObservation =
+  | { state: 'absent' }
+  | { state: 'unavailable' }
+  | { state: 'pending'; original: OriginalIdentity; epoch: number; phase: OriginalPhase }
+  | { state: 'committed'; original: OriginalIdentity; epoch: number; binding: Readonly<UnitOfWork>; proof: CommittedProof }
+  | { state: 'rejected'; original: OriginalIdentity; epoch: number; proof: RejectedProof };
+export type OriginalAdmission = { kind: 'owner'; execution: OriginalExecution } | { kind: 'observer'; observation: RequestObservation };
+export interface OriginalRollbackProof { original: OriginalIdentity; epoch: number; transactionId: string; noClinicalEffects: true }
+/** A bare exception is an attempt error, NOT durable rejection evidence. Only B1 can attest its own transaction. */
+export class CommitRolledBack extends Error {
+  constructor(message = 'Clinical write rolled back', readonly proof: OriginalRollbackProof | null = null) {
+    super(message); this.name = 'CommitRolledBack';
+  }
+}
+export type RejectionEvidence = { code: string; cause: 'not-dispatched' } |
+  { code: 'StorageFailed'; cause: 'rollback'; rollback: OriginalRollbackProof };
+export interface RequestAttemptEvent {
+  attemptId: string; request: RequestIdentity | null; originalId: string | null; code: string;
+}
+/**
+ * B1/B2 handover, NOT an in-process lock implementation. All writers use one durable K/F/O register:
+ * - admission serializes K, fixes F/seed/O, and gives only the first call an original permit. Existing R/C absorb retries.
+ * - observations are authoritative. Existing-key lookups record service-job O, never clinical H or body-delivery L.
+ * - checkpoints must be durable before the next external effect. False fences an old/terminal permit without effects.
+ * - commit checks epoch and commit-dispatched under the same lock, atomically saving V/S/projection/H/receipt/C.
+ * - sealing proves no commit was dispatched OR attests the ORIGINAL rollback, fences every prior epoch, saves R/J.
+ *   The original rejection cause survives a failed seal for recovery; a lost seal answer is reconciled by observe.
+ * - recovery is server-only: fence prior owners under that lock, resume fixed admitted/prepared/signed intent. For
+ *   dispatched work, wait for its transaction; return C/R or seal StorageFailed only with zero-effects/fence proof.
+ *   Elapsed time/lease/absent receipt alone never permits recovery commit or rejection.
+ * - pending/terminal keys are not TTL-deleted/reused. Legacy writers must drain/reconcile before absent means new.
+ * B1 must provide restart scanning as well as wakeRecovery. This interface/types do not prove actual DB durability.
+ */
 export interface ClinicalStorePort {
-  findReceipt(key: ClinicalWritePlan['receiptKey']): Promise<WriteReceipt | null>;
-  commit(work: Readonly<UnitOfWork>): Promise<WriteReceipt>;
+  admitOrObserve(request: RequestIdentity, seed: Readonly<WriteInput>, attemptId: string): Promise<OriginalAdmission>;
+  observe(request: RequestIdentity, attemptId: string, external: boolean): Promise<RequestObservation>;
+  checkpoint(permit: OriginalPermit, value: Readonly<OriginalCheckpoint>): Promise<boolean>;
+  commitOriginal(permit: OriginalPermit, work: Readonly<UnitOfWork>): Promise<RequestObservation>;
+  sealRejected(permit: OriginalPermit, evidence: RejectionEvidence, attemptId: string): Promise<RequestObservation>;
+  recoverOriginal(request: RequestIdentity, attemptId: string): Promise<OriginalAdmission>;
+  wakeRecovery(request: RequestIdentity): Promise<void>;
+  /** J only, deduplicated by attemptId/code. No clinical body in this journal. */
+  noteAttempt(event: RequestAttemptEvent): Promise<void>;
 }
 export type CommitOutcome =
   | Readonly<{ status: 'committed' | 'replayed'; receipt: WriteReceipt }>
@@ -372,52 +430,172 @@ export type CommitOutcome =
 const failed = (code: string): CommitOutcome => freeze({ status: 'failed' as const, code, retry: 'same-request' as const });
 const unknownOutcome = (): CommitOutcome => freeze({ status: 'unknown' as const, code: 'OutcomeUnknown', retry: 'same-request' as const });
 const codeOf = (error: unknown) => error instanceof ContractError ? error.code : 'SignatureNotVerified';
+const sameRequest = (a: RequestIdentity, b: RequestIdentity) => !!a && !!b && a.fingerprint === b.fingerprint &&
+  canonical(a.receiptKey) === canonical(b.receiptKey);
+const sameOriginal = (a: OriginalIdentity, b: OriginalIdentity) => sameRequest(a, b) && !!a.originalId && a.originalId === b.originalId;
 
-async function signVerified(port: SignaturePort, plan: ClinicalWritePlan):
-  Promise<{ ok: true; signature: UnitOfWork['signature'] } | { ok: false; code: string }> {
-  let envelope: unknown, evidence: unknown;
-  try { envelope = await port.sign(plan.signing); evidence = await port.verify(envelope, plan.signing); }
-  catch { return { ok: false, code: 'SignatureFailed' }; }
-  try { return { ok: true, signature: { envelope, evidence: acceptSignature(plan, evidence) } }; }
-  catch (error) { return { ok: false, code: codeOf(error) }; }
+/** The sole request-outcome decision. Throws/refusals belong to a call; only matching Ec/Er terminates the original. */
+export function decideRequestOutcome(request: RequestIdentity, observation: RequestObservation, role: 'owner' | 'observer'): CommitOutcome {
+  if (observation.state === 'unavailable') return unknownOutcome();
+  if (observation.state === 'absent' || observation.state === 'pending') return unknownOutcome();
+  try {
+    const o = observation, p = o.proof;
+    if (!sameRequest(request, o.original) || !sameOriginal(o.original, p.original) || p.epoch !== o.epoch || integer(o.epoch, 1) < 1)
+      return unknownOutcome();
+    if (o.state === 'rejected') {
+      const er = o.proof;
+      if (!er.noClinicalEffects || er.fencedThrough < o.epoch || !string(er.rejectionId) || !string(er.code)) return unknownOutcome();
+      return failed(er.code);
+    }
+    const ec = o.proof, plan = o.binding.plan;
+    if (!sameRequest(request, plan) || canonical(ec.receipt) !== canonical(plan.receipt) ||
+        !sameRef(ec.version, ref(plan.version)) || !sameRef(ec.version, { recordId: ec.receipt.recordId,
+          versionId: ec.receipt.versionId, sha256: ec.receipt.versionSha256 }) || !string(ec.transactionId) || !string(ec.changeId)) return unknownOutcome();
+    if (plan.signing) {
+      acceptSignature(plan, ec.signature);
+      if (canonical(ec.signature) !== canonical(o.binding.signature?.evidence)) return unknownOutcome();
+    } else if (ec.signature !== null || o.binding.signature !== null) return unknownOutcome();
+    // Explicit receipt projection prevents an adapter accidentally exposing its stored intent or clinical text.
+    const r = ec.receipt;
+    return freeze({ status: role === 'owner' ? 'committed' : 'replayed', receipt: {
+      requestId: r.requestId, fingerprint: r.fingerprint, recordId: r.recordId, versionId: r.versionId,
+      versionSha256: r.versionSha256, revision: r.revision, state: r.state, at: r.at,
+    } });
+  } catch { return unknownOutcome(); }
 }
 
-/**
- * Plans, signs and commits one write as one unit of work. Refusals throw before any port is called. A replay of the
- * same canonical request returns the stored receipt; another meaning under the same request ID is refused. A lost
- * commit answer stays `unknown` until the receipt shows the real outcome or the store reports a definite rollback;
- * sending the same request again resolves it (the unique receipt key serialises it with the original).
- */
-export async function commitClinicalWrite(ports: { store: ClinicalStorePort; signature: SignaturePort }, input: WriteInput): Promise<CommitOutcome> {
-  const admitted = prepareClinicalWrite(input);
-  let prior: WriteReceipt | null = null;
-  // An unreadable receipt store says nothing about an earlier attempt of this request: unknown, never a failure.
-  try { prior = await ports.store.findReceipt(admitted.receiptKey); } catch { return unknownOutcome(); }
-  if (prior) {
-    if (prior.fingerprint !== admitted.fingerprint) refuse('RequestIdReused');
-    return freeze({ status: 'replayed', receipt: prior });
-  }
-  const plan = planClinicalWrite(input);
-  let signature: UnitOfWork['signature'] = null;
-  if (plan.signing) {
-    const result = await signVerified(ports.signature, plan);
-    if (result.ok === false) return failed(result.code);
-    signature = result.signature;
-  }
-  let receipt: WriteReceipt;
-  try { receipt = await ports.store.commit({ plan, signature }); }
+type WritePorts = { store: ClinicalStorePort; signature: SignaturePort };
+const unavailable = (): RequestObservation => ({ state: 'unavailable' });
+async function note(store: ClinicalStorePort, request: RequestIdentity | null, attemptId: string, code: string, originalId: string | null = null) {
+  try { await store.noteAttempt({ attemptId, request, originalId, code }); } catch { /* No terminal is inferred from journal availability. */ }
+}
+async function observe(store: ClinicalStorePort, request: RequestIdentity, attemptId: string, external = false): Promise<RequestObservation> {
+  try { return await store.observe(request, attemptId, external); }
   catch (error) {
-    if (error instanceof CommitRolledBack) return failed('StorageFailed');
-    let stored: WriteReceipt | null;
-    try { stored = await ports.store.findReceipt(plan.receiptKey); } catch { return unknownOutcome(); }
-    // Not visible yet is no evidence of a rollback: the original transaction may still complete.
-    if (!stored) return unknownOutcome();
-    // The receipt key is unique and committed with the version: another meaning under it means this unit of work did not commit.
-    if (stored.fingerprint !== plan.fingerprint) refuse('RequestIdReused');
-    return freeze({ status: 'committed', receipt: stored });
+    if (error instanceof ContractError && error.code === 'RequestIdReused') throw error;
+    await note(store, request, attemptId, 'ObservationUnavailable'); return unavailable();
   }
-  if (!receipt || receipt.fingerprint !== plan.fingerprint || receipt.versionId !== plan.version.versionId) return unknownOutcome();
-  return freeze({ status: 'committed', receipt });
+}
+async function outcome(store: ClinicalStorePort, request: RequestIdentity, observed: RequestObservation, role: 'owner' | 'observer', attemptId: string) {
+  const result = decideRequestOutcome(request, observed, role);
+  if (result.status === 'unknown') {
+    if (observed.state === 'committed' || observed.state === 'rejected') await note(store, request, attemptId, 'InvalidOutcomeEvidence');
+    try { await store.wakeRecovery(request); } catch { await note(store, request, attemptId, 'RecoveryUnavailable'); }
+  }
+  return result;
+}
+async function seal(store: ClinicalStorePort, execution: OriginalExecution, evidence: RejectionEvidence, attemptId: string) {
+  const request = execution.permit.original;
+  try { return await store.sealRejected(execution.permit, evidence, attemptId); }
+  catch { await note(store, request, attemptId, 'RejectionUnavailable', request.originalId); return observe(store, request, attemptId); }
+}
+
+/** Only admission/recovery's capability reaches this path. Every callback checkpoints before another external effect. */
+async function executeOriginal(ports: WritePorts, execution: OriginalExecution, attemptId: string): Promise<RequestObservation> {
+  const { store, signature } = ports, { permit } = execution, request = permit.original;
+  let work = execution.checkpoint?.work;
+  if (execution.checkpoint?.phase === 'commit-dispatched') return observe(store, request, attemptId);
+  if (!work) {
+    try { work = { plan: planClinicalWrite(execution.seed), signature: null }; }
+    catch (error) { return seal(store, execution, { cause: 'not-dispatched', code: error instanceof ContractError ? error.code : 'RequestShapeRefused' }, attemptId); }
+  }
+  try {
+    const plan = work.plan;
+    if (!sameRequest(request, plan)) return unavailable();
+    if (!(await store.checkpoint(permit, { phase: work.signature ? 'signed' : 'prepared', work }))) return observe(store, request, attemptId);
+    if (plan.signing && !work.signature) {
+      let envelope = execution.checkpoint?.envelope, evidence: unknown;
+      try { if (envelope === undefined) envelope = await signature.sign(plan.signing, { originalId: request.originalId }); }
+      catch { return seal(store, execution, { cause: 'not-dispatched', code: 'SignatureFailed' }, attemptId); }
+      if (!(await store.checkpoint(permit, { phase: 'prepared', work, envelope }))) return observe(store, request, attemptId);
+      try { evidence = await signature.verify(envelope, plan.signing); }
+      catch { return seal(store, execution, { cause: 'not-dispatched', code: 'SignatureFailed' }, attemptId); }
+      let accepted: SignatureEvidence;
+      try { accepted = acceptSignature(plan, evidence); }
+      catch (error) { return seal(store, execution, { cause: 'not-dispatched', code: codeOf(error) }, attemptId); }
+      work = { plan, signature: { envelope, evidence: accepted } };
+      if (!(await store.checkpoint(permit, { phase: 'signed', work }))) return observe(store, request, attemptId);
+    }
+    if (!(await store.checkpoint(permit, { phase: 'commit-dispatched', work }))) return observe(store, request, attemptId);
+    try { return await store.commitOriginal(permit, work); }
+    catch (error) {
+      const rollback = error instanceof CommitRolledBack ? error.proof : null;
+      if (rollback && sameOriginal(rollback.original, request) && rollback.epoch === permit.epoch && rollback.noClinicalEffects && rollback.transactionId)
+        return seal(store, execution, { cause: 'rollback', code: 'StorageFailed', rollback }, attemptId);
+      await note(store, request, attemptId, 'CommitOutcomeUnknown', request.originalId);
+      return observe(store, request, attemptId);
+    }
+  } catch { await note(store, request, attemptId, 'CheckpointUnavailable', request.originalId); return observe(store, request, attemptId); }
+}
+
+async function checkedRequest(store: ClinicalStorePort, input: WriteInput, attemptId: string) {
+  try { return prepareClinicalWrite(input); }
+  catch (error) { await note(store, null, attemptId, error instanceof ContractError ? error.code : 'RequestShapeRefused'); throw error; }
+}
+/** retry=same-request means result lookup, including after R. Corrected content needs a NEW request ID. */
+export async function commitClinicalWrite(ports: WritePorts, input: WriteInput,
+  options: { waitExpired?: Promise<void>; attemptId?: string } = {}): Promise<CommitOutcome> {
+  const attemptId = options.attemptId ?? randomUUID();
+  const admitted = await checkedRequest(ports.store, input, attemptId);
+  let admission: OriginalAdmission;
+  try { admission = await ports.store.admitOrObserve(admitted, input, attemptId); }
+  catch (error) {
+    if (error instanceof ContractError && error.code === 'RequestIdReused') throw error;
+    await note(ports.store, admitted, attemptId, 'AdmissionUnavailable');
+    return outcome(ports.store, admitted, unavailable(), 'observer', attemptId);
+  }
+  if (admission.kind === 'observer') return outcome(ports.store, admitted, admission.observation, 'observer', attemptId);
+  const execution = executeOriginal(ports, admission.execution, attemptId);
+  // Expiring the HTTP wait never cancels/fails the original execution. Its late effects still require the same permit.
+  const result = options.waitExpired ? await Promise.race([
+    execution.then(observation => ({ observation })), options.waitExpired.then(() => ({ observation: null })),
+  ]) : { observation: await execution };
+  if (result.observation) return outcome(ports.store, admitted, result.observation, 'owner', attemptId);
+  await note(ports.store, admitted, attemptId, 'WaitExpired', admission.execution.permit.original.originalId);
+  return outcome(ports.store, admitted, await observe(ports.store, admitted, attemptId), 'owner', attemptId);
+}
+
+/** A lookup can wake the recovery worker but cannot receive its permit, plan, sign or commit. Access is checked afresh. */
+export async function lookupClinicalWrite(store: ClinicalStorePort, input: WriteInput): Promise<CommitOutcome> {
+  const attemptId = randomUUID(), request = await checkedRequest(store, input, attemptId);
+  return outcome(store, request, await observe(store, request, attemptId, true), 'observer', attemptId);
+}
+/** Server worker entry, not an HTTP retry route. B1 must enumerate pending originals on restart/reconnect. */
+export async function recoverClinicalWrite(ports: WritePorts, request: RequestIdentity): Promise<CommitOutcome> {
+  const attemptId = randomUUID();
+  let admission: OriginalAdmission;
+  try { admission = await ports.store.recoverOriginal(request, attemptId); }
+  catch { return outcome(ports.store, request, unavailable(), 'observer', attemptId); }
+  const observed = admission.kind === 'owner' ? await executeOriginal(ports, admission.execution, attemptId) : admission.observation;
+  return outcome(ports.store, request, observed, 'observer', attemptId);
+}
+/** Request-local reconciliation state; it is neither a durable store nor authority to execute a mutation. */
+export function retainRequestOutcome(previous: CommitOutcome | null, next: CommitOutcome): CommitOutcome {
+  return previous && previous.status !== 'unknown' ? previous : next;
+}
+/**
+ * Automatic lookup contract consumed by R2's existing Save flow. The scheduler owns delay/cancellation; current returns
+ * null on view/account invalidation. R2 still guards UID+sequence/account generation at publish and preserves newer edits.
+ * No new request ID or user action is introduced here. Re-admission is atomic: existing originals are observations
+ * only; if the first admission never reached storage, only its authoritative first claim can start that original.
+ * Store outages keep this loop pending. The input provider must retain the original request body, not newer edits.
+ */
+export async function followClinicalWrite(ports: WritePorts, current: () => WriteInput | null,
+  waitNext: () => Promise<void>, publish: (result: CommitOutcome) => void): Promise<void> {
+  let previous: CommitOutcome | null = null;
+  const initial = current();
+  if (!initial) return;
+  const request = prepareClinicalWrite(initial);
+  do {
+    await waitNext();
+    const input = current();
+    if (!input || !sameRequest(request, prepareClinicalWrite(input))) return;
+    const next = await commitClinicalWrite(ports, input);
+    const active = current();
+    if (!active || active !== input) return;
+    previous = retainRequestOutcome(previous, next);
+    publish(previous);
+  } while (previous.status === 'unknown');
 }
 
 // ---------- reads ----------

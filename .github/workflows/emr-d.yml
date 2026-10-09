@@ -46,10 +46,10 @@ jobs:
         run: ./node_modules/.bin/prisma generate
       - name: API typecheck including api/src/emr-clinical
         run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/typecheck --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json -- api/node_modules/.bin/tsc --noEmit -p api
-      - name: TEST-D-01..04 clinical_vs_operational, versions_and_sr, read_scope, atomic_retry (read-only repository, no network)
+      - name: D contracts and C01-C56 model selection (C52 explicitly deferred to R2 DOM)
         if: ${{ !cancelled() }}
         run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/contract --cwd . --tree api/src/emr-clinical --tree api/src/emr-contract --file tests/emr/d/contract_test.cjs --file api/tsconfig.json --file api/package-lock.json -- docker run --rm --network none --read-only --tmpfs /tmp -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/emr/d/contract_test.cjs
-      - name: M-D-01..05 mutants on copies of api/src/emr-clinical (M-D-06 is round 2)
+      - name: Retained 14 and invariant 12 mutants (contract models distinguished; M-D-06 is round 2)
         if: ${{ !cancelled() }}
         run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/mutants --cwd . --tree api/src/emr-clinical --tree api/src/emr-contract --file tests/emr/d/mutants.py --file tests/emr/d/contract_test.cjs -- python3 -B tests/emr/d/mutants.py
       - name: EMR-D evidence
