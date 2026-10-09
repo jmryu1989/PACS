@@ -658,6 +658,53 @@ const { PrismaService } = require('/app/dist/prisma.service');
 
     # ── RA-2 / RA-3: seal and verify, computed in the isolated verifier ──
 
+    def test_iv19_emr_tablespace_exports_and_verifier_mutants(self):
+        """REQ-EMR-19/20 -> RISK-EMR-LOSS/TAMPER -> TEST-EMR-B-F09-VERIFIER.
+
+        Real PostgreSQL exports exercise both audit scratch restores, including an AuditLog placed outside pg_default.
+        Removing either compatibility option is a runtime mutant, judged by an actual restore failure, not source text.
+        Deployment ownership/ACL/placement and same-pause state are separately required by the L19 rehearsal.
+        """
+        db = self.new_database("iv19", rows=3)
+        docker("exec", "-u", "postgres", self.db, "mkdir", "-m", "700", "/tmp/emr-verifier-tablespace")
+        self.ok("CREATE TABLESPACE kin_emr_access OWNER kin_emr_owner LOCATION '/tmp/emr-verifier-tablespace'")
+        self.ok('ALTER TABLE public."AuditLog" SET TABLESPACE kin_emr_access; '
+                'ALTER TABLE emr_access.member_identity SET TABLESPACE kin_emr_access', db)
+        root = self.new_root()
+        folder, checkpoint, alarm = self.seal(db, root)
+        self.assertIsNone(alarm)
+        self.assertEqual(checkpoint["count"], 3)
+        manifest = json.loads((folder / "manifest.json").read_text())
+        source = audit.snapshot_source(folder, manifest)
+        code, report = audit.verify(folder / audit.CHECKPOINT, source)
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report["guard"]["state"], "present")
+
+        original = audit.VERIFIER_SCRIPT
+        for name, mutated in (
+            ("F09-AUDIT-ROWS", original.replace(" --no-tablespaces", "", 1)),
+            ("F09-AUDIT-SCHEMA", "".join(original.rsplit(" --no-tablespaces", 1))),
+        ):
+            with self.subTest(mutant=name), patch.object(audit, "VERIFIER_SCRIPT", mutated):
+                code, report = audit.verify(folder / audit.CHECKPOINT, source)
+                self.assertEqual(code, 2, report)
+                self.assertTrue(report["cleanup"]["confirmed"], report)
+            print("EMR_VERIFIER_MUTANT " + json.dumps({"id": name, "killed": code == 2,
+                "expected": "input_error", "exit": code, "cleanup_confirmed": report["cleanup"]["confirmed"],
+                "before_sha256": hashlib.sha256(original.encode()).hexdigest(),
+                "mutated_sha256": hashlib.sha256(mutated.encode()).hexdigest(),
+                "restored_sha256": hashlib.sha256(audit.VERIFIER_SCRIPT.encode()).hexdigest()}), flush=True)
+
+        raw = source.path.read_bytes()
+        try:
+            for contents in (raw + b"tampered", raw[:len(raw) // 2]):
+                source.path.write_bytes(contents)
+                code, report = audit.verify(folder / audit.CHECKPOINT, source)
+                self.assertEqual(code, 2, report)
+                self.assertTrue(report["cleanup"]["confirmed"], report)
+        finally:
+            source.path.write_bytes(raw)
+
     def test_iv01_clean_database_verifies_in_a_networkless_verifier(self):
         """IV-DB-01 (IV-01, IV-02, IV-16)."""
         root = self.new_root()

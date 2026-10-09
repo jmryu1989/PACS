@@ -9,6 +9,7 @@ docker CLI of tests/ops_audit_integrity_test.py.
 from __future__ import annotations
 
 import contextlib
+import copy
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -70,6 +71,9 @@ class Host:
                      for name in (*ops.CONTAINERS, "kin-proxy")]
         self.events = []
         self.sources = []
+        self.catalog = {"synthetic": "catalog"}
+        self.restored_catalog = None
+        self.restore_answer = "EMR_RESTORE_VERIFIED"
         # Backups a minute apart within the monitor's 30-hour window: the monitor orders manifests by whole seconds.
         self.clock = datetime.now(timezone.utc) - timedelta(hours=1)
 
@@ -105,7 +109,7 @@ class Host:
         if kwargs.get("output") is not None:
             kwargs["output"].write(orthanc_archive())
             return ""
-        return json.dumps({"integrity": "ok", "attachments": 0, "attachment_bytes": 0}) if "python3" in args else "EMR_RESTORE_VERIFIED"
+        return json.dumps({"integrity": "ok", "attachments": 0, "attachment_bytes": 0}) if "python3" in args else self.restore_answer
 
     def boundary(self, answer):
         def evaluate(source, *args, **kwargs):
@@ -125,7 +129,7 @@ class Host:
                 patch.object(ops, "text", side_effect=self.fake_text), \
                 patch.object(ops, "run", side_effect=self.fake_run), \
                 patch.object(ops, "temporary_run", side_effect=self.fake_archive), \
-                patch.object(ops, "emr_catalog", return_value={"synthetic": "catalog"}), \
+                patch.object(ops, "emr_catalog", return_value=self.catalog), \
                 patch.object(ops, "counts", return_value={"public.Report": 5}), \
                 patch.object(ops, "wait_ready", side_effect=lambda *a: self.events.append(("ready",))), \
                 patch.object(audit, "evaluate", side_effect=self.boundary(answer)), \
@@ -146,7 +150,7 @@ class Host:
         earlier = set(folder.glob("rehearsal-*.json"))
         with patch.object(ops, "run", side_effect=self.fake_run), \
                 patch.object(ops, "temporary_run", side_effect=self.fake_archive), \
-                patch.object(ops, "emr_catalog", return_value={"synthetic": "catalog"}), \
+                patch.object(ops, "emr_catalog", return_value=self.restored_catalog or self.catalog), \
                 patch.object(ops, "counts", return_value={"public.Report": 5}), \
                 patch.object(ops, "remove_owned_if_present", cleanup), \
                 patch.object(audit, "evaluate", side_effect=self.boundary(answer)), \
@@ -746,6 +750,117 @@ class BackupSafetyTests(unittest.TestCase):
                     self.assertEqual(fake.running(), [])
                     self.assertEqual((fake.names("containers"), fake.names("volumes")), ([], []))
                     self.assertEqual(host.files(sealed), before)
+
+
+class EmrRestoreVerification(unittest.TestCase):
+    """REQ-EMR-19/20 -> RISK-EMR-LOSS/PRIVILEGE -> TEST-EMR-B-F09.
+
+    Exercise the real backup validation and rehearsal verdict with file corruption and observed catalog differences.
+    Only Docker/catalog and ledger IO are synthetic here; L19 verifies the same flow with real PostgreSQL and state.
+    Audit-only scratch databases may ignore physical placement; the deployment rehearsal must never do so.
+    """
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.host = Host(temporary.name)
+        self.host.catalog = {
+            "schema": {"owner": "kin_emr_owner", "acl": "kin_runtime=U/kin_emr_owner"},
+            "roles": [{"rolname": name, "rolsuper": False, "rolcanlogin": name != "kin_emr_owner"}
+                      for name in ("kin_emr_owner", "kin_runtime", "kin_emr_reader", "kin_emr_retention")],
+            "memberships": None,
+            "tablespace": {"name": "kin_emr_access", "owner": "kin_emr_owner", "acl": None},
+            "tables": [{"name": "member_identity", "owner": "kin_emr_owner", "acl": None,
+                        "tablespace": "kin_emr_access"}],
+            "functions": [{"signature": "emr_access.append_access(text)", "owner": "kin_emr_owner",
+                           "acl": "kin_runtime=X/kin_emr_owner", "security_definer": True,
+                           "configuration": ["search_path=pg_catalog, emr_access"]}],
+        }
+        self.host.init_ledger()
+        self.answer = rows_stream({1: "synthetic-audit"})
+        self.folder, self.manifest, error = self.host.backup(self.answer)
+        self.assertIsNone(error)
+
+    def assert_restore_refused(self):
+        before = self.host.files(self.folder)
+        result, error, _, cleanup = self.host.rehearse(self.folder, self.answer)
+        self.assertIsInstance(error, RuntimeError)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["cleanup_failures"], [])
+        self.assertEqual(cleanup.call_count, 3)
+        self.assertEqual(self.host.files(self.folder), before)
+
+    def test_b_layout_and_same_pause_components_restore(self):
+        self.assertTrue(self.manifest["emr"]["same_pause"])
+        self.assertTrue(set(ops.EMR_FILES).issubset(self.manifest["sha256"]))
+        result, error, _, cleanup = self.host.rehearse(self.folder, self.answer)
+        self.assertIsNone(error)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["emr"], {"owner_acl_preserved": True, "database_state_verified": True})
+        self.assertTrue(result["audit"]["verified"])
+        self.assertEqual(cleanup.call_count, 3)
+
+    def test_tampered_and_partial_components_refuse_before_restore(self):
+        for name in ("kin.dump", *ops.EMR_FILES):
+            path = self.folder / name
+            original = path.read_bytes()
+            for missing in (False, True):
+                with self.subTest(component=name, missing=missing):
+                    try:
+                        if missing:
+                            path.unlink()
+                        else:
+                            path.write_bytes(original + b"tampered")
+                        with patch.object(ops, "run") as docker_boundary:
+                            with self.assertRaises(RuntimeError):
+                                ops.validate_backup(self.folder)
+                            docker_boundary.assert_not_called()
+                    finally:
+                        path.write_bytes(original)
+
+    def test_missing_or_moved_tablespace_refused(self):
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                changed = copy.deepcopy(self.host.catalog)
+                if missing:
+                    changed["tablespace"] = None
+                else:
+                    changed["tables"][0]["tablespace"] = None
+                self.host.restored_catalog = changed
+                self.assert_restore_refused()
+
+    def test_wrong_owner_refused(self):
+        for field in ("schema", "tablespace", "tables", "functions"):
+            with self.subTest(field=field):
+                changed = copy.deepcopy(self.host.catalog)
+                item = changed[field][0] if isinstance(changed[field], list) else changed[field]
+                item["owner"] = "kin_runtime"
+                self.host.restored_catalog = changed
+                self.assert_restore_refused()
+
+    def test_changed_acl_refused(self):
+        changed = copy.deepcopy(self.host.catalog)
+        changed["tables"][0]["acl"] = "kin_runtime=arwdDxt/kin_emr_owner"
+        self.host.restored_catalog = changed
+        self.assert_restore_refused()
+
+    def test_changed_roles_refused(self):
+        changed = copy.deepcopy(self.host.catalog)
+        changed["roles"][0]["rolcanlogin"] = True
+        self.host.restored_catalog = changed
+        self.assert_restore_refused()
+
+    def test_database_external_state_disagreement_refused(self):
+        self.host.restore_answer = "unverified"
+        self.assert_restore_refused()
+
+    def test_unattested_pause_refused(self):
+        self.manifest["emr"]["same_pause"] = False
+        (self.folder / "manifest.json").write_text(json.dumps(self.manifest), encoding="utf-8")
+        with patch.object(ops, "run") as docker_boundary:
+            with self.assertRaises(RuntimeError):
+                ops.rehearse(self.folder)
+            docker_boundary.assert_not_called()
 
 
 if __name__ == "__main__":
