@@ -2025,7 +2025,8 @@ class ClinicianPolicySpec(unittest.TestCase):
             source = path.read_text(encoding="utf-8")
             calls = len(re.findall(r"\bclinicianOnly\(", source))
             if calls:
-                counted[path.name] = calls
+                # the path under api/src: two modules may share a basename, and a basename key would merge their counts
+                counted[path.relative_to(API).as_posix()] = calls
             self.assertIsNone(re.search(r"includes\(\s*(?:'clinician'|\"clinician\"|CLINICIAN_ROLE)\s*\)", source), path.name)
         self.assertEqual(counted, FIXTURES["role_composition"]["clinician_only_call_sites"])
         self.assertEqual(set(sites) & set(behaviour_sites), set(), "a site is pinned by statement or by behaviour, not both")
