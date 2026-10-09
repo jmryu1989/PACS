@@ -52,13 +52,14 @@ def resolve_test_id(test, runner, workflow):
                     if "--test" not in command:
                         continue
                     tail = command[command.index("--test") + 1:]
-                    if tail not in ([filename], ["/" + filename]):
+                    if (filename not in tail and "/" + filename not in tail or not tail or
+                            not all(arg.endswith(".cjs") and not arg.startswith("-") for arg in tail)):
                         continue
                     if any(arg.startswith(("--test-name-pattern", "--test-skip-pattern",
                                            "--test-only", "--test-shard")) for arg in command):
                         continue
                     return {"id": test, "kind": "node-file", "file": filename}
-        raise ValueError("No unfiltered single-file CI execution: " + test)
+        raise ValueError("No unfiltered whole-file CI execution: " + test)
     parts = test.split(".")
     if len(parts) != 3:
         raise ValueError("Unresolvable Python ID: " + test)
@@ -101,6 +102,19 @@ class RequiredTestResolutionTest(unittest.TestCase):
                      "stage_exit_test.StageExitTest.test_missing"):
             with self.subTest(test=test), self.assertRaises(ValueError):
                 resolve_test_id(test, self.runner, self.workflow)
+
+    def test_stage8_required_ids_resolve_without_running_the_cases(self):
+        required = json.loads((ROOT / "tests/stage8-exit.json").read_text(encoding="utf-8"))
+        proof = []
+        for requirement in required["requirements"]:
+            self.assertTrue(requirement["tests"], requirement["id"])
+            for test in requirement["tests"]:
+                with self.subTest(requirement=requirement["id"], test=test):
+                    proof.append({"requirement": requirement["id"],
+                                  **resolve_test_id(test, self.runner, self.workflow)})
+        directory = ROOT / "tmp/s8-exit-list"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "id-resolution.json").write_text(json.dumps(proof, indent=2) + "\n", encoding="utf-8")
 
     def test_missing_node_file_fails_resolution(self):
         with self.assertRaises(ValueError):
@@ -192,6 +206,36 @@ class StageExitTest(unittest.TestCase):
     def test_one_missing(self):
         self.run_fixture()
         self.assert_failure(*self.verdict([TEST, "lean_fixture.LeanFixture.test_forgotten"]), "누락")
+
+    def test_node_batch_requires_every_case_to_pass_without_filtering(self):
+        tests = ["node:tests/lean_fixture.cjs", "node:tests/second_fixture.cjs"]
+        for name, counts, extra, expected in (
+                ("passed", (2, 0, 0), [], True),
+                ("failed", (1, 1, 0), [], False),
+                ("skipped", (1, 0, 1), [], False),
+                ("filtered", (2, 0, 0), ["--test-name-pattern=one"], False)):
+            with self.subTest(name=name):
+                passed, failed, skipped = counts
+                tap = (f"1..2\n# tests 2\n# pass {passed}\n# fail {failed}\n"
+                       f"# cancelled 0\n# skipped {skipped}\n# todo 0\n")
+                run = subprocess.run(self.record(
+                    [sys.executable, "-c", "print(" + repr(tap) + ")", *extra,
+                     "--test", "tests/lean_fixture.cjs", "tests/second_fixture.cjs"], name),
+                    capture_output=True, timeout=20)
+                self.assertEqual(run.returncode, 0)
+                # Test the public CLI with only this batch's record.
+                self.requirements.write_text(json.dumps({"requirements": [
+                    {"id": "batch", "statement": "whole files", "tests": tests}]}))
+                result = subprocess.run([sys.executable, str(SCRIPT), "--list", str(self.requirements),
+                    "--sha", self.sha, "--runs", str(self.directory / name),
+                    "--output", str(self.output)], capture_output=True, timeout=20)
+                report = json.loads(self.output.read_text(encoding="utf-8"))
+                self.assertEqual(report["all_pass"], expected)
+                self.assertEqual(result.returncode, 0 if expected else 1)
+                for test in tests:
+                    entries = report["requirements"][0]["tests"][test]
+                    self.assertEqual(len(entries), 1)
+                    self.assertEqual(entries[0]["reason"] == "PASS", expected)
 
     def test_interleaved_warning(self):
         self.run_fixture("import warnings; warnings.warn('synthetic child warning', UserWarning)")

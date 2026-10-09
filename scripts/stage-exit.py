@@ -82,8 +82,7 @@ def record_results(path, sha, found):
     # 필터가 붙은 부분 실행을 전체 파일의 결과로 세지 않는다.
     if "--test" in command:
         tail = command[command.index("--test") + 1:]
-        if len(tail) == 1 and tail[0].endswith(".cjs"):
-            test = "node:tests/" + Path(tail[0]).name
+        if tail and all(arg.endswith(".cjs") and not arg.startswith("-") for arg in tail):
             counts = {name: int(value) for name, value in
                       re.findall(r"^# (tests|pass|fail|cancelled|skipped|todo) (\d+)$", log, re.M)}
             reason = problem
@@ -102,7 +101,11 @@ def record_results(path, sha, found):
                     reason = "PASS"
                 else:
                     reason = "미완료: TAP 전체 성공 요약 없음"
-            found.setdefault(test, []).append({"reason": reason, "source": str(path)})
+            # VR CI runs several complete files in one command. Only the success
+            # of the entire batch can establish any member's whole-file result.
+            for filename in tail:
+                test = "node:tests/" + Path(filename).name
+                found.setdefault(test, []).append({"reason": reason, "source": str(path)})
 
 
 def candidate_results(directory, sha, found):
