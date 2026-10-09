@@ -4,15 +4,21 @@ import { LifecycleActor, LifecycleCommand, ReportFacts, transitionReport, valida
 import type { AttachmentReference, VersionReference } from '../emr-contract/signature';
 import { choice, freeze, integer, object, refuse, string, utc } from '../emr-contract/validation';
 import type { SignatureEnvelopeV2, SignaturePayloadV2, VerifiedSignatureV2 } from '../emr-signature/contract';
+import { boundaryPosition } from '../emr-signature/time-basis';
 import { requireVerifiedV2 } from '../emr-signature/verify';
+import { verifiedRecord } from '../emr-contract/classification';
 import {
   CommitPlan, CommitReceipt, FailureJournalPort, IngressContext, LedgerEntry, ReportStorePort, RetainedInputs, StudyFacts, VerifiedActor,
   institutionAllows, parseCommitReceipt, parseStudyFacts, parseVerifiedActor,
 } from './contract';
 import { signedTransition } from './retention';
 
-export type ReportCommandAction = 'start' | 'save' | 'release' | 'preliminary' | 'approve' | 'amend' | 'addendum' | 'cancel';
-const SIGNED_ACTION = freeze({ preliminary: 'preliminary', approve: 'approve-sign', amend: 'amend', addendum: 'addendum', cancel: 'cancel' } as const);
+export type ReportCommandAction = 'start' | 'save' | 'release' | 'preliminary' | 'approve' | 'amend' | 'addendum' | 'cancel' | 'cancel-preliminary';
+/** cancel-preliminary: the designated reviewer's reasoned, signed cancellation of a Preliminary (AGENTS §1.3). */
+const SIGNED_ACTION = freeze({ preliminary: 'preliminary', approve: 'approve-sign', amend: 'amend', addendum: 'addendum', cancel: 'cancel',
+  'cancel-preliminary': 'cancel' } as const);
+/** Actions that consume the reader's claim; their signature binds the server claim generation. */
+const CLAIM_BOUND: readonly ReportCommandAction[] = freeze(['preliminary', 'approve', 'cancel-preliminary']);
 /** Every command's access action; null only where no record content is written. Each is a 제23조④ act via STATUTORY_ACT. */
 const ACCESS_FOR: Readonly<Record<ReportCommandAction, AccessAction | null>> = freeze({
   start: null,
@@ -23,11 +29,12 @@ const ACCESS_FOR: Readonly<Record<ReportCommandAction, AccessAction | null>> = f
   amend: 'amend',
   addendum: 'addendum',
   cancel: 'cancel',
+  'cancel-preliminary': 'cancel',
 });
 const SURFACE: Readonly<Record<ReportCommandAction, string>> = freeze({
   start: 'POST studies/:uid/hold', save: 'PUT studies/:uid/report', release: 'POST studies/:uid/release',
   preliminary: 'POST studies/:uid/report/commit', approve: 'POST studies/:uid/report/commit', amend: 'POST studies/:uid/report/commit',
-  addendum: 'POST studies/:uid/report/commit', cancel: 'POST studies/:uid/report/commit',
+  addendum: 'POST studies/:uid/report/commit', cancel: 'POST studies/:uid/report/commit', 'cancel-preliminary': 'POST studies/:uid/report/commit',
 });
 
 /** The client's request. Identity, roles, institution and "verified" facts are not fields: they come from B2. */
@@ -45,7 +52,7 @@ export interface ReportCommand {
 }
 export function parseReportCommand(input: unknown): Readonly<ReportCommand> {
   const v = object(input, ['action', 'recordId', 'eventId', 'expectedClaimGeneration', 'expectedPublishedVersionId', 'draft', 'reason', 'reviewerId', 'preservation', 'envelope']);
-  const action = choice(v.action, ['start', 'save', 'release', 'preliminary', 'approve', 'amend', 'addendum', 'cancel']);
+  const action = choice<ReportCommandAction>(v.action, ['start', 'save', 'release', 'preliminary', 'approve', 'amend', 'addendum', 'cancel', 'cancel-preliminary']);
   let draft: ReportCommand['draft'] = null;
   if (v.draft !== null) {
     const d = object(v.draft, ['expectedRevision', 'revision', 'text']), t = object(d.text, ['findings', 'conclusion', 'recommendation']);
@@ -75,9 +82,14 @@ export interface PlanContext {
   receivedAt: string;
   ingress: IngressContext;
   mode: 'online' | 'offline-reconcile';
+  /** Offline only: the claim generation of the grant the signature relied on (checked by checkSignatureGrant). */
+  grantGeneration?: number | null;
 }
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+/** All three base64url parts: a different signature over the same payload is a different, unverified envelope. */
+export const sameEnvelope = (a: SignatureEnvelopeV2 | null, b: SignatureEnvelopeV2) =>
+  !!a && a.protected === b.protected && a.payload === b.payload && a.signature === b.signature;
 export function expectedPreviousVersion(facts: ReportFacts, action: ReportCommandAction): VersionReference | null {
   if (action === 'amend') return facts.bodyVersion;
   if (action === 'addendum' || action === 'cancel') return facts.publishedVersion;
@@ -123,6 +135,8 @@ function accessEntry(action: AccessAction, command: ReportCommand, ctx: PlanCont
 }
 
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
+/** Identity of the exact envelope (all three parts); part of a signed event's content digest so a resend must be byte-identical. */
+export const envelopeDigest = (e: SignatureEnvelopeV2) => digest(`${e.protected}.${e.payload}.${e.signature}`);
 
 /**
  * Plan one report command against stored facts. Signed actions require a verified v2 signature whose signed facts
@@ -157,36 +171,76 @@ export function planReportCommand(context: PlanContext, input: unknown): Readonl
       facts: outcome.facts, effects: outcome.effects, version: null, draft, retention: null, ledger, publish: false,
       times: { signedAt: null, receivedAt, committedAt: null, publishedAt: null } });
   }
+  const prepared = prepareSignedCommand(context, command);
+  const { sig, p, version, lifecycle, retained } = prepared;
+  // A Preliminary cancellation adds no content part: its signed reason is history evidence of the same unit.
+  const outcome = command.action === 'cancel-preliminary' ? { ...transitionReport(facts, lifecycle), retention: null }
+    : signedTransition(facts, lifecycle, retained);
+  if (context.mode === 'online') ledger.push(accessEntry(accessAction, command, ctx, p.versionId, p.signedAt));
+  const publish = outcome.effects.includes('publish-immediately');
+  return freeze({ eventId: command.eventId, contentDigest: digest(`signed:${sig.versionSha256}:${envelopeDigest(sig.envelope)}:${command.preservation ?? 'clinical'}`),
+    recordId: facts.recordId, studyId: study.studyId,
+    expected: { claimGeneration: facts.claimGeneration, publishedVersionId: facts.publishedVersion?.versionId ?? null, draftRevision: context.ownDraftRevision },
+    facts: outcome.facts, effects: outcome.effects, version: { ref: version, action: signedAction, envelope: { ...sig.envelope }, signedAt: p.signedAt },
+    draft: null, retention: outcome.retention, ledger, publish, times: { signedAt: p.signedAt, receivedAt, committedAt: null, publishedAt: null } });
+}
+
+/**
+ * The validation every signed command shares, also for an offline event that will only be recorded as a past event:
+ * the exact verified envelope, verified time and active key, the signed facts against the server's (patient, record,
+ * signer, author, base version, claim lineage, draft revision, event), the amend window over the whole time interval,
+ * and the stored retention inputs bound to this signed version.
+ */
+export function prepareSignedCommand(context: PlanContext, input: unknown): Readonly<{
+  sig: Readonly<VerifiedSignatureV2>; p: Readonly<SignaturePayloadV2>; version: VersionReference; lifecycle: LifecycleCommand; retained: RetainedInputs;
+}> {
+  const command = parseReportCommand(input);
+  const signedAction = Object.prototype.hasOwnProperty.call(SIGNED_ACTION, command.action) ? SIGNED_ACTION[command.action] : null;
+  if (signedAction === null) refuse('SignatureRequired');
+  const actor = parseVerifiedActor(context.actor), study = parseStudyFacts(context.study), facts = context.facts;
+  validateReportFacts(facts);
+  if (actor.sessionState !== 'active') refuse('SessionEnded');
+  if (command.recordId !== facts.recordId || facts.studyId !== study.studyId) refuse('RecordBindingRefused');
   const sig = requireVerifiedV2(context.signature);
+  if (!sameEnvelope(command.envelope, sig.envelope)) refuse('SignedEnvelopeMismatch');
   if (sig.time.status !== 'verified') refuse('SignatureTimeUnverified');
   if (sig.keyAtSigningTime !== 'active') refuse('SigningKeyInactive');
   if (context.mode === 'online' && sig.payload.grant !== null) refuse('OfflineSignatureRequiresReconcile');
-  if (context.mode === 'offline-reconcile' && sig.payload.grant === null) refuse('OnlineSignatureRequiresConnection');
-  if (command.envelope.payload !== sig.payloadBase64url) refuse('SignedPayloadBindingRefused');
+  if (context.mode === 'offline-reconcile' && (sig.payload.grant === null || !Number.isSafeInteger(context.grantGeneration)))
+    refuse('OnlineSignatureRequiresConnection');
   if (!actor.canSign) refuse('SigningAuthorityRequired');
   const p = sig.payload;
   if (context.author === null) refuse('AuthorRequired');
+  if (command.action === 'cancel-preliminary' && (facts.state !== 'Preliminary' || facts.preliminary?.reviewerId !== actor.identity.id))
+    refuse('DesignatedReviewerRequired');
+  // Claim-consuming actions sign the server's claim; later actions sign the lineage of the grant they relied on.
+  const claimGeneration = CLAIM_BOUND.includes(command.action) || context.mode === 'online' ? facts.claimGeneration : context.grantGeneration;
   bindSignedPayload(p, { recordId: facts.recordId, action: signedAction, eventId: command.eventId, patient: study.patient, studyId: study.studyId,
     managingInstitutionId: study.managingInstitutionId, actingInstitutionId: actor.institutionId, signer: actor.identity,
     identityRegistrationId: actor.identityRegistrationId, author: context.author, previousVersion: expectedPreviousVersion(facts, command.action),
-    attachments: context.attachments, claimGeneration: facts.claimGeneration, draftRevision: context.ownDraftRevision, reason: command.reason });
+    attachments: context.attachments, claimGeneration, draftRevision: context.ownDraftRevision, reason: command.reason });
+  if (command.action === 'amend') {
+    if (facts.originalSignerId !== p.signer.id) refuse('AmendSignerRefused');
+    // Exclusive end t0+24h (A): the whole uncertainty interval must end before it; touching or crossing it is Addendum-only.
+    if (facts.amendUntil === null || boundaryPosition(sig.time.interval, facts.amendUntil) !== 'before') refuse('AmendWindowClosed');
+  }
   const version: VersionReference = { recordId: facts.recordId, versionId: p.versionId, sha256: sig.versionSha256 };
   const retained = context.retained;
   if (!retained) refuse('RetainedRecordRequired');
+  if (command.action !== 'cancel-preliminary') {
+    const e = verifiedRecord(retained.source).event;
+    if (verifiedRecord(retained.source).recordId !== facts.recordId || e.versionId !== p.versionId || e.sha256 !== sig.versionSha256 || e.at !== p.signedAt ||
+        !e.signature || (facts.contentHistory.length > 0) !== (retained.record !== null && retained.graph !== null)) refuse('RetainedRecordRequired');
+  }
+  const lifecycleActor: LifecycleActor = { id: actor.identity.id, kind: actor.kind, roles: actor.roles,
+    canReadStudy: institutionAllows(actor, study), canSign: actor.canSign, canCancel: actor.canCancel };
   const lifecycle: LifecycleCommand = { action: command.action, actor: lifecycleActor, at: p.signedAt,
     expectedClaimGeneration: command.expectedClaimGeneration, expectedPublishedVersionId: command.expectedPublishedVersionId, version,
     ...(command.reason !== null ? { reason: command.reason } : {}), eventId: command.eventId,
     ...(command.reviewerId !== null ? { reviewerId: command.reviewerId } : {}),
     ...(command.preservation === 'entry' ? { preservationEntry: retained.source } : {}),
     ...(command.preservation === 'correction' ? { preservationCorrection: retained.source } : {}) };
-  const outcome = signedTransition(facts, lifecycle, retained);
-  if (context.mode === 'online') ledger.push(accessEntry(accessAction, command, ctx, p.versionId, p.signedAt));
-  const publish = outcome.effects.includes('publish-immediately');
-  return freeze({ eventId: command.eventId, contentDigest: digest(`signed:${sig.versionSha256}:${command.preservation ?? 'clinical'}`),
-    recordId: facts.recordId, studyId: study.studyId,
-    expected: { claimGeneration: facts.claimGeneration, publishedVersionId: facts.publishedVersion?.versionId ?? null, draftRevision: context.ownDraftRevision },
-    facts: outcome.facts, effects: outcome.effects, version: { ref: version, action: signedAction, envelope: { ...command.envelope }, signedAt: p.signedAt },
-    draft: null, retention: outcome.retention, ledger, publish, times: { signedAt: p.signedAt, receivedAt, committedAt: null, publishedAt: null } });
+  return Object.freeze({ sig, p, version, lifecycle, retained });
 }
 
 /**
@@ -214,7 +268,7 @@ export interface TechNoteContext {
 }
 export function planTechNoteRevision(context: TechNoteContext, input: unknown): Readonly<{
   recordId: string; versionId: string; signing: 'author-signs' | 'unsigned-operational'; clinicalEntry: boolean;
-  version: VersionReference | null; signedAt: string | null; ledger: readonly LedgerEntry[];
+  version: VersionReference | null; envelope: SignatureEnvelopeV2 | null; signedAt: string | null; ledger: readonly LedgerEntry[];
 }> {
   const r = object(input, ['versionId', 'text', 'reason', 'eventId', 'envelope']);
   const actor = parseVerifiedActor(context.actor), study = parseStudyFacts(context.study), receivedAt = utc(context.receivedAt);
@@ -235,10 +289,11 @@ export function planTechNoteRevision(context: TechNoteContext, input: unknown): 
   };
   if (signing === 'unsigned-operational') {
     if (r.envelope !== null || context.signature !== null) refuse('TechNoteSignatureNotApplicable');
-    return freeze({ recordId: context.recordId, versionId, signing, clinicalEntry: false, version: null, signedAt: null, ledger: [entry(occurredAt(null))] });
+    return freeze({ recordId: context.recordId, versionId, signing, clinicalEntry: false, version: null, envelope: null, signedAt: null,
+      ledger: [entry(occurredAt(null))] });
   }
   const sig = requireVerifiedV2(context.signature);
-  if (r.envelope === null || r.envelope.payload !== sig.payloadBase64url) refuse('SignedPayloadBindingRefused');
+  if (!sameEnvelope(r.envelope, sig.envelope)) refuse('SignedEnvelopeMismatch');
   if (sig.time.status !== 'verified') refuse('SignatureTimeUnverified');
   if (sig.keyAtSigningTime !== 'active') refuse('SigningKeyInactive');
   if (!actor.canSign) refuse('SigningAuthorityRequired');
@@ -251,7 +306,8 @@ export function planTechNoteRevision(context: TechNoteContext, input: unknown): 
       !same(p.patient, study.patient) || p.studyId !== study.studyId || p.managingInstitutionId !== study.managingInstitutionId ||
       p.actingInstitutionId !== actor.institutionId) refuse('SignedPayloadBindingRefused');
   return freeze({ recordId: context.recordId, versionId, signing, clinicalEntry: true,
-    version: { recordId: context.recordId, versionId, sha256: sig.versionSha256 }, signedAt: p.signedAt, ledger: [entry(occurredAt(p.signedAt))] });
+    version: { recordId: context.recordId, versionId, sha256: sig.versionSha256 }, envelope: { ...sig.envelope }, signedAt: p.signedAt,
+    ledger: [entry(occurredAt(p.signedAt))] });
 }
 
 export type CommitResult = Readonly<

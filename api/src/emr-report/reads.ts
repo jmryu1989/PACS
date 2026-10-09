@@ -35,6 +35,10 @@ const known = <T>(value: T) => ({ status: 'known' as const, value });
 function retainedVersions(facts: ReportFacts): readonly VersionReference[] {
   return facts.contentHistory.map(h => h.version);
 }
+/** Versions that A published when they were signed: clinical approve, amend and addendum. */
+function publishedHistory(facts: ReportFacts): readonly VersionReference[] {
+  return facts.contentHistory.filter(h => h.use === 'clinical' && ['approve', 'amend', 'addendum'].includes(h.action)).map(h => h.version);
+}
 
 function event(ctx: ReadContext, surface: string, action: 'provide-prepared' | 'client-shown' | 'explicit-ack' | 'print-opened' | 'print-done',
   version: { recordId: string; versionId: string }, occurredAt: string, relatedEventId: string | null, eventId: string): Readonly<AccessEvent> {
@@ -66,8 +70,14 @@ export function planReportRead(context: ReadContext, input: unknown): Readonly<R
   const access = readRetention(facts, context.archive, context.resume, context.retained);
   if (!access.ordinaryClinicalAccess) refuse('RetentionOnlyAccessRefused');
   const published = facts.publishedVersion;
-  const requested = r.versionId === null ? published : retainedVersions(facts).find(v => v.versionId === string(r.versionId)) ?? null;
-  if (requested === null) refuse(published === null ? 'NoPublishedReport' : 'VersionNotRetained');
+  // A non-reader sees only versions that were ever published to clinicians: never a Preliminary or a preservation-only
+  // version, even once a later version is approved.
+  const readable = reader ? retainedVersions(facts) : publishedHistory(facts);
+  const requested = r.versionId === null ? published : readable.find(v => v.versionId === string(r.versionId)) ?? null;
+  if (requested === null) {
+    if (published === null) refuse('NoPublishedReport');
+    refuse(retainedVersions(facts).some(v => v.versionId === r.versionId) ? 'VersionNotPublished' : 'VersionNotRetained');
+  }
   // Clinicians see what was published; a Preliminary or a later private draft is never their read.
   if (!reader && (published === null || !['Approved', 'Finalized', 'Cancelled'].includes(facts.state))) refuse('NoPublishedReport');
   const surface = READ_SURFACES[surfaceKey];

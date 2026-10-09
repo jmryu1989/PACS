@@ -37,11 +37,13 @@ CMD, REC, RD, RT, Q = ("api/src/emr-report/commands.ts", "api/src/emr-report/rec
 PAGE = "worklist-v0/hpacs-lite/offline-report.js"
 LEDGER = "  if (context.mode === 'online') ledger.push(accessEntry(accessAction, command, ctx, p.versionId, p.signedAt));"
 SERVE = "  return provideAfterDurableEvent(ledger, plan.event, sendBody);"
+GRANT = "api/src/emr-report/offline-grant.ts"
+AMEND_WINDOW = "    if (facts.amendUntil === null || boundaryPosition(sig.time.interval, facts.amendUntil) !== 'before') refuse('AmendWindowClosed');"
 # variant -> (file, anchor, replacement). Each anchor must occur exactly once in its file.
 MUTANTS = {
-    "M01": (CMD, "actor: lifecycleActor, at: p.signedAt,", "actor: lifecycleActor, at: context.mode === 'offline-reconcile' ? receivedAt : p.signedAt,"),
-    "M02": (REC, "      if (position !== 'before') return refused(",
-            "      if (position === 'straddles' || (position === 'at-or-after' && sig.time.interval.earliest > facts.amendUntil)) return refused("),
+    "M01": (CMD, "actor: lifecycleActor, at: p.signedAt,", "actor: lifecycleActor, at: context.mode === 'offline-reconcile' ? utc(context.receivedAt) : p.signedAt,"),
+    "M02": (CMD, AMEND_WINDOW, AMEND_WINDOW.replace("boundaryPosition(sig.time.interval, facts.amendUntil) !== 'before'",
+            "(boundaryPosition(sig.time.interval, facts.amendUntil) === 'at-or-after' && sig.time.interval.earliest > facts.amendUntil)")),
     "M03": (REC, "  if (p.action === 'amend' && facts.state === 'Finalized') {",
             "  if (p.action === 'amend' && facts.state === 'Finalized') return refused(eventId, 'AmendWindowClosed', visible, receivedAt, p.signedAt);\n  if (false) {"),
     "M04-signer": (CMD, "    [same(p.signer, e.signer) && p.identityRegistrationId === e.identityRegistrationId, 'signer'],\n", ""),
@@ -60,15 +62,14 @@ MUTANTS = {
     "M09": (CMD, "    const receipt = parseCommitReceipt(existing);\n    if (receipt.contentDigest !== plan.contentDigest) refuse('EventIdConflict');\n",
             "    const receipt = parseCommitReceipt(existing);\n"),
     "M10-reconcile": (REC, "      if (!context.adoptDivergedDraft) return conflict('own-draft-diverged', ['adopt-signed-original', 'sign-new-version']);\n", ""),
-    "M10-queue": (Q, "if (predecessor !== null && state.get(predecessor) !== 'committed')", "if (predecessor !== null && state.get(predecessor) === 'pending')"),
+    "M10-queue": (Q, "state.get(predecessor) !== 'committed' &&", "state.get(predecessor) === 'pending' &&"),
     "M11-session": (Q, "  if (kind === 'http' && s.status === 401 && s.code === 'AUTH_SESSION_ENDED') return 'awaiting-reauth';",
                     "  if (kind === 'network' || (kind === 'http' && s.status === 401 && s.code === 'AUTH_SESSION_ENDED')) return 'awaiting-reauth';"),
-    "M11-page": (PAGE, "if (signal && signal.status === 401 && signal.code === 'AUTH_SESSION_ENDED') setState(", "if (signal) setState("),
+    "M11-page": (PAGE, "const sessionEnded = signal => !!signal && ((", "const sessionEnded = signal => !!signal || (("),
     "M12-later-input": (PAGE, "const text = textOf(view.readText());",
                         "const text = { get findings() { return view.readText().findings; }, get conclusion() { return view.readText().conclusion; }, "
                         "get recommendation() { return view.readText().recommendation; } };"),
-    "M12-aba": (PAGE, "if (!body || !now || now.uid !== uid || now.generation !== opening.generation) return false;",
-                "if (!body || !now || now.uid !== uid) return false;"),
+    "M12-aba": (PAGE, "if (!body || !sameOpening(start)) return false;", "if (!body) return false;"),
     "M13": (RD, SERVE, "  const body = await sendBody({ eventId: plan.event.eventId, durableAt: plan.event.occurredAt });\n"
                        "  await ledger.append(plan.event);\n  return body;"),
     "M14": (REC, "act: STATUTORY_ACT[entry.access.action], event: entry.access });",
@@ -76,7 +77,8 @@ MUTANTS = {
     "M15": (RT, "  return transitionRetainedReport(facts, command, r.record, source, r.graph, r.archive);",
             "  { const outcome = transitionReport(facts, command); return freeze({ ...outcome, "
             "retention: require('../emr-contract/lawful-defaults').recordVersionAdded(r.record, source, r.graph, false) }); }"),
-    "M16": (CMD, "    ...(command.preservation === 'entry' ? { preservationEntry: retained.source } : {}),", "    ...({}),"),
+    "M16": (RD, "  const access = readRetention(facts, context.archive, context.resume, context.retained);",
+            "  const access = readRetention(facts, facts.contentHistory.some(h => h.use === 'preservation-entry') ? null : context.archive, context.resume, context.retained);"),
     "M17": (RT, "  const read = requireRetainedRead(retained);",
             "  if (retained === null || retained === undefined) return reportRetentionAccess(facts, archive, resume, null);\n"
             "  const read = requireRetainedRead(retained);"),
@@ -90,6 +92,30 @@ MUTANTS = {
     "M20-additional-entry": (CMD, LEDGER, LEDGER.replace("context.mode === 'online'", "context.mode === 'online' && command.action !== 'addendum'")),
     "M20-modification": (CMD, LEDGER, LEDGER.replace("context.mode === 'online'", "context.mode === 'online' && command.action !== 'amend'")),
     "M20-read": (RD, SERVE, "  return sendBody({ eventId: plan.event.eventId, durableAt: plan.event.occurredAt });"),
+    # Round 2 (Astra review of 3521006, D734): each re-introduces one fixed defect.
+    "M21-amend-interval": (CMD, AMEND_WINDOW + "\n", ""),
+    "M21-anchor-interval": ("api/src/emr-signature/time-basis.ts", "  if (basis.interval.latest > basis.anchorValidUntil) return held(",
+                            "  if (signedAt > basis.anchorValidUntil) return held("),
+    "M22-generation": (GRANT, "  if (p.claimGeneration !== study.claimGeneration) refuse('GrantGenerationRefused');\n", ""),
+    "M22-anchor": (GRANT, "  if (p.timeBasis.anchorId !== grant.anchorId) refuse('GrantAnchorRefused');\n", ""),
+    "M22-actions": (GRANT, "  const signActions = usable ? grant.actions.filter(a => a !== 'read') : [];",
+                    "  const signActions: any = usable ? ['approve-sign', 'amend', 'addendum'] : [];"),
+    "M23": (REC, "  try { prepareSignedCommand(planContext, command); }",
+            "  try { if (!(p.action === 'amend' && facts.state === 'Finalized')) prepareSignedCommand(planContext, command); }"),
+    "M24": (RD, "  const readable = reader ? retainedVersions(facts) : publishedHistory(facts);", "  const readable = retainedVersions(facts);"),
+    "M25": (PAGE, "        if (!sameOpening(start)) return false; // ", "        if (false) return false; // "),
+    "M26-sign": (PAGE, "        if (!sameAccount(start)) { setState(t.uid, { status: 'not-saved' }); return stateOf(t.uid); }\n", ""),
+    "M26-list": (PAGE, "          if (!sameAccount(start)) return; // ", "          if (false) return; // "),
+    "M26-reply": (PAGE, "reply.eventId !== entry.eventId || stateOf(uid).eventId !== entry.eventId) return;", "reply.eventId !== entry.eventId) return;"),
+    "M27": (REC, "  if (actor.sessionState !== 'active') return fail('SessionEnded', null);",
+            "  if (context.existingReceipt && parseCommitReceipt(context.existingReceipt).eventId === eventId) return freeze({ kind: 'duplicate' as const, response: answer('duplicate', null, null, false) });\n"
+            "  if (actor.sessionState !== 'active') return fail('SessionEnded', null);"),
+    "M28": (CMD, "  if (!sameEnvelope(command.envelope, sig.envelope)) refuse('SignedEnvelopeMismatch');",
+            "  if (!command.envelope || command.envelope.payload !== sig.envelope.payload) refuse('SignedEnvelopeMismatch');"),
+    "M29": (CMD, "  if (command.action === 'cancel-preliminary' && (facts.state !== 'Preliminary' || facts.preliminary?.reviewerId !== actor.identity.id))\n    refuse('DesignatedReviewerRequired');\n", ""),
+    "M30": (Q, "state.get(predecessor) !== 'committed' && !kept.has(predecessor)", "state.get(predecessor) !== 'committed'"),
+    "M31-session": (Q, "  if (kind === 'http' && [403, 409].includes(s.status as number) && s.code === 'AUTH_SESSION_MISMATCH') return 'awaiting-reauth';\n", ""),
+    "M31-page": (PAGE, " ||\n      ([403, 409].includes(signal.status) && signal.code === 'AUTH_SESSION_MISMATCH'));", ");"),
 }
 
 
@@ -210,7 +236,7 @@ def main():
 
     # Declared mutants and their target cases must equal the implemented table exactly.
     declared = {v["variant"]: v for m in unit["mutants"] for v in m["variants"]}
-    if set(declared) != set(MUTANTS) or [m["id"] for m in unit["mutants"]] != [f"M{n:02d}" for n in range(1, 21)]:
+    if set(declared) != set(MUTANTS) or [m["id"] for m in unit["mutants"]] != [f"M{n:02d}" for n in range(1, len(unit["mutants"]) + 1)]:
         result["declaration"].append("declared mutant variants differ from the implemented table")
     for name, variant in declared.items():
         if name in MUTANTS and variant["file"] != MUTANTS[name][0]:

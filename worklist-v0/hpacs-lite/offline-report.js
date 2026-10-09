@@ -77,17 +77,31 @@
       view.status.textContent = STATUS_TEXT[visible ? current.status : 'idle'] || '';
     }
 
-    /** 서버 응답은 보낸 세션이 아직 현재 세션일 때만 반영한다. 아니면 다음 전송이 같은 eventId로 영수증을 다시 받는다. */
-    async function submit(uid, entry) {
-      const epoch = context.session().epoch;
+    /** 작업을 시작한 계정·세션. 기다림(await) 뒤에는 같은 계정·세션일 때만 이어간다. */
+    const account = () => ({ owner: context.owner(), epoch: context.session().epoch });
+    const sameAccount = start => context.session().epoch === start.epoch && sameOwner(context.owner(), start.owner);
+    /** 화면에 쓰기 직전: 같은 검사·같은 열기(generation)·같은 계정·같은 세션인가. */
+    const sameOpening = start => {
+      const now = context.opening();
+      return !!now && now.uid === start.uid && now.generation === start.generation && sameAccount(start);
+    };
+    // U5의 세션 종료 신호: 401 AUTH_SESSION_ENDED, 403/409 AUTH_SESSION_MISMATCH(다른 로그인의 쿠키). 그 밖의 실패는 종료가 아니다.
+    const sessionEnded = signal => !!signal && ((signal.status === 401 && signal.code === 'AUTH_SESSION_ENDED') ||
+      ([403, 409].includes(signal.status) && signal.code === 'AUTH_SESSION_MISMATCH'));
+
+    /**
+     * 호출자가 시작 문맥(계정·세션)을 확인한 뒤 보낸다. 응답은 같은 세션·같은 계정·그 검사의 지금 사건(eventId)일 때만
+     * 반영한다. 아니면 다음 전송이 같은 eventId로 영수증을 다시 받는다. 오래된 응답이 새 사건의 공개판 참조를 덮어쓰지 않는다.
+     */
+    async function submit(uid, entry, start) {
       let reply;
       try { reply = await transport.submit(entry); }
       catch (signal) {
-        if (context.session().epoch !== epoch) return;
-        if (signal && signal.status === 401 && signal.code === 'AUTH_SESSION_ENDED') setState(uid, { status: 'awaiting-reauth' });
+        if (!sameAccount(start) || stateOf(uid).eventId !== entry.eventId) return;
+        if (sessionEnded(signal)) setState(uid, { status: 'awaiting-reauth' });
         return; // 단절·timeout·5xx는 종료가 아니다: 승인 대기 유지
       }
-      if (context.session().epoch !== epoch || !reply || reply.eventId !== entry.eventId) return;
+      if (!sameAccount(start) || !reply || reply.eventId !== entry.eventId || stateOf(uid).eventId !== entry.eventId) return;
       const next = { committed: 'published', duplicate: 'published', conflict: 'conflict', held: 'held', refused: 'refused', failed: 'pending-offline' }[reply.status];
       if (!next) return;
       setState(uid, { status: next, currentVersion: reply.currentVersion || null, reason: reply.reason || null });
@@ -104,31 +118,35 @@
         const opening = context.opening();
         if (!opening || opening.uid !== t.uid) throw new TypeError('approve: the open study is required');
         const text = textOf(view.readText()); // 누른 순간의 본문. 이후 입력은 별도 작업본으로 남는다.
-        const owner = context.owner();
+        const start = account(), owner = start.owner;
         if (!owner) { setState(t.uid, { status: 'locked' }); return stateOf(t.uid); }
-        setState(t.uid, { status: 'signing', owner, signedText: text });
+        setState(t.uid, { status: 'signing', owner, signedText: text, eventId: null });
         let entry;
         try {
           entry = (await signer.sign(Object.freeze({ uid: t.uid, recordId: t.recordId, baseVersionId: t.baseVersionId ?? null, text, owner }))).entry;
           if (!entry || !sameText(signedText(entry), text) || !sameOwner(entry.owner, owner)) throw new Error('signed other content');
         } catch { setState(t.uid, { status: 'not-saved' }); return stateOf(t.uid); }
+        // 서명을 기다리는 동안 계정·세션이 바뀌었으면 이 승인은 멈춘다(저장·전송하지 않음). 처음 계정에게만 미저장으로 보인다.
+        if (!sameAccount(start)) { setState(t.uid, { status: 'not-saved' }); return stateOf(t.uid); }
         let receipt;
         try {
           receipt = await store.enqueue(entry);
           if (!receipt || receipt.eventId !== entry.eventId) throw new Error('no durable receipt');
         } catch { setState(t.uid, { status: 'not-saved' }); return stateOf(t.uid); }
         setState(t.uid, { status: 'pending-offline', eventId: entry.eventId });
-        if (context.online()) await submit(t.uid, entry);
+        // 저장을 기다리는 동안 계정이 바뀌었으면 원본은 처음 계정 영역에 남고, 지금 세션으로 보내지 않는다.
+        if (context.online() && sameAccount(start)) await submit(t.uid, entry, start);
         return stateOf(t.uid);
       },
 
-      /** 연결이 돌아오면 현재 계정 자신의 큐만 원래 eventId로 다시 보낸다. */
+      /** 연결이 돌아오면 현재 계정 자신의 큐만 원래 eventId로 다시 보낸다. 목록을 기다리는 동안 계정이 바뀌면 멈춘다. */
       async sync() {
         if (!context.online()) return;
-        const owner = context.owner();
+        const start = account(), owner = start.owner;
         if (!owner) return;
         const entries = await store.list(owner);
         for (const entry of Array.isArray(entries) ? entries : []) {
+          if (!sameAccount(start)) return; // 목록이나 앞 전송을 기다리는 동안 계정·세션이 바뀌었으면 멈춘다
           if (!entry || !sameOwner(entry.owner, owner)) continue; // 저장소가 다른 계정 것을 돌려줘도 보내지 않는다
           const uid = entry.access && entry.access.target && entry.access.target.studyId;
           if (typeof uid !== 'string') continue;
@@ -136,36 +154,42 @@
           // 재시작 뒤에는 화면 상태가 비어 있다: 단말이 내구 저장한 미전송 승인을 그대로 이어받는다.
           if (state.status === 'idle') setState(uid, { status: 'pending-offline', eventId: entry.eventId, owner });
           else if (!['pending-offline', 'awaiting-reauth'].includes(state.status) || state.eventId !== entry.eventId) continue;
-          await submit(uid, entry);
+          await submit(uid, entry, start);
         }
       },
 
-      /** 검사를 열면 본문을 자동으로 가져온다(추가 열기 클릭 없음). 늦은 응답은 같은 열기(uid+generation)에만 쓴다. */
+      /**
+       * 검사를 열면 본문을 자동으로 가져온다(추가 열기 클릭 없음). 기다림 뒤 화면에 쓰기 직전마다 같은 검사·같은 열기·같은
+       * 계정·같은 세션인지 다시 확인한다(A→B→A, 계정 전환 중의 늦은 본문은 쓰지 않는다).
+       */
       async open(uid) {
         const opening = context.opening();
         if (!opening || opening.uid !== uid) throw new TypeError('open: the selected study is required');
+        const start = { uid, generation: opening.generation, ...account() };
+        if (!start.owner) return false;
         const online = context.online();
         let body;
         try { body = online ? await transport.read(uid) : await store.cached(uid); } catch { body = null; }
-        const now = context.opening();
-        if (!body || !now || now.uid !== uid || now.generation !== opening.generation) return false;
+        if (!body || !sameOpening(start)) return false;
         // 표시할 때마다 새 사건이다. 단절 중에는 IP를 관측하지 못했으므로 그렇게 기록한다.
         const shown = { action: 'client-shown', eventId: newId(), relatedEventId: null, uid, recordId: body.recordId, versionId: body.versionId,
           network: online ? 'online' : 'offline', ip: online ? null : 'not-observed', physicalOutput: null };
         // 단말 캐시의 재표시는 서버가 제공 사건을 남기지 않으므로, 기록이 저장된 뒤에만 보인다.
         if (!online && !(await observe(shown))) return false;
+        if (!sameOpening(start)) return false; // 기록을 기다리는 동안 다른 열기·계정으로 바뀌었으면 쓰지 않는다
         view.showReport(body);
         render();
         if (online) await observe(shown);
         return true;
       },
-
       /** 출력은 정확한 판에 고정한다. print()가 돌아온 것은 대화상자가 닫혔다는 보고일 뿐 종이 출력의 증거가 아니다. */
       async print(version) {
         const v = version || {};
         const opened = { action: 'print-opened', eventId: newId(), relatedEventId: null, uid: v.uid, recordId: v.recordId, versionId: v.versionId,
           network: context.online() ? 'online' : 'offline', ip: context.online() ? null : 'not-observed', physicalOutput: null };
+        const start = account();
         if (!(await observe(opened))) return 'not-recorded'; // 기록하지 못한 출력은 열지 않는다
+        if (!sameAccount(start)) return 'cancelled'; // 기록을 기다리는 동안 계정이 바뀌었으면 출력하지 않는다
         try { await view.print(Object.freeze({ uid: v.uid, recordId: v.recordId, versionId: v.versionId })); }
         catch { return 'cancelled'; }
         await observe({ ...opened, action: 'print-done', eventId: newId(), relatedEventId: opened.eventId, physicalOutput: 'not-observed' });

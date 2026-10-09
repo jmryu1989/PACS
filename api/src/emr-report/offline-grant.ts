@@ -125,7 +125,7 @@ export interface GrantReader { load(grantId: string): unknown }
  * The offline signature relied on exactly this stored grant: same clinician, device and key, an allowed action on a
  * granted study at the granted claim generation, and its whole time interval inside the grant's validity.
  */
-export function checkSignatureGrant(signature: Readonly<VerifiedSignatureV2>, grants: GrantReader): Readonly<{ grant: OfflineGrant }> {
+export function checkSignatureGrant(signature: Readonly<VerifiedSignatureV2>, grants: GrantReader): Readonly<{ grant: OfflineGrant; generation: number }> {
   const sig = requireVerifiedV2(signature), p = sig.payload;
   if (p.grant === null) refuse('GrantRequired');
   let grant: Readonly<OfflineGrant>;
@@ -137,10 +137,14 @@ export function checkSignatureGrant(signature: Readonly<VerifiedSignatureV2>, gr
   if (!(grant.actions as readonly string[]).includes(p.action)) refuse('GrantActionRefused');
   const study = grant.studies.find(s => s.studyId === p.studyId && s.recordId === p.recordId && s.role === 'current');
   if (!study) refuse('GrantStudyRefused');
+  // The grant belongs to one claim lineage and one server anchor: after a release/reclaim its generation no longer
+  // matches, so a generation-1 grant can never sign a generation-3 approval; another anchor is another time basis.
+  if (p.claimGeneration !== study.claimGeneration) refuse('GrantGenerationRefused');
+  if (p.timeBasis.anchorId !== grant.anchorId) refuse('GrantAnchorRefused');
   if (sig.time.status !== 'verified') refuse('GrantTimeUnverified');
   if (boundaryPosition(sig.time.interval, grant.issuedAt) !== 'at-or-after' || boundaryPosition(sig.time.interval, grant.expiresAt) !== 'before')
     refuse('GrantWindowRefused');
-  return freeze({ grant });
+  return freeze({ grant, generation: study.claimGeneration });
 }
 
 /**
@@ -148,10 +152,12 @@ export function checkSignatureGrant(signature: Readonly<VerifiedSignatureV2>, gr
  * but never delete unsent signed originals; a network outage alone is not an end.
  */
 export function offlineAccess(grantInput: unknown, situation: 'online' | 'offline' | 'session-ended' | 'logged-out' | 'account-switched',
-  interval: { earliest: string; latest: string }): Readonly<{ read: boolean; sign: boolean; keepUnsent: true }> {
+  interval: { earliest: string; latest: string }): Readonly<{ read: boolean; sign: boolean; signActions: readonly GrantAction[]; keepUnsent: true }> {
   const grant = parseGrant(grantInput);
   choice(situation, ['online', 'offline', 'session-ended', 'logged-out', 'account-switched']);
   const inside = boundaryPosition(interval, grant.issuedAt) === 'at-or-after' && boundaryPosition(interval, grant.expiresAt) === 'before';
   const usable = inside && ['online', 'offline'].includes(situation);
-  return freeze({ read: usable, sign: usable, keepUnsent: true as const });
+  // Exactly what the grant lists: reading is not signing and signing is not reading.
+  const signActions = usable ? grant.actions.filter(a => a !== 'read') : [];
+  return freeze({ read: usable && grant.actions.includes('read'), sign: signActions.length > 0, signActions, keepUnsent: true as const });
 }

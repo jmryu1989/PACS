@@ -42,7 +42,7 @@ BOOT = r"""() => {
   const unb64 = text => JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(text.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((text.length + 3) % 4)), c => c.charCodeAt(0))));
   const syn = window.syn = { makeOwner: owner, owner: owner('r1'), online: false, epoch: 1, opening: { uid: '1.2.840.1', generation: 1 }, entries: new Map(),
     observations: [], calls: [], signRequests: [], holdSign: false, signHolds: [], putFault: false, leak: false, submitMode: 'commit', holdSubmit: false,
-    submitHolds: [], holdRead: false, readHolds: [], cache: {}, printMode: 'return', seq: 0 };
+    submitHolds: [], holdRead: false, readHolds: [], cache: {}, printMode: 'return', seq: 0, holdObserve: false, observeHolds: [], holdList: false, listHolds: [], holdCached: false, cachedHolds: [] };
   const field = id => document.querySelector('#' + id).value;
   const view = {
     readText: () => ({ findings: field('findings'), conclusion: field('conclusion'), recommendation: field('recommendation') }),
@@ -65,9 +65,23 @@ BOOT = r"""() => {
   const store = {
     async enqueue(entry) { syn.calls.push(['enqueue', entry.eventId]); if (syn.putFault) throw new Error('disk full'); syn.entries.set(entry.eventId, entry);
       return { eventId: entry.eventId, entryId: 'row-' + entry.eventId, digest: 'd', durableAt: '2026-10-05T01:00:00.000Z' }; },
-    async list(o) { syn.calls.push(['list', o.subject]); return [...syn.entries.values()].filter(e => syn.leak || e.owner.subject === o.subject); },
-    async observe(o) { if (syn.observeFault) throw new Error('store unavailable'); syn.observations.push(JSON.parse(JSON.stringify(o))); return { ok: true }; },
-    async cached(uid) { syn.calls.push(['cached', uid]); return syn.cache[uid] ?? null; },
+    async list(o) {
+      syn.calls.push(['list', o.subject]);
+      const pick = () => [...syn.entries.values()].filter(e => syn.leak || e.owner.subject === o.subject);
+      if (syn.holdList) return new Promise(resolve => syn.listHolds.push(() => resolve(pick())));
+      return pick();
+    },
+    async observe(o) {
+      if (syn.observeFault) throw new Error('store unavailable');
+      syn.observations.push(JSON.parse(JSON.stringify(o)));
+      if (syn.holdObserve) await new Promise(resolve => syn.observeHolds.push(resolve));
+      return { ok: true };
+    },
+    async cached(uid) {
+      syn.calls.push(['cached', uid]);
+      if (syn.holdCached) return new Promise(resolve => syn.cachedHolds.push(() => resolve(syn.cache[uid] ?? null)));
+      return syn.cache[uid] ?? null;
+    },
   };
   const answer = (entry, status, extra) => ({ eventId: entry.eventId, status, reason: null, recoveryRef: null, currentVersion: null,
     times: { signedAt: null, receivedAt: '2026-10-05T02:00:00.000Z', committedAt: null, publishedAt: null }, ...extra });
@@ -77,9 +91,10 @@ BOOT = r"""() => {
       const respond = () => {
         if (syn.submitMode === 'ended') return Promise.reject({ status: 401, code: 'AUTH_SESSION_ENDED' });
         if (syn.submitMode === 'network') return Promise.reject({ kind: 'network' });
+        if (syn.submitMode === 'mismatch') return Promise.reject({ status: 409, code: 'AUTH_SESSION_MISMATCH' });
         if (syn.submitMode === 'conflict') return Promise.resolve(answer(entry, 'conflict', { reason: 'other-approved',
           currentVersion: { recordId: 'report-x', versionId: 'server-v', sha256: 'ab'.repeat(32) } }));
-        return Promise.resolve(answer(entry, 'committed', {}));
+        return Promise.resolve(answer(entry, 'committed', { currentVersion: { recordId: 'report-x', versionId: 'published-' + entry.eventId, sha256: 'cd'.repeat(32) } }));
       };
       if (!syn.holdSubmit) return respond();
       return new Promise((resolve, reject) => syn.submitHolds.push(() => respond().then(resolve, reject)));
@@ -211,6 +226,39 @@ class OfflineReportDOM(unittest.TestCase):
         self.js("() => syn.controller.sync()")
         self.assertEqual([state["eventId"], state["eventId"]], [c[1] for c in self.js("() => syn.submits()")])
         self.assertNotEqual(PENDING_LABEL, self.status())
+        # Account switch while a read is pending: the earlier account's body is never shown to the next account.
+        self.js("""() => { syn.holdRead = true; syn.opening = { uid: 'C', generation: 10 }; syn.third = syn.controller.open('C'); }""")
+        self.page.wait_for_function("() => syn.readHolds.length === 1")
+        report_before = self.page.text_content("#report")
+        self.js("() => { syn.owner = syn.makeOwner('r2'); syn.epoch = 9; syn.readHolds.shift()(); }")
+        self.assertIs(False, self.js("() => syn.third"))
+        self.assertEqual(report_before, self.page.text_content("#report"))
+        # A->B->A while an offline cache display is being recorded: the earlier opening is not painted.
+        self.js("""() => { syn.owner = syn.makeOwner('r1'); syn.epoch = 10; syn.online = false; syn.holdRead = false; syn.holdObserve = true;
+          syn.cache.D = { recordId: 'report-D', versionId: 'v-d', text: 'SYN 이전 열기 본문' }; syn.opening = { uid: 'D', generation: 11 }; syn.fourth = syn.controller.open('D'); }""")
+        self.page.wait_for_function("() => syn.observeHolds.length === 1")
+        self.js("() => { syn.opening = { uid: 'E', generation: 12 }; syn.opening = { uid: 'D', generation: 13 }; syn.holdObserve = false; syn.observeHolds.shift()(); }")
+        self.assertIs(False, self.js("() => syn.fourth"))
+        self.assertNotEqual("SYN 이전 열기 본문", self.page.text_content("#report"))
+        # A->B->A while the device cache is read: nothing is shown and no display is recorded for the earlier opening.
+        observed = len(self.js("() => syn.observations"))
+        self.js("() => { syn.holdCached = true; syn.opening = { uid: 'D', generation: 15 }; syn.fifth = syn.controller.open('D'); }")
+        self.page.wait_for_function("() => syn.cachedHolds.length === 1")
+        self.js("() => { syn.opening = { uid: 'E', generation: 16 }; syn.opening = { uid: 'D', generation: 17 }; syn.holdCached = false; syn.cachedHolds.shift()(); }")
+        self.assertIs(False, self.js("() => syn.fifth"))
+        self.assertEqual(observed, len(self.js("() => syn.observations")))
+        # An older submission's answer never replaces the newer event's published reference.
+        self.js("() => { syn.online = true; syn.opening = { uid: 'F', generation: 14 }; syn.holdSubmit = true; }")
+        self.page.click("#approve")
+        self.page.wait_for_function("() => syn.submitHolds.length === 1")
+        self.js("() => { syn.firstApproval = syn.lastApproval; syn.holdSubmit = false; }")
+        newer = self.approve_click()
+        self.assertEqual("published-" + newer["eventId"], newer["currentVersion"]["versionId"])
+        self.js("() => syn.submitHolds.shift()()")
+        self.js("() => syn.firstApproval.then(() => true)")
+        latest = self.js("uid => ({ ...syn.controller.state(uid) })", "F")
+        self.assertEqual(newer["eventId"], latest["eventId"])
+        self.assertEqual("published-" + newer["eventId"], latest["currentVersion"]["versionId"])
 
     def test_d04_end_reauth_and_other_account(self):
         self.js("() => { syn.online = true; syn.submitMode = 'network'; }")
@@ -237,6 +285,31 @@ class OfflineReportDOM(unittest.TestCase):
         self.assertEqual([state["eventId"], 3], submits[-1][1:])
         self.assertNotIn(self.status(), (PENDING_LABEL, REAUTH_LABEL))
         self.assertEqual("SYN 단절 중 승인", self.page.input_value("#findings"))
+        # A switch while the signature is pending stops that approval: nothing is stored or sent under the next account.
+        stored, sent = self.js("() => syn.entries.size"), len(self.js("() => syn.submits()"))
+        self.js("() => { syn.opening = { uid: 'G', generation: 20 }; syn.holdSign = true; syn.submitMode = 'commit'; }")
+        self.page.click("#approve")
+        self.page.wait_for_function("() => syn.signHolds.length === 1")
+        self.js("() => { syn.owner = syn.makeOwner('r2'); syn.epoch = 4; syn.signHolds.shift()(); syn.holdSign = false; }")
+        self.js("() => syn.lastApproval.then(() => true)")
+        self.assertEqual((stored, sent), (self.js("() => syn.entries.size"), len(self.js("() => syn.submits()"))))
+        self.assertEqual("", self.status())
+        # A switch while the queue listing is pending stops that sync.
+        self.js("() => { syn.owner = syn.makeOwner('r1'); syn.epoch = 5; syn.online = false; syn.opening = { uid: 'H', generation: 21 }; }")
+        self.page.fill("#findings", "SYN 대기 승인")
+        pending = self.approve_click()
+        self.assertEqual(PENDING_LABEL, self.status())
+        self.js("() => { syn.online = true; syn.holdList = true; syn.pendingSync = syn.controller.sync(); }")
+        self.page.wait_for_function("() => syn.listHolds.length === 1")
+        sent = len(self.js("() => syn.submits()"))
+        self.js("() => { syn.owner = syn.makeOwner('r2'); syn.epoch = 6; syn.listHolds.shift()(); }")
+        self.js("() => syn.pendingSync.then(() => true)")
+        self.assertEqual(sent, len(self.js("() => syn.submits()")))
+        # U5's other session-end signal (403/409 AUTH_SESSION_MISMATCH) holds the queue for re-authentication like ENDED.
+        self.js("() => { syn.owner = syn.makeOwner('r1'); syn.epoch = 7; syn.holdList = false; syn.submitMode = 'mismatch'; }")
+        self.js("() => syn.controller.sync()")
+        self.assertEqual(REAUTH_LABEL, self.status())
+        self.assertIn(pending["eventId"], self.js("() => [...syn.entries.keys()]"))
 
     def test_d05_conflict_keeps_both_versions(self):
         self.js("() => { syn.online = true; syn.submitMode = 'conflict'; }")

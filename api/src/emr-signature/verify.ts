@@ -1,7 +1,7 @@
 import { createHash, createPublicKey, verify as verifyBytes } from 'node:crypto';
 import { inspectSignatureEnvelope } from '../emr-contract/signature';
 import { freeze, object, refuse, string } from '../emr-contract/validation';
-import type { VerifiedSignatureV2 } from './contract';
+import type { SignatureEnvelopeV2, VerifiedSignatureV2 } from './contract';
 import { inspectEnvelopeV2 } from './canonical-v2';
 import { KeyPolicy, KeyReader, KeyRegistration, keyStatusAt, loadKey } from './keys';
 import { AnchorReader, TimePolicy, evaluateTimeBasis } from './time-basis';
@@ -41,7 +41,8 @@ export function verifySignatureV2(envelope: unknown, ports: SignatureVerificatio
   const time = evaluateTimeBasis(p.timeBasis, p.signedAt, p.deviceId, ports.anchors, ports.timePolicy);
   const keyAtSigningTime = time.status !== 'verified' ? 'unverifiable' :
     activeThroughout(reg, time.interval.earliest, time.interval.latest) ? 'active' : 'inactive';
-  const result = freeze({ kid: env.kid, payload: p, payloadBase64url: e.payload, versionSha256: createHash('sha256').update(env.payloadBytes).digest('hex'),
+  const verifiedEnvelope = { protected: (envelope as SignatureEnvelopeV2).protected, payload: e.payload, signature: (envelope as SignatureEnvelopeV2).signature };
+  const result = freeze({ kid: env.kid, payload: p, envelope: verifiedEnvelope, versionSha256: createHash('sha256').update(env.payloadBytes).digest('hex'),
     integrity: 'valid' as const, registeredIdentity: 'matched' as const, keyAtSigningTime, time, osUserId: c.osUserId }) as Readonly<VerifiedSignatureV2>;
   verifiedV2.add(result);
   return result;

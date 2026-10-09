@@ -112,9 +112,12 @@ for (const id of ['r1', 'r2', 'r3', 't1']) deviceKey(id);
 let counter = 0;
 const next = prefix => `${prefix}-${++counter}`;
 function basis(signedAt, deviceId, { boot = 'boot-1', signBoot = boot, wall = [], age = H, validFor = 48 * H, epsilon = timePolicy.epsilonMs, claimed = signedAt,
-  register = true, stored = {} } = {}) {
-  const anchorId = next('anchor'), serverTime = plus(signedAt, -age), validUntil = plus(serverTime, validFor);
-  if (register) anchorRows.set(anchorId, { anchorId, deviceId, bootId: boot, serverTime, validUntil, ...stored });
+  register = true, stored = {}, anchor = null } = {}) {
+  // An offline signature reuses the anchor its grant was issued with; elapsed ticks run from that anchor.
+  if (anchor) age = ms(signedAt) - ms(anchor.serverTime);
+  const anchorId = anchor ? anchor.anchorId : next('anchor'), serverTime = anchor ? anchor.serverTime : plus(signedAt, -age);
+  const validUntil = anchor ? anchor.validUntil : plus(serverTime, validFor);
+  if (register && !anchor) anchorRows.set(anchorId, { anchorId, deviceId, bootId: boot, serverTime, validUntil, ...stored });
   return { anchorId, anchorServerTime: serverTime, anchorValidUntil: validUntil, anchorBootId: boot, anchorTickMs: 5000, signBootId: signBoot,
     signTickMs: 5000 + age, wallClockEvents: wall, interval: { earliest: plus(claimed, -epsilon), latest: plus(claimed, epsilon) } };
 }
@@ -139,7 +142,7 @@ const verify = (envelope, osUserId) => V.verifySignatureV2(envelope, ports, { os
 
 // ---- a synthetic server: facts, retention unit, drafts, receipts, ledger, journal ----
 const ACT = { preliminary: 'entry', 'approve-sign': 'entry', amend: 'correction', addendum: 'additional-entry', cancel: 'correction' };
-const SIGNED = { preliminary: 'preliminary', approve: 'approve-sign', amend: 'amend', addendum: 'addendum', cancel: 'cancel' };
+const SIGNED = { preliminary: 'preliminary', approve: 'approve-sign', amend: 'amend', addendum: 'addendum', cancel: 'cancel', 'cancel-preliminary': 'cancel' };
 const COMMAND = { 'approve-sign': 'approve', amend: 'amend', addendum: 'addendum', cancel: 'cancel', preliminary: 'preliminary' };
 function server(recordId = next('report')) {
   return { facts: L.newReportFacts(recordId, STUDY), record: null, archive: null, drafts: new Map(), receipts: new Map(), ledger: [], commits: [], journal: [] };
@@ -223,25 +226,30 @@ function manifest(over = {}) {
   return { manifestId: 'manifest-1', studies: [{ studyId: STUDY, role: 'current', parts: G.MANIFEST_PARTS.map(part) },
     { studyId: 'prior-1', role: 'comparison', parts: G.MANIFEST_PARTS.map(part) }], requiredComparisonIds: ['prior-1'], ...over };
 }
-function grantFor(srv, actorId, issuedAt, { actions = ['approve-sign', 'amend', 'addendum'] } = {}) {
+function grantFor(srv, actorId, issuedAt, { actions = ['read', 'approve-sign', 'amend', 'addendum'] } = {}) {
+  // The server issues the grant together with its time anchor (validity independent of the grant length).
+  const anchor = { anchorId: next('grant-anchor'), deviceId: keyRows.get('kid-' + actorId).deviceId, bootId: 'boot-1', serverTime: issuedAt, validUntil: plus(issuedAt, 48 * H) };
+  anchorRows.set(anchor.anchorId, anchor);
   const readiness = G.offlineReadiness(manifest(), offlinePolicy, { bytes: offlinePolicy.reserveBytesJ });
   const key = keyRows.get('kid-' + actorId);
   const issued = G.issueOfflineGrant({ grantId: next('grant'), deviceId: key.deviceId, kid: key.kid, studies: [
     { studyId: STUDY, recordId: srv.facts.recordId, claimGeneration: srv.facts.claimGeneration, role: 'current' },
-    { studyId: 'prior-1', recordId: 'prior-report', claimGeneration: 0, role: 'comparison' }], actions, issuedAt, anchorId: next('grant-anchor') },
+    { studyId: 'prior-1', recordId: 'prior-report', claimGeneration: 0, role: 'comparison' }], actions, issuedAt, anchorId: anchor.anchorId },
     actor(actorId), key, offlinePolicy, readiness);
   grantRows.set(issued.grant.grantId, issued.grant);
-  return issued;
+  return { ...issued, anchor };
 }
 function offlineEntry(srv, actorId, o) {
   const action = o.action ?? 'approve-sign', reg = keyRows.get('kid-' + actorId);
-  const p = payload({ action, recordId: srv.facts.recordId, signer: actorId, author: o.author ?? actorId, signedAt: o.signedAt, text: o.text,
+  const p = payload({ action, recordId: srv.facts.recordId, signer: actorId, author: o.author ?? actorId, signedAt: o.signedAt, text: o.text, patient: o.patient,
     previous: o.previous !== undefined ? o.previous : CMD.expectedPreviousVersion(srv.facts, COMMAND[action]),
-    claimGeneration: o.claimGeneration ?? srv.facts.claimGeneration, draftRevision: o.draftRevision !== undefined ? o.draftRevision : (srv.drafts.get(actorId) ?? null),
-    grant: { grantId: o.grant.grant.grantId, digest: o.grant.digest }, sequence: o.sequence, predecessor: o.predecessor, eventId: o.eventId, reason: o.reason, basis: o.basis });
+    claimGeneration: o.claimGeneration ?? o.grant.grant.studies.find(s => s.role === 'current').claimGeneration,
+    draftRevision: o.draftRevision !== undefined ? o.draftRevision : (srv.drafts.get(actorId) ?? null),
+    grant: { grantId: o.grant.grant.grantId, digest: o.grant.digest }, sequence: o.sequence, predecessor: o.predecessor, eventId: o.eventId, reason: o.reason,
+    basis: o.ownAnchor ? (o.basis ?? {}) : { anchor: o.grant.anchor, ...(o.basis ?? {}) } });
   const owner = { issuer: ISS, subject: 'sub-' + actorId, institutionId: 'inst-a', deviceId: reg.deviceId, osUserId: reg.osUserId };
   const access = { formatVersion: 'emr-offline-access/1', eventId: p.eventId, relatedEventId: null, deviceId: reg.deviceId, deviceSequence: p.deviceSequence, kid: reg.kid,
-    identity: who(actorId), actingInstitutionId: 'inst-a', managingInstitutionId: 'inst-a', action, target: { patient: { ...patient }, studyId: STUDY, recordId: p.recordId, versionId: p.versionId },
+    identity: who(actorId), actingInstitutionId: 'inst-a', managingInstitutionId: 'inst-a', action, target: { patient: { ...p.patient }, studyId: STUDY, recordId: p.recordId, versionId: p.versionId },
     occurredAt: p.signedAt, timeBasis: p.timeBasis, ip: { status: 'unresolved', reason: 'not-observed' }, network: 'offline', physicalOutput: null };
   return { formatVersion: 'emr-offline-queue/1', eventId: p.eventId, owner, deviceSequence: p.deviceSequence, predecessorEventId: p.predecessorEventId,
     envelope: envelopeFor(p), access, baseVersionId: p.previousVersion ? p.previousVersion.versionId : null };
@@ -311,6 +319,21 @@ test('C-C01 write, private draft, release, independent preliminary approval and 
   const successor = L.newReportAfterCancellation(srv.facts, next('report'), { id: 'r2', kind: 'member', roles: ['radiologist'], canReadStudy: true, canSign: true, canCancel: true }, plus(T0, 11 * MIN));
   assert.equal(successor.previousCancelledRecordId, srv.facts.recordId);
   assert.equal(successor.state, 'Unread');
+  // The designated reviewer cancels a Preliminary with a signed reason; the author or another reader cannot.
+  const pc = server();
+  await run(pc, 'r1', 'start', { at: plus(T0, -H) });
+  await run(pc, 'r1', 'preliminary', { at: plus(T0, -50 * MIN), reviewerId: 'r2' });
+  for (const who of ['r1', 'r3'])
+    assert.throws(() => online(pc, who, 'cancel-preliminary', { at: plus(T0, -40 * MIN), reason: 'SYN 재판독 필요' }), { code: 'DesignatedReviewerRequired' });
+  const cancelled = await run(pc, 'r2', 'cancel-preliminary', { at: plus(T0, -30 * MIN), reason: 'SYN 재판독 필요' });
+  assert.equal(pc.facts.state, 'Unread');
+  assert.equal(pc.facts.preliminary, null);
+  assert(cancelled.plan.effects.includes('append-cancellation'));
+  assert.equal(cancelled.plan.version.action, 'cancel');
+  assert.equal(cancelled.plan.retention, null);
+  assert.equal(cancelled.plan.publish, false);
+  assert.deepEqual(cancelled.plan.ledger.map(e => e.act), ['수정']);
+  assert.equal(pc.facts.contentHistory.length, 1);
 });
 
 test('C-C02 v1 envelopes re-verify unchanged, v2 binds the exact text and a radiographer signs their own Tech Note; swapped body, patient, version, action, key or event, payloads signed for other facts and signatures on admin text are refused', async () => {
@@ -376,9 +399,24 @@ test('C-C02 v1 envelopes re-verify unchanged, v2 binds the exact text and a radi
   assert.deepEqual(signedNote.ledger.map(e => e.act), ['기재']);
   assert.throws(() => CMD.planTechNoteRevision(noteCtx(tech, nsig), { ...noteInput, text: noteText.trim() }), { code: 'SignedPayloadBindingRefused' });
   assert.throws(() => CMD.planTechNoteRevision(noteCtx(tech, null), { ...noteInput, envelope: null }), { code: 'VerifiedSignatureRequired' });
-  const byOther = notePayload({ signer: 'r1' }), otherSig = verify(envelopeFor(byOther), 'os-r1');
-  assert.throws(() => CMD.planTechNoteRevision(noteCtx(tech, otherSig), { ...noteInput, versionId: byOther.versionId, eventId: byOther.eventId, envelope: envelopeFor(byOther) }),
+  const byOther = notePayload({ signer: 'r1' }), otherEnv = envelopeFor(byOther), otherSig = verify(otherEnv, 'os-r1');
+  assert.throws(() => CMD.planTechNoteRevision(noteCtx(tech, otherSig), { ...noteInput, versionId: byOther.versionId, eventId: byOther.eventId, envelope: otherEnv }),
     { code: 'SignedPayloadBindingRefused' });
+  // Only the exact verified envelope is accepted: a corrupted signature over the same payload is another envelope.
+  const forged = { ...nenv, signature: Buffer.alloc(64, 0).toString('base64url') };
+  assert.throws(() => CMD.planTechNoteRevision(noteCtx(tech, nsig), { ...noteInput, envelope: forged }), { code: 'SignedEnvelopeMismatch' });
+  assert.deepEqual(signedNote.envelope, nenv);
+  const reportUnit = server();
+  await run(reportUnit, 'r1', 'start', { at: plus(T0, -MIN) });
+  const rpay = payload({ action: 'approve-sign', recordId: reportUnit.facts.recordId, signer: 'r1', signedAt: T0, claimGeneration: reportUnit.facts.claimGeneration });
+  const rgood = envelopeFor(rpay), rsig0 = verify(rgood, 'os-r1');
+  const reportCtx = { actor: actor('r1'), study: study(), facts: reportUnit.facts, author: who('r1'), ownDraftRevision: null, attachments: [], signature: rsig0,
+    retained: retainedFor(reportUnit, rsig0), receivedAt: T0, ingress, mode: 'online' };
+  const reportCommand = env => ({ action: 'approve', recordId: reportUnit.facts.recordId, eventId: rpay.eventId, expectedClaimGeneration: reportUnit.facts.claimGeneration,
+    expectedPublishedVersionId: null, draft: null, reason: null, reviewerId: null, preservation: null, envelope: env });
+  assert.throws(() => CMD.planReportCommand(reportCtx, reportCommand({ ...rgood, signature: Buffer.alloc(64, 0).toString('base64url') })), { code: 'SignedEnvelopeMismatch' });
+  const goodPlan = allowed(() => CMD.planReportCommand(reportCtx, reportCommand(rgood)));
+  assert.equal(allowed(() => verify(goodPlan.version.envelope, 'os-r1')).versionSha256, rsig0.versionSha256);
   const adminNote = allowed(() => CMD.planTechNoteRevision(noteCtx(admin, null), { ...noteInput, envelope: null }));
   assert.equal(adminNote.signing, 'unsigned-operational');
   assert.equal(adminNote.clinicalEntry, false);
@@ -424,6 +462,9 @@ test('C-C03 a trusted anchor plus same-boot monotonic elapsed time is verified; 
   assert.equal(held.keyAtSigningTime, 'unverifiable');
   assert.throws(() => online(srv, 'r1', 'approve', { at, basis: { signBoot: 'boot-9' } }), { code: 'SignatureTimeUnverified' });
   allowed(() => online(srv, 'r1', 'approve', { at }));
+  // The whole uncertainty interval must lie inside the anchor's validity, not only the claimed instant.
+  assert.equal(TB.evaluateTimeBasis(basis(at, dev, { age: H, validFor: H + 1000 }), at, dev, anchorReader, timePolicy).reason, 'anchor-expired');
+  assert.equal(TB.evaluateTimeBasis(basis(at, dev, { age: H, validFor: H + 2000 }), at, dev, anchorReader, timePolicy).status, 'verified');
 });
 
 test('C-C04 t0 is the first actual signing time and amendment closes at t0+24h; late receipt never restarts it, pre-boundary amends survive Finalized, the exact boundary and later are Addendum-only', async () => {
@@ -473,6 +514,29 @@ test('C-C04 t0 is the first actual signing time and amendment closes at t0+24h; 
   assert.equal(fin.facts.state, 'Finalized');
   assert.notEqual(fin.facts.publishedVersion, null);
   assert.throws(() => online(fin, 'r2', 'approve', { at: plus(T0, 31 * H) }));
+  // Online too: with epsilon = 2 s the interval must end before t0+24h (exclusive). One second inside is an amendment;
+  // touching the boundary or one second past it is not.
+  const edge = await approvedUnit(T0, 'r1');
+  const until = edge.facts.amendUntil;
+  assert.equal(allowed(() => online(edge, 'r1', 'amend', { at: plus(until, -3000) })).publish, true);
+  for (const at of [plus(until, -2000), plus(until, -1000)])
+    assert.throws(() => online(edge, 'r1', 'amend', { at }), { code: 'AmendWindowClosed' });
+  // A late Finalized event passes the same command validation as any signed command before it can be admitted.
+  const lateFin = await approvedUnit(T0, 'r2');
+  const lateGrant2 = grantFor(lateFin, 'r2', plus(T0, 20 * H));
+  const lateEntry = over => offlineEntry(lateFin, 'r2', { action: 'amend', signedAt: plus(T0, DAY - 3000), grant: lateGrant2, ...over });
+  const wrongPatient = lateEntry({ patient: { ...patient, patientId: 'SYN-WRONG' } }), changedDraft = lateEntry({ draftRevision: 'old:1' }), good = lateEntry({});
+  finalize(lateFin, plus(T0, DAY + H));
+  for (const e of [wrongPatient, changedDraft]) {
+    const r = reconcile(lateFin, e, { receivedAt: plus(T0, 30 * H) });
+    assert.equal(r.kind, 'refused');
+    assert.equal(r.code, 'SignedPayloadBindingRefused');
+  }
+  const noRetained = REC.reconcileOfflineEvent({ actor: actor('r2'), study: study(), facts: lateFin.facts, author: who('r2'), ownDraftRevision: null, attachments: [],
+    retained: null, receivedAt: plus(T0, 30 * H), ingress, verification: ports, grants: grantReader, existingReceipt: null, predecessor: null, adoptDivergedDraft: false }, good);
+  assert.equal(noRetained.kind, 'refused');
+  assert.equal(noRetained.code, 'RetainedRecordRequired');
+  assert.equal(reconcile(lateFin, good, { receivedAt: plus(T0, 30 * H) }).kind, 'admit-late-amend');
 });
 
 test('C-C05 registered device keys verify their signatures and two-operator recovery issues a new kid; another OS user, signatures after revocation and single-operator recovery are refused', async () => {
@@ -559,7 +623,7 @@ test('C-C06 finite grants over complete reserved manifests permit offline work; 
   const srv = server();
   await run(srv, 'r1', 'start', { at: plus(T0, -H) });
   const issuedAt = plus(T0, -30 * MIN);
-  const { grant } = grantFor(srv, 'r1', issuedAt, { actions: ['approve-sign'] });
+  const issued = grantFor(srv, 'r1', issuedAt, { actions: ['approve-sign'] }), grant = issued.grant;
   assert.equal(grant.expiresAt, plus(issuedAt, offlinePolicy.disconnectedHoursH * H));
   const request = { grantId: next('grant'), deviceId: 'dev-r1', kid: 'kid-r1', studies: grant.studies, actions: ['approve-sign'], issuedAt, anchorId: 'a' };
   assert.throws(() => G.issueOfflineGrant(request, actor('r1'), keyRows.get('kid-r1'), offlinePolicy, { ready: false, manifestDigest: 'ab'.repeat(32) }), { code: 'OfflineNotReady' });
@@ -568,7 +632,6 @@ test('C-C06 finite grants over complete reserved manifests permit offline work; 
   assert.throws(() => G.issueOfflineGrant({ ...request, studies: [...request.studies, { studyId: 'not-loaded', recordId: 'report-x', claimGeneration: 0, role: 'comparison' }] },
     actor('r1'), keyRows.get('kid-r1'), offlinePolicy, G.offlineReadiness(manifest(), offlinePolicy, reserved)), { code: 'GrantStudyRefused' });
   assert.throws(() => G.parseGrant({ ...grant, expiresAt: plus(grant.expiresAt, H) }), { code: 'GrantLengthRefused' });
-  const issued = { grant, digest: G.grantDigest(grant) };
   const inside = verify(offlineEntry(srv, 'r1', { signedAt: T0, grant: issued }).envelope, 'os-r1');
   assert.equal(allowed(() => G.checkSignatureGrant(inside, grantReader)).grant.grantId, grant.grantId);
   const refusedWith = (code, entryOptions, readerOverride = grantReader) => assert.throws(() =>
@@ -576,16 +639,41 @@ test('C-C06 finite grants over complete reserved manifests permit offline work; 
   refusedWith('GrantActionRefused', { signedAt: T0, action: 'addendum', previous: { recordId: srv.facts.recordId, versionId: 'v0', sha256: 'ab'.repeat(32) } });
   refusedWith('GrantWindowRefused', { signedAt: plus(grant.expiresAt, MIN) });
   refusedWith('GrantWindowRefused', { signedAt: plus(grant.expiresAt, -1000) });
-  refusedWith('GrantWindowRefused', { signedAt: plus(issuedAt, -MIN) });
+  // Before issuance: refused by the grant window even when the time evidence itself is valid (another anchor).
+  assert.throws(() => G.checkSignatureGrant(verify(offlineEntry(srv, 'r1', { grant: issued, signedAt: plus(issuedAt, -MIN), ownAnchor: true }).envelope, 'os-r1'),
+    grantReader), { code: 'GrantAnchorRefused' });
   refusedWith('GrantDigestRefused', { signedAt: T0 }, { load: id => ({ ...grantRows.get(id), actions: ['approve-sign', 'amend'] }) });
   const otherStudy = verify(envelopeFor({ ...payload({ action: 'approve-sign', recordId: 'report-unlisted', signer: 'r1', signedAt: T0, claimGeneration: 1,
     grant: { grantId: grant.grantId, digest: issued.digest } }) }), 'os-r1');
   assert.throws(() => G.checkSignatureGrant(otherStudy, grantReader), { code: 'GrantStudyRefused' });
+  // The grant is bound to its server anchor and to the claim generation it was issued under.
+  refusedWith('GrantAnchorRefused', { signedAt: T0, ownAnchor: true });
+  refusedWith('GrantGenerationRefused', { signedAt: T0, claimGeneration: grant.studies[0].claimGeneration + 2 });
+  const lineage = server();
+  await run(lineage, 'r1', 'start', { at: plus(T0, -H) });
+  const oldGrant = grantFor(lineage, 'r1', plus(T0, -50 * MIN));
+  await run(lineage, 'r1', 'release', { at: plus(T0, -40 * MIN) });
+  await run(lineage, 'r1', 'start', { at: plus(T0, -30 * MIN) });
+  assert.equal(lineage.facts.claimGeneration, 3);
+  // Signing generation 3 with the generation-1 grant is refused; signing generation 1 meets the reclaimed server claim.
+  const reclaimed = reconcile(lineage, offlineEntry(lineage, 'r1', { signedAt: T0, grant: oldGrant, claimGeneration: 3 }), { receivedAt: plus(T0, H) });
+  assert.equal(reclaimed.kind, 'refused'); assert.equal(reclaimed.code, 'GrantGenerationRefused');
+  const stale = reconcile(lineage, offlineEntry(lineage, 'r1', { signedAt: T0, grant: oldGrant }), { receivedAt: plus(T0, H) });
+  assert.equal(stale.kind, 'conflict'); assert.equal(stale.conflict, 'reassigned');
+  assert.equal(lineage.commits.filter(p => p.version).length, 0);
+  // Local access is exactly what the grant lists: reading is not signing.
   const interval = { earliest: T0, latest: T0 };
-  assert.deepEqual({ ...G.offlineAccess(grant, 'offline', interval) }, { read: true, sign: true, keepUnsent: true });
-  for (const situation of ['logged-out', 'account-switched', 'session-ended'])
-    assert.deepEqual({ ...G.offlineAccess(grant, situation, interval) }, { read: false, sign: false, keepUnsent: true });
-  assert.deepEqual({ ...G.offlineAccess(grant, 'offline', { earliest: grant.expiresAt, latest: grant.expiresAt }) }, { read: false, sign: false, keepUnsent: true });
+  assert.deepEqual({ ...G.offlineAccess(grant, 'offline', interval), signActions: [...G.offlineAccess(grant, 'offline', interval).signActions] },
+    { read: false, sign: true, signActions: ['approve-sign'], keepUnsent: true });
+  const readOnly = grantFor(srv, 'r1', issuedAt, { actions: ['read'] }).grant;
+  assert.deepEqual({ ...G.offlineAccess(readOnly, 'offline', interval), signActions: [...G.offlineAccess(readOnly, 'offline', interval).signActions] },
+    { read: true, sign: false, signActions: [], keepUnsent: true });
+  for (const situation of ['logged-out', 'account-switched', 'session-ended']) {
+    const a = G.offlineAccess(grant, situation, interval);
+    assert.deepEqual([a.read, a.sign, a.signActions.length, a.keepUnsent], [false, false, 0, true]);
+  }
+  const expired = G.offlineAccess(grant, 'offline', { earliest: grant.expiresAt, latest: grant.expiresAt });
+  assert.deepEqual([expired.read, expired.sign, expired.keepUnsent], [false, false, true]);
 });
 
 test('C-C07 an equivalent retry with the same eventId returns the original receipt; the same eventId with other content is a 409 conflict, no duplicate version is made and a failed commit is journalled', async () => {
@@ -638,6 +726,15 @@ test('C-C07 an equivalent retry with the same eventId returns the original recei
   assert.equal(refused.kind, 'refused');
   assert.equal(refused.code, 'EventIdConflict');
   assert.equal(off.commits.filter(p => p.eventId === 'event-c07-offline').length, 1);
+  // A resend is answered from the receipt only for the signer's own live session and the exact original envelope.
+  const replays = [[reconcile(off, entry, { receivedAt: plus(T0, 3 * H), submitter: 'r2' }), 'SubmitterNotSigner'],
+    [reconcile(off, entry, { receivedAt: plus(T0, 3 * H), actor: { sessionState: 'ended' } }), 'SessionEnded'],
+    [reconcile(off, { ...entry, envelope: { ...entry.envelope, signature: Buffer.alloc(64, 0).toString('base64url') } }, { receivedAt: plus(T0, 3 * H) }), 'SignatureIntegrityRefused'],
+    [reconcile(off, { ...entry, envelope: envelopeFor(JSON.parse(Buffer.from(entry.envelope.payload, 'base64url').toString('utf8'))) }, { receivedAt: plus(T0, 3 * H) }), 'EventIdConflict']];
+  for (const [r, code] of replays) {
+    assert.equal(r.kind, 'refused');
+    assert.equal(r.code, code);
+  }
 });
 
 test('C-C08 bodies are served after the durable receipt to the actual target and version, display is a separate event, each write act is ledgered once; list/409 leaks, authorisation-as-read and invented offline addresses are refused', async () => {
@@ -694,6 +791,16 @@ test('C-C08 bodies are served after the durable receipt to the actual target and
   const projection = RD.listProjection(srv.facts, true);
   assert.equal(deepHas(projection, 'SYN 소견 본문'), false);
   assert.equal(projection.publishedVersionId, srv.facts.publishedVersion.versionId);
+  // A clinician never receives a version that was not published, even once a later version is approved.
+  const prelim = server();
+  await run(prelim, 'r1', 'start', { at: plus(T0, -H) });
+  const pv = (await run(prelim, 'r1', 'preliminary', { at: plus(T0, -MIN), reviewerId: 'r2' })).plan.version.ref;
+  await run(prelim, 'r2', 'approve', { at: T0 });
+  const pctx = ctx({ facts: prelim.facts, retained: { record: prelim.record, at: plus(T0, H) } });
+  assert.throws(() => RD.planReportRead(pctx, { surface: 'clinician', versionId: pv.versionId, eventId: 'r-pre' }), { code: 'VersionNotPublished' });
+  const pub = prelim.facts.publishedVersion.versionId;
+  assert.equal(allowed(() => RD.planReportRead(pctx, { surface: 'clinician', versionId: pub, eventId: 'r-pub' })).version.versionId, pub);
+  assert.equal(allowed(() => RD.planReportRead({ ...pctx, actor: actor('r3') }, { surface: 'reader', versionId: pv.versionId, eventId: 'r-reader' })).version.versionId, pv.versionId);
 });
 
 test('C-C09 in each of the four reconnect conflicts the server state and my signed original are both kept; automatic merge or overwrite and early application of dependent events are refused', async () => {
@@ -776,6 +883,9 @@ test('C-C10 a disconnection keeps working and only the signer\'s own new authent
   const resumed = await reconcileAndCommit(srv, entry, { receivedAt: plus(T0, 2 * H) });
   assert.equal(resumed.result.status, 'committed');
   assert.equal(srv.facts.firstApprovedAt, T0);
+  // U5's other session-end signal: the cookie belongs to another login (403/409 AUTH_SESSION_MISMATCH).
+  for (const status of [403, 409]) assert.equal(Q.classifySessionSignal({ kind: 'http', status, code: 'AUTH_SESSION_MISMATCH' }), 'awaiting-reauth');
+  assert.equal(Q.classifySessionSignal({ kind: 'http', status: 401, code: 'AUTH_SESSION_MISMATCH' }), 'continue-offline');
 });
 
 test('C-C11 retained transitions and reads keep lawful preservation and archive; expired reference-only units cannot take ordinary parts, archived preservation entries do not reopen access and reads without {record, at} are refused (L5-01/03/04)', async () => {
@@ -809,6 +919,9 @@ test('C-C11 retained transitions and reads keep lawful preservation and archive;
   const afterEntry = RT.readRetention(entry.facts, arc.archive, null, { record: entry.retention, at: entryAt });
   assert.equal(afterEntry.state, 'retention-only');
   assert.equal(afterEntry.ordinaryClinicalAccess, false);
+  // O5: reading the archived unit after its preservation entry stays closed to ordinary access.
+  assert.throws(() => RD.planReportRead({ actor: actor('r3'), roleAllowed: true, study: study(), facts: entry.facts, archive: arc.archive, resume: null,
+    retained: { record: entry.retention, at: entryAt }, ingress, now: entryAt }, { surface: 'reader', versionId: null, eventId: 'read-o5' }), { code: 'RetentionOnlyAccessRefused' });
   const clinical = allowed(() => online(arc, 'r2', 'addendum', { at: entryAt }));
   assert.equal(clinical.publish, true);
   assert.equal(RT.readRetention(clinical.facts, arc.archive, null, { record: clinical.retention, at: entryAt }).ordinaryClinicalAccess, true);

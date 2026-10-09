@@ -64,7 +64,8 @@ export function evaluateTimeBasis(input: TimeBasis, signedAt: string, deviceId: 
   if (basis.signBootId !== basis.anchorBootId) return held(signedAt, 'boot-discontinuity');
   if (basis.wallClockEvents.some(e => e.tickMs >= basis.anchorTickMs && e.tickMs <= basis.signTickMs))
     return held(signedAt, 'wall-clock-changed');
-  if (signedAt > basis.anchorValidUntil) return held(signedAt, 'anchor-expired');
+  // The whole uncertainty interval must lie inside the anchor's validity, not only the claimed instant.
+  if (basis.interval.latest > basis.anchorValidUntil) return held(signedAt, 'anchor-expired');
   return freeze({ status: 'verified', signedAt, interval: { ...basis.interval } });
 }
 

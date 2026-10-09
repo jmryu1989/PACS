@@ -80,8 +80,8 @@ export type TimeEvaluation = Readonly<
 export interface VerifiedSignatureV2 {
   kid: string;
   payload: Readonly<SignaturePayloadV2>;
-  /** The exact signed payload bytes, base64url as signed (kept as text so the verdict can be frozen). */
-  payloadBase64url: string;
+  /** The exact envelope that was verified (base64url text, frozen); only these bytes may be stored or published. */
+  envelope: SignatureEnvelopeV2;
   /** SHA-256 of the exact signed payload bytes: the content hash of this version. */
   versionSha256: string;
   integrity: 'valid';

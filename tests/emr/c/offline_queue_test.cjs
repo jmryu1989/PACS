@@ -70,26 +70,29 @@ function claim(srv, id, at) {
     at, expectedClaimGeneration: srv.facts.claimGeneration, expectedPublishedVersionId: null }).facts;
 }
 function grantFor(srv, id, issuedAt) {
+  const anchor = { anchorId: next('grant-anchor'), deviceId: 'dev-' + id, bootId: 'boot-1', serverTime: issuedAt, validUntil: plus(issuedAt, 48 * H) };
+  anchorRows.set(anchor.anchorId, anchor);
   const key = keyRows.get('kid-' + id), part = name => ({ part: name, sha256: sha(name), verifiedSha256: sha(name), bytes: 10 });
   const readiness = G.offlineReadiness({ manifestId: 'm', studies: [{ studyId: STUDY, role: 'current', parts: G.MANIFEST_PARTS.map(part) }], requiredComparisonIds: [] },
     offlinePolicy, { bytes: offlinePolicy.reserveBytesJ });
   const issued = G.issueOfflineGrant({ grantId: next('grant'), deviceId: key.deviceId, kid: key.kid, studies: [{ studyId: STUDY, recordId: srv.facts.recordId,
-    claimGeneration: srv.facts.claimGeneration, role: 'current' }], actions: ['approve-sign', 'amend', 'addendum'], issuedAt, anchorId: 'grant-anchor' }, actor(id), key, offlinePolicy, readiness);
+    claimGeneration: srv.facts.claimGeneration, role: 'current' }], actions: ['approve-sign', 'amend', 'addendum'], issuedAt, anchorId: anchor.anchorId }, actor(id), key, offlinePolicy, readiness);
   grantRows.set(issued.grant.grantId, issued.grant);
+  return { ...issued, anchor };
   return issued;
 }
 function entry(srv, id, o) {
   const action = o.action ?? 'approve-sign', key = keyRows.get('kid-' + id), signedAt = o.signedAt;
-  const anchorId = next('anchor'), serverTime = plus(signedAt, -H);
-  anchorRows.set(anchorId, { anchorId, deviceId: key.deviceId, bootId: 'boot-1', serverTime, validUntil: plus(serverTime, 48 * H) });
-  const basis = { anchorId, anchorServerTime: serverTime, anchorValidUntil: plus(serverTime, 48 * H), anchorBootId: 'boot-1', anchorTickMs: 1000,
-    signBootId: o.signBoot ?? 'boot-1', signTickMs: 1000 + H, wallClockEvents: [], interval: { earliest: plus(signedAt, -2000), latest: plus(signedAt, 2000) } };
+  // Offline signatures run from the anchor issued with their grant.
+  const { anchorId, serverTime, validUntil } = o.grant.anchor;
+  const basis = { anchorId, anchorServerTime: serverTime, anchorValidUntil: validUntil, anchorBootId: 'boot-1', anchorTickMs: 1000,
+    signBootId: o.signBoot ?? 'boot-1', signTickMs: 1000 + ms(signedAt) - ms(serverTime), wallClockEvents: [], interval: { earliest: plus(signedAt, -2000), latest: plus(signedAt, 2000) } };
   const previous = o.previous !== undefined ? o.previous : action === 'approve-sign' ? null : srv.facts.bodyVersion;
   const p = { formatVersion: 'emr-signature/2', text: { kind: 'report', findings: o.findings ?? 'SYN Q 소견', conclusion: '', recommendation: '' }, patient: { ...patient },
     managingInstitutionId: 'inst-a', actingInstitutionId: 'inst-a', studyId: STUDY, recordKind: 'report-version', recordId: srv.facts.recordId, versionId: next('version'),
     previousVersion: previous, attachments: [], author: who(id), signer: who(id), identityRegistrationId: 'reg-' + id, action, reason: null,
     eventId: o.eventId ?? next('event'), deviceId: key.deviceId, kid: key.kid, grant: { grantId: o.grant.grant.grantId, digest: o.grant.digest },
-    claimGeneration: o.claimGeneration ?? srv.facts.claimGeneration, draftRevision: null, deviceSequence: o.sequence ?? 1, predecessorEventId: o.predecessor ?? null,
+    claimGeneration: o.claimGeneration ?? o.grant.grant.studies[0].claimGeneration, draftRevision: null, deviceSequence: o.sequence ?? 1, predecessorEventId: o.predecessor ?? null,
     signedAt, timeBasis: basis };
   const header = CV.protectedHeaderV2(key.kid).toString('base64url'), body = CV.canonicalPayloadV2(p).toString('base64url');
   const envelope = { protected: header, payload: body,
@@ -141,7 +144,7 @@ function transport(srv, { receivedAt = plus(T0, 2 * H), lose = 0, fail = null, e
 
 /** The protected store stand-in: rows keyed by eventId per owner, with explicit faults. */
 function memoryStore({ putFault = null, receiptOverride = null, reserveFault = false, reserveBytes = null, leakOther = null } = {}) {
-  const rows = new Map(), calls = [];
+  const rows = new Map(), calls = [], evidence = new Set();
   return { rows, calls,
     async reserve(bytes) { calls.push('reserve'); if (reserveFault) throw new Error('disk full'); return { reservationId: 'res-1', bytes: reserveBytes ?? bytes }; },
     async put(e, digest) {
@@ -157,6 +160,8 @@ function memoryStore({ putFault = null, receiptOverride = null, reserveFault = f
     },
     async setState(eventId, state) { calls.push(`state:${eventId}:${state}`); rows.get(eventId).state = state; },
     async remove(eventId) { calls.push('remove:' + eventId); rows.delete(eventId); },
+    async keepCommitEvidence(eventId) { calls.push('evidence:' + eventId); evidence.add(eventId); },
+    async commitEvidence() { return [...evidence]; },
   };
 }
 const states = list => Object.fromEntries(list.map(x => [x.eventId, x.state]));
@@ -255,6 +260,19 @@ test('C-Q04 a conflicting approval stays as conflict with its original kept, and
   assert.equal(JSON.stringify(srv.facts), before);
   assert(store.rows.has(approval.eventId) && store.rows.has(amend.eventId));
   assert.equal(store.calls.filter(c => c.startsWith('remove:')).length, 0);
+  // Once a committed predecessor's original is removed after its verified retention receipt, its commit evidence
+  // remains, so a dependant is sent instead of waiting forever.
+  const s2 = server(); claim(s2, 'r1', plus(T0, -H));
+  const g2 = grantFor(s2, 'r1', plus(T0, -30 * MIN));
+  const first = entry(s2, 'r1', { signedAt: T0, grant: g2, sequence: 1 });
+  const st2 = memoryStore(), q2 = Q.createOfflineQueue({ store: st2, owner: ownerOf('r1') });
+  await q2.enqueue(first);
+  assert.equal(states(await sent(q2, transport(s2), sessionOf('r1')))[first.eventId], 'committed');
+  assert.equal(await q2.acknowledgeRetention(first.eventId, { eventId: first.eventId }, { verify: () => true }), true);
+  const child = entry(s2, 'r1', { action: 'amend', signedAt: plus(T0, MIN), grant: g2, sequence: 2, predecessor: first.eventId });
+  await q2.enqueue(child);
+  assert.equal(states(await sent(q2, transport(s2), sessionOf('r1')))[child.eventId], 'committed');
+  assert.deepEqual(s2.submitted, [first.eventId, child.eventId]);
 });
 
 test('C-Q05 a disconnection keeps the queue pending, a real session end pauses it for re-authentication, another account cannot send it and the owner\'s new session resumes it', async () => {
@@ -266,6 +284,11 @@ test('C-Q05 a disconnection keeps the queue pending, a real session end pauses i
   for (const fail of [{ kind: 'network' }, { kind: 'timeout' }, { kind: 'http', status: 503 }, { kind: 'http', status: 401 }])
     assert.equal(states(await sent(queue, transport(srv, { fail }), sessionOf('r1')))[e.eventId], 'sent-unknown', JSON.stringify(fail));
   assert.equal(states(await sent(queue, transport(srv, { ended: true }), sessionOf('r1')))[e.eventId], 'awaiting-reauth');
+  // U5's other end signal (cookie of another login) is handled the same way: held for re-authentication, nothing deleted.
+  const mismatched = Q.createOfflineQueue({ store: memoryStore(), owner: ownerOf('r1') });
+  const e2 = entry(srv, 'r1', { signedAt: plus(T0, 2 * MIN), grant, sequence: 2 });
+  await mismatched.enqueue(e2);
+  assert.equal(states(await sent(mismatched, transport(srv, { fail: { kind: 'http', status: 409, code: 'AUTH_SESSION_MISMATCH' } }), sessionOf('r1')))[e2.eventId], 'awaiting-reauth');
   assert(store.rows.has(e.eventId));
   assert.equal(states(await sent(queue, transport(srv), sessionOf('r1', 'ended')))[e.eventId], 'awaiting-reauth');
   const submittedBefore = srv.submitted.length;

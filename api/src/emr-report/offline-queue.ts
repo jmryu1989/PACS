@@ -15,18 +15,23 @@ export interface DurableQueuePort {
   list(owner: Readonly<QueueOwner>): Promise<unknown>;
   setState(eventId: string, state: QueueState, evidence: unknown): Promise<void>;
   remove(eventId: string, receipt: unknown): Promise<void>;
+  /** Commit evidence outlives the original: kept before removal so dependants still see their predecessor as applied. */
+  keepCommitEvidence(eventId: string, receipt: unknown): Promise<void>;
+  commitEvidence(owner: Readonly<QueueOwner>): Promise<unknown>;
 }
 export interface QueueTransport { submit(entry: Readonly<QueueEntry>): Promise<unknown> }
 export interface RetentionReceiptVerifier { verify(receipt: unknown, entry: Readonly<QueueEntry>): boolean }
 
 /**
- * Connection problems are not the end of a session: the work continues and the queue waits. Only the server's explicit
- * AUTH_SESSION_ENDED moves the queue to "send after re-authentication", and even then nothing is deleted.
+ * Connection problems are not the end of a session: the work continues and the queue waits. Only U5's session-end
+ * signals (401 AUTH_SESSION_ENDED; 403/409 AUTH_SESSION_MISMATCH, the cookie belongs to another login) move the queue to
+ * "send after re-authentication", and even then nothing is deleted.
  */
 export function classifySessionSignal(signal: unknown): 'continue-offline' | 'awaiting-reauth' {
   const s = (signal && typeof signal === 'object' ? signal : {}) as { kind?: unknown; status?: unknown; code?: unknown };
   const kind = choice(s.kind, ['network', 'timeout', 'http']);
   if (kind === 'http' && s.status === 401 && s.code === 'AUTH_SESSION_ENDED') return 'awaiting-reauth';
+  if (kind === 'http' && [403, 409].includes(s.status as number) && s.code === 'AUTH_SESSION_MISMATCH') return 'awaiting-reauth';
   return 'continue-offline';
 }
 
@@ -97,6 +102,12 @@ export function createOfflineQueue(options: { store: DurableQueuePort; owner: Qu
     return out;
   }
 
+  async function keptCommits(): Promise<string[]> {
+    const listed = await store.commitEvidence(owner);
+    if (!Array.isArray(listed) || listed.some(id => typeof id !== 'string')) refuse('CommitEvidenceRefused');
+    return listed as string[];
+  }
+
   return Object.freeze({
     /** Pending only after the durable receipt for this exact entry; a failed or partial write is "not saved". */
     async enqueue(input: unknown): Promise<Readonly<{ status: 'pending-offline'; receipt: { eventId: string; entryId: string; digest: string; durableAt: string } } | { status: 'not-saved'; code: string }>> {
@@ -126,6 +137,7 @@ export function createOfflineQueue(options: { store: DurableQueuePort; owner: Qu
       if (queueAccess(owner, session) !== 'own') refuse('OwnerMismatch');
       const list = await rows();
       const state = new Map(list.map(r => [r.eventId, r.state]));
+      const kept = new Set<string>(await keptCommits());
       const set = async (eventId: string, next: QueueState, evidence: unknown) => { state.set(eventId, next); await store.setState(eventId, next, evidence); };
       if (session.state === 'ended') {
         for (const row of list) if (['pending', 'sent-unknown'].includes(row.state)) await set(row.eventId, 'awaiting-reauth', null);
@@ -134,7 +146,7 @@ export function createOfflineQueue(options: { store: DurableQueuePort; owner: Qu
       for (const row of list) {
         if (!row.entry || row.blocked || !['pending', 'sent-unknown', 'awaiting-reauth', 'held'].includes(state.get(row.eventId)!)) continue;
         const predecessor = row.entry.predecessorEventId;
-        if (predecessor !== null && state.get(predecessor) !== 'committed') { await set(row.eventId, 'held', { waitingFor: predecessor }); continue; }
+        if (predecessor !== null && state.get(predecessor) !== 'committed' && !kept.has(predecessor)) { await set(row.eventId, 'held', { waitingFor: predecessor }); continue; }
         let answer: Record<string, any>;
         try { answer = object(await transport.submit(row.entry), ['eventId', 'status', 'reason', 'recoveryRef', 'currentVersion', 'times']); }
         catch (signal) {
@@ -160,6 +172,7 @@ export function createOfflineQueue(options: { store: DurableQueuePort; owner: Qu
       if (!row || !row.entry || row.state !== 'committed') return false;
       const verified = verifier.verify(receipt, row.entry) === true;
       if (!mayRemoveLocalOriginal('server-retention-receipt', { eventId, verified }, row.entry.eventId)) return false;
+      await store.keepCommitEvidence(eventId, receipt);
       await store.remove(eventId, receipt);
       return true;
     },
