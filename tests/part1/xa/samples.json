@@ -1,0 +1,626 @@
+{
+ "schema": "e-xa-r1 public and synthetic samples, v1",
+ "note": "Public files are read in place, read-only, by exact relative path and SHA-256; they are not copied into the repository. A missing or changed file fails the case as 'verification incomplete'; it is never a skip. Synthetic fixtures are built by dicom_contract_test.py in a temporary directory at run time, are not clinical data and do not replace the real public samples listed in real_sample_pending.",
+ "root_env": "KIN_XA_SAMPLE_ROOT",
+ "default_root": "C:/Users/norne/PACS/tmp/dicom-samples/tcia-20261004",
+ "inventory": {
+  "path": "C:/Users/norne/PACS/tmp/astra-control/evidence/emg-exa-prep-20261009/inventory.json",
+  "rule": "every sha256 here was recomputed from the file and equals the prepared inventory (36/36 XA+RF files)"
+ },
+ "licenses": {
+  "EAY131": "CC BY 4.0",
+  "CMB-MML": "CC BY 4.0",
+  "CMB-CRC": "CC BY 4.0",
+  "CMB-PCA": "CC BY 4.0",
+  "VAREPOP-APOLLO": "CC BY 4.0",
+  "source": "TCIA collection licences as recorded in tcia-20261004/LICENSES.md and samples.md"
+ },
+ "public": [
+  {
+   "id": "EAY131-XA-01",
+   "collection": "EAY131",
+   "relpath": "studies/EAY131/EAY131-7194785/1960-01-07-2309695769/1.3.6.1.4.1.14519.5.2.1.1620.1226.556671887929658205439233229751/00000001.dcm",
+   "sha256": "d07b6a93e183d20e1d79194244db9765af8afb88957c98086ae4776fe316301d",
+   "bytes": 4722070,
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.1",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 1,
+   "frame_time": null,
+   "pointer": null,
+   "role": "real public XA, single frame, uncompressed: still image path and negative control for time playback",
+   "cases": [
+    "XA01-DICOM-ALLOW",
+    "XA07-DICOM-ALLOW",
+    "XA07-DICOM-REJECT"
+   ]
+  },
+  {
+   "id": "CMB-MML-XA-01",
+   "collection": "CMB-MML",
+   "relpath": "studies/CMB-MML/MSB-01049/1959-09-05-5780102493/1.3.6.1.4.1.14519.5.2.1.302554159607260948010821600945054200021/00000001.dcm",
+   "sha256": "859d087032c33267af7b34ec7523954e720eca5d50fd5ffd3a55f160031aab14",
+   "bytes": 2099824,
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.1",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 1,
+   "frame_time": null,
+   "pointer": null,
+   "role": "real public XA, single frame, uncompressed: still image path and negative control for time playback",
+   "cases": [
+    "XA01-DICOM-ALLOW",
+    "XA07-DICOM-ALLOW",
+    "XA07-DICOM-REJECT"
+   ]
+  },
+  {
+   "id": "CMB-MML-XA-02",
+   "collection": "CMB-MML",
+   "relpath": "studies/CMB-MML/MSB-01049/1959-09-05-5780102493/1.3.6.1.4.1.14519.5.2.1.131035040037757318422645774567283072093/00000001.dcm",
+   "sha256": "ddfccc7f09f65e12542dc93b91c75138fdefd30a43d62d6979572ca8f8baa422",
+   "bytes": 2099834,
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.1",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 1,
+   "frame_time": null,
+   "pointer": null,
+   "role": "real public XA, single frame, uncompressed: still image path and negative control for time playback",
+   "cases": [
+    "XA01-DICOM-ALLOW",
+    "XA07-DICOM-ALLOW",
+    "XA07-DICOM-REJECT"
+   ]
+  },
+  {
+   "id": "CMB-MML-XA-03",
+   "collection": "CMB-MML",
+   "relpath": "studies/CMB-MML/MSB-01049/1959-09-05-5780102493/1.3.6.1.4.1.14519.5.2.1.92716470162264682290902110706372921544/00000001.dcm",
+   "sha256": "b5d8a785c3a6ecc687abab993fbcf34cc67d67932bf5583348b223b865cba4d6",
+   "bytes": 2099826,
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.1",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 1,
+   "frame_time": null,
+   "pointer": null,
+   "role": "real public XA, single frame, uncompressed: still image path and negative control for time playback",
+   "cases": [
+    "XA01-DICOM-ALLOW",
+    "XA07-DICOM-ALLOW",
+    "XA07-DICOM-REJECT"
+   ]
+  },
+  {
+   "id": "CMB-PCA-RF-01",
+   "collection": "CMB-PCA",
+   "relpath": "studies/CMB-PCA/MSB-08178/1956-10-31-0236187384/1.3.6.1.4.1.14519.5.2.1.1.33643639350182954926460908023620772315/00000001.dcm",
+   "sha256": "ef03498f1b9b6bbf69f01bcae27bc9279ebae9dcc27fee0ddf8bdc7563779f29",
+   "bytes": 2101522,
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.2",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 1,
+   "frame_time": null,
+   "pointer": [
+    "00181063"
+   ],
+   "role": "real public RF, single frame whose Frame Increment Pointer names Frame Time without a Frame Time: stays on the generic path, never XA",
+   "cases": [
+    "XA07-DICOM-ALLOW",
+    "XA07-DICOM-REJECT"
+   ]
+  },
+  {
+   "id": "VAREPOP-APOLLO-RF-01",
+   "collection": "VAREPOP-APOLLO",
+   "relpath": "studies/VAREPOP-APOLLO/AP-7CQ6/1975-04-20-7980009076/1.3.6.1.4.1.14519.5.2.1.169111720477496880368273966917558660013/00000001.dcm",
+   "sha256": "0c73bd3e2f13a8ebcb9eb3453096d23629bc712ca08fba7260905fb1719d8e98",
+   "bytes": 8160406,
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.2",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 2,
+   "frame_time": 1000.0,
+   "pointer": [
+    "00181063"
+   ],
+   "role": "real public RF multi-frame, uncompressed: multi-frame pipeline and Cine Module regression only, not XA evidence",
+   "cases": [
+    "XA01-DICOM-ALLOW",
+    "XA02-DICOM-ALLOW",
+    "XA07-DICOM-ALLOW",
+    "XA07-DICOM-REJECT"
+   ]
+  },
+  {
+   "id": "VAREPOP-APOLLO-RF-02",
+   "collection": "VAREPOP-APOLLO",
+   "relpath": "studies/VAREPOP-APOLLO/AP-7CQ6/1975-04-20-7980009076/1.3.6.1.4.1.14519.5.2.1.209550482758949917605546956133783547750/00000001.dcm",
+   "sha256": "356af15acd12e91c48ab52163071f5f01233ef227f27185dd6086deb7e8b6ee5",
+   "bytes": 18878298,
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.2",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 16,
+   "frame_time": 250.0,
+   "pointer": [
+    "00181063"
+   ],
+   "role": "real public RF multi-frame, uncompressed: multi-frame pipeline and Cine Module regression only, not XA evidence",
+   "cases": [
+    "XA01-DICOM-ALLOW",
+    "XA02-DICOM-ALLOW",
+    "XA07-DICOM-ALLOW",
+    "XA07-DICOM-REJECT"
+   ]
+  },
+  {
+   "id": "VAREPOP-APOLLO-RF-03",
+   "collection": "VAREPOP-APOLLO",
+   "relpath": "studies/VAREPOP-APOLLO/AP-7CQ6/1975-04-20-7980009076/1.3.6.1.4.1.14519.5.2.1.114038165058490064705735122306615351137/00000001.dcm",
+   "sha256": "1e10afd5cb018b31c8c95378dab8fd4a82315f91803e82116762568a414a2e95",
+   "bytes": 21237588,
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.2",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 18,
+   "frame_time": 250.0,
+   "pointer": [
+    "00181063"
+   ],
+   "role": "real public RF multi-frame, uncompressed: multi-frame pipeline and Cine Module regression only, not XA evidence",
+   "cases": [
+    "XA01-DICOM-ALLOW",
+    "XA02-DICOM-ALLOW",
+    "XA07-DICOM-ALLOW",
+    "XA07-DICOM-REJECT"
+   ]
+  },
+  {
+   "id": "VAREPOP-APOLLO-RF-04",
+   "collection": "VAREPOP-APOLLO",
+   "relpath": "studies/VAREPOP-APOLLO/AP-7CQ6/1975-04-20-7980009076/1.3.6.1.4.1.14519.5.2.1.12461011597508229004937243434979481807/00000001.dcm",
+   "sha256": "34e6e4f0ad180a1a9efed01ffb1b58a8ec164c306f4e625e8ba7c7d23116cf87",
+   "bytes": 12238646,
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.2",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 3,
+   "frame_time": 1000.0,
+   "pointer": [
+    "00181063"
+   ],
+   "role": "real public RF multi-frame, uncompressed: multi-frame pipeline and Cine Module regression only, not XA evidence",
+   "cases": [
+    "XA01-DICOM-ALLOW",
+    "XA02-DICOM-ALLOW",
+    "XA07-DICOM-ALLOW",
+    "XA07-DICOM-REJECT"
+   ]
+  },
+  {
+   "id": "VAREPOP-APOLLO-RF-05",
+   "collection": "VAREPOP-APOLLO",
+   "relpath": "studies/VAREPOP-APOLLO/AP-7CQ6/1975-04-20-7980009076/1.3.6.1.4.1.14519.5.2.1.229886382809297854197582008692036572827/00000001.dcm",
+   "sha256": "81a6e0de87cb7d5dec359ee5d22e1c241ed1357c493759ee2f805266a66f740e",
+   "bytes": 12238646,
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.2",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 3,
+   "frame_time": 1000.0,
+   "pointer": [
+    "00181063"
+   ],
+   "role": "real public RF multi-frame, uncompressed: multi-frame pipeline and Cine Module regression only, not XA evidence",
+   "cases": [
+    "XA01-DICOM-ALLOW",
+    "XA02-DICOM-ALLOW",
+    "XA07-DICOM-ALLOW",
+    "XA07-DICOM-REJECT"
+   ]
+  },
+  {
+   "id": "VAREPOP-APOLLO-RF-06",
+   "collection": "VAREPOP-APOLLO",
+   "relpath": "studies/VAREPOP-APOLLO/AP-7CQ6/1975-04-20-7980009076/1.3.6.1.4.1.14519.5.2.1.328413419558483426742783969798905999277/00000001.dcm",
+   "sha256": "1e77d4263416e80c11d564eb4b8e7b9aba8da0f97f7be55833bc2cdbfc8a4751",
+   "bytes": 2363224,
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.2",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 2,
+   "frame_time": 250.0,
+   "pointer": [
+    "00181063"
+   ],
+   "role": "real public RF multi-frame, uncompressed: multi-frame pipeline and Cine Module regression only, not XA evidence",
+   "cases": [
+    "XA01-DICOM-ALLOW",
+    "XA02-DICOM-ALLOW",
+    "XA07-DICOM-ALLOW",
+    "XA07-DICOM-REJECT"
+   ]
+  },
+  {
+   "id": "VAREPOP-APOLLO-RF-07",
+   "collection": "VAREPOP-APOLLO",
+   "relpath": "studies/VAREPOP-APOLLO/AP-7CQ6/1975-04-20-7980009076/1.3.6.1.4.1.14519.5.2.1.269043483505868647838007142053003175668/00000001.dcm",
+   "sha256": "04cb407b267d0545ce0f0cc8641b6c93b6c2af930b0b1eff8ac0aab5b4889fef",
+   "bytes": 12238644,
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.2",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 3,
+   "frame_time": 67.0,
+   "pointer": [
+    "00181063"
+   ],
+   "role": "real public RF multi-frame, uncompressed: multi-frame pipeline and Cine Module regression only, not XA evidence",
+   "cases": [
+    "XA01-DICOM-ALLOW",
+    "XA02-DICOM-ALLOW",
+    "XA07-DICOM-ALLOW",
+    "XA07-DICOM-REJECT"
+   ]
+  },
+  {
+   "id": "CMB-CRC-XA-01",
+   "collection": "CMB-CRC",
+   "relpath": "studies/CMB-CRC/MSB-06489/1959-10-06-3753320680/1.3.6.1.4.1.14519.5.2.1.1.33343722159019714085164945966349503373/00000001.dcm",
+   "sha256": "640fbea0d197cfe5c926dcbbda3218aa28652c5fff137e56b471e9b6a9431d8a",
+   "bytes": 3279666,
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.1",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 1,
+   "frame_time": null,
+   "pointer": null,
+   "role": "real public XA, single frame, uncompressed: still image path and negative control for time playback",
+   "cases": [
+    "XA01-DICOM-ALLOW",
+    "XA07-DICOM-ALLOW",
+    "XA07-DICOM-REJECT"
+   ]
+  },
+  {
+   "id": "CMB-CRC-XA-02",
+   "collection": "CMB-CRC",
+   "relpath": "studies/CMB-CRC/MSB-06489/1959-10-06-3753320680/1.3.6.1.4.1.14519.5.2.1.1.33343722159019714085164945966349503373/00000002.dcm",
+   "sha256": "e03a6832b1512ce880cc1c3fcb7690deb3f2e8a66d0c62c697c7933ec0a65386",
+   "bytes": 3279666,
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.1",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 1,
+   "frame_time": null,
+   "pointer": null,
+   "role": "real public XA, single frame, uncompressed: still image path and negative control for time playback",
+   "cases": [
+    "XA01-DICOM-ALLOW",
+    "XA07-DICOM-ALLOW",
+    "XA07-DICOM-REJECT"
+   ]
+  },
+  {
+   "id": "CMB-CRC-XA-03",
+   "collection": "CMB-CRC",
+   "relpath": "studies/CMB-CRC/MSB-06489/1959-10-06-3753320680/1.3.6.1.4.1.14519.5.2.1.1.33343722159019714085164945966349503373/00000003.dcm",
+   "sha256": "f5f359dc1716b8396c95e10fa6bfbaddbdbd025723bf6916d24a01cace79dada",
+   "bytes": 3279666,
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.1",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 1,
+   "frame_time": null,
+   "pointer": null,
+   "role": "real public XA, single frame, uncompressed: still image path and negative control for time playback",
+   "cases": [
+    "XA01-DICOM-ALLOW",
+    "XA07-DICOM-ALLOW",
+    "XA07-DICOM-REJECT"
+   ]
+  },
+  {
+   "id": "CMB-CRC-XA-04",
+   "collection": "CMB-CRC",
+   "relpath": "studies/CMB-CRC/MSB-06489/1959-10-06-4968582907/1.3.6.1.4.1.14519.5.2.1.120945438785959088957892908270237262225/00000001.dcm",
+   "sha256": "8f84d0bdf7b643a31f2ed380dc9e1a534f463e07b19aa83c06e042748231da57",
+   "bytes": 3279548,
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.1",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 1,
+   "frame_time": null,
+   "pointer": null,
+   "role": "real public XA, single frame, uncompressed: still image path and negative control for time playback",
+   "cases": [
+    "XA01-DICOM-ALLOW",
+    "XA07-DICOM-ALLOW",
+    "XA07-DICOM-REJECT"
+   ]
+  },
+  {
+   "id": "CMB-CRC-XA-05",
+   "collection": "CMB-CRC",
+   "relpath": "studies/CMB-CRC/MSB-06489/1959-10-06-4968582907/1.3.6.1.4.1.14519.5.2.1.120945438785959088957892908270237262225/00000002.dcm",
+   "sha256": "de219ff805a9ac88d3123505124ee480c73219dde8161054cabcbd2bb09965e0",
+   "bytes": 3279548,
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.1",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 1,
+   "frame_time": null,
+   "pointer": null,
+   "role": "real public XA, single frame, uncompressed: still image path and negative control for time playback",
+   "cases": [
+    "XA01-DICOM-ALLOW",
+    "XA07-DICOM-ALLOW",
+    "XA07-DICOM-REJECT"
+   ]
+  },
+  {
+   "id": "CMB-CRC-XA-06",
+   "collection": "CMB-CRC",
+   "relpath": "studies/CMB-CRC/MSB-06489/1959-10-06-4968582907/1.3.6.1.4.1.14519.5.2.1.120945438785959088957892908270237262225/00000003.dcm",
+   "sha256": "295770ae44faf79d72fba2bca80569dbaf032b57b9fa87cffce82080a13f6a7e",
+   "bytes": 3279548,
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.1",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 1,
+   "frame_time": null,
+   "pointer": null,
+   "role": "real public XA, single frame, uncompressed: still image path and negative control for time playback",
+   "cases": [
+    "XA01-DICOM-ALLOW",
+    "XA07-DICOM-ALLOW",
+    "XA07-DICOM-REJECT"
+   ]
+  },
+  {
+   "id": "CMB-MML-XA-04",
+   "collection": "CMB-MML",
+   "relpath": "studies/CMB-MML/MSB-02929/1958-05-22-5541494963/1.3.6.1.4.1.14519.5.2.1.281155099230324021957242116695610893965/00000001.dcm",
+   "sha256": "d3bef1c41004dcf7a3b9bd76695d7a539c181d76b999f8a545c9ba5fc0440fdc",
+   "bytes": 2130984,
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.1",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 1,
+   "frame_time": null,
+   "pointer": null,
+   "role": "real public XA, single frame, uncompressed: still image path and negative control for time playback",
+   "cases": [
+    "XA01-DICOM-ALLOW",
+    "XA07-DICOM-ALLOW",
+    "XA07-DICOM-REJECT"
+   ]
+  },
+  {
+   "id": "CMB-MML-XA-05",
+   "collection": "CMB-MML",
+   "relpath": "studies/CMB-MML/MSB-02929/1958-05-22-5541494963/1.3.6.1.4.1.14519.5.2.1.281155099230324021957242116695610893965/00000002.dcm",
+   "sha256": "1ab9920a0753f4171a4a0e2f055d3e8d95b54ca00e5aac1f9f0d9212ae312924",
+   "bytes": 2130976,
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.1",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 1,
+   "frame_time": null,
+   "pointer": null,
+   "role": "real public XA, single frame, uncompressed: still image path and negative control for time playback",
+   "cases": [
+    "XA01-DICOM-ALLOW",
+    "XA07-DICOM-ALLOW",
+    "XA07-DICOM-REJECT"
+   ]
+  },
+  {
+   "id": "CMB-MML-XA-06",
+   "collection": "CMB-MML",
+   "relpath": "studies/CMB-MML/MSB-02929/1958-05-22-5541494963/1.3.6.1.4.1.14519.5.2.1.146723077402940611392501496773706077631/00000001.dcm",
+   "sha256": "3486d804c445f0de03bd3d2f242593d2630f7945846d7e6d3e927b4fc7ed5f9c",
+   "bytes": 2099786,
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.1",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 1,
+   "frame_time": null,
+   "pointer": null,
+   "role": "real public XA, single frame, uncompressed: still image path and negative control for time playback",
+   "cases": [
+    "XA01-DICOM-ALLOW",
+    "XA07-DICOM-ALLOW",
+    "XA07-DICOM-REJECT"
+   ]
+  },
+  {
+   "id": "CMB-MML-XA-07",
+   "collection": "CMB-MML",
+   "relpath": "studies/CMB-MML/MSB-02929/1958-05-22-5541494963/1.3.6.1.4.1.14519.5.2.1.59262337924955234830347964410871055044/00000001.dcm",
+   "sha256": "6757c70970d132aef434c0ee3e1e6a34e865191759ac40ae4c412f1449afeda4",
+   "bytes": 2099786,
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.1",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 1,
+   "frame_time": null,
+   "pointer": null,
+   "role": "real public XA, single frame, uncompressed: still image path and negative control for time playback",
+   "cases": [
+    "XA01-DICOM-ALLOW",
+    "XA07-DICOM-ALLOW",
+    "XA07-DICOM-REJECT"
+   ]
+  }
+ ],
+ "synthetic": [
+  {
+   "id": "SYN-XA-JPEG-FT",
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.1",
+   "transfer_syntax": "1.2.840.10008.1.2.4.50 (JPEG Baseline, Pillow)",
+   "frames": 24,
+   "rows": 64,
+   "columns": 64,
+   "bits": 8,
+   "timing": "Frame Increment Pointer -> Frame Time 33.3 ms, Frame Delay 250 ms",
+   "covers": [
+    "XA01-DICOM-ALLOW",
+    "XA01-DICOM-REJECT",
+    "XA02-DICOM-ALLOW",
+    "XA07-DICOM-ALLOW"
+   ]
+  },
+  {
+   "id": "SYN-XA-RLE-FTV",
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.1",
+   "transfer_syntax": "1.2.840.10008.1.2.5 (RLE Lossless, pydicom)",
+   "frames": 12,
+   "rows": 64,
+   "columns": 64,
+   "bits": "16 allocated / 12 stored",
+   "timing": "Frame Increment Pointer -> non-uniform Frame Time Vector, Frame Delay 120.5 ms",
+   "covers": [
+    "XA01-DICOM-ALLOW",
+    "XA02-DICOM-ALLOW"
+   ]
+  },
+  {
+   "id": "SYN-XA-RLE-601",
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.1",
+   "transfer_syntax": "1.2.840.10008.1.2.5 (RLE Lossless, pydicom)",
+   "frames": 601,
+   "rows": 32,
+   "columns": 32,
+   "bits": 8,
+   "timing": "Frame Time 33.3 ms",
+   "covers": [
+    "XA04-DICOM-ALLOW"
+   ]
+  },
+  {
+   "id": "SYN-XA-JPEG-130MIB",
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.1",
+   "transfer_syntax": "1.2.840.10008.1.2.4.50 (JPEG Baseline, Pillow)",
+   "frames": 130,
+   "rows": 1024,
+   "columns": 1024,
+   "bits": 8,
+   "timing": "Frame Time 66.7 ms",
+   "covers": [
+    "XA04-DICOM-ALLOW"
+   ],
+   "size": "130 MiB stored-decoded, 1040 MiB by the module's per-frame reservation"
+  },
+  {
+   "id": "SYN-XA-RLE-SUB",
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.1",
+   "transfer_syntax": "1.2.840.10008.1.2.5 (RLE Lossless, pydicom)",
+   "frames": 8,
+   "rows": 32,
+   "columns": 32,
+   "bits": 8,
+   "timing": "Frame Time 66.7 ms",
+   "subtraction": "Recommended Viewing Mode SUB + Mask Subtraction Sequence (AVG_SUB, mask frame 1, sub-pixel shift)",
+   "covers": [
+    "XA07-DICOM-REJECT"
+   ]
+  },
+  {
+   "id": "SYN-EXA-TIME",
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.1.1",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 6,
+   "rows": 16,
+   "columns": 16,
+   "bits": 8,
+   "timing": "per-frame Frame Content Frame Reference DateTime, one temporal dimension",
+   "covers": [
+    "XA07-DICOM-ALLOW"
+   ]
+  },
+  {
+   "id": "SYN-EXA-TWO-DIMENSIONS",
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.1.1",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 6,
+   "rows": 16,
+   "columns": 16,
+   "bits": 8,
+   "timing": "Frame Content times, Dimension Index Sequence stack + time",
+   "covers": [
+    "XA07-DICOM-ALLOW"
+   ]
+  },
+  {
+   "id": "SYN-US-MULTI",
+   "sop_class": "1.2.840.10008.5.1.4.1.1.3.1",
+   "transfer_syntax": "1.2.840.10008.1.2.1",
+   "frames": 4,
+   "rows": 16,
+   "columns": 16,
+   "bits": 8,
+   "timing": "Frame Time 33 ms",
+   "covers": [
+    "XA07-DICOM-ALLOW"
+   ]
+  },
+  {
+   "id": "SYN-XA-DAMAGED",
+   "sop_class": "1.2.840.10008.5.1.4.1.1.12.1",
+   "transfer_syntax": "header variants and one truncated JPEG fragment",
+   "covers": [
+    "XA01-DICOM-REJECT",
+    "XA02-DICOM-REJECT",
+    "XA04-DICOM-REJECT"
+   ]
+  }
+ ],
+ "real_sample_pending": [
+  {
+   "need": "real compressed XA cine with Frame Time (JPEG Lossless SV1, JPEG Baseline, JPEG 2000 or RLE as the equipment sent it)",
+   "covers": [
+    "REQ-XA-01",
+    "REQ-XA-02"
+   ],
+   "synthetic_stand_in": [
+    "SYN-XA-JPEG-FT"
+   ],
+   "confirm": "frame-by-frame decode through the shipped viewer codecs and a WADO frame response in the original transfer syntax (R2)"
+  },
+  {
+   "need": "real XA with Frame Increment Pointer -> Frame Time Vector",
+   "covers": [
+    "REQ-XA-02"
+   ],
+   "synthetic_stand_in": [
+    "SYN-XA-RLE-FTV"
+   ],
+   "confirm": "vector intervals as the equipment wrote them, played in the real viewer"
+  },
+  {
+   "need": "real XA run longer than 500 frames",
+   "covers": [
+    "REQ-XA-04"
+   ],
+   "synthetic_stand_in": [
+    "SYN-XA-RLE-601"
+   ],
+   "confirm": "first-to-last access with bounded supply in the real viewer"
+  },
+  {
+   "need": "real XA run above 128 MiB decoded",
+   "covers": [
+    "REQ-XA-04"
+   ],
+   "synthetic_stand_in": [
+    "SYN-XA-JPEG-130MIB"
+   ],
+   "confirm": "peak/cancel/retry with real decode memory"
+  },
+  {
+   "need": "real Enhanced XA (1.2.840.10008.5.1.4.1.1.12.1.1) with per-frame Frame Content timing and a Dimension Index Sequence",
+   "covers": [
+    "REQ-XA-01",
+    "REQ-XA-02",
+    "REQ-XA-07"
+   ],
+   "synthetic_stand_in": [
+    "SYN-EXA-TIME",
+    "SYN-EXA-TWO-DIMENSIONS"
+   ],
+   "confirm": "timing source and the no-flatten rule on a real object"
+  },
+  {
+   "need": "real XA with stored subtraction instructions (Recommended Viewing Mode SUB / Mask Subtraction Sequence)",
+   "covers": [
+    "REQ-XA-07"
+   ],
+   "synthetic_stand_in": [
+    "SYN-XA-RLE-SUB"
+   ],
+   "confirm": "stored pixels shown unchanged with the stored-pixel note"
+  }
+ ]
+}
