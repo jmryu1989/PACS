@@ -5,9 +5,11 @@ Both consumers run this contract against their actual imported download callable
 import http.client
 import io
 import socket
+import unittest
 from unittest import mock
 import urllib.error
 import zipfile
+import zlib
 
 import archive_download
 
@@ -34,7 +36,8 @@ class PartialResponse(io.BytesIO):
 class DownloadContract:
     def test_transient_failures_discard_partial_bytes_then_recover(self):
         for error in [urllib.error.URLError("disconnected"), socket.timeout("timed out"),
-                      http.client.IncompleteRead(b"tail", 100), zipfile.BadZipFile("bad archive")]:
+                      http.client.IncompleteRead(b"tail", 100), zipfile.BadZipFile("bad archive"),
+                      zlib.error("bad deflate stream"), EOFError("truncated member")]:
             with self.subTest(error=type(error).__name__):
                 expected = zipped_bytes()
                 with mock.patch.object(archive_download.urllib.request, "urlopen",
@@ -48,7 +51,8 @@ class DownloadContract:
 
     def test_exhaustion_discards_partial_response_and_raises(self):
         for error in [urllib.error.URLError("disconnected"), socket.timeout("timed out"),
-                      http.client.IncompleteRead(b"tail", 100), zipfile.BadZipFile("bad archive")]:
+                      http.client.IncompleteRead(b"tail", 100), zipfile.BadZipFile("bad archive"),
+                      zlib.error("bad deflate stream"), EOFError("truncated member")]:
             with self.subTest(error=type(error).__name__):
                 with mock.patch.object(archive_download.urllib.request, "urlopen",
                                        side_effect=[PartialResponse(error) for _ in range(3)]) as request:
@@ -92,3 +96,32 @@ class DownloadContract:
                         self.download("https://test", archive)
                         self.assertEqual(archive.read(), expected)
                         self.assertEqual(request.call_count, 2)
+
+    def test_member_decompression_failures_retry_and_discard_archive(self):
+        expected = zipped_bytes()
+        for error in [zlib.error("bad deflate stream"), EOFError("truncated member")]:
+            for recover in [True, False]:
+                with self.subTest(error=type(error).__name__, recover=recover):
+                    outcomes = [error, error, None if recover else error]
+                    with mock.patch.object(archive_download.urllib.request, "urlopen",
+                                           side_effect=[io.BytesIO(expected) for _ in range(3)]) as request:
+                        with mock.patch.object(zipfile.ZipFile, "testzip", side_effect=outcomes):
+                            with mock.patch.object(archive_download.time, "sleep") as sleep:
+                                archive = io.BytesIO(b"previous attempt")
+                                if recover:
+                                    self.download("https://test", archive)
+                                    self.assertEqual(archive.read(), expected)
+                                else:
+                                    with self.assertRaises(type(error)):
+                                        self.download("https://test", archive)
+                                    self.assertEqual(archive.getvalue(), b"")
+                                self.assertEqual(request.call_count, 3)
+                                self.assertEqual(sleep.call_args_list, [mock.call(2), mock.call(4)])
+
+
+class ArchiveDownloadTest(DownloadContract, unittest.TestCase):
+    download = staticmethod(archive_download.download)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

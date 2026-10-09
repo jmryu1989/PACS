@@ -6,6 +6,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+import zlib
 
 
 def download(url, archive):
@@ -24,7 +25,8 @@ def download(url, archive):
                     raise zipfile.BadZipFile("archive member CRC mismatch")
             archive.seek(0)
             return
-        except (urllib.error.URLError, socket.timeout, http.client.IncompleteRead, zipfile.BadZipFile) as error:
+        except (urllib.error.URLError, socket.timeout, http.client.IncompleteRead,
+                zipfile.BadZipFile, zlib.error, EOFError) as error:
             archive.seek(0)
             archive.truncate()
             if (isinstance(error, urllib.error.HTTPError) and

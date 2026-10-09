@@ -32,17 +32,43 @@ def manifest():
     return json.loads((HERE / "samples.json").read_text(encoding="utf-8"))
 
 
-def local_only(row):
-    # The subject is the second component of the manifest's collection/subject path.
+def d717_subject(row):
     return row["collection"] == "EA1141" and Path(row["path"]).parts[1] == "EA1141-4339969"
 
 
+def d717_approved(spec, row):
+    return spec["sets"][row["set"]].get("approval", "").split(" ", 1)[0] == "D717"
+
+
+def local_only(row, spec=None):
+    spec = manifest() if spec is None else spec
+    # Folder aliases must not make the same series or bytes eligible for hosting.
+    protected = [r for r in spec["used"] if d717_approved(spec, r) or d717_subject(r)]
+    return (d717_approved(spec, row) or d717_subject(row) or
+            any(Path(row["path"]).parent.name == Path(r["path"]).parent.name or
+                row["sha256"] == r["sha256"] for r in protected))
+
+
+def validate_manifest(spec):
+    protected = [r for r in spec["used"] if d717_approved(spec, r)]
+    if not protected:
+        raise ValueError("D717 local-only approval has no samples; refusing MG sample processing")
+    for row in spec["used"]:
+        approved = d717_approved(spec, row)
+        if approved != d717_subject(row):
+            raise ValueError("D717 approval/subject mismatch: " + row["id"])
+        if not approved and local_only(row, spec):
+            raise ValueError("D717 series UID or sha256 reused outside local-only set: " + row["id"])
+
+
 def selection(name):
+    spec = manifest()
+    validate_manifest(spec)
     body = next(s for s in json.loads((HERE / "cases.json").read_text(encoding="utf-8"))["suites"] if s["id"] == name)
-    rows = {r["id"]: r for r in manifest()["used"]}
+    rows = {r["id"]: r for r in spec["used"]}
     selected, excluded = [], []
     for case in body["cases"]:
-        restricted = [sid for sid in case.get("samples", []) if local_only(rows[sid])]
+        restricted = [sid for sid in case.get("samples", []) if local_only(rows[sid], spec)]
         if hosted() and restricted:
             excluded.append({"case": body["class"] + "." + case["name"], "reason": REASON, "samples": restricted})
         else:
@@ -65,8 +91,9 @@ def digest(path):
 
 def plan():
     spec = manifest()
-    rows = [r for r in spec["used"] if not local_only(r)]
-    excluded = [r for r in spec["used"] if local_only(r)]
+    validate_manifest(spec)
+    rows = [r for r in spec["used"] if not local_only(r, spec)]
+    excluded = [r for r in spec["used"] if local_only(r, spec)]
     report = {"hosted_excluded": {"series": len({Path(r["path"]).parent.name for r in excluded}),
               "bytes": sum(r["bytes"] for r in excluded), "reason": REASON},
               "hosted_download_bytes": sum(r["bytes"] for r in rows),
@@ -84,7 +111,9 @@ def plan():
 
 def fetch():
     spec = manifest()
-    rows = [r for r in spec["used"] if not (hosted() and local_only(r))]
+    # Validate every row before network, cache reads or filesystem writes.
+    validate_manifest(spec)
+    rows = [r for r in spec["used"] if not (hosted() and local_only(r, spec))]
     groups = {}
     for row in rows:
         target = sample_target(spec, row)
@@ -93,7 +122,7 @@ def fetch():
                 raise RuntimeError("cached sample hash mismatch: " + row["id"])
             print("verified", row["id"], row["sha256"], flush=True)
             continue
-        if local_only(row):
+        if local_only(row, spec):
             raise RuntimeError("local sample must already be present: " + row["id"])
         target.parent.mkdir(parents=True, exist_ok=True)
         groups.setdefault(Path(row["path"]).parent.name, []).append((row, target))
