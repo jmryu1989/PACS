@@ -1,7 +1,7 @@
 {
  "version": 1,
  "unit": "E-MG",
- "round": 3,
+ "round": 4,
  "order": "C:/Users/norne/PACS/tmp/astra-control/evidence/emg-exa-prep-20261009/e-mg-order.md",
  "base_sha": "04e50ab4524d59b82444fbe765034c9fa759fa30",
  "note": "Declared before collection and compared both ways with the cases actually run; expectations are never generated from a run. A case whose sample set root is absent SKIPS with that reason (commander instruction 2026-10-09, superseding the order's no-skip line); a skip is not_run and never counted as a pass.",
@@ -257,7 +257,7 @@
    "file": "tests/part1/mg/viewer_dom_test.py",
    "class": "MammographyViewerDOMTest",
    "command": "python -B tests/part1/mg/viewer_dom_test.py",
-   "expected": 17,
+   "expected": 22,
    "cases": [
     {
      "name": "test_mg02_dom_first_to_last_frames_render_with_exact_ids",
@@ -530,6 +530,54 @@
      "mutants": [
       "M32"
      ]
+    },
+    {
+     "name": "test_mg06_dom_return_to_shown_frame_keeps_latest_camera_and_size",
+     "test": "TEST-MG-R4-CAMERA-RETURN",
+     "req": "REQ-MG-05",
+     "risk": "RISK-MG-FLIP-CLIP",
+     "inputs": "read-only public frames and test-owned metadata; held load/render and doctor input",
+     "mutants": [
+      "M37"
+     ]
+    },
+    {
+     "name": "test_mg04_dom_layout_switch_follows_latest_cell_paint",
+     "test": "TEST-MG-R4-LATEST-LAYOUT",
+     "req": "REQ-MG-07",
+     "risk": "RISK-MG-PARTIAL",
+     "inputs": "read-only public frames and test-owned metadata; held load/render and doctor input",
+     "mutants": [
+      "M38"
+     ]
+    },
+    {
+     "name": "test_mg06_dom_failed_target_restores_steps_and_retry",
+     "test": "TEST-MG-R4-FAILURE-STEP",
+     "req": "REQ-MG-02",
+     "risk": "RISK-MG-OMIT",
+     "inputs": "read-only public frames and test-owned metadata; held load/render and doctor input",
+     "mutants": [
+      "M39"
+     ]
+    },
+    {
+     "name": "test_mg05_dom_grid_fit_and_labels_stay_within_host",
+     "test": "TEST-MG-R4-HOST-FIT",
+     "req": "REQ-MG-05",
+     "risk": "RISK-MG-FLIP-CLIP",
+     "inputs": "read-only public frames and test-owned metadata; held load/render and doctor input",
+     "mutants": [
+      "M40"
+     ]
+    },
+    {
+     "name": "test_mg06_dom_first_resize_and_repeated_end_controls",
+     "test": "TEST-MG-R4-CONTROLS",
+     "req": "REQ-MG-06",
+     "risk": "RISK-MG-STALE",
+     "inputs": "read-only public frames and test-owned metadata; held load/render and doctor input",
+     "mutants": []
     }
    ]
   },
@@ -781,7 +829,7 @@
    ]
   }
  ],
- "total_expected": 323,
+ "total_expected": 328,
  "mutants": {
   "M1": {
    "file": "model",
@@ -1034,6 +1082,34 @@
    "case": "MG01-allow v2",
    "expect": "MG01 M36: absent or empty partial view hangs automatically",
    "title": "V2-1: absent/empty Partial View requires manual selection again"
+  },
+  "M37": {
+   "file": "viewer",
+   "suite": "dom",
+   "case": "test_mg06_dom_return_to_shown_frame_keeps_latest_camera_and_size",
+   "expect": "MG06 M37: returning to the shown frame still paints the latest camera and box",
+   "title": "R3-01: frame-only equality bypasses the latest camera and box"
+  },
+  "M38": {
+   "file": "viewer",
+   "suite": "dom",
+   "case": "test_mg04_dom_layout_switch_follows_latest_cell_paint",
+   "expect": "MG04 M38: a superseded first paint follows the latest intent without a false rollback",
+   "title": "R3-02: a superseded first layout paint is treated as failure"
+  },
+  "M39": {
+   "file": "viewer",
+   "suite": "dom",
+   "case": "test_mg06_dom_failed_target_restores_steps_and_retry",
+   "expect": "MG06 M39: a failed target is reserved for Retry while the next step starts on screen",
+   "title": "R3-03: failed intent survives and the next relative step starts there"
+  },
+  "M40": {
+   "file": "viewer",
+   "suite": "dom",
+   "case": "test_mg05_dom_grid_fit_and_labels_stay_within_host",
+   "expect": "MG05 M40: wrapped facts and the whole Fit image stay inside the visible host",
+   "title": "R3-04: intrinsic-width grid tracks overflow the host"
   }
  },
  "pending_samples": [
@@ -1088,11 +1164,12 @@
   ]
  },
  "round2_review": "C:/Users/norne/PACS/tmp/astra-control/evidence/astra-worker-runs/e-mg-r1-review-e3231e9-astra-20261009/last-message.md",
- "base_head": "ec657dcd8f92edef413544cbba52c3bf84cbfb00",
+ "base_head": "3bc162052a3d264c9219159498facef76d7a1ed7",
  "d744": {
   "rule": "C:\\Users\\norne\\PACS\\tmp\\astra-control\\evidence\\mg-classification-consult-20261009\\v2\\rule.md",
   "table_sha256": "a60b86b6267853615872a915d66a59150062afdbfe5d8725ca7a55f578c984d0",
   "cases": 273,
   "disputed": []
- }
+ },
+ "amendment": "C:/Users/norne/PACS/tmp/astra-control/evidence/emg-exa-prep-20261009/e-mg-amendment-r4.md"
 }

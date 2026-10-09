@@ -758,6 +758,207 @@ class MammographyViewerDOMTest(unittest.TestCase):
                             self.assertEqual(last["scale"], 1)
                         self.assertEqual(self.violations(page), [])
 
+    def last_paint(self, page, name):
+        hid = self.handle_of(page, name)
+        return page.evaluate("""id=>{const h=mg.handles.find(h=>h.id===id),r=mg.renders.filter(r=>r.handle===id&&r.painted).at(-1);
+            return {frame:r.frame,display:r.display,width:h.element.clientWidth,height:h.element.clientHeight};}""", hid)
+
+    def test_mg06_dom_return_to_shown_frame_keeps_latest_camera_and_size(self):
+        # Opus CE1/CE3: the requested frame is already shown, but its camera or box is obsolete.
+        item, meta = entry(DBT['L CC'])
+        item = copy.deepcopy(item)
+        item['00280008'] = {'vr': 'IS', 'Value': [3]}
+        item['52009230']['Value'] = item['52009230']['Value'][:3]
+        sop, name = tag(item, '00080018'), 'Current L CC'
+        for action in ('Fit', 'pan', 'resize'):
+            for ignore_abort in (False, True):
+                with self.subTest(action=action, ignore_abort=ignore_abort), closing(self.page()) as page:
+                    self.mount(page, [(item, meta)])
+                    self.wait_displayed(page, sop, 1)
+                    self.settle(page)
+                    if action == 'Fit':
+                        self.camera_action(page, name, 'zoom')
+                        self.settle(page)
+                        before = self.last_paint(page, name)['display']
+                        self.assertGreater(before['scale'], min(before['width']/before['columns'], before['height']/before['rows']))
+                    page.evaluate("ig=>{mg.control.ignoreAbort=ig;mg.control.hold=r=>r.purpose==='display'&&r.frame===3}", ignore_abort)
+                    self.key(page, name, 'End')
+                    page.wait_for_function('()=>mg.held.size>0', timeout=WAIT)
+                    self.camera_action(page, name, action)
+                    self.key(page, name, 'Home')
+                    page.evaluate('()=>{mg.control.hold=null;[...mg.held.keys()].forEach(mgRelease)}')
+                    self.settle(page)
+                    page.wait_for_timeout(200)
+                    final = self.last_paint(page, name)
+                    d = final['display']
+                    self.assertEqual(final['frame'], 1)
+                    self.assertEqual(self.frames_shown(page, sop), [1])
+                    message = 'MG06 M37: returning to the shown frame still paints the latest camera and box'
+                    if action == 'Fit':
+                        self.assertAlmostEqual(d['scale'], min(final['width']/d['columns'], final['height']/d['rows']), msg=message)
+                        self.assertEqual(d['pan'], {'x': 0, 'y': 0}, message)
+                    elif action == 'pan':
+                        self.assertGreater(d['pan']['x'], 0, message)
+                    self.assertEqual([d['width'], d['height']], [final['width'], final['height']], message)
+                    self.assertEqual(self.violations(page), [])
+
+    def test_mg04_dom_layout_switch_follows_latest_cell_paint(self):
+        # Opus CE2, plus ordinary pan, wheel navigation and Fit during the same transition.
+        current = {v: entry(s) for v, s in DBT.items()}
+        prior = {v: (prior_copy(i, n, date='19390713'), m) for n, (v, (i, m)) in enumerate(current.items())}
+        sop, name = tag(prior['R CC'][0], '00080018'), 'Prior R CC'
+        for action in ('zoom', 'resize', 'pan', 'wheel', 'Fit'):
+            with self.subTest(action=action), closing(self.page()) as page:
+                self.mount(page, list(current.values()), list(prior.values()))
+                for i, _ in current.values():
+                    self.wait_displayed(page, tag(i, '00080018'), 1)
+                self.settle(page)
+                page.evaluate("s=>{mg.control.holdRender=(i,p)=>{if(p==='before'&&i.sop===s){mg.control.holdRender=null;return true;}return false;}}", sop)
+                page.get_by_role('button', name='Compare CC', exact=True).click()
+                page.wait_for_function('()=>mg.renderHeld.length>0', timeout=WAIT)
+                if action == 'wheel':
+                    self.cell(page, name).focus()
+                    box = self.cell(page, name).bounding_box()
+                    page.mouse.move(box['x']+box['width']/2, box['y']+box['height']/2)
+                    page.mouse.wheel(0, 100)
+                    page.wait_for_timeout(80)
+                else:
+                    self.camera_action(page, name, action)
+                page.evaluate('()=>mg.renderRelease.splice(0).forEach(r=>r())')
+                self.settle(page)
+                page.wait_for_timeout(250)
+                message = 'MG04 M38: a superseded first paint follows the latest intent without a false rollback'
+                self.assertEqual(page.get_by_role('button', name='Compare CC', exact=True).get_attribute('aria-pressed'), 'true', message)
+                self.assertEqual(page.get_by_role('status').first.inner_text().strip(), '', message)
+                self.assertEqual(self.cell(page, name).count(), 1, message)
+                final = self.last_paint(page, name)
+                d = final['display']
+                self.assertEqual(final['frame'], 2 if action == 'wheel' else 1, message)
+                self.assertEqual([d['width'], d['height']], [final['width'], final['height']])
+                if action == 'zoom':
+                    self.assertGreater(d['scale'], min(d['width']/d['columns'], d['height']/d['rows']))
+                elif action == 'pan':
+                    self.assertGreater(d['pan']['x'], 0)
+                elif action in ('Fit', 'resize'):
+                    self.assertAlmostEqual(d['scale'], min(d['width']/d['columns'], d['height']/d['rows']))
+                self.assertEqual(self.violations(page), [])
+
+    def test_mg06_dom_failed_target_restores_steps_and_retry(self):
+        # Opus CE6: both loader and renderer failure resume relative movement at the visible slice.
+        item, meta = entry(DBT['L CC'])
+        sop, name = tag(item, '00080018'), 'Current L CC'
+        for failure in ('load', 'render'):
+            for recovery in ('step', 'retry'):
+                with self.subTest(failure=failure, recovery=recovery), closing(self.page()) as page:
+                    self.mount(page, [(item, meta)])
+                    self.wait_displayed(page, sop, 1)
+                    self.settle(page)
+                    if failure == 'load':
+                        page.evaluate("()=>{mg.control.fail=r=>r.purpose==='display'&&r.frame===16?'network':null}")
+                    else:
+                        page.evaluate('()=>{mg.control.failRender=i=>i.frame===16}')
+                    self.key(page, name, 'End')
+                    expect(self.cell(page, name).get_by_role('button', name='Retry', exact=True)).to_be_visible(timeout=WAIT)
+                    self.settle(page)
+                    self.assertIn('Slice 1 / 16', self.label(page, name))
+                    page.evaluate('()=>{mg.control.fail=null;mg.control.failRender=null}')
+                    if recovery == 'step':
+                        self.key(page, name, 'ArrowDown')
+                    else:
+                        self.cell(page, name).get_by_role('button', name='Retry', exact=True).click()
+                    self.settle(page)
+                    page.wait_for_timeout(200)
+                    target = 2 if recovery == 'step' else 16
+                    self.assertEqual(self.frames_shown(page, sop), [1, target],
+                                     'MG06 M39: a failed target is reserved for Retry while the next step starts on screen')
+                    self.assertEqual(self.last_paint(page, name)['frame'], target)
+
+    def test_mg05_dom_grid_fit_and_labels_stay_within_host(self):
+        # Opus grid CE: inspect actual renderer rectangles and visible text, not CSS implementation.
+        rows = [entry(s) for s in DBT.values()]
+        # Missing VOI is a test-owned metadata variant; its Unverified fact must remain visible.
+        rows = [(copy.deepcopy(i), m) for i, m in rows]
+        for item, _ in rows:
+            item.pop('00281050', None)
+            item.pop('00281051', None)
+            for tag_key in ('52009229', '52009230'):
+                for group in item.get(tag_key, {}).get('Value', []):
+                    group.pop('00289132', None)
+        for width in (1000, 420):
+            with self.subTest(width=width), closing(self.page()) as page:
+                page.locator('#host').evaluate('(e,w)=>e.style.width=w+"px"', width)
+                self.mount(page, rows)
+                for i, _ in rows:
+                    self.wait_displayed(page, tag(i, '00080018'), 1)
+                self.settle(page)
+                page.wait_for_timeout(200)
+                facts = page.evaluate("""()=>{const host=document.getElementById('host').getBoundingClientRect();
+                    return mg.handles.filter(h=>!h.handle.detached).map(h=>{
+                      const g=h.element.closest('[role=group]'),r=g.getBoundingClientRect(),v=h.element.getBoundingClientRect();
+                      const text=[],walker=document.createTreeWalker(g,NodeFilter.SHOW_TEXT);
+                      while(walker.nextNode()){const n=walker.currentNode;if(!n.textContent.trim())continue;
+                        const range=document.createRange();range.selectNodeContents(n);
+                        for(const b of range.getClientRects())text.push({left:b.left,right:b.right,top:b.top,bottom:b.bottom});}
+                      return {id:h.id,inside:r.left>=host.left&&r.right<=host.right&&r.top>=host.top&&r.bottom<=host.bottom,
+                        textInside:text.every(b=>b.left>=r.left&&b.right<=r.right&&b.top>=r.top&&b.bottom<=r.bottom),
+                        viewInside:v.left>=host.left&&v.right<=host.right&&v.top>=host.top&&v.bottom<=host.bottom,
+                        width:h.element.clientWidth,height:h.element.clientHeight,
+                        d:mg.renders.filter(x=>x.handle===h.id&&x.painted).at(-1).display};});}""")
+                for f in facts:
+                    message = 'MG05 M40: wrapped facts and the whole Fit image stay inside the visible host'
+                    self.assertTrue(f['inside'] and f['viewInside'] and f['textInside'], message)
+                    self.assertGreater(f['height'], 0, message)
+                    self.assertEqual([f['d']['width'], f['d']['height']], [f['width'], f['height']], message)
+                    self.assertLessEqual(f['d']['rows']*f['d']['scale'], f['height']+1e-8, message)
+                    self.assertLessEqual(f['d']['columns']*f['d']['scale'], f['width']+1e-8, message)
+                for name in ('Current R CC', 'Current L CC', 'Current R MLO', 'Current L MLO'):
+                    self.assertIn('VOI Unverified', self.label(page, name))
+                name = 'Current R CC'
+                hid, start = self.handle_of(page, name), page.evaluate('()=>mg.renders.length')
+                sop = tag(rows[3][0], '00080018')
+                self.key(page, name, 'ArrowDown', times=9, sop=sop)
+                self.settle(page)
+                self.assertIn('Slice 10 / 16', self.label(page, name))
+                neighbour = page.evaluate('([n,id])=>mg.renders.slice(n).filter(r=>r.handle!==id).length', [start, hid])
+                self.assertEqual(neighbour, 0, 'MG05: changing one label never re-renders neighbouring images')
+
+    def test_mg06_dom_first_resize_and_repeated_end_controls(self):
+        # Passing Opus CE3b/CE4a/CE4b must remain passing after the latest-outcome change.
+        item, meta = entry(DBT['L CC'])
+        sop, name = tag(item, '00080018'), 'Current L CC'
+        with closing(self.page()) as page:
+            page.evaluate("()=>{mg.control.holdRender=(i,p)=>{if(p==='before'){mg.control.holdRender=null;return true;}return false;}}")
+            self.mount(page, [(item, meta)])
+            page.wait_for_function('()=>mg.renderHeld.length>0', timeout=WAIT)
+            self.camera_action(page, name, 'resize')
+            page.evaluate('()=>mg.renderRelease.splice(0).forEach(r=>r())')
+            self.wait_displayed(page, sop, 1)
+            self.settle(page)
+            f = self.last_paint(page, name)
+            self.assertEqual(self.frames_shown(page, sop), [1])
+            self.assertEqual([f['display']['width'], f['display']['height']], [f['width'], f['height']])
+        for delayed in ('load', 'receipt'):
+            with self.subTest(delayed=delayed), closing(self.page()) as page:
+                self.mount(page, [(item, meta)])
+                self.wait_displayed(page, sop, 1)
+                self.settle(page)
+                if delayed == 'load':
+                    page.evaluate("()=>{mg.control.ignoreAbort=true;mg.control.hold=r=>r.purpose==='display'&&r.frame===16}")
+                else:
+                    page.evaluate("()=>{mg.control.holdRender=(i,p)=>{if(p==='after'&&i.frame===16){mg.control.holdRender=null;return true;}return false;}}")
+                self.key(page, name, 'End')
+                page.wait_for_function("d=>d==='load'?mg.held.size>0:mg.renderHeld.length>0", arg=delayed, timeout=WAIT)
+                self.key(page, name, 'Home')
+                self.key(page, name, 'End')
+                if delayed == 'load':
+                    page.wait_for_function('()=>mg.loads.filter(l=>l.wasHeld).length===2', timeout=WAIT)
+                page.evaluate('()=>{mg.control.hold=null;[...mg.held.keys()].sort((a,b)=>a-b).forEach(mgRelease);mg.renderRelease.splice(0).forEach(r=>r())}')
+                self.wait_displayed(page, sop, 16)
+                self.settle(page)
+                self.assertEqual(self.frames_shown(page, sop), [1, 16])
+                self.assertEqual(self.last_paint(page, name)['frame'], 16)
+                self.assertEqual(self.violations(page), [])
+
     def test_mg04_dom_duplicate_and_mixed_minip_mount_and_choose(self):
         original, meta = entry(DBT["L CC"])
         for mixed in (False, True):

@@ -143,10 +143,10 @@
     }
     function build(cell){
       const s=cell.spec,name=ROLE_LABEL[s.role]+' '+s.side+' '+s.view;
-      cell.label=el('div',{style:'padding:2px 4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:#111'});
+      cell.label=el('div',{style:'padding:2px 4px;flex-shrink:0;white-space:normal;overflow-wrap:anywhere;background:#111'});
       cell.view=el('div',{style:'flex:1;min-height:0;position:relative;overflow:hidden;touch-action:none'});
-      cell.note=el('div',{style:'padding:2px 4px;min-height:1.2em'});
-      cell.element=el('div',{role:'group','aria-label':name,tabindex:'0',style:'display:flex;flex-direction:column;min-height:0;border:1px solid #333;outline:none'},cell.label,cell.view,cell.note);
+      cell.note=el('div',{style:'padding:2px 4px;min-height:1.2em;flex-shrink:0;overflow-wrap:anywhere'});
+      cell.element=el('div',{role:'group','aria-label':name,tabindex:'0',style:'display:flex;flex-direction:column;min-width:0;min-height:0;border:1px solid #333;outline:none'},cell.label,cell.view,cell.note);
       cell.element.addEventListener('focus',()=>activate(cell));
       cell.element.addEventListener('pointerdown',()=>activate(cell));
       cell.element.addEventListener('keydown',event=>key(cell,event));
@@ -237,10 +237,21 @@
       const entry=cell.index.entries[cell.intent-1];
       return {...gate.begin(cell.id,entry.sop+'#'+entry.frame),opening:bound};
     }
+    function requestPaint(cell,ticket){
+      cell.pending=paint(cell,ticket);
+      return cell.pending;
+    }
+    function paintFailure(cell,target,message){
+      cell.failed=target;
+      // Relative navigation resumes at the image on screen; Retry alone remembers the failed target.
+      cell.intent=cell.position;
+      cell.note.textContent=message;cell.note.append(' ',retry(cell));
+      return 'failed';
+    }
     async function paint(cell,ticket){
       const latest=()=>usable(cell)&&gate.current(ticket)&&ticket.opening===bound&&
         ticket.key===cell.index.entries[cell.intent-1].sop+'#'+cell.index.entries[cell.intent-1].frame&&live();
-      if(!latest())return false;
+      if(!latest())return 'superseded';
       const wanted=cell.index.entries[cell.intent-1];
       if(!cell.supply||cell.supply.key!==ticket.key){
         const c=track(cell);c.display=true;
@@ -252,41 +263,39 @@
       try{image=await supply.promise;}
       catch(error){
         if(cell.supply===supply)cell.supply=null;
-        if(!latest())return false;
-        if(refused(error)){stop(MESSAGE.ended);return false;}
-        if(aborted(error))return false;
-        cell.failed=cell.intent;
-        cell.note.textContent=error&&error.name==='KinFrameMismatch'?MESSAGE.mismatch:MESSAGE.delayed;cell.note.append(' ',retry(cell));return false;
+        if(!latest())return 'superseded';
+        if(refused(error)){stop(MESSAGE.ended);return 'superseded';}
+        return paintFailure(cell,cell.intent,error&&error.name==='KinFrameMismatch'?MESSAGE.mismatch:MESSAGE.delayed);
       }
-      if(!latest())return false;
+      if(!latest())return 'superseded';
       cell.drawing++;
       const run=cell.queue.then(async()=>{
-        if(!latest())return false;
+        if(!latest())return 'superseded';
         const entry=cell.index.entries[cell.intent-1];
-        if(!sameFrame(image,entry))return false;
+        if(!sameFrame(image,entry))return 'superseded';
         let result=null;
         try{result=await cell.handle.render(image,display(cell,image,entry),{current:latest});}catch(_){result=null;}
-        if(!usable(cell)||!live())return false;
-        if(result&&result.superseded)return false;
+        if(!usable(cell)||!live())return 'superseded';
+        if(result&&result.superseded)return 'superseded';
         const painted=!!result&&result.rendered===true&&result.sop===entry.sop&&result.frame===entry.frame;
         const current=latest();
-        if(!current)return false;
+        if(!current)return 'superseded';
         if(!painted){
-          cell.failed=entry.index;cell.note.textContent=MESSAGE.renderFailed;cell.note.append(' ',retry(cell));
-          return false;
+          return paintFailure(cell,entry.index,MESSAGE.renderFailed);
         }
         // No external observer or await separates this validation from the visible state/coverage commit.
         cell.position=entry.index;cell.image=image;cell.shown={sop:entry.sop,frame:entry.frame};
         const fresh=!cell.reported||cell.reported.sop!==entry.sop||cell.reported.frame!==entry.frame;
-        cell.failed=null;cell.note.textContent='';
+        if(cell.failed===entry.index)cell.failed=null;
+        if(cell.failed===null)cell.note.textContent='';
         memory.set(cell.object.sop,{position:cell.position,camera:{...cell.camera,pan:{...cell.camera.pan}}});
         if(fresh){cell.reported={sop:entry.sop,frame:entry.frame};cell.coverage.mark(entry);}
         relabel(cell);
         if(fresh&&latest())emit('displayed',record(cell,entry,'display'));
         if(fresh&&latest())prefetch(cell);
-        return true;
+        return 'painted';
       }).finally(()=>{cell.drawing--;});
-      cell.queue=run.catch(()=>false);
+      cell.queue=run.catch(()=>'failed');
       return run;
     }
     function retry(cell){const b=el('button',{type:'button',text:'Retry'});b.onclick=()=>go(cell,cell.failed||cell.position,true);return b;}
@@ -306,17 +315,13 @@
     async function go(cell,target,force){
       if(!cell||!cell.object||!usable(cell)||!live())return;
       const total=cell.index.entries.length;target=Math.max(1,Math.min(total,target));
-      const entry=cell.index.entries[target-1];
       // Every request, also one back to the slice already on screen, supersedes every older one.
       cell.intent=target;const ticket=paintTicket(cell);
+      cell.failed=null;cell.note.textContent='';
       for(const c of cell.controllers)if(c.display){c.abort();untrack(cell,c);}
       cell.supply=null;
-      if(!force&&cell.shown&&cell.shown.sop===entry.sop&&cell.shown.frame===entry.frame){
-        // Already on screen: repaint only when an older render may still land after this point.
-        if(cell.drawing)await paint(cell,ticket);
-        return;
-      }
-      return paint(cell,ticket);
+      // Frame equality alone cannot establish camera, display or viewport-size equality.
+      return requestPaint(cell,ticket);
     }
     function key(cell,event){
       if(!cell.object||cell.index.entries.length<2)return;
@@ -363,11 +368,11 @@
     function camera(cell,next){if(!cell||!cell.object||!usable(cell))return;cell.camera=next;repaint(cell);}
     function repaint(cell){
       if(!cell.object||!usable(cell)||!live())return;
-      return paint(cell,paintTicket(cell));
+      return requestPaint(cell,paintTicket(cell));
     }
 
     function grid(list){
-      const g=el('div',{style:'position:absolute;inset:0;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:2px'});
+      const g=el('div',{style:'position:absolute;inset:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr));gap:2px'});
       g.append(...list.map(c=>c.element));return g;
     }
     function attach(cell){
@@ -398,6 +403,15 @@
       if(busy){queued=[nextLayout,nextKind];return;}
       apply(nextLayout,nextKind);
     }
+    async function latestPaint(cell){
+      if(!cell.object)return {pending:null,outcome:'painted'};
+      for(;;){
+        const pending=cell.pending,outcome=await pending;
+        if(!usable(cell)||!live())return {pending,outcome:'superseded'};
+        if(pending!==cell.pending)continue;
+        return {pending,outcome};
+      }
+    }
     // A layout or kind change replaces the whole arrangement or nothing: every new image is
     // obtained first, and the current arrangement stays on screen if any of them cannot be.
     async function apply(nextLayout,nextKind){
@@ -419,10 +433,15 @@
       if(previousGrid)previousGrid.hidden=true;
       gridHolder.append(next);
       for(const cell of drafts)attach(cell);
-      const shown=await Promise.all(drafts.map(cell=>cell.object?go(cell,cell.intent,true):true));
+      for(const cell of drafts)if(cell.object)go(cell,cell.intent,true);
+      let shown;
+      // A doctor's action replaces a cell's pending paint; a superseded first paint is not a failure.
+      // Recheck the whole arrangement so an already-settled cell cannot commit an obsolete outcome.
+      do{shown=await Promise.all(drafts.map(latestPaint));}
+      while(!ended&&shown.some((r,i)=>drafts[i].object&&r.pending!==drafts[i].pending));
       busy=false;
       if(ended||!live()){discard();return false;}
-      if(shown.some(ok=>!ok)){
+      if(shown.some(r=>r.outcome==='failed')){
         discard();next.remove();
         if(previousGrid){previousGrid.hidden=false;for(const cell of previous)repaint(cell);}
         if(!queued)want={layout,kind};
