@@ -155,6 +155,7 @@
       else{
         const o=cell.object,entry=cell.index.entries[cell.position-1];
         if(o.instanceNumber!==null)parts.push('Img '+o.instanceNumber);
+        if(cell.slot.status==='ambiguous')parts.push('Chosen of '+cell.slot.candidates.length);
         if(o.kind==='dbt'){
           parts.push(SLICE_LABEL[o.sliceKind]+(o.sliceThickness?' '+o.sliceThickness+' mm':''));
           parts.push('Slice '+cell.position+' / '+cell.index.total);
@@ -291,8 +292,11 @@
     function drag(cell,event){
       if(!cell.object||event.button!==0)return;
       const start={x:event.clientX,y:event.clientY},origin={...cell.camera.pan},scale=scaleOf(cell);
-      let pending=false;
+      let pending=false,dragging=false;
       const move=e=>{
+        // A click that jitters a pixel or two is a click, not a pan that leaves Fit.
+        if(!dragging&&Math.hypot(e.clientX-start.x,e.clientY-start.y)<3)return;
+        dragging=true;
         const pan={x:origin.x+e.clientX-start.x,y:origin.y+e.clientY-start.y};
         cell.camera={mode:cell.camera.mode==='pixel'?'pixel':'custom',scale,pan};
         if(!pending){pending=true;Promise.resolve().then(()=>{pending=false;repaint(cell);});}
@@ -381,7 +385,8 @@
       for(const o of rows){
         const why=o.use==='refused'?MESSAGE.priorRefused:(o.issues.map(x=>REASON[x]).find(Boolean)||
           (o.modifiers.length?o.modifiers.join(', ')+' 추가 촬영입니다.':o.partial?'부분 촬영(Partial View)입니다.':o.laterality==='B'?'양측(B) 영상입니다.':'표준 4방향 영상이 아닙니다.'));
-        list.append(el('li',{text:[ROLE_LABEL[o.role],o.date||'Date Unverified',(o.laterality||'?')+' '+(o.view||'?'),KIND_LABEL[o.kind]||'Unverified'].join(' · ')+' — '+why}));
+        const date=o.use==='refused'?[]:[o.date||'Date Unverified'];
+        list.append(el('li',{text:[ROLE_LABEL[o.role],...date,(o.laterality||'?')+' '+(o.view||'?'),KIND_LABEL[o.kind]||'Unverified'].join(' · ')+' — '+why}));
       }
       others.append(list);
     }

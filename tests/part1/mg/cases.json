@@ -1,0 +1,100 @@
+{
+ "version": 1,
+ "unit": "E-MG",
+ "round": 1,
+ "order": "C:/Users/norne/PACS/tmp/astra-control/evidence/emg-exa-prep-20261009/e-mg-order.md",
+ "base_sha": "04e50ab4524d59b82444fbe765034c9fa759fa30",
+ "note": "Declared before collection and compared both ways with the cases actually run; expectations are never generated from a run, and a case whose sample is missing is listed under pending, never skipped.",
+ "requirements": {
+  "REQ-MG-01": {"title": "exact kind: conventional 2D, device synthetic 2D, DBT", "risk": "RISK-MG-MISCLASS"},
+  "REQ-MG-02": {"title": "every stored frame first to last with its own identity", "risk": "RISK-MG-OMIT"},
+  "REQ-MG-03": {"title": "independent DBT positions, no index sync", "risk": "RISK-MG-FALSE-ANATOMY"},
+  "REQ-MG-04": {"title": "current/prior x side x view x kind comparison", "risk": "RISK-MG-WRONG-STUDY"},
+  "REQ-MG-05": {"title": "orientation, grayscale, Fit, 1:1 and pan from the original", "risk": "RISK-MG-FLIP-CLIP"},
+  "REQ-MG-06": {"title": "lifecycle: A->B->A, dispose, access end, short delays", "risk": "RISK-MG-STALE"},
+  "REQ-MG-07": {"title": "atomic arrangement change and HP round trip", "risk": "RISK-MG-PARTIAL"},
+  "REQ-MG-08": {"title": "request, transfer and render recorded separately", "risk": "RISK-MG-FALSE-READ"}
+ },
+ "suites": [
+  {
+   "id": "model",
+   "file": "tests/part1/mg/model_test.cjs",
+   "command": "node --test tests/part1/mg/model_test.cjs",
+   "expected": 10,
+   "cases": [
+    {"name": "MG01-allow conventional, device synthetic 2D and DBT are told apart by standard attributes with evidence", "test": "TEST-MG01-MODEL-ALLOW", "req": "REQ-MG-01", "risk": "RISK-MG-MISCLASS", "inputs": "DICOM JSON built in the test"},
+    {"name": "MG01-reject DERIVED alone, a description, a contradiction or a non-mammography object never yields synthetic 2D or DBT", "test": "TEST-MG01-MODEL-REJECT", "req": "REQ-MG-01", "risk": "RISK-MG-MISCLASS", "inputs": "DICOM JSON built in the test", "mutants": ["M1", "M2"]},
+    {"name": "MG02-allow every stored frame first to last keeps its own SOP and frame number, also after a position sort", "test": "TEST-MG02-MODEL-ALLOW", "req": "REQ-MG-02", "risk": "RISK-MG-OMIT", "inputs": "DICOM JSON built in the test", "mutants": ["M3", "M4"]},
+    {"name": "MG02-reject a duplicate, a missing per-frame item, a gap or a wrong total never reports complete", "test": "TEST-MG02-MODEL-REJECT", "req": "REQ-MG-02", "risk": "RISK-MG-OMIT", "inputs": "DICOM JSON built in the test"},
+    {"name": "MG03-allow two DBTs of different length and spacing report their own positions in mm", "test": "TEST-MG03-MODEL-ALLOW", "req": "REQ-MG-03", "risk": "RISK-MG-FALSE-ANATOMY", "inputs": "DICOM JSON built in the test"},
+    {"name": "MG03-reject absent or non-finite positions stay Unverified and are never borrowed from another DBT", "test": "TEST-MG03-MODEL-REJECT", "req": "REQ-MG-03", "risk": "RISK-MG-FALSE-ANATOMY", "inputs": "DICOM JSON built in the test"},
+    {"name": "MG04-allow current and prior are paired per side, view and kind, and a missing slot is explicit", "test": "TEST-MG04-MODEL-ALLOW", "req": "REQ-MG-04", "risk": "RISK-MG-WRONG-STUDY", "inputs": "DICOM JSON built in the test"},
+    {"name": "MG04-reject another patient, another institution, an ambiguous duplicate or a partial/modified view is never chosen", "test": "TEST-MG04-MODEL-REJECT", "req": "REQ-MG-04", "risk": "RISK-MG-WRONG-STUDY", "inputs": "DICOM JSON built in the test", "mutants": ["M8"]},
+    {"name": "MG06-allow only the latest request of a slot in the live mount generation is current", "test": "TEST-MG06-MODEL-ALLOW", "req": "REQ-MG-06", "risk": "RISK-MG-STALE", "inputs": "none"},
+    {"name": "MG06-reject A->B->A, a reset, an end or another account invalidates older tickets", "test": "TEST-MG06-MODEL-REJECT", "req": "REQ-MG-06", "risk": "RISK-MG-STALE", "inputs": "none", "mutants": ["M9"]}
+   ]
+  },
+  {
+   "id": "dom",
+   "file": "tests/part1/mg/viewer_dom_test.py",
+   "class": "MammographyViewerDOMTest",
+   "command": "python -B tests/part1/mg/viewer_dom_test.py",
+   "expected": 10,
+   "cases": [
+    {"name": "test_mg02_dom_first_to_last_frames_render_with_exact_ids", "test": "TEST-MG02-DOM-ALLOW", "req": "REQ-MG-02", "risk": "RISK-MG-OMIT", "samples": ["ea1141-3227336-310042"]},
+    {"name": "test_mg02_dom_prefetch_wrong_frame_and_wrong_total_never_count_as_displayed", "test": "TEST-MG02-DOM-REJECT", "req": "REQ-MG-02", "risk": "RISK-MG-OMIT", "also": ["REQ-MG-08 seam: prefetch is not display"], "samples": ["ea1141-3227336-310042"], "test_owned_variants": ["NumberOfFrames 17 for 16 stored frames"], "mutants": ["M12"]},
+    {"name": "test_mg03_dom_two_dbts_scroll_independently_with_own_positions", "test": "TEST-MG03-DOM-ALLOW", "req": "REQ-MG-03", "risk": "RISK-MG-FALSE-ANATOMY", "samples": ["ea1141-3227336-185841", "ea1141-3227336-148695", "ea1141-3227336-310042", "ea1141-3227336-319808"]},
+    {"name": "test_mg03_dom_same_length_dbts_are_not_linked_and_missing_positions_stay_unverified", "test": "TEST-MG03-DOM-REJECT", "req": "REQ-MG-03", "risk": "RISK-MG-FALSE-ANATOMY", "samples": ["ea1141-3227336-185841", "ea1141-3227336-148695", "ea1141-3227336-310042"], "test_owned_variants": ["L CC DBT without Plane Position items"], "mutants": ["M5"]},
+    {"name": "test_mg04_dom_compare_layout_identifies_every_slot_and_switches_kind", "test": "TEST-MG04-DOM-ALLOW", "req": "REQ-MG-04", "risk": "RISK-MG-WRONG-STUDY", "samples": ["cmmd-d2-0140-1", "cmmd-d2-0140-2", "cmmd-d2-0140-3", "cmmd-d2-0140-4"], "test_owned_variants": ["same-patient prior: the four CMMD headers under new study/series/SOP UIDs dated 2009-07-18 (not a real prior)"]},
+    {"name": "test_mg04_dom_other_patient_duplicate_and_partial_switch_are_never_applied", "test": "TEST-MG04-DOM-REJECT", "req": "REQ-MG-04", "risk": "RISK-MG-WRONG-STUDY", "also": ["REQ-MG-07 seam: atomic arrangement change"], "samples": ["cmmd-d2-0140-1", "cmmd-d2-0140-2", "cmmd-d2-0140-3", "cmmd-d2-0140-4", "cmmd-d1-0577-1"], "test_owned_variants": ["duplicate R CC under a new SOP UID", "same-patient prior copy as above"], "mutants": ["M11"]},
+    {"name": "test_mg05_dom_real_pixels_fit_one_to_one_and_pan_reach_all_tissue", "test": "TEST-MG05-DOM-ALLOW", "req": "REQ-MG-05", "risk": "RISK-MG-FLIP-CLIP", "samples": ["cmmd-d2-0140-1", "cmmd-d2-0140-2", "cmmd-d2-0140-3", "cmmd-d2-0140-4"], "mutants": ["M6", "M7"]},
+    {"name": "test_mg05_dom_mirrored_unlabelled_copies_and_user_zoom_are_respected", "test": "TEST-MG05-DOM-REJECT", "req": "REQ-MG-05", "risk": "RISK-MG-FLIP-CLIP", "samples": ["cmmd-d2-0140-1", "cmmd-d2-0140-2", "cmmd-d2-0140-3", "cmmd-d2-0140-4", "ea1141-3227336-310042"], "test_owned_variants": ["R CC pixels mirrored with Patient Orientation A\\L", "L CC without Patient Orientation"]},
+    {"name": "test_mg06_dom_late_and_stale_results_never_overwrite_the_current_slice", "test": "TEST-MG06-DOM-ALLOW", "req": "REQ-MG-06", "risk": "RISK-MG-STALE", "samples": ["ea1141-3227336-310042"]},
+    {"name": "test_mg06_dom_dispose_layout_switch_and_account_change_stop_late_results", "test": "TEST-MG06-DOM-REJECT", "req": "REQ-MG-06", "risk": "RISK-MG-STALE", "samples": ["ea1141-3227336-185841", "ea1141-3227336-148695", "ea1141-3227336-310042", "ea1141-3227336-319808"], "mutants": ["M10"]}
+   ]
+  },
+  {
+   "id": "dicom",
+   "file": "tests/part1/mg/dicom_contract_test.py",
+   "class": "MammographyDicomContractTest",
+   "command": "python -B tests/part1/mg/dicom_contract_test.py",
+   "expected": 8,
+   "cases": [
+    {"name": "test_mg01_real_objects_are_classified_by_standard_attributes", "test": "TEST-MG01-DICOM-ALLOW", "req": "REQ-MG-01", "risk": "RISK-MG-MISCLASS", "samples": ["cmmd-d2-0140-1", "cmmd-d2-0140-2", "cmmd-d2-0140-3", "cmmd-d2-0140-4", "ea1141-3227336-185841", "ea1141-3227336-148695", "ea1141-3227336-310042", "ea1141-3227336-319808"]},
+    {"name": "test_mg01_description_derivation_or_secondary_capture_never_confirms_a_kind", "test": "TEST-MG01-DICOM-REJECT", "req": "REQ-MG-01", "risk": "RISK-MG-MISCLASS", "samples": ["victre-208084664-1", "ea1141-8036458-1", "breastdx-01-0021-1", "cmmd-d2-0140-1"], "test_owned_variants": ["CMMD R CC described as 'R CC C-View'", "CMMD R CC described as tomosynthesis"]},
+    {"name": "test_mg02_real_dbt_frames_are_indexed_first_to_last_with_exact_identity", "test": "TEST-MG02-DICOM-ALLOW", "req": "REQ-MG-02", "risk": "RISK-MG-OMIT", "samples": ["ea1141-3227336-185841", "ea1141-3227336-148695", "ea1141-3227336-310042", "ea1141-3227336-319808"]},
+    {"name": "test_mg02_damaged_copies_of_a_real_dbt_never_report_complete", "test": "TEST-MG02-DICOM-REJECT", "req": "REQ-MG-02", "risk": "RISK-MG-OMIT", "samples": ["ea1141-3227336-310042"], "test_owned_variants": ["last per-frame item removed", "frame 2 position duplicated", "NumberOfFrames + 1", "per-frame items stored out of order"]},
+    {"name": "test_mg04_real_four_view_series_is_split_per_object", "test": "TEST-MG04-DICOM-ALLOW", "req": "REQ-MG-04", "risk": "RISK-MG-WRONG-STUDY", "samples": ["cmmd-d2-0140-1", "cmmd-d2-0140-2", "cmmd-d2-0140-3", "cmmd-d2-0140-4", "ea1141-3227336-185841", "ea1141-3227336-148695", "ea1141-3227336-310042", "ea1141-3227336-319808"]},
+    {"name": "test_mg04_other_patients_are_never_a_prior_and_duplicates_are_not_picked", "test": "TEST-MG04-DICOM-REJECT", "req": "REQ-MG-04", "risk": "RISK-MG-WRONG-STUDY", "samples": ["cmmd-d2-0140-1", "cmmd-d2-0140-2", "cmmd-d2-0140-3", "cmmd-d2-0140-4", "cmmd-d1-0860-1", "cmmd-d1-0577-1"], "test_owned_variants": ["duplicate R CC under a new SOP UID"]},
+    {"name": "test_mg05_real_pixels_keep_their_orientation_and_grayscale", "test": "TEST-MG05-DICOM-ALLOW", "req": "REQ-MG-05", "risk": "RISK-MG-FLIP-CLIP", "samples": ["cmmd-d2-0140-1", "cmmd-d2-0140-2", "cmmd-d2-0140-3", "cmmd-d2-0140-4", "ea1141-3227336-185841", "ea1141-3227336-148695", "ea1141-3227336-310042", "ea1141-3227336-319808"]},
+    {"name": "test_mg05_mirrored_unlabelled_and_monochrome1_copies_are_handled_from_their_tags", "test": "TEST-MG05-DICOM-REJECT", "req": "REQ-MG-05", "risk": "RISK-MG-FLIP-CLIP", "samples": ["cmmd-d2-0140-1", "ea1141-8036458-1"], "test_owned_variants": ["R CC with Patient Orientation A\\L over mirrored pixels", "R CC without Patient Orientation"]}
+   ]
+  }
+ ],
+ "total_expected": 28,
+ "mutants": {
+  "M1": {"file": "model", "suite": "model", "case": "MG01-reject", "expect": "MG01 M1: DERIVED pixel data is not evidence of a synthetic view"},
+  "M2": {"file": "model", "suite": "model", "case": "MG01-reject", "expect": "MG01 M2: a series description alone never confirms a synthetic view"},
+  "M3": {"file": "model", "suite": "model", "case": "MG02-allow", "expect": "MG02 M3: the first and the last stored slice are both reachable"},
+  "M4": {"file": "model", "suite": "model", "case": "MG02-allow", "expect": "MG02 M4: a sorted entry still names the stored frame that lies at its position"},
+  "M5": {"file": "viewer", "suite": "dom", "case": "test_mg03_dom_same_length_dbts_are_not_linked_and_missing_positions_stay_unverified", "expect": "MG03 M5: the same slice number is not forced on the other DBT"},
+  "M6": {"file": "model", "suite": "dom", "case": "test_mg05_dom_real_pixels_fit_one_to_one_and_pan_reach_all_tissue", "expect": "MG05 M6: chest wall side on screen for"},
+  "M7": {"file": "model", "suite": "dom", "case": "test_mg05_dom_real_pixels_fit_one_to_one_and_pan_reach_all_tissue", "expect": "MG05 M7: Fit shows the whole acquired"},
+  "M8": {"file": "model", "suite": "model", "case": "MG04-reject", "expect": "MG04 M8: a prior of another patient is refused even on the same date"},
+  "M9": {"file": "model", "suite": "model", "case": "MG06-reject", "expect": "MG06 M9: returning to the same image does not revive the first request"},
+  "M10": {"file": "viewer", "suite": "dom", "case": "test_mg06_dom_dispose_layout_switch_and_account_change_stop_late_results", "expect": "MG06 M10: a released viewport is never drawn into again"},
+  "M11": {"file": "viewer", "suite": "dom", "case": "test_mg04_dom_other_patient_duplicate_and_partial_switch_are_never_applied", "expect": "MG04 M11: a partly failed change is not applied", "scope": "R1 kills M11 on the MG module's own arrangement change; the HP apply/rollback form of M11 (hanging-protocol-model.js / viewer-hanging-protocol.js) is R2"},
+  "M12": {"file": "viewer", "suite": "dom", "case": "test_mg02_dom_prefetch_wrong_frame_and_wrong_total_never_count_as_displayed", "expect": "MG02 M12: a prefetched frame is not a displayed frame", "scope": "R1 kills M12 on the module's display event seam; the EMR-E durable record form of M12 is R2"}
+ },
+ "pending_samples": [
+  {"id": "PENDING-MG01-REAL-SYNTHETIC-2D", "req": "REQ-MG-01", "case": "a real device synthetic 2D object is classified generated2d from its Image Type Value 3/4 and paired with its DBT", "waits_for": "samples.json missing: EA1141-4339969 1945-02-13 'Intelligent 2D' series x4"},
+  {"id": "PENDING-MG02-REAL-THIN-DBT", "req": "REQ-MG-02", "case": "real thin reconstructed DBT slices (TOMOSYNTHESIS/VOLUME) indexed and walked first to last", "waits_for": "samples.json missing: EA1141-4339969 Breast Tomosynthesis series x8"},
+  {"id": "PENDING-MG04-REAL-PRIOR", "req": "REQ-MG-04", "case": "a real same-subject prior (1944-02-21 vs 1945-02-13) paired per side/view/kind", "waits_for": "samples.json missing: EA1141-4339969 both dates"},
+  {"id": "PENDING-MG05-REAL-COMBINATION", "req": "REQ-MG-05", "case": "orientation, VOI, Fit, 1:1 and pan on real DBT + paired synthetic 2D + prior in one comparison", "waits_for": "samples.json missing: all 12 EA1141-4339969 series"}
+ ],
+ "round2": [
+  {"id": "MG07-LIVE", "req": "REQ-MG-07", "where": "tests/part1/mg/live.py", "what": "HP old/new round trip, atomic apply/rollback, CAS 409 without overwrite"},
+  {"id": "MG08-LIVE", "req": "REQ-MG-08", "where": "tests/part1/mg/live.py", "what": "request -> authorization -> transfer -> render bound to EMR-E durable records"},
+  {"id": "G3-WHOLE-FLOW", "req": "REQ-MG-04", "where": "MammographyE2E.test_mg01_compare_public_current_prior", "what": "one end-to-end case added to tests/candidate_ci.py FLOWS by the CI owner"}
+ ]
+}
