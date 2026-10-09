@@ -34,6 +34,7 @@ Rules this runner holds itself to:
 stdlib only. It launches the browser test as a child process; it never drives a browser itself.
 """
 from page_source import read_page_bytes, read_source
+from main_split_harness import REPORT_FIXTURE, fixture_blocks
 import argparse
 import hashlib
 import json
@@ -61,12 +62,10 @@ CASE = "ReportStructureDOMTest"
 # kill into a survivor.
 CRASH_MARKERS = ("playwright._impl._errors", "ModuleNotFoundError", "ReferenceError:", "SyntaxError:")
 
-# The harness slices these out of main.html; if one of them moves, the browser file compiles into
-# something else and no case means what it says.
+# The harness takes its two script runs by the fixture projection (main_split_harness.REPORT_FIXTURE) and slices the
+# markup below out of main.html; if a run does not resolve or a marker moves, the browser file compiles into something
+# else and no case means what it says.
 SLICE_MARKERS = (
-    "    let selectionSeq = 0;",
-    "    function reportSource()",
-    "    function heldByOther(s)",
     '<div class="modal" id="structmodal"',
 )
 
@@ -176,6 +175,11 @@ def main():
         if mutant["expect"] in seen:
             problems.append("%s reuses an expect message; a kill must name one boundary" % mutant["id"])
         seen.add(mutant["expect"])
+    try:
+        fixture_blocks(SOURCES["main"], REPORT_FIXTURE)
+        print("fixture runs resolve: %s" % ", ".join(REPORT_FIXTURE))
+    except Exception as error:
+        problems.append("harness fixture runs do not resolve: %s" % error)
     for marker in SLICE_MARKERS:
         found = source["main"].count(marker)
         print("marker occurrences=%d %r" % (found, marker[:40]))

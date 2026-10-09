@@ -1,38 +1,35 @@
 # coding: utf-8
 """REQ-S9-U0a-PRE-ORDER -> RISK-EARLY-TDZ, RISK-REGISTRATION-ORDER, RISK-REGISTRATION-DUPLICATE
--> TEST-PRE-REGISTRATION, TEST-PRE-EARLY-03, TEST-PRE-EARLY-05, TEST-PRE-EARLY-58 (S9-U0a-PRE, D707).
+-> TEST-PRE-REGISTRATION, TEST-PRE-EARLY-03, TEST-PRE-EARLY-05, TEST-PRE-EARLY-58 (S9-U0a-PRE, D707/D714).
 
 Splitting main.html's one inline script into ordered classic scripts opens a task gap at every boundary: the parser
-waits for the next part while the page already shows its controls. An input in that gap reaches the listeners the
-parts so far registered, and a listener that needs a binding declared in a later part fails. The early-input hazards
-of the U0a re-list (B1-03 report fields, B1-05 template panel, B1-58 Quick Match), and the ones the phase-1 harness
-found beside them (PRE-X1..X3 inputs, B1-15/B1-57/PRE-P3 leaving the page), are reproduced on temporary 18/30/45-part
-copies of the page (tests/main_split_harness.*); nothing is written to the product tree.
+waits for the next part while the page already shows its controls and can be left. An input or a pagehide in that
+gap reaches the listeners the parts so far registered, and a listener that needs a binding declared in a later part
+fails. PRE moves 35 declarations ahead of their earliest consumer (Astra's pre-review design) and moves no
+registration. This file is the browser acceptance of that change on temporary 18/30/45-part copies of the page
+(tests/main_split_harness.*; nothing is written to the product tree). The design names this suite
+`main_pre_order_dom_test.py` and its helper `main_pre_contract.cjs`; here they are this file and main_split_harness.*.
 
 What is compared is what a browser observes:
-  * uncaught errors;
+  * uncaught errors and console.error calls (studyPriority reports a failed render that way);
   * the dispatch outcome of every listener the hazard statements register, identified by the listener's source in
-    the ORIGINAL page's registration trace (so a registration that moves keeps its identity);
+    the ORIGINAL page's registration trace (so a registration keeps its identity wherever its file is cut);
   * the screen (report fields, focus, template panel, Quick Match, chips, list, toasts) and
     KinWorkContext.selection() (the public module contract), right after the early input and after boot.
 The original page has two early moments, and each is an original behaviour: before its script ran ("pre": the input
 reaches no listener) and while boot waits for the session answer ("post": every listener is registered). An early
 input on a split page must end exactly like one of them: never with an error or a partial result.
 
-Registration (green, the reference the product change must keep): every registration the original page makes before
-the session answer is, per (target, event) and in order, the same in the page under test; the hazard targets'
-registrations do not depend on the session answer (answered, failed, failed then retried) and Retry adds none.
-Window and session events (resize, another document in front, a session end told by storage and channel, timers)
-at held boundaries raise nothing.
+Registration: every registration of the page under test equals the ORIGINAL page's per (target, event), in order,
+before the session answer and after each outcome (answered, failed, failed then Retry); the hazard targets gain no
+registration after the session answer; after Retry one Quick Match change has one effect; a report field input
+reaches its listeners in the original order. Window and session events at held boundaries raise nothing.
 
-Red marks: the hazard cases fail today on split pages. `red()` turns a failure whose uncaught errors are all the
-documented binding into an expected failure and any other failure into an error; KIN_PRE_EXPECT_RED=0 runs the
-cases unmarked. Phase 2 removes the marks (OPEN_HAZARDS); no assertion is weakened to pass. The ORIGINAL page is the
-git blob of main_move_spec.json `base` - byte identity is this move's requirement (AGENTS 1-B.14). The page under
-test is the product file (KIN_PRE_PAGE may name a scratch copy for mutants); it is split along the move spec's runs
-re-derived for its own statements (KIN_PRE_SPEC overrides). KIN_PRE_TRACE_DIR receives the reference traces as JSON.
+The ORIGINAL page is pinned: the f1d5406 git blobs of main.html, its other scripts and its move spec (byte identity
+is the move's requirement, AGENTS 1-B.14). The page under test is the product file (KIN_PRE_PAGE may name a scratch
+copy, e.g. a mutant); it is split along tests/main_move_spec.json, re-derived for its own statements when the spec
+describes another page (KIN_PRE_SPEC overrides). KIN_PRE_TRACE_DIR receives the reference traces as JSON.
 """
-import functools
 import json
 import os
 import re
@@ -51,17 +48,21 @@ ROOT = Path(__file__).resolve().parents[1]
 MOVE_SPEC = ROOT / "tests" / "main_move_spec.json"
 SPEC_PATH = Path(os.environ.get("KIN_PRE_SPEC", MOVE_SPEC))
 PAGE = Path(os.environ.get("KIN_PRE_PAGE", sh.PRODUCT_DIR / "main.html"))
-ORIGINAL_SPEC = json.loads(MOVE_SPEC.read_text(encoding="utf-8"))
-EXPECT_RED = os.environ.get("KIN_PRE_EXPECT_RED", "1") != "0"
 TRACE_DIR = os.environ.get("KIN_PRE_TRACE_DIR")
-# Phase 2 removes an id when its product change lands (the commander decides which of the found ones PRE fixes).
-OPEN_HAZARDS = {"B1-03", "B1-05", "B1-58", "PRE-X1", "PRE-X2", "PRE-X3", "B1-15", "B1-57", "PRE-P3"}
+ORIGINAL_COMMIT = "f1d540626aac03f46de23a9620d69f4c9da66037"   # RELIST = product 2fc7358, before the PRE moves
 
+
+def original_blob(path):
+    return subprocess.check_output(["git", "cat-file", "--filters", f"{ORIGINAL_COMMIT}:{path}"], cwd=ROOT)
+
+
+ORIGINAL_SPEC = json.loads(original_blob("tests/main_move_spec.json").decode("utf-8"))
 MODULE = {m["file"]: i for i, m in enumerate(ORIGINAL_SPEC["modules"])}
 PARTS = ORIGINAL_SPEC["parts"]
 FIELDS = ("findings", "conclusion", "recommendation")
 SAVED = {"id": "SYN-FILTER-1", "name": "SYN Saved Search", "quick": "", "days": 0, "mode": "Radiology", "cols": {},
          "sortKey": None, "sortDir": 0, "isDefault": False}
+LOCAL_SAVED = [{"name": "SYN Local Search", "quick": "", "days": -1, "mode": "Radiology", "cols": {}}]
 PROBE_URL = h.ORIGIN + "/syn-elsewhere.html"
 
 
@@ -96,6 +97,13 @@ def template_panel(page):
     page.keyboard.press("Escape")
 
 
+def template_shortcut(page):
+    # A shipped template's shortcut, then Tab: the shortcut listener expands it through the editor's one write path.
+    page.click("#findings")
+    page.keyboard.type("nbct")
+    page.keyboard.press("Tab")
+
+
 def quick_match(page):
     page.select_option("#quick-match", "prefix")
 
@@ -127,9 +135,12 @@ HAZARDS = {
     "B1-03": {"registers": ("report-dictation.js",), "targets": tuple("#" + k for k in FIELDS),
               "inputs": report_fields, "after": select_study, "screen": ("fields", "focus", "work")},
     "B1-05": TEMPLATES,
+    # The template shortcut's indirect path (Tab -> expandShortcut -> editReport), part of B1-05 in the design.
+    "B1-05-TAB": {"registers": ("report-templates-ui.js",), "targets": tuple("#" + k for k in FIELDS),
+                  "inputs": template_shortcut, "after": select_study, "screen": ("fields", "focus", "work")},
     "B1-58": {"registers": ("worklist-controls.js",), "targets": ("#quick-match",),
               "inputs": quick_match, "after": search_patient, "screen": ("worklist", "toasts")},
-    # Found by the phase-1 harness beside the re-listed three (not in b1-possible.md):
+    # Found by the phase-1 harness beside the re-listed three:
     "PRE-X1": {"registers": ("report-hold.js",), "targets": tuple("#" + k for k in FIELDS),
                "inputs": report_fields, "after": select_study, "screen": ("fields", "focus", "work")},
     "PRE-X2": TEMPLATES,
@@ -137,6 +148,7 @@ HAZARDS = {
                                                                    "#page-current"),
                "inputs": worklist_controls, "after": search_patient, "screen": ("worklist", "toasts")},
 }
+SAVED_SEARCH_INPUTS = (quick_match, worklist_controls)
 
 # What the screen shows of the affected areas; ids are locators only.
 SCREEN = """() => {
@@ -175,31 +187,14 @@ TOAST_RECORDER = """(() => {
     look.observe(document, { childList: true, subtree: true }); }
 })();"""
 
+# A saved search this browser kept from a local session, present before any page script (the M25/M27 user result).
+LOCAL_FILTERS = "try { localStorage.setItem('kin-filters', %s); } catch (_) {}" % json.dumps(json.dumps(LOCAL_SAVED))
+
 
 class HazardFailure(AssertionError):
     def __init__(self, message, errors):
         super().__init__(message)
         self.errors = errors
-
-
-def red(hazard, documented):
-    """Expected failure while `hazard` is open - only when every uncaught error is the documented one."""
-    def wrap(fn):
-        if not EXPECT_RED or hazard not in OPEN_HAZARDS:
-            return fn
-
-        @functools.wraps(fn)
-        def run(self):
-            try:
-                fn(self)
-            except Exception as error:
-                if not (isinstance(error, HazardFailure) and error.errors
-                        and all(re.search(documented, item) for item in error.errors)):
-                    self._wrong_red = f"{hazard}: expected to fail only on {documented!r}; failed with {error!r}"[:6000]
-                raise
-        run.__unittest_expecting_failure__ = True
-        return run
-    return wrap
 
 
 class PreSite(h.Site):
@@ -225,7 +220,7 @@ class PreSite(h.Site):
 class Run:
     """One page of one layout with its own context, synthetic origin and script delivery."""
 
-    def __init__(self, case, layout, hold=None, delay_ms=0, auth="answer", filters=()):
+    def __init__(self, case, layout, hold=None, delay_ms=0, auth="answer", filters=(), local_filters=False):
         self.case, (directory, self.manifest) = case, layout
         # The ORIGINAL page also gets the baseline's own versions of the page's other scripts.
         others = Pages.baseline_file if Path(directory).is_relative_to(Pages.original.root) else None
@@ -236,6 +231,8 @@ class Run:
                                                 timezone_id="Asia/Seoul")
         self.context.add_init_script(sh.TRACE_SCRIPT)
         self.context.add_init_script(TOAST_RECORDER)
+        if local_filters:
+            self.context.add_init_script(LOCAL_FILTERS)
         self.context.route("**/*", lambda route, request: self.site.handle(route, request))
         self.context.route(PROBE_URL, lambda route: route.fulfill(body="<!doctype html><title>SYN elsewhere</title>",
                                                                   content_type="text/html; charset=utf-8"))
@@ -245,9 +242,16 @@ class Run:
         self.page.set_default_timeout(10000)
         self.errors, self.dialogs = [], []
         self.page.on("pageerror", lambda error: self.errors.append(f"{error.name}: {error.message}"))
+        self.page.on("console", self.on_console)
         self.page.on("dialog", self.on_dialog)
         case.runs.append(self)
         self.page.goto(h.MAIN_URL, wait_until="commit")
+
+    def on_console(self, message):
+        # console.error calls of page code only (browser notices - resource loads, sandboxed frames - are not the
+        # page's report); the trace marks them, and the mark survives the document being left.
+        if message.type == "error" and message.text.startswith(sh.CONSOLE_MARK):
+            self.errors.append("console.error: " + message.text[len(sh.CONSOLE_MARK):].strip())
 
     def on_dialog(self, dialog):
         self.dialogs.append(dialog.message)
@@ -273,6 +277,13 @@ class Run:
                 self.site.answer(route, *self.site.me(self.site.account))
             else:
                 self.site.answer(route, status, {"code": "AUTH_IDP_UNAVAILABLE"})
+
+    def fail_auth(self):
+        """The session check fails for good (503 to every retry): the page offers Retry Session Check."""
+        self.answer_auth(status=503, failures=3)
+        retry = self.page.locator("#err button")
+        self.wait(lambda: retry.count() > 0, "the failed session check offers a retry", timeout=30)
+        return retry
 
     def booted(self):
         self.wait(f"(document.querySelector('#rows') || {{}}).innerText?.includes({json.dumps(h.PATIENT)})",
@@ -315,17 +326,15 @@ class Result:
 
 
 class Pages:
-    """The ORIGINAL page (git blob of the move baseline) and the page under test, as scratch layouts."""
+    """The ORIGINAL page (f1d5406 blobs) and the page under test, as scratch layouts."""
     current = original = derived = None
     blobs = {}
 
     @classmethod
     def baseline_file(cls, name):
-        """A file of the page directory as the move baseline has it (the ORIGINAL page's other scripts)."""
+        """A file of the page directory as the ORIGINAL commit has it (the ORIGINAL page's other scripts)."""
         if name not in cls.blobs:
-            path = Path(ORIGINAL_SPEC["page"]).parent.as_posix() + "/" + name
-            cls.blobs[name] = subprocess.check_output(["git", "cat-file", "--filters", f"{ORIGINAL_SPEC['base']}:{path}"],
-                                                      cwd=ROOT)
+            cls.blobs[name] = original_blob(Path(ORIGINAL_SPEC["page"]).parent.as_posix() + "/" + name)
         return cls.blobs[name]
 
     @classmethod
@@ -334,13 +343,17 @@ class Pages:
             cls.current = sh.ScratchPages(page=PAGE)
             spec = SPEC_PATH
             if SPEC_PATH == MOVE_SPEC:
+                # Split along the move spec's runs, re-derived for this page's own statements (the spec itself when it
+                # describes this page; a statement moved since the spec's base joins the run it now sits in).
                 spec = cls.current.root / "derived-spec.json"
                 cls.derived = sh.derive_spec(PAGE, spec)
             cls.current.spec = spec
             source = cls.current.root / "original-source" / "main.html"
             source.parent.mkdir(parents=True)
             source.write_bytes(cls.baseline_file("main.html"))
-            cls.original = sh.ScratchPages(page=source, root=cls.current.root / "original")
+            original_spec = cls.current.root / "original-source" / "main_move_spec.json"
+            original_spec.write_text(json.dumps(ORIGINAL_SPEC), encoding="utf-8")
+            cls.original = sh.ScratchPages(page=source, spec=original_spec, root=cls.current.root / "original")
 
     @classmethod
     def close(cls):
@@ -386,9 +399,6 @@ class PreCase(unittest.TestCase):
         for run in self.runs:
             violations += run.site.violations
             run.close()
-        wrong = getattr(self, "_wrong_red", None)
-        if wrong:
-            self.fail(wrong)
         self.assertEqual([], violations, "requests the synthetic origin does not answer")
 
     def assert_same_registrations(self, expected, observed, what):
@@ -399,8 +409,9 @@ class PreCase(unittest.TestCase):
         """Give the hazard's inputs at the early moment, let the page boot, and observe both times. With `gap` (timed
         delivery) the inputs must have been given before that part ran, or the case did not reach the gap."""
         spec = HAZARDS[hazard]
-        run = Run(self, layout, hold=hold, delay_ms=delay_ms, auth=auth,
-                  filters=(SAVED,) if spec["inputs"] in (quick_match, worklist_controls) else ())
+        saved = spec["inputs"] in SAVED_SEARCH_INPUTS
+        run = Run(self, layout, hold=hold, delay_ms=delay_ms, auth=auth, filters=(SAVED,) if saved else (),
+                  local_filters=saved)
         if hold:
             run.blocked()
         elif auth == "wait":
@@ -432,8 +443,8 @@ class PreCase(unittest.TestCase):
         return PreCase.references[key]
 
     def leaving(self, layout, hold=None, auth="answer"):
-        """Uncaught errors when the person leaves the page at the early moment (pagehide and what it starts)."""
-        run = Run(self, layout, hold=hold, auth=auth)
+        """Uncaught errors and console.error calls when the person leaves the page at the early moment."""
+        run = Run(self, layout, hold=hold, auth=auth, local_filters=True)
         if hold:
             run.blocked()
         else:
@@ -498,8 +509,7 @@ class PreCase(unittest.TestCase):
                 "dialogs": result.dialogs}
         like = {moment: {"early": {p: r.early_screen[p] for p in parts}, "final": {p: r.final_screen[p] for p in parts},
                          "dialogs": r.dialogs} for moment, r in references.items()}
-        matching = [moment for moment, expected in like.items() if expected == seen]
-        if not matching:
+        if not any(expected == seen for expected in like.values()):
             nearest = min(like, key=lambda m: sum(like[m][t] != seen[t] for t in seen))
             for when in ("early", "final"):
                 for part in parts:
@@ -508,53 +518,95 @@ class PreCase(unittest.TestCase):
                                      f"(compared with the nearer one, {nearest})")
             self.assertEqual(like[nearest]["dialogs"], seen["dialogs"], f"{hazard}: dialogs")
 
-
-# ── TEST-PRE-REGISTRATION (green: the reference the product change must keep) ──
-class Registration(PreCase):
-    def test_registrations_before_the_session_answer_match_the_original_page(self):
-        manifest, original = self.original_trace()
-        run = Run(self, Pages.current.layout(0), auth="wait")
+    # ── whole-page registration and dispatch, ORIGINAL and page under test through the same steps ──
+    def through(self, layout, outcome, after=None):
+        """Registrations before the session answer and after `outcome`; `after(run)` adds steps and returns data."""
+        run = Run(self, layout, auth="wait", filters=(SAVED,), local_filters=True)
         run.auth_waits()
-        current = run.trace()["registrations"]
-        if TRACE_DIR:
-            write_trace(Path(TRACE_DIR), "original-before-session-answer", manifest, original)
-            write_trace(Path(TRACE_DIR), "current-before-session-answer", Pages.current.layout(0)[1], current)
-        self.assert_same_registrations(sh.by_target_event(original), sh.by_target_event(current),
-                                       "per (target, event): the same registrations in the same order before the session answer")
+        before = run.trace()["registrations"]
+        if outcome == "answered":
+            run.answer_auth()
+            run.booted()
+        else:
+            retry = run.fail_auth()
+            if outcome == "failed then retried":
+                retry.click()
+                run.booted()
+        data = after(run) if after else None
+        return before, run.trace()["registrations"], data, run
+
+
+# ── TEST-PRE-REGISTRATION ──
+class Registration(PreCase):
+    OUTCOMES = ("answered", "failed", "failed then retried")
+
+    def test_registrations_match_the_original_page_before_and_after_each_session_outcome(self):
+        manifest = Pages.original.layout(0)[1]
+        for outcome in self.OUTCOMES:
+            with self.subTest(outcome=outcome):
+                original_before, original_after, _, _ = self.through(Pages.original.layout(0), outcome)
+                before, after, _, _ = self.through(Pages.current.layout(0), outcome)
+                self.assert_same_registrations(sh.by_target_event(original_before), sh.by_target_event(before),
+                                               f"{outcome}: per (target, event), in order, before the session answer")
+                self.assert_same_registrations(sh.by_target_event(original_after), sh.by_target_event(after),
+                                               f"{outcome}: per (target, event), in order, after the outcome")
+                if TRACE_DIR:
+                    name = outcome.replace(" ", "-")
+                    write_trace(Path(TRACE_DIR), f"original-{name}", manifest, original_after)
+                    write_trace(Path(TRACE_DIR), f"current-{name}", Pages.current.layout(0)[1], after)
+                    if outcome == "answered":
+                        write_trace(Path(TRACE_DIR), "original-before-session-answer", manifest, original_before)
+                        write_trace(Path(TRACE_DIR), "current-before-session-answer", Pages.current.layout(0)[1], before)
 
     def test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none(self):
         keys = {(t, e) for hazard in HAZARDS for (t, e, _) in self.keys(hazard)}
         targets = {t for t, _ in keys}
         expected = sh.by_target_event(self.original_trace()[1], keys)
-        observed = {}
-        for outcome in ("answered", "failed", "failed then retried"):
+        for outcome in self.OUTCOMES:
             with self.subTest(outcome=outcome):
-                run = Run(self, Pages.current.layout(0), auth="wait")
-                run.auth_waits()
-                before = run.trace()["registrations"]
-                if outcome == "answered":
-                    run.answer_auth()
-                    run.booted()
-                else:
-                    run.answer_auth(status=503, failures=3)
-                    retry = run.page.locator("#err button")
-                    run.wait(lambda: retry.count() > 0, "the failed session check offers a retry", timeout=30)
-                    if outcome == "failed then retried":
-                        retry.click()
-                        run.booted()
-                after = run.trace()["registrations"]
-                observed[outcome] = after
+                before, after, _, _ = self.through(Pages.current.layout(0), outcome)
                 on_targets = {(r["target"], r["type"]) for r in after if r["target"] in targets}
                 self.assert_same_registrations(expected, sh.by_target_event(before, keys),
                                                f"{outcome}: the hazard registrations exist before the session answer")
                 self.assert_same_registrations(sh.by_target_event(before, on_targets), sh.by_target_event(after, on_targets),
                                                f"{outcome}: the hazard targets gain no registration after the session answer")
-        if TRACE_DIR:
-            for outcome, registrations in observed.items():
-                write_trace(Path(TRACE_DIR), "current-" + outcome.replace(" ", "-"), Pages.current.layout(0)[1], registrations)
+
+    def change_after_retry(self, run):
+        since = run.page.evaluate("window.__kinTrace.now()")
+        quick_match(run.page)
+        run.settle(300)
+        registrations = {r["seq"]: r for r in run.trace()["registrations"]}
+        dispatched = [(d["target"], d["type"], registrations[d["registration"]]["listener"])
+                      for d in run.trace(since)["dispatches"] if "registration" in d and d["target"] == "#quick-match"]
+        search_patient(run.page)
+        return dispatched, run.screen()["worklist"], list(run.errors)
+
+    def test_after_retry_one_quick_match_change_has_one_effect(self):
+        _, _, original, _ = self.through(Pages.original.layout(0), "failed then retried", self.change_after_retry)
+        _, _, current, _ = self.through(Pages.current.layout(0), "failed then retried", self.change_after_retry)
+        self.assertEqual([], current[2], "errors")
+        self.assertEqual(original[0], current[0], "the listeners one Quick Match change reaches after Retry")
+        self.assertEqual(original[1], current[1], "the list, chips and saved-search state after that change")
+
+    def input_order(self, run):
+        select_study(run.page)
+        since = run.page.evaluate("window.__kinTrace.now()")
+        run.page.click("#findings")
+        run.page.keyboard.type("a")
+        run.settle(300)
+        registrations = {r["seq"]: r for r in run.trace()["registrations"]}
+        return [(d["target"], d["type"], registrations[d["registration"]]["listener"])
+                for d in run.trace(since)["dispatches"] if "registration" in d and d["target"] == "#findings"]
+
+    def test_a_report_field_input_reaches_its_listeners_in_the_original_order(self):
+        _, _, original, _ = self.through(Pages.original.layout(0), "answered", self.input_order)
+        _, _, current, run = self.through(Pages.current.layout(0), "answered", self.input_order)
+        self.assertEqual([], run.errors)
+        self.assertTrue(any(t == "input" for _, t, _ in original), "the original reaches input listeners")
+        self.assertEqual(original, current, "the (target, event, listener) invocation order of one focus/keypress")
 
 
-# ── window and session events at held boundaries (green: nothing of them may fail in a gap) ──
+# ── window and session events at held boundaries (nothing of them may fail in a gap) ──
 class WindowAndSessionEvents(PreCase):
     END = {"session": "SYN-SESSION-1", "operation": 9999999999999, "status": "confirmed", "origin": "logout"}
 
@@ -571,7 +623,7 @@ class WindowAndSessionEvents(PreCase):
                 run.page.set_viewport_size({"width": 1000, "height": 700})
                 run.page.wait_for_timeout(100)
                 run.page.set_viewport_size({"width": 1400, "height": 900})
-                other = self.runs[-1].context.new_page()
+                other = run.context.new_page()
                 other.goto(PROBE_URL)
                 other.bring_to_front()
                 run.page.wait_for_timeout(100)
@@ -583,7 +635,7 @@ class WindowAndSessionEvents(PreCase):
                 self.assertEqual([], run.errors)
 
 
-# ── TEST-PRE-EARLY-03/05/58 controls on the unsplit page (green) ──
+# ── TEST-PRE-EARLY-03/05/58 controls on the unsplit page ──
 class UnsplitControl(PreCase):
     def check(self, hazard):
         layout = Pages.current.layout(0)
@@ -605,6 +657,9 @@ class UnsplitControl(PreCase):
     def test_B1_05_unsplit(self):
         self.check("B1-05")
 
+    def test_B1_05_TAB_unsplit(self):
+        self.check("B1-05-TAB")
+
     def test_B1_58_unsplit(self):
         self.check("B1-58")
 
@@ -620,7 +675,7 @@ class UnsplitControl(PreCase):
         self.assertEqual([], self.leaving(layout, auth="wait"), "post")
 
 
-# ── TEST-PRE-EARLY-03/05/58 (and the found ones) on split pages: red until phase 2 ──
+# ── TEST-PRE-EARLY-03/05/58 and the leaving cases on split pages ──
 class EarlyInputSplit(PreCase):
     pass
 
@@ -629,7 +684,7 @@ def case_name(hazard, count, where):
     return f"test_{hazard.replace('-', '_')}_{count}_{re.sub(r'[^A-Za-z0-9]+', '_', where).strip('_')}"
 
 
-def split_case(hazard, count, documented, hold_module=None, trigger_module=None, delay_ms=0, gap_module=None):
+def split_case(hazard, count, guarded, hold_module=None, trigger_module=None, delay_ms=0, gap_module=None):
     def test(self):
         layout = Pages.current.layout(count)
         manifest = layout[1]
@@ -644,66 +699,68 @@ def split_case(hazard, count, documented, hold_module=None, trigger_module=None,
              else f"{delay_ms}ms after {files[trigger_module]['file']}")
     name = case_name(hazard, count, where)
     test.__name__ = name
-    test.__doc__ = f"{hazard}: {count}-part page, {where}; documented failure {documented!r}"
-    setattr(EarlyInputSplit, name, red(hazard, documented)(test))
+    test.__doc__ = f"{hazard}: {count}-part page, {where} (the original page failed here on {guarded})"
+    setattr(EarlyInputSplit, name, test)
 
 
-def leave_case(hazard, count, documented, hold_module):
+def leave_case(hazards, count, guarded, hold_module):
     def test(self):
         layout = Pages.current.layout(count)
         errors = self.leaving(layout, hold=sh.part_of(layout[1], hold_module))
         if errors:
-            raise HazardFailure(f"{hazard}: uncaught errors while leaving the page at the early moment: {errors}", errors)
-        original = Pages.original.layout(0)
-        self.assertEqual([], self.leaving(original, auth="wait"), "the original page leaves without errors")
+            raise HazardFailure(f"{hazards}: errors while leaving the page at the early moment: {errors}", errors)
+        self.assertEqual([], self.leaving(Pages.original.layout(0), auth="wait"), "the original page leaves without errors")
     where = f"leave while holding {ORIGINAL_SPEC['modules'][hold_module]['file']}"
-    name = case_name(hazard, count, where)
+    name = case_name(hazards.split("/")[0], count, where)
     test.__name__ = name
-    test.__doc__ = f"{hazard}: {count}-part page, {where}; documented failure {documented!r}"
-    setattr(EarlyInputSplit, name, red(hazard, documented)(test))
-
-
-def not_defined(*names):
-    return r"^ReferenceError: (%s) is not defined$" % "|".join(names)
+    test.__doc__ = f"{hazards}: {count}-part page, {where} (the original page failed here on {guarded})"
+    setattr(EarlyInputSplit, name, test)
 
 
 for count in PARTS:
     last = count - 1
-    # B1-03: after the dictation registration and before selectionSeq's module.
-    split_case("B1-03", count, not_defined("selectionSeq"), hold_module=MODULE["report-dictation.js"] + 1)
-    split_case("B1-03", count, not_defined("selectionSeq"), hold_module=min(MODULE["report-editor.js"], last))
-    # B1-05: before cur is ready (Modality/Bodypart/search/clear), then before RFIELDS (View).
-    split_case("B1-05", count, not_defined("cur"), hold_module=MODULE["report-templates-ui.js"] + 1)
-    split_case("B1-05", count, not_defined("cur"), hold_module=MODULE["current-study.js"])
-    split_case("B1-05", count, not_defined("RFIELDS"), hold_module=min(MODULE["related-report.js"], last))
-    # B1-58: only where saved-filters.js is a part of its own.
+    # B1-03: after the dictation registration and before selectionSeq's original module.
+    split_case("B1-03", count, "selectionSeq", hold_module=MODULE["report-dictation.js"] + 1)
+    split_case("B1-03", count, "selectionSeq", hold_module=min(MODULE["report-editor.js"], last))
+    # B1-05: before cur's original module (Modality/Bodypart/search/clear), then before RFIELDS' (View).
+    split_case("B1-05", count, "cur", hold_module=MODULE["report-templates-ui.js"] + 1)
+    split_case("B1-05", count, "cur", hold_module=MODULE["current-study.js"])
+    split_case("B1-05", count, "RFIELDS", hold_module=min(MODULE["related-report.js"], last))
+    # B1-05 Tab shortcut: before editReport's original module.
+    split_case("B1-05-TAB", count, "editReport", hold_module=MODULE["report-templates-ui.js"] + 1)
+    split_case("B1-05-TAB", count, "editReport", hold_module=min(MODULE["report-draft-save.js"], last))
+    # B1-58 / PRE-X3: only where saved-filters.js is a part of its own.
     if MODULE["saved-filters.js"] < count:
-        split_case("B1-58", count, not_defined("renderChips"), hold_module=MODULE["saved-filters.js"])
-        split_case("PRE-X3", count, not_defined("renderChips"), hold_module=MODULE["saved-filters.js"])
+        split_case("B1-58", count, "renderChips", hold_module=MODULE["saved-filters.js"])
+        split_case("PRE-X3", count, "renderChips", hold_module=MODULE["saved-filters.js"])
     # PRE-X1 / PRE-X2: the report fields' input (report-hold.js) and View, both before reportWriteBlock's module.
     if MODULE["report-toolbar.js"] < count:
         for module in (MODULE["work-exit.js"], MODULE["report-toolbar.js"]):
-            split_case("PRE-X1", count, not_defined("reportWriteBlock"), hold_module=module)
+            split_case("PRE-X1", count, "reportWriteBlock", hold_module=module)
         for module in (MODULE["report-editor.js"], MODULE["report-toolbar.js"]):
-            split_case("PRE-X2", count, not_defined("reportWriteBlock"), hold_module=module)
-    # Leaving the page: B1-15 (relatedParts -> renderRelated) everywhere; B1-57 (readingWorkspace -> applyLayout) and
-    # PRE-P3 (consultations -> clearFilter -> render -> renderChips) where feature-mounts.js is a part of its own.
-    leave_case("B1-15", count, not_defined("renderRelated"), MODULE["worklist-view.js"])
-    if MODULE["saved-filters.js"] < count:
-        leave_case("B1-57", count, not_defined("applyLayout", "renderChips"), MODULE["clinical-context-panel.js"])
-        leave_case("PRE-P3", count, not_defined("renderChips"), MODULE["worklist-controls.js"])
-# 150 ms per boundary, no hold: the inputs as soon as the registering part ran, before the part that declares.
-for hazard, documented, registering, declaring in (
+            split_case("PRE-X2", count, "reportWriteBlock", hold_module=module)
+    # Leaving the page: relatedParts/studyPriority/feature mounts reach render, renderRelated, updateReportButtons,
+    # renderChips and applyLayout from their pagehide (B1-15/41/42/45, B1-57, PRE-P3).
+    for module, hazards, guarded in (
+            ("worklist-view.js", "B1-15/41/42/45", "renderRelated, render (console.error)"),
+            ("related-studies.js", "B1-41/42/45", "renderRelated, renderChips, updateReportButtons (console.error)"),
+            ("report-commit.js", "B1-41/45", "renderChips, updateReportButtons (console.error)"),
+            ("clinical-context-panel.js", "B1-57/PRE-P3", "applyLayout, renderChips"),
+            ("workspace-panels.js", "B1-57/PRE-P3", "applyLayout, renderChips"),
+            ("saved-filters.js", "PRE-P3/B1-41", "renderChips")):
+        if MODULE[module] < count:
+            leave_case(hazards, count, guarded, MODULE[module])
+# 150 ms per boundary, no hold: the inputs as soon as the registering part ran, before the declaring part.
+for hazard, guarded, registering, declaring in (
         ("B1-03", "selectionSeq", "report-dictation.js", "report-editor.js"),
         ("B1-05", "cur", "report-templates-ui.js", "current-study.js"),
         ("B1-05", "RFIELDS", "current-study.js", "related-report.js"),
         ("B1-58", "renderChips", "worklist-controls.js", "saved-filters.js")):
-    split_case(hazard, 45, not_defined(documented), trigger_module=MODULE[registering], delay_ms=150,
-               gap_module=MODULE[declaring])
+    split_case(hazard, 45, guarded, trigger_module=MODULE[registering], delay_ms=150, gap_module=MODULE[declaring])
 
 
 def write_trace(directory, name, manifest, registrations):
-    """The reference trace: each registration with the statement that made it, and counts per (target, event)."""
+    """A reference trace: each registration with the statement that made it, and counts per (target, event)."""
     directory.mkdir(parents=True, exist_ok=True)
     rows, counts = [], {}
     for item in registrations:

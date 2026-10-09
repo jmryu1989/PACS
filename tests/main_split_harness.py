@@ -18,6 +18,9 @@ Small pieces that the first move part can reuse:
   caught: an exception leaves the listener as before (same error, same reported location) and the window's error
   report that follows is attached to that dispatch.
 * ``derive_spec(page, out)`` - the move spec's runs for a page that changed since the move baseline.
+* ``fixture_blocks(page, ranges)`` - the TypeScript-AST fixture projection for tests that compile part of the page's
+  script: runs of the f1d5406 statements, named by their first and end declarations, taken from the page wherever
+  they now sit (``REPORT_FIXTURE`` is the pair the report harness tests use).
 
 What a case asserts is browser-observed behaviour (registrations, dispatch outcomes, what the screen shows), never
 implementation strings (AGENTS 1-B). Statement names appear only in the manifest, to tell a reader where a
@@ -31,12 +34,17 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-from playwright.sync_api import Error as PlaywrightError
+try:
+    from playwright.sync_api import Error as PlaywrightError
+except ImportError:  # fixture_blocks() serves stdlib-only mutant drivers too; Delivery needs Playwright
+    PlaywrightError = None
 
 ROOT = Path(__file__).resolve().parents[1]
 PRODUCT_DIR = ROOT / "worklist-v0" / "hpacs-lite"
 _HELPER = Path(__file__).with_name("main_split_harness.cjs")
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8"}
+# TRACE_SCRIPT passes every console.error call of page code on with this first argument (browser notices lack it).
+CONSOLE_MARK = "[kin-page-console]"
 
 
 def build(count, out_dir, page=None, spec=None):
@@ -47,6 +55,19 @@ def build(count, out_dir, page=None, spec=None):
     if spec:
         args.append(str(spec))
     return json.loads(subprocess.check_output(args, text=True, encoding="utf-8", cwd=ROOT))
+
+
+# The two script runs the report harness tests compile (report_citation/cursor_insert/dictation_host/dictation_input/
+# rebase/structure DOM tests and their mutant drivers; main_split_harness.cjs REPORT_FIXTURE is the same pair): what
+# they used to cut between "let selectionSeq = 0;" .. "function reportSource()" and "function reportSource() {" ..
+# "function heldByOther(s)".
+REPORT_FIXTURE = {"BASE_BLOCK": ("selectionSeq", "reportSource"), "REPORT_BLOCK": ("reportSource", "heldByOther")}
+
+
+def fixture_blocks(page, ranges):
+    """Runs of the f1d5406 page's statements, named by the declarations that start and end them, taken from page`n    wherever they now sit (main_split_harness.cjs fixtureBlocks): {key: (first, end)} -> {key: script text}."""
+    return json.loads(subprocess.check_output(["node", str(_HELPER), "fixture", str(page), json.dumps(ranges)], text=True,
+                                              encoding="utf-8", cwd=ROOT))
 
 
 def derive_spec(page, out):
@@ -245,9 +266,12 @@ TRACE_SCRIPT = r"""(() => {
     const current = document.currentScript;
     return current ? (current.src ? current.src.replace(/[?#].*$/, '').replace(/^.*\//, '') : 'inline') : null;
   }
+  // A listener's identity across layouts: its source text with line ends normalized (an external part file keeps the
+  // checkout's CRLF while the HTML parser hands inline script text over with LF).
+  const source = fn => Function.prototype.toString.call(fn).replace(/\r\n?/g, '\n');
   function listenerHash(listener) {
-    if (typeof listener === 'function') return hash(Function.prototype.toString.call(listener));
-    if (listener && typeof listener.handleEvent === 'function') return 'h' + hash(Function.prototype.toString.call(listener.handleEvent));
+    if (typeof listener === 'function') return hash(source(listener));
+    if (listener && typeof listener.handleEvent === 'function') return 'h' + hash(source(listener.handleEvent));
     return null;
   }
   function record(kind, target, type, options, listener) {
@@ -325,6 +349,14 @@ TRACE_SCRIPT = r"""(() => {
       dispatch: thrown ? thrown.seq : null });
     if (thrown) { thrown.error = message; thrown = null; }
   }, true);
+  // console.error calls of page code (a caught failure is reported that way, e.g. studyPriority's render): recorded,
+  // and passed on with CONSOLE_MARK first so a reader of the browser console can tell them from browser notices.
+  const consoleError = console.error;
+  console.error = function (...args) {
+    errors.push({ seq: ++seq, message: 'console.error: ' + args.map(String).join(' '),
+      file: '', line: 0, dispatch: null });
+    return consoleError.call(this, '[kin-page-console]', ...args);
+  };
   add.call(window, 'unhandledrejection', event => {
     const reason = event.reason;
     errors.push({ seq: ++seq, message: 'unhandled rejection: ' + (reason && reason.message ? reason.name + ': ' + reason.message : String(reason)), file: '', line: 0 });

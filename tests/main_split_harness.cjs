@@ -14,6 +14,7 @@
 // statement to its module and to its line range in the served layout ({file, start, end}, 1-based).
 const fs = require('node:fs');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 const { scripts } = require('./page_source.cjs');
 const { baseline, chunks, statements, verify } = require('./main_move_contract.cjs');
 
@@ -138,10 +139,74 @@ function deriveSpec(page, options = {}) {
     modules: base.modules.map((m, i) => ({ file: m.file, job: m.job, statements: names.filter((_, k) => homes[k] === i) })) };
 }
 
-module.exports = { split, deriveSpec };
+// Fixture projection for tests that compile part of main.html's script into a page of their own. Such a test names a
+// run of statements of the f1d5406 page (the last page they were cut from by text markers) by the declarations that
+// start and end it; the projection returns those statements from the page under test - wherever its statements now
+// are, in the f1d5406 order - so a declaration moved ahead of its consumers stays in the fixture and one moved in
+// from elsewhere does not. Declarations are matched by their declared names (a test's mutant may change a body);
+// other statements by their text; a statement with no counterpart (new, or a mutated anonymous one) belongs to the
+// run it sits in, as a cut by markers would have it. Function names select fixture source only - nothing here
+// asserts on them.
+const FIXTURE_BASE = 'f1d540626aac03f46de23a9620d69f4c9da66037';
+// The two runs the report harness tests compile (also main_split_harness.py REPORT_FIXTURE): what they cut between
+// "let selectionSeq = 0;" .. "function reportSource()" and "function reportSource() {" .. "function heldByOther(s)".
+const REPORT_FIXTURE = { BASE_BLOCK: ['selectionSeq', 'reportSource'], REPORT_BLOCK: ['reportSource', 'heldByOther'] };
+function fixtureBlocks(page, ranges) {
+  const { readPageSource } = require('./page_source.cjs');
+  const inlineBody = text => {
+    const inline = scripts(text).filter(t => !t.src);
+    if (inline.length !== 1) throw new Error('Expected exactly one inline script');
+    return inline[0].body;
+  };
+  const parse = body => {
+    const source = ts.createSourceFile('inline.js', body, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+    if (source.parseDiagnostics.length) throw new Error('Inline script must parse');
+    return source.statements.map(node => ({
+      names: ts.isVariableStatement(node) ? node.declarationList.declarations.map(d => d.name.getText(source))
+        : node.name ? [node.name.getText(source)] : [],
+      text: node.getText(source).replace(/\r\n?/g, '\n'), full: body.slice(node.getFullStart(), node.end) }));
+  };
+  const base = parse(inlineBody(execFileSync('git', ['cat-file', '--filters', `${FIXTURE_BASE}:worklist-v0/hpacs-lite/main.html`],
+    { cwd: ROOT, encoding: 'utf8', maxBuffer: 8e6 })));
+  const current = parse(inlineBody(readPageSource(page)));
+  const byName = new Map(), byText = new Map();
+  base.forEach((s, i) => {
+    for (const name of s.names) byName.set(name, i);
+    if (!s.names.length) { if (!byText.has(s.text)) byText.set(s.text, []); byText.get(s.text).push(i); }
+  });
+  const home = current.map(s => {
+    if (s.names.length) {
+      const found = new Set(s.names.map(name => byName.get(name)));
+      return found.size === 1 && !found.has(undefined) ? [...found][0] : -1;
+    }
+    return (byText.get(s.text) || []).shift() ?? -1;
+  });
+  const result = {};
+  for (const [key, [first, end]] of Object.entries(ranges)) {
+    const lo = byName.get(first), hi = byName.get(end);
+    if (lo === undefined || hi === undefined || lo >= hi) throw new Error(`Fixture ${key}: no run from ${first} to ${end}`);
+    const picked = [];
+    let previous = -1;
+    current.forEach((s, i) => {
+      if (home[i] >= 0) { previous = home[i]; if (home[i] >= lo && home[i] < hi) picked.push([home[i], 0, i]); return; }
+      const next = home.slice(i + 1).find(h => h >= 0) ?? Infinity;
+      if (previous >= lo && previous < hi && next >= lo && next <= hi) picked.push([previous, 1, i]);
+    });
+    const declared = new Set(base.slice(lo, hi).flatMap(s => s.names));
+    for (const [, , i] of picked) for (const name of current[i].names) declared.delete(name);
+    if (declared.size) throw new Error(`Fixture ${key}: declarations not found in the page: ${[...declared].join(', ')}`);
+    picked.sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]);
+    result[key] = picked.map(([, , i]) => current[i].full).join('');
+  }
+  return result;
+}
+
+module.exports = { split, deriveSpec, fixtureBlocks, FIXTURE_BASE, REPORT_FIXTURE };
 if (require.main === module) {
   const [op, ...args] = process.argv.slice(2);
-  if (op === 'split' && args[1]) {
+  if (op === 'fixture' && args[1]) {
+    process.stdout.write(JSON.stringify(fixtureBlocks(args[0], JSON.parse(args[1]))));
+  } else if (op === 'split' && args[1]) {
     const [count, outDir, page, spec] = args;
     process.stdout.write(JSON.stringify(split(Number(count), outDir, { page, spec })));
   } else if (op === 'derive' && args[1]) {
@@ -149,5 +214,6 @@ if (require.main === module) {
     const derived = deriveSpec(page);
     fs.writeFileSync(outsideProduct(path.dirname(out)) && out, JSON.stringify(derived, null, 1));
     process.stdout.write(JSON.stringify({ moved: derived.moved, statements: derived.modules.reduce((n, m) => n + m.statements.length, 0) }));
-  } else throw new Error('Usage: node main_split_harness.cjs split <count> <outDir> [page] [spec] | derive <page> <outSpec>');
+  } else throw new Error('Usage: node main_split_harness.cjs split <count> <outDir> [page] [spec] | derive <page> <outSpec>'
+    + ' | fixture <page> <{"KEY":["firstDeclaration","endDeclaration"]}>');
 }

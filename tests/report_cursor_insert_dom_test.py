@@ -17,6 +17,7 @@ Two files may be replaced through KIN_CURSOR_MAIN / KIN_CURSOR_CITATION_JS so th
 break the product on purpose without ever touching the source tree.
 """
 from page_source import read_page_source
+from main_split_harness import REPORT_FIXTURE, fixture_blocks
 import json
 import os
 import re
@@ -107,8 +108,11 @@ CITE_HTML = slice_between(MAIN, '<div class="modal" id="cite-preview"', "\n  </d
 PANE_HTML = slice_between(MAIN, '<div class="modal" id="stalemodal"', "\n  </div>") + "\n  </div>"
 STRUCT_HTML = slice_between(MAIN, '<div class="modal" id="structmodal"', "\n  </div>") + "\n  </div>"
 MODAL_CSS = slice_between(MAIN, ".modal { display: none;", "/* ══ 클릭 피드백")
-BASE_BLOCK = slice_between(MAIN, "    let selectionSeq = 0;", "    function reportSource()")
-REPORT_BLOCK = slice_between(MAIN, "    function reportSource() {", "    function heldByOther(s)")
+# The two script runs by the TypeScript-AST fixture projection (S9-U0a-PRE moved some of their declarations ahead of
+# their first callers, so they are no longer one stretch of text).
+FIXTURE = fixture_blocks(MAIN_PATH, REPORT_FIXTURE)
+BASE_BLOCK = FIXTURE["BASE_BLOCK"]
+REPORT_BLOCK = FIXTURE["REPORT_BLOCK"]
 API_FN = extract_function(MAIN, "api")
 WRITE_BLOCK_FN = extract_function(MAIN, "reportWriteBlock")
 EDITOR_BLOCK_FN = extract_function(MAIN, "reportEditorBlock")

@@ -1988,6 +1988,17 @@
      * fetch나 Response를 바꿔 끼우지 않는다: 이 두 가지를 지나지 않는 쓰기는 보호받지 않으므로 지나게 만든다.
      */
     const work = KinWorkContext;
+    // 아래 받아쓰기 칸 focus 등록이 읽는 선택 순번이다. 분할된 script 사이에 온 초기 focus도 읽을 수 있게 그 등록보다 먼저 선언한다(S9-U0a-PRE).
+    /**
+     * 선택이 바뀐 횟수.
+     *
+     * 비동기 응답은 화면에 쓰기 직전에 **UID와 순번을 함께** 확인해야 한다. UID만 보면
+     * A→B→A로 돌아온 화면이 "같은 검사"로 보이지만, 그 사이 화면은 다시 그려졌고
+     * 지금 textarea에 있는 글은 그 요청이 떠날 때의 글이 아니다. `loadRelatedReport`가
+     * `relatedReportSeq`로 하는 것과 같은 검사이며, 여기서 틀리면 **다른 환자의 판독문**이
+     * 한 화면에 나란히 놓인다.
+     */
+    let selectionSeq = 0;
     work.follow(KinAuth);
     const transport = KinSessionTransport.page();
     /**
@@ -2150,6 +2161,26 @@
       orders = SEED_ORDERS.map(o => ({ ...o, matched: "U", studyUid: null }));
     const saveOrders = () => { try { localStorage.setItem("kin-orders", JSON.stringify(orders)); } catch (e) {} };
     saveOrders();
+
+    // 상용구 검색·View·삽입 관문과 그 등록(아래)이 부르는 선언이다. script를 나눠 실어도 틈의 초기 입력이 미정의를 만나지 않게 등록보다 앞에 둔다(S9-U0a-PRE).
+    let studies = [];
+    let selectedUid = null;
+    function cur() { return studies.find(s => s.uid === selectedUid); }
+    const RFIELDS = ["findings", "conclusion", "recommendation"];
+    /**
+     * 판독문 textarea를 **스크립트로** 고쳐도 되는가.
+     *
+     * `readOnly`는 사람의 타이핑만 막는다. `el.value = ...` 대입은 그대로 통과한다.
+     * 그래서 Clear·Paste 같은 버튼은 잠금을 스스로 확인해야 한다 —
+     * 예비 판독 잠금이 이 두 버튼에서만 열려 있었다.
+     * 막는 이유를 문자열로 돌려준다. 통과면 null.
+     */
+    function reportWriteBlock() {
+      if (!selectedUid) return "검사를 선택하세요";
+      if (!KinAuth.has("radiologist")) return "판독문 편집은 판독의 권한이 필요합니다";
+      if (appState[selectedUid]?.prelimHidden) return "다른 판독의의 예비 판독(RS: P)입니다";
+      return null;
+    }
 
     // ── Reading Template ──
     // **계정에 붙는다.** 서버 모드면 bootstrap이 내 것을 실어 오고, 로컬 모드에서만
@@ -2438,6 +2469,42 @@
       // 단축어 자리를 그 칸의 문장으로 바꾼다. 표시·점유·자동 저장은 편집기의 한 자리(`editReport`)가 챙긴다.
       if (!editReport([{ field: el.id, start: pos - word.length, end: pos, text }])) return false;
       toast(`상용구 "${t.title}" 삽입`, "info");
+      return true;
+    }
+    // 단축어 Tab(아래 등록)이 부르는 편집기의 한 자리다. 분할된 script 사이의 Tab이 미정의를 만나지 않게 등록보다 앞에 둔다(S9-U0a-PRE).
+    /**
+     * 판독문 칸(`#findings`·`#conclusion`·`#recommendation`)의 글을 **이 문서의 코드가** 바꾸는 한 자리.
+     *
+     * 사람의 타건은 input 이벤트가 알리지만 스크립트의 `.value` 대입은 아무것도 알리지 않는다. 대입하는 자리마다 "이 글은
+     * 서버가 아직 모른다"는 표시를 각자 챙기게 두면, 한 자리가 빠지는 순간 그 글은 자동 저장·로그아웃 보존·떠나기 경고
+     * 어디에도 없고 다음 폴링이 서버 글로 덮는다(U5CLI-F09: Paste와 Clear가 그랬다). 그래서 값을 바꾸는 일과 그 기록을
+     * 이 함수 하나가 함께 한다 — 붙여넣기·비우기·상용구·받아쓰기·단축어·인용·구조화가 모두 여기를 지난다. 이 함수 밖에서
+     * 세 칸에 대입하는 곳은 둘뿐이다: 서버의 글을 그리는 `loadReport`와 화면을 닫는 `closeWork`(둘 다 이 문서의 편집이
+     * 아니다).
+     *
+     * `edits`는 `{ field, start, end, text[, caret] }`의 목록이다: 그 칸의 지금 글에서 [start, end)를 text로 바꾸고 커서를
+     * caret(없으면 넣은 글의 끝)에 둔다. 칸·범위·넣을 글로 받는 것은 편집기 경계 모듈(report-editor-frame.js의
+     * capture + insert / insertMany)이 같은 것을 받기 때문이다. 쓸 수 있는가(권한·잠금·그때 그 선택인가)는 부르는 쪽이
+     * 이미 확인했다. 여기서는 업무 중인 문서의 고른 검사일 때만 쓰고, 글이 실제로 바뀌었는지를 돌려준다 — 아무것도 바꾸지
+     * 않은 호출(빈 붙여넣기 등)은 편집이 아니므로 표시도 세우지 않는다.
+     */
+    function editReport(edits) {
+      if (work.state() !== "active" || !selectedUid) return false;
+      const changed = [];
+      for (const { field, start, end, text, caret } of edits) {
+        const el = $("#" + field), was = el.value;
+        if (was.slice(start, end) === text) continue;
+        el.value = was.slice(0, start) + text + was.slice(end);
+        const at = caret ?? start + text.length;
+        el.setSelectionRange(at, at);
+        changed.push(el);
+      }
+      if (!changed.length) return false;
+      // 편집기의 글이 바뀌었다 — 그 전에 떠난 편집기 범위의 작업(클립보드 읽기 등)은 이 글 위에 쓰지 않는다.
+      work.edited();
+      recordReportEdit();
+      // 글이 바뀐 뒤에 따라오는 일(점유 시작, 인용 다시 세기, 상용구 단추, 받아쓰기 자리)은 타이핑과 같은 input이 알린다.
+      for (const el of changed) el.dispatchEvent(new Event("input", { bubbles: true }));
       return true;
     }
     ["#findings", "#conclusion", "#recommendation"].forEach(sel =>
@@ -2731,7 +2798,6 @@
     });
 
     // ── 데이터 ──
-    let studies = [];
     // S4-U1b session-local KIN observation (renderObservation). Memory only; a page load starts over.
     let studyObservationModel = window.KinStudyArrivals?.observationStart?.() ?? null;
     // S4-U2 order reconciliation answer (renderOrderReconciliation). Memory only, engineering only.
@@ -2744,11 +2810,83 @@
     let gatewayRetryRequestSeq = 0;
     let favoriteList = null, studyTagList = null, studyTagScope = 'personal';
     let demoMode = false;
-    let quickDays = -1, sortKey = null, sortDir = 0, selectedUid = null, selectedOid = null;
+    let quickDays = -1, sortKey = null, sortDir = 0, selectedOid = null;
     // 워크리스트 선택은 "지금 작성할 검사", Related 선택은 썸네일과 이전 판독문에만 쓴다.
     // 둘을 한 변수로 쓰면 prior를 클릭한 순간 저장·승인 대상까지 prior로 바뀐다.
     let relatedUid = null;
     let relatedModality = "", relatedBodyPart = "", relatedIncludeCurrent = false;
+    // relatedParts의 종료(pagehide)가 부르는 Related 목록 그리기다. 분할된 script 사이에서 페이지를 떠나도 정의돼 있게 생성보다 앞에 둔다(S9-U0a-PRE).
+    function relatedModalities(study) {
+      return [...new Set(String(study.modality ?? "").split(",").map(x => x.trim().toUpperCase()).filter(Boolean))];
+    }
+    let relatedPage = 0, relatedPageQuery = '';
+    function renderRelated(reveal = false) {
+      relatedRowNavigation?.beforeRender();
+      const s = cur();
+      relatedParts.sync(s?.uid||'');
+      $('#related-include-current').checked=relatedIncludeCurrent;$('#related-include-current').disabled=!s;
+      $('#related-load-parts').disabled=!s||!serverMode||offline||demoMode||relatedParts.busy();
+      $('#related-cancel-parts').hidden=!relatedParts.busy();
+      $("#related-return").disabled = !s || !relatedUid;
+      $("#related-current").textContent = s
+        ? `판독 대상 · ${s.date || "날짜 없음"} · ${s.modality} · ${s.name} (${s.id}) · ${shownStudyDesc(s)}`
+        : "판독 대상을 선택하세요";
+      $("#related-current").title = $("#related-current").textContent;
+      let rel = [];
+      if (s) {
+        rel = relatedCandidates().filter(x => relatedIncludeCurrent || x.uid !== s.uid);
+        rel = [...rel].sort((a, b) => b.date.localeCompare(a.date) || b.uid.localeCompare(a.uid));
+      }
+      const total = rel.length;
+      const known=relatedCandidates().filter(x=>relatedParts.get(x.uid)?.parts).length;
+      const partTokens=[...new Set(relatedCandidates().flatMap(x=>relatedParts.get(x.uid)?.parts||[]))].filter(Boolean).sort();
+      const body=$('#related-body-part'),bodyOptions=[new Option('All Body Parts',''),new Option('Unverified','?'),new Option('Unspecified',JSON.stringify('')),
+        ...partTokens.map(v=>new Option(v,JSON.stringify(v)))];
+      if(relatedBodyPart&&!bodyOptions.some(o=>o.value===relatedBodyPart))bodyOptions.push(new Option(JSON.parse(relatedBodyPart),relatedBodyPart));
+      body.replaceChildren(...bodyOptions);body.value=relatedBodyPart;body.disabled=!s;body.title=body.selectedOptions[0]?.textContent||'';
+      $('#related-parts-status').textContent=relatedParts.note() || (s?`${relatedParts.busy()?'조회 중 · ':''}부위 확인 ${known}/${relatedCandidates().length} · 미조회·실패는 Unverified` : '');
+      const modality = $("#related-modality");
+      const tokens = [...new Set(rel.flatMap(relatedModalities))].sort();
+      const options = [new Option("All Modalities", ""), new Option("Unspecified", JSON.stringify("")),
+        ...tokens.map(token => new Option(token, JSON.stringify(token)))];
+      // 마지막 일치 항목이 사라져도 사용자가 고른 조건을 몰래 전체로 넓히지 않는다.
+      if (relatedModality && !options.some(option => option.value === relatedModality))
+        options.push(new Option(JSON.parse(relatedModality), relatedModality));
+      modality.replaceChildren(...options);
+      modality.value = relatedModality;
+      modality.disabled = !s;
+      modality.title = modality.selectedOptions[0]?.textContent || "";
+      if (relatedModality) {
+        const token = JSON.parse(relatedModality);
+        rel = rel.filter(x => token ? relatedModalities(x).includes(token) : !relatedModalities(x).length);
+      }
+      if(relatedBodyPart)rel=rel.filter(x=>{const parts=relatedParts.get(x.uid)?.parts;return relatedBodyPart==='?'?!parts:!!parts&&parts.includes(JSON.parse(relatedBodyPart));});
+      $("#related-filter-count").textContent = `${rel.length} / ${total}`;
+      $("#related-filter-hidden").hidden = !s || !relatedUid || rel.some(x => x.uid === relatedUid);
+      const pageQuery = JSON.stringify([selectedUid, relatedModality, relatedBodyPart, relatedIncludeCurrent]);
+      if (pageQuery !== relatedPageQuery) { relatedPage = 0; relatedPageQuery = pageQuery; }
+      const viewed = rel.findIndex(x => x.uid === relatedUid), pages = Math.max(1, Math.ceil(rel.length / 50));
+      if (reveal === true && viewed >= 0) relatedPage = Math.floor(viewed / 50);
+      relatedPage = Math.max(0, Math.min(relatedPage, pages - 1));
+      $('#related-pages').hidden = pages <= 1;
+      $('#related-page-prev').disabled = relatedPage === 0; $('#related-page-next').disabled = relatedPage >= pages - 1;
+      $('#related-page-current').disabled = viewed < 0;
+      $('#related-page-status').textContent = `${relatedPage + 1}/${pages}페이지`;
+      relatedRows = rel;
+      $("#relrows").innerHTML = s
+        ? (rel.slice(relatedPage * 50, (relatedPage + 1) * 50).map(x => {
+            return `
+            <tr data-uid="${esc(x.uid)}" class="${x.uid === relatedUid || (x.uid === s.uid && !relatedUid) ? "related-selected" : ""}">
+              <td>${x.uid === s.uid ? "Reading Target" : relatedDateLabel(x)} · ${x.uid === relatedUid || (x.uid === s.uid && !relatedUid) ? "👁 열람 중" : "비교"}</td>
+              <td>${esc(x.date)}</td><td>${esc(x.modality)}</td><td>${esc(shownStudyDesc(x))}</td><td class="num">${esc(x.count)}</td>
+              <td><span class="rs ${esc(x.rs)}">${esc(x.rs)}</span></td>
+              <td>${x.rs === "A" ? "Approved" : "No Report"} <button class="chip" type="button" data-related-open="${esc(x.uid)}">${x.uid === s.uid ? 'Open Images' : 'Compare Images'}</button></td>
+            </tr>`;
+          }).join("") || `<tr><td class="empty" colspan="7">${relatedModality || relatedBodyPart ? "조건에 맞는 관련 검사 없음" : "관련 검사 없음"}</td></tr>`)
+        : `<tr><td class="empty" colspan="7">검사를 선택하세요</td></tr>`;
+      columnPrefs?.decorateRelated(mode);
+      relatedRowNavigation?.sync();
+    }
     const relatedParts = KinRelatedParts.create({
       owner:()=>{const key=KinViewerOpening.key(KinAuth.session());return key||null;},
       changed:()=>renderRelated()
@@ -2892,6 +3030,285 @@
     }
 
     let listLoadSequence = 0;
+    // studyPriority·Quick Match·검색·기능 패널의 종료가 부르는 목록·칩·판독 단추 그리기 묶음이다. 분할된 script 사이의 입력·종료가 미정의를 만나지 않게 이 생성보다 앞에 둔다(S9-U0a-PRE).
+    function savedFilterDays(value) {
+      if (value === null || value === "" || typeof value === "boolean") return -1;
+      const days = Number(value);
+      return Number.isFinite(days) ? days : -1;
+    }
+    /** 저장된 필터도 현재 목록과 같은 규칙으로 센다. 화면 상태를 바꾸지 않으므로
+     * 다른 저장 필터의 건수를 보려고 지금 하던 검색이 흔들리지 않는다. */
+    function filteredFor(filter) {
+      worklistBodyParts.sync(studies);
+      const filterMode = Array.isArray(COLS[filter?.mode]) ? filter.mode : mode;
+      const cols = COLS[filterMode].filter(c => c.f);
+      const days = savedFilterDays(filter?.days);
+      const values = filter?.cols && typeof filter.cols === "object" ? filter.cols : {};
+      const needsParts = KinCompoundFilter.usesField(values[KinCompoundFilter.KEY], 'bodyPart', COLS[filterMode]);
+      const matchCompound = KinCompoundFilter.compile(values[KinCompoundFilter.KEY], COLS[filterMode]);
+      const matchQuick = KinCompoundFilter.compileQuick(filter?.quick, values[KinCompoundFilter.KEY], COLS[filterMode]);
+      return studies.filter(s => {
+        if (!matchQuick(s)) return false;
+        if (!withinDays(s.date, days)) return false;
+        return cols.every(c => testCol(s, c, values))
+          && matchCompound(needsParts ? {...s, bodyPart: worklistBodyParts.get(s.uid)} : s);
+      });
+    }
+    let consultationFilter = null;
+    const searchCriteria = () => ({mode,quick:$('#quick').value,days:quickDays,cols:JSON.parse(JSON.stringify(fval))});
+    function filtered() {
+      const search = worklistSearch?.read(searchCriteria());
+      const list = search?.empty ? [] : filteredFor(search?.criteria || searchCriteria());
+      const favorites = favoriteList ? favoriteList.filter(list) : list;
+      const tagged = studyTagList ? studyTagList.filter(favorites) : favorites;
+      return consultationFilter ? tagged.filter(s => consultationFilter.uids.has(s.uid)) : tagged;
+    }
+    // Navigation and its position indicator must use the same order the reader sees.
+    function orderedStudies() {
+      const list = filtered();
+      if (sortDir !== 0 && sortKey)
+        list.sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : a[sortKey] < b[sortKey] ? -1 : 0) * sortDir);
+      return list;
+    }
+    let resultPage = 0, resultQuery = '', resultPageSize = 100;
+    function render(revealUid) {
+      const cols = COLS[mode], shown = shownColumns();
+      const list = orderedStudies();
+      const appliedSearch = worklistSearch?.read(searchCriteria());
+      const bodyPartNote = appliedSearch?.empty ? '' : bodyPartCountNote(appliedSearch?.criteria || searchCriteria());
+      renderBodyParts();
+      const query = JSON.stringify([appliedSearch?.criteria || searchCriteria(), appliedSearch?.empty, sortKey, sortDir, favoriteList?.key(), studyTagList?.key(), consultationFilter?.revision ?? 0]);
+      if (query !== resultQuery) { resultPage = 0; resultQuery = query; }
+      if (typeof revealUid === 'string') {
+        const index = list.findIndex(s => s.uid === revealUid);
+        if (index >= 0) resultPage = Math.floor(index / resultPageSize);
+      }
+      const pages = Math.max(1, Math.ceil(list.length / resultPageSize));
+      resultPage = Math.max(0, Math.min(resultPage, pages - 1));
+      const offset = resultPage * resultPageSize;
+      // Keep restored form-control values consistent with the actual page size.
+      $('#page-size').value = String(resultPageSize);
+      $('#page-prev').disabled = resultPage === 0; $('#page-next').disabled = resultPage >= pages - 1;
+      $('#page-current').disabled = !list.some(s => s.uid === selectedUid);
+      $('#row-keyboard-help').textContent='↑/↓ · Home/End 이동 · Space 선택 · Enter '+(mode==='Radiology'?'판독 진입':'검사 선택');
+      $('#page-status').textContent = `불러온 목록 중 ${list.length ? offset + 1 : 0}–${Math.min(offset + resultPageSize, list.length)} / ${list.length}건 · ${resultPage + 1}/${pages}페이지` + (bodyPartNote ? ` · ${bodyPartNote}` : '');
+
+      rowNavigation?.beforeRender();
+      $("#rows").innerHTML = list.slice(offset, offset + resultPageSize).map((s, i) => `
+        <tr data-uid="${esc(s.uid)}" tabindex="-1" class="st-${esc(String(s.rs).toLowerCase())}${s.uid === selectedUid ? " sel" : ""}${mode === "Radiology" && s.ss === "Unverified" && s.em !== "E" ? " unv" : ""}">` +
+        shown.map(c => {
+          // CELL[]은 우리가 만든 HTML이라 그대로, 나머지는 전부 외부 문자열이라 이스케이프
+          const v = c.k === "no" ? offset + i + 1 : (CELL[c.k] ? CELL[c.k](s) : esc(s[c.k] ?? ""));
+          const classes = [c.num ? "num" : "", c.k === "acc" ? "acc" : "", ["id", "birth"].includes(c.k) ? "dim" : ""];
+          return `<td class="${classes.filter(Boolean).join(" ")}">${v}</td>`;
+        }).join("") + `</tr>`).join("")
+        || `<tr><td class="empty" colspan="${shown.length}">${bodyPartNote ? '부위 확인 전인 검사가 있어 검색 결과가 아직 완전하지 않습니다.' : 'No records found'}</td></tr>`;
+      columnPrefs?.decorate(mode);
+      multiSelection?.sync();
+      rowNavigation?.sync();
+      worklistSearch?.show();
+
+      const active = [];
+      if (consultationFilter) {
+        const known = new Set(studies.map(s=>s.uid));
+        const missing = [...consultationFilter.uids].filter(uid=>!known.has(uid)).length;
+        active.push(consultationFilter.label + (missing ? ` · ${missing} not in loaded worklist` : ''));
+      }
+      if (favoriteList?.label()) active.push(favoriteList.label());
+      if (studyTagList?.label()) active.push(studyTagList.label());
+      // `.on` 버튼이 없으면 `.textContent`가 TypeError를 내고 **render() 전체가 죽는다** —
+      // 목록도, 카운트도, 필터 표시도 안 그려진다. 서버 필터가 0/3/7/30/60/-1 외의
+      // days를 주면 어느 버튼도 `.on`이 아니라 실제로 도달한다.
+      // 화면 한 줄을 못 쓰는 것과 화면 전체가 안 그려지는 것은 다른 사고다.
+      if (quickDays >= 0)
+        active.push(`StudyDate(${$("#qf .on")?.textContent ?? `최근 ${quickDays}일`})`);
+      cols.forEach(c => { if (fval[c.k]) active.push(`${c.t}(${fval[c.k]})${shown.includes(c) ? '' : ' [숨긴 열]'}`); });
+      if (sortKey && sortDir && !shown.some(c => c.k === sortKey)) active.push(`숨긴 열 정렬: ${COLS[mode].find(c => c.k === sortKey)?.t ?? sortKey} ${sortDir > 0 ? '오름차순' : '내림차순'}`);
+      const compound = fval[KinCompoundFilter.KEY];
+      const compoundError = KinCompoundFilter.validate(compound, cols);
+      $("#quick-match").value = compoundError ? "" : KinCompoundFilter.quickMode(compound);
+      if (!compoundError && compound?.version === 2) active.push("Patient Search: " + (compound.quickMatch === "exact" ? "Exact" : "Starts With"));
+      if (compoundError) active.push(`복합 조건 오류: ${compoundError} · 조건을 수정하거나 Clear로 해제하세요`);
+      else if (compound?.rules.length) {
+        active.push('복합 ' + KinCompoundFilter.describe(compound, cols));
+      }
+      $("#filterlist").textContent = (appliedSearch?.pending ? "Draft Filter (not applied) : " : "Filter : ") + (active.join(", ") || "-");
+
+      const n = (k, v) => list.filter(s => s[k] === v).length;
+      if (mode === "Radiology") {
+        $("#countlist").innerHTML =
+          `<span class="count"><span class="dot dot-w"></span>W:${n("rs","W")}</span>` +
+          `<span class="count"><span class="dot dot-a"></span>A:${n("rs","A")}</span>` +
+          `<span class="count"><span class="dot dot-ho"></span>H:${n("rs","H")}</span>` +
+          `<span class="count"><span class="dot dot-ho"></span>O:${n("rs","O")}</span>` +
+          `<span class="count"><span class="dot dot-t"></span>T:${n("rs","T")}</span>` +
+          `<span class="count"><span class="dot dot-p"></span>P:${n("rs","P")}</span>` +
+          `<span class="count">Unverified:${n("ss","Unverified")}</span>`;
+      } else {
+        $("#countlist").textContent =
+          `Verified:${n("ss","Verified")} Unverified:${n("ss","Unverified")} · Unmatched:${n("matched","U")} · Total ${list.length}`;
+      }
+      renderChips();
+      // S4-U5: the poll merges row state after it reports the observation, so the identity panel is redrawn here
+      // too; its stale rule reads that merged state (a correction answer or a newer poll), never an older one.
+      renderStudyIdentity();
+    }
+    function relatedStudy() { return relatedUid ? studies.find(s => s.uid === relatedUid) : null; }
+    function viewed() { return relatedStudy() ?? cur(); }
+    function renderStudyIdentity() {
+      const box = $("#study-identity");
+      if (!box || !studyIdentityModel) return;
+      const s = viewed();
+      const view = s ? KinStudyIdentity.view(studyIdentityModel, s.uid, appState[s.uid] ?? {}) : { hidden: true };
+      const drawn = JSON.stringify(view);
+      if (box.dataset.view === drawn) return;   // unchanged: keep the open panel and any text selection as they are
+      box.dataset.view = drawn;
+      box.hidden = view.hidden;
+      if (view.hidden) return;
+      $("#study-identity-summary").textContent = view.summary.text;
+      $("#study-identity-summary").title = view.summary.title;
+      const order = $("#study-identity-order");
+      order.textContent = view.order?.text ?? ""; order.title = view.order?.title ?? "";
+      $("#study-identity-tags").replaceChildren(...view.rows.map(row => {
+        const line = document.createElement("div"), value = document.createElement("span"), relation = document.createElement("span");
+        line.setAttribute("role", "listitem"); line.dataset.tag = row.key;
+        value.textContent = `${row.tag} ${row.label}: ${row.value}`; value.title = row.valueTitle;
+        relation.textContent = row.relation ? ` · ${row.relation}` : ""; relation.title = row.title;
+        line.append(value, relation);
+        return line;
+      }));
+      $("#study-identity-guidance").textContent = view.guidance;
+    }
+    /**
+     * 표시줄이 안내하는 확정 단추는 **지금 눌리는 것뿐이다.** 승인된 판독문에서 Save·Approve는 잠겨 있는데 "확정하려면 Save
+     * 또는 Approve"라고 쓰면 사람은 갈 수 없는 길을 안내받는다(U5CLI-F11). 무엇이 눌리는가는 단추를 잠그는
+     * `updateReportButtons`가 정한 그대로 읽는다 — 같은 판단을 여기서 다시 계산하면 언젠가 한쪽만 고쳐진다. 그래서 단추를
+     * 다시 잠그거나 푸는 그 함수가 끝에 이것을 부른다. 확정이 나가 있는 동안은 눌리는 것이 없으므로 안내도 없다.
+     */
+    function renderDraftHint() {
+      const hint = $("#drafthint");
+      if (!hint) return;
+      const open = id => { const el = $(id); return !!el && !el.disabled; };
+      hint.textContent = open("#b-addendum") ? " · 추가기재로 확정하려면 More ▸ Addendum"
+        : open("#b-save") && open("#b-approve") ? " · 확정하려면 Save 또는 Approve"
+        : open("#b-save") ? " · 확정하려면 Save" : open("#b-approve") ? " · 확정하려면 Approve" : "";
+    }
+    function heldByOther(s) { return s?.holder && s.holder !== user ? s.holder : null; }
+    function updateReportButtons() {
+      const s = cur();
+      const rad = KinAuth.has("radiologist");
+      const filming = s?.ss === "Unverified" && s?.em !== "E";
+      const filmingTitle = "촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다";
+      const held = heldByOther(s);
+      const heldTitle = `${displayActor(held)} 님이 판독 중입니다`;
+      $("#holdbar").style.display = held ? "flex" : "none";
+      $("#holdmsg").textContent = held ? `✎ ${heldTitle} — 잠금이 풀리면 이어서 판독할 수 있습니다` : "";
+      $("#deferbar").style.display = s?.rs === "H" ? "flex" : "none";
+      $("#defermsg").textContent = s?.rs === "H" ? `⏸ On Hold — ${s.holdReason ?? ""}` : "";
+      // 남의 예비 판독은 읽지도 쓰지도 못한다. 서버가 막지만 회색으로 보이는 편이 낫다 —
+      // 눌러보고 거절당하는 건 "왜 안 되지"를 만들고, 회색은 "내 것이 아니구나"를 만든다.
+      const locked = !!appState[selectedUid]?.prelimHidden;
+      // Clear·Paste가 여기 들어와야 하는 이유: 둘 다 textarea의 `.value`에 직접 쓴다.
+      // `readOnly`는 스크립트 대입을 안 막으므로, 잠긴 판독문이 이 두 버튼으로 지워졌다.
+      for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste", "#b-defer"]) {
+        const el = $(id);
+        if (!el) continue;
+        el.disabled = !rad || locked || filming || !!held;
+        el.title = held ? heldTitle : filming ? filmingTitle : locked ? "다른 판독의의 예비 판독(RS: P)입니다"
+          : !rad ? "판독의 권한이 필요합니다" : "";
+      }
+      // 승인된 판독문을 비우는 길은 사유가 남는 Reset뿐이다. Clear는 그 뒷문이었다.
+      $("#b-defer").disabled = !rad || !s || s.rs === "A" || s.rs === "P" || locked || filming || !!held || !serverMode;
+      $("#b-defer").title = held ? heldTitle : filming ? filmingTitle
+        : locked ? "다른 판독의의 예비 판독(RS: P)입니다"
+        : s?.rs === "A" ? "승인된 판독문은 보류할 수 없습니다. 먼저 판독 취소(Reset)를 하세요"
+        : s?.rs === "P" ? "예비 판독(RS: P)은 보류할 수 없습니다 — 승인 또는 취소만 가능합니다"
+        : !rad ? "판독의 권한이 필요합니다" : !serverMode ? "서버에 연결돼 있을 때만 보류할 수 있습니다" : "";
+      if (s?.rs === "A" && rad && !locked && !filming && !held) {
+        $("#b-clear").disabled = true;
+        $("#b-clear").title = "승인된 판독문은 판독 취소(Reset)로만 비울 수 있습니다";
+        // 승인에서 나가는 길은 Addendum·Reset뿐이다. Save(Transcribe도 save다)는 사유 없이 승인을 풀고
+        // Approve는 승인자를 갈아치우는 재승인이었다 — 서버가 400으로 막고, 여기서는 회색으로 미리 말해준다.
+        for (const id of ["#b-save", "#b-transcribe", "#b-approve"]) {
+          $(id).disabled = true;
+          $(id).title = "승인된 판독문은 추가기재(Addendum) 또는 판독 취소(Reset)로만 바꿀 수 있습니다";
+        }
+      }
+      // Addendum은 승인된 판독문에만 붙는다
+      $("#b-addendum").disabled = s?.rs !== "A" || !rad || locked || filming || !!held;
+      $("#b-addendum").title = held ? heldTitle : filming ? filmingTitle : s?.rs !== "A" ? "승인된 판독문에만 추가기재할 수 있습니다" : "";
+      /**
+       * Prelim은 "아직 확정 안 된 판독을 상급자에게 넘기는" 동작이다.
+       * 이미 승인(A)된 것에는 의미가 없고, 이미 P인 것을 다시 넘기면 지정이 덮어써진다.
+       * 넘긴 뒤에는 지정된 상급자가 Approve로 끝낸다 — 그건 서버가 강제한다.
+       */
+      const b = $("#b-prelim");
+      if (b) {
+        b.disabled = !rad || !s || s.rs === "A" || s.rs === "P" || locked || filming || !!held || !serverMode;
+        b.title = held ? heldTitle : filming ? filmingTitle : !serverMode ? "서버에 연결돼 있을 때만 지정할 수 있습니다"
+          : s?.rs === "P" ? "이미 예비 판독 중입니다"
+          : s?.rs === "A" ? "이미 승인된 판독입니다"
+          : "상급 판독의를 지정해 최종 판독을 맡깁니다 (RS: P)";
+      }
+      for (const id of ["#findings", "#conclusion", "#recommendation"]) {
+        $(id).readOnly = !rad || locked || filming || !!held;
+      }
+      if(studyPriority?.get(selectedUid))for(const id of ['#b-save','#b-approve','#b-transcribe','#b-unread','#b-addendum','#b-prelim','#b-defer']) {
+        const button=$(id);if(button){button.disabled=true;button.title='응급 상태 저장 결과를 확인한 뒤 판독을 저장하세요';}
+      }
+      // 초안 표시줄의 확정 안내는 방금 정한 단추 상태를 그대로 따른다(눌리지 않는 단추를 안내하지 않는다).
+      renderDraftHint();
+      updateTemplatePreview();
+      updateReportTemplateButton();
+      // 받아쓰기 단추도 같은 관문을 따른다. 검사 이동도 여기를 지나므로(refreshRight) 떠난 검사의
+      // 녹음·요청은 여기서 끝난다 — select()에 두면 그 구역을 실행하는 다른 시험 틀이 깨진다.
+      dictation.refresh();
+    }
+    const validUserFilters = value => Array.isArray(value)
+      ? value.filter(uf => uf && typeof uf === "object" && typeof uf.name === "string") : [];
+    let userFilters = [];
+    try { userFilters = validUserFilters(JSON.parse(localStorage.getItem("kin-filters") ?? "[]")); } catch (e) {}
+    let activeFilterName = null;
+    function renderActiveFilter() {
+      const holder = $('#active-filter-info');
+      holder.hidden = activeFilterName === null;
+      if (holder.hidden) return;
+      const stored = userFilters.find(f => f.name === activeFilterName);
+      const modified = !!stored && (filterCriteriaKey(stored) !== filterCriteriaKey(snapshotFilter())
+        || !!favoriteList?.key() || !!studyTagList?.key());
+      $('#active-filter-name').textContent = activeFilterName;
+      $('#active-filter-state').textContent = !stored ? 'Deleted' : modified ? 'Modified' : 'Saved';
+      holder.title = !stored ? '저장 검색이 삭제됐습니다. 현재 목록 조건은 유지됩니다.' : modified
+        ? '현재 목록 조건과 저장된 조건이 다릅니다. 저장 검색을 다시 적용하거나 현재 조건을 새 검색으로 저장하세요.'
+        : '저장된 검색 조건을 적용 중입니다. 결과 건수는 현재 불러온 목록을 기준으로 합니다.';
+      $('#edit-active-filter').disabled = !stored;
+    }
+    function renderChips() {
+      const holder = $("#chips");
+      if (!holder) return;
+      renderActiveFilter();
+      const rows = userFilters.map((uf, i) => {
+        const count = filteredFor(uf).length;
+        const note = bodyPartCountNote(uf);
+        const label = `${uf.name}, 로드된 목록 기준 ${count}건${uf.isDefault ? ", 기본 필터" : ""}${note ? ' · ' + note : ''}`;
+        return { i, uf, count, label, partial: !!note };
+      });
+      // 검색 글자 하나마다 같은 버튼을 다시 만들면 저장 필터에 있던 키보드 포커스가
+      // 사라진다. 실제 이름·기본 여부·건수가 바뀔 때만 DOM을 교체한다.
+      const signature = JSON.stringify(rows.map(x => [x.uf.id ?? null, x.uf.name, !!x.uf.isDefault, x.count, x.label]));
+      if (holder.dataset.renderSignature === signature) {
+        holder.querySelectorAll('button[data-i]').forEach(b => b.setAttribute('aria-pressed', String(userFilters[+b.dataset.i]?.name === activeFilterName)));
+        return;
+      }
+      const focused = holder.contains(document.activeElement) ? userFilters[+document.activeElement.dataset.i]?.name : null;
+      holder.innerHTML = rows.map(({ i, uf, count, label, partial }) =>
+        `<button class="chip" data-i="${i}" data-name="${esc(uf.name)}" aria-label="${esc(label)}" aria-pressed="${uf.name === activeFilterName}" aria-haspopup="menu" ` +
+        `title="${esc(label)} · 클릭: 적용 / 우클릭 또는 Shift+F10: 메뉴">` +
+        `${uf.isDefault ? "⚑ " : ""}${esc(uf.name)} <span aria-hidden="true">(${count}${partial ? ' · Partial' : ''})</span></button>`
+      ).join("");
+      holder.dataset.renderSignature = signature;
+      if (focused !== null) focusFilterChip(focused);
+    }
     studyPriority=KinStudyPriority.create({
       owner:()=>KinViewerOpening.key(KinAuth.session()),
       allowed:uid=>serverMode&&!offline&&!demoMode&&!commitInFlight&&KinAuth.has('technician')&&!!studies.find(s=>s.uid===uid&&!s.tele),
@@ -3143,132 +3560,7 @@
       return String(s[c.k]) === wanted;
     }
 
-    function savedFilterDays(value) {
-      if (value === null || value === "" || typeof value === "boolean") return -1;
-      const days = Number(value);
-      return Number.isFinite(days) ? days : -1;
-    }
-
-    /** 저장된 필터도 현재 목록과 같은 규칙으로 센다. 화면 상태를 바꾸지 않으므로
-     * 다른 저장 필터의 건수를 보려고 지금 하던 검색이 흔들리지 않는다. */
-    function filteredFor(filter) {
-      worklistBodyParts.sync(studies);
-      const filterMode = Array.isArray(COLS[filter?.mode]) ? filter.mode : mode;
-      const cols = COLS[filterMode].filter(c => c.f);
-      const days = savedFilterDays(filter?.days);
-      const values = filter?.cols && typeof filter.cols === "object" ? filter.cols : {};
-      const needsParts = KinCompoundFilter.usesField(values[KinCompoundFilter.KEY], 'bodyPart', COLS[filterMode]);
-      const matchCompound = KinCompoundFilter.compile(values[KinCompoundFilter.KEY], COLS[filterMode]);
-      const matchQuick = KinCompoundFilter.compileQuick(filter?.quick, values[KinCompoundFilter.KEY], COLS[filterMode]);
-      return studies.filter(s => {
-        if (!matchQuick(s)) return false;
-        if (!withinDays(s.date, days)) return false;
-        return cols.every(c => testCol(s, c, values))
-          && matchCompound(needsParts ? {...s, bodyPart: worklistBodyParts.get(s.uid)} : s);
-      });
-    }
-
-    let consultationFilter = null, consultationFilterSequence = 0;
-    const searchCriteria = () => ({mode,quick:$('#quick').value,days:quickDays,cols:JSON.parse(JSON.stringify(fval))});
-    function filtered() {
-      const search = worklistSearch?.read(searchCriteria());
-      const list = search?.empty ? [] : filteredFor(search?.criteria || searchCriteria());
-      const favorites = favoriteList ? favoriteList.filter(list) : list;
-      const tagged = studyTagList ? studyTagList.filter(favorites) : favorites;
-      return consultationFilter ? tagged.filter(s => consultationFilter.uids.has(s.uid)) : tagged;
-    }
-
-    // Navigation and its position indicator must use the same order the reader sees.
-    function orderedStudies() {
-      const list = filtered();
-      if (sortDir !== 0 && sortKey)
-        list.sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : a[sortKey] < b[sortKey] ? -1 : 0) * sortDir);
-      return list;
-    }
-
-    let resultPage = 0, resultQuery = '', resultPageSize = 100;
-    function render(revealUid) {
-      const cols = COLS[mode], shown = shownColumns();
-      const list = orderedStudies();
-      const appliedSearch = worklistSearch?.read(searchCriteria());
-      const bodyPartNote = appliedSearch?.empty ? '' : bodyPartCountNote(appliedSearch?.criteria || searchCriteria());
-      renderBodyParts();
-      const query = JSON.stringify([appliedSearch?.criteria || searchCriteria(), appliedSearch?.empty, sortKey, sortDir, favoriteList?.key(), studyTagList?.key(), consultationFilter?.revision ?? 0]);
-      if (query !== resultQuery) { resultPage = 0; resultQuery = query; }
-      if (typeof revealUid === 'string') {
-        const index = list.findIndex(s => s.uid === revealUid);
-        if (index >= 0) resultPage = Math.floor(index / resultPageSize);
-      }
-      const pages = Math.max(1, Math.ceil(list.length / resultPageSize));
-      resultPage = Math.max(0, Math.min(resultPage, pages - 1));
-      const offset = resultPage * resultPageSize;
-      // Keep restored form-control values consistent with the actual page size.
-      $('#page-size').value = String(resultPageSize);
-      $('#page-prev').disabled = resultPage === 0; $('#page-next').disabled = resultPage >= pages - 1;
-      $('#page-current').disabled = !list.some(s => s.uid === selectedUid);
-      $('#row-keyboard-help').textContent='↑/↓ · Home/End 이동 · Space 선택 · Enter '+(mode==='Radiology'?'판독 진입':'검사 선택');
-      $('#page-status').textContent = `불러온 목록 중 ${list.length ? offset + 1 : 0}–${Math.min(offset + resultPageSize, list.length)} / ${list.length}건 · ${resultPage + 1}/${pages}페이지` + (bodyPartNote ? ` · ${bodyPartNote}` : '');
-
-      rowNavigation?.beforeRender();
-      $("#rows").innerHTML = list.slice(offset, offset + resultPageSize).map((s, i) => `
-        <tr data-uid="${esc(s.uid)}" tabindex="-1" class="st-${esc(String(s.rs).toLowerCase())}${s.uid === selectedUid ? " sel" : ""}${mode === "Radiology" && s.ss === "Unverified" && s.em !== "E" ? " unv" : ""}">` +
-        shown.map(c => {
-          // CELL[]은 우리가 만든 HTML이라 그대로, 나머지는 전부 외부 문자열이라 이스케이프
-          const v = c.k === "no" ? offset + i + 1 : (CELL[c.k] ? CELL[c.k](s) : esc(s[c.k] ?? ""));
-          const classes = [c.num ? "num" : "", c.k === "acc" ? "acc" : "", ["id", "birth"].includes(c.k) ? "dim" : ""];
-          return `<td class="${classes.filter(Boolean).join(" ")}">${v}</td>`;
-        }).join("") + `</tr>`).join("")
-        || `<tr><td class="empty" colspan="${shown.length}">${bodyPartNote ? '부위 확인 전인 검사가 있어 검색 결과가 아직 완전하지 않습니다.' : 'No records found'}</td></tr>`;
-      columnPrefs?.decorate(mode);
-      multiSelection?.sync();
-      rowNavigation?.sync();
-      worklistSearch?.show();
-
-      const active = [];
-      if (consultationFilter) {
-        const known = new Set(studies.map(s=>s.uid));
-        const missing = [...consultationFilter.uids].filter(uid=>!known.has(uid)).length;
-        active.push(consultationFilter.label + (missing ? ` · ${missing} not in loaded worklist` : ''));
-      }
-      if (favoriteList?.label()) active.push(favoriteList.label());
-      if (studyTagList?.label()) active.push(studyTagList.label());
-      // `.on` 버튼이 없으면 `.textContent`가 TypeError를 내고 **render() 전체가 죽는다** —
-      // 목록도, 카운트도, 필터 표시도 안 그려진다. 서버 필터가 0/3/7/30/60/-1 외의
-      // days를 주면 어느 버튼도 `.on`이 아니라 실제로 도달한다.
-      // 화면 한 줄을 못 쓰는 것과 화면 전체가 안 그려지는 것은 다른 사고다.
-      if (quickDays >= 0)
-        active.push(`StudyDate(${$("#qf .on")?.textContent ?? `최근 ${quickDays}일`})`);
-      cols.forEach(c => { if (fval[c.k]) active.push(`${c.t}(${fval[c.k]})${shown.includes(c) ? '' : ' [숨긴 열]'}`); });
-      if (sortKey && sortDir && !shown.some(c => c.k === sortKey)) active.push(`숨긴 열 정렬: ${COLS[mode].find(c => c.k === sortKey)?.t ?? sortKey} ${sortDir > 0 ? '오름차순' : '내림차순'}`);
-      const compound = fval[KinCompoundFilter.KEY];
-      const compoundError = KinCompoundFilter.validate(compound, cols);
-      $("#quick-match").value = compoundError ? "" : KinCompoundFilter.quickMode(compound);
-      if (!compoundError && compound?.version === 2) active.push("Patient Search: " + (compound.quickMatch === "exact" ? "Exact" : "Starts With"));
-      if (compoundError) active.push(`복합 조건 오류: ${compoundError} · 조건을 수정하거나 Clear로 해제하세요`);
-      else if (compound?.rules.length) {
-        active.push('복합 ' + KinCompoundFilter.describe(compound, cols));
-      }
-      $("#filterlist").textContent = (appliedSearch?.pending ? "Draft Filter (not applied) : " : "Filter : ") + (active.join(", ") || "-");
-
-      const n = (k, v) => list.filter(s => s[k] === v).length;
-      if (mode === "Radiology") {
-        $("#countlist").innerHTML =
-          `<span class="count"><span class="dot dot-w"></span>W:${n("rs","W")}</span>` +
-          `<span class="count"><span class="dot dot-a"></span>A:${n("rs","A")}</span>` +
-          `<span class="count"><span class="dot dot-ho"></span>H:${n("rs","H")}</span>` +
-          `<span class="count"><span class="dot dot-ho"></span>O:${n("rs","O")}</span>` +
-          `<span class="count"><span class="dot dot-t"></span>T:${n("rs","T")}</span>` +
-          `<span class="count"><span class="dot dot-p"></span>P:${n("rs","P")}</span>` +
-          `<span class="count">Unverified:${n("ss","Unverified")}</span>`;
-      } else {
-        $("#countlist").textContent =
-          `Verified:${n("ss","Verified")} Unverified:${n("ss","Unverified")} · Unmatched:${n("matched","U")} · Total ${list.length}`;
-      }
-      renderChips();
-      // S4-U5: the poll merges row state after it reports the observation, so the identity panel is redrawn here
-      // too; its stale rule reads that merged state (a correction answer or a newer poll), never an older one.
-      renderStudyIdentity();
-    }
+    let consultationFilterSequence = 0;
 
     // ── 모드 전환 ──
     function setMode(m) {
@@ -3458,9 +3750,6 @@
     window.addEventListener('pagehide', closeSR);
 
     // ── 선택 ──
-    function cur() { return studies.find(s => s.uid === selectedUid); }
-    function relatedStudy() { return relatedUid ? studies.find(s => s.uid === relatedUid) : null; }
-    function viewed() { return relatedStudy() ?? cur(); }
     function viewingUid() { return viewed()?.uid ?? null; }
     function curOrder() { return orders.find(o => o.oid === selectedOid); }
 
@@ -3769,30 +4058,6 @@
         : KinStudyIdentity.failed(studyIdentityModel);
       renderStudyIdentity();
     }
-    function renderStudyIdentity() {
-      const box = $("#study-identity");
-      if (!box || !studyIdentityModel) return;
-      const s = viewed();
-      const view = s ? KinStudyIdentity.view(studyIdentityModel, s.uid, appState[s.uid] ?? {}) : { hidden: true };
-      const drawn = JSON.stringify(view);
-      if (box.dataset.view === drawn) return;   // unchanged: keep the open panel and any text selection as they are
-      box.dataset.view = drawn;
-      box.hidden = view.hidden;
-      if (view.hidden) return;
-      $("#study-identity-summary").textContent = view.summary.text;
-      $("#study-identity-summary").title = view.summary.title;
-      const order = $("#study-identity-order");
-      order.textContent = view.order?.text ?? ""; order.title = view.order?.title ?? "";
-      $("#study-identity-tags").replaceChildren(...view.rows.map(row => {
-        const line = document.createElement("div"), value = document.createElement("span"), relation = document.createElement("span");
-        line.setAttribute("role", "listitem"); line.dataset.tag = row.key;
-        value.textContent = `${row.tag} ${row.label}: ${row.value}`; value.title = row.valueTitle;
-        relation.textContent = row.relation ? ` · ${row.relation}` : ""; relation.title = row.title;
-        line.append(value, relation);
-        return line;
-      }));
-      $("#study-identity-guidance").textContent = view.guidance;
-    }
     // A correction answer (Match, Unmatch, Modify Exam) for the panel's next-action line. Memory only.
     function noteIdentityCorrection(uid, ok) {
       if (studyIdentityModel) studyIdentityModel = KinStudyIdentity.correction(studyIdentityModel, uid, ok);
@@ -3811,80 +4076,9 @@
     }
 
     // Related Exam: 서버가 원본 기관+PatientID로 만든 키가 같은 "다른" 검사만.
-    function relatedModalities(study) {
-      return [...new Set(String(study.modality ?? "").split(",").map(x => x.trim().toUpperCase()).filter(Boolean))];
-    }
-    let relatedPage = 0, relatedPageQuery = '';
     $('#related-page-prev').addEventListener('click', () => { relatedPage--; renderRelated(); });
     $('#related-page-next').addEventListener('click', () => { relatedPage++; renderRelated(); });
     $('#related-page-current').addEventListener('click', () => renderRelated(true));
-    function renderRelated(reveal = false) {
-      relatedRowNavigation?.beforeRender();
-      const s = cur();
-      relatedParts.sync(s?.uid||'');
-      $('#related-include-current').checked=relatedIncludeCurrent;$('#related-include-current').disabled=!s;
-      $('#related-load-parts').disabled=!s||!serverMode||offline||demoMode||relatedParts.busy();
-      $('#related-cancel-parts').hidden=!relatedParts.busy();
-      $("#related-return").disabled = !s || !relatedUid;
-      $("#related-current").textContent = s
-        ? `판독 대상 · ${s.date || "날짜 없음"} · ${s.modality} · ${s.name} (${s.id}) · ${shownStudyDesc(s)}`
-        : "판독 대상을 선택하세요";
-      $("#related-current").title = $("#related-current").textContent;
-      let rel = [];
-      if (s) {
-        rel = relatedCandidates().filter(x => relatedIncludeCurrent || x.uid !== s.uid);
-        rel = [...rel].sort((a, b) => b.date.localeCompare(a.date) || b.uid.localeCompare(a.uid));
-      }
-      const total = rel.length;
-      const known=relatedCandidates().filter(x=>relatedParts.get(x.uid)?.parts).length;
-      const partTokens=[...new Set(relatedCandidates().flatMap(x=>relatedParts.get(x.uid)?.parts||[]))].filter(Boolean).sort();
-      const body=$('#related-body-part'),bodyOptions=[new Option('All Body Parts',''),new Option('Unverified','?'),new Option('Unspecified',JSON.stringify('')),
-        ...partTokens.map(v=>new Option(v,JSON.stringify(v)))];
-      if(relatedBodyPart&&!bodyOptions.some(o=>o.value===relatedBodyPart))bodyOptions.push(new Option(JSON.parse(relatedBodyPart),relatedBodyPart));
-      body.replaceChildren(...bodyOptions);body.value=relatedBodyPart;body.disabled=!s;body.title=body.selectedOptions[0]?.textContent||'';
-      $('#related-parts-status').textContent=relatedParts.note() || (s?`${relatedParts.busy()?'조회 중 · ':''}부위 확인 ${known}/${relatedCandidates().length} · 미조회·실패는 Unverified` : '');
-      const modality = $("#related-modality");
-      const tokens = [...new Set(rel.flatMap(relatedModalities))].sort();
-      const options = [new Option("All Modalities", ""), new Option("Unspecified", JSON.stringify("")),
-        ...tokens.map(token => new Option(token, JSON.stringify(token)))];
-      // 마지막 일치 항목이 사라져도 사용자가 고른 조건을 몰래 전체로 넓히지 않는다.
-      if (relatedModality && !options.some(option => option.value === relatedModality))
-        options.push(new Option(JSON.parse(relatedModality), relatedModality));
-      modality.replaceChildren(...options);
-      modality.value = relatedModality;
-      modality.disabled = !s;
-      modality.title = modality.selectedOptions[0]?.textContent || "";
-      if (relatedModality) {
-        const token = JSON.parse(relatedModality);
-        rel = rel.filter(x => token ? relatedModalities(x).includes(token) : !relatedModalities(x).length);
-      }
-      if(relatedBodyPart)rel=rel.filter(x=>{const parts=relatedParts.get(x.uid)?.parts;return relatedBodyPart==='?'?!parts:!!parts&&parts.includes(JSON.parse(relatedBodyPart));});
-      $("#related-filter-count").textContent = `${rel.length} / ${total}`;
-      $("#related-filter-hidden").hidden = !s || !relatedUid || rel.some(x => x.uid === relatedUid);
-      const pageQuery = JSON.stringify([selectedUid, relatedModality, relatedBodyPart, relatedIncludeCurrent]);
-      if (pageQuery !== relatedPageQuery) { relatedPage = 0; relatedPageQuery = pageQuery; }
-      const viewed = rel.findIndex(x => x.uid === relatedUid), pages = Math.max(1, Math.ceil(rel.length / 50));
-      if (reveal === true && viewed >= 0) relatedPage = Math.floor(viewed / 50);
-      relatedPage = Math.max(0, Math.min(relatedPage, pages - 1));
-      $('#related-pages').hidden = pages <= 1;
-      $('#related-page-prev').disabled = relatedPage === 0; $('#related-page-next').disabled = relatedPage >= pages - 1;
-      $('#related-page-current').disabled = viewed < 0;
-      $('#related-page-status').textContent = `${relatedPage + 1}/${pages}페이지`;
-      relatedRows = rel;
-      $("#relrows").innerHTML = s
-        ? (rel.slice(relatedPage * 50, (relatedPage + 1) * 50).map(x => {
-            return `
-            <tr data-uid="${esc(x.uid)}" class="${x.uid === relatedUid || (x.uid === s.uid && !relatedUid) ? "related-selected" : ""}">
-              <td>${x.uid === s.uid ? "Reading Target" : relatedDateLabel(x)} · ${x.uid === relatedUid || (x.uid === s.uid && !relatedUid) ? "👁 열람 중" : "비교"}</td>
-              <td>${esc(x.date)}</td><td>${esc(x.modality)}</td><td>${esc(shownStudyDesc(x))}</td><td class="num">${esc(x.count)}</td>
-              <td><span class="rs ${esc(x.rs)}">${esc(x.rs)}</span></td>
-              <td>${x.rs === "A" ? "Approved" : "No Report"} <button class="chip" type="button" data-related-open="${esc(x.uid)}">${x.uid === s.uid ? 'Open Images' : 'Compare Images'}</button></td>
-            </tr>`;
-          }).join("") || `<tr><td class="empty" colspan="7">${relatedModality || relatedBodyPart ? "조건에 맞는 관련 검사 없음" : "관련 검사 없음"}</td></tr>`)
-        : `<tr><td class="empty" colspan="7">검사를 선택하세요</td></tr>`;
-      columnPrefs?.decorateRelated(mode);
-      relatedRowNavigation?.sync();
-    }
 
     /**
      * 썸네일. **PACS에서 wrong-patient image display는 그 자체로 사고 분류 항목이다.**
@@ -5402,7 +5596,6 @@
     }
 
     // ── Report ──
-    const RFIELDS = ["findings", "conclusion", "recommendation"];
     let relatedReportSeq = 0;
 
     function clearRelatedReport(message = "Related Exam을 선택하세요") {
@@ -5502,16 +5695,6 @@
      * 초안을 그렸다면 기준은 그 초안이 딛고 선 판이다. 화면에 있는 글자의 출처가
      * 확정본이 아니라 초안이기 때문이다.
      */
-    /**
-     * 선택이 바뀐 횟수.
-     *
-     * 비동기 응답은 화면에 쓰기 직전에 **UID와 순번을 함께** 확인해야 한다. UID만 보면
-     * A→B→A로 돌아온 화면이 "같은 검사"로 보이지만, 그 사이 화면은 다시 그려졌고
-     * 지금 textarea에 있는 글은 그 요청이 떠날 때의 글이 아니다. `loadRelatedReport`가
-     * `relatedReportSeq`로 하는 것과 같은 검사이며, 여기서 틀리면 **다른 환자의 판독문**이
-     * 한 화면에 나란히 놓인다.
-     */
-    let selectionSeq = 0;
     /**
      * S3-U6: **사람이 커서를 둔 적이 있는 칸**의 이름들.
      *
@@ -5770,21 +5953,6 @@
         (behind ? ` · <b>주의</b> 이 초안을 쓰기 시작한 뒤 v${esc(r.version)}이 확정됐습니다`
                 : `<span id="drafthint"></span>`);
       renderDraftHint();
-    }
-
-    /**
-     * 표시줄이 안내하는 확정 단추는 **지금 눌리는 것뿐이다.** 승인된 판독문에서 Save·Approve는 잠겨 있는데 "확정하려면 Save
-     * 또는 Approve"라고 쓰면 사람은 갈 수 없는 길을 안내받는다(U5CLI-F11). 무엇이 눌리는가는 단추를 잠그는
-     * `updateReportButtons`가 정한 그대로 읽는다 — 같은 판단을 여기서 다시 계산하면 언젠가 한쪽만 고쳐진다. 그래서 단추를
-     * 다시 잠그거나 푸는 그 함수가 끝에 이것을 부른다. 확정이 나가 있는 동안은 눌리는 것이 없으므로 안내도 없다.
-     */
-    function renderDraftHint() {
-      const hint = $("#drafthint");
-      if (!hint) return;
-      const open = id => { const el = $(id); return !!el && !el.disabled; };
-      hint.textContent = open("#b-addendum") ? " · 추가기재로 확정하려면 More ▸ Addendum"
-        : open("#b-save") && open("#b-approve") ? " · 확정하려면 Save 또는 Approve"
-        : open("#b-save") ? " · 확정하려면 Save" : open("#b-approve") ? " · 확정하려면 Approve" : "";
     }
 
     /**
@@ -7388,41 +7556,6 @@
     for (const field of RFIELDS) $("#" + field).addEventListener("input", recordReportEdit);
 
     /**
-     * 판독문 칸(`#findings`·`#conclusion`·`#recommendation`)의 글을 **이 문서의 코드가** 바꾸는 한 자리.
-     *
-     * 사람의 타건은 input 이벤트가 알리지만 스크립트의 `.value` 대입은 아무것도 알리지 않는다. 대입하는 자리마다 "이 글은
-     * 서버가 아직 모른다"는 표시를 각자 챙기게 두면, 한 자리가 빠지는 순간 그 글은 자동 저장·로그아웃 보존·떠나기 경고
-     * 어디에도 없고 다음 폴링이 서버 글로 덮는다(U5CLI-F09: Paste와 Clear가 그랬다). 그래서 값을 바꾸는 일과 그 기록을
-     * 이 함수 하나가 함께 한다 — 붙여넣기·비우기·상용구·받아쓰기·단축어·인용·구조화가 모두 여기를 지난다. 이 함수 밖에서
-     * 세 칸에 대입하는 곳은 둘뿐이다: 서버의 글을 그리는 `loadReport`와 화면을 닫는 `closeWork`(둘 다 이 문서의 편집이
-     * 아니다).
-     *
-     * `edits`는 `{ field, start, end, text[, caret] }`의 목록이다: 그 칸의 지금 글에서 [start, end)를 text로 바꾸고 커서를
-     * caret(없으면 넣은 글의 끝)에 둔다. 칸·범위·넣을 글로 받는 것은 편집기 경계 모듈(report-editor-frame.js의
-     * capture + insert / insertMany)이 같은 것을 받기 때문이다. 쓸 수 있는가(권한·잠금·그때 그 선택인가)는 부르는 쪽이
-     * 이미 확인했다. 여기서는 업무 중인 문서의 고른 검사일 때만 쓰고, 글이 실제로 바뀌었는지를 돌려준다 — 아무것도 바꾸지
-     * 않은 호출(빈 붙여넣기 등)은 편집이 아니므로 표시도 세우지 않는다.
-     */
-    function editReport(edits) {
-      if (work.state() !== "active" || !selectedUid) return false;
-      const changed = [];
-      for (const { field, start, end, text, caret } of edits) {
-        const el = $("#" + field), was = el.value;
-        if (was.slice(start, end) === text) continue;
-        el.value = was.slice(0, start) + text + was.slice(end);
-        const at = caret ?? start + text.length;
-        el.setSelectionRange(at, at);
-        changed.push(el);
-      }
-      if (!changed.length) return false;
-      // 편집기의 글이 바뀌었다 — 그 전에 떠난 편집기 범위의 작업(클립보드 읽기 등)은 이 글 위에 쓰지 않는다.
-      work.edited();
-      recordReportEdit();
-      // 글이 바뀐 뒤에 따라오는 일(점유 시작, 인용 다시 세기, 상용구 단추, 받아쓰기 자리)은 타이핑과 같은 input이 알린다.
-      for (const el of changed) el.dispatchEvent(new Event("input", { bubbles: true }));
-      return true;
-    }
-    /**
      * 계획이 낸 **칸 전체의 새 글**을, 지금 글에서 달라지는 한 구간의 편집으로 옮긴다(앞뒤의 같은 글자는 건드리지 않는다).
      * 적용한 결과는 그 계획의 글과 글자까지 같다 — 삽입 자리 규칙(placeBlock·구조화 계획)은 그 계획들이 그대로 정한다.
      */
@@ -7807,79 +7940,6 @@
     function studyLabel(uid) {
       const study = studies.find(s => s.uid === uid);
       return study ? [study.name, study.acc, study.date].filter(Boolean).join(" · ") : uid;
-    }
-
-    function heldByOther(s) { return s?.holder && s.holder !== user ? s.holder : null; }
-
-    function updateReportButtons() {
-      const s = cur();
-      const rad = KinAuth.has("radiologist");
-      const filming = s?.ss === "Unverified" && s?.em !== "E";
-      const filmingTitle = "촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다";
-      const held = heldByOther(s);
-      const heldTitle = `${displayActor(held)} 님이 판독 중입니다`;
-      $("#holdbar").style.display = held ? "flex" : "none";
-      $("#holdmsg").textContent = held ? `✎ ${heldTitle} — 잠금이 풀리면 이어서 판독할 수 있습니다` : "";
-      $("#deferbar").style.display = s?.rs === "H" ? "flex" : "none";
-      $("#defermsg").textContent = s?.rs === "H" ? `⏸ On Hold — ${s.holdReason ?? ""}` : "";
-      // 남의 예비 판독은 읽지도 쓰지도 못한다. 서버가 막지만 회색으로 보이는 편이 낫다 —
-      // 눌러보고 거절당하는 건 "왜 안 되지"를 만들고, 회색은 "내 것이 아니구나"를 만든다.
-      const locked = !!appState[selectedUid]?.prelimHidden;
-      // Clear·Paste가 여기 들어와야 하는 이유: 둘 다 textarea의 `.value`에 직접 쓴다.
-      // `readOnly`는 스크립트 대입을 안 막으므로, 잠긴 판독문이 이 두 버튼으로 지워졌다.
-      for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste", "#b-defer"]) {
-        const el = $(id);
-        if (!el) continue;
-        el.disabled = !rad || locked || filming || !!held;
-        el.title = held ? heldTitle : filming ? filmingTitle : locked ? "다른 판독의의 예비 판독(RS: P)입니다"
-          : !rad ? "판독의 권한이 필요합니다" : "";
-      }
-      // 승인된 판독문을 비우는 길은 사유가 남는 Reset뿐이다. Clear는 그 뒷문이었다.
-      $("#b-defer").disabled = !rad || !s || s.rs === "A" || s.rs === "P" || locked || filming || !!held || !serverMode;
-      $("#b-defer").title = held ? heldTitle : filming ? filmingTitle
-        : locked ? "다른 판독의의 예비 판독(RS: P)입니다"
-        : s?.rs === "A" ? "승인된 판독문은 보류할 수 없습니다. 먼저 판독 취소(Reset)를 하세요"
-        : s?.rs === "P" ? "예비 판독(RS: P)은 보류할 수 없습니다 — 승인 또는 취소만 가능합니다"
-        : !rad ? "판독의 권한이 필요합니다" : !serverMode ? "서버에 연결돼 있을 때만 보류할 수 있습니다" : "";
-      if (s?.rs === "A" && rad && !locked && !filming && !held) {
-        $("#b-clear").disabled = true;
-        $("#b-clear").title = "승인된 판독문은 판독 취소(Reset)로만 비울 수 있습니다";
-        // 승인에서 나가는 길은 Addendum·Reset뿐이다. Save(Transcribe도 save다)는 사유 없이 승인을 풀고
-        // Approve는 승인자를 갈아치우는 재승인이었다 — 서버가 400으로 막고, 여기서는 회색으로 미리 말해준다.
-        for (const id of ["#b-save", "#b-transcribe", "#b-approve"]) {
-          $(id).disabled = true;
-          $(id).title = "승인된 판독문은 추가기재(Addendum) 또는 판독 취소(Reset)로만 바꿀 수 있습니다";
-        }
-      }
-      // Addendum은 승인된 판독문에만 붙는다
-      $("#b-addendum").disabled = s?.rs !== "A" || !rad || locked || filming || !!held;
-      $("#b-addendum").title = held ? heldTitle : filming ? filmingTitle : s?.rs !== "A" ? "승인된 판독문에만 추가기재할 수 있습니다" : "";
-      /**
-       * Prelim은 "아직 확정 안 된 판독을 상급자에게 넘기는" 동작이다.
-       * 이미 승인(A)된 것에는 의미가 없고, 이미 P인 것을 다시 넘기면 지정이 덮어써진다.
-       * 넘긴 뒤에는 지정된 상급자가 Approve로 끝낸다 — 그건 서버가 강제한다.
-       */
-      const b = $("#b-prelim");
-      if (b) {
-        b.disabled = !rad || !s || s.rs === "A" || s.rs === "P" || locked || filming || !!held || !serverMode;
-        b.title = held ? heldTitle : filming ? filmingTitle : !serverMode ? "서버에 연결돼 있을 때만 지정할 수 있습니다"
-          : s?.rs === "P" ? "이미 예비 판독 중입니다"
-          : s?.rs === "A" ? "이미 승인된 판독입니다"
-          : "상급 판독의를 지정해 최종 판독을 맡깁니다 (RS: P)";
-      }
-      for (const id of ["#findings", "#conclusion", "#recommendation"]) {
-        $(id).readOnly = !rad || locked || filming || !!held;
-      }
-      if(studyPriority?.get(selectedUid))for(const id of ['#b-save','#b-approve','#b-transcribe','#b-unread','#b-addendum','#b-prelim','#b-defer']) {
-        const button=$(id);if(button){button.disabled=true;button.title='응급 상태 저장 결과를 확인한 뒤 판독을 저장하세요';}
-      }
-      // 초안 표시줄의 확정 안내는 방금 정한 단추 상태를 그대로 따른다(눌리지 않는 단추를 안내하지 않는다).
-      renderDraftHint();
-      updateTemplatePreview();
-      updateReportTemplateButton();
-      // 받아쓰기 단추도 같은 관문을 따른다. 검사 이동도 여기를 지나므로(refreshRight) 떠난 검사의
-      // 녹음·요청은 여기서 끝난다 — select()에 두면 그 구역을 실행하는 다른 시험 틀이 깨진다.
-      dictation.refresh();
     }
 
     /**
@@ -9039,20 +9099,6 @@
     }
     $("#b-history").addEventListener("click", showHistory);
     $("#hist-close").addEventListener("click", closeHistory);
-    /**
-     * 판독문 textarea를 **스크립트로** 고쳐도 되는가.
-     *
-     * `readOnly`는 사람의 타이핑만 막는다. `el.value = ...` 대입은 그대로 통과한다.
-     * 그래서 Clear·Paste 같은 버튼은 잠금을 스스로 확인해야 한다 —
-     * 예비 판독 잠금이 이 두 버튼에서만 열려 있었다.
-     * 막는 이유를 문자열로 돌려준다. 통과면 null.
-     */
-    function reportWriteBlock() {
-      if (!selectedUid) return "검사를 선택하세요";
-      if (!KinAuth.has("radiologist")) return "판독문 편집은 판독의 권한이 필요합니다";
-      if (appState[selectedUid]?.prelimHidden) return "다른 판독의의 예비 판독(RS: P)입니다";
-      return null;
-    }
 
     /**
      * Clear — 세 칸을 한 번에 비운다.
@@ -9895,6 +9941,48 @@
         try { workChannel.postMessage({ type: "session-work", session, document: workDocument, query: data.query, unsaved: ownUnsavedKinds() }); } catch (_) {}
       };
     } catch (_) {}
+    // 읽기 작업공간의 종료(pagehide)가 부르는 배치 적용이다. 분할된 script 사이에서 페이지를 떠나도 정의돼 있게 생성보다 앞에 둔다(S9-U0a-PRE).
+    let layoutMode = "auto";
+    let workspaceState = KinWorkspaceLayout.defaults();
+    const portraitLayout = () => document.body.classList.contains("portrait");
+    const workspaceAxis = () => portraitLayout() ? "portrait" : "landscape";
+    function applyLayout() {
+      const portrait = layoutMode === "portrait" || (layoutMode === "auto" && innerHeight > innerWidth);
+      document.body.classList.toggle("portrait", portrait);
+      $("#layout-toggle").textContent = {
+        auto: "Layout: Auto", portrait: "Layout: Portrait", landscape: "Layout: Landscape",
+      }[layoutMode];
+      $("#layout-toggle").setAttribute("aria-label", `화면 배치 ${layoutMode}`);
+      $("#resize-main").setAttribute("aria-orientation", portrait ? "horizontal" : "vertical");
+      $("#resize-related").setAttribute("aria-orientation", portrait ? "horizontal" : "vertical");
+      if (portrait) {
+        $(".left").style.width = "";
+        $(".related-p").style.width = "";
+      } else {
+        $(".left").style.height = "";
+        $(".related-p").style.height = "";
+      }
+      // A temporary small window must not overwrite the user's preferred size.
+      // Reapply stored pixels within today's bounds, separately for each orientation.
+      const sizes = workspaceState[workspaceAxis()];
+      const left = $(".left"), related = $(".related-p"), top = $(".rw"), prior = $(".related-list-pane");
+      left.style[portrait ? "height" : "width"] = "";
+      related.style[portrait ? "height" : "width"] = "";
+      top.style.height = "";
+      prior.style.height = "";
+      prior.style.flex = "";
+      const split = $(".split").getBoundingClientRect();
+      if (sizes.main != null) left.style[portrait ? "height" : "width"] = clampPanel(sizes.main,
+        portrait ? 180 : 500, portrait ? split.height - 420 : split.width - 426) + "px";
+      if (sizes.top != null) top.style.height = clampPanel(sizes.top, 140, $(".right").getBoundingClientRect().height - 266) + "px";
+      const row = $(".workrow").getBoundingClientRect();
+      if (sizes.related != null) related.style[portrait ? "height" : "width"] = clampPanel(sizes.related,
+        portrait ? 286 : 220, portrait ? row.height - 186 : row.width - 366) + "px";
+      if (sizes.prior != null) {
+        prior.style.flex = "none";
+        prior.style.height = clampPanel(sizes.prior, 150, related.getBoundingClientRect().height - 136) + "px";
+      }
+    }
     const readingWorkspace = KinReadingWorkspace({
       current: () => selectedUid, study: uid => studies.find(s => s.uid === uid),
       prior: autoPrior, move, select, queue: orderedStudies, layout: () => applyLayout(), popup: openOhifWindow,
@@ -11208,13 +11296,10 @@
       });
     }
     const clampPanel = (value, min, max) => Math.max(min, Math.min(max, value));
-    let layoutMode = "auto";
-    let workspaceState = KinWorkspaceLayout.defaults(), workspaceOwner = null, workspaceStorage = null, workspaceGeneration = 0;
+    let workspaceOwner = null, workspaceStorage = null, workspaceGeneration = 0;
     // 이 브라우저에 배치를 남겼는가(마지막 쓰기·읽기의 결과). 계정 배치를 확인하지 못했을 때 "이 브라우저에서 계속 쓴다"고
     // 말해도 되는지를 이것이 정한다 — 남기지 못했으면 새로고침하면 사라진다고 말한다(workspace-roaming.js).
     let workspaceLocalKept = true;
-    const portraitLayout = () => document.body.classList.contains("portrait");
-    const workspaceAxis = () => portraitLayout() ? "portrait" : "landscape";
     function saveWorkspace() {
       workspaceGeneration++;
       workspaceState.mode = layoutMode;
@@ -11242,43 +11327,6 @@
       $("#layout-status").textContent = ({ restored: "배치 복원됨 · 이 브라우저", empty: "배치 · 이 브라우저",
         disabled: "배치 · 이 창에서만 유지", invalid: "저장된 배치 오류 · 기본 배치", unavailable: "배치 저장소 사용 불가 · 기본 배치" })[result.status];
       applyLayout();
-    }
-    function applyLayout() {
-      const portrait = layoutMode === "portrait" || (layoutMode === "auto" && innerHeight > innerWidth);
-      document.body.classList.toggle("portrait", portrait);
-      $("#layout-toggle").textContent = {
-        auto: "Layout: Auto", portrait: "Layout: Portrait", landscape: "Layout: Landscape",
-      }[layoutMode];
-      $("#layout-toggle").setAttribute("aria-label", `화면 배치 ${layoutMode}`);
-      $("#resize-main").setAttribute("aria-orientation", portrait ? "horizontal" : "vertical");
-      $("#resize-related").setAttribute("aria-orientation", portrait ? "horizontal" : "vertical");
-      if (portrait) {
-        $(".left").style.width = "";
-        $(".related-p").style.width = "";
-      } else {
-        $(".left").style.height = "";
-        $(".related-p").style.height = "";
-      }
-      // A temporary small window must not overwrite the user's preferred size.
-      // Reapply stored pixels within today's bounds, separately for each orientation.
-      const sizes = workspaceState[workspaceAxis()];
-      const left = $(".left"), related = $(".related-p"), top = $(".rw"), prior = $(".related-list-pane");
-      left.style[portrait ? "height" : "width"] = "";
-      related.style[portrait ? "height" : "width"] = "";
-      top.style.height = "";
-      prior.style.height = "";
-      prior.style.flex = "";
-      const split = $(".split").getBoundingClientRect();
-      if (sizes.main != null) left.style[portrait ? "height" : "width"] = clampPanel(sizes.main,
-        portrait ? 180 : 500, portrait ? split.height - 420 : split.width - 426) + "px";
-      if (sizes.top != null) top.style.height = clampPanel(sizes.top, 140, $(".right").getBoundingClientRect().height - 266) + "px";
-      const row = $(".workrow").getBoundingClientRect();
-      if (sizes.related != null) related.style[portrait ? "height" : "width"] = clampPanel(sizes.related,
-        portrait ? 286 : 220, portrait ? row.height - 186 : row.width - 366) + "px";
-      if (sizes.prior != null) {
-        prior.style.flex = "none";
-        prior.style.height = clampPanel(sizes.prior, 150, related.getBoundingClientRect().height - 136) + "px";
-      }
     }
     $("#layout-toggle").addEventListener("click", () => {
       layoutMode = layoutMode === "auto" ? "portrait" : layoutMode === "portrait" ? "landscape" : "auto";
@@ -11373,17 +11421,12 @@
     // 현재 필터 조합에 이름을 붙여 **계정에** 저장한다. 칩을 누르면 그대로 돌아온다.
     // 정렬(sortKey/sortDir)도 함께 저장한다 — 필터가 같아도 정렬이 다르면 다른 화면이다.
     // (HPACS도 2025년에야 "정렬을 적용하여 사용자 필터로 저장"을 넣었다)
-    const validUserFilters = value => Array.isArray(value)
-      ? value.filter(uf => uf && typeof uf === "object" && typeof uf.name === "string") : [];
-    let userFilters = [];
-    try { userFilters = validUserFilters(JSON.parse(localStorage.getItem("kin-filters") ?? "[]")); } catch (e) {}
     const saveFiltersLocal = () => { try { localStorage.setItem("kin-filters", JSON.stringify(userFilters)); } catch (e) {} };
 
     const snapshotFilter = () => ({
       quick: $("#quick").value, days: quickDays, mode, cols: { ...fval },
       sortKey, sortDir,
     });
-    let activeFilterName = null;
     function filterCriteriaKey(filter) {
       const canonical = value => Array.isArray(value) ? value.map(canonical)
         : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(k => [k, canonical(value[k])])) : value;
@@ -11391,20 +11434,6 @@
       const key = COLS[filter.mode]?.some(c => c.k === filter.sortKey) ? filter.sortKey : null;
       return JSON.stringify(canonical({ mode: filter.mode, quick: filter.quick ?? '', days: savedFilterDays(filter.days),
         cols, sortKey: key, sortDir: key ? filter.sortDir || 0 : 0 }));
-    }
-    function renderActiveFilter() {
-      const holder = $('#active-filter-info');
-      holder.hidden = activeFilterName === null;
-      if (holder.hidden) return;
-      const stored = userFilters.find(f => f.name === activeFilterName);
-      const modified = !!stored && (filterCriteriaKey(stored) !== filterCriteriaKey(snapshotFilter())
-        || !!favoriteList?.key() || !!studyTagList?.key());
-      $('#active-filter-name').textContent = activeFilterName;
-      $('#active-filter-state').textContent = !stored ? 'Deleted' : modified ? 'Modified' : 'Saved';
-      holder.title = !stored ? '저장 검색이 삭제됐습니다. 현재 목록 조건은 유지됩니다.' : modified
-        ? '현재 목록 조건과 저장된 조건이 다릅니다. 저장 검색을 다시 적용하거나 현재 조건을 새 검색으로 저장하세요.'
-        : '저장된 검색 조건을 적용 중입니다. 결과 건수는 현재 불러온 목록을 기준으로 합니다.';
-      $('#edit-active-filter').disabled = !stored;
     }
     function focusFilterChip(name) {
       const chip = [...$('#chips').querySelectorAll('button[data-i]')].find(b => userFilters[+b.dataset.i]?.name === name);
@@ -11544,32 +11573,6 @@
       worklistSearch?.apply();
       renderHeads(); render();
       return true;
-    }
-    function renderChips() {
-      const holder = $("#chips");
-      if (!holder) return;
-      renderActiveFilter();
-      const rows = userFilters.map((uf, i) => {
-        const count = filteredFor(uf).length;
-        const note = bodyPartCountNote(uf);
-        const label = `${uf.name}, 로드된 목록 기준 ${count}건${uf.isDefault ? ", 기본 필터" : ""}${note ? ' · ' + note : ''}`;
-        return { i, uf, count, label, partial: !!note };
-      });
-      // 검색 글자 하나마다 같은 버튼을 다시 만들면 저장 필터에 있던 키보드 포커스가
-      // 사라진다. 실제 이름·기본 여부·건수가 바뀔 때만 DOM을 교체한다.
-      const signature = JSON.stringify(rows.map(x => [x.uf.id ?? null, x.uf.name, !!x.uf.isDefault, x.count, x.label]));
-      if (holder.dataset.renderSignature === signature) {
-        holder.querySelectorAll('button[data-i]').forEach(b => b.setAttribute('aria-pressed', String(userFilters[+b.dataset.i]?.name === activeFilterName)));
-        return;
-      }
-      const focused = holder.contains(document.activeElement) ? userFilters[+document.activeElement.dataset.i]?.name : null;
-      holder.innerHTML = rows.map(({ i, uf, count, label, partial }) =>
-        `<button class="chip" data-i="${i}" data-name="${esc(uf.name)}" aria-label="${esc(label)}" aria-pressed="${uf.name === activeFilterName}" aria-haspopup="menu" ` +
-        `title="${esc(label)} · 클릭: 적용 / 우클릭 또는 Shift+F10: 메뉴">` +
-        `${uf.isDefault ? "⚑ " : ""}${esc(uf.name)} <span aria-hidden="true">(${count}${partial ? ' · Partial' : ''})</span></button>`
-      ).join("");
-      holder.dataset.renderSignature = signature;
-      if (focused !== null) focusFilterChip(focused);
     }
 
     /**
