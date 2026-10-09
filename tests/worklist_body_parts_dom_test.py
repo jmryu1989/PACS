@@ -1,5 +1,6 @@
 # coding: utf-8
 """REQ-D01-BODY-PART-SEARCH / RISK-D01-BODY-PART-UNKNOWN/WRONG/STALE/ACCESS / TEST-WORKLIST-BODY-PARTS."""
+from page_source import read_page_source
 import json
 from pathlib import Path
 import sys
@@ -125,7 +126,7 @@ class WorklistBodyPartsDOMTest(unittest.TestCase):
     def setUpClass(cls):
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch(headless=True)
-        source = MAIN.read_text(encoding="utf-8")
+        source = read_page_source(MAIN)
         cls.main_functions = "\n".join(extract_function(source, name) for name in (
             "mountWorklistBodyParts", "bodyPartCountNote", "renderBodyParts", "savedFilterDays",
             "filteredFor", "renderChips",

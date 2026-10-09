@@ -30,6 +30,7 @@ mutant runner can break the product on purpose without touching the source tree.
 
 The browser assertions replace the former source and harness-shape pins.
 """
+from page_source import read_page_source
 import json
 import os
 import re
@@ -44,7 +45,7 @@ MAIN_PATH = Path(os.environ.get("KIN_DICTATION_MAIN", ROOT / "worklist-v0" / "hp
 CITATION_PATH = Path(os.environ.get("KIN_DICTATION_CITATION_JS",
                                     ROOT / "worklist-v0" / "hpacs-lite" / "report-citation.js"))
 STRUCTURE_PATH = ROOT / "worklist-v0" / "hpacs-lite" / "report-structure.js"
-MAIN = MAIN_PATH.read_text(encoding="utf-8")
+MAIN = read_page_source(MAIN_PATH)
 CITATION_JS = CITATION_PATH.read_text(encoding="utf-8")
 STRUCTURE_JS = STRUCTURE_PATH.read_text(encoding="utf-8")
 

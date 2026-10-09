@@ -33,6 +33,7 @@ Rules, inherited from the U5 runner this is modelled on:
 
 stdlib only. It launches the browser test as a child process; it never drives a browser itself.
 """
+from page_source import read_page_bytes, read_page_source
 import argparse
 import hashlib
 import json
@@ -162,7 +163,7 @@ def main():
                         help="Check every anchor, marker and case name against the shipped sources and stop")
     args = parser.parse_args()
 
-    source = SOURCE.read_text(encoding="utf-8")
+    source = read_page_source(SOURCE)
     digest = hashlib.sha256(SOURCE.read_bytes()).hexdigest()
     print("main.html sha256 %s" % digest)
     problems = []
@@ -200,7 +201,7 @@ def main():
     results = []
     try:
         baseline_copy = scratch / "baseline.html"
-        shutil.copyfile(SOURCE, baseline_copy)
+        baseline_copy.write_bytes(read_page_bytes(SOURCE))
         done, output = run_case(baseline_copy, None, args.timeout)
         baseline_ok = done.returncode == 0 and not any(marker in output for marker in CRASH_MARKERS)
         ran = re.search(r"Ran (\d+) tests?", output)

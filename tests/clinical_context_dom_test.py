@@ -50,6 +50,7 @@ local time (YYYY-MM-DD HH:MM:SS, scenario-table section 0) of the context's time
 
 Synthetic data only (SYN-* names, 1.2.826.0.1.3680043.10.* UIDs): no stack, no network, no credentials.
 """
+from page_source import read_page_source
 import copy
 import json
 import re
@@ -75,7 +76,7 @@ def lf_text(path):
     return path.read_bytes().decode("utf-8").replace("\r\n", "\n")
 
 
-MAIN = lf_text(HPACS / "main.html")
+MAIN = read_page_source(HPACS / "main.html")
 # S7-U5: the page's requests leave through its gate and its session-bound transport, so those two shipped files are
 # loaded with auth.js, in the page's own order.
 PAGE_FILES = ("auth.js", "work-context.js", "session-transport.js", "study-arrivals.js", "clinical-context.js")

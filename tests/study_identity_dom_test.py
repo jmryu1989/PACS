@@ -10,6 +10,7 @@ Two harnesses, both built from the real main.html text (tests/worklist_arrivals_
 Each discriminating case also runs the b6a317c code it replaces (in-test controls) and requires that old code to show
 the defect, so a green run here is not a tautology. Hosted only; no server, database or clinical data.
 """
+from page_source import read_page_source
 import json
 import os
 from pathlib import Path
@@ -21,7 +22,7 @@ import worklist_arrivals_dom_test as arrivals
 from report_page_contract import bind_api_fixture
 
 ROOT = Path(__file__).resolve().parents[1]
-MAIN = (Path(os.environ["KIN_IDENTITY_MAIN"]).read_text(encoding="utf-8")
+MAIN = (read_page_source(Path(os.environ["KIN_IDENTITY_MAIN"]))
         if "KIN_IDENTITY_MAIN" in os.environ else arrivals.MAIN).replace("\r\n", "\n")
 IDENTITY_JS = (ROOT / "worklist-v0" / "hpacs-lite" / "study-identity.js").read_text(encoding="utf-8")
 extract_function = arrivals.extract_function

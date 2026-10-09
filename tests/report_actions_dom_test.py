@@ -47,6 +47,7 @@ without them fetches them from origin; if they still cannot be read, or are not 
 fail - they never skip, and no pinned digest stands in for bytes that were not compared (fixed_file(), which the S5-UI2
 and S5-U4c tests use too).
 """
+from page_source import read_page_source
 import hashlib
 import json
 import os
@@ -327,7 +328,7 @@ class ReportActionsStructureTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.text = lf(MAIN.read_text(encoding='utf-8'))
+        cls.text = lf(read_page_source(MAIN))
 
     def test_pins_match_the_fixed_commits(self):
         self.assertEqual(BASE_RBTNS_SHA256, digest(BASE_RBTNS))
@@ -391,7 +392,7 @@ class ReportActionsDOMTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         from playwright.sync_api import sync_playwright
-        cls.html = page_html(MAIN.read_text(encoding='utf-8'))
+        cls.html = page_html(read_page_source(MAIN))
         cls.seen = []
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch()
@@ -435,7 +436,7 @@ class ReportActionsDOMTest(unittest.TestCase):
     def test_every_button_is_on_the_page_with_an_english_label(self):
         # The live page: each of the 18 is found (by its id), and its label is English (AGENTS.md section 4); where
         # each sits and which are in view is the next case.
-        got = self.serialize(MAIN.read_text(encoding='utf-8'))
+        got = self.serialize(read_page_source(MAIN))
         self.assertEqual([], [row[0] for row in got if row[1] is None])
         for key, _, label in got:
             with self.subTest(button=key):

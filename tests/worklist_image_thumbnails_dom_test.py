@@ -1,5 +1,6 @@
 # coding: utf-8
 """Pure DOM coverage for the per-series image thumbnail browser."""
+from page_source import read_page_source
 import unittest
 from pathlib import Path
 from module_session_harness import CORE
@@ -10,7 +11,7 @@ from playwright.sync_api import sync_playwright, expect
 ROOT = Path(__file__).resolve().parents[1]
 PREVIEW = (ROOT / "worklist-v0" / "hpacs-lite" / "worklist-image-preview.js").read_text(encoding="utf-8")
 THUMBNAILS = (ROOT / "worklist-v0" / "hpacs-lite" / "worklist-image-thumbnails.js").read_text(encoding="utf-8")
-MAIN = (ROOT / "worklist-v0" / "hpacs-lite" / "main.html").read_text(encoding="utf-8")
+MAIN = read_page_source(ROOT / "worklist-v0" / "hpacs-lite" / "main.html")
 STUDY, SERIES, SOP1, SOP2 = "2.25.10", "2.25.20", "2.25.31", "2.25.32"
 
 HARNESS = r"""

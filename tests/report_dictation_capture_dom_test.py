@@ -17,6 +17,7 @@ Full Chromium is required for getUserMedia; the headless shell refuses media acc
 CI uses pinned Playwright 1.60 / Chromium 148.0.7778.96. On Windows with error 14001,
 the identical suite can run in the matching Playwright Linux image over loopback.
 """
+from page_source import read_page_source
 import ast
 import hashlib
 import json
@@ -42,7 +43,7 @@ from report_dictation_host_dom_test import (  # noqa: E402  (read-only reuse; ne
 import dictation_capture_signal as signal  # noqa: E402
 
 NGINX = (ROOT / "proxy" / "nginx.conf.template").read_text(encoding="utf-8")
-MAIN = (LITE / "main.html").read_text(encoding="utf-8")
+MAIN = read_page_source(LITE / "main.html")
 PAGE_PATH = "/worklist/hpacs-lite/u4b-capture.html"
 AFTER_EXIT_PATH = "/u4b/after-exit.html"
 ASSET_DIR = "/worklist/hpacs-lite/"
