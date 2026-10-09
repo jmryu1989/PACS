@@ -1,0 +1,18 @@
+test_cap00_harness_oracles_detect_failure_and_signal_corruption (__main__.CaptureOracleTest.test_cap00_harness_oracles_detect_failure_and_signal_corruption) ... ok
+test_cap01_environment_pins_the_secure_origin_the_grant_and_untouched_natives (__main__.ReportDictationCaptureDOMTest.test_cap01_environment_pins_the_secure_origin_the_grant_and_untouched_natives) ... ok
+test_cap02_real_capture_uploads_16k_mono_pcm16_and_inserts_only_on_insert (__main__.ReportDictationCaptureDOMTest.test_cap02_real_capture_uploads_16k_mono_pcm16_and_inserts_only_on_insert) ... ok
+test_cap03_the_worklet_cap_sends_exact_bytes_without_stop (__main__.ReportDictationCaptureDOMTest.test_cap03_the_worklet_cap_sends_exact_bytes_without_stop) ... ok
+test_cap04_cancel_while_recording_ends_tracks_synchronously (__main__.ReportDictationCaptureDOMTest.test_cap04_cancel_while_recording_ends_tracks_synchronously) ... ok
+test_cap05_a_read_only_editor_while_recording_fails_and_releases (__main__.ReportDictationCaptureDOMTest.test_cap05_a_read_only_editor_while_recording_fails_and_releases) ... ok
+test_cap06_an_engine_failure_after_capture_leaves_the_report (__main__.ReportDictationCaptureDOMTest.test_cap06_an_engine_failure_after_capture_leaves_the_report) ... ok
+test_cap07_page_exit_while_recording_ends_tracks (__main__.ReportDictationCaptureDOMTest.test_cap07_page_exit_while_recording_ends_tracks) ... ok
+test_cap08_permissions_policy_denial_is_denied_and_writes_nothing (__main__.ReportDictationCaptureDOMTest.test_cap08_permissions_policy_denial_is_denied_and_writes_nothing) ... ok
+test_cap09_no_grant_either_denies_or_waits_and_cancels (__main__.ReportDictationCaptureDOMTest.test_cap09_no_grant_either_denies_or_waits_and_cancels) ... ok
+test_cap10_cancel_while_the_worklet_loads_never_opens_the_microphone (__main__.ReportDictationCaptureDOMTest.test_cap10_cancel_while_the_worklet_loads_never_opens_the_microphone) ... ok
+test_nc11_a_csp_without_the_worklet_blocks_it_and_the_browser_logs_one_denial (__main__.ReportDictationCaptureDOMTest.test_nc11_a_csp_without_the_worklet_blocks_it_and_the_browser_logs_one_denial) ... ok
+test_nc12_a_worklet_served_as_text_plain_is_refused (__main__.ReportDictationCaptureDOMTest.test_nc12_a_worklet_served_as_text_plain_is_refused) ... ok
+
+----------------------------------------------------------------------
+Ran 13 tests in 28.821s
+
+OK

@@ -44,3 +44,9 @@ $py = 'C:\Users\norne\PACS\tmp\hp-dom-venv\Scripts\python.exe'                  
 4. 원본 위험 변이(제품 변경 되돌림) = 지금 페이지(34 xfail로 확인됨). 재등록 변이(once 가드 제거)·늦은 등록 변이(첫 await 뒤)·window
    등록 이동 변이는 `tools/simulate_fix.cjs` + `tools/run_variants.py`로 scratch에서 재실행(제품 무변경).
 5. tests/README.md·CI(validate.yml/candidate_ci.py) 등록은 owned path 밖 — 지휘자 결정 대기.
+
+## phase 2 (요약은 `phase2.md`)
+
+- 설계 이름 대응: `main_pre_order_dom_test.py` → `tests/main_early_input_dom_test.py`; `main_pre_contract.cjs` → `tests/main_split_harness.cjs`(split·deriveSpec·fixtureBlocks·preMutant) + `tests/main_split_harness.py`; 변이 실행 → `tests/main_early_input_mutants.py`; f1d5406 문장 목록 → `tests/main_split_harness_fixture.json`.
+- 제품 바이트는 `node tmp/s9-u0a-pre/tools/apply_moves.cjs worklist-v0/hpacs-lite/main.html`(f1d5406 blob 입력)의 출력과 같다.
+- 변이: `apply_moves.cjs --except Mxx | --m36 | --m37`(전체 시험 × 38), `preMutant`(드라이버, 같은 문장 결과 `tools/check_mutant_equivalence.cjs`).

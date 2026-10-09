@@ -747,6 +747,7 @@ for count in PARTS:
             ("report-commit.js", "B1-41/45", "renderChips, updateReportButtons (console.error)"),
             ("clinical-context-panel.js", "B1-57/PRE-P3", "applyLayout, renderChips"),
             ("workspace-panels.js", "B1-57/PRE-P3", "applyLayout, renderChips"),
+            ("worklist-controls.js", "PRE-P3", "renderChips"),
             ("saved-filters.js", "PRE-P3/B1-41", "renderChips")):
         if MODULE[module] < count:
             leave_case(hazards, count, guarded, MODULE[module])

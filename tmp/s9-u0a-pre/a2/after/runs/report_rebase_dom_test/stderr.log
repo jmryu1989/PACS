@@ -1,0 +1,16 @@
+test_a_discarded_draft_still_reports_the_server_report_honestly (__main__.ReportRebaseDOMTest.test_a_discarded_draft_still_reports_the_server_report_honestly) ... ok
+test_a_refusal_that_lands_after_the_selection_moved_draws_nothing (__main__.ReportRebaseDOMTest.test_a_refusal_that_lands_after_the_selection_moved_draws_nothing) ... ok
+test_a_refusal_that_returns_after_a_round_trip_is_still_not_the_same_selection (__main__.ReportRebaseDOMTest.test_a_refusal_that_returns_after_a_round_trip_is_still_not_the_same_selection) ... ok
+test_a_refusal_without_a_usable_head_never_becomes_an_approved_report (__main__.ReportRebaseDOMTest.test_a_refusal_without_a_usable_head_never_becomes_an_approved_report) ... ok
+test_a_second_refusal_supersedes_the_first_and_a_moved_selection_refuses_to_write (__main__.ReportRebaseDOMTest.test_a_second_refusal_supersedes_the_first_and_a_moved_selection_refuses_to_write) ... ok
+test_a_stale_addendum_shows_the_refused_head_and_leaves_every_byte_alone (__main__.ReportRebaseDOMTest.test_a_stale_addendum_shows_the_refused_head_and_leaves_every_byte_alone) ... ok
+test_a_surviving_draft_is_never_reported_as_the_loaded_server_report (__main__.ReportRebaseDOMTest.test_a_surviving_draft_is_never_reported_as_the_loaded_server_report) ... ok
+test_a_version_that_arrived_without_a_redraw_never_becomes_the_commit_base (__main__.ReportRebaseDOMTest.test_a_version_that_arrived_without_a_redraw_never_becomes_the_commit_base) ... ok
+test_reloading_the_report_moves_the_base_to_the_version_it_drew (__main__.ReportRebaseDOMTest.test_reloading_the_report_moves_the_base_to_the_version_it_drew) ... ok
+test_the_old_optimistic_lock_branch_keeps_its_own_route (__main__.ReportRebaseDOMTest.test_the_old_optimistic_lock_branch_keeps_its_own_route) ... ok
+test_the_rebase_writes_the_typed_text_onto_exactly_the_version_it_showed (__main__.ReportRebaseDOMTest.test_the_rebase_writes_the_typed_text_onto_exactly_the_version_it_showed) ... ok
+
+----------------------------------------------------------------------
+Ran 11 tests in 5.066s
+
+OK

@@ -1,0 +1,21 @@
+test_account_change_in_either_critical_area_locks_both_without_ending (__main__.ModulesBootDOMTest.test_account_change_in_either_critical_area_locks_both_without_ending) ... ok
+test_shortcuts_mounted_before_boot_enable_and_load_the_accounts_map (__main__.ModulesBootDOMTest.test_shortcuts_mounted_before_boot_enable_and_load_the_accounts_map) ... ok
+test_decoder_end_drops_late_image (__main__.SessionModulesDOMTest.test_decoder_end_drops_late_image) ... ok
+test_decoder_foreign_notice_keeps_image (__main__.SessionModulesDOMTest.test_decoder_foreign_notice_keeps_image) ... ok
+test_decoder_plain_failures_close_nothing (__main__.SessionModulesDOMTest.test_decoder_plain_failures_close_nothing) ... ok
+test_decoder_prepare_cancel_drops_old_and_resumes (__main__.SessionModulesDOMTest.test_decoder_prepare_cancel_drops_old_and_resumes) ... ok
+test_note_cancel_keeps_an_unsaved_attempt_and_the_next_save_succeeds (__main__.SessionModulesDOMTest.test_note_cancel_keeps_an_unsaved_attempt_and_the_next_save_succeeds) ... ok
+test_note_cancel_reads_its_stored_save_and_next_save_uses_the_confirmed_version (__main__.SessionModulesDOMTest.test_note_cancel_reads_its_stored_save_and_next_save_uses_the_confirmed_version) ... ok
+test_request_end_drops_late_result (__main__.SessionModulesDOMTest.test_request_end_drops_late_result) ... ok
+test_request_foreign_notice_keeps_document_usable (__main__.SessionModulesDOMTest.test_request_foreign_notice_keeps_document_usable) ... ok
+test_request_plain_failures_close_nothing (__main__.SessionModulesDOMTest.test_request_plain_failures_close_nothing) ... ok
+test_request_prepare_cancel_drops_old_and_resumes (__main__.SessionModulesDOMTest.test_request_prepare_cancel_drops_old_and_resumes) ... ok
+test_timer_end_stops_requests_and_late_paint (__main__.SessionModulesDOMTest.test_timer_end_stops_requests_and_late_paint) ... ok
+test_timer_foreign_notice_keeps_subscription (__main__.SessionModulesDOMTest.test_timer_foreign_notice_keeps_subscription) ... ok
+test_timer_plain_failures_leave_controls_open (__main__.SessionModulesDOMTest.test_timer_plain_failures_leave_controls_open) ... ok
+test_timer_prepare_cancel_pauses_and_resumes (__main__.SessionModulesDOMTest.test_timer_prepare_cancel_pauses_and_resumes) ... ok
+
+----------------------------------------------------------------------
+Ran 16 tests in 9.719s
+
+OK

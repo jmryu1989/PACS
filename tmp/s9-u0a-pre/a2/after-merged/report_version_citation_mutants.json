@@ -1,0 +1,105 @@
+{
+  "source_sha256_before": "0ed62cf6ee57f011e2ac2ea02574592d424def403ad3fcac521aebd545eac239",
+  "source_sha256_after": "0ed62cf6ee57f011e2ac2ea02574592d424def403ad3fcac521aebd545eac239",
+  "source_unchanged": true,
+  "results": [
+    {
+      "id": "BASELINE",
+      "case": "all",
+      "child_exit": 0,
+      "tests_ran": 10,
+      "ok": true
+    },
+    {
+      "id": "MH1",
+      "title": "the answer no longer has to belong to the version that was pressed",
+      "case": "test_06_every_shape_the_answer_can_fail_is_unknown_and_never_empty",
+      "child_exit": 1,
+      "named_failure": "test_06_every_shape_the_answer_can_fail_is_unknown_and_never_empty (__main__.ReportVersionCitationDOM.test_06_every_shape_the_answer_can_fail_is_unknown_and_never_empty) ... FAIL",
+      "expect": "an answer for another version must make the whole answer unknown",
+      "expect_matched": "an answer for another version must make the whole answer unknown",
+      "assertion_text": "AssertionError: '인용 증적을 확인하지 못했습니다' not found in '인용된 소견인용 증적 확인: server-actor@kin의 열람 권한 기준이 목록은 판독문 문장과 1:1로 대응하지 않습니다.Findings · 소견 r31 · 출처 1번 · 인용 당시 연결 현재 판과 일치 · author-x@kin · 2026-09-19 05:00(UTC) — 넣은 문자열이 이 칸에 그대로 있습니다‘그대로 있습니다’는 그 문장에 대한 것이며, 주변 문장에 대해서는 아무것도 말하지 않습니다.' : an answer for another version must make the whole answer unknown",
+      "harness_crash": false,
+      "killed": true,
+      "mutant_sha256": "3dd1006696943a83b530fc360b5708688ab7b07dc4848aef1d9e799a536dede3"
+    },
+    {
+      "id": "MH2",
+      "title": "the screen recomputes presence with the shipped rule instead of the server's answer",
+      "case": "test_05_each_block_speaks_the_presence_of_its_own_version",
+      "child_exit": 1,
+      "named_failure": "test_05_each_block_speaks_the_presence_of_its_own_version (__main__.ReportVersionCitationDOM.test_05_each_block_speaks_the_presence_of_its_own_version) ... FAIL",
+      "expect": "each block must speak the server presence for its own version",
+      "expect_matched": "each block must speak the server presence for its own version",
+      "assertion_text": "AssertionError: '넣은 문자열이 이 칸에 그대로 있습니다' not found in '인용된 소견인용 증적 확인: server-actor@kin의 열람 권한 기준이 목록은 판독문 문장과 1:1로 대응하지 않습니다.Findings · 소견 r31 · 출처 1번 · 인용 당시 연결 현재 판과 일치 · author-x@kin · 2026-09-19 05:00(UTC) — ' : each block must speak the server presence for its own version",
+      "harness_crash": false,
+      "killed": true,
+      "mutant_sha256": "1ca6a3e1932863f85d65c3a0c2656c3dca31a4aad60a597443d06b85ab6761b7"
+    },
+    {
+      "id": "MH3",
+      "title": "a refusal is given the success state, so it renders as an empty citation list",
+      "case": "test_03_a_refusal_is_not_an_empty_list",
+      "child_exit": 1,
+      "named_failure": "test_03_a_refusal_is_not_an_empty_list (__main__.ReportVersionCitationDOM.test_03_a_refusal_is_not_an_empty_list) ... FAIL",
+      "expect": "a refusal must never read as an empty citation list",
+      "expect_matched": "a refusal must never read as an empty citation list",
+      "assertion_text": "AssertionError: '접근 권한 밖' not found in '인용된 소견인용 증적 확인: 확인자 미확인의 열람 권한 기준인용된 소견 없음' : a refusal must never read as an empty citation list",
+      "harness_crash": false,
+      "killed": true,
+      "mutant_sha256": "cfad2c74d8809e8d1453177f13b0a5afb99aed30ead048b241fd80ddd489d84a"
+    },
+    {
+      "id": "MH4",
+      "title": "every answer is written into the first host instead of the pressed version's",
+      "case": "test_08_two_answers_arriving_out_of_order_stay_in_their_own_blocks",
+      "child_exit": 1,
+      "named_failure": "test_08_two_answers_arriving_out_of_order_stay_in_their_own_blocks (__main__.ReportVersionCitationDOM.test_08_two_answers_arriving_out_of_order_stay_in_their_own_blocks) ... FAIL",
+      "expect": "each version block must show its own answer",
+      "expect_matched": "each version block must show its own answer",
+      "assertion_text": "AssertionError: '소견 r31' not found in '확인하는 중입니다' : each version block must show its own answer",
+      "harness_crash": false,
+      "killed": true,
+      "mutant_sha256": "f31863cd14f3a0b64471275b433af00a6ba9d853d6830f576b160b0b2e04376a"
+    },
+    {
+      "id": "MH5",
+      "title": "closing the history no longer discards the drawn blocks and the per-version state",
+      "case": "test_09_closing_discards_the_blocks_and_no_late_answer_writes",
+      "child_exit": 1,
+      "named_failure": "test_09_closing_discards_the_blocks_and_no_late_answer_writes (__main__.ReportVersionCitationDOM.test_09_closing_discards_the_blocks_and_no_late_answer_writes) ... FAIL",
+      "expect": "closing the history must discard every drawn citation block",
+      "expect_matched": "closing the history must discard every drawn citation block",
+      "assertion_text": "AssertionError: 0 != 2 : closing the history must discard every drawn citation block",
+      "harness_crash": false,
+      "killed": true,
+      "mutant_sha256": "745537dcc0f6def8ac5d326fdb1ba15ec49523cb74dde0f16285f92dc8675991"
+    },
+    {
+      "id": "MH6",
+      "title": "the attribution line is built from the session instead of the server-echoed actor",
+      "case": "test_01_a_pressed_version_draws_its_own_entries_and_the_server_actor",
+      "child_exit": 1,
+      "named_failure": "test_01_a_pressed_version_draws_its_own_entries_and_the_server_actor (__main__.ReportVersionCitationDOM.test_01_a_pressed_version_draws_its_own_entries_and_the_server_actor) ... FAIL",
+      "expect": "the attribution line must name the server-echoed actor",
+      "expect_matched": "the attribution line must name the server-echoed actor",
+      "assertion_text": "AssertionError: 'server-actor@kin' not found in '인용 증적 확인: session-actor@kin의 열람 권한 기준' : the attribution line must name the server-echoed actor",
+      "harness_crash": false,
+      "killed": true,
+      "mutant_sha256": "38e469941e0f7305e4ccd1754d022f827d909ac8665469137521bda34f155f9f"
+    },
+    {
+      "id": "MH7",
+      "title": "the per-entry shape check is dropped, so a malformed entry vanishes from the list",
+      "case": "test_06_every_shape_the_answer_can_fail_is_unknown_and_never_empty",
+      "child_exit": 1,
+      "named_failure": "test_06_every_shape_the_answer_can_fail_is_unknown_and_never_empty (__main__.ReportVersionCitationDOM.test_06_every_shape_the_answer_can_fail_is_unknown_and_never_empty) ... FAIL",
+      "expect": "a malformed entry must make the whole answer unknown",
+      "expect_matched": "a malformed entry must make the whole answer unknown",
+      "assertion_text": "AssertionError: '인용 증적을 확인하지 못했습니다' not found in '인용된 소견인용 증적 확인: server-actor@kin의 열람 권한 기준인용된 소견 없음' : a malformed entry must make the whole answer unknown",
+      "harness_crash": false,
+      "killed": true,
+      "mutant_sha256": "d0f4404a66488885df991350f11fb625a8bdbda48c720658c3658d268072bac7"
+    }
+  ]
+}

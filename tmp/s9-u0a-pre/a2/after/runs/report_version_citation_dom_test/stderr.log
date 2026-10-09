@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\report_version_citation_dom_test.py", line 104, in <module>
+    HISTORY_BLOCK = slice_between(MAIN, "    // ── 판독문 이력 ──",
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\report_version_citation_dom_test.py", line 47, in slice_between
+    end = source.index(end_marker, start + len(start_marker))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: substring not found

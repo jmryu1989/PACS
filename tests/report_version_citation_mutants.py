@@ -34,6 +34,7 @@ Rules, inherited from the U5 runner this is modelled on:
 stdlib only. It launches the browser test as a child process; it never drives a browser itself.
 """
 from page_source import read_page_bytes, read_page_source
+from main_split_harness import fixture_blocks
 import argparse
 import hashlib
 import json
@@ -53,13 +54,11 @@ SOURCE = ROOT / "worklist-v0" / "hpacs-lite" / "main.html"
 DOM_TEST = ROOT / "tests" / "report_version_citation_dom_test.py"
 CASE = "ReportVersionCitationDOM"
 
-# The two markers the DOM harness slices the shipped history block between. They are checked here
-# for the same reason the anchors are: if either drifts, the harness silently compiles a different
-# region and every mutant reports a survivor.
-SLICE_MARKERS = (
-    "    // ── 판독문 이력 ──",
-    "    /**\n     * 판독문 textarea를 **스크립트로**",
-)
+# The DOM harness takes the shipped history block by the fixture projection (main_split_harness); the run is checked
+# after the anchors-only exit (it needs node and the api TypeScript) for the same reason the anchors are: a run that
+# does not resolve would compile a different region and every mutant would report a survivor.
+HISTORY_FIXTURE = {"HISTORY_BLOCK": ("historyEpoch", "reportWriteBlock")}
+SLICE_MARKERS = ()
 
 # Harness-start failures only. A bare "Traceback (most recent call last)" MUST NOT be here:
 # unittest prints it for every ordinary assertion failure, which would turn each genuine kill
@@ -196,6 +195,12 @@ def main():
     if args.anchors_only:
         print("anchors ok (no browser run requested)")
         return 0
+    try:
+        fixture_blocks(SOURCE, HISTORY_FIXTURE)
+        print("fixture run resolves: HISTORY_BLOCK")
+    except Exception as error:
+        print("ANCHOR FAILURE: harness fixture run does not resolve: %s" % error)
+        return 1
 
     scratch = pathlib.Path(tempfile.mkdtemp(prefix="u5b-mutants-"))
     results = []

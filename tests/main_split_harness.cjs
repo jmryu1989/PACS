@@ -197,8 +197,10 @@ function fixtureBlocks(page, ranges) {
     let previous = -1;
     current.forEach((s, i) => {
       if (home[i] >= 0) { previous = home[i]; if (home[i] >= lo && home[i] < hi) picked.push([home[i], 0, i]); return; }
+      // An unmatched statement right after one of the run belongs to it, as a cut to the end marker would have it - even
+      // where the end marker's declaration has moved away (S9-U0a-PRE moved reportWriteBlock and heldByOther).
       const next = home.slice(i + 1).find(h => h >= 0) ?? Infinity;
-      if (previous >= lo && previous < hi && next >= lo && next <= hi) picked.push([previous, 1, i]);
+      if (previous >= lo && previous < hi && next >= lo) picked.push([previous, 1, i]);
     });
     const declared = new Set(base.slice(lo, hi).flatMap(s => s.names));
     for (const [, , i] of picked) for (const name of current[i].names) declared.delete(name);

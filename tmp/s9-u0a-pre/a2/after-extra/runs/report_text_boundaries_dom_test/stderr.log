@@ -1,0 +1,152 @@
+test_held_write_of_a_and_unsent_b_finish_on_one_logout_click (__main__.ReportTextBoundaries.test_held_write_of_a_and_unsent_b_finish_on_one_logout_click) ... ok
+test_unknown_previous_study_is_named_and_retained_until_retry (__main__.ReportTextBoundaries.test_unknown_previous_study_is_named_and_retained_until_retry) ... ok
+test_refused_previous_study_survives_back_to_editing (__main__.ReportTextBoundaries.test_refused_previous_study_survives_back_to_editing) ... ok
+test_conflicted_previous_study_needs_explicit_choice (__main__.ReportTextBoundaries.test_conflicted_previous_study_needs_explicit_choice) ... ok
+test_session_end_recovers_all_studies_for_each_unconfirmed_outcome (__main__.ReportTextBoundaries.test_session_end_recovers_all_studies_for_each_unconfirmed_outcome) ... ok
+test_conflict_then_typing_switch_and_keep_sends_latest_text (__main__.ReportTextBoundaries.test_conflict_then_typing_switch_and_keep_sends_latest_text) ... ok
+test_offline_typing_survives_study_change_and_cannot_be_logged_out_as_saved (__main__.ReportTextBoundaries.test_offline_typing_survives_study_change_and_cannot_be_logged_out_as_saved) ... ok
+test_insertion_defers_sending_but_keeps_subsequent_typing (__main__.ReportTextBoundaries.test_insertion_defers_sending_but_keeps_subsequent_typing) ... ok
+test_conflict_clear_keeps_the_empty_edit_on_study_change (__main__.ReportTextBoundaries.test_conflict_clear_keeps_the_empty_edit_on_study_change) ... ok
+test_unselected_text_warns_before_navigation_away (__main__.ReportTextBoundaries.test_unselected_text_warns_before_navigation_away) ... ok
+test_demo_navigation_still_keeps_its_local_draft (__main__.ReportTextBoundaries.test_demo_navigation_still_keeps_its_local_draft) ... ok
+test_two_documents_have_distinct_preparations_and_matching_resume (__main__.ReportTextBoundaries.test_two_documents_have_distinct_preparations_and_matching_resume) ... ok
+test_reconnect_keeps_and_saves_unselected_offline_text (__main__.ReportTextBoundaries.test_reconnect_keeps_and_saves_unselected_offline_text) ... Task was destroyed but it is pending!
+task: <Task pending name='Task-5173' coro=<BrowserContext._on_route() running at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_browser_context.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]> cb=[Connection.dispatch.<locals>._done_callback() at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_connection.py:466]>
+Task was destroyed but it is pending!
+task: <Task pending name='Task-5176' coro=<BrowserContext._on_route() running at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_browser_context.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]> cb=[Connection.dispatch.<locals>._done_callback() at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_connection.py:466]>
+ok
+test_late_refresh_and_poll_merge_facts_without_losing_unconfirmed_text (__main__.ReportTextBoundaries.test_late_refresh_and_poll_merge_facts_without_losing_unconfirmed_text) ... ok
+test_reconnect_preserves_open_conflict_and_latest_attempt (__main__.ReportTextBoundaries.test_reconnect_preserves_open_conflict_and_latest_attempt) ... ok
+test_reconnect_keeps_unknown_outcome_until_authoritative_read (__main__.ReportTextBoundaries.test_reconnect_keeps_unknown_outcome_until_authoritative_read) ... ok
+test_legacy_demo_text_never_becomes_an_authenticated_draft (__main__.ReportTextBoundaries.test_legacy_demo_text_never_becomes_an_authenticated_draft) ... ok
+test_idle_document_observes_other_drafts_without_writes_warnings_or_logout_questions (__main__.ReportTextBoundaries.test_idle_document_observes_other_drafts_without_writes_warnings_or_logout_questions) ... ok
+test_observed_draft_is_the_baseline_of_the_next_real_edit (__main__.ReportTextBoundaries.test_observed_draft_is_the_baseline_of_the_next_real_edit) ... ok
+test_real_edit_in_otherwise_idle_document_keeps_its_conflict_and_text (__main__.ReportTextBoundaries.test_real_edit_in_otherwise_idle_document_keeps_its_conflict_and_text) ... ok
+test_version_conflict_load_latest_replaces_text_and_next_save_base (__main__.ReportTextBoundaries.test_version_conflict_load_latest_replaces_text_and_next_save_base) ... ok
+test_load_server_draft_replaces_conflict_and_does_not_resend_discarded_text (__main__.ReportTextBoundaries.test_load_server_draft_replaces_conflict_and_does_not_resend_discarded_text) ... ok
+test_discard_draft_takes_server_report_version (__main__.ReportTextBoundaries.test_discard_draft_takes_server_report_version) ... ok
+test_logout_saves_second_study_and_only_offers_first_failure (__main__.ReportTextBoundaries.test_logout_saves_second_study_and_only_offers_first_failure) ... ok
+test_logout_lists_each_remaining_study_with_its_own_reason (__main__.ReportTextBoundaries.test_logout_lists_each_remaining_study_with_its_own_reason) ... ok
+test_pasted_text_in_an_untouched_study_is_saved_or_asked_at_every_boundary (__main__.ReportTextBoundaries.test_pasted_text_in_an_untouched_study_is_saved_or_asked_at_every_boundary) ... ok
+test_a_cleared_draft_in_an_untouched_study_is_saved_or_asked_at_every_boundary (__main__.ReportTextBoundaries.test_a_cleared_draft_in_an_untouched_study_is_saved_or_asked_at_every_boundary) ... ok
+test_each_insertion_by_a_control_is_recorded_like_typed_text (__main__.ReportTextBoundaries.test_each_insertion_by_a_control_is_recorded_like_typed_text) ... ok
+test_text_typed_while_a_save_is_out_is_not_confirmed_by_that_save (__main__.ReportTextBoundaries.test_text_typed_while_a_save_is_out_is_not_confirmed_by_that_save) ... ok
+test_a_refused_or_unconfirmed_approve_or_save_of_an_unedited_study_writes_and_asks_nothing (__main__.ReportTextBoundaries.test_a_refused_or_unconfirmed_approve_or_save_of_an_unedited_study_writes_and_asks_nothing) ... ok
+test_a_failed_discard_of_an_unedited_draft_is_not_sent_again (__main__.ReportTextBoundaries.test_a_failed_discard_of_an_unedited_draft_is_not_sent_again) ... ok
+test_a_refused_insertion_into_an_unedited_study_leaves_no_draft (__main__.ReportTextBoundaries.test_a_refused_insertion_into_an_unedited_study_leaves_no_draft) ... ok
+test_a_study_the_server_no_longer_accepts_is_announced_once_and_its_text_kept (__main__.ReportTextBoundaries.test_a_study_the_server_no_longer_accepts_is_announced_once_and_its_text_kept) ... ok
+test_a_passing_save_failure_is_retried_without_repeating_the_notice (__main__.ReportTextBoundaries.test_a_passing_save_failure_is_retried_without_repeating_the_notice) ... ok
+test_load_latest_without_that_study_in_the_answer_keeps_the_text_and_says_so (__main__.ReportTextBoundaries.test_load_latest_without_that_study_in_the_answer_keeps_the_text_and_says_so) ... ok
+test_a_save_accepted_after_the_study_was_left_is_not_reported_as_failed (__main__.ReportTextBoundaries.test_a_save_accepted_after_the_study_was_left_is_not_reported_as_failed) ... ok
+test_a_refused_write_left_behind_an_accepted_save_is_not_a_failure_and_not_sent_again (__main__.ReportTextBoundaries.test_a_refused_write_left_behind_an_accepted_save_is_not_a_failure_and_not_sent_again)
+The write of leaving the study stood behind the Save. The Save stored that text as the report, so when the ... ok
+test_text_typed_while_a_save_or_approve_is_out_is_kept_when_the_server_accepts_it (__main__.ReportTextBoundaries.test_text_typed_while_a_save_or_approve_is_out_is_kept_when_the_server_accepts_it) ... Task exception was never retrieved
+future: <Task finished name='Task-21799' coro=<Channel.send() done, defined at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_connection.py:61> exception=TargetClosedError('Channel.send: Target page, context or browser has been closed')>
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_connection.py", line 69, in send
+    return await self._connection.wrap_api_call(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_connection.py", line 559, in wrap_api_call
+    raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None
+playwright._impl._errors.TargetClosedError: Channel.send: Target page, context or browser has been closed
+ok
+test_a_preparation_holds_its_lock_from_before_its_notice_until_back_to_editing_releases_it (__main__.ReportTextBoundaries.test_a_preparation_holds_its_lock_from_before_its_notice_until_back_to_editing_releases_it) ... ok
+test_a_real_end_asks_for_the_end_lock_before_its_notice_and_never_releases_the_preparation (__main__.ReportTextBoundaries.test_a_real_end_asks_for_the_end_lock_before_its_notice_and_never_releases_the_preparation) ... Task was destroyed but it is pending!
+task: <Task pending name='Task-23090' coro=<BrowserContext._on_route() running at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_browser_context.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]> cb=[Connection.dispatch.<locals>._done_callback() at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_connection.py:466]>
+ok
+test_closing_the_preparing_tab_releases_its_lock_and_posts_nothing (__main__.ReportTextBoundaries.test_closing_the_preparing_tab_releases_its_lock_and_posts_nothing) ... Task was destroyed but it is pending!
+task: <Task pending name='Task-24560' coro=<BrowserContext._on_route() running at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_browser_context.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]> cb=[Connection.dispatch.<locals>._done_callback() at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_connection.py:466]>
+ok
+test_log_out_with_nothing_to_save_is_one_press_and_the_same_order (__main__.ReportTextBoundaries.test_log_out_with_nothing_to_save_is_one_press_and_the_same_order) ... ok
+test_without_the_lock_manager_the_notices_still_go_and_log_out_completes (__main__.ReportTextBoundaries.test_without_the_lock_manager_the_notices_still_go_and_log_out_completes) ... Task was destroyed but it is pending!
+task: <Task pending name='Task-24880' coro=<BrowserContext._on_route() running at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_browser_context.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]> cb=[Connection.dispatch.<locals>._done_callback() at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_connection.py:466]>
+ok
+test_text_typed_after_approve_is_said_to_be_outside_the_approved_report_then_and_on_every_return (__main__.ReportTextBoundaries.test_text_typed_after_approve_is_said_to_be_outside_the_approved_report_then_and_on_every_return) ... ok
+test_text_outside_the_approved_report_goes_in_by_addendum_or_goes_away_by_discard (__main__.ReportTextBoundaries.test_text_outside_the_approved_report_goes_in_by_addendum_or_goes_away_by_discard) ... ok
+test_text_typed_after_approve_in_a_study_that_was_then_left_is_named_and_shown_on_return (__main__.ReportTextBoundaries.test_text_typed_after_approve_in_a_study_that_was_then_left_is_named_and_shown_on_return) ... ok
+test_the_notice_about_a_study_that_was_left_stays_until_it_is_dismissed_and_asks_nothing_at_log_out (__main__.ReportTextBoundaries.test_the_notice_about_a_study_that_was_left_stays_until_it_is_dismissed_and_asks_nothing_at_log_out)
+U5CLI-F13. The notice about a study that is not on screen stays until a person closes it; closing it changes ... ok
+test_text_typed_after_approve_into_conclusion_or_recommendation_only_is_said_the_same_way (__main__.ReportTextBoundaries.test_text_typed_after_approve_into_conclusion_or_recommendation_only_is_said_the_same_way)
+U5CLI-F14. The text the approval did not carry may sit in any of the three fields. ... ok
+test_an_approved_report_with_crlf_line_ends_is_not_said_to_differ_when_text_is_typed_and_taken_back (__main__.ReportTextBoundaries.test_an_approved_report_with_crlf_line_ends_is_not_said_to_differ_when_text_is_typed_and_taken_back)
+U5CLI-F12. The editor shows CR LF as LF and that is what an autosave stores: a draft that differs from the ... ok
+test_text_typed_after_save_is_said_and_the_next_save_takes_it (__main__.ReportTextBoundaries.test_text_typed_after_save_is_said_and_the_next_save_takes_it) ... ok
+test_approve_or_save_with_nothing_typed_afterwards_is_one_press_one_notice_and_no_bar (__main__.ReportTextBoundaries.test_approve_or_save_with_nothing_typed_afterwards_is_one_press_one_notice_and_no_bar) ... Task exception was never retrieved
+future: <Task finished name='Task-30561' coro=<Channel.send() done, defined at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_connection.py:61> exception=TargetClosedError('Channel.send: Target page, context or browser has been closed')>
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_connection.py", line 69, in send
+    return await self._connection.wrap_api_call(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_connection.py", line 559, in wrap_api_call
+    raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None
+playwright._impl._errors.TargetClosedError: Channel.send: Target page, context or browser has been closed
+ok
+test_the_draft_bar_points_only_at_controls_that_can_be_pressed (__main__.ReportTextBoundaries.test_the_draft_bar_points_only_at_controls_that_can_be_pressed) ... ok
+test_a_late_answer_of_view_approved_report_is_not_drawn_beside_another_selection (__main__.ReportTextBoundaries.test_a_late_answer_of_view_approved_report_is_not_drawn_beside_another_selection) ... ok
+test_a_busy_session_store_does_not_stop_the_autosave (__main__.ReportTextBoundaries.test_a_busy_session_store_does_not_stop_the_autosave) ... ok
+test_a_save_or_approve_accepted_after_the_study_was_left_puts_no_draft_back (__main__.ReportTextBoundaries.test_a_save_or_approve_accepted_after_the_study_was_left_puts_no_draft_back)
+Closure audit claim 1. The write of leaving study A waits behind the Save / Approve. When its turn comes the ... ok
+test_text_typed_after_the_press_and_left_is_stored_once_on_the_accepted_version (__main__.ReportTextBoundaries.test_text_typed_after_the_press_and_left_is_stored_once_on_the_accepted_version)
+The opposite of claim 1: text typed after pressing Save / Approve and before leaving is not what was ... ok
+test_a_save_whose_answer_was_lost_is_not_written_again_as_a_draft (__main__.ReportTextBoundaries.test_a_save_whose_answer_was_lost_is_not_written_again_as_a_draft)
+A021. The server committed the Save; the answer was lost. The reader stays on the study: the page reads ... ok
+test_log_out_after_a_save_whose_answer_was_lost_writes_no_draft_and_asks_nothing (__main__.ReportTextBoundaries.test_log_out_after_a_save_whose_answer_was_lost_writes_no_draft_and_asks_nothing)
+A021 at Log out. The read right after the lost answer fails too, so the preparation is what learns that the ... ok
+test_pressing_save_again_after_a_lost_answer_does_not_commit_twice_or_ask (__main__.ReportTextBoundaries.test_pressing_save_again_after_a_lost_answer_does_not_commit_twice_or_ask)
+A021. After "the outcome could not be confirmed" the reader presses Save again. The page first reads what ... ok
+test_a_save_that_never_reached_the_server_keeps_the_text_and_stores_it_as_a_draft (__main__.ReportTextBoundaries.test_a_save_that_never_reached_the_server_keeps_the_text_and_stores_it_as_a_draft)
+The opposite of A021: an unknown outcome is not "done" either. The Save never reached the server, so the ... ok
+test_text_typed_after_a_save_whose_answer_was_lost_is_kept_on_the_saved_version (__main__.ReportTextBoundaries.test_text_typed_after_a_save_whose_answer_was_lost_is_kept_on_the_saved_version)
+A021 with later text: the server committed what was sent; the sentence typed afterwards stays on screen and ... ok
+test_recover_draft_after_a_save_whose_answer_was_lost_stores_no_draft (__main__.ReportTextBoundaries.test_recover_draft_after_a_save_whose_answer_was_lost_stores_no_draft)
+A021 after the session ended: the capture of a study whose Save the server had committed is not written ... ok
+test_text_typed_while_a_discard_is_out_stays_when_the_server_accepts_the_discard (__main__.ReportTextBoundaries.test_text_typed_while_a_discard_is_out_stays_when_the_server_accepts_the_discard)
+Closure audit claim 2. The answer of Discard Draft does not wipe a sentence typed after the press: it stays ... ok
+test_a_discard_accepted_after_the_study_was_left_does_not_store_the_discarded_text (__main__.ReportTextBoundaries.test_a_discard_accepted_after_the_study_was_left_does_not_store_the_discarded_text)
+Closure audit claim 3. The reader types, presses Discard Draft and moves to study B before the answer; the ... ok
+test_a_discard_of_unknown_outcome_brings_back_nothing_discarded_and_keeps_what_was_typed_after (__main__.ReportTextBoundaries.test_a_discard_of_unknown_outcome_brings_back_nothing_discarded_and_keeps_what_was_typed_after)
+Draft resurrection (Astra 2026-10-06): the reader types, presses Discard Draft and stays on study A; the ... ok
+test_a_late_read_of_an_unknown_discard_does_not_take_back_text_stored_after_it (__main__.ReportTextBoundaries.test_a_late_read_of_an_unknown_discard_does_not_take_back_text_stored_after_it)
+Final review part 1, blocker 2. Discard Draft is accepted and its answer lost, the read that would confirm it ... Task was destroyed but it is pending!
+task: <Task pending name='Task-47584' coro=<BrowserContext._on_route() running at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_browser_context.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]> cb=[Connection.dispatch.<locals>._done_callback() at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_connection.py:466]>
+ok
+test_log_out_pressed_while_a_discard_is_out_waits_for_it_and_preserves_nothing_discarded (__main__.ReportTextBoundaries.test_log_out_pressed_while_a_discard_is_out_waits_for_it_and_preserves_nothing_discarded)
+Claim 3 at Log out: the preparation captures the text only after the discard's answer, so the text the ... ok
+test_a_draft_edited_back_to_the_saved_text_is_stored_as_the_reader_left_it (__main__.ReportTextBoundaries.test_a_draft_edited_back_to_the_saved_text_is_stored_as_the_reader_left_it)
+What is unconfirmed is decided by what this document did, not by comparing texts: a stored draft that the ... ok
+test_recover_draft_goes_on_past_a_study_the_server_refuses (__main__.ReportTextBoundaries.test_recover_draft_goes_on_past_a_study_the_server_refuses)
+A020. Unconfirmed text in studies A and B when the session ends; the server refuses A's write (a standing ... ok
+test_log_out_with_unsaved_viewer_work_asks_in_the_same_panel_and_names_it (__main__.ReportTextBoundaries.test_log_out_with_unsaved_viewer_work_asks_in_the_same_panel_and_names_it)
+A006. The report is saved; a viewer window of the session holds an unsaved measurement and finding text. ... ok
+test_back_to_editing_from_the_unsaved_work_question_discards_nothing (__main__.ReportTextBoundaries.test_back_to_editing_from_the_unsaved_work_question_discards_nothing)
+A006, the opposite mistake: Back to Editing ends nothing - the viewer resumes with its work, the session ... ok
+test_log_out_with_nothing_unsaved_asks_nothing_and_waits_for_nothing (__main__.ReportTextBoundaries.test_log_out_with_nothing_unsaved_asks_nothing_and_waits_for_nothing)
+A006, the opposite mistakes: with nothing unsaved Log out is one press without a prompt or a question to ... ok
+test_no_question_goes_to_other_documents_when_nothing_was_declared (__main__.ReportTextBoundaries.test_no_question_goes_to_other_documents_when_nothing_was_declared)
+The ordinary Log out posts nothing new on the session channel: only a declared holder is asked. ... ok
+test_a_document_that_declared_unsaved_work_and_does_not_answer_is_reported_as_unconfirmed (__main__.ReportTextBoundaries.test_a_document_that_declared_unsaved_work_and_does_not_answer_is_reported_as_unconfirmed)
+A006: a live document that declared unsaved work but does not answer within the bound is not taken for ... ok
+test_unsaved_report_text_is_stored_before_the_question_about_viewer_work (__main__.ReportTextBoundaries.test_unsaved_report_text_is_stored_before_the_question_about_viewer_work)
+A006 with typed report text: the draft is stored first (as before), then the reader is asked about the ... ok
+test_an_unsaved_tech_note_in_a_viewer_is_named_in_the_unsaved_work_panel (__main__.ReportTextBoundaries.test_an_unsaved_tech_note_in_a_viewer_is_named_in_the_unsaved_work_panel)
+Review DR-F01 (main's half; the viewer's side is tests/viewer_session_dom_test.py): a viewer window of the ... ok
+test_a_viewer_that_declared_an_unsaved_tech_note_and_does_not_answer_is_named_as_unconfirmed (__main__.ReportTextBoundaries.test_a_viewer_that_declared_an_unsaved_tech_note_and_does_not_answer_is_named_as_unconfirmed)
+Review DR-F01, as for the other kinds: a document that declared an unsaved Tech Note and does not answer ... ok
+test_a_tech_note_typed_in_another_worklist_tab_is_asked_about_at_log_out (__main__.ReportTextBoundaries.test_a_tech_note_typed_in_another_worklist_tab_is_asked_about_at_log_out) ... ok
+test_an_opened_or_saved_tech_note_in_another_worklist_tab_asks_nothing (__main__.ReportTextBoundaries.test_an_opened_or_saved_tech_note_in_another_worklist_tab_asks_nothing)
+The opposite side: a note opened and read but not edited, or edited and then saved (answer received), is no ... ok
+test_a_dictated_text_in_review_is_asked_about_at_log_out (__main__.ReportTextBoundaries.test_a_dictated_text_in_review_is_asked_about_at_log_out)
+A006: a transcript the reader has not inserted yet is unsaved work of this page. ... Task was destroyed but it is pending!
+task: <Task pending name='Task-55824' coro=<Page._on_route() running at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_page.py:305> wait_for=<Future pending cb=[Task.task_wakeup()]> cb=[Connection.dispatch.<locals>._done_callback() at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_connection.py:466]>
+ok
+test_the_viewer_the_list_opens_is_handed_the_lists_session (__main__.ReportTextBoundaries.test_the_viewer_the_list_opens_is_handed_the_lists_session)
+A015. The viewer window is opener-less; the list hands its session over by the window name before the ... ok
+test_a_second_press_while_the_viewer_is_loading_opens_no_second_window (__main__.ReportTextBoundaries.test_a_second_press_while_the_viewer_is_loading_opens_no_second_window)
+A015, the opposite mistake: the hand-over rides on the window's name until the viewer's first script takes it. ... ok
+test_reopening_from_the_list_rechecks_a_viewer_that_stopped_at_its_entry (__main__.ReportTextBoundaries.test_reopening_from_the_list_rechecks_a_viewer_that_stopped_at_its_entry)
+A015. A viewer that stopped at its entry tells the reader to open it again from the list. Doing so now ... ok
+
+----------------------------------------------------------------------
+Ran 83 tests in 432.599s
+
+OK

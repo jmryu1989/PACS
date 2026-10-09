@@ -1,0 +1,37 @@
+test_cd01_counts_follow_the_items_and_truncated_adds_a_plus (__main__.ClinicalContextDOMTest.test_cd01_counts_follow_the_items_and_truncated_adds_a_plus) ... ok
+test_cd01_every_section_state_has_its_english_name_and_korean_sentence (__main__.ClinicalContextDOMTest.test_cd01_every_section_state_has_its_english_name_and_korean_sentence) ... ok
+test_cd01_items_keep_the_order_the_server_sent (__main__.ClinicalContextDOMTest.test_cd01_items_keep_the_order_the_server_sent)
+I-01: the server orders items (original StudyDate descending, then UID); the screen does not order them again. ... ok
+test_cd02_failed_unread_and_stale_are_never_no_information (__main__.ClinicalContextDOMTest.test_cd02_failed_unread_and_stale_are_never_no_information) ... ok
+test_cd03_first_frame_after_a_change_shows_no_earlier_item_and_the_related_view (__main__.ClinicalContextDOMTest.test_cd03_first_frame_after_a_change_shows_no_earlier_item_and_the_related_view) ... ok
+test_cd03_path_ga_transport_cancel_happens_and_the_last_request_wins (__main__.ClinicalContextDOMTest.test_cd03_path_ga_transport_cancel_happens_and_the_last_request_wins) ... ok
+test_cd03_path_na_a_late_failure_of_the_same_study_changes_nothing (__main__.ClinicalContextDOMTest.test_cd03_path_na_a_late_failure_of_the_same_study_changes_nothing)
+L-12: A1 (cancel ignored) -> B -> A3 painted -> A1 ends 503 / 404 / 409 / a failed connection. ... ok
+test_cd03_path_na_late_answers_reach_api_and_are_refused_by_generation (__main__.ClinicalContextDOMTest.test_cd03_path_na_late_answers_reach_api_and_are_refused_by_generation) ... ok
+test_cd04_no_order_value_shows_and_order_keys_make_the_answer_malformed (__main__.ClinicalContextDOMTest.test_cd04_no_order_value_shows_and_order_keys_make_the_answer_malformed) ... ok
+test_cd05_every_item_carries_its_source_times_and_permission_basis (__main__.ClinicalContextDOMTest.test_cd05_every_item_carries_its_source_times_and_permission_basis) ... ok
+test_cd06_a_failed_reread_keeps_the_answer_as_stale_and_marks_stay_until_a_new_answer (__main__.ClinicalContextDOMTest.test_cd06_a_failed_reread_keeps_the_answer_as_stale_and_marks_stay_until_a_new_answer) ... ok
+test_cd06_later_list_observations_mark_sections_stale_and_nothing_reads_again (__main__.ClinicalContextDOMTest.test_cd06_later_list_observations_mark_sections_stale_and_nothing_reads_again) ... ok
+test_cd07_access_loss_on_a_reread_clears_the_items (__main__.ClinicalContextDOMTest.test_cd07_access_loss_on_a_reread_clears_the_items) ... ok
+test_cd08_identity_conflict_alert_and_row_marks (__main__.ClinicalContextDOMTest.test_cd08_identity_conflict_alert_and_row_marks) ... ok
+test_cd09_only_radiologist_or_admin_sessions_show_and_ask (__main__.ClinicalContextDOMTest.test_cd09_only_radiologist_or_admin_sessions_show_and_ask) ... ok
+test_cd10_markup_in_values_stays_text (__main__.ClinicalContextDOMTest.test_cd10_markup_in_values_stays_text) ... ok
+test_cd11_whole_answer_failures_retry_and_one_read_at_a_time (__main__.ClinicalContextDOMTest.test_cd11_whole_answer_failures_retry_and_one_read_at_a_time) ... ok
+test_cd12_path_na_answers_that_arrive_after_the_end_paint_nothing (__main__.ClinicalContextDOMTest.test_cd12_path_na_answers_that_arrive_after_the_end_paint_nothing)
+L-07 / L-13 / E-09: the cancel-ignoring call ends after the session end with a success, a 503 or a failed ... ok
+test_cd12_session_end_empties_the_panel_before_anything_else_on_path_ga (__main__.ClinicalContextDOMTest.test_cd12_session_end_empties_the_panel_before_anything_else_on_path_ga) ... ok
+test_cd12_the_panels_own_401_is_a_failed_read_and_only_the_servers_end_empties_the_panel (__main__.ClinicalContextDOMTest.test_cd12_the_panels_own_401_is_a_failed_read_and_only_the_servers_end_empties_the_panel)
+E-05 / F-15 under S7-U5. A 401 that does not say the session ended is that read's failure: the panel says ... ok
+test_cd13_a_large_answer_stays_within_the_column_bound (__main__.ClinicalContextDOMTest.test_cd13_a_large_answer_stays_within_the_column_bound) ... ok
+test_cd13_the_rest_of_the_screen_is_unchanged_and_nothing_is_stored (__main__.ClinicalContextDOMTest.test_cd13_the_rest_of_the_screen_is_unchanged_and_nothing_is_stored) ... ok
+test_cd14_one_request_per_change_of_the_viewed_study_in_order_and_none_otherwise (__main__.ClinicalContextDOMTest.test_cd14_one_request_per_change_of_the_viewed_study_in_order_and_none_otherwise) ... ok
+test_cd15_a_malformed_first_read_or_refresh_ends_failed_and_retry_recovers (__main__.ClinicalContextDOMTest.test_cd15_a_malformed_first_read_or_refresh_ends_failed_and_retry_recovers)
+F-13, F-06 and Astra S7-U4b-R-001 F01: a malformed answer ends the read. On a first read and on a Refresh over a ... ok
+test_cd15_every_malformed_answer_is_failed_with_nothing_painted (__main__.ClinicalContextDOMTest.test_cd15_every_malformed_answer_is_failed_with_nothing_painted) ... ok
+test_cd16_offline_hides_and_asks_nothing_until_back_online (__main__.ClinicalContextDOMTest.test_cd16_offline_hides_and_asks_nothing_until_back_online) ... ok
+test_cd17_an_answer_about_another_study_changes_nothing (__main__.ClinicalContextDOMTest.test_cd17_an_answer_about_another_study_changes_nothing) ... ok
+
+----------------------------------------------------------------------
+Ran 27 tests in 68.830s
+
+OK

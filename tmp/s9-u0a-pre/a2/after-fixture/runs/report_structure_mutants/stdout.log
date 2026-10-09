@@ -1,0 +1,26 @@
+main.html sha256 0ed62cf6ee57f011e2ac2ea02574592d424def403ad3fcac521aebd545eac239
+report-structure.js sha256 2dbc4676006481d36cc263872520a76afce4b6dddc501e148cf87bb26ff75077
+marker occurrences=1 '<div class="modal" id="structmodal"'
+anchor M1   file=structure occurrences=1 expect='S3-STRUCT M1: the sentence must occupy a whole line and delete nothing'
+anchor M2   file=main      occurrences=1 expect='S3-STRUCT M2: an existing citation block may not be cut in half'
+anchor M3c  file=main      occurrences=1 expect='S3-STRUCT M3c: a refused apply must leave every byte of the report alone'
+anchor M4c  file=main      occurrences=1 expect='S3-STRUCT M4c: a plan the person did not read may not be sent'
+anchor M5c  file=main      occurrences=1 expect='S3-STRUCT M5c: loading the server draft must replace the stale keep list'
+anchor M6   file=structure occurrences=1 expect='S3-STRUCT M6: two identical sentences must refuse, not guess which one to replace'
+fixture runs resolve: BASE_BLOCK, REPORT_BLOCK
+BASELINE exit=0 tests=22 ok=True
+M1   file=structure case=test_d02_apply_writes_the_field_only_after_the_server_answered exit=1 expect_matched=True killed=True
+      AssertionError: 'typed by handSYNTHETIC-ITEM boolean = yes' != 'typed by hand\nSYNTHETIC-ITEM boolean = yes'
+M2   file=main      case=test_d06_a_new_sentence_never_lands_inside_a_cited_block exit=1 expect_matched=True killed=True
+      AssertionError: 2 != 3 : S3-STRUCT M2: an existing citation block may not be cut in half
+M3c  file=main      case=test_d07_a_refused_apply_leaves_the_body_untouched exit=1 expect_matched=True killed=True
+      AssertionError: 'first line\nsecond line\nthird line\nSYNTHETIC-ITEM choice = alpha' != 'first line\nsecond line\nthird line'
+M4c  file=main      case=test_d15_a_plan_that_went_stale_sends_nothing_and_asks_again exit=1 expect_matched=True killed=True
+      AssertionError: 1 != 0 : S3-STRUCT M4c: a plan the person did not read may not be sent
+M5c  file=main      case=test_d08b_load_server_draft_re_reads_structure_before_the_next_save exit=1 expect_matched=True killed=True
+      AssertionError: Lists differ: ['s-old'] != ['s-server']
+M6   file=structure case=test_d05_an_ambiguous_old_sentence_refuses_and_sends_nothing exit=1 expect_matched=True killed=True
+      AssertionError: 1 != 0 : S3-STRUCT M6: two identical sentences must refuse, not guess which one to replace
+sources unchanged=True
+summary written to C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tmp\s9-u0a-pre\a2\after-fixture\report_structure_mutants.json
+all 6 mutants killed

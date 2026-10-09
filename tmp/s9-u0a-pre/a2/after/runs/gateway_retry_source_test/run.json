@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "command": [
+    "C:\\Users\\norne\\PACS\\tmp\\hp-dom-venv\\Scripts\\python.exe",
+    "-B",
+    "tests/gateway_retry_source_test.py",
+    "-v"
+  ],
+  "cwd": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre",
+  "status": "completed",
+  "started_at_utc": "2026-10-09T05:30:36.450054+00:00",
+  "ended_at_utc": "2026-10-09T05:30:37.385538+00:00",
+  "exit_code": 0,
+  "recorder_exit_code": 0,
+  "launch_error": null,
+  "git_head_before": "00bead586153fbae668c18f1d5387a6a2a13e4b0",
+  "git_head_after": "00bead586153fbae668c18f1d5387a6a2a13e4b0",
+  "files_before": [
+    {
+      "requested": "tests/gateway_retry_source_test.py",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\gateway_retry_source_test.py",
+      "status": "present",
+      "sha256": "7d1ad07cf8d61804e74d96852ba64a1777eea34127021d70deb264c917cbf19b",
+      "lf_sha256": "17b263ee71437021763bad0e79b3cb46a934a703ef6ed48b68d6af743422534b"
+    },
+    {
+      "requested": "worklist-v0/hpacs-lite/main.html",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\worklist-v0\\hpacs-lite\\main.html",
+      "status": "present",
+      "sha256": "0ed62cf6ee57f011e2ac2ea02574592d424def403ad3fcac521aebd545eac239",
+      "lf_sha256": "225b3cc16799d94474cc0d56ce0a5ed647fd23de153979223fddac294c480713"
+    },
+    {
+      "requested": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tmp\\s9-u0a-pre\\tools\\a2_run.py",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tmp\\s9-u0a-pre\\tools\\a2_run.py",
+      "status": "present",
+      "sha256": "86655f6c58055639241b821a47f764ee52ede832219836ef7158ad3db475b949",
+      "lf_sha256": "86655f6c58055639241b821a47f764ee52ede832219836ef7158ad3db475b949"
+    },
+    {
+      "requested": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tmp\\s9-u0a-pre\\a2\\after\\inputs-before.json",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tmp\\s9-u0a-pre\\a2\\after\\inputs-before.json",
+      "status": "present",
+      "sha256": "d0f5c27ae14d86a60994b8d13a79a531cdedfd9bcea44a37079dab9c7c83429b",
+      "lf_sha256": "c2965c4b26305e7de5306ee381926d289a786b80a49b1f6387620bf6b9c9f618"
+    },
+    {
+      "requested": "tests/page_source.cjs",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\page_source.cjs",
+      "status": "present",
+      "sha256": "2c10c2c30085071dbe8285e453bb0c9beb066dc3ed1d6bfe7d2a2c4c80651061",
+      "lf_sha256": "40e8d86620a58c364d3a5c787ad127ffef95bd188e6626b50d5506dc0c96d5fd"
+    },
+    {
+      "requested": "tests/page_source.py",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\page_source.py",
+      "status": "present",
+      "sha256": "a427afb4d4583550f25de38e9adc3ae01158140a152560c89828d5bbba3f1dc4",
+      "lf_sha256": "92b5f2d2e51ae46b463ecc2fdf95dd10b68e049009aa9ba10c2df038a31be4e9"
+    },
+    {
+      "requested": "tests/main_move_spec.json",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\main_move_spec.json",
+      "status": "present",
+      "sha256": "af76b39a776c23cfbfffa6fd2a2be75d38ec0aa2c933bfce93850c65d341c1a2",
+      "lf_sha256": "af76b39a776c23cfbfffa6fd2a2be75d38ec0aa2c933bfce93850c65d341c1a2"
+    },
+    {
+      "requested": "tests/main_move_contract.cjs",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\main_move_contract.cjs",
+      "status": "present",
+      "sha256": "c770765fe77c5e74e649966357939607a3e6477f11f5756a9046f5cd0a5550f2",
+      "lf_sha256": "69274c0b2d00eef08f46fe0e199a759f1f883e8a36a8b53abcb052ae724a8a3d"
+    },
+    {
+      "requested": "tests/main_split_harness.cjs",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\main_split_harness.cjs",
+      "status": "present",
+      "sha256": "54209fcb093802070ccda2fd9993b90e0e3797ea9cc5d8b1d8e4ca13dc73196d",
+      "lf_sha256": "54209fcb093802070ccda2fd9993b90e0e3797ea9cc5d8b1d8e4ca13dc73196d"
+    },
+    {
+      "requested": "tests/main_split_harness.py",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\main_split_harness.py",
+      "status": "present",
+      "sha256": "2c2a4f10649f9f9cab1208077c5eb35391e39a066f00a8b0629dffdbfe1d186f",
+      "lf_sha256": "2c2a4f10649f9f9cab1208077c5eb35391e39a066f00a8b0629dffdbfe1d186f"
+    }
+  ],
+  "files_after": [
+    {
+      "requested": "tests/gateway_retry_source_test.py",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\gateway_retry_source_test.py",
+      "status": "present",
+      "sha256": "7d1ad07cf8d61804e74d96852ba64a1777eea34127021d70deb264c917cbf19b",
+      "lf_sha256": "17b263ee71437021763bad0e79b3cb46a934a703ef6ed48b68d6af743422534b"
+    },
+    {
+      "requested": "worklist-v0/hpacs-lite/main.html",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\worklist-v0\\hpacs-lite\\main.html",
+      "status": "present",
+      "sha256": "0ed62cf6ee57f011e2ac2ea02574592d424def403ad3fcac521aebd545eac239",
+      "lf_sha256": "225b3cc16799d94474cc0d56ce0a5ed647fd23de153979223fddac294c480713"
+    },
+    {
+      "requested": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tmp\\s9-u0a-pre\\tools\\a2_run.py",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tmp\\s9-u0a-pre\\tools\\a2_run.py",
+      "status": "present",
+      "sha256": "86655f6c58055639241b821a47f764ee52ede832219836ef7158ad3db475b949",
+      "lf_sha256": "86655f6c58055639241b821a47f764ee52ede832219836ef7158ad3db475b949"
+    },
+    {
+      "requested": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tmp\\s9-u0a-pre\\a2\\after\\inputs-before.json",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tmp\\s9-u0a-pre\\a2\\after\\inputs-before.json",
+      "status": "present",
+      "sha256": "d0f5c27ae14d86a60994b8d13a79a531cdedfd9bcea44a37079dab9c7c83429b",
+      "lf_sha256": "c2965c4b26305e7de5306ee381926d289a786b80a49b1f6387620bf6b9c9f618"
+    },
+    {
+      "requested": "tests/page_source.cjs",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\page_source.cjs",
+      "status": "present",
+      "sha256": "2c10c2c30085071dbe8285e453bb0c9beb066dc3ed1d6bfe7d2a2c4c80651061",
+      "lf_sha256": "40e8d86620a58c364d3a5c787ad127ffef95bd188e6626b50d5506dc0c96d5fd"
+    },
+    {
+      "requested": "tests/page_source.py",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\page_source.py",
+      "status": "present",
+      "sha256": "a427afb4d4583550f25de38e9adc3ae01158140a152560c89828d5bbba3f1dc4",
+      "lf_sha256": "92b5f2d2e51ae46b463ecc2fdf95dd10b68e049009aa9ba10c2df038a31be4e9"
+    },
+    {
+      "requested": "tests/main_move_spec.json",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\main_move_spec.json",
+      "status": "present",
+      "sha256": "af76b39a776c23cfbfffa6fd2a2be75d38ec0aa2c933bfce93850c65d341c1a2",
+      "lf_sha256": "af76b39a776c23cfbfffa6fd2a2be75d38ec0aa2c933bfce93850c65d341c1a2"
+    },
+    {
+      "requested": "tests/main_move_contract.cjs",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\main_move_contract.cjs",
+      "status": "present",
+      "sha256": "c770765fe77c5e74e649966357939607a3e6477f11f5756a9046f5cd0a5550f2",
+      "lf_sha256": "69274c0b2d00eef08f46fe0e199a759f1f883e8a36a8b53abcb052ae724a8a3d"
+    },
+    {
+      "requested": "tests/main_split_harness.cjs",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\main_split_harness.cjs",
+      "status": "present",
+      "sha256": "54209fcb093802070ccda2fd9993b90e0e3797ea9cc5d8b1d8e4ca13dc73196d",
+      "lf_sha256": "54209fcb093802070ccda2fd9993b90e0e3797ea9cc5d8b1d8e4ca13dc73196d"
+    },
+    {
+      "requested": "tests/main_split_harness.py",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\main_split_harness.py",
+      "status": "present",
+      "sha256": "2c2a4f10649f9f9cab1208077c5eb35391e39a066f00a8b0629dffdbfe1d186f",
+      "lf_sha256": "2c2a4f10649f9f9cab1208077c5eb35391e39a066f00a8b0629dffdbfe1d186f"
+    }
+  ],
+  "stdout": "stdout.log",
+  "stderr": "stderr.log",
+  "log_files": [
+    {
+      "requested": "stdout.log",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tmp\\s9-u0a-pre\\a2\\after\\runs\\gateway_retry_source_test\\stdout.log",
+      "status": "present",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "lf_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "requested": "stderr.log",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tmp\\s9-u0a-pre\\a2\\after\\runs\\gateway_retry_source_test\\stderr.log",
+      "status": "present",
+      "sha256": "c356e027366c3206253fdf03336585390ef9220d74b8494d49eaf333901017d5",
+      "lf_sha256": "d7e3c1f34ebc1db9c68c53cc6e2f0b0b88a77d2e8536d2a11bd610a852f44deb"
+    }
+  ],
+  "duration_seconds": 0.9220000000004802
+}

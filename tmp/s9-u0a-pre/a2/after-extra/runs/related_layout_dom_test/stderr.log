@@ -1,0 +1,24 @@
+test_fc1_fc2_related_rows_without_undeclared_writes (__main__.RelatedLayoutDOMTest.test_fc1_fc2_related_rows_without_undeclared_writes) ... ok
+test_fc3_the_page_override_is_read_once_per_process (__main__.RelatedLayoutDOMTest.test_fc3_the_page_override_is_read_once_per_process) ... ok
+test_fc4_fc5_resize_reapplies_and_stored_layout_restores (__main__.RelatedLayoutDOMTest.test_fc4_fc5_resize_reapplies_and_stored_layout_restores) ... ok
+test_fc6_fc8_clinical_context_and_the_five_prior_report_states (__main__.RelatedLayoutDOMTest.test_fc6_fc8_clinical_context_and_the_five_prior_report_states) ... ok
+test_rl01_small_window_context_visible (__main__.RelatedLayoutDOMTest.test_rl01_small_window_context_visible) ... ok
+test_rl02_small_window_row_pointer (__main__.RelatedLayoutDOMTest.test_rl02_small_window_row_pointer) ... ok
+test_rl03_clinical_column_contained (__main__.RelatedLayoutDOMTest.test_rl03_clinical_column_contained) ... ok
+test_rl04_small_window_keyboard_rows (__main__.RelatedLayoutDOMTest.test_rl04_small_window_keyboard_rows) ... ok
+test_rl05_stored_size_short_window (__main__.RelatedLayoutDOMTest.test_rl05_stored_size_short_window) ... ok
+test_rl05b_stored_size_back_when_the_work_area_grows_without_a_resize (__main__.RelatedLayoutDOMTest.test_rl05b_stored_size_back_when_the_work_area_grows_without_a_resize)
+RL-05b (S7-U5 H1, review of 8c2cf37 F-02): an open View group is a second toolbar row in the flow, so the work ... ok
+test_rl07_window_variants (__main__.RelatedLayoutDOMTest.test_rl07_window_variants) ... ok
+test_rl09_content_variants (__main__.RelatedLayoutDOMTest.test_rl09_content_variants) ... ok
+test_rl10_portrait_selected_row_whole_and_on_top (__main__.RelatedLayoutDOMTest.test_rl10_portrait_selected_row_whole_and_on_top) ... ok
+test_rl11_reading_workspace_header_never_covers_a_row (__main__.RelatedLayoutDOMTest.test_rl11_reading_workspace_header_never_covers_a_row) ... ok
+test_rl11b_related_rows_that_change_without_a_resize_are_measured_again (__main__.RelatedLayoutDOMTest.test_rl11b_related_rows_that_change_without_a_resize_are_measured_again)
+RL-11b (integration review F05): inside the Reading Workspace at a fixed window size the Related rows change ... ok
+test_rl12_image_findings_never_covers_the_report_buttons_or_the_first_related_row (__main__.RelatedLayoutDOMTest.test_rl12_image_findings_never_covers_the_report_buttons_or_the_first_related_row) ... ok
+test_rl06_rl08_layout_equal_to_the_base_where_the_rules_do_not_apply (__main__.RelatedLayoutEquivalence.test_rl06_rl08_layout_equal_to_the_base_where_the_rules_do_not_apply) ... ok
+
+----------------------------------------------------------------------
+Ran 17 tests in 225.410s
+
+OK

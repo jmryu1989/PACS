@@ -1,0 +1,9 @@
+test_every_storage_state_keeps_the_one_row_header (__main__.WorklistHeaderDOMTest.test_every_storage_state_keeps_the_one_row_header) ... ok
+test_log_out_stays_visible_and_reachable_at_every_width (__main__.WorklistHeaderDOMTest.test_log_out_stays_visible_and_reachable_at_every_width) ... ok
+test_portrait_layout_keeps_the_same_header (__main__.WorklistHeaderDOMTest.test_portrait_layout_keeps_the_same_header) ... ok
+test_reading_workspace_header_keeps_log_out_on_screen (__main__.WorklistHeaderDOMTest.test_reading_workspace_header_keeps_log_out_on_screen) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 153.652s
+
+OK

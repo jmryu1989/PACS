@@ -1,0 +1,14 @@
+test_d05_an_ambiguous_old_sentence_refuses_and_sends_nothing (__main__.ReportStructureDOMTest.test_d05_an_ambiguous_old_sentence_refuses_and_sends_nothing) ... FAIL
+
+======================================================================
+FAIL: test_d05_an_ambiguous_old_sentence_refuses_and_sends_nothing (__main__.ReportStructureDOMTest.test_d05_an_ambiguous_old_sentence_refuses_and_sends_nothing)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\report_structure_dom_test.py", line 445, in test_d05_an_ambiguous_old_sentence_refuses_and_sends_nothing
+    self.assertEqual(page.evaluate("() => calls.length"), 0,
+AssertionError: 1 != 0 : S3-STRUCT M6: two identical sentences must refuse, not guess which one to replace
+
+----------------------------------------------------------------------
+Ran 1 test in 1.063s
+
+FAILED (failures=1)

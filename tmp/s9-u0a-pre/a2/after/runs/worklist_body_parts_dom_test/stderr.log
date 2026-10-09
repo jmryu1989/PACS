@@ -1,0 +1,8 @@
+test_real_metadata_filters_tokens_empty_and_errors_then_completes_saved_chip (__main__.WorklistBodyPartsDOMTest.test_real_metadata_filters_tokens_empty_and_errors_then_completes_saved_chip) ... ok
+test_saved_manager_refreshes_live_counts_and_preserves_dirty_body_part_rule (__main__.WorklistBodyPartsDOMTest.test_saved_manager_refreshes_live_counts_and_preserves_dirty_body_part_rule) ... ok
+test_scope_change_discards_cached_parts_without_changing_selection_or_draft (__main__.WorklistBodyPartsDOMTest.test_scope_change_discards_cached_parts_without_changing_selection_or_draft) ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 1.757s
+
+OK

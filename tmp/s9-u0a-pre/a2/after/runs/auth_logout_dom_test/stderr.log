@@ -1,0 +1,75 @@
+test_am5_a_failure_that_proves_no_end_closes_nothing (__main__.LogoutDOMTest.test_am5_a_failure_that_proves_no_end_closes_nothing) ... ok
+test_br01_a_401_that_names_the_session_ended_confirms_without_a_post (__main__.LogoutDOMTest.test_br01_a_401_that_names_the_session_ended_confirms_without_a_post) ... ok
+test_br01_admin_and_clinician_close_before_the_post (__main__.LogoutDOMTest.test_br01_admin_and_clinician_close_before_the_post) ... ok
+test_br01_main_log_out_closes_before_the_post_and_shares_it (__main__.LogoutDOMTest.test_br01_main_log_out_closes_before_the_post_and_shares_it) ... ok
+test_br02_a_busy_session_and_the_fixed_500_stay_on_the_landing_with_retry (__main__.LogoutDOMTest.test_br02_a_busy_session_and_the_fixed_500_stay_on_the_landing_with_retry) ... ok
+test_br03_a_second_tab_without_broadcastchannel_moves_once_on_storage (__main__.LogoutDOMTest.test_br03_a_second_tab_without_broadcastchannel_moves_once_on_storage) ... ok
+test_br03_the_unconfirmed_end_persists_and_a_second_tab_moves_once (__main__.LogoutDOMTest.test_br03_the_unconfirmed_end_persists_and_a_second_tab_moves_once) ... ok
+test_br04_a_login_press_erases_no_record_and_opens_no_work (__main__.LogoutDOMTest.test_br04_a_login_press_erases_no_record_and_opens_no_work) ... ok
+test_br04_retry_confirms_and_the_landing_stays_until_login (__main__.LogoutDOMTest.test_br04_retry_confirms_and_the_landing_stays_until_login) ... Task was destroyed but it is pending!
+task: <Task pending name='Task-4153' coro=<BrowserContext._on_route() running at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_browser_context.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]> cb=[Connection.dispatch.<locals>._done_callback() at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_connection.py:466]>
+ok
+test_br05_a_logout_refused_for_another_login_ends_nothing_and_keeps_that_login (__main__.LogoutDOMTest.test_br05_a_logout_refused_for_another_login_ends_nothing_and_keeps_that_login) ... ok
+test_br05_how_the_answer_is_read (__main__.LogoutDOMTest.test_br05_how_the_answer_is_read) ... ok
+test_br06_a_late_session_answer_restores_nothing (__main__.LogoutDOMTest.test_br06_a_late_session_answer_restores_nothing) ... Task was destroyed but it is pending!
+task: <Task pending name='Task-6325' coro=<BrowserContext._on_route() running at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_browser_context.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]> cb=[Connection.dispatch.<locals>._done_callback() at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_connection.py:466]>
+ok
+test_br06_an_explicit_login_elsewhere_is_not_undone_by_a_late_result (__main__.LogoutDOMTest.test_br06_an_explicit_login_elsewhere_is_not_undone_by_a_late_result) ... ok
+test_br08_the_icons_the_pages_declare_come_from_the_table (__main__.LogoutDOMTest.test_br08_the_icons_the_pages_declare_come_from_the_table) ... ok
+test_br09_an_end_record_that_cannot_be_written_still_keeps_the_session_out (__main__.LogoutDOMTest.test_br09_an_end_record_that_cannot_be_written_still_keeps_the_session_out) ... ok
+test_br09_when_nothing_can_be_stored_a_new_document_is_unknown_and_enters_nothing (__main__.LogoutDOMTest.test_br09_when_nothing_can_be_stored_a_new_document_is_unknown_and_enters_nothing) ... ok
+test_ctx_note_409_refusal_sentence_and_original_reload_confirmation (__main__.LogoutDOMTest.test_ctx_note_409_refusal_sentence_and_original_reload_confirmation) ... ok
+test_ctx_note_answered_refusal_closes_without_history (__main__.LogoutDOMTest.test_ctx_note_answered_refusal_closes_without_history) ... ok
+test_ctx_note_every_5xx_is_unknown_including_real_503_body (__main__.LogoutDOMTest.test_ctx_note_every_5xx_is_unknown_including_real_503_body) ... ok
+test_ctx_note_unknown_close_cancel_then_escape_during_minute_outage (__main__.LogoutDOMTest.test_ctx_note_unknown_close_cancel_then_escape_during_minute_outage) ... ok
+test_ctx_note_unreadable_400_is_still_an_answered_refusal (__main__.LogoutDOMTest.test_ctx_note_unreadable_400_is_still_an_answered_refusal) ... ok
+test_ctx_note_witness_before_foreign_revision_keeps_and_uses_up_the_confirmed_reason (__main__.LogoutDOMTest.test_ctx_note_witness_before_foreign_revision_keeps_and_uses_up_the_confirmed_reason) ... ok
+test_ctx_note_witness_unchanged_text_keeps_reason_and_confirms_only_unsent_correction (__main__.LogoutDOMTest.test_ctx_note_witness_unchanged_text_keeps_reason_and_confirms_only_unsent_correction) ... ok
+test_cut_the_patient_id_copy_finishing_after_the_end_paints_nothing (__main__.LogoutDOMTest.test_cut_the_patient_id_copy_finishing_after_the_end_paints_nothing) ... ok
+test_d01_am7_the_same_content_in_two_documents_converges_without_a_question (__main__.LogoutDOMTest.test_d01_am7_the_same_content_in_two_documents_converges_without_a_question) ... ok
+test_d01_two_documents_on_the_same_revision_the_loser_keeps_its_text_and_is_not_saved (__main__.LogoutDOMTest.test_d01_two_documents_on_the_same_revision_the_loser_keeps_its_text_and_is_not_saved) ... ok
+test_d07_am8_a_lost_or_malformed_answer_is_confirmed_by_a_read_before_anyone_is_told (__main__.LogoutDOMTest.test_d07_am8_a_lost_or_malformed_answer_is_confirmed_by_a_read_before_anyone_is_told) ... ok
+test_d07_am8_a_slow_save_past_its_deadline_is_not_a_failure_and_never_ends_the_session (__main__.LogoutDOMTest.test_d07_am8_a_slow_save_past_its_deadline_is_not_a_failure_and_never_ends_the_session) ... ok
+test_dp01_the_draft_is_saved_before_the_end (__main__.LogoutDOMTest.test_dp01_the_draft_is_saved_before_the_end) ... ok
+test_dp03_back_to_editing_and_an_explicit_discard (__main__.LogoutDOMTest.test_dp03_back_to_editing_and_an_explicit_discard) ... ok
+test_dp05_an_explicit_discard_after_the_session_ended (__main__.LogoutDOMTest.test_dp05_an_explicit_discard_after_the_session_ended) ... ok
+test_dp06_with_nothing_to_write_the_end_follows_at_once (__main__.LogoutDOMTest.test_dp06_with_nothing_to_write_the_end_follows_at_once) ... ok
+test_dp07_am6_log_out_waits_for_a_save_in_flight_and_goes_on_by_itself (__main__.LogoutDOMTest.test_dp07_am6_log_out_waits_for_a_save_in_flight_and_goes_on_by_itself) ... ok
+test_dp10_am7_a_slow_autosave_under_the_preparation_is_settled_without_asking_after_back_to_editing (__main__.LogoutDOMTest.test_dp10_am7_a_slow_autosave_under_the_preparation_is_settled_without_asking_after_back_to_editing) ... ok
+test_dp11_am6_back_to_editing_asks_nothing_and_a_session_that_ended_meanwhile_keeps_the_text (__main__.LogoutDOMTest.test_dp11_am6_back_to_editing_asks_nothing_and_a_session_that_ended_meanwhile_keeps_the_text) ... ok
+test_dp15_d02_a_cut_off_autosave_never_replaces_the_next_autosave (__main__.LogoutDOMTest.test_dp15_d02_a_cut_off_autosave_never_replaces_the_next_autosave) ... ok
+test_dp15_d12_a_cut_off_autosave_never_replaces_the_preparation_save (__main__.LogoutDOMTest.test_dp15_d12_a_cut_off_autosave_never_replaces_the_preparation_save) ... ok
+test_dp15_d12_a_cut_off_write_finishing_late_never_replaces_the_recovery (__main__.LogoutDOMTest.test_dp15_d12_a_cut_off_write_finishing_late_never_replaces_the_recovery) ... ok
+test_note_not_stored_across_cancel_keeps_input_and_the_next_save_works (__main__.LogoutDOMTest.test_note_not_stored_across_cancel_keeps_input_and_the_next_save_works) ... ok
+test_note_stored_across_cancel_confirms_itself_before_the_next_save (__main__.LogoutDOMTest.test_note_stored_across_cancel_confirms_itself_before_the_next_save) ... ok
+test_s01_log_out_prepares_freezes_the_text_and_claims_no_end (__main__.LogoutDOMTest.test_s01_log_out_prepares_freezes_the_text_and_claims_no_end) ... ok
+test_s02_a_save_that_is_refused_or_of_unknown_outcome_keeps_the_text_and_ends_nothing (__main__.LogoutDOMTest.test_s02_a_save_that_is_refused_or_of_unknown_outcome_keeps_the_text_and_ends_nothing) ... ok
+test_s02_d01_a_save_that_conflicts_keeps_the_text_and_never_resends_by_itself (__main__.LogoutDOMTest.test_s02_d01_a_save_that_conflicts_keeps_the_text_and_never_resends_by_itself) ... ok
+test_s02_d07_a_save_whose_answer_is_lost_but_is_found_stored_ends_without_a_question (__main__.LogoutDOMTest.test_s02_d07_a_save_whose_answer_is_lost_but_is_found_stored_ends_without_a_question) ... ok
+test_s03_a_session_that_ends_outside_a_preparation_keeps_unsaved_text_in_this_window (__main__.LogoutDOMTest.test_s03_a_session_that_ends_outside_a_preparation_keeps_unsaved_text_in_this_window) ... ok
+test_s03_the_session_ending_during_the_preparation_closes_at_once_and_quarantines_the_text (__main__.LogoutDOMTest.test_s03_the_session_ending_during_the_preparation_closes_at_once_and_quarantines_the_text) ... ok
+test_s04_cancelling_is_a_new_epoch_answers_from_before_never_apply (__main__.LogoutDOMTest.test_s04_cancelling_is_a_new_epoch_answers_from_before_never_apply) ... ok
+test_s04_cut_a_clipboard_read_finishing_after_the_text_changed_or_a_b_a_writes_nothing (__main__.LogoutDOMTest.test_s04_cut_a_clipboard_read_finishing_after_the_text_changed_or_a_b_a_writes_nothing) ... ok
+test_s08_a_document_that_cannot_read_or_verify_its_storage_stays_closed (__main__.LogoutDOMTest.test_s08_a_document_that_cannot_read_or_verify_its_storage_stays_closed) ... Task was destroyed but it is pending!
+task: <Task pending name='Task-29102' coro=<BrowserContext._on_route() running at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_browser_context.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]> cb=[Connection.dispatch.<locals>._done_callback() at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_connection.py:466]>
+Task was destroyed but it is pending!
+task: <Task pending name='Task-29095' coro=<BrowserContext._on_route() running at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_browser_context.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]> cb=[Connection.dispatch.<locals>._done_callback() at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_connection.py:466]>
+Task was destroyed but it is pending!
+task: <Task pending name='Task-29761' coro=<BrowserContext._on_route() running at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_browser_context.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]> cb=[Connection.dispatch.<locals>._done_callback() at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_connection.py:466]>
+Task was destroyed but it is pending!
+task: <Task pending name='Task-29768' coro=<BrowserContext._on_route() running at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_browser_context.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]> cb=[Connection.dispatch.<locals>._done_callback() at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_connection.py:466]>
+ok
+test_s08_an_entry_proof_enters_once_and_a_replayed_or_foreign_proof_enters_nothing (__main__.LogoutDOMTest.test_s08_an_entry_proof_enters_once_and_a_replayed_or_foreign_proof_enters_nothing) ... ok
+test_s09_a_login_error_or_a_failed_confirmation_starts_no_login_by_itself (__main__.LogoutDOMTest.test_s09_a_login_error_or_a_failed_confirmation_starts_no_login_by_itself) ... ok
+test_s09_a_valid_session_lands_by_role_and_demo_asks_no_server (__main__.LogoutDOMTest.test_s09_a_valid_session_lands_by_role_and_demo_asks_no_server) ... ok
+test_s09_no_session_starts_the_login_by_itself_and_enters_without_a_click (__main__.LogoutDOMTest.test_s09_no_session_starts_the_login_by_itself_and_enters_without_a_click) ... Task was destroyed but it is pending!
+task: <Task pending name='Task-34071' coro=<BrowserContext._on_route() running at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_browser_context.py:258> wait_for=<Future pending cb=[Task.task_wakeup()]> cb=[Connection.dispatch.<locals>._done_callback() at C:\Users\norne\PACS\tmp\hp-dom-venv\Lib\site-packages\playwright\_impl\_connection.py:466]>
+ok
+test_s10_d12_a_differing_owner_or_snapshot_retains_the_capture (__main__.LogoutDOMTest.test_s10_d12_a_differing_owner_or_snapshot_retains_the_capture) ... ok
+test_s10_recover_draft_discards_the_capture_only_on_an_exact_match (__main__.LogoutDOMTest.test_s10_recover_draft_discards_the_capture_only_on_an_exact_match) ... ok
+test_s11_crossed_and_duplicate_notices_close_only_the_matching_session (__main__.LogoutDOMTest.test_s11_crossed_and_duplicate_notices_close_only_the_matching_session) ... ok
+
+----------------------------------------------------------------------
+Ran 56 tests in 164.725s
+
+OK

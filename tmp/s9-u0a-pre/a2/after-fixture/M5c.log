@@ -1,0 +1,21 @@
+test_d08b_load_server_draft_re_reads_structure_before_the_next_save (__main__.ReportStructureDOMTest.test_d08b_load_server_draft_re_reads_structure_before_the_next_save) ... FAIL
+
+======================================================================
+FAIL: test_d08b_load_server_draft_re_reads_structure_before_the_next_save (__main__.ReportStructureDOMTest.test_d08b_load_server_draft_re_reads_structure_before_the_next_save)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\report_structure_dom_test.py", line 530, in test_d08b_load_server_draft_re_reads_structure_before_the_next_save
+    self.assertEqual(page.evaluate("() => structKeep()"), ["s-server"],
+AssertionError: Lists differ: ['s-old'] != ['s-server']
+
+First differing element 0:
+'s-old'
+'s-server'
+
+- ['s-old']
++ ['s-server'] : S3-STRUCT M5c: loading the server draft must replace the stale keep list
+
+----------------------------------------------------------------------
+Ran 1 test in 2.349s
+
+FAILED (failures=1)

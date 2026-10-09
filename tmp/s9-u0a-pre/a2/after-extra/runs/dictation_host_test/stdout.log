@@ -1,0 +1,172 @@
+TAP version 13
+# Subtest: capability: only the exact bootstrap shape is available, and malformed means unavailable
+ok 1 - capability: only the exact bootstrap shape is available, and malformed means unavailable
+  ---
+  duration_ms: 1.1063
+  type: 'test'
+  ...
+# Subtest: browser capability needs a secure context, getUserMedia and the capture module; reading never prompts
+ok 2 - browser capability needs a secure context, getUserMedia and the capture module; reading never prompts
+  ---
+  duration_ms: 0.2497
+  type: 'test'
+  ...
+# Subtest: response text is exact, bounded and never trimmed; shape failures refuse
+ok 3 - response text is exact, bounded and never trimmed; shape failures refuse
+  ---
+  duration_ms: 1.0109
+  type: 'test'
+  ...
+# Subtest: refusals never assume JSON: nginx 413, route codes, shared report refusals and bare statuses
+ok 4 - refusals never assume JSON: nginx 413, route codes, shared report refusals and bare statuses
+  ---
+  duration_ms: 0.3345
+  type: 'test'
+  ...
+# Subtest: unavailable by default and with a browser that cannot capture: pressing does nothing
+ok 5 - unavailable by default and with a browser that cannot capture: pressing does nothing
+  ---
+  duration_ms: 3.8949
+  type: 'test'
+  ...
+# Subtest: record -> stop -> one bounded request -> review; the report is untouched until Insert
+ok 6 - record -> stop -> one bounded request -> review; the report is untouched until Insert
+  ---
+  duration_ms: 19.194
+  type: 'test'
+  ...
+# Subtest: cancel in every phase releases everything and writes nothing; late answers are dropped
+ok 7 - cancel in every phase releases everything and writes nothing; late answers are dropped
+  ---
+  duration_ms: 15.5333
+  type: 'test'
+  ...
+# Subtest: study switch and A->B->A end the session through refresh(); the late 200 is never inserted
+ok 8 - study switch and A->B->A end the session through refresh(); the late 200 is never inserted
+  ---
+  duration_ms: 1.649
+  type: 'test'
+  ...
+# Subtest: outside review a changed base or a newly blocked editor releases the microphone at once
+ok 9 - outside review a changed base or a newly blocked editor releases the microphone at once
+  ---
+  duration_ms: 0.7771
+  type: 'test'
+  ...
+# Subtest: a lost connection closes an open microphone but never costs a reviewed transcript
+ok 10 - a lost connection closes an open microphone but never costs a reviewed transcript
+  ---
+  duration_ms: 1.1786
+  type: 'test'
+  ...
+# Subtest: automatic capture cap sends once without Stop and says so
+ok 11 - automatic capture cap sends once without Stop and says so
+  ---
+  duration_ms: 0.5528
+  type: 'test'
+  ...
+# Subtest: permission refusal and a device ending while stopping each count as ONE failure (callback + rejection)
+ok 12 - permission refusal and a device ending while stopping each count as ONE failure (callback + rejection)
+  ---
+  duration_ms: 1.4971
+  type: 'test'
+  ...
+# Subtest: zero captured frames maps to a user message, not a transport attempt
+ok 13 - zero captured frames maps to a user message, not a transport attempt
+  ---
+  duration_ms: 0.4112
+  type: 'test'
+  ...
+# Subtest: server and transport failures end in failed with the report unchanged
+ok 14 - server and transport failures end in failed with the report unchanged
+  ---
+  duration_ms: 4.2874
+  type: 'test'
+  ...
+# Subtest: plain 401 fails only the run; the client timeout aborts and a late answer is ignored
+ok 15 - plain 401 fails only the run; the client timeout aborts and a late answer is ignored
+  ---
+  duration_ms: 2.6601
+  type: 'test'
+  ...
+# Subtest: an edited field keeps the text, needs an explicit re-pin, and never inserts on re-pin alone
+ok 16 - an edited field keeps the text, needs an explicit re-pin, and never inserts on re-pin alone
+  ---
+  duration_ms: 2.2818
+  type: 'test'
+  ...
+# Subtest: changed base, study or editor gate at Insert refuses and invalidates; nothing is written
+ok 17 - changed base, study or editor gate at Insert refuses and invalidates; nothing is written
+  ---
+  duration_ms: 2.0862
+  type: 'test'
+  ...
+# Subtest: a save in flight is transient; a refused or throwing write fails closed
+ok 18 - a save in flight is transient; a refused or throwing write fails closed
+  ---
+  duration_ms: 1.7585
+  type: 'test'
+  ...
+# Subtest: capability withdrawn mid-recording and page exit both release; cleanup failure is reported
+ok 19 - capability withdrawn mid-recording and page exit both release; cleanup failure is reported
+  ---
+  duration_ms: 1.2044
+  type: 'test'
+  ...
+# Subtest: a second Dictate press while the first is starting starts nothing
+ok 20 - a second Dictate press while the first is starting starts nothing
+  ---
+  duration_ms: 0.357
+  type: 'test'
+  ...
+# Subtest: preparation pauses recording and resumes it with the same edit pin
+ok 21 - preparation pauses recording and resumes it with the same edit pin
+  ---
+  duration_ms: 0.496
+  type: 'test'
+  ...
+# Subtest: preparation during upload resumes from owned RAM audio and never accepts the old result
+ok 22 - preparation during upload resumes from owned RAM audio and never accepts the old result
+  ---
+  duration_ms: 1.881
+  type: 'test'
+  ...
+# Subtest: preparation during microphone acquisition resumes the owned device without another permission request
+ok 23 - preparation during microphone acquisition resumes the owned device without another permission request
+  ---
+  duration_ms: 4.6761
+  type: 'test'
+  ...
+# Subtest: coded session end drops a pending upload and releases all recording resources
+ok 24 - coded session end drops a pending upload and releases all recording resources
+  ---
+  duration_ms: 0.9042
+  type: 'test'
+  ...
+# Subtest: Insert returns its result and emits completion after its own editor write
+ok 25 - Insert returns its result and emits completion after its own editor write
+  ---
+  duration_ms: 0.6696
+  type: 'test'
+  ...
+# Subtest: a study change during the start hash releases the owned start flag
+ok 26 - a study change during the start hash releases the owned start flag
+  ---
+  duration_ms: 0.4784
+  type: 'test'
+  ...
+# Subtest: HD06 read-only report disables Insert and preserves review without a failed outcome
+ok 27 - HD06 read-only report disables Insert and preserves review without a failed outcome
+  ---
+  duration_ms: 0.6091
+  type: 'test'
+  ...
+1..27
+# tests 27
+# suites 0
+# pass 27
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 131.0371

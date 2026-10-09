@@ -1,0 +1,27 @@
+main.html sha256 0ed62cf6ee57f011e2ac2ea02574592d424def403ad3fcac521aebd545eac239
+anchor MH1   occurrences=1 expect='an answer for another version must make the whole answer unknown'
+anchor MH2   occurrences=1 expect='each block must speak the server presence for its own version'
+anchor MH3   occurrences=1 expect='a refusal must never read as an empty citation list'
+anchor MH4   occurrences=1 expect='each version block must show its own answer'
+anchor MH5   occurrences=1 expect='closing the history must discard every drawn citation block'
+anchor MH6   occurrences=1 expect='the attribution line must name the server-echoed actor'
+anchor MH7   occurrences=1 expect='a malformed entry must make the whole answer unknown'
+fixture run resolves: HISTORY_BLOCK
+BASELINE exit=0 tests=10 ok=True
+MH1   case=test_06_every_shape_the_answer_can_fail_is_unknown_and_never_empty exit=1 expect_matched=True killed=True
+      AssertionError: '인용 증적을 확인하지 못했습니다' not found in '인용된 소견인용 증적 확인: server-actor@kin의 열람 권한 기준이 목록은 판독문 문장과 1:1로 대응하지 않습니다.Findings · 소견 r31 · 출처 1번 · 인용 당시 연결 현재 판과 일치 · author-x@kin · 2026-09-19 05:00(UTC) — 넣은 문자열이 이 칸에 그대로 있습니다‘그대로 있습니다’는 그 문장에 대한 것이며, 주변 문장에 대해서는 아무것도 말하지 않습니다.' : an answer for another version must make the whole answer unknown
+MH2   case=test_05_each_block_speaks_the_presence_of_its_own_version exit=1 expect_matched=True killed=True
+      AssertionError: '넣은 문자열이 이 칸에 그대로 있습니다' not found in '인용된 소견인용 증적 확인: server-actor@kin의 열람 권한 기준이 목록은 판독문 문장과 1:1로 대응하지 않습니다.Findings · 소견 r31 · 출처 1번 · 인용 당시 연결 현재 판과 일치 · author-x@kin · 2026-09-19 05:00(UTC) — ' : each block must speak the server presence for its own version
+MH3   case=test_03_a_refusal_is_not_an_empty_list exit=1 expect_matched=True killed=True
+      AssertionError: '접근 권한 밖' not found in '인용된 소견인용 증적 확인: 확인자 미확인의 열람 권한 기준인용된 소견 없음' : a refusal must never read as an empty citation list
+MH4   case=test_08_two_answers_arriving_out_of_order_stay_in_their_own_blocks exit=1 expect_matched=True killed=True
+      AssertionError: '소견 r31' not found in '확인하는 중입니다' : each version block must show its own answer
+MH5   case=test_09_closing_discards_the_blocks_and_no_late_answer_writes exit=1 expect_matched=True killed=True
+      AssertionError: 0 != 2 : closing the history must discard every drawn citation block
+MH6   case=test_01_a_pressed_version_draws_its_own_entries_and_the_server_actor exit=1 expect_matched=True killed=True
+      AssertionError: 'server-actor@kin' not found in '인용 증적 확인: session-actor@kin의 열람 권한 기준' : the attribution line must name the server-echoed actor
+MH7   case=test_06_every_shape_the_answer_can_fail_is_unknown_and_never_empty exit=1 expect_matched=True killed=True
+      AssertionError: '인용 증적을 확인하지 못했습니다' not found in '인용된 소견인용 증적 확인: server-actor@kin의 열람 권한 기준인용된 소견 없음' : a malformed entry must make the whole answer unknown
+main.html sha256 after 0ed62cf6ee57f011e2ac2ea02574592d424def403ad3fcac521aebd545eac239 (unchanged=True)
+summary written to C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tmp\s9-u0a-pre\a2\after-fixture\report_version_citation_mutants.json
+all 7 mutants killed on their own assertion
