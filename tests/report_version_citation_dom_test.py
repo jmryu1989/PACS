@@ -19,7 +19,7 @@ belong to the live suite and stay unverified. No LiveStack, no database, no Orth
 Hosted only: this file has never run anywhere but the hosted runner's measurement step.
 """
 from page_source import read_page_source
-from main_split_harness import fixture_blocks
+from main_split_harness import fixture_block
 import json
 import os
 import unittest
@@ -102,7 +102,8 @@ def extract_function(source, name):
 # The shipped history block - the f1d5406 statements from the history state up to reportWriteBlock - by the
 # TypeScript-AST fixture projection (main_split_harness): S9-U0a-PRE moved reportWriteBlock, whose comment ended the
 # old text cut, ahead of its first caller.
-HISTORY_BLOCK = fixture_blocks(MAIN_PATH, {"HISTORY_BLOCK": ("historyEpoch", "reportWriteBlock")})["HISTORY_BLOCK"]
+# (Computed where the page is built, not at import: main_split_harness.fixture_block.)
+HISTORY_FIXTURE = {"HISTORY_BLOCK": ("historyEpoch", "reportWriteBlock")}
 HIST_HTML = slice_between(MAIN, '<div class="modal" id="histmodal"', "\n  </div>") + "\n  </div>"
 DISPLAY_ACTOR_FN = extract_function(MAIN, "displayActor")
 # S7-U5: the history block applies its answers through the page's work-context gate. The shipped gate is loaded as it is,
@@ -187,7 +188,7 @@ def harness():
             .replace("CITATIONJS", CITATION_JS)
             .replace("PAPERJS", PAPER_JS)
             .replace("DISPLAYACTORFN", DISPLAY_ACTOR_FN)
-            .replace("HISTORYBLOCK", HISTORY_BLOCK)
+            .replace("HISTORYBLOCK", fixture_block(MAIN_PATH, HISTORY_FIXTURE, "HISTORY_BLOCK"))
             .replace("SESSIONACTOR", SESSION_ACTOR)
             .replace("UIDVALUE", UID))
 

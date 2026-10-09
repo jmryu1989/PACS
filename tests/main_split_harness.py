@@ -65,9 +65,24 @@ REPORT_FIXTURE = {"BASE_BLOCK": ("selectionSeq", "reportSource"), "REPORT_BLOCK"
 
 
 def fixture_blocks(page, ranges):
-    """Runs of the f1d5406 page's statements, named by the declarations that start and end them, taken from page`n    wherever they now sit (main_split_harness.cjs fixtureBlocks): {key: (first, end)} -> {key: script text}."""
+    """Runs of the f1d5406 page's statements, named by the declarations that start and end them, taken from page
+    wherever they now sit (main_split_harness.cjs fixtureBlocks): {key: (first, end)} -> {key: script text}."""
     return json.loads(subprocess.check_output(["node", str(_HELPER), "fixture", str(page), json.dumps(ranges)], text=True,
                                               encoding="utf-8", cwd=ROOT))
+
+
+_FIXTURES = {}
+
+
+def fixture_block(page, ranges, key):
+    """One run of fixture_blocks(page, ranges), computed on first use and kept for the process. The projection runs
+    node with the api TypeScript, which a job that only imports a suite (e.g. a selection check that imports
+    test_dictation_live -> the capture and host suites) does not install: a suite asks for its runs where it builds its
+    page, never at import."""
+    cache = (str(page), json.dumps(ranges, sort_keys=True))
+    if cache not in _FIXTURES:
+        _FIXTURES[cache] = fixture_blocks(page, ranges)
+    return _FIXTURES[cache][key]
 
 
 def derive_spec(page, out):

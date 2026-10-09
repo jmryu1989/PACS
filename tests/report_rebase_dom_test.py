@@ -7,7 +7,7 @@ LiveStack, no Orthanc, no database and no original DICOM. Only the refusal body
 the test hands back can become the approved report shown to the user.
 """
 from page_source import read_page_source
-from main_split_harness import REPORT_FIXTURE, fixture_blocks
+from main_split_harness import REPORT_FIXTURE, fixture_block
 import json
 import os
 import unittest
@@ -104,9 +104,7 @@ MODAL_CSS = slice_between(MAIN, ".modal { display: none;", "/* ══ 클릭 피
 # The two script runs by the TypeScript-AST fixture projection (S9-U0a-PRE moved some of their declarations ahead of
 # their first callers): selectionSeq up to reportSource, and the region of report source, loadReport, the draft bar,
 # the rebase pane, stashReport and commitReport, in the order they sat in the file.
-FIXTURE = fixture_blocks(MAIN_PATH, REPORT_FIXTURE)
-BASE_BLOCK = FIXTURE["BASE_BLOCK"]
-REPORT_BLOCK = FIXTURE["REPORT_BLOCK"]
+# (Computed where the page is built, not at import: main_split_harness.fixture_block.)
 API_FN = extract_function(MAIN, "api")
 WRITE_BLOCK_FN = extract_function(MAIN, "reportWriteBlock")
 # S3-U2b moved the shared "may a script write into the editor" check into one function that the
@@ -235,8 +233,8 @@ def harness(state):
             .replace("APIFN", API_FN)
             .replace("WRITEBLOCKFN", WRITE_BLOCK_FN)
             .replace("EDITORBLOCKFN", EDITOR_BLOCK_FN)
-            .replace("BASEBLOCK", BASE_BLOCK)
-            .replace("REPORTBLOCK", REPORT_BLOCK)
+            .replace("BASEBLOCK", fixture_block(MAIN_PATH, REPORT_FIXTURE, "BASE_BLOCK"))
+            .replace("REPORTBLOCK", fixture_block(MAIN_PATH, REPORT_FIXTURE, "REPORT_BLOCK"))
             .replace("INITIALSTATE", json.dumps(state, ensure_ascii=False))
             .replace("UIDVALUE", UID)
             .replace("OTHERVALUE", OTHER))

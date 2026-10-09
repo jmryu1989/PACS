@@ -31,7 +31,7 @@ mutant runner can break the product on purpose without touching the source tree.
 The browser assertions replace the former source and harness-shape pins.
 """
 from page_source import read_page_source
-from main_split_harness import REPORT_FIXTURE, fixture_blocks
+from main_split_harness import REPORT_FIXTURE, fixture_block
 import json
 import os
 import re
@@ -169,9 +169,7 @@ CITE_HTML = slice_between(MAIN, *MARKERS["CITE_HTML"]) + "\n  </div>"
 STRUCT_HTML = slice_between(MAIN, *MARKERS["STRUCT_HTML"]) + "\n  </div>"
 # The two script runs by the TypeScript-AST fixture projection (S9-U0a-PRE moved some of their declarations ahead of
 # their first callers, so they are no longer one stretch of text between two markers).
-FIXTURE = fixture_blocks(MAIN_PATH, REPORT_FIXTURE)
-BASE_BLOCK = FIXTURE["BASE_BLOCK"]
-REPORT_BLOCK = FIXTURE["REPORT_BLOCK"]
+# (Computed where the page is built, not at import: main_split_harness.fixture_block.)
 # Placed AFTER the report block: it declares heldUid/heartbeat/warnedFor/holdPending itself, so the
 # stub below must not, and the only heldUid use inside the report block is inside commitReport.
 HOLD_BLOCK = slice_between(MAIN, *MARKERS["HOLD_BLOCK"])
@@ -337,8 +335,8 @@ def harness(state):
             .replace("APIFN", API_FN)
             .replace("WRITEBLOCKFN", WRITE_BLOCK_FN)
             .replace("EDITORBLOCKFN", EDITOR_BLOCK_FN)
-            .replace("BASEBLOCK", BASE_BLOCK)
-            .replace("REPORTBLOCK", REPORT_BLOCK)
+            .replace("BASEBLOCK", fixture_block(MAIN_PATH, REPORT_FIXTURE, "BASE_BLOCK"))
+            .replace("REPORTBLOCK", fixture_block(MAIN_PATH, REPORT_FIXTURE, "REPORT_BLOCK"))
             .replace("HOLDBLOCK", HOLD_BLOCK)
             .replace("INITIALSTATE", json.dumps(state))
             .replace("UIDVALUE", UID)

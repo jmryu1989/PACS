@@ -23,7 +23,7 @@ pinned Chromium belong to S3-ASR-U4b, and the live refusal battery to U5.
 The browser assertions replace the former source and harness-shape pins.
 """
 from page_source import read_page_source
-from main_split_harness import REPORT_FIXTURE, fixture_blocks
+from main_split_harness import REPORT_FIXTURE, fixture_block
 import json
 import os
 import re
@@ -150,10 +150,19 @@ MARKERS = {
                    "    // ══════════ 이탈 시 판독문 보존 (교훈 §1) ══════════"),
     "SELECT_BLOCK": ("    function select(uid, {", "    function renderClinical()"),
 }
-S = {name: slice_between(MAIN, *pair) for name, pair in MARKERS.items()}
-# BASE_BLOCK and REPORT_BLOCK by the TypeScript-AST fixture projection (S9-U0a-PRE moved some of their declarations
-# ahead of their first callers, so they are no longer one stretch of text between two markers).
-S.update(fixture_blocks(MAIN_PATH, REPORT_FIXTURE))
+class _Sources(dict):
+    """BASE_BLOCK and REPORT_BLOCK by the TypeScript-AST fixture projection (S9-U0a-PRE moved some of their
+    declarations ahead of their first callers, so they are no longer one stretch of text between two markers),
+    fetched on first use: the capture suite and test_dictation_live import this module where no api TypeScript is
+    installed (main_split_harness.fixture_block)."""
+
+    def __missing__(self, name):
+        if name not in REPORT_FIXTURE:
+            raise KeyError(name)
+        return fixture_block(MAIN_PATH, REPORT_FIXTURE, name)
+
+
+S = _Sources((name, slice_between(MAIN, *pair)) for name, pair in MARKERS.items())
 for name in ("RBTNS_HTML", "REDIT_HTML", "RFOOT_HTML"):
     S[name] += "\n        </div>"
 for name in ("PANE_HTML", "CITE_HTML", "STRUCT_HTML"):

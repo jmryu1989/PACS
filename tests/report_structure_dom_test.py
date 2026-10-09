@@ -25,7 +25,7 @@ Two files may be replaced through KIN_STRUCT_MAIN / KIN_STRUCT_STRUCTURE_JS so t
 break the product on purpose without ever touching the source tree.
 """
 from page_source import read_page_source
-from main_split_harness import REPORT_FIXTURE, fixture_blocks
+from main_split_harness import REPORT_FIXTURE, fixture_block
 import json
 import os
 import re
@@ -120,9 +120,7 @@ PANE_HTML = slice_between(MAIN, '<div class="modal" id="stalemodal"', "\n  </div
 MODAL_CSS = slice_between(MAIN, ".modal { display: none;", "/* ══ 클릭 피드백")
 # The two script runs by the TypeScript-AST fixture projection (S9-U0a-PRE moved some of their declarations ahead of
 # their first callers, so they are no longer one stretch of text).
-FIXTURE = fixture_blocks(MAIN_PATH, REPORT_FIXTURE)
-BASE_BLOCK = FIXTURE["BASE_BLOCK"]
-REPORT_BLOCK = FIXTURE["REPORT_BLOCK"]
+# (Computed where the page is built, not at import: main_split_harness.fixture_block.)
 API_FN = extract_function(MAIN, "api")
 WRITE_BLOCK_FN = extract_function(MAIN, "reportWriteBlock")
 EDITOR_BLOCK_FN = extract_function(MAIN, "reportEditorBlock")
@@ -254,8 +252,8 @@ def harness(state, catalog=CATALOG):
             .replace("APIFN", API_FN)
             .replace("WRITEBLOCKFN", WRITE_BLOCK_FN)
             .replace("EDITORBLOCKFN", EDITOR_BLOCK_FN)
-            .replace("BASEBLOCK", BASE_BLOCK)
-            .replace("REPORTBLOCK", REPORT_BLOCK)
+            .replace("BASEBLOCK", fixture_block(MAIN_PATH, REPORT_FIXTURE, "BASE_BLOCK"))
+            .replace("REPORTBLOCK", fixture_block(MAIN_PATH, REPORT_FIXTURE, "REPORT_BLOCK"))
             .replace("INITIALSTATE", json.dumps(state, ensure_ascii=False))
             .replace("UIDVALUE", UID)
             .replace("OTHERVALUE", OTHER))
