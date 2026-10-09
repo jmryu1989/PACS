@@ -1,4 +1,5 @@
 const { readPageSource } = require('./page_source.cjs');
+const { fixtureBlocks, REPORT_FIXTURE } = require('./main_split_harness.cjs');
 // TEST-S3-U3-CLIENT-MODEL: base-version origin, commit failure routing and the
 // refused-head payload, taken from the real main.html source (no copy, no DOM).
 // Run with: node --test tests/report_rebase_model_test.cjs
@@ -8,7 +9,8 @@ const { join } = require('node:path');
 const { test } = require('node:test');
 const vm = require('node:vm');
 
-const html = readPageSource(process.env.KIN_REBASE_MAIN || join(__dirname, '../worklist-v0/hpacs-lite/main.html'));
+const page = process.env.KIN_REBASE_MAIN || join(__dirname, '../worklist-v0/hpacs-lite/main.html');
+const html = readPageSource(page);
 
 /** The shipped function body, brace matched, so a test can never drift into a copy. */
 function extractFunction(source, name) {
@@ -46,12 +48,12 @@ function extractFunction(source, name) {
   throw new Error(`unbalanced ${name}`);
 }
 
-const blockStart = html.indexOf('    let selectionSeq = 0;');
-const blockEnd = html.indexOf('    function reportSource()', blockStart);
-assert.ok(blockStart >= 0 && blockEnd > blockStart, 'The base-version block moved; re-pin the test');
+// The base-version run (selectionSeq up to reportSource) by the TypeScript-AST fixture projection: S9-U0a-PRE moved
+// selectionSeq ahead of its first caller, so the run is no longer one stretch of text between two markers.
+const { BASE_BLOCK: baseBlock } = fixtureBlocks(page, { BASE_BLOCK: REPORT_FIXTURE.BASE_BLOCK });
 // The selection sequence is counted by the page's work-context gate (S7-U5): the block runs against the shipped module.
 const sandbox = vm.createContext({ work: require(join(__dirname, '../worklist-v0/hpacs-lite/work-context.js')).create() });
-vm.runInContext(html.slice(blockStart, blockEnd), sandbox);
+vm.runInContext(baseBlock, sandbox);
 const call = (expression, value) => { sandbox.__input = value; return vm.runInContext(expression, sandbox); };
 
 test('TEST-S3-U3-ORIGIN: only a recorded render decides the base, and the fallback is untouched until then', () => {
@@ -209,7 +211,7 @@ async function stashAfterRender({ rendered, state }) {
     citations: { emptied() {} }, structureState: { emptied() {} },
     $: selector => ({ value: selector === '#findings' ? 'SYN typed findings' : '' }),
   });
-  vm.runInContext(html.slice(blockStart, blockEnd), context, { filename: 'base-version-block.js' });
+  vm.runInContext(baseBlock, context, { filename: 'base-version-block.js' });
   vm.runInContext([
     `markSelectionChanged(${JSON.stringify(UID)});`,
     rendered === undefined ? '' : `recordReportOrigin(${JSON.stringify(UID)}, ${JSON.stringify(rendered)});`,

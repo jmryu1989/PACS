@@ -31,6 +31,7 @@ mutant runner can break the product on purpose without touching the source tree.
 The browser assertions replace the former source and harness-shape pins.
 """
 from page_source import read_page_source
+from main_split_harness import REPORT_FIXTURE, fixture_block
 import json
 import os
 import re
@@ -153,8 +154,6 @@ MARKERS = {
     "PANE_HTML": ('<div class="modal" id="stalemodal"', "\n  </div>"),
     "CITE_HTML": ('<div class="modal" id="cite-preview"', "\n  </div>"),
     "STRUCT_HTML": ('<div class="modal" id="structmodal"', "\n  </div>"),
-    "BASE_BLOCK": ("    let selectionSeq = 0;", "    function reportSource()"),
-    "REPORT_BLOCK": ("    function reportSource() {", "    function heldByOther(s)"),
     "HOLD_BLOCK": ("    // ══════════ 동시 판독 점유 (교훈 §2) ══════════",
                    "    // ══════════ 이탈 시 판독문 보존 (교훈 §1) ══════════"),
 }
@@ -168,8 +167,9 @@ RFOOT_HTML = slice_between(MAIN, *MARKERS["RFOOT_HTML"]) + "\n        </div>"
 PANE_HTML = slice_between(MAIN, *MARKERS["PANE_HTML"]) + "\n  </div>"
 CITE_HTML = slice_between(MAIN, *MARKERS["CITE_HTML"]) + "\n  </div>"
 STRUCT_HTML = slice_between(MAIN, *MARKERS["STRUCT_HTML"]) + "\n  </div>"
-BASE_BLOCK = slice_between(MAIN, *MARKERS["BASE_BLOCK"])
-REPORT_BLOCK = slice_between(MAIN, *MARKERS["REPORT_BLOCK"])
+# The two script runs by the TypeScript-AST fixture projection (S9-U0a-PRE moved some of their declarations ahead of
+# their first callers, so they are no longer one stretch of text between two markers).
+# (Computed where the page is built, not at import: main_split_harness.fixture_block.)
 # Placed AFTER the report block: it declares heldUid/heartbeat/warnedFor/holdPending itself, so the
 # stub below must not, and the only heldUid use inside the report block is inside commitReport.
 HOLD_BLOCK = slice_between(MAIN, *MARKERS["HOLD_BLOCK"])
@@ -335,8 +335,8 @@ def harness(state):
             .replace("APIFN", API_FN)
             .replace("WRITEBLOCKFN", WRITE_BLOCK_FN)
             .replace("EDITORBLOCKFN", EDITOR_BLOCK_FN)
-            .replace("BASEBLOCK", BASE_BLOCK)
-            .replace("REPORTBLOCK", REPORT_BLOCK)
+            .replace("BASEBLOCK", fixture_block(MAIN_PATH, REPORT_FIXTURE, "BASE_BLOCK"))
+            .replace("REPORTBLOCK", fixture_block(MAIN_PATH, REPORT_FIXTURE, "REPORT_BLOCK"))
             .replace("HOLDBLOCK", HOLD_BLOCK)
             .replace("INITIALSTATE", json.dumps(state))
             .replace("UIDVALUE", UID)
