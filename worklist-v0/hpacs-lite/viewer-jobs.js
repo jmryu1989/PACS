@@ -246,6 +246,10 @@ window.kinViewerJobs = function (services, model, session = null) {
           // setImageIdIndex loads pixels but leaves the native scroll target
           // and OHIF scrollbar/instance overlay at the old frame.
           v.scroll(index - v.getTargetImageIdIndex(), false);
+          // The pinned colormap setter replaces the LUT but keeps its invert
+          // and VOILUTFunction flags. Reset both before Grayscale so the saved
+          // sigmoid curve and inversion are rebuilt even on a repeated apply.
+          v.setProperties({ invert: false, VOILUTFunction: 'LINEAR' });
           v.setProperties({ ...cell.properties, colormap: { name: 'Grayscale', opacity: [] } });
           // Native flips adjust the camera too; perform them before assigning
           // physical coordinates so saved pan is not applied twice.
