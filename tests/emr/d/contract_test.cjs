@@ -51,7 +51,7 @@ const who = id => ({ id, issuer: 'https://identity.example.test', subject: `sub-
 const actor = (id, roles, institutionId = 'inst-a', registration = `reg-${id}`) =>
   ({ identity: who(id), kind: 'member', roles, institutionId, signingRegistrationId: registration });
 const patient = { linkId: 'link-1', patientId: 'SYN-1', assigningAuthority: 'hospital-a' };
-const study = { studyId: '1.2.840.99.1', managingInstitutionId: 'inst-a', readingInstitutionId: 'inst-tele', patient };
+const study = { studyId: '1.2.840.99.1', managingInstitutionId: 'inst-a', patient };
 const owner = a => [a.institutionId, a.identity.subject];
 const c1 = actor('c1', ['clinician']), c2 = actor('c2', ['clinician']);
 const r1 = actor('r1', ['radiologist']), r2 = actor('r2', ['radiologist']);
@@ -226,7 +226,7 @@ test('TEST-D-01 clinical_vs_operational: a radiographer signs their own Tech Not
   refused(() => plan('tech-note.write', r1, written, note(r1, written, 'SYN 판독의 메모', 'SYN')), 'ActorPathRefused', 'a radiologist does not write the Tech Note');
   refused(() => plan('tech-note.write', actor('tt', ['technician'], 'inst-tele'), written, note(tech, written, 'SYN', 'SYN')), 'NotFound',
     'only the acquiring institution writes the Tech Note');
-  assert.equal(R.planClinicalRead({ actor: rTele, unit: written, scope: 'current' }).versions.length, 1, 'the tele reading institution reads it');
+  refused(() => R.planClinicalRead({ actor: rTele, unit: written, scope: 'current' }), 'NotFound', 'Part 1 serves no other institution');
 });
 
 test('TEST-D-01 clinical_vs_operational: body claims of authority are refused and server facts alone decide the class', () => {
@@ -394,15 +394,15 @@ test('TEST-D-03 read_scope: the author and institution readers are served; anoth
   assert.equal(R.planClinicalRead({ actor: r2, unit, scope: 'history' }).versions.length, 2);
   assert.equal(R.planClinicalRead({ actor: admin, unit, scope: 'history' }).targets.length, 2);
   refused(() => R.planClinicalRead({ actor: rOther, unit, scope: 'history' }), 'NotFound', 'M-D-05: another institution gets no body');
-  refused(() => R.planClinicalRead({ actor: rTele, unit, scope: 'current' }), 'NotFound', 'M-D-05: the tele institution reads no question thread');
+  refused(() => R.planClinicalRead({ actor: rTele, unit, scope: 'current' }), 'NotFound', 'M-D-05: a reading institution is another institution in Part 1');
   refused(() => R.planClinicalRead({ actor: c2, unit, scope: 'current' }), 'NotFound', 'another clinician\'s thread is not served');
   refused(() => R.planClinicalRead({ actor: tech, unit, scope: 'current' }), 'NotFound');
   const requested = consultation();
   assert.equal(R.planClinicalRead({ actor: r2, unit: requested, scope: 'current' }).versions.length, 1);
   refused(() => R.planClinicalRead({ actor: actor('r3', ['radiologist']), unit: requested, scope: 'current' }), 'NotFound', 'a non-party reader');
   const created = finding();
-  assert.equal(R.planClinicalRead({ actor: rTele, unit: created, scope: 'current' }).versions.length, 1, 'the tele reading institution reads findings');
-  refused(() => R.planClinicalRead({ actor: rOther, unit: created, scope: 'current' }), 'NotFound', 'M-D-05: a third institution reads no finding');
+  assert.equal(R.planClinicalRead({ actor: r2, unit: created, scope: 'current' }).versions.length, 1, 'a radiologist of the institution reads findings');
+  refused(() => R.planClinicalRead({ actor: rTele, unit: created, scope: 'current' }), 'NotFound', 'M-D-05: no finding is served to another institution');
 });
 
 test('TEST-D-03 read_scope: a write from another institution is refused before anything else is examined', () => {
@@ -411,17 +411,16 @@ test('TEST-D-03 read_scope: a write from another institution is refused before a
   refused(() => plan('question.reply', rOther, opened, { ...replyBody(rOther, opened, ANSWER), author: who('r1') }), 'NotFound',
     'M-D-05: the institution boundary comes before any other refusal');
   refused(() => plan('question.create', actor('c9', ['clinician'], 'inst-b'), null, qBody(actor('c9', ['clinician'], 'inst-b'))), 'NotFound');
-  assert.equal(plan('finding.create', rTele, null, { requestId: randomUUID(), item: {} }, { content: SNAPSHOT }).entry, 'clinical-entry');
-  // An assignment row belongs to one institution: the tele institution keeps its own row and never touches the owner's.
+  refused(() => plan('finding.create', rTele, null, { requestId: randomUUID(), item: {} }, { content: SNAPSHOT }), 'NotFound',
+    'M-D-05: a reading institution is another institution in Part 1');
   const assignment = (a, unit, revision) => ({ requestId: randomUUID(), expectedOwner: owner(a), revision, readerSub: randomUUID() });
   const ownerRow = R.applyPlan(null, plan('assignment.write', admin, null, assignment(admin, null, 0), { readerId: 'r1' }));
   const teleAdmin = actor('ta', ['admin'], 'inst-tele');
   refused(() => plan('assignment.write', teleAdmin, ownerRow, assignment(teleAdmin, ownerRow, 1), { readerId: 'rt' }), 'NotFound',
-    'M-D-05: the tele institution cannot write the owner assignment row');
+    'M-D-05: another institution cannot write the assignment');
   refused(() => R.planClinicalRead({ actor: teleAdmin, unit: ownerRow, scope: 'current' }), 'NotFound');
-  const teleRow = R.applyPlan(null, plan('assignment.write', teleAdmin, null, assignment(teleAdmin, null, 0), { readerId: 'rt' }));
-  assert.equal(teleRow.managingInstitutionId, 'inst-tele');
-  refused(() => plan('assignment.write', rOther, null, assignment(rOther, null, 0), { readerId: 'r9' }), 'NotFound', 'a third institution has no row to open');
+  refused(() => plan('assignment.write', teleAdmin, null, assignment(teleAdmin, null, 0), { readerId: 'rt' }), 'NotFound', 'no row is opened for another institution');
+  assert.equal(ownerRow.managingInstitutionId, 'inst-a');
 });
 
 test('TEST-D-03 read_scope: bodies are handed out only after the access event for exactly those versions is durable', async () => {

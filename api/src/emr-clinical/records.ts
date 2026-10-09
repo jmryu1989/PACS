@@ -5,7 +5,7 @@ import { AccessEvent, AccessTarget, AppendOnlyAccessStore, DurableAccessReceipt,
 import { AttachmentReference, VersionReference, versionReference } from '../emr-contract/signature';
 import { ContractError, choice, freeze, integer, object, refuse, sha256, string, utc } from '../emr-contract/validation';
 import { AUTHORITY_FIELDS, ActorFacts, CLINICAL_SURFACES, ClinicalRecord, ClinicalUnit, ClinicalVersion, EntryClass, MANUAL_SR_PREPARATION_MS,
-  READ_ROUTES, READ_SCOPES, SignatureEvidence, SigningRequest, StudyFacts, SurfaceKey, SurfacePath, SurfaceSpec, TELE_RECORDS, TextRule,
+  READ_ROUTES, READ_SCOPES, SignatureEvidence, SigningRequest, StudyFacts, SurfaceKey, SurfacePath, SurfaceSpec, TextRule,
   WriteReceipt, accessAction, entryClass, holds, resolvePath, signatureAction, versionAct } from './contract';
 
 /**
@@ -31,14 +31,13 @@ function actorFacts(input: unknown): Readonly<ActorFacts> {
     institutionId: string(a.institutionId), signingRegistrationId: a.signingRegistrationId === null ? null : string(a.signingRegistrationId) };
 }
 function studyFacts(input: unknown): Readonly<StudyFacts> {
-  const s = object(input, ['studyId', 'managingInstitutionId', 'readingInstitutionId', 'patient']);
-  return { studyId: string(s.studyId), managingInstitutionId: string(s.managingInstitutionId),
-    readingInstitutionId: s.readingInstitutionId === null ? null : string(s.readingInstitutionId), patient: patientLink(s.patient) };
+  const s = object(input, ['studyId', 'managingInstitutionId', 'patient']);
+  return { studyId: string(s.studyId), managingInstitutionId: string(s.managingInstitutionId), patient: patientLink(s.patient) };
 }
 
-/** One institution boundary for reads and writes: the managing institution, or the tele reading institution where the record allows it. */
-export function institutionAdmits(record: ClinicalRecord, mode: 'read' | 'write', institutionId: string, managing: string, reading: string | null): boolean {
-  return institutionId === managing || ((TELE_RECORDS[mode] as readonly string[]).includes(record) && reading !== null && institutionId === reading);
+/** One institution boundary for reads and writes: only the record's managing institution (see StudyFacts, LR-20/D-4). */
+export function institutionAdmits(institutionId: string, managing: string): boolean {
+  return institutionId === managing;
 }
 
 // ---------- versions and the projection ----------
@@ -55,7 +54,7 @@ function versionDigest(v: Omit<ClinicalVersion, 'sha256'>): string {
  * digests disagree with it. A dropped, reordered or rewritten earlier version is detected, not silently projected.
  */
 export function projectUnit(unit: ClinicalUnit): Readonly<{ state: string; revision: number; head: VersionReference | null; clinicalAdoption: boolean }> {
-  const u = object(unit, ['record', 'recordId', 'studyId', 'managingInstitutionId', 'readingInstitutionId', 'patient', 'parties', 'state', 'revision',
+  const u = object(unit, ['record', 'recordId', 'studyId', 'managingInstitutionId', 'patient', 'parties', 'state', 'revision',
     'head', 'clinicalAdoption', 'versions']) as ClinicalUnit;
   if (!Array.isArray(u.versions) || !u.versions.length) refuse('UnitHistoryBroken');
   let previous: ClinicalVersion | null = null, adoption = false;
@@ -104,7 +103,7 @@ export interface ClinicalWritePlan {
   receiptKey: { record: ClinicalRecord; actorId: string; requestId: string };
   entry: EntryClass; version: ClinicalVersion;
   projection: { state: string; revision: number; head: VersionReference; clinicalAdoption: boolean };
-  parties: ClinicalUnit['parties']; readingInstitutionId: string | null;
+  parties: ClinicalUnit['parties'];
   signing: SigningRequest | null;
   access: { route: string; action: 'write' | 'additional-entry' | 'modify' | 'cancel'; target: AccessTarget };
   receipt: WriteReceipt;
@@ -190,12 +189,8 @@ function admit(input: WriteInput) {
   const opening = unit === null;
   if (opening ? spec.opens === false : spec.opens === true) refuse(opening ? 'NotFound' : 'UnitExists');
   // The institution boundary is checked before anything about the record is revealed by a later, more specific refusal.
-  const managing = unit?.managingInstitutionId ?? (spec.record === 'assignment' ? actor.institutionId : study.managingInstitutionId);
-  // An assignment row is opened by the owner or the tele institution for itself (its own row).
-  const ownRow = spec.record === 'assignment' && opening &&
-    [study.managingInstitutionId, study.readingInstitutionId].includes(actor.institutionId);
-  if (!institutionAdmits(spec.record, 'write', actor.institutionId, managing, unit ? unit.readingInstitutionId : study.readingInstitutionId) ||
-      (spec.record === 'assignment' && opening && !ownRow)) refuse('NotFound');
+  const managing = unit?.managingInstitutionId ?? study.managingInstitutionId;
+  if (!institutionAdmits(actor.institutionId, managing)) refuse('NotFound');
   const { requestId, revision, b } = clientBody(spec, w.body, actor);
   const path: SurfacePath = resolvePath(surface, actor, unit);
   const { text, reason } = textFor(path.text ?? spec.text, b, spec, w.content, opening);
@@ -262,8 +257,6 @@ export function planClinicalWrite(input: WriteInput): Readonly<ClinicalWritePlan
     surface, record: spec.record, opening, requestId, fingerprint, receiptKey,
     entry, version, projection: { state: to, revision: version.sequence, head, clinicalAdoption },
     parties: unit ? unit.parties : { authorId: actor.identity.id, recipientId },
-    // An assignment row belongs to one institution (reader-assignment.service.ts:10); no second institution reads or writes it.
-    readingInstitutionId: unit ? unit.readingInstitutionId : spec.record === 'assignment' ? null : study.readingInstitutionId,
     signing, access: { route: spec.route, action: accessAction(spec, entry, act, opening), target },
     // The receipt is what replays, lists and conflicts may return: identifiers and state, never clinical text.
     receipt: { requestId, fingerprint, recordId, versionId, versionSha256: version.sha256, revision: version.sequence, state: to, at },
@@ -277,7 +270,7 @@ export function applyPlan(unit: ClinicalUnit | null, plan: ClinicalWritePlan): R
   const study = unit ?? { studyId: plan.version.studyId, managingInstitutionId: plan.version.managingInstitutionId, patient: plan.version.patient };
   const next: ClinicalUnit = {
     record: plan.record, recordId: plan.version.recordId, studyId: study.studyId, managingInstitutionId: study.managingInstitutionId,
-    readingInstitutionId: plan.readingInstitutionId, patient: study.patient, parties: plan.parties,
+    patient: study.patient, parties: plan.parties,
     state: plan.projection.state, revision: plan.projection.revision, head: plan.projection.head, clinicalAdoption: plan.projection.clinicalAdoption,
     versions: [...(unit?.versions ?? []), plan.version],
   };
@@ -388,7 +381,7 @@ export function planClinicalRead(input: { actor: ActorFacts; unit: ClinicalUnit;
   const r = object(input, ['actor', 'unit', 'scope']);
   const actor = actorFacts(r.actor), unit: ClinicalUnit = r.unit, scope = choice(r.scope, ['current', 'history']);
   projectUnit(unit);
-  if (actor.kind !== 'member' || !institutionAdmits(unit.record, 'read', actor.institutionId, unit.managingInstitutionId, unit.readingInstitutionId))
+  if (actor.kind !== 'member' || !institutionAdmits(actor.institutionId, unit.managingInstitutionId))
     refuse('NotFound');
   const isAuthor = unit.parties.authorId === actor.identity.id;
   const isParty = isAuthor || unit.parties.recipientId === actor.identity.id;
@@ -506,7 +499,7 @@ export function reconcileManualSr(input: unknown, observation: unknown) {
 export function planManualSrAdoption(input: { actor: ActorFacts; study: StudyFacts; sr: unknown; versionId: string; at: string }) {
   const i = object(input, ['actor', 'study', 'sr', 'versionId', 'at']);
   const actor = actorFacts(i.actor), study = studyFacts(i.study), sr = preparedSr(i.sr), at = utc(i.at), versionId = string(i.versionId);
-  // manual-sr.service.ts:14 access(): radiologist of the owning institution, author only; no tele path.
+  // manual-sr.service.ts:14 access(): radiologist of the owning institution, author only.
   if (actor.kind !== 'member' || actor.institutionId !== study.managingInstitutionId || sr.studyId !== study.studyId) refuse('NotFound');
   if (!holds(actor, 'radiologist') || sr.authorId !== actor.identity.id) refuse('ActorPathRefused');
   if (sr.storedAt !== null || sr.adoptedVersion !== null || sr.attemptedAt !== null) refuse('StateTransitionRefused');

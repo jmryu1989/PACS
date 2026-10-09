@@ -167,12 +167,6 @@ export const AUTHORITY_FIELDS = freeze(['author', 'authorId', 'authorSub', 'acto
   'managingInstitutionId', 'actingInstitutionId', 'patient', 'patientId', 'role', 'roles', 'serverTime', 'at', 'versionId',
   'previousVersion', 'sha256', 'identityRegistrationId']);
 
-/**
- * Records the study's tele reading institution may also read or write (finding.service.ts:87; Tech Note is read there,
- * written only at the acquiring institution, pacs.service.ts:1150). An assignment row belongs to one institution
- * (reader-assignment.service.ts:10): the tele institution has its own row, never the owner's.
- */
-export const TELE_RECORDS = freeze({ read: ['finding', 'tech-note'], write: ['finding'] } satisfies Record<'read' | 'write', readonly ClinicalRecord[]>);
 
 /** Who may receive a body, mirroring each service's read scope; an institution boundary always applies first. */
 export const READ_SCOPES = freeze({
@@ -201,8 +195,13 @@ export interface ActorFacts {
   /** C: the registered signer identity of this person, or null when no signing registration exists. */
   signingRegistrationId: string | null;
 }
+/**
+ * Part 1 is one institution: every D record is written and read only by its managing institution. Another institution
+ * (including a tele reading one) needs a recorded 의료법 제21조의2 transfer basis and the Part 2 activation of
+ * inter-institution reading (legal register 2026-10-09 LR-20 / delta D-4, LR-51), which D does not provide.
+ */
 export interface StudyFacts {
-  studyId: string; managingInstitutionId: string; readingInstitutionId: string | null; patient: PatientLinkSnapshot;
+  studyId: string; managingInstitutionId: string; patient: PatientLinkSnapshot;
 }
 export interface ClinicalVersion {
   formatVersion: 'emr-clinical/1';
@@ -221,7 +220,7 @@ export interface ClinicalVersion {
 }
 export interface ClinicalUnit {
   record: ClinicalRecord; recordId: string;
-  studyId: string; managingInstitutionId: string; readingInstitutionId: string | null; patient: PatientLinkSnapshot;
+  studyId: string; managingInstitutionId: string; patient: PatientLinkSnapshot;
   parties: { authorId: string; recipientId: string | null };
   /** Projection; always equal to the fold of `versions`. */
   state: string; revision: number; head: VersionReference | null; clinicalAdoption: boolean;
