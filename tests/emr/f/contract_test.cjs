@@ -1066,7 +1066,7 @@ test('TEST-F-07 incident_scope: confirmed priority and additional notices and PI
   ]);
   assert.ok(notices[1].requiredFields.includes('legal-rights-and-exercise'));
   assert.ok(notices[3].requiredFields.includes('facts-known-so-far'));
-  assert.equal(notices[0].status, 'moot');
+  assert.equal(notices[0].status, 'pending', 'D-25 LQ-05: a planned replacement is still owed');
   assert.ok(notices.slice(1).every(n => n.status === 'pending'));
   const complete = F.planIncidentResponse(auditor, scope, incidentFacts({ ...input, detailsComplete: true, newlyConfirmedAt: null }));
   assert.deepEqual(complete.obligations.map(n => n.kind), ['possible-leak', 'confirmed-leak', 'pipc-kisa-report']);
@@ -1082,7 +1082,7 @@ test('TEST-F-07 incident_scope: not-a-leak follow-up and immediate MOHW notice r
   const { auditor, scope } = await incidentForResponse();
   const facts = incidentFacts({ status: 'not-a-leak', determinationAt: '2026-10-11T02:00:00.000Z',
     priorPossibleNotice: { noticeId: 'notice-1', sentAt: '2026-10-09T04:00:00.000Z' },
-    medicalIncident: { occurredAt: '2026-10-09T00:00:00.000Z', discoveredAt: '2026-10-09T02:00:00.000Z' } });
+    medicalIncident: { occurredAt: '2026-10-09T00:00:00.000Z', discoveredAt: '2026-10-09T02:00:00.000Z', electronicIntrusion: true, type: 'theft-leak' } });
   const previous = F.planIncidentResponse(auditor, scope, incidentFacts(), { asOf: facts.priorPossibleNotice.sentAt, notices: [
     { kind: 'possible-leak', triggeredAt: facts.awarenessAt, ...facts.priorPossibleNotice },
   ] });
@@ -1422,16 +1422,16 @@ test('TEST-F-07 C20 LQ-01 no-leak follow-up sent thirty minutes later is met wit
 
 test('TEST-F-07 C21 LQ-04 medical notice preserves occurrence and discovery elapsed times', async () => {
   const { auditor, scope } = await incidentForResponse();
-  const p = F.planIncidentResponse(auditor, scope, incidentFacts({ medicalIncident: { occurredAt: itime(-1), discoveredAt: IA } }), {
-    asOf: itime(1), notices: [{ kind: 'mohw-notice', triggeredAt: itime(-1), sentAt: itime(1), noticeId: 'medical-1' }] });
+  const p = F.planIncidentResponse(auditor, scope, incidentFacts({ medicalIncident: { occurredAt: itime(-1), discoveredAt: IA, electronicIntrusion: true, type: 'theft-leak' } }), {
+    asOf: itime(1), notices: [{ kind: 'mohw-notice', triggeredAt: itime(-1), sentAt: itime(1), noticeId: 'medical-1', ...mohwDelivery() }] });
   const o = duty(p, 'mohw-notice');
   assert.deepEqual([o.status, o.dueAt, o.elapsedMs, o.sinceDiscoveryMs, o.triggeredAt, o.discoveredAt], ['met', null, 7200000, 3600000, itime(-1), IA]);
 });
 
 test('TEST-F-07 C22 LQ-04 medical notice at coincident occurrence and discovery has zero elapsed', async () => {
   const { auditor, scope } = await incidentForResponse();
-  const p = F.planIncidentResponse(auditor, scope, incidentFacts({ medicalIncident: { occurredAt: IA, discoveredAt: IA } }), {
-    notices: [{ kind: 'mohw-notice', triggeredAt: IA, sentAt: IA, noticeId: 'medical-zero' }] });
+  const p = F.planIncidentResponse(auditor, scope, incidentFacts({ medicalIncident: { occurredAt: IA, discoveredAt: IA, electronicIntrusion: true, type: 'theft-leak' } }), {
+    notices: [{ kind: 'mohw-notice', triggeredAt: IA, sentAt: IA, noticeId: 'medical-zero', ...mohwDelivery() }] });
   assert.deepEqual([duty(p, 'mohw-notice').status, duty(p, 'mohw-notice').elapsedMs, duty(p, 'mohw-notice').sinceDiscoveryMs], ['met', 0, 0]);
 });
 
@@ -1452,7 +1452,7 @@ test('TEST-F-07 C23 C24 LQ-01 additional subject notice and regulator report ful
 test('TEST-F-07 C25 LQ-01 every immediate family stays owed as time advances without a decision', async () => {
   const { auditor, scope } = await incidentForResponse();
   const confirmed = incidentFacts({ status: 'confirmed', determinationAt: itime(24), newlyConfirmedAt: itime(48),
-    reportTriggers: ['sensitive-or-unique'], medicalIncident: { occurredAt: itime(48), discoveredAt: itime(48) } });
+    reportTriggers: ['sensitive-or-unique'], medicalIncident: { occurredAt: itime(48), discoveredAt: itime(48), electronicIntrusion: true, type: 'theft-leak' } });
   for (const offset of [1 / 3600000, 1, 144]) {
     const asOf = itime(48 + offset);
     const p = F.planIncidentResponse(auditor, scope, confirmed, { asOf });
@@ -1594,19 +1594,354 @@ test('TEST-F-07 C37 C40 LQ-05 replacement and completeness preserve independent 
   assert.equal(duty(later, 'confirmed-leak').triggeredAt, itime(24));
   assert.equal(duty(later, 'pipc-kisa-report').dueAt, itime(102));
   assert.equal(duty(later, 'pipc-kisa-report').triggeredAt, itime(30));
-  assert.equal(duty(later, 'possible-leak').replacedBy, duty(later, 'confirmed-leak').obligationKey);
+  assert.equal(duty(later, 'possible-leak').replacedBy, null, 'D-25 LQ-05: an unsent confirmed notice cannot replace performance');
   assert.equal(later.obligations.filter(o => o.family === 'additional-notice').length, 2);
   assert.equal(later.obligations.filter(o => o.family === 'additional-report').length, 2);
   const exact = F.planIncidentResponse(auditor, scope, { ...facts, determinationAt: IDUE, reportKnownAt: IDUE }, { previous: possible });
-  assert.equal(duty(exact, 'possible-leak').status, 'moot');
+  assert.equal(duty(exact, 'possible-leak').status, 'pending', 'D-25 LQ-05: exact-boundary confirmation still requires actual delivery');
   assert.equal(duty(exact, 'confirmed-priority').dueAt, IDUE);
 });
 
 function incidentDelay(key, patch = {}) {
   return { delayId: 'delay-1', obligationKey: key, clause: 'privacy-decree:39-3.1', version: '2026-09-11', reason: 'documented statutory cause',
     evidenceId: 'cause-evidence', by: id('privacy-officer'), recordedAt: itime(2), startedAt: itime(1), clearedAt: null,
-    accepted: true, decisionId: 'acceptance-1', supersedes: null, ...patch };
+    accepted: true, decisionId: 'acceptance-1', supersedes: null, category: 'force-majeure', decider: verifiedDecider(),
+    causalReview: { evidenceId: 'causal-review', reviewedAt: itime(2), relatesToTime: itime(1), createdAt: itime(1), receivedAt: itime(2), reason: 'verified inability caused by documented event' }, ...patch };
 }
+function verifiedDecider(patch = {}) {
+  return { status: 'verified-privacy-officer', by: id('privacy-officer'), ownerId: INST_X, evidenceId: 'designation-evidence', verifiedAt: IA, ...patch };
+}
+function mohwDelivery() {
+  return { channel: 'MOHW-official', coveredFields: ['institution-name', 'incident-time', 'damage-details', 'technical-support-request'] };
+}
+
+// D792 + D-25 v3/v2 -> RISK-F-07. These cases bind time, recipient, authority and actual-performance contracts.
+test('TEST-F-07 R5-I01 LQ-06 later effective verdict retires only unsent no-breach follow-ups', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const first = noLeak(30, { verdictId: 'nl-first', possibleGround: null });
+  for (const supersedes of [undefined, 'nl-first']) {
+    const later = incidentFacts({ status: 'confirmed', determinationAt: itime(40), possibleGround: null,
+      verdictId: 'confirmed-later', ...(supersedes ? { supersedes } : {}) });
+    const p = F.planIncidentResponse(auditor, scope, first, { findings: [incidentFacts()], notices: [possibleNotice()] });
+    const unsent = F.planIncidentResponse(auditor, scope, later, { previous: p, asOf: itime(41) });
+    const u = duty(unsent, 'not-a-leak');
+    assert.deepEqual([u.status, u.stillOwed, u.actionRequiredNow, u.replacedBy], ['moot', false, false, 'confirmed-later'],
+      'M-F-R5-001: a replaced no-breach conclusion is never an immediate send instruction');
+    assert.ok(u.verdictRefs.includes('confirmed-later'));
+    const sent = F.planIncidentResponse(auditor, scope, later, { previous: p, asOf: itime(41), notices: [
+      { kind: 'not-a-leak', triggeredAt: itime(30), triggerEventId: 'nl-first', noticeId: 'sent-followup', sentAt: itime(31) }] });
+    assert.deepEqual([duty(sent, 'not-a-leak').status, duty(sent, 'not-a-leak').noticeRefs], ['met', ['sent-followup']]);
+    const batch = F.planIncidentResponse(auditor, scope, later, { findings: [incidentFacts(), first], notices: [possibleNotice()], asOf: itime(41) });
+    assert.deepEqual(projection(unsent), projection(batch));
+  }
+});
+
+test('TEST-F-07 R5-I02 LQ-03 later possibility evidence revives the original clock', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const nl = noLeak(10, { verdictId: 'nl-early', possibleGround: null });
+  const p = F.planIncidentResponse(auditor, scope, nl, { findings: [incidentFacts()] });
+  assert.equal(duty(F.planIncidentResponse(auditor, scope, nl, { previous: p, asOf: itime(100) }), 'possible-leak').status, 'moot');
+  for (const extra of [{}, { supersedes: 'nl-early' }, { possibilityEventId: 'new-possibility' }]) {
+    const facts = incidentFacts({ determinationAt: itime(20), verdictId: 'possible-later', ...extra });
+    for (const [asOf, status] of [[itime(21), 'pending'], [itime(100), 'overdue']]) {
+      const next = F.planIncidentResponse(auditor, scope, facts, { previous: p, asOf });
+      assert.ok(next.obligations.filter(o => o.family === 'possibility').every(o => o.status === status && o.dueAt === IDUE),
+        'M-F-R5-002: later possibility reopens its original deadline without a supersedes requirement');
+    }
+  }
+  const newEvent = incidentFacts({ determinationAt: itime(20), possibilityKnownAt: itime(18), possibilityEventId: 'new-event', verdictId: 'new-knowledge' });
+  const fresh = F.planIncidentResponse(auditor, scope, newEvent, { previous: p });
+  assert.equal(fresh.obligations.find(o => o.triggerEventId === 'new-event').dueAt, itime(90));
+});
+
+test('TEST-F-07 R5-I03 LQ-05 a performed possibility notice preserves the confirmed notice own deadline', async () => {
+  const { auditor, scope } = await incidentForResponse(), facts = incidentFacts({ status: 'confirmed', determinationAt: itime(71), detailsComplete: true });
+  const sent = F.planIncidentResponse(auditor, scope, facts, { notices: [possibleNotice(1)], asOf: itime(73) });
+  assert.deepEqual([duty(sent, 'confirmed-leak').dueAt, duty(sent, 'confirmed-leak').status, duty(sent, 'possible-leak').replacedBy],
+    [itime(143), 'pending', null], 'M-F-R5-003: a sent possibility notice is not replaced and cannot shorten confirmation clock');
+  const unpaid = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(73) });
+  assert.equal(duty(unpaid, 'confirmed-leak').dueAt, IDUE);
+  assert.equal(duty(unpaid, 'possible-leak').stillOwed, true);
+  const latePossibility = F.planIncidentResponse(auditor, scope, facts, { notices: [possibleNotice(72)], asOf: itime(73) });
+  assert.equal(duty(latePossibility, 'confirmed-leak').dueAt, IDUE, 'only performance by confirmation avoids the replacement clock');
+});
+
+test('TEST-F-07 R5-I04 LQ-06 consecutive same-conclusion verdicts need one follow-up per recipient', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const a = noLeak(30, { verdictId: 'no-leak-one' }), b = noLeak(36, { verdictId: 'no-leak-two', evidenceId: 'reconfirmed' });
+  const p = F.planIncidentResponse(auditor, scope, b, { findings: [a], notices: [possibleNotice()], asOf: itime(37) });
+  assert.equal(p.obligations.filter(o => o.family === 'no-leak').length, 1, 'M-F-R5-004: consecutive no-breach confirmations never duplicate recipient duties');
+  assert.equal(duty(p, 'not-a-leak').triggeredAt, itime(30));
+  assert.deepEqual(duty(p, 'not-a-leak').verdictRefs, ['no-leak-one', 'no-leak-two']);
+  for (const binding of [{ triggerEventId: 'no-leak-one', triggeredAt: itime(30) }, { triggerEventId: 'no-leak-two', triggeredAt: itime(36) }, { triggeredAt: itime(36) }]) {
+    const sent = F.planIncidentResponse(auditor, scope, b, { previous: p, asOf: itime(38), notices: [
+      { kind: 'not-a-leak', ...binding, noticeId: 'one-followup', sentAt: itime(37.5) }] });
+    assert.equal(sent.obligations.filter(o => o.family === 'no-leak' && o.stillOwed).length, 0);
+  }
+});
+
+test('TEST-F-07 R5 LQ-06 verdict intersection deduplicates overlapping notified scopes and warns on reverse sends', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const recipientScopes = [{ scopeRef: 'incident-subjects', recipientIds: ['a', 'b', 'c'] }, { scopeRef: 'ab', recipientIds: ['a', 'b'] },
+    { scopeRef: 'bc', recipientIds: ['b', 'c'] }, { scopeRef: 'b', recipientIds: ['b'] }];
+  const facts = noLeak(30, { verdictScopeRef: 'b', verdictId: 'only-b' });
+  const p = F.planIncidentResponse(auditor, scope, facts, { recipientScopes, asOf: itime(40), notices: [
+    possibleNotice(3, { recipientScopeRef: 'ab', coversAll: false }), possibleNotice(35, { noticeId: 'bc-notice', recipientScopeRef: 'bc', coversAll: false })] });
+  const followups = p.obligations.filter(o => o.family === 'no-leak');
+  assert.deepEqual(followups.map(o => o.recipientScopeRef), ['recipient:b'], 'M-F-R5-010: only actually notified recipients in the verdict scope receive one duty');
+  assert.equal(followups[0].triggeredAt, itime(30));
+  assert.deepEqual(followups[0].warnings, ['possibility-notice-sent-after-no-breach-verdict']);
+  assert.equal(duty(p, 'possible-leak').status, 'met', 'the two actual notified sets cover the whole population');
+  const unsent = F.planIncidentResponse(auditor, scope, facts, { recipientScopes, asOf: itime(40) });
+  assert.equal(duty(unsent, 'possible-leak').status, 'pending', 'a partial no-breach verdict cannot moot the whole population');
+  const unrelated = incidentFacts({ determinationAt: itime(39), verdictId: 'only-c', verdictScopeRef: 'bc', status: 'confirmed', possibleGround: null });
+  const corrected = F.planIncidentResponse(auditor, scope, unrelated, { previous: p, asOf: itime(40) });
+  assert.equal(duty(corrected, 'not-a-leak').actionRequiredNow, false);
+});
+
+test('TEST-F-07 R5 LQ-05 substitution needs actual notice covering possibility recipients and items', async () => {
+  const { auditor, scope } = await incidentForResponse(), facts = incidentFacts({ status: 'confirmed', determinationAt: itime(24), detailsComplete: true });
+  const p = F.planIncidentResponse(auditor, scope, facts), required = duty(p, 'possible-leak').requiredFields;
+  const notice = { kind: 'confirmed-leak', triggeredAt: itime(24), noticeId: 'confirmed-sent', sentAt: itime(25), coveredFields: required };
+  assert.equal(duty(p, 'possible-leak').stillOwed, true);
+  const met = F.planIncidentResponse(auditor, scope, facts, { previous: p, notices: [notice], asOf: itime(26) });
+  assert.deepEqual([duty(met, 'possible-leak').status, duty(met, 'possible-leak').closureGround, duty(met, 'possible-leak').replacedBy],
+    ['met', 'confirmed-notice-substitution', duty(met, 'confirmed-leak').obligationKey]);
+  for (const patch of [{ coveredFields: required.slice(1) }, { coversAll: false }]) {
+    const partial = F.planIncidentResponse(auditor, scope, facts, { previous: p, notices: [{ ...notice, ...patch }], asOf: itime(26) });
+    assert.equal(duty(partial, 'possible-leak').stillOwed, true, 'M-F-R5-009: substitution requires actual recipient and item coverage');
+  }
+  const late = { ...facts, determinationAt: itime(80) }, after = F.planIncidentResponse(auditor, scope, late);
+  assert.equal(duty(after, 'confirmed-leak').dueAt, itime(152));
+  assert.equal(duty(after, 'possible-leak').status, 'overdue');
+  const lateDelivery = F.planIncidentResponse(auditor, scope, late, { previous: after, asOf: itime(82), notices: [
+    { ...notice, triggeredAt: itime(80), sentAt: itime(81) }] });
+  assert.deepEqual([duty(lateDelivery, 'possible-leak').status, duty(lateDelivery, 'possible-leak').lateByMs, duty(lateDelivery, 'possible-leak').replacedBy], ['met', 9 * 3600000, null]);
+});
+
+test('TEST-F-07 R5 LQ-02 accepted delays require clause category and verified owner authority', async () => {
+  const { auditor, scope } = await incidentForResponse(), facts = incidentFacts();
+  const p = F.planIncidentResponse(auditor, scope, facts), key = duty(p, 'possible-leak').obligationKey;
+  for (const decider of [verifiedDecider({ status: 'designationUnverified' }), verifiedDecider({ status: 'representative' }), verifiedDecider({ ownerId: 'other-owner' })]) {
+    const d = incidentDelay(key, { decider }), args = { previous: p, asOf: itime(80), delays: [d] }, before = clone(args);
+    const next = F.planIncidentResponse(auditor, scope, facts, args), o = duty(next, 'possible-leak');
+    assert.deepEqual([o.status, o.dueAt, o.designationUnverified], ['overdue', IDUE, true], 'M-F-R5-006: unverified designation never stops a clock');
+    assert.deepEqual(args, before);
+    assert.equal(Object.isFrozen(d), false); assert.equal(Object.isFrozen(d.causalReview), false);
+  }
+  const rep = incidentDelay(key, { decider: verifiedDecider({ status: 'representative', exemptionEvidenceId: 'small-business-exemption' }) });
+  assert.equal(duty(F.planIncidentResponse(auditor, scope, facts, { previous: p, asOf: itime(80), delays: [rep] }), 'possible-leak').timing, 'deferred-until-cause-cleared');
+  for (const patch of [{ category: 'urgent-containment' }, { version: 'unverified-law-version' }, { causalReview: undefined }, { startedAt: itime(74), recordedAt: itime(75), causalReview: {
+    evidenceId: 'late-cause', reviewedAt: itime(75), createdAt: itime(74), receivedAt: itime(75), relatesToTime: itime(74), reason: 'arose too late' } }]) {
+    const d = incidentDelay(key, patch);
+    incidentRefused(() => F.planIncidentResponse(auditor, scope, facts, { previous: p, asOf: itime(80), delays: [d] }), [p, d], 'clause-specific category and causal onset are mandatory');
+  }
+});
+
+test('TEST-F-07 R5 LQ-02 late causal evidence preserves observations and each clearance time', async () => {
+  const { auditor, scope } = await incidentForResponse(), facts = incidentFacts();
+  const p = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(80) }), key = duty(p, 'possible-leak').obligationKey;
+  const d1 = incidentDelay(key, { recordedAt: itime(81), clearedAt: itime(79) });
+  const d2 = incidentDelay(key, { delayId: 'other-cause', startedAt: itime(2), recordedAt: itime(81), clearedAt: itime(80),
+    causalReview: { evidenceId: 'second-causal-review', createdAt: itime(80), receivedAt: itime(81), reviewedAt: itime(81), relatesToTime: itime(2), reason: 'late filed second cause review' } });
+  const next = F.planIncidentResponse(auditor, scope, facts, { previous: p, asOf: itime(81), delays: [d2, d1] });
+  assert.equal(duty(next, 'possible-leak').sinceClearanceMs, 3600000);
+  assert.ok(duty(next, 'possible-leak').observations.some(x => x.status === 'overdue'));
+  assert.deepEqual(next.ledger.delays.map(d => d.clearedAt).sort(), [itime(79), itime(80)]);
+});
+
+test('TEST-F-07 R5 LQ-03 report exemption is separate and never closes subject or medical duties', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const facts = incidentFacts({ status: 'confirmed', determinationAt: itime(1), healthDataActualLeak: true,
+    medicalIncident: { occurredAt: IA, discoveredAt: IA, electronicIntrusion: true, type: 'system-disruption' } });
+  const p = F.planIncidentResponse(auditor, scope, facts), key = duty(p, 'pipc-kisa-priority').obligationKey;
+  const d = { decisionId: 'exemption', obligationKey: key, at: itime(2), recordedAt: itime(2), by: id('privacy-officer'), authorityEvidenceId: 'verified-mandate',
+    evidenceId: 'risk-reduction-review', reason: 'verified substantial reduction', basis: 'privacy-decree:40.1:last-sentence', effect: 'report-exemption',
+    category: 'risk-substantially-reduced', stillOwed: false, decider: verifiedDecider() };
+  const exempt = F.planIncidentResponse(auditor, scope, facts, { previous: p, decisions: [d], asOf: itime(3) });
+  assert.deepEqual([duty(exempt, 'pipc-kisa-priority').status, duty(exempt, 'pipc-kisa-priority').stillOwed], ['exempt', false]);
+  assert.equal(duty(exempt, 'mohw-notice').stillOwed, true);
+  assert.equal(duty(exempt, 'confirmed-priority').stillOwed, true);
+  const unknown = F.planIncidentResponse(auditor, scope, facts, { previous: p, decisions: [{ ...d, decider: verifiedDecider({ status: 'designationUnverified' }) }], asOf: itime(80) });
+  assert.equal(duty(unknown, 'pipc-kisa-priority').stillOwed, true, 'M-F-R5-007: unverified exemption cannot close a report');
+  for (const kind of ['possible-leak', 'confirmed-priority', 'mohw-notice']) {
+    const wrong = { ...d, obligationKey: duty(p, kind).obligationKey };
+    incidentRefused(() => F.planIncidentResponse(auditor, scope, facts, { previous: p, decisions: [wrong], asOf: itime(3) }), [p, wrong], 'report exemption is per duty');
+  }
+});
+
+test('TEST-F-07 R5 LQ-03 COMMON posting needs cause scope content and thirty days of maintenance', async () => {
+  const { auditor, scope } = await incidentForResponse(), facts = incidentFacts(), p = F.planIncidentResponse(auditor, scope, facts);
+  const base = possibleNotice(3, { coveredFields: duty(p, 'possible-leak').requiredFields, posting: {
+    justCause: 'verified inability to use individual channels', evidenceId: 'posting-artifact', maintainedThrough: itime(723), maintenanceEvidenceId: 'maintenance-log' } });
+  for (const [duration, expected] of [[719, 'overdue'], [720, 'met']]) {
+    const notice = { ...base, posting: { ...base.posting, maintainedThrough: itime(3 + duration) } };
+    const plan = F.planIncidentResponse(auditor, scope, facts, { previous: p, asOf: itime(724), notices: [notice] });
+    assert.equal(duty(plan, 'possible-leak').status, expected, 'M-F-R5-008: a posting shorter than thirty days never completes the duty');
+  }
+  for (const patch of [{ justCause: '' }, { maintenanceEvidenceId: '' }]) {
+    const notice = { ...base, posting: { ...base.posting, ...patch } };
+    incidentRefused(() => F.planIncidentResponse(auditor, scope, facts, { asOf: itime(724), notices: [notice] }), [facts, notice], 'posting evidence is mandatory');
+  }
+  const missingItems = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(724), notices: [{ ...base, coveredFields: ['possible-data-items'] }] });
+  assert.equal(duty(missingItems, 'possible-leak').stillOwed, true);
+});
+
+test('TEST-F-07 R5 LQ-04 COMMON medical duty requires intrusion and binds institutional knowledge and channel', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const facts = noLeak(10, { hospitalKnownAt: IA, firstDetectionEvidenceAt: itime(-2), processorKnownAt: itime(-1), knowledgeAttributionEvidenceId: 'attributed-alert',
+    medicalIncident: { occurredAt: itime(-3), discoveredAt: itime(-2), electronicIntrusion: true, type: 'system-disruption' } });
+  for (const type of ['theft-leak', 'destruction-damage-concealment-loss', 'system-disruption']) {
+    const p = F.planIncidentResponse(auditor, scope, { ...facts, medicalIncident: { ...facts.medicalIncident, type } });
+    const o = duty(p, 'mohw-notice');
+    assert.deepEqual([o.triggeredAt, o.elapsedMs, o.sinceHospitalKnowledgeMs, o.dueAt], [itime(-3), 13 * 3600000, 10 * 3600000, null]);
+  }
+  const noAttack = F.planIncidentResponse(auditor, scope, { ...facts, medicalIncident: { ...facts.medicalIncident, electronicIntrusion: false } });
+  assert.equal(duty(noAttack, 'mohw-notice'), undefined, 'M-F-R5-011: medical notice requires the electronic-intrusion element');
+  const notice = { kind: 'mohw-notice', triggeredAt: itime(-3), noticeId: 'official-receipt', sentAt: itime(1), ...mohwDelivery() };
+  assert.equal(duty(F.planIncidentResponse(auditor, scope, facts, { notices: [notice] }), 'mohw-notice').status, 'met');
+  for (const patch of [{ channel: 'PIPC' }, { coveredFields: ['institution-name'] }]) incidentRefused(
+    () => F.planIncidentResponse(auditor, scope, facts, { notices: [{ ...notice, ...patch }] }), [facts, notice], 'MOHW needs its own official channel and four items');
+});
+
+test('TEST-F-07 R5 COMMON possibility effective date and health-data report trigger are independent', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  for (const [awarenessAt, count] of [['2026-09-10T14:59:59.999Z', 0], ['2026-09-10T15:00:00.000Z', 1]]) {
+    const facts = incidentFacts({ awarenessAt, determinationAt: '2026-09-11T00:00:00.000Z' });
+    assert.equal(F.planIncidentResponse(auditor, scope, facts).obligations.filter(o => o.family === 'possibility').length, count,
+      'M-F-R5-012: possibility knowledge before the effective date never creates the new statutory duty');
+  }
+  const health = incidentFacts({ status: 'confirmed', healthDataActualLeak: true, reportTriggers: [], possibleGround: null });
+  assert.ok(duty(F.planIncidentResponse(auditor, scope, health), 'pipc-kisa-priority'), 'M-F-R5-013: actual health-data leak automatically triggers the report');
+  assert.equal(duty(F.planIncidentResponse(auditor, scope, incidentFacts()), 'pipc-kisa-priority'), undefined);
+});
+
+test('TEST-F-07 R5 COMMON processor clocks and decision authority are separate from hospital duties', async () => {
+  const { auditor, scope } = await incidentForResponse(), hospital = incidentFacts({ hospitalKnownAt: IA, processorKnownAt: itime(-2), knowledgeAttributionEvidenceId: 'hospital-alert' });
+  const h = F.planIncidentResponse(auditor, scope, hospital);
+  const processor = { ...hospital, awarenessAt: itime(-2), determinationAt: itime(-1), obligationOwner: { kind: 'processor', id: 'operator-1' } };
+  const p = F.planIncidentResponse(auditor, scope, processor, { asOf: itime(1) });
+  assert.deepEqual([duty(h, 'possible-leak').dueAt, duty(p, 'possible-leak').dueAt], [IDUE, itime(70)]);
+  assert.notEqual(duty(h, 'possible-leak').obligationKey, duty(p, 'possible-leak').obligationKey);
+  incidentRefused(() => F.planIncidentResponse(auditor, scope, processor, { previous: h }), [h, processor], 'hospital plan cannot be processor history');
+  const d = incidentDelay(duty(p, 'possible-leak').obligationKey);
+  const foreign = F.planIncidentResponse(auditor, scope, processor, { previous: p, asOf: itime(80), delays: [d] });
+  assert.equal(duty(foreign, 'possible-leak').status, 'overdue', 'M-F-R5-014: hospital authority never suspends processor obligations');
+  const own = { ...d, decider: verifiedDecider({ ownerId: 'operator-1' }) };
+  assert.equal(duty(F.planIncidentResponse(auditor, scope, processor, { previous: p, asOf: itime(80), delays: [own] }), 'possible-leak').timing, 'deferred-until-cause-cleared');
+});
+
+function ispFinding(status = true, patch = {}) {
+  return incidentFacts({ ispIncident: { eventId: 'attack-1', attackCaused: true, status,
+    ...(status === 'unknown' ? {} : { verification: { by: id('privacy-officer'), at: IA, evidenceId: 'isp-status-evidence' } }), ...patch } });
+}
+function ispReport(hours = 2, patch = {}) {
+  return { kind: 'isp-incident-report', triggeredAt: IA, noticeId: 'isp-report', sentAt: itime(hours), channel: 'KISA',
+    coveredFields: ['incident-time-cause-damage', 'response-status', 'contact-department'], ...patch };
+}
+function userImpact(patch = {}) {
+  return { kind: 'outage', outageMinutes: 120, confirmedAt: itime(2), recipientScopeRef: 'service-users', evidenceId: 'outage-log', decider: verifiedDecider(), ...patch };
+}
+
+test('TEST-F-07 R5 LQ-01 ISP initial report has its own twenty-four-hour clock and unknown is provisional', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const known = F.planIncidentResponse(auditor, scope, ispFinding(), { asOf: itime(25) });
+  assert.deepEqual([duty(known, 'isp-incident-report').dueAt, duty(known, 'isp-incident-report').status], [itime(24), 'overdue'],
+    'M-F-R5-005: ISP reporting keeps its independent twenty-four-hour deadline');
+  const unverified = F.planIncidentResponse(auditor, scope, ispFinding('unknown'), { asOf: itime(25) });
+  const o = duty(unverified, 'isp-incident-report');
+  assert.deepEqual([o.status, o.dueAt, o.provisionalResponseDueAt, o.provisionalDeadlinePassed, o.audience], ['unverified-pending', null, itime(24), true, 'privacy-officer'],
+    'M-F-R5-015: unknown ISP applicability is provisional and never legal overdue');
+  const evidence = F.planIncidentResponse(auditor, scope, ispFinding('unknown'), { previous: unverified, notices: [ispReport(20)], asOf: itime(26) });
+  assert.equal(duty(evidence, 'isp-incident-report').status, 'unverified-pending');
+  assert.deepEqual(duty(evidence, 'isp-incident-report').noticeRefs, ['isp-report']);
+  assert.deepEqual([duty(evidence, 'isp-incident-report').stillOwed, duty(evidence, 'isp-incident-report').actionRequiredNow, duty(evidence, 'isp-incident-report').lateByMs], [false, false, null]);
+  const notApplicable = ispFinding(false, { verification: { by: id('privacy-officer'), at: itime(27), evidenceId: 'not-an-isp' } });
+  const excluded = F.planIncidentResponse(auditor, scope, notApplicable, { previous: evidence, asOf: itime(28) });
+  assert.equal(duty(excluded, 'isp-incident-report'), undefined);
+  assert.equal(excluded.ledger.notices[0].noticeId, 'isp-report', 'inapplicability does not erase an actual report');
+  const verified = ispFinding(true, { verification: { by: id('privacy-officer'), at: itime(27), evidenceId: 'later-installation-check' } });
+  const replayed = F.planIncidentResponse(auditor, scope, verified, { previous: evidence, asOf: itime(28) });
+  assert.deepEqual([duty(replayed, 'isp-incident-report').status, duty(replayed, 'isp-incident-report').dueAt, duty(replayed, 'isp-incident-report').elapsedMs], ['met', itime(24), 20 * 3600000]);
+  assert.equal(duty(F.planIncidentResponse(auditor, scope, ispFinding(false)), 'isp-incident-report'), undefined);
+  assert.equal(duty(F.planIncidentResponse(auditor, scope, ispFinding(true, { attackCaused: false })), 'isp-incident-report'), undefined);
+});
+
+test('TEST-F-07 R5 LQ-01 ISP deemed report needs actual same-incident authority notice and content', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const facts = { ...ispFinding(), medicalIncident: { occurredAt: itime(-1), discoveredAt: IA, electronicIntrusion: true, type: 'system-disruption' } };
+  const notice = { kind: 'mohw-notice', triggeredAt: itime(-1), sentAt: itime(25), noticeId: 'mohw-receipt', ...mohwDelivery() };
+  const missing = F.planIncidentResponse(auditor, scope, facts, { notices: [notice], asOf: itime(26) });
+  assert.equal(duty(missing, 'isp-incident-report').status, 'overdue');
+  const performed = { ...notice, coveredFields: [...notice.coveredFields, ...ispReport().coveredFields] };
+  const p = F.planIncidentResponse(auditor, scope, facts, { notices: [performed], asOf: itime(26) });
+  assert.deepEqual([duty(p, 'isp-incident-report').status, duty(p, 'isp-incident-report').lateByMs, duty(p, 'isp-incident-report').noticeRefs], ['met', 3600000, ['mohw-receipt']]);
+  assert.equal(duty(p, 'mohw-notice').timeliness, 'requires-review');
+  incidentRefused(() => F.planIncidentResponse(auditor, scope, facts, { notices: [{ ...performed, incidentId: 'different-incident' }], asOf: itime(26) }),
+    [facts, performed], 'deemed reporting requires the same incident');
+});
+
+test('TEST-F-07 R5 LQ-01 ISP supplement and affected-user notice survive initial report and no-breach verdict', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const facts = ispFinding(true, { userImpact: userImpact(), additionalFacts: [
+    { eventId: 'extra-one', confirmedAt: itime(5), evidenceId: 'fact-one' }, { eventId: 'extra-two', confirmedAt: itime(6), evidenceId: 'fact-two' }] });
+  const p = F.planIncidentResponse(auditor, scope, facts, { notices: [ispReport()], asOf: itime(7) });
+  assert.deepEqual(p.obligations.filter(o => o.kind === 'isp-incident-report-supplement').map(o => [o.triggeredAt, o.dueAt]), [[itime(5), itime(29)], [itime(6), itime(30)]],
+    'M-F-R5-016: every additionally confirmed fact retains its independent ISP supplement');
+  assert.deepEqual([duty(p, 'isp-user-notice').dueAt, duty(p, 'isp-user-notice').status, duty(p, 'isp-user-notice').recipientScopeRef], [null, 'pending', 'service-users']);
+  const nl = { ...facts, status: 'not-a-leak', possibleGround: null, verdictId: 'pipa-no-breach', determinationAt: itime(10) };
+  const next = F.planIncidentResponse(auditor, scope, nl, { previous: p });
+  assert.equal(duty(next, 'isp-user-notice').stillOwed, true);
+  assert.equal(next.obligations.filter(o => o.kind === 'isp-incident-report-supplement').length, 2);
+  const userNotice = { kind: 'isp-user-notice', triggeredAt: itime(2), sentAt: itime(3), noticeId: 'users-sent', channel: 'affected-users',
+    coveredFields: ['incident-time-and-circumstances', 'user-damage', 'provider-response', 'user-protective-actions', 'contact-department'] };
+  const sent = F.planIncidentResponse(auditor, scope, facts, { notices: [ispReport(), userNotice], asOf: itime(7) });
+  assert.equal(duty(sent, 'isp-user-notice').status, 'met');
+  assert.equal(sent.obligations.filter(o => o.kind === 'isp-user-additional' && o.stillOwed).length, 2);
+  const unknown = F.planIncidentResponse(auditor, scope, ispFinding('unknown', { userImpact: userImpact() }), { asOf: itime(3) });
+  assert.equal(duty(unknown, 'isp-user-notice').status, 'unverified-pending');
+});
+test('TEST-F-07 R5 LQ-01 ISP priority user notice and per-recipient deemed notice retain remaining duties', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const facts = ispFinding(true, { userImpact: userImpact({ detailsComplete: false }), additionalFacts: [{ eventId: 'details', confirmedAt: itime(5), evidenceId: 'facts' }] });
+  const priorityFields = ['user-damage', 'provider-response', 'user-protective-actions', 'contact-department'];
+  const priority = { kind: 'isp-user-notice', triggeredAt: itime(2), sentAt: itime(3), noticeId: 'priority-users', channel: 'affected-users', coveredFields: priorityFields };
+  const p = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(6), notices: [priority] });
+  assert.equal(duty(p, 'isp-user-notice').status, 'met');
+  assert.equal(duty(p, 'isp-user-additional').stillOwed, true);
+  const sharedScopeFacts = { ...facts, recipientScopeRef: 'service-users' };
+  const deemed = F.planIncidentResponse(auditor, scope, sharedScopeFacts, { asOf: itime(6), notices: [possibleNotice(3, { recipientScopeRef: 'service-users', coveredFields: priorityFields })] });
+  assert.equal(duty(deemed, 'isp-user-notice').status, 'met');
+  assert.equal(duty(deemed, 'isp-user-additional').stillOwed, true);
+  const unprovedScope = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(6), notices: [possibleNotice(3, { coveredFields: priorityFields })] });
+  assert.equal(duty(unprovedScope, 'isp-user-notice').stillOwed, true, 'M-F-R5-017: data-subject delivery never proves coverage of a different service-user population');
+  const provedScope = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(6), notices: [possibleNotice(3, { coveredFields: priorityFields })],
+    recipientScopes: [{ scopeRef: 'incident-subjects', recipientIds: ['user-a', 'user-b'] }, { scopeRef: 'service-users', recipientIds: ['user-b'] }] });
+  assert.equal(duty(provedScope, 'isp-user-notice').status, 'met');
+  const agency = { ...facts, medicalIncident: { occurredAt: IA, discoveredAt: IA, electronicIntrusion: true, type: 'system-disruption' } };
+  const agencyPlan = F.planIncidentResponse(auditor, scope, agency, { asOf: itime(6), notices: [
+    { kind: 'mohw-notice', triggeredAt: IA, sentAt: itime(3), noticeId: 'agency-only', ...mohwDelivery(), coveredFields: [...mohwDelivery().coveredFields, ...priorityFields] }] });
+  assert.equal(duty(agencyPlan, 'isp-user-notice').stillOwed, true, 'an agency receipt never supplies notice to users');
+  const processorFacts = { ...facts, obligationOwner: { kind: 'processor', id: 'operator-isp' }, processorKnownAt: IA,
+    ispIncident: { ...facts.ispIncident, userImpact: userImpact({ recipientScopeRef: 'hospital-customers', decider: verifiedDecider({ ownerId: 'operator-isp' }) }) } };
+  const operator = F.planIncidentResponse(auditor, scope, processorFacts, { asOf: itime(6) });
+  assert.equal(duty(operator, 'isp-user-notice').recipientScopeRef, 'hospital-customers');
+  assert.equal(duty(operator, 'isp-incident-report').dueAt, itime(24));
+});
+
+test('TEST-F-07 R5 LQ-05 multiple possibility causes retain the earliest deadline with proved recipient coverage', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const first = incidentFacts({ possibilityEventId: 'z-first' }), second = incidentFacts({ possibilityKnownAt: itime(2), determinationAt: itime(3), possibilityEventId: 'a-second' });
+  const facts = incidentFacts({ status: 'confirmed', determinationAt: itime(24), detailsComplete: true, possibleGround: null, recipientScopeRef: 'confirmed-subjects' });
+  const recipientScopes = [{ scopeRef: 'incident-subjects', recipientIds: ['a'] }, { scopeRef: 'confirmed-subjects', recipientIds: ['a', 'b'] }];
+  const p = F.planIncidentResponse(auditor, scope, facts, { findings: [first, second], recipientScopes });
+  assert.equal(duty(p, 'confirmed-leak').dueAt, IDUE, 'every eligible possibility cause participates in the minimum deadline');
+  const notice = { kind: 'confirmed-leak', triggeredAt: itime(24), noticeId: 'complete-replacement', sentAt: itime(25), coveredFields: duty(p, 'possible-leak').requiredFields };
+  const sent = F.planIncidentResponse(auditor, scope, facts, { previous: p, notices: [notice], asOf: itime(26) });
+  assert.deepEqual(sent.obligations.filter(o => o.family === 'possibility').map(o => [o.status, o.replacedBy]),
+    [['met', duty(sent, 'confirmed-leak').obligationKey], ['met', duty(sent, 'confirmed-leak').obligationKey]]);
+});
+
 test('TEST-F-07 C38 LQ-02 accepted delay clearance and delivery stay on one duty and require follow-up', async () => {
   const { auditor, scope } = await incidentForResponse(), facts = incidentFacts();
   const initial = F.planIncidentResponse(auditor, scope, facts), key = duty(initial, 'possible-leak').obligationKey;
@@ -1652,7 +1987,7 @@ test('TEST-F-07 C37 LQ-05 confirmation during an accepted possibility delay inhe
   const facts = incidentFacts({ status: 'confirmed', determinationAt: itime(24) });
   const c = F.planIncidentResponse(auditor, scope, facts, { previous: p, delays: [d] });
   assert.equal(duty(c, 'confirmed-priority').originalDueAt, IDUE);
-  assert.equal(duty(c, 'confirmed-priority').timing, 'deferred-until-cause-cleared');
+  assert.equal(duty(c, 'confirmed-priority').timing, 'immediate', 'D-25 LQ-02: confirmed-notice delay needs its own provision decision');
   assert.equal(duty(c, 'confirmed-priority').dueAt, null);
   const d2 = { ...d, delayId: 'resolved-delay', supersedes: d.delayId, clearedAt: itime(80), recordedAt: itime(80) };
   const r = F.planIncidentResponse(auditor, scope, facts, { previous: c, asOf: itime(81), delays: [d2] });
@@ -1660,8 +1995,8 @@ test('TEST-F-07 C37 LQ-05 confirmation during an accepted possibility delay inhe
   const lateFacts = { ...facts, determinationAt: itime(78) };
   const late = F.planIncidentResponse(auditor, scope, lateFacts, { previous: p, delays: [d], asOf: itime(79) });
   assert.deepEqual([duty(late, 'confirmed-priority').originalDueAt, duty(late, 'confirmed-priority').dueAt], [IDUE, null]);
-  assert.equal(duty(late, 'possible-leak').status, 'moot');
-  assert.equal(duty(late, 'possible-leak').replacedBy, duty(late, 'confirmed-priority').obligationKey);
+  assert.equal(duty(late, 'possible-leak').status, 'pending');
+  assert.equal(duty(late, 'possible-leak').replacedBy, null);
 });
 
 test('TEST-F-07 C41 LQ-03 final judgments require evidence retain remaining duties and survive later performance', async () => {
@@ -1683,8 +2018,8 @@ test('TEST-F-07 C41 LQ-03 final judgments require evidence retain remaining duti
   assert.deepEqual([duty(met, 'possible-leak').status, duty(met, 'possible-leak').timeliness, duty(met, 'possible-leak').decisionRefs], ['met', 'final-breach', ['final-1']]);
   assert.ok(duty(met, 'possible-leak').observations.some(x => x.status === 'missed'));
   const extinguished = { ...decision, decisionId: 'ended', effect: 'extinguished', stillOwed: false };
-  const ended = F.planIncidentResponse(auditor, scope, facts, { previous, asOf: itime(80), decisions: [extinguished] });
-  assert.deepEqual([duty(ended, 'possible-leak').status, duty(ended, 'possible-leak').stillOwed], ['missed', false]);
+  incidentRefused(() => F.planIncidentResponse(auditor, scope, facts, { previous, asOf: itime(80), decisions: [extinguished] }),
+    [facts, previous, extinguished], 'D-25 LQ-03: a generic extinguishment memo is not a per-duty closure ground');
 });
 
 test('TEST-F-07 C25 C41 LQ-01 immediate overdue needs an individual timing decision and keeps performance open', async () => {
@@ -1722,7 +2057,7 @@ test('TEST-F-07 C42 partial notices create recipient follow-ups although the who
 });
 
 test('TEST-F-07 C48 LQ-06 reverse-order deliveries trigger follow-up for each newly notified scope', async () => {
-  const { auditor, scope } = await incidentForResponse(), facts = noLeak(24, { medicalIncident: { occurredAt: IA, discoveredAt: itime(1) } });
+  const { auditor, scope } = await incidentForResponse(), facts = noLeak(24, { medicalIncident: { occurredAt: IA, discoveredAt: itime(1), electronicIntrusion: true, type: 'theft-leak' } });
   const n = possibleNotice(30), p = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(40), notices: [n] });
   assert.equal(p.hasNotifiedPossible, true);
   assert.equal(duty(p, 'not-a-leak').triggeredAt, itime(30));
