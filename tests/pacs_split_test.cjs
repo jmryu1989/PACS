@@ -227,3 +227,25 @@ test('U0B-DI-RUNTIME Nest builds one PacsService for its consumers and starts it
     assert.equal(pacs.institutionName('syn-a'), 'SYN A', 'the started instance serves the cache it loaded');
   } finally { await ctx.close(); }
 });
+
+// ── recorder inputs (order section 9, M26): a run record that hashes the facade also hashes the code it forwards to ──
+test('U0B-RECORDER-INPUTS every record-run that names the facade names all 16 concern files; the module suite has its own record', () => {
+  const fs = require('node:fs');
+  const modules = Object.keys(spec.concerns);
+  assert.equal(modules.length, 16);
+  let records = 0;
+  for (const workflow of ['.github/workflows/validate.yml', '.github/workflows/gateway-e2e.yml']) {
+    const lines = fs.readFileSync(path.resolve(__dirname, '..', workflow), 'utf8').replace(/\r\n/g, '\n').split('\n');
+    for (const [index, line] of lines.entries()) {
+      if (!line.includes('scripts/record-run.py') || !line.includes(' --file api/src/pacs.service.ts ')) continue;
+      records++;
+      const missing = modules.filter(module => !line.includes(' --file ' + module + ' '));
+      assert.deepEqual(missing, [], `${workflow}:${index + 1} hashes the facade without its concern files`);
+    }
+  }
+  assert.ok(records >= 2, 'the facade is recorded somewhere');
+  const validate = fs.readFileSync(path.resolve(__dirname, '../.github/workflows/validate.yml'), 'utf8').replace(/\r\n/g, '\n');
+  const own = validate.split('\n').filter(line => line.includes('--run-dir tmp/workspace-ui-ci/pacs-split-modules '));
+  assert.equal(own.length, 1);
+  assert.ok(own[0].includes(' --file tests/pacs_split_modules_test.cjs -- node --test --test-reporter=tap tests/pacs_split_modules_test.cjs'), own[0]);
+});

@@ -37,6 +37,10 @@ BOUND = ['gateway/agent/agent.py', 'gateway/agent/Dockerfile', 'gateway/agent/re
          'docker-compose.yml', 'config/orthanc.json', 'api/src/pacs.service.ts', 'api/src/pacs.controller.ts',
          'api/src/gateway-receipt.ts', 'api/src/gateway-retry.ts', 'api/src/auth.guard.ts',
          '.github/workflows/gateway-e2e.yml']
+# S9-U0b: PacsService is a facade; the gateway receipt/retry/DICOMweb bodies it forwards to live in api/src/pacs/.
+BOUND += ['api/src/pacs/' + name + '.ts' for name in (
+    'values', 'access', 'institutions', 'worklist', 'dicom-gateway', 'preferences', 'filters', 'study-state', 'tech-note',
+    'report-draft', 'report-evidence', 'report-commit', 'hold', 'clinician', 'audit', 'metrics')]
 
 
 def apply(clean, patch):
