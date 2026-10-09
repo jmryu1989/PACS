@@ -1,5 +1,5 @@
 # coding: utf-8
-"""EMR-E R1 mutants M-E-01..07 (required) and M-E-X1..X5 (supplementary), against tests/emr/e/contract_test.cjs.
+"""EMR-E R1 mutants M-E-01..07 (required) and M-E-X1..X6 (supplementary), against tests/emr/e/contract_test.cjs.
 
 Each mutant rewrites one decision in a copy of api/src made outside the repository; the product tree is never written.
 The contract test then runs against that copy (KIN_EMR_E_SOURCE_DIR). A mutant is killed only when every declared case
@@ -63,9 +63,13 @@ MUTANTS = [
      "replace": "choice(r.cause, ['user-view', 'background-fetch', 'service-job']);",
      "kills": ["TEST-E-05 display_epoch R1"]},
     {"id": "M-E-X2", "required": False, "title": "cache re-display not recorded", "file": "emr-image/contract.ts",
-     "find": "if ((source === 'network') !== (r.deliveryEventId !== null)) refuse('DisplaySourceMismatch');",
+     "find": "if ((source === 'network') !== (r.deliveryEventId !== null) || (source !== 'network' && delivery !== null)) refuse('DisplaySourceMismatch');",
      "replace": "if (source !== 'network' || r.deliveryEventId === null) refuse('DisplaySourceMismatch');",
      "kills": ["TEST-E-05 display_epoch A1"]},
+    {"id": "M-E-X6", "required": False, "title": "network display accepted without its own opening's delivery", "file": "emr-image/contract.ts",
+     "find": "    refuse('DisplayDeliveryMismatch');",
+     "replace": "    void 0;",
+     "kills": ["TEST-E-05 display_epoch R1"]},
     {"id": "M-E-X3", "required": False, "title": "ACK of an earlier generation accepted", "file": "emr-image/contract.ts",
      "find": "if (!sameOpening(a as any, current) || !sameOpening(display, current) || display.manifestSha256 !== current.manifestSha256) refuse('StaleAckRefused');",
      "replace": "if (!sameOpening(a as any, current)) refuse('StaleAckRefused');",

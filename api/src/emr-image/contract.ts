@@ -103,9 +103,9 @@ export function parseImageRequest(method: unknown, target: unknown): Readonly<Im
   }
   if (kind === 'study-query') {
     // A study query without exactly one study UID would enumerate the archive; the worklist API lists studies.
-    const ids = ['StudyInstanceUID', '0020000D'].filter(k => k in query);
+    const ids = ['StudyInstanceUID', '0020000D'].filter(k => Object.prototype.hasOwnProperty.call(query, k));
     if (ids.length !== 1) refuse('ImageQueryRefused');
-    studyUid = dicomUid(query[ids[0]]);
+    try { studyUid = dicomUid(query[ids[0]]); } catch { refuse('ImageQueryRefused'); }
   }
   const request = freeze({ method: m as 'GET' | 'HEAD', kind, studyUid, seriesUid, sopInstanceUid, frames, bulkTag, query });
   parsed.add(request);
@@ -214,9 +214,9 @@ export function checkProvisionBasis(input: ProvisionInput): Readonly<ProvisionDe
     if (!Object.prototype.hasOwnProperty.call(PROVISION_EXCEPTIONS, b.clauseId)) refuse('ConsentOrExceptionRequired');
     if (!(PROVISION_EXCEPTIONS[b.clauseId as keyof typeof PROVISION_EXCEPTIONS].facts as readonly string[]).includes(b.fact)) refuse('ConsentOrExceptionRequired');
     basisId = string(b.basisId); from = utc(b.recordedAt); revokedAt = b.revokedAt === null ? null : utc(b.revokedAt); s = scope(b.scope);
-    // An exception is one provision for a named study, never a standing institution-wide permission.
-    if (s.studyUids === 'institution-studies') refuse('ProvisionOutOfScope');
   } else return refuse('ConsentOrExceptionRequired');
+  // A consent or exception names the studies it sends; it is never a standing institution-wide permission.
+  if (s.studyUids === 'institution-studies') refuse('ProvisionOutOfScope');
   if (revokedAt !== null && revokedAt <= at) refuse('BasisRevoked');
   if (from > at) refuse('BasisNotYetValid');
   if (until !== null && until <= at) refuse('BasisExpired');
@@ -232,13 +232,16 @@ export interface DeliveryUnit {
   key: string; sopInstanceUid: string | null; part: 'object' | 'frame' | 'derived'; frame: number | null;
   expectedBytes: number | null; sha256: string | null; recordKind: RecordKind;
 }
+export interface OpeningRef { openingId: string; accountGeneration: number; sequence: number }
 export interface PreparedDelivery {
   formatVersion: 1; eventId: string; manifestSha256: string; studyUid: string; managingInstitution: string; request: ImageRequest;
-  body: boolean; cause: CauseKind; relation: ProvisionRelation; preparedAt: string;
+  body: boolean; cause: CauseKind; relation: ProvisionRelation; opening: OpeningRef | null; preparedAt: string;
   units: readonly DeliveryUnit[]; excluded: readonly { sopInstanceUid: string; reason: string }[];
 }
+/** opening: the viewer opening the request serves (null for a device or service load that serves no opening). */
 export interface DeliveryContext {
   eventId: string; cause: CauseKind; at: string; authorization: { studyUid: string; institution: string }; provision: ProvisionDecision;
+  opening: OpeningRef | null;
 }
 const prepared = new WeakSet<object>();
 const deliverable = (o: ManifestObject) => o.unsupported === null;
@@ -249,18 +252,27 @@ const derivedUnit = (key: string, sopInstanceUid: string | null, frame: number |
 
 export function prepareDelivery(manifestInput: ImageManifest, requestInput: ImageRequest, context: DeliveryContext): Readonly<PreparedDelivery> {
   const manifest = verifiedManifest(manifestInput);
-  const c = object(context, ['eventId', 'cause', 'at', 'authorization', 'provision']);
+  const c = object(context, ['eventId', 'cause', 'at', 'authorization', 'provision', 'opening']);
   const eventId = string(c.eventId), cause = choice(c.cause, ['user-view', 'background-fetch', 'service-job'] as const), preparedAt = utc(c.at);
+  let opening: OpeningRef = null;
+  if (c.opening !== null) {
+    const o = object(c.opening, ['openingId', 'accountGeneration', 'sequence']);
+    opening = { openingId: string(o.openingId), accountGeneration: integer(o.accountGeneration, 1), sequence: integer(o.sequence, 1) };
+  }
   // Only a request the grammar parsed is served: a hand-built object cannot widen the scope the grammar allows.
   if (!requestInput || typeof requestInput !== 'object' || !parsed.has(requestInput)) refuse('ImageRequestRequired');
   const request = requestInput;
-  const auth = object(c.authorization, ['studyUid', 'institution']);
-  // The 204 for another study or institution authorizes nothing here.
-  if (auth.studyUid !== manifest.studyUid || auth.institution !== manifest.managingInstitution) refuse('AuthorizationScopeMismatch');
   if (!c.provision || !decisions.has(c.provision)) refuse('ProvisionDecisionRequired');
   const provision: ProvisionDecision = c.provision;
   if (provision.studyUid !== manifest.studyUid || provision.managingInstitution !== manifest.managingInstitution) refuse('ProvisionOutOfScope');
+  // The basis is decided for this preparation; an earlier decision could predate a revocation or termination.
+  if (provision.at !== preparedAt) refuse('ProvisionDecisionStale');
   if (!provision.deliverable) refuse(provision.refusal);
+  // C's 204 names the study and the acting institution: the managing institution itself, or the processor it named.
+  // A 204 for another study or another institution authorizes nothing here.
+  const auth = object(c.authorization, ['studyUid', 'institution']);
+  const actor = provision.relation === 'processor' ? provision.recipient : manifest.managingInstitution;
+  if (auth.studyUid !== manifest.studyUid || auth.institution !== actor) refuse('AuthorizationScopeMismatch');
   if (request.studyUid !== manifest.studyUid) refuse('ScopeOutsideManifest');
   const inSeries = (uid: string) => manifest.objects.filter(o => o.seriesUid === uid);
   if (request.seriesUid !== null && !inSeries(request.seriesUid).length) refuse('ScopeOutsideManifest');
@@ -302,7 +314,7 @@ export function prepareDelivery(manifestInput: ImageManifest, requestInput: Imag
     default: refuse('ImagePathRefused');
   }
   const result = freeze({ formatVersion: 1 as const, eventId, manifestSha256: manifest.sha256, studyUid: manifest.studyUid, managingInstitution: manifest.managingInstitution,
-    request, body: request.method === 'GET', cause, relation: provision.relation, preparedAt, units, excluded });
+    request, body: request.method === 'GET', cause, relation: provision.relation, opening, preparedAt, units, excluded });
   prepared.add(result);
   return result;
 }
@@ -478,7 +490,7 @@ export function planOfflineBundle(input: { bundleId: string; current: ImageManif
   for (const [id, d] of [...decoders].sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)) parts.push({ key: `decoder:${id}@${d.version}`, kind: 'decoder', bytes: null, sha256: d.sha256 });
   if (all.some(m => m.viewer.id !== current.viewer.id || m.viewer.version !== current.viewer.version || m.viewer.sha256 !== current.viewer.sha256)) refuse('ViewerAssetConflict');
   parts.push({ key: `viewer:${current.viewer.id}@${current.viewer.version}`, kind: 'viewer', bytes: null, sha256: current.viewer.sha256 });
-  if (new Set(parts.map(x => x.key)).size !== parts.length) refuse('ComparisonSelectionInvalid');
+  if (new Set(parts.map(x => x.key)).size !== parts.length) refuse('OfflinePartConflict');
   const missingComparisons = selected.filter(uid => !manifests.some(m => m.studyUid === uid));
   const manifestRefs = all.map((m, i) => ({ studyUid: m.studyUid, sha256: m.sha256, role: i ? 'comparison' as const : 'current' as const }));
   const totalBytes = parts.reduce((sum, x) => sum + (x.bytes ?? 0), 0);
@@ -590,7 +602,8 @@ function opening(value: unknown): Opening {
 const sameOpening = (a: { openingId: string; accountGeneration: number; sequence: number }, b: Opening) =>
   a.openingId === b.openingId && a.accountGeneration === b.accountGeneration && a.sequence === b.sequence;
 
-export function classifyDisplayReport(currentInput: Opening, manifestInput: ImageManifest, report: DisplayReport): Readonly<DisplayRecord> {
+/** delivery: the prepared delivery a network display names (null for a cache or offline-store re-display). */
+export function classifyDisplayReport(currentInput: Opening, manifestInput: ImageManifest, report: DisplayReport, delivery: PreparedDelivery | null): Readonly<DisplayRecord> {
   const current = opening(currentInput), manifest = verifiedManifest(manifestInput);
   const r = object(report, ['openingId', 'accountGeneration', 'sequence', 'studyUid', 'manifestSha256', 'sopInstanceUid', 'frame', 'source', 'cause', 'deliveryEventId', 'reportedAt']);
   if (current.closedAt !== null) refuse('OpeningClosed');
@@ -604,7 +617,12 @@ export function classifyDisplayReport(currentInput: Opening, manifestInput: Imag
   if (frame !== null && !item.frames.some(f => f.number === frame)) refuse('FrameOutOfManifest');
   const source = choice(r.source, ['network', 'cache', 'offline-store'] as const);
   // A network display names the delivery it showed; a cache or offline re-display is recorded without a new delivery.
-  if ((source === 'network') !== (r.deliveryEventId !== null)) refuse('DisplaySourceMismatch');
+  if ((source === 'network') !== (r.deliveryEventId !== null) || (source !== 'network' && delivery !== null)) refuse('DisplaySourceMismatch');
+  // That delivery was prepared for this opening's reading view and carried this object's pixels (not only its metadata).
+  if (source === 'network' && (!delivery || !prepared.has(delivery) || delivery.eventId !== r.deliveryEventId || delivery.manifestSha256 !== current.manifestSha256 ||
+      delivery.cause !== 'user-view' || !delivery.opening || !sameOpening(delivery.opening, current) ||
+      !delivery.units.some(u => u.sopInstanceUid === item.sopInstanceUid && u.recordKind !== 'study-metadata' && (frame === null || u.part === 'object' || u.frame === frame))))
+    refuse('DisplayDeliveryMismatch');
   const record = freeze({ action: 'client-shown' as const, openingId: current.openingId, accountGeneration: current.accountGeneration, sequence: current.sequence,
     studyUid: current.studyUid, manifestSha256: current.manifestSha256, unitKey: frame === null ? `object:${item.sopInstanceUid}` : `frame:${item.sopInstanceUid}#${frame}`,
     source, relatedEventId: r.deliveryEventId === null ? null : string(r.deliveryEventId), reportedAt: utc(r.reportedAt) });

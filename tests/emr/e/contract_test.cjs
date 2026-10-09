@@ -51,7 +51,7 @@ const CASES = [
   'TEST-E-04 offline_ready R4 another patient, an unselected study, an inconsistent requirement or a broken offline order is refused',
   'TEST-E-05 display_epoch A1 the current opening records network, cache and offline-store displays separately from delivery',
   'TEST-E-05 display_epoch A2 an explicit ACK binds to a display of the current opening and is its own record',
-  'TEST-E-05 display_epoch R1 background loads, earlier openings (A to B to A), another account generation or version are not displays',
+  'TEST-E-05 display_epoch R1 background loads, earlier openings (A to B to A), another account generation or version, or another opening\'s delivery are not displays',
   'TEST-E-05 display_epoch R2 an ACK from an earlier generation or without a display is refused',
 ];
 if (process.argv.includes('--list-cases')) {
@@ -153,13 +153,13 @@ function manifestInput(objects = studyObjects(), opts = {}) {
     pages, decoderCatalog: opts.catalog ?? CATALOG, viewer: opts.viewer ?? VIEWER };
 }
 const build = (...args) => M.buildImageManifest(manifestInput(...args));
-const sameInstitution = (study = STUDY) => E.checkProvisionBasis({ relation: 'same-institution', at: T1, managingInstitution: INSTITUTION, recipient: null,
+const sameInstitution = (study = STUDY, at = T1) => E.checkProvisionBasis({ relation: 'same-institution', at, managingInstitution: INSTITUTION, recipient: null,
   studyUid: study, purpose: null, basis: null, agreement: null, auditBefore: null });
 let eventCounter = 0;
 function prepare(manifest, target, opts = {}) {
   return E.prepareDelivery(manifest, E.parseImageRequest(opts.method ?? 'GET', target), { eventId: opts.eventId ?? `evt-${++eventCounter}`,
     cause: opts.cause ?? 'user-view', at: T1, authorization: opts.authorization ?? { studyUid: manifest.studyUid, institution: manifest.managingInstitution },
-    provision: opts.provision ?? sameInstitution(manifest.studyUid) });
+    provision: opts.provision ?? sameInstitution(manifest.studyUid), opening: opts.opening ?? null });
 }
 const receipt = p => ({ stage: 'provide-prepared', receipt: { eventId: p.eventId, durableAt: T1 } });
 const wrote = (unit, start, end, sourceSha256 = unit.sha256) => ({ stage: 'bytes', unit: unit.key, start, end, sourceSha256 });
@@ -170,8 +170,9 @@ function serve(manifest, method, target, provisionInput) {
   const calls = { body: 0 };
   const request = E.parseImageRequest(method, target);
   const provision = provisionInput === undefined ? sameInstitution(manifest.studyUid) : E.checkProvisionBasis(provisionInput);
+  const actor = provision.relation === 'processor' ? provision.recipient : manifest.managingInstitution;
   const p = E.prepareDelivery(manifest, request, { eventId: `evt-${++eventCounter}`, cause: 'user-view', at: T1,
-    authorization: { studyUid: manifest.studyUid, institution: manifest.managingInstitution }, provision });
+    authorization: { studyUid: manifest.studyUid, institution: actor }, provision, opening: null });
   calls.body++;
   return { p, calls };
 }
@@ -518,6 +519,7 @@ def(CASES[21], () => {
       scope: { studyUids: [STUDY], recipient: 'hospital-b', purpose: 'continuing-care' } }), 'ConsentOrExceptionRequired'],
     [thirdParty({ kind: 'statutory-exception', basisId: 'b', clauseId: 'medical:21-2.1-proviso', fact: 'emergency-patient', recordedAt: T0, revokedAt: null,
       scope: { studyUids: 'institution-studies', recipient: 'hospital-b', purpose: 'continuing-care' } }), 'ProvisionOutOfScope'],
+    [thirdParty(consent({ scope: { studyUids: 'institution-studies', recipient: 'hospital-b', purpose: 'continuing-care' } })), 'ProvisionOutOfScope'],
     [thirdParty(consent(), { auditBefore: null }), 'AuditBeforeRequired'],
     [thirdParty(consent(), { recipient: INSTITUTION }), 'ProvisionRelationMismatch'],
   ];
@@ -563,15 +565,23 @@ def(CASES[23], () => {
   for (const method of ['POST', 'DELETE', 'PUT', 'get']) refused(() => E.parseImageRequest(method, `/dicom-web/studies/${STUDY}`), 'ImageMethodRefused');
   for (const target of ['/dicom-web/studies', `/dicom-web/studies?PatientID=SYN-1`, `/dicom-web/studies?StudyInstanceUID=${STUDY}&0020000D=${STUDY}`,
     `${objectPath}?accept=application/octet-stream`, `/dicom-web/studies/${STUDY}/instances?includefield=1&includefield=2`,
-    `/dicom-web/studies/${STUDY}/instances?includefield=<script>`])
+    `/dicom-web/studies/${STUDY}/instances?includefield=<script>`, `/dicom-web/studies?StudyInstanceUID=${'1.'.repeat(40)}1`])
     refused(() => E.parseImageRequest('GET', target), 'ImageQueryRefused');
 });
 def(CASES[24], () => {
   const m = build(), request = E.parseImageRequest('GET', objectPath);
   const context = (overrides = {}) => ({ eventId: 'evt-r4', cause: 'user-view', at: T1, authorization: { studyUid: STUDY, institution: INSTITUTION },
-    provision: sameInstitution(), ...overrides });
+    provision: sameInstitution(), opening: null, ...overrides });
+  assert.equal(allowed(() => E.prepareDelivery(m, request, context())).units.length, 1);
+  // A basis decided earlier is not reused: the consent or agreement may have ended in between.
+  refused(() => E.prepareDelivery(m, request, context({ provision: sameInstitution(STUDY, T0) })), 'ProvisionDecisionStale');
   refused(() => E.prepareDelivery(m, request, context({ authorization: { studyUid: PRIOR, institution: INSTITUTION } })), 'AuthorizationScopeMismatch');
   refused(() => E.prepareDelivery(m, request, context({ authorization: { studyUid: STUDY, institution: 'hospital-b' } })), 'AuthorizationScopeMismatch');
+  // A processor's provision is served to the processor it names, not on the hospital's own 204 and not to another body.
+  const viaProcessor = E.checkProvisionBasis(processor());
+  assert.equal(allowed(() => E.prepareDelivery(m, request, context({ provision: viaProcessor, authorization: { studyUid: STUDY, institution: 'reading-center' } }))).relation, 'processor');
+  refused(() => E.prepareDelivery(m, request, context({ provision: viaProcessor })), 'AuthorizationScopeMismatch');
+  refused(() => E.prepareDelivery(m, request, context({ provision: viaProcessor, authorization: { studyUid: STUDY, institution: 'hospital-b' } })), 'AuthorizationScopeMismatch');
   refused(() => E.prepareDelivery(m, { ...request, kind: 'study-retrieve' }, context()), 'ImageRequestRequired');
   refused(() => E.prepareDelivery(m, request, context({ provision: { ...sameInstitution() } })), 'ProvisionDecisionRequired');
   refused(() => E.prepareDelivery(m, request, context({ provision: sameInstitution(PRIOR) })), 'ProvisionOutOfScope');
@@ -686,44 +696,61 @@ def(CASES[31], () => {
 const openingFor = (m, overrides = {}) => ({ openingId: 'open-1', accountGeneration: 4, sequence: 3, studyUid: m.studyUid, manifestSha256: m.sha256, closedAt: null, ...overrides });
 const report = (m, overrides = {}) => ({ openingId: 'open-1', accountGeneration: 4, sequence: 3, studyUid: m.studyUid, manifestSha256: m.sha256,
   sopInstanceUid: DBT, frame: 2, source: 'network', cause: 'user-view', deliveryEventId: 'evt-frames-1', reportedAt: T1, ...overrides });
+const framesPath = `/dicom-web/studies/${STUDY}/series/${S(STUDY, 3)}/instances/${DBT}/frames/1,2,3`;
+const viewing = (m, overrides = {}, eventId = 'evt-frames-1', target = framesPath) =>
+  prepare(m, target, { eventId, opening: { openingId: 'open-1', accountGeneration: 4, sequence: 3, ...overrides.opening }, cause: overrides.cause ?? 'user-view' });
 def(CASES[32], () => {
-  const m = build(), now = openingFor(m);
-  const net = allowed(() => E.classifyDisplayReport(now, m, report(m)));
+  const m = build(), now = openingFor(m), delivered = viewing(m);
+  const net = allowed(() => E.classifyDisplayReport(now, m, report(m), delivered));
   assert.deepEqual({ ...net }, { action: 'client-shown', openingId: 'open-1', accountGeneration: 4, sequence: 3, studyUid: STUDY, manifestSha256: m.sha256,
     unitKey: `frame:${DBT}#2`, source: 'network', relatedEventId: 'evt-frames-1', reportedAt: T1 });
   // Showing the same frame again from cache is a display too and is recorded; it names no new delivery.
-  const cached = allowed(() => E.classifyDisplayReport(now, m, report(m, { source: 'cache', deliveryEventId: null, reportedAt: T2 })));
+  const cached = allowed(() => E.classifyDisplayReport(now, m, report(m, { source: 'cache', deliveryEventId: null, reportedAt: T2 }), null));
   assert.deepEqual([cached.action, cached.source, cached.relatedEventId, cached.reportedAt], ['client-shown', 'cache', null, T2]);
-  const offline = allowed(() => E.classifyDisplayReport(now, m, report(m, { source: 'offline-store', deliveryEventId: null, frame: null, sopInstanceUid: S(STUDY, 1) + '.1' })));
+  const offline = allowed(() => E.classifyDisplayReport(now, m, report(m, { source: 'offline-store', deliveryEventId: null, frame: null, sopInstanceUid: S(STUDY, 1) + '.1' }), null));
   assert.deepEqual([offline.source, offline.unitKey], ['offline-store', `object:${S(STUDY, 1)}.1`]);
+  // A whole-object delivery covers any of its frames.
+  const whole = viewing(m, {}, 'evt-object-1', `/dicom-web/studies/${STUDY}/series/${S(STUDY, 3)}/instances/${DBT}`);
+  assert.equal(allowed(() => E.classifyDisplayReport(now, m, report(m, { frame: 6, deliveryEventId: 'evt-object-1' }), whole)).unitKey, `frame:${DBT}#6`);
 });
 def(CASES[33], () => {
-  const m = build(), now = openingFor(m), shown = allowed(() => E.classifyDisplayReport(now, m, report(m)));
+  const m = build(), now = openingFor(m), shown = allowed(() => E.classifyDisplayReport(now, m, report(m), viewing(m)));
   const ack = allowed(() => E.acceptExplicitAck(now, shown, { openingId: 'open-1', accountGeneration: 4, sequence: 3, at: T2 }));
   assert.deepEqual({ ...ack }, { action: 'explicit-ack', openingId: 'open-1', accountGeneration: 4, sequence: 3, unitKey: `frame:${DBT}#2`, relatedShownAt: T1, at: T2 });
   assert.notEqual(ack.action, shown.action);
 });
 def(CASES[34], () => {
-  const m = build(), now = openingFor(m);
-  refused(() => E.classifyDisplayReport(now, m, report(m, { cause: 'background-fetch' })), 'BackgroundIsNotDisplay');
-  refused(() => E.classifyDisplayReport(now, m, report(m, { cause: 'service-job' })), 'BackgroundIsNotDisplay');
+  const m = build(), now = openingFor(m), delivered = viewing(m);
+  const show = (overrides, delivery = delivered, opening = now) => E.classifyDisplayReport(opening, m, report(m, overrides), delivery);
+  refused(() => show({ cause: 'background-fetch' }), 'BackgroundIsNotDisplay');
+  refused(() => show({ cause: 'service-job' }), 'BackgroundIsNotDisplay');
   // A -> B -> A: the late report of the first opening of study A arrives while A is open again (sequence 3).
-  refused(() => E.classifyDisplayReport(now, m, report(m, { sequence: 1 })), 'StaleOpeningRefused');
-  refused(() => E.classifyDisplayReport(now, m, report(m, { accountGeneration: 3 })), 'StaleOpeningRefused');
-  refused(() => E.classifyDisplayReport(now, m, report(m, { openingId: 'open-0' })), 'StaleOpeningRefused');
-  refused(() => E.classifyDisplayReport(now, m, report(m, { manifestSha256: h('older version') })), 'ManifestVersionMismatch');
-  refused(() => E.classifyDisplayReport(openingFor(m, { closedAt: T1 }), m, report(m)), 'OpeningClosed');
-  refused(() => E.classifyDisplayReport(now, m, report(m, { deliveryEventId: null })), 'DisplaySourceMismatch');
-  refused(() => E.classifyDisplayReport(now, m, report(m, { source: 'cache' })), 'DisplaySourceMismatch');
-  refused(() => E.classifyDisplayReport(now, m, report(m, { frame: 7 })), 'FrameOutOfManifest');
-  refused(() => E.classifyDisplayReport(now, m, report(m, { sopInstanceUid: S(OTHER, 1) + '.1' })), 'ScopeOutsideManifest');
+  refused(() => show({ sequence: 1 }), 'StaleOpeningRefused');
+  refused(() => show({ accountGeneration: 3 }), 'StaleOpeningRefused');
+  refused(() => show({ openingId: 'open-0' }), 'StaleOpeningRefused');
+  refused(() => show({ manifestSha256: h('older version') }), 'ManifestVersionMismatch');
+  refused(() => show({}, delivered, openingFor(m, { closedAt: T1 })), 'OpeningClosed');
+  refused(() => show({ deliveryEventId: null }), 'DisplaySourceMismatch');
+  refused(() => show({ source: 'cache' }), 'DisplaySourceMismatch');
+  refused(() => show({ source: 'cache', deliveryEventId: null }, delivered), 'DisplaySourceMismatch');
+  refused(() => show({ frame: 7 }), 'FrameOutOfManifest');
+  refused(() => show({ sopInstanceUid: S(OTHER, 1) + '.1' }), 'ScopeOutsideManifest');
+  // The delivery a network display names must be this opening's reading-view delivery of these pixels.
+  refused(() => show({}, null), 'DisplayDeliveryMismatch');
+  refused(() => show({}, viewing(m, { opening: { sequence: 1 } })), 'DisplayDeliveryMismatch');
+  refused(() => show({}, viewing(m, { cause: 'background-fetch' })), 'DisplayDeliveryMismatch');
+  refused(() => show({ frame: 5 }), 'DisplayDeliveryMismatch');
+  refused(() => show({}, viewing(m, {}, 'evt-frames-1', `/dicom-web/studies/${STUDY}/series/${S(STUDY, 3)}/instances/${DBT}/metadata`)), 'DisplayDeliveryMismatch');
+  refused(() => show({}, viewing(m, {}, 'evt-other')), 'DisplayDeliveryMismatch');
+  refused(() => show({}, structuredClone(delivered)), 'DisplayDeliveryMismatch');
 });
 def(CASES[35], () => {
-  const m = build(), earlier = openingFor(m, { accountGeneration: 3 }), shownEarlier = E.classifyDisplayReport(earlier, m, report(m, { accountGeneration: 3 }));
+  const m = build(), earlier = openingFor(m, { accountGeneration: 3 });
+  const shownEarlier = E.classifyDisplayReport(earlier, m, report(m, { accountGeneration: 3 }), viewing(m, { opening: { accountGeneration: 3 } }));
   const now = openingFor(m);
   refused(() => E.acceptExplicitAck(now, shownEarlier, { openingId: 'open-1', accountGeneration: 4, sequence: 3, at: T2 }), 'StaleAckRefused');
   refused(() => E.acceptExplicitAck(now, shownEarlier, { openingId: 'open-1', accountGeneration: 3, sequence: 3, at: T2 }), 'StaleAckRefused');
-  const shown = E.classifyDisplayReport(now, m, report(m));
+  const shown = E.classifyDisplayReport(now, m, report(m), viewing(m));
   refused(() => E.acceptExplicitAck(now, shown, { openingId: 'open-1', accountGeneration: 4, sequence: 2, at: T2 }), 'StaleAckRefused');
   refused(() => E.acceptExplicitAck(now, { ...shown }, { openingId: 'open-1', accountGeneration: 4, sequence: 3, at: T2 }), 'AckWithoutDisplay');
   refused(() => E.acceptExplicitAck(openingFor(m, { closedAt: T2 }), shown, { openingId: 'open-1', accountGeneration: 4, sequence: 3, at: T2 }), 'OpeningClosed');
