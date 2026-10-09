@@ -119,6 +119,7 @@ EMR_ROLES = ['kin_emr_owner', 'kin_emr_reader', 'kin_emr_retention', 'kin_runtim
 # The read-only fixture container's only writable non-data mount; the compose deployment uses its own volume.
 EMR_TABLESPACE = '/tmp/emr-access/ts'
 EMR_CHAIN_ID = '00000000-0000-4000-8000-00000000e001'
+EMR_HISTORY_CHAIN_ID = '00000000-0000-4000-8000-00000000e002'
 
 
 class ProductMismatch(ValueError):
@@ -483,12 +484,14 @@ def expected_emr_rows():
         payload = json.dumps({'kind': 'access', 'event': {'eventId': event_id, 'occurredAt': '2026-09-06T00:00:00.123Z',
                               'synthetic': True}}, separators=(',', ':'))
         digest = hashlib.sha256(('{"sequence":%d,"previousHash":"%s","payload":%s}' % (sequence, previous, payload)).encode()).hexdigest()
-        entries.append(dict(sequence=sequence, previous_hash=previous, hash=digest, kind='access', event_id=event_id, payload=payload,
+        entries.append(dict(stream='viewing', sequence=sequence, previous_hash=previous, hash=digest, kind='access', statutory_act='none', event_id=event_id, payload=payload,
             content_sha256=hashlib.sha256(payload.encode()).hexdigest(), occurred_at=jsonb_time(stamp),
             stored_at=jsonb_time(stamp)))
         previous = digest
     rows['access_entry'] = entries
-    rows['chain_head'] = [dict(id=1, chain_id=EMR_CHAIN_ID, sequence=2, hash=previous)]
+    # D-1: two streams, each its own chain; the seeded entries are viewing entries, the history stream is empty.
+    rows['chain_head'] = [dict(stream='viewing', chain_id=EMR_CHAIN_ID, sequence=2, hash=previous),
+                          dict(stream='history', chain_id=EMR_HISTORY_CHAIN_ID, sequence=0, hash='0'*64)]
     hold = dict(holdId='SYNTHETIC-hold-1', recordId=entries[0]['event_id'], basis={'synthetic': True}, actorId='SYNTHETIC-custodian',
                 at='2026-09-06T00:00:00.123Z', release=None)
     released = dict(hold, release={'holdId': 'SYNTHETIC-hold-1', 'synthetic': True})
@@ -536,11 +539,12 @@ def seed_emr(name, db):
         for row in data[table]:
             execute(name, db, 'INSERT INTO emr_access.'+table+' SELECT * FROM json_populate_record(NULL::emr_access.'+table+', '+
                     sql_literal(json.dumps(row))+')')
-    head = data['chain_head'][0]
-    # Synthetic fixture only: the head row is append-guarded for every role, so its fixed chain identity is set past the
-    # guard as the superuser, in one statement's transaction.
-    execute(name, db, "BEGIN; SET LOCAL session_replication_role = replica; UPDATE emr_access.chain_head SET chain_id = "+
-            sql_literal(head['chain_id'])+"::uuid, sequence = "+str(head['sequence'])+", hash = "+sql_literal(head['hash'])+"; COMMIT")
+    viewing, history = data['chain_head']
+    # Synthetic fixture only: the head rows are append-guarded for every role, so their fixed chain identities are set past
+    # the guard as the superuser, in one statement's transaction.
+    execute(name, db, "BEGIN; SET LOCAL session_replication_role = replica; "+''.join(
+        "UPDATE emr_access.chain_head SET chain_id = "+sql_literal(row['chain_id'])+"::uuid, sequence = "+str(row['sequence'])+
+        ", hash = "+sql_literal(row['hash'])+" WHERE stream = "+sql_literal(row['stream'])+"; " for row in (viewing, history))+"COMMIT")
 
 
 def create_product(name, db, uid):

@@ -1,148 +1,396 @@
 {
-  "unit": "EMR-B",
-  "round": "B1",
-  "base_sha": "2fc7358baffcec4048f5d7a7e7e9e9b478296942",
-  "dependencies": [
-    "EMR-A contract (PR #142, landed in main c4b5bdc)",
-    "S8-CTX landing (PR #144, main 2fc7358): migration 20261006000000_tech_note_attempt_id, profile context-loss, G3 114",
-    "S7-U5 core (PR #131): DB MemberRights authority, session end and entry facts (consumed by B2, not changed by B1)"
-  ],
-  "owned_paths": {
-    "B1": [
-      "api/src/emr-runtime/contract.ts", "api/src/emr-runtime/store.ts", "api/src/emr-runtime/context.ts",
-      "api/src/emr-runtime/failure-journal.ts", "api/src/emr-runtime/seal.ts", "api/src/emr-runtime/manifest.ts",
-      "api/src/emr-contract/access-event.ts", "api/src/emr-contract/classification.ts", "api/src/emr-contract/routes.ts",
-      "api/prisma/schema.prisma", "api/prisma/migrations/20261008120000_emr_b/migration.sql",
-      "api/Dockerfile", "api/start-production.sh", "docker-compose.yml", "docker-compose.prod.yml", "api/src/prisma.service.ts",
-      "scripts/ops_deploy_entry.py", "scripts/ops_deploy_host.py", "scripts/ops_deploy_preflight.py", "scripts/ops_deploy_runner.py",
-      "tests/ops_deploy_host_container_test.py", "tests/ops_deploy_host_test.py", "tests/ops_deploy_preflight_test.py",
-      "tests/ops_deploy_runner_test.py", "tests/audit_store_db_test.py"
-    ],
-    "B1-B2": [
-      "api/src/emr-contract/README.md",
-      ".github/workflows/validate.yml", "tests/measurement_ci.py", "tests/measurement_ci_test.py", "tests/candidate_ci.py",
-      "tests/candidate_ci_test.py", "tests/production_image_test.py", "tests/ops_product_transfer_fixture.py",
-      "tests/ops_product_transfer_test.py", "tests/admin_audit_attribution_test.cjs", "tests/emr_contract_test.cjs", "tests/README.md",
-      ".github/workflows/emr-b.yml", "emr/units/b.json", "scripts/emr-compose.py",
-      "tests/emr/b/contract_test.cjs", "tests/emr/b/live.py", "tests/emr/b/mutants.py"
-    ]
-  },
-  "models": {
-    "prisma": "unchanged: MODEL_CLASSIFICATION equals the freshly parsed Prisma models (no SQL-only storage registered as a model)",
-    "sql": {
-      "emr_access.access_entry": ["access-audit"], "emr_access.access_target": ["access-audit"], "emr_access.chain_head": ["access-audit"], "emr_access.audit_projection": ["access-audit"],
-      "emr_access.member_identity": ["identity-access"],
-      "emr_access.legal_hold_event": ["legal-duty"], "emr_access.duty_request_event": ["legal-duty"],
-      "emr_access.clause_version": ["legal-reference"]
-    }
-  },
-  "routes": {
-    "nest_routes": 138,
-    "internal_surfaces": ["service:auth-session-sweep"],
-    "note": "B1 adds no HTTP route; the internal sweep surface is where B2 records sessions the server ends in process"
-  },
-  "records": {
-    "kinds_added": ["offline-signed-original", "recovery-working-copy", "legal-duty", "legal-reference"],
-    "terminal_models": { "TerminalSignedOriginal": ["offline-signed-original"], "TerminalRecoveryCopy": ["recovery-working-copy"] },
-    "purpose_end_added": "original-received",
-    "access_event_formats": { "v1": "unchanged", "v2": ["online-auth", "verified-offline (refused as unsupported until C composes a verifier)"] }
-  },
-  "migrations": { "added": ["20261008120000_emr_b"], "count": 43, "latest_before": "20261007200000_designation_subjects" },
-  "deployment": {
-    "schema": "emr_access",
-    "tablespace": "kin_emr_access",
-    "tablespace_location": "/var/lib/postgresql/emr-access/ts",
-    "roles": { "owner": "kin_emr_owner", "runtime": "kin_runtime", "reader": "kin_emr_reader", "retention": "kin_emr_retention" },
-    "tables": ["access_entry", "access_target", "audit_projection", "chain_head", "clause_version", "duty_request_event", "legal_hold_event", "member_identity"],
-    "runtime_functions": [
-      "append_access(text,text)", "chain_tail()", "entries_after(bigint,integer)", "entry_for_event(text)",
-      "storage_placement()", "civil_period_end(timestamptz,integer)", "resolve_member_identity(text,text)",
-      "record_projection(text,integer)", "place_hold(text,text,text)", "release_hold(text,text)", "holds_for(text)",
-      "record_duty_request(text,text,text,text)", "duty_requests(text,text)", "clause_versions(text)"
-    ],
-    "reader_functions": [
-      "chain_tail()", "entries_after(bigint,integer)", "entry_for_event(text)", "storage_placement()", "civil_period_end(timestamptz,integer)",
-      "holds_for(text)", "duty_requests(text,text)", "clause_versions(text)"
-    ],
-    "retention_functions": ["expire_prefix(bigint)", "retention_view(bigint,integer)", "chain_tail()", "storage_placement()"],
-    "access_retention": {
-      "source": "commander 2026-10-09 (Fable legal register pass 6, LR-11 / delta D-1; Astra cross-check pending): 의료법 제23조④ record events end at the later of the target record's retention end and event time + floor; non-record events at the floor; permission history (3 years) is not B1 storage",
-      "stored": "no deadline on any entry; each event's record targets are bound in emr_access.access_target from the chained payload (every target A did not mark non-record: kind, record ID, version ID or NULL)",
-      "rule": "api/src/emr-runtime/contract.ts accessDeadline (with ACCESS_RETENTION from A's RECORD_CLASSIFICATION['access-audit'].retention, accessRetentionFloor, recordTargets): computed only when destruction is considered; an unknown record end means no deadline",
-      "database_floor": "emr_access.access_retention_floor(timestamptz), the migration's only civil period; expire_prefix refuses an entry before it (EB004) and any record-bound entry (EB008) until unit H supplies record retention ends",
-      "bound_by": "C07 (non-record ends at the floor; a record-bound event outlives it while its record is retained, never ends while the record end is unknown), C10 (only these two places compute a period, equal periods), L05 (SQL floor = runtime floor, bindings = recordTargets, old non-record prefix removed, old record-bound entry kept and refused EB008)"
-    },
-    "compose_services": ["db (tablespace directory prepared at start)", "emr-provision (one-shot, installer credential)", "api-migrate (one-shot, installer credential)", "api (runtime credential, state volume)"],
-    "volumes": { "emr-access": "db: /var/lib/postgresql/emr-access", "emr-state": "api: /var/lib/kin-emr (seal, pending intents, failure journal)" },
-    "secrets": { "required": ["KIN_EMR_RUNTIME_PASSWORD"], "optional": ["KIN_EMR_READER_PASSWORD", "KIN_EMR_RETENTION_PASSWORD"],
-                 "form": "24 or more of [A-Za-z0-9._~-], used verbatim in DATABASE_URL" },
-    "provision": "python scripts/emr-compose.py sql provision (the same text as compose emr-provision; run with psql and the installer credential)",
-    "api_only_deployment": "refused when the target brings this migration (scripts/ops_deploy_preflight.py); afterwards the running API must hold exactly the state volume and the runtime role",
-    "not_executed_here": "no production provisioning, migration, restart, retention schedule or external backup"
-  },
-  "restore": {
-    "order": ["provision the cluster (roles, secrets, tablespace)", "createdb", "pg_restore keeping owners and privileges, without --no-tablespaces", "restore the API state volume from the same point", "start: seal recovery must pass"],
-    "never_assumed": "pg_dump carries neither roles nor tablespaces",
-    "refused": ["a restore without the roles", "ledger relations outside kin_emr_access", "a state volume ahead of the database (LedgerBehindSeal)", "a missing seal over stored entries (SealMissing)"]
-  },
-  "req_risk_test": [
-    { "req": "REQ-EMR-06/07", "risk": "RISK-EMR-06/07", "test": "TEST-EMR-B-C01 C03 C05 C06 L02 L03 L04 L08" },
-    { "req": "REQ-EMR-02", "risk": "RISK-EMR-02", "test": "TEST-EMR-B-C02 C04 C09" },
-    { "req": "REQ-EMR-01/19", "risk": "RISK-EMR-01/19", "test": "TEST-EMR-B-C07 C08 L05 L06" },
-    { "req": "REQ-EMR-20", "risk": "RISK-EMR-20", "test": "TEST-EMR-B-C10 L01 L07" }
-  ],
-  "cases": {
-    "contract": {
-      "file": "tests/emr/b/contract_test.cjs",
-      "B1": [
-        "C01 v2 authentication facts: v1 unchanged; online-auth admits verified success and verified refusal, refuses a clinical write, a mismatched result, an extra key and an audit-namespace credential",
-        "C02 one immutable identity per verified issuer and subject; namesakes stay apart; a name never joins and unverified input is never known",
-        "C03 the observed ingress address and the in-process service; an untrusted forwarded header or an omitted success address is refused",
-        "C04 a verified offline original with its own reception; a self-declared flag, a reconnect address and another content under one ID are refused",
-        "C05 the body follows the commit receipt only; a provisional, enqueued or other event's receipt and any failure send zero bytes",
-        "C06 the stored chain against its trusted tail; a deleted middle or tail, a repeated sequence and an unsealed gap are found",
-        "C07 independent expired prefix and its checkpoint under the one retention rule: a non-record event ends at the floor, a record-bound event outlives it while its record is retained and never ends while its record end is unknown; an unexpired, held or middle deletion and a read-extended clock are refused",
-        "C08 complete hold set and clause history reloaded from the snapshot; a failed read is never empty; another transaction's snapshot is refused",
-        "C09 the signed original and its recovery copy keep owner and original time; a private-draft end or a new authentication never restarts or erases them",
-        "C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused"
-      ]
-    },
-    "live": {
-      "file": "tests/emr/b/live.py",
-      "class": "EmrBLedgerLive",
-      "profile_suites": [["emr/b/live.py", "EmrBLedgerLive", "ci-emr-b-ledger"]],
-      "B1": [
-        "test_b01_ledger_roles_and_restart",
-        "test_b02_business_commit_and_failure_journal",
-        "test_b03_idempotency_and_concurrent_append",
-        "test_b04_chain_tail_and_crash_recovery",
-        "test_b05_expiry_checkpoint_and_holds",
-        "test_b06_complete_reload_and_clause_history",
-        "test_b07_migration_backup_restore_roles",
-        "test_b08_receipt_before_body"
-      ]
-    }
-  },
-  "expected": {
-    "contract": 10, "live": 8, "mutants": 11, "profiles": 39, "measurements_suites": 20, "validate_jobs": 22, "emr_b_jobs": 1,
-    "session_matrix": 8, "candidate": 115, "candidate_rows": 13, "migrations": 43, "public_tables": 51, "emr_tables": 8,
-    "fixture_public_rows": 90, "fixture_emr_rows": 7,
-    "note": "declared before running; never generated from a run's own result"
-  },
-  "mutants": [
-    { "id": "M01", "kill": ["L01"], "behaviour": "the runtime role regains superuser or owner membership: refused DML/DDL and role escalation must fail the case" },
-    { "id": "M02", "kill": ["L01"], "behaviour": "the runtime may set session_replication_role: the replica-mode bypass must be refused" },
-    { "id": "M03", "kill": ["L02", "L03"], "behaviour": "the ledger append is skipped inside the business transaction" },
-    { "id": "M04", "kill": ["C05", "L08"], "behaviour": "the body is sent before the durable receipt" },
-    { "id": "M05", "kill": ["L02"], "behaviour": "the failure journal record is made inside the business transaction and vanishes with its rollback" },
-    { "id": "M06", "kill": ["C02"], "behaviour": "identities are joined by display name" },
-    { "id": "M07", "kill": ["C01"], "behaviour": "an audit link ID or session reference is accepted as a credential" },
-    { "id": "M08", "kill": ["C03"], "behaviour": "a forwarded address header is trusted without a trusted peer" },
-    { "id": "M11", "kill": ["C06", "L04"], "behaviour": "the trusted tail comparison is skipped" },
-    { "id": "M12", "kill": ["C07", "L05"], "behaviour": "an unexpired prefix may be deleted" },
-    { "id": "M14", "kill": ["C10"], "behaviour": "a declared case missing from its test file is accepted" }
-  ],
-  "candidate_cases": [
-    { "file": "tests/emr/b/live.py", "case": "EmrBLedgerLive.test_b01_ledger_roles_and_restart" }
-  ]
+    "unit":  "EMR-B",
+    "round":  "B1",
+    "base_sha":  "2fc7358baffcec4048f5d7a7e7e9e9b478296942",
+    "dependencies":  [
+                         "EMR-A contract (PR #142, landed in main c4b5bdc)",
+                         "S8-CTX landing (PR #144, main 2fc7358): migration 20261006000000_tech_note_attempt_id, profile context-loss, G3 114",
+                         "S7-U5 core (PR #131): DB MemberRights authority, session end and entry facts (consumed by B2, not changed by B1)"
+                     ],
+    "owned_paths":  {
+                        "B1":  [
+                                   "api/src/emr-runtime/contract.ts",
+                                   "api/src/emr-runtime/store.ts",
+                                   "api/src/emr-runtime/context.ts",
+                                   "api/src/emr-runtime/failure-journal.ts",
+                                   "api/src/emr-runtime/seal.ts",
+                                   "api/src/emr-runtime/manifest.ts",
+                                   "api/src/emr-contract/access-event.ts",
+                                   "api/src/emr-contract/classification.ts",
+                                   "api/src/emr-contract/routes.ts",
+                                   "api/prisma/schema.prisma",
+                                   "api/prisma/migrations/20261008120000_emr_b/migration.sql",
+                                   "api/Dockerfile",
+                                   "api/start-production.sh",
+                                   "docker-compose.yml",
+                                   "docker-compose.prod.yml",
+                                   "api/src/prisma.service.ts",
+                                   "scripts/ops_deploy_entry.py",
+                                   "scripts/ops_deploy_host.py",
+                                   "scripts/ops_deploy_preflight.py",
+                                   "scripts/ops_deploy_runner.py",
+                                   "tests/ops_deploy_host_container_test.py",
+                                   "tests/ops_deploy_host_test.py",
+                                   "tests/ops_deploy_preflight_test.py",
+                                   "tests/ops_deploy_runner_test.py",
+                                   "tests/audit_store_db_test.py",
+                                   "api/src/emr-contract/lawful-defaults.ts"
+                               ],
+                        "B1-B2":  [
+                                      "api/src/emr-contract/README.md",
+                                      ".github/workflows/validate.yml",
+                                      "tests/measurement_ci.py",
+                                      "tests/measurement_ci_test.py",
+                                      "tests/candidate_ci.py",
+                                      "tests/candidate_ci_test.py",
+                                      "tests/production_image_test.py",
+                                      "tests/ops_product_transfer_fixture.py",
+                                      "tests/ops_product_transfer_test.py",
+                                      "tests/admin_audit_attribution_test.cjs",
+                                      "tests/emr_contract_test.cjs",
+                                      "tests/README.md",
+                                      ".github/workflows/emr-b.yml",
+                                      "emr/units/b.json",
+                                      "scripts/emr-compose.py",
+                                      "tests/emr/b/contract_test.cjs",
+                                      "tests/emr/b/live.py",
+                                      "tests/emr/b/mutants.py"
+                                  ]
+                    },
+    "models":  {
+                   "prisma":  "unchanged: MODEL_CLASSIFICATION equals the freshly parsed Prisma models (no SQL-only storage registered as a model)",
+                   "sql":  {
+                               "emr_access.access_entry":  [
+                                                               "access-audit"
+                                                           ],
+                               "emr_access.access_target":  [
+                                                                "access-audit"
+                                                            ],
+                               "emr_access.chain_head":  [
+                                                             "access-audit"
+                                                         ],
+                               "emr_access.audit_projection":  [
+                                                                   "access-audit"
+                                                               ],
+                               "emr_access.member_identity":  [
+                                                                  "identity-access"
+                                                              ],
+                               "emr_access.legal_hold_event":  [
+                                                                   "legal-duty"
+                                                               ],
+                               "emr_access.duty_request_event":  [
+                                                                     "legal-duty"
+                                                                 ],
+                               "emr_access.clause_version":  [
+                                                                 "legal-reference"
+                                                             ]
+                           }
+               },
+    "routes":  {
+                   "nest_routes":  138,
+                   "internal_surfaces":  [
+                                             "service:auth-session-sweep"
+                                         ],
+                   "note":  "B1 adds no HTTP route; the internal sweep surface is where B2 records sessions the server ends in process"
+               },
+    "records":  {
+                    "kinds_added":  [
+                                        "offline-signed-original",
+                                        "recovery-working-copy",
+                                        "legal-duty",
+                                        "legal-reference",
+                                        "chart-incorporation",
+                                        "operational-note"
+                                    ],
+                    "terminal_models":  {
+                                            "TerminalSignedOriginal":  [
+                                                                           "offline-signed-original"
+                                                                       ],
+                                            "TerminalRecoveryCopy":  [
+                                                                         "recovery-working-copy"
+                                                                     ]
+                                        },
+                    "purpose_end_added":  "original-received",
+                    "access_event_formats":  {
+                                                 "v1":  "unchanged",
+                                                 "v2":  [
+                                                            "online-auth",
+                                                            "verified-offline (refused as unsupported until C composes a verifier)"
+                                                        ]
+                                             }
+                },
+    "migrations":  {
+                       "added":  [
+                                     "20261008120000_emr_b"
+                                 ],
+                       "count":  43,
+                       "latest_before":  "20261007200000_designation_subjects"
+                   },
+    "deployment":  {
+                       "schema":  "emr_access",
+                       "tablespace":  "kin_emr_access",
+                       "tablespace_location":  "/var/lib/postgresql/emr-access/ts",
+                       "roles":  {
+                                     "owner":  "kin_emr_owner",
+                                     "runtime":  "kin_runtime",
+                                     "reader":  "kin_emr_reader",
+                                     "retention":  "kin_emr_retention"
+                                 },
+                       "tables":  [
+                                      "access_entry",
+                                      "access_target",
+                                      "audit_projection",
+                                      "chain_head",
+                                      "clause_version",
+                                      "duty_request_event",
+                                      "legal_hold_event",
+                                      "member_identity"
+                                  ],
+                       "runtime_functions":  [
+                                                 "append_access(text,text,text,text)",
+                                                 "chain_tail(text)",
+                                                 "entries_after(text,bigint,integer)",
+                                                 "entry_for_event(text,text)",
+                                                 "storage_placement()",
+                                                 "civil_period_end(timestamptz,integer)",
+                                                 "resolve_member_identity(text,text)",
+                                                 "record_projection(text,integer)",
+                                                 "place_hold(text,text,text)",
+                                                 "release_hold(text,text)",
+                                                 "holds_for(text)",
+                                                 "record_duty_request(text,text,text,text)",
+                                                 "duty_requests(text,text)",
+                                                 "clause_versions(text)"
+                                             ],
+                       "reader_functions":  [
+                                                "chain_tail(text)",
+                                                "entries_after(text,bigint,integer)",
+                                                "entry_for_event(text,text)",
+                                                "storage_placement()",
+                                                "civil_period_end(timestamptz,integer)",
+                                                "holds_for(text)",
+                                                "duty_requests(text,text)",
+                                                "clause_versions(text)"
+                                            ],
+                       "retention_functions":  [
+                                                   "expire_prefix(bigint)",
+                                                   "retention_view(bigint,integer)",
+                                                   "chain_tail(text)",
+                                                   "storage_placement()"
+                                               ],
+                       "access_retention":  {
+                                                "source":  "commander D727/D731 (legal register 2026-10-09 final, Astra cross-check 0 disagreements): deltas D-1 revised, D-19, D-21; delta map D-3, D-18",
+                                                "streams":  "two chains: viewing (every event; its own floor from the event\u0027s day, longer only under a hold or legal basis; prefix expiry with checkpoint and external seal) and history (succeeded 기재·추가기재·수정 about a record; kept with the changed record; destroyed with its destruction set by unit H; no deletion path in B1)",
+                                                "stored":  "no deadline on any entry; statutory_act (A\u0027s mapping) and each record target (kind, record/version IDs) bound per entry in emr_access.access_target from the chained payload",
+                                                "rule":  "api/src/emr-runtime/contract.ts accessDeadline(stream, entry, recordEnd) with ACCESS_RETENTION from A\u0027s RECORD_CLASSIFICATION[\u0027access-audit\u0027], accessRetentionFloor, recordTargets",
+                                                "database_floor":  "emr_access.access_retention_floor(timestamptz), the migration\u0027s only civil period; expire_prefix (viewing only) refuses an entry before it (EB004) or held (EB005)",
+                                                "bound_by":  "A D-1 stream test, C07 (viewing at floor, history with its record, unknown record end = no end), C10 (only these two places compute a period, equal periods), L05 (SQL floor = runtime floor, bindings = recordTargets, old viewing prefix removed, history entry kept)"
+                                            },
+                       "compose_services":  [
+                                                "db (tablespace directory prepared at start)",
+                                                "emr-provision (one-shot, installer credential)",
+                                                "api-migrate (one-shot, installer credential)",
+                                                "api (runtime credential, state volume)"
+                                            ],
+                       "volumes":  {
+                                       "emr-access":  "db: /var/lib/postgresql/emr-access",
+                                       "emr-state":  "api: /var/lib/kin-emr (seal, pending intents, failure journal)"
+                                   },
+                       "secrets":  {
+                                       "required":  [
+                                                        "KIN_EMR_RUNTIME_PASSWORD"
+                                                    ],
+                                       "optional":  [
+                                                        "KIN_EMR_READER_PASSWORD",
+                                                        "KIN_EMR_RETENTION_PASSWORD"
+                                                    ],
+                                       "form":  "24 or more of [A-Za-z0-9._~-], used verbatim in DATABASE_URL"
+                                   },
+                       "provision":  "python scripts/emr-compose.py sql provision (the same text as compose emr-provision; run with psql and the installer credential)",
+                       "api_only_deployment":  "refused when the target brings this migration (scripts/ops_deploy_preflight.py); afterwards the running API must hold exactly the state volume and the runtime role",
+                       "not_executed_here":  "no production provisioning, migration, restart, retention schedule or external backup"
+                   },
+    "restore":  {
+                    "order":  [
+                                  "provision the cluster (roles, secrets, tablespace)",
+                                  "createdb",
+                                  "pg_restore keeping owners and privileges, without --no-tablespaces",
+                                  "restore the API state volume from the same point",
+                                  "start: seal recovery must pass"
+                              ],
+                    "never_assumed":  "pg_dump carries neither roles nor tablespaces",
+                    "refused":  [
+                                    "a restore without the roles",
+                                    "ledger relations outside kin_emr_access",
+                                    "a state volume ahead of the database (LedgerBehindSeal)",
+                                    "a missing seal over stored entries (SealMissing)"
+                                ]
+                },
+    "req_risk_test":  [
+                          {
+                              "req":  "REQ-EMR-06/07",
+                              "risk":  "RISK-EMR-06/07",
+                              "test":  "TEST-EMR-B-C01 C03 C05 C06 L02 L03 L04 L08"
+                          },
+                          {
+                              "req":  "REQ-EMR-02",
+                              "risk":  "RISK-EMR-02",
+                              "test":  "TEST-EMR-B-C02 C04 C09"
+                          },
+                          {
+                              "req":  "REQ-EMR-01/19",
+                              "risk":  "RISK-EMR-01/19",
+                              "test":  "TEST-EMR-B-C07 C08 L05 L06"
+                          },
+                          {
+                              "req":  "REQ-EMR-20",
+                              "risk":  "RISK-EMR-20",
+                              "test":  "TEST-EMR-B-C10 L01 L07"
+                          }
+                      ],
+    "cases":  {
+                  "contract":  {
+                                   "file":  "tests/emr/b/contract_test.cjs",
+                                   "B1":  [
+                                              "C01 v2 authentication facts: v1 keeps its rules with D-18 context; online-auth admits verified success and verified refusal, refuses a clinical write, a mismatched result, an extra key and an audit-namespace credential",
+                                              "C02 one immutable identity per verified issuer and subject; namesakes stay apart; a name never joins and unverified input is never known",
+                                              "C03 the observed ingress address and the in-process service; an untrusted forwarded header or an omitted success address is refused",
+                                              "C04 a verified offline original with its own reception; a self-declared flag, a reconnect address and another content under one ID are refused",
+                                              "C05 the body follows the commit receipt only; a provisional, enqueued or other event\u0027s receipt and any failure send zero bytes",
+                                              "C06 the stored chain against its trusted tail; a deleted middle or tail, a repeated sequence and an unsealed gap are found",
+                                              "C07 independent expired prefix and its checkpoint under the one retention rule: a viewing entry ends at the floor, a change\u0027s history entry lives as long as the record it changed and never ends while that end is unknown; an unexpired, held or middle deletion and a read-extended clock are refused",
+                                              "C08 complete hold set and clause history reloaded from the snapshot; a failed read is never empty; another transaction\u0027s snapshot is refused",
+                                              "C09 the signed original and its recovery copy keep owner and original time; a private-draft end or a new authentication never restarts or erases them",
+                                              "C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused"
+                                          ]
+                               },
+                  "live":  {
+                               "file":  "tests/emr/b/live.py",
+                               "class":  "EmrBLedgerLive",
+                               "profile_suites":  [
+                                                      [
+                                                          "emr/b/live.py",
+                                                          "EmrBLedgerLive",
+                                                          "ci-emr-b-ledger"
+                                                      ]
+                                                  ],
+                               "B1":  [
+                                          "test_b01_ledger_roles_and_restart",
+                                          "test_b02_business_commit_and_failure_journal",
+                                          "test_b03_idempotency_and_concurrent_append",
+                                          "test_b04_chain_tail_and_crash_recovery",
+                                          "test_b05_expiry_checkpoint_and_holds",
+                                          "test_b06_complete_reload_and_clause_history",
+                                          "test_b07_migration_backup_restore_roles",
+                                          "test_b08_receipt_before_body"
+                                      ]
+                           }
+              },
+    "expected":  {
+                     "contract":  10,
+                     "live":  8,
+                     "mutants":  11,
+                     "profiles":  39,
+                     "measurements_suites":  20,
+                     "validate_jobs":  22,
+                     "emr_b_jobs":  1,
+                     "session_matrix":  8,
+                     "candidate":  115,
+                     "candidate_rows":  13,
+                     "migrations":  43,
+                     "public_tables":  51,
+                     "emr_tables":  8,
+                     "fixture_public_rows":  90,
+                     "fixture_emr_rows":  8,
+                     "note":  "declared before running; never generated from a run\u0027s own result"
+                 },
+    "mutants":  [
+                    {
+                        "id":  "M01",
+                        "kill":  [
+                                     "L01"
+                                 ],
+                        "behaviour":  "the runtime role regains superuser or owner membership: refused DML/DDL and role escalation must fail the case"
+                    },
+                    {
+                        "id":  "M02",
+                        "kill":  [
+                                     "L01"
+                                 ],
+                        "behaviour":  "the runtime may set session_replication_role: the replica-mode bypass must be refused"
+                    },
+                    {
+                        "id":  "M03",
+                        "kill":  [
+                                     "L02",
+                                     "L03"
+                                 ],
+                        "behaviour":  "the ledger append is skipped inside the business transaction"
+                    },
+                    {
+                        "id":  "M04",
+                        "kill":  [
+                                     "C05",
+                                     "L08"
+                                 ],
+                        "behaviour":  "the body is sent before the durable receipt"
+                    },
+                    {
+                        "id":  "M05",
+                        "kill":  [
+                                     "L02"
+                                 ],
+                        "behaviour":  "the failure journal record is made inside the business transaction and vanishes with its rollback"
+                    },
+                    {
+                        "id":  "M06",
+                        "kill":  [
+                                     "C02"
+                                 ],
+                        "behaviour":  "identities are joined by display name"
+                    },
+                    {
+                        "id":  "M07",
+                        "kill":  [
+                                     "C01"
+                                 ],
+                        "behaviour":  "an audit link ID or session reference is accepted as a credential"
+                    },
+                    {
+                        "id":  "M08",
+                        "kill":  [
+                                     "C03"
+                                 ],
+                        "behaviour":  "a forwarded address header is trusted without a trusted peer"
+                    },
+                    {
+                        "id":  "M11",
+                        "kill":  [
+                                     "C06",
+                                     "L04"
+                                 ],
+                        "behaviour":  "the trusted tail comparison is skipped"
+                    },
+                    {
+                        "id":  "M12",
+                        "kill":  [
+                                     "C07",
+                                     "L05"
+                                 ],
+                        "behaviour":  "an unexpired prefix may be deleted"
+                    },
+                    {
+                        "id":  "M14",
+                        "kill":  [
+                                     "C10"
+                                 ],
+                        "behaviour":  "a declared case missing from its test file is accepted"
+                    }
+                ],
+    "candidate_cases":  [
+                            {
+                                "file":  "tests/emr/b/live.py",
+                                "case":  "EmrBLedgerLive.test_b01_ledger_roles_and_restart"
+                            }
+                        ]
 }

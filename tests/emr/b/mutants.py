@@ -56,8 +56,8 @@ MUTANTS = {
          "  emr_access.storage_placement() TO kin_emr_retention;\nGRANT SET ON PARAMETER session_replication_role TO kin_runtime;\nCOMMIT;\n")]),
     "M03": ("the business transaction commits without its ledger fact: no receipt, no projection join", [
         ("api/src/emr-runtime/store.ts",
-         "    const result: AppendResult = await this.appendRow(tx, event.eventId, text);\n",
-         "    const result = { chainId: '', sequence: 0, previousHash: '', hash: '', storedAt: '', replay: false } as AppendResult;\n")]),
+         "      const result: AppendResult = await this.appendRow(tx, stream, event.eventId, text, act);\n",
+         "      const result = { chainId: '', sequence: 0, previousHash: '', hash: '', storedAt: '', replay: false } as AppendResult;\n")]),
     "M04": ("body bytes leave before the durable receipt (and with no receipt at all)", [
         ("api/src/emr-runtime/contract.ts",
          "  return provideAfterDurableEvent(store, input, async receipt => {\n"
@@ -78,11 +78,11 @@ MUTANTS = {
     "M08": ("a forwarded address header is believed from any peer", [
         ("api/src/emr-runtime/contract.ts", "if (!peer || !trustedPeers.has(peer) || typeof real", "if (!peer || typeof real")]),
     "M11": ("start-up never compares the database chain with the trusted seal", [
-        ("api/src/emr-runtime/seal.ts", "      if (tail.sequence < current.sequence) throw new SealRefused('LedgerBehindSeal');\n", ""),
+        ("api/src/emr-runtime/seal.ts", "        if (tail.sequence < current.sequence) throw new SealRefused('LedgerBehindSeal', stream);\n", ""),
         ("api/src/emr-runtime/seal.ts",
-         "        const sealed = entries.find(e => e.sequence === current!.sequence);\n"
-         "        if (sealed ? sealed.hash !== current.hash : current.sequence > anchor.sequence || (current.sequence === anchor.sequence && current.hash !== anchor.hash))\n"
-         "          throw new SealRefused('SealTailMismatch');\n", "")]),
+         "          const sealed = entries.find(e => e.sequence === current.sequence);\n"
+         "          if (sealed ? sealed.hash !== current.hash : current.sequence > anchor.sequence || (current.sequence === anchor.sequence && current.hash !== anchor.hash))\n"
+         "            throw new SealRefused('SealTailMismatch', stream);\n", "")]),
     "M12": ("an entry before its end under the retention rule (unexpired, or bound to a record whose end is unknown) is planned into the expired prefix", [
         ("api/src/emr-runtime/contract.ts", "    if (deadline === null || deadline > now || row.held) break;\n", "    if (row.held) break;\n")]),
     "M14": ("a declared live case missing from (or added to) its test file is accepted", [

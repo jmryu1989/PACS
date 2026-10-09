@@ -44,6 +44,7 @@ function authEvent(A, overrides = {}) {
   return { formatVersion: 2, branch: 'online-auth', surface: 'GET auth/callback', eventId: randomUUID(), userId: known(who),
     rolesAtTime: known(['radiologist']), rightsVersion: known(3), actingInstitution: known('hospital-a'), managingInstitution: known('hospital-a'),
     occurredAt: '2026-10-09T00:00:00.000Z', trustedProxyIp: known({ address: '192.0.2.10', source: 'trusted-proxy' }), cause: 'user-view',
+    context: { basis: overrides.cause === 'service-job' ? 'service-job' : 'authentication', studyId: null, relatedStudyId: null, reason: null },
     executor: 'member', affectedIdentity: known(who), session: known('authref:' + randomUUID()), targets: [], action: 'auth.login',
     result: 'succeeded', auth: { endCause: null, failureCause: null, trigger: null }, requestId: 'request-' + randomUUID(),
     auditLinkId: A.newAuditLinkId(), relatedEventId: null, ...overrides };
@@ -52,7 +53,7 @@ function provideEvent(A, overrides = {}) {
   return { formatVersion: 1, surface: 'GET studies/:uid/report/versions', eventId: 'provide-' + randomUUID(), userId: known(member()),
     rolesAtTime: known(['radiologist']), actingInstitution: known('hospital-a'), managingInstitution: known('hospital-a'),
     occurredAt: '2026-10-09T00:00:00.000Z', trustedProxyIp: known({ address: '192.0.2.1', source: 'trusted-proxy' }), cause: 'user-view',
-    executor: 'member', targets: [{ kind: 'report-version', patientLinkSnapshot: known({ linkId: 'link-1', patientId: 'SYN-1', assigningAuthority: 'hospital-a' }),
+    context: { basis: 'assigned-reading', studyId: 'study-1', relatedStudyId: null, reason: null }, executor: 'member', targets: [{ kind: 'report-version', patientLinkSnapshot: known({ linkId: 'link-1', patientId: 'SYN-1', assigningAuthority: 'hospital-a' }),
       studyId: known('study-1'), recordId: known('report-1'), versionId: known('version-1') }],
     action: 'provide-prepared', result: 'prepared', requestId: 'request-1', auditLinkId: A.newAuditLinkId(), relatedEventId: null, ...overrides };
 }
@@ -86,15 +87,18 @@ async function liveDriver() {
     const journal = new FailureJournal(state);
     const seal = new AccessSeal(state, sql, journal);
     const store = new RT.AccessLedgerStore(prisma, sql, seal, journal);
-    if (operation === 'recover') return await seal.recover();
+    // The viewing stream's seal flattened beside both streams, so a caller reads the stream every event is in directly.
+    const flat = s => s === 'absent' ? 'absent' : { ...s.streams.viewing, streams: s.streams, sealedAt: s.sealedAt };
+    if (operation === 'recover') { const r = await seal.recover(); return { ...r, seal: flat(r.seal) }; }
     // A process that writes ledger facts is a started server: its start-up check runs first (B2 calls it before listen).
     if (['append', 'business', 'provide'].includes(operation)) await seal.recover();
-    if (operation === 'seal') return seal.read();
+    if (operation === 'seal') return flat(seal.read());
     if (operation === 'journal') return journal.all().map(record => ({ id: record.id, kind: record.kind, body: record.body }));
-    if (operation === 'tail') return await sql.tail();
+    const stream = args.stream ?? 'viewing';
+    if (operation === 'tail') return await sql.tail(stream);
     if (operation === 'entries') {
       const entries = [];
-      for (let after = 0; ;) { const page = await sql.entriesAfter(after, 1000); entries.push(...page); if (page.length < 1000) break; after = page.at(-1).sequence; }
+      for (let after = 0; ;) { const page = await sql.entriesAfter(stream, after, 1000); entries.push(...page); if (page.length < 1000) break; after = page.at(-1).sequence; }
       return entries;
     }
     if (operation === 'append') {
@@ -133,9 +137,9 @@ async function liveDriver() {
       const order = [];
       try {
         const body = await C.provideAfterReceipt(store, event, async receipt => {
-          const stored = await sql.entryForEvent(event.eventId);
+          const stored = await sql.entryForEvent('viewing', event.eventId);
           const sealed = seal.read();
-          order.push({ body: true, stored: !!stored, sealedThrough: sealed === 'absent' ? null : sealed.sequence, entry: stored?.sequence ?? null, receipt });
+          order.push({ body: true, stored: !!stored, sealedThrough: sealed === 'absent' ? null : sealed.streams.viewing.sequence, entry: stored?.sequence ?? null, receipt });
           return 'SYNTHETIC body';
         });
         return { eventId: event.eventId, body, order };
@@ -152,7 +156,8 @@ async function liveDriver() {
     if (operation === 'reload') return await reload(args);
     // The one retention rule's view of each event: its record targets, and its end while no record end is known (B1).
     if (operation === 'targets') return (args.events ?? []).map(event => C.recordTargets(event));
-    if (operation === 'deadline') return (args.events ?? []).map(event => C.accessDeadline({ occurredAt: event.occurredAt, targets: C.recordTargets(event) }, C.RECORD_RETENTION_UNAVAILABLE));
+    if (operation === 'deadline') return (args.events ?? []).map(event => Object.fromEntries(A.accessStreams(event).map(s =>
+      [s, C.accessDeadline(s, { occurredAt: event.occurredAt, targets: C.recordTargets(event) }, C.RECORD_RETENTION_UNAVAILABLE)])));
     if (operation === 'identity') {
       return await prisma.$transaction(async tx => Promise.all((args.pairs ?? []).map(([issuer, subject]) => store.resolveIdentity(tx, issuer, subject))));
     }
@@ -214,30 +219,41 @@ function contractSuite() {
   const noHolds = (...ids) => ({ holds: new Map(ids.map(id => [id, []])) });
   const ledgerError = (code, message) => Object.assign(new Error(message ?? code), { code: 'P2010', meta: { code } });
 
-  /** An in-memory reference model of schema emr_access's functions, with per-transaction staging and rollback. */
+  /** An in-memory reference model of schema emr_access's functions: two streams (D-1), per-transaction staging, rollback.
+   * `entries`, `head` and `chainId` are the viewing stream's (the stream every event is in). */
   class MemoryLedger {
-    constructor() { this.chainId = randomUUID(); this.head = { sequence: 0, hash: '0'.repeat(64) }; this.entries = []; this.holdRowsList = []; this.requests = []; this.clauses = []; this.down = false; }
-    begin() { return { staged: [], head: null, holds: [], requests: [] }; }
-    commit(tx) { this.entries.push(...tx.staged); if (tx.head) this.head = tx.head; this.holdRowsList.push(...tx.holds); this.requests.push(...tx.requests); }
-    visible(tx) { return tx ? [...this.entries, ...tx.staged] : this.entries; }
+    constructor() {
+      this.streams = Object.fromEntries(A.ACCESS_STREAMS.map(s => [s, { chainId: randomUUID(), head: { sequence: 0, hash: '0'.repeat(64) }, entries: [] }]));
+      this.holdRowsList = []; this.requests = []; this.clauses = []; this.down = false;
+    }
+    get entries() { return this.streams.viewing.entries; } set entries(value) { this.streams.viewing.entries = value; }
+    get head() { return this.streams.viewing.head; } set head(value) { this.streams.viewing.head = value; }
+    get chainId() { return this.streams.viewing.chainId; }
+    begin() { return { staged: { viewing: [], history: [] }, head: {}, holds: [], requests: [] }; }
+    commit(tx) {
+      for (const s of A.ACCESS_STREAMS) { this.streams[s].entries.push(...tx.staged[s]); if (tx.head[s]) this.streams[s].head = tx.head[s]; }
+      this.holdRowsList.push(...tx.holds); this.requests.push(...tx.requests);
+    }
+    visible(tx, stream = 'viewing') { return tx ? [...this.streams[stream].entries, ...tx.staged[stream]] : this.streams[stream].entries; }
     guard() { if (this.down) throw Object.assign(new Error("Can't reach database server"), { code: 'P1001' }); }
-    append(tx, eventId, payload) {
+    append(tx, stream, eventId, payload, act) {
       this.guard();
-      const doc = JSON.parse(payload);
-      if (doc.kind !== 'access' || doc.event.eventId !== eventId || !Array.isArray(doc.event.targets)) throw ledgerError('EB003');
-      const existing = this.visible(tx).find(e => e.eventId === eventId);
-      const head = tx.head ?? this.head;
+      const doc = JSON.parse(payload), kind = stream === 'history' ? 'history' : 'access';
+      const targets = Array.isArray(doc.event?.targets) ? doc.event.targets.flatMap((t, index) => t.recordId?.status === 'not-applicable' ? [] : [{ index, kind: t.kind,
+        recordId: t.recordId?.status === 'known' ? t.recordId.value : null, versionId: t.versionId?.status === 'known' ? t.versionId.value : null }]) : null;
+      if (!A.ACCESS_STREAMS.includes(stream) || doc.kind !== kind || doc.event.eventId !== eventId || !targets ||
+          !['기재', '추가기재', '수정', '열람', 'none'].includes(act) || (stream === 'history' && (!['기재', '추가기재', '수정'].includes(act) || !targets.length))) throw ledgerError('EB003');
+      const chain = this.streams[stream], existing = this.visible(tx, stream).find(e => e.eventId === eventId);
+      const head = tx.head[stream] ?? chain.head;
       if (existing) {
-        if (existing.payload !== payload) throw ledgerError('EB002');
-        return { chainId: this.chainId, sequence: existing.sequence, previousHash: existing.previousHash, hash: existing.hash, storedAt: existing.storedAt, replay: true };
+        if (existing.payload !== payload || existing.statutoryAct !== act) throw ledgerError('EB002');
+        return { chainId: chain.chainId, sequence: existing.sequence, previousHash: existing.previousHash, hash: existing.hash, storedAt: existing.storedAt, replay: true };
       }
       const sequence = head.sequence + 1, hash = C.entryHash(sequence, head.hash, payload), storedAt = new Date().toISOString();
-      // The record binding the schema derives from the same bytes: every target whose record fact is not 'not-applicable'.
-      const targets = doc.event.targets.flatMap((t, index) => t.recordId?.status === 'not-applicable' ? [] : [{ index, kind: t.kind,
-        recordId: t.recordId?.status === 'known' ? t.recordId.value : null, versionId: t.versionId?.status === 'known' ? t.versionId.value : null }]);
-      tx.staged.push({ sequence, previousHash: head.hash, hash, kind: 'access', eventId, payload, contentSha256: createHash('sha256').update(payload).digest('hex'), storedAt, occurredAt: doc.event.occurredAt, targets });
-      tx.head = { sequence, hash };
-      return { chainId: this.chainId, sequence, previousHash: head.hash, hash, storedAt, replay: false };
+      tx.staged[stream].push({ sequence, previousHash: head.hash, hash, kind, statutoryAct: act, eventId, payload,
+        contentSha256: createHash('sha256').update(payload).digest('hex'), storedAt, occurredAt: doc.event.occurredAt, targets });
+      tx.head[stream] = { sequence, hash };
+      return { chainId: chain.chainId, sequence, previousHash: head.hash, hash, storedAt, replay: false };
     }
     checkpoint(through, at) {
       const anchor = this.entries.find(e => e.sequence === through);
@@ -245,16 +261,16 @@ function contractSuite() {
       this.entries = this.entries.filter(e => e.sequence > through);
       const payload = C.checkpointPayload(at, through, count, anchor.hash), sequence = this.head.sequence + 1;
       const hash = C.entryHash(sequence, this.head.hash, payload);
-      this.entries.push({ sequence, previousHash: this.head.hash, hash, kind: 'expiry', eventId: null, payload, contentSha256: createHash('sha256').update(payload).digest('hex'), storedAt: at, occurredAt: at, targets: [] });
+      this.entries.push({ sequence, previousHash: this.head.hash, hash, kind: 'expiry', statutoryAct: null, eventId: null, payload, contentSha256: createHash('sha256').update(payload).digest('hex'), storedAt: at, occurredAt: at, targets: [] });
       this.head = { sequence, hash };
     }
-    stored(e) { return { sequence: e.sequence, previousHash: e.previousHash, hash: e.hash, kind: e.kind, eventId: e.eventId, payload: e.payload, contentSha256: e.contentSha256, storedAt: e.storedAt }; }
+    stored(e) { return { sequence: e.sequence, previousHash: e.previousHash, hash: e.hash, kind: e.kind, statutoryAct: e.statutoryAct, eventId: e.eventId, payload: e.payload, contentSha256: e.contentSha256, storedAt: e.storedAt }; }
   }
   function memorySql(ledger) {
     return {
-      tail: async () => { ledger.guard(); return { chainId: ledger.chainId, ...ledger.head }; },
-      entriesAfter: async (after, limit) => { ledger.guard(); return ledger.entries.filter(e => e.sequence > after).sort((a, b) => a.sequence - b.sequence).slice(0, limit).map(e => ledger.stored(e)); },
-      entryForEvent: async eventId => { ledger.guard(); const e = ledger.entries.find(x => x.eventId === eventId); return e ? ledger.stored(e) : null; },
+      tail: async stream => { ledger.guard(); return { chainId: ledger.streams[stream].chainId, ...ledger.streams[stream].head }; },
+      entriesAfter: async (stream, after, limit) => { ledger.guard(); return ledger.streams[stream].entries.filter(e => e.sequence > after).sort((a, b) => a.sequence - b.sequence).slice(0, limit).map(e => ledger.stored(e)); },
+      entryForEvent: async (stream, eventId) => { ledger.guard(); const e = ledger.streams[stream].entries.find(x => x.eventId === eventId); return e ? ledger.stored(e) : null; },
       placement: async () => [],
     };
   }
@@ -263,7 +279,7 @@ function contractSuite() {
       super({ $transaction: async work => { const tx = ledger.begin(); const value = await work(tx); ledger.commit(tx); return value; } }, memorySql(ledger), seal, journal);
       this.ledger = ledger;
     }
-    async appendRow(tx, eventId, payload) { return this.ledger.append(tx, eventId, payload); }
+    async appendRow(tx, stream, eventId, payload, act) { return this.ledger.append(tx, stream, eventId, payload, act); }
     async holdRows(tx, recordId) { this.ledger.guard(); return [...this.ledger.holdRowsList, ...(tx.holds ?? [])].filter(r => r.recordId === recordId).map(({ holdId, phase, body }) => ({ holdId, phase, body })); }
     async placeHoldRow(tx, holdId, recordId, body) { tx.holds.push({ holdId, phase: 'placed', recordId, body }); }
     async releaseHoldRow(tx, holdId, body) { const placed = [...this.ledger.holdRowsList, ...tx.holds].find(r => r.holdId === holdId && r.phase === 'placed'); tx.holds.push({ holdId, phase: 'released', recordId: placed.recordId, body }); }
@@ -272,25 +288,28 @@ function contractSuite() {
     async clauseRows(tx, clauseId) { return this.ledger.clauses.filter(c => c.clauseId === clauseId).map(({ clauseId: _, ...row }) => row); }
     async entryRow(tx, eventId) { const e = this.ledger.visible(tx).find(x => x.eventId === eventId); return e ? this.ledger.stored(e) : null; }
   }
-  /** A started server's ledger: its seal is created by the start-up recovery over the empty chain, as in production. */
+  /** A started server's ledger: its seal is created by the start-up recovery over the empty chains, as in production. */
   async function world() {
     const state = fs.mkdtempSync(path.join(os.tmpdir(), 'emr-b-state-'));
     const ledger = new MemoryLedger(), journal = new J.FailureJournal(state);
     const seal = new S.AccessSeal(state, memorySql(ledger), journal);
-    assert.deepEqual(await seal.recover(), { seal: seal.read(), recovered: 0, notCommitted: 0 });
+    const started = await seal.recover();
+    assert.deepEqual([started.seal, started.recovered, started.notCommitted], [seal.read(), 0, 0]);
     return { state, ledger, journal, seal, store: new MemoryStore(ledger, seal, journal),
       restart() { const j = new J.FailureJournal(state); const s = new S.AccessSeal(state, memorySql(ledger), j); return { journal: j, seal: s, store: new MemoryStore(ledger, s, j) }; },
       cleanup() { fs.rmSync(state, { recursive: true, force: true }); } };
   }
+  /** A change of an EMR record (D-1: recorded in both streams). */
+  const changeEvent = (overrides = {}) => provideEvent(A, { eventId: 'change-' + randomUUID(), surface: 'POST studies/:uid/report/commit', action: 'approve-sign', result: 'succeeded', ...overrides });
   const code = (work, expected) => assert.throws(work, error => error?.code === expected || String(error?.message).includes(expected), expected);
   const rejects = (promise, expected) => assert.rejects(promise, error => error?.code === expected || String(error?.message).includes(expected), expected);
 
   // ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  test('C01 v2 authentication facts: v1 unchanged; online-auth admits verified success and verified refusal, refuses a clinical write, a mismatched result, an extra key and an audit-namespace credential', () => {
-    // v1: same parse, same fields, same chain bytes as A built them.
+  test('C01 v2 authentication facts: v1 keeps its rules with D-18 context; online-auth admits verified success and verified refusal, refuses a clinical write, a mismatched result, an extra key and an audit-namespace credential', () => {
+    // v1: A's parse, its fields plus D-18's server-bound context, the chain bytes A builds.
     const v1 = A.parseAccessEvent(provideEvent(A));
     assert.deepEqual(Object.keys(v1), ['formatVersion', 'surface', 'eventId', 'userId', 'rolesAtTime', 'actingInstitution', 'managingInstitution', 'occurredAt',
-      'trustedProxyIp', 'cause', 'executor', 'targets', 'action', 'result', 'requestId', 'auditLinkId', 'relatedEventId']);
+      'trustedProxyIp', 'cause', 'context', 'executor', 'targets', 'action', 'result', 'requestId', 'auditLinkId', 'relatedEventId']);
     const sealed = A.sealAccessEvent(A.ACCESS_CHAIN_GENESIS, v1);
     assert.equal(sealed.hash, C.entryHash(1, A.ACCESS_CHAIN_GENESIS.hash, JSON.stringify({ kind: 'access', event: v1 })));
     assert(A.verifyAccessChain(A.ACCESS_CHAIN_GENESIS, [sealed], { sequence: 1, hash: sealed.hash }));
@@ -349,8 +368,8 @@ function contractSuite() {
     // An authentication event is about no EMR record: no bound target, and the one retention rule ends it at the floor.
     const event = authEvent(A);
     assert.deepEqual(C.recordTargets(event), []);
-    assert.equal(C.accessDeadline({ occurredAt: event.occurredAt, targets: C.recordTargets(event) }, C.RECORD_RETENTION_UNAVAILABLE),
-      C.accessRetentionFloor(event.occurredAt));
+    assert.deepEqual(A.accessStreams(event), ['viewing']);
+    assert.equal(C.accessDeadline('viewing', { occurredAt: event.occurredAt, targets: C.recordTargets(event) }), C.accessRetentionFloor(event.occurredAt));
   });
 
   test('C02 one immutable identity per verified issuer and subject; namesakes stay apart; a name never joins and unverified input is never known', async () => {
@@ -399,6 +418,7 @@ function contractSuite() {
     const original = (overrides = {}) => ({ formatVersion: 2, branch: 'verified-offline', surface: 'POST studies/:uid/report/commit', eventId: randomUUID(),
       userId: known(member()), rolesAtTime: known(['radiologist']), actingInstitution: known('hospital-a'), managingInstitution: known('hospital-a'),
       occurredAt: facts.signedAt, trustedProxyIp: unresolved('offline'), cause: 'user-view', executor: 'member',
+      context: { basis: 'assigned-reading', studyId: 'study-1', relatedStudyId: null, reason: null },
       targets: [{ kind: 'report-version', patientLinkSnapshot: known({ linkId: 'link-1', patientId: 'SYN-1', assigningAuthority: 'hospital-a' }),
         studyId: known('study-1'), recordId: known('report-1'), versionId: known('version-2') }],
       action: 'approve-sign', result: 'succeeded', offline: structuredClone(facts), requestId: 'request-offline', auditLinkId: A.newAuditLinkId(),
@@ -454,7 +474,7 @@ function contractSuite() {
       const event = provideEvent(A), seen = [];
       const body = await C.provideAfterReceipt(w.store, event, async receipt => {
         const entry = w.ledger.entries.find(e => e.eventId === event.eventId), sealed = w.seal.read();
-        seen.push({ committed: !!entry, sealedThrough: sealed.sequence, entry: entry?.sequence, receipt: receipt.eventId });
+        seen.push({ committed: !!entry, sealedThrough: sealed.streams.viewing.sequence, entry: entry?.sequence, receipt: receipt.eventId });
         return 'SYNTHETIC body';
       });
       assert.equal(body, 'SYNTHETIC body');
@@ -497,7 +517,7 @@ function contractSuite() {
       // The same bytes A chains: re-seal each parsed payload with A and compare every hash.
       let previous = A.ACCESS_CHAIN_GENESIS;
       for (const entry of entries) { const sealed = A.sealAccessEvent(previous, JSON.parse(entry.payload).event); assert.equal(sealed.hash, entry.hash); previous = { sequence: sealed.sequence, hash: sealed.hash }; }
-      assert.deepEqual(w.seal.read() && { sequence: w.seal.read().sequence, hash: w.seal.read().hash }, tail);
+      assert.deepEqual(w.seal.read() && { sequence: w.seal.read().streams.viewing.sequence, hash: w.seal.read().streams.viewing.hash }, tail);
       assert.deepEqual((await w.restart().seal.recover()).recovered, 0);
       const drop = (list, sequence) => list.filter(e => e.sequence !== sequence);
       assert.equal(C.chainViolation(A.ACCESS_CHAIN_GENESIS, drop(entries, 3), tail), 'missing-entry');
@@ -517,10 +537,10 @@ function contractSuite() {
       const pending = authEvent(A), tx = w.ledger.begin();
       await w.store.appendInTransaction(tx, pending); w.ledger.commit(tx);
       const restarted = w.restart(), recovered = await restarted.seal.recover();
-      assert.equal(recovered.recovered, 1); assert.equal(restarted.seal.read().sequence, 6);
+      assert.equal(recovered.recovered, 1); assert.equal(restarted.seal.read().streams.viewing.sequence, 6);
       assert(restarted.journal.all().some(r => r.kind === 'seal-recovered' && r.body.toSequence === 6));
       const forged = authEvent(A), forgedTx = w.ledger.begin();
-      w.ledger.append(forgedTx, forged.eventId, C.canonicalPayload(forged).text); w.ledger.commit(forgedTx);
+      w.ledger.append(forgedTx, 'viewing', forged.eventId, C.canonicalPayload(forged).text, 'none'); w.ledger.commit(forgedTx);
       await rejects(w.restart().seal.recover(), 'UnsealedEntryUnexplained');
       w.ledger.entries.pop(); w.ledger.head = { sequence: 6, hash: w.ledger.entries.at(-1).hash };
       // A damaged or missing seal is never rebuilt from the database end.
@@ -533,9 +553,9 @@ function contractSuite() {
     } finally { w.cleanup(); }
   });
 
-  test('C07 independent expired prefix and its checkpoint under the one retention rule: a non-record event ends at the floor, a record-bound event outlives it while its record is retained and never ends while its record end is unknown; an unexpired, held or middle deletion and a read-extended clock are refused', async () => {
+  test('C07 independent expired prefix and its checkpoint under the one retention rule: a viewing entry ends at the floor, a change\'s history entry lives as long as the record it changed and never ends while that end is unknown; an unexpired, held or middle deletion and a read-extended clock are refused', async () => {
     // The floor is A's civil period over A's classification period for access records - bound to the rule, never to a
-    // number: the period may change in A's table alone (Asia/Seoul civil days, a 29 February start).
+    // number: the period may change in A's table alone (Asia/Seoul civil days, the first day counted, a 29 February start).
     const years = Cl.RECORD_CLASSIFICATION[C.ACCESS_RETENTION.kind].retention.years;
     assert.equal(C.ACCESS_RETENTION.years, years);
     for (const occurred of ['2026-10-05T00:00:00.000Z', '2024-02-28T15:00:00.000Z', '2024-02-28T15:00:00.001Z', '2026-10-04T15:00:00.000Z'])
@@ -546,40 +566,39 @@ function contractSuite() {
     assert(C.accessRetentionFloor(fresh) > at);
     const record = { index: 0, kind: 'report-version', recordId: 'report-1', versionId: 'version-1' };
     const retainedUntil = plus(at, 365 * day), endedAt = plus(old, day);
-    const ends = { retained: () => retainedUntil, ended: () => endedAt, unknown: C.RECORD_RETENTION_UNAVAILABLE };
-    // A non-record event ends at the floor, whatever any record reader says.
-    assert.equal(C.accessDeadline({ occurredAt: old, targets: [] }, ends.unknown), C.accessRetentionFloor(old));
-    // A record-bound event ends at the later of the floor and its record's end: it outlives the floor while the record is
-    // retained, ends at the floor when the record ended earlier, and has no end at all while the record end is unknown.
-    assert.equal(C.accessDeadline({ occurredAt: old, targets: [record] }, ends.retained), retainedUntil);
-    assert.equal(C.accessDeadline({ occurredAt: old, targets: [record] }, ends.ended), C.accessRetentionFloor(old));
-    assert.equal(C.accessDeadline({ occurredAt: old, targets: [record] }, ends.unknown), null);
-    assert.equal(C.accessDeadline({ occurredAt: old, targets: [{ ...record, recordId: null }] }, ends.retained), null);
-    const row = (sequence, occurredAt, targets = [], held = false) => ({ sequence, hash: createHash('sha256').update(String(sequence)).digest('hex'), kind: 'access', occurredAt, targets, held });
+    const ends = { retained: () => retainedUntil, ended: () => endedAt };
+    // Viewing stream: every entry ends at its floor - a 열람, an event about no record and a change's viewing copy alike.
+    assert.equal(C.accessDeadline('viewing', { occurredAt: old, targets: [] }), C.accessRetentionFloor(old));
+    assert.equal(C.accessDeadline('viewing', { occurredAt: old, targets: [record] }, ends.retained), C.accessRetentionFloor(old));
+    // History stream: a change lives as long as every record it changed (its floor remainder stays in the viewing stream);
+    // with no known record end it has no end at all.
+    assert.equal(C.accessDeadline('history', { occurredAt: old, targets: [record] }, ends.retained), retainedUntil);
+    assert.equal(C.accessDeadline('history', { occurredAt: old, targets: [record] }, ends.ended), endedAt);
+    assert.equal(C.accessDeadline('history', { occurredAt: old, targets: [record] }), null);
+    assert.equal(C.accessDeadline('history', { occurredAt: old, targets: [{ ...record, recordId: null }] }, ends.retained), null);
+    assert.equal(C.accessDeadline('history', { occurredAt: old, targets: [] }, ends.retained), null);
+    const row = (sequence, occurredAt, held = false) => ({ sequence, hash: createHash('sha256').update(String(sequence)).digest('hex'), kind: 'access', occurredAt, held });
     assert.deepEqual(C.planExpiryPrefix([row(1, old), row(2, old), row(3, fresh), row(4, old)], at), { through: 2, hash: row(2, old).hash, count: 2 });
     assert.equal(C.planExpiryPrefix([row(1, fresh), row(2, old)], at), null, 'an unexpired first entry keeps everything after it');
-    assert.equal(C.planExpiryPrefix([row(1, old, [], true), row(2, old)], at), null, 'a held entry is never deleted');
-    assert.equal(C.planExpiryPrefix([row(1, old), row(2, old, [], true), row(3, old)], at).through, 1);
+    assert.equal(C.planExpiryPrefix([row(1, old, true), row(2, old)], at), null, 'a held entry is never deleted');
+    assert.equal(C.planExpiryPrefix([row(1, old), row(2, old, true), row(3, old)], at).through, 1);
     code(() => C.planExpiryPrefix([row(1, old), row(3, old)], at), 'RetentionViewIncomplete');
-    // Past the floor, the record-bound entry stays while its record is retained (and without a reader, as in B1) ...
-    const bound = [row(1, old), row(2, old, [record]), row(3, old)];
-    assert.equal(C.planExpiryPrefix(bound, at, ends.retained).through, 1);
-    assert.equal(C.planExpiryPrefix(bound, at).through, 1);
-    assert.equal(C.planExpiryPrefix(bound, plus(at, 3650 * day)).through, 1, 'an unknown record end never lapses');
-    // ... and goes with the prefix once the record's own end has passed; reading the plan again changes nothing.
-    assert.equal(C.planExpiryPrefix(bound, plus(retainedUntil, 1), ends.retained).through, 3);
-    assert.equal(C.planExpiryPrefix(bound, plus(retainedUntil, 1), ends.retained).through, 3);
+    assert.deepEqual(C.planExpiryPrefix([row(1, old), row(2, old)], at), C.planExpiryPrefix([row(1, old), row(2, old)], at), 'reading never moves an end');
     // The checkpoint bytes are A's expiry entry: same payload, same hash; the chain continues across the deleted prefix.
     const w = await world();
     try {
       for (let n = 0; n < 4; n++) await w.store.append(authEvent(A, { occurredAt: '2020-01-0' + (n + 1) + 'T00:00:00.000Z' }));
-      // Nothing stored carries a deadline; an authentication event binds no record, a provision binds its record targets.
-      const provided = provideEvent(A);
-      await w.store.append(provided);
-      assert(w.ledger.entries.every(entry => !('expiresAt' in entry) && !('expires_at' in entry)));
+      // Nothing stored carries a deadline; an authentication event and a 열람 are viewing-only, a change is in both streams.
+      const provided = provideEvent(A), changed = changeEvent();
+      await w.store.append(provided); await w.store.append(changed);
+      assert(A.ACCESS_STREAMS.every(s => w.ledger.streams[s].entries.every(entry => !('expiresAt' in entry) && !('expires_at' in entry))));
+      assert.deepEqual(w.ledger.entries.map(e => e.statutoryAct), ['none', 'none', 'none', 'none', '열람', '기재']);
       assert.deepEqual(w.ledger.entries.slice(0, 4).map(entry => entry.targets), [[], [], [], []]);
-      assert.deepEqual(w.ledger.entries.at(-1).targets, C.recordTargets(provided));
-      assert.deepEqual(C.recordTargets(provided), [{ index: 0, kind: 'report-version', recordId: 'report-1', versionId: 'version-1' }]);
+      assert.deepEqual(w.ledger.entries[4].targets, C.recordTargets(provided));
+      const [history] = w.ledger.streams.history.entries;
+      assert.deepEqual([w.ledger.streams.history.entries.length, history.eventId, history.kind, history.statutoryAct], [1, changed.eventId, 'history', '기재']);
+      assert.deepEqual(history.targets, [{ index: 0, kind: 'report-version', recordId: 'report-1', versionId: 'version-1' }]);
+      assert.equal(w.seal.read().streams.history.sequence, 1);
       const through = w.ledger.entries[1], previous = { ...w.ledger.head };
       const expected = A.sealAccessExpiry(previous, { sequence: through.sequence, hash: through.hash }, 2, at);
       assert.equal(C.checkpointPayload(at, 2, 2, through.hash), JSON.stringify(expected.payload));
@@ -588,6 +607,7 @@ function contractSuite() {
       const entries = w.ledger.entries.map(e => w.ledger.stored(e));
       assert.deepEqual(C.retainedAnchor(entries), { sequence: 2, hash: through.hash });
       assert.equal(C.chainViolation(C.retainedAnchor(entries), entries, w.ledger.head), null);
+      assert.equal(C.chainViolation(C.retainedAnchor(entries), entries, w.ledger.head, 'history'), 'foreign-stream', 'a viewing entry never verifies as history');
       assert.equal((await w.restart().seal.recover()).recovered, 1, 'the retention checkpoint is sealed like any committed entry');
       // A middle entry removed without its checkpoint is a deletion, not an expiry.
       const middle = entries.filter(e => e.sequence !== 4);
@@ -658,7 +678,9 @@ function contractSuite() {
     const signed = resolve(facts('offline-1', 'TerminalSignedOriginal', { signedAt, purposeId: null }, {}));
     assert.deepEqual(signed.kinds, ['offline-signed-original']);
     const retained = inSnapshot(noHolds('offline-1'), () => D.newRetentionRecord(signed));
-    assert.equal(D.retentionDeadline(retained), D.civilPeriodEnd(signedAt, 10), 'from the actual signing time');
+    // D-19: a signed original keeps its record class's period (5 years, never 진료기록부 by being signed), from signedAt.
+    const originalYears = Cl.RECORD_CLASSIFICATION['offline-signed-original'].retention.years;
+    assert.equal(D.retentionDeadline(retained), D.civilPeriodEnd(signedAt, originalYears), 'from the actual signing time');
     code(() => resolve(facts('offline-2', 'TerminalSignedOriginal', { signedAt, purposeId: null }, { at: receivedAt, signature: { versionId: 'v1', sha256: digest('offline-2'), signedAt: receivedAt, verified: true } })), 'TerminalOriginalTimeRefused');
     code(() => resolve(facts('offline-3', 'TerminalSignedOriginal', { signedAt, purposeId: null }, { signature: null })), 'TerminalOriginalTimeRefused');
     // An original is never a purpose record, so no draft purpose end can destroy it.
@@ -672,7 +694,7 @@ function contractSuite() {
       predecessor: { recordId: 'offline-1', partId: 'v1', sha256: digest('offline-1') } }));
     code(() => inSnapshot(noHolds('offline-1'), () => D.recordVersionAdded(retained, resigned,
       { records: [retained], references: [], complete: true, revision: 'r', checkedAt: receivedAt })), 'NewLawfulRecordEventRequired');
-    assert.equal(D.retentionDeadline(retained), D.civilPeriodEnd(signedAt, 10));
+    assert.equal(D.retentionDeadline(retained), D.civilPeriodEnd(signedAt, originalYears));
     // The recovery copy: owned, referenced, with a purpose that ends at verified reception or the owner's discard only.
     const copyFacts = facts('recovery-1', 'TerminalRecoveryCopy', { signedAt: null, purposeId: 'purpose-recover-1' }, { act: 'creation', signature: null });
     const copy = resolve(copyFacts);

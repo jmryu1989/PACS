@@ -281,7 +281,7 @@ class Pure(unittest.TestCase):
         # same rows. S7-U5 D600 replaced it by the provider change records (ProviderChange, the three columns dropped): 39 files,
         # 49 tables, and two records (an unknown disable of the owed member, a settled end of a provider session).
         # EMR-B1 added schema emr_access (43 files): still 51 public tables and the same public rows; its 8 tables are
-        # observed schema-qualified beside them with 7 synthetic rows (two chained entries and their head, a placed and
+        # observed schema-qualified beside them with 8 synthetic rows (two chained viewing entries, the heads of both streams, a placed and
         # released hold, a reviewed clause version, an identity binding; no record target, projection or request yet).
         self.assertEqual(len(transfer.MIGRATIONS), 43)
         self.assertEqual(len(transfer.TABLES), 51)
@@ -289,7 +289,7 @@ class Pure(unittest.TestCase):
         emr = transfer.expected_emr_rows()
         self.assertEqual(sorted(emr), transfer.EMR_TABLES)
         self.assertEqual({name: len(value) for name, value in emr.items()},
-                         {'access_entry': 2, 'access_target': 0, 'audit_projection': 0, 'chain_head': 1, 'clause_version': 1,
+                         {'access_entry': 2, 'access_target': 0, 'audit_projection': 0, 'chain_head': 2, 'clause_version': 1,
                           'duty_request_event': 0, 'legal_hold_event': 2, 'member_identity': 1})
         first, second = emr['access_entry']
         self.assertEqual((first['previous_hash'], second['previous_hash']), ('0'*64, first['hash']))

@@ -190,23 +190,30 @@ class EmrBLedgerLive(unittest.TestCase):
                 "managingInstitution": {"status": "known", "value": "hospital-a"}, "occurredAt": occurred,
                 "trustedProxyIp": {"status": "known", "value": {"address": "192.0.2.10", "source": "trusted-proxy"}},
                 "cause": "user-view", "executor": "member", "affectedIdentity": {"status": "known", "value": who},
+                "context": {"basis": "authentication", "studyId": None, "relatedStudyId": None, "reason": None},
                 "session": {"status": "known", "value": "authref:" + str(uuid.uuid4())}, "targets": [], "action": "auth.login",
                 "result": "succeeded", "auth": {"endCause": None, "failureCause": None, "trigger": None},
                 "requestId": "request-" + uuid.uuid4().hex, "auditLinkId": "audit:" + str(uuid.uuid4()), "relatedEventId": None}
 
-    def provide_event(self, occurred="2026-10-09T00:00:00.000Z"):
-        """A provision before a report version's body: an event about an EMR record (열람), A's v1 format."""
+    def provide_event(self, occurred="2026-10-09T00:00:00.000Z", **overrides):
+        """A provision before a report version's body: an event about an EMR record (열람), A's v1 format; with overrides
+        (surface, action, result) the same shape is a change of that record (기재), recorded in both streams (D-1)."""
         who = {"id": str(uuid.uuid4()), "issuer": "https://identity.example.test", "subject": "sub-" + uuid.uuid4().hex[:8]}
         return {"formatVersion": 1, "surface": "GET studies/:uid/report/versions", "eventId": "provide-" + str(uuid.uuid4()),
                 "userId": {"status": "known", "value": who}, "rolesAtTime": {"status": "known", "value": ["radiologist"]},
                 "actingInstitution": {"status": "known", "value": "hospital-a"}, "managingInstitution": {"status": "known", "value": "hospital-a"},
                 "occurredAt": occurred, "trustedProxyIp": {"status": "known", "value": {"address": "192.0.2.1", "source": "trusted-proxy"}},
                 "cause": "user-view", "executor": "member",
+                "context": {"basis": "assigned-reading", "studyId": "study-1", "relatedStudyId": None, "reason": None},
                 "targets": [{"kind": "report-version", "patientLinkSnapshot": {"status": "known", "value": {"linkId": "link-1", "patientId": "SYN-1", "assigningAuthority": "hospital-a"}},
                              "studyId": {"status": "known", "value": "study-1"}, "recordId": {"status": "known", "value": "report-1"},
                              "versionId": {"status": "known", "value": "version-1"}}],
                 "action": "provide-prepared", "result": "prepared", "requestId": "request-" + uuid.uuid4().hex,
-                "auditLinkId": "audit:" + str(uuid.uuid4()), "relatedEventId": None}
+                "auditLinkId": "audit:" + str(uuid.uuid4()), "relatedEventId": None, **overrides}
+
+    def change_event(self, occurred="2026-10-09T00:00:00.000Z"):
+        return self.provide_event(occurred, eventId="change-" + str(uuid.uuid4()), surface="POST studies/:uid/report/commit",
+                                  action="approve-sign", result="succeeded")
 
     def chain_ok(self, entries):
         """Recompute A's chain bytes over the stored payloads (independently of the product code)."""
@@ -353,6 +360,19 @@ class EmrBLedgerLive(unittest.TestCase):
         self.assertEqual(len(set(ids[:4])), 1)
         self.assertEqual(len(set(ids)), 3)
         self.assertEqual(self.ok("SELECT count(*) FROM emr_access.member_identity WHERE subject IN ('sub-a', 'sub-b')"), ["3"])
+        # A change of a record commits in both streams with its business row and is sealed in both (D-1); a resend is the
+        # same two entries.
+        change = self.change_event()
+        done = self.driver("business", {"event": change})
+        self.assertIn("receipt", done, done)
+        history = self.driver("entries", {"stream": "history"})
+        self.assertEqual([e["eventId"] for e in history][-1:], [change["eventId"]])
+        self.chain_ok(history)
+        sealed = self.driver("seal")
+        self.assertEqual((sealed["streams"]["history"]["sequence"], sealed["streams"]["history"]["hash"]), (history[-1]["sequence"], history[-1]["hash"]))
+        self.assertIn("receipt", self.driver("append", {"events": [change]})["results"][0])
+        self.assertEqual(self.ok("SELECT stream || ':' || count(*) FROM emr_access.access_entry WHERE event_id = '%s' GROUP BY stream ORDER BY stream" % change["eventId"]),
+                         ["history:1", "viewing:1"])
 
     # ── L04 ──
     def test_b04_chain_tail_and_crash_recovery(self):
@@ -388,16 +408,17 @@ class EmrBLedgerLive(unittest.TestCase):
             self.ok("CREATE DATABASE %s TEMPLATE kin" % name, db=db)
             return self.copy_volume(state, name)
         cases = {
-            "l04_middle": ("DELETE FROM emr_access.access_entry WHERE sequence = 2", "LedgerChainBroken"),
-            "l04_tail": ("DELETE FROM emr_access.access_entry WHERE sequence = %d; UPDATE emr_access.chain_head SET sequence = %d, hash = '%s'"
+            "l04_middle": ("DELETE FROM emr_access.access_entry WHERE stream = 'viewing' AND sequence = 2", "LedgerChainBroken"),
+            "l04_tail": ("DELETE FROM emr_access.access_entry WHERE stream = 'viewing' AND sequence = %d; UPDATE emr_access.chain_head SET sequence = %d, hash = '%s' WHERE stream = 'viewing'"
                          % (base[-1]["sequence"], base[-2]["sequence"], base[-2]["hash"]), "LedgerBehindSeal"),
-            "l04_changed": ("UPDATE emr_access.access_entry SET payload = replace(payload, 'radiologist', 'admin') WHERE sequence = 1", "LedgerChainBroken"),
+            "l04_changed": ("UPDATE emr_access.access_entry SET payload = replace(payload, 'radiologist', 'admin') WHERE stream = 'viewing' AND sequence = 1", "LedgerChainBroken"),
         }
         forged_payload = json.dumps({"kind": "access", "event": {"eventId": str(uuid.uuid4()), "occurredAt": "2026-10-09T00:00:00.000Z"}}, separators=(",", ":"))
         sequence, previous = base[-1]["sequence"] + 1, base[-1]["hash"]
         forged_hash = hashlib.sha256(('{"sequence":%d,"previousHash":"%s","payload":%s}' % (sequence, previous, forged_payload)).encode()).hexdigest()
-        cases["l04_forged"] = ("INSERT INTO emr_access.access_entry VALUES (%d, '%s', '%s', 'access', '%s', '%s', '%s', now(), now()); "
-                               "UPDATE emr_access.chain_head SET sequence = %d, hash = '%s'"
+        cases["l04_forged"] = ("INSERT INTO emr_access.access_entry (stream, sequence, previous_hash, hash, kind, event_id, payload, content_sha256, statutory_act, occurred_at, stored_at) "
+                               "VALUES ('viewing', %d, '%s', '%s', 'access', '%s', '%s', '%s', 'none', now(), now()); "
+                               "UPDATE emr_access.chain_head SET sequence = %d, hash = '%s' WHERE stream = 'viewing'"
                                % (sequence, previous, forged_hash, json.loads(forged_payload)["event"]["eventId"], forged_payload.replace("'", "''"),
                                   hashlib.sha256(forged_payload.encode()).hexdigest(), sequence, forged_hash), "UnsealedEntryUnexplained")
         for name, (statement, expected) in cases.items():
@@ -425,9 +446,9 @@ class EmrBLedgerLive(unittest.TestCase):
         self.migrate(db)
         state = self.volume("l05")
         old = [self.auth_event(OLD[n]) for n in range(3)]
-        record_old = self.provide_event(OLD[3])
+        change_old = self.change_event(OLD[3])
         recent = [self.auth_event() for _ in range(2)]
-        events = old + [record_old] + recent
+        events = old + [change_old] + recent
         appended = self.driver("append", {"events": events}, db=db, volume=state)
         self.assertTrue(all("receipt" in r for r in appended["results"]), appended)
         # One retention rule: the database's single floor is the runtime rule's floor at every civil edge; no entry stores
@@ -441,12 +462,13 @@ class EmrBLedgerLive(unittest.TestCase):
                                  "AND column_name IN ('expires_at', 'expiry', 'deadline')", db=db), ["0"])
         bound = [[{"index": int(i), "kind": k, "recordId": r or None, "versionId": v or None} for i, k, r, v in
                   (line.split("|") for line in self.ok("SELECT target_index, target_kind, coalesce(record_id, ''), coalesce(version_id, '') "
-                   "FROM emr_access.access_target WHERE event_id = '%s' ORDER BY target_index" % e["eventId"], db=db))] for e in events]
+                   "FROM emr_access.access_target WHERE stream = 'viewing' AND event_id = '%s' ORDER BY target_index" % e["eventId"], db=db))] for e in events]
         self.assertEqual(bound, self.driver("targets", {"events": events}, db=db, volume=state))
         self.assertEqual([len(b) for b in bound], [0, 0, 0, 1, 0, 0])
         deadlines = self.driver("deadline", {"events": events}, db=db, volume=state)
-        self.assertEqual(deadlines[:3], self.driver("civil", {"at": [e["occurredAt"] for e in old]}, db=db, volume=state))
-        self.assertIsNone(deadlines[3], "a record-bound event has no end while its record's end is unknown")
+        floors = self.driver("civil", {"at": [e["occurredAt"] for e in old + [change_old]]}, db=db, volume=state)
+        self.assertEqual(deadlines[:3], [{"viewing": end} for end in floors[:3]])
+        self.assertEqual(deadlines[3], {"viewing": floors[3], "history": None}, "a change: its viewing copy ends at the floor, its history with the record")
         # A hold on the second old event keeps it and everything after it.
         hold = {"holdId": "hold-l05", "recordId": old[1]["eventId"], "actorId": "custodian", "at": "2026-10-01T00:00:00.000Z", "release": None,
                 "basis": {"type": "court-order", "clause": {"law": "synthetic-law", "article": "article-1", "version": "2026-v1"},
@@ -480,15 +502,18 @@ class EmrBLedgerLive(unittest.TestCase):
         self.ok("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = 'kin_emr_retention'", db=db)
         session.communicate(timeout=60)
         self.assertEqual(self.ok("SELECT string_agg(sequence::text, ',' ORDER BY sequence) FROM emr_access.access_entry", db=db), snapshot)
-        # After the release the rest of the expired prefix goes with its own checkpoint, up to the old record-bound event,
-        # which stays past the floor (its record's retention is not established here); the chain stays verifiable.
+        # After the release the rest of the expired prefix goes with its own checkpoint - the old change's viewing copy too, at
+        # its floor - while that change stays in the history stream, which no retention call touches; the chains stay verifiable.
         second = self.driver("expire", url=retention, db=db, volume=state)
-        self.assertEqual(second["deleted"], 2, second)
+        self.assertEqual(second["deleted"], 3, second)
         remaining = self.entries(db=db, volume=state)
-        self.assertEqual([e["kind"] for e in remaining], ["access", "access", "access", "expiry", "expiry"])
-        self.assertEqual(sorted(e["eventId"] for e in remaining if e["kind"] == "access"), sorted(e["eventId"] for e in [record_old] + recent))
-        self.assertEqual(self.refused("SELECT emr_access.expire_prefix(%d)" % remaining[0]["sequence"], user="kin_emr_retention", db=db), "EB008")
-        self.assertEqual(self.ok("SELECT count(*) FROM emr_access.access_target WHERE event_id = '%s'" % record_old["eventId"], db=db), ["1"])
+        self.assertEqual([e["kind"] for e in remaining], ["access", "access", "expiry", "expiry"])
+        self.assertEqual(sorted(e["eventId"] for e in remaining if e["kind"] == "access"), sorted(e["eventId"] for e in recent))
+        history = self.driver("entries", {"stream": "history"}, db=db, volume=state)
+        self.assertEqual([(e["kind"], e["eventId"], e["statutoryAct"]) for e in history], [("history", change_old["eventId"], "기재")])
+        self.chain_ok(history)
+        self.assertEqual(self.ok("SELECT count(*) FROM emr_access.access_target WHERE stream = 'history' AND event_id = '%s'" % change_old["eventId"], db=db), ["1"])
+        self.assertEqual(self.refused("DELETE FROM emr_access.access_entry WHERE stream = 'history'", user="kin_emr_retention", db=db), REFUSED)
         for checkpoint in (e for e in remaining if e["kind"] == "expiry"):
             self.assertNotIn("sub-", checkpoint["payload"])
         recovered = self.driver("recover", db=db, volume=state)

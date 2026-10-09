@@ -1,19 +1,22 @@
 import { PrismaClient } from '@prisma/client';
-import { AccessEvent, AppendOnlyAccessStore, DurableAccessReceipt } from '../emr-contract/access-event';
-import { ResolvedRecord } from '../emr-contract/classification';
-import { ContractError, integer, refuse, sha256, string, utc } from '../emr-contract/validation';
 import {
-  AppendResult, ChainTail, ClauseRow, HoldRow, PlacementRow, RECORD_RETENTION_UNAVAILABLE, RecordRetentionEnd, RecordTarget,
-  RequestRow, RetentionRow, StoredEntry, canonicalPayload, mintDurableReceipt, planExpiryPrefix,
+  ACCESS_STREAMS, AccessEvent, AccessStream, AppendOnlyAccessStore, DurableAccessReceipt, StatutoryAct, accessStreams, statutoryAct,
+} from '../emr-contract/access-event';
+import { ResolvedRecord } from '../emr-contract/classification';
+import { ContractError, choice, integer, refuse, sha256, string, utc } from '../emr-contract/validation';
+import {
+  AppendResult, ChainTail, ClauseRow, HoldRow, PlacementRow, RequestRow, RetentionRow, StoredEntry, canonicalPayload, mintDurableReceipt,
+  planExpiryPrefix,
 } from './contract';
 import { EmrSnapshot, SnapshotRequest, snapshotFromRows } from './context';
 import { FailureJournal, JournalUnavailable } from './failure-journal';
 import { RawQuery } from './manifest';
-import { AccessSeal, SealRefused } from './seal';
+import { AccessSeal, SealRefused, SealState } from './seal';
 
 /**
  * The protected access ledger store (EMR-B1). A ledger fact commits in the same PostgreSQL transaction as the business
- * change it describes; the receipt that lets a response go out exists only after that commit was read back and the
+ * change it describes - in every stream A assigns it (D-1: always the viewing stream; also the history stream for a change
+ * of a record) - and the receipt that lets a response go out exists only after each entry was read back and its stream's
  * external seal moved over it. Every path that does not end in a receipt leaves its fact in the failure journal or as a
  * pending intent the next start resolves - never a success, never a second original event for the same attempt.
  *
@@ -27,8 +30,9 @@ export class LedgerFailure extends Error {
     super(ledgerCode ? `${code}: ${ledgerCode}` : code); this.name = 'LedgerFailure';
   }
 }
-/** In-transaction position of an append. It is not durable and is never handed out as a receipt. */
-export interface ProvisionalAppend { readonly provisional: true; readonly eventId: string; readonly sequence: number; readonly hash: string; readonly contentSha256: string }
+/** In-transaction positions of an append, one per stream. Not durable and never handed out as a receipt. */
+export interface ProvisionalEntry { readonly stream: AccessStream; readonly sequence: number; readonly hash: string; readonly contentSha256: string }
+export interface ProvisionalAppend { readonly provisional: true; readonly eventId: string; readonly entries: readonly ProvisionalEntry[] }
 
 /** The SQLSTATE a schema emr_access function raised, read from Prisma's raw-query error. */
 export function ledgerErrorCode(error: unknown): string | null {
@@ -47,25 +51,26 @@ const toIso = (value: unknown) => utc(value instanceof Date ? value.toISOString(
 const toDay = (value: unknown) => (value instanceof Date ? value.toISOString() : string(value)).slice(0, 10);
 function entry(row: any): StoredEntry {
   return { sequence: toNumber(row.sequence), previousHash: sha256(row.previous_hash), hash: sha256(row.hash),
-    kind: row.kind === 'access' || row.kind === 'expiry' ? row.kind : refuse('StoredEntryInvalid'),
+    kind: row.kind === 'access' || row.kind === 'expiry' || row.kind === 'history' ? row.kind : refuse('StoredEntryInvalid'),
+    statutoryAct: row.statutory_act === null ? null : choice(row.statutory_act, ['기재', '추가기재', '수정', '열람', 'none'] as const),
     eventId: row.event_id === null ? null : string(row.event_id), payload: string(row.payload),
     contentSha256: sha256(row.content_sha256), storedAt: toIso(row.stored_at) };
 }
 
-/** Committed-fact reads of the chain (outside any business transaction): what the seal proves itself against. */
+/** Committed-fact reads of one stream's chain (outside any business transaction): what the seal proves itself against. */
 export class PrismaLedgerSql {
   constructor(private readonly db: PrismaClient) {}
 
-  async tail(): Promise<ChainTail> {
-    const [row] = await this.db.$queryRaw<any[]>`SELECT chain_id::text AS chain_id, sequence, hash FROM emr_access.chain_tail()`;
+  async tail(stream: AccessStream): Promise<ChainTail> {
+    const [row] = await this.db.$queryRaw<any[]>`SELECT chain_id::text AS chain_id, sequence, hash FROM emr_access.chain_tail(${choice(stream, ACCESS_STREAMS)}::text)`;
     return { chainId: string(row.chain_id), sequence: toNumber(row.sequence), hash: sha256(row.hash) };
   }
-  async entriesAfter(after: number, limit: number): Promise<StoredEntry[]> {
-    const rows = await this.db.$queryRaw<any[]>`SELECT * FROM emr_access.entries_after(${integer(after)}::bigint, ${integer(limit, 1)}::integer)`;
+  async entriesAfter(stream: AccessStream, after: number, limit: number): Promise<StoredEntry[]> {
+    const rows = await this.db.$queryRaw<any[]>`SELECT * FROM emr_access.entries_after(${choice(stream, ACCESS_STREAMS)}::text, ${integer(after)}::bigint, ${integer(limit, 1)}::integer)`;
     return rows.map(entry);
   }
-  async entryForEvent(eventId: string): Promise<StoredEntry | null> {
-    const rows = await this.db.$queryRaw<any[]>`SELECT * FROM emr_access.entry_for_event(${eventId}::text)`;
+  async entryForEvent(stream: AccessStream, eventId: string): Promise<StoredEntry | null> {
+    const rows = await this.db.$queryRaw<any[]>`SELECT * FROM emr_access.entry_for_event(${choice(stream, ACCESS_STREAMS)}::text, ${eventId}::text)`;
     return rows.length ? entry(rows[0]) : null;
   }
   async placement(): Promise<PlacementRow[]> {
@@ -77,34 +82,45 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
   constructor(private readonly db: PrismaClient, readonly sql: PrismaLedgerSql, readonly seal: AccessSeal, readonly journal: FailureJournal) {}
 
   /**
-   * Inside the caller's open business transaction, last: A parses the event, the intent is made durable outside the
-   * database, then the database appends under the chain-head lock and binds the event's record targets from the same
-   * bytes. No deadline is stored (contract.ts accessDeadline computes it when destruction is considered). Any failure
-   * here must abort the caller's transaction.
+   * Inside the caller's open business transaction, last: A parses the event and names its streams and 의료법 제23조④ act;
+   * for each stream the intent is made durable outside the database, then the database appends under that stream's head
+   * lock and binds the event's record targets from the same bytes. No deadline is stored (contract.ts accessDeadline
+   * computes it when destruction is considered). Any failure here must abort the caller's transaction.
    */
   async appendInTransaction(tx: object, input: AccessEvent, served?: readonly ResolvedRecord[]): Promise<ProvisionalAppend> {
-    const { event, text, contentSha256 } = canonicalPayload(input, served);
-    this.seal.recordIntent(event.eventId, contentSha256);
-    const result: AppendResult = await this.appendRow(tx, event.eventId, text);
-    return Object.freeze({ provisional: true as const, eventId: event.eventId, sequence: result.sequence, hash: result.hash, contentSha256 });
+    const act = statutoryAct(input, served), entries: ProvisionalEntry[] = [];
+    let eventId = '';
+    for (const stream of accessStreams(input, served)) {
+      const { event, text, contentSha256 } = canonicalPayload(input, served, stream);
+      eventId = event.eventId;
+      this.seal.recordIntent(stream, event.eventId, contentSha256);
+      const result: AppendResult = await this.appendRow(tx, stream, event.eventId, text, act);
+      entries.push(Object.freeze({ stream, sequence: result.sequence, hash: result.hash, contentSha256 }));
+    }
+    return Object.freeze({ provisional: true as const, eventId, entries: Object.freeze(entries) });
   }
 
-  /** After the caller's commit: prove it from storage, seal it, and only then mint the receipt. */
+  /** After the caller's commit: prove every entry from storage, seal each stream, and only then mint the receipt. */
   async confirm(appended: ProvisionalAppend): Promise<DurableAccessReceipt> {
-    let stored: StoredEntry | null;
-    try { stored = await this.sql.entryForEvent(appended.eventId); } catch {
-      this.note(appended.eventId, 'ledger-unavailable', 'commit-unknown');
-      throw new LedgerFailure('CommitUnknown');
+    let receipt: DurableAccessReceipt | null = null;
+    for (const provisional of appended.entries) {
+      let stored: StoredEntry | null;
+      try { stored = await this.sql.entryForEvent(provisional.stream, appended.eventId); } catch {
+        this.note(appended.eventId, 'ledger-unavailable', 'commit-unknown');
+        throw new LedgerFailure('CommitUnknown');
+      }
+      if (!stored) throw new LedgerFailure('AppendNotCommitted');
+      if (stored.sequence !== provisional.sequence || stored.hash !== provisional.hash || stored.contentSha256 !== provisional.contentSha256) refuse('DurableReceiptRefused');
+      let sealed: SealState;
+      try { sealed = await this.seal.advance(provisional.stream, { sequence: stored.sequence, hash: stored.hash }); } catch (error) {
+        // Committed but not sealed: no receipt. The same event resent, or the next start, seals it; nothing is appended twice.
+        this.note(appended.eventId, 'ledger-unavailable', 'seal-unavailable');
+        throw error instanceof SealRefused && error.code !== 'SealUnavailable' ? error : new LedgerFailure('SealUnavailable');
+      }
+      if (provisional.stream === 'viewing') receipt = mintDurableReceipt(stored, sealed.streams.viewing);
     }
-    if (!stored) throw new LedgerFailure('AppendNotCommitted');
-    if (stored.sequence !== appended.sequence || stored.hash !== appended.hash || stored.contentSha256 !== appended.contentSha256) refuse('DurableReceiptRefused');
-    let sealed;
-    try { sealed = await this.seal.advance({ sequence: stored.sequence, hash: stored.hash }); } catch (error) {
-      // Committed but not sealed: no receipt. The same event resent, or the next start, seals it; nothing is appended twice.
-      this.note(appended.eventId, 'ledger-unavailable', 'seal-unavailable');
-      throw error instanceof SealRefused && error.code !== 'SealUnavailable' ? error : new LedgerFailure('SealUnavailable');
-    }
-    return mintDurableReceipt(stored, sealed);
+    if (!receipt) refuse('DurableReceiptRefused');
+    return receipt;
   }
 
   /** One standalone ledger fact (a provision before its body, a refusal, an end without a business change). */
@@ -120,22 +136,29 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
   }
 
   /**
-   * A transaction that did not report a commit. No stored entry: the attempt rolled back (journal it, drop its intent).
-   * Storage unreadable, or this very content stored after all: the commit is unknown to this response (journal it, keep
-   * the intent; the resend of the same event ID or the next start settles it) - never a success, never a new event.
-   * Another content stored under this ID: this attempt was refused; the first attempt's intent stays.
+   * A transaction that did not report a commit. No stored entry in any of its streams: the attempt rolled back (journal
+   * it, drop its intents). Storage unreadable, or this very content stored after all: the commit is unknown to this
+   * response (journal it, keep the intents; the resend of the same event ID or the next start settles it) - never a
+   * success, never a new event. Another content stored under this ID: this attempt was refused; the first attempt's
+   * intents stay.
    */
   async settle(input: AccessEvent, error: unknown, served?: readonly ResolvedRecord[]): Promise<void> {
-    const { event, contentSha256 } = canonicalPayload(input, served);
-    const eventId = event.eventId;
-    let stored: StoredEntry | null | undefined;
-    try { stored = await this.sql.entryForEvent(eventId); } catch { stored = undefined; }
-    if (stored === undefined || (stored && stored.contentSha256 === contentSha256)) { this.note(eventId, 'ledger-unavailable', 'commit-unknown'); return; }
-    if (stored) { this.note(eventId, 'append-rolled-back', 'ledger-refused'); return; }
+    const streams = accessStreams(input, served);
+    let eventId = '', unknown = false, other = false;
+    for (const stream of streams) {
+      const { event, contentSha256 } = canonicalPayload(input, served, stream);
+      eventId = event.eventId;
+      let stored: StoredEntry | null | undefined;
+      try { stored = await this.sql.entryForEvent(stream, eventId); } catch { stored = undefined; }
+      if (stored === undefined || (stored && stored.contentSha256 === contentSha256)) unknown = true;
+      else if (stored) other = true;
+    }
+    if (unknown) { this.note(eventId, 'ledger-unavailable', 'commit-unknown'); return; }
+    if (other) { this.note(eventId, 'append-rolled-back', 'ledger-refused'); return; }
     const cause = error instanceof SealRefused ? 'seal-unavailable' : ledgerErrorCode(error) ? 'ledger-refused' :
       isConnectionError(error) ? 'ledger-unreachable' : 'business-rollback';
     this.note(eventId, 'append-rolled-back', cause);
-    if (!(error instanceof ContractError && error.code === 'AccessEventIdConflict')) this.seal.clearIntent(eventId);
+    if (!(error instanceof ContractError && error.code === 'AccessEventIdConflict')) for (const stream of streams) this.seal.clearIntent(stream, eventId);
   }
 
   private note(eventId: string, kind: 'append-rolled-back' | 'ledger-unavailable', cause: string): void {
@@ -189,10 +212,10 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
   }
 
   // ── the schema functions under the caller's transaction (each value bound as a parameter) ──
-  async appendRow(tx: object, eventId: string, payload: string): Promise<AppendResult> {
+  async appendRow(tx: object, stream: AccessStream, eventId: string, payload: string, act: StatutoryAct): Promise<AppendResult> {
     const run = tx as RawQuery;
     const [row] = await run.$queryRaw<any[]>`SELECT chain_id::text AS chain_id, sequence, previous_hash, hash, stored_at, replay
-      FROM emr_access.append_access(${eventId}::text, ${payload}::text)`;
+      FROM emr_access.append_access(${choice(stream, ACCESS_STREAMS)}::text, ${eventId}::text, ${payload}::text, ${act}::text)`;
     return { chainId: string(row.chain_id), sequence: toNumber(row.sequence), previousHash: sha256(row.previous_hash), hash: sha256(row.hash),
       storedAt: toIso(row.stored_at), replay: row.replay === true };
   }
@@ -226,35 +249,29 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
   }
   async entryRow(tx: object, eventId: string): Promise<StoredEntry | null> {
     const run = tx as RawQuery;
-    const rows = await run.$queryRaw<any[]>`SELECT * FROM emr_access.entry_for_event(${eventId}::text)`;
+    const rows = await run.$queryRaw<any[]>`SELECT * FROM emr_access.entry_for_event('viewing'::text, ${eventId}::text)`;
     return rows.length ? entry(rows[0]) : null;
   }
 }
 
-function boundTargets(value: unknown): RecordTarget[] {
-  if (!Array.isArray(value)) refuse('RetentionViewIncomplete');
-  return (value as any[]).map(t => ({ index: integer(t.index), kind: string(t.kind),
-    recordId: t.recordId === null ? null : string(t.recordId), versionId: t.versionId === null ? null : string(t.versionId) }));
-}
 /**
- * The access-ledger retention job (its own process and credential, kin_emr_retention; never the API runtime). It reads
- * positions, each entry's own time, its bound record targets and holds - no payload - and computes each end now, with the
- * one rule (contract.ts accessDeadline) and the record retention ends it is given (none in B1: record-bound entries stay).
- * The database re-checks the floor, the record binding and the holds and appends the non-personal checkpoint in the
- * deleting transaction. Scheduling it is not part of this unit.
+ * The access-ledger retention job for the viewing stream (its own process and credential, kin_emr_retention; never the API
+ * runtime). It reads positions, each entry's own time and holds - no payload - and computes each end now with the one rule
+ * (contract.ts accessDeadline); the database re-checks the floor and the holds and appends the non-personal checkpoint in
+ * the deleting transaction. The history stream is never expired here (unit H). Scheduling it is not part of this unit.
  */
-export async function expireAccessPrefix(retention: RawQuery, now = new Date().toISOString(), recordEnd: RecordRetentionEnd = RECORD_RETENTION_UNAVAILABLE):
+export async function expireAccessPrefix(retention: RawQuery, now = new Date().toISOString()):
   Promise<{ deleted: number; checkpointSequence: number; checkpointHash: string } | null> {
   const rows: RetentionRow[] = [];
   let after = 0;
   for (;;) {
-    const page = await retention.$queryRaw<any[]>`SELECT sequence, hash, kind, occurred_at, targets, held FROM emr_access.retention_view(${after}::bigint, 1000)`;
+    const page = await retention.$queryRaw<any[]>`SELECT sequence, hash, kind, occurred_at, held FROM emr_access.retention_view(${after}::bigint, 1000)`;
     for (const row of page) rows.push({ sequence: toNumber(row.sequence), hash: sha256(row.hash), kind: row.kind === 'expiry' ? 'expiry' : 'access',
-      occurredAt: toIso(row.occurred_at), targets: boundTargets(row.targets), held: row.held === true });
+      occurredAt: toIso(row.occurred_at), held: row.held === true });
     if (page.length < 1000) break;
     after = toNumber(page[page.length - 1].sequence);
   }
-  const plan = planExpiryPrefix(rows, now, recordEnd);
+  const plan = planExpiryPrefix(rows, now);
   if (!plan) return null;
   const through = plan.through;
   const [row] = await retention.$queryRaw<any[]>`SELECT deleted_count, checkpoint_sequence, checkpoint_hash FROM emr_access.expire_prefix(${through}::bigint)`;

@@ -14,16 +14,16 @@ export const EMR_STORAGE = freeze({
   roles: { owner: 'kin_emr_owner', runtime: 'kin_runtime', reader: 'kin_emr_reader', retention: 'kin_emr_retention' },
   tables: ['access_entry', 'access_target', 'audit_projection', 'chain_head', 'clause_version', 'duty_request_event', 'legal_hold_event', 'member_identity'],
   runtimeFunctions: [
-    'append_access(text,text)', 'chain_tail()', 'entries_after(bigint,integer)', 'entry_for_event(text)',
+    'append_access(text,text,text,text)', 'chain_tail(text)', 'entries_after(text,bigint,integer)', 'entry_for_event(text,text)',
     'storage_placement()', 'civil_period_end(timestamptz,integer)', 'resolve_member_identity(text,text)',
     'record_projection(text,integer)', 'place_hold(text,text,text)', 'release_hold(text,text)', 'holds_for(text)',
     'record_duty_request(text,text,text,text)', 'duty_requests(text,text)', 'clause_versions(text)',
   ],
   readerFunctions: [
-    'chain_tail()', 'entries_after(bigint,integer)', 'entry_for_event(text)', 'storage_placement()', 'civil_period_end(timestamptz,integer)',
+    'chain_tail(text)', 'entries_after(text,bigint,integer)', 'entry_for_event(text,text)', 'storage_placement()', 'civil_period_end(timestamptz,integer)',
     'holds_for(text)', 'duty_requests(text,text)', 'clause_versions(text)',
   ],
-  retentionFunctions: ['expire_prefix(bigint)', 'retention_view(bigint,integer)', 'chain_tail()', 'storage_placement()'],
+  retentionFunctions: ['expire_prefix(bigint)', 'retention_view(bigint,integer)', 'chain_tail(text)', 'storage_placement()'],
   /** Never callable by the runtime: deletion and the clause history installer. */
   forbiddenToRuntime: ['expire_prefix(bigint)', 'record_clause_version(text,text,text,text,date,date)'],
   stateDirectoryVariable: 'KIN_EMR_STATE_DIR',
@@ -66,7 +66,7 @@ export async function verifyRuntimeConnection(db: RawQuery): Promise<{ role: str
   const [privileges] = await db.$queryRaw<any[]>`SELECT
       (pg_catalog.has_table_privilege('emr_access.access_entry', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
         OR pg_catalog.has_table_privilege('emr_access.access_target', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')) AS direct_write,
-      pg_catalog.has_function_privilege('emr_access.append_access(text,text)', 'EXECUTE') AS append,
+      pg_catalog.has_function_privilege('emr_access.append_access(text,text,text,text)', 'EXECUTE') AS append,
       pg_catalog.has_function_privilege('emr_access.expire_prefix(bigint)', 'EXECUTE') AS expire,
       pg_catalog.has_function_privilege('emr_access.record_clause_version(text,text,text,text,date,date)', 'EXECUTE') AS clauses,
       pg_catalog.has_schema_privilege('emr_access', 'CREATE') AS create_ledger,

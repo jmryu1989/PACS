@@ -221,8 +221,9 @@ export async function provideAfterReceipt<T>(store: AppendOnlyAccessStore, input
   });
 }
 export function parseStoredEntry(value: unknown): StoredEntry {
-  const v = object(value, ['sequence', 'previousHash', 'hash', 'kind', 'eventId', 'payload', 'contentSha256', 'storedAt']);
+  const v = object(value, ['sequence', 'previousHash', 'hash', 'kind', 'statutoryAct', 'eventId', 'payload', 'contentSha256', 'storedAt']);
   return { sequence: integer(v.sequence, 1), previousHash: sha256(v.previousHash), hash: sha256(v.hash),
-    kind: v.kind === 'access' || v.kind === 'expiry' ? v.kind : refuse('StoredEntryInvalid'),
+    kind: v.kind === 'access' || v.kind === 'expiry' || v.kind === 'history' ? v.kind : refuse('StoredEntryInvalid'),
+    statutoryAct: v.statutoryAct === null ? null : choice(v.statutoryAct, ['기재', '추가기재', '수정', '열람', 'none'] as const),
     eventId: v.eventId === null ? null : string(v.eventId), payload: string(v.payload), contentSha256: sha256(v.contentSha256), storedAt: utc(v.storedAt) };
 }
