@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "command": [
+    "C:\\Users\\norne\\PACS\\tmp\\hp-dom-venv\\Scripts\\python.exe",
+    "tmp/s9-u0a-pre/tools/attribute_pagehide.py"
+  ],
+  "cwd": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre",
+  "status": "completed",
+  "started_at_utc": "2026-10-09T02:07:44.127189+00:00",
+  "ended_at_utc": "2026-10-09T02:07:54.321607+00:00",
+  "exit_code": 0,
+  "recorder_exit_code": 0,
+  "launch_error": null,
+  "git_head_before": "f1d540626aac03f46de23a9620d69f4c9da66037",
+  "git_head_after": "f1d540626aac03f46de23a9620d69f4c9da66037",
+  "files_before": [
+    {
+      "requested": "worklist-v0/hpacs-lite/main.html",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\worklist-v0\\hpacs-lite\\main.html",
+      "status": "present",
+      "sha256": "70af83c893735fdbf2a34716df88ae0cc0db3479f31964d2d74b82f2bdfc5810",
+      "lf_sha256": "7cfba342419534035df155ca65750e22878a2dc07cc05a3d67ac1a63f8645b2a"
+    },
+    {
+      "requested": "tests/main_split_harness.py",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\main_split_harness.py",
+      "status": "present",
+      "sha256": "ffdb8d412da44f2472a96db10114ce47ebaaf239fb2dae293735a9bf9d462789",
+      "lf_sha256": "ffdb8d412da44f2472a96db10114ce47ebaaf239fb2dae293735a9bf9d462789"
+    },
+    {
+      "requested": "tests/main_split_harness.cjs",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\main_split_harness.cjs",
+      "status": "present",
+      "sha256": "c5fc42f1a8d6f44952e58e99412435fb58f7320323e1062b76c96b720b02b1ff",
+      "lf_sha256": "c5fc42f1a8d6f44952e58e99412435fb58f7320323e1062b76c96b720b02b1ff"
+    },
+    {
+      "requested": "tmp/s9-u0a-pre/tools/attribute_pagehide.py",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tmp\\s9-u0a-pre\\tools\\attribute_pagehide.py",
+      "status": "present",
+      "sha256": "7ef42d47c3cc3e0dd625078a9dcfe6330c61145af2c70278efa385642c22ae3d",
+      "lf_sha256": "7ef42d47c3cc3e0dd625078a9dcfe6330c61145af2c70278efa385642c22ae3d"
+    }
+  ],
+  "files_after": [
+    {
+      "requested": "worklist-v0/hpacs-lite/main.html",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\worklist-v0\\hpacs-lite\\main.html",
+      "status": "present",
+      "sha256": "70af83c893735fdbf2a34716df88ae0cc0db3479f31964d2d74b82f2bdfc5810",
+      "lf_sha256": "7cfba342419534035df155ca65750e22878a2dc07cc05a3d67ac1a63f8645b2a"
+    },
+    {
+      "requested": "tests/main_split_harness.py",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\main_split_harness.py",
+      "status": "present",
+      "sha256": "ffdb8d412da44f2472a96db10114ce47ebaaf239fb2dae293735a9bf9d462789",
+      "lf_sha256": "ffdb8d412da44f2472a96db10114ce47ebaaf239fb2dae293735a9bf9d462789"
+    },
+    {
+      "requested": "tests/main_split_harness.cjs",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\main_split_harness.cjs",
+      "status": "present",
+      "sha256": "c5fc42f1a8d6f44952e58e99412435fb58f7320323e1062b76c96b720b02b1ff",
+      "lf_sha256": "c5fc42f1a8d6f44952e58e99412435fb58f7320323e1062b76c96b720b02b1ff"
+    },
+    {
+      "requested": "tmp/s9-u0a-pre/tools/attribute_pagehide.py",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tmp\\s9-u0a-pre\\tools\\attribute_pagehide.py",
+      "status": "present",
+      "sha256": "7ef42d47c3cc3e0dd625078a9dcfe6330c61145af2c70278efa385642c22ae3d",
+      "lf_sha256": "7ef42d47c3cc3e0dd625078a9dcfe6330c61145af2c70278efa385642c22ae3d"
+    }
+  ],
+  "stdout": "stdout.log",
+  "stderr": "stderr.log",
+  "log_files": [
+    {
+      "requested": "stdout.log",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tmp\\s9-u0a-pre\\runs\\attribute-pagehide-1\\stdout.log",
+      "status": "present",
+      "sha256": "96768d84ff0ed0db83aee42d6aff07043df02292150f409afe9fa9e8cf35dd43",
+      "lf_sha256": "42e1cc67dcb6d3807ac7ba89315c88704bf8c7e873f780d18d2110eb32287c13"
+    },
+    {
+      "requested": "stderr.log",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tmp\\s9-u0a-pre\\runs\\attribute-pagehide-1\\stderr.log",
+      "status": "present",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "lf_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "duration_seconds": 10.186999999999898
+}

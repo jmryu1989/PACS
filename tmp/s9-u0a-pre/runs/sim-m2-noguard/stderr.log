@@ -1,0 +1,19 @@
+test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none (__main__.Registration.test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none) ... FAIL
+test_registrations_before_the_session_answer_match_the_original_page (__main__.Registration.test_registrations_before_the_session_answer_match_the_original_page) ... ok
+test_B1_03_unsplit (__main__.UnsplitControl.test_B1_03_unsplit) ... ok
+test_B1_05_unsplit (__main__.UnsplitControl.test_B1_05_unsplit) ... ok
+test_B1_58_unsplit (__main__.UnsplitControl.test_B1_58_unsplit) ... ok
+
+======================================================================
+FAIL: test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none (__main__.Registration.test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 479, in test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none
+    self.assertEqual(sh.by_target_event(before, on_targets), sh.by_target_event(after, on_targets),
+AssertionError: {('#f[1182 chars]7ad')], ('#t-mod', 'change'): [('add', False, [1025 chars]1')]} != {('#f[1182 chars]7ad'), ('add', False, False, None, 'f3a267ad')[1681 chars]1')]}
+Diff is 6321 characters long. Set self.maxDiff to None to see it. : failed then retried: the hazard targets gain no registration after the session answer
+
+----------------------------------------------------------------------
+Ran 5 tests in 48.118s
+
+FAILED (failures=1)

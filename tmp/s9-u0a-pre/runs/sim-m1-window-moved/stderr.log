@@ -1,0 +1,19 @@
+test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none (__main__.Registration.test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none) ... ok
+test_registrations_before_the_session_answer_match_the_original_page (__main__.Registration.test_registrations_before_the_session_answer_match_the_original_page) ... FAIL
+test_B1_03_unsplit (__main__.UnsplitControl.test_B1_03_unsplit) ... ok
+test_B1_05_unsplit (__main__.UnsplitControl.test_B1_05_unsplit) ... ok
+test_B1_58_unsplit (__main__.UnsplitControl.test_B1_58_unsplit) ... ok
+
+======================================================================
+FAIL: test_registrations_before_the_session_answer_match_the_original_page (__main__.Registration.test_registrations_before_the_session_answer_match_the_original_page)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 453, in test_registrations_before_the_session_answer_match_the_original_page
+    self.assertEqual(sh.by_target_event(original), sh.by_target_event(current),
+AssertionError: {('Br[512 chars], ('#tplrows', 'dblclick'): [('add', False, Fa[32143 chars]b')]} != {('Br[512 chars], ('#dictation-pane', 'focusin'): [('add', Fal[32143 chars]b')]}
+Diff is 59419 characters long. Set self.maxDiff to None to see it. : per (target, event): the same registrations in the same order before the session answer
+
+----------------------------------------------------------------------
+Ran 5 tests in 50.926s
+
+FAILED (failures=1)

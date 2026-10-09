@@ -1,0 +1,158 @@
+[
+ {
+  "modules_ran": 9,
+  "held_part": "worklist-view.js",
+  "leaving_for_real": [
+   {
+    "message": "ReferenceError: renderRelated is not defined",
+    "stack": "ReferenceError: renderRelated is not defined\n    at changed (https://syn.test/worklist/hpacs-lite/worklist-data.js:4:19)\n    at end (https://syn.test/worklist/hpacs-lite/related-parts.js:55:41)\n    at wrapper (<anonymous>:88:68)"
+   }
+  ],
+  "synthetic_pagehide": [
+   {
+    "target": "window",
+    "type": "pagehide",
+    "error": "ReferenceError: renderRelated is not defined",
+    "registered_at": "related-parts.js:61",
+    "statement": "worklist-data.js :: relatedParts"
+   }
+  ],
+  "synthetic_errors": [
+   "ReferenceError: renderRelated is not defined"
+  ]
+ },
+ {
+  "modules_ran": 13,
+  "held_part": "related-studies.js",
+  "leaving_for_real": [
+   {
+    "message": "ReferenceError: renderRelated is not defined",
+    "stack": "ReferenceError: renderRelated is not defined\n    at changed (https://syn.test/worklist/hpacs-lite/worklist-data.js:4:19)\n    at end (https://syn.test/worklist/hpacs-lite/related-parts.js:55:41)\n    at wrapper (<anonymous>:88:68)"
+   }
+  ],
+  "synthetic_pagehide": [
+   {
+    "target": "window",
+    "type": "pagehide",
+    "error": "ReferenceError: renderRelated is not defined",
+    "registered_at": "related-parts.js:61",
+    "statement": "worklist-data.js :: relatedParts"
+   }
+  ],
+  "synthetic_errors": [
+   "ReferenceError: renderRelated is not defined"
+  ]
+ },
+ {
+  "modules_ran": 33,
+  "held_part": "clinical-context-panel.js",
+  "leaving_for_real": [
+   {
+    "message": "ReferenceError: renderChips is not defined",
+    "stack": "ReferenceError: renderChips is not defined\n    at render (https://syn.test/worklist/hpacs-lite/worklist-view.js:161:7)\n    at Object.clearFilter (https://syn.test/worklist/hpacs-lite/feature-mounts.js:44:48)\n    at end (https://syn.test/worklist/hpacs-lite/consultations.js:143:45)\n    at wrapper (<anonymous>:88:68)"
+   },
+   {
+    "message": "ReferenceError: applyLayout is not defined",
+    "stack": "ReferenceError: applyLayout is not defined\n    at Object.layout (https://syn.test/worklist/hpacs-lite/feature-mounts.js:99:76)\n    at layout (https://syn.test/worklist/hpacs-lite/reading-workspace.js:492:9)\n    at end (https://syn.test/worklist/hpacs-lite/reading-workspace.js:647:420)\n    at wrapper (<anonymous>:88:68)"
+   }
+  ],
+  "synthetic_pagehide": [
+   {
+    "target": "window",
+    "type": "pagehide",
+    "error": "ReferenceError: renderChips is not defined",
+    "registered_at": "consultations.js:155",
+    "statement": "feature-mounts.js :: consultations"
+   },
+   {
+    "target": "window",
+    "type": "pagehide",
+    "error": "ReferenceError: applyLayout is not defined",
+    "registered_at": "reading-workspace.js:662",
+    "statement": "feature-mounts.js :: readingWorkspace"
+   }
+  ],
+  "synthetic_errors": [
+   "ReferenceError: renderChips is not defined",
+   "ReferenceError: applyLayout is not defined"
+  ]
+ },
+ {
+  "modules_ran": 36,
+  "held_part": "workspace-panels.js",
+  "leaving_for_real": [
+   {
+    "message": "ReferenceError: renderChips is not defined",
+    "stack": "ReferenceError: renderChips is not defined\n    at render (https://syn.test/worklist/hpacs-lite/worklist-view.js:161:7)\n    at Object.clearFilter (https://syn.test/worklist/hpacs-lite/feature-mounts.js:44:48)\n    at end (https://syn.test/worklist/hpacs-lite/consultations.js:143:45)\n    at wrapper (<anonymous>:88:68)"
+   },
+   {
+    "message": "ReferenceError: applyLayout is not defined",
+    "stack": "ReferenceError: applyLayout is not defined\n    at Object.layout (https://syn.test/worklist/hpacs-lite/feature-mounts.js:99:76)\n    at layout (https://syn.test/worklist/hpacs-lite/reading-workspace.js:492:9)\n    at end (https://syn.test/worklist/hpacs-lite/reading-workspace.js:647:420)\n    at wrapper (<anonymous>:88:68)"
+   }
+  ],
+  "synthetic_pagehide": [
+   {
+    "target": "window",
+    "type": "pagehide",
+    "error": "ReferenceError: renderChips is not defined",
+    "registered_at": "consultations.js:155",
+    "statement": "feature-mounts.js :: consultations"
+   },
+   {
+    "target": "window",
+    "type": "pagehide",
+    "error": "ReferenceError: applyLayout is not defined",
+    "registered_at": "reading-workspace.js:662",
+    "statement": "feature-mounts.js :: readingWorkspace"
+   }
+  ],
+  "synthetic_errors": [
+   "ReferenceError: renderChips is not defined",
+   "ReferenceError: applyLayout is not defined"
+  ]
+ },
+ {
+  "modules_ran": 37,
+  "held_part": "worklist-controls.js",
+  "leaving_for_real": [
+   {
+    "message": "ReferenceError: renderChips is not defined",
+    "stack": "ReferenceError: renderChips is not defined\n    at render (https://syn.test/worklist/hpacs-lite/worklist-view.js:161:7)\n    at Object.clearFilter (https://syn.test/worklist/hpacs-lite/feature-mounts.js:44:48)\n    at end (https://syn.test/worklist/hpacs-lite/consultations.js:143:45)\n    at wrapper (<anonymous>:88:68)"
+   }
+  ],
+  "synthetic_pagehide": [
+   {
+    "target": "window",
+    "type": "pagehide",
+    "error": "ReferenceError: renderChips is not defined",
+    "registered_at": "consultations.js:155",
+    "statement": "feature-mounts.js :: consultations"
+   }
+  ],
+  "synthetic_errors": [
+   "ReferenceError: renderChips is not defined"
+  ]
+ },
+ {
+  "modules_ran": 38,
+  "held_part": "saved-filters.js",
+  "leaving_for_real": [
+   {
+    "message": "ReferenceError: renderChips is not defined",
+    "stack": "ReferenceError: renderChips is not defined\n    at render (https://syn.test/worklist/hpacs-lite/worklist-view.js:161:7)\n    at Object.clearFilter (https://syn.test/worklist/hpacs-lite/feature-mounts.js:44:48)\n    at end (https://syn.test/worklist/hpacs-lite/consultations.js:143:45)\n    at wrapper (<anonymous>:88:68)"
+   }
+  ],
+  "synthetic_pagehide": [
+   {
+    "target": "window",
+    "type": "pagehide",
+    "error": "ReferenceError: renderChips is not defined",
+    "registered_at": "consultations.js:155",
+    "statement": "feature-mounts.js :: consultations"
+   }
+  ],
+  "synthetic_errors": [
+   "ReferenceError: renderChips is not defined"
+  ]
+ }
+]

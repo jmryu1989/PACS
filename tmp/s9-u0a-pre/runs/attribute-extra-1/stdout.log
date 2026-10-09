@@ -1,0 +1,62 @@
+[
+ {
+  "case": "report fields input",
+  "held_part": "work-exit.js",
+  "modules_ran": 26,
+  "target": "#findings",
+  "type": "input",
+  "error": "ReferenceError: reportWriteBlock is not defined",
+  "registered_at": "report-hold.js:104",
+  "statement": "report-hold.js :: ExpressionStatement after releaseHold #1"
+ },
+ {
+  "case": "template View",
+  "held_part": "report-editor.js",
+  "modules_ran": 19,
+  "target": "#tplrows",
+  "type": "click",
+  "error": "ReferenceError: reportWriteBlock is not defined",
+  "registered_at": "report-templates-ui.js:35",
+  "statement": "report-templates-ui.js :: ExpressionStatement after updateTemplatePreview #1"
+ },
+ {
+  "case": "quick input",
+  "held_part": "saved-filters.js",
+  "modules_ran": 38,
+  "target": "#quick",
+  "type": "input",
+  "error": "ReferenceError: renderChips is not defined",
+  "registered_at": "worklist-controls.js:3",
+  "statement": "worklist-controls.js :: ExpressionStatement after splitFrame, splitSize #7"
+ },
+ {
+  "case": "page size",
+  "held_part": "saved-filters.js",
+  "modules_ran": 38,
+  "target": "#page-size",
+  "type": "change",
+  "error": "ReferenceError: renderChips is not defined",
+  "registered_at": "worklist-controls.js:20",
+  "statement": "worklist-controls.js :: ExpressionStatement after splitFrame, splitSize #13"
+ },
+ {
+  "case": "quick match",
+  "held_part": "saved-filters.js",
+  "modules_ran": 38,
+  "target": "#quick-match",
+  "type": "change",
+  "error": "ReferenceError: renderChips is not defined",
+  "registered_at": "worklist-controls.js:7",
+  "statement": "worklist-controls.js :: ExpressionStatement after splitFrame, splitSize #8"
+ },
+ {
+  "case": "page next",
+  "held_part": "saved-filters.js",
+  "modules_ran": 38,
+  "target": "#page-next",
+  "type": "click",
+  "error": "ReferenceError: renderChips is not defined",
+  "registered_at": "worklist-controls.js:18",
+  "statement": "worklist-controls.js :: ExpressionStatement after splitFrame, splitSize #11"
+ }
+]
