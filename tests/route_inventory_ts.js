@@ -27,6 +27,8 @@
  * {"error": ...}, and the test fails on it.
  * EMR-A-LAND OL-01: contracts also reports relative loader resolutions and fixed-list prototype comparisons by
  * code-point offset, using this same program and its AST. The closed source contract decides which forms to accept.
+ * EMR-R1-LAND: {"classPropertySource": maskedSource} returns {"class_properties": [codePointOffset, ...]} without
+ * changing the binding program's source set. Only AST-confirmed property names are excluded by the heading reader.
  */
 const path = require('path');
 const readline = require('readline');
@@ -206,6 +208,25 @@ function fixedPrototypeComparison(node, file) {
 
 function answer(request) {
   if (loadError) throw loadError;
+  if (typeof request.classPropertySource === 'string') {
+    // The heading reader must not confuse IdentifierName properties with the class keyword.
+    // Only exclude AST-confirmed names; malformed headings still reach the existing refusal checks.
+    const file = ts.createSourceFile('class-properties.ts', request.classPropertySource,
+      ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const properties = [];
+    const visit = node => {
+      const owner = node.parent;
+      if (ts.isIdentifier(node) && node.text === 'class' && owner && owner.name === node &&
+          (ts.isPropertySignature(owner) || ts.isPropertyAssignment(owner) || ts.isPropertyDeclaration(owner) ||
+           ts.isShorthandPropertyAssignment(owner) || ts.isMethodDeclaration(owner) || ts.isMethodSignature(owner) ||
+           ts.isGetAccessorDeclaration(owner) || ts.isSetAccessorDeclaration(owner) || ts.isPropertyAccessExpression(owner))) {
+        properties.push(codePoint(file, node.getStart(file)));
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(file);
+    return { class_properties: properties };
+  }
   const set = new Map();
   for (const [name, text] of Object.entries(request.files)) {
     const at = absolute(path.join(SRC, name));
