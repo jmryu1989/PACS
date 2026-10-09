@@ -1,7 +1,8 @@
 """TEST-S7-AUDIT-STORE-DB (REQ-S7-AUDIT-STORE -> RISK-S7-AUDIT-TAMPER, RISK-S7-AUDIT-LOSS; RA-1, RA-2, RA-4).
 
 On a disposable networkless postgres:16-alpine holding the API image's own migrations (KIN_TEST_API_IMAGE, prisma migrate
-deploy), the runtime role kin (owner and superuser, as in docker-compose.yml) keeps INSERT and SELECT on AuditLog while
+deploy), the installer role kin (owner and superuser; since EMR-B1 the API itself runs as kin_runtime, AS-04b) keeps
+INSERT and SELECT on AuditLog while
 UPDATE, DELETE and TRUNCATE are refused with SQLSTATE 42501; seals are made by the public seal function over pg_dump
 snapshots and judged by the public `ops_audit_integrity.py verify` on copies a superuser tampered with: rows, the guard,
 the digest computation itself (pg_catalog.sha256 replaced, or a public.sha256 on the search path), and the relation. A
@@ -575,6 +576,29 @@ const { PrismaService } = require('/app/dist/prisma.service');
         self.ok("BEGIN; SET LOCAL session_replication_role = replica; DELETE FROM \"AuditLog\" WHERE id = 2; "
                 "DELETE FROM \"Institution\" WHERE id = 'syn-ref'; COMMIT;", db)
         self.assertEqual(self.ok("SELECT count(*) FROM \"Institution\" WHERE id = 'syn-ref'", db), ["0"])
+
+    def test_as04b_emr_runtime_role_holds_insert_and_select_only(self):
+        """AS-04b (EMR-B1): since the EMR migration the API runs as kin_runtime, not as the owner/superuser kin above.
+        Its privileges on AuditLog are INSERT and SELECT only; the trigger above still refuses the rest for every role,
+        and the runtime cannot reach the guard's off switches (session_replication_role, trigger disable)."""
+        db = self.new_database("as04b", rows=1)
+        (line,) = self.ok("SELECT concat_ws(',', has_table_privilege('kin_runtime', 'public.\"AuditLog\"', 'INSERT'),"
+                          " has_table_privilege('kin_runtime', 'public.\"AuditLog\"', 'SELECT'),"
+                          " has_table_privilege('kin_runtime', 'public.\"AuditLog\"', 'UPDATE'),"
+                          " has_table_privilege('kin_runtime', 'public.\"AuditLog\"', 'DELETE'),"
+                          " has_table_privilege('kin_runtime', 'public.\"AuditLog\"', 'TRUNCATE'),"
+                          " has_table_privilege('kin_runtime', 'public.\"AuditLog\"', 'TRIGGER'),"
+                          " has_parameter_privilege('kin_runtime', 'session_replication_role', 'SET'),"
+                          " (SELECT rolsuper FROM pg_roles WHERE rolname = 'kin_runtime'))", db)
+        self.assertEqual(line, "true,true,false,false,false,false,false,false")
+        self.ok("SET ROLE kin_runtime; INSERT INTO \"AuditLog\" (actor, action, target) VALUES ('syn-runtime', 'syn.runtime', 'syn')", db)
+        for statement in ('SET ROLE kin_runtime; UPDATE "AuditLog" SET detail = \'x\'',
+                          'SET ROLE kin_runtime; DELETE FROM "AuditLog"',
+                          'SET ROLE kin_runtime; SET session_replication_role = replica',
+                          'SET ROLE kin_runtime; ALTER TABLE "AuditLog" DISABLE TRIGGER USER'):
+            with self.subTest(statement):
+                self.assertEqual(self.refused(statement, db), "42501")
+        self.assertEqual(len(self.rows(db)), 2)
 
     def test_as05_dump_restore_carries_rows_and_guard(self):
         """AS-05 (AO-14, RS-06): the restore options of rehearse and the product transfer fixture."""

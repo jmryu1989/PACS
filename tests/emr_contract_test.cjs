@@ -179,7 +179,9 @@ if (process.argv.includes('--emr-inventory-generator')) {
     assert.throws(() => R.classifyRoute('POST studies/:uid/new-record'));
   });
   test('TEST-EMR-01-A: stored and served record coverage includes non-DB and mixed records', () => {
-    const covered = new Set([...Object.values(C.MODEL_CLASSIFICATION), ...Object.values(R.ROUTE_CLASSIFICATION), ...Object.values(R.EXTERNAL_SURFACES)].flat());
+    // EMR-B1: SQL-only storage and the terminal-queue boundary are classified in their own closed tables, never as Prisma models.
+    const covered = new Set([...Object.values(C.MODEL_CLASSIFICATION), ...Object.values(R.ROUTE_CLASSIFICATION), ...Object.values(R.EXTERNAL_SURFACES),
+      ...Object.values(C.SQL_STORAGE_CLASSIFICATION), ...Object.values(C.TERMINAL_RECORD_BOUNDARY.models)].flat());
     assert.deepEqual([...covered].sort(), Object.keys(C.RECORD_CLASSIFICATION).sort());
     for (const kind of ['clinical-answer', 'critical-result-ack', 'comparison-description', 'thumbnail', 'copy', 'external-sr-seg']) assert(covered.has(kind));
     assert(C.classifyModel('ViewerJob').includes('comparison-layout'));
@@ -284,6 +286,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
     preferences: ['ReadingPreferences', {}], assignment: ['ReaderAssignment', {}],
     'identity-access': ['StudyAccessRevision', {}], 'authentication-session': ['AuthSession', {}],
     institution: ['Institution', {}], 'transfer-governance': ['TransferBasis', {}], 'system-operation': ['ViewerStorageBudget', {}],
+    'recovery-working-copy': ['TerminalRecoveryCopy', { originalEventId: 'original-1', state: 'pending-transmission', signedAt: null, purposeId: 'purpose-1' }],
   };
   function stored(kind, recordId, partId, at, options = {}) {
     const [model, row] = fixtureModels[kind] || [];

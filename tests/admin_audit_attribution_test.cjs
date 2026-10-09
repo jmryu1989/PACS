@@ -3187,6 +3187,27 @@ function scanAuditWrites(sources = auditSources()) {
     && tokens.every((token, n) => token.kind !== 'word' || !WRITES.has(token.upper)
       || (token.upper === 'UPDATE' && ['FOR', 'KEY'].includes(tokens[n - 1]?.upper)));
   const isFragment = expression => containsSql(checker.getTypeAtLocation(expression));
+  // EMR-B1: SQL naming schema emr_access reaches the protected access ledger (its facts are A-parsed events, attributed by
+  // the ledger itself, not AuditLog action rows). Such SQL is the ledger adapter's own call only when it is one SELECT with
+  // no row-changing word, in the two adapter files, and every emr_access name is a call of a declared schema function
+  // (migration 20261008120000_emr_b); a direct table write, another function or another file is unresolved where it
+  // stands. No directory is skipped: the adapter's calls are read like every other raw call, interpolations included.
+  const EMR_LEDGER_FILES = new Set(['api/src/emr-runtime/store.ts', 'api/src/emr-runtime/manifest.ts']);
+  const EMR_LEDGER_FUNCTIONS = new Set(['append_access', 'chain_tail', 'entries_after', 'entry_for_event', 'storage_placement',
+    'resolve_member_identity', 'record_projection', 'place_hold', 'release_hold', 'holds_for', 'record_duty_request', 'duty_requests',
+    'clause_versions', 'expire_prefix', 'retention_view']);
+  const namesLedger = tokens => tokens.some(token => (token.kind === 'word' || token.kind === 'ident') && token.name.toLowerCase() === 'emr_access');
+  function ledgerShape(tokens, file) {
+    if (!EMR_LEDGER_FILES.has(file)) return `emr_access SQL outside the EMR ledger adapter (${file})`;
+    if (!readsOnly(tokens)) return 'emr_access SQL that is not one SELECT without a row-changing word (a direct ledger write)';
+    for (const [index, token] of tokens.entries()) {
+      if ((token.kind !== 'word' && token.kind !== 'ident') || token.name.toLowerCase() !== 'emr_access') continue;
+      const [dot, name, open] = tokens.slice(index + 1, index + 4);
+      if (dot?.value !== '.' || name?.kind !== 'word' || !EMR_LEDGER_FUNCTIONS.has(name.name) || !opens(open) || open.value !== '(')
+        return `emr_access reached other than by a declared ledger function call (${[token, dot, name, open].map(shown).join(' ')})`;
+    }
+    return null;
+  }
   // Finite SQL alternatives retain the boundary between text and bound values. Concatenate before
   // lexing, so two innocent-looking fragments cannot hide a table name across their seam.
   class SqlProofError extends Error {}
@@ -3600,6 +3621,11 @@ function scanAuditWrites(sources = auditSources()) {
         && tokens.slice(index + 1, index + 5).some(next => next.kind === 'word'
           && ['FUNCTION', 'PROCEDURE', 'TRIGGER', 'RULE'].includes(next.upper)))))
       return note(call, 'raw call', 'unresolved', 'dynamic SQL execution is not modelled', 'W6');
+    const ledger = namesLedger(tokens);
+    if (ledger) {
+      const why = ledgerShape(tokens, repoPath(call.getSourceFile().fileName));
+      if (why) return note(call, 'raw SQL naming emr_access', 'unresolved', why, 'EMR-B1 ledger adapter');
+    }
     const names = tokens.some(token => (token.kind === 'ident' || token.kind === 'word') && token.name.toLowerCase() === 'auditlog');
     if (names) form = readsOnly(tokens) ? { read: true } : insertForm(tokens);
     const writes = form && !form.read && !form.error;
@@ -3634,6 +3660,8 @@ function scanAuditWrites(sources = auditSources()) {
       return note(call, kind, 'unresolved', problems.map(problem => problem.why).join('; '), [...new Set(problems.map(problem => problem.rule))].join('; '));
     }
     const valued = spans.length ? `every interpolation a value (${[...rules].join('; ')})` : 'no interpolation';
+    if (ledger && !names) return note(call, 'raw SQL naming emr_access', 'proven_non_audit',
+      `a declared EMR ledger function call of the ledger adapter, no AuditLog row; ${valued}`, 'EMR-B1 ledger adapter');
     if (!names) return note(call, 'raw call', 'proven_non_audit', `${parts.some(part => TABLE_WORDS.test(part))
       ? 'AuditLog is only in its strings or comments' : 'its SQL names no AuditLog'}; ${valued}`, 'W6');
     if (!form) return note(call, 'raw call', 'proven_non_audit', `AuditLog is only in its strings or comments; ${valued}`, 'W6');
@@ -4877,5 +4905,30 @@ export function run(tx: Prisma.TransactionClient) { tx.$queryRaw(h(Prisma.sql\`S
     const scan = scanAuditWrites([source]);
     assert.deepEqual(scan.unresolved, []);
     assert.deepEqual(scan.candidates.filter(entry => entry.kind === 'raw call').map(entry => entry.status), ['proven_non_audit']);
+  });
+});
+
+// ── EMR-B1: the protected access ledger's raw calls (no directory is skipped) ──
+test('EMR-B1 ledger provenance: the adapter calls are read; any other emr_access SQL fails where it stands', async t => {
+  const product = scanAuditWrites();
+  const adapter = product.candidates.filter(entry => entry.kind === 'raw SQL naming emr_access');
+  assert.ok(adapter.length >= 15, `the adapter's raw calls are scanned (${adapter.length})`);
+  assert.deepEqual([...new Set(adapter.map(entry => entry.status))], ['proven_non_audit']);
+  assert.deepEqual([...new Set(adapter.map(entry => entry.file))].sort(), ['api/src/emr-runtime/manifest.ts', 'api/src/emr-runtime/store.ts']);
+  const head = "import { Prisma } from '@prisma/client';\nexport async function run(tx: Prisma.TransactionClient, id: string) {\n  ";
+  const adapterFile = 'api/src/emr-runtime/store.ts', other = 'api/src/syn-fixture/ledger.ts';
+  const cases = {
+    'a declared function call in the adapter': [adapterFile, 'await tx.$queryRaw`SELECT * FROM emr_access.entry_for_event(${id}::text)`;', 'proven_non_audit'],
+    'a direct ledger insert in the adapter': [adapterFile, 'await tx.$executeRaw`INSERT INTO emr_access.access_entry (sequence) VALUES (${1})`;', 'unresolved'],
+    'a direct ledger delete in the adapter': [adapterFile, 'await tx.$executeRaw`DELETE FROM emr_access.access_entry WHERE event_id = ${id}`;', 'unresolved'],
+    'an undeclared ledger function in the adapter': [adapterFile, 'await tx.$queryRaw`SELECT emr_access.require_placement()`;', 'unresolved'],
+    'a ledger table read in the adapter': [adapterFile, 'await tx.$queryRaw`SELECT * FROM emr_access.access_entry`;', 'unresolved'],
+    'a declared function call outside the adapter': [other, 'await tx.$queryRaw`SELECT * FROM emr_access.entry_for_event(${id}::text)`;', 'unresolved'],
+    'a quoted schema outside the adapter': [other, 'await tx.$queryRaw`SELECT * FROM "emr_access".chain_tail()`;', 'unresolved'],
+  };
+  for (const [name, [file, statement, status]] of Object.entries(cases)) await t.test(name, () => {
+    const scan = scanAuditWrites([{ file, text: head + statement + '\n}\n' }]);
+    assert.deepEqual(scan.candidates.filter(entry => entry.kind === 'raw SQL naming emr_access').map(entry => entry.status), [status]);
+    assert.equal(scan.unresolved.length, status === 'unresolved' ? 1 : 0);
   });
 });

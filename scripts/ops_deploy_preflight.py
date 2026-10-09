@@ -11,11 +11,18 @@ import json
 from pathlib import Path
 import re
 import sys
+from urllib.parse import urlsplit
 
 import ops_backup as ops
 
 COMPOSE = ["docker-compose.yml", "docker-compose.prod.yml", "docker-compose.monitor.yml"]
-PROTECTED = ["api/prisma", "keycloak", "config", "proxy", "worklist-v0", "gateway", *COMPOSE]
+# EMR-B1: the image's entry modes and the migration/runtime credential split are part of the deployment boundary.
+PROTECTED = ["api/prisma", "api/Dockerfile", "api/start-production.sh", "keycloak", "config", "proxy", "worklist-v0", "gateway", *COMPOSE]
+# A release that brings the EMR-B storage needs, before any switch: the provisioning (roles, secrets, tablespace volume),
+# the installer-credential migration in its own process and a restore rehearsal of database plus API state volume.
+# None of that is an API-only replacement, so this path refuses it outright.
+EMR_MIGRATION = "api/prisma/migrations/20261008120000_emr_b/migration.sql"
+EMR_STATE = "/var/lib/kin-emr"
 FIELDS = {"version", "previous_sha", "target_sha", "previous_api_image", "target_api_image", "compose_files"}
 SHA = re.compile(r"[0-9a-f]{40}")
 IMAGE = re.compile(r"sha256:[0-9a-f]{64}")
@@ -62,12 +69,19 @@ def api_tree(sha):
     return git("rev-parse", sha + ":api")
 
 
+def has_emr_storage(sha):
+    """Whether this commit's product carries the EMR-B storage (its migration file is in the tree)."""
+    return ops.run(["git", "cat-file", "-e", sha + ":" + EMR_MIGRATION], check=False, timeout=30).returncode == 0
+
+
 def check_repository(body):
     previous, target = body["previous_sha"], body["target_sha"]
     require(git("rev-parse", "--show-toplevel") == str(ops.ROOT).replace("\\", "/"), "Wrong repository root")
     require(git("rev-parse", "HEAD") == previous, "Checkout SHA changed")
     require(not git("status", "--porcelain", "--untracked-files=no"), "Tracked working tree is dirty")
     trees = {sha: api_tree(sha) for sha in (previous, target)}
+    require(has_emr_storage(previous) or not has_emr_storage(target),
+            "EMR-B storage requires provisioning, installer migration and restore evidence; not an API-only deployment")
     for path in PROTECTED:
         # Missing paths must not make an empty diff look like proven compatibility.
         before = git("rev-parse", previous + ":" + path)
@@ -84,7 +98,7 @@ def check_image(image, expected_id, expected_tree):
     require(api_tree(revision) == expected_tree, "Image revision API tree mismatch")
 
 
-def check_running_api(container, expected_id):
+def check_running_api(container, expected_id, emr=False):
     require(container.get("Name") == "/kin-api", "Wrong API container")
     require(container.get("Image") == expected_id, "Running API image changed")
     require((container.get("State") or {}).get("Running") is True, "API is not running")
@@ -93,13 +107,28 @@ def check_running_api(container, expected_id):
     require(labels.get("com.docker.compose.project.working_dir") == str(ops.ROOT), "Wrong Compose working directory")
     require(labels.get("com.docker.compose.service") == "api", "Wrong Compose service")
     require(config.get("User") == "node", "Running API is not the production user")
-    require(container.get("Mounts") == [], "API must run without host or volume overrides")
+    mounts = container.get("Mounts")
+    if emr:
+        # EMR-B: exactly the protected state volume (ledger seal and failure journal), never a host path.
+        require(type(mounts) is list and len(mounts) == 1 and type(mounts[0]) is dict and mounts[0].get("Type") == "volume"
+                and mounts[0].get("Destination") == EMR_STATE and mounts[0].get("RW") is True,
+                "API must run with only its EMR state volume")
+    else:
+        require(mounts == [], "API must run without host or volume overrides")
     network = container.get("NetworkSettings") or {}
     require("Ports" in network and not any((network["Ports"] or {}).values()), "API host ports are exposed or unknown")
     host = container.get("HostConfig") or {}
     require(host.get("NetworkMode") not in (None, "host") and not host.get("PortBindings"), "Unsafe API network mode or host bindings")
     env = dict(item.split("=", 1) for item in config.get("Env", []) if "=" in item)
     require(env.get("DEPLOYMENT_MODE") == "production" and env.get("AUTH_REQUIRED") == "true", "Production authentication settings required")
+    if emr:
+        # The server holds the runtime role only: no installer password and no other database user in its environment.
+        try:
+            user = urlsplit(env.get("DATABASE_URL", "")).username
+        except ValueError:
+            user = None
+        require(user == "kin_runtime" and "POSTGRES_PASSWORD" not in env and env.get("KIN_EMR_STATE_DIR") == EMR_STATE,
+                "API must hold only the EMR runtime credential and its state directory")
 
 
 def inspect_one(args):
@@ -115,7 +144,8 @@ def observe(body):
     for prefix in ("previous", "target"):
         identity = body[prefix + "_api_image"]
         check_image(inspect_one(["image", "inspect", identity]), identity, trees[body[prefix + "_sha"]])
-    check_running_api(inspect_one(["inspect", "kin-api"]), body["previous_api_image"])
+    # check_repository refused an EMR introduction, so previous and target agree on the storage shape.
+    check_running_api(inspect_one(["inspect", "kin-api"]), body["previous_api_image"], has_emr_storage(body["previous_sha"]))
     return {"preflight_passed": True, "deployment_authorized": False,
             "automatic_rollback_authorized": False, "schema_unchanged": True,
             "previous_sha": body["previous_sha"], "target_sha": body["target_sha"],

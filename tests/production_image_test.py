@@ -1,6 +1,13 @@
-"""Production image checks against a disposable PostgreSQL, with no host ports."""
+"""Production image checks against a disposable PostgreSQL, with no host ports.
+
+EMR-B1: the image has two entry modes. `start-production.sh migrate` applies the reviewed migrations with the installer
+credential in its own one-shot container; `serve` (the default) opens the API with the least-privilege runtime role only
+and refuses to start, in production, on any other credential. The disposable database is provisioned first with the
+fixed provisioning SQL (roles, secrets, the dedicated tablespace on its own mount).
+"""
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -10,8 +17,15 @@ import time
 import unittest
 import uuid
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 import ops_backup as ops
+
+_spec = importlib.util.spec_from_file_location("emr_compose", ROOT / "scripts" / "emr-compose.py")
+emr_compose = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(emr_compose)
+INSTALLER_URL = "postgresql://postgres@127.0.0.1:5432/kin"
+RUNTIME_URL = "postgresql://kin_runtime@127.0.0.1:5432/kin"
 
 
 class ProductionImageTests(unittest.TestCase):
@@ -24,6 +38,7 @@ class ProductionImageTests(unittest.TestCase):
         cls.image_id = cls.image["Id"]
         cls.db = cls.container("db", [
             "--network", "none", "--tmpfs", "/var/lib/postgresql/data",
+            "--tmpfs", "/var/lib/postgresql/emr-access:uid=70,gid=70,mode=0700",
             "-e", "POSTGRES_HOST_AUTH_METHOD=trust", "-e", "POSTGRES_DB=kin",
             "postgres:16-alpine",
         ])
@@ -35,6 +50,13 @@ class ProductionImageTests(unittest.TestCase):
             time.sleep(0.5)
         else:
             raise RuntimeError("Disposable PostgreSQL did not start")
+        # Trust authentication in this networkless fixture; the provisioning still requires its secret input.
+        ops.run(["docker", "exec", "-u", "postgres", cls.db, "mkdir", "-m", "700", "/var/lib/postgresql/emr-access/ts"])
+        provisioned = subprocess.run(["docker", "exec", "-i", "-e", "KIN_EMR_RUNTIME_PASSWORD=" + uuid.uuid4().hex, cls.db,
+                                      "psql", "-X", "-U", "postgres", "-d", "kin"], input=emr_compose.PROVISION_SQL.encode(),
+                                     capture_output=True, timeout=120)
+        if provisioned.returncode:
+            raise RuntimeError("EMR provisioning of the disposable database failed")
         print(json.dumps({"code_sha": ops.text(["git", "rev-parse", "HEAD"]),
                           "image_id": cls.image_id,
                           "revision": cls.image["Config"].get("Labels", {}).get("org.opencontainers.image.revision")}),
@@ -50,9 +72,16 @@ class ProductionImageTests(unittest.TestCase):
         ops.run(["docker", "start", name])
         return name
 
+    def migrate(self, suffix, url=INSTALLER_URL):
+        """The production image's one-shot migration mode with the installer credential; returns (exit, logs)."""
+        name = self.container(suffix, ["--network", "container:" + self.db, "-e", "DATABASE_URL=" + url,
+                                       self.image_id, "sh", "/app/start-production.sh", "migrate"])
+        code = int(ops.text(["docker", "wait", name], timeout=180))
+        return code, self.logs(name)
+
     def api(self, suffix, **overrides):
         env = {
-            "DATABASE_URL": "postgresql://postgres@127.0.0.1:5432/kin",
+            "DATABASE_URL": RUNTIME_URL,
             "DEPLOYMENT_MODE": "production", "AUTH_REQUIRED": "true",
             "KC_ISSUER": "http://127.0.0.1:1/auth/realms/kin",
             "KC_JWKS_URL": "http://127.0.0.1:1/certs", "KC_AUDIENCE": "kin-api",
@@ -101,28 +130,37 @@ class ProductionImageTests(unittest.TestCase):
         """TEST-C1-01: runtime packaging and non-root user are checked inside the image."""
         self.assertEqual(self.image["Config"]["User"], "node")
         self.assertIn("NODE_ENV=production", self.image["Config"]["Env"])
+        self.assertEqual(self.image["Config"]["Cmd"], ["sh", "/app/start-production.sh", "serve"])
         expected = os.environ.get("KIN_EXPECTED_REVISION", "C1-working-tree")
         self.assertEqual(self.image["Config"]["Labels"]["org.opencontainers.image.revision"], expected)
         script = """
 const fs=require('fs'), assert=require('assert');
 assert.notStrictEqual(process.getuid(),0);
-for(const p of ['dist/main.js','prisma/migrations/0_init/migration.sql',
+for(const p of ['dist/main.js','dist/emr-runtime/store.js','prisma/migrations/0_init/migration.sql',
+  'prisma/migrations/20261008120000_emr_b/migration.sql',
   'node_modules/prisma/build/index.js','node_modules/.prisma/client/index.js']) assert(fs.existsSync(p),p);
 for(const p of ['src','node_modules/@nestjs/cli','node_modules/typescript']) assert(!fs.existsSync(p),p);
 assert.strictEqual(require('@prisma/client/package.json').version,'5.22.0');
 assert.strictEqual(require('prisma/package.json').version,'5.22.0');
 assert(!fs.readFileSync('start-production.sh').includes(13));
+// EMR-B1 protected state directory: the API's own user only (a named volume inherits this on first mount).
+const state=fs.statSync('/var/lib/kin-emr');
+assert(state.isDirectory()); assert.strictEqual(state.uid,process.getuid()); assert.strictEqual(state.mode&0o777,0o700);
 """
         ops.temporary_run(["--network", "none", "--entrypoint", "node", self.image_id, "-e", script])
 
     def test_02_migrate_boot_restart_preserves_data_and_history(self):
-        """TEST-C1-02/03: real Prisma engines, empty migration, auth guard and exec signal path."""
+        """TEST-C1-02/03: real Prisma engines, empty migration, auth guard and exec signal path.
+
+        EMR-B1: the migration runs in the image's own `migrate` mode with the installer credential; the server then
+        starts as the runtime role and never migrates."""
+        code, logs = self.migrate("migrate")
+        self.assertEqual(code, 0, logs[-2000:])
         # This image-only fixture has no realm server. Exercise the supported operator import with an empty realm
         # before boot; onModuleInit must see its real completion marker and never contact the unreachable provider.
         ops.run(["docker", "run", "--rm", "--network", "container:" + self.db,
-                 "-e", "DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin",
+                 "-e", "DATABASE_URL=" + INSTALLER_URL,
                  "--entrypoint", "node", self.image_id, "-e",
-                 "require('child_process').execFileSync('node',['node_modules/prisma/build/index.js','migrate','deploy'],{stdio:'inherit'});"
                  "const {PrismaService}=require('./dist/prisma.service');const db=new PrismaService();"
                  "require('./dist/member-rights-import').importMemberRights(db,{listUsers:async()=>({total:0,users:[]})})"
                  ".finally(()=>db.$disconnect()).catch(()=>process.exit(1));"])
@@ -144,7 +182,8 @@ assert(!fs.readFileSync('start-production.sh').includes(13));
                            '20260909180000_worklist_columns', '20260909220000_favorite_workspace', '20260909233000_study_tags', '20260910000500_reader_assignment', '20260910013000_reading_preferences', '20260910023000_reading_appearance', '20260910044500_workspace_shortcuts', '20260910090000_filter_folders', '20260910100000_shared_filters', '20260910110000_study_consultation', '20260910123000_consultation_predicates', '20260910130000_study_access', '20260910133000_study_access_subject', '20260912100000_hanging_protocol_preferences', '20260917120000_findings', '20260920120000_report_citations', '20260921120000_report_structure', '20260924120000_order_accession', '20260924130000_gateway_receipt', '20260924140000_gateway_retry_request', '20260926120000_study_questions', '20260926130000_study_image_requests', '20260928120000_critical_result', '20260928130000_reader_assignment_scope', '20260930120000_audit_log_append_only', '20261004120000_draft_revision_session_entry',
                           '20261005120000_idp_session_end', '20261005130000_member_isolation',
                           '20261006000000_tech_note_attempt_id',
-                          '20261006120000_member_isolation_call', '20261007120000_provider_change', '20261007170000_member_db_rights', '20261007200000_designation_subjects'])
+                          '20261006120000_member_isolation_call', '20261007120000_provider_change', '20261007170000_member_db_rights', '20261007200000_designation_subjects',
+                          '20261008120000_emr_b'])
         self.psql("CREATE TABLE c1_probe(value text); INSERT INTO c1_probe VALUES ('preserved');")
         ops.run(["docker", "exec", name, "node", "-e",
             "fetch('http://127.0.0.1:3000/api/me').then(r=>{if(r.status!==401)process.exit(1)})"
@@ -160,12 +199,26 @@ assert(!fs.readFileSync('start-production.sh').includes(13));
         self.wait_running_api(name)
         self.assertEqual(self.psql(history_query), history)
         self.assertEqual(self.psql("SELECT value FROM c1_probe;"), "preserved")
-        self.assertIn("No pending migrations to apply", ops.text(["docker", "logs", name]))
+        code, logs = self.migrate("migrate-again")
+        self.assertEqual(code, 0)
+        self.assertIn("No pending migrations to apply", logs)
+        self.assertEqual(self.psql(history_query), history)
 
     def test_03_unreachable_database_prevents_api_start(self):
-        """TEST-C1-02: a failed migration cannot fall through to Node startup."""
-        name = self.api("bad-db", DATABASE_URL="postgresql://postgres@127.0.0.1:1/kin?connect_timeout=2")
-        self.assertIn("P1001", self.stopped_with_error(name))
+        """TEST-C1-02: a failed migration exits non-zero; a server whose database is unreachable never starts."""
+        code, logs = self.migrate("bad-migrate", "postgresql://postgres@127.0.0.1:1/kin?connect_timeout=2")
+        self.assertNotEqual(code, 0)
+        self.assertIn("P1001", logs)
+        name = self.api("bad-db", DATABASE_URL="postgresql://kin_runtime@127.0.0.1:1/kin?connect_timeout=2")
+        self.stopped_with_error(name)
+
+    def test_06_production_refuses_the_installer_credential(self):
+        """EMR-B1 start boundary: in production the server opens only as the least-privilege runtime role."""
+        name = self.api("installer", DATABASE_URL=INSTALLER_URL)
+        logs = self.stopped_with_error(name)
+        self.assertIn("EmrRuntimeRefused", logs)
+        for problem in ("not-the-runtime-role", "rolsuper"):
+            self.assertIn(problem, logs)
 
     def test_04_production_refuses_disabled_auth(self):
         """TEST-C1-03: packaging must retain the production authentication guard."""

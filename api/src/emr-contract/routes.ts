@@ -156,6 +156,16 @@ export function classifyRoute(route: string): readonly RecordKind[] {
   return routeContract(route).kinds;
 }
 
+/** In-process server work that is not an HTTP request (EMR-B1). The executor is the service identity of that job, never
+ * the member it affects; its events carry `not-applicable: in-process-service` instead of an invented client address.
+ * Closed: a new background job adds its own entry here with the records it touches. */
+export const INTERNAL_SURFACES: Readonly<Record<string, RouteContract>> = freeze({
+  'service:auth-session-sweep': { kinds: ['authentication-session'], operation: 'auth', causes: ['service-job'] },
+});
+for (const surface of Object.keys(INTERNAL_SURFACES)) {
+  if (Object.prototype.hasOwnProperty.call(ROUTE_CONTRACTS, surface)) throw new Error('Internal surface shadows an HTTP route');
+}
+
 /** Not Nest routes: unit N must bind actual SOP/frame manifests, not just auth_request success. */
 export const EXTERNAL_SURFACES = freeze({
   'dicom-web-study-series-instance-frame': ['image', 'external-sr-seg', 'pdf', 'download', 'study-metadata'],

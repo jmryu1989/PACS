@@ -2,7 +2,7 @@ import { isEmrReader } from './composition';
 import { STATUTORY_MINIMUM as FLOOR, StatutoryMinimum } from './legal-basis';
 import { choice, freeze, object, refuse, string, utc, sha256 } from './validation';
 
-export type PurposeEnd = 'result-version-signed' | 'intent-superseded' | 'explicit-discard' | 'owner-deleted' | 'assignment-ended' | 'setting-replaced' | 'session-ended' | 'institution-closed' | 'transfer-obligations-ended' | 'operation-completed';
+export type PurposeEnd = 'result-version-signed' | 'intent-superseded' | 'explicit-discard' | 'owner-deleted' | 'assignment-ended' | 'setting-replaced' | 'session-ended' | 'institution-closed' | 'transfer-obligations-ended' | 'operation-completed' | 'original-received';
 export type SignatureRule = 'required' | 'clinical-entry-only' | 'source-evidence' | 'not-required';
 export interface RecordClassification {
   author: { observedSource: string; responsibility: 'immutable-actual-author-or-source' };
@@ -95,8 +95,46 @@ export const RECORD_CLASSIFICATION = freeze({
   'transfer-governance': record('TransferBasis/ProcessingAgreement/Transfer author', unsigned('법 제23조①의 진료기록 서명과 별개; 전송 근거·동의 계약은 유지'), [], 'evidence-record', 'purpose', ['transfer-obligations-ended']),
   'delivery-receipt': record('Gateway/service/request actor; fixed source reference', unsigned('전달 결과 증거; 원기록 서명 보존'), [FLOOR.access], 'evidence-record'),
   'system-operation': record('System process; health/statistics/accounting', unsigned('운영 상태'), [], 'operational-record', 'purpose', ['operation-completed']),
+  // EMR-B1 (D596): an approval actually signed on a registered device while disconnected is the signed record itself, kept
+  // from its actual signedAt; its recovery/review working copy is a separate purpose record that cannot outlive its purpose.
+  'offline-signed-original': record('Device signer; registered device key and its own kid; exact signed bytes at the actual signedAt', signed('단말에서 실제 서명한 임상 기재 원본; 수신·재인증 시각으로 다시 서명하거나 기산하지 않음'), [...images, FLOOR.chart]),
+  'recovery-working-copy': record('Owner; its original event or conflict record; purpose ID', conditional('복구·재검토 작업본 자체의 별도 서명 의무는 명시되지 않음; 진료기록으로 기재·채택할 때 새 서명판'), [], 'emr-candidate', 'purpose', ['original-received', 'explicit-discard']),
+  // EMR-B1 storage of legal duties and the reviewed clause history: evidence attached to the records they concern.
+  'legal-duty': record('Verified legal duty adapter; order/request, authority, scope, validity and release', unsigned('법적 보존 의무·요청 증빙; 진료기록 서명과 구분'), [], 'evidence-record', 'source-record'),
+  'legal-reference': record('Reviewed statute clause history (unit I); publication and effective dates', unsigned('검토된 조문 판본 이력; 환자·개인 자료 없음'), [], 'evidence-record', 'source-record'),
 });
 export type RecordKind = keyof typeof RECORD_CLASSIFICATION;
+
+/** SQL-only storage of EMR-B (schema emr_access, its own tablespace), classified apart from Prisma models: none of these is
+ * a Prisma model and the Prisma inventory never lists them. The live catalog is compared with this table both ways. */
+export const SQL_STORAGE_CLASSIFICATION: Readonly<Record<string, readonly RecordKind[]>> = freeze({
+  'emr_access.access_entry': ['access-audit'], 'emr_access.chain_head': ['access-audit'], 'emr_access.audit_projection': ['access-audit'],
+  'emr_access.member_identity': ['identity-access'],
+  'emr_access.legal_hold_event': ['legal-duty'], 'emr_access.duty_request_event': ['legal-duty'],
+  'emr_access.clause_version': ['legal-reference'],
+});
+/** D596 storage boundary: offline originals and their working copies live in C's clinical terminal queue, not in B. */
+export const TERMINAL_RECORD_BOUNDARY = freeze({
+  storage: 'clinical-terminal-queue',
+  models: { TerminalSignedOriginal: ['offline-signed-original'], TerminalRecoveryCopy: ['recovery-working-copy'] } as Record<string, readonly RecordKind[]>,
+  states: ['pending-transmission', 'received-unverified', 'verified', 'verification-refused'],
+  original: 'owned by its immutable signer; retention from the actual signedAt; never ended by a private-draft purpose end; reception and re-authentication are separate events',
+  recovery: 'owned by the same member; references its original event; a purpose ID; ends at verified reception of the original or the owner discard',
+});
+export type TerminalState = 'pending-transmission' | 'received-unverified' | 'verified' | 'verification-refused';
+export interface TerminalRecordFacts {
+  ownerId: string; originalEventId: string; state: TerminalState;
+  signedAt: string | null; purposeId: string | null;
+}
+function terminalFacts(kind: RecordKind, row: Record<string, any>, event: RecordEvent): void {
+  string(row.ownerId); string(row.originalEventId); choice(row.state, TERMINAL_RECORD_BOUNDARY.states);
+  if (kind === 'offline-signed-original') {
+    // The stored event time is the device's actual signing time; a reception or re-authentication time is refused.
+    if (row.purposeId !== null || utc(row.signedAt) !== event.at || !event.signature) refuse('TerminalOriginalTimeRefused');
+  } else if (row.signedAt !== null || typeof row.purposeId !== 'string' || !row.purposeId.trim() || event.act !== 'creation') {
+    refuse('TerminalPurposeRequired');
+  }
+}
 
 /** Multi-kind rows deliberately retain mixed clinical/operational content. */
 export const MODEL_CLASSIFICATION: Readonly<Record<string, readonly RecordKind[]>> = freeze({
@@ -149,6 +187,12 @@ export function verifiedRecord(input: ResolvedRecord): ResolvedRecord {
 function rowKinds(model: string, row: Record<string, any>, event: RecordEvent): readonly RecordKind[] {
   if (model === 'DicomInstance') return [row.sopClass === 'image' ? 'image' : choice(row.sopClass, ['external-sr-seg', 'pdf'])];
   if (model === 'Dictation') return ['dictation'];
+  if (Object.prototype.hasOwnProperty.call(TERMINAL_RECORD_BOUNDARY.models, model)) {
+    const [kind] = TERMINAL_RECORD_BOUNDARY.models[model];
+    terminalFacts(kind, row, event); return [kind];
+  }
+  if (Object.prototype.hasOwnProperty.call(SQL_STORAGE_CLASSIFICATION, model))
+    return SQL_STORAGE_CLASSIFICATION[model].filter(k => RECORD_CLASSIFICATION[k].retention.mode !== 'source-record');
   const possible = classifyModel(model);
   switch (model) {
     case 'StudyState':

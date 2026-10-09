@@ -32,6 +32,18 @@ services:
     ports: !reset []
     logging: *bounded-logging
 
+  emr-provision:
+    logging: *bounded-logging
+
+  # EMR-B1: 운영 이관도 같은 운영 이미지의 일회성 프로세스(설치 자격)로만 한다. 호스트 파일은 덮지 않는다.
+  api-migrate:
+    build:
+      target: production
+      args:
+        VCS_REF: ${KIN_REVISION:-unknown}
+    volumes: !reset []
+    logging: *bounded-logging
+
   keycloak:
     command: start --import-realm
     environment:
@@ -51,7 +63,9 @@ services:
     ports: !reset []
     # 이미지 안에 빌드된 JS·Prisma 스키마만 쓴다. 운영에서 호스트 파일을 덮으면
     # 배포한 이미지와 실제 실행 코드가 달라져 재현 가능한 롤백이 사라진다.
-    volumes: !reset []
+    # 남는 마운트는 EMR-B1 보호 상태 볼륨(원장 seal·실패 저널) 하나뿐이며 호스트 경로가 아니다.
+    volumes: !override
+      - emr-state:/var/lib/kin-emr
     logging: *bounded-logging
 
 # Only the HTTPS proxy joins this auxiliary network from the PACS stack.

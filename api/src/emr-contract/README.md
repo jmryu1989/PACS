@@ -148,6 +148,19 @@ B의 접속 저장소는 업무 기록과 **별도 저장소**이며 제23조④
 
 `provideAfterDurableEvent()`는 내구성 있는 제공 사건 전에는 본문을 보내지 않는다. 성공 쓰기/서명/공개/접속 append는 함께 commit하고 실패 사건은 업무 rollback과 별개 저널에 남긴다. B의 합성 실환경 시험은 런타임 UPDATE/DELETE/trigger 해제 거절, 저장소 분리, 위변조·누락 탐지, retention 역할의 미만료 삭제 거절, 삭제/checkpoint 중단 원자성·복구를 검증해야 한다. A의 해시 체인 순수 시험은 DB 권한의 실제 이행을 증명하지 않는다.
 
+## EMR-B1: 접속사건 v2·SQL 저장 분류·단말 경계
+
+`formatVersion: 1`의 필드·규칙·체인 바이트는 그대로다. `parseAccessEvent()`는 getter를 실행하지 않고 판본을 읽어 v1과 v2를 나누며 v2는 닫힌 두 분기다.
+
+- **`online-auth`**: `auth.login`·`auth.entry`·`auth.logout`·`auth.session.expired`(법정행위 전부 none, `AUTH_STATUTORY_ACT`). `targets`는 항상 빈 배열이며 임상 대상을 합성하지 않는다. 실행자(`userId`)와 영향 신원(`affectedIdentity`)을 분리한다: 회원 자신의 로그인·종료는 같은 신원, 관리자의 isolation은 다른 회원, 세션 수거는 서비스 신원과 그 회원이다(`service:auth-session-sweep`, `INTERNAL_SURFACES`, IP는 `not-applicable: in-process-service`). 검증 후 거절한 로그인은 known 신원을 남기고 검증 전 거절은 unresolved다. 역할은 확인된 빈 배열도 known이며 DB 권한 판(`rightsVersion`)을 함께 둔다. 기관 미승인 회원의 인증 성공은 `actingInstitution: not-applicable / not-approved`로 임상 접근 성공과 구별한다. 성공은 신뢰 프록시 IP·관리기관·비인증 난수 세션 참조(`authref:<UUID>`)가 필요하고 실패에는 세션이 없다. `auth`의 `endCause`·`failureCause`·`trigger`는 닫힌 값이며 trigger는 재인증 종료에만 있다. 원사건 ID는 서버가 만든 UUID다.
+- **`verified-offline`**: 단말에서 실제로 일어난 임상 행위. IP는 항상 `unresolved: offline`(재접속 IP는 `relatedEventId`의 별도 수신사건), 기기·kid·사전권한·시간 근거/불확실도·기기 순서·대상 manifest·실제 signedAt을 요구하며 이 사실은 서버 시작 시 한 번 구성하는 `composeOfflineReceiptVerifier()`의 결과와 같아야 한다. 본문의 `offline`/`verified` 플래그는 근거가 아니다. C의 실제 키·서명 검증이 없는 현재는 아무것도 구성하지 않으므로 이 분기는 `OfflineVerificationUnsupported`로 거절된다(B2가 main.ts에서 구성 위치를 정한다).
+
+B의 SQL 전용 저장(schema `emr_access`, 전용 tablespace)은 Prisma 모델이 아니므로 `SQL_STORAGE_CLASSIFICATION`에 따로 분류하고 실제 catalog와 양방향 대조한다. 법적 보존 의무·요청(`legal-duty`)과 검토된 조문 판본 이력(`legal-reference`)은 원기록을 따르는 증빙이다(`source-record`). 저장된 접속사건은 `emr_access.access_entry` 모델로 A의 고정 접속 매핑과 같은 사실을 돌려준다.
+
+D596 단말 경계(`TERMINAL_RECORD_BOUNDARY`, 저장은 C의 단말 대기열): 미전송 서명 원본(`offline-signed-original`)은 서명자 소유, 실제 signedAt부터의 판독/진료기록 기간이며 private-draft의 목적 종료로 지워지지 않고 수신·재인증 시각으로 기산하지 않는다(`TerminalOriginalTimeRefused`). 복구·재검토 작업본(`recovery-working-copy`)은 같은 회원 소유·원본 사건 참조·목적 ID를 가진 목적 자료이며 검증된 원본 수신(`original-received`) 또는 소유자 폐기에서 끝난다. 상태는 `pending-transmission`·`received-unverified`·`verified`·`verification-refused`다.
+
+**A low 이관 상태(B1):** L5-02의 B 부분은 `emr_access.clause_version`(설치 자격만 기록, 수정·삭제 거절)과 결속 reader의 전체 hold 목록(활성·종료·해제, `complete:true`, 조회 실패는 빈 집합이 아님)이다. F/H/I 부분은 남는다. L5-05(main 단일 구성·AST 허용 위치 이동)는 B2, L5-01·03·04·06은 C/F/H/I 그대로다.
+
 ## 서명·키·검증 범위
 
 의료인의 임상 기재는 제22조①·제23조①에 따라 각 작성판을 서명한다. Tech Note·초안 등 인간 작성 작업 자료는 실제 임상 기재 시 서명을 요구한다. 서명 강화 설정은 `required`/`clinical-entry-only` 종류만 허용하며, 장치 영상·썸네일·접속기록·시스템 작업 등에 사람이 하지 않는 서명을 요구할 수 없다. source-evidence는 원서명/출처를 보존하고 신규 임상 의견은 별도 임상 종류로 저장한다. 외부 AI 자료는 원문을 재계산·재해석하지 않는다.
