@@ -20,6 +20,10 @@ What this file proves, and nothing more (review M-2):
      Client behaviour is covered by study_identity_test.cjs and study_identity_dom_test.py, not source pins here.
 What it cannot see: whether TypeScript compiles, the browser renders, or PostgreSQL/Orthanc behave as the source says.
 """
+# S9-U0b RELIST: PACS permission/data assertions run compiled suites through pacs_source.
+# Remaining non-PACS source checks are unchanged U0f carry-over.
+# Historical Git byte pins prove the named S4-U5 commits, never the mutable checkout.
+from pacs_source import assert_behaviour
 from page_source import read_page_source
 import importlib.util
 import json
@@ -53,7 +57,6 @@ def text(*parts):
 
 VECTORS = json.loads(text("tests", "study_identity_vectors.json"))
 RULE = text("api", "src", "study-identity.ts")
-SERVICE = text("api", "src", "pacs.service.ts")
 CONTROLLER = text("api", "src", "pacs.controller.ts")
 U2_RULE = text("api", "src", "order-reconciliation.ts")
 U2_CLIENT = text("worklist-v0", "hpacs-lite", "order-reconciliation.js")
@@ -390,32 +393,7 @@ class RulePins(unittest.TestCase):
 
 class ServicePins(unittest.TestCase):
     def test_one_tenant_pinned_identity_read_before_the_access_recheck(self):
-        listing = between(SERVICE, "  async listStudies(c: Caller, query?: any) {", "  private notObserved(")
-        self.assertIn("import { ORDER_IDENTITY_SELECT, orderIdentity, overlayShape, OVERLAY_RULE_TEXT } from './study-identity';", SERVICE)
-        self.assertEqual(SERVICE.count("ORDER_IDENTITY_SELECT"), 2)                  # import + the one read
-        read = listing.index("const identityOrders = linked.length ? await this.prisma.order.findMany({\n"
-                             "      where: { oid: { in: linked }, institutionId: me }, select: ORDER_IDENTITY_SELECT }) : [];")
-        collect = listing.index(".filter(s => s?.institutionId === me && s.matched === 'M' && s.orderOid).map(s => s.orderOid))];")
-        self.assertIn("const linked = [...new Set(pageUids.map(uid => byUid.get(uid))", listing)
-        details = listing.index("for (const state of details) byUid.set(state.uid, state);")
-        loop = listing.index("for (const st of sourceRows) {")
-        current = listing.index("const current = await this.prisma.studyState.findMany({ where: { uid: { in: pageUids } },")
-        unchanged = listing.index("await this.studyAccess.unchanged(c,access);")
-        self.assertTrue(details < collect < read < loop < current < unchanged)
-        self.assertEqual(listing.count("this.prisma.order.findMany("), 1)
-        # Own rows only; the relation is judged on the same `st` the row's acc/id/name/birth/sex come from.
-        self.assertIn("orderIdentity: s.institutionId === me\n"
-                      "          ? orderIdentity(me, s, identityByOid.get(s.orderOid), key => OrthancService.tag(st, key)) : null,", listing)
-        self.assertEqual(listing.count("identityByOid"), 2)
-        self.assertEqual(listing.count("identityOrders"), 2)
-        added = listing[listing.index("// S4-U5: the orders this page"):listing.index("const sourceRows =")]
-        for banned in (".ov", ".orig", "parse(", "report", "Draft", "update", "create", "delete"):
-            self.assertNotIn(banned, added)
-        # The return statement and the U2 order stay exactly as they were.
-        self.assertIn("return { studies: out, serverTime: new Date().toISOString(), observedAt,\n"
-                      "      ...(notObserved === undefined ? {} : { notObserved }),\n"
-                      "      ...(orderReconciliation === undefined ? {} : { orderReconciliation }), ...(page ? { pagination: window.pagination } : {}) };",
-                      listing)
+        assert_behaviour('study_identity_server_test.cjs', '^S4-U5 (full list|paged list|restricted|failures)')
 
     def test_no_order_value_leaves_and_no_new_route_or_bootstrap_change(self):
         # S4-U5 left the controller as it was: both of its commits hold the one pinned file (fixed_file() fails otherwise).
@@ -433,10 +411,7 @@ class ServicePins(unittest.TestCase):
         self.assertTrue(tables["s4u5"])
         self.assertEqual(tables["live"], sorted(tables["s4u5"] + ["GET studies/:uid/draft"]))
         self.behaviour("CORE_R11_BOOTSTRAP")
-        # The U2 pin on accession-bearing code lines keeps holding: the select lives in the rule module (N-9).
-        code = [line.strip() for line in SERVICE.splitlines()
-                if "accession" in line and not line.strip().startswith(("*", "//", "/*"))]
-        self.assertEqual(len(code), 2)
+        assert_behaviour('study_identity_server_test.cjs', '^S4-U5 (full list|bootstrap)')
         self.assertNotIn("accession", SEED)
 
     def test_unmatch_releases_both_sides_and_preserves_refusals(self):
@@ -459,48 +434,14 @@ class ServicePins(unittest.TestCase):
         self.assertIn("await tx.studyState.delete({ where: { uid } });", method[S4U5_RESULT])
 
     def test_m1_overlay_shape_is_last_in_patch_after_every_existing_refusal(self):
-        patch = between(SERVICE, "  async patchState(uid: string, body: any, c: Caller) {", "\n  }\n")
-        order = [patch.index(needle) for needle in (
-            "const owned = REPORT_OWNED_FIELDS.filter(k => body[k] !== undefined);",
-            "if (TECHNICIAN_FIELDS.some(k => body[k] !== undefined)) need(c.roles, 'technician', '검사 정보 변경');",
-            "const prev = await this.gate(uid,c,tx);",
-            "throw new ForbiddenException('원격판독으로 받은 검사의 촬영·환자 정보는 보유 기관만 바꿀 수 있습니다');",
-            "`예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 다룰 수 있습니다.`);",
-            "if (body.ov !== undefined) data.ov = dump(body.ov);",
-            "if (!Object.keys(data).length) throw new BadRequestException('바꿀 필드가 없습니다');",
-            "if (body.ov !== undefined) {\n      const rs = prev?.rs ?? 'W';",
-            "throw new BadRequestException(`판독 전(RS: W)인 검사만 환자·검사 정보를 수정할 수 있습니다 (현재 RS: ${rs})`);",
-            "if (!overlayShape(body.ov))\n        throw new BadRequestException(`환자·검사 정보(ov) 형식이 잘못되었습니다 — ${OVERLAY_RULE_TEXT}`);\n    }",
-            "const saved = await tx.studyState.update({ where: { uid }, data });")]
-        self.assertEqual(order, sorted(order))
-        self.assertEqual(patch.count("overlayShape("), 1)
+        assert_behaviour('study_identity_server_test.cjs', '^S4-U5 compiled overlay')
+        assert_behaviour('pacs_source_behavior_test.cjs', '^U0B-IDENTITY-PATCH')
 
     def test_n1_claimed_original_shape_is_after_every_existing_match_check(self):
-        match = between(SERVICE, "  async match(uid: string, oid: string, patient: any, c: Caller) {", "\n  }\n")
-        order = [match.index(needle) for needle in (
-            "need(c.roles, 'technician', '오더 매칭');",
-            "if (order.institutionId !== me) throw new BadRequestException('오더를 찾을 수 없습니다');",
-            "const prev = await this.gate(uid, c);",
-            "throw new ForbiddenException('원격판독으로 받은 검사는 매칭할 수 없습니다 (보유 기관의 일입니다)');",
-            "throw new BadRequestException(`판독 전(RS: W)인 검사만 매칭할 수 있습니다 (현재 RS: ${prev.rs})`);",
-            "if (!overlayShape(patient?.orig ?? null))\n      throw new BadRequestException(`원래 정보(orig) 형식이 잘못되었습니다 — ${OVERLAY_RULE_TEXT}`);",
-            "const orig = parse(prev?.orig) ?? patient?.orig ?? null;",
-            "state = await this.prisma.$transaction(async tx => {")]
-        self.assertEqual(order, sorted(order))
-        # Mismatch or identity never refuses: nothing from study-identity but the shape check is used here.
-        for banned in ("orderIdentity", "nameKey", "birthKey", "sexKey"):
-            self.assertNotIn(banned, match)
-        self.assertIn("export const OVERLAY_RULE_TEXT = `허용 키 ${OVERLAY_KEYS.join(', ')} · 값은 문자열(age는 유한한 숫자도 가능)`;", RULE)
+        assert_behaviour('pacs_source_behavior_test.cjs', '^U0B-IDENTITY-MATCH')
 
     def test_nb1_match_age_is_coerced_by_the_overlay_rule_without_a_new_refusal(self):
-        """T-NB1-1: pins the text only; the stored value per input is T-NB1-2 on the hosted stack."""
-        match = between(SERVICE, "  async match(uid: string, oid: string, patient: any, c: Caller) {", "\n  }\n")
-        line = "      age: overlayShape({ age: patient?.age }) ? patient.age : '', desc: order.descr, ward: order.ward,\n"
-        self.assertEqual(match.count(line), 1)
-        self.assertNotIn("patient?.age ?? ''", SERVICE)
-        self.assertEqual(match.count("overlayShape("), 2)       # the N-1 orig refusal + this coercion, nothing new
-        refusal = match.index("if (!overlayShape(patient?.orig ?? null))\n      throw new BadRequestException(`원래 정보(orig) 형식이 잘못되었습니다 — ${OVERLAY_RULE_TEXT}`);")
-        self.assertTrue(refusal < match.index(line) < match.index("state = await this.prisma.$transaction(async tx => {"))
+        assert_behaviour('pacs_source_behavior_test.cjs', '^U0B-IDENTITY-MATCH')
 
 
 # ── 3. Client source pins ─────────────────────────────────────────────────────────────────────────────────────

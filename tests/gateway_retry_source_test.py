@@ -9,12 +9,17 @@ vectors are not decoration. agent.py is read by AST and never imported (it needs
 These are source pins and a model, not behaviour: the agent cases (SQLite), the compiled server cases, the DOM
 cases, the live route case and the restore probes are hosted-only and prove the behaviour this file only names.
 """
+# S9-U0b RELIST: PACS permission/data assertions run compiled suites through pacs_source.
+# Remaining non-PACS source checks are unchanged U0f carry-over.
+# The receipt-rule byte pin retains the S4-U4 requirement that the independent U3 rule is unchanged.
+from pacs_source import assert_behaviour
 from page_source import read_page_source
 import ast
 import hashlib
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
 import unittest
 
@@ -34,7 +39,6 @@ AGENT_TESTS = text("gateway", "agent", "test_agent.py")
 README = text("gateway", "README.md")
 RULE = text("api", "src", "gateway-retry.ts")
 RECEIPT_RULE = text("api", "src", "gateway-receipt.ts")
-SERVICE = text("api", "src", "pacs.service.ts")
 CONTROLLER = text("api", "src", "pacs.controller.ts")
 SCHEMA = text("api", "prisma", "schema.prisma")
 MIGRATION_NAME = "20260924140000_gateway_retry_request"
@@ -49,9 +53,7 @@ FIXTURE = text("tests", "ops_product_transfer_fixture.py")
 WORKFLOW = text(".github", "workflows", "validate.yml")
 EPOCH = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 F01 = "같은 바이트로는 성공할 수 없습니다 — 지원 범위 밖(F-01)"
-ADVISORY = "pg_advisory_xact_lock(hashtextextended(${'kin.gateway-receipt:' + uid}, 0))"
 # U3 surfaces this unit must not touch, as they are at 9152f43 (LF-normalised sha256).
-U3_METHOD_SHA256 = "3cf9846a5d1559b9adaf4b9274ac9b61a31b02d54766f94548e95f060755c947"
 U3_RULE_SHA256 = "bff24d487a066df554c2dbe70a9ca1dbc28cf52062eebac87f9a537344d27510"
 U1B_GATEWAY_LABEL_SHA256 = "4b1b003bebeca107b0769f6eee49247e8f380d153c8269d6276673a1475aad79"
 
@@ -427,71 +429,6 @@ class AgentPins(unittest.TestCase):
 
 # ── the server ──
 
-def member_problems(service):
-    body = between(service, "  async requestGatewayRetry(uid: string, body: unknown, c: Caller) {", "\n  }\n")
-    problems = []
-    order = ["need(c.roles, 'technician', 'Gateway 재시도 요청');", "if (c.kind !== 'member')", "const me = inst(c);",
-             "parseGatewayRetryRequestBody(body)", "const s = await this.gate(uid, c);",
-             "if (!s || s.institutionId !== me) throw new NotFoundException('검사를 찾을 수 없습니다');",
-             "await this.studyAccess.prepare(c, [uid]);", "this.prisma.$transaction(", "SET LOCAL lock_timeout = '3s'", ADVISORY,
-             "await this.studyAccess.require(c, [uid], tx);",
-             "tx.studyState.findUnique({ where: { uid }, select: { institutionId: true } })",
-             "if (!study || study.institutionId !== me) return { kind: 'absent' };",
-             "tx.gatewayReceipt.findFirst({ where: { studyUid: uid, institutionId: me } })", "decideGatewayRetryRequest(receipt)",
-             "tx.gatewayRetryRequest.findUnique({ where: { studyUid_epoch_seq: key } })",
-             "if (existing) return { kind: 'already_requested', requestedAt: existing.requestedAt };",
-             "tx.gatewayRetryRequest.create({ data: { ...key, requestedAt } })",
-             "action: 'gateway.retry.request', target: uid,", "detail: dump({ epoch: key.epoch, seq: Number(key.seq) })"]
-    try:
-        positions = [body.index(needle) for needle in order]
-        if positions != sorted(positions):
-            problems.append("order")
-    except ValueError as error:
-        problems.append("missing " + str(error)[:60])
-    # R2: the role check is need() itself (admin included), never an exact or technician-only test.
-    if not body.split("\n", 1)[1].lstrip().startswith("need(c.roles, 'technician', "):
-        problems.append("need is not the first statement")
-    if "needExact" in body or re.search(r"roles\??\.includes\(\s*['\"]technician", body):
-        problems.append("technician-only")
-    if body.count("new NotFoundException('검사를 찾을 수 없습니다')") != 2 or body.count("NotFoundException(") != 2:
-        problems.append("404 wording")
-    if body.count("auditLog.create(") != 1 or body.count("gatewayRetryRequest.create(") != 1:
-        problems.append("one write and one audit")
-    for banned in ("gatewayReceipt.create", "gatewayReceipt.update", "gatewayReceipt.upsert", "studyState.update",
-                   "studyState.create", "this.orthanc", "Date.now"):
-        if banned in body:
-            problems.append(banned)
-    if "isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000" not in body:
-        problems.append("transaction options")
-    if "throw new ServiceUnavailableException({ code: GATEWAY_RETRY_BUSY });" not in body:
-        problems.append("busy")
-    return problems
-
-
-POLL_SQL = ('SELECT q."studyUid" FROM "GatewayRetryRequest" q\n'
-            '      JOIN "GatewayReceipt" r ON r."studyUid" = q."studyUid" AND r.epoch = q.epoch AND r.seq = q.seq\n'
-            '      JOIN "StudyState" s ON s.uid = q."studyUid"\n'
-            "      WHERE q.epoch = ${epoch}::uuid AND r.phase = 'retry' AND r.\"institutionId\" = ${me} AND s.\"institutionId\" = ${me}\n"
-            '      ORDER BY q."requestedAt", q."studyUid" LIMIT 100')
-
-
-def poll_problems(service):
-    body = between(service, "  async gatewayRetryRequests(query: unknown, c: Caller) {", "\n  }\n")
-    problems = []
-    order = ["needExact(c, 'gateway', 'Gateway 재시도 요청 조회');", "const me = inst(c);", "parseGatewayRetryPoll(query)",
-             "await this.prisma.$queryRaw`" + POLL_SQL + "`;", "return { studyUids: rows.map(row => row.studyUid) };"]
-    try:
-        positions = [body.index(needle) for needle in order]
-        if positions != sorted(positions):
-            problems.append("order")
-    except ValueError as error:
-        problems.append("missing " + str(error)[:60])
-    for banned in ("$transaction", ".create(", ".update(", "auditLog", "audit(", "need(c.roles", "count", ".slice("):
-        if banned in body:
-            problems.append(banned)
-    return problems
-
-
 class ServerPins(unittest.TestCase):
     def test_the_rule_module_is_pure_and_its_constants_are_the_vectors(self):
         for banned in ("import ", "require(", "prisma", "process.env", "Date", "fetch("):
@@ -511,54 +448,53 @@ class ServerPins(unittest.TestCase):
         self.assertIn("Array.isArray(body) || Object.keys(body).length !== 0", body)
 
     def test_the_member_route_checks_in_order_binds_under_the_u3_lock_and_writes_once(self):
-        self.assertEqual(member_problems(SERVICE), [])
-        method_text = between(SERVICE, "  async requestGatewayRetry(uid: string, body: unknown, c: Caller) {", "\n  }\n")
-        mutants = {
-            "R2 exact technician": SERVICE.replace("need(c.roles, 'technician', 'Gateway 재시도 요청');",
-                                                   "if (!c.roles.includes('technician')) throw new ForbiddenException('x');"),
-            "R2 needExact": SERVICE.replace("need(c.roles, 'technician', 'Gateway 재시도 요청');",
-                                            "needExact(c, 'technician', 'Gateway 재시도 요청');"),
-            "tele-received accepted": SERVICE.replace("if (!s || s.institutionId !== me) throw", "if (!s) throw"),
-            "another lock key": SERVICE.replace("${'kin.gateway-receipt:' + uid}, 0))`;\n      await this.studyAccess.require(c, [uid], tx);",
-                                                "${'kin.gateway-retry:' + uid}, 0))`;\n      await this.studyAccess.require(c, [uid], tx);"),
-            "any institution's receipt": SERVICE.replace("{ where: { studyUid: uid, institutionId: me } }", "{ where: { studyUid: uid } }"),
-            "a second audit": SERVICE.replace("      return { kind: 'requested', requestedAt };",
-                                              "      await tx.auditLog.create({ data: { actor: 'x', action: 'x', target: uid } });\n      return { kind: 'requested', requestedAt };"),
-            "the receipt is touched": SERVICE.replace("      return { kind: 'requested', requestedAt };",
-                                                      "      await tx.gatewayReceipt.update({ where: { studyUid: uid }, data: {} });\n      return { kind: 'requested', requestedAt };"),
-        }
-        for wrong, source in mutants.items():
-            with self.subTest(wrong=wrong):
-                self.assertNotEqual(source, SERVICE)
-                self.assertNotEqual(member_problems(source), [])
-        self.assertIn("return { studyUid: uid, result: outcome.kind, requestedAt: outcome.requestedAt.toISOString() };", method_text)
-        self.assertIn("throw new ConflictException({ code: GATEWAY_RETRY_UNSUPPORTED_F01 });", method_text)
-        self.assertIn("throw new ConflictException({ code: GATEWAY_RETRY_NOT_RETRY });", method_text)
-        # gate() answers absent-or-foreign with the same sentence; studyAccess.require answers restricted with it too.
-        self.assertIn("      throw new NotFoundException('검사를 찾을 수 없습니다');\n    if(s)await this.studyAccess.require(", SERVICE)
-        self.assertIn("if(uids.some(uid=>!allowed.has(uid)))throw new NotFoundException('검사를 찾을 수 없습니다');",
-                      text("api", "src", "study-access.service.ts"))
-        # need() admits admin; the UI's KinAuth.has does the same (auth.js), so admin inclusion is one rule.
-        self.assertIn("  if (!roles?.includes(role) && !roles?.includes('admin'))", SERVICE)
-        self.assertIn("return session.roles.includes(role) || session.roles.includes('admin');", AUTH)
+        assert_behaviour('gateway_retry_server_test.cjs', '^C[2-6] ')
+        self.assert_client_retry_roles(AUTH)
+
+    def assert_client_retry_roles(self, source):
+        # Run the whole auth module with a fresh document and a synthetic /me answer
+        # per role. Identity enters through init(), never by changing private state.
+        script = r"""
+const assert = require('node:assert/strict'), vm = require('node:vm');
+const source = require('node:fs').readFileSync(0, 'utf8');
+function storage() {
+  const data = new Map();
+  return { getItem: key => data.get(key) ?? null, setItem: (key, value) => data.set(key, String(value)),
+    removeItem: key => data.delete(key), key: index => [...data.keys()][index] ?? null,
+    get length() { return data.size; } };
+}
+(async () => {
+  for (const [roles, allowed] of [[['admin'], true], [['technician'], true],
+    [['radiologist'], false], [['clinician'], false], [['gateway'], false], [[], false]]) {
+    let reads = 0;
+    const context = vm.createContext({
+      location: new URL('https://synthetic.invalid/worklist/' +
+        (roles.includes('clinician') ? 'clinician.html' : 'main.html')), URL, URLSearchParams,
+      document: { cookie: '', addEventListener() {} }, addEventListener() {},
+      localStorage: storage(), sessionStorage: storage(), navigator: {},
+      setTimeout, clearTimeout, AbortController,
+      fetch: async (url, options) => {
+        assert.equal(url, 'https://synthetic.invalid/api/me');
+        assert.equal(options.method, 'GET'); reads += 1;
+        return { status: 200, ok: true, headers: { get: () => null },
+          json: async () => ({ sessionId: 'syn-session', roles, institution: 'synthetic', sub: 'syn-sub', user: 'syn-user' }) };
+      },
+    });
+    vm.runInContext(source, context, { filename: 'auth.js' });
+    const auth = vm.runInContext('KinAuth', context);
+    assert.equal(auth.has('technician'), false, 'unconfirmed identity');
+    assert.equal((await auth.init()).state, 'approved');
+    assert.equal(reads, 1);
+    assert.equal(auth.has('technician'), allowed, `Now Retry client roles: ${JSON.stringify(roles)}`);
+  }
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+        result = subprocess.run(['node', '-e', script], input=source, text=True,
+                                encoding='utf-8', capture_output=True, cwd=ROOT)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_the_poll_is_gateway_only_read_only_and_decides_pending_in_sql_before_the_limit(self):
-        self.assertEqual(poll_problems(SERVICE), [])
-        mutants = {"no seq equality": SERVICE.replace(" AND r.seq = q.seq", ""),
-                   "no epoch equality": SERVICE.replace(" AND r.epoch = q.epoch AND", " AND"),
-                   "any phase": SERVICE.replace(" AND r.phase = 'retry'", ""),
-                   "no receipt institution": SERVICE.replace(" AND r.\"institutionId\" = ${me}", ""),
-                   "no study institution": SERVICE.replace(" AND s.\"institutionId\" = ${me}", ""),
-                   "no limit": SERVICE.replace(' LIMIT 100`;', '`;'),
-                   "member admin allowed": SERVICE.replace("needExact(c, 'gateway', 'Gateway 재시도 요청 조회');",
-                                                           "need(c.roles, 'technician', 'Gateway 재시도 요청 조회');"),
-                   "a count leaks": SERVICE.replace("return { studyUids: rows.map(row => row.studyUid) };",
-                                                    "return { studyUids: rows.map(row => row.studyUid), count: rows.length };")}
-        for wrong, source in mutants.items():
-            with self.subTest(wrong=wrong):
-                self.assertNotEqual(source, SERVICE)
-                self.assertNotEqual(poll_problems(source), [])
-        self.assertIn("LIMIT 100", POLL_SQL)
+        assert_behaviour('gateway_retry_server_test.cjs', '^C[1278] ')
 
     def test_request_history_is_append_only_everywhere(self):
         sources = {path.name: path.read_text(encoding="utf-8") for path in (ROOT / "api" / "src").rglob("*.ts")}
@@ -571,15 +507,10 @@ class ServerPins(unittest.TestCase):
         self.assertEqual(sum(s.count("gatewayRetryRequest.create(") for s in sources.values()), 1)
 
     def test_u3_surfaces_are_untouched(self):
-        self.assertEqual(sha(between(SERVICE, "  async gatewayReceipt(body: unknown, c: Caller) {", "\n  }\n")), U3_METHOD_SHA256)
+        # S4-U4 required the independent receipt rule to remain byte-identical.
         self.assertEqual(sha(RECEIPT_RULE), U3_RULE_SHA256)
-        # 1 -> 2 at S4-F01V: the unchanged projection also serves an absent own study (F01VPins below).
-        self.assertEqual(SERVICE.count("projectGatewayReceipt("), 2)
-        listing = between(SERVICE, "  async listStudies(c: Caller, query?: any) {", "  private notObserved(")
-        bootstrap = between(SERVICE, "  async bootstrap(c: Caller, query?: any) {", "\n  }\n")
-        for surface in (listing, bootstrap):
-            self.assertNotIn("gatewayRetry", surface)
-            self.assertNotIn("GatewayRetry", surface)
+        assert_behaviour('gateway_receipt_server_test.cjs')
+        assert_behaviour('order_reconciliation_server_test.cjs', '^S4-U2 bootstrap')
 
     def test_the_controller_routes_and_the_live_route_table(self):
         self.assertIn("  @Get('gateway/retry-requests')\n  @Header('Cache-Control', 'no-store')\n"
@@ -826,10 +757,6 @@ class ClientPins(unittest.TestCase):
 
 # ── S4-F01V: the receipt and Now Retry of an own study with no observed image ──
 
-F01V_READ = ("const absentReceipts = notObserved?.length ? await this.prisma.gatewayReceipt.findMany({ where: { studyUid: "
-             "{ in: notObserved.map(row => row.uid) }, institutionId: me } }) : [];")
-F01V_ATTACH = ("for (const row of notObserved ?? []) { const receipt = absentReceiptByUid.get(row.uid); "
-               "if (receipt) Object.assign(row, { gatewayReceipt: projectGatewayReceipt(receipt) }); }")
 F01V_COPY = ("rows.push({uid:row.uid,origin:row.origin,createdAt:row.createdAt,"
              "...(row.gatewayReceipt===undefined?{}:{gatewayReceipt:row.gatewayReceipt})});")
 F01V_ARROW = "const drawRetry = (s, retry, retryButton, retryNote) => {"
@@ -839,28 +766,9 @@ F01V_CHANGED = ["api/src/pacs.service.ts", "worklist-v0/hpacs-lite/study-arrival
                 "tests/invariants_live.py", "tests/README.md"]
 
 
-def f01v_problems(service, main, arrivals):
-    """The absent item's receipt is read pinned to the caller's institution between the absence list and the access
-    re-check, attached only when one exists, copied only when sent, and drawn and requested by the one U4 drawing."""
+def f01v_problems(main, arrivals):
+    """Client copy/draw/request checks remain here; server reads execute S4-F01V in the compiled suite."""
     problems = []
-    listing = between(service, "  async listStudies(c: Caller, query?: any) {", "  private notObserved(")
-    order = ["const orderRows = ", "const notObserved = ", F01V_READ, "await this.studyAccess.unchanged(c,access);",
-             "const absentReceiptByUid = new Map(absentReceipts.map(r => [r.studyUid, r]));", F01V_ATTACH,
-             "const orderReconciliation = "]
-    try:
-        positions = [listing.index(needle) for needle in order]
-        if positions != sorted(positions):
-            problems.append("server order")
-        # No origin filter, as for rows: origin is not a transport gate.
-        if "origin" in listing[positions[1] + len(order[1]):positions[-1]]:
-            problems.append("origin filter")
-    except ValueError as error:
-        problems.append("server missing " + str(error)[:60])
-    if listing.count("this.prisma.gatewayReceipt.findMany(") != 2 or listing.count("projectGatewayReceipt(") != 2:
-        problems.append("receipt reads")
-    for banned in ("gatewayReceipt.create", "gatewayReceipt.update", "gatewayReceipt.upsert", "gatewayRetry", "GatewayRetry"):
-        if banned in listing:
-            problems.append(banned)
     if F01V_COPY not in js_function(arrivals, "readNotObserved"):
         problems.append("conditional copy")
     render = js_function(main, "renderObservation")
@@ -911,24 +819,12 @@ def f01v_problems(service, main, arrivals):
 
 class F01VPins(unittest.TestCase):
     def test_s4f01v_absent_receipts_are_own_read_before_the_recheck_and_drawn_by_u4_rules(self):
-        self.assertEqual(f01v_problems(SERVICE, MAIN, ARRIVALS), [])
-        read_line, unchanged = "    " + F01V_READ + "\n", "    await this.studyAccess.unchanged(c,access);\n"
-        service_mutants = {
-            "drop institutionId: me": SERVICE.replace("notObserved.map(row => row.uid) }, institutionId: me } })",
-                                                      "notObserved.map(row => row.uid) } } })"),
-            "read after unchanged": SERVICE.replace(read_line + unchanged, unchanged + read_line),
-            "attach unconditionally": SERVICE.replace("if (receipt) Object.assign(row, {", "Object.assign(row, {"),
-        }
-        for wrong, source in service_mutants.items():
-            with self.subTest(wrong=wrong):
-                self.assertNotEqual(source, SERVICE)
-                self.assertNotEqual(f01v_problems(source, MAIN, ARRIVALS), [])
+        assert_behaviour('gateway_receipt_server_test.cjs', '^S4-F01V list:')
+        self.assertEqual(f01v_problems(MAIN, ARRIVALS), [])
         with self.subTest(wrong="drop the role gate"):
             source = MAIN.replace(' && KinAuth.has("technician"));', ');')
             self.assertNotEqual(source, MAIN)
-            self.assertNotEqual(f01v_problems(SERVICE, source, ARRIVALS), [])
-        # U1b: the absence list itself is unchanged, three fields and nothing more are pushed.
-        self.assertIn("out.push({ uid: s.uid, origin: s.origin, createdAt });", between(SERVICE, "  private notObserved(", "\n  }\n"))
+            self.assertNotEqual(f01v_problems(source, ARRIVALS), [])
         # The behaviour is proved hosted: compiled server (T-S), DOM with the A-1 node cases (T-D) and live (T-L).
         server = text("tests", "gateway_receipt_server_test.cjs")
         self.assertIn("test('S4-F01V list: ", server)

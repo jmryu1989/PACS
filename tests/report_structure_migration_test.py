@@ -11,6 +11,11 @@ invisible at runtime until it is too late - a column that no SELECT names (the e
 `update` that omits instead of clearing (the clear silently did nothing), and a `select` that names
 a row wholesale (the column leaks through a response that never gated it).
 """
+# S9-U0b RELIST: PACS permission/data assertions run compiled suites through pacs_source.
+# Remaining non-PACS source checks are unchanged U0f carry-over.
+# Byte pins are confined to the explicit move/SQL provenance contract (pacs_split_contract.cjs);
+# real PostgreSQL locking and constraint behaviour still require the existing hosted suites.
+from pacs_source import assert_behaviour
 import json
 import pathlib
 import re
@@ -27,7 +32,6 @@ import ops_product_transfer_fixture as restore_fixture  # noqa: E402
 MIGRATION_DIR = ROOT / "api" / "prisma" / "migrations" / "20260921120000_report_structure"
 MIGRATION = (MIGRATION_DIR / "migration.sql").read_text(encoding="utf-8")
 SCHEMA = (ROOT / "api" / "prisma" / "schema.prisma").read_text(encoding="utf-8")
-SERVICE = (ROOT / "api" / "src" / "pacs.service.ts").read_text(encoding="utf-8")
 CONTROLLER = (ROOT / "api" / "src" / "pacs.controller.ts").read_text(encoding="utf-8")
 PURE = (ROOT / "api" / "src" / "report-structure.ts").read_text(encoding="utf-8")
 INVARIANTS = (ROOT / "tests" / "invariants_live.py").read_text(encoding="utf-8")
@@ -72,31 +76,14 @@ class ReportStructureMigration(unittest.TestCase):
         self.assertNotIn("structured", report)
 
     def test_the_service_maps_our_check_names_and_only_ours(self) -> None:
-        names = re.search(r"const STRUCTURE_CHECKS = \[(.*?)\];", SERVICE, re.S)
-        self.assertIsNotNone(names)
-        self.assertEqual(sorted(re.findall(r"'([^']+)'", names.group(1))), sorted(CHECKS))
-        # Three catch sites, the same three the citation column has: the draft write, the budget's
-        # own refusal and the commit.
-        self.assertEqual(SERVICE.count("isStructureCheck(error)") + SERVICE.count("isStructureCheck(e)"), 2)
-        self.assertIn("structureLimit()", SERVICE)
-        self.assertIn("REPORT_STRUCTURE_LIMIT", SERVICE)
+        assert_behaviour('report_structure_test.cjs', '^(our CHECK|B1 the forced release)')
 
     def test_every_limit_wrapper_call_names_a_method_that_exists(self) -> None:
         # B1: the candidate renamed the wrapper at its definition and at one of two call sites, so
         # `this.citationChecked` survived in forceDiscardDrafts and the API stopped compiling
         # (TS2339) - the image build fails before any compiled test runs, and an emitted build would
         # throw TypeError on every admin force-discard. A name check is cheap; tsc is not local.
-        defined = set(re.findall(r"private async (\w+Checked)<", SERVICE))
-        called = set(re.findall(r"this\.(\w+Checked)\(", SERVICE))
-        self.assertEqual(defined, {"reportLimitChecked"})
-        self.assertEqual(called - defined, set(), "a call to a wrapper that does not exist")
-        self.assertEqual(SERVICE.count("this.reportLimitChecked("), 2,
-                         "both writers of a version row - putReport and forceDiscardDrafts")
-        self.assertEqual(SERVICE.count("citationChecked"), 0, "the old name must not survive")
-        for owner in ("async putReport(", "async forceDiscardDrafts("):
-            start = SERVICE.index(owner)
-            end = SERVICE.index("\n  async ", start + len(owner))
-            self.assertIn("this.reportLimitChecked(", SERVICE[start:end], owner)
+        assert_behaviour('report_structure_test.cjs', '^(our CHECK|B1 the forced release)')
 
     def test_the_rendered_sentence_is_cut_and_joined_never_pattern_replaced(self) -> None:
         # B2: `String.replace(needle, replacement)` expands `$$`, `$&`, '$`' and "$'" inside the
@@ -117,50 +104,26 @@ class ReportStructureMigration(unittest.TestCase):
         # an update preserves whatever was there, so "I cleared it" would be false.
         # S7-U5: the draft is written in one place (`storeDraft`) from the whole snapshot, so there is no "request did
         # not mention it" branch left: an update always names the column, a new row omits an empty one.
-        store = SERVICE[SERVICE.index("private async storeDraft("):]
-        store = store[:store.index("\n  }\n")]
-        self.assertEqual(store.count("structured: structured ?? Prisma.DbNull"), 1, "the update says NULL out loud")
-        self.assertEqual(SERVICE.count("structured: Prisma.JsonNull"), 0, "JsonNull is the trap")
-        self.assertEqual(SERVICE.count("structured: null"), 0, "a JS null is the same trap")
-        self.assertIn("content?.structured.length ? content.structured : null", store, "an empty list is no list")
-        self.assertIn("...(structured ? { structured } : {})", store, "a new row has nothing to clear, so it omits")
-        self.assertEqual(SERVICE.count("reportDraft.upsert("), 0, "no second, unconditional draft write beside it")
+        assert_behaviour('report_structure_test.cjs', '^A1 ')
     def test_every_writer_of_a_version_row_carries_the_column(self) -> None:
         # P1/P2: three writers exist - commit, reset's preserved row, and the admin force discard.
-        self.assertIn("...(structured.length ? { structured } : {})", SERVICE)
-        self.assertIn("...(headStructured.length ? { structured: headStructured } : {})", SERVICE)
-        self.assertIn("...(d.structured === null || d.structured === undefined ? {} : { structured: d.structured })",
-                      SERVICE)
+        assert_behaviour('report_structure_test.cjs', '^(commit keeps|reset carries|force discard)')
 
     def test_the_force_discard_select_names_the_column(self) -> None:
         # A raw SELECT that forgets the column destroys the evidence while preserving the sentence,
         # and nothing at runtime would say so.
-        select = re.search(r'SELECT uid, author, findings, conclusion, recommendation, "baseVersion",(.*?)FROM "ReportDraft"',
-                           SERVICE, re.S)
-        self.assertIsNotNone(select)
-        self.assertIn("structured", select.group(1))
-        self.assertIn("citations", select.group(1))
+        assert_behaviour('report_structure_test.cjs', '^force discard')
 
     def test_the_commit_lock_reads_both_json_columns_in_one_statement(self) -> None:
         # S7-U5: the caller's row is locked and read once (`ownDraft`), by the draft write and the commit alike.
-        own = SERVICE[SERVICE.index("private async ownDraft("):]
-        own = own[:own.index("\n  }\n")]
-        select = re.search(r'SELECT (.*?)FROM "ReportDraft" WHERE uid = \$\{uid\} AND author = \$\{c\.actor\} FOR UPDATE', own, re.S)
-        self.assertIsNotNone(select)
-        for column in ("citations", "structured", "revision", "present"):
-            self.assertIn(column, select.group(1))
-        self.assertEqual(own.count("FOR UPDATE"), 1, "one statement locks the row and reads both columns")
+        assert_behaviour('pacs_split_test.cjs', '^U0B-STRUCT-NORMAL')
 
     def test_no_existing_response_gained_the_column(self) -> None:
         # P9/P15: `versions()` selects by name and `toClient` projects five draft fields. If either
         # started returning rows wholesale, this column would leave through a surface that never
         # gated it.
-        versions = re.search(r"return this\.prisma\.reportVersion\.findMany\((.*?)\}\);", SERVICE, re.S)
-        self.assertIsNotNone(versions)
-        self.assertNotIn("structured", versions.group(1))
-        to_client = re.search(r"draft: \(hidden \|\| !d \|\| !d\.present\) \? null : \{(.*?)\},\n", SERVICE, re.S)
-        self.assertIsNotNone(to_client)
-        self.assertNotIn("structured", to_client.group(1))
+        assert_behaviour('report_citation_test.cjs', '^the history response')
+        assert_behaviour('pacs_source_behavior_test.cjs', '^U0B-PROJECTION')
     def test_the_one_new_route_is_declared_where_the_live_suite_checks_it(self) -> None:
         self.assertIn("@Get('studies/:uid/report/structure')", CONTROLLER)
         self.assertIn('("GET", "studies/:uid/report/structure"): Route(Kind.REPORT, "structure")', INVARIANTS)
@@ -201,14 +164,9 @@ class ReportStructureMigration(unittest.TestCase):
         # P6/P7. The seam is one instance property a test overwrites on its own instance; anything
         # else (env var, header, route) would make invented clinical content reachable from the
         # product. P12 made it a validated property pair - still one seam, now with a gate on it.
-        self.assertIn("protected get structureCatalog()", SERVICE)
-        self.assertIn("protected set structureCatalog(", SERVICE)
-        self.assertIn("validateCatalog(next);", SERVICE,
-                      "the setter is the gate; an unchecked catalog must not be installable")
-        self.assertEqual(SERVICE.count("SYN-"), 0, "no synthetic item may be named in the service")
+        assert_behaviour('report_structure_test.cjs', '^the injection seam validates')
         self.assertEqual(PURE.count("SYN-"), 0, "nor in the pure module")
         self.assertEqual(PURE.count("process.env"), 0, "no environment-variable seam")
-        self.assertEqual(SERVICE.count("svc.structureCatalog"), 0)
         # The literal is brace-matched with string contents skipped, not regex-scraped: `[^\]]*`
         # stops at the first `]`, and every shipped template contains `{value}`. A truncated
         # extraction here would turn the leak assertion below into a test of nothing.

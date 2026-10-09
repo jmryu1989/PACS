@@ -742,6 +742,8 @@ Every `scripts/record-run.py --run-dir` in `validate.yml` sits under a path of a
 
 | Job | `--run-dir` | Artifact(s) | Step |
 |---|---|---|---|
+| `measurements` | `tmp/workspace-ui-ci/pacs-split` | `synthetic-workspace-dom-results` | S9-U0b RELIST AST movement contract and independent structure mutants |
+| `measurements` | `tmp/workspace-ui-ci/pacs-source-behaviour` | `synthetic-workspace-dom-results` | S9-U0b RELIST source service behaviour gaps |
 | `measurements` | `tmp/workspace-ui-ci/citation-vectors` | `synthetic-workspace-dom-results` | S3-U2a shared citation vectors against an independent rule |
 | `measurements` | `tmp/workspace-ui-ci/citation-migration` | `synthetic-workspace-dom-results` | S3-U2a additive citation migration, canonical bounds and leak boundary |
 | `measurements` | `tmp/workspace-ui-ci/structure-vectors` | `synthetic-workspace-dom-results` | S3-structured-report shared render vectors against an independent rule and the empty product catalog |
