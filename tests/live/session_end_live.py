@@ -32,6 +32,9 @@ enabled. Every other case only reads Keycloak and the database.
 Owned data: the LiveStack test identities doctor (A) and doctor2 (B), their product sessions, their access rows, the
 end marks (IdpSessionEnd) of their own provider sessions and A's isolation fact (MemberIsolation) - all removed at the
 end. Nothing secret is printed: each case prints one line `S7-U5-END-LIVE {case, ...}` of names, counts and booleans.
+On a browser wait timeout, `S7-U5-WAIT-DIAGNOSTIC` adds at most 64 KiB of route/status/console categories and a
+public landing reason. Each event history keeps at most 64 entries. Bodies, cookies, tokens and arbitrary page text
+are omitted; KIN_EVIDENCE_DIR also receives this JSON if configured. The original timeout still fails the case.
 
 STATUS WHEN WRITTEN (2026-10-05): not run - this job had no stack (Docker was out of bounds). The first run on the
 stack is its first execution; a harness error there is not evidence about the product. SE-01..SE-08 ran 8/8 on the
@@ -42,17 +45,19 @@ another operator) - their first run is their first execution. SE-03b and SE-03c 
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
 import time
 import unittest
+from collections import deque
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 from invariants_live import ROOT, psql, purge_user_audit
 from session_support import cleanup_sessions, setup_stack
@@ -102,6 +107,42 @@ ANSWERED = """() => !/\\/index\\.html$/.test(location.pathname) || window.kinTes
 # The form's own field ids and Keycloak's message element - not its wording.
 SUBMITTED = """() => !location.pathname.startsWith('/auth/realms/kin/login-actions/authenticate')
   || (document.readyState === 'complete' && !!document.querySelector('#input-error, .kc-feedback-text'))"""
+
+
+# Keep only known routes: even a path or hostname can carry credentials. Raw query,
+# fragment, userinfo, arbitrary body/console text and screenshots are never saved.
+DIAGNOSTIC_ROUTES = frozenset({
+    "/api/me", "/api/auth/login", "/api/auth/register", "/api/auth/callback",
+    "/api/auth/logout", "/api/auth/entry",
+    "/auth/realms/kin/protocol/openid-connect/auth", "/auth/realms/kin/protocol/openid-connect/logout",
+    "/auth/realms/kin/login-actions/authenticate", "/auth/realms/kin/login-actions/restart",
+    APP + "index.html", APP + "main.html", APP + "clinician.html",
+})
+
+
+def diagnostic_url(value: str) -> str:
+    try:
+        if len(value) > 4096:
+            return "[omitted-url]"
+        url = urlparse(value)
+        if url.scheme in ("", "http", "https") and url.path in DIAGNOSTIC_ROUTES:
+            return url.path
+    except (TypeError, ValueError):
+        pass
+    return "[omitted-url]"
+
+
+def diagnostic_auth_error(value: str) -> str | None:
+    # These public landing reasons distinguish a refused re-entry from a stuck
+    # navigation without retaining any OIDC query values.
+    try:
+        if len(value) <= 4096:
+            reason = parse_qs(urlparse(value).query).get("auth_error", [None])[0]
+            if reason in ("stale", "session_active", "entry_unconfirmed", "end_unconfirmed", "login_failed", "sso_unidentified"):
+                return reason
+    except (TypeError, ValueError):
+        pass
+    return None
 
 
 def compose_done(done: subprocess.CompletedProcess, verb: str) -> None:
@@ -178,17 +219,86 @@ class SessionEndLive(unittest.TestCase):
             elif url.path.endswith("/protocol/openid-connect/auth"):
                 context.asked.append(("authorize", parse_qs(url.query).get("prompt", [None])[0]))
         context.on("request", note)
+        context.on("page", self.watch_page)
         self.contexts.append(context)
         return context, context.new_page()
 
+    def watch_page(self, page):
+        # A fixed-size history is available even when the hosted runner removes
+        # KIN_EVIDENCE_DIR. No body read, extra request or completion wait is added.
+        page.diagnostic = {key: deque(maxlen=64) for key in ("events", "auth_responses", "console_errors")}
+
+        def navigated(frame):
+            if frame == page.main_frame:
+                page.diagnostic["events"].append({"kind": "navigation", "url": diagnostic_url(frame.url)})
+
+        def response_seen(response):
+            route = diagnostic_url(response.url)
+            if route.startswith("/api/auth/") or route.startswith("/auth/realms/kin/"):
+                method = response.request.method
+                location = response.headers.get("location", "")
+                page.diagnostic["auth_responses"].append({"url": route, "status": response.status,
+                    "method": method if method in ("GET", "POST", "DELETE", "OPTIONS") else "other",
+                    "location": diagnostic_url(location), "auth_error": diagnostic_auth_error(location)})
+
+        def console(message):
+            if message.type == "error":
+                # Retain fixed browser categories, never a regex match that could
+                # contain an arbitrary console payload disguised as an error code.
+                codes = [code for code in ("net::ERR_FAILED", "net::ERR_ABORTED", "net::ERR_CONNECTION_REFUSED",
+                         "net::ERR_NAME_NOT_RESOLVED", "net::ERR_TIMED_OUT") if code in message.text[:4096]]
+                page.diagnostic["console_errors"].append({"kind": "console-error", "codes": codes,
+                    "source": diagnostic_url(message.location.get("url", "")), "text": "omitted"})
+
+        def observe(callback):
+            def guarded(value):
+                try:
+                    callback(value)
+                except Exception:
+                    page.diagnostic["events"].append({"kind": "diagnostic-unavailable"})
+            return guarded
+
+        page.on("framenavigated", observe(navigated))
+        page.on("response", observe(response_seen))
+        page.on("requestfailed", observe(lambda request: page.diagnostic["events"].append(
+            {"kind": "request-failed", "url": diagnostic_url(request.url)})))
+        page.on("console", observe(console))
+        page.on("pageerror", observe(lambda error: page.diagnostic["console_errors"].append({"kind": "page-error", "text": "omitted"})))
+
+    def dump_wait_failure(self, page, wait: str):
+        """Best-effort, bounded evidence; never replace or retry the original failure."""
+        try:
+            dump = {"case": self._testMethodName, "wait": wait, "url": diagnostic_url(page.url),
+                    "auth_error": diagnostic_auth_error(page.url),
+                    **{key: list(values) for key, values in page.diagnostic.items()}}
+            encoded = json.dumps(dump, ensure_ascii=True)
+            if len(encoded) > 65536:
+                encoded = json.dumps({"case": self._testMethodName, "wait": wait, "omitted": "size-limit"})
+            print("S7-U5-WAIT-DIAGNOSTIC " + encoded, flush=True)
+            root = os.environ.get("KIN_EVIDENCE_DIR")
+            if root:
+                directory = Path(root)
+                directory.mkdir(parents=True, exist_ok=True)
+                (directory / (self._testMethodName + "-" + wait + ".json")).write_text(encoded + "\n", encoding="utf-8")
+        except Exception:
+            print("S7-U5-WAIT-DIAGNOSTIC unavailable", flush=True)
+
     def settle(self, page) -> str:
-        return page.wait_for_function(WHERE).json_value()
+        try:
+            return page.wait_for_function(WHERE).json_value()
+        except PlaywrightTimeoutError:
+            self.dump_wait_failure(page, "WHERE")
+            raise
 
     def press(self, page, selector: str) -> str:
         """One press of a landing button; where the browser is once the press has been answered."""
-        page.evaluate(WATCH_NOTICE)
-        page.click(selector)
-        page.wait_for_function(ANSWERED)
+        try:
+            page.evaluate(WATCH_NOTICE)
+            page.click(selector)
+            page.wait_for_function(ANSWERED)
+        except PlaywrightTimeoutError:
+            self.dump_wait_failure(page, "ANSWERED")
+            raise
         return self.settle(page)
 
     def credentials(self, page, who: str, name: bool = True) -> str:
@@ -201,7 +311,11 @@ class SessionEndLive(unittest.TestCase):
                                  self.stack.username(self.logins[who]))
         page.fill("#password", self.stack.passwords[self.logins[who]])
         page.click("#kc-login")
-        page.wait_for_function("() => !location.pathname.startsWith('/auth/realms/kin/login-actions/authenticate') || !!document.querySelector('#input-error')")
+        try:
+            page.wait_for_function("() => !location.pathname.startsWith('/auth/realms/kin/login-actions/authenticate') || !!document.querySelector('#input-error')")
+        except PlaywrightTimeoutError:
+            self.dump_wait_failure(page, "SUBMITTED")
+            raise
         return self.settle(page)
 
     def sign_in(self, page, who: str, opens: int = 1) -> str:
