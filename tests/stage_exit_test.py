@@ -210,14 +210,15 @@ class StageExitTest(unittest.TestCase):
     def test_node_batch_requires_every_case_to_pass_without_filtering(self):
         tests = ["node:tests/lean_fixture.cjs", "node:tests/second_fixture.cjs"]
         for name, counts, extra, expected in (
-                ("passed", (2, 0, 0), [], True),
-                ("failed", (1, 1, 0), [], False),
-                ("skipped", (1, 0, 1), [], False),
-                ("filtered", (2, 0, 0), ["--test-name-pattern=one"], False)):
+                ("passed", (2, 0, 0, 0), [], True),
+                ("failed", (1, 1, 0, 0), [], False),
+                ("skipped", (1, 0, 1, 0), [], False),
+                ("cancelled", (1, 0, 0, 1), [], False),
+                ("filtered", (2, 0, 0, 0), ["--test-name-pattern=one"], False)):
             with self.subTest(name=name):
-                passed, failed, skipped = counts
+                passed, failed, skipped, cancelled = counts
                 tap = (f"1..2\n# tests 2\n# pass {passed}\n# fail {failed}\n"
-                       f"# cancelled 0\n# skipped {skipped}\n# todo 0\n")
+                       f"# cancelled {cancelled}\n# skipped {skipped}\n# todo 0\n")
                 run = subprocess.run(self.record(
                     [sys.executable, "-c", "print(" + repr(tap) + ")", *extra,
                      "--test", "tests/lean_fixture.cjs", "tests/second_fixture.cjs"], name),
