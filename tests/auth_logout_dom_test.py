@@ -54,6 +54,7 @@ Retained (diagnosis scenario 0.C; U5S-REQ-25): BR-01..BR-09 with the contract up
 
 Mutants (U5S-REQ-26) are one-off copies run outside this file; nothing here edits a product file.
 """
+from page_source import include_moved_files
 import json
 import os
 import re
@@ -145,6 +146,7 @@ SERVED_FILES = (
     "worklist-v0/hpacs-lite/clinician.html",
     "worklist-v0/hpacs-lite/clinician.js",
 )
+SERVED_FILES = include_moved_files(SERVED_FILES, ROOT)
 SERVED = set()
 
 ORIGIN = "https://syn.test"

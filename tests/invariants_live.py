@@ -7,6 +7,7 @@ REPORT라고 선언하는 순간 실제 Keycloak 토큰·Orthanc 검사·Postgre
 """
 
 from __future__ import annotations
+from page_source import read_page_source
 
 import base64
 import hashlib
@@ -3803,7 +3804,7 @@ class LiveInvariantTests(unittest.TestCase):
         self.assertNotIn("secret", clients[0], "Gateway 시크릿을 렐름 JSON에 커밋했습니다")
         self.assertFalse(clients[0].get("enabled"), "시크릿 없는 Gateway 템플릿은 활성화하면 안 됩니다")
 
-        page = (ROOT / "worklist-v0" / "hpacs-lite" / "main.html").read_text(encoding="utf-8")
+        page = read_page_source(ROOT / "worklist-v0" / "hpacs-lite" / "main.html")
         self.assertRegex(page, r"\.userfilter\s*\{[^}]*flex-wrap:\s*wrap")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         gateway_readme = (ROOT / "gateway" / "README.md").read_text(encoding="utf-8")
@@ -4236,7 +4237,7 @@ class LiveInvariantTests(unittest.TestCase):
             self.assert_status(reset, 201)
             self.assertEqual(reset.body["rs"], "W")
             # 화면도 같은 말을 한다 — 잠금은 안내일 뿐이지만, 눌러보고 거절당하는 것보다 회색이 낫다
-            page = (ROOT / "worklist-v0" / "hpacs-lite" / "main.html").read_text(encoding="utf-8")
+            page = read_page_source(ROOT / "worklist-v0" / "hpacs-lite" / "main.html")
             self.assertIn('for (const id of ["#b-save", "#b-transcribe", "#b-approve"])', page)
             self.assertIn("승인된 판독문은 추가기재(Addendum) 또는 판독 취소(Reset)로만 바꿀 수 있습니다", page)
 

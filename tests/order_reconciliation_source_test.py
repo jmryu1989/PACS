@@ -13,6 +13,7 @@
 What this file cannot see: whether the compiled server, the browser and PostgreSQL behave as the
 source says. That is the hosted evidence named in the unit report.
 """
+from page_source import read_page_source
 import json
 import re
 import sys
@@ -46,7 +47,7 @@ MIGRATION_NAME = "20260924120000_order_accession"
 MIGRATION = text("api", "prisma", "migrations", MIGRATION_NAME, "migration.sql")
 CLIENT = text("worklist-v0", "hpacs-lite", "order-reconciliation.js")
 PAGES = text("worklist-v0", "hpacs-lite", "study-pages.js")
-MAIN = text("worklist-v0", "hpacs-lite", "main.html")
+MAIN = read_page_source(ROOT.joinpath("worklist-v0", "hpacs-lite", "main.html"))
 HARNESS = text("tests", "worklist_arrivals_dom_test.py")
 WORKFLOW = text(".github", "workflows", "validate.yml")
 

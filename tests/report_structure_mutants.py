@@ -33,6 +33,7 @@ Rules this runner holds itself to:
 
 stdlib only. It launches the browser test as a child process; it never drives a browser itself.
 """
+from page_source import read_page_bytes, read_source
 import argparse
 import hashlib
 import json
@@ -159,7 +160,7 @@ def main():
                         help="Check every anchor, marker and case name against the shipped sources and stop")
     args = parser.parse_args()
 
-    source = {name: path.read_text(encoding="utf-8") for name, path in SOURCES.items()}
+    source = {name: read_source(path) for name, path in SOURCES.items()}
     digest = {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in SOURCES.items()}
     for name in sorted(digest):
         print("%s sha256 %s" % (SOURCES[name].name, digest[name]))
@@ -201,7 +202,10 @@ def main():
         clean = {}
         for name, path in SOURCES.items():
             copy = scratch / ("baseline-%s%s" % (name, path.suffix))
-            shutil.copyfile(path, copy)
+            if path.suffix.lower() == ".html":
+                copy.write_bytes(read_page_bytes(path))
+            else:
+                shutil.copyfile(path, copy)
             clean[name] = copy
         done, output = run_case(clean, None, args.timeout)
         if args.out:

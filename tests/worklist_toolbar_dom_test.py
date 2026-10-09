@@ -42,6 +42,7 @@ S7-PINS fix1 (Astra S7-COMMAND-R-001-F09): the two fixed commits are read by tes
 fixed_file(). A clone without them fetches them from origin; if they still cannot be read, or are not the pinned bytes,
 the equivalence cases fail - they never skip.
 """
+from page_source import read_page_source
 import hashlib
 import json
 import os
@@ -379,7 +380,7 @@ class WorklistToolbarStructureTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.text = lf(MAIN.read_text(encoding='utf-8'))
+        cls.text = lf(read_page_source(MAIN))
         cls.parts = parts(cls.text)
 
     def test_pins_match_the_fixed_commits(self):
@@ -428,7 +429,7 @@ class WorklistToolbarStructureTest(unittest.TestCase):
 class WorklistToolbarDOMTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.html = page_html(MAIN.read_text(encoding='utf-8'))
+        cls.html = page_html(read_page_source(MAIN))
         cls.search = (ASSETS / 'worklist-search.js').read_text(encoding='utf-8')
         cls.seen = []
         cls.pw = sync_playwright().start()
@@ -473,7 +474,7 @@ class WorklistToolbarDOMTest(unittest.TestCase):
     def test_every_base_toolbar_element_is_on_the_page(self):
         # The live page: each base control and each control given an id here is found, and every button or summary among
         # them has an English label (AGENTS.md section 4); where each sits is the next case.
-        got = self.serialize(MAIN.read_text(encoding='utf-8'))
+        got = self.serialize(read_page_source(MAIN))
         self.assertEqual([], [row[0] for row in got if row[1] is None])
         for key, tag, label in got:
             if tag.startswith(('<button', '<summary')):

@@ -1,3 +1,4 @@
+const { readPageSource } = require('./page_source.cjs');
 // Run with node --test tests/worklist_prior_test.cjs. No DOM, network or fixture writes.
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
@@ -5,7 +6,7 @@ const { join } = require('node:path');
 const { test } = require('node:test');
 const vm = require('node:vm');
 
-const html = readFileSync(join(__dirname, '../worklist-v0/hpacs-lite/main.html'), 'utf8');
+const html = readPageSource(join(__dirname, '../worklist-v0/hpacs-lite/main.html'));
 const fmtD = html.match(/^    const fmtD = .*;$/m)?.[0];
 const start = html.indexOf('    function validPriorDate(');
 const end = html.indexOf('    function openFilmbox(', start);

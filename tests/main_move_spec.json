@@ -1,0 +1,941 @@
+{
+  "schema": "s9-u0a-move/1",
+  "base": "2fc7358baffcec4048f5d7a7e7e9e9b478296942",
+  "page": "worklist-v0/hpacs-lite/main.html",
+  "parts": [
+    18,
+    30,
+    45
+  ],
+  "note": "현재 AST에서 재생성한 순서 보존 run. 제품 미이동. PRE 승인 SHA에서 byte baseline과 문장 목록을 다시 생성해야 한다.",
+  "modules": [
+    {
+      "file": "page-core.js",
+      "job": "페이지 공통 세션·전송·표시 도구",
+      "statements": [
+        "sess, user, userDisplayName",
+        "$",
+        "actorNames",
+        "rememberActor",
+        "displayActor",
+        "tagv",
+        "esc",
+        "fmtD",
+        "today",
+        "ageOf",
+        "API",
+        "serverMode",
+        "offline",
+        "myInstitution, myInstitutionName, institutions",
+        "work",
+        "ExpressionStatement after work #1",
+        "transport",
+        "sessionEndHooks",
+        "onSessionEnd",
+        "accountChangeHooks",
+        "notifyAccountChanged",
+        "onCommonEnd",
+        "accountReplaced",
+        "staleAnswer",
+        "api",
+        "toastTimer",
+        "toast",
+        "apiFail"
+      ]
+    },
+    {
+      "file": "study-state.js",
+      "job": "검사별 로컬 상태 보존",
+      "statements": [
+        "appState",
+        "legacyAppState",
+        "TryStatement after legacyAppState #1",
+        "STATE_KEYS",
+        "OVERLAY_KEYS",
+        "overlayValue",
+        "saveApp"
+      ]
+    },
+    {
+      "file": "order-list-store.js",
+      "job": "데모 오더 저장소",
+      "statements": [
+        "SEED_ORDERS",
+        "orders",
+        "TryStatement after orders #1",
+        "IfStatement after orders #1",
+        "saveOrders",
+        "ExpressionStatement after saveOrders #1"
+      ]
+    },
+    {
+      "file": "report-templates.js",
+      "job": "판독 상용구 모델과 삽입",
+      "statements": [
+        "templates",
+        "TryStatement after templates #1",
+        "ExpressionStatement after templates #1",
+        "saveTemplatesLocal",
+        "ExpressionStatement after saveTemplatesLocal #1",
+        "templateClass",
+        "templateModalities",
+        "renderTemplateBodyparts",
+        "renderTemplates",
+        "reportEditorBlock",
+        "templateInsertionBlock",
+        "insertTemplate",
+        "ExpressionStatement after insertTemplate #1"
+      ]
+    },
+    {
+      "file": "report-dictation.js",
+      "job": "받아쓰기와 판독 입력 연결",
+      "statements": [
+        "dictationField",
+        "dictationBlock",
+        "dictationContext",
+        "dictationInsert",
+        "dictationPlacement",
+        "dictation",
+        "ExpressionStatement after dictation #1",
+        "ForOfStatement after dictation #1",
+        "dictationDrawerSeq",
+        "standDownFindingsForDictationReview",
+        "ExpressionStatement after standDownFindingsForDictationReview #1",
+        "ExpressionStatement after standDownFindingsForDictationReview #2"
+      ]
+    },
+    {
+      "file": "report-templates-ui.js",
+      "job": "상용구 편집 UI 이벤트",
+      "statements": [
+        "ExpressionStatement after standDownFindingsForDictationReview #3",
+        "ExpressionStatement after standDownFindingsForDictationReview #4",
+        "ExpressionStatement after standDownFindingsForDictationReview #5",
+        "ExpressionStatement after standDownFindingsForDictationReview #6",
+        "ExpressionStatement after standDownFindingsForDictationReview #7",
+        "templatePreview, templatePreviewReturn",
+        "closeTemplatePreview",
+        "updateTemplatePreview",
+        "ExpressionStatement after updateTemplatePreview #1",
+        "ExpressionStatement after updateTemplatePreview #2",
+        "ExpressionStatement after updateTemplatePreview #3",
+        "ExpressionStatement after updateTemplatePreview #4",
+        "ExpressionStatement after updateTemplatePreview #5",
+        "ExpressionStatement after updateTemplatePreview #6",
+        "expandShortcut",
+        "ExpressionStatement after expandShortcut #1",
+        "templateEditor",
+        "currentTemplateText",
+        "reportTemplateAccessBlock",
+        "reportTemplateBlock",
+        "updateReportTemplateButton",
+        "updateTemplateEditor",
+        "closeTemplateEditor",
+        "editTemplate",
+        "ExpressionStatement after editTemplate #1",
+        "ExpressionStatement after editTemplate #2",
+        "ExpressionStatement after editTemplate #3",
+        "ExpressionStatement after editTemplate #4",
+        "ExpressionStatement after editTemplate #5",
+        "ExpressionStatement after editTemplate #6",
+        "ExpressionStatement after editTemplate #7"
+      ]
+    },
+    {
+      "file": "worklist-columns-view.js",
+      "job": "워크리스트 열 정의와 셀 표시",
+      "statements": [
+        "COLS",
+        "shownStudyDesc",
+        "studyPriority",
+        "CELL",
+        "mode",
+        "fval",
+        "columnPrefs, multiSelection, imagePreview, imageThumbnails, worklistSearch, rowNavigation, relatedRowNavigation, relatedRows",
+        "shownColumns",
+        "renderHeads",
+        "ExpressionStatement after renderHeads #1"
+      ]
+    },
+    {
+      "file": "worklist-state.js",
+      "job": "워크리스트 공유 상태 선언",
+      "statements": [
+        "studies",
+        "studyObservationModel",
+        "orderReconciliationModel",
+        "studyIdentityModel",
+        "orderRefreshSequence",
+        "gatewayRetryRequestSeq",
+        "favoriteList, studyTagList, studyTagScope",
+        "demoMode",
+        "quickDays, sortKey, sortDir, selectedUid, selectedOid",
+        "relatedUid",
+        "relatedModality, relatedBodyPart, relatedIncludeCurrent"
+      ]
+    },
+    {
+      "file": "worklist-data.js",
+      "job": "워크리스트 데이터 동기화",
+      "statements": [
+        "relatedParts",
+        "worklistBodyParts",
+        "mountWorklistBodyParts",
+        "bodyPartCountNote",
+        "renderBodyParts",
+        "relatedCandidates",
+        "DEMO_IMG",
+        "applyState",
+        "noteSummaries",
+        "noteLabel",
+        "updateNoteSummary",
+        "readerAssignments",
+        "updateReaderAssignment",
+        "fromApi",
+        "listLoadSequence",
+        "ExpressionStatement after listLoadSequence #1",
+        "emergencyMenu",
+        "studyPageClient",
+        "ExpressionStatement after studyPageClient #1",
+        "ExpressionStatement after studyPageClient #2",
+        "ExpressionStatement after studyPageClient #3",
+        "assertStudyOwner",
+        "storageSeq, storageLast",
+        "refreshStorage",
+        "paintStorage",
+        "load",
+        "paintDemoList"
+      ]
+    },
+    {
+      "file": "worklist-view.js",
+      "job": "워크리스트 필터·정렬·행 표시",
+      "statements": [
+        "dayStart",
+        "withinDays",
+        "testCol",
+        "savedFilterDays",
+        "filteredFor",
+        "consultationFilter, consultationFilterSequence",
+        "searchCriteria",
+        "filtered",
+        "orderedStudies",
+        "resultPage, resultQuery, resultPageSize",
+        "render",
+        "setMode",
+        "ExpressionStatement after setMode #1",
+        "ExpressionStatement after setMode #2"
+      ]
+    },
+    {
+      "file": "sr-reader.js",
+      "job": "외부 SR 원문 읽기",
+      "statements": [
+        "srTree",
+        "srStyle",
+        "ExpressionStatement after srStyle #1",
+        "ExpressionStatement after srStyle #2",
+        "srDialog",
+        "ExpressionStatement after srDialog #1",
+        "ExpressionStatement after srDialog #2",
+        "ExpressionStatement after srDialog #3",
+        "ExpressionStatement after srDialog #4",
+        "ExpressionStatement after srDialog #5",
+        "srEpoch, srAbort, srUid, srSeries, srDocuments",
+        "srVal",
+        "srValidUid",
+        "srClear",
+        "closeSR",
+        "srLoad",
+        "srOptions",
+        "srList",
+        "ExpressionStatement after srList #1",
+        "ExpressionStatement after srList #2",
+        "ExpressionStatement after srList #3",
+        "ExpressionStatement after srList #4",
+        "ExpressionStatement after srList #5",
+        "ExpressionStatement after srList #6",
+        "ExpressionStatement after srList #7",
+        "ExpressionStatement after srList #8"
+      ]
+    },
+    {
+      "file": "current-study.js",
+      "job": "현재 검사 선택",
+      "statements": [
+        "cur",
+        "relatedStudy",
+        "viewed",
+        "viewingUid",
+        "curOrder",
+        "patientCopyContext, patientCopyEpoch, patientCopyBusy, patientCopyEnded",
+        "patientCopyTarget",
+        "renderPatientCopy",
+        "copyViewedPatientId",
+        "endPatientCopy",
+        "ExpressionStatement after endPatientCopy #1",
+        "ExpressionStatement after endPatientCopy #2",
+        "ExpressionStatement after endPatientCopy #3",
+        "select",
+        "refreshRight"
+      ]
+    },
+    {
+      "file": "study-info-panel.js",
+      "job": "검사 정보 패널 표시",
+      "statements": [
+        "renderClinical",
+        "applyObservation",
+        "markObservationUnavailable",
+        "renderObservation",
+        "requestGatewayRetry",
+        "ExpressionStatement after requestGatewayRetry #1",
+        "applyOrderReconciliation",
+        "renderOrderReconciliation",
+        "applyStudyIdentity",
+        "renderStudyIdentity",
+        "noteIdentityCorrection"
+      ]
+    },
+    {
+      "file": "related-studies.js",
+      "job": "관련 검사 목록 표시",
+      "statements": [
+        "relatedDateLabel",
+        "relatedReportMeta",
+        "relatedModalities",
+        "relatedPage, relatedPageQuery",
+        "ExpressionStatement after relatedPage, relatedPageQuery #1",
+        "ExpressionStatement after relatedPage, relatedPageQuery #2",
+        "ExpressionStatement after relatedPage, relatedPageQuery #3",
+        "renderRelated"
+      ]
+    },
+    {
+      "file": "study-thumbnails.js",
+      "job": "검사 썸네일 읽기",
+      "statements": [
+        "thumbSeq, thumbController, thumbDone, thumbUrls, thumbSort",
+        "orderedThumbs",
+        "cancelThumbs",
+        "ExpressionStatement after cancelThumbs #1",
+        "ExpressionStatement after cancelThumbs #2",
+        "renderThumbs"
+      ]
+    },
+    {
+      "file": "order-list.js",
+      "job": "오더 목록 표시와 갱신",
+      "statements": [
+        "ofval",
+        "ExpressionStatement after ofval #1",
+        "filteredOrders",
+        "renderOrders",
+        "ExpressionStatement after renderOrders #1",
+        "ExpressionStatement after renderOrders #2",
+        "refreshOrders",
+        "ExpressionStatement after refreshOrders #1",
+        "ExpressionStatement after refreshOrders #2"
+      ]
+    },
+    {
+      "file": "study-image-requests.js",
+      "job": "검사 영상 요청 패널",
+      "statements": [
+        "mountImageRequests",
+        "imageRequests",
+        "TryStatement after imageRequests #1"
+      ]
+    },
+    {
+      "file": "study-corrections.js",
+      "job": "검사 정보 정정",
+      "statements": [
+        "doMatch",
+        "doUnmatch",
+        "setSs",
+        "ExpressionStatement after setSs #1",
+        "ExpressionStatement after setSs #2",
+        "openModify",
+        "ExpressionStatement after openModify #1",
+        "saveModify",
+        "ExpressionStatement after saveModify #1",
+        "ExpressionStatement after saveModify #2",
+        "doDelete"
+      ]
+    },
+    {
+      "file": "related-report.js",
+      "job": "관련 검사 판독문 표시",
+      "statements": [
+        "RFIELDS",
+        "relatedReportSeq",
+        "clearRelatedReport",
+        "loadRelatedReport",
+        "returnToReportStudy",
+        "previewRelated"
+      ]
+    },
+    {
+      "file": "report-editor.js",
+      "job": "판독 편집 상태와 불러오기",
+      "statements": [
+        "selectionSeq",
+        "caretFields",
+        "noteCaret",
+        "forgetCaret",
+        "caretAt",
+        "markSelectionChanged",
+        "leftNotes",
+        "renderLeftNotes",
+        "noteLeftStudy",
+        "dropLeftNote",
+        "reportOrigin",
+        "recordReportOrigin",
+        "reportBaseVersion",
+        "renderedOrigin",
+        "commitFailureRoute",
+        "staleHeadOf",
+        "reportSource",
+        "reportRefreshPendingFor",
+        "loadReport",
+        "renderDraftBar",
+        "renderDraftHint",
+        "reportApart",
+        "reportDraftBehind",
+        "discardDraft",
+        "ExpressionStatement after discardDraft #1",
+        "reportUnknownDiscards",
+        "noteUnknownDiscard",
+        "learnDiscardOutcome",
+        "openDraftConflict",
+        "readDraftConflict",
+        "ExpressionStatement after readDraftConflict #1",
+        "ExpressionStatement after readDraftConflict #2",
+        "ExpressionStatement after readDraftConflict #3",
+        "reloadServerReport",
+        "staleSeq, stalePane, staleBusy",
+        "openStaleRebase",
+        "drawApprovedPane",
+        "closeStaleRebase",
+        "viewApprovedReport",
+        "ExpressionStatement after viewApprovedReport #1",
+        "rebaseDraft",
+        "ExpressionStatement after rebaseDraft #1",
+        "ExpressionStatement after rebaseDraft #2",
+        "ExpressionStatement after rebaseDraft #3",
+        "reportDirty"
+      ]
+    },
+    {
+      "file": "report-draft-sync.js",
+      "job": "초안 쓰기·삽입 동기화 상태",
+      "statements": [
+        "citations",
+        "citationReads, citationNotes",
+        "citationListOpen",
+        "reportConverge",
+        "reportSaveFailures",
+        "markConverge",
+        "reportNeedsWrite",
+        "pristineEditor",
+        "insertLeftNoText",
+        "preservedLocal",
+        "mergeObservedReportState",
+        "replaceReportState",
+        "insertInFlight",
+        "discardsOut",
+        "idleWaiters",
+        "workBusy",
+        "workIdle",
+        "wakeIdle",
+        "draftClient",
+        "noteHeld",
+        "draftFailureText",
+        "draftNotSaved",
+        "ensureCitations",
+        "invalidateCitations"
+      ]
+    },
+    {
+      "file": "report-structure-pane.js",
+      "job": "구조화 판독 편집 패널",
+      "statements": [
+        "structureForm",
+        "structureState",
+        "structureReads, structureNotes",
+        "structSeq",
+        "structPane",
+        "ensureStructure",
+        "invalidateStructure",
+        "structurePrevious",
+        "structurePlan",
+        "structureItems",
+        "structureItemKey",
+        "closeStructure",
+        "renderStructure",
+        "selectStructureItem",
+        "openStructure",
+        "applyStructure",
+        "ExpressionStatement after applyStructure #1",
+        "ExpressionStatement after applyStructure #2",
+        "ExpressionStatement after applyStructure #3",
+        "ExpressionStatement after applyStructure #4",
+        "ExpressionStatement after applyStructure #5",
+        "ExpressionStatement after applyStructure #6",
+        "ExpressionStatement after applyStructure #7",
+        "IfStatement after applyStructure #1"
+      ]
+    },
+    {
+      "file": "report-citation-pane.js",
+      "job": "판독 인용 패널",
+      "statements": [
+        "citationBody",
+        "citationEntryText",
+        "renderCitationBar",
+        "citationRefreshTimer",
+        "scheduleCitationRefresh",
+        "ForOfStatement after scheduleCitationRefresh #1",
+        "ForOfStatement after scheduleCitationRefresh #2",
+        "ExpressionStatement after scheduleCitationRefresh #1",
+        "ExpressionStatement after scheduleCitationRefresh #2",
+        "ExpressionStatement after scheduleCitationRefresh #3",
+        "citationGuards",
+        "citationPlan",
+        "placementLine",
+        "screenPlan",
+        "citationInsertBlock",
+        "citePane, citeSeq, citeBusy, citeReturn",
+        "closeCitePreview",
+        "setCiteBusy",
+        "renderCitePreview",
+        "openCitePreview",
+        "ExpressionStatement after openCitePreview #1",
+        "ExpressionStatement after openCitePreview #2",
+        "ExpressionStatement after openCitePreview #3",
+        "ExpressionStatement after openCitePreview #4",
+        "ExpressionStatement after openCitePreview #5",
+        "insertCitation",
+        "ExpressionStatement after insertCitation #1"
+      ]
+    },
+    {
+      "file": "report-draft-save.js",
+      "job": "개인 초안 저장",
+      "statements": [
+        "draftOwner",
+        "sameDraftText",
+        "stashReport",
+        "reportTextToSend",
+        "saveReportDraft",
+        "unconfirmedReport",
+        "reconcileReportDrafts",
+        "reportEdits",
+        "reportEditedAt",
+        "reportEditedSince",
+        "recordReportEdit",
+        "ForOfStatement after recordReportEdit #1",
+        "editReport",
+        "reportEditOf",
+        "keepReportEditor"
+      ]
+    },
+    {
+      "file": "report-commit.js",
+      "job": "판독 확정 동작",
+      "statements": [
+        "commitInFlight",
+        "commitEpoch",
+        "applyAcceptedCommit",
+        "announceCommit",
+        "reportUnknownCommits",
+        "learnCommitOutcome",
+        "readCommitOutcome",
+        "commitReport",
+        "studyLabel",
+        "heldByOther",
+        "updateReportButtons",
+        "doPreliminary",
+        "ExpressionStatement after doPreliminary #1",
+        "ExpressionStatement after doPreliminary #2",
+        "ExpressionStatement after doPreliminary #3",
+        "ExpressionStatement after doPreliminary #4",
+        "ExpressionStatement after doPreliminary #5",
+        "reasonResolve",
+        "askReason",
+        "ExpressionStatement after askReason #1",
+        "ExpressionStatement after askReason #2",
+        "syncStudy"
+      ]
+    },
+    {
+      "file": "report-hold.js",
+      "job": "판독 잠금 유지",
+      "statements": [
+        "heldUid, heartbeat, warnedFor, holdPending",
+        "HOLD_MIN_CHARS",
+        "HEARTBEAT_MS",
+        "holdBlocked",
+        "HOLD_RETRY_MS",
+        "claimHold",
+        "releaseHold",
+        "ExpressionStatement after releaseHold #1"
+      ]
+    },
+    {
+      "file": "work-exit.js",
+      "job": "업무 이탈 시 초안 보존",
+      "statements": [
+        "AUTOSAVE_MS",
+        "ExpressionStatement after AUTOSAVE_MS #1",
+        "ExpressionStatement after AUTOSAVE_MS #2",
+        "loggingOut",
+        "logoutPrep",
+        "holdPreparation",
+        "resumeWork",
+        "ExpressionStatement after resumeWork #1",
+        "captureReport",
+        "saveForLogout",
+        "failLogout",
+        "endUse",
+        "WORK_ANSWER_MS",
+        "WORK_LINES",
+        "workLine",
+        "otherUnsavedWork",
+        "concludeLogout",
+        "logOutAnyway",
+        "forgetCapture",
+        "discardAndLogOut",
+        "overwriteServerDraft",
+        "returnToEditing",
+        "dropEndedDraft",
+        "recoverEndedDraft",
+        "LOGOUT_TITLES",
+        "LOGOUT_NOTES",
+        "LOGOUT_FAILED",
+        "logoutStatus",
+        "showLogoutPanel"
+      ]
+    },
+    {
+      "file": "worklist-polling.js",
+      "job": "워크리스트 주기 갱신",
+      "statements": [
+        "poll, pollGeneration",
+        "startPolling",
+        "pollFails"
+      ]
+    },
+    {
+      "file": "report-history.js",
+      "job": "판독 이력 표시",
+      "statements": [
+        "historyEpoch, historyUid",
+        "historyReads",
+        "historyLive",
+        "closeHistory",
+        "historyAnswerOk",
+        "historyNote",
+        "historyCitationBlock",
+        "loadHistoryCitations",
+        "showHistory",
+        "ExpressionStatement after showHistory #1",
+        "ExpressionStatement after showHistory #2"
+      ]
+    },
+    {
+      "file": "report-toolbar.js",
+      "job": "판독 도구 모음",
+      "statements": [
+        "reportWriteBlock",
+        "ExpressionStatement after reportWriteBlock #1",
+        "ExpressionStatement after reportWriteBlock #2",
+        "ExpressionStatement after reportWriteBlock #3",
+        "reportPreview",
+        "ExpressionStatement after reportPreview #1",
+        "move",
+        "ExpressionStatement after move #1",
+        "ExpressionStatement after move #2"
+      ]
+    },
+    {
+      "file": "viewer-placement.js",
+      "job": "뷰어 창 위치",
+      "statements": [
+        "OHIF_RECT_KEY",
+        "ohifPopupHandle",
+        "ohifRectPolls, ohifPopupSlots, ohifPopupSequences",
+        "ohifPlacementWrites",
+        "ohifOpenSeq",
+        "monitorPermission",
+        "monitorQueryUnsupported",
+        "monitorSessionGranted",
+        "screensCache",
+        "monitorDetails",
+        "monitorHintShown",
+        "monitorPermissionGranted",
+        "updateMonitorButton",
+        "cacheMonitorScreens",
+        "initMonitorPermission",
+        "ExpressionStatement after initMonitorPermission #1",
+        "ExpressionStatement after initMonitorPermission #2",
+        "ExpressionStatement after initMonitorPermission #3",
+        "usableScreenRect",
+        "currentScreenRect",
+        "defaultOhifRect",
+        "readStoredOhifRect",
+        "rectInsideScreen",
+        "overlapArea",
+        "clampOhifRect",
+        "ohifPlacement",
+        "popupRect",
+        "rememberOhifRect",
+        "watchOhifRect",
+        "ExpressionStatement after watchOhifRect #1"
+      ]
+    },
+    {
+      "file": "viewer-launch.js",
+      "job": "뷰어 열기",
+      "statements": [
+        "validPriorDate",
+        "imageOpening, viewerWindows, viewerWindowCursor, worklistAlerts, worklistRefresh, worklistStartup",
+        "autoPrior",
+        "openFilmbox",
+        "ohifScope",
+        "sameOhifScope",
+        "ohifPopupState",
+        "handOverSession",
+        "viewerEntryStopped",
+        "openOhifWindow",
+        "mountViewerWindows"
+      ]
+    },
+    {
+      "file": "feature-mounts.js",
+      "job": "기존 기능 모듈과 페이지 연결",
+      "statements": [
+        "ExpressionStatement after mountViewerWindows #1",
+        "ExpressionStatement after mountViewerWindows #2",
+        "favorites",
+        "ExpressionStatement after favorites #1",
+        "tagScopeState",
+        "ExpressionStatement after tagScopeState #1",
+        "studyTags",
+        "ExpressionStatement after studyTags #1",
+        "ExpressionStatement after studyTags #2",
+        "consultations",
+        "ExpressionStatement after consultations #1",
+        "readerAssignment",
+        "ExpressionStatement after readerAssignment #1",
+        "techNote",
+        "ExpressionStatement after techNote #1",
+        "workDocument",
+        "workDeclared",
+        "ownUnsavedKinds",
+        "declareOwnWork",
+        "ExpressionStatement after declareOwnWork #1",
+        "ForOfStatement after declareOwnWork #1",
+        "TryStatement after declareOwnWork #1",
+        "readingWorkspace",
+        "ExpressionStatement after readingWorkspace #1",
+        "readingFindings",
+        "TryStatement after readingFindings #1"
+      ]
+    },
+    {
+      "file": "clinical-context-panel.js",
+      "job": "임상 맥락 패널",
+      "statements": [
+        "mountClinicalContext",
+        "clinicalContext",
+        "TryStatement after clinicalContext #1"
+      ]
+    },
+    {
+      "file": "critical-result-mounts.js",
+      "job": "긴급 결과 모듈과 페이지 연결",
+      "statements": [
+        "criticalInbox",
+        "TryStatement after criticalInbox #1",
+        "criticalResults",
+        "TryStatement after criticalResults #1"
+      ]
+    },
+    {
+      "file": "study-questions.js",
+      "job": "임상의 질문 답변 패널",
+      "statements": [
+        "mountStudyQuestions",
+        "studyQuestions",
+        "TryStatement after studyQuestions #1"
+      ]
+    },
+    {
+      "file": "workspace-panels.js",
+      "job": "작업공간 패널 크기와 배치",
+      "statements": [
+        "bindPanelResize",
+        "clampPanel",
+        "layoutMode",
+        "workspaceState, workspaceOwner, workspaceStorage, workspaceGeneration",
+        "workspaceLocalKept",
+        "portraitLayout",
+        "workspaceAxis",
+        "saveWorkspace",
+        "rememberPanelSize",
+        "restoreWorkspace",
+        "applyLayout",
+        "ExpressionStatement after applyLayout #1",
+        "ExpressionStatement after applyLayout #2",
+        "ExpressionStatement after applyLayout #3",
+        "workArea",
+        "splitFrame, splitSize",
+        "ExpressionStatement after splitFrame, splitSize #1",
+        "ExpressionStatement after splitFrame, splitSize #2",
+        "ExpressionStatement after splitFrame, splitSize #3",
+        "ExpressionStatement after splitFrame, splitSize #4",
+        "ExpressionStatement after splitFrame, splitSize #5",
+        "ExpressionStatement after splitFrame, splitSize #6"
+      ]
+    },
+    {
+      "file": "worklist-controls.js",
+      "job": "워크리스트 검색·새로고침 조작",
+      "statements": [
+        "ExpressionStatement after splitFrame, splitSize #7",
+        "ForOfStatement after splitFrame, splitSize #1",
+        "ExpressionStatement after splitFrame, splitSize #8",
+        "ExpressionStatement after splitFrame, splitSize #9",
+        "ExpressionStatement after splitFrame, splitSize #10",
+        "ExpressionStatement after splitFrame, splitSize #11",
+        "ExpressionStatement after splitFrame, splitSize #12",
+        "ExpressionStatement after splitFrame, splitSize #13",
+        "ExpressionStatement after splitFrame, splitSize #14",
+        "ExpressionStatement after splitFrame, splitSize #15"
+      ]
+    },
+    {
+      "file": "saved-filters.js",
+      "job": "저장 검색 관리",
+      "statements": [
+        "validUserFilters",
+        "userFilters",
+        "TryStatement after userFilters #1",
+        "saveFiltersLocal",
+        "snapshotFilter",
+        "activeFilterName",
+        "filterCriteriaKey",
+        "renderActiveFilter",
+        "focusFilterChip",
+        "editSavedFilter",
+        "filterWriteReady",
+        "acceptSavedFilter",
+        "savedFilterManager",
+        "ExpressionStatement after savedFilterManager #1",
+        "ExpressionStatement after savedFilterManager #2",
+        "applyFilter",
+        "renderChips",
+        "reloadPrefs",
+        "ExpressionStatement after reloadPrefs #1",
+        "ExpressionStatement after reloadPrefs #2",
+        "showFilterMenu",
+        "ExpressionStatement after showFilterMenu #1",
+        "ExpressionStatement after showFilterMenu #2",
+        "ExpressionStatement after showFilterMenu #3",
+        "ExpressionStatement after showFilterMenu #4"
+      ]
+    },
+    {
+      "file": "worklist-row-events.js",
+      "job": "워크리스트 행 입력 이벤트",
+      "statements": [
+        "ExpressionStatement after showFilterMenu #5",
+        "ExpressionStatement after showFilterMenu #6",
+        "ExpressionStatement after showFilterMenu #7",
+        "ExpressionStatement after showFilterMenu #8",
+        "ExpressionStatement after showFilterMenu #9"
+      ]
+    },
+    {
+      "file": "telerad-request.js",
+      "job": "원격 판독 요청 상태 전이",
+      "statements": [
+        "setTs",
+        "teleRequest",
+        "tsIs"
+      ]
+    },
+    {
+      "file": "context-menu.js",
+      "job": "행 문맥 메뉴",
+      "statements": [
+        "ctx",
+        "ctxItems",
+        "ctxOpener",
+        "showCtx",
+        "ExpressionStatement after showCtx #1",
+        "ExpressionStatement after showCtx #2",
+        "ExpressionStatement after showCtx #3",
+        "ExpressionStatement after showCtx #4",
+        "ExpressionStatement after showCtx #5"
+      ]
+    },
+    {
+      "file": "related-controls.js",
+      "job": "관련 검사 목록 조작",
+      "statements": [
+        "ExpressionStatement after showCtx #6",
+        "ExpressionStatement after showCtx #7",
+        "ExpressionStatement after showCtx #8",
+        "ExpressionStatement after showCtx #9",
+        "ExpressionStatement after showCtx #10",
+        "ExpressionStatement after showCtx #11",
+        "ExpressionStatement after showCtx #12",
+        "ExpressionStatement after showCtx #13",
+        "openRelatedImages"
+      ]
+    },
+    {
+      "file": "session-end.js",
+      "job": "페이지 세션 종료",
+      "statements": [
+        "workClosed",
+        "closeWork",
+        "ExpressionStatement after closeWork #1",
+        "sessionClosed",
+        "closeSession",
+        "ExpressionStatement after closeSession #1",
+        "ExpressionStatement after closeSession #2",
+        "ExpressionStatement after closeSession #3",
+        "ExpressionStatement after closeSession #4"
+      ]
+    },
+    {
+      "file": "page-boot.js",
+      "job": "페이지 시작과 연결 복구",
+      "statements": [
+        "applyRoleUi",
+        "fetchBootstrap",
+        "loadActorNames",
+        "goOnline",
+        "goOffline",
+        "reconnectTimer",
+        "stopReconnect",
+        "startReconnect",
+        "ExpressionStatement after startReconnect #1",
+        "roleText",
+        "showUnassigned",
+        "ExpressionStatement after showUnassigned #1",
+        "ExpressionStatement after showUnassigned #2",
+        "ExpressionStatement after showUnassigned #3",
+        "ExpressionStatement after showUnassigned #4",
+        "showMembershipState",
+        "boot",
+        "ExpressionStatement after boot #1"
+      ]
+    }
+  ]
+}

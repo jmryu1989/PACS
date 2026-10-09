@@ -22,6 +22,7 @@ pinned Chromium belong to S3-ASR-U4b, and the live refusal battery to U5.
 
 The browser assertions replace the former source and harness-shape pins.
 """
+from page_source import read_page_source
 import json
 import os
 import re
@@ -35,7 +36,7 @@ ROOT = Path(__file__).resolve().parents[1]
 LITE = ROOT / "worklist-v0" / "hpacs-lite"
 MAIN_PATH = Path(os.environ.get("KIN_DICTATION_HOST_MAIN", LITE / "main.html"))
 HOST_PATH = Path(os.environ.get("KIN_DICTATION_HOST_JS", LITE / "dictation.js"))
-MAIN = MAIN_PATH.read_text(encoding="utf-8")
+MAIN = read_page_source(MAIN_PATH)
 ASSETS = {
     "report-citation.js": (LITE / "report-citation.js").read_text(encoding="utf-8"),
     "report-structure.js": (LITE / "report-structure.js").read_text(encoding="utf-8"),
