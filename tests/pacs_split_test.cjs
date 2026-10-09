@@ -53,6 +53,30 @@ test('U0B-UNRESOLVED spec entry never falls back to a facade declaration', () =>
 test('U0B-UNRESOLVED-IMPORT an unresolved relative module cannot disappear from the source corpus', () => {
   assert.throws(() => fixture("import { gone } from './missing'; " + plain), /Unresolved module/);
 });
+
+for (const [label, statement] of [
+  ['import', name => `import { ${name} as value } from './values'; export class Worklist { list(uid: string) { return value(uid); } }`],
+  ['re-export', name => `export { ${name} as value } from './values'; ${plain}`],
+]) test(`U0B-R01 missing named ${label} from an existing module is rejected`, () => {
+  const extra = { [path.join(apiSrc, 'pacs/values.ts')]: 'export function present(uid: string) {return uid;}' };
+  assert.deepEqual(fixture(statement('present'), () => {}, extra).validate(), { members: 1, declarations: 0 });
+  // Sol's counterexample: the module exists, but the requested export does not.
+  assert.throws(() => fixture(statement('absent'), () => {}, extra).validate(), /Unresolved named export: absent/);
+});
+
+for (const [field, value] of [['name', 'gatewayReceiptt'], ['kind', 'PropertyDeclaration'],
+  ['id', 'member:gatewayReceiptt:MethodDeclaration'], ['category', 'declaration'], ['live.kind', undefined]]) {
+  test(`U0B-R02 spec ${field} must describe the resolved declaration`, () => {
+    assert.deepEqual(assertContract(createSource()), { members: 125, declarations: 57 });
+    const wrong = structuredClone(spec);
+    const entry = wrong.entries.find(item => item.name === 'gatewayReceipt');
+    if (field === 'live.kind') delete entry.live.kind;
+    else entry[field] = value;
+    // Keep the allocation internally valid so the identity assertion is the oracle.
+    wrong.allocation_sha256 = sha256(JSON.stringify(wrong.entries.map(e => [e.id, e.target])));
+    assert.throws(() => assertContract(createSource({ spec: wrong })), /Inconsistent spec identity/);
+  });
+}
 test('U0B-DUPLICATE-OLD an old unremoved implementation is rejected outside the live spec location', () => {
   const normal = fixture();
   const baseline = fingerprint(normal, normal.member('list'));

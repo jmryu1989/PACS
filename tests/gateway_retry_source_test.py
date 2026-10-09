@@ -19,6 +19,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
 import unittest
 
@@ -448,6 +449,49 @@ class ServerPins(unittest.TestCase):
 
     def test_the_member_route_checks_in_order_binds_under_the_u3_lock_and_writes_once(self):
         assert_behaviour('gateway_retry_server_test.cjs', '^C[2-6] ')
+        self.assert_client_retry_roles(AUTH)
+
+    def assert_client_retry_roles(self, source):
+        # Run the whole auth module with a fresh document and a synthetic /me answer
+        # per role. Identity enters through init(), never by changing private state.
+        script = r"""
+const assert = require('node:assert/strict'), vm = require('node:vm');
+const source = require('node:fs').readFileSync(0, 'utf8');
+function storage() {
+  const data = new Map();
+  return { getItem: key => data.get(key) ?? null, setItem: (key, value) => data.set(key, String(value)),
+    removeItem: key => data.delete(key), key: index => [...data.keys()][index] ?? null,
+    get length() { return data.size; } };
+}
+(async () => {
+  for (const [roles, allowed] of [[['admin'], true], [['technician'], true],
+    [['radiologist'], false], [['clinician'], false], [['gateway'], false], [[], false]]) {
+    let reads = 0;
+    const context = vm.createContext({
+      location: new URL('https://synthetic.invalid/worklist/' +
+        (roles.includes('clinician') ? 'clinician.html' : 'main.html')), URL, URLSearchParams,
+      document: { cookie: '', addEventListener() {} }, addEventListener() {},
+      localStorage: storage(), sessionStorage: storage(), navigator: {},
+      setTimeout, clearTimeout, AbortController,
+      fetch: async (url, options) => {
+        assert.equal(url, 'https://synthetic.invalid/api/me');
+        assert.equal(options.method, 'GET'); reads += 1;
+        return { status: 200, ok: true, headers: { get: () => null },
+          json: async () => ({ sessionId: 'syn-session', roles, institution: 'synthetic', sub: 'syn-sub', user: 'syn-user' }) };
+      },
+    });
+    vm.runInContext(source, context, { filename: 'auth.js' });
+    const auth = vm.runInContext('KinAuth', context);
+    assert.equal(auth.has('technician'), false, 'unconfirmed identity');
+    assert.equal((await auth.init()).state, 'approved');
+    assert.equal(reads, 1);
+    assert.equal(auth.has('technician'), allowed, `Now Retry client roles: ${JSON.stringify(roles)}`);
+  }
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+        result = subprocess.run(['node', '-e', script], input=source, text=True,
+                                encoding='utf-8', capture_output=True, cwd=ROOT)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_the_poll_is_gateway_only_read_only_and_decides_pending_in_sql_before_the_limit(self):
         assert_behaviour('gateway_retry_server_test.cjs', '^C[1278] ')

@@ -53,6 +53,20 @@ function createSource(options = {}) {
     if ((ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement)) && statement.moduleSpecifier) {
       const module = checker.getSymbolAtLocation(statement.moduleSpecifier);
       if (!module || !module.declarations?.length) throw new Error(`Unresolved module: ${statement.moduleSpecifier.text} in ${file.fileName}`);
+      const bindings = ts.isImportDeclaration(statement) ? statement.importClause?.namedBindings : statement.exportClause;
+      if (bindings && (ts.isNamedImports(bindings) || ts.isNamedExports(bindings))) {
+        const exports = checker.getExportsOfModule(module);
+        for (const binding of bindings.elements) {
+          const imported = binding.propertyName || binding.name;
+          const exported = exports.find(symbol => symbol.name === imported.text);
+          const target = exported?.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(exported) : exported;
+          if (!target?.declarations?.length)
+            throw new Error(`Unresolved named export: ${imported.text} from ${statement.moduleSpecifier.text} in ${file.fileName}`);
+          const local = resolveSymbol(binding.name);
+          if (local !== target)
+            throw new Error(`Mismatched named binding: ${binding.name.text} in ${file.fileName}`);
+        }
+      }
     }
   }
   function resolveSymbol(node) {
@@ -110,6 +124,12 @@ function createSource(options = {}) {
       if (spec.phase === 'relist' && item.live.file !== facade || spec.phase === 'split' && item.live.file !== item.target)
         throw new Error(`Unresolved spec location/target: ${item.id}`);
       const node = locate(item.live), key = `${node.getSourceFile().fileName}:${node.pos}:${node.end}`;
+      const name = ts.isConstructorDeclaration(node) ? 'constructor' : node.name?.getText();
+      const kind = ts.SyntaxKind[node.kind];
+      const category = ts.isClassDeclaration(node.parent) ? 'member' : 'declaration';
+      if (item.name !== name || item.kind !== kind || item.category !== category ||
+          item.live.name !== name || item.live.kind !== kind || item.id !== `${category}:${name}:${kind}`)
+        throw new Error(`Inconsistent spec identity: ${item.id}`);
       if (locations.has(key)) throw new Error(`Duplicate implementation: ${item.id}`);
       locations.add(key);
     }
