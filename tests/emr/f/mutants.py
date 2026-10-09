@@ -164,8 +164,8 @@ MUTANTS = [
     },
     {
         "id": "M-F-S7", "title": "possible-leak notification waits beyond its 72-hour deadline", "file": "contract.ts",
-        "old": "    add('possible-leak', 'all-possibly-affected-subjects', hours72(f.awarenessAt), 'without-delay-within-72-hours',\n",
-        "new": "    add('possible-leak', 'all-possibly-affected-subjects', hours72(hours72(f.awarenessAt)), 'without-delay-within-72-hours',\n",
+        "old": "      let originalDueAt = numeric ? hours72(c.at) : IMMEDIATE_TIMING_RULE.dueAt;\n",
+        "new": "      let originalDueAt = numeric ? hours72(c.family === 'possibility' ? hours72(c.at) : c.at) : IMMEDIATE_TIMING_RULE.dueAt;\n",
         "case": "TEST-F-07 incident_scope: possible leak notice covers all possibly affected subjects within 72 hours and an unknown population is never zero",
         "expect": "M-F-S7: possible-leak notice retains its 72-hour deadline and all-possible-subject audience",
     },
@@ -173,10 +173,10 @@ MUTANTS = [
 MUTANTS += [
     {
         "id": "M-F-R2-001", "title": "a no-breach verdict erases the possibility obligation", "file": "contract.ts",
-        "old": "  if (f.possibleGround !== null) {\n",
-        "new": "  if (f.possibleGround !== null && f.status !== 'not-a-leak') {\n",
-        "case": "TEST-F-07 incident_scope: a late no-breach verdict permanently retains the missed possibility obligation",
-        "expect": "M-F-R2-001: a late no-breach verdict retains the missed obligation",
+        "old": "      if (v.possibleGround !== null) causes.push({ family: 'possibility',",
+        "new": "      if (v.possibleGround !== null && v.status !== 'not-a-leak') causes.push({ family: 'possibility',",
+        "case": "TEST-F-07 incident_scope: a late no-breach verdict retains the overdue possibility obligation and actual notices",
+        "expect": "M-F-R2-001: a late no-breach verdict retains the overdue obligation",
     },
     {
         "id": "M-F-R2-002", "title": "the old investigation resolution hides the new finding investigation", "file": "contract.ts",
@@ -200,10 +200,10 @@ MUTANTS += [
 MUTANTS += [
     {
         "id": "M-F-R3-001", "title": "trust the input notice flag instead of recorded obligation history", "file": "contract.ts",
-        "old": "  const priorPossibleNotice = obligations.find(o => o.kind === 'possible-leak' && o.status === 'met' && o.notice !== null)?.notice ?? null;\n",
-        "new": "  const priorPossibleNotice = f.priorPossibleNotice ?? null;\n",
-        "case": "TEST-F-07 incident_scope: stored met possibility notice automatically requires no-breach follow-up without an input flag",
-        "expect": "M-F-R3-001: stored met notice requires follow-up without a caller flag",
+        "old": "    const possibleNotices = notices.filter(n => n.kind === 'possible-leak');\n",
+        "new": "    const possibleNotices = f.priorPossibleNotice ? notices.filter(n => n.noticeId === f.priorPossibleNotice.noticeId) : [];\n",
+        "case": "TEST-F-07 incident_scope: stored bound possibility notice automatically requires no-breach follow-up without an input flag",
+        "expect": "M-F-R3-001: stored bound notice requires follow-up without a caller flag",
     },
     {
         "id": "M-F-R3-002", "title": "read a null inspection step before validating it", "file": "contract.ts",
@@ -213,7 +213,83 @@ MUTANTS += [
         "expect": "M-F-R3-002: null step returns the typed refusal",
     },
 ]
-# The exact round-1 selection including repair round 3, written by hand (never generated from a run). The
+MUTANTS += [
+    {
+        "id": "M-F-R4-001", "title": "derive notice facts before binding newly supplied evidence", "file": "contract.ts",
+        "old": "    const possibleNotices = notices.filter(n => n.kind === 'possible-leak');\n",
+        "new": "    const possibleNotices = (previous?.ledger.notices ?? []).filter(n => n.kind === 'possible-leak');\n",
+        "case": "TEST-F-07 C11 new notice and no-leak verdict create the follow-up in the same call",
+        "expect": "M-F-R4-001: newly supplied notice creates follow-up without another call",
+    },
+    {
+        "id": "M-F-R4-002", "title": "recognise only notices of a previously met whole duty", "file": "contract.ts",
+        "old": "    const possibleNotices = notices.filter(n => n.kind === 'possible-leak');\n",
+        "new": "    const possibleNotices = notices.filter(n => n.kind === 'possible-leak' && previous?.obligations.some(o => o.status === 'met' && o.noticeRefs.includes(n.noticeId)));\n",
+        "case": "TEST-F-07 C42 partial notices create recipient follow-ups although the whole duty remains overdue",
+        "expect": "M-F-R4-002: partial bound notice is a notice fact independently of whole-duty status",
+    },
+    {
+        "id": "M-F-R4-003", "title": "freeze the first projection instead of replaying newly bound past facts", "file": "contract.ts",
+        "old": "    const currentVerdict = effective[effective.length - 1];\n",
+        "new": "    if (previous) return previous;\n    const currentVerdict = effective[effective.length - 1];\n",
+        "case": "TEST-F-07 C26 C29 batched split and late-received evidence replay to the same semantic projection",
+        "expect": "M-F-R4-003: past evidence replays a formerly moot duty and its follow-up",
+    },
+    {
+        "id": "M-F-R4-004", "title": "overwrite conflicting evidence with the last use of its ID", "file": "contract.ts",
+        "old": "        if (old && digest(content(old)) !== digest(content(item))) throw new Error('Conflicting evidence ID');\n",
+        "new": "        if (old && digest(content(old)) !== digest(content(item))) result.set(id(item), item);\n",
+        "case": "TEST-F-07 C30 conflicting notice identity refuses atomically instead of overwriting delivery evidence",
+        "expect": "M-F-R4-004: a notice ID cannot overwrite conflicting evidence",
+    },
+    {
+        "id": "M-F-R4-005", "title": "overdue is absorbing even after actual delivery", "file": "contract.ts",
+        "old": "      o.observations = [...(old?.observations ?? []), { asOf, status: o.status, noticeRefs: [...o.noticeRefs] }];\n",
+        "new": "      if (old?.status === 'overdue') o.status = 'overdue';\n      o.observations = [...(old?.observations ?? []), { asOf, status: o.status, noticeRefs: [...o.noticeRefs] }];\n",
+        "case": "TEST-F-07 C33 C34 overdue observations allow late performance and late recording of timely performance",
+        "expect": "M-F-R4-005: overdue is not an absorbing state after actual delivery",
+    },
+    {
+        "id": "M-F-R4-006", "title": "retroactively moot duties even after their numeric deadline", "file": "contract.ts",
+        "old": "canMoot: (at: string, due: string | null) => due !== null && at < due",
+        "new": "canMoot: (at: string, due: string | null) => due !== null",
+        "case": "TEST-F-07 C35 C36 LQ-03 only a pre-deadline no-leak determination moots an unnotified duty",
+        "expect": "M-F-R4-006: no-leak at or after deadline cannot retroactively moot the duty",
+    },
+    {
+        "id": "M-F-R4-007", "title": "immediate duties have a zero-time deadline and are automatically missed", "file": "contract.ts",
+        "old": "      if (fulfilled) o.status = 'met';\n",
+        "new": "      if (o.timing === 'immediate') o.dueAt = o.triggeredAt;\n"
+               "      if (o.timing === 'immediate' && (fulfilled?.sentAt ?? asOf) > o.dueAt) o.status = 'missed';\n"
+               "      else if (fulfilled) o.status = 'met';\n",
+        "case": "TEST-F-07 C20 LQ-01 no-leak follow-up sent thirty minutes later is met with no numeric legal deadline",
+        "expect": "M-F-R4-007: immediate performance has no invented zero-time deadline",
+    },
+    {
+        "id": "M-F-R4-008", "title": "clearing a delay grants a fresh 72-hour grace window", "file": "contract.ts",
+        "old": "clearedDueAt: (_at: string): string | null => null",
+        "new": "clearedDueAt: (at: string): string | null => hours72(at)",
+        "case": "TEST-F-07 C38 LQ-02 accepted delay clearance and delivery stay on one duty and require follow-up",
+        "expect": "M-F-R4-008: clearance grants no new 72-hour window",
+    },
+    {
+        "id": "M-F-R4-009", "title": "elapsed numeric deadline fabricates a final missed judgment", "file": "contract.ts",
+        "old": "} else if ((o.dueAt !== null && asOf > o.dueAt) || boundDecisions.some(d => d.effect === 'timeliness-overdue')) o.status = 'overdue';",
+        "new": "} else if ((o.dueAt !== null && asOf > o.dueAt) || boundDecisions.some(d => d.effect === 'timeliness-overdue')) o.status = 'missed';",
+        "case": "TEST-F-07 C32 LQ-03 numeric deadline boundaries remain pending then overdue and never auto-missed",
+        "expect": "M-F-R4-009: elapsed time never fabricates a final nonperformance judgment",
+    },
+    {
+        "id": "M-F-R4-010", "title": "issue-time comparison checks only the head and revision", "file": "contract.ts",
+        "old": "    const currentVersions = record.selection === 'all-versions' ? l.versions : record.versions.map(v => l.versions.find(x => x.versionId === v.versionId));\n"
+               "    if (currentVersions.length !== record.versions.length || currentVersions.some((v, i) => !v || digest(v) !== digest(record.versions[i])))\n"
+               "      refuse('DisclosurePackageChanged');\n",
+        "new": "",
+        "case": "TEST-F-03 C19 a replaced original with unchanged head and revision refuses issuance",
+        "expect": "M-F-R4-010: every packaged version is compared at issue time",
+    },
+]
+# The exact round-1 selection including repair round 4, authored before execution (never generated from a run). The
 # baseline must collect exactly these cases, each once, all passing; R2 moves the declaration into emr/units/f.json.
 DECLARED_CASES = [
     "TEST-F-01 roster_scope: a designated auditor gets exactly the granted scopes and a general admin without a grant gets none",
@@ -256,9 +332,13 @@ DECLARED_CASES = [
     "TEST-F-07 incident_scope: possible leak notice covers all possibly affected subjects within 72 hours and an unknown population is never zero",
     "TEST-F-07 incident_scope: confirmed priority and additional notices and PIPC or KISA reports have separate deadlines and required fields",
     "TEST-F-07 incident_scope: not-a-leak follow-up and immediate MOHW notice remain distinct and a template is never sent evidence",
-    "TEST-F-07 incident_scope: a late no-breach verdict permanently retains the missed possibility obligation",
+    "TEST-F-07 incident_scope: a late no-breach verdict retains the overdue possibility obligation and actual notices",
     "TEST-F-07 incident_scope: a no-breach verdict before the deadline makes the obligation moot without erasing it",
     "TEST-F-07 incident_scope: met notices and prior confirmed obligations remain bound across a later verdict",
+    "TEST-F-07 incident_scope: stored bound possibility notice automatically requires no-breach follow-up without an input flag",
+    "TEST-F-07 incident_scope: contradictory prior notice assertions refuse without producing or changing a plan",
+    "TEST-F-07 incident_scope: no bound notice leaves the no-breach path without a follow-up obligation",
+    "TEST-F-05 followup: a null inspection step gives a typed refusal and leaves the cycle unchanged",
     "TEST-F-05 followup: a new anomaly after a resolved investigation needs its own action and recheck",
     "TEST-F-05 followup: reopening a resolved finding creates a new investigation and cannot relabel the old resolution",
     "TEST-F-05 followup: each finding attached to an open investigation needs a subsequent action and recheck",
@@ -267,10 +347,45 @@ DECLARED_CASES = [
     "TEST-F-03 lawful_issue: signature content hash must equal the stored fixed version",
     "TEST-F-03 lawful_issue: signature signed-at time must equal the stored fixed version",
     "TEST-F-03 lawful_issue: signature predecessor hash must equal the stored fixed version",
-    "TEST-F-07 incident_scope: stored met possibility notice automatically requires no-breach follow-up without an input flag",
-    "TEST-F-07 incident_scope: contradictory prior notice assertions refuse without producing or changing a plan",
-    "TEST-F-07 incident_scope: no prior met notice leaves the no-breach path without a follow-up obligation",
-    "TEST-F-05 followup: a null inspection step gives a typed refusal and leaves the cycle unchanged",
+    "TEST-F-07 C10 late notice fulfills the duty and triggers follow-up with actual elapsed and lateness",
+    "TEST-F-07 C06 unpaid priority notice and regulator report retain their causes after a late no-leak verdict",
+    "TEST-F-05 C08 a benign later review cannot close an unresolved finding",
+    "TEST-F-07 C11 new notice and no-leak verdict create the follow-up in the same call",
+    "TEST-F-07 C12 matching simultaneous assertion and null current possibility ground are accepted",
+    "TEST-F-07 C20 LQ-01 no-leak follow-up sent thirty minutes later is met with no numeric legal deadline",
+    "TEST-F-07 C21 LQ-04 medical notice preserves occurrence and discovery elapsed times",
+    "TEST-F-07 C22 LQ-04 medical notice at coincident occurrence and discovery has zero elapsed",
+    "TEST-F-07 C23 C24 LQ-01 additional subject notice and regulator report fulfill independent immediate duties",
+    "TEST-F-07 C25 LQ-01 every immediate family stays owed as time advances without a decision",
+    "TEST-F-07 C26 C29 batched split and late-received evidence replay to the same semantic projection",
+    "TEST-F-07 C27 C28 first-call complete evidence permutations and exact retransmission yield one duty per cause",
+    "TEST-F-07 C28 independent additional sources at the same time retain separate duties in either order",
+    "TEST-F-07 C30 conflicting notice identity refuses atomically instead of overwriting delivery evidence",
+    "TEST-F-07 C30 foreign future unknown-trigger and contradictory verdict evidence refuses atomically",
+    "TEST-F-07 C30 a later explicit verdict correction preserves earlier duties and performance",
+    "TEST-F-07 C32 LQ-03 numeric deadline boundaries remain pending then overdue and never auto-missed",
+    "TEST-F-07 C33 C34 overdue observations allow late performance and late recording of timely performance",
+    "TEST-F-07 C35 C36 LQ-03 only a pre-deadline no-leak determination moots an unnotified duty",
+    "TEST-F-07 C37 C40 LQ-05 replacement and completeness preserve independent original clocks",
+    "TEST-F-07 C38 LQ-02 accepted delay clearance and delivery stay on one duty and require follow-up",
+    "TEST-F-07 C39 LQ-02 pending invalid and cleared delay claims preserve the applicable clock",
+    "TEST-F-07 C37 LQ-05 confirmation during an accepted possibility delay inherits immediate performance on clearance",
+    "TEST-F-07 C41 LQ-03 final judgments require evidence retain remaining duties and survive later performance",
+    "TEST-F-07 C25 C41 LQ-01 immediate overdue needs an individual timing decision and keeps performance open",
+    "TEST-F-07 C42 partial notices create recipient follow-ups although the whole duty remains overdue",
+    "TEST-F-07 C48 LQ-06 reverse-order deliveries trigger follow-up for each newly notified scope",
+    "TEST-F-05 C13 closed inspections reject new steps and replay with appended or inserted findings",
+    "TEST-F-05 C14 a resolved recheck without its own action leaves a reopened finding open",
+    "TEST-F-04 C15 Closed and Aborted issuances refuse every subsequent lifecycle operation",
+    "TEST-F-06 C16 a resolved request and released hold cannot be extended or released again",
+    "TEST-F-03 C07 C18 signed predecessor identity and hash must bind the stored predecessor",
+    "TEST-F-03 C17 a stored predecessor hash mismatch refuses preparation and preserves the listing",
+    "TEST-F-03 C19 a replaced original with unchanged head and revision refuses issuance",
+    "TEST-F-03 C43 middle version id hash and predecessor changes each refuse an unchanged head package",
+    "TEST-F-03 C44 changed signature envelope key and evidence references each refuse issuance",
+    "TEST-F-03 C45 a changed middle version of the last record is checked in a multi-record package",
+    "TEST-F-03 C46 requester-specified historical versions issue exactly that subset and reject its replacement",
+    "TEST-F-03 C47 incomplete added duplicate reordered and unchanged version listings bind issuance precisely"
 ]
 NOT_RUN = [
     {"id": "M-F-01-live", "status": "not_run", "reason": "the server roster check over B1 storage and the B2 caller context is round 2 "
