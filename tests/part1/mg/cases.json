@@ -1,7 +1,7 @@
 {
  "version": 1,
  "unit": "E-MG",
- "round": 4,
+ "round": 5,
  "order": "C:/Users/norne/PACS/tmp/astra-control/evidence/emg-exa-prep-20261009/e-mg-order.md",
  "base_sha": "04e50ab4524d59b82444fbe765034c9fa759fa30",
  "note": "Declared before collection and compared both ways with the cases actually run; expectations are never generated from a run. A case whose sample set root is absent SKIPS with that reason (commander instruction 2026-10-09, superseding the order's no-skip line); a skip is not_run and never counted as a pass.",
@@ -257,7 +257,7 @@
    "file": "tests/part1/mg/viewer_dom_test.py",
    "class": "MammographyViewerDOMTest",
    "command": "python -B tests/part1/mg/viewer_dom_test.py",
-   "expected": 22,
+   "expected": 27,
    "cases": [
     {
      "name": "test_mg02_dom_first_to_last_frames_render_with_exact_ids",
@@ -578,6 +578,56 @@
      "risk": "RISK-MG-STALE",
      "inputs": "read-only public frames and test-owned metadata; held load/render and doctor input",
      "mutants": []
+    },
+    {
+     "name": "test_mg04_dom_unpainted_layout_cells_hide_old_images_and_groups",
+     "test": "TEST-MG-R5-DOM-HIDDEN-GRID",
+     "req": "REQ-MG-04",
+     "risk": "RISK-MG-WRONG-STUDY",
+     "inputs": "read-only public DICOM pixels, controlled viewport seam, Chromium accessibility and composited screen",
+     "mutants": [
+      "M41"
+     ]
+    },
+    {
+     "name": "test_mg06_dom_failed_paint_recovers_camera_without_resize_observer",
+     "test": "TEST-MG-R5-DOM-RECOVERY-NO-RO",
+     "req": "REQ-MG-06",
+     "risk": "RISK-MG-STALE",
+     "inputs": "read-only public DICOM pixels, controlled viewport seam, Chromium accessibility and composited screen",
+     "mutants": [
+      "M42"
+     ]
+    },
+    {
+     "name": "test_mg06_dom_failed_recovery_stops_and_keeps_retry",
+     "test": "TEST-MG-R5-DOM-RECOVERY-BOUNDED",
+     "req": "REQ-MG-06",
+     "risk": "RISK-MG-STALE",
+     "inputs": "read-only public DICOM pixels, controlled viewport seam, Chromium accessibility and composited screen",
+     "mutants": [
+      "M45"
+     ]
+    },
+    {
+     "name": "test_mg04_dom_layout_commits_first_images_despite_later_failure_without_ro",
+     "test": "TEST-MG-R5-DOM-FIRST-IMAGE-COMMIT",
+     "req": "REQ-MG-07",
+     "risk": "RISK-MG-PARTIAL",
+     "inputs": "read-only public DICOM pixels, controlled viewport seam, Chromium accessibility and composited screen",
+     "mutants": [
+      "M43"
+     ]
+    },
+    {
+     "name": "test_mg06_dom_spurious_superseded_is_a_failure_with_intent_restore",
+     "test": "TEST-MG-R5-DOM-SPURIOUS-SUPERSEDED",
+     "req": "REQ-MG-06",
+     "risk": "RISK-MG-STALE",
+     "inputs": "read-only public DICOM pixels, controlled viewport seam, Chromium accessibility and composited screen",
+     "mutants": [
+      "M44"
+     ]
     }
    ]
   },
@@ -829,7 +879,7 @@
    ]
   }
  ],
- "total_expected": 328,
+ "total_expected": 333,
  "mutants": {
   "M1": {
    "file": "model",
@@ -1110,6 +1160,41 @@
    "case": "test_mg05_dom_grid_fit_and_labels_stay_within_host",
    "expect": "MG05 M40: wrapped facts and the whole Fit image stay inside the visible host",
    "title": "R3-04: intrinsic-width grid tracks overflow the host"
+  },
+  "M41": {
+   "file": "viewer",
+   "suite": "dom",
+   "case": "test_mg04_dom_unpainted_layout_cells_hide_old_images_and_groups",
+   "expect": "MG04 M41: only one accessible group per new cell exists during first paint",
+   "title": "R4-01: restore the inline-overridden hidden attribute"
+  },
+  "M42": {
+   "file": "viewer",
+   "suite": "dom",
+   "case": "test_mg06_dom_failed_paint_recovers_camera_without_resize_observer",
+   "expect": "MG06 M42: failure repaints the cached screen with the latest camera and box without RO",
+   "title": "R4-02: leave failure recovery dependent on ResizeObserver"
+  },
+  "M43": {
+   "file": "viewer",
+   "suite": "dom",
+   "case": "test_mg04_dom_layout_commits_first_images_despite_later_failure_without_ro",
+   "expect": "MG04 M43: later navigation failure belongs to its cell after the first image, without rollback",
+   "title": "R4-02: follow every latest paint instead of the first confirmed image"
+  },
+  "M44": {
+   "file": "viewer",
+   "suite": "dom",
+   "case": "test_mg06_dom_spurious_superseded_is_a_failure_with_intent_restore",
+   "expect": "MG06 M44: a still-current superseded receipt is a visible render failure",
+   "title": "R4-03: trust a superseded receipt even while the ticket remains latest"
+  },
+  "M45": {
+   "file": "viewer",
+   "suite": "dom",
+   "case": "test_mg06_dom_failed_recovery_stops_and_keeps_retry",
+   "expect": "MG06 M45: a failed recovery stops after one gated repaint and preserves Retry",
+   "title": "R4-02: failed recovery recursively schedules itself"
   }
  },
  "pending_samples": [
@@ -1164,7 +1249,7 @@
   ]
  },
  "round2_review": "C:/Users/norne/PACS/tmp/astra-control/evidence/astra-worker-runs/e-mg-r1-review-e3231e9-astra-20261009/last-message.md",
- "base_head": "3bc162052a3d264c9219159498facef76d7a1ed7",
+ "base_head": "7fbc24fb816fb5edf139948b2caf8988f9315339",
  "d744": {
   "rule": "C:\\Users\\norne\\PACS\\tmp\\astra-control\\evidence\\mg-classification-consult-20261009\\v2\\rule.md",
   "table_sha256": "a60b86b6267853615872a915d66a59150062afdbfe5d8725ca7a55f578c984d0",

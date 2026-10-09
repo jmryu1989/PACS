@@ -23,6 +23,7 @@ from pathlib import Path
 from contextlib import closing
 import copy
 import hashlib
+import io
 import importlib.util
 import os
 import re
@@ -30,6 +31,7 @@ import unittest
 from urllib.parse import urlparse
 
 import numpy as np
+from PIL import Image
 from playwright.sync_api import sync_playwright, expect
 
 HERE = Path(__file__).resolve().parent
@@ -244,7 +246,7 @@ class MammographyViewerDOMTest(unittest.TestCase):
         return self.cell(page, name).inner_text()
 
     def handle_of(self, page, name):
-        return page.evaluate("""n=>{const g=[...document.querySelectorAll('[role=group]')].find(e=>e.getAttribute('aria-label')===n);
+        return self.cell(page, name).evaluate("""g=>{
             const h=mg.handles.filter(x=>g&&g.contains(x.element)&&!x.handle.detached);return h.length===1?h[0].id:null;}""", name)
 
     def displayed(self, page, sop=None):
@@ -872,6 +874,175 @@ class MammographyViewerDOMTest(unittest.TestCase):
                     self.assertEqual(self.frames_shown(page, sop), [1, target],
                                      'MG06 M39: a failed target is reserved for Retry while the next step starts on screen')
                     self.assertEqual(self.last_paint(page, name)['frame'], target)
+
+    def test_mg04_dom_unpainted_layout_cells_hide_old_images_and_groups(self):
+        current = self.four_view()
+        prior = {v: (prior_copy(i, n), m) for n, (v, (i, m)) in enumerate(current.items())}
+        page = self.page()
+        self.mount(page, list(current.values()), list(prior.values()))
+        for i, _ in current.values():
+            self.wait_displayed(page, tag(i, '00080018'), 1)
+        self.settle(page)
+        sop, name = tag(prior['R CC'][0], '00080018'), 'Prior R CC'
+        page.evaluate("s=>{mg.control.holdRender=(i,p)=>i.sop===s&&p==='before'}", sop)
+        page.get_by_role('button', name='Compare CC', exact=True).click()
+        page.wait_for_function('()=>mg.renderHeld.length>0', timeout=WAIT)
+        hid = self.handle_of(page, name)
+        box = page.evaluate("id=>{const b=mg.handles.find(h=>h.id===id).element.getBoundingClientRect();return {x:b.x,y:b.y,width:b.width,height:b.height}}", hid)
+        # Screenshot the composited viewport, not its still-transparent canvas backing store.
+        clip = {**box, 'x': box['x']+4, 'y': box['y']+4, 'width': box['width']-8, 'height': box['height']-8}
+        pixels = np.asarray(Image.open(io.BytesIO(page.screenshot(clip=clip))).convert('RGB'))
+        self.assertEqual(int(np.count_nonzero(pixels)), 0,
+                         'MG04 R4-01: zero previous-image pixels are visible under an unpainted new label')
+        ax = page.context.new_cdp_session(page)
+        # Chromium also exposes the unnamed Other Images disclosure as a group.
+        groups = [n['name']['value'] for n in ax.send('Accessibility.getFullAXTree')['nodes']
+                  if not n.get('ignored') and n.get('role', {}).get('value') == 'group' and n.get('name', {}).get('value')]
+        self.assertCountEqual(groups, ['Current R CC', 'Current L CC', 'Prior R CC', 'Prior L CC'],
+                              'MG04 M41: only one accessible group per new cell exists during first paint')
+        page.evaluate('()=>{mg.control.holdRender=null;mg.renderRelease.splice(0).forEach(r=>r())}')
+        self.wait_displayed(page, sop, 1)
+        self.settle(page)
+        after = np.asarray(Image.open(io.BytesIO(page.screenshot(clip=clip))).convert('RGB'))
+        self.assertGreater(int(np.count_nonzero(after > 40)), 0, 'positive control: the released image is visible')
+        self.assertEqual(self.violations(page), [])
+
+    def test_mg06_dom_failed_paint_recovers_camera_without_resize_observer(self):
+        # CE7n: the note cannot accidentally repair a stale camera via a ResizeObserver callback.
+        item, meta = entry(DBT['L CC'])
+        item = copy.deepcopy(item)
+        item['00280008'] = {'vr': 'IS', 'Value': [3]}
+        item['52009230']['Value'] = item['52009230']['Value'][:3]
+        sop, name = tag(item, '00080018'), 'Current L CC'
+        for failure in ('load', 'render'):
+            for action in ('Fit', 'pan', '1:1', 'resize'):
+                with self.subTest(failure=failure, action=action), closing(self.page()) as page:
+                    page.evaluate('()=>{window.ResizeObserver=undefined}')
+                    self.mount(page, [(item, meta)])
+                    self.wait_displayed(page, sop, 1)
+                    self.settle(page)
+                    self.camera_action(page, name, 'zoom')
+                    self.settle(page)
+                    hid = self.handle_of(page, name)
+                    page.evaluate("f=>{mg.control.hold=r=>r.purpose==='display'&&r.frame===3;if(f==='load')mg.control.fail=r=>r.frame===3?'network':null;else mg.control.failRender=i=>i.frame===3}", failure)
+                    self.key(page, name, 'End')
+                    page.wait_for_function('()=>mg.held.size>0', timeout=WAIT)
+                    self.camera_action(page, name, action)
+                    # A later box change must also be consumed by recovery, without a resize callback.
+                    page.locator('#host').evaluate("e=>e.style.height='860px'")
+                    page.evaluate('()=>{mg.control.hold=null;[...mg.held.keys()].forEach(mgRelease)}')
+                    expect(self.cell(page, name).get_by_role('button', name='Retry', exact=True)).to_be_visible(timeout=WAIT)
+                    self.settle(page)
+                    final = self.last_paint(page, name)
+                    d = final['display']
+                    message = 'MG06 M42: failure repaints the cached screen with the latest camera and box without RO'
+                    self.assertEqual([d['width'], d['height']], [final['width'], final['height']], message)
+                    if action in ('Fit', 'resize'):
+                        # Resize preserves custom zoom; Fit alone changes the camera mode.
+                        if action == 'Fit':
+                            self.assertAlmostEqual(d['scale'], min(final['width']/d['columns'], final['height']/d['rows']), msg=message)
+                            self.assertEqual(d['pan'], {'x': 0, 'y': 0}, message)
+                    elif action == 'pan':
+                        self.assertGreater(d['pan']['x'], 0, message)
+                    else:
+                        self.assertEqual(d['scale'], 1, message)
+                    self.assertEqual(final['frame'], 1)
+                    self.assertEqual(self.frames_shown(page, sop), [1])
+                    self.assertEqual(page.evaluate("s=>mg.loads.filter(l=>l.sop===s&&l.frame===1).length", sop), 1,
+                                     'recovery uses the saved on-screen image without transferring it again')
+                    page.evaluate('()=>{mg.control.fail=null;mg.control.failRender=null}')
+                    self.cell(page, name).get_by_role('button', name='Retry', exact=True).click()
+                    self.wait_displayed(page, sop, 3)
+                    self.assertEqual(page.evaluate('id=>mg.screen[id]', hid), 3)
+
+    def test_mg06_dom_failed_recovery_stops_and_keeps_retry(self):
+        item, meta = entry(DBT['L CC'])
+        sop, name = tag(item, '00080018'), 'Current L CC'
+        page = self.page()
+        page.evaluate('()=>{window.ResizeObserver=undefined}')
+        self.mount(page, [(item, meta)])
+        self.wait_displayed(page, sop, 1)
+        self.settle(page)
+        hid = self.handle_of(page, name)
+        # Cap the injected failures so a looping mutant remains diagnosable instead of hanging Chromium.
+        page.evaluate("""id=>{const h=mg.handles.find(h=>h.id===id).handle,original=h.render.bind(h);mg.failedAttempts=[];
+            h.render=async(i,d,o)=>{mg.failedAttempts.push(i.frame);if(mg.failedAttempts.length<=5)throw Error('renderer unavailable');return original(i,d,o)};}""", hid)
+        self.key(page, name, 'End')
+        expect(self.cell(page, name).get_by_role('button', name='Retry', exact=True)).to_be_visible(timeout=WAIT)
+        self.settle(page)
+        self.assertEqual(page.evaluate('()=>mg.failedAttempts'), [16, 1],
+                         'MG06 M45: a failed recovery stops after one gated repaint and preserves Retry')
+        self.assertEqual(page.evaluate('id=>mg.screen[id]', hid), 1)
+        self.assertEqual(self.frames_shown(page, sop), [1])
+        self.assertIn('Slice 1 / 16', self.label(page, name))
+        self.assertEqual(self.violations(page), [])
+
+    def test_mg04_dom_layout_commits_first_images_despite_later_failure_without_ro(self):
+        # CE10n: one cell has painted; another is still awaiting its first image.
+        current = {v: entry(s) for v, s in DBT.items()}
+        prior = {v: (prior_copy(i, n, date='19390713'), m) for n, (v, (i, m)) in enumerate(current.items())}
+        sop, name = tag(current['R CC'][0], '00080018'), 'Current R CC'
+        prs = tag(prior['R CC'][0], '00080018')
+        for failure in ('load', 'render', 'recovery'):
+            with self.subTest(failure=failure), closing(self.page()) as page:
+                page.evaluate('()=>{window.ResizeObserver=undefined}')
+                self.mount(page, list(current.values()), list(prior.values()))
+                for i, _ in current.values():
+                    self.wait_displayed(page, tag(i, '00080018'), 1)
+                self.settle(page)
+                page.evaluate("s=>{mg.control.holdRender=(i,p)=>i.sop===s&&p==='before'}", prs)
+                page.get_by_role('button', name='Compare CC', exact=True).click()
+                page.wait_for_function('()=>mg.renderHeld.length>0', timeout=WAIT)
+                self.wait_displayed(page, sop, 1, count=2)
+                hid = self.handle_of(page, name)
+                page.evaluate("""([s,f])=>{if(f==='render')mg.control.failRender=i=>i.sop===s&&i.frame===16;
+                    else{mg.control.fail=r=>r.sop===s&&r.purpose==='display'&&r.frame===16?'network':null;
+                        if(f==='recovery')mg.control.failRender=i=>i.sop===s;}}""", [sop, failure])
+                self.key(page, name, 'End')
+                expect(self.cell(page, name).get_by_role('button', name='Retry', exact=True)).to_be_visible(timeout=WAIT)
+                self.settle(page)
+                page.evaluate('()=>{mg.control.holdRender=null;mg.renderRelease.splice(0).forEach(r=>r())}')
+                self.settle(page)
+                message = 'MG04 M43: later navigation failure belongs to its cell after the first image, without rollback'
+                self.assertEqual(page.get_by_role('button', name='Compare CC', exact=True).get_attribute('aria-pressed'), 'true', message)
+                self.assertEqual(self.cell(page, 'Prior R CC').count(), 1, message)
+                self.assertEqual(self.cell(page, name).get_by_role('button', name='Retry', exact=True).count(), 1, message)
+                self.assertEqual(self.handle_of(page, name), hid, message)
+                self.assertIn('Slice 1 / 16', self.label(page, name))
+                self.assertEqual(page.get_by_role('status').first.inner_text().strip(), '', message)
+                page.evaluate('()=>{mg.control.fail=null;mg.control.failRender=null}')
+                self.cell(page, name).get_by_role('button', name='Retry', exact=True).click()
+                self.wait_displayed(page, sop, 16)
+                self.assertEqual(self.handle_of(page, name), hid)
+                self.assertEqual(self.violations(page), [])
+
+    def test_mg06_dom_spurious_superseded_is_a_failure_with_intent_restore(self):
+        item, meta = entry(DBT['L CC'])
+        sop, name = tag(item, '00080018'), 'Current L CC'
+        for recovery in ('step', 'retry'):
+            with self.subTest(recovery=recovery), closing(self.page()) as page:
+                page.evaluate('()=>{window.ResizeObserver=undefined}')
+                self.mount(page, [(item, meta)])
+                self.wait_displayed(page, sop, 1)
+                self.settle(page)
+                hid = self.handle_of(page, name)
+                page.evaluate("""id=>{const h=mg.handles.find(h=>h.id===id).handle,original=h.render.bind(h);let once=true;
+                    h.render=async(i,d,o)=>{if(once&&i.frame===16){once=false;mg.spuriousCurrent=o.current();return {rendered:false,superseded:true};}return original(i,d,o)};}""", hid)
+                self.key(page, name, 'End')
+                self.settle(page)
+                self.assertTrue(page.evaluate('()=>mg.spuriousCurrent'))
+                self.assertEqual(self.cell(page, name).get_by_role('button', name='Retry', exact=True).count(), 1,
+                                 'MG06 M44: a still-current superseded receipt is a visible render failure')
+                self.assertEqual(page.evaluate('id=>mg.screen[id]', hid), 1)
+                self.assertEqual(self.frames_shown(page, sop), [1])
+                if recovery == 'step':
+                    self.key(page, name, 'ArrowDown')
+                else:
+                    self.cell(page, name).get_by_role('button', name='Retry', exact=True).click()
+                target = 2 if recovery == 'step' else 16
+                self.wait_displayed(page, sop, target)
+                self.assertEqual(self.frames_shown(page, sop), [1, target])
+                self.assertEqual(self.violations(page), [])
 
     def test_mg05_dom_grid_fit_and_labels_stay_within_host(self):
         # Opus grid CE: inspect actual renderer rectangles and visible text, not CSS implementation.

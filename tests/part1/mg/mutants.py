@@ -97,8 +97,8 @@ MUTANTS = [
     {"id": "M11", "file": "viewer", "suite": "dom", "case": "test_mg04_dom_other_patient_duplicate_and_partial_switch_are_never_applied",
      "title": "a layout change in which some images failed is committed",
      "expect": "MG04 M11: a partly failed change is not applied",
-     "old": "      if(shown.some(r=>r.outcome==='failed')){",
-     "new": "      if(shown.every(r=>r.outcome==='failed')){"},
+     "old": "      if(shown.some(outcome=>outcome!=='painted')){",
+     "new": "      if(shown.every(outcome=>outcome!=='painted')){"},
     {"id": "M12", "file": "viewer", "suite": "dom", "case": "test_mg02_dom_prefetch_wrong_frame_and_wrong_total_never_count_as_displayed",
      "title": "a prefetched frame is reported and counted as displayed",
      "expect": "MG02 M12: a prefetched frame is not a displayed frame",
@@ -109,12 +109,13 @@ MUTANTS = [
      "title": "F01: a request back to the slice on screen does not supersede the delayed one",
      "expect": "MG06 M13: a request back to the current slice cancels the delayed one",
      "old": "      cell.intent=target;const ticket=paintTicket(cell);",
-     "new": "      if(target===cell.position&&cell.shown&&!force)return;cell.intent=target;const ticket=paintTicket(cell);"},
+     "new": "      if(target===cell.position&&cell.image)return;cell.intent=target;const ticket=paintTicket(cell);"},
     {"id": "M14", "file": "viewer", "suite": "dom", "case": "test_mg06_dom_superseded_renders_are_neither_painted_nor_reported",
      "title": "F01: no sequence check after the render completes",
      "expect": "MG06 M14: a render superseded after its paint is not counted as seen",
      "old": "        if(!current)return 'superseded';",
-     "new": "        if(false)return 'superseded';"},
+     # Keep the pre-paint superseded outcome intact, as the original mutation did before R4-03.
+     "new": "        if(!current&&!painted)return 'superseded';"},
     {"id": "M15", "file": "viewer", "suite": "dom", "case": "test_mg06_dom_superseded_renders_are_neither_painted_nor_reported",
      "title": "F01: the renderer's pre-paint check always answers current",
      "expect": "MG06 M15: a render superseded before its paint is not painted",
@@ -230,12 +231,12 @@ MUTANTS = [
      "title": "R3-01: frame-only equality bypasses the latest camera and box",
      "expect": "MG06 M37: returning to the shown frame still paints the latest camera and box",
      "old": "      return requestPaint(cell,ticket);",
-     "new": "      if(!force&&cell.shown&&target===cell.position&&!cell.drawing)return;return requestPaint(cell,ticket);"},
+     "new": "      if(cell.image&&target===cell.position&&!cell.drawing)return;return requestPaint(cell,ticket);"},
     {"id": "M38", "file": "viewer", "suite": "dom", "case": "test_mg04_dom_layout_switch_follows_latest_cell_paint",
      "title": "R3-02: a superseded first layout paint is treated as failure",
      "expect": "MG04 M38: a superseded first paint follows the latest intent without a false rollback",
-     "old": "        if(pending!==cell.pending)continue;\n        return {pending,outcome};",
-     "new": "        if(pending!==cell.pending)return {pending:cell.pending,outcome:'failed'};\n        return {pending,outcome};"},
+     "old": "        if(pending!==cell.pending)continue;\n        return outcome;",
+     "new": "        if(pending!==cell.pending)return 'failed';\n        return outcome;"},
     {"id": "M39", "file": "viewer", "suite": "dom", "case": "test_mg06_dom_failed_target_restores_steps_and_retry",
      "title": "R3-03: failed intent survives and the next relative step starts there",
      "expect": "MG06 M39: a failed target is reserved for Retry while the next step starts on screen",
@@ -246,6 +247,41 @@ MUTANTS = [
      "expect": "MG05 M40: wrapped facts and the whole Fit image stay inside the visible host",
      "old": "grid-template-columns:repeat(2,minmax(0,1fr));",
      "new": "grid-template-columns:repeat(2,minmax(max-content,1fr));"},
+    # D793: hide, independent recovery, first-image commit, receipt validity and bounded recovery.
+    {"id": "M41", "file": "viewer", "suite": "dom", "case": "test_mg04_dom_unpainted_layout_cells_hide_old_images_and_groups",
+     "title": "R4-01: restore the inline-overridden hidden attribute",
+     "expect": "MG04 M41: only one accessible group per new cell exists during first paint",
+     "old": "      if(previousGrid){previousGrid.hidden=true;previousGrid.style.display='none';}",
+     "new": "      if(previousGrid)previousGrid.hidden=true;"},
+    {"id": "M42", "file": "viewer", "suite": "dom", "case": "test_mg06_dom_failed_paint_recovers_camera_without_resize_observer",
+     "title": "R4-02: leave failure recovery dependent on ResizeObserver",
+     "expect": "MG06 M42: failure repaints the cached screen with the latest camera and box without RO",
+     "old": "      if(cell.image)requestPaint(cell,{...paintTicket(cell),recovery:true});",
+     "new": "      // No explicit recovery; only ResizeObserver may repaint the image."},
+    {"id": "M43", "file": "viewer", "suite": "dom", "case": "test_mg04_dom_layout_commits_first_images_despite_later_failure_without_ro",
+     "title": "R4-02: follow every latest paint instead of the first confirmed image",
+     "expect": "MG04 M43: later navigation failure belongs to its cell after the first image, without rollback",
+     "old": "      const shown=await Promise.all(drafts.map(firstPaint));",
+     "new": """      async function latestPaint(cell){
+        if(!cell.object)return {pending:null,outcome:'painted'};
+        for(;;){const pending=cell.pending,outcome=await pending;
+          if(!usable(cell)||!live())return {pending,outcome:'superseded'};
+          if(pending!==cell.pending)continue;return {pending,outcome};}
+      }
+      let settled;
+      do{settled=await Promise.all(drafts.map(latestPaint));}
+      while(!ended&&settled.some((r,i)=>drafts[i].object&&r.pending!==drafts[i].pending));
+      const shown=settled.map(r=>r.outcome);"""},
+    {"id": "M44", "file": "viewer", "suite": "dom", "case": "test_mg06_dom_spurious_superseded_is_a_failure_with_intent_restore",
+     "title": "R4-03: trust a superseded receipt even while the ticket remains latest",
+     "expect": "MG06 M44: a still-current superseded receipt is a visible render failure",
+     "old": "        const current=latest();",
+     "new": "        if(result&&result.superseded)return 'superseded';const current=latest();"},
+    {"id": "M45", "file": "viewer", "suite": "dom", "case": "test_mg06_dom_failed_recovery_stops_and_keeps_retry",
+     "title": "R4-02: failed recovery recursively schedules itself",
+     "expect": "MG06 M45: a failed recovery stops after one gated repaint and preserves Retry",
+     "old": "      if(recovery)return 'failed';",
+     "new": "      // Recovery failure may recurse."},
 ]
 
 
