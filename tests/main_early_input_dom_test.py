@@ -1341,6 +1341,28 @@ class ActualLayout(PreCase):
         finally:
             context.close()
 
+    def test_actual_part2_script_responses_are_complete(self):
+        layout = Pages.current.layout("actual")
+        self.assertIn("report-draft-save.js", layout[1]["parts"], "PRECONDITION actual part 2 asset")
+        run = Run(self, layout, hold="report-draft-save.js")
+        responses, failures = [], []
+        run.page.on("response", lambda response: responses.append({"url": response.url, "status": response.status}))
+        run.page.on("requestfailed", lambda request: failures.append({"url": request.url, "failure": request.failure}))
+        try:
+            run.blocked()
+            run.delivery.release()
+            run.wait("document.readyState === 'complete'", "actual asset load completes")
+            raw = {"manifest": layout[1], "delivered": run.delivery.bodies, "responses": responses,
+                   "failures": failures, "errors": run.errors, "trace": run.trace()}
+            sh.keep(ARTIFACTS / "part2-assets", "actual.raw.json", raw)
+            name = "report-draft-save.js"
+            self.assertEqual([200], [r["status"] for r in responses if urlparse(r["url"]).path.endswith('/' + name)],
+                             "actual report-draft-save.js response must arrive")
+            self.assertEqual([], failures, "actual script requests must succeed")
+            self.assertEqual([], run.errors, "actual scripts execute without errors")
+        finally:
+            run.close()
+
 
 class LoadBudget(PreCase):
     @classmethod
