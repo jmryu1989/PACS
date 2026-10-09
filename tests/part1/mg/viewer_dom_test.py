@@ -14,27 +14,30 @@ slot label states (role, date, side/view, kind, slice/total, position), what the
 (chest-wall side, air vs tissue brightness), and what the seam was asked to do (fit, 1:1, pan). No
 product source text, internal name or DOM shape beyond accessible roles/names is read. Pixel hashes are
 facts of the original frames. Variants (mirrored, relabelled, damaged, a same-patient prior copy) are
-test-owned and exist only in memory; they are named as such and never stand in for a real prior.
+test-owned and exist only in memory; they are named as such and never stand in for a real prior (the
+real same-subject prior is EA1141-4339969). A sample set whose root directory is absent SKIPS the case
+with that reason (not run, never a pass); a listed file missing or changed under a present root FAILS.
 KIN_MG_MODEL / KIN_MG_VIEWER may point at module copies (mutants.py); the product tree is never edited.
 """
 from pathlib import Path
 import copy
 import hashlib
-import json
+import importlib.util
 import os
 import re
-import sys
 import unittest
 from urllib.parse import urlparse
 
 import numpy as np
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from dicom_contract_test import dataset, dicom_json, sample_path, per_frame_projection, voi, tag  # noqa: E402
-
-from playwright.sync_api import sync_playwright  # noqa: E402
+from playwright.sync_api import sync_playwright
 
 HERE = Path(__file__).resolve().parent
+# Loaded by path under its own name: a sibling unit (tests/part1/xa) uses the same file names.
+_spec = importlib.util.spec_from_file_location("kin_mg_dicom_contract", HERE / "dicom_contract_test.py")
+_contract = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_contract)
+dataset, dicom_json, sample_path = _contract.dataset, _contract.dicom_json, _contract.sample_path
+per_frame_projection, voi, tag = _contract.per_frame_projection, _contract.voi, _contract.tag
 ROOT = HERE.parents[2]
 MODEL = Path(os.environ.get("KIN_MG_MODEL") or ROOT / "worklist-v0" / "hpacs-lite" / "mammography-model.js")
 VIEWER = Path(os.environ.get("KIN_MG_VIEWER") or ROOT / "worklist-v0" / "hpacs-lite" / "viewer-mammography.js")
@@ -130,20 +133,6 @@ window.mgStrips=(id,threshold)=>{
 </script></body></html>"""
 
 
-def element_header_offset(path):
-    """Byte offset and length of the native Pixel Data value (explicit VR little endian)."""
-    import pydicom
-    with open(path, "rb") as f:
-        pydicom.dcmread(f, stop_before_pixels=True)
-        start = f.tell()
-        head = f.read(12)
-    group, element = int.from_bytes(head[0:2], "little"), int.from_bytes(head[2:4], "little")
-    vr = head[4:6].decode("ascii")
-    if (group, element) != (0x7FE0, 0x0010) or vr not in ("OB", "OW"):
-        raise AssertionError("native Pixel Data expected in %s" % path)
-    return start + 12, int.from_bytes(head[8:12], "little")
-
-
 class Frames:
     """Real stored frame bytes, read from the sample file at its Pixel Data offset."""
 
@@ -152,20 +141,12 @@ class Frames:
 
     def describe(self, sample_id):
         if sample_id not in self.meta:
-            ds = dataset(sample_id)
-            path = sample_path(sample_id)
-            offset, length = element_header_offset(path)
-            rows, columns, bits = int(ds.Rows), int(ds.Columns), int(ds.BitsAllocated)
-            count = int(ds.get("NumberOfFrames", 1) or 1)
-            size = rows * columns * bits // 8
-            if length < size * count:
-                raise AssertionError("pixel data shorter than declared frames in " + sample_id)
-            self.meta[sample_id] = {"path": path, "offset": offset, "size": size, "count": count, "rows": rows, "columns": columns, "bits": bits}
+            self.meta[sample_id] = _contract.pixel_layout(sample_id)
         return self.meta[sample_id]
 
     def read(self, sample_id, frame, variant="raw"):
         m = self.describe(sample_id)
-        if not 1 <= frame <= m["count"]:
+        if not 1 <= frame <= m["frames"]:
             return None
         with open(m["path"], "rb") as f:
             f.seek(m["offset"] + (frame - 1) * m["size"])
@@ -177,7 +158,6 @@ class Frames:
 
 
 FRAMES = Frames()
-
 
 def entry(sample_id, json_item=None, variant=None):
     m = FRAMES.describe(sample_id)
@@ -488,11 +468,15 @@ class MammographyViewerDOMTest(unittest.TestCase):
     def pixel_facts(sample_id, item):
         """From the stored pixels through the object's own VOI (PS3.3 C.11.2.1.2): the display value of
         the tissue threshold, and how much brighter the chest-wall edge strip is than the opposite strip."""
-        pixels = dataset(sample_id, pixels=True).pixel_array
+        pixels = _contract.frame_pixels(sample_id, 1)
         low = float(np.percentile(pixels, 5))
         stored = low + 0.1 * (float(pixels.max()) - low)
-        center, width = float(tag(item, "00281050")), float(tag(item, "00281051"))
-        fn = tag(item, "00281056") or "LINEAR"
+        # Window from the header: top level, or the first window of the shared Frame VOI LUT.
+        voi_item = item
+        if "00281050" not in item:
+            voi_item = item["52009229"]["Value"][0]["00289132"]["Value"][0]
+        center, width = float(tag(voi_item, "00281050")), float(tag(voi_item, "00281051"))
+        fn = tag(voi_item, "00281056") or tag(item, "00281056") or "LINEAR"
         strip = max(1, pixels.shape[1] // 20)
         left, right = voi(pixels[:, :strip], center, width, fn).mean(), voi(pixels[:, -strip:], center, width, fn).mean()
         return float(voi(np.array([stored]), center, width, fn)[0]), float(abs(right - left))
@@ -595,6 +579,45 @@ class MammographyViewerDOMTest(unittest.TestCase):
         self.assertAlmostEqual(after["display"]["scale"], zoomed, places=9, msg="MG05: the doctor's zoom is not replaced on the next slice")
         page2.get_by_role("button", name="Fit", exact=True).click()
         page2.wait_for_function("([id,f])=>{const r=[...mg.renders].reverse().find(x=>x.handle===id&&x.painted);return r&&Math.abs(r.display.scale-f)<1e-9}", arg=[hid, fit], timeout=WAIT)
+
+    # --- EA1141-4339969: real current/prior with DBT and device synthetic 2D ---------------------------
+    def test_mg04_dom_paired_real_prior_compare_dbt_and_synthetic_2d(self):
+        page = self.page()
+        current = [entry(s) for s in _contract.CURRENT_DBT + _contract.CURRENT_2D]
+        prior = [entry(s) for s in _contract.PRIOR_DBT]
+        sop = {s: tag(item, "00080018") for s, (item, _) in zip(_contract.CURRENT_DBT + _contract.CURRENT_2D + _contract.PRIOR_DBT, current + prior)}
+        self.mount(page, current, prior)
+        names = ("R CC", "L CC", "R MLO", "L MLO")
+        for name, sample_id in zip(names, _contract.CURRENT_2D):
+            self.wait_displayed(page, sop[sample_id], 1)
+            text = self.label(page, "Current " + name)
+            for fact in ("1945-02-13", name, "Synthetic 2D"):
+                self.assertIn(fact, text, "MG04: the stored synthetic view is offered and named in " + name)
+        page.get_by_role("button", name="Compare CC", exact=True).click()
+        page.wait_for_function("()=>!!document.querySelector('[aria-label=\"Prior L CC\"]')", timeout=WAIT)
+        for name in ("Prior R CC", "Prior L CC"):
+            text = self.label(page, name)
+            self.assertIn("1944-02-21", text)
+            self.assertIn("Missing", text, "MG04: no prior synthetic view exists, and none is made from DBT")
+        page.get_by_role("button", name="DBT", exact=True).click()
+        for sample_id in (_contract.CURRENT_DBT[0], _contract.CURRENT_DBT[1], _contract.PRIOR_DBT[0], _contract.PRIOR_DBT[1]):
+            self.wait_displayed(page, sop[sample_id], 1)
+        frames = {s: int(dataset(s).NumberOfFrames) for s in (_contract.CURRENT_DBT[1], _contract.PRIOR_DBT[1])}
+        self.assertIn("Slice 1 / %d" % frames[_contract.CURRENT_DBT[1]], self.label(page, "Current L CC"))
+        self.assertIn("Slice 1 / %d" % frames[_contract.PRIOR_DBT[1]], self.label(page, "Prior L CC"))
+        # The prior left CC is stored mirrored (Patient Orientation P\L); on screen its chest wall is at the left.
+        item, _ = prior[1]
+        threshold, _ = self.pixel_facts(_contract.PRIOR_DBT[1], item)
+        side, _ = self.screen_side(page, "Prior L CC", threshold)
+        self.assertEqual(side, "left", "MG05: the real prior is turned to the standard orientation from its tags")
+        self.key(page, "Current L CC", "End", sop=sop[_contract.CURRENT_DBT[1]])
+        self.settle(page)
+        last = frames[_contract.CURRENT_DBT[1]]
+        self.assertIn("Slice %d / %d" % (last, last), self.label(page, "Current L CC"))
+        self.assertIn("Slice 1 / %d" % frames[_contract.PRIOR_DBT[1]], self.label(page, "Prior L CC"),
+                      "MG03: the prior DBT keeps its own slice; frame numbers are never matched across DBTs")
+        self.assertEqual([f for _, f, *_ in self.displayed(page, sop[_contract.PRIOR_DBT[1]])], [1])
+        self.assertEqual(self.violations(page), [])
 
     # --- MG06 -------------------------------------------------------------------------------------
     def test_mg06_dom_late_and_stale_results_never_overwrite_the_current_slice(self):

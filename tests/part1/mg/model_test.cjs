@@ -35,16 +35,16 @@ function mg({sop=next(),series='1.2.826.0.1.3680043.10.8.1',study='1.2.826.0.1.3
 // A DBT object: shared orientation/thickness, per-frame position; `positions` are mm along +z.
 function dbt({sop=next(),study='1.2.826.0.1.3680043.10.7.1',series='1.2.826.0.1.3680043.10.8.2',patient='PT-1',lat='L',view='CC',
   positions=[0,1,2,3,4],frames=null,iop=[0,-1,0,-1,0,0],technique='TOMOSYNTHESIS',volumetric='VOLUME',thickness=1,perFrame=null,
-  frameTypes=null,omitPositions=false}={}){
+  frameTypes=null,omitPositions=false,imageType=['ORIGINAL','PRIMARY','VOLUME','NONE'],frameType=null}={}){
   const count=frames===null?positions.length:frames;
   // frameTypes[i] = [Volumetric Properties, Volume Based Calculation Technique] of frame i+1.
   const items=(perFrame||positions.map((z,i)=>{
     const ft=frameTypes&&frameTypes[i]||[volumetric,technique];
-    return {'00189504':seq({'00089007':v('CS','ORIGINAL','PRIMARY','VOLUME','NONE'),'00089206':v('CS',ft[0]),'00089207':v('CS',ft[1])}),
+    return {'00189504':seq({'00089007':v('CS',...(frameType||imageType)),'00089206':v('CS',ft[0]),'00089207':v('CS',ft[1])}),
       ...(omitPositions?{}:{'00209113':seq({'00200032':v('DS',...(Array.isArray(z)?z:[-60,-10,z]))})})};
   }));
   return {'00080016':v('UI',DBT),'00080018':v('UI',sop),'0020000D':v('UI',study),'0020000E':v('UI',series),'00080060':v('CS','MG'),
-    '00080008':v('CS','ORIGINAL','PRIMARY','VOLUME','NONE'),'00100020':v('LO',patient),'00080020':v('DA','20240105'),
+    '00080008':v('CS',...imageType),'00100020':v('LO',patient),'00080020':v('DA','20240105'),
     '00280008':v('IS',count),'00280010':v('US',120),'00280011':v('US',90),'00280004':v('CS','MONOCHROME2'),'00280101':v('US',12),
     '00540220':seq({'00080102':v('SH',VIEW[view][0]),'00080100':v('SH',VIEW[view][1])}),
     '52009229':seq({'00209071':seq({'00209072':v('CS',lat)}),'00209116':seq({'00200037':v('DS',...iop)}),
@@ -67,6 +67,13 @@ test('MG01-allow conventional, device synthetic 2D and DBT are told apart by sta
   assert.equal(slices.kind,'dbt');assert.equal(slices.sliceKind,'slices');assert.equal(slices.laterality,'L');assert.equal(slices.view,'CC');
   const slab=model.classify(dbt({technique:'MAX_IP',volumetric:'SAMPLED',thickness:10}));
   assert.equal(slab.kind,'dbt');assert.equal(slab.sliceKind,'mip-slab','a MIP slab is reported as what is stored, not as thin slices');assert.equal(slab.sliceThickness,10);
+  // Volumetric Properties VOLUME names regularly sampled slices even when the technique says MAX_IP.
+  const volume=model.classify(dbt({technique:'MAX_IP',volumetric:'VOLUME',thickness:1}));
+  assert.equal(volume.sliceKind,'slices');assert.ok(volume.notes.length>0,'the disagreeing technique is kept as a note');
+  // A device synthetic 2D view stored as a one-frame Breast Tomosynthesis object.
+  const stored2d=model.classify(dbt({positions:[0],technique:'MAX_IP',volumetric:'VOLUME',thickness:54,
+    imageType:['DERIVED','PRIMARY','TOMOSYNTHESIS','GENERATED_2D']}));
+  assert.equal(stored2d.kind,'generated2d');assert.equal(stored2d.status,'verified');assert.equal(stored2d.standard,true);
   const cur='1.2.826.0.1.3680043.10.7.1';
   const p=model.plan(manifest(study(cur,'current',[mg({type:['DERIVED','PRIMARY']}),mg({type:['DERIVED','PRIMARY','TOMOSYNTHESIS','GENERATED_2D']}),
     dbt({lat:'R',view:'CC',technique:'MAX_IP',volumetric:'SAMPLED',thickness:10}),dbt({lat:'R',view:'CC'})])));
@@ -93,6 +100,13 @@ test('MG01-reject DERIVED alone, a description, a contradiction or a non-mammogr
   assert.notEqual(sc.kind,'dbt');assert.notEqual(sc.kind,'generated2d');assert.equal(sc.standard,false,'a secondary capture is never a device image');
   const processing=model.classify(mg({sopClass:MG_PROCESSING,intent:'FOR PROCESSING'}));
   assert.equal(processing.presentation,'processing');assert.equal(processing.standard,false,'For Processing is not shown as For Presentation');
+  const generated=['DERIVED','PRIMARY','TOMOSYNTHESIS','GENERATED_2D'];
+  for(const [name,object] of [['many frames',dbt({imageType:generated})],
+    ['frame type disagrees',dbt({positions:[0],imageType:generated,frameType:['DERIVED','PRIMARY','TOMOSYNTHESIS','NONE']})],
+    ['Value 3 not tomosynthesis',dbt({positions:[0],imageType:['DERIVED','PRIMARY','VOLUME','GENERATED_2D']})]]){
+    const c=model.classify(object);
+    assert.notEqual(c.kind,'generated2d',name);assert.equal(c.standard,false,name);
+  }
   const mixed=model.classify(dbt({frameTypes:[['VOLUME','TOMOSYNTHESIS'],['SAMPLED','MAX_IP'],['VOLUME','TOMOSYNTHESIS'],['VOLUME','TOMOSYNTHESIS'],['VOLUME','TOMOSYNTHESIS']]}));
   assert.equal(mixed.status,'unverified');assert.equal(mixed.standard,false);
   const cur='1.2.826.0.1.3680043.10.7.1';

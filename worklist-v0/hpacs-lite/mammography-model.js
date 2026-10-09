@@ -97,22 +97,29 @@
   // "Tomosynthesis" itself is no such hint: a 2D exposure of a combo examination is described that way.
   const LEGACY_HINT=/\bc-?view\b|synthetic|synthesi[sz]ed|\bv-?preview\b|intelligent\s*2d|\bs-?view\b|insight\s*2d|generated\s*2d|2d\s*generated/i;
 
-  function dbtKind(item,fg,frames){
-    // Frames without a frame type item add nothing here; a frame count that does not match the
-    // per-frame list is the frame index's finding, not a second kind.
+  // The distinct X-Ray 3D frame types of an object as "FrameType|Volumetric Properties|Technique".
+  // Frames without a frame type item add nothing; a frame count that does not match the per-frame
+  // list is the frame index's finding, not a second kind.
+  function frameTypes(fg,frames){
     const seen=new Set();
     for(let k=1;k<=frames;k++){
       const t=macro(fg,k,'00189504');
       if(t)seen.add([tokens(t,'00089007').join('\\'),text(t,'00089206').toUpperCase(),text(t,'00089207').toUpperCase()].join('|'));
     }
-    if(seen.size>1)return {sliceKind:null,issue:'mixed-frame-types',evidence:[...seen].map(s=>'Frame Type='+s)};
+    return seen;
+  }
+  // Volumetric Properties decides what a frame is (C.8.21.1.1.3 notes: VOLUME for regularly sampled
+  // slices, SAMPLED for slabs and MIPs). A technique that disagrees is reported, not used to relabel.
+  function dbtKind(item,fg,frames){
+    const seen=frameTypes(fg,frames);
+    if(seen.size>1)return {sliceKind:null,issue:'mixed-frame-types',notes:[],evidence:[...seen].map(s=>'Frame Type='+s)};
     let [,volumetric,technique]=(seen.size?[...seen][0]:'||').split('|');
     volumetric=volumetric||text(item,'00089206').toUpperCase();technique=technique||text(item,'00089207').toUpperCase();
     const evidence=['Volumetric Properties='+(volumetric||'(absent)'),'Volume Based Calculation Technique='+(technique||'(absent)')];
-    if(technique==='MAX_IP'||technique==='MIN_IP')return {sliceKind:'mip-slab',technique,issue:null,evidence};
-    if(technique==='TOMOSYNTHESIS'&&volumetric==='VOLUME')return {sliceKind:'slices',technique,issue:null,evidence};
-    if(technique==='TOMOSYNTHESIS'&&volumetric==='SAMPLED')return {sliceKind:'sampled',technique,issue:null,evidence};
-    return {sliceKind:'unspecified',technique:technique||null,issue:null,evidence};
+    const projection=technique==='MAX_IP'||technique==='MIN_IP';
+    if(volumetric==='VOLUME')return {sliceKind:'slices',issue:null,notes:technique&&technique!=='TOMOSYNTHESIS'?['technique-'+technique.toLowerCase()+'-on-volume']:[],evidence};
+    if(volumetric==='SAMPLED')return {sliceKind:projection?'mip-slab':'sampled',issue:null,notes:[],evidence};
+    return {sliceKind:projection?'mip-slab':'unspecified',issue:null,notes:[],evidence};
   }
 
   function classify(item){
@@ -121,7 +128,7 @@
     const out={sop:text(item,'00080018'),series:text(item,'0020000E'),study:text(item,'0020000D'),sopClass,
       instanceNumber:number(item,'00200013'),seriesNumber:number(item,'00200011'),frames:Number.isInteger(frames)?frames:null,
       kind:null,status:'unverified',presentation:null,laterality:null,view:null,modifiers:[],partial:false,biopsy:null,
-      sliceKind:null,sliceThickness:null,evidence:[],issues:[],standard:false};
+      sliceKind:null,sliceThickness:null,evidence:[],issues:[],notes:[],standard:false};
     const issue=v=>{if(v&&!out.issues.includes(v))out.issues.push(v);};
     if(!uid(out.sop)||!uid(out.series)||!uid(out.study))issue('identity-invalid');
     const lat=laterality(item,fg);out.laterality=lat.value;out.evidence.push(...lat.evidence);issue(lat.issue);
@@ -130,12 +137,22 @@
     out.evidence.push('SOP Class='+sopClass,'Image Type='+type.join('\\'));
     if(text(item,'00080060').toUpperCase()!=='MG'){out.kind='other';issue('modality-not-mg');}
     else if(sopClass===SOP_DBT){
-      if(type.includes('GENERATED_2D')){out.kind=null;issue('generated-2d-on-tomosynthesis-object');}
+      const t3=type[2]||'';
+      if(type[3]==='GENERATED_2D'){
+        // A device synthetic 2D view stored in the Breast Tomosynthesis IOD: one frame whose Image Type
+        // and Frame Type both say GENERATED_2D (C.8.11.7 terms; C.8.21.1.1.3 names MAX_IP for such views).
+        // The X-Ray 3D rule that Value 4 be NONE is kept as a note, not used to overrule the device.
+        const ft=[...frameTypes(fg,out.frames||0)];
+        if(out.frames===1&&(t3==='TOMOSYNTHESIS'||TOMO_BIOPSY.has(t3))&&ft.length===1&&ft[0].split('|')[0].split('\\')[3]==='GENERATED_2D'){
+          out.kind='generated2d';out.status='verified';out.biopsy=t3==='TOMOSYNTHESIS'?null:t3;out.notes.push('x-ray-3d-value4-not-none');
+          out.evidence.push('Frame Type='+ft[0]);
+        }else issue('generated-2d-on-tomosynthesis-object');
+      }else if(type.includes('GENERATED_2D'))issue('generated-2d-on-tomosynthesis-object');
       else{
-        const d=dbtKind(item,fg,out.frames||0);out.evidence.push(...d.evidence);
+        const d=dbtKind(item,fg,out.frames||0);out.evidence.push(...d.evidence);out.notes.push(...d.notes);
         if(d.issue){issue(d.issue);}else{out.kind='dbt';out.sliceKind=d.sliceKind;out.status='verified';}
-        const t=macro(fg,1,'00289110');out.sliceThickness=t?number(t,'00180050'):null;
       }
+      const t=macro(fg,1,'00289110');out.sliceThickness=t?number(t,'00180050'):null;
     }else if(sopClass===SOP_MG||sopClass===SOP_MG_PROCESSING){
       const v3=type[2]||'',v4=type[3]||'';
       if(v4==='GENERATED_2D'){

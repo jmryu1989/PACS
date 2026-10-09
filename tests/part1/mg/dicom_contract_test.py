@@ -7,10 +7,12 @@ D73: assertions bind to the model's public output for real objects and to facts 
 the DICOM files (header values via pydicom, pixel arrays via numpy). No product source text, function
 name or DOM shape is read. Pixel hashes/coordinates here are facts of the original image, not pins.
 
-Samples are read in place from KIN_MG_SAMPLE_ROOT (default: the local public TCIA copy named in
-samples.json) and checked by SHA-256; DICOM bytes are never copied into this repository. A missing
-or changed sample FAILS the case that needs it; nothing is skipped. Variants (mirrored, relabelled,
-damaged) exist only in memory. KIN_MG_MODEL may point at a copy of the model (mutants.py).
+Samples are read in place from the roots named in samples.json (KIN_MG_SAMPLE_ROOT for the first
+public set, KIN_MG_PAIRED_ROOT for the EA1141-4339969 current/prior set) and checked by SHA-256; DICOM
+bytes are never copied into this repository. A set whose root directory is absent SKIPS the cases
+that need it with that reason (a skip is "not run", never a pass); a listed file that is missing or
+changed under a present root FAILS. Variants (mirrored, relabelled, damaged) exist only in memory.
+KIN_MG_MODEL may point at a copy of the model (mutants.py).
 """
 from pathlib import Path
 import copy
@@ -33,26 +35,70 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 MODEL = Path(os.environ.get("KIN_MG_MODEL") or ROOT / "worklist-v0" / "hpacs-lite" / "mammography-model.js")
 SAMPLES = json.loads((HERE / "samples.json").read_text(encoding="utf-8"))
-SAMPLE_ROOT = Path(os.environ.get(SAMPLES["root_env"]) or SAMPLES["default_root"])
 _verified = {}
+
+
+def set_root(name):
+    spec = SAMPLES["sets"][name]
+    return Path(os.environ.get(spec["root_env"]) or spec["default_root"])
 
 
 def sample_path(sample_id):
     """The local file of a listed sample, after its SHA-256 matches the list."""
     row = next(s for s in SAMPLES["used"] if s["id"] == sample_id)
     if sample_id not in _verified:
-        path = SAMPLE_ROOT / row["path"]
+        root = set_root(row["set"])
+        if not root.is_dir():
+            raise unittest.SkipTest("sample set %s is absent at %s (set %s); hosted CI needs the round-2 fixture plan"
+                                    % (row["set"], root, SAMPLES["sets"][row["set"]]["root_env"]))
+        path = root / row["path"]
         if not path.is_file():
             raise AssertionError("sample %s is not available at %s" % (sample_id, path))
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        if digest != row["sha256"]:
-            raise AssertionError("sample %s changed: sha256 %s != %s" % (sample_id, digest, row["sha256"]))
+        digest = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 24), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != row["sha256"]:
+            raise AssertionError("sample %s changed: sha256 %s != %s" % (sample_id, digest.hexdigest(), row["sha256"]))
         _verified[sample_id] = path
     return _verified[sample_id]
 
 
 def dataset(sample_id, pixels=False):
     return pydicom.dcmread(str(sample_path(sample_id)), stop_before_pixels=not pixels)
+
+
+def pixel_layout(sample_id):
+    """Offset, frame size and shape of the native Pixel Data (explicit VR little endian), from the file."""
+    path = sample_path(sample_id)
+    with open(path, "rb") as f:
+        ds = pydicom.dcmread(f, stop_before_pixels=True)
+        start = f.tell()
+        head = f.read(12)
+    if (int.from_bytes(head[0:2], "little"), int.from_bytes(head[2:4], "little")) != (0x7FE0, 0x0010) or head[4:6] not in (b"OB", b"OW"):
+        raise AssertionError("native Pixel Data expected in " + sample_id)
+    rows, columns, bits = int(ds.Rows), int(ds.Columns), int(ds.BitsAllocated)
+    frames = int(ds.get("NumberOfFrames", 1) or 1)
+    size = rows * columns * bits // 8
+    if int.from_bytes(head[8:12], "little") < size * frames:
+        raise AssertionError("pixel data shorter than its declared frames in " + sample_id)
+    return {"path": path, "offset": start + 12, "size": size, "frames": frames, "rows": rows, "columns": columns, "bits": bits}
+
+
+def frame_bytes(sample_id, frame):
+    """The stored bytes of one frame (1-based), read from the file without decoding the others."""
+    m = pixel_layout(sample_id)
+    if not 1 <= frame <= m["frames"]:
+        return None
+    with open(m["path"], "rb") as f:
+        f.seek(m["offset"] + (frame - 1) * m["size"])
+        return f.read(m["size"])
+
+
+def frame_pixels(sample_id, frame):
+    m = pixel_layout(sample_id)
+    dtype = np.uint8 if m["bits"] == 8 else np.dtype("<u2")
+    return np.frombuffer(frame_bytes(sample_id, frame), dtype=dtype).reshape(m["rows"], m["columns"])
 
 
 def dicom_json(ds):
@@ -141,6 +187,11 @@ def displayed(pixels, spec):
 
 CMMD_VIEWS = ["cmmd-d2-0140-1", "cmmd-d2-0140-2", "cmmd-d2-0140-3", "cmmd-d2-0140-4"]
 DBT_OBJECTS = ["ea1141-3227336-185841", "ea1141-3227336-148695", "ea1141-3227336-310042", "ea1141-3227336-319808"]
+# EA1141-4339969: current 1945-02-13 (DBT + device synthetic 2D) and prior 1944-02-21 (DBT).
+VIEWS4 = ("rcc", "lcc", "rmlo", "lmlo")
+CURRENT_DBT = ["ea1141-4339969-1945-%s-dbt" % v for v in VIEWS4]
+CURRENT_2D = ["ea1141-4339969-1945-%s-i2d" % v for v in VIEWS4]
+PRIOR_DBT = ["ea1141-4339969-1944-%s-dbt" % v for v in VIEWS4]
 VIEW_MEANING = {"cranio-caudal": "CC", "medio-lateral oblique": "MLO"}
 
 
@@ -335,6 +386,97 @@ class MammographyDicomContractTest(unittest.TestCase):
         self.assertFalse(s_unlabelled["orientation"]["flipH"] or s_unlabelled["orientation"]["flipV"], "MG05: no orientation, no guessed flip")
         self.assertTrue(s_processing["invert"], "MONOCHROME1 is shown inverted, once")
         self.assertNotIn("presentation-lut-conflict", s_processing["issues"])
+
+    # --- EA1141-4339969: real device synthetic 2D, thin DBT and a same-subject prior -----------------
+    def test_mg01_paired_device_synthetic_2d_and_thin_dbt_are_classified(self):
+        objects = CURRENT_2D + CURRENT_DBT + PRIOR_DBT
+        results = run_model(*[["classify", dicom_json(dataset(s))] for s in objects])
+        for sample_id, result in zip(objects, results):
+            ds = dataset(sample_id)
+            frame_type = ds.PerFrameFunctionalGroupsSequence[0].XRay3DFrameTypeSequence[0]
+            self.assertEqual((result["laterality"], result["view"]), (header_laterality(ds), header_view(ds)), sample_id)
+            self.assertTrue(result["standard"], sample_id)
+            if sample_id in CURRENT_2D:
+                self.assertEqual((list(ds.ImageType)[2:4], int(ds.NumberOfFrames)), (["TOMOSYNTHESIS", "GENERATED_2D"], 1), sample_id)
+                self.assertEqual(result["kind"], "generated2d", "MG01: the device's synthetic 2D view is recognised from its Image Type: " + sample_id)
+                self.assertEqual(result["status"], "verified")
+            else:
+                self.assertEqual(str(frame_type.VolumetricProperties), "VOLUME", sample_id)
+                self.assertEqual(result["kind"], "dbt", sample_id)
+                self.assertEqual(result["sliceKind"], "slices", "MG01: stored 1 mm sections are slices, not a slab: " + sample_id)
+                self.assertEqual(result["sliceThickness"], float(ds.PerFrameFunctionalGroupsSequence[0].PixelMeasuresSequence[0].SliceThickness))
+
+    def test_mg01_paired_synthetic_copies_without_proof_are_not_synthetic(self):
+        base = dicom_json(dataset(CURRENT_2D[0]))
+        self.assertIn("Intelligent 2D", tag(base, "0008103E"))
+        no_value4 = copy.deepcopy(base)
+        no_value4["00080008"]["Value"][3] = "NONE"
+        two_frames = copy.deepcopy(base)
+        two_frames["00280008"]["Value"] = [2]
+        frame_disagrees = copy.deepcopy(base)
+        frame_disagrees["52009230"]["Value"][0]["00189504"]["Value"][0]["00089007"]["Value"][3] = "NONE"
+        r_value4, r_two, r_frame = run_model(["classify", no_value4], ["classify", two_frames], ["classify", frame_disagrees])
+        self.assertNotEqual(r_value4["kind"], "generated2d", "MG01: 'Intelligent 2D' in the description is not proof of a synthetic view")
+        for name, r in (("two frames", r_two), ("frame type says NONE", r_frame)):
+            self.assertNotEqual(r["kind"], "generated2d", name)
+            self.assertFalse(r["standard"], name)
+
+    def test_mg02_paired_thin_dbt_frames_are_indexed_first_to_last(self):
+        total = 0
+        for sample_id in CURRENT_DBT + PRIOR_DBT:
+            ds = dataset(sample_id)
+            (index,) = run_model(["frameIndex", dicom_json(ds)])
+            frames = int(ds.NumberOfFrames)
+            total += frames
+            projection = per_frame_projection(ds)
+            steps = np.diff(projection)
+            self.assertTrue(np.all(steps > 0) or np.all(steps < 0), sample_id)
+            self.assertEqual(index["total"], frames, sample_id)
+            self.assertEqual([e["frame"] for e in index["entries"]], list(range(1, frames + 1)), "MG02: every stored thin section in order: " + sample_id)
+            self.assertTrue(index["complete"], sample_id)
+            self.assertAlmostEqual(index["spacing"], float(np.mean(np.abs(steps))), places=5)
+            self.assertLess(abs(index["spacing"] - 1.0), 0.01, sample_id)
+            for e in index["entries"]:
+                self.assertAlmostEqual(e["position"]["offset"], abs(projection[e["frame"] - 1] - projection[0]), places=5)
+        self.assertEqual(total, 501)
+
+    def test_mg04_paired_real_prior_is_paired_per_side_view_and_kind(self):
+        current = study_of(CURRENT_DBT + CURRENT_2D, "current")
+        prior = study_of(PRIOR_DBT, "prior")
+        self.assertEqual({tag(i, "00100020") for i in current["instances"] + prior["instances"]}, {"EA1141-4339969"})
+        (plan,) = run_model(["plan", {"institution": "H1", "studies": [current, prior]}])
+        self.assertEqual((plan["prior"]["status"], plan["current"]["date"], plan["prior"]["date"]), ("ok", "1945-02-13", "1944-02-21"))
+        for role, ids, kind in (("current", CURRENT_DBT, "dbt"), ("current", CURRENT_2D, "generated2d"), ("prior", PRIOR_DBT, "dbt")):
+            for sample_id in ids:
+                ds = dataset(sample_id)
+                key = "|".join([role, header_laterality(ds), header_view(ds), kind])
+                self.assertEqual(plan["slots"][key]["status"], "ready", key)
+                self.assertEqual(plan["slots"][key]["object"]["sop"], str(ds.SOPInstanceUID), "MG04: " + key)
+        for side in "RL":
+            for view in ("CC", "MLO"):
+                self.assertEqual(plan["slots"]["prior|%s|%s|generated2d" % (side, view)]["status"], "missing", "no prior synthetic view is made up")
+                self.assertEqual(plan["slots"]["current|%s|%s|conventional" % (side, view)]["status"], "missing")
+
+    def test_mg05_paired_real_pixels_are_oriented_from_their_tags(self):
+        turned = []
+        for sample_id in CURRENT_2D + CURRENT_DBT + PRIOR_DBT:
+            ds = dataset(sample_id)
+            frame = int(ds.get("NumberOfFrames", 1) or 1) // 2 + 1
+            pixels = frame_pixels(sample_id, frame)
+            (spec,) = run_model(["displaySpec", dicom_json(ds), frame])
+            self.assertEqual(spec["orientation"]["status"], "verified", sample_id)
+            stored, shown = chest_wall_side(pixels), chest_wall_side(displayed(pixels, spec))
+            self.assertEqual(shown, "right" if header_laterality(ds) == "R" else "left", "MG05: chest wall side on screen for " + sample_id)
+            if stored != shown:
+                turned.append(sample_id)
+            shown_values = voi(pixels.astype(np.float64) * spec["modality"]["slope"] + spec["modality"]["intercept"],
+                               spec["voi"]["center"], spec["voi"]["width"], spec["voi"]["fn"])
+            low = np.percentile(pixels, 5)
+            air, tissue = pixels <= low, pixels > low + 0.1 * (pixels.max() - low)
+            self.assertLess(shown_values[air].mean(), 0.25 * 255, sample_id)
+            self.assertGreater(shown_values[tissue].mean() - shown_values[air].mean(), 20, sample_id)
+        self.assertEqual(sorted(turned), sorted(["ea1141-4339969-1944-lcc-dbt", "ea1141-4339969-1944-lmlo-dbt"]),
+                         "MG05: exactly the prior left views, stored mirrored per their Patient Orientation, are turned back")
 
 
 if __name__ == "__main__":
