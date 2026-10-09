@@ -12,8 +12,9 @@ import { choice, ContractError, freeze, integer, object, refuse, sha256, string,
 
 /**
  * EMR unit F, round 1 (module-first): pure contracts for the designated-auditor roster, the patient-level replay of the
- * access ledger, lawful copies and legal submissions (의료법 제21조), the monthly inspection follow-up, and the request
- * hold that a lawful deadline extension keeps alive (A ledger L5-06).
+ * access ledger, incident scoping, lawful copies and legal submissions (의료법 제21조), correction/deletion/suspension
+ * requests (개인정보 보호법 제36조·제37조), the monthly inspection follow-up, and the request hold that a lawful deadline
+ * extension keeps alive (A ledger L5-06). The legal register of 2026-10-09 (deltas D-7, D-8, D-9, D-15) is applied.
  *
  * Nothing here opens a database, a route, a page, a signer or a delivery channel. Round 2 binds the ports declared
  * below: RosterReader and the roster history to B1 storage, VerifiedCaller to the B2 session context, the ledger to B1's
@@ -114,7 +115,7 @@ export function grantStateAt(input: unknown, at: string): Readonly<{
   const g = guarded('RosterHistoryRefused', () => object(input, ['grantId', 'subject', 'institutionId', 'events']));
   const grantId = guarded('RosterHistoryRefused', () => string(g.grantId)), subject = guarded('RosterHistoryRefused', () => identity(g.subject));
   const institutionId = guarded('RosterHistoryRefused', () => string(g.institutionId));
-  utc(at);
+  guarded('RosterHistoryRefused', () => utc(at));
   if (!Array.isArray(g.events) || !g.events.length) refuse('RosterHistoryRefused');
   const events = g.events.map(parseRosterEvent);
   if (events[0].kind !== 'granted' || new Set(events.map(e => e.eventId)).size !== events.length ||
