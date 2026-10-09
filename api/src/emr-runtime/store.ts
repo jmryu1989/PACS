@@ -6,7 +6,7 @@ import { ResolvedRecord } from '../emr-contract/classification';
 import { ContractError, choice, integer, refuse, sha256, string, utc } from '../emr-contract/validation';
 import {
   AppendResult, ChainTail, ClauseRow, HoldRow, PlacementRow, RequestRow, RetentionRow, StoredEntry, canonicalPayload, mintDurableReceipt,
-  planExpiryPrefix,
+  planExpiryPrefix, OrderFact, parseOrderFact,
 } from './contract';
 import { EmrSnapshot, SnapshotRequest, snapshotFromRows } from './context';
 import { FailureJournal, JournalUnavailable } from './failure-journal';
@@ -174,12 +174,14 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
   async snapshot(tx: object, scope: object, request: SnapshotRequest): Promise<EmrSnapshot> {
     const holds = new Map<string, HoldRow[]>(), accessRequests = new Map<string, RequestRow[]>(), correctionRequests = new Map<string, RequestRow[]>();
     const clauseVersions = new Map<string, ClauseRow[]>(), accessEvents = new Map<string, StoredEntry | null>();
+    const orderFacts = new Map<string, readonly Readonly<OrderFact>[]>();
     for (const id of request.recordIds ?? []) holds.set(id, await this.holdRows(tx, string(id)));
     for (const id of request.accessRequestIds ?? []) accessRequests.set(id, await this.requestRows(tx, 'access-request', string(id)));
     for (const id of request.correctionRequestIds ?? []) correctionRequests.set(id, await this.requestRows(tx, 'correction-request', string(id)));
     for (const id of request.clauseIds ?? []) clauseVersions.set(id, await this.clauseRows(tx, string(id)));
     for (const id of request.accessEventIds ?? []) accessEvents.set(id, await this.entryRow(tx, string(id)));
-    return snapshotFromRows(scope, { holds, accessRequests, correctionRequests, clauseVersions, accessEvents });
+    for (const id of request.orderRecordIds ?? []) orderFacts.set(id, await this.orderFacts(tx, string(id)));
+    return snapshotFromRows(scope, { holds, accessRequests, correctionRequests, clauseVersions, accessEvents, orderFacts });
   }
 
   // ── legal-duty facts (append-only; A validates them when they are read back) ──
@@ -198,6 +200,27 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
   async recordDutyRequest(tx: object, kind: 'access-request' | 'correction-request', facts: { requestId: string; resolution: unknown }): Promise<void> {
     const phase = facts.resolution === null ? 'received' : 'resolved';
     await this.dutyRequestRow(tx, kind, string(facts.requestId), phase, JSON.stringify(facts));
+  }
+  /** The SQL reader takes the per-record transaction lock; replays return the original fact, never a new receipt clock. */
+  async recordOrderFact(tx: object, input: OrderFact): Promise<Readonly<OrderFact>> {
+    const recordId = string(input.recordId), eventId = string(input.eventId);
+    const history = await this.orderFacts(tx, recordId), replay = history.find(f => f.eventId === eventId);
+    if (replay) {
+      if (JSON.stringify(replay) !== JSON.stringify(input)) refuse('OrderEventIdConflict');
+      return replay;
+    }
+    const fact = parseOrderFact(input, history[history.length - 1]);
+    const run = tx as RawQuery;
+    await run.$queryRaw`SELECT emr_access.record_order_fact(${recordId}::text, ${eventId}::text,
+      ${fact.previousEventId}::text, ${JSON.stringify(fact)}::text)::text AS done`;
+    return fact;
+  }
+  async orderFacts(tx: object, recordId: string): Promise<readonly Readonly<OrderFact>[]> {
+    const run = tx as RawQuery;
+    const rows = await run.$queryRaw<{ body: string }[]>`SELECT body FROM emr_access.order_facts_for(${string(recordId)}::text)`;
+    const result: Readonly<OrderFact>[] = [];
+    for (const row of rows) result.push(parseOrderFact(JSON.parse(row.body), result[result.length - 1]));
+    return Object.freeze(result);
   }
   /** The immutable internal member ID of a verified issuer and subject (created once; names are never a key). */
   async resolveIdentity(tx: object, issuer: string, subject: string): Promise<string> {
@@ -260,8 +283,9 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
  * (contract.ts accessDeadline); the database re-checks the floor and the holds and appends the non-personal checkpoint in
  * the deleting transaction. The history stream is never expired here (unit H). Scheduling it is not part of this unit.
  */
-export async function expireAccessPrefix(retention: RawQuery, now = new Date().toISOString()):
+export async function expireAccessPrefix(retention: PrismaClient, seal: AccessSeal, now = new Date().toISOString()):
   Promise<{ deleted: number; checkpointSequence: number; checkpointHash: string } | null> {
+  await seal.recover();
   const rows: RetentionRow[] = [];
   let after = 0;
   for (;;) {
@@ -274,6 +298,11 @@ export async function expireAccessPrefix(retention: RawQuery, now = new Date().t
   const plan = planExpiryPrefix(rows, now);
   if (!plan) return null;
   const through = plan.through;
-  const [row] = await retention.$queryRaw<any[]>`SELECT deleted_count, checkpoint_sequence, checkpoint_hash FROM emr_access.expire_prefix(${through}::bigint)`;
-  return { deleted: toNumber(row.deleted_count), checkpointSequence: toNumber(row.checkpoint_sequence), checkpointHash: sha256(row.checkpoint_hash) };
+  const proof = await seal.prepareExpiry(through);
+  return retention.$transaction(async tx => {
+    const [row] = await tx.$queryRaw<any[]>`SELECT deleted_count, checkpoint_sequence, checkpoint_hash FROM emr_access.expire_prefix(${through}::bigint)`;
+    if (toNumber(row.checkpoint_sequence) !== proof.checkpointSequence || toNumber(row.deleted_count) !== proof.count)
+      refuse('ExpirySnapshotChanged');
+    return { deleted: toNumber(row.deleted_count), checkpointSequence: toNumber(row.checkpoint_sequence), checkpointHash: sha256(row.checkpoint_hash) };
+  });
 }

@@ -114,7 +114,7 @@ STAMP = '2026-09-06T00:00:00.123'
 PRODUCT_FIELDS = {'migrations', 'study_uid', 'catalog', 'rows', 'sequences', 'emr'}
 # EMR-B1: schema emr_access, observed schema-qualified (the public catalog above never sees it).
 EMR_TABLES = sorted(['access_entry', 'access_target', 'audit_projection', 'chain_head', 'clause_version', 'duty_request_event',
-                     'legal_hold_event', 'member_identity'])
+                     'legal_hold_event', 'member_identity', 'order_fact'])
 EMR_ROLES = ['kin_emr_owner', 'kin_emr_reader', 'kin_emr_retention', 'kin_runtime']
 # The read-only fixture container's only writable non-data mount; the compose deployment uses its own volume.
 EMR_TABLESPACE = '/tmp/emr-access/ts'
@@ -501,6 +501,18 @@ def expected_emr_rows():
         published_at='2026-01-01', effective_at='2026-01-01', recorded_at=jsonb_time(stamp))]
     rows['member_identity'] = [dict(id='00000000-0000-4000-8000-00000000e201', issuer='https://identity.example.test',
         subject='SYNTHETIC-sub', created_at=jsonb_time(stamp))]
+    at, record_id = '2026-09-06T00:00:00.123Z', 'SYNTHETIC-native-order'
+    facts = dict(objectKind='order-indication', origin='product-authored', authorId='SYNTHETIC-physician', authorRole='physician',
+        requestingClinicianId='SYNTHETIC-physician', directionSourceRef=None, examCodes=['SYNTHETIC-CT'], source=None, feed=None,
+        inherited=[], firstReceivedAt=None, firstReceiptEventId=None, duplicateOf=None, scheduledAt=None, scheduleChangeEvidenceId=None,
+        status='closed', statusEvent=dict(eventId='SYNTHETIC-order-event', actorId='SYNTHETIC-physician', at=at, reason='fixture'),
+        fulfilment=None, chartIncorporation=None, procedure=None, synthetic=None)
+    event = dict(eventId='SYNTHETIC-order-event', recordId=record_id, versionId='v1', sha256='ab'*32, contentSha256='ab'*32,
+        at=at, act='entry', signature=dict(versionId='v1', sha256='ab'*32, signedAt=at, verified=True),
+        predecessor=None, components=[], processing=None)
+    body = dict(recordId=record_id, eventId=event['eventId'], previousEventId=None, facts=facts, event=event)
+    rows['order_fact'] = [dict(record_id=record_id, event_id=event['eventId'], sequence=1, previous_event_id=None,
+        body=json.dumps(body, separators=(',', ':')), recorded_at=jsonb_time(stamp))]
     return rows
 
 
@@ -535,7 +547,7 @@ def provision(name):
 
 def seed_emr(name, db):
     data = expected_emr_rows()
-    for table in ('access_entry', 'legal_hold_event', 'clause_version', 'member_identity'):
+    for table in ('access_entry', 'legal_hold_event', 'clause_version', 'member_identity', 'order_fact'):
         for row in data[table]:
             execute(name, db, 'INSERT INTO emr_access.'+table+' SELECT * FROM json_populate_record(NULL::emr_access.'+table+', '+
                     sql_literal(json.dumps(row))+')')

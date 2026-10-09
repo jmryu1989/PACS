@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { parseAccessEvent } from '../emr-contract/access-event';
 import type { EmrAdapters } from '../emr-contract/composition';
 import { freeze, refuse, string } from '../emr-contract/validation';
-import { ClauseRow, HoldRow, RequestRow, StoredEntry } from './contract';
+import { ClauseRow, HoldRow, RequestRow, StoredEntry, OrderFact, parseOrderFact } from './contract';
 
 /**
  * A's readers are synchronous; storage is not. Under the caller's transaction lock B reads every fact an A decision may
@@ -15,7 +15,7 @@ import { ClauseRow, HoldRow, RequestRow, StoredEntry } from './contract';
  */
 export interface SnapshotRequest {
   recordIds?: readonly string[]; accessRequestIds?: readonly string[]; correctionRequestIds?: readonly string[];
-  clauseIds?: readonly string[]; accessEventIds?: readonly string[];
+  clauseIds?: readonly string[]; accessEventIds?: readonly string[]; orderRecordIds?: readonly string[];
 }
 export interface EmrSnapshot {
   readonly holdListings: ReadonlyMap<string, readonly string[]>;
@@ -24,6 +24,7 @@ export interface EmrSnapshot {
   readonly correctionRequests: ReadonlyMap<string, unknown | null>;
   readonly clauseVersions: ReadonlyMap<string, readonly unknown[]>;
   readonly accessEvents: ReadonlyMap<string, unknown>;
+  readonly orderFacts: ReadonlyMap<string, readonly Readonly<OrderFact>[]>;
 }
 interface Frame { scope: object; snapshot: EmrSnapshot }
 const context = new AsyncLocalStorage<Frame>();
@@ -57,6 +58,7 @@ export interface SnapshotRows {
   correctionRequests: ReadonlyMap<string, readonly RequestRow[]>;
   clauseVersions: ReadonlyMap<string, readonly ClauseRow[]>;
   accessEvents: ReadonlyMap<string, StoredEntry | null>;
+  orderFacts?: ReadonlyMap<string, readonly Readonly<OrderFact>[]>;
 }
 /** The immutable snapshot of those rows, bound to the transaction scope they were read in. */
 export function snapshotFromRows(scope: object, rows: SnapshotRows): EmrSnapshot {
@@ -76,7 +78,16 @@ export function snapshotFromRows(scope: object, rows: SnapshotRows): EmrSnapshot
     if (!entry || entry.kind !== 'access' || entry.eventId !== id) refuse('AccessRecordRequired');
     accessEvents.set(id, freeze((json(entry.payload) as any).event));
   }
-  const snapshot: EmrSnapshot = Object.freeze({ holdListings, holds, accessRequests, correctionRequests, clauseVersions, accessEvents });
+  const orderFacts = new Map<string, readonly Readonly<OrderFact>[]>();
+  for (const [id, history] of rows.orderFacts ?? []) {
+    const parsed: Readonly<OrderFact>[] = [];
+    for (const fact of history) {
+      if (fact.recordId !== id) refuse('OrderEventBindingRefused');
+      parsed.push(parseOrderFact(fact, parsed[parsed.length - 1]));
+    }
+    orderFacts.set(id, freeze(parsed));
+  }
+  const snapshot: EmrSnapshot = Object.freeze({ holdListings, holds, accessRequests, correctionRequests, clauseVersions, accessEvents, orderFacts });
   owners.set(snapshot, scope);
   return snapshot;
 }
@@ -105,6 +116,12 @@ function read<T>(map: ReadonlyMap<string, T>, id: string): T {
 export const runtimeAdapters: EmrAdapters = Object.freeze({
   stored: Object.freeze({
     load(recordId: string, eventId: string) {
+      const orders = snapshot().orderFacts;
+      if (orders.has(recordId)) {
+        const fact = [...read(orders, recordId)].reverse().find(f => f.event.eventId === eventId);
+        if (!fact) refuse('EmrContextRecordMissing');
+        return { recordId, model: 'emr_access.order_fact', row: fact.facts, event: fact.event };
+      }
       if (recordId !== eventId) refuse('EmrRecordUnsupported');
       const event = parseAccessEvent(read(snapshot().accessEvents, eventId));
       const digest = createHash('sha256').update(JSON.stringify(event)).digest('hex');

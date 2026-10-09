@@ -1,4 +1,4 @@
-/* EMR-B1 contract cases C01-C10 (REQ-EMR-01/02/06/07/19/20 -> RISK-EMR-* -> TEST-EMR-B-C01..C10).
+/* EMR-B1 contract cases C01-C10 and C13-C18 (REQ-EMR-01/02/06/07/19/20 -> RISK-EMR-* -> TEST-EMR-B-C01..C10).
  *
  * Pure: the A contract, the B runtime modules (api/src/emr-runtime) and the unit declaration, compiled with the installed
  * TypeScript like tests/emr_contract_test.cjs. The ledger store runs its real logic (snapshot, deadline, intent, append,
@@ -80,7 +80,14 @@ async function liveDriver() {
   await prisma.$connect();
   try {
     if (operation === 'verify-runtime') return await verifyRuntimeConnection(prisma);
-    if (operation === 'expire') return await RT.expireAccessPrefix(prisma, args.now ?? new Date().toISOString());
+    if (operation === 'expire') {
+      const reader = new PrismaClient({ datasources: { db: { url: process.env.EMR_READER_URL } } });
+      try {
+        const journal = new FailureJournal(process.env.KIN_EMR_STATE_DIR);
+        const seal = new AccessSeal(process.env.KIN_EMR_STATE_DIR, new RT.PrismaLedgerSql(reader), journal);
+        return await RT.expireAccessPrefix(prisma, seal, args.now ?? new Date().toISOString());
+      } finally { await reader.$disconnect(); }
+    }
     if (operation === 'civil') return args.at.map(at => C.accessRetentionFloor(at));
     const state = process.env.KIN_EMR_STATE_DIR;
     const sql = new RT.PrismaLedgerSql(prisma);
@@ -93,6 +100,7 @@ async function liveDriver() {
     // A process that writes ledger facts is a started server: its start-up check runs first (B2 calls it before listen).
     if (['append', 'business', 'provide'].includes(operation)) await seal.recover();
     if (operation === 'seal') return flat(seal.read());
+    if (operation === 'journal-add') return journal.record(args.id, 'append-rolled-back', { eventId: args.id, cause: 'business-rollback' });
     if (operation === 'journal') return journal.all().map(record => ({ id: record.id, kind: record.kind, body: record.body }));
     const stream = args.stream ?? 'viewing';
     if (operation === 'tail') return await sql.tail(stream);
@@ -161,6 +169,20 @@ async function liveDriver() {
     if (operation === 'identity') {
       return await prisma.$transaction(async tx => Promise.all((args.pairs ?? []).map(([issuer, subject]) => store.resolveIdentity(tx, issuer, subject))));
     }
+    if (operation === 'order-facts') {
+      return await prisma.$transaction(async tx => {
+        for (const fact of args.facts ?? []) await store.recordOrderFact(tx, fact);
+        const history = await store.orderFacts(tx, args.recordId);
+        const scope = CTX.transactionScope();
+        const snapshot = await store.snapshot(tx, scope, { orderRecordIds: [args.recordId], recordIds: [args.recordId] });
+        return CTX.withSnapshot(scope, snapshot, () => {
+          const Cl = require(dist + '/emr-contract/classification');
+          const last = history.at(-1);
+          const source = Cl.resolveStoredRecord(M.emrAdapters().stored, args.recordId, last.event.eventId);
+          return { history, kinds: source.kinds, duties: D.orderRetentionDuties(source) };
+        });
+      });
+    }
     throw Object.assign(new Error('unknown driver operation'), { code: 'UnknownOperation' });
     async function reload(request) {
       return prisma.$transaction(async tx => {
@@ -203,10 +225,11 @@ function contractSuite() {
   // Composition happens once per process. Legal, clinical and stored-access facts are the B runtime readers themselves;
   // terminal-queue rows (C's future storage) and purpose ends (C's) are synthetic facts held by this test.
   const terminalRows = new Map(), purposeEnds = new Map(), signedResults = new Map(), intentFacts = new Map();
+  const claimDuties = new Map();
   M.composeEmrAdapters({
     stored: { load: (recordId, eventId) => terminalRows.has(recordId + ':' + eventId) ? structuredClone(terminalRows.get(recordId + ':' + eventId))
       : CTX.runtimeAdapters.stored.load(recordId, eventId) },
-    legal: CTX.runtimeAdapters.legal,
+    legal: { ...CTX.runtimeAdapters.legal, loadStatutoryDuty: id => claimDuties.get(id) },
     purpose: { load: id => purposeEnds.get(id), loadSignedResult: (id, vid) => signedResults.get(id + ':' + vid), loadIntentEndingFact: id => intentFacts.get(id) },
     clinical: CTX.runtimeAdapters.clinical,
   });
@@ -602,6 +625,7 @@ function contractSuite() {
       const through = w.ledger.entries[1], previous = { ...w.ledger.head };
       const expected = A.sealAccessExpiry(previous, { sequence: through.sequence, hash: through.hash }, 2, at);
       assert.equal(C.checkpointPayload(at, 2, 2, through.hash), JSON.stringify(expected.payload));
+      await w.seal.prepareExpiry(2);
       w.ledger.checkpoint(2, at);
       assert.equal(w.ledger.entries.at(-1).hash, expected.hash);
       const entries = w.ledger.entries.map(e => w.ledger.stored(e));
@@ -713,6 +737,210 @@ function contractSuite() {
     assert.deepEqual(Cl.TERMINAL_RECORD_BOUNDARY.states, ['pending-transmission', 'received-unverified', 'verified', 'verification-refused']);
   });
 
+  test('C13 expiry recovery needs external proof of the deleted prefix and its trusted seal, including interrupted recovery', async () => {
+    const at = '2035-01-01T00:00:00.000Z';
+    for (const interrupt of ['before-delete', 'after-delete', 'after-seal']) {
+      const w = await world();
+      try {
+        await w.store.append(authEvent(A)); await w.store.append(authEvent(A));
+        await w.seal.prepareExpiry(1);
+        if (interrupt === 'before-delete') assert.equal((await w.restart().seal.recover()).recovered, 0);
+        w.ledger.checkpoint(1, at);
+        const restarted = w.restart();
+        assert.equal((await restarted.seal.recover()).recovered, 1);
+        assert.equal((await w.restart().seal.recover()).recovered, 0);
+        // Successive expiries may remove the old checkpoint only after its replacement proof is durable.
+        await restarted.seal.prepareExpiry(2); w.ledger.checkpoint(2, at);
+        assert.equal((await w.restart().seal.recover()).recovered, 1);
+      } finally { w.cleanup(); }
+    }
+    // Review's counterexample: trusted seal 1; an attacker supplies DB anchor 2 / checkpoint 3.
+    const w = await world();
+    try {
+      await w.store.append(authEvent(A));
+      const tx = w.ledger.begin(), forged = authEvent(A);
+      w.ledger.append(tx, 'viewing', forged.eventId, C.canonicalPayload(forged).text, 'none'); w.ledger.commit(tx);
+      w.ledger.checkpoint(2, at);
+      await rejects(w.restart().seal.recover(), 'SealTailMismatch');
+      assert.equal(w.seal.read().streams.viewing.sequence, 1);
+    } finally { w.cleanup(); }
+    // Even an anchor behind the seal cannot justify a checkpoint with no external expiry intent.
+    const u = await world();
+    try {
+      await u.store.append(authEvent(A)); await u.store.append(authEvent(A));
+      u.ledger.checkpoint(1, at);
+      await rejects(u.restart().seal.recover(), 'UnsealedEntryUnexplained');
+    } finally { u.cleanup(); }
+  });
+
+  test('C14 a torn journal preserves its exact damaged bytes separately and remains appendable across repeated restarts', () => {
+    const state = fs.mkdtempSync(path.join(os.tmpdir(), 'emr-journal-r2-'));
+    try {
+      const first = new J.FailureJournal(state), body = { eventId: 'attempt', cause: 'business-rollback' };
+      first.record('good-1', 'append-rolled-back', body);
+      const file = path.join(state, 'journal', 'failure-journal.jsonl'), good = fs.readFileSync(file);
+      const torn = Buffer.from('{"id":"incomplete"'); assert.equal(torn.length, 18);
+      fs.appendFileSync(file, torn);
+      const second = new J.FailureJournal(state);
+      assert.equal(second.tornBytes, 18); assert.deepEqual(fs.readFileSync(file), good);
+      const archives = fs.readdirSync(path.dirname(file)).filter(n => n.startsWith('torn-'));
+      assert.equal(archives.length, 1); assert.deepEqual(fs.readFileSync(path.join(path.dirname(file), archives[0])), torn);
+      second.record('good-2', 'append-rolled-back', body);
+      const third = new J.FailureJournal(state);
+      assert.equal(third.tornBytes, 0); third.record('good-3', 'append-rolled-back', body);
+      assert.deepEqual(new J.FailureJournal(state).all().map(r => r.id), ['good-1', 'good-2', 'good-3']);
+      // Interruption after archive publication but before truncation: the same archive is reused without data loss.
+      fs.writeFileSync(file, Buffer.concat([good, torn]));
+      assert.equal(new J.FailureJournal(state).tornBytes, 18);
+      assert.deepEqual(fs.readdirSync(path.dirname(file)).filter(n => n.startsWith('torn-')), archives);
+      assert.deepEqual(fs.readFileSync(path.join(path.dirname(file), archives[0])), torn);
+    } finally { fs.rmSync(state, { recursive: true, force: true }); }
+  });
+
+  const orderAt = '2026-01-02T00:00:00.000Z';
+  const procedure = (state = 'open-order', patch = {}) => ({ state, responsibleRole: 'privacy-officer', assigneeId: 'officer',
+    enteredAt: orderAt, evidenceDueAt: '2026-01-05T00:00:00.000Z', escalationDecisionDueAt: '2026-01-06T00:00:00.000Z',
+    finalDecisionDueAt: '2026-01-07T00:00:00.000Z', superiorRole: 'institution-head', superiorId: 'head', escalatedAt: null,
+    extensions: 0, extensionLimit: 1, extensionEvidenceId: null, decision: null, ...patch });
+  const orderFacts = (patch = {}) => ({ objectKind: 'order-indication', origin: 'product-authored', authorId: 'physician', authorRole: 'physician',
+    requestingClinicianId: 'physician', directionSourceRef: null, examCodes: ['CT-CHEST'], source: null, feed: null, inherited: [],
+    firstReceivedAt: null, firstReceiptEventId: null, duplicateOf: null, scheduledAt: null, scheduleChangeEvidenceId: null,
+    status: 'closed', statusEvent: { eventId: 'order-event', actorId: 'physician', at: orderAt, reason: 'synthetic' },
+    fulfilment: null, chartIncorporation: null, procedure: null, synthetic: null, ...patch });
+  const orderEvent = (id = 'native', patch = {}) => ({ eventId: 'order-event', recordId: id, versionId: 'original',
+    sha256: 'ab'.repeat(32), contentSha256: 'ab'.repeat(32), at: orderAt, act: 'entry',
+    signature: { versionId: 'original', sha256: 'ab'.repeat(32), signedAt: orderAt, verified: true },
+    predecessor: null, components: [], processing: null, ...patch });
+  const resolveOrder = (facts, event = orderEvent()) => {
+    terminalRows.set(event.recordId + ':' + event.eventId, { recordId: event.recordId, model: 'emr_access.order_fact', row: facts, event });
+    return Cl.resolveStoredRecord(M.emrAdapters().stored, event.recordId, event.eventId);
+  };
+  const fulfilment = { eventId: 'fulfilled', actorId: 'technician', at: '2028-01-02T00:00:00.000Z', studyId: 'study', partial: true, reason: 'partial examination confirmed' };
+
+  test('C15 D24 registration needs its original direction; code-only native directions keep ten years through cancellation and later adoption', () => {
+    const native = orderFacts(), event = orderEvent();
+    const record = inSnapshot(noHolds('native'), () => D.newRetentionRecord(resolveOrder(native, event)));
+    assert.deepEqual(record.kinds, ['order-indication']); assert.equal(D.retentionDeadline(record), '2036-01-01T15:00:00.000Z');
+    assert(Cl.RECORD_CLASSIFICATION['order-indication'].signature.rule === 'required');
+    assert.equal(Cl.RECORD_CLASSIFICATION['exam-clinical-info'].retention.years, 5);
+    assert.equal(Cl.RECORD_CLASSIFICATION['comparison-description'].retention.years, 5);
+    for (const status of ['cancelled', 'superseded', 'fulfilment-confirmed']) {
+      const next = orderFacts({ status, ...(status === 'fulfilment-confirmed' ? { fulfilment } : {}), statusEvent: { ...native.statusEvent, eventId: status, at: fulfilment.at } });
+      D.validateOrderTransition(native, next);
+      const updated = D.refreshOrderLifecycle(record, resolveOrder(next, event));
+      assert.equal(D.retentionDeadline(updated), '2036-01-01T15:00:00.000Z');
+    }
+    code(() => D.validateOrderTransition(native, orderFacts({ objectKind: 'exam-clinical-info' })), 'NoShorteningOfEstablishedDuty');
+    const registration = orderFacts({ objectKind: 'registration', authorRole: 'registrar', status: 'open', procedure: procedure() });
+    code(() => Cl.parseOrderFacts(registration), 'DirectionSourceRequired');
+    registration.directionSourceRef = { kind: 'order-indication', systemId: 'pacs', recordId: 'native', versionId: 'original' };
+    assert.deepEqual(resolveOrder(registration, orderEvent('registration', { act: 'creation', signature: null })).kinds, ['order']);
+    const adopted = resolveOrder(orderFacts({ objectKind: 'exam-component', fulfilment }), orderEvent('adopted', { at: fulfilment.at, act: 'creation', signature: null,
+      components: [{ recordId: 'native', partId: 'original', sha256: event.sha256 }] }));
+    const exam = inSnapshot(noHolds('native', 'adopted'), () => D.newRetentionRecord(adopted, { records: [record], references: [], complete: true, revision: 'r1', checkedAt: fulfilment.at }));
+    assert.equal(D.retentionDeadline(exam), '2033-01-01T15:00:00.000Z');
+    const graph = { records: [record, exam], references: [{ fromRecordId: 'adopted', fromPartId: 'original', toRecordId: 'native', toPartId: 'original', relation: 'incorporation' }], complete: true, revision: 'r2', checkedAt: fulfilment.at };
+    assert.equal(D.retentionDeadline(record, graph), '2036-01-01T15:00:00.000Z');
+    const correctionAt = '2029-01-02T00:00:00.000Z';
+    const correctionEvent = orderEvent('native', { eventId: 'correction', versionId: 'corrected', at: correctionAt,
+      sha256: 'cd'.repeat(32), contentSha256: 'cd'.repeat(32), act: 'correction',
+      signature: { versionId: 'corrected', sha256: 'cd'.repeat(32), signedAt: correctionAt, verified: true },
+      predecessor: { recordId: 'native', partId: 'original', sha256: event.sha256 } });
+    const correctionFacts = orderFacts({ examCodes: ['CT-ABDOMEN'], statusEvent: { ...native.statusEvent, eventId: 'correction', at: correctionAt } });
+    const originalFact = C.parseOrderFact({ recordId: 'native', eventId: event.eventId, previousEventId: null, facts: native, event });
+    const correctionFact = { recordId: 'native', eventId: 'correction', previousEventId: event.eventId, facts: correctionFacts, event: correctionEvent };
+    assert(C.parseOrderFact(correctionFact, originalFact));
+    code(() => C.parseOrderFact({ ...correctionFact, event: { ...correctionEvent, predecessor: null } }, originalFact), 'OrderHistoryIncomplete');
+    code(() => C.parseOrderFact({ ...correctionFact, event }, originalFact), 'OrderClinicalVersionImmutable');
+    const corrected = inSnapshot(noHolds('native'), () => D.recordVersionAdded(record, resolveOrder(correctionFacts, correctionEvent),
+      { records: [record], references: [], complete: true, revision: 'corrected', checkedAt: correctionAt }));
+    assert.deepEqual(corrected.parts.map(p => p.partId), ['original', 'corrected']);
+    assert.equal(D.retentionDeadline(corrected), '2039-01-01T15:00:00.000Z');
+    assert.equal(corrected.parts[0].startedAt, orderAt, 'correction preserves the original ten-year unit and its prior version');
+    const unsigned = inSnapshot(noHolds('native'), () => D.newRetentionRecord(resolveOrder(native, { ...event, act: 'creation', signature: null })));
+    assert.equal(D.retentionDeadline(unsigned), D.retentionDeadline(record), 'missing signature remains a defect with the original clock');
+    const synthetic = { runId: 'seed-run', seedId: 'SEED_ORDERS-1', originalSha256: 'ab'.repeat(32), observedSha256: 'ab'.repeat(32), checkedAt: orderAt, verificationRunId: 'verified-run', linkedStudyIds: [] };
+    assert(Cl.parseOrderFacts({ ...registration, synthetic }));
+    for (const bad of [{ ...synthetic, observedSha256: 'cd'.repeat(32) }, { ...synthetic, linkedStudyIds: ['real-study'] }, { ...synthetic, verificationRunId: '' }])
+      assert.throws(() => Cl.parseOrderFacts({ ...registration, synthetic: bad }));
+    const migrated = { ...registration, origin: 'migrated', directionSourceRef: null, synthetic: null, procedure: procedure('classification-unconfirmed') };
+    assert(Cl.parseOrderFacts(migrated)); code(() => resolveOrder(migrated), 'OrderClassificationUnconfirmed');
+  });
+
+  test('C16 D24 received evidence keeps independent original, adopted, chart and receipt clocks without a duplicate restart', () => {
+    const event = orderEvent('received', { act: 'receipt', signature: null });
+    const facts = orderFacts({ objectKind: 'received-order', origin: 'received-ris',
+      source: { systemId: 'ris', recordId: 'external', versionId: 'source-v1', at: '2020-01-02T00:00:00.000Z', signatureEvidenceId: 'original-signature' },
+      feed: { feedId: 'ris', installationEvidenceId: 'installation-verified', roles: ['worklist-copy', 'entrusted-original', 'exam-component'] },
+      inherited: [{ kind: 'order-indication', recordId: 'external', versionId: 'source-v1', startedAt: '2020-01-02T00:00:00.000Z', evidenceId: 'supply-verified' }],
+      firstReceivedAt: orderAt, firstReceiptEventId: event.eventId, fulfilment });
+    const source = resolveOrder(facts, event), duties = D.orderRetentionDuties(source);
+    assert.deepEqual(duties, [{ kind: 'order-indication', startedAt: '2020-01-02T00:00:00.000Z', years: 10 },
+      { kind: 'order-exam-component', startedAt: orderAt, years: 5 }, { kind: 'patient-match', startedAt: fulfilment.at, years: 5 }]);
+    assert.equal(D.periodStartRow(source), 'inherited');
+    assert.deepEqual(D.orderRetentionDuties(resolveOrder({ ...facts, duplicateOf: event.eventId }, event)), duties);
+    code(() => D.validateOrderTransition(facts, { ...facts, firstReceivedAt: fulfilment.at }), 'NoShorteningOfEstablishedDuty');
+    code(() => D.validateOrderTransition(facts, { ...facts, feed: { ...facts.feed, roles: ['worklist-copy', 'exam-component'] }, inherited: [] }), 'NoShorteningOfEstablishedDuty');
+    const streams = A.orderReceptionEvidence(source);
+    assert.equal(streams.original.sourceAt, facts.source.at); assert.equal(streams.receipt.years, 2); assert.equal(streams.receipt.basis, 'product-policy');
+    assert.deepEqual(Cl.RECORD_CLASSIFICATION['delivery-receipt'].retention.statutoryMinimum, []);
+    const fact = { recordId: 'received', eventId: 'order-event', previousEventId: null, facts, event };
+    const duplicate = { ...structuredClone(fact), eventId: 'resend', previousEventId: 'order-event' };
+    duplicate.facts.duplicateOf = event.eventId; duplicate.facts.statusEvent = { ...facts.statusEvent, eventId: 'resend', at: fulfilment.at };
+    assert(C.parseOrderFact(duplicate, C.parseOrderFact(fact)));
+    code(() => C.parseOrderFact({ ...duplicate, event: { ...event, at: fulfilment.at } }, fact), 'OrderClinicalVersionImmutable');
+    const fixed = inSnapshot({ ...noHolds('received'), orderFacts: new Map([['received', [fact, duplicate]]]) }, () => Cl.resolveStoredRecord(M.emrAdapters().stored, 'received', event.eventId));
+    assert.equal(fixed.row.duplicateOf, event.eventId); assert.equal(fixed.event.at, orderAt);
+  });
+
+  test('C17 D24 finite review deadlines escalate without erasing duties or renewing on retries; four evidence-bound decisions close the procedure', () => {
+    for (const state of ['classification-unconfirmed', 'entrusted-evidence-unconfirmed', 'linked-fulfilment-unconfirmed', 'open-order', 'unlinked-exam', 'copy-window-review', 'interface-outage', 'claim-duty-end-unconfirmed']) {
+      const facts = orderFacts({ procedure: procedure(state) });
+      assert.equal(D.orderProcedureState(facts, '2026-01-03T00:00:00.000Z'), 'pending');
+      assert.equal(D.orderProcedureState(facts, '2026-01-05T00:00:00.000Z'), 'escalate');
+      assert.equal(D.orderProcedureState(facts, '2040-01-01T00:00:00.000Z'), 'superior-decision-overdue');
+      code(() => D.validateOrderTransition(facts, { ...facts, procedure: procedure(state, { evidenceDueAt: '2026-01-05T01:00:00.000Z' }) }), 'OrderProcedureDeadlineRequired');
+      assert.throws(() => Cl.parseOrderFacts({ ...facts, procedure: { ...facts.procedure, finalDecisionDueAt: null } }));
+    }
+    const pending = orderFacts({ procedure: procedure('open-order') }), at = '2026-01-08T00:00:00.000Z';
+    const record = inSnapshot(noHolds('native'), () => D.newRetentionRecord(resolveOrder(pending)));
+    assert.equal(D.retentionState(record, undefined, '2040-01-01T00:00:00.000Z').destroyNotBefore, null);
+    for (const route of ['classification-confirmed', 'duty-continues', 'lawful-return', 'unnecessary-operations']) {
+      const decision = { route, actorId: 'head', at, evidenceId: 'decision-' + route, basisId: route === 'duty-continues' ? 'actual-legal-basis' : null,
+        scope: ['native'], reviewAt: route === 'duty-continues' ? '2027-01-01T00:00:00.000Z' : null, originalPreservedEvidenceId: route === 'lawful-return' ? 'hospital-original-verified' : null };
+      const next = { ...pending, procedure: { ...pending.procedure, decision } };
+      D.validateOrderTransition(pending, next);
+      assert.equal(D.orderProcedureState(next, at), route === 'duty-continues' ? 'duty-continues' : 'clear');
+      code(() => Cl.parseOrderFacts({ ...next, procedure: { ...next.procedure, decision: { ...decision, actorId: 'officer' } } }), 'OrderDecisionAuthorityRequired');
+      const updated = D.refreshOrderLifecycle(record, resolveOrder(next));
+      assert.equal(D.retentionDeadline(updated), '2036-01-01T15:00:00.000Z', 'return or an operational decision never shortens an established native duty');
+    }
+    const extended = { ...pending, procedure: procedure('open-order', { evidenceDueAt: '2026-02-05T00:00:00.000Z', escalationDecisionDueAt: '2026-02-06T00:00:00.000Z', finalDecisionDueAt: '2026-02-07T00:00:00.000Z', extensions: 1, extensionEvidenceId: 'new-reservation' }) };
+    D.validateOrderTransition(pending, extended);
+    assert.throws(() => D.validateOrderTransition(extended, { ...extended, procedure: { ...extended.procedure, extensions: 2 } }));
+  });
+
+  test('C18 D24 claim duties require an actual ending event and preserve an outstanding statutory obligation past internal deadlines', () => {
+    const B = load('emr-contract/legal-basis.ts');
+    assert.equal(B.HOLD_DUTY_CLAUSES['nhi:96-4.1'].article, '96-4.1');
+    const claim = { requestId: 'claim-1', recordIds: ['native'], startedAt: orderAt, endedAt: null, endingEventId: null,
+      basisId: 'entrusted-claim-evidence', procedure: procedure('claim-duty-end-unconfirmed') };
+    claimDuties.set(claim.requestId, claim);
+    const hold = { holdId: 'claim-hold', recordId: 'native', actorId: 'officer', at: orderAt, release: null,
+      basis: { type: 'statutory-duty', clause: { law: 'nhi', article: '96-4.1', version: 'synthetic-reviewed' }, clauseId: 'nhi:96-4.1',
+        requestId: claim.requestId, authorityId: 'hospital-a', authorityKind: 'medical-institution', managingInstitutionId: 'hospital-a', scope: ['native'], verified: true,
+        validity: { from: orderAt, until: null, condition: 'duty-active' } } };
+    const rows = { holds: new Map([['native', [{ holdId: hold.holdId, phase: 'placed', body: JSON.stringify(hold) }]]]),
+      clauseVersions: new Map([['nhi:96-4.1', [{ law: 'nhi', article: '96-4.1', publication: 'synthetic-reviewed', publishedAt: '2025-01-01', effectiveAt: '2025-01-01' }]]]) };
+    const state = inSnapshot(rows, () => {
+      const record = D.newRetentionRecord(resolveOrder(orderFacts()));
+      return D.retentionState(record, undefined, '2040-01-01T00:00:00.000Z');
+    });
+    assert.equal(state.state, 'legal-hold'); assert.equal(state.destroyNotBefore, null);
+    claim.endedAt = '2027-01-01T00:00:00.000Z';
+    assert.throws(() => inSnapshot(rows, () => D.reloadLegalHolds('native')), 'an end timestamp with no actual ending event is refused');
+  });
+
   test('C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused', () => {
     // The declaration against the contract and the runtime manifest, both ways.
     assert.deepEqual(declaration.models.sql, Cl.SQL_STORAGE_CLASSIFICATION);
@@ -728,28 +956,36 @@ function contractSuite() {
     for (const kinds of Object.values(Cl.SQL_STORAGE_CLASSIFICATION)) for (const kind of kinds) assert(Cl.RECORD_CLASSIFICATION[kind], kind);
     const migrations = fs.readdirSync(path.join(api, 'prisma/migrations'), { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name).sort();
     assert.equal(migrations.length, declaration.migrations.count); assert.equal(migrations.at(-1), declaration.migrations.added.at(-1));
-    // One access-retention rule (read with the installed TypeScript parser and from the declared migration): in the B
-    // runtime only contract.ts accessRetentionFloor computes a civil period, and in the migration only
-    // access_retention_floor names one - with the same period as the rule. A period change is then one place per side.
-    const runtimeDir = path.join(api, 'src', 'emr-runtime'), periodCalls = [];
-    for (const name of fs.readdirSync(runtimeDir).filter(n => n.endsWith('.ts')).sort()) {
-      const source = ts.createSourceFile(name, fs.readFileSync(path.join(runtimeDir, name), 'utf8'), ts.ScriptTarget.Latest, true);
-      const walk = (node, within) => {
-        const here = (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && node.name ? node.name.getText(source) : within;
-        if (ts.isCallExpression(node)) {
-          const callee = ts.isIdentifier(node.expression) ? node.expression.text : ts.isPropertyAccessExpression(node.expression) ? node.expression.name.text : null;
-          if (callee === 'civilPeriodEnd') periodCalls.push(name + ':' + here);
+    // A single B rule calls A's calendar symbol. Resolve aliases with the compiler, then prove that
+    // the public deadline and prefix planner both reach that rule. Renaming the intermediate function is immaterial.
+    const program = ts.createProgram(parsed.fileNames, parsed.options), checker = program.getTypeChecker();
+    const symbol = node => {
+      const found = checker.getSymbolAtLocation(node);
+      return found && (found.flags & ts.SymbolFlags.Alias) ? checker.getAliasedSymbol(found) : found;
+    };
+    const source = suffix => program.getSourceFiles().find(f => f.fileName.replaceAll('\\', '/').endsWith(suffix));
+    const exported = (file, name) => checker.getExportsOfModule(checker.getSymbolAtLocation(file)).find(s => s.name === name);
+    const calendar = exported(source('/emr-contract/lawful-defaults.ts'), 'civilPeriodEnd');
+    const contract = source('/emr-runtime/contract.ts'), edges = new Map(), callers = new Set();
+    for (const file of program.getSourceFiles().filter(f => f.fileName.replaceAll('\\', '/').includes('/emr-runtime/'))) {
+      const visit = (node, owner) => {
+        if (ts.isFunctionDeclaration(node) && node.name) owner = symbol(node.name);
+        if (ts.isCallExpression(node) && owner) {
+          const target = symbol(node.expression);
+          if (!edges.has(owner)) edges.set(owner, new Set());
+          edges.get(owner).add(target);
+          if (target === calendar) callers.add(owner);
         }
-        ts.forEachChild(node, child => walk(child, here));
+        ts.forEachChild(node, child => visit(child, owner));
       };
-      walk(source, null);
+      visit(file, null);
     }
-    assert.deepEqual(periodCalls, ['contract.ts:accessRetentionFloor']);
-    const migrationSql = fs.readFileSync(path.join(api, 'prisma/migrations', declaration.migrations.added.at(-1), 'migration.sql'), 'utf8');
-    const bodies = [...migrationSql.matchAll(/CREATE FUNCTION emr_access\.(\w+)\([^]*?\$\$([^]*?)\$\$/g)].map(m => [m[1], m[2]]);
-    assert.deepEqual(bodies.filter(([, body]) => /civil_period_end\s*\(/.test(body)).map(([name]) => name), ['access_retention_floor']);
-    const floorYears = /civil_period_end\s*\(\s*p_at\s*,\s*(\d+)\s*\)/.exec(bodies.find(([name]) => name === 'access_retention_floor')[1]);
-    assert.equal(Number(floorYears[1]), C.ACCESS_RETENTION.years);
+    assert.equal(callers.size, 1, 'one runtime access calendar rule');
+    const [rule] = callers;
+    const reaches = (from, seen = new Set()) => from === rule || (!seen.has(from) &&
+      (seen.add(from), [...(edges.get(from) || [])].some(next => reaches(next, seen))));
+    for (const name of ['accessDeadline', 'planExpiryPrefix']) assert(reaches(exported(contract, name)), name);
+    // The SQL half is checked against actual pg_proc/pg_depend and period results in L05, never SQL text parsing.
     // The contract cases of this very file, collected with the installed TypeScript parser, against the declaration.
     const file = ts.createSourceFile(__filename, fs.readFileSync(__filename, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
     const collected = [];

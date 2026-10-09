@@ -1329,7 +1329,8 @@ def oracle_self_check():
         problems.append('the review body must satisfy the client contract (dictation.js:101-119)')
     if ASR_ENGINE_PIN is None or ASR_MODEL_PIN is None or len(TEMPLATE_CSP) != 1:
         problems.append('the source-bound pins must each be found exactly once')
-    if len(generated_secret_names()) != 6 or 'POSTGRES_PASSWORD' not in generated_secret_names():
+    if set(generated_secret_names()) != {'POSTGRES_PASSWORD', 'ORTHANC_PASS', 'KC_ADMIN_PASSWORD',
+                                         'KC_CLIENT_SECRET', 'KC_WEB_SECRET', 'KIN_COOKIE_SECRET', 'KIN_EMR_RUNTIME_PASSWORD'}:
         problems.append('the generated secret names must be read from measurement_ci.py')
     if CHANNEL != 'chromium' or MAX_FRAMES != 524266:
         problems.append('the launch channel and node cap pins moved')

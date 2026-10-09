@@ -24,6 +24,9 @@ export class SealRefused extends Error {
   constructor(readonly code: SealRefusal, readonly detail: string | null = null) { super(detail ? `${code}: ${detail}` : code); this.name = 'SealRefused'; }
 }
 export interface RecoveryCount { recovered: number; notCommitted: number }
+interface ExpiryIntent {
+  chainId: string; seal: ChainPosition; anchor: ChainPosition; count: number; checkpointSequence: number;
+}
 const PAGE = 1000;
 
 function canonical(state: SealState): string {
@@ -36,6 +39,7 @@ const intentName = (stream: AccessStream, eventId: string) => createHash('sha256
 export class AccessSeal {
   private readonly file: string;
   private readonly pending: string;
+  private readonly expiry: string;
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(stateDirectory: string | undefined, private readonly sql: PrismaLedgerSql, private readonly journal: FailureJournal) {
@@ -45,6 +49,7 @@ export class AccessSeal {
     const info = fs.lstatSync(this.pending, { throwIfNoEntry: false });
     if (!info) { fs.mkdirSync(this.pending, { mode: 0o700 }); syncDirectory(dir); }
     else if (!info.isDirectory() || info.isSymbolicLink()) throw new SealRefused('SealUnavailable');
+    this.expiry = protectedDirectory(stateDirectory, 'expiry-evidence');
   }
 
   /** The stored seal of both streams, or 'absent'. A damaged seal is refused, never repaired from the database. */
@@ -153,11 +158,74 @@ export class AccessSeal {
   }
 
   /** Every unsealed event entry must be one this server recorded an intent for, in its stream, before committing it. */
-  private explain(entries: readonly StoredEntry[], intents: Map<string, string>): void {
+  private explain(entries: readonly StoredEntry[], intents: Map<string, string>, chainId: string): void {
     for (const entry of entries) {
-      if (entry.kind === 'expiry') continue; // expiry checkpoints are written by the retention role's own function
+      if (entry.kind === 'expiry') {
+        if (this.expiryProof(entry)?.chainId !== chainId) throw new SealRefused('UnsealedEntryUnexplained', String(entry.sequence));
+        continue;
+      }
       if (intents.get(entry.eventId!) !== entry.contentSha256) throw new SealRefused('UnsealedEntryUnexplained', String(entry.sequence));
     }
+  }
+
+  private expiryProof(entry: StoredEntry): ExpiryIntent | null {
+    try {
+      const p = object(JSON.parse(entry.payload), ['kind', 'at', 'deletedThrough', 'deletedCount', 'anchorHash']);
+      utc(p.at);
+      const target = path.join(this.expiry, `${integer(entry.sequence, 1)}-${integer(p.deletedThrough, 1)}-${sha256(p.anchorHash)}.json`);
+      if (!fs.existsSync(target)) return null;
+      const proof = object(JSON.parse(fs.readFileSync(target, 'utf8')), ['chainId', 'seal', 'anchor', 'count', 'checkpointSequence']);
+      const seal = object(proof.seal, ['sequence', 'hash']), anchor = object(proof.anchor, ['sequence', 'hash']);
+      string(proof.chainId); integer(seal.sequence); sha256(seal.hash); integer(anchor.sequence, 1); sha256(anchor.hash);
+      if (p.kind !== 'expiry' || proof.checkpointSequence !== entry.sequence || seal.sequence + 1 !== entry.sequence ||
+          seal.hash !== entry.previousHash || anchor.sequence !== p.deletedThrough || anchor.hash !== p.anchorHash ||
+          integer(proof.count, 1) !== p.deletedCount || anchor.sequence > seal.sequence) return null;
+      return proof as ExpiryIntent;
+    } catch { throw new SealRefused('SealCorrupt', 'expiry-evidence'); }
+  }
+
+  /** The database alone cannot justify a deleted prefix, even if it also supplies a valid-looking checkpoint. */
+  private verifyRetained(stream: AccessStream, entries: readonly StoredEntry[], current: StreamSeal, tail: ChainTail): void {
+    const anchor = retainedAnchor(entries);
+    if (!anchor) throw new SealRefused('LedgerChainBroken', `${stream}:unjustified-start`);
+    if (anchor.sequence > current.sequence) throw new SealRefused('SealTailMismatch', stream);
+    if (anchor.sequence > 0) {
+      const proof = entries.filter(e => e.kind === 'expiry').map(e => this.expiryProof(e)).find(p => p &&
+        p.chainId === current.chainId && p.anchor.sequence === anchor.sequence && p.anchor.hash === anchor.hash);
+      if (!proof) throw new SealRefused('UnsealedEntryUnexplained', 'expiry-anchor');
+    }
+    const violation = chainViolation(anchor, entries, tail, stream);
+    if (violation) throw new SealRefused('LedgerChainBroken', `${stream}:${violation}`);
+    const sealed = entries.find(e => e.sequence === current.sequence);
+    if (sealed ? sealed.hash !== current.hash : current.sequence !== anchor.sequence || current.hash !== anchor.hash)
+      throw new SealRefused('SealTailMismatch', stream);
+  }
+
+  /**
+   * Retention's external intent, before the deleting transaction commits. The whole retained chain must reach the last
+   * trusted seal, which must already cover the prefix. Only positions/hashes/counts survive here, never deleted bodies.
+   * The caller must roll back if the returned checkpoint sequence differs (a concurrent append advanced the DB head).
+   * An interrupted attempt leaves this harmless evidence; recovery still requires the actual committed checkpoint.
+   */
+  prepareExpiry(through: number): Promise<{ count: number; checkpointSequence: number }> {
+    return this.serial(async () => {
+      const state = this.read();
+      if (state === 'absent') throw new SealRefused('SealMissing');
+      const current = state.streams.viewing, tail = await this.sql.tail('viewing');
+      if (tail.chainId !== current.chainId || tail.sequence !== current.sequence || tail.hash !== current.hash)
+        throw new SealRefused('SealTailMismatch', 'recover-before-expiry');
+      const entries = await this.range('viewing', 0, tail.sequence);
+      this.verifyRetained('viewing', entries, current, tail);
+      const prefix = entries.filter(e => e.sequence <= integer(through, 1)), last = prefix[prefix.length - 1];
+      if (!last || last.sequence !== through) throw new SealRefused('LedgerChainBroken', 'expiry-prefix');
+      const proof: ExpiryIntent = { chainId: current.chainId, seal: { sequence: current.sequence, hash: current.hash },
+        anchor: { sequence: through, hash: last.hash }, count: prefix.length, checkpointSequence: current.sequence + 1 };
+      const target = path.join(this.expiry, `${proof.checkpointSequence}-${through}-${last.hash}.json`);
+      const text = JSON.stringify(proof);
+      if (fs.existsSync(target) && fs.readFileSync(target, 'utf8') !== text) throw new SealRefused('SealCorrupt', 'expiry-conflict');
+      this.writeDurably(target, text);
+      return { count: proof.count, checkpointSequence: proof.checkpointSequence };
+    });
   }
 
   /** Move one stream's seal to a committed position, proving every entry between its current seal and it first. */
@@ -170,7 +238,7 @@ export class AccessSeal {
       const entries = await this.range(stream, current.sequence, target.sequence);
       const violation = chainViolation(current, entries, target, stream);
       if (violation) throw new SealRefused('LedgerChainBroken', `${stream}:${violation}`);
-      this.explain(entries, this.intents()[stream]);
+      this.explain(entries, this.intents()[stream], current.chainId);
       const next: SealState = { streams: Object.freeze({ ...state.streams, [stream]: Object.freeze({ chainId: current.chainId,
         sequence: target.sequence, hash: target.hash }) }), sealedAt: new Date().toISOString() };
       this.write(next);
@@ -206,16 +274,10 @@ export class AccessSeal {
         if (tail.sequence < current.sequence) throw new SealRefused('LedgerBehindSeal', stream);
         const entries = await this.range(stream, 0, tail.sequence);
         if (tail.sequence > 0) {
-          const anchor = retainedAnchor(entries);
-          if (!anchor) throw new SealRefused('LedgerChainBroken', `${stream}:unjustified-start`);
-          const violation = chainViolation(anchor, entries, tail, stream);
-          if (violation) throw new SealRefused('LedgerChainBroken', `${stream}:${violation}`);
-          const sealed = entries.find(e => e.sequence === current.sequence);
-          if (sealed ? sealed.hash !== current.hash : current.sequence > anchor.sequence || (current.sequence === anchor.sequence && current.hash !== anchor.hash))
-            throw new SealRefused('SealTailMismatch', stream);
+          this.verifyRetained(stream, entries, current, tail);
         } else if (current.hash !== tail.hash) throw new SealRefused('SealTailMismatch', stream);
         const unsealed = entries.filter(e => e.sequence > current.sequence);
-        this.explain(unsealed, intents[stream]);
+        this.explain(unsealed, intents[stream], current.chainId);
         let recovered = 0;
         if (unsealed.length) {
           this.journal.record(`seal-recovered:${stream}:${current.sequence}-${tail.sequence}`, 'seal-recovered',

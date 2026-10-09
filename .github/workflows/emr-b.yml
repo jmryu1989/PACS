@@ -2,9 +2,9 @@ name: EMR-B access ledger
 
 # EMR-B1 (emr/units/b.json; unit order section 10). On every pull request and main push, and by hand for a candidate
 # commit, the same checkout runs: the declaration against files, migrations, catalog, compose, profile and candidate
-# selection; the ledger contract C01-C10; the production API image of this commit; the emr-b live profile (L01-L08 in
+# selection; the ledger contracts C01-C10 and C13-C18; the production API image of this commit; the emr-b live profile (L01-L08 and L17-L19 in
 # their own disposable PostgreSQL and API containers, beside the synthetic stack on an empty hosted daemon); then the
-# eleven declared mutants in a separate copy. Synthetic data and generated credentials only; no hospital or production
+# twenty-one declared mutants in a separate copy. Synthetic data and generated credentials only; no hospital or production
 # system is reached. validate.yml keeps its own jobs and adds only the declaration and contract check.
 on:
   push:
@@ -35,10 +35,12 @@ jobs:
           (cd api && ./node_modules/.bin/prisma generate)
       - name: EMR-B1 declaration against files, migrations, ledger catalog, compose, profile and candidate selection
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/declaration --cwd . --file emr/units/b.json --file scripts/emr-compose.py --file docker-compose.yml --file docker-compose.prod.yml --file tests/measurement_ci.py --file tests/candidate_ci.py --file tests/emr/b/live.py --file tests/production_image_test.py --file tests/ops_product_transfer_fixture.py --file api/prisma/migrations/20261008120000_emr_b/migration.sql -- python3 -B scripts/emr-compose.py check
-      - name: EMR-B1 access ledger contract C01-C10, exactly the declared cases each passed once
+      - name: EMR-B1 access ledger contracts C01-C10 and C13-C18, exactly the declared cases each passed once
         run: |
           python3 scripts/record-run.py --run-dir tmp/emr-b-ci/contract --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json --file emr/units/b.json --file scripts/emr-compose.py --file tests/emr/b/contract_test.cjs -- env KIN_EMR_PYTHON=python3 node --test --test-reporter=tap tests/emr/b/contract_test.cjs
           python3 -B scripts/emr-compose.py check-run --kind node --cases-from contract --run-dir tmp/emr-b-ci/contract
+      - name: Mutant verdicts distinguish behavioural failures from harness errors
+        run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/mutant-verdict --cwd . --file tests/emr/b/mutants.py -- python3 -B tests/emr/b/mutants.py --self-test
       - name: Production API image of this commit
         timeout-minutes: 15
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/image --cwd . --tree api/src --tree api/prisma --file api/Dockerfile --file api/start-production.sh --file api/package.json --file api/package-lock.json -- docker build --target production --build-arg "VCS_REF=${{ github.sha }}" -t "kin-emrb-ci:${{ github.sha }}" api
@@ -47,12 +49,14 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/emr-b-python"
           "$RUNNER_TEMP/emr-b-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
-      - name: EMR-B1 live ledger cases L01-L08 on an empty hosted daemon
+      - name: Orthanc image for disposable same-point backup rehearsal
+        run: docker pull orthancteam/orthanc:24.12.0
+      - name: EMR-B1 live ledger cases L01-L08 and L17-L19 on an empty hosted daemon
         timeout-minutes: 28
         env:
           KIN_TEST_API_IMAGE: kin-emrb-ci:${{ github.sha }}
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/live --cwd . --file tests/emr/b/live.py --file tests/emr/b/contract_test.cjs --file scripts/emr-compose.py --file tests/measurement_ci.py --file scripts/run-tests.py --file tests/live_test_gate.py --file docker-compose.yml --file api/prisma/migrations/20261008120000_emr_b/migration.sql -- "$RUNNER_TEMP/emr-b-python/bin/python" tests/measurement_ci.py --profile emr-b
-      - name: EMR-B1 mutants M01-M08, M11, M12, M14 in a separate copy of this commit
+      - name: EMR-B1 mutants M01-M08, M11, M12, M14-M24 in a separate copy of this commit
         if: ${{ !cancelled() }}
         timeout-minutes: 80
         run: python3 scripts/record-run.py --run-dir tmp/emr-b-ci/mutants-run --cwd . --tree api/src --file api/prisma/migrations/20261008120000_emr_b/migration.sql --file emr/units/b.json --file scripts/emr-compose.py --file scripts/run-tests.py --file tests/live_test_gate.py --file tests/emr/b/mutants.py --file tests/emr/b/live.py --file tests/emr/b/contract_test.cjs -- python3 -B tests/emr/b/mutants.py --out tmp/emr-b-ci/mutants

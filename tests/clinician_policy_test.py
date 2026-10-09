@@ -2611,7 +2611,7 @@ class ClinicianPolicySpec(unittest.TestCase):
                 {added: controller(nest + "import { Header } from '@nestjs/common';\n",
                                    "  @Header('x-read', '1')\n  @Get('read')\n  read() { return this.Header; }\n")},
                 {("GET", "bound/read"): False}),
-            # listed packages since S5-U1c-F06: an unlisted one such as node:fs is refused in test_21
+            # listed packages since S5-U1c-F06: an unlisted one such as node:child_process is refused in test_21
             "unrelated aliases and a namespace": (
                 {outside: service(inject + "import * as nodeCrypto from 'node:crypto';\nimport { createHash as digest } from 'crypto';\n")},
                 {}),
@@ -2977,7 +2977,7 @@ class ClinicianPolicySpec(unittest.TestCase):
             "runInThisContext from node:vm": service("export const run = runInThisContext;\n",
                                                      "import { runInThisContext } from 'node:vm';\n"),
             "a namespace import of an unlisted package": service("export const read = fs.readFileSync;\n",
-                                                                 "import * as fs from 'node:fs';\n"),
+                                                                 "import * as childProcess from 'node:child_process';\n"),
             "a side-effect import of an unlisted package": service("", "import 'reflect-metadata';\n"),
             "a relative import outside api/src": service("export const seed = SEED;\n",
                                                          "import { SEED } from '../prisma/seed';\n"),

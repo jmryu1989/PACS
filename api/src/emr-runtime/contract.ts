@@ -4,8 +4,8 @@ import {
   ACCESS_STREAMS, AccessEvent, AccessExpiryCheckpoint, AccessStream, ACCESS_CHAIN_GENESIS, ChainPosition, DurableAccessReceipt,
   AppendOnlyAccessStore, ImmutableIdentity, NON_RECORD_TARGETS, StatutoryAct, parseAccessEvent, provideAfterDurableEvent,
 } from '../emr-contract/access-event';
-import { RECORD_CLASSIFICATION, ResolvedRecord } from '../emr-contract/classification';
-import { civilPeriodEnd } from '../emr-contract/lawful-defaults';
+import { RECORD_CLASSIFICATION, ResolvedRecord, OrderFacts, parseOrderFacts, RecordEvent, parseRecordEvent } from '../emr-contract/classification';
+import { civilPeriodEnd, validateOrderTransition } from '../emr-contract/lawful-defaults';
 import { choice, freeze, integer, object, refuse, sha256, string, utc } from '../emr-contract/validation';
 
 /**
@@ -24,6 +24,29 @@ export interface HoldRow { holdId: string; phase: 'placed' | 'released'; body: s
 export interface RequestRow { phase: 'received' | 'resolved'; body: string }
 export interface ClauseRow { law: string; article: string; publication: string; publishedAt: string; effectiveAt: string }
 export interface PlacementRow { relation: string; relkind: string; tablespace: string }
+export interface OrderFact {
+  recordId: string; eventId: string; previousEventId: string | null; facts: OrderFacts; event: RecordEvent;
+}
+/** Append-only source/order facts. Source provenance and the original receipt are immutable across operational events. */
+export function parseOrderFact(input: unknown, previous?: OrderFact): Readonly<OrderFact> {
+  const v = object(input, ['recordId', 'eventId', 'previousEventId', 'facts', 'event']);
+  string(v.recordId); string(v.eventId);
+  if (v.previousEventId !== null) string(v.previousEventId);
+  const facts = parseOrderFacts(v.facts);
+  const e = parseRecordEvent(v.event);
+  if (e.recordId !== v.recordId || facts.statusEvent.eventId !== v.eventId || facts.statusEvent.at < e.at ||
+      facts.procedure?.decision && !facts.procedure.decision.scope.includes(v.recordId)) refuse('OrderEventBindingRefused');
+  if (previous) {
+    if (previous.recordId !== v.recordId || v.previousEventId !== previous.eventId || e.at < previous.event.at) refuse('OrderEventSequenceRefused');
+    if (previous.event.versionId === e.versionId && JSON.stringify(previous.event) !== JSON.stringify(e)) refuse('OrderClinicalVersionImmutable');
+    if (previous.event.versionId === e.versionId && (JSON.stringify(previous.facts.examCodes) !== JSON.stringify(facts.examCodes) ||
+        previous.facts.requestingClinicianId !== facts.requestingClinicianId)) refuse('OrderClinicalVersionImmutable');
+    if (previous.event.versionId !== e.versionId && (e.predecessor?.recordId !== previous.recordId ||
+        e.predecessor?.partId !== previous.event.versionId || e.predecessor?.sha256 !== previous.event.sha256)) refuse('OrderHistoryIncomplete');
+    validateOrderTransition(previous.facts, facts);
+  } else if (v.previousEventId !== null) refuse('OrderHistoryIncomplete');
+  return freeze(structuredClone({ ...v, facts })) as Readonly<OrderFact>;
+}
 
 /** The SQLSTATE codes schema emr_access raises (migration 20261008120000_emr_b). */
 export const LEDGER_ERRORS = freeze({

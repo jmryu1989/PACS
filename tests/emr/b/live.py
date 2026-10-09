@@ -1,4 +1,4 @@
-"""EMR-B1 live ledger cases L01-L08 (REQ-EMR-01/02/06/07/19/20 -> RISK-EMR-* -> TEST-EMR-B-L01..L08).
+"""EMR-B1 live ledger cases L01-L08 and L17-L19 (REQ-EMR-01/02/06/07/19/20 -> RISK-EMR-* -> TEST-EMR-B-L01..L08/L17..L19).
 
 Runs only through scripts/run-tests.py in live mode. Every database this class uses is a PostgreSQL 16 container it
 creates itself: no network, tmpfs data, its own tmpfs tablespace mount, generated credentials, this run's label. The
@@ -6,7 +6,7 @@ product code is the production API image built from this checkout (KIN_TEST_API_
 end): its one-shot `migrate` mode applies the migrations with the installer credential, and its compiled store runs
 through the contract file's driver (tests/emr/b/contract_test.cjs --emr-b-live) with the runtime role. No port is
 published, no compose stack or foreign container is touched, and everything created here carries this run's label and is
-removed in tearDownClass. Assertions are SQLSTATEs, returned/stored facts and closed error codes.
+removed by class cleanup, including setup failures. Assertions are SQLSTATEs, returned/stored facts and closed error codes.
 """
 from __future__ import annotations
 
@@ -54,6 +54,7 @@ class EmrBLedgerLive(unittest.TestCase):
         cls.token = uuid.uuid4().hex[:12]
         cls.label = "kin.emrb.live=" + cls.token
         cls.created = {"container": [], "volume": [], "image": []}
+        cls.addClassCleanup(cls.cleanup_resources)
         cls.secrets = {name: secrets.token_hex(24) for name in
                        ("POSTGRES_PASSWORD", "KIN_EMR_RUNTIME_PASSWORD", "KIN_EMR_READER_PASSWORD", "KIN_EMR_RETENTION_PASSWORD")}
         cls.env = {**os.environ, **cls.secrets}
@@ -72,7 +73,7 @@ class EmrBLedgerLive(unittest.TestCase):
         cls.state = cls.volume("main")
 
     @classmethod
-    def tearDownClass(cls):
+    def cleanup_resources(cls):
         problems = []
         for kind in ("container", "volume", "image"):
             for name in reversed(cls.created[kind]):
@@ -144,9 +145,9 @@ class EmrBLedgerLive(unittest.TestCase):
              "--entrypoint", "sh", self.image, "-c", command])
 
     def driver(self, operation, args=None, *, db=None, volume=None, url=None):
-        env = {**self.env, "DATABASE_URL": url or self.url()}
+        env = {**self.env, "DATABASE_URL": url or self.url(), "EMR_READER_URL": self.url("kin_emr_reader")}
         result = run(["docker", "run", "--rm", "--label", self.label, "--network", "container:" + (db or self.db),
-                      "-e", "DATABASE_URL", "-e", "KIN_EMR_STATE_DIR=" + STATE, "-v", (volume or self.state) + ":" + STATE,
+                      "-e", "DATABASE_URL", "-e", "EMR_READER_URL", "-e", "KIN_EMR_STATE_DIR=" + STATE, "-v", (volume or self.state) + ":" + STATE,
                       "-v", str(DRIVER_DIR) + ":/emr-b:ro", "--entrypoint", "node", self.image,
                       "/emr-b/contract_test.cjs", "--emr-b-live", operation, json.dumps(args or {})], env=env, check=False, timeout=300)
         lines = [line for line in result.stdout.decode("utf-8", "replace").splitlines() if line.startswith("EMR_B_RESULT ")]
@@ -458,6 +459,11 @@ class EmrBLedgerLive(unittest.TestCase):
         from_rule = self.driver("civil", {"at": edges}, db=db, volume=state)
         from_sql = [self.ok("SELECT " + utc % ("emr_access.access_retention_floor('%s')" % at), db=db)[0] for at in edges]
         self.assertEqual(from_sql, from_rule)
+        # PostgreSQL resolves this dependency itself; no SQL-text matching or intermediate-name pin.
+        self.assertEqual(self.ok("SELECT count(*) FROM pg_depend d JOIN pg_proc p ON p.oid=d.objid "
+            "WHERE d.classid='pg_proc'::regclass AND d.refclassid='pg_proc'::regclass "
+            "AND d.refobjid='emr_access.civil_period_end(timestamptz,integer)'::regprocedure "
+            "AND p.pronamespace='emr_access'::regnamespace", db=db), ["1"])
         self.assertEqual(self.ok("SELECT count(*) FROM information_schema.columns WHERE table_schema = 'emr_access' "
                                  "AND column_name IN ('expires_at', 'expiry', 'deadline')", db=db), ["0"])
         bound = [[{"index": int(i), "kind": k, "recordId": r or None, "versionId": v or None} for i, k, r, v in
@@ -479,6 +485,9 @@ class EmrBLedgerLive(unittest.TestCase):
         retention = self.url("kin_emr_retention")
         self.assertEqual(self.refused("SELECT emr_access.expire_prefix(2)", user="kin_emr_retention", db=db), "EB005")
         first = self.driver("expire", url=retention, db=db, volume=state)
+        self.assertIsInstance(first, dict)
+        self.assertNotIn("error", first, "L05 expiry must return a committed deletion result")
+        self.assertEqual(set(first), {"deleted", "checkpointSequence", "checkpointHash"})
         self.assertEqual(first["deleted"], 1, first)
         # Unexpired, held, middle and runtime deletions are refused; nothing moved.
         snapshot = self.ok("SELECT string_agg(sequence::text, ',' ORDER BY sequence) FROM emr_access.access_entry", db=db)
@@ -505,6 +514,9 @@ class EmrBLedgerLive(unittest.TestCase):
         # After the release the rest of the expired prefix goes with its own checkpoint - the old change's viewing copy too, at
         # its floor - while that change stays in the history stream, which no retention call touches; the chains stay verifiable.
         second = self.driver("expire", url=retention, db=db, volume=state)
+        self.assertIsInstance(second, dict)
+        self.assertNotIn("error", second, "L05 released prefix must expire successfully")
+        self.assertEqual(set(second), {"deleted", "checkpointSequence", "checkpointHash"})
         self.assertEqual(second["deleted"], 3, second)
         remaining = self.entries(db=db, volume=state)
         self.assertEqual([e["kind"] for e in remaining], ["access", "access", "expiry", "expiry"])
@@ -517,7 +529,7 @@ class EmrBLedgerLive(unittest.TestCase):
         for checkpoint in (e for e in remaining if e["kind"] == "expiry"):
             self.assertNotIn("sub-", checkpoint["payload"])
         recovered = self.driver("recover", db=db, volume=state)
-        self.assertEqual((recovered["recovered"], recovered["seal"]["sequence"]), (2, remaining[-1]["sequence"]), recovered)
+        self.assertEqual((recovered["recovered"], recovered["seal"]["sequence"]), (1, remaining[-1]["sequence"]), recovered)
 
     # ── L06 ──
     def test_b06_complete_reload_and_clause_history(self):
@@ -675,6 +687,137 @@ class EmrBLedgerLive(unittest.TestCase):
             self.ok("ALTER TABLE emr_access.member_identity SET TABLESPACE kin_emr_access")
         self.assertEqual((dark.get("error"), dark.get("order")), ("LedgerUnreachable", []), dark)
         self.assertEqual(self.driver("recover")["recovered"], 0)
+
+
+    def test_b17_order_fact_history_and_classification(self):
+        """D24: order facts survive restart, replay is exact, lifecycle facts preserve the original clinical clock."""
+        record_id = "SYNTHETIC-order-" + self.token
+        at = "2026-01-02T00:00:00.000Z"
+        facts = dict(objectKind="order-indication", origin="product-authored", authorId="physician", authorRole="physician",
+            requestingClinicianId="physician", directionSourceRef=None, examCodes=["CT-CHEST"], source=None, feed=None,
+            inherited=[], firstReceivedAt=None, firstReceiptEventId=None, duplicateOf=None, scheduledAt=None,
+            scheduleChangeEvidenceId=None, status="closed", statusEvent=dict(eventId="original", actorId="physician", at=at, reason="synthetic"),
+            fulfilment=None, chartIncorporation=None, procedure=None, synthetic=None)
+        event = dict(eventId="original", recordId=record_id, versionId="v1", sha256="ab"*32, contentSha256="ab"*32, at=at,
+            act="entry", signature=dict(versionId="v1", sha256="ab"*32, signedAt=at, verified=True), predecessor=None, components=[], processing=None)
+        first = dict(recordId=record_id, eventId="original", previousEventId=None, facts=facts, event=event)
+        one = self.driver("order-facts", dict(recordId=record_id, facts=[first]))
+        self.assertNotIn("error", one, one)
+        self.assertEqual(one["kinds"], ["order-indication"])
+        self.assertEqual(one["duties"], [dict(kind="order-indication", startedAt=at, years=10)])
+        self.assertEqual(self.driver("order-facts", dict(recordId=record_id, facts=[first])), one)
+        second = json.loads(json.dumps(first))
+        second.update(eventId="cancelled", previousEventId="original")
+        second["facts"].update(status="cancelled", statusEvent=dict(eventId="cancelled", actorId="physician", at="2027-01-01T00:00:00.000Z", reason="no longer required"))
+        two = self.driver("order-facts", dict(recordId=record_id, facts=[second]))
+        self.assertNotIn("error", two, two)
+        self.assertEqual(len(two["history"]), 2); self.assertEqual(two["duties"], one["duties"])
+        changed = json.loads(json.dumps(second)); changed["facts"]["examCodes"] = ["DIFFERENT"]
+        self.assertEqual(self.driver("order-facts", dict(recordId=record_id, facts=[changed])).get("error"), "OrderEventIdConflict")
+        shorter = json.loads(json.dumps(second)); shorter.update(eventId="downgrade", previousEventId="cancelled")
+        shorter["facts"]["statusEvent"]["eventId"] = "downgrade"; shorter["facts"]["objectKind"] = "exam-clinical-info"
+        self.assertEqual(self.driver("order-facts", dict(recordId=record_id, facts=[shorter])).get("error"), "NoShorteningOfEstablishedDuty")
+        for verb in ["UPDATE emr_access.order_fact SET body='{}'", "DELETE FROM emr_access.order_fact", "TRUNCATE emr_access.order_fact"]:
+            self.assertEqual(self.refused(verb, user="kin_runtime"), REFUSED)
+        self.assertEqual(self.driver("order-facts", dict(recordId=record_id)), two)
+
+    def test_b18_external_expiry_proof_and_torn_journal_restarts(self):
+        """The two review counterexamples on real persisted storage, independent of the in-memory contract model."""
+        db = self.start_db("l18"); self.provision(db); self.migrate(db); state = self.volume("l18")
+        first = self.driver("append", {"events": [self.auth_event(OLD[0])]}, db=db, volume=state)
+        self.assertIn("receipt", first["results"][0], first)
+        # Record 2 commits with an external append intent, but the last trusted seal is still 1.
+        self.assertEqual(self.driver("business", {"event": self.auth_event(OLD[1]), "exit": "after-commit"}, db=db, volume=state), {"exited": True})
+        self.ok("SELECT * FROM emr_access.expire_prefix(2)", user="kin_emr_retention", db=db)
+        rejected = self.driver("recover", db=db, volume=state)
+        self.assertEqual(rejected.get("error"), "SealTailMismatch", rejected)
+        self.assertEqual(self.driver("seal", db=db, volume=state)["sequence"], 1)
+        # A separate clean state exercises the journal; the damaged raw bytes survive all later appends.
+        state2 = self.volume("l18-journal")
+        self.as_root(state2, "mkdir -p /var/lib/kin-emr/journal; chmod 700 /var/lib/kin-emr; chown -R 1000:1000 /var/lib/kin-emr")
+        # The driver's failure journal can be read without sealing this independent state over a populated DB.
+        self.assertEqual(self.driver("journal", volume=state2), [])
+        self.as_root(state2, "printf '%s' '{\"id\":\"incomplete\"' > /var/lib/kin-emr/journal/failure-journal.jsonl; chown 1000:1000 /var/lib/kin-emr/journal/failure-journal.jsonl")
+        self.assertEqual(self.driver("journal", volume=state2), [])
+        self.assertEqual(self.driver("journal", volume=state2), [])
+        archive = run(["docker", "run", "--rm", "--label", self.label, "--network", "none", "-v", state2+":/s:ro", "--entrypoint", "sh", self.image,
+            "-c", "cat /s/journal/torn-*.bin; wc -c < /s/journal/failure-journal.jsonl"]).stdout
+        self.assertEqual(archive, b'{"id":"incomplete"0\n')
+        for index in (1, 2):
+            self.assertEqual(self.driver("journal-add", {"id": "after-torn-"+str(index)}, volume=state2)["id"], "after-torn-"+str(index))
+            self.assertEqual(len(self.driver("journal", volume=state2)), index)
+
+    def test_b19_backup_rehearsal_preserves_database_and_external_state(self):
+        """The real backup/rehearse functions over owned disposable resources; only source names and HTTP probes are adapted.
+
+        There is no shared stack: Docker argv target names map exclusively to this run. The clinical source is an empty
+        synthetic SQLite index; all PostgreSQL dumps, role/catalog checks, state archives and seal recovery are real.
+        """
+        import contextlib
+        import sqlite3
+        from unittest.mock import patch
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import ops_backup as backup
+        import ops_audit_integrity as audit
+        self.assertNotIn("error", self.driver("recover"))
+        seeded = self.driver("append", {"count": 2})
+        self.assertNotIn("error", seeded, seeded)
+        self.assertEqual(len(seeded["results"]), 2)
+        self.assertTrue(all("receipt" in row for row in seeded["results"]), seeded)
+        self.ok("CREATE DATABASE keycloak OWNER kin")
+        self.ok("CREATE TABLE synthetic_realm(id text PRIMARY KEY); INSERT INTO synthetic_realm VALUES ('EMR-B-L19')", database="keycloak")
+        orthanc_image = json.loads(run(["docker", "image", "inspect", "orthancteam/orthanc:24.12.0"]).stdout)[0]["Id"]
+        with tempfile.TemporaryDirectory(prefix="kin-emrb-backup-") as temporary:
+            root = Path(temporary); repo = root / "repo"; repo.mkdir(); output = root / "backups"; output.mkdir()
+            for filename in backup.FILES[3:]:
+                (repo / filename).write_text("SYNTHETIC_ONLY=no_production_secret\n", encoding="utf-8")
+            sqlite = root / "index"
+            with contextlib.closing(sqlite3.connect(sqlite)) as connection:
+                connection.execute("CREATE TABLE AttachedFiles(uuid TEXT, compressedSize INTEGER)")
+            orthanc_volume = self.volume("l19-orthanc")
+            aliases = {"kin-db": self.db}
+            for role, image, mount in [("api", self.image, self.state+":"+STATE),
+                    ("keycloak", self.image, None), ("orthanc", orthanc_image, orthanc_volume+":/var/lib/orthanc/db"),
+                    ("proxy", self.image, None)]:
+                name = "kin-emrb-"+self.token+"-l19-"+role
+                self.created["container"].append(name); aliases["kin-"+role] = name
+                run(["docker", "run", "-d", "--name", name, "--label", self.label, "--network", "none",
+                    *(["-v", mount] if mount else []), "--entrypoint", "sleep", image, "infinity"])
+            run(["docker", "cp", str(sqlite), aliases["kin-orthanc"]+":/var/lib/orthanc/db/index"])
+            actual_run = backup.run
+            def isolated_run(argv, **kwargs):
+                if argv[0] == "git":
+                    return subprocess.run(argv, cwd=ROOT, capture_output=True, check=True)
+                mapped = [aliases.get(value, value) for value in argv]
+                result = actual_run(mapped, **kwargs)
+                if argv[:2] == ["docker", "inspect"] and "--format" not in argv:
+                    facts = json.loads(result.stdout)
+                    reverse = {value: key for key, value in aliases.items()}
+                    for item in facts:
+                        actual_name = item["Name"].lstrip("/")
+                        self.assertIn(actual_name, reverse)
+                        self.assertEqual(item["Config"]["Labels"]["kin.emrb.live"], self.token)
+                        item["Name"] = "/"+reverse[actual_name]
+                        item["Config"]["Labels"].update({"com.docker.compose.project": "synthetic-emr-b",
+                            "com.docker.compose.project.working_dir": str(repo)})
+                    result.stdout = json.dumps(facts).encode()
+                return result
+            with patch.object(backup, "ROOT", repo), patch.object(backup, "run", side_effect=isolated_run), \
+                    patch.object(backup, "reload_proxy"), patch.object(backup, "wait_ready"):
+                self.assertEqual(audit.main(["init", str(output)]), 0)
+                backup.backup(output)
+                folder, = [p for p in output.iterdir() if p.is_dir()]
+                manifest = json.loads((folder / "manifest.json").read_text())
+                self.assertTrue(manifest["complete"]); self.assertTrue(manifest["emr"]["same_pause"])
+                self.assertTrue(set(backup.EMR_FILES).issubset(manifest["sha256"]))
+                backup.rehearse(folder)
+                result_file, = folder.glob("rehearsal-*.json")
+                result = json.loads(result_file.read_text())
+                self.assertTrue(result["success"], result)
+                self.assertEqual(result["emr"], {"owner_acl_preserved": True, "database_state_verified": True})
+                self.assertTrue(result["audit"]["verified"], result)
+                self.assertEqual(result["cleanup_failures"], [])
+        self.assertNotIn("error", self.driver("recover"), "backup did not alter the source ledger or seal")
 
 
 if __name__ == "__main__":

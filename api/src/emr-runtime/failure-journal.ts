@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { choice, freeze, integer, object, refuse, sha256, string, utc } from '../emr-contract/validation';
@@ -71,16 +71,17 @@ export class FailureJournal {
   private readonly file: string;
   private records = new Map<string, JournalRecord>();
   private bytes = 0;
-  /** Bytes of a torn final line from a crash mid-write; kept in the file, never counted as a record. */
+  private unavailable = false;
+  /** Bytes of a torn final line, durably quarantined before the good journal is truncated. */
   readonly tornBytes: number;
 
   constructor(stateDirectory: string | undefined) {
     this.file = path.join(protectedDirectory(stateDirectory, 'journal'), 'failure-journal.jsonl');
-    let raw = '';
-    try { raw = fs.readFileSync(this.file, 'utf8'); } catch (error: any) { if (error?.code !== 'ENOENT') throw new JournalUnavailable('FailureJournalUnavailable'); }
-    const complete = raw.endsWith('\n') || raw === '' ? raw : raw.slice(0, raw.lastIndexOf('\n') + 1);
-    this.tornBytes = Buffer.byteLength(raw) - Buffer.byteLength(complete);
-    for (const line of complete.split('\n').filter(Boolean)) {
+    let raw: Buffer = Buffer.alloc(0);
+    try { raw = fs.readFileSync(this.file); } catch (error: any) { if (error?.code !== 'ENOENT') throw new JournalUnavailable('FailureJournalUnavailable'); }
+    const goodLength = raw.lastIndexOf(10) + 1;
+    this.tornBytes = raw.length - goodLength;
+    for (const line of raw.subarray(0, goodLength).toString('utf8').split('\n').filter(Boolean)) {
       let record: JournalRecord;
       try {
         const v = object(JSON.parse(line), ['id', 'kind', 'at', 'body', 'sha256']);
@@ -91,9 +92,35 @@ export class FailureJournal {
       if (this.records.has(record.id)) throw new JournalUnavailable('FailureJournalCorrupt');
       this.records.set(record.id, freeze(record));
     }
-    this.bytes = Buffer.byteLength(raw);
-    // A torn tail gets its own line end so the next record never joins it.
-    if (this.tornBytes) this.write('\n');
+    if (this.tornBytes) this.quarantine(raw, goodLength);
+    this.bytes = goodLength;
+    // Quarantine is evidence too: a crash must not reset the volume budget.
+    for (const name of fs.readdirSync(path.dirname(this.file)).filter(n => n.startsWith('torn-'))) {
+      const info = fs.lstatSync(path.join(path.dirname(this.file), name));
+      if (!info.isFile() || info.isSymbolicLink()) throw new JournalUnavailable('FailureJournalCorrupt');
+      this.bytes += info.size;
+    }
+  }
+
+  private quarantine(raw: Buffer, goodLength: number): void {
+    const dir = path.dirname(this.file), torn = raw.subarray(goodLength);
+    const target = path.join(dir, `torn-${createHash('sha256').update(raw).digest('hex')}.bin`);
+    const temporary = path.join(dir, `.tmp-${randomBytes(8).toString('hex')}`);
+    let fd: number | undefined;
+    try {
+      fd = fs.openSync(temporary, 'wx', 0o600);
+      fs.writeFileSync(fd, torn); fs.fsyncSync(fd); fs.closeSync(fd); fd = undefined;
+      try { fs.linkSync(temporary, target); } catch (error: any) {
+        if (error?.code !== 'EEXIST' || !fs.readFileSync(target).equals(torn)) throw error;
+      }
+      syncDirectory(dir);
+      // A restart before this point sees the same bytes and the same archive; after it, only valid records remain.
+      fd = fs.openSync(this.file, 'r+'); fs.ftruncateSync(fd, goodLength); fs.fsyncSync(fd);
+    } catch { throw new JournalUnavailable('FailureJournalUnavailable'); }
+    finally {
+      if (fd !== undefined) fs.closeSync(fd);
+      try { fs.rmSync(temporary, { force: true }); } catch { /* never remove the durable archive */ }
+    }
   }
 
   private write(text: string): void {
@@ -101,10 +128,11 @@ export class FailureJournal {
     try {
       const existed = fs.existsSync(this.file);
       fd = fs.openSync(this.file, 'a', 0o600);
-      fs.writeSync(fd, text);
+      fs.writeFileSync(fd, text);
       fs.fsyncSync(fd);
       if (!existed) syncDirectory(path.dirname(this.file));
     } catch {
+      this.unavailable = true;
       throw new JournalUnavailable('FailureJournalUnavailable');
     } finally {
       if (fd !== undefined) try { fs.closeSync(fd); } catch { /* the record was synced or the write already failed */ }
@@ -114,6 +142,7 @@ export class FailureJournal {
 
   /** Durable before it returns; the same ID and body again is the same record, another body under that ID is refused. */
   record(id: string, kind: JournalKind, body: Record<string, string | number>, at = new Date().toISOString()): Readonly<JournalRecord> {
+    if (this.unavailable) throw new JournalUnavailable('FailureJournalUnavailable');
     const record: JournalRecord = { id: string(id), kind: choice(kind, Object.keys(JOURNAL_KINDS) as JournalKind[]), at: utc(at), body: parseBody(kind, body) };
     const existing = this.records.get(record.id);
     if (existing) {

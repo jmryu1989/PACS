@@ -201,13 +201,13 @@ if (process.argv.includes('--emr-inventory-generator')) {
     // reading report and the clinical records attached to it are the image's 소견서/검사소견 - five years, never 진료기록부 -
     // and the ten-year 진료기록부 class belongs only to a recorded chart incorporation.
     for (const kind of ['image', 'report-head', 'report-version', 'manual-sr', 'clinical-question', 'clinical-answer', 'consultation',
-      'critical-result', 'critical-result-ack', 'finding', 'offline-signed-original']) {
+      'critical-result', 'critical-result-ack', 'finding', 'offline-signed-original', 'comparison-description']) {
       assert.equal(defaults[kind].retentionYears, 5, kind);
       assert(C.RECORD_CLASSIFICATION[kind].retention.statutoryMinimum.some(m => m.clauseId === 'medical-rules:15.1.6' && m.years === 5), kind);
       assert(!C.RECORD_CLASSIFICATION[kind].retention.statutoryMinimum.some(m => m.clauseId === 'medical-rules:15.1.2'), kind);
     }
     assert.equal(defaults['access-audit'].retentionYears, 2);
-    for (const kind of ['chart-incorporation', 'comparison-description']) {
+    for (const kind of ['chart-incorporation', 'order-indication']) {
       assert.equal(defaults[kind].retentionYears, 10);
       assert(C.RECORD_CLASSIFICATION[kind].retention.statutoryMinimum.some(m => m.clauseId === 'medical-rules:15.1.2' && m.years === 10));
     }
@@ -285,6 +285,13 @@ if (process.argv.includes('--emr-inventory-generator')) {
   const extension = (overrides = {}) => ({ cause: 'continuing-treatment', actorId: 'synthetic-reader', reason: '계속 진료 필요',
     at: '2031-10-04T00:00:00.000Z', until: '2036-10-04T15:00:00.000Z', ...overrides });
   const digest = text => require('node:crypto').createHash('sha256').update(text).digest('hex');
+  function orderFacts(overrides = {}) {
+    return { objectKind: 'order-indication', origin: 'product-authored', authorId: 'physician-1', authorRole: 'physician',
+      requestingClinicianId: 'physician-1', directionSourceRef: null, examCodes: ['CT-CHEST'], source: null, feed: null,
+      inherited: [], firstReceivedAt: null, firstReceiptEventId: null, duplicateOf: null, scheduledAt: null,
+      scheduleChangeEvidenceId: null, status: 'closed', statusEvent: { eventId: 'status-1', actorId: 'physician-1', at: t0, reason: 'synthetic' },
+      fulfilment: null, chartIncorporation: null, procedure: null, synthetic: null, ...overrides };
+  }
   const fixtureModels = {
     image: ['DicomInstance', { sopClass: 'image' }], 'report-version': ['ReportVersion', {}],
     'clinical-answer': ['StudyQuestionEntry', { kind: 'answer' }], 'critical-result': ['CriticalResult', {}],
@@ -300,15 +307,24 @@ if (process.argv.includes('--emr-inventory-generator')) {
     'operational-note': ['TechNoteRevision', { authorRole: 'administrator' }],
   };
   function stored(kind, recordId, partId, at, options = {}) {
-    const [model, row] = fixtureModels[kind] || [];
+    let [model, row] = fixtureModels[kind] || [];
+    if (['order', 'received-order'].includes(kind)) {
+      model = 'Order'; row = orderFacts({ objectKind: 'registration', authorId: 'owner',
+        directionSourceRef: { kind: 'native-chart', systemId: 'emr', recordId: 'direction', versionId: 'v1' } });
+      if (kind === 'received-order') Object.assign(row, { objectKind: 'received-order', origin: 'received-ris',
+        firstReceivedAt: at, firstReceiptEventId: 'event:' + partId,
+        source: { systemId: 'ris', recordId: 'source', versionId: 'v1', at, signatureEvidenceId: 'signature' },
+        feed: { feedId: 'feed', installationEvidenceId: 'verified', roles: ['worklist-copy'] } });
+    }
     assert(model, `Missing synthetic model fixture: ${kind}`);
     const signed = C.RECORD_CLASSIFICATION[kind].signature.rule === 'required';
     const hash = digest(recordId + ':' + partId);
     const event = { eventId: 'event:' + partId, recordId, versionId: partId, sha256: hash, contentSha256: hash, at,
-      act: signed ? 'entry' : kind === 'image' ? 'acquisition' : 'creation',
+      act: signed ? 'entry' : kind === 'image' ? 'acquisition' : kind === 'received-order' ? 'receipt' : 'creation',
       signature: signed ? { versionId: partId, sha256: hash, signedAt: at, verified: true } : null,
       predecessor: null, components: [], processing: null, ...options.event };
     const facts = { recordId, model, row: { ...row, ownerId: 'owner', draftBinding: { reportId: 'parent', intentId: 'intent:' + recordId, action: 'approve' }, ...options.row }, event };
+    if (model === 'Order') { delete facts.row.ownerId; delete facts.row.draftBinding; }
     return resolveRow(facts);
   }
   function makeRecord(recordId, recordKinds, at, partId = recordId, options = {}) {
@@ -853,7 +869,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
     assert.throws(() => A.sealAccessEvent(A.ACCESS_CHAIN_GENESIS, change, 'other'));
   });
   test('TEST-EMR-19-A D-21: each statutory part counts from its pinned starting event', () => {
-    assert.deepEqual(Object.keys(D.PERIOD_START).sort(), ['access-audit', 'acquired', 'critical-result-ack', 'delivery-receipt', 'extension', 'hold', 'other', 'received-order', 'signed']);
+    assert.deepEqual(Object.keys(D.PERIOD_START).sort(), ['access-audit', 'acquired', 'critical-result-ack', 'delivery-receipt', 'extension', 'hold', 'inherited', 'other', 'received-order', 'signed']);
     const rows = { 'report-version': 'signed', 'clinical-answer': 'signed', image: 'acquired', 'tech-note': 'signed', 'chart-incorporation': 'other' };
     const report = makeRecord('start-report', ['report-version'], t0);
     for (const [kind, row] of Object.entries(rows)) {
@@ -954,7 +970,16 @@ if (process.argv.includes('--emr-inventory-generator')) {
     for (const [kind, row] of Object.entries(C.RECORD_CLASSIFICATION).filter(([, r]) => r.retention.mode === 'purpose')) {
       assert(row.retention.purposeEnds.length > 0);
       for (const trigger of row.retention.purposeEnds) {
-        const record = purposeRecord('private', kind, 'owner', t0, ['private-v1', 'private-v2']);
+        const orderRow = ['order', 'received-order'].includes(kind) ? { status: 'closed',
+          statusEvent: { eventId: 'ended', actorId: 'owner', at: deadline, reason: 'objective completion' },
+          procedure: trigger === 'order-purpose-ended' ? null : {
+            state: 'copy-window-review', responsibleRole: 'privacy-officer', assigneeId: 'owner', enteredAt: t0,
+            evidenceDueAt: '2026-10-06T00:00:00.000Z', escalationDecisionDueAt: '2026-10-07T00:00:00.000Z',
+            finalDecisionDueAt: '2026-10-08T00:00:00.000Z', superiorRole: 'institution-head', superiorId: 'owner', escalatedAt: null,
+            extensions: 0, extensionLimit: 0, extensionEvidenceId: null,
+            decision: { route: trigger, actorId: 'owner', at: deadline, evidenceId: 'decision', scope: ['private'], basisId: null, reviewAt: null,
+              originalPreservedEvidenceId: trigger === 'lawful-return' ? 'verified-original' : null } } } : {};
+        const record = purposeRecord('private', kind, 'owner', t0, ['private-v1', 'private-v2'], { row: orderRow });
         const end = purposeEnd(record, trigger, deadline, trigger === 'intent-superseded' ? { superseded: {
           eventId: 'another-approval', reportId: 'parent', at: deadline, action: 'approve', authorId: 'another-reader', draftId: 'another-draft', versionId: 'approved-v1' } } : {});
         const events = [];
@@ -1120,7 +1145,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
   }
   test('TEST-EMR-01/19-A R2-06: every stored model resolves to a statutory, purpose, source or access path', () => {
     const rows = {
-      StudyState: { change: 'acquisition' }, Order: { origin: 'product-authored' }, Transfer: { localPatientId: null },
+      StudyState: { change: 'acquisition' }, Order: orderFacts(), Transfer: { localPatientId: null },
       ViewerItem: { snapshot: { type: 'measurement' } }, ViewerRevision: { snapshot: { type: 'key-image' } },
       ViewerJob: { title: '', description: '', clinicalEntry: false }, ViewerJobRevision: { title: 'followup', description: 'clinical', clinicalEntry: true },
       StudyQuestionEntry: { kind: 'answer' }, CriticalResultEvent: { recordId: 'model-row', event: 'created' }, TechNoteRevision: { authorRole: 'radiographer' },
@@ -1130,7 +1155,7 @@ if (process.argv.includes('--emr-inventory-generator')) {
         'StudyConsultation', 'StudyQuestion', 'StudyQuestionEntry', 'CriticalResult', 'CriticalResultEvent', 'TechNoteRevision'];
       const deliveries = ['GatewayReceipt', 'GatewayRetryRequest', 'ViewerRequest', 'StudyImageRequestReceipt', 'CriticalResultReceipt'];
       const act = clinicalModels.includes(model) ? 'entry' : deliveries.includes(model) ? 'delivery' : model === 'AuditLog' ? 'access' : model === 'StudyState' ? 'acquisition' : 'creation';
-      const source = modelSource(model, { ownerId: 'owner', draftBinding: { reportId: 'parent', intentId: 'intent', action: 'approve' }, ...rows[model] }, act);
+      const source = modelSource(model, model === 'Order' ? rows.Order : { ownerId: 'owner', draftBinding: { reportId: 'parent', intentId: 'intent', action: 'approve' }, ...rows[model] }, act);
       const disposition = C.retentionDisposition(source);
       if (disposition === 'statutory') assert(D.newRetentionRecord(source).parts.length === 1, model);
       else if (disposition === 'purpose') assert(D.newPurposeRecord(source, ['model-v1']).kind, model);
@@ -1388,17 +1413,20 @@ if (process.argv.includes('--emr-inventory-generator')) {
 
   test('TEST-EMR-01/19-A R3-06: received RIS order and StudyState correction bind their generating events', () => {
     const seed = stored('report-version', 'ris-order', 'o1', t0);
-    const source = resolveRow({ recordId: 'ris-order', model: 'Order', row: { origin: 'received-ris', receiptEventId: seed.event.eventId,
-      sourceSystem: 'verified-ris', sourceSignatureEvidence: 'unchanged-source-envelope' }, event: { ...seed.event, act: 'receipt', signature: null } });
+    const source = resolveRow({ recordId: 'ris-order', model: 'Order', row: orderFacts({ objectKind: 'received-order', origin: 'received-ris',
+      source: { systemId: 'verified-ris', recordId: 'source-order', versionId: 'original', at: t0, signatureEvidenceId: 'unchanged-source-envelope' },
+      feed: { feedId: 'ris-feed', installationEvidenceId: 'feed-verified', roles: ['worklist-copy', 'entrusted-original'] },
+      inherited: [{ kind: 'order-indication', recordId: 'source-order', versionId: 'original', startedAt: t0, evidenceId: 'entrustment-1' }],
+      firstReceivedAt: t0, firstReceiptEventId: seed.event.eventId }), event: { ...seed.event, act: 'receipt', signature: null } });
     const order = D.newRetentionRecord(source);
     assert.equal(D.retentionDeadline(order), '2036-10-04T15:00:00.000Z'); assert.equal(order.parts[0].evidence.event.signature, null);
     const receivedAccess = access({ surface: 'GET bootstrap', targets: [{ ...access().targets[0], kind: 'received-order', recordId: known('ris-order'), versionId: known('o1') }] });
     assert(A.parseAccessEvent(receivedAccess, [source]));
-    assert.equal(order.parts[0].evidence.row.sourceSignatureEvidence, 'unchanged-source-envelope');
-    const authored = resolveRow({ recordId: 'ris-order', model: 'Order', row: { origin: 'product-authored' }, event: { ...seed.event, signature: null } });
+    assert.equal(order.parts[0].evidence.row.source.signatureEvidenceId, 'unchanged-source-envelope');
+    const authored = resolveRow({ recordId: 'ris-order', model: 'Order', row: orderFacts(), event: { ...seed.event, signature: null } });
     assert.throws(() => D.newRetentionRecord(authored), { code: 'NewLawfulRecordEventRequired' });
-    assert(D.newRetentionRecord(resolveRow({ recordId: 'ris-order', model: 'Order', row: { origin: 'product-authored' }, event: seed.event })));
-    assert.throws(() => resolveRow({ recordId: 'ris-order', model: 'Order', row: { ...source.row, receiptEventId: 'wrong-event' }, event: source.event }), { code: 'OrderReceiptRequired' });
+    assert(D.newRetentionRecord(resolveRow({ recordId: 'ris-order', model: 'Order', row: orderFacts(), event: seed.event })));
+    assert.throws(() => resolveRow({ recordId: 'ris-order', model: 'Order', row: { ...source.row, firstReceiptEventId: 'wrong-event' }, event: source.event }), { code: 'OrderReceiptRequired' });
     const metadata = modelSource('StudyState', { change: 'acquisition' }, 'acquisition', 'metadata');
     const unit = D.newRetentionRecord(metadata), at = '2030-01-01T00:00:00.000Z';
     const correctionSeed = stored('tech-note', 'metadata', 'corrected', at);
@@ -1663,16 +1691,20 @@ if (process.argv.includes('--emr-inventory-generator')) {
   });
   test('TEST-EMR-01/19-A R4-08 Y5b: received and system events refuse product person signatures', () => {
     const signed = stored('report-version', 'received-signed', 'r1', t0).event;
-    const facts = { recordId: signed.recordId, model: 'Order', row: { origin: 'received-ris', receiptEventId: signed.eventId,
-      sourceSystem: 'RIS', sourceSignatureEvidence: 'source-original-signature' }, event: { ...signed, act: 'receipt' } };
+    const facts = { recordId: signed.recordId, model: 'Order', row: orderFacts({ objectKind: 'received-order', origin: 'received-ris',
+      firstReceivedAt: t0, firstReceiptEventId: signed.eventId,
+      source: { systemId: 'RIS', recordId: 'original', versionId: 'v1', at: t0, signatureEvidenceId: 'source-original-signature' },
+      feed: { feedId: 'feed', installationEvidenceId: 'verified', roles: ['entrusted-original'] },
+      inherited: [{ kind: 'order-indication', recordId: 'original', versionId: 'v1', startedAt: t0, evidenceId: 'verified-supply' }] }),
+      event: { ...signed, act: 'receipt' } };
     assert.throws(() => D.newRetentionRecord(resolveRow(facts)), { code: 'ProductSignatureRefused' });
     const received = D.newRetentionRecord(resolveRow({ ...facts, event: { ...facts.event, signature: null } }));
-    assert.equal(received.parts[0].evidence.row.sourceSignatureEvidence, 'source-original-signature');
+    assert.equal(received.parts[0].evidence.row.source.signatureEvidenceId, 'source-original-signature');
     for (const [model, row, act] of [['DicomInstance', { sopClass: 'image' }, 'acquisition'], ['AuditLog', {}, 'access'], ['GatewayReceipt', {}, 'delivery']]) {
       const source = resolveRow({ recordId: signed.recordId, model, row, event: { ...signed, act } });
       assert.throws(() => model === 'DicomInstance' ? D.newRetentionRecord(source) : A.deliveryRetention(source), { code: 'ProductSignatureRefused' });
     }
-    const clinical = resolveRow({ recordId: signed.recordId, model: 'Order', row: { origin: 'product-authored' }, event: signed });
+    const clinical = resolveRow({ recordId: signed.recordId, model: 'Order', row: orderFacts(), event: signed });
     assert(D.newRetentionRecord(clinical));
     const humanNote = resolveRow({ recordId: signed.recordId, model: 'TechNoteRevision', row: { authorRole: 'radiographer', clinicalEntry: true }, event: signed });
     assert(D.newRetentionRecord(humanNote));

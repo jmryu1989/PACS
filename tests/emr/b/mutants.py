@@ -1,10 +1,10 @@
-"""EMR-B1 mutants M01-M08, M11, M12, M14 (emr/units/b.json `mutants`; order section 9).
+"""EMR-B1 mutants M01-M08, M11, M12, M14-M24 (emr/units/b.json `mutants`; order section 9).
 
 Each mutant is one declared change applied to a separate copy of the committed checkout (`git archive HEAD`), never to
 this working tree. Its declared kill cases run in that copy: contract cases (Cnn) through `node --test` with TAP output
 and a name pattern, live cases (Lnn) through the copy's own scripts/run-tests.py with a plan that selects exactly those
 EmrBLedgerLive cases and a production API image built from the mutated copy. A mutant is killed only when every declared
-kill case is reported failed; a build failure, a missing case or a refusal before the case ran is not a kill.
+kill case has a behavioural assertion failure; a harness error, build failure, a missing case or a refusal before the case ran is not a kill.
 
 Per mutant the record keeps the exact change, the cases, the expected failure, each run's exit code and raw log path, and
 the changed file's SHA-256 before the change, while mutated, and after the restore (which must equal the first).
@@ -15,6 +15,7 @@ inspection record of that run (identity copied from the marker) and calls releas
 the gate stays closed and the run is reported as needing inspection.
 
     python tests/emr/b/mutants.py --out tmp/emr-b1/mutants [--only M03,M04] [--contract-only]
+    python tests/emr/b/mutants.py --self-test
 """
 from __future__ import annotations
 
@@ -80,13 +81,37 @@ MUTANTS = {
     "M11": ("start-up never compares the database chain with the trusted seal", [
         ("api/src/emr-runtime/seal.ts", "        if (tail.sequence < current.sequence) throw new SealRefused('LedgerBehindSeal', stream);\n", ""),
         ("api/src/emr-runtime/seal.ts",
-         "          const sealed = entries.find(e => e.sequence === current.sequence);\n"
-         "          if (sealed ? sealed.hash !== current.hash : current.sequence > anchor.sequence || (current.sequence === anchor.sequence && current.hash !== anchor.hash))\n"
-         "            throw new SealRefused('SealTailMismatch', stream);\n", "")]),
+         "    const sealed = entries.find(e => e.sequence === current.sequence);\n"
+         "    if (sealed ? sealed.hash !== current.hash : current.sequence !== anchor.sequence || current.hash !== anchor.hash)\n"
+         "      throw new SealRefused('SealTailMismatch', stream);\n", "")]),
     "M12": ("an entry before its end under the retention rule (unexpired, or bound to a record whose end is unknown) is planned into the expired prefix", [
         ("api/src/emr-runtime/contract.ts", "    if (deadline === null || deadline > now || row.held) break;\n", "    if (row.held) break;\n")]),
     "M14": ("a declared live case missing from (or added to) its test file is accepted", [
         ("scripts/emr-compose.py", "    if live != expected_live:\n", "    if live is None:\n")]),
+    "M15": ("expiry checkpoints are trusted without durable external expiry evidence", [
+        ("api/src/emr-runtime/seal.ts", "        if (this.expiryProof(entry)?.chainId !== chainId) throw new SealRefused('UnsealedEntryUnexplained', String(entry.sequence));\n", ""),
+        ("api/src/emr-runtime/seal.ts", "      if (!proof) throw new SealRefused('UnsealedEntryUnexplained', 'expiry-anchor');\n", "")]),
+    "M16": ("torn bytes remain in the good journal after quarantine", [
+        ("api/src/emr-runtime/failure-journal.ts", "fs.ftruncateSync(fd, goodLength);", "/* missing repair */")]),
+    "M17": ("native clinical directions get only five years", [
+        ("api/src/emr-contract/classification.ts", "original decision, including a code-only direction', clinical, chart)", "original decision, including a code-only direction', clinical, images)")]),
+    "M18": ("registration with no original direction is accepted", [
+        ("api/src/emr-contract/classification.ts", "  if (r.objectKind === 'registration' && r.directionSourceRef === null && r.origin !== 'migrated') refuse('DirectionSourceRequired');\n", "")]),
+    "M19": ("a retransmission resets the first local receipt clock", [
+        ("api/src/emr-contract/lawful-defaults.ts", " || before.firstReceivedAt !== after.firstReceivedAt", "")]),
+    "M20": ("unanswered review silently ends on the internal deadline", [
+        ("api/src/emr-contract/lawful-defaults.ts", "if (at >= p.finalDecisionDueAt) return 'superior-decision-overdue';", "if (at >= p.finalDecisionDueAt) return 'clear';")]),
+    "M21": ("a claim end timestamp needs no actual ending evidence", [
+        ("api/src/emr-contract/lawful-defaults.ts", "    string(d.endingEventId);\n", "")]),
+    "M22": ("a changed seed is still treated as verified synthetic", [
+        ("api/src/emr-contract/classification.ts", "s.originalSha256 !== s.observedSha256 || ", "")]),
+    "M23": ("a subsequent event can drop an inherited original duty", [
+        ("api/src/emr-contract/lawful-defaults.ts", "before.inherited.some(d => !after.inherited.some(n => JSON.stringify(d) === JSON.stringify(n))) ||", "false ||"),
+        ("api/src/emr-contract/lawful-defaults.ts", "before.feed?.roles.some(role => role !== 'worklist-copy' && !after.feed?.roles.includes(role))", "false")]),
+    "M24": ("a new clinical version needs no link to the prior preserved version", [
+        ("api/src/emr-runtime/contract.ts",
+         "    if (previous.event.versionId !== e.versionId && (e.predecessor?.recordId !== previous.recordId ||\n"
+         "        e.predecessor?.partId !== previous.event.versionId || e.predecessor?.sha256 !== previous.event.sha256)) refuse('OrderHistoryIncomplete');\n", "")]),
 }
 
 
@@ -104,12 +129,24 @@ def run(args, *, cwd, env=None, timeout, log):
     return code, round(time.monotonic() - started, 1)
 
 
-def make_copy(target):
+def make_copy(target, worktree=False):
     """The committed checkout (HEAD) as files, with this checkout's installed api/node_modules linked in."""
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT).decode().strip()
     archive = subprocess.run(["git", "archive", "--format=tar", head], cwd=ROOT, capture_output=True, check=True).stdout
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
         tar.extractall(target, filter="data") if sys.version_info >= (3, 12) else tar.extractall(target)
+    if worktree:
+        tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=ROOT).decode().split("\0")
+        declaration = json.loads(DECLARATION.read_text(encoding="utf-8"))
+        tracked = sorted(set(filter(None, tracked)) | {name for group in declaration["owned_paths"].values() for name in group})
+        for name in filter(None, tracked):
+            origin, destination = ROOT / name, target / name
+            if origin.is_file():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(origin, destination)
+            elif destination.exists():
+                destination.unlink()
+        (target / "mutant-inputs.json").write_text(json.dumps({name: sha256(ROOT / name) for name in tracked if name and (ROOT / name).is_file()}, sort_keys=True), encoding="utf-8")
     modules = ROOT / "api" / "node_modules"
     if not modules.is_dir():
         raise SystemExit("api/node_modules is required (npm ci --prefix api)")
@@ -123,7 +160,7 @@ def make_copy(target):
 
 def unlink_modules(link):
     if os.name == "nt":
-        subprocess.run(["cmd", "/c", "rmdir", str(link)], check=True, capture_output=True)
+        os.rmdir(link)  # Remove this verified junction only, never its shared target tree.
     else:
         link.unlink()
 
@@ -157,6 +194,22 @@ def restore(copy, applied):
         del item["original"]
 
 
+def contract_verdict(text, cases, code):
+    blocks = re.findall(r"^not ok \d+ - (C\d+) [^\n]*\n(.*?)(?=^# Subtest:|^ok |^not ok |^1\.\.|\Z)", text, re.M | re.S)
+    failed = {case for case, details in blocks if case in cases and re.search(r"code: ['\"]?ERR_ASSERTION\b", details)}
+    harness = any(case in cases and not re.search(r"code: ['\"]?ERR_ASSERTION\b", details) for case, details in blocks)
+    passed = {case for case in cases if re.search(r"^ok \d+ - " + case + r" ", text, re.M)}
+    return {"failed": sorted(failed), "passed": sorted(passed), "harness_errors": harness,
+            "killed": code != 0 and failed == set(cases) and not harness}
+
+
+def live_verdict(text, cases, code):
+    failed = {case for case in cases if re.search(r"^FAIL: " + LIVE[case] + r" \(", text, re.M)}
+    harness = bool(re.search(r"^ERROR: ", text, re.M))
+    return {"failed": sorted(failed), "harness_errors": harness,
+            "killed": code != 0 and failed == set(cases) and not harness}
+
+
 def contract_kills(copy, cases, out, name, env):
     """Run the copy's contract file for these case IDs; each must be reported `not ok`."""
     pattern = "^(" + "|".join(cases) + ") "
@@ -164,10 +217,8 @@ def contract_kills(copy, cases, out, name, env):
     code, seconds = run(["node", "--test", "--test-reporter=tap", "--test-name-pattern=" + pattern, "tests/emr/b/contract_test.cjs"],
                         cwd=copy, env=env, timeout=900, log=log)
     text = log.read_text(encoding="utf-8", errors="replace")
-    failed = {case for case in cases if re.search(r"^\s*not ok \d+ - " + case + r" ", text, re.M)}
-    passed = {case for case in cases if re.search(r"^\s*ok \d+ - " + case + r" ", text, re.M)}
     return {"kind": "contract", "cases": cases, "exit": code, "seconds": seconds, "log": str(log),
-            "failed": sorted(failed), "passed": sorted(passed), "killed": code != 0 and failed == set(cases)}
+            **contract_verdict(text, cases, code)}
 
 
 def leftovers():
@@ -206,8 +257,13 @@ def wait_for_live_gate(copy, minutes=90):
     sys.path.insert(0, str(copy / "tests"))
     import live_test_gate as gate
     deadline = time.monotonic() + minutes * 60
-    while (gate.STATE / "live-needs-inspection.json").exists() and time.monotonic() < deadline:
-        time.sleep(5)
+    while time.monotonic() < deadline:
+        try:
+            gate.preflight_live()
+            return
+        except gate.Refused:
+            time.sleep(5)
+    raise RuntimeError("another run still owns the live lease or inspection marker")
 
 
 def live_kills(copy, cases, out, name, head, env):
@@ -231,27 +287,57 @@ def live_kills(copy, cases, out, name, head, env):
         code, seconds = run([sys.executable, "-B", "scripts/run-tests.py", "--plan", str(plan)], cwd=copy,
                             env={**env, "KIN_TEST_API_IMAGE": tag}, timeout=3300, log=log)
         text = log.read_text(encoding="utf-8", errors="replace")
-        # unittest's failure section names each failed or erroring case (also through a subtest); a class fixture error
-        # ("ERROR: setUpClass") names no case and so kills nothing.
-        failed = {case for case in cases if re.search(r"^(?:FAIL|ERROR): " + LIVE[case] + r" \(", text, re.M)}
+        # Only a behavioural assertion (FAIL) kills a mutant. KeyError, setup errors and all other ERROR sections
+        # are harness failures even when their heading names the selected case.
+        verdict = live_verdict(text, cases, code)
         passed = {case for case in cases if re.search(r"^" + LIVE[case] + r" \([\w.]+\)(?:\n(?!test_)[^\n]*?)? \.\.\. ok$", text, re.M)}
         # A run the gate refused before any case ran (another unit held the account's live lease) proves nothing either way.
         started = "EXACT_TESTS " in text
-        result.update(unit=unit, exit=code, seconds=seconds, log=str(log), failed=sorted(failed), passed=sorted(passed),
-                      killed=(code != 0 and failed == set(cases)) if started else None,
+        result.update(unit=unit, exit=code, seconds=seconds, log=str(log), **verdict, passed=sorted(passed),
                       **({} if started else {"status": "not_run", "reason": "live run refused before any case ran (gate lease)"}))
+        if not started:
+            result["killed"] = None
         result["gate"] = release_gate(copy, unit, code, log, out, name) if code else {"marker": "not-needed"}
     finally:
         subprocess.run(["docker", "image", "rm", "-f", tag], capture_output=True, timeout=300)
     return result
 
 
+def self_test():
+    """F04 behavioural verdict regression, using this driver's owned file only."""
+    import unittest
+    class VerdictTest(unittest.TestCase):
+        def test_live_assertion_and_key_error_are_distinct(self):
+            name = "test_b05_expiry_checkpoint_and_holds (live.EmrBLedgerLive)"
+            self.assertTrue(live_verdict("FAIL: " + name + "\nAssertionError: expected expiry", ["L05"], 1)["killed"])
+            self.assertFalse(live_verdict("ERROR: " + name + "\nKeyError: deleted_count", ["L05"], 1)["killed"])
+            self.assertFalse(live_verdict("FAIL: " + name + "\nERROR: tearDownClass\n", ["L05"], 1)["killed"])
+
+        def test_contract_assertion_and_harness_exception_are_distinct(self):
+            prefix = "not ok 1 - C13 expiry proof\n  ---\n  code: "
+            self.assertTrue(contract_verdict(prefix + "'ERR_ASSERTION'\n  ...\n1..1\n", ["C13"], 1)["killed"])
+            self.assertFalse(contract_verdict(prefix + "'ReferenceError'\n  ...\n1..1\n", ["C13"], 1)["killed"])
+            self.assertFalse(contract_verdict(prefix + "'ERR_ASSERTION'\n  ...\n1..1\n", ["C13"], 0)["killed"])
+
+        def test_missing_case_and_wrong_case_are_not_kills(self):
+            self.assertFalse(contract_verdict("not ok 1 - test file\n", ["C13"], 1)["killed"])
+            self.assertFalse(live_verdict("FAIL: test_b04_chain_tail_and_crash_recovery (live.EmrBLedgerLive)\n", ["L05"], 1)["killed"])
+    suite = unittest.defaultTestLoader.loadTestsFromTestCase(VerdictTest)
+    return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--out", type=Path)
+    parser.add_argument("--self-test", action="store_true", help="verify behavioural verdicts without Docker or copied source")
     parser.add_argument("--only", help="comma-separated mutant IDs")
+    parser.add_argument("--worktree", action="store_true", help="snapshot tracked uncommitted inputs; preserve their hashes")
     parser.add_argument("--contract-only", action="store_true", help="run contract kill cases only (live ones are reported not_run)")
     args = parser.parse_args(argv)
+    if args.self_test:
+        return self_test()
+    if args.out is None:
+        parser.error("--out is required unless --self-test is selected")
     declared = {m["id"]: m for m in json.loads(DECLARATION.read_text(encoding="utf-8"))["mutants"]}
     if set(declared) != set(MUTANTS):
         raise SystemExit("declared mutants differ from this driver: %s" % sorted(set(declared) ^ set(MUTANTS)))
@@ -263,8 +349,20 @@ def main(argv=None):
     with tempfile.TemporaryDirectory(prefix="kin-emrb-mutants-") as folder:
         copy = Path(folder) / "checkout"
         copy.mkdir()
-        head, link = make_copy(copy)
+        head, link = make_copy(copy, args.worktree)
+        if args.worktree:
+            shutil.copyfile(copy / "mutant-inputs.json", out / "mutant-inputs.json")
         try:
+            baseline_log = out / "baseline-contract.log"
+            baseline_code, baseline_seconds = run(["node", "--test", "--test-reporter=tap", "tests/emr/b/contract_test.cjs"],
+                cwd=copy, env=env, timeout=900, log=baseline_log)
+            expected_cases = json.loads(DECLARATION.read_text(encoding="utf-8"))["cases"]["contract"]["B1"]
+            expected_ids = {case.split()[0] for case in expected_cases}
+            passed = re.findall(r"^ok \d+ - (C\d+) ", baseline_log.read_text(encoding="utf-8", errors="replace"), re.M)
+            baseline = dict(exit=baseline_code, seconds=baseline_seconds, passed=passed, expected=sorted(expected_ids))
+            (out / "baseline.json").write_text(json.dumps(baseline, indent=2), encoding="utf-8")
+            if baseline_code or len(passed) != len(expected_ids) or set(passed) != expected_ids:
+                raise RuntimeError("unmutated copy did not pass its complete contract selection; no mutant verdict is valid")
             for name in chosen:
                 expected, changes = MUTANTS[name]
                 kill = declared[name]["kill"]

@@ -3195,7 +3195,7 @@ function scanAuditWrites(sources = auditSources()) {
   const EMR_LEDGER_FILES = new Set(['api/src/emr-runtime/store.ts', 'api/src/emr-runtime/manifest.ts']);
   const EMR_LEDGER_FUNCTIONS = new Set(['append_access', 'chain_tail', 'entries_after', 'entry_for_event', 'storage_placement',
     'resolve_member_identity', 'record_projection', 'place_hold', 'release_hold', 'holds_for', 'record_duty_request', 'duty_requests',
-    'clause_versions', 'expire_prefix', 'retention_view']);
+    'clause_versions', 'expire_prefix', 'retention_view', 'record_order_fact', 'order_facts_for']);
   const namesLedger = tokens => tokens.some(token => (token.kind === 'word' || token.kind === 'ident') && token.name.toLowerCase() === 'emr_access');
   function ledgerShape(tokens, file) {
     if (!EMR_LEDGER_FILES.has(file)) return `emr_access SQL outside the EMR ledger adapter (${file})`;

@@ -1,6 +1,7 @@
 import { emrAdapters, isEmrReader } from './composition';
 import { randomUUID } from 'node:crypto';
-import { RECORD_CLASSIFICATION, RecordKind, PurposeEnd, ResolvedRecord, verifiedRecord, resolveStoredRecord } from './classification';
+import { RECORD_CLASSIFICATION, RecordKind, PurposeEnd, ResolvedRecord, verifiedRecord, resolveStoredRecord,
+  OrderFacts, parseOrderFacts, parseOrderProcedure } from './classification';
 import { STATUTORY_MINIMUM, HOLD_DUTY_CLAUSES, HOLD_CLAUSE_VERSIONS, ClauseVersion, clauseVersionAt } from './legal-basis';
 import { choice, freeze, object, string, utc, refuse } from './validation';
 
@@ -100,6 +101,7 @@ export function statutoryClasses(recordKinds: readonly RecordKind[]): readonly S
   const classes = new Set<StatutoryClass>();
   for (const kind of recordKinds) {
     const row = RECORD_CLASSIFICATION[choice(kind, kinds)];
+    if (recordKinds.length > 1 && ['order', 'received-order'].includes(kind)) continue;
     if (row.retention.mode !== 'statutory') refuse('IndependentStatutoryClockRefused');
     for (const minimum of row.retention.statutoryMinimum) {
       classes.add((Object.keys(STATUTORY_MINIMUM) as StatutoryClass[]).find(key => STATUTORY_MINIMUM[key].clauseId === minimum.clauseId)!);
@@ -135,6 +137,7 @@ export interface LegalDutyReader {
   listHolds(recordId: string): unknown;
   loadAccessRequest?(requestId: string): unknown;
   loadCorrectionRequest?(requestId: string): unknown;
+  loadStatutoryDuty?(requestId: string): unknown;
   /** I's verified history supplies dates before the first built-in version, or external order grounds. */
   loadClauseVersions?(clauseId: string): readonly ClauseVersion[];
 }
@@ -150,10 +153,73 @@ function opaqueUnit(value: unknown): string {
   return id;
 }
 function yearsFor(recordKinds: readonly RecordKind[]): number {
-  return Math.max(...statutoryClasses(recordKinds).map(c => STATUTORY_MINIMUM[c].years));
+  const classes = statutoryClasses(recordKinds);
+  return classes.length ? Math.max(...classes.map(c => STATUTORY_MINIMUM[c].years)) : retentionFor(recordKinds).retentionYears;
 }
 function partDeadline(record: Pick<RetentionRecord, 'kinds' | 'parts'>): string {
-  return record.parts.map(p => civilPeriodEnd(p.startedAt, yearsFor(record.kinds))).sort().slice(-1)[0];
+  return record.parts.map(p => {
+    const s = p.evidence;
+    if (s.model === 'Order' || s.model === 'emr_access.order_fact') {
+      const ends = orderRetentionDuties(s).map(d => civilPeriodEnd(d.startedAt, d.years));
+      if (!ends.length) refuse('IndependentStatutoryClockRefused');
+      return ends.sort().slice(-1)[0];
+    }
+    return civilPeriodEnd(p.startedAt, yearsFor(record.kinds));
+  }).sort().slice(-1)[0];
+}
+
+/** Each obligation keeps its own origin. A received copy can carry all three feed roles at once. */
+export function orderRetentionDuties(source: ResolvedRecord): readonly { kind: RecordKind; startedAt: string; years: number }[] {
+  const s = verifiedRecord(source), r = parseOrderFacts(s.row);
+  const duty = (kind: RecordKind, startedAt: string) => ({ kind, startedAt: utc(startedAt), years: RECORD_CLASSIFICATION[kind].retention.years });
+  if (r.objectKind === 'order-indication') return freeze([duty('order-indication', s.event.at)]);
+  if (r.objectKind === 'exam-clinical-info') return freeze([duty('exam-clinical-info', s.event.at)]);
+  const result = r.inherited.map(d => duty(d.kind, d.startedAt));
+  if (r.fulfilment) result.push(duty('order-exam-component', r.objectKind === 'received-order' ? r.firstReceivedAt! : r.fulfilment.at), duty('patient-match', r.fulfilment.at));
+  if (r.chartIncorporation) result.push(duty('chart-incorporation', r.chartIncorporation.at));
+  return freeze(result);
+}
+
+/** D-24 §2: time passing causes escalation; it never establishes a classification or removes a duty. */
+export function orderProcedureState(input: OrderFacts, at: string): 'clear' | 'pending' | 'escalate' | 'superior-decision-overdue' | 'duty-continues' {
+  const r = parseOrderFacts(input); utc(at);
+  if (!r.procedure) return 'clear';
+  const p = parseOrderProcedure(r.procedure), d = p.decision;
+  if (d && d.at <= at) {
+    if (d.route === 'duty-continues') return at >= d.reviewAt! ? 'escalate' : 'duty-continues';
+    return 'clear';
+  }
+  if (at >= p.finalDecisionDueAt) return 'superior-decision-overdue';
+  return at >= p.evidenceDueAt ? 'escalate' : 'pending';
+}
+
+/** Checked under the order's storage lock. An unanswered review, retry or outage cannot renew its clocks. */
+export function validateOrderTransition(previous: OrderFacts, next: OrderFacts): void {
+  const before = parseOrderFacts(previous), after = parseOrderFacts(next);
+  if (before.objectKind !== after.objectKind || before.origin !== after.origin || before.authorId !== after.authorId ||
+      before.authorRole !== after.authorRole || before.directionSourceRef && JSON.stringify(before.directionSourceRef) !== JSON.stringify(after.directionSourceRef) ||
+      before.source && JSON.stringify(before.source) !== JSON.stringify(after.source) || before.firstReceivedAt !== after.firstReceivedAt ||
+      before.firstReceiptEventId !== after.firstReceiptEventId) refuse('NoShorteningOfEstablishedDuty');
+  if (before.inherited.some(d => !after.inherited.some(n => JSON.stringify(d) === JSON.stringify(n))) ||
+      (before.fulfilment && JSON.stringify(before.fulfilment) !== JSON.stringify(after.fulfilment)) ||
+      (before.chartIncorporation && JSON.stringify(before.chartIncorporation) !== JSON.stringify(after.chartIncorporation)))
+    refuse('NoShorteningOfEstablishedDuty');
+  if (before.feed?.roles.some(role => role !== 'worklist-copy' && !after.feed?.roles.includes(role))) refuse('NoShorteningOfEstablishedDuty');
+  if (after.statusEvent.at < before.statusEvent.at) refuse('OrderEventSequenceRefused');
+  if (before.scheduledAt !== after.scheduledAt && (!after.scheduleChangeEvidenceId || after.scheduleChangeEvidenceId === before.scheduleChangeEvidenceId))
+    refuse('OrderExtensionEvidenceRequired');
+  if (before.procedure) {
+    const p = before.procedure, n = after.procedure;
+    if (!n || n.enteredAt !== p.enteredAt || n.extensionLimit !== p.extensionLimit || n.extensions < p.extensions)
+      refuse('OrderProcedureDeadlineRequired');
+    const changed = ['evidenceDueAt', 'escalationDecisionDueAt', 'finalDecisionDueAt'].some(k => p[k] !== n[k]);
+    if (changed && (n.extensions !== p.extensions + 1 || !n.extensionEvidenceId || n.extensionEvidenceId === p.extensionEvidenceId ||
+        !['open-order', 'unlinked-exam'].includes(p.state))) refuse('OrderProcedureDeadlineRequired');
+    if (!changed && n.extensions !== p.extensions) refuse('OrderExtensionEvidenceRequired');
+    if (p.decision && JSON.stringify(p.decision) !== JSON.stringify(n.decision) &&
+        (p.decision.route !== 'duty-continues' || !n.decision || n.decision.at <= p.decision.at ||
+         n.decision.evidenceId === p.decision.evidenceId)) refuse('OrderDecisionBindingRefused');
+  }
 }
 /**
  * D-21 starting events (legal register §5-46, pinned): the event each statutory period of a part counts from. A part's
@@ -162,7 +228,8 @@ function partDeadline(record: Pick<RetentionRecord, 'kinds' | 'parts'>): string 
  */
 export const PERIOD_START = freeze({
   signed: { acts: ['entry', 'additional-entry', 'correction'], from: 'the signed version (report, Addendum, every signed clinical entry): its signedAt' },
-  'received-order': { acts: ['receipt'], from: 'the verified receipt' },
+  'received-order': { acts: ['receipt'], from: 'the first verified local-version receipt of an adopted component; duplicate reception never starts a new part' },
+  inherited: { acts: ['receipt'], from: 'each entrusted source record and version: its verified original start, never the local receipt' },
   'critical-result-ack': { acts: ['handoff-ack'], from: 'the acknowledgment' },
   'access-audit': { acts: ['access'], from: 'the access event time' },
   'delivery-receipt': { acts: ['delivery'], from: 'the delivery event time' },
@@ -175,12 +242,16 @@ export type PeriodStartRow = keyof typeof PERIOD_START;
 /** Which PERIOD_START row a stored part's kinds select. */
 export function periodStartRow(source: ResolvedRecord): PeriodStartRow {
   const s = verifiedRecord(source);
+  if ((s.model === 'Order' || s.model === 'emr_access.order_fact') && s.row.objectKind === 'received-order')
+    return s.row.inherited.length ? 'inherited' : 'received-order';
   if (s.kinds.some(k => RECORD_CLASSIFICATION[k].signature.rule === 'required') || s.row.clinicalEntry === true) return 'signed';
   for (const kind of ['received-order', 'critical-result-ack', 'access-audit', 'delivery-receipt'] as const) if (s.kinds.includes(kind)) return kind;
   return s.kinds.some(k => ['image', 'external-sr-seg', 'study-metadata'].includes(k)) ? 'acquired' : 'other';
 }
 function lawfulPart(source: ResolvedRecord): RetentionPart {
   const s = verifiedRecord(source), e = s.event;
+  if (s.kinds.includes('order-indication') && s.row.objectKind === 'order-indication' && e.act === 'creation' && e.signature === null)
+    return { partId: e.versionId, startedAt: e.at, evidence: s }; // A missing signature is a defect, never a zero-year record.
   const row = periodStartRow(s), signature = row === 'signed';
   const allowed: readonly string[] = PERIOD_START[row].acts;
   if (!signature && ['receipt', 'acquisition', 'handoff-ack', 'access', 'delivery'].includes(e.act) && e.signature !== null) refuse('ProductSignatureRefused');
@@ -235,11 +306,14 @@ function readLegalDuty(reader: LegalDutyReader, holdId: string): Readonly<LegalH
   const v = object(b.validity, ['from', 'until', 'condition']); utc(v.from);
   const condition = b.type === 'pending-access-request' ? 'request-pending' : b.type === 'statutory-duty' ? 'duty-active' : 'order-in-force';
   if (v.condition !== condition || v.from > h.at || (v.until !== null && utc(v.until) <= h.at)) refuse('HoldValidityRefused');
-  if (['pending-access-request', 'statutory-duty'].includes(b.type)) {
+  if (requestBasedHold(h as LegalHold)) {
     const request = readAccessRequest(reader, h as LegalHold);
     if (v.until === null || v.until > request.responseDueAt || h.at < request.receivedAt) refuse('HoldValidityRefused');
   }
+  const claim = b.type === 'statutory-duty' && b.clauseId === 'nhi:96-4.1' ? claimDuty(reader, h as LegalHold) : null;
+  if (claim && v.until !== null && claim.endedAt !== v.until) refuse('HoldValidityRefused');
   if (h.release !== null) {
+    if (claim && (claim.endedAt === null || h.release.reason !== 'duty-ended' || h.release.evidenceId !== claim.endingEventId || h.release.at < claim.endedAt)) refuse('HoldReleaseBindingRefused');
     const r = object(h.release, ['holdId', 'actorId', 'at', 'evidenceId', 'authorityVerified', 'reason',
       ...(h.release.reason === 'effect-ended' ? ['endingFact'] : [])]);
     string(r.actorId); string(r.evidenceId);
@@ -252,12 +326,12 @@ function readLegalDuty(reader: LegalDutyReader, holdId: string): Readonly<LegalH
       if (utc(end.at) > r.at) refuse('HoldReleaseBindingRefused');
       if (end.kind === 'validity-expired') {
         if (v.until === null || end.at !== v.until) refuse('HoldReleaseBindingRefused');
-      } else if (end.kind === 'request-resolved' && ['pending-access-request', 'statutory-duty'].includes(b.type)) {
+      } else if (end.kind === 'request-resolved' && requestBasedHold(h as LegalHold)) {
         const resolution = readAccessRequest(reader, h as LegalHold).resolution;
         if (!resolution || end.at !== resolution.at || end.eventId !== resolution.eventId || r.evidenceId !== resolution.eventId)
           refuse('HoldReleaseBindingRefused');
       } else refuse('HoldReleaseBindingRefused');
-    } else if (['pending-access-request', 'statutory-duty'].includes(b.type)) {
+    } else if (requestBasedHold(h as LegalHold)) {
       const request = readAccessRequest(reader, h as LegalHold), end = request.resolution;
       const reasons = { fulfilled: b.type === 'statutory-duty' ? 'duty-ended' : 'request-fulfilled', withdrawn: 'request-withdrawn', 'lawfully-refused': 'request-refused' };
       if (!end || r.evidenceId !== end.eventId || r.at < end.at || r.reason !== reasons[end.outcome]) refuse('HoldReleaseBindingRefused');
@@ -265,6 +339,26 @@ function readLegalDuty(reader: LegalDutyReader, holdId: string): Readonly<LegalH
   }
   const hold = freeze(structuredClone(h)) as Readonly<LegalHold>;
   verifiedDuties.add(hold); dutySources.set(hold, reader); return hold;
+}
+function requestBasedHold(hold: LegalHold): boolean {
+  return hold.basis.type === 'pending-access-request' || (hold.basis.type === 'statutory-duty' && hold.basis.clauseId === 'privacy:36.2');
+}
+function claimDuty(reader: LegalDutyReader, hold: LegalHold): { endedAt: string | null; endingEventId: string | null } {
+  if (typeof reader.loadStatutoryDuty !== 'function') refuse('StatutoryDutyEvidenceRequired');
+  const d = object(reader.loadStatutoryDuty(hold.basis.requestId), ['requestId', 'recordIds', 'startedAt', 'endedAt', 'endingEventId', 'basisId', 'procedure']);
+  if (d.requestId !== hold.basis.requestId || !Array.isArray(d.recordIds) || hold.basis.scope.some(id => !d.recordIds.includes(id)) || utc(d.startedAt) > hold.at)
+    refuse('StatutoryDutyEvidenceRequired');
+  string(d.basisId);
+  if (d.endedAt === null) {
+    if (d.endingEventId !== null) refuse('StatutoryDutyEvidenceRequired');
+    const p = parseOrderProcedure(d.procedure);
+    if (p.state !== 'claim-duty-end-unconfirmed' || (p.decision && !['duty-continues', 'lawful-return'].includes(p.decision.route)))
+      refuse('StatutoryDutyEvidenceRequired');
+  } else {
+    if (utc(d.endedAt) < d.startedAt) refuse('StatutoryDutyEvidenceRequired');
+    string(d.endingEventId);
+  }
+  return { endedAt: d.endedAt, endingEventId: d.endingEventId };
 }
 function readAccessRequest(reader: LegalDutyReader, hold: LegalHold): AccessRequestFacts {
   const load = hold.basis.type === 'statutory-duty' ? reader.loadCorrectionRequest : reader.loadAccessRequest;
@@ -284,8 +378,12 @@ function readAccessRequest(reader: LegalDutyReader, hold: LegalHold): AccessRequ
   return r as AccessRequestFacts;
 }
 function holdEnded(hold: LegalHold, at: string): boolean {
+  if (hold.basis.clauseId === 'nhi:96-4.1') {
+    const d = claimDuty(dutySources.get(hold)!, hold);
+    return d.endedAt !== null && d.endedAt <= at;
+  }
   if (hold.basis.validity.until !== null && hold.basis.validity.until <= at) return true;
-  if (['pending-access-request', 'statutory-duty'].includes(hold.basis.type)) {
+  if (requestBasedHold(hold)) {
     const request = readAccessRequest(dutySources.get(hold)!, hold);
     if (request.resolution && request.resolution.at <= at) return true;
   }
@@ -394,6 +492,16 @@ export function extendRetention(input: RetentionRecord, extension: ContinuingTre
   if (record.extension !== null || extension === null) throw new Error('Extension already used or missing');
   return parseRetentionRecord({ ...record, extension });
 }
+/** Refresh only lifecycle facts of the same fixed clinical version, from B's current locked snapshot. No new clock. */
+export function refreshOrderLifecycle(input: RetentionRecord, source: ResolvedRecord): Readonly<RetentionRecord> {
+  const record = parseRetentionRecord(input), s = verifiedRecord(source);
+  const previous = record.parts.find(p => p.partId === s.event.versionId);
+  if (!previous || s.recordId !== record.recordId || !['Order', 'emr_access.order_fact'].includes(s.model) ||
+      JSON.stringify(previous.evidence.event) !== JSON.stringify(s.event) ||
+      JSON.stringify(previous.evidence.kinds) !== JSON.stringify(s.kinds)) refuse('OrderLifecycleBindingRefused');
+  validateOrderTransition(previous.evidence.row as OrderFacts, s.row as OrderFacts);
+  return parseRetentionRecord({ ...record, parts: record.parts.map(p => p === previous ? { ...p, evidence: s } : p) });
+}
 export function placeLegalHold(input: RetentionRecord, reader: LegalDutyReader, holdId: string, graph: RetentionGraph): Readonly<RetentionRecord> {
   const record = parseRetentionRecord(input);
   const hold = readLegalDuty(reader, holdId);
@@ -500,14 +608,16 @@ export function retentionDeadline(input: RetentionRecord, graph?: RetentionGraph
   return retainingUnits(input, graph).flatMap(r => [partDeadline(r), ...(r.extension ? [r.extension.until] : [])]).sort().slice(-1)[0];
 }
 export function retentionState(input: RetentionRecord, graph?: RetentionGraph, at?: string, validate = true): Readonly<{
-  state: 'retained' | 'legal-hold'; deadline: string; destroyNotBefore: string | null; releaseNotRecorded: readonly string[];
+  state: 'retained' | 'legal-hold' | 'order-review'; deadline: string; destroyNotBefore: string | null; releaseNotRecorded: readonly string[];
 }> {
   const units = retainingUnits(input, graph, validate), deadline = units.flatMap(r => [partDeadline(r), ...(r.extension ? [r.extension.until] : [])]).sort().slice(-1)[0];
   const holds = units.flatMap(r => r.holds), held = holds.some(h => holdActive(h, at));
   const releaseNotRecorded = at ? holds.filter(h => !h.release && holdEnded(h, at)).map(h => h.holdId) : [];
   const releases = holds.flatMap(h => h.release ? [h.release.at] : []);
-  return freeze({ state: held ? 'legal-hold' : 'retained', deadline, releaseNotRecorded,
-    destroyNotBefore: held || releaseNotRecorded.length ? null : [deadline, ...releases].sort().slice(-1)[0] });
+  const review = units.some(r => r.parts.some(p => ['Order', 'emr_access.order_fact'].includes(p.evidence.model) &&
+    orderProcedureState(p.evidence.row as OrderFacts, at ?? p.startedAt) !== 'clear'));
+  return freeze({ state: held ? 'legal-hold' : review ? 'order-review' : 'retained', deadline, releaseNotRecorded,
+    destroyNotBefore: held || review || releaseNotRecorded.length ? null : [deadline, ...releases].sort().slice(-1)[0] });
 }
 export interface DisposalRequest { record: RetentionRecord; versionIds: readonly string[]; requestedAt: string; graph: RetentionGraph }
 /** disposalUnitId is random, never a source ID/hash; its source mapping must be erased with the unit. */
@@ -750,7 +860,7 @@ function buildPurposeRecord(source: ResolvedRecord, partIds: readonly string[], 
     const b = object(s.row.draftBinding, ['reportId', 'intentId', 'action']);
     string(b.reportId); string(b.intentId); choice(b.action, ['approve', 'addendum', 'amend']);
   }
-  return freeze({ recordId: s.recordId, disposalUnitId: `disposal:${randomUUID()}`, kind, ownerId: string(s.row.ownerId),
+  return freeze({ recordId: s.recordId, disposalUnitId: `disposal:${randomUUID()}`, kind, ownerId: string(['order', 'received-order'].includes(kind) ? s.row.authorId : s.row.ownerId),
     createdAt: s.event.at, partIds: partIds.map(id => string(id)), holds, source: s, destroyedAt: null });
 }
 function parsePurposeRecord(record: PurposeRecord): Readonly<PurposeRecord> {
@@ -798,6 +908,14 @@ export async function destroyAtPurposeEnd(store: PurposeDisposalStore, record: P
   if (!verifiedEnds.has(e) || !RECORD_CLASSIFICATION[parsed.kind].retention.purposeEnds.includes(e.trigger) ||
       e.recordId !== parsed.recordId || e.at <= parsed.createdAt) refuse('PurposeBindingRefused');
   if (['explicit-discard', 'owner-deleted'].includes(e.trigger) && e.actorId !== parsed.ownerId) refuse('PurposeOwnerRefused');
+  if (['order', 'received-order'].includes(parsed.kind)) {
+    const facts = parseOrderFacts(parsed.source.row), decision = facts.procedure?.decision;
+    if (orderProcedureState(facts, requestedAt) !== 'clear') refuse('OrderReviewRequired');
+    if (decision && (decision.at !== e.at || decision.actorId !== e.actorId || !decision.scope.includes(parsed.recordId) ||
+        !['lawful-return', 'unnecessary-operations'].includes(decision.route) || e.trigger !== decision.route)) refuse('OrderDecisionBindingRefused');
+    if (!decision && (e.trigger !== 'order-purpose-ended' || !['closed', 'cancelled', 'superseded'].includes(facts.status) ||
+        facts.statusEvent.at !== e.at || facts.statusEvent.actorId !== e.actorId)) refuse('OrderDecisionBindingRefused');
+  }
   if (e.trigger === 'result-version-signed') {
     const b = parsed.source.row.draftBinding, r = e.result;
     if (!b || !r || r.draftId !== parsed.recordId || r.intentId !== b.intentId || r.recordId !== b.reportId ||

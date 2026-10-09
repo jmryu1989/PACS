@@ -1,7 +1,7 @@
 import { resolveAccessRecord } from './composition';
 import { createHash, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
-import { RECORD_CLASSIFICATION, RecordKind, resolveStoredRecord, ResolvedRecord, verifiedRecord } from './classification';
+import { RECORD_CLASSIFICATION, RecordKind, resolveStoredRecord, ResolvedRecord, verifiedRecord, parseOrderFacts } from './classification';
 import { newAccessRetentionRecord } from './lawful-defaults';
 import { routeContract, EXTERNAL_SURFACES, INTERNAL_SURFACES, ROUTE_CONTRACTS } from './routes';
 import { choice, freeze, integer, object, sha256, string, utc, refuse } from './validation';
@@ -516,6 +516,21 @@ export const ACCESS_INVARIANTS = freeze({
  *    destruction set (unit H). It has no prefix expiry.
  */
 export const ACCESS_STREAMS = freeze(['viewing', 'history'] as const);
+/** D-24: the receiver stores these evidence classes separately; a receipt clock never owns the source bytes. */
+export function orderReceptionEvidence(source: ResolvedRecord): Readonly<{
+  access: { recordId: string; versionId: string; occurredAt: string; retention: 'viewing-floor' };
+  original: { recordId: string; versionId: string; sourceSystem: string; sourceAt: string; signatureEvidenceId: string; retention: 'record-obligations' };
+  receipt: { eventId: string; receivedAt: string; years: number; basis: 'product-policy' };
+}> {
+  const s = verifiedRecord(source), facts = parseOrderFacts(s.row);
+  if (facts.objectKind !== 'received-order' || !facts.source || facts.duplicateOf !== null || s.event.act !== 'receipt' ||
+      facts.firstReceiptEventId !== s.event.eventId || facts.firstReceivedAt !== s.event.at) refuse('OrderReceiptRequired');
+  return freeze({ access: { recordId: s.recordId, versionId: s.event.versionId, occurredAt: s.event.at, retention: 'viewing-floor' },
+    original: { recordId: facts.source.recordId, versionId: facts.source.versionId, sourceSystem: facts.source.systemId,
+      sourceAt: facts.source.at, signatureEvidenceId: facts.source.signatureEvidenceId, retention: 'record-obligations' },
+    receipt: { eventId: facts.firstReceiptEventId, receivedAt: facts.firstReceivedAt, years: RECORD_CLASSIFICATION['delivery-receipt'].retention.years,
+      basis: 'product-policy' } });
+}
 export type AccessStream = typeof ACCESS_STREAMS[number];
 export type StatutoryAct = '기재' | '추가기재' | '수정' | '열람' | 'none';
 const CHANGE_ACTS: readonly StatutoryAct[] = freeze(['기재', '추가기재', '수정']);

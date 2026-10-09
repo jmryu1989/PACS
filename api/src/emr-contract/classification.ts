@@ -1,8 +1,8 @@
 import { isEmrReader } from './composition';
 import { STATUTORY_MINIMUM as FLOOR, StatutoryMinimum } from './legal-basis';
-import { choice, freeze, object, refuse, string, utc, sha256 } from './validation';
+import { choice, freeze, object, refuse, string, utc, sha256, integer } from './validation';
 
-export type PurposeEnd = 'result-version-signed' | 'intent-superseded' | 'explicit-discard' | 'owner-deleted' | 'assignment-ended' | 'setting-replaced' | 'session-ended' | 'institution-closed' | 'transfer-obligations-ended' | 'operation-completed' | 'original-received';
+export type PurposeEnd = 'result-version-signed' | 'intent-superseded' | 'explicit-discard' | 'owner-deleted' | 'assignment-ended' | 'setting-replaced' | 'session-ended' | 'institution-closed' | 'transfer-obligations-ended' | 'operation-completed' | 'original-received' | 'order-purpose-ended' | 'lawful-return' | 'unnecessary-operations';
 export type SignatureRule = 'required' | 'clinical-entry-only' | 'source-evidence' | 'not-required';
 export interface RecordClassification {
   author: { observedSource: string; responsibility: 'immutable-actual-author-or-source' };
@@ -74,7 +74,7 @@ export const RECORD_CLASSIFICATION = freeze({
   'manual-sr': record('ManualSr.authorSub; immutable DICOM bytes', clinical, images),
   'external-sr-seg': record('External DICOM producer; unchanged bytes', source('원작성자·원서명 증거를 보존하고 재서명/재해석하지 않음; 원자료를 새 진료기록으로 기재할 때 별도 서명'), images),
   'comparison-layout': record('ViewerJob.authorSub; image placement only', unsigned('배치만 있는 운영 기록; 임상 문구는 comparison-description으로 함께 분류'), [], 'operational-record', 'purpose', ['owner-deleted']),
-  'comparison-description': record('ViewerJob/ViewerJobRevision clinical title/description/actor', clinical, chart),
+  'comparison-description': record('ViewerJob/ViewerJobRevision clinical title/description/actor', clinical, images),
   'study-correction': record('StudyState.ov/orig; immutable modifying actor', conditional('원 StudyState 단위의 정정판; 원본 보존, 임상 기재 정정 시 새 서명판 필요'), images),
   'patient-match': record('StudyState/Order; immutable matching actor', conditional('환자 명부 연결 정보; 진료기록 인적사항을 정정하면 해당 원기록 분류와 새 서명판 필요'), [FLOOR.patientRegister]),
   'study-metadata': record('DICOM producer; StudyState provenance', source('취득 메타데이터에 별도 서명 의무는 명시되지 않음; 임상 기재 문서의 원서명 보존'), images),
@@ -88,8 +88,11 @@ export const RECORD_CLASSIFICATION = freeze({
   disclosure: record('Providing actor; basis/recipient/fixed scope', source('원기록 서명 유지; 제공 동작에 새 서명 의무는 명시되지 않음'), [], 'emr-candidate', 'source-record'),
   'access-audit': record('System recorder; immutable acting identity', unsigned('접속사건은 작성자·시각·해시 및 내구성으로 증명'), [FLOOR.access], 'evidence-record'),
   'signature-evidence': record('Registered signer/key registrar; exact signed bytes', unsigned('기존 서명 검증 증거에 재귀적 서명 의무는 명시되지 않음'), [], 'evidence-record', 'source-record'),
-  order: record('RIS origin/requesting clinician', clinical, chart),
-  'received-order': record('Verified RIS receipt; unchanged source and signature provenance', source('수신 처방은 검증된 수신 사건과 원서명 증거에 결속; 제품 작성 처방은 별도 서명'), chart),
+  order: record('Registration actor; pinned original clinical direction', unsigned('이미 존재하는 원 지시를 접수·예약·대사하는 등록 표현; 원 지시 참조 필수'), [], 'operational-record', 'purpose', ['order-purpose-ended', 'lawful-return', 'unnecessary-operations']),
+  'order-indication': record('Treating physician; original decision, including a code-only direction', clinical, chart),
+  'exam-clinical-info': record('Exam clinical information author; own signed entry', signed('검사내용으로 처음 작성한 임상정보; 작성자 본인 서명'), [FLOOR.examination]),
+  'order-exam-component': record('Verified fulfilment event; pinned adopted part', source('이행 확인으로 검사에 채택한 부분; 원기재 단위·원서명은 별도로 존속'), [FLOOR.examination]),
+  'received-order': record('Verified feed and per-record obligations; unchanged original evidence', source('원판·원서명·출처·원 기산 증거는 승계 의무를 따르며 단순 수신 영수증과 분리'), [], 'evidence-record', 'purpose', ['order-purpose-ended', 'lawful-return', 'unnecessary-operations']),
   dictation: record('Radiologist; preserved voice/transcript versions', conditional('개인 음성 초안 자체의 별도 서명 의무는 명시되지 않음; 진료기록으로 기재할 때 서명'), [], 'emr-candidate', 'purpose', ['result-version-signed', 'intent-superseded', 'explicit-discard']),
   assignment: record('ReaderAssignment.changedBy; allocation only', unsigned('업무 배정'), [], 'operational-record', 'purpose', ['assignment-ended']),
   preferences: record('Account/site setting author', unsigned('필터·배치 설정만; 환자 임상 문구가 있으면 임상 종류로 추가 분류'), [], 'operational-record', 'purpose', ['setting-replaced', 'owner-deleted']),
@@ -99,7 +102,9 @@ export const RECORD_CLASSIFICATION = freeze({
   'authentication-session': record('Authentication service; no credential copying', unsigned('인증 상태; 종료한 비밀은 의무기록 보존 대상에서 제외'), [], 'operational-record', 'purpose', ['session-ended']),
   institution: record('Institution administrator', unsigned('기관 설정'), [], 'operational-record', 'purpose', ['institution-closed']),
   'transfer-governance': record('TransferBasis/ProcessingAgreement/Transfer author', unsigned('법 제23조①의 진료기록 서명과 별개; 전송 근거·동의 계약은 유지'), [], 'evidence-record', 'purpose', ['transfer-obligations-ended']),
-  'delivery-receipt': record('Gateway/service/request actor; fixed source reference', unsigned('전달 결과 증거; 원기록 서명 보존'), [FLOOR.access], 'evidence-record'),
+  // Two years is a product policy for the receipt only, not a statutory floor for its original payload.
+  'delivery-receipt': { ...record('Gateway/service/request actor; fixed source reference', unsigned('단순 전달 영수증의 제품 정책 2년; 원판·원서명은 별도 의무'), [FLOOR.access], 'evidence-record'),
+    retention: { years: 2, statutoryMinimum: [], basis: '제품 정책: 전달 결과 확인; 내부 관리계획에 목적·필요성·조기 종료 명시', mode: 'statutory' as const, purposeEnds: [] } },
   'system-operation': record('System process; health/statistics/accounting', unsigned('운영 상태'), [], 'operational-record', 'purpose', ['operation-completed']),
   // EMR-B1 (D596): an approval actually signed on a registered device while disconnected is the signed record itself, kept
   // from its actual signedAt; its recovery/review working copy is a separate purpose record that cannot outlive its purpose.
@@ -124,6 +129,7 @@ export const SQL_STORAGE_CLASSIFICATION: Readonly<Record<string, readonly Record
   'emr_access.member_identity': ['identity-access'],
   'emr_access.legal_hold_event': ['legal-duty'], 'emr_access.duty_request_event': ['legal-duty'],
   'emr_access.clause_version': ['legal-reference'],
+  'emr_access.order_fact': ['order', 'order-indication', 'exam-clinical-info', 'received-order', 'order-exam-component'],
 });
 /** D596 storage boundary: offline originals and their working copies live in C's clinical terminal queue, not in B. */
 export const TERMINAL_RECORD_BOUNDARY = freeze({
@@ -154,6 +160,155 @@ function terminalFacts(kind: RecordKind, row: Record<string, any>, event: Record
   }
 }
 
+/** D-24: facts supplied by the bound storage adapter, never classification flags accepted from an HTTP body. */
+export const ORDER_OBJECTS = freeze(['registration', 'order-indication', 'exam-clinical-info', 'received-order', 'exam-component'] as const);
+export const ORDER_REVIEW_STATES = freeze(['classification-unconfirmed', 'entrusted-evidence-unconfirmed', 'linked-fulfilment-unconfirmed',
+  'open-order', 'unlinked-exam', 'copy-window-review', 'interface-outage', 'claim-duty-end-unconfirmed'] as const);
+export interface OrderProcedure {
+  state: typeof ORDER_REVIEW_STATES[number]; responsibleRole: 'privacy-officer' | 'delegated-officer'; assigneeId: string;
+  enteredAt: string; evidenceDueAt: string; escalationDecisionDueAt: string; finalDecisionDueAt: string;
+  superiorRole: 'institution-head' | 'trustee-representative'; superiorId: string; escalatedAt: string | null;
+  extensions: number; extensionLimit: number; extensionEvidenceId: string | null;
+  decision: null | { route: 'classification-confirmed' | 'duty-continues' | 'lawful-return' | 'unnecessary-operations';
+    actorId: string; at: string; evidenceId: string; basisId: string | null; scope: readonly string[];
+    reviewAt: string | null; originalPreservedEvidenceId: string | null };
+}
+export interface DirectionSourceRef { kind: 'received-order' | 'native-chart' | 'order-indication'; systemId: string; recordId: string; versionId: string }
+export interface OrderFacts {
+  objectKind: typeof ORDER_OBJECTS[number]; origin: 'product-authored' | 'received-ris' | 'migrated';
+  authorId: string; authorRole: 'physician' | 'radiographer' | 'registrar' | 'interface'; requestingClinicianId: string;
+  directionSourceRef: DirectionSourceRef | null; examCodes: readonly string[];
+  source: null | { systemId: string; recordId: string; versionId: string; at: string; signatureEvidenceId: string };
+  feed: null | { feedId: string; installationEvidenceId: string; roles: readonly ('worklist-copy' | 'exam-component' | 'entrusted-original')[] };
+  inherited: readonly { kind: RecordKind; recordId: string; versionId: string; startedAt: string; evidenceId: string }[];
+  firstReceivedAt: string | null; firstReceiptEventId: string | null; duplicateOf: string | null;
+  scheduledAt: string | null; scheduleChangeEvidenceId: string | null;
+  status: 'open' | 'linked' | 'fulfilment-confirmed' | 'closed' | 'cancelled' | 'superseded';
+  statusEvent: { eventId: string; actorId: string; at: string; reason: string };
+  fulfilment: null | { eventId: string; actorId: string; at: string; studyId: string; partial: boolean; reason: string };
+  chartIncorporation: null | { eventId: string; at: string; recordId: string; versionId: string };
+  procedure: OrderProcedure | null;
+  synthetic: null | { runId: string; seedId: string; originalSha256: string; observedSha256: string; checkedAt: string;
+    verificationRunId: string; linkedStudyIds: readonly string[] };
+}
+export function parseOrderProcedure(input: unknown): Readonly<OrderProcedure> {
+  const p = object(input, ['state', 'responsibleRole', 'assigneeId', 'enteredAt', 'evidenceDueAt', 'escalationDecisionDueAt',
+    'finalDecisionDueAt', 'superiorRole', 'superiorId', 'escalatedAt', 'extensions', 'extensionLimit', 'extensionEvidenceId', 'decision']);
+  choice(p.state, ORDER_REVIEW_STATES); choice(p.responsibleRole, ['privacy-officer', 'delegated-officer']); string(p.assigneeId);
+  choice(p.superiorRole, ['institution-head', 'trustee-representative']); string(p.superiorId);
+  const dates = ['enteredAt', 'evidenceDueAt', 'escalationDecisionDueAt', 'finalDecisionDueAt'].map(k => utc(p[k]));
+  if (dates.some((d, i) => i > 0 && d <= dates[i - 1])) refuse('OrderProcedureDeadlineRequired');
+  if (p.escalatedAt !== null && utc(p.escalatedAt) < p.enteredAt) refuse('OrderProcedureDeadlineRequired');
+  if (integer(p.extensions) > integer(p.extensionLimit)) refuse('OrderReconciliationLimit');
+  if (p.extensions > 0) string(p.extensionEvidenceId); else if (p.extensionEvidenceId !== null) refuse('OrderExtensionEvidenceRequired');
+  if (p.decision !== null) {
+    const d = object(p.decision, ['route', 'actorId', 'at', 'evidenceId', 'basisId', 'scope', 'reviewAt', 'originalPreservedEvidenceId']);
+    choice(d.route, ['classification-confirmed', 'duty-continues', 'lawful-return', 'unnecessary-operations']);
+    string(d.actorId); string(d.evidenceId);
+    if (utc(d.at) < p.enteredAt || ![p.assigneeId, p.superiorId].includes(d.actorId) ||
+        (d.at >= p.escalationDecisionDueAt && d.actorId !== p.superiorId)) refuse('OrderDecisionAuthorityRequired');
+    if (!Array.isArray(d.scope) || !d.scope.length) refuse('OrderDecisionScopeRequired');
+    d.scope.forEach(x => string(x));
+    if (d.route === 'duty-continues') {
+      string(d.basisId);
+      if (utc(d.reviewAt) <= d.at) refuse('OrderProcedureDeadlineRequired');
+    } else if (d.basisId !== null || d.reviewAt !== null) refuse('OrderDecisionBindingRefused');
+    if (d.route === 'lawful-return') string(d.originalPreservedEvidenceId);
+    else if (d.originalPreservedEvidenceId !== null) refuse('OrderDecisionBindingRefused');
+  }
+  return freeze(structuredClone(p)) as Readonly<OrderProcedure>;
+}
+export function parseOrderFacts(input: unknown): Readonly<OrderFacts> {
+  const r = object(input, ['objectKind', 'origin', 'authorId', 'authorRole', 'requestingClinicianId', 'directionSourceRef', 'examCodes',
+    'source', 'feed', 'inherited', 'firstReceivedAt', 'firstReceiptEventId', 'duplicateOf', 'scheduledAt', 'scheduleChangeEvidenceId',
+    'status', 'statusEvent', 'fulfilment', 'chartIncorporation', 'procedure', 'synthetic']);
+  choice(r.objectKind, ORDER_OBJECTS); choice(r.origin, ['product-authored', 'received-ris', 'migrated']);
+  string(r.authorId); choice(r.authorRole, ['physician', 'radiographer', 'registrar', 'interface']); string(r.requestingClinicianId);
+  if (!Array.isArray(r.examCodes) || !r.examCodes.length || new Set(r.examCodes).size !== r.examCodes.length) refuse('OrderExamCodesRequired');
+  r.examCodes.forEach(x => string(x));
+  if (r.objectKind === 'registration' && r.directionSourceRef === null && r.origin !== 'migrated') refuse('DirectionSourceRequired');
+  if (r.directionSourceRef !== null) {
+    const d = object(r.directionSourceRef, ['kind', 'systemId', 'recordId', 'versionId']);
+    choice(d.kind, ['received-order', 'native-chart', 'order-indication']); ['systemId', 'recordId', 'versionId'].forEach(k => string(d[k]));
+  }
+  if (r.objectKind === 'order-indication' && r.authorRole !== 'physician') refuse('OrderClinicalAuthorRequired');
+  if (r.source !== null) {
+    const s = object(r.source, ['systemId', 'recordId', 'versionId', 'at', 'signatureEvidenceId']);
+    ['systemId', 'recordId', 'versionId', 'signatureEvidenceId'].forEach(k => string(s[k])); utc(s.at);
+  }
+  if (r.feed !== null) {
+    const f = object(r.feed, ['feedId', 'installationEvidenceId', 'roles']); string(f.feedId); string(f.installationEvidenceId);
+    if (!Array.isArray(f.roles) || !f.roles.length || new Set(f.roles).size !== f.roles.length) refuse('OrderFeedEvidenceRequired');
+    f.roles.forEach(x => choice(x, ['worklist-copy', 'exam-component', 'entrusted-original']));
+  }
+  if (!Array.isArray(r.inherited)) refuse('OrderInheritedEvidenceRequired');
+  for (const d of r.inherited) {
+    object(d, ['kind', 'recordId', 'versionId', 'startedAt', 'evidenceId']);
+    const kind = choice(d.kind, Object.keys(RECORD_CLASSIFICATION) as RecordKind[]);
+    if (!RECORD_CLASSIFICATION[kind].retention.statutoryMinimum.length || ['access-audit', 'patient-match'].includes(kind)) refuse('OrderInheritedEvidenceRequired');
+    string(d.recordId); string(d.versionId); utc(d.startedAt); string(d.evidenceId);
+  }
+  if (r.objectKind === 'received-order') {
+    utc(r.firstReceivedAt); string(r.firstReceiptEventId);
+    if (r.source && r.source.at > r.firstReceivedAt) refuse('OrderReceiptRequired');
+    if (r.feed && r.feed.roles.includes('entrusted-original') !== (r.inherited.length > 0) &&
+        r.procedure?.state !== 'entrusted-evidence-unconfirmed') refuse('OrderInheritedEvidenceRequired');
+  } else if (r.feed !== null || r.inherited.length || r.firstReceivedAt !== null || r.firstReceiptEventId !== null || r.duplicateOf !== null) refuse('OrderReceiptRequired');
+  if (r.duplicateOf !== null && string(r.duplicateOf) !== r.firstReceiptEventId) refuse('OrderReceiptRequired');
+  if (r.scheduledAt !== null) utc(r.scheduledAt);
+  if (r.scheduleChangeEvidenceId !== null) string(r.scheduleChangeEvidenceId);
+  choice(r.status, ['open', 'linked', 'fulfilment-confirmed', 'closed', 'cancelled', 'superseded']);
+  const e = object(r.statusEvent, ['eventId', 'actorId', 'at', 'reason']); string(e.eventId); string(e.actorId); utc(e.at); string(e.reason, true);
+  if (r.fulfilment !== null) {
+    const f = object(r.fulfilment, ['eventId', 'actorId', 'at', 'studyId', 'partial', 'reason']);
+    ['eventId', 'actorId', 'studyId'].forEach(k => string(f[k])); utc(f.at); string(f.reason);
+    if (typeof f.partial !== 'boolean') refuse('OrderFulfilmentRequired');
+  }
+  if ((r.status === 'fulfilment-confirmed' || r.objectKind === 'exam-component' || r.feed?.roles.includes('exam-component')) && !r.fulfilment)
+    refuse('OrderFulfilmentRequired');
+  if (r.chartIncorporation !== null) {
+    const c = object(r.chartIncorporation, ['eventId', 'at', 'recordId', 'versionId']);
+    ['eventId', 'recordId', 'versionId'].forEach(k => string(c[k])); utc(c.at);
+  }
+  if (r.procedure !== null) parseOrderProcedure(r.procedure);
+  const unresolved = r.origin === 'migrated' || r.status === 'linked' ||
+    (r.objectKind === 'registration' && r.status === 'open') || (r.objectKind === 'received-order' && !r.scheduledAt && r.status === 'open');
+  if (unresolved && !r.procedure) refuse('OrderProcedureRequired');
+  if ((r.objectKind === 'registration' && !r.directionSourceRef || r.objectKind === 'received-order' && (!r.source || !r.feed)) &&
+      (!r.procedure || !['classification-unconfirmed', 'entrusted-evidence-unconfirmed'].includes(r.procedure.state) ||
+       r.procedure.decision?.route === 'classification-confirmed')) refuse('OrderClassificationUnconfirmed');
+  if (r.synthetic !== null) {
+    const s = object(r.synthetic, ['runId', 'seedId', 'originalSha256', 'observedSha256', 'checkedAt', 'verificationRunId', 'linkedStudyIds']);
+    string(s.runId); string(s.seedId); string(s.verificationRunId); sha256(s.originalSha256); sha256(s.observedSha256); utc(s.checkedAt);
+    if (!Array.isArray(s.linkedStudyIds)) refuse('SyntheticVerificationRequired');
+    s.linkedStudyIds.forEach(x => string(x));
+    if (s.originalSha256 !== s.observedSha256 || s.linkedStudyIds.length || r.fulfilment !== null) refuse('SyntheticVerificationRequired');
+  }
+  return freeze(structuredClone(r)) as Readonly<OrderFacts>;
+}
+/** A code-only direction is still native-chart; adoption creates another record and never reclassifies the original. */
+function orderKinds(row: Record<string, any>, event: RecordEvent): readonly RecordKind[] {
+  const r = parseOrderFacts(row);
+  if (r.procedure && r.procedure.decision?.route !== 'classification-confirmed' && ['classification-unconfirmed', 'entrusted-evidence-unconfirmed'].includes(r.procedure.state))
+    refuse('OrderClassificationUnconfirmed');
+  if (r.objectKind === 'order-indication') return ['order-indication'];
+  if (r.objectKind === 'exam-clinical-info') return ['exam-clinical-info'];
+  if (r.objectKind === 'exam-component') {
+    if (!event.components.length) refuse('OrderOriginalComponentRequired');
+    return ['order-exam-component', 'patient-match'];
+  }
+  if (r.objectKind === 'received-order' && (event.act !== 'receipt' || r.firstReceiptEventId !== event.eventId || r.firstReceivedAt !== event.at))
+    refuse('OrderReceiptRequired');
+  const kinds: RecordKind[] = [r.objectKind === 'registration' ? 'order' : 'received-order'];
+  if (r.fulfilment) kinds.push('order-exam-component', 'patient-match');
+  if (r.chartIncorporation) {
+    if (!event.components.length) refuse('ChartIncorporationRequired');
+    kinds.push('chart-incorporation');
+  }
+  for (const duty of r.inherited) if (!kinds.includes(duty.kind)) kinds.push(duty.kind);
+  return kinds;
+}
+
 /** Multi-kind rows deliberately retain mixed clinical/operational content. */
 export const MODEL_CLASSIFICATION: Readonly<Record<string, readonly RecordKind[]>> = freeze({
   AuthSession: ['authentication-session'], Institution: ['institution'],
@@ -163,7 +318,7 @@ export const MODEL_CLASSIFICATION: Readonly<Record<string, readonly RecordKind[]
   StudyState: ['study-metadata', 'study-correction', 'patient-match', 'assignment'],
   GatewayReceipt: ['delivery-receipt'], GatewayRetryRequest: ['delivery-receipt'],
   TechNoteRevision: ['tech-note', 'operational-note'], TransferBasis: ['transfer-governance'], ProcessingAgreement: ['transfer-governance'], Transfer: ['transfer-governance', 'patient-match'],
-  Report: ['report-head'], ReportDraft: ['private-draft', 'report-evidence'], ReportVersion: ['report-version', 'report-evidence'], Order: ['order', 'received-order', 'patient-match'],
+  Report: ['report-head'], ReportDraft: ['private-draft', 'report-evidence'], ReportVersion: ['report-version', 'report-evidence'], Order: ['order', 'received-order', 'order-indication', 'exam-clinical-info', 'order-exam-component', 'patient-match', 'chart-incorporation'],
   UserFilterCollection: ['preferences'], SharedFilterLibrary: ['preferences'], UserFilter: ['preferences'], ReadingTemplate: ['reading-template'],
   AuditLog: ['access-audit'], ViewerItem: ['measurement', 'key-image'], ViewerRevision: ['measurement', 'key-image'], ManualSr: ['manual-sr'],
   ViewerStorageBudget: ['system-operation'], ViewerRequest: ['delivery-receipt'], Finding: ['finding'], FindingRevision: ['finding'],
@@ -203,6 +358,7 @@ export function verifiedRecord(input: ResolvedRecord): ResolvedRecord {
   return input;
 }
 function rowKinds(model: string, row: Record<string, any>, event: RecordEvent): readonly RecordKind[] {
+  if (model === 'emr_access.order_fact') return orderKinds(row, event);
   if (model === 'DicomInstance') return [row.sopClass === 'image' ? 'image' : choice(row.sopClass, ['external-sr-seg', 'pdf'])];
   if (model === 'Dictation') return ['dictation'];
   if (Object.prototype.hasOwnProperty.call(TERMINAL_RECORD_BOUNDARY.models, model)) {
@@ -230,10 +386,7 @@ function rowKinds(model: string, row: Record<string, any>, event: RecordEvent): 
       }
       break;
     case 'Order':
-      if (choice(row.origin, ['product-authored', 'received-ris']) === 'product-authored') return ['order', 'patient-match'];
-      if (row.receiptEventId !== event.eventId || event.act !== 'receipt') refuse('OrderReceiptRequired');
-      string(row.sourceSystem); string(row.sourceSignatureEvidence, true);
-      return ['received-order', 'patient-match'];
+      return orderKinds(row, event);
     case 'Transfer': return row.localPatientId === null ? ['transfer-governance'] : (string(row.localPatientId), ['patient-match']);
     case 'ViewerItem': case 'ViewerRevision': return [choice(row.snapshot?.type, ['measurement', 'key-image'])];
     case 'ViewerJob': case 'ViewerJobRevision':
@@ -260,12 +413,8 @@ function rowKinds(model: string, row: Record<string, any>, event: RecordEvent): 
   }
   return refuse('RowFactsRequired');
 }
-export function resolveStoredRecord(reader: StoredRecordReader, recordId: string, eventId: string): Readonly<ResolvedRecord> {
-  string(recordId); string(eventId);
-  if (!isEmrReader('stored', reader)) refuse('StoredReaderRequired');
-  const v = object(reader.load(recordId, eventId), ['recordId', 'model', 'row', 'event']);
-  const e = object(v.event, ['eventId', 'recordId', 'versionId', 'sha256', 'contentSha256', 'at', 'act', 'signature', 'predecessor', 'components', 'processing']);
-  if (v.recordId !== recordId || e.recordId !== recordId || e.eventId !== eventId) refuse('RecordEventBindingRefused');
+export function parseRecordEvent(input: unknown): Readonly<RecordEvent> {
+  const e = object(input, ['eventId', 'recordId', 'versionId', 'sha256', 'contentSha256', 'at', 'act', 'signature', 'predecessor', 'components', 'processing']);
   string(e.versionId); sha256(e.sha256); sha256(e.contentSha256); utc(e.at);
   choice(e.act, ['entry', 'additional-entry', 'correction', 'acquisition', 'receipt', 'creation', 'handoff-ack', 'access', 'delivery', 'read', 'resign', 'migration', 'bookkeeping']);
   if (e.signature !== null) {
@@ -288,6 +437,15 @@ export function resolveStoredRecord(reader: StoredRecordReader, recordId: string
       p.componentRecordIds.forEach(x => string(x));
     }
   }
+  string(e.recordId); string(e.eventId);
+  return freeze(structuredClone(e)) as Readonly<RecordEvent>;
+}
+export function resolveStoredRecord(reader: StoredRecordReader, recordId: string, eventId: string): Readonly<ResolvedRecord> {
+  string(recordId); string(eventId);
+  if (!isEmrReader('stored', reader)) refuse('StoredReaderRequired');
+  const v = object(reader.load(recordId, eventId), ['recordId', 'model', 'row', 'event']);
+  const e = parseRecordEvent(v.event);
+  if (v.recordId !== recordId || e.recordId !== recordId || e.eventId !== eventId) refuse('RecordEventBindingRefused');
   const model = string(v.model), row = object(v.row, Object.keys(v.row ?? {}));
   const result = freeze({ recordId, model, row: structuredClone(row), event: structuredClone(e) as RecordEvent, kinds: rowKinds(model, row, e as RecordEvent) });
   if (!result.kinds.length) refuse('RowFactsRequired');

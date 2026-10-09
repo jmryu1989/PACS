@@ -12,16 +12,17 @@ export const EMR_STORAGE = freeze({
   schema: 'emr_access',
   tablespace: 'kin_emr_access',
   roles: { owner: 'kin_emr_owner', runtime: 'kin_runtime', reader: 'kin_emr_reader', retention: 'kin_emr_retention' },
-  tables: ['access_entry', 'access_target', 'audit_projection', 'chain_head', 'clause_version', 'duty_request_event', 'legal_hold_event', 'member_identity'],
+  tables: ['access_entry', 'access_target', 'audit_projection', 'chain_head', 'clause_version', 'duty_request_event', 'legal_hold_event', 'member_identity', 'order_fact'],
   runtimeFunctions: [
     'append_access(text,text,text,text)', 'chain_tail(text)', 'entries_after(text,bigint,integer)', 'entry_for_event(text,text)',
     'storage_placement()', 'civil_period_end(timestamptz,integer)', 'resolve_member_identity(text,text)',
     'record_projection(text,integer)', 'place_hold(text,text,text)', 'release_hold(text,text)', 'holds_for(text)',
     'record_duty_request(text,text,text,text)', 'duty_requests(text,text)', 'clause_versions(text)',
+    'order_facts_for(text)', 'record_order_fact(text,text,text,text)',
   ],
   readerFunctions: [
     'chain_tail(text)', 'entries_after(text,bigint,integer)', 'entry_for_event(text,text)', 'storage_placement()', 'civil_period_end(timestamptz,integer)',
-    'holds_for(text)', 'duty_requests(text,text)', 'clause_versions(text)',
+    'holds_for(text)', 'duty_requests(text,text)', 'clause_versions(text)', 'order_facts_for(text)',
   ],
   retentionFunctions: ['expire_prefix(bigint)', 'retention_view(bigint,integer)', 'chain_tail(text)', 'storage_placement()'],
   /** Never callable by the runtime: deletion and the clause history installer. */

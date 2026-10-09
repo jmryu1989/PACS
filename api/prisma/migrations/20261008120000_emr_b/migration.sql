@@ -160,6 +160,16 @@ CREATE TABLE emr_access.legal_hold_event (
   PRIMARY KEY (hold_id, phase)
 );
 CREATE INDEX legal_hold_event_record ON emr_access.legal_hold_event (record_id);
+-- D-24 order facts are append-only evidence, distinct from the C unit's mutable registration projection.
+CREATE TABLE emr_access.order_fact (
+  record_id text NOT NULL CHECK (length(record_id) BETWEEN 1 AND 200),
+  event_id text NOT NULL CHECK (length(event_id) BETWEEN 1 AND 200),
+  sequence bigint NOT NULL CHECK (sequence > 0),
+  previous_event_id text,
+  body text NOT NULL CHECK (octet_length(body) <= 65536),
+  recorded_at timestamptz NOT NULL,
+  PRIMARY KEY (record_id, sequence), UNIQUE (record_id, event_id)
+);
 CREATE TABLE emr_access.duty_request_event (
   kind text NOT NULL CHECK (kind IN ('access-request', 'correction-request')),
   request_id text NOT NULL CHECK (pg_catalog.length(request_id) BETWEEN 1 AND 200),
@@ -209,6 +219,8 @@ CREATE TRIGGER duty_request_event_guard BEFORE UPDATE OR DELETE ON emr_access.du
 CREATE TRIGGER duty_request_event_truncate BEFORE TRUNCATE ON emr_access.duty_request_event FOR EACH STATEMENT EXECUTE FUNCTION emr_access.refuse_change();
 CREATE TRIGGER clause_version_guard BEFORE UPDATE OR DELETE ON emr_access.clause_version FOR EACH ROW EXECUTE FUNCTION emr_access.refuse_change();
 CREATE TRIGGER clause_version_truncate BEFORE TRUNCATE ON emr_access.clause_version FOR EACH STATEMENT EXECUTE FUNCTION emr_access.refuse_change();
+CREATE TRIGGER order_fact_guard BEFORE UPDATE OR DELETE ON emr_access.order_fact FOR EACH ROW EXECUTE FUNCTION emr_access.refuse_change();
+CREATE TRIGGER order_fact_truncate BEFORE TRUNCATE ON emr_access.order_fact FOR EACH STATEMENT EXECUTE FUNCTION emr_access.refuse_change();
 
 -- A's civilPeriodEnd: Asia/Seoul civil days at the fixed +09:00 offset; the first day is the starting event's civil day
 -- (D-21, 행정기본법 제6조②1); the period ends with the day before the corresponding day of the last year, weekends and
@@ -239,9 +251,9 @@ $$;
 -- records): the end for an entry about no EMR record, and the least end of any entry. The contract and live suites hold
 -- the two equal. expire_prefix reads it here.
 CREATE FUNCTION emr_access.access_retention_floor(p_at timestamptz) RETURNS timestamptz
-  LANGUAGE sql IMMUTABLE STRICT SET search_path = pg_catalog, pg_temp AS $$
-  SELECT emr_access.civil_period_end(p_at, 2);
-$$;
+-- SQL-standard body binds the one floor to its calendar dependency at creation (and prevents dropping it).
+  LANGUAGE sql IMMUTABLE STRICT SET search_path = pg_catalog, pg_temp
+  RETURN emr_access.civil_period_end(p_at, 2);
 
 -- Every ledger relation, its indexes and TOAST storage must be in kin_emr_access; otherwise nothing is written.
 CREATE FUNCTION emr_access.storage_placement() RETURNS TABLE (relation text, relkind text, tablespace text)
@@ -539,6 +551,36 @@ CREATE FUNCTION emr_access.clause_versions(p_clause_id text)
   WHERE c.clause_id = p_clause_id ORDER BY c.effective_at;
 $$;
 
+CREATE FUNCTION emr_access.order_facts_for(p_record_id text) RETURNS TABLE (body text)
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended('emr-order:' || p_record_id, 0));
+  RETURN QUERY SELECT f.body FROM emr_access.order_fact f WHERE f.record_id = p_record_id ORDER BY f.sequence;
+END
+$$;
+CREATE FUNCTION emr_access.record_order_fact(p_record_id text, p_event_id text, p_previous text, p_body text) RETURNS void
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE doc json := emr_access.append_fact_checked(p_body, ARRAY['recordId', 'eventId', 'previousEventId', 'facts', 'event']);
+  previous emr_access.order_fact%ROWTYPE; existing text;
+BEGIN
+  PERFORM emr_access.require_placement();
+  PERFORM pg_advisory_xact_lock(hashtextextended('emr-order:' || p_record_id, 0));
+  IF doc ->> 'recordId' IS DISTINCT FROM p_record_id OR doc ->> 'eventId' IS DISTINCT FROM p_event_id
+     OR doc ->> 'previousEventId' IS DISTINCT FROM p_previous OR json_typeof(doc -> 'facts') <> 'object'
+     OR doc #>> '{facts,statusEvent,eventId}' IS DISTINCT FROM p_event_id OR doc #>> '{event,recordId}' IS DISTINCT FROM p_record_id THEN
+    RAISE EXCEPTION 'OrderFactInvalid' USING ERRCODE = 'EB003';
+  END IF;
+  SELECT f.body INTO existing FROM emr_access.order_fact f WHERE f.record_id = p_record_id AND f.event_id = p_event_id;
+  IF FOUND THEN
+    IF existing = p_body THEN RETURN; END IF;
+    RAISE EXCEPTION 'OrderEventIdConflict' USING ERRCODE = 'EB002';
+  END IF;
+  SELECT * INTO previous FROM emr_access.order_fact f WHERE f.record_id = p_record_id ORDER BY f.sequence DESC LIMIT 1;
+  IF previous.event_id IS DISTINCT FROM p_previous THEN RAISE EXCEPTION 'OrderHistoryIncomplete' USING ERRCODE = 'EB003'; END IF;
+  INSERT INTO emr_access.order_fact VALUES (p_record_id, p_event_id, coalesce(previous.sequence, 0) + 1, p_previous, p_body, clock_timestamp());
+END
+$$;
+
 RESET ROLE;
 SET LOCAL default_tablespace = '';
 
@@ -550,13 +592,13 @@ GRANT EXECUTE ON FUNCTION
   emr_access.resolve_member_identity(text, text), emr_access.record_projection(text, integer),
   emr_access.place_hold(text, text, text), emr_access.release_hold(text, text), emr_access.holds_for(text),
   emr_access.record_duty_request(text, text, text, text), emr_access.duty_requests(text, text), emr_access.clause_versions(text)
-  TO kin_runtime;
+  , emr_access.order_facts_for(text), emr_access.record_order_fact(text,text,text,text) TO kin_runtime;
 GRANT SELECT ON ALL TABLES IN SCHEMA emr_access TO kin_emr_reader;
 GRANT EXECUTE ON FUNCTION
   emr_access.chain_tail(text), emr_access.entries_after(text, bigint, integer), emr_access.entry_for_event(text, text), emr_access.storage_placement(),
   emr_access.civil_period_end(timestamptz, integer), emr_access.holds_for(text), emr_access.duty_requests(text, text),
   emr_access.clause_versions(text)
-  TO kin_emr_reader;
+  , emr_access.order_facts_for(text) TO kin_emr_reader;
 GRANT EXECUTE ON FUNCTION emr_access.expire_prefix(bigint), emr_access.retention_view(bigint, integer), emr_access.chain_tail(text),
   emr_access.storage_placement() TO kin_emr_retention;
 COMMIT;

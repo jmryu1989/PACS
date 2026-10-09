@@ -290,7 +290,7 @@ class Pure(unittest.TestCase):
         self.assertEqual(sorted(emr), transfer.EMR_TABLES)
         self.assertEqual({name: len(value) for name, value in emr.items()},
                          {'access_entry': 2, 'access_target': 0, 'audit_projection': 0, 'chain_head': 2, 'clause_version': 1,
-                          'duty_request_event': 0, 'legal_hold_event': 2, 'member_identity': 1})
+                          'duty_request_event': 0, 'legal_hold_event': 2, 'member_identity': 1, 'order_fact': 1})
         first, second = emr['access_entry']
         self.assertEqual((first['previous_hash'], second['previous_hash']), ('0'*64, first['hash']))
         self.assertEqual(emr['chain_head'][0]['hash'], second['hash'])

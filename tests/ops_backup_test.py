@@ -66,7 +66,7 @@ class Host:
         self.info = [{"Name": "/" + name, "State": {"Running": True}, "Image": "sha256:" + "a" * 64,
                       "Config": {"Labels": {"com.docker.compose.project": "fixture",
                                             "com.docker.compose.project.working_dir": str(self.repo)}},
-                      "Mounts": [{"Destination": "/var/lib/orthanc/db", "Type": "volume", "Name": "fixture-volume"}]}
+                      "Mounts": [{"Destination": "/var/lib/orthanc/db", "Type": "volume", "Name": "fixture-volume"}, {"Destination": ops.EMR_STATE, "Type": "volume", "Name": "fixture-emr-state"}]}
                      for name in (*ops.CONTAINERS, "kin-proxy")]
         self.events = []
         self.sources = []
@@ -89,11 +89,13 @@ class Host:
             return '[{"RepoDigests": []}]'
         if "pg_database_size('kin')" in " ".join(args):
             return "4096"
+        if "pg_stat_activity" in " ".join(args):
+            return "0"
         return "" if "status" in args else "a" * 40
 
     def fake_run(self, args, **kwargs):
         self.events.append(("command", list(args)))
-        if "pg_dump" in args:
+        if "pg_dump" in args or "pg_dumpall" in args:
             kwargs["output"].write(b"fixture dump " + str(time.monotonic_ns()).encode())
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
@@ -103,7 +105,7 @@ class Host:
         if kwargs.get("output") is not None:
             kwargs["output"].write(orthanc_archive())
             return ""
-        return json.dumps({"integrity": "ok", "attachments": 0, "attachment_bytes": 0}) if "python3" in args else ""
+        return json.dumps({"integrity": "ok", "attachments": 0, "attachment_bytes": 0}) if "python3" in args else "EMR_RESTORE_VERIFIED"
 
     def boundary(self, answer):
         def evaluate(source, *args, **kwargs):
@@ -123,7 +125,8 @@ class Host:
                 patch.object(ops, "text", side_effect=self.fake_text), \
                 patch.object(ops, "run", side_effect=self.fake_run), \
                 patch.object(ops, "temporary_run", side_effect=self.fake_archive), \
-                patch.object(ops, "counts", return_value={"Report": 5}), \
+                patch.object(ops, "emr_catalog", return_value={"synthetic": "catalog"}), \
+                patch.object(ops, "counts", return_value={"public.Report": 5}), \
                 patch.object(ops, "wait_ready", side_effect=lambda *a: self.events.append(("ready",))), \
                 patch.object(audit, "evaluate", side_effect=self.boundary(answer)), \
                 contextlib.redirect_stdout(io.StringIO()):
@@ -143,7 +146,8 @@ class Host:
         earlier = set(folder.glob("rehearsal-*.json"))
         with patch.object(ops, "run", side_effect=self.fake_run), \
                 patch.object(ops, "temporary_run", side_effect=self.fake_archive), \
-                patch.object(ops, "counts", return_value={"Report": 5}), \
+                patch.object(ops, "emr_catalog", return_value={"synthetic": "catalog"}), \
+                patch.object(ops, "counts", return_value={"public.Report": 5}), \
                 patch.object(ops, "remove_owned_if_present", cleanup), \
                 patch.object(audit, "evaluate", side_effect=self.boundary(answer)), \
                 contextlib.redirect_stdout(io.StringIO()):
@@ -177,7 +181,7 @@ class BackupSafetyTests(unittest.TestCase):
                              "Image": "sha256:" + "a" * 64,
                              "Config": {"Labels": {"com.docker.compose.project": "fixture",
                                                    "com.docker.compose.project.working_dir": str(root)}},
-                             "Mounts": [{"Destination": "/var/lib/orthanc/db", "Type": "volume", "Name": "fixture-volume"}]})
+                             "Mounts": [{"Destination": "/var/lib/orthanc/db", "Type": "volume", "Name": "fixture-volume"}, {"Destination": ops.EMR_STATE, "Type": "volume", "Name": "fixture-emr-state"}]})
 
             def fake_text(args, **kwargs):
                 if args[:2] == ["docker", "inspect"]:
@@ -186,9 +190,13 @@ class BackupSafetyTests(unittest.TestCase):
                     return "4096"
                 if args[:3] == ["docker", "image", "inspect"]:
                     return '[{"RepoDigests": []}]'
+                if "pg_stat_activity" in " ".join(args):
+                    return "0"
                 return "" if "status" in args else "a" * 40
 
             def fake_run(args, **kwargs):
+                if "pg_dumpall" in args:
+                    kwargs["output"].write(b"synthetic roles")
                 if "pg_dump" in args:
                     raise RuntimeError("simulated dump failure")
                 return SimpleNamespace(returncode=0, stdout=b"")
@@ -197,7 +205,8 @@ class BackupSafetyTests(unittest.TestCase):
             with patch.object(ops, "ROOT", root), patch.object(ops, "text", side_effect=fake_text), \
                     patch.object(ops, "run", side_effect=fake_run) as commands, \
                     patch.object(ops, "temporary_run", return_value="8 /source"), \
-                    patch.object(ops, "counts", return_value={"Report": 5}):
+                    patch.object(ops, "emr_catalog", return_value={"synthetic": "catalog"}), \
+                    patch.object(ops, "counts", return_value={"public.Report": 5}):
                 with self.assertRaisesRegex(RuntimeError, "simulated dump failure"):
                     ops.backup(output)
             starts = [call.args[0] for call in commands.call_args_list if call.args[0][1] == "start"]
@@ -336,7 +345,7 @@ class BackupSafetyTests(unittest.TestCase):
             info = [{"Name": "/" + name, "State": {"Running": True}, "Image": "sha256:" + "a"*64,
                      "Config": {"Labels": {"com.docker.compose.project": "fixture",
                                            "com.docker.compose.project.working_dir": str(root)}},
-                     "Mounts": [{"Destination": "/var/lib/orthanc/db", "Type": "volume", "Name": "fixture-volume"}]}
+                     "Mounts": [{"Destination": "/var/lib/orthanc/db", "Type": "volume", "Name": "fixture-volume"}, {"Destination": ops.EMR_STATE, "Type": "volume", "Name": "fixture-emr-state"}]}
                     for name in (*ops.CONTAINERS, "kin-proxy")]
 
             def fake_text(args, **kwargs):
@@ -346,10 +355,12 @@ class BackupSafetyTests(unittest.TestCase):
                     return '[{"RepoDigests": []}]'
                 if "pg_database_size('kin')" in " ".join(args):
                     return "4096"
+                if "pg_stat_activity" in " ".join(args):
+                    return "0"
                 return "" if "status" in args else "a"*40
 
             def fake_run(args, **kwargs):
-                if "pg_dump" in args:
+                if "pg_dump" in args or "pg_dumpall" in args:
                     kwargs["output"].write(b"fixture dump")
                 return SimpleNamespace(returncode=0, stdout=b"")
 
@@ -367,7 +378,8 @@ class BackupSafetyTests(unittest.TestCase):
                 self.assertEqual(audit.main(["init", str(output)]), 0)
             with patch.object(ops, "ROOT", root), patch.object(ops, "text", side_effect=fake_text), \
                     patch.object(ops, "run", side_effect=fake_run), patch.object(ops, "temporary_run", side_effect=fake_archive), \
-                    patch.object(ops, "counts", return_value={"Report": 5}), \
+                    patch.object(ops, "emr_catalog", return_value={"synthetic": "catalog"}), \
+                patch.object(ops, "counts", return_value={"public.Report": 5}), \
                     patch.object(ops, "wait_ready", side_effect=RuntimeError("fixture timeout")), \
                     patch.object(audit, "evaluate", return_value=rows_stream({1: "fixture"})):
                 with self.assertRaisesRegex(RuntimeError, "readiness needs recovery"):
@@ -698,6 +710,12 @@ class BackupSafetyTests(unittest.TestCase):
             def rehearse():
                 with patch.object(sys, "argv", ["ops_backup.py", "rehearse", str(sealed)]):
                     ops.main()
+            def rehearsal_run(args, **kwargs):
+                # This boundary test simulates provisioning only; the real verifier/exporter still hits FakeDocker
+                # and its watchdog. B L07/L19 exercise these provisioning statements on PostgreSQL itself.
+                if args[:2] == ["docker", "exec"] and ("mkdir" in args or "psql" in args):
+                    return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+                return real_run(args, **kwargs)
             for label, plan, success in (("sound", dict(answer=verifier_answer(rows)), True),
                                          ("the restored copy's export stalls", dict(exporter="stall"), False)):
                 with self.subTest(label):
@@ -705,7 +723,9 @@ class BackupSafetyTests(unittest.TestCase):
                     earlier = set(sealed.glob("rehearsal-*.json"))
                     before = host.files(sealed)
                     with fake.active(), patch.object(ops, "ROOT", host.repo), patch.object(ops, "require_local_docker"), \
-                            patch.object(ops, "counts", return_value={"Report": 5}), \
+                            patch.object(ops, "run", side_effect=rehearsal_run), \
+                            patch.object(ops, "emr_catalog", return_value={"synthetic": "catalog"}), \
+                            patch.object(ops, "counts", return_value={"public.Report": 5}), \
                             patch.object(ops, "temporary_run", side_effect=host.fake_archive), \
                             patch.object(audit, "evaluate", side_effect=limited), \
                             contextlib.redirect_stdout(io.StringIO()):
