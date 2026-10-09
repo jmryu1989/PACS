@@ -68,9 +68,11 @@ const CASES = [
   'TEST-E-05 display_epoch R3 a HEAD response or a header bulk attribute is not evidence that pixels were shown; the Pixel Data bulk is',
 ];
 const RULE_TABLE = path.join(__dirname, 'rule-cases.json');
-const RULE_TABLE_SHA256 = '83ccf159299a551adc7937888daacb1eb5047152f82afd18da901efc579f083e';
-const ruleBytes = fs.readFileSync(RULE_TABLE);
-if (createHash('sha256').update(ruleBytes).digest('hex') !== RULE_TABLE_SHA256) throw new Error('rule-cases.json is not the D735 table this file is bound to');
+// The consult file (sha256 83ccf159…083e) is CRLF; Git stores and checks it out per platform, so the pin is over its
+// bytes with CRLF normalized to LF (the same lf_sha256 scripts/record-run.py records).
+const RULE_TABLE_LF_SHA256 = 'b77b7691cf4b78530162f24cb6fddc3bd67f447c1c4efd77aed7c62ee894ea9e';
+const ruleBytes = Buffer.from(fs.readFileSync(RULE_TABLE).toString('latin1').replace(/\r\n/g, '\n'), 'latin1');
+if (createHash('sha256').update(ruleBytes).digest('hex') !== RULE_TABLE_LF_SHA256) throw new Error('rule-cases.json is not the D735 table this file is bound to');
 const RULE = JSON.parse(ruleBytes.toString('utf8'));
 if (RULE.schemaVersion !== 'D735-1' || RULE.cases.length !== 223 || new Set(RULE.cases.map(c => c.testId)).size !== 223) throw new Error('unexpected D735 table shape');
 const DECLARED = [...CASES, ...RULE.cases.map(c => c.testId)];
