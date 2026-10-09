@@ -191,6 +191,8 @@ REQ-S3-ASR-U5-AUTHZ/PARITY/INERT/ORDER/INPUT/SESSION/PROOF → RISK-U5-WEAKER-CO
 
 ## 기능별 시험 카탈로그
 
+REQ-S9-U0a-PRE-ORDER → RISK-B1-03/05/15/41/42/45/57/58·PRE-X1~X3·PRE-P3(classic script를 18/30/45개로 나눈 페이지의 틈에서 입력·떠나기·창/세션 사건이 아직 없는 선언을 만남) → TEST-S9-U0a-PRE: `tests/main_early_input_dom_test.py`(설계 이름 `main_pre_order_dom_test.py`, 하니스 `main_split_harness.py`/`.cjs` = `main_pre_contract.cjs`)가 임시 분할 페이지(경계 hold에 부분 사이 0/150 ms, 45개는 150 ms 시차)의 결과를 f1d5406 원본 페이지의 한 시점과 비교하고, 세션 답 대기·답함·실패·실패→Retry·반복 실패→Retry마다 등록 전체 순서(대상은 생성으로 이름 붙인 객체 하나씩 = markup 원소는 parser 순서, 만든 객체는 생성 API·f1d5406 문장 기준 호출 위치·그 위치의 생성 차수, 등록마다 같은 기준의 호출 stack)와 (target, event)별 등록이 원본과 같음을 본다. 등록 비교는 멈춘 시계 위에서 요청을 도착 순서대로 하나씩 답하고 다음 timer까지만 시간을 진행하는 결정적 일정(기본·inbox 답 보류·목록 본문 보류)으로 하며, 양쪽 원시 trace를 비교 전에 남긴다. 세션 종료는 오류 0이 아니라 남는 화면·원문·저장·닫힘으로, 인증 뒤 상용구 미리보기를 연 채 Log out, 상용구 행 메뉴 Edit(편집창·원값·초점, 보류된 저장 중 입력 보존·한 번의 요청·wire 본문, 서버 재조회·View·재편집·새 페이지·Insert), 열린 Filters에서 Saved→Modified→Deleted→Saved(다른 검색)와 조건·목록·선택·판독 원문 보존, 저장 검색 저장소(없음·있음·손상·잘못된 값·키 읽기 실패·저장소 전체 거부→안내→복구→Login)와 서버 검색 적용, 잘못된 mode/복합 조건 거절과 prefs 읽기 실패 뒤 Reload List 회복, A→B→A 뒤 늦은 받아쓰기(full Chromium·가짜 마이크), 실제 back/forward cache 복귀를 원본과 같은 결과로, 각 쪽 결과를 먼저 요구 결과로 확인한다. `tests/main_early_input_mutants.py`는 35개 이동을 하나씩 되돌린 변이와 M36(Retry가 Quick Match 등록 추가)·M37(받아쓰기 편집 알림을 citation input 뒤로)을 각자의 사례로 죽인다 — 선언 변이의 사례는 실제 전달된 45개 분할 manifest에서 되돌린 문장이 든 파일을 보류하고, 그 순간(파일 미실행·소비자 등록·binding 없음)을 먼저 확인한다. F2-M01~M12(생성 식별·signal·listener 의미·barrier·Run 격리·원시 기록 순서의 하니스 변이와 상용구 Edit·저장, 검색 삭제 반영, 서버 검색 채택, Login, Reload List의 페이지 변이)는 따로 세며 각자의 관측 단언으로 죽는다. `node --test tests/main_move_test.cjs`(A1)는 `tests/main_move_spec.json`(base = 이동 커밋)을, `node tests/main_split_harness.cjs fixture-check`는 report 하니스 시험이 읽는 f1d5406 문장 목록(`tests/main_split_harness_fixture.json`)을 결속한다. 실스택·네트워크·자격증명 없음.
+
 순수 Node 계약 시험 `node --test tests/emr_contract_test.cjs`는 D589/D591의 법정 기록 분류·접속사건 형식·서명 payload·판독 수명주기와 적법 기본값을 결속한다.
 
 D-MEASURE2 비교 중 미저장 작업 회복: `node --test tests/viewer_recovery_test.cjs` (24개),
@@ -768,6 +770,10 @@ Every `scripts/record-run.py --run-dir` in `validate.yml` sits under a path of a
 | `measurements` | `tmp/workspace-ui-ci/image-thumbnails` | `synthetic-workspace-dom-results` | Individual image thumbnails identity and bounded page lifecycle |
 | `measurements` | `tmp/workspace-ui-ci/narrow-image-layout` | `synthetic-workspace-dom-results` | Narrow worklist row and image control hit targets |
 | `measurements` | `tmp/workspace-ui-ci/worklist-header` | `synthetic-workspace-dom-results` | S5-UI1 worklist header keeps Log out on screen and keyboard reachable |
+| `measurements` | `tmp/workspace-ui-ci/main-move` | `synthetic-workspace-dom-results` | S9-U0a A1 byte move map, loss, duplication and order mutants |
+| `measurements` | `tmp/workspace-ui-ci/pre-fixture-reference` | `synthetic-workspace-dom-results` | S9-U0a-PRE report harness fixture statements equal the f1d5406 page |
+| `measurements` | `tmp/workspace-ui-ci/pre-early-input-dom` | `synthetic-workspace-dom-results` | S9-U0a-PRE early input, pagehide and registration order on 18/30/45-part pages against the f1d5406 page |
+| `measurements` | `tmp/workspace-ui-ci/pre-mutants` | `synthetic-workspace-dom-results` | S9-U0a-PRE 37 mutants killed by their own cases |
 | `measurements` | `tmp/workspace-ui-ci/worklist-toolbar` | `synthetic-workspace-dom-results` | S5-UI2 worklist toolbar keeps one row of groups, every control and the page script |
 | `measurements` | `tmp/workspace-ui-ci/report-actions` | `synthetic-workspace-dom-results` | S5-UI3 report button rows keep every button in its declared section and the page script |
 | `measurements` | `tmp/workspace-ui-ci/study-arrivals` | `synthetic-workspace-dom-results` | Existing study arrivals and preserved reading inputs |
