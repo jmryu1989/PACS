@@ -232,15 +232,24 @@ class Delivery:
 
 # The trace is installed before any page script (context.add_init_script). It keeps its own references to the
 # original EventTarget methods, so its own listeners are not part of the trace.
+#
+# An object is named when it is CREATED, never when something is first registered on it (Astra fix-2 design §1):
+#   * the page markup's elements: their order of insertion by the parser, <script> elements left out (a split copy only
+#     adds script tags). A MutationObserver numbers them; the parser runs a microtask checkpoint before every script, so
+#     a parsed element has its number before any script can touch it;
+#   * what scripts create: the creating API is hooked and keeps the call frames (the creation site) and how many times
+#     that site had created before (its occurrence). An HTML subtree (innerHTML, cloning) has one occurrence for the
+#     operation and each new element its slot in document order; a controller's signal belongs to the controller; an
+#     object a promise delivers (a permission status, a media stream) takes its occurrence when it is asked for;
+#   * window, document and the browser's other single objects, by name.
+# A target with none of these is `unresolved`; the comparison refuses it instead of inventing a name. The role (id,
+# place in the document, kind) stays beside it for a reader and for the suite's selectors - never as identity.
 TRACE_SCRIPT = r"""(() => {
   if (window.__kinTrace) return;
   const add = EventTarget.prototype.addEventListener, remove = EventTarget.prototype.removeEventListener;
-  const registrations = [], dispatches = [], executed = [], errors = [];
+  const registrations = [], dispatches = [], executed = [], errors = [], objects = [], unresolved = [], parsed = [];
   let seq = 0, thrown = null;
-  // A target's identity is its role (id, or its place in the document, or its kind when detached) plus the order in
-  // which objects of that role first appeared: a second, different element given the same id is '#id@2', never merged
-  // with the first (Astra PRE-A03).
-  const names = new WeakMap(), counters = new Map(), ordinals = new Map();
+  const births = new WeakMap(), siteCounts = new Map();
   const NOISY = new Set(['mousemove', 'pointermove', 'pointerrawupdate', 'mouseover', 'mouseout', 'pointerover',
     'pointerout', 'mouseenter', 'mouseleave', 'pointerenter', 'pointerleave']);
   function pathOf(el) {
@@ -253,22 +262,11 @@ TRACE_SCRIPT = r"""(() => {
     }
     return steps.join('>');
   }
-  function nameOf(target) {
+  function roleOf(target) {
     if (target === window) return 'window';
     if (target === document) return 'document';
-    let name = names.get(target);
-    if (name) return name;
-    if (target instanceof Element && (target.id || target.isConnected)) {
-      const role = target.id ? '#' + target.id : pathOf(target);
-      const n = (ordinals.get(role) || 0) + 1; ordinals.set(role, n);
-      name = n === 1 ? role : role + '@' + n;
-    } else {
-      const kind = (target instanceof Element ? '<' + target.localName + '>' : (target && target.constructor && target.constructor.name)) || 'EventTarget';
-      const n = (counters.get(kind) || 0) + 1; counters.set(kind, n);
-      name = kind + '~' + n;
-    }
-    names.set(target, name);
-    return name;
+    if (target instanceof Element) return target.id ? '#' + target.id : target.isConnected ? pathOf(target) : '<' + target.localName + '>';
+    return (target && target.constructor && target.constructor.name) || 'EventTarget';
   }
   function hash(text) {
     let h = 0x811c9dc5;
@@ -297,12 +295,134 @@ TRACE_SCRIPT = r"""(() => {
     if (listener && typeof listener.handleEvent === 'function') return 'h' + hash(source(listener.handleEvent));
     return null;
   }
+
+  // ── the creation ledger ──
+  const siteOf = fr => fr.map(f => f.join(':')).join(' ');
+  function occurrence(site) { const n = (siteCounts.get(site) || 0) + 1; siteCounts.set(site, n); return n; }
+  function born(obj, record) { births.set(obj, record); objects.push(record); return record; }
+  function create(obj, kind, api, fr, owner, slot, n) {
+    if (!obj || (typeof obj !== 'object' && typeof obj !== 'function')) return null;
+    if (births.has(obj)) return births.get(obj);
+    return born(obj, { id: objects.length + 1, seq: ++seq, kind, api, frames: fr,
+      occurrence: n ?? occurrence(kind + '|' + api + '|' + siteOf(fr)),
+      owner: owner && births.has(owner) ? births.get(owner).id : null, slot: slot ?? null });
+  }
+  const kindOf = node => 'element:' + node.localName;
+  function subtree(root, api, fr, owner, includeRoot) {
+    const n = occurrence('subtree|' + api + '|' + siteOf(fr));
+    let slot = 0;
+    const visit = node => { if (node.nodeType === 1 && !births.has(node)) create(node, kindOf(node), api, fr, owner, slot++, n); };
+    if (includeRoot) visit(root);
+    if (!root || typeof root.nodeType !== 'number') return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) visit(node);
+  }
+  const replace = (holder, name, wrap) => {
+    const d = holder && Object.getOwnPropertyDescriptor(holder, name);
+    if (d && typeof d.value === 'function') Object.defineProperty(holder, name, { ...d, value: wrap(d.value) });
+  };
+  const afterSet = (holder, name, after) => {
+    const d = holder && Object.getOwnPropertyDescriptor(holder, name);
+    if (!d || typeof d.set !== 'function') return;
+    Object.defineProperty(holder, name, { ...d, set(value) {
+      const fr = frames(), parent = this.parentNode, result = d.set.call(this, value);
+      after(this, fr, parent); return result; } });
+  };
+  for (const name of ['createElement', 'createElementNS'])
+    replace(Document.prototype, name, native => function (...args) {
+      const fr = frames(), el = native.apply(this, args); create(el, kindOf(el), name, fr); return el; });
+  replace(Node.prototype, 'cloneNode', native => function (...args) {
+    const fr = frames(), copy = native.apply(this, args); subtree(copy, 'cloneNode', fr, this, true); return copy; });
+  replace(Document.prototype, 'importNode', native => function (node, ...rest) {
+    const fr = frames(), copy = native.call(this, node, ...rest); subtree(copy, 'importNode', fr, node, true); return copy; });
+  afterSet(Element.prototype, 'innerHTML', (el, fr) => subtree(el, 'innerHTML', fr, el, false));
+  afterSet(HTMLElement.prototype, 'innerText', (el, fr) => subtree(el, 'innerText', fr, el, false));
+  afterSet(Element.prototype, 'outerHTML', (el, fr, parent) => parent && subtree(parent, 'outerHTML', fr, parent, false));
+  replace(Element.prototype, 'insertAdjacentHTML', native => function (where, html) {
+    const fr = frames(), parent = /^(beforebegin|afterend)$/i.test(where) ? this.parentNode : this;
+    const result = native.call(this, where, html); if (parent) subtree(parent, 'insertAdjacentHTML', fr, this, false); return result; });
+  replace(Range.prototype, 'createContextualFragment', native => function (html) {
+    const fr = frames(), fragment = native.call(this, html); subtree(fragment, 'createContextualFragment', fr, null, false); return fragment; });
+  replace(DOMParser.prototype, 'parseFromString', native => function (...args) {
+    const fr = frames(), doc = native.apply(this, args); subtree(doc, 'parseFromString', fr, null, false); return doc; });
+  const construct = (name, after) => {
+    const Native = window[name], d = Object.getOwnPropertyDescriptor(window, name);
+    if (typeof Native !== 'function' || !d || !(d.writable || d.configurable)) return;
+    const proxy = new Proxy(Native, { construct(target, args, newTarget) {
+      const fr = frames(), obj = Reflect.construct(target, args, newTarget === proxy ? target : newTarget);
+      after(obj, fr); return obj; } });
+    Object.defineProperty(window, name, { ...d, value: proxy });
+  };
+  for (const name of ['EventTarget', 'BroadcastChannel', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'Worker',
+    'SharedWorker', 'FileReader', 'Notification', 'MediaRecorder', 'MediaStream', 'AudioContext', 'OfflineAudioContext',
+    'MediaSource', 'RTCPeerConnection', 'Image', 'Audio', 'Option'])
+    construct(name, (obj, fr) => create(obj, obj instanceof Element ? kindOf(obj) : name, 'new ' + name, fr));
+  construct('AudioWorkletNode', (node, fr) => {
+    create(node, 'AudioWorkletNode', 'new AudioWorkletNode', fr);
+    create(node.port, 'MessagePort', 'AudioWorkletNode.port', fr, node, 'port');
+  });
+  construct('MessageChannel', (channel, fr) => {
+    create(channel, 'MessageChannel', 'new MessageChannel', fr);
+    create(channel.port1, 'MessagePort', 'MessageChannel.port1', fr, channel, 'port1');
+    create(channel.port2, 'MessagePort', 'MessageChannel.port2', fr, channel, 'port2');
+  });
+  construct('AbortController', (controller, fr) => {
+    create(controller, 'AbortController', 'new AbortController', fr);
+    create(controller.signal, 'AbortSignal', 'AbortController.signal', fr, controller, 'signal');
+  });
+  for (const name of ['timeout', 'any', 'abort'])
+    replace(AbortSignal, name, native => function (...args) {
+      const fr = frames(), signal = native.apply(this, args); create(signal, 'AbortSignal', 'AbortSignal.' + name, fr); return signal; });
+  replace(window, 'matchMedia', native => function (...args) {
+    const fr = frames(), list = native.apply(this, args); create(list, 'MediaQueryList', 'matchMedia', fr); return list; });
+  replace(window, 'open', native => function (...args) {
+    const fr = frames(), opened = native.apply(this, args); if (opened) create(opened, 'Window', 'window.open', fr); return opened; });
+  const promised = (holder, name, kind, children) => replace(holder, name, native => function (...args) {
+    const fr = frames(), n = occurrence(kind + '|' + name + '|' + siteOf(fr));
+    return native.apply(this, args).then(value => {
+      create(value, kind, name, fr, null, null, n); if (children) children(value, fr); return value; });
+  });
+  if (typeof Permissions === 'function') promised(Permissions.prototype, 'query', 'PermissionStatus');
+  if (typeof MediaDevices === 'function') promised(MediaDevices.prototype, 'getUserMedia', 'MediaStream',
+    (stream, fr) => stream.getTracks().forEach((track, i) => create(track, 'MediaStreamTrack', 'getUserMedia.track', fr, stream, i)));
+  // The markup's elements, numbered in parser order (scripts aside); see above.
+  const parsedNode = node => {
+    if (node.nodeType !== 1 || births.has(node)) return;
+    if (node.localName === 'script') { born(node, { id: objects.length + 1, seq: ++seq, kind: 'element:script', api: 'parser-script' }); return; }
+    parsed.push(node.localName);
+    born(node, { id: objects.length + 1, seq: ++seq, kind: kindOf(node), api: 'parser', parser: parsed.length });
+  };
+  new MutationObserver(records => {
+    for (const r of records) for (const node of r.addedNodes) {
+      parsedNode(node);
+      if (node.nodeType !== 1) continue;
+      const walker = document.createTreeWalker(node, NodeFilter.SHOW_ELEMENT);
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) parsedNode(n);
+    }
+  }).observe(document, { childList: true, subtree: true });
+  let single = null;
+  const singletons = () => single ??= [['window', () => window], ['document', () => document], ['screen', () => window.screen],
+    ['visualViewport', () => window.visualViewport], ['screen.orientation', () => window.screen.orientation],
+    ['mediaDevices', () => navigator.mediaDevices], ['fonts', () => document.fonts], ['performance', () => window.performance],
+    ['serviceWorker', () => navigator.serviceWorker], ['speechSynthesis', () => window.speechSynthesis],
+    ['connection', () => navigator.connection]].map(([name, get]) => { try { return [name, get()]; } catch (_) { return [name, null]; } })
+    .filter(([, value]) => value);
+  function objectOf(target) {
+    const record = births.get(target);
+    if (record) return 'o' + record.id;
+    for (const [name, value] of singletons()) if (value === target) return 'singleton:' + name;
+    unresolved.push({ seq: seq + 1, role: roleOf(target), kind: (target && target.constructor && target.constructor.name) || typeof target });
+    return 'unresolved:' + unresolved.length;
+  }
+
+  // ── registrations and dispatches ──
   function record(kind, target, type, options, listener) {
     const capture = typeof options === 'boolean' ? options : !!(options && options.capture);
-    const entry = { seq: ++seq, kind, target: nameOf(target), type: String(type), capture,
+    const signal = options && typeof options === 'object' && options.signal ? options.signal : null;
+    const entry = { seq: ++seq, kind, object: objectOf(target), target: roleOf(target), type: String(type), capture,
       once: !!(options && typeof options === 'object' && options.once),
       passive: options && typeof options === 'object' && 'passive' in options ? !!options.passive : null,
-      signal: !!(options && typeof options === 'object' && options.signal), listener: listenerHash(listener),
+      signal: !!signal, signalObject: signal ? objectOf(signal) : null, listener: listenerHash(listener),
       script: script(), ready: document.readyState, frames: frames() };
     registrations.push(entry);
     return entry;
@@ -317,12 +437,12 @@ TRACE_SCRIPT = r"""(() => {
     const key = String(type) + '|' + capture;
     let wrapper = byKey.get(key);
     if (!wrapper && entry) {
-      const registration = entry.seq, where = entry.target;
+      const registration = entry.seq, where = entry.target, object = entry.object;
       // No catch: an exception leaves the listener exactly as before (same error, same reported location); the
       // window error report that follows names it on this dispatch.
       wrapper = function (event) {
         const noisy = NOISY.has(event.type);
-        const item = noisy ? null : { seq: ++seq, registration, target: where, type: event.type, trusted: event.isTrusted, error: null };
+        const item = noisy ? null : { seq: ++seq, registration, target: where, object, type: event.type, trusted: event.isTrusted, error: null };
         if (item) dispatches.push(item);
         let completed = false;
         try {
@@ -384,18 +504,38 @@ TRACE_SCRIPT = r"""(() => {
     const reason = event.reason;
     errors.push({ seq: ++seq, message: 'unhandled rejection: ' + (reason && reason.message ? reason.name + ': ' + reason.message : String(reason)), file: '', line: 0 });
   });
+  // The creation records an id names, with the records they belong to (a signal's controller, a clone's source).
+  function objectsFor(ids) {
+    const out = {}, todo = [...ids];
+    while (todo.length) {
+      const id = todo.pop();
+      if (!id || !/^o\d+$/.test(id) || out[id]) continue;
+      const record = objects[+id.slice(1) - 1];
+      out[id] = record;
+      if (record && record.owner) todo.push('o' + record.owner);
+    }
+    return out;
+  }
   Object.defineProperty(window, '__kinTrace', { value: Object.freeze({ registrations, dispatches, executed, errors,
+    unresolved, objectsFor, parsed: () => parsed.slice(), created: () => objects.length,
     mark(label) { const item = { seq: ++seq, label: String(label) }; dispatches.push(item); return item.seq; },
     now: () => seq }) });
 })();"""
 
 
+class TraceInfraFailure(AssertionError):
+    """The trace cannot name a target by its creation (a creating API the trace does not know): a harness failure, never
+    a pass and never a kill."""
+
+
 def snapshot(page, since=0):
-    """The trace recorded so far (entries with seq > since)."""
+    """The trace recorded so far (entries with seq > since), with the creation records its targets and signals name."""
     return page.evaluate("""since => { const t = window.__kinTrace;
       const pick = list => list.filter(item => item.seq > since);
-      return { registrations: pick(t.registrations), dispatches: pick(t.dispatches), errors: pick(t.errors),
-               executed: t.executed.slice(), now: t.now() }; }""", since)
+      const registrations = pick(t.registrations), dispatches = pick(t.dispatches);
+      const ids = [...registrations.flatMap(r => [r.object, r.signalObject]), ...dispatches.map(d => d.object)];
+      return { registrations, dispatches, errors: pick(t.errors), executed: t.executed.slice(), now: t.now(),
+               objects: t.objectsFor(ids), unresolved: t.unresolved.slice() }; }""", since)
 
 
 def attribute(manifest, registration):
@@ -418,21 +558,60 @@ def frozen_indexes(page):
                                               encoding="utf-8", cwd=ROOT))
 
 
-def provenance(manifest, frozen, registration):
-    """Where a registration was made, the same for the ORIGINAL page and a page that moved declarations: the f1d5406
-    statement of its outermost page-script frame, else the outermost frame of another script (file, line)."""
-    _, owner = attribute(manifest, registration)
-    if owner:
-        return ("statement", frozen[owner["index"]])
-    frames = registration["frames"]
-    return ("script", frames[-1][0], frames[-1][1]) if frames else None
+class Provenance:
+    """Call frames of one served layout, mapped to what the ORIGINAL page and a page that moved declarations share: a
+    frame in the page script becomes (its f1d5406 statement, the line within that statement, the column) - the moved
+    statements kept their text, so a place inside one keeps its line offset and column - and a frame in another script
+    stays (file, line, column)."""
+
+    def __init__(self, manifest, frozen):
+        self.manifest, self.frozen = manifest, frozen
+
+    def frame(self, frame):
+        file, line, column = frame
+        found = locate(self.manifest, file, line)
+        if found:
+            return ("main", self.frozen[found["index"]], line - found["start"], column)
+        return (file, line, column)
+
+    def stack(self, frames):
+        return tuple(self.frame(frame) for frame in frames)
+
+    def key(self, trace, ident):
+        """An object's identity from its creation record (see TRACE_SCRIPT)."""
+        if ident is None:
+            return None
+        if ident.startswith("singleton:"):
+            return ("singleton", ident.split(":", 1)[1])
+        record = trace["objects"].get(ident) if ident.startswith("o") else None
+        if record is None:
+            raise TraceInfraFailure(f"TRACE INFRA: target {ident} has no creation record; unresolved: "
+                                    f"{trace.get('unresolved', [])[:5]}")
+        if record["api"] == "parser":
+            return ("parsed", record["parser"], record["kind"])
+        if record["api"] == "parser-script":
+            raise TraceInfraFailure(f"TRACE INFRA: a script element is a target ({ident})")
+        owner = self.key(trace, "o" + str(record["owner"])) if record.get("owner") else None
+        return ("created", record["kind"], record["api"], self.stack(record["frames"]), record["occurrence"],
+                record.get("slot"), owner)
 
 
-def full_order(manifest, frozen, registrations):
-    """Every registration in the order it was made: kind, target identity (role and creation order), event, options,
-    listener and provenance."""
-    return [(r["kind"], r["target"], r["type"], r["capture"], r["once"], r["passive"], r["signal"], r["listener"],
-             provenance(manifest, frozen, r)) for r in registrations]
+def full_order(trace, provenance):
+    """Every registration in the order it was made: kind, the target as one object (its creation), event, options, the
+    signal as one object, listener and the mapped call stack that made it."""
+    if trace.get("unresolved"):
+        raise TraceInfraFailure(f"TRACE INFRA: {len(trace['unresolved'])} unresolved targets, e.g. {trace['unresolved'][:5]}")
+    return [(r["kind"], provenance.key(trace, r["object"]), r["type"], r["capture"], r["once"], r["passive"],
+             provenance.key(trace, r["signalObject"]), r["listener"], provenance.stack(r["frames"]))
+            for r in trace["registrations"]]
+
+
+def dispatch_order(trace, provenance, since=0):
+    """Every dispatch to a recorded listener after `since`, in order, by the registration it reached (as full_order
+    names it)."""
+    order = {r["seq"]: item for r, item in zip(trace["registrations"], full_order(trace, provenance))}
+    return [(d["type"], d["trusted"], bool(d["error"]), order.get(d["registration"])) for d in trace["dispatches"]
+            if "registration" in d and d["seq"] > since]
 
 
 def order_difference(expected, observed, limit=5):
@@ -446,6 +625,81 @@ def order_difference(expected, observed, limit=5):
             if len(out) >= limit:
                 break
     return out
+
+
+def keep(directory, name, value):
+    """Write one raw record (before anything is asserted on it); a failed write is a failure of its own."""
+    path = Path(directory) / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+    return path
+
+
+# The page side of a run whose clock is paused (Astra fix-2 design §2): every fetch the page starts (its answer, its body
+# being read), and every timer and animation frame it asks for (when due, fired, cancelled), so a phase can end only when
+# nothing is in flight and say which scheduled work it leaves for later. Installed after the clock, so the timers it
+# wraps are the paused clock's. `__synBodyHolds` (a Map path -> releases), when the case sets it, keeps the body of an
+# answer to that path from the page until the case releases it.
+LEDGER_SCRIPT = r"""(() => {
+  if (window.__synLedger) return;
+  const fetches = [], timers = new Map(), answers = new WeakMap();
+  let count = 0;
+  const realFetch = window.fetch;
+  window.fetch = function (input, init) {
+    let path = '', query = '';
+    try { const url = new URL(typeof input === 'string' ? input : input.url, location.href); path = url.pathname; query = url.search; } catch (_) {}
+    const entry = { n: ++count, method: String((init && init.method) || (input && input.method) || 'GET').toUpperCase(), path, query,
+      at: Date.now(), state: 'pending', status: null, body: 'unread' };
+    fetches.push(entry);
+    return realFetch.apply(this, arguments).then(response => {
+      entry.state = 'answered'; entry.status = response.status; answers.set(response, entry); return response;
+    }, error => { entry.state = 'failed'; entry.error = String(error && error.name); throw error; });
+  };
+  for (const name of ['json', 'text', 'arrayBuffer', 'blob', 'formData']) {
+    const read = Response.prototype[name];
+    Response.prototype[name] = function () {
+      const entry = answers.get(this), reading = read.call(this);
+      if (!entry) return reading;
+      const holds = window.__synBodyHolds, held = holds && holds.has(entry.path);
+      const finish = promise => promise.then(value => { entry.body = 'read'; return value; }, error => { entry.body = 'failed'; throw error; });
+      if (!held) { entry.body = 'reading'; return finish(reading); }
+      entry.body = 'held';
+      return new Promise((resolve, reject) => holds.get(entry.path).push(() => {
+        entry.body = 'reading'; finish(reading).then(resolve, reject); }));
+    };
+  }
+  const wrap = (name, interval, frame) => {
+    const native = window[name];
+    if (typeof native !== 'function') return;
+    window[name] = function (callback, delay, ...rest) {
+      const wait = frame ? 16 : Math.max(0, +delay || 0), record = { kind: name, at: Date.now(), delay: wait, fired: 0, done: false, cleared: false };
+      const run = typeof callback === 'function' ? function () { record.fired++; if (!interval) record.done = true; return callback.apply(this, arguments); } : callback;
+      const id = frame ? native.call(this, run) : native.call(this, run, delay, ...rest);
+      record.id = name + ':' + id;
+      timers.set(record.id, record);
+      return id;
+    };
+  };
+  const unwrap = (name, kind) => {
+    const native = window[name];
+    if (typeof native !== 'function') return;
+    window[name] = function (id) { const record = timers.get(kind + ':' + id); if (record) record.cleared = true; return native.call(this, id); };
+  };
+  wrap('setTimeout', false, false); wrap('setInterval', true, false); wrap('requestAnimationFrame', false, true);
+  unwrap('clearTimeout', 'setTimeout'); unwrap('clearInterval', 'setInterval'); unwrap('cancelAnimationFrame', 'requestAnimationFrame');
+  const due = record => record.at + record.delay * (record.kind === 'setInterval' ? record.fired + 1 : 1);
+  Object.defineProperty(window, '__synLedger', { value: Object.freeze({
+    state() {
+      const live = [...timers.values()].filter(t => !t.done && !t.cleared);
+      return { now: Date.now(), fetches: fetches.map(f => ({ ...f })),
+        inFlight: fetches.filter(f => f.state === 'pending' || f.body === 'reading').length,
+        held: fetches.filter(f => f.body === 'held').map(f => f.path),
+        timers: live.map(t => ({ kind: t.kind, delay: t.delay, due: due(t), fired: t.fired })),
+        nextDue: live.length ? Math.min(...live.map(due)) : null };
+    },
+    release(path) { const list = window.__synBodyHolds && window.__synBodyHolds.get(path); const n = list ? list.length : 0; if (list) list.splice(0).forEach(go => go()); return n; },
+  }) });
+})();"""
 
 
 def by_target_event(registrations, keys=None):

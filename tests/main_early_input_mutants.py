@@ -25,6 +25,12 @@ Rules this runner holds itself to (as the S3 mutant runners do):
     crash AND no failed precondition - an import, fixture or precondition failure is not a kill;
   * the source hash is written to the summary before and after.
 
+F2-M01..M12 (Astra fix-2 design §4) prove the harness and the after-auth acceptance cases: M01-M06 change the trace,
+the deterministic schedule, run isolation or the raw-first comparison (scratch copies of main_split_harness.py or of
+main_early_input_dom_test.py, run from a scratch directory); M07-M12 change the page (a scratch main.html through
+KIN_PRE_PAGE) or one of its files (KIN_PRE_ASSETS, for the page under test only). Each is killed by the explicit
+observation of its own case, after the same cases passed unmutated; the 37 above are reported apart.
+
 stdlib only; it launches the browser test as a child process (one per mutant) and never drives a browser itself.
 --anchors-only writes every mutant and its layout (no browser) and stops.
 """
@@ -98,20 +104,110 @@ MUTANTS = [
 ]
 
 
+DOM = "tests/main_early_input_dom_test.py"
+HARNESS = "tests/main_split_harness.py"
+PAGE_FILE = "worklist-v0/hpacs-lite/main.html"
+F2_MUTANTS = [
+    {"id": "F2-M01", "case": "TraceOracle.test_objects_are_named_by_creation_and_a_swapped_registration_order_differs",
+     "expect": "the same probe gives the same whole order", "file": DOM,
+     "old": 'for order in (["first", "second"], ["first", "second"])]',
+     "new": 'for order in (["first", "second"], ["second", "first"])]'},
+    {"id": "F2-M02", "case": "TraceOracle.test_object_lifetime_signals_and_coverage",
+     "expect": "two controllers' signals are two objects", "file": HARNESS,
+     "old": "create(controller.signal, 'AbortSignal', 'AbortController.signal', fr, controller, 'signal');",
+     "new": "create(controller.signal, 'AbortSignal', 'AbortController.signal', [], null, 'signal', 1);"},
+    {"id": "F2-M03", "case": "TraceOracle.test_the_instrument_keeps_listener_semantics",
+     "expect": "as without the instrument", "file": HARNESS,
+     "old": "return remove.call(this, type, wrapperFor(this, type, capture, listener, null), options);",
+     "new": "return remove.call(this, type, listener, options);"},
+    {"id": "F2-M04", "case": "Registration.test_repeated_retry_schedules_complete_and_end_as_on_the_original_page",
+     "expect": "the barrier left work behind", "file": DOM,
+     "old": '            if condition() and not state["held"]:', "new": "            if condition():"},
+    {"id": "F2-M05", "case": "HarnessSelfChecks.test_each_run_starts_from_its_own_fixture",
+     "expect": "the second run's account model", "file": DOM,
+     "old": "        self.site = PreSite(filters, dictation=dictation, templates=templates, rows=rows, assets=assets)",
+     "new": ('        self.site = getattr(Run, "shared_site", None) or PreSite(filters, dictation=dictation, '
+             'templates=templates, rows=rows, assets=assets)\n        Run.shared_site = self.site')},
+    {"id": "F2-M06", "case": "HarnessSelfChecks.test_raw_sides_are_kept_before_a_failed_comparison",
+     "expect": "comparison.json kept before the assertion", "file": DOM,
+     "old": ('            sh.keep(base / name, "comparison.json", comparison)\n'
+             '            self.assertEqual([], comparison["difference"], f"{what} {name}: every registration in order")'),
+     "new": ('            self.assertEqual([], comparison["difference"], f"{what} {name}: every registration in order")\n'
+             '            sh.keep(base / name, "comparison.json", comparison)')},
+    {"id": "F2-M07", "case": "AfterAuthScenarios.test_template_edit_opens_saves_and_is_used_as_edited",
+     "expect": "the template editor opens from the row's Edit", "file": PAGE_FILE,
+     "old": "function editTemplate(t, source = null, seed = t) {",
+     "new": "function editTemplate(t, source = null, seed = t) { return;"},
+    {"id": "F2-M08", "case": "AfterAuthScenarios.test_template_edit_opens_saves_and_is_used_as_edited",
+     "expect": "one template save request", "file": PAGE_FILE,
+     "old": 'const saved = await api("POST", "/templates", body, undefined, at);', "new": "const saved = t;"},
+    {"id": "F2-M09", "case": "AfterAuthScenarios.test_saved_search_saved_modified_deleted_and_another_applied",
+     "expect": "deleted: the saved search, its state and the list", "file": PAGE_FILE,
+     "old": "try { await api(\"DELETE\", `/filters/${f.id}`, undefined, undefined, at); await reloadPrefs(at); }",
+     "new": "try { await api(\"DELETE\", `/filters/${f.id}`, undefined, undefined, at); }"},
+    {"id": "F2-M10", "case": "AfterAuthScenarios.test_saved_search_storage_and_values_end_as_on_the_original_page",
+     "expect": "the server's saved searches are the ones offered", "file": PAGE_FILE,
+     "old": "      userFilters = validUserFilters(b.filters);", "new": "      userFilters = [];"},
+    {"id": "F2-M11", "case": "AfterAuthScenarios.test_storage_refused_lands_explains_and_recovers_through_login",
+     "expect": "Login returns to the work page", "file": "worklist-v0/hpacs-lite/index.html",
+     "old": "$(\"#signin\").addEventListener('click', () => press(() => KinAuth.login()));",
+     "new": "$(\"#signin\").addEventListener('click', () => press(() => {}));"},
+    {"id": "F2-M12", "case": "AfterAuthScenarios.test_saved_search_refusals_and_list_reload_recover",
+     "expect": "Reload List brings the recovered list", "file": "worklist-v0/hpacs-lite/saved-filter-manager.js",
+     "old": "$('reload').addEventListener('click', () => {", "new": "$('reload').addEventListener('click', () => { return;"},
+]
+
+
+def scratch_copy(scratch, mutant):
+    """The mutated copy and how the DOM test runs with it: {script, page, assets, pythonpath}."""
+    source = (ROOT / mutant["file"]).read_bytes().decode("utf-8")
+    newline = "\r\n" if "\r\n" in source else "\n"
+    body = source.replace("\r\n", "\n")
+    if body.count(mutant["old"]) != 1:
+        raise ValueError("%s: the mutation anchor occurs %d times" % (mutant["id"], body.count(mutant["old"])))
+    mutated = body.replace(mutant["old"], mutant["new"]).replace("\n", newline)
+    folder = scratch / mutant["id"]
+    folder.mkdir(parents=True, exist_ok=True)
+    root = "Path(%r)" % str(ROOT)
+    run = {"script": DOM_TEST, "page": PAGE, "assets": None, "pythonpath": None}
+    if mutant["file"] in (DOM, HARNESS):
+        # A scratch copy runs from its own directory (it is imported first), with the repository named outright.
+        dom = mutated if mutant["file"] == DOM else DOM_TEST.read_bytes().decode("utf-8")
+        dom = dom.replace("ROOT = Path(__file__).resolve().parents[1]", "ROOT = " + root, 1)
+        (folder / "main_early_input_dom_test.py").write_bytes(dom.encode("utf-8"))
+        if mutant["file"] == HARNESS:
+            harness = mutated.replace("ROOT = Path(__file__).resolve().parents[1]", "ROOT = " + root, 1).replace(
+                '_HELPER = Path(__file__).with_name("main_split_harness.cjs")',
+                "_HELPER = %s / 'tests' / 'main_split_harness.cjs'" % root, 1)
+            (folder / "main_split_harness.py").write_bytes(harness.encode("utf-8"))
+        run.update(script=folder / "main_early_input_dom_test.py", pythonpath=str(ROOT / "tests"))
+    elif mutant["file"] == PAGE_FILE:
+        (folder / "main.html").write_bytes(mutated.encode("utf-8"))
+        run["page"] = folder / "main.html"
+    else:
+        (folder / pathlib.Path(mutant["file"]).name).write_bytes(mutated.encode("utf-8"))
+        run["assets"] = str(folder)
+    return run
+
+
 def node(*args):
     return json.loads(subprocess.run(["node", str(HELPER), *map(str, args)], cwd=str(ROOT), check=True,
                                      capture_output=True, text=True, encoding="utf-8").stdout)
 
 
-def run_cases(page, cases, timeout, boundary=(), spec=None):
+def run_cases(page, cases, timeout, boundary=(), spec=None, script=None, assets=None, pythonpath=None):
     environment = dict(os.environ, KIN_PRE_PAGE=str(page), PYTHONIOENCODING="utf-8")
-    for key in ("KIN_PRE_SPEC", "KIN_PRE_TRACE_DIR", "KIN_PRE_BOUNDARY"):
+    for key in ("KIN_PRE_SPEC", "KIN_PRE_TRACE_DIR", "KIN_PRE_BOUNDARY", "KIN_PRE_ASSETS"):
         environment.pop(key, None)
     if boundary:
         environment["KIN_PRE_BOUNDARY"] = json.dumps(list(boundary))
     if spec:
         environment["KIN_PRE_SPEC"] = str(spec)
-    command = [sys.executable, "-B", str(DOM_TEST), *cases]
+    if assets:
+        environment["KIN_PRE_ASSETS"] = str(assets)
+    if pythonpath:
+        environment["PYTHONPATH"] = pythonpath + os.pathsep + environment.get("PYTHONPATH", "")
+    command = [sys.executable, "-B", str(script or DOM_TEST), *cases]
     done = subprocess.run(command, cwd=str(ROOT), env=environment, capture_output=True, text=True,
                           encoding="utf-8", errors="replace", timeout=timeout)
     return done, (done.stdout or "") + (done.stderr or "")
@@ -175,9 +271,10 @@ def main():
     parser.add_argument("--timeout", type=int, default=600, help="Seconds per child run")
     parser.add_argument("--jobs", type=int, default=2, help="Mutant children at a time")
     parser.add_argument("--anchors-only", action="store_true", help="Write every mutant and its layout (no browser) and stop")
-    parser.add_argument("only", nargs="*", help="Mutant ids (default: all 37)")
+    parser.add_argument("only", nargs="*", help="Mutant ids (default: the 37 and F2-M01..M12)")
     args = parser.parse_args()
     selected = [m for m in MUTANTS if not args.only or m["id"] in args.only]
+    selected_f2 = [m for m in F2_MUTANTS if not args.only or m["id"] in args.only]
     before = hashlib.sha256(PAGE.read_bytes()).hexdigest()
     print("%s sha256 %s" % (PAGE.name, before))
     scratch = pathlib.Path(tempfile.mkdtemp(prefix="kin-pre-split-mutants-"))
@@ -198,6 +295,14 @@ def main():
                 continue
             if "boundary" not in ready and ("def %s(" % ready["case"].split(".")[-1]) not in dom_source:
                 problems.append("%s names a case that does not exist: %s" % (mutant["id"], ready["case"]))
+        f2_runs = {}
+        for mutant in selected_f2:
+            try:
+                f2_runs[mutant["id"]] = scratch_copy(scratch, mutant)
+            except (OSError, ValueError) as error:
+                problems.append(str(error))
+            if ("def %s(" % mutant["case"].split(".")[-1]) not in dom_source:
+                problems.append("%s names a case that does not exist: %s" % (mutant["id"], mutant["case"]))
         if problems:
             for problem in problems:
                 print("ANCHOR FAILURE:", problem)
@@ -205,9 +310,10 @@ def main():
         for mutant in prepared:
             print("%s case=%s layout=%s" % (mutant["id"], mutant["case"], json.dumps(mutant.get("layout"))))
         if args.anchors_only:
-            print("all %d mutants and layouts written (no browser run requested)" % len(prepared))
+            print("all %d mutants and layouts and %d F2 mutants written (no browser run requested)" % (len(prepared), len(f2_runs)))
             return 0
         boundary, cases = baseline_cases(prepared)
+        cases += sorted({m["case"] for m in selected_f2} - set(cases))
         done, output = run_cases(PAGE, cases, args.timeout * 4, boundary=boundary)
         ran = re.search(r"Ran (\d+) tests?", output)
         baseline_ok = (done.returncode == 0 and not any(marker in output for marker in CRASH_MARKERS)
@@ -237,6 +343,25 @@ def main():
                     "precondition_failed": precondition, "harness_crash": crashed, "killed": killed,
                     "mutant_sha256": hashlib.sha256(page.read_bytes()).hexdigest()}
 
+        def judge_f2(mutant):
+            run = f2_runs[mutant["id"]]
+            done, output = run_cases(run["page"], [mutant["case"]], args.timeout, script=run["script"],
+                                     assets=run["assets"], pythonpath=run["pythonpath"])
+            named, block, assertion = failure_block(output, mutant["case"])
+            crashed = any(marker in output for marker in CRASH_MARKERS)
+            matched = mutant["expect"] if mutant["expect"] in block else ""
+            killed = done.returncode != 0 and bool(named) and bool(assertion) and bool(matched) and not crashed
+            return {"id": mutant["id"], "case": mutant["case"], "mutation": {k: mutant[k] for k in ("file", "old", "new")},
+                    "child_exit": done.returncode, "named_failure": named, "expect": mutant["expect"],
+                    "expect_matched": matched, "assertion_text": assertion, "harness_crash": crashed, "killed": killed,
+                    "tail": output[-1500:] if not killed else ""}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
+            for row in pool.map(judge_f2, selected_f2):
+                results.append(row)
+                print("%s case=%s exit=%d expect_matched=%s killed=%s" % (row["id"], row["case"], row["child_exit"],
+                                                                          bool(row["expect_matched"]), row["killed"]))
+                print("      %s" % (row["assertion_text"] or row["named_failure"] or "no failure reported"))
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
             for row in pool.map(judge, prepared):
                 results.append(row)
@@ -255,6 +380,10 @@ def main():
         out.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
         print("summary written to %s" % out)
     survivors = [row["id"] for row in results if row["id"] != "BASELINE" and not row["killed"]]
+    f2 = [row for row in results if row["id"].startswith("F2-")]
+    print("M01-M37: %d/%d killed; F2-M01..M12: %d/%d killed" % (
+        sum(r["killed"] for r in results if r["id"].startswith("M")), sum(1 for r in results if r["id"].startswith("M")),
+        sum(r["killed"] for r in f2), len(f2)))
     if survivors or before != after:
         print("SURVIVORS: %s" % ", ".join(survivors) if survivors else "the page changed during the run")
         return 1
