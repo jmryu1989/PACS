@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "command": [
+    "C:\\Users\\norne\\PACS\\tmp\\hp-dom-venv\\Scripts\\python.exe",
+    "tests/main_early_input_dom_test.py",
+    "EarlyInputSplit"
+  ],
+  "cwd": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre",
+  "status": "completed",
+  "started_at_utc": "2026-10-09T02:27:34.809092+00:00",
+  "ended_at_utc": "2026-10-09T02:29:15.990617+00:00",
+  "exit_code": 1,
+  "recorder_exit_code": 1,
+  "launch_error": null,
+  "git_head_before": "8a577caca1e6a63d340d37bbe6eea0592f613a06",
+  "git_head_after": "8a577caca1e6a63d340d37bbe6eea0592f613a06",
+  "files_before": [
+    {
+      "requested": "worklist-v0/hpacs-lite/main.html",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\worklist-v0\\hpacs-lite\\main.html",
+      "status": "present",
+      "sha256": "70af83c893735fdbf2a34716df88ae0cc0db3479f31964d2d74b82f2bdfc5810",
+      "lf_sha256": "7cfba342419534035df155ca65750e22878a2dc07cc05a3d67ac1a63f8645b2a"
+    },
+    {
+      "requested": "tests/main_early_input_dom_test.py",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\main_early_input_dom_test.py",
+      "status": "present",
+      "sha256": "1bc0347e3417f72312c40bd436121fe3d10a0f5ffa5abe04cf5939469721aba9",
+      "lf_sha256": "1bc0347e3417f72312c40bd436121fe3d10a0f5ffa5abe04cf5939469721aba9"
+    },
+    {
+      "requested": "tests/main_split_harness.py",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\main_split_harness.py",
+      "status": "present",
+      "sha256": "4519dfb32aabfc76cbace3125dea918bf6cf4dd731f4821ec476ea727065144c",
+      "lf_sha256": "4519dfb32aabfc76cbace3125dea918bf6cf4dd731f4821ec476ea727065144c"
+    },
+    {
+      "requested": "tests/main_split_harness.cjs",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\main_split_harness.cjs",
+      "status": "present",
+      "sha256": "c5fc42f1a8d6f44952e58e99412435fb58f7320323e1062b76c96b720b02b1ff",
+      "lf_sha256": "c5fc42f1a8d6f44952e58e99412435fb58f7320323e1062b76c96b720b02b1ff"
+    },
+    {
+      "requested": "tmp/s9-u0a-pre/tools/simulate_fix.cjs",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tmp\\s9-u0a-pre\\tools\\simulate_fix.cjs",
+      "status": "present",
+      "sha256": "a892f3080dab786b95c43379c751f77d930ecec539432583cf4ec7411088e1c2",
+      "lf_sha256": "a892f3080dab786b95c43379c751f77d930ecec539432583cf4ec7411088e1c2"
+    },
+    {
+      "requested": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-sim\\proposal-plus-2.html",
+      "path": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-sim\\proposal-plus-2.html",
+      "status": "present",
+      "sha256": "0dd3eedfe81658608166fcc2c106ece4ddf3716728cf51716ff66d0161f3d0ae",
+      "lf_sha256": "308bcb686023f3674f32846d2bf55cb677a71ab1e5df9567f25ed8e81b3e780d"
+    }
+  ],
+  "files_after": [
+    {
+      "requested": "worklist-v0/hpacs-lite/main.html",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\worklist-v0\\hpacs-lite\\main.html",
+      "status": "present",
+      "sha256": "70af83c893735fdbf2a34716df88ae0cc0db3479f31964d2d74b82f2bdfc5810",
+      "lf_sha256": "7cfba342419534035df155ca65750e22878a2dc07cc05a3d67ac1a63f8645b2a"
+    },
+    {
+      "requested": "tests/main_early_input_dom_test.py",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\main_early_input_dom_test.py",
+      "status": "present",
+      "sha256": "1bc0347e3417f72312c40bd436121fe3d10a0f5ffa5abe04cf5939469721aba9",
+      "lf_sha256": "1bc0347e3417f72312c40bd436121fe3d10a0f5ffa5abe04cf5939469721aba9"
+    },
+    {
+      "requested": "tests/main_split_harness.py",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\main_split_harness.py",
+      "status": "present",
+      "sha256": "4519dfb32aabfc76cbace3125dea918bf6cf4dd731f4821ec476ea727065144c",
+      "lf_sha256": "4519dfb32aabfc76cbace3125dea918bf6cf4dd731f4821ec476ea727065144c"
+    },
+    {
+      "requested": "tests/main_split_harness.cjs",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\main_split_harness.cjs",
+      "status": "present",
+      "sha256": "c5fc42f1a8d6f44952e58e99412435fb58f7320323e1062b76c96b720b02b1ff",
+      "lf_sha256": "c5fc42f1a8d6f44952e58e99412435fb58f7320323e1062b76c96b720b02b1ff"
+    },
+    {
+      "requested": "tmp/s9-u0a-pre/tools/simulate_fix.cjs",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tmp\\s9-u0a-pre\\tools\\simulate_fix.cjs",
+      "status": "present",
+      "sha256": "a892f3080dab786b95c43379c751f77d930ecec539432583cf4ec7411088e1c2",
+      "lf_sha256": "a892f3080dab786b95c43379c751f77d930ecec539432583cf4ec7411088e1c2"
+    },
+    {
+      "requested": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-sim\\proposal-plus-2.html",
+      "path": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-sim\\proposal-plus-2.html",
+      "status": "present",
+      "sha256": "0dd3eedfe81658608166fcc2c106ece4ddf3716728cf51716ff66d0161f3d0ae",
+      "lf_sha256": "308bcb686023f3674f32846d2bf55cb677a71ab1e5df9567f25ed8e81b3e780d"
+    }
+  ],
+  "stdout": "stdout.log",
+  "stderr": "stderr.log",
+  "log_files": [
+    {
+      "requested": "stdout.log",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tmp\\s9-u0a-pre\\runs\\sim-proposal-plus-2\\stdout.log",
+      "status": "present",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "lf_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "requested": "stderr.log",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tmp\\s9-u0a-pre\\runs\\sim-proposal-plus-2\\stderr.log",
+      "status": "present",
+      "sha256": "242a64554effb98e7cd26d6f87c02a52c69eac28f227dccf1bbd33689672d313",
+      "lf_sha256": "fea8931c792637e25f777c71644352a360f1695ca6af1ce1d44e7238bb89b550"
+    }
+  ],
+  "duration_seconds": 101.17200000000048
+}

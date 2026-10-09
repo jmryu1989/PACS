@@ -1,0 +1,30 @@
+test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none (__main__.Registration.test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none) ... 
+  test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none (__main__.Registration.test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none) (outcome='failed then retried') ... FAIL
+test_registrations_before_the_session_answer_match_the_original_page (__main__.Registration.test_registrations_before_the_session_answer_match_the_original_page) ... ok
+test_B1_03_unsplit (__main__.UnsplitControl.test_B1_03_unsplit) ... ok
+test_B1_05_unsplit (__main__.UnsplitControl.test_B1_05_unsplit) ... ok
+test_B1_58_unsplit (__main__.UnsplitControl.test_B1_58_unsplit) ... ok
+test_PRE_X1_unsplit (__main__.UnsplitControl.test_PRE_X1_unsplit) ... ok
+test_PRE_X3_unsplit (__main__.UnsplitControl.test_PRE_X3_unsplit) ... ok
+test_leaving_unsplit (__main__.UnsplitControl.test_leaving_unsplit) ... ok
+
+======================================================================
+FAIL: test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none (__main__.Registration.test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none) (outcome='failed then retried')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 550, in test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none
+    self.assert_same_registrations(sh.by_target_event(before, on_targets), sh.by_target_event(after, on_targets),
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 395, in assert_same_registrations
+    self.assertEqual([], registration_difference(expected, observed), what)
+AssertionError: Lists differ: [] != [{'key': ('#conclusion', 'keydown'), 'orig[2963 chars]')]}]
+
+Second list contains 16 additional elements.
+First extra element 0:
+{'key': ('#conclusion', 'keydown'), 'original': [('add', False, False, None, '4e6f013d')], 'observed': [('add', False, False, None, '4e6f013d'), ('add', False, False, None, '4e6f013d')]}
+
+Diff is 3463 characters long. Set self.maxDiff to None to see it. : failed then retried: the hazard targets gain no registration after the session answer
+
+----------------------------------------------------------------------
+Ran 8 tests in 58.082s
+
+FAILED (failures=1)

@@ -227,6 +227,8 @@ class Run:
 
     def __init__(self, case, layout, hold=None, delay_ms=0, auth="answer", filters=()):
         self.case, (directory, self.manifest) = case, layout
+        # The ORIGINAL page also gets the baseline's own versions of the page's other scripts.
+        others = Pages.baseline_file if Path(directory).is_relative_to(Pages.original.root) else None
         self.site = PreSite(filters)
         if auth != "answer":
             self.site.held_me = []
@@ -237,7 +239,8 @@ class Run:
         self.context.route("**/*", lambda route, request: self.site.handle(route, request))
         self.context.route(PROBE_URL, lambda route: route.fulfill(body="<!doctype html><title>SYN elsewhere</title>",
                                                                   content_type="text/html; charset=utf-8"))
-        self.delivery = sh.Delivery(directory, self.manifest, h.BASE, delay_ms=delay_ms, hold=hold).install(self.context)
+        self.delivery = sh.Delivery(directory, self.manifest, h.BASE, delay_ms=delay_ms, hold=hold,
+                                    others=others).install(self.context)
         self.page = self.context.new_page()
         self.page.set_default_timeout(10000)
         self.errors, self.dialogs = [], []
@@ -314,6 +317,16 @@ class Result:
 class Pages:
     """The ORIGINAL page (git blob of the move baseline) and the page under test, as scratch layouts."""
     current = original = derived = None
+    blobs = {}
+
+    @classmethod
+    def baseline_file(cls, name):
+        """A file of the page directory as the move baseline has it (the ORIGINAL page's other scripts)."""
+        if name not in cls.blobs:
+            path = Path(ORIGINAL_SPEC["page"]).parent.as_posix() + "/" + name
+            cls.blobs[name] = subprocess.check_output(["git", "cat-file", "--filters", f"{ORIGINAL_SPEC['base']}:{path}"],
+                                                      cwd=ROOT)
+        return cls.blobs[name]
 
     @classmethod
     def open(cls):
@@ -324,11 +337,9 @@ class Pages:
                 spec = cls.current.root / "derived-spec.json"
                 cls.derived = sh.derive_spec(PAGE, spec)
             cls.current.spec = spec
-            blob = subprocess.check_output(["git", "cat-file", "--filters", f"{ORIGINAL_SPEC['base']}:{ORIGINAL_SPEC['page']}"],
-                                           cwd=ROOT)
             source = cls.current.root / "original-source" / "main.html"
             source.parent.mkdir(parents=True)
-            source.write_bytes(blob)
+            source.write_bytes(cls.baseline_file("main.html"))
             cls.original = sh.ScratchPages(page=source, root=cls.current.root / "original")
 
     @classmethod
@@ -384,8 +395,9 @@ class PreCase(unittest.TestCase):
         self.assertEqual([], registration_difference(expected, observed), what)
 
     # ── the scenario ──
-    def early(self, hazard, layout, hold=None, delay_ms=0, trigger=None, auth="answer"):
-        """Give the hazard's inputs at the early moment, let the page boot, and observe both times."""
+    def early(self, hazard, layout, hold=None, delay_ms=0, trigger=None, auth="answer", gap=None):
+        """Give the hazard's inputs at the early moment, let the page boot, and observe both times. With `gap` (timed
+        delivery) the inputs must have been given before that part ran, or the case did not reach the gap."""
         spec = HAZARDS[hazard]
         run = Run(self, layout, hold=hold, delay_ms=delay_ms, auth=auth,
                   filters=(SAVED,) if spec["inputs"] in (quick_match, worklist_controls) else ())
@@ -397,6 +409,8 @@ class PreCase(unittest.TestCase):
             run.ran(trigger)
         since = run.page.evaluate("window.__kinTrace.now()")
         spec["inputs"](run.page)
+        if gap and run.page.evaluate("f => window.__kinTrace.executed.includes(f)", gap):
+            self.skipTest(f"timing: the inputs ended after {gap} ran, so they did not land in the gap before it")
         run.settle(150)
         early_trace, early_screen = run.trace(since), run.screen()
         run.delivery.release()
@@ -464,23 +478,35 @@ class PreCase(unittest.TestCase):
         return out
 
     def assert_like_original(self, hazard, result):
-        """No error, no failed hazard listener, and the same screen as the original moment it corresponds to."""
+        """No error, no failed hazard listener, hazard listeners that were reached behave as in the original's `post`
+        moment, and the screen (right after the input and after boot) is the original's at one of its two moments.
+        Other listeners on the same targets may already be registered or not (a part boundary can fall between
+        them); what counts is that the person sees what the original shows at `pre` or at `post`."""
         if result.errors:
             raise HazardFailure(f"{hazard}: uncaught errors on the early input: {result.errors}", result.errors)
         failed = [d for d in result.dispatches if d["error"]]
         self.assertEqual([], failed, f"{hazard}: hazard listeners that failed")
-        moment = "post" if result.dispatches else "pre"
-        reference = self.reference(hazard, moment)
-        self.assertEqual([], reference.errors, f"{hazard}: the original page itself had errors at the {moment} moment")
-        self.assertEqual([(d["target"], d["type"]) for d in reference.dispatches],
-                         [(d["target"], d["type"]) for d in result.dispatches],
-                         f"{hazard}: the hazard listeners the early input reached (like the original's {moment} moment)")
-        for part in HAZARDS[hazard]["screen"]:
-            self.assertEqual(reference.early_screen[part], result.early_screen[part],
-                             f"{hazard}: '{part}' right after the early input differs from the original's {moment} moment")
-            self.assertEqual(reference.final_screen[part], result.final_screen[part],
-                             f"{hazard}: '{part}' after boot differs from the original's {moment} moment")
-        self.assertEqual(reference.dialogs, result.dialogs, f"{hazard}: dialogs")
+        references = {moment: self.reference(hazard, moment) for moment in ("pre", "post")}
+        for moment, reference in references.items():
+            self.assertEqual([], reference.errors, f"{hazard}: the original page itself had errors at the {moment} moment")
+        if result.dispatches:
+            self.assertEqual([(d["target"], d["type"]) for d in references["post"].dispatches],
+                             [(d["target"], d["type"]) for d in result.dispatches],
+                             f"{hazard}: the hazard listeners the early input reached, as at the original's post moment")
+        parts = HAZARDS[hazard]["screen"]
+        seen = {"early": {p: result.early_screen[p] for p in parts}, "final": {p: result.final_screen[p] for p in parts},
+                "dialogs": result.dialogs}
+        like = {moment: {"early": {p: r.early_screen[p] for p in parts}, "final": {p: r.final_screen[p] for p in parts},
+                         "dialogs": r.dialogs} for moment, r in references.items()}
+        matching = [moment for moment, expected in like.items() if expected == seen]
+        if not matching:
+            nearest = min(like, key=lambda m: sum(like[m][t] != seen[t] for t in seen))
+            for when in ("early", "final"):
+                for part in parts:
+                    self.assertEqual(like[nearest][when][part], seen[when][part],
+                                     f"{hazard}: '{part}' ({when}) is neither the original's pre nor its post screen "
+                                     f"(compared with the nearer one, {nearest})")
+            self.assertEqual(like[nearest]["dialogs"], seen["dialogs"], f"{hazard}: dialogs")
 
 
 # ── TEST-PRE-REGISTRATION (green: the reference the product change must keep) ──
@@ -603,14 +629,16 @@ def case_name(hazard, count, where):
     return f"test_{hazard.replace('-', '_')}_{count}_{re.sub(r'[^A-Za-z0-9]+', '_', where).strip('_')}"
 
 
-def split_case(hazard, count, documented, hold_module=None, trigger_module=None, delay_ms=0):
+def split_case(hazard, count, documented, hold_module=None, trigger_module=None, delay_ms=0, gap_module=None):
     def test(self):
         layout = Pages.current.layout(count)
         manifest = layout[1]
         hold = sh.part_of(manifest, hold_module) if hold_module is not None else None
         trigger = sh.part_of(manifest, trigger_module) if trigger_module is not None else None
-        self.assertTrue(hold or trigger, "the case names a boundary of this layout")
-        self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger))
+        gap = sh.part_of(manifest, gap_module) if gap_module is not None else None
+        self.assertTrue(hold or (trigger and gap), "the case names a boundary of this layout")
+        self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger,
+                                                     gap=gap))
     files = ORIGINAL_SPEC["modules"]
     where = (f"hold {files[hold_module]['file']}" if hold_module is not None
              else f"{delay_ms}ms after {files[trigger_module]['file']}")
@@ -664,10 +692,14 @@ for count in PARTS:
     if MODULE["saved-filters.js"] < count:
         leave_case("B1-57", count, not_defined("applyLayout", "renderChips"), MODULE["clinical-context-panel.js"])
         leave_case("PRE-P3", count, not_defined("renderChips"), MODULE["worklist-controls.js"])
-split_case("B1-03", 45, not_defined("selectionSeq"), trigger_module=MODULE["report-dictation.js"], delay_ms=150)
-split_case("B1-05", 45, not_defined("cur"), trigger_module=MODULE["report-templates-ui.js"], delay_ms=150)
-split_case("B1-05", 45, not_defined("RFIELDS"), trigger_module=MODULE["current-study.js"], delay_ms=150)
-split_case("B1-58", 45, not_defined("renderChips"), trigger_module=MODULE["worklist-controls.js"], delay_ms=150)
+# 150 ms per boundary, no hold: the inputs as soon as the registering part ran, before the part that declares.
+for hazard, documented, registering, declaring in (
+        ("B1-03", "selectionSeq", "report-dictation.js", "report-editor.js"),
+        ("B1-05", "cur", "report-templates-ui.js", "current-study.js"),
+        ("B1-05", "RFIELDS", "current-study.js", "related-report.js"),
+        ("B1-58", "renderChips", "worklist-controls.js", "saved-filters.js")):
+    split_case(hazard, 45, not_defined(documented), trigger_module=MODULE[registering], delay_ms=150,
+               gap_module=MODULE[declaring])
 
 
 def write_trace(directory, name, manifest, registrations):

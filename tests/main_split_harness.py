@@ -99,8 +99,10 @@ class Delivery:
     for ``release()``. Anything else under the page directory falls back to the routes registered before this one.
     """
 
-    def __init__(self, directory, manifest, base, delay_ms=0, hold=None):
+    def __init__(self, directory, manifest, base, delay_ms=0, hold=None, others=None):
         self.dir, self.manifest, self.base = Path(directory), manifest, base
+        # The page's other scripts: the product files, or `others(name) -> bytes` (e.g. a baseline's git blobs).
+        self.others = others or (lambda name: (PRODUCT_DIR / name).read_bytes())
         self.order = list(manifest["scripts"])
         self.parts = set(manifest["parts"])
         self.delay = delay_ms / 1000.0
@@ -115,8 +117,9 @@ class Delivery:
         return self
 
     def body(self, name):
-        own = name == "main.html" or name in self.parts
-        return ((self.dir if own else PRODUCT_DIR) / name).read_bytes()
+        if name == "main.html" or name in self.parts:
+            return (self.dir / name).read_bytes()
+        return self.others(name)
 
     def _handle(self, route, request):
         name = urlparse(request.url).path[len(self.base):]

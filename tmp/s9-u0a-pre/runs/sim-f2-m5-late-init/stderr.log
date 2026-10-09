@@ -1,0 +1,98 @@
+test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none (__main__.Registration.test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none) ... 
+  test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none (__main__.Registration.test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none) (outcome='answered') ... FAIL
+  test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none (__main__.Registration.test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none) (outcome='failed') ... FAIL
+  test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none (__main__.Registration.test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none) (outcome='failed then retried') ... FAIL
+test_registrations_before_the_session_answer_match_the_original_page (__main__.Registration.test_registrations_before_the_session_answer_match_the_original_page) ... FAIL
+test_B1_03_unsplit (__main__.UnsplitControl.test_B1_03_unsplit) ... ok
+test_B1_05_unsplit (__main__.UnsplitControl.test_B1_05_unsplit) ... 
+  test_B1_05_unsplit (__main__.UnsplitControl.test_B1_05_unsplit) (moment='post') ... FAIL
+test_B1_58_unsplit (__main__.UnsplitControl.test_B1_58_unsplit) ... 
+  test_B1_58_unsplit (__main__.UnsplitControl.test_B1_58_unsplit) (moment='post') ... FAIL
+test_PRE_X1_unsplit (__main__.UnsplitControl.test_PRE_X1_unsplit) ... ok
+test_PRE_X3_unsplit (__main__.UnsplitControl.test_PRE_X3_unsplit) ... ok
+test_leaving_unsplit (__main__.UnsplitControl.test_leaving_unsplit) ... ok
+
+======================================================================
+FAIL: test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none (__main__.Registration.test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none) (outcome='answered')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 548, in test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none
+    self.assert_same_registrations(expected, sh.by_target_event(before, keys),
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 395, in assert_same_registrations
+    self.assertEqual([], registration_difference(expected, observed), what)
+AssertionError: Lists differ: [] != [{'key': ('#quick-match', 'change'), 'orig[1383 chars]one}]
+
+Second list contains 13 additional elements.
+First extra element 0:
+{'key': ('#quick-match', 'change'), 'original': [('add', False, False, None, 'a6162491')], 'observed': None}
+
+Diff is 1578 characters long. Set self.maxDiff to None to see it. : answered: the hazard registrations exist before the session answer
+
+======================================================================
+FAIL: test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none (__main__.Registration.test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none) (outcome='failed')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 548, in test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none
+    self.assert_same_registrations(expected, sh.by_target_event(before, keys),
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 395, in assert_same_registrations
+    self.assertEqual([], registration_difference(expected, observed), what)
+AssertionError: Lists differ: [] != [{'key': ('#quick-match', 'change'), 'orig[1383 chars]one}]
+
+Second list contains 13 additional elements.
+First extra element 0:
+{'key': ('#quick-match', 'change'), 'original': [('add', False, False, None, 'a6162491')], 'observed': None}
+
+Diff is 1578 characters long. Set self.maxDiff to None to see it. : failed: the hazard registrations exist before the session answer
+
+======================================================================
+FAIL: test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none (__main__.Registration.test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none) (outcome='failed then retried')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 548, in test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none
+    self.assert_same_registrations(expected, sh.by_target_event(before, keys),
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 395, in assert_same_registrations
+    self.assertEqual([], registration_difference(expected, observed), what)
+AssertionError: Lists differ: [] != [{'key': ('#quick-match', 'change'), 'orig[1383 chars]one}]
+
+Second list contains 13 additional elements.
+First extra element 0:
+{'key': ('#quick-match', 'change'), 'original': [('add', False, False, None, 'a6162491')], 'observed': None}
+
+Diff is 1578 characters long. Set self.maxDiff to None to see it. : failed then retried: the hazard registrations exist before the session answer
+
+======================================================================
+FAIL: test_registrations_before_the_session_answer_match_the_original_page (__main__.Registration.test_registrations_before_the_session_answer_match_the_original_page)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 522, in test_registrations_before_the_session_answer_match_the_original_page
+    self.assert_same_registrations(sh.by_target_event(original), sh.by_target_event(current),
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 395, in assert_same_registrations
+    self.assertEqual([], registration_difference(expected, observed), what)
+AssertionError: Lists differ: [] != [{'key': ('#b-report-template', 'click'), [2258 chars]one}]
+
+Second list contains 21 additional elements.
+First extra element 0:
+{'key': ('#b-report-template', 'click'), 'original': [('add', False, False, None, 'b8e7c97f')], 'observed': None}
+
+Diff is 2541 characters long. Set self.maxDiff to None to see it. : per (target, event): the same registrations in the same order before the session answer
+
+======================================================================
+FAIL: test_B1_05_unsplit (__main__.UnsplitControl.test_B1_05_unsplit) (moment='post')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 595, in check
+    self.assertEqual(moment == "post", bool(result.dispatches), "the hazard listeners are reached only after the script ran")
+AssertionError: True != False : the hazard listeners are reached only after the script ran
+
+======================================================================
+FAIL: test_B1_58_unsplit (__main__.UnsplitControl.test_B1_58_unsplit) (moment='post')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 595, in check
+    self.assertEqual(moment == "post", bool(result.dispatches), "the hazard listeners are reached only after the script ran")
+AssertionError: True != False : the hazard listeners are reached only after the script ran
+
+----------------------------------------------------------------------
+Ran 8 tests in 51.383s
+
+FAILED (failures=6)

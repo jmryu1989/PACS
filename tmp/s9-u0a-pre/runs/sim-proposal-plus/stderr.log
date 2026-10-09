@@ -1,0 +1,195 @@
+test_B1_03_18_hold_report_templates_ui_js (__main__.EarlyInputSplit.test_B1_03_18_hold_report_templates_ui_js)
+B1-03: 18-part page, hold report-templates-ui.js; documented failure '^ReferenceError: (selectionSeq) is not defined$' ... ok
+test_B1_03_18_hold_study_corrections_js (__main__.EarlyInputSplit.test_B1_03_18_hold_study_corrections_js)
+B1-03: 18-part page, hold study-corrections.js; documented failure '^ReferenceError: (selectionSeq) is not defined$' ... ok
+test_B1_03_30_hold_report_editor_js (__main__.EarlyInputSplit.test_B1_03_30_hold_report_editor_js)
+B1-03: 30-part page, hold report-editor.js; documented failure '^ReferenceError: (selectionSeq) is not defined$' ... ok
+test_B1_03_30_hold_report_templates_ui_js (__main__.EarlyInputSplit.test_B1_03_30_hold_report_templates_ui_js)
+B1-03: 30-part page, hold report-templates-ui.js; documented failure '^ReferenceError: (selectionSeq) is not defined$' ... ok
+test_B1_03_45_150ms_after_report_dictation_js (__main__.EarlyInputSplit.test_B1_03_45_150ms_after_report_dictation_js)
+B1-03: 45-part page, 150ms after report-dictation.js; documented failure '^ReferenceError: (selectionSeq) is not defined$' ... ok
+test_B1_03_45_hold_report_editor_js (__main__.EarlyInputSplit.test_B1_03_45_hold_report_editor_js)
+B1-03: 45-part page, hold report-editor.js; documented failure '^ReferenceError: (selectionSeq) is not defined$' ... ok
+test_B1_03_45_hold_report_templates_ui_js (__main__.EarlyInputSplit.test_B1_03_45_hold_report_templates_ui_js)
+B1-03: 45-part page, hold report-templates-ui.js; documented failure '^ReferenceError: (selectionSeq) is not defined$' ... ok
+test_B1_05_18_hold_current_study_js (__main__.EarlyInputSplit.test_B1_05_18_hold_current_study_js)
+B1-05: 18-part page, hold current-study.js; documented failure '^ReferenceError: (cur) is not defined$' ... ok
+test_B1_05_18_hold_study_corrections_js (__main__.EarlyInputSplit.test_B1_05_18_hold_study_corrections_js)
+B1-05: 18-part page, hold study-corrections.js; documented failure '^ReferenceError: (RFIELDS) is not defined$' ... ok
+test_B1_05_18_hold_worklist_columns_view_js (__main__.EarlyInputSplit.test_B1_05_18_hold_worklist_columns_view_js)
+B1-05: 18-part page, hold worklist-columns-view.js; documented failure '^ReferenceError: (cur) is not defined$' ... ok
+test_B1_05_30_hold_current_study_js (__main__.EarlyInputSplit.test_B1_05_30_hold_current_study_js)
+B1-05: 30-part page, hold current-study.js; documented failure '^ReferenceError: (cur) is not defined$' ... ok
+test_B1_05_30_hold_related_report_js (__main__.EarlyInputSplit.test_B1_05_30_hold_related_report_js)
+B1-05: 30-part page, hold related-report.js; documented failure '^ReferenceError: (RFIELDS) is not defined$' ... ok
+test_B1_05_30_hold_worklist_columns_view_js (__main__.EarlyInputSplit.test_B1_05_30_hold_worklist_columns_view_js)
+B1-05: 30-part page, hold worklist-columns-view.js; documented failure '^ReferenceError: (cur) is not defined$' ... ok
+test_B1_05_45_150ms_after_current_study_js (__main__.EarlyInputSplit.test_B1_05_45_150ms_after_current_study_js)
+B1-05: 45-part page, 150ms after current-study.js; documented failure '^ReferenceError: (RFIELDS) is not defined$' ... ok
+test_B1_05_45_150ms_after_report_templates_ui_js (__main__.EarlyInputSplit.test_B1_05_45_150ms_after_report_templates_ui_js)
+B1-05: 45-part page, 150ms after report-templates-ui.js; documented failure '^ReferenceError: (cur) is not defined$' ... ok
+test_B1_05_45_hold_current_study_js (__main__.EarlyInputSplit.test_B1_05_45_hold_current_study_js)
+B1-05: 45-part page, hold current-study.js; documented failure '^ReferenceError: (cur) is not defined$' ... ok
+test_B1_05_45_hold_related_report_js (__main__.EarlyInputSplit.test_B1_05_45_hold_related_report_js)
+B1-05: 45-part page, hold related-report.js; documented failure '^ReferenceError: (RFIELDS) is not defined$' ... ok
+test_B1_05_45_hold_worklist_columns_view_js (__main__.EarlyInputSplit.test_B1_05_45_hold_worklist_columns_view_js)
+B1-05: 45-part page, hold worklist-columns-view.js; documented failure '^ReferenceError: (cur) is not defined$' ... ok
+test_B1_15_18_leave_while_holding_worklist_view_js (__main__.EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js)
+B1-15: 18-part page, leave while holding worklist-view.js; documented failure '^ReferenceError: (renderRelated) is not defined$' ... FAIL
+test_B1_15_30_leave_while_holding_worklist_view_js (__main__.EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js)
+B1-15: 30-part page, leave while holding worklist-view.js; documented failure '^ReferenceError: (renderRelated) is not defined$' ... FAIL
+test_B1_15_45_leave_while_holding_worklist_view_js (__main__.EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js)
+B1-15: 45-part page, leave while holding worklist-view.js; documented failure '^ReferenceError: (renderRelated) is not defined$' ... FAIL
+test_B1_57_45_leave_while_holding_clinical_context_panel_js (__main__.EarlyInputSplit.test_B1_57_45_leave_while_holding_clinical_context_panel_js)
+B1-57: 45-part page, leave while holding clinical-context-panel.js; documented failure '^ReferenceError: (applyLayout|renderChips) is not defined$' ... FAIL
+test_B1_58_45_150ms_after_worklist_controls_js (__main__.EarlyInputSplit.test_B1_58_45_150ms_after_worklist_controls_js)
+B1-58: 45-part page, 150ms after worklist-controls.js; documented failure '^ReferenceError: (renderChips) is not defined$' ... ok
+test_B1_58_45_hold_saved_filters_js (__main__.EarlyInputSplit.test_B1_58_45_hold_saved_filters_js)
+B1-58: 45-part page, hold saved-filters.js; documented failure '^ReferenceError: (renderChips) is not defined$' ... ok
+test_PRE_P3_45_leave_while_holding_worklist_controls_js (__main__.EarlyInputSplit.test_PRE_P3_45_leave_while_holding_worklist_controls_js)
+PRE-P3: 45-part page, leave while holding worklist-controls.js; documented failure '^ReferenceError: (renderChips) is not defined$' ... FAIL
+test_PRE_X1_30_hold_report_toolbar_js (__main__.EarlyInputSplit.test_PRE_X1_30_hold_report_toolbar_js)
+PRE-X1: 30-part page, hold report-toolbar.js; documented failure '^ReferenceError: (reportWriteBlock) is not defined$' ... FAIL
+test_PRE_X1_30_hold_work_exit_js (__main__.EarlyInputSplit.test_PRE_X1_30_hold_work_exit_js)
+PRE-X1: 30-part page, hold work-exit.js; documented failure '^ReferenceError: (reportWriteBlock) is not defined$' ... FAIL
+test_PRE_X1_45_hold_report_toolbar_js (__main__.EarlyInputSplit.test_PRE_X1_45_hold_report_toolbar_js)
+PRE-X1: 45-part page, hold report-toolbar.js; documented failure '^ReferenceError: (reportWriteBlock) is not defined$' ... FAIL
+test_PRE_X1_45_hold_work_exit_js (__main__.EarlyInputSplit.test_PRE_X1_45_hold_work_exit_js)
+PRE-X1: 45-part page, hold work-exit.js; documented failure '^ReferenceError: (reportWriteBlock) is not defined$' ... FAIL
+test_PRE_X2_30_hold_report_editor_js (__main__.EarlyInputSplit.test_PRE_X2_30_hold_report_editor_js)
+PRE-X2: 30-part page, hold report-editor.js; documented failure '^ReferenceError: (reportWriteBlock) is not defined$' ... ok
+test_PRE_X2_30_hold_report_toolbar_js (__main__.EarlyInputSplit.test_PRE_X2_30_hold_report_toolbar_js)
+PRE-X2: 30-part page, hold report-toolbar.js; documented failure '^ReferenceError: (reportWriteBlock) is not defined$' ... ok
+test_PRE_X2_45_hold_report_editor_js (__main__.EarlyInputSplit.test_PRE_X2_45_hold_report_editor_js)
+PRE-X2: 45-part page, hold report-editor.js; documented failure '^ReferenceError: (reportWriteBlock) is not defined$' ... ok
+test_PRE_X2_45_hold_report_toolbar_js (__main__.EarlyInputSplit.test_PRE_X2_45_hold_report_toolbar_js)
+PRE-X2: 45-part page, hold report-toolbar.js; documented failure '^ReferenceError: (reportWriteBlock) is not defined$' ... ok
+test_PRE_X3_45_hold_saved_filters_js (__main__.EarlyInputSplit.test_PRE_X3_45_hold_saved_filters_js)
+PRE-X3: 45-part page, hold saved-filters.js; documented failure '^ReferenceError: (renderChips) is not defined$' ... ok
+test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none (__main__.Registration.test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none) ... ok
+test_registrations_before_the_session_answer_match_the_original_page (__main__.Registration.test_registrations_before_the_session_answer_match_the_original_page) ... ok
+test_B1_03_unsplit (__main__.UnsplitControl.test_B1_03_unsplit) ... ok
+test_B1_05_unsplit (__main__.UnsplitControl.test_B1_05_unsplit) ... ok
+test_B1_58_unsplit (__main__.UnsplitControl.test_B1_58_unsplit) ... ok
+test_PRE_X1_unsplit (__main__.UnsplitControl.test_PRE_X1_unsplit) ... ok
+test_PRE_X3_unsplit (__main__.UnsplitControl.test_PRE_X3_unsplit) ... ok
+test_leaving_unsplit (__main__.UnsplitControl.test_leaving_unsplit) ... ok
+test_window_and_session_events_at_held_boundaries_raise_nothing (__main__.WindowAndSessionEvents.test_window_and_session_events_at_held_boundaries_raise_nothing) ... ok
+
+======================================================================
+FAIL: test_B1_15_18_leave_while_holding_worklist_view_js (__main__.EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js)
+B1-15: 18-part page, leave while holding worklist-view.js; documented failure '^ReferenceError: (renderRelated) is not defined$'
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 628, in test
+    raise HazardFailure(f"{hazard}: uncaught errors while leaving the page at the early moment: {errors}", errors)
+HazardFailure: B1-15: uncaught errors while leaving the page at the early moment: ['ReferenceError: renderRelated is not defined']
+
+======================================================================
+FAIL: test_B1_15_30_leave_while_holding_worklist_view_js (__main__.EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js)
+B1-15: 30-part page, leave while holding worklist-view.js; documented failure '^ReferenceError: (renderRelated) is not defined$'
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 628, in test
+    raise HazardFailure(f"{hazard}: uncaught errors while leaving the page at the early moment: {errors}", errors)
+HazardFailure: B1-15: uncaught errors while leaving the page at the early moment: ['ReferenceError: renderRelated is not defined']
+
+======================================================================
+FAIL: test_B1_15_45_leave_while_holding_worklist_view_js (__main__.EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js)
+B1-15: 45-part page, leave while holding worklist-view.js; documented failure '^ReferenceError: (renderRelated) is not defined$'
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 628, in test
+    raise HazardFailure(f"{hazard}: uncaught errors while leaving the page at the early moment: {errors}", errors)
+HazardFailure: B1-15: uncaught errors while leaving the page at the early moment: ['ReferenceError: renderRelated is not defined']
+
+======================================================================
+FAIL: test_B1_57_45_leave_while_holding_clinical_context_panel_js (__main__.EarlyInputSplit.test_B1_57_45_leave_while_holding_clinical_context_panel_js)
+B1-57: 45-part page, leave while holding clinical-context-panel.js; documented failure '^ReferenceError: (applyLayout|renderChips) is not defined$'
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 628, in test
+    raise HazardFailure(f"{hazard}: uncaught errors while leaving the page at the early moment: {errors}", errors)
+HazardFailure: B1-57: uncaught errors while leaving the page at the early moment: ['ReferenceError: renderChips is not defined', 'ReferenceError: applyLayout is not defined']
+
+======================================================================
+FAIL: test_PRE_P3_45_leave_while_holding_worklist_controls_js (__main__.EarlyInputSplit.test_PRE_P3_45_leave_while_holding_worklist_controls_js)
+PRE-P3: 45-part page, leave while holding worklist-controls.js; documented failure '^ReferenceError: (renderChips) is not defined$'
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 628, in test
+    raise HazardFailure(f"{hazard}: uncaught errors while leaving the page at the early moment: {errors}", errors)
+HazardFailure: PRE-P3: uncaught errors while leaving the page at the early moment: ['ReferenceError: renderChips is not defined']
+
+======================================================================
+FAIL: test_PRE_X1_30_hold_report_toolbar_js (__main__.EarlyInputSplit.test_PRE_X1_30_hold_report_toolbar_js)
+PRE-X1: 30-part page, hold report-toolbar.js; documented failure '^ReferenceError: (reportWriteBlock) is not defined$'
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 613, in test
+    self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger))
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 479, in assert_like_original
+    self.assertEqual(reference.early_screen[part], result.early_screen[part],
+AssertionError: {'uid': None, 'selectionSeq': 0, 'editRevision': 0} != {'uid': None, 'selectionSeq': 0, 'editRevision': 3}
+- {'editRevision': 0, 'selectionSeq': 0, 'uid': None}
+?                  ^
+
++ {'editRevision': 3, 'selectionSeq': 0, 'uid': None}
+?                  ^
+ : PRE-X1: 'work' right after the early input differs from the original's pre moment
+
+======================================================================
+FAIL: test_PRE_X1_30_hold_work_exit_js (__main__.EarlyInputSplit.test_PRE_X1_30_hold_work_exit_js)
+PRE-X1: 30-part page, hold work-exit.js; documented failure '^ReferenceError: (reportWriteBlock) is not defined$'
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 613, in test
+    self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger))
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 479, in assert_like_original
+    self.assertEqual(reference.early_screen[part], result.early_screen[part],
+AssertionError: {'uid': None, 'selectionSeq': 0, 'editRevision': 0} != {'uid': None, 'selectionSeq': 0, 'editRevision': 3}
+- {'editRevision': 0, 'selectionSeq': 0, 'uid': None}
+?                  ^
+
++ {'editRevision': 3, 'selectionSeq': 0, 'uid': None}
+?                  ^
+ : PRE-X1: 'work' right after the early input differs from the original's pre moment
+
+======================================================================
+FAIL: test_PRE_X1_45_hold_report_toolbar_js (__main__.EarlyInputSplit.test_PRE_X1_45_hold_report_toolbar_js)
+PRE-X1: 45-part page, hold report-toolbar.js; documented failure '^ReferenceError: (reportWriteBlock) is not defined$'
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 613, in test
+    self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger))
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 479, in assert_like_original
+    self.assertEqual(reference.early_screen[part], result.early_screen[part],
+AssertionError: {'uid': None, 'selectionSeq': 0, 'editRevision': 0} != {'uid': None, 'selectionSeq': 0, 'editRevision': 3}
+- {'editRevision': 0, 'selectionSeq': 0, 'uid': None}
+?                  ^
+
++ {'editRevision': 3, 'selectionSeq': 0, 'uid': None}
+?                  ^
+ : PRE-X1: 'work' right after the early input differs from the original's pre moment
+
+======================================================================
+FAIL: test_PRE_X1_45_hold_work_exit_js (__main__.EarlyInputSplit.test_PRE_X1_45_hold_work_exit_js)
+PRE-X1: 45-part page, hold work-exit.js; documented failure '^ReferenceError: (reportWriteBlock) is not defined$'
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 613, in test
+    self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger))
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 479, in assert_like_original
+    self.assertEqual(reference.early_screen[part], result.early_screen[part],
+AssertionError: {'uid': None, 'selectionSeq': 0, 'editRevision': 0} != {'uid': None, 'selectionSeq': 0, 'editRevision': 3}
+- {'editRevision': 0, 'selectionSeq': 0, 'uid': None}
+?                  ^
+
++ {'editRevision': 3, 'selectionSeq': 0, 'uid': None}
+?                  ^
+ : PRE-X1: 'work' right after the early input differs from the original's pre moment
+
+----------------------------------------------------------------------
+Ran 43 tests in 211.456s
+
+FAILED (failures=9)
