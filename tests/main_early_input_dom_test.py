@@ -31,6 +31,7 @@ copy, e.g. a mutant); it is split along tests/main_move_spec.json, re-derived fo
 describes another page (KIN_PRE_SPEC overrides). KIN_PRE_TRACE_DIR receives the reference traces as JSON.
 """
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -40,7 +41,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 import auth_logout_dom_test as h
 import main_split_harness as sh
@@ -230,14 +231,21 @@ class PreSite(h.Site):
     def handle(self, route, request):
         url = urlparse(request.url)
         if not self.page_file(url.path):
+            identity = (request.method, url.path, canonical_query(url.query))
+            occurrence = 1 + sum(request_key(r)[:3] == identity for r in self.ledger)
             self.ledger.append({"n": len(self.ledger) + 1, "method": request.method, "path": url.path,
-                                "query": url.query, "held": self.hold_all})
+                                "query": url.query, "occurrence": occurrence, "held": self.hold_all})
             if self.hold_all:
                 return self.waiting.append((route, request))
         return super().handle(route, request)
 
     def release(self, index=0):
         route, request = self.waiting.pop(index)
+        if hasattr(self, "steps"):
+            record = next(r for r in self.ledger if r["method"] == request.method
+                          and r["path"] == urlparse(request.url).path and r["query"] == urlparse(request.url).query
+                          and "released_at" not in r)
+            record["released_at"] = self.steps.virtual
         return h.Site.handle(self, route, request)
 
     def list_body(self, account, rename=None):
@@ -532,17 +540,26 @@ class Steps:
     def __init__(self, run):
         self.run, self.virtual = run, 0
         self.phases = []
+        self.hold_events = []
+        run.site.steps = self
 
     def ledger(self):
         return self.run.page.evaluate("window.__synLedger.state()")
 
     def pending(self, state, holds):
-        waiting = [request for _, request in self.run.site.waiting if urlparse(request.url).path not in holds]
-        flying = [f for f in state["fetches"] if (f["state"] == "pending" and f["path"] not in holds) or f["body"] == "reading"]
+        waiting = [request for _, request in self.run.site.waiting if not self.is_held(request, holds)]
+        flying = [f for f in state["fetches"] if (f["state"] == "pending" and not held_key(request_key(f), holds))
+                  or f["body"] == "reading"]
         return waiting, flying
 
-    def drive(self, condition, what, limit_ms, holds=(), release=None):
-        """`holds`: paths whose requests stay waiting (the case answers them later); `release(state)`: the schedule's
+    def is_held(self, request, holds):
+        url = urlparse(request.url)
+        records = [r for r in self.run.site.ledger if r["method"] == request.method and r["path"] == url.path
+                   and r["query"] == url.query and "released_at" not in r]
+        return bool(records) and held_key(request_key(records[0]), holds)
+
+    def drive(self, condition, what, limit_ms, holds=(), release=None, delivery_only=False):
+        """`holds`: exact request keys that stay waiting (the case answers them later); `release(state)`: the schedule's
         own point to let a held body go (returns True when it released one)."""
         run, start, deadline = self.run, self.virtual, time.monotonic() + self.HOST_S
         while True:
@@ -550,8 +567,16 @@ class Steps:
                 raise AssertionError(f"PHASE {what}: not reached within {self.HOST_S:.0f} s of host time "
                                      f"(virtual {self.virtual - start} ms)")
             run.delivery.pump()
+            if delivery_only:
+                if condition():
+                    self.phases.append({"phase": what, "virtual": self.virtual, "pending_timers": self.ledger()["timers"]})
+                    return self.ledger()
+                # Script delivery is host I/O. It must never spend a virtual timer tick merely because the parser
+                # has not consumed a script yet (the former 16ms P0 drift).
+                run.page.wait_for_timeout(5)
+                continue
             index = next((i for i, (_, request) in enumerate(run.site.waiting)
-                          if urlparse(request.url).path not in holds), None)
+                          if not self.is_held(request, holds)), None)
             if index is not None:
                 run.site.release(index)
                 continue
@@ -579,13 +604,56 @@ class Steps:
         return {"waiting": [urlparse(r.url).path for r in waiting], "in_flight": [f["path"] for f in flying],
                 "held_bodies": state["held"]}
 
+    def rendered(self, what):
+        """The app clock and the browser compositor have separate frame queues. An isolated world's native rAF
+        observes real render/scroll completion even when a scroll position changed and returned to its old value.
+        All product dispatches remain in the main-world trace, including those before selection."""
+        self.run.page.clock.run_for(32)
+        self.virtual += 32
+        self.native_frames()
+        self.run.wait(lambda: not self.run.page.evaluate("window.__kinTrace.rendering()"),
+                      what + ": browser scroll completion")
+        self.drive(lambda: True, what, 5000)
+
+    def native_frames(self):
+        if not hasattr(self, "render_cdp"):
+            self.render_cdp = self.run.context.new_cdp_session(self.run.page)
+            frame = self.render_cdp.send("Page.getFrameTree")["frameTree"]["frame"]["id"]
+            self.render_world = self.render_cdp.send("Page.createIsolatedWorld", {
+                "frameId": frame, "worldName": "kin-native-render-observer"})["executionContextId"]
+        result = self.render_cdp.send("Runtime.evaluate", {"contextId": self.render_world, "awaitPromise": True,
+            "returnByValue": True,
+            "expression": "new Promise((resolve, reject) => { const timeout = setTimeout(() => reject(new Error('native frame timeout')), 10000); "
+                          "requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(timeout); resolve(true); })); })"})
+        self.run.case.assertEqual(True, result.get("result", {}).get("value"), "native rendering frames completed")
+
+    def prepare_control(self, locator, what):
+        locator.scroll_into_view_if_needed()
+        self.rendered(what)
+
+    def click_control(self, locator, what):
+        self.prepare_control(locator, what + " visible")
+        # Hover uses Playwright's hit testing of the visible clipped area; a wide table row's raw bounding-box
+        # centre can lie outside its scroll pane and over a different control.
+        locator.hover()
+        self.native_frames()
+        self.run.page.mouse.down()
+        self.native_frames()
+        self.run.page.mouse.up()
+        self.native_frames()
+
     def raw(self, phase):
         """Everything of the run at the end of a phase, kept before anything is compared."""
         run = self.run
         return {"phase": phase, "virtual_ms": self.virtual, "trace": run.trace(), "ledger": self.ledger(),
                 "site": [dict(item) for item in run.site.ledger], "screen": run.observe(), "errors": list(run.errors),
-                "dialogs": list(run.dialogs), "phases": list(self.phases),
-                "source": {"page": str(PAGE), "layout": run.manifest.get("count"), "original": run.original}}
+                "dialogs": list(run.dialogs), "phases": list(self.phases), "holds": list(self.hold_events),
+                "inbox_badge": run.page.evaluate("document.getElementById('cvr-inbox-badge')?.innerText || null"),
+                "source": {"page": str(PAGE), "sha256": hashlib.sha256(
+                    Pages.baseline_file("main.html") if run.original else PAGE.read_bytes()).hexdigest(),
+                    "layout": run.manifest.get("count"), "original": run.original,
+                    "manifest": run.manifest, "frozen": Pages.frozen["original" if run.original else "current"]},
+                "schedule": getattr(self, "schedule", None), "fixture": {"filters": run.site.filters}}
 
 
 class Result:
@@ -811,12 +879,13 @@ class PreCase(unittest.TestCase):
         has). `after(run)` adds P4 and returns data. The Run is closed before this returns."""
         run = Run(self, layout, deterministic=True, filters=(SAVED,), local_filters=True)
         steps, raws = run.steps, {}
+        steps.schedule = schedule
         hold = SCHEDULES[schedule]
         keep = keep or (lambda phase, raw: None)
 
-        def phase(name, condition, limit_ms, holds=(), release=None):
+        def phase(name, condition, limit_ms, holds=(), release=None, delivery_only=False):
             try:
-                steps.drive(condition, name, limit_ms, holds=holds, release=release)
+                steps.drive(condition, name, limit_ms, holds=holds, release=release, delivery_only=delivery_only)
             except AssertionError:
                 keep(name + "-partial", steps.raw(name + " (failed)"))
                 raise
@@ -838,7 +907,10 @@ class PreCase(unittest.TestCase):
         try:
             scripts = set(run.delivery.order)
             phase("P0", lambda: any(urlparse(q.url).path == "/api/me" for _, q in run.site.waiting)
-                  and scripts <= set(run.page.evaluate("window.__kinTrace.executed")), 10000, holds=("/api/me",))
+                  and scripts <= set(run.page.evaluate("window.__kinTrace.executed")), 10000, holds=(ME_KEY,),
+                  delivery_only=True)
+            self.assertEqual((0, int(CLOCK_START.timestamp() * 1000)),
+                             (steps.virtual, steps.ledger()["now"]), "P0: script delivery spends no virtual time")
             if outcome != "answered":
                 run.site.me_answers = [ME_FAIL] * 4
                 phase("P1", lambda: me_asked() == 4 and retry_ready(), 20000)
@@ -853,33 +925,44 @@ class PreCase(unittest.TestCase):
                     run.page.locator("#err button").click()
                 held_since, holds = {}, set()
                 if hold and hold["kind"] == "body":
-                    run.page.evaluate("path => { window.__synBodyHolds = new Map([[path, []]]); }", hold["path"])
+                    run.page.evaluate("key => { window.__synBodyHolds = new Map([[key, []]]); }",
+                                      json.dumps(hold["key"], separators=(",", ":")))
                 if hold and hold["kind"] == "answer":
-                    holds.add(hold["path"])
+                    holds.add(hold["key"])
 
                 def release(state):
                     """The schedule's own point: the held body or answer goes once `after_ms` of virtual time passed since
                     the page reached it (every other request and timer goes on meanwhile)."""
-                    if not hold or hold["path"] in held_since and hold["path"] not in holds and hold["kind"] == "answer":
+                    if not hold or hold["path"] in held_since and hold["key"] not in holds and hold["kind"] == "answer":
                         return False
                     reached = (hold["path"] in state["held"] if hold["kind"] == "body"
-                               else any(urlparse(q.url).path == hold["path"] for _, q in run.site.waiting))
+                               else any(steps.is_held(q, holds) for _, q in run.site.waiting))
                     if not reached:
                         return False
-                    held_since.setdefault(hold["path"], steps.virtual)
+                    if hold["path"] not in held_since:
+                        held_since[hold["path"]] = steps.virtual
+                        actual = next(f for f in state["fetches"] if (
+                            f["body"] == "held" if hold["kind"] == "body" else
+                            f["state"] == "pending" and held_key(request_key(f), holds)))
+                        steps.hold_events.append({"event": "held", "key": request_key(actual), "virtual_ms": steps.virtual})
                     if steps.virtual - held_since[hold["path"]] < hold["after_ms"]:
                         return False
                     if hold["kind"] == "answer":
-                        holds.discard(hold["path"])
+                        holds.discard(hold["key"])
+                        steps.hold_events.append({"event": "released", "key": hold["key"], "virtual_ms": steps.virtual})
                         return True
-                    return bool(run.page.evaluate("path => window.__synLedger.release(path)", hold["path"]))
+                    return bool(run.page.evaluate("key => window.__synLedger.release(key)",
+                                                  json.dumps(hold["key"], separators=(",", ":"))))
                 # The default schedule ends with the worklist and the inbox read; a held schedule ends when its hold went
                 # and the inbox read is done - what the page made of the delay is the comparison's business.
                 phase("P3", lambda: inbox_received(run) and (rows_show(run) if not hold else hold["path"] in held_since
-                                                               and hold["path"] not in holds), 30000,
+                                                               and hold["key"] not in holds), 30000,
                       holds=holds, release=release)
                 if hold:
                     self.assertTrue(held_since, f"{schedule}: the schedule's held {hold['kind']} was reached")
+                    if hold["kind"] == "answer":
+                        assert_inbox_hold(self, raws["P3"])
+                self.assertTrue(rows_show(run), "P3: the completed worklist is shown")
             data = after(run) if after else None
             return raws, data, list(run.errors)
         finally:
@@ -904,10 +987,8 @@ class PreCase(unittest.TestCase):
                 orders = (sh.full_order(a, Pages.provenance("original")), sh.full_order(b, Pages.provenance("current")))
                 comparison.update(registrations=[len(o) for o in orders], difference=sh.order_difference(*orders))
                 if dispatches:
-                    # The gesture's own dispatches (from its mark on): the browser's layout events before it (scroll,
-                    # resize) follow rendering, not the page's code.
-                    sent = (sh.dispatch_order(a, Pages.provenance("original"), original[name].get("since", 0)),
-                            sh.dispatch_order(b, Pages.provenance("current"), candidate[name].get("since", 0)))
+                    sent = (sh.dispatch_order(a, Pages.provenance("original")),
+                            sh.dispatch_order(b, Pages.provenance("current")))
                     comparison.update(dispatches=[len(o) for o in sent], dispatch_difference=sh.order_difference(*sent))
                 comparison["requests"] = [[(r["method"], r["path"], r["query"]) for r in side[name]["site"]]
                                           for side in (original, candidate)]
@@ -916,19 +997,41 @@ class PreCase(unittest.TestCase):
                 sh.keep(base / name, "comparison.json", comparison)
                 raise
             sh.keep(base / name, "comparison.json", comparison)
+            for side in ("original", "candidate"):
+                self.assertTrue((base / name / f"{side}.raw.json").is_file(),
+                                f"{what} {name}: actual raw kept before comparison ({side})")
             self.assertEqual([], comparison["difference"], f"{what} {name}: every registration in order")
             if dispatches:
                 self.assertEqual([], comparison["dispatch_difference"], f"{what} {name}: every dispatch in order")
             self.assertEqual(*comparison["requests"], f"{what} {name}: the same requests in the same order")
+            self.assertEqual(original[name]["virtual_ms"], candidate[name]["virtual_ms"],
+                             f"{what} {name}: the same virtual schedule")
 
 
 # The deterministic runs' fixed answers and schedules.
 ME_FAIL = (503, {"code": "AUTH_IDP_UNAVAILABLE"})
 INBOX = "/api/critical-results"
+
+
+def canonical_query(query):
+    return tuple(sorted(parse_qsl(query.lstrip("?"), keep_blank_values=True)))
+
+
+def request_key(record):
+    return (record["method"], record["path"], canonical_query(record["query"]), record.get("occurrence", 1))
+
+
+def held_key(key, holds):
+    return key in holds
+
+
+ME_KEY = ("GET", "/api/me", (), 1)
+INBOX_KEY = ("GET", INBOX, canonical_query("view=received&state=pending"), 1)
+STUDIES_KEY = ("GET", "/api/studies", canonical_query("limit=100"), 1)
 # Besides answering in arrival order (default): the inbox read's answer, or the worklist read's body, held for a while of
 # virtual time once the page asks for it - every other request and timer goes on meanwhile.
-SCHEDULES = {"default": None, "inbox-answer-held": {"kind": "answer", "path": INBOX, "after_ms": 500},
-             "studies-body-held": {"kind": "body", "path": "/api/studies", "after_ms": 1500}}
+SCHEDULES = {"default": None, "inbox-answer-held": {"kind": "answer", "path": INBOX, "key": INBOX_KEY, "after_ms": 500},
+             "studies-body-held": {"kind": "body", "path": "/api/studies", "key": STUDIES_KEY, "after_ms": 1500}}
 ARTIFACTS = Path(TRACE_DIR) if TRACE_DIR else Path(tempfile.mkdtemp(prefix="kin-pre-raw-"))
 
 
@@ -937,8 +1040,27 @@ def rows_show(run, text=h.PATIENT):
 
 
 def inbox_received(run):
-    return any(f["path"] == INBOX and "view=received" in f["query"] and f["state"] != "pending"
-               for f in run.steps.ledger()["fetches"])
+    return (any(request_key(f) == INBOX_KEY and f["state"] == "answered" and f["body"] == "read"
+                for f in run.steps.ledger()["fetches"])
+            and run.page.locator("#cvr-inbox-badge").inner_text() == "Load Failed")
+
+
+def assert_inbox_hold(case, raw):
+    fetches = raw["ledger"]["fetches"]
+    received = [f for f in fetches if request_key(f) == INBOX_KEY]
+    case.assertEqual(1, len(received), "inbox: exactly the first received-view request")
+    request = received[0]
+    release = next(r for r in raw["site"] if request_key(r) == INBOX_KEY)
+    arrived = request["at"] - int(CLOCK_START.timestamp() * 1000)
+    case.assertGreaterEqual(release["released_at"] - arrived, 500, "inbox: received-view held for 500 virtual ms")
+    case.assertEqual(("answered", 404, "read"), (request["state"], request["status"], request["body"]),
+                     "inbox: the released received-view failure was consumed")
+    case.assertGreaterEqual(request["consumedAt"], request["at"] + 500, "inbox: consumption follows the hold")
+    case.assertEqual(["held", "released"], [r["event"] for r in raw["holds"]], "inbox: hold and release both observed")
+    case.assertTrue(all(r["key"] == INBOX_KEY for r in raw["holds"]), "inbox: the observed held request is received-view")
+    case.assertEqual("Load Failed", raw["inbox_badge"], "inbox: the consumed failure is shown")
+    case.assertFalse(any(t["delay"] == 60000 and t["kind"] == "setTimeout" for t in raw["ledger"]["timers"]),
+                     "inbox: response deadline cleared after consumption")
 
 
 # ── TEST-PRE-REGISTRATION ──
@@ -948,8 +1070,35 @@ class Registration(PreCase):
 
     def both(self, case, outcome, after=None, schedule="default"):
         base, keeper = self.kept(f"{case}-{outcome}", schedule, "unsplit")
-        original = self.through(Pages.original.layout(0), outcome, after, schedule, keep=keeper("original"))
-        candidate = self.through(Pages.current.layout(0), outcome, after, schedule, keep=keeper("candidate"))
+        reached = {"original": set(), "candidate": set()}
+
+        def save(side):
+            def receive(phase, raw):
+                keeper(side)(phase, raw)
+                reached[side].add(phase)
+            return receive
+
+        def once(side, layout):
+            def following(run):
+                try:
+                    return after(run) if after else None
+                finally:
+                    if after:
+                        save(side)("after", run.steps.raw("after"))
+            return self.through(layout, outcome, following if after else None, schedule, keep=save(side))
+
+        try:
+            original = once("original", Pages.original.layout(0))
+            candidate = once("candidate", Pages.current.layout(0))
+        except BaseException as failure:
+            # A partial phase is not a successful empty trace. Explain every missing peer at the point of failure.
+            for phase in reached["original"] | reached["candidate"]:
+                for side in ("original", "candidate"):
+                    if phase not in reached[side]:
+                        keeper(side)(phase, {"status": "not_run", "reason": f"{type(failure).__name__}: {failure}",
+                                             "phase": phase, "side": side, "schedule": schedule,
+                                             "source_sha256": hashlib.sha256(PAGE.read_bytes()).hexdigest()})
+            raise
         return base, original, candidate
 
     def test_registrations_match_the_original_page_before_and_after_each_session_outcome(self):
@@ -957,7 +1106,7 @@ class Registration(PreCase):
             with self.subTest(outcome=outcome):
                 base, (original, _, original_errors), (candidate, _, errors) = self.both("registrations", outcome)
                 self.assertEqual([], errors, "errors")
-                self.compare_phases(base, original, candidate, outcome)
+                self.compare_phases(base, original, candidate, outcome, dispatches=True)
                 # Per (target, event), a reader's view of the same thing.
                 for name in original:
                     self.assert_same_registrations(sh.by_target_event(original[name]["trace"]["registrations"]),
@@ -972,7 +1121,7 @@ class Registration(PreCase):
                     "repeated-retry", "failed, retried and failed again, then retried", schedule=schedule)
                 self.assertEqual([], errors, "errors")
                 self.assertEqual(["P0", "P1", "P2", "P3"], sorted(candidate), "the phases of the repeated failure")
-                self.compare_phases(base, original, candidate, f"repeated failure, {schedule}")
+                self.compare_phases(base, original, candidate, f"repeated failure, {schedule}", dispatches=True)
 
     def test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none(self):
         keys = {(t, e) for hazard in HAZARDS for (t, e, _) in self.keys(hazard)}
@@ -993,14 +1142,14 @@ class Registration(PreCase):
         steps = run.steps
         since = run.page.evaluate("window.__kinTrace.now()")
         quick_match(run.page)
-        run.page.wait_for_timeout(200)
+        steps.rendered("Quick Match rendered")
         steps.drive(lambda: True, "P4 one Quick Match change", 5000)
         trace = run.trace()
         registrations = {r["seq"]: r for r in trace["registrations"]}
         dispatched = [(d["target"], d["type"], registrations[d["registration"]]["listener"])
                       for d in run.trace(since)["dispatches"] if "registration" in d and d["target"] == "#quick-match"]
         run.page.fill("#quick", "PATIENT")
-        run.page.wait_for_timeout(200)
+        steps.rendered("search rendered")
         steps.drive(lambda: True, "P4 a search", 5000)
         return dispatched, run.screen()["worklist"], {**steps.raw("P4"), "since": since}
 
@@ -1017,17 +1166,26 @@ class Registration(PreCase):
 
     def input_order(self, run):
         steps = run.steps
-        run.page.locator("#rows tr", has_text=h.PATIENT).first.click()
-        steps.drive(lambda: run.page.evaluate("typeof KinWorkContext === 'object' && !!KinWorkContext.selection().uid"),
+        row = run.page.locator("#rows tr", has_text=h.PATIENT).first
+        steps.click_control(row, "study row")
+        steps.drive(lambda: run.page.evaluate("KinWorkContext.selection().uid") == h.UID
+                    and run.page.locator("#findings").is_editable(),
                     "a study selected", 5000)
+        steps.rendered("selected study rendered")
         since = run.page.evaluate("window.__kinTrace.now()")
-        # A person's pace between the parts of the gesture: the browser's rendering (a scroll the focus causes) has
-        # its frames before the next input, as it would for a hand - the page's clock stays paused meanwhile.
-        run.page.click("#findings")
-        run.page.wait_for_timeout(200)
-        run.page.keyboard.type("a")
-        run.page.wait_for_timeout(200)
-        steps.drive(lambda: True, "one focus and keypress", 5000)
+        steps.click_control(run.page.locator("#findings"), "report field")
+        steps.rendered("report field focused")
+        self.assertEqual("findings", run.page.evaluate("document.activeElement.id"), "input: report field focused")
+        before = run.page.locator("#findings").input_value()
+        caret = run.page.locator("#findings").evaluate("el => [el.selectionStart, el.selectionEnd]")
+        run.page.keyboard.down("a")
+        steps.native_frames()
+        run.page.keyboard.up("a")
+        steps.rendered("one focus and keypress rendered")
+        self.assertEqual(before[:caret[0]] + "a" + before[caret[1]:], run.page.locator("#findings").input_value(),
+                         "input: the typed character and surrounding text")
+        self.assertEqual([caret[0] + 1] * 2, run.page.locator("#findings").evaluate("el => [el.selectionStart, el.selectionEnd]"),
+                         "input: caret after the typed character")
         trace = run.trace()
         registrations = {r["seq"]: r for r in trace["registrations"]}
         reached = [(d["target"], d["type"], registrations[d["registration"]]["listener"])
@@ -1207,22 +1365,86 @@ class HarnessSelfChecks(PreCase):
             second.close()
 
     def test_raw_sides_are_kept_before_a_failed_comparison(self):
-        """F2-I06 / C06: a known difference still leaves both raw sides and the comparison on disk, written before the
-        assertion fails."""
-        base = ARTIFACTS / "self-check-raw-first" / str(os.getpid())
-        a = {"P0": {"trace": {"registrations": [{"seq": 1, "kind": "add", "object": "singleton:window", "target": "window",
-                                                  "type": "pagehide", "capture": False, "once": False, "passive": None,
-                                                  "signalObject": None, "listener": "1", "frames": []}],
-                              "dispatches": [], "objects": {}, "unresolved": []}, "site": []}}
-        b = json.loads(json.dumps(a))
-        b["P0"]["trace"]["registrations"][0]["type"] = "pageshow"
-        sh.keep(base / "P0", "original.raw.json", a["P0"])
-        sh.keep(base / "P0", "candidate.raw.json", b["P0"])
-        with self.assertRaises(AssertionError):
-            self.compare_phases(base, a, b, "a known difference")
-        for name in ("original.raw.json", "candidate.raw.json", "comparison.json"):
-            self.assertTrue((base / "P0" / name).is_file(), f"{name} kept before the assertion")
-        self.assertNotEqual([], json.loads((base / "P0" / "comparison.json").read_text(encoding="utf-8"))["difference"])
+        """F2-I06 / C06: a parent runs real failing browser phases/comparisons in a child and inspects disk at failure.
+        A hand-written trace cannot prove that through() used its raw keeper."""
+        for fault in ("comparison", "timeout-P0", "timeout-P3"):
+            with self.subTest(fault=fault):
+                with tempfile.TemporaryDirectory(prefix="kin-pre-failure-child-") as directory:
+                    environment = dict(os.environ, KIN_PRE_FAILURE_CHILD=fault, KIN_PRE_TRACE_DIR=directory)
+                    child = subprocess.run([sys.executable, "-B", str(Path(__file__).resolve()), "FailureChild.test_failure"],
+                                           cwd=ROOT, env=environment, capture_output=True, text=True,
+                                           encoding="utf-8", errors="replace", timeout=180)
+                    checkpoint = Path(directory) / "failure-time-files.json"
+                    sh.keep(ARTIFACTS / "failure-children", fault + ".json",
+                            {"exit": child.returncode, "stdout": child.stdout, "stderr": child.stderr,
+                             "files": {str(p.relative_to(directory)): json.loads(p.read_text(encoding="utf-8"))
+                                       for p in Path(directory).rglob("*.json")}})
+                    self.assertEqual(1, child.returncode, "failure child must fail, never silently succeed")
+                    self.assertTrue(checkpoint.is_file(), "failure child reached the intended phase/comparison")
+                    observed = json.loads(checkpoint.read_text(encoding="utf-8"))
+                    expected = "every dispatch in order" if fault == "comparison" else "host time"
+                    # Missing evidence is a failure of this parent, even when the child rejected it first.
+                    self.assertTrue(observed["raw_files"], "actual raw kept before failing child assertion")
+                    self.assertIn(expected, observed["failure"], "failure child reached its named assertion")
+                    phases = {}
+                    for name, record in observed["raw_files"].items():
+                        phase, side = Path(name).parent.name, Path(name).name.split(".")[0]
+                        phases.setdefault(phase, {})[side] = record
+                    wanted = "after" if fault == "comparison" else fault.split("-")[1] + "-partial"
+                    self.assertIn(wanted, phases, "actual raw kept before failing child assertion")
+                    for phase, sides in phases.items():
+                        self.assertEqual({"original", "candidate"}, set(sides),
+                                         "actual raw kept before failing child assertion: both sides or explicit not_run")
+                        for side, raw in sides.items():
+                            if raw.get("status") == "not_run":
+                                self.assertTrue(raw.get("reason"), "not_run explains the stopping failure")
+                                self.assertEqual("candidate", side, "only the unstarted peer is not_run")
+                            else:
+                                self.assertTrue(raw["trace"]["registrations"], "real browser trace, not a fabricated empty success")
+                                self.assertTrue(raw["source"]["sha256"] and raw["source"]["manifest"] and raw["source"]["frozen"])
+                    if fault == "comparison":
+                        self.assertTrue(observed["comparisons"], "comparison.json kept before the assertion")
+                        self.assertTrue(any(c.get("dispatch_difference") for c in observed["comparisons"].values()))
+                    else:
+                        self.assertEqual("not_run", phases[wanted]["candidate"].get("status"),
+                                         "the timed-out original leaves the candidate explicitly not_run")
+
+    def test_saved_rows_preserve_order_duplicates_extras_and_shown_count(self):
+        run = Run(self, Pages.current.layout(0), filters=(SEARCH_S,), rows=FILTER_ROWS)
+        try:
+            run.booted()
+            before = apply_chip(run, SEARCH_S["name"])
+            self.assertEqual(expected_rows(h.UID, h.UID_B, UID_C), before["rows"], "ordered studies, actual rows and shown count")
+            html = run.page.locator("#rows").inner_html()
+            count = run.page.locator("#page-status").inner_text()
+            mutations = {
+                "duplicate": "rows.append(rows.firstElementChild.cloneNode(true));",
+                "extra": "const extra=rows.firstElementChild.cloneNode(true); extra.dataset.uid='SYN-EXTRA'; rows.append(extra);",
+                "swapped": "rows.prepend(rows.lastElementChild);",
+                "shown": "document.getElementById('page-status').textContent='불러온 목록 중 1–4 / 4건 · 1/1페이지';",
+            }
+            for name, mutation in mutations.items():
+                with self.subTest(mutation=name):
+                    run.page.evaluate("html => document.getElementById('rows').innerHTML=html", html)
+                    run.page.locator("#page-status").evaluate("(el, text) => el.textContent=text", count)
+                    run.page.evaluate("() => { const rows=document.getElementById('rows'); " + mutation + " }")
+                    self.assertNotEqual(before["rows"], saved_state(run)["rows"],
+                                        "ordered studies, actual rows and shown count detect " + name)
+        finally:
+            run.close()
+
+    def test_full_dispatch_includes_events_before_the_action_mark(self):
+        raw = []
+        for order in (["first", "second"], ["second", "first"]):
+            _, trace = TraceOracle.probe(self, TraceOracle.ORDER.replace(
+                "for (const name of order) register(targets[name]);",
+                "for (const name of ['first', 'second']) register(targets[name]);"), args=order)
+            raw.append({"trace": trace, "since": max(d["seq"] for d in trace["dispatches"]), "site": [], "virtual_ms": 0})
+        base, keeper = self.kept("full-dispatch-counterexample", "default", "probe")
+        for side, record in zip(("original", "candidate"), raw):
+            keeper(side)("input", record)
+        with self.assertRaisesRegex(AssertionError, "every dispatch in order"):
+            self.compare_phases(base, {"input": raw[0]}, {"input": raw[1]}, "pre-mark event reversal", dispatches=True)
 
 
 # What a person is left with after a scenario (screen, text, cursor, what is open, what was kept): ids are locators
@@ -1393,7 +1615,8 @@ SAVED_STATE = """() => {
     edit_enabled: shown(info) ? !el('edit-active-filter').disabled : null,
     chips: [...document.querySelectorAll('#chips button[data-i]')].filter(shown).map(b => b.dataset.name),
     quick: el('quick').value, match: el('quick-match').value,
-    rows: [...document.querySelectorAll('#rows tr')].map(tr => tr.innerText.split('\\t')),
+    rows: { uids: [...document.querySelectorAll('#rows tr')].map(tr => tr.dataset.uid || null),
+      row_count: document.querySelectorAll('#rows tr').length, shown_text: el('page-status').innerText },
     toasts: (window.__kinToasts || []).slice(),
   };
 }"""
@@ -1408,9 +1631,15 @@ def until(run, predicate, timeout=20.0):
         return False
 
 
+def expected_rows(*uids):
+    return {"uids": list(uids), "row_count": len(uids), "shown": len(uids), "total": len(uids)}
+
+
 def saved_state(run):
     state = run.page.evaluate(SAVED_STATE)
-    state["rows"] = sorted({cell for row in state.pop("rows") for cell in row if cell in NAMES})
+    shown = re.search(r"(\d+)–(\d+) / (\d+)건", state["rows"].pop("shown_text"))
+    state["rows"]["shown"] = int(shown.group(2)) - int(shown.group(1)) + 1 if shown and int(shown.group(1)) else 0
+    state["rows"]["total"] = int(shown.group(3)) if shown else None
     return state
 
 
@@ -1637,11 +1866,11 @@ class AfterAuthScenarios(SameGestures):
     def test_saved_search_saved_modified_deleted_and_another_applied(self):
         def check(result, side):
             states = dict(result["states"])
-            three, two, one = sorted(NAMES), sorted({"ALPHA SYN", "ALPHA"}), ["ALPHA"]
+            three, two, one = expected_rows(h.UID, h.UID_B, UID_C), expected_rows(h.UID, h.UID_B), expected_rows(h.UID)
             expect = {"search, prefix": (None, None, two), "search, exact": (None, None, one),
                       "search, contains": (None, None, three), "apply S": ("SYN Search S", "Saved", three),
                       "modified": ("SYN Search S", "Modified", three), "delete waiting": ("SYN Search S", "Modified", three),
-                      "deleted": ("SYN Search S", "Deleted", three), "apply R": ("SYN Search R", "Saved", ["ALPHA SYN"])}
+                      "deleted": ("SYN Search S", "Deleted", three), "apply R": ("SYN Search R", "Saved", expected_rows(h.UID_B))}
             for step, (name, status, rows) in expect.items():
                 state = states.get(step)
                 self.assertIsNotNone(state, f"{side}: {step} reached")
@@ -1709,11 +1938,11 @@ class AfterAuthScenarios(SameGestures):
             self.assertEqual(["SYN Search R", "SYN Search S"], sorted(result["offered"]["chips"]),
                              f"{side}: the server's saved searches are the ones offered")
             applied, searched = result["applied"], result["searched"]
-            self.assertEqual(("SYN Search S", "Saved", "ALPHA", sorted(NAMES)),
+            self.assertEqual(("SYN Search S", "Saved", "ALPHA", expected_rows(h.UID, h.UID_B, UID_C)),
                              (applied["name"], applied["state"], applied["quick"], applied["rows"]), f"{side}: S applied")
-            self.assertEqual(("Modified", ["ALPHA SYN"]), (searched["state"], searched["rows"]), f"{side}: a new search")
+            self.assertEqual(("Modified", expected_rows(h.UID_B)), (searched["state"], searched["rows"]), f"{side}: a new search")
             if "fresh" in result:
-                self.assertEqual(("SYN Search S", "Saved", sorted(NAMES)),
+                self.assertEqual(("SYN Search S", "Saved", expected_rows(h.UID, h.UID_B, UID_C)),
                                  (result["fresh"]["name"], result["fresh"]["state"], result["fresh"]["rows"]),
                                  f"{side}: a fresh page applies S")
             self.assertEqual([], result["errors"], f"{side}: errors")
@@ -1755,7 +1984,7 @@ class AfterAuthScenarios(SameGestures):
             self.assertFalse([name for name in NAMES if name in result["text"]], f"{side}: no patient on the landing")
             self.assertEqual([], result["writes"], f"{side}: nothing written")
             self.assertTrue(result["returned"], f"{side}: Login returns to the work page")
-            self.assertEqual(("SYN Search S", "Saved", sorted(NAMES)),
+            self.assertEqual(("SYN Search S", "Saved", expected_rows(h.UID, h.UID_B, UID_C)),
                              (result["applied"]["name"], result["applied"]["state"], result["applied"]["rows"]),
                              f"{side}: a saved search applies after the return")
             self.assertEqual([], result["errors"], f"{side}: errors")
@@ -1807,7 +2036,7 @@ class AfterAuthScenarios(SameGestures):
 
     def test_saved_search_refusals_and_list_reload_recover(self):
         def check(result, side):
-            three = sorted(NAMES)
+            three = expected_rows(h.UID, h.UID_B, UID_C)
             self.assertEqual(("SYN Search S", "Saved", three), (result["S"]["name"], result["S"]["state"], result["S"]["rows"]),
                              f"{side}: S applied")
             for name in (BAD_MODE["name"], BAD_COMPOUND["name"]):
@@ -1817,7 +2046,7 @@ class AfterAuthScenarios(SameGestures):
                 self.assertEqual(("SYN Search S", "Saved", "ALPHA", three),
                                  (state["name"], state["state"], state["quick"], state["rows"]),
                                  f"{side}: {name}: the applied search, its conditions and the list stay")
-            self.assertEqual(("SYN Search R", "Saved", ["ALPHA SYN"]), (result["R"]["name"], result["R"]["state"],
+            self.assertEqual(("SYN Search R", "Saved", expected_rows(h.UID_B)), (result["R"]["name"], result["R"]["state"],
                                                                          result["R"]["rows"]), f"{side}: R applied")
             self.assertIn(SEARCH_R2["name"], result["recovered"]["names"], f"{side}: Reload List brings the recovered list")
             for failure in result["failures"]:
@@ -1827,7 +2056,7 @@ class AfterAuthScenarios(SameGestures):
                 self.assertEqual(result["manager"]["name_field"], failure["name_field"], f"{side}: the edited values stay")
                 self.assertNotIn(SEARCH_R2["name"], failure["names"])
             self.assertIn(SEARCH_R2["name"], result["recovered"]["names"], f"{side}: Reload List brings the recovered list")
-            self.assertEqual(("SYN Search R2", "Saved", [h.PATIENT]),
+            self.assertEqual(("SYN Search R2", "Saved", expected_rows(UID_C)),
                              (result.get("R2", {}).get("name"), result.get("R2", {}).get("state"),
                               result.get("R2", {}).get("rows")), f"{side}: the recovered search applies")
             self.assertEqual([], result["errors"], f"{side}: errors")
@@ -2122,6 +2351,40 @@ def boundary_case(config):
 for _config in BOUNDARY:
     boundary_case(_config)
 
+
+
+# Only the parent self-check enables this intentionally failing child. It exercises the real browser and keeper.
+if os.environ.get("KIN_PRE_FAILURE_CHILD"):
+    class FailureChild(Registration):
+        def test_failure(self):
+            fault = os.environ["KIN_PRE_FAILURE_CHILD"]
+            drive = Steps.drive
+
+            def fail_phase(steps, condition, what, *args, **kwargs):
+                if fault == "timeout-" + what and steps.run.original:
+                    steps.run.wait(lambda: steps.run.page.evaluate("!!window.__synLedger && !!window.__kinTrace"),
+                                   "child instrumentation ready")
+                    steps.HOST_S = 0
+                return drive(steps, condition, what, *args, **kwargs)
+
+            def gesture(run):
+                if not run.original:
+                    run.page.evaluate("window.dispatchEvent(new Event('resize'))")
+                return run.steps.raw("after")
+
+            Steps.drive = fail_phase
+            try:
+                base, original, candidate = self.both("failure-child", "answered", gesture if fault == "comparison" else None)
+                self.compare_phases(base, {"after": original[1]}, {"after": candidate[1]}, "known child difference", dispatches=True)
+            except AssertionError as failure:
+                files = {str(p.relative_to(ARTIFACTS)): json.loads(p.read_text(encoding="utf-8"))
+                         for p in ARTIFACTS.rglob("*.json")}
+                sh.keep(ARTIFACTS, "failure-time-files.json", {"failure": str(failure),
+                    "raw_files": {n: r for n, r in files.items() if n.endswith(".raw.json")},
+                    "comparisons": {n: r for n, r in files.items() if n.endswith("comparison.json")}})
+                raise
+            finally:
+                Steps.drive = drive
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

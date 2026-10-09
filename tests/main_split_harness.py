@@ -516,7 +516,24 @@ TRACE_SCRIPT = r"""(() => {
     }
     return out;
   }
+  // Observe the browser's scroll completion with the native listener, outside the product trace. Reading layout
+  // alone is insufficient: scrollTop can change before the browser dispatches the corresponding scroll event.
+  const scrolled = new WeakMap();
+  add.call(document, 'scroll', event => {
+    const el = event.target === document ? document.scrollingElement : event.target;
+    if (el) scrolled.set(el, [el.scrollLeft, el.scrollTop]);
+  }, true);
+  function rendering() {
+    const pending = [];
+    for (const el of document.querySelectorAll('*')) {
+      const prior = scrolled.get(el) || [0, 0];
+      if (el.scrollLeft !== prior[0] || el.scrollTop !== prior[1])
+        pending.push({ element: el.id || el.localName, left: el.scrollLeft, top: el.scrollTop, prior });
+    }
+    return pending;
+  }
   Object.defineProperty(window, '__kinTrace', { value: Object.freeze({ registrations, dispatches, executed, errors,
+    rendering,
     unresolved, objectsFor, parsed: () => parsed.slice(), created: () => objects.length,
     mark(label) { const item = { seq: ++seq, label: String(label) }; dispatches.push(item); return item.seq; },
     now: () => seq }) });
@@ -638,8 +655,7 @@ def keep(directory, name, value):
 # The page side of a run whose clock is paused (Astra fix-2 design §2): every fetch the page starts (its answer, its body
 # being read), and every timer and animation frame it asks for (when due, fired, cancelled), so a phase can end only when
 # nothing is in flight and say which scheduled work it leaves for later. Installed after the clock, so the timers it
-# wraps are the paused clock's. `__synBodyHolds` (a Map path -> releases), when the case sets it, keeps the body of an
-# answer to that path from the page until the case releases it.
+# wraps are the paused clock's. `__synBodyHolds` maps exact serialized request keys to release callbacks.
 LEDGER_SCRIPT = r"""(() => {
   if (window.__synLedger) return;
   const fetches = [], timers = new Map(), answers = new WeakMap();
@@ -650,9 +666,10 @@ LEDGER_SCRIPT = r"""(() => {
     try { const url = new URL(typeof input === 'string' ? input : input.url, location.href); path = url.pathname; query = url.search; } catch (_) {}
     const entry = { n: ++count, method: String((init && init.method) || (input && input.method) || 'GET').toUpperCase(), path, query,
       at: Date.now(), state: 'pending', status: null, body: 'unread' };
+    entry.occurrence = 1 + fetches.filter(f => f.method === entry.method && f.path === path && f.query === query).length;
     fetches.push(entry);
     return realFetch.apply(this, arguments).then(response => {
-      entry.state = 'answered'; entry.status = response.status; answers.set(response, entry); return response;
+      entry.state = 'answered'; entry.answeredAt = Date.now(); entry.status = response.status; answers.set(response, entry); return response;
     }, error => { entry.state = 'failed'; entry.error = String(error && error.name); throw error; });
   };
   for (const name of ['json', 'text', 'arrayBuffer', 'blob', 'formData']) {
@@ -660,11 +677,13 @@ LEDGER_SCRIPT = r"""(() => {
     Response.prototype[name] = function () {
       const entry = answers.get(this), reading = read.call(this);
       if (!entry) return reading;
-      const holds = window.__synBodyHolds, held = holds && holds.has(entry.path);
-      const finish = promise => promise.then(value => { entry.body = 'read'; return value; }, error => { entry.body = 'failed'; throw error; });
+      const query = [...new URLSearchParams(entry.query)].sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
+      const key = JSON.stringify([entry.method, entry.path, query, entry.occurrence]);
+      const holds = window.__synBodyHolds, held = holds && holds.has(key);
+      const finish = promise => promise.then(value => { entry.body = 'read'; entry.consumedAt = Date.now(); return value; }, error => { entry.body = 'failed'; throw error; });
       if (!held) { entry.body = 'reading'; return finish(reading); }
       entry.body = 'held';
-      return new Promise((resolve, reject) => holds.get(entry.path).push(() => {
+      return new Promise((resolve, reject) => holds.get(key).push(() => {
         entry.body = 'reading'; finish(reading).then(resolve, reject); }));
     };
   }

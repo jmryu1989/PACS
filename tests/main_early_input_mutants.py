@@ -129,11 +129,9 @@ F2_MUTANTS = [
      "new": ('        self.site = getattr(Run, "shared_site", None) or PreSite(filters, dictation=dictation, '
              'templates=templates, rows=rows, assets=assets)\n        Run.shared_site = self.site')},
     {"id": "F2-M06", "case": "HarnessSelfChecks.test_raw_sides_are_kept_before_a_failed_comparison",
-     "expect": "comparison.json kept before the assertion", "file": DOM,
-     "old": ('            sh.keep(base / name, "comparison.json", comparison)\n'
-             '            self.assertEqual([], comparison["difference"], f"{what} {name}: every registration in order")'),
-     "new": ('            self.assertEqual([], comparison["difference"], f"{what} {name}: every registration in order")\n'
-             '            sh.keep(base / name, "comparison.json", comparison)')},
+     "expect": "actual raw kept before failing child assertion", "file": DOM,
+     "old": '            return lambda phase, raw: sh.keep(base / phase, f"{side}.raw.json", raw)',
+     "new": '            return lambda phase, raw: None'},
     {"id": "F2-M07", "case": "AfterAuthScenarios.test_template_edit_opens_saves_and_is_used_as_edited",
      "expect": "the template editor opens from the row's Edit", "file": PAGE_FILE,
      "old": "function editTemplate(t, source = null, seed = t) {",
@@ -158,6 +156,34 @@ F2_MUTANTS = [
 ]
 
 
+# D824: browser-visible result, exact request selection, zero-time delivery and the actual failure keeper.
+F3_MUTANTS = [
+    {"id": "F3-M01", "case": "AfterAuthScenarios.test_saved_search_saved_modified_deleted_and_another_applied",
+     "expect": "search, prefix: the saved search, its state and the list", "file": DOM,
+     "old": 'def saved_state(run):\n    state = run.page.evaluate(SAVED_STATE)',
+     "new": 'def saved_state(run):\n    if not run.original:\n        run.page.evaluate("() => { const r=document.getElementById(\'rows\'); if(r.firstElementChild) r.append(r.firstElementChild.cloneNode(true)); }")\n    state = run.page.evaluate(SAVED_STATE)'},
+    {"id": "F3-M02", "case": "Registration.test_repeated_retry_schedules_complete_and_end_as_on_the_original_page",
+     "expect": "inbox: received-view held for 500 virtual ms", "file": DOM,
+     "old": '    return key in holds', "new": '    return any(key[1] == hold[1] for hold in holds)'},
+    {"id": "F3-M03", "case": "Registration.test_repeated_retry_schedules_complete_and_end_as_on_the_original_page",
+     "expect": "P0: script delivery spends no virtual time", "file": DOM,
+     "old": '            scripts = set(run.delivery.order)',
+     "new": '            run.page.clock.run_for(16)\n            steps.virtual += 16\n            scripts = set(run.delivery.order)'},
+    {"id": "F3-M04", "case": "HarnessSelfChecks.test_raw_sides_are_kept_before_a_failed_comparison",
+     "expect": "actual raw kept before failing child assertion", "file": DOM,
+     "old": '            return lambda phase, raw: sh.keep(base / phase, f"{side}.raw.json", raw)',
+     "new": '            return lambda phase, raw: setattr(self, "late_raw", getattr(self, "late_raw", []) + [(base / phase, f"{side}.raw.json", raw)])'},
+    {"id": "F3-M05", "case": "HarnessSelfChecks.test_full_dispatch_includes_events_before_the_action_mark",
+     "expect": "AssertionError not raised", "file": DOM,
+     "old": '                    sent = (sh.dispatch_order(a, Pages.provenance("original")),\n                            sh.dispatch_order(b, Pages.provenance("current")))',
+     "new": '                    sent = (sh.dispatch_order(a, Pages.provenance("original"), original[name].get("since", 0)),\n                            sh.dispatch_order(b, Pages.provenance("current"), candidate[name].get("since", 0)))'},
+    {"id": "F3-M06", "case": "HarnessSelfChecks.test_raw_sides_are_kept_before_a_failed_comparison",
+     "expect": "comparison.json kept before the assertion", "file": DOM,
+     "old": '            sh.keep(base / name, "comparison.json", comparison)\n            for side in ("original", "candidate"):',
+     "new": '            if comparison.get("dispatch_difference"):\n                self.assertEqual([], comparison["dispatch_difference"], f"{what} {name}: every dispatch in order")\n            sh.keep(base / name, "comparison.json", comparison)\n            for side in ("original", "candidate"):'},
+]
+
+
 def scratch_copy(scratch, mutant):
     """The mutated copy and how the DOM test runs with it: {script, page, assets, pythonpath}."""
     source = (ROOT / mutant["file"]).read_bytes().decode("utf-8")
@@ -165,7 +191,11 @@ def scratch_copy(scratch, mutant):
     body = source.replace("\r\n", "\n")
     if body.count(mutant["old"]) != 1:
         raise ValueError("%s: the mutation anchor occurs %d times" % (mutant["id"], body.count(mutant["old"])))
-    mutated = body.replace(mutant["old"], mutant["new"]).replace("\n", newline)
+    mutated = body.replace(mutant["old"], mutant["new"])
+    if mutant["id"] == "F3-M04":
+        marker = "\n\n# The deterministic runs' fixed answers and schedules."
+        mutated = mutated.replace(marker, '\n        for directory, name, raw in getattr(self, "late_raw", []):\n            sh.keep(directory, name, raw)\n' + marker)
+    mutated = mutated.replace("\n", newline)
     folder = scratch / mutant["id"]
     folder.mkdir(parents=True, exist_ok=True)
     root = "Path(%r)" % str(ROOT)
@@ -195,7 +225,7 @@ def node(*args):
                                      capture_output=True, text=True, encoding="utf-8").stdout)
 
 
-def run_cases(page, cases, timeout, boundary=(), spec=None, script=None, assets=None, pythonpath=None):
+def run_cases(page, cases, timeout, boundary=(), spec=None, script=None, assets=None, pythonpath=None, evidence_id="BASELINE"):
     environment = dict(os.environ, KIN_PRE_PAGE=str(page), PYTHONIOENCODING="utf-8")
     for key in ("KIN_PRE_SPEC", "KIN_PRE_TRACE_DIR", "KIN_PRE_BOUNDARY", "KIN_PRE_ASSETS"):
         environment.pop(key, None)
@@ -207,9 +237,14 @@ def run_cases(page, cases, timeout, boundary=(), spec=None, script=None, assets=
         environment["KIN_PRE_ASSETS"] = str(assets)
     if pythonpath:
         environment["PYTHONPATH"] = pythonpath + os.pathsep + environment.get("PYTHONPATH", "")
+    evidence = pathlib.Path(os.environ["KIN_PRE_MUTANT_EVIDENCE"]) / evidence_id
+    evidence.mkdir(parents=True, exist_ok=True)
+    environment["KIN_PRE_TRACE_DIR"] = str(evidence / "traces")
     command = [sys.executable, "-B", str(script or DOM_TEST), *cases]
     done = subprocess.run(command, cwd=str(ROOT), env=environment, capture_output=True, text=True,
                           encoding="utf-8", errors="replace", timeout=timeout)
+    (evidence / "stdout.log").write_text(done.stdout or "", encoding="utf-8")
+    (evidence / "stderr.log").write_text(done.stderr or "", encoding="utf-8")
     return done, (done.stdout or "") + (done.stderr or "")
 
 
@@ -271,10 +306,12 @@ def main():
     parser.add_argument("--timeout", type=int, default=600, help="Seconds per child run")
     parser.add_argument("--jobs", type=int, default=2, help="Mutant children at a time")
     parser.add_argument("--anchors-only", action="store_true", help="Write every mutant and its layout (no browser) and stop")
-    parser.add_argument("only", nargs="*", help="Mutant ids (default: the 37 and F2-M01..M12)")
+    parser.add_argument("only", nargs="*", help="Mutant ids (default: M01-M37, F2-M01-M12, F3-M01-M06)")
     args = parser.parse_args()
+    os.environ["KIN_PRE_MUTANT_EVIDENCE"] = str(pathlib.Path(args.out).resolve().parent / "mutant-children"
+        if args.out else pathlib.Path(tempfile.mkdtemp(prefix="kin-pre-mutant-evidence-")))
     selected = [m for m in MUTANTS if not args.only or m["id"] in args.only]
-    selected_f2 = [m for m in F2_MUTANTS if not args.only or m["id"] in args.only]
+    selected_f2 = [m for m in F2_MUTANTS + F3_MUTANTS if not args.only or m["id"] in args.only]
     before = hashlib.sha256(PAGE.read_bytes()).hexdigest()
     print("%s sha256 %s" % (PAGE.name, before))
     scratch = pathlib.Path(tempfile.mkdtemp(prefix="kin-pre-split-mutants-"))
@@ -330,7 +367,7 @@ def main():
             page = pathlib.Path(mutant["page"])
             boundary = [mutant["boundary"]] if "boundary" in mutant else ()
             done, output = run_cases(page, [mutant["case"]], args.timeout, boundary=boundary,
-                                     spec=mutant["spec"] if boundary else None)
+                                     spec=mutant["spec"] if boundary else None, evidence_id=mutant["id"])
             named, block, assertion = failure_block(output, mutant["case"])
             crashed = any(marker in output for marker in CRASH_MARKERS)
             precondition = PRECONDITION in block
@@ -346,14 +383,16 @@ def main():
         def judge_f2(mutant):
             run = f2_runs[mutant["id"]]
             done, output = run_cases(run["page"], [mutant["case"]], args.timeout, script=run["script"],
-                                     assets=run["assets"], pythonpath=run["pythonpath"])
+                                     assets=run["assets"], pythonpath=run["pythonpath"], evidence_id=mutant["id"])
             named, block, assertion = failure_block(output, mutant["case"])
             crashed = any(marker in output for marker in CRASH_MARKERS)
             matched = mutant["expect"] if mutant["expect"] in block else ""
-            killed = done.returncode != 0 and bool(named) and bool(assertion) and bool(matched) and not crashed
+            precondition = PRECONDITION in block
+            killed = done.returncode != 0 and bool(named) and bool(assertion) and bool(matched) and not crashed and not precondition
             return {"id": mutant["id"], "case": mutant["case"], "mutation": {k: mutant[k] for k in ("file", "old", "new")},
                     "child_exit": done.returncode, "named_failure": named, "expect": mutant["expect"],
                     "expect_matched": matched, "assertion_text": assertion, "harness_crash": crashed, "killed": killed,
+                    "precondition_failed": precondition,
                     "tail": output[-1500:] if not killed else ""}
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
@@ -381,6 +420,8 @@ def main():
         print("summary written to %s" % out)
     survivors = [row["id"] for row in results if row["id"] != "BASELINE" and not row["killed"]]
     f2 = [row for row in results if row["id"].startswith("F2-")]
+    f3 = [row for row in results if row["id"].startswith("F3-")]
+    print("F3: %d/%d killed" % (sum(r["killed"] for r in f3), len(f3)))
     print("M01-M37: %d/%d killed; F2-M01..M12: %d/%d killed" % (
         sum(r["killed"] for r in results if r["id"].startswith("M")), sum(1 for r in results if r["id"].startswith("M")),
         sum(r["killed"] for r in f2), len(f2)))
