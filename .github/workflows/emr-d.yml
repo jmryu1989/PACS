@@ -1,0 +1,62 @@
+name: EMR-D clinical attached-record contracts
+
+# Round 1 of unit D: the pure/contract cases and the mutants of api/src/emr-clinical only. It calls no B consumer that
+# has not landed, adds nothing to the candidate selection (tests/candidate_ci.py) and uses no synthetic stack.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full lowercase 40-character commit SHA to validate (default: the dispatched ref)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: emr-d-${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  emr-d:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Requested source is a full commit SHA
+        run: |
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "TARGET_SHA must be a full lowercase 40-character SHA"; exit 1; }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          persist-credentials: false
+      - name: Checked-out source is the requested SHA
+        run: test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+      - name: TypeScript, Nest and Prisma pinned by api/package-lock.json (no lifecycle scripts)
+        timeout-minutes: 5
+        run: |
+          node --version
+          npm ci --prefix api --ignore-scripts --no-audit --no-fund
+      - name: Generate the Prisma client for the API typecheck
+        working-directory: api
+        run: ./node_modules/.bin/prisma generate
+      - name: API typecheck including api/src/emr-clinical
+        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/typecheck --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json -- api/node_modules/.bin/tsc --noEmit -p api
+      - name: TEST-D-01..04 clinical_vs_operational, versions_and_sr, read_scope, atomic_retry (read-only repository, no network)
+        if: ${{ !cancelled() }}
+        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/contract --cwd . --tree api/src/emr-clinical --tree api/src/emr-contract --file tests/emr/d/contract_test.cjs --file api/tsconfig.json --file api/package-lock.json -- docker run --rm --network none --read-only --tmpfs /tmp -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/emr/d/contract_test.cjs
+      - name: M-D-01..05 mutants on copies of api/src/emr-clinical (M-D-06 is round 2)
+        if: ${{ !cancelled() }}
+        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/mutants --cwd . --tree api/src/emr-clinical --tree api/src/emr-contract --file tests/emr/d/mutants.py --file tests/emr/d/contract_test.cjs -- python3 -B tests/emr/d/mutants.py
+      - name: EMR-D evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: emr-d-results
+          path: tmp/emr-d-ci/
+          if-no-files-found: error
+          retention-days: 7

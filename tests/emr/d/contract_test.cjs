@@ -122,6 +122,11 @@ function memoryStore(unit) {
     async commit(work) {
       state.commits++;
       if (state.failCommit === 'before') throw new Error('SYN connection reset before commit');
+      if (state.failCommit === 'taken') {
+        // A concurrent request with the same ID and another body won the unique receipt key first.
+        receipts.set(key(work.plan.receiptKey), { ...work.plan.receipt, fingerprint: '0'.repeat(64) });
+        throw new Error('SYN unique violation on the receipt key');
+      }
       state.unit = R.applyPlan(state.unit, work.plan); receipts.set(key(work.plan.receiptKey), work.plan.receipt); state.signatures.push(work.signature);
       if (state.failCommit === 'after') throw new Error('SYN answer lost after commit');
       return state.wrongReceipt ? { ...work.plan.receipt, versionId: 'other' } : work.plan.receipt;
@@ -203,6 +208,25 @@ test('TEST-D-01 clinical_vs_operational: staff processing text is an operational
   const quiet = plan('question.close', c1, opened, closeBody(c1, opened, ''));
   assert.deepEqual([quiet.entry, quiet.signing, quiet.projection.state], ['state-change', null, 'Closed']);
   refused(() => plan('question.close', admin, opened, closeBody(admin, opened, '')), 'TextRequired', 'another person closing needs a reason');
+});
+
+test('TEST-D-01 clinical_vs_operational: a radiographer signs their own Tech Note; an administrator never signs in their place', () => {
+  const note = (a, unit, text, reason) => ({ baseVersion: unit ? unit.revision : 0, text, reason, attemptId: randomUUID() });
+  const first = plan('tech-note.write', tech, null, note(tech, null, 'SYN 조영제 주입 후 오심', ''));
+  assert.equal(first.entry, 'clinical-entry', 'M-D-01: a radiographer Tech Note must be a signed entry of its author');
+  assert.deepEqual([first.signing.signer, first.signing.action, first.version.kind, first.access.action], [tech.identity, 'record', 'tech-note', 'write']);
+  const written = R.applyPlan(null, first);
+  const cleared = plan('tech-note.write', tech, written, note(tech, written, '', 'SYN 다른 환자 메모'));
+  assert.deepEqual([cleared.entry, cleared.version.act, cleared.signing.action, cleared.signing.reason, cleared.signing.content.body],
+    ['clinical-entry', 'correction', 'amend', 'SYN 다른 환자 메모', ''], 'clearing a note is a signed correction with its reason');
+  const byAdmin = plan('tech-note.write', admin, written, note(admin, written, 'SYN 관리자 수정', 'SYN 오타'));
+  assert.deepEqual([byAdmin.entry, byAdmin.signing, byAdmin.version.capacity], ['operational-note', null, 'operational-staff']);
+  refused(() => plan('tech-note.write', tech, written, note(tech, written, 'SYN 수정', ' ')), 'ReasonRequired');
+  refused(() => plan('tech-note.write', tech, null, note(tech, null, ' ', '')), 'TextRequired');
+  refused(() => plan('tech-note.write', r1, written, note(r1, written, 'SYN 판독의 메모', 'SYN')), 'ActorPathRefused', 'a radiologist does not write the Tech Note');
+  refused(() => plan('tech-note.write', actor('tt', ['technician'], 'inst-tele'), written, note(tech, written, 'SYN', 'SYN')), 'NotFound',
+    'only the acquiring institution writes the Tech Note');
+  assert.equal(R.planClinicalRead({ actor: rTele, unit: written, scope: 'current' }).versions.length, 1, 'the tele reading institution reads it');
 });
 
 test('TEST-D-01 clinical_vs_operational: body claims of authority are refused and server facts alone decide the class', () => {
@@ -388,6 +412,16 @@ test('TEST-D-03 read_scope: a write from another institution is refused before a
     'M-D-05: the institution boundary comes before any other refusal');
   refused(() => plan('question.create', actor('c9', ['clinician'], 'inst-b'), null, qBody(actor('c9', ['clinician'], 'inst-b'))), 'NotFound');
   assert.equal(plan('finding.create', rTele, null, { requestId: randomUUID(), item: {} }, { content: SNAPSHOT }).entry, 'clinical-entry');
+  // An assignment row belongs to one institution: the tele institution keeps its own row and never touches the owner's.
+  const assignment = (a, unit, revision) => ({ requestId: randomUUID(), expectedOwner: owner(a), revision, readerSub: randomUUID() });
+  const ownerRow = R.applyPlan(null, plan('assignment.write', admin, null, assignment(admin, null, 0), { readerId: 'r1' }));
+  const teleAdmin = actor('ta', ['admin'], 'inst-tele');
+  refused(() => plan('assignment.write', teleAdmin, ownerRow, assignment(teleAdmin, ownerRow, 1), { readerId: 'rt' }), 'NotFound',
+    'M-D-05: the tele institution cannot write the owner assignment row');
+  refused(() => R.planClinicalRead({ actor: teleAdmin, unit: ownerRow, scope: 'current' }), 'NotFound');
+  const teleRow = R.applyPlan(null, plan('assignment.write', teleAdmin, null, assignment(teleAdmin, null, 0), { readerId: 'rt' }));
+  assert.equal(teleRow.managingInstitutionId, 'inst-tele');
+  refused(() => plan('assignment.write', rOther, null, assignment(rOther, null, 0), { readerId: 'r9' }), 'NotFound', 'a third institution has no row to open');
 });
 
 test('TEST-D-03 read_scope: bodies are handed out only after the access event for exactly those versions is durable', async () => {
@@ -406,6 +440,8 @@ test('TEST-D-03 read_scope: bodies are handed out only after the access event fo
   const narrowed = { ...event, targets: event.targets.slice(0, 1) };
   await refusedAsync(R.provideClinicalRead(counting, narrowed, p, send), 'AccessTargetMismatch');
   await refusedAsync(R.provideClinicalRead(counting, accessEvent(p, r2, 'provide-prepared', 'prepared'), p, send), 'AccessTargetMismatch');
+  await refusedAsync(R.provideClinicalRead(counting, { ...event, managingInstitution: { status: 'known', value: 'inst-b' } }, p, send),
+    'AccessTargetMismatch', 'the event names the record managing institution');
   await refusedAsync(R.provideClinicalRead(counting, event, structuredClone(p), send), 'ReadPlanRequired');
   assert.equal(appended, 0);
   assert.equal(sent.length, 1, 'TEST-D-03: no body is sent before the access event is durable');
@@ -488,6 +524,10 @@ test('TEST-D-04 atomic_retry: a lost commit answer is resolved by the stored rec
   assert.deepEqual([unknown.status, unknown.code], ['unknown', 'OutcomeUnknown'], 'an unreadable outcome is neither success nor failure');
   const odd = memoryStore(opened); odd.state.wrongReceipt = true;
   assert.equal((await R.commitClinicalWrite({ store: odd.port, signature: signaturePort().port }, replyInput(opened))).status, 'unknown');
+  const raced = memoryStore(opened); raced.state.failCommit = 'taken';
+  await refusedAsync(R.commitClinicalWrite({ store: raced.port, signature: signaturePort().port }, replyInput(opened)), 'RequestIdReused',
+    'a key another body took first is a refusal, not a success');
+  assert.deepEqual(raced.state.unit, opened);
 });
 
 test('TEST-D-04 atomic_retry: a stale revision, a forbidden transition or a regressed clock is refused before any signing', async () => {

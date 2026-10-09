@@ -19,8 +19,12 @@ import { freeze, refuse } from '../emr-contract/validation';
  * signature, the access event and the receipt; H executes destruction.
  */
 
-export type ClinicalRecord = 'question' | 'consultation' | 'finding' | 'image-request' | 'assignment';
-/** A person acting on the clinical path of a surface with a medical role, or staff acting on its processing path. */
+export type ClinicalRecord = 'question' | 'consultation' | 'finding' | 'image-request' | 'assignment' | 'tech-note';
+/**
+ * clinical-author: the person writing a record entry in their own professional role, who signs it themselves (a
+ * physician, or a radiographer for their own Tech Note: legal register LR-49 / delta D-3). operational-staff: an
+ * administrator or a technician acting on someone else's record while processing it; never a signer of that record.
+ */
 export type Capacity = 'clinical-author' | 'operational-staff';
 /**
  * clinical-entry: the medical author's own text, signed by that author (의료법 제22조①·제23조①).
@@ -30,7 +34,8 @@ export type Capacity = 'clinical-author' | 'operational-staff';
  */
 export type EntryClass = 'clinical-entry' | 'operational-note' | 'state-change' | 'assignment';
 export type Relation = 'any' | 'author' | 'other' | 'recipient';
-export type TextRule = 'required' | 'optional' | 'empty' | 'none' | 'server';
+/** replace: the field is the whole new content (empty clears it) and every later version needs the author's reason. */
+export type TextRule = 'required' | 'optional' | 'empty' | 'none' | 'server' | 'replace';
 export type VersionAct = 'entry' | 'additional-entry' | 'correction' | 'bookkeeping' | 'creation';
 
 export interface SurfacePath { relation: Relation; role: string; capacity: Capacity; kind: RecordKind; text?: TextRule; to?: string }
@@ -44,8 +49,11 @@ export interface SurfaceSpec {
   /** Exact client body keys, taken from the existing service validation. */
   client: readonly string[];
   optional?: readonly string[];
+  /** The idempotency key field (default requestId). */
+  requestField?: string;
   textField: string | null;
   text: TextRule;
+  reasonField?: string;
   revisionField: string | null;
   /** The body action the server already validated; it selects the surface, it never grants authority. */
   action?: string;
@@ -142,6 +150,14 @@ export const CLINICAL_SURFACES = freeze({
     client: ['requestId', 'expectedOwner', 'revision', 'readerSub'], textField: null, text: 'none', revisionField: 'revision', act: 'additional-entry',
     paths: ['admin', 'technician', 'radiologist'].map(role => ({ relation: 'any' as const, role, capacity: S, kind: 'assignment' as const })),
     from: [null, 'Assigned', 'Unassigned'], to: 'reader' },
+  // pacs.service.ts:1181 saveTechNote (base version, whole text, trimmed reason, attempt ID). The radiographer signs their
+  // own note (LR-49 / D-3); an administrator's write is recorded as theirs but never signed in the radiographer's place.
+  // Round 2 wires this through the pacs.* owner; the screen always sends the attempt ID after release.
+  'tech-note.write': { ...base, record: 'tech-note', model: 'TechNoteRevision', route: 'POST studies/:uid/tech-note', opens: 'if-absent', ownerField: false,
+    client: ['baseVersion', 'text', 'reason', 'attemptId'], requestField: 'attemptId', textField: 'text', text: 'replace', reasonField: 'reason',
+    revisionField: 'baseVersion', act: 'correction',
+    paths: [{ relation: 'any', role: 'technician', capacity: C, kind: 'tech-note' }, { relation: 'any', role: 'admin', capacity: S, kind: 'tech-note' }],
+    from: [null, 'Recorded'], to: 'Recorded' },
 } satisfies Record<string, SurfaceSpec>);
 export type SurfaceKey = keyof typeof CLINICAL_SURFACES;
 
@@ -151,8 +167,12 @@ export const AUTHORITY_FIELDS = freeze(['author', 'authorId', 'authorSub', 'acto
   'managingInstitutionId', 'actingInstitutionId', 'patient', 'patientId', 'role', 'roles', 'serverTime', 'at', 'versionId',
   'previousVersion', 'sha256', 'identityRegistrationId']);
 
-/** Records whose rows may be read and written by the study's tele reading institution as well (finding.service.ts:87, reader-assignment.service.ts:64). */
-export const TELE_RECORDS: readonly ClinicalRecord[] = freeze(['finding', 'assignment']);
+/**
+ * Records the study's tele reading institution may also read or write (finding.service.ts:87; Tech Note is read there,
+ * written only at the acquiring institution, pacs.service.ts:1150). An assignment row belongs to one institution
+ * (reader-assignment.service.ts:10): the tele institution has its own row, never the owner's.
+ */
+export const TELE_RECORDS = freeze({ read: ['finding', 'tech-note'], write: ['finding'] } satisfies Record<'read' | 'write', readonly ClinicalRecord[]>);
 
 /** Who may receive a body, mirroring each service's read scope; an institution boundary always applies first. */
 export const READ_SCOPES = freeze({
@@ -161,10 +181,11 @@ export const READ_SCOPES = freeze({
   'image-request': [{ role: 'clinician', relation: 'author' }, { role: 'radiologist', relation: 'any' }, { role: 'technician', relation: 'any' }, { role: 'admin', relation: 'any' }],
   finding: [{ role: '*', relation: 'any' }],
   assignment: [{ role: 'admin', relation: 'any' }, { role: 'technician', relation: 'any' }, { role: 'radiologist', relation: 'any' }],
+  'tech-note': [{ role: 'technician', relation: 'any' }, { role: 'radiologist', relation: 'any' }, { role: 'admin', relation: 'any' }],
 } satisfies Record<ClinicalRecord, readonly { role: string; relation: 'any' | 'author' | 'party' }[]>);
 export const READ_ROUTES = freeze({
   question: 'GET questions/:id', consultation: 'GET consultations/:id', 'image-request': 'GET image-requests/:id',
-  finding: 'GET studies/:uid/findings/:id/revisions', assignment: 'GET studies/:uid/reader-assignment',
+  finding: 'GET studies/:uid/findings/:id/revisions', assignment: 'GET studies/:uid/reader-assignment', 'tech-note': 'GET studies/:uid/tech-note/history',
 } satisfies Record<ClinicalRecord, string>);
 
 /** Product decision, not a statutory period: an unattempted prepared SR file is a working copy for 24 hours (manual-sr.service.ts:116). */
@@ -222,7 +243,8 @@ export interface WriteReceipt {
   requestId: string; fingerprint: string; recordId: string; versionId: string; versionSha256: string; revision: number; state: string; at: string;
 }
 
-const MEDICAL_ROLES = freeze(['radiologist', 'clinician']);
+/** Roles that author and sign their own record entries; an administrator never signs a record entry. */
+const AUTHOR_ROLES = freeze(['radiologist', 'clinician', 'technician']);
 export function holds(actor: Pick<ActorFacts, 'roles'>, role: string): boolean {
   return Array.isArray(actor.roles) && (role === '*' ? actor.roles.length > 0 : actor.roles.includes(role));
 }
@@ -234,7 +256,7 @@ export function resolvePath(surface: SurfaceKey, actor: ActorFacts, unit: Pick<C
   const ordered = [...spec.paths].sort((a, b) => (a.capacity === C ? 0 : 1) - (b.capacity === C ? 0 : 1));
   for (const path of ordered) {
     if (!holds(actor, path.role)) continue;
-    if (path.capacity === C && !MEDICAL_ROLES.includes(path.role)) continue;
+    if (path.capacity === C && !AUTHOR_ROLES.includes(path.role)) continue;
     const authorId = unit?.parties.authorId ?? null, recipientId = unit?.parties.recipientId ?? null;
     const ok = path.relation === 'any' ? true : path.relation === 'author' ? authorId === actor.identity.id :
       path.relation === 'other' ? authorId !== null && authorId !== actor.identity.id : recipientId === actor.identity.id;
@@ -246,7 +268,8 @@ export function resolvePath(surface: SurfaceKey, actor: ActorFacts, unit: Pick<C
 /** Clinical text by a medical author is a clinical entry; staff text is an operational note; no text moves state only. */
 export function entryClass(spec: SurfaceSpec, path: SurfacePath, text: string | null): EntryClass {
   if (spec.record === 'assignment') return 'assignment';
-  if (text === null || text === '') return 'state-change';
+  // A replaced content is content even when it becomes empty: clearing a note is a correction, not a state change.
+  if (text === null || (text === '' && spec.text !== 'replace')) return 'state-change';
   return path.capacity === C ? 'clinical-entry' : 'operational-note';
 }
 

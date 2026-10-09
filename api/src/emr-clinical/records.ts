@@ -37,8 +37,8 @@ function studyFacts(input: unknown): Readonly<StudyFacts> {
 }
 
 /** One institution boundary for reads and writes: the managing institution, or the tele reading institution where the record allows it. */
-export function institutionAdmits(record: ClinicalRecord, institutionId: string, managing: string, reading: string | null): boolean {
-  return institutionId === managing || (TELE_RECORDS.includes(record) && reading !== null && institutionId === reading);
+export function institutionAdmits(record: ClinicalRecord, mode: 'read' | 'write', institutionId: string, managing: string, reading: string | null): boolean {
+  return institutionId === managing || ((TELE_RECORDS[mode] as readonly string[]).includes(record) && reading !== null && institutionId === reading);
 }
 
 // ---------- versions and the projection ----------
@@ -59,16 +59,19 @@ export function projectUnit(unit: ClinicalUnit): Readonly<{ state: string; revis
     'head', 'clinicalAdoption', 'versions']) as ClinicalUnit;
   if (!Array.isArray(u.versions) || !u.versions.length) refuse('UnitHistoryBroken');
   let previous: ClinicalVersion | null = null, adoption = false;
-  u.versions.forEach((v, index) => {
-    if (!v || typeof v !== 'object' || typeof v.surface !== 'string' || !own(CLINICAL_SURFACES, v.surface)) refuse('UnitHistoryBroken');
-    const { sha256: digest, ...rest } = v;
-    if (v.formatVersion !== 'emr-clinical/1' || v.record !== u.record || v.recordId !== u.recordId || v.sequence !== index + 1 ||
-        v.studyId !== u.studyId || v.managingInstitutionId !== u.managingInstitutionId || versionDigest(rest) !== sha256(digest) ||
-        !sameRef(v.previousVersion, previous ? ref(previous) : null) || v.state.from !== (previous ? previous.state.to : null) ||
-        (previous && v.at < previous.at)) refuse('UnitHistoryBroken');
-    if (v.entry === 'clinical-entry' && (CLINICAL_SURFACES[v.surface] as SurfaceSpec).clinicalAdoption) adoption = true;
-    previous = v;
-  });
+  // Any malformed stored version is the same finding as a tampered one: the history cannot be trusted.
+  try {
+    u.versions.forEach((v, index) => {
+      if (!v || typeof v !== 'object' || typeof v.surface !== 'string' || !own(CLINICAL_SURFACES, v.surface)) refuse('UnitHistoryBroken');
+      const { sha256: digest, ...rest } = v;
+      if (v.formatVersion !== 'emr-clinical/1' || v.record !== u.record || v.recordId !== u.recordId || v.sequence !== index + 1 ||
+          v.studyId !== u.studyId || v.managingInstitutionId !== u.managingInstitutionId || versionDigest(rest) !== sha256(digest) ||
+          !sameRef(v.previousVersion, previous ? ref(previous) : null) || v.state.from !== (previous ? previous.state.to : null) ||
+          (previous && utc(v.at) < previous.at)) refuse('UnitHistoryBroken');
+      if (v.entry === 'clinical-entry' && (CLINICAL_SURFACES[v.surface] as SurfaceSpec).clinicalAdoption) adoption = true;
+      previous = v;
+    });
+  } catch { refuse('UnitHistoryBroken'); }
   const projection = { state: previous.state.to, revision: u.versions.length, head: ref(previous), clinicalAdoption: adoption };
   if (u.state !== projection.state || u.revision !== projection.revision || !sameRef(u.head, projection.head) || u.clinicalAdoption !== projection.clinicalAdoption)
     refuse('UnitHistoryBroken');
@@ -114,20 +117,30 @@ function clientBody(spec: SurfaceSpec, input: unknown, actor: ActorFacts) {
   const optional = (spec.optional ?? []).filter(key => own(input, key));
   let b: Record<string, any> = null;
   try { b = object(input, [...spec.client, ...optional]); } catch { refuse('RequestShapeRefused'); }
-  if (typeof b.requestId !== 'string' || !UUID.test(b.requestId)) refuse('RequestShapeRefused');
+  const requestId = b[spec.requestField ?? 'requestId'];
+  if (typeof requestId !== 'string' || !UUID.test(requestId)) refuse('RequestShapeRefused');
   if (spec.ownerField && JSON.stringify(b.expectedOwner) !== JSON.stringify([actor.institutionId, actor.identity.subject])) refuse('OwnerChanged');
   if (spec.action !== undefined && b.action !== spec.action) refuse('RequestShapeRefused');
   let revision: number | null = null;
   if (spec.revisionField) {
-    try { revision = integer(b[spec.revisionField], spec.record === 'assignment' ? 0 : 1); } catch { refuse('RequestShapeRefused'); }
+    // Units that open on their first write count revisions from 0 (no row yet), as the services do.
+    try { revision = integer(b[spec.revisionField], spec.opens === 'if-absent' ? 0 : 1); } catch { refuse('RequestShapeRefused'); }
   }
-  return { requestId: b.requestId.toLowerCase(), revision, b };
+  return { requestId: requestId.toLowerCase(), revision, b };
 }
 
-function textFor(rule: TextRule, b: Record<string, any>, spec: SurfaceSpec, content: string | null): { text: string | null; reason: string | null } {
+function textFor(rule: TextRule, b: Record<string, any>, spec: SurfaceSpec, content: string | null, opening: boolean): { text: string | null; reason: string | null } {
   const field = spec.textField === null ? undefined : b[spec.textField];
   const reasonOf = (text: string | null) => spec.cancel ? text : null;
   switch (rule) {
+    case 'replace': {
+      // pacs.service.ts:1190/1208/1209: the first version needs text; every later one (including clearing) the author's reason.
+      const reason = b[spec.reasonField];
+      if (typeof field !== 'string' || typeof reason !== 'string' || content !== null) refuse('RequestShapeRefused');
+      string(field, true); string(reason, true);
+      if (opening ? !field.trim() : !reason.trim()) refuse(opening ? 'TextRequired' : 'ReasonRequired');
+      return { text: field, reason: reason.trim() === '' ? null : reason.trim() };
+    }
     case 'none': if (content !== null) refuse('TextRefused'); return { text: null, reason: null };
     case 'empty': if (field !== '' || content !== null) refuse('TextRefused'); return { text: null, reason: null };
     case 'optional': if (typeof field !== 'string' || content !== null) refuse('TextRequired'); string(field, true);
@@ -178,12 +191,14 @@ function admit(input: WriteInput) {
   if (opening ? spec.opens === false : spec.opens === true) refuse(opening ? 'NotFound' : 'UnitExists');
   // The institution boundary is checked before anything about the record is revealed by a later, more specific refusal.
   const managing = unit?.managingInstitutionId ?? (spec.record === 'assignment' ? actor.institutionId : study.managingInstitutionId);
-  if (!institutionAdmits(spec.record, actor.institutionId, managing, unit ? unit.readingInstitutionId : study.readingInstitutionId) ||
-      (opening && spec.record === 'assignment' && !institutionAdmits('assignment', actor.institutionId, study.managingInstitutionId, study.readingInstitutionId)))
-    refuse('NotFound');
+  // An assignment row is opened by the owner or the tele institution for itself (its own row).
+  const ownRow = spec.record === 'assignment' && opening &&
+    [study.managingInstitutionId, study.readingInstitutionId].includes(actor.institutionId);
+  if (!institutionAdmits(spec.record, 'write', actor.institutionId, managing, unit ? unit.readingInstitutionId : study.readingInstitutionId) ||
+      (spec.record === 'assignment' && opening && !ownRow)) refuse('NotFound');
   const { requestId, revision, b } = clientBody(spec, w.body, actor);
   const path: SurfacePath = resolvePath(surface, actor, unit);
-  const { text, reason } = textFor(path.text ?? spec.text, b, spec, w.content);
+  const { text, reason } = textFor(path.text ?? spec.text, b, spec, w.content, opening);
   const entry = entryClass(spec, path, text);
   let readerId: string | null = null;
   if (spec.record === 'assignment') {
@@ -247,7 +262,8 @@ export function planClinicalWrite(input: WriteInput): Readonly<ClinicalWritePlan
     surface, record: spec.record, opening, requestId, fingerprint, receiptKey,
     entry, version, projection: { state: to, revision: version.sequence, head, clinicalAdoption },
     parties: unit ? unit.parties : { authorId: actor.identity.id, recipientId },
-    readingInstitutionId: unit ? unit.readingInstitutionId : study.readingInstitutionId,
+    // An assignment row belongs to one institution (reader-assignment.service.ts:10); no second institution reads or writes it.
+    readingInstitutionId: unit ? unit.readingInstitutionId : spec.record === 'assignment' ? null : study.readingInstitutionId,
     signing, access: { route: spec.route, action: accessAction(spec, entry, act, opening), target },
     // The receipt is what replays, lists and conflicts may return: identifiers and state, never clinical text.
     receipt: { requestId, fingerprint, recordId, versionId, versionSha256: version.sha256, revision: version.sequence, state: to, at },
@@ -340,23 +356,24 @@ export async function commitClinicalWrite(ports: { store: ClinicalStorePort; sig
     if (result.ok === false) return failed(result.code);
     signature = result.signature;
   }
-  try {
-    const receipt = await ports.store.commit({ plan, signature });
-    if (!receipt || receipt.fingerprint !== plan.fingerprint || receipt.versionId !== plan.version.versionId) return unknownOutcome();
-    return freeze({ status: 'committed', receipt });
-  } catch {
-    try {
-      const stored = await ports.store.findReceipt(plan.receiptKey);
-      if (!stored) return failed('StorageFailed');
-      return stored.fingerprint === plan.fingerprint ? freeze({ status: 'committed', receipt: stored }) : unknownOutcome();
-    } catch { return unknownOutcome(); }
+  let receipt: WriteReceipt;
+  try { receipt = await ports.store.commit({ plan, signature }); }
+  catch {
+    let stored: WriteReceipt | null;
+    try { stored = await ports.store.findReceipt(plan.receiptKey); } catch { return unknownOutcome(); }
+    if (!stored) return failed('StorageFailed');
+    // The receipt key is unique and committed with the version: another body under it means this unit of work did not commit.
+    if (stored.fingerprint !== plan.fingerprint) refuse('RequestIdReused');
+    return freeze({ status: 'committed', receipt: stored });
   }
+  if (!receipt || receipt.fingerprint !== plan.fingerprint || receipt.versionId !== plan.version.versionId) return unknownOutcome();
+  return freeze({ status: 'committed', receipt });
 }
 
 // ---------- reads ----------
 
 export interface ReadPlan {
-  route: string; record: ClinicalRecord; recordId: string; actorId: string; actingInstitutionId: string;
+  route: string; record: ClinicalRecord; recordId: string; actorId: string; actingInstitutionId: string; managingInstitutionId: string;
   versions: readonly (VersionReference & { kind: RecordKind })[];
   targets: readonly AccessTarget[];
 }
@@ -371,7 +388,7 @@ export function planClinicalRead(input: { actor: ActorFacts; unit: ClinicalUnit;
   const r = object(input, ['actor', 'unit', 'scope']);
   const actor = actorFacts(r.actor), unit: ClinicalUnit = r.unit, scope = choice(r.scope, ['current', 'history']);
   projectUnit(unit);
-  if (actor.kind !== 'member' || !institutionAdmits(unit.record, actor.institutionId, unit.managingInstitutionId, unit.readingInstitutionId))
+  if (actor.kind !== 'member' || !institutionAdmits(unit.record, 'read', actor.institutionId, unit.managingInstitutionId, unit.readingInstitutionId))
     refuse('NotFound');
   const isAuthor = unit.parties.authorId === actor.identity.id;
   const isParty = isAuthor || unit.parties.recipientId === actor.identity.id;
@@ -382,6 +399,7 @@ export function planClinicalRead(input: { actor: ActorFacts; unit: ClinicalUnit;
   const served = scope === 'current' ? [unit.versions[unit.versions.length - 1]] : [...unit.versions];
   const plan = freeze(structuredClone({
     route: READ_ROUTES[unit.record], record: unit.record, recordId: unit.recordId, actorId: actor.identity.id, actingInstitutionId: actor.institutionId,
+    managingInstitutionId: unit.managingInstitutionId,
     versions: served.map(v => ({ ...ref(v), kind: v.kind })),
     targets: served.map(v => ({ kind: v.kind, patientLinkSnapshot: { status: 'known', value: v.patient }, studyId: { status: 'known', value: v.studyId },
       recordId: { status: 'known', value: v.recordId }, versionId: { status: 'known', value: v.versionId } })),
@@ -404,7 +422,8 @@ export async function provideClinicalRead<T>(store: AppendOnlyAccessStore, event
     JSON.stringify([p.patientLinkSnapshot, p.studyId, p.recordId, p.versionId]);
   if (e.surface !== plan.route || e.action !== 'provide-prepared' || e.targets.length !== plan.targets.length ||
       e.targets.some((t, i) => !match(t, plan.targets[i])) || e.userId.status !== 'known' || e.userId.value.id !== plan.actorId ||
-      e.actingInstitution.status !== 'known' || e.actingInstitution.value !== plan.actingInstitutionId) refuse('AccessTargetMismatch');
+      e.actingInstitution.status !== 'known' || e.actingInstitution.value !== plan.actingInstitutionId ||
+      e.managingInstitution.status !== 'known' || e.managingInstitution.value !== plan.managingInstitutionId) refuse('AccessTargetMismatch');
   return provideAfterDurableEvent(store, event, receipt => send(bodies, receipt));
 }
 
