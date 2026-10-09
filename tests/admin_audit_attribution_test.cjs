@@ -36,7 +36,7 @@
  * stay unresolved; the SQL rules are unchanged. The product is not shaped for it (AGENTS 1-B, D73).
  * REQ-AUDIT-CLOSED-WORLD -> RISK-AUDIT-UNRESOLVED / RISK-AUDIT-ATTACKER-ACTION / RISK-AUDIT-OBJECT-ESCAPE /
  *   RISK-AUDIT-SQL-PROVENANCE -> TEST-AUDIT-CLOSED-WORLD CW01-CW20 (tests/fixtures/admin-audit-checker/closed-world).
- *   Rule B′ (every member projection proved, Astra consult 2) closes erased references within the named limits L1-L8,
+ *   Rule B′ (every member projection proved, Astra consult 2) closes erased references within the named limits L1-L10,
  *   which stay limits, each with its review rule (see the completeness section): no completeness is claimed beyond what
  *   the check proves. Decorators in a holder chain: only @nestjs/common's Injectable() (L5, commander D847).
  *
@@ -948,7 +948,7 @@ test('the query takes limit (1-100, default 25) and the sealed after only', () =
 //    to a declaration. A use that only writes (`=`, a destructuring or for-in/of target, `delete`) is counted as a write
 //    (objectWrites, slotWrites); a read-modify-write meets both. A failed obligation hands the object on, so every writer,
 //    client flow or SQL value that depends on it is unresolved where it stands. This closes the class of erased references
-//    inside the trust boundary above; it does not lift the named limits L1-L8. The receiver is read at its apparent type,
+//    inside the trust boundary above; it does not lift the named limits L1-L10. The receiver is read at its apparent type,
 //    so the polymorphic `this` (`this as this`) is its class (Astra review 3 F02). A slot's holder chain carries no
 //    decorator but @nestjs/common's Injectable() on a class (L5): a decorator elsewhere there may install a method body
 //    no call the check reads would show (review 3 F01).
@@ -992,7 +992,7 @@ test('the query takes limit (1-100, default 25) and the sealed after only', () =
 //    it); L4 an SQL function that executes a text argument inside an ordinary query (dblink_exec and the like). That
 //    none of them is used today is an observation, not a proof: a change that introduces one of these shapes reopens
 //    the limit. The cases are kept as comments beside the negative table (LIMIT L1-L3) so that they are not rediscovered.
-//    The closed world (W3-C, W4-C, rule B′; AUDIT-CHECKER-U0B, commander D844/D847) names four more, so that a shape
+//    The closed world (W3-C, W4-C, rule B′; AUDIT-CHECKER-U0B, commander D844/D847/D856) names six more, so that a shape
 //    outside them is a limit and a review item, not another hardening round. Each limit with the review rule that keeps
 //    product code out of it (the U0b round-2 review checklist and every later change to these files):
 //      L1 Prisma namespace as a value — review: the namespace is only called (`Prisma.sql`, `Prisma.join` ...), never
@@ -1019,6 +1019,20 @@ test('the query takes limit (1-100, default 25) and the sealed after only', () =
 //         computed path, and a patched prototype of a built-in or library class (Function.prototype.call, PrismaClient,
 //         Object.prototype) are outside what the TypeScript program shows. Review: none of these in product code; a
 //         dynamic member access on a holder (a computed key, a key widened by an assertion) is refused, not a limit.
+//      L9 a decorator applied by hand to a holder class: `Reflect.decorate([install], SynFacade)` with a program
+//         function that replaces a prototype descriptor is no `@` decorator, so the chain check does not see it, and
+//         the class handed to that call is not linked to its instances' prototype (Astra review of 22dad67, F03, N01:
+//         TypeScript diagnostics 0, six verdicts empty, a synthetic run recorded evil.audit for study.arrived). Review:
+//         no manual decorator application — Reflect.decorate, a decorator function called by hand, Object.defineProperty
+//         or Object.assign on a prototype — to facade, concern or DI classes; a program-defined decorator only sets
+//         metadata (L7), and L5/L7 stay as they are.
+//      L10 a class a function returns: a generic mixin `mix<T extends new (...args: any[]) => SynFacade>(Base: T)` that
+//         returns `class extends Base` is not tied to the holder's family, so a call in the returned class (here
+//         through `(this as any)`) is not read (Astra review of 22dad67, F04, N03: diagnostics 0, six verdicts empty,
+//         a synthetic `new Mixed(...).arrived` recorded evil.audit). Review: no mixin or class factory for facade,
+//         concern or DI classes — holders are plain class declarations created with `new` in the facade into private
+//         readonly fields (U0b order section 4), and no facade or concern class is handed to a function or to the
+//         constructor of another holder as a class.
 //  Closure (Astra S7-U3a-AUDIT-SPEC-C-R-001-F03, the conditions of S7-U3a-G-R-001): (a) W1-W6 alone resolve every write of
 //    the baseline and give every other candidate its classification, with no writer left out, no exception by place and
 //    no product change; (b) each enumerated counterexample, alone next to the baseline, leaves its write unresolved and
