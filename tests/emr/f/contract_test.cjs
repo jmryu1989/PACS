@@ -1900,7 +1900,7 @@ test('TEST-F-07 R5 LQ-01 ISP supplement and affected-user notice survive initial
   assert.equal(duty(next, 'isp-user-notice').stillOwed, true);
   assert.equal(next.obligations.filter(o => o.kind === 'isp-incident-report-supplement').length, 2);
   const userNotice = { kind: 'isp-user-notice', triggeredAt: itime(2), sentAt: itime(3), noticeId: 'users-sent', channel: 'affected-users',
-    coveredFields: ['incident-time-and-circumstances', 'user-damage', 'provider-response', 'user-protective-actions', 'contact-department'] };
+    coveredFields: ['incident-time-and-circumstances', 'user-damage', 'provider-response', 'user-protective-actions', 'user-remedy-measures', 'contact-department'] };
   const sent = F.planIncidentResponse(auditor, scope, facts, { notices: [ispReport(), userNotice], asOf: itime(7) });
   assert.equal(duty(sent, 'isp-user-notice').status, 'met');
   assert.equal(sent.obligations.filter(o => o.kind === 'isp-user-additional' && o.stillOwed).length, 2);
@@ -1910,7 +1910,7 @@ test('TEST-F-07 R5 LQ-01 ISP supplement and affected-user notice survive initial
 test('TEST-F-07 R5 LQ-01 ISP priority user notice and per-recipient deemed notice retain remaining duties', async () => {
   const { auditor, scope } = await incidentForResponse();
   const facts = ispFinding(true, { userImpact: userImpact({ detailsComplete: false }), additionalFacts: [{ eventId: 'details', confirmedAt: itime(5), evidenceId: 'facts' }] });
-  const priorityFields = ['user-damage', 'provider-response', 'user-protective-actions', 'contact-department'];
+  const priorityFields = ['incident-occurred', 'facts-known-so-far', 'provider-response', 'user-protective-actions', 'user-remedy-measures', 'contact-department'];
   const priority = { kind: 'isp-user-notice', triggeredAt: itime(2), sentAt: itime(3), noticeId: 'priority-users', channel: 'affected-users', coveredFields: priorityFields };
   const p = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(6), notices: [priority] });
   assert.equal(duty(p, 'isp-user-notice').status, 'met');
@@ -2048,7 +2048,7 @@ test('TEST-F-07 R6 LQ-03 v5 late supplementary performance remains performed wit
   assert.equal(o.observations[0].status, 'overdue');
 });
 test('TEST-F-07 R6 ISP-DUTIES D25V3-N3 outage permits recipient deeming and otherwise needs direct notice', async () => {
-  const { auditor, scope } = await incidentForResponse(), fields = ['incident-time-and-circumstances', 'user-damage', 'provider-response', 'user-protective-actions', 'contact-department'];
+  const { auditor, scope } = await incidentForResponse(), fields = ['incident-time-and-circumstances', 'user-damage', 'provider-response', 'user-protective-actions', 'user-remedy-measures', 'contact-department'];
   const facts = { ...ispFinding(true, { userImpact: userImpact() }), recipientScopeRef: 'service-users' };
   const empty = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(4) });
   assert.equal(duty(empty, 'isp-user-notice').stillOwed, true);
@@ -2486,7 +2486,7 @@ const r7PreCutover = { occurredAt: '2026-09-20T00:00:00.000Z', endedAt: '2026-09
 const r7UnknownOccurrence = { occurredAt: null, endedAt: null, evidenceId: 'occurrence-under-investigation' };
 function r7UserNotice(patch = {}) {
   return { kind: 'isp-user-notice', triggeredAt: itime(2), sentAt: itime(3), noticeId: 'users-informed', channel: 'affected-users',
-    coveredFields: ['incident-time-and-circumstances', 'user-damage', 'provider-response', 'user-protective-actions', 'contact-department'], ...patch };
+    coveredFields: ['incident-time-and-circumstances', 'user-damage', 'provider-response', 'user-protective-actions', 'user-remedy-measures', 'contact-department'], ...patch };
 }
 function r7NoticeDecision(applies, hours, decisionId) {
   return { decisionId, applies, at: itime(hours), reason: 'reviewed occurrence evidence', basis: 'network:21500:addendum:4',
@@ -3202,8 +3202,10 @@ test("TEST-F-07 R10 D26 C22 C23 direct report receipt needs no duplicate PIPA at
 
 test("TEST-F-07 R10 R9-I04 CE21 earlier-effective correction retains observed moot history", async () => {
   const { auditor, scope } = await incidentForResponse(), facts = r6Finding(IA, { occurrence: r8PostCutover, userImpact: userImpact() });
+  facts.recordedAt = itime(4);
   const first = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(4) });
   const revised = r9Correction(facts, r7PreCutover, 0.5);
+  revised.recordedAt = itime(6);
   const next = F.planIncidentResponse(auditor, scope, revised, { previous: first, asOf: itime(6) });
   const o = duty(next, 'isp-user-notice');
   assert.ok(o, 'R9-I04 CE21 observed duty never disappears');
@@ -3214,12 +3216,21 @@ test("TEST-F-07 R10 R9-I04 CE21 earlier-effective correction retains observed mo
   assert.ok(o.corrections.length > 0);
   assert.ok(o.replacedBy);
   assert.ok(next.ledger.findings.length > first.ledger.findings.length);
+  const batch = F.planIncidentResponse(auditor, scope, revised, { findings: [facts], asOf: itime(6) });
+  const permuted = F.planIncidentResponse(auditor, scope, facts, { findings: [revised], asOf: itime(6) });
+  assert.deepEqual(projection(batch), projection(next), 'R11 CE21 batch equals stepwise for recorded evidence');
+  assert.deepEqual(projection(permuted), projection(next), 'R11 CE21 permutation equals stepwise');
+  const split = F.planIncidentResponse(auditor, scope, revised, { previous: batch, findings: [facts], asOf: itime(6) });
+  assert.deepEqual(projection(split), projection(next), 'R11 CE21 split duplicate replay equals stepwise');
+
 });
 
 test("TEST-F-07 R10 R9-I04 CE21b earlier-effective correction retains observed moot history", async () => {
   const { auditor, scope } = await incidentForResponse(), facts = { ...r8Decided(true), ispIncident: { ...r8Decided(true).ispIncident, userNoticeDecision: r7NoticeDecision(true, 0.25, 'initial-yes') } };
+  facts.recordedAt = itime(4);
   const first = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(4) });
   const revised = { ...facts, ispIncident: { ...facts.ispIncident, userNoticeDecision: r7NoticeDecision(false, 0.5, 'backdated-no') } };
+  revised.recordedAt = itime(6);
   const next = F.planIncidentResponse(auditor, scope, revised, { previous: first, asOf: itime(6) });
   const o = duty(next, 'isp-user-notice');
   assert.ok(o, 'R9-I04 CE21b observed duty never disappears');
@@ -3230,6 +3241,13 @@ test("TEST-F-07 R10 R9-I04 CE21b earlier-effective correction retains observed m
   assert.ok(o.corrections.length > 0);
   assert.ok(o.replacedBy);
   assert.ok(next.ledger.findings.length > first.ledger.findings.length);
+  const batch = F.planIncidentResponse(auditor, scope, revised, { findings: [facts], asOf: itime(6) });
+  const permuted = F.planIncidentResponse(auditor, scope, facts, { findings: [revised], asOf: itime(6) });
+  assert.deepEqual(projection(batch), projection(next), 'R11 CE21b batch equals stepwise for recorded evidence');
+  assert.deepEqual(projection(permuted), projection(next), 'R11 CE21b permutation equals stepwise');
+  const split = F.planIncidentResponse(auditor, scope, revised, { previous: batch, findings: [facts], asOf: itime(6) });
+  assert.deepEqual(projection(split), projection(next), 'R11 CE21b split duplicate replay equals stepwise');
+
 });
 
 test("TEST-F-07 R10 D26-N2 PD40 principal trigger and separately verified exemption never exempt ISP", async () => {
@@ -3366,4 +3384,143 @@ test('TEST-F-07 R10 D26 Q4 exact reviewed v2 constant', () => {
     "reevaluation": "completing attribution re-classifies evidence only; original known/incident/performed times are never overwritten by the completion time"
   }
 }, 'D26 Q4 exact legal contract');
+});
+
+// D859: statutory content/replay -> REQ-EMR-15/19 -> RISK-F-07 -> TEST-F-07.
+// Expected content is independently enumerated from ND58-9(2)(1)-(5) and (3), not read from the plan.
+const r11FullUserFields = ['incident-time-and-circumstances', 'user-damage', 'provider-response',
+  'user-protective-actions', 'user-remedy-measures', 'contact-department'];
+const r11PriorityUserFields = ['incident-occurred', 'facts-known-so-far', 'provider-response',
+  'user-protective-actions', 'user-remedy-measures', 'contact-department'];
+
+test('TEST-F-07 R11 full user notice requires every ND58-9 paragraph 2 item', async () => {
+  const { auditor, scope } = await incidentForResponse(), facts = ispFinding(true, { userImpact: userImpact() });
+  const pending = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(3) });
+  assert.deepEqual(duty(pending, 'isp-user-notice').requiredFields, r11FullUserFields, 'R11 full notice lists items 1 to 5');
+  for (const missing of r11FullUserFields) {
+    const notice = r7UserNotice({ coveredFields: r11FullUserFields.filter(k => k !== missing) });
+    incidentRefused(() => F.planIncidentResponse(auditor, scope, facts, { previous: pending, notices: [notice], asOf: itime(4) }),
+      [pending, facts, notice], `R11 incomplete direct notice cannot satisfy ${missing}`);
+    assert.equal(duty(pending, 'isp-user-notice').stillOwed, true);
+  }
+  const sent = F.planIncidentResponse(auditor, scope, facts, { previous: pending, notices: [r7UserNotice({ coveredFields: r11FullUserFields })], asOf: itime(4) });
+  assert.deepEqual([duty(sent, 'isp-user-notice').status, duty(sent, 'isp-user-notice').stillOwed], ['met', false]);
+});
+
+test('TEST-F-07 R11 priority user notice requires occurrence known facts and items 2 to 5', async () => {
+  const { auditor, scope } = await incidentForResponse(), facts = ispFinding(true, { userImpact: userImpact({ detailsComplete: false }) });
+  const pending = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(3) });
+  assert.deepEqual(duty(pending, 'isp-user-notice').requiredFields, r11PriorityUserFields, 'R11 priority notice includes statutory replacements and items 2 to 5');
+  for (const missing of r11PriorityUserFields) {
+    const notice = r7UserNotice({ coveredFields: r11PriorityUserFields.filter(k => k !== missing) });
+    incidentRefused(() => F.planIncidentResponse(auditor, scope, facts, { previous: pending, notices: [notice], asOf: itime(4) }),
+      [pending, facts, notice], `R11 incomplete priority notice cannot satisfy ${missing}`);
+    assert.equal(duty(pending, 'isp-user-notice').stillOwed, true);
+  }
+  const sent = F.planIncidentResponse(auditor, scope, facts, { previous: pending, notices: [r7UserNotice({ coveredFields: r11PriorityUserFields })], asOf: itime(4) });
+  assert.equal(duty(sent, 'isp-user-notice').status, 'met');
+});
+
+test('TEST-F-07 R11 D26 attribution lists missing remedy content without deeming performance', async () => {
+  const partial = r11FullUserFields.filter(k => k !== 'user-remedy-measures');
+  const p = await d26Plan([d26SubjectAttribution({ coveredItems: partial })], { notices: [d26Subject({ recordedAt: itime(3), coveredFields: partial })] });
+  const e = p.ledger.notices[0].operatorEvidence;
+  assert.equal(e.attributionComplete, false, 'R11 attribution requires every statutory user item');
+  assert.deepEqual(e.invalidFields, ['coveredItems']);
+  assert.deepEqual(e.missingFields, ['coveredItems.user-remedy-measures'], 'R11 attribution identifies the missing statutory item');
+  assert.deepEqual([duty(p, 'isp-user-notice').stillOwed, duty(p, 'isp-user-notice').notice], [true, null]);
+  const complete = await d26Plan([d26SubjectAttribution({ coveredItems: r11FullUserFields })], { notices: [d26Subject({ recordedAt: itime(3), coveredFields: r11FullUserFields })] });
+  assert.equal(complete.ledger.notices[0].operatorEvidence.attributionComplete, true);
+  assert.equal(duty(complete, 'isp-user-notice').stillOwed, true, 'D26 remains evidence only');
+  const { auditor, scope } = await incidentForResponse();
+  const direct = F.planIncidentResponse(auditor, scope, r8Operator(), { previous: complete, notices: [r7UserNotice({ coveredFields: r11FullUserFields })], asOf: itime(31) });
+  assert.equal(duty(direct, 'isp-user-notice').status, 'met');
+});
+
+test('TEST-F-07 R11 user posting requires all paragraph 2 items even in priority mode', async () => {
+  const { auditor, scope } = await incidentForResponse(), facts = ispFinding(true, { userImpact: userImpact({ detailsComplete: false }) });
+  const posting = { justCause: 'unknown-user-contact', evidenceId: 'contact-search', maintainedThrough: itime(723), maintenanceEvidenceId: 'posting-log' };
+  const full = r7UserNotice({ coveredFields: r11FullUserFields, posting });
+  let sent;
+  assert.doesNotThrow(() => { sent = F.planIncidentResponse(auditor, scope, facts, { notices: [full], asOf: itime(724) }); },
+    'R11 posting uses the full statutory content');
+  assert.deepEqual([duty(sent, 'isp-user-notice').status, duty(sent, 'isp-user-notice').closureGround], ['met', 'posting'], 'R11 posting uses the full statutory content');
+  for (const coveredFields of [r11PriorityUserFields, r11FullUserFields.filter(k => k !== 'user-remedy-measures')]) {
+    const notice = { ...full, coveredFields };
+    incidentRefused(() => F.planIncidentResponse(auditor, scope, facts, { notices: [notice], asOf: itime(724) }),
+      [facts, notice], 'R11 posting cannot use the priority content exception');
+  }
+});
+
+test('TEST-F-07 R11 PIPA statutory notice and report content lists match each provision', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const full = ['data-items', 'occurrence-and-circumstances', 'subject-protective-actions',
+    'controller-response-and-remedies', 'contact-department', 'legal-rights-and-exercise'];
+  for (const detailsComplete of [false, true]) {
+    const facts = incidentFacts({ status: 'confirmed', possibleGround: null, determinationAt: itime(1), detailsComplete,
+      newlyConfirmedAt: itime(3), reportTriggers: ['sensitive-or-unique'] });
+    const p = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(4) });
+    assert.deepEqual(p.obligations.find(o => o.family === 'confirmed').requiredFields, detailsComplete ? full :
+      ['leak-confirmed', 'facts-known-so-far', ...full.slice(2)], 'P34(1)(1)-(6); PD39(2) keeps items 3-6');
+    assert.deepEqual(p.obligations.find(o => o.family === 'report').requiredFields, detailsComplete ? full :
+      ['leak-confirmed', 'facts-known-so-far', ...full.slice(2, 5)], 'PD40(1), (2) priority keeps items 3-5');
+    assert.deepEqual(duty(p, 'confirmed-additional').requiredFields, ['newly-confirmed-facts', 'legal-rights-and-exercise']);
+    assert.deepEqual(duty(p, 'pipc-kisa-additional').requiredFields, ['newly-confirmed-facts']);
+  }
+  const possible = F.planIncidentResponse(auditor, scope, incidentFacts());
+  assert.deepEqual(duty(possible, 'possible-leak').requiredFields,
+    ['possible-data-items', 'suspected-time-and-circumstances', ...full.slice(2, 5), 'further-notice-on-determination'], 'PD39-2(2)(1)-(4)');
+  const no = F.planIncidentResponse(auditor, scope, noLeak(), { notices: [possibleNotice()] });
+  assert.deepEqual(duty(no, 'not-a-leak').requiredFields, ['no-leak-confirmed', 'prior-possible-notice-reference'], 'PD39-3(3)');
+});
+
+test('TEST-F-07 R11 ISP reports supplements and MOHW content match each provision', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const facts = ispFinding(true, { userImpact: userImpact(), additionalFacts: [{ eventId: 'more', confirmedAt: itime(5), evidenceId: 'new-facts' }] });
+  facts.medicalIncident = { occurredAt: IA, discoveredAt: IA, electronicIntrusion: true, type: 'system-disruption' };
+  const p = F.planIncidentResponse(auditor, scope, facts, { notices: [ispReport(), r7UserNotice()], asOf: itime(6) });
+  assert.deepEqual(duty(p, 'isp-incident-report').requiredFields, ['incident-time-cause-damage', 'response-status', 'contact-department'], 'ND58-8(1)(1)-(3)');
+  assert.deepEqual(duty(p, 'isp-incident-report-supplement').requiredFields, ['newly-confirmed-facts'], 'ND58-8(2)');
+  assert.deepEqual(duty(p, 'isp-user-additional').requiredFields, ['newly-confirmed-facts'], 'ND58-9(3)');
+  assert.deepEqual(duty(p, 'mohw-notice').requiredFields, ['institution-name', 'incident-time', 'damage-details', 'technical-support-request'], 'MR16-2(1)(1)-(4)');
+});
+
+for (const mode of ['occurrence', 'decision']) test(`TEST-F-07 R11 ${mode} replay never invents an observation before the cause was recorded`, async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const facts = mode === 'occurrence' ? r6Finding(IA, { occurrence: r8PostCutover, userImpact: userImpact() }) :
+    { ...r8Decided(true), ispIncident: { ...r8Decided(true).ispIncident, userNoticeDecision: r7NoticeDecision(true, 0.25, 'yes') } };
+  facts.recordedAt = itime(6);
+  const revised = mode === 'occurrence' ? r9Correction(facts, r7PreCutover, 0.5) :
+    { ...facts, ispIncident: { ...facts.ispIncident, userNoticeDecision: r7NoticeDecision(false, 0.5, 'no') } };
+  for (const correctedRecordedAt of [itime(4), itime(6)]) {
+    revised.recordedAt = correctedRecordedAt;
+    const batch = F.planIncidentResponse(auditor, scope, revised, { findings: [facts], asOf: itime(6) });
+    const reversed = F.planIncidentResponse(auditor, scope, facts, { findings: [revised], asOf: itime(6) });
+    assert.equal(duty(batch, 'isp-user-notice'), undefined, 'R11 no observed duty before causal evidence intake');
+    assert.deepEqual(projection(batch), projection(reversed));
+  }
+});
+
+test('TEST-F-07 R11 substitute postings retain full PIPA and ISP additional notice content', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const posting = { justCause: 'no-contact', evidenceId: 'contact-search', maintainedThrough: itime(724), maintenanceEvidenceId: 'thirty-days' };
+  const full = ['data-items', 'occurrence-and-circumstances', 'subject-protective-actions',
+    'controller-response-and-remedies', 'contact-department', 'legal-rights-and-exercise'];
+  const facts = incidentFacts({ status: 'confirmed', possibleGround: null, determinationAt: itime(1), detailsComplete: false, newlyConfirmedAt: itime(3) });
+  for (const [kind, triggeredAt, incomplete] of [
+    ['confirmed-priority', itime(1), ['leak-confirmed', 'facts-known-so-far', ...full.slice(2)]],
+    ['confirmed-additional', itime(3), ['newly-confirmed-facts', 'legal-rights-and-exercise']]]) {
+    const notice = { kind, triggeredAt, sentAt: itime(4), noticeId: kind, posting, coveredFields: incomplete };
+    const pending = F.planIncidentResponse(auditor, scope, facts, { notices: [notice], asOf: itime(725) });
+    assert.equal(duty(pending, kind).stillOwed, true, 'R11 PIPA posting always requires P34 full content');
+    const complete = F.planIncidentResponse(auditor, scope, facts, { notices: [{ ...notice, coveredFields: full }], asOf: itime(725) });
+    assert.deepEqual([duty(complete, kind).status, duty(complete, kind).closureGround], ['met', 'posting']);
+  }
+  const isp = ispFinding(true, { userImpact: userImpact(), additionalFacts: [{ eventId: 'extra', confirmedAt: itime(5), evidenceId: 'extra' }] });
+  const supplement = { kind: 'isp-user-additional', triggeredAt: itime(5), sentAt: itime(6), noticeId: 'posted-additional',
+    posting: { ...posting, maintainedThrough: itime(726) }, coveredFields: ['newly-confirmed-facts'] };
+  incidentRefused(() => F.planIncidentResponse(auditor, scope, isp, { notices: [r7UserNotice(), supplement], asOf: itime(727) }),
+    [isp, supplement], 'R11 ISP additional posting cannot omit full content');
+  const complete = F.planIncidentResponse(auditor, scope, isp, { notices: [r7UserNotice(), { ...supplement, coveredFields: r11FullUserFields }], asOf: itime(727) });
+  assert.equal(duty(complete, 'isp-user-additional').status, 'met');
 });

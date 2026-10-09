@@ -724,7 +724,10 @@ const DUTY_FAMILY: Readonly<Record<DutyKind, DutyFamily>> = freeze({
 // D-25 v5 (LQ-01 unchanged from v3): no numeric deadline for "immediate"; elapsed time is not a legal verdict.
 const IMMEDIATE_TIMING_RULE = freeze({ dueAt: null as string | null, status: 'pending' as const, timeliness: 'requires-review' as const,
   ispHours: 24, ispReportFields: ['incident-time-cause-damage', 'response-status', 'contact-department'],
-  ispUserFields: ['incident-time-and-circumstances', 'user-damage', 'provider-response', 'user-protective-actions', 'contact-department'] });
+  // Network decree 58-9(2): item 1 uses two fields; items 2-5 each retain their own content.
+  ispUserFields: ['incident-time-and-circumstances', 'user-damage', 'provider-response', 'user-protective-actions', 'user-remedy-measures', 'contact-department'],
+  // 58-9(3) replaces the unconfirmed item 1 with the occurrence fact and what is known so far.
+  ispUserPriorityFields: ['incident-occurred', 'facts-known-so-far', 'provider-response', 'user-protective-actions', 'user-remedy-measures', 'contact-department'] });
 // D-25 v5 (LQ-02 unchanged from v3): each exception belongs to its own provision; a documented acceptance preserves the original clock and
 // clearance requires immediate action. A pending claim never disables the statutory clock.
 const DELAY_RULE = freeze({ clauses: { possibility: 'privacy-decree:39-3.1', confirmed: 'privacy-decree:39.1', report: 'privacy-decree:40.1' },
@@ -1096,8 +1099,29 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
     const initial = (c: Cause) => !['confirmed', 'report'].includes(c.family) || !sources.some(x => x.family === c.family && x.recipients === c.recipients &&
       (x.at < c.at || (x.at === c.at && x.eventId < c.eventId)));
     const dutySources = sources.filter(initial);
-    const userNoticeFields = (fact: BoundFinding['facts']) => fact.ispIncident.userImpact?.detailsComplete === false ?
-      IMMEDIATE_TIMING_RULE.ispUserFields.slice(1) : IMMEDIATE_TIMING_RULE.ispUserFields;
+    // Reconstruct what could be observed from the recorded evidence, even on a single batch replay.
+    // A backdated correction cannot erase a duty seen before that correction was recorded.
+    const ispUserPreviouslyObserved = (c: Cause) => {
+      const eventFindings = findings.filter(x => x.facts.ispIncident?.eventId === c.fact.ispIncident.eventId);
+      const causeRecordedAt = eventFindings.filter(x => {
+        const incident = x.facts.ispIncident;
+        return incident.userImpact?.recipientScopeRef === c.recipients && (c.family === 'isp-user'
+          ? incident.userImpact.confirmedAt === c.at
+          : incident.additionalFacts?.some(a => a.eventId === c.eventId && a.confirmedAt === c.at));
+      }).map(x => x.recordedAt).sort()[0];
+      return eventFindings.some(observed => {
+        if (observed.recordedAt < causeRecordedAt) return false;
+        const known = eventFindings.filter(x => x.recordedAt <= observed.recordedAt);
+        const occurrences = known.map(x => x.facts.ispIncident.occurrence).filter(Boolean);
+        const definite = occurrences.some(o => o.occurredAt !== null && Date.parse(o.occurredAt) >= Date.parse(ISP.userNoticeAppliesFrom) &&
+          !occurrences.some(next => next.correction?.supersedes === o.evidenceId));
+        const decisions = known.map(x => x.facts.ispIncident.userNoticeDecision).filter(Boolean)
+          .sort((a, b) => a.at.localeCompare(b.at) || a.decisionId.localeCompare(b.decisionId));
+        return definite || decisions.slice(-1)[0]?.applies === true;
+      });
+    };
+    const userNoticeFields = (fact: BoundFinding['facts'], posting = false) => !posting && fact.ispIncident.userImpact?.detailsComplete === false ?
+      IMMEDIATE_TIMING_RULE.ispUserPriorityFields : IMMEDIATE_TIMING_RULE.ispUserFields;
     const rawNotices = [...(previous?.ledger.notices ?? []), ...list(history.notices)];
     const parsedNotices = rawNotices.map(value => {
       const n = optionalObject(value, ['kind', 'triggeredAt', 'noticeId', 'sentAt'], ['institutionId', 'incidentId', 'triggerEventId', 'recipientScopeRef', 'coversAll', 'evidenceId', 'recordedAt', 'coveredFields', 'channel', 'posting', 'operatorEvidence']);
@@ -1119,7 +1143,7 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
       if (['isp-report', 'isp-supplement'].includes(family) && (!['MSIT', 'KISA'].includes(n.channel) ||
           !(family === 'isp-report' ? IMMEDIATE_TIMING_RULE.ispReportFields : ['newly-confirmed-facts']).every(k => n.coveredFields?.includes(k)))) throw new Error('ISP report channel and content required');
       if (['isp-user', 'isp-user-additional'].includes(family) && (!n.posting && n.channel !== 'affected-users' ||
-          !(family === 'isp-user' ? userNoticeFields((matches[0] as Cause).fact) : ['newly-confirmed-facts']).every(k => n.coveredFields?.includes(k)))) throw new Error('ISP user content required');
+          !(n.posting ? IMMEDIATE_TIMING_RULE.ispUserFields : family === 'isp-user' ? userNoticeFields((matches[0] as Cause).fact) : ['newly-confirmed-facts']).every(k => n.coveredFields?.includes(k)))) throw new Error('ISP user content required');
       return { kind: n.kind as DutyKind, triggeredAt: n.triggeredAt, noticeId: n.noticeId, sentAt: n.sentAt,
         institutionId: authority.institutionId, incidentId: f.incidentId, triggerEventId: matches[0].eventId,
         recipientScopeRef: string(n.recipientScopeRef ?? matches[0].recipients), coversAll: n.coversAll ?? true,
@@ -1175,6 +1199,7 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
         Array.isArray(a?.recipientAuthority) && a.recipientAuthority.length > 0 && eligibleRecipientIds.length === a.recipientAuthority.length);
       const required = isReport ? IMMEDIATE_TIMING_RULE.ispReportFields : IMMEDIATE_TIMING_RULE.ispUserFields;
       valid('coveredItems', required.every(k => a?.coveredItems?.includes(k)));
+      if (a?.coveredItems) missingFields.push(...required.filter(k => !a.coveredItems.includes(k)).map(k => `coveredItems.${k}`));
       valid('legalBasisRef', isReport ? a?.legalBasisRef?.basis === 'P26⑧→P34④+PD40' :
         ['P26⑧→P34①+PD39', 'P26⑧→P34②+PD39의2·39의3'].includes(a?.legalBasisRef?.basis));
       n.operatorEvidence = { kind, attributionComplete: missingFields.length === 0 && invalidFields.length === 0,
@@ -1261,12 +1286,12 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
       if (reportLaw?.taskPolicy) continue;
       if (['isp-user', 'isp-user-additional'].includes(c.family) && !ispUserApplicable(c.fact.ispIncident.eventId) &&
           !ispUserPreviouslyApplicable(c.fact.ispIncident.eventId, c.at) &&
-          !previous?.obligations.some(o => o.obligationKey === key(c.family, c.eventId, c.recipients))) continue;
+          !ispUserPreviouslyObserved(c)) continue;
       if (['isp-supplement', 'isp-user-additional'].includes(c.family)) {
         const prior = notices.some(n => postingReady(n) && performedAt(n) <= c.at && (c.family === 'isp-supplement'
           ? ((n.kind === 'isp-incident-report' && n.triggerEventId === c.fact.ispIncident.eventId) ||
             (owner.kind !== 'operator' && NO_LEAK_CLOSURE_RULE.deemedReportKinds.includes(n.kind) && n.sentAt >= c.fact.awarenessAt && ['MOHW-official', 'MOHW-delegated', 'PIPC', 'KISA'].includes(n.channel) && IMMEDIATE_TIMING_RULE.ispReportFields.every(k => n.coveredFields?.includes(k))))
-          : ((n.kind === 'isp-user-notice' || (owner.kind !== 'operator' && ['possible-leak', 'confirmed-leak', 'confirmed-priority'].includes(n.kind))) && noticeCovers(n, c.recipients) && userNoticeFields(c.fact).every(k => n.coveredFields?.includes(k)))));
+          : ((n.kind === 'isp-user-notice' || (owner.kind !== 'operator' && ['possible-leak', 'confirmed-leak', 'confirmed-priority'].includes(n.kind))) && noticeCovers(n, c.recipients) && userNoticeFields(c.fact, !!n.posting).every(k => n.coveredFields?.includes(k)))));
         if (!prior) continue;
       }
       const mode = facts.filter(v => v.status === 'confirmed' && v.determinationAt === c.fact.determinationAt).some(v => v.detailsComplete);
@@ -1336,7 +1361,10 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
     // 4. Calculate performance separately from timing and final judgments. A late delivery can fulfill the duty.
     for (const o of obligations) {
       const matching = notices.filter(n => belongs(n, o)).sort((a, b) => a.sentAt.localeCompare(b.sentAt) || a.noticeId.localeCompare(b.noticeId));
-      const direct = completion(matching.filter(n => postingReady(n) && (!n.posting || o.requiredFields.every(k => n.coveredFields.includes(k)))), o.recipientScopeRef);
+      // ND58-9(5) and PD39(3) posting carry the full notice items, including priority and additional notices.
+      const performanceFields = (n: BoundNotice) => n.posting && ['isp-user', 'isp-user-additional'].includes(o.family) ? IMMEDIATE_TIMING_RULE.ispUserFields :
+        n.posting && ['confirmed', 'additional-notice'].includes(o.family) ? LEAK_NOTICE_FIELDS : o.requiredFields;
+      const direct = completion(matching.filter(n => postingReady(n) && (!n.posting || performanceFields(n).every(k => n.coveredFields.includes(k)))), o.recipientScopeRef);
       // D839: attached other-law evidence does not establish the operator's own ISP performance.
       const deemed = notices.filter(n => owner.kind !== 'operator' && postingReady(n) && performedAt(n) >= o.triggeredAt && (
         o.family === 'isp-report' ? NO_LEAK_CLOSURE_RULE.deemedReportKinds.includes(n.kind) &&
@@ -1344,7 +1372,7 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
         o.family === 'isp-supplement' ? NO_LEAK_CLOSURE_RULE.supplementDeemed.kinds.includes(n.kind) &&
           ['MSIT', 'KISA'].includes(n.channel) && o.requiredFields.every(k => n.coveredFields?.includes(k)) :
         ['isp-user', 'isp-user-additional'].includes(o.family) ? NO_LEAK_CLOSURE_RULE.deemedUserKinds.includes(n.kind) &&
-          noticeCovers(n, o.recipientScopeRef) && o.requiredFields.every(k => n.coveredFields?.includes(k)) : false
+          noticeCovers(n, o.recipientScopeRef) && performanceFields(n).every(k => n.coveredFields?.includes(k)) : false
       )).sort((a, b) => performedAt(a).localeCompare(performedAt(b)))[0];
       const residual = o.family === 'possibility' ? notices.find(n => ['confirmed-leak', 'confirmed-priority'].includes(n.kind) &&
         n.triggeredAt > o.originalDueAt && postingReady(n) && noticeCovers(n, o.recipientScopeRef) && possibleFields.every(k => n.coveredFields?.includes(k))) : undefined;
