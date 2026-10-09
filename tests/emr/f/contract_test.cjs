@@ -649,7 +649,8 @@ test('TEST-F-04 issuance_result: a paper handover is the staff attestation and n
   const summary = F.issuanceSummary([syntheticDelivered, prepared().issuance]);
   assert.deepEqual([summary.operational.Delivered, summary.operational.Prepared, summary['synthetic-test'].Delivered], [0, 1, 1]);
   const relabelled = { ...syntheticDelivered, environment: 'operational' };
-  assert.equal(F.issuanceSummary([relabelled]).operational.Delivered, 1);
+  refused(() => F.issuanceSummary([relabelled]), 'IssuanceEnvironmentMismatch',
+    'M-F-S3: relabelling a synthetic issuance cannot make operational evidence');
   refused(() => F.issuanceState({ ...syntheticDelivered, environment: 'production' }), 'IssuanceRecordRefused', 'an unknown environment');
 });
 
@@ -935,18 +936,157 @@ test('TEST-F-08 rights_request: deletion or suspension of a record the law keeps
   const suspension = F.decideRightsRequest(officer, rightsRequest('processing-suspension'), RIGHTS_RECORDS, DECIDED);
   assert.deepEqual(outcomes(suspension), { 'rep-r': 'refused-legal-duty', 'tpl-1': 'suspend-processing', 'evt-rights-1': 'refused-legal-duty' });
   const purposeOnly = F.decideRightsRequest(officer, rightsRequest('deletion', ['tpl-1']), [ofP1(TEMPLATE)], DECIDED);
-  assert.equal(purposeOnly.notice.content, 'action-taken');
+  assert.equal(purposeOnly.status, 'planned');
+  assert.equal(purposeOnly.notice.content, 'action-result-required');
 });
 
 test('TEST-F-08 rights_request: a correction is a new signed version that keeps the original and an access event is never edited and the request binds its own patient', () => {
   const officer = authorityFor('records-officer');
   const correction = F.decideRightsRequest(officer, rightsRequest('correction'), RIGHTS_RECORDS, DECIDED);
   assert.deepEqual(outcomes(correction), { 'rep-r': 'correct-by-new-signed-version', 'tpl-1': 'correct', 'evt-rights-1': 'append-correction-note' });
-  assert.equal(correction.notice.content, 'action-taken');
+  assert.equal(correction.notice.content, 'action-result-required');
   refused(() => F.decideRightsRequest(officer, rightsRequest('deletion', ['rep-r']), [{ record: RIGHTS_REPORT.resolved, subject: { patient: P2, managingInstitutionId: INST_X } }], DECIDED),
     'DisclosureSubjectMismatch', 'another patient record');
   refused(() => F.decideRightsRequest(officer, rightsRequest('deletion', ['rep-r']), [ofP1(clone(RIGHTS_REPORT.resolved))], DECIDED), 'StoredRecordRequired', 'a record not resolved by the server');
   refused(() => F.decideRightsRequest(officer, rightsRequest('deletion', ['rep-r', 'tpl-1']), [ofP1(TEMPLATE)], DECIDED), 'RightsRequestRefused', 'a requested record not resolved');
   refused(() => F.decideRightsRequest(authorityFor('aud-1', ['investigate']), rightsRequest('deletion'), RIGHTS_RECORDS, DECIDED), 'AuditScopeNotGranted', 'no disclosure scope');
   refused(() => F.decideRightsRequest(officer, { ...rightsRequest('erase-everything') }, RIGHTS_RECORDS, DECIDED), 'RightsRequestRefused', 'an unknown kind');
+});
+
+test('TEST-F-02 patient_replay: change and view streams keep independent snapshots and cursors and neither stream may silently disappear', async () => {
+  const auditor = authorityFor('aud-1');
+  const sources = {
+    changes: ledgerOf(chainRows([1, 2, 3].map(n => accessEvent({ eventId: `change-${n}`, surface: 'POST studies/:uid/report/commit',
+      action: 'approve-sign', result: 'succeeded' })))),
+    views: ledgerOf(chainRows([1, 2, 3].map(n => accessEvent({ eventId: `view-${n}` })))),
+  };
+  const plans = (changes, views) => ({
+    changes: F.planInvestigation(auditor, query({ limit: 2, ...(changes ? { after: changes } : {}) })),
+    views: F.planInvestigation(auditor, query({ limit: 2, ...(views ? { after: views } : {}) })),
+  });
+  const first = await F.readInvestigationStreams(plans(), sources);
+  assert.equal(first.totalEntries, 6, 'M-F-S4: both access streams contribute their own entries');
+  assert.deepEqual(first.changes.rows.map(r => r.eventId), ['change-3', 'change-2']);
+  assert.deepEqual(first.views.rows.map(r => r.eventId), ['view-3', 'view-2']);
+  assert.notEqual(first.changes.nextCursor, first.views.nextCursor);
+  for (const stream of ['changes', 'views']) {
+    const data = sources[stream].data;
+    data.push(...chainRows([accessEvent()], data).slice(data.length));
+  }
+  const next = await F.readInvestigationStreams(plans(first.changes.nextCursor, first.views.nextCursor), sources);
+  assert.deepEqual([next.totalEntries, next.changes.rows[0].eventId, next.views.rows[0].eventId], [6, 'change-1', 'view-1']);
+  assert.equal(F.investigationLedgerEvent(next.changes).targets[0].recordId.value, 'change-1');
+  await refusedAsync(() => F.readInvestigationStreams(plans(first.views.nextCursor, first.changes.nextCursor), sources),
+    'InvestigationCursorRefused', 'a cursor never crosses streams');
+  await refusedAsync(() => F.readInvestigationStreams(plans(), { changes: sources.changes }), 'LedgerReadFailed', 'a missing stream is not empty');
+  const denied = { ...plans(), views: F.planInvestigation(authorityFor('foreign', ALL_SCOPES, INST_Y), query({ limit: 2 })) };
+  const before = clone(sources.changes.calls);
+  await refusedAsync(() => F.readInvestigationStreams(denied, sources), 'InvestigationStreamSelectionMismatch', 'different scopes cannot be joined');
+  assert.deepEqual(sources.changes.calls, before);
+});
+
+test('TEST-F-06 extended_request_hold: a reloaded release needs its own verified resolution and institution and cannot end preservation early', () => {
+  const officer = authorityFor('records-officer'), hold = holdRow(REQ_DUE);
+  const resolution = { eventId: 'done-1', at: '2026-10-12T00:00:00.000Z', outcome: 'fulfilled' };
+  const facts = requestFacts({ resolution });
+  const release = F.planRequestHoldRelease(officer, facts, hold, { reason: 'request-fulfilled', evidenceId: resolution.eventId }, '2026-10-13T00:00:00.000Z');
+  const pending = requestFacts(), invalid = { ...hold, release }, before = clone([pending, invalid]);
+  refused(() => F.requestHoldState(pending, invalid, '2026-10-14T00:00:00.000Z'), 'HoldReleaseBindingRefused',
+    'M-F-S5: a release without the request resolution never ends preservation');
+  assert.deepEqual([pending, invalid], before);
+  for (const patch of [{ holdId: 'another' }, { evidenceId: 'other-resolution' }, { authorityVerified: false },
+    { reason: 'request-withdrawn' }, { at: '2026-10-11T00:00:00.000Z' }])
+    refused(() => F.requestHoldState(facts, { ...hold, release: { ...release, ...patch } }, '2026-10-14T00:00:00.000Z'),
+      'HoldReleaseBindingRefused', 'mismatched stored release');
+  assert.equal(F.requestHoldState(facts, invalid, '2026-10-12T01:00:00.000Z').preserve, true);
+  assert.equal(F.requestHoldState(facts, invalid, release.at).preserve, false);
+  refused(() => F.planRequestHoldRelease(authorityFor('foreign-officer', ALL_SCOPES, INST_Y), facts, hold,
+    { reason: 'request-fulfilled', evidenceId: resolution.eventId }, release.at), 'AuditScopeNotGranted', 'foreign institution release');
+});
+
+test('TEST-F-05 followup: every new action needs a later recheck before closing including actions at the same time', () => {
+  const inspector = authorityFor('inspector-1');
+  const at = '2026-11-02T01:00:00.000Z';
+  const step = (cycle, input) => F.recordInspectionStep(inspector, cycle, { at, ...input });
+  let cycle = step(reportedCycle(), { kind: 'reviewed', conclusion: 'anomaly-found', note: 'night activity' });
+  cycle = step(cycle, { kind: 'investigation-opened', investigationId: 'follow-1', eventIds: ['e-1'], summary: 'investigation' });
+  cycle = step(cycle, { kind: 'action-recorded', investigationId: 'follow-1', action: 'restrict account' });
+  cycle = step(cycle, { kind: 'rechecked', investigationId: 'follow-1', result: 'resolved', note: 'access stopped' });
+  assert.equal(F.inspectionStatus(cycle).state, 'ready-to-close');
+  cycle = step(cycle, { kind: 'action-recorded', investigationId: 'follow-1', action: 'restore corrected account' });
+  assert.equal(F.inspectionStatus(cycle).state, 'in-follow-up', 'M-F-S6: a new action cannot reuse an earlier recheck');
+  refused(() => step(cycle, { kind: 'closed' }), 'InspectionFollowUpOpen', 'latest action not yet rechecked');
+  cycle = step(cycle, { kind: 'rechecked', investigationId: 'follow-1', result: 'resolved', note: 'permissions checked' });
+  assert.equal(F.inspectionStatus(step(cycle, { kind: 'closed' })).state, 'closed');
+});
+
+const incidentFacts = (patch = {}) => ({ incidentId: 'incident-1', awarenessAt: '2026-10-09T02:00:00.000Z',
+  determinationAt: '2026-10-09T03:00:00.000Z', status: 'possible', possibleGround: 'illegal-access-unidentifiable',
+  priorPossibleNotice: null, detailsComplete: false, newlyConfirmedAt: null, reportTriggers: [], medicalIncident: null, ...patch });
+async function incidentForResponse(unknown = true) {
+  const auditor = authorityFor('aud-1');
+  const scope = await F.incidentScope(auditor, F.planInvestigation(auditor, query(), 'export'), incidentLedger(),
+    unknown ? [{ kind: 'records-not-attributable', note: 'copied database may contain other patients' }] : []);
+  return { auditor, scope };
+}
+
+test('TEST-F-07 incident_scope: possible leak notice covers all possibly affected subjects within 72 hours and an unknown population is never zero', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const input = incidentFacts(), before = clone(input);
+  const result = F.planIncidentResponse(auditor, scope, input);
+  assert.equal(result.status, 'planned');
+  assert.equal(result.subjectsIdentifiable, false);
+  assert.deepEqual(result.obligations.map(o => [o.kind, o.recipient, o.dueAt, o.status]),
+    [['possible-leak', 'all-possibly-affected-subjects', '2026-10-12T02:00:00.000Z', 'pending']],
+    'M-F-S7: possible-leak notice retains its 72-hour deadline and all-possible-subject audience');
+  assert.deepEqual(result.obligations[0].requiredFields, ['possible-data-items', 'suspected-time-and-circumstances',
+    'subject-protective-actions', 'controller-response-and-remedies', 'contact-department', 'further-notice-on-determination']);
+  assert.equal(scope.auditEvent.action, 'download');
+  assert.ok(scope.auditEvent.targets.length > 0);
+  assert.deepEqual(input, before);
+  refused(() => F.planIncidentResponse(auditor, { ...scope }, input), 'IncidentScopeRequired', 'a caller cannot invent a scope');
+  const known = await incidentForResponse(false);
+  refused(() => F.planIncidentResponse(known.auditor, known.scope, input), 'IncidentResponseRefused', 'unidentifiable ground contradicts a complete query');
+  const broader = F.planIncidentResponse(known.auditor, known.scope, incidentFacts({ possibleGround: 'other-subjects-at-risk' }));
+  assert.equal(broader.obligations[0].recipient, 'all-possibly-affected-subjects');
+});
+
+test('TEST-F-07 incident_scope: confirmed priority and additional notices and PIPC or KISA reports have separate deadlines and required fields', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const input = incidentFacts({ status: 'confirmed', determinationAt: '2026-10-10T02:00:00.000Z',
+    newlyConfirmedAt: '2026-10-11T02:00:00.000Z', reportTriggers: ['sensitive-or-unique'] });
+  const notices = F.planIncidentResponse(auditor, scope, input).obligations;
+  assert.deepEqual(notices.map(n => [n.kind, n.recipient, n.dueAt]), [
+    ['confirmed-priority', 'affected-subjects', '2026-10-12T02:00:00.000Z'],
+    ['confirmed-additional', 'affected-subjects', '2026-10-11T02:00:00.000Z'],
+    ['pipc-kisa-priority', 'PIPC-or-KISA', '2026-10-13T02:00:00.000Z'],
+    ['pipc-kisa-additional', 'PIPC-or-KISA', '2026-10-11T02:00:00.000Z'],
+  ]);
+  assert.ok(notices[0].requiredFields.includes('legal-rights-and-exercise'));
+  assert.ok(notices[2].requiredFields.includes('facts-known-so-far'));
+  assert.ok(notices.every(n => n.status === 'pending'));
+  const complete = F.planIncidentResponse(auditor, scope, incidentFacts({ ...input, detailsComplete: true, newlyConfirmedAt: null }));
+  assert.deepEqual(complete.obligations.map(n => n.kind), ['confirmed-leak', 'pipc-kisa-report']);
+  assert.ok(complete.obligations[1].requiredFields.includes('legal-rights-and-exercise'));
+  const overdue = F.planIncidentResponse(auditor, scope, incidentFacts({ status: 'confirmed', determinationAt: '2026-10-15T02:00:00.000Z' }));
+  assert.equal(overdue.obligations[0].kind, 'possible-leak');
+  assert.equal(overdue.obligations[0].dueAt, '2026-10-12T02:00:00.000Z');
+  refused(() => F.planIncidentResponse(auditor, scope, incidentFacts({ ...input, newlyConfirmedAt: NOW })),
+    'IncidentResponseRefused', 'additional findings cannot predate the confirmation');
+});
+
+test('TEST-F-07 incident_scope: not-a-leak follow-up and immediate MOHW notice remain distinct and a template is never sent evidence', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const facts = incidentFacts({ status: 'not-a-leak', determinationAt: '2026-10-11T02:00:00.000Z',
+    priorPossibleNotice: { noticeId: 'notice-1', sentAt: '2026-10-09T04:00:00.000Z' },
+    medicalIncident: { occurredAt: '2026-10-09T00:00:00.000Z', discoveredAt: '2026-10-09T02:00:00.000Z' } });
+  const result = F.planIncidentResponse(auditor, scope, facts);
+  assert.deepEqual(result.obligations.map(n => [n.kind, n.recipient, n.timing, n.dueAt, n.status]), [
+    ['not-a-leak', 'previously-notified-subjects', 'immediate', '2026-10-11T02:00:00.000Z', 'pending'],
+    ['mohw-notice', 'MOHW', 'immediate', '2026-10-09T02:00:00.000Z', 'pending'],
+  ]);
+  assert.deepEqual(result.obligations[1].requiredFields, ['institution-name', 'incident-time', 'damage-details', 'technical-support-request']);
+  assert.deepEqual(F.planIncidentResponse(auditor, scope, { ...facts, priorPossibleNotice: null, medicalIncident: null }).obligations, []);
+  refused(() => F.planIncidentResponse(authorityFor('foreign', ALL_SCOPES, INST_Y), scope, facts), 'AuditScopeNotGranted', 'foreign incident');
+  refused(() => F.planIncidentResponse(auditor, scope, { ...facts, sent: true }), 'IncidentResponseRefused', 'a template cannot claim delivery');
 });

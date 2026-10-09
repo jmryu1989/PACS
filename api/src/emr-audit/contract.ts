@@ -405,6 +405,27 @@ export async function readInvestigationPage(plan: InvestigationPlan, ledger: Inv
   return page;
 }
 
+/** D-1 revised: the record-change and view streams have independent sequence spaces, snapshots and retention.
+ * F reads both explicitly; it never applies a common expiry or treats a missing stream as an empty one. B's actual
+ * storage/seal interface is a round-2 adapter, not a SQL layout defined here. Pages stay labelled by their stream. */
+export async function readInvestigationStreams(
+  selection: { changes: InvestigationPlan; views: InvestigationPlan },
+  sources: { changes: InvestigationLedger; views: InvestigationLedger },
+): Promise<Readonly<{ changes: InvestigationPage; views: InvestigationPage; totalEntries: number }>> {
+  const { changes, views } = selection ?? {};
+  if (!plans.has(changes) || !plans.has(views)) refuse('InvestigationPlanRequired');
+  if (changes.planId !== views.planId) refuse('InvestigationStreamSelectionMismatch');
+  const read = async (stream: 'changes' | 'views') => {
+    const original = selection[stream];
+    // A view-stream cursor must never skip a change-stream entry with the same sequence number.
+    const bound = freeze({ ...original, planId: digest({ planId: original.planId, stream }) });
+    plans.add(bound);
+    return readInvestigationPage(bound, sources?.[stream]);
+  };
+  const changePage = await read('changes'), viewPage = await read('views');
+  return freeze({ changes: changePage, views: viewPage, totalEntries: changePage.total + viewPage.total });
+}
+
 /** The investigation is itself an access to the shown events (B ledger, 제23조④ 열람): one access-audit target per shown
  * event and patient, and an export is a download. Events without a resolved patient target carry no patient record. */
 export function investigationLedgerEvent(page: InvestigationPage): Readonly<{ action: 'provide-prepared' | 'download'; targets: readonly AccessTarget[] }> {
@@ -431,11 +452,13 @@ export function investigationLedgerEvent(page: InvestigationPage): Readonly<{ ac
 export interface IncidentDetermination { kind: 'access-outside-ledger' | 'records-not-attributable'; note: string }
 export interface IncidentScope {
   institutionId: string; filters: InvestigationFilters; top: number | null;
+  auditEvent: { action: 'provide-prepared' | 'download'; targets: readonly AccessTarget[] };
   identified: readonly { patient: { patientId: string; assigningAuthority: string }; eventIds: readonly string[]; firstAt: string; lastAt: string }[];
   /** False when the people affected cannot be identified: the possible-leak notice of 제34조② (시행령 제39조의2①1) applies. */
   subjectsIdentifiable: boolean;
   reasons: readonly ({ kind: 'ledger-unreadable'; code: string } | { kind: IncidentDetermination['kind']; note: string; by: ImmutableIdentity })[];
 }
+const incidentScopes = new WeakSet<object>();
 /** Every matching event of an export plan (period, patient, actor, address, event types). Refused and failed requests
  * provided nothing and name no one. A ledger read or integrity failure is itself the fact that the subjects cannot be
  * identified, and is reported as such — never as "nobody affected". */
@@ -443,7 +466,7 @@ export async function incidentScope(authority: AuditAuthority, plan: Investigati
   determinations: readonly IncidentDetermination[] = []): Promise<Readonly<IncidentScope>> {
   requireScope(authority, 'investigate');
   if (!plans.has(plan) || plan.mode !== 'export') refuse('IncidentScopeNeedsCompleteRead');
-  if (plan.institutionId !== authority.institutionId) refuse('AuditScopeNotGranted');
+  if (plan.institutionId !== authority.institutionId || !sameIdentity(plan.auditor, authority.subject)) refuse('AuditScopeNotGranted');
   const recorded = guarded('IncidentDeterminationRefused', () => {
     if (!Array.isArray(determinations)) throw new Error('Expected a list');
     return determinations.map(d => {
@@ -473,8 +496,100 @@ export async function incidentScope(authority: AuditAuthority, plan: Investigati
   reasons.push(...recorded);
   const identified = [...groups.values()].sort((a, b) => a.patient.patientId.localeCompare(b.patient.patientId) ||
     a.patient.assigningAuthority.localeCompare(b.patient.assigningAuthority));
-  return freeze({ institutionId: plan.institutionId, filters: plan.filters, top: page?.top ?? null, identified,
-    subjectsIdentifiable: reasons.length === 0, reasons });
+  const scope = freeze({ institutionId: plan.institutionId, filters: plan.filters, top: page?.top ?? null, identified,
+    subjectsIdentifiable: reasons.length === 0, reasons,
+    auditEvent: page ? investigationLedgerEvent(page) : { action: 'download' as const, targets: [] } });
+  incidentScopes.add(scope);
+  return scope;
+}
+
+/** D-15: findings supplied by the designated investigator, not inferred from the number of query hits. B/F R2 must
+ * persist the finding and the query/export audit event; I owns the actual notice forms and delivery evidence. */
+export interface IncidentResponseFacts {
+  incidentId: string; awarenessAt: string; determinationAt: string;
+  status: 'possible' | 'confirmed' | 'not-a-leak';
+  possibleGround: 'illegal-access-unidentifiable' | 'other-subjects-at-risk' | null;
+  priorPossibleNotice: { noticeId: string; sentAt: string } | null;
+  detailsComplete: boolean; newlyConfirmedAt: string | null;
+  reportTriggers: readonly ('1000-subjects' | 'sensitive-or-unique' | 'external-illegal-access')[];
+  medicalIncident: { occurredAt: string; discoveredAt: string } | null;
+}
+export interface IncidentObligation {
+  kind: 'possible-leak' | 'confirmed-leak' | 'confirmed-priority' | 'confirmed-additional' | 'not-a-leak' |
+    'pipc-kisa-report' | 'pipc-kisa-priority' | 'pipc-kisa-additional' | 'mohw-notice';
+  recipient: 'all-possibly-affected-subjects' | 'affected-subjects' | 'previously-notified-subjects' | 'PIPC-or-KISA' | 'MOHW';
+  dueAt: string; timing: 'without-delay-within-72-hours' | 'immediate';
+  requiredFields: readonly string[]; basis: readonly string[]; status: 'pending';
+}
+const LEAK_NOTICE_FIELDS = freeze(['data-items', 'occurrence-and-circumstances', 'subject-protective-actions',
+  'controller-response-and-remedies', 'contact-department', 'legal-rights-and-exercise']);
+/** Plans pending obligations only. A readable empty ledger never establishes "not a leak". No timer, external sender,
+ * completed notice or emergency exemption is created here. An actual justified delay needs I's recorded procedure. */
+export function planIncidentResponse(authority: AuditAuthority, scope: IncidentScope, input: unknown): Readonly<{
+  incidentId: string; institutionId: string; recordedBy: ImmutableIdentity; subjectsIdentifiable: boolean;
+  obligations: readonly IncidentObligation[]; status: 'planned';
+}> {
+  requireScope(authority, 'investigate');
+  if (!incidentScopes.has(scope)) refuse('IncidentScopeRequired');
+  if (scope.institutionId !== authority.institutionId) refuse('AuditScopeNotGranted');
+  const f = guarded('IncidentResponseRefused', () => {
+    const v = object(input, ['incidentId', 'awarenessAt', 'determinationAt', 'status', 'possibleGround', 'priorPossibleNotice',
+      'detailsComplete', 'newlyConfirmedAt', 'reportTriggers', 'medicalIncident']);
+    string(v.incidentId); utc(v.awarenessAt); utc(v.determinationAt);
+    choice(v.status, ['possible', 'confirmed', 'not-a-leak']);
+    if (v.determinationAt < v.awarenessAt || typeof v.detailsComplete !== 'boolean') throw new Error('Invalid finding');
+    if (v.possibleGround !== null) choice(v.possibleGround, ['illegal-access-unidentifiable', 'other-subjects-at-risk']);
+    if (v.status === 'possible' && (v.possibleGround === null ||
+        (v.possibleGround === 'illegal-access-unidentifiable' && scope.subjectsIdentifiable))) throw new Error('Possible-leak ground required');
+    if (v.priorPossibleNotice !== null) {
+      const n = object(v.priorPossibleNotice, ['noticeId', 'sentAt']); string(n.noticeId); utc(n.sentAt);
+      if (n.sentAt < v.awarenessAt || n.sentAt > v.determinationAt || v.possibleGround === null) throw new Error('Notice outside investigation');
+    }
+    if (v.newlyConfirmedAt !== null && (utc(v.newlyConfirmedAt) < v.determinationAt || v.status !== 'confirmed'))
+      throw new Error('Additional facts before confirmation');
+    uniqueStrings(v.reportTriggers, true).forEach(t => choice(t, ['1000-subjects', 'sensitive-or-unique', 'external-illegal-access']));
+    if (v.medicalIncident !== null) {
+      const m = object(v.medicalIncident, ['occurredAt', 'discoveredAt']); utc(m.occurredAt); utc(m.discoveredAt);
+      if (m.occurredAt > m.discoveredAt) throw new Error('Medical incident discovery before occurrence');
+    }
+    return v as IncidentResponseFacts;
+  });
+  const obligations: IncidentObligation[] = [];
+  const hours72 = (at: string) => new Date(Date.parse(at) + 72 * 3_600_000).toISOString();
+  const add = (kind: IncidentObligation['kind'], recipient: IncidentObligation['recipient'], dueAt: string,
+    timing: IncidentObligation['timing'], requiredFields: readonly string[], basis: readonly string[]) =>
+    obligations.push({ kind, recipient, dueAt, timing, requiredFields, basis, status: 'pending' });
+  if (f.priorPossibleNotice === null && (f.status === 'possible' ||
+      (f.status === 'confirmed' && f.possibleGround !== null && f.determinationAt > hours72(f.awarenessAt)))) {
+    add('possible-leak', 'all-possibly-affected-subjects', hours72(f.awarenessAt), 'without-delay-within-72-hours',
+      ['possible-data-items', 'suspected-time-and-circumstances', ...LEAK_NOTICE_FIELDS.slice(2, 5), 'further-notice-on-determination'],
+      ['privacy:34.2', 'privacy-decree:39-2', 'privacy-decree:39-3.1']);
+  }
+  if (f.status === 'confirmed') {
+    // Confirmation within the possibility window replaces that notice without restarting its deadline (39-3.2).
+    const confirmationDue = hours72(f.determinationAt);
+    const dueAt = f.possibleGround !== null && f.priorPossibleNotice === null && f.determinationAt <= hours72(f.awarenessAt)
+      ? hours72(f.awarenessAt) : confirmationDue;
+    add(f.detailsComplete ? 'confirmed-leak' : 'confirmed-priority', 'affected-subjects', dueAt, 'without-delay-within-72-hours',
+      f.detailsComplete ? LEAK_NOTICE_FIELDS : ['leak-confirmed', 'facts-known-so-far', ...LEAK_NOTICE_FIELDS.slice(2)],
+      ['privacy:34.1', 'privacy-decree:39.1', 'privacy-decree:39.2']);
+    if (f.newlyConfirmedAt !== null) add('confirmed-additional', 'affected-subjects', f.newlyConfirmedAt, 'immediate',
+      ['newly-confirmed-facts', 'legal-rights-and-exercise'], ['privacy-decree:39.2']);
+    if (f.reportTriggers.length) {
+      add(f.detailsComplete ? 'pipc-kisa-report' : 'pipc-kisa-priority', 'PIPC-or-KISA', confirmationDue, 'without-delay-within-72-hours',
+        f.detailsComplete ? LEAK_NOTICE_FIELDS : ['leak-confirmed', 'facts-known-so-far', ...LEAK_NOTICE_FIELDS.slice(2, 5)],
+        ['privacy:34.4', 'privacy-decree:40.1', 'privacy-decree:40.2']);
+      if (f.newlyConfirmedAt !== null) add('pipc-kisa-additional', 'PIPC-or-KISA', f.newlyConfirmedAt, 'immediate',
+        ['newly-confirmed-facts'], ['privacy-decree:40.2']);
+    }
+  } else if (f.status === 'not-a-leak' && f.priorPossibleNotice !== null) {
+    add('not-a-leak', 'previously-notified-subjects', f.determinationAt, 'immediate',
+      ['no-leak-confirmed', 'prior-possible-notice-reference'], ['privacy-decree:39-3.3']);
+  }
+  if (f.medicalIncident !== null) add('mohw-notice', 'MOHW', f.medicalIncident.discoveredAt, 'immediate',
+    ['institution-name', 'incident-time', 'damage-details', 'technical-support-request'], ['medical:23-3.1', 'medical-rules:16-2.1']);
+  return freeze({ incidentId: f.incidentId, institutionId: authority.institutionId, recordedBy: authority.subject,
+    subjectsIdentifiable: scope.subjectsIdentifiable, obligations, status: 'planned' as const });
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -600,7 +715,7 @@ export interface PackageRecord {
   selection: 'all-versions' | 'requester-specified'; versions: readonly PackageVersion[];
 }
 export interface DisclosureManifest {
-  formatVersion: 'emr-disclosure/1'; requestId: string; receivedAt: string; institutionId: string; patient: PatientLinkSnapshot;
+  formatVersion: 'emr-disclosure/1'; environment: Environment; requestId: string; receivedAt: string; institutionId: string; patient: PatientLinkSnapshot;
   basis: DisclosureApproval['basis']; purpose: string; requester: DisclosureRequest['requester'];
   qualification: readonly { kind: QualificationEvidence; documentId: string }[];
   approvedBy: ImmutableIdentity; approvedAt: string; preparedBy: ImmutableIdentity; preparedAt: string;
@@ -675,7 +790,7 @@ export function prepareDisclosurePackage(authority: AuditAuthority, approval: Di
       selection: s.versions === 'all' ? 'all-versions' as const : 'requester-specified' as const, versions };
   });
   const manifest: DisclosureManifest = {
-    formatVersion: 'emr-disclosure/1', requestId: request.requestId, receivedAt: request.receivedAt, institutionId: approval.institutionId,
+    formatVersion: 'emr-disclosure/1', environment, requestId: request.requestId, receivedAt: request.receivedAt, institutionId: approval.institutionId,
     patient: request.patient, basis: approval.basis, purpose: request.basis.purpose, requester: request.requester,
     qualification: request.evidence.map(e => ({ kind: e.kind, documentId: e.documentId })),
     approvedBy: approval.approvedBy, approvedAt: approval.approvedAt, preparedBy: authority.subject, preparedAt: at,
@@ -698,6 +813,7 @@ export function issuanceState(input: unknown): Readonly<{
     const v = object(input, ['issuanceId', 'manifest', 'manifestSha256', 'environment', 'events']);
     string(v.issuanceId); const environment = choice(v.environment, ['operational', 'synthetic-test']);
     if (sha256(v.manifestSha256) !== digest(v.manifest)) refuse('IssuanceManifestMismatch');
+    if (environment !== v.manifest.environment) refuse('IssuanceEnvironmentMismatch');
     if (!Array.isArray(v.events) || !v.events.length) throw new Error('History required');
     const method = v.manifest.delivery.method;
     let state: IssuanceState | null = null, artifact: string | null = null, delivery = null, previousAt = '';
@@ -783,8 +899,12 @@ export function issueDisclosure(authority: AuditAuthority, issuance: Issuance, i
   ownIssuance(authority, issuance);
   if (!Array.isArray(input?.listings)) refuse('VersionListingRefused');
   const now = input.listings.map(verifiedListing);
+  if (now.length !== issuance.manifest.records.length || new Set(now.map(l => l.recordId)).size !== now.length)
+    refuse('VersionListingRefused');
   for (const record of issuance.manifest.records) {
     const l = now.find(x => x.recordId === record.recordId), head = l?.versions[l.versions.length - 1];
+    if (l && (l.subject.managingInstitutionId !== authority.institutionId ||
+        !samePatient(l.subject.patient, issuance.manifest.patient) || l.subject.studyId !== record.studyId)) refuse('DisclosureSubjectMismatch');
     if (!l || l.revision !== record.revision || head.versionId !== record.head.versionId || head.sha256 !== record.head.sha256) refuse('RecordHeadChanged');
   }
   return appended(issuance, { kind: 'issued', at: input.at, by: authority.subject, artifact: input.artifact, method: issuance.manifest.delivery.method });
@@ -835,9 +955,10 @@ export type RightsOutcome = 'correct-by-new-signed-version' | 'correct' | 'appen
 /** One requested record as the server resolved it, with the subject facts B/C hold for it. */
 export interface RightsRecord { record: ResolvedRecord; subject: { patient: PatientLinkSnapshot; managingInstitutionId: string } }
 export interface RightsDecision {
+  status: 'planned';
   requestId: string; kind: RightsRequestKind; receivedAt: string; decidedBy: ImmutableIdentity; decidedAt: string;
   records: readonly { recordId: string; disposition: ReturnType<typeof retentionDisposition>; outcome: RightsOutcome; basis: readonly string[] }[];
-  notice: { content: 'action-taken' | 'refusal-with-reason-and-objection-method'; dueBy: string };
+  notice: { content: 'action-result-required' | 'refusal-with-reason-and-objection-method'; dueBy: string };
 }
 const KEPT_BY_LAW: Readonly<Record<string, readonly string[]>> = freeze({
   statutory: ['medical:22.2', 'medical-rules:15.1'], 'source-record': ['medical:22.2', 'source-record-follows-original'],
@@ -876,8 +997,8 @@ export function decideRightsRequest(authority: AuditAuthority, input: unknown, r
   const [year, month, day] = seoulDay(r.receivedAt).split('-').map(Number);
   const dueBy = new Date(Date.UTC(year, month - 1, day + 10) - KST_OFFSET_MS).toISOString();
   const refusedAny = decided.some(d => d.outcome === 'refused-retained-by-law' || d.outcome === 'refused-legal-duty');
-  return freeze({ requestId: r.requestId, kind: r.kind, receivedAt: r.receivedAt, decidedBy: authority.subject, decidedAt: r.at, records: decided,
-    notice: { content: refusedAny ? 'refusal-with-reason-and-objection-method' : 'action-taken', dueBy } });
+  return freeze({ status: 'planned' as const, requestId: r.requestId, kind: r.kind, receivedAt: r.receivedAt, decidedBy: authority.subject, decidedAt: r.at, records: decided,
+    notice: { content: refusedAny ? 'refusal-with-reason-and-objection-method' : 'action-result-required', dueBy } });
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -917,7 +1038,7 @@ function parseInspectionEvent(e: any): any {
   if (kind === 'download-reason') { string(v.eventId); string(v.reason); choice(v.outcome, ['legitimate', 'investigate']); }
   if (kind === 'investigation-opened') { string(v.investigationId); uniqueStrings(v.eventIds); string(v.summary); }
   if (kind === 'action-recorded') { string(v.investigationId); string(v.action); }
-  if (kind === 'rechecked') { string(v.investigationId); choice(v.result, ['resolved', 'not-resolved']); }
+  if (kind === 'rechecked') { string(v.investigationId); choice(v.result, ['resolved', 'not-resolved']); string(v.note); }
   return v;
 }
 /** What the month still owes. An automatically generated report is not an inspection; a designated person reviews it. */
@@ -939,17 +1060,21 @@ export function inspectionStatus(input: unknown): Readonly<{
     const review = events.filter(e => e.kind === 'reviewed').pop() ?? null;
     const reasons = new Map(events.filter(e => e.kind === 'download-reason').map(e => [e.eventId, e]));
     const investigations = new Map(events.filter(e => e.kind === 'investigation-opened').map(e => [e.investigationId, e]));
+    if (investigations.size !== events.filter(e => e.kind === 'investigation-opened').length) throw new Error('Repeated investigation');
     for (const e of events) {
-      if ((e.kind === 'action-recorded' || e.kind === 'rechecked') && !investigations.has(e.investigationId)) throw new Error('Unknown investigation');
+      if ((e.kind === 'action-recorded' || e.kind === 'rechecked') &&
+          (!investigations.has(e.investigationId) || events.indexOf(investigations.get(e.investigationId)) >= events.indexOf(e)))
+        throw new Error('Investigation must precede its follow-up');
       if (e.kind === 'download-reason' && !report.downloadEventIds.includes(e.eventId)) throw new Error('Not a download of this month');
     }
     const missingDownloadReasons = report ? report.downloadEventIds.filter(id => !reasons.has(id)) : [];
     const covered = new Set([...investigations.values()].flatMap(i => i.eventIds));
     const uninvestigated = [...reasons.values()].filter(r => r.outcome === 'investigate' && !covered.has(r.eventId)).map(r => r.eventId);
     const openInvestigations = [...investigations.keys()].filter(id => {
-      const acted = events.some(e => e.kind === 'action-recorded' && e.investigationId === id);
+      const action = events.filter(e => e.kind === 'action-recorded' && e.investigationId === id).pop();
       const recheck = events.filter(e => e.kind === 'rechecked' && e.investigationId === id).pop();
-      return !acted || recheck?.result !== 'resolved';
+      // A new action invalidates an older recheck, including steps sharing the same clock tick.
+      return !action || recheck?.result !== 'resolved' || events.indexOf(recheck) <= events.indexOf(action);
     });
     const anomalyOpen = review?.conclusion === 'anomaly-found' && investigations.size === 0;
     const open: InspectionState = !report ? 'awaiting-report' : !review ? 'report-only' :
@@ -1020,7 +1145,7 @@ function parseDeadline(input: unknown): Readonly<RequestDeadlineFacts> {
     if (v.resolution !== null) {
       const r = object(v.resolution, ['eventId', 'at', 'outcome']);
       resolution = { eventId: string(r.eventId), at: utc(r.at), outcome: choice(r.outcome, ['fulfilled', 'withdrawn', 'lawfully-refused']) };
-      if (resolution.at < receivedAt) throw new Error('Resolution before receipt');
+      if (resolution.at < receivedAt || extensions.some(e => e.at > resolution.at)) throw new Error('Resolution before request history');
     }
     return freeze({ requestId: string(v.requestId), recordIds: uniqueStrings(v.recordIds), receivedAt, initialDueAt, extensions, resolution });
   });
@@ -1032,9 +1157,15 @@ export function effectiveDue(input: unknown): string {
 function requestHold(input: unknown, facts: RequestDeadlineFacts): Readonly<LegalHold> {
   const hold = guarded('RequestHoldRefused', () => {
     const h = object(input, ['holdId', 'recordId', 'basis', 'actorId', 'at', 'release']);
-    string(h.holdId); string(h.recordId); utc(h.at);
+    string(h.holdId); string(h.recordId); string(h.actorId); utc(h.at);
     choice(h.basis?.type, ['pending-access-request', 'statutory-duty']);
-    object(h.basis.validity, ['from', 'until', 'condition']); utc(h.basis.validity.until);
+    const b = h.basis;
+    string(b.managingInstitutionId);
+    if (b.verified !== true || b.authorityId !== b.managingInstitutionId || b.authorityKind !== 'personal-information-controller' ||
+        !uniqueStrings(b.scope).includes(h.recordId)) throw new Error('Verified request scope required');
+    object(b.validity, ['from', 'until', 'condition']); utc(b.validity.until); utc(b.validity.from);
+    if (b.validity.from > h.at || h.at < facts.receivedAt || b.validity.until <= h.at ||
+        b.validity.condition !== (b.type === 'pending-access-request' ? 'request-pending' : 'duty-active')) throw new Error('Invalid hold validity');
     return h as LegalHold;
   });
   if (hold.basis.requestId !== facts.requestId || !facts.recordIds.includes(hold.recordId)) refuse('HoldRequestBindingRefused');
@@ -1063,7 +1194,23 @@ export function requestHoldState(factsInput: unknown, holdInput: unknown, at: st
   const facts = parseDeadline(factsInput), hold = requestHold(holdInput, facts);
   guarded('RequestDeadlineRefused', () => utc(at));
   const due = effectiveDue(facts);
-  if (hold.release !== null) return freeze({ preserve: false, state: 'released', dueAt: due });
+  if (hold.release !== null) {
+    const release = guarded('HoldReleaseBindingRefused', () => {
+      const r = object(hold.release, ['holdId', 'actorId', 'at', 'evidenceId', 'authorityVerified', 'reason',
+        ...(hold.release.reason === 'effect-ended' ? ['endingFact'] : [])]);
+      string(r.actorId); utc(r.at);
+      const end = facts.resolution;
+      if (!end || r.holdId !== hold.holdId || r.authorityVerified !== true || r.evidenceId !== end.eventId ||
+          r.at < end.at || r.at < hold.at) refuse('HoldReleaseBindingRefused');
+      if (r.reason === 'effect-ended') {
+        const f = object(r.endingFact, ['kind', 'at', 'eventId']);
+        if (f.kind !== 'request-resolved' || f.at !== end.at || f.eventId !== end.eventId) refuse('HoldReleaseBindingRefused');
+      } else if (r.reason !== ({ fulfilled: hold.basis.type === 'statutory-duty' ? 'duty-ended' : 'request-fulfilled',
+        withdrawn: 'request-withdrawn', 'lawfully-refused': 'request-refused' })[end.outcome]) refuse('HoldReleaseBindingRefused');
+      return r;
+    });
+    if (release.at <= at) return freeze({ preserve: false, state: 'released', dueAt: due });
+  }
   if (hold.basis.validity.until !== due) return freeze({ preserve: true, state: 'hold-out-of-sync', dueAt: due });
   if (facts.resolution !== null && facts.resolution.at <= at) return freeze({ preserve: true, state: 'release-required', dueAt: due });
   if (at >= due) return freeze({ preserve: true, state: 'pending-overdue', dueAt: due });
@@ -1076,6 +1223,7 @@ export function planRequestHoldRelease(authority: AuditAuthority, factsInput: un
   requireScope(authority, 'disclosure');
   const facts = parseDeadline(factsInput), hold = requestHold(holdInput, facts);
   guarded('RequestDeadlineRefused', () => utc(at));
+  if (hold.basis.managingInstitutionId !== authority.institutionId) refuse('AuditScopeNotGranted');
   if (hold.release !== null) refuse('HoldAlreadyReleased');
   const end = facts.resolution;
   if (end === null || end.at > at) refuse('PendingRequestHoldCannotEnd');

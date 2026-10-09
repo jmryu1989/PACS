@@ -1,5 +1,5 @@
 # coding: utf-8
-"""TEST-F mutants (EMR-F round 1): M-F-01..M-F-07 and the register-delta mutants M-F-S1..S2 of api/src/emr-audit.
+"""TEST-F mutants (EMR-F round 1): M-F-01..M-F-07 and M-F-S1..S7 of api/src/emr-audit.
 
 REQ-EMR-07/15/16/17/19 -> RISK-F-01..08 -> TEST-F-01..08 (tests/emr/f/contract_test.cjs).
 
@@ -133,6 +133,42 @@ MUTANTS = [
         "case": "TEST-F-08 rights_request: deletion or suspension of a record the law keeps is refused with reason and objection notice while purpose data is acted on",
         "expect": "M-F-S2: a statutory record is never deleted on request",
     },
+    {
+        "id": "M-F-S3", "title": "synthetic issuance can be relabelled as operational", "file": "contract.ts",
+        "old": "    if (environment !== v.manifest.environment) refuse('IssuanceEnvironmentMismatch');\n",
+        "new": "",
+        "case": "TEST-F-04 issuance_result: a paper handover is the staff attestation and not a detection and synthetic recipients never count as operational",
+        "expect": "M-F-S3: relabelling a synthetic issuance cannot make operational evidence",
+    },
+    {
+        "id": "M-F-S4", "title": "the view stream is silently omitted", "file": "contract.ts",
+        "old": "totalEntries: changePage.total + viewPage.total",
+        "new": "totalEntries: changePage.total",
+        "case": "TEST-F-02 patient_replay: change and view streams keep independent snapshots and cursors and neither stream may silently disappear",
+        "expect": "M-F-S4: both access streams contribute their own entries",
+    },
+    {
+        "id": "M-F-S5", "title": "an unbound stored release ends a pending request hold", "file": "contract.ts",
+        "old": "  if (hold.release !== null) {\n    const release = guarded('HoldReleaseBindingRefused', () => {\n",
+        "new": "  if (hold.release !== null) return freeze({ preserve: false, state: 'released', dueAt: due });\n"
+               "  if (hold.release !== null) {\n    const release = guarded('HoldReleaseBindingRefused', () => {\n",
+        "case": "TEST-F-06 extended_request_hold: a reloaded release needs its own verified resolution and institution and cannot end preservation early",
+        "expect": "M-F-S5: a release without the request resolution never ends preservation",
+    },
+    {
+        "id": "M-F-S6", "title": "an older recheck closes a new follow-up action", "file": "contract.ts",
+        "old": "      return !action || recheck?.result !== 'resolved' || events.indexOf(recheck) <= events.indexOf(action);\n",
+        "new": "      return !action || recheck?.result !== 'resolved';\n",
+        "case": "TEST-F-05 followup: every new action needs a later recheck before closing including actions at the same time",
+        "expect": "M-F-S6: a new action cannot reuse an earlier recheck",
+    },
+    {
+        "id": "M-F-S7", "title": "possible-leak notification waits beyond its 72-hour deadline", "file": "contract.ts",
+        "old": "    add('possible-leak', 'all-possibly-affected-subjects', hours72(f.awarenessAt), 'without-delay-within-72-hours',\n",
+        "new": "    add('possible-leak', 'all-possibly-affected-subjects', hours72(hours72(f.awarenessAt)), 'without-delay-within-72-hours',\n",
+        "case": "TEST-F-07 incident_scope: possible leak notice covers all possibly affected subjects within 72 hours and an unknown population is never zero",
+        "expect": "M-F-S7: possible-leak notice retains its 72-hour deadline and all-possible-subject audience",
+    },
 ]
 # The exact round-1 selection of tests/emr/f/contract_test.cjs, written by hand (never generated from a run). The
 # baseline must collect exactly these cases, each once, all passing; R2 moves the declaration into emr/units/f.json.
@@ -171,6 +207,12 @@ DECLARED_CASES = [
     "TEST-F-07 incident_scope: a ledger that cannot be read or verified is reported as subjects not identifiable and never as nobody affected",
     "TEST-F-08 rights_request: deletion or suspension of a record the law keeps is refused with reason and objection notice while purpose data is acted on",
     "TEST-F-08 rights_request: a correction is a new signed version that keeps the original and an access event is never edited and the request binds its own patient",
+    "TEST-F-02 patient_replay: change and view streams keep independent snapshots and cursors and neither stream may silently disappear",
+    "TEST-F-06 extended_request_hold: a reloaded release needs its own verified resolution and institution and cannot end preservation early",
+    "TEST-F-05 followup: every new action needs a later recheck before closing including actions at the same time",
+    "TEST-F-07 incident_scope: possible leak notice covers all possibly affected subjects within 72 hours and an unknown population is never zero",
+    "TEST-F-07 incident_scope: confirmed priority and additional notices and PIPC or KISA reports have separate deadlines and required fields",
+    "TEST-F-07 incident_scope: not-a-leak follow-up and immediate MOHW notice remain distinct and a template is never sent evidence",
 ]
 NOT_RUN = [
     {"id": "M-F-01-live", "status": "not_run", "reason": "the server roster check over B1 storage and the B2 caller context is round 2 "
@@ -262,8 +304,10 @@ def judge(mutant, code, stdout, stderr):
     block = "\n".join(entry[2]) if entry else ""
     crash = [marker for marker in CRASH_MARKERS if marker in stdout or marker in stderr]
     reasons = []
-    if code == 0:
-        reasons.append("child exited 0")
+    if code != 1:
+        reasons.append(f"child exit is {code}, expected assertion-failure exit 1")
+    if set(cases) != set(DECLARED_CASES) or any(skip for _, skip, _ in cases.values()):
+        reasons.append("mutant collection differs from the exact declared selection")
     if entry is None:
         reasons.append("named case not reported")
     elif entry[0] != "not ok" or entry[1]:
@@ -285,6 +329,19 @@ def main():
     parser.add_argument("--anchors-only", action="store_true")
     parser.add_argument("--out")
     args = parser.parse_args()
+    raw_dir = pathlib.Path(args.out).with_suffix(".raw") if args.out else None
+    if raw_dir is not None:
+        raw_dir.mkdir(parents=True, exist_ok=False)
+
+    def retain_logs(label, stdout, stderr):
+        if raw_dir is None:
+            return {"stdout": stdout, "stderr": stderr}
+        paths = {}
+        for name, value in (("stdout", stdout), ("stderr", stderr)):
+            log = raw_dir / f"{label}.{name}.log"
+            log.write_text(value, encoding="utf-8")
+            paths[name] = str(log)
+        return paths
     problems = check_anchors()
     sources = {str(p.relative_to(ROOT)).replace("\\", "/"): sha(p.read_bytes())
                for p in sorted([*F_DIR.glob("*.ts"), *A_DIR.glob("*.ts"), TEST])}
@@ -308,7 +365,8 @@ def main():
         passed = {name for name, (status, skip, _) in cases.items() if status == "ok" and not skip}
         selection = {"declared": len(DECLARED_CASES), "collected": len(cases), "passed": len(passed),
                      "undeclared": sorted(set(cases) - set(DECLARED_CASES)), "not_collected": sorted(set(DECLARED_CASES) - set(cases))}
-        summary["baseline"] = {"exit": code, "selection": selection, "not_ok": sorted(n for n, (s, _, _) in cases.items() if s == "not ok")}
+        summary["baseline"] = {"exit": code, "selection": selection, "logs": retain_logs("baseline", stdout, stderr),
+                               "not_ok": sorted(n for n, (s, _, _) in cases.items() if s == "not ok")}
         if code != 0 or set(cases) != set(DECLARED_CASES) or passed != set(DECLARED_CASES):
             summary["baseline"]["stderr_tail"] = stderr[-2000:]
             return emit(1)
@@ -318,7 +376,8 @@ def main():
             code, stdout, stderr = run(node, f_src)
             verdict = judge(mutant, code, stdout, stderr)
             summary["mutants"].append({"id": mutant["id"], "title": mutant["title"], "file": "api/src/emr-audit/" + mutant["file"],
-                                       "case": mutant["case"], "expect": mutant["expect"], "exit": code, **hashes, **verdict})
+                                       "case": mutant["case"], "expect": mutant["expect"], "exit": code,
+                                       "logs": retain_logs(mutant["id"], stdout, stderr), **hashes, **verdict})
     killed = all(m["killed"] for m in summary["mutants"])
     summary["result"] = {"killed": sum(m["killed"] for m in summary["mutants"]), "total": len(MUTANTS), "not_run": len(NOT_RUN)}
     return emit(0 if killed else 1)
