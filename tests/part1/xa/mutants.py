@@ -2,7 +2,7 @@
 """E-XA mutants X1..X14 (order e-xa-order.md section 5), X15..X21 (round 2: one per Astra finding EXA-R1-01..05,
 two for EXA-R1-02 - model and viewer), X22..X37 (round 3: one per invariant I01..I16 of the D732 consult,
 evidence/e-xa-consult-20261009/design.md section 8), X38..X42 (round 4: Astra review of 61eb967, EXA-R3-01..04),
-and the case declaration check.
+X43..X54 (D757 persistent opening state, authorization proof and display transaction), and the case declaration check.
 
 Each mutant breaks the shipped module in a COPY (the source tree is never written) and must be killed by a behaviour
 failure: the named case fails on an assertion that carries that mutant's own token (XA-Xn:), the child exits non-zero
@@ -12,7 +12,7 @@ The clean copies must first pass the same runs through the same overrides, or no
   --check-cases   compare tests/part1/xa/cases.json with the cases the runners actually collect, both ways, and with
                   the mutant table below; a declared case that does not run or a running case that is not declared fails
   --anchors-only  check that every anchor occurs exactly once and every token is asserted in its named case, then stop
-  (default)       --check-cases, anchors, clean baseline, then every mutant (X1..X42)
+  (default)       --check-cases, anchors, clean baseline, then every mutant (X1..X54)
 
 The anchors are source text on purpose: this runner rewrites a copy of the code, so it has to find the code. They bind
 the mutation tool only; no test case asserts source text (AGENTS 1-B). stdlib only; browsers and node run as children.
@@ -191,7 +191,7 @@ MUTANTS = [
     {'id': 'X34', 'file': 'viewer', 'suite': 'dom', 'case': 'XA06-DOM-RENDER-TIMEOUT', 'token': 'XA-X34:',
      'title': 'I13: a timed-out render that is still the latest recovers on its own when it answers',
      'old': "        if (t.draw.void) return 'drain';",
-     'new': '        // a timed-out draw may still publish'},
+     'new': "        if (t.draw.void && t.draw.G === G) { O.failed = null; return 'current'; }"},
     {'id': 'X35', 'file': 'model', 'suite': 'model', 'case': 'B05-MODEL', 'token': 'XA-X35:',
      'title': 'I14: cleanup finds the current resource by its frame key instead of the exact token',
      'old': '    const exact = t => (t && resources.get(t)) || null;',
@@ -215,16 +215,64 @@ MUTANTS = [
      'new': "      if (verdict === 'current') fail(J.slot.index, { kind: 'render' });\n      if (receipt?.surface) viewport.release?.(receipt.surface);\n      endDraw(J);"},
     {'id': 'X40', 'file': 'viewer', 'suite': 'dom', 'case': 'EXA-R3-02-DOM', 'token': 'XA-X40:',
      'title': 'EXA-R3-02: a 401/403 on a look-ahead frame is only skipped',
-     'old': "      if (f.kind === 'denied') return fail(slot.index, f);",
-     'new': '      // a refused look-ahead frame is only skipped'},
+     'old': '    const O = Q.opening;',
+     'new': "    if (![...broker.resources.values()].some(r => r.Q === Q && [...r.consumers].some(s => s.kind === 'target'))) return;\n    const O = Q.opening;"},
     {'id': 'X41', 'file': 'viewer', 'suite': 'dom', 'case': 'EXA-R3-03-DOM', 'token': 'XA-X41:',
      'title': 'EXA-R3-03: the claim ignores a cover that failed and loads over the previous Study',
-     'edits': [('      if (coverPhysical(true)) return true;', '      coverPhysical(true); return true;'),
-               ('      if (physical.covered) { newIntent(); bring(at); }', '      if (hidden) { newIntent(); bring(at); }')]},
+     'old': '      if (coverPhysical(true)) return true;',
+     'new': '      coverPhysical(true); physical.covered = true; physical.safe = true; return true;'},
     {'id': 'X42', 'file': 'viewer', 'suite': 'dom', 'case': 'XA06-DOM-RENDER-TIMEOUT', 'token': 'XA-X42:',
      'title': 'EXA-R3-04: Retry after a render timeout during playback restarts playback',
      'old': '      const resume = playing && !error?.timedOut;',
      'new': '      const resume = playing;'},
+    {'id': 'X43', 'file': 'viewer', 'suite': 'dom', 'case': 'C03-DOM', 'token': 'XA-X43:',
+     'title': 'I17 direction clears the authoritative blocking reasons',
+     'old': "      if (gate('settings') !== 'current') { paint(); return; }",
+     'new': '      O.access = null; O.failed = null; O.faults.clear();'},
+    {'id': 'X44', 'file': 'viewer', 'suite': 'dom', 'case': 'C01-DOM', 'token': 'XA-X44:',
+     'title': 'I18 access outcome requires a remaining current consumer',
+     'old': '    const O = Q.opening;',
+     'new': '    if (![...broker.resources.values()].some(r => r.Q === Q && wanted(r))) return;\n    const O = Q.opening;'},
+    {'id': 'X45', 'file': 'viewer', 'suite': 'dom', 'case': 'C06-DOM', 'token': 'XA-X45:',
+     'title': 'I19 denial targets the current same-SOP opening instead of its request opening',
+     'old': '    const O = Q.opening;',
+     'new': '    const O = [...broker.openings.values()].reverse().find(o => !o.ended && o.key.sop === Q.opening.key.sop) || Q.opening;'},
+    {'id': 'X46', 'file': 'viewer', 'suite': 'dom', 'case': 'C09-DOM', 'token': 'XA-X46:',
+     'title': 'I20 proof completion ignores the current attempt and denial generation',
+     'old': "        const valid = current() && proof?.attempt === attempt && proof?.authorized === true && proof?.fresh === true &&",
+     'new': "        const valid = gate('retry') === 'current' && proof?.attempt === attempt && proof?.authorized === true && proof?.fresh === true &&"},
+    {'id': 'X47', 'file': 'viewer', 'suite': 'dom', 'case': 'C03-DOM', 'token': 'XA-X47:',
+     'title': 'I21 recovery accepts a failed physical barrier as safe',
+     'old': '        if (!hide()) { paint(); return; }',
+     'new': '        hide(); physical.safe = true;'},
+    {'id': 'X48', 'file': 'viewer', 'suite': 'dom', 'case': 'C02-DOM', 'token': 'XA-X48:',
+     'title': 'I22 cached seek gets effect permission despite an unchanged access latch',
+     'old': "      if (['notice', 'pause', 'retry', 'end'].includes(kind)) return 'current';",
+     'new': "      if (O.access && ['seek', 'bring', 'admit', 'supply', 'draw', 'publish'].includes(kind)) return 'current';\n      if (['notice', 'pause', 'retry', 'end'].includes(kind)) return 'current';"},
+    {'id': 'X49', 'file': 'viewer', 'suite': 'dom', 'case': 'C11-DOM', 'token': 'XA-X49:',
+     'title': 'I23 Retry clears Failed before the recovery target has committed',
+     'old': "      O.failed = { index, kind: f.kind, resume: recovery.resume };",
+     'new': '      O.failed = null; // Retry prematurely clears the latch'},
+    {'id': 'X50', 'file': 'viewer', 'suite': 'dom', 'case': 'C04-DOM', 'token': 'XA-X50:',
+     'title': 'I24 display facts commit before uncover succeeds',
+     'old': '      if (physical.covered && !coverPhysical(false)) {',
+     'new': '      commitDisplay(J);\n      if (physical.covered && !coverPhysical(false)) {'},
+    {'id': 'X51', 'file': 'viewer', 'suite': 'dom', 'case': 'C04-DOM', 'token': 'XA-X51:',
+     'title': 'I25 uncover failure releases the still attached hidden front',
+     'old': '        physical.safe = false; block(); return;',
+     'new': '        ledger.detach(J.draw); releaseSurface(J.draw); physical.safe = false; block(); return;'},
+    {'id': 'X52', 'file': 'viewer', 'suite': 'dom', 'case': 'C13-DOM', 'token': 'XA-X52:',
+     'title': 'I26 restored authorization revives old revoked prepared draws',
+     'old': "        if (t.draw.void) return 'drain';",
+     'new': "        if (O.auth && !O.access && !O.faults.size) return 'current';\n        if (t.draw.void) return 'drain';"},
+    {'id': 'X53', 'file': 'viewer', 'suite': 'dom', 'case': 'C14-DOM', 'token': 'XA-X53:',
+     'title': 'I27 displayed observer runs before label and full facts are committed',
+     'old': '      shownSlot = slot; shown = index;',
+     'new': "      emit({ type: 'displayed', index });\n      shownSlot = slot; shown = index;"},
+    {'id': 'X54', 'file': 'viewer', 'suite': 'dom', 'case': 'C16-DOM', 'token': 'XA-X54:',
+     'title': 'I28 normal seek requires an unnecessary Retry',
+     'old': "      if (gate('seek') !== 'current') { paint(); return; }",
+     'new': "      if (gate('seek') === 'current') { fail(index, { kind: 'failed' }); return; }"},
 ]
 
 
