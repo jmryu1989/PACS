@@ -1,6 +1,0 @@
-test_row_and_images_controls_remain_reachable_after_toolbar_wrap (__main__.WorklistNarrowLayoutDOMTest.test_row_and_images_controls_remain_reachable_after_toolbar_wrap) ... ok
-
-----------------------------------------------------------------------
-Ran 1 test in 7.031s
-
-OK

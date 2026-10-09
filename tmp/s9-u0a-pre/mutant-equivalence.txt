@@ -1,2 +1,0 @@
-﻿{"M01":"same","M02":"same","M03":"same","M04":"same","M05":"same","M06":"same","M07":"same","M08":"same","M09":"same","M10":"same","M11":"same","M12":"same","M13":"same","M14":"same","M15":"same","M16":"same","M17":"same","M18":"same","M19":"same","M20":"same","M21":"same","M22":"same","M23":"same","M24":"same","M25":"same","M26":"same","M27":"same","M28":"same","M29":"same","M30":"same","M31":"same","M32":"same","M33":"same","M34":"same","M35":"same","M36":"same","M37":"same"}
-all same: true
