@@ -397,7 +397,7 @@ class EmrBLedgerLive(unittest.TestCase):
         self.assertEqual(self.driver("business", {"exit": "before-commit", "event": event}, db=db, volume=state), {"exited": True})
         before = self.driver("recover", db=db, volume=state)
         self.assertEqual((before["recovered"], before["notCommitted"]), (0, 1), before)
-        self.assertIn("commit-not-found:" + event["eventId"], [r["id"] for r in self.driver("journal", db=db, volume=state)])
+        self.assertIn("commit-not-found:viewing:" + event["eventId"], [r["id"] for r in self.driver("journal", db=db, volume=state)])
         resent = self.driver("append", {"events": [event]}, db=db, volume=state)["results"][0]
         self.assertIn("receipt", resent)
         self.assertEqual(self.ok("SELECT count(*) FROM emr_access.access_entry WHERE event_id = '%s'" % event["eventId"], db=db), ["1"])
@@ -487,7 +487,7 @@ class EmrBLedgerLive(unittest.TestCase):
         self.assertEqual(self.refused("SELECT emr_access.expire_prefix(2)", user="kin_runtime", db=db), REFUSED)
         self.assertEqual(self.ok("SELECT string_agg(sequence::text, ',' ORDER BY sequence) FROM emr_access.access_entry", db=db), snapshot)
         # The retention view never shows the payload.
-        self.assertEqual(self.refused("SELECT * FROM emr_access.entries_after(0, 10)", user="kin_emr_retention", db=db), REFUSED)
+        self.assertEqual(self.refused("SELECT * FROM emr_access.entries_after('viewing', 0, 10)", user="kin_emr_retention", db=db), REFUSED)
         # An expiry interrupted before its commit: everything is as before.
         released = dict(hold, release={"holdId": "hold-l05", "actorId": "custodian", "at": "2026-10-09T00:00:00.000Z",
                                        "evidenceId": "order-l05-ended", "authorityVerified": True, "reason": "order-ended"})
@@ -589,7 +589,7 @@ class EmrBLedgerLive(unittest.TestCase):
                        "SELECT 'grant:' || table_schema::text || '.' || table_name::text || ':' || privilege_type::text "
                        "FROM information_schema.role_table_grants WHERE grantee = 'kin_runtime') q")
         source_catalog = self.ok(catalog_sql)
-        before = (self.ok("SELECT count(*) || ':' || max(sequence) || ':' || (SELECT hash FROM emr_access.chain_head) FROM emr_access.access_entry"),
+        before = (self.ok("SELECT count(*) || ':' || max(sequence) || ':' || (SELECT hash FROM emr_access.chain_head WHERE stream = 'viewing') FROM emr_access.access_entry WHERE stream = 'viewing'"),
                   self.ok("SELECT count(*) FROM \"AuditLog\""))
         with tempfile.TemporaryDirectory(prefix="kin-emrb-dump-") as folder:
             dump = Path(folder) / "kin.dump"
@@ -638,7 +638,7 @@ class EmrBLedgerLive(unittest.TestCase):
         self.assertIn("ledger-missing", self.driver("verify-runtime", db=partial, volume=self.volume("l07-partial")).get("problems") or [])
         # The source's data is unchanged by its backup (only the deliberate later append moved it on, by exactly one).
         count, last, _ = before[0][0].split(":")
-        self.assertEqual(self.ok("SELECT count(*) || ':' || max(sequence) FROM emr_access.access_entry"), ["%d:%d" % (int(count) + 1, int(last) + 1)])
+        self.assertEqual(self.ok("SELECT count(*) || ':' || max(sequence) FROM emr_access.access_entry WHERE stream = 'viewing'"), ["%d:%d" % (int(count) + 1, int(last) + 1)])
         self.assertEqual(self.ok("SELECT count(*) FROM \"AuditLog\""), before[1])
 
     # ── L08 ──
