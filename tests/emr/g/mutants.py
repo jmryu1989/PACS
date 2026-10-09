@@ -1,10 +1,11 @@
 # coding: utf-8
 """TEST-G-MUTANTS: the required EMR-G round-1 mutants against the pure legacy migration contract.
 
-REQ-EMR-03/05/12/18 -> RISK-G-01..05 -> TEST-G-01..05 -> M-G-01..06 (+ M-G-01R, M-G-05R).
+REQ-EMR-03/05/12/18 -> RISK-G-01..05 -> TEST-G-01..05 -> M-G-01..06 (+ M-G-01R, M-G-01S, M-G-05R).
 
   M-G-01   the migration event is dated with the source's original time        -> TEST-G-03 refuse (past events)
   M-G-01R  the retention start is reset to the migration time                    -> TEST-G-04 allow
+  M-G-01S  the stored original time is replaced by the migration time             -> TEST-G-01 allow
   M-G-02   a signer whose display name matches becomes the legacy author        -> TEST-G-03 refuse (same display name)
   M-G-03   a legacy approval gets a backdated signature event                    -> TEST-G-03 refuse (past events)
   M-G-04   patients are compared as a total, so an exchange passes               -> TEST-G-01 refuse (exchanged patients)
@@ -71,6 +72,14 @@ MUTANTS = [
                "lifecycle: lifecycleFor(item),",
     },
     {
+        "id": "M-G-01S",
+        "title": "the stored original time is replaced by the migration time",
+        "case": "TEST-G-01 reconcile allow: original stored time survives migration",
+        "expect": "M-G-01S: the stored original time is never replaced by the migration time",
+        "old": "    original: { columns: item.columns, time: item.time }, institution: item.institution,",
+        "new": "    original: { columns: item.columns, time: { ...item.time, value: ctx.at } }, institution: item.institution,",
+    },
+    {
         "id": "M-G-02",
         "title": "a signer whose display name equals the legacy author string is taken as that author",
         "case": "TEST-G-03 unsigned_supplement refuse: the same display name does not identify the legacy author",
@@ -135,10 +144,9 @@ CONTROLS = [
         "new": "      // A cleared draft row is a revision boundary, not a draft; it is listed, never silently dropped (control).",
     },
 ]
-NOT_RUN = [
-    {"id": "M-G-01..06 (live)", "reason": "R2: real importer, B1 storage, C supplement signing and C/D re-read screens do not exist "
-                                         "in round 1; tests/emr/g/live.py (EmrGLive) owns the live and DOM variants"},
-]
+NOT_RUN = [{"id": name + " (live)", "reason": "R2: real importer, B1 storage, C supplement signing and C/D re-read screens "
+            "do not exist in round 1; tests/emr/g/live.py (EmrGLive) owns the live and DOM variants"}
+           for name in ["M-G-01", "M-G-02", "M-G-03", "M-G-04", "M-G-05", "M-G-06"]]
 
 RESULT = re.compile(r"^(ok|not ok) (\d+) - (.*)$")
 # A broken copy that never reaches its assertions is a crash, not a kill.
@@ -182,11 +190,18 @@ def run_copy(node, source_text, work, label):
     copy.write_bytes(source_text.encode("utf-8"))
     env = dict(os.environ)
     env[ENV_KEY] = str(copy)
-    completed = subprocess.run([node, "--test", "--test-reporter=tap", str(TEST)], cwd=str(ROOT), env=env,
-                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=TIMEOUT)
-    stdout = completed.stdout.decode("utf-8", errors="replace")
-    (work / (label + ".tap")).write_text(stdout, encoding="utf-8")
-    (work / (label + ".stderr")).write_bytes(completed.stderr)
+    run = work / label
+    completed = subprocess.run([sys.executable, str(ROOT / "scripts/record-run.py"), "--run-dir", str(run), "--cwd", str(ROOT),
+                                "--file", str(SOURCE), "--file", str(copy), "--file", str(TEST), "--file", str(pathlib.Path(__file__)),
+                                "--tree", "api/src/emr-contract", "--file", "api/tsconfig.json", "--file", "api/package-lock.json",
+                                "--file", "api/prisma/schema.prisma", "--", node, "--test", "--test-reporter=tap", str(TEST)],
+                               cwd=str(ROOT), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=TIMEOUT)
+    if not (run / "run.json").is_file():
+        raise RuntimeError("recorder did not create evidence: " + completed.stderr.decode("utf-8", errors="replace"))
+    record = json.loads((run / "run.json").read_text(encoding="utf-8"))
+    if record["status"] != "completed" or record["exit_code"] != completed.returncode:
+        raise RuntimeError("incomplete recorded mutant run: " + str(run))
+    stdout = (run / "stdout.log").read_text(encoding="utf-8", errors="replace")
     return completed.returncode, parse_tap(stdout), sha256(copy.read_bytes())
 
 
@@ -202,11 +217,14 @@ def anchors(source_text):
 def judge(mutant, exit_code, cases, baseline_names):
     case = cases.get(mutant["case"])
     missing = sorted(baseline_names - set(cases))
+    extra = sorted(set(cases) - baseline_names)
     reasons = []
     if exit_code == 0:
         reasons.append("exit 0")
     if missing:
         reasons.append("cases not reported (load or harness crash): " + ", ".join(missing[:3]))
+    if extra:
+        reasons.append("unexpected cases: " + ", ".join(extra))
     if case is None:
         reasons.append("named case not reported")
     elif case["ok"]:
@@ -241,45 +259,55 @@ def main(argv=None):
         if not args.node:
             raise SystemExit("node executable not found")
         summary["node"] = subprocess.run([args.node, "--version"], stdout=subprocess.PIPE, check=True).stdout.decode().strip()
-        with tempfile.TemporaryDirectory(prefix="emr-g-mutants-") as directory:
-            work = pathlib.Path(directory)
-            exit_code, cases, copy_sha = run_copy(args.node, source_text, work, "baseline")
-            baseline_names = set(cases)
-            failing = sorted(name for name, case in cases.items() if not case["ok"])
-            summary["baseline"] = {"exit": exit_code, "cases": len(cases), "fail": failing, "copy_sha256": copy_sha}
-            baseline_ok = exit_code == 0 and cases and not failing and copy_sha == summary["source"]["sha256_before"]
-            missing_cases = sorted({m["case"] for m in MUTANTS} - set(cases))
-            if missing_cases:
-                summary["baseline"]["missing_named_cases"] = missing_cases
-                baseline_ok = False
-            ok = ok and bool(baseline_ok)
-            for mutant in MUTANTS:
-                entry = {key: mutant[key] for key in ("id", "title", "case", "expect")}
-                if not baseline_ok or source_text.count(mutant["old"]) != 1:
-                    entry.update(killed=False, reasons=["not judged: baseline failed or anchor not unique"])
-                    summary["mutants"].append(entry)
-                    ok = False
-                    continue
-                mutated = source_text.replace(mutant["old"], mutant["new"], 1)
-                exit_code, cases, copy_sha = run_copy(args.node, mutated, work, mutant["id"])
-                killed, reasons, block = judge(mutant, exit_code, cases, baseline_names)
-                entry.update(killed=killed, reasons=reasons, exit=exit_code, mutated_sha256=copy_sha,
-                             other_failures=sorted(n for n, c in cases.items() if not c["ok"] and n != mutant["case"]),
-                             evidence=block[:1500])
+        # Retain the copied inputs and complete recorder logs, including non-target failures and survivors.
+        evidence_root = pathlib.Path(args.out).resolve().parent if args.out else ROOT / "tmp/emr-g-r1/runs"
+        evidence_root.mkdir(parents=True, exist_ok=True)
+        work = pathlib.Path(tempfile.mkdtemp(prefix="mutant-evidence-", dir=str(evidence_root)))
+        summary["evidence"] = str(work)
+        catalog = subprocess.run([args.node, str(TEST), "--list-cases"], cwd=str(ROOT), check=True,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=TIMEOUT)
+        expected = json.loads(catalog.stdout.decode("utf-8"))
+        (work / "expected-cases.json").write_text(json.dumps(expected, indent=2) + "\n", encoding="utf-8")
+        if len(set(expected)) != len(expected) or not expected:
+            raise RuntimeError("empty or duplicate case declaration")
+        exit_code, cases, copy_sha = run_copy(args.node, source_text, work, "baseline")
+        baseline_names = set(cases)
+        failing = sorted(name for name, case in cases.items() if not case["ok"])
+        summary["baseline"] = {"exit": exit_code, "cases": len(cases), "expected": expected, "collected": list(cases),
+                               "fail": failing, "copy_sha256": copy_sha, "evidence": str(work / "baseline")}
+        baseline_ok = exit_code == 0 and set(cases) == set(expected) and not failing and copy_sha == summary["source"]["sha256_before"]
+        missing_cases = sorted({m["case"] for m in MUTANTS} - set(cases))
+        if missing_cases:
+            summary["baseline"]["missing_named_cases"] = missing_cases
+            baseline_ok = False
+        ok = ok and bool(baseline_ok)
+        for mutant in MUTANTS:
+            entry = {key: mutant[key] for key in ("id", "title", "case", "expect")}
+            if not baseline_ok or source_text.count(mutant["old"]) != 1:
+                entry.update(killed=False, reasons=["not judged: baseline failed or anchor not unique"])
                 summary["mutants"].append(entry)
-                ok = ok and killed
-            for control in CONTROLS:
-                entry = {key: control[key] for key in ("id", "title", "case")}
-                if not baseline_ok or source_text.count(control["old"]) != 1:
-                    entry.update(survived=False, reasons=["not judged: baseline failed or anchor not unique"])
-                    ok = False
-                else:
-                    exit_code, cases, copy_sha = run_copy(args.node, source_text.replace(control["old"], control["new"], 1), work, control["id"])
-                    killed, reasons, _ = judge(control, exit_code, cases, baseline_names)
-                    survived = not killed and exit_code == 0 and set(cases) == baseline_names and all(c["ok"] for c in cases.values())
-                    entry.update(survived=survived, exit=exit_code, mutated_sha256=copy_sha, reasons=reasons)
-                    ok = ok and survived
-                summary["controls"].append(entry)
+                ok = False
+                continue
+            mutated = source_text.replace(mutant["old"], mutant["new"], 1)
+            exit_code, cases, copy_sha = run_copy(args.node, mutated, work, mutant["id"])
+            killed, reasons, block = judge(mutant, exit_code, cases, baseline_names)
+            entry.update(killed=killed, reasons=reasons, exit=exit_code, mutated_sha256=copy_sha,
+                         other_failures=sorted(n for n, c in cases.items() if not c["ok"] and n != mutant["case"]),
+                         expected=expected, collected=list(cases), evidence=block, raw_evidence=str(work / mutant["id"]))
+            summary["mutants"].append(entry)
+            ok = ok and killed
+        for control in CONTROLS:
+            entry = {key: control[key] for key in ("id", "title", "case")}
+            if not baseline_ok or source_text.count(control["old"]) != 1:
+                entry.update(survived=False, reasons=["not judged: baseline failed or anchor not unique"])
+                ok = False
+            else:
+                exit_code, cases, copy_sha = run_copy(args.node, source_text.replace(control["old"], control["new"], 1), work, control["id"])
+                killed, reasons, _ = judge(control, exit_code, cases, baseline_names)
+                survived = not killed and exit_code == 0 and set(cases) == baseline_names and all(c["ok"] for c in cases.values())
+                entry.update(survived=survived, exit=exit_code, mutated_sha256=copy_sha, reasons=reasons)
+                ok = ok and survived
+            summary["controls"].append(entry)
     summary["source"]["sha256_after"] = sha256(SOURCE.read_bytes())
     ok = ok and summary["source"]["sha256_after"] == summary["source"]["sha256_before"]
     summary["result"] = "pass" if ok else "fail"

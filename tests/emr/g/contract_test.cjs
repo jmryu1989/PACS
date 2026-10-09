@@ -24,7 +24,13 @@ if (process.argv.includes('--emr-g-inventory-generator')) {
   });
 } else {
   const assert = require('node:assert/strict');
-  const { test } = require('node:test');
+  const declaredCases = [];
+  const listing = process.argv.includes('--list-cases');
+  const test = (name, body) => {
+    assert(!declaredCases.includes(name), `duplicate case: ${name}`);
+    declaredCases.push(name);
+    if (!listing) require('node:test').test(name, body);
+  };
   const { spawnSync } = require('node:child_process');
   const crypto = require('node:crypto');
   const root = path.resolve(__dirname, '..', '..', '..');
@@ -172,7 +178,8 @@ if (process.argv.includes('--emr-g-inventory-generator')) {
       const stored = [...store.records.values()].filter(r => r.model === input.model && r.sourceKey === sourceKeyOf(input));
       assert.equal(stored.length, 1);
       assert.deepEqual(stored[0].original.columns, input.columns);
-      assert.deepEqual(stored[0].original.time, { value: input.columns[G.LEGACY_SOURCES[input.model].time], basis: input.timeBasis });
+      assert.deepEqual(stored[0].original.time, { value: input.columns[G.LEGACY_SOURCES[input.model].time], basis: input.timeBasis },
+        'M-G-01S: the stored original time is never replaced by the migration time');
       assert.deepEqual([stored[0].patient, stored[0].institution, stored[0].objects], [input.patient, input.institution, input.objects]);
     }
     assert.equal(findRecord(result.records, 'ReportVersion', UID1, 2).original.columns.findings, TRICKY);
@@ -180,6 +187,15 @@ if (process.argv.includes('--emr-g-inventory-generator')) {
     // Without an open fact the same run is a plain match.
     const plain = migrated(baseRows().filter(r => r.model !== 'ReportDraft')).result;
     assert.equal(plain.status, 'matched');
+  });
+
+  test('TEST-G-01 reconcile allow: original stored time survives migration', () => {
+    const { sealed, units } = migrated();
+    for (const { write } of writesOf(units)) {
+      const source = sealed.rows.find(r => r.model === write.model && sourceKeyOf(r) === write.sourceKey);
+      assert.deepEqual(write.original.time, { value: source.columns[G.LEGACY_SOURCES[source.model].time], basis: source.timeBasis },
+        'M-G-01S: the stored original time is never replaced by the migration time');
+    }
   });
 
   test('TEST-G-01 reconcile refuse: equal totals with two patients exchanged fail on both rows', () => {
@@ -326,12 +342,13 @@ if (process.argv.includes('--emr-g-inventory-generator')) {
 
   test('TEST-G-02 restart allow: re-running the same source after completion writes nothing', () => {
     const { store } = migrated(), writes = store.writes;
-    const again = planOf(snapshot(baseRows(), { snapshotId: 'snap-2' }));
+    const again = planOf(snapshot());
     const receipt = G.dryRunLegacyMigration(again, storedOf(store), tick());
     assert.deepEqual([receipt.preexisting.length, receipt.conflicts.length, receipt.ok], [again.items.length, 0, true]);
     const journal = drive(G.startLegacyRun(again, receipt, storedOf(store), { runId: 'run-2', at: tick(), actorId: 'svc-emr-legacy-migrator' }), again, store);
     assert.equal(journal.state, 'completed');
     assert.equal(store.writes, writes, 'no duplicate of an already migrated row');
+    assert.notEqual(G.reconcileLegacyMigration(again, readBackOf(store)).status, 'failed', 'restart also preserves original provenance');
   });
 
   test('TEST-G-02 restart refuse: a changed source under the same snapshot and different bytes for a migrated row are refused', () => {
@@ -409,6 +426,82 @@ if (process.argv.includes('--emr-g-inventory-generator')) {
       { runId: 'run-0', at: tick(), actorId: 'svc' })), 'RunIdReused');
   });
 
+  test('TEST-G-02 restart refuse: foreign unit receipts and changed commit bodies cannot advance the checkpoint', () => {
+    const plan = planOf(), store = newStore();
+    const step = G.nextLegacyUnit(startRun(plan, store), plan, { at: tick(), size: 2 });
+    const original = structuredClone(step);
+    const unitChanges = [
+      u => { u.writes.pop(); },
+      u => { u.writes[0].original.columns.findings = 'different bytes'; },
+      u => { u.checkpoint.runId = 'another-run'; },
+      u => { u.checkpoint.unitId = 'another-unit'; },
+      u => { u.runId = 'another-run'; },
+      u => { u.from = 1; },
+    ];
+    for (const change of unitChanges) {
+      const unit = structuredClone(step.unit); change(unit);
+      assert.equal(refusal(() => G.recordLegacyCommit(step.journal, plan, unit, 'committed', tick())), 'UnitMismatch');
+    }
+    assert.deepEqual(step, original, 'a refused receipt leaves journal and proposed originals unchanged');
+    assert.equal(store.writes, 0);
+    commit(store, step.unit);
+    const unknown = G.recordLegacyCommit(step.journal, plan, step.unit, 'unknown', tick());
+    const changes = [
+      s => { s.checkpoints[0].unitId = 'another-unit'; },
+      s => { s.items[0].unitId = 'another-unit'; },
+      s => { s.items[0].runId = 'another-run'; },
+      s => { s.checkpoints.push({ ...s.checkpoints[0] }); },
+    ];
+    for (const change of changes) {
+      const facts = storedOf(store); change(facts);
+      const before = structuredClone(facts);
+      assert.equal(refusal(() => G.resolveLegacyCommit(unknown, plan, facts, tick())), 'JournalStoreDiverged',
+        'matching counts cannot substitute for the pending transaction identity');
+      assert.deepEqual(facts, before);
+    }
+    const resolved = G.resolveLegacyCommit(JSON.parse(JSON.stringify(unknown)), plan, storedOf(store), tick());
+    assert.equal(resolved.checkpoint.unitId, step.unit.unitId, 'serialized restart data resolves the exact committed unit');
+    assert.equal(unknown.state, 'commit-unknown', 'resolution returns a new journal');
+  });
+
+  test('TEST-G-02 restart refuse: malformed journals and vanished acknowledgments preserve storage and the pending outcome', () => {
+    const plan = planOf(), store = newStore(), journal = startRun(plan, store);
+    const changes = [
+      j => { j.pending = { unitId: 'x', from: 0, through: plan.items.length + 1 }; },
+      j => { j.checkpoint = { through: plan.items.length + 1, lastItemKey: 'x', unitId: 'x' }; },
+      j => { j.preexisting = ['foreign-row']; },
+      j => { j.state = 'completed'; },
+      j => { j.state = 'commit-unknown'; },
+      j => { j.history = [{ kind: 'run-started', at: 'invalid' }]; },
+    ];
+    for (const change of changes) {
+      const altered = structuredClone(journal); change(altered);
+      assert.equal(refusal(() => G.nextLegacyUnit(altered, plan, { at: tick(), size: 2 })), 'MigrationJournalMalformed');
+    }
+    assert.deepEqual(storedOf(store), { complete: true, items: [], checkpoints: [] });
+    const prior = migrated(), restarted = startRun(plan, prior.store, 'run-2');
+    prior.store.items.delete(plan.items.at(-1).itemKey);
+    assert.equal(refusal(() => G.resumeLegacyRun(restarted, plan, storedOf(prior.store), tick())), 'JournalStoreDiverged',
+      'a vanished acknowledged row must not be silently skipped later');
+    assert.equal(refusal(() => startRun(plan, newStore(), 'old-run', later(CAPTURED, -1))), 'ServerTimeRefused');
+  });
+
+  test('TEST-G-02 restart allow: a stop while the commit outcome is unknown resolves before any new unit', () => {
+    const plan = planOf();
+    for (const committed of [false, true]) {
+      const store = newStore(), step = G.nextLegacyUnit(startRun(plan, store), plan, { at: tick(), size: 2 });
+      if (committed) commit(store, step.unit);
+      const unknown = G.recordLegacyCommit(step.journal, plan, step.unit, 'unknown', tick());
+      const stopped = G.requestLegacyStop(unknown, plan, tick());
+      assert.equal(stopped.state, 'commit-unknown');
+      const resolved = G.resolveLegacyCommit(stopped, plan, storedOf(store), tick());
+      const end = G.nextLegacyUnit(resolved, plan, { at: tick(), size: 2 });
+      assert.deepEqual([end.journal.state, end.unit, store.writes], ['stopped', null, committed ? 2 : 0]);
+      drive(G.resumeLegacyRun(end.journal, plan, storedOf(store), tick()), plan, store);
+      assert.equal(store.writes, plan.items.length);
+    }
+  });
+
   test('TEST-G-03 unsigned_supplement allow: Legacy Unsigned stays and a current clinician adds a current-time supplement', () => {
     const { plan, store, result } = migrated();
     const target = findRecord(result.records, 'ReportVersion', UID1, 2), at = later(RUN_AT, 86_400_000);
@@ -474,6 +567,7 @@ if (process.argv.includes('--emr-g-inventory-generator')) {
       [target.itemKey, request({ viewed: { ...viewedOf(target), snapshotId: 'snap-other' } }), 'SupplementProvenanceUnconfirmed'],
       [target.itemKey, request({ signer: signer('dr.choi', { roles: ['clinician'] }) }), 'SupplementAuthorityRefused'],
       [target.itemKey, request({ signer: signer('dr.choi', { canSign: false }) }), 'SupplementAuthorityRefused'],
+      [target.itemKey, request({ signer: signer('dr.choi', { canReadStudy: false }) }), 'SupplementAuthorityRefused'],
       [target.itemKey, request({ signer: signer('svc', { kind: 'service' }) }), 'SupplementAuthorityRefused'],
       [target.itemKey, request({ at: CAPTURED }), 'SupplementTimeRefused'],
       [result.records.find(r => r.model === 'ReportDraft').itemKey, request(), 'SupplementNotApplicable'],
@@ -490,11 +584,12 @@ if (process.argv.includes('--emr-g-inventory-generator')) {
     const writes = writesOf(units);
     const { unit, write } = writes.find(({ write: w }) => w.model === 'ReportVersion' && w.original.columns.uid === UID1 && w.sequence === 2);
     const original = '2026-03-02T02:00:00.000Z';
-    assert.deepEqual(write.retention, { status: 'original-start', startedAt: original, classes: ['chart', 'examination', 'imageReport'], years: 10,
-      ownDeadline: D.civilPeriodEnd(original, 10) }, 'M-G-01R: the retention start is the stored original time, never the migration time');
-    assert.notEqual(write.retention.ownDeadline, D.civilPeriodEnd(unit.at, 10));
+    const years = D.retentionFor([write.kind]).retentionYears;
+    assert.deepEqual(write.retention, { status: 'original-start', startedAt: original, classes: D.statutoryClasses([write.kind]), years,
+      ownDeadline: D.civilPeriodEnd(original, years) }, 'M-G-01R: the retention start is the stored original time, never the migration time');
+    assert.notEqual(write.retention.ownDeadline, D.civilPeriodEnd(unit.at, years));
     const srWrite = writes.find(({ write: w }) => w.model === 'ManualSr').write;
-    assert.deepEqual([srWrite.retention.startedAt, srWrite.retention.years], ['2026-03-03T00:00:00.000Z', 5]);
+    assert.deepEqual([srWrite.retention.startedAt, srWrite.retention.years], ['2026-03-03T00:00:00.000Z', D.retentionFor([srWrite.kind]).retentionYears]);
     assert.deepEqual(write.lifecycle, { amendWindow: { status: 'not-granted', reason: 'no-verified-original-signer' }, finalization: 'not-asserted', legacyAction: 'approve' });
   });
 
@@ -513,6 +608,30 @@ if (process.argv.includes('--emr-g-inventory-generator')) {
     for (const { write: w } of writesOf(units)) {
       assert.equal(w.lifecycle.amendWindow.status, 'not-granted');
       assert(w.retention.status === 'unresolved' ? w.retention.destroyable === false : w.retention.ownDeadline === D.civilPeriodEnd(w.retention.startedAt, w.retention.years));
+    }
+  });
+
+  test('TEST-G-04 unknown_dates: classification and civil-period boundaries are consumed from A without a G period table', () => {
+    // D-19/D-21 correction is owned by B1/A. This consumer test runs against whichever A is actually bound;
+    // passing on the frozen base does not claim the new five-year/first-day legal acceptance has landed there.
+    const times = ['2024-02-28T15:00:00.000Z', '2024-02-29T03:00:00.000Z',
+      '2025-01-31T14:59:59.999Z', '2025-01-31T15:00:00.000Z', '2025-12-31T14:59:59.999Z',
+      '2025-12-31T15:00:00.000Z', '2026-10-08T15:00:00.000Z', '2026-10-09T03:00:00.000Z'];
+    for (const original of times) {
+      const rows = baseRows();
+      for (const row of rows) row.columns[G.LEGACY_SOURCES[row.model].time] = original;
+      const { units } = migrated(rows);
+      for (const { write } of writesOf(units)) {
+        if (write.model === 'ReportDraft') {
+          assert.deepEqual(write.retention, { status: 'unresolved', fact: 'purpose-end', destroyable: false });
+          continue;
+        }
+        const kinds = C.classifyModel(write.model).filter(k => C.RECORD_CLASSIFICATION[k].retention.mode !== 'source-record');
+        const years = D.retentionFor(kinds).retentionYears;
+        assert.deepEqual(write.retention, { status: 'original-start', startedAt: original,
+          classes: D.statutoryClasses(kinds), years, ownDeadline: D.civilPeriodEnd(original, years) });
+        assert.equal(write.lifecycle.amendWindow.status, 'not-granted');
+      }
     }
   });
 
@@ -582,6 +701,9 @@ if (process.argv.includes('--emr-g-inventory-generator')) {
     const missing = migrated(rows).result;
     assert.notEqual(missing.status, 'failed', 'the record is preserved as it is');
     assert.equal(refusal(() => G.acceptLegacyReopen(missing, { complete: true, views: viewsOf(missing) })), 'ReopenBlockedByUnresolved');
+    const missingSr = missing.records.find(r => r.model === 'ManualSr');
+    assert.equal(refusal(() => G.planLegacySupplement(missing, missingSr.itemKey,
+      { signer: signer(), at: tick(), viewed: viewedOf(missingSr) })), 'SupplementBlockedByUnresolved');
 
     const { plan, store, result } = migrated();
     const target = findRecord(result.records, 'ReportVersion', UID1, 2);
@@ -599,4 +721,5 @@ if (process.argv.includes('--emr-g-inventory-generator')) {
     const back = readBackOf(store); findRecord(back.records, 'ReportVersion', UID2, 1).patient = known(PATIENT_A);
     assert.equal(refusal(() => G.acceptLegacyReopen(G.reconcileLegacyMigration(plan, back), { complete: true, views: viewsOf(result) })), 'ReconciliationFailed');
   });
+  if (listing) process.stdout.write(JSON.stringify(declaredCases) + '\n');
 }

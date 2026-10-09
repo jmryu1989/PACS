@@ -1,8 +1,7 @@
 import { createHash } from 'node:crypto';
 import { ImmutableIdentity, PatientLinkSnapshot, identity, patientLink } from '../emr-contract/access-event';
 import { RECORD_CLASSIFICATION, RecordEvent, RecordKind, classifyModel } from '../emr-contract/classification';
-import { STATUTORY_MINIMUM } from '../emr-contract/legal-basis';
-import { StatutoryClass, civilPeriodEnd, statutoryClasses } from '../emr-contract/lawful-defaults';
+import { StatutoryClass, civilPeriodEnd, statutoryClasses, retentionFor as classifiedRetention } from '../emr-contract/lawful-defaults';
 import { ContractError, choice, freeze, integer, object, refuse, sha256, string, utc } from '../emr-contract/validation';
 
 /* EMR-G R1: move unsigned legacy records into the new record system without changing a fact.
@@ -305,7 +304,9 @@ export type RetentionHandoff =
 function retentionFor(item: PlanItem): RetentionHandoff {
   if (RECORD_CLASSIFICATION[item.kind].retention.mode !== 'statutory') return { status: 'unresolved', fact: 'purpose-end', destroyable: false };
   if (item.time.basis !== 'utc-verified') return { status: 'unresolved', fact: 'original-time', destroyable: false };
-  const classes = statutoryClasses([item.kind]), years = Math.max(...classes.map(c => STATUTORY_MINIMUM[c].years));
+  // D-19/D-21 belong to A: G neither invents chart incorporation nor owns a period/calendar table.
+  // R2 must bind the corrected A and recorded original-start/incorporation evidence before H consumes this handoff.
+  const classes = statutoryClasses([item.kind]), years = classifiedRetention([item.kind]).retentionYears;
   return { status: 'original-start', startedAt: item.time.value, classes, years, ownDeadline: civilPeriodEnd(item.time.value, years) };
 }
 export interface LegacyLifecycle {
@@ -369,6 +370,8 @@ function storedFacts(input: unknown): StoredFacts {
   }));
   // Two stored copies of one source row are exactly the duplicate this contract exists to prevent.
   if (new Set(items.map(i => i.itemKey)).size !== items.length) refuse('JournalStoreDiverged');
+  if (new Set(checkpoints.map(c => canonicalJson([c.runId, c.unitId]))).size !== checkpoints.length ||
+      new Set(checkpoints.map(c => canonicalJson([c.runId, c.through]))).size !== checkpoints.length) refuse('JournalStoreDiverged');
   return { complete: true, items, checkpoints };
 }
 
@@ -414,9 +417,23 @@ function parseJournal(input: MigrationJournal): MigrationJournal {
     string(v.runId); sha256(v.planSha256); sha256(v.inputSha256); string(v.snapshotId); string(v.actorId); utc(v.startedAt);
     choice(v.state, ['applying', 'stopping', 'stopped', 'commit-unknown', 'completed']);
     const c = object(v.checkpoint, ['through', 'lastItemKey', 'unitId']); integer(c.through);
-    if (v.pending !== null) { const p = object(v.pending, ['unitId', 'from', 'through']); string(p.unitId); integer(p.from); integer(p.through, 1); }
+    if (c.through === 0 ? c.lastItemKey !== null || c.unitId !== null : !string(c.lastItemKey) || !string(c.unitId))
+      throw new Error('Checkpoint identity required');
+    if (v.pending !== null) {
+      const p = object(v.pending, ['unitId', 'from', 'through']); string(p.unitId); integer(p.from); integer(p.through, 1);
+      if (p.from !== c.through || p.through <= p.from) throw new Error('Pending range mismatch');
+    }
     if (!Array.isArray(v.preexisting) || !Array.isArray(v.history)) throw new Error('Journal lists required');
+    v.preexisting.forEach(x => string(x));
+    if (new Set(v.preexisting).size !== v.preexisting.length) throw new Error('Duplicate acknowledgment');
+    for (const entry of v.history) {
+      const h = object(entry, ['kind', 'at']); utc(h.at);
+      choice(h.kind, ['run-started', 'stop-requested', 'run-stopped', 'commit-unknown', 'commit-resolved', 'run-resumed', 'run-completed']);
+    }
     if (v.stopRequestedAt !== null) utc(v.stopRequestedAt);
+    if ((v.state === 'commit-unknown' && v.pending === null) ||
+        (['stopped', 'completed'].includes(v.state) && v.pending !== null) ||
+        (['stopping', 'stopped'].includes(v.state) && v.stopRequestedAt === null)) throw new Error('Journal state mismatch');
     return v as MigrationJournal;
   });
 }
@@ -424,8 +441,16 @@ function bindJournal(journal: MigrationJournal, plan: MigrationPlan): MigrationJ
   const j = parseJournal(journal), p = verifiedPlan(plan);
   if (j.snapshotId === p.snapshotId && j.inputSha256 !== p.inputSha256) refuse('SourceSnapshotChanged');
   if (j.planSha256 !== p.planSha256 || j.inputSha256 !== p.inputSha256 || j.snapshotId !== p.snapshotId) refuse('PlanMismatch');
+  if (j.startedAt < p.capturedAt || j.checkpoint.through > p.items.length ||
+      (j.checkpoint.through && j.checkpoint.lastItemKey !== p.items[j.checkpoint.through - 1].itemKey) ||
+      j.preexisting.some(key => !p.items.some(i => i.itemKey === key)) ||
+      (j.state === 'completed' && j.checkpoint.through !== p.items.length) ||
+      (j.pending && (j.pending.through > p.items.length || j.pending.unitId !== unitIdentity(j.runId, p, j.pending.from, j.pending.through))))
+    refuse('MigrationJournalMalformed');
   return j;
 }
+const unitIdentity = (runId: string, plan: MigrationPlan, from: number, through: number) =>
+  `unit:${digest([runId, plan.planSha256, from, through])}`;
 const next = (j: MigrationJournal, change: Partial<MigrationJournal>, event?: MigrationJournal['history'][number]): Readonly<MigrationJournal> =>
   freeze({ ...structuredClone(j), ...change, history: event ? [...j.history, event] : [...j.history] });
 
@@ -434,6 +459,7 @@ export function startLegacyRun(plan: MigrationPlan, receipt: DryRunReceipt, stor
   command: { runId: string; at: string; actorId: string }): Readonly<MigrationJournal> {
   const p = verifiedPlan(plan), c = object(command, ['runId', 'at', 'actorId']);
   const runId = string(c.runId), at = utc(c.at), actorId = string(c.actorId);
+  if (at < p.capturedAt) refuse('ServerTimeRefused');
   if (receipt?.planSha256 !== p.planSha256 || receipt.inputSha256 !== p.inputSha256) refuse('DryRunMismatch');
   const fresh = dryRunLegacyMigration(p, stored, at);
   if (fresh.conflicts.length) refuse('LegacyItemConflict');
@@ -457,7 +483,7 @@ export function nextLegacyUnit(journal: MigrationJournal, plan: MigrationPlan, c
   if (from >= p.items.length) return { journal: next(j, { state: 'completed' }, { kind: 'run-completed', at }), unit: null };
   if (j.state === 'stopping') return { journal: next(j, { state: 'stopped' }, { kind: 'run-stopped', at }), unit: null };
   const through = Math.min(p.items.length, from + size);
-  const unitId = `unit:${digest([j.runId, p.planSha256, from, through])}`, pre = new Set(j.preexisting);
+  const unitId = unitIdentity(j.runId, p, from, through), pre = new Set(j.preexisting);
   const range = p.items.slice(from, through);
   const unit = freeze({ unitId, runId: j.runId, planSha256: p.planSha256, from, through, at,
     writes: range.filter(i => !pre.has(i.itemKey)).map(i => legacyWrite(p, i, { runId: j.runId, unitId, at, actorId: j.actorId })),
@@ -473,6 +499,16 @@ export function recordLegacyCommit(journal: MigrationJournal, plan: MigrationPla
   choice(outcome, ['committed', 'rolled-back', 'unknown']); utc(at);
   if (j.state === 'commit-unknown') refuse('CommitOutcomeUnknown');
   if (!j.pending || unit?.unitId !== j.pending.unitId || unit.checkpoint?.through !== j.pending.through) refuse('UnitMismatch');
+  const { from, through: end } = j.pending, pre = new Set(j.preexisting), range = p.items.slice(from, end);
+  shaped('UnitMismatch', () => {
+    utc(unit.at);
+    if (unit.at < j.startedAt || at < unit.at || !same(unit, {
+      unitId: j.pending.unitId, runId: j.runId, planSha256: p.planSha256, from, through: end, at: unit.at,
+      writes: range.filter(i => !pre.has(i.itemKey)).map(i => legacyWrite(p, i, { runId: j.runId, unitId: j.pending.unitId, at: unit.at, actorId: j.actorId })),
+      acknowledged: range.filter(i => pre.has(i.itemKey)).map(i => ({ itemKey: i.itemKey, rowSha256: i.rowSha256 })),
+      checkpoint: { runId: j.runId, unitId: j.pending.unitId, through: end, lastItemKey: p.items[end - 1].itemKey },
+    })) refuse('UnitMismatch');
+  });
   if (outcome === 'unknown') return next(j, { state: 'commit-unknown' }, { kind: 'commit-unknown', at });
   if (outcome === 'rolled-back') return next(j, { pending: null });
   const { unitId, through } = j.pending;
@@ -486,14 +522,31 @@ function progress(j: MigrationJournal, p: MigrationPlan, s: StoredFacts): Migrat
     const item = planned.get(row.itemKey);
     if (item && item.rowSha256 !== row.rowSha256) refuse('LegacyItemConflict');
   }
-  const mine = s.checkpoints.filter(c => c.runId === j.runId);
+  const mine = s.checkpoints.filter(c => c.runId === j.runId).sort((a, b) => a.through - b.through);
   const through = Math.max(0, ...mine.map(c => c.through));
   if (j.checkpoint.through > through) refuse('CheckpointAheadOfBody');
   if (through !== j.checkpoint.through && through !== j.pending?.through) refuse('JournalStoreDiverged');
+  if (through > p.items.length) refuse('JournalStoreDiverged');
   for (let n = 0; n < through; n++) if (!byKey.has(p.items[n].itemKey)) refuse('CheckpointAheadOfBody');
+  // A matching row count is not proof of this transaction: bind every durable range and body to its own unit ID.
+  const pre = new Set(j.preexisting);
+  let from = 0;
+  for (const checkpoint of mine) {
+    if (checkpoint.unitId !== unitIdentity(j.runId, p, from, checkpoint.through)) refuse('JournalStoreDiverged');
+    const rangeKeys = new Set(p.items.slice(from, checkpoint.through).map(i => i.itemKey));
+    for (const body of s.items.filter(i => rangeKeys.has(i.itemKey))) {
+      if (pre.has(body.itemKey) ? body.runId === j.runId : body.runId !== j.runId || body.unitId !== checkpoint.unitId)
+        refuse('JournalStoreDiverged');
+    }
+    from = checkpoint.through;
+  }
+  if (j.checkpoint.through && !mine.some(c => c.through === j.checkpoint.through && c.unitId === j.checkpoint.unitId))
+    refuse('JournalStoreDiverged');
+  if (through > j.checkpoint.through && !mine.some(c => c.unitId === j.pending?.unitId && c.through === j.pending?.through))
+    refuse('JournalStoreDiverged');
+  if (j.preexisting.some(key => !byKey.has(key))) refuse('JournalStoreDiverged');
   // Beyond the checkpoint only rows acknowledged at start may exist: a body of this run without its checkpoint, or a row
   // another writer migrated meanwhile, would otherwise be written twice.
-  const pre = new Set(j.preexisting);
   if (p.items.slice(through).some(i => byKey.has(i.itemKey) && (byKey.get(i.itemKey).runId === j.runId || !pre.has(i.itemKey))))
     refuse('JournalStoreDiverged');
   const last = mine.find(c => c.through === through);
@@ -668,6 +721,7 @@ export function planLegacySupplement(reconciliation: Reconciliation, itemKey: st
   const r = verifiedReconciliation(reconciliation);
   const record = r.records.find(x => x.itemKey === itemKey);
   if (!record || record.marking?.status !== 'legacy-unsigned') refuse('LegacyRecordRequired');
+  if (r.unresolved.some(f => f.itemKey === itemKey && f.blocksAcceptance)) refuse('SupplementBlockedByUnresolved');
   const roles = SUPPLEMENT_ROLES[record.kind];
   if (!roles) refuse('SupplementNotApplicable');
   const q = shaped('SupplementRequestMalformed', () => object(request, ['signer', 'at', 'viewed']));
