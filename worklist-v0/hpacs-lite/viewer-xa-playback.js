@@ -19,7 +19,7 @@
                 prepare(image, {sop, frame, index, opening}, {draw, surface, signal}) -> {draw, surface, sop, frame, opening}
                   renders into a private surface behind the opaque handle `surface` issued to this draw, and echoes it
                 publish({draw, surface, sop, frame, index, opening})   synchronous swap of the visible front to that
-                  surface; no later pixel writes, no callbacks
+                  surface; no later pixel writes. Synchronous host re-entry revokes the transaction before commit.
                 release(surface handle) -> ack, clear(), cover(on), current() -> index.
                   publish/clear/cover are synchronous; undefined means completed under a throw-on-failure contract;
                   true or {ok:true} also confirms success; false/Promise/missing capability is failure. A remaining host
@@ -37,14 +37,16 @@
 
   // D757: an opening outlives its consumers and presentation generations. Tombstones prevent remount revival;
   // requests keep this record even after cancellation, so a transport refusal cannot disappear with its last slot.
+  // These metadata-only tombstones live for the document lifetime (unbounded in opening count). Evicting them by LRU
+  // would revive ended identities; the host owns document/session disposal. They are outside the decoded-byte budget.
   function openingRecord(key) {
     const id = broker.model.scopeKey(key);
     if (!broker.openings.has(id)) broker.openings.set(id, { key, members: new Set(), ended: false, access: null,
-      denyEpoch: 0, faults: new Map(), failed: null, recovery: null, authorization: null, auth: null, commits: 0 });
+      denyEpoch: 0, faults: new Map(), failed: new Map(), recovery: null, authorization: null, auth: null, commits: 0 });
     return broker.openings.get(id);
   }
-  function stateOf(O) {
-    return O.ended ? 'Ended' : O.faults.size ? 'CoverFailed' : O.access ? 'AccessBlocked' : O.failed ? 'Failed' : 'Active';
+  function stateOf(O, index) {
+    return O.ended ? 'Ended' : O.faults.size ? 'CoverFailed' : O.access ? 'AccessBlocked' : O.failed.has(index) ? 'Failed' : 'Active';
   }
   function denial(Q, status, event = Q) {
     if (Number(status) !== 401 && Number(status) !== 403) return;
@@ -117,6 +119,7 @@
     if (!wanted(res)) { broker.ledger.abandon(res.token); endResource(res, { kind: 'cancelled', status: null }); return; }
     broker.ledger.start(res.token);
     res.state = 'loading';
+    res.started = res.time.now();
     let supply;
     try {
       supply = Promise.resolve(res.source.load(res.index, { signal: res.abort.signal, opening: res.Q.opening.key,
@@ -124,7 +127,7 @@
         mayDecode: () => res.state === 'loading' && !broker.ledger.retiring(res.token) && wanted(res) }));
     } catch (error) { supply = Promise.reject(error); }
     supply.then(result => supplied(res, result, null), error => supplied(res, null, error || Error('load failed')));
-    for (const slot of [...res.consumers]) slot.owner.loaded(slot);
+    for (const slot of [...res.consumers]) slot.owner.loaded(slot, res);
   }
   function endResource(res, failure) {
     res.state = 'gone';
@@ -172,8 +175,12 @@
     const total = meta.ok ? meta.frames : 0;
     const navigable = path.path === 'xa' || path.path === 'xa-frames';
     let physical = broker.viewports.get(viewport);
-    if (!physical) { physical = { owner: null, controller: null, covered: false, safe: false, uncertain: new Set() }; broker.viewports.set(viewport, physical); }
+    if (!physical) { physical = { owner: null, controller: null, covered: false, safe: false, uncertain: new Set(), retired: new Set() }; broker.viewports.set(viewport, physical); }
     const V = Object.freeze({});  // this mount's ownership of the physical viewport; never reused
+    let initialTarget = 0;
+    try { initialTarget = viewport.current?.(); } catch (_) {}
+    if (!Number.isSafeInteger(initialTarget) || initialTarget < 0 || initialTarget >= total) initialTarget = 0;
+    let selected = initialTarget;
 
     // G: presentation generation (every user intent); P: playback generation (timers and look-ahead).
     let seq = 0, G = 0, P = 0, playing = false, shown = null, shownSlot = null, target = null, drawing = null;
@@ -181,7 +188,7 @@
     let range = total ? { first: 0, last: total - 1 } : null;
     let coverage = range ? Model.createCoverage(range.first, range.last) : null;
     let speed = meta.ok ? Model.defaultSpeed(meta.timing) : null;
-    const failure = () => O.faults.get(physical) || O.access || O.failed || (O.faults.size ? [...O.faults.values()][0] : null);
+    const failure = () => O.faults.get(physical) || O.access || O.failed.get(selected) || (O.faults.size ? [...O.faults.values()][0] : null);
     let message = '', lastDue = 0, pendingDue = null, pendingWait = 0, late = 0, sleeper = null, recovery = null, fact = null;
     let ended = false, disposed = false, memoryWait = false;
     const slots = new Set(), skip = new Set(), told = new WeakSet(), listeners = [];
@@ -198,7 +205,7 @@
     const self = {
       scope, opening: O, alive: () => !ended && !disposed,
       wants: slot => gate('supply', { slot }) === 'current',
-      loaded: slot => emit({ type: 'requested', index: slot.index, shared: false }),
+      loaded: (slot, res) => { armLoad(slot, res); if (gate('supply', { slot }) === 'current') emit({ type: 'requested', index: slot.index, shared: false }); },
       supplied: (slot, res) => supplied(slot, res),
       supplyFailed: (slot, f) => supplyFailed(slot, f),
       lose: () => lose('stale'),
@@ -208,6 +215,11 @@
       park: () => { park(); paint(); },
       finish: (state, text) => finish(state, text),
       accessEvent: (index, status, denyEpoch) => emit({ type: 'failed', index, kind: 'denied', status, denyEpoch, needed: true }),
+      refresh: () => {
+        if (O.failed.has(selected) && !ended && !recovery) { park(); if (physical.owner === V) hide(); }
+        if (!failure() && !ended) { message = ''; phase = playing ? 'playing' : 'paused'; }
+        paint();
+      },
     };
 
     // ---- the panel: English names, Korean explanations, external text only through textContent ----
@@ -243,17 +255,18 @@
     function paint() {
       if (disposed) return;
       if (O.ended && !ended) phase = 'ended';
-      else if (O.faults.size || O.failed || O.access) phase = O.faults.size ? 'failed' : O.access ? 'denied' : 'failed';
+      else if (failure()) phase = O.faults.size ? 'failed' : O.access ? 'denied' : 'failed';
       const parts = [PHASE[phase]];
       if (path.path === 'xa' && speed && !ended) parts.push(speed.kind === 'source' ? speedName(speed) : 'Manual ' + speed.fps + ' fps' + (meta.timing.verified ? '' : ' · Timing Unverified'));
       if (total) parts.push('Frame ' + (shown === null ? '-' : shown + 1) + ' / ' + total);
+      if (O.failed.has(selected)) parts.push('Failed Frame ' + (selected + 1));
       if (navigable && coverage) { const c = coverage.snapshot(); parts.push(c.all ? 'All Shown' : 'Shown ' + c.shown + ' / ' + c.total); }
       if (late > 0 && playing) parts.push(speed.kind === 'source' ? 'Slower Than Source' : 'Slower Than Set Speed');
       status.textContent = parts.join(' · ');
-      note.textContent = memoryWait && !ended ? MEMORY_WAIT : message;
+      note.textContent = memoryWait && !ended ? MEMORY_WAIT : failure() ? failureMessage() : message;
       const open = !ended && navigable;
       const playable = open && path.path === 'xa';
-      play.disabled = !playable || playing || stateOf(O) !== 'Active';
+      play.disabled = !playable || playing || stateOf(O, selected) !== 'Active';
       pause.disabled = !playing;
       first.disabled = last.disabled = !open;
       directionSelect.disabled = loopBox.disabled = speedSelect.disabled = rangeStart.disabled = rangeEnd.disabled = apply.disabled = !playable;
@@ -268,8 +281,11 @@
     function gate(kind, t = {}) {
       const tokens = !!(t.slot || t.draw);
       if (disposed || ended || O.ended) return tokens ? 'drain' : 'reject';
+      const generation = G;
       const now = opening();
+      if (disposed || ended || O.ended || generation !== G) return tokens ? 'drain' : 'reject';
       if (now !== 'current' || physical.owner !== V) { lose(now); return tokens ? 'drain' : 'reject'; }
+      if (t.G !== undefined && t.G !== G) return tokens ? 'drain' : 'reject';
       if (t.P !== undefined && t.P !== P) return tokens ? 'drain' : 'reject';
       if (t.slot) {
         if (!slots.has(t.slot) || t.slot.phase === 'released') return 'reject';
@@ -285,7 +301,8 @@
       const recovering = r && r === O.recovery && r === recovery && !r.invalid && r.G === G &&
         r.epoch === O.denyEpoch && (!t.slot || t.slot.index === r.index) && (!t.draw || t.draw.slot.index === r.index);
       if (O.access || O.faults.size || !physical.safe && physical.covered) return tokens ? 'drain' : 'reject';
-      if (O.failed && !recovering) return tokens ? 'drain' : 'reject';
+      const index = t.draw?.slot.index ?? t.slot?.index ?? t.index ?? selected;
+      if (O.failed.has(index) && !recovering && !['seek', 'range', 'settings', 'rate'].includes(kind)) return tokens ? 'drain' : 'reject';
       return 'current';
     }
     function syncEffect(fn) {
@@ -296,9 +313,11 @@
         return ack === undefined || ack === true || ack?.ok === true && ack.exposed !== false;
       } catch (_) { return false; }
     }
-    function coverPhysical(on) {
+    function coverPhysical(on, ticket) {
       if (physical.owner !== V) return false;
       if (!syncEffect(typeof viewport.cover === 'function' ? () => viewport.cover(on) : null)) return false;
+      if (physical.owner !== V) return false;
+      if (!on && gate('publish', ticket) !== 'current') { hide(); return false; }
       physical.covered = on; physical.safe = on; return true;
     }
     // Hide what the physical viewport shows: the cover, or when the cover cannot be set, clearing the front so no
@@ -306,9 +325,11 @@
     function hide() {
       if (coverPhysical(true)) return true;
       if (physical.owner !== V) return false;
-      physicalFailure(recovery?.index ?? target?.index ?? shown ?? 0);
+      physicalFailure(recovery?.index ?? target?.index ?? selected);
+      if (physical.owner !== V) return false;
       physical.safe = false;
       if (!syncEffect(typeof viewport.clear === 'function' ? () => viewport.clear() : null)) return false;
+      if (physical.owner !== V) return false;
       physical.safe = true;
       const front = ledger.front(physical);
       if (front) { ledger.detach(front); releaseSurface(front); }
@@ -384,6 +405,17 @@
       return slot;
     }
     function clearTimer(slot) { if (slot.timer !== null) { time.clearTimeout(slot.timer); slot.timer = null; } }
+    function armLoad(slot, res) {
+      if (slot !== target || slot.timer !== null || res?.state !== 'loading' || gate('supply', { slot }) !== 'current') return;
+      slot.timer = time.setTimeout(() => {
+        slot.timer = null;
+        if (target !== slot || slot.phase === 'decoded' || slot.phase === 'drawing' || slot.phase === 'released') return;
+        if (gate('supply', { slot }) !== 'current') return;
+        const ticket = { G };
+        releaseSlot(slot);
+        if (gate('bring', ticket) === 'current') fail(slot.index, { kind: 'timeout' });
+      }, Math.max(0, LOAD_TIMEOUT_MS - (res.time.now() - res.started)));
+    }
     // A slot that has not started drawing lets go of its lease; a load nobody wants any more is asked to abort, and its
     // memory stays counted until the source's own promise settles.
     function releaseSlot(slot) {
@@ -429,7 +461,11 @@
       if (broker.queue.length && broker.queue[0] !== self) { if (needed) wait('queued'); return false; }
       const ask = () => ledger.admit({ lease: slot.lease, scope, key: slot.key, payload: meta.payloadBytes });
       let r = ask();
-      if (!r.ok && (r.reason === 'bytes' || r.reason === 'prepared')) { relieve(slot, needed); r = ask(); }
+      if (!r.ok && (r.reason === 'bytes' || r.reason === 'prepared')) {
+        relieve(slot, needed);
+        if (gate('admit', { slot }) !== 'current') return false;
+        r = ask();
+      }
       if (!r.ok) {
         if (r.reason === 'too-large' || r.reason === 'invalid') { if (needed) fail(slot.index, { kind: 'refused' }); return false; }
         if (needed) wait(r.reason);
@@ -444,10 +480,15 @@
           Q: { opening: O, index: slot.index, startAuthEpoch: O.denyEpoch, denials: new Set() } };
         broker.resources.set(r.resource, res);
         queueMicrotask(() => callLoad(res));
-      } else emit({ type: 'requested', index: slot.index, shared: true });
+      }
       res.consumers.add(slot);
+      if (r.joined) {
+        emit({ type: 'requested', index: slot.index, shared: true });
+        if (gate('supply', { slot }) !== 'current') { releaseSlot(slot); return false; }
+      }
       if (res.state === 'decoded') { const s = slot; queueMicrotask(() => supplied(s, res)); }
       else slot.phase = res.state === 'loading' ? 'loading' : 'requested';
+      armLoad(slot, res);
       return true;
     }
     function plan() {
@@ -510,7 +551,11 @@
       const res = broker.resources.get(slot.res);
       const ask = () => ledger.beginDraw({ resource: slot.res, lease: slot.lease, owner: physical, surface: meta.surfaceBytes });
       let d = ask();
-      if (!d.ok && d.reason === 'bytes') { relieve(slot, true); d = ask(); }
+      if (!d.ok && d.reason === 'bytes') {
+        relieve(slot, true);
+        if (gate('draw', { slot }) !== 'current') return;
+        d = ask();
+      }
       if (!d.ok || !res) { wait('bytes'); return; }
       const J = { draw: d.draw, surface: Object.freeze({}), slot, res, G, void: false, ended: false, abort: new AbortController(), timer: null };
       broker.handles.set(J.draw, J.surface);
@@ -518,6 +563,7 @@
       J.timer = time.setTimeout(() => expire(J), LOAD_TIMEOUT_MS);
       let pending;
       const frameId = { sop: meta.sop, frame: slot.index + 1, index: slot.index, opening: opened.sequence };
+      if (gate('draw', { draw: J }) !== 'current') { endDraw(J); return; }
       try { pending = Promise.resolve(viewport.prepare(res.image, frameId, { draw: J.draw, surface: J.surface, signal: J.abort.signal })); }
       catch (error) { pending = Promise.reject(error); }
       pending.then(receipt => drawn(J, receipt, null), error => drawn(J, null, error || Error('render failed')));
@@ -552,38 +598,55 @@
     function publish(J) {
       const slot = J.slot, index = slot.index;
       const frameId = { sop: meta.sop, frame: index + 1, index, opening: opened.sequence };
+      if (gate('publish', { draw: J }) !== 'current') { endDraw(J); return; }
       if (!syncEffect(() => viewport.publish({ draw: J.draw, surface: J.surface, ...frameId }))) {
         // A throwing adapter may already have installed the surface. Pin both possible fronts until a real detach.
         physical.uncertain.add(J);
         if (drawing === J) drawing = null;
-        fail(index, { kind: 'render' }); hide(); paint(); return;
+        if (gate('publish', { draw: J }) === 'current') fail(index, { kind: 'render' });
+        if (physical.owner === V) hide(); paint(); return;
       }
-      J.ended = true; time.clearTimeout(J.timer);
+      if (gate('publish', { draw: J }) !== 'current') {
+        physical.uncertain.add(J);
+        if (drawing === J) drawing = null;
+        if (physical.owner === V) hide();
+        return;
+      }
+      time.clearTimeout(J.timer);
       if (drawing === J) drawing = null;
       const { previous } = ledger.publish(J.draw, physical);
-      if (previous) releaseSurface(previous);
-      for (const uncertain of physical.uncertain) endDraw(uncertain);
-      physical.uncertain.clear();
+      // A detached old front is still counted until after the new display commits. A release callback can end O.
+      const retiring = [...physical.uncertain];
+      if (previous) physical.retired.add(previous);
       if (physical.slot && physical.slot !== slot) { physical.slot.phase = 'released'; slots.delete(physical.slot); }
       slot.phase = 'shown'; physical.slot = slot;
       if (target === slot) target = null;
       ledger.leave(slot.lease, slot.res);  // the front pins the frame now; the interest is over
       broker.resources.get(slot.res)?.consumers.delete(slot);
-      if (physical.covered && !coverPhysical(false)) {
+      if (gate('publish', { draw: J }) !== 'current') { if (physical.owner === V) hide(); return; }
+      if (physical.covered && !coverPhysical(false, { draw: J })) {
+        if (gate('publish', { draw: J }) !== 'current') { if (physical.owner === V) hide(); return; }
         physicalFailure(index);
         physical.safe = false; block(); return;
       }
-      commitDisplay(J);
+      if (gate('publish', { draw: J }) !== 'current') { if (physical.owner === V) hide(); return; }
+      if (!commitDisplay(J)) return;
+      J.ended = true;
+      // These detached references can drain even if the commit observer ended/replaced the opening.
+      for (const token of [...physical.retired]) { physical.retired.delete(token); releaseSurface(token); }
+      for (const uncertain of retiring) { physical.uncertain.delete(uncertain); endDraw(uncertain); }
     }
     function commitDisplay(J) {
       const slot = J.slot, index = slot.index;
+      const now = time.now();
+      if (gate('publish', { draw: J }) !== 'current') { if (physical.owner === V) hide(); return false; }
       shownSlot = slot; shown = index;
       fact = Object.freeze({ commit: ++O.commits, opening: opened, frame: index + 1, epoch: O.denyEpoch });
       if (slot.recovery === O.recovery && slot.recovery) {
         const resume = slot.recovery.resume;
-        O.failed = null; O.recovery = null; recovery = null; playing = resume;
+        O.failed.delete(index); O.recovery = null; recovery = null; playing = resume;
+        for (const c of [...O.members]) c.refresh();
       }
-      const now = time.now();
       if (pendingDue === null) lastDue = now;
       else if (now - pendingDue > Math.max(15, pendingWait / 2)) { late = 10; lastDue = now; }
       else { if (late > 0) late--; lastDue = pendingDue; }
@@ -592,8 +655,9 @@
       phase = playing ? 'playing' : path.path === 'xa' ? 'paused' : 'frames';
       paint();
       emit({ type: 'displayed', index, commit: fact.commit, authorizationEpoch: fact.epoch });
-      afterShown();
+      if (gate('publish', { draw: J }) === 'current') afterShown();
       schedulePump();
+      return true;
     }
     // A render that does not confirm in time loses its right to the screen for good; only Retry makes a new one.
     function expire(J) {
@@ -605,13 +669,22 @@
 
     // ---- intents ----
     function newIntent() {
+      // A new navigation owns its own play intent; it cannot inherit a pending Retry's resume ticket.
+      if (recovery) {
+        recovery.invalid = true;
+        if (O.recovery === recovery && !O.authorization) O.recovery = null;
+        if (O.authorization !== recovery) recovery = null;
+      }
       G = ++seq; P = ++seq;
       cancelSleep(); dequeue(self); memoryWait = false; skip.clear(); pendingDue = null;
+      const intent = { G };
       for (const slot of [...slots]) {
         if (slot.phase === 'drawing') abortDraw(slot.J);
         else if (slot.phase !== 'shown') releaseSlot(slot);
       }
+      if (gate('notice', intent) !== 'current') return false;
       target = null; drawing = null;
+      return true;
     }
     function withdraw(pick) {
       for (const slot of [...slots]) {
@@ -621,20 +694,17 @@
       }
     }
     function bring(index) {
-      if (gate('bring', { recovery }) !== 'current') return;
+      if (gate('seek', { index }) !== 'current') return;
+      selected = index;
+      if (gate('bring', { recovery, index }) !== 'current') {
+        playing = false; cancelSleep(); hide(); paint(); return;
+      }
       const slot = slotFor(index, 'target');
       target = slot;
       if (slot.phase === 'decoded') queueMicrotask(() => startDraw(slot));
       else if (slot.phase === 'requested' && !slot.res) admitSlot(slot, true);
-      if (slot.phase !== 'decoded' && slot.phase !== 'drawing' && slot.timer === null && !ended) {
-        slot.timer = time.setTimeout(() => {
-          slot.timer = null;
-          if (target !== slot || slot.phase === 'decoded' || slot.phase === 'drawing' || slot.phase === 'released') return;
-          if (gate('supply', { slot }) !== 'current') return;
-          releaseSlot(slot);
-          fail(index, { kind: 'timeout' });
-        }, LOAD_TIMEOUT_MS);
-      }
+      if (gate('supply', { slot }) !== 'current') return;
+      if (slot.res) armLoad(slot, broker.resources.get(slot.res));
       if (slot.phase !== 'decoded' && slot.phase !== 'drawing' && !failure() && phase !== 'unavailable') phase = playing ? 'buffering' : 'loading';
       fill(); paint();
     }
@@ -644,23 +714,36 @@
       // A timed-out render is recovered by one verified frame; playback does not restart by itself (R07).
       const resume = playing && !error?.timedOut;
       P = ++seq; playing = false; cancelSleep(); dequeue(self); memoryWait = false;
+      const notice = { G, P };
+      if (kind !== 'refused') {
+        O.failed.set(index, { index, kind, resume });
+        selected = index;
+        if (recovery) { recovery.invalid = true; if (O.recovery === recovery) O.recovery = null; recovery = null; }
+      }
       // Refused access ends every pending load and publish of this opening, a draw already under way included.
       if (kind === 'denied') { G = ++seq; withdraw(() => true); }
       else withdraw(slot => slot.kind === 'ahead' || slot.phase !== 'drawing');
+      if (gate('notice', notice) !== 'current') return false;
       const at = shown === null ? '-' : shown + 1, frameNumber = index + 1;
       if (kind === 'refused') { phase = 'unavailable'; message = REASON['frame-too-large']; paint(); return false; }
-      O.failed = { index, kind, resume };
-      for (const c of [...O.members]) if (c !== self) c.park();
-      if (recovery) { recovery.invalid = true; if (O.recovery === recovery) O.recovery = null; recovery = null; }
       phase = kind === 'denied' ? 'denied' : 'failed';
       if (kind === 'denied') {
         message = '프레임 ' + frameNumber + '을 볼 권한을 확인하지 못해 영상을 가렸습니다. Retry로 다시 확인하세요.';
         hide();
       } else message = (kind === 'timeout' ? '프레임 ' + frameNumber + ' 준비 시간이 초과되었습니다. ' : '프레임 ' + frameNumber + '을 불러오거나 표시하지 못했습니다. ') +
         '마지막으로 표시한 프레임 ' + at + '에서 멈췄습니다. Retry로 같은 위치부터 다시 시도하세요.';
+      hide();
+      if (gate('notice', notice) !== 'current') return false;
+      for (const c of [...O.members]) if (c !== self) c.refresh();
       emit({ type: 'failed', index, kind, needed: true });
       paint();
       return false;
+    }
+    function failureMessage() {
+      if (O.faults.size) return '화면 가림을 설정하지 못해 표시를 멈췄습니다. Retry로 다시 시도하세요.';
+      if (O.access) return '영상을 볼 권한을 확인하지 못했습니다. Retry로 다시 확인하세요.';
+      const f = O.failed.get(selected);
+      return f ? '프레임 ' + (f.index + 1) + '을 불러오거나 표시하지 못했습니다. Retry로 이 프레임을 다시 시도하거나 다른 프레임으로 이동하세요.' : '';
     }
     function sleep(ms, fn) {
       cancelSleep();
@@ -698,7 +781,7 @@
     }
     function start() {
       if (gate('play') !== 'current' || path.path !== 'xa' || playing || doc.hidden) return;
-      newIntent();
+      if (!newIntent()) return;
       playing = true; message = ''; late = 0;
       let at = shown;
       if (!Number.isSafeInteger(at) || at < range.first || at > range.last) at = null;
@@ -710,11 +793,11 @@
     }
     function seek(index) {
       if (!navigable || ended || disposed || !Number.isSafeInteger(index) || index < 0 || index >= total) return;
-      if (gate('seek') !== 'current') { paint(); return; }
+      if (gate('seek', { index }) !== 'current') { paint(); return; }
       message = '';
-      newIntent(); playing = false;
+      if (!newIntent()) return false; playing = false;
       // Seeking to the frame already on screen ends older draws but invents no new display.
-      if (index === shown && shownSlot) { phase = path.path === 'xa' ? 'paused' : 'frames'; paint(); return; }
+      if (index === shown && shownSlot && !physical.covered) { selected = index; phase = path.path === 'xa' ? 'paused' : 'frames'; paint(); return; }
       phase = 'loading';
       bring(index);
     }
@@ -724,15 +807,16 @@
       const index = O.access?.index ?? f.index;
       if (physicalFault || access) {
         if (!hide()) { paint(); return; }
+        if (gate('retry') !== 'current') return;
         O.faults.delete(physical);
         if (O.faults.size) { paint(); return; }
       }
-      newIntent();
+      if (!newIntent()) return;
       playing = false;
       // The failure remains visible through supply and render. This ticket permits only the failed target.
       recovery = { owner: V, index, resume: !access && !physicalFault && !!f.resume, G, epoch: O.denyEpoch, invalid: false };
       O.recovery = recovery;
-      O.failed = { index, kind: f.kind, resume: recovery.resume };
+      selected = index;
       if (access) authorize(recovery); else bring(index);
       paint();
     }
@@ -774,7 +858,7 @@
       if (!Number.isSafeInteger(a) || !Number.isSafeInteger(b) || a < 1 || a >= b || b > total) {
         message = '재생 범위는 1~' + total + ' 안에서 시작이 끝보다 작아야 합니다.'; paint(); return false;
       }
-      newIntent(); playing = false;
+      if (!newIntent()) return false; playing = false;
       range = { first: a - 1, last: b - 1 }; coverage = Model.createCoverage(range.first, range.last);
       direction = mode === 'reverse' ? -1 : 1;
       phase = 'paused'; message = '범위를 적용했습니다. Play로 시작하세요.'; paint();
@@ -791,7 +875,7 @@
     const changed = () => {
       if (gate('settings') !== 'current') { paint(); return; }
       mode = directionSelect.value; loop = loopBox.checked; direction = mode === 'reverse' ? -1 : 1;
-      newIntent(); playing = false;
+      if (!newIntent()) return false; playing = false;
       if (phase !== 'ready') phase = 'paused';
       message = '설정을 바꿨습니다. Play로 다시 시작하세요.'; paint();
     };
@@ -815,21 +899,17 @@
     O.members.add(self);
     // The claim needs the cover; when the cover fails the previous front is cleared instead, and the opening waits in
     // a failed state for Retry rather than loading over whatever might still be on screen.
-    const hidden = hide();
+    hide();
     broker.controllers.add(self);
     previousOwner?.lose();
     if (meta.ok && !binding.ok) {
       // Nothing of a source that is not this opening's object is fetched or drawn.
       phase = 'unavailable'; message = REASON[binding.reason] || REASON.opening; ended = true;
     } else if (!O.ended && navigable) {
-      let at = null;
-      try { at = viewport.current?.(); } catch (_) {}
-      if (!Number.isSafeInteger(at) || at < 0 || at >= total) at = 0;
-      if (gate('mount') === 'current' && physical.covered) { newIntent(); bring(at); }
+      if (gate('mount') === 'current' && physical.covered) { if (newIntent()) bring(initialTarget); }
       else {
         phase = 'failed';
-        message = hidden ? '화면 가림을 설정하지 못해 이전 영상을 지우고 멈췄습니다. Retry로 다시 시도하세요.'
-          : '이전 영상을 가리지 못해 이 영상을 표시하지 않았습니다. Retry로 다시 시도하세요.';
+        message = failureMessage();
       }
     }
     paint();
@@ -843,7 +923,7 @@
         speed: speed ? { ...speed } : null, timing: meta.ok ? { source: meta.timing.source, verified: meta.timing.verified } : null,
         coverage: coverage ? coverage.snapshot() : null, slower: late > 0 && playing, owner: physical.owner === V, covered: !!physical.covered,
         failure: failure() ? { frame: failure().index + 1, kind: failure().kind } : null, subtractionRecommended: !!meta.subtractionRecommended,
-        openingState: stateOf(O), denyEpoch: O.denyEpoch, recovering: !!O.recovery, commit: fact?.commit ?? null,
+        openingState: stateOf(O, selected), failedFrames: [...O.failed.keys()].map(i => i + 1), denyEpoch: O.denyEpoch, recovering: !!O.recovery, commit: fact?.commit ?? null,
         exposure: physical.safe ? 'hidden' : physical.covered || O.faults.has(physical) ? 'unknown' : 'exposed' }),
       dispose() {
         if (disposed) return;
@@ -860,13 +940,15 @@
           if ((front || physical.uncertain.size) && typeof viewport.clear === 'function') {
             // A front the renderer could not clear stays counted: it is still memory in use, not a release.
             const cleared = syncEffect(() => viewport.clear());
-            if (cleared) {
+            if (cleared && physical.owner === V) {
               if (front) { ledger.detach(front); releaseSurface(front); }
               for (const J of physical.uncertain) endDraw(J);
               physical.uncertain.clear();
+              for (const token of physical.retired) releaseSurface(token);
+              physical.retired.clear();
             }
           }
-          physical.owner = null; physical.controller = null;
+          if (physical.owner === V) { physical.owner = null; physical.controller = null; }
         }
         disposed = true; broker.controllers.delete(self);
         unbind();

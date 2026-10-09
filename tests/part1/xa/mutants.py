@@ -12,7 +12,7 @@ The clean copies must first pass the same runs through the same overrides, or no
   --check-cases   compare tests/part1/xa/cases.json with the cases the runners actually collect, both ways, and with
                   the mutant table below; a declared case that does not run or a running case that is not declared fails
   --anchors-only  check that every anchor occurs exactly once and every token is asserted in its named case, then stop
-  (default)       --check-cases, anchors, clean baseline, then every mutant (X1..X54)
+  (default)       --check-cases, anchors, clean baseline, then every mutant (X1..X63)
 
 The anchors are source text on purpose: this runner rewrites a copy of the code, so it has to find the code. They bind
 the mutation tool only; no test case asserts source text (AGENTS 1-B). stdlib only; browsers and node run as children.
@@ -174,8 +174,8 @@ MUTANTS = [
      'new': "    const reclaimable = h => !!h && h.state === 'decoded' && !h.leases.size && !h.draws.size;"},
     {'id': 'X30', 'file': 'viewer', 'suite': 'dom', 'case': 'R01-DOM', 'where': 'late_seek', 'token': 'XA-X30:',
      'title': 'I09: a privately prepared surface is published without the current-draw check',
-     'old': "      if (verdict === 'current' && !error && receiptOk(receipt, J)) { publish(J); return; }",
-     'new': "      if (verdict !== 'reject' && !error && receiptOk(receipt, J)) { publish(J); return; }"},
+     'old': "        if (t.draw.G !== G) return 'drain';",
+     'new': "        if (t.draw.G !== G) return 'current';"},
     {'id': 'X31', 'file': 'viewer', 'suite': 'dom', 'case': 'B03-DOM', 'token': 'XA-X31:',
      'title': 'I10: a render receipt is accepted when only the frame number matches',
      'old': '    const receiptOk = (r, J) => !!r && r.draw === J.draw && r.surface === J.surface && r.sop === meta.sop &&\n      r.frame === J.slot.index + 1 && r.opening === opened.sequence;',
@@ -191,7 +191,7 @@ MUTANTS = [
     {'id': 'X34', 'file': 'viewer', 'suite': 'dom', 'case': 'XA06-DOM-RENDER-TIMEOUT', 'token': 'XA-X34:',
      'title': 'I13: a timed-out render that is still the latest recovers on its own when it answers',
      'old': "        if (t.draw.void) return 'drain';",
-     'new': "        if (t.draw.void && t.draw.G === G) { O.failed = null; return 'current'; }"},
+     'new': "        if (t.draw.void && t.draw.G === G) { O.failed.clear(); return 'current'; }"},
     {'id': 'X35', 'file': 'model', 'suite': 'model', 'case': 'B05-MODEL', 'token': 'XA-X35:',
      'title': 'I14: cleanup finds the current resource by its frame key instead of the exact token',
      'old': '    const exact = t => (t && resources.get(t)) || null;',
@@ -228,7 +228,7 @@ MUTANTS = [
     {'id': 'X43', 'file': 'viewer', 'suite': 'dom', 'case': 'C03-DOM', 'token': 'XA-X43:',
      'title': 'I17 direction clears the authoritative blocking reasons',
      'old': "      if (gate('settings') !== 'current') { paint(); return; }",
-     'new': '      O.access = null; O.failed = null; O.faults.clear();'},
+     'new': '      O.access = null; O.failed.clear(); O.faults.clear();'},
     {'id': 'X44', 'file': 'viewer', 'suite': 'dom', 'case': 'C01-DOM', 'token': 'XA-X44:',
      'title': 'I18 access outcome requires a remaining current consumer',
      'old': '    const O = Q.opening;',
@@ -251,12 +251,12 @@ MUTANTS = [
      'new': "      if (O.access && ['seek', 'bring', 'admit', 'supply', 'draw', 'publish'].includes(kind)) return 'current';\n      if (['notice', 'pause', 'retry', 'end'].includes(kind)) return 'current';"},
     {'id': 'X49', 'file': 'viewer', 'suite': 'dom', 'case': 'C11-DOM', 'token': 'XA-X49:',
      'title': 'I23 Retry clears Failed before the recovery target has committed',
-     'old': "      O.failed = { index, kind: f.kind, resume: recovery.resume };",
-     'new': '      O.failed = null; // Retry prematurely clears the latch'},
+     'old': '      O.recovery = recovery;',
+     'new': '      O.recovery = recovery; O.failed.delete(index); // premature failure removal'},
     {'id': 'X50', 'file': 'viewer', 'suite': 'dom', 'case': 'C04-DOM', 'token': 'XA-X50:',
      'title': 'I24 display facts commit before uncover succeeds',
-     'old': '      if (physical.covered && !coverPhysical(false)) {',
-     'new': '      commitDisplay(J);\n      if (physical.covered && !coverPhysical(false)) {'},
+     'old': '      if (physical.covered && !coverPhysical(false, { draw: J })) {',
+     'new': '      commitDisplay(J);\n      if (physical.covered && !coverPhysical(false, { draw: J })) {'},
     {'id': 'X51', 'file': 'viewer', 'suite': 'dom', 'case': 'C04-DOM', 'token': 'XA-X51:',
      'title': 'I25 uncover failure releases the still attached hidden front',
      'old': '        physical.safe = false; block(); return;',
@@ -271,8 +271,18 @@ MUTANTS = [
      'new': "      emit({ type: 'displayed', index });\n      shownSlot = slot; shown = index;"},
     {'id': 'X54', 'file': 'viewer', 'suite': 'dom', 'case': 'C16-DOM', 'token': 'XA-X54:',
      'title': 'I28 normal seek requires an unnecessary Retry',
-     'old': "      if (gate('seek') !== 'current') { paint(); return; }",
-     'new': "      if (gate('seek') === 'current') { fail(index, { kind: 'failed' }); return; }"},
+     'old': "      if (gate('seek', { index }) !== 'current') { paint(); return; }",
+     'new': "      if (gate('seek', { index }) === 'current') { fail(index, { kind: 'failed' }); return; }"},
+    # D783: one fault injection per amended invariant I29-I36.
+    {'id': 'X55', 'file': 'viewer', 'suite': 'dom', 'case': 'CE1-DOM', 'token': 'XA-X55:', 'title': 'I29 a publish transaction carries its decision across adapter re-entry', 'edits': [('      const tokens = !!(t.slot || t.draw);', "      if (kind === 'publish' && t.draw?.cachedDecision) return 'current';\n      const tokens = !!(t.slot || t.draw);"), ('      if (!syncEffect(() => viewport.publish({ draw: J.draw, surface: J.surface, ...frameId }))) {', '      J.cachedDecision = true;\n      if (!syncEffect(() => viewport.publish({ draw: J.draw, surface: J.surface, ...frameId }))) {')]},
+    {'id': 'X56', 'file': 'viewer', 'suite': 'dom', 'case': 'CE9-DOM', 'token': 'XA-X56:', 'title': 'I30 budget waiting consumes the actual load deadline', 'old': '      target = slot;', 'new': "      target = slot; slot.timer = time.setTimeout(() => { if (target === slot && !slot.res) fail(index, { kind: 'timeout' }); }, LOAD_TIMEOUT_MS);"},
+    {'id': 'X57', 'file': 'viewer', 'suite': 'dom', 'case': 'R6-RECOVERY-DOM', 'token': 'XA-X57:', 'title': 'I31 recovery leaves other members with the stale error and controls', 'old': '        for (const c of [...O.members]) c.refresh();', 'new': '        self.refresh();'},
+    {'id': 'X58', 'file': 'viewer', 'suite': 'dom', 'case': 'CE7-DOM', 'token': 'XA-X58:', 'title': 'I32 access mount refusal is mislabeled as a cover failure', 'old': "      if (O.access) return '영상을 볼 권한을 확인하지 못했습니다. Retry로 다시 확인하세요.';", 'new': "      if (O.access) return '화면 가림을 설정하지 못했습니다. Retry로 다시 시도하세요.';"},
+    {'id': 'X59', 'file': 'viewer', 'suite': 'dom', 'case': 'CE6-DOM', 'token': 'XA-X59:', 'title': 'I33 access proof erases independent frame failures', 'old': '          O.auth = attempt; O.access = null;', 'new': '          O.auth = attempt; O.access = null; O.failed.clear();'},
+    {'id': 'X60', 'file': 'viewer', 'suite': 'dom', 'case': 'CE8-DOM', 'token': 'XA-X60:', 'title': 'I34 a failed first claim forgets the intended frame', 'old': '      physicalFailure(recovery?.index ?? target?.index ?? selected);', 'new': '      physicalFailure(recovery?.index ?? target?.index ?? shown ?? 0);'},
+    {'id': 'X61', 'file': 'viewer', 'suite': 'dom', 'case': 'R6-FRAMES-DOM', 'token': 'XA-X61:', 'title': 'I35 one failed frame blocks every other target in the opening', 'old': "      if (O.failed.has(index) && !recovering && !['seek', 'range', 'settings', 'rate'].includes(kind)) return tokens ? 'drain' : 'reject';", 'new': "      if (O.failed.size && !recovering) return tokens ? 'drain' : 'reject';"},
+    {'id': 'X62', 'file': 'viewer', 'suite': 'dom', 'case': 'M01-M16-DOM', 'token': 'XA-X62:', 'title': 'I36 healthy navigation silently refuses Last Frame', 'old': "      if (gate('seek', { index }) !== 'current') { paint(); return; }", 'new': "      if (index === total - 1 || gate('seek', { index }) !== 'current') { paint(); return; }"},
+    {'id': 'X63', 'file': 'viewer', 'suite': 'dom', 'case': 'R6-FRAMES-DOM', 'token': 'XA-X63:', 'title': 'I35/I02 a new seek inherits the pending Retry resume intent', 'old': "      // A new navigation owns its own play intent; it cannot inherit a pending Retry's resume ticket.\n      if (recovery) {\n        recovery.invalid = true;\n        if (O.recovery === recovery && !O.authorization) O.recovery = null;\n        if (O.authorization !== recovery) recovery = null;\n      }\n", 'new': '      // new intent retains the old Retry\n'},
 ]
 
 

@@ -743,7 +743,7 @@ class XaPlaybackDomTest(unittest.TestCase):
                     self.hold(0, 'R', 5)
                     self.seek(0, 5)
                     self.tick(1)
-                    expected = ([A, 1, 1], 1, [1], False)
+                    expected = (None, 1, [1], True)
                     frame = 5
                 elif variant == 'during-playback':
                     self.open(frames=30, frameTime=100, sop=A)
@@ -751,7 +751,7 @@ class XaPlaybackDomTest(unittest.TestCase):
                     self.control('Play').click()
                     self.tick(105)
                     self.assertIn(2, self.look()['prepares'])
-                    expected = ([A, 1, 1], 1, [1], False)
+                    expected = (None, 1, [1], True)
                     frame = 2
                 else:
                     self.hold(0, 'R', 1)
@@ -1029,14 +1029,14 @@ class XaPlaybackDomTest(unittest.TestCase):
                 self.tick(20001)
                 expect(self.status()).to_contain_text('Failed')
                 seen = self.look()
-                self.assert_unseen(seen, 5, [A, 1, 1], 'a timeout shows nothing')
+                self.assertEqual((seen['V'], seen['C'], seen['Lb'], seen['E']), (None, True, 1, [1]), 'timeout covers without altering display facts')
                 self.assertGreaterEqual(seen['Q']['loading'], 1, 'the timed-out work still holds its permit')
                 self.honest(seen, 'after the timeout')
                 if variant == 'retry-after-arrival':
                     self.complete(0, phase, 5)
                     self.tick(3)
                     seen = self.look()
-                    self.assert_unseen(seen, 5, [A, 1, 1], 'a late arrival after a timeout is not success')
+                    self.assertEqual((seen['V'], seen['C'], seen['Lb'], seen['E']), (None, True, 1, [1]), 'late timeout arrival is not success')
                     self.assertEqual(seen['state']['failure'], {'frame': 5, 'kind': 'timeout'})
                     self.control('Retry').click()
                     self.tick(3)
@@ -1373,7 +1373,7 @@ class XaPlaybackDomTest(unittest.TestCase):
                         self.assertTrue(seen['C'], 'refused access hides at once')
                         expect(self.status()).to_contain_text('Access Denied')
                     else:
-                        self.assertEqual((seen['V'], seen['C'], seen['Lb'], seen['E']), ([A, 1, 1], False, 1, [1]), 'a codec failure keeps what was shown')
+                        self.assertEqual((seen['V'], seen['C'], seen['Lb'], seen['E']), (None, True, 1, [1]), 'D783: a failed frame covers the preserved last display')
                         expect(self.status()).to_contain_text('Failed')
                     self.js('healFrame(0, 4)')
                     retry_frame = 5
@@ -1399,7 +1399,7 @@ class XaPlaybackDomTest(unittest.TestCase):
                 self.complete(0, 'R', 5, how=how)
                 self.tick(3)
                 seen = self.look()
-                self.assertEqual((seen['V'], seen['Lb'], seen['E'], seen['C']), ([A, 1, 1], 1, [1], False),
+                self.assertEqual((seen['V'], seen['Lb'], seen['E'], seen['C']), (None, 1, [1], True),
                                  'XA-X38: only the surface issued to this draw is published')
                 self.assertEqual((seen['published'], seen['state']['coverage']['shown']), ([1], 1), 'XA-X38: only the surface issued to this draw is published')
                 self.assertNotIn(k(A, 1), seen['surfaceReleases'], 'XA-X39: a refused receipt never gives back the front it names')
@@ -1669,7 +1669,7 @@ class XaPlaybackDomTest(unittest.TestCase):
         self.js('failFrame(0,4,0)'); self.seek(0,5); self.tick(2)
         self.js('healFrame(0,4)'); self.hold(0,'R',5)
         self.js('views[0].controller.retry()'); self.tick(2); self.save('recovering-owner')
-        self.open(sop=A)
+        self.open(sop=A, current=4)
         self.js('views[0].controller.retry()'); self.tick(3)
         self.assertEqual((self.look()['V'], self.state()['openingState']), ([A,5,1], 'Active'), 'a revoked old owner recovery cannot lock Retry on a remount of the same O')
         self.complete(0,'R',5); self.tick(2)
@@ -1776,10 +1776,15 @@ class XaPlaybackDomTest(unittest.TestCase):
                     elif state == 'F':
                         self.js('failFrame(0,4,0)'); self.seek(0, 5); self.tick(2)
                     elif state == 'E': self.js('endSession(0)')
+                    if state == 'Active' and row in (1, 2, 3, 4, 5):
+                        self.seek(0, 5); self.tick(3)
+                    if state == 'Active' and row == 7:
+                        self.js('views[0].controller.play()')
+                        self.assertTrue(self.state()['playing'])
                     before = self.look()
                     if row == 14:
                         self.save('same'); self.open(sop=A, frames=20, revision='new-source')
-                        if state != 'Active':
+                        if state not in ('Active', 'F'):
                             self.assertEqual(self.state()['openingState'], before['state']['openingState'])
                             self.assertEqual(self.look()['calls'], [], 'same O remount, even another revision, does not clear its latch')
                         self.save('replacement'); self.open(sop=B, sequence=2)
@@ -1789,12 +1794,29 @@ class XaPlaybackDomTest(unittest.TestCase):
                         self.js('() => {const c=views[0].controller, panel=document.querySelector("#host0 [role=group]"), input=n=>[...panel.querySelectorAll("[aria-label]")].find(e=>e.getAttribute("aria-label")===n); ' + commands[row] + ';}')
                         self.tick(3)
                         after = self.look()
-                        if state != 'Active' and row < 14:
+                        if state not in ('Active', 'F') and row < 14:
                             self.assertEqual(after['state']['openingState'], before['state']['openingState'])
                             self.assertEqual((after['calls'], after['prepares'], after['published'], after['E'], after['Lb']),
                                              (before['calls'] + ([4] if row == 12 and state == 'F' else []),
                                               before['prepares'], before['published'], before['E'], before['Lb']))
                             self.assertEqual(after['auth'], 1 if row == 12 and state == 'AB' else 0)
+                        if state == 'Active' and row <= 12:
+                            expected_frame = {1: 1, 2: 1, 3: 20, 4: 6, 5: 4, 6: 1, 7: 1, 8: 1, 9: 1, 10: 1, 11: 2, 12: 1}[row]
+                            expected_playing = row in (6, 8, 9, 10, 11)
+                            self.assertEqual((after['Lb'], after['V'], after['state']['playing']),
+                                             (expected_frame, [A, expected_frame, 1], expected_playing),
+                                             'XA-X62: M01-M12 Active must perform the requested normal effect')
+                            if expected_playing:
+                                self.tick(103 if row == 9 else 23)
+                                progressed = {6: 2, 8: 20, 9: 2, 10: 2, 11: 3}[row]
+                                self.assertEqual((self.look()['Lb'], self.state()['playing']), (progressed, True),
+                                                 'Active Play advances in the selected direction, speed and range')
+                        if state == 'F' and row < 14:
+                            self.assertIn(5, self.state()['failedFrames'], 'navigation/settings cannot erase a failed frame')
+                            if row in (1, 2, 3, 4, 5, 11):
+                                self.assertIsNotNone(after['V'], 'D783: other frames remain navigable')
+                            else:
+                                self.assertTrue(after['C'], 'the failed target stays covered until its own recovery')
                         if row in (15, 16): self.assertEqual(self.state()['openingState'], 'Ended')
                     after = self.look()
                     self.honest(after, 'matrix effect boundary')
@@ -1804,6 +1826,349 @@ class XaPlaybackDomTest(unittest.TestCase):
                     if state == 'CF': self.device_fault(False)
                     if row == 12 and state == 'AB': self.auth('fail')
                     self.drained()
+
+
+    # D783: independent Opus probes promoted to maintained behaviour regressions.
+    def report(self, name, observation):
+        print(json.dumps({'probe': name, 'observation': observation}, ensure_ascii=False), flush=True)
+
+    def snap(self, slot=0, name=None):
+        s = self.look(slot, name)
+        out = {k: s[k] for k in ('V', 'C', 'Lb', 'E', 'calls', 'published', 'auth')}
+        out['state'] = {k: s['state'].get(k) for k in ('openingState', 'phase', 'playing', 'frame', 'failure', 'covered', 'exposure', 'recovering', 'denyEpoch', 'failedFrames')}
+        out['status'] = s['status']
+        out['note'] = self.js('slot => { const n=[...document.querySelectorAll("#host"+slot+" [aria-live]")].at(-1); return n ? n.textContent : null; }', slot)
+        return out
+
+    def events(self, slot=0):
+        return self.js('slot => events.filter(e => e.slot === slot).map(e => [e.type, e.frame, e.sequence, e.kind || e.reason || null])', slot)
+
+    def test_astra_r4_failed_barrier_settings_bypass_adapted(self):
+        self.open(sop=A, frames=10, sequence=1)
+        self.save('old')
+        self.js('''() => { const p=physical(0); p.cover=()=>{throw Error('cover unavailable')}; p.clear=()=>{throw Error('clear unavailable')}; return true; }''')
+        self.open(sop=B, study='2.25.21', sequence=2, frames=10, hold='all')
+        self.assertEqual(self.look()['calls'], [])
+        self.label('Playback Direction').select_option('reverse')
+        play_disabled = self.js('() => [...document.querySelectorAll("#host0 [role=group]")].at(-1).querySelector("button").disabled')
+        self.js('''() => { const b=[...document.querySelectorAll("#host0 [role=group]")].at(-1).querySelector("button");
+          b.dispatchEvent(new Event("click")); views[0].controller.play(); views[0].controller.first(); return true; }''')
+        self.tick(3)
+        s = self.snap()
+        self.report('astra_r4_failed_barrier_settings_bypass_adapted', {'play_button_disabled': play_disabled, 'seen': s})
+        self.assertEqual((s['calls'], s['published'], s['state']['openingState']), ([], [], 'CoverFailed'),
+                         'D742/EXA-R4-03: settings must not erase an unresolved opening barrier')
+
+    def test_ce1_session_end_inside_publish_never_uncovers_or_counts(self):
+        self.open(0, frames=10, sop=A)
+        self.js('''() => { const p = physical(0), publish = p.publish;
+          p.publish = r => { publish(r); if (r.frame === 5) endSession(0); }; return true; }''')
+        self.seek(0, 5)
+        self.tick(3)
+        s = self.snap()
+        self.report('ce1_session_end_inside_publish', {'seen': s, 'events': self.events()})
+        self.assertEqual(s['state']['openingState'], 'Ended')
+        self.assertTrue(s['C'], 'XA-X55: Ended opening never uncovers after synchronous publish re-entry')
+        self.assertNotIn(5, s['E'], 'no displayed fact after the opening ended')
+        self.assertNotEqual(s['Lb'], 5, 'no frame label after the opening ended')
+
+    def test_ce2_denial_inside_publish_keeps_the_cover(self):
+        self.open(0, frames=20, sop=A, lateAbort=True, holdLoad=[9])
+        self.seek(0, 10)
+        self.tick(2)
+        self.js('''() => { const p = physical(0), publish = p.publish;
+          p.publish = r => { publish(r); if (r.frame === 5) rejectTransport(0, 9, 403); }; return true; }''')
+        self.seek(0, 5)
+        self.tick(3)
+        s = self.snap()
+        self.report('ce2_denial_inside_publish', {'seen': s, 'events': self.events()})
+        self.assertEqual(s['state']['openingState'], 'AccessBlocked')
+        self.assertTrue(s['C'], 'AccessBlocked: the viewport stays covered; no uncover after the latch')
+        self.assertNotIn(5, s['E'], 'no displayed fact under AccessBlocked')
+        self.js('endAborts(0)')
+        self.drained()
+
+    def test_ce10_session_end_inside_previous_front_release_never_uncovers(self):
+        self.open(0, frames=10, sop=A)
+        self.js('''() => { const p = physical(0), release = p.release; window.armed = false;
+          p.release = h => { release(h); if (window.armed) { window.armed = false; endSession(0); } }; return true; }''')
+        self.js('window.armed = true')
+        self.seek(0, 5)
+        self.tick(3)
+        s = self.snap()
+        self.report('ce10_session_end_inside_release', {'seen': s, 'events': self.events()})
+        self.assertEqual(s['state']['openingState'], 'Ended')
+        self.assertTrue(s['C'], 'XA-X55: Ended opening never uncovers after synchronous publish re-entry')
+        self.assertEqual(s['E'], [1, 5], 'the valid commit precedes old-front release; release re-entry adds no facts')
+
+    def test_ce11_dispose_then_same_key_remount_is_terminal(self):
+        self.open(0, frames=10, sop=A)
+        self.js('views[0].controller.dispose()')
+        self.tick(2)
+        self.open(0, frames=10, sop=A)
+        s = self.snap()
+        self.report('ce11_dispose_then_same_key_remount', s)
+        self.assertEqual((s['state']['openingState'], s['calls'], s['V']), ('Ended', [], None),
+                         'by D757 design the same O cannot be revived; the R2 host must issue a new opening sequence')
+        self.drained()
+
+    def test_ce3_session_end_with_render_pending_then_late_success(self):
+        self.open(0, frames=10, sop=A)
+        self.hold(0, 'R', 5)
+        self.seek(0, 5)
+        self.tick(2)
+        self.js('endSession(0)')
+        self.tick(1)
+        self.complete(0, 'R', 5)
+        self.tick(3)
+        s = self.snap()
+        self.report('ce3_session_end_render_pending', {'seen': s, 'events': self.events()})
+        self.assertEqual((s['state']['openingState'], s['C'], s['published'], s['E']), ('Ended', True, [1], [1]))
+        self.drained()
+
+    def test_ce4_cover_failure_then_opening_change_a_b_a(self):
+        self.open(0, frames=10, sop=A, sequence=1)
+        self.hold(0, 'D', 5)
+        self.seek(0, 5)
+        self.tick(2)
+        self.save('A1')
+        self.device_fault()
+        self.open(0, frames=10, sop=B, study='2.25.21', sequence=2)
+        self.save('B2')
+        b2 = self.snap()
+        self.open(0, frames=10, sop=A, sequence=3)
+        self.save('A3')
+        a3 = self.snap()
+        self.complete(0, 'D', 5, name='A1')
+        self.tick(3)
+        self.label('Playback Direction').select_option('reverse')
+        self.js('views[0].controller.play(); views[0].controller.first(); views[0].controller.seek(4)')
+        self.tick(5)
+        blocked = self.snap()
+        a1 = self.snap(0, 'A1')
+        self.js('views[0].controller.retry()')
+        self.tick(3)
+        still = self.snap()
+        self.device_fault(False)
+        self.js('views[0].controller.retry()')
+        self.tick(3)
+        healed = self.snap()
+        self.report('ce4_cover_failure_a_b_a', {'B2_on_claim': b2, 'A3_on_claim': a3, 'A3_after_commands': blocked,
+                                                'A1_after_late_decode': a1, 'A3_retry_device_still_broken': still,
+                                                'A3_after_device_recovered_retry': healed, 'events': self.events()})
+        self.assertEqual((b2['calls'], b2['published'], b2['state']['openingState']), ([], [], 'CoverFailed'))
+        self.assertEqual((a3['calls'], a3['published'], a3['state']['openingState']), ([], [], 'CoverFailed'))
+        self.assertEqual(a3['state']['exposure'], 'unknown', 'both hides failed: the residual A1 pixels are not reported hidden')
+        self.assertEqual((blocked['calls'], blocked['published'], blocked['Lb'], blocked['E']), ([], [], None, []))
+        self.assertEqual(a1['published'], [1], 'the late A1 decode never publishes on the reused viewport')
+        self.assertEqual((still['calls'], still['state']['openingState']), ([], 'CoverFailed'))
+        self.assertEqual((healed['V'], healed['Lb'], healed['E'], healed['state']['openingState'], healed['state']['playing']),
+                         ([A, 1, 3], 1, [1], 'Active', False),
+                         'after a real safe receipt Retry shows A3 at its own recovery target and stays paused')
+        self.drained()
+
+    def test_ce5a_retry_while_the_old_request_succeeds_late(self):
+        self.open(0, frames=20, sop=A)
+        self.hold(0, 'D', 5)
+        self.seek(0, 5)
+        self.tick(20001)
+        failed = self.snap()
+        self.js('views[0].controller.retry()')
+        self.tick(2)
+        waiting = self.snap()
+        self.complete(0, 'D', 5)
+        self.tick(5)
+        s = self.snap()
+        self.report('ce5a_retry_vs_late_old_success', {'failed': failed, 'retry_waiting': waiting, 'after': s, 'events': self.events()})
+        self.assertEqual(failed['state']['openingState'], 'Failed')
+        self.assertEqual((waiting['published'], waiting['E'], waiting['state']['openingState']), ([1], [1], 'Failed'),
+                         'the Retry does not borrow the old incarnation before it settles')
+        self.assertEqual((s['V'], s['E'], s['state']['openingState'], s['state']['playing']), ([A, 5, 1], [1, 5], 'Active', False))
+        self.assertEqual(s['calls'].count(4), 2, 'the recovery uses its own new load, the old one only drains')
+        self.drained()
+
+    def test_ce5b_pending_retry_then_a_b_a_and_late_success(self):
+        self.open(0, frames=20, sop=A, sequence=1)
+        self.js('failFrame(0, 4, 0)')
+        self.seek(0, 5)
+        self.tick(2)
+        self.js('healFrame(0, 4)')
+        self.hold(0, 'D', 5)
+        self.js('views[0].controller.retry()')
+        self.tick(2)
+        self.save('A1')
+        self.open(0, frames=20, sop=B, study='2.25.21', sequence=2)
+        self.save('B2')
+        self.open(0, frames=20, sop=A, sequence=3)
+        self.complete(0, 'D', 5, name='A1')
+        self.tick(3)
+        s = self.snap()
+        a1 = self.snap(0, 'A1')
+        self.report('ce5b_pending_retry_a_b_a', {'A3': s, 'A1': a1, 'events': self.events()})
+        self.assertEqual((s['V'], s['Lb'], s['E'], s['state']['openingState']), ([A, 1, 3], 1, [1], 'Active'))
+        self.assertEqual(a1['published'], [1], 'the old recovery never publishes after its opening lost the viewport')
+        self.drained()
+
+    def test_ce6_access_recovery_with_a_pending_failed_reason(self):
+        self.open(0, frames=20, sop=A, lateAbort=True, holdLoad=[9])
+        self.seek(0, 10)
+        self.tick(2)
+        self.js('failFrame(0, 4, 0)')
+        self.seek(0, 5)
+        self.tick(3)
+        failed = self.snap()
+        self.js('rejectTransport(0, 9, 403)')
+        self.tick(1)
+        blocked = self.snap()
+        self.js('views[0].controller.retry()')
+        self.tick(5)
+        s = self.snap()
+        self.report('ce6_access_and_failed_reasons', {'failed': failed, 'blocked': blocked, 'after_proof': s})
+        self.js('healFrame(0, 4); endAborts(0)')
+        self.assertEqual(failed['state']['failure'], {'frame': 5, 'kind': 'failed'})
+        self.assertEqual(blocked['state']['openingState'], 'AccessBlocked')
+        # D757 s2.1: lower-priority reasons are not deleted; Failed leaves only through its own recovery commit (frame 5).
+        self.assertEqual(s['state']['failedFrames'], [5], 'XA-X59: access recovery preserves the independent frame-5 failure')
+        self.seek(0, 5); self.tick(2)
+        self.assertEqual((self.state()['openingState'], self.look()['C']), ('Failed', True))
+        self.drained()
+
+    def test_ce7_second_viewport_of_a_blocked_opening_names_the_real_reason(self):
+        self.open(0, frames=20, sop=A)
+        self.js('rejectTransport(0, 0, 403)')
+        self.tick(1)
+        self.open(1, frames=20, sop=A)
+        s = self.snap(1)
+        self.report('ce7_second_viewport_blocked_reason', s)
+        self.assertEqual((s['calls'], s['state']['openingState'], s['C']), ([], 'AccessBlocked', True))
+        self.assertIn('권한', s['note'], 'XA-X58: a refused mount explains the access reason')
+        self.assertNotIn('가림을 설정하지 못해', s['note'])
+        self.drained()
+
+    def test_ce8_initial_cover_failure_recovers_the_opening_first_target(self):
+        self.open(0, frames=20, sop=A, current=5)
+        control = self.snap()
+        self.fresh()
+        self.device_fault()
+        self.open(0, frames=20, sop=A, current=5)
+        cf = self.snap()
+        self.device_fault(False)
+        self.js('views[0].controller.retry()')
+        self.tick(3)
+        s = self.snap()
+        self.report('ce8_initial_cover_failure_target', {'control_no_fault': control, 'cover_failed': cf, 'after_retry': s})
+        self.assertEqual(control['V'], [A, 6, 1])
+        self.assertEqual(cf['state']['openingState'], 'CoverFailed')
+        self.assertEqual(s['V'], [A, 6, 1], 'XA-X60: Retry recovers the intended first target (frame 6)')
+        self.drained()
+
+    def test_ce9_budget_wait_is_not_an_error_state(self):
+        self.open(0, frames=6, sop='2.25.81', rows=4096, cols=2048)
+        self.open(1, frames=6, sop='2.25.82', study='2.25.21', rows=4096, cols=2048)
+        start = (self.snap(0), self.snap(1))
+        self.seek(0, 2)
+        self.tick(2)
+        waiting = self.snap(0)
+        self.tick(20001)
+        later = self.snap(0)
+        self.seek(0, 3)
+        self.tick(2)
+        seek_after = self.snap(0)
+        self.js('views[1].controller.dispose()')
+        self.tick(5)
+        freed = self.snap(0)
+        self.report('ce9_budget_wait', {'start': start, 'waiting': waiting, 'after_20s': later, 'seek3_after_20s': seek_after,
+                                        'after_other_viewport_closed': freed})
+        self.assertEqual(waiting['state']['openingState'], 'Active')
+        self.assertEqual(later['state']['openingState'], 'Active', 'XA-X56: waiting for budget never consumes a load timeout')
+        self.assertEqual(freed['Lb'], 3, 'when the other viewport closes, the waiting seek continues without Retry (C16)')
+        self.drained()
+        # A Retry also waits for its old decoder to drain; this busy wait does not consume the new load deadline.
+        self.fresh(); self.open(sop=A); self.hold(0, 'D', 5); self.seek(0, 5); self.tick(20001)
+        self.js('views[0].controller.retry()'); self.tick(20001)
+        self.assertEqual(self.look()['calls'].count(4), 1)
+        self.assertTrue(self.state()['recovering'])
+        self.complete(0, 'D', 5); self.tick(4)
+        self.assertEqual((self.look()['V'], self.look()['calls'].count(4)), ([A,5,1], 2))
+        self.drained()
+
+    def test_r6_recovery_clears_messages_and_refreshes_every_member(self):
+        for reason in ('access', 'frame'):
+            with self.subTest(reason=reason):
+                self.fresh(); self.open(sop=A); self.open(1, sop=A)
+                if reason == 'access': self.deny()
+                else:
+                    self.js('failFrame(0,4,0)'); self.seek(0,5); self.tick(3)
+                    self.seek(1,5); self.tick(2)
+                    self.js('healFrame(0,4)')
+                self.js('views[0].controller.retry()'); self.tick(4)
+                for slot in (0, 1):
+                    self.assertEqual(self.state(slot)['openingState'], 'Active')
+                    self.assertEqual(self.snap(slot)['note'], '', 'XA-X57: a recovery commit refreshes every member and clears its resolved error')
+                    self.assertFalse(self.control('Play', slot).is_disabled())
+                    self.assertTrue(self.control('Retry', slot).is_hidden())
+                self.drained()
+
+    def test_r6_failed_frames_have_independent_retry_and_do_not_block_navigation(self):
+        self.open(sop=A, frames=20)
+        self.js('failFrame(0,4,0); failFrame(0,8,0)')
+        self.seek(0,5); self.tick(3)
+        self.assertEqual((self.look()['C'], self.state()['failure']), (True, {'frame': 5, 'kind': 'failed'}))
+        self.assertIn('Failed Frame 5', self.look()['status'])
+        self.seek(0,6); self.tick(3)
+        self.assertEqual(self.look()['V'], [A,6,1], 'XA-X61: a failed frame never blocks another frame')
+        self.js('views[0].controller.play()'); self.tick(23)
+        self.assertEqual((self.look()['Lb'], self.state()['playing']), (7, True))
+        self.js('views[0].controller.pause()'); self.seek(0,9); self.tick(3)
+        self.assertEqual(self.state()['failedFrames'], [5,9])
+        self.seek(0,5); self.tick(3)
+        self.assertEqual((self.look()['C'], self.state()['failure']['frame']), (True,5))
+        self.assertNotIn(5, self.look()['E']); self.assertNotIn(9, self.look()['E'])
+        self.js('healFrame(0,4); views[0].controller.retry()'); self.tick(3)
+        self.assertEqual((self.look()['V'], self.state()['failedFrames']), ([A,5,1], [9]))
+        self.seek(0,9); self.tick(2)
+        self.assertTrue(self.look()['C']); self.assertIn('Failed Frame 9', self.look()['status'])
+        self.js('healFrame(0,8); views[0].controller.retry()'); self.tick(3)
+        self.assertEqual((self.look()['V'], self.state()['failedFrames']), ([A,9,1], []))
+        self.drained()
+        self.fresh(); self.open(sop=A, frames=10, holdLoad=[0])
+        self.js('failFrame(0,0,0)'); self.complete(0, 'L', 1); self.tick(3)
+        self.assertEqual((self.look()['Lb'], self.look()['E'], self.look()['C']), (None, [], True))
+        self.seek(0, 2); self.tick(3); self.js('views[0].controller.play()'); self.tick(23)
+        self.assertEqual((self.look()['Lb'], self.state()['playing'], self.state()['failedFrames']), (3, True, [1]))
+        self.drained()
+
+        # A pending Retry from a playback failure must not resume a later, explicitly paused seek.
+        self.fresh(); self.open(sop=A)
+        self.js('failFrame(0,4,0); views[0].controller.play()'); self.tick(103)
+        self.js('healFrame(0,4)'); self.hold(0, 'R', 5)
+        self.js('views[0].controller.retry()'); self.tick(3)
+        self.seek(0,6); self.tick(3); self.complete(0, 'R', 5); self.tick(3)
+        self.assertEqual((self.look()['V'], self.state()['playing']), ([A,6,1], False),
+                         'XA-X63: a seek discards the old Retry resume ticket')
+        self.assertIn(5, self.state()['failedFrames'])
+        self.seek(0,5); self.tick(2); self.js('views[0].controller.retry()'); self.tick(3)
+        self.assertEqual((self.look()['V'], self.state()['failedFrames']), ([A,5,1], []))
+        self.drained()
+
+    def test_r6_cover_and_requested_callbacks_revalidate_before_next_effect(self):
+        self.hold(0, 'R', 1); self.open(sop=A)
+        self.js("() => {const p=physical(0), cover=p.cover; let armed=true; p.cover=on=>{cover(on); if(!on&&armed){armed=false;endSession(0);}};}")
+        self.complete(0, 'R', 1); self.tick(3)
+        self.assertEqual((self.look()['C'], self.look()['E'], self.look()['Lb']), (True, [], None))
+        self.honest(self.look(), 're-entry inside uncover pins the installed front'); self.drained()
+        self.fresh()
+        self.js("() => {window.onEvent=(slot,e)=>{if(e.type==='requested'){window.onEvent=null;endSession(slot);}};}")
+        self.open(sop=A); self.tick(3)
+        self.assertEqual((self.look()['C'], self.look()['E'], self.look()['published']), (True, [], []))
+        self.drained()
+        self.fresh(); self.open(sop=A, frames=6, rows=4096, cols=2048)
+        self.seek(0, 2); self.tick(3)
+        self.js("() => {const src=views[0].source, release=src.release; let armed=true; src.release=(...args)=>{const ack=release(...args); if(armed){armed=false;endSession(0);} return ack;};}")
+        self.seek(0, 3); self.tick(3)
+        self.assertEqual((self.look()['prepares'], self.look()['E'], self.look()['C']), ([1,2], [1,2], True),
+                         'source release during budget relief revalidates before another prepare')
+        self.drained()
 
 
 if __name__ == '__main__':
