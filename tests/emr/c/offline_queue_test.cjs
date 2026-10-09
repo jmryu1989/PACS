@@ -159,6 +159,8 @@ function memoryStore({ putFault = null, receiptOverride = null, reserveFault = f
   };
 }
 const states = list => Object.fromEntries(list.map(x => [x.eventId, x.state]));
+/** An expected-success send: a rejection is an assertion failure of the case, not an unrelated error. */
+const sent = async (queue, t, session) => { let value; await assert.doesNotReject(async () => { value = await queue.send(t, session); }); return value; };
 
 test('C-Q01 an approval is pending only after the durable write of the exact entry; a failed, partial or mismatched write is not shown as saved', async () => {
   const srv = server(); claim(srv, 'r1', plus(T0, -H));
@@ -179,6 +181,14 @@ test('C-Q01 an approval is pending only after the durable write of the exact ent
   assert.equal((await q2.enqueue(e)).status, 'not-saved');
   assert.deepEqual(await q2.recover(), []);
   await assert.rejects(Q.createOfflineQueue({ store: memoryStore(), owner: ownerOf('r2') }).enqueue(e), { code: 'OwnerMismatch' });
+  // The runtime's answer counts only for exactly the requested payload with a durable receipt of that entry.
+  const request = { payload: JSON.parse(Buffer.from(e.envelope.payload, 'base64url').toString('utf8')), access: e.access, owner: e.owner, baseVersionId: e.baseVersionId };
+  const durable = { eventId: e.eventId, entryId: 'row-1', digest: NP.queueEntryDigest(e), durableAt: T0 };
+  assert.equal(NP.parseSignApprovalResult({ protocol: NP.NATIVE_PROTOCOL, entry: e, durable }, request).digest, durable.digest);
+  assert.throws(() => NP.parseSignApprovalResult({ protocol: NP.NATIVE_PROTOCOL, entry: e, durable: { ...durable, digest: 'ab'.repeat(32) } }, request), { code: 'DurableReceiptRequired' });
+  const other = entry(srv, 'r1', { signedAt: T0, grant, findings: 'SYN 다른 서명 본문' });
+  assert.throws(() => NP.parseSignApprovalResult({ protocol: NP.NATIVE_PROTOCOL, entry: other, durable: { ...durable, eventId: other.eventId, digest: NP.queueEntryDigest(other) } }, request),
+    { code: 'NativeSignedOtherContent' });
   await assert.rejects(queue.enqueue({ ...e, access: { ...e.access, occurredAt: plus(T0, 1) } }), { code: 'QueueEntryInconsistent' });
 });
 
@@ -195,7 +205,7 @@ test('C-Q02 after a restart intact entries resume in order; a damaged entry is d
   const recovered = states(await restarted.recover());
   assert.deepEqual([recovered[entries[0].eventId], recovered[entries[1].eventId], recovered[entries[2].eventId]], ['pending', 'corrupt', 'held']);
   const t = transport(srv);
-  await restarted.send(t, sessionOf('r1'));
+  await sent(restarted, t, sessionOf('r1'));
   assert.deepEqual(srv.submitted, [entries[0].eventId]);
   assert(store.rows.has(entries[1].eventId) && store.rows.has(entries[2].eventId));
   const leaking = memoryStore({ leakOther: [{ entry: entry(srv, 'r2', { signedAt: T0, grant: grantFor(srv, 'r2', plus(T0, -30 * MIN)) }), digest: 'ab'.repeat(32), state: 'pending' }] });
@@ -208,16 +218,16 @@ test('C-Q03 a resend after a lost answer carries the original eventId and is app
   const e = entry(srv, 'r1', { signedAt: T0, grant, eventId: 'event-q03' });
   const store = memoryStore(), queue = Q.createOfflineQueue({ store, owner: ownerOf('r1') });
   await queue.enqueue(e);
-  assert.deepEqual(states(await queue.send(transport(srv, { lose: 1 }), sessionOf('r1'))), { 'event-q03': 'sent-unknown' });
+  assert.deepEqual(states(await sent(queue, transport(srv, { lose: 1 }), sessionOf('r1'))), { 'event-q03': 'sent-unknown' });
   assert.deepEqual(srv.commits, ['event-q03']);
-  assert.deepEqual(states(await queue.send(transport(srv), sessionOf('r1'))), { 'event-q03': 'committed' });
+  assert.deepEqual(states(await sent(queue, transport(srv), sessionOf('r1'))), { 'event-q03': 'committed' });
   assert.deepEqual(srv.submitted, ['event-q03', 'event-q03']);
   assert.deepEqual(srv.commits, ['event-q03']);
   assert.equal(srv.facts.firstApprovedAt, T0);
   const impostor = entry(srv, 'r1', { signedAt: plus(T0, MIN), grant, eventId: 'event-q03', findings: 'SYN 다른 본문', previous: null, claimGeneration: 1 });
   const store2 = memoryStore(), q2 = Q.createOfflineQueue({ store: store2, owner: ownerOf('r1') });
   await q2.enqueue(impostor);
-  assert.deepEqual(states(await q2.send(transport(srv), sessionOf('r1'))), { 'event-q03': 'refused' });
+  assert.deepEqual(states(await sent(q2, transport(srv), sessionOf('r1'))), { 'event-q03': 'refused' });
   assert.deepEqual(srv.commits, ['event-q03']);
   assert(store2.rows.has('event-q03'));
 });
@@ -237,7 +247,7 @@ test('C-Q04 a conflicting approval stays as conflict with its original kept, and
   const before = JSON.stringify(srv.facts);
   const store = memoryStore(), queue = Q.createOfflineQueue({ store, owner: ownerOf('r1') });
   await queue.enqueue(approval); await queue.enqueue(amend);
-  const result = states(await queue.send(transport(srv), sessionOf('r1')));
+  const result = states(await sent(queue, transport(srv), sessionOf('r1')));
   assert.equal(result[approval.eventId], 'conflict');
   assert.equal(result[amend.eventId], 'held');
   assert.deepEqual(srv.submitted, [approval.eventId]);
@@ -253,15 +263,15 @@ test('C-Q05 a disconnection keeps the queue pending, a real session end pauses i
   const store = memoryStore(), queue = Q.createOfflineQueue({ store, owner: ownerOf('r1') });
   await queue.enqueue(e);
   for (const fail of [{ kind: 'network' }, { kind: 'timeout' }, { kind: 'http', status: 503 }, { kind: 'http', status: 401 }])
-    assert.equal(states(await queue.send(transport(srv, { fail }), sessionOf('r1')))[e.eventId], 'sent-unknown', JSON.stringify(fail));
-  assert.equal(states(await queue.send(transport(srv, { ended: true }), sessionOf('r1')))[e.eventId], 'awaiting-reauth');
+    assert.equal(states(await sent(queue, transport(srv, { fail }), sessionOf('r1')))[e.eventId], 'sent-unknown', JSON.stringify(fail));
+  assert.equal(states(await sent(queue, transport(srv, { ended: true }), sessionOf('r1')))[e.eventId], 'awaiting-reauth');
   assert(store.rows.has(e.eventId));
-  assert.equal(states(await queue.send(transport(srv), sessionOf('r1', 'ended')))[e.eventId], 'awaiting-reauth');
+  assert.equal(states(await sent(queue, transport(srv), sessionOf('r1', 'ended')))[e.eventId], 'awaiting-reauth');
   const submittedBefore = srv.submitted.length;
   await assert.rejects(queue.send(transport(srv), sessionOf('r2')), { code: 'OwnerMismatch' });
   assert.equal(srv.submitted.length, submittedBefore);
   assert.deepEqual(await Q.createOfflineQueue({ store, owner: ownerOf('r2') }).recover(), []);
-  assert.equal(states(await queue.send(transport(srv), sessionOf('r1')))[e.eventId], 'committed');
+  assert.equal(states(await sent(queue, transport(srv), sessionOf('r1')))[e.eventId], 'committed');
   assert.equal(srv.facts.firstApprovedAt, T0);
 });
 
@@ -272,7 +282,7 @@ test('C-Q06 events outside the grant window or with unverifiable time are not ap
   const rebooted = entry(srv, 'r1', { signedAt: T0, grant, sequence: 2, signBoot: 'boot-2' });
   const store = memoryStore(), queue = Q.createOfflineQueue({ store, owner: ownerOf('r1') });
   await queue.enqueue(late); await queue.enqueue(rebooted);
-  const result = states(await queue.send(transport(srv), sessionOf('r1')));
+  const result = states(await sent(queue, transport(srv), sessionOf('r1')));
   assert.equal(result[late.eventId], 'refused');
   assert.equal(result[rebooted.eventId], 'held');
   assert.deepEqual(srv.commits, []);
@@ -283,7 +293,7 @@ test('C-Q06 events outside the grant window or with unverifiable time are not ap
   const ok = entry(srv, 'r1', { signedAt: T0, grant, sequence: 3 });
   const q2 = Q.createOfflineQueue({ store: memoryStore(), owner: ownerOf('r1') });
   await q2.enqueue(ok);
-  assert.equal(states(await q2.send(transport(srv), sessionOf('r1')))[ok.eventId], 'committed');
+  assert.equal(states(await sent(q2, transport(srv), sessionOf('r1')))[ok.eventId], 'committed');
 });
 
 test('C-Q07 queue space J is reserved before images load, and no eviction, logout, grant expiry or draft end deletes an unsent signed original; only a verified retention receipt does', async () => {
@@ -305,7 +315,7 @@ test('C-Q07 queue space J is reserved before images load, and no eviction, logou
   await queue.enqueue(e);
   for (const cause of ['cache-evicted', 'logout', 'grant-expired', 'draft-purpose-ended']) assert.deepEqual(await queue.evict(cause), [e.eventId]);
   assert.equal(await queue.acknowledgeRetention(e.eventId, { eventId: e.eventId }, { verify: () => true }), false);
-  await queue.send(transport(srv), sessionOf('r1'));
+  await sent(queue, transport(srv), sessionOf('r1'));
   assert.equal(await queue.acknowledgeRetention(e.eventId, { eventId: e.eventId }, { verify: () => false }), false);
   assert(store.rows.has(e.eventId));
   assert.equal(store.calls.filter(c => c.startsWith('remove:')).length, 0);
@@ -323,19 +333,19 @@ test('C-Q08 at every commit, receipt and answer cut the queue keeps a state it c
   const restarted = Q.createOfflineQueue({ store, owner: ownerOf('r1') });
   assert.deepEqual(states(await restarted.recover()), { [e.eventId]: 'pending' });
   // Cut 2: the server could not commit: nothing applied, the entry stays to be sent again.
-  assert.equal(states(await restarted.send(transport(srv, { commitFault: 'LedgerUnavailable' }), sessionOf('r1')))[e.eventId], 'pending');
+  assert.equal(states(await sent(restarted, transport(srv, { commitFault: 'LedgerUnavailable' }), sessionOf('r1')))[e.eventId], 'pending');
   assert.deepEqual(srv.commits, []);
   // Cut 3: committed on the server, answer lost, device restarted before recording anything.
-  assert.equal(states(await restarted.send(transport(srv, { lose: 1 }), sessionOf('r1')))[e.eventId], 'sent-unknown');
+  assert.equal(states(await sent(restarted, transport(srv, { lose: 1 }), sessionOf('r1')))[e.eventId], 'sent-unknown');
   store.rows.get(e.eventId).state = 'pending';
   const again = Q.createOfflineQueue({ store, owner: ownerOf('r1') });
-  assert.equal(states(await again.send(transport(srv), sessionOf('r1')))[e.eventId], 'committed');
+  assert.equal(states(await sent(again, transport(srv), sessionOf('r1')))[e.eventId], 'committed');
   assert.deepEqual(srv.commits, [e.eventId]);
   assert.equal(srv.facts.firstApprovedAt, T0);
   // Cut 4: a write that never became durable is never sent.
   const lost = entry(srv, 'r1', { signedAt: plus(T0, MIN), grant, sequence: 2 });
   const s2 = memoryStore({ putFault: 'before-write' });
   assert.equal((await Q.createOfflineQueue({ store: s2, owner: ownerOf('r1') }).enqueue(lost)).status, 'not-saved');
-  assert.deepEqual(await Q.createOfflineQueue({ store: s2, owner: ownerOf('r1') }).send(transport(srv), sessionOf('r1')), []);
+  assert.deepEqual(await sent(Q.createOfflineQueue({ store: s2, owner: ownerOf('r1') }), transport(srv), sessionOf('r1')), []);
   assert.equal(srv.submitted.includes(lost.eventId), false);
 });

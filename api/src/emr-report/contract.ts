@@ -4,7 +4,7 @@ import type { ResolvedRecord } from '../emr-contract/classification';
 import type { RetentionGraph, RetentionRecord } from '../emr-contract/lawful-defaults';
 import type { LifecycleOutcome, ReportFacts, RetentionOnlyEvent } from '../emr-contract/report-lifecycle';
 import type { VersionReference } from '../emr-contract/signature';
-import { choice, freeze, integer, object, refuse, sha256, string, utc } from '../emr-contract/validation';
+import { choice, freeze, integer, object, sha256, string, utc } from '../emr-contract/validation';
 import type { OfflineAccessObservation } from '../emr-signature/native-port';
 import type { SignatureEnvelopeV2 } from '../emr-signature/contract';
 
@@ -132,5 +132,3 @@ export interface ReportEventResponse {
   currentVersion: VersionReference | null;
   times: ReportTimes;
 }
-
-export function refuseUnless(condition: boolean, code: string): void { if (!condition) refuse(code); }

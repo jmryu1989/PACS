@@ -449,6 +449,14 @@ test('C-C05 registered device keys verify their signatures and two-operator reco
   assert.throws(() => K.parseKeyRegistration(reg, { acceptedEvidence: ['tpm-nonexportable'] }), { code: 'KeyEvidenceRefused' });
   assert.throws(() => V.verifySignatureV2(early, { ...ports, keyPolicy: { acceptedEvidence: ['tpm-nonexportable'] } }, { osUserId: 'os-r3' }), { code: 'KeyEvidenceRefused' });
   assert.throws(() => K.requireKeyPolicy(undefined), { code: 'KeyPolicyRequired' });
+  // The native runtime only answers the product origin and the key's own OS user, and has no raw signing operation.
+  const call = (operation, over = {}) => ({ operation, context: { protocol: NP.NATIVE_PROTOCOL, origin: 'https://pacs.example.test', documentId: 'doc-1', osUserId: 'os-r3', ...over } });
+  const allowedCall = { origins: ['https://pacs.example.test'], osUserId: 'os-r3' };
+  assert.equal(allowed(() => NP.requireNativeCall(call('sign-approval'), allowedCall)).operation, 'sign-approval');
+  assert.throws(() => NP.requireNativeCall(call('sign-approval', { origin: 'https://elsewhere.example.test' }), allowedCall), { code: 'NativeBindingRefused' });
+  assert.throws(() => NP.requireNativeCall(call('sign-approval', { osUserId: 'os-r1' }), allowedCall), { code: 'NativeBindingRefused' });
+  assert.throws(() => NP.requireNativeCall(call('sign-bytes'), allowedCall), { code: 'NativeOperationRefused' });
+  assert.throws(() => NP.requireNativeCall(call('sign-approval', { protocol: 'kin-native/0' }), allowedCall), { code: 'NativeProtocolRefused' });
   // Revocation takes effect at its time: earlier signatures stay valid, later ones are not accepted.
   const revokedAt = plus(T0, 3 * H);
   keyRows.set('kid-r3', allowed(() => K.revokeKey(reg, { at: revokedAt, reason: 'SYN device lost', actorId: 'security-1' }, keyPolicy)));
@@ -516,6 +524,8 @@ test('C-C06 finite grants over complete reserved manifests permit offline work; 
   assert.throws(() => G.issueOfflineGrant(request, actor('r1'), keyRows.get('kid-r1'), offlinePolicy, { ready: false, manifestDigest: 'ab'.repeat(32) }), { code: 'OfflineNotReady' });
   assert.throws(() => G.issueOfflineGrant(request, actor('r1'), keyRows.get('kid-r2'), offlinePolicy, G.offlineReadiness(manifest(), offlinePolicy, reserved)), { code: 'GrantKeyRefused' });
   assert.throws(() => G.issueOfflineGrant(request, actor('r1', { roles: ['clinician'] }), keyRows.get('kid-r1'), offlinePolicy, G.offlineReadiness(manifest(), offlinePolicy, reserved)), { code: 'GrantAuthorityRefused' });
+  assert.throws(() => G.issueOfflineGrant({ ...request, studies: [...request.studies, { studyId: 'not-loaded', recordId: 'report-x', claimGeneration: 0, role: 'comparison' }] },
+    actor('r1'), keyRows.get('kid-r1'), offlinePolicy, G.offlineReadiness(manifest(), offlinePolicy, reserved)), { code: 'GrantStudyRefused' });
   assert.throws(() => G.parseGrant({ ...grant, expiresAt: plus(grant.expiresAt, H) }), { code: 'GrantLengthRefused' });
   const issued = { grant, digest: G.grantDigest(grant) };
   const inside = verify(offlineEntry(srv, 'r1', { signedAt: T0, grant: issued }).envelope, 'os-r1');
@@ -591,7 +601,7 @@ test('C-C07 an equivalent retry with the same eventId returns the original recei
 
 test('C-C08 bodies are served after the durable receipt to the actual target and version, display is a separate event, each write act is ledgered once; list/409 leaks, authorisation-as-read and invented offline addresses are refused', async () => {
   const srv = await approvedUnit(T0, 'r1');
-  const ctx = (over = {}) => ({ actor: actor('c1', { roles: ['clinician'], canSign: false, canCancel: false }), study: study(), facts: srv.facts, archive: null, resume: null,
+  const ctx = (over = {}) => ({ actor: actor('c1', { roles: ['clinician'], canSign: false, canCancel: false }), roleAllowed: true, study: study(), facts: srv.facts, archive: null, resume: null,
     retained: { record: srv.record, at: plus(T0, H) }, ingress, now: plus(T0, H), ...over });
   const plan = allowed(() => RD.planReportRead(ctx(), { surface: 'clinician', versionId: null, eventId: 'read-1' }));
   assert.equal(plan.version.versionId, srv.facts.publishedVersion.versionId);
@@ -610,7 +620,7 @@ test('C-C08 bodies are served after the durable receipt to the actual target and
   assert.equal(A.STATUTORY_ACT[shown.action], '열람');
   // Refused reads produce no read event and no body.
   assert.throws(() => RD.planReportRead(ctx({ actor: actor('c2', { roles: ['clinician'], institutionId: 'inst-b' }) }), { surface: 'clinician', versionId: null, eventId: 'r2' }), { code: 'InstitutionRefused' });
-  assert.throws(() => RD.planReportRead(ctx({ actor: actor('c3', { roles: ['admin'] }) }), { surface: 'clinician', versionId: null, eventId: 'r3' }), { code: 'RoleRefused' });
+  assert.throws(() => RD.planReportRead(ctx({ actor: actor('c3', { roles: ['admin'] }), roleAllowed: false }), { surface: 'clinician', versionId: null, eventId: 'r3' }), { code: 'RoleRefused' });
   const pre = server();
   await run(pre, 'r1', 'start', { at: plus(T0, -MIN) });
   await run(pre, 'r1', 'preliminary', { at: T0, reviewerId: 'r2' });
@@ -763,7 +773,7 @@ test('C-C11 retained transitions and reads keep lawful preservation and archive;
   assert.equal(RT.readRetention(clinical.facts, arc.archive, null, { record: clinical.retention, at: entryAt }).ordinaryClinicalAccess, true);
   // L5-04: every read names the stored record and the instant.
   const fresh = await approvedUnit(T0, 'r1');
-  const readCtx = retained => ({ actor: actor('r2'), study: study(), facts: fresh.facts, archive: null, resume: null, retained, ingress, now: plus(T0, H) });
+  const readCtx = retained => ({ actor: actor('r2'), roleAllowed: true, study: study(), facts: fresh.facts, archive: null, resume: null, retained, ingress, now: plus(T0, H) });
   for (const missing of [null, undefined, { record: fresh.record }, { at: plus(T0, H) }])
     assert.throws(() => RD.planReportRead(readCtx(missing), { surface: 'reader', versionId: null, eventId: 'read-c11' }), { code: 'RetainedReadArgumentRequired' });
   allowed(() => RD.planReportRead(readCtx({ record: fresh.record, at: plus(T0, H) }), { surface: 'reader', versionId: null, eventId: 'read-c11' }));
@@ -803,7 +813,7 @@ test('C-C13 read and print requests stay on one version and an acknowledgement b
   const v1 = srv.facts.publishedVersion;
   await run(srv, 'r1', 'amend', { at: plus(T0, H) });
   const v2 = srv.facts.publishedVersion;
-  const ctx = { actor: actor('r2'), study: study(), facts: srv.facts, archive: null, resume: null, retained: { record: srv.record, at: plus(T0, 2 * H) }, ingress, now: plus(T0, 2 * H) };
+  const ctx = { actor: actor('r2'), roleAllowed: true, study: study(), facts: srv.facts, archive: null, resume: null, retained: { record: srv.record, at: plus(T0, 2 * H) }, ingress, now: plus(T0, 2 * H) };
   const preview = RD.planReportRead(ctx, { surface: 'preview', versionId: v1.versionId, eventId: 'preview-1' });
   assert.equal(preview.version.versionId, v1.versionId);
   const opened = allowed(() => RD.printRequested(ctx, preview, v1.versionId, plus(T0, 2 * H + 1000), 'print-1'));

@@ -2,7 +2,8 @@
  *
  * 자체 fetch·전역 인증·페이지 부팅이 없다. 생성자가 받는 다섯 접점만 쓴다.
  *   view      readText() → {findings, conclusion, recommendation}, status(요소), showReport(body), print() → Promise
- *   store     관리형 단말의 보호 저장(C-NATIVE): enqueue(entry), list(owner), observe(observation), cached(uid)
+ *   store     관리형 단말의 보호 저장(C-NATIVE): enqueue(entry), list(owner) → 그 계정의 서버 보존 영수증 전 항목,
+ *             observe(observation), cached(uid)
  *   signer    단말 서명(C-NATIVE): sign(request) → { entry }  — 완성된 승인 요청만 서명한다(임의 바이트 서명 없음)
  *   transport 서버: submit(entry), read(uid)
  *   context   owner(), online(), session() → {epoch}, opening() → {uid, generation}

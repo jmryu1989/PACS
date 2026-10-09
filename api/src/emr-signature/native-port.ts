@@ -105,7 +105,9 @@ export function parseQueueEntry(input: unknown): Readonly<QueueEntry> {
   if (v.eventId !== p.eventId || access.eventId !== p.eventId || v.deviceSequence !== p.deviceSequence || access.deviceSequence !== p.deviceSequence ||
       access.action !== p.action || v.predecessorEventId !== p.predecessorEventId || owner.deviceId !== p.deviceId || access.deviceId !== p.deviceId || owner.subject !== p.signer.subject ||
       owner.issuer !== p.signer.issuer || access.kid !== p.kid || access.occurredAt !== p.signedAt || access.target.versionId !== p.versionId ||
-      access.target.recordId !== p.recordId || (v.baseVersionId ?? null) !== (p.previousVersion?.versionId ?? null)) refuse('QueueEntryInconsistent');
+      access.target.recordId !== p.recordId || access.target.studyId !== p.studyId || JSON.stringify(access.target.patient) !== JSON.stringify(p.patient) ||
+      JSON.stringify(access.identity) !== JSON.stringify(p.signer) || access.actingInstitutionId !== p.actingInstitutionId ||
+      access.managingInstitutionId !== p.managingInstitutionId || (v.baseVersionId ?? null) !== (p.previousVersion?.versionId ?? null)) refuse('QueueEntryInconsistent');
   return freeze({ formatVersion: 'emr-offline-queue/1' as const, eventId: p.eventId, owner, deviceSequence: p.deviceSequence,
     predecessorEventId: p.predecessorEventId, envelope: { protected: v.envelope.protected, payload: v.envelope.payload, signature: v.envelope.signature },
     access, baseVersionId: v.baseVersionId ?? null });

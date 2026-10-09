@@ -50,7 +50,7 @@ const digestOf = (value: unknown) => createHash('sha256').update(JSON.stringify(
  * the total fits Q and the queue space J was reserved first. Cached HTML or already-displayed pixels are not evidence.
  */
 export function offlineReadiness(manifestInput: unknown, policyInput: unknown, reservation: { bytes: number } | null): Readonly<{
-  ready: boolean; missing: readonly string[]; manifestDigest: string;
+  ready: boolean; missing: readonly string[]; manifestDigest: string; studyIds: readonly string[];
 }> {
   const policy = requireOfflinePolicy(policyInput), manifest = parseManifest(manifestInput), missing: string[] = [];
   for (const study of manifest.studies) for (const part of MANIFEST_PARTS) {
@@ -63,7 +63,7 @@ export function offlineReadiness(manifestInput: unknown, policyInput: unknown, r
   const bytes = manifest.studies.reduce((n, s) => n + s.parts.reduce((m, p) => m + p.bytes, 0), 0);
   if (bytes > policy.imageBytesQ) missing.push('over-image-capacity');
   if (!reservation || !Number.isSafeInteger(reservation.bytes) || reservation.bytes < policy.reserveBytesJ) missing.push('queue-space-not-reserved');
-  return freeze({ ready: missing.length === 0, missing, manifestDigest: digestOf(manifest) });
+  return freeze({ ready: missing.length === 0, missing, manifestDigest: digestOf(manifest), studyIds: manifest.studies.map(s => s.studyId) });
 }
 
 export type GrantAction = 'approve-sign' | 'amend' | 'addendum' | 'read';
@@ -103,14 +103,16 @@ export const grantDigest = (grant: OfflineGrant) => digestOf(parseGrant(grant));
 
 /** Issued online by the server for a verified clinician, device key and a complete, reserved manifest. */
 export function issueOfflineGrant(request: unknown, actorInput: VerifiedActor, key: KeyRegistration, policyInput: unknown,
-  readiness: { ready: boolean; manifestDigest: string }): Readonly<{ grant: OfflineGrant; digest: string }> {
+  readiness: { ready: boolean; manifestDigest: string; studyIds: readonly string[] }): Readonly<{ grant: OfflineGrant; digest: string }> {
   const r = object(request, ['grantId', 'deviceId', 'kid', 'studies', 'actions', 'issuedAt', 'anchorId']);
   const actor = parseVerifiedActor(actorInput), policy = requireOfflinePolicy(policyInput);
   if (actor.sessionState !== 'active' || !actor.canSign || actor.kind !== 'member' || !actor.roles.includes('radiologist')) refuse('GrantAuthorityRefused');
   if (key.kid !== r.kid || key.deviceId !== r.deviceId || key.identity.id !== actor.identity.id || key.identity.issuer !== actor.identity.issuer ||
       key.identity.subject !== actor.identity.subject || key.institutionId !== actor.institutionId || keyStatusAt(key, utc(r.issuedAt)) !== 'active')
     refuse('GrantKeyRefused');
-  if (!readiness || readiness.ready !== true) refuse('OfflineNotReady');
+  if (!readiness || readiness.ready !== true || !Array.isArray(readiness.studyIds)) refuse('OfflineNotReady');
+  // Only studies whose complete manifest was verified may be granted; anything else is outside the grant.
+  if (!Array.isArray(r.studies) || r.studies.some(s => !readiness.studyIds.includes(s?.studyId))) refuse('GrantStudyRefused');
   const expiresAt = new Date(Date.parse(r.issuedAt) + policy.disconnectedHoursH * 3600000).toISOString();
   const grant = parseGrant({ formatVersion: 'emr-offline-grant/1', grantId: r.grantId, clinician: { ...actor.identity },
     identityRegistrationId: actor.identityRegistrationId, institutionId: actor.institutionId, deviceId: r.deviceId, kid: r.kid, studies: r.studies,
@@ -130,7 +132,8 @@ export function checkSignatureGrant(signature: Readonly<VerifiedSignatureV2>, gr
   try { grant = parseGrant(grants.load(p.grant.grantId)); } catch { refuse('GrantUnknown'); }
   if (grantDigest(grant) !== p.grant.digest) refuse('GrantDigestRefused');
   if (grant.clinician.id !== p.signer.id || grant.clinician.issuer !== p.signer.issuer || grant.clinician.subject !== p.signer.subject ||
-      grant.identityRegistrationId !== p.identityRegistrationId || grant.deviceId !== p.deviceId || grant.kid !== p.kid) refuse('GrantBindingRefused');
+      grant.identityRegistrationId !== p.identityRegistrationId || grant.institutionId !== p.actingInstitutionId || grant.deviceId !== p.deviceId ||
+      grant.kid !== p.kid) refuse('GrantBindingRefused');
   if (!(grant.actions as readonly string[]).includes(p.action)) refuse('GrantActionRefused');
   const study = grant.studies.find(s => s.studyId === p.studyId && s.recordId === p.recordId && s.role === 'current');
   if (!study) refuse('GrantStudyRefused');

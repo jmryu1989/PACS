@@ -1,0 +1,75 @@
+name: EMR C report flow
+
+# EMR-C1 (order §9): the unwired C1 modules only — type check, the 14 contract and 8 queue cases, the 6 isolated DOM
+# cases and the M01..M20 mutants, all on the same checked-out SHA. No stack, database, Docker or OS key is used here;
+# the shared validate/candidate workflows and their selections are unchanged. C2 extends this job with its live suite.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Public PR code runs without production credentials or a persisted Git token.
+permissions:
+  contents: read
+
+concurrency:
+  group: emr-c-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  emr-c:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Installed TypeScript, Nest declarations and Prisma (lifecycle scripts off)
+        timeout-minutes: 5
+        run: |
+          node --version
+          npm ci --prefix api --ignore-scripts --no-audit --no-fund
+      - name: Generate the Prisma client for the API type check
+        working-directory: api
+        run: ./node_modules/.bin/prisma generate
+      - name: API type check including the C1 modules
+        run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/tsc --cwd . --tree api/src/emr-report --tree api/src/emr-signature --file api/tsconfig.json --file api/package-lock.json -- node api/node_modules/typescript/bin/tsc --noEmit -p api
+      - name: C1 contract and queue cases (C-C01..C-C14, C-Q01..C-Q08)
+        if: ${{ !cancelled() }}
+        run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/node --cwd . --tree api/src/emr-contract --tree api/src/emr-report --tree api/src/emr-signature --file emr/units/c.json --file tests/emr/c/contract_test.cjs --file tests/emr/c/offline_queue_test.cjs -- node --test --test-reporter=tap --test-reporter-destination=tmp/emr-c-ci/node.tap --test-reporter=spec --test-reporter-destination=stdout tests/emr/c/contract_test.cjs tests/emr/c/offline_queue_test.cjs
+      - name: Exact selection of the C1 Node cases (every declared case passed once, none skipped or extra)
+        if: ${{ !cancelled() }}
+        run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/node-selection --cwd . --file emr/units/c.json --file tmp/emr-c-ci/node.tap -- node tests/emr/c/contract_test.cjs --judge-tap tmp/emr-c-ci/node.tap
+      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
+        if: ${{ !cancelled() }}
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        if: ${{ !cancelled() }}
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
+      - name: Install the pinned browser test dependencies
+        if: ${{ !cancelled() }}
+        timeout-minutes: 15
+        run: |
+          python3 -m venv "$RUNNER_TEMP/emr-c-python"
+          "$RUNNER_TEMP/emr-c-python/bin/python" -m pip install -r tests/e2e/requirements.txt
+          "$RUNNER_TEMP/emr-c-python/bin/python" -m playwright install --with-deps chromium
+      - name: C1 isolated offline report DOM cases (C-D01..C-D06)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/dom --cwd . --file worklist-v0/hpacs-lite/offline-report.js --file tests/emr/c/offline_report_dom_test.py -- "$RUNNER_TEMP/emr-c-python/bin/python" -B tests/emr/c/offline_report_dom_test.py -v
+      - name: C1 mutants M01..M20 over an exact baseline in a separate copy
+        if: ${{ !cancelled() }}
+        timeout-minutes: 20
+        run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/mutants --cwd . --tree api/src/emr-contract --tree api/src/emr-report --tree api/src/emr-signature --tree tests/emr/c --file emr/units/c.json --file worklist-v0/hpacs-lite/offline-report.js -- "$RUNNER_TEMP/emr-c-python/bin/python" -B tests/emr/c/mutants.py --out tmp/emr-c-ci/mutants-result
+      - name: C1 evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: emr-c1-results
+          path: tmp/emr-c-ci/
+          if-no-files-found: error
+          retention-days: 7

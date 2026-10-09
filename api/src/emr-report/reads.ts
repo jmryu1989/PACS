@@ -19,6 +19,8 @@ export type ReadSurface = keyof typeof READ_SURFACES;
 
 export interface ReadContext {
   actor: VerifiedActor;
+  /** The server's existing role decision for this surface (need(), AGENTS §1.5); C keeps no second role table. */
+  roleAllowed: boolean;
   study: StudyFacts;
   facts: ReportFacts;
   archive: RetentionOnlyEvent | null;
@@ -59,8 +61,8 @@ export function planReportRead(context: ReadContext, input: unknown): Readonly<R
   if (actor.sessionState !== 'active') refuse('SessionEnded');
   if (facts.studyId !== study.studyId) refuse('RecordBindingRefused');
   if (!institutionAllows(actor, study)) refuse('InstitutionRefused');
-  const reader = actor.roles.includes('radiologist'), clinician = actor.roles.includes('clinician');
-  if (surfaceKey === 'clinician' ? !clinician && !reader : !reader) refuse('RoleRefused');
+  if (context.roleAllowed !== true) refuse('RoleRefused');
+  const reader = actor.roles.includes('radiologist');
   const access = readRetention(facts, context.archive, context.resume, context.retained);
   if (!access.ordinaryClinicalAccess) refuse('RetentionOnlyAccessRefused');
   const published = facts.publishedVersion;
