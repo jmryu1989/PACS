@@ -1,7 +1,7 @@
 # coding: utf-8
 """S4-U1b receipt display: axis A assignment, axis B KIN observation, axis C Gateway report.
 
-Pure stdlib, no browser, no Node, no stack. Three kinds of evidence and nothing more:
+Pure stdlib, no browser, no stack; Node only through tests/page_source.py, which reads main.html across the S9-U0a split. Three kinds of evidence and nothing more:
   1. tests/study_observation_vectors.json judged by an independent Python model of the rules
      (session-local change, resets, departure, failure keeps, cold start, label table, reasons,
      IF-W09 phrases). The shipped JS is judged against the SAME file by tests/study_arrivals_test.cjs
