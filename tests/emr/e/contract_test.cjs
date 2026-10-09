@@ -9,6 +9,13 @@
  * nothing here reads implementation text. Refusals are checked together with "no body source was called" and with the
  * inputs left unchanged. Synthetic UIDs, hashes and identities only.
  *
+ * REQ-D735-CLASS/SOURCE -> RISK-D735-MISCLASS/SOURCE -> TEST-D735-*: every case of the shared mammography table
+ * tests/emr/e/rule-cases.json (D735 consult, also bound by E-MG) runs through buildImageManifest, one test per case ID,
+ * and every expected key is compared. The table is byte-pinned (SHA-256 below): its identity is the requirement that
+ * both units judge the same headers, so a changed table must fail here rather than be followed silently (AGENTS 1-B.14).
+ * The adapter only moves tags into the manifest input (identity, frame count, Image Type, synthetic digests); it never
+ * fills a classification fact from the expected values.
+ *
  * KIN_EMR_E_SOURCE_DIR (tests/emr/e/mutants.py only) points the loader at a mutated copy of api/src outside the tree.
  * `node tests/emr/e/contract_test.cjs --list-cases` prints the declared case list instead of running it.
  */
@@ -31,12 +38,12 @@ const CASES = [
   'TEST-E-02 manifest_sources A1 every held object keeps SOP, frames, bytes, hash, origin, source and MG/DBT/XA facts under one content digest',
   'TEST-E-02 manifest_sources A2 identical relisting collapses and an unknown format stays listed but undeliverable while the study opens',
   'TEST-E-02 manifest_sources A3 XA frame order and the stored timing are kept as stored and only reported as verified or not',
-  'TEST-E-02 manifest_sources A4 a one-frame Breast Tomosynthesis object typed GENERATED_2D in Image and Frame Type is the device synthetic 2D; DBT slices or slabs follow Volumetric Properties',
+  'TEST-E-02 manifest_sources A4 the stored header decides the mammography class; a caller label is only recorded, and the rule version and every verdict are manifest content',
   'TEST-E-02 manifest_sources R1 the same SOP with different bytes is refused',
   'TEST-E-02 manifest_sources R2 a missing last frame or a repeated frame number is refused',
   'TEST-E-02 manifest_sources R3 an incomplete or broken page chain is refused',
   'TEST-E-02 manifest_sources R4 an external object without its source, or a source claim that hides the producer, is refused',
-  'TEST-E-02 manifest_sources R5 a multi-frame or mistyped tomosynthesis object is never a generated 2D and DERIVED alone is not synthetic evidence',
+  'TEST-E-02 manifest_sources R5 a mammography object without its header, with another object\'s header or with fewer references than its header is refused',
   'TEST-E-02 manifest_sources R6 relabelled origin, a foreign study object, a missing decoder pin or a copied manifest is refused',
   'TEST-E-03 basis_and_bypass A1 reading inside the managing institution needs no consent, contract or extra step and delivers',
   'TEST-E-03 basis_and_bypass A2 a complete processor agreement delivers; a lawful third-party basis is recorded but sends no body in Part 1',
@@ -60,8 +67,15 @@ const CASES = [
   'TEST-E-05 display_epoch R2 an ACK from an earlier generation or without a display is refused',
   'TEST-E-05 display_epoch R3 a HEAD response or a header bulk attribute is not evidence that pixels were shown; the Pixel Data bulk is',
 ];
+const RULE_TABLE = path.join(__dirname, 'rule-cases.json');
+const RULE_TABLE_SHA256 = '83ccf159299a551adc7937888daacb1eb5047152f82afd18da901efc579f083e';
+const ruleBytes = fs.readFileSync(RULE_TABLE);
+if (createHash('sha256').update(ruleBytes).digest('hex') !== RULE_TABLE_SHA256) throw new Error('rule-cases.json is not the D735 table this file is bound to');
+const RULE = JSON.parse(ruleBytes.toString('utf8'));
+if (RULE.schemaVersion !== 'D735-1' || RULE.cases.length !== 223 || new Set(RULE.cases.map(c => c.testId)).size !== 223) throw new Error('unexpected D735 table shape');
+const DECLARED = [...CASES, ...RULE.cases.map(c => c.testId)];
 if (process.argv.includes('--list-cases')) {
-  process.stdout.write(JSON.stringify(CASES) + '\n');
+  process.stdout.write(JSON.stringify(DECLARED) + '\n');
   process.exit(0);
 }
 
@@ -133,28 +147,35 @@ function doc(study, series, sop, sopClass, provenance) {
 const external = (system = 'Vendor AI', evidence = { status: 'present', sha256: h('sig') }) => ({ kind: 'external', system, receiptEventId: 'import-7', signatureEvidence: evidence });
 const S = (study, n) => `${study}.${n}`;
 const DBT = S(STUDY, 3) + '.1', SYNTH = S(STUDY, 4) + '.1';
-/** The E-MG verdict plus the stored Frame Type list and Volumetric Properties it was read from. */
-const role = (kind, laterality, frameTypes = null, volumetricProperties = null, view = 'CC') => ({ kind, laterality, view, frameTypes, volumetricProperties });
-/** Header shape of a Hologic Selenia Dimensions "Intelligent 2D" (EA1141-4339969, read by E-MG): one frame of the Breast
- * Tomosynthesis IOD whose Image Type and Frame Type are DERIVED\PRIMARY\TOMOSYNTHESIS\GENERATED_2D, VOLUME / MAX_IP. */
-const I2D_TYPE = ['DERIVED', 'PRIMARY', 'TOMOSYNTHESIS', 'GENERATED_2D'];
-const hologicSynthetic = (study, series, sop, laterality = 'L', sources = []) => pixel(study, series, sop, SC('13.1.3'), { ts: TS.j2k,
-  imageType: I2D_TYPE, derivation: { kind: 'derived', sources }, mammography: role('generated-2d', laterality, [I2D_TYPE], 'VOLUME') });
-/** Its paired 1 mm DBT: DERIVED\PRIMARY\TOMOSYNTHESIS\NONE, many frames, VOLUME (slices). */
-const DBT_TYPE = ['DERIVED', 'PRIMARY', 'TOMOSYNTHESIS', 'NONE'];
-const hologicDbt = (study, series, sop, frames = 60, laterality = 'L', volumetric = 'VOLUME') => pixel(study, series, sop, SC('13.1.3'), { ts: TS.j2k,
-  frames, frameBytes: 10, imageType: DBT_TYPE, derivation: { kind: 'derived', sources: [] }, mammography: role('dbt', laterality, [DBT_TYPE], volumetric) });
+/** PS3.18 DICOM JSON element. Headers below are synthetic, shaped like the D735 table's cases. */
+const dj = (vr, ...v) => ({ vr, Value: v });
+const viewCodeItem = (code = '399162004', meaning = 'cranio-caudal') => ({ '00080100': dj('SH', code), '00080102': dj('SH', 'SCT'), '00080104': dj('LO', meaning) });
+function mgHeader(study, series, sop, sopClass, type, laterality, extra = {}) {
+  return { '00080016': dj('UI', sopClass), '00080018': dj('UI', sop), '0020000D': dj('UI', study), '0020000E': dj('UI', series), '00080060': dj('CS', 'MG'),
+    '00080008': dj('CS', ...type), '00080068': dj('CS', sopClass === SC('1.2.1') ? 'FOR PROCESSING' : 'FOR PRESENTATION'),
+    '00200062': dj('CS', laterality), '00540220': dj('SQ', viewCodeItem()), '00281350': dj('CS', 'NO'), ...extra };
+}
+function btoHeader(study, series, sop, n, type, laterality, { thickness = 1, step = 1, vp = 'VOLUME', tech = 'NONE' } = {}) {
+  const hd = mgHeader(study, series, sop, SC('13.1.3'), type, laterality, { '00280008': dj('IS', n), '00089206': dj('CS', vp), '00089207': dj('CS', tech),
+    '52009229': dj('SQ', { '00289110': dj('SQ', { '00180050': dj('DS', thickness) }), '00209116': dj('SQ', { '00200037': dj('DS', 1, 0, 0, 0, 1, 0) }) }),
+    '52009230': dj('SQ', ...Array.from({ length: n }, (_, k) => ({ '00189504': dj('SQ', { '00089007': dj('CS', ...type), '00089206': dj('CS', vp), '00089207': dj('CS', tech) }),
+      '00209113': dj('SQ', { '00200032': dj('DS', 0, 0, k * step) }) }))) });
+  delete hd['00080068'];
+  return hd;
+}
+const withHeader = (entry, header) => ({ ...entry, mammography: { header, declaredSources: null, claimedClass: null } });
 function studyObjects(study = STUDY) {
+  const conventional = ['DERIVED', 'PRIMARY'], dbtType = ['ORIGINAL', 'PRIMARY', 'TOMOSYNTHESIS', 'NONE'], generated = ['DERIVED', 'PRIMARY', 'TOMOSYNTHESIS', 'GENERATED_2D'];
   return [
     pixel(study, S(study, 1), S(study, 1) + '.1', SC('2'), { imageType: ['ORIGINAL', 'PRIMARY', 'AXIAL'] }),
     pixel(study, S(study, 1), S(study, 1) + '.2', SC('2'), { imageType: ['ORIGINAL', 'PRIMARY', 'AXIAL'] }),
-    pixel(study, S(study, 2), S(study, 2) + '.1', SC('1.2'), { imageType: ['DERIVED', 'PRIMARY'], derivation: { kind: 'derived', sources: [] },
-      mammography: role('conventional-2d', 'R') }),
-    pixel(study, S(study, 3), S(study, 3) + '.1', SC('13.1.3'), { ts: TS.j2k, frames: 6, imageType: ['ORIGINAL', 'PRIMARY', 'TOMOSYNTHESIS', 'NONE'],
-      mammography: role('dbt', 'L', [['ORIGINAL', 'PRIMARY', 'TOMOSYNTHESIS', 'NONE']], 'VOLUME') }),
-    pixel(study, S(study, 4), S(study, 4) + '.1', SC('1.2'), { imageType: ['DERIVED', 'PRIMARY', 'TOMOSYNTHESIS', 'GENERATED_2D'],
-      derivation: { kind: 'derived', sources: [{ studyUid: study, seriesUid: S(study, 3), sopInstanceUid: S(study, 3) + '.1' }] },
-      mammography: role('generated-2d', 'L') }),
+    withHeader(pixel(study, S(study, 2), S(study, 2) + '.1', SC('1.2'), { imageType: conventional, derivation: { kind: 'derived', sources: [] } }),
+      mgHeader(study, S(study, 2), S(study, 2) + '.1', SC('1.2'), conventional, 'R')),
+    withHeader(pixel(study, S(study, 3), S(study, 3) + '.1', SC('13.1.3'), { ts: TS.j2k, frames: 6, imageType: dbtType }),
+      btoHeader(study, S(study, 3), S(study, 3) + '.1', 6, dbtType, 'L')),
+    withHeader(pixel(study, S(study, 4), S(study, 4) + '.1', SC('1.2'), { imageType: generated,
+      derivation: { kind: 'derived', sources: [{ studyUid: study, seriesUid: S(study, 3), sopInstanceUid: S(study, 3) + '.1' }] } }),
+      mgHeader(study, S(study, 4), S(study, 4) + '.1', SC('1.2'), generated, 'L', { '00082112': dj('SQ', { '00081150': dj('UI', SC('13.1.3')), '00081155': dj('UI', S(study, 3) + '.1') }) })),
     pixel(study, S(study, 5), S(study, 5) + '.1', SC('12.1'), { ts: TS.jpeg, frames: 8, imageType: ['ORIGINAL', 'PRIMARY', 'SINGLE PLANE'],
       timing: { source: 'frame-time-vector', vectorMs: [0, 66, 67, 66, 67, 66, 67, 66] } }),
     doc(study, S(study, 6), S(study, 6) + '.1', SC('88.22'), external()),
@@ -171,7 +192,7 @@ function manifestInput(objects = studyObjects(), opts = {}) {
   const unique = new Map(objects.map(o => [o.sopInstanceUid, o]));
   return { formatVersion: 1, studyUid: study, managingInstitution: opts.institution ?? INSTITUTION, patient: opts.patient ?? PATIENT, builtAt: T0,
     expected: opts.expected ?? { series: new Set([...unique.values()].map(o => o.seriesUid)).size, objects: unique.size },
-    pages, decoderCatalog: opts.catalog ?? CATALOG, viewer: opts.viewer ?? VIEWER };
+    pages, decoderCatalog: opts.catalog ?? CATALOG, viewer: opts.viewer ?? VIEWER, referencedObjects: opts.referencedObjects ?? [] };
 }
 const build = (...args) => M.buildImageManifest(manifestInput(...args));
 const sameInstitution = (study = STUDY, at = T1) => E.checkProvisionBasis({ relation: 'same-institution', at, managingInstitution: INSTITUTION, recipient: null,
@@ -382,7 +403,7 @@ def('TEST-E-02 manifest_sources A1', () => {
   assert.equal(m.objects.length, objects.length);
   const byUid = Object.fromEntries(m.objects.map(o => [o.sopInstanceUid, o]));
   assert.deepEqual(byUid[DBT].frames.map(f => f.number), [1, 2, 3, 4, 5, 6]);
-  assert.deepEqual([byUid[DBT].mammography.kind, byUid[SYNTH].mammography.kind], ['dbt', 'generated-2d']);
+  assert.deepEqual([byUid[DBT].mammography.class, byUid[SYNTH].mammography.class, byUid[SYNTH].mammography.sourceLinkStatus], ['dbt-slices', 'device-synthetic-2d', 'verified']);
   assert.deepEqual(byUid[SYNTH].derivation, { kind: 'derived', sources: [{ studyUid: STUDY, seriesUid: S(STUDY, 3), sopInstanceUid: DBT }] });
   assert.deepEqual(byUid[S(STUDY, 6) + '.1'].provenance, external());
   assert.deepEqual(m.objects.map(o => M.recordKindOf(o)).sort(),
@@ -478,66 +499,40 @@ def('TEST-E-02 manifest_sources R4', () => {
   assert.deepEqual(build().objects.find(o => o.sopInstanceUid === S(STUDY, 7) + '.1').provenance, external('Referring EMR', { status: 'absent' }));
 });
 def('TEST-E-02 manifest_sources A4', () => {
-  // A Hologic pair as stored: an Intelligent 2D view (Breast Tomosynthesis IOD, one frame) and its 1 mm DBT volume.
-  const i2dSeries = S(STUDY, 8), volSeries = S(STUDY, 9), i2d = i2dSeries + '.1', vol = volSeries + '.1';
-  const pair = [...studyObjects(), hologicDbt(STUDY, volSeries, vol),
-    hologicSynthetic(STUDY, i2dSeries, i2d, 'L', [{ studyUid: STUDY, seriesUid: volSeries, sopInstanceUid: vol }])];
-  const m = allowed(() => build(pair));
-  const byUid = Object.fromEntries(m.objects.map(o => [o.sopInstanceUid, o]));
-  assert.deepEqual([byUid[i2d].family, byUid[i2d].declaredFrameCount, byUid[i2d].mammography.kind, byUid[i2d].mammography.dbtRepresentation],
-    ['breast-tomosynthesis', 1, 'generated-2d', null]);
-  assert.deepEqual(byUid[i2d].mammography.frameTypes, [I2D_TYPE]);
-  assert.deepEqual([byUid[vol].mammography.kind, byUid[vol].mammography.dbtRepresentation, byUid[vol].frames.length], ['dbt', 'slices', 60]);
-  // Volumetric Properties decides slices or slabs: GE's 10 mm MIP slabs say SAMPLED; another value stays unspecified.
-  const slab = allowed(() => build([...studyObjects(), hologicDbt(STUDY, volSeries, vol, 30, 'L', 'SAMPLED')]));
-  assert.equal(slab.objects.find(o => o.sopInstanceUid === vol).mammography.dbtRepresentation, 'slab');
-  const other = allowed(() => build([...studyObjects(), hologicDbt(STUDY, volSeries, vol, 30, 'L', 'DISTORTED')]));
-  assert.equal(other.objects.find(o => o.sopInstanceUid === vol).mammography.dbtRepresentation, 'unspecified');
-  // A generated 2D stored in the Digital Mammography IOD (no Frame Type) is accepted as well.
-  assert.equal(build().objects.find(o => o.sopInstanceUid === SYNTH).mammography.kind, 'generated-2d');
+  const m = build(), byUid = Object.fromEntries(m.objects.map(o => [o.sopInstanceUid, o]));
+  assert.equal(m.classificationRule, 'D735-1');
+  const synth = byUid[SYNTH].mammography;
+  assert.deepEqual([byUid[DBT].mammography.class, byUid[DBT].mammography.representation, synth.class, synth.fullViewAutoMatch], ['dbt-slices', 'slices', 'device-synthetic-2d', true]);
+  // The raw reference is kept with its path and judged against the stored target header.
+  assert.deepEqual(synth.links.map(l => [l.path, l.sopClass, l.sop, l.status]), [['SourceImageSequence[0]/', SC('13.1.3'), DBT, 'verified']]);
+  // A caller label is recorded and compared, never used: the conventional header stays conventional.
+  const claimed = studyObjects(); claimed[2] = { ...claimed[2], mammography: { ...claimed[2].mammography, claimedClass: 'dbt-slices' } };
+  const conventional = allowed(() => build(claimed)).objects.find(o => o.sopInstanceUid === S(STUDY, 2) + '.1').mammography;
+  assert.deepEqual([conventional.class, conventional.claim], ['conventional-2d-presentation', { class: 'dbt-slices', agrees: false }]);
+  // Only the stored header changes (one DBT frame loses its position): the verdict changes, the object stays listed and
+  // deliverable, and the manifest is a new version.
+  const moved = studyObjects(); const header = structuredClone(moved[3].mammography.header);
+  delete header['52009230'].Value[1]['00209113'];
+  moved[3] = { ...moved[3], mammography: { ...moved[3].mammography, header } };
+  const changed = allowed(() => build(moved)), dbt = changed.objects.find(o => o.sopInstanceUid === DBT);
+  assert.deepEqual([dbt.mammography.class, dbt.mammography.representation, dbt.frames.length], ['unverified', 'unspecified', 6]);
+  assert.equal(changed.objects.find(o => o.sopInstanceUid === SYNTH).mammography.sourceLinkStatus, 'rejected');
+  assert.notEqual(changed.sha256, m.sha256);
+  assert.equal(allowed(() => prepare(changed, `/dicom-web/studies/${STUDY}/series/${S(STUDY, 3)}/instances/${DBT}/frames/1`)).units.length, 1);
 });
 def('TEST-E-02 manifest_sources R5', () => {
-  const series = S(STUDY, 8), i2d = series + '.1', withObject = o => [...studyObjects(), o];
-  // A multi-frame tomosynthesis object stays DBT even when every type field says GENERATED_2D: its frame count alone refuses it.
-  const multiFrame = hologicSynthetic(STUDY, series, i2d);
-  Object.assign(multiFrame, { declaredFrameCount: 60, frames: frameSet(i2d, 60, 10), bytes: 60 * 10 + 4000 });
-  refused(() => build(withObject(multiFrame)), 'MammographyKindMismatch');
-  // Frame Type that says NONE, mixed Frame Types or no Frame Type: not a device synthetic 2D of the tomosynthesis IOD.
-  for (const frameTypes of [[DBT_TYPE], [I2D_TYPE, DBT_TYPE], null]) {
-    const o = hologicSynthetic(STUDY, series, i2d);
-    o.mammography = { ...o.mammography, frameTypes };
-    refused(() => build(withObject(o)), 'MammographyKindMismatch');
-  }
-  const wrongValue3 = hologicSynthetic(STUDY, series, i2d);
-  wrongValue3.imageType = ['DERIVED', 'PRIMARY', 'VOLUME', 'GENERATED_2D'];
-  wrongValue3.mammography = { ...wrongValue3.mammography, frameTypes: [wrongValue3.imageType] };
-  refused(() => build(withObject(wrongValue3)), 'MammographyKindMismatch');
-  // A DBT label on a GENERATED_2D object or on mixed frame types, a 2D label on tomosynthesis, a DBT label on a 2D view.
-  const synthAsDbt = hologicSynthetic(STUDY, series, i2d);
-  synthAsDbt.mammography = { ...synthAsDbt.mammography, kind: 'dbt' };
-  refused(() => build(withObject(synthAsDbt)), 'MammographyKindMismatch');
-  const mixedDbt = studyObjects(); mixedDbt[3] = { ...mixedDbt[3], mammography: role('dbt', 'L', [DBT_TYPE, I2D_TYPE], 'VOLUME') };
-  refused(() => build(mixedDbt), 'MammographyKindMismatch');
-  const asConventional = studyObjects(); asConventional[3] = { ...asConventional[3], mammography: role('conventional-2d', 'L') };
-  refused(() => build(asConventional), 'MammographyKindMismatch');
-  const flatDbt = studyObjects(); flatDbt[2] = { ...flatDbt[2], mammography: role('dbt', 'R') };
-  refused(() => build(flatDbt), 'MammographyKindMismatch');
-  // DERIVED\PRIMARY (CMMD) without GENERATED_2D is not synthetic evidence; a Value 3 term is not a plain exposure.
-  const derivedOnly = studyObjects(); derivedOnly[2] = { ...derivedOnly[2], mammography: role('generated-2d', 'R') };
-  refused(() => build(derivedOnly), 'MammographyKindMismatch');
-  const notPlain = studyObjects(); notPlain[2] = { ...notPlain[2], imageType: ['DERIVED', 'PRIMARY', 'TOMOSYNTHESIS'] };
-  refused(() => build(notPlain), 'MammographyKindMismatch');
-  // A generated 2D comes from tomosynthesis data of the same breast, never from another 2D view.
-  const sourceNotTomo = studyObjects();
-  sourceNotTomo[4] = { ...sourceNotTomo[4], derivation: { kind: 'derived', sources: [{ studyUid: STUDY, seriesUid: S(STUDY, 2), sopInstanceUid: S(STUDY, 2) + '.1' }] } };
-  refused(() => build(sourceNotTomo), 'DerivedSourceMismatch');
-  const otherSide = studyObjects(); otherSide[4] = { ...otherSide[4], mammography: role('generated-2d', 'R') };
-  refused(() => build(otherSide), 'DerivedSourceMismatch');
-  const missingRole = studyObjects(); missingRole[3] = { ...missingRole[3], mammography: null };
-  refused(() => build(missingRole), 'MammographyRoleRequired');
-  // Unverified is always available: the model may decline to classify, never be forced to guess.
-  const unsure = studyObjects(); unsure[3] = { ...unsure[3], mammography: role('unverified', null, null, null, null) };
-  assert.equal(allowed(() => build(unsure)).objects.find(o => o.sopInstanceUid === DBT).mammography.kind, 'unverified');
+  const noHeader = studyObjects(); noHeader[3] = { ...noHeader[3], mammography: null };
+  refused(() => build(noHeader), 'MammographyHeaderRequired');
+  const otherHeader = studyObjects(); otherHeader[3] = { ...otherHeader[3], mammography: { ...otherHeader[3].mammography, header: studyObjects()[2].mammography.header } };
+  refused(() => build(otherHeader), 'MammographyHeaderMismatch');
+  const typeDiffers = studyObjects(); typeDiffers[2] = { ...typeDiffers[2], imageType: ['DERIVED', 'PRIMARY', ''] };
+  refused(() => build(typeDiffers), 'MammographyHeaderMismatch');
+  // The server's reference list may be longer than the selected header (X-Ray 3D Acquisition), never shorter.
+  const fewer = studyObjects(); fewer[4] = { ...fewer[4], mammography: { ...fewer[4].mammography, declaredSources: [] } };
+  refused(() => build(fewer), 'MammographyHeaderMismatch');
+  const listedTwice = { header: studyObjects()[3].mammography.header, patientKey: PATIENT.linkId, institutionKey: INSTITUTION };
+  refused(() => M.buildImageManifest(manifestInput(studyObjects(), { referencedObjects: [listedTwice] })), 'DuplicateObjectConflict');
+  refused(() => M.buildImageManifest({ ...manifestInput(), referencedObjects: 'none' }), 'MammographyHeaderInvalid');
 });
 def('TEST-E-02 manifest_sources R6', () => {
   const relabel = studyObjects(); relabel[0] = { ...relabel[0], derivation: { kind: 'derived', sources: [] } };
@@ -911,5 +906,45 @@ def('TEST-E-05 display_epoch R3', () => {
     { sopInstanceUid: pdf, frame: null })).unitKey, `object:${pdf}`);
 });
 
+// ── TEST-D735-* shared mammography table, through the manifest path ─────────────────────────────────────────────────
+/** Moves tags into the manifest's object input: identity, the stored frame count, Image Type and its Value 1, synthetic
+ * byte digests. Classification facts are left to the manifest; the case's expected values are never read here. */
+function entryFromHeader(hd, declaredSources, claimedClass) {
+  const value = tag => hd[tag]?.Value ?? null;
+  const perFrame = value('52009230'), nf = value('00280008')?.[0];
+  const n = perFrame && perFrame.length ? perFrame.length : Number.isInteger(nf) && nf > 0 ? nf : 1;
+  const imageType = hd['00080008'] === undefined ? null : [...(hd['00080008'].Value ?? [])];
+  const v1 = typeof imageType?.[0] === 'string' ? imageType[0].trim() : null, sop = value('00080018')[0];
+  return { studyUid: value('0020000D')[0], seriesUid: value('0020000E')[0], sopInstanceUid: sop, sopClassUid: value('00080016')[0],
+    transferSyntaxUid: TS.explicit, imageType, bytes: n * 10 + 100, sha256: h(sop), declaredFrameCount: n, frames: frameSet(sop, n, 10),
+    provenance: { kind: 'device', receiptEventId: `rcpt-${sop}` },
+    derivation: v1 === 'ORIGINAL' ? { kind: 'original' } : v1 === 'DERIVED' ? { kind: 'derived', sources: [] } : { kind: 'unknown' },
+    mammography: { header: hd, declaredSources, claimedClass }, timing: null };
+}
+/** Stored objects of the same study, patient and institution are listed objects; any other stored object is an
+ * out-of-study reference target with the keys it was resolved under (ManifestInput.referencedObjects). */
+function ruleCaseResult(c) {
+  const ctx = c.input.context ?? null, patientKey = ctx?.patientKey ?? 'synthetic-patient', institutionKey = ctx?.institutionKey ?? 'synthetic-institution';
+  const study = c.input.dicom['0020000D'].Value[0];
+  const objects = [entryFromHeader(c.input.dicom, c.input.declaredSources ?? null, null)], referencedObjects = [];
+  for (const s of ctx?.storedObjects ?? []) {
+    if (s.dicom['0020000D'].Value[0] === study && s.patientKey === patientKey && s.institutionKey === institutionKey)
+      objects.push(entryFromHeader(s.dicom, null, ctx.claimedSourceClass ?? null));
+    else referencedObjects.push({ header: s.dicom, patientKey: s.patientKey, institutionKey: s.institutionKey });
+  }
+  const m = M.buildImageManifest({ formatVersion: 1, studyUid: study, managingInstitution: institutionKey, builtAt: T0,
+    patient: { linkId: patientKey, patientId: 'SYN-D735', assigningAuthority: 'synthetic-authority' },
+    expected: { series: new Set(objects.map(o => o.seriesUid)).size, objects: objects.length }, pages: [{ cursor: null, next: null, objects }],
+    decoderCatalog: CATALOG, viewer: VIEWER, referencedObjects });
+  return m.objects.find(o => o.sopInstanceUid === objects[0].sopInstanceUid).mammography;
+}
+for (const c of RULE.cases) {
+  registered.add(c.testId);
+  test(c.testId, () => {
+    const result = ruleCaseResult(c);
+    for (const [key, expected] of Object.entries(c.expected)) assert.deepEqual(result[key], expected, `${c.id}: ${key}`);
+  });
+}
+
 // Every declared case has exactly one body and nothing undeclared runs; a mismatch stops the file before any case starts.
-assert.deepEqual([...registered].sort(), [...CASES].sort());
+assert.deepEqual([...registered].sort(), [...DECLARED].sort());

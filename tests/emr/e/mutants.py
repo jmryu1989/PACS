@@ -1,5 +1,5 @@
 # coding: utf-8
-"""EMR-E R1 mutants M-E-01..07 and M-E-F01..F06 (required) and M-E-X1..X6 (supplementary), against tests/emr/e/contract_test.cjs.
+"""EMR-E R1 mutants M-E-01..07, M-E-F01..F06 and M-E-D1..D7 (required) and M-E-X1..X6 (supplementary), against tests/emr/e/contract_test.cjs.
 
 Each mutant rewrites one decision in a copy of api/src (or, for M-E-F06, of the test file) made outside the repository;
 the product tree is never written.
@@ -50,10 +50,11 @@ MUTANTS = [
      "kills": ["TEST-E-01 delivery_states R2"]},
     # Round 2 (E-R1-05): the old M-E-05 removed a guard that refused every generated 2D of the Breast Tomosynthesis IOD,
     # which the standard allows. The required defect is a multi-frame DBT accepted as synthetic 2D.
+    # Round 3 (D735): the classifier reads the stored header; a multi-frame tomosynthesis object is never synthetic 2D.
     {"id": "M-E-05", "required": True, "title": "multi-frame DBT accepted as synthetic 2D", "file": "emr-image/manifest.ts",
-     "find": "    if (kind === 'generated-2d' && !(oneFrame && value4 === 'GENERATED_2D' && GENERATED_2D_VALUE3.includes(value3) &&",
-     "replace": "    if (kind === 'generated-2d' && !(value4 === 'GENERATED_2D' && GENERATED_2D_VALUE3.includes(value3) &&",
-     "kills": ["TEST-E-02 manifest_sources R5"]},
+     "find": "    if (n === 1 && key === ",
+     "replace": "    if (key === ",
+     "kills": ["TEST-D735-BTO-GENERATED-TWO-FRAMES"]},
     {"id": "M-E-06", "required": True, "title": "reconnect IP written into the offline records", "file": "emr-image/contract.ts",
      "find": "relatedOfflineEventIds: offline.map(x => x.eventId) }, offline: [...offline] });",
      "replace": "relatedOfflineEventIds: offline.map(x => x.eventId) }, offline: offline.map(x => ({ ...x, trustedProxyIp: { status: 'known' as const,"
@@ -105,10 +106,9 @@ MUTANTS = [
      "replace": "  return delivery.units.some(u => u.recordKind !== 'study-metadata' && u.sopInstanceUid === sopInstanceUid && (frame === null || u.frame === null || u.frame === frame));",
      "kills": ["TEST-E-05 display_epoch R3"]},
     {"id": "M-E-F05", "required": True, "title": "E-R1-05 standard generated 2D of the tomosynthesis IOD refused", "file": "emr-image/manifest.ts",
-     "find": "  if (entry.family === 'breast-tomosynthesis') {\n    const ft = frameTypes ?? [];",
-     "replace": "  if (entry.family === 'breast-tomosynthesis' && !['dbt', 'unverified'].includes(kind)) refuse('MammographyKindMismatch');\n"
-                "  if (entry.family === 'breast-tomosynthesis') {\n    const ft = frameTypes ?? [];",
-     "kills": ["TEST-E-02 manifest_sources A4"]},
+     "find": "    if (n === 1 && key === ",
+     "replace": "    if (false && n === 1 && key === ",
+     "kills": ["TEST-D735-BTO-HOLOGIC-GENERATED"]},
     {"id": "M-E-F06", "required": True, "title": "E-R1-06 refusal check counts the body only when the call returns", "target": "test",
      "file": "tests/emr/e/contract_test.cjs",
      "find": "function bodyNeverStarts(fn, code) {\n  const spy = { body: 0, prepared: [] };\n  refused(() => fn(spy), code);\n"
@@ -118,6 +118,34 @@ MUTANTS = [
                 "  refused(() => { const spy = { body: 0, prepared: [] }; fn(spy); reached += spy.body; }, code);\n"
                 "  assert.equal(reached, 0, 'no body source may start on a refused provision');\n}",
      "kills": ["TEST-E-03 basis_and_bypass R5"]},
+    # Round 3 (D735, rule.md EMR-E deltas E-1..E-7): one mutant per delta class, killed by the shared table or its own case.
+    {"id": "M-E-D1", "required": True, "title": "E-1 only the first frame's Frame Type is read", "file": "emr-image/manifest.ts",
+     "find": "  for (const f of perFrame) {", "replace": "  for (const f of perFrame.slice(0, 1)) {",
+     "kills": ["TEST-D735-BTO-ONE-FRAME-TYPE-MISSING"]},
+    {"id": "M-E-D2", "required": True, "title": "E-2 Image Type and Frame Type mismatch accepted (E-R2-01)", "file": "emr-image/manifest.ts",
+     "find": "    if (typeKey(strings(ft[0], '00089007')) !== key) fail('frame-type-mismatch');\n", "replace": "",
+     "kills": ["TEST-D735-BTO-TYPE-MISMATCH-ORIGIN"]},
+    {"id": "M-E-D3", "required": True, "title": "E-3 Volumetric Properties alone decides slices or slab (E-R2-03)", "file": "emr-image/manifest.ts",
+     "find": "  const g = geometry(shared, perFrame, itemsOf(h, '00209222'));",
+     "replace": "  let g: { t: number; d: number }; try { g = geometry(shared, perFrame, itemsOf(h, '00209222')); } catch {"
+                " return { base: vp === 'VOLUME' ? 'dbt-slices' : 'dbt-slab', basis: 'volumetric-properties', representation: vp === 'VOLUME' ? 'slices' : 'slab', biopsy: null }; }",
+     "kills": ["TEST-D735-DBT-SAMPLED-ALONE"]},
+    {"id": "M-E-D4", "required": True, "title": "E-4 unknown partial counted as a full view", "file": "emr-image/manifest.ts",
+     "find": "    f.partial === 'no' && presentation !== 'processing'",
+     "replace": "    f.partial !== 'yes' && f.partial !== 'conflict' && presentation !== 'processing'",
+     "kills": ["TEST-D735-PARTIAL-ABSENT"]},
+    {"id": "M-E-D5", "required": True, "title": "E-5 an unverified target accepted as a synthetic 2D source (E-R2-02)", "file": "emr-image/manifest.ts",
+     "find": "  if (target.c.result.status !== 'verified' || !SOURCE_CLASSES.includes(target.c.result.baseClass)) return",
+     "replace": "  if (target.c.result.status === 'verified' && !SOURCE_CLASSES.includes(target.c.result.baseClass)) return",
+     "kills": ["TEST-D735-SOURCE-SC-UNVERIFIED"]},
+    {"id": "M-E-D6", "required": True, "title": "E-6 classification and rule version left out of the manifest digest", "file": "emr-image/manifest.ts",
+     "find": "JSON.stringify({ formatVersion: 1, classificationRule, studyUid, managingInstitution, patient, objects, decoders, viewer })",
+     "replace": "JSON.stringify({ formatVersion: 1, studyUid, managingInstitution, patient, objects: objects.map(o => ({ ...o, mammography: null })), decoders, viewer })",
+     "kills": ["TEST-E-02 manifest_sources A4"]},
+    {"id": "M-E-D7", "required": True, "title": "E-7 thick geometry alone named a slab without an aggregation pair", "file": "emr-image/manifest.ts",
+     "find": "  if (g.t > 3 && g.t + tol(g.d) >= g.d && SLAB_PAIRS.includes(`${v4}|${technique}`))",
+     "replace": "  if (g.t > 3 && g.t + tol(g.d) >= g.d)",
+     "kills": ["TEST-D735-DBT-THICKNESS-ALONE"]},
 ]
 
 TOP = re.compile(r"^(ok|not ok) (\d+) - (.*)$")
@@ -223,6 +251,7 @@ def main():
                 work.mkdir(parents=True)
                 path, source_dir = work / TEST.name, base
                 shutil.copy2(TEST, path)
+                shutil.copy2(TEST.parent / "rule-cases.json", work / "rule-cases.json")
                 test_path = path
             else:
                 work = Path(temporary) / mutant["id"] / "src"
@@ -241,7 +270,7 @@ def main():
             results = parse_tap(text) if code is not None else {}
             collected = list(results)
             collected_all = sorted(collected) == sorted(cases) and not any(r.get("duplicate") for r in results.values())
-            named = [n for n in collected if any(n.startswith(prefix + " ") for prefix in mutant["kills"])]
+            named = [n for n in collected if any(n == prefix or n.startswith(prefix + " ") for prefix in mutant["kills"])]
             killed_by = [n for n in named if not results[n]["ok"] and results[n]["code"] == "ERR_ASSERTION"]
             others = [n for n, r in results.items() if not r["ok"] and n not in killed_by]
             entry.update(exit=code, collected_all=collected_all, named_cases=named,

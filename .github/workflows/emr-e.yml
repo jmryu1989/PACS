@@ -44,11 +44,11 @@ jobs:
         run: ./node_modules/.bin/prisma generate
       - name: Typecheck the API including api/src/emr-image
         run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/typecheck --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json -- api/node_modules/.bin/tsc --noEmit -p api
-      - name: TEST-E-01..05 declared allow/refuse cases
-        run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/contract --cwd . --tree api/src/emr-contract --tree api/src/emr-image --file api/tsconfig.json --file api/package-lock.json --file tests/emr/e/contract_test.cjs -- node --test --test-reporter=tap tests/emr/e/contract_test.cjs
+      - name: TEST-E-01..05 declared allow/refuse cases and the shared D735 mammography table
+        run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/contract --cwd . --tree api/src/emr-contract --tree api/src/emr-image --file api/tsconfig.json --file api/package-lock.json --file tests/emr/e/contract_test.cjs --file tests/emr/e/rule-cases.json -- node --test --test-reporter=tap tests/emr/e/contract_test.cjs
       - name: M-E-01..07 and supplementary mutants on an out-of-tree copy
         if: ${{ !cancelled() }}
-        run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/mutants --cwd . --tree api/src/emr-contract --tree api/src/emr-image --file api/tsconfig.json --file tests/emr/e/contract_test.cjs --file tests/emr/e/mutants.py -- python3 -B tests/emr/e/mutants.py --out tmp/emr-e-ci/mutants/mutants.json
+        run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/mutants --cwd . --tree api/src/emr-contract --tree api/src/emr-image --file api/tsconfig.json --file tests/emr/e/contract_test.cjs --file tests/emr/e/rule-cases.json --file tests/emr/e/mutants.py -- python3 -B tests/emr/e/mutants.py --out tmp/emr-e-ci/mutants/mutants.json
       - name: Raw run evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
