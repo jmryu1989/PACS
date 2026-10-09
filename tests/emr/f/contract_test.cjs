@@ -137,7 +137,8 @@ const query = (extra = {}) => ({ from: PERIOD.from, to: PERIOD.to, ...extra });
 // Fixed versions (C's listing in round 2)
 function signedVersion(recordId, versionId, at, previous, o = {}) {
   const patient = o.patient ?? P1, studyId = o.study ?? 'study-1', inst = o.inst ?? INST_X;
-  const sha = hex(`${recordId}:${versionId}:sha`), content = hex(`${recordId}:${versionId}:content`);
+  const text = { kind: 'report', findings: `findings ${versionId}`, conclusion: 'conclusion', recommendation: '' };
+  const sha = hex(`${recordId}:${versionId}:sha`), content = hex(JSON.stringify(text));
   const event = { eventId: `${recordId}:${versionId}`, recordId, versionId, sha256: sha, contentSha256: content, at,
     act: previous ? 'correction' : 'entry', signature: { versionId, sha256: sha, signedAt: at, verified: true },
     predecessor: previous ? { recordId, partId: previous.resolved.event.versionId, sha256: previous.resolved.event.sha256 } : null,
@@ -145,7 +146,7 @@ function signedVersion(recordId, versionId, at, previous, o = {}) {
   storedRows.set(`${recordId}:${event.eventId}`, { recordId, model: 'ReportVersion', row: {}, event });
   const resolved = C.resolveStoredRecord(caps.stored, recordId, event.eventId);
   const payload = S.canonicalPayload({ formatVersion: 'emr-signature/1',
-    text: { kind: 'report', findings: `findings ${versionId}`, conclusion: 'conclusion', recommendation: '' },
+    text,
     patient: o.signedPatient ?? patient, studyId, managingInstitutionId: inst, actingInstitutionId: inst, recordKind: 'report-version',
     recordId: o.signedRecord ?? recordId, versionId, author: id('dr-1'), signer: id('dr-1'), identityRegistrationId: 'reg-1',
     action: previous ? 'amend' : 'approve-sign', serverTime: at,
@@ -722,10 +723,10 @@ test('TEST-F-05 followup: every download of the month needs a confirmed reason b
 test('TEST-F-05 followup: an investigation closes only with a recorded action and a passing recheck by designated people', () => {
   const inspector = authorityFor('inspector-1', ['inspection']);
   const step = (cycle, s) => F.recordInspectionStep(inspector, cycle, s);
-  let cycle = step(reportedCycle(['dl-1']), { kind: 'reviewed', at: '2026-11-02T00:00:00.000Z', conclusion: 'anomaly-found', note: 'odd night access' });
-  cycle = step(cycle, { kind: 'download-reason', at: '2026-11-02T00:01:00.000Z', eventId: 'dl-1', reason: 'unclear', outcome: 'investigate' });
+  let cycle = step(reportedCycle(['dl-1']), { kind: 'investigation-opened', at: '2026-11-02T00:00:00.000Z', investigationId: 'inv-1', eventIds: ['dl-1', 'evt-9'], summary: 'night download' });
+  cycle = step(cycle, { kind: 'reviewed', at: '2026-11-02T00:00:00.000Z', conclusion: 'anomaly-found', note: 'odd night access', investigationId: 'inv-1' });
+  cycle = step(cycle, { kind: 'download-reason', at: '2026-11-02T00:01:00.000Z', eventId: 'dl-1', reason: 'unclear', outcome: 'investigate', investigationId: 'inv-1' });
   assert.deepEqual([...F.inspectionStatus(cycle).uninvestigated], ['dl-1']);
-  cycle = step(cycle, { kind: 'investigation-opened', at: '2026-11-02T00:02:00.000Z', investigationId: 'inv-1', eventIds: ['dl-1', 'evt-9'], summary: 'night download' });
   refused(() => step(cycle, { kind: 'closed', at: '2026-11-02T00:03:00.000Z' }), 'InspectionFollowUpOpen', 'an investigation without action');
   cycle = step(cycle, { kind: 'action-recorded', at: '2026-11-02T00:04:00.000Z', investigationId: 'inv-1', action: 'account suspended pending interview' });
   cycle = step(cycle, { kind: 'rechecked', at: '2026-11-03T00:00:00.000Z', investigationId: 'inv-1', result: 'not-resolved', note: 'interview pending' });
@@ -1008,8 +1009,8 @@ test('TEST-F-05 followup: every new action needs a later recheck before closing 
   const inspector = authorityFor('inspector-1');
   const at = '2026-11-02T01:00:00.000Z';
   const step = (cycle, input) => F.recordInspectionStep(inspector, cycle, { at, ...input });
-  let cycle = step(reportedCycle(), { kind: 'reviewed', conclusion: 'anomaly-found', note: 'night activity' });
-  cycle = step(cycle, { kind: 'investigation-opened', investigationId: 'follow-1', eventIds: ['e-1'], summary: 'investigation' });
+  let cycle = step(reportedCycle(), { kind: 'investigation-opened', investigationId: 'follow-1', eventIds: ['e-1'], summary: 'investigation' });
+  cycle = step(cycle, { kind: 'reviewed', conclusion: 'anomaly-found', note: 'night activity', investigationId: 'follow-1' });
   cycle = step(cycle, { kind: 'action-recorded', investigationId: 'follow-1', action: 'restrict account' });
   cycle = step(cycle, { kind: 'rechecked', investigationId: 'follow-1', result: 'resolved', note: 'access stopped' });
   assert.equal(F.inspectionStatus(cycle).state, 'ready-to-close');
@@ -1057,16 +1058,18 @@ test('TEST-F-07 incident_scope: confirmed priority and additional notices and PI
     newlyConfirmedAt: '2026-10-11T02:00:00.000Z', reportTriggers: ['sensitive-or-unique'] });
   const notices = F.planIncidentResponse(auditor, scope, input).obligations;
   assert.deepEqual(notices.map(n => [n.kind, n.recipient, n.dueAt]), [
+    ['possible-leak', 'all-possibly-affected-subjects', '2026-10-12T02:00:00.000Z'],
     ['confirmed-priority', 'affected-subjects', '2026-10-12T02:00:00.000Z'],
     ['confirmed-additional', 'affected-subjects', '2026-10-11T02:00:00.000Z'],
     ['pipc-kisa-priority', 'PIPC-or-KISA', '2026-10-13T02:00:00.000Z'],
     ['pipc-kisa-additional', 'PIPC-or-KISA', '2026-10-11T02:00:00.000Z'],
   ]);
-  assert.ok(notices[0].requiredFields.includes('legal-rights-and-exercise'));
-  assert.ok(notices[2].requiredFields.includes('facts-known-so-far'));
-  assert.ok(notices.every(n => n.status === 'pending'));
+  assert.ok(notices[1].requiredFields.includes('legal-rights-and-exercise'));
+  assert.ok(notices[3].requiredFields.includes('facts-known-so-far'));
+  assert.equal(notices[0].status, 'moot');
+  assert.ok(notices.slice(1).every(n => n.status === 'pending'));
   const complete = F.planIncidentResponse(auditor, scope, incidentFacts({ ...input, detailsComplete: true, newlyConfirmedAt: null }));
-  assert.deepEqual(complete.obligations.map(n => n.kind), ['confirmed-leak', 'pipc-kisa-report']);
+  assert.deepEqual(complete.obligations.map(n => n.kind), ['possible-leak', 'confirmed-leak', 'pipc-kisa-report']);
   assert.ok(complete.obligations[1].requiredFields.includes('legal-rights-and-exercise'));
   const overdue = F.planIncidentResponse(auditor, scope, incidentFacts({ status: 'confirmed', determinationAt: '2026-10-15T02:00:00.000Z' }));
   assert.equal(overdue.obligations[0].kind, 'possible-leak');
@@ -1082,11 +1085,162 @@ test('TEST-F-07 incident_scope: not-a-leak follow-up and immediate MOHW notice r
     medicalIncident: { occurredAt: '2026-10-09T00:00:00.000Z', discoveredAt: '2026-10-09T02:00:00.000Z' } });
   const result = F.planIncidentResponse(auditor, scope, facts);
   assert.deepEqual(result.obligations.map(n => [n.kind, n.recipient, n.timing, n.dueAt, n.status]), [
+    ['possible-leak', 'all-possibly-affected-subjects', 'without-delay-within-72-hours', '2026-10-12T02:00:00.000Z', 'met'],
     ['not-a-leak', 'previously-notified-subjects', 'immediate', '2026-10-11T02:00:00.000Z', 'pending'],
-    ['mohw-notice', 'MOHW', 'immediate', '2026-10-09T02:00:00.000Z', 'pending'],
+    ['mohw-notice', 'MOHW', 'immediate', '2026-10-09T02:00:00.000Z', 'missed'],
   ]);
-  assert.deepEqual(result.obligations[1].requiredFields, ['institution-name', 'incident-time', 'damage-details', 'technical-support-request']);
-  assert.deepEqual(F.planIncidentResponse(auditor, scope, { ...facts, priorPossibleNotice: null, medicalIncident: null }).obligations, []);
+  assert.deepEqual(result.obligations[2].requiredFields, ['institution-name', 'incident-time', 'damage-details', 'technical-support-request']);
+  assert.equal(F.planIncidentResponse(auditor, scope, { ...facts, priorPossibleNotice: null, medicalIncident: null }).obligations[0].status, 'moot');
   refused(() => F.planIncidentResponse(authorityFor('foreign', ALL_SCOPES, INST_Y), scope, facts), 'AuditScopeNotGranted', 'foreign incident');
   refused(() => F.planIncidentResponse(auditor, scope, { ...facts, sent: true }), 'IncidentResponseRefused', 'a template cannot claim delivery');
+});
+
+test('TEST-F-07 incident_scope: a late no-breach verdict permanently retains the missed possibility obligation', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const facts = incidentFacts({ status: 'not-a-leak', determinationAt: '2026-10-15T02:00:00.000Z' });
+  const before = clone(facts);
+  const result = F.planIncidentResponse(auditor, scope, facts);
+  assert.equal(result.verdict, 'not-a-leak');
+  const missed = result.obligations.find(o => o.kind === 'possible-leak');
+  assert.equal(missed?.status, 'missed', 'M-F-R2-001: a late no-breach verdict retains the missed obligation');
+  assert.deepEqual([missed.triggeredAt, missed.dueAt, missed.notice], [facts.awarenessAt, '2026-10-12T02:00:00.000Z', null]);
+  assert.deepEqual(missed.basis, ['privacy:34.2', 'privacy-decree:39-2', 'privacy-decree:39-3.1']);
+  const lateNotice = { noticeId: 'late-notice', sentAt: '2026-10-14T02:00:00.000Z' };
+  const next = F.planIncidentResponse(auditor, scope, { ...facts, priorPossibleNotice: lateNotice }, { previous: result });
+  assert.equal(next.obligations[0].status, 'missed', 'a late notice cannot repair the missed deadline');
+  assert.deepEqual(next.obligations[0].notice, lateNotice);
+  const retrospect = F.planIncidentResponse(auditor, scope, facts, { previous: result, notices: [
+    { kind: 'possible-leak', triggeredAt: facts.awarenessAt, noticeId: 'later-recorded-evidence', sentAt: '2026-10-10T02:00:00.000Z' },
+  ] });
+  assert.equal(retrospect.obligations[0].status, 'missed', 'a recorded missed status is never relabelled by subsequently supplied evidence');
+  const later = F.planIncidentResponse(auditor, scope, { ...facts, determinationAt: '2026-10-20T02:00:00.000Z' }, { previous: next });
+  assert.deepEqual(later.obligations[0], next.obligations[0]);
+  assert.equal(later.obligations.find(o => o.kind === 'not-a-leak').status, 'missed', 'follow-up notice history is retained too');
+  assert.deepEqual(facts, before);
+});
+
+test('TEST-F-07 incident_scope: a no-breach verdict before the deadline makes the obligation moot without erasing it', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const facts = incidentFacts({ status: 'not-a-leak', determinationAt: '2026-10-11T02:00:00.000Z' });
+  const result = F.planIncidentResponse(auditor, scope, facts);
+  assert.equal(result.verdict, 'not-a-leak');
+  assert.deepEqual(result.obligations.map(o => [o.kind, o.status, o.triggeredAt, o.dueAt]),
+    [['possible-leak', 'moot', facts.awarenessAt, '2026-10-12T02:00:00.000Z']]);
+  const later = F.planIncidentResponse(auditor, scope, { ...facts, determinationAt: '2026-10-15T02:00:00.000Z' }, { previous: result });
+  assert.deepEqual(later.obligations, result.obligations, 'a moot obligation stays moot after its former deadline');
+  const boundary = F.planIncidentResponse(auditor, scope, { ...facts, determinationAt: '2026-10-12T02:00:00.000Z' },
+    { asOf: '2026-10-12T02:00:00.001Z' });
+  assert.equal(boundary.obligations[0].status, 'missed', 'only a verdict BEFORE the deadline moots the obligation');
+});
+
+test('TEST-F-07 incident_scope: met notices and prior confirmed obligations remain bound across a later verdict', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const notice = { noticeId: 'on-time', sentAt: '2026-10-09T02:30:00.000Z' };
+  const initial = F.planIncidentResponse(auditor, scope, incidentFacts({ priorPossibleNotice: notice }));
+  assert.equal(initial.obligations[0].status, 'met');
+  assert.deepEqual(initial.obligations[0].notice, notice);
+  const facts = incidentFacts({ status: 'confirmed', determinationAt: '2026-10-10T02:00:00.000Z', detailsComplete: true,
+    priorPossibleNotice: notice, reportTriggers: ['sensitive-or-unique'] });
+  const confirmed = F.planIncidentResponse(auditor, scope, facts, { previous: initial, notices: [
+    { kind: 'confirmed-leak', triggeredAt: facts.determinationAt, noticeId: 'confirmed-notice', sentAt: facts.determinationAt },
+  ] });
+  const finalFacts = { ...facts, status: 'not-a-leak', determinationAt: '2026-10-15T02:00:00.000Z', reportTriggers: [] };
+  const final = F.planIncidentResponse(auditor, scope, finalFacts, { previous: confirmed });
+  assert.deepEqual(final.obligations.map(o => [o.kind, o.status]),
+    [['possible-leak', 'met'], ['confirmed-leak', 'met'], ['pipc-kisa-report', 'missed'], ['not-a-leak', 'pending']]);
+  refused(() => F.planIncidentResponse(auditor, scope, { ...finalFacts, incidentId: 'other' }, { previous: final }),
+    'IncidentResponseRefused', 'another incident cannot inherit this history');
+  refused(() => F.planIncidentResponse(auditor, scope, facts, { previous: final }),
+    'IncidentResponseRefused', 'history cannot move backwards');
+});
+
+function resolvedInspection() {
+  const inspector = authorityFor('r2-inspector'), at = '2026-11-02T01:00:00.000Z';
+  const step = (cycle, input) => F.recordInspectionStep(inspector, cycle, { at, ...input });
+  let cycle = step(reportedCycle(['dl-new']), { kind: 'reviewed', conclusion: 'anomaly-found', note: 'old anomaly' });
+  const investigationId = cycle.events.at(-1).investigationId;
+  cycle = step(cycle, { kind: 'download-reason', eventId: 'dl-new', outcome: 'legitimate', reason: 'initial review' });
+  cycle = step(cycle, { kind: 'action-recorded', investigationId, action: 'old anomaly remedied' });
+  cycle = step(cycle, { kind: 'rechecked', investigationId, result: 'resolved', note: 'old remedy verified' });
+  assert.equal(F.inspectionStatus(cycle).state, 'ready-to-close');
+  return { cycle, investigationId, step, inspector, at };
+}
+
+test('TEST-F-05 followup: a new anomaly after a resolved investigation needs its own action and recheck', () => {
+  const old = resolvedInspection(), before = clone(old.cycle);
+  let cycle = old.step(old.cycle, { kind: 'reviewed', conclusion: 'anomaly-found', note: 'new unrelated anomaly' });
+  assert.equal(F.inspectionStatus(cycle).state, 'in-follow-up', 'M-F-R2-002: a new anomaly cannot reuse an old resolution');
+  const investigationId = cycle.events.at(-1).investigationId;
+  assert.notEqual(investigationId, old.investigationId);
+  refused(() => old.step(cycle, { kind: 'closed' }), 'InspectionFollowUpOpen', 'new finding has no remedy');
+  const forged = { ...cycle, events: [...cycle.events, { kind: 'closed', at: old.at, by: id('r2-inspector') }] };
+  refused(() => F.inspectionStatus(forged), 'InspectionFollowUpOpen', 'reload refuses premature closure too');
+  cycle = old.step(cycle, { kind: 'action-recorded', investigationId, action: 'new remedy' });
+  refused(() => old.step(cycle, { kind: 'closed' }), 'InspectionFollowUpOpen', 'new action has no recheck');
+  cycle = old.step(cycle, { kind: 'rechecked', investigationId, result: 'resolved', note: 'new remedy checked' });
+  assert.equal(F.inspectionStatus(old.step(cycle, { kind: 'closed' })).state, 'closed');
+  assert.deepEqual(old.cycle, before);
+});
+
+test('TEST-F-05 followup: reopening a resolved finding creates a new investigation and cannot relabel the old resolution', () => {
+  const old = resolvedInspection();
+  let cycle = old.step(old.cycle, { kind: 'reviewed', conclusion: 'anomaly-found', note: 'same anomaly recurred', investigationId: old.investigationId });
+  const nextId = cycle.events.at(-1).investigationId;
+  assert.notEqual(nextId, old.investigationId, 'a resolved investigation is not open for attachment');
+  assert.deepEqual(F.inspectionStatus(cycle).openInvestigations, [nextId]);
+  const history = clone(cycle.events.slice(0, old.cycle.events.length));
+  cycle = old.step(cycle, { kind: 'action-recorded', investigationId: old.investigationId, action: 'old case note' });
+  cycle = old.step(cycle, { kind: 'rechecked', investigationId: old.investigationId, result: 'resolved', note: 'old case checked again' });
+  refused(() => old.step(cycle, { kind: 'closed' }), 'InspectionFollowUpOpen', 'another investigation cannot cover the reopened finding');
+  cycle = old.step(cycle, { kind: 'action-recorded', investigationId: nextId, action: 'recurrence remedied' });
+  cycle = old.step(cycle, { kind: 'rechecked', investigationId: nextId, result: 'resolved', note: 'recurrence checked' });
+  assert.equal(F.inspectionStatus(old.step(cycle, { kind: 'closed' })).state, 'closed');
+  assert.deepEqual(cycle.events.slice(0, old.cycle.events.length), history);
+});
+
+test('TEST-F-05 followup: each finding attached to an open investigation needs a subsequent action and recheck', () => {
+  const old = resolvedInspection();
+  let cycle = old.step(old.cycle, { kind: 'reviewed', conclusion: 'anomaly-found', note: 'first new finding' });
+  const investigationId = cycle.events.at(-1).investigationId;
+  cycle = old.step(cycle, { kind: 'action-recorded', investigationId, action: 'first finding addressed' });
+  cycle = old.step(cycle, { kind: 'download-reason', eventId: 'dl-new', reason: 'new evidence', outcome: 'investigate', investigationId });
+  assert.equal(cycle.events.at(-1).investigationId, investigationId, 'named open investigation receives the finding');
+  cycle = old.step(cycle, { kind: 'rechecked', investigationId, result: 'resolved', note: 'first action checked' });
+  refused(() => old.step(cycle, { kind: 'closed' }), 'InspectionFollowUpOpen', 'second finding has no action even though the first action was rechecked');
+  cycle = old.step(cycle, { kind: 'action-recorded', investigationId, action: 'both findings addressed' });
+  refused(() => old.step(cycle, { kind: 'closed' }), 'InspectionFollowUpOpen', 'new action needs a later recheck');
+  cycle = old.step(cycle, { kind: 'rechecked', investigationId, result: 'resolved', note: 'both remedies verified' });
+  assert.equal(F.inspectionStatus(old.step(cycle, { kind: 'closed' })).state, 'closed');
+});
+
+function checkSignatureMismatch(field, change) {
+  const officer = authorityFor('r2-officer'), approval = F.approveDisclosure(officer, copyRequest(), NOW);
+  assert.equal(F.prepareDisclosurePackage(officer, approval, [listingOf('rep-1', [V1, V2])], PREPARED_AT).manifest.records[0].versions.length, 2);
+  const evidence = clone(V2.evidence), payload = JSON.parse(Buffer.from(evidence.envelope.payload, 'base64url').toString('utf8'));
+  change(payload);
+  evidence.envelope.payload = b64u(S.canonicalPayload(payload));
+  const listings = [listingOf('rep-1', [V1, V2], { signatures: [V1.evidence, evidence] })], before = clone(listings);
+  let produced = null;
+  refused(() => { produced = F.prepareDisclosurePackage(officer, approval, listings, PREPARED_AT); },
+    'SignatureEvidenceMismatch', `M-F-R2-003-${field}: contradictory signature refuses the package`);
+  assert.equal(produced, null);
+  assert.deepEqual(listings, before);
+}
+test('TEST-F-03 lawful_issue: signature record id must equal the stored fixed version', () => {
+  checkSignatureMismatch('record', p => { p.recordId = 'wrong-record'; p.previousVersion.recordId = 'wrong-record'; });
+});
+test('TEST-F-03 lawful_issue: signature version id must equal the stored fixed version', () => {
+  checkSignatureMismatch('version', p => { p.versionId = 'wrong-version'; });
+});
+test('TEST-F-03 lawful_issue: signature content hash must equal the stored fixed version', () => {
+  checkSignatureMismatch('content', p => { p.text.findings = 'different signed content'; });
+});
+test('TEST-F-03 lawful_issue: signature signed-at time must equal the stored fixed version', () => {
+  checkSignatureMismatch('time', p => { p.serverTime = '2026-10-05T04:00:00.000Z'; });
+});
+test('TEST-F-03 lawful_issue: signature predecessor hash must equal the stored fixed version', () => {
+  checkSignatureMismatch('predecessor', p => { p.previousVersion.sha256 = hex('wrong predecessor'); });
+  checkSignatureMismatch('time-and-predecessor', p => {
+    p.serverTime = '2026-10-05T04:00:00.000Z'; p.previousVersion.sha256 = hex('wrong predecessor');
+  });
 });

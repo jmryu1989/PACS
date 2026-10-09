@@ -170,7 +170,34 @@ MUTANTS = [
         "expect": "M-F-S7: possible-leak notice retains its 72-hour deadline and all-possible-subject audience",
     },
 ]
-# The exact round-1 selection of tests/emr/f/contract_test.cjs, written by hand (never generated from a run). The
+MUTANTS += [
+    {
+        "id": "M-F-R2-001", "title": "a no-breach verdict erases the possibility obligation", "file": "contract.ts",
+        "old": "  if (f.possibleGround !== null) {\n",
+        "new": "  if (f.possibleGround !== null && f.status !== 'not-a-leak') {\n",
+        "case": "TEST-F-07 incident_scope: a late no-breach verdict permanently retains the missed possibility obligation",
+        "expect": "M-F-R2-001: a late no-breach verdict retains the missed obligation",
+    },
+    {
+        "id": "M-F-R2-002", "title": "the old investigation resolution hides the new finding investigation", "file": "contract.ts",
+        "old": "    const openInvestigations = [...investigations.keys()].filter(id => {\n",
+        "new": "    const openInvestigations = [...investigations.keys()].slice(0, 1).filter(id => {\n",
+        "case": "TEST-F-05 followup: a new anomaly after a resolved investigation needs its own action and recheck",
+        "expect": "M-F-R2-002: a new anomaly cannot reuse an old resolution",
+    },
+    {
+        "id": "M-F-R2-003", "title": "copy issuance ignores fixed signature time and predecessor binding", "file": "contract.ts",
+        "old": "        if (digest(payload.text) !== e.contentSha256 || payload.serverTime !== e.signature.signedAt ||\n"
+               "            payload.serverTime !== e.at || (e.predecessor === null ? payload.previousVersion !== null :\n"
+               "              payload.previousVersion === null || payload.previousVersion.recordId !== e.predecessor.recordId ||\n"
+               "              payload.previousVersion.versionId !== e.predecessor.partId || payload.previousVersion.sha256 !== e.predecessor.sha256))\n"
+               "          refuse('SignatureEvidenceMismatch');\n",
+        "new": "",
+        "case": "TEST-F-03 lawful_issue: signature signed-at time must equal the stored fixed version",
+        "expect": "M-F-R2-003-time: contradictory signature refuses the package",
+    },
+]
+# The exact round-1 selection including repair round 2, written by hand (never generated from a run). The
 # baseline must collect exactly these cases, each once, all passing; R2 moves the declaration into emr/units/f.json.
 DECLARED_CASES = [
     "TEST-F-01 roster_scope: a designated auditor gets exactly the granted scopes and a general admin without a grant gets none",
@@ -213,6 +240,17 @@ DECLARED_CASES = [
     "TEST-F-07 incident_scope: possible leak notice covers all possibly affected subjects within 72 hours and an unknown population is never zero",
     "TEST-F-07 incident_scope: confirmed priority and additional notices and PIPC or KISA reports have separate deadlines and required fields",
     "TEST-F-07 incident_scope: not-a-leak follow-up and immediate MOHW notice remain distinct and a template is never sent evidence",
+    "TEST-F-07 incident_scope: a late no-breach verdict permanently retains the missed possibility obligation",
+    "TEST-F-07 incident_scope: a no-breach verdict before the deadline makes the obligation moot without erasing it",
+    "TEST-F-07 incident_scope: met notices and prior confirmed obligations remain bound across a later verdict",
+    "TEST-F-05 followup: a new anomaly after a resolved investigation needs its own action and recheck",
+    "TEST-F-05 followup: reopening a resolved finding creates a new investigation and cannot relabel the old resolution",
+    "TEST-F-05 followup: each finding attached to an open investigation needs a subsequent action and recheck",
+    "TEST-F-03 lawful_issue: signature record id must equal the stored fixed version",
+    "TEST-F-03 lawful_issue: signature version id must equal the stored fixed version",
+    "TEST-F-03 lawful_issue: signature content hash must equal the stored fixed version",
+    "TEST-F-03 lawful_issue: signature signed-at time must equal the stored fixed version",
+    "TEST-F-03 lawful_issue: signature predecessor hash must equal the stored fixed version",
 ]
 NOT_RUN = [
     {"id": "M-F-01-live", "status": "not_run", "reason": "the server roster check over B1 storage and the B2 caller context is round 2 "

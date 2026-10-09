@@ -519,16 +519,25 @@ export interface IncidentObligation {
     'pipc-kisa-report' | 'pipc-kisa-priority' | 'pipc-kisa-additional' | 'mohw-notice';
   recipient: 'all-possibly-affected-subjects' | 'affected-subjects' | 'previously-notified-subjects' | 'PIPC-or-KISA' | 'MOHW';
   dueAt: string; timing: 'without-delay-within-72-hours' | 'immediate';
-  requiredFields: readonly string[]; basis: readonly string[]; status: 'pending';
+  triggeredAt: string; requiredFields: readonly string[]; basis: readonly string[];
+  status: 'pending' | 'met' | 'missed' | 'moot';
+  notice: { noticeId: string; sentAt: string } | null;
 }
+export interface IncidentResponsePlan {
+  incidentId: string; institutionId: string; recordedBy: ImmutableIdentity; subjectsIdentifiable: boolean;
+  awarenessAt: string; verdict: IncidentResponseFacts['status']; determinationAt: string; asOf: string;
+  obligations: readonly IncidentObligation[]; status: 'planned';
+}
+export interface IncidentNoticeEvidence {
+  kind: IncidentObligation['kind']; triggeredAt: string; noticeId: string; sentAt: string;
+}
+const incidentResponses = new WeakSet<object>();
 const LEAK_NOTICE_FIELDS = freeze(['data-items', 'occurrence-and-circumstances', 'subject-protective-actions',
   'controller-response-and-remedies', 'contact-department', 'legal-rights-and-exercise']);
-/** Plans pending obligations only. A readable empty ledger never establishes "not a leak". No timer, external sender,
- * completed notice or emergency exemption is created here. An actual justified delay needs I's recorded procedure. */
-export function planIncidentResponse(authority: AuditAuthority, scope: IncidentScope, input: unknown): Readonly<{
-  incidentId: string; institutionId: string; recordedBy: ImmutableIdentity; subjectsIdentifiable: boolean;
-  obligations: readonly IncidentObligation[]; status: 'planned';
-}> {
+/** Retains obligations separately from the current verdict. The server supplies notice evidence and the preceding
+ * plan; a missed deadline is never repaired by a later verdict or notice. No external sending occurs here. */
+export function planIncidentResponse(authority: AuditAuthority, scope: IncidentScope, input: unknown,
+  history: { previous?: Readonly<IncidentResponsePlan>; notices?: readonly IncidentNoticeEvidence[]; asOf?: string } = {}): Readonly<IncidentResponsePlan> {
   requireScope(authority, 'investigate');
   if (!incidentScopes.has(scope)) refuse('IncidentScopeRequired');
   if (scope.institutionId !== authority.institutionId) refuse('AuditScopeNotGranted');
@@ -554,13 +563,22 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
     }
     return v as IncidentResponseFacts;
   });
-  const obligations: IncidentObligation[] = [];
+  const asOf = guarded('IncidentResponseRefused', () => utc(history.asOf ?? f.newlyConfirmedAt ?? f.determinationAt));
+  const previous = history.previous;
+  if (asOf < f.determinationAt || (f.newlyConfirmedAt !== null && asOf < f.newlyConfirmedAt) ||
+      (previous && (!incidentResponses.has(previous) || previous.incidentId !== f.incidentId ||
+        previous.institutionId !== authority.institutionId || previous.awarenessAt !== f.awarenessAt ||
+        previous.asOf > asOf || previous.determinationAt > f.determinationAt))) refuse('IncidentResponseRefused');
+  const obligations: IncidentObligation[] = (previous?.obligations ?? []).map(o => ({ ...o }));
   const hours72 = (at: string) => new Date(Date.parse(at) + 72 * 3_600_000).toISOString();
   const add = (kind: IncidentObligation['kind'], recipient: IncidentObligation['recipient'], dueAt: string,
-    timing: IncidentObligation['timing'], requiredFields: readonly string[], basis: readonly string[]) =>
-    obligations.push({ kind, recipient, dueAt, timing, requiredFields, basis, status: 'pending' });
-  if (f.priorPossibleNotice === null && (f.status === 'possible' ||
-      (f.status === 'confirmed' && f.possibleGround !== null && f.determinationAt > hours72(f.awarenessAt)))) {
+    timing: IncidentObligation['timing'], requiredFields: readonly string[], basis: readonly string[]) => {
+    const triggeredAt = kind === 'possible-leak' ? f.awarenessAt : kind === 'mohw-notice' ? f.medicalIncident!.discoveredAt :
+      kind.endsWith('-additional') ? f.newlyConfirmedAt! : f.determinationAt;
+    if (!obligations.some(o => o.kind === kind && o.triggeredAt === triggeredAt))
+      obligations.push({ kind, recipient, dueAt, timing, triggeredAt, requiredFields, basis, status: 'pending', notice: null });
+  };
+  if (f.possibleGround !== null) {
     add('possible-leak', 'all-possibly-affected-subjects', hours72(f.awarenessAt), 'without-delay-within-72-hours',
       ['possible-data-items', 'suspected-time-and-circumstances', ...LEAK_NOTICE_FIELDS.slice(2, 5), 'further-notice-on-determination'],
       ['privacy:34.2', 'privacy-decree:39-2', 'privacy-decree:39-3.1']);
@@ -588,8 +606,34 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
   }
   if (f.medicalIncident !== null) add('mohw-notice', 'MOHW', f.medicalIncident.discoveredAt, 'immediate',
     ['institution-name', 'incident-time', 'damage-details', 'technical-support-request'], ['medical:23-3.1', 'medical-rules:16-2.1']);
-  return freeze({ incidentId: f.incidentId, institutionId: authority.institutionId, recordedBy: authority.subject,
+  const notices = guarded('IncidentResponseRefused', () => {
+    if (history.notices !== undefined && !Array.isArray(history.notices)) throw new Error('Notice list required');
+    return [...(history.notices ?? []), ...(f.priorPossibleNotice ?
+      [{ kind: 'possible-leak' as const, triggeredAt: f.awarenessAt, ...f.priorPossibleNotice }] : [])].map(input => {
+      const n = object(input, ['kind', 'triggeredAt', 'noticeId', 'sentAt']);
+      string(n.noticeId); utc(n.triggeredAt); utc(n.sentAt);
+      if (!obligations.some(o => o.kind === n.kind && o.triggeredAt === n.triggeredAt) ||
+          n.sentAt < n.triggeredAt || n.sentAt > asOf) throw new Error('Unbound notice');
+      return n as IncidentNoticeEvidence;
+    });
+  });
+  for (const o of obligations) {
+    const notice = notices.filter(n => n.kind === o.kind && n.triggeredAt === o.triggeredAt)
+      .sort((a, b) => a.sentAt.localeCompare(b.sentAt))[0];
+    if (notice && o.notice === null) o.notice = { noticeId: notice.noticeId, sentAt: notice.sentAt };
+    if (o.status !== 'pending') continue;
+    const changedAt = o.kind === 'possible-leak' && f.status !== 'possible' ? f.determinationAt :
+      f.status === 'not-a-leak' && ['confirmed-leak', 'confirmed-priority', 'confirmed-additional',
+        'pipc-kisa-report', 'pipc-kisa-priority', 'pipc-kisa-additional'].includes(o.kind) ? f.determinationAt : null;
+    if (o.notice && o.notice.sentAt <= o.dueAt && (changedAt === null || o.notice.sentAt <= changedAt)) o.status = 'met';
+    else if (changedAt !== null && changedAt < o.dueAt) o.status = 'moot';
+    else if (asOf > o.dueAt) o.status = 'missed';
+  }
+  const result = freeze({ incidentId: f.incidentId, institutionId: authority.institutionId, recordedBy: authority.subject,
+    awarenessAt: f.awarenessAt, verdict: f.status, determinationAt: f.determinationAt, asOf,
     subjectsIdentifiable: scope.subjectsIdentifiable, obligations, status: 'planned' as const });
+  incidentResponses.add(result);
+  return result;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -751,6 +795,12 @@ function verifiedListing(input: unknown): { recordId: string; revision: string; 
         const payload = JSON.parse(payloadBytes.toString('utf8'));
         if (payload.recordId !== recordId || payload.versionId !== e.versionId || payload.studyId !== subject.studyId ||
             payload.managingInstitutionId !== subject.managingInstitutionId || !samePatient(payload.patient, subject.patient))
+          refuse('SignatureEvidenceMismatch');
+        // A's canonical payload fixes text field order and UTF-8 spelling; content excludes signing metadata.
+        if (digest(payload.text) !== e.contentSha256 || payload.serverTime !== e.signature.signedAt ||
+            payload.serverTime !== e.at || (e.predecessor === null ? payload.previousVersion !== null :
+              payload.previousVersion === null || payload.previousVersion.recordId !== e.predecessor.recordId ||
+              payload.previousVersion.versionId !== e.predecessor.partId || payload.previousVersion.sha256 !== e.predecessor.sha256))
           refuse('SignatureEvidenceMismatch');
         signature = { keyId, envelopeSha256: digest(x.envelope), publicKeyEvidenceId: string(x.publicKeyEvidenceId),
           identityEvidenceId: string(x.identityEvidenceId) };
@@ -1029,14 +1079,17 @@ function parseInspectionEvent(e: any): any {
     'download-reason': ['by', 'eventId', 'reason', 'outcome'], 'investigation-opened': ['by', 'investigationId', 'eventIds', 'summary'],
     'action-recorded': ['by', 'investigationId', 'action'], rechecked: ['by', 'investigationId', 'result', 'note'], closed: ['by'],
   }[kind];
-  const v = object(e, ['kind', 'at', ...keys]); utc(v.at);
+  const finding = (kind === 'reviewed' && e.conclusion === 'anomaly-found') ||
+    (kind === 'download-reason' && e.outcome === 'investigate');
+  const v = object(e, ['kind', 'at', ...keys, ...(finding ? ['investigationId'] : [])]); utc(v.at);
+  if (finding) string(v.investigationId);
   if (kind === 'report-generated') {
     if (v.generator !== 'system') throw new Error('Reports are generated by the system');
     sha256(v.reportSha256); integer(v.eventCount); uniqueStrings(v.downloadEventIds, true);
   } else identity(v.by);
   if (kind === 'reviewed') choice(v.conclusion, ['no-anomaly', 'anomaly-found']);
   if (kind === 'download-reason') { string(v.eventId); string(v.reason); choice(v.outcome, ['legitimate', 'investigate']); }
-  if (kind === 'investigation-opened') { string(v.investigationId); uniqueStrings(v.eventIds); string(v.summary); }
+  if (kind === 'investigation-opened') { string(v.investigationId); uniqueStrings(v.eventIds, true); string(v.summary); }
   if (kind === 'action-recorded') { string(v.investigationId); string(v.action); }
   if (kind === 'rechecked') { string(v.investigationId); choice(v.result, ['resolved', 'not-resolved']); string(v.note); }
   return v;
@@ -1061,24 +1114,36 @@ export function inspectionStatus(input: unknown): Readonly<{
     const reasons = new Map(events.filter(e => e.kind === 'download-reason').map(e => [e.eventId, e]));
     const investigations = new Map(events.filter(e => e.kind === 'investigation-opened').map(e => [e.investigationId, e]));
     if (investigations.size !== events.filter(e => e.kind === 'investigation-opened').length) throw new Error('Repeated investigation');
+    const findings = events.filter(e => (e.kind === 'reviewed' && e.conclusion === 'anomaly-found') ||
+      (e.kind === 'download-reason' && e.outcome === 'investigate'));
     for (const e of events) {
-      if ((e.kind === 'action-recorded' || e.kind === 'rechecked') &&
+      if ((e.kind === 'action-recorded' || e.kind === 'rechecked' || findings.includes(e)) &&
           (!investigations.has(e.investigationId) || events.indexOf(investigations.get(e.investigationId)) >= events.indexOf(e)))
         throw new Error('Investigation must precede its follow-up');
       if (e.kind === 'download-reason' && !report.downloadEventIds.includes(e.eventId)) throw new Error('Not a download of this month');
+      if (findings.includes(e)) {
+        const prior = events.slice(0, events.indexOf(e)).filter(p => p.investigationId === e.investigationId);
+        const action = prior.filter(p => p.kind === 'action-recorded').pop();
+        const recheck = prior.filter(p => p.kind === 'rechecked').pop();
+        const finding = prior.filter(p => findings.includes(p)).pop();
+        if (action && recheck?.result === 'resolved' && prior.indexOf(recheck) > prior.indexOf(action) &&
+            (!finding || prior.indexOf(action) > prior.indexOf(finding))) throw new Error('Resolved investigation cannot absorb a new finding');
+      }
     }
     const missingDownloadReasons = report ? report.downloadEventIds.filter(id => !reasons.has(id)) : [];
-    const covered = new Set([...investigations.values()].flatMap(i => i.eventIds));
-    const uninvestigated = [...reasons.values()].filter(r => r.outcome === 'investigate' && !covered.has(r.eventId)).map(r => r.eventId);
+    const uninvestigated = findings.filter(f => !events.some(e => e.kind === 'action-recorded' &&
+      e.investigationId === f.investigationId && events.indexOf(e) > events.indexOf(f)))
+      .filter(f => f.kind === 'download-reason').map(f => f.eventId);
     const openInvestigations = [...investigations.keys()].filter(id => {
       const action = events.filter(e => e.kind === 'action-recorded' && e.investigationId === id).pop();
       const recheck = events.filter(e => e.kind === 'rechecked' && e.investigationId === id).pop();
+      const latestFinding = findings.filter(e => e.investigationId === id).pop();
+      if (latestFinding && (!action || events.indexOf(action) <= events.indexOf(latestFinding))) return true;
       // A new action invalidates an older recheck, including steps sharing the same clock tick.
       return !action || recheck?.result !== 'resolved' || events.indexOf(recheck) <= events.indexOf(action);
     });
-    const anomalyOpen = review?.conclusion === 'anomaly-found' && investigations.size === 0;
     const open: InspectionState = !report ? 'awaiting-report' : !review ? 'report-only' :
-      missingDownloadReasons.length || uninvestigated.length || openInvestigations.length || anomalyOpen ? 'in-follow-up' : 'ready-to-close';
+      missingDownloadReasons.length || uninvestigated.length || openInvestigations.length ? 'in-follow-up' : 'ready-to-close';
     if (closings && open !== 'ready-to-close') refuse(open === 'report-only' ? 'HumanReviewRequired' : 'InspectionFollowUpOpen');
     return freeze({ state: closings ? 'closed' as const : open, missingDownloadReasons, uninvestigated, openInvestigations });
   });
@@ -1103,7 +1168,20 @@ export function recordInspectionStep(authority: AuditAuthority, cycle: Inspectio
   if (before.state === 'closed') refuse('InspectionClosed');
   if (step?.kind === 'report-generated' || (step && Object.prototype.hasOwnProperty.call(step, 'by'))) refuse('InspectionStepRefused');
   if (before.state === 'awaiting-report') refuse('InspectionReportRequired');
-  const next = { ...cycle, events: [...cycle.events, { ...step, by: authority.subject }] };
+  const events = [...cycle.events];
+  let recorded: Record<string, unknown> = { ...step, by: authority.subject };
+  if ((step.kind === 'reviewed' && step.conclusion === 'anomaly-found') ||
+      (step.kind === 'download-reason' && step.outcome === 'investigate')) {
+    // Only an explicitly named open investigation may absorb a finding. Resolved/unknown/unnamed creates a new one.
+    const named = step.investigationId;
+    if (named !== undefined) guarded('InspectionStepRefused', () => string(named));
+    const investigationId = typeof named === 'string' && before.openInvestigations.includes(named)
+      ? named : `investigation:${randomUUID()}`;
+    if (investigationId !== named) events.push({ kind: 'investigation-opened', at: step.at, by: authority.subject,
+      investigationId, eventIds: step.kind === 'download-reason' ? [step.eventId] : [], summary: step.note ?? step.reason });
+    recorded = { ...recorded, investigationId };
+  }
+  const next = { ...cycle, events: [...events, recorded] };
   try { inspectionStatus(next); } catch (error) {
     if (error instanceof ContractError && error.code === 'InspectionCycleRefused') refuse('InspectionStepRefused');
     throw error;
