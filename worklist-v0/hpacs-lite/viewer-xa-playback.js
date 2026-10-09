@@ -191,6 +191,8 @@
           throw entry.error;
         }
         time.clearTimeout(entry.timer);
+        // Answered in the same turn it was let go: nobody holds it any more, so the image goes straight back.
+        if (shared.frames.get(key) !== entry) { release(entry, image); entry.error = { kind: 'cancelled', status: null }; throw entry.error; }
         entry.state = 'ready'; entry.image = image; budget.ready(key);
         schedulePump();
         return entry;
@@ -247,7 +249,7 @@
         if (!entry) {
           own.delete(index);
           let r = request(index, true);
-          if (r.refused === 'bytes' || r.refused === 'prepared') {
+          if (r.refused === 'bytes' || r.refused === 'prepared' || r.refused === 'queued') {
             // Never wait on this viewport's own look-ahead: give it back first, in the same turn, then ask again.
             for (const i of [...own]) if (i !== shown && i !== index) letGo(i);
             r = request(index, true);

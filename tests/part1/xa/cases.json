@@ -1,0 +1,94 @@
+{
+ "unit": "E-XA",
+ "round": 1,
+ "order": "C:/Users/norne/PACS/tmp/astra-control/evidence/emg-exa-prep-20261009/e-xa-order.md",
+ "rule": "Hand-written declaration, never generated from a run. tests/part1/xa/mutants.py --check-cases compares it both ways with the cases the runners actually collect and with the mutant table.",
+ "requirements": [
+  {"req": "REQ-XA-01", "risk": "RISK-XA-CODEC", "test": "XA01", "allowed": "stored XA frame identity, pixels and compressed frames decode as stored", "refused": "an unsupported or damaged frame or identity is never success"},
+  {"req": "REQ-XA-02", "risk": "RISK-XA-FALSE-TIME", "test": "XA02", "allowed": "Frame Time, a non-uniform Frame Time Vector or Enhanced Frame Content time is the source timeline; manual speed is named apart", "refused": "wrong length, NaN, negative, a non-zero first increment or a pointer contradiction is Unverified"},
+  {"req": "REQ-XA-03", "risk": "RISK-XA-OMIT", "test": "XA03", "allowed": "first/last/forward/reverse/yoyo/range over every stored frame", "refused": "duplicated end frame, a missing last frame or an index offset"},
+  {"req": "REQ-XA-04", "risk": "RISK-XA-OOM", "test": "XA04", "allowed": "601-frame and >128 MiB runs played through a bounded window", "refused": "whole-run preload, truncation at 500, in-flight frames left out of the budget, more than four decodes"},
+  {"req": "REQ-XA-05", "risk": "RISK-XA-STALE", "test": "XA05", "allowed": "brief buffering keeps the position", "refused": "a late answer after stop/seek, A->B->A or a session end reaches the screen"},
+  {"req": "REQ-XA-06", "risk": "RISK-XA-FALSE-SUCCESS", "test": "XA06", "allowed": "a middle frame failure stops at the last shown frame and Retry continues there", "refused": "403, codec failure, cancellation or a prepared frame counts as shown"},
+  {"req": "REQ-XA-07", "risk": "RISK-XA-REGRESSION", "test": "XA07", "allowed": "XA goes to XA playback, US/RF/other stay on their path, stored pixels are unchanged", "refused": "re-subtraction, pixel shift, flattening several objects or dimensions into one run"},
+  {"req": "REQ-XA-08", "risk": "RISK-XA-FALSE-READ", "test": "XA08", "allowed": "requested, provided and displayed are separate facts", "refused": "interrupted bytes or a prefetch reported as displayed"}
+ ],
+ "planned_counts": {"model": 12, "dom": 10, "dicom": 8},
+ "suites": {
+  "model": {
+   "path": "tests/part1/xa/model_test.cjs",
+   "runner": "node --test tests/part1/xa/model_test.cjs",
+   "cases": [
+    {"id": "XA01-MODEL-ALLOW", "req": "REQ-XA-01", "risk": "RISK-XA-CODEC", "test": "XA01", "name": "XA01 allow: a stored XA run keeps SOP/frame identity apart from the viewport index and goes to XA playback"},
+    {"id": "XA01-MODEL-REJECT", "req": "REQ-XA-01", "risk": "RISK-XA-CODEC", "test": "XA01", "name": "XA01 reject: a still, another modality, several objects or damaged identity never becomes an XA time run"},
+    {"id": "XA02-MODEL-ALLOW", "req": "REQ-XA-02", "risk": "RISK-XA-FALSE-TIME", "test": "XA02", "name": "XA02 allow: Frame Time and a non-uniform Frame Time Vector give their own source intervals; manual speed is separate"},
+    {"id": "XA02-MODEL-REJECT", "req": "REQ-XA-02", "risk": "RISK-XA-FALSE-TIME", "test": "XA02", "name": "XA02 reject: wrong length, NaN, negative, non-zero first, missing value or pointer contradiction is Unverified"},
+    {"id": "XA03-MODEL-ALLOW", "req": "REQ-XA-03", "risk": "RISK-XA-OMIT", "test": "XA03", "name": "XA03 allow: forward, reverse, yoyo, ranges and loops visit every frame of the range, the last included, endpoints once"},
+    {"id": "XA03-MODEL-REJECT", "req": "REQ-XA-03", "risk": "RISK-XA-OMIT", "test": "XA03", "name": "XA03 reject: an invalid range or play state is refused, never clamped into another frame"},
+    {"id": "XA04-MODEL-ALLOW", "req": "REQ-XA-04", "risk": "RISK-XA-OOM", "test": "XA04", "name": "XA04 allow: a 601-frame run and a run over 128 MiB play first to last inside one bounded budget"},
+    {"id": "XA04-MODEL-REJECT", "req": "REQ-XA-04", "risk": "RISK-XA-OOM", "test": "XA04", "name": "XA04 reject: in-flight frames count, decoding stays at four, too-large or unreadable frames never reserve, no viewport frees another's frame"},
+    {"id": "XA05-MODEL-ALLOW", "req": "REQ-XA-05", "risk": "RISK-XA-STALE", "test": "XA05", "name": "XA05 allow: the same opening stays current, and a late frame keeps its place and its source interval"},
+    {"id": "XA05-MODEL-REJECT", "req": "REQ-XA-05", "risk": "RISK-XA-STALE", "test": "XA05", "name": "XA05 reject: another account, no session or the same object opened again (A->B->A) is not the current opening"},
+    {"id": "XA06-MODEL-ALLOW", "req": "REQ-XA-06", "risk": "RISK-XA-FALSE-SUCCESS", "test": "XA06", "name": "XA06 allow: a frame is shown only after its render; after a middle failure the retried frame completes the range"},
+    {"id": "XA06-MODEL-REJECT", "req": "REQ-XA-06", "risk": "RISK-XA-FALSE-SUCCESS", "test": "XA06", "name": "XA06 reject: refused access, codec failure, cancellation and out-of-range marks never make All Shown"}
+   ]
+  },
+  "dom": {
+   "path": "tests/part1/xa/viewer_dom_test.py",
+   "runner": "python tests/part1/xa/viewer_dom_test.py (Chromium; PLAYWRIGHT_BROWSERS_PATH)",
+   "class": "XaPlaybackDomTest",
+   "cases": [
+    {"id": "XA02-DOM-SOURCE", "req": "REQ-XA-02", "risk": "RISK-XA-FALSE-TIME", "test": "XA02", "method": "test_xa02_source_vector_drives_each_frame_interval_and_is_named_source_timing"},
+    {"id": "XA02-DOM-MANUAL", "req": "REQ-XA-02", "risk": "RISK-XA-FALSE-TIME", "test": "XA02", "method": "test_xa02_unverified_timing_plays_only_at_a_named_manual_speed"},
+    {"id": "XA03-DOM-ORDER", "req": "REQ-XA-03", "risk": "RISK-XA-OMIT", "test": "XA03", "method": "test_xa03_forward_yoyo_reverse_and_range_render_every_stored_frame_in_order"},
+    {"id": "XA03-DOM-FIRST-LAST", "req": "REQ-XA-03", "risk": "RISK-XA-OMIT", "test": "XA03", "method": "test_xa03_first_last_and_a_refused_range_keep_the_frame_on_screen"},
+    {"id": "XA04-DOM-601", "req": "REQ-XA-04", "risk": "RISK-XA-OOM", "test": "XA04", "method": "test_xa04_601_frame_run_reaches_its_last_frame_through_a_bounded_window"},
+    {"id": "XA04-DOM-SHARED", "req": "REQ-XA-04", "risk": "RISK-XA-OOM", "test": "XA04", "method": "test_xa04_viewports_share_one_budget_and_never_free_each_others_frames"},
+    {"id": "XA05-DOM-BUFFERING", "req": "REQ-XA-05", "risk": "RISK-XA-STALE", "test": "XA05", "method": "test_xa05_buffering_keeps_the_position_and_pause_drops_a_late_frame"},
+    {"id": "XA05-DOM-OPENING", "req": "REQ-XA-05", "risk": "RISK-XA-STALE", "test": "XA05", "method": "test_xa05_account_end_and_the_same_object_reopened_drop_late_frames"},
+    {"id": "XA06-DOM-RETRY", "req": "REQ-XA-06", "risk": "RISK-XA-FALSE-SUCCESS", "test": "XA06", "method": "test_xa06_middle_failure_stops_at_the_last_shown_frame_and_retry_continues_there"},
+    {"id": "XA06-DOM-NOT-SHOWN", "req": "REQ-XA-06", "risk": "RISK-XA-FALSE-SUCCESS", "test": "XA06", "method": "test_xa06_denied_codec_failure_and_prefetch_never_count_as_shown"}
+   ]
+  },
+  "dicom": {
+   "path": "tests/part1/xa/dicom_contract_test.py",
+   "runner": "python tests/part1/xa/dicom_contract_test.py (node on PATH; public samples at KIN_XA_SAMPLE_ROOT or samples.json default_root)",
+   "class": "XaDicomContractTest",
+   "cases": [
+    {"id": "XA01-DICOM-ALLOW", "req": "REQ-XA-01", "risk": "RISK-XA-CODEC", "test": "XA01", "method": "test_xa01_allow_stored_frames_keep_identity_and_decode_alone_in_order", "public_samples": true},
+    {"id": "XA01-DICOM-REJECT", "req": "REQ-XA-01", "risk": "RISK-XA-CODEC", "test": "XA01", "method": "test_xa01_reject_damaged_frames_and_identity_never_become_playable_frames", "public_samples": false},
+    {"id": "XA02-DICOM-ALLOW", "req": "REQ-XA-02", "risk": "RISK-XA-FALSE-TIME", "test": "XA02", "method": "test_xa02_allow_frame_time_and_frame_time_vector_are_the_source_timeline", "public_samples": true},
+    {"id": "XA02-DICOM-REJECT", "req": "REQ-XA-02", "risk": "RISK-XA-FALSE-TIME", "test": "XA02", "method": "test_xa02_reject_missing_or_contradictory_source_timing_is_unverified", "public_samples": false},
+    {"id": "XA04-DICOM-ALLOW", "req": "REQ-XA-04", "risk": "RISK-XA-OOM", "test": "XA04", "method": "test_xa04_allow_601_frame_and_over_128_mib_runs_traverse_first_to_last_within_budget", "public_samples": false},
+    {"id": "XA04-DICOM-REJECT", "req": "REQ-XA-04", "risk": "RISK-XA-OOM", "test": "XA04", "method": "test_xa04_reject_a_frame_that_cannot_pair_in_the_budget_or_lacks_its_size_never_reserves", "public_samples": false},
+    {"id": "XA07-DICOM-ALLOW", "req": "REQ-XA-07", "risk": "RISK-XA-REGRESSION", "test": "XA07", "method": "test_xa07_allow_each_object_goes_to_one_playback_path", "public_samples": true},
+    {"id": "XA07-DICOM-REJECT", "req": "REQ-XA-07", "risk": "RISK-XA-REGRESSION", "test": "XA07", "method": "test_xa07_reject_stored_subtraction_is_shown_as_stored_and_no_source_changes", "public_samples": true}
+   ]
+  }
+ },
+ "mutants": [
+  {"id": "X1", "file": "worklist-v0/hpacs-lite/xa-playback-model.js", "case": "XA02-MODEL-ALLOW", "token": "XA-X1:", "what": "every input plays at 10 fps"},
+  {"id": "X2", "file": "worklist-v0/hpacs-lite/xa-playback-model.js", "case": "XA02-MODEL-ALLOW", "token": "XA-X2:", "what": "the Frame Time Vector is averaged"},
+  {"id": "X3", "file": "worklist-v0/hpacs-lite/xa-playback-model.js", "case": "XA02-MODEL-ALLOW", "token": "XA-X3:", "what": "the first 0 increment is added as a one-frame delay"},
+  {"id": "X4", "file": "worklist-v0/hpacs-lite/xa-playback-model.js", "case": "XA03-MODEL-ALLOW", "token": "XA-X4:", "what": "the last frame is left out"},
+  {"id": "X5", "file": "worklist-v0/hpacs-lite/xa-playback-model.js", "case": "XA03-MODEL-ALLOW", "token": "XA-X5:", "what": "reverse/yoyo end frame duplicated"},
+  {"id": "X6", "file": "worklist-v0/hpacs-lite/viewer-xa-playback.js", "case": "XA04-DOM-601", "token": "XA-X6:", "what": "the whole run is fetched eagerly"},
+  {"id": "X7", "file": "worklist-v0/hpacs-lite/xa-playback-model.js", "case": "XA04-MODEL-REJECT", "token": "XA-X7:", "what": "in-flight reservations left out"},
+  {"id": "X8", "file": "worklist-v0/hpacs-lite/xa-playback-model.js", "case": "XA04-MODEL-REJECT", "token": "XA-X8:", "what": "decode concurrency limit removed"},
+  {"id": "X9", "file": "worklist-v0/hpacs-lite/xa-playback-model.js", "case": "XA04-MODEL-REJECT", "token": "XA-X9:", "what": "another viewport's held frame evicted"},
+  {"id": "X10", "file": "worklist-v0/hpacs-lite/viewer-xa-playback.js", "case": "XA05-DOM-BUFFERING", "token": "XA-X10:", "what": "an old promise draws after stop"},
+  {"id": "X11", "file": "worklist-v0/hpacs-lite/xa-playback-model.js", "case": "XA05-MODEL-REJECT", "token": "XA-X11:", "what": "A->B->A sequence check removed"},
+  {"id": "X12", "file": "worklist-v0/hpacs-lite/viewer-xa-playback.js", "case": "XA06-DOM-RETRY", "token": "XA-X12:", "what": "a failed frame is stepped over"},
+  {"id": "X13", "file": "worklist-v0/hpacs-lite/xa-playback-model.js", "case": "XA04-MODEL-ALLOW", "token": "XA-X13:", "what": "cut at 500/501"},
+  {"id": "X14", "file": "worklist-v0/hpacs-lite/viewer-xa-playback.js", "case": "XA06-DOM-NOT-SHOWN", "token": "XA-X14:", "what": "prefetch counted as display"}
+ ],
+ "inputs": {
+  "tests/part1/xa/samples.json": "9ea899b93c5c3e20bf1736108a07be0918661d152015189d6909f0febb8761bd"
+ },
+ "r2_declared_not_run_in_r1": [
+  {"id": "XA07-LIVE", "req": "REQ-XA-07", "file": "tests/part1/xa/live.py", "class": "XaPlaybackE2E", "method": null, "what": "single OHIF cine dispatcher: XA to this module, US/RF/CT MPR on their path, one timer owner, stored pixel hash before/after"},
+  {"id": "XA08-LIVE", "req": "REQ-XA-08", "file": "tests/part1/xa/live.py", "class": "XaPlaybackE2E", "method": null, "what": "EMR-E requested/provided/displayed events from the real frame supply; interrupted bytes and prefetch never reported as displayed"},
+  {"id": "XA-WHOLE-FLOW-G3", "req": "REQ-XA-01..08", "file": "tests/part1/xa/live.py", "class": "XaPlaybackE2E", "method": "test_xa01_public_cine_timing_supply_and_recovery", "what": "the one G3 exact selection named by the order; profile part1-xa and workflow .github/workflows/part1-xa.yml"}
+ ],
+ "real_sample_pending": "tests/part1/xa/samples.json real_sample_pending"
+}

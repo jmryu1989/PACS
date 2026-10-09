@@ -313,19 +313,39 @@ class XaPlaybackDomTest(unittest.TestCase):
         expect(self.status()).to_contain_text('Slower Than Source')
         self.tick(25)
         self.assertEqual(self.frames(), [1, 2, 3, 4, 5, 6], 'after a late frame the clock restarts: no catch-up burst')
-        self.control('Pause').click()
-        # Pause while frame 8 is still decoding: its late answer must not reach the screen or restart playback.
+        # A hidden window pauses; showing it again neither resumes nor replays the missed frames in a burst.
+        visible = 'on => { Object.defineProperty(document, "hidden", { configurable: true, get: () => !on }); document.dispatchEvent(new Event("visibilitychange")); }'
+        self.page.evaluate(visible, False)
+        self.tick(500)
+        self.assertEqual(self.frames(), [1, 2, 3, 4, 5, 6])
+        self.assertEqual(self.state()['phase'], 'paused')
+        self.page.evaluate(visible, True)
+        self.tick(500)
+        self.assertEqual(self.frames(), [1, 2, 3, 4, 5, 6], 'returning to the window replays nothing')
+        # Pause while frame 8 is still decoding for viewport 1. Viewport 2 shows the same object and waits for the same
+        # frame, so the shared load cannot be cancelled: its answer arrives after the Pause and must still not reach
+        # viewport 1's screen or restart its playback.
         self.open(1, frames=10, frameTime=20, hold=[7], sop='2.25.41')
+        self.open(2, frames=10, frameTime=20, sop='2.25.41')
         self.control('Play', 1).click()
         self.tick(130)
         self.assertEqual(self.frames(1), [1, 2, 3, 4, 5, 6, 7])
+        host = self.page.locator('#host2')
+        host.get_by_label('Range Start').fill('8')
+        host.get_by_label('Range End').fill('10')
+        self.control('Apply Range', 2).click()
+        self.control('First Frame', 2).click()
+        self.tick(20)
+        expect(self.status(1)).to_contain_text('Buffering')  # viewport 1 is waiting on frame 8 itself, not sleeping
         self.control('Pause', 1).click()
         self.js('releaseHeld(1, 7)')
         self.tick(200)
+        self.assertEqual(self.frames(2), [8], 'the waiting viewport still gets its frame')
         self.assertNotIn(8, self.frames(1), 'XA-X10: a frame that arrives after Pause never reaches the screen')
         self.assertEqual(self.state(1)['phase'], 'paused')
         self.assertFalse(self.state(1)['playing'])
         expect(self.control('Play', 1)).to_be_enabled()
+        self.assertEqual(self.js('views[2].log.loads'), [], 'one decode for both viewports')
 
     def test_xa05_account_end_and_the_same_object_reopened_drop_late_frames(self):
         self.open(0, frames=10, frameTime=20, hold=[2], sequence=1)
