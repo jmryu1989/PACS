@@ -2269,3 +2269,26 @@ S7-U5 DB 권한 migration 후 API는 먼저 기동하고 realm 전체 이관을 
 3. 이관 경계 이후의 인증 초를 확보한 뒤(기존 `LiveStack.set_member_rights`의 1.05초 대기), 빈 cookie jar로 공개 `GET /api/auth/login` → 같은 origin의 Keycloak form → 같은 jar로 form action에 `POST username=jmryu&password=<메모리 값>&credentialId=` → `/api/auth/callback` → `/worklist/hpacs-lite/main.html#kin-entry=...`를 따른다. origin·callback 도달·최종 경로를 확인하며 impersonation은 쓰지 않는다.
 4. 같은 jar로 `POST /api/auth/entry` (`X-KIN-CSRF: 1`, body의 `proof`) → 200/sessionId, `GET /api/me` → 기대 jmryu sub/admin 역할/sessionId를 확인한다.
 5. 같은 jar와 sessionId로 `PATCH /api/admin/users/{합성 사용자 id}` (`X-KIN-CSRF: 1`, `X-KIN-Session`, 기존 회원 명령/버전 body) → 200/version을 확인하고 명부 게시·대상 사용자 재인증을 이어간다. 종료 시 해당 fixture BFF 세션을 Log out한다. 진단은 경로/status/허용된 감사 cause만 남기며 password·token·code/state·proof·cookie·HTML을 기록하지 않는다.
+
+
+REQ-S9-U0a-BYTES/PRE-ORDER → RISK-MOVE-LOSS/ORDER/EARLY-TDZ/LOAD-REGRESSION → C1–C6/PRE/LOAD-BUDGET:
+`main_move_test.cjs` checks exact moved bytes, trivia, markup, blocking tag order, Python projection and frozen fixture cuts.
+`main_split_static_test.cjs` uses TypeScript AST symbols for immediate reads/writes and forward-reference inventory (C2),
+and one Program containing the original 56 scripts, the current moved prefix and remaining inline script for C6.
+`main_early_input_dom_test.py` retains every PRE case and serves the actual on-disk HTML/assets in addition to generated
+0/18/30/45 layouts. It compares approved PRE/previous-parent Git blobs with actual delivered hashes, whole registration
+and dispatch order, deterministic auth/Retry schedules, held input/session-end boundaries and browser-visible results.
+Historical f1d5406 provenance is retained. Ledger 178 self-checks preserve canonical per-side phase status/raw hashes,
+request-object occurrences and reverse release, independent shown range/total counts, and actual browser scroll/resize dispatch.
+Registration includes all instrumented event types. Dispatch excludes exactly mousemove, pointermove, pointerrawupdate,
+mouseover, mouseout, pointerover, pointerout, mouseenter, mouseleave, pointerenter and pointerleave; click/input/keydown/
+focus/scroll/resize remain compared. This does not claim coverage of every browser event.
+The existing mutant driver retains 55 PRE/F2/F3 mutants and adds S1-M01–M06 and H178-M01–M08 (69 distinct IDs);
+byte mutants are C1 evidence, while response-hash and registration/dispatch mutants exercise browser harness oracles.
+`LoadBudget` uses uninstrumented full Chromium, five alternating baseline/candidate cold pairs and five repeated-navigation
+pairs. Playwright routing disables HTTP cache: repeated samples are explicitly not warm-cache evidence. Hosted HTTP
+cache verification remains required before acceptance. Cold median delta limits are max(250 ms, 10% baseline);
+the hosted warm limit is max(100 ms, 10% baseline), for navigation→auth and auth response→usable worklist separately.
+Raw samples, maxima, transfer sizes and all failed/partial traces are retained under the existing measurements artifact.
+No new controls, prompts or user actions are introduced. PR CI, G3 and independent review bind the commander's final
+CI integration SHA; pure/DOM checks do not replace hosted HTTPS/MIME/CSP/cache checks or doctor confirmation.
