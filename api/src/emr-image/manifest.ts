@@ -74,7 +74,7 @@ export interface ManifestObjectInput extends SopRef {
 export interface ManifestObject extends Omit<ManifestObjectInput, 'mammography'> {
   mammography: MammographyResult | null;
   format: ObjectFormat; family: SopFamily; decoder: string | null; timingVerified: boolean | null;
-  unsupported: 'UnknownObjectFormat' | 'UnknownTransferSyntax' | null;
+  unsupported: 'UnknownObjectFormat' | 'UnknownTransferSyntax' | 'MammographyFrameCountUnreadable' | null;
 }
 export interface AssetPin { id: string; version: string; sha256: string }
 /** referencedObjects: headers of objects outside this study that stored source references name, with the patient and
@@ -144,8 +144,9 @@ export const MG_RULE_VERSION = 'D744-2' as const;
 export type DicomJson = Readonly<Record<string, { vr?: string; Value?: readonly unknown[] }>>;
 export type MgClass = 'conventional-2d-presentation' | 'conventional-2d-processing' | 'device-synthetic-2d' | 'dbt-slices' | 'dbt-slab' |
   'projection' | 'partial-view' | 'unverified';
-export interface MgDeclaredSource { path: string; sopClass: string | null; sop: string; frames: readonly number[] | null }
-export interface MgSourceLink { path: string; sopClass: string | null; sop: string; frames: readonly number[] | null; status: 'verified' | 'rejected' | 'unresolved'; reason: string }
+/** Keep DICOM values as stored; parsing for validation must not rewrite the reference or its digest. */
+export interface MgDeclaredSource { path: string; sopClass: string | null; sop: string; frames: readonly unknown[] | null }
+export interface MgSourceLink extends MgDeclaredSource { status: 'verified' | 'rejected' | 'unresolved'; reason: string }
 export interface MammographyResult {
   rule: typeof MG_RULE_VERSION; class: MgClass; baseClass: MgClass; status: 'verified' | 'unverified'; basis: string;
   partial: 'yes' | 'no' | 'unknown' | 'conflict'; presentation: 'presentation' | 'processing' | null;
@@ -153,7 +154,9 @@ export interface MammographyResult {
   fullness: 'conflict' | 'partial' | 'declared-not-partial' | 'inferred-for-hanging' | 'undetermined';
   representation: 'slices' | 'slab' | 'mip-slab' | 'minip-slab' | 'unspecified' | null;
   fullViewAutoMatch: boolean; sourceClassEligible: boolean; laterality: string | null; view: string | null; biopsy: string | null;
-  declaredSourceCount: number; rawReferenceRetained: boolean; links: readonly MgSourceLink[];
+  declaredSourceCount: number | null; rawReferenceRetained: boolean; links: readonly MgSourceLink[];
+  /** On extraction failure the original header remains evidence, never a replacement source inventory. */
+  sourceHeader: DicomJson | null;
   sourceLinkStatus: 'verified' | 'rejected' | 'unresolved' | 'none' | 'not-applicable'; sourceAccepted: boolean; sourceLinks: string;
   claim: { class: string; agrees: boolean } | null;
 }
@@ -244,27 +247,35 @@ function laterality(h: DicomJson, frames: DicomJson[]): { value: string | null; 
   for (const f of frames) for (const a of itemsOf(f, '00209071') ?? []) { const v = first(a, '00209072'); if (v) seen.add(v.toUpperCase()); }
   return { value: seen.size === 1 ? [...seen][0] : null, conflict: seen.size > 1 };
 }
-function facts(h: DicomJson, sop: string, frames: DicomJson[]): Facts & { lateralityConflict: boolean; viewConflict: boolean } {
-  const lat = laterality(h, frames);
-  const views = viewItems(h, '00540220'), codeItem = views[0] ?? null;
-  const codeView = codeItem ? VIEW_CODES[`${(first(codeItem, '00080102') ?? '').toUpperCase()}|${first(codeItem, '00080100') ?? ''}`] ?? null : null;
-  const position = first(h, '00185101')?.toUpperCase() ?? null;
+function facts(h: DicomJson, sop: string, frames: DicomJson[]): Facts & { lateralityConflict: boolean; viewConflict: boolean; error: string | null } {
+  let error: string = null;
+  const read = <T>(fn: () => T, fallback: T): T => {
+    try { return fn(); } catch (e) { if (!(e instanceof Unverified)) throw e; error ??= e.reason; return fallback; }
+  };
+  const lat = read(() => laterality(h, frames), { value: null, conflict: false });
+  const views = read(() => viewItems(h, '00540220'), []), codeItem = views[0] ?? null;
+  const codeView = codeItem ? read(() => VIEW_CODES[codeKey(codeItem)] ?? null, null) : null;
+  const position = read(() => first(h, '00185101')?.toUpperCase() ?? null, null);
   const viewConflict = !!(codeView && position && codeView !== position);
   const view = codeItem ? codeView : position;
-  const modifiers = [...viewItems(h, '00540222'), ...views.flatMap(v => viewItems(v, '00540222'))];
-  const modifier = modifiers.length > 0, wrongContainer = [...views, ...modifiers].some(c => !!PARTIAL_REGIONS[codeKey(c)]);
-  const spotMag = modifiers.some(c => SPOT_MAG.has(codeKey(c)));
-  const flag = partialDeclaration(h), codes = viewItems(h, '00281352'), description = first(h, '00281351');
+  const modifiers = read(() => [...viewItems(h, '00540222'), ...views.flatMap(v => viewItems(v, '00540222'))], []);
+  const modifier = modifiers.length > 0, wrongContainer = [...views, ...modifiers].some(c => read(() => !!PARTIAL_REGIONS[codeKey(c)], false));
+  const spotMag = modifiers.some(c => read(() => SPOT_MAG.has(codeKey(c)), false));
+  const flag = partialDeclaration(h);
+  let codes: DicomJson[] = [], description: string = null, regions: string[] = [], partialError = false;
+  try {
+    codes = viewItems(h, '00281352'); description = first(h, '00281351');
+    regions = codes.map(c => PARTIAL_REGIONS[codeKey(c)] ?? null);
+  } catch (e) { if (!(e instanceof Unverified)) throw e; error ??= e.reason; partialError = true; }
   let partial: MammographyResult['partial'];
-  if (flag === 'INVALID' || wrongContainer) partial = 'conflict';
+  if (flag === 'INVALID' || wrongContainer || partialError) partial = 'conflict';
   else if (codes.length > 2) partial = 'conflict';
   else if (flag === 'NO' && (codes.length || description)) partial = 'conflict';
   else if (flag === 'YES' || codes.length || description) partial = spotMag ? 'conflict' : 'yes';
   else partial = flag === 'NO' ? 'no' : 'unknown';
-  const regions = codes.map(c => PARTIAL_REGIONS[codeKey(c)] ?? null);
   const partialCodes = regions.every(r => r !== null) ? [...new Set(regions)].sort() : [];
   return { laterality: lat.value, lateralityConflict: lat.conflict, view, viewConflict, modifier, partial, partialCodes, partialDeclaration: flag,
-    btoCodeMissing: sop === BTO && flag === 'YES' && codes.length === 0 };
+    btoCodeMissing: sop === BTO && flag === 'YES' && codes.length === 0, error };
 }
 const hologic = (h: DicomJson) => ['HOLOGIC', 'HOLOGIC, INC.'].includes((first(h, '00080070') ?? '').toUpperCase()) &&
   (first(h, '00081090') ?? '').toUpperCase() === 'SELENIA DIMENSIONS';
@@ -386,7 +397,7 @@ function classifyBto(h: DicomJson): Base {
 }
 
 interface Classified { sop: string; studyUid: string; sopClass: string; frameCount: number | null; result: Omit<MammographyResult,
-  'declaredSourceCount' | 'rawReferenceRetained' | 'links' | 'sourceLinkStatus' | 'sourceAccepted' | 'sourceLinks' | 'claim'>; facts: Facts }
+  'declaredSourceCount' | 'rawReferenceRetained' | 'links' | 'sourceHeader' | 'sourceLinkStatus' | 'sourceAccepted' | 'sourceLinks' | 'claim'>; facts: Facts }
 /** The header-only verdict (rule.md T, table rows 0-8, H, G/S/A, P). Source links are judged separately. */
 export function classifyMammography(headerInput: unknown): Classified {
   if (!headerInput || typeof headerInput !== 'object' || Array.isArray(headerInput)) refuse('MammographyHeaderInvalid');
@@ -397,12 +408,12 @@ export function classifyMammography(headerInput: unknown): Classified {
     frameStructure(h, sop);
     frames = [...(itemsOf(h, '52009229') ?? []), ...(itemsOf(h, '52009230') ?? [])];
   } catch (e) { if (!(e instanceof Unverified)) throw e; frameError = e.reason; }
-  let f: ReturnType<typeof facts>;
-  try { f = facts(h, sop, frames); } catch (e) { if (!(e instanceof Unverified)) throw e; f = { laterality: null, lateralityConflict: true, view: null, viewConflict: true, modifier: false, partial: 'conflict', partialDeclaration: partialDeclaration(h), partialCodes: [], btoCodeMissing: false }; }
+  const f = facts(h, sop, frames);
   const presentationOfSop = sop === MG_P ? 'presentation' as const : sop === MG_R ? 'processing' as const : null;
   let base: Base = null, reason: string = null;
   try {
     if (frameError) fail(frameError);
+    if (f.error) fail(f.error);
     if (![MG_P, MG_R, BTO].includes(sop)) fail('unsupported-sop');
     for (const uid of [sop, sopInstance, studyUid, first(h, '0020000E') ?? '']) if (uid.length > 64 || !/^[0-9]+(?:\.[0-9]+)+$/.test(uid)) fail('identity-invalid');
     if (first(h, '00080060')?.toUpperCase() !== 'MG') fail('modality-not-mg');
@@ -432,7 +443,8 @@ export function classifyMammography(headerInput: unknown): Classified {
   let nf: number | null = null;
   const countValues = valuesOf(h, '00280008');
   const count = countValues?.length === 1 ? numbers(h, '00280008')[0] : null;
-  nf = countValues === null ? (sop === BTO ? null : 1) : Number.isInteger(count) && count > 0 && count <= 2000 ? count : null;
+  // The classification budget is not a limit on the stored frame inventory that the manifest must compare.
+  nf = countValues === null ? (sop === BTO ? null : 1) : Number.isSafeInteger(count) && count > 0 ? count : null;
   return { sop: sopInstance, studyUid, sopClass: sop, frameCount: nf, facts: f,
     result: { rule: MG_RULE_VERSION, class: cls, baseClass, status: base === null ? 'unverified' : 'verified', basis: base === null ? reason : base.basis,
       partial: f.partial, partialDeclaration: f.partialDeclaration, fullness, presentation, representation, fullViewAutoMatch, sourceClassEligible, laterality: f.laterality, view: f.view,
@@ -442,26 +454,33 @@ export function classifyMammography(headerInput: unknown): Classified {
 /** Raw source references at root, acquisition and root/shared/per-frame derivation paths, never supplied replacements. */
 function extractSources(h: DicomJson): MgDeclaredSource[] {
   const out: MgDeclaredSource[] = [];
+  const sequence = (d: DicomJson, tag: string): DicomJson[] => {
+    if (has(d, tag)) {
+      const e = d[tag];
+      if (!e || typeof e !== 'object' || Array.isArray(e) || (e.vr !== undefined && e.vr !== 'SQ') ||
+          (Object.prototype.hasOwnProperty.call(e, 'Value') && !Array.isArray(e.Value))) fail('malformed-' + tag);
+    }
+    return itemsOf(d, tag) ?? [];
+  };
   const read = (items: DicomJson[], path: string) => items.forEach((r, i) => out.push({ path: `${path}SourceImageSequence[${i}]/`,
-    sopClass: first(r, '00081150'), sop: first(r, '00081155') ?? '', frames: numbers(r, '00081160') }));
-  read(itemsOf(h, '00082112') ?? [], '');
-  (itemsOf(h, '00189507') ?? []).forEach((a, ai) => read(itemsOf(a, '00082112') ?? [], `XRay3DAcquisitionSequence[${ai}]/`));
-  (itemsOf(h, '00089124') ?? []).forEach((dv, di) => read(itemsOf(dv, '00082112') ?? [], `DerivationImageSequence[${di}]/`));
+    sopClass: first(r, '00081150'), sop: first(r, '00081155') ?? '', frames: structuredClone(valuesOf(r, '00081160')) }));
+  read(sequence(h, '00082112'), '');
+  sequence(h, '00189507').forEach((a, ai) => read(sequence(a, '00082112'), `XRay3DAcquisitionSequence[${ai}]/`));
+  sequence(h, '00089124').forEach((dv, di) => read(sequence(dv, '00082112'), `DerivationImageSequence[${di}]/`));
   for (const [tag, name] of [['52009229', 'SharedFunctionalGroupsSequence'], ['52009230', 'PerFrameFunctionalGroupsSequence']]) {
     if ((valuesOf(h, tag)?.length ?? 0) > 2000) fail('frame-count-range');
-    (itemsOf(h, tag) ?? []).forEach((g, gi) => (itemsOf(g, '00089124') ?? []).forEach((dv, di) =>
-      read(itemsOf(dv, '00082112') ?? [], `${name}[${gi}]/DerivationImageSequence[${di}]/`)));
+    sequence(h, tag).forEach((g, gi) => sequence(g, '00089124').forEach((dv, di) =>
+      read(sequence(dv, '00082112'), `${name}[${gi}]/DerivationImageSequence[${di}]/`)));
   }
   return out;
 }
 function declared(value: unknown, h: DicomJson): MgDeclaredSource[] {
-  let fromHeader: MgDeclaredSource[];
-  try { fromHeader = extractSources(h); } catch (e) { if (e instanceof Unverified) refuse('MammographyHeaderInvalid'); throw e; }
+  const fromHeader = extractSources(h);
   if (value === null) return fromHeader;
   if (!Array.isArray(value)) refuse('MammographyHeaderMismatch');
   const list = value.map(x => {
     const v = object(x, ['path', 'sopClass', 'sop', 'frames']);
-    if (v.frames !== null && (!Array.isArray(v.frames) || v.frames.some((n: unknown) => !Number.isInteger(n)))) refuse('MammographyHeaderMismatch');
+    if (v.frames !== null && !Array.isArray(v.frames)) refuse('MammographyHeaderMismatch');
     return { path: string(v.path), sopClass: v.sopClass === null ? null : string(v.sopClass), sop: string(v.sop), frames: v.frames === null ? null : [...v.frames] };
   });
   // Compare complete inventories including duplicate path occurrences. The header remains the sole authority.
@@ -480,8 +499,13 @@ function judgeSource(result: Classified, ref: MgDeclaredSource, store: ReadonlyM
   if (target.patientKey !== keys.patientKey) return { status: 'rejected', reason: 'other-patient' };
   if (target.institutionKey !== keys.institutionKey) return { status: 'rejected', reason: 'other-institution' };
   if (target.c.studyUid !== result.studyUid) return { status: 'rejected', reason: 'other-study' };
+  if (ref.sopClass === null) return { status: 'unresolved', reason: 'source-class-absent' };
   if (ref.sopClass !== null && ref.sopClass !== target.c.sopClass) return { status: 'rejected', reason: 'class-conflict' };
-  if (ref.frames && ref.frames.some(n => target.c.frameCount === null || n < 1 || n > target.c.frameCount)) return { status: 'rejected', reason: 'frame-out-of-range' };
+  if (ref.frames?.length === 0 && target.c.frameCount !== 1) return { status: 'unresolved', reason: 'empty-frame-selection' };
+  if (ref.frames && ref.frames.some(raw => {
+    const n = typeof raw === 'number' ? raw : typeof raw === 'string' && /^[+]?\d+$/.test(raw.trim()) ? Number(raw) : NaN;
+    return !Number.isSafeInteger(n) || target.c.frameCount === null || n < 1 || n > target.c.frameCount;
+  })) return { status: 'rejected', reason: 'frame-out-of-range' };
   // The stored header decides what the target is; no label makes a conventional or unverified object a source.
   if (target.c.result.status !== 'verified' || !SOURCE_CLASSES.includes(target.c.result.baseClass)) return { status: 'rejected', reason: 'target-not-tomosynthesis-data' };
   if (target.c.facts.modifier !== result.facts.modifier) return { status: 'rejected', reason: 'modifier-conflict' };
@@ -500,15 +524,15 @@ function judgeSource(result: Classified, ref: MgDeclaredSource, store: ReadonlyM
   return { status: 'unresolved', reason: 'partial-unknown' };
 }
 function mammographyResult(c: Classified, refs: MgDeclaredSource[], claimedClass: string | null, store: ReadonlyMap<string, MgStoreEntry & { c: Classified }>,
-  keys: { patientKey: string; institutionKey: string }): MammographyResult {
+  keys: { patientKey: string; institutionKey: string }, sourceHeader: DicomJson | null): MammographyResult {
   const synthetic = c.result.status === 'verified' && c.result.baseClass === 'device-synthetic-2d';
   const links: MgSourceLink[] = refs.map(r => ({ ...r, ...(synthetic ? judgeSource(c, r, store, keys)
     : { status: 'unresolved' as const, reason: store.has(r.sop) ? 'not-a-synthetic-result' : 'not-in-store' }) }));
-  const sourceLinkStatus = !synthetic ? 'not-applicable' as const : !links.length ? 'none' as const
+  const sourceLinkStatus = sourceHeader ? 'unresolved' as const : !synthetic ? 'not-applicable' as const : !links.length ? 'none' as const
     : links.some(l => l.status === 'rejected') ? 'rejected' as const : links.some(l => l.status === 'unresolved') ? 'unresolved' as const : 'verified' as const;
-  const sourceLinks = !links.length ? 'none' : links.every(l => l.reason === 'not-in-store') ? 'unresolved-not-in-input-store'
+  const sourceLinks = sourceHeader ? 'not-verified' : !links.length ? 'none' : links.every(l => l.reason === 'not-in-store') ? 'unresolved-not-in-input-store'
     : synthetic ? sourceLinkStatus : 'not-verified';
-  return { ...c.result, declaredSourceCount: refs.length, rawReferenceRetained: refs.length > 0, links, sourceLinkStatus,
+  return { ...c.result, declaredSourceCount: sourceHeader ? null : refs.length, rawReferenceRetained: refs.length > 0 || sourceHeader !== null, links, sourceHeader, sourceLinkStatus,
     sourceAccepted: sourceLinkStatus === 'verified', sourceLinks, claim: claimedClass === null ? null : { class: claimedClass, agrees: claimedClass === c.result.class } };
 }
 
@@ -531,7 +555,7 @@ function timing(value: unknown, frames: number): { timing: FrameTiming | null; v
   return refuse('InvalidFrameTiming');
 }
 
-type Pending = { c: Classified; header: DicomJson; refs: MgDeclaredSource[]; claimedClass: string | null };
+type Pending = { c: Classified; header: DicomJson; refs: MgDeclaredSource[]; sourceHeader: DicomJson | null; claimedClass: string | null };
 const NO_STORE: ReadonlyMap<string, MgStoreEntry & { c: Classified }> = new Map();
 function entry(value: unknown, studyUid: string, keys: { patientKey: string; institutionKey: string }): [ManifestObject, Pending | null] {
   const v = object(value, ['studyUid', 'seriesUid', 'sopInstanceUid', 'sopClassUid', 'transferSyntaxUid', 'imageType', 'bytes', 'sha256',
@@ -542,7 +566,7 @@ function entry(value: unknown, studyUid: string, keys: { patientKey: string; ins
   const known = Object.prototype.hasOwnProperty.call(SOP_CLASSES, sopClassUid) ? SOP_CLASSES[sopClassUid] : null;
   const format: ObjectFormat = known ? known.format : 'unsupported', family: SopFamily = known ? known.family : 'general';
   const decoder = Object.prototype.hasOwnProperty.call(TRANSFER_SYNTAX_DECODER, transferSyntaxUid) ? TRANSFER_SYNTAX_DECODER[transferSyntaxUid] : null;
-  const unsupported = !known ? 'UnknownObjectFormat' as const : !decoder ? 'UnknownTransferSyntax' as const : null;
+  let unsupported: ManifestObject['unsupported'] = !known ? 'UnknownObjectFormat' : !decoder ? 'UnknownTransferSyntax' : null;
   const bytes = integer(v.bytes, 1), digest = sha256(v.sha256), declaredFrameCount = integer(v.declaredFrameCount);
   if (!Array.isArray(v.frames)) refuse('FrameSetIncomplete');
   if (PIXEL_FORMATS.includes(format)) {
@@ -596,11 +620,21 @@ function entry(value: unknown, studyUid: string, keys: { patientKey: string; ins
     if (c.sop !== ref.sopInstanceUid || c.sopClass !== sopClassUid || c.studyUid !== ref.studyUid ||
         (header['0020000E']?.Value?.[0] ?? null) !== ref.seriesUid || JSON.stringify(raw) !== JSON.stringify(imageType)) refuse('MammographyHeaderMismatch');
     if (c.frameCount !== null && c.frameCount !== declaredFrameCount) refuse('MammographyHeaderMismatch');
-    pending = { c, header, refs: declared(m.declaredSources, header), claimedClass: m.claimedClass === null ? null : string(m.claimedClass) };
+    // An unreadable count cannot attest completeness. Keep the object listed, but exclude it from delivery/offline readiness.
+    if (c.frameCount === null) unsupported = 'MammographyFrameCountUnreadable';
+    let refs: MgDeclaredSource[] = [], sourceHeader: DicomJson = null;
+    try { refs = declared(m.declaredSources, header); } catch (e) {
+      if (!(e instanceof Unverified)) throw e;
+      sourceHeader = structuredClone(header);
+      c.result = { ...c.result, class: 'unverified', baseClass: 'unverified', status: 'unverified', basis: e.reason,
+        fullness: c.result.fullness === 'inferred-for-hanging' ? 'undetermined' : c.result.fullness,
+        fullViewAutoMatch: false, sourceClassEligible: false };
+    }
+    pending = { c, header, refs, sourceHeader, claimedClass: m.claimedClass === null ? null : string(m.claimedClass) };
   }
   if (v.timing !== null && !PIXEL_FORMATS.includes(format)) refuse('InvalidFrameTiming');
   const time = timing(v.timing, declaredFrameCount);
-  const mammography = pending ? mammographyResult(pending.c, pending.refs, pending.claimedClass, NO_STORE, keys) : null;
+  const mammography = pending ? mammographyResult(pending.c, pending.refs, pending.claimedClass, NO_STORE, keys, pending.sourceHeader) : null;
   return [{ ...ref, sopClassUid, transferSyntaxUid, imageType, bytes, sha256: digest, declaredFrameCount, frames, provenance: source, derivation,
     mammography, timing: time.timing, format, family, decoder: unsupported ? null : decoder, timingVerified: time.verified, unsupported }, pending];
 }
@@ -645,7 +679,7 @@ export function buildImageManifest(input: ManifestInput): Readonly<ImageManifest
     if (!c.sop || store.has(c.sop) || bySop.has(c.sop)) refuse('DuplicateObjectConflict');
     store.set(c.sop, { header: r.header, patientKey: string(r.patientKey), institutionKey: string(r.institutionKey), c });
   }
-  const objects = [...bySop.values()].map(x => x.pending ? { ...x.object, mammography: mammographyResult(x.pending.c, x.pending.refs, x.pending.claimedClass, store, keys) } : x.object)
+  const objects = [...bySop.values()].map(x => x.pending ? { ...x.object, mammography: mammographyResult(x.pending.c, x.pending.refs, x.pending.claimedClass, store, keys, x.pending.sourceHeader) } : x.object)
     .sort((a, b) => a.seriesUid < b.seriesUid ? -1 : a.seriesUid > b.seriesUid ? 1 : a.sopInstanceUid < b.sopInstanceUid ? -1 : a.sopInstanceUid > b.sopInstanceUid ? 1 : 0);
   if (objects.length !== expected.objects || new Set(objects.map(o => o.seriesUid)).size !== expected.series) refuse('ManifestPageIncomplete');
   const bySopUid = new Map(objects.map(o => [o.sopInstanceUid, o]));

@@ -11,7 +11,9 @@
  *
  * REQ-D735-CLASS/SOURCE -> RISK-D735-MISCLASS/SOURCE -> TEST-D735-*: every case of the shared mammography table
  * tests/emr/e/rule-cases.json (D744-2 consult, also bound by E-MG) runs through buildImageManifest, one test per case ID,
- * and every expected key is compared. The table is byte-pinned (SHA-256 below): its identity is the requirement that
+ * and every expected key is compared. The billion-frame resource case checks manifest refusal of an incomplete
+ * inventory and compares the public header classifier, without allocating a billion synthetic frame digests.
+ * The table is byte-pinned (SHA-256 below): its identity is the requirement that
  * both units judge the same headers, so a changed table must fail here rather than be followed silently (AGENTS 1-B.14).
  * The adapter only moves tags into the manifest input (identity, frame count, Image Type, synthetic digests); it never
  * fills a classification fact from the expected values.
@@ -57,6 +59,15 @@ const CASES = [
   'TEST-E-02 manifest_sources R16 D744 malformed partial declarations and sequences are conflicts, never absence',
   'TEST-E-02 manifest_sources A5 D744 declaration and fullness survive hashing and reread; old manifests cannot authorize the changed content',
   'TEST-E-02 manifest_sources A6 D744 complete source headers preserve every raw path through failed verification and recovery',
+  'TEST-E-02 manifest_sources R17 E-R4-01 A1 text abc is a rejected frame reference and remains verbatim in the digest',
+  'TEST-E-02 manifest_sources R18 E-R4-01 A2 fractional 2.5 is a rejected frame reference and remains verbatim in the digest',
+  'TEST-E-02 manifest_sources R19 E-R4-01 A3 text NaN is a rejected frame reference and remains verbatim in the digest',
+  'TEST-E-02 manifest_sources R20 E-R4-01 A4 mixed 2 and x is a rejected frame reference and remains verbatim in the digest',
+  'TEST-E-02 manifest_sources R21 E-R4-02 unreadable counts cannot be delivered and unsupported readable counts still bind the inventory',
+  'TEST-E-02 manifest_sources R22 E-R4-03 a malformed object stays unverified with unresolved sources while normal objects open and hang',
+  'TEST-E-02 manifest_sources R23 E-R4-04 non-P format errors preserve Partial View facts and the actual error basis',
+  'TEST-E-02 manifest_sources R24 E-R4-05 empty frame selection needs a single-frame target and source SOP class cannot be missing',
+  'TEST-E-02 manifest_sources A7 E-R4-01 valid numeric strings retain their raw spelling and the reference inventory must match it',
   'TEST-E-03 basis_and_bypass A1 reading inside the managing institution needs no consent, contract or extra step and delivers',
   'TEST-E-03 basis_and_bypass A2 a complete processor agreement delivers; a lawful third-party basis is recorded but sends no body in Part 1',
   'TEST-E-03 basis_and_bypass A3 the image grammar parses exactly the DICOMweb shapes the viewer and worklist use',
@@ -1100,16 +1111,147 @@ def('TEST-E-02 manifest_sources A6', () => {
   assert.deepEqual(allowed(() => ruleCaseResult(original)), verified, 'reread after restoring the header recovers without changing the raw source');
 });
 
+// Round 5 review cases exercise the public manifest and delivery boundaries, including raw-value preservation.
+for (const [id, frames] of [[17, ['abc']], [18, [2.5]], [19, ['NaN']], [20, [2, 'x']]]) {
+  def(`TEST-E-02 manifest_sources R${id}`, () => {
+    const c = ruleCase('SOURCE-FRAME-VALID');
+    c.input.dicom['00082112'].Value[0]['00081160'] = dj('IS', ...frames);
+    const before = structuredClone(c), m = allowed(() => ruleCaseManifest(c));
+    const r = m.objects.find(o => o.sopInstanceUid === c.input.dicom['00080018'].Value[0]).mammography;
+    assert.deepEqual([r.sourceAccepted, r.sourceLinkStatus, r.links[0].status], [false, 'rejected', 'rejected']);
+    assert.deepEqual(r.links[0].frames, frames);
+    assert.deepEqual(JSON.parse(JSON.stringify(r)).links[0].frames, frames, 'invalid references must survive serialization verbatim');
+    assert.deepEqual(c, before, 'classification cannot rewrite the stored input');
+    assert.equal(allowed(() => ruleCaseManifest(structuredClone(c))).sha256, m.sha256);
+    c.input.dicom['00082112'].Value[0]['00081160'] = dj('IS', null);
+    assert.notEqual(allowed(() => ruleCaseManifest(c)).sha256, m.sha256, 'invalid raw frames must not collapse to null in the digest');
+    c.input.dicom['00082112'].Value[0]['00081160'] = dj('IS', 2);
+    assert.equal(allowed(() => ruleCaseResult(c)).sourceAccepted, true, 'a valid reread recovers the source');
+    assert.deepEqual(r.links[0].frames, frames, 'a later input change cannot change the fixed manifest');
+  });
+}
+
+def('TEST-E-02 manifest_sources A7', () => {
+  const c = ruleCase('SOURCE-FRAME-VALID');
+  c.input.dicom['00082112'].Value[0]['00081160'] = dj('IS', '  +02 ');
+  const m = allowed(() => ruleCaseManifest(c)), r = allowed(() => ruleCaseResult(c));
+  assert.equal(r.sourceAccepted, true); assert.deepEqual(r.links[0].frames, ['  +02 ']);
+  c.input.declaredSources = rawLinks(r);
+  assert.equal(allowed(() => ruleCaseManifest(c)).sha256, m.sha256);
+  c.input.declaredSources[0].frames = [2];
+  refused(() => ruleCaseManifest(c), 'MammographyHeaderMismatch');
+  c.input.declaredSources = null;
+  c.input.dicom['00082112'].Value[0]['00081160'] = dj('IS', 2);
+  assert.equal(allowed(() => ruleCaseResult(c)).sourceAccepted, true);
+  assert.notEqual(allowed(() => ruleCaseManifest(c)).sha256, m.sha256, 'numeric equality must not erase raw source evidence');
+});
+
+def('TEST-E-02 manifest_sources R21', () => {
+  const all = studyObjects(), o = all.find(o => o.sopInstanceUid === DBT), hd = o.mammography.header;
+  o.declaredFrameCount = 1; o.frames = o.frames.slice(0, 1);
+  hd['00280008'] = dj('IS', 2001);
+  refused(() => build(all), 'MammographyHeaderMismatch');
+  for (const values of [[6, 6], [0], [-1], ['abc'], [2.5], ['NaN'], []]) {
+    hd['00280008'] = dj('IS', ...values);
+    const before = structuredClone(all), m = allowed(() => build(all)), bad = m.objects.find(x => x.sopInstanceUid === DBT);
+    assert.deepEqual([bad.unsupported, bad.mammography.status], ['MammographyFrameCountUnreadable', 'unverified']);
+    bodyNeverStarts(spy => serve(spy, m, 'GET', `/dicom-web/studies/${STUDY}/series/${o.seriesUid}/instances/${DBT}`), 'MammographyFrameCountUnreadable');
+    const whole = allowed(() => prepare(m, `/dicom-web/studies/${STUDY}`));
+    assert.equal(whole.units.some(u => u.sopInstanceUid === DBT), false);
+    assert.deepEqual(whole.excluded, [{ sopInstanceUid: DBT, reason: 'MammographyFrameCountUnreadable' }]);
+    assert.equal(whole.units.length, all.length - 1);
+    assert.deepEqual(all, before);
+  }
+  assert.equal(build().objects.find(x => x.sopInstanceUid === DBT).unsupported, null);
+});
+
+def('TEST-E-02 manifest_sources R22', () => {
+  const baseline = build();
+  for (const flaw of ['2001-frames', 'source-uid', 'source-uid-absent-partial', 'root-sequence', 'acquisition-sequence', 'derivation-sequence', 'per-frame-source']) {
+    const all = studyObjects(), uid = flaw === '2001-frames' ? DBT : SYNTH, o = all.find(x => x.sopInstanceUid === uid), hd = o.mammography.header;
+    if (flaw === '2001-frames') {
+      hd['00280008'] = dj('IS', 2001);
+      hd['52009230'].Value = Array.from({ length: 2001 }, () => structuredClone(hd['52009230'].Value[0]));
+      o.declaredFrameCount = 2001; o.frames = frameSet(uid, 2001, 1); o.bytes = 6000;
+    } else if (flaw.startsWith('source-uid')) {
+      hd['00082112'].Value[0]['00081155'] = dj('UI', { bad: true });
+      if (flaw === 'source-uid-absent-partial') delete hd['00281350'];
+    }
+    else if (flaw === 'root-sequence') hd['00082112'] = { vr: 'SQ', Value: {} };
+    else if (flaw === 'acquisition-sequence') hd['00189507'] = dj('SQ', { '00082112': dj('SQ', null) });
+    else if (flaw === 'derivation-sequence') hd['00089124'] = dj('SQ', { '00082112': { vr: 'CS', Value: [] } });
+    else hd['52009230'] = dj('SQ', { '00089124': dj('SQ', { '00082112': dj('SQ', null) }) });
+    const before = structuredClone(all), m = allowed(() => build(all)), bad = m.objects.find(x => x.sopInstanceUid === uid).mammography;
+    assert.equal(m.objects.length, baseline.objects.length, flaw);
+    assert.deepEqual([bad.class, bad.status, bad.fullViewAutoMatch, bad.sourceAccepted, bad.sourceLinkStatus],
+      ['unverified', 'unverified', false, false, 'unresolved'], flaw);
+    assert.equal(bad.declaredSourceCount, null, 'failed extraction cannot report a known empty source inventory');
+    assert.equal(bad.fullness, flaw === 'source-uid-absent-partial' ? 'undetermined' : 'declared-not-partial');
+    assert.deepEqual(bad.sourceHeader, hd, 'unreadable source evidence stays available without inventing an inventory');
+    const normal = m.objects.find(x => x.sopInstanceUid === S(STUDY, 2) + '.1');
+    assert.deepEqual(normal, baseline.objects.find(x => x.sopInstanceUid === normal.sopInstanceUid));
+    assert.equal(normal.mammography.status, 'verified'); assert.equal(normal.mammography.fullViewAutoMatch, true);
+    assert.equal(allowed(() => prepare(m, `/dicom-web/studies/${STUDY}`)).units.length, all.length);
+    assert.deepEqual(all, before);
+    assert.equal(allowed(() => build(structuredClone(all))).sha256, m.sha256);
+    hd['00082112'] = dj('SQ', { '00081155': dj('UI', { different: true }) });
+    assert.notEqual(allowed(() => build(all)).sha256, m.sha256, 'retained malformed evidence is manifest content');
+  }
+  assert.equal(build().sha256, baseline.sha256, 'reread of repaired objects restores normal behaviour');
+});
+
+def('TEST-E-02 manifest_sources R23', () => {
+  for (const [flag, partial, fullness] of [['NO', 'no', 'declared-not-partial'], ['YES', 'yes', 'partial'], [null, 'unknown', 'undetermined']]) {
+    for (const tag of ['00200062', '00185101', '00540220']) {
+      const c = ruleCase('SOURCE-FRAME-VALID');
+      if (flag) c.input.dicom['00281350'] = dj('CS', flag); else delete c.input.dicom['00281350'];
+      c.input.dicom[tag] = tag === '00540220' ? { vr: 'SQ', Value: {} } : dj('CS', {});
+      const r = allowed(() => ruleCaseResult(c));
+      assert.deepEqual([r.status, r.partial, r.fullness, r.fullViewAutoMatch], ['unverified', partial, fullness, false]);
+      assert.equal(r.basis, tag === '00540220' ? 'partial-sequence-malformed' : `malformed-${tag}`);
+    }
+  }
+  const c = ruleCase('SOURCE-FRAME-VALID');
+  c.input.dicom['00200062'] = dj('CS', {});
+  c.input.dicom['00281350'] = dj('CS', 'NO'); c.input.dicom['00281351'] = dj('LO', 'partial');
+  const conflict = allowed(() => ruleCaseResult(c));
+  assert.deepEqual([conflict.partial, conflict.fullness], ['conflict', 'conflict'], 'a real P contradiction still survives unrelated errors');
+});
+
+def('TEST-E-02 manifest_sources R24', () => {
+  const c = ruleCase('SOURCE-FRAME-VALID'), ref = c.input.dicom['00082112'].Value[0];
+  for (const e of [dj('IS'), { vr: 'IS' }]) {
+    ref['00081160'] = e;
+    const r = allowed(() => ruleCaseResult(c));
+    assert.deepEqual([r.sourceAccepted, r.sourceLinkStatus, r.links[0].frames], [false, 'unresolved', []]);
+  }
+  delete ref['00081160'];
+  assert.equal(allowed(() => ruleCaseResult(c)).sourceAccepted, true, 'an absent selection still names the whole object');
+  const target = c.input.context.storedObjects[0].dicom;
+  const type = ['DERIVED', 'PRIMARY', 'TOMO_PROJ', 'NONE'];
+  target['00080008'] = dj('CS', ...type); target['00280008'] = dj('IS', 1);
+  target['52009230'].Value = target['52009230'].Value.slice(0, 1);
+  target['52009230'].Value[0]['00189504'].Value[0]['00089007'] = dj('CS', ...type);
+  ref['00081160'] = dj('IS');
+  const single = allowed(() => ruleCaseResult(c));
+  assert.deepEqual([single.sourceAccepted, single.links[0].frames], [true, []]);
+  for (const frames of [[], [1]]) {
+    ref['00081160'] = dj('IS', ...frames); delete ref['00081150'];
+    const r = allowed(() => ruleCaseResult(c));
+    assert.deepEqual([r.sourceAccepted, r.sourceLinkStatus, r.links[0].sopClass], [false, 'unresolved', null]);
+  }
+});
+
 // ── TEST-D735-* / TEST-D744-* shared mammography table, through the manifest path ────────────────────────────────────
 /** Moves tags into the manifest's object input: identity, the stored frame count, Image Type and its Value 1, synthetic
  * byte digests. Classification facts are left to the manifest; the case's expected values are never read here. */
 function entryFromHeader(hd, declaredSources, claimedClass) {
   const value = tag => hd[tag]?.Value ?? null;
   const perFrame = value('52009230'), nf = value('00280008')?.[0];
-  // A malformed or out-of-support count cannot allocate an unbounded synthetic frame set. Valid counts name the
-  // actual frame inventory, independently of incomplete functional groups (which the classifier must diagnose).
+  // Include the just-over-budget 2001-frame object. The billion-frame resource case instead checks refusal plus
+  // header classification below; its small inventory must never silently stand in for the declared billion frames.
   const count = Number(nf);
-  const n = Number.isInteger(count) && count > 0 && count <= 2000 ? count : perFrame?.length || 1;
+  const n = Number.isInteger(count) && count > 0 && count <= 2001 ? count : perFrame?.length || 1;
   const imageType = hd['00080008'] === undefined ? null : [...(hd['00080008'].Value ?? [])];
   const v1 = typeof imageType?.[0] === 'string' ? imageType[0].trim() : null, sop = value('00080018')[0];
   return { studyUid: value('0020000D')[0], seriesUid: value('0020000E')[0], sopInstanceUid: sop, sopClassUid: value('00080016')[0],
@@ -1120,7 +1262,7 @@ function entryFromHeader(hd, declaredSources, claimedClass) {
 }
 /** Stored objects of the same study, patient and institution are listed objects; any other stored object is an
  * out-of-study reference target with the keys it was resolved under (ManifestInput.referencedObjects). */
-function ruleCaseResult(c) {
+function ruleCaseManifest(c) {
   const ctx = c.input.context ?? null, patientKey = ctx?.patientKey ?? 'synthetic-patient', institutionKey = ctx?.institutionKey ?? 'synthetic-institution';
   const study = c.input.dicom['0020000D'].Value[0];
   const objects = [entryFromHeader(c.input.dicom, c.input.declaredSources ?? null, null)], referencedObjects = [];
@@ -1133,12 +1275,19 @@ function ruleCaseResult(c) {
     patient: { linkId: patientKey, patientId: 'SYN-D735', assigningAuthority: 'synthetic-authority' },
     expected: { series: new Set(objects.map(o => o.seriesUid)).size, objects: objects.length }, pages: [{ cursor: null, next: null, objects }],
     decoderCatalog: CATALOG, viewer: VIEWER, referencedObjects });
-  return m.objects.find(o => o.sopInstanceUid === objects[0].sopInstanceUid).mammography;
+  return m;
+}
+function ruleCaseResult(c) {
+  return ruleCaseManifest(c).objects.find(o => o.sopInstanceUid === c.input.dicom['00080018'].Value[0]).mammography;
 }
 for (const c of RULE.cases) {
   registered.add(c.testId);
   test(c.testId, () => {
-    const result = ruleCaseResult(c);
+    let result;
+    if (Number(c.input.dicom['00280008']?.Value?.[0]) > 2001) {
+      refused(() => ruleCaseManifest(c), 'MammographyHeaderMismatch');
+      result = allowed(() => M.classifyMammography(c.input.dicom)).result;
+    } else result = ruleCaseResult(c);
     for (const [key, expected] of Object.entries(c.expected)) assert.deepEqual(result[key], expected, `${c.id}: ${key}`);
   });
 }
