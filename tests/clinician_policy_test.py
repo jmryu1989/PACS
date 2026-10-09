@@ -1954,7 +1954,8 @@ class ClinicianPolicySpec(unittest.TestCase):
         # a controller or route outside *.controller.ts is invisible to both inventories: every other file goes through the
         # same lexer and runs (S5-U1c-F03), and together they use exactly the classified names
         sources = api_sources()
-        outside = {path.name: outside_decorators(path, source) for path, source in sources.items()
+        # keyed by the path under api/src: two modules may share a basename (emr-report/contract.ts, emr-signature/contract.ts)
+        outside = {path.relative_to(API).as_posix(): outside_decorators(path, source) for path, source in sources.items()
                    if not path.name.endswith(".controller.ts")}
         self.assertEqual(len(outside) + len(list(API.rglob("*.controller.ts"))), len(sources))
         self.assertEqual({name for names in outside.values() for name in names}, OUTSIDE_DECORATORS)
