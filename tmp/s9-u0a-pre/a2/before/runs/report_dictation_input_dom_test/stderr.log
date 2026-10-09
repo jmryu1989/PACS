@@ -1,0 +1,29 @@
+test_di00_opening_the_report_keeps_the_text_and_starts_no_recording (__main__.ReportDictationInputDOMTest.test_di00_opening_the_report_keeps_the_text_and_starts_no_recording) ... ok
+test_di01_a_committed_composition_lands_at_the_caret (__main__.ReportDictationInputDOMTest.test_di01_a_committed_composition_lands_at_the_caret) ... ok
+test_di02_typed_without_an_ime_composed_and_directly_committed_are_the_same_text (__main__.ReportDictationInputDOMTest.test_di02_typed_without_an_ime_composed_and_directly_committed_are_the_same_text)
+Three ways text reaches a field, with the honest names. ... ok
+test_di03_autosave_carries_what_is_in_the_field_at_that_instant (__main__.ReportDictationInputDOMTest.test_di03_autosave_carries_what_is_in_the_field_at_that_instant)
+Autosave is value-polled (main.html:4932-4943), so it writes whatever the field holds - ... ok
+test_di04_observation_a_same_value_poll_during_a_live_composition (__main__.ReportDictationInputDOMTest.test_di04_observation_a_same_value_poll_during_a_live_composition)
+OBSERVATION, NOT A GATE. Runs the shipped handlers unchanged. ... ok
+test_di05_a_poll_during_a_live_composition_keeps_typing_parity (__main__.ReportDictationInputDOMTest.test_di05_a_poll_during_a_live_composition_keeps_typing_parity)
+The contract. Same shape as DI-04, now asserted: a composition that outlives an autosave ... ok
+test_di06_a_forced_load_replaces_the_field_even_mid_composition (__main__.ReportDictationInputDOMTest.test_di06_a_forced_load_replaces_the_field_even_mid_composition)
+A study switch must still overwrite (the A->B->A lesson). What Blink does to a live ... ok
+test_di07_a_prelim_lock_during_a_composition_locks_the_field (__main__.ReportDictationInputDOMTest.test_di07_a_prelim_lock_during_a_composition_locks_the_field)
+Value preservation and permission are different states (main.html:3234). Someone else's ... ok
+test_di08_occupancy_starts_on_composing_text_exactly_as_on_typing (__main__.ReportDictationInputDOMTest.test_di08_occupancy_starts_on_composing_text_exactly_as_on_typing) ... ok
+test_di09_a_structured_line_goes_to_the_caret_the_composition_left (__main__.ReportDictationInputDOMTest.test_di09_a_structured_line_goes_to_the_caret_the_composition_left) ... ok
+test_di10_the_structured_value_field_is_not_rebuilt_while_it_is_composed_into (__main__.ReportDictationInputDOMTest.test_di10_the_structured_value_field_is_not_rebuilt_while_it_is_composed_into)
+Every keystroke re-renders that pane (main.html:3887-3889). A render that reassigned the ... ok
+test_di11_a_value_that_is_not_one_line_is_refused (__main__.ReportDictationInputDOMTest.test_di11_a_value_that_is_not_one_line_is_refused) ... ok
+test_di12_the_limit_is_utf8_bytes_not_utf16_units (__main__.ReportDictationInputDOMTest.test_di12_the_limit_is_utf8_bytes_not_utf16_units) ... ok
+test_di13_the_dictate_control_says_what_is_true (__main__.ReportDictationInputDOMTest.test_di13_the_dictate_control_says_what_is_true)
+The button comes from the sliced product markup, so this asserts main.html's own bytes. ... ok
+test_di14_a_declared_capability_enables_the_control_and_withdrawing_it_restores_di13 (__main__.ReportDictationInputDOMTest.test_di14_a_declared_capability_enables_the_control_and_withdrawing_it_restores_di13)
+asr-binding-contract §10: the ONE available case. DI-13 is unchanged and keeps asserting the ... ok
+
+----------------------------------------------------------------------
+Ran 15 tests in 5.921s
+
+OK

@@ -1,0 +1,15 @@
+test_01_landing_follows_the_guard_rule_and_main_html_hands_clinician_only_over (__main__.ClinicianHomeDOMTest.test_01_landing_follows_the_guard_rule_and_main_html_hands_clinician_only_over) ... ok
+test_02_identifiers_final_report_and_key_images_come_from_the_dto_only (__main__.ClinicianHomeDOMTest.test_02_identifiers_final_report_and_key_images_come_from_the_dto_only) ... ok
+test_03_non_final_answers_show_status_only_and_failures_are_shown_as_sent (__main__.ClinicianHomeDOMTest.test_03_non_final_answers_show_status_only_and_failures_are_shown_as_sent) ... ok
+test_04_a_b_a_late_answers_never_paint_over_the_current_study (__main__.ClinicianHomeDOMTest.test_04_a_b_a_late_answers_never_paint_over_the_current_study) ... ok
+test_05_controls_a_uid_only_or_absent_guard_paints_the_late_answer (__main__.ClinicianHomeDOMTest.test_05_controls_a_uid_only_or_absent_guard_paints_the_late_answer) ... ok
+test_06_list_states_are_distinct_and_refusals_are_shown_as_sent (__main__.ClinicianHomeDOMTest.test_06_list_states_are_distinct_and_refusals_are_shown_as_sent) ... ok
+test_07_paging_passes_each_signed_cursor_verbatim_and_rechecks_the_account (__main__.ClinicianHomeDOMTest.test_07_paging_passes_each_signed_cursor_verbatim_and_rechecks_the_account) ... ok
+test_08_wording_dialogs_fonts_hit_targets_and_keyboard (__main__.ClinicianHomeDOMTest.test_08_wording_dialogs_fonts_hit_targets_and_keyboard) ... ok
+test_11_a_list_refresh_takes_the_selected_study_down_until_a_list_succeeds (__main__.ClinicianHomeDOMTest.test_11_a_list_refresh_takes_the_selected_study_down_until_a_list_succeeds) ... ok
+test_13_ack_wording_ban_covers_everything_outside_the_critical_results_region (__main__.ClinicianHomeDOMTest.test_13_ack_wording_ban_covers_everything_outside_the_critical_results_region) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 12.167s
+
+OK

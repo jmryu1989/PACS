@@ -1,0 +1,28 @@
+test_every_gateway_error_literal_has_a_code_and_the_table_has_no_stale_entry (__main__.AgentPins.test_every_gateway_error_literal_has_a_code_and_the_table_has_no_stale_entry) ... ok
+test_receipt_delivery_never_reaches_the_transfer (__main__.AgentPins.test_receipt_delivery_never_reaches_the_transfer) ... ok
+test_seq_moves_in_the_same_statement_as_every_receipt_field (__main__.AgentPins.test_seq_moves_in_the_same_statement_as_every_receipt_field) ... ok
+test_templates_are_unambiguous (__main__.AgentPins.test_templates_are_unambiguous) ... ok
+test_the_enumeration_catches_an_unmapped_or_non_literal_error (__main__.AgentPins.test_the_enumeration_catches_an_unmapped_or_non_literal_error) ... ok
+test_the_invariants_agent_count_is_the_suite_as_authored (__main__.AgentPins.test_the_invariants_agent_count_is_the_suite_as_authored) ... ok
+test_the_receipt_body_is_the_closed_key_set_without_time_institution_or_text (__main__.AgentPins.test_the_receipt_body_is_the_closed_key_set_without_time_institution_or_text) ... ok
+test_main_wires_the_server_receipt_through_the_readable_observation_only (__main__.ClientPins.test_main_wires_the_server_receipt_through_the_readable_observation_only) ... ok
+test_changed_files_are_strict_utf8_without_bom_or_bare_cr (__main__.Encoding.test_changed_files_are_strict_utf8_without_bom_or_bare_cr) ... ok
+test_image_and_restore_bookkeeping_name_the_migration_and_the_table (__main__.MigrationPins.test_image_and_restore_bookkeeping_name_the_migration_and_the_table) ... ok
+test_the_closed_checks_are_the_restore_stable_form_of_the_rule_sets (__main__.MigrationPins.test_the_closed_checks_are_the_restore_stable_form_of_the_rule_sets) ... ok
+test_the_migration_is_one_additive_table (__main__.MigrationPins.test_the_migration_is_one_additive_table) ... ok
+test_the_schema_model_matches_the_table (__main__.MigrationPins.test_the_schema_model_matches_the_table) ... ok
+test_each_named_wrong_rule_fails_a_vector (__main__.ModelVectors.test_each_named_wrong_rule_fails_a_vector) ... ok
+test_every_decide_vector (__main__.ModelVectors.test_every_decide_vector) ... ok
+test_every_parse_vector (__main__.ModelVectors.test_every_parse_vector) ... ok
+test_vectors_cover_the_contract_cases (__main__.ModelVectors.test_vectors_cover_the_contract_cases) ... ok
+test_the_controller_route (__main__.ServerPins.test_the_controller_route) ... ok
+test_the_list_carries_only_own_receipts_and_bootstrap_none (__main__.ServerPins.test_the_list_carries_only_own_receipts_and_bootstrap_none) ... ok
+test_the_route_decides_ownership_first_and_writes_only_forward (__main__.ServerPins.test_the_route_decides_ownership_first_and_writes_only_forward) ... ok
+test_the_rule_constants_are_the_vectors_and_the_agent_table (__main__.ServerPins.test_the_rule_constants_are_the_vectors_and_the_agent_table) ... ok
+test_the_rule_module_is_pure (__main__.ServerPins.test_the_rule_module_is_pure) ... ok
+test_hosted_steps_select_the_new_tests_with_their_sources (__main__.WorkflowPins.test_hosted_steps_select_the_new_tests_with_their_sources) ... ok
+
+----------------------------------------------------------------------
+Ran 23 tests in 0.128s
+
+OK

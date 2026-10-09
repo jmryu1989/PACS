@@ -1,0 +1,25 @@
+test_main_wires_the_answer_through_the_observation_and_nothing_else (__main__.ClientPins.test_main_wires_the_answer_through_the_observation_and_nothing_else) ... ok
+test_the_module_has_no_storage_network_dom_or_seed_path (__main__.ClientPins.test_the_module_has_no_storage_network_dom_or_seed_path) ... ok
+test_the_order_panel_carries_the_engineering_marker_and_the_box (__main__.ClientPins.test_the_order_panel_carries_the_engineering_marker_and_the_box) ... ok
+test_the_page_client_hands_the_answer_over_from_the_completing_page_only (__main__.ClientPins.test_the_page_client_hands_the_answer_over_from_the_completing_page_only) ... ok
+test_the_poll_harness_supplies_every_product_function_the_observation_now_calls (__main__.ClientPins.test_the_poll_harness_supplies_every_product_function_the_observation_now_calls) ... ok
+test_changed_files_are_strict_utf8_without_bom_or_bare_cr (__main__.Encoding.test_changed_files_are_strict_utf8_without_bom_or_bare_cr) ... ok
+test_every_vector_holds_in_the_independent_model (__main__.IndependentModel.test_every_vector_holds_in_the_independent_model) ... ok
+test_phrases_are_the_study_arrivals_phrases (__main__.IndependentModel.test_phrases_are_the_study_arrivals_phrases) ... ok
+test_the_vectors_cover_each_contract_case (__main__.IndependentModel.test_the_vectors_cover_each_contract_case) ... ok
+test_the_image_and_restore_bookkeeping_name_the_migration (__main__.MigrationPins.test_the_image_and_restore_bookkeeping_name_the_migration) ... ok
+test_the_migration_is_one_nullable_column_and_nothing_else (__main__.MigrationPins.test_the_migration_is_one_nullable_column_and_nothing_else) ... ok
+test_the_schema_declares_the_column_nullable_without_default (__main__.MigrationPins.test_the_schema_declares_the_column_nullable_without_default) ... ok
+test_identity_enumeration_default_is_unchanged_and_accession_is_opt_in (__main__.ServerPins.test_identity_enumeration_default_is_unchanged_and_accession_is_opt_in) ... ok
+test_list_reads_the_order_side_on_the_completing_page_before_the_access_recheck (__main__.ServerPins.test_list_reads_the_order_side_on_the_completing_page_before_the_access_recheck) ... ok
+test_no_existing_write_or_response_path_gained_the_accession (__main__.ServerPins.test_no_existing_write_or_response_path_gained_the_accession) ... ok
+test_order_side_query_is_tenant_filtered_and_carries_no_patient_field (__main__.ServerPins.test_order_side_query_is_tenant_filtered_and_carries_no_patient_field) ... ok
+test_the_answer_uses_the_same_successful_enumeration_and_the_server_read_accession (__main__.ServerPins.test_the_answer_uses_the_same_successful_enumeration_and_the_server_read_accession) ... ok
+test_the_rule_module_is_pure_and_carries_the_tenant_pins (__main__.ServerPins.test_the_rule_module_is_pure_and_carries_the_tenant_pins) ... ok
+test_each_named_wrong_rule_fails_its_vector (__main__.VectorAdequacy.test_each_named_wrong_rule_fails_its_vector) ... ok
+test_hosted_steps_select_the_new_tests_with_their_source_hashes (__main__.WorkflowPins.test_hosted_steps_select_the_new_tests_with_their_source_hashes) ... ok
+
+----------------------------------------------------------------------
+Ran 20 tests in 0.022s
+
+OK

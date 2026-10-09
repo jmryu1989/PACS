@@ -1,0 +1,27 @@
+test_dr01_demo_rows_follow_filters_and_keep_no_search_options (__main__.MultiInstitutionWorklist.test_dr01_demo_rows_follow_filters_and_keep_no_search_options) ... ok
+test_dr02_session_end_empties_the_list_in_both_entries (__main__.MultiInstitutionWorklist.test_dr02_session_end_empties_the_list_in_both_entries) ... ok
+test_dr03_demo_fallback_rows_and_reentry (__main__.MultiInstitutionWorklist.test_dr03_demo_fallback_rows_and_reentry) ... ok
+test_dr04_demo_rereads_draw_only_the_latest_answer (__main__.MultiInstitutionWorklist.test_dr04_demo_rereads_draw_only_the_latest_answer) ... ok
+test_f1_both_boot_kinds_are_clean (__main__.MultiInstitutionWorklist.test_f1_both_boot_kinds_are_clean) ... ok
+test_f5_demo_reach_check_fails_on_the_builtin_fallback (__main__.MultiInstitutionWorklist.test_f5_demo_reach_check_fails_on_the_builtin_fallback) ... ok
+test_mi01_demo_entry_reads_orthanc_and_fills_no_hospital (__main__.MultiInstitutionWorklist.test_mi01_demo_entry_reads_orthanc_and_fills_no_hospital) ... ok
+test_mi01_hospital_cell_owner_name_and_tele (__main__.MultiInstitutionWorklist.test_mi01_hospital_cell_owner_name_and_tele) ... ok
+test_mi02_hospital_filter_compound_and_hidden_column (__main__.MultiInstitutionWorklist.test_mi02_hospital_filter_compound_and_hidden_column) ... ok
+test_mi02_manual_search_and_a_name_with_tele (__main__.MultiInstitutionWorklist.test_mi02_manual_search_and_a_name_with_tele) ... ok
+test_mi03_saved_search_keeps_hospital_text_rule_and_sort (__main__.MultiInstitutionWorklist.test_mi03_saved_search_keeps_hospital_text_rule_and_sort) ... ok
+test_mi04_account_load_and_save_answers (__main__.MultiInstitutionWorklist.test_mi04_account_load_and_save_answers) ... ok
+test_mi04_stored_browser_layouts_from_before_the_unit (__main__.MultiInstitutionWorklist.test_mi04_stored_browser_layouts_from_before_the_unit) ... ok
+test_mi04_two_owners_and_reset (__main__.MultiInstitutionWorklist.test_mi04_two_owners_and_reset) ... ok
+test_mi05_routing_factors_legend_infers_nothing (__main__.MultiInstitutionWorklist.test_mi05_routing_factors_legend_infers_nothing) ... ok
+test_mi06_urgency_comes_from_em_not_the_description (__main__.MultiInstitutionWorklist.test_mi06_urgency_comes_from_em_not_the_description) ... ok
+test_mi06_urgency_is_the_server_em_and_nothing_changes_with_time (__main__.MultiInstitutionWorklist.test_mi06_urgency_is_the_server_em_and_nothing_changes_with_time) ... ok
+test_mi07_hospital_header_sorts_by_name_only (__main__.MultiInstitutionWorklist.test_mi07_hospital_header_sorts_by_name_only) ... ok
+test_mi08_assignment_filters_keep_tele_rows (__main__.MultiInstitutionWorklist.test_mi08_assignment_filters_keep_tele_rows) ... ok
+test_mi09_technician_mode_and_reqhosp (__main__.MultiInstitutionWorklist.test_mi09_technician_mode_and_reqhosp) ... ok
+test_mi10_external_strings_stay_text (__main__.MultiInstitutionWorklist.test_mi10_external_strings_stay_text) ... ok
+test_mi11_refresh_closed_renamed_and_late_answers (__main__.MultiInstitutionWorklist.test_mi11_refresh_closed_renamed_and_late_answers) ... ok
+
+----------------------------------------------------------------------
+Ran 22 tests in 185.674s
+
+OK

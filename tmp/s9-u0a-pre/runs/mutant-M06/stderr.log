@@ -1,0 +1,435 @@
+test_B1_03_18_hold_report_templates_ui_js (__main__.EarlyInputSplit.test_B1_03_18_hold_report_templates_ui_js)
+B1-03: 18-part page, hold report-templates-ui.js (the original page failed here on selectionSeq) ... ok
+test_B1_03_18_hold_study_corrections_js (__main__.EarlyInputSplit.test_B1_03_18_hold_study_corrections_js)
+B1-03: 18-part page, hold study-corrections.js (the original page failed here on selectionSeq) ... ok
+test_B1_03_30_hold_report_editor_js (__main__.EarlyInputSplit.test_B1_03_30_hold_report_editor_js)
+B1-03: 30-part page, hold report-editor.js (the original page failed here on selectionSeq) ... ok
+test_B1_03_30_hold_report_templates_ui_js (__main__.EarlyInputSplit.test_B1_03_30_hold_report_templates_ui_js)
+B1-03: 30-part page, hold report-templates-ui.js (the original page failed here on selectionSeq) ... ok
+test_B1_03_45_150ms_after_report_dictation_js (__main__.EarlyInputSplit.test_B1_03_45_150ms_after_report_dictation_js)
+B1-03: 45-part page, 150ms after report-dictation.js (the original page failed here on selectionSeq) ... ok
+test_B1_03_45_hold_report_editor_js (__main__.EarlyInputSplit.test_B1_03_45_hold_report_editor_js)
+B1-03: 45-part page, hold report-editor.js (the original page failed here on selectionSeq) ... ok
+test_B1_03_45_hold_report_templates_ui_js (__main__.EarlyInputSplit.test_B1_03_45_hold_report_templates_ui_js)
+B1-03: 45-part page, hold report-templates-ui.js (the original page failed here on selectionSeq) ... ok
+test_B1_05_18_hold_current_study_js (__main__.EarlyInputSplit.test_B1_05_18_hold_current_study_js)
+B1-05: 18-part page, hold current-study.js (the original page failed here on cur) ... FAIL
+test_B1_05_18_hold_study_corrections_js (__main__.EarlyInputSplit.test_B1_05_18_hold_study_corrections_js)
+B1-05: 18-part page, hold study-corrections.js (the original page failed here on RFIELDS) ... FAIL
+test_B1_05_18_hold_worklist_columns_view_js (__main__.EarlyInputSplit.test_B1_05_18_hold_worklist_columns_view_js)
+B1-05: 18-part page, hold worklist-columns-view.js (the original page failed here on cur) ... FAIL
+test_B1_05_30_hold_current_study_js (__main__.EarlyInputSplit.test_B1_05_30_hold_current_study_js)
+B1-05: 30-part page, hold current-study.js (the original page failed here on cur) ... FAIL
+test_B1_05_30_hold_related_report_js (__main__.EarlyInputSplit.test_B1_05_30_hold_related_report_js)
+B1-05: 30-part page, hold related-report.js (the original page failed here on RFIELDS) ... FAIL
+test_B1_05_30_hold_worklist_columns_view_js (__main__.EarlyInputSplit.test_B1_05_30_hold_worklist_columns_view_js)
+B1-05: 30-part page, hold worklist-columns-view.js (the original page failed here on cur) ... FAIL
+test_B1_05_45_150ms_after_current_study_js (__main__.EarlyInputSplit.test_B1_05_45_150ms_after_current_study_js)
+B1-05: 45-part page, 150ms after current-study.js (the original page failed here on RFIELDS) ... FAIL
+test_B1_05_45_150ms_after_report_templates_ui_js (__main__.EarlyInputSplit.test_B1_05_45_150ms_after_report_templates_ui_js)
+B1-05: 45-part page, 150ms after report-templates-ui.js (the original page failed here on cur) ... FAIL
+test_B1_05_45_hold_current_study_js (__main__.EarlyInputSplit.test_B1_05_45_hold_current_study_js)
+B1-05: 45-part page, hold current-study.js (the original page failed here on cur) ... FAIL
+test_B1_05_45_hold_related_report_js (__main__.EarlyInputSplit.test_B1_05_45_hold_related_report_js)
+B1-05: 45-part page, hold related-report.js (the original page failed here on RFIELDS) ... FAIL
+test_B1_05_45_hold_worklist_columns_view_js (__main__.EarlyInputSplit.test_B1_05_45_hold_worklist_columns_view_js)
+B1-05: 45-part page, hold worklist-columns-view.js (the original page failed here on cur) ... FAIL
+test_B1_05_TAB_18_hold_study_corrections_js (__main__.EarlyInputSplit.test_B1_05_TAB_18_hold_study_corrections_js)
+B1-05-TAB: 18-part page, hold study-corrections.js (the original page failed here on editReport) ... ok
+test_B1_05_TAB_18_hold_worklist_columns_view_js (__main__.EarlyInputSplit.test_B1_05_TAB_18_hold_worklist_columns_view_js)
+B1-05-TAB: 18-part page, hold worklist-columns-view.js (the original page failed here on editReport) ... ok
+test_B1_05_TAB_30_hold_report_draft_save_js (__main__.EarlyInputSplit.test_B1_05_TAB_30_hold_report_draft_save_js)
+B1-05-TAB: 30-part page, hold report-draft-save.js (the original page failed here on editReport) ... ok
+test_B1_05_TAB_30_hold_worklist_columns_view_js (__main__.EarlyInputSplit.test_B1_05_TAB_30_hold_worklist_columns_view_js)
+B1-05-TAB: 30-part page, hold worklist-columns-view.js (the original page failed here on editReport) ... ok
+test_B1_05_TAB_45_hold_report_draft_save_js (__main__.EarlyInputSplit.test_B1_05_TAB_45_hold_report_draft_save_js)
+B1-05-TAB: 45-part page, hold report-draft-save.js (the original page failed here on editReport) ... ok
+test_B1_05_TAB_45_hold_worklist_columns_view_js (__main__.EarlyInputSplit.test_B1_05_TAB_45_hold_worklist_columns_view_js)
+B1-05-TAB: 45-part page, hold worklist-columns-view.js (the original page failed here on editReport) ... ok
+test_B1_15_18_leave_while_holding_worklist_view_js (__main__.EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js)
+B1-15/41/42/45: 18-part page, leave while holding worklist-view.js (the original page failed here on renderRelated, render (console.error)) ... FAIL
+test_B1_15_30_leave_while_holding_worklist_view_js (__main__.EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js)
+B1-15/41/42/45: 30-part page, leave while holding worklist-view.js (the original page failed here on renderRelated, render (console.error)) ... FAIL
+test_B1_15_45_leave_while_holding_worklist_view_js (__main__.EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js)
+B1-15/41/42/45: 45-part page, leave while holding worklist-view.js (the original page failed here on renderRelated, render (console.error)) ... FAIL
+test_B1_41_18_leave_while_holding_related_studies_js (__main__.EarlyInputSplit.test_B1_41_18_leave_while_holding_related_studies_js)
+B1-41/42/45: 18-part page, leave while holding related-studies.js (the original page failed here on renderRelated, renderChips, updateReportButtons (console.error)) ... FAIL
+test_B1_41_30_leave_while_holding_related_studies_js (__main__.EarlyInputSplit.test_B1_41_30_leave_while_holding_related_studies_js)
+B1-41/42/45: 30-part page, leave while holding related-studies.js (the original page failed here on renderRelated, renderChips, updateReportButtons (console.error)) ... FAIL
+test_B1_41_30_leave_while_holding_report_commit_js (__main__.EarlyInputSplit.test_B1_41_30_leave_while_holding_report_commit_js)
+B1-41/45: 30-part page, leave while holding report-commit.js (the original page failed here on renderChips, updateReportButtons (console.error)) ... FAIL
+test_B1_41_45_leave_while_holding_related_studies_js (__main__.EarlyInputSplit.test_B1_41_45_leave_while_holding_related_studies_js)
+B1-41/42/45: 45-part page, leave while holding related-studies.js (the original page failed here on renderRelated, renderChips, updateReportButtons (console.error)) ... FAIL
+test_B1_41_45_leave_while_holding_report_commit_js (__main__.EarlyInputSplit.test_B1_41_45_leave_while_holding_report_commit_js)
+B1-41/45: 45-part page, leave while holding report-commit.js (the original page failed here on renderChips, updateReportButtons (console.error)) ... FAIL
+test_B1_57_45_leave_while_holding_clinical_context_panel_js (__main__.EarlyInputSplit.test_B1_57_45_leave_while_holding_clinical_context_panel_js)
+B1-57/PRE-P3: 45-part page, leave while holding clinical-context-panel.js (the original page failed here on applyLayout, renderChips) ... ok
+test_B1_57_45_leave_while_holding_workspace_panels_js (__main__.EarlyInputSplit.test_B1_57_45_leave_while_holding_workspace_panels_js)
+B1-57/PRE-P3: 45-part page, leave while holding workspace-panels.js (the original page failed here on applyLayout, renderChips) ... ok
+test_B1_58_45_150ms_after_worklist_controls_js (__main__.EarlyInputSplit.test_B1_58_45_150ms_after_worklist_controls_js)
+B1-58: 45-part page, 150ms after worklist-controls.js (the original page failed here on renderChips) ... ok
+test_B1_58_45_hold_saved_filters_js (__main__.EarlyInputSplit.test_B1_58_45_hold_saved_filters_js)
+B1-58: 45-part page, hold saved-filters.js (the original page failed here on renderChips) ... ok
+test_PRE_P3_45_leave_while_holding_saved_filters_js (__main__.EarlyInputSplit.test_PRE_P3_45_leave_while_holding_saved_filters_js)
+PRE-P3/B1-41: 45-part page, leave while holding saved-filters.js (the original page failed here on renderChips) ... ok
+test_PRE_X1_30_hold_report_toolbar_js (__main__.EarlyInputSplit.test_PRE_X1_30_hold_report_toolbar_js)
+PRE-X1: 30-part page, hold report-toolbar.js (the original page failed here on reportWriteBlock) ... FAIL
+test_PRE_X1_30_hold_work_exit_js (__main__.EarlyInputSplit.test_PRE_X1_30_hold_work_exit_js)
+PRE-X1: 30-part page, hold work-exit.js (the original page failed here on reportWriteBlock) ... FAIL
+test_PRE_X1_45_hold_report_toolbar_js (__main__.EarlyInputSplit.test_PRE_X1_45_hold_report_toolbar_js)
+PRE-X1: 45-part page, hold report-toolbar.js (the original page failed here on reportWriteBlock) ... FAIL
+test_PRE_X1_45_hold_work_exit_js (__main__.EarlyInputSplit.test_PRE_X1_45_hold_work_exit_js)
+PRE-X1: 45-part page, hold work-exit.js (the original page failed here on reportWriteBlock) ... FAIL
+test_PRE_X2_30_hold_report_editor_js (__main__.EarlyInputSplit.test_PRE_X2_30_hold_report_editor_js)
+PRE-X2: 30-part page, hold report-editor.js (the original page failed here on reportWriteBlock) ... FAIL
+test_PRE_X2_30_hold_report_toolbar_js (__main__.EarlyInputSplit.test_PRE_X2_30_hold_report_toolbar_js)
+PRE-X2: 30-part page, hold report-toolbar.js (the original page failed here on reportWriteBlock) ... FAIL
+test_PRE_X2_45_hold_report_editor_js (__main__.EarlyInputSplit.test_PRE_X2_45_hold_report_editor_js)
+PRE-X2: 45-part page, hold report-editor.js (the original page failed here on reportWriteBlock) ... FAIL
+test_PRE_X2_45_hold_report_toolbar_js (__main__.EarlyInputSplit.test_PRE_X2_45_hold_report_toolbar_js)
+PRE-X2: 45-part page, hold report-toolbar.js (the original page failed here on reportWriteBlock) ... FAIL
+test_PRE_X3_45_hold_saved_filters_js (__main__.EarlyInputSplit.test_PRE_X3_45_hold_saved_filters_js)
+PRE-X3: 45-part page, hold saved-filters.js (the original page failed here on renderChips) ... ok
+test_a_report_field_input_reaches_its_listeners_in_the_original_order (__main__.Registration.test_a_report_field_input_reaches_its_listeners_in_the_original_order) ... ok
+test_after_retry_one_quick_match_change_has_one_effect (__main__.Registration.test_after_retry_one_quick_match_change_has_one_effect) ... ok
+test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none (__main__.Registration.test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none) ... ok
+test_registrations_match_the_original_page_before_and_after_each_session_outcome (__main__.Registration.test_registrations_match_the_original_page_before_and_after_each_session_outcome) ... ok
+test_B1_03_unsplit (__main__.UnsplitControl.test_B1_03_unsplit) ... ok
+test_B1_05_TAB_unsplit (__main__.UnsplitControl.test_B1_05_TAB_unsplit) ... ok
+test_B1_05_unsplit (__main__.UnsplitControl.test_B1_05_unsplit) ... ok
+test_B1_58_unsplit (__main__.UnsplitControl.test_B1_58_unsplit) ... ok
+test_PRE_X1_unsplit (__main__.UnsplitControl.test_PRE_X1_unsplit) ... ok
+test_PRE_X3_unsplit (__main__.UnsplitControl.test_PRE_X3_unsplit) ... ok
+test_leaving_unsplit (__main__.UnsplitControl.test_leaving_unsplit) ... ok
+test_window_and_session_events_at_held_boundaries_raise_nothing (__main__.WindowAndSessionEvents.test_window_and_session_events_at_held_boundaries_raise_nothing) ... 
+  test_window_and_session_events_at_held_boundaries_raise_nothing (__main__.WindowAndSessionEvents.test_window_and_session_events_at_held_boundaries_raise_nothing) (held='sr-reader.js') ... FAIL
+  test_window_and_session_events_at_held_boundaries_raise_nothing (__main__.WindowAndSessionEvents.test_window_and_session_events_at_held_boundaries_raise_nothing) (held='report-editor.js') ... FAIL
+  test_window_and_session_events_at_held_boundaries_raise_nothing (__main__.WindowAndSessionEvents.test_window_and_session_events_at_held_boundaries_raise_nothing) (held='work-exit.js') ... FAIL
+
+======================================================================
+FAIL: test_B1_05_18_hold_current_study_js (__main__.EarlyInputSplit.test_B1_05_18_hold_current_study_js)
+B1-05: 18-part page, hold current-study.js (the original page failed here on cur)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 695, in test
+    self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger,
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 497, in assert_like_original
+    raise HazardFailure(f"{hazard}: uncaught errors on the early input: {result.errors}", result.errors)
+HazardFailure: B1-05: uncaught errors on the early input: ['ReferenceError: reportWriteBlock is not defined', 'ReferenceError: reportWriteBlock is not defined']
+
+======================================================================
+FAIL: test_B1_05_18_hold_study_corrections_js (__main__.EarlyInputSplit.test_B1_05_18_hold_study_corrections_js)
+B1-05: 18-part page, hold study-corrections.js (the original page failed here on RFIELDS)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 695, in test
+    self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger,
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 497, in assert_like_original
+    raise HazardFailure(f"{hazard}: uncaught errors on the early input: {result.errors}", result.errors)
+HazardFailure: B1-05: uncaught errors on the early input: ['ReferenceError: reportWriteBlock is not defined', 'ReferenceError: reportWriteBlock is not defined']
+
+======================================================================
+FAIL: test_B1_05_18_hold_worklist_columns_view_js (__main__.EarlyInputSplit.test_B1_05_18_hold_worklist_columns_view_js)
+B1-05: 18-part page, hold worklist-columns-view.js (the original page failed here on cur)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 695, in test
+    self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger,
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 497, in assert_like_original
+    raise HazardFailure(f"{hazard}: uncaught errors on the early input: {result.errors}", result.errors)
+HazardFailure: B1-05: uncaught errors on the early input: ['ReferenceError: reportWriteBlock is not defined', 'ReferenceError: reportWriteBlock is not defined']
+
+======================================================================
+FAIL: test_B1_05_30_hold_current_study_js (__main__.EarlyInputSplit.test_B1_05_30_hold_current_study_js)
+B1-05: 30-part page, hold current-study.js (the original page failed here on cur)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 695, in test
+    self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger,
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 497, in assert_like_original
+    raise HazardFailure(f"{hazard}: uncaught errors on the early input: {result.errors}", result.errors)
+HazardFailure: B1-05: uncaught errors on the early input: ['ReferenceError: reportWriteBlock is not defined', 'ReferenceError: reportWriteBlock is not defined']
+
+======================================================================
+FAIL: test_B1_05_30_hold_related_report_js (__main__.EarlyInputSplit.test_B1_05_30_hold_related_report_js)
+B1-05: 30-part page, hold related-report.js (the original page failed here on RFIELDS)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 695, in test
+    self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger,
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 497, in assert_like_original
+    raise HazardFailure(f"{hazard}: uncaught errors on the early input: {result.errors}", result.errors)
+HazardFailure: B1-05: uncaught errors on the early input: ['ReferenceError: reportWriteBlock is not defined', 'ReferenceError: reportWriteBlock is not defined']
+
+======================================================================
+FAIL: test_B1_05_30_hold_worklist_columns_view_js (__main__.EarlyInputSplit.test_B1_05_30_hold_worklist_columns_view_js)
+B1-05: 30-part page, hold worklist-columns-view.js (the original page failed here on cur)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 695, in test
+    self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger,
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 497, in assert_like_original
+    raise HazardFailure(f"{hazard}: uncaught errors on the early input: {result.errors}", result.errors)
+HazardFailure: B1-05: uncaught errors on the early input: ['ReferenceError: reportWriteBlock is not defined', 'ReferenceError: reportWriteBlock is not defined']
+
+======================================================================
+FAIL: test_B1_05_45_150ms_after_current_study_js (__main__.EarlyInputSplit.test_B1_05_45_150ms_after_current_study_js)
+B1-05: 45-part page, 150ms after current-study.js (the original page failed here on RFIELDS)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 695, in test
+    self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger,
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 497, in assert_like_original
+    raise HazardFailure(f"{hazard}: uncaught errors on the early input: {result.errors}", result.errors)
+HazardFailure: B1-05: uncaught errors on the early input: ['ReferenceError: reportWriteBlock is not defined', 'ReferenceError: reportWriteBlock is not defined']
+
+======================================================================
+FAIL: test_B1_05_45_150ms_after_report_templates_ui_js (__main__.EarlyInputSplit.test_B1_05_45_150ms_after_report_templates_ui_js)
+B1-05: 45-part page, 150ms after report-templates-ui.js (the original page failed here on cur)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 695, in test
+    self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger,
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 497, in assert_like_original
+    raise HazardFailure(f"{hazard}: uncaught errors on the early input: {result.errors}", result.errors)
+HazardFailure: B1-05: uncaught errors on the early input: ['ReferenceError: reportWriteBlock is not defined', 'ReferenceError: reportWriteBlock is not defined']
+
+======================================================================
+FAIL: test_B1_05_45_hold_current_study_js (__main__.EarlyInputSplit.test_B1_05_45_hold_current_study_js)
+B1-05: 45-part page, hold current-study.js (the original page failed here on cur)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 695, in test
+    self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger,
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 497, in assert_like_original
+    raise HazardFailure(f"{hazard}: uncaught errors on the early input: {result.errors}", result.errors)
+HazardFailure: B1-05: uncaught errors on the early input: ['ReferenceError: reportWriteBlock is not defined', 'ReferenceError: reportWriteBlock is not defined']
+
+======================================================================
+FAIL: test_B1_05_45_hold_related_report_js (__main__.EarlyInputSplit.test_B1_05_45_hold_related_report_js)
+B1-05: 45-part page, hold related-report.js (the original page failed here on RFIELDS)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 695, in test
+    self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger,
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 497, in assert_like_original
+    raise HazardFailure(f"{hazard}: uncaught errors on the early input: {result.errors}", result.errors)
+HazardFailure: B1-05: uncaught errors on the early input: ['ReferenceError: reportWriteBlock is not defined', 'ReferenceError: reportWriteBlock is not defined']
+
+======================================================================
+FAIL: test_B1_05_45_hold_worklist_columns_view_js (__main__.EarlyInputSplit.test_B1_05_45_hold_worklist_columns_view_js)
+B1-05: 45-part page, hold worklist-columns-view.js (the original page failed here on cur)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 695, in test
+    self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger,
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 497, in assert_like_original
+    raise HazardFailure(f"{hazard}: uncaught errors on the early input: {result.errors}", result.errors)
+HazardFailure: B1-05: uncaught errors on the early input: ['ReferenceError: reportWriteBlock is not defined', 'ReferenceError: reportWriteBlock is not defined']
+
+======================================================================
+FAIL: test_B1_15_18_leave_while_holding_worklist_view_js (__main__.EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js)
+B1-15/41/42/45: 18-part page, leave while holding worklist-view.js (the original page failed here on renderRelated, render (console.error))
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 711, in test
+    raise HazardFailure(f"{hazards}: errors while leaving the page at the early moment: {errors}", errors)
+HazardFailure: B1-15/41/42/45: errors while leaving the page at the early moment: ['console.error: Emergency status rendering failed ReferenceError: reportWriteBlock is not defined\n    at reportTemplateAccessBlock (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:155:19)\n    at reportTemplateBlock (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:162:14)\n    at updateReportTemplateButton (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:165:19)\n    at updateReportButtons (https://syn.test/worklist/hpacs-lite/worklist-data.js:374:7)\n    at changed (https://syn.test/worklist/hpacs-lite/worklist-data.js:431:45)\n    at update (https://syn.test/worklist/hpacs-lite/study-priority.js:6:27)\n    at end (https://syn.test/worklist/hpacs-lite/study-priority.js:28:47)\n    at wrapper (<anonymous>:91:68)']
+
+======================================================================
+FAIL: test_B1_15_30_leave_while_holding_worklist_view_js (__main__.EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js)
+B1-15/41/42/45: 30-part page, leave while holding worklist-view.js (the original page failed here on renderRelated, render (console.error))
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 711, in test
+    raise HazardFailure(f"{hazards}: errors while leaving the page at the early moment: {errors}", errors)
+HazardFailure: B1-15/41/42/45: errors while leaving the page at the early moment: ['console.error: Emergency status rendering failed ReferenceError: reportWriteBlock is not defined\n    at reportTemplateAccessBlock (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:155:19)\n    at reportTemplateBlock (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:162:14)\n    at updateReportTemplateButton (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:165:19)\n    at updateReportButtons (https://syn.test/worklist/hpacs-lite/worklist-data.js:374:7)\n    at changed (https://syn.test/worklist/hpacs-lite/worklist-data.js:431:45)\n    at update (https://syn.test/worklist/hpacs-lite/study-priority.js:6:27)\n    at end (https://syn.test/worklist/hpacs-lite/study-priority.js:28:47)\n    at wrapper (<anonymous>:91:68)']
+
+======================================================================
+FAIL: test_B1_15_45_leave_while_holding_worklist_view_js (__main__.EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js)
+B1-15/41/42/45: 45-part page, leave while holding worklist-view.js (the original page failed here on renderRelated, render (console.error))
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 711, in test
+    raise HazardFailure(f"{hazards}: errors while leaving the page at the early moment: {errors}", errors)
+HazardFailure: B1-15/41/42/45: errors while leaving the page at the early moment: ['console.error: Emergency status rendering failed ReferenceError: reportWriteBlock is not defined\n    at reportTemplateAccessBlock (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:155:19)\n    at reportTemplateBlock (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:162:14)\n    at updateReportTemplateButton (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:165:19)\n    at updateReportButtons (https://syn.test/worklist/hpacs-lite/worklist-data.js:374:7)\n    at changed (https://syn.test/worklist/hpacs-lite/worklist-data.js:431:45)\n    at update (https://syn.test/worklist/hpacs-lite/study-priority.js:6:27)\n    at end (https://syn.test/worklist/hpacs-lite/study-priority.js:28:47)\n    at wrapper (<anonymous>:91:68)']
+
+======================================================================
+FAIL: test_B1_41_18_leave_while_holding_related_studies_js (__main__.EarlyInputSplit.test_B1_41_18_leave_while_holding_related_studies_js)
+B1-41/42/45: 18-part page, leave while holding related-studies.js (the original page failed here on renderRelated, renderChips, updateReportButtons (console.error))
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 711, in test
+    raise HazardFailure(f"{hazards}: errors while leaving the page at the early moment: {errors}", errors)
+HazardFailure: B1-41/42/45: errors while leaving the page at the early moment: ['console.error: Emergency status rendering failed ReferenceError: reportWriteBlock is not defined\n    at reportTemplateAccessBlock (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:155:19)\n    at reportTemplateBlock (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:162:14)\n    at updateReportTemplateButton (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:165:19)\n    at updateReportButtons (https://syn.test/worklist/hpacs-lite/worklist-data.js:374:7)\n    at changed (https://syn.test/worklist/hpacs-lite/worklist-data.js:431:45)\n    at update (https://syn.test/worklist/hpacs-lite/study-priority.js:6:27)\n    at end (https://syn.test/worklist/hpacs-lite/study-priority.js:28:47)\n    at wrapper (<anonymous>:91:68)']
+
+======================================================================
+FAIL: test_B1_41_30_leave_while_holding_related_studies_js (__main__.EarlyInputSplit.test_B1_41_30_leave_while_holding_related_studies_js)
+B1-41/42/45: 30-part page, leave while holding related-studies.js (the original page failed here on renderRelated, renderChips, updateReportButtons (console.error))
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 711, in test
+    raise HazardFailure(f"{hazards}: errors while leaving the page at the early moment: {errors}", errors)
+HazardFailure: B1-41/42/45: errors while leaving the page at the early moment: ['console.error: Emergency status rendering failed ReferenceError: reportWriteBlock is not defined\n    at reportTemplateAccessBlock (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:155:19)\n    at reportTemplateBlock (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:162:14)\n    at updateReportTemplateButton (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:165:19)\n    at updateReportButtons (https://syn.test/worklist/hpacs-lite/worklist-data.js:374:7)\n    at changed (https://syn.test/worklist/hpacs-lite/worklist-data.js:431:45)\n    at update (https://syn.test/worklist/hpacs-lite/study-priority.js:6:27)\n    at end (https://syn.test/worklist/hpacs-lite/study-priority.js:28:47)\n    at wrapper (<anonymous>:91:68)']
+
+======================================================================
+FAIL: test_B1_41_30_leave_while_holding_report_commit_js (__main__.EarlyInputSplit.test_B1_41_30_leave_while_holding_report_commit_js)
+B1-41/45: 30-part page, leave while holding report-commit.js (the original page failed here on renderChips, updateReportButtons (console.error))
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 711, in test
+    raise HazardFailure(f"{hazards}: errors while leaving the page at the early moment: {errors}", errors)
+HazardFailure: B1-41/45: errors while leaving the page at the early moment: ['console.error: Emergency status rendering failed ReferenceError: reportWriteBlock is not defined\n    at reportTemplateAccessBlock (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:155:19)\n    at reportTemplateBlock (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:162:14)\n    at updateReportTemplateButton (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:165:19)\n    at updateReportButtons (https://syn.test/worklist/hpacs-lite/worklist-data.js:374:7)\n    at changed (https://syn.test/worklist/hpacs-lite/worklist-data.js:431:45)\n    at update (https://syn.test/worklist/hpacs-lite/study-priority.js:6:27)\n    at end (https://syn.test/worklist/hpacs-lite/study-priority.js:28:47)\n    at wrapper (<anonymous>:91:68)']
+
+======================================================================
+FAIL: test_B1_41_45_leave_while_holding_related_studies_js (__main__.EarlyInputSplit.test_B1_41_45_leave_while_holding_related_studies_js)
+B1-41/42/45: 45-part page, leave while holding related-studies.js (the original page failed here on renderRelated, renderChips, updateReportButtons (console.error))
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 711, in test
+    raise HazardFailure(f"{hazards}: errors while leaving the page at the early moment: {errors}", errors)
+HazardFailure: B1-41/42/45: errors while leaving the page at the early moment: ['console.error: Emergency status rendering failed ReferenceError: reportWriteBlock is not defined\n    at reportTemplateAccessBlock (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:155:19)\n    at reportTemplateBlock (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:162:14)\n    at updateReportTemplateButton (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:165:19)\n    at updateReportButtons (https://syn.test/worklist/hpacs-lite/worklist-data.js:374:7)\n    at changed (https://syn.test/worklist/hpacs-lite/worklist-data.js:431:45)\n    at update (https://syn.test/worklist/hpacs-lite/study-priority.js:6:27)\n    at end (https://syn.test/worklist/hpacs-lite/study-priority.js:28:47)\n    at wrapper (<anonymous>:91:68)']
+
+======================================================================
+FAIL: test_B1_41_45_leave_while_holding_report_commit_js (__main__.EarlyInputSplit.test_B1_41_45_leave_while_holding_report_commit_js)
+B1-41/45: 45-part page, leave while holding report-commit.js (the original page failed here on renderChips, updateReportButtons (console.error))
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 711, in test
+    raise HazardFailure(f"{hazards}: errors while leaving the page at the early moment: {errors}", errors)
+HazardFailure: B1-41/45: errors while leaving the page at the early moment: ['console.error: Emergency status rendering failed ReferenceError: reportWriteBlock is not defined\n    at reportTemplateAccessBlock (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:155:19)\n    at reportTemplateBlock (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:162:14)\n    at updateReportTemplateButton (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:165:19)\n    at updateReportButtons (https://syn.test/worklist/hpacs-lite/worklist-data.js:374:7)\n    at changed (https://syn.test/worklist/hpacs-lite/worklist-data.js:431:45)\n    at update (https://syn.test/worklist/hpacs-lite/study-priority.js:6:27)\n    at end (https://syn.test/worklist/hpacs-lite/study-priority.js:28:47)\n    at wrapper (<anonymous>:91:68)']
+
+======================================================================
+FAIL: test_PRE_X1_30_hold_report_toolbar_js (__main__.EarlyInputSplit.test_PRE_X1_30_hold_report_toolbar_js)
+PRE-X1: 30-part page, hold report-toolbar.js (the original page failed here on reportWriteBlock)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 695, in test
+    self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger,
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 497, in assert_like_original
+    raise HazardFailure(f"{hazard}: uncaught errors on the early input: {result.errors}", result.errors)
+HazardFailure: PRE-X1: uncaught errors on the early input: ['ReferenceError: reportWriteBlock is not defined', 'ReferenceError: reportWriteBlock is not defined', 'ReferenceError: reportWriteBlock is not defined']
+
+======================================================================
+FAIL: test_PRE_X1_30_hold_work_exit_js (__main__.EarlyInputSplit.test_PRE_X1_30_hold_work_exit_js)
+PRE-X1: 30-part page, hold work-exit.js (the original page failed here on reportWriteBlock)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 695, in test
+    self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger,
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 497, in assert_like_original
+    raise HazardFailure(f"{hazard}: uncaught errors on the early input: {result.errors}", result.errors)
+HazardFailure: PRE-X1: uncaught errors on the early input: ['ReferenceError: reportWriteBlock is not defined', 'ReferenceError: reportWriteBlock is not defined', 'ReferenceError: reportWriteBlock is not defined']
+
+======================================================================
+FAIL: test_PRE_X1_45_hold_report_toolbar_js (__main__.EarlyInputSplit.test_PRE_X1_45_hold_report_toolbar_js)
+PRE-X1: 45-part page, hold report-toolbar.js (the original page failed here on reportWriteBlock)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 695, in test
+    self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger,
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 497, in assert_like_original
+    raise HazardFailure(f"{hazard}: uncaught errors on the early input: {result.errors}", result.errors)
+HazardFailure: PRE-X1: uncaught errors on the early input: ['ReferenceError: reportWriteBlock is not defined', 'ReferenceError: reportWriteBlock is not defined', 'ReferenceError: reportWriteBlock is not defined']
+
+======================================================================
+FAIL: test_PRE_X1_45_hold_work_exit_js (__main__.EarlyInputSplit.test_PRE_X1_45_hold_work_exit_js)
+PRE-X1: 45-part page, hold work-exit.js (the original page failed here on reportWriteBlock)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 695, in test
+    self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger,
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 497, in assert_like_original
+    raise HazardFailure(f"{hazard}: uncaught errors on the early input: {result.errors}", result.errors)
+HazardFailure: PRE-X1: uncaught errors on the early input: ['ReferenceError: reportWriteBlock is not defined', 'ReferenceError: reportWriteBlock is not defined', 'ReferenceError: reportWriteBlock is not defined']
+
+======================================================================
+FAIL: test_PRE_X2_30_hold_report_editor_js (__main__.EarlyInputSplit.test_PRE_X2_30_hold_report_editor_js)
+PRE-X2: 30-part page, hold report-editor.js (the original page failed here on reportWriteBlock)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 695, in test
+    self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger,
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 497, in assert_like_original
+    raise HazardFailure(f"{hazard}: uncaught errors on the early input: {result.errors}", result.errors)
+HazardFailure: PRE-X2: uncaught errors on the early input: ['ReferenceError: reportWriteBlock is not defined', 'ReferenceError: reportWriteBlock is not defined']
+
+======================================================================
+FAIL: test_PRE_X2_30_hold_report_toolbar_js (__main__.EarlyInputSplit.test_PRE_X2_30_hold_report_toolbar_js)
+PRE-X2: 30-part page, hold report-toolbar.js (the original page failed here on reportWriteBlock)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 695, in test
+    self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger,
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 497, in assert_like_original
+    raise HazardFailure(f"{hazard}: uncaught errors on the early input: {result.errors}", result.errors)
+HazardFailure: PRE-X2: uncaught errors on the early input: ['ReferenceError: reportWriteBlock is not defined', 'ReferenceError: reportWriteBlock is not defined']
+
+======================================================================
+FAIL: test_PRE_X2_45_hold_report_editor_js (__main__.EarlyInputSplit.test_PRE_X2_45_hold_report_editor_js)
+PRE-X2: 45-part page, hold report-editor.js (the original page failed here on reportWriteBlock)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 695, in test
+    self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger,
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 497, in assert_like_original
+    raise HazardFailure(f"{hazard}: uncaught errors on the early input: {result.errors}", result.errors)
+HazardFailure: PRE-X2: uncaught errors on the early input: ['ReferenceError: reportWriteBlock is not defined', 'ReferenceError: reportWriteBlock is not defined']
+
+======================================================================
+FAIL: test_PRE_X2_45_hold_report_toolbar_js (__main__.EarlyInputSplit.test_PRE_X2_45_hold_report_toolbar_js)
+PRE-X2: 45-part page, hold report-toolbar.js (the original page failed here on reportWriteBlock)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 695, in test
+    self.assert_like_original(hazard, self.early(hazard, layout, hold=hold, delay_ms=delay_ms, trigger=trigger,
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 497, in assert_like_original
+    raise HazardFailure(f"{hazard}: uncaught errors on the early input: {result.errors}", result.errors)
+HazardFailure: PRE-X2: uncaught errors on the early input: ['ReferenceError: reportWriteBlock is not defined', 'ReferenceError: reportWriteBlock is not defined']
+
+======================================================================
+FAIL: test_window_and_session_events_at_held_boundaries_raise_nothing (__main__.WindowAndSessionEvents.test_window_and_session_events_at_held_boundaries_raise_nothing) (held='sr-reader.js')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 635, in test_window_and_session_events_at_held_boundaries_raise_nothing
+    self.assertEqual([], run.errors)
+AssertionError: Lists differ: [] != ['console.error: Emergency status renderin[902 chars]:9)']
+
+Second list contains 1 additional elements.
+First extra element 0:
+'console.error: Emergency status rendering failed ReferenceError: reportWriteBlock is not defined\n    at reportTemplateAccessBlock (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:155:19)\n    at reportTemplateBlock (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:162:14)\n    at updateReportTemplateButton (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:165:19)\n    at updateReportButtons (https://syn.test/worklist/hpacs-lite/worklist-data.js:374:7)\n    at changed (https://syn.test/worklist/hpacs-lite/worklist-data.js:431:45)\n    at update (https://syn.test/worklist/hpacs-lite/study-priority.js:6:27)\n    at end (https://syn.test/worklist/hpacs-lite/study-priority.js:28:47)\n    at https://syn.test/worklist/hpacs-lite/study-priority.js:30:84\n    at notify (https://syn.test/worklist/hpacs-lite/work-context.js:70:15)\n    at lifecycle (https://syn.test/worklist/hpacs-lite/work-context.js:180:9)'
+
+Diff is 1059 characters long. Set self.maxDiff to None to see it.
+
+======================================================================
+FAIL: test_window_and_session_events_at_held_boundaries_raise_nothing (__main__.WindowAndSessionEvents.test_window_and_session_events_at_held_boundaries_raise_nothing) (held='report-editor.js')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 635, in test_window_and_session_events_at_held_boundaries_raise_nothing
+    self.assertEqual([], run.errors)
+AssertionError: Lists differ: [] != ['console.error: Emergency status renderin[902 chars]:9)']
+
+Second list contains 1 additional elements.
+First extra element 0:
+'console.error: Emergency status rendering failed ReferenceError: reportWriteBlock is not defined\n    at reportTemplateAccessBlock (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:155:19)\n    at reportTemplateBlock (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:162:14)\n    at updateReportTemplateButton (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:165:19)\n    at updateReportButtons (https://syn.test/worklist/hpacs-lite/worklist-data.js:374:7)\n    at changed (https://syn.test/worklist/hpacs-lite/worklist-data.js:431:45)\n    at update (https://syn.test/worklist/hpacs-lite/study-priority.js:6:27)\n    at end (https://syn.test/worklist/hpacs-lite/study-priority.js:28:47)\n    at https://syn.test/worklist/hpacs-lite/study-priority.js:30:84\n    at notify (https://syn.test/worklist/hpacs-lite/work-context.js:70:15)\n    at lifecycle (https://syn.test/worklist/hpacs-lite/work-context.js:180:9)'
+
+Diff is 1059 characters long. Set self.maxDiff to None to see it.
+
+======================================================================
+FAIL: test_window_and_session_events_at_held_boundaries_raise_nothing (__main__.WindowAndSessionEvents.test_window_and_session_events_at_held_boundaries_raise_nothing) (held='work-exit.js')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre\tests\main_early_input_dom_test.py", line 635, in test_window_and_session_events_at_held_boundaries_raise_nothing
+    self.assertEqual([], run.errors)
+AssertionError: Lists differ: [] != ['console.error: Emergency status renderin[902 chars]:9)']
+
+Second list contains 1 additional elements.
+First extra element 0:
+'console.error: Emergency status rendering failed ReferenceError: reportWriteBlock is not defined\n    at reportTemplateAccessBlock (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:155:19)\n    at reportTemplateBlock (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:162:14)\n    at updateReportTemplateButton (https://syn.test/worklist/hpacs-lite/report-templates-ui.js:165:19)\n    at updateReportButtons (https://syn.test/worklist/hpacs-lite/worklist-data.js:374:7)\n    at changed (https://syn.test/worklist/hpacs-lite/worklist-data.js:431:45)\n    at update (https://syn.test/worklist/hpacs-lite/study-priority.js:6:27)\n    at end (https://syn.test/worklist/hpacs-lite/study-priority.js:28:47)\n    at https://syn.test/worklist/hpacs-lite/study-priority.js:30:84\n    at notify (https://syn.test/worklist/hpacs-lite/work-context.js:70:15)\n    at lifecycle (https://syn.test/worklist/hpacs-lite/work-context.js:180:9)'
+
+Diff is 1059 characters long. Set self.maxDiff to None to see it.
+
+----------------------------------------------------------------------
+Ran 58 tests in 493.395s
+
+FAILED (failures=30)

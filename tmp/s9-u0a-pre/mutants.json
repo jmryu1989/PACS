@@ -1,0 +1,1038 @@
+{
+ "M00": {
+  "id": "M00",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_03_18_hold_report_templates_ui_js",
+   "EarlyInputSplit.test_B1_03_18_hold_study_corrections_js",
+   "EarlyInputSplit.test_B1_03_30_hold_report_editor_js",
+   "EarlyInputSplit.test_B1_03_30_hold_report_templates_ui_js",
+   "EarlyInputSplit.test_B1_03_45_150ms_after_report_dictation_js",
+   "EarlyInputSplit.test_B1_03_45_hold_report_editor_js",
+   "EarlyInputSplit.test_B1_03_45_hold_report_templates_ui_js",
+   "EarlyInputSplit.test_B1_05_18_hold_current_study_js",
+   "EarlyInputSplit.test_B1_05_18_hold_study_corrections_js",
+   "EarlyInputSplit.test_B1_05_18_hold_worklist_columns_view_js",
+   "EarlyInputSplit.test_B1_05_30_hold_current_study_js",
+   "EarlyInputSplit.test_B1_05_30_hold_related_report_js",
+   "EarlyInputSplit.test_B1_05_30_hold_worklist_columns_view_js",
+   "EarlyInputSplit.test_B1_05_45_150ms_after_current_study_js",
+   "EarlyInputSplit.test_B1_05_45_150ms_after_report_templates_ui_js",
+   "EarlyInputSplit.test_B1_05_45_hold_current_study_js",
+   "EarlyInputSplit.test_B1_05_45_hold_related_report_js",
+   "EarlyInputSplit.test_B1_05_45_hold_worklist_columns_view_js",
+   "EarlyInputSplit.test_B1_05_TAB_18_hold_study_corrections_js",
+   "EarlyInputSplit.test_B1_05_TAB_18_hold_worklist_columns_view_js",
+   "EarlyInputSplit.test_B1_05_TAB_30_hold_report_draft_save_js",
+   "EarlyInputSplit.test_B1_05_TAB_30_hold_worklist_columns_view_js",
+   "EarlyInputSplit.test_B1_05_TAB_45_hold_report_draft_save_js",
+   "EarlyInputSplit.test_B1_05_TAB_45_hold_worklist_columns_view_js",
+   "EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_41_18_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_30_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_30_leave_while_holding_report_commit_js",
+   "EarlyInputSplit.test_B1_41_45_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_45_leave_while_holding_report_commit_js",
+   "EarlyInputSplit.test_B1_57_45_leave_while_holding_clinical_context_panel_js",
+   "EarlyInputSplit.test_B1_57_45_leave_while_holding_workspace_panels_js",
+   "EarlyInputSplit.test_B1_58_45_150ms_after_worklist_controls_js",
+   "EarlyInputSplit.test_B1_58_45_hold_saved_filters_js",
+   "EarlyInputSplit.test_PRE_P3_45_leave_while_holding_saved_filters_js",
+   "EarlyInputSplit.test_PRE_X1_30_hold_report_toolbar_js",
+   "EarlyInputSplit.test_PRE_X1_30_hold_work_exit_js",
+   "EarlyInputSplit.test_PRE_X1_45_hold_report_toolbar_js",
+   "EarlyInputSplit.test_PRE_X1_45_hold_work_exit_js",
+   "EarlyInputSplit.test_PRE_X2_30_hold_report_editor_js",
+   "EarlyInputSplit.test_PRE_X2_30_hold_report_toolbar_js",
+   "EarlyInputSplit.test_PRE_X2_45_hold_report_editor_js",
+   "EarlyInputSplit.test_PRE_X2_45_hold_report_toolbar_js",
+   "EarlyInputSplit.test_PRE_X3_45_hold_saved_filters_js",
+   "WindowAndSessionEvents.test_window_and_session_events_at_held_boundaries_raise_nothing"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 408.675s",
+   "FAILED (failures=52)"
+  ],
+  "first_failure": "HazardFailure: B1-03: uncaught errors on the early input: ['ReferenceError: selectionSeq is not defined', 'ReferenceError: selectionSeq is not defined', 'ReferenceError: selectionSeq is not defined']",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M00.html",
+  "made": [
+   "M01",
+   "M02",
+   "M03",
+   "M04",
+   "M05",
+   "M06",
+   "M07",
+   "M08",
+   "M09",
+   "M10",
+   "M11",
+   "M12",
+   "M13",
+   "M14",
+   "M15",
+   "M16",
+   "M17",
+   "M18",
+   "M19",
+   "M20",
+   "M21",
+   "M22",
+   "M23",
+   "M24",
+   "M25",
+   "M26",
+   "M27",
+   "M28",
+   "M29",
+   "M30",
+   "M31",
+   "M32",
+   "M33",
+   "M34",
+   "M35"
+  ],
+  "statements": 658,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M00"
+ },
+ "M01": {
+  "id": "M01",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_03_18_hold_report_templates_ui_js",
+   "EarlyInputSplit.test_B1_03_18_hold_study_corrections_js",
+   "EarlyInputSplit.test_B1_03_30_hold_report_editor_js",
+   "EarlyInputSplit.test_B1_03_30_hold_report_templates_ui_js",
+   "EarlyInputSplit.test_B1_03_45_150ms_after_report_dictation_js",
+   "EarlyInputSplit.test_B1_03_45_hold_report_editor_js",
+   "EarlyInputSplit.test_B1_03_45_hold_report_templates_ui_js",
+   "EarlyInputSplit.test_B1_05_TAB_18_hold_study_corrections_js",
+   "EarlyInputSplit.test_B1_05_TAB_18_hold_worklist_columns_view_js",
+   "EarlyInputSplit.test_B1_05_TAB_30_hold_worklist_columns_view_js",
+   "EarlyInputSplit.test_B1_05_TAB_45_hold_worklist_columns_view_js"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 434.140s",
+   "FAILED (failures=11)"
+  ],
+  "first_failure": "HazardFailure: B1-03: uncaught errors on the early input: ['ReferenceError: selectionSeq is not defined', 'ReferenceError: selectionSeq is not defined', 'ReferenceError: selectionSeq is not defined']",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M01.html",
+  "made": [
+   "M01"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M01"
+ },
+ "M02": {
+  "id": "M02",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_05_18_hold_worklist_columns_view_js",
+   "EarlyInputSplit.test_B1_05_30_hold_worklist_columns_view_js",
+   "EarlyInputSplit.test_B1_05_45_150ms_after_report_templates_ui_js",
+   "EarlyInputSplit.test_B1_05_45_hold_worklist_columns_view_js"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 439.749s",
+   "FAILED (failures=4)"
+  ],
+  "first_failure": "HazardFailure: B1-05: uncaught errors on the early input: ['ReferenceError: studies is not defined', 'ReferenceError: studies is not defined', 'ReferenceError: studies is not defined', 'ReferenceError: studies is not defined', 'ReferenceError: studies is not defined']",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M02.html",
+  "made": [
+   "M02"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M02"
+ },
+ "M03": {
+  "id": "M03",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_05_18_hold_worklist_columns_view_js",
+   "EarlyInputSplit.test_B1_05_30_hold_worklist_columns_view_js",
+   "EarlyInputSplit.test_B1_05_45_150ms_after_report_templates_ui_js",
+   "EarlyInputSplit.test_B1_05_45_hold_worklist_columns_view_js"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 430.092s",
+   "FAILED (failures=4)"
+  ],
+  "first_failure": "HazardFailure: B1-05: uncaught errors on the early input: ['ReferenceError: selectedUid is not defined', 'ReferenceError: selectedUid is not defined']",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M03.html",
+  "made": [
+   "M03"
+  ],
+  "statements": 660,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M03"
+ },
+ "M04": {
+  "id": "M04",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_05_18_hold_current_study_js",
+   "EarlyInputSplit.test_B1_05_18_hold_worklist_columns_view_js",
+   "EarlyInputSplit.test_B1_05_30_hold_current_study_js",
+   "EarlyInputSplit.test_B1_05_30_hold_worklist_columns_view_js",
+   "EarlyInputSplit.test_B1_05_45_150ms_after_report_templates_ui_js",
+   "EarlyInputSplit.test_B1_05_45_hold_current_study_js",
+   "EarlyInputSplit.test_B1_05_45_hold_worklist_columns_view_js",
+   "EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js",
+   "WindowAndSessionEvents.test_window_and_session_events_at_held_boundaries_raise_nothing"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 478.465s",
+   "FAILED (failures=11)"
+  ],
+  "first_failure": "HazardFailure: B1-05: uncaught errors on the early input: ['ReferenceError: cur is not defined', 'ReferenceError: cur is not defined', 'ReferenceError: cur is not defined', 'ReferenceError: cur is not defined', 'ReferenceError: cur is not defined']",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M04.html",
+  "made": [
+   "M04"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M04"
+ },
+ "M05": {
+  "id": "M05",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_05_18_hold_current_study_js",
+   "EarlyInputSplit.test_B1_05_18_hold_study_corrections_js",
+   "EarlyInputSplit.test_B1_05_18_hold_worklist_columns_view_js",
+   "EarlyInputSplit.test_B1_05_30_hold_current_study_js",
+   "EarlyInputSplit.test_B1_05_30_hold_related_report_js",
+   "EarlyInputSplit.test_B1_05_30_hold_worklist_columns_view_js",
+   "EarlyInputSplit.test_B1_05_45_150ms_after_current_study_js",
+   "EarlyInputSplit.test_B1_05_45_150ms_after_report_templates_ui_js",
+   "EarlyInputSplit.test_B1_05_45_hold_current_study_js",
+   "EarlyInputSplit.test_B1_05_45_hold_related_report_js",
+   "EarlyInputSplit.test_B1_05_45_hold_worklist_columns_view_js"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 497.845s",
+   "FAILED (failures=11)"
+  ],
+  "first_failure": "HazardFailure: B1-05: uncaught errors on the early input: ['ReferenceError: RFIELDS is not defined', 'ReferenceError: RFIELDS is not defined']",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M05.html",
+  "made": [
+   "M05"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M05"
+ },
+ "M06": {
+  "id": "M06",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_05_18_hold_current_study_js",
+   "EarlyInputSplit.test_B1_05_18_hold_study_corrections_js",
+   "EarlyInputSplit.test_B1_05_18_hold_worklist_columns_view_js",
+   "EarlyInputSplit.test_B1_05_30_hold_current_study_js",
+   "EarlyInputSplit.test_B1_05_30_hold_related_report_js",
+   "EarlyInputSplit.test_B1_05_30_hold_worklist_columns_view_js",
+   "EarlyInputSplit.test_B1_05_45_150ms_after_current_study_js",
+   "EarlyInputSplit.test_B1_05_45_150ms_after_report_templates_ui_js",
+   "EarlyInputSplit.test_B1_05_45_hold_current_study_js",
+   "EarlyInputSplit.test_B1_05_45_hold_related_report_js",
+   "EarlyInputSplit.test_B1_05_45_hold_worklist_columns_view_js",
+   "EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_41_18_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_30_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_30_leave_while_holding_report_commit_js",
+   "EarlyInputSplit.test_B1_41_45_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_45_leave_while_holding_report_commit_js",
+   "EarlyInputSplit.test_PRE_X1_30_hold_report_toolbar_js",
+   "EarlyInputSplit.test_PRE_X1_30_hold_work_exit_js",
+   "EarlyInputSplit.test_PRE_X1_45_hold_report_toolbar_js",
+   "EarlyInputSplit.test_PRE_X1_45_hold_work_exit_js",
+   "EarlyInputSplit.test_PRE_X2_30_hold_report_editor_js",
+   "EarlyInputSplit.test_PRE_X2_30_hold_report_toolbar_js",
+   "EarlyInputSplit.test_PRE_X2_45_hold_report_editor_js",
+   "EarlyInputSplit.test_PRE_X2_45_hold_report_toolbar_js",
+   "WindowAndSessionEvents.test_window_and_session_events_at_held_boundaries_raise_nothing"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 493.395s",
+   "FAILED (failures=30)"
+  ],
+  "first_failure": "HazardFailure: B1-05: uncaught errors on the early input: ['ReferenceError: reportWriteBlock is not defined', 'ReferenceError: reportWriteBlock is not defined']",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M06.html",
+  "made": [
+   "M06"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M06"
+ },
+ "M07": {
+  "id": "M07",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_05_TAB_18_hold_study_corrections_js",
+   "EarlyInputSplit.test_B1_05_TAB_18_hold_worklist_columns_view_js",
+   "EarlyInputSplit.test_B1_05_TAB_30_hold_report_draft_save_js",
+   "EarlyInputSplit.test_B1_05_TAB_30_hold_worklist_columns_view_js",
+   "EarlyInputSplit.test_B1_05_TAB_45_hold_report_draft_save_js",
+   "EarlyInputSplit.test_B1_05_TAB_45_hold_worklist_columns_view_js"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 513.130s",
+   "FAILED (failures=6)"
+  ],
+  "first_failure": "HazardFailure: B1-05-TAB: uncaught errors on the early input: ['ReferenceError: editReport is not defined']",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M07.html",
+  "made": [
+   "M07"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M07"
+ },
+ "M08": {
+  "id": "M08",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_41_18_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_30_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_45_leave_while_holding_related_studies_js",
+   "WindowAndSessionEvents.test_window_and_session_events_at_held_boundaries_raise_nothing"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 480.032s",
+   "FAILED (failures=7)"
+  ],
+  "first_failure": "HazardFailure: B1-15/41/42/45: errors while leaving the page at the early moment: ['ReferenceError: relatedModalities is not defined', 'console.error: Emergency status rendering failed ReferenceError: relatedModalities is not defined\\n    at renderRelated (https://syn.test/worklist/hpacs-lite/worklist-state.js:49:",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M08.html",
+  "made": [
+   "M08"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M08"
+ },
+ "M09": {
+  "id": "M09",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_41_18_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_30_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_45_leave_while_holding_related_studies_js",
+   "WindowAndSessionEvents.test_window_and_session_events_at_held_boundaries_raise_nothing"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 443.326s",
+   "FAILED (failures=7)"
+  ],
+  "first_failure": "HazardFailure: B1-15/41/42/45: errors while leaving the page at the early moment: ['ReferenceError: relatedPageQuery is not defined', 'console.error: Emergency status rendering failed ReferenceError: relatedPageQuery is not defined\\n    at renderRelated (https://syn.test/worklist/hpacs-lite/worklist-state.js:69:25",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M09.html",
+  "made": [
+   "M09"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M09"
+ },
+ "M10": {
+  "id": "M10",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_41_18_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_30_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_45_leave_while_holding_related_studies_js",
+   "WindowAndSessionEvents.test_window_and_session_events_at_held_boundaries_raise_nothing"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 446.323s",
+   "FAILED (failures=7)"
+  ],
+  "first_failure": "HazardFailure: B1-15/41/42/45: errors while leaving the page at the early moment: ['ReferenceError: renderRelated is not defined', 'console.error: Emergency status rendering failed ReferenceError: renderRelated is not defined\\n    at changed (https://syn.test/worklist/hpacs-lite/worklist-data.js:431:29)\\n    at up",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M10.html",
+  "made": [
+   "M10"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M10"
+ },
+ "M11": {
+  "id": "M11",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 470.227s",
+   "FAILED (failures=3)"
+  ],
+  "first_failure": "HazardFailure: B1-15/41/42/45: errors while leaving the page at the early moment: ['console.error: Emergency status rendering failed ReferenceError: savedFilterDays is not defined\\n    at filteredFor (https://syn.test/worklist/hpacs-lite/worklist-data.js:152:20)\\n    at filtered (https://syn.test/worklist/hpacs-li",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M11.html",
+  "made": [
+   "M11"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M11"
+ },
+ "M12": {
+  "id": "M12",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 546.584s",
+   "FAILED (failures=3)"
+  ],
+  "first_failure": "HazardFailure: B1-15/41/42/45: errors while leaving the page at the early moment: ['console.error: Emergency status rendering failed ReferenceError: filteredFor is not defined\\n    at filtered (https://syn.test/worklist/hpacs-lite/worklist-data.js:155:26)\\n    at orderedStudies (https://syn.test/worklist/hpacs-lit",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M12.html",
+  "made": [
+   "M12"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M12"
+ },
+ "M13": {
+  "id": "M13",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 565.252s",
+   "FAILED (failures=3)"
+  ],
+  "first_failure": "HazardFailure: B1-15/41/42/45: errors while leaving the page at the early moment: ['console.error: Emergency status rendering failed ReferenceError: consultationFilter is not defined\\n    at filtered (https://syn.test/worklist/hpacs-lite/worklist-data.js:175:7)\\n    at orderedStudies (https://syn.test/worklist/hpa",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M13.html",
+  "made": [
+   "M13"
+  ],
+  "statements": 660,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M13"
+ },
+ "M14": {
+  "id": "M14",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 496.946s",
+   "FAILED (failures=3)"
+  ],
+  "first_failure": "HazardFailure: B1-15/41/42/45: errors while leaving the page at the early moment: ['console.error: Emergency status rendering failed ReferenceError: searchCriteria is not defined\\n    at filtered (https://syn.test/worklist/hpacs-lite/worklist-data.js:172:59)\\n    at orderedStudies (https://syn.test/worklist/hpacs-",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M14.html",
+  "made": [
+   "M14"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M14"
+ },
+ "M15": {
+  "id": "M15",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_03_18_hold_report_templates_ui_js",
+   "EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 515.426s",
+   "FAILED (failures=4)"
+  ],
+  "first_failure": "AssertionError: boot waits for the session answer: not observed within 20s (delivered 0/56, pending [])",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M15.html",
+  "made": [
+   "M15"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M15"
+ },
+ "M16": {
+  "id": "M16",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 505.934s",
+   "FAILED (failures=3)"
+  ],
+  "first_failure": "HazardFailure: B1-15/41/42/45: errors while leaving the page at the early moment: ['console.error: Emergency status rendering failed ReferenceError: orderedStudies is not defined\\n    at render (https://syn.test/worklist/hpacs-lite/worklist-data.js:181:20)\\n    at changed (https://syn.test/worklist/hpacs-lite/work",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M16.html",
+  "made": [
+   "M16"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M16"
+ },
+ "M17": {
+  "id": "M17",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 501.086s",
+   "FAILED (failures=3)"
+  ],
+  "first_failure": "HazardFailure: B1-15/41/42/45: errors while leaving the page at the early moment: ['console.error: Emergency status rendering failed ReferenceError: resultQuery is not defined\\n    at render (https://syn.test/worklist/hpacs-lite/worklist-data.js:192:21)\\n    at changed (https://syn.test/worklist/hpacs-lite/worklis",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M17.html",
+  "made": [
+   "M17"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M17"
+ },
+ "M18": {
+  "id": "M18",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 538.310s",
+   "FAILED (failures=3)"
+  ],
+  "first_failure": "HazardFailure: B1-15/41/42/45: errors while leaving the page at the early moment: ['console.error: Emergency status rendering failed ReferenceError: render is not defined\\n    at changed (https://syn.test/worklist/hpacs-lite/worklist-data.js:349:20)\\n    at update (https://syn.test/worklist/hpacs-lite/study-priori",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M18.html",
+  "made": [
+   "M18"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M18"
+ },
+ "M19": {
+  "id": "M19",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js",
+   "WindowAndSessionEvents.test_window_and_session_events_at_held_boundaries_raise_nothing"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 532.647s",
+   "FAILED (failures=4)"
+  ],
+  "first_failure": "HazardFailure: B1-15/41/42/45: errors while leaving the page at the early moment: ['console.error: Emergency status rendering failed ReferenceError: relatedStudy is not defined\\n    at viewed (https://syn.test/worklist/hpacs-lite/worklist-data.js:268:25)\\n    at renderStudyIdentity (https://syn.test/worklist/hpacs",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M19.html",
+  "made": [
+   "M19"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M19"
+ },
+ "M20": {
+  "id": "M20",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_03_18_hold_report_templates_ui_js",
+   "EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js",
+   "WindowAndSessionEvents.test_window_and_session_events_at_held_boundaries_raise_nothing"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 545.742s",
+   "FAILED (failures=5)"
+  ],
+  "first_failure": "AssertionError: boot waits for the session answer: not observed within 20s (delivered 56/56, pending [])",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M20.html",
+  "made": [
+   "M20"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M20"
+ },
+ "M21": {
+  "id": "M21",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js",
+   "WindowAndSessionEvents.test_window_and_session_events_at_held_boundaries_raise_nothing"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 565.327s",
+   "FAILED (failures=4)"
+  ],
+  "first_failure": "HazardFailure: B1-15/41/42/45: errors while leaving the page at the early moment: ['console.error: Emergency status rendering failed ReferenceError: renderStudyIdentity is not defined\\n    at render (https://syn.test/worklist/hpacs-lite/worklist-data.js:266:7)\\n    at changed (https://syn.test/worklist/hpacs-lite/",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M21.html",
+  "made": [
+   "M21"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M21"
+ },
+ "M22": {
+  "id": "M22",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_41_18_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_30_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_45_leave_while_holding_related_studies_js",
+   "WindowAndSessionEvents.test_window_and_session_events_at_held_boundaries_raise_nothing"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 533.062s",
+   "FAILED (failures=8)"
+  ],
+  "first_failure": "HazardFailure: B1-15/41/42/45: errors while leaving the page at the early moment: ['console.error: Emergency status rendering failed ReferenceError: renderDraftHint is not defined\\n    at updateReportButtons (https://syn.test/worklist/hpacs-lite/worklist-data.js:358:7)\\n    at changed (https://syn.test/worklist/hp",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M22.html",
+  "made": [
+   "M22"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M22"
+ },
+ "M23": {
+  "id": "M23",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_41_18_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_30_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_30_leave_while_holding_report_commit_js",
+   "EarlyInputSplit.test_B1_41_45_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_45_leave_while_holding_report_commit_js",
+   "WindowAndSessionEvents.test_window_and_session_events_at_held_boundaries_raise_nothing"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 532.273s",
+   "FAILED (failures=10)"
+  ],
+  "first_failure": "HazardFailure: B1-15/41/42/45: errors while leaving the page at the early moment: ['console.error: Emergency status rendering failed ReferenceError: heldByOther is not defined\\n    at updateReportButtons (https://syn.test/worklist/hpacs-lite/worklist-data.js:313:20)\\n    at changed (https://syn.test/worklist/hpacs",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M23.html",
+  "made": [
+   "M23"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M23"
+ },
+ "M24": {
+  "id": "M24",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_41_18_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_30_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_30_leave_while_holding_report_commit_js",
+   "EarlyInputSplit.test_B1_41_45_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_45_leave_while_holding_report_commit_js",
+   "WindowAndSessionEvents.test_window_and_session_events_at_held_boundaries_raise_nothing"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 534.516s",
+   "FAILED (failures=10)"
+  ],
+  "first_failure": "HazardFailure: B1-15/41/42/45: errors while leaving the page at the early moment: ['console.error: Emergency status rendering failed ReferenceError: updateReportButtons is not defined\\n    at changed (https://syn.test/worklist/hpacs-lite/worklist-data.js:361:45)\\n    at update (https://syn.test/worklist/hpacs-lite",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M24.html",
+  "made": [
+   "M24"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M24"
+ },
+ "M25": {
+  "id": "M25",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_58_45_150ms_after_worklist_controls_js",
+   "EarlyInputSplit.test_B1_58_45_hold_saved_filters_js",
+   "UnsplitControl.test_B1_58_unsplit",
+   "EarlyInputSplit.test_PRE_X3_45_hold_saved_filters_js",
+   "UnsplitControl.test_PRE_X3_unsplit"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 513.087s",
+   "FAILED (failures=5)"
+  ],
+  "first_failure": "AssertionError: {'qui[48 chars]s': 'SYN Local Search (0)', 'saved': None, 'ro[19 chars]und'} != {'qui[48 chars]s': '', 'saved': None, 'rows': 'No records found'}",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M25.html",
+  "made": [
+   "M25"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M25"
+ },
+ "M26": {
+  "id": "M26",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_58_45_150ms_after_worklist_controls_js",
+   "UnsplitControl.test_B1_58_unsplit",
+   "UnsplitControl.test_PRE_X3_unsplit"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 500.830s",
+   "FAILED (failures=3)"
+  ],
+  "first_failure": "AssertionError: {'qui[48 chars]s': 'SYN Local Search (0)', 'saved': None, 'ro[19 chars]und'} != {'qui[48 chars]s': '', 'saved': None, 'rows': 'No records found'}",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M26.html",
+  "made": [
+   "M26"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M26"
+ },
+ "M27": {
+  "id": "M27",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_58_45_hold_saved_filters_js",
+   "EarlyInputSplit.test_PRE_X3_45_hold_saved_filters_js"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 527.838s",
+   "FAILED (failures=2)"
+  ],
+  "first_failure": "AssertionError: {'qui[48 chars]s': 'SYN Local Search (0)', 'saved': None, 'ro[19 chars]und'} != {'qui[48 chars]s': '', 'saved': None, 'rows': 'No records found'}",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M27.html",
+  "made": [
+   "M27"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M27"
+ },
+ "M28": {
+  "id": "M28",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_41_18_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_30_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_30_leave_while_holding_report_commit_js",
+   "EarlyInputSplit.test_B1_41_45_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_45_leave_while_holding_report_commit_js",
+   "EarlyInputSplit.test_B1_57_45_leave_while_holding_clinical_context_panel_js",
+   "EarlyInputSplit.test_B1_57_45_leave_while_holding_workspace_panels_js",
+   "EarlyInputSplit.test_PRE_P3_45_leave_while_holding_saved_filters_js",
+   "EarlyInputSplit.test_PRE_X3_45_hold_saved_filters_js",
+   "WindowAndSessionEvents.test_window_and_session_events_at_held_boundaries_raise_nothing"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 478.819s",
+   "FAILED (failures=18)"
+  ],
+  "first_failure": "HazardFailure: B1-15/41/42/45: errors while leaving the page at the early moment: ['console.error: Emergency status rendering failed ReferenceError: activeFilterName is not defined\\n    at renderActiveFilter (https://syn.test/worklist/hpacs-lite/worklist-data.js:385:23)\\n    at renderChips (https://syn.test/workli",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M28.html",
+  "made": [
+   "M28"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M28"
+ },
+ "M29": {
+  "id": "M29",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_41_18_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_30_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_30_leave_while_holding_report_commit_js",
+   "EarlyInputSplit.test_B1_41_45_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_45_leave_while_holding_report_commit_js",
+   "EarlyInputSplit.test_B1_57_45_leave_while_holding_clinical_context_panel_js",
+   "EarlyInputSplit.test_B1_57_45_leave_while_holding_workspace_panels_js",
+   "EarlyInputSplit.test_B1_58_45_150ms_after_worklist_controls_js",
+   "EarlyInputSplit.test_B1_58_45_hold_saved_filters_js",
+   "EarlyInputSplit.test_PRE_P3_45_leave_while_holding_saved_filters_js",
+   "EarlyInputSplit.test_PRE_X3_45_hold_saved_filters_js",
+   "WindowAndSessionEvents.test_window_and_session_events_at_held_boundaries_raise_nothing"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 498.861s",
+   "FAILED (failures=20)"
+  ],
+  "first_failure": "HazardFailure: B1-15/41/42/45: errors while leaving the page at the early moment: ['console.error: Emergency status rendering failed ReferenceError: renderActiveFilter is not defined\\n    at renderChips (https://syn.test/worklist/hpacs-lite/worklist-data.js:387:7)\\n    at render (https://syn.test/worklist/hpacs-li",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M29.html",
+  "made": [
+   "M29"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M29"
+ },
+ "M30": {
+  "id": "M30",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_15_18_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_30_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_15_45_leave_while_holding_worklist_view_js",
+   "EarlyInputSplit.test_B1_41_18_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_30_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_30_leave_while_holding_report_commit_js",
+   "EarlyInputSplit.test_B1_41_45_leave_while_holding_related_studies_js",
+   "EarlyInputSplit.test_B1_41_45_leave_while_holding_report_commit_js",
+   "EarlyInputSplit.test_B1_57_45_leave_while_holding_clinical_context_panel_js",
+   "EarlyInputSplit.test_B1_57_45_leave_while_holding_workspace_panels_js",
+   "EarlyInputSplit.test_B1_58_45_150ms_after_worklist_controls_js",
+   "EarlyInputSplit.test_B1_58_45_hold_saved_filters_js",
+   "EarlyInputSplit.test_PRE_P3_45_leave_while_holding_saved_filters_js",
+   "EarlyInputSplit.test_PRE_X3_45_hold_saved_filters_js",
+   "WindowAndSessionEvents.test_window_and_session_events_at_held_boundaries_raise_nothing"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 532.581s",
+   "FAILED (failures=20)"
+  ],
+  "first_failure": "HazardFailure: B1-15/41/42/45: errors while leaving the page at the early moment: ['console.error: Emergency status rendering failed ReferenceError: renderChips is not defined\\n    at render (https://syn.test/worklist/hpacs-lite/worklist-data.js:263:7)\\n    at changed (https://syn.test/worklist/hpacs-lite/worklist",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M30.html",
+  "made": [
+   "M30"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M30"
+ },
+ "M31": {
+  "id": "M31",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_03_18_hold_report_templates_ui_js",
+   "EarlyInputSplit.test_B1_57_45_leave_while_holding_clinical_context_panel_js",
+   "EarlyInputSplit.test_B1_57_45_leave_while_holding_workspace_panels_js"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 533.837s",
+   "FAILED (failures=3)"
+  ],
+  "first_failure": "AssertionError: boot waits for the session answer: not observed within 20s (delivered 0/56, pending [])",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M31.html",
+  "made": [
+   "M31"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M31"
+ },
+ "M32": {
+  "id": "M32",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_03_18_hold_report_templates_ui_js",
+   "EarlyInputSplit.test_B1_57_45_leave_while_holding_clinical_context_panel_js",
+   "EarlyInputSplit.test_B1_57_45_leave_while_holding_workspace_panels_js"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 516.791s",
+   "FAILED (failures=3)"
+  ],
+  "first_failure": "AssertionError: boot waits for the session answer: not observed within 20s (delivered 6/56, pending [])",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M32.html",
+  "made": [
+   "M32"
+  ],
+  "statements": 660,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M32"
+ },
+ "M33": {
+  "id": "M33",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_57_45_leave_while_holding_clinical_context_panel_js",
+   "EarlyInputSplit.test_B1_57_45_leave_while_holding_workspace_panels_js"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 541.441s",
+   "FAILED (failures=2)"
+  ],
+  "first_failure": "HazardFailure: B1-57/PRE-P3: errors while leaving the page at the early moment: ['ReferenceError: portraitLayout is not defined']",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M33.html",
+  "made": [
+   "M33"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M33"
+ },
+ "M34": {
+  "id": "M34",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_57_45_leave_while_holding_clinical_context_panel_js",
+   "EarlyInputSplit.test_B1_57_45_leave_while_holding_workspace_panels_js"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 492.904s",
+   "FAILED (failures=2)"
+  ],
+  "first_failure": "HazardFailure: B1-57/PRE-P3: errors while leaving the page at the early moment: ['ReferenceError: workspaceAxis is not defined']",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M34.html",
+  "made": [
+   "M34"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M34"
+ },
+ "M35": {
+  "id": "M35",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_57_45_leave_while_holding_clinical_context_panel_js",
+   "EarlyInputSplit.test_B1_57_45_leave_while_holding_workspace_panels_js"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 495.734s",
+   "FAILED (failures=2)"
+  ],
+  "first_failure": "HazardFailure: B1-57/PRE-P3: errors while leaving the page at the early moment: ['ReferenceError: applyLayout is not defined']",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M35.html",
+  "made": [
+   "M35"
+  ],
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M35"
+ },
+ "M36": {
+  "id": "M36",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "Registration.test_after_retry_one_quick_match_change_has_one_effect",
+   "Registration.test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none",
+   "Registration.test_registrations_match_the_original_page_before_and_after_each_session_outcome"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 374.105s",
+   "FAILED (failures=4)"
+  ],
+  "first_failure": "AssertionError: Lists differ: [('#quick-match', 'change', 'a6162491')] != [('#quick-match', 'change', 'a6162491'), ('#quick-match', 'change', '0c03e6b9')]",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M36.html",
+  "made": "m36",
+  "statements": 661,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M36"
+ },
+ "M37": {
+  "id": "M37",
+  "exit": 1,
+  "killed": true,
+  "failed": [
+   "EarlyInputSplit.test_B1_03_18_hold_report_templates_ui_js",
+   "EarlyInputSplit.test_B1_03_18_hold_study_corrections_js",
+   "EarlyInputSplit.test_B1_03_30_hold_report_editor_js",
+   "EarlyInputSplit.test_B1_03_30_hold_report_templates_ui_js",
+   "EarlyInputSplit.test_B1_03_45_150ms_after_report_dictation_js",
+   "EarlyInputSplit.test_B1_03_45_hold_report_editor_js",
+   "EarlyInputSplit.test_B1_03_45_hold_report_templates_ui_js",
+   "Registration.test_a_report_field_input_reaches_its_listeners_in_the_original_order",
+   "Registration.test_hazard_registrations_do_not_depend_on_the_session_answer_and_retry_adds_none",
+   "Registration.test_registrations_match_the_original_page_before_and_after_each_session_outcome"
+  ],
+  "errors": [],
+  "summary": [
+   "Ran 58 tests in 350.331s",
+   "FAILED (failures=14)"
+  ],
+  "first_failure": "AssertionError: Lists differ: [('#f[44 chars], ('#findings', 'input'), ('#conclusion', 'foc[146 chars]ut')] != [('#f[44 chars], ('#conclusion', 'focus'), ('#conclusion', 'm[66 chars]up')]",
+  "page": "C:\\Users\\norne\\AppData\\Local\\Temp\\kin-pre-mutants\\M37.html",
+  "made": "m37",
+  "statements": 662,
+  "run": "tmp\\s9-u0a-pre\\runs\\mutant-M37"
+ }
+}

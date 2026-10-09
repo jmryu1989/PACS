@@ -1,0 +1,32 @@
+test_hd00_opening_the_report_keeps_the_text_and_starts_no_recording (__main__.ReportDictationHostDOMTest.test_hd00_opening_the_report_keeps_the_text_and_starts_no_recording) ... ok
+test_hd01_unavailable_by_default_and_when_malformed_says_what_is_true (__main__.ReportDictationHostDOMTest.test_hd01_unavailable_by_default_and_when_malformed_says_what_is_true) ... ok
+test_hd02_an_insecure_origin_cannot_record_even_when_the_server_says_available (__main__.ReportDictationHostDOMTest.test_hd02_an_insecure_origin_cannot_record_even_when_the_server_says_available) ... ok
+test_hd03_review_then_explicit_insert_at_the_caret_and_exactly_one_autosave (__main__.ReportDictationHostDOMTest.test_hd03_review_then_explicit_insert_at_the_caret_and_exactly_one_autosave) ... ok
+test_hd04_permission_refusal_fails_once_and_leaves_the_report (__main__.ReportDictationHostDOMTest.test_hd04_permission_refusal_fails_once_and_leaves_the_report) ... ok
+test_hd05_an_edited_field_keeps_the_text_and_needs_a_click_repin_and_a_fresh_insert (__main__.ReportDictationHostDOMTest.test_hd05_an_edited_field_keeps_the_text_and_needs_a_click_repin_and_a_fresh_insert) ... ok
+test_hd06_a_changed_base_refuses_and_invalidates (__main__.ReportDictationHostDOMTest.test_hd06_a_changed_base_refuses_and_invalidates) ... ok
+test_hd06_a_newly_read_only_report_turns_insert_off_and_keeps_the_dictated_text (__main__.ReportDictationHostDOMTest.test_hd06_a_newly_read_only_report_turns_insert_off_and_keeps_the_dictated_text)
+While the report cannot be edited (someone else holds the study) Insert is off and the dictated text ... ok
+test_hd07_a_study_move_ends_the_session_and_the_late_answer_is_dropped (__main__.ReportDictationHostDOMTest.test_hd07_a_study_move_ends_the_session_and_the_late_answer_is_dropped) ... ok
+test_hd08_review_is_dropped_by_an_a_b_a_move_and_cancel_is_honest (__main__.ReportDictationHostDOMTest.test_hd08_review_is_dropped_by_an_a_b_a_move_and_cancel_is_honest) ... ok
+test_hd09_the_capture_cap_sends_without_stop_and_page_exit_releases (__main__.ReportDictationHostDOMTest.test_hd09_the_capture_cap_sends_without_stop_and_page_exit_releases) ... ok
+test_hd10_a_device_that_ends_while_stopping_is_one_failure_with_one_message (__main__.ReportDictationHostDOMTest.test_hd10_a_device_that_ends_while_stopping_is_one_failure_with_one_message) ... ok
+test_hd11_server_refusals_without_json_and_route_codes_leave_the_report (__main__.ReportDictationHostDOMTest.test_hd11_server_refusals_without_json_and_route_codes_leave_the_report) ... ok
+test_hd12_keyboard_reaches_every_step_and_an_arriving_answer_never_takes_focus (__main__.ReportDictationHostDOMTest.test_hd12_keyboard_reaches_every_step_and_an_arriving_answer_never_takes_focus) ... ok
+test_hd13_the_pane_is_bounded_and_the_report_layout_is_unchanged_at_both_viewports (__main__.ReportDictationHostDOMTest.test_hd13_the_pane_is_bounded_and_the_report_layout_is_unchanged_at_both_viewports) ... ok
+test_hd14_a_double_dictate_and_a_double_stop_start_and_send_once (__main__.ReportDictationHostDOMTest.test_hd14_a_double_dictate_and_a_double_stop_start_and_send_once) ... ok
+test_hd15_review_stands_the_findings_drawer_down_once_per_run_and_never_reopens_it (__main__.ReportDictationHostDOMTest.test_hd15_review_stands_the_findings_drawer_down_once_per_run_and_never_reopens_it)
+U4L attempt 1 (Astra B2): the page closes Image Findings once when a run enters review ... ok
+test_hd16_the_foot_wrapper_is_inert_outside_the_reading_review (__main__.ReportDictationHostDOMTest.test_hd16_the_foot_wrapper_is_inert_outside_the_reading_review)
+D2 (Astra CE7): meta and the actions sit in one role-less .dictation-foot so that the reading ... ok
+test_hd18_offline_releases_recording_and_refuses_insert (__main__.ReportDictationHostDOMTest.test_hd18_offline_releases_recording_and_refuses_insert)
+U5PT-F02 / HELD-MICROPHONE: run the shipped offline transition. ... ok
+test_hd19_audio_never_enters_browser_storage_or_an_object_url (__main__.ReportDictationHostDOMTest.test_hd19_audio_never_enters_browser_storage_or_an_object_url)
+U5PT-F02 / voice retention: observe storage APIs through upload and disposal. ... ok
+test_hd20_offline_refuses_inserting_an_already_received_transcript (__main__.ReportDictationHostDOMTest.test_hd20_offline_refuses_inserting_an_already_received_transcript)
+U5PT-F02: preserve the requested refusal even if the current product allows it. ... ok
+
+----------------------------------------------------------------------
+Ran 21 tests in 10.990s
+
+OK

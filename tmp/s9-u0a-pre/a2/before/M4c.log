@@ -1,0 +1,14 @@
+test_d15_a_plan_that_went_stale_sends_nothing_and_asks_again (__main__.ReportStructureDOMTest.test_d15_a_plan_that_went_stale_sends_nothing_and_asks_again) ... FAIL
+
+======================================================================
+FAIL: test_d15_a_plan_that_went_stale_sends_nothing_and_asks_again (__main__.ReportStructureDOMTest.test_d15_a_plan_that_went_stale_sends_nothing_and_asks_again)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre-a2before\tests\report_structure_dom_test.py", line 724, in test_d15_a_plan_that_went_stale_sends_nothing_and_asks_again
+    self.assertEqual(page.evaluate("() => calls.length"), 0,
+AssertionError: 1 != 0 : S3-STRUCT M4c: a plan the person did not read may not be sent
+
+----------------------------------------------------------------------
+Ran 1 test in 0.723s
+
+FAILED (failures=1)

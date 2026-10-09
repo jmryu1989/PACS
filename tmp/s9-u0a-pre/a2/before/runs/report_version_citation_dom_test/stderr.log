@@ -1,0 +1,15 @@
+test_01_a_pressed_version_draws_its_own_entries_and_the_server_actor (__main__.ReportVersionCitationDOM.test_01_a_pressed_version_draws_its_own_entries_and_the_server_actor) ... ok
+test_02_a_version_with_no_citations_says_so (__main__.ReportVersionCitationDOM.test_02_a_version_with_no_citations_says_so) ... ok
+test_03_a_refusal_is_not_an_empty_list (__main__.ReportVersionCitationDOM.test_03_a_refusal_is_not_an_empty_list) ... ok
+test_04_failures_are_unknown_replace_what_they_showed_and_an_ended_session_draws_nothing (__main__.ReportVersionCitationDOM.test_04_failures_are_unknown_replace_what_they_showed_and_an_ended_session_draws_nothing) ... ok
+test_05_each_block_speaks_the_presence_of_its_own_version (__main__.ReportVersionCitationDOM.test_05_each_block_speaks_the_presence_of_its_own_version) ... ok
+test_06_every_shape_the_answer_can_fail_is_unknown_and_never_empty (__main__.ReportVersionCitationDOM.test_06_every_shape_the_answer_can_fail_is_unknown_and_never_empty) ... ok
+test_07_a_reduced_entry_keeps_its_line_and_claims_nothing (__main__.ReportVersionCitationDOM.test_07_a_reduced_entry_keeps_its_line_and_claims_nothing) ... ok
+test_08_two_answers_arriving_out_of_order_stay_in_their_own_blocks (__main__.ReportVersionCitationDOM.test_08_two_answers_arriving_out_of_order_stay_in_their_own_blocks) ... ok
+test_09_closing_discards_the_blocks_and_no_late_answer_writes (__main__.ReportVersionCitationDOM.test_09_closing_discards_the_blocks_and_no_late_answer_writes) ... ok
+test_10_no_identifier_or_sentence_reaches_the_history_markup (__main__.ReportVersionCitationDOM.test_10_no_identifier_or_sentence_reaches_the_history_markup) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 2.630s
+
+OK

@@ -1,0 +1,46 @@
+TAP version 13
+# Subtest: TEST-D03A-PAST: closest strictly older study; future and same day are excluded
+ok 1 - TEST-D03A-PAST: closest strictly older study; future and same day are excluded
+  ---
+  duration_ms: 11.4314
+  type: 'test'
+  ...
+# Subtest: TEST-D03A-DATE: malformed source dates cannot become automatic priors through fmtD
+ok 2 - TEST-D03A-DATE: malformed source dates cannot become automatic priors through fmtD
+  ---
+  duration_ms: 0.6892
+  type: 'test'
+  ...
+# Subtest: TEST-D03A-DATE: Gregorian leap and month boundaries are real calendar dates
+ok 3 - TEST-D03A-DATE: Gregorian leap and month boundaries are real calendar dates
+  ---
+  duration_ms: 0.2505
+  type: 'test'
+  ...
+# Subtest: TEST-D03A-DATE: absent or non-string in-memory dates fail closed
+ok 4 - TEST-D03A-DATE: absent or non-string in-memory dates fail closed
+  ---
+  duration_ms: 0.1939
+  type: 'test'
+  ...
+# Subtest: TEST-D03A-IDENTITY: source-qualified identity, modality and known key are required
+ok 5 - TEST-D03A-IDENTITY: source-qualified identity, modality and known key are required
+  ---
+  duration_ms: 0.2858
+  type: 'test'
+  ...
+# Subtest: TEST-D03A-TIE/COST: existing UID descending tie is stable and inputs remain intact
+ok 6 - TEST-D03A-TIE/COST: existing UID descending tie is stable and inputs remain intact
+  ---
+  duration_ms: 0.2451
+  type: 'test'
+  ...
+1..6
+# tests 6
+# suites 0
+# pass 6
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 119.2671

@@ -1,0 +1,13 @@
+✔ A1: not-yet-moved page or moved page preserves every statement, byte and outer markup (173.231ms)
+✔ A1 rejects dropped statements (358.8656ms)
+✔ A1 rejects duplicated statements (327.1238ms)
+✔ A1 rejects swapped statements (308.8368ms)
+✔ A1/helper: all three split stages reconstruct the original text and enforce tags, files and markup (3736.4312ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 5586.6317

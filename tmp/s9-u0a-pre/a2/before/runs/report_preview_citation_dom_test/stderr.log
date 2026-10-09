@@ -1,0 +1,28 @@
+test_a_citation_answer_for_another_version_is_unknown (__main__.ReportPreviewCitationDOMTest.test_a_citation_answer_for_another_version_is_unknown) ... ok
+test_a_failed_read_is_unknown_and_does_not_blank_the_paper (__main__.ReportPreviewCitationDOMTest.test_a_failed_read_is_unknown_and_does_not_blank_the_paper) ... ok
+test_a_late_citation_answer_after_close_paints_nothing (__main__.ReportPreviewCitationDOMTest.test_a_late_citation_answer_after_close_paints_nothing)
+close() does not bump selectionEpoch, so check(s) is the only statement that stops the ... ok
+test_a_late_citation_answer_cannot_overwrite_a_newer_paper (__main__.ReportPreviewCitationDOMTest.test_a_late_citation_answer_cannot_overwrite_a_newer_paper) ... ok
+test_a_late_citation_answer_cannot_paint_another_patients_paper (__main__.ReportPreviewCitationDOMTest.test_a_late_citation_answer_cannot_paint_another_patients_paper)
+close → open on a different study is the dangerous shape: without check(s) the first ... ok
+test_a_malformed_two_hundred_is_unknown (__main__.ReportPreviewCitationDOMTest.test_a_malformed_two_hundred_is_unknown) ... ok
+test_a_plain_401_is_unknown_evidence_and_keeps_the_report_open (__main__.ReportPreviewCitationDOMTest.test_a_plain_401_is_unknown_evidence_and_keeps_the_report_open) ... ok
+test_a_refused_read_says_so_and_still_prints_the_report (__main__.ReportPreviewCitationDOMTest.test_a_refused_read_says_so_and_still_prints_the_report) ... ok
+test_a_saved_head_prints_one_witness_line_for_each_citation (__main__.ReportPreviewCitationDOMTest.test_a_saved_head_prints_one_witness_line_for_each_citation) ... ok
+test_an_empty_head_prints_the_empty_wording (__main__.ReportPreviewCitationDOMTest.test_an_empty_head_prints_the_empty_wording) ... ok
+test_an_ended_session_blanks_the_paper_instead_of_drawing_unknown (__main__.ReportPreviewCitationDOMTest.test_an_ended_session_blanks_the_paper_instead_of_drawing_unknown) ... ok
+test_coded_403_is_unknown_instead_of_outside_study_access (__main__.ReportPreviewCitationDOMTest.test_coded_403_is_unknown_instead_of_outside_study_access) ... ok
+test_editor_mode_prints_a_notice_and_never_reads_citations (__main__.ReportPreviewCitationDOMTest.test_editor_mode_prints_a_notice_and_never_reads_citations) ... ok
+test_no_identifier_and_no_inserted_text_reach_the_printed_evidence (__main__.ReportPreviewCitationDOMTest.test_no_identifier_and_no_inserted_text_reach_the_printed_evidence) ... ok
+test_no_section_and_no_read_when_no_version_has_been_saved (__main__.ReportPreviewCitationDOMTest.test_no_section_and_no_read_when_no_version_has_been_saved) ... ok
+test_print_refuses_when_the_evidence_changed_since_the_render (__main__.ReportPreviewCitationDOMTest.test_print_refuses_when_the_evidence_changed_since_the_render) ... ok
+test_print_writes_the_same_evidence_the_preview_showed (__main__.ReportPreviewCitationDOMTest.test_print_writes_the_same_evidence_the_preview_showed) ... ok
+test_printed_report_neither_claims_structure_nor_reads_its_route (__main__.ReportPreviewCitationDOMTest.test_printed_report_neither_claims_structure_nor_reads_its_route)
+U5PT-F02 / P15: output must not imply an unverified structure attestation. ... ok
+test_switching_modes_redraws_the_section_under_that_modes_rule (__main__.ReportPreviewCitationDOMTest.test_switching_modes_redraws_the_section_under_that_modes_rule) ... ok
+test_the_section_is_the_last_block_of_the_paper_and_avoids_splitting (__main__.ReportPreviewCitationDOMTest.test_the_section_is_the_last_block_of_the_paper_and_avoids_splitting) ... ok
+
+----------------------------------------------------------------------
+Ran 20 tests in 5.726s
+
+OK

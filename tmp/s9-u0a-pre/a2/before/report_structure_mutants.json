@@ -1,0 +1,105 @@
+{
+  "source_sha256_before": {
+    "main": "70af83c893735fdbf2a34716df88ae0cc0db3479f31964d2d74b82f2bdfc5810",
+    "structure": "2dbc4676006481d36cc263872520a76afce4b6dddc501e148cf87bb26ff75077"
+  },
+  "source_sha256_after": {
+    "main": "70af83c893735fdbf2a34716df88ae0cc0db3479f31964d2d74b82f2bdfc5810",
+    "structure": "2dbc4676006481d36cc263872520a76afce4b6dddc501e148cf87bb26ff75077"
+  },
+  "source_unchanged": true,
+  "server_rules_asserted_directly_not_mutated": "tests/report_structure_test.cjs",
+  "results": [
+    {
+      "id": "BASELINE",
+      "case": "all",
+      "child_exit": 0,
+      "tests_ran": 22,
+      "ok": true
+    },
+    {
+      "id": "M1",
+      "title": "the sentence is concatenated onto the field instead of placed on whole lines",
+      "file": "structure",
+      "case": "test_d02_apply_writes_the_field_only_after_the_server_answered",
+      "child_exit": 1,
+      "named_failure": "test_d02_apply_writes_the_field_only_after_the_server_answered (__main__.ReportStructureDOMTest.test_d02_apply_writes_the_field_only_after_the_server_answered) ... FAIL",
+      "expect": "S3-STRUCT M1: the sentence must occupy a whole line and delete nothing",
+      "expect_matched": "S3-STRUCT M1: the sentence must occupy a whole line and delete nothing",
+      "assertion_text": "AssertionError: 'typed by handSYNTHETIC-ITEM boolean = yes' != 'typed by hand\\nSYNTHETIC-ITEM boolean = yes'",
+      "harness_crash": false,
+      "killed": true,
+      "mutant_sha256": "345e02ce23a2bc57234452adfdd50e9489a0ec17096401da6ed71a60168d4ba0"
+    },
+    {
+      "id": "M2",
+      "title": "the structure path stops asking for the citation guards",
+      "file": "main",
+      "case": "test_d06_a_new_sentence_never_lands_inside_a_cited_block",
+      "child_exit": 1,
+      "named_failure": "test_d06_a_new_sentence_never_lands_inside_a_cited_block (__main__.ReportStructureDOMTest.test_d06_a_new_sentence_never_lands_inside_a_cited_block) ... FAIL",
+      "expect": "S3-STRUCT M2: an existing citation block may not be cut in half",
+      "expect_matched": "S3-STRUCT M2: an existing citation block may not be cut in half",
+      "assertion_text": "AssertionError: 2 != 3 : S3-STRUCT M2: an existing citation block may not be cut in half",
+      "harness_crash": false,
+      "killed": true,
+      "mutant_sha256": "2b085c7af49aa7037edb71dba39839f2e28d6f45c1d354af1942dd0abe51de28"
+    },
+    {
+      "id": "M3c",
+      "title": "the field is written even when the server refused the apply",
+      "file": "main",
+      "case": "test_d07_a_refused_apply_leaves_the_body_untouched",
+      "child_exit": 1,
+      "named_failure": "test_d07_a_refused_apply_leaves_the_body_untouched (__main__.ReportStructureDOMTest.test_d07_a_refused_apply_leaves_the_body_untouched) ... FAIL",
+      "expect": "S3-STRUCT M3c: a refused apply must leave every byte of the report alone",
+      "expect_matched": "S3-STRUCT M3c: a refused apply must leave every byte of the report alone",
+      "assertion_text": "AssertionError: 'first line\\nsecond line\\nthird line\\nSYNTHETIC-ITEM choice = alpha' != 'first line\\nsecond line\\nthird line'",
+      "harness_crash": false,
+      "killed": true,
+      "mutant_sha256": "4219afdf35122f9a6fa1ce784f5b8b48bda04e7eb89d269823da3e7596d54d51"
+    },
+    {
+      "id": "M4c",
+      "title": "the plan the person read is no longer compared with the one about to be sent",
+      "file": "main",
+      "case": "test_d15_a_plan_that_went_stale_sends_nothing_and_asks_again",
+      "child_exit": 1,
+      "named_failure": "test_d15_a_plan_that_went_stale_sends_nothing_and_asks_again (__main__.ReportStructureDOMTest.test_d15_a_plan_that_went_stale_sends_nothing_and_asks_again) ... FAIL",
+      "expect": "S3-STRUCT M4c: a plan the person did not read may not be sent",
+      "expect_matched": "S3-STRUCT M4c: a plan the person did not read may not be sent",
+      "assertion_text": "AssertionError: 1 != 0 : S3-STRUCT M4c: a plan the person did not read may not be sent",
+      "harness_crash": false,
+      "killed": true,
+      "mutant_sha256": "b0ca75d6d122e80f221373b946f22050be36b866215f5b8ee4ecf271ac37dc24"
+    },
+    {
+      "id": "M5c",
+      "title": "loading the server draft keeps the previous structure state",
+      "file": "main",
+      "case": "test_d08b_load_server_draft_re_reads_structure_before_the_next_save",
+      "child_exit": 1,
+      "named_failure": "test_d08b_load_server_draft_re_reads_structure_before_the_next_save (__main__.ReportStructureDOMTest.test_d08b_load_server_draft_re_reads_structure_before_the_next_save) ... FAIL",
+      "expect": "S3-STRUCT M5c: loading the server draft must replace the stale keep list",
+      "expect_matched": "S3-STRUCT M5c: loading the server draft must replace the stale keep list",
+      "assertion_text": "AssertionError: Lists differ: ['s-old'] != ['s-server']",
+      "harness_crash": false,
+      "killed": true,
+      "mutant_sha256": "9d37e4134901f137a5805bfadd6daec6284ce699c5bba764eb21470ca304efa2"
+    },
+    {
+      "id": "M6",
+      "title": "two identical sentences are replaced by guessing the first one",
+      "file": "structure",
+      "case": "test_d05_an_ambiguous_old_sentence_refuses_and_sends_nothing",
+      "child_exit": 1,
+      "named_failure": "test_d05_an_ambiguous_old_sentence_refuses_and_sends_nothing (__main__.ReportStructureDOMTest.test_d05_an_ambiguous_old_sentence_refuses_and_sends_nothing) ... FAIL",
+      "expect": "S3-STRUCT M6: two identical sentences must refuse, not guess which one to replace",
+      "expect_matched": "S3-STRUCT M6: two identical sentences must refuse, not guess which one to replace",
+      "assertion_text": "AssertionError: 1 != 0 : S3-STRUCT M6: two identical sentences must refuse, not guess which one to replace",
+      "harness_crash": false,
+      "killed": true,
+      "mutant_sha256": "b78513ade03e97b7230b02336da83bc61d6c8d2674a623c7683deba42ef9fcf0"
+    }
+  ]
+}

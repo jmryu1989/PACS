@@ -167,11 +167,6 @@ def main():
         if mutant["expect"] in seen:
             problems.append("%s reuses an expect message; a kill must name one boundary" % mutant["id"])
         seen.add(mutant["expect"])
-    try:
-        fixture_blocks(SOURCES["main"], REPORT_FIXTURE)
-        print("fixture runs resolve: %s" % ", ".join(REPORT_FIXTURE))
-    except Exception as error:
-        problems.append("harness fixture runs do not resolve: %s" % error)
     for marker in SLICE_MARKERS:
         found = source["main"].count(marker)
         print("marker occurrences=%d %r" % (found, marker[:40]))
@@ -191,6 +186,14 @@ def main():
     if args.anchors_only:
         print("anchors ok (no browser run requested)")
         return 0
+    # The DOM test takes its two script runs by the fixture projection (node and the api TypeScript, which CI installs
+    # after the anchors-only step); a run that does not resolve is a harness failure, not a survivor.
+    try:
+        fixture_blocks(SOURCES["main"], REPORT_FIXTURE)
+        print("fixture runs resolve: %s" % ", ".join(REPORT_FIXTURE))
+    except Exception as error:
+        print("ANCHOR FAILURE: harness fixture runs do not resolve: %s" % error)
+        return 1
 
     scratch = pathlib.Path(tempfile.mkdtemp(prefix="u6-mutants-"))
     results = []

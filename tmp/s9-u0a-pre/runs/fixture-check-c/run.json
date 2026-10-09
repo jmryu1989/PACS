@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "command": [
+    "node",
+    "tests/main_split_harness.cjs",
+    "fixture-check"
+  ],
+  "cwd": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre",
+  "status": "completed",
+  "started_at_utc": "2026-10-09T05:18:57.680526+00:00",
+  "ended_at_utc": "2026-10-09T05:18:58.504992+00:00",
+  "exit_code": 0,
+  "recorder_exit_code": 0,
+  "launch_error": null,
+  "git_head_before": "121811d27b06c0b9868a7fd6b97f8eca995c87fc",
+  "git_head_after": "121811d27b06c0b9868a7fd6b97f8eca995c87fc",
+  "files_before": [
+    {
+      "requested": "tests/main_split_harness.cjs",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\main_split_harness.cjs",
+      "status": "present",
+      "sha256": "54209fcb093802070ccda2fd9993b90e0e3797ea9cc5d8b1d8e4ca13dc73196d",
+      "lf_sha256": "54209fcb093802070ccda2fd9993b90e0e3797ea9cc5d8b1d8e4ca13dc73196d"
+    },
+    {
+      "requested": "tests/main_split_harness_fixture.json",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\main_split_harness_fixture.json",
+      "status": "present",
+      "sha256": "36dcf146137f76f1cac5bac4a4003bca973762c99c1a795ae16905a8a7e043c3",
+      "lf_sha256": "36dcf146137f76f1cac5bac4a4003bca973762c99c1a795ae16905a8a7e043c3"
+    }
+  ],
+  "files_after": [
+    {
+      "requested": "tests/main_split_harness.cjs",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\main_split_harness.cjs",
+      "status": "present",
+      "sha256": "54209fcb093802070ccda2fd9993b90e0e3797ea9cc5d8b1d8e4ca13dc73196d",
+      "lf_sha256": "54209fcb093802070ccda2fd9993b90e0e3797ea9cc5d8b1d8e4ca13dc73196d"
+    },
+    {
+      "requested": "tests/main_split_harness_fixture.json",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tests\\main_split_harness_fixture.json",
+      "status": "present",
+      "sha256": "36dcf146137f76f1cac5bac4a4003bca973762c99c1a795ae16905a8a7e043c3",
+      "lf_sha256": "36dcf146137f76f1cac5bac4a4003bca973762c99c1a795ae16905a8a7e043c3"
+    }
+  ],
+  "stdout": "stdout.log",
+  "stderr": "stderr.log",
+  "log_files": [
+    {
+      "requested": "stdout.log",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tmp\\s9-u0a-pre\\runs\\fixture-check-c\\stdout.log",
+      "status": "present",
+      "sha256": "9f3cdff29aaf176310575a8d376013be0dc9bdd970df60375d2ee1c8289c3e7f",
+      "lf_sha256": "9f3cdff29aaf176310575a8d376013be0dc9bdd970df60375d2ee1c8289c3e7f"
+    },
+    {
+      "requested": "stderr.log",
+      "path": "C:\\Users\\norne\\PACS\\tmp\\opus-worktrees\\s9-u0a-pre\\tmp\\s9-u0a-pre\\runs\\fixture-check-c\\stderr.log",
+      "status": "present",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "lf_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "duration_seconds": 0.8289999999997235
+}

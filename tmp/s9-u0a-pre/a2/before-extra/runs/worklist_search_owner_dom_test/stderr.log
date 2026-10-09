@@ -1,0 +1,15 @@
+test_m00_harness_origin_storage_channel_and_sandbox (__main__.WorklistSearchOwnerContract.test_m00_harness_origin_storage_channel_and_sandbox) ... ok
+test_m01_bound_owner_saves_restores_separates_and_reports (__main__.WorklistSearchOwnerContract.test_m01_bound_owner_saves_restores_separates_and_reports) ... ok
+test_m01e_bound_owner_storage_refused_by_the_browser (__main__.WorklistSearchOwnerContract.test_m01e_bound_owner_storage_refused_by_the_browser) ... ok
+test_m02_ownerless_reads_current_criteria_and_never_touches_storage (__main__.WorklistSearchOwnerContract.test_m02_ownerless_reads_current_criteria_and_never_touches_storage) ... ok
+test_m02x_ownerless_with_storage_refused_by_the_browser (__main__.WorklistSearchOwnerContract.test_m02x_ownerless_with_storage_refused_by_the_browser) ... ok
+test_m03_owner_a_to_b (__main__.WorklistSearchOwnerContract.test_m03_owner_a_to_b) ... ok
+test_m04_ownerless_to_an_owner (__main__.WorklistSearchOwnerContract.test_m04_ownerless_to_an_owner) ... ok
+test_m05_owner_a_to_none (__main__.WorklistSearchOwnerContract.test_m05_owner_a_to_none) ... ok
+test_m06_session_end_and_unrelated_signals (__main__.WorklistSearchOwnerContract.test_m06_session_end_and_unrelated_signals) ... ok
+test_m07_pagehide_ends (__main__.WorklistSearchOwnerContract.test_m07_pagehide_ends) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 11.844s
+
+OK

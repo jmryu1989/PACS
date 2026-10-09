@@ -1,0 +1,14 @@
+test_d06_a_new_sentence_never_lands_inside_a_cited_block (__main__.ReportStructureDOMTest.test_d06_a_new_sentence_never_lands_inside_a_cited_block) ... FAIL
+
+======================================================================
+FAIL: test_d06_a_new_sentence_never_lands_inside_a_cited_block (__main__.ReportStructureDOMTest.test_d06_a_new_sentence_never_lands_inside_a_cited_block)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\norne\PACS\tmp\opus-worktrees\s9-u0a-pre-a2before\tests\report_structure_dom_test.py", line 464, in test_d06_a_new_sentence_never_lands_inside_a_cited_block
+    self.assertEqual(lines.index("cited head") + 1, lines.index("cited tail"),
+AssertionError: 2 != 3 : S3-STRUCT M2: an existing citation block may not be cut in half
+
+----------------------------------------------------------------------
+Ran 1 test in 1.060s
+
+FAILED (failures=1)
