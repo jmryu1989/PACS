@@ -10,7 +10,7 @@
  * inputs left unchanged. Synthetic UIDs, hashes and identities only.
  *
  * REQ-D735-CLASS/SOURCE -> RISK-D735-MISCLASS/SOURCE -> TEST-D735-*: every case of the shared mammography table
- * tests/emr/e/rule-cases.json (D735 consult, also bound by E-MG) runs through buildImageManifest, one test per case ID,
+ * tests/emr/e/rule-cases.json (D744-2 consult, also bound by E-MG) runs through buildImageManifest, one test per case ID,
  * and every expected key is compared. The table is byte-pinned (SHA-256 below): its identity is the requirement that
  * both units judge the same headers, so a changed table must fail here rather than be followed silently (AGENTS 1-B.14).
  * The adapter only moves tags into the manifest input (identity, frame count, Image Type, synthetic digests); it never
@@ -45,6 +45,18 @@ const CASES = [
   'TEST-E-02 manifest_sources R4 an external object without its source, or a source claim that hides the producer, is refused',
   'TEST-E-02 manifest_sources R5 a mammography object without its header, with another object\'s header or with fewer references than its header is refused',
   'TEST-E-02 manifest_sources R6 relabelled origin, a foreign study object, a missing decoder pin or a copied manifest is refused',
+  'TEST-E-02 manifest_sources R7 E-R3-01 CP1 header frame count binds the declaration and complete manifest frame set',
+  'TEST-E-02 manifest_sources R8 E-R3-02 CP2 source frame claims cannot replace the raw reference inventory',
+  'TEST-E-02 manifest_sources R9 E-R3-03 CP3 identical unverified partial regions never approve a source',
+  'TEST-E-02 manifest_sources R10 E-R3-04 CP4 contrast energy and unsupported BTO extensions never enter ordinary slots',
+  'TEST-E-02 manifest_sources R11 E-R3-05 CP5 duplicate positions are refused even inside spacing tolerance',
+  'TEST-E-02 manifest_sources R12 E-R3-06 CP6 conflicting root Frame Type claims remain unverified',
+  'TEST-E-02 manifest_sources R13 E-R3-02 CP7 a supplied source class cannot override the stored class claim',
+  'TEST-E-02 manifest_sources R14 E-R3-07 CP8 frame counts and lengths are checked before inspecting frame data',
+  'TEST-E-02 manifest_sources R15 E-R3-05 CP9 non-finite spacing cannot verify slices',
+  'TEST-E-02 manifest_sources R16 D744 malformed partial declarations and sequences are conflicts, never absence',
+  'TEST-E-02 manifest_sources A5 D744 declaration and fullness survive hashing and reread; old manifests cannot authorize the changed content',
+  'TEST-E-02 manifest_sources A6 D744 complete source headers preserve every raw path through failed verification and recovery',
   'TEST-E-03 basis_and_bypass A1 reading inside the managing institution needs no consent, contract or extra step and delivers',
   'TEST-E-03 basis_and_bypass A2 a complete processor agreement delivers; a lawful third-party basis is recorded but sends no body in Part 1',
   'TEST-E-03 basis_and_bypass A3 the image grammar parses exactly the DICOMweb shapes the viewer and worklist use',
@@ -68,13 +80,12 @@ const CASES = [
   'TEST-E-05 display_epoch R3 a HEAD response or a header bulk attribute is not evidence that pixels were shown; the Pixel Data bulk is',
 ];
 const RULE_TABLE = path.join(__dirname, 'rule-cases.json');
-// The consult file (sha256 83ccf159…083e) is CRLF; Git stores and checks it out per platform, so the pin is over its
-// bytes with CRLF normalized to LF (the same lf_sha256 scripts/record-run.py records).
-const RULE_TABLE_LF_SHA256 = 'b77b7691cf4b78530162f24cb6fddc3bd67f447c1c4efd77aed7c62ee894ea9e';
+// Shared contract identity, normalized to LF for Git checkouts (AGENTS 1-B.14), not a product implementation pin.
+const RULE_TABLE_LF_SHA256 = 'a60b86b6267853615872a915d66a59150062afdbfe5d8725ca7a55f578c984d0';
 const ruleBytes = Buffer.from(fs.readFileSync(RULE_TABLE).toString('latin1').replace(/\r\n/g, '\n'), 'latin1');
-if (createHash('sha256').update(ruleBytes).digest('hex') !== RULE_TABLE_LF_SHA256) throw new Error('rule-cases.json is not the D735 table this file is bound to');
+if (createHash('sha256').update(ruleBytes).digest('hex') !== RULE_TABLE_LF_SHA256) throw new Error('rule-cases.json is not the D744-2 table this file is bound to');
 const RULE = JSON.parse(ruleBytes.toString('utf8'));
-if (RULE.schemaVersion !== 'D735-1' || RULE.cases.length !== 223 || new Set(RULE.cases.map(c => c.testId)).size !== 223) throw new Error('unexpected D735 table shape');
+if (RULE.schemaVersion !== 'D744-2' || RULE.cases.length !== 273 || new Set(RULE.cases.map(c => c.testId)).size !== 273) throw new Error('unexpected D744-2 table shape');
 const DECLARED = [...CASES, ...RULE.cases.map(c => c.testId)];
 if (process.argv.includes('--list-cases')) {
   process.stdout.write(JSON.stringify(DECLARED) + '\n');
@@ -502,7 +513,7 @@ def('TEST-E-02 manifest_sources R4', () => {
 });
 def('TEST-E-02 manifest_sources A4', () => {
   const m = build(), byUid = Object.fromEntries(m.objects.map(o => [o.sopInstanceUid, o]));
-  assert.equal(m.classificationRule, 'D735-1');
+  assert.equal(m.classificationRule, 'D744-2');
   const synth = byUid[SYNTH].mammography;
   assert.deepEqual([byUid[DBT].mammography.class, byUid[DBT].mammography.representation, synth.class, synth.fullViewAutoMatch], ['dbt-slices', 'slices', 'device-synthetic-2d', true]);
   // The raw reference is kept with its path and judged against the stored target header.
@@ -529,7 +540,7 @@ def('TEST-E-02 manifest_sources R5', () => {
   refused(() => build(otherHeader), 'MammographyHeaderMismatch');
   const typeDiffers = studyObjects(); typeDiffers[2] = { ...typeDiffers[2], imageType: ['DERIVED', 'PRIMARY', ''] };
   refused(() => build(typeDiffers), 'MammographyHeaderMismatch');
-  // The server's reference list may be longer than the selected header (X-Ray 3D Acquisition), never shorter.
+  // An optional reference inventory must match the complete header exactly.
   const fewer = studyObjects(); fewer[4] = { ...fewer[4], mammography: { ...fewer[4].mammography, declaredSources: [] } };
   refused(() => build(fewer), 'MammographyHeaderMismatch');
   const listedTwice = { header: studyObjects()[3].mammography.header, patientKey: PATIENT.linkId, institutionKey: INSTITUTION };
@@ -908,13 +919,197 @@ def('TEST-E-05 display_epoch R3', () => {
     { sopInstanceUid: pdf, frame: null })).unitKey, `object:${pdf}`);
 });
 
-// ── TEST-D735-* shared mammography table, through the manifest path ─────────────────────────────────────────────────
+// R4 counterexamples: REQ-EMR-11/17 -> RISK-E-02 -> TEST-E-02; D744 facts also bind RISK-D744-FALSE-FULL-OR-FRICTION/SOURCE-PROMOTION.
+const ruleCase = id => structuredClone(RULE.cases.find(c => c.id === id));
+const rawLinks = r => r.links.map(({ path, sopClass, sop, frames }) => ({ path, sopClass, sop, frames }));
+def('TEST-E-02 manifest_sources R7', () => {
+  const objects = studyObjects(), o = objects.find(o => o.sopInstanceUid === DBT);
+  assert.equal(o.mammography.header['00280008'].Value[0], 6);
+  o.declaredFrameCount = 1; o.frames = o.frames.slice(0, 1);
+  const before = structuredClone(objects);
+  refused(() => build(objects), 'MammographyHeaderMismatch');
+  assert.deepEqual(objects, before);
+  assert.deepEqual(allowed(() => build()).objects.find(o => o.sopInstanceUid === DBT).frames.map(f => f.number), [1, 2, 3, 4, 5, 6]);
+});
+def('TEST-E-02 manifest_sources R8', () => {
+  const c = ruleCase('SOURCE-FRAME-OUT-OF-RANGE'), r = allowed(() => ruleCaseResult(c));
+  assert.equal(r.sourceAccepted, false);
+  c.input.declaredSources = rawLinks(r); c.input.declaredSources[0].frames = [1];
+  const before = structuredClone(c);
+  refused(() => ruleCaseResult(c), 'MammographyHeaderMismatch');
+  assert.deepEqual(c, before);
+  // Each dimension, occurrence and missing/extra reference matters, even if the same SOP remains in the list.
+  const valid = ruleCase('SOURCE-FRAME-VALID'), raw = rawLinks(allowed(() => ruleCaseResult(valid)));
+  for (const inventory of [[], [...raw, raw[0]], [{ ...raw[0], path: 'SourceImageSequence[1]/' }],
+    [{ ...raw[0], sop: '2.25.99999' }], [{ ...raw[0], frames: null }]]) {
+    valid.input.declaredSources = inventory;
+    refused(() => ruleCaseResult(valid), 'MammographyHeaderMismatch');
+  }
+  valid.input.declaredSources = raw;
+  assert.equal(allowed(() => ruleCaseResult(valid)).sourceAccepted, true);
+});
+def('TEST-E-02 manifest_sources R9', () => {
+  const original = ruleCase('SOURCE-SAME-PARTIAL');
+  assert.equal(allowed(() => ruleCaseResult(original)).sourceAccepted, true);
+  for (const code of [
+    { '00080100': dj('SH', 'UNKNOWN-REGION'), '00080102': dj('SH', '99PRIVATE'), '00080104': dj('LO', 'Medial') },
+    { '00080100': dj('SH', '255561001'), '00080102': dj('SH', '99PRIVATE') }, {},
+  ]) {
+    const c = structuredClone(original);
+    for (const hd of [c.input.dicom, ...c.input.context.storedObjects.map(o => o.dicom)]) hd['00281352'] = dj('SQ', structuredClone(code));
+    const r = allowed(() => ruleCaseResult(c));
+    assert.equal(r.sourceAccepted, false, 'identical unverified regions cannot prove the same partial coverage');
+    assert.equal(r.sourceLinkStatus, 'unresolved');
+    assert.deepEqual(rawLinks(r), rawLinks(ruleCaseResult(original)));
+  }
+  // The same verified CID concept may use a legacy code on the target.
+  const legacy = structuredClone(original);
+  const code = legacy.input.context.storedObjects[0].dicom['00281352'].Value[0];
+  code['00080100'] = dj('SH', 'R-404D5'); code['00080102'] = dj('SH', 'SRT');
+  assert.equal(allowed(() => ruleCaseResult(legacy)).sourceAccepted, true);
+});
+def('TEST-E-02 manifest_sources R10', () => {
+  assert.equal(allowed(() => ruleCaseResult(ruleCase('DBT-SLICES-SAMPLED'))).fullViewAutoMatch, true);
+  for (const value of ['LOW_ENERGY', 'HIGH_ENERGY', 'ADDITION', 'SUBTRACTION', 'UNSUPPORTED']) {
+    const c = ruleCase('DBT-SLICES-SAMPLED'), hd = c.input.dicom;
+    hd['00080008'].Value.push(value);
+    for (const f of hd['52009230'].Value) f['00189504'].Value[0]['00089007'].Value.push(value);
+    const r = allowed(() => ruleCaseResult(c));
+    assert.deepEqual([r.class, r.status, r.fullViewAutoMatch, r.sourceClassEligible], ['unverified', 'unverified', false, false]);
+  }
+});
+def('TEST-E-02 manifest_sources R11', () => {
+  const o = studyObjects().find(o => o.sopInstanceUid === DBT), hd = o.mammography.header;
+  hd['52009229'].Value[0]['00289110'].Value[0]['00180050'].Value = [0.01];
+  const zs = [0, 0, 0.01, 0.02, 0.03, 0.04];
+  hd['52009230'].Value.forEach((f, i) => { f['00209113'].Value[0]['00200032'].Value = [0, 0, zs[i]]; });
+  assert.equal(allowed(() => build([o])).objects[0].mammography.status, 'unverified');
+  hd['52009230'].Value.forEach((f, i) => { f['00209113'].Value[0]['00200032'].Value = [0, 0, i * 0.01]; });
+  assert.equal(allowed(() => build([o])).objects[0].mammography.class, 'dbt-slices');
+});
+def('TEST-E-02 manifest_sources R12', () => {
+  const o = studyObjects().find(o => o.sopClassUid === SC('1.2'));
+  o.mammography.header['00089007'] = dj('CS', 'DERIVED', 'PRIMARY', 'TOMOSYNTHESIS', 'GENERATED_2D');
+  const before = structuredClone(o), r = allowed(() => build([o])).objects[0].mammography;
+  assert.deepEqual([r.class, r.fullViewAutoMatch], ['unverified', false]);
+  assert.deepEqual(o, before);
+  delete o.mammography.header['00089007'];
+  assert.equal(allowed(() => build([o])).objects[0].mammography.class, 'conventional-2d-presentation');
+  const c = ruleCase('DBT-SLICES-SAMPLED'); c.input.dicom['00089007'] = dj('CS', 'ORIGINAL', 'PRIMARY', 'TOMO_PROJ', 'NONE');
+  assert.equal(allowed(() => ruleCaseResult(c)).status, 'unverified');
+});
+def('TEST-E-02 manifest_sources R13', () => {
+  const c = ruleCase('SOURCE-UID-CLASS-CONFLICT'), r = allowed(() => ruleCaseResult(c));
+  assert.equal(r.sourceAccepted, false);
+  c.input.declaredSources = rawLinks(r);
+  c.input.declaredSources[0].sopClass = c.input.context.storedObjects[0].dicom['00080016'].Value[0];
+  refused(() => ruleCaseResult(c), 'MammographyHeaderMismatch');
+  c.input.declaredSources = rawLinks(r);
+  assert.deepEqual(rawLinks(allowed(() => ruleCaseResult(c))), rawLinks(r));
+  assert.equal(ruleCaseResult(c).sourceAccepted, false);
+});
+def('TEST-E-02 manifest_sources R14', () => {
+  for (const [count, length, reason] of [[2001, 2001, 'frame-count-range'], [6, 2001, 'frame-count-range'], [6, 5, 'per-frame-count']]) {
+    const hd = studyObjects().find(o => o.sopInstanceUid === DBT).mammography.header;
+    hd['00280008'].Value = [count];
+    let inspected = 0;
+    hd['52009230'].Value = Array.from({ length }, () => Object.defineProperty({}, '00209071', {
+      get() { inspected++; return dj('SQ', { '00209072': dj('CS', 'L') }); },
+    }));
+    const r = allowed(() => M.classifyMammography(hd));
+    assert.equal(r.result.status, 'unverified');
+    assert.equal(r.result.basis, reason);
+    assert.equal(inspected, 0, 'refused frame arrays must not inspect frame anatomy');
+  }
+  // Manifest array length is also checked before reading even its first frame digest.
+  const o = studyObjects().find(o => o.sopInstanceUid === DBT); let inspected = 0;
+  o.frames = Array.from({ length: 5 }, () => Object.defineProperty({ bytes: 10, sha256: h('frame') }, 'number', {
+    enumerable: true, get() { inspected++; return 1; },
+  }));
+  refused(() => build([o]), 'FrameSetIncomplete');
+  assert.equal(inspected, 0);
+});
+def('TEST-E-02 manifest_sources R15', () => {
+  const o = studyObjects().find(o => o.sopInstanceUid === DBT), pm = o.mammography.header['52009229'].Value[0]['00289110'].Value[0];
+  for (const v of ['NaN', 'Infinity', '-Infinity', Number.NaN]) {
+    pm['00180088'] = dj('DS', v);
+    assert.equal(allowed(() => build([o])).objects[0].mammography.status, 'unverified', 'non-finite spacing is not a verified slice interval');
+  }
+  pm['00180088'] = dj('DS', '1');
+  assert.equal(allowed(() => build([o])).objects[0].mammography.class, 'dbt-slices');
+});
+def('TEST-E-02 manifest_sources R16', () => {
+  const base = ruleCase('PARTIAL-ABSENT');
+  for (const element of [null, [], 17, { vr: 'CS', Value: 'NO' }, { vr: 'PN', Value: ['NO'] }]) {
+    const c = structuredClone(base); c.input.dicom['00281350'] = element;
+    const r = allowed(() => ruleCaseResult(c));
+    assert.deepEqual([r.partialDeclaration, r.partial, r.fullness, r.fullViewAutoMatch], ['INVALID', 'conflict', 'conflict', false]);
+  }
+  for (const element of [null, [], { vr: 'SQ', Value: {} }, { vr: 'CS', Value: [] }]) {
+    const c = structuredClone(base); c.input.dicom['00281352'] = element;
+    const r = allowed(() => ruleCaseResult(c));
+    assert.deepEqual([r.partialDeclaration, r.partial, r.fullness, r.fullViewAutoMatch], ['ABSENT', 'conflict', 'conflict', false]);
+  }
+});
+def('TEST-E-02 manifest_sources A5', () => {
+  const original = studyObjects();
+  for (const o of original) if (o.mammography) delete o.mammography.header['00281350'];
+  const absent = allowed(() => build(original)), r = absent.objects.find(o => o.sopInstanceUid === SYNTH).mammography;
+  assert.deepEqual([absent.classificationRule, r.rule, r.partialDeclaration, r.partial, r.fullness, r.fullViewAutoMatch],
+    ['D744-2', 'D744-2', 'ABSENT', 'unknown', 'inferred-for-hanging', true]);
+  assert.equal(r.sourceAccepted, false, 'automatic hanging does not prove source coverage');
+  const again = allowed(() => M.buildImageManifest({ ...manifestInput(structuredClone(original)), builtAt: T2 }));
+  assert.equal(again.sha256, absent.sha256); assert.deepEqual(again.objects, absent.objects);
+  const emptyInput = structuredClone(original);
+  emptyInput.find(o => o.sopInstanceUid === SYNTH).mammography.header['00281350'] = dj('CS', '');
+  const empty = allowed(() => build(emptyInput));
+  assert.notEqual(empty.sha256, absent.sha256, 'ABSENT versus EMPTY alone changes the declaration content digest');
+  const no = allowed(() => build());
+  assert.notEqual(no.sha256, absent.sha256);
+  const noResult = no.objects.find(o => o.sopInstanceUid === SYNTH).mammography;
+  assert.deepEqual([noResult.partialDeclaration, noResult.fullness, noResult.fullViewAutoMatch], ['NO', 'declared-not-partial', true]);
+  for (const tags of [
+    { '00281350': dj('CS', 'YES') },
+    { '00281352': dj('SQ', { '00080100': dj('SH', '255561001'), '00080102': dj('SH', 'SCT') }) },
+    { '00281351': dj('LO', 'full view') },
+    { '00281350': dj('CS', 'NO'), '00281351': dj('LO', 'partial') },
+  ]) {
+    const input = structuredClone(original); Object.assign(input.find(o => o.sopInstanceUid === SYNTH).mammography.header, tags);
+    const changed = allowed(() => build(input));
+    assert.notEqual(changed.sha256, absent.sha256);
+    assert.equal(changed.objects.find(o => o.sopInstanceUid === SYNTH).mammography.fullViewAutoMatch, false);
+    refused(() => E.classifyDisplayReport(openingFor(changed), changed, report(absent), viewing(absent)), 'ManifestVersionMismatch');
+  }
+  const old = structuredClone(absent); old.classificationRule = 'D735-1';
+  refused(() => prepare(old, `/dicom-web/studies/${STUDY}`), 'ManifestRequired');
+});
+def('TEST-E-02 manifest_sources A6', () => {
+  for (const id of ['PUBLIC-010', 'PUBLIC-011', 'PUBLIC-012', 'PUBLIC-013']) {
+    const c = ruleCase(id); assert.equal(c.input.declaredSources, undefined);
+    const r = allowed(() => ruleCaseResult(c));
+    assert.equal(r.declaredSourceCount, 10);
+    assert.deepEqual(rawLinks(r), c.source.raw_reference_inventory, 'complete headers retain all acquisition and derivation paths');
+    c.input.declaredSources = [...c.source.raw_reference_inventory].reverse();
+    assert.deepEqual(rawLinks(allowed(() => ruleCaseResult(c))), rawLinks(r), 'inventory order cannot reorder the raw references');
+  }
+  for (const id of ['V2-049', 'V2-050']) assert.equal(allowed(() => ruleCaseResult(ruleCase(id))).declaredSourceCount, 1);
+  const c = ruleCase('SOURCE-FRAME-VALID'), original = structuredClone(c), verified = allowed(() => ruleCaseResult(c));
+  delete c.input.context.storedObjects[0].dicom['52009230'].Value[0]['00209113'];
+  const rejected = allowed(() => ruleCaseResult(c));
+  assert.equal(rejected.sourceAccepted, false); assert.deepEqual(rawLinks(rejected), rawLinks(verified));
+  assert.deepEqual(allowed(() => ruleCaseResult(original)), verified, 'reread after restoring the header recovers without changing the raw source');
+});
+
+// ── TEST-D735-* / TEST-D744-* shared mammography table, through the manifest path ────────────────────────────────────
 /** Moves tags into the manifest's object input: identity, the stored frame count, Image Type and its Value 1, synthetic
  * byte digests. Classification facts are left to the manifest; the case's expected values are never read here. */
 function entryFromHeader(hd, declaredSources, claimedClass) {
   const value = tag => hd[tag]?.Value ?? null;
   const perFrame = value('52009230'), nf = value('00280008')?.[0];
-  const n = perFrame && perFrame.length ? perFrame.length : Number.isInteger(nf) && nf > 0 ? nf : 1;
+  // A malformed or out-of-support count cannot allocate an unbounded synthetic frame set. Valid counts name the
+  // actual frame inventory, independently of incomplete functional groups (which the classifier must diagnose).
+  const count = Number(nf);
+  const n = Number.isInteger(count) && count > 0 && count <= 2000 ? count : perFrame?.length || 1;
   const imageType = hd['00080008'] === undefined ? null : [...(hd['00080008'].Value ?? [])];
   const v1 = typeof imageType?.[0] === 'string' ? imageType[0].trim() : null, sop = value('00080018')[0];
   return { studyUid: value('0020000D')[0], seriesUid: value('0020000E')[0], sopInstanceUid: sop, sopClassUid: value('00080016')[0],

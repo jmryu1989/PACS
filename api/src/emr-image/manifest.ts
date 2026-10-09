@@ -136,11 +136,11 @@ function provenance(value: unknown, format: ObjectFormat): Provenance {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// D735 mammography classification (shared contract with E-MG, rule.md + rule-cases.json, schema D735-1). The class is
+// D744 mammography classification (shared contract with E-MG, rule.md + rule-cases.json, schema D744-2). The class is
 // read from the stored header only; a caller's label is recorded, never used. "verified" means this contract's header
 // evidence is met, not diagnostic fitness, decoder or display correctness, or a preserved acquisition.
 
-export const MG_RULE_VERSION = 'D735-1' as const;
+export const MG_RULE_VERSION = 'D744-2' as const;
 export type DicomJson = Readonly<Record<string, { vr?: string; Value?: readonly unknown[] }>>;
 export type MgClass = 'conventional-2d-presentation' | 'conventional-2d-processing' | 'device-synthetic-2d' | 'dbt-slices' | 'dbt-slab' |
   'projection' | 'partial-view' | 'unverified';
@@ -149,6 +149,8 @@ export interface MgSourceLink { path: string; sopClass: string | null; sop: stri
 export interface MammographyResult {
   rule: typeof MG_RULE_VERSION; class: MgClass; baseClass: MgClass; status: 'verified' | 'unverified'; basis: string;
   partial: 'yes' | 'no' | 'unknown' | 'conflict'; presentation: 'presentation' | 'processing' | null;
+  partialDeclaration: 'YES' | 'NO' | 'ABSENT' | 'EMPTY' | 'INVALID';
+  fullness: 'conflict' | 'partial' | 'declared-not-partial' | 'inferred-for-hanging' | 'undetermined';
   representation: 'slices' | 'slab' | 'mip-slab' | 'minip-slab' | 'unspecified' | null;
   fullViewAutoMatch: boolean; sourceClassEligible: boolean; laterality: string | null; view: string | null; biopsy: string | null;
   declaredSourceCount: number; rawReferenceRetained: boolean; links: readonly MgSourceLink[];
@@ -167,6 +169,12 @@ const VIEW_CODES: Readonly<Record<string, string>> = freeze(Object.fromEntries([
   ['ML', ['SCT|399260004', 'SRT|R-10224', 'SNM3|R-10224']], ['LM', ['SCT|399352003', 'SRT|R-10228', 'SNM3|R-10228']],
   ['SPECIMEN', ['SCT|127457009', 'SRT|G-8310', 'SNM3|G-8310']],
 ].flatMap(([view, codes]) => (codes as string[]).map(code => [code, view as string]))));
+/** CID 4005 and its legacy equivalents identify regions; identical unknown codes do not prove a shared region. */
+const PARTIAL_REGIONS: Readonly<Record<string, string>> = freeze(Object.fromEntries([
+  ['255549009', 'R-404CC'], ['255551008', 'R-404CE'], ['264217000', 'R-42191'], ['261089000', 'R-4094A'],
+  ['255561001', 'R-404D5'], ['49370004', 'G-A104'], ['26216008', 'G-A110'],
+].flatMap(([sct, legacy]) => [[`SCT|${sct}`, sct], [`SRT|${legacy}`, sct], [`SNM3|${legacy}`, sct]])));
+const SPOT_MAG = new Set(['SCT|399163009', 'SCT|399055006', 'SRT|R-102D6', 'SRT|R-102D7', 'SNM3|R-102D6', 'SNM3|R-102D7']);
 
 class Unverified extends Error { constructor(readonly reason: string) { super(reason); } }
 const fail = (reason: string): never => { throw new Unverified(reason); };
@@ -189,10 +197,47 @@ const numbers = (d: DicomJson, tag: string): number[] | null => {
   return v === null ? null : v.map(x => typeof x === 'number' ? x : typeof x === 'string' && x.trim() ? Number(x) : NaN);
 };
 /** Optional trailing empty values beyond Value 4 compare as absent; inner empty values keep their position. */
-const typeKey = (t: readonly string[]) => { const out = [...t]; while (out.length > 4 && out[out.length - 1] === '') out.pop(); return out.join('\\'); };
+const typeKey = (t: readonly string[] | null) => { if (t === null) return null; const out = [...t]; while (out.length > 4 && out[out.length - 1] === '') out.pop(); return out.join('\\'); };
 const tol = (d: number) => Math.max(0.05, 0.01 * d);
 
-interface Facts { laterality: string | null; view: string | null; modifier: boolean; partial: MammographyResult['partial']; partialCodes: string[]; btoCodeMissing: boolean }
+interface Facts { laterality: string | null; view: string | null; modifier: boolean; partial: MammographyResult['partial'];
+  partialDeclaration: MammographyResult['partialDeclaration']; partialCodes: string[]; btoCodeMissing: boolean }
+function partialDeclaration(h: DicomJson): MammographyResult['partialDeclaration'] {
+  if (!has(h, '00281350')) return 'ABSENT';
+  const e = h['00281350'];
+  if (!e || typeof e !== 'object' || Array.isArray(e) || (e.vr !== undefined && e.vr !== 'CS')) return 'INVALID';
+  if (!Object.prototype.hasOwnProperty.call(e, 'Value')) return 'EMPTY';
+  if (!Array.isArray(e.Value) || e.Value.length > 1) return 'INVALID';
+  if (!e.Value.length || e.Value[0] === null) return 'EMPTY';
+  if (typeof e.Value[0] !== 'string') return 'INVALID';
+  const flag = e.Value[0].trim().toUpperCase();
+  return !flag ? 'EMPTY' : flag === 'YES' || flag === 'NO' ? flag : 'INVALID';
+}
+const codeKey = (c: DicomJson) => `${(first(c, '00080102') ?? '').toUpperCase()}|${first(c, '00080100') ?? ''}`;
+/** These optional sequences must not turn malformed elements or items into an empty, ordinary view. */
+function viewItems(h: DicomJson, tag: string): DicomJson[] {
+  if (has(h, tag)) {
+    const e = h[tag];
+    if (!e || typeof e !== 'object' || Array.isArray(e) || (e.vr !== undefined && e.vr !== 'SQ') ||
+        (Object.prototype.hasOwnProperty.call(e, 'Value') && !Array.isArray(e.Value))) fail('partial-sequence-malformed');
+  }
+  return itemsOf(h, tag) ?? [];
+}
+/** Bound arrays before mapping, spreading or inspecting any frame's anatomy. Bad counts remain an unverified header. */
+function frameStructure(h: DicomJson, sop: string): void {
+  let n: number = null;
+  if (sop === BTO) {
+    const v = valuesOf(h, '00280008');
+    if (!v || !v.length) fail('frame-count-absent');
+    if (v.length !== 1) fail('frame-count-range');
+    n = numbers(h, '00280008')[0];
+    if (!Number.isInteger(n) || n < 1 || n > 2000) fail('frame-count-range');
+  }
+  const shared = valuesOf(h, '52009229'), frames = valuesOf(h, '52009230');
+  if (shared && shared.length > 1) fail('shared-functional-groups');
+  if (frames && frames.length > 2000) fail('frame-count-range');
+  if (sop === BTO && (!frames || frames.length !== n)) fail('per-frame-count');
+}
 function laterality(h: DicomJson, frames: DicomJson[]): { value: string | null; conflict: boolean } {
   const seen = new Set<string>();
   for (const tag of ['00200062', '00200060']) { const v = first(h, tag); if (v) seen.add(v.toUpperCase()); }
@@ -201,21 +246,24 @@ function laterality(h: DicomJson, frames: DicomJson[]): { value: string | null; 
 }
 function facts(h: DicomJson, sop: string, frames: DicomJson[]): Facts & { lateralityConflict: boolean; viewConflict: boolean } {
   const lat = laterality(h, frames);
-  const codeItem = (itemsOf(h, '00540220') ?? [])[0] ?? null;
+  const views = viewItems(h, '00540220'), codeItem = views[0] ?? null;
   const codeView = codeItem ? VIEW_CODES[`${(first(codeItem, '00080102') ?? '').toUpperCase()}|${first(codeItem, '00080100') ?? ''}`] ?? null : null;
   const position = first(h, '00185101')?.toUpperCase() ?? null;
   const viewConflict = !!(codeView && position && codeView !== position);
   const view = codeItem ? codeView : position;
-  const modifier = !!codeItem && (itemsOf(codeItem, '00540222') ?? []).length > 0;
-  const flag = first(h, '00281350')?.toUpperCase() ?? null, codes = itemsOf(h, '00281352') ?? [], description = first(h, '00281351');
+  const modifiers = [...viewItems(h, '00540222'), ...views.flatMap(v => viewItems(v, '00540222'))];
+  const modifier = modifiers.length > 0, wrongContainer = [...views, ...modifiers].some(c => !!PARTIAL_REGIONS[codeKey(c)]);
+  const spotMag = modifiers.some(c => SPOT_MAG.has(codeKey(c)));
+  const flag = partialDeclaration(h), codes = viewItems(h, '00281352'), description = first(h, '00281351');
   let partial: MammographyResult['partial'];
-  if (flag !== null && flag !== 'YES' && flag !== 'NO') partial = 'conflict';
+  if (flag === 'INVALID' || wrongContainer) partial = 'conflict';
   else if (codes.length > 2) partial = 'conflict';
   else if (flag === 'NO' && (codes.length || description)) partial = 'conflict';
-  else if (flag === 'YES' || codes.length || description) partial = modifier ? 'conflict' : 'yes';
+  else if (flag === 'YES' || codes.length || description) partial = spotMag ? 'conflict' : 'yes';
   else partial = flag === 'NO' ? 'no' : 'unknown';
-  const partialCodes = codes.map(c => `${(first(c, '00080102') ?? '').toUpperCase()}|${first(c, '00080100') ?? ''}`).sort();
-  return { laterality: lat.value, lateralityConflict: lat.conflict, view, viewConflict, modifier, partial, partialCodes,
+  const regions = codes.map(c => PARTIAL_REGIONS[codeKey(c)] ?? null);
+  const partialCodes = regions.every(r => r !== null) ? [...new Set(regions)].sort() : [];
+  return { laterality: lat.value, lateralityConflict: lat.conflict, view, viewConflict, modifier, partial, partialCodes, partialDeclaration: flag,
     btoCodeMissing: sop === BTO && flag === 'YES' && codes.length === 0 };
 }
 const hologic = (h: DicomJson) => ['HOLOGIC', 'HOLOGIC, INC.'].includes((first(h, '00080070') ?? '').toUpperCase()) &&
@@ -233,6 +281,7 @@ function geometry(shared: DicomJson, perFrame: DicomJson[], dimension: DicomJson
     if (!p || p.length !== 3 || !p.every(Number.isFinite)) fail('geometry-position');
     if (!o || o.length !== 6 || !o.every(Number.isFinite)) fail('geometry-orientation');
     const spacing = pm ? numbers(pm, '00180088') : null;
+    if (spacing !== null && (spacing.length !== 1 || !Number.isFinite(spacing[0]))) fail('geometry-spacing-tag');
     const content = (itemsOf(f, '00209111') ?? [])[0] ?? null;
     return { i, t, p, o, spacing: spacing && spacing.length ? Math.abs(spacing[0]) : null, index: content ? numbers(content, '00209157') : null };
   });
@@ -243,6 +292,7 @@ function geometry(shared: DicomJson, perFrame: DicomJson[], dimension: DicomJson
   const n = [r1 * c2 - r2 * c1, r2 * c0 - r0 * c2, r0 * c1 - r1 * c0];
   const z = rows.map(r => ({ i: r.i, z: r.p[0] * n[0] + r.p[1] * n[1] + r.p[2] * n[2], index: r.index }));
   const sorted = [...z].sort((a, b) => a.z - b.z), steps = sorted.slice(1).map((x, k) => x.z - sorted[k].z);
+  if (steps.some(s => !Number.isFinite(s) || s <= 0)) fail('geometry-position');
   const median = [...steps].sort((a, b) => a - b)[Math.floor((steps.length - 1) / 2)];
   if (!(median > 0) || steps.some(s => Math.abs(s - median) > tol(median))) fail('geometry-spacing');
   const t = rows[0].t;
@@ -300,6 +350,7 @@ function classifyBto(h: DicomJson): Base {
   const type = strings(h, '00080008');
   if (!type) fail('image-type-absent');
   const [v1, v2, v3, v4] = [type[0], type[1] ?? '', type[2] ?? '', type[3] ?? ''];
+  if (type.slice(4).some(x => x !== '')) fail('unmapped-image-type-extension');
   if (!['ORIGINAL', 'DERIVED'].includes(v1) || v2 !== 'PRIMARY' || !v3 || !v4) fail('image-type-profile');
   const key = typeKey(type), vp = first(h, '00089206'), technique = first(h, '00089207');
   for (const f of perFrame) {
@@ -341,15 +392,22 @@ export function classifyMammography(headerInput: unknown): Classified {
   if (!headerInput || typeof headerInput !== 'object' || Array.isArray(headerInput)) refuse('MammographyHeaderInvalid');
   const h = headerInput as DicomJson;
   const sop = first(h, '00080016') ?? '', sopInstance = first(h, '00080018') ?? '', studyUid = first(h, '0020000D') ?? '';
-  const frames = [...(itemsOf(h, '52009229') ?? []), ...(itemsOf(h, '52009230') ?? [])];
+  let frameError: string = null, frames: DicomJson[] = [];
+  try {
+    frameStructure(h, sop);
+    frames = [...(itemsOf(h, '52009229') ?? []), ...(itemsOf(h, '52009230') ?? [])];
+  } catch (e) { if (!(e instanceof Unverified)) throw e; frameError = e.reason; }
   let f: ReturnType<typeof facts>;
-  try { f = facts(h, sop, frames); } catch (e) { if (!(e instanceof Unverified)) throw e; f = { laterality: null, lateralityConflict: true, view: null, viewConflict: true, modifier: false, partial: 'conflict', partialCodes: [], btoCodeMissing: false }; }
+  try { f = facts(h, sop, frames); } catch (e) { if (!(e instanceof Unverified)) throw e; f = { laterality: null, lateralityConflict: true, view: null, viewConflict: true, modifier: false, partial: 'conflict', partialDeclaration: partialDeclaration(h), partialCodes: [], btoCodeMissing: false }; }
   const presentationOfSop = sop === MG_P ? 'presentation' as const : sop === MG_R ? 'processing' as const : null;
   let base: Base = null, reason: string = null;
   try {
+    if (frameError) fail(frameError);
     if (![MG_P, MG_R, BTO].includes(sop)) fail('unsupported-sop');
     for (const uid of [sop, sopInstance, studyUid, first(h, '0020000E') ?? '']) if (uid.length > 64 || !/^[0-9]+(?:\.[0-9]+)+$/.test(uid)) fail('identity-invalid');
     if (first(h, '00080060')?.toUpperCase() !== 'MG') fail('modality-not-mg');
+    // An out-of-IOD root claim cannot contradict the Image Type just because that IOD does not consume it.
+    if (has(h, '00089007') && typeKey(strings(h, '00089007')) !== typeKey(strings(h, '00080008'))) fail('root-frame-type-conflict');
     base = sop === BTO ? classifyBto(h) : classify2d(h, sop);
     if (f.lateralityConflict) fail('laterality-conflict');
     if (f.viewConflict) fail('view-conflict');
@@ -367,24 +425,30 @@ export function classifyMammography(headerInput: unknown): Classified {
     : ['dbt-slices', 'dbt-slab'].includes(base.base) ? null : sop === BTO ? 'presentation' as const : presentationOfSop;
   const representation = base !== null ? base.representation : sop === BTO && type[3] !== 'GENERATED_2D' ? 'unspecified' as const : null;
   const fullViewAutoMatch = base !== null && cls === base.base && ['conventional-2d-presentation', 'device-synthetic-2d', 'dbt-slices', 'dbt-slab'].includes(cls) &&
-    f.partial === 'no' && presentation !== 'processing' && ['R', 'L'].includes(f.laterality) && ['CC', 'MLO'].includes(f.view) && !f.modifier && !base.biopsy;
+    ['no', 'unknown'].includes(f.partial) && presentation !== 'processing' && ['R', 'L'].includes(f.laterality) && ['CC', 'MLO'].includes(f.view) && !f.modifier && !base.biopsy;
+  const fullness: MammographyResult['fullness'] = f.partial === 'conflict' ? 'conflict' : f.partial === 'yes' ? 'partial'
+    : f.partial === 'no' ? 'declared-not-partial' : fullViewAutoMatch ? 'inferred-for-hanging' : 'undetermined';
   const sourceClassEligible = base !== null && SOURCE_CLASSES.includes(base.base);
   let nf: number | null = null;
-  try { const v = numbers(h, '00280008'); nf = v && v.length && Number.isInteger(v[0]) ? v[0] : sop === BTO ? null : 1; } catch { nf = null; }
+  const countValues = valuesOf(h, '00280008');
+  const count = countValues?.length === 1 ? numbers(h, '00280008')[0] : null;
+  nf = countValues === null ? (sop === BTO ? null : 1) : Number.isInteger(count) && count > 0 && count <= 2000 ? count : null;
   return { sop: sopInstance, studyUid, sopClass: sop, frameCount: nf, facts: f,
     result: { rule: MG_RULE_VERSION, class: cls, baseClass, status: base === null ? 'unverified' : 'verified', basis: base === null ? reason : base.basis,
-      partial: f.partial, presentation, representation, fullViewAutoMatch, sourceClassEligible, laterality: f.laterality, view: f.view,
+      partial: f.partial, partialDeclaration: f.partialDeclaration, fullness, presentation, representation, fullViewAutoMatch, sourceClassEligible, laterality: f.laterality, view: f.view,
       biopsy: base?.biopsy ?? null } };
 }
 
-/** Raw source references as the device stored them: Source Image Sequence at the top level and inside the Derivation
- * Image macro of the shared and per-frame groups. Kept with their path, class and frames whatever their status. */
+/** Raw source references at root, acquisition and root/shared/per-frame derivation paths, never supplied replacements. */
 function extractSources(h: DicomJson): MgDeclaredSource[] {
   const out: MgDeclaredSource[] = [];
   const read = (items: DicomJson[], path: string) => items.forEach((r, i) => out.push({ path: `${path}SourceImageSequence[${i}]/`,
     sopClass: first(r, '00081150'), sop: first(r, '00081155') ?? '', frames: numbers(r, '00081160') }));
   read(itemsOf(h, '00082112') ?? [], '');
+  (itemsOf(h, '00189507') ?? []).forEach((a, ai) => read(itemsOf(a, '00082112') ?? [], `XRay3DAcquisitionSequence[${ai}]/`));
+  (itemsOf(h, '00089124') ?? []).forEach((dv, di) => read(itemsOf(dv, '00082112') ?? [], `DerivationImageSequence[${di}]/`));
   for (const [tag, name] of [['52009229', 'SharedFunctionalGroupsSequence'], ['52009230', 'PerFrameFunctionalGroupsSequence']]) {
+    if ((valuesOf(h, tag)?.length ?? 0) > 2000) fail('frame-count-range');
     (itemsOf(h, tag) ?? []).forEach((g, gi) => (itemsOf(g, '00089124') ?? []).forEach((dv, di) =>
       read(itemsOf(dv, '00082112') ?? [], `${name}[${gi}]/DerivationImageSequence[${di}]/`)));
   }
@@ -400,9 +464,10 @@ function declared(value: unknown, h: DicomJson): MgDeclaredSource[] {
     if (v.frames !== null && (!Array.isArray(v.frames) || v.frames.some((n: unknown) => !Number.isInteger(n)))) refuse('MammographyHeaderMismatch');
     return { path: string(v.path), sopClass: v.sopClass === null ? null : string(v.sopClass), sop: string(v.sop), frames: v.frames === null ? null : [...v.frames] };
   });
-  // The server's list may hold references outside the selected header (e.g. X-Ray 3D Acquisition); never fewer.
-  if (fromHeader.some(r => !list.some(x => x.sop === r.sop))) refuse('MammographyHeaderMismatch');
-  return list;
+  // Compare complete inventories including duplicate path occurrences. The header remains the sole authority.
+  const inventory = (refs: MgDeclaredSource[]) => refs.map(r => JSON.stringify([r.path, r.sopClass, r.sop, r.frames])).sort();
+  if (JSON.stringify(inventory(fromHeader)) !== JSON.stringify(inventory(list))) refuse('MammographyHeaderMismatch');
+  return fromHeader;
 }
 
 export interface MgStoreEntry { header: DicomJson; patientKey: string; institutionKey: string }
@@ -426,8 +491,11 @@ function judgeSource(result: Classified, ref: MgDeclaredSource, store: ReadonlyM
   if (result.facts.view !== target.c.facts.view) return { status: 'rejected', reason: 'other-view' };
   const [a, b] = [result.facts, target.c.facts];
   if (a.partial === 'no' && b.partial === 'no') return { status: 'verified', reason: 'same-breast-view-full' };
-  if (a.partial === 'yes' && b.partial === 'yes') return a.partialCodes.length && a.partialCodes.join(',') === b.partialCodes.join(',')
-    ? { status: 'verified', reason: 'same-partial-region' } : { status: 'rejected', reason: 'other-partial-region' };
+  if (a.partial === 'yes' && b.partial === 'yes') {
+    if (!a.partialCodes.length || !b.partialCodes.length) return { status: 'unresolved', reason: 'partial-region-unknown' };
+    return a.partialCodes.join(',') === b.partialCodes.join(',')
+      ? { status: 'verified', reason: 'same-partial-region' } : { status: 'rejected', reason: 'other-partial-region' };
+  }
   if ((a.partial === 'yes' && b.partial === 'no') || (a.partial === 'no' && b.partial === 'yes')) return { status: 'rejected', reason: 'partial-scope-conflict' };
   return { status: 'unresolved', reason: 'partial-unknown' };
 }
@@ -477,6 +545,10 @@ function entry(value: unknown, studyUid: string, keys: { patientKey: string; ins
   const unsupported = !known ? 'UnknownObjectFormat' as const : !decoder ? 'UnknownTransferSyntax' as const : null;
   const bytes = integer(v.bytes, 1), digest = sha256(v.sha256), declaredFrameCount = integer(v.declaredFrameCount);
   if (!Array.isArray(v.frames)) refuse('FrameSetIncomplete');
+  if (PIXEL_FORMATS.includes(format)) {
+    if (v.frames.length > declaredFrameCount) refuse('FrameSetConflict');
+    if (declaredFrameCount < 1 || v.frames.length !== declaredFrameCount) refuse('FrameSetIncomplete');
+  } else if (format !== 'unsupported' && (declaredFrameCount !== 0 || v.frames.length)) refuse('FrameSetIncomplete');
   const frames = v.frames.map((f: unknown) => {
     const x = object(f, ['number', 'bytes', 'sha256']);
     return { number: integer(x.number, 1), bytes: integer(x.bytes, 1), sha256: sha256(x.sha256) };
@@ -484,7 +556,7 @@ function entry(value: unknown, studyUid: string, keys: { patientKey: string; ins
   if (new Set(frames.map(f => f.number)).size !== frames.length) refuse('FrameSetConflict');
   if (PIXEL_FORMATS.includes(format)) {
     // Every stored frame, first to last, by number. The last frame missing is the classic silent truncation.
-    if (declaredFrameCount < 1 || frames.length !== declaredFrameCount || frames.some((f, i) => f.number !== i + 1)) refuse('FrameSetIncomplete');
+    if (frames.some((f, i) => f.number !== i + 1)) refuse('FrameSetIncomplete');
   } else if (format !== 'unsupported' && (declaredFrameCount !== 0 || frames.length)) refuse('FrameSetIncomplete');
   if (frames.reduce((sum, f) => sum + f.bytes, 0) > bytes) refuse('FrameBytesExceedObject');
   let imageType: string[] | null = null;
@@ -523,6 +595,7 @@ function entry(value: unknown, studyUid: string, keys: { patientKey: string; ins
     const raw = header['00080008'] === undefined ? null : Array.isArray(header['00080008'].Value) ? header['00080008'].Value : [];
     if (c.sop !== ref.sopInstanceUid || c.sopClass !== sopClassUid || c.studyUid !== ref.studyUid ||
         (header['0020000E']?.Value?.[0] ?? null) !== ref.seriesUid || JSON.stringify(raw) !== JSON.stringify(imageType)) refuse('MammographyHeaderMismatch');
+    if (c.frameCount !== null && c.frameCount !== declaredFrameCount) refuse('MammographyHeaderMismatch');
     pending = { c, header, refs: declared(m.declaredSources, header), claimedClass: m.claimedClass === null ? null : string(m.claimedClass) };
   }
   if (v.timing !== null && !PIXEL_FORMATS.includes(format)) refuse('InvalidFrameTiming');

@@ -35,8 +35,8 @@ MUTANTS = [
                 " slot.derivedDone = true; } continue; }",
      "kills": ["TEST-E-01 delivery_states R1"]},
     {"id": "M-E-02", "required": True, "title": "manifest ignores a missing last frame", "file": "emr-image/manifest.ts",
-     "find": "if (declaredFrameCount < 1 || frames.length !== declaredFrameCount || frames.some((f, i) => f.number !== i + 1)) refuse('FrameSetIncomplete');",
-     "replace": "if (declaredFrameCount < 1 || frames.some((f, i) => f.number !== i + 1)) refuse('FrameSetIncomplete');",
+     "find": "if (declaredFrameCount < 1 || v.frames.length !== declaredFrameCount) refuse('FrameSetIncomplete');",
+     "replace": "if (declaredFrameCount < 1) refuse('FrameSetIncomplete');",
      "kills": ["TEST-E-02 manifest_sources R2"]},
     {"id": "M-E-03", "required": True, "title": "direct Orthanc /instances path allowed", "file": "emr-image/contract.ts",
      "find": "  if (s[0] !== 'dicom-web') refuse(DIRECT_ORTHANC_ROOTS.includes(s[0]) ? 'DirectOrthancPathRefused' : 'ImagePathRefused');",
@@ -130,9 +130,10 @@ MUTANTS = [
      "replace": "  let g: { t: number; d: number }; try { g = geometry(shared, perFrame, itemsOf(h, '00209222')); } catch {"
                 " return { base: vp === 'VOLUME' ? 'dbt-slices' : 'dbt-slab', basis: 'volumetric-properties', representation: vp === 'VOLUME' ? 'slices' : 'slab', biopsy: null }; }",
      "kills": ["TEST-D735-DBT-SAMPLED-ALONE"]},
-    {"id": "M-E-D4", "required": True, "title": "E-4 unknown partial counted as a full view", "file": "emr-image/manifest.ts",
-     "find": "    f.partial === 'no' && presentation !== 'processing'",
-     "replace": "    f.partial !== 'yes' && f.partial !== 'conflict' && presentation !== 'processing'",
+    # D744 replaces v1's absent exclusion: keep unknown as a fact while allowing ordinary hanging.
+    {"id": "M-E-D4", "required": True, "title": "D744 ordinary absent Partial View blocked from automatic hanging", "file": "emr-image/manifest.ts",
+     "find": "    ['no', 'unknown'].includes(f.partial) && presentation !== 'processing'",
+     "replace": "    f.partial === 'no' && presentation !== 'processing'",
      "kills": ["TEST-D735-PARTIAL-ABSENT"]},
     {"id": "M-E-D5", "required": True, "title": "E-5 an unverified target accepted as a synthetic 2D source (E-R2-02)", "file": "emr-image/manifest.ts",
      "find": "  if (target.c.result.status !== 'verified' || !SOURCE_CLASSES.includes(target.c.result.baseClass)) return",
@@ -146,6 +147,56 @@ MUTANTS = [
      "find": "  if (g.t > 3 && g.t + tol(g.d) >= g.d && SLAB_PAIRS.includes(`${v4}|${technique}`))",
      "replace": "  if (g.t > 3 && g.t + tol(g.d) >= g.d)",
      "kills": ["TEST-D735-DBT-THICKNESS-ALONE"]},
+    # Round 4: each review counterexample has its own behavioural kill, including both variants of R3-02 and R3-05.
+    {"id": "M-E-R3-01", "required": True, "title": "CP1 header count disconnected from manifest frames", "file": "emr-image/manifest.ts",
+     "find": "    if (c.frameCount !== null && c.frameCount !== declaredFrameCount) refuse('MammographyHeaderMismatch');\n",
+     "replace": "", "kills": ["TEST-E-02 manifest_sources R7"]},
+    {"id": "M-E-R3-02", "required": True, "title": "CP2 source inventory ignores raw frame selection", "file": "emr-image/manifest.ts",
+     "find": "[r.path, r.sopClass, r.sop, r.frames]", "replace": "[r.path, r.sopClass, r.sop]",
+     "kills": ["TEST-E-02 manifest_sources R8"]},
+    {"id": "M-E-R3-03", "required": True, "title": "CP3 identical unknown partial codes certify a region", "file": "emr-image/manifest.ts",
+     "find": "codes.map(c => PARTIAL_REGIONS[codeKey(c)] ?? null)", "replace": "codes.map(c => PARTIAL_REGIONS[codeKey(c)] ?? codeKey(c))",
+     "kills": ["TEST-E-02 manifest_sources R9"]},
+    {"id": "M-E-R3-04", "required": True, "title": "CP4 BTO energy extension enters ordinary screening", "file": "emr-image/manifest.ts",
+     "find": "  if (type.slice(4).some(x => x !== '')) fail('unmapped-image-type-extension');\n",
+     "replace": "", "kills": ["TEST-E-02 manifest_sources R10"]},
+    {"id": "M-E-R3-05", "required": True, "title": "CP5 duplicate positions hidden in tolerance", "file": "emr-image/manifest.ts",
+     "find": "  if (steps.some(s => !Number.isFinite(s) || s <= 0)) fail('geometry-position');\n",
+     "replace": "", "kills": ["TEST-E-02 manifest_sources R11"]},
+    {"id": "M-E-R3-06", "required": True, "title": "CP6 conflicting root Frame Type ignored", "file": "emr-image/manifest.ts",
+     "find": "    if (has(h, '00089007') && typeKey(strings(h, '00089007')) !== typeKey(strings(h, '00080008'))) fail('root-frame-type-conflict');\n",
+     "replace": "", "kills": ["TEST-E-02 manifest_sources R12"]},
+    {"id": "M-E-R3-02C", "required": True, "title": "CP7 source inventory ignores raw SOP class", "file": "emr-image/manifest.ts",
+     "find": "[r.path, r.sopClass, r.sop, r.frames]", "replace": "[r.path, r.sop, r.frames]",
+     "kills": ["TEST-E-02 manifest_sources R13"]},
+    {"id": "M-E-R3-07", "required": True, "title": "CP8 frame budget checked after reading anatomy", "file": "emr-image/manifest.ts",
+     "find": "    frameStructure(h, sop);\n", "replace": "", "kills": ["TEST-E-02 manifest_sources R14"]},
+    {"id": "M-E-R3-05N", "required": True, "title": "CP9 non-finite declared spacing accepted", "file": "emr-image/manifest.ts",
+     "find": "    if (spacing !== null && (spacing.length !== 1 || !Number.isFinite(spacing[0]))) fail('geometry-spacing-tag');\n",
+     "replace": "", "kills": ["TEST-E-02 manifest_sources R15"]},
+    {"id": "M-E-V2-1", "required": True, "title": "D744 new facts still labelled as v1", "file": "emr-image/manifest.ts",
+     "find": "export const MG_RULE_VERSION = 'D744-2' as const;", "replace": "export const MG_RULE_VERSION = 'D735-1' as const;",
+     "kills": ["TEST-E-02 manifest_sources A5"]},
+    {"id": "M-E-V2-2", "required": True, "title": "declaration and fullness omitted from the content digest", "file": "emr-image/manifest.ts",
+     "find": "JSON.stringify({ formatVersion: 1, classificationRule, studyUid, managingInstitution, patient, objects, decoders, viewer })",
+     "replace": "JSON.stringify({ formatVersion: 1, classificationRule, studyUid, managingInstitution, patient, objects: objects.map(o => ({ ...o,"
+                " mammography: o.mammography ? { ...o.mammography, partialDeclaration: undefined, fullness: undefined } : null })), decoders, viewer })",
+     "kills": ["TEST-E-02 manifest_sources A5"]},
+    {"id": "M-E-V2-3", "required": True, "title": "every modifier conflicts with partial evidence", "file": "emr-image/manifest.ts",
+     "find": "partial = spotMag ? 'conflict' : 'yes';", "replace": "partial = modifier ? 'conflict' : 'yes';",
+     "kills": ["TEST-D744-V2-027"]},
+    {"id": "M-E-V2-4", "required": True, "title": "CID 4005 in the wrong container silently accepted", "file": "emr-image/manifest.ts",
+     "find": "if (flag === 'INVALID' || wrongContainer)", "replace": "if (flag === 'INVALID')",
+     "kills": ["TEST-D744-V2-028", "TEST-D744-V2-029", "TEST-D744-V2-030", "TEST-D744-V2-031"]},
+    {"id": "M-E-V2-5", "required": True, "title": "acquisition source references lost", "file": "emr-image/manifest.ts",
+     "find": "  (itemsOf(h, '00189507') ?? []).forEach((a, ai) => read(itemsOf(a, '00082112') ?? [], `XRay3DAcquisitionSequence[${ai}]/`));\n",
+     "replace": "", "kills": ["TEST-E-02 manifest_sources A6", "TEST-D744-V2-049"]},
+    {"id": "M-E-V2-6", "required": True, "title": "root derivation source references lost", "file": "emr-image/manifest.ts",
+     "find": "  (itemsOf(h, '00089124') ?? []).forEach((dv, di) => read(itemsOf(dv, '00082112') ?? [], `DerivationImageSequence[${di}]/`));\n",
+     "replace": "", "kills": ["TEST-E-02 manifest_sources A6", "TEST-D744-V2-050"]},
+    {"id": "M-E-V2-7", "required": True, "title": "non-string partial flag swallowed as empty", "file": "emr-image/manifest.ts",
+     "find": "  if (typeof e.Value[0] !== 'string') return 'INVALID';", "replace": "  if (typeof e.Value[0] !== 'string') return 'EMPTY';",
+     "kills": ["TEST-D744-V2-035", "TEST-D744-V2-036"]},
 ]
 
 TOP = re.compile(r"^(ok|not ok) (\d+) - (.*)$")
@@ -225,6 +276,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out")
     args = parser.parse_args()
+    # Preserve each raw process result alongside the aggregate, including failures that cannot count as a kill.
+    evidence = Path(args.out).parent if args.out else None
+    if evidence:
+        evidence.mkdir(parents=True, exist_ok=True)
+    def retain(name, stdout, stderr):
+        if evidence:
+            (evidence / (name + '.tap')).write_text(stdout, encoding='utf-8')
+            (evidence / (name + '.stderr.log')).write_text(stderr, encoding='utf-8')
     cases = declared()
     report = {"declared": cases, "baseline": None, "mutants": []}
     ok = True
@@ -232,6 +291,7 @@ def main():
         base = Path(temporary) / "baseline" / "src"
         copy_tree(base)
         code, text, stderr = run_against(base)
+        retain('baseline', text, stderr)
         results = parse_tap(text) if code is not None else {}
         # Collection is compared as a set: node reports cases in registration order, the declaration groups them by TEST-ID.
         matches = sorted(results) == sorted(cases) and not any(r.get("duplicate") for r in results.values())
@@ -267,6 +327,7 @@ def main():
                 continue
             path.write_text(original.replace(mutant["find"], mutant["replace"]), encoding="utf-8")
             code, text, stderr = run_against(source_dir, test_path)
+            retain(mutant['id'], text, stderr)
             results = parse_tap(text) if code is not None else {}
             collected = list(results)
             collected_all = sorted(collected) == sorted(cases) and not any(r.get("duplicate") for r in results.values())
