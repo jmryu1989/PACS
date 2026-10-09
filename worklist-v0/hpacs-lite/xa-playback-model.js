@@ -71,14 +71,17 @@
     return verifiedTimeline(source, offsets, { reference: 'content-time', frameDelay, frameDelayPresent: rawDelay !== undefined, origin: null, relative });
   }
 
-  /* DT per PS3.5 6.2: "YYYYMMDDHHMMSS[.F{1,6}][&ZZXX]" to milliseconds, fraction kept. Ordering frames needs the full
-     date and time to the second. Hour 00-23, minute 00-59, second 00-60 (60 only as a leap second, which closes 23:59
-     UTC on 30 June or 31 December); a real calendar date; the offset has 4 digits, minutes 00-59, lies within -1200 to
-     +1400 and is never -0000. Anything else is not a time, so the timeline is Unverified. */
-  function dateTime(v) {
-    const m = typeof v === 'string' && v.trim().match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(?:\.(\d{1,6}))?(?:([+-])(\d{2})(\d{2}))?$/);
+  /* DT per PS3.5 6.2: "YYYY[MM[DD[HH[MM[SS[.F{1,6}]]]]]][&ZZXX]", at most 26 characters. Only trailing ASCII SPACE
+     (U+0020) is padding; a leading or inner space, TAB, CR, LF, NBSP, NUL or BOM makes the value invalid and is never
+     repaired. Month 01-12, a real day, hour 00-23, minute 00-59, second 00-60 (60 only as a leap second, which closes
+     23:59 UTC on 30 June or 31 December); the offset has 4 digits, minutes 00-59, lies within -1200 to +1400 and is
+     never -0000. A legal DT coarser than the second cannot time frames and is reported as such, not filled in. */
+  function parseDT(text) {
+    const m = text.match(/^(\d{4})(\d{2})?(\d{2})?(\d{2})?(\d{2})?(\d{2})?(?:\.(\d{1,6}))?(?:([+-])(\d{2})(\d{2}))?$/);
     if (!m) return null;
-    const [y, mo, d, h, mi, s] = m.slice(1, 7).map(Number);
+    for (let i = 3; i <= 6; i++) if (m[i] !== undefined && m[i - 1] === undefined) return null;
+    if (m[7] !== undefined && m[6] === undefined) return null;
+    const [y, mo = 1, d = 1, h = 0, mi = 0, s = 0] = m.slice(1, 7).map(n => n === undefined ? undefined : Number(n));
     if (mo < 1 || mo > 12 || d < 1 || h > 23 || mi > 59 || s > 60) return null;
     const day = new Date(0);
     day.setUTCFullYear(y, mo - 1, d); day.setUTCHours(h, mi, Math.min(s, 59), 0);
@@ -92,12 +95,22 @@
     }
     const utc = day.getTime() - zone * 60000;
     if (s === 60) {
+      if (m[6] === undefined) return null;
       const at = new Date(utc);
       const end = (at.getUTCMonth() === 5 && at.getUTCDate() === 30) || (at.getUTCMonth() === 11 && at.getUTCDate() === 31);
       if (!end || at.getUTCHours() !== 23 || at.getUTCMinutes() !== 59) return null;
     }
+    if (m[6] === undefined) return { coarse: true };
     // Whole UTC seconds and the fraction apart, so a difference keeps its microseconds.
     return { seconds: (utc / 1000) + (s === 60 ? 1 : 0), fraction: m[7] ? Number('0.' + m[7]) * 1000 : 0, zoned: !!m[8], leap: s === 60 };
+  }
+  function dateTime(v) {
+    if (typeof v !== 'string') return null;
+    let end = v.length;
+    while (end > 0 && v.charCodeAt(end - 1) === 0x20) end--;
+    const text = v.slice(0, end);
+    if (!text || v.length > 26 || !/^[0-9.+-]+$/.test(text)) return null;
+    return parseDT(text);
   }
   const between = (a, b) => (a.seconds - b.seconds) * 1000 + (a.fraction - b.fraction);
 
@@ -111,13 +124,16 @@
       const raw = items.map(item => one(one(item, TAG.frameContent), tag));
       if (raw.some(v => v === undefined)) continue;
       const times = raw.map(dateTime);
-      if (times.some(t => !t) || new Set(times.map(t => t.zoned)).size !== 1) return unverified('content-time');
+      if (times.some(t => !t)) return unverified('content-time');
+      // Legal, but too coarse to time frames: an invalid DT and an unsupported precision are different reasons.
+      if (times.some(t => t.coarse)) return unverified('content-precision');
+      if (new Set(times.map(t => t.zoned)).size !== 1) return unverified('content-time');
       // A leap second is a legal DT, but intervals across it are unknowable without a leap-second table.
       if (times.some(t => t.leap)) return unverified('leap-second');
       const offsets = times.map(t => between(t, times[0]));
       for (let i = 1; i < frames; i++) if (!(offsets[i] > offsets[i - 1]) || !Number.isFinite(offsets[i])) return unverified('content-order');
       return verifiedTimeline('frame-content', offsets, { reference: 'frame-content', attribute: tag, frameDelay: null,
-        frameDelayPresent: false, origin: raw[0].trim(), relative: offsets.slice() });
+        frameDelayPresent: false, origin: raw[0], relative: offsets.slice() });
     }
     return unverified('content-time');
   }
@@ -129,9 +145,10 @@
     return timing.verified ? 'time' : 'frames';
   }
 
-  /* Conservative per-frame reservation: the decoder output reserved at 4 bytes per sample (the pinned renderer may
-     scale stored values to Float32) plus one RGBA8 staging copy for the texture, both with 4-byte row alignment.
-     Missing, inconsistent or overflowing pixel attributes never become a successful reservation. */
+  /* Conservative per-frame reservation, in two parts: the decoded payload at 4 bytes per sample (the pinned renderer may
+     scale stored values to Float32), shared by every viewport of the same opening, and one RGBA8 render surface, which
+     every viewport drawing the frame pays for itself; both with 4-byte row alignment. Missing, inconsistent or
+     overflowing pixel attributes never become a successful reservation. */
   function frameBytes(json) {
     const rows = integer(one(json, TAG.rows)), columns = integer(one(json, TAG.columns)), samples = integer(one(json, TAG.samples));
     const allocated = integer(one(json, TAG.bitsAllocated)), stored = integer(one(json, TAG.bitsStored));
@@ -140,9 +157,9 @@
     if (![1, 3].includes(samples) || ![8, 16, 32].includes(allocated) || !(stored >= 1 && stored <= allocated) ||
         high !== stored - 1 || ![0, 1].includes(representation)) return refuse('pixel-layout');
     const align = n => Math.ceil(n / 4) * 4;
-    const bytes = rows * align(columns * samples * 4) + rows * align(columns * 4);
-    if (!Number.isSafeInteger(bytes) || bytes <= 0) return refuse('pixel-size');
-    return Object.freeze({ ok: true, bytes, rows, columns, samples, bitsAllocated: allocated });
+    const payload = rows * align(columns * samples * 4), surface = rows * align(columns * 4), bytes = payload + surface;
+    if (![payload, surface, bytes].every(n => Number.isSafeInteger(n) && n > 0)) return refuse('pixel-size');
+    return Object.freeze({ ok: true, bytes, payload, surface, rows, columns, samples, bitsAllocated: allocated });
   }
 
   function describe(json) {
@@ -163,7 +180,8 @@
     const subtractionRecommended = String(one(json, TAG.viewingMode) || '').trim().toUpperCase() === 'SUB' ||
       (values(json, TAG.maskSubtraction) || []).length > 0;
     return Object.freeze({ ok: true, kind, sopClass, study, series, sop, frames, timing, playback,
-      frameBytes: reservation.ok ? reservation.bytes : null, reservation, subtractionRecommended });
+      frameBytes: reservation.ok ? reservation.bytes : null, payloadBytes: reservation.ok ? reservation.payload : null,
+      surfaceBytes: reservation.ok ? reservation.surface : null, reservation, subtractionRecommended });
   }
 
   /* One display set -> one playback owner. XA never goes to the generic fixed-rate cine: a still is a still, a damaged
@@ -246,72 +264,135 @@
     return Math.max(1, Math.min(limits.ahead, Math.floor(share / size) - 1));
   }
 
-  /* One budget for every XA viewport of the document. A reservation is taken before the fetch starts and is keyed by
-     the source frame, so two viewports of the same frame share one reservation and one decode. A viewport only ever
-     releases its own hold; a frame another viewport holds or pins stays. A load nobody wants any more, or one that timed
-     out, is `retiring`: asking it to stop is not the same as it having stopped, so its bytes and its decode slot stay
-     counted until the load itself ends (drop), and nobody can join it meanwhile. A failed load ends the reservation. */
-  function createBudget(limits = LIMITS) {
-    const entries = new Map();
-    let bytes = 0, loading = 0, peakBytes = 0, peakLoading = 0, peakPrepared = 0;
+  /* The one ownership ledger of a document's XA viewports (consult D732 section 2). A resource R is one incarnation of
+     one source frame for one opening scope, with a token that is never reused; consumers hold leases on it, draws and
+     front surfaces pin it. Everything is addressed by token: a frame key alone never names a resource, so an old
+     callback can only ever end its own incarnation.
+       bytes    = payload of every resource not yet given back (admitted, loading, decoded, draining)
+                  + the surface of every draw and front that the renderer has not yet let go
+       loading  = decode permits: admitted resources and supplies whose promise has not settled
+       prepared = resources not yet given back; retiring = cancelled loads still running + drains not yet acknowledged
+     Cancelling ends nobody's wait for the memory: a cancelled load keeps its bytes and permit until it settles, a release
+     keeps its bytes until it is acknowledged (a failed release keeps them for good). Under pressure only a decoded
+     resource with no lease, no draw and no front may be reclaimed; a drawing frame, a shown frame or another viewport's
+     frame never is. Sharing is only within the same complete opening scope, never with a retiring or draining one. */
+  function createLedger(limits = LIMITS) {
+    const resources = new Map(), byScope = new Map(), surfaces = new Map();
+    let bytes = 0, permits = 0, peakBytes = 0, peakLoading = 0, peakPrepared = 0;
     const no = reason => ({ ok: false, reason });
-    function reserve(owner, key, size) {
-      if (!owner || typeof key !== 'string' || !key || !Number.isSafeInteger(size) || size <= 0) return no('invalid');
-      const held = entries.get(key);
+    const exact = t => (t && resources.get(t)) || null;
+    const peak = () => { peakBytes = Math.max(peakBytes, bytes); peakLoading = Math.max(peakLoading, permits); peakPrepared = Math.max(peakPrepared, resources.size); };
+    function gone(held) {
+      resources.delete(held.token);
+      if (byScope.get(held.id) === held) byScope.delete(held.id);
+      bytes -= held.payload;
+      if (held.permit) { held.permit = false; permits--; }
+      held.state = 'gone';
+    }
+    function admit({ lease, scope, key, payload }) {
+      if (!lease || typeof scope !== 'string' || !scope || typeof key !== 'string' || !key || !Number.isSafeInteger(payload) || payload <= 0) return no('invalid');
+      const id = JSON.stringify([scope, key]);
+      const held = byScope.get(id);
       if (held) {
-        if (held.state === 'retiring') return no('busy');
-        if (held.size !== size) return no('invalid');
-        held.owners.add(owner);
-        return { ok: true, shared: true, state: held.state };
+        if (held.retiring || held.state === 'draining') return no('busy');
+        if (held.payload !== payload) return no('invalid');
+        held.leases.add(lease);
+        return { ok: true, resource: held.token, joined: true, state: held.state };
       }
-      if (size > limits.bytes) return no('too-large');
-      if (bytes + size > limits.bytes) return no('bytes');
-      if (entries.size >= limits.prepared) return no('prepared');
-      if (loading >= limits.decodes) return no('decodes');
-      entries.set(key, { size, owners: new Set([owner]), pins: new Set(), state: 'loading' });
-      bytes += size; loading++;
-      peakBytes = Math.max(peakBytes, bytes); peakLoading = Math.max(peakLoading, loading); peakPrepared = Math.max(peakPrepared, entries.size);
-      return { ok: true, shared: false, state: 'loading' };
+      if (payload > limits.bytes) return no('too-large');
+      if (bytes + payload > limits.bytes) return no('bytes');
+      if (resources.size >= limits.prepared) return no('prepared');
+      if (permits >= limits.decodes) return no('decodes');
+      const token = Object.freeze({ scope, key });
+      const created = { token, id, payload, state: 'admitted', retiring: false, permit: true, releaseFailed: false,
+        leases: new Set([lease]), draws: new Set(), displays: new Set() };
+      resources.set(token, created); byScope.set(id, created);
+      bytes += payload; permits++; peak();
+      return { ok: true, resource: token, joined: false, state: 'admitted' };
     }
-    function ready(key) {
-      const held = entries.get(key);
-      if (held?.state !== 'loading') return false;
-      held.state = 'ready'; loading--;
+    // The source call really happened.
+    function start(t) { const held = exact(t); if (held?.state !== 'admitted') return false; held.state = 'loading'; return true; }
+    // Admitted but never called (the gate refused at the call): the provisional reservation simply comes back.
+    function abandon(t) { const held = exact(t); if (held?.state !== 'admitted') return false; gone(held); return true; }
+    // The supply promise settled: the decoder has stopped. decoded | release (nobody wants the image, or the image is
+    // refused as not the requested frame: its bytes stay until the source takes it back) | failed (no image at all).
+    function settle(t, image, refused = false) {
+      const held = exact(t);
+      if (!held || held.state !== 'loading') return null;
+      held.permit = false; permits--;
+      if (!image) { gone(held); return 'failed'; }
+      if (held.retiring || refused || !held.leases.size) { held.state = 'draining'; return 'release'; }
+      held.state = 'decoded';
+      return 'decoded';
+    }
+    // kept | unstarted | retire (still loading: the abort is asked for, the memory stays) | unheld (decoded, reclaimable)
+    function leave(lease, t) {
+      const held = exact(t);
+      if (!held || !held.leases.delete(lease)) return null;
+      if (held.leases.size || held.draws.size || held.displays.size) return 'kept';
+      if (held.state === 'admitted') return 'unstarted';
+      if (held.state === 'loading') {
+        held.retiring = true;
+        return 'retire';
+      }
+      return held.state === 'decoded' ? 'unheld' : 'kept';
+    }
+    const reclaimable = h => !!h && h.state === 'decoded' && !h.leases.size && !h.draws.size && !h.displays.size;
+    function reclaim(t) { const held = exact(t); if (!reclaimable(held)) return false; held.state = 'draining'; return true; }
+    // The source acknowledged giving the image back; a failed release keeps its bytes counted.
+    function released(t, ok = true) {
+      const held = exact(t);
+      if (!held || held.state !== 'draining') return false;
+      if (!ok) { held.releaseFailed = true; return false; }
+      gone(held);
       return true;
     }
-    // The frame's load has ended (or a ready frame left the last viewport): only now do its bytes and slot come back.
-    function drop(key) {
-      const held = entries.get(key);
-      if (!held) return false;
-      entries.delete(key); bytes -= held.size;
-      if (held.state === 'loading' || held.state === 'retiring') loading--;
+    // A draw pins its decoded resource and reserves its own surface before the renderer allocates it.
+    function beginDraw({ resource: t, lease, owner, surface }) {
+      const held = exact(t);
+      if (!held || held.state !== 'decoded' || !held.leases.has(lease) || !owner || !Number.isSafeInteger(surface) || surface <= 0) return no('invalid');
+      const cost = surface;
+      if (bytes + cost > limits.bytes) return no('bytes');
+      const draw = Object.freeze({ key: held.token.key });
+      surfaces.set(draw, { token: draw, resource: held, owner, cost, kind: 'draw', failed: false });
+      held.draws.add(draw); bytes += cost; peak();
+      return { ok: true, draw };
+    }
+    // The verified draw becomes the owner's front; the previous front is detached and returned for its surface release.
+    function publish(draw, owner) {
+      const s = surfaces.get(draw);
+      if (!s || s.kind !== 'draw' || s.owner !== owner) return { ok: false, previous: null };
+      const previous = [...surfaces.values()].find(x => x.kind === 'front' && x.owner === owner) || null;
+      s.kind = 'front'; s.resource.draws.delete(draw); s.resource.displays.add(draw);
+      if (previous) { previous.kind = 'detached'; previous.resource.displays.delete(previous.token); }
+      return { ok: true, previous: previous ? previous.token : null };
+    }
+    // The owner's front leaves the screen without a successor (closed under its cover).
+    function detach(draw) { const s = surfaces.get(draw); if (!s || s.kind !== 'front') return false; s.kind = 'detached'; s.resource.displays.delete(draw); return true; }
+    const front = owner => [...surfaces.values()].find(x => x.kind === 'front' && x.owner === owner)?.token || null;
+    // A draw that ended unpublished, or a detached front, whose surface the renderer has really let go.
+    function drop(draw, ok = true) {
+      const s = surfaces.get(draw);
+      if (!s || s.kind === 'front') return false;
+      if (!ok) { s.failed = true; return false; }
+      surfaces.delete(draw); bytes -= s.cost;
+      s.resource.draws.delete(draw); s.resource.displays.delete(draw);
       return true;
     }
-    // true when this was the last holder. A frame still loading then retires; a ready frame is gone.
-    function release(owner, key) {
-      const held = entries.get(key);
-      if (!held || !held.owners.has(owner)) return false;
-      held.owners.delete(owner); held.pins.delete(owner);
-      if (held.owners.size) return false;
-      if (held.state === 'loading') { held.state = 'retiring'; return true; }
-      return drop(key);
-    }
-    // A timed-out load: every holder is let go at once, the reservation stays until the load ends.
-    function retire(key) {
-      const held = entries.get(key);
-      if (!held || held.state === 'ready') return false;
-      held.owners.clear(); held.pins.clear(); held.state = 'retiring';
-      return true;
-    }
-    function pin(owner, key) { const held = entries.get(key); if (!held?.owners.has(owner)) return false; held.pins.add(owner); return true; }
-    function unpin(owner, key) { const held = entries.get(key); return !!held && held.pins.delete(owner); }
-    const holds = (owner, key) => !!entries.get(key)?.owners.has(owner);
-    const pinned = key => (entries.get(key)?.pins.size || 0) > 0;
-    const state = key => entries.get(key)?.state || null;
-    const snapshot = () => ({ bytes, loading, prepared: entries.size, retiring: [...entries.values()].filter(e => e.state === 'retiring').length,
-      peakBytes, peakLoading, peakPrepared, limit: limits.bytes, decodes: limits.decodes });
-    return Object.freeze({ reserve, ready, drop, release, retire, pin, unpin, holds, pinned, state, snapshot, limits });
+    const holds = (lease, t) => !!exact(t)?.leases.has(lease);
+    const state = t => exact(t)?.state || null;
+    const retiring = t => !!exact(t)?.retiring;
+    const reclaimables = () => [...resources.values()].filter(reclaimable).map(h => h.token);
+    const snapshot = () => ({ bytes, loading: permits, prepared: resources.size,
+      retiring: [...resources.values()].filter(h => (h.retiring && h.state === 'loading') || h.state === 'draining').length,
+      surfaces: surfaces.size, peakBytes, peakLoading, peakPrepared, limit: limits.bytes, decodes: limits.decodes });
+    return Object.freeze({ admit, start, abandon, settle, leave, reclaim, released, beginDraw, publish, detach, front, drop,
+      holds, state, retiring, reclaimables, snapshot, limits });
   }
+
+  // The sharing scope of a frame: the complete opening (and session when the host gives one) plus the source revision.
+  const scopeKey = (opening, revision = '') => JSON.stringify([opening?.account, opening?.institution, opening?.session ?? null,
+    opening?.study, opening?.series, opening?.sop, opening?.sequence, revision]);
 
   /* An opening is the account, the institution, the object (Study/Series/SOP) and the opening sequence; when the host
      also gives a login session, that too. Each must be present: a missing field never matches by being equally missing.
@@ -358,6 +439,6 @@
   }
 
   const api = Object.freeze({ SOP, LIMITS, MODES, describe, route, frame, step, speedOptions, defaultSpeed, interval,
-    windowPlan, aheadFor, createBudget, sameOpening, openingMatches, failureKind, createCoverage });
+    windowPlan, aheadFor, createLedger, scopeKey, sameOpening, openingMatches, failureKind, createCoverage });
   if (typeof module === 'object' && module.exports) module.exports = api; else root.KinXaPlaybackModel = api;
 })(globalThis);

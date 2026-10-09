@@ -62,26 +62,35 @@ process.stdin.on('end', () => {
   });
   process.stdout.write(JSON.stringify(out));
 });
-// Forward play first to last through the shared budget: window reserve -> decode -> show -> give back.
+// Forward play first to last through the one ledger: window admit -> load settles -> draw -> publish -> give back.
 function traverse(d) {
-  const budget = M.createBudget(M.LIMITS), owner = {}, held = new Set(), shown = [];
+  const ledger = M.createLedger(M.LIMITS), owner = {}, leases = new Map(), shown = [];
   const ahead = M.aheadFor({ frameBytes: d.frameBytes, owners: 1 });
   let index = 0, direction = 1, notReady = 0;
   for (let n = 0; n < d.frames; n++) {
     const plan = M.windowPlan({ index, first: 0, last: d.frames - 1, mode: 'forward', direction, loop: false, ahead });
-    const keys = new Set(plan.map(i => M.frame(d, i).key));
-    for (const key of [...held]) if (!keys.has(key)) { budget.release(owner, key); held.delete(key); }
-    for (let pass = 0; pass < 3; pass++) {
-      for (const i of plan) { const key = M.frame(d, i).key; if (held.has(key)) continue; if (!budget.reserve(owner, key, d.frameBytes).ok) break; held.add(key); }
-      for (const key of held) budget.ready(key);
+    for (const [i, held] of [...leases]) if (!plan.includes(i)) { ledger.leave(held.lease, held.resource); leases.delete(i); }
+    for (const t of ledger.reclaimables()) { ledger.reclaim(t); ledger.released(t); }
+    for (const i of plan) {
+      if (leases.has(i)) continue;
+      const lease = {}, r = ledger.admit({ lease, scope: 'scope', key: M.frame(d, i).key, payload: d.payloadBytes });
+      if (!r.ok) break;
+      leases.set(i, { lease, resource: r.resource });
+      if (!r.joined) { ledger.start(r.resource); ledger.settle(r.resource, true); }
     }
-    if (budget.state(M.frame(d, index).key) !== 'ready') notReady++;
+    const held = leases.get(index);
+    const draw = held && ledger.state(held.resource) === 'decoded'
+      ? ledger.beginDraw({ resource: held.resource, lease: held.lease, owner, surface: d.surfaceBytes }) : { ok: false };
+    if (!draw.ok) { notReady++; break; }
+    const { previous } = ledger.publish(draw.draw, owner);
+    if (previous) ledger.drop(previous);
+    ledger.leave(held.lease, held.resource); leases.delete(index);
     shown.push(index);
     const s = M.step({ index, first: 0, last: d.frames - 1, mode: 'forward', direction, loop: false });
     if (s.stop) break;
     index = s.next; direction = s.direction;
   }
-  return { shown: shown.length, first: shown[0], last: shown.at(-1), ordered: shown.every((v, i) => v === i), notReady, ...budget.snapshot() };
+  return { shown: shown.length, first: shown[0], last: shown.at(-1), ordered: shown.every((v, i) => v === i), notReady, ...ledger.snapshot() };
 }
 '''
 

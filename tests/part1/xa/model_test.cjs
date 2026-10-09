@@ -232,29 +232,43 @@ test('XA03 reject: an invalid range or play state is refused, never clamped into
   assert.throws(() => M.createCoverage(4, 2), RangeError);
 });
 
+// Forward play through the ledger exactly as a viewport uses it: lease the window, start and settle each supply,
+// draw and publish the current frame, detach the previous front, let go of frames that left the window.
 function traverse(d, owners = 1) {
-  const budget = M.createBudget(M.LIMITS), owner = {}, held = new Set(), shown = [];
+  const ledger = M.createLedger(M.LIMITS), scope = 'scope', owner = {}, leases = new Map(), shown = [];
   const ahead = M.aheadFor({ frameBytes: d.frameBytes, owners });
   let index = 0, direction = 1, notReady = 0;
+  const reclaim = () => { for (const t of ledger.reclaimables()) { ledger.reclaim(t); ledger.released(t); } };
   for (let n = 0; n < d.frames; n++) {
     const plan = M.windowPlan({ index, first: 0, last: d.frames - 1, mode: 'forward', direction, loop: false, ahead });
-    for (const key of [...held]) if (!plan.some(i => M.frame(d, i).key === key)) { budget.release(owner, key); held.delete(key); }
-    for (let pass = 0; pass < 3; pass++) {
-      for (const i of plan) {
-        const key = M.frame(d, i).key;
-        if (held.has(key)) continue;
-        if (!budget.reserve(owner, key, d.frameBytes).ok) break;
-        held.add(key);
-      }
-      for (const key of held) budget.ready(key);
+    for (const [i, held] of [...leases]) if (!plan.includes(i)) { ledger.leave(held.lease, held.resource); leases.delete(i); }
+    reclaim();
+    for (const i of plan) {
+      if (leases.has(i)) continue;
+      const lease = {}, r = ledger.admit({ lease, scope, key: M.frame(d, i).key, payload: d.payloadBytes });
+      if (!r.ok) break;
+      leases.set(i, { lease, resource: r.resource });
+      if (!r.joined) { ledger.start(r.resource); ledger.settle(r.resource, true); }
     }
-    if (budget.state(M.frame(d, index).key) !== 'ready') notReady++;
+    const held = leases.get(index);
+    if (!held || ledger.state(held.resource) !== 'decoded') { notReady++; break; }
+    const draw = ledger.beginDraw({ resource: held.resource, lease: held.lease, owner, surface: d.surfaceBytes });
+    if (!draw.ok) { notReady++; break; }
+    const { previous } = ledger.publish(draw.draw, owner);
+    if (previous) ledger.drop(previous);
+    ledger.leave(held.lease, held.resource); leases.delete(index);
     shown.push(index);
     const s = M.step({ index, first: 0, last: d.frames - 1, mode: 'forward', direction, loop: false });
     if (s.stop) break;
     index = s.next; direction = s.direction;
   }
-  return { shown, notReady, snapshot: budget.snapshot() };
+  return { shown, notReady, snapshot: ledger.snapshot() };
+}
+const ledgerOf = (bytes, decodes = 4, prepared = 500) => M.createLedger({ bytes, decodes, prepared, ahead: 8 });
+// Admit one consumer lease and return what the ledger gave it.
+function take(ledger, key, payload, { scope = 'A', lease = {} } = {}) {
+  const r = ledger.admit({ lease, scope, key, payload });
+  return { ...r, lease };
 }
 
 test('XA04 allow: a 601-frame run and a run over 128 MiB play first to last inside one bounded budget', () => {
@@ -262,6 +276,7 @@ test('XA04 allow: a 601-frame run and a run over 128 MiB play first to last insi
   assert.equal(long.frames, 601, 'XA-X13: a 601-frame run keeps all 601 frames; nothing is cut at 500');
   assert.equal(M.route(long).path, 'xa', 'XA-X13: a 601-frame run keeps all 601 frames; nothing is cut at 500');
   assert.equal(long.frameBytes, 512 * 512 * 8, 'Float32 decode + RGBA8 staging per mono pixel');
+  assert.deepEqual([long.payloadBytes, long.surfaceBytes], [512 * 512 * 4, 512 * 512 * 4], 'shared payload and per-viewport surface');
   assert.ok(long.frameBytes * long.frames > M.LIMITS.bytes, 'the run is larger than the budget');
   const a = traverse(long);
   assert.deepEqual(a.shown, Array.from({ length: 601 }, (_, i) => i), 'XA-X13: a 601-frame run keeps all 601 frames; nothing is cut at 500');
@@ -279,71 +294,261 @@ test('XA04 allow: a 601-frame run and a run over 128 MiB play first to last insi
 });
 
 test('XA04 reject: in-flight frames count, decoding stays at four, too-large or unreadable frames never reserve, no viewport frees another\'s frame', () => {
-  const small = M.createBudget({ bytes: 10, decodes: 4, prepared: 500, ahead: 8 });
-  const owner = {};
-  assert.equal(small.reserve(owner, 'a', 4).ok, true);
-  assert.equal(small.reserve(owner, 'b', 4).ok, true);
+  const small = ledgerOf(10);
+  const a = take(small, 'a', 4), b = take(small, 'b', 4);
+  assert.deepEqual([a.ok, b.ok], [true, true]);
+  small.start(a.resource);
   assert.equal(small.snapshot().bytes, 8, 'XA-X7: a frame still loading holds its reservation');
-  assert.deepEqual(small.reserve(owner, 'c', 4), { ok: false, reason: 'bytes' }, 'XA-X7: a frame still loading holds its reservation');
-  const wide = M.createBudget({ bytes: 1000, decodes: 4, prepared: 500, ahead: 8 });
-  for (const key of ['1', '2', '3', '4']) assert.equal(wide.reserve(owner, key, 1).ok, true);
-  assert.deepEqual(wide.reserve(owner, '5', 1), { ok: false, reason: 'decodes' }, 'XA-X8: no more than four frames decode at once');
-  wide.ready('1');
-  assert.equal(wide.reserve(owner, '5', 1).ok, true, 'a finished decode frees a decode slot');
-  const few = M.createBudget({ bytes: 1000, decodes: 10, prepared: 3, ahead: 8 });
-  for (const key of ['x', 'y', 'z']) few.reserve(owner, key, 1);
-  assert.deepEqual(few.reserve(owner, 'w', 1), { ok: false, reason: 'prepared' });
-  assert.deepEqual(M.createBudget().reserve(owner, 'huge', M.LIMITS.bytes + 1), { ok: false, reason: 'too-large' });
-  for (const size of [0, -1, 1.5, NaN, null]) assert.equal(M.createBudget().reserve(owner, 'k', size).ok, false, String(size));
+  assert.deepEqual(take(small, 'c', 4).reason, 'bytes', 'XA-X7: a frame still loading holds its reservation');
+  const wide = ledgerOf(1000);
+  const four = ['1', '2', '3', '4'].map(key => take(wide, key, 1));
+  assert.ok(four.every(r => r.ok));
+  assert.equal(take(wide, '5', 1).reason, 'decodes', 'XA-X8: no more than four frames decode at once');
+  wide.start(four[0].resource); wide.settle(four[0].resource, true);
+  assert.equal(take(wide, '5', 1).ok, true, 'a settled decode frees a decode permit');
+  const few = ledgerOf(1000, 10, 3);
+  for (const key of ['x', 'y', 'z']) take(few, key, 1);
+  assert.equal(take(few, 'w', 1).reason, 'prepared');
+  assert.equal(take(ledgerOf(M.LIMITS.bytes), 'huge', M.LIMITS.bytes + 1).reason, 'too-large');
+  for (const size of [0, -1, 1.5, NaN, null]) assert.equal(take(ledgerOf(1000), 'k', size).ok, false, String(size));
   assert.equal(M.route(M.describe(fixed(8, 33, { rows: 8192, cols: 4096 }))).reason, 'frame-too-large');
   const noRows = fixed(8, 33); delete noRows['00280010'];
   assert.deepEqual([M.describe(noRows).frameBytes, M.route(M.describe(noRows)).path], [null, 'refused']);
-  // Two viewports of the same frame share one reservation; B letting go never frees what A still shows.
-  const budget = M.createBudget(), A = {}, B = {};
-  assert.deepEqual(budget.reserve(A, 'sop#7', 100), { ok: true, shared: false, state: 'loading' });
-  assert.deepEqual(budget.reserve(B, 'sop#7', 100), { ok: true, shared: true, state: 'loading' });
-  assert.equal(budget.snapshot().bytes, 100, 'one decode, one reservation');
-  assert.equal(budget.ready('sop#7'), true);
-  assert.equal(budget.release(B, 'sop#7'), false, 'XA-X9: another viewport\'s frame stays when one viewport lets go');
-  assert.equal(budget.holds(A, 'sop#7'), true, 'XA-X9: another viewport\'s frame stays when one viewport lets go');
-  assert.equal(budget.snapshot().bytes, 100, 'XA-X9: another viewport\'s frame stays when one viewport lets go');
-  assert.equal(budget.release(B, 'sop#7'), false, 'a viewport cannot release what it does not hold');
-  assert.equal(budget.release(A, 'sop#7'), true);
-  assert.equal(budget.snapshot().bytes, 0);
-  budget.reserve(A, 'sop#8', 50); budget.reserve(B, 'sop#8', 50);
-  assert.equal(budget.drop('sop#8'), true, 'a failed load ends the reservation for every holder');
-  assert.equal(budget.holds(A, 'sop#8') || budget.holds(B, 'sop#8'), false);
+  // Two viewports of the same opening share one reservation; B letting go never frees what A still holds.
+  const ledger = ledgerOf(1000), A = take(ledger, 'sop#7', 100), B = take(ledger, 'sop#7', 100);
+  assert.deepEqual([A.joined, B.joined, B.resource === A.resource, ledger.snapshot().bytes], [false, true, true, 100], 'one decode, one reservation');
+  ledger.start(A.resource);
+  assert.equal(ledger.leave(B.lease, B.resource), 'kept', 'XA-X9: another viewport\'s frame stays when one viewport lets go');
+  assert.equal(ledger.holds(A.lease, A.resource), true, 'XA-X9: another viewport\'s frame stays when one viewport lets go');
+  assert.equal(ledger.retiring(A.resource), false, 'XA-X9: another viewport\'s frame stays when one viewport lets go');
+  assert.equal(ledger.leave(B.lease, B.resource), null, 'a viewport cannot release what it does not hold');
+  ledger.settle(A.resource, true);
+  assert.equal(ledger.leave(A.lease, A.resource), 'unheld');
+  assert.deepEqual([ledger.reclaim(A.resource), ledger.released(A.resource), ledger.snapshot().bytes], [true, true, 0]);
+  const C = take(ledger, 'sop#8', 50), D = take(ledger, 'sop#8', 50);
+  ledger.start(C.resource);
+  assert.equal(ledger.settle(C.resource, false), 'failed', 'a failed load ends the reservation for every holder');
+  assert.deepEqual([ledger.holds(C.lease, C.resource), ledger.holds(D.lease, D.resource), ledger.snapshot().bytes], [false, false, 0]);
 });
 
 test('XA04 reject: a cancelled or timed-out load keeps its bytes and decode slot until the load itself ends, and nobody joins it', () => {
-  const A = {}, B = {};
-  const small = M.createBudget({ bytes: 10, decodes: 4, prepared: 500, ahead: 8 });
-  small.reserve(A, 'a', 4);
-  assert.equal(small.release(A, 'a'), true, 'A was the last holder');
+  const small = ledgerOf(10);
+  const a = take(small, 'a', 4);
+  small.start(a.resource);
+  assert.equal(small.leave(a.lease, a.resource), 'retire', 'A was the last holder of a running load');
   assert.equal(small.snapshot().bytes, 4, 'XA-X16: a cancelled load still decoding keeps its reservation until it ends');
-  assert.equal(small.state('a'), 'retiring', 'XA-X16: a cancelled load still decoding keeps its reservation until it ends');
-  small.reserve(A, 'b', 4);
-  assert.deepEqual(small.reserve(A, 'c', 4), { ok: false, reason: 'bytes' }, 'XA-X16: a cancelled load still decoding keeps its reservation until it ends');
-  assert.deepEqual(small.reserve(B, 'a', 4), { ok: false, reason: 'busy' }, 'an ending load cannot be joined or restarted');
-  assert.equal(small.ready('a'), false, 'a late answer of a cancelled load does not become a held frame');
-  assert.equal(small.drop('a'), true, 'the load has ended');
-  assert.equal(small.reserve(A, 'c', 4).ok, true);
+  assert.equal(small.state(a.resource), 'loading', 'XA-X16: a cancelled load still decoding keeps its reservation until it ends');
+  take(small, 'b', 4);
+  assert.equal(take(small, 'c', 4).reason, 'bytes', 'XA-X16: a cancelled load still decoding keeps its reservation until it ends');
+  assert.equal(take(small, 'a', 4).reason, 'busy', 'an ending load cannot be joined or restarted');
+  assert.equal(small.settle(a.resource, true), 'release', 'a late image of a cancelled load is given back, never held');
+  assert.equal(small.snapshot().bytes, 8, 'until the release is acknowledged the bytes stay');
+  assert.equal(small.released(a.resource), true);
+  assert.equal(take(small, 'c', 4).ok, true);
   assert.equal(small.snapshot().bytes, 8);
-  // Many cancels in flight never open more decode slots than four.
-  const slots = M.createBudget({ bytes: 1000, decodes: 4, prepared: 500, ahead: 8 });
-  for (const key of ['1', '2', '3', '4']) { slots.reserve(A, key, 1); slots.release(A, key); }
-  assert.deepEqual(slots.snapshot().loading, 4);
-  assert.deepEqual(slots.reserve(A, '5', 1), { ok: false, reason: 'decodes' }, 'XA-X16: a cancelled load still decoding keeps its reservation until it ends');
-  slots.drop('1');
-  assert.equal(slots.reserve(A, '5', 1).ok, true);
-  // A timeout lets every holder go at once; the reservation stays until the load really ends.
-  const timed = M.createBudget({ bytes: 100, decodes: 4, prepared: 500, ahead: 8 });
-  timed.reserve(A, 't', 30); timed.reserve(B, 't', 30);
-  assert.equal(timed.retire('t'), true);
-  assert.deepEqual([timed.holds(A, 't'), timed.holds(B, 't'), timed.snapshot().bytes, timed.snapshot().loading, timed.snapshot().retiring], [false, false, 30, 1, 1]);
-  assert.equal(timed.release(A, 't'), false, 'nobody holds a retiring load any more');
-  timed.drop('t');
-  assert.deepEqual([timed.snapshot().bytes, timed.snapshot().loading], [0, 0]);
+  // Many cancels in flight never open more decode permits than four.
+  const slots = ledgerOf(1000);
+  const runs = ['1', '2', '3', '4'].map(key => { const r = take(slots, key, 1); slots.start(r.resource); slots.leave(r.lease, r.resource); return r; });
+  assert.deepEqual([slots.snapshot().loading, slots.snapshot().retiring], [4, 4]);
+  assert.equal(take(slots, '5', 1).reason, 'decodes', 'XA-X16: a cancelled load still decoding keeps its reservation until it ends');
+  slots.settle(runs[0].resource, false);
+  assert.equal(take(slots, '5', 1).ok, true);
+  // An admitted resource whose source was never called is simply abandoned: nothing to release.
+  const never = take(ledgerOf(100), 'n', 30);
+  assert.equal(never.ok, true);
+});
+
+test('B05 model: an old incarnation\'s duplicate settle, leave or release never touches the new resource of the same frame', () => {
+  const ledger = ledgerOf(100);
+  const old = take(ledger, 'sop#1', 10);
+  ledger.start(old.resource); ledger.leave(old.lease, old.resource);
+  assert.equal(ledger.settle(old.resource, true), 'release');
+  assert.equal(ledger.snapshot().bytes, 10, 'the old release is not acknowledged yet: its bytes stay');
+  assert.equal(take(ledger, 'sop#1', 10).reason, 'busy', 'the same frame waits while the old one drains');
+  ledger.released(old.resource);
+  const fresh = take(ledger, 'sop#1', 10);
+  assert.equal(fresh.ok, true);
+  assert.notEqual(fresh.resource, old.resource, 'a new incarnation has a new token');
+  ledger.start(fresh.resource);
+  const before = ledger.snapshot();
+  assert.equal(ledger.settle(old.resource, true), null, 'XA-X35: an old token never reaches the new incarnation');
+  assert.equal(ledger.released(old.resource), false, 'XA-X35: an old token never reaches the new incarnation');
+  assert.equal(ledger.leave(old.lease, old.resource), null, 'XA-X35: an old token never reaches the new incarnation');
+  assert.equal(ledger.abandon(old.resource), false);
+  assert.deepEqual(ledger.snapshot(), before, 'XA-X35: an old token never reaches the new incarnation');
+  assert.equal(ledger.state(fresh.resource), 'loading');
+  // A failed release keeps its bytes counted; nothing goes negative.
+  ledger.settle(fresh.resource, true); ledger.leave(fresh.lease, fresh.resource); ledger.reclaim(fresh.resource);
+  assert.equal(ledger.released(fresh.resource, false), false);
+  assert.equal(ledger.snapshot().bytes, 10, 'a failed release is not accounted as returned');
+  assert.ok(Object.values(ledger.snapshot()).every(v => typeof v !== 'number' || v >= 0));
+});
+
+test('B06 model: viewports of one opening share a load; one leaving cancels nobody else, and a retiring load is never joined', () => {
+  const ledger = ledgerOf(1000);
+  const first = take(ledger, 'sop#3', 40, { scope: 'O1' }), second = take(ledger, 'sop#3', 40, { scope: 'O1' });
+  assert.deepEqual([first.joined, second.joined, first.resource === second.resource], [false, true, true]);
+  ledger.start(first.resource);
+  assert.equal(ledger.leave(first.lease, first.resource), 'kept', 'the first viewport leaving does not cancel the second');
+  assert.equal(ledger.retiring(first.resource), false);
+  assert.equal(ledger.settle(first.resource, true), 'decoded', 'the remaining consumer still gets the frame');
+  assert.equal(ledger.leave(second.lease, second.resource), 'unheld');
+  const third = take(ledger, 'sop#4', 40, { scope: 'O1' });
+  ledger.start(third.resource); ledger.leave(third.lease, third.resource);
+  assert.equal(take(ledger, 'sop#4', 40, { scope: 'O1' }).reason, 'busy', 'XA-X26: a retiring load is never joined or revived');
+  assert.equal(ledger.snapshot().retiring, 1, 'XA-X26: a retiring load is never joined or revived');
+  ledger.settle(third.resource, false);
+  const again = take(ledger, 'sop#4', 40, { scope: 'O1' });
+  assert.deepEqual([again.ok, again.joined, again.resource !== third.resource], [true, false, true], 'after it ends, a new token is admitted');
+});
+
+test('B07 model: under pressure only a decoded frame with no lease, no draw and no front is reclaimed', () => {
+  const ledger = ledgerOf(1000), owner = {};
+  const shown = take(ledger, 's', 10), drawing = take(ledger, 'd', 10), loading = take(ledger, 'l', 10), idle = take(ledger, 'i', 10);
+  for (const r of [shown, drawing, idle]) { ledger.start(r.resource); ledger.settle(r.resource, true); }
+  ledger.start(loading.resource);
+  const front = ledger.beginDraw({ resource: shown.resource, lease: shown.lease, owner, surface: 5 });
+  ledger.publish(front.draw, owner);
+  ledger.leave(shown.lease, shown.resource);                     // quiescent shown: only its front pins it
+  ledger.beginDraw({ resource: drawing.resource, lease: drawing.lease, owner: {}, surface: 5 });
+  ledger.leave(drawing.lease, drawing.resource);                 // drawing: only the draw pins it
+  ledger.leave(idle.lease, idle.resource);                       // decoded, held by nothing
+  assert.deepEqual(ledger.reclaimables(), [idle.resource], 'XA-X29: a shown, drawing or loading frame is never reclaimed');
+  assert.equal(ledger.reclaim(shown.resource), false, 'XA-X29: a shown, drawing or loading frame is never reclaimed');
+  assert.equal(ledger.reclaim(drawing.resource), false);
+  assert.equal(ledger.reclaim(loading.resource), false);
+  assert.equal(ledger.reclaim(idle.resource), true);
+  // The shown frame comes back only through the normal path: a new front replaces it and its surface is let go.
+  const next = take(ledger, 'n', 10); ledger.start(next.resource); ledger.settle(next.resource, true);
+  const nextDraw = ledger.beginDraw({ resource: next.resource, lease: next.lease, owner, surface: 5 });
+  const { previous } = ledger.publish(nextDraw.draw, owner);
+  assert.equal(previous, front.draw);
+  assert.equal(ledger.drop(previous), true);
+  assert.equal(ledger.reclaim(shown.resource), true, 'detached and let go: now reclaimable, once');
+  assert.equal(ledger.reclaim(shown.resource), false);
+});
+
+test('B08 model: the same SOP and frame under another account, institution, session, opening or source revision is another resource', () => {
+  const opening = { account: 'reader', institution: 'hospital', study: '2.25.1', series: '2.25.2', sop: '2.25.3', sequence: 1, session: 'S1' };
+  const base = M.scopeKey(opening, 'r1');
+  const others = [{ ...opening, account: 'other' }, { ...opening, institution: 'other' }, { ...opening, session: 'S2' }, { ...opening, sequence: 3 }]
+    .map(o => M.scopeKey(o, 'r1')).concat([M.scopeKey(opening, 'r2')]);
+  const ledger = ledgerOf(10000, 10), first = take(ledger, '2.25.3#1', 10, { scope: base });
+  for (const scope of others) {
+    const r = take(ledger, '2.25.3#1', 10, { scope });
+    assert.deepEqual([r.ok, r.joined, r.resource !== first.resource], [true, false, true], 'XA-X22: another opening scope never shares a load: ' + scope);
+  }
+  assert.equal(take(ledger, '2.25.3#1', 10, { scope: base }).joined, true, 'the same complete opening and revision shares');
+});
+
+test('B09 model: a shared payload is counted once, every viewport surface on its own', () => {
+  const ledger = ledgerOf(128), A = {}, B = {}, C = {};
+  const fixedHold = take(ledger, 'other', 64);
+  const a = take(ledger, 'f#1', 32), b = take(ledger, 'f#1', 32);
+  ledger.start(a.resource); ledger.settle(a.resource, true);
+  const drawA = ledger.beginDraw({ resource: a.resource, lease: a.lease, owner: A, surface: 16 });
+  const drawB = ledger.beginDraw({ resource: b.resource, lease: b.lease, owner: B, surface: 16 });
+  assert.deepEqual([fixedHold.ok, drawA.ok, drawB.ok, ledger.snapshot().bytes], [true, true, true, 128], '64 + 32 + 16 + 16; XA-X25: every surface is reserved on its own');
+  const c = take(ledger, 'f#1', 32);
+  assert.equal(c.joined, true, 'the payload is shared');
+  assert.equal(ledger.beginDraw({ resource: c.resource, lease: c.lease, owner: C, surface: 16 }).reason, 'bytes', 'XA-X25: a third surface needs its own 16 MiB');
+  assert.equal(ledger.snapshot().bytes, 128, 'XA-X25: a third surface needs its own 16 MiB');
+  ledger.publish(drawA.draw, A); ledger.detach(drawA.draw); ledger.drop(drawA.draw);
+  assert.equal(ledger.beginDraw({ resource: c.resource, lease: c.lease, owner: C, surface: 16 }).ok, true, 'after one surface is let go');
+});
+
+test('B12 model: bytes, four decodes and 500 prepared each refuse at the bound and admit again only after real returns', () => {
+  const bytes = ledgerOf(100), held = take(bytes, 'h', 60);
+  assert.equal(take(bytes, 'x', 41).reason, 'bytes');
+  assert.equal(take(bytes, 'x', 40).ok, true);
+  const decodes = ledgerOf(1000), runs = [1, 2, 3, 4].map(i => take(decodes, 'k' + i, 1));
+  runs.forEach(r => decodes.start(r.resource));
+  assert.equal(take(decodes, 'k5', 1).reason, 'decodes');
+  decodes.leave(runs[0].lease, runs[0].resource);
+  assert.equal(take(decodes, 'k5', 1).reason, 'decodes', 'a cancel is not an end');
+  decodes.settle(runs[0].resource, true);
+  assert.equal(take(decodes, 'k5', 1).ok, true, 'the decoder really stopped');
+  const prepared = ledgerOf(10000, 1000, 500), all = [];
+  for (let i = 0; i < 500; i++) { const r = take(prepared, 'p' + i, 1); prepared.start(r.resource); prepared.settle(r.resource, true); all.push(r); }
+  assert.equal(take(prepared, 'p500', 1).reason, 'prepared');
+  prepared.leave(all[0].lease, all[0].resource); prepared.reclaim(all[0].resource);
+  assert.equal(take(prepared, 'p500', 1).reason, 'prepared', 'draining still counts');
+  prepared.released(all[0].resource);
+  assert.equal(take(prepared, 'p500', 1).ok, true);
+  const s = prepared.snapshot();
+  assert.deepEqual([s.prepared, s.peakPrepared <= 500, s.peakLoading <= 1000, held.ok], [500, true, true, true]);
+});
+
+test('B13 model: every way a frame can end returns exactly what it took, once, and nothing before it really ended', () => {
+  const ledger = ledgerOf(1000), owner = {};
+  const never = take(ledger, 'never', 10);
+  assert.equal(ledger.leave(never.lease, never.resource), 'unstarted');
+  assert.equal(ledger.abandon(never.resource), true, 'a source never called gives its reservation straight back');
+  const thrown = take(ledger, 'thrown', 10); ledger.start(thrown.resource);
+  assert.equal(ledger.settle(thrown.resource, false), 'failed');
+  const late = take(ledger, 'late', 10); ledger.start(late.resource); ledger.leave(late.lease, late.resource);
+  assert.equal(ledger.snapshot().bytes, 10, 'started work keeps its reservation until it settles');
+  assert.equal(ledger.settle(late.resource, false), 'failed');
+  const drawn = take(ledger, 'drawn', 10); ledger.start(drawn.resource); ledger.settle(drawn.resource, true);
+  const draw = ledger.beginDraw({ resource: drawn.resource, lease: drawn.lease, owner, surface: 5 });
+  ledger.leave(drawn.lease, drawn.resource);
+  assert.equal(ledger.reclaim(drawn.resource), false, 'a draw still pins it');
+  assert.equal(ledger.drop(draw.draw, false), false, 'a renderer that failed to let go keeps its surface counted');
+  assert.equal(ledger.snapshot().bytes, 15);
+  assert.equal(ledger.drop(draw.draw, true), true);
+  assert.equal(ledger.drop(draw.draw, true), false, 'a second drop changes nothing');
+  ledger.reclaim(drawn.resource);
+  assert.equal(ledger.released(drawn.resource), true);
+  assert.equal(ledger.released(drawn.resource), false);
+  assert.deepEqual(ledger.snapshot().bytes + ledger.snapshot().loading + ledger.snapshot().prepared + ledger.snapshot().retiring, 0);
+});
+
+const enhancedTimeline = times => M.describe(run({ frames: times.length, sopClass: ENHANCED, extra: { '52009230': perFrame(times), '00209222': dimension('00189151') } })).timing;
+test('B14 model: trailing ASCII SPACE is DT padding and changes nothing; the stored text is kept as it was', () => {
+  const full = enhancedTimeline(['20261009120000.123456+0900', '20261009120000.223457+0900']);  // 26 characters: no room to pad
+  assert.equal(full.verified, true);
+  close(full.offsets[1], 100.001, 'microseconds kept');
+  const plain = enhancedTimeline(['20261009120000', '20261009120001']), padded = enhancedTimeline(['20261009120000 ', '20261009120001 ']);
+  assert.deepEqual([padded.verified, [...padded.offsets]], [plain.verified, [...plain.offsets]], 'padded and unpadded are the same time');
+  assert.deepEqual([padded.verified, [...padded.offsets]], [true, [0, 1000]]);
+  const year = enhancedTimeline(['20261231235959.999999 ', '20270101000000.000001 ']);
+  assert.equal(year.verified, true);
+  close(year.offsets[1], 0.002, 'across a year boundary');
+  assert.equal(year.basis.origin, '20261231235959.999999 ', 'the stored text is not rewritten');
+  assert.equal(enhancedTimeline(['20261009120000.0400' + ' '.repeat(8), '20261009120000.0800']).verified, false, 'padding cannot exceed the DT length');
+  const ft = M.describe(fixed(3, 40, { extra: { '00181066': el('DS', 250) } })).timing;
+  assert.deepEqual([...ft.basis.relative], [250, 290, 330], 'Frame Delay basis unchanged');
+});
+
+test('B15 model: leading or inner space, TAB, CR, LF, NBSP, NUL, BOM or too long a DT is invalid, never trimmed into a time', () => {
+  const good = '20261009120000.040000';
+  const bad = [' ' + good, good.slice(0, 8) + ' ' + good.slice(8), good + '\t', '\t' + good, good + '\r', good + '\n', '\n' + good,
+    good + ' ', ' ' + good, good + '\u0000', '﻿' + good, good + ' ', good + '+0900  ', '2026100912000O', good + '+090A'];
+  for (const value of bad) {
+    const t = enhancedTimeline(['20261009120000.000000', value]);
+    assert.equal(t.verified, false, 'XA-X37: only trailing ASCII SPACE is DT padding ' + JSON.stringify(value));
+    assert.equal(M.speedOptions(t).some(s => s.kind === 'source'), false);
+  }
+  const raw = ['20261009120000.000000', ' ' + good];
+  const json = run({ frames: 2, sopClass: ENHANCED, extra: { '52009230': perFrame(raw), '00209222': dimension('00189151') } });
+  const copy = JSON.stringify(json);
+  M.describe(json);
+  assert.equal(JSON.stringify(json), copy, 'the input is not modified');
+});
+
+test('B16 model: a legal but coarse DT, a bad date or offset, a leap second or a non-increasing timeline is never filled in as verified', () => {
+  const coarse = enhancedTimeline(['2026', '2027']);
+  assert.deepEqual([coarse.verified, coarse.reason], [false, 'content-precision'], 'legal, too coarse to time frames');
+  const minutes = enhancedTimeline(['202610091200', '202610091201']);
+  assert.deepEqual([minutes.verified, minutes.reason], [false, 'content-precision']);
+  const zonedYear = enhancedTimeline(['2007-0500', '2008-0500']);
+  assert.deepEqual([zonedYear.verified, zonedYear.reason], [false, 'content-precision'], 'PS3.5 example 2007-0500 is legal');
+  for (const bad of [['20261332120000', '20261332120001'], ['20261009120000+1500', '20261009120001+1500'], ['20261009120000-0000', '20261009120001-0000']]) {
+    assert.deepEqual([enhancedTimeline(bad).verified, enhancedTimeline(bad).reason], [false, 'content-time'], JSON.stringify(bad));
+  }
+  assert.equal(enhancedTimeline(['20161231235959+0000', '20161231235960+0000']).reason, 'leap-second');
+  assert.equal(enhancedTimeline(['20261009120001', '20261009120000']).reason, 'content-order');
+  assert.equal(enhancedTimeline(['20261009120000', '20261009120001']).verified, true, 'a complete, increasing timeline');
 });
 
 test('XA05 allow: the same opening stays current, and a late frame keeps its place and its source interval', () => {

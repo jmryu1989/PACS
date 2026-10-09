@@ -1,6 +1,7 @@
 # coding: utf-8
 """E-XA mutants X1..X14 (order e-xa-order.md section 5), X15..X21 (round 2: one per Astra finding EXA-R1-01..05,
-two for EXA-R1-02 - model and viewer), and the case declaration check.
+two for EXA-R1-02 - model and viewer), X22..X37 (round 3: one per invariant I01..I16 of the D732 consult,
+evidence/e-xa-consult-20261009/design.md section 8), and the case declaration check.
 
 Each mutant breaks the shipped module in a COPY (the source tree is never written) and must be killed by a behaviour
 failure: the named case fails on an assertion that carries that mutant's own token (XA-Xn:), the child exits non-zero
@@ -10,7 +11,7 @@ The clean copies must first pass the same runs through the same overrides, or no
   --check-cases   compare tests/part1/xa/cases.json with the cases the runners actually collect, both ways, and with
                   the mutant table below; a declared case that does not run or a running case that is not declared fails
   --anchors-only  check that every anchor occurs exactly once and every token is asserted in its named case, then stop
-  (default)       --check-cases, anchors, clean baseline, then every mutant (X1..X21)
+  (default)       --check-cases, anchors, clean baseline, then every mutant (X1..X37)
 
 The anchors are source text on purpose: this runner rewrites a copy of the code, so it has to find the code. They bind
 the mutation tool only; no test case asserts source text (AGENTS 1-B). stdlib only; browsers and node run as children.
@@ -74,57 +75,58 @@ MUTANTS = [
      'new': '      const ahead = total;'},
     {'id': 'X7', 'file': 'model', 'suite': 'model', 'case': 'XA04-MODEL-REJECT', 'token': 'XA-X7:',
      'title': 'frames still loading are left out of the reservation',
-     'old': "      if (bytes + size > limits.bytes) return no('bytes');",
-     'new': "      if ([...entries.values()].filter(e => e.state === 'ready').reduce((n, e) => n + e.size, 0) + size > limits.bytes) return no('bytes');"},
+     'old': "      if (bytes + payload > limits.bytes) return no('bytes');",
+     'new': "      if ([...resources.values()].filter(h => h.state === 'decoded').reduce((n, h) => n + h.payload, 0) + payload > limits.bytes) return no('bytes');"},
     {'id': 'X8', 'file': 'model', 'suite': 'model', 'case': 'XA04-MODEL-REJECT', 'token': 'XA-X8:',
      'title': 'the four-decode limit is removed',
-     'old': "      if (loading >= limits.decodes) return no('decodes');",
+     'old': "      if (permits >= limits.decodes) return no('decodes');",
      'new': '      // decode limit removed'},
     {'id': 'X9', 'file': 'model', 'suite': 'model', 'case': 'XA04-MODEL-REJECT', 'token': 'XA-X9:',
      'title': "one viewport's release frees a frame another viewport still holds",
-     'old': '      if (held.owners.size) return false;',
-     'new': '      void held.owners.size;'},
+     'old': "      if (held.leases.size || held.draws.size || held.displays.size) return 'kept';",
+     'new': "      if (held.draws.size || held.displays.size) return 'kept';"},
     {'id': 'X10', 'file': 'viewer', 'suite': 'dom', 'case': 'XA05-DOM-BUFFERING', 'token': 'XA-X10:',
-     'title': 'a frame answered after Pause is still drawn',
-     'old': '      if (!live(g) || !checkOpening()) return false;',
-     'new': '      if (!checkOpening()) return false; // generation check removed'},
+     'title': 'a frame that had not started drawing at Pause is still drawn',
+     'old': "      withdraw(slot => slot.phase !== 'drawing');",
+     'new': "      withdraw(slot => slot.kind === 'ahead' && slot.phase !== 'drawing');"},
     {'id': 'X11', 'file': 'model', 'suite': 'model', 'case': 'XA05-MODEL-REJECT', 'token': 'XA-X11:',
      'title': 'the opening sequence is not compared (A->B->A)',
      'old': "    if (now.study !== opened.study || now.series !== opened.series || now.sop !== opened.sop || now.sequence !== opened.sequence) return 'stale';",
      'new': "    if (now.study !== opened.study || now.series !== opened.series || now.sop !== opened.sop) return 'stale';"},
     {'id': 'X12', 'file': 'viewer', 'suite': 'dom', 'case': 'XA06-DOM-RETRY', 'token': 'XA-X12:',
      'title': 'a failed frame is stepped over',
-     'old': '      try { entry = await need(g, index); } catch (error) { return live(g) ? fail(index, error) : false; }',
-     'new': '      try { entry = await need(g, index); } catch (error) { if (!live(g)) return false; shown = index; target = null; return true; }'},
+     'old': '      return fail(slot.index, f);',
+     'new': '      shown = slot.index; coverage.mark(slot.index); afterShown(); return;'},
     {'id': 'X13', 'file': 'model', 'suite': 'model', 'case': 'XA04-MODEL-ALLOW', 'token': 'XA-X13:',
      'title': 'a run is cut at 500 frames',
      'old': '    const frames = raw === undefined ? 1 : integer(raw);',
      'new': '    const frames = raw === undefined ? 1 : Math.min(integer(raw), 500);'},
     {'id': 'X14', 'file': 'viewer', 'suite': 'dom', 'case': 'XA06-DOM-NOT-SHOWN', 'token': 'XA-X14:',
      'title': 'a prepared frame is counted as shown',
-     'old': "        if (own.has(index) && !told.has(index)) { told.add(index); emit({ type: 'provided', index }); }",
-     'new': "        if (own.has(index) && !told.has(index)) { told.add(index); coverage.mark(index); emit({ type: 'provided', index }); }"},
-    # Round 2 (Astra review of 585c66f): each one puts back the defect a finding named.
+     'old': "      if (!told.has(slot)) { told.add(slot); emit({ type: 'provided', index: slot.index }); }",
+     'new': "      if (!told.has(slot)) { told.add(slot); coverage.mark(slot.index); emit({ type: 'provided', index: slot.index }); }"},
+    # Round 2 (Astra review of 585c66f): each one puts back the defect a finding named; round 3 moved each onto the
+    # one decision of the D732 ownership model that now carries it.
     {'id': 'X15', 'file': 'viewer', 'suite': 'dom', 'case': 'XA05-DOM-RENDER-RACE', 'token': 'XA-X15:',
-     'title': 'EXA-R1-01: a render answer moves the label without being the latest render request',
-     'old': '    function current(job) { return job === renderSeq && !ended && !disposed && checkOpening(); }',
-     'new': '    function current(job) { return !ended && !disposed && checkOpening(); }'},
+     'title': 'EXA-R1-01: a render of an older intent still counts as the latest render request',
+     'old': "        if (t.draw.G !== G) return 'drain';",
+     'new': '        // a draw of an older intent stays current'},
     {'id': 'X16', 'file': 'model', 'suite': 'model', 'case': 'XA04-MODEL-RETIRING', 'token': 'XA-X16:',
      'title': 'EXA-R1-02: letting go of a load still decoding frees its bytes and slot at once',
-     'old': "      if (held.state === 'loading') { held.state = 'retiring'; return true; }",
-     'new': '      // retiring removed: the reservation ends with the request'},
+     'old': "        held.retiring = true;\n        return 'retire';",
+     'new': "        gone(held);\n        return 'retire';"},
     {'id': 'X17', 'file': 'viewer', 'suite': 'dom', 'case': 'XA04-DOM-LATE-ABORT', 'token': 'XA-X17:',
      'title': 'EXA-R1-02: a cancelled load gives its reservation back before its abort has settled',
-     'old': '    shared.budget.retire(entry.key);',
-     'new': '    shared.budget.drop(entry.key);'},
+     'old': "        res.abort.abort();\n        emit({ type: 'cancelled', index: slot.index });",
+     'new': "        res.abort.abort(); ledger.settle(slot.res, false);\n        emit({ type: 'cancelled', index: slot.index });"},
     {'id': 'X18', 'file': 'model', 'suite': 'dom', 'case': 'XA05-DOM-OPENING-BINDING', 'token': 'XA-X18:',
      'title': 'EXA-R1-03: the opening is not compared with the Study/Series/SOP the source supplies',
      'old': "    if (key.study !== d.study || key.series !== d.series || key.sop !== d.sop) return Object.freeze({ ok: false, reason: 'manifest' });",
      'new': '    void d.study;'},
     {'id': 'X19', 'file': 'viewer', 'suite': 'dom', 'case': 'XA05-DOM-OPENING-BINDING', 'token': 'XA-X19:',
-     'title': 'EXA-R1-03: an async completion requests more frames without re-checking the current opening',
-     'old': '      if (!checkOpening()) return;',
-     'new': '      // opening re-check removed'},
+     'title': 'EXA-R1-03: after mount, async completions and timers no longer re-check the current opening',
+     'old': '      const now = opening();',
+     'new': "      const now = kind === 'mount' || kind === 'notice' ? opening() : 'current';"},
     {'id': 'X20', 'file': 'model', 'suite': 'model', 'case': 'XA02-MODEL-BASIS', 'token': 'XA-X20:',
      'title': 'EXA-R1-04: Frame Delay is dropped from the source timeline',
      'old': '    const relative = offsets.map(o => frameDelay + o);',
@@ -133,7 +135,79 @@ MUTANTS = [
      'title': 'EXA-R1-05: a DT offset outside -1200..+1400 is accepted',
      'old': "      if (zone < -720 || zone > 840 || (m[8] === '-' && zone === 0)) return null;",
      'new': "      if (m[8] === '-' && zone === 0) return null;"},
+    # Round 3 (D732 consult, design.md section 8): one per invariant I01..I16, each a change of one decision of the
+    # ownership ledger or the gate. 'where' names the shared matrix helper a DOM case runs (the token sits there).
+    {'id': 'X22', 'file': 'model', 'suite': 'model', 'case': 'B08-MODEL', 'token': 'XA-X22:',
+     'title': 'I01: the sharing key drops the opening/security/source scope and keeps only SOP#frame',
+     'old': '      const id = JSON.stringify([scope, key]);',
+     'new': '      const id = JSON.stringify([key]);'},
+    {'id': 'X23', 'file': 'viewer', 'suite': 'dom', 'case': 'R01-DOM', 'where': 'late_seek', 'token': 'XA-X23:',
+     'title': 'I02: the presentation generation moves when a new draw starts, not when the reader asks',
+     'edits': [("      G = ++seq; P = ++seq;\n      cancelSleep(); dequeue(self); memoryWait = false; skip.clear(); pendingDue = null;",
+                "      P = ++seq;\n      cancelSleep(); dequeue(self); memoryWait = false; skip.clear(); pendingDue = null;"),
+               ('      const J = { draw: d.draw, slot, res, G, void: false, ended: false, abort: new AbortController(), timer: null };',
+                '      G = ++seq; slot.G = G;\n      const J = { draw: d.draw, slot, res, G, void: false, ended: false, abort: new AbortController(), timer: null };')]},
+    {'id': 'X24', 'file': 'viewer', 'suite': 'dom', 'case': 'B01-DOM', 'token': 'XA-X24:',
+     'title': 'I03: the deferred source.load() call trusts the check made when the request was queued',
+     'old': "    if (!wanted(res)) { broker.ledger.abandon(res.token); endResource(res, { kind: 'cancelled', status: null }); return; }",
+     'new': '    // decided when the request was queued'},
+    {'id': 'X25', 'file': 'model', 'suite': 'model', 'case': 'B09-MODEL', 'token': 'XA-X25:',
+     'title': "I04: a second viewport's surface is treated as covered by the shared payload",
+     'old': '      const cost = surface;',
+     'new': '      const cost = held.draws.size || held.displays.size ? 0 : surface;'},
+    {'id': 'X26', 'file': 'model', 'suite': 'model', 'case': 'B06-MODEL', 'token': 'XA-X26:',
+     'title': 'I05: a new consumer may join a retiring load',
+     'old': "        if (held.retiring || held.state === 'draining') return no('busy');",
+     'new': "        if (held.state === 'draining') return no('busy');"},
+    {'id': 'X27', 'file': 'model', 'suite': 'dom', 'case': 'D08-DOM', 'where': 'late_abort', 'token': 'XA-X27:',
+     'title': 'I06: an abort request gives the decode permit back before the decoder has stopped',
+     'old': "        held.retiring = true;\n        return 'retire';",
+     'new': "        held.retiring = true; held.permit = false; permits--;\n        return 'retire';"},
+    {'id': 'X28', 'file': 'viewer', 'suite': 'dom', 'case': 'R06-DOM', 'where': 'late_pressure', 'token': 'XA-X28:',
+     'title': 'I07: a superseded draw gives its surface and frame back when it is asked to stop',
+     'old': '      try { J.abort.abort(); } catch (_) {}  // asked to stop; its surface and its frame stay pinned until it really ends',
+     'new': '      try { J.abort.abort(); } catch (_) {}  endDraw(J, null);'},
+    {'id': 'X29', 'file': 'model', 'suite': 'model', 'case': 'B07-MODEL', 'token': 'XA-X29:',
+     'title': 'I08: a frame on screen may be reclaimed under pressure once nothing is loading or drawing it',
+     'old': "    const reclaimable = h => !!h && h.state === 'decoded' && !h.leases.size && !h.draws.size && !h.displays.size;",
+     'new': "    const reclaimable = h => !!h && h.state === 'decoded' && !h.leases.size && !h.draws.size;"},
+    {'id': 'X30', 'file': 'viewer', 'suite': 'dom', 'case': 'R01-DOM', 'where': 'late_seek', 'token': 'XA-X30:',
+     'title': 'I09: a privately prepared surface is published without the current-draw check',
+     'old': "      if (verdict === 'current' && !error && receiptOk(receipt, J)) { publish(J, receipt); return; }",
+     'new': "      if (verdict !== 'reject' && !error && receiptOk(receipt, J)) { publish(J, receipt); return; }"},
+    {'id': 'X31', 'file': 'viewer', 'suite': 'dom', 'case': 'B03-DOM', 'token': 'XA-X31:',
+     'title': 'I10: a render receipt is accepted when only the frame number matches',
+     'old': '    const receiptOk = (r, J) => !!r && r.draw === J.draw && r.sop === meta.sop && r.frame === J.slot.index + 1 && !!r.surface;',
+     'new': '    const receiptOk = (r, J) => !!r && r.frame === J.slot.index + 1 && !!r.surface;'},
+    {'id': 'X32', 'file': 'viewer', 'suite': 'dom', 'case': 'B04-DOM', 'token': 'XA-X32:',
+     'title': 'I11: the label, coverage and displayed move when the target is decoded, before its render',
+     'old': "      if (!told.has(slot)) { told.add(slot); emit({ type: 'provided', index: slot.index }); }",
+     'new': "      if (!told.has(slot)) { told.add(slot); emit({ type: 'provided', index: slot.index }); if (slot === target) { shown = slot.index; coverage.mark(slot.index); paint(); emit({ type: 'displayed', index: slot.index }); } }"},
+    {'id': 'X33', 'file': 'viewer', 'suite': 'dom', 'case': 'B10-DOM', 'token': 'XA-X33:',
+     'title': "I12: the new opening's cover is lifted when its first frame is decoded",
+     'old': "      slot.phase = 'decoded';\n      clearTimer(slot);",
+     'new': "      slot.phase = 'decoded'; if (physical.covered) coverPhysical(false);\n      clearTimer(slot);"},
+    {'id': 'X34', 'file': 'viewer', 'suite': 'dom', 'case': 'XA06-DOM-RENDER-TIMEOUT', 'token': 'XA-X34:',
+     'title': 'I13: a timed-out render that is still the latest recovers on its own when it answers',
+     'old': "        if (t.draw.void) return 'drain';",
+     'new': '        // a timed-out draw may still publish'},
+    {'id': 'X35', 'file': 'model', 'suite': 'model', 'case': 'B05-MODEL', 'token': 'XA-X35:',
+     'title': 'I14: cleanup finds the current resource by its frame key instead of the exact token',
+     'old': '    const exact = t => (t && resources.get(t)) || null;',
+     'new': '    const exact = t => (t && (resources.get(t) || byScope.get(JSON.stringify([t.scope, t.key])))) || null;'},
+    {'id': 'X36', 'file': 'viewer', 'suite': 'dom', 'case': 'R02-DOM', 'where': 'late_pause', 'token': 'XA-X36:',
+     'title': 'I15: Pause also takes away the right to publish from a draw already under way',
+     'old': "      withdraw(slot => slot.phase !== 'drawing');",
+     'new': '      withdraw(slot => true);'},
+    {'id': 'X37', 'file': 'model', 'suite': 'model', 'case': 'B15-MODEL', 'token': 'XA-X37:',
+     'title': 'I16: DT is trimmed of any white space instead of only trailing ASCII SPACE',
+     'old': '    const text = v.slice(0, end);',
+     'new': '    const text = v.trim();'},
 ]
+
+
+def edits(m):
+    return m.get('edits') or [(m['old'], m['new'])]
 
 
 def text_hash(path):
@@ -264,12 +338,13 @@ def check_anchors(problems, table):
     tests = {suite: body['path'].read_text(encoding='utf-8') for suite, body in SUITES.items()}
     tokens = set()
     for m in MUTANTS:
-        found = sources[m['file']].count(m['old'])
-        print('anchor %-3s file=%-6s occurrences=%d case=%s' % (m['id'], m['file'], found, m['case']))
-        if found != 1:
-            problems.append('%s anchor occurs %d times' % (m['id'], found))
-        if m['new'] in sources[m['file']]:
-            problems.append('%s mutation is already the shipped text' % m['id'])
+        for old, new in edits(m):
+            found = sources[m['file']].count(old)
+            print('anchor %-3s file=%-6s occurrences=%d case=%s' % (m['id'], m['file'], found, m['case']))
+            if found != 1:
+                problems.append('%s anchor occurs %d times' % (m['id'], found))
+            if new in sources[m['file']]:
+                problems.append('%s mutation is already the shipped text' % m['id'])
         if m['token'] in tokens:
             problems.append('%s reuses a token' % m['id'])
         tokens.add(m['token'])
@@ -287,6 +362,12 @@ def check_anchors(problems, table):
         else:
             start = body.find('def %s(' % case['method'])
             end = body.find('\n    def ', start + 1)
+            # A matrix case runs a shared helper: the case must call it, and the token must sit in that helper.
+            if m.get('where') and start >= 0:
+                if 'self.%s(' % m['where'] not in body[start:end if end > 0 else None]:
+                    problems.append('%s case %s does not run %s' % (m['id'], m['case'], m['where']))
+                start = body.find('def %s(' % m['where'])
+                end = body.find('\n    def ', start + 1)
         if start < 0 or m['token'] not in body[start:end if end > 0 else None]:
             problems.append('%s token is not asserted inside %s' % (m['id'], m['case']))
 
@@ -344,7 +425,10 @@ def main():
         for m in chosen:
             source = SOURCES[m['file']].read_text(encoding='utf-8')
             broken = scratch / ('%s-%s' % (m['id'], SOURCES[m['file']].name))
-            broken.write_text(source.replace(m['old'], m['new']), encoding='utf-8')
+            mutated = source
+            for old, new in edits(m):
+                mutated = mutated.replace(old, new)
+            broken.write_text(mutated, encoding='utf-8')
             if broken.read_text(encoding='utf-8') == source:
                 raise AssertionError(m['id'])
             overrides = dict(clean, **{m['file']: broken})
