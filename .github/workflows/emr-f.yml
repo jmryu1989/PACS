@@ -1,0 +1,62 @@
+name: EMR-F audit investigation and lawful copy contracts
+
+# EMR-F round 1: the pure/contract cases of api/src/emr-audit and their mutants, on a pull request head or on an
+# explicitly dispatched candidate SHA. No stack, database, browser, credentials or network service is used; it calls no
+# B consumer that has not landed and adds nothing to the candidate selection (tests/candidate_ci.py). The live suite
+# (tests/emr/f/live.py, profile emr-f) is round 2.
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full lowercase 40-character commit SHA to validate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: emr-f-${{ inputs.candidate_sha || github.event.pull_request.head.sha }}
+  cancel-in-progress: false
+
+jobs:
+  emr-f-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha }}
+    steps:
+      - name: Refuse anything but a full lowercase commit SHA
+        run: printf '%s' "$TARGET_SHA" | grep -Eqx '[0-9a-f]{40}'
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          persist-credentials: false
+      - name: The checked-out tree is the requested SHA
+        run: test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+      # The compiler and Prisma generator the lockfile pins; lifecycle scripts stay off.
+      - name: Installed TypeScript compiler from the API lockfile
+        timeout-minutes: 5
+        run: |
+          node --version
+          npm ci --prefix api --ignore-scripts --no-audit --no-fund
+      - name: Generate the Prisma client the API typecheck reads
+        working-directory: api
+        run: ./node_modules/.bin/prisma generate
+      - name: Typecheck the API including api/src/emr-audit
+        run: python3 scripts/record-run.py --run-dir tmp/emr-f-ci/typecheck --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json -- api/node_modules/.bin/tsc --noEmit -p api
+      - name: TEST-F-01..08 declared allow/refuse cases
+        if: ${{ !cancelled() }}
+        run: python3 scripts/record-run.py --run-dir tmp/emr-f-ci/contract --cwd . --tree api/src/emr-contract --tree api/src/emr-audit --file api/tsconfig.json --file api/package-lock.json --file tests/emr/f/contract_test.cjs -- node --test --test-reporter=tap tests/emr/f/contract_test.cjs
+      - name: 46 mutants M-F-01..07, S1..S7, R2-001..003, R3-001..002, R4-001..010 and R5-001..017 on an out-of-tree copy
+        if: ${{ !cancelled() }}
+        run: python3 scripts/record-run.py --run-dir tmp/emr-f-ci/mutants --cwd . --tree api/src/emr-contract --tree api/src/emr-audit --file api/tsconfig.json --file tests/emr/f/contract_test.cjs --file tests/emr/f/mutants.py -- python3 -B tests/emr/f/mutants.py --out tmp/emr-f-ci/mutants.json
+      - name: Raw run evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: emr-f-${{ env.TARGET_SHA }}
+          path: tmp/emr-f-ci/
+          if-no-files-found: error
+          retention-days: 7

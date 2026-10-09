@@ -437,7 +437,7 @@
         "'class', a name unless the class is an expression or a default export, optional type parameters, then extends and implements clauses in any order and the '{' of the class body; 'abstract', 'export' and 'export default' before 'class' are not part of the heading",
         "type parameters and type arguments read to the '>' that closes them: '<' and '>' counted, '(', '[' and '{' skipped whole to the bracket that closes them (a type literal, a function type's parameters, a tuple), '=>' an arrow, and between them only names, numbers and , . = | & ? : -",
         "a class reference of a heritage clause: a name, then '.' and a name and type arguments; after extends also a parenthesised start, call arguments and an index; implements takes a ',' list",
-        "class after '.', '?.' or '#' is a property name, not a keyword",
+        "AST-confirmed class property names (including type/object members, optional members, methods and shorthand), and class after '.', '?.' or '#', are not class headings",
         "in a *.controller.ts file no class heading holds extends, in a heritage clause or anywhere else, and every class keyword's heading is read",
         "class_body: a '{' opens a class body only as the body of a class keyword whose heading class_heading reads; any other block holds no method declaration, so a require in it is read as a call"
       ],
@@ -456,15 +456,33 @@
         "a type parameter constraint": [["review-inherited.controller.ts: a class heading in a controller file holds extends outside a heritage clause", "'class ReviewInheritedController<T extends object = {}>')"]],
         "a '<' that does not close": [["review-inherited.controller.ts: a class keyword in a controller file whose heading the reader does not read to its body", "does not close"]],
         "a token no type holds inside '<' and '>'": [["review-inherited.controller.ts: a class keyword in a controller file whose heading the reader does not read to its body", "'!' at offset", "which no type is written with"]],
-        "class as an object key in a controller file": [["review-inherited.controller.ts: a class keyword in a controller file whose heading the reader does not read to its body", "':' at offset", "where the class heading goes on or its body opens"]],
-        "a member named class in a controller file": [["review-inherited.controller.ts: a class keyword in a controller file whose heading the reader does not read to its body", "'(' at offset", "where the class heading goes on or its body opens"]],
         "a loader call in a block after 'x. class'": [["unlisted-routes.ts: a module loader the binding check does not follow", "require('../outside'): relative module is missing or outside the checked api/src scope"]]
       },
       "accepted": [
+        "class as an object key in a controller file",
+        "a member named class in a controller file",
+        "class as a type-literal member",
+        "class as an optional type-literal member",
         "a generic controller without inheritance",
         "a require method in a class whose generic default holds a type literal",
         "class as a property name after '.' and '?.' in a controller file"
-      ]
+      ],
+      "property_names": {
+        "type-literal member": "type Claim = { class: string; agrees: boolean };",
+        "optional type-literal member": "type Claim = { class /* gap */ ?: string };",
+        "object-literal key": "const claim = { class: value };",
+        "destructuring key": "const { class: value } = claim;",
+        "enum member": "enum Claim { class, other }",
+        "member access": "const value = x.class;",
+        "optional member access": "const value = x?.class;",
+        "shorthand property": "const claim = { class };",
+        "object method": "const claim = { class() { return 1; } };",
+        "generic method": "const claim = { class<T extends object>() { return 1; } };",
+        "type method": "type Claim = { class(): string };",
+        "optional type method": "type Claim = { class?(): string };",
+        "accessor": "const claim = { get class() { return 1; } };",
+        "non-BMP prefix": "/* 😀 */ type Claim = { class: string };"
+      }
     }
   },
   "request_method_pin": {
