@@ -5,7 +5,8 @@
  * Two halves over one answer fixture (ANSWER below):
  *  - page: the <script id="admin-metrics-model"> block of worklist-v0/hpacs-lite/admin.html, run as shipped in a vm
  *    context (no copy, no DOM). Every read, failure, missing-source and zero-denominator vector; wording; no threshold.
- *  - server: the compiled api/src/pacs.service.ts (adminMetricRows, orthancDiskBytes, PacsService.adminMetrics) over a
+ *  - server: the compiled api/src/pacs.service.ts (adminMetricRows, orthancDiskBytes, PacsService.adminMetrics) and its
+ *    metrics concern api/src/pacs/metrics.ts (S9-U0b: the owner of the clock and wait seams) over a
  *    fake store. It runs only when KIN_ADMIN_METRICS_SERVER names the compiled module (kin-api:ci: /app/dist/pacs.service);
  *    when the variable is set a missing module fails the run. Without it these cases are reported as skipped, never passed.
  * The server half proves the fixture is what the compiled rows produce, so the page half reads the real shape.
@@ -36,6 +37,9 @@ const F = iso => `<${iso}>`;
 const SERVER = process.env.KIN_ADMIN_METRICS_SERVER || '';
 const S = SERVER ? require(SERVER) : null;
 const { StudyAccessService } = SERVER ? require(path.join(path.dirname(SERVER), 'study-access.service')) : {};
+// S9-U0b: the metrics concern owns the observation clock and the source wait (its protected seams); the facade forwards to it.
+const { PacsMetrics } = SERVER ? require(path.join(path.dirname(SERVER), 'pacs', 'metrics')) : {};
+const { PacsAccess } = SERVER ? require(path.join(path.dirname(SERVER), 'pacs', 'access')) : {};
 const hosted = S ? false : 'KIN_ADMIN_METRICS_SERVER is not set: the compiled PacsService runs in kin-api:ci only (/app/dist)';
 
 const KEYS = ['storage.server', 'storage.institution', 'studies.own', 'studies.tele', 'studies.flag_unreadable',
@@ -337,10 +341,13 @@ function store({ policies = [[], []], statistics = STATISTICS, orthanc = null, d
     },
   };
   const source = { get: orthanc ? path => orthanc(path, db, calls) : async path => { calls.push(['orthanc', path]); return structuredClone(statistics); } };
-  const service = new S.PacsService(prisma, source, {}, new StudyAccessService(prisma, {}, {}), {});
+  const access = new StudyAccessService(prisma, {}, {});
+  const service = new PacsMetrics(prisma, source, access, new PacsAccess(prisma, access));
   // The instance clock is the fixture's NOW, so windows and durations are the fixture's to the second.
   service.metricsClock = () => now;
-  return { service, calls };
+  // The public facade over the same store: what the admin controller calls.
+  const facade = new S.PacsService(prisma, source, {}, access, {});
+  return { service, facade, calls };
 }
 // The fixture as the service stamps it: its one clock also stamps the Orthanc observation.
 const AT_CLOCK = () => clone(ROWS).map(row => row.key === 'storage.server' ? { ...row, observedAt: NOW } : row);
@@ -414,21 +421,23 @@ test('server: only admin, only with an institution, never for a restricted study
   for (const [who, caller] of [['radiologist', { ...ADMIN, roles: ['radiologist'] }], ['technician', { ...ADMIN, roles: ['technician'] }],
     ['clinician-only', { ...ADMIN, roles: ['clinician'] }], ['no roles', { ...ADMIN, roles: [] }],
     ['gateway', { ...ADMIN, kind: 'gateway', roles: ['gateway'] }], ['no institution', { ...ADMIN, institution: null }]]) {
-    const { service, calls } = store();
-    await assert.rejects(service.adminMetrics(caller), e => e.getStatus() === 403, who);
-    assert.deepEqual(calls, [], `${who}: no read before the refusal`);
+    for (const via of ['facade', 'service']) {
+      const built = store();
+      await assert.rejects(built[via].adminMetrics(caller), e => e.getStatus() === 403, `${who} (${via})`);
+      assert.deepEqual(built.calls, [], `${who} (${via}): no read before the refusal`);
+    }
   }
-  const { service, calls } = store({ policies: [[POLICY(true)]] });
+  const { facade: service, calls } = store({ policies: [[POLICY(true)]] });
   await assert.rejects(service.adminMetrics(ADMIN),
     e => e.getStatus() === 403 && e.getResponse().code === 'ADMIN_METRICS_RESTRICTED');
   assert.deepEqual(calls.map(call => call[0]), ['policy'], 'restricted: no study, approval or Orthanc read');
   // A mixed admin+clinician account is an admin (the clinician-only gate never applies to it).
   const mixed = store();
-  assert.equal((await mixed.service.adminMetrics({ ...ADMIN, roles: ['clinician', 'admin'] })).institutionId, 'hallym');
+  assert.equal((await mixed.facade.adminMetrics({ ...ADMIN, roles: ['clinician', 'admin'] })).institutionId, 'hallym');
 });
 
 test('server: a change of the study access policy during the read refuses the aggregate (409)', { skip: hosted }, async () => {
-  const { service } = store({ policies: [[], [POLICY(false)]] });
+  const { facade: service } = store({ policies: [[], [POLICY(false)]] });
   await assert.rejects(service.adminMetrics(ADMIN), e => e.getStatus() === 409 && e.getResponse().code === 'STUDY_ACCESS_CHANGED');
 });
 
