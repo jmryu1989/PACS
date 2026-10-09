@@ -1,13 +1,42 @@
 # Keycloak 렐름 (개발용)
 
 `kin-realm.json`은 빈 Keycloak PostgreSQL DB를 처음 띄울 때만 들어간다
-(`start-dev --import-realm`). 이후 렐름·계정·회전된 자격증명은 PostgreSQL에 유지된다.
+(`start-dev --import-realm`, 운영은 `start --import-realm`; 둘 다 아래 세션 캐시 옵션을 함께 준다).
+이후 렐름·계정·회전된 자격증명은 PostgreSQL에 유지된다.
 서버는 `26.7.3`으로 고정한다. `prompt=create` 가입 진입은 26.1.0부터 지원되므로
 그보다 낮은 버전으로 내리면 BFF 가입 링크가 로그인 화면으로 잘못 열린다.
 
 > ⚠️ **이 파일의 JSON에는 주석을 넣을 수 없다.** Keycloak은 모르는 필드를 만나면
 > import 자체를 거부하고 서버가 뜨지 않는다 (`Unrecognized field ... not marked as ignorable`).
 > 설명은 전부 이 README에 쓴다.
+
+## 사용자 세션 캐시는 끈다 (`--spi-user-sessions--infinispan--use-caches=false`)
+
+두 compose의 Keycloak command에 이 옵션을 둔다(`docker-compose.yml`, 그리고 그 command를 통째로 덮어쓰는
+`docker-compose.prod.yml` — 운영 파일에서 빠뜨리면 운영에만 문제가 남는다). **persistent user sessions는 끄지 않는다**:
+세션은 계속 PostgreSQL에 남아 재기동 뒤에도 유지된다. 끄는 것은 그 앞의 내장(embedded) 사용자/클라이언트 세션
+캐시뿐이며 렐름·사용자·역할 캐시는 그대로다. `cache=local`로 바꾸는 것은 대신이 아니다(local도 같은 캐시다).
+
+**왜:** 26.7.3에서 세션 캐시가 비었을 때 DB에서 읽은 옛 세션을 캐시에 다시 넣는 사이 종료가 끼면, 이미 끝낸 세션이
+캐시에서 되살아난다(keycloak#51127). 그러면 확인된 Log out 뒤에도 같은 브라우저의 다음 Login에 Keycloak이 앞 의사의 끝난
+인증을 폼 없이 돌려줄 수 있다 — 관리자 세션 목록은 DB를 읽어 0으로 보이면서. 캐시 없이 DB만 읽으면 그 부활 경로가 없다
+(26.7.3 `InfinispanUserSessionProviderFactory`: 옵션 `useCaches`, 읽는 곳 `:144`, 보고 `:330-334`). 이 옵션은 이미 끝난
+응답이나 발급된 code를 소급 취소하지 않으므로 BFF의 종료 표식·옛 Bearer 거절·미확인 종료 보호는 그대로 필요하다.
+
+**확인(실효값):** 옵션이 소스에 있다는 것은 실행 중 반영의 증거가 아니다. 실행 중인 Keycloak의 관리자 자격으로
+`GET /auth/admin/serverinfo`를 읽어 `providers.userSessions.providers.infinispan.operationalInfo.useCaches`가 `"false"`인지,
+같은 응답의 `PERSISTENT_USER_SESSIONS` 기능이 켜져 있는지(`enabled: true`) 확인한다. 비밀 필드는 출력·보존하지 않는다.
+이 옵션 이전(캐시 ON)의 값은 `"true"`다.
+
+**기존 설치:** 렐름·클라이언트 쓰기가 아니라 Keycloak **프로세스 옵션**이므로, 기존 PostgreSQL 렐름은 그대로 두고
+Keycloak 서비스만 새 command로 갱신·재기동하면 반영된다(렐름 재import·삭제·비밀번호/secret 회전 없음, 병원 쪽 수동 작업 없음).
+같은 옵션·DB로 다시 띄우는 것은 멱등이다. 갱신 뒤 위 실효값을 다시 읽어 확인한다. 이 변경은 API-only 배포
+(`scripts/ops_deploy_preflight.py`가 compose·keycloak 변경을 일부러 거절한다)로는 나가지 않으며, Keycloak을 포함한 배포
+경로로 반영한다.
+
+**26.8.0 업그레이드는 별도 단위다.** 26.8.0은 #51127을 제한된 tombstone으로 고쳤지만 기본은 여전히 캐시 ON이고,
+Keycloak 자체 DB migration이 있는 minor 업그레이드다. 업그레이드를 하더라도 이 옵션은 명시적으로 유지한다. 같은 브라우저에서
+끝난 sid를 다음 SSO가 다시 받는 일(keycloak#53682)은 이 옵션과 별개이며 BFF의 같은-sid 경계가 계속 다룬다.
 
 ## 들어 있는 것
 
