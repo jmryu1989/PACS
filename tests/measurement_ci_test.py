@@ -45,7 +45,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(uploads[0]['with']['path'], 'tests/e2e/artifacts/context-loss-ci/')
 
     def test_emr_b_profile_runs_the_declared_ledger_cases_only_in_its_own_workflow(self):
-        """EMR-B1 (order section 10): one suite of the eight declared ledger cases, a 600s planned ceiling whose
+        """EMR-B1 (order section 10): one suite of the eleven declared ledger cases, a 600s planned ceiling whose
         supervisor margin leaves the shared 25 minute deadline 230s of setup and cleanup even after B2's second
         suite, a separate artifact and project, and only emr-b.yml requests the profile."""
         import ast

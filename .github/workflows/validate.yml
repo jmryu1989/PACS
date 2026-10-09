@@ -134,10 +134,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/emr-contract --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json --file api/prisma/schema.prisma --file api/src/emr-contract/README.md --file api/src/emr-contract/access-event.ts --file api/src/emr-contract/classification.ts --file api/src/emr-contract/composition.ts --file api/src/emr-contract/lawful-defaults.ts --file api/src/emr-contract/legal-basis.ts --file api/src/emr-contract/report-lifecycle.ts --file api/src/emr-contract/routes.ts --file api/src/emr-contract/signature.ts --file api/src/emr-contract/validation.ts --file tests/emr_contract_test.cjs -- docker run --rm --network none --read-only --tmpfs /tmp -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/emr_contract_test.cjs
       # EMR-B1: the unit declaration against the owned files, migrations, ledger catalog, compose shape, emr-b profile and
-      # candidate selection; then the ledger contract C01-C10 on this job's node with the TypeScript and Prisma client
+      # candidate selection; then the ledger contracts C01-C10 and C13-C18 on this job's node with the TypeScript and Prisma client
       # installed above (C10 runs the same checker against altered declarations), judged as exactly the declared cases
-      # each passed once. The live cases L01-L08 and the mutants run in .github/workflows/emr-b.yml.
-      - name: EMR-B1 declaration agreement and access ledger contract C01-C10
+      # each passed once. The live cases L01-L08 and L17-L19 and the mutants run in .github/workflows/emr-b.yml.
+      - name: EMR-B1 declaration agreement and access ledger contracts C01-C10 and C13-C18
         if: ${{ !cancelled() }}
         run: |
           python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/emr-b-declaration --cwd . --file emr/units/b.json --file scripts/emr-compose.py --file docker-compose.yml --file docker-compose.prod.yml --file tests/measurement_ci.py --file tests/candidate_ci.py --file tests/emr/b/live.py --file tests/production_image_test.py --file tests/ops_product_transfer_fixture.py --file api/prisma/migrations/20261008120000_emr_b/migration.sql -- python3 -B scripts/emr-compose.py check
