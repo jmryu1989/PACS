@@ -39,7 +39,10 @@ test fails. Three kinds of evidence and nothing more:
   3. Source pins that guard, member console, Keycloak client and realm carry the same role list and that
      the gate sits between the membership check and the CSRF rule in the guard.
 """
+# S9-U0b RELIST: PACS permission/data assertions run compiled suites through pacs_source.
+# Remaining non-PACS source checks are unchanged U0f carry-over.
 from __future__ import annotations
+from pacs_source import assert_behaviour, source_query
 
 import atexit
 import functools
@@ -1756,7 +1759,7 @@ class ClinicianPolicySpec(unittest.TestCase):
     def test_09_u1b_read_rows_are_narrow_scoped_and_final_gated_in_source(self):
         """S5-U1b source pins. Runtime proof is clinician_read_live.py; these catch a narrow path being widened."""
         read = lambda name: (API / name).read_text(encoding="utf-8")  # noqa: E731
-        controller, service = read("pacs.controller.ts"), read("pacs.service.ts")
+        controller = read("pacs.controller.ts")
         viewer, preview = read("viewer.controller.ts"), read("report-preview.controller.ts")
         items = read("viewer.service.ts")
         contract = FIXTURES["read_contract"]
@@ -1771,40 +1774,12 @@ class ClinicianPolicySpec(unittest.TestCase):
             self.assertIsNotNone(block, route)
             self.assertIn("return " + call + ";", block.group(1))
         self.assertNotIn("clinician", controller)
-        # the clinician list IS the worklist enumeration (same tenant/tele/StudyAccess/page/recheck), narrowed after it
-        body = re.search(r"\n  async clinicianStudies\(c: Caller, query\?: any\) \{\r?\n(.*?)\r?\n  \}\r?\n", service, re.S).group(1)
-        lines = [line.strip() for line in body.splitlines()]
-        self.assertEqual(lines[:2], ["this.clinicianCaller(c);", "const list = await this.listStudies(c, query);"])
-        self.assertEqual(lines[-1], "return clinicianList(list, current);")
-        self.assertIn("if (clinicianListChanged(list.studies, current))", body)
-        # S5-U1b-F02: scope and report status (rs, signer, date, Report.version, head action) come from ONE statement —
-        # one snapshot — and the rows are projected from it; no second StudyState/Report read is merged in
-        self.assertEqual(body.count("$queryRaw"), 1, "one statement reads the whole report status")
-        self.assertEqual(body.count("await "), 2, "listStudies and the one snapshot statement are the only reads")
-        snapshot = body[body.index("$queryRaw"):]
-        for fragment in ('SELECT s.uid, s."institutionId", s."teleInstitutionId", s.rs, s."repDoc", s.confirm,',
-                         "COALESCE(r.version, 0) AS version, v.action", 'FROM "StudyState" s',
-                         'LEFT JOIN "Report" r ON r.uid = s.uid',
-                         'LEFT JOIN "ReportVersion" v ON v.uid = r.uid AND v.version = r.version'):
-            self.assertIn(fragment, snapshot, fragment)
-        for token in ("findings", "reportDraft", "toClient", "notObserved", "orderReconciliation", "gatewayReceipt",
-                      "findMany", "findUnique"):
-            self.assertNotIn(token, body, token)
+        assert_behaviour('pacs_source_behavior_test.cjs', '^U0B-CLINICIAN-')
+        assert_behaviour('clinician_read_serializer_test.cjs')
         self.assertEqual(ts_array(self.policy, "CLINICIAN_LIST_PINS"), contract["list_snapshot_pins"])
         self.assertIn("report: clinicianReportStatus(record, record ? { version: record.version, action: record.action } : null),", self.policy)
         self.assertIn("return !state || CLINICIAN_LIST_PINS.some(key => (state[key] ?? null) !== (seen[key] ?? null));", self.policy)
         self.assertNotIn("head.version === state.version", self.policy, "the worklist row's own version never pins a head")
-        scope = re.search(r"\n  private async clinicianScope<T>\(.*?\n  \}\r?\n", service, re.S).group(0)
-        self.assertIn("need(c.roles, CLINICIAN_ROLE, '임상의 조회');", service)
-        self.assertIn("this.clinicianCaller(c);", scope)
-        self.assertIn("const state = await this.gate(uid, c, tx);", scope)
-        self.assertIn("if (!state) throw new NotFoundException('검사를 찾을 수 없습니다');", scope)
-        self.assertIn("where: { uid_version: { uid, version: report.version } },", scope)
-        self.assertIn("isolationLevel: 'RepeatableRead'", scope)
-        self.assertIn("if (!report.final) return { uid, report, keys: null };", service)
-        statistics = service[service.index("if (path === '/statistics') {"):service.index("// /dicom-web/studies/{uid}/")]
-        closed = statistics.index("if (clinicianOnly(c.roles)) throw new ForbiddenException(")
-        self.assertLess(closed, statistics.index("return;"), "the server-wide count closes for clinician-only before it passes")
         # viewer items: clinician-only branch pinned to ONE signed version (S5-U1b-F01), not a boolean asked twice:
         # gate -> items read in the same statement as the signed head of that version -> gate again, all compared
         self.assertIn("return clinicianOnly(c.roles) ? this.clinicianItems(uid, query, c) : this.svc.list(uid, query, c);", viewer)
@@ -1820,9 +1795,8 @@ class ClinicianPolicySpec(unittest.TestCase):
         self.assertIn("new ConflictException({ code: CLINICIAN_VIEWER_CHANGED, message });", viewer)
         self.assertEqual(branch.count("clinicianViewerHead(uid, c)"), 2)
         self.assertNotIn("this.svc.list(", branch, "the clinician path never reads items without the signed head")
-        for source in (viewer, service):
+        for source in (viewer,):
             self.assertNotIn("clinicianViewerFinal", source, "a boolean gate cannot see reset -> re-approve")
-        self.assertIn("clinicianFinal(state.rs, head) ? head.version as number : null", service)
         self.assertRegex(self.policy, r"return Number\.isSafeInteger\(before\) && \(before as number\) > 0 && read === before && after === before;")
         self.assertEqual(re.search(r"export const CLINICIAN_VIEWER_CHANGED = '([A-Z_]+)';", self.policy).group(1),
                          contract["viewer_changed_code"])
@@ -1954,7 +1928,8 @@ class ClinicianPolicySpec(unittest.TestCase):
         # a controller or route outside *.controller.ts is invisible to both inventories: every other file goes through the
         # same lexer and runs (S5-U1c-F03), and together they use exactly the classified names
         sources = api_sources()
-        outside = {path.name: outside_decorators(path, source) for path, source in sources.items()
+        # keyed by the path under api/src: two modules may share a basename (emr-report/contract.ts, emr-signature/contract.ts)
+        outside = {path.relative_to(API).as_posix(): outside_decorators(path, source) for path, source in sources.items()
                    if not path.name.endswith(".controller.ts")}
         self.assertEqual(len(outside) + len(list(API.rglob("*.controller.ts"))), len(sources))
         self.assertEqual({name for names in outside.values() for name in names}, OUTSIDE_DECORATORS)
@@ -2010,23 +1985,30 @@ class ClinicianPolicySpec(unittest.TestCase):
             "auth.guard.ts": "req.clinicianOnly = clinicianOnly(req.roles);",
             "viewer.controller.ts": "return clinicianOnly(c.roles) ? this.clinicianItems(uid, query, c) : this.svc.list(uid, query, c);",
             "report-preview.controller.ts": "if (clinicianOnly(caller.roles)) throw new ForbiddenException({ code: CLINICIAN_ROUTE_DENIED });",
-            "pacs.service.ts": "if (clinicianOnly(c.roles)) throw new ForbiddenException('전체 검사 통계를 열람할 수 없습니다');",
         }
-        # D73 (AGENTS.md section 1-B): the four statement pins above are S9-U0f carry-over and no precedent. A site added
+        # D73 (AGENTS.md section 1-B): the three remaining statement pins above are S9-U0f carry-over and no precedent. A site added
         # since is named here by file and call count only; what its call does is checked by running the compiled code in
         # the named test cases (for S7-U4a, the real controller in CC-S02: clinician-only refused before any read, mixed
-        # users admitted). The TypeScript AST is installed only in the api image, not where this stdlib test runs.
-        behaviour_sites = FIXTURES["role_composition"]["behaviour_checked_sites"]
+        # users admitted). PACS provenance uses the installed TypeScript Program through pacs_source.
+        behaviour_sites = dict(FIXTURES["role_composition"]["behaviour_checked_sites"])
+        pacs = FIXTURES["role_composition"]["pacs_entry_site"]
+        location = source_query('entry', pacs['entry'])['file'].removeprefix('api/src/')
+        behaviour_sites[location] = pacs['behaviour']
+        expected = dict(FIXTURES["role_composition"]["clinician_only_call_sites"])
+        self.assertNotIn(location, expected)
+        expected[location] = pacs['calls']
+        bound_calls = Counter(site['file'].removeprefix('api/src/') for site in source_query('clinician-sites'))
         counted = {}
         for path in sorted(API.rglob("*.ts")):
             if path == POLICY:
                 continue
             source = path.read_text(encoding="utf-8")
-            calls = len(re.findall(r"\bclinicianOnly\(", source))
+            calls = bound_calls[path.relative_to(API).as_posix()]
             if calls:
-                counted[path.name] = calls
+                # the path under api/src: two modules may share a basename, and a basename key would merge their counts
+                counted[path.relative_to(API).as_posix()] = calls
             self.assertIsNone(re.search(r"includes\(\s*(?:'clinician'|\"clinician\"|CLINICIAN_ROLE)\s*\)", source), path.name)
-        self.assertEqual(counted, FIXTURES["role_composition"]["clinician_only_call_sites"])
+        self.assertEqual(counted, expected)
         self.assertEqual(set(sites) & set(behaviour_sites), set(), "a site is pinned by statement or by behaviour, not both")
         self.assertEqual(set(sites) | set(behaviour_sites), set(counted), "every counted site is one of the two kinds")
         for name, line in sites.items():
@@ -2038,7 +2020,7 @@ class ClinicianPolicySpec(unittest.TestCase):
                 for case in entry["cases"]:
                     self.assertIn("test('" + case + " ", cases, "the named behaviour case exists")
         # the clinician reads admit a mixed user by role; they never require clinician-only
-        self.assertIn("need(c.roles, CLINICIAN_ROLE, '임상의 조회');", (API / "pacs.service.ts").read_text(encoding="utf-8"))
+        assert_behaviour('pacs_source_behavior_test.cjs', '^U0B-CLINICIAN-ROLES')
         live = LIVE_MODULE.read_text(encoding="utf-8")
         self.assertIn("def " + FIXTURES["role_composition"]["live_test"] + "(self) -> None:", live)
         self.assertIn('"' + FIXTURES["role_composition"]["live_marker"] + ' "', live)

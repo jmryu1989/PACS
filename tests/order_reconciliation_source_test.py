@@ -13,6 +13,9 @@
 What this file cannot see: whether the compiled server, the browser and PostgreSQL behave as the
 source says. That is the hosted evidence named in the unit report.
 """
+# S9-U0b RELIST: PACS permission/data assertions run compiled suites through pacs_source.
+# Remaining non-PACS source checks are unchanged U0f carry-over.
+from pacs_source import assert_behaviour
 from page_source import read_page_source
 import json
 import re
@@ -38,7 +41,6 @@ def text(*parts):
     return (ROOT.joinpath(*parts)).read_text(encoding="utf-8").replace("\r\n", "\n")
 
 
-SERVICE = text("api", "src", "pacs.service.ts")
 RULE = text("api", "src", "order-reconciliation.ts")
 ORTHANC = text("api", "src", "orthanc.service.ts")
 SEED = text("api", "src", "seed.ts")
@@ -366,36 +368,13 @@ def js_function(source, name):
 
 class ServerPins(unittest.TestCase):
     def test_list_reads_the_order_side_on_the_completing_page_before_the_access_recheck(self):
-        listing = between(SERVICE, "  async listStudies(c: Caller, query?: any) {", "  private notObserved(")
-        self.assertIn("const qido = page ? await this.orthanc.studyIdentities(this.studyAccess.needsMetadata(access), true) : await this.orthanc.studies();", listing)
-        current = listing.index("if (changedAccess(current)) throw accessConflict();")
-        rows = listing.index("const orderRows = !page || window.pagination?.next === null ? await this.orderSide(me) : null;")
-        unchanged = listing.index("await this.studyAccess.unchanged(c,access);")
-        answer = listing.index("const orderReconciliation = orderRows ? this.orderReconciliation(qido, orderRows, me, access) : undefined;")
-        self.assertTrue(current < rows < unchanged < answer)
-        self.assertIn("observedAt,\n      ...(notObserved === undefined ? {} : { notObserved }),\n"
-                      "      ...(orderReconciliation === undefined ? {} : { orderReconciliation }), ...(page ? { pagination: window.pagination } : {}) };",
-                      listing)
-        # U1b's absence line is untouched.
-        self.assertIn("const notObserved = !page || window.pagination?.next === null ? this.notObserved(qido, states, me, access, observedAt) : undefined;", listing)
+        assert_behaviour('order_reconciliation_server_test.cjs', '^S4-U2 (paged list|failures)')
 
     def test_order_side_query_is_tenant_filtered_and_carries_no_patient_field(self):
-        side = between(SERVICE, "  private orderSide(me: string) {", "\n  }\n")
-        self.assertEqual(2, side.count("where: { institutionId: me }"))
-        self.assertIn("select: { oid: true, institutionId: true, accession: true, matched: true, studyUid: true } }", side)
-        self.assertIn("select: { uid: true, institutionId: true, matched: true, orderOid: true } }", side)
-        for field in ("patientId", "name:", "sched", "birth", "ov", "orig", "teleInstitutionId"):
-            self.assertNotIn(field, side)
+        assert_behaviour('order_reconciliation_server_test.cjs', '^S4-U2 (full list|restricted)')
 
     def test_the_answer_uses_the_same_successful_enumeration_and_the_server_read_accession(self):
-        helper = between(SERVICE, "  private orderReconciliation(", "\n  }\n")
-        for needle in ("if (!Array.isArray(qido)) return null;", "if (!uid) return null;",
-                       "restricted: access.policy.restricted",
-                       "accessionOf: row => OrthancService.tag(row, '00080050')",
-                       "permitted: (uid, row) => this.studyAccess.matches(access, uid, row)"):
-            self.assertIn(needle, helper)
-        for banned in (".ov", ".orig", "parse(", "prisma", "patient"):
-            self.assertNotIn(banned, helper)
+        assert_behaviour('order_reconciliation_server_test.cjs', '^S4-U2 (compiled|full list|failures)')
 
     def test_the_rule_module_is_pure_and_carries_the_tenant_pins(self):
         self.assertIn("export const ORDER_RECONCILIATION_SOURCE = 'engineering_only' as const;", RULE)
@@ -412,23 +391,15 @@ class ServerPins(unittest.TestCase):
             self.assertNotIn(banned, RULE)
 
     def test_no_existing_write_or_response_path_gained_the_accession(self):
-        for owner in ("  async match(", "  async unmatch(", "  async removeState("):
-            body = between(SERVICE, owner, "\n  }\n")
-            self.assertNotIn("accession", body, owner)
-        bootstrap = between(SERVICE, "  async bootstrap(c: Caller, query?: any) {", "\n  }\n")
-        self.assertNotIn("accession", bootstrap)
-        # Code (not comment) lines naming the column: the one read and the one server-read DICOM tag.
-        code = [line.strip() for line in SERVICE.splitlines()
-                if "accession" in line and not line.strip().startswith(("*", "//", "/*"))]
-        self.assertEqual(["select: { oid: true, institutionId: true, accession: true, matched: true, studyUid: true } }),",
-                          "accessionOf: row => OrthancService.tag(row, '00080050'),"], code)
+        assert_behaviour('order_reconciliation_server_test.cjs', '^S4-U2 bootstrap')
+        assert_behaviour('pacs_source_behavior_test.cjs', '^U0B-IDENTITY-MATCH')
         self.assertNotIn("accession", SEED, "the product never invents a seed accession")
 
     def test_identity_enumeration_default_is_unchanged_and_accession_is_opt_in(self):
         self.assertIn("async studyIdentities(accessMetadata = false, accession = false): Promise<any[]> {", ORTHANC)
         self.assertIn("RequestedTags:['StudyInstanceUID','InstitutionName',\n        ...(accessMetadata ? ['PatientID','StudyDate','ModalitiesInStudy'] : []), ...(accession ? ['AccessionNumber'] : [])] });", ORTHANC)
         self.assertIn("Object.assign(source, { '00080050': { Value:[typeof value === 'string' ? value : ''] } });", ORTHANC)
-        self.assertEqual(1, SERVICE.count("studyIdentities("))
+        assert_behaviour('order_reconciliation_server_test.cjs', '^S4-U2 paged list')
 
 
 class MigrationPins(unittest.TestCase):

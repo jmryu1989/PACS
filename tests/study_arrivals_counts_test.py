@@ -11,8 +11,11 @@ Pure stdlib. Two things are checked here and nothing more:
      edit that reintroduces `|| 0` or drops the null branch fails this file rather than silently
      changing the meaning of 0 in the worklist.
 """
+# S9-U0b RELIST: PACS permission/data assertions run compiled suites through pacs_source.
+# Remaining non-PACS source checks are unchanged U0f carry-over.
 from __future__ import annotations
 
+from pacs_source import assert_behaviour
 import math
 import re
 import sys
@@ -129,25 +132,14 @@ class CountRuleVectors(unittest.TestCase):
 
 class SourcePins(unittest.TestCase):
     def setUp(self):
-        self.service = SERVICE.read_text(encoding="utf-8")
         self.arrivals = ARRIVALS.read_text(encoding="utf-8")
         self.cjs = CJS.read_text(encoding="utf-8")
 
     def test_service_routes_both_count_tags_through_qido_count_and_never_or_zero(self):
-        self.assertIn("count: qidoCount(st, '00201208'),", self.service)
-        self.assertIn("series: qidoCount(st, '00201206'),", self.service)
-        self.assertNotRegex(self.service, r"tag\(st, '0020120[68]'\)")
-        self.assertNotRegex(self.service, r"\+OrthancService\.tag\([^)]*\)\s*\|\|\s*0")
+        assert_behaviour('pacs_source_behavior_test.cjs', '^U0B-COUNTS')
 
     def test_service_helper_decision_surface_matches_the_python_model(self):
-        body = self.service[self.service.index("export function qidoCount("):]
-        body = body[:body.index("\n}\n") + 3]
-        self.assertIn("typeof raw === 'number' ? String(raw) : typeof raw === 'string' ? raw.trim() : ''", body)
-        self.assertIn(r"/^\+?\d+$/.test(text)", body)
-        self.assertIn("return null", body)
-        self.assertIn("Number.isSafeInteger(value) ? value : null", body)
-        self.assertEqual(r"\+?\d+", IS_SHAPE.pattern)
-        self.assertIn(": number | null", body)
+        assert_behaviour('pacs_source_behavior_test.cjs', '^U0B-COUNTS')
 
     def test_arrivals_module_accepts_null_as_unknown_and_measures_growth_only_between_known(self):
         self.assertIn("const validCount=value=>value===null||(Number.isSafeInteger(value)&&value>=0);", self.arrivals)

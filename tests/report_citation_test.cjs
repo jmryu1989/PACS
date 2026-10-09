@@ -44,7 +44,7 @@ const EPOCH = '0a1b2c3d-0000-4000-8000-00000000000a';
 
 function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@synthetic', findings: 'HEAD', conclusion: '', recommendation: '' },
   versions = new Map(), draft = null, readable = READABLE, readableAll = false, bytes = null, fail = null,
-  refuseTxRequire = false } = {}) {
+  refuseTxRequire = false, checkError = fail_error() } = {}) {
   const writes = [], audits = [], raw = [], calls = [], created = [];
   // S7-U5: the caller's draft row as the store holds it, with its boundary; the study row carries the draft epoch.
   let row = draft ? { uid: UID, author: CALLER.actor, findings: '', conclusion: '', recommendation: '', baseVersion: 0, citations: null,
@@ -72,6 +72,7 @@ function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@syn
     // `reportDraft.deleteMany` - the names the cases below have always used for "the draft is stored / is gone".
     reportDraft: new Proxy({}, { get: (_target, method) => async a => {
       if (method === 'findUnique') { calls.push({ call: 'reportDraft.findUnique', tx: true }); return row; }
+      if (fail === 'upsert') throw checkError;
       const data = a.data ?? a.create ?? a.update;
       if (data.present === false) writes.push('reportDraft.deleteMany');
       else { writes.push('reportDraft.upsert'); created.push({ call: 'draft', data }); }
@@ -85,20 +86,22 @@ function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@syn
       // Every existing caller passes this uid (the service always keys on its own argument).
       findUnique: async a => { calls.push({ call: 'reportVersion.findUnique', args: a });
         return (a.where.uid_version.uid === UID ? versions.get(a.where.uid_version.version) : null) ?? null; },
-      create: async a => { if (fail === 'create') throw fail_error();
+      create: async a => { if (fail === 'create') throw checkError;
         writes.push(`reportVersion.create:v${a.data.version}:${a.data.action}`); created.push({ call: 'version', data: a.data }); },
-      createMany: async a => { if (fail === 'createMany') throw fail_error();
+      createMany: async a => { if (fail === 'createMany') throw checkError;
         writes.push('reportVersion.createMany'); created.push({ call: 'many', data: a.data }); },
     },
     auditLog: { create: async a => { audits.push(a.data); return a.data; } },
   };
   const prisma = {
     $transaction: async (work, options) => { calls.push({ call: 'transaction', options });
-      if (fail === 'upsert') throw fail_error(); return work(tx); },
+      return work(tx); },
     studyState: { findUnique: async () => { calls.push({ call: 'studyState', tx: false }); return state; } },
     report: { findUnique: async () => report },
     reportDraft: { findUnique: async () => { calls.push({ call: 'reportDraft.findUnique', tx: false }); return row; } },
-    reportVersion: { findMany: async a => { calls.push({ call: 'versions', args: a }); return []; } },
+    reportVersion: { findMany: async a => { calls.push({ call: 'versions', args: a });
+      return [...versions.values()].map(version => a.select
+        ? Object.fromEntries(Object.entries(version).filter(([key]) => a.select[key])) : { ...version }); } },
     auditLog: { create: async a => { audits.push(a.data); return a.data; } },
   };
   const studyAccess = { prepare: async () => calls.push({ call: 'prepare' }),
@@ -136,7 +139,8 @@ function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@syn
 
 // The shape PostgreSQL's driver gives us is unproven until the hosted run; the one thing the
 // service may rely on is the constraint name it wrote itself.
-const fail_error = () => Object.assign(new Error('null value violates check constraint "ReportVersion_citations_check"'), { code: 'P2010' });
+const fail_error = (constraint = 'ReportVersion_citations_check') =>
+  Object.assign(new Error(`null value violates check constraint "${constraint}"`), { code: 'P2010' });
 
 // What StudyAccessService.require() gives the caller when the policy no longer allows the study.
 // The class itself is not reachable from this file's module path, so the SHAPE the service and
@@ -453,7 +457,8 @@ test('the byte bound is whatever the database measured, not a shorter local gues
 
 test('a citation CHECK becomes the same named 409 on all three write paths, and other errors are untouched', async () => {
   const draft = { baseVersion: 4, citations: [] };
-  const insertion = await refusal(fixture({ draft, fail: 'upsert' }).svc.putReport(UID, { ...BODY, baseVersion: 4, insert: INSERT }, CALLER), 409);
+  const insertion = await refusal(fixture({ draft, fail: 'upsert', checkError: fail_error('ReportDraft_citations_check') })
+    .svc.putReport(UID, { ...BODY, baseVersion: 4, insert: INSERT }, CALLER), 409);
   assert.equal(insertion.code, 'REPORT_CITATION_LIMIT');
   const signing = await refusal(commit(fixture({ draft, fail: 'create' }), { action: 'approve' }), 409);
   assert.equal(signing.code, 'REPORT_CITATION_LIMIT');
@@ -470,6 +475,17 @@ test('a citation CHECK becomes the same named 409 on all three write paths, and 
   const e = await commit(other, { action: 'approve' }).then(() => null, error => error);
   assert.match(String(e.message), /column "x"/);
   assert.notEqual(e.getStatus?.(), 409);
+  for (const fail of ['upsert', 'create', 'createMany']) {
+    const differentCheck = fail_error('Unrelated_check');
+    const f = fixture({ draft, fail, checkError: differentCheck });
+    if (fail === 'createMany') f.tx.$queryRaw = forced.tx.$queryRaw;
+    const operation = fail === 'upsert'
+      ? f.svc.putReport(UID, { ...BODY, baseVersion: 4, insert: INSERT }, CALLER)
+      : fail === 'create' ? commit(f, { action: 'approve' })
+        : f.svc.forceDiscardDrafts(UID, { ...CALLER, roles: ['admin'] });
+    await assert.rejects(operation, error => error === differentCheck,
+      `${fail}: a different CHECK must retain its original error`);
+  }
 });
 
 test('a forced release runs once under the study lock a commit takes: its CHECK is the named 409 and there is no retry leg', async () => {
@@ -490,12 +506,14 @@ test('a forced release runs once under the study lock a commit takes: its CHECK 
   assert.match(f.raw[0], /FROM "StudyState".*FOR UPDATE/, 'the study row is locked before the drafts are read');
 });
 test('the history response names its columns and the new one is not among them', async () => {
-  const f = fixture();
-  await f.svc.versions(UID, CALLER);
-  const args = f.calls.find(c => c.call === 'versions').args;
-  assert.ok(args.select, 'a whole-row history response would carry citations');
-  assert.equal(args.select.citations, undefined);
-  assert.equal(args.select.findings, true);
+  const row = { version: 4, findings: 'SYN history', citations: [carried('history')],
+    structured: [{ sid: 'syn-structure', renderedText: 'SYN structured evidence' }] };
+  const f = fixture({ versions: new Map([[4, row]]) });
+  const history = await f.svc.versions(UID, CALLER);
+  assert.equal(history.length, 1, 'exercise a stored version with both evidence columns');
+  assert.equal(history[0].findings, row.findings);
+  assert.equal(Object.hasOwn(history[0], 'citations'), false, 'history must not expose citations');
+  assert.equal(Object.hasOwn(history[0], 'structured'), false, 'history must not expose structured data');
 });
 
 test('the dedicated read re-gates finding readability and reduces what it cannot vouch for', async () => {

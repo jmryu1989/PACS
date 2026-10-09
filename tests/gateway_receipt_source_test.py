@@ -6,6 +6,9 @@ Named wrong rules must each fail a vector, so the vectors are not decoration. Th
 literals are read by AST (agent.py is never imported: it needs `requests`), and the pins the hosted
 runs depend on - route, migration, restore bookkeeping, counts, workflow steps - are checked as text.
 """
+# S9-U0b RELIST: PACS permission/data assertions run compiled suites through pacs_source.
+# Remaining non-PACS source checks are unchanged U0f carry-over.
+from pacs_source import assert_behaviour
 from page_source import read_page_source
 import ast
 import json
@@ -28,7 +31,6 @@ VECTORS = json.loads(text("tests", "gateway_receipt_vectors.json"))
 AGENT = text("gateway", "agent", "agent.py")
 AGENT_TESTS = text("gateway", "agent", "test_agent.py")
 RULE = text("api", "src", "gateway-receipt.ts")
-SERVICE = text("api", "src", "pacs.service.ts")
 CONTROLLER = text("api", "src", "pacs.controller.ts")
 SCHEMA = text("api", "prisma", "schema.prisma")
 MIGRATION_NAME = "20260924130000_gateway_receipt"
@@ -389,44 +391,10 @@ class ServerPins(unittest.TestCase):
                         decide.index("if (next.seq < stored.seq) return { kind: 'stale' };"))
 
     def test_the_route_decides_ownership_first_and_writes_only_forward(self):
-        method = between(SERVICE, "  async gatewayReceipt(body: unknown, c: Caller) {", "\n  }\n")
-        order = ["needExact(c, 'gateway', '전송 영수증');", "const me = inst(c);", "parseGatewayReceipt(body)",
-                 "this.prisma.$transaction(", "pg_advisory_xact_lock(hashtextextended(${'kin.gateway-receipt:' + uid}, 0))",
-                 "tx.studyState.findUnique({ where: { uid }, select: { institutionId: true } })",
-                 "if (!study || study.institutionId !== me) return { kind: 'absent' as const };",
-                 "tx.gatewayReceipt.findUnique(", "decideGatewayReceipt("]
-        positions = [method.index(needle) for needle in order]
-        self.assertEqual(positions, sorted(positions))
-        # One 404 for absent and foreign; the announce ownership 409 is not reused.
-        self.assertEqual(method.count("NotFoundException("), 1)
-        self.assertIn("throw new NotFoundException({ code: 'GATEWAY_RECEIPT_STUDY_NOT_FOUND' });", method)
-        self.assertNotIn("STUDY_OWNERSHIP_CONFLICT", method)
-        self.assertEqual(method.count("ConflictException("), 2)
-        # The body is handed to the parser and to nothing else: no institution or time is read from it.
-        self.assertEqual(re.findall(r"\bbody\b", method), ["body", "body"])
-        self.assertIn("receivedAt: new Date() };", method)
-        self.assertEqual(method.count("tx.gatewayReceipt.create("), 1)
-        self.assertEqual(method.count("tx.gatewayReceipt.update("), 1)
-        for banned in ("upsert", ".delete", "deleteMany", "updateMany"):
-            self.assertNotIn(banned, method)
-        self.assertEqual(sorted(set(re.findall(r"'(gateway\.receipt\.[a-z_]+)'", method))),
-                         ["gateway.receipt.epoch_unrecognised", "gateway.receipt.first", "gateway.receipt.transition"])
-        self.assertIn("if (decision.transition)", method)
-        self.assertIn("where: { action: 'gateway.receipt.epoch_unrecognised', target: uid, at: { gte: since } }", method)
+        assert_behaviour('gateway_receipt_server_test.cjs', '^S4-U3 route:')
 
     def test_the_list_carries_only_own_receipts_and_bootstrap_none(self):
-        listing = between(SERVICE, "  async listStudies(c: Caller, query?: any) {", "  private notObserved(")
-        self.assertIn("const receipts = await this.prisma.gatewayReceipt.findMany({ where: { studyUid: { in: pageUids }, institutionId: me } });", listing)
-        self.assertIn("gatewayReceipt: s.institutionId === me ? projectGatewayReceipt(receiptByUid.get(uid)) : null,", listing)
-        self.assertLess(listing.index("this.prisma.gatewayReceipt.findMany("), listing.index("await this.studyAccess.unchanged(c,access);"))
-        # 1 -> 2 at S4-F01V: the same projection for an absent own study (tests/gateway_retry_source_test.py pins it).
-        self.assertEqual(SERVICE.count("projectGatewayReceipt("), 2)
-        for owner in ("  async bootstrap(c: Caller, query?: any) {", "function toClient("):
-            self.assertNotIn("gatewayReceipt", between(SERVICE, owner, "\n  }\n" if owner.startswith("  async") else "\n}\n"))
-        project = between(RULE, "export function projectGatewayReceipt(row: any) {", "\n}\n")
-        keys = re.findall(r"(\w+):", between(project, "return {", "};"))
-        self.assertEqual(sorted(set(keys)), sorted(OBSERVATION["receipts"]["sending_3_of_12"]),
-                         "the projection is the shape S4-U1b's labels already read")
+        assert_behaviour('gateway_receipt_server_test.cjs', '^S4-U3 (list:|projection)')
 
     def test_the_controller_route(self):
         self.assertIn("  @Post('gateway/receipt')\n  @HttpCode(200)\n  gatewayReceipt(@Body() body: any, @Req() req: any) {\n"

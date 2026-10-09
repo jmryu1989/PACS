@@ -348,11 +348,12 @@ MODULE_STUBS = {
     "finding-link-model.js": "window.kinFindingLinkModel = { SCHEMA: 2 };",
     "viewer-findings.js": "window.kinViewerFindings = (services, model, session) => window.synModule('findings', ['New Finding', 'Link Saved Items'], '#kin-viewer-history', session);",
     "viewer-volume-job.js": "/* SYN: no volume job module */",
+    "viewer-stack-restore.js": "/* SYN: no stack restore in the role-only fixture */",
     "viewer-jobs.js": "window.kinViewerJobs = (services, model, session) => window.synModule('jobs', ['Save New Job'], null, session);",
     "tech-note.css": "",
 }
 
-REAL_MODULES = {"jobs": ("viewer-jobs.js",), "findings": ("finding-link-model.js", "viewer-findings.js"),
+REAL_MODULES = {"jobs": ("viewer-stack-restore.js", "viewer-jobs.js"), "findings": ("finding-link-model.js", "viewer-findings.js"),
                 "tech-note": ("viewer-tech-note.js",)}
 
 VIEWER_HARNESS = r"""<!doctype html><html><head><meta charset="utf-8"><title>SYN viewer harness</title></head><body>
