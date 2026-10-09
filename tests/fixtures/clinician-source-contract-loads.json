@@ -1,5 +1,19 @@
 [
   {
+    "name": "fixed image native flock dependency",
+    "files": {"emr-runtime/file-lock.ts": "export const lock = (fd: number) => require('../../native/flock.node').flock(fd, true);\n"}
+  },
+  {
+    "name": "native dependency exception does not allow another native module",
+    "files": {"emr-runtime/file-lock.ts": "export const lock = () => require('../../native/other.node');\n"},
+    "refused": "relative module is missing or outside the checked api/src scope"
+  },
+  {
+    "name": "native dependency exception does not allow another loader site",
+    "files": {"probe.ts": "export const lock = () => require('../native/flock.node');\n"},
+    "refused": "relative module is missing or outside the checked api/src scope"
+  },
+  {
     "name": "listed IP parser and fixed prototype comparisons",
     "files": {"probe.ts": "import { isIP } from 'node:net';\nexport const valid = (value: any) => isIP(value) !== 0;\nexport const plain = (value: any) => [null, Object.prototype, Array.prototype].includes(Object.getPrototypeOf(value));\n"}
   },

@@ -1204,7 +1204,7 @@ def module_loads(path, source, code, bindings=None):
         elif kind == "plain" and module.startswith(("./", "../")):
             # The compiler resolves against exactly the source set the inventory checks, not the filesystem alone.
             followed = bindings.get("relative_loads", {}).get(at)
-            if followed != "followed":
+            if followed not in ("followed", "native-flock"):
                 found.append((line_of(code, at), f"{word}({module!r}): {followed or 'relative binding not followed'}"))
         elif kind == "plain":
             found.append((line_of(code, at), f"{word}({module!r}): not a package the loaders may take"))

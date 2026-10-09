@@ -166,6 +166,12 @@ function relativeLoad(node, file, program, checker, known, files) {
   } else return null;
   if (!ts.isStringLiteral(argument) || !/^\.\.?\//.test(argument.text)) return null;
   const offset = codePoint(file, callee.getStart(file));
+  // The image-built N-API component is a trusted native dependency with a single
+  // flock ABI (LOCK-01). This exact loader does not broaden TS module traversal.
+  if (absolute(file.fileName) === SRC + '/emr-runtime/file-lock.ts' &&
+      argument.text === '../../native/flock.node' && ts.isIdentifier(callee) && callee.text === 'require') {
+    return [offset, 'native-flock'];
+  }
   const resolved = ts.resolveModuleName(argument.text, file.fileName, options, host).resolvedModule;
   const destination = resolved && absolute(resolved.resolvedFileName);
   if (!destination || !files.has(destination) || !underSrc(destination) || destination.endsWith('.d.ts')) {
