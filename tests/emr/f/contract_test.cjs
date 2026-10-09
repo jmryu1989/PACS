@@ -1609,7 +1609,9 @@ function incidentDelay(key, patch = {}) {
     causalReview: { evidenceId: 'causal-review', reviewedAt: itime(2), relatesToTime: itime(1), createdAt: itime(1), receivedAt: itime(2), reason: 'verified inability caused by documented event' }, ...patch };
 }
 function verifiedDecider(patch = {}) {
-  return { status: 'verified-privacy-officer', by: id('privacy-officer'), ownerId: INST_X, evidenceId: 'designation-evidence', verifiedAt: IA, ...patch };
+  return { status: 'verified-privacy-officer', by: id('privacy-officer'), ownerId: INST_X, evidenceId: 'designation-evidence', verifiedAt: IA,
+    designation: { categoryBasis: 'privacy-decree:32.2.2', categoryEvidenceId: 'executive-designation',
+      qualificationRequired: false, qualificationAssessmentEvidenceId: 'controller-category-check' }, ...patch };
 }
 function mohwDelivery() {
   return { channel: 'MOHW-official', coveredFields: ['institution-name', 'incident-time', 'damage-details', 'technical-support-request'] };
@@ -1833,7 +1835,10 @@ test('TEST-F-07 R5 COMMON processor clocks and decision authority are separate f
 
 function ispFinding(status = true, patch = {}) {
   return incidentFacts({ ispIncident: { eventId: 'attack-1', attackCaused: true, status,
-    ...(status === 'unknown' ? {} : { verification: { by: id('privacy-officer'), at: IA, evidenceId: 'isp-status-evidence' } }), ...patch } });
+    occurrence: { occurredAt: IA, endedAt: null, evidenceId: 'attack-occurrence' },
+    ...patch, ...(status === 'unknown' ? {} : { verification: { by: id('privacy-officer'), at: IA, evidenceId: 'isp-status-evidence',
+      types: { telecomBusiness: false, forProfitTelecomInformation: status },
+      ...(status === false ? { nonApplicabilityBasis: 'verified software supply only; neither statutory type applies' } : {}), ...patch.verification } }) } });
 }
 function ispReport(hours = 2, patch = {}) {
   return { kind: 'isp-incident-report', triggeredAt: IA, noticeId: 'isp-report', sentAt: itime(hours), channel: 'KISA',
@@ -1927,6 +1932,216 @@ test('TEST-F-07 R5 LQ-01 ISP priority user notice and per-recipient deemed notic
   const operator = F.planIncidentResponse(auditor, scope, processorFacts, { asOf: itime(6) });
   assert.equal(duty(operator, 'isp-user-notice').recipientScopeRef, 'hospital-customers');
   assert.equal(duty(operator, 'isp-incident-report').dueAt, itime(24));
+});
+
+// D812 / D-25 v5 -> REQ-EMR-15/19 -> RISK-F-07 -> TEST-F-07.
+// Dates below are legal event boundaries in Seoul; the public event contract stores canonical UTC.
+const r6Utc = at => new Date(at).toISOString();
+const r6After = (at, hours) => new Date(Date.parse(at) + hours * 3600000).toISOString();
+const r6OldBasis = '구 정보통신망법 제48조의3제1항 전단(즉시) + 구 시행령 제58조의2제1항(알게 된 때부터 24시간 이내)';
+const r6NewBasis = '정보통신망법 제48조의3제1항 전단(알게 된 때부터 24시간 이내) + 시행령 제58조의8제1항·제3항(신고사항·방법)';
+function r6Finding(knownAt = IA, patch = {}) {
+  const at = r6Utc(knownAt);
+  const f = ispFinding(patch.status ?? true, { occurrence: { occurredAt: at, endedAt: null, evidenceId: 'occurrence' }, ...patch,
+    ...(patch.status === 'unknown' ? {} : { verification: { at, ...patch.verification } }) });
+  return { ...f, awarenessAt: at, hospitalKnownAt: at, knowledgeAttributionEvidenceId: 'institutional-knowledge',
+    determinationAt: at, status: 'not-a-leak', possibleGround: null };
+}
+function r6Report(at, sentAt, patch = {}) {
+  return ispReport(1, { triggeredAt: at, sentAt, ...patch });
+}
+const r6Initial = p => duty(p, 'isp-incident-report');
+test('TEST-F-07 R6 ISP-DUTIES D25V4-N1 2024-08-13 23:59 KST is display-only without exemption', async () => {
+  const { auditor, scope } = await incidentForResponse(), at = r6Utc('2024-08-13T23:59:00+09:00');
+  for (const status of [true, 'unknown']) {
+    const facts = r6Finding(at, { status }), p = F.planIncidentResponse(auditor, scope, facts, { asOf: r6After(at, 30) });
+    assert.equal(r6Initial(p), undefined, 'M-F-R6-001: historical knowledge creates no automatic report task');
+    assert.deepEqual(p.ispAssessments[0].initialReport, { dueAt: null,
+      dueRule: 'resolve from the law in force at hospitalKnownAt; do not assign a blanket +24h or a blanket no-deadline',
+      displayedBasis: '확인된 당시 시행 법령·기한을 표시. 확인 전에는 당시 법령 확인 필요로 표시.',
+      taskPolicy: 'display-only', automaticExemption: false });
+    const reported = F.planIncidentResponse(auditor, scope, facts, { previous: p, notices: [r6Report(at, r6After(at, 20))], asOf: r6After(at, 31) });
+    assert.equal(r6Initial(reported), undefined);
+    assert.equal(reported.ledger.notices[0].sentAt, r6After(at, 20));
+  }
+});
+for (const [label, knownAt, dueAt, basis, method] of [
+  ['2024-08-14 00:00', '2024-08-14T00:00:00+09:00', '2024-08-15T00:00:00+09:00', r6OldBasis, '구 시행령 제58조의2제3항'],
+  ['2026-09-30 23:59', '2026-09-30T23:59:00+09:00', '2026-10-01T23:59:00+09:00', r6OldBasis, '구 시행령 제58조의2제3항'],
+  ['2026-10-01 00:00', '2026-10-01T00:00:00+09:00', '2026-10-02T00:00:00+09:00', r6NewBasis, '시행령 제58조의8제3항'],
+  ['2026-09-29 10:00 counterexample', '2026-09-29T10:00:00+09:00', '2026-09-30T10:00:00+09:00', r6OldBasis, '구 시행령 제58조의2제3항'],
+]) test(`TEST-F-07 R6 ISP-DUTIES D25V4-N1 ${label} KST keeps its deadline and knowledge-date basis`, async () => {
+  const { auditor, scope } = await incidentForResponse(), facts = r6Finding(knownAt);
+  const p = F.planIncidentResponse(auditor, scope, facts, { asOf: r6After(dueAt, 1) }), o = r6Initial(p);
+  assert.deepEqual([o.triggeredAt, o.dueAt, o.originalDueAt, o.status, o.lateByMs],
+    [r6Utc(knownAt), r6Utc(dueAt), r6Utc(dueAt), 'overdue', 3600000], 'M-F-R6-002: old and new knowledge bands both retain continuous twenty-four hours');
+  assert.equal(p.ispAssessments[0].initialReport.displayedBasis, basis, 'M-F-R6-004: the statute boundary is midnight KST');
+  assert.deepEqual(o.basis, [basis, method], 'M-F-R6-003: basis follows original knowledge even when due after cutover');
+  const sent = F.planIncidentResponse(auditor, scope, facts, { previous: p, asOf: r6After(dueAt, 2), notices: [r6Report(r6Utc(knownAt), r6After(dueAt, 0.5))] });
+  assert.deepEqual([r6Initial(sent).status, r6Initial(sent).lateByMs, r6Initial(sent).timeliness], ['met', 1800000, 'requires-review']);
+});
+test('TEST-F-07 R6 ISP-DUTIES D25V3-N1 user notice selects occurrence independently of later knowledge', async () => {
+  const { auditor, scope } = await incidentForResponse(), known = r6Utc('2026-10-02T10:00:00+09:00');
+  for (const occurredAt of ['2024-08-13T23:59:00+09:00', '2024-08-14T00:00:00+09:00', '2026-09-30T23:59:00+09:00', '2026-10-01T00:00:00+09:00']) {
+    const applies = occurredAt === '2026-10-01T00:00:00+09:00';
+    const facts = r6Finding(known, { occurrence: { occurredAt: r6Utc(occurredAt), endedAt: r6Utc(occurredAt), evidenceId: 'ended-incident' },
+      userImpact: userImpact({ confirmedAt: known, decider: verifiedDecider({ verifiedAt: known }) }) });
+    const p = F.planIncidentResponse(auditor, scope, facts);
+    assert.equal(!!duty(p, 'isp-user-notice'), applies, 'M-F-R6-005: later knowledge never substitutes for the occurrence cutover');
+    assert.equal(r6Initial(p).dueAt, r6After(known, 24));
+    assert.equal(p.ispAssessments[0].userNotice.applicability, applies ? 'applicable' : 'not-applicable');
+    if (applies) assert.deepEqual([duty(p, 'isp-user-notice').dueAt, duty(p, 'isp-user-notice').triggeredAt], [null, known]);
+  }
+});
+test('TEST-F-07 R6 ISP-DUTIES D25V3-N1 unclear or straddling occurrence requires a recorded decision', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  for (const occurrence of [undefined, { occurredAt: null, endedAt: null, evidenceId: 'unknown-time' },
+    { occurredAt: r6Utc('2026-09-30T23:59:00+09:00'), endedAt: r6Utc('2026-10-01T01:00:00+09:00'), evidenceId: 'continuous-attack' }]) {
+    const facts = r6Finding(IA, { occurrence, userImpact: userImpact() });
+    const p = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(3) });
+    assert.deepEqual([duty(p, 'isp-user-notice'), p.ispAssessments[0].userNotice.applicability], [undefined, 'decision-required'],
+      'M-F-R6-006: uncertainty never automatically creates or exempts the user notice');
+    assert.ok(r6Initial(p));
+    for (const applies of [true, false]) {
+      const decision = { decisionId: `occurrence-${applies}`, applies, at: itime(4), reason: 'reviewed occurrence evidence and applicability',
+        basis: 'network:21500:addendum:4', evidenceId: 'occurrence-review', decider: verifiedDecider() };
+      const next = { ...facts, ispIncident: { ...facts.ispIncident, userNoticeDecision: decision } };
+      const resolved = F.planIncidentResponse(auditor, scope, next, { previous: p, asOf: itime(5) });
+      assert.equal(!!duty(resolved, 'isp-user-notice'), applies);
+      assert.deepEqual(resolved.ispAssessments[0].userNotice.decisionRefs, [decision.decisionId]);
+      if (applies) assert.equal(duty(resolved, 'isp-user-notice').triggeredAt, itime(2));
+      const invalid = { ...next, ispIncident: { ...next.ispIncident, userNoticeDecision: { ...decision, evidenceId: '' } } };
+      incidentRefused(() => F.planIncidentResponse(auditor, scope, invalid, { asOf: itime(5) }), [invalid], 'applicability decision needs evidence');
+    }
+  }
+});
+test('TEST-F-07 R6 LQ-03 D25V3-N2 supplements require actual reports after direct or deemed initial performance', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const facts = { ...ispFinding(true, { additionalFacts: [{ eventId: 'extra-one', confirmedAt: itime(2), evidenceId: 'extra-one' },
+    { eventId: 'extra-two', confirmedAt: itime(3), evidenceId: 'extra-two' }] }), status: 'confirmed', determinationAt: IA,
+    possibleGround: null, newlyConfirmedAt: itime(2), reportTriggers: ['sensitive-or-unique'] };
+  for (const initial of [ispReport(1), { kind: 'pipc-kisa-report', triggeredAt: IA, sentAt: itime(1), noticeId: 'deemed-initial', channel: 'KISA', coveredFields: ispReport().coveredFields }]) {
+    const related = { kind: 'pipc-kisa-additional', triggeredAt: itime(2), sentAt: itime(4), noticeId: 'other-law-supplement', channel: 'KISA', coveredFields: ['newly-confirmed-facts'] };
+    const p = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(5), notices: [initial, related] });
+    const supplements = p.obligations.filter(o => o.family === 'isp-supplement');
+    assert.deepEqual(supplements.map(o => [o.dueAt, o.status, o.notice]), [[itime(26), 'pending', null], [itime(27), 'pending', null]],
+      'M-F-R6-007: other-law supplementary performance alone never closes an ISP supplement');
+    assert.ok(p.ledger.notices.some(n => n.noticeId === related.noticeId));
+    const actual = { kind: 'isp-incident-report-supplement', triggerEventId: 'extra-one', triggeredAt: itime(2), sentAt: itime(6), noticeId: 'actual-supplement', channel: 'MSIT', coveredFields: ['newly-confirmed-facts'] };
+    const sent = F.planIncidentResponse(auditor, scope, facts, { previous: p, asOf: itime(7), notices: [actual] });
+    assert.deepEqual(sent.obligations.filter(o => o.family === 'isp-supplement').map(o => [o.status, o.notice?.sentAt ?? null]), [['met', itime(6)], ['pending', null]]);
+  }
+});
+test('TEST-F-07 R6 LQ-03 v5 late supplementary performance remains performed without retroactive timeliness', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const facts = ispFinding(true, { additionalFacts: [{ eventId: 'extra-one', confirmedAt: itime(2), evidenceId: 'extra-one' }] });
+  const overdue = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(30), notices: [ispReport(1)] });
+  const actual = { kind: 'isp-incident-report-supplement', triggerEventId: 'extra-one', triggeredAt: itime(2), sentAt: itime(31), noticeId: 'late-actual', channel: 'KISA', coveredFields: ['newly-confirmed-facts'] };
+  const p = F.planIncidentResponse(auditor, scope, facts, { previous: overdue, asOf: itime(33), notices: [actual] });
+  const o = duty(p, 'isp-incident-report-supplement');
+  assert.deepEqual([o.status, o.stillOwed, o.notice], ['met', false, { noticeId: 'late-actual', sentAt: itime(31) }],
+    'M-F-R6-008: a late actual supplement is not permanently unperformed');
+  assert.deepEqual([o.originalDueAt, o.elapsedMs, o.lateByMs, o.timeliness], [itime(26), 29 * 3600000, 5 * 3600000, 'requires-review'],
+    'M-F-R6-009: late performance is never retroactively certified as timely');
+  assert.equal(o.observations[0].status, 'overdue');
+});
+test('TEST-F-07 R6 ISP-DUTIES D25V3-N3 outage permits recipient deeming and otherwise needs direct notice', async () => {
+  const { auditor, scope } = await incidentForResponse(), fields = ['incident-time-and-circumstances', 'user-damage', 'provider-response', 'user-protective-actions', 'contact-department'];
+  const facts = { ...ispFinding(true, { userImpact: userImpact() }), recipientScopeRef: 'service-users' };
+  const empty = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(4) });
+  assert.equal(duty(empty, 'isp-user-notice').stillOwed, true);
+  const other = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(4), notices: [possibleNotice(3, { recipientScopeRef: 'service-users', coveredFields: fields })] });
+  assert.equal(duty(other, 'isp-user-notice').status, 'met', 'M-F-R6-010: outage never excludes valid other-law user notice');
+  const direct = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(4), notices: [{ kind: 'isp-user-notice', triggeredAt: itime(2), sentAt: itime(3), noticeId: 'direct-users', channel: 'affected-users', coveredFields: fields }] });
+  assert.equal(duty(direct, 'isp-user-notice').status, 'met');
+});
+test('TEST-F-07 R6 ISP-DUTIES D25V3-N3 outage permits reasoned thirty-day posting', async () => {
+  const { auditor, scope } = await incidentForResponse(), facts = ispFinding(true, { userImpact: userImpact() });
+  const first = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(4) });
+  const posting = { kind: 'isp-user-notice', triggeredAt: itime(2), sentAt: itime(3), noticeId: 'posted-users', coveredFields: duty(first, 'isp-user-notice').requiredFields,
+    posting: { justCause: 'unreachable users with documented cause', evidenceId: 'posting-cause', maintainedThrough: itime(3 + 720), maintenanceEvidenceId: 'maintained-30-days' } };
+  const p = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(724), notices: [posting] });
+  assert.deepEqual([duty(p, 'isp-user-notice').status, duty(p, 'isp-user-notice').closureGround], ['met', 'posting'],
+    'M-F-R6-011: outage permits a qualified thirty-day posting');
+  const short = { ...posting, posting: { ...posting.posting, maintainedThrough: itime(722) } };
+  assert.equal(duty(F.planIncidentResponse(auditor, scope, facts, { asOf: itime(724), notices: [short] }), 'isp-user-notice').stillOwed, true);
+});
+test('TEST-F-07 R6 INSTALL-FACTS D25V3-N4 unknown supplements retain each event on late true replay', async () => {
+  const { auditor, scope } = await incidentForResponse(), at = r6Utc('2026-09-30T23:00:00+09:00');
+  const facts = r6Finding(at, { status: 'unknown', additionalFacts: [
+    { eventId: 'old-fact', confirmedAt: r6After(at, 0.75), evidenceId: 'old-fact' },
+    { eventId: 'new-fact', confirmedAt: r6After(at, 2), evidenceId: 'new-fact' }] });
+  const initial = r6Report(at, r6After(at, 0.5));
+  const unknown = F.planIncidentResponse(auditor, scope, facts, { asOf: r6After(at, 30), notices: [initial] });
+  assert.deepEqual(unknown.obligations.filter(o => o.family === 'isp-supplement').map(o => [o.triggeredAt, o.provisionalResponseDueAt, o.provisionalDeadlinePassed, o.status]),
+    [[r6After(at, 0.75), r6After(at, 24.75), true, 'unverified-pending'], [r6After(at, 2), r6After(at, 26), true, 'unverified-pending']],
+    'M-F-R6-012: unknown status retains provisional supplementary clocks after initial performance');
+  const actual = { kind: 'isp-incident-report-supplement', triggerEventId: 'old-fact', triggeredAt: r6After(at, 0.75), sentAt: r6After(at, 28), noticeId: 'unknown-period-actual', channel: 'KISA', coveredFields: ['newly-confirmed-facts'] };
+  const performed = F.planIncidentResponse(auditor, scope, facts, { previous: unknown, asOf: r6After(at, 31), notices: [actual] });
+  const verified = r6Finding(at, { ...facts.ispIncident, status: true, verification: { at: r6After(at, 40), evidenceId: 'late-verification' } });
+  const p = F.planIncidentResponse(auditor, scope, verified, { previous: performed, asOf: r6After(at, 41) });
+  const rows = p.obligations.filter(o => o.family === 'isp-supplement');
+  assert.deepEqual(rows.map(o => [o.triggeredAt, o.dueAt, o.basis]),
+    [[r6After(at, 0.75), r6After(at, 24.75), ['구 시행령 제58조의2제2항']], [r6After(at, 2), r6After(at, 26), ['시행령 제58조의8제2항']]],
+    'M-F-R6-013: replay uses each supplementary event and its own law');
+  assert.deepEqual([r6Initial(p).dueAt, r6Initial(p).basis[0], r6Initial(p).elapsedMs], [r6After(at, 24), r6OldBasis, 1800000],
+    'M-F-R6-014: verification never restarts the original report clock');
+  assert.deepEqual([rows[0].status, rows[0].notice.sentAt, rows[0].elapsedMs, rows[0].lateByMs], ['met', r6After(at, 28), 27.25 * 3600000, 3.25 * 3600000]);
+  assert.equal(rows[1].status, 'overdue');
+  const batch = F.planIncidentResponse(auditor, scope, verified, { findings: [facts], notices: [initial, actual], asOf: r6After(at, 41) });
+  assert.deepEqual(projection(p), projection(batch));
+});
+test('TEST-F-07 R6 INSTALL-FACTS D25V3-N4 user replay starts at impact confirmation and keeps elapsed time', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const facts = ispFinding('unknown', { userImpact: userImpact({ confirmedAt: itime(5) }) });
+  const unknown = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(30) });
+  const verified = ispFinding(true, { userImpact: facts.ispIncident.userImpact, verification: { at: itime(40) } });
+  const p = F.planIncidentResponse(auditor, scope, verified, { previous: unknown, asOf: itime(41) });
+  assert.deepEqual([duty(p, 'isp-user-notice').triggeredAt, duty(p, 'isp-user-notice').elapsedMs, duty(p, 'isp-user-notice').dueAt], [itime(5), 36 * 3600000, null],
+    'M-F-R6-015: user notice replays its impact confirmation event');
+});
+test('TEST-F-07 R6 INSTALL-FACTS D25V3-N5 operator types are alternatives and deployment is only a clue', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  for (const deploymentModel of ['hosted', 'managed', 'on-prem']) for (const types of [
+    { telecomBusiness: true, forProfitTelecomInformation: false }, { telecomBusiness: false, forProfitTelecomInformation: true },
+    { telecomBusiness: true, forProfitTelecomInformation: true }]) {
+    const base = ispFinding(true, { deploymentModel, verification: { types } });
+    const facts = { ...base, obligationOwner: { kind: 'operator', id: 'service-operator' }, operatorKnownAt: IA,
+      hospitalKnownAt: itime(10), knowledgeAttributionEvidenceId: 'separate-hospital-knowledge',
+      ispIncident: { ...base.ispIncident, userImpact: userImpact({ recipientScopeRef: 'actual-customers', decider: verifiedDecider({ ownerId: 'service-operator' }) }) } };
+    let p;
+    assert.doesNotThrow(() => { p = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(11) }); }, 'M-F-R6-016: either ISP type suffices and both may apply');
+    assert.equal(r6Initial(p)?.dueAt, itime(24), 'M-F-R6-017: deployment never overrides verified ISP applicability');
+    assert.equal(duty(p, 'isp-user-notice').recipientScopeRef, 'actual-customers');
+    assert.equal(r6Initial(p).obligationOwner.id, 'service-operator');
+  }
+  for (const deploymentModel of ['hosted', 'managed', 'on-prem']) {
+    const facts = ispFinding('unknown', { deploymentModel }), p = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(25) });
+    assert.equal(r6Initial(p).applicability, 'unverified');
+  }
+});
+test('TEST-F-07 R6 INSTALL-FACTS D25V3-N5 false requires verified non-applicability evidence', async () => {
+  const { auditor, scope } = await incidentForResponse(), facts = ispFinding(false, { deploymentModel: 'on-prem' });
+  assert.equal(r6Initial(F.planIncidentResponse(auditor, scope, facts)), undefined);
+  const missing = clone(facts); delete missing.ispIncident.verification.nonApplicabilityBasis;
+  incidentRefused(() => F.planIncidentResponse(auditor, scope, missing), [missing], 'M-F-R6-018: false needs a verified non-applicability basis');
+  const contradiction = clone(facts); contradiction.ispIncident.verification.types.telecomBusiness = true;
+  incidentRefused(() => F.planIncidentResponse(auditor, scope, contradiction), [contradiction], 'false contradicts a qualifying type');
+});
+test('TEST-F-07 R6 INSTALL-FACTS I-6 verified designation includes category and Annex 1 qualifications', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const designation = { categoryBasis: 'privacy-decree:32.2.2', categoryEvidenceId: 'representative-appointment',
+    qualificationRequired: true, qualificationAssessmentEvidenceId: 'tertiary-hospital-32.3.3', qualificationEvidenceId: 'annex-1-qualification' };
+  const facts = ispFinding(true, { userImpact: userImpact({ decider: verifiedDecider({ designation }) }) });
+  assert.equal(duty(F.planIncidentResponse(auditor, scope, facts, { asOf: itime(3) }), 'isp-user-notice').designationUnverified, false);
+  const unqualified = clone(facts); delete unqualified.ispIncident.userImpact.decider.designation.qualificationEvidenceId;
+  incidentRefused(() => F.planIncidentResponse(auditor, scope, unqualified, { asOf: itime(3) }), [unqualified],
+    'M-F-R6-019: representative status alone never waives Annex 1 qualifications');
+  const noCategory = clone(facts); delete noCategory.ispIncident.userImpact.decider.designation.categoryEvidenceId;
+  incidentRefused(() => F.planIncidentResponse(auditor, scope, noCategory, { asOf: itime(3) }), [noCategory], 'designation category requires evidence');
+  const unknown = ispFinding(true, { userImpact: userImpact({ decider: verifiedDecider({ status: 'designationUnverified', designation: undefined }) }) });
+  const p = F.planIncidentResponse(auditor, scope, unknown, { asOf: itime(3) });
+  assert.deepEqual([duty(p, 'isp-user-notice').designationUnverified, duty(p, 'isp-user-notice').actionRequiredNow], [true, true]);
 });
 
 test('TEST-F-07 R5 LQ-05 multiple possibility causes retain the earliest deadline with proved recipient coverage', async () => {
