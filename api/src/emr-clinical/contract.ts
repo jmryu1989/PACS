@@ -78,7 +78,7 @@ export interface SurfaceSpec {
    * The correction's reason is bound by the server from the work context when the author gives none; a request outside
    * that context needs one stated line (legal register D-18, D727 Q4).
    */
-  contextReason?: 'reading';
+  contextReason?: readonly WorkContext['kind'][];
 }
 
 const C: Capacity = 'clinical-author', S: Capacity = 'operational-staff';
@@ -151,11 +151,11 @@ export const CLINICAL_SURFACES = freeze({
     paths: [{ relation: 'author', role: 'radiologist', capacity: C, kind: 'finding' }], from: ['Visible', 'Hidden'], to: 'same' },
   'finding.hide': { ...base, record: 'finding', model: 'FindingRevision', route: 'POST studies/:uid/findings/:id/revisions', opens: false, ownerField: false,
     client: ['requestId', 'expectedRevision', 'action', 'item'], optional: ['reason'], textField: null, text: 'server', revisionField: 'expectedRevision',
-    action: 'hide', act: 'correction', attachments: FINDING_SOURCES, navigation: true, contextReason: 'reading',
+    action: 'hide', act: 'correction', attachments: FINDING_SOURCES, navigation: true, contextReason: ['reading'],
     paths: [{ relation: 'author', role: 'radiologist', capacity: C, kind: 'finding' }], from: ['Visible'], to: 'Hidden' },
   'finding.restore': { ...base, record: 'finding', model: 'FindingRevision', route: 'POST studies/:uid/findings/:id/revisions', opens: false, ownerField: false,
     client: ['requestId', 'expectedRevision', 'action', 'item'], optional: ['reason'], textField: null, text: 'server', revisionField: 'expectedRevision',
-    action: 'restore', act: 'correction', attachments: FINDING_SOURCES, navigation: true, contextReason: 'reading',
+    action: 'restore', act: 'correction', attachments: FINDING_SOURCES, navigation: true, contextReason: ['reading'],
     paths: [{ relation: 'author', role: 'radiologist', capacity: C, kind: 'finding' }], from: ['Hidden'], to: 'Visible' },
   // reader-assignment.service.ts:79 write: allocation only, no free text exists to smuggle a clinical entry through.
   'assignment.write': { ...base, record: 'assignment', model: 'ReaderAssignment', route: 'POST studies/:uid/reader-assignment', opens: 'if-absent',
@@ -167,7 +167,7 @@ export const CLINICAL_SURFACES = freeze({
   // Round 2 wires this through the pacs.* owner; the screen always sends the attempt ID after release.
   'tech-note.write': { ...base, record: 'tech-note', model: 'TechNoteRevision', route: 'POST studies/:uid/tech-note', opens: 'if-absent', ownerField: false,
     client: ['baseVersion', 'text', 'reason', 'attemptId'], requestField: 'attemptId', normalize: { reason: 'trim' }, textField: 'text', text: 'replace', reasonField: 'reason',
-    revisionField: 'baseVersion', act: 'correction',
+    revisionField: 'baseVersion', act: 'correction', contextReason: ['acquisition'],
     paths: [{ relation: 'any', role: 'technician', capacity: C, kind: 'tech-note' }, { relation: 'any', role: 'admin', capacity: S, kind: 'tech-note' }],
     from: [null, 'Recorded'], to: 'Recorded' },
 } satisfies Record<string, SurfaceSpec>);
@@ -243,8 +243,8 @@ export interface ClinicalUnit {
   state: string; revision: number; head: VersionReference | null; clinicalEntry: boolean;
   versions: readonly ClinicalVersion[];
 }
-/** Server fact: the author's current reading of this study (claim/session), from which a correction reason is bound. */
-export interface WorkContext { kind: 'reading'; studyId: string; referenceId: string }
+/** Server fact: the author's current work on this study (a radiologist's reading, a radiographer's acquisition), from which a correction reason is bound. */
+export interface WorkContext { kind: 'reading' | 'acquisition'; studyId: string; referenceId: string }
 export interface SigningRequest {
   recordKind: RecordKind; recordId: string; versionId: string; versionSha256: string;
   content: { kind: 'text'; body: string; sha256: string } | { kind: 'dicom'; sopInstanceUid: string; sha256: string };

@@ -650,6 +650,20 @@ test('TEST-D-04 atomic_retry: a lost answer with no visible receipt stays unknow
   assert.deepEqual([rolledBack.status, rolledBack.code, definite.state.unit], ['failed', 'StorageFailed', unit], 'only a reported rollback is a failure');
 });
 
+test('TEST-D-04 atomic_retry: a resend whose receipt lookup fails stays unknown until the late original is visible', async () => {
+  const unit = opened();
+  const store = memoryStore(unit); store.state.failCommit = 'late';
+  const body = replyBody(r1, unit, ANSWER);
+  assert.equal((await R.commitClinicalWrite(ports(store), replyInput(unit, r1, body))).status, 'unknown');
+  store.state.failCommit = null; store.state.failRequery = true;
+  const resend = await outcomeOf(R.commitClinicalWrite(ports(store), replyInput(unit, r1, body)));
+  assert.deepEqual([resend.status, resend.code], ['unknown', 'OutcomeUnknown'], 'M-D-R1-03b: an unreadable receipt store on resend is not a failure');
+  assert.equal(store.state.commits, 1, 'the resend committed nothing while the outcome was unknown');
+  store.state.late.forEach(apply => apply()); store.state.failRequery = false;
+  const resolved = await R.commitClinicalWrite(ports(store), replyInput(store.state.unit, r1, body));
+  assert.deepEqual([resolved.status, store.state.unit.revision], ['replayed', 2], 'the original success is the final answer');
+});
+
 test('TEST-D-03 read_scope: a rewritten author or recipient projection is refused and no body is provided', async () => {
   const unit = questionThread();
   const forged = structuredClone(unit); forged.parties.authorId = 'c2';
@@ -680,6 +694,24 @@ test('TEST-D-02 versions_and_sr: an Orthanc observation contradicting an adopted
   assert.equal(R.reconcileManualSr(adopted, { status: 'absent' }).outcome, 'conflict', 'an adopted original that is gone is a conflict');
   assert.equal(R.reconcileManualSr(adopted, present('cd'.repeat(32))).outcome, 'already-adopted', 'control: the same bytes stay adopted');
   assert.equal(R.reconcileManualSr(adopted, { status: 'unknown' }).outcome, 'already-adopted', 'an unknown lookup changes nothing');
+});
+
+test('TEST-D-02 versions_and_sr: a Tech Note amendment in the acquisition context needs no typed reason and is a signed correction keeping the original', () => {
+  const written = R.applyPlan(null, plan('tech-note.write', tech, null, { baseVersion: 0, text: 'SYN 조영제 주입 후 오심', reason: '', attemptId: randomUUID() }));
+  const context = { kind: 'acquisition', studyId: study.studyId, referenceId: 'exam-1' };
+  const amend = () => ({ baseVersion: 1, text: 'SYN 조영제 주입 후 오심, 회복', reason: '', attemptId: randomUUID() });
+  let amended;
+  assert.doesNotThrow(() => { amended = plan('tech-note.write', tech, written, amend(), { workContext: context }); },
+    'M-D-R2-01: a Tech Note amendment in the acquisition context needs no typed reason');
+  assert.deepEqual([amended.entry, amended.version.act, amended.signing.action, amended.version.reasonSource, amended.signing.reason, amended.signing.signer],
+    ['clinical-entry', 'correction', 'amend', 'work-context', 'work-context:acquisition:exam-1', tech.identity]);
+  assert.equal(R.applyPlan(written, amended).versions[0].text, 'SYN 조영제 주입 후 오심', 'the original note is kept');
+  refused(() => plan('tech-note.write', tech, written, amend()), 'ReasonRequired', 'outside the work context an amendment needs a reason');
+  refused(() => plan('tech-note.write', tech, written, amend(), { workContext: { ...context, studyId: '1.2.840.99.9' } }), 'ReasonRequired',
+    'work on another study is outside the context');
+  refused(() => plan('tech-note.write', tech, written, amend(), { workContext: { ...context, kind: 'reading' } }), 'ReasonRequired',
+    'a reading context does not bind a Tech Note reason');
+  assert.equal(plan('tech-note.write', tech, written, { ...amend(), reason: ' SYN 오기재 ' }).version.reasonSource, 'stated');
 });
 
 test('TEST-D-02 versions_and_sr: hide and restore in the reading context need no typed reason and are signed corrections keeping the original', () => {

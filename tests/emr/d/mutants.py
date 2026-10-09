@@ -147,6 +147,25 @@ MUTANTS = [
         "case": "TEST-D-02 versions_and_sr: hide and restore in the reading context need no typed reason and are signed corrections keeping the original",
         "expect": "M-D-R1-06: hiding in the reading context needs no typed reason",
     },
+    # Round 3 (Astra re-review of eef4781).
+    {
+        "id": "M-D-R1-03b",
+        "title": "an unreadable receipt store on resend is reported as a failure",
+        "file": "records.ts",
+        "old": "  try { prior = await ports.store.findReceipt(admitted.receiptKey); } catch { return unknownOutcome(); }",
+        "new": "  try { prior = await ports.store.findReceipt(admitted.receiptKey); } catch { return failed('StoreUnavailable'); }",
+        "case": "TEST-D-04 atomic_retry: a resend whose receipt lookup fails stays unknown until the late original is visible",
+        "expect": "M-D-R1-03b: an unreadable receipt store on resend is not a failure",
+    },
+    {
+        "id": "M-D-R2-01",
+        "title": "a Tech Note amendment in its work context still demands a typed reason",
+        "file": "records.ts",
+        "old": "      if (context) return { text: field, reason: ",
+        "new": "      if (false && context) return { text: field, reason: ",
+        "case": "TEST-D-02 versions_and_sr: a Tech Note amendment in the acquisition context needs no typed reason and is a signed correction keeping the original",
+        "expect": "M-D-R2-01: a Tech Note amendment in the acquisition context needs no typed reason",
+    },
 ]
 # The exact round-1 selection of tests/emr/d/contract_test.cjs, written by hand (never generated from a run). The
 # baseline must collect exactly these cases, each once, all passing; R2 moves the declaration into emr/units/d.json.
@@ -199,6 +218,8 @@ DECLARED_CASES = [
     "TEST-D-03 read_scope: a rewritten author or recipient projection is refused and no body is provided",
     "TEST-D-02 versions_and_sr: an Orthanc observation contradicting an adopted SR is a conflict, never adopted",
     "TEST-D-02 versions_and_sr: hide and restore in the reading context need no typed reason and are signed corrections keeping the original",
+    "TEST-D-04 atomic_retry: a resend whose receipt lookup fails stays unknown until the late original is visible",
+    "TEST-D-02 versions_and_sr: a Tech Note amendment in the acquisition context needs no typed reason and is a signed correction keeping the original",
 ]
 NOT_RUN = [{"id": "M-D-06", "status": "not_run",
             "reason": "delayed-response UID+sequence/account-generation check is page code (consultations.js, finding-command.js, "

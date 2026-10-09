@@ -41,7 +41,7 @@ function studyFacts(input: unknown): Readonly<StudyFacts> {
 function workContext(input: unknown): Readonly<WorkContext> | null {
   if (input === null) return null;
   const c = object(input, ['kind', 'studyId', 'referenceId']);
-  return { kind: choice(c.kind, ['reading']), studyId: string(c.studyId), referenceId: string(c.referenceId) };
+  return { kind: choice(c.kind, ['reading', 'acquisition']), studyId: string(c.studyId), referenceId: string(c.referenceId) };
 }
 
 /** One institution boundary for reads and writes: only the record's managing institution (see StudyFacts, LR-20/D-4). */
@@ -165,12 +165,15 @@ function textFor(rule: TextRule, b: Record<string, any>, spec: SurfaceSpec, cont
   const stated = (text: string | null): Text => spec.cancel && text !== null ? { text, reason: text, reasonSource: 'stated' } : { text, reason: null, reasonSource: null };
   switch (rule) {
     case 'replace': {
-      // pacs.service.ts:1190/1208/1209: the first version needs text; every NEW later one (including clearing) the author's reason.
+      // pacs.service.ts:1190/1208/1209: the first version needs text; a NEW later one (including clearing) needs a reason, which
+      // inside the author's own work context the server binds (D-18/D734); only an out-of-context amendment asks for one.
       const reason = b[spec.reasonField];
       if (typeof field !== 'string' || typeof reason !== 'string' || content !== null) refuse('RequestShapeRefused');
       string(field, true); string(reason, true);
-      if (opening ? !field.trim() : !reason.trim()) refuse(opening ? 'TextRequired' : 'ReasonRequired');
-      return { text: field, reason: reason.trim() || null, reasonSource: reason.trim() ? 'stated' : null };
+      if (opening && !field.trim()) refuse('TextRequired');
+      if (opening || reason.trim()) return { text: field, reason: reason.trim() || null, reasonSource: reason.trim() ? 'stated' : null };
+      if (context) return { text: field, reason: `work-context:${context.kind}:${context.referenceId}`, reasonSource: 'work-context' };
+      return refuse('ReasonRequired');
     }
     case 'none': if (content !== null) refuse('TextRefused'); return stated(null);
     case 'empty': if (field !== '' || content !== null) refuse('TextRefused'); return stated(null);
@@ -254,7 +257,7 @@ export function planClinicalWrite(input: WriteInput): Readonly<ClinicalWritePlan
   const opening = unit === null, at = utc(w.at), versionId = string(w.ids.versionId);
   const context = workContext(w.workContext);
   const { text, reason, reasonSource } = textFor(path.text ?? spec.text, b, spec, w.content, opening,
-    context && context.studyId === study.studyId ? context : null);
+    context && context.studyId === study.studyId && (spec.contextReason ?? []).includes(context.kind) ? context : null);
   const entry = entryClass(spec, path, text);
   if (spec.revisionField && revision !== (unit?.revision ?? 0)) refuse('StaleRevision');
   const from = unit?.state ?? null;
@@ -388,7 +391,8 @@ async function signVerified(port: SignaturePort, plan: ClinicalWritePlan):
 export async function commitClinicalWrite(ports: { store: ClinicalStorePort; signature: SignaturePort }, input: WriteInput): Promise<CommitOutcome> {
   const admitted = prepareClinicalWrite(input);
   let prior: WriteReceipt | null = null;
-  try { prior = await ports.store.findReceipt(admitted.receiptKey); } catch { return failed('StoreUnavailable'); }
+  // An unreadable receipt store says nothing about an earlier attempt of this request: unknown, never a failure.
+  try { prior = await ports.store.findReceipt(admitted.receiptKey); } catch { return unknownOutcome(); }
   if (prior) {
     if (prior.fingerprint !== admitted.fingerprint) refuse('RequestIdReused');
     return freeze({ status: 'replayed', receipt: prior });
