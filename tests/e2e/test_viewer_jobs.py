@@ -130,7 +130,15 @@ class ViewerJobsE2E(DisplayControlsE2E):
   for key in ['2','r','h','v','i']:p.keyboard.press(key)
   # Soft-tissue keeps this phantom visible; Liver clips every fixture pixel to
   # black and cannot exercise the spatial canvas restoration oracle.
-  self.choose(p,1);p.keyboard.press('ArrowDown');p.keyboard.press('ArrowDown');p.keyboard.press('1');p.wait_for_timeout(200)
+  self.choose(p,1);p.keyboard.press('ArrowDown');p.keyboard.press('ArrowDown');p.keyboard.press('1')
+  # Save only a rendered native manipulation; restore completion itself must
+  # already include the saved render, so no compensating sleep follows it.
+  p.evaluate('''()=>Promise.all([...services.viewportGridService.getState().viewports.values()].map((g,i)=>new Promise((resolve,reject)=>{
+   const v=services.cornerstoneViewportService.getCornerstoneViewport(g.viewportId),event=cornerstone.Enums.Events.IMAGE_RENDERED;
+   const done=()=>{if(v.getCurrentImageIdIndex()!==i+1||v.getTargetImageIdIndex()!==i+1)return;clearTimeout(timer);v.element.removeEventListener(event,done);resolve()};
+   const timer=setTimeout(()=>{v.element.removeEventListener(event,done);reject(Error('Save display did not render'))},15000);
+   v.element.addEventListener(event,done);v.render();
+  })))''')
   before=self.display(p);p.get_by_label('Job Title',exact=True).fill('현재·과거 비교');p.get_by_label('Description',exact=True).fill('프레임·밝기·방향 저장')
   self.click_job(p,'Save New Job','저장했습니다');self.assertEqual(len(self.jobs(a)),1)
   p.close();p=self.launch_job([a])
@@ -138,7 +146,6 @@ class ViewerJobsE2E(DisplayControlsE2E):
   try:self.click_job(p,'Restore Job','복원했습니다')
   except Exception:
    print('JOB RESTORE FAILURE',p.url,self.display(p),flush=True);raise
-  p.wait_for_timeout(400)
   self.assertIn('StudyInstanceUIDs='+a.uid+'%2C'+b.uid,p.url);self.assertIn('kinJob=',p.url)
   print('JOB restored observation '+json.dumps(dict(before=before,after=self.display(p))),flush=True);canvas_ready(p,2)
   after=self.display(p)
@@ -154,7 +161,8 @@ class ViewerJobsE2E(DisplayControlsE2E):
   for i,index in enumerate([1,2]):expect(p.locator('[data-cy=viewport-grid] > div').nth(i)).to_contain_text('('+str(index+1)+'/4)')
   print('JOB native roundtrip '+json.dumps(dict(before=before,after=after)),flush=True)
   p.screenshot(path=str(Path(__file__).parent/'artifacts/JOB-restored.png'))
-  self.choose(p,1);p.keyboard.press('ArrowDown');p.wait_for_timeout(120)
+  self.choose(p,1);p.keyboard.press('ArrowDown')
+  p.wait_for_function('()=>{const g=[...services.viewportGridService.getState().viewports.values()][1];return services.cornerstoneViewportService.getCornerstoneViewport(g.viewportId).getCurrentImageIdIndex()===3}')
   self.assertEqual(self.display(p)[1]['index'],3);expect(p.locator('[data-cy=viewport-grid] > div').nth(1)).to_contain_text('(4/4)')
   self.click_job(p,'Edit Details','편집 후');p.get_by_label('Description',exact=True).fill('수정된 설명');self.click_job(p,'Save Changes','저장했습니다')
   self.assertEqual(self.jobs(a)[0]['description'],'수정된 설명')
