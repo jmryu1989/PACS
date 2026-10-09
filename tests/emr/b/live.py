@@ -455,15 +455,13 @@ class EmrBLedgerLive(unittest.TestCase):
         # One retention rule: the database's single floor is the runtime rule's floor at every civil edge; no entry stores
         # a deadline; each event's record targets are bound exactly as the rule reads them from the same event.
         utc = "to_char(%s AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')"
-        edges = ["2024-02-28T15:00:00.000Z", "2024-02-28T15:00:00.001Z", "2026-10-04T15:00:00.000Z", "2026-10-05T00:00:00.000Z", "2023-12-31T14:59:59.999Z"]
+        edges = [day + time for day in ("2024-02-28", "2024-02-29", "2023-02-28", "2026-10-04", "2026-10-05", "2023-12-31")
+                 for time in ("T14:59:59.999Z", "T15:00:00.000Z", "T15:00:00.001Z", "T23:59:59.999Z")]
         from_rule = self.driver("civil", {"at": edges}, db=db, volume=state)
         from_sql = [self.ok("SELECT " + utc % ("emr_access.access_retention_floor('%s')" % at), db=db)[0] for at in edges]
         self.assertEqual(from_sql, from_rule)
-        # PostgreSQL resolves this dependency itself; no SQL-text matching or intermediate-name pin.
-        self.assertEqual(self.ok("SELECT count(*) FROM pg_depend d JOIN pg_proc p ON p.oid=d.objid "
-            "WHERE d.classid='pg_proc'::regclass AND d.refclassid='pg_proc'::regclass "
-            "AND d.refobjid='emr_access.civil_period_end(timestamptz,integer)'::regprocedure "
-            "AND p.pronamespace='emr_access'::regnamespace", db=db), ["1"])
+        # SQL-standard and plpgsql/string bodies have different catalog dependency coverage: the returned period is
+        # the contract. At the same input, both runtimes must include the first local day and end at the same boundary.
         self.assertEqual(self.ok("SELECT count(*) FROM information_schema.columns WHERE table_schema = 'emr_access' "
                                  "AND column_name IN ('expires_at', 'expiry', 'deadline')", db=db), ["0"])
         bound = [[{"index": int(i), "kind": k, "recordId": r or None, "versionId": v or None} for i, k, r, v in
@@ -513,6 +511,9 @@ class EmrBLedgerLive(unittest.TestCase):
         self.assertEqual(self.ok("SELECT string_agg(sequence::text, ',' ORDER BY sequence) FROM emr_access.access_entry", db=db), snapshot)
         # After the release the rest of the expired prefix goes with its own checkpoint - the old change's viewing copy too, at
         # its floor - while that change stays in the history stream, which no retention call touches; the chains stay verifiable.
+        # The next worker starts with no active writers. Expiry itself must never perform this start-only recovery.
+        restarted = self.driver("recover", db=db, volume=state)
+        self.assertEqual((restarted.get("recovered"), restarted.get("seal", {}).get("sequence")), (1, first["checkpointSequence"]), restarted)
         second = self.driver("expire", url=retention, db=db, volume=state)
         self.assertIsInstance(second, dict)
         self.assertNotIn("error", second, "L05 released prefix must expire successfully")

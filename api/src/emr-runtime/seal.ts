@@ -158,7 +158,7 @@ export class AccessSeal {
   }
 
   /** Every unsealed event entry must be one this server recorded an intent for, in its stream, before committing it. */
-  private explain(entries: readonly StoredEntry[], intents: Map<string, string>, chainId: string): void {
+  private async explain(stream: AccessStream, entries: readonly StoredEntry[], intents: Map<string, string>, chainId: string): Promise<void> {
     for (const entry of entries) {
       if (entry.kind === 'expiry') {
         if (this.expiryProof(entry)?.chainId !== chainId) throw new SealRefused('UnsealedEntryUnexplained', String(entry.sequence));
@@ -166,12 +166,23 @@ export class AccessSeal {
       }
       if (intents.get(entry.eventId!) !== entry.contentSha256) throw new SealRefused('UnsealedEntryUnexplained', String(entry.sequence));
     }
+    // An interrupted expiry proof cannot explain away an append replaced by a checkpoint at the unsealed tail.
+    // Until every outstanding append is stored or explicitly settled, that collision is ambiguous: retain its intent.
+    if (entries.some(entry => entry.kind === 'expiry')) {
+      for (const eventId of intents.keys()) {
+        if (!await this.sql.entryForEvent(stream, eventId)) throw new SealRefused('UnsealedEntryUnexplained', 'expiry-append-conflict');
+      }
+    }
   }
 
   private expiryProof(entry: StoredEntry): ExpiryIntent | null {
+    let p: Record<string, any>;
     try {
-      const p = object(JSON.parse(entry.payload), ['kind', 'at', 'deletedThrough', 'deletedCount', 'anchorHash']);
-      utc(p.at);
+      p = object(JSON.parse(entry.payload), ['kind', 'at', 'deletedThrough', 'deletedCount', 'anchorHash']);
+      if (p.kind !== 'expiry') throw new Error('kind');
+      utc(p.at); integer(p.deletedThrough, 1); integer(p.deletedCount, 1); sha256(p.anchorHash);
+    } catch { throw new SealRefused('LedgerChainBroken', 'expiry-payload'); }
+    try {
       const target = path.join(this.expiry, `${integer(entry.sequence, 1)}-${integer(p.deletedThrough, 1)}-${sha256(p.anchorHash)}.json`);
       if (!fs.existsSync(target)) return null;
       const proof = object(JSON.parse(fs.readFileSync(target, 'utf8')), ['chainId', 'seal', 'anchor', 'count', 'checkpointSequence']);
@@ -205,15 +216,15 @@ export class AccessSeal {
    * Retention's external intent, before the deleting transaction commits. The whole retained chain must reach the last
    * trusted seal, which must already cover the prefix. Only positions/hashes/counts survive here, never deleted bodies.
    * The caller must roll back if the returned checkpoint sequence differs (a concurrent append advanced the DB head).
-   * An interrupted attempt leaves this harmless evidence; recovery still requires the actual committed checkpoint.
+   * Only a proven rollback may remove its proof; an unknown commit keeps it for start-up recovery.
    */
-  prepareExpiry(through: number): Promise<{ count: number; checkpointSequence: number }> {
+  prepareExpiry(through: number): Promise<{ count: number; checkpointSequence: number; rollback: () => void }> {
     return this.serial(async () => {
       const state = this.read();
       if (state === 'absent') throw new SealRefused('SealMissing');
       const current = state.streams.viewing, tail = await this.sql.tail('viewing');
       if (tail.chainId !== current.chainId || tail.sequence !== current.sequence || tail.hash !== current.hash)
-        throw new SealRefused('SealTailMismatch', 'recover-before-expiry');
+        throw new SealRefused('SealTailMismatch', 'unsealed-tail');
       const entries = await this.range('viewing', 0, tail.sequence);
       this.verifyRetained('viewing', entries, current, tail);
       const prefix = entries.filter(e => e.sequence <= integer(through, 1)), last = prefix[prefix.length - 1];
@@ -222,9 +233,16 @@ export class AccessSeal {
         anchor: { sequence: through, hash: last.hash }, count: prefix.length, checkpointSequence: current.sequence + 1 };
       const target = path.join(this.expiry, `${proof.checkpointSequence}-${through}-${last.hash}.json`);
       const text = JSON.stringify(proof);
-      if (fs.existsSync(target) && fs.readFileSync(target, 'utf8') !== text) throw new SealRefused('SealCorrupt', 'expiry-conflict');
-      this.writeDurably(target, text);
-      return { count: proof.count, checkpointSequence: proof.checkpointSequence };
+      // Claim exclusively: another worker must not reuse (or later remove) an unresolved attempt's proof.
+      const temporary = path.join(this.expiry, `.tmp-${randomBytes(8).toString('hex')}`);
+      this.writeDurably(temporary, text);
+      try { fs.linkSync(temporary, target); syncDirectory(this.expiry); }
+      catch { throw new SealRefused('SealUnavailable', 'expiry-pending'); }
+      finally { fs.rmSync(temporary, { force: true }); }
+      return { count: proof.count, checkpointSequence: proof.checkpointSequence, rollback: () => {
+        try { fs.unlinkSync(target); syncDirectory(this.expiry); }
+        catch { throw new SealRefused('SealUnavailable', 'expiry-rollback'); }
+      } };
     });
   }
 
@@ -238,7 +256,7 @@ export class AccessSeal {
       const entries = await this.range(stream, current.sequence, target.sequence);
       const violation = chainViolation(current, entries, target, stream);
       if (violation) throw new SealRefused('LedgerChainBroken', `${stream}:${violation}`);
-      this.explain(entries, this.intents()[stream], current.chainId);
+      await this.explain(stream, entries, this.intents()[stream], current.chainId);
       const next: SealState = { streams: Object.freeze({ ...state.streams, [stream]: Object.freeze({ chainId: current.chainId,
         sequence: target.sequence, hash: target.hash }) }), sealedAt: new Date().toISOString() };
       this.write(next);
@@ -277,7 +295,7 @@ export class AccessSeal {
           this.verifyRetained(stream, entries, current, tail);
         } else if (current.hash !== tail.hash) throw new SealRefused('SealTailMismatch', stream);
         const unsealed = entries.filter(e => e.sequence > current.sequence);
-        this.explain(unsealed, intents[stream], current.chainId);
+        await this.explain(stream, unsealed, intents[stream], current.chainId);
         let recovered = 0;
         if (unsealed.length) {
           this.journal.record(`seal-recovered:${stream}:${current.sequence}-${tail.sequence}`, 'seal-recovered',
@@ -297,6 +315,18 @@ export class AccessSeal {
           notCommitted++;
         }
         counts[stream] = { recovered, notCommitted };
+      }
+      // Only this quiescent start can prove a pending expiry never committed. Active jobs must keep unknown commits.
+      for (const name of fs.readdirSync(this.expiry)) {
+        if (name.startsWith('.tmp-')) continue;
+        const target = path.join(this.expiry, name);
+        let proof: any;
+        try { proof = JSON.parse(fs.readFileSync(target, 'utf8')); integer(proof.checkpointSequence, 1); }
+        catch { throw new SealRefused('SealCorrupt', 'expiry-evidence'); }
+        if (proof.chainId === tails.viewing.chainId && proof.checkpointSequence > tails.viewing.sequence) {
+          try { fs.unlinkSync(target); syncDirectory(this.expiry); }
+          catch { throw new SealRefused('SealUnavailable', 'expiry-rollback'); }
+        }
       }
       return { seal: state, streams: counts,
         recovered: ACCESS_STREAMS.reduce((n, s) => n + counts[s].recovered, 0),

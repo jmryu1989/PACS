@@ -337,7 +337,7 @@
     "expected":  {
                      "contract":  16,
                      "live":  11,
-                     "mutants":  21,
+                     "mutants":  28,
                      "profiles":  39,
                      "measurements_suites":  20,
                      "validate_jobs":  22,
@@ -503,7 +503,14 @@
                         "kill":  [
                                      "C15"
                                  ]
-                    }
+                    },
+                    {"id": "M25", "kill": ["C13"], "behaviour": "expiry must never run start-only recovery during append"},
+                    {"id": "M26", "kill": ["C13"], "behaviour": "a rolled-back expiry proof cannot justify a replacement checkpoint"},
+                    {"id": "M27", "kill": ["C10"], "behaviour": "count class methods as calendar owners"},
+                    {"id": "M28", "kill": ["C10"], "behaviour": "count exported arrows as calendar owners"},
+                    {"id": "M29", "kill": ["C10"], "behaviour": "count function expressions as calendar owners"},
+                    {"id": "M30", "kill": ["C10"], "behaviour": "count module-level calls as calendar owners"},
+                    {"id": "M31", "kill": ["C13"], "behaviour": "an interrupted expiry proof cannot hide an unresolved append"}
                 ],
     "candidate_cases":  [
                             {

@@ -285,7 +285,7 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
  */
 export async function expireAccessPrefix(retention: PrismaClient, seal: AccessSeal, now = new Date().toISOString()):
   Promise<{ deleted: number; checkpointSequence: number; checkpointHash: string } | null> {
-  await seal.recover();
+  // Recovery may settle absent intents only before writers start. An active append may still commit.
   const rows: RetentionRow[] = [];
   let after = 0;
   for (;;) {
@@ -299,10 +299,19 @@ export async function expireAccessPrefix(retention: PrismaClient, seal: AccessSe
   if (!plan) return null;
   const through = plan.through;
   const proof = await seal.prepareExpiry(through);
-  return retention.$transaction(async tx => {
-    const [row] = await tx.$queryRaw<any[]>`SELECT deleted_count, checkpoint_sequence, checkpoint_hash FROM emr_access.expire_prefix(${through}::bigint)`;
-    if (toNumber(row.checkpoint_sequence) !== proof.checkpointSequence || toNumber(row.deleted_count) !== proof.count)
-      refuse('ExpirySnapshotChanged');
-    return { deleted: toNumber(row.deleted_count), checkpointSequence: toNumber(row.checkpoint_sequence), checkpointHash: sha256(row.checkpoint_hash) };
-  });
+  let callbackFailed = false;
+  try {
+    return await retention.$transaction(async tx => {
+      try {
+        const [row] = await tx.$queryRaw<any[]>`SELECT deleted_count, checkpoint_sequence, checkpoint_hash FROM emr_access.expire_prefix(${through}::bigint)`;
+        if (toNumber(row.checkpoint_sequence) !== proof.checkpointSequence || toNumber(row.deleted_count) !== proof.count)
+          refuse('ExpirySnapshotChanged');
+        return { deleted: toNumber(row.deleted_count), checkpointSequence: toNumber(row.checkpoint_sequence), checkpointHash: sha256(row.checkpoint_hash) };
+      } catch (error) { callbackFailed = true; throw error; }
+    });
+  } catch (error) {
+    // A rejected callback cannot COMMIT. A failure after it returns may be an unknown COMMIT: keep that proof.
+    if (callbackFailed) proof.rollback();
+    throw error;
+  }
 }

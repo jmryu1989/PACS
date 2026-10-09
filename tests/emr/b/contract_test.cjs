@@ -744,10 +744,14 @@ function contractSuite() {
       try {
         await w.store.append(authEvent(A)); await w.store.append(authEvent(A));
         await w.seal.prepareExpiry(1);
-        if (interrupt === 'before-delete') assert.equal((await w.restart().seal.recover()).recovered, 0);
+        if (interrupt === 'before-delete') {
+          assert.equal((await w.restart().seal.recover()).recovered, 0);
+          await w.seal.prepareExpiry(1);
+        }
         w.ledger.checkpoint(1, at);
+        if (interrupt === 'after-seal') await w.seal.advance('viewing', w.ledger.head);
         const restarted = w.restart();
-        assert.equal((await restarted.seal.recover()).recovered, 1);
+        assert.equal((await restarted.seal.recover()).recovered, interrupt === 'after-seal' ? 0 : 1);
         assert.equal((await w.restart().seal.recover()).recovered, 0);
         // Successive expiries may remove the old checkpoint only after its replacement proof is durable.
         await restarted.seal.prepareExpiry(2); w.ledger.checkpoint(2, at);
@@ -771,6 +775,95 @@ function contractSuite() {
       u.ledger.checkpoint(1, at);
       await rejects(u.restart().seal.recover(), 'UnsealedEntryUnexplained');
     } finally { u.cleanup(); }
+    // The transaction model exposes the two head-lock orders and rolls back only the deleting transaction.
+    const retention = (w, before = async () => {}, fail = null) => ({
+      $queryRaw: async (_sql, after) => w.ledger.entries.filter(e => e.sequence > after).map(e => ({
+        sequence: e.sequence, hash: e.hash, kind: e.kind, occurred_at: e.occurredAt, held: false })),
+      $transaction: async work => {
+        await before();
+        const entries = structuredClone(w.ledger.entries), head = { ...w.ledger.head };
+        let result;
+        try {
+          result = await work({ $queryRaw: async (_sql, through) => {
+            if (fail === 'rollback') throw ledgerError('EB005');
+            const count = w.ledger.entries.filter(e => e.sequence <= through).length;
+            w.ledger.checkpoint(through, at);
+            return [{ deleted_count: count, checkpoint_sequence: w.ledger.head.sequence, checkpoint_hash: w.ledger.head.hash }];
+          } });
+        } catch (error) { w.ledger.entries = entries; w.ledger.head = head; throw error; }
+        if (fail === 'commit-unknown') throw Object.assign(new Error('lost commit response'), { code: 'P1017' });
+        return result;
+      },
+    });
+    for (const order of ['nothing-expired', 'append-first', 'expiry-first', 'unsealed-append']) {
+      const w = await world();
+      try {
+        await w.store.append(authEvent(A));
+        const event = authEvent(A), tx = w.ledger.begin();
+        let provisional;
+        if (order === 'expiry-first') {
+          const payload = C.canonicalPayload(event);
+          w.seal.recordIntent('viewing', event.eventId, payload.contentSha256);
+        } else provisional = await w.store.appendInTransaction(tx, event);
+        if (order === 'nothing-expired') {
+          assert.equal(await RT.expireAccessPrefix(retention(w), w.seal, '2026-10-10T00:00:00.000Z'), null);
+          w.ledger.commit(tx);
+        } else if (order === 'append-first') {
+          await rejects(RT.expireAccessPrefix(retention(w, async () => w.ledger.commit(tx)), w.seal, at), 'ExpirySnapshotChanged');
+          assert.equal(w.ledger.entries.length, 2, 'the deleting rollback preserves both access facts');
+        } else if (order === 'unsealed-append') {
+          w.ledger.commit(tx);
+          await rejects(RT.expireAccessPrefix(retention(w), w.seal, at), 'SealTailMismatch');
+        } else {
+          assert.equal((await RT.expireAccessPrefix(retention(w), w.seal, at)).deleted, 1);
+          await rejects(w.seal.advance('viewing', w.ledger.head), 'UnsealedEntryUnexplained');
+          provisional = await w.store.appendInTransaction(tx, event); w.ledger.commit(tx);
+        }
+        assert(!w.journal.all().some(r => r.kind === 'commit-not-found'), 'an active intent is never settled by expiry');
+        assert.equal((await w.store.confirm(provisional)).eventId, event.eventId, order);
+        assert.equal((await w.store.append(authEvent(A))).eventId !== event.eventId, true, 'later appends remain available');
+        assert.equal((await w.restart().seal.recover()).notCommitted, 0, 'restart accepts the complete chain');
+      } finally { w.cleanup(); }
+    }
+    for (const failure of ['rollback', 'commit-unknown']) {
+      const w = await world();
+      try {
+        await w.store.append(authEvent(A)); await w.store.append(authEvent(A));
+        await rejects(RT.expireAccessPrefix(retention(w, undefined, failure), w.seal, at), failure === 'rollback' ? 'EB005' : 'P1017');
+        if (failure === 'rollback') {
+          const before = structuredClone(w.ledger.entries), head = { ...w.ledger.head };
+          w.ledger.checkpoint(2, at); // DB replacement must not reuse a rolled-back job's proof (X-STALE).
+          await rejects(w.restart().seal.recover(), 'UnsealedEntryUnexplained');
+          w.ledger.entries = before; w.ledger.head = head;
+          assert.equal((await RT.expireAccessPrefix(retention(w), w.seal, at)).deleted, 2, 'a fresh attempt can succeed');
+        }
+        assert.equal((await w.restart().seal.recover()).recovered, 1, 'unknown COMMIT keeps proof for recovery');
+      } finally { w.cleanup(); }
+    }
+    const swapped = await world();
+    try {
+      for (let i = 0; i < 3; i++) await swapped.store.append(authEvent(A));
+      await swapped.seal.prepareExpiry(1);
+      const before = structuredClone(swapped.ledger.entries), head = { ...swapped.ledger.head };
+      const event = authEvent(A), tx = swapped.ledger.begin();
+      await swapped.store.appendInTransaction(tx, event); swapped.ledger.commit(tx);
+      swapped.ledger.entries = before; swapped.ledger.head = head; // the DB replaces an unsealed append (X-STALE)
+      swapped.ledger.checkpoint(1, at);
+      await rejects(swapped.seal.advance('viewing', swapped.ledger.head), 'UnsealedEntryUnexplained');
+      await rejects(swapped.restart().seal.recover(), 'UnsealedEntryUnexplained');
+      assert(!swapped.journal.all().some(r => r.kind === 'commit-not-found'), 'a conflicting checkpoint is not proof of rollback');
+    } finally { swapped.cleanup(); }
+    const pending = await world();
+    try {
+      await pending.store.append(authEvent(A));
+      const proof = await pending.seal.prepareExpiry(1);
+      await rejects(pending.restart().seal.prepareExpiry(1), 'SealUnavailable');
+      proof.rollback();
+      await pending.seal.prepareExpiry(1);
+      pending.ledger.checkpoint(1, at);
+      pending.ledger.entries[0].payload = '{malformed database payload';
+      await rejects(pending.restart().seal.recover(), 'LedgerChainBroken');
+    } finally { pending.cleanup(); }
   });
 
   test('C14 a torn journal preserves its exact damaged bytes separately and remains appendable across repeated restarts', () => {
@@ -819,6 +912,11 @@ function contractSuite() {
 
   test('C15 D24 registration needs its original direction; code-only native directions keep ten years through cancellation and later adoption', () => {
     const native = orderFacts(), event = orderEvent();
+    // D-24 delta 16: hiding indication text in a direct-order UI does not turn the physician's sole direction
+    // into registration. Its stored authorship/code selection is still the original; no separate source exists.
+    const hiddenIndication = resolveOrder(orderFacts({ examCodes: ['CT-CHEST'], directionSourceRef: null }));
+    assert.deepEqual(hiddenIndication.kinds, ['order-indication']);
+    code(() => resolveOrder(orderFacts({ objectKind: 'registration', directionSourceRef: null })), 'DirectionSourceRequired');
     const record = inSnapshot(noHolds('native'), () => D.newRetentionRecord(resolveOrder(native, event)));
     assert.deepEqual(record.kinds, ['order-indication']); assert.equal(D.retentionDeadline(record), '2036-01-01T15:00:00.000Z');
     assert(Cl.RECORD_CLASSIFICATION['order-indication'].signature.rule === 'required');
@@ -865,6 +963,15 @@ function contractSuite() {
       assert.throws(() => Cl.parseOrderFacts({ ...registration, synthetic: bad }));
     const migrated = { ...registration, origin: 'migrated', directionSourceRef: null, synthetic: null, procedure: procedure('classification-unconfirmed') };
     assert(Cl.parseOrderFacts(migrated)); code(() => resolveOrder(migrated), 'OrderClassificationUnconfirmed');
+    // Identifier overlap alone is no synthetic provenance: the same seed-shaped ID can name a real original,
+    // a verified test registration, or an unresolved imported row; each follows its own stored facts.
+    const overlappingId = synthetic.seedId;
+    const overlappingOriginal = resolveOrder(native, orderEvent(overlappingId));
+    assert.deepEqual(overlappingOriginal.kinds, ['order-indication']);
+    assert.equal(overlappingOriginal.row.synthetic, null);
+    assert.equal(D.retentionDeadline(inSnapshot(noHolds(overlappingId), () => D.newRetentionRecord(overlappingOriginal))), '2036-01-01T15:00:00.000Z');
+    assert.equal(resolveOrder({ ...registration, synthetic }, orderEvent(overlappingId, { act: 'creation', signature: null })).row.synthetic.runId, 'seed-run');
+    code(() => resolveOrder(migrated, orderEvent(overlappingId, { act: 'creation', signature: null })), 'OrderClassificationUnconfirmed');
   });
 
   test('C16 D24 received evidence keeps independent original, adopted, chart and receipt clocks without a duplicate restart', () => {
@@ -909,6 +1016,13 @@ function contractSuite() {
       const decision = { route, actorId: 'head', at, evidenceId: 'decision-' + route, basisId: route === 'duty-continues' ? 'actual-legal-basis' : null,
         scope: ['native'], reviewAt: route === 'duty-continues' ? '2027-01-01T00:00:00.000Z' : null, originalPreservedEvidenceId: route === 'lawful-return' ? 'hospital-original-verified' : null };
       const next = { ...pending, procedure: { ...pending.procedure, decision } };
+      if (route === 'duty-continues') {
+        // No automatic destruction on an unanswered deadline, and no baseless or unreviewed indefinite retention.
+        for (const missing of ['basisId', 'reviewAt', 'evidenceId'])
+          assert.throws(() => Cl.parseOrderFacts({ ...next, procedure: { ...next.procedure, decision: { ...decision, [missing]: null } } }), missing);
+        assert.equal(D.orderProcedureState(next, decision.reviewAt), 'escalate');
+        assert.equal(D.orderProcedureState(next, '2040-01-01T00:00:00.000Z'), 'escalate', 'overdue review is never silent indefinite authorization');
+      }
       D.validateOrderTransition(pending, next);
       assert.equal(D.orderProcedureState(next, at), route === 'duty-continues' ? 'duty-continues' : 'clear');
       code(() => Cl.parseOrderFacts({ ...next, procedure: { ...next.procedure, decision: { ...decision, actorId: 'officer' } } }), 'OrderDecisionAuthorityRequired');
@@ -967,25 +1081,32 @@ function contractSuite() {
     const exported = (file, name) => checker.getExportsOfModule(checker.getSymbolAtLocation(file)).find(s => s.name === name);
     const calendar = exported(source('/emr-contract/lawful-defaults.ts'), 'civilPeriodEnd');
     const contract = source('/emr-runtime/contract.ts'), edges = new Map(), callers = new Set();
+    const callableOwner = resolved => {
+      const declaration = resolved?.valueDeclaration;
+      if (declaration && ts.isFunctionLike(declaration)) return declaration;
+      if (declaration?.initializer && ts.isFunctionLike(declaration.initializer)) return declaration.initializer;
+      return resolved;
+    };
     for (const file of program.getSourceFiles().filter(f => f.fileName.replaceAll('\\', '/').includes('/emr-runtime/'))) {
       const visit = (node, owner) => {
-        if (ts.isFunctionDeclaration(node) && node.name) owner = symbol(node.name);
-        if (ts.isCallExpression(node) && owner) {
+        if (ts.isFunctionLike(node) && node.body) owner = node;
+        if (ts.isCallExpression(node)) {
           const target = symbol(node.expression);
           if (!edges.has(owner)) edges.set(owner, new Set());
-          edges.get(owner).add(target);
+          edges.get(owner).add(callableOwner(target));
           if (target === calendar) callers.add(owner);
         }
         ts.forEachChild(node, child => visit(child, owner));
       };
-      visit(file, null);
+      visit(file, file); // top-level initializers/calls are owners too, even without a callable declaration
     }
     assert.equal(callers.size, 1, 'one runtime access calendar rule');
     const [rule] = callers;
     const reaches = (from, seen = new Set()) => from === rule || (!seen.has(from) &&
       (seen.add(from), [...(edges.get(from) || [])].some(next => reaches(next, seen))));
-    for (const name of ['accessDeadline', 'planExpiryPrefix']) assert(reaches(exported(contract, name)), name);
-    // The SQL half is checked against actual pg_proc/pg_depend and period results in L05, never SQL text parsing.
+    for (const name of ['accessDeadline', 'planExpiryPrefix']) assert(reaches(callableOwner(exported(contract, name))), name);
+    // L05 compares the TS and PostgreSQL floor at civil boundaries and exercises deletion on both sides of that floor.
+    // pg_depend cannot prove call ownership for plpgsql/string bodies and is not an oracle for that requirement.
     // The contract cases of this very file, collected with the installed TypeScript parser, against the declaration.
     const file = ts.createSourceFile(__filename, fs.readFileSync(__filename, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
     const collected = [];

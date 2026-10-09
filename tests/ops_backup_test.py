@@ -862,6 +862,51 @@ class EmrRestoreVerification(unittest.TestCase):
                 ops.rehearse(self.folder)
             docker_boundary.assert_not_called()
 
+    def test_missing_state_volume_refuses_before_pause_or_dump(self):
+        api = next(item for item in self.host.info if item['Name'] == '/kin-api')
+        api['Mounts'] = [mount for mount in api['Mounts'] if mount['Destination'] != ops.EMR_STATE]
+        before = set(self.host.parent.iterdir())
+        with patch.object(ops, 'ROOT', self.host.repo), patch.object(ops, 'text', side_effect=self.host.fake_text), \
+                patch.object(ops, 'run') as commands, patch.object(ops, 'temporary_run') as helpers:
+            with self.assertRaisesRegex(RuntimeError, 'Expected one named EMR state volume'):
+                ops.backup(self.host.parent)
+            commands.assert_not_called()
+            helpers.assert_not_called()
+        self.assertEqual(set(self.host.parent.iterdir()), before)
+
+    def test_connected_database_client_refuses_dump_and_resumes_writers(self):
+        original = self.host.fake_text
+        def connected(args, **kwargs):
+            return '1' if 'pg_stat_activity' in ' '.join(args) else original(args, **kwargs)
+        self.host.events.clear()
+        with patch.object(self.host, 'fake_text', side_effect=connected):
+            _, manifest, error = self.host.backup(self.answer)
+        self.assertIsInstance(error, RuntimeError)
+        self.assertIn('Database clients remain', str(error))
+        self.assertFalse(manifest['complete'])
+        commands = [event[1] for event in self.host.events if event[0] == 'command']
+        self.assertFalse(any('pg_dump' in command or 'pg_dumpall' in command for command in commands))
+        resumed = [name for command in commands if command[:2] == ['docker', 'start'] for name in command[2:]]
+        self.assertCountEqual(resumed, ops.CONTAINERS[:-1])
+
+    def test_unsafe_emr_archive_refused_despite_matching_checksum(self):
+        archive_path = self.folder / 'emr-state.tgz'
+        for name, kind in [('../outside', tarfile.REGTYPE), ('/absolute', tarfile.REGTYPE),
+                           ('seal/link', tarfile.SYMTYPE), ('seal/device', tarfile.CHRTYPE)]:
+            with self.subTest(name=name):
+                with tarfile.open(archive_path, 'w:gz') as archive:
+                    entry = tarfile.TarInfo(name)
+                    entry.type = kind
+                    entry.linkname = '../outside' if kind == tarfile.SYMTYPE else ''
+                    archive.addfile(entry)
+                self.manifest['sha256']['emr-state.tgz'] = ops.digest(archive_path)
+                self.manifest['bytes']['emr-state.tgz'] = archive_path.stat().st_size
+                ops.write_json(self.folder / 'manifest.json', self.manifest)
+                with patch.object(ops, 'run') as commands:
+                    with self.assertRaisesRegex(RuntimeError, 'Unsafe EMR archive entry'):
+                        ops.validate_backup(self.folder)
+                    commands.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

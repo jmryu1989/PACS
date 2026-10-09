@@ -1,4 +1,4 @@
-"""EMR-B1 mutants M01-M08, M11, M12, M14-M24 (emr/units/b.json `mutants`; order section 9).
+"""EMR-B1 mutants M01-M08, M11, M12, M14-M31 (emr/units/b.json `mutants`; order section 9).
 
 Each mutant is one declared change applied to a separate copy of the committed checkout (`git archive HEAD`), never to
 this working tree. Its declared kill cases run in that copy: contract cases (Cnn) through `node --test` with TAP output
@@ -112,6 +112,20 @@ MUTANTS = {
         ("api/src/emr-runtime/contract.ts",
          "    if (previous.event.versionId !== e.versionId && (e.predecessor?.recordId !== previous.recordId ||\n"
          "        e.predecessor?.partId !== previous.event.versionId || e.predecessor?.sha256 !== previous.event.sha256)) refuse('OrderHistoryIncomplete');\n", "")]),
+    "M25": ("expiry settles an in-flight append as absent and permanently loses its intent", [
+        ("api/src/emr-runtime/store.ts", "  const rows: RetentionRow[] = [];\n", "  await seal.recover();\n  const rows: RetentionRow[] = [];\n")]),
+    "M26": ("a rolled-back expiry leaves reusable proof for a forged checkpoint", [
+        ("api/src/emr-runtime/store.ts", "    if (callbackFailed) proof.rollback();\n", "")]),
+    "M27": ("a second calendar owner as a class method goes undetected", [
+        ("api/src/emr-runtime/contract.ts", "export interface ChainTail", "export class DuplicateCalendar { end(at: string) { return civilPeriodEnd(at, 2); } }\nexport interface ChainTail")]),
+    "M28": ("a second calendar owner as an exported arrow goes undetected", [
+        ("api/src/emr-runtime/contract.ts", "export interface ChainTail", "export const duplicateCalendar = (at: string) => civilPeriodEnd(at, 2);\nexport interface ChainTail")]),
+    "M29": ("a second calendar owner as a function expression goes undetected", [
+        ("api/src/emr-runtime/contract.ts", "export interface ChainTail", "export const duplicateCalendar = function(at: string) { return civilPeriodEnd(at, 2); };\nexport interface ChainTail")]),
+    "M30": ("a second calendar owner at module scope goes undetected", [
+        ("api/src/emr-runtime/contract.ts", "export interface ChainTail", "export const duplicateCalendar = civilPeriodEnd('2026-01-01T00:00:00.000Z', 2);\nexport interface ChainTail")]),
+    "M31": ("an unresolved append may be replaced by a checkpoint using an interrupted expiry proof", [
+        ("api/src/emr-runtime/seal.ts", "        if (!await this.sql.entryForEvent(stream, eventId)) throw new SealRefused('UnsealedEntryUnexplained', 'expiry-append-conflict');\n", "")]),
 }
 
 
