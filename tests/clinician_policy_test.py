@@ -1595,7 +1595,8 @@ class ClinicianPolicySpec(unittest.TestCase):
         # reply, close; the service decides each action's role), the two S5-U4c image request writes (create, and
         # the state change whose accept/close/decline the service keeps to technician/admin and whose cancel to the
         # requester or admin) and the S7-U1a explicit acknowledgement of a critical result by its named recipient
-        # (contract S7-U1p section 6.3); anything else that is not a GET is a new decision.
+        # (contract S7-U1p section 6.3), plus S8-CTX's POST studies/:uid/viewer-context-events diagnostic record.
+        # Anything else that is not a GET is a new decision.
         self.assertEqual(len(FIXTURES["business_routes"]), len(set(FIXTURES["business_routes"])))
         self.assertEqual([k for k in FIXTURES["business_routes"] if not k.startswith("GET ")],
                          ["POST studies/:uid/viewer-context-events", "POST dicom/lookup", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close",

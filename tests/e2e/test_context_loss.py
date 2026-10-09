@@ -52,13 +52,14 @@ class ContextLossE2E(mip.VolumeMipE2E):
         state = viewer.evaluate('''() => new Promise((resolve,reject) => {
           const v=cornerstone.getEnabledElements().map(e=>e.viewport).find(v=>v.type==='stack'&&v.csImage);
           const event=cornerstone.Enums.Events.IMAGE_RENDERED;
+          const previousReceipt=contextLossRendered.get(v.element);
           const stop=()=>{clearTimeout(timer);v.element.removeEventListener(event,sample)};
           const timer=setTimeout(()=>{stop();reject(Error('Current stack canvas did not report IMAGE_RENDERED'))},60000);
           function sample(){
             try{
               const image=v.csImage,canvas=v.getCanvas(),receipt=contextLossRendered.get(v.element);
               if(v.viewportStatus!==cornerstone.Enums.ViewportStatus.RENDERED||!image||image.imageId!==v.getCurrentImageId()
-                  ||!receipt||receipt.canvas!==canvas||receipt.imageId!==image.imageId
+                  ||!receipt||receipt===previousReceipt||receipt.canvas!==canvas||receipt.imageId!==image.imageId
                   ||!canvas.width||!canvas.height||receipt.width!==canvas.width||receipt.height!==canvas.height)return;
               // Read in the same task as the matching render receipt so a resize
               // cannot clear the canvas between readiness and the pixel oracle.
@@ -70,7 +71,9 @@ class ContextLossE2E(mip.VolumeMipE2E):
               stop();resolve(state);
             }catch(error){stop();reject(error)}
           }
-          v.element.addEventListener(event,sample);sample();
+          // Even a same-size canvas reset invalidates the previous pixels.
+          // Request a new paint and sample only its matching render receipt.
+          v.element.addEventListener(event,sample);v.render();
         })''')
         self.assertEqual(state['study'], study.uid)
         self.assertFalse(state['lost'])
