@@ -2745,37 +2745,44 @@ function r8Operator() {
 const r8OtherReport = (patch = {}) => ({ kind: 'pipc-kisa-report', triggeredAt: itime(1), sentAt: itime(2), noticeId: 'operator-other-report',
   channel: 'KISA', coveredFields: ['incident-time-cause-damage', 'response-status', 'contact-department'], ...patch });
 
-test('TEST-F-07 R8-I04 operator other-law reports bind and deem only the initial ISP report', async () => {
+test('TEST-F-07 R8-I04 operator other-law reports remain evidence until actual ISP reporting', async () => {
   const { auditor, scope } = await incidentForResponse(), facts = r8Operator(), report = r8OtherReport(); let p;
   assert.doesNotThrow(() => { p = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(30), notices: [report] }); },
     'M-F-R8-007: operator other-law delivery binds as evidence without a privacy duty');
-  assert.equal(duty(p, 'isp-incident-report').status, 'met', 'M-F-R8-008: actual qualifying operator other-law report deems the ISP initial report');
+  assert.equal(duty(p, 'isp-incident-report').status, 'overdue', 'M-F-R8-008: operator other-law reports cannot fulfill the ISP initial report');
   assert.deepEqual([duty(p, 'isp-incident-report').dueAt, duty(p, 'isp-incident-report').noticeRefs, duty(p, 'isp-incident-report').elapsedMs],
-    [itime(24), [report.noticeId], 2 * 3600000]);
-  assert.equal(duty(p, 'isp-incident-report-supplement').status, 'overdue');
+    [itime(24), [], 30 * 3600000]);
+  assert.equal(duty(p, 'isp-incident-report-supplement'), undefined, 'other-law evidence is not the operator initial ISP performance');
+  assert.equal(p.ledger.notices[0].noticeId, report.noticeId);
   assert.equal(duty(p, 'isp-user-notice').stillOwed, true, 'agency report never notifies users');
   assert.ok(p.obligations.every(o => o.family.startsWith('isp-')));
   const late = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(30), notices: [r8OtherReport({ sentAt: itime(26) })] });
   assert.deepEqual([duty(late, 'isp-incident-report').status, duty(late, 'isp-incident-report').lateByMs, duty(late, 'isp-incident-report').timeliness],
-    ['met', 2 * 3600000, 'requires-review']);
+    ['overdue', 6 * 3600000, 'requires-review']);
   for (const notices of [[], [r8OtherReport({ coveredFields: ['response-status'] })], [r8OtherReport({ channel: 'affected-users' })]]) {
     const unpaid = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(30), notices });
     assert.equal(duty(unpaid, 'isp-incident-report').status, 'overdue');
     assert.equal(unpaid.ledger.notices.length, notices.length);
   }
-  const additional = F.planIncidentResponse(auditor, scope, facts, { previous: p, asOf: itime(31), notices: [
+  const actual = F.planIncidentResponse(auditor, scope, facts, { previous: p, asOf: itime(30), notices: [ispReport()] });
+  assert.deepEqual([duty(actual, 'isp-incident-report').status, duty(actual, 'isp-incident-report').noticeRefs], ['met', [ispReport().noticeId]]);
+  assert.equal(duty(actual, 'isp-incident-report-supplement').status, 'overdue');
+  const additional = F.planIncidentResponse(auditor, scope, facts, { previous: actual, asOf: itime(31), notices: [
     { kind: 'pipc-kisa-additional', triggeredAt: itime(5), sentAt: itime(6), noticeId: 'other-supplement', channel: 'KISA', coveredFields: ['newly-confirmed-facts'] }] });
   assert.equal(duty(additional, 'isp-incident-report-supplement').status, 'overdue');
 });
 
-test('TEST-F-07 R8-I04 operator user deeming requires actual matching recipients and content', async () => {
+test('TEST-F-07 R8-I04 operator other-law user notices remain evidence despite matching recipients and content', async () => {
   const { auditor, scope } = await incidentForResponse(), facts = r8Operator();
   const sent = { kind: 'confirmed-leak', triggeredAt: itime(1), sentAt: itime(3), noticeId: 'operator-other-user-notice',
     recipientScopeRef: 'service-users', channel: 'affected-users', coveredFields: r7UserNotice().coveredFields };
   const p = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(6), notices: [sent] });
-  assert.equal(duty(p, 'isp-user-notice').status, 'met', 'M-F-R8-009: qualifying actual operator notice deems the user duty');
-  assert.deepEqual(duty(p, 'isp-user-notice').noticeRefs, [sent.noticeId]);
-  assert.equal(duty(p, 'isp-user-additional').stillOwed, true);
+  assert.equal(duty(p, 'isp-user-notice').status, 'pending', 'M-F-R8-009: operator other-law notices cannot fulfill the ISP user duty');
+  assert.deepEqual(duty(p, 'isp-user-notice').noticeRefs, []);
+  assert.equal(duty(p, 'isp-user-additional'), undefined, 'other-law evidence is not the operator initial user notice');
+  const actual = F.planIncidentResponse(auditor, scope, facts, { previous: p, asOf: itime(6), notices: [r7UserNotice()] });
+  assert.deepEqual([duty(actual, 'isp-user-notice').status, duty(actual, 'isp-user-notice').noticeRefs], ['met', [r7UserNotice().noticeId]]);
+  assert.equal(duty(actual, 'isp-user-additional').stillOwed, true);
   const subjectFacts = { ...facts, recipientScopeRef: 'data-subjects' };
   for (const [f, notice] of [[facts, { ...sent, coveredFields: ['contact-department'] }], [subjectFacts, { ...sent, recipientScopeRef: 'data-subjects' }]]) {
     const unmatched = F.planIncidentResponse(auditor, scope, f, { asOf: itime(6), notices: [notice] });
@@ -2784,7 +2791,7 @@ test('TEST-F-07 R8-I04 operator user deeming requires actual matching recipients
   }
   const proved = F.planIncidentResponse(auditor, scope, subjectFacts, { asOf: itime(6), notices: [{ ...sent, recipientScopeRef: 'data-subjects' }],
     recipientScopes: [{ scopeRef: 'data-subjects', recipientIds: ['hospital-a', 'hospital-b'] }, { scopeRef: 'service-users', recipientIds: ['hospital-b'] }] });
-  assert.equal(duty(proved, 'isp-user-notice').status, 'met');
+  assert.equal(duty(proved, 'isp-user-notice').status, 'pending');
 });
 
 test('TEST-F-07 R8-I04 operator evidence never creates privacy medical or no-breach follow-up duties', async () => {
@@ -2793,7 +2800,7 @@ test('TEST-F-07 R8-I04 operator evidence never creates privacy medical or no-bre
   const p = F.planIncidentResponse(auditor, scope, medicalFacts, { asOf: itime(6), notices: [
     possibleNotice(3, { recipientScopeRef: 'service-users' }), { kind: 'mohw-notice', triggeredAt: IA, sentAt: itime(3), noticeId: 'medical-actual',
       ...mohwDelivery(), coveredFields: [...mohwDelivery().coveredFields, ...r8OtherReport().coveredFields] }] });
-  assert.equal(duty(p, 'isp-incident-report').status, 'met');
+  assert.equal(duty(p, 'isp-incident-report').status, 'pending');
   const noLeak = { ...medicalFacts, status: 'not-a-leak', determinationAt: itime(8), verdictId: 'no-leak-later', possibleGround: null, newlyConfirmedAt: null };
   const next = F.planIncidentResponse(auditor, scope, noLeak, { previous: p, asOf: itime(9) });
   assert.ok(next.obligations.every(o => o.family.startsWith('isp-')));
@@ -2821,5 +2828,183 @@ test('TEST-F-07 R8-I04 invalid operator notice binding refuses atomically while 
   const replay = F.planIncidentResponse(auditor, scope, facts, { previous: next, asOf: itime(7), notices: [report] });
   assert.deepEqual(replay.ledger.notices, next.ledger.notices);
   assert.equal(replay.ledger.notices.length, 1);
-  assert.equal(duty(replay, 'isp-incident-report').status, 'met');
+  assert.equal(duty(replay, 'isp-incident-report').status, 'pending');
+});
+
+// D839 / OPUS-F-R8-001..003 -> REQ-EMR-15/19 -> RISK-F-07 -> TEST-F-07.
+// Corrections are forensic evidence records, independent of the officer's applicability decisions.
+function r9Correction(facts, occurrence = r7PreCutover, hours = 5, evidenceId = 'corrected-occurrence') {
+  return r8Occurred(clone(facts), { ...occurrence, evidenceId, correction: { supersedes: facts.ispIncident.occurrence.evidenceId,
+    at: itime(hours), reason: 'Forensic clock offset reconciled against the source log', evidenceId: `forensics-${evidenceId}` } });
+}
+
+test('TEST-F-07 R9-I01 CE16 hospital MOHW evidence cannot fulfill the operator ISP report', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const facts = { ...r8Operator(), medicalIncident: { occurredAt: IA, discoveredAt: IA, electronicIntrusion: true, type: 'system-disruption' } };
+  const notice = { kind: 'mohw-notice', triggeredAt: IA, sentAt: itime(3), noticeId: 'hospital-mohw', ...mohwDelivery(),
+    coveredFields: [...mohwDelivery().coveredFields, ...r8OtherReport().coveredFields] };
+  const p = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(30), notices: [notice] });
+  assert.deepEqual([duty(p, 'isp-incident-report').status, duty(p, 'isp-incident-report').stillOwed, duty(p, 'isp-incident-report').noticeRefs],
+    ['overdue', true, []], 'M-F-R9-001: hospital MOHW notice is never operator ISP performance');
+  assert.equal(p.ledger.notices[0].noticeId, notice.noticeId);
+  assert.ok(p.obligations.every(o => o.family.startsWith('isp-') && o.audience === 'privacy-officer'));
+  const hospital = { ...facts, obligationOwner: { kind: 'hospital', id: scope.institutionId },
+    ispIncident: { ...facts.ispIncident, userImpact: userImpact() } };
+  const control = F.planIncidentResponse(auditor, scope, hospital, { asOf: itime(30), notices: [notice] });
+  assert.deepEqual([duty(control, 'isp-incident-report').status, duty(control, 'isp-incident-report').noticeRefs], ['met', [notice.noticeId]]);
+});
+
+test('TEST-F-07 R9-I01 CE11a unattributed PIPC KISA reports are evidence only for the operator', async () => {
+  const { auditor, scope } = await incidentForResponse(), facts = r8Operator();
+  for (const channel of ['PIPC', 'KISA']) {
+    const other = r8OtherReport({ channel }), p = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(30), notices: [other] });
+    assert.deepEqual([duty(p, 'isp-incident-report').stillOwed, duty(p, 'isp-incident-report').notice], [true, null],
+      'M-F-R9-002: unattributed PIPC KISA evidence cannot discharge operator reporting');
+    const actual = F.planIncidentResponse(auditor, scope, facts, { previous: p, asOf: itime(30), notices: [ispReport(), r7UserNotice(),
+      { kind: 'pipc-kisa-additional', triggeredAt: itime(5), sentAt: itime(6), noticeId: 'other-more', channel, coveredFields: ['newly-confirmed-facts'] },
+      { kind: 'confirmed-additional', triggeredAt: itime(5), sentAt: itime(6), noticeId: 'other-user-more', channel: 'affected-users', coveredFields: ['newly-confirmed-facts'] }] });
+    assert.deepEqual(['isp-incident-report', 'isp-user-notice'].map(k => duty(actual, k).status), ['met', 'met']);
+    assert.deepEqual(['isp-incident-report-supplement', 'isp-user-additional'].map(k => [duty(actual, k).stillOwed, duty(actual, k).noticeRefs]), [[true, []], [true, []]]);
+    const completed = F.planIncidentResponse(auditor, scope, facts, { previous: actual, asOf: itime(31), notices: [
+      ispReport(30, { kind: 'isp-incident-report-supplement', triggeredAt: itime(5), noticeId: 'isp-more', coveredFields: ['newly-confirmed-facts'] }),
+      r7UserNotice({ kind: 'isp-user-additional', triggeredAt: itime(5), sentAt: itime(30), noticeId: 'isp-users-more', coveredFields: ['newly-confirmed-facts'] })] });
+    assert.deepEqual(['isp-incident-report-supplement', 'isp-user-additional'].map(k => duty(completed, k).status), ['met', 'met']);
+    assert.ok(actual.ledger.notices.every(n => completed.ledger.notices.some(x => x.noticeId === n.noticeId)));
+  }
+});
+
+test('TEST-F-07 R9-I01 operator other-law evidence cannot stand in for initial ISP performance', async () => {
+  const { auditor, scope } = await incidentForResponse(), facts = r8Operator();
+  const notices = [r8OtherReport(), { kind: 'confirmed-leak', triggeredAt: itime(1), sentAt: itime(3), noticeId: 'other-users',
+    channel: 'affected-users', recipientScopeRef: 'service-users', coveredFields: r7UserNotice().coveredFields }];
+  const p = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(30), notices });
+  assert.equal(duty(p, 'isp-incident-report-supplement'), undefined, 'M-F-R9-010: other-law report is not the operator initial ISP report');
+  assert.equal(duty(p, 'isp-user-additional'), undefined, 'M-F-R9-011: other-law user notice is not the operator initial ISP notice');
+  assert.ok(p.obligations.every(o => o.stillOwed));
+  const actual = F.planIncidentResponse(auditor, scope, facts, { previous: p, asOf: itime(30), notices: [ispReport(), r7UserNotice()] });
+  assert.deepEqual(['isp-incident-report-supplement', 'isp-user-additional'].map(k => [duty(actual, k).triggeredAt, duty(actual, k).stillOwed]),
+    [[itime(5), true], [itime(5), true]]);
+});
+
+test('TEST-F-07 R9-I02 CE15 a negative re-decision closes unknown ISP user duties', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const facts = r8Decided(true, { status: 'unknown', additionalFacts: [{ eventId: 'more', confirmedAt: itime(5), evidenceId: 'more' }] });
+  for (const sent of [false, true]) {
+    const first = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(6), notices: sent ? [r7UserNotice()] : [] });
+    const revised = { ...facts, ispIncident: { ...facts.ispIncident, userNoticeDecision: r7NoticeDecision(false, 7, 'not-applicable') } };
+    const next = F.planIncidentResponse(auditor, scope, revised, { previous: first, asOf: itime(8) });
+    const o = duty(next, sent ? 'isp-user-additional' : 'isp-user-notice');
+    assert.deepEqual([o.status, o.stillOwed, o.actionRequiredNow, o.replacedBy, o.closureGround],
+      ['moot', false, false, 'not-applicable', 'applicability-redecided'], 'M-F-R9-003: an unknown ISP retired user duty is moot and not owed');
+    assert.equal(o.provisionalDeadlinePassed, false);
+    assert.ok(o.observations.some(x => x.status === 'unverified-pending'));
+    assert.ok(o.corrections.some(x => x.evidenceRefs.includes('not-applicable')));
+    assert.equal(duty(next, 'isp-incident-report').stillOwed, true);
+    if (sent) assert.deepEqual([duty(next, 'isp-user-notice').status, duty(next, 'isp-user-notice').noticeRefs], ['met', [r7UserNotice().noticeId]]);
+    assert.deepEqual(r8UserProjection(F.planIncidentResponse(auditor, scope, revised, { findings: [facts], notices: sent ? [r7UserNotice()] : [], asOf: itime(8) })), r8UserProjection(next));
+  }
+});
+
+test('TEST-F-07 R9-I03 CE18 occurrence correction retires the unsent duty with evidence history', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const facts = r6Finding(IA, { occurrence: r8PostCutover, userImpact: userImpact() });
+  const first = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(4) }), corrected = r9Correction(facts), before = clone({ first, corrected }); let next;
+  assert.doesNotThrow(() => { next = F.planIncidentResponse(auditor, scope, corrected, { previous: first, asOf: itime(6) }); },
+    'M-F-R9-004: a reasoned occurrence correction is recordable');
+  const original = duty(first, 'isp-user-notice'), o = duty(next, 'isp-user-notice');
+  assert.ok(o, 'M-F-R9-005: occurrence correction retains the historical user duty');
+  assert.deepEqual([o.status, o.stillOwed, o.actionRequiredNow, o.closureGround], ['moot', false, false, 'occurrence-corrected']);
+  assert.equal(o.replacedBy, corrected.ispIncident.occurrence.evidenceId, 'M-F-R9-012: corrected closure identifies its occurrence evidence');
+  assert.deepEqual([o.obligationKey, o.triggeredAt], [original.obligationKey, original.triggeredAt]);
+  assert.deepEqual(o.observations.map(x => x.status), ['pending', 'moot']);
+  assert.ok(o.corrections.some(x => x.evidenceRefs.includes('forensics-corrected-occurrence')));
+  assert.ok(first.ledger.findings.every(f => next.ledger.findings.some(n => n.findingId === f.findingId)),
+    'M-F-R9-007: superseded occurrence findings remain in the evidence ledger');
+  assert.deepEqual(next.ispAssessments[0].userNotice.effectiveOccurrenceEvidenceRefs, ['corrected-occurrence']);
+  assert.deepEqual(next.ispAssessments[0].userNotice.occurrenceEvidenceRefs, ['corrected-occurrence', r8PostCutover.evidenceId].sort());
+  assert.deepEqual({ first, corrected }, before);
+  assert.deepEqual(r8UserProjection(F.planIncidentResponse(auditor, scope, corrected, { findings: [facts], asOf: itime(6) })), r8UserProjection(next));
+});
+
+test('TEST-F-07 R9-I03 CE12 effective occurrence correction resolves repeated negative decisions', async () => {
+  const { auditor, scope } = await incidentForResponse(), facts = r8Decided(false);
+  const p0 = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(3) });
+  const post = r8Occurred(facts, r8PostCutover), p1 = F.planIncidentResponse(auditor, scope, post, { previous: p0, asOf: itime(4) });
+  const repeated = { ...post, ispIncident: { ...post.ispIncident, userNoticeDecision: r7NoticeDecision(false, 5, 'still-no') } };
+  const p2 = F.planIncidentResponse(auditor, scope, repeated, { previous: p1, asOf: itime(6) });
+  assert.equal(duty(p2, 'isp-user-notice').stillOwed, true, 'a negative decision cannot override definite post-cutover evidence');
+  const corrected = r9Correction(repeated, r7PreCutover, 7), p3 = F.planIncidentResponse(auditor, scope, corrected, { previous: p2, asOf: itime(8) });
+  assert.deepEqual([p3.ispAssessments[0].userNotice.applicability, duty(p3, 'isp-user-notice').status, duty(p3, 'isp-user-notice').stillOwed],
+    ['not-applicable', 'moot', false], 'M-F-R9-006: superseded post-cutover evidence no longer forces applicability');
+  assert.deepEqual(duty(p3, 'isp-user-notice').decisionRefs, ['initial-decision', 'still-no']);
+  assert.equal(duty(p3, 'isp-user-notice').replacedBy, 'corrected-occurrence');
+  assert.deepEqual(duty(p3, 'isp-user-notice').observations.map(x => x.status), ['pending', 'pending', 'moot']);
+  // An independent positive decision still supports the union until it too is revised.
+  const positive = r8Decided(true, { occurrence: r8PostCutover }), yes = F.planIncidentResponse(auditor, scope, positive, { asOf: itime(4) });
+  const pre = r9Correction(positive), waiting = F.planIncidentResponse(auditor, scope, pre, { previous: yes, asOf: itime(6) });
+  assert.deepEqual([waiting.ispAssessments[0].userNotice.applicability, duty(waiting, 'isp-user-notice').stillOwed], ['re-decision-required', true]);
+  const no = { ...pre, ispIncident: { ...pre.ispIncident, userNoticeDecision: r7NoticeDecision(false, 7, 'effective-no') } };
+  const closed = F.planIncidentResponse(auditor, scope, no, { previous: waiting, asOf: itime(8) });
+  assert.deepEqual([duty(closed, 'isp-user-notice').status, duty(closed, 'isp-user-notice').replacedBy], ['moot', 'effective-no']);
+});
+
+test('TEST-F-07 R9-I03 occurrence correction preserves actual notices and ends the old supplement interval', async () => {
+  const { auditor, scope } = await incidentForResponse();
+  for (const sent of [false, true]) {
+    const facts = r6Finding(IA, { occurrence: r8PostCutover, userImpact: userImpact(), additionalFacts: [{ eventId: 'before', confirmedAt: itime(5), evidenceId: 'before' }] });
+    const notices = [r7UserNotice(), ...(sent ? [r7UserNotice({ kind: 'isp-user-additional', triggeredAt: itime(5), sentAt: itime(6), noticeId: 'sent-more', coveredFields: ['newly-confirmed-facts'] })] : [])];
+    const first = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(6), notices });
+    const corrected = r9Correction(facts, r7PreCutover, 7);
+    corrected.ispIncident.additionalFacts.push({ eventId: 'after', confirmedAt: itime(8), evidenceId: 'after' });
+    const next = F.planIncidentResponse(auditor, scope, corrected, { previous: first, asOf: itime(9) });
+    assert.deepEqual([duty(next, 'isp-user-notice').status, duty(next, 'isp-user-notice').noticeRefs], ['met', [r7UserNotice().noticeId]]);
+    assert.deepEqual(next.obligations.filter(o => o.family === 'isp-user-additional').map(o => [o.triggerEventId, o.status]), [['before', sent ? 'met' : 'moot']]);
+    assert.deepEqual(next.ledger.notices, first.ledger.notices);
+    assert.deepEqual(r8UserProjection(F.planIncidentResponse(auditor, scope, corrected, { findings: [facts], notices, asOf: itime(9) })), r8UserProjection(next));
+  }
+});
+
+test('TEST-F-07 R9-I03 invalid occurrence corrections refuse atomically without losing prior evidence', async () => {
+  const { auditor, scope } = await incidentForResponse(), facts = r6Finding(IA, { occurrence: r8PostCutover, userImpact: userImpact() });
+  const first = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(4) }), corrected = r9Correction(facts);
+  for (const patch of [{ reason: '' }, { evidenceId: '' }, { supersedes: 'missing' }, { supersedes: 'corrected-occurrence' }, { at: itime(8) }, { at: itime(-1) }]) {
+    const bad = clone(corrected); Object.assign(bad.ispIncident.occurrence.correction, patch);
+    incidentRefused(() => F.planIncidentResponse(auditor, scope, bad, { previous: first, asOf: itime(6) }), [first, bad],
+      patch.reason === '' ? 'M-F-R9-008: occurrence correction needs a recorded reason' : 'invalid correction refuses atomically');
+  }
+  const unlinked = r8Occurred(facts, r7PreCutover);
+  incidentRefused(() => F.planIncidentResponse(auditor, scope, unlinked, { previous: first, asOf: itime(6) }), [first, unlinked], 'conflicting times require explicit correction');
+  const foreign = clone(corrected); foreign.ispIncident.eventId = 'other-attack';
+  incidentRefused(() => F.planIncidentResponse(auditor, scope, foreign, { previous: first, asOf: itime(6) }), [first, foreign], 'correction cannot borrow another attack evidence');
+  const duplicate = clone(corrected); duplicate.ispIncident.occurrence.evidenceId = r8PostCutover.evidenceId;
+  incidentRefused(() => F.planIncidentResponse(auditor, scope, duplicate, { previous: first, asOf: itime(6) }), [first, duplicate], 'occurrence ID content is immutable');
+  const branch = r9Correction(facts, r7PreCutover, 6, 'competing-correction');
+  incidentRefused(() => F.planIncidentResponse(auditor, scope, branch, { previous: first, findings: [corrected], asOf: itime(7) }), [first, corrected, branch],
+    'M-F-R9-009: two corrections cannot supersede the same occurrence');
+  const backward = r9Correction(corrected, r8PostCutover, 4, 'backward');
+  incidentRefused(() => F.planIncidentResponse(auditor, scope, backward, { previous: first, findings: [corrected], asOf: itime(6) }), [first, backward], 'correction chain cannot run backward');
+  const a = clone(corrected), b = r9Correction(corrected, r7PreCutover, 5, 'cyclic'); a.ispIncident.occurrence.correction.supersedes = 'cyclic';
+  incidentRefused(() => F.planIncidentResponse(auditor, scope, b, { findings: [a], asOf: itime(6) }), [a, b], 'cyclic occurrence corrections refuse');
+  const allowed = F.planIncidentResponse(auditor, scope, corrected, { previous: first, asOf: itime(6) });
+  assert.equal(duty(allowed, 'isp-user-notice').status, 'moot');
+});
+
+test('TEST-F-07 R9-I03 chained occurrence corrections replay independently of intake order', async () => {
+  const { auditor, scope } = await incidentForResponse(), facts = r6Finding(IA, { occurrence: r8PostCutover, userImpact: userImpact() });
+  const first = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(4) });
+  const pre = r9Correction(facts), closed = F.planIncidentResponse(auditor, scope, pre, { previous: first, asOf: itime(6) });
+  const post = r9Correction(pre, r8PostCutover, 7, 'final-post');
+  const reopened = F.planIncidentResponse(auditor, scope, post, { previous: closed, asOf: itime(8) });
+  assert.deepEqual([duty(reopened, 'isp-user-notice').status, duty(reopened, 'isp-user-notice').obligationKey, duty(reopened, 'isp-user-notice').triggeredAt,
+    duty(reopened, 'isp-user-notice').elapsedMs], ['pending', duty(first, 'isp-user-notice').obligationKey, itime(2), 6 * 3600000]);
+  assert.deepEqual(duty(reopened, 'isp-user-notice').observations.map(x => x.status), ['pending', 'moot', 'pending']);
+  for (const ordered of [[facts, pre, post], [facts, post, pre], [pre, facts, post], [pre, post, facts], [post, facts, pre], [post, pre, facts]]) {
+    const batch = F.planIncidentResponse(auditor, scope, ordered[0], { findings: ordered.slice(1), asOf: itime(8) });
+    assert.deepEqual(r8UserProjection(batch), r8UserProjection(reopened));
+    assert.deepEqual(batch.ispAssessments, reopened.ispAssessments);
+    assert.deepEqual(batch.ledger.findings.map(x => x.findingId), reopened.ledger.findings.map(x => x.findingId));
+  }
+  const replay = F.planIncidentResponse(auditor, scope, facts, { previous: reopened, asOf: itime(9) });
+  assert.equal(replay.ledger.findings.length, reopened.ledger.findings.length);
+  assert.deepEqual(replay.ispAssessments[0].userNotice.effectiveOccurrenceEvidenceRefs, ['final-post']);
 });

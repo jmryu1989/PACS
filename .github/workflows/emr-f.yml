@@ -49,7 +49,7 @@ jobs:
       - name: TEST-F-01..08 declared allow/refuse cases
         if: ${{ !cancelled() }}
         run: python3 scripts/record-run.py --run-dir tmp/emr-f-ci/contract --cwd . --tree api/src/emr-contract --tree api/src/emr-audit --file api/tsconfig.json --file api/package-lock.json --file tests/emr/f/contract_test.cjs -- node --test --test-reporter=tap tests/emr/f/contract_test.cjs
-      - name: 84 mutants M-F-01..07, S1..S7, R2-001..003, R3-001..002, R4-001..010, R5-001..017, R6-001..019, R7-001..008 and R8-001..011 on an out-of-tree copy
+      - name: 96 mutants M-F-01..07, S1..S7, R2-001..003, R3-001..002, R4-001..010, R5-001..017, R6-001..019, R7-001..008, R8-001..011 and R9-001..012 on an out-of-tree copy
         if: ${{ !cancelled() }}
         run: python3 scripts/record-run.py --run-dir tmp/emr-f-ci/mutants --cwd . --tree api/src/emr-contract --tree api/src/emr-audit --file api/tsconfig.json --file tests/emr/f/contract_test.cjs --file tests/emr/f/mutants.py -- python3 -B tests/emr/f/mutants.py --out tmp/emr-f-ci/mutants.json
       - name: Raw run evidence

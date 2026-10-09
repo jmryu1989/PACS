@@ -525,7 +525,8 @@ export interface IncidentResponseFacts {
     verification?: { by: ImmutableIdentity; at: string; evidenceId: string;
       types: { telecomBusiness: boolean; forProfitTelecomInformation: boolean }; nonApplicabilityBasis?: string };
     deploymentModel?: 'hosted' | 'managed' | 'on-prem';
-    occurrence?: { occurredAt: string | null; endedAt: string | null; evidenceId: string };
+    occurrence?: { occurredAt: string | null; endedAt: string | null; evidenceId: string;
+      correction?: { supersedes: string; at: string; reason: string; evidenceId: string } };
     userNoticeDecision?: { decisionId: string; applies: boolean; at: string; reason: string; basis: string; evidenceId: string; decider: IncidentDecider };
     userImpact?: { kind: 'outage' | 'user-information' | 'comparable-serious-impact'; outageMinutes?: number;
       confirmedAt: string; recipientScopeRef: string; evidenceId: string; decider: IncidentDecider; detailsComplete?: boolean };
@@ -587,7 +588,7 @@ export interface IncidentObligation {
   verdictRefs: readonly string[]; warnings: readonly string[]; designationUnverified: boolean;
   obligationOwner: { kind: 'hospital' | 'processor' | 'operator'; id: string }; sinceHospitalKnowledgeMs: number | null;
   applicability: 'verified' | 'unverified'; audience: 'privacy-officer'; provisionalResponseDueAt: string | null;
-  provisionalDeadlinePassed: boolean; closureGround: 'actual-notice' | 'posting' | 'confirmed-notice-substitution' | 'report-exemption' | 'verdict-replaced' | 'applicability-redecided' | null;
+  provisionalDeadlinePassed: boolean; closureGround: 'actual-notice' | 'posting' | 'confirmed-notice-substitution' | 'report-exemption' | 'verdict-replaced' | 'applicability-redecided' | 'occurrence-corrected' | null;
   observations: readonly { asOf: string; status: IncidentObligation['status']; noticeRefs: readonly string[] }[];
   corrections: readonly { observedAt: string; revisedAt: string; reason: 'evidence-replayed'; evidenceRefs: readonly string[] }[];
 }
@@ -600,6 +601,7 @@ export interface IncidentResponsePlan {
     dueAt: string | null; dueRule: string; displayedBasis: string; taskPolicy: 'display-only' | 'track'; automaticExemption: false;
     applicability: 'verified' | 'unverified' | 'not-applicable'; provisionalResponseDueAt: string | null };
     userNotice: { applicability: 'applicable' | 'not-applicable' | 'decision-required' | 're-decision-required'; decisionRefs: readonly string[];
+      occurrenceEvidenceRefs: readonly string[]; effectiveOccurrenceEvidenceRefs: readonly string[];
       reasonCode: 'occurrence-evidence-contradicts-decision' | null; reason: string | null } }[];
   recipientScopes: readonly { scopeRef: string; recipientIds: readonly string[] }[];
   ledger: { findings: readonly BoundFinding[]; notices: readonly BoundNotice[]; delays: readonly IncidentDelay[]; decisions: readonly IncidentDecision[] };
@@ -762,9 +764,14 @@ function incidentFacts(input: unknown, scope: IncidentScope): IncidentResponseFa
     }
     if (isp.deploymentModel !== undefined) choice(isp.deploymentModel, ['hosted', 'managed', 'on-prem']);
     if (isp.occurrence) {
-      const o = object(isp.occurrence, ['occurredAt', 'endedAt', 'evidenceId']); string(o.evidenceId);
+      const o = optionalObject(isp.occurrence, ['occurredAt', 'endedAt', 'evidenceId'], ['correction']); string(o.evidenceId);
       if (o.occurredAt !== null && utc(o.occurredAt) > ownKnownAt) throw new Error('Occurrence after knowledge');
       if (o.endedAt !== null && (utc(o.endedAt) < o.occurredAt)) throw new Error('Invalid occurrence interval');
+      if (o.correction !== undefined) {
+        const c = object(o.correction, ['supersedes', 'at', 'reason', 'evidenceId']);
+        string(c.supersedes); string(c.reason); string(c.evidenceId);
+        if (utc(c.at) < ownKnownAt) throw new Error('Correction before incident knowledge');
+      }
     }
     if (isp.userNoticeDecision) {
       const d = object(isp.userNoticeDecision, ['decisionId', 'applies', 'at', 'reason', 'basis', 'evidenceId', 'decider']);
@@ -844,6 +851,7 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
       if (['hospitalKnownAt', 'firstDetectionEvidenceAt', 'processorKnownAt', 'operatorKnownAt', 'notifiedHospitalAt'].some(k => v[k] && v[k] > recordedAt) ||
           (v.ispIncident?.verification && v.ispIncident.verification.at > recordedAt) ||
           (v.ispIncident?.occurrence?.endedAt && v.ispIncident.occurrence.endedAt > recordedAt) ||
+          (v.ispIncident?.occurrence?.correction && v.ispIncident.occurrence.correction.at > recordedAt) ||
           (v.ispIncident?.userNoticeDecision && v.ispIncident.userNoticeDecision.at > recordedAt) ||
           (v.ispIncident?.userImpact && v.ispIncident.userImpact.confirmedAt > recordedAt) ||
           v.ispIncident?.additionalFacts?.some(x => x.confirmedAt > recordedAt)) throw new Error('Future incident evidence');
@@ -895,13 +903,27 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
       return latest?.status ?? 'unknown';
     };
     const ispAssessments: IncidentResponsePlan['ispAssessments'][number][] = [];
-    const ispUserRules = new Map<string, { applicable: boolean; decisions: NonNullable<IncidentResponseFacts['ispIncident']['userNoticeDecision']>[] }>();
+    type Occurrence = NonNullable<IncidentResponseFacts['ispIncident']['occurrence']>;
+    const ispUserRules = new Map<string, { applicable: boolean; decisions: NonNullable<IncidentResponseFacts['ispIncident']['userNoticeDecision']>[];
+      occurrences: Occurrence[]; retirement: { ref: string; ground: IncidentObligation['closureGround'] } | null }>();
     for (const eventId of [...new Set(facts.filter(v => v.ispIncident?.attackCaused).map(v => v.ispIncident.eventId))].sort()) {
       const eventFacts = facts.filter(v => v.ispIncident?.eventId === eventId);
       const knowledgeAt = eventFacts[0].awarenessAt, law = ispLawAt(knowledgeAt);
-      const occurrences = eventFacts.map(v => v.ispIncident.occurrence).filter(Boolean);
-      const starts = [...new Set(occurrences.map(o => o.occurredAt).filter(Boolean))];
-      const ends = [...new Set(occurrences.map(o => o.endedAt).filter(Boolean))];
+      const occurrences = merge(eventFacts.map(v => v.ispIncident.occurrence).filter(Boolean), o => o.evidenceId);
+      for (const o of occurrences) if (o.correction) {
+        const old = occurrences.find(x => x.evidenceId === o.correction.supersedes);
+        if (!old || old.evidenceId === o.evidenceId || (old.correction && old.correction.at > o.correction.at) ||
+            occurrences.some(x => x.evidenceId !== o.evidenceId && x.correction?.supersedes === old.evidenceId)) throw new Error('Invalid occurrence correction');
+        const visited = new Set([o.evidenceId]); let parent = old;
+        while (parent) {
+          if (visited.has(parent.evidenceId)) throw new Error('Cyclic occurrence correction');
+          visited.add(parent.evidenceId); parent = occurrences.find(x => x.evidenceId === parent.correction?.supersedes);
+        }
+      }
+      // Retain the forensic record while allowing an explicit correction to replace its factual conclusion.
+      const effectiveOccurrences = occurrences.filter(o => !occurrences.some(x => x.correction?.supersedes === o.evidenceId));
+      const starts = [...new Set(effectiveOccurrences.map(o => o.occurredAt).filter(Boolean))];
+      const ends = [...new Set(effectiveOccurrences.map(o => o.endedAt).filter(Boolean))];
       if (starts.length > 1 || ends.length > 1) throw new Error('Conflicting occurrence evidence');
       const occurredAt = starts[0], endedAt = ends[0], cutover = Date.parse(ISP.userNoticeAppliesFrom);
       const uncertain = !occurredAt || (Date.parse(occurredAt) < cutover && (!endedAt || Date.parse(endedAt) >= cutover));
@@ -912,8 +934,14 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
       // Evidence intake must not depend on an officer making a replacement decision in the same call.
       const needsRedecision = !uncertain && !!latest && latest.applies !== definite;
       const applicability = needsRedecision ? 're-decision-required' : uncertain ? latest ? latest.applies ? 'applicable' : 'not-applicable' : 'decision-required' : definite ? 'applicable' : 'not-applicable';
+      const correction = effectiveOccurrences.filter(o => o.correction).sort((a, b) =>
+        a.correction.at.localeCompare(b.correction.at) || a.evidenceId.localeCompare(b.evidenceId)).slice(-1)[0];
+      const retirement = correction && (!latest || correction.correction.at >= latest.at)
+        ? { ref: correction.evidenceId, ground: 'occurrence-corrected' as const }
+        : latest ? { ref: latest.decisionId, ground: 'applicability-redecided' as const } : null;
       // A pending re-decision cannot suppress either independently sufficient source of an owed duty.
       ispUserRules.set(eventId, { applicable: definite || !!latest?.applies,
+        occurrences, retirement,
         decisions: [...decisions].sort((a, b) => a.at.localeCompare(b.at) || a.decisionId.localeCompare(b.decisionId)) });
       const status = ispStatus(eventId), reportDueAt = law.taskPolicy ? null : new Date(Date.parse(knowledgeAt) + IMMEDIATE_TIMING_RULE.ispHours * 3600000).toISOString();
       ispAssessments.push({ eventId, knowledgeAt, initialReport: { dueAt: status === true ? reportDueAt : null,
@@ -921,14 +949,19 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
         applicability: status === true ? 'verified' : status === false ? 'not-applicable' : 'unverified',
         provisionalResponseDueAt: status === 'unknown' ? reportDueAt : null },
         userNotice: { applicability, decisionRefs: decisions.map(d => d.decisionId),
+          occurrenceEvidenceRefs: occurrences.map(o => o.evidenceId), effectiveOccurrenceEvidenceRefs: effectiveOccurrences.map(o => o.evidenceId),
           reasonCode: needsRedecision ? 'occurrence-evidence-contradicts-decision' : null,
           reason: needsRedecision ? '확인된 사고 발생 시각이 기존 이용자 통지 적용 결정과 달라 재판정이 필요합니다.' : null } });
     }
     const ispUserApplicable = (eventId: string) => ispUserRules.get(eventId)?.applicable === true;
     // Replay the effective decision intervals, including a duty first recognized after its original trigger.
     // A new cause after a negative re-decision does not belong to the earlier applicable interval.
-    const ispUserPreviouslyApplicable = (eventId: string, at: string) => ispUserRules.get(eventId)?.decisions.some((d, i, all) =>
-      d.applies && (!all[i + 1] || all[i + 1].at > at)) === true;
+    const ispUserPreviouslyApplicable = (eventId: string, at: string) => {
+      const rule = ispUserRules.get(eventId);
+      return rule?.decisions.some((d, i, all) => d.applies && (!all[i + 1] || all[i + 1].at > at)) === true ||
+        rule?.occurrences.some(o => o.occurredAt !== null && Date.parse(o.occurredAt) >= Date.parse(ISP.userNoticeAppliesFrom) &&
+          rule.occurrences.some(next => next.correction?.supersedes === o.evidenceId && next.correction.at > at)) === true;
+    };
     type Cause = { family: DutyFamily; eventId: string; at: string; recipients: string; fact: BoundFinding['facts']; discoveredAt?: string; evidenceAt?: string; verdictRefs?: string[] };
     const causes: Cause[] = [];
     for (const v of facts) {
@@ -1076,8 +1109,8 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
       if (['isp-supplement', 'isp-user-additional'].includes(c.family)) {
         const prior = notices.some(n => postingReady(n) && performedAt(n) <= c.at && (c.family === 'isp-supplement'
           ? ((n.kind === 'isp-incident-report' && n.triggerEventId === c.fact.ispIncident.eventId) ||
-            (NO_LEAK_CLOSURE_RULE.deemedReportKinds.includes(n.kind) && n.sentAt >= c.fact.awarenessAt && ['MOHW-official', 'MOHW-delegated', 'PIPC', 'KISA'].includes(n.channel) && IMMEDIATE_TIMING_RULE.ispReportFields.every(k => n.coveredFields?.includes(k))))
-          : ((n.kind === 'isp-user-notice' || ['possible-leak', 'confirmed-leak', 'confirmed-priority'].includes(n.kind)) && noticeCovers(n, c.recipients) && userNoticeFields(c.fact).every(k => n.coveredFields?.includes(k)))));
+            (owner.kind !== 'operator' && NO_LEAK_CLOSURE_RULE.deemedReportKinds.includes(n.kind) && n.sentAt >= c.fact.awarenessAt && ['MOHW-official', 'MOHW-delegated', 'PIPC', 'KISA'].includes(n.channel) && IMMEDIATE_TIMING_RULE.ispReportFields.every(k => n.coveredFields?.includes(k))))
+          : ((n.kind === 'isp-user-notice' || (owner.kind !== 'operator' && ['possible-leak', 'confirmed-leak', 'confirmed-priority'].includes(n.kind))) && noticeCovers(n, c.recipients) && userNoticeFields(c.fact).every(k => n.coveredFields?.includes(k)))));
         if (!prior) continue;
       }
       const mode = facts.filter(v => v.status === 'confirmed' && v.determinationAt === c.fact.determinationAt).some(v => v.detailsComplete);
@@ -1147,7 +1180,8 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
     for (const o of obligations) {
       const matching = notices.filter(n => belongs(n, o)).sort((a, b) => a.sentAt.localeCompare(b.sentAt) || a.noticeId.localeCompare(b.noticeId));
       const direct = completion(matching.filter(n => postingReady(n) && (!n.posting || o.requiredFields.every(k => n.coveredFields.includes(k)))), o.recipientScopeRef);
-      const deemed = notices.filter(n => postingReady(n) && performedAt(n) >= o.triggeredAt && (
+      // D839: attached other-law evidence does not establish the operator's own ISP performance.
+      const deemed = notices.filter(n => owner.kind !== 'operator' && postingReady(n) && performedAt(n) >= o.triggeredAt && (
         o.family === 'isp-report' ? NO_LEAK_CLOSURE_RULE.deemedReportKinds.includes(n.kind) &&
           ['MOHW-official', 'MOHW-delegated', 'PIPC', 'KISA'].includes(n.channel) && o.requiredFields.every(k => n.coveredFields?.includes(k)) :
         o.family === 'isp-supplement' ? NO_LEAK_CLOSURE_RULE.supplementDeemed.kinds.includes(n.kind) &&
@@ -1181,13 +1215,17 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
       o.decisionRefs = boundDecisions.map(d => d.decisionId).sort();
       o.designationUnverified = [...applicableDelays, ...boundDecisions].some(d => !DELAY_RULE.decider(d.decider, owner.id));
       let retiredUserDuty = false;
+      let userRetirementGround: IncidentObligation['closureGround'] = null;
       if (['isp-user', 'isp-user-additional'].includes(o.family)) {
         const event = dutySources.find(c => c.family === o.family && c.eventId === o.triggerEventId).fact.ispIncident;
         const assessment = ispAssessments.find(x => x.eventId === event.eventId);
         o.decisionRefs = [...o.decisionRefs, ...assessment.userNotice.decisionRefs];
         o.reasonCode = assessment.userNotice.reasonCode;
         retiredUserDuty = !ispUserApplicable(event.eventId) && assessment.userNotice.applicability === 'not-applicable';
-        if (retiredUserDuty) o.replacedBy = ispUserRules.get(event.eventId).decisions.slice(-1)[0].decisionId;
+        const rule = ispUserRules.get(event.eventId);
+        if (retiredUserDuty) { o.replacedBy = rule.retirement.ref; userRetirementGround = rule.retirement.ground; }
+        if (rule.occurrences.some(x => x.correction)) o.causeRefs = [...new Set([...o.causeRefs,
+          ...rule.occurrences.flatMap(x => [x.evidenceId, ...(x.correction ? [x.correction.supersedes, x.correction.evidenceId] : [])])])].sort();
         o.designationUnverified ||= !DELAY_RULE.decider(event.userImpact.decider, owner.id) ||
           facts.some(v => v.ispIncident?.eventId === event.eventId && v.ispIncident.userNoticeDecision && !DELAY_RULE.decider(v.ispIncident.userNoticeDecision.decider, owner.id));
       }
@@ -1217,13 +1255,13 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
       } else if ((o.dueAt !== null && asOf > o.dueAt) || boundDecisions.some(d => d.effect === 'timeliness-overdue')) o.status = 'overdue';
       else o.status = IMMEDIATE_TIMING_RULE.status;
       if (substitution && !fulfilled) { o.noticeRefs = [...new Set([...o.noticeRefs, substitution.noticeId])].sort(); o.notice = { noticeId: substitution.noticeId, sentAt: substitution.sentAt }; }
-      o.closureGround = fulfilled ? fulfilled.posting ? 'posting' : 'actual-notice' : retiredUserDuty ? 'applicability-redecided' : exemption ? 'report-exemption' : retiredFollowup ? 'verdict-replaced' : substitution ? 'confirmed-notice-substitution' : null;
+      o.closureGround = fulfilled ? fulfilled.posting ? 'posting' : 'actual-notice' : retiredUserDuty ? userRetirementGround : exemption ? 'report-exemption' : retiredFollowup ? 'verdict-replaced' : substitution ? 'confirmed-notice-substitution' : null;
       if (final) o.timeliness = 'final-breach';
       else if (boundDecisions.some(d => d.effect === 'timeliness-overdue')) o.timeliness = 'overdue-determined';
-      if (o.applicability === 'unverified') { o.status = 'unverified-pending'; o.dueAt = null; o.closureGround = null;
+      if (o.applicability === 'unverified' && !retiredUserDuty) { o.status = 'unverified-pending'; o.dueAt = null; o.closureGround = null;
         o.timeliness = 'requires-review';
         o.provisionalDeadlinePassed = o.provisionalResponseDueAt !== null && asOf > o.provisionalResponseDueAt && !fulfilled; }
-      o.stillOwed = o.applicability === 'unverified' ? !fulfilled : !['met', 'moot', 'exempt'].includes(o.status);
+      o.stillOwed = o.applicability === 'unverified' && !retiredUserDuty ? !fulfilled : !['met', 'moot', 'exempt'].includes(o.status);
       o.actionRequiredNow = o.stillOwed && o.timing !== 'deferred-until-cause-cleared';
       const end = fulfilled ? performedAt(fulfilled) : substitution ? performedAt(substitution) : asOf;
       o.elapsedMs = elapsed(o.triggeredAt, end);
