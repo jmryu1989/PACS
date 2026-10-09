@@ -603,7 +603,9 @@ test('SPLIT-11 a live hold of another reader is reported, never overwritten; an 
   await refused(() => w.hold.forceRelease(s.uid, RAD_A), 403);
   assert.deepEqual(await w.hold.forceRelease(s.uid, ADMIN_A), { ok: true, released: RAD_A2.actor });
   assert.equal(row().holder, null);
-  const [forced] = w.audits('hold.force-release');
+  const forcedRows = w.audits('hold.force-release');
+  assert.equal(forcedRows.length, 1, 'a forced release leaves one audit row');
+  const [forced] = forcedRows;
   assert.deepEqual(JSON.parse(forced.detail).by, INST_A);
   assert.deepEqual([JSON.parse(forced.detail).holder, JSON.parse(forced.detail).alive], [RAD_A2.actor, true]);
   assert.deepEqual(w.db.writesBy('root'), []);
