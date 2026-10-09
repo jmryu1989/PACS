@@ -21,6 +21,10 @@ function readPage(file) {
   file = path.resolve(file);
   const html = fs.readFileSync(file, 'utf8');
   const tags = scripts(html);
+  // A moved file named any other way ("./x.js", "x.js?v=1", an absolute path) would not count as moved and the
+  // page would read as unsplit with its script cut short; refuse it instead of returning partial source.
+  const misnamed = tags.filter(t => t.src && !movedNames.has(t.src) && movedNames.has(path.posix.basename(t.src.replace(/[?#].*$/, ''))));
+  if (misnamed.length) throw new Error('Moved script src must be the plain spec file name: ' + misnamed.map(t => t.src).join(', '));
   const moved = tags.filter(t => movedNames.has(t.src));
   const inline = tags.filter(t => !t.src);
   if (inline.length > 1) throw new Error('Expected at most one remaining inline script');

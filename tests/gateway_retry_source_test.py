@@ -1,4 +1,4 @@
-"""TEST-S4-U4-NOW-RETRY source: stdlib only - no database, network, browser, Node or container.
+"""TEST-S4-U4-NOW-RETRY source: stdlib only - no database, network, browser or container; Node only through tests/page_source.py, which reads main.html across the S9-U0a split.
 
 An independent model of the Now Retry rules (closed body, closed poll query, which stored receipt a request
 may bind, the D2 pending predicate, the agent's D4 confirm-then-compare-and-set and the one row change a nudge

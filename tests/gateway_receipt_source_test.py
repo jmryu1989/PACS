@@ -1,4 +1,4 @@
-"""TEST-S4-U3-GATEWAY-RECEIPT source: stdlib only - no database, network, browser, Node or container.
+"""TEST-S4-U3-GATEWAY-RECEIPT source: stdlib only - no database, network, browser or container; Node only through tests/page_source.py, which reads main.html across the S9-U0a split.
 
 An independent model of the receipt rule is judged against tests/gateway_receipt_vectors.json, which the
 compiled api/src/gateway-receipt.ts also reads in kin-api:ci (tests/gateway_receipt_server_test.cjs).
