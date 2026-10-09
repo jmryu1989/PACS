@@ -1,0 +1,45 @@
+name: EMR-H inventory contract
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full commit SHA of the candidate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CANDIDATE_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha }}
+    steps:
+      - name: Validate immutable input
+        shell: bash
+        run: '[[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]'
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          persist-credentials: false
+      - name: Install locked API dependencies
+        run: npm ci --prefix api
+      - name: Generate the existing Prisma client
+        run: cd api && npx --no-install prisma generate
+      - name: Typecheck
+        run: python3 scripts/record-run.py --run-dir tmp/emr-h-r1/runs/typecheck --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json -- npx --no-install --prefix api tsc --noEmit -p api
+      - name: Inventory contracts
+        run: python3 scripts/record-run.py --run-dir tmp/emr-h-r1/runs/contract --cwd . --tree api/src/emr-contract --tree api/src/emr-retention --tree tests/emr/h -- node --test --test-reporter=tap tests/emr/h/contract_test.cjs
+      - name: Behaviour mutants
+        run: python3 scripts/record-run.py --run-dir tmp/emr-h-r1/runs/mutants --cwd . --tree api/src/emr-contract --tree api/src/emr-retention --tree tests/emr/h -- python3 -B tests/emr/h/mutants.py --evidence-dir tmp/emr-h-r1/runs/mutant-tap
+      - name: Retain raw evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: emr-h-${{ env.CANDIDATE_SHA }}
+          path: tmp/emr-h-r1/runs
+          if-no-files-found: error
