@@ -191,6 +191,8 @@ REQ-S3-ASR-U5-AUTHZ/PARITY/INERT/ORDER/INPUT/SESSION/PROOF → RISK-U5-WEAKER-CO
 
 순수 Node 계약 시험 `node --test tests/emr_contract_test.cjs`는 D589/D591의 법정 기록 분류·접속사건 형식·서명 payload·판독 수명주기와 적법 기본값을 결속한다.
 
+EMR-B1 접속기록 원장(REQ-EMR-01/02/06/07/19/20 → RISK-EMR-* → TEST-EMR-B-C01..C10·L01..L08, 선언 `emr/units/b.json`): 선언 대조 `python scripts/emr-compose.py check`(소유 파일·migration 43·원장 표 7개와 분류·compose 배치·emr-b profile·후보 선택), 계약 `node --test --test-reporter=tap tests/emr/b/contract_test.cjs`(C01–C10, C10은 같은 검사기를 바꾼 선언 사본에 돌린다), 실DB `scripts/run-tests.py --module tests/emr/b/live.py --class EmrBLedgerLive --mode live`(L01–L08, 이 클래스가 만든 일회용 PostgreSQL 16과 이 커밋의 production API 이미지만 사용, 라벨로 정리), mutant `python tests/emr/b/mutants.py --out DIR`(M01–M08·M11·M12·M14, 커밋 사본에서). measurements job은 선언·계약만, `.github/workflows/emr-b.yml`의 job `emr-b`가 선언·계약·이미지·`measurement_ci.py --profile emr-b`(1 suite·8건·600초 계획 상한)·mutant를 실행한다. profile 39개, validate job 22개 유지, 후보 선택 115건(실행행 13; L01 `EmrBLedgerLive.test_b01_ledger_roles_and_restart`, 단위 `candidate-flow-emr-b-live`), 합성 stack의 API는 `KIN_EMR_RUNTIME_PASSWORD`(생성 비밀)로 최소권한 `kin_runtime`만 쓴다.
+
 D-MEASURE2 비교 중 미저장 작업 회복: `node --test tests/viewer_recovery_test.cjs` (24개),
 `python tests/e2e/test_viewer_recovery.py` (10개).
 S3-U5 CI1: 현재 URL 검사의 시리즈 메타데이터 GET이 HTTP 500~599로 거절되면 수명주기·검사·시리즈마다 1000ms 뒤 한 번만 다시 요청한다(0·4xx·동기 예외는 다시 묻지 않음). 끝난 실패는 URL 순서의 검사 번호로만 알린다. 빠른 시험 `U5-CI1 R1`~`R6`과 실스택 `test_recovery_07`~`10`(일시 500 회복·지속 500·403·재요청 전 종료)이 이 경계를 본다.

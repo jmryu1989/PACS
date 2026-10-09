@@ -36,6 +36,14 @@ PROFILES = {
         'suite_timeout': 1200,
         'suites': (('e2e/test_context_loss.py', 'ContextLossE2E', 'ci-context-loss'),),
     },
+    # EMR-B1: the access ledger's own disposable PostgreSQL/API containers (emr/units/b.json cases.live).
+    # Planned ceiling, not a measured hosted duration; B2 adds EmrBAuthLive as a second 600s suite.
+    'emr-b': {
+        'out': ROOT / 'tests/e2e/artifacts/emr-b-ci',
+        'project_prefix': 'kin-emr-b-ci-',
+        'suite_timeout': 600,
+        'suites': (('emr/b/live.py', 'EmrBLedgerLive', 'ci-emr-b-ledger'),),
+    },
     'u5-session-api': {
         'out': ROOT / 'tests/e2e/artifacts/u5-session-api-ci',
         'project_prefix': 'kin-u5-session-api-ci-',
@@ -704,7 +712,9 @@ def main(profile_name, credential_provider=None):
     os.environ['KIN_SYNTHETIC_REALM'] = '1'
     out.mkdir(parents=True, exist_ok=False)
     values = {key: secrets.token_hex(32) for key in ['POSTGRES_PASSWORD','ORTHANC_PASS',
-              'KC_ADMIN_PASSWORD','KC_CLIENT_SECRET','KC_WEB_SECRET','KIN_COOKIE_SECRET']}
+              'KC_ADMIN_PASSWORD','KC_CLIENT_SECRET','KC_WEB_SECRET','KIN_COOKIE_SECRET',
+              # EMR-B1: the API's runtime database login (docker-compose.yml requires it; emr-provision sets it).
+              'KIN_EMR_RUNTIME_PASSWORD']}
     for value in values.values(): print('::add-mask::'+value, flush=True)
     evidence_stage = None
     if profile_name == 'volume-rendering':

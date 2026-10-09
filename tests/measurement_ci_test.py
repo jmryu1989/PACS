@@ -44,6 +44,67 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(len(uploads), 1)
         self.assertEqual(uploads[0]['with']['path'], 'tests/e2e/artifacts/context-loss-ci/')
 
+    def test_emr_b_profile_runs_the_declared_ledger_cases_only_in_its_own_workflow(self):
+        """EMR-B1 (order section 10): one suite of the eight declared ledger cases, a 600s planned ceiling whose
+        supervisor margin leaves the shared 25 minute deadline 230s of setup and cleanup even after B2's second
+        suite, a separate artifact and project, and only emr-b.yml requests the profile."""
+        import ast
+        import yaml
+        profile = ci.PROFILES['emr-b']
+        declaration = json.loads((ci.ROOT/'emr/units/b.json').read_text(encoding='utf-8'))
+        self.assertEqual([list(row) for row in profile['suites']], declaration['cases']['live']['profile_suites'])
+        self.assertEqual(profile['out'].name, 'emr-b-ci')
+        self.assertNotIn('suite_budgets', profile)
+        command, outer = ci.guarded_profile_run(profile, *profile['suites'][0], 1500)
+        self.assertEqual(command[command.index('--module')+1], 'tests/emr/b/live.py')
+        self.assertEqual(command[command.index('--class')+1], 'EmrBLedgerLive')
+        self.assertEqual(command[command.index('--unit')+1], 'ci-emr-b-ledger')
+        self.assertEqual(command[command.index('--timeout')+1], '600')
+        self.assertEqual(command[command.index('--mode')+1], 'live')
+        self.assertEqual(outer, 635)
+        self.assertLessEqual(2*outer, 25*60-230)
+        for name, other in ci.PROFILES.items():
+            if name != 'emr-b':
+                self.assertNotEqual(profile['out'], other['out'])
+                self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
+        module = ast.parse((ci.ROOT/'tests/emr/b/live.py').read_text(encoding='utf-8'))
+        cls = next(n for n in module.body if isinstance(n, ast.ClassDef) and n.name == 'EmrBLedgerLive')
+        self.assertEqual([n.name for n in cls.body if isinstance(n, ast.FunctionDef) and n.name.startswith('test_')],
+                         declaration['cases']['live']['B1'])
+        self.assertEqual((ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8').count('--profile emr-b'), 0)
+        workflow = yaml.safe_load((ci.ROOT/'.github/workflows/emr-b.yml').read_text(encoding='utf-8'))
+        self.assertEqual(list(workflow['jobs']), ['emr-b'])
+        steps = workflow['jobs']['emr-b']['steps']
+        self.assertEqual(len([s for s in steps if '--profile emr-b' in str(s.get('run', ''))]), 1)
+        uploads = [s for s in steps if str(s.get('uses', '')).startswith('actions/upload-artifact@')]
+        self.assertTrue(any('tests/e2e/artifacts/emr-b-ci' in str(s['with']['path']) for s in uploads))
+        # The disposable stack's API reads its runtime login from a generated secret (docker-compose.yml refuses to
+        # start without one), distinct from the installer's, and the secret is redacted from every artifact.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            patched = {**profile, 'out': root/'artifacts'}
+            seen = []
+
+            def fake_run(command, **kwargs):
+                seen.append((list(map(str, command)), kwargs.get('env') or {}))
+                secret = seen[0][1].get('KIN_EMR_RUNTIME_PASSWORD', 'missing')
+                return MagicMock(returncode=1 if len(seen) == 1 else 0, stdout=('echo ' + secret).encode(), stderr=b'')
+
+            with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted'}, clear=True), \
+                    patch.object(ci, 'ROOT', root), patch.dict(ci.PROFILES, {'emr-b': patched}), \
+                    patch.object(ci, 'seed_source'), \
+                    patch.object(ci.subprocess, 'check_output', side_effect=[b'', b'', b'unix:///var/run/docker.sock']), \
+                    patch.object(ci.subprocess, 'run', side_effect=fake_run), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(RuntimeError, 'database failed'):
+                    ci.main('emr-b')
+            env = seen[0][1]
+            self.assertRegex(env['KIN_EMR_RUNTIME_PASSWORD'], r'^[0-9a-f]{64}$')
+            self.assertNotEqual(env['KIN_EMR_RUNTIME_PASSWORD'], env['POSTGRES_PASSWORD'])
+            for log in (root/'artifacts').glob('*.log'):
+                self.assertNotIn(env['KIN_EMR_RUNTIME_PASSWORD'], log.read_text(encoding='utf-8'))
+            self.assertIn('[REDACTED]', (root/'artifacts'/'database.log').read_text(encoding='utf-8'))
+
     def test_browser_install_cache_and_budgets_cover_pinned_dependencies(self):
         import yaml
         workflow = yaml.safe_load((ci.ROOT / '.github/workflows/validate.yml').read_text(encoding='utf-8'))
@@ -965,6 +1026,8 @@ class MeasurementCiTests(unittest.TestCase):
                           'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text',
                           'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient', 'cell-merge', 'u2b-regressions',
                           'gateway-e2e', 'critical-result-screens',
+                          # EMR-B1: the access ledger profile, run only by .github/workflows/emr-b.yml.
+                          'emr-b',
                           # S7-U5: the session contract job's eight profiles (validate.yml s7-u5-session-contracts matrix);
                           # u5-fixups is the fix round's five screen regressions (final review part 1, blocker 3).
                           'u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries',
