@@ -228,27 +228,35 @@ export function checkProvisionBasis(input: ProvisionInput): Readonly<ProvisionDe
 // ---------------------------------------------------------------------------------------------------------------
 // Prepared delivery: the exact units one response may carry, bound to one manifest version, before the first byte.
 
+/** displayable: the unit carries what a reader sees (pixels, a rendering, a document), not metadata or a header attribute. */
 export interface DeliveryUnit {
   key: string; sopInstanceUid: string | null; part: 'object' | 'frame' | 'derived'; frame: number | null;
-  expectedBytes: number | null; sha256: string | null; recordKind: RecordKind;
+  expectedBytes: number | null; sha256: string | null; recordKind: RecordKind; displayable: boolean;
 }
 export interface OpeningRef { openingId: string; accountGeneration: number; sequence: number }
+/** Who received the bytes: relation, acting institution, account generation and viewer opening. Bytes sent to one
+ * receiver never complete a provision to another. */
+export interface DeliveryReceiver {
+  relation: ProvisionRelation; institution: string; accountGeneration: number; openingId: string | null; sequence: number | null;
+}
 export interface PreparedDelivery {
   formatVersion: 1; eventId: string; manifestSha256: string; studyUid: string; managingInstitution: string; request: ImageRequest;
-  body: boolean; cause: CauseKind; relation: ProvisionRelation; opening: OpeningRef | null; preparedAt: string;
+  body: boolean; cause: CauseKind; relation: ProvisionRelation; opening: OpeningRef | null; receiver: DeliveryReceiver; preparedAt: string;
   units: readonly DeliveryUnit[]; excluded: readonly { sopInstanceUid: string; reason: string }[];
 }
-/** opening: the viewer opening the request serves (null for a device or service load that serves no opening). */
+/** authorization: C's verdict for this request (study, acting institution, the caller's account generation).
+ * opening: the viewer opening the request serves (null for a device or service load that serves no opening). */
 export interface DeliveryContext {
-  eventId: string; cause: CauseKind; at: string; authorization: { studyUid: string; institution: string }; provision: ProvisionDecision;
-  opening: OpeningRef | null;
+  eventId: string; cause: CauseKind; at: string; authorization: { studyUid: string; institution: string; accountGeneration: number };
+  provision: ProvisionDecision; opening: OpeningRef | null;
 }
 const prepared = new WeakSet<object>();
 const deliverable = (o: ManifestObject) => o.unsupported === null;
+const DISPLAYED_FORMATS: readonly string[] = freeze(['image', 'segmentation', 'encapsulated-pdf', 'structured-report']);
 const objectUnit = (o: ManifestObject): DeliveryUnit => ({ key: `object:${o.sopInstanceUid}`, sopInstanceUid: o.sopInstanceUid, part: 'object', frame: null,
-  expectedBytes: o.bytes, sha256: o.sha256, recordKind: recordKindOf(o) });
-const derivedUnit = (key: string, sopInstanceUid: string | null, frame: number | null, recordKind: RecordKind): DeliveryUnit =>
-  ({ key: `derived:${key}`, sopInstanceUid, part: 'derived', frame, expectedBytes: null, sha256: null, recordKind });
+  expectedBytes: o.bytes, sha256: o.sha256, recordKind: recordKindOf(o), displayable: DISPLAYED_FORMATS.includes(o.format) });
+const derivedUnit = (key: string, sopInstanceUid: string | null, frame: number | null, recordKind: RecordKind, displayable: boolean): DeliveryUnit =>
+  ({ key: `derived:${key}`, sopInstanceUid, part: 'derived', frame, expectedBytes: null, sha256: null, recordKind, displayable });
 
 export function prepareDelivery(manifestInput: ImageManifest, requestInput: ImageRequest, context: DeliveryContext): Readonly<PreparedDelivery> {
   const manifest = verifiedManifest(manifestInput);
@@ -270,9 +278,14 @@ export function prepareDelivery(manifestInput: ImageManifest, requestInput: Imag
   if (!provision.deliverable) refuse(provision.refusal);
   // C's 204 names the study and the acting institution: the managing institution itself, or the processor it named.
   // A 204 for another study or another institution authorizes nothing here.
-  const auth = object(c.authorization, ['studyUid', 'institution']);
+  const auth = object(c.authorization, ['studyUid', 'institution', 'accountGeneration']);
+  const accountGeneration = integer(auth.accountGeneration, 1);
   const actor = provision.relation === 'processor' ? provision.recipient : manifest.managingInstitution;
   if (auth.studyUid !== manifest.studyUid || auth.institution !== actor) refuse('AuthorizationScopeMismatch');
+  // An opening belongs to one account generation; a 204 of another generation does not serve it.
+  if (opening !== null && opening.accountGeneration !== accountGeneration) refuse('AuthorizationScopeMismatch');
+  const receiver: DeliveryReceiver = { relation: provision.relation, institution: actor, accountGeneration,
+    openingId: opening?.openingId ?? null, sequence: opening?.sequence ?? null };
   if (request.studyUid !== manifest.studyUid) refuse('ScopeOutsideManifest');
   const inSeries = (uid: string) => manifest.objects.filter(o => o.seriesUid === uid);
   if (request.seriesUid !== null && !inSeries(request.seriesUid).length) refuse('ScopeOutsideManifest');
@@ -286,7 +299,7 @@ export function prepareDelivery(manifestInput: ImageManifest, requestInput: Imag
   const pixel = (o: ManifestObject) => o.format === 'image' || o.format === 'segmentation';
   switch (request.kind) {
     case 'study-query': case 'series-query': case 'instance-query': case 'metadata':
-      units.push(derivedUnit(`${request.kind}:${request.sopInstanceUid ?? request.seriesUid ?? request.studyUid}`, request.sopInstanceUid, null, 'study-metadata'));
+      units.push(derivedUnit(`${request.kind}:${request.sopInstanceUid ?? request.seriesUid ?? request.studyUid}`, request.sopInstanceUid, null, 'study-metadata', false));
       break;
     case 'study-retrieve': case 'series-retrieve':
       for (const o of request.kind === 'study-retrieve' ? manifest.objects : inSeries(request.seriesUid)) {
@@ -300,42 +313,56 @@ export function prepareDelivery(manifestInput: ImageManifest, requestInput: Imag
       for (const n of request.frames) {
         const f = target.frames.find(x => x.number === n) ?? refuse('FrameOutOfManifest');
         units.push(request.kind === 'frames'
-          ? { key: `frame:${target.sopInstanceUid}#${n}`, sopInstanceUid: target.sopInstanceUid, part: 'frame', frame: n, expectedBytes: f.bytes, sha256: f.sha256, recordKind: 'image' }
-          : derivedUnit(`rendered:${target.sopInstanceUid}#${n}`, target.sopInstanceUid, n, 'thumbnail'));
+          ? { key: `frame:${target.sopInstanceUid}#${n}`, sopInstanceUid: target.sopInstanceUid, part: 'frame', frame: n, expectedBytes: f.bytes, sha256: f.sha256,
+              recordKind: 'image', displayable: true }
+          : derivedUnit(`rendered:${target.sopInstanceUid}#${n}`, target.sopInstanceUid, n, 'thumbnail', true));
       }
       break;
     case 'rendered':
       if (!pixel(target) && target.format !== 'encapsulated-pdf') refuse('ScopeOutsideManifest');
-      units.push(derivedUnit(`rendered:${target.sopInstanceUid}`, target.sopInstanceUid, null, target.format === 'encapsulated-pdf' ? 'pdf' : 'thumbnail'));
+      units.push(derivedUnit(`rendered:${target.sopInstanceUid}`, target.sopInstanceUid, null, target.format === 'encapsulated-pdf' ? 'pdf' : 'thumbnail', true));
       break;
     case 'bulk':
-      units.push(derivedUnit(`bulk:${target.sopInstanceUid}/${request.bulkTag}`, target.sopInstanceUid, null, recordKindOf(target)));
+      // Only the Pixel Data of an image or the Encapsulated Document of a PDF is something a reader sees;
+      // any other bulk attribute (PixelSpacing, LUTs, overlays) is header data.
+      units.push(derivedUnit(`bulk:${target.sopInstanceUid}/${request.bulkTag}`, target.sopInstanceUid, null, recordKindOf(target),
+        (request.bulkTag === '7fe00010' && pixel(target)) || (request.bulkTag === '00420011' && target.format === 'encapsulated-pdf')));
       break;
     default: refuse('ImagePathRefused');
   }
   const result = freeze({ formatVersion: 1 as const, eventId, manifestSha256: manifest.sha256, studyUid: manifest.studyUid, managingInstitution: manifest.managingInstitution,
-    request, body: request.method === 'GET', cause, relation: provision.relation, opening, preparedAt, units, excluded });
+    request, body: request.method === 'GET', cause, relation: provision.relation, opening, receiver, preparedAt, units, excluded });
   prepared.add(result);
   return result;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
 // Transfer judgement: only bytes the server wrote inside a response that ended normally, after a durable receipt,
-// count. A 204, a prepared event, an aborted or unknown response, or bytes whose source hash differs from the fixed
-// manifest never make a unit complete. Socket "finish" is the server's end of the transfer, not a person seeing it.
+// count, and a manifest-bound unit is complete only where those bytes were also verified against the fixed hash. A
+// 204, a prepared event, an aborted or unknown response, an unverified range, a range sent to another receiver or
+// bytes whose source hash differs from the manifest never make a unit complete. Socket "finish" is the server's end of
+// the transfer, not a person seeing it.
 
+/** verifiedBy: the bytes of this range were written from one store read (readId) of the whole unit whose SHA-256 the
+ * stream computed; null when the stream did not verify what it wrote. */
+export type RangeVerification = { source: 'store-read'; readId: string; sha256: string };
 export type TransferObservation =
   | { stage: 'authorized'; status: 204 }
   | { stage: 'provide-prepared'; receipt: DurableAccessReceipt }
   | { stage: 'unit-length'; unit: string; length: number }
-  | { stage: 'bytes'; unit: string; start: number; end: number; sourceSha256: string | null }
+  | { stage: 'bytes'; unit: string; start: number; end: number; verifiedBy: RangeVerification | null }
   | { stage: 'transfer-ended' } | { stage: 'transfer-aborted' } | { stage: 'transfer-unknown' };
 export type UnitStatus = 'complete' | 'unverified' | 'partial' | 'unconfirmed' | 'mismatch' | 'not-sent';
+export interface RangeRecord { start: number; end: number; response: string; confirmed: boolean; verifiedBy: RangeVerification | null }
 export interface DeliveryJudgement {
   outcome: 'complete' | 'incomplete' | 'unknown' | 'mismatch' | 'no-body';
-  units: readonly { key: string; status: UnitStatus; confirmed: readonly (readonly [number, number])[] }[];
+  receiver: DeliveryReceiver;
+  units: readonly { key: string; status: UnitStatus; confirmed: readonly (readonly [number, number])[]; verified: readonly (readonly [number, number])[];
+    ranges: readonly RangeRecord[] }[];
   responses: readonly { eventId: string; prepared: boolean; terminal: 'transfer-ended' | 'transfer-aborted' | 'transfer-unknown' | null }[];
 }
+const sameReceiver = (a: DeliveryReceiver, b: DeliveryReceiver) => a.relation === b.relation && a.institution === b.institution &&
+  a.accountGeneration === b.accountGeneration && a.openingId === b.openingId && a.sequence === b.sequence;
 /** Each stage is its own access record. 'transfer-unknown' has no EMR-A v1 action: B's next format names it (R2). */
 export const DELIVERY_STAGE_ACCESS_ACTION: Readonly<Record<'provide-prepared' | 'transfer-ended' | 'transfer-aborted' | 'transfer-unknown', AccessAction | null>> =
   freeze({ 'provide-prepared': 'provide-prepared', 'transfer-ended': 'transfer-ended', 'transfer-aborted': 'transfer-aborted', 'transfer-unknown': null });
@@ -353,18 +380,24 @@ const covered = (ranges: [number, number][], length: number) => ranges.length ==
 export function judgeDelivery(responses: readonly { prepared: PreparedDelivery; observations: readonly TransferObservation[] }[]): Readonly<DeliveryJudgement> {
   if (!Array.isArray(responses) || !responses.length) refuse('PreparedDeliveryRequired');
   const first = responses[0]?.prepared;
-  const units = new Map<string, { unit: DeliveryUnit; confirmed: [number, number][]; unconfirmed: [number, number][]; hash: boolean; mismatch: boolean; derivedDone: boolean }>();
-  const summary: DeliveryJudgement['responses'][number][] = [];
+  if (!first || !prepared.has(first)) refuse('PreparedDeliveryRequired');
+  const units = new Map<string, { unit: DeliveryUnit; ranges: RangeRecord[]; derivedDone: boolean }>();
+  const summary: DeliveryJudgement['responses'][number][] = [], seen = new Set<string>();
   let unknown = false;
   for (const response of responses) {
     const r = object(response, ['prepared', 'observations']), p: PreparedDelivery = r.prepared;
     if (!p || !prepared.has(p)) refuse('PreparedDeliveryRequired');
+    if (seen.has(p.eventId)) refuse('DuplicateResponse');
+    seen.add(p.eventId);
     // Ranges are combined only within one fixed manifest version; a changed study is a new delivery.
     if (p.manifestSha256 !== first.manifestSha256) refuse('ManifestVersionMismatch');
+    // A resumed delivery continues one receiver's provision: another account generation, opening, institution or
+    // relation is a different provision and its bytes never complete this one.
+    if (!sameReceiver(p.receiver, first.receiver)) refuse('DeliveryContextMismatch');
     if (!Array.isArray(r.observations)) refuse('ObservationOrderInvalid');
-    for (const u of p.units) if (!units.has(u.key)) units.set(u.key, { unit: u, confirmed: [], unconfirmed: [], hash: false, mismatch: false, derivedDone: false });
+    for (const u of p.units) if (!units.has(u.key)) units.set(u.key, { unit: u, ranges: [], derivedDone: false });
     let durable = false, terminal: DeliveryJudgement['responses'][number]['terminal'] = null;
-    const lengths = new Map<string, number>(), written: { key: string; range: [number, number]; sourceSha256: string | null }[] = [];
+    const lengths = new Map<string, number>(), written: { key: string; range: [number, number]; verifiedBy: RangeVerification | null }[] = [];
     for (const raw of r.observations) {
       const stage = (raw as any)?.stage;
       if (terminal !== null) refuse('ObservationOrderInvalid');
@@ -390,20 +423,21 @@ export function judgeDelivery(responses: readonly { prepared: PreparedDelivery; 
         lengths.set(u.key, length); continue;
       }
       if (stage !== 'bytes') refuse('ObservationOrderInvalid');
-      const o = object(raw, ['stage', 'unit', 'start', 'end', 'sourceSha256']), u = p.units.find(x => x.key === o.unit) ?? refuse('UnitOutsideDelivery');
+      const o = object(raw, ['stage', 'unit', 'start', 'end', 'verifiedBy']), u = p.units.find(x => x.key === o.unit) ?? refuse('UnitOutsideDelivery');
       const start = integer(o.start), end = integer(o.end, 1), length = u.expectedBytes ?? lengths.get(u.key);
       if (length === undefined || start >= end || end > length) refuse('RangeOutsideUnit');
-      written.push({ key: u.key, range: [start, end], sourceSha256: o.sourceSha256 === null ? null : sha256(o.sourceSha256) });
+      let verifiedBy: RangeVerification = null;
+      if (o.verifiedBy !== null) {
+        // Only a manifest-bound unit has a fixed hash to verify against; a generated body cannot claim one.
+        if (u.sha256 === null) refuse('VerificationNotApplicable');
+        const v = object(o.verifiedBy, ['source', 'readId', 'sha256']);
+        verifiedBy = { source: choice(v.source, ['store-read'] as const), readId: string(v.readId), sha256: sha256(v.sha256) };
+      }
+      written.push({ key: u.key, range: [start, end], verifiedBy });
     }
     const confirmed = terminal === 'transfer-ended';
     if (terminal === null || terminal === 'transfer-unknown') unknown = true;
-    for (const w of written) {
-      const slot = units.get(w.key);
-      (confirmed ? slot.confirmed : slot.unconfirmed).push(w.range);
-      if (slot.unit.sha256 !== null && w.sourceSha256 !== null) {
-        if (w.sourceSha256 !== slot.unit.sha256) slot.mismatch = true; else if (confirmed) slot.hash = true;
-      }
-    }
+    for (const w of written) units.get(w.key).ranges.push({ start: w.range[0], end: w.range[1], response: p.eventId, confirmed, verifiedBy: w.verifiedBy });
     if (confirmed) for (const [key, length] of lengths) {
       const slot = units.get(key);
       // A generated body (metadata, rendering) is complete only within the one response that wrote all of it.
@@ -411,20 +445,25 @@ export function judgeDelivery(responses: readonly { prepared: PreparedDelivery; 
     }
     summary.push({ eventId: p.eventId, prepared: durable, terminal });
   }
+  const span = (list: RangeRecord[]) => union(list.map(x => [x.start, x.end] as const));
   const result = [...units.values()].map(slot => {
-    const confirmed = union(slot.confirmed), any = union([...slot.confirmed, ...slot.unconfirmed]);
     const length = slot.unit.expectedBytes;
-    const status: UnitStatus = slot.mismatch ? 'mismatch'
+    const confirmed = span(slot.ranges.filter(x => x.confirmed)), any = span(slot.ranges);
+    // Verification is kept per range: only confirmed bytes written from a read whose hash equals the manifest count.
+    const verified = slot.unit.sha256 === null ? [] : span(slot.ranges.filter(x => x.confirmed && x.verifiedBy?.sha256 === slot.unit.sha256));
+    const mismatch = slot.unit.sha256 !== null && slot.ranges.some(x => x.verifiedBy !== null && x.verifiedBy.sha256 !== slot.unit.sha256);
+    const status: UnitStatus = mismatch ? 'mismatch'
       : length === null ? (slot.derivedDone ? 'complete' : confirmed.length ? 'partial' : any.length ? 'unconfirmed' : 'not-sent')
-      : covered(confirmed, length) ? (slot.hash ? 'complete' : 'unverified')
+      : covered(verified, length) ? 'complete'
+      : covered(confirmed, length) ? 'unverified'
       : any.length && covered(any, length) ? 'unconfirmed' : confirmed.length ? 'partial' : any.length ? 'unconfirmed' : 'not-sent';
-    return { key: slot.unit.key, status, confirmed };
+    return { key: slot.unit.key, status, confirmed, verified, ranges: slot.ranges };
   });
   const body = responses.some(r => r.prepared.body);
   const outcome: DeliveryJudgement['outcome'] = !body ? 'no-body'
     : result.some(u => u.status === 'mismatch') ? 'mismatch'
     : result.every(u => u.status === 'complete') ? 'complete' : unknown ? 'unknown' : 'incomplete';
-  return freeze({ outcome, units: result, responses: summary });
+  return freeze({ outcome, receiver: first.receiver, units: result, responses: summary });
 }
 
 /** A commit whose result is unknown is re-read by its original event ID; it is never assumed stored or lost. */
@@ -500,8 +539,8 @@ export function planOfflineBundle(input: { bundleId: string; current: ImageManif
   return plan;
 }
 
-export type ReadinessReason = { code: 'bundle-stale' | 'comparison-missing' | 'object-missing' | 'text-missing' | 'decoder-missing' | 'viewer-missing' |
-  'part-mismatch' | 'storage-insufficient' | 'journal-insufficient'; key: string | null };
+export type ReadinessReason = { code: 'bundle-stale' | 'comparison-missing' | 'object-unsupported' | 'object-missing' | 'text-missing' | 'decoder-missing' |
+  'viewer-missing' | 'part-mismatch' | 'storage-insufficient' | 'journal-insufficient'; key: string | null };
 /** Device facts come from C's managed-device store (R2); Q/J/H/ε margins are inside C's requiredBytes, never chosen here. */
 export interface OfflineDeviceState {
   bundleId: string; planSha256: string; verified: readonly { key: string; bytes: number | null; sha256: string }[];
@@ -517,6 +556,9 @@ export function offlineReadiness(planInput: OfflineBundlePlan, device: OfflineDe
   const reasons: ReadinessReason[] = [];
   if (d.bundleId !== plan.bundleId || d.planSha256 !== plan.sha256) reasons.push({ code: 'bundle-stale', key: null });
   for (const uid of plan.missingComparisons) reasons.push({ code: 'comparison-missing', key: uid });
+  // Online, an unsupported object is refused by name while the rest of the study opens. Offline Ready claims the whole
+  // reading set is on the device, so every object left out of the copy keeps the bundle not ready, by name.
+  for (const x of plan.excluded) reasons.push({ code: 'object-unsupported', key: `object:${x.studyUid}/${x.sopInstanceUid}` });
   if (!Array.isArray(d.verified)) refuse('OfflinePlanRequired');
   const verified = new Map<string, { bytes: number | null; sha256: string }>();
   for (const raw of d.verified) {
@@ -602,6 +644,12 @@ function opening(value: unknown): Opening {
 const sameOpening = (a: { openingId: string; accountGeneration: number; sequence: number }, b: Opening) =>
   a.openingId === b.openingId && a.accountGeneration === b.accountGeneration && a.sequence === b.sequence;
 
+/** A network display needs a response that carried a body (never HEAD) and a displayable unit of that object: its
+ * pixels, frame, rendering or document; a unit without a frame number carries every frame. Metadata and header bulk
+ * attributes such as PixelSpacing are not what the reader saw. */
+function displayedBy(delivery: PreparedDelivery, sopInstanceUid: string, frame: number | null): boolean {
+  return delivery.body && delivery.units.some(u => u.displayable && u.sopInstanceUid === sopInstanceUid && (frame === null || u.frame === null || u.frame === frame));
+}
 /** delivery: the prepared delivery a network display names (null for a cache or offline-store re-display). */
 export function classifyDisplayReport(currentInput: Opening, manifestInput: ImageManifest, report: DisplayReport, delivery: PreparedDelivery | null): Readonly<DisplayRecord> {
   const current = opening(currentInput), manifest = verifiedManifest(manifestInput);
@@ -620,8 +668,7 @@ export function classifyDisplayReport(currentInput: Opening, manifestInput: Imag
   if ((source === 'network') !== (r.deliveryEventId !== null) || (source !== 'network' && delivery !== null)) refuse('DisplaySourceMismatch');
   // That delivery was prepared for this opening's reading view and carried this object's pixels (not only its metadata).
   if (source === 'network' && (!delivery || !prepared.has(delivery) || delivery.eventId !== r.deliveryEventId || delivery.manifestSha256 !== current.manifestSha256 ||
-      delivery.cause !== 'user-view' || !delivery.opening || !sameOpening(delivery.opening, current) ||
-      !delivery.units.some(u => u.sopInstanceUid === item.sopInstanceUid && u.recordKind !== 'study-metadata' && (frame === null || u.part === 'object' || u.frame === frame))))
+      delivery.cause !== 'user-view' || !delivery.opening || !sameOpening(delivery.opening, current) || !displayedBy(delivery, item.sopInstanceUid, frame)))
     refuse('DisplayDeliveryMismatch');
   const record = freeze({ action: 'client-shown' as const, openingId: current.openingId, accountGeneration: current.accountGeneration, sequence: current.sequence,
     studyUid: current.studyUid, manifestSha256: current.manifestSha256, unitKey: frame === null ? `object:${item.sopInstanceUid}` : `frame:${item.sopInstanceUid}#${frame}`,

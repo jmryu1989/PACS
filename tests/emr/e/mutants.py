@@ -1,7 +1,8 @@
 # coding: utf-8
-"""EMR-E R1 mutants M-E-01..07 (required) and M-E-X1..X6 (supplementary), against tests/emr/e/contract_test.cjs.
+"""EMR-E R1 mutants M-E-01..07 and M-E-F01..F06 (required) and M-E-X1..X6 (supplementary), against tests/emr/e/contract_test.cjs.
 
-Each mutant rewrites one decision in a copy of api/src made outside the repository; the product tree is never written.
+Each mutant rewrites one decision in a copy of api/src (or, for M-E-F06, of the test file) made outside the repository;
+the product tree is never written.
 The contract test then runs against that copy (KIN_EMR_E_SOURCE_DIR). A mutant is killed only when every declared case
 was collected and at least one of the behaviour cases it names fails on an assertion (node:assert, ERR_ASSERTION); the
 assertion text is kept as evidence. A load failure, a crash, a missing or repeated anchor or a timeout is a harness
@@ -29,7 +30,9 @@ TIMEOUT = 180
 MUTANTS = [
     {"id": "M-E-01", "required": True, "title": "authz 204 recorded as download complete", "file": "emr-image/contract.ts",
      "find": "if (stage === 'authorized') { const o = object(raw, ['stage', 'status']); if (o.status !== 204 || durable) refuse('ObservationOrderInvalid'); continue; }",
-     "replace": "if (stage === 'authorized') { for (const u of p.units) { const slot = units.get(u.key); slot.confirmed.push([0, u.expectedBytes ?? 1]); slot.hash = true; slot.derivedDone = true; } continue; }",
+     "replace": "if (stage === 'authorized') { for (const u of p.units) { const slot = units.get(u.key); slot.ranges.push({ start: 0, end: u.expectedBytes ?? 1,"
+                " response: p.eventId, confirmed: true, verifiedBy: u.sha256 ? { source: 'store-read', readId: 'authz', sha256: u.sha256 } : null });"
+                " slot.derivedDone = true; } continue; }",
      "kills": ["TEST-E-01 delivery_states R1"]},
     {"id": "M-E-02", "required": True, "title": "manifest ignores a missing last frame", "file": "emr-image/manifest.ts",
      "find": "if (declaredFrameCount < 1 || frames.length !== declaredFrameCount || frames.some((f, i) => f.number !== i + 1)) refuse('FrameSetIncomplete');",
@@ -45,9 +48,11 @@ MUTANTS = [
      "find": "const confirmed = terminal === 'transfer-ended';",
      "replace": "const confirmed = terminal === 'transfer-ended' || terminal === 'transfer-aborted';",
      "kills": ["TEST-E-01 delivery_states R2"]},
-    {"id": "M-E-05", "required": True, "title": "DBT accepted as synthetic 2D", "file": "emr-image/manifest.ts",
-     "find": "  if (entry.family === 'breast-tomosynthesis' && !['dbt', 'unverified'].includes(kind)) refuse('MammographyKindMismatch');\n",
-     "replace": "",
+    # Round 2 (E-R1-05): the old M-E-05 removed a guard that refused every generated 2D of the Breast Tomosynthesis IOD,
+    # which the standard allows. The required defect is a multi-frame DBT accepted as synthetic 2D.
+    {"id": "M-E-05", "required": True, "title": "multi-frame DBT accepted as synthetic 2D", "file": "emr-image/manifest.ts",
+     "find": "    if (kind === 'generated-2d' && !(oneFrame && value4 === 'GENERATED_2D' && GENERATED_2D_VALUE3.includes(value3) &&",
+     "replace": "    if (kind === 'generated-2d' && !(value4 === 'GENERATED_2D' && GENERATED_2D_VALUE3.includes(value3) &&",
      "kills": ["TEST-E-02 manifest_sources R5"]},
     {"id": "M-E-06", "required": True, "title": "reconnect IP written into the offline records", "file": "emr-image/contract.ts",
      "find": "relatedOfflineEventIds: offline.map(x => x.eventId) }, offline: [...offline] });",
@@ -82,6 +87,37 @@ MUTANTS = [
      "find": "  if (revokedAt !== null && revokedAt <= at) refuse('BasisRevoked');\n",
      "replace": "",
      "kills": ["TEST-E-03 basis_and_bypass R1"]},
+    # Round 2: each fix of the Astra review of 775a31b re-broken, killed by its own behaviour case.
+    {"id": "M-E-F01", "required": True, "title": "E-R1-01 one verified range marks the whole unit verified", "file": "emr-image/contract.ts",
+     "find": "    const verified = slot.unit.sha256 === null ? [] : span(slot.ranges.filter(x => x.confirmed && x.verifiedBy?.sha256 === slot.unit.sha256));",
+     "replace": "    const verified = slot.unit.sha256 === null ? [] : slot.ranges.some(x => x.confirmed && x.verifiedBy?.sha256 === slot.unit.sha256) ? confirmed : [];",
+     "kills": ["TEST-E-01 delivery_states R7"]},
+    {"id": "M-E-F02", "required": True, "title": "E-R1-02 ranges of another receiver summed into one provision", "file": "emr-image/contract.ts",
+     "find": "    if (!sameReceiver(p.receiver, first.receiver)) refuse('DeliveryContextMismatch');\n",
+     "replace": "",
+     "kills": ["TEST-E-01 delivery_states R8"]},
+    {"id": "M-E-F03", "required": True, "title": "E-R1-03 Offline Ready ignores objects left out of the copy", "file": "emr-image/contract.ts",
+     "find": "  for (const x of plan.excluded) reasons.push({ code: 'object-unsupported', key: `object:${x.studyUid}/${x.sopInstanceUid}` });\n",
+     "replace": "",
+     "kills": ["TEST-E-04 offline_ready R5"]},
+    {"id": "M-E-F04", "required": True, "title": "E-R1-04 HEAD or header bulk accepted as display evidence", "file": "emr-image/contract.ts",
+     "find": "  return delivery.body && delivery.units.some(u => u.displayable && u.sopInstanceUid === sopInstanceUid && (frame === null || u.frame === null || u.frame === frame));",
+     "replace": "  return delivery.units.some(u => u.recordKind !== 'study-metadata' && u.sopInstanceUid === sopInstanceUid && (frame === null || u.frame === null || u.frame === frame));",
+     "kills": ["TEST-E-05 display_epoch R3"]},
+    {"id": "M-E-F05", "required": True, "title": "E-R1-05 standard generated 2D of the tomosynthesis IOD refused", "file": "emr-image/manifest.ts",
+     "find": "  if (entry.family === 'breast-tomosynthesis') {\n    const ft = frameTypes ?? [];",
+     "replace": "  if (entry.family === 'breast-tomosynthesis' && !['dbt', 'unverified'].includes(kind)) refuse('MammographyKindMismatch');\n"
+                "  if (entry.family === 'breast-tomosynthesis') {\n    const ft = frameTypes ?? [];",
+     "kills": ["TEST-E-02 manifest_sources A4"]},
+    {"id": "M-E-F06", "required": True, "title": "E-R1-06 refusal check counts the body only when the call returns", "target": "test",
+     "file": "tests/emr/e/contract_test.cjs",
+     "find": "function bodyNeverStarts(fn, code) {\n  const spy = { body: 0, prepared: [] };\n  refused(() => fn(spy), code);\n"
+             "  assert.equal(spy.body, 0, 'no body source may start on a refused provision');\n"
+             "  assert.equal(spy.prepared.length, 0, 'no delivery plan may be issued on a refused provision');\n}",
+     "replace": "function bodyNeverStarts(fn, code) {\n  let reached = 0;\n"
+                "  refused(() => { const spy = { body: 0, prepared: [] }; fn(spy); reached += spy.body; }, code);\n"
+                "  assert.equal(reached, 0, 'no body source may start on a refused provision');\n}",
+     "kills": ["TEST-E-03 basis_and_bypass R5"]},
 ]
 
 TOP = re.compile(r"^(ok|not ok) (\d+) - (.*)$")
@@ -141,10 +177,11 @@ def parse_tap(text):
     return results
 
 
-def run_against(source_dir):
-    env = dict(os.environ, KIN_EMR_E_SOURCE_DIR=str(source_dir))
+def run_against(source_dir, test_path=TEST):
+    # A mutated copy of the test file runs from outside the tree, so the API directory is named explicitly.
+    env = dict(os.environ, KIN_EMR_E_SOURCE_DIR=str(source_dir), KIN_EMR_E_API_DIR=str(ROOT / "api"))
     try:
-        out = subprocess.run([node(), "--test", "--test-reporter=tap", str(TEST)], cwd=ROOT, env=env, capture_output=True, timeout=TIMEOUT)
+        out = subprocess.run([node(), "--test", "--test-reporter=tap", str(test_path)], cwd=ROOT, env=env, capture_output=True, timeout=TIMEOUT)
     except subprocess.TimeoutExpired:
         return None, "timeout", ""
     text = out.stdout.decode("utf-8", "replace")
@@ -168,18 +205,29 @@ def main():
         copy_tree(base)
         code, text, stderr = run_against(base)
         results = parse_tap(text) if code is not None else {}
-        baseline_ok = code == 0 and list(results) == cases and all(r["ok"] for r in results.values())
+        # Collection is compared as a set: node reports cases in registration order, the declaration groups them by TEST-ID.
+        matches = sorted(results) == sorted(cases) and not any(r.get("duplicate") for r in results.values())
+        baseline_ok = code == 0 and matches and all(r["ok"] for r in results.values())
         report["baseline"] = {"exit": code, "collected": list(results), "passed": sum(r["ok"] for r in results.values()),
-                              "failed": [n for n, r in results.items() if not r["ok"]], "matches_declared": list(results) == cases}
+                              "failed": [n for n, r in results.items() if not r["ok"]], "matches_declared": matches}
         if not baseline_ok:
             report["baseline"]["stderr"] = stderr[-4000:]
             print("BASELINE FAILED", json.dumps(report["baseline"], ensure_ascii=False))
             ok = False
         for mutant in MUTANTS:
             entry = {key: mutant[key] for key in ("id", "required", "title", "file", "kills")}
-            work = Path(temporary) / mutant["id"] / "src"
-            copy_tree(work)
-            path = work / mutant["file"]
+            entry["target"] = mutant.get("target", "src")
+            if entry["target"] == "test":
+                # The defect lives in the test harness: mutate a copy of the test file, run it on the unmutated product copy.
+                work = Path(temporary) / mutant["id"] / "test"
+                work.mkdir(parents=True)
+                path, source_dir = work / TEST.name, base
+                shutil.copy2(TEST, path)
+                test_path = path
+            else:
+                work = Path(temporary) / mutant["id"] / "src"
+                copy_tree(work)
+                path, source_dir, test_path = work / mutant["file"], work, TEST
             original = path.read_text(encoding="utf-8")
             count = original.count(mutant["find"])
             if count != 1:
@@ -189,18 +237,19 @@ def main():
                 print(mutant["id"], "harness-error", entry["reason"])
                 continue
             path.write_text(original.replace(mutant["find"], mutant["replace"]), encoding="utf-8")
-            code, text, stderr = run_against(work)
+            code, text, stderr = run_against(source_dir, test_path)
             results = parse_tap(text) if code is not None else {}
             collected = list(results)
+            collected_all = sorted(collected) == sorted(cases) and not any(r.get("duplicate") for r in results.values())
             named = [n for n in collected if any(n.startswith(prefix + " ") for prefix in mutant["kills"])]
             killed_by = [n for n in named if not results[n]["ok"] and results[n]["code"] == "ERR_ASSERTION"]
             others = [n for n, r in results.items() if not r["ok"] and n not in killed_by]
-            entry.update(exit=code, collected_all=collected == cases, named_cases=named,
+            entry.update(exit=code, collected_all=collected_all, named_cases=named,
                          killed_by=[{"case": n, "assertion": results[n]["message"][:6]} for n in killed_by],
                          other_failures=[{"case": n, "code": results[n]["code"], "assertion": results[n]["message"][:3]} for n in others])
             if code is None:
                 entry.update(status="harness-error", reason="timeout")
-            elif collected != cases or not named:
+            elif not collected_all or not named:
                 entry.update(status="harness-error", reason="the mutated copy did not run every declared case", stderr=stderr[-2000:])
             else:
                 entry["status"] = "killed" if killed_by else "survived"

@@ -61,15 +61,22 @@ export type Provenance =
   | { kind: 'external'; system: string; receiptEventId: string; signatureEvidence: { status: 'present'; sha256: string } | { status: 'absent' } };
 export type Derivation = { kind: 'original' } | { kind: 'derived'; sources: readonly SopRef[] } | { kind: 'not-image' };
 export type MammographyKind = 'dbt' | 'generated-2d' | 'conventional-2d' | 'unverified';
-export interface MammographyRole { kind: MammographyKind; laterality: 'L' | 'R' | 'B' | null; view: string | null }
+/** frameTypes: the distinct Frame Type (0008,9007) values across the object's frames (null when the IOD has none);
+ * volumetricProperties: (0008,9206) as stored. Both come from the stored headers, never from the classifier. */
+export interface MammographyRoleInput {
+  kind: MammographyKind; laterality: 'L' | 'R' | 'B' | null; view: string | null;
+  frameTypes: readonly (readonly string[])[] | null; volumetricProperties: string | null;
+}
+export interface MammographyRole extends MammographyRoleInput { dbtRepresentation: 'slices' | 'slab' | 'unspecified' | null }
 export type FrameTiming = { source: 'frame-time'; frameTimeMs: number } | { source: 'frame-time-vector'; vectorMs: readonly number[] } | { source: 'none' };
 
 export interface ManifestObjectInput extends SopRef {
   sopClassUid: string; transferSyntaxUid: string; imageType: readonly string[] | null;
   bytes: number; sha256: string; declaredFrameCount: number; frames: readonly FrameDigest[];
-  provenance: Provenance; derivation: Derivation; mammography: MammographyRole | null; timing: FrameTiming | null;
+  provenance: Provenance; derivation: Derivation; mammography: MammographyRoleInput | null; timing: FrameTiming | null;
 }
-export interface ManifestObject extends ManifestObjectInput {
+export interface ManifestObject extends Omit<ManifestObjectInput, 'mammography'> {
+  mammography: MammographyRole | null;
   format: ObjectFormat; family: SopFamily; decoder: string | null; timingVerified: boolean | null;
   unsupported: 'UnknownObjectFormat' | 'UnknownTransferSyntax' | null;
 }
@@ -128,23 +135,47 @@ function provenance(value: unknown, format: ObjectFormat): Provenance {
   return refuse('ObjectSourceRequired');
 }
 
-function mammography(value: unknown, entry: { family: SopFamily; declaredFrameCount: number; imageType: readonly string[] | null; derivation: Derivation }): MammographyRole | null {
+/** Image Type Value 3 terms of a tomosynthesis-derived 2D view (PS3.3 C.8.11.7; the biopsy terms as E-MG reads them). */
+const GENERATED_2D_VALUE3: readonly string[] = freeze(['TOMOSYNTHESIS', 'PREFIRE', 'POSTFIRE', 'POSTBIOPSY', 'POSTMARKER']);
+
+function mammography(value: unknown, entry: { family: SopFamily; declaredFrameCount: number; imageType: readonly string[] | null }): MammographyRole | null {
   const mg = entry.family === 'mammography-2d' || entry.family === 'breast-tomosynthesis';
   if (!mg) { if (value !== null) refuse('MammographyRoleUnexpected'); return null; }
   if (value === null) refuse('MammographyRoleRequired');
-  const v = object(value, ['kind', 'laterality', 'view']);
+  const v = object(value, ['kind', 'laterality', 'view', 'frameTypes', 'volumetricProperties']);
   const kind = choice(v.kind, ['dbt', 'generated-2d', 'conventional-2d', 'unverified'] as const);
   const laterality = v.laterality === null ? null : choice(v.laterality, ['L', 'R', 'B'] as const);
   const view = v.view === null ? null : string(v.view);
   if (view !== null && !/^[A-Z]{1,8}$/.test(view)) refuse('MammographyKindMismatch');
-  const generated = (entry.imageType ?? []).includes('GENERATED_2D');
-  // The kind is the E-MG model's verdict; here only the structural impossibilities are refused. A tomosynthesis
-  // object is never a 2D image, and a generated 2D is a single derived device frame that says so in ImageType.
-  if (entry.family === 'breast-tomosynthesis' && !['dbt', 'unverified'].includes(kind)) refuse('MammographyKindMismatch');
-  if (kind === 'dbt' && entry.family !== 'breast-tomosynthesis') refuse('MammographyKindMismatch');
-  if (kind === 'generated-2d' && (entry.declaredFrameCount !== 1 || entry.derivation.kind !== 'derived' || !generated)) refuse('MammographyKindMismatch');
-  if (kind === 'conventional-2d' && (entry.declaredFrameCount !== 1 || generated)) refuse('MammographyKindMismatch');
-  return { kind, laterality, view };
+  let frameTypes: string[][] = null;
+  if (v.frameTypes !== null) {
+    if (!Array.isArray(v.frameTypes) || v.frameTypes.some((t: unknown) => !Array.isArray(t))) refuse('MammographyKindMismatch');
+    frameTypes = v.frameTypes.map((t: unknown[]) => t.map(x => string(x, true)));
+  }
+  const volumetricProperties = v.volumetricProperties === null ? null : string(v.volumetricProperties);
+  const type = entry.imageType ?? [], value3 = type[2] ?? '', value4 = type[3] ?? '';
+  const oneFrame = entry.declaredFrameCount === 1;
+  // The kind is the E-MG model's verdict; here only what the stored headers contradict is refused (PS3.3 A.55.3,
+  // C.8.11.7, C.8.21.6). A device synthetic 2D may be stored in the Breast Tomosynthesis IOD: then it is one frame
+  // whose Image Type and every Frame Type say TOMOSYNTHESIS (or a biopsy term) \ GENERATED_2D. A multi-frame object is
+  // never a generated 2D, and a tomosynthesis volume carries no GENERATED_2D anywhere.
+  if (entry.family === 'breast-tomosynthesis') {
+    const ft = frameTypes ?? [];
+    if (kind === 'generated-2d' && !(oneFrame && value4 === 'GENERATED_2D' && GENERATED_2D_VALUE3.includes(value3) &&
+        ft.length === 1 && ft[0][3] === 'GENERATED_2D')) refuse('MammographyKindMismatch');
+    if (kind === 'dbt' && (type.includes('GENERATED_2D') || ft.length > 1 || ft.some(t => t.includes('GENERATED_2D')))) refuse('MammographyKindMismatch');
+    if (kind === 'conventional-2d') refuse('MammographyKindMismatch');
+  } else {
+    if (kind === 'dbt') refuse('MammographyKindMismatch');
+    if (kind === 'generated-2d' && !(oneFrame && value4 === 'GENERATED_2D' && GENERATED_2D_VALUE3.includes(value3))) refuse('MammographyKindMismatch');
+    // Value 1 DERIVED describes pixel processing (CMMD DERIVED\PRIMARY); only Value 3/4 would mark something else.
+    if (kind === 'conventional-2d' && !(oneFrame && !value3 && !value4)) refuse('MammographyKindMismatch');
+  }
+  // Volumetric Properties decides what DBT frames are (C.8.21.1.1.3 notes): VOLUME = regularly sampled slices,
+  // SAMPLED = slabs/MIPs. Anything else is kept as stored and reported as unspecified.
+  const dbtRepresentation = kind !== 'dbt' ? null : volumetricProperties === 'VOLUME' ? 'slices' as const
+    : volumetricProperties === 'SAMPLED' ? 'slab' as const : 'unspecified' as const;
+  return { kind, laterality, view, frameTypes, volumetricProperties, dbtRepresentation };
 }
 
 function timing(value: unknown, frames: number): { timing: FrameTiming | null; verified: boolean | null } {
@@ -212,7 +243,7 @@ function entry(value: unknown, studyUid: string): ManifestObject {
     if (!pixel && derivation.kind !== 'not-image') refuse('DerivationMismatch');
   }
   const source = provenance(v.provenance, format);
-  const role = mammography(v.mammography, { family, declaredFrameCount, imageType, derivation });
+  const role = mammography(v.mammography, { family, declaredFrameCount, imageType });
   if (v.timing !== null && !PIXEL_FORMATS.includes(format)) refuse('InvalidFrameTiming');
   const time = timing(v.timing, declaredFrameCount);
   return { ...ref, sopClassUid, transferSyntaxUid, imageType, bytes, sha256: digest, declaredFrameCount, frames, provenance: source, derivation,
@@ -258,7 +289,9 @@ export function buildImageManifest(input: ManifestInput): Readonly<ImageManifest
       const target = bySopUid.get(s.sopInstanceUid);
       // A declared source that is held must be the same object it names; an absent one stays as the object declared it.
       if (target && (target.seriesUid !== s.seriesUid || target.studyUid !== s.studyUid)) refuse('DerivedSourceMismatch');
-      if (target && o.mammography?.kind === 'generated-2d' && (target.mammography?.kind !== 'dbt' ||
+      // A generated 2D comes from tomosynthesis data of the same breast (the DBT volume or its stored projections,
+      // which E-MG may leave unverified), never from another 2D view or a non-breast object.
+      if (target && o.mammography?.kind === 'generated-2d' && (!target.mammography || ['conventional-2d', 'generated-2d'].includes(target.mammography.kind) ||
           (o.mammography.laterality && target.mammography.laterality && o.mammography.laterality !== target.mammography.laterality))) refuse('DerivedSourceMismatch');
     }
   }

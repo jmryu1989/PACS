@@ -26,14 +26,17 @@ const CASES = [
   'TEST-E-01 delivery_states R4 bytes before the durable receipt, a foreign receipt or a body on HEAD are refused',
   'TEST-E-01 delivery_states R5 bytes whose source hash differs from the fixed manifest are a mismatch, unhashed bytes stay unverified',
   'TEST-E-01 delivery_states R6 an unknown append is re-read by its event ID and only a found receipt allows the body',
+  'TEST-E-01 delivery_states R7 a range without its own hash verification leaves the unit unverified even beside a verified range',
+  'TEST-E-01 delivery_states R8 ranges sent to another account generation, opening, institution or relation never complete one provision',
   'TEST-E-02 manifest_sources A1 every held object keeps SOP, frames, bytes, hash, origin, source and MG/DBT/XA facts under one content digest',
   'TEST-E-02 manifest_sources A2 identical relisting collapses and an unknown format stays listed but undeliverable while the study opens',
   'TEST-E-02 manifest_sources A3 XA frame order and the stored timing are kept as stored and only reported as verified or not',
+  'TEST-E-02 manifest_sources A4 a one-frame Breast Tomosynthesis object typed GENERATED_2D in Image and Frame Type is the device synthetic 2D; DBT slices or slabs follow Volumetric Properties',
   'TEST-E-02 manifest_sources R1 the same SOP with different bytes is refused',
   'TEST-E-02 manifest_sources R2 a missing last frame or a repeated frame number is refused',
   'TEST-E-02 manifest_sources R3 an incomplete or broken page chain is refused',
   'TEST-E-02 manifest_sources R4 an external object without its source, or a source claim that hides the producer, is refused',
-  'TEST-E-02 manifest_sources R5 a tomosynthesis object is never a generated 2D and DERIVED alone is not synthetic evidence',
+  'TEST-E-02 manifest_sources R5 a multi-frame or mistyped tomosynthesis object is never a generated 2D and DERIVED alone is not synthetic evidence',
   'TEST-E-02 manifest_sources R6 relabelled origin, a foreign study object, a missing decoder pin or a copied manifest is refused',
   'TEST-E-03 basis_and_bypass A1 reading inside the managing institution needs no consent, contract or extra step and delivers',
   'TEST-E-03 basis_and_bypass A2 a complete processor agreement delivers; a lawful third-party basis is recorded but sends no body in Part 1',
@@ -42,6 +45,7 @@ const CASES = [
   'TEST-E-03 basis_and_bypass R2 an incomplete, inactive, undisclosed, sub-processed or overseas processor agreement is refused',
   'TEST-E-03 basis_and_bypass R3 direct Orthanc paths and escaped paths are refused before any read',
   'TEST-E-03 basis_and_bypass R4 a scope outside the manifest, a foreign 204 or a forged request or decision prepares nothing',
+  'TEST-E-03 basis_and_bypass R5 the body-start spy still sees a body that started before a refusal',
   'TEST-E-04 offline_ready A1 a fully verified current and selected comparison bundle is ready and stays ready after a restart',
   'TEST-E-04 offline_ready A2 grant expiry or end stops offline viewing and keeps the queue',
   'TEST-E-04 offline_ready A3 an offline view keeps device time, device and order with no observed address; reconnection is its own event',
@@ -49,10 +53,12 @@ const CASES = [
   'TEST-E-04 offline_ready R2 a missing comparison, short storage or journal, or a stale plan is reported by name',
   'TEST-E-04 offline_ready R3 a missing decoder or viewer asset is not ready',
   'TEST-E-04 offline_ready R4 another patient, an unselected study, an inconsistent requirement or a broken offline order is refused',
+  'TEST-E-04 offline_ready R5 an object left out of the device copy keeps the bundle not ready by name while the study still opens online',
   'TEST-E-05 display_epoch A1 the current opening records network, cache and offline-store displays separately from delivery',
   'TEST-E-05 display_epoch A2 an explicit ACK binds to a display of the current opening and is its own record',
   'TEST-E-05 display_epoch R1 background loads, earlier openings (A to B to A), another account generation or version, or another opening\'s delivery are not displays',
   'TEST-E-05 display_epoch R2 an ACK from an earlier generation or without a display is refused',
+  'TEST-E-05 display_epoch R3 a HEAD response or a header bulk attribute is not evidence that pixels were shown; the Pixel Data bulk is',
 ];
 if (process.argv.includes('--list-cases')) {
   process.stdout.write(JSON.stringify(CASES) + '\n');
@@ -62,7 +68,8 @@ if (process.argv.includes('--list-cases')) {
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const root = path.resolve(__dirname, '../../..');
-const api = path.join(root, 'api');
+// KIN_EMR_E_API_DIR: mutants.py runs a mutated copy of this file from outside the tree and points it back at api/.
+const api = process.env.KIN_EMR_E_API_DIR ? path.resolve(process.env.KIN_EMR_E_API_DIR) : path.join(root, 'api');
 const source = process.env.KIN_EMR_E_SOURCE_DIR ? path.resolve(process.env.KIN_EMR_E_SOURCE_DIR) : path.join(api, 'src');
 const ts = require(path.join(api, 'node_modules/typescript'));
 const originalTsLoader = require.extensions['.ts'];
@@ -76,8 +83,11 @@ const E = require(path.join(source, 'emr-image/contract.ts'));
 if (originalTsLoader) require.extensions['.ts'] = originalTsLoader; else delete require.extensions['.ts'];
 
 const registered = new Set();
-function def(name, fn) {
-  assert.ok(CASES.includes(name), `undeclared case: ${name}`);
+/** id: "TEST-E-0n suffix An|Rn"; it names exactly one declared case. */
+function def(id, fn) {
+  const matches = CASES.filter(name => name.startsWith(id + ' '));
+  assert.equal(matches.length, 1, `case id must name one declared case: ${id}`);
+  const name = matches[0];
   assert.ok(!registered.has(name), `duplicate case: ${name}`);
   registered.add(name);
   test(name, fn);
@@ -123,17 +133,28 @@ function doc(study, series, sop, sopClass, provenance) {
 const external = (system = 'Vendor AI', evidence = { status: 'present', sha256: h('sig') }) => ({ kind: 'external', system, receiptEventId: 'import-7', signatureEvidence: evidence });
 const S = (study, n) => `${study}.${n}`;
 const DBT = S(STUDY, 3) + '.1', SYNTH = S(STUDY, 4) + '.1';
+/** The E-MG verdict plus the stored Frame Type list and Volumetric Properties it was read from. */
+const role = (kind, laterality, frameTypes = null, volumetricProperties = null, view = 'CC') => ({ kind, laterality, view, frameTypes, volumetricProperties });
+/** Header shape of a Hologic Selenia Dimensions "Intelligent 2D" (EA1141-4339969, read by E-MG): one frame of the Breast
+ * Tomosynthesis IOD whose Image Type and Frame Type are DERIVED\PRIMARY\TOMOSYNTHESIS\GENERATED_2D, VOLUME / MAX_IP. */
+const I2D_TYPE = ['DERIVED', 'PRIMARY', 'TOMOSYNTHESIS', 'GENERATED_2D'];
+const hologicSynthetic = (study, series, sop, laterality = 'L', sources = []) => pixel(study, series, sop, SC('13.1.3'), { ts: TS.j2k,
+  imageType: I2D_TYPE, derivation: { kind: 'derived', sources }, mammography: role('generated-2d', laterality, [I2D_TYPE], 'VOLUME') });
+/** Its paired 1 mm DBT: DERIVED\PRIMARY\TOMOSYNTHESIS\NONE, many frames, VOLUME (slices). */
+const DBT_TYPE = ['DERIVED', 'PRIMARY', 'TOMOSYNTHESIS', 'NONE'];
+const hologicDbt = (study, series, sop, frames = 60, laterality = 'L', volumetric = 'VOLUME') => pixel(study, series, sop, SC('13.1.3'), { ts: TS.j2k,
+  frames, frameBytes: 10, imageType: DBT_TYPE, derivation: { kind: 'derived', sources: [] }, mammography: role('dbt', laterality, [DBT_TYPE], volumetric) });
 function studyObjects(study = STUDY) {
   return [
     pixel(study, S(study, 1), S(study, 1) + '.1', SC('2'), { imageType: ['ORIGINAL', 'PRIMARY', 'AXIAL'] }),
     pixel(study, S(study, 1), S(study, 1) + '.2', SC('2'), { imageType: ['ORIGINAL', 'PRIMARY', 'AXIAL'] }),
     pixel(study, S(study, 2), S(study, 2) + '.1', SC('1.2'), { imageType: ['DERIVED', 'PRIMARY'], derivation: { kind: 'derived', sources: [] },
-      mammography: { kind: 'conventional-2d', laterality: 'R', view: 'CC' } }),
+      mammography: role('conventional-2d', 'R') }),
     pixel(study, S(study, 3), S(study, 3) + '.1', SC('13.1.3'), { ts: TS.j2k, frames: 6, imageType: ['ORIGINAL', 'PRIMARY', 'TOMOSYNTHESIS', 'NONE'],
-      mammography: { kind: 'dbt', laterality: 'L', view: 'CC' } }),
+      mammography: role('dbt', 'L', [['ORIGINAL', 'PRIMARY', 'TOMOSYNTHESIS', 'NONE']], 'VOLUME') }),
     pixel(study, S(study, 4), S(study, 4) + '.1', SC('1.2'), { imageType: ['DERIVED', 'PRIMARY', 'TOMOSYNTHESIS', 'GENERATED_2D'],
       derivation: { kind: 'derived', sources: [{ studyUid: study, seriesUid: S(study, 3), sopInstanceUid: S(study, 3) + '.1' }] },
-      mammography: { kind: 'generated-2d', laterality: 'L', view: 'CC' } }),
+      mammography: role('generated-2d', 'L') }),
     pixel(study, S(study, 5), S(study, 5) + '.1', SC('12.1'), { ts: TS.jpeg, frames: 8, imageType: ['ORIGINAL', 'PRIMARY', 'SINGLE PLANE'],
       timing: { source: 'frame-time-vector', vectorMs: [0, 66, 67, 66, 67, 66, 67, 66] } }),
     doc(study, S(study, 6), S(study, 6) + '.1', SC('88.22'), external()),
@@ -156,34 +177,42 @@ const build = (...args) => M.buildImageManifest(manifestInput(...args));
 const sameInstitution = (study = STUDY, at = T1) => E.checkProvisionBasis({ relation: 'same-institution', at, managingInstitution: INSTITUTION, recipient: null,
   studyUid: study, purpose: null, basis: null, agreement: null, auditBefore: null });
 let eventCounter = 0;
+const GENERATION = 4;
 function prepare(manifest, target, opts = {}) {
+  const accountGeneration = opts.accountGeneration ?? opts.opening?.accountGeneration ?? GENERATION;
   return E.prepareDelivery(manifest, E.parseImageRequest(opts.method ?? 'GET', target), { eventId: opts.eventId ?? `evt-${++eventCounter}`,
-    cause: opts.cause ?? 'user-view', at: T1, authorization: opts.authorization ?? { studyUid: manifest.studyUid, institution: manifest.managingInstitution },
+    cause: opts.cause ?? 'user-view', at: T1,
+    authorization: opts.authorization ?? { studyUid: manifest.studyUid, institution: manifest.managingInstitution, accountGeneration },
     provision: opts.provision ?? sameInstitution(manifest.studyUid), opening: opts.opening ?? null });
 }
 const receipt = p => ({ stage: 'provide-prepared', receipt: { eventId: p.eventId, durableAt: T1 } });
-const wrote = (unit, start, end, sourceSha256 = unit.sha256) => ({ stage: 'bytes', unit: unit.key, start, end, sourceSha256 });
+/** The stream read the whole unit from the store as readId and hashed it; the written range came from that read. */
+const verified = (unit, sha = unit.sha256, readId = 'read-1') => ({ source: 'store-read', readId, sha256: sha });
+const wrote = (unit, start, end, verifiedBy = unit.sha256 ? verified(unit) : null) => ({ stage: 'bytes', unit: unit.key, start, end, verifiedBy });
 const ended = { stage: 'transfer-ended' }, aborted = { stage: 'transfer-aborted' }, unknown = { stage: 'transfer-unknown' };
 const full = p => [{ stage: 'authorized', status: 204 }, receipt(p), ...p.units.map(u => wrote(u, 0, u.expectedBytes)), ended];
-/** What R2's stream does at its first byte, reduced to a counter: every refusal must land before it. */
-function serve(manifest, method, target, provisionInput) {
-  const calls = { body: 0 };
+/** What R2's stream does around its first byte. The spy lives outside the call, so a body that started before a
+ * refusal is still seen after the refusal propagates. */
+function serve(spy, manifest, method, target, provisionInput) {
   const request = E.parseImageRequest(method, target);
   const provision = provisionInput === undefined ? sameInstitution(manifest.studyUid) : E.checkProvisionBasis(provisionInput);
   const actor = provision.relation === 'processor' ? provision.recipient : manifest.managingInstitution;
   const p = E.prepareDelivery(manifest, request, { eventId: `evt-${++eventCounter}`, cause: 'user-view', at: T1,
-    authorization: { studyUid: manifest.studyUid, institution: actor }, provision, opening: null });
-  calls.body++;
-  return { p, calls };
+    authorization: { studyUid: manifest.studyUid, institution: actor, accountGeneration: GENERATION }, provision, opening: null });
+  spy.body++;
+  spy.prepared.push(p);
+  return p;
 }
+/** R1 claim, exactly: on a refusal no delivery plan is issued and the body hook never ran, before or after the throw. */
 function bodyNeverStarts(fn, code) {
-  let reached = 0;
-  refused(() => { const r = fn(); reached += r.calls.body; }, code);
-  assert.equal(reached, 0, 'no body source may start on a refused provision');
+  const spy = { body: 0, prepared: [] };
+  refused(() => fn(spy), code);
+  assert.equal(spy.body, 0, 'no body source may start on a refused provision');
+  assert.equal(spy.prepared.length, 0, 'no delivery plan may be issued on a refused provision');
 }
 
 // ── TEST-E-01 delivery_states ───────────────────────────────────────────────────────────────────────────────────
-def(CASES[0], () => {
+def('TEST-E-01 delivery_states A1', () => {
   const m = build(), sop = S(STUDY, 1) + '.1', p = prepare(m, `/dicom-web/studies/${STUDY}/series/${S(STUDY, 1)}/instances/${sop}`);
   assert.deepEqual(p.units.map(u => [u.part, u.expectedBytes, u.sha256, u.recordKind]), [['object', 5000, h(sop), 'image']]);
   const judged = E.judgeDelivery([{ prepared: p, observations: full(p) }]);
@@ -194,7 +223,7 @@ def(CASES[0], () => {
   assert.deepEqual({ ...E.DELIVERY_STAGE_ACCESS_ACTION }, { 'provide-prepared': 'provide-prepared', 'transfer-ended': 'transfer-ended',
     'transfer-aborted': 'transfer-aborted', 'transfer-unknown': null });
 });
-def(CASES[1], () => {
+def('TEST-E-01 delivery_states A2', () => {
   const m = build(), dbt = S(STUDY, 3) + '.1';
   const p = prepare(m, `/dicom-web/studies/${STUDY}/series/${S(STUDY, 3)}/instances/${dbt}/frames/1,2,3,4,5,6`);
   assert.deepEqual(p.units.map(u => u.frame), [1, 2, 3, 4, 5, 6]);
@@ -209,7 +238,7 @@ def(CASES[1], () => {
   // The prefix alone is partial, not complete.
   assert.equal(E.judgeDelivery([{ prepared: a, observations: [receipt(a), wrote(u, 0, 3000), ended] }]).units[0].status, 'partial');
 });
-def(CASES[2], () => {
+def('TEST-E-01 delivery_states A3', () => {
   const m = build(), p = prepare(m, `/dicom-web/studies/${STUDY}/series/${S(STUDY, 1)}/metadata`), u = p.units[0];
   assert.deepEqual([u.part, u.expectedBytes, u.recordKind], ['derived', null, 'study-metadata']);
   const one = [receipt(p), { stage: 'unit-length', unit: u.key, length: 900 }, wrote(u, 0, 900, null), ended];
@@ -222,7 +251,7 @@ def(CASES[2], () => {
   assert.equal(split.outcome, 'incomplete');
   refused(() => E.judgeDelivery([{ prepared: p, observations: [receipt(p), wrote(u, 0, 10, null), ended] }]), 'RangeOutsideUnit');
 });
-def(CASES[3], () => {
+def('TEST-E-01 delivery_states R1', () => {
   const m = build(), p = prepare(m, `/dicom-web/studies/${STUDY}/series/${S(STUDY, 1)}/instances/${S(STUDY, 1)}.1`);
   const judged = E.judgeDelivery([{ prepared: p, observations: [{ stage: 'authorized', status: 204 }] }]);
   assert.equal(judged.outcome, 'unknown');
@@ -232,7 +261,7 @@ def(CASES[3], () => {
   assert.notEqual(withEnd.outcome, 'complete');
   assert.deepEqual(withEnd.units.map(u => u.status), ['not-sent']);
 });
-def(CASES[4], () => {
+def('TEST-E-01 delivery_states R2', () => {
   const m = build(), p = prepare(m, `/dicom-web/studies/${STUDY}/series/${S(STUDY, 1)}/instances/${S(STUDY, 1)}.1`), u = p.units[0];
   const judged = E.judgeDelivery([{ prepared: p, observations: [receipt(p), wrote(u, 0, u.expectedBytes), aborted] }]);
   assert.equal(judged.outcome, 'incomplete');
@@ -245,7 +274,7 @@ def(CASES[4], () => {
   assert.equal(resumed.outcome, 'incomplete');
   assert.equal(resumed.units[0].status, 'unconfirmed');
 });
-def(CASES[5], () => {
+def('TEST-E-01 delivery_states R3', () => {
   const m = build(), xa = S(STUDY, 5) + '.1';
   const p = prepare(m, `/dicom-web/studies/${STUDY}/series/${S(STUDY, 5)}/instances/${xa}/frames/1,2,3,4,5,6,7,8`);
   const last = p.units[p.units.length - 1];
@@ -258,7 +287,7 @@ def(CASES[5], () => {
   const silent = E.judgeDelivery([{ prepared: p, observations: [receipt(p), ...p.units.map(u => wrote(u, 0, u.expectedBytes))] }]);
   assert.equal(silent.outcome, 'unknown');
 });
-def(CASES[6], () => {
+def('TEST-E-01 delivery_states R4', () => {
   const m = build(), target = `/dicom-web/studies/${STUDY}/series/${S(STUDY, 1)}/instances/${S(STUDY, 1)}.1`;
   const p = prepare(m, target), u = p.units[0];
   refused(() => E.judgeDelivery([{ prepared: p, observations: [wrote(u, 0, 5000), receipt(p), ended] }]), 'BodyBeforeDurableReceipt');
@@ -271,9 +300,9 @@ def(CASES[6], () => {
   assert.equal(E.judgeDelivery([{ prepared: head, observations: [receipt(head), ended] }]).outcome, 'no-body');
   refused(() => E.judgeDelivery([{ prepared: structuredClone(p), observations: full(p) }]), 'PreparedDeliveryRequired');
 });
-def(CASES[7], () => {
+def('TEST-E-01 delivery_states R5', () => {
   const m = build(), p = prepare(m, `/dicom-web/studies/${STUDY}/series/${S(STUDY, 1)}/instances/${S(STUDY, 1)}.1`), u = p.units[0];
-  const swapped = E.judgeDelivery([{ prepared: p, observations: [receipt(p), wrote(u, 0, 5000, h('other bytes')), ended] }]);
+  const swapped = E.judgeDelivery([{ prepared: p, observations: [receipt(p), wrote(u, 0, 5000, verified(u, h('other bytes'))), ended] }]);
   assert.equal(swapped.outcome, 'mismatch');
   assert.equal(swapped.units[0].status, 'mismatch');
   const unhashed = E.judgeDelivery([{ prepared: p, observations: [receipt(p), wrote(u, 0, 5000, null), ended] }]);
@@ -285,7 +314,7 @@ def(CASES[7], () => {
   refused(() => E.judgeDelivery([{ prepared: p, observations: [receipt(p), wrote(u, 0, 3000), ended] },
     { prepared: later, observations: [receipt(later), wrote(later.units[0], 3000, 5000), ended] }]), 'ManifestVersionMismatch');
 });
-def(CASES[8], async () => {
+def('TEST-E-01 delivery_states R6', async () => {
   let sent = 0;
   const sendIf = result => { if (result.status === 'durable') sent++; return result.status; };
   const found = { findByEventId: async id => ({ status: 'found', receipt: { eventId: id, durableAt: T1 } }) };
@@ -298,8 +327,55 @@ def(CASES[8], async () => {
   await refusedAsync(() => E.resolveUnknownAppend('evt-x', { findByEventId: async () => ({ status: 'found', receipt: { eventId: 'evt-y', durableAt: T1 } }) }), 'DurabilityReceiptMismatch');
 });
 
+def('TEST-E-01 delivery_states R7', () => {
+  const m = build(), target = `/dicom-web/studies/${STUDY}/series/${S(STUDY, 1)}/instances/${S(STUDY, 1)}.1`;
+  const a = prepare(m, target), b = prepare(m, target), u = a.units[0];
+  // One verified byte and 4999 unverified ones, both responses ended: the unit is not delivered as the fixed object.
+  const judged = E.judgeDelivery([{ prepared: a, observations: [receipt(a), wrote(u, 0, 1), ended] },
+    { prepared: b, observations: [receipt(b), wrote(b.units[0], 1, 5000, null), ended] }]);
+  assert.equal(judged.outcome, 'incomplete');
+  assert.deepEqual([judged.units[0].status, judged.units[0].confirmed, judged.units[0].verified], ['unverified', [[0, 5000]], [[0, 1]]]);
+  // Each range keeps who verified it: the prefix by read-1 in response a, the rest by nobody.
+  assert.deepEqual(judged.units[0].ranges.map(r => [r.start, r.end, r.response, r.confirmed, r.verifiedBy?.readId ?? null]),
+    [[0, 1, a.eventId, true, 'read-1'], [1, 5000, b.eventId, true, null]]);
+  // Verified ranges that are written in an aborted response do not count either.
+  const c = prepare(m, target), d = prepare(m, target);
+  assert.equal(E.judgeDelivery([{ prepared: c, observations: [receipt(c), wrote(c.units[0], 0, 2500), aborted] },
+    { prepared: d, observations: [receipt(d), wrote(d.units[0], 2500, 5000), ended] }]).units[0].status, 'unconfirmed');
+  // Two ranges, each written from its own verified read, together complete the unit.
+  const e = prepare(m, target), f = prepare(m, target);
+  const both = E.judgeDelivery([{ prepared: e, observations: [receipt(e), wrote(e.units[0], 0, 2500, verified(u, u.sha256, 'read-e')), ended] },
+    { prepared: f, observations: [receipt(f), wrote(f.units[0], 2500, 5000, verified(u, u.sha256, 'read-f')), ended] }]);
+  assert.deepEqual([both.outcome, both.units[0].verified], ['complete', [[0, 5000]]]);
+  // A generated body has no fixed hash and cannot claim one.
+  const md = prepare(m, `/dicom-web/studies/${STUDY}/series/${S(STUDY, 1)}/metadata`);
+  refused(() => E.judgeDelivery([{ prepared: md, observations: [receipt(md), { stage: 'unit-length', unit: md.units[0].key, length: 10 },
+    wrote(md.units[0], 0, 10, verified(md.units[0], h('generated'))), ended] }]), 'VerificationNotApplicable');
+});
+def('TEST-E-01 delivery_states R8', () => {
+  const m = build(), target = `/dicom-web/studies/${STUDY}/series/${S(STUDY, 1)}/instances/${S(STUDY, 1)}.1`;
+  const openA = { openingId: 'open-A', accountGeneration: 1, sequence: 1 };
+  const halves = (a, b) => E.judgeDelivery([{ prepared: a, observations: [receipt(a), wrote(a.units[0], 0, 2500), ended] },
+    { prepared: b, observations: [receipt(b), wrote(b.units[0], 2500, 5000), ended] }]);
+  const first = prepare(m, target, { opening: openA });
+  // Another account generation and opening, the same account in a later opening (A to B to A), a load serving no opening,
+  // and a processor relation are each a different receiver.
+  refused(() => halves(first, prepare(m, target, { opening: { openingId: 'open-B', accountGeneration: 2, sequence: 3 } })), 'DeliveryContextMismatch');
+  refused(() => halves(first, prepare(m, target, { opening: { ...openA, sequence: 2 } })), 'DeliveryContextMismatch');
+  refused(() => halves(first, prepare(m, target, { opening: null, accountGeneration: 1 })), 'DeliveryContextMismatch');
+  refused(() => halves(first, prepare(m, target, { provision: E.checkProvisionBasis(processor()),
+    authorization: { studyUid: STUDY, institution: 'reading-center', accountGeneration: 1 } })), 'DeliveryContextMismatch');
+  refused(() => halves(first, first), 'DuplicateResponse');
+  // The same receiver resumes normally, and the judgement names that receiver.
+  const same = allowed(() => halves(first, prepare(m, target, { opening: openA })));
+  assert.deepEqual([same.outcome, { ...same.receiver }], ['complete',
+    { relation: 'same-institution', institution: INSTITUTION, accountGeneration: 1, openingId: 'open-A', sequence: 1 }]);
+  // An opening of one account generation is not served on another generation's 204.
+  refused(() => prepare(m, target, { opening: openA, accountGeneration: 2 }), 'AuthorizationScopeMismatch');
+});
+
 // ── TEST-E-02 manifest_sources ──────────────────────────────────────────────────────────────────────────────────
-def(CASES[9], () => {
+def('TEST-E-02 manifest_sources A1', () => {
   const objects = studyObjects(), input = manifestInput(objects), before = structuredClone(input);
   const m = M.buildImageManifest(input);
   assert.deepEqual(input, before, 'the input listing is not modified');
@@ -319,7 +395,7 @@ def(CASES[9], () => {
   const changed = studyObjects(); changed[1] = { ...changed[1], sha256: h('changed') };
   assert.notEqual(build(changed).sha256, m.sha256);
 });
-def(CASES[10], () => {
+def('TEST-E-02 manifest_sources A2', () => {
   const objects = studyObjects(), dup = objects[0];
   const m = M.buildImageManifest(manifestInput(objects, { pages: [{ cursor: null, next: 'p2', objects: objects.slice(0, 5) },
     { cursor: 'p2', next: null, objects: [dup, ...objects.slice(5)] }] }));
@@ -338,7 +414,7 @@ def(CASES[10], () => {
   assert.equal(all.units.length, objects.length);
   assert.deepEqual(all.excluded.map(x => x.reason).sort(), ['UnknownObjectFormat', 'UnknownTransferSyntax']);
 });
-def(CASES[11], () => {
+def('TEST-E-02 manifest_sources A3', () => {
   const m = build(), xa = m.objects.find(o => o.family === 'xa');
   assert.deepEqual(xa.frames.map(f => f.number), [1, 2, 3, 4, 5, 6, 7, 8]);
   assert.deepEqual(xa.timing, { source: 'frame-time-vector', vectorMs: [0, 66, 67, 66, 67, 66, 67, 66] });
@@ -354,14 +430,14 @@ def(CASES[11], () => {
   const bad = studyObjects(); bad[5] = { ...bad[5], timing: { source: 'frame-time-vector', vectorMs: [0, Number.NaN] } };
   refused(() => build(bad), 'InvalidFrameTiming');
 });
-def(CASES[12], () => {
+def('TEST-E-02 manifest_sources R1', () => {
   const objects = studyObjects(), twin = { ...objects[0], sha256: h('same uid, other bytes') };
   refused(() => M.buildImageManifest(manifestInput(objects, { pages: [{ cursor: null, next: 'p2', objects: objects.slice(0, 5) },
     { cursor: 'p2', next: null, objects: [twin, ...objects.slice(5)] }] })), 'DuplicateObjectConflict');
   const resized = { ...objects[0], bytes: objects[0].bytes + 1 };
   refused(() => M.buildImageManifest(manifestInput([...objects, resized])), 'DuplicateObjectConflict');
 });
-def(CASES[13], () => {
+def('TEST-E-02 manifest_sources R2', () => {
   const lastMissing = studyObjects(); lastMissing[3] = { ...lastMissing[3], frames: frameSet(DBT, 5) };
   refused(() => build(lastMissing), 'FrameSetIncomplete');
   const gap = studyObjects(); gap[5] = { ...gap[5], frames: frameSet(S(STUDY, 5) + '.1', 8).filter(f => f.number !== 4) };
@@ -373,7 +449,7 @@ def(CASES[13], () => {
   // With all frames present the same object is accepted.
   assert.equal(build().objects.find(o => o.sopInstanceUid === DBT).frames.length, 6);
 });
-def(CASES[14], () => {
+def('TEST-E-02 manifest_sources R3', () => {
   const objects = studyObjects();
   refused(() => M.buildImageManifest(manifestInput(objects, { pages: [{ cursor: null, next: 'p2', objects: objects.slice(0, 5) }] , expected: { series: 7, objects: 9 } })), 'ManifestPageIncomplete');
   refused(() => M.buildImageManifest(manifestInput(objects, { pages: [{ cursor: null, next: 'p2', objects: objects.slice(0, 5) },
@@ -382,7 +458,7 @@ def(CASES[14], () => {
   refused(() => M.buildImageManifest(manifestInput(objects.slice(1), { expected: { series: 7, objects: 9 } })), 'ManifestPageIncomplete');
   refused(() => M.buildImageManifest(manifestInput(objects, { pages: [] })), 'ManifestPageIncomplete');
 });
-def(CASES[15], () => {
+def('TEST-E-02 manifest_sources R4', () => {
   const cases = [
     [{ kind: 'external', system: 'Vendor AI', receiptEventId: 'import-7' }, 'ExternalSourceRequired'],
     [{ kind: 'external', system: ' ', receiptEventId: 'import-7', signatureEvidence: { status: 'absent' } }, 'ExternalSourceRequired'],
@@ -401,33 +477,69 @@ def(CASES[15], () => {
   // The external SR keeps its source evidence; no product signature is added to it.
   assert.deepEqual(build().objects.find(o => o.sopInstanceUid === S(STUDY, 7) + '.1').provenance, external('Referring EMR', { status: 'absent' }));
 });
-def(CASES[16], () => {
-  // A single-frame derived object of the Breast Tomosynthesis class that even says GENERATED_2D is still not a 2D image.
-  const posing = studyObjects();
-  posing[3] = pixel(STUDY, S(STUDY, 3), DBT, SC('13.1.3'), { ts: TS.j2k, imageType: ['DERIVED', 'PRIMARY', 'TOMOSYNTHESIS', 'GENERATED_2D'],
-    derivation: { kind: 'derived', sources: [] }, mammography: { kind: 'generated-2d', laterality: 'L', view: 'CC' } });
-  posing[4] = { ...posing[4], derivation: { kind: 'derived', sources: [] } };
-  refused(() => build(posing), 'MammographyKindMismatch');
-  const asConventional = studyObjects(); asConventional[3] = { ...asConventional[3], mammography: { kind: 'conventional-2d', laterality: 'L', view: 'CC' } };
+def('TEST-E-02 manifest_sources A4', () => {
+  // A Hologic pair as stored: an Intelligent 2D view (Breast Tomosynthesis IOD, one frame) and its 1 mm DBT volume.
+  const i2dSeries = S(STUDY, 8), volSeries = S(STUDY, 9), i2d = i2dSeries + '.1', vol = volSeries + '.1';
+  const pair = [...studyObjects(), hologicDbt(STUDY, volSeries, vol),
+    hologicSynthetic(STUDY, i2dSeries, i2d, 'L', [{ studyUid: STUDY, seriesUid: volSeries, sopInstanceUid: vol }])];
+  const m = allowed(() => build(pair));
+  const byUid = Object.fromEntries(m.objects.map(o => [o.sopInstanceUid, o]));
+  assert.deepEqual([byUid[i2d].family, byUid[i2d].declaredFrameCount, byUid[i2d].mammography.kind, byUid[i2d].mammography.dbtRepresentation],
+    ['breast-tomosynthesis', 1, 'generated-2d', null]);
+  assert.deepEqual(byUid[i2d].mammography.frameTypes, [I2D_TYPE]);
+  assert.deepEqual([byUid[vol].mammography.kind, byUid[vol].mammography.dbtRepresentation, byUid[vol].frames.length], ['dbt', 'slices', 60]);
+  // Volumetric Properties decides slices or slabs: GE's 10 mm MIP slabs say SAMPLED; another value stays unspecified.
+  const slab = allowed(() => build([...studyObjects(), hologicDbt(STUDY, volSeries, vol, 30, 'L', 'SAMPLED')]));
+  assert.equal(slab.objects.find(o => o.sopInstanceUid === vol).mammography.dbtRepresentation, 'slab');
+  const other = allowed(() => build([...studyObjects(), hologicDbt(STUDY, volSeries, vol, 30, 'L', 'DISTORTED')]));
+  assert.equal(other.objects.find(o => o.sopInstanceUid === vol).mammography.dbtRepresentation, 'unspecified');
+  // A generated 2D stored in the Digital Mammography IOD (no Frame Type) is accepted as well.
+  assert.equal(build().objects.find(o => o.sopInstanceUid === SYNTH).mammography.kind, 'generated-2d');
+});
+def('TEST-E-02 manifest_sources R5', () => {
+  const series = S(STUDY, 8), i2d = series + '.1', withObject = o => [...studyObjects(), o];
+  // A multi-frame tomosynthesis object stays DBT even when every type field says GENERATED_2D: its frame count alone refuses it.
+  const multiFrame = hologicSynthetic(STUDY, series, i2d);
+  Object.assign(multiFrame, { declaredFrameCount: 60, frames: frameSet(i2d, 60, 10), bytes: 60 * 10 + 4000 });
+  refused(() => build(withObject(multiFrame)), 'MammographyKindMismatch');
+  // Frame Type that says NONE, mixed Frame Types or no Frame Type: not a device synthetic 2D of the tomosynthesis IOD.
+  for (const frameTypes of [[DBT_TYPE], [I2D_TYPE, DBT_TYPE], null]) {
+    const o = hologicSynthetic(STUDY, series, i2d);
+    o.mammography = { ...o.mammography, frameTypes };
+    refused(() => build(withObject(o)), 'MammographyKindMismatch');
+  }
+  const wrongValue3 = hologicSynthetic(STUDY, series, i2d);
+  wrongValue3.imageType = ['DERIVED', 'PRIMARY', 'VOLUME', 'GENERATED_2D'];
+  wrongValue3.mammography = { ...wrongValue3.mammography, frameTypes: [wrongValue3.imageType] };
+  refused(() => build(withObject(wrongValue3)), 'MammographyKindMismatch');
+  // A DBT label on a GENERATED_2D object or on mixed frame types, a 2D label on tomosynthesis, a DBT label on a 2D view.
+  const synthAsDbt = hologicSynthetic(STUDY, series, i2d);
+  synthAsDbt.mammography = { ...synthAsDbt.mammography, kind: 'dbt' };
+  refused(() => build(withObject(synthAsDbt)), 'MammographyKindMismatch');
+  const mixedDbt = studyObjects(); mixedDbt[3] = { ...mixedDbt[3], mammography: role('dbt', 'L', [DBT_TYPE, I2D_TYPE], 'VOLUME') };
+  refused(() => build(mixedDbt), 'MammographyKindMismatch');
+  const asConventional = studyObjects(); asConventional[3] = { ...asConventional[3], mammography: role('conventional-2d', 'L') };
   refused(() => build(asConventional), 'MammographyKindMismatch');
-  const flatDbt = studyObjects(); flatDbt[2] = { ...flatDbt[2], mammography: { kind: 'dbt', laterality: 'R', view: 'CC' } };
+  const flatDbt = studyObjects(); flatDbt[2] = { ...flatDbt[2], mammography: role('dbt', 'R') };
   refused(() => build(flatDbt), 'MammographyKindMismatch');
-  // DERIVED\PRIMARY (CMMD) without GENERATED_2D is not synthetic evidence; claiming generated-2d is refused.
-  const derivedOnly = studyObjects(); derivedOnly[2] = { ...derivedOnly[2], mammography: { kind: 'generated-2d', laterality: 'R', view: 'CC' } };
+  // DERIVED\PRIMARY (CMMD) without GENERATED_2D is not synthetic evidence; a Value 3 term is not a plain exposure.
+  const derivedOnly = studyObjects(); derivedOnly[2] = { ...derivedOnly[2], mammography: role('generated-2d', 'R') };
   refused(() => build(derivedOnly), 'MammographyKindMismatch');
-  const sourceNotDbt = studyObjects();
-  sourceNotDbt[4] = { ...sourceNotDbt[4], derivation: { kind: 'derived', sources: [{ studyUid: STUDY, seriesUid: S(STUDY, 2), sopInstanceUid: S(STUDY, 2) + '.1' }] } };
-  refused(() => build(sourceNotDbt), 'DerivedSourceMismatch');
-  const otherSide = studyObjects(); otherSide[4] = { ...otherSide[4], mammography: { kind: 'generated-2d', laterality: 'R', view: 'CC' } };
+  const notPlain = studyObjects(); notPlain[2] = { ...notPlain[2], imageType: ['DERIVED', 'PRIMARY', 'TOMOSYNTHESIS'] };
+  refused(() => build(notPlain), 'MammographyKindMismatch');
+  // A generated 2D comes from tomosynthesis data of the same breast, never from another 2D view.
+  const sourceNotTomo = studyObjects();
+  sourceNotTomo[4] = { ...sourceNotTomo[4], derivation: { kind: 'derived', sources: [{ studyUid: STUDY, seriesUid: S(STUDY, 2), sopInstanceUid: S(STUDY, 2) + '.1' }] } };
+  refused(() => build(sourceNotTomo), 'DerivedSourceMismatch');
+  const otherSide = studyObjects(); otherSide[4] = { ...otherSide[4], mammography: role('generated-2d', 'R') };
   refused(() => build(otherSide), 'DerivedSourceMismatch');
   const missingRole = studyObjects(); missingRole[3] = { ...missingRole[3], mammography: null };
   refused(() => build(missingRole), 'MammographyRoleRequired');
   // Unverified is always available: the model may decline to classify, never be forced to guess.
-  const unsure = studyObjects(); unsure[3] = { ...unsure[3], mammography: { kind: 'unverified', laterality: null, view: null } };
-  unsure[4] = { ...unsure[4], derivation: { kind: 'derived', sources: [] } };
-  assert.equal(build(unsure).objects.find(o => o.sopInstanceUid === DBT).mammography.kind, 'unverified');
+  const unsure = studyObjects(); unsure[3] = { ...unsure[3], mammography: role('unverified', null, null, null, null) };
+  assert.equal(allowed(() => build(unsure)).objects.find(o => o.sopInstanceUid === DBT).mammography.kind, 'unverified');
 });
-def(CASES[17], () => {
+def('TEST-E-02 manifest_sources R6', () => {
   const relabel = studyObjects(); relabel[0] = { ...relabel[0], derivation: { kind: 'derived', sources: [] } };
   refused(() => build(relabel), 'DerivationMismatch');
   const asOriginal = studyObjects(); asOriginal[2] = { ...asOriginal[2], derivation: { kind: 'original' } };
@@ -454,22 +566,24 @@ const thirdParty = (basis, input = {}) => ({ relation: 'third-party-recipient', 
   studyUid: STUDY, purpose: 'continuing-care', basis, agreement: null, auditBefore: { eventId: 'audit-before-2' }, ...input });
 const objectPath = `/dicom-web/studies/${STUDY}/series/${S(STUDY, 1)}/instances/${S(STUDY, 1)}.1`;
 
-def(CASES[18], () => {
+def('TEST-E-03 basis_and_bypass A1', () => {
   const m = build(), decision = allowed(() => sameInstitution());
   assert.deepEqual({ ...decision }, { relation: 'same-institution', studyUid: STUDY, managingInstitution: INSTITUTION, at: T1, recipient: null,
     basisId: null, agreementId: null, auditBeforeEventId: null, deliverable: true, refusal: null });
-  const { p, calls } = allowed(() => serve(m, 'GET', objectPath));
-  assert.equal(calls.body, 1);
+  const spy = { body: 0, prepared: [] }, p = allowed(() => serve(spy, m, 'GET', objectPath));
+  assert.deepEqual([spy.body, spy.prepared.length], [1, 1]);
   assert.equal(E.judgeDelivery([{ prepared: p, observations: full(p) }]).outcome, 'complete');
   // Normal reading never asks for consent or a contract: supplying them is a different relation, not an extra step.
   refused(() => E.checkProvisionBasis({ relation: 'same-institution', at: T1, managingInstitution: INSTITUTION, recipient: null, studyUid: STUDY,
     purpose: null, basis: consent(), agreement: null, auditBefore: null }), 'ProvisionRelationMismatch');
 });
-def(CASES[19], () => {
+def('TEST-E-03 basis_and_bypass A2', () => {
   const m = build();
   const d = allowed(() => E.checkProvisionBasis(processor()));
   assert.deepEqual([d.deliverable, d.agreementId, d.auditBeforeEventId], [true, 'agr-1', 'audit-before-1']);
-  assert.equal(allowed(() => serve(m, 'GET', objectPath, processor())).calls.body, 1);
+  const processorSpy = { body: 0, prepared: [] };
+  allowed(() => serve(processorSpy, m, 'GET', objectPath, processor()));
+  assert.equal(processorSpy.body, 1);
   const withSub = processor({ subProcessors: [{ name: 'backup-operator', consentedAt: T0 }] });
   assert.equal(allowed(() => E.checkProvisionBasis(withSub)).deliverable, true);
   // A lawful consent or listed exception is recorded for the Connect request, but no image body leaves in Part 1.
@@ -478,9 +592,9 @@ def(CASES[19], () => {
   const exception = E.checkProvisionBasis(thirdParty({ kind: 'statutory-exception', basisId: 'basis-2', clauseId: 'medical:21-2.1-proviso',
     fact: 'emergency-patient', recordedAt: T0, revokedAt: null, scope: { studyUids: [STUDY], recipient: 'hospital-b', purpose: 'continuing-care' } }));
   assert.equal(exception.refusal, 'ExternalDeliveryNotEnabled');
-  bodyNeverStarts(() => serve(m, 'GET', objectPath, thirdParty(consent())), 'ExternalDeliveryNotEnabled');
+  bodyNeverStarts(spy => serve(spy, m, 'GET', objectPath, thirdParty(consent())), 'ExternalDeliveryNotEnabled');
 });
-def(CASES[20], () => {
+def('TEST-E-03 basis_and_bypass A3', () => {
   const fields = '0020000D,0020000E,00080018,0008103E,00200013,00280008,00280010,00280011,00280004';
   const r = (target, method = 'GET') => ({ ...E.parseImageRequest(method, target) });
   assert.deepEqual(r(`/dicom-web/studies?StudyInstanceUID=${STUDY}`), { method: 'GET', kind: 'study-query', studyUid: STUDY, seriesUid: null,
@@ -502,7 +616,7 @@ def(CASES[20], () => {
   assert.deepEqual(prepare(m, `/dicom-web/studies/${STUDY}/series/${S(STUDY, 7)}/instances/${S(STUDY, 7)}.1/rendered`).units.map(u => u.recordKind), ['pdf']);
   assert.equal(prepare(m, `/dicom-web/studies/${STUDY}/series/${S(STUDY, 1)}`).units.length, 2);
 });
-def(CASES[21], () => {
+def('TEST-E-03 basis_and_bypass R1', () => {
   const m = build();
   const cases = [
     [thirdParty(consent({ revokedAt: T0 })), 'BasisRevoked'],
@@ -525,11 +639,11 @@ def(CASES[21], () => {
   ];
   for (const [input, code] of cases) {
     const before = structuredClone(input);
-    bodyNeverStarts(() => serve(m, 'GET', objectPath, input), code);
+    bodyNeverStarts(spy => serve(spy, m, 'GET', objectPath, input), code);
     assert.deepEqual(input, before, 'the recorded basis is not modified by a refusal');
   }
 });
-def(CASES[22], () => {
+def('TEST-E-03 basis_and_bypass R2', () => {
   const m = build();
   const { purposeLimit: _gone, ...shortDocument } = agreement().document;
   const cases = [
@@ -548,9 +662,9 @@ def(CASES[22], () => {
     [processor({}, { auditBefore: null }), 'AuditBeforeRequired'],
     [processor({}, { basis: consent() }), 'ProvisionRelationMismatch'],
   ];
-  for (const [input, code] of cases) bodyNeverStarts(() => serve(m, 'GET', objectPath, input), code);
+  for (const [input, code] of cases) bodyNeverStarts(spy => serve(spy, m, 'GET', objectPath, input), code);
 });
-def(CASES[23], () => {
+def('TEST-E-03 basis_and_bypass R3', () => {
   const orthancId = '0d3e7a1c-5b2f4e11-9a8b7c6d-1e2f3a4b-5c6d7e8f';
   const direct = [`/instances/${orthancId}/file`, `/instances/${orthancId}/pdf`, `/instances/${orthancId}/frames/1/rendered`,
     `/instances/${orthancId}/tags`, `/studies/${orthancId}/archive`, `/series/${orthancId}/media`, '/patients', '/tools/find', '/system',
@@ -568,20 +682,20 @@ def(CASES[23], () => {
     `/dicom-web/studies/${STUDY}/instances?includefield=<script>`, `/dicom-web/studies?StudyInstanceUID=${'1.'.repeat(40)}1`])
     refused(() => E.parseImageRequest('GET', target), 'ImageQueryRefused');
 });
-def(CASES[24], () => {
+def('TEST-E-03 basis_and_bypass R4', () => {
   const m = build(), request = E.parseImageRequest('GET', objectPath);
-  const context = (overrides = {}) => ({ eventId: 'evt-r4', cause: 'user-view', at: T1, authorization: { studyUid: STUDY, institution: INSTITUTION },
+  const context = (overrides = {}) => ({ eventId: 'evt-r4', cause: 'user-view', at: T1, authorization: { studyUid: STUDY, institution: INSTITUTION, accountGeneration: GENERATION },
     provision: sameInstitution(), opening: null, ...overrides });
   assert.equal(allowed(() => E.prepareDelivery(m, request, context())).units.length, 1);
   // A basis decided earlier is not reused: the consent or agreement may have ended in between.
   refused(() => E.prepareDelivery(m, request, context({ provision: sameInstitution(STUDY, T0) })), 'ProvisionDecisionStale');
-  refused(() => E.prepareDelivery(m, request, context({ authorization: { studyUid: PRIOR, institution: INSTITUTION } })), 'AuthorizationScopeMismatch');
-  refused(() => E.prepareDelivery(m, request, context({ authorization: { studyUid: STUDY, institution: 'hospital-b' } })), 'AuthorizationScopeMismatch');
+  refused(() => E.prepareDelivery(m, request, context({ authorization: { studyUid: PRIOR, institution: INSTITUTION, accountGeneration: GENERATION } })), 'AuthorizationScopeMismatch');
+  refused(() => E.prepareDelivery(m, request, context({ authorization: { studyUid: STUDY, institution: 'hospital-b', accountGeneration: GENERATION } })), 'AuthorizationScopeMismatch');
   // A processor's provision is served to the processor it names, not on the hospital's own 204 and not to another body.
   const viaProcessor = E.checkProvisionBasis(processor());
-  assert.equal(allowed(() => E.prepareDelivery(m, request, context({ provision: viaProcessor, authorization: { studyUid: STUDY, institution: 'reading-center' } }))).relation, 'processor');
+  assert.equal(allowed(() => E.prepareDelivery(m, request, context({ provision: viaProcessor, authorization: { studyUid: STUDY, institution: 'reading-center', accountGeneration: GENERATION } }))).relation, 'processor');
   refused(() => E.prepareDelivery(m, request, context({ provision: viaProcessor })), 'AuthorizationScopeMismatch');
-  refused(() => E.prepareDelivery(m, request, context({ provision: viaProcessor, authorization: { studyUid: STUDY, institution: 'hospital-b' } })), 'AuthorizationScopeMismatch');
+  refused(() => E.prepareDelivery(m, request, context({ provision: viaProcessor, authorization: { studyUid: STUDY, institution: 'hospital-b', accountGeneration: GENERATION } })), 'AuthorizationScopeMismatch');
   refused(() => E.prepareDelivery(m, { ...request, kind: 'study-retrieve' }, context()), 'ImageRequestRequired');
   refused(() => E.prepareDelivery(m, request, context({ provision: { ...sameInstitution() } })), 'ProvisionDecisionRequired');
   refused(() => E.prepareDelivery(m, request, context({ provision: sameInstitution(PRIOR) })), 'ProvisionOutOfScope');
@@ -592,7 +706,20 @@ def(CASES[24], () => {
     [`/dicom-web/studies/${STUDY}/series/${S(STUDY, 3)}/instances/${DBT}/frames/7`, 'FrameOutOfManifest'],
     [`/dicom-web/studies/${STUDY}/series/${S(STUDY, 6)}/instances/${S(STUDY, 6)}.1/frames/1`, 'ScopeOutsideManifest'],
     [`/dicom-web/studies/${STUDY}/series/${S(STUDY, 6)}/instances/${S(STUDY, 6)}.1/rendered`, 'ScopeOutsideManifest'],
-  ]) bodyNeverStarts(() => serve(m, 'GET', target), code);
+  ]) bodyNeverStarts(spy => serve(spy, m, 'GET', target), code);
+});
+
+def('TEST-E-03 basis_and_bypass R5', () => {
+  // The refusal check itself: a body or a plan that started before the refusal is reported, not hidden by the throw.
+  const late = (mark) => spy => { mark(spy); throw Object.assign(new Error('late refusal'), { code: 'LateRefusal' }); };
+  for (const mark of [spy => { spy.body++; }, spy => { spy.prepared.push({}); }]) {
+    let caught = null;
+    try { bodyNeverStarts(late(mark), 'LateRefusal'); } catch (e) { caught = e; }
+    assert.equal(caught?.code, 'ERR_ASSERTION', 'a body or plan started before a refusal must fail the refusal check');
+  }
+  bodyNeverStarts(() => { throw Object.assign(new Error('early refusal'), { code: 'EarlyRefusal' }); }, 'EarlyRefusal');
+  // On the product path a refused provision issues no plan and starts no body.
+  bodyNeverStarts(spy => serve(spy, build(), 'GET', objectPath, thirdParty(consent({ revokedAt: T0 }))), 'BasisRevoked');
 });
 
 // ── TEST-E-04 offline_ready ─────────────────────────────────────────────────────────────────────────────────────
@@ -607,7 +734,7 @@ function device(plan, opts = {}) {
     verified: opts.verified ?? parts.map(p => ({ key: p.key, bytes: p.bytes, sha256: (opts.alter ?? {})[p.key] ?? p.sha256 })),
     storage: opts.storage ?? { freeBytes: plan.totalBytes * 2, requiredBytes: plan.totalBytes + 1 }, journal: opts.journal ?? { freeBytes: 4096, requiredBytes: 1024 } };
 }
-def(CASES[25], () => {
+def('TEST-E-04 offline_ready A1', () => {
   const plan = bundle();
   assert.deepEqual(plan.manifests.map(m => m.role), ['current', 'comparison']);
   assert.deepEqual([...new Set(plan.parts.map(p => p.kind))], ['object', 'text', 'decoder', 'viewer']);
@@ -621,13 +748,13 @@ def(CASES[25], () => {
   assert.equal(again.sha256, plan.sha256);
   assert.equal(E.offlineReadiness(again, replay.state).ready, true);
 });
-def(CASES[26], () => {
+def('TEST-E-04 offline_ready A2', () => {
   const grant = { grantId: 'grant-1', notAfter: T2, endedAt: null };
   assert.deepEqual({ ...E.offlineAccess(grant, T1) }, { viewAllowed: true, reason: 'grant-active', queuePreserved: true });
   assert.deepEqual({ ...E.offlineAccess(grant, T2) }, { viewAllowed: false, reason: 'grant-expired', queuePreserved: true });
   assert.deepEqual({ ...E.offlineAccess({ ...grant, endedAt: T1 }, T1) }, { viewAllowed: false, reason: 'grant-ended', queuePreserved: true });
 });
-def(CASES[27], () => {
+def('TEST-E-04 offline_ready A3', () => {
   const who = { id: 'u-1', issuer: 'https://identity.example.test', subject: 'sub-u-1' };
   const offline = [1, 2].map(n => E.sealOfflineView({ eventId: `off-${n}`, deviceId: 'device-7', deviceSequence: n, occurredAt: n === 1 ? T0 : T1,
     userId: who, grantId: 'grant-1', studyUid: STUDY, sopInstanceUid: DBT, frame: n }));
@@ -642,7 +769,7 @@ def(CASES[27], () => {
   assert.deepEqual(joined.offline.map(r => r.occurredAt), [T0, T1]);
   assert.equal(JSON.stringify(offline), snapshot);
 });
-def(CASES[28], () => {
+def('TEST-E-04 offline_ready R1', () => {
   const plan = bundle();
   const thumbs = plan.parts.filter(p => p.kind === 'object').map(p => ({ key: p.key.replace('object:', 'thumbnail:'), bytes: 900, sha256: h(p.key + ':thumb') }));
   const onlyThumbs = E.offlineReadiness(plan, device(plan, { verified: [...thumbs, ...plan.parts.filter(p => p.kind !== 'object').map(p => ({ key: p.key, bytes: p.bytes, sha256: p.sha256 }))] }));
@@ -653,7 +780,7 @@ def(CASES[28], () => {
   const short = device(plan, { verified: plan.parts.map(p => p.key === key ? { key, bytes: part.bytes - 1000, sha256: h('five frames') } : { key: p.key, bytes: p.bytes, sha256: p.sha256 }) });
   assert.deepEqual({ ...E.offlineReadiness(plan, short) }, { ready: false, reasons: [{ code: 'part-mismatch', key }] });
 });
-def(CASES[29], () => {
+def('TEST-E-04 offline_ready R2', () => {
   const plan = bundle(build(), undefined, { manifests: [] });
   assert.deepEqual(plan.missingComparisons, [PRIOR]);
   assert.deepEqual(E.offlineReadiness(plan, device(plan)).reasons, [{ code: 'comparison-missing', key: PRIOR }]);
@@ -665,7 +792,7 @@ def(CASES[29], () => {
   const text = E.offlineReadiness(full, device(full, { drop: ['text'] }));
   assert.deepEqual(text.reasons, [{ code: 'text-missing', key: 'text:report-1@v3' }]);
 });
-def(CASES[30], () => {
+def('TEST-E-04 offline_ready R3', () => {
   const plan = bundle();
   const noDecoder = E.offlineReadiness(plan, device(plan, { dropKeys: ['decoder:jpeg-2000@jpeg-2000-1.0.0'] }));
   assert.deepEqual({ ...noDecoder }, { ready: false, reasons: [{ code: 'decoder-missing', key: 'decoder:jpeg-2000@jpeg-2000-1.0.0' }] });
@@ -674,7 +801,7 @@ def(CASES[30], () => {
   const noViewer = E.offlineReadiness(plan, device(plan, { drop: ['viewer'] }));
   assert.deepEqual(noViewer.reasons, [{ code: 'viewer-missing', key: `viewer:${VIEWER.id}@${VIEWER.version}` }]);
 });
-def(CASES[31], () => {
+def('TEST-E-04 offline_ready R4', () => {
   refused(() => bundle(build(), M.buildImageManifest(manifestInput(studyObjects(PRIOR), { patient: { ...PATIENT, patientId: 'SYN-2' } }))), 'ComparisonPatientMismatch');
   refused(() => bundle(build(), M.buildImageManifest(manifestInput(studyObjects(PRIOR), { institution: 'hospital-b' }))), 'ComparisonPatientMismatch');
   refused(() => bundle(build(), build(studyObjects(OTHER))), 'ComparisonNotSelected');
@@ -692,14 +819,27 @@ def(CASES[31], () => {
   refused(() => E.reconnectRecord([seal(1)], { eventId: 'r', deviceId: 'device-7', at: T2, trustedProxyIp: { address: 'client-said', source: 'trusted-proxy' } }), 'TrustedProxyIpRequired');
 });
 
+def('TEST-E-04 offline_ready R5', () => {
+  const odd = pixel(STUDY, S(STUDY, 9), S(STUDY, 9) + '.1', SC('2'), { ts: TS.unknown });
+  const current = build([...studyObjects(), odd]);
+  // Online the object is refused by name and the rest of the study opens as before.
+  refused(() => prepare(current, `/dicom-web/studies/${STUDY}/series/${S(STUDY, 9)}/instances/${odd.sopInstanceUid}`), 'UnknownTransferSyntax');
+  assert.equal(allowed(() => prepare(current, objectPath)).units.length, 1);
+  // Offline Ready claims the whole reading set: with that object left out of the copy it is not ready, by name.
+  const plan = bundle(current);
+  assert.deepEqual(plan.excluded.map(x => ({ ...x })), [{ studyUid: STUDY, sopInstanceUid: odd.sopInstanceUid, reason: 'UnknownTransferSyntax' }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(E.offlineReadiness(plan, device(plan)))),
+    { ready: false, reasons: [{ code: 'object-unsupported', key: `object:${STUDY}/${odd.sopInstanceUid}` }] });
+});
+
 // ── TEST-E-05 display_epoch ─────────────────────────────────────────────────────────────────────────────────────
 const openingFor = (m, overrides = {}) => ({ openingId: 'open-1', accountGeneration: 4, sequence: 3, studyUid: m.studyUid, manifestSha256: m.sha256, closedAt: null, ...overrides });
 const report = (m, overrides = {}) => ({ openingId: 'open-1', accountGeneration: 4, sequence: 3, studyUid: m.studyUid, manifestSha256: m.sha256,
   sopInstanceUid: DBT, frame: 2, source: 'network', cause: 'user-view', deliveryEventId: 'evt-frames-1', reportedAt: T1, ...overrides });
 const framesPath = `/dicom-web/studies/${STUDY}/series/${S(STUDY, 3)}/instances/${DBT}/frames/1,2,3`;
-const viewing = (m, overrides = {}, eventId = 'evt-frames-1', target = framesPath) =>
-  prepare(m, target, { eventId, opening: { openingId: 'open-1', accountGeneration: 4, sequence: 3, ...overrides.opening }, cause: overrides.cause ?? 'user-view' });
-def(CASES[32], () => {
+const viewing = (m, overrides = {}, eventId = 'evt-frames-1', target = framesPath, method = 'GET') =>
+  prepare(m, target, { eventId, method, opening: { openingId: 'open-1', accountGeneration: 4, sequence: 3, ...overrides.opening }, cause: overrides.cause ?? 'user-view' });
+def('TEST-E-05 display_epoch A1', () => {
   const m = build(), now = openingFor(m), delivered = viewing(m);
   const net = allowed(() => E.classifyDisplayReport(now, m, report(m), delivered));
   assert.deepEqual({ ...net }, { action: 'client-shown', openingId: 'open-1', accountGeneration: 4, sequence: 3, studyUid: STUDY, manifestSha256: m.sha256,
@@ -713,13 +853,13 @@ def(CASES[32], () => {
   const whole = viewing(m, {}, 'evt-object-1', `/dicom-web/studies/${STUDY}/series/${S(STUDY, 3)}/instances/${DBT}`);
   assert.equal(allowed(() => E.classifyDisplayReport(now, m, report(m, { frame: 6, deliveryEventId: 'evt-object-1' }), whole)).unitKey, `frame:${DBT}#6`);
 });
-def(CASES[33], () => {
+def('TEST-E-05 display_epoch A2', () => {
   const m = build(), now = openingFor(m), shown = allowed(() => E.classifyDisplayReport(now, m, report(m), viewing(m)));
   const ack = allowed(() => E.acceptExplicitAck(now, shown, { openingId: 'open-1', accountGeneration: 4, sequence: 3, at: T2 }));
   assert.deepEqual({ ...ack }, { action: 'explicit-ack', openingId: 'open-1', accountGeneration: 4, sequence: 3, unitKey: `frame:${DBT}#2`, relatedShownAt: T1, at: T2 });
   assert.notEqual(ack.action, shown.action);
 });
-def(CASES[34], () => {
+def('TEST-E-05 display_epoch R1', () => {
   const m = build(), now = openingFor(m), delivered = viewing(m);
   const show = (overrides, delivery = delivered, opening = now) => E.classifyDisplayReport(opening, m, report(m, overrides), delivery);
   refused(() => show({ cause: 'background-fetch' }), 'BackgroundIsNotDisplay');
@@ -744,7 +884,7 @@ def(CASES[34], () => {
   refused(() => show({}, viewing(m, {}, 'evt-other')), 'DisplayDeliveryMismatch');
   refused(() => show({}, structuredClone(delivered)), 'DisplayDeliveryMismatch');
 });
-def(CASES[35], () => {
+def('TEST-E-05 display_epoch R2', () => {
   const m = build(), earlier = openingFor(m, { accountGeneration: 3 });
   const shownEarlier = E.classifyDisplayReport(earlier, m, report(m, { accountGeneration: 3 }), viewing(m, { opening: { accountGeneration: 3 } }));
   const now = openingFor(m);
@@ -756,5 +896,20 @@ def(CASES[35], () => {
   refused(() => E.acceptExplicitAck(openingFor(m, { closedAt: T2 }), shown, { openingId: 'open-1', accountGeneration: 4, sequence: 3, at: T2 }), 'OpeningClosed');
 });
 
+def('TEST-E-05 display_epoch R3', () => {
+  const m = build(), now = openingFor(m), object = `/dicom-web/studies/${STUDY}/series/${S(STUDY, 3)}/instances/${DBT}`;
+  const show = (delivery, overrides = {}) => E.classifyDisplayReport(now, m, report(m, { deliveryEventId: delivery.eventId, ...overrides }), delivery);
+  // HEAD carries no body; PixelSpacing (0028,0030) as bulk data is a header attribute: neither shows pixels.
+  refused(() => show(viewing(m, {}, 'evt-head', object, 'HEAD')), 'DisplayDeliveryMismatch');
+  refused(() => show(viewing(m, {}, 'evt-spacing', object + '/bulk/00280030')), 'DisplayDeliveryMismatch');
+  refused(() => show(viewing(m, {}, 'evt-meta', object + '/metadata')), 'DisplayDeliveryMismatch');
+  // The Pixel Data bulk and a whole-object GET are what the reader saw; a PDF's encapsulated document likewise.
+  assert.equal(allowed(() => show(viewing(m, {}, 'evt-pixels', object + '/bulk/7fe00010'))).unitKey, `frame:${DBT}#2`);
+  assert.equal(allowed(() => show(viewing(m, {}, 'evt-object', object))).relatedEventId, 'evt-object');
+  const pdf = S(STUDY, 7) + '.1';
+  assert.equal(allowed(() => show(viewing(m, {}, 'evt-pdf', `/dicom-web/studies/${STUDY}/series/${S(STUDY, 7)}/instances/${pdf}/bulk/00420011`),
+    { sopInstanceUid: pdf, frame: null })).unitKey, `object:${pdf}`);
+});
+
 // Every declared case has exactly one body and nothing undeclared runs; a mismatch stops the file before any case starts.
-assert.deepEqual([...registered], CASES);
+assert.deepEqual([...registered].sort(), [...CASES].sort());
