@@ -426,6 +426,29 @@ if (process.argv.includes('--emr-g-inventory-generator')) {
       { runId: 'run-0', at: tick(), actorId: 'svc' })), 'RunIdReused');
   });
 
+  for (const outcome of ['rolled-back', 'committed']) test(`TEST-G-02 restart refuse: SOL-CE-01 ${outcome} re-read rejects an out-of-plan body owned by the same run`, () => {
+    const plan = planOf(snapshot([version(901, UID1, 1, 'approve', 'synthetic review wording', 'synthetic.doctor', '2026-03-01T00:00:00.000Z')]));
+    const store = newStore(), step = G.nextLegacyUnit(startRun(plan, store), plan, { at: tick(), size: 1 });
+    if (outcome === 'committed') commit(store, step.unit);
+    const unknown = G.recordLegacyCommit(step.journal, plan, step.unit, 'unknown', tick());
+    const facts = storedOf(store);
+    const orphan = { itemKey: 'legacy:' + sha('outside-the-declared-source-scope'), rowSha256: sha('foreign-bytes'),
+      runId: 'unrelated-run', unitId: step.unit.unitId };
+    facts.items.push(orphan);
+    const unrelated = G.resolveLegacyCommit(unknown, plan, facts, tick());
+    assert.deepEqual([unrelated.state, unrelated.checkpoint.through], ['applying', outcome === 'committed' ? 1 : 0],
+      'unrelated runs outside this plan do not change its recovery');
+
+    orphan.runId = unknown.runId;
+    const before = structuredClone({ facts, unknown, plan });
+    const code = refusal(() => G.resolveLegacyCommit(unknown, plan, facts, tick()));
+    assert.deepEqual({ facts, unknown, plan }, before, 'refusal preserves the stored facts, fixed plan and unknown journal');
+    assert.equal(code, 'JournalStoreDiverged',
+      'M-G-07: an out-of-plan body of this run cannot resolve an unknown commit as rollback or success');
+    assert.equal(refusal(() => G.resumeLegacyRun(unknown, plan, facts, tick())), 'JournalStoreDiverged');
+    assert.deepEqual({ facts, unknown, plan }, before, 'restart cannot bypass divergence or edit its inputs');
+  });
+
   test('TEST-G-02 restart refuse: foreign unit receipts and changed commit bodies cannot advance the checkpoint', () => {
     const plan = planOf(), store = newStore();
     const step = G.nextLegacyUnit(startRun(plan, store), plan, { at: tick(), size: 2 });
@@ -518,6 +541,39 @@ if (process.argv.includes('--emr-g-inventory-generator')) {
     const after = again.records.find(r => r.itemKey === target.itemKey);
     assert.deepEqual([after.original, after.marking, after.retention, after.lifecycle], [stored.original, stored.marking, stored.retention, stored.lifecycle]);
     assert.deepEqual(after.supplements, [supplement.summary]);
+  });
+
+  test('TEST-G-03 unsigned_supplement allow: SOL-CE-02 eligible record kinds accept their planned supplement on re-read', () => {
+    const { plan, store, result } = migrated(baseRows().filter(r => r.model !== 'ReportDraft'));
+    const back = readBackOf(store), at = later(RUN_AT, 86_400_000);
+    assert.deepEqual([...new Set(back.records.map(r => r.model))].sort(), ['ManualSr', 'Report', 'ReportVersion', 'StudyConsultation']);
+    for (const record of back.records) {
+      const supplement = G.planLegacySupplement(result, record.itemKey, { signer: signer(), at, viewed: viewedOf(record) });
+      record.supplements.push(supplement.summary);
+    }
+    const before = structuredClone({ back, plan, result });
+    const again = G.reconcileLegacyMigration(plan, back);
+    assert.equal(again.status, 'matched', 'eligible records keep accepting the current supplement that planning permits');
+    assert(again.rows.every(r => r.result === 'matched' && r.mismatches.length === 0));
+    assert.deepEqual(again.records, back.records);
+    assert.deepEqual({ back, plan, result }, before, 'permitted supplements leave the read-back and source unchanged');
+  });
+
+  test('TEST-G-03 unsigned_supplement refuse: SOL-CE-02 a private ReportDraft cannot acquire a resign summary on re-read', () => {
+    const { plan, store, result } = migrated([draft(UID1, 'synthetic.doctor', 'private synthetic notes', 'true')]);
+    const record = result.records[0], at = later(RUN_AT, 86_400_000);
+    assert.equal(result.status, 'matched-with-unresolved');
+    assert.deepEqual(result.rows[0].mismatches, [], 'an unsigned private draft is still a valid migrated record');
+    assert.equal(refusal(() => G.planLegacySupplement(result, record.itemKey, { signer: signer(), at, viewed: viewedOf(record) })),
+      'SupplementNotApplicable', 'planning rejects a supplement on a private draft');
+    const back = readBackOf(store);
+    back.records[0].supplements.push({ act: 'resign', at, signer: signer().identity, contentSha256: record.contentSha256 });
+    const before = structuredClone({ back, plan, result });
+    const again = G.reconcileLegacyMigration(plan, back);
+    assert.deepEqual({ back, plan, result }, before, 'reconciliation never edits the draft, source or read-back');
+    assert.equal(again.status, 'failed', 'M-G-08: a supplement prohibited for a private draft must fail re-read reconciliation');
+    assert.deepEqual(again.rows, [{ itemKey: record.itemKey, result: 'mismatch', mismatches: ['supplements'] }]);
+    assert.equal(again.counts.matched, 0);
   });
 
   test('TEST-G-03 unsigned_supplement refuse: migration creates no past signature, approval or reading', () => {

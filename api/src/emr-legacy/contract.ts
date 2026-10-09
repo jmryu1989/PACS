@@ -520,6 +520,7 @@ function progress(j: MigrationJournal, p: MigrationPlan, s: StoredFacts): Migrat
   const planned = new Map(p.items.map(i => [i.itemKey, i])), byKey = new Map(s.items.map(i => [i.itemKey, i]));
   for (const row of s.items) {
     const item = planned.get(row.itemKey);
+    if (row.runId === j.runId && !item) refuse('JournalStoreDiverged');
     if (item && item.rowSha256 !== row.rowSha256) refuse('LegacyItemConflict');
   }
   const mine = s.checkpoints.filter(c => c.runId === j.runId).sort((a, b) => a.through - b.through);
@@ -612,6 +613,7 @@ function eventsOk(record: LegacyRecordReadBack, plan: MigrationPlan): boolean {
   });
 }
 function supplementsOk(record: LegacyRecordReadBack): boolean {
+  if (record.supplements.length && !SUPPLEMENT_ROLES[record.kind]) return false;
   const migratedAt = record.events[0]?.at;
   return record.supplements.every(s => {
     try {

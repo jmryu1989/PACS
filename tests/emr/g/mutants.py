@@ -12,6 +12,8 @@ REQ-EMR-03/05/12/18 -> RISK-G-01..05 -> TEST-G-01..05 -> M-G-01..06 (+ M-G-01R, 
   M-G-05   the checkpoint is committed ahead of the bodies it covers             -> TEST-G-02 allow (crash at any boundary)
   M-G-05R  restart trusts a stored checkpoint without its bodies                 -> TEST-G-02 refuse (checkpoint ahead)
   M-G-06   an unknown approval time grants a 24-hour window from the migration  -> TEST-G-04 refuse (unknown dates)
+  M-G-07   recovery ignores an out-of-plan body owned by the same run           -> TEST-G-02 refuse (SOL-CE-01 rollback)
+  M-G-08   re-read accepts a supplement prohibited for a private draft          -> TEST-G-03 refuse (SOL-CE-02 draft)
 
 M-G-01 reads "이관 시각을 원시각으로 덮기" as backdating the migration event; M-G-01R covers the other direction
 (the original time replaced by the migration time) so neither reading survives.
@@ -131,6 +133,22 @@ MUTANTS = [
         "new": "    marking: markingFor(plan, item), retention: retentionFor(item), lifecycle: item.time.basis === 'utc-verified' ? "
                "lifecycleFor(item) : { ...lifecycleFor(item), amendWindow: { status: 'granted', from: ctx.at, "
                "until: new Date(Date.parse(ctx.at) + 86400000).toISOString() } },",
+    },
+    {
+        "id": "M-G-07",
+        "title": "recovery ignores an out-of-plan body owned by the same run (G-R1-SOL-01)",
+        "case": "TEST-G-02 restart refuse: SOL-CE-01 rolled-back re-read rejects an out-of-plan body owned by the same run",
+        "expect": "M-G-07: an out-of-plan body of this run cannot resolve an unknown commit as rollback or success",
+        "old": "    if (row.runId === j.runId && !item) refuse('JournalStoreDiverged');",
+        "new": "    void 0;",
+    },
+    {
+        "id": "M-G-08",
+        "title": "re-read accepts a supplement prohibited for a private draft (G-R1-SOL-02)",
+        "case": "TEST-G-03 unsigned_supplement refuse: SOL-CE-02 a private ReportDraft cannot acquire a resign summary on re-read",
+        "expect": "M-G-08: a supplement prohibited for a private draft must fail re-read reconciliation",
+        "old": "  if (record.supplements.length && !SUPPLEMENT_ROLES[record.kind]) return false;",
+        "new": "  void 0;",
     },
 ]
 # A behaviour-preserving edit must survive; if it were "killed", this runner could not tell a survivor from a kill.
