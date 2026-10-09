@@ -38,6 +38,9 @@ test fails. Three kinds of evidence and nothing more:
      business row, or a denied row with a named basis, and every route added since the baseline has its own row.
   3. Source pins that guard, member console, Keycloak client and realm carry the same role list and that
      the gate sits between the membership check and the CSRF rule in the guard.
+
+EMR-R1-LAND step 3 (D73): TypeScript AST property names are excluded from class headings, including EMR-E's
+required class: key. The remaining legacy heading/decorator reader's full AST replacement stays S9-U0f.
 """
 # S9-U0b RELIST: PACS permission/data assertions run compiled suites through pacs_source.
 # Remaining non-PACS source checks are unchanged U0f carry-over.
@@ -784,18 +787,9 @@ class Compiler:
                  if path.suffix == ".ts" and API in path.parents}
         key = tuple(sorted(files.items()))
         if key not in self.answers:
-            if self.process is None:
-                self.start()
             request = {"files": {name: None if self.sent.get(name) == text else text for name, text in files.items()},
                        "names": STRICT_MODULE}
-            self.process.stdin.write(json.dumps(request, ensure_ascii=True) + "\n")
-            self.process.stdin.flush()
-            line = self.process.stdout.readline()
-            if not line:
-                raise AssertionError(f"the TypeScript compiler stopped without an answer (exit {self.process.poll()})")
-            reply = json.loads(line)
-            if "error" in reply:
-                raise AssertionError("the TypeScript compiler did not answer: " + reply["error"])
+            reply = self.request(request)
             self.sent = files
             self.versions = {name: reply[name] for name in ("typescript", "node", "decorators")}
             self.answers[key] = {API / name: {offset: kind for offset, _name, kind in found}
@@ -805,6 +799,23 @@ class Compiler:
                     relative_loads=dict(contract["relative_loads"]),
                     prototype_comparisons=set(contract["prototype_comparisons"]))
         return self.answers[key]
+
+    def request(self, request):
+        if self.process is None:
+            self.start()
+        self.process.stdin.write(json.dumps(request, ensure_ascii=True) + "\n")
+        self.process.stdin.flush()
+        line = self.process.stdout.readline()
+        if not line:
+            raise AssertionError(f"the TypeScript compiler stopped without an answer (exit {self.process.poll()})")
+        reply = json.loads(line)
+        if "error" in reply:
+            raise AssertionError("the TypeScript compiler did not answer: " + reply["error"])
+        return reply
+
+    @functools.lru_cache(maxsize=None)
+    def class_properties(self, code):
+        return frozenset(self.request({"classPropertySource": code})["class_properties"])
 
 
 COMPILER = Compiler()
@@ -1006,9 +1017,12 @@ def class_heading(code, at):
 
 
 def class_keywords(code):
-    """Offsets of the class keywords of code; 'class' after '.', '?.' or '#' is a property name, not a keyword."""
-    return [match.start() for match in CLASS_WORD.finditer(code)
-            if not (is_property(code, match.start()) or before_token(code, match.start())[0] == "#")]
+    """Class keywords, excluding property names identified by the installed TypeScript AST (D73)."""
+    matches = list(CLASS_WORD.finditer(code))
+    properties = COMPILER.class_properties(code) if matches else frozenset()
+    return [match.start() for match in matches
+            if match.start() not in properties
+            and not (is_property(code, match.start()) or before_token(code, match.start())[0] == "#")]
 
 
 @functools.lru_cache(maxsize=None)
@@ -1285,8 +1299,8 @@ def controller_heritage(path, code):
     Every class keyword's heading is read to the '{' of its body by class_heading, past type parameters and heritage
     clauses (S5-U1c-F08). An extends that opens a heritage clause is refused; an extends anywhere else in the heading, a
     type parameter constraint or a conditional type, is a form source_contract does not list; and a class keyword whose
-    heading class_heading does not read (a '<' that does not close, a token no heading holds, class as a key or a member
-    name) is refused too, since an extends in what follows it would go unread. Each kind is its own reason."""
+    heading class_heading does not read (a '<' that does not close or a token no heading holds) is refused too, since
+    an extends in what follows it would go unread. AST-confirmed property names are not headings."""
     heritage, elsewhere, unread = [], [], []
     for at in class_keywords(code):
         try:
@@ -3395,10 +3409,6 @@ class ClinicianPolicySpec(unittest.TestCase):
                                                       inherits=False),
             "a '<' that does not close": controller("class ReviewInheritedController<T = {} extends PacsController"),
             "a token no type holds inside '<' and '>'": controller("class ReviewInheritedController<T = PacsController!>"),
-            "class as an object key in a controller file": controller(
-                "class ReviewInheritedController", "export const keys = { class: 1 };\n", inherits=False),
-            "a member named class in a controller file": controller(
-                "class ReviewInheritedController", body="\n  class() { return 1; }\n", inherits=False),
             "a loader call in a block after 'x. class'": {
                 outside: helper + "const x: any = {};\nif (x. class) {\n  require('../outside')\n  {}\n}\n"},
         }
@@ -3413,6 +3423,14 @@ class ClinicianPolicySpec(unittest.TestCase):
         self.assertTrue(old_class_body(code, block))
         self.assertFalse(class_body(code, block))
         accepted = {
+            "class as an object key in a controller file": controller(
+                "class ReviewInheritedController", "export const keys = { class: 1 };\n", inherits=False),
+            "a member named class in a controller file": controller(
+                "class ReviewInheritedController", body="\n  class() { return 1; }\n", inherits=False),
+            "class as a type-literal member": controller(
+                "class ReviewInheritedController", "type Claim = { class: string; agrees: boolean };\n", inherits=False),
+            "class as an optional type-literal member": controller(
+                "class ReviewInheritedController", "type Claim = { class?: string };\n", inherits=False),
             "a generic controller without inheritance": controller(
                 "class ReviewInheritedController<T = { marker: string }>", inherits=False),
             "a require method in a class whose generic default holds a type literal": {outside: inject + (
@@ -3578,6 +3596,28 @@ class ClinicianPolicySpec(unittest.TestCase):
             "renamed": ["ReportHead", "PinnedHead"], "real_routes": len(baseline), "nest_imports_bound": len(nest),
             "compiler": COMPILER.versions,
         }, ensure_ascii=True, sort_keys=True))
+
+
+    def test_25_class_property_names_do_not_hide_real_class_headings(self):
+        """D73 / EMR-R1-LAND: property spelling cannot reject EMR-E or conceal inherited controller routes."""
+        forms = CONTRACT["class_heading"]["property_names"]
+
+        def check_properties():
+            for label, source in forms.items():
+                code = code_mask(source)
+                self.assertEqual(class_keywords(code), [], label)
+                # A real declaration after the property must still reach the inheritance refusal.
+                mixed = code + "\nclass Actual<T = { class?: string }> extends Base {}"
+                headings = class_keywords(mixed)
+                self.assertEqual(headings, [mixed.index("class Actual")], label)
+                with self.assertRaisesRegex(AssertionError, "a class in a controller file extends another class"):
+                    controller_heritage(API / "property.controller.ts", mixed)
+
+        check_properties()
+        # Mutant: remove AST discrimination, restoring the exact property-as-heading defect.
+        with mock.patch.object(COMPILER, "class_properties", return_value=frozenset()):
+            with self.assertRaises(AssertionError):
+                check_properties()
 
 
 if __name__ == "__main__":

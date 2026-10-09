@@ -1,0 +1,155 @@
+name: Part 1 MG module contracts
+
+# R1 only. R2 adds the live job here; shared profiles and G3 stay unchanged.
+# Sample bytes are never uploaded as artifacts; the shared MG rule table is committed.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: part1-mg-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  part1-mg:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      PART1_UNIT: mg
+      KIN_MG_CI_SCOPE: hosted
+      TARGET_SHA: ${{ github.sha }}
+      PYTHONDONTWRITEBYTECODE: '1'
+      KIN_MG_RULE_CASES: tests/emr/e/rule-cases.json
+    steps:
+      - name: Initialize runner-local paths
+        shell: python
+        run: |
+          import os
+          root = os.environ["RUNNER_TEMP"]
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write(f"PLAYWRIGHT_BROWSERS_PATH={root}/part1-mg-browsers\n")
+              env.write(f"KIN_MG_SAMPLE_ROOT={root}/part1-mg-samples/base\n")
+              env.write(f"KIN_MG_PAIRED_ROOT={root}/part1-mg-samples/paired\n")
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          persist-credentials: false
+      - name: Checked-out source is the event SHA
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/sha --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml -- python3 -c "import os,subprocess; assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip() == os.environ['TARGET_SHA']"
+      - name: Create the isolated Python environment
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/venv --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml --file tests/e2e/requirements.txt -- python3 -m venv "$RUNNER_TEMP/part1-mg-python"
+      - name: Install the versions used by the unit tests
+        if: ${{ !cancelled() }}
+        timeout-minutes: 15
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/dependencies --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml --file tests/e2e/requirements.txt -- "$RUNNER_TEMP/part1-mg-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4
+      - name: Prepare the hosted browser package repositories
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/browser-apt --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml --file scripts/ci_browser_apt.py -- sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Install full Chromium with its Linux libraries
+        if: ${{ !cancelled() }}
+        timeout-minutes: 15
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/browser --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml -- "$RUNNER_TEMP/part1-mg-python/bin/python" -m playwright install --with-deps chromium
+      - name: Sample scope and download recovery contracts
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/sample-contracts --cwd . --tree tests/part1/mg --file .github/workflows/part1-mg.yml -- python3 -B tests/part1/mg/ci_test.py
+      - name: Declare hosted sample scope and cache hash list
+        id: sample-plan
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/sample-plan --cwd . --tree tests/part1/mg --file .github/workflows/part1-mg.yml -- python3 -B tests/part1/mg/ci.py plan
+      - name: Cache permitted public samples
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ steps.sample-plan.outputs.cache-paths }}
+          key: ${{ runner.os }}-${{ steps.sample-plan.outputs.cache-key }}
+      - name: Fetch public DICOM series and verify every pinned file hash
+        if: ${{ !cancelled() }}
+        timeout-minutes: 40
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/samples --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml -- python3 -B tests/part1/mg/ci.py fetch
+      - name: Verify the committed hash-pinned D744-2 rule table
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/rule-table --cwd . --file "$KIN_MG_RULE_CASES" --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml -- python3 -c "$(cat <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          spec = json.loads(Path("tests/part1/mg/cases.json").read_text(encoding="utf-8"))["suites"][0]["rule_table"]
+          target = Path(os.environ["KIN_MG_RULE_CASES"])
+          raw = target.read_bytes().replace(b"\r\n", b"\n")
+          if hashlib.sha256(raw).hexdigest() != spec["sha256"]:
+              raise SystemExit("D744-2 rule table hash mismatch")
+          print("verified D744-2", spec["sha256"])
+          PY
+          )"
+      - name: Model behaviour cases
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/model --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml --file "$KIN_MG_RULE_CASES" -- node --test --test-reporter=tap --test-reporter-destination=tmp/part1-mg-ci/model.tap --test-reporter=spec --test-reporter-destination=stdout tests/part1/mg/model_test.cjs
+      - name: Model declared cases equal the cases that passed
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/model-selection --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml --file "$KIN_MG_RULE_CASES" --file tmp/part1-mg-ci/model.tap -- python3 -c "$(cat <<'PY'
+          import collections, json, os, re
+          from pathlib import Path
+          unit = os.environ["PART1_UNIT"]
+          declaration = json.loads(Path("tests/part1/" + unit + "/cases.json").read_text(encoding="utf-8"))
+          body = declaration["suites"][0] if unit == "mg" else declaration["suites"]["model"]
+          expected = [c["name"] for c in body["cases"]]
+          if unit == "mg":
+              table = json.loads(Path(os.environ["KIN_MG_RULE_CASES"]).read_text(encoding="utf-8"))
+              expected += ["D744 rule table is the pinned one"] + [c["testId"] for c in table["cases"]]
+              assert len(expected) == body["expected"]
+          tap = Path("tmp/part1-" + unit + "-ci/model.tap").read_text(encoding="utf-8")
+          results = re.findall(r"^(ok|not ok) [0-9]+ - (.*)$", tap, re.M)
+          actual = [name for status, name in results]
+          assert collections.Counter(actual) == collections.Counter(expected), {"declared": expected, "collected": actual}
+          assert all(status == "ok" for status, _ in results), results
+          assert re.search(r"^# (?:skip|skipped) 0$", tap, re.M), "no skipped cases allowed"
+          assert re.search(r"^# todo 0$", tap, re.M), "no TODO cases allowed"
+          print(json.dumps({"declared": len(expected), "collected": len(actual), "passed": len(actual), "names": actual}, indent=2))
+          PY
+          )"
+      - name: DICOM contract cases with exact collection and no silent skips
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/dicom --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml -- "$RUNNER_TEMP/part1-mg-python/bin/python" -B tests/part1/mg/ci.py dicom
+      - name: Full Chromium DOM cases with exact collection and no silent skips
+        if: ${{ !cancelled() }}
+        timeout-minutes: 20
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/dom --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml -- "$RUNNER_TEMP/part1-mg-python/bin/python" -B tests/part1/mg/ci.py dom
+      - name: Mutants against an exact unmutated baseline
+        if: ${{ !cancelled() }}
+        timeout-minutes: 60
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/mutants --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml --file "$KIN_MG_RULE_CASES" -- "$RUNNER_TEMP/part1-mg-python/bin/python" -B tests/part1/mg/mutants.py --out tmp/part1-mg-ci/mutants-result
+      - name: R1 evidence including failures and not-run reasons
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: part1-mg-results
+          path: tmp/part1-mg-ci/
+          if-no-files-found: error
+          retention-days: 7

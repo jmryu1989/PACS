@@ -1,0 +1,59 @@
+name: EMR-E image delivery contracts
+
+# EMR-E R1: the pure image manifest/delivery contracts, their declared cases and mutants, on a pull request head or on
+# an explicitly dispatched candidate SHA. No stack, database, browser or credentials; the live suite is R2's.
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full lowercase 40-character commit SHA to validate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: emr-e-${{ inputs.candidate_sha || github.event.pull_request.head.sha }}
+  cancel-in-progress: false
+
+jobs:
+  emr-e-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha }}
+    steps:
+      - name: Refuse anything but a full lowercase commit SHA
+        run: printf '%s' "$TARGET_SHA" | grep -Eqx '[0-9a-f]{40}'
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          persist-credentials: false
+      - name: The checked-out tree is the requested SHA
+        run: test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+      # The compiler and Prisma generator the lockfile pins; lifecycle scripts stay off.
+      - name: Installed TypeScript compiler from the API lockfile
+        timeout-minutes: 5
+        run: |
+          node --version
+          npm ci --prefix api --ignore-scripts --no-audit --no-fund
+      - name: Generate the Prisma client the API typecheck reads
+        working-directory: api
+        run: ./node_modules/.bin/prisma generate
+      - name: Typecheck the API including api/src/emr-image
+        run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/typecheck --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json -- api/node_modules/.bin/tsc --noEmit -p api
+      - name: TEST-E-01..05 declared allow/refuse cases and the shared D744-2 mammography table
+        run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/contract --cwd . --tree api/src/emr-contract --tree api/src/emr-image --file api/tsconfig.json --file api/package-lock.json --file tests/emr/e/contract_test.cjs --file tests/emr/e/rule-cases.json -- node --test --test-reporter=tap tests/emr/e/contract_test.cjs
+      - name: M-E-01..07 and supplementary mutants on an out-of-tree copy
+        if: ${{ !cancelled() }}
+        run: python3 scripts/record-run.py --run-dir tmp/emr-e-ci/mutants --cwd . --tree api/src/emr-contract --tree api/src/emr-image --file api/tsconfig.json --file tests/emr/e/contract_test.cjs --file tests/emr/e/rule-cases.json --file tests/emr/e/mutants.py -- python3 -B tests/emr/e/mutants.py --out tmp/emr-e-ci/mutants/mutants.json
+      - name: Raw run evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: emr-e-${{ env.TARGET_SHA }}
+          path: tmp/emr-e-ci/
+          if-no-files-found: error
+          retention-days: 7

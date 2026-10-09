@@ -1,0 +1,61 @@
+name: EMR-G legacy migration contract
+
+# EMR-G round 1: the pure legacy migration contract (TEST-G-01..05) and its required mutants (M-G-01..06) on the PR head
+# or an explicit candidate SHA. No database, container, browser or other unit's runner is used; the live profile emr-g
+# (tests/emr/g/live.py) and the shared CI/candidate declarations arrive in round 2.
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full lowercase 40-character commit SHA to validate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: emr-g-${{ inputs.candidate_sha || github.event.pull_request.head.sha }}
+  cancel-in-progress: false
+
+jobs:
+  emr-g:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha }}
+    steps:
+      - name: Validate the requested commit
+        run: printf '%s' "$TARGET_SHA" | grep -Eqx '[0-9a-f]{40}'
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          persist-credentials: false
+      - name: Confirm the checkout is the requested commit
+        run: test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+      # The installed TypeScript compiler and Prisma parser that api/package-lock.json pins; lifecycle scripts stay off.
+      - name: Install the pinned API compiler and schema parser
+        timeout-minutes: 5
+        run: |
+          node --version
+          npm ci --prefix api --ignore-scripts --no-audit --no-fund
+      - name: Generate the Prisma client for the API typecheck
+        working-directory: api
+        run: ./node_modules/.bin/prisma generate
+      - name: EMR-G module typecheck with the API compiler settings
+        run: python3 scripts/record-run.py --run-dir tmp/emr-g-ci/typecheck --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json --file api/prisma/schema.prisma -- node api/node_modules/typescript/bin/tsc --noEmit -p api
+      - name: EMR-G legacy migration contract (TEST-G-01..05)
+        if: ${{ !cancelled() }}
+        run: python3 scripts/record-run.py --run-dir tmp/emr-g-ci/contract --cwd . --tree api/src/emr-contract --file api/src/emr-legacy/contract.ts --file api/tsconfig.json --file api/package-lock.json --file api/prisma/schema.prisma --file tests/emr/g/contract_test.cjs -- node --test --test-reporter=tap tests/emr/g/contract_test.cjs
+      - name: EMR-G required mutants (M-G-01..06) with a surviving control
+        if: ${{ !cancelled() }}
+        run: python3 scripts/record-run.py --run-dir tmp/emr-g-ci/mutants --cwd . --tree api/src/emr-contract --file api/src/emr-legacy/contract.ts --file api/tsconfig.json --file api/package-lock.json --file api/prisma/schema.prisma --file tests/emr/g/contract_test.cjs --file tests/emr/g/mutants.py -- python3 -B tests/emr/g/mutants.py --out tmp/emr-g-ci/mutants-summary.json
+      - name: Upload EMR-G evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: emr-g-${{ env.TARGET_SHA }}
+          path: tmp/emr-g-ci/
+          if-no-files-found: error
+          retention-days: 7
