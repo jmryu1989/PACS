@@ -62,7 +62,7 @@ const Q = 'SYN 흉통 지속\r\n이전 CT와 비교 바랍니다 é ';
 const ANSWER = 'SYN 이전 CT 대비 변화 없음.';
 
 function input(surface, a, unit, body, extra = {}) {
-  return { surface, actor: a, study, unit, body, content: null, attachments: [], navigation: [], recipientId: null, readerId: null,
+  return { surface, actor: a, study, unit, body, content: null, attachments: [], navigation: [], recipientId: null, readerId: null, workContext: null,
     ids: { recordId: unit ? unit.recordId : randomUUID(), versionId: randomUUID() }, at: unit ? t(unit.versions.length * 10) : t(0), ...extra };
 }
 const plan = (...args) => R.planClinicalWrite(input(...args));
@@ -116,12 +116,18 @@ function signaturePort({ failSign = false, verdict = null, signer = null, versio
 }
 function memoryStore(unit) {
   const receipts = new Map(), key = k => JSON.stringify([k.record, k.actorId, k.requestId]);
-  const state = { unit, commits: 0, failCommit: null, failRequery: false, wrongReceipt: false, finds: 0, signatures: [] };
+  const state = { unit, commits: 0, failCommit: null, failRequery: false, wrongReceipt: false, finds: 0, signatures: [], late: [] };
   return { state, port: {
     async findReceipt(k) { state.finds++; if (state.failRequery && state.commits) throw new Error('SYN store unavailable'); return receipts.get(key(k)) ?? null; },
     async commit(work) {
       state.commits++;
       if (state.failCommit === 'before') throw new Error('SYN connection reset before commit');
+      if (state.failCommit === 'rolledback') throw new R.CommitRolledBack('SYN statement failed inside the transaction');
+      if (state.failCommit === 'late') {
+        // The answer is lost while the original transaction is still in flight; it becomes visible later.
+        state.late.push(() => { state.unit = R.applyPlan(state.unit, work.plan); receipts.set(key(work.plan.receiptKey), work.plan.receipt); });
+        throw new Error('SYN connection lost during COMMIT');
+      }
       if (state.failCommit === 'taken') {
         // A concurrent request with the same ID and another body won the unique receipt key first.
         receipts.set(key(work.plan.receiptKey), { ...work.plan.receipt, fingerprint: '0'.repeat(64) });
@@ -193,12 +199,12 @@ test('TEST-D-01 clinical_vs_operational: reader assignment carries no text and n
 test('TEST-D-01 clinical_vs_operational: staff processing text is an operational note; a clinician\'s request text is adopted and signed', () => {
   const requested = imageRequest();
   assert.equal(requested.versions[0].entry, 'clinical-entry', 'M-D-01: the requesting clinician reason must be a signed clinical entry');
-  assert.equal(requested.clinicalAdoption, true, 'clinical text in an image request adds the clinical classification');
+  assert.equal(requested.clinicalEntry, true, 'the request is marked as carrying signed clinical text (no chart class by itself, D-19)');
   const accept = plan('image-request.accept', tech, requested, changeBody(tech, requested, 'accept', ''));
   assert.deepEqual([accept.entry, accept.signing], ['state-change', null]);
   const accepted = R.applyPlan(requested, accept);
   const close = plan('image-request.close', tech, accepted, changeBody(tech, accepted, 'close', 'SYN 외부 영상 수신 완료'));
-  assert.deepEqual([close.entry, close.signing, close.version.capacity, close.projection.clinicalAdoption],
+  assert.deepEqual([close.entry, close.signing, close.version.capacity, close.projection.clinicalEntry],
     ['operational-note', null, 'operational-staff', true], 'a technician\'s note is recorded but never signed as a clinical entry');
   const opened = step(null, 'question.create', c1, qBody(c1));
   const byAdmin = plan('question.close', admin, opened, closeBody(admin, opened, 'SYN 중복 질문'));
@@ -291,7 +297,8 @@ test('TEST-D-02 versions_and_sr: every change appends a version; earlier text st
   assert.equal(completed.versions[0].contentSha256, require('node:crypto').createHash('sha256').update(Buffer.from(Q, 'utf8')).digest('hex'));
   completed.versions.forEach((v, i) => assert.deepEqual(v.previousVersion, i ? { recordId: v.recordId, versionId: completed.versions[i - 1].versionId,
     sha256: completed.versions[i - 1].sha256 } : null));
-  assert.deepEqual(R.projectUnit(completed), { state: 'Completed', revision: 3, head: completed.head, clinicalAdoption: false });
+  assert.deepEqual(R.projectUnit(completed), { state: 'Completed', revision: 3, head: completed.head, clinicalEntry: false,
+    parties: { authorId: 'r1', recipientId: 'r2' } });
   let request = imageRequest();
   request = step(request, 'image-request.accept', tech, changeBody(tech, request, 'accept', ''));
   request = step(request, 'image-request.close', tech, changeBody(tech, request, 'close', 'SYN 수신 완료'));
@@ -330,7 +337,7 @@ test('TEST-D-02 versions_and_sr: a finding correction keeps the original and inc
   refused(() => plan('question.create', c1, null, qBody(c1), { attachments: [item] }), 'AttachmentRefused');
   refused(() => plan('question.create', c1, null, qBody(c1), { navigation: ['1.2.840.99.7'] }), 'NavigationRefused');
   refused(() => step(created, 'finding.hide', r1, { requestId: randomUUID(), expectedRevision: 1, action: 'hide', item: {}, reason: ' ' },
-    { content: SNAPSHOT }), 'TextRequired', 'hiding needs the author\'s reason');
+    { content: SNAPSHOT }), 'ReasonRequired', 'hiding outside the reading context needs a stated reason');
   refused(() => step(created, 'finding.edit', r2, { requestId: randomUUID(), expectedRevision: 1, action: 'edit', item: {} },
     { content: SNAPSHOT }), 'ActorPathRefused', 'only the author corrects a finding');
 });
@@ -515,7 +522,7 @@ test('TEST-D-04 atomic_retry: a lost commit answer is resolved by the stored rec
   assert.deepEqual([recovered.status, lost.state.commits, lost.state.unit.revision], ['committed', 1, 2]);
   lost.state.failCommit = null;
   assert.equal((await R.commitClinicalWrite({ store: lost.port, signature: signaturePort().port }, replyInput(opened, r1, body))).status, 'replayed');
-  const reset = memoryStore(opened); reset.state.failCommit = 'before';
+  const reset = memoryStore(opened); reset.state.failCommit = 'rolledback';
   const failed = await R.commitClinicalWrite({ store: reset.port, signature: signaturePort().port }, replyInput(opened));
   assert.deepEqual([failed.status, failed.code, failed.retry, reset.state.unit], ['failed', 'StorageFailed', 'same-request', opened]);
   const dark = memoryStore(opened); dark.state.failCommit = 'before'; dark.state.failRequery = true;
@@ -542,4 +549,159 @@ test('TEST-D-04 atomic_retry: a stale revision, a forbidden transition or a regr
   await refusedAsync(R.commitClinicalWrite({ store: store.port, signature: sig.port },
     input('question.reply', c1, unit, replyBody(c1, unit, 'SYN 추가'), { at: t(-1) })), 'ServerTimeRegressed');
   assert.deepEqual([sig.calls.sign, store.state.commits], [0, 0]);
+});
+
+// ---------------- round 2: review 5457844 findings D-R1-01..06 ----------------
+
+const ports = (store, sig = signaturePort()) => ({ store: store.port, signature: sig.port });
+const outcomeOf = promise => promise.catch(error => ({ status: 'threw', code: error.code }));
+const SUB = { r1: '11111111-1111-4111-8111-111111111111', r2: '22222222-2222-4222-8222-222222222222', r3: '33333333-3333-4333-8333-333333333333' };
+
+test('TEST-D-04 atomic_retry: an opening write replays from the re-read unit; a new amendment still needs its reason', async () => {
+  const assignmentStore = memoryStore(null);
+  const assignment = { requestId: randomUUID(), expectedOwner: owner(admin), revision: 0, readerSub: SUB.r1.toUpperCase() };
+  const first = await R.commitClinicalWrite(ports(assignmentStore), input('assignment.write', admin, null, assignment, { readerId: 'r1' }));
+  assert.equal(first.status, 'committed');
+  const again = await outcomeOf(R.commitClinicalWrite(ports(assignmentStore),
+    input('assignment.write', admin, assignmentStore.state.unit, { ...assignment, readerSub: SUB.r1 }, { readerId: 'r1' })));
+  assert.deepEqual([again.status, again.receipt], ['replayed', first.receipt], 'M-D-R1-01: the first assignment replays from the re-read unit');
+  const noteStore = memoryStore(null);
+  const note = { baseVersion: 0, text: 'SYN 조영제 주입 후 오심', reason: '', attemptId: randomUUID() };
+  const written = await R.commitClinicalWrite(ports(noteStore), input('tech-note.write', tech, null, note));
+  const replay = await outcomeOf(R.commitClinicalWrite(ports(noteStore), input('tech-note.write', tech, noteStore.state.unit, note)));
+  assert.deepEqual([replay.status, replay.receipt], ['replayed', written.receipt], 'M-D-R1-01: the first Tech Note replays without a reason');
+  assert.equal(noteStore.state.commits, 1);
+  const amendment = { baseVersion: 1, text: 'SYN 수정', reason: '', attemptId: randomUUID() };
+  await refusedAsync(R.commitClinicalWrite(ports(noteStore), input('tech-note.write', tech, noteStore.state.unit, amendment)), 'ReasonRequired',
+    'a new amendment needs its reason');
+  assert.equal((await R.commitClinicalWrite(ports(noteStore), input('tech-note.write', tech, noteStore.state.unit,
+    { ...amendment, reason: 'SYN 오기재' }))).status, 'committed');
+});
+
+// Independent of the product: the fields each service's request carries (services at 04e50ab), one refusal case per field.
+// Surfaces whose route opens a new unit are sent again without a unit, as the server would (no record ID in the route).
+const CLINICAL_OPENS = new Set(['image-request.create', 'consultation.create', 'question.create', 'finding.create']);
+const opened = () => step(null, 'question.create', c1, qBody(c1));
+const acceptedConsultation = () => { const r = consultation(); return step(r, 'consultation.accept', r2, changeBody(r2, r, 'accept', '')); };
+const acceptedRequest = () => { const r = imageRequest(); return step(r, 'image-request.accept', tech, changeBody(tech, r, 'accept', '')); };
+const imageBody = () => ({ requestId: randomUUID(), expectedOwner: owner(c1), kind: 'external-image', counterparty: 'SYN 외부병원',
+  counterpartyInstitutionId: null, reason: Q });
+const MEANING_FIELDS = [
+  ['image-request.create', 'kind', () => [c1, null, imageBody(), {}], b => [{ ...b, kind: 'image-transfer' }, {}]],
+  ['image-request.create', 'counterparty', () => [c1, null, imageBody(), {}], b => [{ ...b, counterparty: 'SYN 다른 병원' }, {}]],
+  ['image-request.create', 'counterpartyInstitutionId', () => [c1, null, imageBody(), {}], b => [{ ...b, counterpartyInstitutionId: 'inst-c' }, {}]],
+  ['image-request.create', 'reason', () => [c1, null, imageBody(), {}], b => [{ ...b, reason: 'SYN 다른 사유' }, {}]],
+  ['consultation.create', 'recipientSub', () => [r1, null, { requestId: randomUUID(), expectedOwner: owner(r1), recipientSub: SUB.r2, reason: Q }, { recipientId: 'r2' }],
+    b => [{ ...b, recipientSub: SUB.r3 }, { recipientId: 'r3' }]],
+  ['consultation.create', 'reason', () => [r1, null, { requestId: randomUUID(), expectedOwner: owner(r1), recipientSub: SUB.r2, reason: Q }, { recipientId: 'r2' }],
+    b => [{ ...b, reason: 'SYN 다른 의뢰' }, { recipientId: 'r2' }]],
+  ['question.create', 'body', () => [c1, null, qBody(c1), {}], b => [{ ...b, body: 'SYN 다른 질문' }, {}]],
+  ['question.reply', 'body', () => { const u = opened(); return [r1, u, replyBody(r1, u, ANSWER), {}]; }, b => [{ ...b, body: 'SYN 다른 답' }, {}]],
+  ['question.reply', 'revision', () => { const u = opened(); return [r1, u, replyBody(r1, u, ANSWER), {}]; }, b => [{ ...b, revision: 2 }, {}]],
+  ['question.close', 'note', () => { const u = opened(); return [c1, u, closeBody(c1, u, ''), {}]; }, b => [{ ...b, note: 'SYN 해결됨' }, {}]],
+  ['consultation.complete', 'note', () => { const u = acceptedConsultation(); return [r2, u, changeBody(r2, u, 'complete', ANSWER), {}]; },
+    b => [{ ...b, note: 'SYN 다른 답변' }, {}]],
+  ['consultation.accept', 'action', () => { const u = consultation(); return [r2, u, changeBody(r2, u, 'accept', ''), {}]; },
+    b => [{ ...b, action: 'complete', note: ANSWER }, {}], 'consultation.complete'],
+  ['image-request.close', 'note', () => { const u = acceptedRequest(); return [tech, u, changeBody(tech, u, 'close', 'SYN 수신 완료'), {}]; },
+    b => [{ ...b, note: 'SYN 일부 수신' }, {}]],
+  ['assignment.write', 'readerSub', () => [admin, null, { requestId: randomUUID(), expectedOwner: owner(admin), revision: 0, readerSub: SUB.r1 }, { readerId: 'r1' }],
+    b => [{ ...b, readerSub: SUB.r2 }, { readerId: 'r2' }]],
+  ['assignment.write', 'revision', () => [admin, null, { requestId: randomUUID(), expectedOwner: owner(admin), revision: 0, readerSub: SUB.r1 }, { readerId: 'r1' }],
+    b => [{ ...b, revision: 1 }, { readerId: 'r1' }]],
+  ['tech-note.write', 'text', () => [tech, null, { baseVersion: 0, text: 'SYN 메모', reason: '', attemptId: randomUUID() }, {}], b => [{ ...b, text: 'SYN 다른 메모' }, {}]],
+  ['tech-note.write', 'reason', () => [tech, null, { baseVersion: 0, text: 'SYN 메모', reason: '', attemptId: randomUUID() }, {}], b => [{ ...b, reason: 'SYN 사유' }, {}]],
+  ['tech-note.write', 'baseVersion', () => [tech, null, { baseVersion: 0, text: 'SYN 메모', reason: '', attemptId: randomUUID() }, {}], b => [{ ...b, baseVersion: 1 }, {}]],
+  ['finding.create', 'item', () => [r1, null, { requestId: randomUUID(), item: {} }, { content: SNAPSHOT }],
+    b => [{ ...b, item: { title: 'SYN other' } }, { content: SNAPSHOT.replace('nodule', 'other') }]],
+  ['finding.hide', 'item', () => { const u = finding(); return [r1, u, { requestId: randomUUID(), expectedRevision: 1, action: 'hide', item: {} },
+    { content: SNAPSHOT, workContext: { kind: 'reading', studyId: study.studyId, referenceId: 'claim-1' } }]; },
+    b => [{ ...b, item: { hidden: true } }, { content: SNAPSHOT, workContext: { kind: 'reading', studyId: study.studyId, referenceId: 'claim-1' } }]],
+  ['finding.hide', 'reason', () => { const u = finding(); return [r1, u, { requestId: randomUUID(), expectedRevision: 1, action: 'hide', item: {} },
+    { content: SNAPSHOT, workContext: { kind: 'reading', studyId: study.studyId, referenceId: 'claim-1' } }]; },
+    b => [{ ...b, reason: 'SYN 오기재' }, { content: SNAPSHOT }]],
+];
+for (const [surface, field, first, change, secondSurface] of MEANING_FIELDS) {
+  test(`TEST-D-04 atomic_retry: the same request ID with another ${surface} ${field} is refused`, async () => {
+    const [a, unit, body, extra] = first();
+    const store = memoryStore(unit);
+    assert.equal((await R.commitClinicalWrite(ports(store), input(surface, a, unit, body, extra))).status, 'committed');
+    const [changed, changedExtra] = change(body);
+    const opensFresh = CLINICAL_OPENS.has(surface);
+    await refusedAsync(R.commitClinicalWrite(ports(store), input(secondSurface ?? surface, a, opensFresh ? null : store.state.unit, changed, changedExtra)),
+      'RequestIdReused', `M-D-R1-02: ${surface} ${field} is part of the request meaning`);
+    assert.equal(store.state.commits, 1, 'the changed request committed nothing');
+  });
+}
+
+test('TEST-D-04 atomic_retry: a lost answer with no visible receipt stays unknown and resolves to the late real outcome', async () => {
+  const unit = opened();
+  const store = memoryStore(unit); store.state.failCommit = 'late';
+  const body = replyBody(r1, unit, ANSWER);
+  const first = await R.commitClinicalWrite(ports(store), replyInput(unit, r1, body));
+  assert.deepEqual([first.status, first.code, first.retry], ['unknown', 'OutcomeUnknown', 'same-request'],
+    'M-D-R1-03: a missing receipt after a lost answer is not a failure');
+  store.state.late.forEach(apply => apply()); store.state.failCommit = null;
+  const resolved = await R.commitClinicalWrite(ports(store), replyInput(store.state.unit, r1, body));
+  assert.deepEqual([resolved.status, resolved.receipt.versionId, store.state.unit.revision], ['replayed', store.state.unit.head.versionId, 2],
+    'the same request ends as the real (late) outcome, appended once');
+  const definite = memoryStore(unit); definite.state.failCommit = 'rolledback';
+  const rolledBack = await R.commitClinicalWrite(ports(definite), replyInput(unit));
+  assert.deepEqual([rolledBack.status, rolledBack.code, definite.state.unit], ['failed', 'StorageFailed', unit], 'only a reported rollback is a failure');
+});
+
+test('TEST-D-03 read_scope: a rewritten author or recipient projection is refused and no body is provided', async () => {
+  const unit = questionThread();
+  const forged = structuredClone(unit); forged.parties.authorId = 'c2';
+  refused(() => R.planClinicalRead({ actor: c2, unit: forged, scope: 'history' }), 'UnitHistoryBroken',
+    'M-D-R1-04: a rewritten author projection grants nothing');
+  let sent = 0;
+  await assert.rejects((async () => {
+    const p = R.planClinicalRead({ actor: c2, unit: forged, scope: 'history' });
+    await R.provideClinicalRead({ append: async e => ({ eventId: e.eventId, durableAt: t(501) }) }, accessEvent(p, c2, 'provide-prepared', 'prepared'), p,
+      async () => { sent++; });
+  })(), error => error.code === 'UnitHistoryBroken');
+  assert.equal(sent, 0, 'no body is provided for a rewritten projection');
+  refused(() => plan('question.reply', c2, forged, replyBody(c2, forged, 'SYN')), 'UnitHistoryBroken', 'nor is a write planned on it');
+  const requested = consultation();
+  assert.equal(requested.versions[0].recipientId, 'r2', 'the recipient is fixed by the opening version');
+  const rerouted = structuredClone(requested); rerouted.parties.recipientId = 'r3';
+  refused(() => R.planClinicalRead({ actor: actor('r3', ['radiologist']), unit: rerouted, scope: 'current' }), 'UnitHistoryBroken');
+  assert.equal(R.planClinicalRead({ actor: r2, unit: requested, scope: 'current' }).versions.length, 1,
+    'control: the genuine recipient is served');
+  assert.equal(R.planClinicalRead({ actor: c1, unit, scope: 'current' }).versions.length, 1, 'control: the genuine author is served');
+});
+
+test('TEST-D-02 versions_and_sr: an Orthanc observation contradicting an adopted SR is a conflict, never adopted', () => {
+  const adopted = sr({ attemptedAt: t(5), storedAt: t(6) });
+  const present = (sha, sop = adopted.sopInstanceUid) => ({ status: 'present', sopInstanceUid: sop, sha256: sha });
+  assert.equal(R.reconcileManualSr(adopted, present('00'.repeat(32))).outcome, 'conflict', 'M-D-R1-05: another hash under an adopted SOP is a conflict');
+  assert.equal(R.reconcileManualSr(adopted, present('cd'.repeat(32), '1.2.3')).outcome, 'conflict', 'another SOP is a conflict');
+  assert.equal(R.reconcileManualSr(adopted, { status: 'absent' }).outcome, 'conflict', 'an adopted original that is gone is a conflict');
+  assert.equal(R.reconcileManualSr(adopted, present('cd'.repeat(32))).outcome, 'already-adopted', 'control: the same bytes stay adopted');
+  assert.equal(R.reconcileManualSr(adopted, { status: 'unknown' }).outcome, 'already-adopted', 'an unknown lookup changes nothing');
+});
+
+test('TEST-D-02 versions_and_sr: hide and restore in the reading context need no typed reason and are signed corrections keeping the original', () => {
+  const created = finding();
+  const context = { kind: 'reading', studyId: study.studyId, referenceId: 'claim-1' };
+  const HIDDEN = SNAPSHOT.replace('"hidden":false', '"hidden":true');
+  const hideBody = () => ({ requestId: randomUUID(), expectedRevision: 1, action: 'hide', item: {} });
+  let hide;
+  assert.doesNotThrow(() => { hide = plan('finding.hide', r1, created, hideBody(), { content: HIDDEN, workContext: context }); },
+    'M-D-R1-06: hiding in the reading context needs no typed reason');
+  assert.deepEqual([hide.entry, hide.version.act, hide.signing.action, hide.version.reasonSource, hide.signing.reason, hide.projection.state],
+    ['clinical-entry', 'correction', 'amend', 'work-context', 'work-context:reading:claim-1', 'Hidden']);
+  const hidden = R.applyPlan(created, hide);
+  assert.equal(hidden.versions[0].text, SNAPSHOT, 'the original finding is kept next to the correction');
+  const restore = plan('finding.restore', r1, hidden, { requestId: randomUUID(), expectedRevision: 2, action: 'restore', item: {} },
+    { content: SNAPSHOT, workContext: context });
+  assert.deepEqual([restore.entry, restore.version.reasonSource, restore.projection.state], ['clinical-entry', 'work-context', 'Visible']);
+  refused(() => plan('finding.hide', r1, created, hideBody(), { content: HIDDEN }), 'ReasonRequired', 'outside the reading context a reason is required');
+  refused(() => plan('finding.hide', r1, created, hideBody(), { content: HIDDEN, workContext: { ...context, studyId: '1.2.840.99.9' } }), 'ReasonRequired',
+    'reading another study is outside the context');
+  const stated = plan('finding.hide', r1, created, { ...hideBody(), reason: 'SYN 오기재' }, { content: HIDDEN });
+  assert.deepEqual([stated.version.reasonSource, stated.signing.reason], ['stated', 'SYN 오기재'], 'a stated reason is kept as stated');
+  refused(() => plan('finding.edit', r1, created, { requestId: randomUUID(), expectedRevision: 1, action: 'edit', item: {}, reason: 'SYN' },
+    { content: SNAPSHOT.replace('8 mm', '9 mm') }), 'TextRefused', 'an edit carries no reason');
 });

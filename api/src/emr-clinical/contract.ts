@@ -12,8 +12,9 @@ import { freeze, refuse } from '../emr-contract/validation';
  * Authority comes from server facts only. The surface key is chosen by the server route handler (plus the
  * body action the existing service already validates), the actor is the verified auth context (B2), the unit is
  * the stored history (D store, R2), and attached records are A-resolved stored records. The client body supplies
- * only the request ID, the expected revision and the text the service validated; a body that names an author,
- * kind, signature verdict or institution is refused, never consulted.
+ * the request ID and the request's own meaning (expected revision, text and the fields the service validated), all of
+ * which the idempotency fingerprint covers; a body that names an author, kind, signature verdict or institution is
+ * refused, never consulted.
  *
  * Round 1 wires nothing: no route, SQL, signer or ledger. C signs and verifies; B co-commits the version, the
  * signature, the access event and the receipt; H executes destruction.
@@ -51,6 +52,8 @@ export interface SurfaceSpec {
   optional?: readonly string[];
   /** The idempotency key field (default requestId). */
   requestField?: string;
+  /** Normalisation of meaning fields before the request fingerprint, as the service normalises them. */
+  normalize?: Readonly<Record<string, 'trim' | 'lower'>>;
   textField: string | null;
   text: TextRule;
   reasonField?: string;
@@ -66,8 +69,16 @@ export interface SurfaceSpec {
   to: string;
   attachments: readonly RecordKind[];
   navigation: boolean;
-  /** Clinical text added to a record whose A kind is operational unless it carries clinical content. */
-  clinicalAdoption?: true;
+  /**
+   * A clinical entry here marks the unit as carrying signed clinical text. It does not add the chart class by itself:
+   * the 10-year class needs a recorded chart-incorporation fact (legal register D-19).
+   */
+  marksClinicalEntry?: true;
+  /**
+   * The correction's reason is bound by the server from the work context when the author gives none; a request outside
+   * that context needs one stated line (legal register D-18, D727 Q4).
+   */
+  contextReason?: 'reading';
 }
 
 const C: Capacity = 'clinical-author', S: Capacity = 'operational-staff';
@@ -106,11 +117,11 @@ export const CLINICAL_SURFACES = freeze({
     textField: 'note', text: 'required', revisionField: 'revision', action: 'cancel', act: 'additional-entry', cancel: true,
     paths: [{ relation: 'author', role: 'radiologist', capacity: C, kind: 'consultation' }, { relation: 'any', role: 'admin', capacity: S, kind: 'consultation' }],
     from: PENDING, to: 'Cancelled' },
-  // image-request.service.ts:282 create, :325 change. A keeps the request itself in the patient register (5 years);
-  // the requesting clinician's own text is treated as a clinical instruction/opinion: signed and clinically adopted.
+  // image-request.service.ts:282 create, :325 change. The request stays in the patient register (5 years); the requesting
+  // clinician's own text is treated as a clinical instruction/opinion and signed. No automatic chart class (D-19).
   'image-request.create': { ...base, record: 'image-request', model: 'StudyImageRequest', route: 'POST studies/:uid/image-requests', opens: true,
     client: ['requestId', 'expectedOwner', 'kind', 'counterparty', 'counterpartyInstitutionId', 'reason'], textField: 'reason', text: 'required',
-    revisionField: null, act: 'additional-entry', clinicalAdoption: true,
+    revisionField: null, act: 'additional-entry', marksClinicalEntry: true,
     paths: [{ relation: 'any', role: 'clinician', capacity: C, kind: 'image-request' }], from: [null], to: 'Requested' },
   'image-request.accept': { ...base, record: 'image-request', model: 'StudyImageRequest', route: 'POST image-requests/:id', opens: false, client: reply,
     textField: 'note', text: 'empty', revisionField: 'revision', action: 'accept', act: 'additional-entry',
@@ -125,11 +136,12 @@ export const CLINICAL_SURFACES = freeze({
     paths: [{ relation: 'any', role: 'technician', capacity: S, kind: 'image-request' }, { relation: 'any', role: 'admin', capacity: S, kind: 'image-request' }],
     from: PENDING, to: 'Declined' },
   'image-request.cancel': { ...base, record: 'image-request', model: 'StudyImageRequest', route: 'POST image-requests/:id', opens: false, client: reply,
-    textField: 'note', text: 'required', revisionField: 'revision', action: 'cancel', act: 'additional-entry', cancel: true, clinicalAdoption: true,
+    textField: 'note', text: 'required', revisionField: 'revision', action: 'cancel', act: 'additional-entry', cancel: true, marksClinicalEntry: true,
     paths: [{ relation: 'author', role: 'clinician', capacity: C, kind: 'image-request' }, { relation: 'any', role: 'admin', capacity: S, kind: 'image-request' }],
     from: PENDING, to: 'Cancelled' },
   // finding.service.ts:364 write; finding-input.ts:74 command keys. The recorded text is the server's canonical
-  // snapshot (frozen source copies included), never the client item.
+  // snapshot (frozen source copies included), never the client item. Hide/restore need no typed reason inside the
+  // author's reading context (R2 drops the required reason in finding-input.ts:80).
   'finding.create': { ...base, record: 'finding', model: 'Finding', route: 'POST studies/:uid/findings', opens: true, ownerField: false,
     client: ['requestId', 'item'], textField: null, text: 'server', revisionField: null, act: 'correction', attachments: FINDING_SOURCES, navigation: true,
     paths: [{ relation: 'any', role: 'radiologist', capacity: C, kind: 'finding' }], from: [null], to: 'Visible' },
@@ -138,23 +150,23 @@ export const CLINICAL_SURFACES = freeze({
     action: 'edit', act: 'correction', attachments: FINDING_SOURCES, navigation: true,
     paths: [{ relation: 'author', role: 'radiologist', capacity: C, kind: 'finding' }], from: ['Visible', 'Hidden'], to: 'same' },
   'finding.hide': { ...base, record: 'finding', model: 'FindingRevision', route: 'POST studies/:uid/findings/:id/revisions', opens: false, ownerField: false,
-    client: ['requestId', 'expectedRevision', 'action', 'item', 'reason'], textField: null, text: 'server', revisionField: 'expectedRevision',
-    action: 'hide', act: 'correction', attachments: FINDING_SOURCES, navigation: true,
+    client: ['requestId', 'expectedRevision', 'action', 'item'], optional: ['reason'], textField: null, text: 'server', revisionField: 'expectedRevision',
+    action: 'hide', act: 'correction', attachments: FINDING_SOURCES, navigation: true, contextReason: 'reading',
     paths: [{ relation: 'author', role: 'radiologist', capacity: C, kind: 'finding' }], from: ['Visible'], to: 'Hidden' },
   'finding.restore': { ...base, record: 'finding', model: 'FindingRevision', route: 'POST studies/:uid/findings/:id/revisions', opens: false, ownerField: false,
-    client: ['requestId', 'expectedRevision', 'action', 'item', 'reason'], textField: null, text: 'server', revisionField: 'expectedRevision',
-    action: 'restore', act: 'correction', attachments: FINDING_SOURCES, navigation: true,
+    client: ['requestId', 'expectedRevision', 'action', 'item'], optional: ['reason'], textField: null, text: 'server', revisionField: 'expectedRevision',
+    action: 'restore', act: 'correction', attachments: FINDING_SOURCES, navigation: true, contextReason: 'reading',
     paths: [{ relation: 'author', role: 'radiologist', capacity: C, kind: 'finding' }], from: ['Hidden'], to: 'Visible' },
   // reader-assignment.service.ts:79 write: allocation only, no free text exists to smuggle a clinical entry through.
   'assignment.write': { ...base, record: 'assignment', model: 'ReaderAssignment', route: 'POST studies/:uid/reader-assignment', opens: 'if-absent',
-    client: ['requestId', 'expectedOwner', 'revision', 'readerSub'], textField: null, text: 'none', revisionField: 'revision', act: 'additional-entry',
+    client: ['requestId', 'expectedOwner', 'revision', 'readerSub'], normalize: { readerSub: 'lower' }, textField: null, text: 'none', revisionField: 'revision', act: 'additional-entry',
     paths: ['admin', 'technician', 'radiologist'].map(role => ({ relation: 'any' as const, role, capacity: S, kind: 'assignment' as const })),
     from: [null, 'Assigned', 'Unassigned'], to: 'reader' },
   // pacs.service.ts:1181 saveTechNote (base version, whole text, trimmed reason, attempt ID). The radiographer signs their
   // own note (LR-49 / D-3); an administrator's write is recorded as theirs but never signed in the radiographer's place.
   // Round 2 wires this through the pacs.* owner; the screen always sends the attempt ID after release.
   'tech-note.write': { ...base, record: 'tech-note', model: 'TechNoteRevision', route: 'POST studies/:uid/tech-note', opens: 'if-absent', ownerField: false,
-    client: ['baseVersion', 'text', 'reason', 'attemptId'], requestField: 'attemptId', textField: 'text', text: 'replace', reasonField: 'reason',
+    client: ['baseVersion', 'text', 'reason', 'attemptId'], requestField: 'attemptId', normalize: { reason: 'trim' }, textField: 'text', text: 'replace', reasonField: 'reason',
     revisionField: 'baseVersion', act: 'correction',
     paths: [{ relation: 'any', role: 'technician', capacity: C, kind: 'tech-note' }, { relation: 'any', role: 'admin', capacity: S, kind: 'tech-note' }],
     from: [null, 'Recorded'], to: 'Recorded' },
@@ -209,10 +221,14 @@ export interface ClinicalVersion {
   previousVersion: VersionReference | null;
   surface: SurfaceKey; entry: EntryClass; capacity: Capacity; kind: RecordKind; act: VersionAct;
   author: ImmutableIdentity; actingInstitutionId: string;
-  text: string | null; contentSha256: string | null; reason: string | null;
+  text: string | null; contentSha256: string | null;
+  /** stated: typed by the author; work-context: bound by the server from the author's work context (D-18). */
+  reason: string | null; reasonSource: 'stated' | 'work-context' | null;
   attachments: readonly AttachmentReference[]; navigation: readonly string[];
   state: { from: string | null; to: string };
   readerId: string | null;
+  /** Permission-deciding party fixed by the opening version (the consultation recipient); null elsewhere. */
+  recipientId: string | null;
   studyId: string; managingInstitutionId: string; patient: PatientLinkSnapshot;
   at: string;
   /** SHA-256 of every field above in this order (UTF-8 JSON); the version's identity for signatures and incorporation. */
@@ -221,11 +237,14 @@ export interface ClinicalVersion {
 export interface ClinicalUnit {
   record: ClinicalRecord; recordId: string;
   studyId: string; managingInstitutionId: string; patient: PatientLinkSnapshot;
+  /** Projection of the opening version's author and recipient; never trusted on its own. */
   parties: { authorId: string; recipientId: string | null };
   /** Projection; always equal to the fold of `versions`. */
-  state: string; revision: number; head: VersionReference | null; clinicalAdoption: boolean;
+  state: string; revision: number; head: VersionReference | null; clinicalEntry: boolean;
   versions: readonly ClinicalVersion[];
 }
+/** Server fact: the author's current reading of this study (claim/session), from which a correction reason is bound. */
+export interface WorkContext { kind: 'reading'; studyId: string; referenceId: string }
 export interface SigningRequest {
   recordKind: RecordKind; recordId: string; versionId: string; versionSha256: string;
   content: { kind: 'text'; body: string; sha256: string } | { kind: 'dicom'; sopInstanceUid: string; sha256: string };
