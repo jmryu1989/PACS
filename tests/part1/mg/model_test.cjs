@@ -76,12 +76,12 @@ test('MG01-allow conventional, device synthetic 2D and DBT are told apart by sta
   const slab=model.classify(dbt({technique:'MAX_IP',volumetric:'SAMPLED',thickness:10}));
   assert.equal(slab.kind,'dbt');assert.equal(slab.sliceKind,'mip-slab','a MIP slab is reported as what is stored, not as thin slices');assert.equal(slab.sliceThickness,10);
   // Slices vs slab follow thickness and contiguous positions together with the tags (ruling D730).
-  const thin=model.classify(dbt({technique:'MAX_IP',volumetric:'VOLUME',thickness:1}));
-  assert.equal(thin.sliceKind,'slices');assert.ok(thin.notes.length>0,'the disagreeing technique is kept as a note');
   const sampledThin=model.classify(dbt({volumetric:'SAMPLED',thickness:1}));
   const volumeThick=model.classify(dbt({positions:[0,5,10,15],technique:'MAX_IP',volumetric:'VOLUME',thickness:10}));
   assert.deepEqual([sampledThin.sliceKind,volumeThick.sliceKind],['slices','mip-slab'],
     'MG01 M23: slices vs slab follow thickness and contiguous positions, not Volumetric Properties alone');
+  const thin=model.classify(dbt({technique:'MAX_IP',volumetric:'VOLUME',thickness:1}));
+  assert.equal(thin.sliceKind,'slices');assert.ok(thin.notes.length>0,'the disagreeing technique is kept as a note');
   const gaps=model.classify(dbt({positions:[0,3,6,9],thickness:1}));
   assert.equal(gaps.sliceKind,'unspecified','sections with gaps between them are not claimed to be contiguous slices');
   // The named device exception: Hologic Selenia Dimensions one-frame Breast Tomosynthesis GENERATED_2D.

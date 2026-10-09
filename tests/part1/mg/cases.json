@@ -1,7 +1,7 @@
 {
  "version": 1,
  "unit": "E-MG",
- "round": 1,
+ "round": 2,
  "order": "C:/Users/norne/PACS/tmp/astra-control/evidence/emg-exa-prep-20261009/e-mg-order.md",
  "base_sha": "04e50ab4524d59b82444fbe765034c9fa759fa30",
  "note": "Declared before collection and compared both ways with the cases actually run; expectations are never generated from a run. A case whose sample set root is absent SKIPS with that reason (commander instruction 2026-10-09, superseding the order's no-skip line); a skip is not_run and never counted as a pass.",
@@ -44,14 +44,17 @@
    "id": "model",
    "file": "tests/part1/mg/model_test.cjs",
    "command": "node --test tests/part1/mg/model_test.cjs",
-   "expected": 10,
+   "expected": 12,
    "cases": [
     {
      "name": "MG01-allow conventional, device synthetic 2D and DBT are told apart by standard attributes with evidence",
      "test": "TEST-MG01-MODEL-ALLOW",
      "req": "REQ-MG-01",
      "risk": "RISK-MG-MISCLASS",
-     "inputs": "DICOM JSON built in the test"
+     "inputs": "DICOM JSON built in the test",
+     "mutants": [
+      "M23"
+     ]
     },
     {
      "name": "MG01-reject DERIVED alone, a description, a contradiction or a non-mammography object never yields synthetic 2D or DBT",
@@ -61,7 +64,9 @@
      "inputs": "DICOM JSON built in the test",
      "mutants": [
       "M1",
-      "M2"
+      "M2",
+      "M17",
+      "M18"
      ]
     },
     {
@@ -80,7 +85,11 @@
      "test": "TEST-MG02-MODEL-REJECT",
      "req": "REQ-MG-02",
      "risk": "RISK-MG-OMIT",
-     "inputs": "DICOM JSON built in the test"
+     "inputs": "DICOM JSON built in the test",
+     "mutants": [
+      "M20",
+      "M21"
+     ]
     },
     {
      "name": "MG03-allow two DBTs of different length and spacing report their own positions in mm",
@@ -110,7 +119,8 @@
      "risk": "RISK-MG-WRONG-STUDY",
      "inputs": "DICOM JSON built in the test",
      "mutants": [
-      "M8"
+      "M8",
+      "M19"
      ]
     },
     {
@@ -129,6 +139,23 @@
      "mutants": [
       "M9"
      ]
+    },
+    {
+     "name": "MG05-allow the requested frame's own orientation decides its horizontal and vertical flips",
+     "test": "TEST-MG05-MODEL-ALLOW",
+     "req": "REQ-MG-05",
+     "risk": "RISK-MG-FLIP-CLIP",
+     "inputs": "DICOM JSON built in the test",
+     "mutants": [
+      "M22"
+     ]
+    },
+    {
+     "name": "MG05-reject a frame whose own tags disagree, or cannot decide, is shown as stored and Unverified",
+     "test": "TEST-MG05-MODEL-REJECT",
+     "req": "REQ-MG-05",
+     "risk": "RISK-MG-FLIP-CLIP",
+     "inputs": "DICOM JSON built in the test"
     }
    ]
   },
@@ -137,7 +164,7 @@
    "file": "tests/part1/mg/viewer_dom_test.py",
    "class": "MammographyViewerDOMTest",
    "command": "python -B tests/part1/mg/viewer_dom_test.py",
-   "expected": 11,
+   "expected": 14,
    "cases": [
     {
      "name": "test_mg02_dom_first_to_last_frames_render_with_exact_ids",
@@ -324,6 +351,57 @@
       "ea1141-4339969-1944-lmlo-dbt"
      ],
      "skip_if_absent": "ea1141-4339969"
+    },
+    {
+     "name": "test_mg06_dom_latest_intent_wins_over_delayed_seek_and_scroll_bursts",
+     "test": "TEST-MG06-DOM-LATEST-INTENT",
+     "req": "REQ-MG-06",
+     "risk": "RISK-MG-STALE",
+     "samples": [
+      "ea1141-3227336-310042"
+     ],
+     "skip_if_absent": "tcia-20261004",
+     "mutants": [
+      "M13",
+      "M16"
+     ]
+    },
+    {
+     "name": "test_mg06_dom_superseded_renders_are_neither_painted_nor_reported",
+     "test": "TEST-MG06-DOM-SUPERSEDED-RENDER",
+     "req": "REQ-MG-06",
+     "risk": "RISK-MG-STALE",
+     "also": [
+      "REQ-MG-08 seam: only the latest intent is reported as displayed"
+     ],
+     "samples": [
+      "ea1141-3227336-310042"
+     ],
+     "skip_if_absent": "tcia-20261004",
+     "mutants": [
+      "M14",
+      "M15"
+     ]
+    },
+    {
+     "name": "test_mg04_dom_partial_and_oversized_objects_are_never_auto_placed",
+     "test": "TEST-MG04-DOM-PARTIAL-OVERSIZED",
+     "req": "REQ-MG-04",
+     "risk": "RISK-MG-WRONG-STUDY",
+     "also": [
+      "REQ-MG-02 frame-count refusal without errors"
+     ],
+     "samples": [
+      "cmmd-d2-0140-1",
+      "cmmd-d2-0140-2",
+      "cmmd-d2-0140-3",
+      "cmmd-d2-0140-4"
+     ],
+     "test_owned_variants": [
+      "R CC with Partial View Section Medial only",
+      "L CC copy with NumberOfFrames 2001"
+     ],
+     "skip_if_absent": "tcia-20261004"
     }
    ]
   },
@@ -562,7 +640,7 @@
    ]
   }
  ],
- "total_expected": 34,
+ "total_expected": 39,
  "mutants": {
   "M1": {
    "file": "model",
@@ -637,6 +715,83 @@
    "case": "test_mg02_dom_prefetch_wrong_frame_and_wrong_total_never_count_as_displayed",
    "expect": "MG02 M12: a prefetched frame is not a displayed frame",
    "scope": "R1 kills M12 on the module's display event seam; the EMR-E durable record form of M12 is R2"
+  },
+  "M13": {
+   "file": "viewer",
+   "suite": "dom",
+   "case": "test_mg06_dom_latest_intent_wins_over_delayed_seek_and_scroll_bursts",
+   "expect": "MG06 M13: a request back to the current slice cancels the delayed one",
+   "fix": "F01"
+  },
+  "M14": {
+   "file": "viewer",
+   "suite": "dom",
+   "case": "test_mg06_dom_superseded_renders_are_neither_painted_nor_reported",
+   "expect": "MG06 M14: a render superseded after its paint is not reported as the current display",
+   "fix": "F01"
+  },
+  "M15": {
+   "file": "viewer",
+   "suite": "dom",
+   "case": "test_mg06_dom_superseded_renders_are_neither_painted_nor_reported",
+   "expect": "MG06 M15: a render superseded before its paint is not painted",
+   "fix": "F01"
+  },
+  "M16": {
+   "file": "viewer",
+   "suite": "dom",
+   "case": "test_mg06_dom_latest_intent_wins_over_delayed_seek_and_scroll_bursts",
+   "expect": "MG06 M16: a scroll burst moves from the latest intent",
+   "fix": "F01"
+  },
+  "M17": {
+   "file": "model",
+   "suite": "model",
+   "case": "MG01-reject",
+   "expect": "MG01 M17: Image Type and Frame Type must agree before any kind is trusted",
+   "fix": "F02"
+  },
+  "M18": {
+   "file": "model",
+   "suite": "model",
+   "case": "MG01-reject",
+   "expect": "MG01 M18: a one-frame tomosynthesis GENERATED_2D object is synthetic 2D only as the named device exception",
+   "fix": "F02"
+  },
+  "M19": {
+   "file": "model",
+   "suite": "model",
+   "case": "MG04-reject",
+   "expect": "MG04 M19: a partial view is never matched as the full standard view",
+   "fix": "F03"
+  },
+  "M20": {
+   "file": "model",
+   "suite": "model",
+   "case": "MG02-reject",
+   "expect": "MG02 M20: a frame count outside the limit is refused before any per-frame work",
+   "fix": "F04"
+  },
+  "M21": {
+   "file": "model",
+   "suite": "model",
+   "case": "MG02-reject",
+   "expect": "MG02 M21: dimension index values that contradict the positions never report complete",
+   "fix": "F05"
+  },
+  "M22": {
+   "file": "model",
+   "suite": "model",
+   "case": "MG05-allow",
+   "expect": "MG05 M22: the orientation of the requested frame decides its flips",
+   "fix": "F06"
+  },
+  "M23": {
+   "file": "model",
+   "suite": "model",
+   "case": "MG01-allow",
+   "expect": "MG01 M23: slices vs slab follow thickness and contiguous positions, not Volumetric Properties alone",
+   "fix": "ruling 2"
   }
  },
  "pending_samples": [
@@ -689,5 +844,6 @@
    "PENDING-MG04-REAL-PRIOR",
    "PENDING-MG05-REAL-COMBINATION (stored-pixel level; the real renderer stays round 2)"
   ]
- }
+ },
+ "round2_review": "C:/Users/norne/PACS/tmp/astra-control/evidence/astra-worker-runs/e-mg-r1-review-e3231e9-astra-20261009/last-message.md"
 }

@@ -1,6 +1,6 @@
 # coding: utf-8
-"""TEST-MG-MUTANTS (E-MG R1): the twelve required mutants M1-M12 of the order, each killed by a named
-behaviour test.
+"""TEST-MG-MUTANTS (E-MG): the twelve required mutants M1-M12 of the order and M13-M23 of the round-2
+review fixes (D730), each killed by a named behaviour test.
 
 A mutant that is merely declared is not a kill. This runner breaks the product on purpose - in a COPY
 under a temporary directory - and requires the named case to fail on its own named assertion:
@@ -104,6 +104,62 @@ MUTANTS = [
      "expect": "MG02 M12: a prefetched frame is not a displayed frame",
      "old": "        const pending=load(cell,entry,'prefetch',c.signal).then(image=>{if(usable(cell))remember(key,image);return image;},",
      "new": "        const pending=load(cell,entry,'prefetch',c.signal).then(image=>{if(usable(cell)){remember(key,image);cell.coverage.mark(entry);emit('displayed',record(cell,entry,'display'));}return image;},"},
+    # Round 2 (D730): one mutant per fix, each re-introducing the defect the review found.
+    {"id": "M13", "file": "viewer", "suite": "dom", "case": "test_mg06_dom_latest_intent_wins_over_delayed_seek_and_scroll_bursts",
+     "title": "F01: a request back to the slice on screen does not supersede the delayed one",
+     "expect": "MG06 M13: a request back to the current slice cancels the delayed one",
+     "old": "      const ticket=gate.begin(cell.id,entry.sop+'#'+entry.frame);cell.intent=target;",
+     "new": "      if(target===cell.position&&cell.shown&&!force)return;const ticket=gate.begin(cell.id,entry.sop+'#'+entry.frame);cell.intent=target;"},
+    {"id": "M14", "file": "viewer", "suite": "dom", "case": "test_mg06_dom_superseded_renders_are_neither_painted_nor_reported",
+     "title": "F01: no sequence check after the render completes",
+     "expect": "MG06 M14: a render superseded after its paint is not reported as the current display",
+     "old": "        if(!current){relabel(cell);return false;}",
+     "new": "        if(false){relabel(cell);return false;}"},
+    {"id": "M15", "file": "viewer", "suite": "dom", "case": "test_mg06_dom_superseded_renders_are_neither_painted_nor_reported",
+     "title": "F01: the renderer's pre-paint check always answers current",
+     "expect": "MG06 M15: a render superseded before its paint is not painted",
+     "old": "try{result=await cell.handle.render(image,display(cell,image,entry),{current:latest});}catch(_){result=null;}",
+     "new": "try{result=await cell.handle.render(image,display(cell,image,entry),{current:()=>true});}catch(_){result=null;}"},
+    {"id": "M16", "file": "viewer", "suite": "dom", "case": "test_mg06_dom_latest_intent_wins_over_delayed_seek_and_scroll_bursts",
+     "title": "F01: a key step is taken from the slice on screen, not from the latest intent",
+     "expect": "MG06 M16: a scroll burst moves from the latest intent",
+     "old": "      if(event.key in moves)target=cell.intent+moves[event.key];",
+     "new": "      if(event.key in moves)target=cell.position+moves[event.key];"},
+    {"id": "M17", "file": "model", "suite": "model", "case": "MG01-reject",
+     "title": "F02: Image Type and Frame Type are not compared",
+     "expect": "MG01 M17: Image Type and Frame Type must agree before any kind is trusted",
+     "old": "        else if(ft[0].split('|')[0]!==imageType)issue('image-frame-type-conflict');",
+     "new": "        else if(false)issue('image-frame-type-conflict');"},
+    {"id": "M18", "file": "model", "suite": "model", "case": "MG01-reject",
+     "title": "F02: the device exception no longer names its manufacturer and model",
+     "expect": "MG01 M18: a one-frame tomosynthesis GENERATED_2D object is synthetic 2D only as the named device exception",
+     "old": "      x.manufacturer.test(manufacturer)&&x.model.test(model))||null;",
+     "new": "      true)||null;"},
+    {"id": "M19", "file": "model", "suite": "model", "case": "MG04-reject",
+     "title": "F03: only the Partial View flag marks a partial acquisition",
+     "expect": "MG04 M19: a partial view is never matched as the full standard view",
+     "old": "    const evident=flag==='YES'||sections.length>0||!!description;",
+     "new": "    const evident=flag==='YES';"},
+    {"id": "M20", "file": "model", "suite": "model", "case": "MG02-reject",
+     "title": "F04: the frame-count limit is not applied before classification",
+     "expect": "MG02 M20: a frame count outside the limit is refused before any per-frame work",
+     "old": "    const framesOk=Number.isInteger(declared)&&declared>=1&&declared<=MAX_FRAMES;",
+     "new": "    const framesOk=Number.isInteger(declared)&&declared>=1;"},
+    {"id": "M21", "file": "model", "suite": "model", "case": "MG02-reject",
+     "title": "F05: Dimension Index Values are not cross-checked",
+     "expect": "MG02 M21: dimension index values that contradict the positions never report complete",
+     "old": "    dimensionCheck(item,fg,stored,known).forEach(issue);",
+     "new": "    void dimensionCheck;"},
+    {"id": "M22", "file": "model", "suite": "model", "case": "MG05-allow",
+     "title": "F06: every frame takes the first frame's orientation",
+     "expect": "MG05 M22: the orientation of the requested frame decides its flips",
+     "old": "    const plane=macro(fg,frame,'00209116'),iop=(plane?numbers(plane,'00200037',6):null)||numbers(item,'00200037',6);",
+     "new": "    const plane=macro(fg,1,'00209116'),iop=(plane?numbers(plane,'00200037',6):null)||numbers(item,'00200037',6);"},
+    {"id": "M23", "file": "model", "suite": "model", "case": "MG01-allow",
+     "title": "ruling 2: Volumetric Properties alone decides slices vs slab",
+     "expect": "MG01 M23: slices vs slab follow thickness and contiguous positions, not Volumetric Properties alone",
+     "old": "    const projection=technique==='MAX_IP'||technique==='MIN_IP',notes=[];",
+     "new": "    const projection=technique==='MAX_IP'||technique==='MIN_IP',notes=[];if(volumetric==='VOLUME')return {sliceKind:'slices',notes};if(volumetric==='SAMPLED')return {sliceKind:projection?'mip-slab':'sampled',notes};"},
 ]
 
 
@@ -165,7 +221,7 @@ def main():
     cases = json.loads((HERE / "cases.json").read_text(encoding="utf-8"))
     declared = cases["mutants"]
     problems = []
-    if {m["id"] for m in MUTANTS} != set(declared) or len(MUTANTS) != 12:
+    if {m["id"] for m in MUTANTS} != set(declared) or len(MUTANTS) != 23:
         problems.append("mutant ids differ from cases.json")
     tests_text = {suite: spec["file"].read_text(encoding="utf-8") for suite, spec in SUITES.items()}
     seen = set()
