@@ -123,7 +123,8 @@ function deriveSpec(page, options = {}) {
     if (source.parseDiagnostics.length) throw new Error('Inline script must parse');
     return source.statements.map(node => node.getText(source));
   };
-  const oldTexts = texts(inlineBody(baseHtml)), body = inlineBody(fs.readFileSync(page, 'utf8')), newTexts = texts(body);
+  const html = fs.readFileSync(page, 'utf8');
+  const oldTexts = texts(inlineBody(baseHtml)), body = inlineBody(html), newTexts = texts(body);
   const oldModule = base.modules.flatMap((m, i) => m.statements.map(() => i));
   if (oldModule.length !== oldTexts.length) throw new Error('The spec does not describe its baseline page');
   const pool = new Map();
@@ -131,11 +132,28 @@ function deriveSpec(page, options = {}) {
   const match = newTexts.map(text => (pool.get(text) || []).shift() ?? -1);
   const anchors = longestIncreasing(match);
   const names = statements(body).map(n => n.name);
+  // A statement outside the kept order that sits between two runs joins the later one when the f1d5406 page had it in
+  // that file - a mutant that puts a declaration back at its f1d5406 place gets the f1d5406 file, so the gap the
+  // original split had in front of it is there again - and otherwise the run it follows.
+  const fixture = readFixture(), file = new Map(base.modules.map((m, i) => [m.file, i]));
+  const f1d5406Module = fixture.modules.flatMap(([name, count]) => Array(count).fill(file.get(name)));
+  const f1d5406Home = frozenIndexes(fixtureStatements(html), fixture.statements);
+  const nextAnchored = [];
+  for (let i = names.length - 1, next = base.modules.length - 1; i >= 0; i--) {
+    nextAnchored[i] = next;
+    if (anchors.has(i)) next = oldModule[match[i]];
+  }
   let module = 0;
-  const homes = names.map((_, i) => (anchors.has(i) ? (module = oldModule[match[i]]) : module));
+  const homes = names.map((_, i) => {
+    if (anchors.has(i)) return (module = oldModule[match[i]]);
+    const wanted = f1d5406Home[i] >= 0 ? f1d5406Module[f1d5406Home[i]] : undefined;
+    if (wanted !== undefined && wanted >= module && wanted <= nextAnchored[i]) module = wanted;
+    return module;
+  });
   const moved = names.filter((_, i) => !anchors.has(i));
   return { ...base, base: null, derivedFrom: base.base, moved,
-    note: 'Test-side split of a changed page: baseline runs kept, moved/new statements join the run they sit in.',
+    note: 'Test-side split of a changed page: baseline runs kept; a moved/new statement between two runs joins the '
+      + 'later one when the f1d5406 split had it there, otherwise the run it sits in.',
     modules: base.modules.map((m, i) => ({ file: m.file, job: m.job, statements: names.filter((_, k) => homes[k] === i) })) };
 }
 
@@ -166,29 +184,44 @@ function fixtureStatements(text) {
       : node.name ? [node.name.getText(source)] : [],
     print: fingerprintOf(node.getText(source).replace(/\r\n?/g, '\n')), full: body.slice(node.getFullStart(), node.end) }));
 }
+// The f1d5406 split's files and statement counts come with the statement list (deriveSpec gives a statement between
+// two runs the file the f1d5406 split had it in).
 function freezeFixture() {
-  const blob = execFileSync('git', ['cat-file', '--filters', `${FIXTURE_BASE}:worklist-v0/hpacs-lite/main.html`],
+  const blob = path => execFileSync('git', ['cat-file', '--filters', `${FIXTURE_BASE}:${path}`],
     { cwd: ROOT, encoding: 'utf8', maxBuffer: 8e6 });
+  const spec = JSON.parse(blob('tests/main_move_spec.json'));
   return { base: FIXTURE_BASE, page: 'worklist-v0/hpacs-lite/main.html',
-    statements: fixtureStatements(blob).map(s => (s.names.length ? s.names : s.print)) };
+    modules: spec.modules.map(m => [m.file, m.statements.length]),
+    statements: fixtureStatements(blob('worklist-v0/hpacs-lite/main.html')).map(s => (s.names.length ? s.names : s.print)) };
 }
-function fixtureBlocks(page, ranges) {
-  const { readPageSource } = require('./page_source.cjs');
-  const base = JSON.parse(fs.readFileSync(FIXTURE_FILE, 'utf8')).statements
-    .map(s => (Array.isArray(s) ? { names: s } : { names: [], print: s }));
-  const current = fixtureStatements(readPageSource(page));
+function readFixture() {
+  const kept = JSON.parse(fs.readFileSync(FIXTURE_FILE, 'utf8'));
+  return { modules: kept.modules,
+    statements: kept.statements.map(s => (Array.isArray(s) ? { names: s } : { names: [], print: s })) };
+}
+// Each current statement's f1d5406 statement: a declaration by its declared names (a split declarator finds the
+// multi-declaration it came from), anything else by its text, in order; -1 when there is none.
+function frozenIndexes(current, base) {
   const byName = new Map(), byPrint = new Map();
   base.forEach((s, i) => {
     for (const name of s.names) byName.set(name, i);
     if (!s.names.length) { if (!byPrint.has(s.print)) byPrint.set(s.print, []); byPrint.get(s.print).push(i); }
   });
-  const home = current.map(s => {
+  return current.map(s => {
     if (s.names.length) {
       const found = new Set(s.names.map(name => byName.get(name)));
       return found.size === 1 && !found.has(undefined) ? [...found][0] : -1;
     }
     return (byPrint.get(s.print) || []).shift() ?? -1;
   });
+}
+function fixtureBlocks(page, ranges) {
+  const { readPageSource } = require('./page_source.cjs');
+  const base = readFixture().statements;
+  const current = fixtureStatements(readPageSource(page));
+  const byName = new Map();
+  base.forEach((s, i) => { for (const name of s.names) byName.set(name, i); });
+  const home = frozenIndexes(current, base);
   const result = {};
   for (const [key, [first, end]] of Object.entries(ranges)) {
     const lo = byName.get(first), hi = byName.get(end);
@@ -288,7 +321,41 @@ function preMutant(page, id) {
   return html.slice(0, at) + next + html.slice(tag.end - '</script>'.length);
 }
 
-module.exports = { split, deriveSpec, fixtureBlocks, freezeFixture, preMutant, PRE_UNITS, FIXTURE_BASE, FIXTURE_FILE, REPORT_FIXTURE };
+// The statement a declaration mutant (M01..M35) put back, in the mutant page: its index among the page's top-level
+// statements (the restored multi-declaration for a split declarator) and the bindings it gives the page (the declarator
+// alone; none for the anonymous storage read M27).
+function restoredStatement(html, id) {
+  const unit = PRE_UNITS.find(u => u[0] === id);
+  if (!unit) return null;
+  const [, index, declarator] = unit;
+  const frozen = readFixture().statements;
+  const home = frozenIndexes(fixtureStatements(html), frozen);
+  const hits = home.flatMap((h, i) => (h === index ? [i] : []));
+  if (hits.length !== 1) throw new Error(`${id}: the restored statement found ${hits.length} times`);
+  return { index: hits[0], f1d5406: index, bindings: declarator ? [declarator] : frozen[index].names };
+}
+// Where the page under test has f1d5406 statements (by index): {f1d5406Index: currentIndex or -1}.
+function locateStatements(page, indexes) {
+  const home = frozenIndexes(fixtureStatements(fs.readFileSync(page, 'utf8')), readFixture().statements);
+  return Object.fromEntries(indexes.map(index => [index, home.indexOf(Number(index))]));
+}
+// A mutant as the early-input suite serves it: the page, its derived spec and its 45-part layout, with the part that
+// holds the restored statement (the manifest the browser is given, not an assumption about it).
+function mutantLayout(page, id, outDir) {
+  const dir = outsideProduct(outDir);
+  fs.mkdirSync(dir, { recursive: true });
+  const out = path.join(dir, id + '.html'), html = preMutant(page, id);
+  fs.writeFileSync(out, html);
+  const spec = path.join(dir, id + '-spec.json');
+  fs.writeFileSync(spec, JSON.stringify(deriveSpec(out), null, 1));
+  const restored = restoredStatement(html, id);
+  const manifest = split(45, path.join(dir, id + '-45'), { page: out, spec });
+  return { id, page: out, spec, restored,
+    part: restored && { count: 45, ...manifest.statements[restored.index], parts: manifest.parts } };
+}
+
+module.exports = { split, deriveSpec, fixtureBlocks, freezeFixture, preMutant, restoredStatement, locateStatements,
+  mutantLayout, PRE_UNITS, FIXTURE_BASE, FIXTURE_FILE, REPORT_FIXTURE };
 if (require.main === module) {
   const [op, ...args] = process.argv.slice(2);
   if (op === 'fixture' && args[1]) {
@@ -300,8 +367,18 @@ if (require.main === module) {
   } else if (op === 'freeze') {
     const frozen = freezeFixture();
     fs.writeFileSync(FIXTURE_FILE, '{"base": ' + JSON.stringify(frozen.base) + ', "page": ' + JSON.stringify(frozen.page)
-      + ', "statements": [\n' + frozen.statements.map(s => JSON.stringify(s)).join(',\n') + '\n]}\n');
-    process.stdout.write(JSON.stringify({ statements: frozen.statements.length }));
+      + ', "modules": [\n' + frozen.modules.map(m => JSON.stringify(m)).join(',\n')
+      + '\n], "statements": [\n' + frozen.statements.map(s => JSON.stringify(s)).join(',\n') + '\n]}\n');
+    process.stdout.write(JSON.stringify({ modules: frozen.modules.length, statements: frozen.statements.length }));
+  } else if (op === 'mutant-layout' && args[2]) {
+    const [page, id, outDir] = args;
+    process.stdout.write(JSON.stringify(mutantLayout(page, id, outDir)));
+  } else if (op === 'frozen-index' && args[0]) {
+    process.stdout.write(JSON.stringify(frozenIndexes(fixtureStatements(fs.readFileSync(args[0], 'utf8')),
+      readFixture().statements)));
+  } else if (op === 'locate' && args[1]) {
+    const [page, ...indexes] = args;
+    process.stdout.write(JSON.stringify(locateStatements(page, indexes)));
   } else if (op === 'fixture-check') {
     const frozen = freezeFixture(), kept = JSON.parse(fs.readFileSync(FIXTURE_FILE, 'utf8'));
     const same = JSON.stringify(frozen) === JSON.stringify(kept);
@@ -316,5 +393,6 @@ if (require.main === module) {
     fs.writeFileSync(outsideProduct(path.dirname(out)) && out, JSON.stringify(derived, null, 1));
     process.stdout.write(JSON.stringify({ moved: derived.moved, statements: derived.modules.reduce((n, m) => n + m.statements.length, 0) }));
   } else throw new Error('Usage: node main_split_harness.cjs split <count> <outDir> [page] [spec] | derive <page> <outSpec>'
-    + ' | fixture <page> <{"KEY":["firstDeclaration","endDeclaration"]}> | freeze | fixture-check | pre-mutant <page> <M01..M37> <out>');
+    + ' | fixture <page> <{"KEY":["firstDeclaration","endDeclaration"]}> | freeze | fixture-check | pre-mutant <page> <M01..M37> <out>'
+    + ' | mutant-layout <page> <M01..M37> <outDir> | locate <page> <f1d5406 statement index>...');
 }

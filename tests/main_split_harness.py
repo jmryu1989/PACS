@@ -135,8 +135,11 @@ class Delivery:
     for ``release()``. Anything else under the page directory falls back to the routes registered before this one.
     """
 
-    def __init__(self, directory, manifest, base, delay_ms=0, hold=None, others=None):
+    def __init__(self, directory, manifest, base, delay_ms=0, hold=None, others=None, cache_headers=True):
         self.dir, self.manifest, self.base = Path(directory), manifest, base
+        # no-store keeps every run's answers its own; without it (cache_headers=False) the page is answered as the
+        # product's /worklist/ location answers it - no cache header - which a native back/forward cache needs.
+        self.headers = {"Cache-Control": "no-store"} if cache_headers else {}
         # The page's other scripts: the product files, or `others(name) -> bytes` (e.g. a baseline's git blobs).
         self.others = others or (lambda name: (PRODUCT_DIR / name).read_bytes())
         self.order = list(manifest["scripts"])
@@ -172,7 +175,7 @@ class Delivery:
     def _fulfill(self, route, name):
         try:
             route.fulfill(status=200, body=self.body(name), content_type=TYPES[Path(name).suffix],
-                          headers={"Cache-Control": "no-store"})
+                          headers=dict(self.headers))
         except PlaywrightError:
             pass  # the page has gone
 
@@ -234,7 +237,10 @@ TRACE_SCRIPT = r"""(() => {
   const add = EventTarget.prototype.addEventListener, remove = EventTarget.prototype.removeEventListener;
   const registrations = [], dispatches = [], executed = [], errors = [];
   let seq = 0, thrown = null;
-  const names = new WeakMap(), counters = new Map();
+  // A target's identity is its role (id, or its place in the document, or its kind when detached) plus the order in
+  // which objects of that role first appeared: a second, different element given the same id is '#id@2', never merged
+  // with the first (Astra PRE-A03).
+  const names = new WeakMap(), counters = new Map(), ordinals = new Map();
   const NOISY = new Set(['mousemove', 'pointermove', 'pointerrawupdate', 'mouseover', 'mouseout', 'pointerover',
     'pointerout', 'mouseenter', 'mouseleave', 'pointerenter', 'pointerleave']);
   function pathOf(el) {
@@ -252,9 +258,11 @@ TRACE_SCRIPT = r"""(() => {
     if (target === document) return 'document';
     let name = names.get(target);
     if (name) return name;
-    if (target instanceof Element && target.id) name = '#' + target.id;
-    else if (target instanceof Element && target.isConnected) name = pathOf(target);
-    else {
+    if (target instanceof Element && (target.id || target.isConnected)) {
+      const role = target.id ? '#' + target.id : pathOf(target);
+      const n = (ordinals.get(role) || 0) + 1; ordinals.set(role, n);
+      name = n === 1 ? role : role + '@' + n;
+    } else {
       const kind = (target instanceof Element ? '<' + target.localName + '>' : (target && target.constructor && target.constructor.name)) || 'EventTarget';
       const n = (counters.get(kind) || 0) + 1; counters.set(kind, n);
       name = kind + '~' + n;
@@ -401,6 +409,43 @@ def attribute(manifest, registration):
             owner = found
             break
     return inner, owner
+
+
+def frozen_indexes(page):
+    """For each top-level statement of `page`, its f1d5406 statement index (by declared names, else by text; -1 for
+    none) - the AST provenance two layouts of different pages share."""
+    return json.loads(subprocess.check_output(["node", str(_HELPER), "frozen-index", str(page)], text=True,
+                                              encoding="utf-8", cwd=ROOT))
+
+
+def provenance(manifest, frozen, registration):
+    """Where a registration was made, the same for the ORIGINAL page and a page that moved declarations: the f1d5406
+    statement of its outermost page-script frame, else the outermost frame of another script (file, line)."""
+    _, owner = attribute(manifest, registration)
+    if owner:
+        return ("statement", frozen[owner["index"]])
+    frames = registration["frames"]
+    return ("script", frames[-1][0], frames[-1][1]) if frames else None
+
+
+def full_order(manifest, frozen, registrations):
+    """Every registration in the order it was made: kind, target identity (role and creation order), event, options,
+    listener and provenance."""
+    return [(r["kind"], r["target"], r["type"], r["capture"], r["once"], r["passive"], r["signal"], r["listener"],
+             provenance(manifest, frozen, r)) for r in registrations]
+
+
+def order_difference(expected, observed, limit=5):
+    """The first places where two ordered lists differ (readable, unlike a list diff of hundreds of tuples)."""
+    out = []
+    for i in range(max(len(expected), len(observed))):
+        a = expected[i] if i < len(expected) else None
+        b = observed[i] if i < len(observed) else None
+        if a != b:
+            out.append({"at": i, "original": a, "observed": b})
+            if len(out) >= limit:
+                break
+    return out
 
 
 def by_target_event(registrations, keys=None):
