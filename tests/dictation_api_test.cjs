@@ -138,16 +138,21 @@ test('gate refusal prevents inference; post-inference revocation refuses result 
   assert.equal(audits, 1);
 });
 test('shared report gate preserves role, unverified, hold and preliminary refusals', async () => {
-  const svc = Object.create(PacsService.prototype);
-  const caller = { actor: 'reader', roles: ['radiologist'] };
-  let state = { ss: 'Verified', rs: 'W' }; svc.gate = async () => state;
-  assert.equal(await svc.reportDraftGate('1.2', caller, {}), state);
-  await assert.rejects(svc.reportDraftGate('1.2', { ...caller, roles: ['technician'] }, {}));
-  state = { ss: 'Unverified' }; await assert.rejects(svc.reportDraftGate('1.2', caller, {}));
-  state = { ss: 'Verified', holder: 'other', heldAt: new Date().toISOString() };
-  await assert.rejects(svc.reportDraftGate('1.2', caller, {}), code('REPORT_HELD'));
-  state = { ss: 'Verified', rs: 'P', preDoc: 'other', preReviewer: 'another' }; await assert.rejects(svc.reportDraftGate('1.2', caller, {}));
-  state = null; await assert.rejects(svc.reportDraftGate('1.2', caller, {}));
+  // S9-U0b: the shared rules are reached through the service's public dictation gate (the controller's call) over a stub
+  // store, as the real study row would answer them, not through a prototype instance with its study lookup replaced.
+  let state = null;
+  const db = { $executeRaw: async () => 0, $transaction: async fn => fn(db), studyState: { findUnique: async () => state } };
+  const svc = new PacsService(db, {}, {}, { prepare: async () => {}, require: async () => {} });
+  const caller = { actor: 'reader', roles: ['radiologist'], institution: 'synthetic', sub: 'reader-sub' };
+  const study = fields => ({ uid: '1.2', institutionId: 'synthetic', teleInstitutionId: null, ...fields });
+  state = study({ ss: 'Verified', rs: 'W' }); assert.equal(await svc.dictationGate('1.2', caller), undefined);
+  await assert.rejects(svc.dictationGate('1.2', { ...caller, roles: ['technician'] }), e => e.getStatus() === 403);
+  state = study({ ss: 'Unverified' }); await assert.rejects(svc.dictationGate('1.2', caller), e => e.getStatus() === 409);
+  state = study({ ss: 'Verified', holder: 'other', heldAt: new Date().toISOString() });
+  await assert.rejects(svc.dictationGate('1.2', caller), code('REPORT_HELD'));
+  state = study({ ss: 'Verified', rs: 'P', preDoc: 'other', preReviewer: 'another' });
+  await assert.rejects(svc.dictationGate('1.2', caller), e => e.getStatus() === 403);
+  state = null; await assert.rejects(svc.dictationGate('1.2', caller), e => e.getStatus() === 404);
 });
 async function parse(bytes, headers = {}, path = '/api/studies/1.2/dictation') {
   const req = Readable.from([bytes]); req.headers = { 'content-type': 'audio/wav', 'content-length': String(bytes.length), ...headers };

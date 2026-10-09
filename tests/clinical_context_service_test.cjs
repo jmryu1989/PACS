@@ -237,8 +237,12 @@ function world(studies, { policies = {}, orders = true } = {}) {
   w.prisma = prisma;
   w.orthanc = orthanc;
   w.access = new StudyAccessService(prisma, orthanc, {});
-  w.pacs = new PacsService(prisma, orthanc, {}, w.access, {});
-  w.pacs.institutions = NAMES.map(n => ({ ...n }));
+  // S9-U0b: the institution cache belongs to the institutions concern and is filled by the service's own start. The facade
+  // answers only display names here, so it starts over a store of those names; the case's own store sees no start read.
+  const names = { institution: { upsert: async () => ({}), findMany: async () => NAMES.map(n => ({ ...n })) },
+    order: { count: async () => 1, updateMany: async () => ({ count: 0 }) } };
+  w.pacs = new PacsService(names, orthanc, {}, w.access, {});
+  w.started = w.pacs.onModuleInit();
   w.service = new ClinicalContextService(prisma, orthanc, w.access, w.pacs);
   w.controller = new ClinicalContextController(w.service);
   return w;
@@ -246,6 +250,7 @@ function world(studies, { policies = {}, orders = true } = {}) {
 
 /** Calls the real controller; answers { status, body } for 200 and for every HTTP error. */
 async function call(w, caller, uid = ANCHOR, query = {}) {
+  await w.started;
   try {
     const body = await w.controller.read(uid, query, { ...caller });
     return { status: 200, body: JSON.parse(JSON.stringify(body)) };
@@ -882,6 +887,7 @@ test('CC-S14 anchor block and permission basis: owner answers are owner, tele an
     assert.equal(answer.sections.techNote.items[0].version, answer.anchor.techNoteVersion);
   }
   const probe = world([]);
+  await probe.started;
   assert.equal(owner.anchor.institutionName, probe.pacs.institutionName(A), 'the name the worklist row shows');
   assert.equal((await ok(world([study(ANCHOR)]), reader)).anchor.techNoteVersion, 0);
 });

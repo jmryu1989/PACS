@@ -135,7 +135,18 @@ const Q=(uid,inst)=>({'0020000D':val(uid),'00080080':val(inst),'00080020':val('2
   '00100010':{vr:'PN',Value:[{Alphabetic:'SYN^ROW^'+uid.slice(-4)}]},'00201206':val(1),'00201208':val(1)});
 const QIDO=[Q('2.25.8101','SYN-DICOM-A'),Q('2.25.8102','SYN-DICOM-B'),Q('2.25.8103','SYN-DICOM-A'),Q('2.25.8104','SYN OTHER'),Q('2.25.8105','SYN-DICOM-A')];
 const project=(rows,select)=>select?rows.map(r=>Object.fromEntries(Object.keys(select).map(k=>[k,r[k]]))):rows;
-function listService(){
+// S9-U0b: the institution cache belongs to the institutions concern. It is filled as the API process fills it, by the
+// service's own start (onModuleInit), over a start-time view of this store: the institution list given here, and the
+// start's seed writes absorbed. The cases begin after the start and keep every refusal of their own store.
+async function start(svc,prisma,names){
+  const saved={institution:prisma.institution,order:prisma.order};
+  prisma.institution={upsert:async()=>({}),findMany:async()=>structuredClone(names)};
+  prisma.order={...prisma.order,count:async()=>1,updateMany:async()=>({count:0})};
+  const log=console.log;console.log=()=>{};
+  try{await svc.onModuleInit();}finally{console.log=log;if(saved.order)prisma.order=saved.order;else delete prisma.order;if(saved.institution)prisma.institution=saved.institution;else delete prisma.institution;}
+  return svc;
+}
+async function listService(names=INSTITUTIONS){
   const refuse=what=>async()=>{throw new Error('the list must not write: '+what);};
   const prisma={
     studyState:{findMany:async arg=>{let rows=clone(STATES).map(s=>({...s,createdAt:at}));const where=arg?.where;
@@ -154,13 +165,13 @@ function listService(){
     studyIdentities:async()=>clone(QIDO).map(r=>({'0020000D':r['0020000D'],'00080080':r['00080080'],'00080050':r['00080050']})),
     studiesByUid:async uids=>uids.map(uid=>clone(QIDO).find(r=>r['0020000D'].Value[0]===uid))};
   const svc=new PacsService(prisma,orthanc,{},new StudyAccessService(prisma,orthanc,{}));
-  svc.institutions=clone(INSTITUTIONS);svc.prefs=async()=>({filters:[],templates:[]});
+  await start(svc,prisma,clone(names));
   return svc;
 }
 const rowsOf=answer=>Object.fromEntries(answer.studies.map(r=>[r.uid,{institutionName:r.institutionName,tele:r.tele}]));
 
 test('sc05 list rows carry the owner registry name and tele only for a study received by the caller',async()=>{
-  const svc=listService();
+  const svc=await listService();
   const expectA={
     '2.25.8101':{institutionName:'SYN Hospital A',tele:false},   // SR-01
     '2.25.8102':{institutionName:'SYN Center B',tele:true},      // SR-02: the owner's name, not the caller's
@@ -177,7 +188,7 @@ test('sc05 list rows carry the owner registry name and tele only for a study rec
   assert.deepEqual(rowsOf(await svc.listStudies(other)),expectB,'full list, kin-center');
   assert.deepEqual(rowsOf(await svc.listStudies(other,{limit:'100'})),expectB,'paged list, kin-center');
   // Equal registry names (HC-04): tele still follows the row, never a name comparison.
-  const same=listService();same.institutions=[{...INSTITUTIONS[0],name:'SYN Hospital'},{...INSTITUTIONS[1],name:'SYN Hospital'}];
+  const same=await listService([{...INSTITUTIONS[0],name:'SYN Hospital'},{...INSTITUTIONS[1],name:'SYN Hospital'}]);
   const rows=rowsOf(await same.listStudies(caller));
   assert.deepEqual(rows['2.25.8101'],{institutionName:'SYN Hospital',tele:false});
   assert.deepEqual(rows['2.25.8102'],{institutionName:'SYN Hospital',tele:true});
