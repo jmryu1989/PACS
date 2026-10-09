@@ -1,7 +1,8 @@
 # coding: utf-8
 """E-XA mutants X1..X14 (order e-xa-order.md section 5), X15..X21 (round 2: one per Astra finding EXA-R1-01..05,
 two for EXA-R1-02 - model and viewer), X22..X37 (round 3: one per invariant I01..I16 of the D732 consult,
-evidence/e-xa-consult-20261009/design.md section 8), and the case declaration check.
+evidence/e-xa-consult-20261009/design.md section 8), X38..X42 (round 4: Astra review of 61eb967, EXA-R3-01..04),
+and the case declaration check.
 
 Each mutant breaks the shipped module in a COPY (the source tree is never written) and must be killed by a behaviour
 failure: the named case fails on an assertion that carries that mutant's own token (XA-Xn:), the child exits non-zero
@@ -11,7 +12,7 @@ The clean copies must first pass the same runs through the same overrides, or no
   --check-cases   compare tests/part1/xa/cases.json with the cases the runners actually collect, both ways, and with
                   the mutant table below; a declared case that does not run or a running case that is not declared fails
   --anchors-only  check that every anchor occurs exactly once and every token is asserted in its named case, then stop
-  (default)       --check-cases, anchors, clean baseline, then every mutant (X1..X37)
+  (default)       --check-cases, anchors, clean baseline, then every mutant (X1..X42)
 
 The anchors are source text on purpose: this runner rewrites a copy of the code, so it has to find the code. They bind
 the mutation tool only; no test case asserts source text (AGENTS 1-B). stdlib only; browsers and node run as children.
@@ -145,8 +146,8 @@ MUTANTS = [
      'title': 'I02: the presentation generation moves when a new draw starts, not when the reader asks',
      'edits': [("      G = ++seq; P = ++seq;\n      cancelSleep(); dequeue(self); memoryWait = false; skip.clear(); pendingDue = null;",
                 "      P = ++seq;\n      cancelSleep(); dequeue(self); memoryWait = false; skip.clear(); pendingDue = null;"),
-               ('      const J = { draw: d.draw, slot, res, G, void: false, ended: false, abort: new AbortController(), timer: null };',
-                '      G = ++seq; slot.G = G;\n      const J = { draw: d.draw, slot, res, G, void: false, ended: false, abort: new AbortController(), timer: null };')]},
+               ('      const J = { draw: d.draw, surface: Object.freeze({}), slot, res, G, void: false, ended: false, abort: new AbortController(), timer: null };',
+                '      G = ++seq; slot.G = G;\n      const J = { draw: d.draw, surface: Object.freeze({}), slot, res, G, void: false, ended: false, abort: new AbortController(), timer: null };')]},
     {'id': 'X24', 'file': 'viewer', 'suite': 'dom', 'case': 'B01-DOM', 'token': 'XA-X24:',
      'title': 'I03: the deferred source.load() call trusts the check made when the request was queued',
      'old': "    if (!wanted(res)) { broker.ledger.abandon(res.token); endResource(res, { kind: 'cancelled', status: null }); return; }",
@@ -166,18 +167,18 @@ MUTANTS = [
     {'id': 'X28', 'file': 'viewer', 'suite': 'dom', 'case': 'R06-DOM', 'where': 'late_pressure', 'token': 'XA-X28:',
      'title': 'I07: a superseded draw gives its surface and frame back when it is asked to stop',
      'old': '      try { J.abort.abort(); } catch (_) {}  // asked to stop; its surface and its frame stay pinned until it really ends',
-     'new': '      try { J.abort.abort(); } catch (_) {}  endDraw(J, null);'},
+     'new': '      try { J.abort.abort(); } catch (_) {}  endDraw(J);'},
     {'id': 'X29', 'file': 'model', 'suite': 'model', 'case': 'B07-MODEL', 'token': 'XA-X29:',
      'title': 'I08: a frame on screen may be reclaimed under pressure once nothing is loading or drawing it',
      'old': "    const reclaimable = h => !!h && h.state === 'decoded' && !h.leases.size && !h.draws.size && !h.displays.size;",
      'new': "    const reclaimable = h => !!h && h.state === 'decoded' && !h.leases.size && !h.draws.size;"},
     {'id': 'X30', 'file': 'viewer', 'suite': 'dom', 'case': 'R01-DOM', 'where': 'late_seek', 'token': 'XA-X30:',
      'title': 'I09: a privately prepared surface is published without the current-draw check',
-     'old': "      if (verdict === 'current' && !error && receiptOk(receipt, J)) { publish(J, receipt); return; }",
-     'new': "      if (verdict !== 'reject' && !error && receiptOk(receipt, J)) { publish(J, receipt); return; }"},
+     'old': "      if (verdict === 'current' && !error && receiptOk(receipt, J)) { publish(J); return; }",
+     'new': "      if (verdict !== 'reject' && !error && receiptOk(receipt, J)) { publish(J); return; }"},
     {'id': 'X31', 'file': 'viewer', 'suite': 'dom', 'case': 'B03-DOM', 'token': 'XA-X31:',
      'title': 'I10: a render receipt is accepted when only the frame number matches',
-     'old': '    const receiptOk = (r, J) => !!r && r.draw === J.draw && r.sop === meta.sop && r.frame === J.slot.index + 1 && !!r.surface;',
+     'old': '    const receiptOk = (r, J) => !!r && r.draw === J.draw && r.surface === J.surface && r.sop === meta.sop &&\n      r.frame === J.slot.index + 1 && r.opening === opened.sequence;',
      'new': '    const receiptOk = (r, J) => !!r && r.frame === J.slot.index + 1 && !!r.surface;'},
     {'id': 'X32', 'file': 'viewer', 'suite': 'dom', 'case': 'B04-DOM', 'token': 'XA-X32:',
      'title': 'I11: the label, coverage and displayed move when the target is decoded, before its render',
@@ -203,6 +204,27 @@ MUTANTS = [
      'title': 'I16: DT is trimmed of any white space instead of only trailing ASCII SPACE',
      'old': '    const text = v.slice(0, end);',
      'new': '    const text = v.trim();'},
+    # Round 4 (Astra review of 61eb967): each one puts back the defect a finding named.
+    {'id': 'X38', 'file': 'viewer', 'suite': 'dom', 'case': 'EXA-R3-01-DOM', 'token': 'XA-X38:',
+     'title': 'EXA-R3-01: a receipt is published when it carries any surface, not the one issued to this draw',
+     'old': '&& r.surface === J.surface &&',
+     'new': '&& !!r.surface &&'},
+    {'id': 'X39', 'file': 'viewer', 'suite': 'dom', 'case': 'EXA-R3-01-DOM', 'token': 'XA-X39:',
+     'title': 'EXA-R3-01: a refused receipt gives back the surface it names as if it were its own',
+     'old': "      if (verdict === 'current') fail(J.slot.index, { kind: 'render' });\n      endDraw(J);",
+     'new': "      if (verdict === 'current') fail(J.slot.index, { kind: 'render' });\n      if (receipt?.surface) viewport.release?.(receipt.surface);\n      endDraw(J);"},
+    {'id': 'X40', 'file': 'viewer', 'suite': 'dom', 'case': 'EXA-R3-02-DOM', 'token': 'XA-X40:',
+     'title': 'EXA-R3-02: a 401/403 on a look-ahead frame is only skipped',
+     'old': "      if (f.kind === 'denied') return fail(slot.index, f);",
+     'new': '      // a refused look-ahead frame is only skipped'},
+    {'id': 'X41', 'file': 'viewer', 'suite': 'dom', 'case': 'EXA-R3-03-DOM', 'token': 'XA-X41:',
+     'title': 'EXA-R3-03: the claim ignores a cover that failed and loads over the previous Study',
+     'edits': [('      if (coverPhysical(true)) return true;', '      coverPhysical(true); return true;'),
+               ('      if (physical.covered) { newIntent(); bring(at); }', '      if (hidden) { newIntent(); bring(at); }')]},
+    {'id': 'X42', 'file': 'viewer', 'suite': 'dom', 'case': 'XA06-DOM-RENDER-TIMEOUT', 'token': 'XA-X42:',
+     'title': 'EXA-R3-04: Retry after a render timeout during playback restarts playback',
+     'old': '      const resume = playing && !error?.timedOut;',
+     'new': '      const resume = playing;'},
 ]
 
 

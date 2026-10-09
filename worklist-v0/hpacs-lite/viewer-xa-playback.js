@@ -11,9 +11,11 @@
                                                                             mayDecode() is asked right before decoding),
                 release(index, image) -> ack}
      viewport  the physical viewport, the same object for every opening shown in it:
-                prepare(image, {sop, frame, index, opening}, {draw, signal}) -> {draw, sop, frame, surface}   (private surface only)
-                publish(receipt) -> {replaced}   (synchronous swap of the visible front; no later pixel writes)
-                release(surface) -> ack, clear() -> {replaced}, cover(on), current() -> index
+                prepare(image, {sop, frame, index, opening}, {draw, surface, signal}) -> {draw, surface, sop, frame, opening}
+                  renders into a private surface behind the opaque handle `surface` issued to this draw, and echoes it
+                publish({draw, surface, sop, frame, index, opening})   synchronous swap of the visible front to that
+                  surface; no later pixel writes, no callbacks
+                release(surface handle) -> ack, clear(), cover(on), current() -> index
      identity  {key: {account, institution, study, series, sop, sequence[, session]}, current(), subscribe?(onChange)}
      events    {emit(event)}: requested / provided / displayed / failed / cancelled / stopped stay separate facts
      clock     {now, setTimeout, clearTimeout}; the document's own timers when omitted. */
@@ -21,7 +23,9 @@
   'use strict';
   const LOAD_TIMEOUT_MS = 20000;
   // One ledger, the live resources, the owner of every physical viewport and one memory queue per document.
-  const broker = { model: null, ledger: null, resources: new Map(), viewports: new Map(), controllers: new Set(), queue: [], pumping: false };
+  // handles: the surface handle issued to each draw token (the only surface that draw may publish or give back).
+  const broker = { model: null, ledger: null, resources: new Map(), viewports: new Map(), controllers: new Set(), queue: [], pumping: false,
+    handles: new Map() };
 
   const PHASE = { ready: 'Ready', loading: 'Loading', playing: 'Playing', buffering: 'Buffering', paused: 'Paused',
     failed: 'Failed', denied: 'Access Denied', ended: 'Stopped', stale: 'Stopped', unavailable: 'Unavailable',
@@ -238,6 +242,18 @@
       if (physical.owner !== V) return false;
       try { viewport.cover?.(on); physical.covered = on; return true; } catch (_) { return false; }
     }
+    // Hide what the physical viewport shows: the cover, or when the cover cannot be set, clearing the front so no
+    // earlier pixels remain. false = nothing could hide it.
+    function hide() {
+      if (coverPhysical(true)) return true;
+      if (physical.owner !== V || typeof viewport.clear !== 'function') return false;
+      try { viewport.clear(); } catch (_) { return false; }
+      const front = ledger.front(physical);
+      if (front) { ledger.detach(front); releaseSurface(front); }
+      return true;
+    }
+    // After the claim could not cover, nothing new is loaded until the previous image is really gone.
+    function barrier() { return failure?.kind !== 'cover' || physical.covered || hide(); }
     function lose(state) {
       if (ended || disposed) return;
       if (state === 'ended') finish('ended', '로그인 상태가 바뀌어 재생을 멈추고 영상을 가렸습니다.');
@@ -251,7 +267,7 @@
         if (slot.phase === 'drawing') abortDraw(slot.J);
         else if (slot.phase !== 'shown') releaseSlot(slot);
       }
-      coverPhysical(true);
+      if (physical.owner === V) hide();
       phase = next; message = text;
       emit({ type: 'stopped', index: shown ?? -1, reason: next });
       paint(); schedulePump();
@@ -372,12 +388,18 @@
       clearTimer(slot); slot.phase = 'released'; slots.delete(slot);
       if (wasTarget) target = null;
       if (verdict !== 'current' || f.kind === 'cancelled') return;
+      // Refused access concerns the opening, not one frame: a 401/403 on any of its requests, look-ahead included,
+      // covers and stops exactly like the frame being shown.
+      if (f.kind === 'denied') return fail(slot.index, f);
       if (!wasTarget) { skip.add(slot.index); emit({ type: 'failed', index: slot.index, kind: f.kind, needed: false }); return; }
       return fail(slot.index, f);
     }
 
     // ---- drawing: prepare privately, verify, publish synchronously ----
-    const receiptOk = (r, J) => !!r && r.draw === J.draw && r.sop === meta.sop && r.frame === J.slot.index + 1 && !!r.surface;
+    // Each draw is issued one surface handle of its own at the gate. Only that exact handle, for this draw, this
+    // object, frame and opening, may be published; a draw that ends unpublished gives back that handle and nothing else.
+    const receiptOk = (r, J) => !!r && r.draw === J.draw && r.surface === J.surface && r.sop === meta.sop &&
+      r.frame === J.slot.index + 1 && r.opening === opened.sequence;
     function startDraw(slot) {
       if (slot.phase !== 'decoded' || slot !== target) return;
       if (gate('draw', { slot }) !== 'current') { releaseSlot(slot); return; }
@@ -386,29 +408,31 @@
       let d = ask();
       if (!d.ok && d.reason === 'bytes') { relieve(slot, true); d = ask(); }
       if (!d.ok || !res) { wait('bytes'); return; }
-      const J = { draw: d.draw, slot, res, G, void: false, ended: false, abort: new AbortController(), timer: null };
+      const J = { draw: d.draw, surface: Object.freeze({}), slot, res, G, void: false, ended: false, abort: new AbortController(), timer: null };
+      broker.handles.set(J.draw, J.surface);
       slot.phase = 'drawing'; slot.J = J; drawing = J;
       J.timer = time.setTimeout(() => expire(J), LOAD_TIMEOUT_MS);
       let pending;
       const frameId = { sop: meta.sop, frame: slot.index + 1, index: slot.index, opening: opened.sequence };
-      try { pending = Promise.resolve(viewport.prepare(res.image, frameId, { draw: J.draw, signal: J.abort.signal })); }
+      try { pending = Promise.resolve(viewport.prepare(res.image, frameId, { draw: J.draw, surface: J.surface, signal: J.abort.signal })); }
       catch (error) { pending = Promise.reject(error); }
       pending.then(receipt => drawn(J, receipt, null), error => drawn(J, null, error || Error('render failed')));
     }
     function abortDraw(J) {
       try { J.abort.abort(); } catch (_) {}  // asked to stop; its surface and its frame stay pinned until it really ends
     }
-    function releaseSurface(token, surface) {
-      if (!surface) { ledger.drop(token, true); schedulePump(); return; }
+    // Gives back the surface issued to this draw token, through the renderer, counted until the renderer confirms.
+    function releaseSurface(token) {
+      const handle = broker.handles.get(token);
       let ack;
-      try { ack = viewport.release?.(surface); } catch (_) { ledger.drop(token, false); return; }
-      Promise.resolve(ack).then(() => { ledger.drop(token, true); schedulePump(); }, () => ledger.drop(token, false));
+      try { ack = viewport.release?.(handle); } catch (_) { ledger.drop(token, false); return; }
+      Promise.resolve(ack).then(() => { ledger.drop(token, true); broker.handles.delete(token); schedulePump(); }, () => ledger.drop(token, false));
     }
-    function endDraw(J, receipt) {
+    function endDraw(J) {
       J.ended = true;
       if (drawing === J) drawing = null;
       time.clearTimeout(J.timer);
-      releaseSurface(J.draw, receipt?.surface);
+      releaseSurface(J.draw);
       const slot = J.slot;
       if (slot.phase === 'drawing') { slot.phase = 'decoded'; releaseSlot(slot); }
     }
@@ -416,19 +440,19 @@
       if (J.ended) return;
       time.clearTimeout(J.timer);
       const verdict = gate('publish', { draw: J });
-      if (verdict === 'current' && !error && receiptOk(receipt, J)) { publish(J, receipt); return; }
+      if (verdict === 'current' && !error && receiptOk(receipt, J)) { publish(J); return; }
       if (verdict === 'current') fail(J.slot.index, { kind: 'render' });
-      endDraw(J, receipt);
+      endDraw(J);
     }
     // One synchronous transaction: the verified surface goes to the front, then the facts that follow from it.
-    function publish(J, receipt) {
+    function publish(J) {
       const slot = J.slot, index = slot.index;
-      let swapped;
-      try { swapped = viewport.publish(receipt); } catch (_) { fail(index, { kind: 'render' }); endDraw(J, receipt); return; }
+      const frameId = { sop: meta.sop, frame: index + 1, index, opening: opened.sequence };
+      try { viewport.publish({ draw: J.draw, surface: J.surface, ...frameId }); } catch (_) { fail(index, { kind: 'render' }); endDraw(J); return; }
       J.ended = true; time.clearTimeout(J.timer);
       if (drawing === J) drawing = null;
       const { previous } = ledger.publish(J.draw, physical);
-      if (previous) releaseSurface(previous, swapped?.replaced);
+      if (previous) releaseSurface(previous);
       if (shownSlot && shownSlot !== slot) { shownSlot.phase = 'released'; slots.delete(shownSlot); }
       slot.phase = 'shown'; shownSlot = slot; shown = index;
       if (target === slot) target = null;
@@ -452,7 +476,7 @@
       if (J.ended || J.void) return;
       J.void = true;
       abortDraw(J);
-      if (J.G === G && !ended && !disposed) fail(J.slot.index, { kind: 'render' });
+      if (J.G === G && !ended && !disposed) fail(J.slot.index, { kind: 'render', timedOut: true });
     }
 
     // ---- intents ----
@@ -493,16 +517,19 @@
     function fail(index, error) {
       const kind = error?.kind || 'failed';
       if (kind === 'cancelled' || ended || disposed) return false;
-      const resume = playing;
+      // A timed-out render is recovered by one verified frame; playback does not restart by itself (R07).
+      const resume = playing && !error?.timedOut;
       P = ++seq; playing = false; cancelSleep(); dequeue(self); memoryWait = false;
-      withdraw(slot => slot.kind === 'ahead' || slot.phase !== 'drawing');
+      // Refused access ends every pending load and publish of this opening, a draw already under way included.
+      if (kind === 'denied') { G = ++seq; withdraw(() => true); }
+      else withdraw(slot => slot.kind === 'ahead' || slot.phase !== 'drawing');
       const at = shown === null ? '-' : shown + 1, frameNumber = index + 1;
       if (kind === 'refused') { phase = 'unavailable'; failure = null; message = REASON['frame-too-large']; paint(); return false; }
       failure = { index, kind, resume };
       phase = kind === 'denied' ? 'denied' : 'failed';
       if (kind === 'denied') {
         message = '프레임 ' + frameNumber + '을 볼 권한을 확인하지 못해 영상을 가렸습니다. Retry로 다시 확인하세요.';
-        coverPhysical(true);
+        hide();
       } else message = (kind === 'timeout' ? '프레임 ' + frameNumber + ' 준비 시간이 초과되었습니다. ' : '프레임 ' + frameNumber + '을 불러오거나 표시하지 못했습니다. ') +
         '마지막으로 표시한 프레임 ' + at + '에서 멈췄습니다. Retry로 같은 위치부터 다시 시도하세요.';
       emit({ type: 'failed', index, kind, needed: true });
@@ -549,6 +576,7 @@
     }
     function seek(index) {
       if (!navigable || ended || disposed || !Number.isSafeInteger(index) || index < 0 || index >= total) return;
+      if (!barrier()) { paint(); return; }
       failure = null; message = '';
       newIntent(); playing = false;
       // Seeking to the frame already on screen ends older draws but invents no new display.
@@ -558,6 +586,7 @@
     }
     function again() {
       if (!failure || ended || disposed) return;
+      if (!barrier()) { paint(); return; }
       const { index, resume } = failure;
       failure = null; message = '';
       newIntent();
@@ -608,18 +637,24 @@
     // Claim the physical viewport: the previous owner loses its right to publish now, and a new opening starts covered.
     const previousOwner = physical.controller;
     physical.owner = V; physical.controller = self;
-    coverPhysical(true);
+    // The claim needs the cover; when the cover fails the previous front is cleared instead, and the opening waits in
+    // a failed state for Retry rather than loading over whatever might still be on screen.
+    const hidden = hide();
     broker.controllers.add(self);
     previousOwner?.lose();
     if (meta.ok && !binding.ok) {
       // Nothing of a source that is not this opening's object is fetched or drawn.
       phase = 'unavailable'; message = REASON[binding.reason] || REASON.opening; ended = true;
     } else if (gate('mount') === 'current' && navigable) {
-      newIntent();
       let at = null;
       try { at = viewport.current?.(); } catch (_) {}
       if (!Number.isSafeInteger(at) || at < 0 || at >= total) at = 0;
-      bring(at);
+      if (physical.covered) { newIntent(); bring(at); }
+      else {
+        failure = { index: at, kind: 'cover', resume: false }; phase = 'failed';
+        message = hidden ? '화면 가림을 설정하지 못해 이전 영상을 지우고 멈췄습니다. Retry로 다시 시도하세요.'
+          : '이전 영상을 가리지 못해 이 영상을 표시하지 않았습니다. Retry로 다시 시도하세요.';
+      }
     }
     paint();
 
@@ -645,9 +680,9 @@
           const front = ledger.front(physical);
           if (front && typeof viewport.clear === 'function') {
             // A front the renderer could not clear stays counted: it is still memory in use, not a release.
-            let swapped = null, cleared = true;
-            try { swapped = viewport.clear(); } catch (_) { cleared = false; }
-            if (cleared) { ledger.detach(front); releaseSurface(front, swapped?.replaced); }
+            let cleared = true;
+            try { viewport.clear(); } catch (_) { cleared = false; }
+            if (cleared) { ledger.detach(front); releaseSurface(front); }
           }
           physical.owner = null; physical.controller = null;
         }

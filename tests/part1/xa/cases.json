@@ -1,9 +1,10 @@
 {
  "unit": "E-XA",
- "round": 3,
+ "round": 4,
  "order": "C:/Users/norne/PACS/tmp/astra-control/evidence/emg-exa-prep-20261009/e-xa-order.md",
  "round2": "Astra review of 585c66f (EXA-R1-01..05) and the commander's design (D726): render jobs, retiring reservations, opening binding, source time basis, strict DT. The R1 plan was 12/10/8 named cases; round 2 adds 3 model and 4 DOM cases and widens one DICOM case (Frame Delay).",
  "round3": "Astra review of 86a3826 (EXA-R2-01..04) and the Astra design consult D732 (evidence/e-xa-consult-20261009/design.md): one ownership ledger, one gate before every effect, prepare -> verify -> publish, the cover owned by the physical viewport, timeout without automatic success (DC01). All 37 earlier cases are kept; XA06-DOM-RENDER-TIMEOUT changes its expectation per DC01 and is renamed. Round 3 adds 10 model cases (B05-B09, B12-B16) and 32 DOM cases (the late load/decode/draw matrix and B01-B04, B06, B08-B11). The 40 consult cases are design obligations bound below to collected cases; 40 is not a count of new functions.",
+ "round4": "Astra review of 61eb967 (EXA-R3-01..05, D742) inside the D732 design: a surface handle issued to each draw at the gate (publish and release only by that handle), a 401/403 on any request of the opening covers and stops, the claim never loads over a previous Study whose cover failed, Retry after a render timeout stays paused, and the declaration below binds every axis to an observation or not_run. Adds 3 DOM cases (EXA-R3-01..03), widens B01/B03/B04/R07 and changes XA06-DOM-NOT-SHOWN: a 403 on look-ahead frame 4 now stops at frame 1.",
  "rule": "Hand-written declaration, never generated from a run. tests/part1/xa/mutants.py --check-cases compares it both ways with the cases the runners actually collect and with the mutant table.",
  "requirements": [
   {"req": "REQ-XA-01", "risk": "RISK-XA-CODEC", "test": "XA01", "allowed": "stored XA frame identity, pixels and compressed frames decode as stored", "refused": "an unsupported or damaged frame or identity is never success"},
@@ -15,7 +16,7 @@
   {"req": "REQ-XA-07", "risk": "RISK-XA-REGRESSION", "test": "XA07", "allowed": "XA goes to XA playback, US/RF/other stay on their path, stored pixels are unchanged", "refused": "re-subtraction, pixel shift, flattening several objects or dimensions into one run"},
   {"req": "REQ-XA-08", "risk": "RISK-XA-FALSE-READ", "test": "XA08", "allowed": "requested, provided and displayed are separate facts; displayed is the published render, once", "refused": "interrupted bytes or a prefetch reported as displayed"}
  ],
- "planned_counts": {"model": 25, "dom": 46, "dicom": 8},
+ "planned_counts": {"model": 25, "dom": 49, "dicom": 8},
  "suites": {
   "model": {
    "path": "tests/part1/xa/model_test.cjs",
@@ -98,7 +99,10 @@
     {"id": "B08-DOM", "req": "REQ-XA-05", "risk": "RISK-XA-STALE", "test": "XA05", "consult": "B08", "method": "test_b08_the_same_frame_of_another_opening_is_fetched_on_its_own"},
     {"id": "B09-DOM", "req": "REQ-XA-04", "risk": "RISK-XA-OOM", "test": "XA04", "consult": "B09", "method": "test_b09_a_shared_payload_counts_once_and_every_surface_on_its_own"},
     {"id": "B10-DOM", "req": "REQ-XA-05", "risk": "RISK-XA-STALE", "test": "XA05", "consult": "B10", "finding": "EXA-R2-03", "method": "test_b10_a_new_opening_stays_covered_until_its_own_first_render_is_published"},
-    {"id": "B11-DOM", "req": "REQ-XA-06", "risk": "RISK-XA-FALSE-SUCCESS", "test": "XA06", "consult": "B11", "method": "test_b11_failures_keep_the_screen_they_found_and_never_fake_success"}
+    {"id": "B11-DOM", "req": "REQ-XA-06", "risk": "RISK-XA-FALSE-SUCCESS", "test": "XA06", "consult": "B11", "method": "test_b11_failures_keep_the_screen_they_found_and_never_fake_success"},
+    {"id": "EXA-R3-01-DOM", "req": "REQ-XA-08", "risk": "RISK-XA-FALSE-READ", "test": "XA08", "finding": "EXA-R3-01", "consult": "B03", "method": "test_exa_r3_01_a_receipt_naming_another_draws_surface_is_never_published_or_given_back"},
+    {"id": "EXA-R3-02-DOM", "req": "REQ-XA-06", "risk": "RISK-XA-FALSE-SUCCESS", "test": "XA06", "finding": "EXA-R3-02", "consult": "B11", "method": "test_exa_r3_02_a_403_on_a_look_ahead_frame_covers_stops_and_ends_everything_pending"},
+    {"id": "EXA-R3-03-DOM", "req": "REQ-XA-05", "risk": "RISK-XA-STALE", "test": "XA05", "finding": "EXA-R3-03", "consult": "B10", "method": "test_exa_r3_03_a_new_opening_whose_cover_fails_never_loads_or_shows_over_the_previous_study"}
    ]
   },
   "dicom": {
@@ -128,7 +132,7 @@
    "L03": {"cases": ["L03-DOM"], "run": ["X inside the new range", "X outside the new range", "First Frame afterwards publishes the new range"], "not_run": []},
    "L04": {"cases": ["L04-DOM"], "run": ["A1 -> B2 -> A3 on one physical viewport, A1 answers last, A1 disposed after A3 is shown"], "not_run": []},
    "L05": {"cases": ["L05-DOM"], "run": ["session end then a new epoch", "owner dispose then a new mount"], "not_run": ["old completion before the new epoch mounts"]},
-   "L06": {"cases": ["L06-DOM"], "run": ["four decode permits held across two viewports, a fifth request waits"], "not_run": ["the 128 MiB byte variant for a late load (bytes at the bound are R06 and B09)"]},
+   "L06": {"cases": ["L06-DOM"], "run": ["four supply permits in use (this viewport's held transport + three cancelled transports of another viewport not yet ended), a fifth load is not called; X then shows once"], "not_run": ["the 128 MiB byte variant for a late load (bytes at the bound are R06 and B09)"]},
    "L07": {"cases": ["L07-DOM"], "run": ["late transport arrives before Retry", "Retry before the late transport arrives"], "not_run": []},
    "L08": {"cases": ["L08-DOM"], "run": ["abort acknowledged late", "transport succeeds after the abort", "owner dispose then late abort end", "duplicate abort end"], "not_run": []},
    "D01": {"cases": ["D01-DOM"], "run": ["old completion first", "new completion first"], "not_run": []},
@@ -136,28 +140,28 @@
    "D03": {"cases": ["D03-DOM"], "run": ["X inside the new range", "X outside the new range"], "not_run": []},
    "D04": {"cases": ["D04-DOM"], "run": ["A1 -> B2 -> A3, same SOP and frame index, A1 decoder ends last"], "not_run": []},
    "D05": {"cases": ["D05-DOM"], "run": ["session end then a new epoch", "owner dispose then a new mount"], "not_run": ["old completion before the new epoch mounts"]},
-   "D06": {"cases": ["D06-DOM"], "run": ["four decoders running, a fifth waits; it enters only after real ends"], "not_run": ["the 128 MiB byte variant for a late decode"]},
+   "D06": {"cases": ["D06-DOM"], "run": ["four supply permits in use: one running decoder (X) + three cancelled transports of another viewport not yet ended; a fifth load is not called and enters only after those transports really end; X then shows once"], "not_run": ["four decoders running at the same time", "the 128 MiB byte variant for a late decode"]},
    "D07": {"cases": ["D07-DOM"], "run": ["late decoder success before Retry", "Retry before the late decoder success"], "not_run": ["late decoder failure after the timeout"]},
-   "D08": {"cases": ["D08-DOM"], "run": ["ten alternating seeks with decoders that keep running after abort, ended in reverse order"], "not_run": ["ended in forward order"]},
+   "D08": {"cases": ["D08-DOM"], "run": ["ten alternating seeks; four decoders keep running after their abort and the later requests wait (busy or no permit); ended in reverse order; only the last intent shows, every cancelled image goes back once"], "not_run": ["ended in forward order"]},
    "R01": {"cases": ["R01-DOM", "XA05-DOM-RENDER-RACE"], "run": ["old completion first", "new completion first"], "not_run": []},
    "R02": {"cases": ["R02-DOM", "XA05-DOM-RENDER-RACE"], "run": ["Pause alone", "seek before the draw completes"], "not_run": []},
    "R03": {"cases": ["R03-DOM"], "run": ["X inside the new range", "X outside the new range"], "not_run": []},
    "R04": {"cases": ["R04-DOM"], "run": ["A1 draw answers before A3's first publish"], "not_run": ["A1 draw answering after A3's first publish"]},
    "R05": {"cases": ["R05-DOM"], "run": ["session end then a new mount", "owner dispose then a new mount"], "not_run": ["old completion before the new mount"]},
    "R06": {"cases": ["R06-DOM"], "run": ["32 MiB payload + 32 MiB front shown and 32 + 32 drawing = 128 MiB, seek waits until the draw ends"], "not_run": []},
-   "R07": {"cases": ["XA06-DOM-RENDER-TIMEOUT"], "run": ["subsequent render", "initial render"], "not_run": []},
+   "R07": {"cases": ["XA06-DOM-RENDER-TIMEOUT"], "run": ["subsequent render", "initial render", "render during playback: Retry shows one verified frame and stays paused (EXA-R3-04)"], "not_run": []},
    "R08": {"cases": ["R08-DOM"], "run": ["renderer succeeds after abort", "renderer rejects after abort"], "not_run": []},
-   "B01": {"cases": ["B01-DOM"], "run": ["identity end", "identity replaced", "seek again", "dispose", "control stays current"], "not_run": ["invalidation from a requested-event observer"]},
+   "B01": {"cases": ["B01-DOM"], "run": ["identity end", "identity replaced", "seek again", "dispose", "control stays current", "each ends with dispose and a drain to zero"], "not_run": ["invalidation from a requested-event observer"]},
    "B02": {"cases": ["B02-DOM"], "run": ["seek at the provided event before the queued draw", "back to the shown frame while drawing", "30 clicks then back to the shown frame"], "not_run": []},
-   "B03": {"cases": ["B03-DOM"], "run": ["wrong SOP", "wrong frame", "wrong draw token", "no surface", "render rejects", "foreign image from the source", "exact receipt"], "not_run": []},
-   "B04": {"cases": ["B04-DOM", "XA06-DOM-NOT-SHOWN"], "run": ["no handler", "displayed handler seeks", "displayed handler ends the session", "displayed handler throws"], "not_run": ["the renderer delivering the same receipt twice"]},
+   "B03": {"cases": ["B03-DOM", "EXA-R3-01-DOM"], "run": ["wrong SOP", "wrong frame", "wrong opening", "wrong draw token", "no surface", "a surface handle no draw was issued", "render rejects", "foreign image from the source", "exact receipt", "the front surface returned with this draw's own token, SOP and frame (EXA-R3-01)", "the front surface with another token (EXA-R3-01)", "each refused draw gives back only its own issued surface; each subcase ends with dispose and a drain to zero"], "not_run": []},
+   "B04": {"cases": ["B04-DOM", "XA06-DOM-NOT-SHOWN"], "run": ["no handler", "displayed handler seeks", "displayed handler ends the session", "displayed handler throws", "each ends with dispose and a drain to zero"], "not_run": ["the renderer delivering the same receipt twice"]},
    "B05": {"cases": ["B05-MODEL"], "run": ["old settle, release and leave after a new incarnation", "delayed release acknowledgement", "failed release"], "not_run": []},
    "B06": {"cases": ["B06-MODEL", "B06-DOM"], "run": ["first source owner disposed while the other waits", "retiring load never joined (model)"], "not_run": []},
    "B07": {"cases": ["B07-MODEL", "R06-DOM"], "run": ["shown, drawing, loading and unheld decoded side by side"], "not_run": []},
    "B08": {"cases": ["B08-MODEL", "B08-DOM"], "run": ["another account, institution (model), session (model), opening sequence, source revision", "same complete opening shares (model)"], "not_run": []},
    "B09": {"cases": ["B09-MODEL", "B09-DOM"], "run": ["64 + 16 payload + 3 x 16 surfaces = 128 MiB in the DOM; 64 + 32 + 16 + 16 in the model"], "not_run": []},
-   "B10": {"cases": ["B10-DOM"], "run": ["first render fails then Retry", "first render times out then answers, then Retry", "A -> B -> A"], "not_run": ["a stale viewport.current() index at mount"]},
-   "B11": {"cases": ["B11-DOM", "XA06-DOM-RETRY", "XA06-DOM-NOT-SHOWN"], "run": ["codec failure after a shown frame", "first render fails", "403", "Retry after each"], "not_run": ["a transport failure (before decode) after a shown frame"]},
+   "B10": {"cases": ["B10-DOM", "EXA-R3-03-DOM"], "run": ["first render fails then Retry", "first render times out then answers, then Retry", "A -> B -> A", "cover(true) throws at the claim: the previous front is cleared, no load, Failed with Retry (EXA-R3-03)", "cover and clear both throw: no load and no draw over the previous Study, Retry waits until it can be hidden (EXA-R3-03)"], "not_run": ["a stale viewport.current() index at mount"]},
+   "B11": {"cases": ["B11-DOM", "XA06-DOM-RETRY", "XA06-DOM-NOT-SHOWN", "EXA-R3-02-DOM"], "run": ["codec failure after a shown frame", "first render fails", "403 on the requested frame", "403 on a look-ahead frame while playing: cover, stop, the pending draw never publishes, no new load (EXA-R3-02)", "Retry after each"], "not_run": ["a transport failure (before decode) after a shown frame"]},
    "B12": {"cases": ["B12-MODEL", "XA04-DOM-601"], "run": ["bytes, four decodes and 500 prepared each at the bound"], "not_run": []},
    "B13": {"cases": ["B13-MODEL"], "run": ["never called, failed, cancelled then failed, draw drop failed then ok, duplicate drop and release"], "not_run": []},
    "B14": {"cases": ["B14-MODEL"], "run": ["padded and unpadded seconds, six-digit fraction at 26 characters, year boundary, stored text kept"], "not_run": []},
@@ -202,7 +206,12 @@
   {"id": "X34", "file": "worklist-v0/hpacs-lite/viewer-xa-playback.js", "case": "XA06-DOM-RENDER-TIMEOUT", "token": "XA-X34:", "what": "I13 a timed-out latest render recovers on its own"},
   {"id": "X35", "file": "worklist-v0/hpacs-lite/xa-playback-model.js", "case": "B05-MODEL", "token": "XA-X35:", "what": "I14 cleanup by frame key instead of the exact token"},
   {"id": "X36", "file": "worklist-v0/hpacs-lite/viewer-xa-playback.js", "case": "R02-DOM", "token": "XA-X36:", "what": "I15 Pause also voids a draw already under way"},
-  {"id": "X37", "file": "worklist-v0/hpacs-lite/xa-playback-model.js", "case": "B15-MODEL", "token": "XA-X37:", "what": "I16 DT trimmed of any white space"}
+  {"id": "X37", "file": "worklist-v0/hpacs-lite/xa-playback-model.js", "case": "B15-MODEL", "token": "XA-X37:", "what": "I16 DT trimmed of any white space"},
+  {"id": "X38", "file": "worklist-v0/hpacs-lite/viewer-xa-playback.js", "case": "EXA-R3-01-DOM", "token": "XA-X38:", "what": "EXA-R3-01 any surface is published, not the one issued to this draw"},
+  {"id": "X39", "file": "worklist-v0/hpacs-lite/viewer-xa-playback.js", "case": "EXA-R3-01-DOM", "token": "XA-X39:", "what": "EXA-R3-01 a refused receipt gives back the surface it names"},
+  {"id": "X40", "file": "worklist-v0/hpacs-lite/viewer-xa-playback.js", "case": "EXA-R3-02-DOM", "token": "XA-X40:", "what": "EXA-R3-02 a look-ahead 401/403 is only skipped"},
+  {"id": "X41", "file": "worklist-v0/hpacs-lite/viewer-xa-playback.js", "case": "EXA-R3-03-DOM", "token": "XA-X41:", "what": "EXA-R3-03 the claim ignores a failed cover and loads"},
+  {"id": "X42", "file": "worklist-v0/hpacs-lite/viewer-xa-playback.js", "case": "XA06-DOM-RENDER-TIMEOUT", "token": "XA-X42:", "what": "EXA-R3-04 Retry after a render timeout restarts playback"}
  ],
  "inputs": {
   "tests/part1/xa/samples.json": "220fb2b09cf048919cc44830ce8816b641c91268ecee11dfa627de6b2b41022c"
@@ -211,7 +220,7 @@
   {"id": "XA07-LIVE", "req": "REQ-XA-07", "file": "tests/part1/xa/live.py", "class": "XaPlaybackE2E", "method": null, "what": "single OHIF cine dispatcher: XA to this module, US/RF/CT MPR on their path, one timer owner, stored pixel hash before/after"},
   {"id": "XA08-LIVE", "req": "REQ-XA-08", "file": "tests/part1/xa/live.py", "class": "XaPlaybackE2E", "method": null, "what": "EMR-E requested/provided/displayed events from the real frame supply; interrupted bytes and prefetch never reported as displayed"},
   {"id": "XA-WHOLE-FLOW-G3", "req": "REQ-XA-01..08", "file": "tests/part1/xa/live.py", "class": "XaPlaybackE2E", "method": "test_xa01_public_cine_timing_supply_and_recovery", "what": "the one G3 exact selection named by the order; profile part1-xa and workflow .github/workflows/part1-xa.yml"},
-  {"id": "XA-R2-ADAPTER", "req": "REQ-XA-05", "file": "R2 OHIF adapter", "class": null, "method": null, "what": "D732 DC02/DC03: the pinned OHIF renderer must implement prepare (private surface) -> publish (synchronous swap) -> release, viewport-owned cover, mayDecode before decode, a supply promise that settles only after its decoder stops, and the host's session/opening notice wired to identity.subscribe; until then only the module and the isolated DOM are complete"}
+  {"id": "XA-R2-ADAPTER", "req": "REQ-XA-05", "file": "R2 OHIF adapter", "class": null, "method": null, "what": "D732 DC02/DC03: the pinned OHIF renderer must implement prepare (private surface behind the handle issued to each draw, echoed in the receipt) -> publish (synchronous swap to that handle) -> release (by handle only), clear, viewport-owned cover, mayDecode before decode, a supply promise that settles only after its decoder stops, and the host's session/opening notice wired to identity.subscribe; until then only the module and the isolated DOM are complete"}
  ],
  "real_sample_pending": "tests/part1/xa/samples.json real_sample_pending"
 }

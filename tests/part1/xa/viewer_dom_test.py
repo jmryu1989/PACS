@@ -6,8 +6,9 @@ Real Chromium, the shipped xa-playback-model.js and viewer-xa-playback.js, Playw
 module synthetic adapters only. They model the seams of the consult's contract, not the pinned OHIF renderer:
   * a source with separate transport and decode control points; a decoder keeps running after an abort and settles
     only when it ends; an abort during transport may be acknowledged late; mayDecode() is asked before decoding;
-  * a renderer that prepares into a private surface and changes the visible canvas only inside publish(); it has no
-    "latest request" logic of its own, so only the module decides what reaches the screen;
+  * a renderer that prepares into a private surface behind the handle the module issued to that draw, changes the
+    visible canvas only inside publish() and frees a surface only when release() names its handle; it has no "latest
+    request" logic of its own, so only the module decides what reaches the screen and what is given back;
   * one physical viewport per canvas, reused by every opening shown in it, whose pixels encode SOP, frame and opening
     sequence so the test reads the screen itself; cover() hides the canvas;
   * an allocation ledger of what the fakes really hold (open loads, running decoders, live images and surfaces), which
@@ -66,28 +67,35 @@ window.metadata = ({ frames = 10, sop = '2.25.13', rows = 32, cols = 32, frameTi
 };
 // One physical viewport per canvas: the same object for every opening shown in it.
 window.physical = slot => phys[slot] || (phys[slot] = makeViewport(slot));
+// The renderer keeps its private surfaces behind the opaque handle the module issues to each draw; it renders only
+// into that surface, puts on screen only what publish() names, and frees a surface only when release() names its handle.
 function makeViewport(slot) {
   const canvas = document.getElementById('view' + slot), front = canvas.getContext('2d');
   const log = { prepares: [], publishes: [], released: [], covers: [], aborted: [], holds: new Set(), pending: [] };
+  const kins = new WeakMap();
   let current = null;
   return { log, canvas,
     current: () => views[slot]?.current ?? 0,
-    prepare(image, frame, { draw, signal }) {
+    prepare(image, frame, { draw, surface: handle, signal }) {
       const key = frame.sop + '#' + frame.frame;
       log.prepares.push({ key, sop: frame.sop, frame: frame.frame, opening: frame.opening,
         decoded: produced.has(image) && image.frame === frame.frame && image.sop === frame.sop });
       const surface = document.createElement('canvas'); surface.width = surface.height = 4;
       surface.kin = { key, sop: frame.sop, frame: frame.frame, opening: frame.opening, size: image.surfaceBytes, released: false };
-      bump('surfaces', 1); bytesBy(image.surfaceBytes);
+      kins.set(handle, surface); bump('surfaces', 1); bytesBy(image.surfaceBytes);
       signal.addEventListener('abort', () => log.aborted.push(key), { once: true });
       const answer = how => {
-        if (how === 'reject') { bump('surfaces', -1); bytesBy(-surface.kin.size); surface.kin.released = true; throw Error('render failed'); }
+        if (how === 'reject') throw Error('render failed');
         const c = surface.getContext('2d'); c.fillStyle = 'rgb(' + codeOf(frame.sop) + ',' + frame.frame + ',' + frame.opening + ')'; c.fillRect(0, 0, 4, 4);
-        const r = { draw, sop: frame.sop, frame: frame.frame, opening: frame.opening, surface };
+        const r = { draw, surface: handle, sop: frame.sop, frame: frame.frame, opening: frame.opening };
         if (how === 'wrong-sop') r.sop = '2.25.999';
         if (how === 'wrong-frame') r.frame = frame.frame + 1;
+        if (how === 'wrong-opening') r.opening = frame.opening + 100;
         if (how === 'wrong-draw') r.draw = Object.freeze({});
-        if (how === 'no-surface') { r.surface = null; bump('surfaces', -1); bytesBy(-surface.kin.size); surface.kin.released = true; }
+        if (how === 'no-surface') r.surface = null;
+        if (how === 'foreign-handle') r.surface = Object.freeze({});
+        if (how === 'front-surface') r.surface = current;  // another draw's surface: the one on screen
+        if (how === 'wrong-draw-front-surface') { r.draw = Object.freeze({}); r.surface = current; }
         return r;
       };
       if (log.holds.has(key)) {
@@ -97,16 +105,18 @@ function makeViewport(slot) {
       return Promise.resolve().then(() => answer('ok'));
     },
     publish(receipt) {
-      front.clearRect(0, 0, canvas.width, canvas.height); front.drawImage(receipt.surface, 0, 0, canvas.width, canvas.height);
-      log.publishes.push({ ...receipt.surface.kin, at: performance.now(), calls: alloc.calls });
-      const replaced = current; current = receipt.surface;
-      return { replaced };
+      const surface = kins.get(receipt.surface);
+      if (!surface || surface.kin.released) throw Error('no such surface');
+      front.clearRect(0, 0, canvas.width, canvas.height); front.drawImage(surface, 0, 0, canvas.width, canvas.height);
+      log.publishes.push({ ...surface.kin, at: performance.now(), calls: alloc.calls });
+      current = receipt.surface;
     },
-    release(surface) {
+    release(handle) {
+      const surface = handle && kins.get(handle);
       if (!surface || surface.kin.released) return;
       surface.kin.released = true; log.released.push(surface.kin.key); bump('surfaces', -1); bytesBy(-surface.kin.size);
     },
-    clear() { front.clearRect(0, 0, canvas.width, canvas.height); const replaced = current; current = null; return { replaced }; },
+    clear() { front.clearRect(0, 0, canvas.width, canvas.height); current = null; },
     cover(on) { log.covers.push(on); canvas.style.visibility = on ? 'hidden' : 'visible'; },
   };
 }
@@ -674,7 +684,10 @@ class XaPlaybackDomTest(unittest.TestCase):
         self.js('failFrame(0, 3, 403)')
         self.control('Play').click()
         self.tick(300)
-        self.assertEqual(self.frames(), [1, 2, 3])
+        # Frame 4 is refused while it is still look-ahead: access is about the opening, so playback stops right there
+        # (round 4, EXA-R3-02; until round 3 this ran on to frame 3 and stopped only when frame 4 was due).
+        self.assertEqual(self.frames(), [1])
+        self.assertEqual(self.state()['failure'], {'frame': 4, 'kind': 'denied'})
         expect(self.status()).to_contain_text('Access Denied')
         self.assertTrue(self.look(0)['C'], 'refused access hides the image')
         self.assertNotIn('All Shown', self.status().inner_text())
@@ -699,7 +712,7 @@ class XaPlaybackDomTest(unittest.TestCase):
 
     def test_xa06_render_timeout_needs_retry_and_a_late_success_changes_nothing(self):
         # R07 (DC01): a timed-out render keeps no right to the screen, even as the latest request; only Retry makes one.
-        for variant in ('subsequent', 'initial'):
+        for variant in ('subsequent', 'initial', 'during-playback'):
             with self.subTest(variant=variant):
                 self.fresh()
                 if variant == 'subsequent':
@@ -709,6 +722,14 @@ class XaPlaybackDomTest(unittest.TestCase):
                     self.tick(1)
                     expected = ([A, 1, 1], 1, [1], False)
                     frame = 5
+                elif variant == 'during-playback':
+                    self.open(frames=30, frameTime=100, sop=A)
+                    self.hold(0, 'R', 2)
+                    self.control('Play').click()
+                    self.tick(105)
+                    self.assertIn(2, self.look()['prepares'])
+                    expected = ([A, 1, 1], 1, [1], False)
+                    frame = 2
                 else:
                     self.hold(0, 'R', 1)
                     self.open(frames=10, frameTime=20, sop=A)
@@ -729,7 +750,9 @@ class XaPlaybackDomTest(unittest.TestCase):
                 self.tick(5)
                 seen = self.look()
                 self.assertEqual((seen['V'][1], seen['Lb'], seen['E'][-1], seen['C']), (frame, frame, frame, False), 'Retry is a new render that may succeed')
-                self.assertFalse(seen['state']['playing'])
+                self.assertFalse(seen['state']['playing'], 'XA-X42: Retry after a render timeout shows one verified frame and stays paused')
+                self.tick(1000)
+                self.assertEqual(self.look()['published'][-1], frame, 'XA-X42: Retry after a render timeout shows one verified frame and stays paused')
                 self.drained()
 
     # -- the consult matrix: late load (L), late decode (D), late draw (R) x eight events ----------------------------
@@ -1109,6 +1132,7 @@ class XaPlaybackDomTest(unittest.TestCase):
                 seen = self.look()
                 if variant == 'control':
                     self.assertEqual((seen['calls'].count(4), seen['Lb']), (1, 5))
+                    self.drained()
                     continue
                 self.assertEqual(seen['calls'].count(4), 0, 'XA-X24: the gate decides at the call itself, not when the request was queued')
                 self.assertNotIn(5, seen['prepares'])
@@ -1119,6 +1143,7 @@ class XaPlaybackDomTest(unittest.TestCase):
                 if variant != 'dispose':
                     self.assertLessEqual(seen['Q']['prepared'], before['Q']['prepared'] + (1 if variant == 'seek-again' else 0), 'the provisional reservation came back')
                 self.honest(seen, 'after the refused call')
+                self.drained()
 
     def test_b02_an_intent_change_before_or_during_the_draw_keeps_the_screen(self):
         for variant in ('seek-at-provided', 'back-to-shown-while-drawing', 'many-clicks'):
@@ -1149,7 +1174,7 @@ class XaPlaybackDomTest(unittest.TestCase):
                 self.drained()
 
     def test_b03_only_an_exact_receipt_or_identity_is_published(self):
-        for how in ('wrong-sop', 'wrong-frame', 'wrong-draw', 'no-surface', 'reject', 'foreign-image', 'exact'):
+        for how in ('wrong-sop', 'wrong-frame', 'wrong-opening', 'wrong-draw', 'no-surface', 'foreign-handle', 'reject', 'foreign-image', 'exact'):
             with self.subTest(result=how):
                 self.fresh()
                 if how == 'foreign-image':
@@ -1164,12 +1189,15 @@ class XaPlaybackDomTest(unittest.TestCase):
                 seen = self.look()
                 if how == 'exact':
                     self.assertEqual((seen['V'], seen['Lb'], seen['E'], seen['C']), ([A, 1, 1], 1, [1], False))
+                    self.drained()
                     continue
                 self.assertEqual((seen['V'], seen['Lb'], seen['E'], seen['C']), (None, None, [], True), 'XA-X31: a result that is not exactly this draw is never shown')
                 self.assertEqual(seen['published'], [], 'XA-X31: a result that is not exactly this draw is never shown')
                 expect(self.status()).to_contain_text('Failed')
                 if how == 'foreign-image':
                     self.assertEqual((seen['prepares'], seen['releases']), ([], [0]), 'a foreign image is refused before any draw and given back')
+                else:
+                    self.assertEqual(seen['surfaceReleases'], [k(A, 1)], 'the refused draw gives back exactly the surface issued to it')
                 self.control('Retry').click()
                 self.tick(3)
                 seen = self.look()
@@ -1201,6 +1229,7 @@ class XaPlaybackDomTest(unittest.TestCase):
                     self.assertTrue(seen['C'])
                 self.js('window.onEvent = null')
                 self.honest(seen, 'after the observer')
+                self.drained()
 
     def test_b06_one_opening_two_viewports_share_a_load_through_the_source_that_made_it(self):
         self.open(0, frames=10, sop=A)
@@ -1330,6 +1359,98 @@ class XaPlaybackDomTest(unittest.TestCase):
                 self.tick(3)
                 seen = self.look()
                 self.assertEqual((seen['V'][1], seen['C'], seen['Lb'], seen['E'][-1]), (retry_frame, False, retry_frame, retry_frame), 'Retry, and only Retry, recovers')
+                self.drained()
+
+    # -- round 4 (Astra review of 61eb967) ---------------------------------------------------------------------------
+    def test_exa_r3_01_a_receipt_naming_another_draws_surface_is_never_published_or_given_back(self):
+        # The renderer answers frame 5 with the surface on screen (frame 1): once with this draw's own token, SOP and
+        # frame, once with another token as well. Neither may publish, relabel or record frame 5, and neither may
+        # free the front it names; the failed draw gives back only the surface issued to it.
+        for how in ('front-surface', 'wrong-draw-front-surface'):
+            with self.subTest(receipt=how):
+                self.fresh()
+                self.open(0, frames=10, sop=A)
+                self.hold(0, 'R', 5)
+                self.seek(0, 5)
+                self.tick(1)
+                self.complete(0, 'R', 5, how=how)
+                self.tick(3)
+                seen = self.look()
+                self.assertEqual((seen['V'], seen['Lb'], seen['E'], seen['C']), ([A, 1, 1], 1, [1], False),
+                                 'XA-X38: only the surface issued to this draw is published')
+                self.assertEqual((seen['published'], seen['state']['coverage']['shown']), ([1], 1), 'XA-X38: only the surface issued to this draw is published')
+                self.assertNotIn(k(A, 1), seen['surfaceReleases'], 'XA-X39: a refused receipt never gives back the front it names')
+                self.assertEqual(seen['surfaceReleases'], [k(A, 5)], 'XA-X39: a refused receipt never gives back the front it names')
+                expect(self.status()).to_contain_text('Failed')
+                self.honest(seen, 'after the refused receipt')
+                self.control('Retry').click()
+                self.tick(3)
+                seen = self.look()
+                self.assertEqual((seen['V'], seen['Lb'], seen['E'], seen['C']), ([A, 5, 1], 5, [1, 5], False), 'the front was still owned: Retry replaces it normally')
+                self.assertEqual(sorted(seen['surfaceReleases']), sorted([k(A, 5), k(A, 1)]), 'the old front goes back once, after it was replaced')
+                self.drained()
+
+    def test_exa_r3_02_a_403_on_a_look_ahead_frame_covers_stops_and_ends_everything_pending(self):
+        self.open(0, frames=30, frameTime=1000, sop=A, holdLoad=[4])
+        self.js('failFrame(0, 4, 403)')
+        self.hold(0, 'R', 2)
+        self.control('Play').click()
+        self.tick(1001)
+        seen = self.look()
+        self.assertEqual((seen['prepares'].count(2), seen['state']['playing'], seen['C']), (1, True, False), 'frame 2 is being drawn while frame 5 is still on its way')
+        self.js('releaseLoad(0, 4)')  # frame 5, fetched only as look-ahead, is refused
+        self.tick(2)
+        seen = self.look()
+        self.assertTrue(seen['C'], 'XA-X40: a 401/403 on any request of the opening covers at once')
+        self.assertFalse(seen['state']['playing'], 'XA-X40: a 401/403 on any request of the opening covers at once')
+        self.assertEqual(seen['state']['failure'], {'frame': 5, 'kind': 'denied'})
+        expect(self.status()).to_contain_text('Access Denied')
+        calls = len(seen['calls'])
+        self.complete(0, 'R', 2)  # the draw under way at the refusal answers afterwards
+        self.tick(3000)
+        seen = self.look()
+        self.assertNotIn(2, seen['published'], 'a draw pending at the refusal is never published')
+        self.assertEqual((seen['Lb'], seen['E'], seen['C']), (1, [1], True))
+        self.assertEqual(len(seen['calls']), calls, 'no new load after the refusal')
+        self.honest(seen, 'after the refusal')
+        self.js('healFrame(0, 4)')
+        self.control('Retry').click()  # Retry asks for access again
+        self.tick(3)
+        seen = self.look()
+        self.assertEqual((seen['V'], seen['C'], seen['Lb']), ([A, 5, 1], False, 5))
+        self.control('Pause').click()
+        self.drained()
+
+    def test_exa_r3_03_a_new_opening_whose_cover_fails_never_loads_or_shows_over_the_previous_study(self):
+        for variant in ('cover-throws', 'cover-and-clear-throw'):
+            with self.subTest(variant=variant):
+                self.fresh()
+                self.open(0, frames=10, sop=A, sequence=1)
+                self.save('A1', 0)
+                self.js('''([both]) => {
+                  const p = physical(0), cover = p.cover, clear = p.clear; window.screenOk = false;
+                  p.cover = on => { if (on && !window.screenOk) throw Error('cover unavailable'); return cover(on); };
+                  if (both) p.clear = () => { if (!window.screenOk) throw Error('clear unavailable'); return clear(); };
+                  return true; }''', [variant == 'cover-and-clear-throw'])
+                self.open(0, frames=10, sop=B, study='2.25.21', sequence=2)
+                seen = self.look(0)
+                self.assertEqual((seen['calls'], seen['prepares'], seen['Lb'], seen['E']), ([], [], None, []),
+                                 'XA-X41: without a cover the new opening never loads or draws over the previous Study')
+                self.assertEqual(seen['state']['failure'], {'frame': 1, 'kind': 'cover'})
+                expect(self.status()).to_contain_text('Failed')
+                expect(self.control('Retry')).to_be_visible()
+                if variant == 'cover-throws':
+                    self.assertIsNone(seen['pixel'], 'XA-X41: the previous Study is cleared when it cannot be covered')
+                else:
+                    self.assertEqual(seen['pixel'], [A, 1, 1], 'nothing could hide it: the failure says so and nothing is drawn over it')
+                    self.control('Retry').click()
+                    self.tick(3)
+                    self.assertEqual((self.look(0)['calls'], self.look(0)['state']['failure']['kind']), ([], 'cover'), 'Retry waits until the previous image can be hidden')
+                self.js('window.screenOk = true')
+                self.control('Retry').click()
+                self.tick(3)
+                seen = self.look(0)
+                self.assertEqual((seen['V'], seen['C'], seen['Lb'], seen['E']), ([B, 1, 2], False, 1, [1]))
                 self.drained()
 
 
