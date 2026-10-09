@@ -201,6 +201,15 @@ def release_gate(copy, unit, code, log, out, name):
     return {"marker": "released", "record": str(record)}
 
 
+def wait_for_live_gate(copy, minutes=90):
+    """Another unit's live run holds the account's lease (or awaits its own inspection): wait for it, never touch it."""
+    sys.path.insert(0, str(copy / "tests"))
+    import live_test_gate as gate
+    deadline = time.monotonic() + minutes * 60
+    while (gate.STATE / "live-needs-inspection.json").exists() and time.monotonic() < deadline:
+        time.sleep(5)
+
+
 def live_kills(copy, cases, out, name, head, env):
     """Build the production image from the mutated copy and run exactly these live cases through run-tests.py."""
     token = secrets.token_hex(4)
@@ -218,6 +227,7 @@ def live_kills(copy, cases, out, name, head, env):
         plan.write_text(json.dumps({"unit": unit, "mode": "live", "max_attempts": 3, "timeout_seconds": 3000,
             "tests": [{"file": "tests/emr/b/live.py", "case": "EmrBLedgerLive." + LIVE[case]} for case in cases]}), encoding="utf-8")
         log = out / (name + "-live.log")
+        wait_for_live_gate(copy)
         code, seconds = run([sys.executable, "-B", "scripts/run-tests.py", "--plan", str(plan)], cwd=copy,
                             env={**env, "KIN_TEST_API_IMAGE": tag}, timeout=3300, log=log)
         text = log.read_text(encoding="utf-8", errors="replace")
@@ -225,8 +235,11 @@ def live_kills(copy, cases, out, name, head, env):
         # ("ERROR: setUpClass") names no case and so kills nothing.
         failed = {case for case in cases if re.search(r"^(?:FAIL|ERROR): " + LIVE[case] + r" \(", text, re.M)}
         passed = {case for case in cases if re.search(r"^" + LIVE[case] + r" \([\w.]+\)(?:\n(?!test_)[^\n]*?)? \.\.\. ok$", text, re.M)}
+        # A run the gate refused before any case ran (another unit held the account's live lease) proves nothing either way.
+        started = "EXACT_TESTS " in text
         result.update(unit=unit, exit=code, seconds=seconds, log=str(log), failed=sorted(failed), passed=sorted(passed),
-                      killed=code != 0 and failed == set(cases))
+                      killed=(code != 0 and failed == set(cases)) if started else None,
+                      **({} if started else {"status": "not_run", "reason": "live run refused before any case ran (gate lease)"}))
         result["gate"] = release_gate(copy, unit, code, log, out, name) if code else {"marker": "not-needed"}
     finally:
         subprocess.run(["docker", "image", "rm", "-f", tag], capture_output=True, timeout=300)
