@@ -1372,16 +1372,16 @@ async function locationWorld({snapshot=lSnapshot(),studies=[L_STUDY]}={}){
  // The MPR Job stub: the current screen is a version 4 capture; apply outcomes come from w.apply (one per call). A version 6 apply
  // restores the saved marks into the marks capability, as viewer-volume-job.js does.
  const volumeJob={capture:()=>structuredClone(w.captured),resolve:()=>'ds-volume',
-  apply:async(value,current)=>{log.push('apply:'+value.version);const next=w.apply.shift();if(typeof next==='function')await next(value,current);else if(next instanceof Error)throw next;
+  apply:async(value,current,changingLayout)=>{changingLayout?.();log.push('apply:'+value.version);const next=w.apply.shift();if(typeof next==='function')await next(value,current);else if(next instanceof Error)throw next;
    if(value.version===6)marks.restore(value.marks);}};
  const marks={records:[],value:null,dirty:()=>false,saved(){},restore(v){marks.value=structuredClone(v);},capture:()=>structuredClone(marks.value),
   goTo:(id,expected,pass)=>{const location=sandbox.kinViewerJobLocation;marks.records.push({id,expected:structuredClone(expected),owns:location.owns(pass),forged:location.owns({live:()=>true}),
    busy:sandbox.kinViewerJobWorkspaceState().busy});return w.go?w.go(id,expected,pass):{ok:true,moved:'all'};}};
  const sessionStorage={setItem:(k,v)=>{storage.set(k,v);},getItem:k=>storage.get(k)??null,removeItem:k=>storage.delete(k)};
  class FakeDate extends Date{static now(){return c.now();}}
- const sandbox={document:{createElement:element,head:element('head'),querySelector:selector=>selector==='#kin-viewer-layout'?layout:null,addEventListener(){},removeEventListener(){}},
+ const sandbox={document:{visibilityState:'visible',createElement:element,head:element('head'),querySelector:selector=>selector==='#kin-viewer-layout'?layout:null,addEventListener(){},removeEventListener(){}},
   location:{search:'?StudyInstanceUIDs='+studies.join(','),origin:'https://kin.test',assign:url=>assigned.push(url)},fetch,crypto,AbortController,URL,URLSearchParams,sessionStorage,Date:FakeDate,
-  queueMicrotask,setTimeout:c.setTimeout,clearTimeout:c.clearTimeout,setInterval:()=>0,clearInterval(){},
+  performance:{now:()=>c.now()},queueMicrotask,setTimeout:c.setTimeout,clearTimeout:c.clearTimeout,setInterval:()=>0,clearInterval(){},
   addEventListener:(name,fn)=>listeners.set(name,fn),removeEventListener(){},
   kinCreateVolumeJob:()=>volumeJob,kinMprMarks:marks,KinVolumeMarks:{normalize:v=>structuredClone(v)},
   cornerstone:{eventTarget:nativeEvents,Enums:{Events:E},metaData:{get:(type,id)=>type==='instance'&&typeof id==='string'?{StudyInstanceUID:L_STUDY,SeriesInstanceUID:L_STACK_SERIES,SOPInstanceUID:id.slice(4)}:null}}};
@@ -1793,6 +1793,23 @@ function crosshairWorld(){
   return {boundary,enders,native,tool,dispose(){delete context.window.KinViewerSessionBoundary;delete context.window.cornerstoneTools;}};
 }
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
+
+// VR112-REQ-03 -> VR112-RISK-03 -> T16: a failed pre-layout capability must
+// release the borrowed stack owner immediately, before any later native event.
+test('a mixed restore releases its stack owner when setup throws before layout',async()=>{
+  for(const failure of ['batch','crosshair']){
+    let disposed=0,layouts=0,changing=0;
+    const stack={...frameHelper(),prepare:async()=>({dispose:()=>{disposed++;}})};
+    const job=world(1,2,['axial','frame'],{stack,setLayout:()=>{layouts++;}}),value=job.capture();
+    if(failure==='batch')context.window.kinVolumeBatchState={clear:()=>{throw Error('SYN setup refused');}};
+    else context.window.cornerstoneTools={ToolGroupManager:{getToolGroup:()=>{throw Error('SYN setup refused');}}};
+    try{
+      await assert.rejects(job.apply(value,()=>true,()=>{changing++;}),/SYN setup refused/);
+      assert.equal(disposed,1,'failed setup must dispose the stack owner before apply rejects');
+      assert.equal(layouts,0);assert.equal(changing,0,'setup failure precedes the layout mutation boundary');
+    }finally{delete context.window.kinVolumeBatchState;delete context.window.cornerstoneTools;}
+  }
+});
 
 test('a restore parked when the session ends gives the Crosshairs reset back at the end, once',async()=>{
   const x=crosshairWorld();

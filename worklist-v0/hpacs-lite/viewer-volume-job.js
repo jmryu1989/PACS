@@ -226,17 +226,18 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     withdraw=window.KinViewerSessionBoundary?.onEnd?.(release)??null;
     return {group,tool,release};
   }
-  async function apply(value,current) {
+  async function apply(value,current,changingLayout) {
     if(JSON.stringify(value.studies)!==JSON.stringify(studies))throw Error('저장한 현재·비교 검사를 같은 순서로 먼저 여세요.');
     const set=resolve(value),ids=value.cells.map(()=> 'kin-volume-job-'+crypto.randomUUID());
     // Every stack cell of a mixed layout names its own display set; a plane cell shares the
     // single volume display set. Both are resolved before the current screen is replaced.
     const frames=value.cells.map(cell=>cell&&cell.kind==='stack'?stackTools().resolve(cell):null);
-    const stackOwner=frames.some(Boolean)?await stackTools().prepare(value.cells.map((cell,i)=>frames[i]?cell:null),ids,current):null;
+    let stackOwner=null,crosshair=null;try{
+    stackOwner=frames.some(Boolean)?await stackTools().prepare(value.cells.map((cell,i)=>frames[i]?cell:null),ids,current):null;
     window.kinVolumeBatchState?.clear();
     // Native reset callbacks reset every linked plane while OHIF replaces one
     // viewport. Hold that propagation through both initialization and failure.
-    const crosshair=holdCrosshairReset();try{
+    crosshair=holdCrosshairReset();
     // Native position-cache keys use viewportOptions.id, not viewportId. A
     // cached oblique reference recurses through setOrientation/resetCamera on
     // a fresh axial viewport. Initialize a new presentation for this Job;
@@ -246,6 +247,7 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     // A merged layout asks native for the saved rectangles through the same layoutOptions
     // the cell merge module dispatches, so this Job drives the one native grid rather than
     // a second renderer of its own. Its cell list covers those rectangles, not the base grid.
+    changingLayout?.();
     await grid.setLayout({numRows:value.rows,numCols:value.cols,activeViewportId:ids[value.active],isHangingProtocolLayout:false,
       ...(value.version===9?{layoutOptions:value.rects.map(r=>({x:r.x,y:r.y,width:r.width,height:r.height}))}:{}),
       findOrCreateViewport:index=>value.cells[index]&&!frames[index]?({displaySetInstanceUIDs:[set],displaySetOptions:[{}],viewportOptions:{id:ids[index],viewportId:ids[index],viewportType:'volume',toolGroupId:'mpr',orientation:value.cells[index].orientation||['axial','sagittal','coronal'][index],allowUnmatchedView:true}})
@@ -361,7 +363,7 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     // MIP Batch recipe, which the viewer regenerates only after that display is Final, under its own explicit budget.
     if([12,13,14,15].includes(value.version))await window.kinVolumeMipJob.restore(value.mip,current,deadline,ids[value.active],value.mipBatch??null,value.version);else window.kinVolumeMipJob?.clearForJob();
     stackOwner?.verify();
-    }finally{stackOwner?.dispose();crosshair.release();}
+    }finally{stackOwner?.dispose();crosshair?.release();}
   }
   return {capture,resolve,apply};
 };

@@ -240,13 +240,14 @@ window.kinViewerJobs = function (services, model, session = null, dataSource = n
       if (!current()) throw new Error('화면이 변경되었습니다.');
       return adapter.begin(plans, ids, current, abort.signal);
     }
-    async function apply(value, ticket) {
+    async function apply(value, ticket, changingLayout) {
       const current = () => live() && serial === ticket;
-      if ([4,5,6,7,8,9,10,11,12,13,14,15].includes(value.version)) return volumeTools().apply(value,current);
+      if ([4,5,6,7,8,9,10,11,12,13,14,15].includes(value.version)) return volumeTools().apply(value,current,changingLayout);
       if (JSON.stringify(value.studies) !== JSON.stringify(studies)) throw new Error('저장한 현재·비교 검사를 같은 순서로 먼저 여세요.');
       const sets = value.cells.map(resolve), ids = value.cells.map(() => 'kin-job-' + crypto.randomUUID());
       const owner = await prepareStacks(value.cells, ids, current);
       try {
+        changingLayout?.();
         await grid.setLayout({ numRows: value.rows, numCols: value.cols, activeViewportId: ids[value.active], isHangingProtocolLayout: false,
           findOrCreateViewport: index => ({ displaySetInstanceUIDs: sets[index] ? [sets[index]] : [], displaySetOptions: [{}],
             viewportOptions: owner.options(index) }) });
@@ -388,10 +389,12 @@ window.kinViewerJobs = function (services, model, session = null, dataSource = n
       try { if (VOLUME_VERSIONS.includes(job.snapshot.version)) volumeTools().resolve(job.snapshot); else job.snapshot.cells.forEach(resolve); }
       catch (e) { throw refusal(/도구/.test(e.message) ? 'tool-missing' : 'job-studies', e.message); }
       located?.ensure();
-      ctx.mutating = true; applying = true;
-      try { await apply(job.snapshot, ticket); }
+      applying = true;
+      try { await apply(job.snapshot, ticket, () => { ctx.mutating = true; }); }
       catch (e) {
         const message = /[가-힣]/.test(e.message) ? e.message : '영상 상태를 적용하지 못했습니다. 이전 화면을 확인하세요.';
+        // Preparing native image ordering has not replaced the doctor's screen.
+        if (!ctx.mutating) throw refusal('apply-failed', message);
         if (e.kinRestoreOwnershipLost || !(live() && serial === ticket)) throw outcome('screen-unknown', 'apply-failed', message);
         try { await apply(previous, ticket); } catch (_) { throw outcome('screen-unknown', 'apply-failed', '복원과 이전 화면 복구에 실패했습니다. 검사를 다시 여세요.'); }
         throw outcome('rolled-back', 'apply-failed', message);
@@ -402,9 +405,9 @@ window.kinViewerJobs = function (services, model, session = null, dataSource = n
       lastJob = { jobId: job.id, revision: job.revision, snapshotVersion: job.snapshot.version, marks };
       return { state: 'restored', message: restoredText(job.snapshot.version), revision: job.revision, snapshotVersion: job.snapshot.version };
     }
-    /* A finding's saved location (kinViewerJobLocation.restore). The restore owns one deadline: requests stop before the last
-       60 s, apply never starts with less than the 60 s apply bound left, and once it starts the promise settles after the apply
-       and, when needed, the rollback (worst case LOCATION_MS + 60 s = 240 s after the claim, plus at most WAIT_MS before it).
+    /* A finding's saved location (kinViewerJobLocation.restore). Requests stop before the last 60 s reserved for apply;
+       once apply starts, the promise settles after its render confirmation and, when needed, the rollback. Stack completion
+       deadlines count visible time, so a hidden document can retain this operation beyond that wall-clock reservation.
        The point moves inside the same owned operation; a verified view whose point move fails stays restored. */
     const LOCATION_MS = 180000, APPLY_MS = 60000, WAIT_MS = 20000;
     const uuidOk = s => typeof s === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s);

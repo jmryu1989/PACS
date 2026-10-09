@@ -42,7 +42,7 @@ window.kinCreateStackRestore = function ({ services, dataSource }) {
     } finally { clearTimeout(timer); signal.removeEventListener('abort', cancel); }
   }
   function begin(plans, ids, current, signal) {
-    let active = true, failure = null, timer;
+    let active = true, failure = null, timer, finished = false, remaining = 15000, visibleSince = null;
     const cleanup = [], entries = plans.map((plan, i) => plan && { ...plan, id: ids[i], viewport: null, data: null, done: false, attempts: 0 });
     let resolve, reject;
     const completed = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -56,6 +56,19 @@ window.kinCreateStackRestore = function ({ services, dataSource }) {
     const dispose = () => { active = false; clearTimeout(timer); cleanup.splice(0).forEach(off => off()); };
     const fail = error => { if (!active) return; failure = error; dispose(); reject(error); };
     const ensure = () => { if (failure) throw failure; if (!active || !current() || signal.aborted) throw changed(); };
+    // Hidden documents can stop rendering indefinitely. Keep ownership, but charge
+    // the completion budget only while the browser can show the resulting frame.
+    const deadline = () => {
+      clearTimeout(timer);
+      if (!active || finished) return;
+      const now = performance.now();
+      if (visibleSince !== null) remaining -= now - visibleSince;
+      visibleSince = document.visibilityState === 'visible' ? now : null;
+      if (visibleSince !== null) {
+        if (remaining <= 0) fail(new Error('원본 영상 초기화 또는 최종 표시를 확인하지 못했습니다.'));
+        else timer = setTimeout(deadline, remaining);
+      }
+    };
     const owns = entry => {
       ensure();
       const g = grid.getState().viewports.get(entry.id), v = cs.getCornerstoneViewport(entry.id);
@@ -93,6 +106,14 @@ window.kinCreateStackRestore = function ({ services, dataSource }) {
       listen(signal, 'abort', () => fail(changed()));
       listen(window, 'pagehide', () => fail(changed()));
       listen(window, 'popstate', () => fail(changed()));
+      listen(document, 'visibilitychange', guarded(() => {
+        deadline();
+        if (!active || finished) return;
+        for (const entry of entries.filter(Boolean)) {
+          entry.done = false;
+          if (document.visibilityState === 'visible' && entry.data) owns(entry).render();
+        }
+      }));
       listen(native.eventTarget, events.ELEMENT_ENABLED, guarded(event => {
         const entry = entries.find(e => e?.id === event.detail.viewportId);
         if (!entry) return;
@@ -111,13 +132,14 @@ window.kinCreateStackRestore = function ({ services, dataSource }) {
         entry.data = viewportData;
         const v = owns(entry);
         listen(v.element, events.IMAGE_RENDERED, guarded(event => {
-          if (event.detail.viewportId !== entry.id || event.detail.element !== v.element) return;
+          if (document.visibilityState !== 'visible' || event.detail.viewportId !== entry.id || event.detail.element !== v.element) return;
           // Other listeners of this render can finish native camera/presentation
           // work. Read back after that dispatch before accepting the rendered state.
           queueMicrotask(guarded(() => {
+            if (document.visibilityState !== 'visible') return;
             if (!matches(entry)) { apply(entry); return; }
             entry.done = true;
-            if (entries.filter(Boolean).every(e => e.done)) { verify(); clearTimeout(timer); resolve(); }
+            if (entries.filter(Boolean).every(e => e.done)) { verify(); finished = true; clearTimeout(timer); resolve(); }
           }));
         }));
         apply(entry);
@@ -128,7 +150,7 @@ window.kinCreateStackRestore = function ({ services, dataSource }) {
       });
       subscribe(grid, grid.EVENTS.LAYOUT_CHANGED, gridChanged);
       subscribe(grid, grid.EVENTS.GRID_STATE_CHANGED, gridChanged);
-      timer = setTimeout(() => fail(new Error('원본 영상 초기화 또는 최종 표시를 확인하지 못했습니다.')), 15000);
+      deadline();
       ensure();
     } catch (error) { fail(error); }
     return {

@@ -559,6 +559,121 @@ class NativeStackRestore(unittest.TestCase):
         self.assertNotIn('복원했습니다',self.page.get_by_role('status').inner_text());self.assertEqual(self.page.evaluate('generation'),1)
         self.assert_display(before)
 
+    def visibility_fixture(self):
+        # Model the platform boundary: timers keep running, but a hidden document
+        # queues animation frames. Native rendering and its events remain real.
+        self.page.clock.install()
+        self.page.evaluate('''()=>{
+          let visible=true, next=0;const queued=new Map();
+          const raf=window.requestAnimationFrame.bind(window),cancel=window.cancelAnimationFrame.bind(window);
+          Object.defineProperty(document,'visibilityState',{configurable:true,get:()=>visible?'visible':'hidden'});
+          window.requestAnimationFrame=cb=>{if(visible)return raf(cb);const id=--next;queued.set(id,cb);return id};
+          window.cancelAnimationFrame=id=>{if(id<0)queued.delete(id);else cancel(id)};
+          window.setVisibility=value=>{
+            visible=value;document.dispatchEvent(new Event('visibilitychange'));
+            if(visible){const callbacks=[...queued.values()];queued.clear();callbacks.forEach(raf)}
+          };
+        }''')
+
+    def start_location(self):
+        self.page.evaluate('''()=>{
+          window.restoreResult=null;
+          kinViewerJobLocation.restore({subject:'reader',jobId:job.id,revision:job.revision,
+            snapshotVersion:job.snapshotVersion,studies:job.snapshot.studies,mode:'same-document',mark:null})
+            .then(result=>{window.restoreResult=result});
+        }''')
+
+    def location_result(self):
+        self.page.wait_for_function('window.restoreResult!==null',polling=50)
+        return self.page.evaluate('restoreResult')
+
+    def test_T13_hidden_restore_waits_for_visible_render(self):
+        before=self.save();self.visibility_fixture()
+        self.page.evaluate('hold("data-2-0");hold("data-2-1")')
+        self.start_location();self.gate_ready('data-2-0');self.gate_ready('data-2-1')
+        self.page.clock.run_for(6000)
+        self.page.evaluate('setVisibility(false);release("data-2-0");release("data-2-1")')
+        self.page.wait_for_function('trace.filter(e=>e.event==="data"&&e.gen===2).length===2',polling=50)
+        self.page.clock.fast_forward(16000)
+        self.assertTrue(self.page.evaluate('kinViewerJobWorkspaceState().busy'),
+                        'hidden render wait must retain ownership beyond 15 seconds')
+        self.assertIsNone(self.page.evaluate('restoreResult'),'hidden render cannot complete restore')
+        self.assertEqual(self.page.evaluate('generation'),2,'hidden render wait must not start rollback')
+        self.page.evaluate('setVisibility(true)');self.page.clock.run_for(100)
+        self.assertEqual(self.location_result()['state'],'restored')
+        self.assert_display(before);self.assert_labels([1,2])
+
+    def test_T13_initially_hidden_restore(self):
+        before=self.save();self.visibility_fixture();self.page.evaluate('setVisibility(false)')
+        self.start_location()
+        self.page.wait_for_function('trace.filter(e=>e.event==="data"&&e.gen===2).length===2',polling=50)
+        self.page.clock.fast_forward(16000)
+        self.assertIsNone(self.page.evaluate('restoreResult'),'initially hidden restore must wait for visible rendering')
+        self.assertEqual(self.page.evaluate('generation'),2)
+        self.page.evaluate('setVisibility(true)');self.page.clock.run_for(100)
+        self.assertEqual(self.location_result()['state'],'restored');self.assert_display(before);self.assert_labels([1,2])
+
+    def test_T13_hidden_rollback_waits_for_visible_render(self):
+        self.save();self.page.evaluate('()=>seed(false,false,"LINEAR")');previous=self.page.evaluate('observe()')
+        self.visibility_fixture();self.page.evaluate('hold("data-2-1");hold("data-3-0");hold("data-3-1")')
+        self.start_location();self.gate_ready('data-2-1');self.page.clock.fast_forward(15100)
+        self.gate_ready('data-3-0');self.gate_ready('data-3-1');self.page.clock.run_for(100)
+        self.page.evaluate('setVisibility(false);release("data-3-0");release("data-3-1")')
+        self.page.wait_for_function('trace.filter(e=>e.event==="data"&&e.gen===3).length===2',polling=50)
+        self.page.clock.fast_forward(16000)
+        self.assertIsNone(self.page.evaluate('restoreResult'),'hidden rollback must keep waiting for its verified render')
+        self.assertTrue(self.page.evaluate('kinViewerJobWorkspaceState().busy'))
+        self.page.evaluate('setVisibility(true)');self.page.clock.run_for(100)
+        self.assertEqual(self.location_result()['state'],'rolled-back');self.assert_display(previous);self.assert_labels([1,2])
+        self.release('data-2-1');self.page.clock.run_for(100);self.assert_display(previous)
+
+    def test_T13_visible_budget_accumulates_across_hidden_intervals(self):
+        previous=self.save();self.visibility_fixture();self.page.evaluate('hold("data-2-1")')
+        self.start_location();self.gate_ready('data-2-1')
+        for _ in range(2):
+            self.page.clock.run_for(6000);self.page.evaluate('setVisibility(false)');self.page.clock.fast_forward(16000)
+            self.assertIsNone(self.page.evaluate('restoreResult'),'hidden time must not consume the visible deadline')
+            self.page.evaluate('setVisibility(true)')
+        self.page.clock.run_for(3200)
+        self.assertEqual(self.location_result()['state'],'rolled-back','showing the document must not reset the visible budget')
+        self.assertEqual(self.page.evaluate('generation'),3);self.assert_display(previous)
+
+    def test_T14_hidden_session_end_has_no_completion(self):
+        self.save();self.visibility_fixture();self.page.evaluate('hold("data-2-1")')
+        self.start_location();self.gate_ready('data-2-1');self.page.clock.run_for(100)
+        self.page.evaluate('setVisibility(false)');self.page.clock.fast_forward(16000)
+        self.assertIsNone(self.page.evaluate('restoreResult'),'hidden owner must wait until session end')
+        self.page.evaluate('panel.stop()')
+        self.assertEqual(self.location_result()['state'],'screen-unknown','session end must settle the hidden owner immediately')
+        self.page.evaluate('release("data-2-1");setVisibility(true)');self.page.clock.run_for(100)
+        self.assertNotEqual(self.page.evaluate('views()[1].getProperties().colormap?.name'),'Grayscale',
+                            'ended hidden restore must not apply late saved display')
+        self.assertEqual(self.page.evaluate('generation'),2);expect(self.page.locator('#kin-viewer-jobs')).to_have_count(0)
+
+    def test_T15_native_ordering_prepare_failure_is_refused(self):
+        self.save()
+        self.page.evaluate('''async()=>{
+          const v=views()[1];await v.setImageIdIndex(1);v.scroll(1-v.getTargetImageIdIndex(),false);await rendered(v);
+          nativeCache.stackImageIds.delete('series-2');const original=source.getImageIdsForDisplaySet;
+          source.getImageIdsForDisplaySet=set=>original(set).filter(id=>id!=='syn:2:2');
+        }''')
+        previous=self.page.evaluate('observe()');self.start_location()
+        self.assertEqual(self.location_result()['state'],'refused','prepare failure before layout must be a refusal, never rolled-back')
+        self.assertEqual(self.page.evaluate('generation'),1,'prepare refusal must not replace the grid')
+        self.assertNotIn('복원했습니다',self.page.get_by_role('status').inner_text());self.assert_display(previous);self.assert_labels([1,1])
+
+    def test_T14_hidden_pagehide_ends_owner_immediately(self):
+        self.save();self.visibility_fixture();self.page.evaluate('hold("data-2-1")')
+        self.start_location();self.gate_ready('data-2-1');self.page.clock.run_for(100)
+        self.page.evaluate('setVisibility(false)');self.page.clock.fast_forward(16000)
+        self.assertIsNone(self.page.evaluate('restoreResult'))
+        self.page.evaluate('window.dispatchEvent(new PageTransitionEvent("pagehide"))')
+        self.assertEqual(self.location_result()['state'],'screen-unknown','pagehide must settle the hidden owner immediately')
+        self.page.evaluate('release("data-2-1");setVisibility(true)');self.page.clock.run_for(100)
+        self.assertNotEqual(self.page.evaluate('views()[1].getProperties().colormap?.name'),'Grayscale')
+        self.assertEqual(self.page.evaluate('generation'),2)
+        self.assertNotIn('복원했습니다',self.page.get_by_role('status').inner_text())
+
     def roundtrip(self, invert, colormap, reset, lut='LINEAR'):
         p = self.page
         p.evaluate('([invert,colormap,lut])=>seed(invert,colormap,lut)', [invert, colormap, lut])
