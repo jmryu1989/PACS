@@ -280,24 +280,22 @@ class Pure(unittest.TestCase):
         # S7-U5 then added the provider call in flight to MemberIsolation (three columns): 38 files, still 48 tables and the
         # same rows. S7-U5 D600 replaced it by the provider change records (ProviderChange, the three columns dropped): 39 files,
         # 49 tables, and two records (an unknown disable of the owed member, a settled end of a provider session).
-        # EMR-B1 added schema emr_access (43 files): still 51 public tables and the same public rows; its 7 tables are
+        # EMR-B1 added schema emr_access (43 files): still 51 public tables and the same public rows; its 8 tables are
         # observed schema-qualified beside them with 7 synthetic rows (two chained entries and their head, a placed and
-        # released hold, a reviewed clause version, an identity binding; no projection or request yet).
+        # released hold, a reviewed clause version, an identity binding; no record target, projection or request yet).
         self.assertEqual(len(transfer.MIGRATIONS), 43)
         self.assertEqual(len(transfer.TABLES), 51)
         self.assertEqual(set(rows), set(transfer.TABLES))
         emr = transfer.expected_emr_rows()
         self.assertEqual(sorted(emr), transfer.EMR_TABLES)
         self.assertEqual({name: len(value) for name, value in emr.items()},
-                         {'access_entry': 2, 'audit_projection': 0, 'chain_head': 1, 'clause_version': 1, 'duty_request_event': 0,
-                          'legal_hold_event': 2, 'member_identity': 1})
+                         {'access_entry': 2, 'access_target': 0, 'audit_projection': 0, 'chain_head': 1, 'clause_version': 1,
+                          'duty_request_event': 0, 'legal_hold_event': 2, 'member_identity': 1})
         first, second = emr['access_entry']
         self.assertEqual((first['previous_hash'], second['previous_hash']), ('0'*64, first['hash']))
         self.assertEqual(emr['chain_head'][0]['hash'], second['hash'])
-        # A's two-year civil boundary: 2026-09-06 09:00 KST starts the next day, ends 2028-09-07 00:00 KST.
-        self.assertEqual(first['expires_at'], '2028-09-06T15:00:00+00:00')
-        self.assertEqual(transfer.civil_period_end('2024-02-28T15:00:00.000Z', 1).isoformat(), '2025-02-28T15:00:00')
-        self.assertEqual(transfer.civil_period_end('2024-02-28T15:00:00.001Z', 1).isoformat(), '2025-02-28T15:00:00')
+        # No deadline is stored on an entry (the one retention rule computes it when destruction is considered).
+        self.assertFalse({'expires_at', 'expiry', 'deadline'} & (set(first) | set(second)))
         self.assertEqual((len(rows['Finding']), len(rows['FindingRevision'])), (1, 2))
         self.assertEqual([(r['oid'], r['accession'], r['studyUid']) for r in rows['Order']],
                          [('SYNTHETIC-order-1', 'SYNTHETIC-ACC-1', None)])

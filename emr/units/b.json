@@ -30,7 +30,7 @@
   "models": {
     "prisma": "unchanged: MODEL_CLASSIFICATION equals the freshly parsed Prisma models (no SQL-only storage registered as a model)",
     "sql": {
-      "emr_access.access_entry": ["access-audit"], "emr_access.chain_head": ["access-audit"], "emr_access.audit_projection": ["access-audit"],
+      "emr_access.access_entry": ["access-audit"], "emr_access.access_target": ["access-audit"], "emr_access.chain_head": ["access-audit"], "emr_access.audit_projection": ["access-audit"],
       "emr_access.member_identity": ["identity-access"],
       "emr_access.legal_hold_event": ["legal-duty"], "emr_access.duty_request_event": ["legal-duty"],
       "emr_access.clause_version": ["legal-reference"]
@@ -53,9 +53,9 @@
     "tablespace": "kin_emr_access",
     "tablespace_location": "/var/lib/postgresql/emr-access/ts",
     "roles": { "owner": "kin_emr_owner", "runtime": "kin_runtime", "reader": "kin_emr_reader", "retention": "kin_emr_retention" },
-    "tables": ["access_entry", "audit_projection", "chain_head", "clause_version", "duty_request_event", "legal_hold_event", "member_identity"],
+    "tables": ["access_entry", "access_target", "audit_projection", "chain_head", "clause_version", "duty_request_event", "legal_hold_event", "member_identity"],
     "runtime_functions": [
-      "append_access(text,text,timestamptz)", "chain_tail()", "entries_after(bigint,integer)", "entry_for_event(text)",
+      "append_access(text,text)", "chain_tail()", "entries_after(bigint,integer)", "entry_for_event(text)",
       "storage_placement()", "civil_period_end(timestamptz,integer)", "resolve_member_identity(text,text)",
       "record_projection(text,integer)", "place_hold(text,text,text)", "release_hold(text,text)", "holds_for(text)",
       "record_duty_request(text,text,text,text)", "duty_requests(text,text)", "clause_versions(text)"
@@ -65,6 +65,13 @@
       "holds_for(text)", "duty_requests(text,text)", "clause_versions(text)"
     ],
     "retention_functions": ["expire_prefix(bigint)", "retention_view(bigint,integer)", "chain_tail()", "storage_placement()"],
+    "access_retention": {
+      "source": "commander 2026-10-09 (Fable legal register pass 6, LR-11 / delta D-1; Astra cross-check pending): 의료법 제23조④ record events end at the later of the target record's retention end and event time + floor; non-record events at the floor; permission history (3 years) is not B1 storage",
+      "stored": "no deadline on any entry; each event's record targets are bound in emr_access.access_target from the chained payload (every target A did not mark non-record: kind, record ID, version ID or NULL)",
+      "rule": "api/src/emr-runtime/contract.ts accessDeadline (with ACCESS_RETENTION from A's RECORD_CLASSIFICATION['access-audit'].retention, accessRetentionFloor, recordTargets): computed only when destruction is considered; an unknown record end means no deadline",
+      "database_floor": "emr_access.access_retention_floor(timestamptz), the migration's only civil period; expire_prefix refuses an entry before it (EB004) and any record-bound entry (EB008) until unit H supplies record retention ends",
+      "bound_by": "C07 (non-record ends at the floor; a record-bound event outlives it while its record is retained, never ends while the record end is unknown), C10 (only these two places compute a period, equal periods), L05 (SQL floor = runtime floor, bindings = recordTargets, old non-record prefix removed, old record-bound entry kept and refused EB008)"
+    },
     "compose_services": ["db (tablespace directory prepared at start)", "emr-provision (one-shot, installer credential)", "api-migrate (one-shot, installer credential)", "api (runtime credential, state volume)"],
     "volumes": { "emr-access": "db: /var/lib/postgresql/emr-access", "emr-state": "api: /var/lib/kin-emr (seal, pending intents, failure journal)" },
     "secrets": { "required": ["KIN_EMR_RUNTIME_PASSWORD"], "optional": ["KIN_EMR_READER_PASSWORD", "KIN_EMR_RETENTION_PASSWORD"],
@@ -94,7 +101,7 @@
         "C04 a verified offline original with its own reception; a self-declared flag, a reconnect address and another content under one ID are refused",
         "C05 the body follows the commit receipt only; a provisional, enqueued or other event's receipt and any failure send zero bytes",
         "C06 the stored chain against its trusted tail; a deleted middle or tail, a repeated sequence and an unsealed gap are found",
-        "C07 independent expired prefix and its checkpoint; an unexpired, held or middle deletion and a read-extended clock are refused",
+        "C07 independent expired prefix and its checkpoint under the one retention rule: a non-record event ends at the floor, a record-bound event outlives it while its record is retained and never ends while its record end is unknown; an unexpired, held or middle deletion and a read-extended clock are refused",
         "C08 complete hold set and clause history reloaded from the snapshot; a failed read is never empty; another transaction's snapshot is refused",
         "C09 the signed original and its recovery copy keep owner and original time; a private-draft end or a new authentication never restarts or erases them",
         "C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused"
@@ -118,7 +125,7 @@
   },
   "expected": {
     "contract": 10, "live": 8, "mutants": 11, "profiles": 39, "measurements_suites": 20, "validate_jobs": 22, "emr_b_jobs": 1,
-    "session_matrix": 8, "candidate": 115, "candidate_rows": 13, "migrations": 43, "public_tables": 51, "emr_tables": 7,
+    "session_matrix": 8, "candidate": 115, "candidate_rows": 13, "migrations": 43, "public_tables": 51, "emr_tables": 8,
     "fixture_public_rows": 90, "fixture_emr_rows": 7,
     "note": "declared before running; never generated from a run's own result"
   },

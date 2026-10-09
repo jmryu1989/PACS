@@ -157,6 +157,8 @@ B의 접속 저장소는 업무 기록과 **별도 저장소**이며 제23조④
 
 B의 SQL 전용 저장(schema `emr_access`, 전용 tablespace)은 Prisma 모델이 아니므로 `SQL_STORAGE_CLASSIFICATION`에 따로 분류하고 실제 catalog와 양방향 대조한다. 법적 보존 의무·요청(`legal-duty`)과 검토된 조문 판본 이력(`legal-reference`)은 원기록을 따르는 증빙이다(`source-record`). 저장된 접속사건은 `emr_access.access_entry` 모델로 A의 고정 접속 매핑과 같은 사실을 돌려준다.
 
+**접속기록 보존 규칙(지휘 2026-10-09, 법령 등록부 LR-11·D-1, Astra 교차 확인 대기):** 원장 행에는 만료 시각을 저장하지 않는다. 파기를 검토하는 시점에만 하나의 규칙(`api/src/emr-runtime/contract.ts`의 `accessDeadline`)으로 계산한다. 기록 대상이 없는 사건(로그인·진입·로그아웃·세션 종료 등)은 사건 시각부터 A 분류표의 접속기록 기간(`RECORD_CLASSIFICATION['access-audit']`, `accessRetentionFloor`)에 끝난다. 의료법 제23조④의 기록 사건(기재·추가기재·수정·열람)은 그 기간과 대상 기록의 보존 종료 중 늦은 때에 끝나며, 대상 기록의 종료를 알 수 없으면 끝나지 않는다. 각 사건의 기록 대상은 체인 payload에서 그대로 `emr_access.access_target`에 묶는다(A가 non-record로 표시하지 않은 모든 대상). DB의 기간 선언은 `emr_access.access_retention_floor` 한 곳이고 C10·L05가 위 규칙과 같음을 확인한다. B1에는 기록 저장소가 없으므로 기록 대상 사건은 파기되지 않는다(`expire_prefix`가 EB008로 거절). 대상 기록의 종료를 공급하는 일은 H다. 권한 이력 3년은 B1 저장이 아니다.
+
 D596 단말 경계(`TERMINAL_RECORD_BOUNDARY`, 저장은 C의 단말 대기열): 미전송 서명 원본(`offline-signed-original`)은 서명자 소유, 실제 signedAt부터의 판독/진료기록 기간이며 private-draft의 목적 종료로 지워지지 않고 수신·재인증 시각으로 기산하지 않는다(`TerminalOriginalTimeRefused`). 복구·재검토 작업본(`recovery-working-copy`)은 같은 회원 소유·원본 사건 참조·목적 ID를 가진 목적 자료이며 검증된 원본 수신(`original-received`) 또는 소유자 폐기에서 끝난다. 상태는 `pending-transmission`·`received-unverified`·`verified`·`verification-refused`다.
 
 **A low 이관 상태(B1):** L5-02의 B 부분은 `emr_access.clause_version`(설치 자격만 기록, 수정·삭제 거절)과 결속 reader의 전체 hold 목록(활성·종료·해제, `complete:true`, 조회 실패는 빈 집합이 아님)이다. F/H/I 부분은 남는다. L5-05(main 단일 구성·AST 허용 위치 이동)는 B2, L5-01·03·04·06은 C/F/H/I 그대로다.

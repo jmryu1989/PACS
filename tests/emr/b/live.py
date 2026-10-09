@@ -194,6 +194,20 @@ class EmrBLedgerLive(unittest.TestCase):
                 "result": "succeeded", "auth": {"endCause": None, "failureCause": None, "trigger": None},
                 "requestId": "request-" + uuid.uuid4().hex, "auditLinkId": "audit:" + str(uuid.uuid4()), "relatedEventId": None}
 
+    def provide_event(self, occurred="2026-10-09T00:00:00.000Z"):
+        """A provision before a report version's body: an event about an EMR record (열람), A's v1 format."""
+        who = {"id": str(uuid.uuid4()), "issuer": "https://identity.example.test", "subject": "sub-" + uuid.uuid4().hex[:8]}
+        return {"formatVersion": 1, "surface": "GET studies/:uid/report/versions", "eventId": "provide-" + str(uuid.uuid4()),
+                "userId": {"status": "known", "value": who}, "rolesAtTime": {"status": "known", "value": ["radiologist"]},
+                "actingInstitution": {"status": "known", "value": "hospital-a"}, "managingInstitution": {"status": "known", "value": "hospital-a"},
+                "occurredAt": occurred, "trustedProxyIp": {"status": "known", "value": {"address": "192.0.2.1", "source": "trusted-proxy"}},
+                "cause": "user-view", "executor": "member",
+                "targets": [{"kind": "report-version", "patientLinkSnapshot": {"status": "known", "value": {"linkId": "link-1", "patientId": "SYN-1", "assigningAuthority": "hospital-a"}},
+                             "studyId": {"status": "known", "value": "study-1"}, "recordId": {"status": "known", "value": "report-1"},
+                             "versionId": {"status": "known", "value": "version-1"}}],
+                "action": "provide-prepared", "result": "prepared", "requestId": "request-" + uuid.uuid4().hex,
+                "auditLinkId": "audit:" + str(uuid.uuid4()), "relatedEventId": None}
+
     def chain_ok(self, entries):
         """Recompute A's chain bytes over the stored payloads (independently of the product code)."""
         previous = None
@@ -382,7 +396,7 @@ class EmrBLedgerLive(unittest.TestCase):
         forged_payload = json.dumps({"kind": "access", "event": {"eventId": str(uuid.uuid4()), "occurredAt": "2026-10-09T00:00:00.000Z"}}, separators=(",", ":"))
         sequence, previous = base[-1]["sequence"] + 1, base[-1]["hash"]
         forged_hash = hashlib.sha256(('{"sequence":%d,"previousHash":"%s","payload":%s}' % (sequence, previous, forged_payload)).encode()).hexdigest()
-        cases["l04_forged"] = ("INSERT INTO emr_access.access_entry VALUES (%d, '%s', '%s', 'access', '%s', '%s', '%s', now(), now() + interval '3 years', now()); "
+        cases["l04_forged"] = ("INSERT INTO emr_access.access_entry VALUES (%d, '%s', '%s', 'access', '%s', '%s', '%s', now(), now()); "
                                "UPDATE emr_access.chain_head SET sequence = %d, hash = '%s'"
                                % (sequence, previous, forged_hash, json.loads(forged_payload)["event"]["eventId"], forged_payload.replace("'", "''"),
                                   hashlib.sha256(forged_payload.encode()).hexdigest(), sequence, forged_hash), "UnsealedEntryUnexplained")
@@ -402,21 +416,37 @@ class EmrBLedgerLive(unittest.TestCase):
 
     # ── L05 ──
     def test_b05_expiry_checkpoint_and_holds(self):
-        """The retention role removes only an expired, unheld prefix with its checkpoint in one transaction; an unexpired,
-        held or direct deletion and any runtime call are refused; an interrupted expiry changes nothing."""
+        """The retention role removes only an expired, unheld prefix with its checkpoint in one transaction, under the one
+        retention rule: an old event about no record goes at the floor, an old event about an EMR record stays while that
+        record's retention is not established (B1 has no record store); an unexpired, held, record-bound or direct
+        deletion and any runtime call are refused; an interrupted expiry changes nothing."""
         db = self.start_db("l05")
         self.provision(db)
         self.migrate(db)
         state = self.volume("l05")
         old = [self.auth_event(OLD[n]) for n in range(3)]
+        record_old = self.provide_event(OLD[3])
         recent = [self.auth_event() for _ in range(2)]
-        appended = self.driver("append", {"events": old + recent}, db=db, volume=state)
+        events = old + [record_old] + recent
+        appended = self.driver("append", {"events": events}, db=db, volume=state)
         self.assertTrue(all("receipt" in r for r in appended["results"]), appended)
-        # The SQL boundary is A's civil boundary.
+        # One retention rule: the database's single floor is the runtime rule's floor at every civil edge; no entry stores
+        # a deadline; each event's record targets are bound exactly as the rule reads them from the same event.
+        utc = "to_char(%s AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')"
         edges = ["2024-02-28T15:00:00.000Z", "2024-02-28T15:00:00.001Z", "2026-10-04T15:00:00.000Z", "2026-10-05T00:00:00.000Z", "2023-12-31T14:59:59.999Z"]
-        from_a = self.driver("civil", {"at": edges}, db=db, volume=state)
-        from_sql = [self.ok("SELECT to_char(emr_access.civil_period_end('%s', 2) AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')" % at, db=db)[0] for at in edges]
-        self.assertEqual(from_sql, from_a)
+        from_rule = self.driver("civil", {"at": edges}, db=db, volume=state)
+        from_sql = [self.ok("SELECT " + utc % ("emr_access.access_retention_floor('%s')" % at), db=db)[0] for at in edges]
+        self.assertEqual(from_sql, from_rule)
+        self.assertEqual(self.ok("SELECT count(*) FROM information_schema.columns WHERE table_schema = 'emr_access' "
+                                 "AND column_name IN ('expires_at', 'expiry', 'deadline')", db=db), ["0"])
+        bound = [[{"index": int(i), "kind": k, "recordId": r or None, "versionId": v or None} for i, k, r, v in
+                  (line.split("|") for line in self.ok("SELECT target_index, target_kind, coalesce(record_id, ''), coalesce(version_id, '') "
+                   "FROM emr_access.access_target WHERE event_id = '%s' ORDER BY target_index" % e["eventId"], db=db))] for e in events]
+        self.assertEqual(bound, self.driver("targets", {"events": events}, db=db, volume=state))
+        self.assertEqual([len(b) for b in bound], [0, 0, 0, 1, 0, 0])
+        deadlines = self.driver("deadline", {"events": events}, db=db, volume=state)
+        self.assertEqual(deadlines[:3], self.driver("civil", {"at": [e["occurredAt"] for e in old]}, db=db, volume=state))
+        self.assertIsNone(deadlines[3], "a record-bound event has no end while its record's end is unknown")
         # A hold on the second old event keeps it and everything after it.
         hold = {"holdId": "hold-l05", "recordId": old[1]["eventId"], "actorId": "custodian", "at": "2026-10-01T00:00:00.000Z", "release": None,
                 "basis": {"type": "court-order", "clause": {"law": "synthetic-law", "article": "article-1", "version": "2026-v1"},
@@ -450,12 +480,15 @@ class EmrBLedgerLive(unittest.TestCase):
         self.ok("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = 'kin_emr_retention'", db=db)
         session.communicate(timeout=60)
         self.assertEqual(self.ok("SELECT string_agg(sequence::text, ',' ORDER BY sequence) FROM emr_access.access_entry", db=db), snapshot)
-        # After the release the rest of the expired prefix goes with its own checkpoint; the chain stays verifiable.
+        # After the release the rest of the expired prefix goes with its own checkpoint, up to the old record-bound event,
+        # which stays past the floor (its record's retention is not established here); the chain stays verifiable.
         second = self.driver("expire", url=retention, db=db, volume=state)
         self.assertEqual(second["deleted"], 2, second)
         remaining = self.entries(db=db, volume=state)
-        self.assertEqual([e["kind"] for e in remaining], ["access", "access", "expiry", "expiry"])
-        self.assertEqual(sorted(e["eventId"] for e in remaining if e["kind"] == "access"), sorted(e["eventId"] for e in recent))
+        self.assertEqual([e["kind"] for e in remaining], ["access", "access", "access", "expiry", "expiry"])
+        self.assertEqual(sorted(e["eventId"] for e in remaining if e["kind"] == "access"), sorted(e["eventId"] for e in [record_old] + recent))
+        self.assertEqual(self.refused("SELECT emr_access.expire_prefix(%d)" % remaining[0]["sequence"], user="kin_emr_retention", db=db), "EB008")
+        self.assertEqual(self.ok("SELECT count(*) FROM emr_access.access_target WHERE event_id = '%s'" % record_old["eventId"], db=db), ["1"])
         for checkpoint in (e for e in remaining if e["kind"] == "expiry"):
             self.assertNotIn("sub-", checkpoint["payload"])
         recovered = self.driver("recover", db=db, volume=state)

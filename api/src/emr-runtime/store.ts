@@ -3,10 +3,10 @@ import { AccessEvent, AppendOnlyAccessStore, DurableAccessReceipt } from '../emr
 import { ResolvedRecord } from '../emr-contract/classification';
 import { ContractError, integer, refuse, sha256, string, utc } from '../emr-contract/validation';
 import {
-  AppendResult, ChainTail, ClauseRow, HoldRow, PlacementRow, RequestRow, RetentionRow, StoredEntry,
-  accessExpiry, canonicalPayload, mintDurableReceipt, planExpiryPrefix,
+  AppendResult, ChainTail, ClauseRow, HoldRow, PlacementRow, RECORD_RETENTION_UNAVAILABLE, RecordRetentionEnd, RecordTarget,
+  RequestRow, RetentionRow, StoredEntry, canonicalPayload, mintDurableReceipt, planExpiryPrefix,
 } from './contract';
-import { EmrSnapshot, SnapshotRequest, snapshotFromRows, transactionScope, withSnapshot } from './context';
+import { EmrSnapshot, SnapshotRequest, snapshotFromRows } from './context';
 import { FailureJournal, JournalUnavailable } from './failure-journal';
 import { RawQuery } from './manifest';
 import { AccessSeal, SealRefused } from './seal';
@@ -77,17 +77,15 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
   constructor(private readonly db: PrismaClient, readonly sql: PrismaLedgerSql, readonly seal: AccessSeal, readonly journal: FailureJournal) {}
 
   /**
-   * Inside the caller's open business transaction, last: A parses the event, its own two-year deadline is computed from
-   * the holds read under this transaction, the intent is made durable outside the database, then the database appends
-   * under the chain-head lock. Any failure here must abort the caller's transaction.
+   * Inside the caller's open business transaction, last: A parses the event, the intent is made durable outside the
+   * database, then the database appends under the chain-head lock and binds the event's record targets from the same
+   * bytes. No deadline is stored (contract.ts accessDeadline computes it when destruction is considered). Any failure
+   * here must abort the caller's transaction.
    */
   async appendInTransaction(tx: object, input: AccessEvent, served?: readonly ResolvedRecord[]): Promise<ProvisionalAppend> {
     const { event, text, contentSha256 } = canonicalPayload(input, served);
-    const scope = transactionScope();
-    const snapshot = await this.snapshot(tx, scope, { recordIds: [event.eventId] });
-    const expiresAt = withSnapshot(scope, snapshot, () => accessExpiry(event));
     this.seal.recordIntent(event.eventId, contentSha256);
-    const result: AppendResult = await this.appendRow(tx, event.eventId, text, expiresAt);
+    const result: AppendResult = await this.appendRow(tx, event.eventId, text);
     return Object.freeze({ provisional: true as const, eventId: event.eventId, sequence: result.sequence, hash: result.hash, contentSha256 });
   }
 
@@ -191,10 +189,10 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
   }
 
   // ── the schema functions under the caller's transaction (each value bound as a parameter) ──
-  async appendRow(tx: object, eventId: string, payload: string, expiresAt: string): Promise<AppendResult> {
+  async appendRow(tx: object, eventId: string, payload: string): Promise<AppendResult> {
     const run = tx as RawQuery;
     const [row] = await run.$queryRaw<any[]>`SELECT chain_id::text AS chain_id, sequence, previous_hash, hash, stored_at, replay
-      FROM emr_access.append_access(${eventId}::text, ${payload}::text, ${expiresAt}::timestamptz)`;
+      FROM emr_access.append_access(${eventId}::text, ${payload}::text)`;
     return { chainId: string(row.chain_id), sequence: toNumber(row.sequence), previousHash: sha256(row.previous_hash), hash: sha256(row.hash),
       storedAt: toIso(row.stored_at), replay: row.replay === true };
   }
@@ -233,22 +231,30 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
   }
 }
 
+function boundTargets(value: unknown): RecordTarget[] {
+  if (!Array.isArray(value)) refuse('RetentionViewIncomplete');
+  return (value as any[]).map(t => ({ index: integer(t.index), kind: string(t.kind),
+    recordId: t.recordId === null ? null : string(t.recordId), versionId: t.versionId === null ? null : string(t.versionId) }));
+}
 /**
- * The access-ledger retention job (its own process and credential, kin_emr_retention; never the API runtime). It plans
- * the expired, unheld prefix from positions and deadlines only, and the database function re-checks the same rule and
- * appends the non-personal checkpoint in the deleting transaction. Scheduling it is not part of this unit.
+ * The access-ledger retention job (its own process and credential, kin_emr_retention; never the API runtime). It reads
+ * positions, each entry's own time, its bound record targets and holds - no payload - and computes each end now, with the
+ * one rule (contract.ts accessDeadline) and the record retention ends it is given (none in B1: record-bound entries stay).
+ * The database re-checks the floor, the record binding and the holds and appends the non-personal checkpoint in the
+ * deleting transaction. Scheduling it is not part of this unit.
  */
-export async function expireAccessPrefix(retention: RawQuery, now = new Date().toISOString()):
+export async function expireAccessPrefix(retention: RawQuery, now = new Date().toISOString(), recordEnd: RecordRetentionEnd = RECORD_RETENTION_UNAVAILABLE):
   Promise<{ deleted: number; checkpointSequence: number; checkpointHash: string } | null> {
   const rows: RetentionRow[] = [];
   let after = 0;
   for (;;) {
-    const page = await retention.$queryRaw<any[]>`SELECT sequence, hash, expires_at, held FROM emr_access.retention_view(${after}::bigint, 1000)`;
-    for (const row of page) rows.push({ sequence: toNumber(row.sequence), hash: sha256(row.hash), expiresAt: toIso(row.expires_at), held: row.held === true });
+    const page = await retention.$queryRaw<any[]>`SELECT sequence, hash, kind, occurred_at, targets, held FROM emr_access.retention_view(${after}::bigint, 1000)`;
+    for (const row of page) rows.push({ sequence: toNumber(row.sequence), hash: sha256(row.hash), kind: row.kind === 'expiry' ? 'expiry' : 'access',
+      occurredAt: toIso(row.occurred_at), targets: boundTargets(row.targets), held: row.held === true });
     if (page.length < 1000) break;
     after = toNumber(page[page.length - 1].sequence);
   }
-  const plan = planExpiryPrefix(rows, now);
+  const plan = planExpiryPrefix(rows, now, recordEnd);
   if (!plan) return null;
   const through = plan.through;
   const [row] = await retention.$queryRaw<any[]>`SELECT deleted_count, checkpoint_sequence, checkpoint_hash FROM emr_access.expire_prefix(${through}::bigint)`;

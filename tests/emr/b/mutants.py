@@ -56,7 +56,7 @@ MUTANTS = {
          "  emr_access.storage_placement() TO kin_emr_retention;\nGRANT SET ON PARAMETER session_replication_role TO kin_runtime;\nCOMMIT;\n")]),
     "M03": ("the business transaction commits without its ledger fact: no receipt, no projection join", [
         ("api/src/emr-runtime/store.ts",
-         "    const result: AppendResult = await this.appendRow(tx, event.eventId, text, expiresAt);\n",
+         "    const result: AppendResult = await this.appendRow(tx, event.eventId, text);\n",
          "    const result = { chainId: '', sequence: 0, previousHash: '', hash: '', storedAt: '', replay: false } as AppendResult;\n")]),
     "M04": ("body bytes leave before the durable receipt (and with no receipt at all)", [
         ("api/src/emr-runtime/contract.ts",
@@ -83,8 +83,8 @@ MUTANTS = {
          "        const sealed = entries.find(e => e.sequence === current!.sequence);\n"
          "        if (sealed ? sealed.hash !== current.hash : current.sequence > anchor.sequence || (current.sequence === anchor.sequence && current.hash !== anchor.hash))\n"
          "          throw new SealRefused('SealTailMismatch');\n", "")]),
-    "M12": ("an unexpired entry is planned into the expired prefix", [
-        ("api/src/emr-runtime/contract.ts", "    if (utc(row.expiresAt) > now || row.held) break;\n", "    if (row.held) break;\n")]),
+    "M12": ("an entry before its end under the retention rule (unexpired, or bound to a record whose end is unknown) is planned into the expired prefix", [
+        ("api/src/emr-runtime/contract.ts", "    if (deadline === null || deadline > now || row.held) break;\n", "    if (row.held) break;\n")]),
     "M14": ("a declared live case missing from (or added to) its test file is accepted", [
         ("scripts/emr-compose.py", "    if live != expected_live:\n", "    if live is None:\n")]),
 }

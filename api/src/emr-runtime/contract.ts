@@ -2,10 +2,10 @@ import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
 import {
   AccessEvent, AccessExpiryCheckpoint, ACCESS_CHAIN_GENESIS, ChainPosition, DurableAccessReceipt, AppendOnlyAccessStore,
-  ImmutableIdentity, accessRetention, parseAccessEvent, provideAfterDurableEvent,
+  ImmutableIdentity, NON_RECORD_TARGETS, parseAccessEvent, provideAfterDurableEvent,
 } from '../emr-contract/access-event';
-import { ResolvedRecord } from '../emr-contract/classification';
-import { retentionDeadline } from '../emr-contract/lawful-defaults';
+import { RECORD_CLASSIFICATION, ResolvedRecord } from '../emr-contract/classification';
+import { civilPeriodEnd } from '../emr-contract/lawful-defaults';
 import { freeze, integer, object, refuse, sha256, string, utc } from '../emr-contract/validation';
 
 /**
@@ -28,6 +28,7 @@ export interface PlacementRow { relation: string; relkind: string; tablespace: s
 export const LEDGER_ERRORS = freeze({
   EB001: 'EmrStoragePlacementRequired', EB002: 'AccessEventIdConflict', EB003: 'AccessPayloadInvalid',
   EB004: 'RetentionNotElapsed', EB005: 'LegalHoldActive', EB006: 'ExpiryPrefixInvalid', EB007: 'ProjectionWithoutEvent',
+  EB008: 'RecordRetentionRequired',
 } as const);
 
 // ── chain bytes ──
@@ -85,24 +86,63 @@ export function retainedAnchor(entries: readonly StoredEntry[]): ChainPosition |
 
 // ── retention ──
 
-/** Each access event's own two-year deadline from A (제8조①2). Requires the composed readers and a hold snapshot. */
-export function accessExpiry(event: AccessEvent): string {
-  return retentionDeadline(accessRetention(event));
-}
-export interface RetentionRow { sequence: number; hash: string; expiresAt: string; held: boolean }
 /**
- * The longest retained prefix whose every entry has passed its own deadline and carries no unreleased hold. Returns the
- * last sequence of that prefix and its hash, or null when the first retained entry may not go. Reading an entry never
- * moves a deadline: deadlines come from the stored expiry of each entry only. The database re-checks the same rule.
+ * B's one access-retention rule (commander 2026-10-09, legal register D-1; pending Astra's cross-check). No deadline is
+ * stored with an entry: it is computed only when destruction is considered, here and nowhere else.
+ *  - An entry about no EMR record (login, entry, logout, session end, a refusal without a record, an expiry checkpoint)
+ *    ends at the floor: A's classification period for access records (RECORD_CLASSIFICATION['access-audit'].retention,
+ *    from A's statutory table) counted from the entry's own time.
+ *  - An event about EMR records (의료법 제23조④ 기재·추가기재·수정·열람; every target A did not mark non-record) ends at the
+ *    later of that floor and the retention end of each record it is about. While a record's end is unknown the event has
+ *    no deadline and is never destroyed.
+ * The database holds the same floor once (emr_access.access_retention_floor, kept equal by C10 and L05) and binds each
+ * event's record targets from its chained payload (emr_access.access_target).
  */
-export function planExpiryPrefix(rows: readonly RetentionRow[], now: string): { through: number; hash: string; count: number } | null {
+export const ACCESS_RETENTION = freeze({ kind: 'access-audit' as const, years: RECORD_CLASSIFICATION['access-audit'].retention.years });
+/** The end of an entry about no EMR record that started at `at`; the least end of any entry. */
+export function accessRetentionFloor(at: string): string {
+  return civilPeriodEnd(utc(at), ACCESS_RETENTION.years);
+}
+/** One EMR record an event is about, as bound in emr_access.access_target (IDs null when the event could not resolve them). */
+export interface RecordTarget { index: number; kind: string; recordId: string | null; versionId: string | null }
+/** The record targets of a parsed event, in target order: what append_access binds from the same payload. */
+export function recordTargets(input: unknown, served?: readonly ResolvedRecord[]): RecordTarget[] {
+  const event = parseAccessEvent(input, served);
+  return event.targets.flatMap((target, index) => NON_RECORD_TARGETS.includes(target.kind) ? [] : [{
+    index, kind: target.kind, recordId: target.recordId.status === 'known' ? target.recordId.value : null,
+    versionId: target.versionId.status === 'known' ? target.versionId.value : null }]);
+}
+/** The target record's retention end (the record's own A retention, unit H), or null when it cannot be established. */
+export type RecordRetentionEnd = (target: RecordTarget) => string | null;
+/** No record store is composed in B1: every record-bound event stays (fail closed) until unit H supplies record ends. */
+export const RECORD_RETENTION_UNAVAILABLE: RecordRetentionEnd = () => null;
+/** The rule itself: an entry's end, or null when it has none yet. */
+export function accessDeadline(entry: { occurredAt: string; targets: readonly RecordTarget[] }, recordEnd: RecordRetentionEnd): string | null {
+  let deadline = accessRetentionFloor(entry.occurredAt);
+  for (const target of entry.targets) {
+    const end = target.recordId === null ? null : recordEnd(target);
+    if (end === null) return null;
+    if (utc(end) > deadline) deadline = end;
+  }
+  return deadline;
+}
+export interface RetentionRow { sequence: number; hash: string; kind: 'access' | 'expiry'; occurredAt: string; targets: readonly RecordTarget[]; held: boolean }
+/**
+ * The longest retained prefix whose every entry is past its end under the rule above and carries no unreleased hold.
+ * Returns the last sequence of that prefix and its hash, or null when the first retained entry may not go. Reading an
+ * entry never moves its end: only its own time, its bound records' retention and holds count. The database re-checks
+ * the floor, the record binding and the holds.
+ */
+export function planExpiryPrefix(rows: readonly RetentionRow[], now: string, recordEnd: RecordRetentionEnd = RECORD_RETENTION_UNAVAILABLE):
+  { through: number; hash: string; count: number } | null {
   utc(now);
   let plan: { through: number; hash: string; count: number } | null = null;
   let previous: number | null = null;
   for (const row of rows) {
     if (previous !== null && row.sequence !== previous + 1) refuse('RetentionViewIncomplete');
     previous = row.sequence;
-    if (utc(row.expiresAt) > now || row.held) break;
+    const deadline = accessDeadline(row, recordEnd);
+    if (deadline === null || deadline > now || row.held) break;
     plan = { through: row.sequence, hash: row.hash, count: (plan?.count ?? 0) + 1 };
   }
   return plan;

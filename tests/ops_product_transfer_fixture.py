@@ -8,7 +8,7 @@ roles nor tablespaces; they are never assumed to come back with the dump. The AP
 its own state volume, outside this database dump (their restore consistency is the EMR-B live L07 case).
 """
 import argparse
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 import hashlib
 import importlib.util
 import json
@@ -113,7 +113,7 @@ SEQUENCES = ['AuditLog_id_seq', 'ProviderChange_id_seq', 'ReadingTemplate_id_seq
 STAMP = '2026-09-06T00:00:00.123'
 PRODUCT_FIELDS = {'migrations', 'study_uid', 'catalog', 'rows', 'sequences', 'emr'}
 # EMR-B1: schema emr_access, observed schema-qualified (the public catalog above never sees it).
-EMR_TABLES = sorted(['access_entry', 'audit_projection', 'chain_head', 'clause_version', 'duty_request_event',
+EMR_TABLES = sorted(['access_entry', 'access_target', 'audit_projection', 'chain_head', 'clause_version', 'duty_request_event',
                      'legal_hold_event', 'member_identity'])
 EMR_ROLES = ['kin_emr_owner', 'kin_emr_reader', 'kin_emr_retention', 'kin_runtime']
 # The read-only fixture container's only writable non-data mount; the compose deployment uses its own volume.
@@ -464,17 +464,6 @@ def expected_sequences():
                        is_called=name in ('ReportVersion_id_seq', 'UserFilter_id_seq', 'ProviderChange_id_seq')) for name in SEQUENCES}
 
 
-def civil_period_end(at, years):
-    """A's civilPeriodEnd (fixed +09:00 civil days; the first day counts only from 00:00; 29 Feb -> 1 Mar)."""
-    local = datetime.fromisoformat(at.replace('Z', '+00:00')).astimezone(timezone.utc).replace(tzinfo=None) + timedelta(hours=9)
-    midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
-    start = (midnight if local == midnight else midnight + timedelta(days=1)).date()
-    year = start.year + years
-    leap = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
-    target = start.replace(year=year, month=3, day=1) if (start.month, start.day) == (2, 29) and not leap else start.replace(year=year)
-    return datetime(target.year, target.month, target.day) - timedelta(hours=9)
-
-
 def jsonb_time(moment):
     """How to_jsonb renders a timestamptz under SET timezone='UTC'."""
     text = moment.strftime('%Y-%m-%dT%H:%M:%S')
@@ -496,7 +485,7 @@ def expected_emr_rows():
         digest = hashlib.sha256(('{"sequence":%d,"previousHash":"%s","payload":%s}' % (sequence, previous, payload)).encode()).hexdigest()
         entries.append(dict(sequence=sequence, previous_hash=previous, hash=digest, kind='access', event_id=event_id, payload=payload,
             content_sha256=hashlib.sha256(payload.encode()).hexdigest(), occurred_at=jsonb_time(stamp),
-            expires_at=jsonb_time(civil_period_end('2026-09-06T00:00:00.123Z', 2)), stored_at=jsonb_time(stamp)))
+            stored_at=jsonb_time(stamp)))
         previous = digest
     rows['access_entry'] = entries
     rows['chain_head'] = [dict(id=1, chain_id=EMR_CHAIN_ID, sequence=2, hash=previous)]

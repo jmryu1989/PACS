@@ -12,9 +12,9 @@ export const EMR_STORAGE = freeze({
   schema: 'emr_access',
   tablespace: 'kin_emr_access',
   roles: { owner: 'kin_emr_owner', runtime: 'kin_runtime', reader: 'kin_emr_reader', retention: 'kin_emr_retention' },
-  tables: ['access_entry', 'audit_projection', 'chain_head', 'clause_version', 'duty_request_event', 'legal_hold_event', 'member_identity'],
+  tables: ['access_entry', 'access_target', 'audit_projection', 'chain_head', 'clause_version', 'duty_request_event', 'legal_hold_event', 'member_identity'],
   runtimeFunctions: [
-    'append_access(text,text,timestamptz)', 'chain_tail()', 'entries_after(bigint,integer)', 'entry_for_event(text)',
+    'append_access(text,text)', 'chain_tail()', 'entries_after(bigint,integer)', 'entry_for_event(text)',
     'storage_placement()', 'civil_period_end(timestamptz,integer)', 'resolve_member_identity(text,text)',
     'record_projection(text,integer)', 'place_hold(text,text,text)', 'release_hold(text,text)', 'holds_for(text)',
     'record_duty_request(text,text,text,text)', 'duty_requests(text,text)', 'clause_versions(text)',
@@ -64,8 +64,9 @@ export async function verifyRuntimeConnection(db: RawQuery): Promise<{ role: str
   const [table] = await db.$queryRaw<any[]>`SELECT pg_catalog.to_regclass('emr_access.access_entry') IS NOT NULL AS present`;
   if (!table.present) throw new EmrRuntimeRefused([...problems, 'ledger-missing']);
   const [privileges] = await db.$queryRaw<any[]>`SELECT
-      pg_catalog.has_table_privilege('emr_access.access_entry', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') AS direct_write,
-      pg_catalog.has_function_privilege('emr_access.append_access(text,text,timestamptz)', 'EXECUTE') AS append,
+      (pg_catalog.has_table_privilege('emr_access.access_entry', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+        OR pg_catalog.has_table_privilege('emr_access.access_target', 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')) AS direct_write,
+      pg_catalog.has_function_privilege('emr_access.append_access(text,text)', 'EXECUTE') AS append,
       pg_catalog.has_function_privilege('emr_access.expire_prefix(bigint)', 'EXECUTE') AS expire,
       pg_catalog.has_function_privilege('emr_access.record_clause_version(text,text,text,text,date,date)', 'EXECUTE') AS clauses,
       pg_catalog.has_schema_privilege('emr_access', 'CREATE') AS create_ledger,

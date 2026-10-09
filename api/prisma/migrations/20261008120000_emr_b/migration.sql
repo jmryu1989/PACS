@@ -20,6 +20,9 @@
 -- server's JSON.stringify of A's parsed event and is stored verbatim (text, not jsonb, so the hashed bytes survive).
 -- Retries of the same event ID with the same payload return the stored entry; the same ID with other content is refused.
 -- Deletion exists only in expire_prefix: an expired, unheld prefix and its non-personal checkpoint commit together.
+-- Retention (commander 2026-10-09, legal register D-1): no deadline is stored. It is computed when destruction is
+-- considered, by one rule over the entry's own time and the retention of the EMR records it is about (bound in
+-- access_target); an entry about no record ends at the floor declared once below (access_retention_floor).
 BEGIN;
 
 DO $$
@@ -93,11 +96,24 @@ CREATE TABLE emr_access.access_entry (
   payload text NOT NULL CHECK (pg_catalog.octet_length(payload) <= 65536),
   content_sha256 text NOT NULL CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
   occurred_at timestamptz NOT NULL,
-  expires_at timestamptz NOT NULL,
   stored_at timestamptz NOT NULL,
-  CHECK ((kind = 'access') = (event_id IS NOT NULL)),
-  CHECK (expires_at > occurred_at)
+  CHECK ((kind = 'access') = (event_id IS NOT NULL))
 );
+
+-- No deadline is stored on an entry: it is computed only when destruction is considered, from one rule
+-- (api/src/emr-runtime/contract.ts accessDeadline) over the entry's own time and, for an event about an EMR record
+-- (기재·추가기재·수정·열람), that record's retention. Each such record target of an event is bound here, derived by
+-- append_access from the chained payload itself: every target A did not mark as a non-record target, in payload order.
+CREATE TABLE emr_access.access_target (
+  sequence bigint NOT NULL REFERENCES emr_access.access_entry (sequence),
+  target_index integer NOT NULL CHECK (target_index >= 0),
+  event_id text NOT NULL,
+  target_kind text NOT NULL CHECK (pg_catalog.length(target_kind) BETWEEN 1 AND 100),
+  record_id text CHECK (record_id IS NULL OR pg_catalog.length(record_id) BETWEEN 1 AND 200),
+  version_id text CHECK (version_id IS NULL OR pg_catalog.length(version_id) BETWEEN 1 AND 200),
+  PRIMARY KEY (sequence, target_index)
+);
+CREATE INDEX access_target_record ON emr_access.access_target (record_id, version_id);
 
 -- Unit B2 records here the one legacy AuditLog row that projects each new original event (eventId <-> Int id, once).
 CREATE TABLE emr_access.audit_projection (
@@ -153,7 +169,7 @@ CREATE TABLE emr_access.clause_version (
 CREATE FUNCTION emr_access.refuse_change() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
   IF TG_OP = 'UPDATE' AND TG_TABLE_NAME = 'chain_head' AND current_setting('kin.emr_append', true) = 'head' THEN RETURN NEW; END IF;
-  IF TG_OP = 'DELETE' AND TG_TABLE_NAME IN ('access_entry', 'audit_projection') AND current_setting('kin.emr_expiry', true) = 'prefix' THEN
+  IF TG_OP = 'DELETE' AND TG_TABLE_NAME IN ('access_entry', 'access_target', 'audit_projection') AND current_setting('kin.emr_expiry', true) = 'prefix' THEN
     RETURN OLD;
   END IF;
   RAISE EXCEPTION 'emr_access is append-only: % on % refused', TG_OP, TG_TABLE_NAME USING ERRCODE = 'insufficient_privilege';
@@ -163,6 +179,8 @@ CREATE TRIGGER chain_head_guard BEFORE UPDATE OR DELETE ON emr_access.chain_head
 CREATE TRIGGER chain_head_truncate BEFORE TRUNCATE ON emr_access.chain_head FOR EACH STATEMENT EXECUTE FUNCTION emr_access.refuse_change();
 CREATE TRIGGER access_entry_guard BEFORE UPDATE OR DELETE ON emr_access.access_entry FOR EACH ROW EXECUTE FUNCTION emr_access.refuse_change();
 CREATE TRIGGER access_entry_truncate BEFORE TRUNCATE ON emr_access.access_entry FOR EACH STATEMENT EXECUTE FUNCTION emr_access.refuse_change();
+CREATE TRIGGER access_target_guard BEFORE UPDATE OR DELETE ON emr_access.access_target FOR EACH ROW EXECUTE FUNCTION emr_access.refuse_change();
+CREATE TRIGGER access_target_truncate BEFORE TRUNCATE ON emr_access.access_target FOR EACH STATEMENT EXECUTE FUNCTION emr_access.refuse_change();
 CREATE TRIGGER audit_projection_guard BEFORE UPDATE OR DELETE ON emr_access.audit_projection FOR EACH ROW EXECUTE FUNCTION emr_access.refuse_change();
 CREATE TRIGGER audit_projection_truncate BEFORE TRUNCATE ON emr_access.audit_projection FOR EACH STATEMENT EXECUTE FUNCTION emr_access.refuse_change();
 CREATE TRIGGER member_identity_guard BEFORE UPDATE OR DELETE ON emr_access.member_identity FOR EACH ROW EXECUTE FUNCTION emr_access.refuse_change();
@@ -196,6 +214,15 @@ BEGIN
 END
 $$;
 
+-- The database's one declaration of the access-chain retention floor, the counterpart of B's single rule
+-- (api/src/emr-runtime/contract.ts ACCESS_RETENTION / accessRetentionFloor, from A's classification row for access
+-- records): the end for an entry about no EMR record, and the least end of any entry. The contract and live suites hold
+-- the two equal. expire_prefix reads it here.
+CREATE FUNCTION emr_access.access_retention_floor(p_at timestamptz) RETURNS timestamptz
+  LANGUAGE sql IMMUTABLE STRICT SET search_path = pg_catalog, pg_temp AS $$
+  SELECT emr_access.civil_period_end(p_at, 2);
+$$;
+
 -- Every ledger relation, its indexes and TOAST storage must be in kin_emr_access; otherwise nothing is written.
 CREATE FUNCTION emr_access.storage_placement() RETURNS TABLE (relation text, relkind text, tablespace text)
   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
@@ -227,7 +254,7 @@ CREATE FUNCTION emr_access.chain_hash(p_sequence bigint, p_previous text, p_payl
   SELECT encode(sha256(convert_to('{"sequence":' || p_sequence::text || ',"previousHash":"' || p_previous || '","payload":' || p_payload || '}', 'UTF8')), 'hex');
 $$;
 
-CREATE FUNCTION emr_access.append_access(p_event_id text, p_payload text, p_expires_at timestamptz)
+CREATE FUNCTION emr_access.append_access(p_event_id text, p_payload text)
   RETURNS TABLE (chain_id uuid, sequence bigint, previous_hash text, hash text, stored_at timestamptz, replay boolean)
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
@@ -247,7 +274,9 @@ BEGIN
     RAISE EXCEPTION 'AccessPayloadInvalid' USING ERRCODE = 'EB003';
   END;
   IF p_event_id IS NULL OR doc ->> 'kind' IS DISTINCT FROM 'access' OR doc -> 'event' ->> 'eventId' IS DISTINCT FROM p_event_id
-     OR occurred IS NULL OR p_expires_at IS DISTINCT FROM emr_access.civil_period_end(occurred, 2) THEN
+     OR occurred IS NULL OR pg_catalog.json_typeof(doc -> 'event' -> 'targets') IS DISTINCT FROM 'array'
+     OR EXISTS (SELECT 1 FROM pg_catalog.json_array_elements(doc -> 'event' -> 'targets') t(value)
+                WHERE pg_catalog.json_typeof(t.value) IS DISTINCT FROM 'object' OR t.value ->> 'kind' IS NULL) THEN
     RAISE EXCEPTION 'AccessPayloadInvalid' USING ERRCODE = 'EB003';
   END IF;
   SELECT * INTO head FROM emr_access.chain_head h WHERE h.id = 1 FOR UPDATE;
@@ -261,9 +290,17 @@ BEGIN
   END IF;
   next_sequence := head.sequence + 1;
   next_hash := emr_access.chain_hash(next_sequence, head.hash, p_payload);
-  INSERT INTO emr_access.access_entry (sequence, previous_hash, hash, kind, event_id, payload, content_sha256, occurred_at, expires_at, stored_at)
+  INSERT INTO emr_access.access_entry (sequence, previous_hash, hash, kind, event_id, payload, content_sha256, occurred_at, stored_at)
     VALUES (next_sequence, head.hash, next_hash, 'access', p_event_id, p_payload, encode(sha256(convert_to(p_payload, 'UTF8')), 'hex'),
-            occurred, p_expires_at, stored);
+            occurred, stored);
+  -- Its record targets, from the same bytes: A marks a non-record target's record fact 'not-applicable'; every other
+  -- target is about an EMR record (its record and version IDs when known, NULL when the event could not resolve them).
+  INSERT INTO emr_access.access_target (sequence, target_index, event_id, target_kind, record_id, version_id)
+  SELECT next_sequence, (t.position - 1)::integer, p_event_id, t.value ->> 'kind',
+         CASE WHEN t.value -> 'recordId' ->> 'status' = 'known' THEN t.value -> 'recordId' ->> 'value' END,
+         CASE WHEN t.value -> 'versionId' ->> 'status' = 'known' THEN t.value -> 'versionId' ->> 'value' END
+  FROM pg_catalog.json_array_elements(doc -> 'event' -> 'targets') WITH ORDINALITY AS t(value, position)
+  WHERE (t.value -> 'recordId' ->> 'status') IS DISTINCT FROM 'not-applicable';
   PERFORM set_config('kin.emr_append', 'head', true);
   UPDATE emr_access.chain_head h SET sequence = next_sequence, hash = next_hash WHERE h.id = 1;
   PERFORM set_config('kin.emr_append', '', true);
@@ -288,18 +325,24 @@ CREATE FUNCTION emr_access.entry_for_event(p_event_id text)
   FROM emr_access.access_entry e WHERE e.event_id = p_event_id;
 $$;
 
--- What the retention job may know: positions, own deadlines and whether an unreleased hold exists - no payload.
+-- What the retention job may know: positions, each entry's own time, its record targets (identifiers only) and whether
+-- an unreleased hold exists - no payload. The job computes each deadline from these with the one retention rule.
 CREATE FUNCTION emr_access.retention_view(p_after bigint, p_limit integer)
-  RETURNS TABLE (sequence bigint, hash text, expires_at timestamptz, held boolean)
+  RETURNS TABLE (sequence bigint, hash text, kind text, occurred_at timestamptz, targets json, held boolean)
   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-  SELECT e.sequence, e.hash, e.expires_at, EXISTS (
+  SELECT e.sequence, e.hash, e.kind, e.occurred_at, COALESCE((
+    SELECT pg_catalog.json_agg(pg_catalog.json_build_object('index', t.target_index, 'kind', t.target_kind, 'recordId', t.record_id,
+      'versionId', t.version_id) ORDER BY t.target_index)
+    FROM emr_access.access_target t WHERE t.sequence = e.sequence), '[]'::json), EXISTS (
     SELECT 1 FROM emr_access.legal_hold_event placed WHERE placed.record_id = e.event_id AND placed.phase = 'placed'
       AND NOT EXISTS (SELECT 1 FROM emr_access.legal_hold_event released WHERE released.hold_id = placed.hold_id AND released.phase = 'released'))
   FROM emr_access.access_entry e WHERE e.sequence > p_after ORDER BY e.sequence LIMIT least(greatest(p_limit, 1), 1000);
 $$;
 
--- Retention role only. The prefix up to p_through must be expired by its own two-year clock and free of any unreleased
--- hold; it and its projections are deleted and the checkpoint appended in this one transaction, or nothing happens.
+-- Retention role only. The prefix up to p_through must be past every entry's retention floor, hold no entry about an EMR
+-- record (its end is the target record's retention, which this unit does not hold: unit H supplies it and replaces this
+-- refusal) and be free of any unreleased hold; it, its targets and projections are deleted and the checkpoint appended in
+-- this one transaction, or nothing happens.
 CREATE FUNCTION emr_access.expire_prefix(p_through bigint)
   RETURNS TABLE (deleted_count bigint, checkpoint_sequence bigint, checkpoint_hash text)
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
@@ -317,8 +360,11 @@ BEGIN
   SELECT * INTO head FROM emr_access.chain_head h WHERE h.id = 1 FOR UPDATE;
   SELECT * INTO anchor FROM emr_access.access_entry e WHERE e.sequence = p_through;
   IF NOT FOUND THEN RAISE EXCEPTION 'ExpiryPrefixInvalid' USING ERRCODE = 'EB006'; END IF;
-  IF EXISTS (SELECT 1 FROM emr_access.access_entry e WHERE e.sequence <= p_through AND e.expires_at > now_at) THEN
+  IF EXISTS (SELECT 1 FROM emr_access.access_entry e WHERE e.sequence <= p_through AND emr_access.access_retention_floor(e.occurred_at) > now_at) THEN
     RAISE EXCEPTION 'RetentionNotElapsed' USING ERRCODE = 'EB004';
+  END IF;
+  IF EXISTS (SELECT 1 FROM emr_access.access_target t WHERE t.sequence <= p_through) THEN
+    RAISE EXCEPTION 'RecordRetentionRequired' USING ERRCODE = 'EB008';
   END IF;
   IF EXISTS (SELECT 1 FROM emr_access.access_entry e JOIN emr_access.legal_hold_event placed
                ON placed.record_id = e.event_id AND placed.phase = 'placed'
@@ -329,6 +375,7 @@ BEGIN
   SELECT count(*) INTO removed FROM emr_access.access_entry e WHERE e.sequence <= p_through;
   PERFORM set_config('kin.emr_expiry', 'prefix', true);
   DELETE FROM emr_access.audit_projection p USING emr_access.access_entry e WHERE e.sequence <= p_through AND p.event_id = e.event_id;
+  DELETE FROM emr_access.access_target t WHERE t.sequence <= p_through;
   DELETE FROM emr_access.access_entry e WHERE e.sequence <= p_through;
   PERFORM set_config('kin.emr_expiry', '', true);
   at_text := to_char(now_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"');
@@ -336,9 +383,9 @@ BEGIN
                 ',"anchorHash":"' || anchor.hash || '"}';
   next_sequence := head.sequence + 1;
   next_hash := emr_access.chain_hash(next_sequence, head.hash, checkpoint);
-  INSERT INTO emr_access.access_entry (sequence, previous_hash, hash, kind, event_id, payload, content_sha256, occurred_at, expires_at, stored_at)
+  INSERT INTO emr_access.access_entry (sequence, previous_hash, hash, kind, event_id, payload, content_sha256, occurred_at, stored_at)
     VALUES (next_sequence, head.hash, next_hash, 'expiry', NULL, checkpoint, encode(sha256(convert_to(checkpoint, 'UTF8')), 'hex'),
-            now_at, emr_access.civil_period_end(now_at, 2), clock_timestamp());
+            now_at, clock_timestamp());
   PERFORM set_config('kin.emr_append', 'head', true);
   UPDATE emr_access.chain_head h SET sequence = next_sequence, hash = next_hash WHERE h.id = 1;
   PERFORM set_config('kin.emr_append', '', true);
@@ -475,7 +522,7 @@ SET LOCAL default_tablespace = '';
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA emr_access FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA emr_access FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION
-  emr_access.append_access(text, text, timestamptz), emr_access.chain_tail(), emr_access.entries_after(bigint, integer),
+  emr_access.append_access(text, text), emr_access.chain_tail(), emr_access.entries_after(bigint, integer),
   emr_access.entry_for_event(text), emr_access.storage_placement(), emr_access.civil_period_end(timestamptz, integer),
   emr_access.resolve_member_identity(text, text), emr_access.record_projection(text, integer),
   emr_access.place_hold(text, text, text), emr_access.release_hold(text, text), emr_access.holds_for(text),

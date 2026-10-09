@@ -80,7 +80,7 @@ async function liveDriver() {
   try {
     if (operation === 'verify-runtime') return await verifyRuntimeConnection(prisma);
     if (operation === 'expire') return await RT.expireAccessPrefix(prisma, args.now ?? new Date().toISOString());
-    if (operation === 'civil') return args.at.map(at => D.civilPeriodEnd(at, 2));
+    if (operation === 'civil') return args.at.map(at => C.accessRetentionFloor(at));
     const state = process.env.KIN_EMR_STATE_DIR;
     const sql = new RT.PrismaLedgerSql(prisma);
     const journal = new FailureJournal(state);
@@ -150,6 +150,9 @@ async function liveDriver() {
       return await reload(args);
     }
     if (operation === 'reload') return await reload(args);
+    // The one retention rule's view of each event: its record targets, and its end while no record end is known (B1).
+    if (operation === 'targets') return (args.events ?? []).map(event => C.recordTargets(event));
+    if (operation === 'deadline') return (args.events ?? []).map(event => C.accessDeadline({ occurredAt: event.occurredAt, targets: C.recordTargets(event) }, C.RECORD_RETENTION_UNAVAILABLE));
     if (operation === 'identity') {
       return await prisma.$transaction(async tx => Promise.all((args.pairs ?? []).map(([issuer, subject]) => store.resolveIdentity(tx, issuer, subject))));
     }
@@ -218,10 +221,10 @@ function contractSuite() {
     commit(tx) { this.entries.push(...tx.staged); if (tx.head) this.head = tx.head; this.holdRowsList.push(...tx.holds); this.requests.push(...tx.requests); }
     visible(tx) { return tx ? [...this.entries, ...tx.staged] : this.entries; }
     guard() { if (this.down) throw Object.assign(new Error("Can't reach database server"), { code: 'P1001' }); }
-    append(tx, eventId, payload, expiresAt) {
+    append(tx, eventId, payload) {
       this.guard();
       const doc = JSON.parse(payload);
-      if (doc.kind !== 'access' || doc.event.eventId !== eventId || expiresAt !== D.civilPeriodEnd(doc.event.occurredAt, 2)) throw ledgerError('EB003');
+      if (doc.kind !== 'access' || doc.event.eventId !== eventId || !Array.isArray(doc.event.targets)) throw ledgerError('EB003');
       const existing = this.visible(tx).find(e => e.eventId === eventId);
       const head = tx.head ?? this.head;
       if (existing) {
@@ -229,7 +232,10 @@ function contractSuite() {
         return { chainId: this.chainId, sequence: existing.sequence, previousHash: existing.previousHash, hash: existing.hash, storedAt: existing.storedAt, replay: true };
       }
       const sequence = head.sequence + 1, hash = C.entryHash(sequence, head.hash, payload), storedAt = new Date().toISOString();
-      tx.staged.push({ sequence, previousHash: head.hash, hash, kind: 'access', eventId, payload, contentSha256: createHash('sha256').update(payload).digest('hex'), storedAt, expiresAt });
+      // The record binding the schema derives from the same bytes: every target whose record fact is not 'not-applicable'.
+      const targets = doc.event.targets.flatMap((t, index) => t.recordId?.status === 'not-applicable' ? [] : [{ index, kind: t.kind,
+        recordId: t.recordId?.status === 'known' ? t.recordId.value : null, versionId: t.versionId?.status === 'known' ? t.versionId.value : null }]);
+      tx.staged.push({ sequence, previousHash: head.hash, hash, kind: 'access', eventId, payload, contentSha256: createHash('sha256').update(payload).digest('hex'), storedAt, occurredAt: doc.event.occurredAt, targets });
       tx.head = { sequence, hash };
       return { chainId: this.chainId, sequence, previousHash: head.hash, hash, storedAt, replay: false };
     }
@@ -239,7 +245,7 @@ function contractSuite() {
       this.entries = this.entries.filter(e => e.sequence > through);
       const payload = C.checkpointPayload(at, through, count, anchor.hash), sequence = this.head.sequence + 1;
       const hash = C.entryHash(sequence, this.head.hash, payload);
-      this.entries.push({ sequence, previousHash: this.head.hash, hash, kind: 'expiry', eventId: null, payload, contentSha256: createHash('sha256').update(payload).digest('hex'), storedAt: at, expiresAt: D.civilPeriodEnd(at, 2) });
+      this.entries.push({ sequence, previousHash: this.head.hash, hash, kind: 'expiry', eventId: null, payload, contentSha256: createHash('sha256').update(payload).digest('hex'), storedAt: at, occurredAt: at, targets: [] });
       this.head = { sequence, hash };
     }
     stored(e) { return { sequence: e.sequence, previousHash: e.previousHash, hash: e.hash, kind: e.kind, eventId: e.eventId, payload: e.payload, contentSha256: e.contentSha256, storedAt: e.storedAt }; }
@@ -257,7 +263,7 @@ function contractSuite() {
       super({ $transaction: async work => { const tx = ledger.begin(); const value = await work(tx); ledger.commit(tx); return value; } }, memorySql(ledger), seal, journal);
       this.ledger = ledger;
     }
-    async appendRow(tx, eventId, payload, expiresAt) { return this.ledger.append(tx, eventId, payload, expiresAt); }
+    async appendRow(tx, eventId, payload) { return this.ledger.append(tx, eventId, payload); }
     async holdRows(tx, recordId) { this.ledger.guard(); return [...this.ledger.holdRowsList, ...(tx.holds ?? [])].filter(r => r.recordId === recordId).map(({ holdId, phase, body }) => ({ holdId, phase, body })); }
     async placeHoldRow(tx, holdId, recordId, body) { tx.holds.push({ holdId, phase: 'placed', recordId, body }); }
     async releaseHoldRow(tx, holdId, body) { const placed = [...this.ledger.holdRowsList, ...tx.holds].find(r => r.holdId === holdId && r.phase === 'placed'); tx.holds.push({ holdId, phase: 'released', recordId: placed.recordId, body }); }
@@ -340,9 +346,11 @@ function contractSuite() {
     C.refuseAuditNamespaceCredential('kin_sid_' + randomUUID());
     for (const bad of [{ requestId: link }, { session: known(link) }, { session: known('kin-session-cookie-value') }])
       assert.throws(() => A.parseAccessEvent(authEvent(A, bad)), JSON.stringify(bad));
-    // Its own two-year clock from A, read under a snapshot (no hold on a new event).
+    // An authentication event is about no EMR record: no bound target, and the one retention rule ends it at the floor.
     const event = authEvent(A);
-    assert.equal(inSnapshot(noHolds(event.eventId), () => C.accessExpiry(event)), D.civilPeriodEnd(event.occurredAt, 2));
+    assert.deepEqual(C.recordTargets(event), []);
+    assert.equal(C.accessDeadline({ occurredAt: event.occurredAt, targets: C.recordTargets(event) }, C.RECORD_RETENTION_UNAVAILABLE),
+      C.accessRetentionFloor(event.occurredAt));
   });
 
   test('C02 one immutable identity per verified issuer and subject; namesakes stay apart; a name never joins and unverified input is never known', async () => {
@@ -512,7 +520,7 @@ function contractSuite() {
       assert.equal(recovered.recovered, 1); assert.equal(restarted.seal.read().sequence, 6);
       assert(restarted.journal.all().some(r => r.kind === 'seal-recovered' && r.body.toSequence === 6));
       const forged = authEvent(A), forgedTx = w.ledger.begin();
-      w.ledger.append(forgedTx, forged.eventId, C.canonicalPayload(forged).text, D.civilPeriodEnd(forged.occurredAt, 2)); w.ledger.commit(forgedTx);
+      w.ledger.append(forgedTx, forged.eventId, C.canonicalPayload(forged).text); w.ledger.commit(forgedTx);
       await rejects(w.restart().seal.recover(), 'UnsealedEntryUnexplained');
       w.ledger.entries.pop(); w.ledger.head = { sequence: 6, hash: w.ledger.entries.at(-1).hash };
       // A damaged or missing seal is never rebuilt from the database end.
@@ -525,26 +533,53 @@ function contractSuite() {
     } finally { w.cleanup(); }
   });
 
-  test('C07 independent expired prefix and its checkpoint; an unexpired, held or middle deletion and a read-extended clock are refused', async () => {
-    const at = '2031-01-01T00:00:00.000Z';
-    const row = (sequence, expiresAt, held = false) => ({ sequence, hash: createHash('sha256').update(String(sequence)).digest('hex'), expiresAt, held });
-    const old = '2028-01-01T00:00:00.000Z', fresh = '2032-01-01T00:00:00.000Z';
+  test('C07 independent expired prefix and its checkpoint under the one retention rule: a non-record event ends at the floor, a record-bound event outlives it while its record is retained and never ends while its record end is unknown; an unexpired, held or middle deletion and a read-extended clock are refused', async () => {
+    // The floor is A's civil period over A's classification period for access records - bound to the rule, never to a
+    // number: the period may change in A's table alone (Asia/Seoul civil days, a 29 February start).
+    const years = Cl.RECORD_CLASSIFICATION[C.ACCESS_RETENTION.kind].retention.years;
+    assert.equal(C.ACCESS_RETENTION.years, years);
+    for (const occurred of ['2026-10-05T00:00:00.000Z', '2024-02-28T15:00:00.000Z', '2024-02-28T15:00:00.001Z', '2026-10-04T15:00:00.000Z'])
+      assert.equal(C.accessRetentionFloor(occurred), D.civilPeriodEnd(occurred, years));
+    // Times relative to the rule: `at` is one day past the floor of `old`; `fresh` started two days after `old`.
+    const day = 86400000, plus = (iso, ms) => new Date(Date.parse(iso) + ms).toISOString();
+    const old = '2020-01-01T00:00:00.000Z', fresh = '2020-01-03T00:00:00.000Z', at = plus(C.accessRetentionFloor(old), day);
+    assert(C.accessRetentionFloor(fresh) > at);
+    const record = { index: 0, kind: 'report-version', recordId: 'report-1', versionId: 'version-1' };
+    const retainedUntil = plus(at, 365 * day), endedAt = plus(old, day);
+    const ends = { retained: () => retainedUntil, ended: () => endedAt, unknown: C.RECORD_RETENTION_UNAVAILABLE };
+    // A non-record event ends at the floor, whatever any record reader says.
+    assert.equal(C.accessDeadline({ occurredAt: old, targets: [] }, ends.unknown), C.accessRetentionFloor(old));
+    // A record-bound event ends at the later of the floor and its record's end: it outlives the floor while the record is
+    // retained, ends at the floor when the record ended earlier, and has no end at all while the record end is unknown.
+    assert.equal(C.accessDeadline({ occurredAt: old, targets: [record] }, ends.retained), retainedUntil);
+    assert.equal(C.accessDeadline({ occurredAt: old, targets: [record] }, ends.ended), C.accessRetentionFloor(old));
+    assert.equal(C.accessDeadline({ occurredAt: old, targets: [record] }, ends.unknown), null);
+    assert.equal(C.accessDeadline({ occurredAt: old, targets: [{ ...record, recordId: null }] }, ends.retained), null);
+    const row = (sequence, occurredAt, targets = [], held = false) => ({ sequence, hash: createHash('sha256').update(String(sequence)).digest('hex'), kind: 'access', occurredAt, targets, held });
     assert.deepEqual(C.planExpiryPrefix([row(1, old), row(2, old), row(3, fresh), row(4, old)], at), { through: 2, hash: row(2, old).hash, count: 2 });
     assert.equal(C.planExpiryPrefix([row(1, fresh), row(2, old)], at), null, 'an unexpired first entry keeps everything after it');
-    assert.equal(C.planExpiryPrefix([row(1, old, true), row(2, old)], at), null, 'a held entry is never deleted');
-    assert.equal(C.planExpiryPrefix([row(1, old), row(2, old, true), row(3, old)], at).through, 1);
+    assert.equal(C.planExpiryPrefix([row(1, old, [], true), row(2, old)], at), null, 'a held entry is never deleted');
+    assert.equal(C.planExpiryPrefix([row(1, old), row(2, old, [], true), row(3, old)], at).through, 1);
     code(() => C.planExpiryPrefix([row(1, old), row(3, old)], at), 'RetentionViewIncomplete');
-    // Each event's own two-year boundary from A (Asia/Seoul civil days); reading it again changes nothing.
-    for (const [occurred, end] of [['2026-10-05T00:00:00.000Z', '2028-10-05T15:00:00.000Z'], ['2024-02-28T15:00:00.000Z', '2026-02-28T15:00:00.000Z'],
-      ['2026-10-04T15:00:00.000Z', '2028-10-04T15:00:00.000Z']]) {
-      const event = authEvent(A, { occurredAt: occurred });
-      assert.equal(inSnapshot(noHolds(event.eventId), () => C.accessExpiry(event)), end);
-      assert.equal(inSnapshot(noHolds(event.eventId), () => C.accessExpiry(event)), end);
-    }
+    // Past the floor, the record-bound entry stays while its record is retained (and without a reader, as in B1) ...
+    const bound = [row(1, old), row(2, old, [record]), row(3, old)];
+    assert.equal(C.planExpiryPrefix(bound, at, ends.retained).through, 1);
+    assert.equal(C.planExpiryPrefix(bound, at).through, 1);
+    assert.equal(C.planExpiryPrefix(bound, plus(at, 3650 * day)).through, 1, 'an unknown record end never lapses');
+    // ... and goes with the prefix once the record's own end has passed; reading the plan again changes nothing.
+    assert.equal(C.planExpiryPrefix(bound, plus(retainedUntil, 1), ends.retained).through, 3);
+    assert.equal(C.planExpiryPrefix(bound, plus(retainedUntil, 1), ends.retained).through, 3);
     // The checkpoint bytes are A's expiry entry: same payload, same hash; the chain continues across the deleted prefix.
     const w = await world();
     try {
       for (let n = 0; n < 4; n++) await w.store.append(authEvent(A, { occurredAt: '2020-01-0' + (n + 1) + 'T00:00:00.000Z' }));
+      // Nothing stored carries a deadline; an authentication event binds no record, a provision binds its record targets.
+      const provided = provideEvent(A);
+      await w.store.append(provided);
+      assert(w.ledger.entries.every(entry => !('expiresAt' in entry) && !('expires_at' in entry)));
+      assert.deepEqual(w.ledger.entries.slice(0, 4).map(entry => entry.targets), [[], [], [], []]);
+      assert.deepEqual(w.ledger.entries.at(-1).targets, C.recordTargets(provided));
+      assert.deepEqual(C.recordTargets(provided), [{ index: 0, kind: 'report-version', recordId: 'report-1', versionId: 'version-1' }]);
       const through = w.ledger.entries[1], previous = { ...w.ledger.head };
       const expected = A.sealAccessExpiry(previous, { sequence: through.sequence, hash: through.hash }, 2, at);
       assert.equal(C.checkpointPayload(at, 2, 2, through.hash), JSON.stringify(expected.payload));
@@ -671,6 +706,28 @@ function contractSuite() {
     for (const kinds of Object.values(Cl.SQL_STORAGE_CLASSIFICATION)) for (const kind of kinds) assert(Cl.RECORD_CLASSIFICATION[kind], kind);
     const migrations = fs.readdirSync(path.join(api, 'prisma/migrations'), { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name).sort();
     assert.equal(migrations.length, declaration.migrations.count); assert.equal(migrations.at(-1), declaration.migrations.added.at(-1));
+    // One access-retention rule (read with the installed TypeScript parser and from the declared migration): in the B
+    // runtime only contract.ts accessRetentionFloor computes a civil period, and in the migration only
+    // access_retention_floor names one - with the same period as the rule. A period change is then one place per side.
+    const runtimeDir = path.join(api, 'src', 'emr-runtime'), periodCalls = [];
+    for (const name of fs.readdirSync(runtimeDir).filter(n => n.endsWith('.ts')).sort()) {
+      const source = ts.createSourceFile(name, fs.readFileSync(path.join(runtimeDir, name), 'utf8'), ts.ScriptTarget.Latest, true);
+      const walk = (node, within) => {
+        const here = (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && node.name ? node.name.getText(source) : within;
+        if (ts.isCallExpression(node)) {
+          const callee = ts.isIdentifier(node.expression) ? node.expression.text : ts.isPropertyAccessExpression(node.expression) ? node.expression.name.text : null;
+          if (callee === 'civilPeriodEnd') periodCalls.push(name + ':' + here);
+        }
+        ts.forEachChild(node, child => walk(child, here));
+      };
+      walk(source, null);
+    }
+    assert.deepEqual(periodCalls, ['contract.ts:accessRetentionFloor']);
+    const migrationSql = fs.readFileSync(path.join(api, 'prisma/migrations', declaration.migrations.added.at(-1), 'migration.sql'), 'utf8');
+    const bodies = [...migrationSql.matchAll(/CREATE FUNCTION emr_access\.(\w+)\([^]*?\$\$([^]*?)\$\$/g)].map(m => [m[1], m[2]]);
+    assert.deepEqual(bodies.filter(([, body]) => /civil_period_end\s*\(/.test(body)).map(([name]) => name), ['access_retention_floor']);
+    const floorYears = /civil_period_end\s*\(\s*p_at\s*,\s*(\d+)\s*\)/.exec(bodies.find(([name]) => name === 'access_retention_floor')[1]);
+    assert.equal(Number(floorYears[1]), C.ACCESS_RETENTION.years);
     // The contract cases of this very file, collected with the installed TypeScript parser, against the declaration.
     const file = ts.createSourceFile(__filename, fs.readFileSync(__filename, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
     const collected = [];
