@@ -13,7 +13,10 @@ Pure stdlib, no browser, no stack; Node only through tests/page_source.py, which
      named S4-U1b additions may appear. The mutant scripts' own --anchors-only checks are run
      beside this file by the same CI step.
 """
+# S9-U0b RELIST: PACS permission/data assertions run compiled suites through pacs_source.
+# Remaining non-PACS source checks are unchanged U0f carry-over.
 from __future__ import annotations
+from pacs_source import assert_behaviour
 from page_source import read_page_source
 
 import hashlib
@@ -307,7 +310,6 @@ class SourcePins(unittest.TestCase):
         cls.arrivals = ARRIVALS.read_text(encoding="utf-8").replace("\r\n", "\n")
         cls.pages = PAGES.read_text(encoding="utf-8").replace("\r\n", "\n")
         cls.main = read_page_source(MAIN).replace("\r\n", "\n")
-        cls.service = SERVICE.read_text(encoding="utf-8").replace("\r\n", "\n")
 
     def test_module_carries_the_rules_the_model_mirrors(self):
         for needle in (
@@ -329,32 +331,8 @@ class SourcePins(unittest.TestCase):
         self.assertNotIn("sessionStorage", self.arrivals)
 
     def test_server_absence_surface_is_decided_from_the_whole_successful_enumeration(self):
-        listing = body(self.service, "  async listStudies(c: Caller, query?: any) {", "  /** 프론트가 켜질 때")
-        qido = listing.index("const qido = page ? await this.orthanc.studyIdentities(")
-        at = listing.index("const observedAt = new Date().toISOString();")
-        states = listing.index("const states = page ? await this.prisma.studyState.findMany({")
-        self.assertTrue(qido < at < states)
-        self.assertIn("select: { uid:true, institutionId:true, teleInstitutionId:true, origin:true, createdAt:true },", listing)
-        self.assertIn("const notObserved = !page || window.pagination?.next === null ? this.notObserved(qido, states, me, access, observedAt) : undefined;", listing)
-        # S4-F01V reversed this order: the absence list is pure over the enumeration, and the receipt read for its
-        # own items joins the other tenant reads before the access re-check (tests/gateway_retry_source_test.py).
-        self.assertLess(listing.index("const notObserved = "), listing.index("const absentReceipts = "))
-        self.assertLess(listing.index("const absentReceipts = "), listing.index("await this.studyAccess.unchanged(c,access);"))
-        self.assertIn("observedAt,\n      ...(notObserved === undefined ? {} : { notObserved }),", listing)
-        absent = body(self.service, "  private notObserved(", "\n  }\n")
-        for needle in ("if (!Array.isArray(qido)) return null;", "if (!uid) return null;",
-                       "if (s.institutionId !== me || present.has(s.uid) || !this.studyAccess.matches(access, s.uid)) continue;",
-                       "if (!(s.createdAt instanceof Date) || typeof s.origin !== 'string') return null;",
-                       "if (createdAt > observedAt) continue;",
-                       "out.push({ uid: s.uid, origin: s.origin, createdAt });"):
-            self.assertIn(needle, absent)
-        # uid + origin + createdAt only: no patient field can leave through this surface.
-        pushed = absent.split("out.push({")[1].split("})")[0]
-        self.assertEqual(["uid", "origin", "createdAt"], re.findall(r"(?:^|,)\s*([A-Za-z_]\w*)", pushed))
-        self.assertIn("const out: { uid: string; origin: string; createdAt: string }[] = [];", absent)
-        # S4-U1a numeric 0 vs null stays.
-        self.assertIn("count: qidoCount(st, '00201208'),", self.service)
-        self.assertIn("series: qidoCount(st, '00201206'),", self.service)
+        assert_behaviour('gateway_receipt_server_test.cjs', '^S4-F01V list:')
+        assert_behaviour('pacs_source_behavior_test.cjs', '^U0B-(COUNTS|OBSERVATION)')
 
     def test_page_client_hands_over_only_the_completing_page_observation(self):
         self.assertIn("if (page.next === null) draft.observation = { observedAt: data.observedAt, notObserved: data.notObserved };", self.pages)
