@@ -1156,6 +1156,26 @@ MUTANTS += [{'case': 'TEST-F-07 R11 substitute postings retain full PIPA and ISP
   'old': 'n.posting ? IMMEDIATE_TIMING_RULE.ispUserFields : family',
   'title': 'allow additional ISP posting to omit full statutory content'}]
 
+DECLARED_CASES += [
+    'TEST-F-07 followup incomplete sent ISP evidence is retained without fulfilling duties',
+    'TEST-F-07 followup item 4 omissions survive applicability corrections and replay',
+    'TEST-F-07 followup incomplete evidence still refuses forged and unlinkable references',
+]
+MUTANTS += [
+    {'id': 'M-F-FOLLOWUP-001', 'title': 'refuse actual incomplete ISP delivery at intake', 'file': 'contract.ts',
+     'old': "      const needsChannel = ispFields && !n.posting;",
+     'new': "      if (missingFields?.length) throw new Error('Incomplete ISP notice');\n      const needsChannel = ispFields && !n.posting;",
+     'case': DECLARED_CASES[-3], 'expect': 'followup sent ISP evidence is accepted despite missing content'},
+    {'id': 'M-F-FOLLOWUP-002', 'title': 'fulfil ISP duty with incomplete delivery', 'file': 'contract.ts',
+     'old': '!n.missingFields?.length && !n.invalidFields?.length && postingReady(n)',
+     'new': 'postingReady(n)',
+     'case': DECLARED_CASES[-3], 'expect': 'followup incomplete evidence leaves duty owed'},
+    {'id': 'M-F-FOLLOWUP-003', 'title': 'omit the missing statutory content from recorded evidence', 'file': 'contract.ts',
+     'old': '...(ispFields ? { missingFields, invalidFields } : {})',
+     'new': '...(ispFields ? { missingFields: [], invalidFields } : {})',
+     'case': DECLARED_CASES[-3], 'expect': 'followup missing items are listed'},
+]
+
 NOT_RUN = [
     {"id": "M-F-01-live", "status": "not_run", "reason": "the server roster check over B1 storage and the B2 caller context is round 2 "
      "(api/src/emr-audit/query.ts, admin.service.ts); TEST-F-01 live pair in tests/emr/f/live.py"},

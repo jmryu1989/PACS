@@ -11,14 +11,14 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
-import time
 import unittest
-import urllib.error
 import urllib.request
 import zipfile
 
 HERE = Path(__file__).resolve().parent
 REASON = "D717 local-only sample"
+sys.path.insert(0, str(HERE.parent))
+from archive_download import download
 
 
 def hosted():
@@ -80,23 +80,6 @@ def plan():
             output.write("cache-paths<<MG_CACHE_PATHS\n")
             output.write("\n".join(str(sample_target(spec, r)) for r in rows) + "\nMG_CACHE_PATHS\n")
     summary("selection", report["not_run"])
-
-
-def download(url, archive):
-    for attempt in range(3):
-        archive.seek(0)
-        archive.truncate()
-        try:
-            request = urllib.request.Request(url, headers={"User-Agent": "PACS-part1-CI/1.0"})
-            with urllib.request.urlopen(request, timeout=180) as response:
-                shutil.copyfileobj(response, archive, 1024 * 1024)
-            archive.seek(0)
-            return
-        except urllib.error.HTTPError as error:
-            if error.code not in (408, 429, 500, 502, 503, 504) or attempt == 2:
-                raise
-            print("transient HTTP", error.code, "retry", attempt + 1, flush=True)
-            time.sleep(2 ** (attempt + 1))
 
 
 def fetch():

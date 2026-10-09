@@ -2,6 +2,7 @@
 
 D73: asserts selected dependencies, requested bytes and failures, not source spelling.
 """
+import copy
 import hashlib
 import io
 import json
@@ -14,16 +15,44 @@ import urllib.error
 import zipfile
 
 import ci
+from archive_download_test import DownloadContract
 
 
-class MgCiTest(unittest.TestCase):
+def approved_ids(spec):
+    return {r["id"] for r in spec["used"] if spec["sets"][r["set"]].get("approval", "").split(" ", 1)[0] == "D717"}
+
+
+def assert_local_only_matches_approval(test, spec):
+    expected = approved_ids(spec)
+    test.assertEqual(len(expected), 12, "D717 approval must cover the 12 local-only rows")
+    test.assertEqual({r["id"] for r in spec["used"] if ci.local_only(r)}, expected,
+                     "local-only selection must match independent D717 approval")
+
+
+class MgCiTest(DownloadContract, unittest.TestCase):
+    download = staticmethod(ci.download)
+
+    def test_local_only_rows_match_d717_approval(self):
+        assert_local_only_matches_approval(self, ci.manifest())
+
+    def test_manifest_relocation_cannot_silently_drop_d717_exclusion(self):
+        for field, value in [("collection", "renamed-collection"), ("path", "relocated/subject/series/sample.dcm")]:
+            with self.subTest(field=field):
+                spec = copy.deepcopy(ci.manifest())
+                restricted = approved_ids(spec)
+                for row in spec["used"]:
+                    if row["id"] in restricted:
+                        row[field] = value
+                with self.assertRaisesRegex(AssertionError, "independent D717 approval"):
+                    assert_local_only_matches_approval(self, spec)
+
     def test_hosted_exclusions_follow_manifest_dependencies(self):
-        rows = {r["id"]: r for r in ci.manifest()["used"]}
+        restricted_ids = approved_ids(ci.manifest())
         with mock.patch.dict(os.environ, {"KIN_MG_CI_SCOPE": "hosted"}):
             for name in ("dicom", "dom"):
                 body, selected, excluded = ci.selection(name)
                 for case in body["cases"]:
-                    restricted = [s for s in case.get("samples", []) if ci.local_only(rows[s])]
+                    restricted = [s for s in case.get("samples", []) if s in restricted_ids]
                     self.assertEqual(case["name"] in selected, not restricted)
                 self.assertEqual(len(selected) + len(excluded), body["expected"])
                 self.assertTrue(all(e["reason"] == "D717 local-only sample" for e in excluded))
@@ -40,31 +69,11 @@ class MgCiTest(unittest.TestCase):
                 with mock.patch("sys.stdout", new_callable=io.StringIO):
                     ci.plan()
             text = output.read_text(encoding="utf-8")
-            rows = [r for r in ci.manifest()["used"] if not ci.local_only(r)]
+            rows = [r for r in ci.manifest()["used"] if r["id"] not in approved_ids(ci.manifest())]
             expected = hashlib.sha256("\n".join(sorted(r["sha256"] for r in rows)).encode("ascii")).hexdigest()
             self.assertIn("cache-key=mg-public-v1-" + expected, text)
             for row in ci.manifest()["used"]:
-                self.assertEqual(str(ci.sample_target(ci.manifest(), row)) in text, not ci.local_only(row))
-
-    def test_transient_http_retries_discard_partial_bytes(self):
-        error = urllib.error.HTTPError("https://test", 503, "unavailable", {}, None)
-        with mock.patch.object(ci.urllib.request, "urlopen", side_effect=[error, error, io.BytesIO(b"archive")]) as request:
-            with mock.patch.object(ci.time, "sleep") as sleep:
-                archive = io.BytesIO(b"partial response")
-                ci.download("https://test", archive)
-                self.assertEqual(archive.read(), b"archive")
-                self.assertEqual(request.call_count, 3)
-                self.assertEqual(sleep.call_count, 2)
-
-    def test_permanent_and_exhausted_http_errors_fail(self):
-        for status, attempts in ((404, 1), (503, 3)):
-            with self.subTest(status=status):
-                error = urllib.error.HTTPError("https://test", status, "failed", {}, None)
-                with mock.patch.object(ci.urllib.request, "urlopen", side_effect=error) as request:
-                    with mock.patch.object(ci.time, "sleep"):
-                        with self.assertRaises(urllib.error.HTTPError):
-                            ci.download("https://test", io.BytesIO())
-                        self.assertEqual(request.call_count, attempts)
+                self.assertEqual(str(ci.sample_target(ci.manifest(), row)) in text, row["id"] not in approved_ids(ci.manifest()))
 
     def test_download_never_requests_local_only_series_and_rechecks_cache(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -649,6 +649,7 @@ export interface IncidentNoticeEvidence {
 }
 interface BoundNotice extends IncidentNoticeEvidence {
   operatorEvidence?: OperatorNoticeEvidence;
+  missingFields?: readonly string[]; invalidFields?: readonly string[];
   institutionId: string; incidentId: string; triggerEventId: string; recipientScopeRef: string;
   coversAll: boolean; evidenceId: string; recordedAt: string;
 }
@@ -1124,7 +1125,7 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
       IMMEDIATE_TIMING_RULE.ispUserPriorityFields : IMMEDIATE_TIMING_RULE.ispUserFields;
     const rawNotices = [...(previous?.ledger.notices ?? []), ...list(history.notices)];
     const parsedNotices = rawNotices.map(value => {
-      const n = optionalObject(value, ['kind', 'triggeredAt', 'noticeId', 'sentAt'], ['institutionId', 'incidentId', 'triggerEventId', 'recipientScopeRef', 'coversAll', 'evidenceId', 'recordedAt', 'coveredFields', 'channel', 'posting', 'operatorEvidence']);
+      const n = optionalObject(value, ['kind', 'triggeredAt', 'noticeId', 'sentAt'], ['institutionId', 'incidentId', 'triggerEventId', 'recipientScopeRef', 'coversAll', 'evidenceId', 'recordedAt', 'coveredFields', 'channel', 'posting', 'operatorEvidence', 'missingFields', 'invalidFields']);
       choice(n.kind, Object.keys(DUTY_FAMILY) as DutyKind[]); string(n.noticeId); utc(n.triggeredAt); utc(n.sentAt);
       const family = DUTY_FAMILY[n.kind], recordedAt = utc(n.recordedAt ?? asOf);
       if (n.sentAt < n.triggeredAt || n.sentAt > recordedAt || recordedAt > asOf ||
@@ -1134,20 +1135,27 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
         : dutySources.filter(c => c.family === family && c.at === n.triggeredAt && (!n.triggerEventId || c.eventId === n.triggerEventId));
       if (matches.length !== 1) throw new Error('Unknown or ambiguous notice trigger');
       if (n.coversAll !== undefined && typeof n.coversAll !== 'boolean') throw new Error('Coverage evidence required');
-      if (n.coveredFields !== undefined) uniqueStrings(n.coveredFields);
+      if (n.coveredFields !== undefined) uniqueStrings(n.coveredFields, family.startsWith('isp-'));
       if (n.channel !== undefined) choice(n.channel, ['MOHW-official', 'MOHW-delegated', 'PIPC', 'KISA', 'MSIT', 'affected-users']);
       if (n.posting) { const p = object(n.posting, ['justCause', 'evidenceId', 'maintainedThrough', 'maintenanceEvidenceId']);
         string(p.justCause); string(p.evidenceId); string(p.maintenanceEvidenceId); utc(p.maintainedThrough);
-        if (!NO_LEAK_CLOSURE_RULE.postingFamilies.includes(family) || !n.coveredFields || p.maintainedThrough < n.sentAt || p.maintainedThrough > recordedAt) throw new Error('Invalid posting evidence'); }
+        if (!NO_LEAK_CLOSURE_RULE.postingFamilies.includes(family) || (!family.startsWith('isp-') && !n.coveredFields) || p.maintainedThrough < n.sentAt || p.maintainedThrough > recordedAt) throw new Error('Invalid posting evidence'); }
       if (family === 'medical' && (!MEDICAL_TRIGGER_RULE.channels.includes(n.channel) || !['institution-name', 'incident-time', 'damage-details', 'technical-support-request'].every(k => n.coveredFields?.includes(k)))) throw new Error('MOHW official channel and content required');
-      if (['isp-report', 'isp-supplement'].includes(family) && (!['MSIT', 'KISA'].includes(n.channel) ||
-          !(family === 'isp-report' ? IMMEDIATE_TIMING_RULE.ispReportFields : ['newly-confirmed-facts']).every(k => n.coveredFields?.includes(k)))) throw new Error('ISP report channel and content required');
-      if (['isp-user', 'isp-user-additional'].includes(family) && (!n.posting && n.channel !== 'affected-users' ||
-          !(n.posting ? IMMEDIATE_TIMING_RULE.ispUserFields : family === 'isp-user' ? userNoticeFields((matches[0] as Cause).fact) : ['newly-confirmed-facts']).every(k => n.coveredFields?.includes(k)))) throw new Error('ISP user content required');
+      // Preserve what was actually sent; recompute deficiencies instead of trusting a replayed assessment.
+      const ispFields = ['isp-report', 'isp-supplement'].includes(family)
+        ? (family === 'isp-report' ? IMMEDIATE_TIMING_RULE.ispReportFields : ['newly-confirmed-facts'])
+        : ['isp-user', 'isp-user-additional'].includes(family)
+          ? (n.posting ? IMMEDIATE_TIMING_RULE.ispUserFields : family === 'isp-user' ? userNoticeFields((matches[0] as Cause).fact) : ['newly-confirmed-facts']) : null;
+      const missingFields = ispFields?.filter(k => !n.coveredFields?.includes(k)).map(k => `coveredFields.${k}`);
+      const needsChannel = ispFields && !n.posting;
+      if (needsChannel && !n.channel) missingFields.push('channel');
+      const invalidFields = needsChannel && n.channel && !(['isp-report', 'isp-supplement'].includes(family)
+        ? ['MSIT', 'KISA'].includes(n.channel) : n.channel === 'affected-users') ? ['channel'] : [];
       return { kind: n.kind as DutyKind, triggeredAt: n.triggeredAt, noticeId: n.noticeId, sentAt: n.sentAt,
         institutionId: authority.institutionId, incidentId: f.incidentId, triggerEventId: matches[0].eventId,
         recipientScopeRef: string(n.recipientScopeRef ?? matches[0].recipients), coversAll: n.coversAll ?? true,
         evidenceId: string(n.evidenceId ?? n.noticeId), recordedAt,
+        ...(ispFields ? { missingFields, invalidFields } : {}),
         ...(n.coveredFields ? { coveredFields: [...n.coveredFields].sort() } : {}), ...(n.channel ? { channel: n.channel } : {}), ...(n.posting ? { posting: { ...n.posting } } : {}) };
     });
     const notices: BoundNotice[] = merge(parsedNotices, n => n.noticeId, n => { const { recordedAt, ...bound } = n; return bound; });
@@ -1364,7 +1372,7 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
       // ND58-9(5) and PD39(3) posting carry the full notice items, including priority and additional notices.
       const performanceFields = (n: BoundNotice) => n.posting && ['isp-user', 'isp-user-additional'].includes(o.family) ? IMMEDIATE_TIMING_RULE.ispUserFields :
         n.posting && ['confirmed', 'additional-notice'].includes(o.family) ? LEAK_NOTICE_FIELDS : o.requiredFields;
-      const direct = completion(matching.filter(n => postingReady(n) && (!n.posting || performanceFields(n).every(k => n.coveredFields.includes(k)))), o.recipientScopeRef);
+      const direct = completion(matching.filter(n => !n.missingFields?.length && !n.invalidFields?.length && postingReady(n) && (!n.posting || performanceFields(n).every(k => n.coveredFields?.includes(k)))), o.recipientScopeRef);
       // D839: attached other-law evidence does not establish the operator's own ISP performance.
       const deemed = notices.filter(n => owner.kind !== 'operator' && postingReady(n) && performedAt(n) >= o.triggeredAt && (
         o.family === 'isp-report' ? NO_LEAK_CLOSURE_RULE.deemedReportKinds.includes(n.kind) &&
