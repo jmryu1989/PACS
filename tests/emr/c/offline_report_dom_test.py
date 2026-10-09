@@ -66,7 +66,7 @@ BOOT = r"""() => {
     async enqueue(entry) { syn.calls.push(['enqueue', entry.eventId]); if (syn.putFault) throw new Error('disk full'); syn.entries.set(entry.eventId, entry);
       return { eventId: entry.eventId, entryId: 'row-' + entry.eventId, digest: 'd', durableAt: '2026-10-05T01:00:00.000Z' }; },
     async list(o) { syn.calls.push(['list', o.subject]); return [...syn.entries.values()].filter(e => syn.leak || e.owner.subject === o.subject); },
-    async observe(o) { syn.observations.push(JSON.parse(JSON.stringify(o))); return { ok: true }; },
+    async observe(o) { if (syn.observeFault) throw new Error('store unavailable'); syn.observations.push(JSON.parse(JSON.stringify(o))); return { ok: true }; },
     async cached(uid) { syn.calls.push(['cached', uid]); return syn.cache[uid] ?? null; },
   };
   const answer = (entry, status, extra) => ({ eventId: entry.eventId, status, reason: null, recoveryRef: null, currentVersion: null,
@@ -283,6 +283,14 @@ class OfflineReportDOM(unittest.TestCase):
         self.assertEqual("cancelled", self.js("v => syn.controller.print(v)", version))
         after = self.js("() => syn.observations.slice(5)")
         self.assertEqual(["print-opened"], [row["action"] for row in after])
+        # When the access event cannot be stored, an offline re-display and a print do not happen at all.
+        self.js("""() => { syn.observeFault = true; syn.printMode = 'return'; syn.cache.S1 = { recordId: 'report-S1', versionId: 'v-cached', text: 'SYN 새 캐시 본문' };
+          syn.opening = { uid: 'S1', generation: 4 }; }""")
+        prints = len([c for c in self.js("() => syn.calls") if c[0] == "print"])
+        self.assertIs(False, self.js("() => syn.controller.open('S1')"))
+        self.assertNotEqual("SYN 새 캐시 본문", self.page.text_content("#report"))
+        self.assertEqual("not-recorded", self.js("v => syn.controller.print(v)", version))
+        self.assertEqual(prints, len([c for c in self.js("() => syn.calls") if c[0] == "print"]))
 
 
 if __name__ == "__main__":

@@ -45,8 +45,11 @@ export function readRetention(facts: ReportFacts, archive: RetentionOnlyEvent | 
 
 /**
  * What a device-side artifact is for retention. A signed but not yet adopted original was a real clinical signature:
- * it follows the report record classification (A, D603) and is never auto-published. A recovery work copy only lives
- * for its recovery purpose. Cache copies follow E/H lifetimes, never the 24-hour amend window.
+ * it is kept apart from draft disposal and follows the report-version classification, never a period of its own, and
+ * is never auto-published. A is the single source of that period (the 2026-10-09 legal register reads a radiology
+ * report as rule 15(1)6 "그 소견서", 5 years unless incorporated into a chart record; that correction is A/H/I's D-19,
+ * so nothing here fixes 5 or 10). A recovery work copy lives only for its recovery purpose. Cache copies follow E/H
+ * lifetimes, never the 24-hour amend window.
  */
 export type OfflineArtifact = 'signed-unadopted-original' | 'recovery-work-copy' | 'offline-cache-copy' | 'unsigned-private-draft';
 export function offlineArtifactRetention(kind: OfflineArtifact): Readonly<{

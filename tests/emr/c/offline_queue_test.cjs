@@ -47,7 +47,8 @@ const next = prefix => `${prefix}-${++counter}`;
 // Explicit test-only values; the product values of epsilon/Q/J/H are measured on devices (D603) and are not known here.
 const keyRows = new Map(), privateKeys = new Map(), anchorRows = new Map(), grantRows = new Map();
 const keyPolicy = { acceptedEvidence: ['test-software'] }, timePolicy = { epsilonMs: 2000, reviewRef: 'test-only:not-a-product-value' };
-const ports = { keys: { load: kid => keyRows.get(kid) ?? null }, keyPolicy, anchors: { load: id => anchorRows.get(id) ?? null }, timePolicy };
+const ports = { keys: { load: kid => keyRows.get(kid) ?? null, holderOf: t => [...keyRows.values()].find(r => K.jwkThumbprint(r.publicKey) === t)?.kid ?? null },
+  keyPolicy, anchors: { load: id => anchorRows.get(id) ?? null }, timePolicy };
 const offlinePolicy = { imageBytesQ: 10_000_000, reserveBytesJ: 1_000_000, disconnectedHoursH: 12, epsilonMs: 2000, reviewRef: 'test-only:not-a-product-value' };
 for (const id of ['r1', 'r2']) {
   const { privateKey, publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' }), jwk = publicKey.export({ format: 'jwk' });

@@ -88,7 +88,8 @@ const deepHas = (value, needle) => JSON.stringify(value).includes(needle);
 
 // ---- keys, anchors and the native signer stand-in (explicit test values, not product values) ----
 const keyRows = new Map(), privateKeys = new Map();
-const keyReader = { load: kid => keyRows.get(kid) ?? null };
+const keyReader = { load: kid => keyRows.get(kid) ?? null,
+  holderOf: thumbprint => [...keyRows.values()].find(r => K.jwkThumbprint(r.publicKey) === thumbprint)?.kid ?? null };
 const keyPolicy = Object.freeze({ acceptedEvidence: ['test-software'] });
 const timePolicy = Object.freeze({ epsilonMs: 2000, reviewRef: 'test-only:not-a-product-value' });
 const anchorRows = new Map(), anchorReader = { load: id => anchorRows.get(id) ?? null };
@@ -449,6 +450,12 @@ test('C-C05 registered device keys verify their signatures and two-operator reco
   assert.throws(() => K.parseKeyRegistration(reg, { acceptedEvidence: ['tpm-nonexportable'] }), { code: 'KeyEvidenceRefused' });
   assert.throws(() => V.verifySignatureV2(early, { ...ports, keyPolicy: { acceptedEvidence: ['tpm-nonexportable'] } }, { osUserId: 'os-r3' }), { code: 'KeyEvidenceRefused' });
   assert.throws(() => K.requireKeyPolicy(undefined), { code: 'KeyPolicyRequired' });
+  // One key material, one clinician registration: a shared or re-registered key is refused.
+  const shared = { kid: 'kid-r2-shared', deviceId: 'dev-r2b', osUserId: 'os-r2', publicKey: { ...keyRows.get('kid-r1').publicKey },
+    evidence: { kind: 'test-software', evidenceId: 'evidence-shared' }, at: plus(T0, H), actorId: 'registrar-1' };
+  assert.throws(() => K.registerDeviceKey(shared, clinician('r2'), keyPolicy, keyReader), { code: 'KeyAlreadyRegistered' });
+  assert.throws(() => K.registerDeviceKey({ ...shared, kid: 'kid-r1' }, clinician('r2'), keyPolicy, keyReader), { code: 'KeyIdReused' });
+  assert.equal(allowed(() => K.registerDeviceKey({ ...shared, publicKey: keyMaterial().publicKey }, clinician('r2'), keyPolicy, keyReader)).kid, 'kid-r2-shared');
   // The native runtime only answers the product origin and the key's own OS user, and has no raw signing operation.
   const call = (operation, over = {}) => ({ operation, context: { protocol: NP.NATIVE_PROTOCOL, origin: 'https://pacs.example.test', documentId: 'doc-1', osUserId: 'os-r3', ...over } });
   const allowedCall = { origins: ['https://pacs.example.test'], osUserId: 'os-r3' };
@@ -787,8 +794,8 @@ test('C-C12 signed unadopted originals keep the report classification and recove
   const original = RT.offlineArtifactRetention('signed-unadopted-original');
   const report = C.RECORD_CLASSIFICATION['report-version'].retention;
   assert.equal(original.mode, 'statutory');
+  // The period is A's report-version classification, never a number fixed in C (legal register LR-15/§5-02, D-19).
   assert.equal(original.years, report.years);
-  assert.equal(original.years, 10);
   assert.deepEqual([...original.clauseIds], report.statutoryMinimum.map(m => m.clauseId));
   assert.equal(original.autoPublish, false);
   const recovery = RT.offlineArtifactRetention('recovery-work-copy');

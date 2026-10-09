@@ -149,11 +149,14 @@
         try { body = online ? await transport.read(uid) : await store.cached(uid); } catch { body = null; }
         const now = context.opening();
         if (!body || !now || now.uid !== uid || now.generation !== opening.generation) return false;
+        // 표시할 때마다 새 사건이다. 단절 중에는 IP를 관측하지 못했으므로 그렇게 기록한다.
+        const shown = { action: 'client-shown', eventId: newId(), relatedEventId: null, uid, recordId: body.recordId, versionId: body.versionId,
+          network: online ? 'online' : 'offline', ip: online ? null : 'not-observed', physicalOutput: null };
+        // 단말 캐시의 재표시는 서버가 제공 사건을 남기지 않으므로, 기록이 저장된 뒤에만 보인다.
+        if (!online && !(await observe(shown))) return false;
         view.showReport(body);
         render();
-        // 표시할 때마다 새 사건이다. 단절 중에는 IP를 관측하지 못했으므로 그렇게 기록한다.
-        await observe({ action: 'client-shown', eventId: newId(), relatedEventId: null, uid, recordId: body.recordId, versionId: body.versionId,
-          network: online ? 'online' : 'offline', ip: online ? null : 'not-observed', physicalOutput: null });
+        if (online) await observe(shown);
         return true;
       },
 
@@ -162,7 +165,7 @@
         const v = version || {};
         const opened = { action: 'print-opened', eventId: newId(), relatedEventId: null, uid: v.uid, recordId: v.recordId, versionId: v.versionId,
           network: context.online() ? 'online' : 'offline', ip: context.online() ? null : 'not-observed', physicalOutput: null };
-        await observe(opened);
+        if (!(await observe(opened))) return 'not-recorded'; // 기록하지 못한 출력은 열지 않는다
         try { await view.print(Object.freeze({ uid: v.uid, recordId: v.recordId, versionId: v.versionId })); }
         catch { return 'cancelled'; }
         await observe({ ...opened, action: 'print-done', eventId: newId(), relatedEventId: opened.eventId, physicalOutput: 'not-observed' });

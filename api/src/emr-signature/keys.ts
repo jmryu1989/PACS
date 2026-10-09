@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { ImmutableIdentity, identity } from '../emr-contract/access-event';
 import { KeyStatus, transitionSigningKey } from '../emr-contract/lawful-defaults';
 import { choice, freeze, object, refuse, string, utc } from '../emr-contract/validation';
@@ -29,6 +30,22 @@ export interface KeyRegistration {
   supersedes: string | null;
 }
 export interface KeyReader { load(kid: string): unknown }
+/** Registration-time view of the stored keys: by kid, and which registration already holds a public key. */
+export interface KeyRegistry extends KeyReader { holderOf(thumbprint: string): unknown }
+/** RFC 7638 JWK thumbprint of a P-256 key: the identity of the key material itself, independent of its kid. */
+export function jwkThumbprint(key: PublicKeyJwk): string {
+  const k = publicKey(key);
+  return createHash('sha256').update(JSON.stringify({ crv: k.crv, kty: k.kty, x: k.x, y: k.y })).digest('base64url');
+}
+/** One key material belongs to one registration of one clinician: a shared or re-used key is refused (legal register D-12). */
+function requireUnusedKey(existing: KeyRegistry, kid: string, key: PublicKeyJwk): void {
+  let usedKid: unknown = null, holder: unknown = null;
+  try { usedKid = existing.load(string(kid)); } catch { usedKid = null; }
+  if (usedKid) refuse('KeyIdReused');
+  if (typeof existing.holderOf !== 'function') refuse('KeyRegistryRequired');
+  try { holder = existing.holderOf(jwkThumbprint(key)); } catch { refuse('KeyRegistryRequired'); }
+  if (holder !== null && holder !== undefined) refuse('KeyAlreadyRegistered');
+}
 
 /** B2-verified clinician facts at registration/recovery time; never taken from the request body. */
 export interface VerifiedClinician {
@@ -92,13 +109,11 @@ export interface DeviceKeyRequest {
   kid: string; deviceId: string; osUserId: string; publicKey: PublicKeyJwk; evidence: { kind: KeyEvidenceKind; evidenceId: string }; at: string; actorId: string;
 }
 /** Online registration binds the verified clinician, institution and managed device user to a new kid. */
-export function registerDeviceKey(request: DeviceKeyRequest, clinician: VerifiedClinician, policy: KeyPolicy, existing: KeyReader): Readonly<KeyRegistration> {
+export function registerDeviceKey(request: DeviceKeyRequest, clinician: VerifiedClinician, policy: KeyPolicy, existing: KeyRegistry): Readonly<KeyRegistration> {
   const r = object(request, ['kid', 'deviceId', 'osUserId', 'publicKey', 'evidence', 'at', 'actorId']);
   const who = parseVerifiedClinician(clinician);
   if (!who.canSign) refuse('SigningAuthorityRequired');
-  let used: unknown = null;
-  try { used = existing.load(string(r.kid)); } catch { used = null; }
-  if (used) refuse('KeyIdReused');
+  requireUnusedKey(existing, r.kid, r.publicKey);
   return parseKeyRegistration({ kid: r.kid, deviceId: r.deviceId, osUserId: r.osUserId, publicKey: r.publicKey, identity: { ...who.identity },
     identityRegistrationId: who.identityRegistrationId, institutionId: who.institutionId, evidence: r.evidence,
     history: [{ status: 'active', effectiveAt: utc(r.at), reason: 'registered', actorIds: [string(r.actorId)] }], supersedes: null }, policy);
@@ -136,13 +151,11 @@ function authorizeRecovery(reg: KeyRegistration, input: RecoveryAuthorization): 
  * clinician. Existing signatures keep verifying with the old public key.
  */
 export function recoverSigningKey(reg: KeyRegistration, authorization: RecoveryAuthorization,
-  replacement: Omit<DeviceKeyRequest, 'at' | 'actorId'>, policy: KeyPolicy, existing: KeyReader): Readonly<{ retired: KeyRegistration; replacement: KeyRegistration }> {
+  replacement: Omit<DeviceKeyRequest, 'at' | 'actorId'>, policy: KeyPolicy, existing: KeyRegistry): Readonly<{ retired: KeyRegistration; replacement: KeyRegistration }> {
   const { at, operatorIds } = authorizeRecovery(reg, authorization);
   const r = object(replacement, ['kid', 'deviceId', 'osUserId', 'publicKey', 'evidence']);
   if (r.kid === reg.kid) refuse('KeyIdReused');
-  let used: unknown = null;
-  try { used = existing.load(string(r.kid)); } catch { used = null; }
-  if (used) refuse('KeyIdReused');
+  requireUnusedKey(existing, r.kid, r.publicKey);
   const current = keyStatusAt(reg, at);
   const retired = ['active', 'suspended'].includes(current) ? parseKeyRegistration({ ...reg, history: [...reg.history,
     { status: transitionSigningKey(current as KeyStatus, 'recover'), effectiveAt: at, reason: 'recovered', actorIds: operatorIds }] }, policy) : reg;
