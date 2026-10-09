@@ -43,7 +43,7 @@ Fable은 범위·고정 입력·영향 조사와 검증된 도구 실행을 맡�
 | 업무 화면(목록·판독) | `worklist-v0/hpacs-lite/main.html` + 기능별 `*.js`(compound-filter·saved-filter-manager·worklist-columns·favorites·favorite-list·study-tags·reader-assignment·tech-note·reading-workspace·study-pages·workspace-layout/roaming·viewer-jobs·critical-result-send) | `tests/e2e/test_*.py`(컨테이너 스택 필요), 격리 DOM `tests/*_dom_test.py`, 순수 모델 `tests/*_test.cjs`(`node --test`) |
 | 임상의·관리 화면 | `worklist-v0/hpacs-lite/clinician.html`·`clinician.js`, 관리 `admin.html`·`study-access-admin.js` | `tests/clinician_*_dom_test.py`, `tests/admin_member_roles_dom_test.py` |
 | 뷰어(고정 OHIF) 확장 | `config/ohif.js`의 `kinCreate*` 확장, 별도 창 스크립트 `worklist-v0/hpacs-lite/viewer-tech-note.js`·`viewer-workspace-dock.js` | `tests/viewer_*_test.cjs`·`tests/ct_*_test.cjs`·`tests/cine_budget_test.cjs`(`/app/dist` require 시험은 컨테이너 전용) |
-| API 목록·판독·hold·권한 | `api/src/pacs.controller.ts`·`pacs.service.ts`(`visible()`·`need()`·`commitReport`·`hold`), `auth.guard.ts` | `tests/invariants_live.py`(라우트 선언표 `ROUTES`는 컨트롤러 데코레이터와 정확 일치해야 함), `tests/e2e/test_worklist.py`. 후보 선택 건수는 `tests/candidate_ci.py`의 선언에만 두고 실제 수집 목록과 정확히 일치해야 한다 |
+| API 목록·판독·hold·권한 | `api/src/pacs.controller.ts`·`pacs.service.ts`(공개 facade)·`pacs/`(concern 지도 `pacs/README.md`: `access.ts`의 `visible()`·`need()`, `report-commit.ts`의 `commitReport`, `hold.ts`의 `hold`), `auth.guard.ts` | `tests/invariants_live.py`(라우트 선언표 `ROUTES`는 컨트롤러 데코레이터와 정확 일치해야 함), `tests/e2e/test_worklist.py`. 후보 선택 건수는 `tests/candidate_ci.py`의 선언에만 두고 실제 수집 목록과 정확히 일치해야 한다 |
 | API 기능별 | `favorite.*`·`study-tags.*`·`reader-assignment.*`·`viewer-job.*`·`manual-sr.*`·`connect.*`·`admin.*`·`report-preview.controller.ts`, `clinician-policy.ts`·`clinician-question.*`·`clinical-context*`·`critical-result*`·`image-request.*`·`consultation.*`·`study-access*`, 원본 조회 `orthanc.service.ts`·`study-page.ts`, 계정 `keycloak.service.ts` | 해당 `tests/e2e/test_<기능>.py`, `tests/*_live.py`, 역할·경로 행렬 `tests/clinician_policy_test.py`·`tests/clinician_policy_fixtures.json` |
 | DB | `api/prisma/schema.prisma`, `api/prisma/migrations/<시각>_<이름>/migration.sql` (`StudyState.preDocSub`·`preReviewerSub`: 판독 지정 주체) | migration을 추가하면 같은 커밋에서 `tests/production_image_test.py`의 기대 목록과 복원 fixture(`tests/ops_product_transfer_*.py`)를 갱신한다(2026-09-09 누락으로 CI `runtime` 12커밋 실패) |
 | 운영·CI | `.github/workflows/validate.yml`(build/runtime/measurements)·`candidate.yml`(G3, `tests/candidate_ci.py`)·`restore-*.yml`, `scripts/ops_*.py`, `docker-compose*.yml`, `proxy/` | `tests/ops_*_test.py`, `tests/production_image_test.py`, `tests/candidate_ci_test.py` |
@@ -59,7 +59,7 @@ Fable은 범위·고정 입력·영향 조사와 검증된 도구 실행을 맡�
 2. 개인 `ReportDraft`의 키는 `(uid, author)`이며 확정 `Report`를 바꾸지 않는다. 충돌은 확정(`commitReport`) 때 처리하고 남의 초안은 응답에 포함하지 않는다.
 3. RS=P에서는 지정된 상급 판독의의 승인 또는 사유가 있는 취소만 상태를 바꾼다. 임시저장은 P를 유지하며 작성자 자신의 승인은 금지한다.
 4. 타 기관 열람은 `StudyState.teleInstitutionId` 경계를 지킨다. `admin`도 예외가 아니며 기관 범위와 역할 권한을 따로 검사한다.
-5. 역할 검사는 서버의 `need()`, 기관 검사는 `visible()`에서 강제한다(`api/src/pacs.service.ts`). 화면 잠금으로 서버 검사를 대신하지 않는다.
+5. 역할 검사는 서버의 `need()`, 기관 검사는 `visible()`에서 강제한다(`api/src/pacs/access.ts`). 화면 잠금으로 서버 검사를 대신하지 않는다.
 6. `rs`·`repDoc`·`confirm`은 `commitReport`를 통해서만 변경하며 PATCH로 바꾸지 않는다.
 
 권한·상태 규칙을 바꾸면 같은 자원에 닿는 모든 API 진입점을 대조한다. 비동기 응답은 화면에
@@ -80,7 +80,7 @@ Fable은 범위·고정 입력·영향 조사와 검증된 도구 실행을 맡�
 
 2026-09-27 사용자 결정 D73으로 모든 작업 단위에 즉시 적용한다. 시험은 제품 요구를 확인하는 수단이며, 시험의 편의가 제품 구조를 정하지 않는다.
 
-13. 제품 코드는 시험 선택자·시험 문자열·시험 하니스를 통과시키기 위해 구조·문구·접근 방식을 바꾸지 않는다. 시험이 요구하는 형태가 제품 요구와 다르면 시험을 고친다. 현재 알려진 위반은 `worklist-v0/hpacs-lite/admin.html:216`(넓은 선택자 시험을 위해 열 머리글을 `thead` 대신 `tbody`에 둠)·`:1200`(시험 anchor 문자열이 한 번만 나오도록 달리 쓴 오류 문구), `api/src/pacs.service.ts:636`(Orthanc private 메서드의 대괄호 접근)이며 9단계 S9-U0f에서 정리한다. 이 목록을 새 위반의 선례로 쓰지 않는다.
+13. 제품 코드는 시험 선택자·시험 문자열·시험 하니스를 통과시키기 위해 구조·문구·접근 방식을 바꾸지 않는다. 시험이 요구하는 형태가 제품 요구와 다르면 시험을 고친다. 현재 알려진 위반은 `worklist-v0/hpacs-lite/admin.html:216`(넓은 선택자 시험을 위해 열 머리글을 `thead` 대신 `tbody`에 둠)·`:1200`(시험 anchor 문자열이 한 번만 나오도록 달리 쓴 오류 문구), `api/src/pacs/metrics.ts:206`(Orthanc private 메서드의 대괄호 접근)이며 9단계 S9-U0f에서 정리한다. 이 목록을 새 위반의 선례로 쓰지 않는다.
 14. 시험은 동작·권한 계약(역할·상태, §1·§1-A 불변조건, §4 문구 규칙, API 계약)에 단언을 붙인다. 구현 문자열·DOM 형태·내부 함수명에 붙이지 않는다. 바이트 핀은 바이트 동일성 자체가 요구인 경우(동작 보존 리팩터링의 전후 동등성, 브랜딩 영역 제외)에만 허용하고 그 사유를 시험 파일 머리에 적는다.
 15. 구문 검사·정적 대조가 필요하면 자체 파서를 만들지 않고 이미 설치된 도구(TypeScript AST, Nest 메타데이터, 실제 라우트 표)를 쓴다. `tests/clinician_policy_test.py`의 자체 TS 구문 검사기와 구현 문자열 고정 시험도 S9-U0f 정리 대상이다.
 16. 검수(Astra/Fable)는 "시험을 위해 비튼 제품 코드"와 "구현 문자열에 고정된 시험"을 finding으로 보고한다. 작업 결과 JSON에는 변경분에 이 절의 위반이 없음을 확인한 줄을 둔다.
