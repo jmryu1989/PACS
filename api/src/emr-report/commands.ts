@@ -189,6 +189,71 @@ export function planReportCommand(context: PlanContext, input: unknown): Readonl
     draft: null, retention: outcome.retention, ledger, publish, times: { signedAt: p.signedAt, receivedAt, committedAt: null, publishedAt: null } });
 }
 
+/**
+ * Tech Note signing (legal register D-3, LR-49/§5-49; wiring into pacs.service saveTechNote is C2). A radiographer's
+ * note is a record of their own work: they sign it themselves, and that signature does not stand in for a physician's
+ * recording duty. A note written by an administrator only is operational text: it is not signed and no signature is
+ * made up for it. Other roles do not write Tech Notes.
+ */
+export function techNoteSigning(input: VerifiedActor): 'author-signs' | 'unsigned-operational' {
+  const actor = parseVerifiedActor(input);
+  if (actor.kind !== 'member') refuse('TechNoteAuthorRefused');
+  if (actor.roles.includes('technician')) return 'author-signs';
+  if (actor.roles.includes('admin')) return 'unsigned-operational';
+  return refuse('TechNoteAuthorRefused');
+}
+export interface TechNoteContext {
+  actor: VerifiedActor;
+  study: StudyFacts;
+  recordId: string;
+  /** The stored latest revision of this study's note, or null for the first one. */
+  previous: VersionReference | null;
+  signature: Readonly<VerifiedSignatureV2> | null;
+  receivedAt: string;
+  ingress: IngressContext;
+}
+export function planTechNoteRevision(context: TechNoteContext, input: unknown): Readonly<{
+  recordId: string; versionId: string; signing: 'author-signs' | 'unsigned-operational'; clinicalEntry: boolean;
+  version: VersionReference | null; signedAt: string | null; ledger: readonly LedgerEntry[];
+}> {
+  const r = object(input, ['versionId', 'text', 'reason', 'eventId', 'envelope']);
+  const actor = parseVerifiedActor(context.actor), study = parseStudyFacts(context.study), receivedAt = utc(context.receivedAt);
+  const text = string(r.text, true), reason = r.reason === null ? null : string(r.reason), versionId = string(r.versionId), eventId = string(r.eventId);
+  if (actor.sessionState !== 'active') refuse('SessionEnded');
+  if (!institutionAllows(actor, study)) refuse('InstitutionRefused');
+  if (context.previous !== null && (reason === null || !reason.trim())) refuse('RevisionReasonRequired');
+  const signing = techNoteSigning(actor);
+  const action: AccessAction = context.previous === null ? 'write' : 'modify';
+  const occurredAt = (signedAt: string | null) => signedAt ?? receivedAt;
+  const entry = (at: string) => {
+    const event = parseAccessEvent({ formatVersion: 1, surface: 'POST studies/:uid/tech-note', eventId: `access:${eventId}:${action}`,
+      userId: known({ ...actor.identity }), rolesAtTime: known([...actor.roles]), actingInstitution: known(actor.institutionId),
+      managingInstitution: known(study.managingInstitutionId), occurredAt: at, trustedProxyIp: context.ingress.ip, cause: 'user-view', executor: 'member',
+      targets: [{ kind: 'tech-note', patientLinkSnapshot: known({ ...study.patient }), studyId: known(study.studyId), recordId: known(string(context.recordId)),
+        versionId: known(versionId) }], action, result: 'succeeded', requestId: context.ingress.requestId, auditLinkId: newAuditLinkId(), relatedEventId: null });
+    return freeze({ kind: 'access-v1' as const, act: STATUTORY_ACT[action], event });
+  };
+  if (signing === 'unsigned-operational') {
+    if (r.envelope !== null || context.signature !== null) refuse('TechNoteSignatureNotApplicable');
+    return freeze({ recordId: context.recordId, versionId, signing, clinicalEntry: false, version: null, signedAt: null, ledger: [entry(occurredAt(null))] });
+  }
+  const sig = requireVerifiedV2(context.signature);
+  if (r.envelope === null || r.envelope.payload !== sig.payloadBase64url) refuse('SignedPayloadBindingRefused');
+  if (sig.time.status !== 'verified') refuse('SignatureTimeUnverified');
+  if (sig.keyAtSigningTime !== 'active') refuse('SigningKeyInactive');
+  if (!actor.canSign) refuse('SigningAuthorityRequired');
+  const p = sig.payload;
+  // The signed bytes must be this note: its exact text, this study and record, this author signing for themselves.
+  if (p.recordKind !== 'tech-note' || p.recordId !== context.recordId || p.versionId !== versionId || p.eventId !== eventId || p.grant !== null ||
+      p.action !== (context.previous === null ? 'record' : 'amend') || p.text.kind !== 'clinical-entry' || p.text.body !== text || p.reason !== reason ||
+      JSON.stringify(p.previousVersion) !== JSON.stringify(context.previous) || p.attachments.length !== 0 ||
+      !same(p.signer, actor.identity) || !same(p.author, actor.identity) || p.identityRegistrationId !== actor.identityRegistrationId ||
+      !same(p.patient, study.patient) || p.studyId !== study.studyId || p.managingInstitutionId !== study.managingInstitutionId ||
+      p.actingInstitutionId !== actor.institutionId) refuse('SignedPayloadBindingRefused');
+  return freeze({ recordId: context.recordId, versionId, signing, clinicalEntry: true,
+    version: { recordId: context.recordId, versionId, sha256: sig.versionSha256 }, signedAt: p.signedAt, ledger: [entry(occurredAt(p.signedAt))] });
+}
+
 export type CommitResult = Readonly<
   { status: 'committed' | 'duplicate'; receipt: Readonly<CommitReceipt> } |
   { status: 'failed'; code: string; journal: { journalId: string; durableAt: string } | null }

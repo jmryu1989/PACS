@@ -108,7 +108,7 @@ function deviceKey(id, { kid = 'kid-' + id, deviceId = 'dev-' + id, osUserId = '
   keyRows.set(kid, reg); privateKeys.set(kid, k.privateKey);
   return reg;
 }
-for (const id of ['r1', 'r2', 'r3']) deviceKey(id);
+for (const id of ['r1', 'r2', 'r3', 't1']) deviceKey(id);
 let counter = 0;
 const next = prefix => `${prefix}-${++counter}`;
 function basis(signedAt, deviceId, { boot = 'boot-1', signBoot = boot, wall = [], age = H, validFor = 48 * H, epsilon = timePolicy.epsilonMs, claimed = signedAt,
@@ -313,7 +313,7 @@ test('C-C01 write, private draft, release, independent preliminary approval and 
   assert.equal(successor.state, 'Unread');
 });
 
-test('C-C02 v1 envelopes re-verify unchanged and v2 binds the exact text; swapped body, patient, version, action, key or event and payloads signed for other facts are refused', async () => {
+test('C-C02 v1 envelopes re-verify unchanged, v2 binds the exact text and a radiographer signs their own Tech Note; swapped body, patient, version, action, key or event, payloads signed for other facts and signatures on admin text are refused', async () => {
   // v1: exact A bytes plus the ES256 check C owns.
   const v1 = { formatVersion: 'emr-signature/1', text: reportText(), patient: { ...patient }, studyId: STUDY, managingInstitutionId: 'inst-a', actingInstitutionId: 'inst-a',
     recordKind: 'report-version', recordId: 'report-v1', versionId: 'v1', author: who('r1'), signer: who('r1'), identityRegistrationId: 'reg-r1', action: 'approve-sign',
@@ -357,6 +357,40 @@ test('C-C02 v1 envelopes re-verify unchanged and v2 binds the exact text; swappe
     ['eventId', { eventId: 'event-not-signed' }]]) {
     assert.throws(() => online(srv, 'r1', 'approve', { at: T0, ...option }), { code: 'SignedPayloadBindingRefused' }, field);
   }
+  // D-3: a radiographer signs their own Tech Note; a note written only by an administrator stays unsigned operational text.
+  const tech = actor('t1', { roles: ['technician'], canCancel: false }), admin = actor('a1', { roles: ['admin'], canSign: false, canCancel: false });
+  assert.equal(CMD.techNoteSigning(tech), 'author-signs');
+  assert.equal(CMD.techNoteSigning(admin), 'unsigned-operational');
+  assert.throws(() => CMD.techNoteSigning(actor('c9', { roles: ['clinician'] })), { code: 'TechNoteAuthorRefused' });
+  const noteRecord = 'tech-note:' + STUDY, noteText = 'SYN 촬영 메모\r\n조영제 주입 지연  ';
+  const notePayload = o => ({ ...payload({ action: 'record', recordId: noteRecord, signer: 't1', signedAt: T0, claimGeneration: 0, text: { kind: 'clinical-entry', body: noteText }, ...o }),
+    recordKind: 'tech-note' });
+  const np = notePayload({}), nenv = envelopeFor(np), nsig = verify(nenv, 'os-t1');
+  const noteCtx = (who, signature, previous = null) => ({ actor: who, study: study(), recordId: noteRecord, previous, signature, receivedAt: plus(T0, 1000), ingress });
+  const noteInput = { versionId: np.versionId, text: noteText, reason: null, eventId: np.eventId, envelope: nenv };
+  const signedNote = allowed(() => CMD.planTechNoteRevision(noteCtx(tech, nsig), noteInput));
+  assert.equal(signedNote.signing, 'author-signs');
+  assert.equal(signedNote.clinicalEntry, true);
+  assert.equal(signedNote.version.sha256, nsig.versionSha256);
+  assert.equal(signedNote.signedAt, T0);
+  assert.deepEqual(signedNote.ledger.map(e => e.act), ['기재']);
+  assert.throws(() => CMD.planTechNoteRevision(noteCtx(tech, nsig), { ...noteInput, text: noteText.trim() }), { code: 'SignedPayloadBindingRefused' });
+  assert.throws(() => CMD.planTechNoteRevision(noteCtx(tech, null), { ...noteInput, envelope: null }), { code: 'VerifiedSignatureRequired' });
+  const byOther = notePayload({ signer: 'r1' }), otherSig = verify(envelopeFor(byOther), 'os-r1');
+  assert.throws(() => CMD.planTechNoteRevision(noteCtx(tech, otherSig), { ...noteInput, versionId: byOther.versionId, eventId: byOther.eventId, envelope: envelopeFor(byOther) }),
+    { code: 'SignedPayloadBindingRefused' });
+  const adminNote = allowed(() => CMD.planTechNoteRevision(noteCtx(admin, null), { ...noteInput, envelope: null }));
+  assert.equal(adminNote.signing, 'unsigned-operational');
+  assert.equal(adminNote.clinicalEntry, false);
+  assert.equal(adminNote.version, null);
+  assert.throws(() => CMD.planTechNoteRevision(noteCtx(admin, nsig), noteInput), { code: 'TechNoteSignatureNotApplicable' });
+  // A revision is signed as a correction of the stored latest revision and carries its reason.
+  const previous = signedNote.version;
+  const rp = notePayload({ action: 'amend', previous, reason: 'SYN 시간 정정', signedAt: plus(T0, MIN) }), renv = envelopeFor(rp), rsig = verify(renv, 'os-t1');
+  const revision = allowed(() => CMD.planTechNoteRevision(noteCtx(tech, rsig, previous), { versionId: rp.versionId, text: noteText, reason: 'SYN 시간 정정', eventId: rp.eventId, envelope: renv }));
+  assert.deepEqual(revision.ledger.map(e => e.act), ['수정']);
+  assert.throws(() => CMD.planTechNoteRevision(noteCtx(tech, rsig, previous), { versionId: rp.versionId, text: noteText, reason: null, eventId: rp.eventId, envelope: renv }),
+    { code: 'RevisionReasonRequired' });
 });
 
 test('C-C03 a trusted anchor plus same-boot monotonic elapsed time is verified; wall-clock claims, rollbacks, reboots, unverified anchors, widened uncertainty and boundary overlap are refused or held', () => {

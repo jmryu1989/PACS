@@ -12,7 +12,8 @@ import { freeze } from '../emr-contract/validation';
 export const SIGNATURE_V2_FORMAT = 'emr-signature/2' as const;
 /** Different `typ` from v1 (`emr-signature+jws`): a v1 envelope can never carry a v2 payload and vice versa. */
 export const SIGNATURE_V2_TYPE = 'emr-signature-v2+jws' as const;
-export const SIGNATURE_V2_ACTIONS = freeze(['preliminary', 'approve-sign', 'amend', 'addendum', 'cancel'] as const);
+/** `record` is a first non-report entry (e.g. a radiographer's Tech Note); report flows never use it. */
+export const SIGNATURE_V2_ACTIONS = freeze(['record', 'preliminary', 'approve-sign', 'amend', 'addendum', 'cancel'] as const);
 export type SignatureActionV2 = typeof SIGNATURE_V2_ACTIONS[number];
 
 /**
