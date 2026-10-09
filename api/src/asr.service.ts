@@ -1,5 +1,6 @@
-import { Injectable, HttpException } from '@nestjs/common';
+import { Injectable, HttpException, Logger } from '@nestjs/common';
 import { inspectDictationWav, DICTATION_AUDIO_MAX_BYTES } from './dictation-audio';
+import { asrDestination, asrFetch, AsrDestinationError } from './asr-destination';
 
 // Configured attribution labels, not runtime image/model attestation (U3).
 export const ASR_ENGINE_PIN = 'whisper.cpp@927cfce34f31707e17f2bff35c349632fb9e2c3a';
@@ -18,8 +19,8 @@ export function asrConfiguration(env = process.env) {
   const maxBytes = limit(env.KIN_ASR_MAX_BYTES, DICTATION_AUDIO_MAX_BYTES, 46, DICTATION_AUDIO_MAX_BYTES);
   const timeoutMs = limit(env.KIN_ASR_TIMEOUT_MS, 120000, 1, 240000);
   const languagePin = env.KIN_ASR_LANGUAGE ?? 'auto';
-  let url: URL;
-  try { url = new URL(env.KIN_ASR_URL); } catch { /* optional, fail closed */ }
+  const url = asrDestination(env.KIN_ASR_URL);
+  if (env.KIN_ASR_URL && !url) Logger.error('KIN_ASR_URL 설정 오류: 배포 내부 서비스명 또는 사설·로컬 IP의 /inference 주소만 허용합니다. 받아쓰기를 사용할 수 없습니다.', 'AsrService');
   const available = !!(url && ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password &&
     !url.search && !url.hash && url.pathname === '/inference' &&
     env.KIN_ASR_ENGINE === ASR_ENGINE_PIN && env.KIN_ASR_MODEL === ASR_MODEL_PIN &&
@@ -56,7 +57,7 @@ export class AsrService {
       form.append('file', new Blob([new Uint8Array(bytes)], { type: 'audio/wav' }), 'dictation.wav');
       form.append('response_format', 'json');
       form.append('language', config.languagePin);
-      const response = await fetch(config.url, { method: 'POST', body: form, signal: abort.signal,
+      const response = await asrFetch(config.url, { method: 'POST', body: form, signal: abort.signal,
         redirect: 'error', credentials: 'omit' });
       if (!response.ok || !response.body) throw dictationError('DICTATION_ENGINE_FAILED');
       const length = response.headers.get('content-length');
@@ -78,7 +79,11 @@ export class AsrService {
         throw dictationError('DICTATION_ENGINE_FAILED');
       return { text: result.text, enginePin: config.enginePin, modelPin: config.modelPin,
         languagePin: config.languagePin, seconds: audio.seconds };
-    } catch {
+    } catch (error) {
+      if (error instanceof AsrDestinationError) {
+        Logger.error('KIN_ASR_URL 설정 오류: 서비스명의 DNS 주소가 없거나 내부 대역이 아닙니다. 음성 전송을 거절했습니다.', 'AsrService');
+        throw dictationError('DICTATION_NOT_CONFIGURED');
+      }
       throw dictationError(timedOut ? 'DICTATION_TIMEOUT' : 'DICTATION_ENGINE_FAILED');
     } finally {
       clearTimeout(timer);
