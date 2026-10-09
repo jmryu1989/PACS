@@ -543,6 +543,102 @@ export interface IncidentDecider {
   designation?: { categoryBasis: 'privacy-decree:32.2.1' | 'privacy-decree:32.2.2'; categoryEvidenceId: string;
     qualificationRequired: boolean; qualificationAssessmentEvidenceId: string; qualificationEvidenceId?: string };
 }
+/** D849/D850: the reviewed D-26 v2 Q4 constant, including its interpretation qualifications.
+ * Attribution is evidence classification, never permission to deem the operator's ISP duty performed. */
+export const OPERATOR_OTHER_LAW_DEEMING = freeze({
+  "interpretationStatus": "적용 미확정·증거 전용 (statutory deeming possibility ≠ product auto-closure; not a permanent denial — separate candidate if an official interpretation or reviewed basis is bound)",
+  "prediction": false,
+  "isp-incident-report": {
+    "deemableKinds": [],
+    "actualPerformanceKinds": [
+      "isp-report-receipt (KISA/과기정통부 incident-report receipt; includes the same document received as an ISP report)"
+    ],
+    "evidenceOnlyKinds": [
+      "pipa-processor-report",
+      "unattributed-other-law-report"
+    ],
+    "neverKinds": [
+      "mohw-notice",
+      "pipa-controller-report",
+      "pipa-controller-subject-notice",
+      "contract-notice-to-hospital",
+      "pipa-processor-subject-notice"
+    ],
+    "attribution": [
+      "reporterEntity=operator legal entity (own name/capacity; staff or lawful agent submission ok; hospital-name filing never)",
+      "capacity=processor-own-duty (P26⑧→P34)",
+      "recipientAuthority in {PIPC, KISA}",
+      "incidentIdentity=same attack incident (service–incident relation, not ownership; receipt alone insufficient)",
+      "coveredItems ⊇ ND58의8① 1~3",
+      "performedAt=actual receipt evidence",
+      "legalBasisRef=P26⑧→P34④+PD40 + document ref"
+    ],
+    "attributionComplete": "recorded true/false; never closes the duty",
+    "timeliness": "met-timely / met-late only for actualPerformanceKinds against operatorKnownAt + 24h; PIPA 72h never extends; late performance never erases prior delay",
+    "privacyOfficerPrompt": "직접 신고로 확정(실제 이행으로 확인 가능); 동일 서류가 ISP 신고로 접수된 증거가 있으면 중복 서류 불요",
+    "physicianFacing": "none"
+  },
+  "isp-user-notice": {
+    "deemableKinds": [],
+    "actualPerformanceKinds": [
+      "operator-user-notice (ND58의9② items + ④ method + delivered + recipient scope = actual service users + without delay; per recipient)"
+    ],
+    "evidenceOnlyKinds": [
+      "pipa-processor-subject-notice (record recipient∩operator-service-users)",
+      "contract-notice-to-hospital (items/method not met)"
+    ],
+    "neverKinds": [
+      "mohw-notice",
+      "pipa-controller-report",
+      "pipa-controller-subject-notice",
+      "pipa-processor-report"
+    ],
+    "perRecipient": true,
+    "recipientMustBeOperatorServiceUser": true,
+    "attribution": [
+      "notifierEntity=operator legal entity",
+      "capacity=processor-own-duty (P26⑧)",
+      "recipients in operator-service-users (patients only with a verified usage relation; hospital entity, staff individuals and patients never merged)",
+      "incidentIdentity=same attack incident",
+      "coveredItems ⊇ ND58의9② 1~5",
+      "performedAt=actual delivery evidence (no read-receipt requirement)",
+      "legalBasisRef in {P26⑧→P34①+PD39, P26⑧→P34②+PD39의2·39의3} + document ref"
+    ],
+    "independentPaths": [
+      "ND58의9③ priority/additional notice",
+      "ND58의9⑤ posting with 정당한 사유, ≥30 days"
+    ],
+    "partialNotice": "never closes the duty for other users"
+  },
+  "isp-incident-report-supplement": {
+    "deemableKinds": [],
+    "actualPerformanceKinds": [
+      "isp-supplement-receipt"
+    ],
+    "note": "D-25 v4 N2 — actual supplementary report only; per confirmed fact +24h"
+  },
+  "pipaReportTrigger": "health-data 유출등 known → PD40①2호 principal criterion; PD40① 단서 (신고 생략) and 전단 delay grounds verified separately with evidence; unverified exceptions never auto-exempt; an accepted PIPA exemption is never ISP deeming or exemption evidence",
+  "hospitalPlanRules": "unchanged (D-25); never cross-applied to the operator plan",
+  "reevaluation": "completing attribution re-classifies evidence only; original known/incident/performed times are never overwritten by the completion time"
+});
+export interface IncidentNoticeAttribution {
+  attributionId: string; noticeId: string; recordedAt: string; supersedes?: string;
+  kind: 'pipa-processor-report' | 'unattributed-other-law-report' | 'pipa-processor-subject-notice' |
+    'contract-notice-to-hospital' | 'pipa-controller-report' | 'pipa-controller-subject-notice' | 'mohw-notice';
+  reporterEntity?: string; capacity?: string;
+  /** An authority for a report; distinct recipient IDs for a subject notice. */
+  recipientAuthority?: string | readonly string[];
+  incidentIdentity?: { eventId: string; attackCaused: boolean; serviceRelationEvidenceId: string };
+  coveredItems?: readonly string[]; performedAt?: string;
+  legalBasisRef?: { basis: string; documentRef: string };
+}
+interface OperatorNoticeEvidence {
+  kind: IncidentNoticeAttribution['kind'] | null; attributionComplete: boolean;
+  missingFields: readonly string[]; invalidFields: readonly string[];
+  attributionHistory: readonly IncidentNoticeAttribution[];
+  eligibleRecipientIds: readonly string[]; perRecipient: boolean; recipientMustBeOperatorServiceUser: boolean;
+  classification: Readonly<Record<'isp-incident-report' | 'isp-user-notice' | 'isp-incident-report-supplement', 'evidence-only' | 'never'>>;
+}
 export interface IncidentNoticeEvidence {
   kind: DutyKind; triggeredAt: string; noticeId: string; sentAt: string;
   institutionId?: string; incidentId?: string; triggerEventId?: string;
@@ -552,6 +648,7 @@ export interface IncidentNoticeEvidence {
   posting?: { justCause: string; evidenceId: string; maintainedThrough: string; maintenanceEvidenceId: string };
 }
 interface BoundNotice extends IncidentNoticeEvidence {
+  operatorEvidence?: OperatorNoticeEvidence;
   institutionId: string; incidentId: string; triggerEventId: string; recipientScopeRef: string;
   coversAll: boolean; evidenceId: string; recordedAt: string;
 }
@@ -603,12 +700,14 @@ export interface IncidentResponsePlan {
     userNotice: { applicability: 'applicable' | 'not-applicable' | 'decision-required' | 're-decision-required'; decisionRefs: readonly string[];
       occurrenceEvidenceRefs: readonly string[]; effectiveOccurrenceEvidenceRefs: readonly string[];
       reasonCode: 'occurrence-evidence-contradicts-decision' | null; reason: string | null } }[];
+  operatorEvidencePrompt: { audience: 'privacy-officer'; physicianFacing: 'none'; text: string } | null;
   recipientScopes: readonly { scopeRef: string; recipientIds: readonly string[] }[];
-  ledger: { findings: readonly BoundFinding[]; notices: readonly BoundNotice[]; delays: readonly IncidentDelay[]; decisions: readonly IncidentDecision[] };
+  ledger: { findings: readonly BoundFinding[]; notices: readonly BoundNotice[]; noticeAttributions: readonly IncidentNoticeAttribution[]; delays: readonly IncidentDelay[]; decisions: readonly IncidentDecision[] };
   obligations: readonly IncidentObligation[]; status: 'planned';
 }
 export interface IncidentResponseHistory {
   previous?: Readonly<IncidentResponsePlan>; notices?: readonly IncidentNoticeEvidence[]; asOf?: string;
+  noticeAttributions?: readonly IncidentNoticeAttribution[];
   findings?: readonly IncidentResponseFacts[]; delays?: readonly IncidentDelay[]; decisions?: readonly IncidentDecision[];
   recipientScopes?: readonly { scopeRef: string; recipientIds: readonly string[] }[];
 }
@@ -804,7 +903,7 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
   if (!incidentScopes.has(scope)) refuse('IncidentScopeRequired');
   if (scope.institutionId !== authority.institutionId) refuse('AuditScopeNotGranted');
   return guarded('IncidentResponseRefused', () => {
-    optionalObject(history, [], ['previous', 'notices', 'asOf', 'findings', 'delays', 'decisions', 'recipientScopes']);
+    optionalObject(history, [], ['previous', 'notices', 'asOf', 'findings', 'delays', 'decisions', 'recipientScopes', 'noticeAttributions']);
     const f = incidentFacts(input, scope), asOf = utc(history.asOf ?? f.newlyConfirmedAt ?? f.determinationAt), previous = history.previous;
     if (previous && (!incidentResponses.has(previous) || previous.incidentId !== f.incidentId || previous.institutionId !== authority.institutionId ||
         previous.awarenessAt !== f.awarenessAt || previous.asOf > asOf)) throw new Error('Unbound history');
@@ -1001,7 +1100,7 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
       IMMEDIATE_TIMING_RULE.ispUserFields.slice(1) : IMMEDIATE_TIMING_RULE.ispUserFields;
     const rawNotices = [...(previous?.ledger.notices ?? []), ...list(history.notices)];
     const parsedNotices = rawNotices.map(value => {
-      const n = optionalObject(value, ['kind', 'triggeredAt', 'noticeId', 'sentAt'], ['institutionId', 'incidentId', 'triggerEventId', 'recipientScopeRef', 'coversAll', 'evidenceId', 'recordedAt', 'coveredFields', 'channel', 'posting']);
+      const n = optionalObject(value, ['kind', 'triggeredAt', 'noticeId', 'sentAt'], ['institutionId', 'incidentId', 'triggerEventId', 'recipientScopeRef', 'coversAll', 'evidenceId', 'recordedAt', 'coveredFields', 'channel', 'posting', 'operatorEvidence']);
       choice(n.kind, Object.keys(DUTY_FAMILY) as DutyKind[]); string(n.noticeId); utc(n.triggeredAt); utc(n.sentAt);
       const family = DUTY_FAMILY[n.kind], recordedAt = utc(n.recordedAt ?? asOf);
       if (n.sentAt < n.triggeredAt || n.sentAt > recordedAt || recordedAt > asOf ||
@@ -1027,7 +1126,63 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
         evidenceId: string(n.evidenceId ?? n.noticeId), recordedAt,
         ...(n.coveredFields ? { coveredFields: [...n.coveredFields].sort() } : {}), ...(n.channel ? { channel: n.channel } : {}), ...(n.posting ? { posting: { ...n.posting } } : {}) };
     });
-    const notices = merge(parsedNotices, n => n.noticeId, n => { const { recordedAt, ...bound } = n; return bound; });
+    const notices: BoundNotice[] = merge(parsedNotices, n => n.noticeId, n => { const { recordedAt, ...bound } = n; return bound; });
+    const attributionFields = ['reporterEntity', 'capacity', 'recipientAuthority', 'incidentIdentity', 'coveredItems', 'performedAt', 'legalBasisRef'];
+    const noticeAttributions = merge([...(previous?.ledger.noticeAttributions ?? []), ...list(history.noticeAttributions)].map(value => {
+      const a = structuredClone(optionalObject(value, ['attributionId', 'noticeId', 'recordedAt', 'kind'], ['supersedes', ...attributionFields])) as IncidentNoticeAttribution;
+      string(a.attributionId); string(a.noticeId); utc(a.recordedAt);
+      choice(a.kind, ['pipa-processor-report', 'unattributed-other-law-report', 'pipa-processor-subject-notice', 'contract-notice-to-hospital',
+        'pipa-controller-report', 'pipa-controller-subject-notice', 'mohw-notice']);
+      const n = notices.find(n => n.noticeId === a.noticeId);
+      if (owner.kind !== 'operator' || !n || DUTY_FAMILY[n.kind].startsWith('isp-') || a.recordedAt > asOf || a.recordedAt < n.recordedAt) throw new Error('Unbound attribution');
+      const reportKind = ['pipa-processor-report', 'unattributed-other-law-report', 'pipa-controller-report'].includes(a.kind);
+      if (reportKind ? !['report', 'additional-report'].includes(DUTY_FAMILY[n.kind]) : a.kind === 'mohw-notice' ? n.kind !== 'mohw-notice' :
+          !['possibility', 'confirmed', 'additional-notice', 'no-leak'].includes(DUTY_FAMILY[n.kind])) throw new Error('Attribution kind conflicts with performed act');
+      if (a.supersedes !== undefined) string(a.supersedes);
+      for (const field of ['reporterEntity', 'capacity'] as const) if (a[field] !== undefined) string(a[field]);
+      if (a.recipientAuthority !== undefined) { if (Array.isArray(a.recipientAuthority)) uniqueStrings(a.recipientAuthority); else string(a.recipientAuthority); }
+      if (a.incidentIdentity) { const i = object(a.incidentIdentity, ['eventId', 'attackCaused', 'serviceRelationEvidenceId']);
+        string(i.eventId); string(i.serviceRelationEvidenceId); if (typeof i.attackCaused !== 'boolean') throw new Error('Attack evidence required'); }
+      if (a.coveredItems !== undefined) uniqueStrings(a.coveredItems);
+      if (a.performedAt !== undefined && utc(a.performedAt) !== n.sentAt) throw new Error('Attribution cannot rewrite performance time');
+      if (a.legalBasisRef) { const b = object(a.legalBasisRef, ['basis', 'documentRef']); string(b.basis); string(b.documentRef); }
+      return a;
+    }), a => a.attributionId);
+    for (const a of noticeAttributions) if (a.supersedes) {
+      const old = noticeAttributions.find(x => x.attributionId === a.supersedes);
+      if (!old || old.noticeId !== a.noticeId || old.recordedAt > a.recordedAt || old.attributionId === a.attributionId ||
+          noticeAttributions.some(x => x.attributionId !== a.attributionId && x.supersedes === a.supersedes)) throw new Error('Invalid attribution revision');
+      const seen = new Set([a.attributionId]); let parent = old;
+      while (parent) { if (seen.has(parent.attributionId)) throw new Error('Cyclic attribution revision'); seen.add(parent.attributionId);
+        parent = noticeAttributions.find(x => x.attributionId === parent.supersedes); }
+    }
+    for (const n of notices) if (owner.kind === 'operator' && !DUTY_FAMILY[n.kind].startsWith('isp-')) {
+      const attributionHistory = noticeAttributions.filter(a => a.noticeId === n.noticeId);
+      const latest = attributionHistory.filter(a => !attributionHistory.some(x => x.supersedes === a.attributionId));
+      if (latest.length > 1) throw new Error('Ambiguous attribution');
+      const a = latest[0], kind = a?.kind ?? (['report', 'additional-report'].includes(DUTY_FAMILY[n.kind]) ? 'unattributed-other-law-report' : n.kind === 'mohw-notice' ? 'mohw-notice' : null);
+      const isReport = ['pipa-processor-report', 'unattributed-other-law-report', 'pipa-controller-report'].includes(kind);
+      const missingFields = attributionFields.filter(k => a?.[k] === undefined), invalidFields: string[] = [];
+      const valid = (field: string, ok: boolean) => { if (!missingFields.includes(field) && !ok) invalidFields.push(field); };
+      valid('reporterEntity', a?.reporterEntity === owner.id);
+      valid('capacity', a?.capacity === 'processor-own-duty');
+      const event = facts.find(f => f.ispIncident?.eventId === a?.incidentIdentity?.eventId && f.ispIncident.attackCaused)?.ispIncident;
+      valid('incidentIdentity', !!event && a?.incidentIdentity?.attackCaused === true);
+      const delivered = members(n.recipientScopeRef) ?? [];
+      const serviceUsers = members(event?.userImpact?.recipientScopeRef ?? '') ?? [];
+      const eligibleRecipientIds = Array.isArray(a?.recipientAuthority) ? a.recipientAuthority.filter(id => delivered.includes(id) && serviceUsers.includes(id)).sort() : [];
+      valid('recipientAuthority', isReport ? ['PIPC', 'KISA'].includes(a?.recipientAuthority as string) && a?.recipientAuthority === n.channel :
+        Array.isArray(a?.recipientAuthority) && a.recipientAuthority.length > 0 && eligibleRecipientIds.length === a.recipientAuthority.length);
+      const required = isReport ? IMMEDIATE_TIMING_RULE.ispReportFields : IMMEDIATE_TIMING_RULE.ispUserFields;
+      valid('coveredItems', required.every(k => a?.coveredItems?.includes(k)));
+      valid('legalBasisRef', isReport ? a?.legalBasisRef?.basis === 'P26⑧→P34④+PD40' :
+        ['P26⑧→P34①+PD39', 'P26⑧→P34②+PD39의2·39의3'].includes(a?.legalBasisRef?.basis));
+      n.operatorEvidence = { kind, attributionComplete: missingFields.length === 0 && invalidFields.length === 0,
+        missingFields, invalidFields, attributionHistory, eligibleRecipientIds, perRecipient: !isReport, recipientMustBeOperatorServiceUser: !isReport,
+        classification: { 'isp-incident-report': ['pipa-processor-report', 'unattributed-other-law-report'].includes(kind) ? 'evidence-only' : 'never',
+          'isp-user-notice': ['pipa-processor-subject-notice', 'contract-notice-to-hospital'].includes(kind) || kind === null ? 'evidence-only' : 'never',
+          'isp-incident-report-supplement': 'never' } };
+    }
     const delays = merge([...(previous?.ledger.delays ?? []), ...list(history.delays)].map(value => {
       const d = structuredClone(optionalObject(value, ['delayId', 'obligationKey', 'clause', 'version', 'reason', 'evidenceId', 'by', 'recordedAt', 'startedAt', 'clearedAt', 'accepted', 'decisionId', 'supersedes'], ['category', 'decider', 'causalReview']));
       for (const k of ['delayId', 'obligationKey', 'clause', 'version', 'reason', 'evidenceId']) string(d[k]);
@@ -1105,7 +1260,8 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
       const reportLaw = ['isp-report', 'isp-supplement'].includes(c.family) ? ispLawAt(c.at) : null;
       if (reportLaw?.taskPolicy) continue;
       if (['isp-user', 'isp-user-additional'].includes(c.family) && !ispUserApplicable(c.fact.ispIncident.eventId) &&
-          !ispUserPreviouslyApplicable(c.fact.ispIncident.eventId, c.at)) continue;
+          !ispUserPreviouslyApplicable(c.fact.ispIncident.eventId, c.at) &&
+          !previous?.obligations.some(o => o.obligationKey === key(c.family, c.eventId, c.recipients))) continue;
       if (['isp-supplement', 'isp-user-additional'].includes(c.family)) {
         const prior = notices.some(n => postingReady(n) && performedAt(n) <= c.at && (c.family === 'isp-supplement'
           ? ((n.kind === 'isp-incident-report' && n.triggerEventId === c.fact.ispIncident.eventId) ||
@@ -1156,7 +1312,8 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
     // Every piece of evidence must have a unique destination; reject the whole snapshot if a reference is unusable.
     const belongs = (n: BoundNotice, o: IncidentObligation) => DUTY_FAMILY[n.kind] === o.family && n.triggerEventId === o.triggerEventId &&
       (n.triggeredAt === o.triggeredAt || (o.family === 'no-leak' && n.triggeredAt >= o.triggeredAt)) &&
-      (n.recipientScopeRef === o.recipientScopeRef || (o.family === 'no-leak' && covers(n.recipientScopeRef, o.recipientScopeRef)) || (!n.coversAll && o.family === 'possibility'));
+      (n.recipientScopeRef === o.recipientScopeRef || (o.family === 'no-leak' && covers(n.recipientScopeRef, o.recipientScopeRef)) ||
+        (owner.kind === 'operator' && ['isp-user', 'isp-user-additional'].includes(o.family) && covers(o.recipientScopeRef, n.recipientScopeRef)) || (!n.coversAll && o.family === 'possibility'));
     const operatorEvidence = (n: BoundNotice) => owner.kind === 'operator' && [...dutySources, ...followupMap.values()].some(c => !c.family.startsWith('isp-') &&
       c.family === DUTY_FAMILY[n.kind] && c.eventId === n.triggerEventId && (c.at === n.triggeredAt || (c.family === 'no-leak' && c.at <= n.triggeredAt)) &&
       (c.recipients === n.recipientScopeRef || covers(c.recipients, n.recipientScopeRef)));
@@ -1280,7 +1437,11 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
     const result = freeze({ incidentId: f.incidentId, institutionId: authority.institutionId, recordedBy: { ...authority.subject },
       awarenessAt: f.awarenessAt, verdict: currentVerdict.status, determinationAt: currentVerdict.at, asOf,
       subjectsIdentifiable: scope.subjectsIdentifiable, hasNotifiedPossible: possibleNotices.length > 0,
-      obligationOwner: { ...owner }, ispAssessments, recipientScopes, ledger: { findings, notices, delays, decisions }, obligations, status: 'planned' as const });
+      obligationOwner: { ...owner }, ispAssessments, recipientScopes,
+      operatorEvidencePrompt: owner.kind === 'operator' && notices.some(n => n.operatorEvidence) ? { audience: 'privacy-officer' as const,
+        physicianFacing: OPERATOR_OTHER_LAW_DEEMING['isp-incident-report'].physicianFacing as 'none',
+        text: OPERATOR_OTHER_LAW_DEEMING['isp-incident-report'].privacyOfficerPrompt } : null,
+      ledger: { findings, notices, noticeAttributions, delays, decisions }, obligations, status: 'planned' as const });
     incidentResponses.add(result);
     return result;
   });

@@ -11,6 +11,7 @@
  *
  * Each case observes both sides: the allowed decision, and for the refused one its error code, no plan/row/package/
  * release/state produced, no port read where none may happen, and inputs left unchanged. Assertions bind to the
+ * D-26 Q4 constant equality is an explicitly required legal-contract identity check, not an implementation pin.
  * module's public decisions and refusal codes (the contract), never to product strings, DOM or internal names. The A
  * contract is the real module (installed TypeScript, transpiled the way api/tsconfig.json compiles), composed once with
  * synthetic adapters. Synthetic data only: no database, network, stack or credentials. KIN_EMR_F_SRC lets the mutant
@@ -2923,7 +2924,8 @@ test('TEST-F-07 R9-I03 CE18 occurrence correction retires the unsent duty with e
   assert.deepEqual(next.ispAssessments[0].userNotice.effectiveOccurrenceEvidenceRefs, ['corrected-occurrence']);
   assert.deepEqual(next.ispAssessments[0].userNotice.occurrenceEvidenceRefs, ['corrected-occurrence', r8PostCutover.evidenceId].sort());
   assert.deepEqual({ first, corrected }, before);
-  assert.deepEqual(r8UserProjection(F.planIncidentResponse(auditor, scope, corrected, { findings: [facts], asOf: itime(6) })), r8UserProjection(next));
+  assert.deepEqual(r8UserProjection(F.planIncidentResponse(auditor, scope, corrected, { findings: [facts], asOf: itime(6) })), r8UserProjection(next),
+    'M-F-R9-005: occurrence correction retains the historical user duty');
 });
 
 test('TEST-F-07 R9-I03 CE12 effective occurrence correction resolves repeated negative decisions', async () => {
@@ -3007,4 +3009,361 @@ test('TEST-F-07 R9-I03 chained occurrence corrections replay independently of in
   const replay = F.planIncidentResponse(auditor, scope, facts, { previous: reopened, asOf: itime(9) });
   assert.equal(replay.ledger.findings.length, reopened.ledger.findings.length);
   assert.deepEqual(replay.ispAssessments[0].userNotice.effectiveOccurrenceEvidenceRefs, ['final-post']);
+});
+
+// D850 / D26-N1..N3, C12/C14/C18/C20/C22/C23 and R9-I04 -> REQ-EMR-15/19 -> RISK-F-07 -> TEST-F-07.
+const d26Fields = ['reporterEntity', 'capacity', 'recipientAuthority', 'incidentIdentity', 'coveredItems', 'performedAt', 'legalBasisRef'];
+function d26Attribution(patch = {}) {
+  return { attributionId: 'own-report', noticeId: r8OtherReport().noticeId, recordedAt: itime(4), kind: 'pipa-processor-report',
+    reporterEntity: 'service-operator', capacity: 'processor-own-duty', recipientAuthority: 'KISA',
+    incidentIdentity: { eventId: r8Operator().ispIncident.eventId, attackCaused: true, serviceRelationEvidenceId: 'same-attack-service-log' },
+    coveredItems: ispReport().coveredFields, performedAt: r8OtherReport().sentAt,
+    legalBasisRef: { basis: 'P26⑧→P34④+PD40', documentRef: 'accepted-pipa-document' }, ...patch };
+}
+const d26Scopes = [{ scopeRef: 'service-users', recipientIds: ['hospital-entity', 'staff-1'] },
+  { scopeRef: 'hospital-only', recipientIds: ['hospital-entity'] },
+  { scopeRef: 'mixed-subjects', recipientIds: ['hospital-entity', 'patient-non-user'] }];
+function d26Subject(patch = {}) { return { kind: 'confirmed-leak', triggeredAt: itime(1), sentAt: itime(3), noticeId: 'own-subject-notice',
+  recipientScopeRef: 'service-users', channel: 'affected-users', coveredFields: r7UserNotice().coveredFields, ...patch }; }
+function d26SubjectAttribution(patch = {}) { return d26Attribution({ attributionId: 'own-subject', noticeId: 'own-subject-notice',
+  kind: 'pipa-processor-subject-notice', recipientAuthority: ['hospital-entity', 'staff-1'], coveredItems: r7UserNotice().coveredFields,
+  performedAt: itime(3), legalBasisRef: { basis: 'P26⑧→P34①+PD39', documentRef: 'delivered-subject-document' }, ...patch }); }
+async function d26Plan(attributions, extra = {}) {
+  const { auditor, scope } = await incidentForResponse();
+  return F.planIncidentResponse(auditor, scope, r8Operator(), { asOf: itime(30), notices: [r8OtherReport({ recordedAt: itime(3) })],
+    noticeAttributions: attributions, recipientScopes: d26Scopes, ...extra });
+}
+
+test("TEST-F-07 R10 D26-N1 C21 Q4 conservative interpretation and no automatic deeming", async () => {
+  const c = F.OPERATOR_OTHER_LAW_DEEMING;
+  assert.ok(c.interpretationStatus.startsWith('적용 미확정·증거 전용'), 'D26 interpretation remains unresolved');
+  assert.equal(c.prediction, false, 'D26 no legislative prediction');
+  for (const k of ['isp-incident-report', 'isp-user-notice', 'isp-incident-report-supplement']) {
+    assert.deepEqual(c[k].deemableKinds, [], 'D26 no automatic deeming');
+    assert.ok(c[k].actualPerformanceKinds.length > 0);
+  }
+  assert.equal(c['isp-user-notice'].perRecipient, true);
+  assert.equal(c['isp-user-notice'].recipientMustBeOperatorServiceUser, true);
+  const p = await d26Plan([d26Attribution()]);
+  const e = p.ledger.notices[0].operatorEvidence;
+  assert.equal(e.attributionComplete, true, 'D26 complete attribution is recorded');
+  assert.deepEqual(e.classification, { 'isp-incident-report': 'evidence-only', 'isp-user-notice': 'never', 'isp-incident-report-supplement': 'never' });
+  assert.deepEqual([duty(p, 'isp-incident-report').status, duty(p, 'isp-incident-report').stillOwed, duty(p, 'isp-incident-report').dueAt,
+    duty(p, 'isp-incident-report').noticeRefs], ['overdue', true, itime(24), []], 'D26 complete attribution never closes the duty');
+});
+
+test("TEST-F-07 R10 D26-N3 missing reporterEntity is recorded on evidence", async () => {
+  const a = d26Attribution(); delete a.reporterEntity;
+  const p = await d26Plan([a]), e = p.ledger.notices[0].operatorEvidence;
+  assert.deepEqual(e.missingFields, ['reporterEntity'], 'D26 missing reporterEntity remains visible');
+  assert.equal(e.attributionComplete, false);
+  assert.equal(duty(p, 'isp-incident-report').stillOwed, true);
+});
+
+test("TEST-F-07 R10 D26-N3 missing capacity is recorded on evidence", async () => {
+  const a = d26Attribution(); delete a.capacity;
+  const p = await d26Plan([a]), e = p.ledger.notices[0].operatorEvidence;
+  assert.deepEqual(e.missingFields, ['capacity'], 'D26 missing capacity remains visible');
+  assert.equal(e.attributionComplete, false);
+  assert.equal(duty(p, 'isp-incident-report').stillOwed, true);
+});
+
+test("TEST-F-07 R10 D26-N3 missing recipientAuthority is recorded on evidence", async () => {
+  const a = d26Attribution(); delete a.recipientAuthority;
+  const p = await d26Plan([a]), e = p.ledger.notices[0].operatorEvidence;
+  assert.deepEqual(e.missingFields, ['recipientAuthority'], 'D26 missing recipientAuthority remains visible');
+  assert.equal(e.attributionComplete, false);
+  assert.equal(duty(p, 'isp-incident-report').stillOwed, true);
+});
+
+test("TEST-F-07 R10 D26-N3 missing incidentIdentity is recorded on evidence", async () => {
+  const a = d26Attribution(); delete a.incidentIdentity;
+  const p = await d26Plan([a]), e = p.ledger.notices[0].operatorEvidence;
+  assert.deepEqual(e.missingFields, ['incidentIdentity'], 'D26 missing incidentIdentity remains visible');
+  assert.equal(e.attributionComplete, false);
+  assert.equal(duty(p, 'isp-incident-report').stillOwed, true);
+});
+
+test("TEST-F-07 R10 D26-N3 missing coveredItems is recorded on evidence", async () => {
+  const a = d26Attribution(); delete a.coveredItems;
+  const p = await d26Plan([a]), e = p.ledger.notices[0].operatorEvidence;
+  assert.deepEqual(e.missingFields, ['coveredItems'], 'D26 missing coveredItems remains visible');
+  assert.equal(e.attributionComplete, false);
+  assert.equal(duty(p, 'isp-incident-report').stillOwed, true);
+});
+
+test("TEST-F-07 R10 D26-N3 missing performedAt is recorded on evidence", async () => {
+  const a = d26Attribution(); delete a.performedAt;
+  const p = await d26Plan([a]), e = p.ledger.notices[0].operatorEvidence;
+  assert.deepEqual(e.missingFields, ['performedAt'], 'D26 missing performedAt remains visible');
+  assert.equal(e.attributionComplete, false);
+  assert.equal(duty(p, 'isp-incident-report').stillOwed, true);
+});
+
+test("TEST-F-07 R10 D26-N3 missing legalBasisRef is recorded on evidence", async () => {
+  const a = d26Attribution(); delete a.legalBasisRef;
+  const p = await d26Plan([a]), e = p.ledger.notices[0].operatorEvidence;
+  assert.deepEqual(e.missingFields, ['legalBasisRef'], 'D26 missing legalBasisRef remains visible');
+  assert.equal(e.attributionComplete, false);
+  assert.equal(duty(p, 'isp-incident-report').stillOwed, true);
+});
+
+test("TEST-F-07 R10 D26-N3 C03 C10 attribution values require own capacity same attack content and basis", async () => {
+  for (const [field, value] of [['reporterEntity', 'hospital-entity'], ['capacity', 'hospital-agent'], ['recipientAuthority', 'MOHW'],
+    ['incidentIdentity', { eventId: 'another-attack', attackCaused: true, serviceRelationEvidenceId: 'receipt-alone' }],
+    ['coveredItems', ['contact-department']], ['legalBasisRef', { basis: 'P34④', documentRef: 'unattributed-document' }]]) {
+    const p = await d26Plan([d26Attribution({ [field]: value })]);
+    assert.ok(p.ledger.notices[0].operatorEvidence.invalidFields.includes(field), `D26 invalid ${field} is not attributed`);
+    assert.equal(p.ledger.notices[0].operatorEvidence.attributionComplete, false);
+  }
+  const p = await d26Plan([]);
+  assert.deepEqual(p.ledger.notices[0].operatorEvidence.missingFields, d26Fields);
+  assert.equal(p.ledger.notices[0].operatorEvidence.attributionComplete, false);
+});
+
+test("TEST-F-07 R10 D26-N3 C12 user legalBasisRef alternatives and service-user intersections", async () => {
+  for (const basis of ['P26⑧→P34①+PD39', 'P26⑧→P34②+PD39의2·39의3']) {
+    const p = await d26Plan([d26SubjectAttribution({ legalBasisRef: { basis, documentRef: 'subject-document' } })],
+      { notices: [d26Subject({ recordedAt: itime(3) })] });
+    const e = p.ledger.notices[0].operatorEvidence;
+    assert.equal(e.attributionComplete, true, 'D26 both user-notice legal paths are accepted');
+    assert.deepEqual(e.eligibleRecipientIds, ['hospital-entity', 'staff-1']);
+    assert.deepEqual([e.perRecipient, e.recipientMustBeOperatorServiceUser, duty(p, 'isp-user-notice').stillOwed], [true, true, true]);
+  }
+  const { auditor, scope } = await incidentForResponse();
+  const p = F.planIncidentResponse(auditor, scope, { ...r8Operator(), recipientScopeRef: 'mixed-subjects' }, { asOf: itime(30),
+    recipientScopes: d26Scopes, noticeAttributions: [d26SubjectAttribution({ recipientAuthority: ['hospital-entity', 'patient-non-user'] })],
+    notices: [d26Subject({ recipientScopeRef: 'mixed-subjects', recordedAt: itime(3) })] });
+  assert.deepEqual(p.ledger.notices[0].operatorEvidence.eligibleRecipientIds, ['hospital-entity'], 'D26 non-users never join the user intersection');
+  assert.equal(p.ledger.notices[0].operatorEvidence.attributionComplete, false);
+  const missing = d26SubjectAttribution(); delete missing.legalBasisRef;
+  const q = await d26Plan([missing], { notices: [d26Subject({ recordedAt: itime(3) })] });
+  assert.deepEqual(q.ledger.notices[0].operatorEvidence.missingFields, ['legalBasisRef']);
+});
+
+test("TEST-F-07 R10 D26 C20 attribution completion preserves all original times and immutable evidence history", async () => {
+  const { auditor, scope } = await incidentForResponse(), facts = { ...r8Operator(), recordedAt: itime(6) }, n = r8OtherReport({ recordedAt: itime(3) });
+  const incomplete = d26Attribution(); delete incomplete.legalBasisRef;
+  const first = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(30), notices: [n], noticeAttributions: [incomplete] });
+  const complete = d26Attribution({ attributionId: 'completed', supersedes: incomplete.attributionId, recordedAt: itime(40) });
+  const next = F.planIncidentResponse(auditor, scope, facts, { previous: first, asOf: itime(40), noticeAttributions: [complete] });
+  assert.equal(next.ledger.notices[0].operatorEvidence.attributionComplete, true);
+  assert.equal(next.ledger.notices[0].operatorEvidence.attributionHistory.length, 2, 'D26 attribution history is append-only');
+  assert.deepEqual([next.awarenessAt, next.ledger.notices[0].sentAt, next.ledger.notices[0].triggeredAt, next.ledger.notices[0].recordedAt],
+    [IA, n.sentAt, n.triggeredAt, n.recordedAt], 'D26 attribution completion preserves times');
+  assert.equal(first.ledger.notices[0].operatorEvidence.attributionComplete, false);
+  assert.deepEqual(next.ledger.findings, first.ledger.findings);
+  assert.equal(duty(next, 'isp-incident-report').stillOwed, true);
+  const bad = { ...complete, attributionId: 'bad-time', performedAt: itime(40) };
+  incidentRefused(() => F.planIncidentResponse(auditor, scope, facts, { previous: first, asOf: itime(40), noticeAttributions: [bad] }),
+    [first, bad], 'D26 attribution cannot rewrite performance time');
+  for (const patch of [{ supersedes: 'missing' }, { supersedes: 'completed' }, { recordedAt: itime(2) }, { noticeId: 'unknown' }]) {
+    const bad = { ...complete, ...patch };
+    incidentRefused(() => F.planIncidentResponse(auditor, scope, facts, { previous: first, asOf: itime(40), noticeAttributions: [bad] }), [first, bad], 'invalid attribution refuses atomically');
+  }
+  const batch = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(40), notices: [n], noticeAttributions: [complete, incomplete] });
+  assert.deepEqual(batch.ledger, next.ledger);
+});
+
+test("TEST-F-07 R10 D26 C12 C14 C18 partial direct user delivery retains other users and delay judgment", async () => {
+  const { auditor, scope } = await incidentForResponse(), facts = r8Operator();
+  const first = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(6), recipientScopes: d26Scopes });
+  let partial;
+  assert.doesNotThrow(() => { partial = F.planIncidentResponse(auditor, scope, facts, { previous: first, asOf: itime(30),
+    notices: [r7UserNotice({ recipientScopeRef: 'hospital-only', coversAll: false, sentAt: itime(26) })] }); }, 'D26 subset delivery binds to its users');
+  assert.equal(duty(partial, 'isp-user-notice').stillOwed, true, 'D26 partial notice never closes other users');
+  const o = duty(partial, 'isp-user-notice');
+  const decision = { decisionId: 'late-user-notice', obligationKey: o.obligationKey, at: itime(27), recordedAt: itime(27), by: id('officer'),
+    authorityEvidenceId: 'privacy-review', evidenceId: 'without-delay-review', reason: 'Unjustified delay verified', basis: 'network:48-3.4',
+    effect: 'timeliness-overdue', stillOwed: true };
+  const final = F.planIncidentResponse(auditor, scope, facts, { previous: partial, asOf: itime(32), decisions: [decision], notices: [
+    r7UserNotice({ noticeId: 'staff-informed', recipientScopeRef: 'recipient:staff-1', sentAt: itime(31), coversAll: false })] });
+  assert.deepEqual([duty(final, 'isp-user-notice').status, duty(final, 'isp-user-notice').timeliness, duty(final, 'isp-user-notice').dueAt],
+    ['met', 'overdue-determined', null], 'D26 late actual delivery keeps without-delay judgment');
+  assert.deepEqual(duty(final, 'isp-user-notice').noticeRefs, ['staff-informed', 'users-informed']);
+  assert.ok(duty(final, 'isp-user-notice').observations.some(x => x.status === 'pending'));
+});
+
+test("TEST-F-07 R10 D26 C22 C23 direct report receipt needs no duplicate PIPA attribution and prompt is officer only", async () => {
+  const { auditor, scope } = await incidentForResponse(), facts = r8Operator();
+  const first = await d26Plan([d26Attribution()]);
+  assert.deepEqual(first.operatorEvidencePrompt, { audience: 'privacy-officer', physicianFacing: 'none',
+    text: F.OPERATOR_OTHER_LAW_DEEMING['isp-incident-report'].privacyOfficerPrompt }, 'D26 prompt is privacy-officer only');
+  assert.ok(first.operatorEvidencePrompt.text.startsWith('직접 신고로 확정'));
+  const p = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(30), notices: [ispReport(26, { evidenceId: 'same-document-isp-receipt' })] });
+  assert.deepEqual([duty(p, 'isp-incident-report').status, duty(p, 'isp-incident-report').lateByMs], ['met', 2 * 3600000]);
+  assert.equal(p.ledger.notices[0].operatorEvidence, undefined);
+  const hospital = F.planIncidentResponse(auditor, scope, { ...facts, obligationOwner: { kind: 'hospital', id: scope.institutionId }, ispIncident: { ...facts.ispIncident, userImpact: userImpact() } },
+    { asOf: itime(30), notices: [r8OtherReport()] });
+  assert.equal(duty(hospital, 'isp-incident-report').status, 'met');
+  assert.equal(hospital.operatorEvidencePrompt, null);
+  assert.equal(hospital.ledger.notices[0].operatorEvidence, undefined);
+});
+
+test("TEST-F-07 R10 R9-I04 CE21 earlier-effective correction retains observed moot history", async () => {
+  const { auditor, scope } = await incidentForResponse(), facts = r6Finding(IA, { occurrence: r8PostCutover, userImpact: userImpact() });
+  const first = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(4) });
+  const revised = r9Correction(facts, r7PreCutover, 0.5);
+  const next = F.planIncidentResponse(auditor, scope, revised, { previous: first, asOf: itime(6) });
+  const o = duty(next, 'isp-user-notice');
+  assert.ok(o, 'R9-I04 CE21 observed duty never disappears');
+  assert.deepEqual([o.status, o.stillOwed, o.actionRequiredNow, o.closureGround], ['moot', false, false, 'occurrence-corrected']);
+  assert.equal(o.obligationKey, duty(first, 'isp-user-notice').obligationKey);
+  assert.equal(o.triggeredAt, itime(2));
+  assert.deepEqual(o.observations.map(x => x.status), ['pending', 'moot']);
+  assert.ok(o.corrections.length > 0);
+  assert.ok(o.replacedBy);
+  assert.ok(next.ledger.findings.length > first.ledger.findings.length);
+});
+
+test("TEST-F-07 R10 R9-I04 CE21b earlier-effective correction retains observed moot history", async () => {
+  const { auditor, scope } = await incidentForResponse(), facts = { ...r8Decided(true), ispIncident: { ...r8Decided(true).ispIncident, userNoticeDecision: r7NoticeDecision(true, 0.25, 'initial-yes') } };
+  const first = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(4) });
+  const revised = { ...facts, ispIncident: { ...facts.ispIncident, userNoticeDecision: r7NoticeDecision(false, 0.5, 'backdated-no') } };
+  const next = F.planIncidentResponse(auditor, scope, revised, { previous: first, asOf: itime(6) });
+  const o = duty(next, 'isp-user-notice');
+  assert.ok(o, 'R9-I04 CE21b observed duty never disappears');
+  assert.deepEqual([o.status, o.stillOwed, o.actionRequiredNow, o.closureGround], ['moot', false, false, 'applicability-redecided']);
+  assert.equal(o.obligationKey, duty(first, 'isp-user-notice').obligationKey);
+  assert.equal(o.triggeredAt, itime(2));
+  assert.deepEqual(o.observations.map(x => x.status), ['pending', 'moot']);
+  assert.ok(o.corrections.length > 0);
+  assert.ok(o.replacedBy);
+  assert.ok(next.ledger.findings.length > first.ledger.findings.length);
+});
+
+test("TEST-F-07 R10 D26-N2 PD40 principal trigger and separately verified exemption never exempt ISP", async () => {
+  const { auditor, scope } = await incidentForResponse();
+  const facts = { ...r6Finding(), status: 'confirmed', determinationAt: itime(1), healthDataActualLeak: true, reportTriggers: [] };
+  const first = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(2) });
+  const report = first.obligations.find(o => o.family === 'report');
+  assert.ok(report, 'D26 known health leak triggers the principal PD40 criterion');
+  const decision = { decisionId: 'verified-pipa-exception', obligationKey: report.obligationKey, at: itime(2), recordedAt: itime(2),
+    by: id('privacy-officer'), authorityEvidenceId: 'appointment', evidenceId: 'retrieval-deletion-risk-review',
+    reason: 'Verified substantially reduced risk following recovery and deletion', basis: 'privacy-decree:40.1:last-sentence',
+    effect: 'report-exemption', category: 'risk-substantially-reduced', stillOwed: false, decider: verifiedDecider() };
+  const unverified = F.planIncidentResponse(auditor, scope, facts, { previous: first, asOf: itime(80),
+    decisions: [{ ...decision, decider: verifiedDecider({ status: 'designationUnverified' }) }] });
+  assert.equal(unverified.obligations.find(o => o.family === 'report').stillOwed, true, 'D26 unverified exception never auto-releases');
+  const accepted = F.planIncidentResponse(auditor, scope, facts, { previous: first, asOf: itime(80), decisions: [decision] });
+  assert.equal(accepted.obligations.find(o => o.family === 'report').status, 'exempt');
+  assert.deepEqual([duty(accepted, 'isp-incident-report').status, duty(accepted, 'isp-incident-report').stillOwed], ['overdue', true],
+    'D26 PIPA exemption never closes ISP reporting or declares missed');
+  const wrong = { ...decision, obligationKey: duty(first, 'isp-incident-report').obligationKey };
+  incidentRefused(() => F.planIncidentResponse(auditor, scope, facts, { previous: first, asOf: itime(80), decisions: [wrong] }), [first, wrong], 'PIPA exception cannot bind to ISP');
+  assert.equal(accepted.ledger.delays.length, 0);
+  assert.equal(duty(accepted, 'isp-incident-report').dueAt, itime(24));
+});
+
+test("TEST-F-07 R10 D26 C13 C19 never kinds and supplements cannot be satisfied by attributed other-law evidence", async () => {
+  const { auditor, scope } = await incidentForResponse(), facts = r8Operator();
+  for (const kind of ['pipa-controller-report', 'pipa-processor-report', 'unattributed-other-law-report']) {
+    const p = await d26Plan([d26Attribution({ kind })], { notices: [r8OtherReport({ recordedAt: itime(3) }), ispReport()] });
+    assert.equal(p.ledger.notices.find(n => n.noticeId === r8OtherReport().noticeId).operatorEvidence.classification['isp-incident-report-supplement'],
+      'never', 'D26 supplement never deems other-law evidence');
+    assert.equal(duty(p, 'isp-incident-report-supplement').stillOwed, true);
+    if (kind === 'pipa-controller-report') assert.equal(p.ledger.notices.find(n => n.noticeId === r8OtherReport().noticeId).operatorEvidence.classification['isp-incident-report'], 'never');
+  }
+  for (const kind of ['pipa-controller-subject-notice', 'contract-notice-to-hospital']) {
+    const p = await d26Plan([d26SubjectAttribution({ kind })], { notices: [d26Subject({ recordedAt: itime(3) })] });
+    const e = p.ledger.notices[0].operatorEvidence;
+    assert.equal(e.classification['isp-user-notice'], kind === 'contract-notice-to-hospital' ? 'evidence-only' : 'never');
+    assert.equal(duty(p, 'isp-user-notice').stillOwed, true);
+  }
+  const contract = d26Subject({ noticeId: 'contract-title', evidenceId: 'one-delivered-document', recordedAt: itime(3) });
+  const q = F.planIncidentResponse(auditor, scope, facts, { asOf: itime(30), notices: [contract,
+    r7UserNotice({ noticeId: 'verified-direct-performance', evidenceId: contract.evidenceId })] });
+  assert.equal(duty(q, 'isp-user-notice').status, 'met');
+  assert.deepEqual(duty(q, 'isp-user-notice').noticeRefs, ['verified-direct-performance']);
+});
+
+test('TEST-F-07 R10 D26 C13 attribution cannot relabel a performed act or its authority', async () => {
+  const { auditor, scope } = await incidentForResponse(), facts = r8Operator();
+  const n = r8OtherReport({ recordedAt: itime(3) }), a = d26Attribution({ kind: 'pipa-processor-subject-notice' });
+  incidentRefused(() => F.planIncidentResponse(auditor, scope, facts, { asOf: itime(30), notices: [n], noticeAttributions: [a] }),
+    [facts, n, a], 'D26 report evidence cannot become subject-notice evidence');
+  const p = await d26Plan([d26Attribution({ recipientAuthority: 'PIPC' })]);
+  assert.deepEqual(p.ledger.notices[0].operatorEvidence.invalidFields, ['recipientAuthority'], 'D26 recipient authority matches actual receipt');
+});
+
+// D73 exception: exact legal-contract identity explicitly required by D850; copied from D-26 v2 Q4.constant.
+test('TEST-F-07 R10 D26 Q4 exact reviewed v2 constant', () => {
+  assert.deepEqual({ OPERATOR_OTHER_LAW_DEEMING: F.OPERATOR_OTHER_LAW_DEEMING }, {
+  "OPERATOR_OTHER_LAW_DEEMING": {
+    "interpretationStatus": "적용 미확정·증거 전용 (statutory deeming possibility ≠ product auto-closure; not a permanent denial — separate candidate if an official interpretation or reviewed basis is bound)",
+    "prediction": false,
+    "isp-incident-report": {
+      "deemableKinds": [],
+      "actualPerformanceKinds": [
+        "isp-report-receipt (KISA/과기정통부 incident-report receipt; includes the same document received as an ISP report)"
+      ],
+      "evidenceOnlyKinds": [
+        "pipa-processor-report",
+        "unattributed-other-law-report"
+      ],
+      "neverKinds": [
+        "mohw-notice",
+        "pipa-controller-report",
+        "pipa-controller-subject-notice",
+        "contract-notice-to-hospital",
+        "pipa-processor-subject-notice"
+      ],
+      "attribution": [
+        "reporterEntity=operator legal entity (own name/capacity; staff or lawful agent submission ok; hospital-name filing never)",
+        "capacity=processor-own-duty (P26⑧→P34)",
+        "recipientAuthority in {PIPC, KISA}",
+        "incidentIdentity=same attack incident (service–incident relation, not ownership; receipt alone insufficient)",
+        "coveredItems ⊇ ND58의8① 1~3",
+        "performedAt=actual receipt evidence",
+        "legalBasisRef=P26⑧→P34④+PD40 + document ref"
+      ],
+      "attributionComplete": "recorded true/false; never closes the duty",
+      "timeliness": "met-timely / met-late only for actualPerformanceKinds against operatorKnownAt + 24h; PIPA 72h never extends; late performance never erases prior delay",
+      "privacyOfficerPrompt": "직접 신고로 확정(실제 이행으로 확인 가능); 동일 서류가 ISP 신고로 접수된 증거가 있으면 중복 서류 불요",
+      "physicianFacing": "none"
+    },
+    "isp-user-notice": {
+      "deemableKinds": [],
+      "actualPerformanceKinds": [
+        "operator-user-notice (ND58의9② items + ④ method + delivered + recipient scope = actual service users + without delay; per recipient)"
+      ],
+      "evidenceOnlyKinds": [
+        "pipa-processor-subject-notice (record recipient∩operator-service-users)",
+        "contract-notice-to-hospital (items/method not met)"
+      ],
+      "neverKinds": [
+        "mohw-notice",
+        "pipa-controller-report",
+        "pipa-controller-subject-notice",
+        "pipa-processor-report"
+      ],
+      "perRecipient": true,
+      "recipientMustBeOperatorServiceUser": true,
+      "attribution": [
+        "notifierEntity=operator legal entity",
+        "capacity=processor-own-duty (P26⑧)",
+        "recipients in operator-service-users (patients only with a verified usage relation; hospital entity, staff individuals and patients never merged)",
+        "incidentIdentity=same attack incident",
+        "coveredItems ⊇ ND58의9② 1~5",
+        "performedAt=actual delivery evidence (no read-receipt requirement)",
+        "legalBasisRef in {P26⑧→P34①+PD39, P26⑧→P34②+PD39의2·39의3} + document ref"
+      ],
+      "independentPaths": [
+        "ND58의9③ priority/additional notice",
+        "ND58의9⑤ posting with 정당한 사유, ≥30 days"
+      ],
+      "partialNotice": "never closes the duty for other users"
+    },
+    "isp-incident-report-supplement": {
+      "deemableKinds": [],
+      "actualPerformanceKinds": [
+        "isp-supplement-receipt"
+      ],
+      "note": "D-25 v4 N2 — actual supplementary report only; per confirmed fact +24h"
+    },
+    "pipaReportTrigger": "health-data 유출등 known → PD40①2호 principal criterion; PD40① 단서 (신고 생략) and 전단 delay grounds verified separately with evidence; unverified exceptions never auto-exempt; an accepted PIPA exemption is never ISP deeming or exemption evidence",
+    "hospitalPlanRules": "unchanged (D-25); never cross-applied to the operator plan",
+    "reevaluation": "completing attribution re-classifies evidence only; original known/incident/performed times are never overwritten by the completion time"
+  }
+}, 'D26 Q4 exact legal contract');
 });
