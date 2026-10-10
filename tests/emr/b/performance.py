@@ -101,8 +101,14 @@ def main():
                 # Each sample starts a fresh process. Keep its immutable source
                 # and existing compiler on Linux too: repeated compiler/module
                 # loads through a Windows bind mount are not receipt latency.
+                # The image runs as the unprivileged `node` user while the
+                # /evidence bind mount is a directory the host runner created
+                # (owner runner, mode 755 on Linux CI): without this the first
+                # receipt append fails with EACCES. Docker Desktop on Windows
+                # never showed it because its bind mounts are world-writable.
                 subprocess.run(["docker", "exec", "--user", "0", container, "node", "-e",
-                    "for (const p of ['/harness/tests/emr','/candidate','/baseline','/deps']) require('node:fs').mkdirSync(p,{recursive:true})"],
+                    "for (const p of ['/harness/tests/emr','/candidate','/baseline','/deps']) require('node:fs').mkdirSync(p,{recursive:true});"
+                    "require('node:fs').chmodSync('/evidence', 0o1777)"],
                     check=True, capture_output=True, timeout=60)
                 for source, destination in ((ROOT / 'tests/emr/b', '/harness/tests/emr/b'),
                         (str(candidate) + '/.', '/candidate'), (str(baseline) + '/.', '/baseline'),
