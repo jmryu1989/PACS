@@ -478,7 +478,7 @@
     "session_matrix": 8,
     "candidate": 115,
     "candidate_rows": 13,
-    "migrations": 44,
+    "migrations": 45,
     "public_tables": 51,
     "emr_tables": 10,
     "fixture_public_rows": 90,
