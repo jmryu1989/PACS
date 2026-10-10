@@ -31,10 +31,12 @@ copy, e.g. a mutant); it is split along tests/main_move_spec.json, re-derived fo
 describes another page (KIN_PRE_SPEC overrides). KIN_PRE_TRACE_DIR receives the reference traces as JSON.
 """
 import datetime
+from collections import Counter
 import hashlib
 import json
 import os
 import re
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -219,6 +221,7 @@ class PreSite(h.Site):
         self.dictation = dictation
         self.held_dictations, self.dictations = [], []
         self.hold_all, self.waiting, self.ledger = False, [], []
+        self.request_rows = {}
         self.hold_writes, self.held_writes = set(), []                # "template-post", "filter-delete"
         self.prefs_answers = []                                       # (status, body) | "not-a-list", in order
         self.template_posts, self.filter_deletes, self.serial_template = [], [], 0
@@ -233,8 +236,11 @@ class PreSite(h.Site):
         if not self.page_file(url.path):
             identity = (request.method, url.path, canonical_query(url.query))
             occurrence = 1 + sum(request_key(r)[:3] == identity for r in self.ledger)
-            self.ledger.append({"n": len(self.ledger) + 1, "method": request.method, "path": url.path,
-                                "query": url.query, "occurrence": occurrence, "held": self.hold_all})
+            row = {"n": len(self.ledger) + 1, "method": request.method, "path": url.path,
+                   "query": url.query, "occurrence": occurrence, "held": self.hold_all,
+                   "key": (*identity, occurrence)}
+            self.ledger.append(row)
+            self.request_rows[request] = row
             if self.hold_all:
                 return self.waiting.append((route, request))
         return super().handle(route, request)
@@ -242,9 +248,7 @@ class PreSite(h.Site):
     def release(self, index=0):
         route, request = self.waiting.pop(index)
         if hasattr(self, "steps"):
-            record = next(r for r in self.ledger if r["method"] == request.method
-                          and r["path"] == urlparse(request.url).path and r["query"] == urlparse(request.url).query
-                          and "released_at" not in r)
+            record = self.request_rows[request]
             record["released_at"] = self.steps.virtual
         return h.Site.handle(self, route, request)
 
@@ -322,6 +326,8 @@ class PreSite(h.Site):
 
     def static(self, route, path):
         name = path[len(h.BASE):] if path.startswith(h.BASE) else None
+        if name and getattr(self, "historical_file", None):
+            return route.fulfill(status=200, content_type=h.TYPES[Path(name).suffix], body=self.historical_file(name))
         if name and self.assets and (self.assets / name).is_file():
             return route.fulfill(status=200, content_type=h.TYPES[Path(name).suffix], body=(self.assets / name).read_bytes())
         # The dictation's AudioWorklet module: a file of the page directory the logout suite's table does not list.
@@ -371,12 +377,15 @@ class Run:
                  deterministic=False, rows=None, dialogs=(), cookies=()):
         self.case, (directory, self.manifest) = case, layout
         # The ORIGINAL page also gets the baseline's own versions of the page's other scripts.
-        self.original = Path(directory).is_relative_to(Pages.original.root)
+        self.source_side = self.manifest.get("side", "current")
+        self.original = self.source_side == "original"
         assets = Path(ASSETS) if ASSETS and not self.original else None
-        others = Pages.baseline_file if self.original else (
+        others = (lambda name: Pages.blob_file(self.source_side, name)) if self.source_side != "current" else (
             (lambda name: (assets / name).read_bytes() if (assets / name).is_file() else (sh.PRODUCT_DIR / name).read_bytes())
             if assets else None)
         self.site = PreSite(filters, dictation=dictation, templates=templates, rows=rows, assets=assets)
+        if self.source_side != "current":
+            self.site.historical_file = lambda name: Pages.blob_file(self.source_side, name)
         self.site.second_study = second_study
         if auth != "answer":
             self.site.held_me = []
@@ -541,6 +550,8 @@ class Steps:
         self.run, self.virtual = run, 0
         self.phases = []
         self.hold_events = []
+        self.host_clock = time.monotonic
+        self.deadline_hook = None
         run.site.steps = self
 
     def ledger(self):
@@ -553,17 +564,17 @@ class Steps:
         return waiting, flying
 
     def is_held(self, request, holds):
-        url = urlparse(request.url)
-        records = [r for r in self.run.site.ledger if r["method"] == request.method and r["path"] == url.path
-                   and r["query"] == url.query and "released_at" not in r]
-        return bool(records) and held_key(request_key(records[0]), holds)
+        record = self.run.site.request_rows[request]
+        return held_key(record["key"], holds)
 
     def drive(self, condition, what, limit_ms, holds=(), release=None, delivery_only=False):
         """`holds`: exact request keys that stay waiting (the case answers them later); `release(state)`: the schedule's
         own point to let a held body go (returns True when it released one)."""
-        run, start, deadline = self.run, self.virtual, time.monotonic() + self.HOST_S
+        run, start, deadline = self.run, self.virtual, self.host_clock() + self.HOST_S
+        if self.deadline_hook:
+            self.deadline_hook(self, what, deadline)
         while True:
-            if time.monotonic() > deadline:
+            if self.host_clock() > deadline:
                 raise AssertionError(f"PHASE {what}: not reached within {self.HOST_S:.0f} s of host time "
                                      f"(virtual {self.virtual - start} ms)")
             run.delivery.pump()
@@ -642,17 +653,17 @@ class Steps:
         self.run.page.mouse.up()
         self.native_frames()
 
-    def raw(self, phase):
+    def raw(self, phase, status="completed"):
         """Everything of the run at the end of a phase, kept before anything is compared."""
         run = self.run
-        return {"phase": phase, "virtual_ms": self.virtual, "trace": run.trace(), "ledger": self.ledger(),
+        return {"phase": phase, "status": status, "virtual_ms": self.virtual, "trace": run.trace(), "ledger": self.ledger(),
                 "site": [dict(item) for item in run.site.ledger], "screen": run.observe(), "errors": list(run.errors),
                 "dialogs": list(run.dialogs), "phases": list(self.phases), "holds": list(self.hold_events),
                 "inbox_badge": run.page.evaluate("document.getElementById('cvr-inbox-badge')?.innerText || null"),
-                "source": {"page": str(PAGE), "sha256": hashlib.sha256(
-                    Pages.baseline_file("main.html") if run.original else PAGE.read_bytes()).hexdigest(),
+                "source": {"page": run.manifest["source"], "sha256": hashlib.sha256(run.delivery.body("main.html")).hexdigest(),
                     "layout": run.manifest.get("count"), "original": run.original,
-                    "manifest": run.manifest, "frozen": Pages.frozen["original" if run.original else "current"]},
+                    "side": run.source_side, "kind": run.manifest["kind"], "inputs": run.delivery.expected,
+                    "delivered": list(run.delivery.bodies), "manifest": run.manifest, "frozen": Pages.frozen[run.source_side]},
                 "schedule": getattr(self, "schedule", None), "fixture": {"filters": run.site.filters}}
 
 
@@ -663,7 +674,7 @@ class Result:
 
 class Pages:
     """The ORIGINAL page (f1d5406 blobs) and the page under test, as scratch layouts."""
-    current = original = derived = None
+    current = original = approved = previous = derived = None
     blobs, frozen = {}, {}
 
     @classmethod
@@ -672,6 +683,23 @@ class Pages:
         if name not in cls.blobs:
             cls.blobs[name] = original_blob(Path(ORIGINAL_SPEC["page"]).parent.as_posix() + "/" + name)
         return cls.blobs[name]
+
+    @classmethod
+    def blob_file(cls, which, name):
+        if which == "original":
+            return cls.baseline_file(name)
+        sha = cls.commits[which]
+        key = (sha, name)
+        if key not in cls.blobs:
+            cls.blobs[key] = subprocess.check_output(["git", "cat-file", "--filters",
+                f"{sha}:worklist-v0/hpacs-lite/{name}"], cwd=ROOT)
+        return cls.blobs[key]
+
+    @classmethod
+    def layout(cls, which, count=0):
+        directory, manifest = getattr(cls, which).layout(count)
+        manifest["side"] = which
+        return directory, manifest
 
     @classmethod
     def open(cls):
@@ -692,18 +720,33 @@ class Pages:
             cls.original = sh.ScratchPages(page=source, spec=original_spec, root=cls.current.root / "original")
             # AST provenance shared by both pages: each statement's f1d5406 statement.
             cls.frozen = {"original": sh.frozen_indexes(source), "current": sh.frozen_indexes(PAGE)}
+            cls.commits = {"approved": json.loads(MOVE_SPEC.read_text(encoding="utf-8"))["base"],
+                           "previous": os.environ.get("KIN_SPLIT_PARENT", subprocess.check_output(
+                               ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip())}
+            for which in ("approved", "previous"):
+                source = cls.current.root / (which + "-source") / "main.html"
+                source.parent.mkdir(parents=True)
+                source.write_bytes(cls.blob_file(which, "main.html"))
+                # Previous parts may already be external: materialize their own Git blobs, never today's files.
+                for module in json.loads(MOVE_SPEC.read_text(encoding="utf-8"))["modules"]:
+                    if f'src="{module["file"]}"' in source.read_text(encoding="utf-8"):
+                        (source.parent / module["file"]).write_bytes(cls.blob_file(which, module["file"]))
+                setattr(cls, which, sh.ScratchPages(page=source, spec=MOVE_SPEC, root=cls.current.root / which))
+                cls.frozen[which] = sh.frozen_indexes(source)
+            # Existing callers of ScratchPages.layout also carry their source side.
+            for which in ("original", "current", "approved", "previous"):
+                getattr(cls, which).side = which
 
     @classmethod
     def provenance(cls, which, count=0):
         """Frames of that page's `count`-part layout, mapped to what both pages share (sh.Provenance)."""
-        pages = cls.original if which == "original" else cls.current
-        return sh.Provenance(pages.layout(count)[1], cls.frozen[which])
+        return sh.Provenance(cls.layout(which, count)[1], cls.frozen[which])
 
     @classmethod
     def close(cls):
         if cls.current is not None:
             cls.current.close()
-            cls.current = cls.original = None
+            cls.current = cls.original = cls.approved = cls.previous = None
 
 
 def setUpModule():
@@ -868,7 +911,7 @@ class PreCase(unittest.TestCase):
             self.assertEqual(like[nearest]["dialogs"], seen["dialogs"], f"{hazard}: dialogs")
 
     # ── whole-page registration and dispatch, ORIGINAL and page under test through the same schedule ──
-    def through(self, layout, outcome, after=None, schedule="default", keep=None):
+    def through(self, layout, outcome, after=None, schedule="default", keep=None, delay_ms=0):
         """A deterministic run (Steps) through the session check and `outcome`, phase by phase:
           P0  every script ran, the first session check waits (unanswered);
           P1  it fails - 503 and the page's own three retries - and one usable Retry button is offered;
@@ -877,7 +920,7 @@ class PreCase(unittest.TestCase):
               watch and its received-view read;
         each phase's raw state is handed to `keep(phase, raw)` as soon as it exists (a failed phase hands over what it
         has). `after(run)` adds P4 and returns data. The Run is closed before this returns."""
-        run = Run(self, layout, deterministic=True, filters=(SAVED,), local_filters=True)
+        run = Run(self, layout, deterministic=True, filters=(SAVED,), local_filters=True, delay_ms=delay_ms)
         steps, raws = run.steps, {}
         steps.schedule = schedule
         hold = SCHEDULES[schedule]
@@ -887,7 +930,7 @@ class PreCase(unittest.TestCase):
             try:
                 steps.drive(condition, name, limit_ms, holds=holds, release=release, delivery_only=delivery_only)
             except AssertionError:
-                keep(name + "-partial", steps.raw(name + " (failed)"))
+                keep(name + "-partial", steps.raw(name, status="failed"))
                 raise
             left = steps.settled(holds)
             raws[name] = steps.raw(name)
@@ -982,13 +1025,18 @@ class PreCase(unittest.TestCase):
         self.assertEqual(sorted(original), sorted(candidate), f"{what}: the phases both runs reached")
         for name in original:
             a, b = original[name]["trace"], candidate[name]["trace"]
+            def provenance(raw, default):
+                source = raw.get("source")
+                return sh.Provenance(source["manifest"], source["frozen"]) if source else Pages.provenance(default)
+            original_provenance = provenance(original[name], "original")
+            candidate_provenance = provenance(candidate[name], "current")
             comparison = {"phase": name}
             try:
-                orders = (sh.full_order(a, Pages.provenance("original")), sh.full_order(b, Pages.provenance("current")))
+                orders = (sh.full_order(a, original_provenance), sh.full_order(b, candidate_provenance))
                 comparison.update(registrations=[len(o) for o in orders], difference=sh.order_difference(*orders))
                 if dispatches:
-                    sent = (sh.dispatch_order(a, Pages.provenance("original")),
-                            sh.dispatch_order(b, Pages.provenance("current")))
+                    sent = (sh.dispatch_order(a, original_provenance),
+                            sh.dispatch_order(b, candidate_provenance))
                     comparison.update(dispatches=[len(o) for o in sent], dispatch_difference=sh.order_difference(*sent))
                 comparison["requests"] = [[(r["method"], r["path"], r["query"]) for r in side[name]["site"]]
                                           for side in (original, candidate)]
@@ -1014,7 +1062,8 @@ INBOX = "/api/critical-results"
 
 
 def canonical_query(query):
-    return tuple(sorted(parse_qsl(query.lstrip("?"), keep_blank_values=True)))
+    return tuple(sorted(parse_qsl(query.lstrip("?"), keep_blank_values=True),
+                        key=lambda pair: tuple(s.encode("utf-16-be", errors="surrogatepass") for s in pair)))
 
 
 def request_key(record):
@@ -1068,37 +1117,55 @@ class Registration(PreCase):
     OUTCOMES = ("answered", "failed", "failed then retried", "failed, retried and failed again, then retried")
     RETRIED = ("failed then retried", "failed, retried and failed again, then retried")
 
-    def both(self, case, outcome, after=None, schedule="default"):
-        base, keeper = self.kept(f"{case}-{outcome}", schedule, "unsplit")
-        reached = {"original": set(), "candidate": set()}
+    def both(self, case, outcome, after=None, schedule="default", reference="original", count="actual", delay_ms=0):
+        base, keeper = self.kept(f"{case}-{outcome}", schedule, f"{reference}-{count}-{delay_ms}ms")
+        layouts = {"original": Pages.layout(reference, 0), "candidate": Pages.layout("current", count)}
+        reached = {"original": {}, "candidate": {}}
+        status = {"original": "not_started", "candidate": "not_started"}
 
         def save(side):
             def receive(phase, raw):
                 keeper(side)(phase, raw)
-                reached[side].add(phase)
+                canonical = raw["phase"]
+                reached[side][canonical] = raw["status"]
+                if phase != canonical:
+                    keeper(side)(canonical, raw)
+                sh.keep(base, "phase-status.json", {"sides": status, "phases": reached})
             return receive
 
         def once(side, layout):
+            status[side] = "running"
+            sh.keep(base, "phase-status.json", {"sides": status, "phases": reached})
             def following(run):
                 try:
                     return after(run) if after else None
                 finally:
                     if after:
                         save(side)("after", run.steps.raw("after"))
-            return self.through(layout, outcome, following if after else None, schedule, keep=save(side))
+            result = self.through(layout, outcome, following if after else None, schedule, keep=save(side),
+                                  delay_ms=delay_ms if side == "candidate" else 0)
+            status[side] = "completed"
+            return result
 
         try:
-            original = once("original", Pages.original.layout(0))
-            candidate = once("candidate", Pages.current.layout(0))
+            original = once("original", layouts["original"])
+            candidate = once("candidate", layouts["candidate"])
         except BaseException as failure:
             # A partial phase is not a successful empty trace. Explain every missing peer at the point of failure.
-            for phase in reached["original"] | reached["candidate"]:
+            for side in status:
+                if status[side] == "running":
+                    status[side] = "failed"
+            for phase in set(reached["original"]) | set(reached["candidate"]):
                 for side in ("original", "candidate"):
                     if phase not in reached[side]:
-                        keeper(side)(phase, {"status": "not_run", "reason": f"{type(failure).__name__}: {failure}",
+                        manifest = layouts[side][1]
+                        keeper(side)(phase, {"status": "not_started", "reason": f"{type(failure).__name__}: {failure}",
                                              "phase": phase, "side": side, "schedule": schedule,
-                                             "source_sha256": hashlib.sha256(PAGE.read_bytes()).hexdigest()})
+                                             "source_sha256": manifest["inputs"][manifest["page"]]["sha256"],
+                                             "source": {"manifest": manifest, "side": manifest["side"]}})
             raise
+        finally:
+            sh.keep(base, "phase-status.json", {"sides": status, "phases": reached})
         return base, original, candidate
 
     def test_registrations_match_the_original_page_before_and_after_each_session_outcome(self):
@@ -1207,6 +1274,156 @@ class Registration(PreCase):
 # ── the trace itself: what the registration comparisons rely on (Astra fix-2 design §1, F2-I01..I03) ──
 # A probe page served by the case, its script in a file of its own (`probe.js`) so frames are real script frames.
 PROBE_PAGE = "<!doctype html><title>SYN trace</title><body><div id=static-a></div><script src=/probe.js></script>"
+
+
+class ActualLayout(PreCase):
+    both = Registration.both
+
+    def test_approved_pre_and_actual_layout_keep_registration_dispatch_and_schedule(self):
+        for delay in (0, 150):
+            for outcome in Registration.OUTCOMES:
+                schedules = SCHEDULES if outcome == Registration.OUTCOMES[-1] else ("default",)
+                for schedule in schedules:
+                    with self.subTest(delay=delay, outcome=outcome, schedule=schedule):
+                        base, (before, _, before_errors), (after, _, errors) = self.both(
+                            "actual-C3", outcome, schedule=schedule, reference="approved", delay_ms=delay)
+                        self.assertEqual([], before_errors)
+                        self.assertEqual([], errors)
+                        self.compare_phases(base, before, after, "approved PRE to actual", dispatches=True)
+                        for name in before:
+                            self.assertEqual(before[name]["screen"], after[name]["screen"], "same visible result and storage effects")
+
+    def test_previous_parent_and_actual_layout(self):
+        base, (before, _, before_errors), (after, _, errors) = self.both(
+            "incremental-C3", "answered", reference="previous")
+        self.assertEqual([], before_errors)
+        self.assertEqual([], errors)
+        self.compare_phases(base, before, after, "previous parent to actual", dispatches=True)
+
+    def test_actual_held_input_and_leaving_boundaries(self):
+        layout = Pages.current.layout("actual")
+        for hazard, module in (("B1-03", "report-templates-ui.js"), ("B1-05", "worklist-columns-view.js"),
+                               ("B1-05-TAB", "worklist-columns-view.js"), ("B1-05", "related-studies.js")):
+            if module in layout[1]["parts"]:
+                for delay in (0, 150):
+                    with self.subTest(hazard=hazard, hold=module, delay=delay):
+                        self.assert_like_original(hazard, self.early(hazard, layout, hold=module, delay_ms=delay))
+        for module in ("worklist-view.js", "related-studies.js", "clinical-context-panel.js", "saved-filters.js"):
+            if module in layout[1]["parts"]:
+                with self.subTest(leaving=module):
+                    self.assertEqual([], self.leaving(layout, hold=module), "actual held boundary leaves without error")
+
+    def test_delivered_asset_hash_is_bound_to_the_actual_body(self):
+        layout = Pages.current.layout("actual")
+        name = layout[1]["parts"][0] if layout[1]["parts"] else layout[1]["scripts"][-1]
+        run = Run(self, layout, hold=name)
+        try:
+            run.blocked()
+            body = run.delivery.body
+            run.delivery.body = lambda requested: body(requested) + (b' ' if requested == name else b'')
+            with self.assertRaisesRegex(AssertionError, "delivered asset hash differs"):
+                run.delivery.release()
+        finally:
+            run.close()
+
+    def test_C6_html_ids_have_no_new_duplicates(self):
+        context = self.browser.new_context()
+        try:
+            page = context.new_page()
+            def duplicate_ids(html):
+                return page.evaluate("""html => {
+                  const doc = new DOMParser().parseFromString(html, 'text/html'), counts = {};
+                  for (const element of doc.querySelectorAll('[id]')) counts[element.id] = (counts[element.id] || 0) + 1;
+                  return Object.entries(counts).filter(([, n]) => n > 1);
+                }""", html)
+            self.assertEqual(duplicate_ids(Pages.blob_file("approved", "main.html").decode("utf-8")),
+                             duplicate_ids(PAGE.read_text(encoding="utf-8")), "C6 HTML duplicate ids")
+        finally:
+            context.close()
+
+
+class LoadBudget(PreCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.pw = sync_playwright().start()
+        cls.browser = cls.pw.chromium.launch(channel="chromium", headless=True)
+
+    def sample(self, layout, context):
+        context.unroute_all(behavior="wait")
+        site = PreSite()
+        site.held_me = []
+        context.route("**/*", lambda route, request: site.handle(route, request))
+        side = layout[1].get("side", "current")
+        if side != "current":
+            site.historical_file = lambda name: Pages.blob_file(side, name)
+        others = (lambda name: Pages.blob_file(side, name)) if side != "current" else None
+        delivery = sh.Delivery(*layout, h.BASE, others=others).install(context)
+        page = context.new_page()
+        page.clock.set_fixed_time(CLOCK_START)
+        errors, console_errors, auth = [], [], []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.on("console", lambda message: console_errors.append(message.text) if message.type == "error" else None)
+        page.on("request", lambda request: auth.append(time.perf_counter()) if urlparse(request.url).path == "/api/me" else None)
+        started = time.perf_counter()
+        try:
+            page.goto(h.MAIN_URL, wait_until="commit")
+            delivery.wait(page, lambda: bool(site.held_me), "uninstrumented first auth")
+            answered = time.perf_counter()
+            for route in site.held_me:
+                site.answer(route, *site.me(site.account))
+            site.held_me = None
+            delivery.wait(page, lambda: h.PATIENT in page.locator("#rows").inner_text(), "uninstrumented usable list")
+            page.locator("#quick").fill(h.PATIENT)
+            delivery.wait(page, lambda: page.locator('#rows tr[data-uid]').count() > 0, "usable search")
+            usable = time.perf_counter()
+            self.assertEqual([], errors, "load budget page errors")
+            entries = page.evaluate("performance.getEntriesByType('resource').map(e => ({name:e.name, transferSize:e.transferSize, encodedBodySize:e.encodedBodySize, duration:e.duration}))")
+            return {"navigation_to_auth_ms": (auth[0] - started) * 1000,
+                    "auth_to_usable_ms": (usable - answered) * 1000, "resources": entries,
+                    "script_requests": [name for _, name in delivery.requests],
+                    "non_script_requests": [(r['method'], r['path'], r['query']) for r in site.ledger],
+                    "console_errors": console_errors, "page_errors": errors,
+                    "inputs": delivery.expected, "delivered": delivery.bodies}
+        finally:
+            delivery.dispose()
+            page.close()
+
+    def test_uninstrumented_paired_load_budget(self):
+        layouts = {"baseline": Pages.layout("approved", 0), "candidate": Pages.layout("current", "actual")}
+        result = {"cache": "Playwright routing disables HTTP cache; repeat samples are not warm-cache evidence",
+                  "warm_status": "not_run: requires hosted HTTP origin", "cold": [], "repeat_cache_disabled": []}
+        try:
+            for mode in ("cold", "repeat_cache_disabled"):
+                contexts = {}
+                try:
+                    for index in range(5):
+                        pair = {}
+                        for side in (("baseline", "candidate") if index % 2 == 0 else ("candidate", "baseline")):
+                            if mode == "cold" or side not in contexts:
+                                contexts[side] = self.browser.new_context(viewport={"width": 1400, "height": 900},
+                                    locale="ko-KR", timezone_id="Asia/Seoul")
+                            pair[side] = self.sample(layouts[side], contexts[side])
+                            if mode == "cold":
+                                contexts.pop(side).close()
+                        result[mode].append(pair)
+                        self.assertEqual(Counter(pair["baseline"]["console_errors"]), Counter(pair["candidate"]["console_errors"]),
+                                         "load budget adds no console errors")
+                        self.assertEqual(Counter(pair["baseline"]["non_script_requests"]), Counter(pair["candidate"]["non_script_requests"]),
+                                         "load budget adds no non-script requests")
+                finally:
+                    for context in contexts.values():
+                        context.close()
+            result["budgets"] = {}
+            for metric in ("navigation_to_auth_ms", "auth_to_usable_ms"):
+                before = [p["baseline"][metric] for p in result["cold"]]
+                after = [p["candidate"][metric] for p in result["cold"]]
+                limit = max(250, statistics.median(before) * .10)
+                delta = statistics.median(after) - statistics.median(before)
+                result["budgets"][metric] = {"baseline_median": statistics.median(before), "candidate_median": statistics.median(after),
+                    "baseline_max": max(before), "candidate_max": max(after), "delta": delta, "limit": limit}
+                self.assertLessEqual(delta, limit, metric + " cold load regression budget")
+        finally:
+            sh.keep(ARTIFACTS / "load-budget", "samples.json", result)
 
 
 class TraceOracle(PreCase):
@@ -1344,6 +1561,75 @@ class HarnessSelfChecks(PreCase):
     SENTINEL = {"id": "SYN-SENTINEL", "name": "SYN Sentinel Search", "quick": "SENTINEL", "days": -1, "mode": "Radiology",
                 "cols": {}, "sortKey": None, "sortDir": 0, "isDefault": False}
 
+    def test_request_occurrences_release_the_exact_request_and_canonical_query(self):
+        run = Run(self, Pages.current.layout("actual"))
+        try:
+            run.booted()
+            run.site.hold_all = True
+            steps = Steps(run)
+            # Duplicate values and spelling/order variants share identity, but keep separate occurrences.
+            run.page.evaluate("""() => {
+              window.__occurrenceAnswers = [];
+              for (const [i, query] of ['a=2&a=1&b=', 'b=&a=1&a=2'].entries())
+                fetch('/api/prefs?' + query).then(() => window.__occurrenceAnswers.push(i));
+            }""")
+            run.wait(lambda: len(run.site.waiting) == 2, "two identical request identities held")
+            rows = [run.site.request_rows[request] for _, request in run.site.waiting]
+            self.assertEqual(rows[0]["key"][:3], rows[1]["key"][:3])
+            self.assertEqual([1, 2], [row["occurrence"] for row in rows])
+            steps.virtual = 21
+            run.site.release(1)
+            run.wait(lambda: run.page.evaluate("window.__occurrenceAnswers.length") == 1, "second request answered")
+            self.assertNotIn("released_at", rows[0], "occurrence 1 must remain held")
+            self.assertEqual(21, rows[1]["released_at"], "occurrence 2 owns its release time")
+            steps.virtual = 34
+            run.site.release(0)
+            run.wait(lambda: run.page.evaluate("window.__occurrenceAnswers.length") == 2, "first request answered")
+            self.assertEqual([1, 0], run.page.evaluate("window.__occurrenceAnswers"))
+            self.assertEqual([34, 21], [row["released_at"] for row in rows])
+        finally:
+            run.close()
+        observed, _ = TraceOracle.probe(self, """async () => {
+          await Promise.all(['a=2&a=1&b=', 'b=&a=1&a=2'].map(q => fetch('data:text/plain,?' + q)));
+          return window.__synLedger.state().fetches;
+        }""", setup=sh.LEDGER_SCRIPT)
+        self.assertEqual([1, 2], [row["occurrence"] for row in observed], "page ledger shares request occurrences")
+        self.assertEqual([list(pair) for pair in canonical_query('b=&a=1&a=2')], observed[0]["canonicalQuery"])
+        self.assertEqual(observed[0]["canonicalQuery"], observed[1]["canonicalQuery"])
+
+    def render_dispatch_counterexamples(self, event):
+        body = TraceOracle.ORDER.replace("'click'", repr(event)).replace(
+            "for (const name of order) register(targets[name]);",
+            "for (const name of ['first', 'second']) register(targets[name]);")
+        records = []
+        for order in (["first", "second"], ["first"], ["first", "second", "first"], ["second", "first"]):
+            _, trace = TraceOracle.probe(self, body, args=order)
+            records.append({"trace": trace, "since": max(d["seq"] for d in trace["dispatches"]),
+                            "site": [], "virtual_ms": 0})
+        for label, changed in zip(("missing", "extra", "reversed"), records[1:]):
+            base, keeper = self.kept(event + "-" + label, "default", "probe")
+            for side, raw in zip(("original", "candidate"), (records[0], changed)):
+                keeper(side)("input", raw)
+            with self.assertRaisesRegex(AssertionError, "every dispatch in order"):
+                self.compare_phases(base, {"input": records[0]}, {"input": changed}, event + label, dispatches=True)
+
+    def test_scroll_dispatch_is_compared_before_the_mark(self):
+        self.render_dispatch_counterexamples("scroll")
+
+    def test_resize_dispatch_is_compared_before_the_mark(self):
+        self.render_dispatch_counterexamples("resize")
+
+    def test_only_the_eleven_motion_crossing_dispatch_types_are_excluded(self):
+        included = ["click", "input", "keydown", "focus", "scroll", "resize"]
+        _, trace = TraceOracle.probe(self, """types => {
+          const target = new EventTarget();
+          for (const type of types) target.addEventListener(type, () => {});
+          for (const type of types) target.dispatchEvent(new Event(type));
+        }""", args=[*sh.NOISY_EVENTS, *included])
+        self.assertEqual(list(sh.NOISY_EVENTS), trace["excluded_dispatch_types"], "exact eleven dispatch exclusions")
+        self.assertEqual([*sh.NOISY_EVENTS, *included], [r["type"] for r in trace["registrations"]])
+        self.assertEqual(included, [d["type"] for d in trace["dispatches"]], "click and render events stay observable")
+
     def test_each_run_starts_from_its_own_fixture(self):
         """F2-I05 / C05: a run that left an account change, held answers and a held session check behind does not
         reach the next run's start."""
@@ -1367,7 +1653,7 @@ class HarnessSelfChecks(PreCase):
     def test_raw_sides_are_kept_before_a_failed_comparison(self):
         """F2-I06 / C06: a parent runs real failing browser phases/comparisons in a child and inspects disk at failure.
         A hand-written trace cannot prove that through() used its raw keeper."""
-        for fault in ("comparison", "timeout-P0", "timeout-P3"):
+        for fault in ("comparison", "original-P0", "original-P3", "candidate-P0", "candidate-P3"):
             with self.subTest(fault=fault):
                 with tempfile.TemporaryDirectory(prefix="kin-pre-failure-child-") as directory:
                     environment = dict(os.environ, KIN_PRE_FAILURE_CHILD=fault, KIN_PRE_TRACE_DIR=directory)
@@ -1390,24 +1676,35 @@ class HarnessSelfChecks(PreCase):
                     for name, record in observed["raw_files"].items():
                         phase, side = Path(name).parent.name, Path(name).name.split(".")[0]
                         phases.setdefault(phase, {})[side] = record
-                    wanted = "after" if fault == "comparison" else fault.split("-")[1] + "-partial"
+                    wanted = "after" if fault == "comparison" else fault.split("-")[1]
                     self.assertIn(wanted, phases, "actual raw kept before failing child assertion")
                     for phase, sides in phases.items():
+                        if phase.endswith("-partial"):
+                            self.assertEqual("failed", next(iter(sides.values()))["status"])
+                            continue
                         self.assertEqual({"original", "candidate"}, set(sides),
                                          "actual raw kept before failing child assertion: both sides or explicit not_run")
                         for side, raw in sides.items():
-                            if raw.get("status") == "not_run":
+                            if raw.get("status") == "not_started":
                                 self.assertTrue(raw.get("reason"), "not_run explains the stopping failure")
                                 self.assertEqual("candidate", side, "only the unstarted peer is not_run")
+                                self.assertEqual(Pages.current.layout("actual")[1]["inputs"][PAGE.name]["sha256"],
+                                                 raw["source_sha256"], "unstarted side's own source hash")
                             else:
                                 self.assertTrue(raw["trace"]["registrations"], "real browser trace, not a fabricated empty success")
                                 self.assertTrue(raw["source"]["sha256"] and raw["source"]["manifest"] and raw["source"]["frozen"])
+                                expected_hash = hashlib.sha256(Pages.baseline_file("main.html") if side == "original"
+                                                               else PAGE.read_bytes()).hexdigest()
+                                self.assertEqual(expected_hash, raw["source"]["sha256"], "each side's own source hash")
                     if fault == "comparison":
                         self.assertTrue(observed["comparisons"], "comparison.json kept before the assertion")
                         self.assertTrue(any(c.get("dispatch_difference") for c in observed["comparisons"].values()))
                     else:
-                        self.assertEqual("not_run", phases[wanted]["candidate"].get("status"),
-                                         "the timed-out original leaves the candidate explicitly not_run")
+                        failed_side = fault.split("-")[0]
+                        self.assertEqual("failed", phases[wanted][failed_side]["status"], "timeout keeps failed canonical phase")
+                        peer = "candidate" if failed_side == "original" else "original"
+                        self.assertEqual("not_started" if failed_side == "original" else "completed",
+                                         phases[wanted][peer]["status"], "completed peer raw is never overwritten")
 
     def test_saved_rows_preserve_order_duplicates_extras_and_shown_count(self):
         run = Run(self, Pages.current.layout(0), filters=(SEARCH_S,), rows=FILTER_ROWS)
@@ -1421,14 +1718,19 @@ class HarnessSelfChecks(PreCase):
                 "duplicate": "rows.append(rows.firstElementChild.cloneNode(true));",
                 "extra": "const extra=rows.firstElementChild.cloneNode(true); extra.dataset.uid='SYN-EXTRA'; rows.append(extra);",
                 "swapped": "rows.prepend(rows.lastElementChild);",
-                "shown": "document.getElementById('page-status').textContent='불러온 목록 중 1–4 / 4건 · 1/1페이지';",
+                "shown": "document.getElementById('page-status').textContent='불러온 목록 중 1–4 / 3건 · 1/1페이지';",
+                "total": "document.getElementById('page-status').textContent='불러온 목록 중 1–3 / 4건 · 1/1페이지';",
             }
             for name, mutation in mutations.items():
                 with self.subTest(mutation=name):
                     run.page.evaluate("html => document.getElementById('rows').innerHTML=html", html)
                     run.page.locator("#page-status").evaluate("(el, text) => el.textContent=text", count)
                     run.page.evaluate("() => { const rows=document.getElementById('rows'); " + mutation + " }")
-                    self.assertNotEqual(before["rows"], saved_state(run)["rows"],
+                    after = saved_state(run)["rows"]
+                    if name in ("shown", "total"):
+                        other = "total" if name == "shown" else "shown"
+                        self.assertEqual(before["rows"][other], after[other], "independent shown/total counterexample")
+                    self.assertNotEqual(before["rows"], after,
                                         "ordered studies, actual rows and shown count detect " + name)
         finally:
             run.close()
@@ -1553,7 +1855,7 @@ class SameGestures(PreCase):
     """One gesture script on the ORIGINAL page and on the page under test - unsplit, and its 45-part copy with every
     part delivered at once - with the same synthetic server state. Each side's result is kept, then checked on its own
     against the requirement (`check`: what a person must see), then compared with the original's."""
-    COUNTS = (0, 45)
+    COUNTS = (0, 45, "actual")
 
     def compare(self, scenario, what, counts=COUNTS, check=None, **options):
         base = ARTIFACTS / "scenarios" / re.sub(r"[^A-Za-z0-9]+", "-", what).strip("-")
@@ -2361,10 +2663,15 @@ if os.environ.get("KIN_PRE_FAILURE_CHILD"):
             drive = Steps.drive
 
             def fail_phase(steps, condition, what, *args, **kwargs):
-                if fault == "timeout-" + what and steps.run.original:
+                side = "original" if steps.run.original else "candidate"
+                if fault == side + "-" + what:
                     steps.run.wait(lambda: steps.run.page.evaluate("!!window.__synLedger && !!window.__kinTrace"),
                                    "child instrumentation ready")
-                    steps.HOST_S = 0
+                    def expire(observed, phase, deadline):
+                        self.assertEqual(what, phase, "injected deadline reached its phase")
+                        observed.deadline_hook = None
+                        observed.host_clock = lambda: deadline + 1
+                    steps.deadline_hook = expire
                 return drive(steps, condition, what, *args, **kwargs)
 
             def gesture(run):
@@ -2375,6 +2682,8 @@ if os.environ.get("KIN_PRE_FAILURE_CHILD"):
             Steps.drive = fail_phase
             try:
                 base, original, candidate = self.both("failure-child", "answered", gesture if fault == "comparison" else None)
+                if fault != "comparison":
+                    self.fail("injected deadline unexpectedly completed")
                 self.compare_phases(base, {"after": original[1]}, {"after": candidate[1]}, "known child difference", dispatches=True)
             except AssertionError as failure:
                 files = {str(p.relative_to(ARTIFACTS)): json.loads(p.read_text(encoding="utf-8"))
