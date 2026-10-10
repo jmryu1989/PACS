@@ -66,11 +66,22 @@ jobs:
         timeout-minutes: 5
         run: |
           python3 scripts/record-run.py --run-dir tmp/part1-xa-ci/sample-contracts --file tests/part1/archive_download.py --file tests/part1/archive_download_test.py --cwd . --tree tests/part1/xa --file .github/workflows/part1-xa.yml -- python3 -B tests/part1/xa/ci_test.py
+      - name: Declare public sample cache hash list
+        id: sample-plan
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-xa-ci/sample-plan --file tests/part1/archive_download.py --file tests/part1/archive_download_test.py --cwd . --tree tests/part1/xa --file .github/workflows/part1-xa.yml -- python3 -B tests/part1/xa/ci.py plan
+      - name: Cache permitted public samples
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ steps.sample-plan.outputs.cache-paths }}
+          key: ${{ runner.os }}-${{ steps.sample-plan.outputs.cache-key }}
       - name: Fetch public DICOM series and verify every pinned file hash
         if: ${{ !cancelled() }}
         timeout-minutes: 40
         run: |
-          python3 scripts/record-run.py --run-dir tmp/part1-xa-ci/samples --file tests/part1/archive_download.py --file tests/part1/archive_download_test.py --cwd . --tree tests/part1/xa --file worklist-v0/hpacs-lite/xa-playback-model.js --file worklist-v0/hpacs-lite/viewer-xa-playback.js --file .github/workflows/part1-xa.yml -- python3 -B tests/part1/xa/ci.py
+          python3 scripts/record-run.py --run-dir tmp/part1-xa-ci/samples --file tests/part1/archive_download.py --file tests/part1/archive_download_test.py --cwd . --tree tests/part1/xa --file worklist-v0/hpacs-lite/xa-playback-model.js --file worklist-v0/hpacs-lite/viewer-xa-playback.js --file .github/workflows/part1-xa.yml -- python3 -B tests/part1/xa/ci.py fetch
       - name: Model behaviour cases
         if: ${{ !cancelled() }}
         timeout-minutes: 5
