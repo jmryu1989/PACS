@@ -21,6 +21,11 @@ import ops_deploy_host as host
 import ops_deploy_preflight as pre
 import ops_deploy_runner as runner
 from ops_deploy_host_test import approve, encoded, policy_fixture, private
+import importlib.util
+
+_spec = importlib.util.spec_from_file_location("emr_compose", Path(__file__).resolve().parents[1] / "scripts" / "emr-compose.py")
+emr_compose = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(emr_compose)
 
 
 class ContainerTests(unittest.TestCase):
@@ -58,6 +63,15 @@ class ContainerTests(unittest.TestCase):
         self.assertEqual(item["Labels"].get("kin.ops.run"), self.token)
         self.command(["docker", "network", "rm", item["Id"]])
 
+    def remove_volume(self, name):
+        result = subprocess.run(["docker", "volume", "inspect", name], capture_output=True, timeout=30)
+        if result.returncode:
+            self.command(["docker", "info", "--format", "{{.ServerVersion}}"])
+            return
+        item = json.loads(result.stdout)[0]
+        self.assertEqual((item.get("Labels") or {}).get("kin.ops.run"), self.token)
+        self.command(["docker", "volume", "rm", item["Name"]])
+
     def psql(self, sql):
         return self.command(["docker", "exec", self.db, "psql", "-X", "-U", "postgres", "-d", "kin",
                              "-v", "ON_ERROR_STOP=1", "-qAt", "-c", sql])
@@ -93,15 +107,20 @@ class ContainerTests(unittest.TestCase):
         self.git("checkout", "--detach", self.command(["git", "-c", "safe.directory=" + str(source), "rev-parse", "HEAD"], cwd=source))
         image = os.environ.get("KIN_TEST_API_IMAGE", "kin-api:ci")
         previous_image = json.loads(self.command(["docker", "image", "inspect", image]))[0]["Id"]
-        env = {"DATABASE_URL": "postgresql://postgres@" + self.db + ":5432/kin",
+        # EMR-B1: the server holds only the runtime role (trust authentication in this internal fixture network) and its
+        # state volume; the installer credential migrates once, in its own container, before the server exists.
+        env = {"DATABASE_URL": "postgresql://kin_runtime@" + self.db + ":5432/kin", "KIN_EMR_STATE_DIR": pre.EMR_STATE,
                "DEPLOYMENT_MODE": "production", "AUTH_REQUIRED": "true",
                "KC_ISSUER": "http://127.0.0.1:1/auth/realms/kin", "KC_JWKS_URL": "http://127.0.0.1:1/certs",
                "KC_AUDIENCE": "kin-api", "KC_WEB_SECRET": uuid.uuid4().hex, "KIN_COOKIE_SECRET": uuid.uuid4().hex,
                "PUBLIC_ORIGIN": "http://127.0.0.1:3000", "ORTHANC_USER": "synthetic-fixture", "ORTHANC_PASS": uuid.uuid4().hex,
                "KC_ADMIN_URL": "http://127.0.0.1:1/auth", "KC_REALM": "kin", "KC_CLIENT_ID": "kin-api", "KC_CLIENT_SECRET": uuid.uuid4().hex}
+        state_volume = self.network + "-emr-state"
         compose = {"name": self.network, "services": {"api": {"container_name": "kin-api", "image": previous_image,
-                   "environment": env, "labels": {"kin.ops.run": self.token}, "networks": ["fixture"]}},
-                   "networks": {"fixture": {"external": True, "name": self.network}}}
+                   "environment": env, "labels": {"kin.ops.run": self.token}, "networks": ["fixture"],
+                   "volumes": ["emr-state:" + pre.EMR_STATE]}},
+                   "networks": {"fixture": {"external": True, "name": self.network}},
+                   "volumes": {"emr-state": {"name": state_volume, "labels": {"kin.ops.run": self.token}}}}
         private(self.repo / pre.COMPOSE[0], encoded(compose))
         for name in pre.COMPOSE[1:]:
             private(self.repo / name, b'{"services":{}}\n')
@@ -123,7 +142,8 @@ class ContainerTests(unittest.TestCase):
         self.command(["docker", "network", "create", "--internal", "--label", "kin.ops.run=" + self.token, self.network])
         self.addCleanup(self.remove_container, self.db)
         self.command(["docker", "run", "-d", "--name", self.db, "--label", "kin.ops.run=" + self.token,
-                      "--network", self.network, "--tmpfs", "/var/lib/postgresql/data", "-e", "POSTGRES_HOST_AUTH_METHOD=trust",
+                      "--network", self.network, "--tmpfs", "/var/lib/postgresql/data",
+                      "--tmpfs", "/var/lib/postgresql/emr-access:uid=70,gid=70,mode=0700", "-e", "POSTGRES_HOST_AUTH_METHOD=trust",
                       "-e", "POSTGRES_DB=kin", "postgres:16-alpine"])
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
@@ -133,6 +153,13 @@ class ContainerTests(unittest.TestCase):
             time.sleep(0.5)
         else:
             self.fail("Disposable database readiness timed out")
+        self.addCleanup(self.remove_volume, state_volume)
+        self.command(["docker", "exec", "-u", "postgres", self.db, "mkdir", "-m", "700", "/var/lib/postgresql/emr-access/ts"])
+        self.command(["docker", "exec", "-i", "-e", "KIN_EMR_RUNTIME_PASSWORD=" + uuid.uuid4().hex, self.db, "psql", "-X", "-U", "postgres",
+                      "-d", "kin"], input=emr_compose.PROVISION_SQL.encode())
+        self.command(["docker", "run", "--rm", "--label", "kin.ops.run=" + self.token, "--network", self.network,
+                      "-e", "DATABASE_URL=postgresql://postgres@" + self.db + ":5432/kin", previous_image,
+                      "sh", "/app/start-production.sh", "migrate"], timeout=180)
         nginx = private(root / "nginx.conf", b"events {}\nhttp { server { listen 8080; return 200; } }\n")
         self.addCleanup(self.remove_container, "kin-proxy")
         self.command(["docker", "run", "-d", "--name", "kin-proxy", "--label", "kin.ops.run=" + self.token,
@@ -165,7 +192,7 @@ class ContainerTests(unittest.TestCase):
                 self.readiness()
                 container = self.inspect("kin-api")
                 self.assertNotEqual(container["Id"], before)
-                pre.check_running_api(container, identity)
+                pre.check_running_api(container, identity, emr=True)
                 self.assertEqual(container["Config"]["Labels"]["kin.deploy.release"], sha)
                 self.assertEqual(self.git("rev-parse", "HEAD"), sha)
                 self.assertEqual(self.inspect(self.db)["Id"], database_id)

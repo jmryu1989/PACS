@@ -33,7 +33,18 @@ FLOWS = (
     # conflict and history flow (the selection 112 -> 114).
     ("e2e/test_tech_note.py", "TechNoteE2E", "test_note_09_attempt_ids_idempotent_resend_reuse_and_reads", "test_note_09_"),
     ("e2e/test_viewer_tech_note.py", "ViewerTechNoteE2E", "test_viewer_note_02_technician_save_conflict_and_history", "test_viewer_note_02_"),
+    # EMR-B1 L01 (emr/units/b.json candidate_cases): the access ledger's roles, guards and restart in its own disposable
+    # database and production API image (the selection 114 -> 115).
+    ("emr/b/live.py", "EmrBLedgerLive", "test_b01_ledger_roles_and_restart", "test_b01_"),
 )
+
+
+def flow_unit(filename):
+    """The flow's runner unit: e2e/test_x.py keeps its earlier candidate-flow-x; a file outside e2e/ keeps its folders
+    (emr/b/live.py -> candidate-flow-emr-b-live), so two flows can never share a unit unnoticed (checked in exact_selection)."""
+    parts = filename.removeprefix("e2e/").removesuffix(".py").split("/")
+    parts[-1] = parts[-1].removeprefix("test_")
+    return "candidate-flow-" + "-".join(parts).replace("_", "-")
 
 
 def require(condition, message):
@@ -88,11 +99,11 @@ def exact_selection(target, runner):
         require(isinstance(cls, type) and cls.__module__ == module.__name__, "Flow class must be declared in target source")
         require(method.startswith(prefix) and method in cls.__dict__ and callable(cls.__dict__[method]),
                 "Flow method must be the declared target entry point")
-        unit = "candidate-flow-" + filename.rsplit("/", 1)[-1].removeprefix("test_").removesuffix(".py").replace("_", "-")
-        rows.append((filename, class_name, unit))
+        rows.append((filename, class_name, flow_unit(filename)))
         selected.append({"file": "tests/" + filename, "case": class_name + "." + method})
-    require(len(selected) == 114 and len({(x["file"], x["case"]) for x in selected}) == 114,
-            "Candidate selection must contain 114 unique exact cases")
+    require(len({row[2] for row in rows}) == len(rows), "Candidate runner units must be unique")
+    require(len(selected) == 115 and len({(x["file"], x["case"]) for x in selected}) == 115,
+            "Candidate selection must contain 115 unique exact cases")
     return rows, selected
 
 

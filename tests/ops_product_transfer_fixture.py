@@ -1,5 +1,16 @@
-"""Hosted CI product-schema synthetic restore; no live PACS data or credentials."""
+"""Hosted CI product-schema synthetic restore; no live PACS data or credentials.
+
+EMR-B1: the product schema now also holds schema emr_access (its own owner role, tablespace and functions). Both the
+producer and the consumer provision the cluster first (roles, the tablespace on this read-only container's /tmp, a
+synthetic runtime secret), and the restore keeps owners and privileges - a restore that drops them would hand the
+ledger's security-definer functions to the restoring superuser and lose the runtime grants. pg_dump carries neither
+roles nor tablespaces; they are never assumed to come back with the dump. The API's seal and failure journal live on
+its own state volume, outside this database dump (their restore consistency is the EMR-B live L07 case).
+"""
 import argparse
+from datetime import datetime
+import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -12,6 +23,10 @@ import uuid
 
 import ops_combined_transfer_fixture as combined
 import ops_product_transfer_worker as worker
+
+_spec = importlib.util.spec_from_file_location('emr_compose', Path(__file__).resolve().parents[1]/'scripts'/'emr-compose.py')
+emr_compose = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(emr_compose)
 
 orth, pg = combined.orth, combined.pg
 image_transfer, inventory = combined.image_transfer, combined.inventory
@@ -84,7 +99,9 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261006120000_member_isolation_call/migration.sql',
               'api/prisma/migrations/20261007120000_provider_change/migration.sql',
               'api/prisma/migrations/20261007170000_member_db_rights/migration.sql',
-              'api/prisma/migrations/20261007200000_designation_subjects/migration.sql']
+              'api/prisma/migrations/20261007200000_designation_subjects/migration.sql',
+              'api/prisma/migrations/20261008120000_emr_b/migration.sql', 'api/prisma/migrations/20261010120000_emr_seal_attempts/migration.sql',
+              'api/prisma/migrations/20261010150000_emr_read_jit_off/migration.sql']
 TABLES = sorted(['AuthSession', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
@@ -95,7 +112,15 @@ TABLES = sorted(['AuthSession', 'IdpSessionEnd', 'MemberIsolation', 'ProviderCha
                  'GatewayReceipt', 'GatewayRetryRequest'])
 SEQUENCES = ['AuditLog_id_seq', 'ProviderChange_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
 STAMP = '2026-09-06T00:00:00.123'
-PRODUCT_FIELDS = {'migrations', 'study_uid', 'catalog', 'rows', 'sequences'}
+PRODUCT_FIELDS = {'migrations', 'study_uid', 'catalog', 'rows', 'sequences', 'emr'}
+# EMR-B1: schema emr_access, observed schema-qualified (the public catalog above never sees it).
+EMR_TABLES = sorted(['access_entry', 'access_target', 'audit_projection', 'chain_head', 'clause_version', 'commit_marker', 'duty_request_event',
+                     'legal_hold_event', 'member_identity', 'order_fact'])
+EMR_ROLES = ['kin_emr_owner', 'kin_emr_reader', 'kin_emr_retention', 'kin_runtime']
+# The read-only fixture container's only writable non-data mount; the compose deployment uses its own volume.
+EMR_TABLESPACE = '/tmp/emr-access/ts'
+EMR_CHAIN_ID = '00000000-0000-4000-8000-00000000e001'
+EMR_HISTORY_CHAIN_ID = '00000000-0000-4000-8000-00000000e002'
 
 
 class ProductMismatch(ValueError):
@@ -441,6 +466,61 @@ def expected_sequences():
                        is_called=name in ('ReportVersion_id_seq', 'UserFilter_id_seq', 'ProviderChange_id_seq')) for name in SEQUENCES}
 
 
+def jsonb_time(moment):
+    """How to_jsonb renders a timestamptz under SET timezone='UTC'."""
+    text = moment.strftime('%Y-%m-%dT%H:%M:%S')
+    if moment.microsecond:
+        text += ('.%06d' % moment.microsecond).rstrip('0')
+    return text + '+00:00'
+
+
+def expected_emr_rows():
+    """Deterministic synthetic ledger facts: a two-entry chain with its head, a placed and released hold, one reviewed
+    clause version and one identity binding. Payloads are synthetic text; hashes are A's chain bytes over them."""
+    stamp = datetime(2026, 9, 6, 0, 0, 0, 123000)
+    rows = {name: [] for name in EMR_TABLES}
+    previous, entries = '0'*64, []
+    for sequence, suffix in ((1, 'e101'), (2, 'e102')):
+        event_id = '00000000-0000-4000-8000-00000000' + suffix
+        payload = json.dumps({'kind': 'access', 'event': {'eventId': event_id, 'occurredAt': '2026-09-06T00:00:00.123Z',
+                              'synthetic': True}}, separators=(',', ':'))
+        digest = hashlib.sha256(('{"sequence":%d,"previousHash":"%s","payload":%s}' % (sequence, previous, payload)).encode()).hexdigest()
+        entries.append(dict(stream='viewing', sequence=sequence, previous_hash=previous, hash=digest, kind='access', statutory_act='none', event_id=event_id, payload=payload,
+            content_sha256=hashlib.sha256(payload.encode()).hexdigest(), occurred_at=jsonb_time(stamp),
+            stored_at=jsonb_time(stamp)))
+        previous = digest
+    rows['access_entry'] = entries
+    rows['commit_marker'] = [dict(stream='viewing',chain_id=EMR_CHAIN_ID,attempt_id='SYNTHETIC-attempt-'+str(e['sequence']),
+        bundle_id='SYNTHETIC-bundle-'+str(e['sequence']),kind=e['kind'],event_id=e['event_id'],sequence=e['sequence'],
+        previous_hash=e['previous_hash'],hash=e['hash'],content_sha256=e['content_sha256'],generation=e['sequence'],
+        proof_digest=None,transaction_id=1) for e in entries]
+    # D-1: two streams, each its own chain; the seeded entries are viewing entries, the history stream is empty.
+    rows['chain_head'] = [dict(stream='viewing', chain_id=EMR_CHAIN_ID, sequence=2, hash=previous),
+                          dict(stream='history', chain_id=EMR_HISTORY_CHAIN_ID, sequence=0, hash='0'*64)]
+    hold = dict(holdId='SYNTHETIC-hold-1', recordId=entries[0]['event_id'], basis={'synthetic': True}, actorId='SYNTHETIC-custodian',
+                at='2026-09-06T00:00:00.123Z', release=None)
+    released = dict(hold, release={'holdId': 'SYNTHETIC-hold-1', 'synthetic': True})
+    rows['legal_hold_event'] = [dict(hold_id='SYNTHETIC-hold-1', phase=phase, record_id=entries[0]['event_id'],
+        body=json.dumps(body, separators=(',', ':')), recorded_at=jsonb_time(stamp)) for phase, body in (('placed', hold), ('released', released))]
+    rows['clause_version'] = [dict(clause_id='synthetic-law:article-1', publication='2026-v1', law='synthetic-law', article='article-1',
+        published_at='2026-01-01', effective_at='2026-01-01', recorded_at=jsonb_time(stamp))]
+    rows['member_identity'] = [dict(id='00000000-0000-4000-8000-00000000e201', issuer='https://identity.example.test',
+        subject='SYNTHETIC-sub', created_at=jsonb_time(stamp))]
+    at, record_id = '2026-09-06T00:00:00.123Z', 'SYNTHETIC-native-order'
+    facts = dict(objectKind='order-indication', origin='product-authored', authorId='SYNTHETIC-physician', authorRole='physician',
+        requestingClinicianId='SYNTHETIC-physician', directionSourceRef=None, examCodes=['SYNTHETIC-CT'], source=None, feed=None,
+        inherited=[], firstReceivedAt=None, firstReceiptEventId=None, duplicateOf=None, scheduledAt=None, scheduleChangeEvidenceId=None,
+        status='closed', statusEvent=dict(eventId='SYNTHETIC-order-event', actorId='SYNTHETIC-physician', at=at, reason='fixture'),
+        fulfilment=None, chartIncorporation=None, procedure=None, synthetic=None)
+    event = dict(eventId='SYNTHETIC-order-event', recordId=record_id, versionId='v1', sha256='ab'*32, contentSha256='ab'*32,
+        at=at, act='entry', signature=dict(versionId='v1', sha256='ab'*32, signedAt=at, verified=True),
+        predecessor=None, components=[], processing=None)
+    body = dict(recordId=record_id, eventId=event['eventId'], previousEventId=None, facts=facts, event=event)
+    rows['order_fact'] = [dict(record_id=record_id, event_id=event['eventId'], sequence=1, previous_event_id=None,
+        body=json.dumps(body, separators=(',', ':')), recorded_at=jsonb_time(stamp))]
+    return rows
+
+
 def sql_literal(text):
     return "'"+text.replace("'", "''")+"'"
 
@@ -460,10 +540,45 @@ def execute(name, db, sql):
     require(psql(name, db, sql+"; SELECT 'SYNTHETIC-OK';") == b'SYNTHETIC-OK')
 
 
+def provision(name, installer='postgres'):
+    """The fixed EMR provisioning (cluster roles, a synthetic runtime secret, the tablespace) before any migration or
+    restore. pg_dump/pg_restore never carry roles or tablespaces."""
+    # Standalone test containers start as root; PostgreSQL must own the placement directory.
+    command(['docker', 'exec', '--user', 'postgres', name, 'mkdir', '-p', '-m', '700', EMR_TABLESPACE])
+    result = subprocess.run(['docker', 'exec', '-i', '-e', 'KIN_EMR_RUNTIME_PASSWORD='+uuid.uuid4().hex, name, 'psql', '-X',
+                             '-U', installer, '-d', 'postgres', '-v', 'tablespace_location='+EMR_TABLESPACE],
+                            input=emr_compose.PROVISION_SQL.encode(), capture_output=True, timeout=60)
+    require(result.returncode == 0)
+    # D984: observe cluster prerequisites before any migration/restore can supply or hide them.
+    observed = subprocess.run(['docker', 'exec', name, 'psql', '-XqAt', '-U', installer, '-d', 'postgres',
+                               '-v', 'ON_ERROR_STOP=1', '-c',
+                               "SELECT pg_get_userbyid(spcowner), pg_tablespace_location(oid) "
+                               "FROM pg_tablespace WHERE spcname='kin_emr_access'; "
+                               "SELECT rolname FROM pg_roles WHERE rolname IN ("+
+                               ','.join(sql_literal(role) for role in EMR_ROLES)+") ORDER BY rolname;"],
+                              capture_output=True, timeout=30, check=True)
+    require(observed.stdout.decode().splitlines() == ['kin_emr_owner|'+EMR_TABLESPACE, *sorted(EMR_ROLES)])
+
+
+def seed_emr(name, db):
+    data = expected_emr_rows()
+    for table in ('access_entry', 'commit_marker', 'legal_hold_event', 'clause_version', 'member_identity', 'order_fact'):
+        for row in data[table]:
+            execute(name, db, 'BEGIN; SET LOCAL session_replication_role = replica; INSERT INTO emr_access.'+table+' SELECT * FROM json_populate_record(NULL::emr_access.'+table+', '+
+                    sql_literal(json.dumps(row))+'); COMMIT')
+    viewing, history = data['chain_head']
+    # Synthetic fixture only: the head rows are append-guarded for every role, so their fixed chain identities are set past
+    # the guard as the superuser, in one statement's transaction.
+    execute(name, db, "BEGIN; SET LOCAL session_replication_role = replica; "+''.join(
+        "UPDATE emr_access.chain_head SET chain_id = "+sql_literal(row['chain_id'])+"::uuid, sequence = "+str(row['sequence'])+
+        ", hash = "+sql_literal(row['hash'])+" WHERE stream = "+sql_literal(row['stream'])+"; " for row in (viewing, history))+"COMMIT")
+
+
 def create_product(name, db, uid):
     command(['docker', 'exec', name, 'createdb', '-U', 'postgres', db])
     for raw in migration_sources():
         execute(name, db, raw.decode())
+    seed_emr(name, db)
     data = expected_rows(uid)
     for table in ('Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft', 'Order', 'UserFilter',
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
@@ -478,7 +593,7 @@ def create_product(name, db, uid):
             fields = [key for key in row if not (table in ('ReportVersion', 'UserFilter', 'ProviderChange') and key == 'id')]
             quoted = ','.join('"'+key+'"' for key in fields)
             execute(name, db, 'INSERT INTO "'+table+'" ('+quoted+') SELECT '+quoted+
-                ' FROM json_populate_record(NULL::"'+table+'", '+sql_literal(json.dumps(row))+')')
+                ' FROM json_populate_record(NULL::"'+table+'", '+sql_literal(json.dumps(row))+'); COMMIT')
 
 
 CATALOG_SQL = """
@@ -502,6 +617,58 @@ SELECT jsonb_build_object(
 """
 
 
+EMR_ROLE_LIST = ', '.join("'"+role+"'" for role in EMR_ROLES)
+# Schema-qualified: owners, tablespaces, ACLs (each list sorted), function definitions and settings, guards, the EMR roles'
+# attributes and memberships, and the runtime's grants on the business schema. ACL text names roles, never secrets.
+EMR_CATALOG_SQL = """
+SELECT jsonb_build_object(
+ 'tablespace',(SELECT jsonb_build_object('name',spcname,'owner',pg_get_userbyid(spcowner)) FROM pg_tablespace WHERE spcname='kin_emr_access'),
+ 'schema',(SELECT jsonb_build_object('owner',pg_get_userbyid(nspowner),'acl',(SELECT jsonb_agg(a::text ORDER BY a::text) FROM unnest(nspacl) a))
+   FROM pg_namespace WHERE nspname='emr_access'),
+ 'relations',(SELECT jsonb_agg(jsonb_build_object('name',c.relname,'kind',c.relkind,'owner',pg_get_userbyid(c.relowner),
+     'tablespace',COALESCE(t.spcname,'database-default'),'acl',(SELECT jsonb_agg(a::text ORDER BY a::text) FROM unnest(c.relacl) a))
+     ORDER BY c.relname COLLATE "C")
+   FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace LEFT JOIN pg_tablespace t ON t.oid=c.reltablespace
+   WHERE n.nspname='emr_access' AND c.relkind IN ('r','i')),
+ 'columns',(SELECT jsonb_agg(to_jsonb(x) ORDER BY x.table_name COLLATE "C",x.ordinal_position)
+   FROM (SELECT table_name,column_name,ordinal_position,data_type,is_nullable,column_default FROM information_schema.columns
+     WHERE table_schema='emr_access') x),
+ 'constraints',(SELECT jsonb_agg(jsonb_build_object('table',c.relname,'name',k.conname,'definition',pg_get_constraintdef(k.oid,true))
+     ORDER BY c.relname COLLATE "C",k.conname COLLATE "C")
+   FROM pg_constraint k JOIN pg_class c ON c.oid=k.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='emr_access'),
+ 'triggers',(SELECT jsonb_agg(jsonb_build_object('table',c.relname,'name',g.tgname,'enabled',g.tgenabled::text,'definition',pg_get_triggerdef(g.oid))
+     ORDER BY c.relname COLLATE "C",g.tgname COLLATE "C")
+   FROM pg_trigger g JOIN pg_class c ON c.oid=g.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+   WHERE n.nspname='emr_access' AND NOT g.tgisinternal),
+ 'functions',(SELECT jsonb_agg(jsonb_build_object('signature',p.oid::regprocedure::text,'owner',pg_get_userbyid(p.proowner),
+     'security_definer',p.prosecdef,'config',p.proconfig,'acl',(SELECT jsonb_agg(a::text ORDER BY a::text) FROM unnest(p.proacl) a),
+     'body_sha256',encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')) ORDER BY p.oid::regprocedure::text COLLATE "C")
+   FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='emr_access'),
+ 'roles',(SELECT jsonb_agg(jsonb_build_object('name',rolname,'super',rolsuper,'createrole',rolcreaterole,'createdb',rolcreatedb,
+     'replication',rolreplication,'bypassrls',rolbypassrls,'inherit',rolinherit,'login',rolcanlogin) ORDER BY rolname COLLATE "C")
+   FROM pg_roles WHERE rolname IN (ROLES)),
+ 'memberships',(SELECT count(*) FROM pg_auth_members m JOIN pg_roles g ON g.oid=m.roleid JOIN pg_roles u ON u.oid=m.member
+   WHERE g.rolname IN (ROLES) OR u.rolname IN (ROLES)),
+ 'runtime_grants',(SELECT jsonb_agg(x.table_name || ':' || x.privilege_type ORDER BY x.table_name COLLATE "C",x.privilege_type COLLATE "C")
+   FROM information_schema.role_table_grants x WHERE x.grantee='kin_runtime' AND x.table_schema IN ('public','emr_access')),
+ 'default_acl',(SELECT jsonb_agg(n.nspname || ':' || d.defaclobjtype::text || ':' || (SELECT string_agg(a::text, ',' ORDER BY a::text) FROM unnest(d.defaclacl) a)
+     ORDER BY n.nspname COLLATE "C", d.defaclobjtype::text COLLATE "C")
+   FROM pg_default_acl d JOIN pg_namespace n ON n.oid=d.defaclnamespace WHERE n.nspname IN ('public','emr_access')))
+""".replace('ROLES', EMR_ROLE_LIST)
+
+
+def emr_catalog_contract(value):
+    require(type(value) is dict and set(value) == {'tablespace', 'schema', 'relations', 'columns', 'constraints', 'triggers',
+                                                    'functions', 'roles', 'memberships', 'runtime_grants', 'default_acl'})
+    require(value['tablespace'] == {'name': 'kin_emr_access', 'owner': 'kin_emr_owner'} and value['schema']['owner'] == 'kin_emr_owner')
+    require(sorted(r['name'] for r in value['relations'] if r['kind'] == 'r') == EMR_TABLES)
+    require(all(r['owner'] == 'kin_emr_owner' and r['tablespace'] == 'kin_emr_access' for r in value['relations']))
+    require([r['name'] for r in value['roles']] == EMR_ROLES and value['memberships'] == 0)
+    require(not any(r[k] for r in value['roles'] for k in ('super', 'createrole', 'createdb', 'replication', 'bypassrls')))
+    require(all(f['owner'] == 'kin_emr_owner' for f in value['functions']))
+    require(not any(g.startswith(('access_entry:', 'commit_marker:', 'chain_head:', 'legal_hold_event:', 'clause_version:')) for g in value['runtime_grants']))
+
+
 def catalog_contract(value):
     require(type(value) is dict and set(value) == {'tables', 'columns', 'constraints', 'indexes', 'sequence_settings'})
     require(value['tables'] == TABLES)
@@ -519,7 +686,12 @@ def observe(name, db):
         for table in TABLES}
     sequences = {seq: inventory.parse(psql(name, db,
         'SELECT jsonb_build_object(\'last_value\',last_value,\'is_called\',is_called) FROM "'+seq+'"')) for seq in SEQUENCES}
-    return dict(catalog=catalog, rows=rows, sequences=sequences)
+    emr_catalog = inventory.parse(psql(name, db, EMR_CATALOG_SQL))
+    emr_catalog_contract(emr_catalog)
+    emr_rows = {table: inventory.parse(psql(name, db,
+        'SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text COLLATE "C"), \'[]\'::jsonb) FROM emr_access."'+table+'" t'))
+        for table in EMR_TABLES}
+    return dict(catalog=catalog, rows=rows, sequences=sequences, emr=dict(catalog=emr_catalog, rows=emr_rows))
 
 
 def sorted_rows(rows):
@@ -559,10 +731,12 @@ def bounded_diagnostic(report):
 
 def verify_product(name, db, expected):
     actual = observe(name, db)
-    for key in ('catalog', 'rows', 'sequences'):
+    for key in ('catalog', 'rows', 'sequences', 'emr'):
         left, right = actual[key], expected[key]
         if key == 'rows':
             left, right = sorted_rows(left), sorted_rows(right)
+        if key == 'emr':
+            left, right = dict(left, rows=sorted_rows(left['rows'])), dict(right, rows=sorted_rows(right['rows']))
         if canonical(left) != canonical(right):
             if key == 'catalog':
                 print('Synthetic catalog difference (expected vs restored, schema metadata only): '+
@@ -578,6 +752,9 @@ def product_contract(product):
     catalog_contract(product['catalog'])
     require(canonical(sorted_rows(product['rows'])) == canonical(sorted_rows(expected_rows(product['study_uid']))))
     require(canonical(product['sequences']) == canonical(expected_sequences()))
+    require(type(product['emr']) is dict and set(product['emr']) == {'catalog', 'rows'})
+    emr_catalog_contract(product['emr']['catalog'])
+    require(canonical(sorted_rows(product['emr']['rows'])) == canonical(sorted_rows(expected_emr_rows())))
 
 
 def relation(snapshot):
@@ -627,10 +804,12 @@ def keycloak_rows(name, snapshot):
 
 
 def restore(name, db, path):
+    """Into a cluster provisioned first. Owners and privileges are kept (EMR-B1): the ledger's owner role, its function
+    grants and the runtime's business grants are part of what is restored; tablespaces are never dropped from the dump."""
     command(['docker', 'exec', name, 'createdb', '-U', 'postgres', db])
     with path.open('rb') as incoming:
         command(['docker', 'exec', '-i', name, 'pg_restore', '-U', 'postgres', '-d', db,
-            '--no-owner', '--no-privileges', '--exit-on-error'], stdin=incoming, timeout=120)
+            '--exit-on-error'], stdin=incoming, timeout=120)
 
 
 def constraint_probes(name, product):
@@ -810,11 +989,27 @@ def constraint_probes(name, product):
       BEGIN INSERT INTO "AuditLog" (id,actor,action,target) VALUES(-1,'SYNTHETIC','SYNTHETIC','SYNTHETIC');
         DELETE FROM "AuditLog" WHERE id=-1;
         RAISE EXCEPTION 'missing audit append-only guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+      -- EMR-B1 after the restore: the ledger stays placed, append-only for the owner path, closed to the runtime's direct
+      -- writes and to its expiry call, and the retention role cannot remove an unexpired prefix.
+      IF EXISTS (SELECT 1 FROM emr_access.storage_placement() WHERE tablespace <> 'kin_emr_access') THEN
+        RAISE EXCEPTION 'emr placement lost'; END IF;
+      BEGIN DELETE FROM emr_access.access_entry;
+        RAISE EXCEPTION 'missing emr append-only guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+      BEGIN UPDATE emr_access.chain_head SET sequence = 0;
+        RAISE EXCEPTION 'missing emr head guard'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+      BEGIN EXECUTE 'SET LOCAL ROLE kin_runtime'; INSERT INTO emr_access.access_entry SELECT * FROM emr_access.access_entry;
+        RAISE EXCEPTION 'runtime writes the ledger directly'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+      BEGIN EXECUTE 'SET LOCAL ROLE kin_runtime'; PERFORM emr_access.expire_reserved(1, 'SYNTHETIC-probe-attempt', 'SYNTHETIC-probe-bundle');
+        RAISE EXCEPTION 'runtime reaches expiry'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+      BEGIN EXECUTE 'SET LOCAL ROLE kin_emr_retention'; PERFORM emr_access.expire_reserved(1, 'SYNTHETIC-probe-attempt', 'SYNTHETIC-probe-bundle');
+        RAISE EXCEPTION 'unexpired prefix removed'; EXCEPTION WHEN SQLSTATE 'EB004' THEN NULL; END;
+      EXECUTE 'RESET ROLE';
     END $$; ROLLBACK'''.replace('UID', uid)
     execute(name, 'kin', sql)
     verify_product(name, 'kin', product)
     return dict(version_unique=True, report_study_fk=True, draft_composite_pk=True,
-                viewer_restrict=True, finding_restrict=True, rolled_back_unchanged=True)
+                viewer_restrict=True, finding_restrict=True, rolled_back_unchanged=True,
+                emr_placement=True, emr_append_only=True, emr_runtime_closed=True, emr_unexpired_kept=True)
 
 
 def negative_restore(name, folder, product):
@@ -861,6 +1056,7 @@ def produce(destination):
         orth.bounded_output(['docker', 'exec', resources['orthanc'], 'cat', '/work/store.tar'], destination/'store.tar', LIMITS['store.tar'], timeout=30)
         pg.start_database(identities['postgres'], resources['postgres'], token)
         name = resources['postgres']
+        provision(name)
         create_product(name, 'kin', uid)
         product = dict(observe(name, 'kin'), migrations=migration_records(), study_uid=uid)
         product_contract(product)
@@ -911,6 +1107,7 @@ def consume(source, expected, expected_product):
                 module.settings(loaded.get('Config'), token)
             pg.start_database(identities['postgres'], resources['postgres'], token)
             name = resources['postgres']
+            provision(name)
             for db in pg.DATABASES:
                 restore(name, db, folder/(db+'.dump'))
             verify_product(name, 'kin', body['product'])
@@ -931,6 +1128,7 @@ def consume(source, expected, expected_product):
     return dict(synthetic_product_schema_restored=True, product_sha256=expected_product, migrations=body['product']['migrations'],
         row_counts={key: len(value) for key, value in body['product']['rows'].items()}, sequences=body['product']['sequences'],
         constraints=constraints, negative=negative, keycloak_fixture_rows=kc, orthanc=restored,
+        emr_rows={key: len(value) for key, value in body['product']['emr']['rows'].items()},
         producer_boot_id=body['producer_boot_id'], consumer_boot_id=context['boot_id'], both_images_originally_absent=True,
         source_unchanged=True, preexisting_image_referenced_layers=cache, unreferenced_layer_cache_verified=False,
         base_labels_are_producer_declarations=True, full_restore_verified=False, offsite_backup_verified=False,

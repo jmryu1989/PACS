@@ -116,6 +116,7 @@ function access(overrides = {}) {
   return { formatVersion: 1, surface: 'GET studies/:uid/report/versions', eventId: 'event-1', userId: known(identity('reader-1')),
     rolesAtTime: known(['radiologist']), actingInstitution: known('hospital-a'), managingInstitution: known('hospital-a'), occurredAt: t0,
     trustedProxyIp: known({ address: '192.0.2.1', source: 'trusted-proxy' }), cause: 'user-view', executor: 'member',
+    context: { basis: 'worklist', studyId: 'study-1', relatedStudyId: null, reason: null },
     targets: [{ kind: 'report-version', patientLinkSnapshot: known(patient), studyId: known('study-1'), recordId: known('report-1'), versionId: known('version-1') }],
     action: 'provide-prepared', result: 'prepared', requestId: 'request-1', auditLinkId: A.newAuditLinkId(), relatedEventId: null, ...overrides };
 }
@@ -387,6 +388,41 @@ test('TEST-H-01/period_extension: a comparison link from a live report does not 
   const own = D.retentionDeadline(base, snapshotFor([base], t0)), held = snapshotFor([base, cvr], own);
   await refused([base], own, held, 'RetentionNotElapsed', 'an image actually incorporated by a live record stays for that record');
   assert(D.retentionDeadline(cvr) > own);
+});
+
+test('TEST-H-01/period_extension: authentication events bind to the non-record two-year floor without changed records', () => {
+  const surfaces = { 'auth.login': 'GET auth/callback', 'auth.entry': 'POST auth/entry',
+    'auth.logout': 'POST auth/logout', 'auth.session.expired': 'GET me' };
+  for (const [action, surface] of Object.entries(surfaces)) {
+    const event = access({ formatVersion: 2, branch: 'online-auth', eventId: crypto.randomUUID(),
+      surface, action, result: 'succeeded', targets: [], rightsVersion: known(1),
+      context: { basis: 'authentication', studyId: null, relatedStudyId: null, reason: null },
+      affectedIdentity: known(identity('reader-1')), session: known(`authref:${crypto.randomUUID()}`),
+      auth: { endCause: action === 'auth.logout' ? 'logout' : action === 'auth.session.expired' ? 'idle' : null,
+        failureCause: null, trigger: null } });
+    const unit = A.accessRetention(event);
+    assert.equal(unit.recordId, event.eventId);
+    assert.equal(unit.parts[0].evidence.event.sha256, digest(JSON.stringify(A.parseAccessEvent(event))));
+    const facts = { action, result: event.result, targets: [] };
+    assert.equal(K.accessStream(facts), 'non-record');
+    assert.deepEqual(K.changedRecordIds(facts), []);
+    assert.deepEqual(K.accessUnitFacts(unit, event), {
+      stream: 'non-record', floor: D.civilPeriodEnd(event.occurredAt, 2), changedRecordIds: [] });
+    for (const corrupt of [{ action: 'auth.unknown' }, { eventId: crypto.randomUUID() },
+      { occurredAt: shift(t0, 1000) }, { requestId: 'changed-request' }]) {
+      assert.throws(() => K.accessUnitFacts(unit, { ...event, ...corrupt }), { code: 'AccessEventBindingRefused' });
+    }
+  }
+});
+
+test('TEST-H-01/period_extension: malformed authentication actions and missing access facts are refused', () => {
+  assert.throws(() => K.accessStream({ action: 'auth.unknown', result: 'succeeded', targets: [] }));
+  assert.throws(() => K.accessStream({ action: 'auth.login', result: 'succeeded', targets: null }),
+    { code: 'AccessStreamFactsRequired' });
+  for (const action of ['approve-sign', 'provide-prepared']) {
+    assert.throws(() => K.accessStream({ action, result: action === 'approve-sign' ? 'succeeded' : 'prepared',
+      targets: [{ kind: 'report-version', recordId: null }] }), { code: 'AccessStreamFactsRequired' });
+  }
 });
 
 test('TEST-H-01/period_extension: access units leave by their stream at destruction time', async () => {

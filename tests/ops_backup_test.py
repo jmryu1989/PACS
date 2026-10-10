@@ -9,6 +9,7 @@ docker CLI of tests/ops_audit_integrity_test.py.
 from __future__ import annotations
 
 import contextlib
+import copy
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -66,10 +67,13 @@ class Host:
         self.info = [{"Name": "/" + name, "State": {"Running": True}, "Image": "sha256:" + "a" * 64,
                       "Config": {"Labels": {"com.docker.compose.project": "fixture",
                                             "com.docker.compose.project.working_dir": str(self.repo)}},
-                      "Mounts": [{"Destination": "/var/lib/orthanc/db", "Type": "volume", "Name": "fixture-volume"}]}
+                      "Mounts": [{"Destination": "/var/lib/orthanc/db", "Type": "volume", "Name": "fixture-volume"}, {"Destination": ops.EMR_STATE, "Type": "volume", "Name": "fixture-emr-state"}]}
                      for name in (*ops.CONTAINERS, "kin-proxy")]
         self.events = []
         self.sources = []
+        self.catalog = {"synthetic": "catalog"}
+        self.restored_catalog = None
+        self.restore_answer = "EMR_RESTORE_VERIFIED"
         # Backups a minute apart within the monitor's 30-hour window: the monitor orders manifests by whole seconds.
         self.clock = datetime.now(timezone.utc) - timedelta(hours=1)
 
@@ -89,11 +93,13 @@ class Host:
             return '[{"RepoDigests": []}]'
         if "pg_database_size('kin')" in " ".join(args):
             return "4096"
+        if "pg_stat_activity" in " ".join(args):
+            return "0"
         return "" if "status" in args else "a" * 40
 
     def fake_run(self, args, **kwargs):
         self.events.append(("command", list(args)))
-        if "pg_dump" in args:
+        if "pg_dump" in args or "pg_dumpall" in args:
             kwargs["output"].write(b"fixture dump " + str(time.monotonic_ns()).encode())
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
@@ -103,7 +109,7 @@ class Host:
         if kwargs.get("output") is not None:
             kwargs["output"].write(orthanc_archive())
             return ""
-        return json.dumps({"integrity": "ok", "attachments": 0, "attachment_bytes": 0}) if "python3" in args else ""
+        return json.dumps({"integrity": "ok", "attachments": 0, "attachment_bytes": 0}) if "python3" in args else self.restore_answer
 
     def boundary(self, answer):
         def evaluate(source, *args, **kwargs):
@@ -123,7 +129,8 @@ class Host:
                 patch.object(ops, "text", side_effect=self.fake_text), \
                 patch.object(ops, "run", side_effect=self.fake_run), \
                 patch.object(ops, "temporary_run", side_effect=self.fake_archive), \
-                patch.object(ops, "counts", return_value={"Report": 5}), \
+                patch.object(ops, "emr_catalog", return_value=self.catalog), \
+                patch.object(ops, "counts", return_value={"public.Report": 5}), \
                 patch.object(ops, "wait_ready", side_effect=lambda *a: self.events.append(("ready",))), \
                 patch.object(audit, "evaluate", side_effect=self.boundary(answer)), \
                 contextlib.redirect_stdout(io.StringIO()):
@@ -143,7 +150,8 @@ class Host:
         earlier = set(folder.glob("rehearsal-*.json"))
         with patch.object(ops, "run", side_effect=self.fake_run), \
                 patch.object(ops, "temporary_run", side_effect=self.fake_archive), \
-                patch.object(ops, "counts", return_value={"Report": 5}), \
+                patch.object(ops, "emr_catalog", return_value=self.restored_catalog or self.catalog), \
+                patch.object(ops, "counts", return_value={"public.Report": 5}), \
                 patch.object(ops, "remove_owned_if_present", cleanup), \
                 patch.object(audit, "evaluate", side_effect=self.boundary(answer)), \
                 contextlib.redirect_stdout(io.StringIO()):
@@ -177,7 +185,7 @@ class BackupSafetyTests(unittest.TestCase):
                              "Image": "sha256:" + "a" * 64,
                              "Config": {"Labels": {"com.docker.compose.project": "fixture",
                                                    "com.docker.compose.project.working_dir": str(root)}},
-                             "Mounts": [{"Destination": "/var/lib/orthanc/db", "Type": "volume", "Name": "fixture-volume"}]})
+                             "Mounts": [{"Destination": "/var/lib/orthanc/db", "Type": "volume", "Name": "fixture-volume"}, {"Destination": ops.EMR_STATE, "Type": "volume", "Name": "fixture-emr-state"}]})
 
             def fake_text(args, **kwargs):
                 if args[:2] == ["docker", "inspect"]:
@@ -186,9 +194,13 @@ class BackupSafetyTests(unittest.TestCase):
                     return "4096"
                 if args[:3] == ["docker", "image", "inspect"]:
                     return '[{"RepoDigests": []}]'
+                if "pg_stat_activity" in " ".join(args):
+                    return "0"
                 return "" if "status" in args else "a" * 40
 
             def fake_run(args, **kwargs):
+                if "pg_dumpall" in args:
+                    kwargs["output"].write(b"synthetic roles")
                 if "pg_dump" in args:
                     raise RuntimeError("simulated dump failure")
                 return SimpleNamespace(returncode=0, stdout=b"")
@@ -197,7 +209,8 @@ class BackupSafetyTests(unittest.TestCase):
             with patch.object(ops, "ROOT", root), patch.object(ops, "text", side_effect=fake_text), \
                     patch.object(ops, "run", side_effect=fake_run) as commands, \
                     patch.object(ops, "temporary_run", return_value="8 /source"), \
-                    patch.object(ops, "counts", return_value={"Report": 5}):
+                    patch.object(ops, "emr_catalog", return_value={"synthetic": "catalog"}), \
+                    patch.object(ops, "counts", return_value={"public.Report": 5}):
                 with self.assertRaisesRegex(RuntimeError, "simulated dump failure"):
                     ops.backup(output)
             starts = [call.args[0] for call in commands.call_args_list if call.args[0][1] == "start"]
@@ -336,7 +349,7 @@ class BackupSafetyTests(unittest.TestCase):
             info = [{"Name": "/" + name, "State": {"Running": True}, "Image": "sha256:" + "a"*64,
                      "Config": {"Labels": {"com.docker.compose.project": "fixture",
                                            "com.docker.compose.project.working_dir": str(root)}},
-                     "Mounts": [{"Destination": "/var/lib/orthanc/db", "Type": "volume", "Name": "fixture-volume"}]}
+                     "Mounts": [{"Destination": "/var/lib/orthanc/db", "Type": "volume", "Name": "fixture-volume"}, {"Destination": ops.EMR_STATE, "Type": "volume", "Name": "fixture-emr-state"}]}
                     for name in (*ops.CONTAINERS, "kin-proxy")]
 
             def fake_text(args, **kwargs):
@@ -346,10 +359,12 @@ class BackupSafetyTests(unittest.TestCase):
                     return '[{"RepoDigests": []}]'
                 if "pg_database_size('kin')" in " ".join(args):
                     return "4096"
+                if "pg_stat_activity" in " ".join(args):
+                    return "0"
                 return "" if "status" in args else "a"*40
 
             def fake_run(args, **kwargs):
-                if "pg_dump" in args:
+                if "pg_dump" in args or "pg_dumpall" in args:
                     kwargs["output"].write(b"fixture dump")
                 return SimpleNamespace(returncode=0, stdout=b"")
 
@@ -367,7 +382,8 @@ class BackupSafetyTests(unittest.TestCase):
                 self.assertEqual(audit.main(["init", str(output)]), 0)
             with patch.object(ops, "ROOT", root), patch.object(ops, "text", side_effect=fake_text), \
                     patch.object(ops, "run", side_effect=fake_run), patch.object(ops, "temporary_run", side_effect=fake_archive), \
-                    patch.object(ops, "counts", return_value={"Report": 5}), \
+                    patch.object(ops, "emr_catalog", return_value={"synthetic": "catalog"}), \
+                patch.object(ops, "counts", return_value={"public.Report": 5}), \
                     patch.object(ops, "wait_ready", side_effect=RuntimeError("fixture timeout")), \
                     patch.object(audit, "evaluate", return_value=rows_stream({1: "fixture"})):
                 with self.assertRaisesRegex(RuntimeError, "readiness needs recovery"):
@@ -698,6 +714,12 @@ class BackupSafetyTests(unittest.TestCase):
             def rehearse():
                 with patch.object(sys, "argv", ["ops_backup.py", "rehearse", str(sealed)]):
                     ops.main()
+            def rehearsal_run(args, **kwargs):
+                # This boundary test simulates provisioning only; the real verifier/exporter still hits FakeDocker
+                # and its watchdog. B L07/L19 exercise these provisioning statements on PostgreSQL itself.
+                if args[:2] == ["docker", "exec"] and ("mkdir" in args or "psql" in args):
+                    return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+                return real_run(args, **kwargs)
             for label, plan, success in (("sound", dict(answer=verifier_answer(rows)), True),
                                          ("the restored copy's export stalls", dict(exporter="stall"), False)):
                 with self.subTest(label):
@@ -705,7 +727,9 @@ class BackupSafetyTests(unittest.TestCase):
                     earlier = set(sealed.glob("rehearsal-*.json"))
                     before = host.files(sealed)
                     with fake.active(), patch.object(ops, "ROOT", host.repo), patch.object(ops, "require_local_docker"), \
-                            patch.object(ops, "counts", return_value={"Report": 5}), \
+                            patch.object(ops, "run", side_effect=rehearsal_run), \
+                            patch.object(ops, "emr_catalog", return_value={"synthetic": "catalog"}), \
+                            patch.object(ops, "counts", return_value={"public.Report": 5}), \
                             patch.object(ops, "temporary_run", side_effect=host.fake_archive), \
                             patch.object(audit, "evaluate", side_effect=limited), \
                             contextlib.redirect_stdout(io.StringIO()):
@@ -726,6 +750,162 @@ class BackupSafetyTests(unittest.TestCase):
                     self.assertEqual(fake.running(), [])
                     self.assertEqual((fake.names("containers"), fake.names("volumes")), ([], []))
                     self.assertEqual(host.files(sealed), before)
+
+
+class EmrRestoreVerification(unittest.TestCase):
+    """REQ-EMR-19/20 -> RISK-EMR-LOSS/PRIVILEGE -> TEST-EMR-B-F09.
+
+    Exercise the real backup validation and rehearsal verdict with file corruption and observed catalog differences.
+    Only Docker/catalog and ledger IO are synthetic here; L19 verifies the same flow with real PostgreSQL and state.
+    Audit-only scratch databases may ignore physical placement; the deployment rehearsal must never do so.
+    """
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.host = Host(temporary.name)
+        self.host.catalog = {
+            "schema": {"owner": "kin_emr_owner", "acl": "kin_runtime=U/kin_emr_owner"},
+            "roles": [{"rolname": name, "rolsuper": False, "rolcanlogin": name != "kin_emr_owner"}
+                      for name in ("kin_emr_owner", "kin_runtime", "kin_emr_reader", "kin_emr_retention")],
+            "memberships": None,
+            "tablespace": {"name": "kin_emr_access", "owner": "kin_emr_owner", "acl": None},
+            "tables": [{"name": "member_identity", "owner": "kin_emr_owner", "acl": None,
+                        "tablespace": "kin_emr_access"}],
+            "functions": [{"signature": "emr_access.append_access(text)", "owner": "kin_emr_owner",
+                           "acl": "kin_runtime=X/kin_emr_owner", "security_definer": True,
+                           "configuration": ["search_path=pg_catalog, emr_access"]}],
+        }
+        self.host.init_ledger()
+        self.answer = rows_stream({1: "synthetic-audit"})
+        self.folder, self.manifest, error = self.host.backup(self.answer)
+        self.assertIsNone(error)
+
+    def assert_restore_refused(self):
+        before = self.host.files(self.folder)
+        result, error, _, cleanup = self.host.rehearse(self.folder, self.answer)
+        self.assertIsInstance(error, RuntimeError)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["cleanup_failures"], [])
+        self.assertEqual(cleanup.call_count, 3)
+        self.assertEqual(self.host.files(self.folder), before)
+
+    def test_b_layout_and_same_pause_components_restore(self):
+        self.assertTrue(self.manifest["emr"]["same_pause"])
+        self.assertTrue(set(ops.EMR_FILES).issubset(self.manifest["sha256"]))
+        result, error, _, cleanup = self.host.rehearse(self.folder, self.answer)
+        self.assertIsNone(error)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["emr"], {"owner_acl_preserved": True, "database_state_verified": True})
+        self.assertTrue(result["audit"]["verified"])
+        self.assertEqual(cleanup.call_count, 3)
+
+    def test_tampered_and_partial_components_refuse_before_restore(self):
+        for name in ("kin.dump", *ops.EMR_FILES):
+            path = self.folder / name
+            original = path.read_bytes()
+            for missing in (False, True):
+                with self.subTest(component=name, missing=missing):
+                    try:
+                        if missing:
+                            path.unlink()
+                        else:
+                            path.write_bytes(original + b"tampered")
+                        with patch.object(ops, "run") as docker_boundary:
+                            with self.assertRaises(RuntimeError):
+                                ops.validate_backup(self.folder)
+                            docker_boundary.assert_not_called()
+                    finally:
+                        path.write_bytes(original)
+
+    def test_missing_or_moved_tablespace_refused(self):
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                changed = copy.deepcopy(self.host.catalog)
+                if missing:
+                    changed["tablespace"] = None
+                else:
+                    changed["tables"][0]["tablespace"] = None
+                self.host.restored_catalog = changed
+                self.assert_restore_refused()
+
+    def test_wrong_owner_refused(self):
+        for field in ("schema", "tablespace", "tables", "functions"):
+            with self.subTest(field=field):
+                changed = copy.deepcopy(self.host.catalog)
+                item = changed[field][0] if isinstance(changed[field], list) else changed[field]
+                item["owner"] = "kin_runtime"
+                self.host.restored_catalog = changed
+                self.assert_restore_refused()
+
+    def test_changed_acl_refused(self):
+        changed = copy.deepcopy(self.host.catalog)
+        changed["tables"][0]["acl"] = "kin_runtime=arwdDxt/kin_emr_owner"
+        self.host.restored_catalog = changed
+        self.assert_restore_refused()
+
+    def test_changed_roles_refused(self):
+        changed = copy.deepcopy(self.host.catalog)
+        changed["roles"][0]["rolcanlogin"] = True
+        self.host.restored_catalog = changed
+        self.assert_restore_refused()
+
+    def test_database_external_state_disagreement_refused(self):
+        self.host.restore_answer = "unverified"
+        self.assert_restore_refused()
+
+    def test_unattested_pause_refused(self):
+        self.manifest["emr"]["same_pause"] = False
+        (self.folder / "manifest.json").write_text(json.dumps(self.manifest), encoding="utf-8")
+        with patch.object(ops, "run") as docker_boundary:
+            with self.assertRaises(RuntimeError):
+                ops.rehearse(self.folder)
+            docker_boundary.assert_not_called()
+
+    def test_missing_state_volume_refuses_before_pause_or_dump(self):
+        api = next(item for item in self.host.info if item['Name'] == '/kin-api')
+        api['Mounts'] = [mount for mount in api['Mounts'] if mount['Destination'] != ops.EMR_STATE]
+        before = set(self.host.parent.iterdir())
+        with patch.object(ops, 'ROOT', self.host.repo), patch.object(ops, 'text', side_effect=self.host.fake_text), \
+                patch.object(ops, 'run') as commands, patch.object(ops, 'temporary_run') as helpers:
+            with self.assertRaisesRegex(RuntimeError, 'Expected one named EMR state volume'):
+                ops.backup(self.host.parent)
+            commands.assert_not_called()
+            helpers.assert_not_called()
+        self.assertEqual(set(self.host.parent.iterdir()), before)
+
+    def test_connected_database_client_refuses_dump_and_resumes_writers(self):
+        original = self.host.fake_text
+        def connected(args, **kwargs):
+            return '1' if 'pg_stat_activity' in ' '.join(args) else original(args, **kwargs)
+        self.host.events.clear()
+        with patch.object(self.host, 'fake_text', side_effect=connected):
+            _, manifest, error = self.host.backup(self.answer)
+        self.assertIsInstance(error, RuntimeError)
+        self.assertIn('Database clients remain', str(error))
+        self.assertFalse(manifest['complete'])
+        commands = [event[1] for event in self.host.events if event[0] == 'command']
+        self.assertFalse(any('pg_dump' in command or 'pg_dumpall' in command for command in commands))
+        resumed = [name for command in commands if command[:2] == ['docker', 'start'] for name in command[2:]]
+        self.assertCountEqual(resumed, ops.CONTAINERS[:-1])
+
+    def test_unsafe_emr_archive_refused_despite_matching_checksum(self):
+        archive_path = self.folder / 'emr-state.tgz'
+        for name, kind in [('../outside', tarfile.REGTYPE), ('/absolute', tarfile.REGTYPE),
+                           ('seal/link', tarfile.SYMTYPE), ('seal/device', tarfile.CHRTYPE)]:
+            with self.subTest(name=name):
+                with tarfile.open(archive_path, 'w:gz') as archive:
+                    entry = tarfile.TarInfo(name)
+                    entry.type = kind
+                    entry.linkname = '../outside' if kind == tarfile.SYMTYPE else ''
+                    archive.addfile(entry)
+                self.manifest['sha256']['emr-state.tgz'] = ops.digest(archive_path)
+                self.manifest['bytes']['emr-state.tgz'] = archive_path.stat().st_size
+                ops.write_json(self.folder / 'manifest.json', self.manifest)
+                with patch.object(ops, 'run') as commands:
+                    with self.assertRaisesRegex(RuntimeError, 'Unsafe EMR archive entry'):
+                        ops.validate_backup(self.folder)
+                    commands.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -77,6 +77,7 @@ const M = load('emr-contract/composition'), C = load('emr-contract/classificatio
 const S = load('emr-contract/signature'), L = load('emr-contract/report-lifecycle'), D = load('emr-contract/lawful-defaults');
 const CV = load('emr-signature/canonical-v2'), CS = load('emr-signature/contract'), TB = load('emr-signature/time-basis');
 const K = load('emr-signature/keys'), V = load('emr-signature/verify'), NP = load('emr-signature/native-port');
+const CTX = load('emr-report/contract');
 const CMD = load('emr-report/commands'), RD = load('emr-report/reads'), RT = load('emr-report/retention');
 const G = load('emr-report/offline-grant'), Q = load('emr-report/offline-queue'), REC = load('emr-report/reconcile');
 if (previousLoader) require.extensions['.ts'] = previousLoader; else delete require.extensions['.ts'];
@@ -221,7 +222,7 @@ function online(srv, actorId, action, o = {}) {
   const command = { action, recordId: srv.facts.recordId, eventId: o.eventId ?? (sig ? sig.payload.eventId : next('event')),
     expectedClaimGeneration: o.expectedClaimGeneration ?? srv.facts.claimGeneration, expectedPublishedVersionId: srv.facts.publishedVersion?.versionId ?? null,
     draft: o.draft ?? null, reason: o.reason ?? null, reviewerId: o.reviewerId ?? null, preservation: o.preservation ?? null, envelope, ...(o.extra ?? {}) };
-  return CMD.planReportCommand({ actor: actor(actorId, o.actor), study: study(o.study), facts: o.facts ?? srv.facts, author: who(author),
+  return CMD.planReportCommand({ actor: actor(actorId, o.actor), workStudy: o.workStudy ?? null, study: study(o.study), facts: o.facts ?? srv.facts, author: who(author),
     ownDraftRevision: srv.drafts.get(actorId) ?? null, attachments: [], signature: sig, retained, receivedAt: o.receivedAt ?? at, ingress: o.ingress ?? ingress,
     mode: 'online', storedVersions: o.storedVersions }, command);
 }
@@ -289,7 +290,7 @@ function reconcile(srv, entry, o = {}) {
   const p = JSON.parse(Buffer.from(entry.envelope.payload, 'base64url').toString('utf8'));
   let retained = null;
   try { retained = retainedFor(srv, V.verifySignatureV2(entry.envelope, ports, { osUserId: entry.owner.osUserId })); } catch { retained = null; }
-  return REC.reconcileOfflineEvent({ actor: actor(o.submitter ?? p.signer.id, o.actor), study: study(), facts: srv.facts, author: who(o.author ?? p.author.id),
+  return REC.reconcileOfflineEvent({ actor: actor(o.submitter ?? p.signer.id, o.actor), workStudy: null, study: study(), facts: srv.facts, author: who(o.author ?? p.author.id),
     ownDraftRevision: srv.drafts.get(p.signer.id) ?? null, attachments: [], retained: o.retained === undefined ? retained : o.retained, receivedAt: o.receivedAt, ingress: o.ingress ?? ingress,
     verification: ports, grants: grantReader, existingReceipt: srv.receipts.get(entry.eventId) ?? null, predecessor: o.predecessor ?? null, existingAdoption: o.existingAdoption ?? null, storedVersions: o.storedVersions,
     adoptDivergedDraft: o.adopt ?? false }, entry);
@@ -307,6 +308,7 @@ test('C-C01 write, private draft, release, independent preliminary approval and 
   const text = { findings: 'SYN 초안', conclusion: '', recommendation: '' };
   const saved = await run(srv, 'r1', 'save', { at: plus(T0, MIN), draft: { expectedRevision: null, revision: 'e1:1', text } });
   assert.equal(saved.plan.draft.author, 'r1');
+  assert.deepEqual(saved.plan.ledger[0].event.context, { basis: 'worklist', studyId: STUDY, relatedStudyId: null, reason: null });
   assert.equal(srv.drafts.get('r1'), 'e1:1');
   // Another reader cannot write into this claim, and the request cannot name an author or an authority.
   assert.throws(() => online(srv, 'r2', 'save', { at: plus(T0, 2 * MIN), draft: { expectedRevision: null, revision: 'e9:1', text } }));
@@ -330,6 +332,7 @@ test('C-C01 write, private draft, release, independent preliminary approval and 
   const approval = await run(srv, 'r2', 'approve', { at: approvedAt });
   assert.equal(srv.facts.state, 'Approved');
   assert.equal(approval.plan.publish, true);
+  assert.deepEqual(approval.plan.ledger[0].event.context, { basis: 'assigned-reading', studyId: STUDY, relatedStudyId: null, reason: null });
   assert.equal(approval.result.receipt.publishedAt, approvedAt);
   assert.equal(srv.facts.firstApprovedAt, approvedAt);
   assert.equal(srv.facts.amendUntil, plus(approvedAt, DAY));
@@ -424,7 +427,7 @@ test('C-C02 v1 envelopes re-verify unchanged, v2 binds the exact text and a radi
   const notePayload = o => ({ ...payload({ action: 'record', recordId: noteRecord, signer: 't1', signedAt: T0, claimGeneration: 0, text: { kind: 'clinical-entry', body: noteText }, ...o }),
     recordKind: 'tech-note' });
   const np = notePayload({}), nenv = envelopeFor(np), nsig = verify(nenv, 'os-t1');
-  const noteCtx = (who, signature, previous = null) => ({ actor: who, study: study(), recordId: noteRecord, previous, signature, receivedAt: plus(T0, 1000), ingress });
+  const noteCtx = (who, signature, previous = null) => ({ actor: who, workStudy: null, study: study(), recordId: noteRecord, previous, signature, receivedAt: plus(T0, 1000), ingress });
   const noteInput = { versionId: np.versionId, text: noteText, reason: null, eventId: np.eventId, envelope: nenv };
   const signedNote = allowed(() => CMD.planTechNoteRevision(noteCtx(tech, nsig), noteInput));
   assert.equal(signedNote.signing, 'author-signs');
@@ -445,7 +448,7 @@ test('C-C02 v1 envelopes re-verify unchanged, v2 binds the exact text and a radi
   await run(reportUnit, 'r1', 'start', { at: plus(T0, -MIN) });
   const rpay = payload({ action: 'approve-sign', recordId: reportUnit.facts.recordId, signer: 'r1', signedAt: T0, claimGeneration: reportUnit.facts.claimGeneration });
   const rgood = envelopeFor(rpay), rsig0 = verify(rgood, 'os-r1');
-  const reportCtx = { actor: actor('r1'), study: study(), facts: reportUnit.facts, author: who('r1'), ownDraftRevision: null, attachments: [], signature: rsig0,
+  const reportCtx = { actor: actor('r1'), workStudy: null, study: study(), facts: reportUnit.facts, author: who('r1'), ownDraftRevision: null, attachments: [], signature: rsig0,
     retained: retainedFor(reportUnit, rsig0), receivedAt: T0, ingress, mode: 'online' };
   const reportCommand = env => ({ action: 'approve', recordId: reportUnit.facts.recordId, eventId: rpay.eventId, expectedClaimGeneration: reportUnit.facts.claimGeneration,
     expectedPublishedVersionId: null, draft: null, reason: null, reviewerId: null, preservation: null, envelope: env });
@@ -569,7 +572,7 @@ test('C-C04 t0 is the first actual signing time and amendment closes at t0+24h; 
     assert.equal(r.kind, 'refused');
     assert.equal(r.code, 'SignedPayloadBindingRefused');
   }
-  const noRetained = REC.reconcileOfflineEvent({ actor: actor('r2'), study: study(), facts: lateFin.facts, author: who('r2'), ownDraftRevision: null, attachments: [],
+  const noRetained = REC.reconcileOfflineEvent({ actor: actor('r2'), workStudy: null, study: study(), facts: lateFin.facts, author: who('r2'), ownDraftRevision: null, attachments: [],
     retained: null, receivedAt: plus(T0, 30 * H), ingress, verification: ports, grants: grantReader, existingReceipt: null, predecessor: null, adoptDivergedDraft: false }, good);
   assert.equal(noRetained.kind, 'refused');
   assert.equal(noRetained.code, 'RetainedRecordRequired');
@@ -866,9 +869,38 @@ test('C-C07 an equivalent retry with the same eventId returns the original recei
 
 test('C-C08 bodies are served after the durable receipt to the actual target and version, display is a separate event, each write act is ledgered once; list/409 leaks, authorisation-as-read and invented offline addresses are refused', async () => {
   const srv = await approvedUnit(T0, 'r1');
-  const ctx = (over = {}) => ({ actor: actor('c1', { roles: ['clinician'], canSign: false, canCancel: false }), roleAllowed: true, study: study(), facts: srv.facts, archive: null, resume: null,
+  const ctx = (over = {}) => ({ actor: actor('c1', { roles: ['clinician'], canSign: false, canCancel: false }), roleAllowed: true, workStudy: null, study: study(), facts: srv.facts, archive: null, resume: null,
     retained: { record: srv.record, at: plus(T0, H) }, ingress, now: plus(T0, H), ...over });
   const plan = allowed(() => RD.planReportRead(ctx(), { surface: 'clinician', versionId: null, eventId: 'read-1' }));
+  // REQ-EMR-07 / D-18 -> RISK-EMR-07 -> C-C08: derive observed work, never a default reason.
+  const expected = (basis, studyId = STUDY, relatedStudyId = null) => ({ basis, studyId, relatedStudyId, reason: null });
+  const workStudy = { studyId: 'current-work-study', patient: { ...patient } };
+  const bound = ctx({ actor: actor('r1'), workStudy });
+  assert.deepEqual(CTX.workContextFor(ctx()), expected('worklist'));
+  assert.deepEqual(CTX.workContextFor(bound), expected('same-patient-comparison', workStudy.studyId, STUDY));
+  const assigned = { ...bound, study: study({ assignment: { readerId: 'r1', generation: 7 } }) };
+  assert.deepEqual(CTX.workContextFor(assigned), expected('assigned-reading'));
+  for (const preliminary of [{ authorId: 'r1', reviewerId: 'r2' }, { authorId: 'r2', reviewerId: 'r1' }])
+    assert.deepEqual(CTX.workContextFor({ ...bound, facts: { studyId: STUDY, preliminary } }), expected('assigned-reading'));
+  assert.deepEqual(CTX.workContextFor({ ...bound, facts: { studyId: 'other-study', preliminary: { authorId: 'r1', reviewerId: 'r2' } } }),
+    expected('same-patient-comparison', workStudy.studyId, STUDY));
+  for (const work of [null, { ...workStudy, studyId: STUDY },
+    ...['linkId', 'patientId', 'assigningAuthority'].map(key => ({ ...workStudy, patient: { ...patient, [key]: 'different' } }))])
+    assert.deepEqual(CTX.workContextFor({ ...bound, workStudy: work }), expected('worklist'));
+  for (const [cause, member] of [['background-fetch', actor('r1')], ['service-job', actor('job', { kind: 'service' })]])
+    assert.deepEqual(CTX.workContextFor({ ...assigned, cause, actor: member }), expected(cause));
+  assert.equal(CTX.workContextFor({ ...assigned, cause: 'service-job' }), null);
+  assert.equal(CTX.workContextFor({ ...assigned, actor: actor('job', { kind: 'service' }) }), null);
+  const invisible = { ...assigned, actor: actor('r1', { institutionId: 'inst-other' }) };
+  assert.equal(CTX.workContextFor(invisible), null);
+  assert.throws(() => A.parseAccessEvent({ ...plan.event, context: CTX.workContextFor(invisible) }));
+  assert.throws(() => RD.planReportRead(invisible, { surface: 'reader', versionId: null, eventId: 'no-context' }), { code: 'InstitutionRefused' });
+  for (const [context, basis, current, related] of [[ctx(), 'worklist', STUDY, null],
+    [bound, 'same-patient-comparison', workStudy.studyId, STUDY], [assigned, 'assigned-reading', STUDY, null]]) {
+    const observed = RD.planReportRead(context, { surface: 'reader', versionId: null, eventId: 'context-' + basis });
+    assert.deepEqual(observed.event.context, expected(basis, current, related));
+    assert.deepEqual(RD.displayReported(context, observed, plus(T0, H + 1000), 'display-' + basis).context, expected(basis, current, related));
+  }
   assert.equal(plan.version.versionId, srv.facts.publishedVersion.versionId);
   assert.equal(plan.event.targets[0].versionId.value, srv.facts.publishedVersion.versionId);
   assert.equal(A.STATUTORY_ACT[plan.event.action], '열람');
@@ -1092,14 +1124,14 @@ test('C-C11 retained transitions and reads keep lawful preservation and archive;
   assert.equal(afterEntry.state, 'retention-only');
   assert.equal(afterEntry.ordinaryClinicalAccess, false);
   // O5: reading the archived unit after its preservation entry stays closed to ordinary access.
-  assert.throws(() => RD.planReportRead({ actor: actor('r3'), roleAllowed: true, study: study(), facts: entry.facts, archive: arc.archive, resume: null,
+  assert.throws(() => RD.planReportRead({ actor: actor('r3'), roleAllowed: true, workStudy: null, study: study(), facts: entry.facts, archive: arc.archive, resume: null,
     retained: { record: entry.retention, at: entryAt }, ingress, now: entryAt }, { surface: 'reader', versionId: null, eventId: 'read-o5' }), { code: 'RetentionOnlyAccessRefused' });
   const clinical = allowed(() => online(arc, 'r2', 'addendum', { at: entryAt }));
   assert.equal(clinical.publish, true);
   assert.equal(RT.readRetention(clinical.facts, arc.archive, null, { record: clinical.retention, at: entryAt }).ordinaryClinicalAccess, true);
   // L5-04: every read names the stored record and the instant.
   const fresh = await approvedUnit(T0, 'r1');
-  const readCtx = retained => ({ actor: actor('r2'), roleAllowed: true, study: study(), facts: fresh.facts, archive: null, resume: null, retained, ingress, now: plus(T0, H) });
+  const readCtx = retained => ({ actor: actor('r2'), roleAllowed: true, workStudy: null, study: study(), facts: fresh.facts, archive: null, resume: null, retained, ingress, now: plus(T0, H) });
   for (const missing of [null, undefined, { record: fresh.record }, { at: plus(T0, H) }])
     assert.throws(() => RD.planReportRead(readCtx(missing), { surface: 'reader', versionId: null, eventId: 'read-c11' }), { code: 'RetainedReadArgumentRequired' });
   allowed(() => RD.planReportRead(readCtx({ record: fresh.record, at: plus(T0, H) }), { surface: 'reader', versionId: null, eventId: 'read-c11' }));
@@ -1139,7 +1171,7 @@ test('C-C13 read and print requests stay on one version and an acknowledgement b
   const v1 = srv.facts.publishedVersion;
   await run(srv, 'r1', 'amend', { at: plus(T0, H) });
   const v2 = srv.facts.publishedVersion;
-  const ctx = { actor: actor('r2'), roleAllowed: true, study: study(), facts: srv.facts, archive: null, resume: null, retained: { record: srv.record, at: plus(T0, 2 * H) }, ingress, now: plus(T0, 2 * H) };
+  const ctx = { actor: actor('r2'), roleAllowed: true, workStudy: null, study: study(), facts: srv.facts, archive: null, resume: null, retained: { record: srv.record, at: plus(T0, 2 * H) }, ingress, now: plus(T0, 2 * H) };
   const preview = RD.planReportRead(ctx, { surface: 'preview', versionId: v1.versionId, eventId: 'preview-1' });
   assert.equal(preview.version.versionId, v1.versionId);
   const opened = allowed(() => RD.printRequested(ctx, preview, v1.versionId, plus(T0, 2 * H + 1000), 'print-1'));

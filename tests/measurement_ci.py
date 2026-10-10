@@ -36,6 +36,14 @@ PROFILES = {
         'suite_timeout': 1200,
         'suites': (('e2e/test_context_loss.py', 'ContextLossE2E', 'ci-context-loss'),),
     },
+    # EMR-B1: the access ledger's own disposable PostgreSQL/API containers (emr/units/b.json cases.live).
+    # D941 includes live 20k prefill and interleaved latency measurement in the same gated suite.
+    'emr-b': {
+        'out': ROOT / 'tests/e2e/artifacts/emr-b-ci',
+        'project_prefix': 'kin-emr-b-ci-',
+        'suite_timeout': 3600,
+        'suites': (('emr/b/live.py', 'EmrBLedgerLive', 'ci-emr-b-ledger'),),
+    },
     'u5-session-api': {
         'out': ROOT / 'tests/e2e/artifacts/u5-session-api-ci',
         'project_prefix': 'kin-u5-session-api-ci-',
@@ -685,6 +693,12 @@ def inspect_failed_module(run, out, compose, unit, suite, result):
         gate.release_after_inspection(record)
 
 
+def profile_deadline_seconds(profile_name):
+    # D941's live 20k prefill needs the whole EMR suite budget plus setup/cleanup.
+    # Every other existing profile retains the shared 25 minute deadline.
+    return 65*60 if profile_name == 'emr-b' else 25*60
+
+
 def main(profile_name, credential_provider=None):
     if profile_name not in PROFILES:
         raise RuntimeError('Unknown CI profile')
@@ -704,7 +718,9 @@ def main(profile_name, credential_provider=None):
     os.environ['KIN_SYNTHETIC_REALM'] = '1'
     out.mkdir(parents=True, exist_ok=False)
     values = {key: secrets.token_hex(32) for key in ['POSTGRES_PASSWORD','ORTHANC_PASS',
-              'KC_ADMIN_PASSWORD','KC_CLIENT_SECRET','KC_WEB_SECRET','KIN_COOKIE_SECRET']}
+              'KC_ADMIN_PASSWORD','KC_CLIENT_SECRET','KC_WEB_SECRET','KIN_COOKIE_SECRET',
+              # EMR-B1: the API's runtime database login (docker-compose.yml requires it; emr-provision sets it).
+              'KIN_EMR_RUNTIME_PASSWORD']}
     for value in values.values(): print('::add-mask::'+value, flush=True)
     evidence_stage = None
     if profile_name == 'volume-rendering':
@@ -719,7 +735,7 @@ def main(profile_name, credential_provider=None):
     # not this project name. Helpers must still address the same Compose project.
     env['COMPOSE_PROJECT_NAME'] = project
     compose = ['docker','compose','-p',project]
-    results = []; deadline = time.monotonic()+25*60
+    results = []; deadline = time.monotonic() + profile_deadline_seconds(profile_name)
     def run(name, command, timeout=600, finalizing=False, fail_fast=True):
         started = time.monotonic()
         if not finalizing: timeout = max(.1, min(timeout, deadline-started))

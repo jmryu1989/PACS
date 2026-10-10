@@ -1,0 +1,10 @@
+{
+  "unit": "stage2-emr-b-restore",
+  "mode": "live",
+  "max_attempts": 3,
+  "timeout_seconds": 1800,
+  "tests": [
+    {"file": "tests/emr/b/live.py", "case": "EmrBLedgerLive.test_b07_migration_backup_restore_roles"},
+    {"file": "tests/emr/b/live.py", "case": "EmrBLedgerLive.test_b19_backup_rehearsal_preserves_database_and_external_state"}
+  ]
+}

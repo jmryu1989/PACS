@@ -17,13 +17,28 @@ UID = '2.25.123456789'
 MIGRATIONS = [dict(path=transfer.MIGRATIONS[0], sha256='f'*64)]
 
 
+def emr_catalog():
+    """A synthetic emr_access catalog of the shape emr_catalog_contract accepts (the hosted run observes the real one)."""
+    return dict(tablespace=dict(name='kin_emr_access', owner='kin_emr_owner'),
+        schema=dict(owner='kin_emr_owner', acl=['fixture-test-only']),
+        relations=[dict(name=name, kind='r', owner='kin_emr_owner', tablespace='kin_emr_access', acl=None) for name in transfer.EMR_TABLES],
+        columns=[dict(column_name='fixture-test-only')], constraints=[dict(name='fixture-test-only')],
+        triggers=[dict(name='fixture-test-only')],
+        functions=[dict(signature='emr_access.fixture_test_only()', owner='kin_emr_owner', security_definer=True,
+                        config=['search_path=pg_catalog, pg_temp', 'jit=off'], acl=None, body_sha256='0'*64)],
+        roles=[dict(name=name, super=False, createrole=False, createdb=False, replication=False, bypassrls=False, inherit=False,
+                    login=name != 'kin_emr_owner') for name in transfer.EMR_ROLES],
+        memberships=0, runtime_grants=['AuditLog:INSERT', 'AuditLog:SELECT'], default_acl=['public:r:fixture-test-only'])
+
+
 def fixture():
     body, files, pg_config, orth_config = combined_fixture()
     catalog = dict(tables=transfer.TABLES, columns=[dict(column_name='fixture-test-only')],
         constraints=[dict(name='fixture-test-only')], indexes=[dict(name='fixture-test-only')],
         sequence_settings=[dict(sequencename=name) for name in transfer.SEQUENCES])
     product = dict(migrations=MIGRATIONS, study_uid=UID, catalog=catalog,
-                   rows=transfer.expected_rows(UID), sequences=transfer.expected_sequences())
+                   rows=transfer.expected_rows(UID), sequences=transfer.expected_sequences(),
+                   emr=dict(catalog=emr_catalog(), rows=transfer.expected_emr_rows()))
     return dict(body, schema=2, profile=transfer.PROFILE, product=product,
                 relation=transfer.relation(body['snapshot'])), files, pg_config, orth_config
 
@@ -53,7 +68,7 @@ class Pure(unittest.TestCase):
                 ('MemberRights', 'version', 1), ('MemberRights', 'newAuthAfter', None),
                 ('MemberRightsImport', 'id', 'wrong-import'),
                 ('StudyState', 'preDocSub', None), ('StudyState', 'preReviewerSub', 'wrong-reviewer')]:
-            actual = {key: copy.deepcopy(expected[key]) for key in ('catalog', 'rows', 'sequences')}
+            actual = {key: copy.deepcopy(expected[key]) for key in ('catalog', 'rows', 'sequences', 'emr')}
             actual['rows'][table][0][field] = value
             with self.subTest(table=table, field=field), patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
                 transfer.verify_product('owned', 'kin', expected)
@@ -72,7 +87,7 @@ class Pure(unittest.TestCase):
                 ('StudyQuestionEntry','fingerprint','0'*64),('StudyQuestionEntry','result',{}),('StudyQuestionEntry','reportVersion',1),
                 ('StudyImageRequest','institutionId','SYNTHETIC-tele'),('StudyImageRequest','counterpartyInstitutionId',None),('StudyImageRequest','handlerActor',None),('StudyImageRequest','revision',2),
                 ('StudyImageRequestReceipt','fingerprint','0'*64),('StudyImageRequestReceipt','result',{}),('StudyImageRequestReceipt','subjectSub','SYNTHETIC-other-sub')]:
-            actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
+            actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences','emr')}
             actual['rows'][table][0][field]=value
             with self.subTest(table=table,field=field),patch.object(transfer,'observe',return_value=actual),self.assertRaises(transfer.ProductMismatch):
                 transfer.verify_product('owned','kin',expected)
@@ -88,12 +103,12 @@ class Pure(unittest.TestCase):
                          [(UID,'SYNTHETIC-hospital',4,False,None,True),(UID,'SYNTHETIC-tele',3,True,3,False)])
         for index,field,value in [(1,'closedAt',None),(1,'closedRevision',None),(1,'institutionId','SYNTHETIC-hospital'),
                                   (0,'closedRevision',4),(0,'institutionId','SYNTHETIC-tele')]:
-            actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
+            actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences','emr')}
             actual['rows']['ReaderAssignment'][index][field]=value
             with self.subTest(index=index,field=field),patch.object(transfer,'observe',return_value=actual),self.assertRaises(transfer.ProductMismatch):
                 transfer.verify_product('owned','kin',expected)
         for index in (0,1):
-            actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
+            actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences','emr')}
             del actual['rows']['ReaderAssignment'][index]
             with self.subTest(dropped=index),patch.object(transfer,'observe',return_value=actual),self.assertRaises(transfer.ProductMismatch):
                 transfer.verify_product('owned','kin',expected)
@@ -106,11 +121,11 @@ class Pure(unittest.TestCase):
              ('SYNTHETIC-hospital','SYNTHETIC-other')})
         for index,field,value in [(0,'bindings',{}),(0,'revision',1),(1,'institution','wrong-owner'),
                 (2,'subject','wrong-owner'),(2,'bindings',rows[0]['bindings'])]:
-            actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
+            actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences','emr')}
             actual['rows']['WorkspaceShortcuts'][index][field]=value
             with self.subTest(index=index,field=field),patch.object(transfer,'observe',return_value=actual),self.assertRaises(transfer.ProductMismatch):
                 transfer.verify_product('owned','kin',expected)
-        actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
+        actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences','emr')}
         actual['rows']['WorkspaceShortcuts']=[]
         with patch.object(transfer,'observe',return_value=actual),self.assertRaises(transfer.ProductMismatch):
             transfer.verify_product('owned','kin',expected)
@@ -118,10 +133,10 @@ class Pure(unittest.TestCase):
     def test_worklist_column_restore_contract(self):
         body, _, _, _ = fixture(); expected=body['product']
         self.assertEqual(len(expected['rows']['WorklistColumns']),2)
-        actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
+        actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences','emr')}
         with patch.object(transfer,'observe',return_value=actual):transfer.verify_product('owned','kin',expected)
         for row,field,value in [(0,'value',None),(0,'revision',1),(0,'subject','wrong-owner'),(1,'value','{}'),(1,'revision',1)]:
-            actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
+            actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences','emr')}
             actual['rows']['WorklistColumns'][row][field]=value
             with patch.object(transfer,'observe',return_value=actual), self.assertRaises(transfer.ProductMismatch):
                 transfer.verify_product('owned','kin',expected)
@@ -139,13 +154,13 @@ class Pure(unittest.TestCase):
             changed=copy.deepcopy(layout);changed['reading'][key]=value;changed_layouts.append(changed)
         legacy=copy.deepcopy(layout);del legacy['reading'];legacy['version']=1;changed_layouts.append(legacy)
         for changed in changed_layouts:
-            actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
+            actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences','emr')}
             actual['rows']['WorkspaceLayout'][0]['value']=json.dumps(changed,separators=(',',':'))
             with self.subTest(layout=changed),patch.object(transfer,'observe',return_value=actual),self.assertRaises(transfer.ProductMismatch):
                 transfer.verify_product('owned','kin',expected)
         for index,field,value in [(0,'revision',1),(0,'subject','wrong-owner'),
                 (0,'institution','wrong-institution'),(1,'value',row['value'])]:
-            actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
+            actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences','emr')}
             actual['rows']['WorkspaceLayout'][index][field]=value
             with self.subTest(index=index,field=field),patch.object(transfer,'observe',return_value=actual),self.assertRaises(transfer.ProductMismatch):
                 transfer.verify_product('owned','kin',expected)
@@ -158,7 +173,7 @@ class Pure(unittest.TestCase):
                          ('SYNTHETIC/CT', 'SYNTHETIC follow-up', 7))
         self.assertEqual(expected['sequences']['UserFilter_id_seq'], dict(last_value=1, is_called=True))
         for field, value in (('folder',''), ('description','changed'), ('ordinal',0)):
-            actual = {key: copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
+            actual = {key: copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences','emr')}
             actual['rows']['UserFilter'][0][field] = value
             with patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
                 transfer.verify_product('owned', 'kin', expected)
@@ -168,7 +183,7 @@ class Pure(unittest.TestCase):
         self.assertEqual(expected['rows']['UserFilterCollection'][0]['folders'][0]['path'], 'SYNTHETIC/Empty')
         for field, value in [('owner', 'wrong-owner'), ('revision', 0), ('folders', []),
                              ('folders', [dict(path='SYNTHETIC/Empty', description='changed', ordinal=2)])]:
-            actual = {key: copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
+            actual = {key: copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences','emr')}
             actual['rows']['UserFilterCollection'][0][field] = value
             with self.subTest(field=field), patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
                 transfer.verify_product('owned', 'kin', expected)
@@ -178,7 +193,7 @@ class Pure(unittest.TestCase):
         self.assertEqual(expected['rows']['SharedFilterLibrary'][0]['filters'][0]['cols'], {'mod':'CT'})
         for field, value in [('institution','foreign'),('revision',0),('folders',[]),('filters',[]),
                              ('updatedBy','foreign'),('updatedAt','2020-01-01T00:00:00')]:
-            actual = {key: copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
+            actual = {key: copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences','emr')}
             actual['rows']['SharedFilterLibrary'][0][field] = value
             with self.subTest(field=field), patch.object(transfer,'observe',return_value=actual), self.assertRaises(transfer.ProductMismatch):
                 transfer.verify_product('owned','kin',expected)
@@ -265,9 +280,22 @@ class Pure(unittest.TestCase):
         # S7-U5 then added the provider call in flight to MemberIsolation (three columns): 38 files, still 48 tables and the
         # same rows. S7-U5 D600 replaced it by the provider change records (ProviderChange, the three columns dropped): 39 files,
         # 49 tables, and two records (an unknown disable of the owed member, a settled end of a provider session).
-        self.assertEqual(len(transfer.MIGRATIONS), 42)
+        # EMR-B1 added schema emr_access (43 files): still 51 public tables and the same public rows; its 8 tables are
+        # observed schema-qualified beside them with 8 synthetic rows (two chained viewing entries, the heads of both streams, a placed and
+        # released hold, a reviewed clause version, an identity binding; no record target, projection or request yet).
+        self.assertEqual(len(transfer.MIGRATIONS), 45)
         self.assertEqual(len(transfer.TABLES), 51)
         self.assertEqual(set(rows), set(transfer.TABLES))
+        emr = transfer.expected_emr_rows()
+        self.assertEqual(sorted(emr), transfer.EMR_TABLES)
+        self.assertEqual({name: len(value) for name, value in emr.items()},
+                         {'access_entry': 2, 'access_target': 0, 'audit_projection': 0, 'chain_head': 2, 'clause_version': 1, 'commit_marker': 2,
+                          'duty_request_event': 0, 'legal_hold_event': 2, 'member_identity': 1, 'order_fact': 1})
+        first, second = emr['access_entry']
+        self.assertEqual((first['previous_hash'], second['previous_hash']), ('0'*64, first['hash']))
+        self.assertEqual(emr['chain_head'][0]['hash'], second['hash'])
+        # No deadline is stored on an entry (the one retention rule computes it when destruction is considered).
+        self.assertFalse({'expires_at', 'expiry', 'deadline'} & (set(first) | set(second)))
         self.assertEqual((len(rows['Finding']), len(rows['FindingRevision'])), (1, 2))
         self.assertEqual([(r['oid'], r['accession'], r['studyUid']) for r in rows['Order']],
                          [('SYNTHETIC-order-1', 'SYNTHETIC-ACC-1', None)])
@@ -382,14 +410,20 @@ class Pure(unittest.TestCase):
 
     def test_07_actual_observation_compares_every_section(self):
         body, _, _, _ = fixture(); product = body['product']
-        actual = {key: copy.deepcopy(product[key]) for key in ('catalog', 'rows', 'sequences')}
+        actual = {key: copy.deepcopy(product[key]) for key in ('catalog', 'rows', 'sequences', 'emr')}
         actual['rows']['ReportVersion'].reverse()
+        actual['emr']['rows']['access_entry'].reverse()
         with patch.object(transfer, 'observe', return_value=actual): transfer.verify_product('owned', 'kin', product)
-        for section in ('catalog', 'rows', 'sequences'):
+        for section in ('catalog', 'rows', 'sequences', 'emr-catalog', 'emr-rows', 'emr-acl', 'emr-jit'):
             changed = copy.deepcopy(actual)
             if section == 'catalog': changed[section]['constraints'][0]['name'] = 'different'
             if section == 'rows': changed[section]['ReportVersion'][0]['findings'] = 'SYNTHETIC foreign'
             if section == 'sequences': changed[section]['ReportVersion_id_seq']['last_value'] = 1
+            # EMR-B1: a restore that lost the ledger's function grants or a chained entry is a mismatch, not a pass.
+            if section == 'emr-catalog': changed['emr']['catalog']['functions'][0]['acl'] = ['=X/kin_emr_owner']
+            if section == 'emr-rows': changed['emr']['rows']['access_entry'].pop()
+            if section == 'emr-acl': changed['emr']['catalog']['runtime_grants'] = []
+            if section == 'emr-jit': changed['emr']['catalog']['functions'][0]['config'].remove('jit=off')
             with patch.object(transfer, 'observe', return_value=changed), self.assertRaises(transfer.ProductMismatch):
                 transfer.verify_product('owned', 'kin', product)
 
@@ -415,14 +449,14 @@ class Pure(unittest.TestCase):
         parsed = json.loads(text); self.assertIn('constraints', parsed); self.assertTrue(parsed['constraints']['truncated'])
         self.assertEqual(parsed['constraints']['actual_count'], 20)
         # verify_product prints the diagnostic only for a catalog mismatch and still raises; rows never appear.
-        actual = {key: copy.deepcopy(product[key]) for key in ('catalog', 'rows', 'sequences')}
+        actual = {key: copy.deepcopy(product[key]) for key in ('catalog', 'rows', 'sequences', 'emr')}
         actual['catalog']['constraints'][0]['name'] = 'restored-form'
         stream = io.StringIO()
         with patch.object(transfer, 'observe', return_value=actual), contextlib.redirect_stderr(stream), self.assertRaises(transfer.ProductMismatch):
             transfer.verify_product('owned', 'kin', product)
         self.assertIn('"only_actual":["{\\"name\\":\\"restored-form\\"}"]', stream.getvalue())
         self.assertNotIn('SYNTHETIC', stream.getvalue())
-        actual = {key: copy.deepcopy(product[key]) for key in ('catalog', 'rows', 'sequences')}
+        actual = {key: copy.deepcopy(product[key]) for key in ('catalog', 'rows', 'sequences', 'emr')}
         actual['rows']['ReportVersion'][0]['findings'] = 'SYNTHETIC foreign'
         stream = io.StringIO()
         with patch.object(transfer, 'observe', return_value=actual), contextlib.redirect_stderr(stream), self.assertRaises(transfer.ProductMismatch):
@@ -496,6 +530,12 @@ class Pure(unittest.TestCase):
             state = next(i for i, text in enumerate(sql) if 'INSERT INTO "StudyState"' in text)
             report = next(i for i, text in enumerate(sql) if 'INSERT INTO "Report" ' in text)
             self.assertLess(state, report)
+            # EMR-B1: every expected ledger fact is seeded too, schema-qualified, and the head names the last entry.
+            for table, rows in transfer.expected_emr_rows().items():
+                inserted = [text for text in sql if 'INSERT INTO emr_access.'+table+' ' in text]
+                self.assertEqual(len(inserted), 0 if table == 'chain_head' else len(rows), table)
+            [head] = [text for text in sql if 'UPDATE emr_access.chain_head' in text]
+            self.assertIn(transfer.expected_emr_rows()['chain_head'][0]['hash'], head)
             for text in sql:
                 if text.startswith('INSERT INTO "ReportVersion"'): self.assertNotIn('"id"', text.split(' SELECT ')[0])
 

@@ -26,7 +26,7 @@ function bind<T extends object>(kind: ReaderKind, reader: T, required: readonly 
 export function composeEmrAdapters(adapters: EmrAdapters): Readonly<EmrAdapters> {
   if (context) refuse('EmrAdaptersAlreadyComposed');
   const stored = bind('stored', adapters.stored, ['load']);
-  const legal = bind('legal', adapters.legal, ['load', 'listHolds'], ['loadAccessRequest', 'loadCorrectionRequest', 'loadClauseVersions']);
+  const legal = bind('legal', adapters.legal, ['load', 'listHolds'], ['loadAccessRequest', 'loadCorrectionRequest', 'loadStatutoryDuty', 'loadClauseVersions']);
   const purpose = bind('purpose', adapters.purpose, ['load', 'loadSignedResult'], ['loadIntentEndingFact']);
   const clinical = bind('clinical', adapters.clinical, ['loadStudy', 'loadReportPatient']);
   context = Object.freeze({ stored, legal, purpose, clinical }); return context;

@@ -14,7 +14,7 @@ import sys
 import tarfile
 import tempfile
 
-from ops_backup import AUDIT_CHECKPOINT, FILES
+from ops_backup import AUDIT_CHECKPOINT, FILES, EMR_FILES, backup_components
 from ops_monitor import NAMES
 
 HEX = re.compile(r'[0-9a-f]{64}')
@@ -212,7 +212,9 @@ def parse_inventory(raw, expected_hash):
     expected = {'snapshot/' + name for name in (*FILES, 'manifest.json')} | HOST_FILES | {'source.bundle'}
     expected |= {'images/' + value[7:] + '.tar' for value in images.values()}
     # A snapshot whose AuditLog was sealed carries its checkpoint; verify() requires the manifest to declare exactly it.
-    require(type(files) is dict and set(files) in (expected, expected | {'snapshot/' + AUDIT_CHECKPOINT}))
+    emr_files = {'snapshot/' + name for name in EMR_FILES}
+    require(type(files) is dict and set(files) in (expected, expected | {'snapshot/' + AUDIT_CHECKPOINT},
+            expected | emr_files, expected | emr_files | {'snapshot/' + AUDIT_CHECKPOINT}))
     for name, record in files.items():
         relative(name)
         require(type(record) is dict and set(record) == {'bytes', 'sha256'})
@@ -253,7 +255,11 @@ def verify(root, expected_hash):
     require(type(running) is dict and set(running) == set(NAMES))
     require(all(type(running[name]) is dict and running[name].get('id') == images[name] for name in NAMES))
     require(snapshot.get('postgres_image') == images['kin-db'] and snapshot.get('orthanc_image') == images['kin-orthanc'])
-    components = (*FILES, AUDIT_CHECKPOINT) if 'snapshot/' + AUDIT_CHECKPOINT in files else FILES
+    components = backup_components(snapshot)
+    require(('snapshot/emr-state.tgz' in files) == ('emr' in snapshot))
+    if 'emr' in snapshot:
+        require(snapshot['emr'].get('same_pause') is True and snapshot['emr'].get('tablespace') == 'kin_emr_access')
+    components = (*components, AUDIT_CHECKPOINT) if 'snapshot/' + AUDIT_CHECKPOINT in files else components
     for field in ('sha256', 'bytes'):
         require(type(snapshot.get(field)) is dict and set(snapshot[field]) == set(components))
         require(all(type(snapshot[field][name]) is type(files['snapshot/' + name][field])
@@ -265,7 +271,7 @@ def verify(root, expected_hash):
     return {'inventory_verified': True, 'inventory_sha256': expected_hash, 'git_sha': sha,
             'file_count': len(files), 'image_count': len(set(images.values())),
             'source_services_ready': snapshot.get('ready') is True and snapshot.get('resume_failures') == [],
-            'encrypted': False, 'offsite_verified': False, 'restore_verified': False,
+            'emr_backup_bound': 'emr' in snapshot, 'encrypted': False, 'offsite_verified': False, 'restore_verified': False,
             'deployment_authorized': False}
 
 

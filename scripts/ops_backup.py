@@ -31,6 +31,41 @@ from urllib.request import urlopen
 ROOT = Path(__file__).resolve().parents[1]
 CONTAINERS = ("kin-api", "kin-keycloak", "kin-orthanc", "kin-db")
 FILES = ("kin.dump", "keycloak.dump", "orthanc.tgz", ".env", "docker-compose.yml", "docker-compose.prod.yml")
+EMR_FILES = ("cluster-roles.sql", "emr-state.tgz", "emr-catalog.json")
+EMR_STATE = "/var/lib/kin-emr"
+EMR_TABLESPACE = "/var/lib/postgresql/emr-access/ts"
+
+
+def backup_components(manifest):
+    return (*FILES, *EMR_FILES) if "emr" in manifest else FILES
+
+
+def emr_catalog(container, user):
+    """Owner, ACL, role attributes and placement are restore data, never inferred from row counts."""
+    sql = """SELECT json_build_object(
+      'schema', (SELECT json_build_object('owner', pg_get_userbyid(nspowner), 'acl', nspacl::text)
+                 FROM pg_namespace WHERE nspname='emr_access'),
+      'roles', (SELECT json_agg(r ORDER BY rolname) FROM
+        (SELECT rolname, rolsuper, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolinherit
+         FROM pg_roles WHERE rolname IN ('kin_emr_owner','kin_runtime','kin_emr_reader','kin_emr_retention')) r),
+      'memberships', (SELECT json_agg(r ORDER BY granted, member) FROM
+        (SELECT a.rolname AS granted, b.rolname AS member FROM pg_auth_members m JOIN pg_roles a ON a.oid=m.roleid
+         JOIN pg_roles b ON b.oid=m.member WHERE a.rolname LIKE 'kin_emr_%' OR b.rolname LIKE 'kin_emr_%'
+         OR a.rolname='kin_runtime' OR b.rolname='kin_runtime') r),
+      'tablespace', (SELECT json_build_object('name',spcname,'owner',pg_get_userbyid(spcowner),'acl',spcacl::text)
+                    FROM pg_tablespace WHERE spcname='kin_emr_access'),
+      'tables', (SELECT json_agg(r ORDER BY name) FROM
+        (SELECT c.relname AS name, pg_get_userbyid(c.relowner) AS owner, c.relacl::text AS acl, t.spcname AS tablespace
+         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace LEFT JOIN pg_tablespace t ON t.oid=c.reltablespace
+         WHERE n.nspname='emr_access' AND c.relkind IN ('r','i','S')) r),
+      'functions', (SELECT json_agg(r ORDER BY signature) FROM
+        (SELECT p.oid::regprocedure::text AS signature, pg_get_userbyid(p.proowner) AS owner, p.proacl::text AS acl,
+         p.prosecdef AS security_definer, p.proconfig AS configuration
+         FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='emr_access') r))"""
+    value = json.loads(text(["docker", "exec", container, "psql", "-X", "-U", user, "-d", "kin", "-v", "ON_ERROR_STOP=1", "-qAt", "-c", sql]))
+    if not value.get("schema") or not value.get("tablespace") or not value.get("tables") or len(value.get("roles") or []) != 4:
+        raise RuntimeError("EMR deployment catalog is incomplete")
+    return value
 # The sealed AuditLog checkpoint (scripts/ops_audit_integrity.py) is an extra component a manifest declares in its
 # sha256/bytes; it is not in FILES, so backups taken before the seal existed stay valid six-file snapshots.
 AUDIT_CHECKPOINT = "audit-checkpoint.json"
@@ -141,10 +176,10 @@ def digest(path):
 
 def counts(container, database, user):
     command = ["docker", "exec", container, "psql", "-X", "-U", user, "-d", database, "-v", "ON_ERROR_STOP=1", "-qAt", "-c"]
-    tables = text(command + ["SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename;"]).splitlines()
-    if not tables or any(not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", name) for name in tables):
+    tables = text(command + ["SELECT schemaname || '.' || tablename FROM pg_tables WHERE schemaname IN ('public','emr_access') ORDER BY schemaname,tablename;"]).splitlines()
+    if not tables or any(not re.fullmatch(r"(?:public|emr_access)\.[A-Za-z_][A-Za-z_0-9]*", name) for name in tables):
         raise RuntimeError("Unexpected or empty database table list")
-    selects = [f'SELECT \'{name}\' AS name, count(*) AS n FROM "{name}"' for name in tables]
+    selects = [f'SELECT \'{name}\' AS name, count(*) AS n FROM ' + '.'.join('"'+p+'"' for p in name.split('.')) for name in tables]
     return json.loads(text(command + ["SELECT json_object_agg(name,n) FROM (" + " UNION ALL ".join(selects) + ") counts;"]))
 
 
@@ -234,6 +269,10 @@ def backup(output, ready_timeout=120):
     if len(mounts) != 1 or mounts[0]["Type"] != "volume":
         raise RuntimeError("Expected one named Orthanc volume")
     volume = mounts[0]["Name"]
+    state_mounts = [m for m in by_name["kin-api"]["Mounts"] if m["Destination"] == EMR_STATE]
+    if len(state_mounts) != 1 or state_mounts[0]["Type"] != "volume":
+        raise RuntimeError("Expected one named EMR state volume")
+    state_volume = state_mounts[0]["Name"]
     initial_running = [name for name in CONTAINERS[:-1] if by_name[name]["State"]["Running"]]
     api_env = dict(entry.split("=", 1) for entry in by_name["kin-api"]["Config"].get("Env", []) if "=" in entry)
     origin = api_env.get("PUBLIC_ORIGIN", "https://localhost:9443").rstrip("/")
@@ -243,12 +282,16 @@ def backup(output, ready_timeout=120):
                                     "--entrypoint", "du", by_name["kin-db"]["Image"], "-sk", "/source"]).split()[0])
     database_bytes = int(text(["docker", "exec", "kin-db", "psql", "-X", "-U", "kin", "-d", "kin", "-qAt", "-c",
                                "SELECT pg_database_size('kin') + pg_database_size('keycloak');"]))
-    required = 2 * (volume_kib * 1024 + database_bytes) + 512 * 1024 * 1024
+    state_kib = int(temporary_run(['--network', 'none', '--read-only', '--mount',
+        f'type=volume,source={state_volume},target=/source,readonly', '--entrypoint', 'du',
+        by_name['kin-db']['Image'], '-sk', '/source']).split()[0])
+    required = 2 * ((volume_kib + state_kib) * 1024 + database_bytes) + 512 * 1024 * 1024
     if shutil.disk_usage(parent).free < required:
         raise RuntimeError("Insufficient free space for backup and restore margin")
     directory = parent / (datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8])
     directory.mkdir(mode=0o700)
     manifest = {"format": 1, "complete": False, "created_utc": datetime.now(timezone.utc).isoformat(),
+                "emr": {"state_volume": state_volume, "tablespace": "kin_emr_access", "same_pause": True},
                 "git_sha": text(["git", "rev-parse", "HEAD"]),
                 "git_dirty": bool(text(["git", "status", "--porcelain", "--untracked-files=no"])),
                 "postgres_image": by_name["kin-db"]["Image"],
@@ -268,11 +311,19 @@ def backup(output, ready_timeout=120):
         for name in initial_running:
             if text(["docker", "inspect", "--format", "{{.State.Running}}", name]) != "false":
                 raise RuntimeError("A write service is still running")
+        stage = "check EMR writers and preserve catalog"
+        active = text(["docker", "exec", "kin-db", "psql", "-X", "-U", "kin", "-d", "kin", "-qAt", "-c",
+                       "SELECT count(*) FROM pg_stat_activity WHERE datname='kin' AND backend_type='client backend' AND pid<>pg_backend_pid();"])
+        if active != "0":
+            raise RuntimeError("Database clients remain after stopping writers")
+        write_json(directory / "emr-catalog.json", emr_catalog("kin-db", "kin"))
+        with (directory / "cluster-roles.sql").open("wb") as handle:
+            run(["docker", "exec", "kin-db", "pg_dumpall", "-U", "kin", "--roles-only", "--no-role-passwords"], output=handle)
         for database in ("kin", "keycloak"):
             stage = "dump " + database
             manifest["counts"][database] = counts("kin-db", database, "kin")
             with (directory / (database + ".dump")).open("wb") as handle:
-                run(["docker", "exec", "kin-db", "pg_dump", "-U", "kin", "-d", database, "-Fc"], output=handle)
+                run(["docker", "exec", "kin-db", "pg_dump", "-U", "kin", "-d", database, "-Fc", "--create"], output=handle)
         stage = "archive Orthanc"
         # The Docker helper runs as root on Linux. Stream to a host-owned file
         # instead of creating a root-owned archive in a writable host bind mount.
@@ -281,16 +332,21 @@ def backup(output, ready_timeout=120):
                  "--mount", f"type=volume,source={volume},target=/source,readonly",
                  "--entrypoint", "tar", manifest["postgres_image"], "-czf", "-", "-C", "/source", "."],
                 timeout=1800, output=handle)
+        stage = "archive EMR state at the same pause"
+        with (directory / "emr-state.tgz").open("wb") as handle:
+            temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={state_volume},target=/source,readonly",
+                           "--entrypoint", "tar", manifest["postgres_image"], "-czf", "-", "-C", "/source", "."], timeout=1800, output=handle)
         stage = "copy configuration and checksum"
         for name in FILES[3:]:
             shutil.copyfile(ROOT / name, directory / name)
-        for name in FILES:
+        components = backup_components(manifest)
+        for name in components:
             path = directory / name
             path.chmod(0o600)
             if not path.stat().st_size:
                 raise RuntimeError("Empty backup component")
-        manifest["sha256"] = {name: digest(directory / name) for name in FILES}
-        manifest["bytes"] = {name: (directory / name).stat().st_size for name in FILES}
+        manifest["sha256"] = {name: digest(directory / name) for name in components}
+        manifest["bytes"] = {name: (directory / name).stat().st_size for name in components}
         manifest["complete"] = True
     except BaseException as error:
         manifest["backup_error"] = {"stage": stage, "type": type(error).__name__}
@@ -349,7 +405,8 @@ def validate_backup(directory):
     # Snapshot validity is independent of the source application's readiness.
     # A failed restart is exactly when an intact snapshot must remain usable.
     # A declared audit checkpoint is a component like the others; an undeclared one is not trusted or required.
-    declared = (*FILES, AUDIT_CHECKPOINT) if AUDIT_CHECKPOINT in manifest.get("sha256", {}) else FILES
+    components = backup_components(manifest)
+    declared = (*components, AUDIT_CHECKPOINT) if AUDIT_CHECKPOINT in manifest.get("sha256", {}) else components
     for name in declared:
         path = directory / name
         if path.is_symlink() or not path.is_file() or digest(path) != manifest.get("sha256", {}).get(name):
@@ -365,6 +422,19 @@ def validate_backup(directory):
             found_index |= str(path) == "index" and entry.isfile()
     if not found_index:
         raise RuntimeError("Orthanc archive has no SQLite index")
+    if "emr" in manifest:
+        if manifest.get("emr", {}).get("same_pause") is not True:
+            raise RuntimeError("EMR database/state consistency is not attested")
+        with tarfile.open(directory / "emr-state.tgz", "r|gz") as archive:
+            for entry in archive:
+                member = PurePosixPath(entry.name)
+                if member.is_absolute() or ".." in member.parts or not (entry.isfile() or entry.isdir()):
+                    raise RuntimeError("Unsafe EMR archive entry")
+    if "emr" in manifest:
+        api_image = manifest.get("running_images", {}).get("kin-api", {}).get("id", "")
+        if not re.fullmatch(r"sha256:[a-f0-9]{64}", api_image):
+            raise RuntimeError("Backup API image ID is invalid")
+        run(["docker", "image", "inspect", api_image])
     for key in ("postgres_image", "orthanc_image"):
         if not re.fullmatch(r"sha256:[a-f0-9]{64}", manifest.get(key, "")):
             raise RuntimeError("Backup image ID is invalid")
@@ -413,12 +483,17 @@ def rehearse(directory):
     token = uuid.uuid4().hex
     name = "kin-rehearsal-" + token[:16]
     volume = name + "-orthanc"
+    state_volume = name + "-emr-state"
+    emr = "emr" in manifest
     started = time.monotonic()
     result = {"backup": directory.name, "git_sha": manifest["git_sha"], "success": False}
     try:
         run(["docker", "volume", "create", "--label", "kin.ops.run=" + token, volume])
+        if emr:
+            run(["docker", "volume", "create", "--label", "kin.ops.run=" + token, state_volume])
         run(["docker", "run", "-d", "--name", name, "--label", "kin.ops.run=" + token,
-             "--network", "none", "-e", "POSTGRES_HOST_AUTH_METHOD=trust", manifest["postgres_image"]])
+             "--network", "none", "--tmpfs", "/var/lib/postgresql/emr-access:uid=70,gid=70,mode=0700",
+             "-e", "POSTGRES_HOST_AUTH_METHOD=trust", manifest["postgres_image"]])
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             # The image's init server accepts Unix sockets before shutdown/restart.
@@ -428,13 +503,44 @@ def rehearse(directory):
             time.sleep(0.5)
         else:
             raise RuntimeError("Isolated PostgreSQL did not become ready")
+        if emr:
+            with (directory / "cluster-roles.sql").open("rb") as handle:
+                run(["docker", "exec", "-i", name, "psql", "-X", "-U", "postgres", "-v", "ON_ERROR_STOP=1"], input_file=handle)
+            run(["docker", "exec", "-u", "postgres", name, "mkdir", "-m", "700", EMR_TABLESPACE])
+            run(["docker", "exec", name, "psql", "-X", "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-c",
+                 "CREATE TABLESPACE kin_emr_access OWNER kin_emr_owner LOCATION '" + EMR_TABLESPACE + "';"])
         for database in ("kin", "keycloak"):
-            run(["docker", "exec", name, "createdb", "-U", "postgres", database])
+            if not emr:
+                run(["docker", "exec", name, "createdb", "-U", "postgres", database])
             with (directory / (database + ".dump")).open("rb") as handle:
-                run(["docker", "exec", "-i", name, "pg_restore", "-U", "postgres", "-d", database,
-                     "--no-owner", "--no-privileges", "--exit-on-error"], input_file=handle)
-            if counts(name, database, "postgres") != manifest["counts"][database]:
+                run(["docker", "exec", "-i", name, "pg_restore", "-U", "postgres", "-d", "postgres" if emr else database,
+                     *(["--create"] if emr else ["--no-owner", "--no-privileges"]), "--exit-on-error"], input_file=handle)
+            expected_counts = manifest["counts"][database]
+            if not emr:
+                expected_counts = {key if "." in key else "public." + key: value for key, value in expected_counts.items()}
+            if counts(name, database, "postgres") != expected_counts:
                 raise RuntimeError("Restored database row counts differ: " + database)
+        if emr:
+            if emr_catalog(name, "postgres") != json.loads((directory / "emr-catalog.json").read_text(encoding="utf-8")):
+                raise RuntimeError("Restored EMR owner/ACL/roles/tablespace differ")
+            temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={state_volume},target=/restore",
+                 "--mount", f"type=bind,source={directory},target=/backup,readonly", "--entrypoint", "tar",
+                 manifest["postgres_image"], "-xzf", "/backup/emr-state.tgz", "-C", "/restore"], timeout=1800)
+            api_image = manifest["running_images"]["kin-api"]["id"]
+            recovery = """const {PrismaClient}=require('/app/node_modules/@prisma/client');
+const {PrismaLedgerSql}=require('/app/dist/emr-runtime/store');
+const {AccessSeal}=require('/app/dist/emr-runtime/seal');
+const {FailureJournal}=require('/app/dist/emr-runtime/failure-journal');
+const db=new PrismaClient(); const dir='/var/lib/kin-emr';
+new AccessSeal(dir,new PrismaLedgerSql(db),new FailureJournal(dir)).recoverAtStart()
+.then(()=>console.log('EMR_RESTORE_VERIFIED')).catch(()=>{process.exitCode=1}).finally(()=>db.$disconnect());"""
+            # The optional reader login may correctly be disabled in the source catalog. Use the disposable restore
+            # administrator for this read-only ledger check; do not alter the preserved source role attributes.
+            checked = temporary_run(["--network", "container:"+name, "--read-only", "-e", "DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin",
+                "--mount", f"type=volume,source={state_volume},target={EMR_STATE}", "--entrypoint", "node", api_image, "-e", recovery])
+            if checked != "EMR_RESTORE_VERIFIED":
+                raise RuntimeError("Restored database and external state do not agree")
+            result["emr"] = {"owner_acl_preserved": True, "database_state_verified": True}
         result["audit"] = rehearse_audit(directory, manifest, name)
         if result["audit"] != "not_sealed" and not result["audit"]["verified"]:
             raise RuntimeError("Restored AuditLog is not verified against its sealed checkpoint")
@@ -448,7 +554,7 @@ def rehearse(directory):
         result.update(success=True, databases=["kin", "keycloak"], orthanc=orthanc)
     finally:
         failures = []
-        for kind, resource in (("container", name), ("volume", volume)):
+        for kind, resource in (("container", name), ("volume", volume), *(([("volume", state_volume)]) if emr else [])):
             try:
                 remove_owned_if_present(kind, resource, token)
             except Exception:

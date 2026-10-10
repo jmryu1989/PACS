@@ -1,0 +1,773 @@
+{
+  "unit": "EMR-B",
+  "round": "B1",
+  "base_sha": "8c411b97ff208fa85f0cc0cf625ee11126c4417e",
+  "dependencies": [
+    "EMR-A contract (PR #142, landed in main c4b5bdc)",
+    "S8-CTX landing (PR #144, main 2fc7358): migration 20261006000000_tech_note_attempt_id, profile context-loss, G3 114",
+    "S7-U5 core (PR #131): DB MemberRights authority, session end and entry facts (consumed by B2, not changed by B1)"
+  ],
+  "owned_paths": {
+    "B1": [
+      "api/src/emr-runtime/contract.ts",
+      "api/src/emr-runtime/store.ts",
+      "api/src/emr-runtime/context.ts",
+      "api/src/emr-runtime/failure-journal.ts",
+      "api/src/emr-runtime/seal.ts",
+      "api/src/emr-runtime/manifest.ts",
+      "api/src/emr-contract/access-event.ts",
+      "api/src/emr-contract/classification.ts",
+      "api/src/emr-contract/routes.ts",
+      "api/prisma/schema.prisma",
+      "api/prisma/migrations/20261008120000_emr_b/migration.sql",
+      "api/Dockerfile",
+      "api/start-production.sh",
+      "docker-compose.yml",
+      "docker-compose.prod.yml",
+      "api/src/prisma.service.ts",
+      "scripts/ops_deploy_entry.py",
+      "scripts/ops_deploy_host.py",
+      "scripts/ops_deploy_preflight.py",
+      "scripts/ops_deploy_runner.py",
+      "tests/ops_deploy_host_container_test.py",
+      "tests/ops_deploy_host_test.py",
+      "tests/ops_deploy_preflight_test.py",
+      "tests/ops_deploy_runner_test.py",
+      "tests/audit_store_db_test.py",
+      "api/src/emr-contract/lawful-defaults.ts",
+      "api/src/emr-contract/composition.ts",
+      "api/src/emr-contract/legal-basis.ts",
+      ".env.example",
+      "tests/clinician_policy_fixtures.json",
+      "tests/clinician_policy_test.py",
+      "tests/e2e/test_dictation_live.py",
+      "tests/report_structure_migration_test.py",
+      "tests/order_reconciliation_source_test.py",
+      "tests/gateway_receipt_source_test.py",
+      "tests/gateway_retry_source_test.py",
+      "scripts/ops_backup.py",
+      "tests/ops_backup_test.py",
+      "scripts/ops_export_inventory.py",
+      "tests/ops_export_inventory_test.py",
+      ".github/workflows/stage2-rollout-rehearsal.yml",
+      "rehearsal-bundle/bundle-sha256.txt",
+      "rehearsal-bundle/rehearsal/stage2-rollout-rehearsal.yml",
+      "rehearsal-bundle/rehearsal/emr-b-restore-plan.json",
+      "rehearsal-bundle/rollout.py",
+      "rehearsal-bundle/selftest_rollout_stage2.py",
+      "api/src/emr-runtime/coordinator.ts",
+      "api/src/emr-runtime/external-writer.ts",
+      "api/src/emr-runtime/journal-file.ts",
+      "api/prisma/migrations/20261010120000_emr_seal_attempts/migration.sql",
+      "tests/emr/b/seal_checker.cjs",
+      "tests/route_inventory_ts.js",
+      "api/src/emr-runtime/file-lock.ts",
+      "tests/fixtures/clinician-source-contract-loads.json",
+      "api/src/emr-runtime/state-client.ts",
+      "api/src/emr-runtime/state-client-worker.ts",
+      "api/src/emr-runtime/limits.ts",
+      "api/src/emr-runtime/admission.ts",
+      "api/src/emr-runtime/client.ts",
+      "api/prisma/migrations/20261010150000_emr_read_jit_off/migration.sql",
+      "tests/emr/b/quiet_host.py",
+      "tests/emr/b/quiet_host_test.py",
+      "tests/emr/b/dry_run.py"
+    ],
+    "B1-B2": [
+      "api/src/emr-contract/README.md",
+      ".github/workflows/validate.yml",
+      "tests/measurement_ci.py",
+      "tests/measurement_ci_test.py",
+      "tests/candidate_ci.py",
+      "tests/candidate_ci_test.py",
+      "tests/production_image_test.py",
+      "tests/ops_product_transfer_fixture.py",
+      "tests/ops_product_transfer_test.py",
+      "tests/admin_audit_attribution_test.cjs",
+      "tests/emr_contract_test.cjs",
+      "tests/README.md",
+      ".github/workflows/emr-b.yml",
+      "emr/units/b.json",
+      "scripts/emr-compose.py",
+      "tests/emr/b/contract_test.cjs",
+      "tests/emr/b/live.py",
+      "tests/emr/b/mutants.py",
+      "tests/emr/b/throughput.cjs",
+      "tests/emr/b/throughput_live.py",
+      "tests/emr/b/ab_latency.cjs",
+      "tests/emr/b/ab_sustained.cjs",
+      "tests/emr/b/journal_cost.cjs",
+      "tests/emr/b/performance.py",
+      "tests/emr/b/performance_test.py",
+      "tests/emr/b/performance_mutants.py",
+      "tests/emr/b/lock_test.cjs",
+      "tests/emr/b/transaction_options_test.cjs",
+      "tests/emr/b/client_pool_test.cjs",
+      "tests/emr/b/live_acceptance.py",
+      "tests/emr/b/live_benchmark.cjs",
+      "tests/emr/b/live_mutants.py",
+      "tests/emr/b/noninferiority.py",
+      "tests/emr/b/noninferiority_test.py",
+      "tests/emr/b/verification_plan.cjs",
+      "tests/emr/b/power_design.py"
+    ]
+  },
+  "models": {
+    "prisma": "unchanged: MODEL_CLASSIFICATION equals the freshly parsed Prisma models (no SQL-only storage registered as a model)",
+    "sql": {
+      "emr_access.access_entry": [
+        "access-audit"
+      ],
+      "emr_access.access_target": [
+        "access-audit"
+      ],
+      "emr_access.chain_head": [
+        "access-audit"
+      ],
+      "emr_access.audit_projection": [
+        "access-audit"
+      ],
+      "emr_access.member_identity": [
+        "identity-access"
+      ],
+      "emr_access.legal_hold_event": [
+        "legal-duty"
+      ],
+      "emr_access.duty_request_event": [
+        "legal-duty"
+      ],
+      "emr_access.clause_version": [
+        "legal-reference"
+      ],
+      "emr_access.order_fact": [
+        "order",
+        "order-indication",
+        "exam-clinical-info",
+        "received-order",
+        "order-exam-component"
+      ],
+      "emr_access.commit_marker": [
+        "access-audit"
+      ]
+    }
+  },
+  "routes": {
+    "nest_routes": 138,
+    "internal_surfaces": [
+      "service:auth-session-sweep"
+    ],
+    "note": "B1 adds no HTTP route; the internal sweep surface is where B2 records sessions the server ends in process"
+  },
+  "records": {
+    "kinds_added": [
+      "offline-signed-original",
+      "recovery-working-copy",
+      "legal-duty",
+      "legal-reference",
+      "chart-incorporation",
+      "operational-note",
+      "order-indication",
+      "exam-clinical-info",
+      "order-exam-component"
+    ],
+    "terminal_models": {
+      "TerminalSignedOriginal": [
+        "offline-signed-original"
+      ],
+      "TerminalRecoveryCopy": [
+        "recovery-working-copy"
+      ]
+    },
+    "purpose_end_added": "original-received",
+    "access_event_formats": {
+      "v1": "unchanged",
+      "v2": [
+        "online-auth",
+        "verified-offline (refused as unsupported until C composes a verifier)"
+      ]
+    }
+  },
+  "migrations": {
+    "added": [
+      "20261008120000_emr_b",
+      "20261010120000_emr_seal_attempts",
+      "20261010150000_emr_read_jit_off"
+    ],
+    "count": 45,
+    "latest_before": "20261007200000_designation_subjects"
+  },
+  "deployment": {
+    "schema": "emr_access",
+    "tablespace": "kin_emr_access",
+    "tablespace_location": "/var/lib/postgresql/emr-access/ts",
+    "roles": {
+      "owner": "kin_emr_owner",
+      "runtime": "kin_runtime",
+      "reader": "kin_emr_reader",
+      "retention": "kin_emr_retention"
+    },
+    "tables": [
+      "access_entry",
+      "access_target",
+      "audit_projection",
+      "chain_head",
+      "clause_version",
+      "commit_marker",
+      "duty_request_event",
+      "legal_hold_event",
+      "member_identity",
+      "order_fact"
+    ],
+    "runtime_functions": [
+      "chain_tail(text)",
+      "entries_after(text,bigint,integer)",
+      "entry_for_event(text,text)",
+      "storage_placement()",
+      "civil_period_end(timestamptz,integer)",
+      "resolve_member_identity(text,text)",
+      "record_projection(text,integer)",
+      "place_hold(text,text,text)",
+      "release_hold(text,text)",
+      "holds_for(text)",
+      "record_duty_request(text,text,text,text)",
+      "duty_requests(text,text)",
+      "clause_versions(text)",
+      "order_facts_for(text)",
+      "record_order_fact(text,text,text,text)",
+      "enter_writer()",
+      "fence_writers()",
+      "commit_marker_for_slot(text,bigint)",
+      "commit_marker_for_attempt(text,text)",
+      "append_reserved(text,text,text,text,text,text)",
+      "bind_commit(text,text,bigint,text)"
+    ],
+    "reader_functions": [
+      "chain_tail(text)",
+      "entries_after(text,bigint,integer)",
+      "entry_for_event(text,text)",
+      "storage_placement()",
+      "civil_period_end(timestamptz,integer)",
+      "holds_for(text)",
+      "duty_requests(text,text)",
+      "clause_versions(text)",
+      "order_facts_for(text)",
+      "enter_writer()",
+      "fence_writers()",
+      "commit_marker_for_slot(text,bigint)",
+      "commit_marker_for_attempt(text,text)"
+    ],
+    "retention_functions": [
+      "retention_view(bigint,integer)",
+      "chain_tail(text)",
+      "storage_placement()",
+      "enter_writer()",
+      "fence_writers()",
+      "commit_marker_for_slot(text,bigint)",
+      "commit_marker_for_attempt(text,text)",
+      "expire_reserved(bigint,text,text)",
+      "bind_commit(text,text,bigint,text)",
+      "lock_chain(text)"
+    ],
+    "access_retention": {
+      "source": "commander D727/D731 (legal register 2026-10-09 final, Astra cross-check 0 disagreements): deltas D-1 revised, D-19, D-21; delta map D-3, D-18",
+      "streams": "two chains: viewing (every event; its own floor from the event's day, longer only under a hold or legal basis; prefix expiry with checkpoint and external seal) and history (succeeded 기재·추가기재·수정 about a record; kept with the changed record; destroyed with its destruction set by unit H; no deletion path in B1)",
+      "stored": "no deadline on any entry; statutory_act (A's mapping) and each record target (kind, record/version IDs) bound per entry in emr_access.access_target from the chained payload",
+      "rule": "api/src/emr-runtime/contract.ts accessDeadline(stream, entry, recordEnd) with ACCESS_RETENTION from A's RECORD_CLASSIFICATION['access-audit'], accessRetentionFloor, recordTargets",
+      "database_floor": "emr_access.access_retention_floor(timestamptz), the migration's only civil period; expire_prefix (viewing only) refuses an entry before it (EB004) or held (EB005)",
+      "bound_by": "A D-1 stream test, C07 (viewing at floor, history with its record, unknown record end = no end), C10 (only these two places compute a period, equal periods), L05 (SQL floor = runtime floor, bindings = recordTargets, old viewing prefix removed, history entry kept)"
+    },
+    "compose_services": [
+      "db (tablespace directory prepared at start)",
+      "emr-provision (one-shot, installer credential)",
+      "api-migrate (one-shot, installer credential)",
+      "api (runtime credential, state volume)"
+    ],
+    "volumes": {
+      "emr-access": "db: /var/lib/postgresql/emr-access",
+      "emr-state": "api: /var/lib/kin-emr (seal, pending intents, failure journal)"
+    },
+    "secrets": {
+      "required": [
+        "KIN_EMR_RUNTIME_PASSWORD"
+      ],
+      "optional": [
+        "KIN_EMR_READER_PASSWORD",
+        "KIN_EMR_RETENTION_PASSWORD"
+      ],
+      "form": "24 or more of [A-Za-z0-9._~-], used verbatim in DATABASE_URL"
+    },
+    "provision": "python scripts/emr-compose.py sql provision (the same text as compose emr-provision; run with psql and the installer credential)",
+    "api_only_deployment": "refused when the target brings this migration (scripts/ops_deploy_preflight.py); afterwards the running API must hold exactly the state volume and the runtime role",
+    "not_executed_here": "no production provisioning, migration, restart, retention schedule or external backup"
+  },
+  "restore": {
+    "order": [
+      "provision the cluster (roles, secrets, tablespace)",
+      "createdb",
+      "pg_restore keeping owners and privileges, without --no-tablespaces",
+      "restore the API state volume from the same point",
+      "start: seal recovery must pass"
+    ],
+    "never_assumed": "pg_dump carries neither roles nor tablespaces",
+    "refused": [
+      "a restore without the roles",
+      "ledger relations outside kin_emr_access",
+      "a state volume ahead of the database (LedgerBehindSeal)",
+      "a missing seal over stored entries (SealMissing)"
+    ]
+  },
+  "req_risk_test": [
+    {
+      "req": "REQ-EMR-06/07",
+      "risk": "RISK-EMR-06/07",
+      "test": "TEST-EMR-B-C01 C03 C05 C06 L02 L03 L04 L08"
+    },
+    {
+      "req": "REQ-EMR-02",
+      "risk": "RISK-EMR-02",
+      "test": "TEST-EMR-B-C02 C04 C09"
+    },
+    {
+      "req": "REQ-EMR-01/19",
+      "risk": "RISK-EMR-01/19",
+      "test": "TEST-EMR-B-C07 C08 L05 L06"
+    },
+    {
+      "req": "REQ-EMR-20",
+      "risk": "RISK-EMR-20",
+      "test": "TEST-EMR-B-C10 L01 L07"
+    },
+    {
+      "req": "REQ-EMR-01/06/07/19/20 D24-1..9",
+      "risk": "RISK-EMR-01/06/07/19/20",
+      "test": "TEST-EMR-B-C13 C14 C15 C16 C17 C18 L17 L18 L19"
+    },
+    {
+      "req": "REQ-D874-EMR-B-THROUGHPUT",
+      "risk": "RISK-READING-RECEIPT-LATENCY",
+      "test": "TEST-EMR-B-C19 L03 L03b M36"
+    },
+    {
+      "req": "REQ-D878",
+      "risk": "RISK-EMR-RECEIPT-DELAY",
+      "test": "PERF-ledger PERF-sustained PERF-concurrent-24 PERF-concurrent-48 PERF-journal LOCK-01 MP01 MP02 MP03 MP04 C13 M37"
+    },
+    {
+      "req": "REQ-D889-SEALED-REPLAY",
+      "risk": "RISK-EMR-FORGED-RECEIPT",
+      "test": "TEST-EMR-B-C20 M38"
+    },
+    {
+      "req": "REQ-D889-NO-NATIVE-FENCE",
+      "risk": "RISK-EMR-STALE-WRITER",
+      "test": "LOCK-01 C21 PERF-sustained PERF-concurrent-24 PERF-concurrent-48"
+    },
+    {
+      "req": "REQ-D927-CHECKER-CI",
+      "risk": "RISK-EMR-UNVERIFIED-CONCURRENCY",
+      "test": "seal_checker.cjs ci (both retention states, depth 4, I1-I4 and all named/attack classes); seal_checker.cjs (profile argument omitted; recorded non-CI complete bounded graph)"
+    },
+    {
+      "req": "REQ-D931-POOL-ADMISSION",
+      "risk": "RISK-EMR-POOL-STARVATION",
+      "test": "C22 TX-01 TX-02 M39 L03 L03b"
+    },
+    {
+      "req": "REQ-D931-API-OWNER",
+      "risk": "RISK-EMR-STALE-WRITER",
+      "test": "LOCK-01"
+    },
+    {
+      "req": "REQ-D931-BOUNDED-REPLAY",
+      "risk": "RISK-EMR-RECEIPT-DELAY",
+      "test": "C20 C23 PERF-ledger PERF-sustained"
+    },
+    {
+      "req": "REQ-D935-MERGED-RESERVATION-LANES",
+      "risk": "RISK-EMR-POOL-STARVATION/CRASH/RECEIPT-DELAY",
+      "test": "C21 C22 M39 M40 M41 M42 L03 L03b seal_checker ci/full PERF-sustained"
+    },
+    {
+      "req": "REQ-D941",
+      "risk": "RISK-EMR-RECEIPT-JIT/POOL/FALSE-PERFORMANCE-ACCEPT",
+      "test": "L03 L03b L03c PLAN-01 POOL-01 POOL-02 noninferiority_test C22 seal_checker ci/full"
+    },
+    {
+      "req": "REQ-D949",
+      "risk": "RISK-EMR-FALSE-PERFORMANCE-ACCEPT/HOST-NOISE/NESTED-JIT",
+      "test": "L03 L03b L03c PLAN-02 PLAN-03 noninferiority_test performance_test (hosted p95 point <=1.25 for all receipt cases; sustained NI statistics recorded only; structural checks retained; loaded by noninferiority_test CI entry) quiet_host_test power_self_check measurement_ci main deadline clamp restore config preservation"
+    },
+    {
+      "req": "REQ-D952",
+      "risk": "RISK-EMR-FALSE-PERFORMANCE-ACCEPT/HOST-NOISE/ATTEMPT-TIMEOUT/IDLE-OFFSET",
+      "test": "noninferiority_test complete tail+median rules and joint probability; quiet_host_test duration refusal, plan binding, bounded settling, retries, control reuse; dry_run L03 L03b L03c M36 (ci-gross pilot only)"
+    },
+    {
+      "req": "REQ-D956",
+      "risk": "RISK-EMR-FALSE-PERFORMANCE-ACCEPT/IDLE-OFFSET/ATTEMPT-TIMEOUT",
+      "test": "noninferiority_test empirical power self-check; quiet_host_test full single dry-run design and final-block duration; dry_run balanced idle sweep with per-request SQL and file I/O; L03 L03b L03c M36 attempt-free preview"
+    },
+    {
+      "req": "REQ-D961",
+      "risk": "RISK-EMR-FALSE-PERFORMANCE-ACCEPT",
+      "test": "noninferiority_test known-input paired p95/median t bounds and superiority mutant; L03 L03b L03c acceptance: p95 point and one-sided 95% UB <=1.10, concurrent median UB <=1.10 only; M36 latency positive control; power_design whole-plan equality probability under stated dispersion assumptions"
+    }
+  ],
+  "cases": {
+    "contract": {
+      "file": "tests/emr/b/contract_test.cjs",
+      "B1": [
+        "C01 v2 authentication facts: v1 keeps its rules with D-18 context; online-auth admits verified success and verified refusal, refuses a clinical write, a mismatched result, an extra key and an audit-namespace credential",
+        "C02 one immutable identity per verified issuer and subject; namesakes stay apart; a name never joins and unverified input is never known",
+        "C03 the observed ingress address and the in-process service; an untrusted forwarded header or an omitted success address is refused",
+        "C04 a verified offline original with its own reception; a self-declared flag, a reconnect address and another content under one ID are refused",
+        "C05 the body follows the commit receipt only; a provisional, enqueued or other event's receipt and any failure send zero bytes",
+        "C06 the stored chain against its trusted tail; a deleted middle or tail, a repeated sequence and an unsealed gap are found",
+        "C07 independent expired prefix and its checkpoint under the one retention rule: a viewing entry ends at the floor, a change's history entry lives as long as the record it changed and never ends while that end is unknown; an unexpired, held or middle deletion and a read-extended clock are refused",
+        "C08 complete hold set and clause history reloaded from the snapshot; a failed read is never empty; another transaction's snapshot is refused",
+        "C09 the signed original and its recovery copy keep owner and original time; a private-draft end or a new authentication never restarts or erases them",
+        "C13 expiry recovery needs external proof of the deleted prefix and its trusted seal, including interrupted recovery",
+        "C14 a torn journal preserves its exact damaged bytes separately and remains appendable across repeated restarts",
+        "C15 D24 registration needs its original direction; code-only native directions keep ten years through cancellation and later adoption",
+        "C16 D24 received evidence keeps independent original, adopted, chart and receipt clocks without a duplicate restart",
+        "C17 D24 finite review deadlines escalate without erasing duties or renewing on retries; four evidence-bound decisions close the procedure",
+        "C18 D24 claim duties require an actual ending event and preserve an outstanding statutory obligation past internal deadlines",
+        "C20 replay binds sealed DB bytes through the external seal before issuing any receipt",
+        "C21 adjacent stream advances share durability barriers and recover together after each publication cut",
+        "C19 committed receipt groups preserve every binding, ignore unrelated pending work and share durable publication; publication failure sends no receipt",
+        "C22 bounded lanes keep two verification connections free across small pools and shared stores",
+        "C23 a cold replay beyond the named verification cap refuses before acquiring a snapshot",
+        "C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused"
+      ]
+    },
+    "live": {
+      "file": "tests/emr/b/live.py",
+      "class": "EmrBLedgerLive",
+      "profile_suites": [
+        [
+          "emr/b/live.py",
+          "EmrBLedgerLive",
+          "ci-emr-b-ledger"
+        ]
+      ],
+      "B1": [
+        "test_b01_ledger_roles_and_restart",
+        "test_b02_business_commit_and_failure_journal",
+        "test_b03_idempotency_and_concurrent_append",
+        "test_b03b_concurrent_48_receipts",
+        "test_b03c_warm_single_sustained_and_verification_plans",
+        "test_b04_chain_tail_and_crash_recovery",
+        "test_b05_expiry_checkpoint_and_holds",
+        "test_b06_complete_reload_and_clause_history",
+        "test_b07_migration_backup_restore_roles",
+        "test_b08_receipt_before_body",
+        "test_b17_order_fact_history_and_classification",
+        "test_b18_external_expiry_proof_and_torn_journal_restarts",
+        "test_b19_backup_rehearsal_preserves_database_and_external_state"
+      ]
+    }
+  },
+  "expected": {
+    "contract": 21,
+    "live": 13,
+    "mutants": 39,
+    "profiles": 39,
+    "measurements_suites": 20,
+    "validate_jobs": 22,
+    "emr_b_jobs": 1,
+    "session_matrix": 8,
+    "candidate": 115,
+    "candidate_rows": 13,
+    "migrations": 45,
+    "public_tables": 51,
+    "emr_tables": 10,
+    "fixture_public_rows": 90,
+    "fixture_emr_rows": 11,
+    "note": "declared before running; never generated from a run's own result"
+  },
+  "mutants": [
+    {
+      "id": "M01",
+      "kill": [
+        "L01"
+      ],
+      "behaviour": "the runtime role regains superuser or owner membership: refused DML/DDL and role escalation must fail the case"
+    },
+    {
+      "id": "M02",
+      "kill": [
+        "L01"
+      ],
+      "behaviour": "the runtime may set session_replication_role: the replica-mode bypass must be refused"
+    },
+    {
+      "id": "M03",
+      "kill": [
+        "L02",
+        "L03"
+      ],
+      "behaviour": "the ledger append is skipped inside the business transaction"
+    },
+    {
+      "id": "M04",
+      "kill": [
+        "C05",
+        "L08"
+      ],
+      "behaviour": "the body is sent before the durable receipt"
+    },
+    {
+      "id": "M05",
+      "kill": [
+        "L02"
+      ],
+      "behaviour": "the failure journal record is made inside the business transaction and vanishes with its rollback"
+    },
+    {
+      "id": "M06",
+      "kill": [
+        "C02"
+      ],
+      "behaviour": "identities are joined by display name"
+    },
+    {
+      "id": "M07",
+      "kill": [
+        "C01"
+      ],
+      "behaviour": "an audit link ID or session reference is accepted as a credential"
+    },
+    {
+      "id": "M08",
+      "kill": [
+        "C03"
+      ],
+      "behaviour": "a forwarded address header is trusted without a trusted peer"
+    },
+    {
+      "id": "M11",
+      "kill": [
+        "C06",
+        "L04"
+      ],
+      "behaviour": "the trusted tail comparison is skipped"
+    },
+    {
+      "id": "M12",
+      "kill": [
+        "C07",
+        "L05"
+      ],
+      "behaviour": "an unexpired prefix may be deleted"
+    },
+    {
+      "id": "M14",
+      "kill": [
+        "C10"
+      ],
+      "behaviour": "a declared case missing from its test file is accepted"
+    },
+    {
+      "id": "M15",
+      "kill": [
+        "C13"
+      ],
+      "behaviour": "expiry checkpoints are trusted without durable external expiry evidence"
+    },
+    {
+      "id": "M16",
+      "kill": [
+        "C14"
+      ],
+      "behaviour": "torn bytes remain in the good journal after quarantine"
+    },
+    {
+      "id": "M17",
+      "kill": [
+        "C15"
+      ],
+      "behaviour": "native clinical directions get only five years"
+    },
+    {
+      "id": "M18",
+      "kill": [
+        "C15"
+      ],
+      "behaviour": "registration with no original direction is accepted"
+    },
+    {
+      "id": "M19",
+      "kill": [
+        "C16"
+      ],
+      "behaviour": "a retransmission resets the first local receipt clock"
+    },
+    {
+      "id": "M20",
+      "kill": [
+        "C17"
+      ],
+      "behaviour": "unanswered review silently ends on the internal deadline"
+    },
+    {
+      "id": "M21",
+      "kill": [
+        "C18"
+      ],
+      "behaviour": "a claim end timestamp needs no actual ending evidence"
+    },
+    {
+      "id": "M22",
+      "kill": [
+        "C15"
+      ],
+      "behaviour": "a changed seed is still treated as verified synthetic"
+    },
+    {
+      "id": "M23",
+      "kill": [
+        "C16"
+      ],
+      "behaviour": "a subsequent event can drop an inherited original duty"
+    },
+    {
+      "id": "M24",
+      "behaviour": "accept a clinical correction without its original-version predecessor",
+      "kill": [
+        "C15"
+      ]
+    },
+    {
+      "id": "M25",
+      "kill": [
+        "C13"
+      ],
+      "behaviour": "expiry must never run start-only recovery during append"
+    },
+    {
+      "id": "M26",
+      "kill": [
+        "C13"
+      ],
+      "behaviour": "a rolled-back expiry proof cannot justify a replacement checkpoint"
+    },
+    {
+      "id": "M27",
+      "kill": [
+        "C10"
+      ],
+      "behaviour": "count class methods as calendar owners"
+    },
+    {
+      "id": "M28",
+      "kill": [
+        "C10"
+      ],
+      "behaviour": "count exported arrows as calendar owners"
+    },
+    {
+      "id": "M29",
+      "kill": [
+        "C10"
+      ],
+      "behaviour": "count function expressions as calendar owners"
+    },
+    {
+      "id": "M30",
+      "kill": [
+        "C10"
+      ],
+      "behaviour": "count module-level calls as calendar owners"
+    },
+    {
+      "id": "M31",
+      "kill": [
+        "C13"
+      ],
+      "behaviour": "an interrupted expiry proof cannot hide an unresolved append"
+    },
+    {
+      "id": "M32",
+      "kill": [
+        "C13"
+      ],
+      "behaviour": "I1 prepared proof without marker/slot/generation: X-STALE is accepted"
+    },
+    {
+      "id": "M33",
+      "kill": [
+        "C13"
+      ],
+      "behaviour": "I2 startup pending veto blocks normal automatic recovery"
+    },
+    {
+      "id": "M34",
+      "kill": [
+        "C13"
+      ],
+      "behaviour": "I3 unrelated open B blocks the healthy committed A receipt"
+    },
+    {
+      "id": "M35",
+      "kill": [
+        "C13"
+      ],
+      "behaviour": "I4 expiry returns before its checkpoint seal"
+    },
+    {
+      "id": "M36",
+      "kill": [
+        "L03"
+      ],
+      "behaviour": "per-operation Node startup returns to the head-locked writer; D961 same-run concurrent tail point and one-sided 95% UB <=1.10 AND median UB <=1.10 only; CI-gross point <=1.25; reuse successful same-run L03 control"
+    },
+    {
+      "id": "M37",
+      "kill": [
+        "C13"
+      ],
+      "behaviour": "in-flight verification shares the mutable coordinator index and accepts another writer changed binding"
+    },
+    {
+      "id": "M38",
+      "behaviour": "A7 replay trusts a sealed DB row without binding its bytes through the external seal",
+      "kill": [
+        "C20"
+      ]
+    },
+    {
+      "id": "M39",
+      "kill": [
+        "C22"
+      ],
+      "behaviour": "head-lock waiters consume every pool connection ahead of a committed receipt verification"
+    },
+    {
+      "id": "M40",
+      "kill": [
+        "C22"
+      ],
+      "behaviour": "append lanes consume verification reserve"
+    },
+    {
+      "id": "M41",
+      "kill": [
+        "C21"
+      ],
+      "behaviour": "merged reservation loses durability"
+    },
+    {
+      "id": "M42",
+      "kill": [
+        "C21"
+      ],
+      "behaviour": "merged reservation loses recovery intent"
+    }
+  ],
+  "candidate_cases": [
+    {
+      "file": "tests/emr/b/live.py",
+      "case": "EmrBLedgerLive.test_b01_ledger_roles_and_restart"
+    }
+  ]
+}

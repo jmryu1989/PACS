@@ -16,12 +16,34 @@ from live_admin_credential_test import ImportedAdminCredentialTests
 
 
 class MeasurementCiTests(unittest.TestCase):
+    def test_main_uses_profile_deadline_to_clamp_commands_and_preserves_cleanup(self):
+        # REQ-D949 -> RISK-CI-DEADLINE-DRIFT: observe the actual subprocess bound
+        # passed by main(), without binding a source string or internal layout.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            calls = []
+            def execute(command, **kwargs):
+                calls.append((command, kwargs['timeout']))
+                return SimpleNamespace(returncode=1 if 'up' in command else 0, stdout=b'', stderr=b'')
+            profile = dict(ci.PROFILES['emr-b'], out=root/'out')
+            with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted'}, clear=True), \
+                    patch.object(ci, 'ROOT', root), patch.dict(ci.PROFILES, {'emr-b': profile}), \
+                    patch.object(ci, 'seed_source'), patch.object(ci, 'profile_deadline_seconds', return_value=37), \
+                    patch.object(ci.time, 'monotonic', side_effect=[100, 105, 106, 107, 108, 109, 110]), \
+                    patch.object(ci.subprocess, 'check_output', side_effect=[b'', b'', b'unix:///runner.sock']), \
+                    patch.object(ci.subprocess, 'run', side_effect=execute), contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(RuntimeError):
+                    ci.main('emr-b')
+            self.assertEqual(calls[0][1], 32)
+            self.assertEqual([timeout for argv, timeout in calls if 'logs' in argv], [30])
+            self.assertEqual([timeout for argv, timeout in calls if 'down' in argv], [60])
+
     def test_context_loss_profile_selects_only_its_declared_cases_on_a_fresh_runner(self):
         import ast
         import yaml
         profile = ci.PROFILES['context-loss']
         self.assertEqual(profile['suites'], (('e2e/test_context_loss.py', 'ContextLossE2E', 'ci-context-loss'),))
-        command, timeout = ci.guarded_profile_run(profile, *profile['suites'][0], 1500)
+        command, timeout = ci.guarded_profile_run(profile, *profile['suites'][0], 3900)
         self.assertEqual(command[command.index('--class') + 1], 'ContextLossE2E')
         self.assertLessEqual(timeout, 1235)
         module = ast.parse((ci.ROOT / 'tests/e2e/test_context_loss.py').read_text(encoding='utf-8'))
@@ -43,6 +65,66 @@ class MeasurementCiTests(unittest.TestCase):
         uploads = [s for s in job['steps'] if s.get('uses', '').startswith('actions/upload-artifact@')]
         self.assertEqual(len(uploads), 1)
         self.assertEqual(uploads[0]['with']['path'], 'tests/e2e/artifacts/context-loss-ci/')
+
+    def test_emr_b_profile_runs_the_declared_ledger_cases_only_in_its_own_workflow(self):
+        """EMR-B1 (order section 10): one declared ledger suite including D941 live latency, a 3600s planned ceiling within
+        its dedicated 65 minute deadline, a separate artifact and project, and only emr-b.yml requests the profile."""
+        import ast
+        import yaml
+        profile = ci.PROFILES['emr-b']
+        declaration = json.loads((ci.ROOT/'emr/units/b.json').read_text(encoding='utf-8'))
+        self.assertEqual([list(row) for row in profile['suites']], declaration['cases']['live']['profile_suites'])
+        self.assertEqual(profile['out'].name, 'emr-b-ci')
+        self.assertNotIn('suite_budgets', profile)
+        command, outer = ci.guarded_profile_run(profile, *profile['suites'][0], 3900)
+        self.assertEqual(command[command.index('--module')+1], 'tests/emr/b/live.py')
+        self.assertEqual(command[command.index('--class')+1], 'EmrBLedgerLive')
+        self.assertEqual(command[command.index('--unit')+1], 'ci-emr-b-ledger')
+        self.assertEqual(command[command.index('--timeout')+1], '3600')
+        self.assertEqual(command[command.index('--mode')+1], 'live')
+        self.assertEqual(outer, 3635)
+        self.assertLessEqual(outer, 65*60-230)
+        for name, other in ci.PROFILES.items():
+            if name != 'emr-b':
+                self.assertNotEqual(profile['out'], other['out'])
+                self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
+        module = ast.parse((ci.ROOT/'tests/emr/b/live.py').read_text(encoding='utf-8'))
+        cls = next(n for n in module.body if isinstance(n, ast.ClassDef) and n.name == 'EmrBLedgerLive')
+        self.assertEqual([n.name for n in cls.body if isinstance(n, ast.FunctionDef) and n.name.startswith('test_')],
+                         declaration['cases']['live']['B1'])
+        self.assertEqual((ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8').count('--profile emr-b'), 0)
+        workflow = yaml.safe_load((ci.ROOT/'.github/workflows/emr-b.yml').read_text(encoding='utf-8'))
+        self.assertEqual(list(workflow['jobs']), ['emr-b'])
+        steps = workflow['jobs']['emr-b']['steps']
+        self.assertEqual(len([s for s in steps if '--profile emr-b' in str(s.get('run', ''))]), 1)
+        uploads = [s for s in steps if str(s.get('uses', '')).startswith('actions/upload-artifact@')]
+        self.assertTrue(any('tests/e2e/artifacts/emr-b-ci' in str(s['with']['path']) for s in uploads))
+        # The disposable stack's API reads its runtime login from a generated secret (docker-compose.yml refuses to
+        # start without one), distinct from the installer's, and the secret is redacted from every artifact.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            patched = {**profile, 'out': root/'artifacts'}
+            seen = []
+
+            def fake_run(command, **kwargs):
+                seen.append((list(map(str, command)), kwargs.get('env') or {}))
+                secret = seen[0][1].get('KIN_EMR_RUNTIME_PASSWORD', 'missing')
+                return MagicMock(returncode=1 if len(seen) == 1 else 0, stdout=('echo ' + secret).encode(), stderr=b'')
+
+            with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted'}, clear=True), \
+                    patch.object(ci, 'ROOT', root), patch.dict(ci.PROFILES, {'emr-b': patched}), \
+                    patch.object(ci, 'seed_source'), \
+                    patch.object(ci.subprocess, 'check_output', side_effect=[b'', b'', b'unix:///var/run/docker.sock']), \
+                    patch.object(ci.subprocess, 'run', side_effect=fake_run), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(RuntimeError, 'database failed'):
+                    ci.main('emr-b')
+            env = seen[0][1]
+            self.assertRegex(env['KIN_EMR_RUNTIME_PASSWORD'], r'^[0-9a-f]{64}$')
+            self.assertNotEqual(env['KIN_EMR_RUNTIME_PASSWORD'], env['POSTGRES_PASSWORD'])
+            for log in (root/'artifacts').glob('*.log'):
+                self.assertNotIn(env['KIN_EMR_RUNTIME_PASSWORD'], log.read_text(encoding='utf-8'))
+            self.assertIn('[REDACTED]', (root/'artifacts'/'database.log').read_text(encoding='utf-8'))
 
     def test_browser_install_cache_and_budgets_cover_pinned_dependencies(self):
         import yaml
@@ -722,8 +804,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertTrue(all(value < 900 for value in budgets.values()))
         # Unlike every other profile, this one's ENTIRE configured worst case fits
         # main()'s single deadline, with room left for the stack it shares.
-        self.assertIn('deadline = time.monotonic()+25*60',
-                      (ci.ROOT/'tests/measurement_ci.py').read_text(encoding='utf-8'))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
         worst_case = sum(budgets.values()) + 35*len(units)
         self.assertEqual(worst_case, 1200)
         # Measured on run 34703534031: 60.6s setup and 12.8s cleanup through this
@@ -965,6 +1046,8 @@ class MeasurementCiTests(unittest.TestCase):
                           'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text',
                           'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient', 'cell-merge', 'u2b-regressions',
                           'gateway-e2e', 'critical-result-screens',
+                          # EMR-B1: the access ledger profile, run only by .github/workflows/emr-b.yml.
+                          'emr-b',
                           # S7-U5: the session contract job's eight profiles (validate.yml s7-u5-session-contracts matrix);
                           # u5-fixups is the fix round's five screen regressions (final review part 1, blocker 3).
                           'u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries',
@@ -1006,8 +1089,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(len({row[2] for row in measurements['suites']}), 20)
         self.assertEqual(measurements['suite_timeout'], 540)
         self.assertNotIn('suite_budgets', measurements)
-        self.assertIn('deadline = time.monotonic()+25*60',
-                      (ci.ROOT/'tests/measurement_ci.py').read_text(encoding='utf-8'))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
         self.assertEqual(volume['suites'], (('e2e/test_volume_rendering.py',
                          None, 'ci-volume-rendering'),))
         self.assertEqual(output['suites'], (
@@ -1100,8 +1182,7 @@ class MeasurementCiTests(unittest.TestCase):
         # All suites share main()'s single deadline, so no one suite may be able to
         # claim it: even at full cap every suite plus its reserved margin must fit
         # with stack time left, and the cap must stay under the volume-rendering cap.
-        self.assertIn('deadline = time.monotonic()+25*60',
-                      (ci.ROOT/'tests/measurement_ci.py').read_text(encoding='utf-8'))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
         self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
         self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
         self.assertLess(profile['suite_timeout'],
@@ -1306,8 +1387,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual([command[command.index('--unit')+1] for command in commands],
                          ['ci-path-native', 'ci-mpr-orientation', 'ci-finding-location'])
         # All three suites at full cap plus their reserved margins fit the shared deadline with stack time left.
-        self.assertIn('deadline = time.monotonic()+25*60',
-                      (ci.ROOT/'tests/measurement_ci.py').read_text(encoding='utf-8'))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
         self.assertEqual(sum(budget+35 for budget in budgets.values()), 1185)
         self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
         self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
@@ -1445,8 +1525,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual([command[command.index('--unit')+1] for command in commands],
                          ['ci-batch-preview', 'ci-batch-context', 'ci-batch-save', 'ci-batch-scout'])
         # All four suites at full cap plus their reserved margins fit the shared deadline with stack time left.
-        self.assertIn('deadline = time.monotonic()+25*60',
-                      (ci.ROOT/'tests/measurement_ci.py').read_text(encoding='utf-8'))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
         self.assertEqual(sum(budget+35 for budget in budgets.values()), 1220)
         self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
         self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
@@ -1565,8 +1644,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual([command[command.index('--unit')+1] for command in commands],
                          ['ci-mpr-sync', 'ci-mpr-preferences'])
         # Both suites at full cap plus their reserved margins fit the shared deadline with stack time left.
-        self.assertIn('deadline = time.monotonic()+25*60',
-                      (ci.ROOT/'tests/measurement_ci.py').read_text(encoding='utf-8'))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
         self.assertEqual(sum(budget+35 for budget in budgets.values()), 970)
         self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
         self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
@@ -1677,8 +1755,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual([command[command.index('--unit')+1] for command in commands],
                          ['ci-mpr-marks', 'ci-mpr-marks-print'])
         # Both suites at full cap plus their reserved margins fit the shared deadline with stack time left.
-        self.assertIn('deadline = time.monotonic()+25*60',
-                      (ci.ROOT/'tests/measurement_ci.py').read_text(encoding='utf-8'))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
         self.assertEqual(sum(budget+35 for budget in budgets.values()), 1150)
         self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
         self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
@@ -1780,8 +1857,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(command[command.index('--timeout')+1], '1200')
         self.assertEqual(outer, 1235)
         # The one suite at full cap plus its reserved margin fits the shared deadline with stack time left.
-        self.assertIn('deadline = time.monotonic()+25*60',
-                      (ci.ROOT/'tests/measurement_ci.py').read_text(encoding='utf-8'))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
         self.assertEqual(sum(budget+35 for budget in budgets.values()), 1235)
         self.assertEqual(25*60-sum(budget+35 for budget in budgets.values()), 265)
         self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
@@ -1894,8 +1970,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(command[command.index('--unit')+1], 'ci-mip-job')
         self.assertEqual(command[command.index('--timeout')+1], '1200')
         self.assertEqual(outer, 1235)
-        self.assertIn('deadline = time.monotonic()+25*60',
-                      (ci.ROOT/'tests/measurement_ci.py').read_text(encoding='utf-8'))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
         self.assertEqual(sum(budget+35 for budget in budgets.values()), 1235)
         self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
         self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
@@ -2670,7 +2745,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(command[command.index('--timeout')+1], '1260')
         self.assertEqual(outer, 1295)
         # A1: 1260+35 = 1295 <= 1500-205, and 205s is about 2.5x the recorded hosted stack setup and cleanup.
-        self.assertIn('deadline = time.monotonic()+25*60', (ci.ROOT/'tests/measurement_ci.py').read_text(encoding='utf-8'))
+        self.assertTrue(all(ci.profile_deadline_seconds(name) == (3900 if name == 'emr-b' else 1500) for name in ci.PROFILES))
         self.assertLessEqual(profile['suite_timeout'] + 35, 25*60 - 205)
         for name, other in ci.PROFILES.items():
             if name != 'gateway-e2e':
