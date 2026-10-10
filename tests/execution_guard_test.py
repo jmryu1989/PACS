@@ -646,6 +646,8 @@ class Probe(unittest.TestCase):
 from pathlib import Path
 base = Path(__file__).parent
 with socket.create_connection(json.loads((base/'address.json').read_text()), timeout=75) as ready:
+ # Outlast the runner's 60s wait and the parent's 45s probe even under load.
+ ready.settimeout(300)
  ready.sendall(b'R')
  if ready.recv(1) == b'G':
   (base/'escaped').write_text('bad')
@@ -845,11 +847,12 @@ with socket.create_connection(json.loads((base/'address.json').read_text()), tim
             self.assertIsNone(runner.poll(), 'Runner expired before descendant readiness')
             stdout, stderr = runner.communicate(timeout=60)
             self.assertEqual(runner.returncode, 124, stderr)
-        # EOF/reset is an observable closed child, not an arbitrary delay before
-        # checking a file. A surviving child would remain blocked on recv.
+        # Challenge a survivor to write its marker and acknowledge it. Passive
+        # recv could mistake the child's own timeout for successful termination.
         try:
+            ready.sendall(b'G')
             closed = ready.recv(1)
-        except ConnectionResetError:
+        except (ConnectionResetError, BrokenPipeError):
             closed = b''
         self.assertEqual(closed, b'', stdout)
         self.assertFalse((self.tests/'escaped').exists())

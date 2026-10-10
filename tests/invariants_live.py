@@ -346,6 +346,12 @@ def _json_or_text(raw: bytes) -> tuple[Any, str]:
         return text, text
 
 
+# D736 retained 30s; ledger 167 / TEST-HYGIENE-2 allows 120s for Compose/psql
+# startup under concurrent viewer/CI load, including fixture cleanup. Keep a
+# finite bound without retrying a possibly committed write or extending the plan.
+PSQL_TIMEOUT_SECONDS = 120
+
+
 def psql(sql: str) -> list[str]:
     """컨테이너 psql 한 문장. 시간 비교가 섞이므로 세션 시간대를 UTC로 고정한다 — Prisma가 UTC로 쓴다.
 
@@ -355,10 +361,7 @@ def psql(sql: str) -> list[str]:
     completed = subprocess.run(
         ["docker", "compose", "exec", "-T", "-e", "PGTZ=UTC", "db", "psql", "-U", "kin", "-d", "kin",
          "-v", "ON_ERROR_STOP=1", "-qAt", "-c", sql],
-        # D736 / TEST-HYGIENE-2: Compose/psql startup can exceed 30s under
-        # concurrent viewer/CI load. Bound this harness operation at 120s;
-        # do not retry a potentially committed write or extend the live plan.
-        cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=PSQL_TIMEOUT_SECONDS,
     )
     if completed.returncode:
         raise RuntimeError("psql 실패: " + completed.stdout + completed.stderr)
@@ -1239,7 +1242,7 @@ class LiveStack:
             cleaned = subprocess.run(
                 ["docker", "compose", "exec", "-T", "db", "psql", "-U", "kin", "-d", "kin",
                  "-v", "ON_ERROR_STOP=1", "-c", sql],
-                cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+                cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=PSQL_TIMEOUT_SECONDS,
             )
             if cleaned.returncode:
                 failures.append("DB 정리 실패: " + cleaned.stdout + cleaned.stderr)

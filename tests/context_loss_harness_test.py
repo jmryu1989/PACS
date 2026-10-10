@@ -102,6 +102,32 @@ class SqlHarnessTest(unittest.TestCase):
                         live.psql('SELECT synthetic')
                 run.assert_called_once()
 
+    def test_cleanup_uses_the_same_sql_bound_without_retry(self):
+        # Bypass live configuration only in this mock-only harness; neither
+        # Orthanc nor Docker is contacted, including failure paths.
+        stack = object.__new__(live.LiveStack)
+        uid = '1.2.3.456'
+        with patch.object(live.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout='')) as query:
+            live.psql('SELECT synthetic')
+        for failure in ('success', 'sql_error', 'timeout'):
+            with self.subTest(failure=failure):
+                stack.active = {uid: object()}
+                with patch.object(stack, '_orthanc_request', return_value=SimpleNamespace(status=404)), \
+                        patch.object(live.subprocess, 'run',
+                                     side_effect=subprocess.TimeoutExpired('synthetic', 120) if failure == 'timeout' else None,
+                                     return_value=SimpleNamespace(returncode=int(failure == 'sql_error'),
+                                                                  stdout='', stderr='SQL rejected')) as cleanup:
+                    if failure == 'success':
+                        stack.cleanup_fixture(uid)
+                        self.assertNotIn(uid, stack.active)
+                    else:
+                        with self.assertRaises(subprocess.TimeoutExpired if failure == 'timeout' else RuntimeError):
+                            stack.cleanup_fixture(uid)
+                cleanup.assert_called_once()
+                self.assertEqual(cleanup.call_args.kwargs['timeout'], query.call_args.kwargs['timeout'])
+                self.assertGreater(cleanup.call_args.kwargs['timeout'], 30)
+                self.assertLessEqual(cleanup.call_args.kwargs['timeout'], 120)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
