@@ -2318,7 +2318,8 @@ request-object occurrences and reverse release, independent shown range/total co
 Registration includes all instrumented event types. Dispatch excludes exactly mousemove, pointermove, pointerrawupdate,
 mouseover, mouseout, pointerover, pointerout, mouseenter, mouseleave, pointerenter and pointerleave; click/input/keydown/
 focus/scroll/resize remain compared. This does not claim coverage of every browser event.
-The existing mutant driver retains 55 PRE/F2/F3 mutants and adds S1-M01–M06, H178-M01–M08 and S2-M01–M06 (75 distinct IDs);
+The existing mutant driver retains 55 PRE/F2/F3 mutants and adds S1-M01–M06, H178-M01–M08, S2-M01–M06,
+S3-M01–M07 and PERM-M01–M06 (88 distinct IDs);
 byte mutants are C1 evidence, while response-hash and registration/dispatch mutants exercise browser harness oracles.
 `LoadBudget` uses uninstrumented full Chromium, five alternating baseline/candidate cold pairs and five repeated-navigation
 pairs. Playwright routing disables HTTP cache: repeated samples are explicitly not warm-cache evidence. Hosted HTTP
@@ -2333,3 +2334,48 @@ Its C3 gate uses the real 30-file layout and the unchanged full registration/dis
 PermissionStatus partial-order refinement and PERM mutants to part 3; generated 45-file diagnostics are not part-2 acceptance.
 S2-M01–M04 exercise C1 boundary loss/tag order/trivia/duplication; S2-M05 removes the actual draft-save response;
 S2-M06 reverses real report input listeners in an externalized 30-file copy. Consumed mutant assets are hashed individually.
+
+S9-U0a 3b (D919): 45 editable LF sources are delivered as one committed classic script,
+`main-split.bundle.js`. `scripts/main-split-order.json` pins source order and original byte ranges.
+REQ-S9-U0a-BYTES -> RISK-BUNDLE-DRIFT/ORDER -> TEST-S9-U0a-BUNDLE: run
+`python3 scripts/build-main-split-bundle.py --check` before validation; CI never regenerates it.
+The default `--mode auto` always verifies artifact == concatenation of the 45 current ordered sources.
+While `scripts/main-split-order.json` has `migration_state: "pristine"`, it also checks the candidate-only
+0261b1c inline-body/source-slice/markup pin. `--check --mode permanent` needs no historical Git object;
+`--check --mode candidate-pin` explicitly runs both checks. The first approved source edit must set
+`migration_state` to `"modified"`, regenerate/commit the bundle, and rebind the separate C1 move spec/tests
+in the same change. This disables only the historical pin in auto mode; stale artifacts still fail.
+Missing/unknown states fail closed. The bundle tests exercise stale and regenerated edited sources in both states.
+P3-01 whitespace exception: C's final `boot();\n  ` bytes are verbatim in `page-boot.js` and the bundle.
+The exact two `.gitattributes` entries disable only blank-at-eol/blank-at-eof warnings for these paths;
+`git diff --check 7bccdb614c6582b2a718c493cfb5cff6600629b9` (whole candidate), `git diff --cached --check`
+and `git diff --check` (pending changes) honour that allow-list in CI and commander checkouts. Keep the
+bytes intact; the pristine candidate pin verifies them. Other paths/whitespace checks remain active.
+C1/C3 retain all source coverage; C5 serves the actual artifact and C6 loads its single Script.
+Five bundle mutants cover stale artifact, wrong order, deleted original boundary trivia, extra byte and tag count.
+The existing 88 mutants and every PRE assertion remain. C2 includes eager const-arrow calls, object-literal
+methods, Promise executors, local function/class constructors and sort/replace callbacks, with synthetic
+positive and deferred controls. It remains a bounded classifier: reflective call/apply, getters and tagged
+templates are not a complete JavaScript execution analysis; the browser actual-layout suite remains the oracle.
+The incremental C3 comparison serves the landed part-2 parent (7bccdb6, 30 files) and the actual bundle.
+CI main.html recorder rows bind the 45 editable sources as provenance plus the actual served bundle and
+build metadata. The served request list continues to contain the bundle, not 45 separate source requests.
+Hosted LoadBudget uses the real unchanged HTTPS proxy/Orthanc path without browser routing or clock injection.
+Cold/warm each use five alternating BC/CB pairs; host monotonic remains the verdict and native CDP timings are
+reported alongside it. Each metric must satisfy median(C)-median(B) <= max(250ms, 10% of median(B)).
+It checks real response hashes, MIME, protocol/cache/status, 56/57 script requests, console errors, same-origin CSP
+compatibility, real missing-bundle failure and recovery. Actual CSP headers are retained; missing inheritance is
+not reported as enforced policy. Synthetic API success responses complete startup for both sides. Host/native timing is frozen at the usable-list boundary; request collection then waits for the first received-inbox response on both sides before comparing the complete startup request sets. This wait does not move either budget clock.
+The normal live gate applies: set KIN_PRE_LOAD_UNIT to the authorized run unit. Inspection refusal means waiting;
+never clear a marker or rename a failed unit to obtain more attempts. Earlier route/hosted failures stay evidence.
+Byte pins are justified by behaviour preservation (D73). The bundle has no injected test hooks or user-visible change.
+
+D883 permission/ScreenDetails comparisons retain complete registration tuples per creation identity/event,
+strict per-target histories and whole dispatch order (since=0). Only proved independent initial startup property
+registrations commute across different targets; raw differences, individual swap witnesses and all residual
+differences remain recorded. Clear/replacement and other asynchronous registrations receive no exemption.
+Generated C45 retains the former internal permission-gap scenarios. For the actual bundle, event-driven inputs
+are compared with the original single inline Script at the same auth-response barrier, including Monitor input,
+revocation and pending ScreenDetails replies. Native PermissionStatus smoke, competing handler probes,
+context invalidation, repeat changes and saved popup geometry assertions remain. This does not prove physical
+OS monitor placement. The direct source files remain unchanged and all existing PRE/mutant selections remain.

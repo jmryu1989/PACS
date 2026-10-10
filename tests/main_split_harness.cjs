@@ -71,7 +71,7 @@ function actual(page, options = {}) {
   const spec = options.spec ? JSON.parse(fs.readFileSync(options.spec, 'utf8')) : require('./main_move_spec.json');
   const input = readPage(page), served = input.html, html = input.source;
   const tag = scripts(html).find(t => !t.src), parts = chunks(html, spec);
-  const count = input.files.length, rest = input.region.find(t => !t.src);
+  const count = input.bundle ? parts.length : input.files.length, rest = input.region.find(t => !t.src);
   // Line ranges of every statement in the served layout, from the same AST the contract uses. A range starts at
   // the statement's first token (not its leading comments), so a registration's line names one statement.
   const nodes = statements(tag.body);
@@ -88,7 +88,10 @@ function actual(page, options = {}) {
     for (let k = 0; k < p.statements; k++, index++) {
       const n = nodes[index], name = spec.modules[module].statements[k];
       let file, start, end;
-      if (external) {
+      if (input.bundle) {
+        const at = lines(input.script);
+        file = input.bundle; start = at(n.token); end = at(Math.max(n.token, n.end - 1));
+      } else if (external) {
         file = p.file; start = at(n.token - first); end = at(Math.max(n.token - first, n.end - first - 1));
       } else {
         const off = restAt + (n.token - restFirst);
@@ -98,7 +101,7 @@ function actual(page, options = {}) {
     }
   });
   const externals = scripts(served).filter(t => t.src).map(t => t.src);
-  const files = [page, ...input.files];
+  const files = [page, ...input.files, ...(input.bundle ? parts.map(p => path.join(path.dirname(page), p.file)) : [])];
   const inputs = Object.fromEntries(files.map(file => {
     const bytes = fs.readFileSync(file);
     return [path.basename(file), { bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'),
@@ -106,7 +109,7 @@ function actual(page, options = {}) {
   }));
   const manifest = { kind: options.kind || 'actual', count, page: path.basename(page), source: options.source || page,
     scripts: externals, inputs,
-    parts: parts.slice(0, count).map(p => p.file),
+    parts: input.files.map(p => path.basename(p)), bundle: input.bundle || null,
     modules: parts.map((p, i) => ({ index: i, file: p.file, external: i < count, statements: p.statements })),
     statements: result };
   return manifest;
@@ -375,16 +378,17 @@ function mutantLayout(page, id, outDir) {
 
 function splitMutant(page, id, outDir) {
   const dir = outsideProduct(outDir);
-  if (id === 'S2-M06') {
+  if (id === 'S2-M06' || id === 'S3-M06') {
     fs.mkdirSync(dir, { recursive: true });
     const source = path.join(dir, 'input.html'), spec = path.join(dir, 'derived-spec.json');
-    fs.writeFileSync(source, preMutant(page, 'M37'));
+    fs.writeFileSync(source, preMutant(page, id === 'S3-M06' ? 'M36' : 'M37'));
     fs.writeFileSync(spec, JSON.stringify(deriveSpec(source)));
-    const destination = path.join(dir, 'actual30');
-    const manifest = split(30, destination, { page: source, spec });
+    const count = id === 'S3-M06' ? 45 : 30;
+    const destination = path.join(dir, 'actual' + count);
+    const manifest = split(count, destination, { page: source, spec });
     return { id, page: path.join(destination, 'main.html'), spec, manifest };
   }
-  const count = id.startsWith('S2-') ? 30 : Math.max(18, readPage(page).files.length);
+  const count = id.startsWith('S1-') ? 18 : id.startsWith('S2-') ? 30 : 45;
   const manifest = split(count, dir, { page });
   const target = path.join(dir, 'main.html');
   let html = fs.readFileSync(target, 'utf8');
@@ -428,6 +432,24 @@ function splitMutant(page, id, outDir) {
     if (node.name !== 'ExpressionStatement after move #2') throw new Error('S2-M04: final move registration missing');
     const inline = scripts(html).find(t => !t.src), at = inline.start + '<script>'.length;
     html = html.slice(0, at) + body.slice(node.start) + html.slice(at);
+  } else if (id === 'S3-M01') {
+    const file = path.join(dir, 'viewer-placement.js'), body = fs.readFileSync(file, 'utf8');
+    const nodes = statements(body);
+    if (nodes[0].name !== 'OHIF_RECT_KEY') throw new Error('S3-M01: first declaration missing');
+    fs.writeFileSync(file, body.slice(nodes[1].start));
+  } else if (id === 'S3-M02') {
+    const first = '<script src="worklist-controls.js"></script>', next = '<script src="saved-filters.js"></script>';
+    if (!html.includes(first + '\n  ' + next)) throw new Error('S3-M02: adjacent tags missing');
+    html = html.replace(first + '\n  ' + next, next + '\n  ' + first);
+  } else if (id === 'S3-M03') {
+    html = html.replace('<script src="page-boot.js"></script>', '<script src="page-boot.js"></script>\n  <script>boot();</script>');
+  } else if (id === 'S3-M04') {
+    html = html.replace('<script src="page-boot.js">', '<script async src="page-boot.js">');
+  } else if (id === 'S3-M05') {
+    // The faulty source helper sees zero inline scripts and loses all external statements.
+    const helper = path.join(dir, 'empty-projection.cjs');
+    fs.writeFileSync(helper, 'exports.readPageSource = () => "";\n');
+    return { id, page: target, manifest, helper };
   } else if (id !== 'BASELINE') throw new Error('Unknown byte mutant ' + id);
   fs.writeFileSync(target, html);
   return { id, page: target, manifest };

@@ -11,3 +11,57 @@ api/start-production.sh text eol=lf
 # checkin and checkout on every platform; `diff` keeps the files reviewable as text.
 rehearsal-bundle/** -text diff
 .github/workflows/stage2-rollout-rehearsal.yml -text diff
+
+# Ordered classic bundle: preserve the migration proof and served bytes on every checkout.
+worklist-v0/hpacs-lite/main.html text eol=lf
+worklist-v0/hpacs-lite/main-split.bundle.js text eol=lf
+worklist-v0/hpacs-lite/page-core.js text eol=lf
+worklist-v0/hpacs-lite/study-state.js text eol=lf
+worklist-v0/hpacs-lite/order-list-store.js text eol=lf
+worklist-v0/hpacs-lite/report-templates.js text eol=lf
+worklist-v0/hpacs-lite/report-dictation.js text eol=lf
+worklist-v0/hpacs-lite/report-templates-ui.js text eol=lf
+worklist-v0/hpacs-lite/worklist-columns-view.js text eol=lf
+worklist-v0/hpacs-lite/worklist-state.js text eol=lf
+worklist-v0/hpacs-lite/worklist-data.js text eol=lf
+worklist-v0/hpacs-lite/worklist-view.js text eol=lf
+worklist-v0/hpacs-lite/sr-reader.js text eol=lf
+worklist-v0/hpacs-lite/current-study.js text eol=lf
+worklist-v0/hpacs-lite/study-info-panel.js text eol=lf
+worklist-v0/hpacs-lite/related-studies.js text eol=lf
+worklist-v0/hpacs-lite/study-thumbnails.js text eol=lf
+worklist-v0/hpacs-lite/order-list.js text eol=lf
+worklist-v0/hpacs-lite/study-image-requests.js text eol=lf
+worklist-v0/hpacs-lite/study-corrections.js text eol=lf
+worklist-v0/hpacs-lite/related-report.js text eol=lf
+worklist-v0/hpacs-lite/report-editor.js text eol=lf
+worklist-v0/hpacs-lite/report-draft-sync.js text eol=lf
+worklist-v0/hpacs-lite/report-structure-pane.js text eol=lf
+worklist-v0/hpacs-lite/report-citation-pane.js text eol=lf
+worklist-v0/hpacs-lite/report-draft-save.js text eol=lf
+worklist-v0/hpacs-lite/report-commit.js text eol=lf
+worklist-v0/hpacs-lite/report-hold.js text eol=lf
+worklist-v0/hpacs-lite/work-exit.js text eol=lf
+worklist-v0/hpacs-lite/worklist-polling.js text eol=lf
+worklist-v0/hpacs-lite/report-history.js text eol=lf
+worklist-v0/hpacs-lite/report-toolbar.js text eol=lf
+worklist-v0/hpacs-lite/viewer-placement.js text eol=lf
+worklist-v0/hpacs-lite/viewer-launch.js text eol=lf
+worklist-v0/hpacs-lite/feature-mounts.js text eol=lf
+worklist-v0/hpacs-lite/clinical-context-panel.js text eol=lf
+worklist-v0/hpacs-lite/critical-result-mounts.js text eol=lf
+worklist-v0/hpacs-lite/study-questions.js text eol=lf
+worklist-v0/hpacs-lite/workspace-panels.js text eol=lf
+worklist-v0/hpacs-lite/worklist-controls.js text eol=lf
+worklist-v0/hpacs-lite/saved-filters.js text eol=lf
+worklist-v0/hpacs-lite/worklist-row-events.js text eol=lf
+worklist-v0/hpacs-lite/telerad-request.js text eol=lf
+worklist-v0/hpacs-lite/context-menu.js text eol=lf
+worklist-v0/hpacs-lite/related-controls.js text eol=lf
+worklist-v0/hpacs-lite/session-end.js text eol=lf
+worklist-v0/hpacs-lite/page-boot.js text eol=lf
+
+# P3-01: C ends with "boot();\n  "; these exact verbatim bytes are required by
+# the pristine candidate pin. Keep other whitespace checks on both paths.
+worklist-v0/hpacs-lite/page-boot.js whitespace=-blank-at-eol,-blank-at-eof
+worklist-v0/hpacs-lite/main-split.bundle.js whitespace=-blank-at-eol,-blank-at-eof

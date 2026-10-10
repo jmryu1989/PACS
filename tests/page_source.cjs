@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const spec = require('./main_move_spec.json');
 const movedNames = new Set(spec.modules.map(m => m.file));
+const bundleName = 'main-split.bundle.js';
 
 function scripts(html) {
   const result = [];
@@ -21,6 +22,17 @@ function readPage(file) {
   file = path.resolve(file);
   const html = fs.readFileSync(file, 'utf8');
   const tags = scripts(html);
+  const bundles = tags.filter(t => t.src && path.posix.basename(t.src.replace(/[?#].*$/, '')) === bundleName);
+  if (bundles.length) {
+    const tag = bundles[0];
+    if (bundles.length !== 1 || tag.src !== bundleName || tag.tag !== `<script src="${bundleName}"></script>`)
+      throw new Error('Bundle must use one ordinary blocking classic script tag');
+    if (tags.some(t => !t.src || movedNames.has(path.posix.basename(t.src.replace(/[?#].*$/, '')))))
+      throw new Error('Bundle cannot coexist with inline or direct moved script tags');
+    const asset = path.join(path.dirname(file), bundleName), body = fs.readFileSync(asset, 'utf8');
+    return { html, script: body, files: [asset], region: [tag], bundle: bundleName,
+      source: html.slice(0, tag.start) + '<script>' + body + '</script>' + html.slice(tag.end) };
+  }
   // A moved file named any other way ("./x.js", "x.js?v=1", an absolute path) would not count as moved and the
   // page would read as unsplit with its script cut short; refuse it instead of returning partial source.
   const misnamed = tags.filter(t => t.src && !movedNames.has(t.src) && movedNames.has(path.posix.basename(t.src.replace(/[?#].*$/, ''))));
