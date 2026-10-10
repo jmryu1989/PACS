@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { ACCESS_ACTIONS, AccessAction, AccessEvent, NON_RECORD_TARGETS, parseAccessEvent } from '../emr-contract/access-event';
+import { ACCESS_ACTIONS, AUTH_ACTIONS, AccessEvent, NON_RECORD_TARGETS, parseAccessEvent } from '../emr-contract/access-event';
 import { RECORD_CLASSIFICATION, RecordKind } from '../emr-contract/classification';
 import { STATUTORY_MINIMUM } from '../emr-contract/legal-basis';
 import { RetentionRecord, civilPeriodEnd, parseRetentionRecord } from '../emr-contract/lawful-defaults';
@@ -99,12 +99,13 @@ export const ACCESS_STREAM_RULE = freeze({
 });
 
 export interface AccessFacts {
-  action: AccessAction; result: string; targets: readonly { kind: RecordKind; recordId: string | null }[];
+  action: AccessEvent['action']; result: string; targets: readonly { kind: RecordKind; recordId: string | null }[];
 }
-const actions = Object.values(ACCESS_ACTIONS).flat() as readonly AccessAction[];
+const actions = [...Object.values(ACCESS_ACTIONS).flat(), ...AUTH_ACTIONS] as readonly AccessEvent['action'][];
 const kinds = Object.keys(RECORD_CLASSIFICATION) as RecordKind[];
 /** One closed decision per event. Every successful write-family action changes a record's state (서명·공개·취소·
- * Addendum·보존 조치 alike), so it is change history; a read/export of a record is viewing. */
+ * Addendum·보존 조치 alike), so it is change history; a read/export of a record is viewing. Authentication actions are neither
+ * writes nor reads/exports and have no targets, so they fall through to non-record (the existing session rule). */
 export function accessStream(input: AccessFacts): AccessStream {
   const action = choice(input.action, actions), result = string(input.result);
   if (!Array.isArray(input.targets)) refuse('AccessStreamFactsRequired');

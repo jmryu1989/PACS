@@ -110,6 +110,7 @@ function accessEvent(o = {}) {
     userId: known(id(o.actor ?? 'dr-1')), rolesAtTime: known(['radiologist']), actingInstitution: o.acting ?? known(inst),
     managingInstitution: o.managing ?? known(inst), occurredAt: o.at ?? minute(eventCounter),
     trustedProxyIp: o.ip ?? known({ address: o.address ?? '10.0.0.5', source: 'trusted-proxy' }), cause: 'user-view', executor: 'member',
+    context: { basis: 'out-of-context', studyId: null, relatedStudyId: null, reason: 'Synthetic audit investigation' },
     targets: o.targets ?? [target(o.patient ?? P1, o.study ?? 'study-1', o.record ?? 'rep-1', o.version ?? 'v1')],
     action: o.action ?? 'provide-prepared', result: o.result ?? 'prepared', requestId: `request-${eventCounter}`,
     auditLinkId: `audit:${crypto.randomUUID()}`, relatedEventId: o.related ?? null,
@@ -134,6 +135,53 @@ function ledgerOf(data) {
         .sort((a, b) => b.entry.sequence - a.entry.sequence).slice(0, take); } };
 }
 const query = (extra = {}) => ({ from: PERIOD.from, to: PERIOD.to, ...extra });
+
+function authEvent(action = 'auth.login') {
+  const surfaces = { 'auth.login': 'GET auth/callback', 'auth.entry': 'POST auth/entry',
+    'auth.logout': 'POST auth/logout', 'auth.session.expired': 'GET me' };
+  return { ...accessEvent({ action, surface: surfaces[action], result: 'succeeded', targets: [] }),
+    formatVersion: 2, branch: 'online-auth', eventId: crypto.randomUUID(), rightsVersion: known(1),
+    context: { basis: 'authentication', studyId: null, relatedStudyId: null, reason: null },
+    affectedIdentity: known(id('dr-1')), session: known(`authref:${crypto.randomUUID()}`),
+    auth: { endCause: action === 'auth.logout' ? 'logout' : action === 'auth.session.expired' ? 'idle' : null,
+      failureCause: null, trigger: null } };
+}
+
+test('TEST-F-02 patient_replay: unfiltered authentication events replay with no statutory act or clinical targets', async () => {
+  const events = ['auth.login', 'auth.entry', 'auth.logout', 'auth.session.expired'].map(authEvent);
+  const plan = F.planInvestigation(authorityFor('auth-auditor'), query());
+  assert.equal(plan.filters.actions, null);
+  const page = await F.readInvestigationPage(plan, ledgerOf(chainRows(events)));
+  assert.equal(page.total, events.length);
+  assert.deepEqual(page.rows.map(row => ({ eventId: row.eventId, action: row.action, occurredAt: row.occurredAt,
+    actor: row.actor, statutoryAct: row.statutoryAct, targets: row.targets })), events.toReversed().map(event => ({
+    eventId: event.eventId, action: event.action, occurredAt: event.occurredAt, actor: event.userId,
+    statutoryAct: 'none', targets: [] })));
+});
+
+test('TEST-F-02 patient_replay: an auth.login action filter excludes other authentication and record events', async () => {
+  const login = authEvent();
+  const ledger = ledgerOf(chainRows([login, authEvent('auth.entry'), authEvent('auth.logout'),
+    authEvent('auth.session.expired'), accessEvent()]));
+  const auditor = authorityFor('auth-filter-auditor');
+  const page = await F.readInvestigationPage(F.planInvestigation(auditor, query({ actions: ['auth.login'] })), ledger);
+  assert.equal(page.total, 1);
+  assert.deepEqual(page.rows.map(row => row.eventId), [login.eventId]);
+  refused(() => F.planInvestigation(auditor, query({ actions: ['auth.unknown'] })),
+    'InvestigationQueryRefused', 'unknown authentication action cannot broaden the query');
+});
+
+test('TEST-F-02 patient_replay: patient, study, record and version filters exclude authentication events', async () => {
+  const record = accessEvent();
+  const ledger = ledgerOf(chainRows([authEvent(), authEvent('auth.logout'), record]));
+  const auditor = authorityFor('target-filter-auditor');
+  for (const filter of [{ patient: { patientId: P1.patientId, assigningAuthority: P1.assigningAuthority } },
+    { studyId: 'study-1' }, { recordId: 'rep-1' }, { versionId: 'v1' }]) {
+    const page = await F.readInvestigationPage(F.planInvestigation(auditor, query(filter)), ledger);
+    assert.equal(page.total, 1);
+    assert.deepEqual(page.rows.map(row => row.eventId), [record.eventId]);
+  }
+});
 
 // Fixed versions (C's listing in round 2)
 function signedVersion(recordId, versionId, at, previous, o = {}) {
@@ -456,7 +504,8 @@ test('TEST-F-02 patient_replay: the investigation is itself an access event for 
   assert.ok(event.targets.every(t => t.kind === 'access-audit' && t.patientLinkSnapshot.value.patientId === 'SYN-P1'));
   const parsed = AE.parseAccessEvent({ formatVersion: 1, surface: 'GET admin/audit', eventId: 'audit-view-1', userId: known(id('aud-1')),
     rolesAtTime: known(['staff']), actingInstitution: known(INST_X), managingInstitution: known(INST_X), occurredAt: NOW,
-    trustedProxyIp: known({ address: '10.0.0.9', source: 'trusted-proxy' }), cause: 'user-view', executor: 'member', targets: event.targets,
+    trustedProxyIp: known({ address: '10.0.0.9', source: 'trusted-proxy' }), cause: 'user-view', executor: 'member',
+    context: { basis: 'out-of-context', studyId: null, relatedStudyId: null, reason: 'Synthetic audit investigation' }, targets: event.targets,
     action: event.action, result: 'prepared', requestId: 'audit-view-request', auditLinkId: `audit:${crypto.randomUUID()}`, relatedEventId: null });
   assert.equal(parsed.targets.length, 2);
   const exported = await F.readInvestigationPage(F.planInvestigation(auditor, query(), 'export'), ledger);
@@ -578,7 +627,8 @@ test('TEST-F-03 lawful_issue: the disclosure ledger event built from the package
   assert.equal(targets.length, 2);
   const parsed = AE.parseAccessEvent({ formatVersion: 1, surface: 'authorized-disclosure', eventId: 'disclosure-1', userId: known(id('records-officer')),
     rolesAtTime: known(['staff']), actingInstitution: known(INST_X), managingInstitution: known(INST_X), occurredAt: '2026-10-09T03:00:00.000Z',
-    trustedProxyIp: known({ address: '10.0.0.9', source: 'trusted-proxy' }), cause: 'user-view', executor: 'member', targets,
+    trustedProxyIp: known({ address: '10.0.0.9', source: 'trusted-proxy' }), cause: 'user-view', executor: 'member',
+    context: { basis: 'out-of-context', studyId: null, relatedStudyId: null, reason: 'Synthetic audit investigation' }, targets,
     action: 'disclosure', result: 'succeeded', requestId: 'copy-1', auditLinkId: `audit:${crypto.randomUUID()}`, relatedEventId: null });
   assert.deepEqual(parsed.targets.map(t => [t.kind, t.recordId.value, t.versionId.value, t.patientLinkSnapshot.value.patientId]),
     [['disclosure', 'rep-1', 'v1', 'SYN-P1'], ['disclosure', 'rep-1', 'v2', 'SYN-P1']]);
