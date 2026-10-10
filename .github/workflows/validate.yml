@@ -1512,6 +1512,8 @@ jobs:
         run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/worklist_prior_test.cjs
       - name: Compound search operators and malformed condition boundaries
         run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/compound_filter_test.cjs tests/worklist_alerts_test.cjs tests/worklist_refresh_test.cjs tests/worklist_startup_test.cjs tests/related_parts_test.cjs tests/worklist_body_parts_test.cjs tests/study_priority_test.cjs tests/worklist_search_test.cjs
+      - name: Worklist folder multi-selection and shortcut module contract
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/worklist-folder-tree --cwd . --file worklist-v0/hpacs-lite/worklist-folder-tree.js --file worklist-v0/hpacs-lite/worklist-folder-tree.css --file worklist-v0/hpacs-lite/compound-filter.js --file tests/worklist_folder_tree_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/worklist_folder_tree_test.cjs
       - name: Worklist column visibility and account storage model
         run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/worklist_columns_test.cjs
       - name: Account and browser workspace storage boundaries
