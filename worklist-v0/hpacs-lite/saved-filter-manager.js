@@ -116,7 +116,16 @@
         // New multi-value edits and folder selections retain their token-array meaning.
         cols[key] = key === 'modality' && input.value === String(original ?? '') ? original ?? ''
           : key === 'modality' && /[,\\]/.test(input.value)
-            ? input.value.split(/[,\\]/).map(v => v.trim().toUpperCase()).filter(Boolean) : input.value;
+            ? [...new Set(input.value.split(/[,\\]/).map(v => v.trim().toUpperCase()))] : input.value;
+        if (key === 'modality') {
+          const allowed = options.modalities?.() || options.columns[$('mode').value].find(c => c.k === key)?.f || [];
+          const tokens = Array.isArray(cols[key]) ? cols[key] : [cols[key]];
+          const error = input.value !== String(original ?? '') && input.value !== ''
+            && tokens.some(v => !v || !allowed.includes(v))
+            ? '사용할 수 없는 Modality입니다. 빈 값 없이 목록의 Modality를 쉼표로 구분해 입력하세요.' : '';
+          input.setCustomValidity(error);
+          if (error) cols[key] = original ?? '';
+        }
       });
       function readRules(container) { return [...container.children].map(row => {
         if (row.classList.contains('sfm-group')) return {
@@ -273,7 +282,8 @@
     }
     function count() {
       const filter = value();
-      const error = compound.validate(filter.cols[compound.KEY], options.columns[filter.mode]);
+      const error = dialog.querySelector('[data-col="modality"]')?.validationMessage
+        || compound.validate(filter.cols[compound.KEY], options.columns[filter.mode]);
       const note = error ? '' : options.countNote?.(filter) || '';
       $('count').textContent = error ? '복합 조건 오류: ' + error
         : `편집 중 조건: 로드된 목록 기준 ${options.count(filter)}건 · 기본 조건 AND 복합 조건을 적용합니다.` + (note ? ' · ' + note : '');
@@ -583,6 +593,7 @@
     });
     $('preview').addEventListener('click', () => {
       if (busy || !editable) return;
+      if (dialog.querySelector('[data-col="modality"]')?.validationMessage) return;
       if (organizerDirty() && !confirm('검색을 적용하고 닫으면 저장하지 않은 폴더 변경은 버립니다. 계속할까요?')) return;
       const next = value();
       const error = compound.validate(next.cols[compound.KEY], options.columns[next.mode]);

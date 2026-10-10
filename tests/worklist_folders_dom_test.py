@@ -195,8 +195,8 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.page.locator('#savefilter').click()
         self.page.locator('#sfm-name').fill('My MR')
         self.page.locator('#sfm-save-apply').click()
-        expect(self.page.locator('#sfm-status')).to_contain_text('저장')
-        self.page.locator('#sfm-close').click()
+        expect(self.page.locator('#saved-filter-manager')).not_to_be_visible()
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
         nav = self.page.get_by_role('navigation', name='Folders')
         nav.get_by_label('Shortcut Name', exact=True).fill('Morning')
         nav.get_by_role('combobox', name=re.compile(r'^Saved Search')).select_option('own:1')
@@ -363,9 +363,9 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.site.held_lists = []
         self.page.goto(auth.MAIN_URL)
         self.page.locator('#worklist-folders-toggle').click()
-        for token in ['MG', 'XA']:
-            expect(self.folder(token)).to_have_text(token+' (—)')
-            expect(self.folder(token)).to_have_attribute('aria-pressed', 'true')
+        expect(self.folder('MG and XA')).to_have_text('MG and XA (—)')
+        expect(self.folder('MG and XA')).to_have_attribute('aria-current', 'true')
+        expect(self.page.locator('#filterrow [data-f=modality]')).to_have_value('MG,XA')
         held = self.site.held_lists
         self.site.held_lists = None
         for route, account in held:
@@ -375,8 +375,12 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.page.goto(auth.MAIN_URL)
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
         self.page.locator('#worklist-folders-toggle').click()
+        expect(self.folder('MG and XA')).to_have_text('MG and XA (2)')
+        expect(self.folder('MG and XA')).to_have_attribute('aria-current', 'true')
+        expect(self.page.locator('#filterrow [data-f=modality]')).to_have_value('MG,XA')
         for token in ['MG', 'XA']:
-            expect(self.folder(token)).to_have_attribute('aria-pressed', 'true')
+            expect(self.folder(token)).to_have_text(token+' (1)')
+            expect(self.folder(token)).to_have_attribute('aria-pressed', 'false')
 
     def test_relative_dates_cross_local_midnight_dst_month_and_year(self):
         from datetime import datetime, timedelta
@@ -476,14 +480,15 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.page.locator('#toolbar-filters > summary').click()
         self.page.locator('#edit-active-filter').click()
         self.page.locator('#sfm-save-apply').click()
-        expect(self.page.locator('#sfm-status')).to_contain_text('저장')
+        expect(self.page.locator('#saved-filter-manager')).not_to_be_visible()
         self.assertEqual('CT,SR', self.site.filters[0]['cols']['modality'])
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
+        self.page.locator('#edit-active-filter').click()
         self.page.locator('#sfm-col-modality').fill('CT, MR')
         self.page.locator('#sfm-save-apply').click()
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(3)
+        expect(self.page.locator('#saved-filter-manager')).not_to_be_visible()
         self.assertEqual(['CT','MR'], self.site.filters[0]['cols']['modality'])
-        self.page.locator('#sfm-close').click()
         self.site.sign_in(auth.RAD)
         self.page.goto(auth.MAIN_URL)
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(3)
@@ -551,23 +556,47 @@ class WorklistFoldersDOM(unittest.TestCase):
             body['studies'][0]['uid'] = auth.UID
             return body
         self.site.list_body = one_study
+        # Capture the public mounted module, not page-private globals. A retained
+        # document must not be able to use the old account's destroyed module.
+        self.context.route('**/worklist-folder-tree.js', lambda route: route.fulfill(
+            content_type='application/javascript', body=(auth.ROOT / 'worklist-v0/hpacs-lite/worklist-folder-tree.js').read_text(encoding='utf-8') + """
+          { const mount = KinWorklistFolderTree.mount;
+            KinWorklistFolderTree.mount = options => {
+              const api = mount(options); window.folderLifecycle = api; return api;
+            };
+          }
+        """))
         self.page.goto(auth.MAIN_URL)
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
         self.page.locator('#rows tr[data-uid]').click()
         expect(self.page.locator('#findings')).to_be_editable()
         self.page.locator('#findings').fill('SYN unsaved recovery text')
-        self.page.evaluate('window.endedFolder = worklistFolders')
+        self.page.locator('#worklist-folders-toggle').click()
+        expect(self.folder('Private shortcut')).to_be_visible()
+        old_button = self.folder('Private shortcut').element_handle()
         self.site.ended.add(self.site.cookie)
         self.page.locator('#refresh').click()
         expect(self.page.locator('dialog.kin-logout h2')).to_have_text('Session Ended')
         expect(self.page).to_have_url(auth.MAIN_URL)
         expect(self.page.locator('#worklist-folders nav')).to_have_count(0)
         # Public module lifecycle: the old owner cannot operate its detached tree.
-        self.assertTrue(self.page.evaluate("() => {try {window.endedFolder.select('all');return false;} catch(e){return true;}}"))
-        # Account retention is itself the requirement; inspect data, not implementation source/strings.
-        self.assertEqual([],self.page.evaluate('storedShortcuts'))
-        self.assertEqual([],self.page.evaluate('sharedSearches'))
+        self.assertTrue(self.page.evaluate("() => {try {window.folderLifecycle.select('all');return false;} catch(e){return true;}}"))
+        self.assertTrue(self.page.evaluate("() => {try {window.folderLifecycle.update({});return false;} catch(e){return true;}}"))
+        self.assertTrue(self.page.evaluate("() => {try {window.folderLifecycle.snapshot();return false;} catch(e){return true;}}"))
+        old_button.evaluate('button => button.click()')
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(0)
         self.assertNotIn('Private shortcut',self.page.locator('body').text_content())
+        self.assertNotIn('Shared CT',self.page.locator('body').text_content())
+        self.site.shortcuts = []
+        self.site.shared = []
+        self.site.filters = []
+        self.site.ended.clear()
+        self.site.account = auth.RAD_OTHER
+        self.page.goto(auth.MAIN_URL)
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
+        self.page.locator('#worklist-folders-toggle').click()
+        self.assertNotIn('Private shortcut', self.page.locator('body').text_content())
+        self.assertNotIn('Shared CT', self.page.locator('body').text_content())
 
     def test_manager_read_write_failure_clears_progress_status(self):
         self.open()
@@ -585,6 +614,98 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.page.locator('#sfm-folder-save').click()
         expect(self.page.locator('#shortcuts-status')).to_contain_text('저장하지 못했습니다')
         expect(self.page.locator('#sfm-status')).to_contain_text('SYN conflict')
+
+    def test_stored_scalar_tree_alignment_uses_exact_search_count(self):
+        self.site.filters = [dict(id=1, name='Default CT', mode='Radiology', days=-1, quick='',
+                                 cols={'modality': 'CT'}, isDefault=True)]
+        self.page.goto(auth.MAIN_URL)
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
+        self.page.locator('#worklist-folders-toggle').click()
+        expect(self.folder('CT')).to_have_attribute('aria-pressed', 'false')
+        expect(self.folder('Default CT')).to_have_attribute('aria-current', 'true')
+        expect(self.folder('Default CT')).to_have_text('Default CT (1)')
+        self.assertEqual(self.page.locator('#rows tr[data-uid]').count(),
+                         int(re.search(r'\((\d+)\)$', self.folder('Default CT').inner_text())[1]))
+        self.folder('CT').click()
+        expect(self.folder('CT')).to_have_text('CT (2)')
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
+        self.page.locator('#quick').fill('SYN CT,SR')
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
+        expect(self.folder('CT')).to_have_attribute('aria-pressed', 'false')
+
+    def test_folder_replaces_favorite_tag_and_consultation_predicates(self):
+        owner = [auth.INSTITUTION, self.site.account['sub']]
+        link = dict(id='one', name='Synthetic', uids=[auth.UID + '.0'])
+        self.site.gets['/api/favorite-folders'] = (200, dict(owner=owner, revision=1, folders=[link]))
+        self.site.gets['/api/study-tags'] = (200, dict(owner=owner, catalogs=[
+            dict(scope='personal', revision=1, tags=[link]), dict(scope='institution', revision=1, tags=[])]))
+        self.site.gets['/api/consultations'] = (200, dict(owner=owner, direction='received', nextCursor=None,
+            items=[dict(id='request', studyUid=auth.UID+'.0', state='Requested', revision=1,
+                        institutionId=auth.INSTITUTION, requesterActor='SYN requester')]))
+        self.open()
+        self.page.locator('#toolbar-filters > summary').click()
+        for folder in ['All Studies', 'CT', 'Shared CT']:
+            for opener, apply, footer in [('#favorite-open', '#favorite-apply', '즐겨찾기'),
+                                          ('#study-tag-open', '#study-tag-apply', '태그'),
+                                          ('#consultations-open', '#co-filter', 'Consultations')]:
+                with self.subTest(folder=folder, footer=footer):
+                    section = '#toolbar-more' if opener == '#consultations-open' else '#toolbar-filters'
+                    if not self.page.locator(section).evaluate('e=>e.open'):
+                        self.page.locator(section + ' > summary').click()
+                    self.page.locator(opener).click()
+                    if opener == '#consultations-open':
+                        expect(self.page.locator('#co-count')).to_contain_text('1 shown')
+                    self.page.locator(apply).click()
+                    expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
+                    expect(self.page.locator('.statusbar').first).to_contain_text(footer)
+                    self.folder(folder).click()
+                    expected = {'All Studies': 6, 'CT': 2, 'Shared CT': 1}[folder]
+                    expect(self.page.locator('#rows tr[data-uid]')).to_have_count(expected)
+                    expect(self.folder(folder)).to_have_text(f'{folder} ({expected})')
+                    expect(self.page.locator('.statusbar').first).not_to_contain_text(footer)
+                    expect(self.page.locator('#favorite-clear')).to_be_hidden()
+                    expect(self.page.locator('#study-tag-clear')).to_be_hidden()
+
+    def test_duplicate_and_invalid_multi_value_column_input_is_atomic(self):
+        self.open()
+        field = self.page.locator('#filterrow [data-f=modality]')
+        field.fill('ct, CT, mr, MR')
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(3)
+        expect(self.folder('CT')).to_have_attribute('aria-pressed', 'true')
+        expect(self.folder('MR')).to_have_attribute('aria-pressed', 'true')
+        before = self.page.locator('#rows tr[data-uid]').evaluate_all('rows=>rows.map(r=>r.dataset.uid)')
+        for bad in ['CT,', 'CT,,MR', 'CT, UNKNOWN']:
+            field.fill(bad)
+            self.assertIn('사용할 수 없는 Modality', field.evaluate('e=>e.validationMessage'))
+            self.assertEqual(before, self.page.locator('#rows tr[data-uid]').evaluate_all('rows=>rows.map(r=>r.dataset.uid)'))
+        field.fill('CT\\ct')
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
+        expect(self.folder('CT')).to_have_text('CT (2)')
+
+    def test_duplicate_multi_value_editor_save_reapply_and_invalid_draft(self):
+        self.open()
+        self.page.locator('#toolbar-filters > summary').click()
+        self.page.locator('#managefilters').click()
+        self.page.locator('#sfm-name').fill('Stable modalities')
+        field = self.page.locator('#sfm-col-modality')
+        for bad in ['CT,', 'CT,,MR', 'CT, UNKNOWN']:
+            field.fill(bad)
+            expect(self.page.locator('#sfm-count')).to_contain_text('사용할 수 없는 Modality')
+            self.page.locator('#sfm-preview').click()
+            expect(self.page.locator('#saved-filter-manager')).to_be_visible()
+            expect(self.page.locator('#rows tr[data-uid]')).to_have_count(6)
+            self.page.locator('#sfm-save').click()
+            self.assertEqual([], self.site.filters)
+        field.fill('ct, CT, mr, MR')
+        self.page.locator('#sfm-save-apply').click()
+        expect(self.page.locator('#saved-filter-manager')).not_to_be_visible()
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(3)
+        self.assertEqual(['CT', 'MR'], self.site.filters[0]['cols']['modality'])
+        self.folder('All Studies').click()
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(6)
+        self.folder('Stable modalities').click()
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(3)
+        expect(self.folder('Stable modalities')).to_have_text('Stable modalities (3)')
 
 
 if __name__ == '__main__':

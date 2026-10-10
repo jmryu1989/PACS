@@ -113,6 +113,7 @@
       return label;
     }
     function snapshot() {
+      active();
       return { selectedId: selected.length === 1 ? selected[0] : null, selectedIds: [...selected],
         loadState: state.loadState, shortcuts: state.shortcuts.map(item => ({ ...item })),
         items: items().map(item => ({ ...item, count: count(item), selected: selected.includes(item.id) })) };
@@ -289,7 +290,13 @@
         active(); const chosen = items().filter(item => selected.includes(item.id));
         return list.filter(row => chosen.some(item => matches(item, row) === true));
       },
-      destroy() { if (!ended) { ended = true; nav.remove(); controls.clear(); } },
+      destroy() {
+        if (!ended) {
+          ended = true; nav.remove(); controls.clear(); counts.clear();
+          state = { rows: [], searches: [], shortcuts: [], loadState: 'unknown' };
+          selected = []; applied = []; appliedSearch = undefined;
+        }
+      },
     };
   }
   return { mount, matchesModality, defaultModalities };

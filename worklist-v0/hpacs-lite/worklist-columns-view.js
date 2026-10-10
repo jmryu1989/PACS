@@ -107,11 +107,18 @@
     }
     $("#filterrow").addEventListener("input", e => {
       const el = e.target.closest("[data-f]"); if (!el) return;
-      fval[el.dataset.f] = el.value.trim();
+      let value = el.value.trim();
       if (el.dataset.f === 'modality') {
-        if (/[,\\]/.test(el.value)) fval.modality = el.value.split(/[,\\]/).map(v => v.trim().toUpperCase()).filter(Boolean);
+        const tokens = value.split(/[,\\]/).map(v => v.trim().toUpperCase());
+        const allowed = KinWorklistFolderTree.defaultModalities(studies);
+        const error = value && tokens.some(v => !v || !allowed.includes(v))
+          ? '사용할 수 없는 Modality입니다. 빈 값 없이 목록의 Modality를 쉼표로 구분해 입력하세요.' : '';
+        el.setCustomValidity(error);
+        if (error) { toast(error, 'err'); return; }
+        if (/[,\\]/.test(el.value)) value = [...new Set(tokens)];
         folderAppliedSearch = null;
       }
+      fval[el.dataset.f] = value;
       worklistSearch?.change();
       render();
     });

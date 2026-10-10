@@ -187,8 +187,23 @@
       return JSON.stringify([studies, userFilters, sharedSearches, mode, new Date().toDateString(),
         studies.map(s => worklistBodyParts.get(s.uid))]);
     }
+    function folderSelectionIds(filter) {
+      // Folder counts describe replacement searches. Once another predicate narrows
+      // the list, no folder may claim that its replacement count is the applied list.
+      if (favoriteList?.key() || studyTagList?.key() || consultationFilter) return [];
+      const stored = folderSearches().find(f => f.name === activeFilterName
+        && f.treeId.startsWith('own:') && filterCriteriaKey(f) === filterCriteriaKey(filter));
+      if (stored) return [stored.treeId];
+      if (filter.quick || savedFilterDays(filter.days) !== -1
+        || Object.entries(filter.cols || {}).some(([key, value]) => key !== 'modality' && value !== '' && value != null)) return [];
+      const value = filter.cols?.modality;
+      // Scalars, including old comma-delimited saved values, mean exact equality.
+      // Only a newly created array represents modality folder tokens.
+      return Array.isArray(value) ? value.map(v => 'modality:' + v) : value ? [] : ['all'];
+    }
     function updateWorklistFolders() {
       if (!worklistFolders) return;
+      worklistBodyParts.sync(studies);
       const key = JSON.stringify([folderInputsKey(), offline, folderLoadState, folderAppliedSearch, shortcutDraft ?? storedShortcuts]);
       if (key !== folderRenderKey) {
       const searches = folderSearches().filter(f => Array.isArray(COLS[f.mode])
@@ -197,33 +212,37 @@
         .map(f => {
           const criteria = JSON.parse(JSON.stringify(f));
           // Compile once per search update, not once for every row counted in the tree.
-          const match = filterPredicate(criteria), unknown = !!bodyPartCountNote(criteria);
-          return { id: f.treeId, name: f.name, matches: row => unknown ? null : match(row) };
+          const match = filterPredicate(criteria);
+          const needsParts = KinCompoundFilter.usesField(criteria.cols?.[KinCompoundFilter.KEY], 'bodyPart', COLS[criteria.mode]);
+          // Applied criteria stay fixed, but failed metadata can become available on retry.
+          return { id: f.treeId, name: f.name,
+            matches: row => needsParts && worklistBodyParts.get(row.uid) === undefined ? null : match(row) };
         });
       worklistFolders.update({ rows: studies, loadState: offline ? 'unknown' : folderLoadState, searches,
         shortcuts: shortcutDraft ?? storedShortcuts });
       folderRenderKey = key;
       }
       if (!folderAppliedSearch) {
-        const value = (worklistSearch?.read(searchCriteria()).criteria || searchCriteria()).cols?.modality;
-        const tokens = Array.isArray(value) ? value : String(value || '').split(/[,\\]/).map(v => v.trim().toUpperCase()).filter(Boolean);
-        const ids = Array.isArray(value) || tokens.length ? tokens.map(v => 'modality:' + v) : ['all'];
+        const search = worklistSearch?.read(searchCriteria());
+        const ids = search?.empty ? [] : folderSelectionIds(search?.criteria || searchCriteria());
         if (JSON.stringify(worklistFolders.snapshot().selectedIds) !== JSON.stringify(ids)) worklistFolders.setApplied(ids);
+      } else if (folderAppliedSearch.criteria !== filterCriteriaKey(worklistSearch?.read(searchCriteria()).criteria || searchCriteria())
+        || favoriteList?.key() || studyTagList?.key() || consultationFilter) {
+        if (worklistFolders.snapshot().selectedIds.length) worklistFolders.setApplied([]);
       }
     }
     function alignWorklistFolder(filter, id) {
       if (!worklistFolders) return;
       updateWorklistFolders();
       if (id) { worklistFolders.setApplied(id); return; }
-      const value = filter?.cols?.modality;
-      const modalities = Array.isArray(value) ? value : String(value || '').split(/[,\\]/).map(v => v.trim().toUpperCase()).filter(Boolean);
-      worklistFolders.setApplied(Array.isArray(value) || modalities.length ? modalities.map(v => 'modality:' + v) : 'all');
+      worklistFolders.setApplied(folderSelectionIds(filter || searchCriteria()));
     }
     function mountWorklistFolders() {
       if (worklistFolders || !$('#worklist-folders')) return;
       worklistFolders = KinWorklistFolderTree.mount({ host: $('#worklist-folders'),
         onSelect(item) {
           if (!work.admits(work.capture('document'))) return;
+          favoriteList?.clear(); studyTagList?.clear(); consultationFilter = null;
           if (item.kind === 'search' || item.kind === 'shortcut') {
             const filter = folderSearches().find(f => f.treeId === item.searchId);
             if (filter) applyFilter(filter, item.id);

@@ -145,7 +145,8 @@
     // 지난다 — 로그아웃 준비·세션 종료 뒤에 온 답은 목록을 바꾸지 않고 취소로 끝난다.
     const savedFilterManager = KinSavedFilterManager.mount({
       columns: COLS, days: savedFilterDays, list: () => userFilters, snapshot: snapshotFilter,
-      count: f => filteredFor(f).length, countNote: bodyPartCountNote, apply: applyFilter,
+      modalities: () => KinWorklistFolderTree.defaultModalities(studies),
+      count: f => filteredFor(f).length, countNote: bodyPartCountNote, apply: f => applyFilter(f),
       bodyParts: { snapshot: () => worklistBodyParts.sync(studies),
         load: refresh => { worklistBodyParts.sync(studies); return worklistBodyParts.load({refresh}); },
         cancel: () => worklistBodyParts.cancel() },
@@ -262,7 +263,7 @@
       if (compoundError) { toast('복합 조건을 적용하지 못했습니다: ' + compoundError, 'err'); return false; }
       activeFilterName = userFilters.some(saved => saved.name === f.name) ? f.name : null;
       const source = folderId && folderSearches().find(saved => saved.treeId === (f.treeId || 'own:' + f.id));
-      folderAppliedSearch = source ? { id: source.treeId, name: source.name } : null;
+      folderAppliedSearch = source ? { id: source.treeId, name: source.name, criteria: filterCriteriaKey(f) } : null;
       $("#quick").value = f.quick ?? "";
       quickDays = savedFilterDays(f.days);
       document.querySelectorAll("#qf button").forEach(x => x.classList.toggle("on", +x.dataset.days === quickDays));
