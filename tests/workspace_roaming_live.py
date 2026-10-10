@@ -182,4 +182,52 @@ class WorkspaceRoamingLive(unittest.TestCase):
         legacy['revision']=winner['revision'];refused=self.write(legacy)
         self.assertEqual(refused.status,409,refused.text);self.assertEqual(self.get(),winner)
 
+    # REQ-WS1/WS2/WS7 -> RISK-WS1/WS2/WS7 -> TEST-W3-ROAM-11/12.
+    # Prepared for an isolated synthetic stack; pure facade tests do not prove DB races.
+    def test_11_v3_roundtrip_downgrade_refusal_and_explicit_clear(self):
+        legacy=self.body_v2();saved=self.write(legacy);self.assertEqual(saved.status,200,saved.text)
+        body=self.body_v2(state=saved.body);body['layout']['version']=3
+        body['layout']['workspace']=dict(version=1,rail=1,worklist=16384,related=None,
+            prior=280,railCollapsed=True,studyPanelTab='templates')
+        saved=self.write(body);self.assertEqual(saved.status,200,saved.text)
+        self.assertEqual(saved.body['layout'],body['layout']);self.assertEqual(self.get(),saved.body)
+        for version in [1,2]:
+            old=self.body(state=saved.body) if version==1 else self.body_v2(state=saved.body)
+            refused=self.write(old);self.assertEqual(refused.status,409,refused.text)
+            self.assertEqual(refused.body.get('code'),'WORKSPACE_CONFLICT')
+            self.assertEqual(self.get(),saved.body)
+        original=saved.body;body['revision']=original['revision']
+        for change in ['open','size','reading','owner']:
+            bad=copy.deepcopy(body)
+            if change=='open':bad['layout']['workspace']['open']=True
+            elif change=='size':bad['layout']['workspace']['rail']=1.5
+            elif change=='reading':bad['layout']['reading']['relatedHidden']='false'
+            else:bad['expectedOwner'][1]='other-synthetic-subject'
+            refused=self.write(bad);self.assertEqual(refused.status,409 if change=='owner' else 400,refused.text)
+            self.assertEqual(self.get(),original)
+        cleared=self.write(dict(expectedOwner=original['owner'],revision=original['revision']),method='DELETE')
+        self.assertEqual(cleared.status,200,cleared.text);self.assertIsNone(cleared.body['layout'])
+        self.assertEqual(cleared.body['revision'],original['revision']+1)
+        restored=self.write(self.body(state=cleared.body));self.assertEqual(restored.status,200,restored.text)
+        self.assertEqual(restored.body['layout']['version'],1);self.assertEqual(self.get(),restored.body)
+
+    def test_12_concurrent_v3_upgrade_and_v2_update_keep_reading_and_revision(self):
+        old=self.body_v2();saved=self.write(old);self.assertEqual(saved.status,200,saved.text)
+        old['revision']=saved.body['revision'];old['layout']['reading']['reportWidth']=620
+        upgrade=self.body_v2(state=saved.body);upgrade['layout']['version']=3
+        upgrade['layout']['workspace']=dict(version=1,rail=None,worklist=300,related=180,
+            prior=None,railCollapsed=False,studyPanelTab='info')
+        gate=threading.Barrier(2)
+        def send(body):gate.wait();return self.write(body)
+        with ThreadPoolExecutor(max_workers=2) as pool:results=list(pool.map(send,[old,upgrade]))
+        self.assertEqual(sorted(r.status for r in results),[200,409],[r.text for r in results])
+        winner=next(r.body for r in results if r.status==200);self.assertEqual(self.get(),winner)
+        if winner['layout']['version']==2:
+            upgrade['revision']=winner['revision'];upgrade['layout']['reading']=winner['layout']['reading']
+            saved=self.write(upgrade);self.assertEqual(saved.status,200,saved.text);winner=saved.body
+        self.assertEqual(winner['layout']['reading'],upgrade['layout']['reading'])
+        self.assertEqual(winner['layout']['workspace'],upgrade['layout']['workspace'])
+        old['revision']=winner['revision'];refused=self.write(old)
+        self.assertEqual(refused.status,409,refused.text);self.assertEqual(self.get(),winner)
+
 if __name__=='__main__':unittest.main(verbosity=2)
