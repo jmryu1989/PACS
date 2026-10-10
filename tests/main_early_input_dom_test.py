@@ -1119,7 +1119,9 @@ class Registration(PreCase):
 
     def both(self, case, outcome, after=None, schedule="default", reference="original", count="actual", delay_ms=0):
         base, keeper = self.kept(f"{case}-{outcome}", schedule, f"{reference}-{count}-{delay_ms}ms")
-        layouts = {"original": Pages.layout(reference, 0), "candidate": Pages.layout("current", count)}
+        # The incremental reference must keep the landed parent's external-script boundaries.
+        layouts = {"original": Pages.layout(reference, "actual" if reference == "previous" else 0),
+                   "candidate": Pages.layout("current", count)}
         reached = {"original": {}, "candidate": {}}
         status = {"original": "not_started", "candidate": "not_started"}
 
@@ -1298,6 +1300,8 @@ class ActualLayout(PreCase):
             "incremental-C3", "answered", reference="previous")
         self.assertEqual([], before_errors)
         self.assertEqual([], errors)
+        for phase in before.values():
+            self.assertEqual("actual", phase["source"]["kind"], "previous parent is delivered without resplitting")
         self.compare_phases(base, before, after, "previous parent to actual", dispatches=True)
 
     def test_actual_held_input_and_leaving_boundaries(self):
@@ -1340,6 +1344,28 @@ class ActualLayout(PreCase):
                              duplicate_ids(PAGE.read_text(encoding="utf-8")), "C6 HTML duplicate ids")
         finally:
             context.close()
+
+    def test_actual_part2_script_responses_are_complete(self):
+        layout = Pages.current.layout("actual")
+        self.assertIn("report-draft-save.js", layout[1]["parts"], "PRECONDITION actual part 2 asset")
+        run = Run(self, layout, hold="report-draft-save.js")
+        responses, failures = [], []
+        run.page.on("response", lambda response: responses.append({"url": response.url, "status": response.status}))
+        run.page.on("requestfailed", lambda request: failures.append({"url": request.url, "failure": request.failure}))
+        try:
+            run.blocked()
+            run.delivery.release()
+            run.wait("document.readyState === 'complete'", "actual asset load completes")
+            raw = {"manifest": layout[1], "delivered": run.delivery.bodies, "responses": responses,
+                   "failures": failures, "errors": run.errors, "trace": run.trace()}
+            sh.keep(ARTIFACTS / "part2-assets", "actual.raw.json", raw)
+            name = "report-draft-save.js"
+            self.assertEqual([200], [r["status"] for r in responses if urlparse(r["url"]).path.endswith('/' + name)],
+                             "actual report-draft-save.js response must arrive")
+            self.assertEqual([], failures, "actual script requests must succeed")
+            self.assertEqual([], run.errors, "actual scripts execute without errors")
+        finally:
+            run.close()
 
 
 class LoadBudget(PreCase):

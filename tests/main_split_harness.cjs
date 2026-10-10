@@ -374,7 +374,18 @@ function mutantLayout(page, id, outDir) {
 }
 
 function splitMutant(page, id, outDir) {
-  const dir = outsideProduct(outDir), manifest = split(18, dir, { page });
+  const dir = outsideProduct(outDir);
+  if (id === 'S2-M06') {
+    fs.mkdirSync(dir, { recursive: true });
+    const source = path.join(dir, 'input.html'), spec = path.join(dir, 'derived-spec.json');
+    fs.writeFileSync(source, preMutant(page, 'M37'));
+    fs.writeFileSync(spec, JSON.stringify(deriveSpec(source)));
+    const destination = path.join(dir, 'actual30');
+    const manifest = split(30, destination, { page: source, spec });
+    return { id, page: path.join(destination, 'main.html'), spec, manifest };
+  }
+  const count = id.startsWith('S2-') ? 30 : Math.max(18, readPage(page).files.length);
+  const manifest = split(count, dir, { page });
   const target = path.join(dir, 'main.html');
   let html = fs.readFileSync(target, 'utf8');
   if (id === 'S1-M01') {
@@ -395,6 +406,28 @@ function splitMutant(page, id, outDir) {
       '<script src="study-state.js"></script>\n  <script src="page-core.js"></script>');
   } else if (id === 'S1-M05') {
     html = html.replace('<script src="report-dictation.js">', '<script defer src="report-dictation.js">');
+  } else if (id === 'S2-M01') {
+    const file = path.join(dir, 'related-report.js'), body = fs.readFileSync(file, 'utf8');
+    const nodes = statements(body);
+    if (nodes[0].name !== 'relatedReportSeq') throw new Error('S2-M01: first declaration missing');
+    fs.writeFileSync(file, body.slice(nodes[1].start));
+  } else if (id === 'S2-M02') {
+    const first = '<script src="report-editor.js"></script>', next = '<script src="report-draft-sync.js"></script>';
+    if (!html.includes(first + '\n  ' + next)) throw new Error('S2-M02: adjacent tags missing');
+    html = html.replace(first + '\n  ' + next, next + '\n  ' + first);
+  } else if (id === 'S2-M03') {
+    const file = path.join(dir, 'report-commit.js'), body = fs.readFileSync(file, 'utf8');
+    const nodes = statements(body), last = nodes.at(-1);
+    // getFullStart owns leading trivia: the boundary LF may be the last LF inside this run.
+    const at = body.lastIndexOf('\n');
+    if (at < last.start) throw new Error('S2-M03: final statement LF missing');
+    fs.writeFileSync(file, body.slice(0, at > 0 && body[at - 1] === '\r' ? at - 1 : at) + body.slice(at + 1));
+  } else if (id === 'S2-M04') {
+    const body = fs.readFileSync(path.join(dir, 'report-toolbar.js'), 'utf8');
+    const nodes = statements(body), node = nodes.at(-1);
+    if (node.name !== 'ExpressionStatement after move #2') throw new Error('S2-M04: final move registration missing');
+    const inline = scripts(html).find(t => !t.src), at = inline.start + '<script>'.length;
+    html = html.slice(0, at) + body.slice(node.start) + html.slice(at);
   } else if (id !== 'BASELINE') throw new Error('Unknown byte mutant ' + id);
   fs.writeFileSync(target, html);
   return { id, page: target, manifest };

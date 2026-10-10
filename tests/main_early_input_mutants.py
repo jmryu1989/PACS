@@ -33,8 +33,8 @@ observation of its own case, after the same cases passed unmutated; the 37 above
 
 stdlib only; it launches the browser test as a child process (one per mutant) and never drives a browser itself.
 --anchors-only writes every mutant and its layout (no browser) and stops.
-Part 1 retains those 55 ids and adds five C1 byte/tag/file mutants, one actual delivered-asset hash mutant,
-and eight ledger-178 oracle mutants. Every generated Python override is compiled before browser execution.
+Part 2 retains all 69 part-1 ids and adds four C1 boundary mutants, an actual missing response and an actual
+30-file input dispatch reversal. Every generated Python override is compiled before browser execution.
 """
 import argparse
 import concurrent.futures
@@ -227,6 +227,21 @@ PART1_MUTANTS = [
      "old": '            if self.host_clock() > deadline:', "new": '            if False and self.host_clock() > deadline:'},
 ]
 
+S2_BYTE = [
+    {"id": "S2-M01", "expect": "Moved bytes: related-report.js"},
+    {"id": "S2-M02", "expect": "Moved script load order differs"},
+    {"id": "S2-M03", "expect": "Moved bytes: report-commit.js"},
+    {"id": "S2-M04", "expect": "No dropped, duplicated, reordered or changed statement/trivia"},
+]
+PART2_MUTANTS = [
+    {"id": "S2-M05", "case": "ActualLayout.test_actual_part2_script_responses_are_complete",
+     "expect": "actual report-draft-save.js response must arrive", "file": HARNESS,
+     "old": '    def _fulfill(self, route, name):\n        body = self.body(name)',
+     "new": '    def _fulfill(self, route, name):\n        if name == "report-draft-save.js" and self.manifest.get("kind") == "actual":\n            return route.abort("failed")\n        body = self.body(name)'},
+]
+S2_EXEC = [{"id": "S2-M06", "case": "Registration.test_a_report_field_input_reaches_its_listeners_in_the_original_order",
+            "expect": "the (target, event, listener) invocation order of one focus/keypress"}]
+
 
 def source_hashes():
     files = [*PAGE.parent.glob("*.js"), *PAGE.parent.glob("*.html"), PAGE, HELPER, DOM_TEST,
@@ -297,6 +312,9 @@ def run_cases(page, cases, timeout, boundary=(), spec=None, script=None, assets=
     inputs = source_hashes()
     for candidate in (pathlib.Path(page), pathlib.Path(script or DOM_TEST)):
         inputs[str(candidate)] = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    from page_source import moved_files
+    for candidate in moved_files(pathlib.Path(page)):
+        inputs[str(candidate)] = hashlib.sha256(candidate.read_bytes()).hexdigest()
     if assets:
         inputs.update({str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in pathlib.Path(assets).glob("*") if p.is_file()})
     done = subprocess.run(command, cwd=str(ROOT), env=environment, capture_output=True, text=True,
@@ -322,6 +340,9 @@ def failure_block(output, case):
 
 def prepare(scratch, mutant):
     """The mutant page and, for a declaration mutant, the boundary case bound to its delivered 45-part layout."""
+    if mutant["id"] == "S2-M06":
+        layout = node("split-mutant", PAGE, mutant["id"], scratch / mutant["id"])
+        return dict(mutant, page=layout["page"], spec=layout["spec"], layout={"count": 30, "kind": "actual"})
     layout = node("mutant-layout", PAGE, mutant["id"], scratch / mutant["id"])
     mutant = dict(mutant, page=layout["page"], spec=layout["spec"], restored=layout["restored"])
     if "hazard" in mutant:
@@ -366,13 +387,13 @@ def main():
     parser.add_argument("--timeout", type=int, default=600, help="Seconds per child run")
     parser.add_argument("--jobs", type=int, default=2, help="Mutant children at a time")
     parser.add_argument("--anchors-only", action="store_true", help="Write every mutant and its layout (no browser) and stop")
-    parser.add_argument("only", nargs="*", help="Mutant ids (default: all 69 PRE/F2/F3/S1/H178 ids)")
+    parser.add_argument("only", nargs="*", help="Mutant ids (default: all 75 PRE/F2/F3/S1/H178/S2 ids)")
     args = parser.parse_args()
     os.environ["KIN_PRE_MUTANT_EVIDENCE"] = str(pathlib.Path(args.out).resolve().parent / "mutant-children"
         if args.out else pathlib.Path(tempfile.mkdtemp(prefix="kin-pre-mutant-evidence-")))
-    selected = [m for m in MUTANTS if not args.only or m["id"] in args.only]
-    selected_f2 = [m for m in F2_MUTANTS + F3_MUTANTS + PART1_MUTANTS if not args.only or m["id"] in args.only]
-    selected_byte = [m for m in S1_BYTE if not args.only or m["id"] in args.only]
+    selected = [m for m in MUTANTS + S2_EXEC if not args.only or m["id"] in args.only]
+    selected_f2 = [m for m in F2_MUTANTS + F3_MUTANTS + PART1_MUTANTS + PART2_MUTANTS if not args.only or m["id"] in args.only]
+    selected_byte = [m for m in S1_BYTE + S2_BYTE if not args.only or m["id"] in args.only]
     inputs_before = source_hashes()
     before = hashlib.sha256(PAGE.read_bytes()).hexdigest()
     print("%s sha256 %s" % (PAGE.name, before))
@@ -385,7 +406,8 @@ def main():
             try:
                 ready = prepare(scratch, mutant)
                 prepared.append(ready)
-                if pathlib.Path(ready["page"]).read_bytes() == PAGE.read_bytes():
+                from page_source import read_page_bytes
+                if read_page_bytes(pathlib.Path(ready["page"])) == read_page_bytes(PAGE):
                     problems.append("%s changes nothing" % mutant["id"])
                 if "load_consumer" in ready and not ready["layout"]["consumer_first"]:
                     problems.append("%s: the load-time consumer does not precede the declaration %s" % (mutant["id"], ready["layout"]))

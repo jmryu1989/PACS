@@ -108,7 +108,8 @@ test('S1 candidate byte contract', () => {
 });
 
 for (const [id, reason] of [['S1-M01', /Moved bytes/], ['S1-M02', /ENOENT/], ['S1-M03', /No dropped/],
-  ['S1-M04', /load order/], ['S1-M05', /ordinary blocking classic/]]) {
+  ['S1-M04', /load order/], ['S1-M05', /ordinary blocking classic/],
+  ['S2-M01', /Moved bytes/], ['S2-M02', /load order/], ['S2-M03', /Moved bytes/], ['S2-M04', /No dropped/]]) {
   test(`C1 rejects ${id}`, t => {
     const dir = scratch(t, 'u0a-part1-mutant-');
     const source = path.join(dir, 'main.html'); fs.writeFileSync(source, before);
