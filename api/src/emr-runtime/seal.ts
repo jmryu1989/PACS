@@ -47,10 +47,8 @@ export class AccessSeal {
   read(): SealState | 'absent' { return this.load().tail ?? 'absent'; }
   recordIntent(stream: AccessStream, attemptId: string, eventId: string | null, contentSha256: string | null, bundleId: string): void {
     this.change(state => this.addIntent(state, { stream, attemptId, eventId, contentSha256, bundleId }));
-    this.acknowledgements.clear();
   }
   private addIntent(state: ExternalState, value: { stream: AccessStream; attemptId: string; eventId: string | null; contentSha256: string | null; bundleId: string }): void {
-    this.forgetAcknowledged(state);
     const id = key(value.stream, value.attemptId);
     const owned = { ...value, owner: this.journal.coordinator.ownerId };
     if (state.intents[id] && !same(state.intents[id], owned)) refuse('AccessEventIdConflict');
@@ -71,24 +69,34 @@ export class AccessSeal {
         const group = this.intents; this.intents = null;
         try {
           this.change(state => { for (const entry of group) this.addIntent(state, entry.value); }, 'admit');
-          this.acknowledgements.clear();
           for (const entry of group) entry.resolve();
         } catch (error) { for (const entry of group) entry.reject(error); }
       });
     });
   }
 
-  /** Only called with the stream's DB head lock, after staging the exact row and before COMMIT.
-   * Reusing a slot proves that its old reservation's transaction has ended without committing.
+  /** Intent and exact reservation share one durable WAL record under the head lock.
+   * EB008 prevents staged SQL from committing before this record is bound. Reusing
+   * a slot proves that its old transaction ended without committing.
    */
   private reservationState: ExternalState | undefined;
   reserve(binding: Omit<CommitBinding, 'generation' | 'proofDigest'>, prefix?: { seal: StreamSeal; anchor: ChainPosition; count: number }): CommitBinding {
     let superseded = false;
     const result = this.change(state => {
       const id = key(binding.stream, binding.attemptId), position = slot(binding.stream, binding.sequence);
-      if (!state.intents[id]) throw new SealRefused('UnsealedEntryUnexplained', 'intent-missing');
+      const intent = state.intents[id];
+      if (intent && (intent.stream !== binding.stream || intent.attemptId !== binding.attemptId ||
+          intent.bundleId !== binding.bundleId || intent.eventId !== binding.eventId ||
+          intent.contentSha256 !== null && intent.contentSha256 !== binding.contentSha256))
+        throw new SealRefused('UnsealedEntryUnexplained', 'intent-binding');
+      if (!intent) this.addIntent(state, { stream: binding.stream, attemptId: binding.attemptId,
+        eventId: binding.eventId, contentSha256: binding.contentSha256, bundleId: binding.bundleId });
       const prior = state.slots[position];
-      if (prior?.attemptId === binding.attemptId) return { binding: prior, state };
+      if (prior?.attemptId === binding.attemptId) {
+        const { generation: _, proofDigest: __, ...identity } = prior;
+        if (!same(identity, binding)) throw new SealRefused('UnsealedEntryUnexplained', 'reservation-binding');
+        return { binding: prior, state };
+      }
       if (prior) {
         superseded = true;
         const old = key(prior.stream, prior.attemptId);
@@ -120,6 +128,7 @@ export class AccessSeal {
     this.change(state => {
       const id = key(stream, attemptId), reservation = Object.values(state.slots).find(q => key(q.stream, q.attemptId) === id);
       if (state.terminal[id]?.phase === 'committed') throw new SealRefused('SealTailMismatch', 'abort-committed');
+      if (!reservation && !state.intents[id] && !state.terminal[id]) return;
       state.terminal[id] = { phase: 'aborted', generation: reservation?.generation ?? state.generation };
       if (reservation) delete state.slots[slot(stream, reservation.sequence)];
       delete state.proofs[id]; delete state.intents[id];
@@ -210,15 +219,6 @@ export class AccessSeal {
   async reconcileCommitted(stream: AccessStream, target?: ChainPosition, reader = this.sql, recovering = false): Promise<SealState> {
     return (await this.reconcileState(stream, target, reader, recovering)).tail;
   }
-  private recentlyVerified(state: ExternalState, stream: AccessStream, target: ChainPosition): boolean {
-    const sealed = state.tail.streams[stream];
-    // A retained receipt has an exact protected binding, including
-    // when retention already removed its row. Other replays must prove the DB
-    // bytes through the external seal; a DB event lookup alone is not authority.
-    return Object.values(state.terminal).some(t => t.phase === 'committed' &&
-      t.binding.stream === stream && t.binding.chainId === sealed.chainId &&
-      t.binding.sequence === target.sequence && t.binding.hash === target.hash);
-  }
   private async bindSealedTarget(sql: PrismaLedgerSql, state: ExternalState, stream: AccessStream, target: ChainPosition): Promise<void> {
     const sealed = state.tail.streams[stream];
     const tail = await sql.tail(stream);
@@ -244,14 +244,11 @@ export class AccessSeal {
       if (target && target.sequence <= sealed.sequence && !recovering) {
         if (target.sequence === sealed.sequence && target.hash !== sealed.hash) throw new SealRefused('SealTailMismatch', 'target');
         try {
-          // An exact protected binding has already proved this position. Opening
-          // an otherwise empty SQL snapshot would add a DB availability dependency
-          // and pool contention to a receipt whose authority is already durable.
-          if (!this.recentlyVerified(state, stream, target)) {
-            if (sealed.sequence - target.sequence + 1 > EMR_REPLAY_VERIFY_ROWS)
-              throw new SealRefused('SealUnavailable', 'replay-verification-limit');
-            await reader.snapshot(sql => this.bindSealedTarget(sql, state, stream, target));
-          }
+          // A new replay cannot borrow another attempt's retained receipt. Only
+          // advanceReceipt's exact attempt binding bypasses this DB-byte proof.
+          if (sealed.sequence - target.sequence + 1 > EMR_REPLAY_VERIFY_ROWS)
+            throw new SealRefused('SealUnavailable', 'replay-verification-limit');
+          await reader.snapshot(sql => this.bindSealedTarget(sql, state, stream, target));
         }
         catch (error) {
           if (!same(this.load().tail.streams[stream], sealed)) continue;
@@ -344,7 +341,11 @@ export class AccessSeal {
       setImmediate(() => {
         const group = this.publications; this.publications = null;
         try {
-          const result = this.change(state => ({ accepted: group.map(entry => Boolean(entry.install(state))), state }));
+          const result = this.change(state => {
+            this.forgetAcknowledged(state);
+            return { accepted: group.map(entry => Boolean(entry.install(state))), state };
+          });
+          this.acknowledgements.clear();
           for (let i = 0; i < group.length; i++) group[i].resolve(result.accepted[i] ? result.state : null);
         } catch (error) { for (const entry of group) entry.reject(error); }
       });
@@ -386,6 +387,14 @@ export class AccessSeal {
    * Returning its exact binding avoids a second lock/read after publication; no
    * cached evidence is reused for a later request or after a failed publication. */
   async advanceReceipt(stream: AccessStream, attemptId: string, eventId: string, entry: StoredEntry): Promise<SealState | null> {
+    // A helper can publish after this instance reserved, even while our COMMIT
+    // response is delayed. Consult the current protected authority before adding
+    // a DB dependency; a cached reservation must not hide an already sealed receipt.
+    const current = this.load(), receipt = this.receiptFrom(current, stream, attemptId, eventId, entry);
+    if (receipt) return receipt;
+    // A replay owns neither a new reservation nor the original receipt attempt.
+    // Its caller will read the event and bind its bytes through the sealed tail.
+    if (current.slots[slot(stream, entry.sequence)]?.attemptId !== attemptId) return null;
     const state = await this.advanceState(stream, { sequence: entry.sequence, hash: entry.hash });
     return this.receiptFrom(state, stream, attemptId, eventId, entry);
   }
@@ -398,7 +407,7 @@ export class AccessSeal {
   }
   private readonly acknowledgements = new Set<string>();
   /** Cleanup is not receipt authority. Fold acknowledged bindings into the next
-   * intent publication; a crash before that is swept by the fenced startup once
+   * receipt publication; a crash before that is swept by the fenced startup once
    * this process's ownership lock has closed. At most the last receipt group waits. */
   acknowledge(stream: AccessStream, attemptId: string): Promise<void> {
     this.acknowledgements.add(key(stream, attemptId));

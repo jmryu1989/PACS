@@ -220,10 +220,9 @@ export function executeExternal(request: WriterRequest): any {
     publishTail(tailFile, state.tail);
     cached.offset += append(log, { revision: state.revision, published: true }, context);
   }
-  // Only admission before the first head lock may compact during ordinary work.
-  // Synchronous expiry intents and supersession settlement can run under that lock;
-  // those updates append only. Startup also compacts behind the writer fence.
-  if (operation === 'admit' || operation === 'compare-and-set' && value.operation === 'admit') compact();
+  // Compact only after a completed publication, never in the reservation's head-
+  // locked durability barrier. Startup also compacts behind the writer fence.
+  if (body.publishing) compact();
   // A caller's verification snapshot must not alias the coordinator's live index:
   // another process's WAL suffix can change that index before publication checks it.
   return { changed: true, result: clone(result) };

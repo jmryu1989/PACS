@@ -11,7 +11,7 @@ const clock = () => performance.now();
 const round = n => Math.round(n * 1000) / 1000;
 const disk = { write_ms: 0, fsync_ms: 0, writes: 0, fsyncs: 0 };
 let activeScope;
-for (const [name, field, count] of [['writeFileSync', 'write_ms', 'writes'], ['fsyncSync', 'fsync_ms', 'fsyncs']]) {
+for (const [name, field, count] of [['writeFileSync', 'write_ms', 'writes'], ['fsyncSync', 'fsync_ms', 'fsyncs'], ['fdatasyncSync', 'fsync_ms', 'fsyncs']]) {
   const original = fs[name];
   fs[name] = function (...args) { const start = clock(); try { return original.apply(this, args); }
     finally {

@@ -133,7 +133,8 @@ export class PrismaLedgerSql {
 
 export class AccessLedgerStore implements AppendOnlyAccessStore {
   private readonly attempts = new WeakMap<object, { attemptId: string; streams: readonly AccessStream[] }>();
-  constructor(private readonly db: PrismaClient, readonly sql: PrismaLedgerSql, readonly seal: AccessSeal, readonly journal: FailureJournal) {}
+  constructor(private readonly db: PrismaClient, readonly sql: PrismaLedgerSql, readonly seal: AccessSeal, readonly journal: FailureJournal,
+    private readonly poolSize: number = (db as PrismaClient & { emrAppendPoolSize?: number })?.emrAppendPoolSize ?? 3) {}
 
   /** Both standalone and business writers enter before acquiring a connection.
    * Callers include their business change and appendInTransaction in this same
@@ -142,14 +143,14 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
    * head-lock/pool priority inversion for business writes.
    */
   withAppendTransaction<T>(work: (tx: any) => Promise<T>): Promise<T> {
-    return admitAppend(this.db, () => this.db.$transaction(work,
+    return admitAppend(this.db, this.poolSize, () => this.db.$transaction(work,
       { maxWait: EMR_TX_MAX_WAIT_MS, timeout: EMR_TX_TIMEOUT_MS }));
   }
 
   /**
    * Inside the caller's open business transaction, last: A parses the event and names its streams and 의료법 제23조④ act;
-   * for each stream the intent is made durable outside the database, then the database appends under that stream's head
-   * lock and binds the event's record targets from the same bytes. No deadline is stored (contract.ts accessDeadline
+   * each stream stages its row under the head lock, then durably records intent and exact reservation together.
+   * EB008 forbids COMMIT until that reservation is bound in the same transaction. No deadline is stored (contract.ts accessDeadline
    * computes it when destruction is considered). Any failure here must abort the caller's transaction.
    */
   async appendInTransaction(tx: object, input: AccessEvent, served?: readonly ResolvedRecord[]): Promise<ProvisionalAppend> {
@@ -161,12 +162,10 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
     for (const stream of accessStreams(input, served)) {
       const { event, text, contentSha256 } = canonicalPayload(input, served, stream);
       eventId = event.eventId;
-      await this.seal.recordIntentAsync(stream, attemptId, event.eventId, contentSha256, bundleId);
       let result: AppendResult;
       try { result = await this.appendRow(tx, stream, event.eventId, text, act, attemptId, bundleId); }
       catch (error) { if (ledgerErrorCode(error) === 'EB002') refuse('AccessEventIdConflict'); throw error; }
-      if (result.replay) this.seal.abort(stream, attemptId);
-      else {
+      if (!result.replay) {
         const binding = this.seal.reserve({ stream, chainId: result.chainId, attemptId, bundleId,
           kind: stream === 'viewing' ? 'access' : 'history', eventId, sequence: result.sequence,
           previousHash: result.previousHash, hash: result.hash, contentSha256 });
@@ -436,7 +435,6 @@ export async function expireAccessPrefix(retention: PrismaClient, seal: AccessSe
         await tx.$queryRaw`SELECT emr_access.enter_writer()::text`;
         await tx.$queryRaw`SELECT emr_access.lock_chain('viewing'::text)::text`;
         const prefix = await seal.expiryPrefix(through);
-        seal.recordIntent('viewing', attemptId, null, null, bundleId);
         const [row] = await tx.$queryRaw<any[]>`SELECT * FROM emr_access.expire_reserved(${through}::bigint, ${attemptId}::text, ${bundleId}::text)`;
         const binding = seal.reserve({ stream: 'viewing', chainId: string(row.chain_id), attemptId, bundleId, kind: 'expiry', eventId: null,
           sequence: toNumber(row.checkpoint_sequence), previousHash: sha256(row.previous_hash), hash: sha256(row.checkpoint_hash),

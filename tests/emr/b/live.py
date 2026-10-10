@@ -428,6 +428,8 @@ class EmrBLedgerLive(unittest.TestCase):
         """Concurrent original events are all ordered once; the same event resent is the same receipt; another content
         under its ID is refused; one verified subject is one identity however many resolve it at once. The appends run
         at once in one server process (its connection pool), the deployment's one API per state volume."""
+        self.measured_appends(1)
+        self.assertLessEqual(self.latency_pair['r4d']['p95_ms'], self.latency_pair['r3']['p95_ms'] * 1.10, self.latency_pair)
         start = self.driver("tail")["sequence"]
         results = self.measured_appends(24)
         self.assertEqual(len(results), 24)

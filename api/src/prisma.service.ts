@@ -1,9 +1,16 @@
 import { Injectable, OnModuleInit, OnApplicationShutdown } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 import { verifyRuntimeConnection } from './emr-runtime/manifest';
+import { appendPoolConfiguration } from './emr-runtime/admission';
 
 @Injectable()
 export class PrismaService extends PrismaClient implements OnModuleInit, OnApplicationShutdown {
+  readonly emrAppendPoolSize: number;
+  constructor() {
+    const pool = process.env.DATABASE_URL ? appendPoolConfiguration(process.env.DATABASE_URL) : null;
+    super(pool ? { datasources: { db: { url: pool.url } } } : undefined);
+    this.emrAppendPoolSize = pool?.poolSize ?? 3;
+  }
   async onModuleInit() {
     await this.$connect();
     // EMR-B1 시작 경계: 운영 서버는 최소권한 runtime 역할(소유·superuser·이관/보존 자격 없음)과 전용 저장소에 놓인 원장

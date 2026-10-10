@@ -154,6 +154,9 @@ def main():
         stats["permutation_p"] = permutation([r["p95"] for r in pair["r3"]], [r["p95"] for r in pair["r4d"]])
         stats["p95_pct"] = (stats["r4d"]["p95"] / stats["r3"]["p95"] - 1) * 100
         stats.update(relative_bound([r["p95"] for r in pair["r3"]], [r["p95"] for r in pair["r4d"]]))
+        added = [b["p95"] - a["p95"] for a, b in zip(pair["r3"], pair["r4d"])]
+        stats["added_p95_ms_upper95"] = (statistics.mean(added) + 2.262157 * statistics.stdev(added) / math.sqrt(len(added))) if len(added) == 10 else None
+        stats["added_interval_method"] = "paired difference Student t upper endpoint of two-sided 95% interval, df=9" if len(added) == 10 else "not computed"
         stats["failures"] = sum(r["failures"] for r in selected)
         report["cases"][f"{case}-{count}-{retained}"] = stats
         if stats["failures"]:

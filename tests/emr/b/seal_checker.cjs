@@ -1,6 +1,6 @@
 /* D860, pure bounded scheduler. Product TS is compiled without edits, DB transactions and
  * filesystem syscalls are adapters. No PostgreSQL, network, host fixture, product writes.
- * A/B each have start(intent), outcome(COMMIT), deliver(confirm/settle) cuts; E has
+ * A/B each have start(waiting for slot), outcome(merged reservation then COMMIT), deliver(confirm/settle) cuts; E has
  * start(prepare/proof), outcome(delete+checkpoint transaction), deliver(job completion).
  * A crash/restart probe is made at EVERY reachable cut, including all three actors open.
  * Requirement assertions are about stored facts, receipts, progress, external seal only.
@@ -341,6 +341,32 @@ async function named(){
     const d=await probe(w);console.log(JSON.stringify({case:id,...d}));return d;
   }
   const result={};
+  result['R6-merged-intent-and-reservation']=await run('R6-merged-intent-and-reservation',['A:start'],async w=>{
+    assert.equal(Object.keys(w.coordinator.call('read').intents).length,0,'no external obligation before a slot exists');
+    await w.commit('A','unknown0');
+    const external=w.coordinator.call('read'), q=external.slots['viewing:'+w.actors.A.staged.row.sequence];
+    const intent=external.intents['viewing:'+q.attemptId];
+    assert(intent,'reservation crash state must include its intent');
+    assert.equal(intent.eventId,q.eventId);assert.equal(intent.contentSha256,q.contentSha256);assert.equal(intent.bundleId,q.bundleId);
+    await w.deliver('A');
+    const r=create(w.snapshot(),true,true);
+    try { await r.seal.recoverAtStart(); }
+    catch(error) {
+      if(error.code!=='UnsealedEntryUnexplained')throw error;
+      const detail={found:true,error:{code:error.code,detail:error.detail}};
+      finding('I2',['A:merged-reservation','A:unknown0','crash','recoverAtStart'],detail);return detail;
+    }
+    assert.equal(r.journal.all().filter(x=>x.kind==='commit-not-found'&&x.body.eventId===eventId('A')).length,1);
+    assert.equal(Object.keys(r.coordinator.call('read').intents).length,0);
+    return {found:false,mergedRecordRecovered:true,uncommittedAttemptSettled:true};
+  });
+  await run('R6-merged-binding-failure',['A:start'],async w=>{
+    w.failBinding=true;await w.commit('A','ok');await w.deliver('A');
+    assert(w.actors.A.error&&!w.actors.A.committed,'failed marker binding cannot commit a staged append');
+    const r=create(w.snapshot(),true,true);await r.seal.recoverAtStart();
+    assert.equal(r.rows.length,1,'only the seed committed');
+    return {stagedAppendRolledBack:true};
+  });
   await run('R4c-fixed-target-and-unrelated-revision',['A:start','A:commit:ok','B:start'],async w=>{
     const target={sequence:w.head.sequence,hash:w.head.hash}, read=w.sql.verificationPage.bind(w.sql);
     let rows=0, changed=false;

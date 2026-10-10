@@ -138,7 +138,13 @@ MUTANTS = {
     "M38": ("A7 replay trusts a sealed DB row without binding its bytes through the external seal", [
         ("api/src/emr-runtime/seal.ts", "await reader.snapshot(sql => this.bindSealedTarget(sql, state, stream, target));", "void 0; /* missing sealed-target binding */")]),
     "M39": ("head-lock waiters acquire every pool connection ahead of a committed request's verification", [
-        ("api/src/emr-runtime/admission.ts", "  await before;", "  void before; /* admission removed */")]),
+        ("api/src/emr-runtime/admission.ts", "if (pool.active >= capacity)", "if (false)")]),
+    "M40": ("append lanes consume the verification reserve", [
+        ("api/src/emr-runtime/limits.ts", "export const EMR_VERIFY_RESERVE = 2;", "export const EMR_VERIFY_RESERVE = 0;")]),
+    "M41": ("a reservation is acknowledged without its durable merged WAL record", [
+        ("api/src/emr-runtime/external-writer.ts", "  cached.offset += append(log, body, context);", "  if (operation !== 'reserve') cached.offset += append(log, body, context);")]),
+    "M42": ("merged reservation omits its recovery intent", [
+        ("api/src/emr-runtime/seal.ts", "      if (!intent) this.addIntent", "      if (false) this.addIntent")]),
     "M37": ("a verification snapshot aliases the coordinator index and accepts another writer's changed binding", [
         ("api/src/emr-runtime/external-writer.ts", "return { changed: true, result: clone(result) };", "return { changed: true, result };")]),
 
@@ -277,10 +283,11 @@ def invariant_witness(copy, out, name, env):
         result = json.loads(result_file.read_text(encoding="utf-8"))
         witness = result["witnesses"].get(expected)
         if name == "M33":
-            # I2's designated control is a normal E -> open A/B -> crash/start,
-            # not an incidental refusal while preparing an unrelated tamper probe.
-            restart = result["named"]["RACE-3"]
-            witness = {"trace": ["E:COMMIT", "E:success", "A:open", "B:open", "crash", "recoverAtStart"],
+            # D935: an append waiting for its slot has no durable intent yet.
+            # Exercise the same I2 obligation after the merged reservation and
+            # a genuine unknown0 result, where negative settlement is required.
+            restart = result["named"]["R6-merged-intent-and-reservation"]
+            witness = {"trace": ["A:merged-reservation", "A:unknown0", "crash", "recoverAtStart"],
                        "detail": restart} if restart.get("found") is True else None
         healthy = name != "M32" or (not result["named"]["RACE-1"]["found"]
             and result["named"]["RACE-2"]["restart"] == "ok" and not result["named"]["RACE-3"]["found"])

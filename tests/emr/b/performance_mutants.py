@@ -18,8 +18,8 @@ from performance import ROOT
 MUTANTS = {
     "MP01": ("ledger", "seal.ts", "    const current = state.tail.streams[stream];\n    if (tail.chainId",
              "    full = true;\n    const current = state.tail.streams[stream];\n    if (tail.chainId", "single receipt rereads the retained prefix"),
-    "MP02": ("sustained", "seal.ts", "      void Promise.resolve().then(() => {",
-             "      void new Promise(resolve => setTimeout(resolve, 50)).then(() => {", "fixed intake delay exceeds the sustained receipt budget"),
+    "MP02": ("sustained", "seal.ts", "      void Promise.resolve().then(drain);",
+             "      void new Promise(resolve => setTimeout(resolve, 50)).then(drain);", "fixed receipt delay exceeds the sustained receipt budget"),
     "MP03": ("concurrent", "external-writer.ts", "  const { directory, operation, value } = request, context = request.context ?? {};",
              "  const { directory, operation, value } = request, context = request.context ?? {};\n"
              "  if (operation === 'reserve') require('node:child_process').spawnSync(process.execPath, ['-e', '']);",
@@ -35,7 +35,11 @@ def property_failures(case, failures):
     goals remain reported by the complete healthy A/B run."""
     if case == 'ledger':
         return [f for f in failures if 'single receipt reads retained prefix' in f]
-    return [f for f in failures if f.startswith(case + '-') or f.startswith(case + ':')]
+    # MP02/MP03 corrupt receipt latency, so both their healthy control and kill
+    # must use the same request/budget assertions. Insufficient paired evidence
+    # (case + ':') remains a delivery failure in performance.py and is retained
+    # as other_control_failures; it cannot itself kill a latency mutant.
+    return [f for f in failures if f.startswith(case + '-')]
 
 
 def main():

@@ -10,6 +10,7 @@
 const fs = require('node:fs'), path = require('node:path'), os = require('node:os'), crypto = require('node:crypto');
 const { performance } = require('node:perf_hooks');
 const Module = require('node:module');
+const { instrument } = require('./throughput.cjs');
 const [root, label, concText, prefillText, out, sqlText = '0.5', commitText = '1.0', flockText = '1.0', poolText = '9'] = process.argv.slice(2);
 const C_REQ = Number(concText), PREFILL = Number(prefillText), SQL_MS = Number(sqlText), COMMIT_MS = Number(commitText), FLOCK_MS = Number(flockText), POOL = Number(poolText);
 
@@ -89,6 +90,15 @@ const db = {
   async $transaction(work) {
     await pool.acquire();
     const tx = { id: ++txSeq, staged: { viewing: [], history: [] }, locks: new Set(), markers: [], lockedAt: {} };
+    tx.$queryRaw = async (strings, stream) => {
+      if (!strings.join('?').includes('emrb_measure_lock')) throw new Error('unknown measurement query');
+      const start = performance.now();
+      if (!tx.locks.has(stream)) {
+        await L.s[stream].lock.acquire(); tx.locks.add(stream); tx.lockedAt[stream] = performance.now();
+        detail.lock_wait_ms.push(tx.lockedAt[stream] - start);
+      }
+      return [{ wait_ms: performance.now() - start }];
+    };
     try {
       await delay(SQL_MS); // BEGIN
       const value = await work(tx);
@@ -156,13 +166,15 @@ const q = (xs, p) => xs[Math.min(xs.length - 1, Math.ceil(xs.length * p) - 1)];
       if (v4) journal.coordinator.call('update', st => { st.tail = { ...st.tail, streams: { ...st.tail.streams, viewing: position }, generation: ++st.generation }; });
       else { const cur = seal.read(); seal['write']({ streams: { ...cur.streams, viewing: position }, sealedAt: new Date().toISOString() }); }
     }
-    const store = new Store(db, sql, seal, journal);
+    const store = new Store(db, sql, seal, journal, POOL);
     const confirm0 = store.confirm.bind(store); store.confirm = async a => { const t0 = performance.now(); try { return await confirm0(a); } finally { detail.confirm_ms.push(performance.now() - t0); } };
     for (let i = 0; i < 5; i++) await store.append(authEvent());   // warm-up (JIT, files)
+    const probe = instrument(db, store, seal, { headProbe: true });
     calls = 0; readRows = 0; for (const k of Object.keys(detail)) detail[k] = Array.isArray(detail[k]) ? [] : {};
     const events = Array.from({ length: C_REQ }, authEvent), started = performance.now();
     const rows = await Promise.all(events.map(async e => { const s = performance.now();
-      try { await store.append(e); return { ms: performance.now() - s }; } catch (error) { return { ms: performance.now() - s, error: error.code || error.name, detail: String(error.message).slice(0, 160) }; } }));
+      const measured = await probe.run(e);
+      return { ms: measured.receipt_ms, error: measured.error, detail: measured.error_detail, instrument: measured }; }));
     const wall = performance.now() - started, ok = rows.filter(r => !r.error).map(r => r.ms).sort((a, b) => a - b);
     const all = rows.map(r => r.ms).sort((a, b) => a - b);
     const result = { label, version: v4 ? 'r4d' : 'r3', concurrency: C_REQ, prefill: PREFILL, sql_ms: SQL_MS, commit_ms: COMMIT_MS, flock_ms: v4 ? FLOCK_MS : null, pool: POOL,
@@ -171,6 +183,8 @@ const q = (xs, p) => xs[Math.min(xs.length - 1, Math.ceil(xs.length * p) - 1)];
       read_rows: readRows, coordinator_calls: v4 ? calls : null, sealed_through: (seal.read()).streams.viewing.sequence, at: new Date().toISOString() };
     if (process.env.AB_DETAIL === '1') { const st = xs => { xs = xs.slice().sort((a, b) => a - b); return xs.length ? { n: xs.length, sum: +xs.reduce((a, b) => a + b, 0).toFixed(1), p50: +q(xs, .5).toFixed(2), p95: +q(xs, .95).toFixed(2) } : null; };
       result.detail = { lock_hold_ms: st(detail.lock_hold_ms), lock_wait_ms: st(detail.lock_wait_ms), confirm_ms: st(detail.confirm_ms), coordinator_ms: Object.fromEntries(Object.entries(detail.coordinator_ms).map(([k, v]) => [k, st(v)])) }; }
+    result.request_instruments = rows.map(r => r.instrument); result.drain_groups = probe.drains;
+    probe.restore();
     fs.appendFileSync(out, JSON.stringify(result) + '\n');
     console.log(JSON.stringify(result));
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }

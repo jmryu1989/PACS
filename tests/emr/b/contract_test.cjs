@@ -79,8 +79,13 @@ async function liveDriver() {
   const { verifyRuntimeConnection } = require(dist + '/emr-runtime/manifest');
   const { PrismaClient } = require('/app/node_modules/@prisma/client');
   M.composeEmrAdapters(CTX.runtimeAdapters);
-  const url = args.url ?? process.env.DATABASE_URL;
-  const prisma = new PrismaClient({ datasources: { db: { url } } });
+  const measuredUrl = new URL(args.url ?? process.env.DATABASE_URL);
+  if (!measuredUrl.searchParams.has('connection_limit')) measuredUrl.searchParams.set('connection_limit', '9');
+  const rawUrl = measuredUrl.toString();
+  const admission = fs.existsSync(dist + '/emr-runtime/admission.js') ? require(dist + '/emr-runtime/admission') : null;
+  const pool = admission?.appendPoolConfiguration ? admission.appendPoolConfiguration(rawUrl) : { url: rawUrl, poolSize: Number(measuredUrl.searchParams.get('connection_limit')) };
+  const prisma = new PrismaClient({ datasources: { db: { url: pool.url } } });
+  prisma.emrAppendPoolSize = pool.poolSize;
   await prisma.$connect();
   try {
     if (operation === 'verify-runtime') return await verifyRuntimeConnection(prisma);
@@ -118,7 +123,7 @@ async function liveDriver() {
         return result;
       },
     } : prisma;
-    const store = new RT.AccessLedgerStore(transactions, sql, seal, journal);
+    const store = new RT.AccessLedgerStore(transactions, sql, seal, journal, pool.poolSize);
     // The viewing stream's seal flattened beside both streams, so a caller reads the stream every event is in directly.
     const flat = s => s === 'absent' ? 'absent' : { ...s.streams.viewing, streams: s.streams, sealedAt: s.sealedAt };
     if (operation === 'recover') { const r = await seal.recoverAtStart(); return { ...r, seal: flat(r.seal) }; }
@@ -832,6 +837,29 @@ function contractSuite() {
   });
 
   test('C13 expiry recovery needs external proof of the deleted prefix and its trusted seal, including interrupted recovery', async () => {
+    // D935: a slot-waiting request has no intent; keep the live recovery
+    // counterexample at a RESERVED but still open transaction instead. An
+    // unexpired job has no work and must not wait for the startup writer fence.
+    {
+      const w = await world(), event = authEvent(A), tx = w.ledger.begin();
+      let finishWriter, completed = false, result, failure;
+      const ended = new Promise(resolve => { finishWriter = resolve; });
+      const fence = w.seal.sql.withWriterFence;
+      let job;
+      try {
+        await w.store.appendInTransaction(tx, event);
+        const staged = tx.staged.viewing.at(-1);
+        w.seal.sql.withWriterFence = async work => { await ended; return fence(work); };
+        const retention = { $queryRaw: async () => [{ sequence: staged.sequence, hash: staged.hash,
+          kind: 'access', occurred_at: event.occurredAt, held: false }] };
+        job = RT.expireAccessPrefix(retention, w.seal, event.occurredAt).then(value => { completed = true; result = value; }, error => { failure = error; });
+        await new Promise(setImmediate);
+        const noWait = completed && result === null;
+        w.ledger.commit(tx); finishWriter(); await job;
+        assert.equal(failure, undefined);
+        assert(noWait, 'an unexpired job must finish while the unrelated reserved writer is still open');
+      } finally { finishWriter(); if (job) await job; w.cleanup(); }
+    }
     const checked=spawnSync(process.execPath,[path.join(__dirname,'seal_checker.cjs'),root,path.join(api,'node_modules/typescript'),'', 'named'],{encoding:'utf8',timeout:180000});
     if(checked.error||checked.status===2||checked.status===3)throw new Error('seal checker harness failed: '+checked.stderr);
       assert.equal(checked.status,0,'seal invariant behaviour: '+checked.stdout);
@@ -1143,6 +1171,21 @@ function contractSuite() {
     }
     // The other permitted A7 path is an exact, recently verified external binding.
     // Its late response does not need another available database connection.
+    // A different seal instance can publish while the original COMMIT response
+    // is delayed. Its exact attempt receipt remains sufficient during a DB outage.
+    {
+      const w = await world();
+      try {
+        const tx = w.ledger.begin(), provisional = await w.store.appendInTransaction(tx, authEvent(A));
+        w.ledger.commit(tx);
+        const helper = new S.AccessSeal(w.state, memorySql(w.ledger), w.journal);
+        await helper.advance('viewing', w.ledger.head);
+        w.ledger.down = true;
+        const outcome = await Promise.allSettled([w.store.confirm(provisional)]);
+        assert.equal(outcome[0].status, 'fulfilled', 'a helper-sealed original attempt needs no new DB read');
+        assert(C.isDurableReceipt(outcome[0].value));
+      } finally { w.cleanup(); }
+    }
     const bound = await world();
     try {
       const tx = bound.ledger.begin(), provisional = await bound.store.appendInTransaction(tx, authEvent(A));
@@ -1160,6 +1203,40 @@ function contractSuite() {
 
   // D889 publication batching -> RISK-EMR-RECEIPT-DELAY / CRASH -> C21.
   test('C21 adjacent stream advances share durability barriers and recover together after each publication cut', async () => {
+    // D935 merged intent/reservation: no COMMIT without this one durable record.
+    // Crash recovery uses the record's exact attempt and position, including when
+    // SQL staging succeeded but reservation durability failed.
+    for (const failedSync of [false, true]) {
+      const w = await world(), original = fs.fdatasyncSync, event = authEvent(A);
+      let syncs = 0;
+      try {
+        const tx = w.ledger.begin();
+        fs.fdatasyncSync = function (...args) {
+          syncs++;
+          if (failedSync) throw Object.assign(new Error('reservation durability failure'), { code: 'EIO' });
+          return original.apply(this, args);
+        };
+        const outcome = await Promise.allSettled([w.store.appendInTransaction(tx, event)]);
+        fs.fdatasyncSync = original;
+        assert.equal(syncs, 1, 'intent and exact reservation require one durability barrier');
+        assert.equal(w.ledger.entries.length, 0, 'staging is never a committed event');
+        if (failedSync) assert.equal(outcome[0].status, 'rejected', 'no callback success before the merged record is durable');
+        else {
+          assert.equal(outcome[0].status, 'fulfilled');
+          const state = w.restart().journal.coordinator.call('read');
+          const q = state.slots['viewing:1'], intent = state.intents['viewing:' + q.attemptId];
+          assert(intent, 'the reservation and intent are durably recovered together');
+          assert.equal(intent.eventId, event.eventId);
+          assert.equal(intent.contentSha256, q.contentSha256);
+          assert.equal(intent.bundleId, q.bundleId);
+          assert(q.generation > 0);
+        }
+        const restarted = w.restart(); await restarted.seal.recoverAtStart();
+        assert.equal(Object.keys(restarted.journal.coordinator.call('read').intents).length, 0);
+        assert.equal(restarted.seal.read().streams.viewing.sequence, 0);
+        assert(C.isDurableReceipt(await restarted.store.append(event)), 'a crash before COMMIT permits same-event retry');
+      } finally { fs.fdatasyncSync = original; w.cleanup(); }
+    }
     for (const cut of [0, 1, 2, 3]) {
       const w = await world(), original = fs.fdatasyncSync;
       try {
@@ -1246,8 +1323,9 @@ function contractSuite() {
         return open(file, flags, ...args);
       };
       try {
-        const results = await Promise.allSettled(ids.map(id => w.seal.recordIntentAsync('viewing', id, id, 'a'.repeat(64), randomUUID())));
-        assert(cut, 'large valid intent group reaches ' + boundary);
+        await Promise.all(ids.map(id => w.seal.recordIntentAsync('viewing', id, id, 'a'.repeat(64), randomUUID())));
+        const results = await Promise.allSettled([w.store.append(authEvent(A))]);
+        assert(cut, 'publication compacts the large valid WAL at ' + boundary);
         assert(results.every(r => r.status === 'rejected'));
       } finally { fs.renameSync = rename; fs.openSync = open; }
       try {
@@ -1257,16 +1335,26 @@ function contractSuite() {
     }
   });
 
-  test('C22 a four-connection pool admits 24 appends without holding queued head-lock connections ahead of a committed receipt', async () => {
+  test('C22 bounded lanes keep two verification connections free across small pools and shared stores', async () => {
+    const { appendLaneCount, appendPoolConfiguration } = load('emr-runtime/admission.ts');
+    for (const value of [0, 1, 2, -1, 4.5, NaN]) assert.throws(() => appendLaneCount(value));
+    for (const value of ['0', '2', '-1', '4.5', 'bad'])
+      assert.throws(() => appendPoolConfiguration('postgresql://synthetic.invalid/db?connection_limit=' + value));
+    for (const poolSize of [3, 4, 5, 6, 9]) {
+    const capacity = Math.min(4, poolSize - 2);
+    assert.equal(appendLaneCount(poolSize), capacity);
+    const configured = appendPoolConfiguration('postgresql://synthetic.invalid/db?connection_limit=' + poolSize);
+    assert.equal(Number(new URL(configured.url).searchParams.get('connection_limit')), poolSize);
+    assert.equal(configured.poolSize, poolSize);
     // Deterministic adverse schedule: after the first COMMIT, the next writer is
     // paused until its predecessor receives a receipt. Extra head-lock waiters
     // must remain outside the connection pool. A saturated verification request
     // exhausts its virtual acquisition deadline; no wall-clock sleep is used.
     const w = await world(), raw = memorySql(w.ledger);
-    let slots = 4, txId = 0, head = Promise.resolve(), resume, peakPoolUse = 0, peakPoolQueue = 0;
+    let slots = poolSize, txId = 0, head = Promise.resolve(), resume, peakPoolUse = 0, peakPoolQueue = 0;
     const paused = new Promise(resolve => { resume = resolve; }), queue = [];
     const acquire = () => {
-      if (slots) { slots--; peakPoolUse = Math.max(peakPoolUse, 4 - slots); return Promise.resolve(); }
+      if (slots) { slots--; peakPoolUse = Math.max(peakPoolUse, poolSize - slots); return Promise.resolve(); }
       return new Promise(resolve => { queue.push(resolve); peakPoolQueue = Math.max(peakPoolQueue, queue.length); });
     };
     const release = () => { const next = queue.shift(); if (next) next(); else slots++; };
@@ -1287,17 +1375,22 @@ function contractSuite() {
     const sql = { ...raw, verificationPage: (...args) => query(() => raw.verificationPage(...args)),
       entryForEvent: (...args) => query(() => raw.entryForEvent(...args)),
       snapshot: work => query(() => work(raw)) };
-    w.store.db = pool; w.store.sql = sql; w.seal.sql = sql;
+    w.store.db = pool; w.store.sql = sql; w.seal.sql = sql; w.store.poolSize = poolSize;
+    const sibling = new MemoryStore(w.ledger, w.seal, w.journal);
+    sibling.db = pool; sibling.sql = sql; sibling.poolSize = poolSize;
     try {
       const first = w.store.append(authEvent(A)).finally(resume);
-      const rest = Array.from({ length: 23 }, () => w.store.append(authEvent(A)));
+      const rest = Array.from({ length: 23 }, (_, i) => (i % 2 ? sibling : w.store).append(authEvent(A)));
       const results = await Promise.allSettled([first, ...rest]);
-      console.info('EMR_POOL_ADMISSION ' + JSON.stringify({ pool: 4, concurrent: 24,
+      console.info('EMR_POOL_ADMISSION ' + JSON.stringify({ pool: poolSize, lanes: capacity, concurrent: 24,
         receipts: results.filter(r => r.status === 'fulfilled').length,
         errors: results.filter(r => r.status === 'rejected').map(r => errorCode(r.reason)), peakPoolUse, peakPoolQueue }));
       assert.deepEqual(results.filter(r => r.status === 'rejected').map(r => errorCode(r.reason)), [], 'every committed request receives its receipt');
       assert.equal(w.ledger.entries.length, 24);
       assert.equal(w.seal.read().streams.viewing.sequence, 24);
+      assert.equal(peakPoolQueue, 0, 'head-lock waiters never enter the pool queue');
+      assert(peakPoolUse <= capacity + 1, 'two connections remain available before verification');
+      assert(peakPoolUse >= capacity, 'all permitted append lanes can enter');
       const probe = require('./throughput.cjs').instrument(pool, w.store, w.seal);
       try {
         const traced = await Promise.all(Array.from({ length: 24 }, () => probe.run(authEvent(A))));
@@ -1309,6 +1402,7 @@ function contractSuite() {
         }
       } finally { probe.restore(); }
     } finally { resume(); w.cleanup(); }
+    }
   });
 
   test('C23 a cold replay beyond the named verification cap refuses before acquiring a snapshot', async () => {
