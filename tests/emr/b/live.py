@@ -757,10 +757,10 @@ class EmrBLedgerLive(unittest.TestCase):
     def test_b07_migration_backup_restore_roles(self):
         """A clean install, a dump and a provisioned restore give back the same ledger, guards, grants, placement and
         trusted tail; a restore without roles, off its tablespace, with a stale or missing state, or without the
-        migration is refused; the source never changes."""
+        EMR migrations is refused; the source never changes."""
         history = self.ok("SELECT migration_name || ':' || (finished_at IS NOT NULL) FROM _prisma_migrations ORDER BY migration_name COLLATE \"C\"")
-        self.assertEqual(len(history), 44)
-        self.assertEqual(history[-1], "20261010120000_emr_seal_attempts:true")
+        migrations = sorted(p.name for p in (ROOT / "api/prisma/migrations").iterdir() if p.is_dir())
+        self.assertEqual(history, [name + ":true" for name in migrations])
         self.driver("append", {"count": 3})
         source_entries = self.entries()
         marker_sql = "SELECT md5(string_agg(row_to_json(m)::text, E'\\n' ORDER BY stream,sequence)) FROM emr_access.commit_marker m"
@@ -805,7 +805,7 @@ class EmrBLedgerLive(unittest.TestCase):
             self.assertEqual(self.refused("SELECT emr_access.expire_reserved(1, 'live-attempt-00000003', 'live-bundle-00000003')", user="kin_emr_retention", db=target), "EB004")
             self.assertEqual(self.refused("DELETE FROM emr_access.access_entry", user="kin_runtime", db=target), REFUSED)
             # Refused: no roles in the target cluster; the ledger off its tablespace; a state ahead of the restored data;
-            # no state at all; and a database without the EMR migration.
+            # no state at all; and a database without the EMR migrations.
             bare = self.start_db("l07-bare")
             self.assertNotEqual(restore(bare).returncode, 0)
             loose = self.start_db("l07-loose")
@@ -822,8 +822,12 @@ class EmrBLedgerLive(unittest.TestCase):
             self.assertEqual(self.driver("recover", db=stale, volume=self.volume("l07-empty")).get("error"), "SealMissing")
         partial = self.start_db("l07-partial")
         self.provision(partial)
+        # Exclude the whole EMR family: later alterations also require the omitted schema.
+        emr_migrations = {p.name for p in (ROOT / "api/prisma/migrations").glob("*_emr_*") if p.is_dir()}
+        self.assertLessEqual({"20261008120000_emr_b", "20261010120000_emr_seal_attempts",
+                              "20261010150000_emr_read_jit_off"}, emr_migrations)
         for path in sorted((ROOT / "api/prisma/migrations").glob("*/migration.sql")):
-            if path.parent.name not in {"20261008120000_emr_b", "20261010120000_emr_seal_attempts"}:
+            if path.parent.name not in emr_migrations:
                 self.ok(path.read_text(encoding="utf-8"), db=partial)
         self.assertIn("ledger-missing", self.driver("verify-runtime", db=partial, volume=self.volume("l07-partial")).get("problems") or [])
         # The source's data is unchanged by its backup (only the deliberate later append moved it on, by exactly one).
@@ -954,7 +958,7 @@ class EmrBLedgerLive(unittest.TestCase):
         self.ok("CREATE TABLE synthetic_realm(id text PRIMARY KEY); INSERT INTO synthetic_realm VALUES ('EMR-B-L19')", database="keycloak")
         orthanc_image = json.loads(run(["docker", "image", "inspect", "orthancteam/orthanc:24.12.0"]).stdout)[0]["Id"]
         with tempfile.TemporaryDirectory(prefix="kin-emrb-backup-") as temporary:
-            root = Path(temporary); repo = root / "repo"; repo.mkdir(); output = root / "backups"; output.mkdir()
+            root = Path(temporary); repo = root / "repo"; repo.mkdir(); output = root / "backups"; output.mkdir(mode=0o700)
             for filename in backup.FILES[3:]:
                 (repo / filename).write_text("SYNTHETIC_ONLY=no_production_secret\n", encoding="utf-8")
             sqlite = root / "index"
