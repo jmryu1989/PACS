@@ -5,6 +5,18 @@ from noninferiority import noninferiority, concurrent_result, whole_rule_probabi
 
 
 class NonInferiorityTest(unittest.TestCase):
+    def test_empirical_power_order_statistic_and_margin_controls(self):
+        from power_design import self_check
+        self.assertTrue(self_check()['passed'])
+
+    def test_empirical_power_rejects_invalid_designs_and_observations(self):
+        from power_design import single_probability
+        valid = {'r3': [[1., 2.]] * 2, 'candidate': [[1., 2.]] * 2}
+        for size, blocks, samples in [(1, 10, valid), (120, 1, valid),
+                (120, 32, valid), (120, 10, {**valid, 'candidate': [[0., 2.]] * 2})]:
+            with self.assertRaises(ValueError):
+                single_probability(samples, size, blocks, replicates=1)
+
     def test_equal_faster_and_margin_regression(self):
         a = [[100.] * 40 for _ in range(30)]
         for ratio, expected in [(1., True), (.9, True), (1.11, False)]:

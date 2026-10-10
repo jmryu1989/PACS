@@ -22,9 +22,35 @@ for (const [name, field, count] of [['writeFileSync', 'write_ms', 'writes'], ['f
 }
 if (process.env.EMR_TIMING_CHILD === '1') process.on('exit', () => fs.writeSync(2, 'EMR_DISK ' + JSON.stringify(disk) + '\n'));
 
-function instrument(prisma, store, seal, { headProbe = false } = {}) {
+function instrument(prisma, store, seal, { headProbe = false, detailed = false } = {}) {
   const scope = new AsyncLocalStorage(), originalSpawn = cp.spawnSync;
   const drains = [], pending = new Map(), restorers = [];
+  // Diagnostic-only syscall and SQL boundaries. No extra database statement is
+  // issued inside the timed receipt; server logs independently identify backend
+  // reuse and parse/bind/execute time. These traces do not enter NI samples.
+  if (detailed) for (const name of ['openSync', 'closeSync', 'lstatSync', 'readSync', 'readFileSync',
+      'writeFileSync', 'fsyncSync', 'fdatasyncSync', 'ftruncateSync', 'renameSync']) {
+    const original = fs[name];
+    fs[name] = function (...args) {
+      const row = scope.getStore(), start = clock();
+      try { return original.apply(this, args); }
+      finally { if (row) (row.io ||= []).push({ operation: name,
+        target: typeof args[0] === 'number' ? args[0] : String(args[0]),
+        start, ms: clock() - start }); }
+    };
+    restorers.push(() => { fs[name] = original; });
+  }
+  const tracedTx = tx => !detailed ? tx : new Proxy(tx, { get(target, key) {
+    const original = Reflect.get(target, key);
+    if (!['$queryRaw', '$executeRaw'].includes(key)) return original;
+    return async (...args) => {
+      const row = scope.getStore(), start = clock();
+      try { return await original.apply(target, args); }
+      finally { if (row) (row.statements ||= []).push({
+        sql: Array.isArray(args[0]) ? args[0].join('?').replace(/\s+/g, ' ').trim() : String(args[0]),
+        start, ms: clock() - start }); }
+    };
+  } });
   const newRow = () => ({ head_lock_wait_ms: 0, head_lock_and_sql_ms: 0, pool_wait_ms: 0,
     commit_ms: 0, admission_wait_ms: 0, verification_sql_ms: 0, coordinator_ms: 0,
     writer_ms: 0, write_ms: 0, fsync_ms: 0, writes: 0, fsyncs: 0, transactions: [], spans: [] });
@@ -104,7 +130,7 @@ function instrument(prisma, store, seal, { headProbe = false } = {}) {
           row.pool_wait_ms += clock() - start; row.transactions.push(options || {});
           row.spans.push([start, clock(), 'pool_wait']);
         }
-        try { return await work(tx); } finally { callbackEnd = clock(); }
+        try { return await work(tracedTx(tx)); } finally { callbackEnd = clock(); }
       }, options);
     } catch (error) {
       if (row) (row.transaction_errors ||= []).push({ options, elapsed_ms: round(clock() - start), code: error.code, message: String(error.message) });

@@ -7,6 +7,12 @@ const { performance } = require('node:perf_hooks');
 const { instrument, summary } = require('./throughput.cjs');
 const send = value => new Promise(resolve => process.stdout.write('EMR_BENCHMARK ' + JSON.stringify(value) + '\n', resolve));
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+function descriptors() {
+  const fs = require('node:fs');
+  return Object.fromEntries(fs.readdirSync('/proc/self/fd').flatMap(fd => {
+    try { return [[fd, fs.readlinkSync('/proc/self/fd/' + fd)]]; } catch { return []; }
+  }));
+}
 
 async function run({ prisma, store, seal, sql, Sql, event }) {
   const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -32,10 +38,30 @@ async function run({ prisma, store, seal, sql, Sql, event }) {
         await send({ prefilled: command.count, before, after: (await sql.tail('viewing')).sequence });
         continue;
       }
-      const probe = instrument(prisma, store, seal, { headProbe: true });
+      const probe = instrument(prisma, store, seal, { headProbe: true, detailed: command.kind === 'gap-sweep' });
       try {
         const results = [], started = performance.now();
-        if (command.kind === 'gap-probe') {
+        if (command.kind === 'gap-sweep') {
+          // Balanced rotation avoids confounding idle length with ledger growth.
+          const gaps = [0, 50, 200, 1000];
+          for (let cycle = 0; cycle < command.count / gaps.length; cycle++) {
+            const shift = (cycle + command.block) % gaps.length;
+            const order = gaps.slice(shift).concat(gaps.slice(0, shift));
+            if ((cycle + command.block) % 2) order.reverse();
+            for (const gap of order) {
+              // Inspect before sleeping: /proc reads after the idle interval
+              // would wake the process before the timed product request.
+              const before = descriptors();
+              if (gap) await pause(gap);
+              const wall = new Date().toISOString();
+              const actualGap = previousReceipt === undefined ? null : performance.now() - previousReceipt;
+              const row = await probe.run(event());
+              previousReceipt = performance.now();
+              results.push({ ...row, scheduled_gap_ms: gap, idle_gap_ms: actualGap, cycle,
+                wall_start: wall, descriptors_before: before, descriptors_after: descriptors() });
+            }
+          }
+        } else if (command.kind === 'gap-probe') {
           // Diagnostic only: balance 0/200 ms ordering within one warm process.
           // Receipt latency excludes the deliberate pause, as in the main run.
           for (let pair = 0; pair < command.count / 2; pair++) {

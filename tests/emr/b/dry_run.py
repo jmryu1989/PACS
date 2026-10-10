@@ -2,7 +2,8 @@
 
 Explicit entrypoint only: does not call run-tests, grant a live ticket, acquire
 a lease, or masquerade as GitHub Actions. The runner-facing cases retain their
-live guard. Reduced samples preview every D952 rule; never final acceptance.
+live guard. Full single and reduced other workloads preview every D952 rule;
+never final acceptance. D956 also permits a separate instrumented idle sweep.
 """
 import argparse
 import hashlib
@@ -29,12 +30,12 @@ def pilot(plan_path, output, image, source_manifest=None, gap_diagnostic_only=Fa
     estimate = estimate_duration(plan)
     output.mkdir(parents=True, exist_ok=False)
     token = uuid.uuid4().hex
-    name, label = 'kin-emrb-r9-pilot-' + token[:12], 'kin.emrb.quiet=' + token
-    report = {'decision': 'D952', 'mode': 'ci-gross', 'dry_run': True,
+    name, label = 'kin-emrb-pilot-' + token[:12], 'kin.emrb.quiet=' + token
+    report = {'decision': 'D956', 'mode': 'ci-gross', 'dry_run': True,
               'runner_attempts_consumed': 0, 'lease_acquired': False,
               'plan_sha256': hashlib.sha256(plan_path.read_bytes()).hexdigest(),
               'duration_estimate': estimate, 'verdict_preview': 'INVALID',
-              'purpose': 'gap-diagnostic-only' if gap_diagnostic_only else 'full-reduced-plan'}
+              'purpose': 'gap-diagnostic-only' if gap_diagnostic_only else 'full-single-reduced-rest'}
     started = time.monotonic()
     probe_started = False
     try:

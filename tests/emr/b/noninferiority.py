@@ -13,7 +13,8 @@ CONCURRENT_RATIO_LIMIT = 1.10
 CONCURRENT_MEDIAN_LIMIT = 1.00
 CI_RATIO_LIMIT = 1.25
 MIN_ATTRIBUTION = .95
-SINGLE_BLOCKS = 30
+SINGLE_BLOCKS = 10
+SINGLE_REQUESTS = 120
 CONCURRENT_BLOCKS = 24
 SUSTAINED_BLOCKS = 12
 
@@ -104,7 +105,10 @@ def power_self_check(replicates=20000):
     rng = random.Random(949)
     result = {'seed': 949, 'replicates': replicates, 'sd_log_ratio': .15,
               'assumption': 'independent normal paired block-p95 log ratios; true ratio=1'}
-    for name, n, point_limit in [('single', SINGLE_BLOCKS, 1.10),
+    # Fixed reference experiment for the simulation self-check, independent of
+    # the selected plan. D956 empirical design power is in power_design.py.
+    result['reference_single_blocks'] = 30
+    for name, n, point_limit in [('single', 30, 1.10),
                                   ('concurrent_tail', CONCURRENT_BLOCKS, 1.10),
                                   ('concurrent_median', CONCURRENT_BLOCKS, 1.00),
                                   ('sustained', SUSTAINED_BLOCKS, 1.10)]:
@@ -117,7 +121,7 @@ def power_self_check(replicates=20000):
         result[name] = {'blocks': n, 'ni_bound_power': bounds / replicates,
                         'acceptance_power': accepted / replicates}
     models = {name: {'blocks': n, 'tail_mean': 0, 'tail_sd': .15}
-              for name, n in [('single', SINGLE_BLOCKS), ('sustained', SUSTAINED_BLOCKS),
+              for name, n in [('single', 30), ('sustained', SUSTAINED_BLOCKS),
                              ('concurrent-24', CONCURRENT_BLOCKS), ('concurrent-48', CONCURRENT_BLOCKS)]}
     for name in ('concurrent-24', 'concurrent-48'):
         models[name].update(median_mean=0, median_sd=.15, tail_median_correlation=0)
@@ -189,12 +193,12 @@ def r7_probability(directory, replicates=20000):
         observed = {'paired_point': math.exp(statistics.mean(tail)), 'sd_log_ratio': statistics.stdev(tail)}
         if name == 'single':
             # R7's ten-request p95 is a maximum; carrying its mean to the new
-            # 40-request p95 would change the estimand. Model 40-request blocks
+            # larger-block p95 would change the estimand. Model selected blocks
             # from the recorded request populations instead (no idle effect
             # can be inferred from that older run).
             rng = random.Random(95240)
             a, b = sum(samples['r3'], []), sum(samples['candidate'], [])
-            tail = [math.log(p95(rng.choices(b, k=40)) / p95(rng.choices(a, k=40))) for _ in range(20000)]
+            tail = [math.log(p95(rng.choices(b, k=SINGLE_REQUESTS)) / p95(rng.choices(a, k=SINGLE_REQUESTS))) for _ in range(20000)]
         model = {'blocks': SINGLE_BLOCKS if name == 'single' else SUSTAINED_BLOCKS if name == 'sustained' else CONCURRENT_BLOCKS,
                  'tail_mean': statistics.mean(tail), 'tail_sd': statistics.stdev(tail)}
         if name.startswith('concurrent'):
@@ -205,7 +209,7 @@ def r7_probability(directory, replicates=20000):
         sources[name] = {'path': str(path), 'sha256': hashlib.sha256(raw).hexdigest(),
                          'observed_pairs': len(samples['r3']), 'observed_requests_per_block': len(samples['r3'][0]),
                          'original_block_summary': observed,
-                         'moment_model': '20000 empirical request resamples of 40 per revision (seed 95240); normal approximation to block log ratios' if name == 'single' else 'observed paired blocks'}
+                         'moment_model': f'20000 empirical request resamples of {SINGLE_REQUESTS} per revision (seed 95240); normal approximation to block log ratios' if name == 'single' else 'observed paired blocks'}
     return {**whole_rule_probability(models, replicates), 'sources': sources,
             'design_limitation': 'r7 single uses 6x10 without prescribed 200ms gaps; R9 pilot is required to investigate idle effects; r7 is design input only'}
 

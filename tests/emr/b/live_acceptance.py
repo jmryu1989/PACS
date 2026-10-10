@@ -1,6 +1,6 @@
 """D952: paired ABBA blocks, fresh durable volumes, explicit verdict mode.
 
-Single: 30x40, 200 ms idle, first-to-last block starts >=600 seconds.
+Single: 10x120, 200 ms idle, first-to-last block starts >=600 seconds.
 Concurrent: 24 bursts/size/revision, quiet settle before each pair. Sustained: 12x200 at
 20 rps after 20k product appends. CI records the same statistics but only
 point<=1.25 gates; only the commander's reviewed live plan uses the NI bound.
@@ -17,11 +17,11 @@ import statistics
 from concurrent.futures import ThreadPoolExecutor
 
 from noninferiority import (noninferiority, concurrent_result, gate_result,
-                           SINGLE_BLOCKS, CONCURRENT_BLOCKS, SUSTAINED_BLOCKS, MIN_ATTRIBUTION, T95)
+                           SINGLE_BLOCKS, SINGLE_REQUESTS, CONCURRENT_BLOCKS, SUSTAINED_BLOCKS, MIN_ATTRIBUTION, T95)
 from quiet_host import HostProbe, QuietMonitor, InvalidRun
 
 WARMUP_REQUESTS = 5
-SINGLE_PER_BLOCK = 40
+SINGLE_PER_BLOCK = SINGLE_REQUESTS
 SINGLE_IDLE_MS = 200
 SETTLE_SECONDS = 2
 MIN_SINGLE_SPAN_SECONDS = 600
@@ -47,8 +47,11 @@ def estimate_duration(plan):
         ('tests/emr/b/live_mutants.py', 'EmrBLiveMutants.test_m36_receipt_startup_delay')]
     if [(t['file'], t['case']) for t in plan.get('tests', [])] != expected:
         raise ValueError('duration model requires reviewed L03/L03b/L03c/M36 order')
-    segment = (SINGLE_PER_BLOCK / 2 - 1) * SINGLE_IDLE_MS / 1000 + SINGLE_PER_BLOCK / 2 * .045
-    parts = {'single': max(MIN_SINGLE_SPAN_SECONDS, SINGLE_BLOCKS * (2.8 + 4 * segment)),
+    segment = (SINGLE_PER_BLOCK / 2 - 1) * SINGLE_IDLE_MS / 1000 + SINGLE_PER_BLOCK / 2 * .050
+    block_seconds = 2.8 + 4 * segment
+    # The last block starts at/after 600s and still has to finish. Counting only
+    # 600s hides that last block when the natural run is shorter than the spread.
+    parts = {'single': max(2.8 + MIN_SINGLE_SPAN_SECONDS + block_seconds, SINGLE_BLOCKS * block_seconds),
              'concurrent_24_and_48': CONCURRENT_BLOCKS * ((2.8 + 2 * .6) + (2.8 + 2 * 1.6)),
              'sustained': SUSTAINED_BLOCKS * (2.8 + 2 * ((SUSTAINED_COUNT - 1) / SUSTAINED_RPS + .55)),
              'parallel_prefill': 128.4 * RETAINED_ROWS / 2400 * 1.10,
@@ -59,7 +62,7 @@ def estimate_duration(plan):
     return {'components_seconds': parts, 'estimated_seconds': total,
             'estimated_minutes': total / 60, 'cap_seconds': cap, 'within_cap': total <= cap,
             'm36_control': 'reuse same-process successful L03; no repeated healthy comparison',
-            'basis': 'D952 R9 full reduced pilot (700.109 s), parallel prefill 128.39 s/2400 rows/revision; product paths unchanged',
+            'basis': 'D956: 10x120 single at 50ms/receipt with 200ms request gaps, including final block after 600s; R9 pilot prefill 128.39 s/2400 rows/revision',
             'limitation': '20k parallel prefill is extrapolated, not measured in R9; 10% prefill margin and 180 s extra quiet waiting included; persistent noise can still invalidate before the 3600 s runner cap'}
 
 
@@ -93,6 +96,8 @@ def block_design(workload, mode, dry_run=False):
     # acceptance. Keep its fixed shorter design distinct in the raw report.
     if mode == 'ci-gross':
         if dry_run:
+            if workload == 'single':
+                return SINGLE_BLOCKS, SINGLE_PER_BLOCK, MIN_SINGLE_SPAN_SECONDS / (SINGLE_BLOCKS - 1)
             return 6, {'single': 40, 'sustained': 40}.get(workload, int(workload.split('-')[-1]) if workload.startswith('concurrent-') else 40), 0
         return 6, {'single': 10, 'sustained': SUSTAINED_COUNT}.get(workload, int(workload.split('-')[-1]) if workload.startswith('concurrent-') else 10), 0
     count = SINGLE_BLOCKS if workload == 'single' else SUSTAINED_BLOCKS if workload == 'sustained' else CONCURRENT_BLOCKS
@@ -102,7 +107,7 @@ def block_design(workload, mode, dry_run=False):
 
 def block_segments(workload, block, size):
     order = ['candidate', 'r3'] if block % 2 == 0 else ['r3', 'candidate']
-    # Each single experimental block is a complete ABBA crossover: 20+20
+    # Each single experimental block is a complete ABBA crossover: two halves
     # requests per revision, pooled to one block p95 before the paired t test.
     # A burst is indivisible, so concurrent pairs alternate AB then BA.
     if workload == 'single':
@@ -176,6 +181,11 @@ def compare(fixture, workloads):
             fixture.provision(db)
             fixture.migrate(db)
             fixture.ok(fixture.latency_probe, db=db)
+            if gap_diagnostic:
+                # Only synthetic diagnostic DBs log statements. The measured
+                # receipt performs no extra connection/plan introspection SQL.
+                fixture.ok("ALTER SYSTEM SET log_min_duration_statement = 0; ALTER SYSTEM SET log_connections = on; ALTER SYSTEM SET log_disconnections = on; SELECT pg_reload_conf();", db=db)
+                report.setdefault('diagnostic_databases', {})[version] = db
             state = fixture.volume(token + '-' + version)
             name = 'kin-emrb-' + fixture.token + '-bench-' + token + '-' + version
             cls.created['container'].append(name)
@@ -202,8 +212,16 @@ def compare(fixture, workloads):
             for block in range(6):
                 monitor.wait_quiet()
                 for version, _ in block_segments('concurrent-24', block, 40):
-                    data = command(version, {'kind': 'gap-probe', 'count': 40, 'idle_ms': SINGLE_IDLE_MS})
+                    data = command(version, {'kind': 'gap-sweep', 'count': 40, 'block': block})
+                    groups = {g['id']: g for g in data['drain_groups']}
+                    for row in data['results']:
+                        parts = [row] + [groups[key] for key in row['drain_groups']]
+                        for field in ('pool_wait_ms', 'coordinator_ms', 'fsync_ms', 'commit_ms'):
+                            row['total_' + field] = sum(p.get(field, 0) for p in parts)
+                        row['transaction_sql_ms'] = sum(s['ms'] for p in parts for s in p.get('statements', []))
                     diagnostics[version].append(data['results'])
+                    print('EMR_GAP_SWEEP ' + json.dumps({'block': block, 'version': version, **data['summary']}), flush=True)
+            report['gap_sweep_samples'] = diagnostics
             report['gap_diagnostic'] = summarize_gap_diagnostic(diagnostics)
         for workload in workloads:
             if workload == 'sustained':
@@ -228,7 +246,11 @@ def compare(fixture, workloads):
             started = time.monotonic()
             block_starts = []
             for block in range(blocks):
-                time.sleep(max(0, started + block * spacing - time.monotonic()))
+                # Quiet settling precedes the first actual measurement. Anchor
+                # subsequent deadlines there, so a shorter later quiet window
+                # cannot erode the required first-to-last start separation.
+                origin = block_starts[0] if block_starts else started
+                time.sleep(max(0, origin + block * spacing - time.monotonic()))
                 if monitor:
                     monitor.wait_quiet()
                 else:
@@ -284,7 +306,7 @@ def compare(fixture, workloads):
                         medians['candidate']['post_gap_ms'] - medians['candidate']['gap_free_warm_ms']
                         - medians['r3']['post_gap_ms'] + medians['r3']['gap_free_warm_ms'])
                     report['post_gap']['limitation'] = 'four gap-free warm-up rows per revision are not a balanced idle-effect control; use the separate gap diagnostic'
-            if workload == 'single' and mode == 'acceptance':
+            if workload == 'single' and (mode == 'acceptance' or dry_run):
                 fixture.assertGreaterEqual(result['block_start_span_seconds'], MIN_SINGLE_SPAN_SECONDS)
                 fixture.assertEqual(result['samples_per_revision'], SINGLE_BLOCKS * SINGLE_PER_BLOCK)
         stack.close()
@@ -314,6 +336,9 @@ def compare(fixture, workloads):
                 process.communicate(timeout=10)
         for stream in files:
             stream.close()
+        for version, db in report.get('diagnostic_databases', {}).items():
+            logs = subprocess.run(['docker', 'logs', '--timestamps', db], capture_output=True, check=True)
+            (out / (version + '-postgres.log')).write_bytes(logs.stdout + logs.stderr)
         (out / 'summary.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
     print('EMR_LIVE_ACCEPTANCE ' + json.dumps({k: v for k, v in report.items() if k not in ('samples', 'cold_and_warmup', 'jit')}), flush=True)
     for workload, result in report['results'].items():
@@ -341,14 +366,18 @@ def summarize(directory):
 def summarize_gap_diagnostic(samples):
     """Paired block difference-in-differences; no warm-up rows enter the offset."""
     fields = ('receipt_ms', 'pool_wait_ms', 'admission_wait_ms', 'coordinator_ms',
-              'append_callback_ms', 'confirm_ms', 'verification_sql_ms')
+              'append_callback_ms', 'confirm_ms', 'verification_sql_ms',
+              'total_pool_wait_ms', 'total_coordinator_ms', 'total_fsync_ms',
+              'total_commit_ms', 'transaction_sql_ms')
     result, effects = {}, []
     deltas = {}
     for version, blocks in samples.items():
+        gaps = sorted({row['scheduled_gap_ms'] for block in blocks for row in block})
         groups = {gap: [row for block in blocks for row in block if row['scheduled_gap_ms'] == gap]
-                  for gap in (0, SINGLE_IDLE_MS)}
+                  for gap in gaps}
         result[version] = {str(gap): {'count': len(rows), 'median': {
-            key: statistics.median(row.get(key, 0) for row in rows) for key in fields}}
+            key: statistics.median(row.get(key, 0) for row in rows) for key in fields},
+            'mean': {key: statistics.mean(row.get(key, 0) for row in rows) for key in fields}}
             for gap, rows in groups.items()}
         deltas[version] = [statistics.median(row['receipt_ms'] for row in block if row['scheduled_gap_ms'] == SINGLE_IDLE_MS)
                            - statistics.median(row['receipt_ms'] for row in block if row['scheduled_gap_ms'] == 0)
