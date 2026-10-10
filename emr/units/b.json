@@ -366,6 +366,11 @@
       "req": "REQ-D931-BOUNDED-REPLAY",
       "risk": "RISK-EMR-RECEIPT-DELAY",
       "test": "C20 C23 PERF-ledger PERF-sustained"
+    },
+    {
+      "req": "REQ-D935-MERGED-RESERVATION-LANES",
+      "risk": "RISK-EMR-POOL-STARVATION/CRASH/RECEIPT-DELAY",
+      "test": "C21 C22 M39 M40 M41 M42 L03 L03b seal_checker ci/full PERF-sustained"
     }
   ],
   "cases": {
@@ -390,7 +395,7 @@
         "C20 replay binds sealed DB bytes through the external seal before issuing any receipt",
         "C21 adjacent stream advances share durability barriers and recover together after each publication cut",
         "C19 committed receipt groups preserve every binding, ignore unrelated pending work and share durable publication; publication failure sends no receipt",
-        "C22 a four-connection pool admits 24 appends without holding queued head-lock connections ahead of a committed receipt",
+        "C22 bounded lanes keep two verification connections free across small pools and shared stores",
         "C23 a cold replay beyond the named verification cap refuses before acquiring a snapshot",
         "C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused"
       ]
@@ -424,7 +429,7 @@
   "expected": {
     "contract": 21,
     "live": 12,
-    "mutants": 36,
+    "mutants": 39,
     "profiles": 39,
     "measurements_suites": 20,
     "validate_jobs": 22,
@@ -695,6 +700,27 @@
         "C22"
       ],
       "behaviour": "head-lock waiters consume every pool connection ahead of a committed receipt verification"
+    },
+    {
+      "id": "M40",
+      "kill": [
+        "C22"
+      ],
+      "behaviour": "append lanes consume verification reserve"
+    },
+    {
+      "id": "M41",
+      "kill": [
+        "C21"
+      ],
+      "behaviour": "merged reservation loses durability"
+    },
+    {
+      "id": "M42",
+      "kill": [
+        "C21"
+      ],
+      "behaviour": "merged reservation loses recovery intent"
     }
   ],
   "candidate_cases": [
