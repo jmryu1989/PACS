@@ -1,0 +1,20 @@
+.worklist-folder-tree { color: var(--kin-text); background: var(--kin-panel); padding: 8px; min-width: 0; }
+.worklist-folder-tree ul { list-style: none; margin: 0; padding: 0; }
+.worklist-folder-tree ul ul { padding-inline-start: 12px; }
+.worklist-folder-tree li { margin-block: 4px; }
+.worklist-folder-tree button, .worklist-folder-tree input, .worklist-folder-tree select {
+  font: inherit; color: inherit; background: var(--kin-panel2); border: 1px solid var(--kin-muted);
+  border-radius: 4px; padding: 6px; max-width: 100%; box-sizing: border-box;
+}
+.worklist-folder-tree li > button { width: 100%; text-align: start; overflow-wrap: anywhere; }
+.worklist-folder-tree button { cursor: pointer; }
+.worklist-folder-tree button:hover { background: var(--kin-row-hover); }
+.worklist-folder-tree button[aria-current], .worklist-folder-tree button[aria-pressed=true] { background: var(--kin-row-sel); border-color: var(--kin-link); font-weight: bold; }
+.worklist-folder-tree :is(button, input, select, summary):focus-visible { outline: 2px solid var(--kin-link); outline-offset: 2px; }
+.worklist-folder-tree button:disabled { cursor: default; color: var(--kin-muted); }
+.worklist-folder-tree label { display: block; margin-block: 6px; }
+.worklist-folder-tree label :is(input, select) { display: block; width: 100%; }
+.worklist-folder-tree details { margin-inline-start: 8px; }
+.worklist-folder-tree summary { cursor: pointer; padding: 4px; }
+.worklist-folder-tree form { margin-block-start: 12px; }
+.worklist-folder-tree [role=status] { overflow-wrap: anywhere; }
