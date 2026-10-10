@@ -2352,7 +2352,7 @@ build metadata. The served request list continues to contain the bundle, not 45 
 Hosted LoadBudget uses the real unchanged HTTPS proxy/Orthanc path without browser routing or clock injection.
 Cold/warm each use five alternating BC/CB pairs; host monotonic remains the verdict and native CDP timings are
 reported alongside it. Each metric must satisfy median(C)-median(B) <= max(250ms, 10% of median(B)).
-It checks real response hashes, MIME, protocol/cache/status, 56/57 script requests, console errors, same-origin CSP
+It checks real response hashes, MIME, protocol/cache/status, baseline 56 / candidate 58 script requests, console errors, same-origin CSP
 compatibility, real missing-bundle failure and recovery. Actual CSP headers are retained; missing inheritance is
 not reported as enforced policy. Synthetic API success responses complete startup for both sides. Host/native timing is frozen at the usable-list boundary; request collection then waits for the first received-inbox response on both sides before comparing the complete startup request sets. This wait does not move either budget clock.
 The normal live gate applies: set KIN_PRE_LOAD_UNIT to the authorized run unit. Inspection refusal means waiting;
@@ -2400,7 +2400,7 @@ PRE의 과거 original/approved/parent 동등성 전체 코스와 기존 mutants
 고정 landed 페이지와 의존 파일을 제공해 유지한다. 현재 동작을 과거 화면 구조와 같다고 주장하지 않으며,
 현재 PRE 순서/동작은 C3-LIVE와 아래 소비자 시험에 결속한다. 기존 PRE 단언이나 원본 바이트 핀은 삭제하지 않는다.
 Hosted LoadBudget은 역사적 오버라이드와 무관하게 현재 제품 디렉터리를 candidate로 사용한다.
-baseline은 기존 approved PRE blob이며 W2의 추가 요청은 folder-tree JS 1개 및 계정 검색 GET 2개로 정확히 제한한다.
+baseline은 기존 approved PRE blob이며 script 요청 수는 baseline 56 / candidate 58이다. W2는 bundle 앞에 `worklist-folder-tree.js`와 해당 CSS를 추가하며, 추가 요청은 JS 1개·CSS 1개 및 계정 검색 GET 2개로 정확히 제한한다.
 CSS도 응답 hash·status·cache 기록에 포함된다. 시간 예산·쌍 개수·캐시 조건은 유지하며 새 measurement profile은 없다.
 
 `page_source` 소비자 DOM 목록(개별 파일을 그대로 실행):
