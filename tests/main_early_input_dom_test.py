@@ -1910,9 +1910,11 @@ class LoadBudget(PreCase):
         result = {"mode": "hosted", "baseline_sha": Pages.commits["approved"], "cold": [], "warm": [],
                   "visits": [], "budgets": {}, "verdict": "FAIL", "valid_pairs": {"cold": 0, "warm": 0},
                   "observation": "host monotonic: goto call -> first /api/me request; server auth release -> searchable list",
-                  "cache": "fresh context per side/pair; warm new page immediately after cold in same context; no routing/cache override"}
+                  "cache": "fresh context per side/pair; warm new page immediately after cold in same context; no routing/cache override",
+                  "sampling_policy": hosted.sampling_policy()}
         directory = ARTIFACTS / "load-budget"
         directory.mkdir(parents=True, exist_ok=True)
+        sh.keep(directory, "samples.json", result)  # Declare exclusions before any browser visit.
         stack = hosted.HostedStack(directory / "stack", PreSite, Pages.commits["approved"], PAGE.parent)
         errors = []
         started = time.perf_counter()
@@ -1920,52 +1922,26 @@ class LoadBudget(PreCase):
             stack.prepare()
             result["browser"] = self.browser.version
             result["readiness"] = stack.readiness
-            # Fixed before sampling: one disposable context per revision warms
-            # host services, while every measured cold context remains fresh.
-            result["warmups"] = []
-            for visit_id, side in ((-2, "baseline"), (-1, "candidate")):
-                stack.activate(side)
-                context = self.browser.new_context(viewport={"width": 1400, "height": 900},
-                    locale="ko-KR", timezone_id="Asia/Seoul", ignore_https_errors=True)
-                try:
-                    result["warmups"].append(hosted.visit(stack, context, CLOCK_START, h.PATIENT,
-                        {"mode": "warmup", "visit": visit_id,
-                         "note": "one per revision before sampling; excluded by design"}))
-                finally:
-                    context.close()
-            for index in range(5):
-                order = ("baseline", "candidate") if index % 2 == 0 else ("candidate", "baseline")
-                pairs = {"cold": {}, "warm": {}}
-                for side in order:
-                    stack.activate(side)
-                    context_id = f"pair-{index + 1}-{side}"
-                    context = self.browser.new_context(viewport={"width": 1400, "height": 900},
-                        locale="ko-KR", timezone_id="Asia/Seoul", ignore_https_errors=True)
-                    try:
-                        for mode in ("cold", "warm"):
-                            metadata = {"pair": index + 1, "order": list(order), "context": context_id,
-                                        "mode": mode, "visit": len(result["visits"]) + 1}
-                            sample = hosted.visit(stack, context, CLOCK_START, h.PATIENT, metadata)
-                            pairs[mode][side] = sample
-                            result["visits"].append(sample)
-                    finally:
-                        context.close()
-                for mode, pair in pairs.items():
-                    result[mode].append(pair)
-                    result["valid_pairs"][mode] += int(all(s["valid"] for s in pair.values()))
+            result["network_settle"] = hosted.settle_network(
+                self.browser, stack.origin, directory / "network-settle.json")
+            hosted.run_warmups(stack, self.browser, CLOCK_START, h.PATIENT, result)
+            hosted.collect_pairs(stack, self.browser, CLOCK_START, h.PATIENT, result)
+            for mode in ("cold", "warm"):
+                for pair in result[mode]:
+                    pair_number = pair["baseline"]["pair"]
                     try:
                         hosted.assert_script_requests(pair["baseline"]["script_requests"],
                                                       pair["candidate"]["script_requests"])
                     except AssertionError as error:
-                        errors.append(f"{mode} pair {index + 1}: {error}")
+                        errors.append(f"{mode} pair {pair_number}: {error}")
                     for field in ("console_errors", "non_script_requests"):
                         if Counter(map(str, pair["baseline"][field])) != Counter(map(str, pair["candidate"][field])):
-                            errors.append(f"{mode} pair {index + 1}: different {field}")
-                sh.keep(directory, "samples.json", result)
+                            errors.append(f"{mode} pair {pair_number}: different {field}")
             for mode in ("cold", "warm"):
                 result["budgets"][mode] = {}
                 if result["valid_pairs"][mode] != 5:
                     errors.append(f"{mode}: fewer than 5 valid pairs")
+                    continue
                 for metric in ("navigation_to_auth_ms", "auth_to_usable_ms"):
                     before = [p["baseline"][metric] for p in result[mode]]
                     after = [p["candidate"][metric] for p in result[mode]]
@@ -1981,7 +1957,7 @@ class LoadBudget(PreCase):
                 locale="ko-KR", timezone_id="Asia/Seoul", ignore_https_errors=True)
             try:
                 result["failure_recovery"] = hosted.visit(stack, recovery, CLOCK_START, h.PATIENT,
-                    {"mode": "recovery", "visit": 21, "note": "diagnostic recovery; excluded from timing pairs by design"})
+                    {"mode": "recovery", "visit": len(result["visits"]) + 1, "note": "diagnostic recovery; excluded from timing pairs by design"})
             finally:
                 recovery.close()
             result["errors"] = errors

@@ -5,6 +5,7 @@ Only API answers are synthetic. No browser routing or product instrumentation is
 used. This fixture requires run-tests.py's live lease, even though it has no real
 accounts, DICOM, database, host credentials, or persistent Docker volumes.
 """
+import copy
 import hashlib
 import json
 import shutil
@@ -22,15 +23,197 @@ from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen
 
 import live_test_gate as gate
+from playwright.sync_api import TimeoutError as BrowserTimeoutError
 
 ROOT = Path(__file__).resolve().parents[1]
 # Shared CI runners can spend tens of seconds starting the proxy/upstreams.
 # These are failure deadlines, not performance budgets; no sample starts here.
 STACK_READINESS_TIMEOUT_S = 180
 FIRST_AUTH_TIMEOUT_S = 90  # Allow CI scheduling/script compilation; retain every measured millisecond.
+WARMUP_ATTEMPTS = 3
+NETWORK_SETTLE_WINDOW_S = 3
+NETWORK_SETTLE_TIMEOUT_S = 30
+# Both timing observations (including usable) are frozen before this collection
+# deadline. Allow three 30s app polls on CI; this cannot change a timing metric.
+STARTUP_COLLECTION_TIMEOUT_S = 90
+MAX_REPLACED_PAIRS_PER_PHASE = 2
+NETWORK_CHANGED = "net::ERR_NETWORK_CHANGED"
 DISCOVERY_PATH = "/auth/realms/kin/.well-known/openid-configuration"
 READINESS_CHECKS = {"api": "/api/health", "auth_realm": DISCOVERY_PATH,
                     "orthanc": "/worklist/hpacs-lite/main.html"}
+
+
+class WaitTimeout(AssertionError):
+    pass
+
+
+class VisitFailure(AssertionError):
+    def __init__(self, error, result):
+        super().__init__(str(error))
+        self.result = result
+
+
+def network_changed(result):
+    """Predeclared invalidity: an unanswered request plus network-change evidence.
+
+    A console-only notification without an unanswered/aborted waterfall row is
+    insufficient. CDP may omit loadingFailed on the runner, hence the fallback.
+    Timing values never participate in this decision.
+    """
+    console = any(NETWORK_CHANGED in error for error in result.get("console_errors", []))
+    return any(row.get("status") is None and (
+        row.get("failed", {}).get("errorText") == NETWORK_CHANGED or
+        (console and "end" not in row)) for row in result.get("waterfall", []))
+
+
+def incomplete_requests(result):
+    return [row for row in result.get("waterfall", []) if "end" not in row and "failed" not in row]
+
+
+def sampling_policy():
+    return {"warmup_attempts": WARMUP_ATTEMPTS,
+            "settle_window_s": NETWORK_SETTLE_WINDOW_S,
+            "settle_timeout_s": NETWORK_SETTLE_TIMEOUT_S,
+            "collection_deadline_s": STARTUP_COLLECTION_TIMEOUT_S,
+            "max_replaced_pairs_per_phase": MAX_REPLACED_PAIRS_PER_PHASE,
+            "required_valid_pairs": 5,
+            "invalidity": "status None plus CDP ERR_NETWORK_CHANGED, or console ERR_NETWORK_CHANGED plus a row without status/end; dependent warm invalid after invalid cold",
+            "warmup_retry": "wait failure or network change; otherwise successful visits with pending (not completed/failed) requests; never retry unrelated assertions",
+            "replacement": "after five planned pairs, at most two additional rounds; accept only deficient phases chosen before each round; timing never selects pairs; alternate order by physical round without rebalancing accepted pairs",
+            "overall_bound": "existing run-tests.py 600s deadline still applies to all phases and attempts",
+            "docker_operations": "prepare build/up/ps/inspect/exec precede settle; activate only copies owned files; no Docker operation between visits; down in close after all visits"}
+
+
+def settle_network(browser, origin, record_path, clock=time.monotonic):
+    """Disposable health-page traffic; no app boot, auth, cache or sample survives."""
+    started = clock()
+    deadline = started + NETWORK_SETTLE_TIMEOUT_S
+    stable_since = started
+    record = {"ready": False, "window_s": NETWORK_SETTLE_WINDOW_S,
+              "timeout_s": NETWORK_SETTLE_TIMEOUT_S, "attempts": [], "events": []}
+    context = None
+
+    def disturbed(kind, detail):
+        nonlocal stable_since
+        stable_since = clock()
+        record["events"].append({"elapsed_s": clock() - started, "kind": kind, "detail": detail})
+
+    try:
+        context = browser.new_context(ignore_https_errors=True)
+        page = context.new_page()
+        page.on("requestfailed", lambda request: disturbed("requestfailed", str(request.failure)))
+        page.on("console", lambda message: disturbed("console", message.text)
+                if NETWORK_CHANGED in message.text else None)
+        stable_since = clock()  # Context creation was not browser observation time.
+        while clock() < deadline:
+            attempt = {"elapsed_s": clock() - started}
+            try:
+                response = page.goto(origin + "/api/health", wait_until="load",
+                                     timeout=max(1, min(2000, (deadline - clock()) * 1000)))
+                attempt["status"] = response.status if response else None
+                if attempt["status"] != 200:
+                    disturbed("health", str(attempt["status"]))
+            except Exception as error:
+                attempt["error"] = str(error)
+                disturbed("navigation", str(error))
+            record["attempts"].append(attempt)
+            if attempt.get("status") == 200 and clock() - stable_since >= NETWORK_SETTLE_WINDOW_S and clock() < deadline:
+                record["ready"] = True
+                return record
+            page.wait_for_timeout(max(0, min(250, (deadline - clock()) * 1000)))
+        raise AssertionError("hosted timeout: network settle")
+    finally:
+        record["duration_seconds"] = clock() - started
+        save(record_path, record)
+        if context is not None:
+            context.close()
+
+
+def new_context(browser):
+    return browser.new_context(viewport={"width": 1400, "height": 900},
+        locale="ko-KR", timezone_id="Asia/Seoul", ignore_https_errors=True)
+
+
+def run_warmups(stack, browser, clock_start, patient, result, visit_fn=None):
+    visit_fn = visit_fn or visit
+    result["warmups"] = []
+    for side in ("baseline", "candidate"):
+        stack.activate(side)
+        for attempt in range(1, WARMUP_ATTEMPTS + 1):
+            context = new_context(browser)
+            metadata = {"mode": "warmup", "visit": -len(result["warmups"]) - 1,
+                        "attempt": attempt, "note": "non-sample; excluded by design"}
+            try:
+                try:
+                    sample = visit_fn(stack, context, clock_start, patient, metadata)
+                except VisitFailure as error:
+                    sample = error.result
+                    if not (sample.get("wait_failed") or network_changed(sample)):
+                        result["warmups"].append(sample)
+                        save(stack.root.parent / "samples.json", result)
+                        raise
+                result["warmups"].append(sample)
+                save(stack.root.parent / "samples.json", result)
+                if sample["valid"] and not network_changed(sample) and not incomplete_requests(sample):
+                    break
+            finally:
+                context.close()
+        else:
+            raise AssertionError(f"hosted warmup exhausted: {side} ({WARMUP_ATTEMPTS} attempts): "
+                                 + sample.get("failure", "network change or pending requests"))
+
+
+def collect_pairs(stack, browser, clock_start, patient, result, visit_fn=None):
+    """Keep physical rounds, including failures and predetermined diagnostic peers."""
+    visit_fn = visit_fn or visit
+    result["pair_attempts"] = []
+    result["replacements"] = {"cold": 0, "warm": 0}
+    for index in range(5 + MAX_REPLACED_PAIRS_PER_PHASE):
+        phases = [mode for mode in ("cold", "warm") if result["valid_pairs"][mode] < 5]
+        if not phases:
+            break
+        if index >= 5:
+            for mode in phases:
+                result["replacements"][mode] += 1
+        order = ("baseline", "candidate") if index % 2 == 0 else ("candidate", "baseline")
+        pairs = {"cold": {}, "warm": {}}
+        attempt = {"pair": index + 1, "eligible_phases": phases, "pairs": pairs, "accepted": []}
+        result["pair_attempts"].append(attempt)
+        try:
+            for side in order:
+                stack.activate(side)
+                context = new_context(browser)
+                try:
+                    for mode in ("cold", "warm"):
+                        metadata = {"pair": index + 1, "order": list(order), "context": f"pair-{index + 1}-{side}",
+                                    "mode": mode, "visit": len(result["visits"]) + 1,
+                                    "eligible_phase": mode in phases}
+                        try:
+                            sample = visit_fn(stack, context, clock_start, patient, metadata)
+                        except VisitFailure as error:
+                            sample = error.result
+                            result["visits"].append(sample)
+                            pairs[mode][side] = sample
+                            if not network_changed(sample):
+                                raise
+                        else:
+                            result["visits"].append(sample)
+                            pairs[mode][side] = sample
+                finally:
+                    context.close()
+            cold_invalid = any(network_changed(sample) for sample in pairs["cold"].values())
+            for mode in phases:
+                pair = pairs[mode]
+                invalid = any(network_changed(sample) for sample in pair.values()) or (mode == "warm" and cold_invalid)
+                if invalid:
+                    attempt.setdefault("invalid", {})[mode] = "network change" if mode == "cold" or not cold_invalid else "network change in preceding cold visit"
+                    continue
+                assert all(sample["valid"] for sample in pair.values()), "invalid visit without network-change evidence"
+                result[mode].append(pair)
+                result["valid_pairs"][mode] += 1
+                attempt["accepted"].append(mode)
+        finally:
+            save(stack.root.parent / "samples.json", result)
 
 
 def probe_endpoint(origin, name, path, timeout_s, document_sha256):
@@ -130,8 +313,10 @@ class HostedStack:
     def reset(self):
         self.site = self.site_factory()
         self.requests = []
-        self.me_received.clear()
-        self.me_release.clear()
+        # In-flight handlers retain their own visit's state after a failed page
+        # closes; a retry must neither clear their release nor inherit errors.
+        self.me_received, self.me_release = threading.Event(), threading.Event()
+        self.visit_violations = []
 
     def command(self, *args, check=True):
         started = time.perf_counter()
@@ -282,9 +467,17 @@ class HostedStack:
                 self.wfile.write(body)
 
             def do_GET(self):
+                site, requests = stack.site, stack.requests
+                me_received, me_release = stack.me_received, stack.me_release
+                violations = stack.visit_violations
+
+                def violation(message):
+                    violations.append(message)
+                    stack.violations.append(message)  # Full history survives in cleanup.json.
+
                 stamp = time.perf_counter()
                 url = urlparse(self.path)
-                stack.requests.append({"method": "GET", "path": url.path, "query": url.query, "received": stamp})
+                requests.append({"method": "GET", "path": url.path, "query": url.query, "received": stamp})
                 if url.path == "/api/health":
                     return self.fulfill(json={"ok": True, "synthetic": True})
                 if url.path == DISCOVERY_PATH:
@@ -296,9 +489,9 @@ class HostedStack:
                         "token_endpoint": issuer + "/protocol/openid-connect/token",
                         "jwks_uri": issuer + "/protocol/openid-connect/certs"})
                 if url.path == "/api/me":
-                    stack.me_received.set()
-                    if not stack.me_release.wait(30):
-                        stack.violations.append("auth release timeout")
+                    me_received.set()
+                    if not me_release.wait(30):
+                        violation("auth release timeout")
                         return self.fulfill(status=504, body="synthetic auth release timeout")
                 request = SimpleNamespace(method="GET", url="https://syn.test" + self.path,
                     headers={k.lower(): v for k, v in self.headers.items()}, post_data=None,
@@ -309,9 +502,9 @@ class HostedStack:
                     # in p3b evidence; neither side receives those errors here.
                     if url.path in ("/api/authz/dicom", "/api/study-access", "/api/reading-appearance",
                                     "/api/reading-preferences", "/api/workspace-layout", "/api/critical-results"):
-                        account, refused = stack.site.authenticate(request, strict=True)
+                        account, refused = site.authenticate(request, strict=True)
                         if refused:
-                            return stack.site.refuse(self, *refused)
+                            return site.refuse(self, *refused)
                         if url.path == "/api/authz/dicom":
                             return self.fulfill(status=204)
                         if url.path == "/api/study-access":
@@ -327,11 +520,11 @@ class HostedStack:
                                  "/api/workspace-layout": "layout"}[url.path]
                         return self.fulfill(json={"owner": owner_of(account), "revision": 0, field: None})
                     if url.path.startswith("/api/"):
-                        stack.site.api(self, request, "GET", url.path, url.query)
+                        site.api(self, request, "GET", url.path, url.query)
                     else:
                         self.fulfill(status=404, body="synthetic endpoint absent")
                 except Exception as error:
-                    stack.violations.append(repr(error))
+                    violation(repr(error))
                     self.fulfill(status=500, body="synthetic fixture error")
 
         self.server = ThreadingHTTPServer(("0.0.0.0", 0), Handler)
@@ -402,8 +595,28 @@ def wait(page, predicate, label, timeout_s=30, on_timeout=None):
         if time.perf_counter() >= deadline:
             if on_timeout:
                 on_timeout()
-            raise AssertionError("hosted timeout: " + label)
+            raise WaitTimeout("hosted timeout: " + label)
         page.wait_for_timeout(10)
+
+
+def collect_startup_requests(page, waterfall, result, record_path):
+    def inbox_complete():
+        return any(urlparse(row.get("url", "")).path == "/api/critical-results"
+                   and parse_qs(urlparse(row["url"]).query).get("view") == ["received"]
+                   and parse_qs(urlparse(row["url"]).query).get("state") == ["pending"]
+                   and row.get("status") == 200 and "end" in row
+                   for row in waterfall.rows.values())
+
+    def diagnostic():
+        rows = copy.deepcopy(list(waterfall.rows.values()))
+        result["startup_collection_timeout"] = {
+            "timeout_s": STARTUP_COLLECTION_TIMEOUT_S,
+            "pending_requests": [row for row in rows if "end" not in row and "failed" not in row],
+            "console_errors": list(result["console_errors"]), "waterfall": rows}
+        save(record_path, result)
+
+    wait(page, inbox_complete, "first received-inbox response", timeout_s=STARTUP_COLLECTION_TIMEOUT_S,
+         on_timeout=diagnostic)
 
 
 def visit(stack, browser_context, clock_start, patient, metadata):
@@ -438,17 +651,15 @@ def visit(stack, browser_context, clock_start, patient, metadata):
         wait(page, lambda: page.locator('#rows tr[data-uid]').count() > 0, "usable search")
         usable = time.perf_counter()
         performance = waterfall.performance()
+        result.update(navigation_to_auth_ms=(auth[0] - started) * 1000,
+                      auth_to_usable_ms=(usable - answered) * 1000,
+                      raw={"navigation": started, "first_auth_request": auth[0],
+                           "auth_release": answered, "usable_list": usable})
         # Freeze both timing observations before collecting the complete startup
         # request set. Body hashing can otherwise cross the delayed inbox poll
         # on only one side. Observe its real response on both pages; do not drop
         # requests or move the usable boundary to make the budget pass.
-        def inbox_complete():
-            return any(urlparse(row.get("url", "")).path == "/api/critical-results"
-                       and parse_qs(urlparse(row["url"]).query).get("view") == ["received"]
-                       and parse_qs(urlparse(row["url"]).query).get("state") == ["pending"]
-                       and row.get("status") == 200 and "end" in row
-                       for row in waterfall.rows.values())
-        wait(page, inbox_complete, "first received-inbox response")
+        collect_startup_requests(page, waterfall, result, record_path)
         collected = time.perf_counter()
         wire = []
         for response in static_responses:
@@ -478,7 +689,7 @@ def visit(stack, browser_context, clock_start, patient, metadata):
                                      for r in waterfall.rows.values() if r.get("type") == "Script"]
         assert not errors, errors
         assert not console_errors, console_errors
-        assert not stack.violations, stack.violations
+        assert not stack.visit_violations, stack.visit_violations
         assert result["navigation"][0]["type"] == "navigate", "warm visit must be a new document"
         # Real wire checks, not inferred from an https URL or the template alone.
         static = [r for r in waterfall.rows.values() if "/worklist/" in r.get("url", "") and "status" in r]
@@ -498,8 +709,21 @@ def visit(stack, browser_context, clock_start, patient, metadata):
             assert not any(any(r["cache"].values()) or r.get("transfer_size") == 0 for r in static), "cold cache was not empty"
         result["valid"] = True
         return result
+    except Exception as error:
+        result.update(failure=f"{type(error).__name__}: {error}",
+                      wait_failed=isinstance(error, (WaitTimeout, BrowserTimeoutError)))
+        raise VisitFailure(error, result) from error
     finally:
-        result["waterfall"] = list(waterfall.rows.values())
+        result["waterfall"] = copy.deepcopy(list(waterfall.rows.values()))
+        result["console_errors"] = list(console_errors)
+        result["page_errors"] = list(errors)
+        result["fixture_violations"] = list(stack.visit_violations)
+        # A failed navigation/auth wait may leave a synthetic handler held.
+        # Release this visit's event before its page closes and reset replaces it.
+        stack.me_release.set()
+        result["network_changed"] = network_changed(result)
+        if result["network_changed"]:
+            result["valid"] = False
         save(record_path, result)
         waterfall.close()
         page.close()
