@@ -16,6 +16,87 @@ const rule = (field, op, value, value2) => ({ field, op, ...(value === undefined
 const expr = (rules = [], join = 'and') => ({ version: 1, join, rules });
 const match = (study, condition, spec = columns) => matcher.matches(study, condition, spec);
 const valid = condition => assert.equal(matcher.validate(condition, columns), null);
+
+// REQ-WS3 -> RISK-WS3 -> TEST-WS3-RELATIVE: local calendar boundaries, without a live stack.
+function localClock(year, month, day, hour = 12, minute = 0) {
+  let instant = new Date(year, month - 1, day, hour, minute).getTime();
+  class Clock extends Date { constructor(...args) { super(...(args.length ? args : [instant])); } }
+  const sandbox = vm.createContext({ window: {}, Date: Clock });
+  vm.runInContext(readFileSync(join(__dirname, '../worklist-v0/hpacs-lite/compound-filter.js'), 'utf8'), sandbox);
+  return { matcher: sandbox.window.KinCompoundFilter, advance: ms => { instant += ms; } };
+}
+const relative = days => expr([rule('date', 'withinLastDays', days)]);
+test('TEST-WS3-RELATIVE-SUMMARY: applied summaries substitute days, with Today for zero, including nested rules', () => {
+  assert.equal(matcher.describe(relative('1'),columns),'(StudyDate Within Last 1 Day)');
+  for (const days of ['7','365']) assert.equal(matcher.describe(relative(days),columns), `(StudyDate Within Last ${days} Days)`);
+  assert.equal(matcher.describe(relative('0'),columns),'(StudyDate Today)');
+  assert.equal(matcher.describe(expr([{join:'and',rules:relative('7').rules},{join:'and',rules:relative('0').rules}],'or'),columns),
+    '((StudyDate Within Last 7 Days) OR (StudyDate Today))');
+  const operators = matcher.operators(matcher.fields(columns).find(field => field.k === 'date'));
+  assert.deepEqual(operators.map(([op]) => op), ['eq','neq','gte','lte','between','empty','notEmpty']);
+  assert.equal(matcher.describe(relative('366'),columns),'복합 조건 오류');
+});
+function localTest(name, run) {
+  for (const zone of ['Asia/Seoul', 'America/Los_Angeles']) test(`${name} [${zone}]`, () => {
+    const previous = process.env.TZ;
+    try {
+      process.env.TZ = zone;
+      assert.equal(new Date(2026, 0, 1).getTimezoneOffset(), zone === 'Asia/Seoul' ? -540 : 480);
+      run();
+    } finally {
+      if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous;
+    }
+  });
+}
+
+localTest('TEST-WS3-RELATIVE-VALIDATION: bounded integer day strings, no coercion or second value', () => {
+  for (const days of ['0', '1', '365']) valid(relative(days));
+  for (const days of [undefined, null, 0, 1, false, {}, [], '', ' ', '-1', '366', '1.5', '1e2', '7d', '01', ' 1', '1\n']) invalid(relative(days));
+  invalid(expr([rule('date', 'withinLastDays', '1', '2026-10-04')]));
+  invalid(expr([rule('name', 'withinLastDays', '1')]));
+  const clock = localClock(2026, 10, 4);
+  for (const days of ['0', '1', '365']) {
+    for (const date of [undefined, null, '', '2026-02-30', 'bad', 20261004]) {
+      assert.equal(clock.matcher.matches({ date }, relative(days), columns), false);
+    }
+  }
+});
+
+localTest('TEST-WS3-RELATIVE-BOUNDS: today through N days ago, excluding future dates', () => {
+  const clock = localClock(2026, 10, 4);
+  for (const [days, dates, expected] of [
+    ['0', ['20261003', '20261004', '20261005'], [false, true, false]],
+    ['1', ['20261002', '20261003', '20261004', '20261005'], [false, true, true, false]],
+    ['365', ['20251003', '20251004', '20261004', '20261005'], [false, true, true, false]],
+  ]) assert.deepEqual(dates.map(date => clock.matcher.matches({ date }, relative(days), columns)), expected);
+});
+
+localTest('TEST-WS3-RELATIVE-CALENDAR: month, leap year and year boundaries', () => {
+  for (const [year, month, day, previous, outside] of [
+    [2026, 3, 1, '20260228', '20260227'], [2028, 3, 1, '20280229', '20280228'],
+    [2027, 1, 1, '20261231', '20261230'], [2026, 11, 2, '20261101', '20261031'],
+  ]) {
+    const compiled = localClock(year, month, day).matcher.compile(relative('1'), columns);
+    assert.equal(compiled({ date: previous }), true);
+    assert.equal(compiled({ date: outside }), false);
+  }
+});
+
+localTest('TEST-WS3-RELATIVE-MIDNIGHT: an already compiled condition follows the local day', () => {
+  const clock = localClock(2026, 12, 31, 23, 59), compiled = clock.matcher.compile(relative('0'), columns);
+  assert.equal(compiled({ date: '20261231' }), true);
+  assert.equal(compiled({ date: '20270101' }), false);
+  clock.advance(60000);
+  assert.equal(compiled({ date: '20261231' }), false);
+  assert.equal(compiled({ date: '20270101' }), true);
+});
+
+test('TEST-WS3-RELATIVE-COMPATIBILITY: saved modality comparisons retain exact matching', () => {
+  assert.equal(match({ modality: 'CT,SR' }, expr([rule('modality', 'eq', 'CT')])), false);
+  assert.equal(match({ modality: 'CT' }, expr([rule('modality', 'eq', 'CT')])), true);
+  const expression = relative('1');
+  assert.deepEqual(matcher.withQuickMode(matcher.withQuickMode(expression, 'exact', columns), 'contains', columns), expression);
+});
 function invalid(condition, message = '') {
   assert.equal(typeof matcher.validate(condition, columns), 'string', message);
   assert.equal(match({ id: 'alpha', name: '환자', modality: 'CT', date: '20260909' }, condition), false, message);

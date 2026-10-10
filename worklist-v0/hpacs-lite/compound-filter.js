@@ -11,7 +11,8 @@
       ['neq', '같지 않음'], ['empty', '비어 있음'], ['notEmpty', '값 있음']],
     select: [['eq', '같음'], ['neq', '같지 않음'], ['empty', '비어 있음'], ['notEmpty', '값 있음']],
     date: [['eq', '같은 날'], ['neq', '다른 날'], ['gte', '이후 (포함)'], ['lte', '이전 (포함)'],
-      ['between', '기간 (양 끝 포함)'], ['empty', '비어 있음'], ['notEmpty', '값 있음']],
+      ['between', '기간 (양 끝 포함)'], ['empty', '비어 있음'], ['notEmpty', '값 있음'],
+      ['withinLastDays', 'Within Last N Days']],
     tokens: [['contains', 'Contains'], ['eq', 'Equals'], ['notContains', 'Does Not Contain'],
       ['neq', 'Does Not Equal'], ['empty', 'Unspecified'], ['notEmpty', 'Specified']],
   };
@@ -39,7 +40,10 @@
   }
 
   function operators(field) {
-    return (own(OPS, field?.type) ? OPS[field.type] : []).map(pair => [...pair]);
+    // The served editor still uses date inputs; expose relative days at W2-LAND
+    // together with its numeric editor. Stored/module criteria remain supported.
+    return (own(OPS, field?.type) ? OPS[field.type] : [])
+      .filter(([op]) => op !== 'withinLastDays').map(pair => [...pair]);
   }
 
   function calendarDate(value, exact) {
@@ -86,13 +90,18 @@
       }
       const field = available.get(rule.field);
       if (!field) return '현재 모드에서 사용할 수 없는 검색 항목입니다.';
-      if (!operators(field).some(([op]) => op === rule.op)) return '검색 항목에 사용할 수 없는 비교 방법입니다.';
+      if (!OPS[field.type].some(([op]) => op === rule.op)) return '검색 항목에 사용할 수 없는 비교 방법입니다.';
       // Single-line controls strip CR/LF on assignment. Reject stored multiline
       // criteria before the editor can silently change their matching meaning.
       if (['value', 'value2'].some(key => typeof rule[key] === 'string' && /[\r\n]/.test(rule[key]))) {
         return '검색 값에는 줄바꿈을 사용할 수 없습니다.';
       }
       if (rule.op === 'empty' || rule.op === 'notEmpty') continue;
+      if (rule.op === 'withinLastDays') {
+        if (!own(rule, 'value') || typeof rule.value !== 'string' || !/^(0|[1-9]\d{0,2})$/.test(rule.value)
+          || Number(rule.value) > 365 || own(rule, 'value2')) return '최근 일수는 0~365 사이의 정수로 입력해 주세요.';
+        continue;
+      }
       if (!own(rule, 'value') || typeof rule.value !== 'string' || !rule.value.trim() || rule.value.length > 1000) {
         return '검색 값은 공백이 아닌 1~1,000자 문자열이어야 합니다.';
       }
@@ -183,6 +192,13 @@
         const actual = calendarDate(value, false), wanted = calendarDate(rule.value, true);
         if (actual === null) return false;
         switch (rule.op) {
+          case 'withinLastDays': {
+            // Read the local calendar on each evaluation, including after midnight.
+            const today = new Date(), start = new Date(today.getTime());
+            start.setDate(start.getDate() - Number(rule.value));
+            const day = date => date.getFullYear() * 10000 + (date.getMonth() + 1) * 100 + date.getDate();
+            return actual >= day(start) && actual <= day(today);
+          }
           case 'eq': return actual === wanted;
           case 'neq': return actual !== wanted;
           case 'gte': return actual >= wanted;
@@ -214,7 +230,11 @@
     function groupText(group) {
       return '(' + group.rules.map(rule => {
         if (own(rule, 'rules')) return groupText(rule);
-        const field = available.get(rule.field), op = operators(field).find(([op]) => op === rule.op)[1];
+        const field = available.get(rule.field);
+        if (rule.op === 'withinLastDays') {
+          return `${field.t} ${rule.value === '0' ? 'Today' : `Within Last ${rule.value} ${rule.value === '1' ? 'Day' : 'Days'}`}`;
+        }
+        const op = operators(field).find(([op]) => op === rule.op)[1];
         return `${field.t} ${op}${['empty','notEmpty'].includes(rule.op) ? '' : ' ' + rule.value}${rule.op === 'between' ? ' ~ ' + rule.value2 : ''}`;
       }).join(group.join === 'or' ? ' OR ' : ' AND ') + ')';
     }
