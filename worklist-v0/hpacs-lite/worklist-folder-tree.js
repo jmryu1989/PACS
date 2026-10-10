@@ -6,6 +6,7 @@
 })(typeof window === 'object' ? window : null, function () {
   'use strict';
   const BASE = ['CT', 'MR', 'CR', 'US', 'SC'];
+  let nextMountId = 0;
   const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
   const text = value => typeof value === 'string' && value.trim().length > 0 && value.length <= 400 && !/[\r\n]/.test(value);
   const tokens = value => typeof value === 'string'
@@ -40,6 +41,7 @@
       throw new Error('폴더 표시 영역과 변경 콜백을 확인해 주세요.');
     }
     const doc = host.ownerDocument;
+    const sectionPrefix = 'worklist-folders-' + ++nextMountId;
     let state, selected = ['all'], applied = [{ id: 'all', name: 'All Studies', kind: 'all' }], appliedSearch, ended = false;
     const nav = doc.createElement('nav');
     nav.className = 'worklist-folder-tree'; nav.setAttribute('aria-label', 'Folders');
@@ -115,12 +117,26 @@
     function active() { if (ended) throw new Error('종료된 폴더 목록입니다.'); }
     function choose(value, reason) {
       active();
-      const ids = Array.isArray(value) ? [...value] : [value];
-      const available = availableItems(), previous = items();
-      const next = ids.map(id => available.find(item => item.id === id) || previous.find(item => item.id === id));
-      if (new Set(ids).size !== ids.length || next.some(item => !item || item.unavailable)
-        || (next.length > 1 && next.some(item => item.kind !== 'modality'))) {
-        throw new Error('사용할 수 없는 폴더입니다. Modality만 함께 선택할 수 있습니다.');
+      const ids = (Array.isArray(value) ? [...value] : [value]).map(id => {
+        if (typeof id !== 'string' || !id.startsWith('modality:')) return id;
+        const token = id.slice('modality:'.length);
+        if (!text(token) || /[,\\]/.test(token)) throw new Error('사용할 수 없는 폴더입니다.');
+        return 'modality:' + token.trim().toUpperCase();
+      });
+      const available = availableItems();
+      const next = ids.map(id => {
+        const known = available.find(item => item.id === id);
+        if (known) return known;
+        // Re-login can restore an applied modality before any rows have arrived.
+        if (typeof id === 'string' && id.startsWith('modality:')) {
+          const modality = id.slice('modality:'.length);
+          return { id, name: modality, modality, kind: 'modality' };
+        }
+      });
+      if (new Set(ids).size !== ids.length) throw new Error('같은 폴더를 중복해서 선택할 수 없습니다.');
+      if (next.some(item => !item || item.unavailable)) throw new Error('사용할 수 없는 폴더입니다.');
+      if (next.length > 1 && next.some(item => item.kind !== 'modality')) {
+        throw new Error('Modality만 함께 선택할 수 있습니다.');
       }
       selected = ids; applied = next.map(item => ({ ...item }));
       appliedSearch = state.searches.find(search => search.id === next[0]?.searchId);
@@ -193,6 +209,7 @@
       const node = remember(element('button', label), key); node.type = 'button'; node.onclick = action; return node;
     }
     const status = element('p'); status.setAttribute('role', 'status'); status.setAttribute('lang', 'ko');
+    const selectionStatus = element('p'); selectionStatus.setAttribute('role', 'status'); selectionStatus.setAttribute('lang', 'ko');
     function attempt(action) {
       status.textContent = '';
       try { action(); } catch (error) { status.textContent = error.message; }
@@ -216,6 +233,8 @@
       for (const [kind, title] of [['shortcut', 'My Shortcuts'], ['modality', 'Modality']]) {
         const group = element('li'), children = element('ul'); children.hidden = collapsed.has(kind);
         const toggle = button(title, () => { collapsed.has(kind) ? collapsed.delete(kind) : collapsed.add(kind); render(); }, 'section:' + kind);
+        toggle.setAttribute('id', sectionPrefix + '-' + kind);
+        children.setAttribute('aria-labelledby', toggle.getAttribute('id'));
         toggle.setAttribute('aria-expanded', String(!children.hidden)); group.append(toggle, children); list.append(group);
         for (const item of all.filter(item => item.kind === kind)) {
           const li = itemRow(item, children);
@@ -247,7 +266,8 @@
           controls.get('add-name').value = '';
         });
       };
-      nav.replaceChildren(list, form, status);
+      selectionStatus.textContent = selected.length ? '' : '선택된 Modality가 없습니다. All Studies 또는 Modality를 선택해 주세요.';
+      nav.replaceChildren(list, form, status, selectionStatus);
       for (const [key, value] of drafts) {
         const node = controls.get(key);
         if (node && (node.tagName !== 'SELECT' || state.searches.some(search => search.id === value))) node.value = value;

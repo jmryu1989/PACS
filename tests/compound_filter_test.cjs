@@ -27,12 +27,13 @@ function localClock(year, month, day, hour = 12, minute = 0) {
 }
 const relative = days => expr([rule('date', 'withinLastDays', days)]);
 test('TEST-WS3-RELATIVE-SUMMARY: applied summaries substitute days, with Today for zero, including nested rules', () => {
-  for (const days of ['1','7','365']) assert.equal(matcher.describe(relative(days),columns), `(StudyDate Within Last ${days} Days)`);
+  assert.equal(matcher.describe(relative('1'),columns),'(StudyDate Within Last 1 Day)');
+  for (const days of ['7','365']) assert.equal(matcher.describe(relative(days),columns), `(StudyDate Within Last ${days} Days)`);
   assert.equal(matcher.describe(relative('0'),columns),'(StudyDate Today)');
   assert.equal(matcher.describe(expr([{join:'and',rules:relative('7').rules},{join:'and',rules:relative('0').rules}],'or'),columns),
     '((StudyDate Within Last 7 Days) OR (StudyDate Today))');
   const operators = matcher.operators(matcher.fields(columns).find(field => field.k === 'date'));
-  assert.ok(operators.some(([op,label]) => op === 'withinLastDays' && label === 'Within Last N Days'));
+  assert.deepEqual(operators.map(([op]) => op), ['eq','neq','gte','lte','between','empty','notEmpty']);
   assert.equal(matcher.describe(relative('366'),columns),'복합 조건 오류');
 });
 function localTest(name, run) {

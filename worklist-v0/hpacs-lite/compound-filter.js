@@ -40,7 +40,10 @@
   }
 
   function operators(field) {
-    return (own(OPS, field?.type) ? OPS[field.type] : []).map(pair => [...pair]);
+    // The served editor still uses date inputs; expose relative days at W2-LAND
+    // together with its numeric editor. Stored/module criteria remain supported.
+    return (own(OPS, field?.type) ? OPS[field.type] : [])
+      .filter(([op]) => op !== 'withinLastDays').map(pair => [...pair]);
   }
 
   function calendarDate(value, exact) {
@@ -87,7 +90,7 @@
       }
       const field = available.get(rule.field);
       if (!field) return '현재 모드에서 사용할 수 없는 검색 항목입니다.';
-      if (!operators(field).some(([op]) => op === rule.op)) return '검색 항목에 사용할 수 없는 비교 방법입니다.';
+      if (!OPS[field.type].some(([op]) => op === rule.op)) return '검색 항목에 사용할 수 없는 비교 방법입니다.';
       // Single-line controls strip CR/LF on assignment. Reject stored multiline
       // criteria before the editor can silently change their matching meaning.
       if (['value', 'value2'].some(key => typeof rule[key] === 'string' && /[\r\n]/.test(rule[key]))) {
@@ -227,10 +230,11 @@
     function groupText(group) {
       return '(' + group.rules.map(rule => {
         if (own(rule, 'rules')) return groupText(rule);
-        const field = available.get(rule.field), op = operators(field).find(([op]) => op === rule.op)[1];
+        const field = available.get(rule.field);
         if (rule.op === 'withinLastDays') {
-          return `${field.t} ${rule.value === '0' ? 'Today' : `Within Last ${rule.value} Days`}`;
+          return `${field.t} ${rule.value === '0' ? 'Today' : `Within Last ${rule.value} ${rule.value === '1' ? 'Day' : 'Days'}`}`;
         }
+        const op = operators(field).find(([op]) => op === rule.op)[1];
         return `${field.t} ${op}${['empty','notEmpty'].includes(rule.op) ? '' : ' ' + rule.value}${rule.op === 'between' ? ' ~ ' + rule.value2 : ''}`;
       }).join(group.join === 'or' ? ' OR ' : ' AND ') + ')';
     }

@@ -3,6 +3,7 @@
 from page_source import read_page_source
 import json
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
@@ -249,6 +250,29 @@ render();
         self.assertEqual(result["state"]["findings"], before["findings"])
         self.assertEqual(result["state"]["fval"], before["fval"])
         self.assertIn("(0 · Partial)", page.locator("#chips").inner_text())
+
+    def test_saved_manager_date_operator_labels_preserve_the_served_editor_contract(self):
+        # REQ-WS3 -> RISK-WS3 (unsupported date entry) -> W2R1-F01:
+        # drive the unchanged served editor through its controls, with the real gate.
+        page = self.new_page(viewport={"width": 1280, "height": 900})
+        page.route("**/*", lambda route: route.fulfill(status=200, content_type="text/html; charset=utf-8", body=MANAGER_HARNESS)
+                   if route.request.url == "https://example.test/manager" else route.abort())
+        page.goto("https://example.test/manager")
+        activate(page)
+        page.add_style_tag(content=self.manager_css)
+        page.add_script_tag(content=self.compound_source)
+        page.add_script_tag(content=self.manager_source)
+        page.evaluate("window.manager=KinSavedFilterManager.mount(options);manager.open()")
+        page.get_by_role("combobox", name=re.compile(r"^Field\b")).select_option("date")
+        operator = page.get_by_role("combobox", name=re.compile(r"^Operator\b"))
+        self.assertEqual(operator.locator("option").all_inner_texts(),
+                         ["Equals", "Does Not Equal", "On or After", "On or Before",
+                          "Between (Inclusive)", "Is Empty", "Is Not Empty"])
+        operator.select_option(label="On or After")
+        value = page.get_by_label("Value", exact=True)
+        self.assertEqual(value.get_attribute("type"), "date")
+        value.fill("2026-10-01")
+        self.assertEqual(value.input_value(), "2026-10-01")
 
     def test_saved_manager_refreshes_live_counts_and_preserves_dirty_body_part_rule(self):
         page = self.new_page(viewport={"width": 1280, "height": 900})

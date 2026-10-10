@@ -149,6 +149,108 @@ test('TEST-WS3-MULTI-BOUNDARIES: replacement, silent alignment, empty and invali
   for (const fn of [() => api.select([]),() => api.setApplied([]),() => api.filter(rows)]) assert.throws(fn);
 });
 
+// W2R1-F02/F03: REQ-WS3 -> RISK-WS3 (restore widening) -> public restore/toggle witnesses.
+test('TEST-WS3-UNKNOWN-ALIGNMENT: first-paint and re-login restore unseen modalities before rows arrive', () => {
+  for (const [input, wanted] of [
+    [['modality:MG'], ['MG']], [['modality:CT','modality:XA'], ['CT','XA']],
+    [['modality: mg ','modality:xa'], ['MG','XA']],
+  ]) {
+    for (const method of ['setApplied','select']) {
+      const { api, host, selections } = setup({rows:[],loadState:'unknown'});
+      api[method](input);
+      const selectedIds = wanted.map(modality => 'modality:' + modality);
+      assert.deepEqual(api.snapshot().selectedIds, selectedIds);
+      assert.equal(get(api,'all').selected, false);
+      for (const modality of wanted) {
+        assert.equal(get(api,'modality:' + modality).count, '—');
+        assert.equal(button(host,modality + ' (—)').getAttribute('aria-pressed'), 'true');
+      }
+      const rows = [{modality:'MG'},{modality:'XA'},{modality:'CT'},{modality:'US'}];
+      api.update({rows,loadState:'complete'});
+      assert.deepEqual(api.filter(rows), rows.filter(row => wanted.includes(row.modality)));
+      assert.deepEqual(api.snapshot().selectedIds, selectedIds);
+      assert.equal(selections.length, method === 'setApplied' ? 0 : 1);
+      api.destroy();
+    }
+  }
+});
+
+test('TEST-WS3-VANISHED-ADD: adding CT keeps the vanished DX selection and complete callback arrays', () => {
+  const { api, host, selections } = setup({rows:[{modality:'DX'}],loadState:'complete'});
+  button(host,'DX (1)').click();
+  assert.deepEqual(selections, [[
+    {id:'modality:DX',name:'DX',modality:'DX',kind:'modality',modalities:['DX'],selectedIds:['modality:DX']},
+    {mode:'replace',reason:'user'},
+  ]]);
+  api.update({rows:[{modality:'CT'},{modality:'US'}],loadState:'complete'});
+  button(host,'CT (1)').click();
+  assert.deepEqual(api.snapshot().selectedIds, ['modality:DX','modality:CT']);
+  assert.deepEqual(selections.at(-1), [
+    {kind:'modality',modalities:['DX','CT'],selectedIds:['modality:DX','modality:CT']},
+    {mode:'replace',reason:'user'},
+  ]);
+  assert.equal(get(api,'modality:DX').count, '0');
+  const rows = [{modality:'DX'},{modality:'CT'},{modality:'US'}];
+  api.update({rows,loadState:'complete'});
+  assert.deepEqual(api.filter(rows), rows.slice(0,2));
+  assert.equal(selections.length, 2);
+});
+
+test('TEST-WS3-SELECTION-REFUSALS: malformed tokens, unavailable, duplicate and mixed selections refuse atomically', () => {
+  const { api, selections } = setup({searches,shortcuts:[shortcut('a'),{...shortcut('gone'),searchId:'absent'}]});
+  api.setApplied('modality:MG');
+  const before = api.snapshot();
+  for (const [ids, message] of [
+    ...['missing','shortcut:gone','modality:','modality:  ','modality:MG,XA','modality:MG\\XA',
+      'modality:MG\n','modality:' + 'A'.repeat(401),null,{},42]
+      .map(id => [[id], '사용할 수 없는 폴더입니다.']),
+    [['modality:MG','modality: mg '], '같은 폴더를 중복해서 선택할 수 없습니다.'],
+    [['all','modality:MG'], 'Modality만 함께 선택할 수 있습니다.'],
+    [['shortcut:a','modality:MG'], 'Modality만 함께 선택할 수 있습니다.'],
+  ]) {
+    for (const fn of [api.select,api.setApplied]) {
+      assert.throws(() => fn(ids), {message});
+      assert.deepEqual(api.snapshot(), before);
+    }
+  }
+  assert.equal(selections.length, 0);
+  const token = 'A'.repeat(400);
+  api.setApplied('modality:' + token);
+  assert.deepEqual(api.filter([{modality:token},{modality:'CT'}]), [{modality:token}]);
+});
+
+test('TEST-WS7-SECTION-STATUS: named lists, modality toggle semantics and empty-selection guidance', () => {
+  const { api, host } = setup({rows:[{modality:'CT'},{modality:'MR'}],loadState:'complete'});
+  const groupIds = [];
+  for (const title of ['My Shortcuts','Modality']) {
+    const id = button(host,title).getAttribute('id');
+    assert.ok(id);
+    assert.equal(nodes(host).filter(node => node.tagName === 'UL' && node.getAttribute('aria-labelledby') === id).length, 1);
+    groupIds.push(id);
+  }
+  assert.equal(new Set(groupIds).size, 2);
+  const other = setup();
+  for (const title of ['My Shortcuts','Modality']) assert.ok(!groupIds.includes(button(other.host,title).getAttribute('id')));
+  other.api.destroy();
+  const guidance = () => nodes(host).filter(node => node.getAttribute('role') === 'status').map(node => node.textContent).join('');
+  for (const ids of [['modality:CT'],['modality:CT','modality:MR'],[]]) {
+    api.setApplied(ids);
+    for (const item of api.snapshot().items.filter(item => item.kind === 'modality')) {
+      assert.equal(button(host,`${item.name} (${item.count})`).getAttribute('aria-current'), null);
+    }
+  }
+  assert.match(guidance(), /선택된 Modality가 없습니다/);
+  assert.match(guidance(), /All Studies 또는 Modality를 선택/);
+  api.update({rows:[],loadState:'unknown'});
+  assert.match(guidance(), /선택된 Modality가 없습니다/);
+  button(host,'CT (—)').click();
+  assert.equal(guidance(), '');
+  button(host,'CT (—)').click();
+  assert.match(guidance(), /선택된 Modality가 없습니다/);
+  button(host,'All Studies (—)').click();
+  assert.equal(guidance(), '');
+});
+
 test('TEST-WS3-SAVE-CONTRACT: edits emit whole detached arrays and an authoritative read restores them silently', () => {
   const rows = [{modality:'CT'},{modality:'MR'}];
   const own = {id:'own:7',name:'Personal',matches:row => row.modality === 'CT'};
