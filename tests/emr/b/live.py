@@ -52,11 +52,17 @@ def run(args, *, env=None, input=None, timeout=300, check=True, cwd=None):
 
 
 class EmrBLedgerLive(unittest.TestCase):
+    label_namespace = 'kin.emrb.live'
     @classmethod
     def setUpClass(cls):
         gate.require_live_run()
+        cls.setup_disposable_resources()
+
+    @classmethod
+    def setup_disposable_resources(cls):
+        """Same isolated fixture for the live runner and explicit CI-gross pilot."""
         cls.token = uuid.uuid4().hex[:12]
-        cls.label = "kin.emrb.live=" + cls.token
+        cls.label = cls.label_namespace + '=' + cls.token
         cls.created = {"container": [], "volume": [], "image": []}
         cls.addClassCleanup(cls.cleanup_resources)
         cls.secrets = {name: secrets.token_hex(24) for name in
@@ -428,7 +434,7 @@ class EmrBLedgerLive(unittest.TestCase):
 
     def assert_relative_latency(self):
         from live_acceptance import compare
-        compare(self, ['concurrent-' + str(self.latency_pair['count'])])
+        return compare(self, ['concurrent-' + str(self.latency_pair['count'])])
 
     def test_b03_idempotency_and_concurrent_append(self):
         """Concurrent original events are all ordered once; the same event resent is the same receipt; another content
@@ -515,7 +521,9 @@ class EmrBLedgerLive(unittest.TestCase):
         self.assertIn("receipt", fenced, fenced)
         self.assertTrue(fenced.get("staleWriterRefused"), fenced)
         print('EMR_L03_POST_LATENCY idempotency conflict multi-process fence stale-CAS reached', flush=True)
-        self.assert_relative_latency()
+        report = self.assert_relative_latency()
+        from live_acceptance import register_l03_control
+        register_l03_control(type(self).image, report)
 
     def test_b03b_concurrent_48_receipts(self):
         """L03b: 48 simultaneous viewers receive durable receipts without failures."""

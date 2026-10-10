@@ -1,7 +1,7 @@
-"""D949: paired ABBA blocks, fresh durable volumes, explicit verdict mode.
+"""D952: paired ABBA blocks, fresh durable volumes, explicit verdict mode.
 
 Single: 30x40, 200 ms idle, first-to-last block starts >=600 seconds.
-Concurrent: 24 bursts/size/revision, 2 s settle. Sustained: 12x200 at
+Concurrent: 24 bursts/size/revision, quiet settle before each pair. Sustained: 12x200 at
 20 rps after 20k product appends. CI records the same statistics but only
 point<=1.25 gates; only the commander's reviewed live plan uses the NI bound.
 """
@@ -12,9 +12,12 @@ from pathlib import Path
 import subprocess
 import uuid
 import time
+import hashlib
+import statistics
+from concurrent.futures import ThreadPoolExecutor
 
-from noninferiority import (noninferiority, gate_result, LATENCY_RATIO_LIMIT, CONCURRENT_RATIO_LIMIT,
-                           SINGLE_BLOCKS, CONCURRENT_BLOCKS, SUSTAINED_BLOCKS, MIN_ATTRIBUTION)
+from noninferiority import (noninferiority, concurrent_result, gate_result,
+                           SINGLE_BLOCKS, CONCURRENT_BLOCKS, SUSTAINED_BLOCKS, MIN_ATTRIBUTION, T95)
 from quiet_host import HostProbe, QuietMonitor, InvalidRun
 
 WARMUP_REQUESTS = 5
@@ -25,12 +28,72 @@ MIN_SINGLE_SPAN_SECONDS = 600
 SUSTAINED_RPS = 20
 SUSTAINED_COUNT = 200
 RETAINED_ROWS = 20000
+PASSED_CONTROLS = {}
 
 
-def block_design(workload, mode):
+def estimate_duration(plan):
+    """R9 pilot timings plus explicit overhead; refuse unknown case mixes.
+
+    Parallel prefill took 128.39 s for 2400 rows/revision: project linearly
+    to 20k and add 10%. Ordinary burst budgets round up the pilot observations;
+    busy-host windows are budgeted separately, not multiplied into every burst.
+    The reduced pilot's setup/build/functional/cleanup remainder was <300 s.
+    This is a planning estimate, not a guarantee on an arbitrarily busy host.
+    """
+    expected = [
+        ('tests/emr/b/live.py', 'EmrBLedgerLive.test_b03_idempotency_and_concurrent_append'),
+        ('tests/emr/b/live.py', 'EmrBLedgerLive.test_b03b_concurrent_48_receipts'),
+        ('tests/emr/b/live.py', 'EmrBLedgerLive.test_b03c_warm_single_sustained_and_verification_plans'),
+        ('tests/emr/b/live_mutants.py', 'EmrBLiveMutants.test_m36_receipt_startup_delay')]
+    if [(t['file'], t['case']) for t in plan.get('tests', [])] != expected:
+        raise ValueError('duration model requires reviewed L03/L03b/L03c/M36 order')
+    segment = (SINGLE_PER_BLOCK / 2 - 1) * SINGLE_IDLE_MS / 1000 + SINGLE_PER_BLOCK / 2 * .045
+    parts = {'single': max(MIN_SINGLE_SPAN_SECONDS, SINGLE_BLOCKS * (2.8 + 4 * segment)),
+             'concurrent_24_and_48': CONCURRENT_BLOCKS * ((2.8 + 2 * .6) + (2.8 + 2 * 1.6)),
+             'sustained': SUSTAINED_BLOCKS * (2.8 + 2 * ((SUSTAINED_COUNT - 1) / SUSTAINED_RPS + .55)),
+             'parallel_prefill': 128.4 * RETAINED_ROWS / 2400 * 1.10,
+             'm36_mutant': CONCURRENT_BLOCKS * (2.8 + 2.3 + 1.0),
+             'setup_builds_functional_cleanup': 300, 'quiet_wait_allowance': 180}
+    total = sum(parts.values())
+    cap = min(3000, .85 * plan['timeout_seconds'])
+    return {'components_seconds': parts, 'estimated_seconds': total,
+            'estimated_minutes': total / 60, 'cap_seconds': cap, 'within_cap': total <= cap,
+            'm36_control': 'reuse same-process successful L03; no repeated healthy comparison',
+            'basis': 'D952 R9 full reduced pilot (700.109 s), parallel prefill 128.39 s/2400 rows/revision; product paths unchanged',
+            'limitation': '20k parallel prefill is extrapolated, not measured in R9; 10% prefill margin and 180 s extra quiet waiting included; persistent noise can still invalidate before the 3600 s runner cap'}
+
+
+def control_key(image):
+    preflight = os.environ.get('KIN_EMR_ACCEPTANCE_RECORD', '')
+    digest = hashlib.sha256(Path(preflight).read_bytes()).hexdigest() if preflight else None
+    return (image, os.environ.get('KIN_EMR_BENCHMARK_MODE', 'ci-gross'),
+            str(Path(os.environ.get('KIN_EMR_LIVE_EVIDENCE', '.')).resolve()),
+            preflight, digest)
+
+
+def register_l03_control(image, report):
+    """Called only after the full L03 method and its comparison have passed."""
+    if report['verdict'] not in ('PASS', 'CI_PASS'):
+        raise ValueError('cannot reuse an unsuccessful L03')
+    path = Path(report['raw_directory']) / 'summary.json'
+    PASSED_CONTROLS[control_key(image)] = {
+        'passed': True, 'reused': True, 'case': 'L03', 'image': image,
+        'log': str(path), 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
+def reusable_l03_control(image):
+    value = PASSED_CONTROLS.get(control_key(image))
+    if value and hashlib.sha256(Path(value['log']).read_bytes()).hexdigest() == value['sha256']:
+        return dict(value)
+    return None
+
+
+def block_design(workload, mode, dry_run=False):
     # Hosted CI samples are diagnostics for a gross-regression gate, never an
     # acceptance. Keep its fixed shorter design distinct in the raw report.
     if mode == 'ci-gross':
+        if dry_run:
+            return 6, {'single': 40, 'sustained': 40}.get(workload, int(workload.split('-')[-1]) if workload.startswith('concurrent-') else 40), 0
         return 6, {'single': 10, 'sustained': SUSTAINED_COUNT}.get(workload, int(workload.split('-')[-1]) if workload.startswith('concurrent-') else 10), 0
     count = SINGLE_BLOCKS if workload == 'single' else SUSTAINED_BLOCKS if workload == 'sustained' else CONCURRENT_BLOCKS
     size = SINGLE_PER_BLOCK if workload == 'single' else SUSTAINED_COUNT if workload == 'sustained' else int(workload.split('-')[-1])
@@ -52,12 +115,25 @@ def compare(fixture, workloads):
     if mode not in ('acceptance', 'ci-gross'):
         raise ValueError('unknown benchmark mode')
     preflight = None
+    dry_run = getattr(fixture, 'dry_run', False)
+    gap_diagnostic = getattr(fixture, 'gap_diagnostic', False)
+    if gap_diagnostic and (not dry_run or workloads):
+        raise ValueError('idle diagnostic is a separate attempt-free pilot, not an acceptance workload')
+    if not workloads and not gap_diagnostic:
+        raise ValueError('at least one reviewed workload required')
+    if dry_run and mode != 'ci-gross':
+        raise ValueError('dry run requires the hosted ci-gross path')
     if mode == 'acceptance':
         if os.environ.get('GITHUB_ACTIONS') == 'true':
             raise ValueError('hosted CI cannot run the NI acceptance verdict')
         preflight = json.loads(Path(os.environ['KIN_EMR_ACCEPTANCE_RECORD']).read_text(encoding='utf-8'))
-        if preflight['verdict'] != 'QUIET' or preflight['unit'] != 'emr-b1-r7-jit':
+        raw_plan = Path(os.environ['KIN_EMR_ACCEPTANCE_PLAN']).read_bytes()
+        plan = json.loads(raw_plan)
+        if (preflight['verdict'] != 'QUIET' or preflight['unit'] != plan['unit']
+                or preflight['plan_sha256'] != hashlib.sha256(raw_plan).hexdigest()):
             raise InvalidRun('missing commander pre-lease quiet-host record')
+    elif dry_run:
+        preflight = fixture.dry_run_preflight
     cls = type(fixture)
     if 'baseline_image' not in cls.__dict__:
         fixture.baseline_appends(1)  # builds the pinned source; this cold observation is not accepted
@@ -67,8 +143,9 @@ def compare(fixture, workloads):
     out = root / ('comparison-' + token)
     out.mkdir(parents=True, exist_ok=False)
     sessions, files = {}, []
-    report = {'decision': 'D949', 'mode': mode, 'workloads': workloads, 'verdict': 'INCOMPLETE',
-              'design': {w: block_design(w, mode) for w in workloads}, 'preflight': preflight,
+    report = {'decision': 'D952', 'mode': mode, 'dry_run': dry_run, 'workloads': workloads, 'verdict': 'INCOMPLETE',
+              'candidate_image': candidate_image, 'baseline_image': cls.baseline_image,
+              'design': {w: block_design(w, mode, dry_run) for w in workloads}, 'preflight': preflight,
               'warmup': WARMUP_REQUESTS, 'fresh_db_and_state': True, 'postgres_storage': 'fresh durable local volumes',
               'samples': {}, 'results': {}, 'raw_directory': str(out)}
 
@@ -115,38 +192,52 @@ def compare(fixture, workloads):
             fixture.assertIn('"ready":true', ready, version + ' benchmark did not initialize: ' + ready)
             report.setdefault('cold_and_warmup', {})[version] = command(version, {'kind': 'single', 'count': WARMUP_REQUESTS})
 
-        if mode == 'acceptance':
+        if preflight:
             monitor = QuietMonitor(HostProbe(preflight['probe']), out / 'host-during.jsonl',
                                    {preflight['probe_label'], fixture.label})
             monitor.preflight()  # Recheck after image/container setup, before measuring.
             stack.enter_context(monitor)
+        if gap_diagnostic:
+            diagnostics = {'candidate': [], 'r3': []}
+            for block in range(6):
+                monitor.wait_quiet()
+                for version, _ in block_segments('concurrent-24', block, 40):
+                    data = command(version, {'kind': 'gap-probe', 'count': 40, 'idle_ms': SINGLE_IDLE_MS})
+                    diagnostics[version].append(data['results'])
+            report['gap_diagnostic'] = summarize_gap_diagnostic(diagnostics)
         for workload in workloads:
             if workload == 'sustained':
-                for version in ['candidate', 'r3']:
-                    seed = command(version, {'kind': 'prefill', 'count': RETAINED_ROWS})
-                    fixture.assertEqual(seed['after'] - seed['before'], RETAINED_ROWS)
-                    print('EMR_LIVE_PREFILL ' + json.dumps({'version': version, **seed}), flush=True)
+                count = 2400 if dry_run else RETAINED_ROWS
+                prefill_start = time.monotonic()
+                # Distinct processes, pipes, files and DBs. No measured work
+                # overlaps the other revision; only unmeasured seeding does.
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    futures = {version: pool.submit(command, version, {'kind': 'prefill', 'count': count})
+                               for version in ['candidate', 'r3']}
+                    for version, future in futures.items():
+                        seed = future.result()
+                        fixture.assertEqual(seed['after'] - seed['before'], count)
+                        print('EMR_LIVE_PREFILL ' + json.dumps({'version': version, **seed}), flush=True)
+                report['prefill'] = {'parallel': True, 'per_revision': count,
+                                     'elapsed_seconds': time.monotonic() - prefill_start}
                 report['jit'] = command('candidate', {'kind': 'plans'})
                 print('EMR_VERIFICATION_PLAN ' + json.dumps({k: v for k, v in report['jit'].items() if k != 'statements'}), flush=True)
             paired = {'candidate': [], 'r3': []}
             instrumented = {'candidate': [], 'r3': []}
-            blocks, size, spacing = block_design(workload, mode)
+            blocks, size, spacing = block_design(workload, mode, dry_run)
             started = time.monotonic()
             block_starts = []
             for block in range(blocks):
                 time.sleep(max(0, started + block * spacing - time.monotonic()))
+                if monitor:
+                    monitor.wait_quiet()
+                else:
+                    time.sleep(SETTLE_SECONDS)
                 block_starts.append(time.monotonic())
                 block_samples = {'candidate': [], 'r3': []}
                 for segment, (version, segment_size) in enumerate(block_segments(workload, block, size)):
                     if monitor:
                         monitor.require_valid()
-                        # Idle utilization must also be quiet; active samples alone
-                        # cannot distinguish an overloaded host from our own work.
-                        before = monitor.probe.counters()
-                        time.sleep(SETTLE_SECONDS)
-                        monitor.sample(before, False)
-                    else:
-                        time.sleep(SETTLE_SECONDS)
                     if workload.startswith('concurrent-'):
                         request = {'kind': 'concurrent', 'count': segment_size}
                     elif workload == 'sustained':
@@ -161,8 +252,8 @@ def compare(fixture, workloads):
                 for version in paired:
                     fixture.assertEqual(len(block_samples[version]), size)
                     paired[version].append(block_samples[version])
-            ratio_limit = CONCURRENT_RATIO_LIMIT if workload.startswith('concurrent') else LATENCY_RATIO_LIMIT
-            result = noninferiority(paired['r3'], paired['candidate'], ratio_limit)
+            estimator = concurrent_result if workload.startswith('concurrent') else noninferiority
+            result = estimator(paired['r3'], paired['candidate'])
             result['attribution'] = {version: sum(r['attributed_ms'] for r in rows) / sum(r['receipt_ms'] for r in rows)
                                      for version, rows in instrumented.items()}
             # Keep the verdict even when attribution is insufficient. An opaque
@@ -172,18 +263,38 @@ def compare(fixture, workloads):
             if mode == 'acceptance':
                 result['gate_passed'] = result['gate_passed'] and result['attribution_met']
             result['noninferiority_met'] = result.pop('accepted')
+            result['acceptance_preview'] = result['noninferiority_met'] and result['attribution_met']
             result['block_start_monotonic'] = block_starts
             result['block_start_span_seconds'] = block_starts[-1] - block_starts[0]
             report['samples'][workload] = paired
             report['results'][workload] = result
+            if workload == 'single':
+                # Within-process warm-up is gap-free; every measured request
+                # after the first in a segment has an observed >=200 ms gap.
+                medians = {}
+                for version, rows in instrumented.items():
+                    post = [r['receipt_ms'] for r in rows if r.get('segment_request', 0) > 0
+                            and (r.get('idle_gap_ms') or 0) >= SINGLE_IDLE_MS - 1]
+                    warm = [r['receipt_ms'] for r in report['cold_and_warmup'][version]['results'][1:]]
+                    medians[version] = {'post_gap_ms': statistics.median(post) if post else None,
+                                        'gap_free_warm_ms': statistics.median(warm)}
+                report['post_gap'] = medians
+                if all(v['post_gap_ms'] is not None for v in medians.values()):
+                    report['post_gap']['warmup_based_offset_ms'] = (
+                        medians['candidate']['post_gap_ms'] - medians['candidate']['gap_free_warm_ms']
+                        - medians['r3']['post_gap_ms'] + medians['r3']['gap_free_warm_ms'])
+                    report['post_gap']['limitation'] = 'four gap-free warm-up rows per revision are not a balanced idle-effect control; use the separate gap diagnostic'
             if workload == 'single' and mode == 'acceptance':
                 fixture.assertGreaterEqual(result['block_start_span_seconds'], MIN_SINGLE_SPAN_SECONDS)
                 fixture.assertEqual(result['samples_per_revision'], SINGLE_BLOCKS * SINGLE_PER_BLOCK)
         stack.close()
         report['verdict'] = ('PASS' if mode == 'acceptance' else 'CI_PASS') if all(r['gate_passed'] for r in report['results'].values()) else 'FAIL'
+        report['verdict_preview'] = 'PASS' if all(r['acceptance_preview'] for r in report['results'].values()) else 'FAIL'
+        if gap_diagnostic:
+            report.update(verdict='DIAGNOSTIC_ONLY', verdict_preview=None)
     except InvalidRun as error:
         report.update(verdict='INVALID', invalid_reason=str(error), verdict_attempts_consumed=0,
-                      runner_attempt_consumed=True)
+                      runner_attempt_consumed=mode == 'acceptance', verdict_preview='INVALID')
         for result in report['results'].values():
             result['gate_passed'] = None
         (out / 'invalid.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
@@ -206,7 +317,7 @@ def compare(fixture, workloads):
         (out / 'summary.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
     print('EMR_LIVE_ACCEPTANCE ' + json.dumps({k: v for k, v in report.items() if k not in ('samples', 'cold_and_warmup', 'jit')}), flush=True)
     for workload, result in report['results'].items():
-        fixture.assertTrue(result['gate_passed'], 'D949 ' + mode + ' ' + workload + ': ' + json.dumps(result))
+        fixture.assertTrue(result['gate_passed'], 'D952 ' + mode + ' ' + workload + ': ' + json.dumps(result))
     return report
 
 
@@ -224,7 +335,32 @@ def summarize(directory):
                         'mode': value['mode'], 'verdict': value['verdict'],
                         'design': value['design'], 'results': value['results'],
                         'jit': value.get('jit'), 'raw_directory': value['raw_directory']})
-    print(json.dumps({'decision': 'D949', 'reports': reports}, indent=2))
+    print(json.dumps({'decision': 'D952', 'reports': reports}, indent=2))
+
+
+def summarize_gap_diagnostic(samples):
+    """Paired block difference-in-differences; no warm-up rows enter the offset."""
+    fields = ('receipt_ms', 'pool_wait_ms', 'admission_wait_ms', 'coordinator_ms',
+              'append_callback_ms', 'confirm_ms', 'verification_sql_ms')
+    result, effects = {}, []
+    deltas = {}
+    for version, blocks in samples.items():
+        groups = {gap: [row for block in blocks for row in block if row['scheduled_gap_ms'] == gap]
+                  for gap in (0, SINGLE_IDLE_MS)}
+        result[version] = {str(gap): {'count': len(rows), 'median': {
+            key: statistics.median(row.get(key, 0) for row in rows) for key in fields}}
+            for gap, rows in groups.items()}
+        deltas[version] = [statistics.median(row['receipt_ms'] for row in block if row['scheduled_gap_ms'] == SINGLE_IDLE_MS)
+                           - statistics.median(row['receipt_ms'] for row in block if row['scheduled_gap_ms'] == 0)
+                           for block in blocks]
+    effects = [c-b for c, b in zip(deltas['candidate'], deltas['r3'])]
+    point = statistics.mean(effects)
+    half = T95[len(effects)-1] * statistics.stdev(effects) / len(effects)**.5
+    return {'conditions': result, 'block_candidate_only_offsets_ms': effects,
+            'post_gap_offset_ms': point, 'lower_95_one_sided_ms': point-half,
+            'upper_95_one_sided_ms': point+half,
+            'method': 'six paired block medians; (candidate 200ms-gap minus 0-gap) minus (r3 200ms-gap minus 0-gap); t bound',
+            'scope': 'diagnostic only, excludes warm-up; original acceptance preview remains unchanged'}
 
 
 if __name__ == '__main__':

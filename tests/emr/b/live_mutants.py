@@ -21,9 +21,10 @@ import live_test_gate as gate
 
 class EmrBLiveMutants(unittest.TestCase):
     controls = {}
+    fixture_class = EmrBLedgerLive
 
     def exercise(self, image, cases, log):
-        class Probe(EmrBLedgerLive):
+        class Probe(self.fixture_class):
             pass
         # Each class owns a new labelled DB/volume set and its own cleanup.
         with patch.dict(os.environ, {'KIN_TEST_API_IMAGE': image}), log.open('w', encoding='utf-8') as stream, contextlib.redirect_stdout(stream):
@@ -33,6 +34,10 @@ class EmrBLiveMutants(unittest.TestCase):
 
     def check_mutant(self, name):
         gate.require_live_run()
+        self.run_disposable_mutant(name)
+
+    def run_disposable_mutant(self, name):
+        """Disposable CI-gross pilot reuses the reporter, never a live ticket."""
         output = Path(os.environ['KIN_EMR_LIVE_EVIDENCE']) / 'mutants' / name
         output.mkdir(parents=True, exist_ok=False)
         declaration = json.loads(DECLARATION.read_text(encoding='utf-8'))
@@ -53,6 +58,16 @@ class EmrBLiveMutants(unittest.TestCase):
             print('EMR_LIVE_MUTANT ' + json.dumps(report), flush=True)
 
     def run_probe(self, name, cases, control_key, output, report):
+        if name == 'M36' and cases == ['L03']:
+            from live_acceptance import reusable_l03_control
+            from live import run as fixture_run
+            image = json.loads(fixture_run(['docker', 'image', 'inspect', os.environ['KIN_TEST_API_IMAGE']]).stdout)[0]['Id']
+            reused = reusable_l03_control(image)
+            if reused:
+                self.controls[control_key] = reused
+                (output / 'control.log').write_text(json.dumps(reused, indent=2) + '\n', encoding='utf-8')
+            elif os.environ.get('KIN_EMR_BENCHMARK_MODE') == 'acceptance' or getattr(self.fixture_class, 'dry_run', False):
+                self.fail('D952 duration plan requires same-run successful L03 control before M36')
         if control_key not in self.controls:
             control = self.exercise(os.environ['KIN_TEST_API_IMAGE'], cases, output / 'control.log')
             self.controls[control_key] = {'passed': control.wasSuccessful() and not control.skipped,
@@ -138,6 +153,47 @@ def reporting_self_test():
             self.assertIsNotNone(error)
             self.assertFalse(report['killed'])
             self.assertTrue(report['harness_errors'])
+
+        def test_m36_reuses_same_run_control_without_exercising_it_again(self):
+            import live
+            import live_acceptance
+            with tempfile.TemporaryDirectory() as directory:
+                output = Path(directory)
+                instance = EmrBLiveMutants('test_m36_receipt_startup_delay')
+                instance.controls = {}
+                calls = []
+                def exercise(image, cases, log):
+                    calls.append(image)
+                    log.write_text('FAIL: ' + LIVE['L03'] + ' (probe)\nAssertionError: D952 receipt latency\n')
+                    return SimpleNamespace(wasSuccessful=lambda: False, skipped=[])
+                reused = {'passed': True, 'reused': True, 'image': 'healthy-id', 'log': 'same-run-summary', 'sha256': 'bound'}
+                env = {'KIN_TEST_API_IMAGE': 'healthy', 'KIN_EMR_MUTANT_SOURCE_MANIFEST': 'unused',
+                       'KIN_EMR_BENCHMARK_MODE': 'acceptance'}
+                with patch.dict(os.environ, env), patch.object(instance, 'exercise', side_effect=exercise), \
+                        patch.object(live, 'run', return_value=SimpleNamespace(stdout=b'[{"Id":"healthy-id"}]')), \
+                        patch.object(live_acceptance, 'reusable_l03_control', return_value=reused), \
+                        patch.object(module, 'make_copy', return_value=('head', None)), \
+                        patch.object(module, 'unlink_modules'), patch.object(module, 'run', return_value=(0, 0)), \
+                        patch.object(module, 'apply', return_value=[]):
+                    report = {}
+                    instance.run_probe('M36', ['L03'], ('L03',), output, report)
+                self.assertEqual(len(calls), 1)
+                self.assertNotEqual(calls[0], 'healthy')
+                self.assertEqual(report['control'], reused)
+                self.assertTrue(report['killed'])
+
+        def test_acceptance_m36_refuses_missing_same_run_control(self):
+            import live
+            import live_acceptance
+            with tempfile.TemporaryDirectory() as directory, \
+                    patch.dict(os.environ, {'KIN_TEST_API_IMAGE': 'healthy', 'KIN_EMR_BENCHMARK_MODE': 'acceptance'}), \
+                    patch.object(live, 'run', return_value=SimpleNamespace(stdout=b'[{"Id":"healthy-id"}]')), \
+                    patch.object(live_acceptance, 'reusable_l03_control', return_value=None):
+                instance = EmrBLiveMutants('test_m36_receipt_startup_delay')
+                instance.controls = {}
+                with patch.object(instance, 'exercise') as exercise, self.assertRaises(AssertionError):
+                    instance.run_probe('M36', ['L03'], ('L03',), Path(directory), {})
+                exercise.assert_not_called()
 
     return 0 if unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(ReportingTests)).wasSuccessful() else 1
 

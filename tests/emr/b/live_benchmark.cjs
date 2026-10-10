@@ -11,6 +11,7 @@ const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function run({ prisma, store, seal, sql, Sql, event }) {
   const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
   await send({ ready: true });
+  let previousReceipt;
   for await (const line of input) {
     const command = JSON.parse(line);
     if (command.kind === 'close') break;
@@ -34,7 +35,19 @@ async function run({ prisma, store, seal, sql, Sql, event }) {
       const probe = instrument(prisma, store, seal, { headProbe: true });
       try {
         const results = [], started = performance.now();
-        if (command.kind === 'concurrent') {
+        if (command.kind === 'gap-probe') {
+          // Diagnostic only: balance 0/200 ms ordering within one warm process.
+          // Receipt latency excludes the deliberate pause, as in the main run.
+          for (let pair = 0; pair < command.count / 2; pair++) {
+            for (const gap of (pair % 2 ? [command.idle_ms, 0] : [0, command.idle_ms])) {
+              if (gap) await pause(gap);
+              const actualGap = previousReceipt === undefined ? null : performance.now() - previousReceipt;
+              const row = await probe.run(event());
+              previousReceipt = performance.now();
+              results.push({ ...row, scheduled_gap_ms: gap, idle_gap_ms: actualGap, pair });
+            }
+          }
+        } else if (command.kind === 'concurrent') {
           results.push(...await Promise.all(Array.from({ length: command.count }, () => probe.run(event()))));
         } else if (command.kind === 'sustained') {
           const pending = [];
@@ -46,7 +59,10 @@ async function run({ prisma, store, seal, sql, Sql, event }) {
         } else {
           for (let n = 0; n < command.count; n++) {
             if (n && command.idle_ms) await pause(command.idle_ms);
-            results.push(await probe.run(event()));
+            const gap = previousReceipt === undefined ? null : performance.now() - previousReceipt;
+            const row = await probe.run(event());
+            previousReceipt = performance.now();
+            results.push({ ...row, idle_gap_ms: gap, segment_request: n });
           }
         }
         await send({ command, results, summary: summary(results), drain_groups: probe.drains,

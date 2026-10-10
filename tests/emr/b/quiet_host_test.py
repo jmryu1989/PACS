@@ -1,17 +1,28 @@
-"""REQ-D949 -> RISK-EMR-HOST-NOISE -> refusal before lease, invalid during run."""
+"""REQ-D952 -> RISK-EMR-HOST-NOISE -> refusal before lease, invalid during run."""
 import json
+import hashlib
 import contextlib
 import io
 import os
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch, MagicMock
 
 import quiet_host as q
 import live_acceptance as acceptance
 from live_acceptance import block_design, block_segments
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+
+def full_plan(unit='emr-b1-r7-jit', timeout=3600):
+    return {'unit': unit, 'mode': 'live', 'max_attempts': 3, 'timeout_seconds': timeout,
+            'tests': [{'file': 'tests/emr/b/live.py', 'case': 'EmrBLedgerLive.' + name} for name in (
+                'test_b03_idempotency_and_concurrent_append', 'test_b03b_concurrent_48_receipts',
+                'test_b03c_warm_single_sustained_and_verification_plans')] + [
+                {'file': 'tests/emr/b/live_mutants.py', 'case': 'EmrBLiveMutants.test_m36_receipt_startup_delay'}]}
 
 
 class QuietHostTests(unittest.TestCase):
@@ -41,7 +52,7 @@ class QuietHostTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             plan = root / 'plan.json'
-            plan.write_text(json.dumps({'unit': 'emr-b1-r7-jit', 'mode': 'live'}))
+            plan.write_text(json.dumps(full_plan()))
             with patch.object(gate, 'preflight_live'), patch.object(q, 'command', return_value='[{"Config":{"Labels":{}}}]'), \
                     patch.object(q.QuietMonitor, 'preflight', side_effect=q.InvalidRun('foreign workload')), \
                     patch.object(q.subprocess, 'run') as runner, patch.dict(os.environ, {'GITHUB_ACTIONS': 'false'}):
@@ -59,11 +70,83 @@ class QuietHostTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             out = Path(folder) / 'host.jsonl'
             monitor = q.QuietMonitor(Probe(), out, set())
+            monitor.sample({}, True)
+            monitor.sample({}, True)
             with self.assertRaises(q.InvalidRun):
                 monitor.sample({}, True)
             with self.assertRaises(q.InvalidRun):
                 monitor.require_valid()
-            self.assertFalse(json.loads(out.read_text())['quiet'])
+            self.assertEqual(len(out.read_text().splitlines()), 3)
+            self.assertTrue(all(not json.loads(row)['quiet'] for row in out.read_text().splitlines()))
+
+    def test_active_spike_resets_after_a_quiet_window(self):
+        probe = MagicMock()
+        probe.snapshot.side_effect = [({}, {'host_cpu': v, 'engine_cpu': .01, 'containers': []})
+                                      for v in [.95, .95, .1, .95, .1]]
+        with tempfile.TemporaryDirectory() as folder:
+            monitor = q.QuietMonitor(probe, Path(folder) / 'samples.jsonl', set())
+            for _ in range(5): monitor.sample({}, True)
+            monitor.require_valid()
+
+    def test_idle_wait_keeps_busy_windows_then_accepts_quiet(self):
+        clock = [0.]
+        probe = MagicMock()
+        probe.snapshot.side_effect = [({}, {'host_cpu': v, 'engine_cpu': .01, 'containers': []}) for v in [.3, .4, .1]]
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(q.time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch.object(q.time, 'sleep', side_effect=lambda n: clock.__setitem__(0, clock[0]+n)):
+            path = Path(folder) / 'samples.jsonl'
+            monitor = q.QuietMonitor(probe, path, set())
+            monitor.wait_quiet()
+            self.assertEqual(clock[0], 6)
+            self.assertEqual([json.loads(row)['quiet'] for row in path.read_text().splitlines()], [False, False, True])
+
+    def test_persistent_idle_noise_times_out_without_accepting(self):
+        clock = [0.]
+        probe = MagicMock()
+        probe.snapshot.return_value = {}, {'host_cpu': .3, 'engine_cpu': .01, 'containers': []}
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(q.time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch.object(q.time, 'sleep', side_effect=lambda n: clock.__setitem__(0, clock[0]+n)):
+            monitor = q.QuietMonitor(probe, Path(folder) / 'samples.jsonl', set())
+            with self.assertRaises(q.InvalidRun): monitor.wait_quiet()
+            self.assertEqual(clock[0], 30)
+            self.assertEqual(probe.snapshot.call_count, 15)
+
+    def test_probe_retry_once_and_persistent_failure_is_invalid(self):
+        with tempfile.TemporaryDirectory() as folder:
+            probe = MagicMock()
+            probe.snapshot.side_effect = [OSError('transient'), ({}, {'host_cpu': .1, 'engine_cpu': .1, 'containers': []})]
+            monitor = q.QuietMonitor(probe, Path(folder) / 'samples.jsonl', set())
+            monitor.sample({}, True)
+            self.assertEqual(probe.snapshot.call_count, 2)
+            probe.snapshot.side_effect = OSError('persistent')
+            with self.assertRaises(q.InvalidRun): monitor.sample({}, True)
+            self.assertEqual(probe.snapshot.call_count, 4)
+
+    def test_duration_refusal_precedes_probe_and_gate(self):
+        import live_test_gate as gate
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            plan = root / 'plan.json'
+            plan.write_text(json.dumps(full_plan(timeout=1800)))
+            with patch.object(gate, 'preflight_live') as lease, patch.object(q, 'command') as command, \
+                    patch.object(q.subprocess, 'run') as runner, patch.dict(os.environ, {'GITHUB_ACTIONS': 'false'}):
+                self.assertEqual(q.launch(plan, root / 'record'), 2)
+            lease.assert_not_called()
+            command.assert_not_called()
+            runner.assert_not_called()
+            record = json.loads((root / 'record/plan-record.json').read_text())
+            self.assertFalse(record['duration_estimate']['within_cap'])
+            self.assertEqual(record['plan_sha256'], hashlib.sha256(plan.read_bytes()).hexdigest())
+
+    def test_full_duration_is_under_fifty_minutes(self):
+        estimate = acceptance.estimate_duration(full_plan())
+        self.assertTrue(estimate['within_cap'])
+        self.assertLessEqual(estimate['estimated_seconds'], 3000)
+        with self.assertRaises(ValueError): acceptance.estimate_duration({**full_plan(), 'tests': []})
+        with patch.object(acceptance, 'RETAINED_ROWS', 40000):
+            self.assertFalse(acceptance.estimate_duration(full_plan())['within_cap'])
 
     def test_acceptance_sizes_and_ten_minute_single_spread(self):
         for work, blocks, size in [('single', 30, 40), ('concurrent-24', 24, 24),
@@ -80,10 +163,11 @@ class QuietHostTests(unittest.TestCase):
         self.assertEqual(block_segments('concurrent-24', 0, 24) + block_segments('concurrent-24', 1, 24),
                          [('candidate', 24), ('r3', 24), ('r3', 24), ('candidate', 24)])
 
-    def exercise_compare(self, invalid=False, mode='acceptance', attributed_ms=50):
+    def exercise_compare(self, invalid=False, mode='acceptance', attributed_ms=50, stale_plan=False, workloads=None):
         # Drive the Python director through its pipe boundary. No Docker, clock
         # waiting or product substitute is used as performance evidence.
         calls, clock = [], [0.]
+        prefill_barrier = threading.Barrier(2)
         class Fixture(unittest.TestCase):
             image, baseline_image = 'candidate-image', 'r3-image'
             created, env, label, token, latency_probe = {'container': []}, {}, 'owned=fixture', 'fixture', ''
@@ -106,6 +190,13 @@ class QuietHostTests(unittest.TestCase):
                     return 'EMR_BENCHMARK {"ready":true}\n'
                 command = self.value
                 calls.append((self.version, command))
+                if command['kind'] == 'prefill':
+                    # The second revision must enter its own pipe before either
+                    # response can complete: a serial prefill times out here.
+                    prefill_barrier.wait(timeout=5)
+                    return 'EMR_BENCHMARK ' + json.dumps({'before': 5, 'after': 5 + command['count']}) + '\n'
+                if command['kind'] == 'plans':
+                    return 'EMR_BENCHMARK {"plans":[]}\n'
                 clock[0] += command['count'] * .25
                 return 'EMR_BENCHMARK ' + json.dumps({'summary': {'failures': 0},
                     'results': [{'receipt_ms': 50, 'attributed_ms': attributed_ms}] * command['count']}) + '\n'
@@ -113,13 +204,17 @@ class QuietHostTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             preflight = root / 'preflight.json'
-            preflight.write_text(json.dumps({'verdict': 'QUIET', 'unit': 'emr-b1-r7-jit',
+            plan = root / 'plan.json'
+            plan.write_text(json.dumps(full_plan(unit='reviewed-other-unit')))
+            preflight.write_text(json.dumps({'verdict': 'QUIET', 'unit': 'reviewed-other-unit',
+                                             'plan_sha256': 'stale' if stale_plan else hashlib.sha256(plan.read_bytes()).hexdigest(),
                                              'probe': 'probe', 'probe_label': 'owned=probe'}))
             monitor = MagicMock()
             if invalid:
-                monitor.sample.side_effect = q.InvalidRun('foreign workload during measurement')
+                monitor.wait_quiet.side_effect = q.InvalidRun('foreign workload during measurement')
             env = {'KIN_EMR_BENCHMARK_MODE': mode, 'GITHUB_ACTIONS': 'false',
                    'KIN_EMR_ACCEPTANCE_RECORD': str(preflight), 'KIN_EMR_LIVE_EVIDENCE': str(root)}
+            env['KIN_EMR_ACCEPTANCE_PLAN'] = str(plan)
             with patch.dict(os.environ, env), patch.object(acceptance.subprocess, 'Popen', Process), \
                     patch.object(acceptance, 'QuietMonitor', return_value=monitor), \
                     patch.object(acceptance.time, 'monotonic', side_effect=lambda: clock[0]), \
@@ -127,9 +222,9 @@ class QuietHostTests(unittest.TestCase):
                     contextlib.redirect_stdout(io.StringIO()):
                 if invalid:
                     with self.assertRaises(q.InvalidRun):
-                        acceptance.compare(Fixture(), ['single'])
+                        acceptance.compare(Fixture(), workloads or ['single'])
                 else:
-                    acceptance.compare(Fixture(), ['single'])
+                    acceptance.compare(Fixture(), workloads or ['single'])
             report = json.loads(next(root.glob('comparison-*/summary.json')).read_text())
             return calls, report
 
@@ -143,6 +238,49 @@ class QuietHostTests(unittest.TestCase):
         result = report['results']['single']
         self.assertEqual((result['paired_blocks'], result['samples_per_revision']), (30, 1200))
         self.assertGreaterEqual(result['block_start_span_seconds'], 600)
+
+    def test_changed_plan_cannot_use_an_old_quiet_record(self):
+        with self.assertRaises(q.InvalidRun): self.exercise_compare(stale_plan=True)
+
+    def test_sustained_prefills_independent_revisions_concurrently(self):
+        calls, report = self.exercise_compare(workloads=['sustained'])
+        seeds = [(v, c['count']) for v, c in calls if c['kind'] == 'prefill']
+        self.assertCountEqual(seeds, [('candidate', 20000), ('r3', 20000)])
+        self.assertTrue(report['prefill']['parallel'])
+        self.assertEqual(report['results']['sustained']['samples_per_revision'], 2400)
+
+    def test_director_records_and_applies_both_concurrent_rules(self):
+        _, report = self.exercise_compare(workloads=['concurrent-24', 'concurrent-48'])
+        for result in report['results'].values():
+            self.assertTrue(result['noninferiority_met'])
+            self.assertTrue(result['median']['accepted'])
+            self.assertEqual(result['point_limit'], 1.10)
+            self.assertEqual(result['median']['point_limit'], 1.)
+            self.assertEqual(result['median']['upper_limit'], 1.10)
+
+    def test_control_reuse_is_bound_to_process_image_run_and_evidence(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'KIN_EMR_LIVE_EVIDENCE': 'run-one'}):
+            path = Path(folder) / 'summary.json'
+            path.write_text('{}')
+            report = {'verdict': 'PASS', 'raw_directory': folder}
+            acceptance.register_l03_control('image-one', report)
+            self.assertTrue(acceptance.reusable_l03_control('image-one')['passed'])
+            self.assertIsNone(acceptance.reusable_l03_control('image-two'))
+            with patch.dict(os.environ, {'KIN_EMR_LIVE_EVIDENCE': 'run-two'}):
+                self.assertIsNone(acceptance.reusable_l03_control('image-one'))
+            path.write_text('{"tampered":true}')
+            self.assertIsNone(acceptance.reusable_l03_control('image-one'))
+            with self.assertRaises(ValueError):
+                acceptance.register_l03_control('image-one', {**report, 'verdict': 'FAIL'})
+
+    def test_gap_offset_uses_balanced_conditions_not_initial_warmup(self):
+        samples = {version: [[{'scheduled_gap_ms': gap, 'receipt_ms': latency}
+                             for gap, latency in [(0, base), (200, base + extra)]] * 10 for _ in range(6)]
+                   for version, base, extra in [('r3', 100, 2), ('candidate', 20, 7)]}
+        result = acceptance.summarize_gap_diagnostic(samples)
+        self.assertEqual(result['post_gap_offset_ms'], 5.)
+        self.assertEqual(result['upper_95_one_sided_ms'], 5.)
+        self.assertEqual(result['conditions']['candidate']['200']['count'], 60)
 
     def test_director_records_invalid_without_performance_failure(self):
         _, report = self.exercise_compare(invalid=True)

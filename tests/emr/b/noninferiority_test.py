@@ -1,7 +1,7 @@
-"""REQ-D949 -> RISK-EMR-FALSE-PERFORMANCE-ACCEPT -> known-input estimator tests."""
+"""REQ-D952 -> RISK-EMR-FALSE-PERFORMANCE-ACCEPT -> known-input estimator tests."""
 import math
 import unittest
-from noninferiority import noninferiority, p95, gate_result
+from noninferiority import noninferiority, concurrent_result, whole_rule_probability, p95, gate_result
 
 
 class NonInferiorityTest(unittest.TestCase):
@@ -37,6 +37,30 @@ class NonInferiorityTest(unittest.TestCase):
         self.assertLess(result['upper_95_ratio'], 1.10)
         self.assertTrue(result['accepted'])
         self.assertFalse(noninferiority(a, [[101.]] * 24, 1.)['accepted'])
+
+    def test_concurrent_tail_and_median_are_both_required(self):
+        baseline = [[100.] * 23 + [200.]] * 24
+        # p95=105 is within the tail margin, median=105 violates no-slower.
+        result = concurrent_result(baseline, [[105.] * 23 + [200.]] * 24)
+        self.assertTrue(result['tail_accepted'])
+        self.assertFalse(result['median']['accepted'])
+        self.assertFalse(result['accepted'])
+        baseline = [[100.] * 13 + [200.] * 11] * 24
+        result = concurrent_result(baseline, [[90.] * 13 + [210.] * 11] * 24)
+        self.assertTrue(result['accepted'])
+        self.assertAlmostEqual(result['point_ratio'], 1.05)
+        self.assertAlmostEqual(result['median']['point_ratio'], .9)
+        self.assertFalse(concurrent_result(baseline, [[90.] * 13 + [225.] * 11] * 24)['accepted'])
+
+    def test_joint_probability_includes_median_coin_flip(self):
+        models = {name: {'blocks': 24, 'tail_mean': 0, 'tail_sd': .01,
+                        'median_mean': math.log(.65), 'median_sd': .05, 'tail_median_correlation': 0}
+                  for name in ('c24', 'c48')}
+        result = whole_rule_probability(models, replicates=3000)
+        self.assertGreater(result['at_equality'], .21)
+        self.assertLess(result['at_equality'], .29)
+        self.assertEqual(result['at_r7_effects'], 1.)
+        self.assertFalse(result['equality_target_met'])
 
     def test_block_p95_and_estimand_are_not_pooled_p95(self):
         self.assertEqual(p95(list(range(1, 41))), 38)
