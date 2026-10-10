@@ -1,8 +1,21 @@
-"""XA pinned public sample fetch; hash and cache policy unchanged."""
+"""XA public sample cache plan and fetch; every restored or downloaded file is hash-verified."""
 import hashlib, json, os, shutil, sys, tempfile, zipfile
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from archive_download import download
+
+def plan():
+    manifest = json.loads(Path(__file__).with_name("samples.json").read_text(encoding="utf-8"))
+    rows = manifest["public"]
+    if os.environ.get("GITHUB_OUTPUT"):
+        hashes = "\n".join(sorted(row["sha256"] for row in rows))
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+            output.write("cache-key=xa-public-v1-" + hashlib.sha256(hashes.encode("ascii")).hexdigest() + "\n")
+            # Match MG: cache only manifest-named public files, not an entire sample root.
+            output.write("cache-paths<<XA_CACHE_PATHS\n")
+            output.write("\n".join(str(Path(os.environ[manifest["root_env"]]) / row["relpath"])
+                                   for row in rows) + "\nXA_CACHE_PATHS\n")
+    print("public samples in cache plan:", len(rows))
 
 def fetch():
     manifest = json.loads(Path(__file__).with_name("samples.json").read_text(encoding="utf-8"))
@@ -58,4 +71,10 @@ def fetch():
 
 
 if __name__ == "__main__":
-    fetch()
+    action = sys.argv[1] if len(sys.argv) > 1 else "fetch"
+    if action == "plan":
+        plan()
+    elif action == "fetch":
+        fetch()
+    else:
+        raise SystemExit("unknown XA CI action: " + action)
