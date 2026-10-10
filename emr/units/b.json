@@ -70,7 +70,8 @@
       "api/src/emr-runtime/client.ts",
       "api/prisma/migrations/20261010150000_emr_read_jit_off/migration.sql",
       "tests/emr/b/quiet_host.py",
-      "tests/emr/b/quiet_host_test.py"
+      "tests/emr/b/quiet_host_test.py",
+      "tests/emr/b/dry_run.py"
     ],
     "B1-B2": [
       "api/src/emr-contract/README.md",
@@ -393,6 +394,11 @@
       "req": "REQ-D949",
       "risk": "RISK-EMR-FALSE-PERFORMANCE-ACCEPT/HOST-NOISE/NESTED-JIT",
       "test": "L03 L03b L03c PLAN-02 PLAN-03 noninferiority_test quiet_host_test power_self_check measurement_ci main deadline clamp restore config preservation"
+    },
+    {
+      "req": "REQ-D952",
+      "risk": "RISK-EMR-FALSE-PERFORMANCE-ACCEPT/HOST-NOISE/ATTEMPT-TIMEOUT/IDLE-OFFSET",
+      "test": "noninferiority_test complete tail+median rules and joint probability; quiet_host_test duration refusal, plan binding, bounded settling, retries, control reuse; dry_run L03 L03b L03c M36 (ci-gross pilot only)"
     }
   ],
   "cases": {
@@ -701,7 +707,7 @@
       "kill": [
         "L03"
       ],
-      "behaviour": "per-operation Node startup returns to the head-locked writer; receipt p95 exceeds same-run round-3 (0 percent margin)"
+      "behaviour": "per-operation Node startup returns to the head-locked writer; D952 same-run concurrent tail point and one-sided 95% UB <=1.10 AND median point <=1.00 and UB <=1.10; CI-gross point <=1.25; reuse successful same-run L03 control"
     },
     {
       "id": "M37",
