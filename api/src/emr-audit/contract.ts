@@ -518,11 +518,16 @@ export interface IncidentResponseFacts {
   verdictId?: string; supersedes?: string; possibilityEventId?: string; additionalEventId?: string;
   reportEventId?: string; reportKnownAt?: string; recipientScopeRef?: string; recordedAt?: string;
   verdictScopeRef?: string; possibilityKnownAt?: string;
-  hospitalKnownAt?: string; firstDetectionEvidenceAt?: string; processorKnownAt?: string; notifiedHospitalAt?: string;
+  hospitalKnownAt?: string; firstDetectionEvidenceAt?: string; processorKnownAt?: string; operatorKnownAt?: string; notifiedHospitalAt?: string;
   knowledgeAttributionEvidenceId?: string; healthDataActualLeak?: boolean;
-  obligationOwner?: { kind: 'hospital' | 'processor'; id: string };
+  obligationOwner?: { kind: 'hospital' | 'processor' | 'operator'; id: string };
   ispIncident?: { eventId: string; attackCaused: boolean; status: boolean | 'unknown';
-    verification?: { by: ImmutableIdentity; at: string; evidenceId: string };
+    verification?: { by: ImmutableIdentity; at: string; evidenceId: string;
+      types: { telecomBusiness: boolean; forProfitTelecomInformation: boolean }; nonApplicabilityBasis?: string };
+    deploymentModel?: 'hosted' | 'managed' | 'on-prem';
+    occurrence?: { occurredAt: string | null; endedAt: string | null; evidenceId: string;
+      correction?: { supersedes: string; at: string; reason: string; evidenceId: string } };
+    userNoticeDecision?: { decisionId: string; applies: boolean; at: string; reason: string; basis: string; evidenceId: string; decider: IncidentDecider };
     userImpact?: { kind: 'outage' | 'user-information' | 'comparable-serious-impact'; outageMinutes?: number;
       confirmedAt: string; recipientScopeRef: string; evidenceId: string; decider: IncidentDecider; detailsComplete?: boolean };
     additionalFacts?: readonly { eventId: string; confirmedAt: string; evidenceId: string }[] };
@@ -535,6 +540,104 @@ type DutyFamily = 'possibility' | 'confirmed' | 'additional-notice' | 'no-leak' 
 export interface IncidentDecider {
   status: 'verified-privacy-officer' | 'representative' | 'designationUnverified';
   by: ImmutableIdentity; ownerId: string; evidenceId: string; verifiedAt: string; exemptionEvidenceId?: string;
+  designation?: { categoryBasis: 'privacy-decree:32.2.1' | 'privacy-decree:32.2.2'; categoryEvidenceId: string;
+    qualificationRequired: boolean; qualificationAssessmentEvidenceId: string; qualificationEvidenceId?: string };
+}
+/** D849/D850: the reviewed D-26 v2 Q4 constant, including its interpretation qualifications.
+ * Attribution is evidence classification, never permission to deem the operator's ISP duty performed. */
+export const OPERATOR_OTHER_LAW_DEEMING = freeze({
+  "interpretationStatus": "적용 미확정·증거 전용 (statutory deeming possibility ≠ product auto-closure; not a permanent denial — separate candidate if an official interpretation or reviewed basis is bound)",
+  "prediction": false,
+  "isp-incident-report": {
+    "deemableKinds": [],
+    "actualPerformanceKinds": [
+      "isp-report-receipt (KISA/과기정통부 incident-report receipt; includes the same document received as an ISP report)"
+    ],
+    "evidenceOnlyKinds": [
+      "pipa-processor-report",
+      "unattributed-other-law-report"
+    ],
+    "neverKinds": [
+      "mohw-notice",
+      "pipa-controller-report",
+      "pipa-controller-subject-notice",
+      "contract-notice-to-hospital",
+      "pipa-processor-subject-notice"
+    ],
+    "attribution": [
+      "reporterEntity=operator legal entity (own name/capacity; staff or lawful agent submission ok; hospital-name filing never)",
+      "capacity=processor-own-duty (P26⑧→P34)",
+      "recipientAuthority in {PIPC, KISA}",
+      "incidentIdentity=same attack incident (service–incident relation, not ownership; receipt alone insufficient)",
+      "coveredItems ⊇ ND58의8① 1~3",
+      "performedAt=actual receipt evidence",
+      "legalBasisRef=P26⑧→P34④+PD40 + document ref"
+    ],
+    "attributionComplete": "recorded true/false; never closes the duty",
+    "timeliness": "met-timely / met-late only for actualPerformanceKinds against operatorKnownAt + 24h; PIPA 72h never extends; late performance never erases prior delay",
+    "privacyOfficerPrompt": "직접 신고로 확정(실제 이행으로 확인 가능); 동일 서류가 ISP 신고로 접수된 증거가 있으면 중복 서류 불요",
+    "physicianFacing": "none"
+  },
+  "isp-user-notice": {
+    "deemableKinds": [],
+    "actualPerformanceKinds": [
+      "operator-user-notice (ND58의9② items + ④ method + delivered + recipient scope = actual service users + without delay; per recipient)"
+    ],
+    "evidenceOnlyKinds": [
+      "pipa-processor-subject-notice (record recipient∩operator-service-users)",
+      "contract-notice-to-hospital (items/method not met)"
+    ],
+    "neverKinds": [
+      "mohw-notice",
+      "pipa-controller-report",
+      "pipa-controller-subject-notice",
+      "pipa-processor-report"
+    ],
+    "perRecipient": true,
+    "recipientMustBeOperatorServiceUser": true,
+    "attribution": [
+      "notifierEntity=operator legal entity",
+      "capacity=processor-own-duty (P26⑧)",
+      "recipients in operator-service-users (patients only with a verified usage relation; hospital entity, staff individuals and patients never merged)",
+      "incidentIdentity=same attack incident",
+      "coveredItems ⊇ ND58의9② 1~5",
+      "performedAt=actual delivery evidence (no read-receipt requirement)",
+      "legalBasisRef in {P26⑧→P34①+PD39, P26⑧→P34②+PD39의2·39의3} + document ref"
+    ],
+    "independentPaths": [
+      "ND58의9③ priority/additional notice",
+      "ND58의9⑤ posting with 정당한 사유, ≥30 days"
+    ],
+    "partialNotice": "never closes the duty for other users"
+  },
+  "isp-incident-report-supplement": {
+    "deemableKinds": [],
+    "actualPerformanceKinds": [
+      "isp-supplement-receipt"
+    ],
+    "note": "D-25 v4 N2 — actual supplementary report only; per confirmed fact +24h"
+  },
+  "pipaReportTrigger": "health-data 유출등 known → PD40①2호 principal criterion; PD40① 단서 (신고 생략) and 전단 delay grounds verified separately with evidence; unverified exceptions never auto-exempt; an accepted PIPA exemption is never ISP deeming or exemption evidence",
+  "hospitalPlanRules": "unchanged (D-25); never cross-applied to the operator plan",
+  "reevaluation": "completing attribution re-classifies evidence only; original known/incident/performed times are never overwritten by the completion time"
+});
+export interface IncidentNoticeAttribution {
+  attributionId: string; noticeId: string; recordedAt: string; supersedes?: string;
+  kind: 'pipa-processor-report' | 'unattributed-other-law-report' | 'pipa-processor-subject-notice' |
+    'contract-notice-to-hospital' | 'pipa-controller-report' | 'pipa-controller-subject-notice' | 'mohw-notice';
+  reporterEntity?: string; capacity?: string;
+  /** An authority for a report; distinct recipient IDs for a subject notice. */
+  recipientAuthority?: string | readonly string[];
+  incidentIdentity?: { eventId: string; attackCaused: boolean; serviceRelationEvidenceId: string };
+  coveredItems?: readonly string[]; performedAt?: string;
+  legalBasisRef?: { basis: string; documentRef: string };
+}
+interface OperatorNoticeEvidence {
+  kind: IncidentNoticeAttribution['kind'] | null; attributionComplete: boolean;
+  missingFields: readonly string[]; invalidFields: readonly string[];
+  attributionHistory: readonly IncidentNoticeAttribution[];
+  eligibleRecipientIds: readonly string[]; perRecipient: boolean; recipientMustBeOperatorServiceUser: boolean;
+  classification: Readonly<Record<'isp-incident-report' | 'isp-user-notice' | 'isp-incident-report-supplement', 'evidence-only' | 'never'>>;
 }
 export interface IncidentNoticeEvidence {
   kind: DutyKind; triggeredAt: string; noticeId: string; sentAt: string;
@@ -545,6 +648,8 @@ export interface IncidentNoticeEvidence {
   posting?: { justCause: string; evidenceId: string; maintainedThrough: string; maintenanceEvidenceId: string };
 }
 interface BoundNotice extends IncidentNoticeEvidence {
+  operatorEvidence?: OperatorNoticeEvidence;
+  missingFields?: readonly string[]; invalidFields?: readonly string[];
   institutionId: string; incidentId: string; triggerEventId: string; recipientScopeRef: string;
   coversAll: boolean; evidenceId: string; recordedAt: string;
 }
@@ -577,10 +682,11 @@ export interface IncidentObligation {
   elapsedMs: number; lateByMs: number | null; sinceDiscoveryMs: number | null; sinceClearanceMs: number | null;
   timeliness: 'requires-review' | 'delay-accepted' | 'overdue-determined' | 'final-breach';
   delayRefs: readonly string[]; decisionRefs: readonly string[]; replacedBy: string | null;
+  reasonCode: 'occurrence-evidence-contradicts-decision' | null;
   verdictRefs: readonly string[]; warnings: readonly string[]; designationUnverified: boolean;
-  obligationOwner: { kind: 'hospital' | 'processor'; id: string }; sinceHospitalKnowledgeMs: number | null;
+  obligationOwner: { kind: 'hospital' | 'processor' | 'operator'; id: string }; sinceHospitalKnowledgeMs: number | null;
   applicability: 'verified' | 'unverified'; audience: 'privacy-officer'; provisionalResponseDueAt: string | null;
-  provisionalDeadlinePassed: boolean; closureGround: 'actual-notice' | 'posting' | 'confirmed-notice-substitution' | 'report-exemption' | 'verdict-replaced' | null;
+  provisionalDeadlinePassed: boolean; closureGround: 'actual-notice' | 'posting' | 'confirmed-notice-substitution' | 'report-exemption' | 'verdict-replaced' | 'applicability-redecided' | 'occurrence-corrected' | null;
   observations: readonly { asOf: string; status: IncidentObligation['status']; noticeRefs: readonly string[] }[];
   corrections: readonly { observedAt: string; revisedAt: string; reason: 'evidence-replayed'; evidenceRefs: readonly string[] }[];
 }
@@ -588,13 +694,21 @@ export interface IncidentResponsePlan {
   incidentId: string; institutionId: string; recordedBy: ImmutableIdentity; subjectsIdentifiable: boolean;
   awarenessAt: string; verdict: IncidentResponseFacts['status']; determinationAt: string; asOf: string;
   hasNotifiedPossible: boolean;
-  obligationOwner: { kind: 'hospital' | 'processor'; id: string };
+  obligationOwner: { kind: 'hospital' | 'processor' | 'operator'; id: string };
+  ispAssessments: readonly { eventId: string; knowledgeAt: string; initialReport: {
+    dueAt: string | null; dueRule: string; displayedBasis: string; taskPolicy: 'display-only' | 'track'; automaticExemption: false;
+    applicability: 'verified' | 'unverified' | 'not-applicable'; provisionalResponseDueAt: string | null };
+    userNotice: { applicability: 'applicable' | 'not-applicable' | 'decision-required' | 're-decision-required'; decisionRefs: readonly string[];
+      occurrenceEvidenceRefs: readonly string[]; effectiveOccurrenceEvidenceRefs: readonly string[];
+      reasonCode: 'occurrence-evidence-contradicts-decision' | null; reason: string | null } }[];
+  operatorEvidencePrompt: { audience: 'privacy-officer'; physicianFacing: 'none'; text: string } | null;
   recipientScopes: readonly { scopeRef: string; recipientIds: readonly string[] }[];
-  ledger: { findings: readonly BoundFinding[]; notices: readonly BoundNotice[]; delays: readonly IncidentDelay[]; decisions: readonly IncidentDecision[] };
+  ledger: { findings: readonly BoundFinding[]; notices: readonly BoundNotice[]; noticeAttributions: readonly IncidentNoticeAttribution[]; delays: readonly IncidentDelay[]; decisions: readonly IncidentDecision[] };
   obligations: readonly IncidentObligation[]; status: 'planned';
 }
 export interface IncidentResponseHistory {
   previous?: Readonly<IncidentResponsePlan>; notices?: readonly IncidentNoticeEvidence[]; asOf?: string;
+  noticeAttributions?: readonly IncidentNoticeAttribution[];
   findings?: readonly IncidentResponseFacts[]; delays?: readonly IncidentDelay[]; decisions?: readonly IncidentDecision[];
   recipientScopes?: readonly { scopeRef: string; recipientIds: readonly string[] }[];
 }
@@ -608,11 +722,14 @@ const DUTY_FAMILY: Readonly<Record<DutyKind, DutyFamily>> = freeze({
   'isp-incident-report': 'isp-report', 'isp-incident-report-supplement': 'isp-supplement',
   'isp-user-notice': 'isp-user', 'isp-user-additional': 'isp-user-additional',
 });
-// LQ-01: no numeric legal deadline is invented for "immediate"; elapsed time is not a legal verdict.
+// D-25 v5 (LQ-01 unchanged from v3): no numeric deadline for "immediate"; elapsed time is not a legal verdict.
 const IMMEDIATE_TIMING_RULE = freeze({ dueAt: null as string | null, status: 'pending' as const, timeliness: 'requires-review' as const,
   ispHours: 24, ispReportFields: ['incident-time-cause-damage', 'response-status', 'contact-department'],
-  ispUserFields: ['incident-time-and-circumstances', 'user-damage', 'provider-response', 'user-protective-actions', 'contact-department'] });
-// LQ-02: each exception belongs to its own provision; a documented acceptance preserves the original clock and
+  // Network decree 58-9(2): item 1 uses two fields; items 2-5 each retain their own content.
+  ispUserFields: ['incident-time-and-circumstances', 'user-damage', 'provider-response', 'user-protective-actions', 'user-remedy-measures', 'contact-department'],
+  // 58-9(3) replaces the unconfirmed item 1 with the occurrence fact and what is known so far.
+  ispUserPriorityFields: ['incident-occurred', 'facts-known-so-far', 'provider-response', 'user-protective-actions', 'user-remedy-measures', 'contact-department'] });
+// D-25 v5 (LQ-02 unchanged from v3): each exception belongs to its own provision; a documented acceptance preserves the original clock and
 // clearance requires immediate action. A pending claim never disables the statutory clock.
 const DELAY_RULE = freeze({ clauses: { possibility: 'privacy-decree:39-3.1', confirmed: 'privacy-decree:39.1', report: 'privacy-decree:40.1' },
   version: '2026-09-11',
@@ -620,21 +737,63 @@ const DELAY_RULE = freeze({ clauses: { possibility: 'privacy-decree:39-3.1', con
   decider: (d: IncidentDecider | undefined, ownerId: string) => !!d && d.ownerId === ownerId &&
     (d.status === 'verified-privacy-officer' || (d.status === 'representative' && !!d.exemptionEvidenceId)),
   clearedDueAt: (_at: string): string | null => null });
-// LQ-03: only a pre-deadline no-leak finding moots an unnotified numeric duty. A final breach decision alone still owes performance.
+// D-25 v5 LQ-03: only a pre-deadline no-leak finding moots an unnotified numeric duty. A final breach still owes performance.
 const NO_LEAK_CLOSURE_RULE = freeze({ canMoot: (at: string, due: string | null) => due !== null && at < due, finalBreachStillOwed: true,
   postingFamilies: ['possibility', 'confirmed', 'additional-notice', 'no-leak', 'isp-user', 'isp-user-additional'],
+  supplementDeemed: { policy: 'not-until-legal-basis-bound', kinds: [] as readonly string[] },
+  deemedReportKinds: ['mohw-notice', 'pipc-kisa-report', 'pipc-kisa-priority'],
+  deemedUserKinds: ['possible-leak', 'confirmed-leak', 'confirmed-priority', 'confirmed-additional'],
   postingDays: 30, reportExemptionBasis: 'privacy-decree:40.1:last-sentence' });
-// LQ-04: preserve occurrence as legal cause and expose time since discovery separately.
+// D-25 v5 (LQ-04 unchanged from v2): preserve occurrence as legal cause and expose discovery time separately.
 const MEDICAL_TRIGGER_RULE = freeze({ at: (incident: NonNullable<IncidentResponseFacts['medicalIncident']>) => incident.occurredAt,
   types: ['theft-leak', 'destruction-damage-concealment-loss', 'system-disruption'], channels: ['MOHW-official', 'MOHW-delegated'] });
-// LQ-05: confirmation at the original boundary still substitutes, with the earlier limit and any accepted delay retained.
+// D-25 v5 (LQ-05 unchanged from v3): the boundary still substitutes, with the earlier limit and accepted delay retained.
 const CONFIRMATION_REPLACEMENT_RULE = freeze({ within: (at: string, due: string, acceptedDelay: boolean) => at <= due || acceptedDelay,
   due: (possibleDue: string, confirmedDue: string) => possibleDue < confirmedDue ? possibleDue : confirmedDue });
-// LQ-06: both actual events must exist; late receipt does not move their trigger to the receipt time.
+// D-25 v5 (LQ-06 unchanged from v2): both actual events must exist; receipt never replaces the event time.
 const NO_LEAK_FOLLOWUP_RULE = freeze({ at: (sentAt: string, confirmedAt: string) => sentAt > confirmedAt ? sentAt : confirmedAt,
   warnOnPostVerdictSend: true });
+// D-25 v5 COMMON; independent owner clocks also apply to the operator's verified ISP duties.
 const INCIDENT_COMMON_RULE = freeze({ possibilityEffectiveFrom: '2026-09-10T15:00:00.000Z',
   healthLeakReportTrigger: 'sensitive-or-unique' as const });
+// D-25 v5 INSTALL-FACTS: I verifies the two alternative statutory types, not a deployment label.
+const INSTALL_FACTS_RULE = freeze({
+  ispApplies: (types: { telecomBusiness: boolean; forProfitTelecomInformation: boolean }) =>
+    types.telecomBusiness || types.forProfitTelecomInformation,
+  privacyOfficerQualified: (d: IncidentDecider['designation']) => !!d &&
+    (!d.qualificationRequired || !!d.qualificationEvidenceId),
+});
+// D-25 v5 ISP-DUTIES / D25V4-N1: the numeric deadline predates its incorporation into the statute.
+// This map is the reviewed emr-f-constants shape; select by original knowledge, never release or verification.
+export const ISP = freeze({
+  initialReport: { legalBasisByKnowledgeDate: {
+    selectBy: 'hospitalKnownAt', timeZone: 'Asia/Seoul', bands: [
+      { fromInclusive: null, toExclusive: '2024-08-14T00:00:00+09:00',
+        dueRule: 'resolve from the law in force at hospitalKnownAt; do not assign a blanket +24h or a blanket no-deadline',
+        displayedBasis: '확인된 당시 시행 법령·기한을 표시. 확인 전에는 당시 법령 확인 필요로 표시.',
+        taskPolicy: 'display-only; no task creation for this historical band', automaticExemption: false },
+      { fromInclusive: '2024-08-14T00:00:00+09:00', toExclusive: '2026-10-01T00:00:00+09:00',
+        dueRule: 'hospitalKnownAt + PT24H (continuous elapsed hours)',
+        displayedBasis: '구 정보통신망법 제48조의3제1항 전단(즉시) + 구 시행령 제58조의2제1항(알게 된 때부터 24시간 이내)',
+        relatedBasis: { supplement: '구 시행령 제58조의2제2항', methods: '구 시행령 제58조의2제3항' },
+        sourcePin: '대통령령 제36502호 스냅샷; 부칙 제34821호 2024-08-14 시행' },
+      { fromInclusive: '2026-10-01T00:00:00+09:00', toExclusive: null,
+        dueRule: 'hospitalKnownAt + PT24H (continuous elapsed hours)',
+        displayedBasis: '정보통신망법 제48조의3제1항 전단(알게 된 때부터 24시간 이내) + 시행령 제58조의8제1항·제3항(신고사항·방법)',
+        relatedBasis: { supplement: '시행령 제58조의8제2항', methods: '시행령 제58조의8제3항' },
+        sourcePin: '법률 제21500호 2026-10-01 시행; 시행령 제36735호 스냅샷' },
+    ],
+    replay: { preserve: ['original hospitalKnownAt', 'applicable law at each duty event', 'actual performance fact', 'actual performance time', 'elapsed time'],
+      restartAtVerification: false, restartAtRelease: false },
+    userNoticeCutover: 'separate rule: occurredAt >= 2026-10-01T00:00:00+09:00; never select it using this initial-report map',
+  } },
+  userNoticeAppliesFrom: '2026-10-01T00:00:00+09:00',
+});
+function ispLawAt(at: string) {
+  return ISP.initialReport.legalBasisByKnowledgeDate.bands.find(b =>
+    (b.fromInclusive === null || Date.parse(at) >= Date.parse(b.fromInclusive)) &&
+    (b.toExclusive === null || Date.parse(at) < Date.parse(b.toExclusive)));
+}
 const hours72 = (at: string) => new Date(Date.parse(at) + 72 * 3_600_000).toISOString();
 const elapsed = (start: string, end: string) => Math.max(0, Date.parse(end) - Date.parse(start));
 function optionalObject(input: unknown, required: readonly string[], optional: readonly string[]): Record<string, any> {
@@ -642,18 +801,25 @@ function optionalObject(input: unknown, required: readonly string[], optional: r
   return object(input, [...required, ...optional.filter(k => keys.includes(k))]);
 }
 function incidentDecider(input: unknown, at: string): IncidentDecider {
-  const d = optionalObject(input, ['status', 'by', 'ownerId', 'evidenceId', 'verifiedAt'], ['exemptionEvidenceId']);
+  const d = optionalObject(input, ['status', 'by', 'ownerId', 'evidenceId', 'verifiedAt'], ['exemptionEvidenceId', 'designation']);
   choice(d.status, ['verified-privacy-officer', 'representative', 'designationUnverified']); identity(d.by);
   string(d.ownerId); string(d.evidenceId); utc(d.verifiedAt);
   if (d.verifiedAt > at) throw new Error('Future authority verification');
   if (d.exemptionEvidenceId !== undefined) string(d.exemptionEvidenceId);
+  if (d.designation) {
+    const q = optionalObject(d.designation, ['categoryBasis', 'categoryEvidenceId', 'qualificationRequired', 'qualificationAssessmentEvidenceId'], ['qualificationEvidenceId']);
+    choice(q.categoryBasis, ['privacy-decree:32.2.1', 'privacy-decree:32.2.2']); string(q.categoryEvidenceId); string(q.qualificationAssessmentEvidenceId);
+    if (typeof q.qualificationRequired !== 'boolean') throw new Error('Qualification assessment required');
+    if (q.qualificationEvidenceId !== undefined) string(q.qualificationEvidenceId);
+  }
+  if (d.status === 'verified-privacy-officer' && !INSTALL_FACTS_RULE.privacyOfficerQualified(d.designation)) throw new Error('Lawful designation and qualification required');
   return { ...d, by: { ...d.by } } as IncidentDecider;
 }
 function incidentFacts(input: unknown, scope: IncidentScope): IncidentResponseFacts {
   const v = optionalObject(input, ['incidentId', 'awarenessAt', 'determinationAt', 'status', 'possibleGround',
     'detailsComplete', 'newlyConfirmedAt', 'reportTriggers', 'medicalIncident', 'evidenceId'],
     ['priorPossibleNotice', 'verdictId', 'supersedes', 'possibilityEventId', 'additionalEventId', 'reportEventId', 'reportKnownAt', 'recipientScopeRef', 'recordedAt',
-      'verdictScopeRef', 'possibilityKnownAt', 'hospitalKnownAt', 'firstDetectionEvidenceAt', 'processorKnownAt', 'notifiedHospitalAt',
+      'verdictScopeRef', 'possibilityKnownAt', 'hospitalKnownAt', 'firstDetectionEvidenceAt', 'processorKnownAt', 'operatorKnownAt', 'notifiedHospitalAt',
       'knowledgeAttributionEvidenceId', 'healthDataActualLeak', 'obligationOwner', 'ispIncident']);
   string(v.incidentId); utc(v.awarenessAt); utc(v.determinationAt); string(v.evidenceId);
   choice(v.status, ['possible', 'confirmed', 'not-a-leak']);
@@ -676,28 +842,54 @@ function incidentFacts(input: unknown, scope: IncidentScope): IncidentResponseFa
   for (const k of ['reportKnownAt', 'recordedAt']) if (v[k] !== undefined) utc(v[k]);
   if (v.reportKnownAt !== undefined && (v.status !== 'confirmed' || v.reportKnownAt < v.determinationAt))
     throw new Error('Invalid report trigger');
-  for (const k of ['possibilityKnownAt', 'hospitalKnownAt', 'firstDetectionEvidenceAt', 'processorKnownAt', 'notifiedHospitalAt']) if (v[k] !== undefined) utc(v[k]);
+  for (const k of ['possibilityKnownAt', 'hospitalKnownAt', 'firstDetectionEvidenceAt', 'processorKnownAt', 'operatorKnownAt', 'notifiedHospitalAt']) if (v[k] !== undefined) utc(v[k]);
   if (v.obligationOwner !== undefined) {
-    const owner = object(v.obligationOwner, ['kind', 'id']); choice(owner.kind, ['hospital', 'processor']); string(owner.id);
+    const owner = object(v.obligationOwner, ['kind', 'id']); choice(owner.kind, ['hospital', 'processor', 'operator']); string(owner.id);
     if (owner.kind === 'hospital' && owner.id !== scope.institutionId) throw new Error('Foreign controller');
     if (owner.kind === 'processor' && !v.processorKnownAt) throw new Error('Processor knowledge required');
+    if (owner.kind === 'operator' && !v.operatorKnownAt) throw new Error('Operator knowledge required');
   }
-  const ownKnownAt = v.obligationOwner?.kind === 'processor' ? v.processorKnownAt : (v.hospitalKnownAt ?? v.awarenessAt);
+  const ownKnownAt = v.obligationOwner?.kind === 'operator' ? v.operatorKnownAt :
+    v.obligationOwner?.kind === 'processor' ? v.processorKnownAt : (v.hospitalKnownAt ?? v.awarenessAt);
   if (ownKnownAt !== v.awarenessAt || (v.hospitalKnownAt !== undefined && !v.knowledgeAttributionEvidenceId) ||
       (v.possibilityKnownAt !== undefined && (v.possibilityKnownAt < ownKnownAt || v.possibilityKnownAt > v.determinationAt))) throw new Error('Knowledge attribution required');
   if (v.healthDataActualLeak !== undefined && (typeof v.healthDataActualLeak !== 'boolean' || (v.healthDataActualLeak && v.status !== 'confirmed'))) throw new Error('Actual health leak requires confirmation');
   if (v.ispIncident !== undefined) {
-    const isp = optionalObject(v.ispIncident, ['eventId', 'attackCaused', 'status'], ['verification', 'userImpact', 'additionalFacts']);
+    const isp = optionalObject(v.ispIncident, ['eventId', 'attackCaused', 'status'], ['verification', 'userImpact', 'additionalFacts', 'deploymentModel', 'occurrence', 'userNoticeDecision']);
     string(isp.eventId); if (typeof isp.attackCaused !== 'boolean' || ![true, false, 'unknown'].includes(isp.status)) throw new Error('Invalid ISP finding');
     if (isp.status !== 'unknown' && !isp.verification) throw new Error('ISP verification required');
-    if (isp.verification) { const x = object(isp.verification, ['by', 'at', 'evidenceId']); identity(x.by); utc(x.at); string(x.evidenceId); }
+    if (isp.verification) {
+      const x = optionalObject(isp.verification, ['by', 'at', 'evidenceId', 'types'], ['nonApplicabilityBasis']); identity(x.by); utc(x.at); string(x.evidenceId);
+      const types = object(x.types, ['telecomBusiness', 'forProfitTelecomInformation']);
+      if (Object.values(types).some(t => typeof t !== 'boolean')) throw new Error('ISP type findings required');
+      if (isp.status === 'unknown' || isp.status !== INSTALL_FACTS_RULE.ispApplies(x.types)) throw new Error('ISP status contradicts verified types');
+      if (isp.status === false) string(x.nonApplicabilityBasis);
+    }
+    if (isp.deploymentModel !== undefined) choice(isp.deploymentModel, ['hosted', 'managed', 'on-prem']);
+    if (isp.occurrence) {
+      const o = optionalObject(isp.occurrence, ['occurredAt', 'endedAt', 'evidenceId'], ['correction']); string(o.evidenceId);
+      if (o.occurredAt !== null && utc(o.occurredAt) > ownKnownAt) throw new Error('Occurrence after knowledge');
+      if (o.endedAt !== null && (utc(o.endedAt) < o.occurredAt)) throw new Error('Invalid occurrence interval');
+      if (o.correction !== undefined) {
+        const c = object(o.correction, ['supersedes', 'at', 'reason', 'evidenceId']);
+        string(c.supersedes); string(c.reason); string(c.evidenceId);
+        if (utc(c.at) < ownKnownAt) throw new Error('Correction before incident knowledge');
+      }
+    }
+    if (isp.userNoticeDecision) {
+      const d = object(isp.userNoticeDecision, ['decisionId', 'applies', 'at', 'reason', 'basis', 'evidenceId', 'decider']);
+      for (const k of ['decisionId', 'reason', 'basis', 'evidenceId']) string(d[k]); utc(d.at);
+      if (typeof d.applies !== 'boolean' || d.at < ownKnownAt) throw new Error('Occurrence applicability decision required');
+      const decider = incidentDecider(d.decider, d.at);
+      if (decider.ownerId !== (v.obligationOwner?.id ?? scope.institutionId)) throw new Error('Other occurrence decision owner');
+    }
     if (isp.userImpact) {
       const u = optionalObject(isp.userImpact, ['kind', 'confirmedAt', 'recipientScopeRef', 'evidenceId', 'decider'], ['outageMinutes', 'detailsComplete']);
       choice(u.kind, ['outage', 'user-information', 'comparable-serious-impact']); utc(u.confirmedAt); string(u.recipientScopeRef); string(u.evidenceId);
       if (u.confirmedAt < ownKnownAt || (u.kind === 'outage' && (!Number.isFinite(u.outageMinutes) || u.outageMinutes < 120))) throw new Error('User impact threshold not met');
       if (u.detailsComplete !== undefined && typeof u.detailsComplete !== 'boolean') throw new Error('ISP completeness required');
       const d = incidentDecider(u.decider, u.confirmedAt);
-      if (!DELAY_RULE.decider(d, v.obligationOwner?.id ?? scope.institutionId)) throw new Error('User scope decision authority required');
+      if (d.ownerId !== (v.obligationOwner?.id ?? scope.institutionId)) throw new Error('User scope decision authority required');
     }
     if (isp.additionalFacts !== undefined) {
       if (!Array.isArray(isp.additionalFacts)) throw new Error('Additional facts required');
@@ -715,7 +907,7 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
   if (!incidentScopes.has(scope)) refuse('IncidentScopeRequired');
   if (scope.institutionId !== authority.institutionId) refuse('AuditScopeNotGranted');
   return guarded('IncidentResponseRefused', () => {
-    optionalObject(history, [], ['previous', 'notices', 'asOf', 'findings', 'delays', 'decisions', 'recipientScopes']);
+    optionalObject(history, [], ['previous', 'notices', 'asOf', 'findings', 'delays', 'decisions', 'recipientScopes', 'noticeAttributions']);
     const f = incidentFacts(input, scope), asOf = utc(history.asOf ?? f.newlyConfirmedAt ?? f.determinationAt), previous = history.previous;
     if (previous && (!incidentResponses.has(previous) || previous.incidentId !== f.incidentId || previous.institutionId !== authority.institutionId ||
         previous.awarenessAt !== f.awarenessAt || previous.asOf > asOf)) throw new Error('Unbound history');
@@ -759,12 +951,15 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
       const recordedAt = v.recordedAt ?? asOf;
       if (recordedAt > asOf || recordedAt < v.determinationAt || (v.newlyConfirmedAt !== null && v.newlyConfirmedAt > recordedAt) ||
           (v.reportKnownAt && v.reportKnownAt > recordedAt) || (v.medicalIncident && v.medicalIncident.discoveredAt > recordedAt)) throw new Error('Future finding');
-      if (['hospitalKnownAt', 'firstDetectionEvidenceAt', 'processorKnownAt', 'notifiedHospitalAt'].some(k => v[k] && v[k] > recordedAt) ||
+      if (['hospitalKnownAt', 'firstDetectionEvidenceAt', 'processorKnownAt', 'operatorKnownAt', 'notifiedHospitalAt'].some(k => v[k] && v[k] > recordedAt) ||
           (v.ispIncident?.verification && v.ispIncident.verification.at > recordedAt) ||
+          (v.ispIncident?.occurrence?.endedAt && v.ispIncident.occurrence.endedAt > recordedAt) ||
+          (v.ispIncident?.occurrence?.correction && v.ispIncident.occurrence.correction.at > recordedAt) ||
+          (v.ispIncident?.userNoticeDecision && v.ispIncident.userNoticeDecision.at > recordedAt) ||
           (v.ispIncident?.userImpact && v.ispIncident.userImpact.confirmedAt > recordedAt) ||
           v.ispIncident?.additionalFacts?.some(x => x.confirmedAt > recordedAt)) throw new Error('Future incident evidence');
       const facts: BoundFinding['facts'] = {
-        ...Object.fromEntries(['hospitalKnownAt', 'firstDetectionEvidenceAt', 'processorKnownAt', 'notifiedHospitalAt', 'knowledgeAttributionEvidenceId',
+        ...Object.fromEntries(['hospitalKnownAt', 'firstDetectionEvidenceAt', 'processorKnownAt', 'operatorKnownAt', 'notifiedHospitalAt', 'knowledgeAttributionEvidenceId',
           'healthDataActualLeak', 'obligationOwner', 'ispIncident', 'possibilityKnownAt'].filter(k => v[k] !== undefined).map(k => [k, structuredClone(v[k])])),
         incidentId: v.incidentId, awarenessAt: v.awarenessAt, determinationAt: v.determinationAt, status: v.status,
         possibleGround: v.possibleGround, detailsComplete: v.detailsComplete, newlyConfirmedAt: v.newlyConfirmedAt,
@@ -803,21 +998,91 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
       for (let i = ordered.findIndex(x => x.id === v.id) - 1; i >= 0 && ordered[i].status === v.status; i--) root = ordered[i];
       return root;
     };
+    const ispStatus = (eventId: string) => {
+      const candidates = findings.filter(x => x.facts.ispIncident?.eventId === eventId).sort((a, b) =>
+        (a.facts.ispIncident.verification?.at ?? '').localeCompare(b.facts.ispIncident.verification?.at ?? '') || a.recordedAt.localeCompare(b.recordedAt));
+      const latest = candidates.slice(-1)[0]?.facts.ispIncident;
+      if (latest && candidates.some(x => x.facts.ispIncident.verification?.at === latest.verification?.at && x.facts.ispIncident.status !== latest.status)) throw new Error('Conflicting ISP verification');
+      return latest?.status ?? 'unknown';
+    };
+    const ispAssessments: IncidentResponsePlan['ispAssessments'][number][] = [];
+    type Occurrence = NonNullable<IncidentResponseFacts['ispIncident']['occurrence']>;
+    const ispUserRules = new Map<string, { applicable: boolean; decisions: NonNullable<IncidentResponseFacts['ispIncident']['userNoticeDecision']>[];
+      occurrences: Occurrence[]; retirement: { ref: string; ground: IncidentObligation['closureGround'] } | null }>();
+    for (const eventId of [...new Set(facts.filter(v => v.ispIncident?.attackCaused).map(v => v.ispIncident.eventId))].sort()) {
+      const eventFacts = facts.filter(v => v.ispIncident?.eventId === eventId);
+      const knowledgeAt = eventFacts[0].awarenessAt, law = ispLawAt(knowledgeAt);
+      const occurrences = merge(eventFacts.map(v => v.ispIncident.occurrence).filter(Boolean), o => o.evidenceId);
+      for (const o of occurrences) if (o.correction) {
+        const old = occurrences.find(x => x.evidenceId === o.correction.supersedes);
+        if (!old || old.evidenceId === o.evidenceId || (old.correction && old.correction.at > o.correction.at) ||
+            occurrences.some(x => x.evidenceId !== o.evidenceId && x.correction?.supersedes === old.evidenceId)) throw new Error('Invalid occurrence correction');
+        const visited = new Set([o.evidenceId]); let parent = old;
+        while (parent) {
+          if (visited.has(parent.evidenceId)) throw new Error('Cyclic occurrence correction');
+          visited.add(parent.evidenceId); parent = occurrences.find(x => x.evidenceId === parent.correction?.supersedes);
+        }
+      }
+      // Retain the forensic record while allowing an explicit correction to replace its factual conclusion.
+      const effectiveOccurrences = occurrences.filter(o => !occurrences.some(x => x.correction?.supersedes === o.evidenceId));
+      const starts = [...new Set(effectiveOccurrences.map(o => o.occurredAt).filter(Boolean))];
+      const ends = [...new Set(effectiveOccurrences.map(o => o.endedAt).filter(Boolean))];
+      if (starts.length > 1 || ends.length > 1) throw new Error('Conflicting occurrence evidence');
+      const occurredAt = starts[0], endedAt = ends[0], cutover = Date.parse(ISP.userNoticeAppliesFrom);
+      const uncertain = !occurredAt || (Date.parse(occurredAt) < cutover && (!endedAt || Date.parse(endedAt) >= cutover));
+      const decisions = merge(eventFacts.map(v => v.ispIncident.userNoticeDecision).filter(Boolean), d => d.decisionId);
+      const latest = [...decisions].sort((a, b) => a.at.localeCompare(b.at)).slice(-1)[0];
+      if (latest && decisions.some(d => d.at === latest.at && d.applies !== latest.applies)) throw new Error('Conflicting occurrence decisions');
+      const definite = !!occurredAt && Date.parse(occurredAt) >= cutover;
+      // Evidence intake must not depend on an officer making a replacement decision in the same call.
+      const needsRedecision = !uncertain && !!latest && latest.applies !== definite;
+      const applicability = needsRedecision ? 're-decision-required' : uncertain ? latest ? latest.applies ? 'applicable' : 'not-applicable' : 'decision-required' : definite ? 'applicable' : 'not-applicable';
+      const correction = effectiveOccurrences.filter(o => o.correction).sort((a, b) =>
+        a.correction.at.localeCompare(b.correction.at) || a.evidenceId.localeCompare(b.evidenceId)).slice(-1)[0];
+      const retirement = correction && (!latest || correction.correction.at >= latest.at)
+        ? { ref: correction.evidenceId, ground: 'occurrence-corrected' as const }
+        : latest ? { ref: latest.decisionId, ground: 'applicability-redecided' as const } : null;
+      // A pending re-decision cannot suppress either independently sufficient source of an owed duty.
+      ispUserRules.set(eventId, { applicable: definite || !!latest?.applies,
+        occurrences, retirement,
+        decisions: [...decisions].sort((a, b) => a.at.localeCompare(b.at) || a.decisionId.localeCompare(b.decisionId)) });
+      const status = ispStatus(eventId), reportDueAt = law.taskPolicy ? null : new Date(Date.parse(knowledgeAt) + IMMEDIATE_TIMING_RULE.ispHours * 3600000).toISOString();
+      ispAssessments.push({ eventId, knowledgeAt, initialReport: { dueAt: status === true ? reportDueAt : null,
+        dueRule: law.dueRule, displayedBasis: law.displayedBasis, taskPolicy: law.taskPolicy ? 'display-only' : 'track', automaticExemption: false,
+        applicability: status === true ? 'verified' : status === false ? 'not-applicable' : 'unverified',
+        provisionalResponseDueAt: status === 'unknown' ? reportDueAt : null },
+        userNotice: { applicability, decisionRefs: decisions.map(d => d.decisionId),
+          occurrenceEvidenceRefs: occurrences.map(o => o.evidenceId), effectiveOccurrenceEvidenceRefs: effectiveOccurrences.map(o => o.evidenceId),
+          reasonCode: needsRedecision ? 'occurrence-evidence-contradicts-decision' : null,
+          reason: needsRedecision ? '확인된 사고 발생 시각이 기존 이용자 통지 적용 결정과 달라 재판정이 필요합니다.' : null } });
+    }
+    const ispUserApplicable = (eventId: string) => ispUserRules.get(eventId)?.applicable === true;
+    // Replay the effective decision intervals, including a duty first recognized after its original trigger.
+    // A new cause after a negative re-decision does not belong to the earlier applicable interval.
+    const ispUserPreviouslyApplicable = (eventId: string, at: string) => {
+      const rule = ispUserRules.get(eventId);
+      return rule?.decisions.some((d, i, all) => d.applies && (!all[i + 1] || all[i + 1].at > at)) === true ||
+        rule?.occurrences.some(o => o.occurredAt !== null && Date.parse(o.occurredAt) >= Date.parse(ISP.userNoticeAppliesFrom) &&
+          rule.occurrences.some(next => next.correction?.supersedes === o.evidenceId && next.correction.at > at)) === true;
+    };
     type Cause = { family: DutyFamily; eventId: string; at: string; recipients: string; fact: BoundFinding['facts']; discoveredAt?: string; evidenceAt?: string; verdictRefs?: string[] };
     const causes: Cause[] = [];
     for (const v of facts) {
-      const possibleAt = v.possibilityKnownAt ?? v.awarenessAt;
-      if (v.possibleGround !== null && possibleAt >= INCIDENT_COMMON_RULE.possibilityEffectiveFrom) causes.push({ family: 'possibility', eventId: v.possibilityEventId,
-        at: possibleAt, evidenceAt: v.status === 'possible' ? v.determinationAt : possibleAt, recipients: v.recipientScopeRef, fact: v });
-      if (v.status === 'confirmed') {
-        causes.push({ family: 'confirmed', eventId: v.verdictId, at: v.determinationAt, recipients: v.recipientScopeRef, fact: v });
-        if (v.reportTriggers.length) causes.push({ family: 'report', eventId: v.reportEventId, at: v.reportKnownAt, recipients: 'PIPC-or-KISA', fact: v });
-        if (v.newlyConfirmedAt !== null) {
-          causes.push({ family: 'additional-notice', eventId: v.additionalEventId, at: v.newlyConfirmedAt, recipients: v.recipientScopeRef, fact: v });
-          if (v.reportTriggers.length) causes.push({ family: 'additional-report', eventId: v.additionalEventId, at: v.newlyConfirmedAt, recipients: 'PIPC-or-KISA', fact: v });
+      // Other-law causes bind actual deliveries even when this owner has no duty under that law.
+      {
+        const possibleAt = v.possibilityKnownAt ?? v.awarenessAt;
+        if (v.possibleGround !== null && possibleAt >= INCIDENT_COMMON_RULE.possibilityEffectiveFrom) causes.push({ family: 'possibility', eventId: v.possibilityEventId,
+          at: possibleAt, evidenceAt: v.status === 'possible' ? v.determinationAt : possibleAt, recipients: v.recipientScopeRef, fact: v });
+        if (v.status === 'confirmed') {
+          causes.push({ family: 'confirmed', eventId: v.verdictId, at: v.determinationAt, recipients: v.recipientScopeRef, fact: v });
+          if (v.reportTriggers.length) causes.push({ family: 'report', eventId: v.reportEventId, at: v.reportKnownAt, recipients: 'PIPC-or-KISA', fact: v });
+          if (v.newlyConfirmedAt !== null) {
+            causes.push({ family: 'additional-notice', eventId: v.additionalEventId, at: v.newlyConfirmedAt, recipients: v.recipientScopeRef, fact: v });
+            if (v.reportTriggers.length) causes.push({ family: 'additional-report', eventId: v.additionalEventId, at: v.newlyConfirmedAt, recipients: 'PIPC-or-KISA', fact: v });
+          }
         }
       }
-      if (owner.kind === 'hospital' && v.medicalIncident?.electronicIntrusion) causes.push({ family: 'medical', eventId: `medical:${v.medicalIncident.occurredAt}`, at: MEDICAL_TRIGGER_RULE.at(v.medicalIncident),
+      if (owner.kind !== 'processor' && v.medicalIncident?.electronicIntrusion) causes.push({ family: 'medical', eventId: `medical:${v.medicalIncident.occurredAt}`, at: MEDICAL_TRIGGER_RULE.at(v.medicalIncident),
         discoveredAt: v.medicalIncident.discoveredAt, recipients: 'MOHW', fact: v });
       const isp = v.ispIncident;
       if (isp?.attackCaused) {
@@ -835,18 +1100,32 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
     const initial = (c: Cause) => !['confirmed', 'report'].includes(c.family) || !sources.some(x => x.family === c.family && x.recipients === c.recipients &&
       (x.at < c.at || (x.at === c.at && x.eventId < c.eventId)));
     const dutySources = sources.filter(initial);
-    const userNoticeFields = (fact: BoundFinding['facts']) => fact.ispIncident.userImpact?.detailsComplete === false ?
-      IMMEDIATE_TIMING_RULE.ispUserFields.slice(1) : IMMEDIATE_TIMING_RULE.ispUserFields;
-    const ispStatus = (eventId: string) => {
-      const candidates = findings.filter(x => x.facts.ispIncident?.eventId === eventId).sort((a, b) =>
-        (a.facts.ispIncident.verification?.at ?? '').localeCompare(b.facts.ispIncident.verification?.at ?? '') || a.recordedAt.localeCompare(b.recordedAt));
-      const latest = candidates.slice(-1)[0]?.facts.ispIncident;
-      if (latest && candidates.some(x => x.facts.ispIncident.verification?.at === latest.verification?.at && x.facts.ispIncident.status !== latest.status)) throw new Error('Conflicting ISP verification');
-      return latest?.status ?? 'unknown';
+    // Reconstruct what could be observed from the recorded evidence, even on a single batch replay.
+    // A backdated correction cannot erase a duty seen before that correction was recorded.
+    const ispUserPreviouslyObserved = (c: Cause) => {
+      const eventFindings = findings.filter(x => x.facts.ispIncident?.eventId === c.fact.ispIncident.eventId);
+      const causeRecordedAt = eventFindings.filter(x => {
+        const incident = x.facts.ispIncident;
+        return incident.userImpact?.recipientScopeRef === c.recipients && (c.family === 'isp-user'
+          ? incident.userImpact.confirmedAt === c.at
+          : incident.additionalFacts?.some(a => a.eventId === c.eventId && a.confirmedAt === c.at));
+      }).map(x => x.recordedAt).sort()[0];
+      return eventFindings.some(observed => {
+        if (observed.recordedAt < causeRecordedAt) return false;
+        const known = eventFindings.filter(x => x.recordedAt <= observed.recordedAt);
+        const occurrences = known.map(x => x.facts.ispIncident.occurrence).filter(Boolean);
+        const definite = occurrences.some(o => o.occurredAt !== null && Date.parse(o.occurredAt) >= Date.parse(ISP.userNoticeAppliesFrom) &&
+          !occurrences.some(next => next.correction?.supersedes === o.evidenceId));
+        const decisions = known.map(x => x.facts.ispIncident.userNoticeDecision).filter(Boolean)
+          .sort((a, b) => a.at.localeCompare(b.at) || a.decisionId.localeCompare(b.decisionId));
+        return definite || decisions.slice(-1)[0]?.applies === true;
+      });
     };
+    const userNoticeFields = (fact: BoundFinding['facts'], posting = false) => !posting && fact.ispIncident.userImpact?.detailsComplete === false ?
+      IMMEDIATE_TIMING_RULE.ispUserPriorityFields : IMMEDIATE_TIMING_RULE.ispUserFields;
     const rawNotices = [...(previous?.ledger.notices ?? []), ...list(history.notices)];
     const parsedNotices = rawNotices.map(value => {
-      const n = optionalObject(value, ['kind', 'triggeredAt', 'noticeId', 'sentAt'], ['institutionId', 'incidentId', 'triggerEventId', 'recipientScopeRef', 'coversAll', 'evidenceId', 'recordedAt', 'coveredFields', 'channel', 'posting']);
+      const n = optionalObject(value, ['kind', 'triggeredAt', 'noticeId', 'sentAt'], ['institutionId', 'incidentId', 'triggerEventId', 'recipientScopeRef', 'coversAll', 'evidenceId', 'recordedAt', 'coveredFields', 'channel', 'posting', 'operatorEvidence', 'missingFields', 'invalidFields']);
       choice(n.kind, Object.keys(DUTY_FAMILY) as DutyKind[]); string(n.noticeId); utc(n.triggeredAt); utc(n.sentAt);
       const family = DUTY_FAMILY[n.kind], recordedAt = utc(n.recordedAt ?? asOf);
       if (n.sentAt < n.triggeredAt || n.sentAt > recordedAt || recordedAt > asOf ||
@@ -856,23 +1135,87 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
         : dutySources.filter(c => c.family === family && c.at === n.triggeredAt && (!n.triggerEventId || c.eventId === n.triggerEventId));
       if (matches.length !== 1) throw new Error('Unknown or ambiguous notice trigger');
       if (n.coversAll !== undefined && typeof n.coversAll !== 'boolean') throw new Error('Coverage evidence required');
-      if (n.coveredFields !== undefined) uniqueStrings(n.coveredFields);
+      if (n.coveredFields !== undefined) uniqueStrings(n.coveredFields, family.startsWith('isp-'));
       if (n.channel !== undefined) choice(n.channel, ['MOHW-official', 'MOHW-delegated', 'PIPC', 'KISA', 'MSIT', 'affected-users']);
       if (n.posting) { const p = object(n.posting, ['justCause', 'evidenceId', 'maintainedThrough', 'maintenanceEvidenceId']);
         string(p.justCause); string(p.evidenceId); string(p.maintenanceEvidenceId); utc(p.maintainedThrough);
-        if (!NO_LEAK_CLOSURE_RULE.postingFamilies.includes(family) || !n.coveredFields || p.maintainedThrough < n.sentAt || p.maintainedThrough > recordedAt) throw new Error('Invalid posting evidence'); }
+        if (!NO_LEAK_CLOSURE_RULE.postingFamilies.includes(family) || (!family.startsWith('isp-') && !n.coveredFields) || p.maintainedThrough < n.sentAt || p.maintainedThrough > recordedAt) throw new Error('Invalid posting evidence'); }
       if (family === 'medical' && (!MEDICAL_TRIGGER_RULE.channels.includes(n.channel) || !['institution-name', 'incident-time', 'damage-details', 'technical-support-request'].every(k => n.coveredFields?.includes(k)))) throw new Error('MOHW official channel and content required');
-      if (['isp-report', 'isp-supplement'].includes(family) && (!['MSIT', 'KISA'].includes(n.channel) ||
-          !(family === 'isp-report' ? IMMEDIATE_TIMING_RULE.ispReportFields : ['newly-confirmed-facts']).every(k => n.coveredFields?.includes(k)))) throw new Error('ISP report channel and content required');
-      if (['isp-user', 'isp-user-additional'].includes(family) && (!n.posting && n.channel !== 'affected-users' ||
-          !(family === 'isp-user' ? userNoticeFields((matches[0] as Cause).fact) : ['newly-confirmed-facts']).every(k => n.coveredFields?.includes(k)))) throw new Error('ISP user content required');
+      // Preserve what was actually sent; recompute deficiencies instead of trusting a replayed assessment.
+      const ispFields = ['isp-report', 'isp-supplement'].includes(family)
+        ? (family === 'isp-report' ? IMMEDIATE_TIMING_RULE.ispReportFields : ['newly-confirmed-facts'])
+        : ['isp-user', 'isp-user-additional'].includes(family)
+          ? (n.posting ? IMMEDIATE_TIMING_RULE.ispUserFields : family === 'isp-user' ? userNoticeFields((matches[0] as Cause).fact) : ['newly-confirmed-facts']) : null;
+      const missingFields = ispFields?.filter(k => !n.coveredFields?.includes(k)).map(k => `coveredFields.${k}`);
+      const needsChannel = ispFields && !n.posting;
+      if (needsChannel && !n.channel) missingFields.push('channel');
+      const invalidFields = needsChannel && n.channel && !(['isp-report', 'isp-supplement'].includes(family)
+        ? ['MSIT', 'KISA'].includes(n.channel) : n.channel === 'affected-users') ? ['channel'] : [];
       return { kind: n.kind as DutyKind, triggeredAt: n.triggeredAt, noticeId: n.noticeId, sentAt: n.sentAt,
         institutionId: authority.institutionId, incidentId: f.incidentId, triggerEventId: matches[0].eventId,
         recipientScopeRef: string(n.recipientScopeRef ?? matches[0].recipients), coversAll: n.coversAll ?? true,
         evidenceId: string(n.evidenceId ?? n.noticeId), recordedAt,
+        ...(ispFields ? { missingFields, invalidFields } : {}),
         ...(n.coveredFields ? { coveredFields: [...n.coveredFields].sort() } : {}), ...(n.channel ? { channel: n.channel } : {}), ...(n.posting ? { posting: { ...n.posting } } : {}) };
     });
-    const notices = merge(parsedNotices, n => n.noticeId, n => { const { recordedAt, ...bound } = n; return bound; });
+    const notices: BoundNotice[] = merge(parsedNotices, n => n.noticeId, n => { const { recordedAt, ...bound } = n; return bound; });
+    const attributionFields = ['reporterEntity', 'capacity', 'recipientAuthority', 'incidentIdentity', 'coveredItems', 'performedAt', 'legalBasisRef'];
+    const noticeAttributions = merge([...(previous?.ledger.noticeAttributions ?? []), ...list(history.noticeAttributions)].map(value => {
+      const a = structuredClone(optionalObject(value, ['attributionId', 'noticeId', 'recordedAt', 'kind'], ['supersedes', ...attributionFields])) as IncidentNoticeAttribution;
+      string(a.attributionId); string(a.noticeId); utc(a.recordedAt);
+      choice(a.kind, ['pipa-processor-report', 'unattributed-other-law-report', 'pipa-processor-subject-notice', 'contract-notice-to-hospital',
+        'pipa-controller-report', 'pipa-controller-subject-notice', 'mohw-notice']);
+      const n = notices.find(n => n.noticeId === a.noticeId);
+      if (owner.kind !== 'operator' || !n || DUTY_FAMILY[n.kind].startsWith('isp-') || a.recordedAt > asOf || a.recordedAt < n.recordedAt) throw new Error('Unbound attribution');
+      const reportKind = ['pipa-processor-report', 'unattributed-other-law-report', 'pipa-controller-report'].includes(a.kind);
+      if (reportKind ? !['report', 'additional-report'].includes(DUTY_FAMILY[n.kind]) : a.kind === 'mohw-notice' ? n.kind !== 'mohw-notice' :
+          !['possibility', 'confirmed', 'additional-notice', 'no-leak'].includes(DUTY_FAMILY[n.kind])) throw new Error('Attribution kind conflicts with performed act');
+      if (a.supersedes !== undefined) string(a.supersedes);
+      for (const field of ['reporterEntity', 'capacity'] as const) if (a[field] !== undefined) string(a[field]);
+      if (a.recipientAuthority !== undefined) { if (Array.isArray(a.recipientAuthority)) uniqueStrings(a.recipientAuthority); else string(a.recipientAuthority); }
+      if (a.incidentIdentity) { const i = object(a.incidentIdentity, ['eventId', 'attackCaused', 'serviceRelationEvidenceId']);
+        string(i.eventId); string(i.serviceRelationEvidenceId); if (typeof i.attackCaused !== 'boolean') throw new Error('Attack evidence required'); }
+      if (a.coveredItems !== undefined) uniqueStrings(a.coveredItems);
+      if (a.performedAt !== undefined && utc(a.performedAt) !== n.sentAt) throw new Error('Attribution cannot rewrite performance time');
+      if (a.legalBasisRef) { const b = object(a.legalBasisRef, ['basis', 'documentRef']); string(b.basis); string(b.documentRef); }
+      return a;
+    }), a => a.attributionId);
+    for (const a of noticeAttributions) if (a.supersedes) {
+      const old = noticeAttributions.find(x => x.attributionId === a.supersedes);
+      if (!old || old.noticeId !== a.noticeId || old.recordedAt > a.recordedAt || old.attributionId === a.attributionId ||
+          noticeAttributions.some(x => x.attributionId !== a.attributionId && x.supersedes === a.supersedes)) throw new Error('Invalid attribution revision');
+      const seen = new Set([a.attributionId]); let parent = old;
+      while (parent) { if (seen.has(parent.attributionId)) throw new Error('Cyclic attribution revision'); seen.add(parent.attributionId);
+        parent = noticeAttributions.find(x => x.attributionId === parent.supersedes); }
+    }
+    for (const n of notices) if (owner.kind === 'operator' && !DUTY_FAMILY[n.kind].startsWith('isp-')) {
+      const attributionHistory = noticeAttributions.filter(a => a.noticeId === n.noticeId);
+      const latest = attributionHistory.filter(a => !attributionHistory.some(x => x.supersedes === a.attributionId));
+      if (latest.length > 1) throw new Error('Ambiguous attribution');
+      const a = latest[0], kind = a?.kind ?? (['report', 'additional-report'].includes(DUTY_FAMILY[n.kind]) ? 'unattributed-other-law-report' : n.kind === 'mohw-notice' ? 'mohw-notice' : null);
+      const isReport = ['pipa-processor-report', 'unattributed-other-law-report', 'pipa-controller-report'].includes(kind);
+      const missingFields = attributionFields.filter(k => a?.[k] === undefined), invalidFields: string[] = [];
+      const valid = (field: string, ok: boolean) => { if (!missingFields.includes(field) && !ok) invalidFields.push(field); };
+      valid('reporterEntity', a?.reporterEntity === owner.id);
+      valid('capacity', a?.capacity === 'processor-own-duty');
+      const event = facts.find(f => f.ispIncident?.eventId === a?.incidentIdentity?.eventId && f.ispIncident.attackCaused)?.ispIncident;
+      valid('incidentIdentity', !!event && a?.incidentIdentity?.attackCaused === true);
+      const delivered = members(n.recipientScopeRef) ?? [];
+      const serviceUsers = members(event?.userImpact?.recipientScopeRef ?? '') ?? [];
+      const eligibleRecipientIds = Array.isArray(a?.recipientAuthority) ? a.recipientAuthority.filter(id => delivered.includes(id) && serviceUsers.includes(id)).sort() : [];
+      valid('recipientAuthority', isReport ? ['PIPC', 'KISA'].includes(a?.recipientAuthority as string) && a?.recipientAuthority === n.channel :
+        Array.isArray(a?.recipientAuthority) && a.recipientAuthority.length > 0 && eligibleRecipientIds.length === a.recipientAuthority.length);
+      const required = isReport ? IMMEDIATE_TIMING_RULE.ispReportFields : IMMEDIATE_TIMING_RULE.ispUserFields;
+      valid('coveredItems', required.every(k => a?.coveredItems?.includes(k)));
+      if (a?.coveredItems) missingFields.push(...required.filter(k => !a.coveredItems.includes(k)).map(k => `coveredItems.${k}`));
+      valid('legalBasisRef', isReport ? a?.legalBasisRef?.basis === 'P26⑧→P34④+PD40' :
+        ['P26⑧→P34①+PD39', 'P26⑧→P34②+PD39의2·39의3'].includes(a?.legalBasisRef?.basis));
+      n.operatorEvidence = { kind, attributionComplete: missingFields.length === 0 && invalidFields.length === 0,
+        missingFields, invalidFields, attributionHistory, eligibleRecipientIds, perRecipient: !isReport, recipientMustBeOperatorServiceUser: !isReport,
+        classification: { 'isp-incident-report': ['pipa-processor-report', 'unattributed-other-law-report'].includes(kind) ? 'evidence-only' : 'never',
+          'isp-user-notice': ['pipa-processor-subject-notice', 'contract-notice-to-hospital'].includes(kind) || kind === null ? 'evidence-only' : 'never',
+          'isp-incident-report-supplement': 'never' } };
+    }
     const delays = merge([...(previous?.ledger.delays ?? []), ...list(history.delays)].map(value => {
       const d = structuredClone(optionalObject(value, ['delayId', 'obligationKey', 'clause', 'version', 'reason', 'evidenceId', 'by', 'recordedAt', 'startedAt', 'clearedAt', 'accepted', 'decisionId', 'supersedes'], ['category', 'decider', 'causalReview']));
       for (const k of ['delayId', 'obligationKey', 'clause', 'version', 'reason', 'evidenceId']) string(d[k]);
@@ -945,12 +1288,18 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
       key(a.family, a.eventId, a.recipients).localeCompare(key(b.family, b.eventId, b.recipients)));
     for (const c of ordered) {
       const isIsp = c.family.startsWith('isp-'), applicability = isIsp ? ispStatus(c.fact.ispIncident.eventId) : true;
+      if (owner.kind === 'operator' && !isIsp) continue;
       if (applicability === false) continue;
+      const reportLaw = ['isp-report', 'isp-supplement'].includes(c.family) ? ispLawAt(c.at) : null;
+      if (reportLaw?.taskPolicy) continue;
+      if (['isp-user', 'isp-user-additional'].includes(c.family) && !ispUserApplicable(c.fact.ispIncident.eventId) &&
+          !ispUserPreviouslyApplicable(c.fact.ispIncident.eventId, c.at) &&
+          !ispUserPreviouslyObserved(c)) continue;
       if (['isp-supplement', 'isp-user-additional'].includes(c.family)) {
         const prior = notices.some(n => postingReady(n) && performedAt(n) <= c.at && (c.family === 'isp-supplement'
           ? ((n.kind === 'isp-incident-report' && n.triggerEventId === c.fact.ispIncident.eventId) ||
-            (['mohw-notice', 'pipc-kisa-report', 'pipc-kisa-priority'].includes(n.kind) && ['MOHW-official', 'MOHW-delegated', 'PIPC', 'KISA'].includes(n.channel) && IMMEDIATE_TIMING_RULE.ispReportFields.every(k => n.coveredFields?.includes(k))))
-          : ((n.kind === 'isp-user-notice' || ['possible-leak', 'confirmed-leak', 'confirmed-priority'].includes(n.kind)) && noticeCovers(n, c.recipients) && userNoticeFields(c.fact).every(k => n.coveredFields?.includes(k)))));
+            (owner.kind !== 'operator' && NO_LEAK_CLOSURE_RULE.deemedReportKinds.includes(n.kind) && n.sentAt >= c.fact.awarenessAt && ['MOHW-official', 'MOHW-delegated', 'PIPC', 'KISA'].includes(n.channel) && IMMEDIATE_TIMING_RULE.ispReportFields.every(k => n.coveredFields?.includes(k))))
+          : ((n.kind === 'isp-user-notice' || (owner.kind !== 'operator' && ['possible-leak', 'confirmed-leak', 'confirmed-priority'].includes(n.kind))) && noticeCovers(n, c.recipients) && userNoticeFields(c.fact, !!n.posting).every(k => n.coveredFields?.includes(k)))));
         if (!prior) continue;
       }
       const mode = facts.filter(v => v.status === 'confirmed' && v.determinationAt === c.fact.determinationAt).some(v => v.detailsComplete);
@@ -977,7 +1326,8 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
       const basis = ({ possibility: ['privacy:34.2', 'privacy-decree:39-2', 'privacy-decree:39-3.1'], confirmed: ['privacy:34.1', 'privacy-decree:39.1', 'privacy-decree:39.2'],
         'additional-notice': ['privacy-decree:39.2'], 'no-leak': ['privacy-decree:39-3.3'], report: ['privacy:34.4', 'privacy-decree:40.1', 'privacy-decree:40.2'],
         'additional-report': ['privacy-decree:40.2'], medical: ['medical:23-3.1', 'medical-rules:16-2.1'],
-        'isp-report': ['network:48-3.1', 'network-decree:58-8.1'], 'isp-supplement': ['network-decree:58-8.2'],
+        'isp-report': reportLaw ? [reportLaw.displayedBasis, reportLaw.relatedBasis.methods] : [],
+        'isp-supplement': reportLaw ? [reportLaw.relatedBasis.supplement] : [],
         'isp-user': ['network:48-3.4', 'network-decree:58-9'], 'isp-user-additional': ['network-decree:58-9.3'] })[c.family];
       if (replaces.length) basis.push('privacy-decree:39-3.2');
       obligations.push({ obligationKey: key(c.family, c.eventId, c.recipients), family: c.family, triggerEventId: c.eventId, recipientScopeRef: c.recipients,
@@ -987,7 +1337,7 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
         causeRefs: [c.eventId, c.fact.evidenceId, ...(c.fact.supersedes ? [c.fact.supersedes] : []), ...replaces.map(x => x.eventId).sort(),
           ...(c.family === 'no-leak' ? possibleNotices.filter(n => covers(n.recipientScopeRef, c.recipients)).map(n => n.noticeId) : [])],
         elapsedMs: 0, lateByMs: null, sinceDiscoveryMs: null, sinceClearanceMs: null, timeliness: IMMEDIATE_TIMING_RULE.timeliness,
-        delayRefs: [], decisionRefs: [], replacedBy: null, observations: [], corrections: [],
+        delayRefs: [], decisionRefs: [], replacedBy: null, reasonCode: null, observations: [], corrections: [],
         verdictRefs: [...new Set(c.verdictRefs ?? [c.fact.verdictId])].sort(), warnings: [], designationUnverified: false,
         obligationOwner: { ...owner }, sinceHospitalKnowledgeMs: null, applicability: applicability === 'unknown' ? 'unverified' : 'verified', audience: 'privacy-officer',
         provisionalResponseDueAt: applicability === 'unknown' ? originalDueAt : null, provisionalDeadlinePassed: false, closureGround: null });
@@ -995,9 +1345,15 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
     // Every piece of evidence must have a unique destination; reject the whole snapshot if a reference is unusable.
     const belongs = (n: BoundNotice, o: IncidentObligation) => DUTY_FAMILY[n.kind] === o.family && n.triggerEventId === o.triggerEventId &&
       (n.triggeredAt === o.triggeredAt || (o.family === 'no-leak' && n.triggeredAt >= o.triggeredAt)) &&
-      (n.recipientScopeRef === o.recipientScopeRef || (o.family === 'no-leak' && covers(n.recipientScopeRef, o.recipientScopeRef)) || (!n.coversAll && o.family === 'possibility'));
-    for (const n of notices) if (!obligations.some(o => belongs(n, o)) && !dutySources.some(c => c.family === DUTY_FAMILY[n.kind] &&
-      c.family.startsWith('isp-') && c.eventId === n.triggerEventId && ispStatus(c.fact.ispIncident.eventId) === false)) throw new Error('Unbound notice scope');
+      (n.recipientScopeRef === o.recipientScopeRef || (o.family === 'no-leak' && covers(n.recipientScopeRef, o.recipientScopeRef)) ||
+        (owner.kind === 'operator' && ['isp-user', 'isp-user-additional'].includes(o.family) && covers(o.recipientScopeRef, n.recipientScopeRef)) || (!n.coversAll && o.family === 'possibility'));
+    const operatorEvidence = (n: BoundNotice) => owner.kind === 'operator' && [...dutySources, ...followupMap.values()].some(c => !c.family.startsWith('isp-') &&
+      c.family === DUTY_FAMILY[n.kind] && c.eventId === n.triggerEventId && (c.at === n.triggeredAt || (c.family === 'no-leak' && c.at <= n.triggeredAt)) &&
+      (c.recipients === n.recipientScopeRef || covers(c.recipients, n.recipientScopeRef)));
+    for (const n of notices) if (!obligations.some(o => belongs(n, o)) && !operatorEvidence(n) && !dutySources.some(c => c.family === DUTY_FAMILY[n.kind] &&
+      c.family.startsWith('isp-') && c.eventId === n.triggerEventId && (ispStatus(c.fact.ispIncident.eventId) === false ||
+        (['isp-report', 'isp-supplement'].includes(c.family) && ispLawAt(c.at).taskPolicy) ||
+        (['isp-user', 'isp-user-additional'].includes(c.family) && !ispUserApplicable(c.fact.ispIncident.eventId))))) throw new Error('Unbound notice scope');
     for (const d of delays) {
       const o = obligations.find(o => o.obligationKey === d.obligationKey);
       if (!o || d.clause !== DELAY_RULE.clauses[o.family] || d.startedAt < o.triggeredAt) throw new Error('Wrong delay provision');
@@ -1013,12 +1369,18 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
     // 4. Calculate performance separately from timing and final judgments. A late delivery can fulfill the duty.
     for (const o of obligations) {
       const matching = notices.filter(n => belongs(n, o)).sort((a, b) => a.sentAt.localeCompare(b.sentAt) || a.noticeId.localeCompare(b.noticeId));
-      const direct = completion(matching.filter(n => postingReady(n) && (!n.posting || o.requiredFields.every(k => n.coveredFields.includes(k)))), o.recipientScopeRef);
-      const deemed = notices.filter(n => postingReady(n) && performedAt(n) >= o.triggeredAt && (
-        o.family === 'isp-report' ? ['mohw-notice', 'pipc-kisa-report', 'pipc-kisa-priority'].includes(n.kind) &&
+      // ND58-9(5) and PD39(3) posting carry the full notice items, including priority and additional notices.
+      const performanceFields = (n: BoundNotice) => n.posting && ['isp-user', 'isp-user-additional'].includes(o.family) ? IMMEDIATE_TIMING_RULE.ispUserFields :
+        n.posting && ['confirmed', 'additional-notice'].includes(o.family) ? LEAK_NOTICE_FIELDS : o.requiredFields;
+      const direct = completion(matching.filter(n => !n.missingFields?.length && !n.invalidFields?.length && postingReady(n) && (!n.posting || performanceFields(n).every(k => n.coveredFields?.includes(k)))), o.recipientScopeRef);
+      // D839: attached other-law evidence does not establish the operator's own ISP performance.
+      const deemed = notices.filter(n => owner.kind !== 'operator' && postingReady(n) && performedAt(n) >= o.triggeredAt && (
+        o.family === 'isp-report' ? NO_LEAK_CLOSURE_RULE.deemedReportKinds.includes(n.kind) &&
           ['MOHW-official', 'MOHW-delegated', 'PIPC', 'KISA'].includes(n.channel) && o.requiredFields.every(k => n.coveredFields?.includes(k)) :
-        ['isp-user', 'isp-user-additional'].includes(o.family) ? ['possible-leak', 'confirmed-leak', 'confirmed-priority', 'confirmed-additional'].includes(n.kind) &&
-          noticeCovers(n, o.recipientScopeRef) && o.requiredFields.every(k => n.coveredFields?.includes(k)) : false
+        o.family === 'isp-supplement' ? NO_LEAK_CLOSURE_RULE.supplementDeemed.kinds.includes(n.kind) &&
+          ['MSIT', 'KISA'].includes(n.channel) && o.requiredFields.every(k => n.coveredFields?.includes(k)) :
+        ['isp-user', 'isp-user-additional'].includes(o.family) ? NO_LEAK_CLOSURE_RULE.deemedUserKinds.includes(n.kind) &&
+          noticeCovers(n, o.recipientScopeRef) && performanceFields(n).every(k => n.coveredFields?.includes(k)) : false
       )).sort((a, b) => performedAt(a).localeCompare(performedAt(b)))[0];
       const residual = o.family === 'possibility' ? notices.find(n => ['confirmed-leak', 'confirmed-priority'].includes(n.kind) &&
         n.triggeredAt > o.originalDueAt && postingReady(n) && noticeCovers(n, o.recipientScopeRef) && possibleFields.every(k => n.coveredFields?.includes(k))) : undefined;
@@ -1045,6 +1407,21 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
       const boundDecisions = decisions.filter(d => d.obligationKey === o.obligationKey);
       o.decisionRefs = boundDecisions.map(d => d.decisionId).sort();
       o.designationUnverified = [...applicableDelays, ...boundDecisions].some(d => !DELAY_RULE.decider(d.decider, owner.id));
+      let retiredUserDuty = false;
+      let userRetirementGround: IncidentObligation['closureGround'] = null;
+      if (['isp-user', 'isp-user-additional'].includes(o.family)) {
+        const event = dutySources.find(c => c.family === o.family && c.eventId === o.triggerEventId).fact.ispIncident;
+        const assessment = ispAssessments.find(x => x.eventId === event.eventId);
+        o.decisionRefs = [...o.decisionRefs, ...assessment.userNotice.decisionRefs];
+        o.reasonCode = assessment.userNotice.reasonCode;
+        retiredUserDuty = !ispUserApplicable(event.eventId) && assessment.userNotice.applicability === 'not-applicable';
+        const rule = ispUserRules.get(event.eventId);
+        if (retiredUserDuty) { o.replacedBy = rule.retirement.ref; userRetirementGround = rule.retirement.ground; }
+        if (rule.occurrences.some(x => x.correction)) o.causeRefs = [...new Set([...o.causeRefs,
+          ...rule.occurrences.flatMap(x => [x.evidenceId, ...(x.correction ? [x.correction.supersedes, x.correction.evidenceId] : [])])])].sort();
+        o.designationUnverified ||= !DELAY_RULE.decider(event.userImpact.decider, owner.id) ||
+          facts.some(v => v.ispIncident?.eventId === event.eventId && v.ispIncident.userNoticeDecision && !DELAY_RULE.decider(v.ispIncident.userNoticeDecision.decider, owner.id));
+      }
       const final = boundDecisions.find(d => d.effect === 'final-breach');
       const exemption = boundDecisions.find(d => d.effect === 'report-exemption' && DELAY_RULE.decider(d.decider, owner.id));
       const current = currentFor(o.recipientScopeRef);
@@ -1056,11 +1433,12 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
       const substitution = replacing ? notices.find(n => belongs(n, replacing) && postingReady(n) && noticeCovers(n, o.recipientScopeRef) &&
         possibleFields.every(k => n.coveredFields?.includes(k))) : undefined;
       const retiredFollowup = o.family === 'no-leak' && current && (current.status !== 'not-a-leak' || consecutiveRoot(current, o.recipientScopeRef).id !== o.triggerEventId) ? current : undefined;
-      o.replacedBy = substitution ? replacing.obligationKey : retiredFollowup?.id ?? null;
+      o.replacedBy = substitution ? replacing.obligationKey : retiredFollowup?.id ?? o.replacedBy;
       if (retiredFollowup) { o.verdictRefs = [...new Set([...o.verdictRefs, retiredFollowup.id])].sort(); o.causeRefs = [...new Set([...o.causeRefs, retiredFollowup.id])]; }
       if (o.family === 'no-leak' && NO_LEAK_FOLLOWUP_RULE.warnOnPostVerdictSend && possibleNotices.some(n => covers(n.recipientScopeRef, o.recipientScopeRef) &&
           n.sentAt > verdicts.find(v => v.id === o.triggerEventId).at)) o.warnings = ['possibility-notice-sent-after-no-breach-verdict'];
       if (fulfilled) o.status = 'met';
+      else if (retiredUserDuty) o.status = 'moot';
       else if (exemption) o.status = 'exempt';
       else if (retiredFollowup) o.status = 'moot';
       else if (substitution) o.status = 'met';
@@ -1070,13 +1448,13 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
       } else if ((o.dueAt !== null && asOf > o.dueAt) || boundDecisions.some(d => d.effect === 'timeliness-overdue')) o.status = 'overdue';
       else o.status = IMMEDIATE_TIMING_RULE.status;
       if (substitution && !fulfilled) { o.noticeRefs = [...new Set([...o.noticeRefs, substitution.noticeId])].sort(); o.notice = { noticeId: substitution.noticeId, sentAt: substitution.sentAt }; }
-      o.closureGround = fulfilled ? fulfilled.posting ? 'posting' : 'actual-notice' : exemption ? 'report-exemption' : retiredFollowup ? 'verdict-replaced' : substitution ? 'confirmed-notice-substitution' : null;
+      o.closureGround = fulfilled ? fulfilled.posting ? 'posting' : 'actual-notice' : retiredUserDuty ? userRetirementGround : exemption ? 'report-exemption' : retiredFollowup ? 'verdict-replaced' : substitution ? 'confirmed-notice-substitution' : null;
       if (final) o.timeliness = 'final-breach';
       else if (boundDecisions.some(d => d.effect === 'timeliness-overdue')) o.timeliness = 'overdue-determined';
-      if (o.applicability === 'unverified') { o.status = 'unverified-pending'; o.dueAt = null; o.closureGround = null;
+      if (o.applicability === 'unverified' && !retiredUserDuty) { o.status = 'unverified-pending'; o.dueAt = null; o.closureGround = null;
         o.timeliness = 'requires-review';
         o.provisionalDeadlinePassed = o.provisionalResponseDueAt !== null && asOf > o.provisionalResponseDueAt && !fulfilled; }
-      o.stillOwed = o.applicability === 'unverified' ? !fulfilled : !['met', 'moot', 'exempt'].includes(o.status);
+      o.stillOwed = o.applicability === 'unverified' && !retiredUserDuty ? !fulfilled : !['met', 'moot', 'exempt'].includes(o.status);
       o.actionRequiredNow = o.stillOwed && o.timing !== 'deferred-until-cause-cleared';
       const end = fulfilled ? performedAt(fulfilled) : substitution ? performedAt(substitution) : asOf;
       o.elapsedMs = elapsed(o.triggeredAt, end);
@@ -1095,7 +1473,11 @@ export function planIncidentResponse(authority: AuditAuthority, scope: IncidentS
     const result = freeze({ incidentId: f.incidentId, institutionId: authority.institutionId, recordedBy: { ...authority.subject },
       awarenessAt: f.awarenessAt, verdict: currentVerdict.status, determinationAt: currentVerdict.at, asOf,
       subjectsIdentifiable: scope.subjectsIdentifiable, hasNotifiedPossible: possibleNotices.length > 0,
-      obligationOwner: { ...owner }, recipientScopes, ledger: { findings, notices, delays, decisions }, obligations, status: 'planned' as const });
+      obligationOwner: { ...owner }, ispAssessments, recipientScopes,
+      operatorEvidencePrompt: owner.kind === 'operator' && notices.some(n => n.operatorEvidence) ? { audience: 'privacy-officer' as const,
+        physicianFacing: OPERATOR_OTHER_LAW_DEEMING['isp-incident-report'].physicianFacing as 'none',
+        text: OPERATOR_OTHER_LAW_DEEMING['isp-incident-report'].privacyOfficerPrompt } : null,
+      ledger: { findings, notices, noticeAttributions, delays, decisions }, obligations, status: 'planned' as const });
     incidentResponses.add(result);
     return result;
   });

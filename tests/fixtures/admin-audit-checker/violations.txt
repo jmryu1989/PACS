@@ -604,3 +604,57 @@ const ACTION = 'syn.allowed';
 export async function run(tx: Prisma.TransactionClient) {
   await tx.auditLog.create({ data: { actor: 'syn', target: 'syn', action: ACTION || 'syn.second' } }); // expect: unresolved is a || expression, outside W2
 }
+
+// ==== case: u0b-f01-a-helper-called-through-an-assertion-to-any | verdict: unresolved ====
+// Astra AUDIT-CHECKER-U0B review F01: what is read or called through an assertion is typed at the asserted type, so the
+// call is not one the check reads; the object no longer keeps to the program (W4), before W3-C and since.
+import { Prisma } from '@prisma/client';
+export class SynAsserted {
+  private go(tx: Prisma.TransactionClient, action: string) {
+    return tx.auditLog.create({ data: { actor: 'syn', action, target: 'syn' } }); // expect: unresolved which is read through the assertion `this as any`
+  }
+  async run(tx: Prisma.TransactionClient, body: any) {
+    await this.go(tx, 'syn.allowed'); // expect: unresolved a client value handed to `this.go`, which this check does not follow
+    await (this as any).go(tx, body.kind); // expect: unresolved a client value handed to `(this as any).go`, which this check does not follow
+  }
+}
+
+// ==== case: u0b-f01-a-helper-called-through-a-structural-assertion | verdict: unresolved ====
+import { Prisma } from '@prisma/client';
+type SynGo = { go(tx: Prisma.TransactionClient, action: string): unknown };
+export class SynAsserted {
+  private go(tx: Prisma.TransactionClient, action: string) {
+    return tx.auditLog.create({ data: { actor: 'syn', action, target: 'syn' } }); // expect: unresolved which is read through the assertion `this as unknown as SynGo`
+  }
+  async run(tx: Prisma.TransactionClient, body: any) {
+    await this.go(tx, 'syn.allowed'); // expect: unresolved a client value handed to `this.go`, which this check does not follow
+    await (this as unknown as SynGo).go(tx, body.kind); // expect: unresolved a client value handed to `(this as unknown as SynGo).go`, which this check does not follow
+  }
+}
+
+// ==== case: u0b-r3-p01-a-private-helper-called-through-this-as-any | verdict: unresolved ====
+// Astra AUDIT-CHECKER-U0B consult 2, P01 (her probe source verbatim but for the marks): the base W3 helper read through
+// an erased receiver is the same projection obligation (rule B′ I2) as an owned slot's.
+import { Prisma } from '@prisma/client';
+export class SynPrivate {
+  private go(tx: Prisma.TransactionClient, action: string) {
+    return tx.auditLog.create({ data: { actor: 'syn', action, target: 'syn' } }); // expect: unresolved which is read through the assertion `this as any`
+  }
+  async run(tx: Prisma.TransactionClient, body: any) {
+    await this.go(tx, 'syn.allowed'); // expect: unresolved a client value handed to `this.go`, which this check does not follow
+    await (this as any).go(tx, body.kind); // expect: unresolved a client value handed to `(this as any).go`, which this check does not follow
+  }
+}
+
+// ==== case: u0b-r3-p02-a-private-helper-called-by-a-widened-key | verdict: unresolved ====
+// P02: the key W1 fixes, read as any (`'go' as any`): the call is no longer one of the helper's (W4 projection: result).
+import { Prisma } from '@prisma/client';
+export class SynPrivate {
+  private go(tx: Prisma.TransactionClient, action: string) {
+    return tx.auditLog.create({ data: { actor: 'syn', action, target: 'syn' } }); // expect: unresolved (W4 projection: result)
+  }
+  async run(tx: Prisma.TransactionClient, body: any) {
+    await this.go(tx, 'syn.allowed'); // expect: unresolved a client value handed to `this.go`, which this check does not follow
+    await this["go" as any](tx, body.kind); // expect: unresolved a client value handed to `this["go" as any]`, which this check does not follow
+  }
+}

@@ -30,6 +30,16 @@
  * REQ-S7-RAW-PROVENANCE -> RISK-S7-RAW-HIDDEN-WRITE / RISK-S7-RAW-BEHAVIOUR-DRIFT
  *   -> TEST-S7-RAW-COMPOSITION / TEST-S7-RAW-MUTANTS.
  *
+ * AUDIT-CHECKER-U0B (Astra S9-U0b audit consult D1-D4, D765/D800): the closed world. W3-C reads an action through a public
+ * method of a class the program creates and owns (W4-C), across files, by every call the program has; an action from a
+ * request or not read, a helper or callback that leaves the program, and an object whose origin or holders are not fixed
+ * stay unresolved; the SQL rules are unchanged. The product is not shaped for it (AGENTS 1-B, D73).
+ * REQ-AUDIT-CLOSED-WORLD -> RISK-AUDIT-UNRESOLVED / RISK-AUDIT-ATTACKER-ACTION / RISK-AUDIT-OBJECT-ESCAPE /
+ *   RISK-AUDIT-SQL-PROVENANCE -> TEST-AUDIT-CLOSED-WORLD CW01-CW20 (tests/fixtures/admin-audit-checker/closed-world).
+ *   Rule B′ (every member projection proved, Astra consult 2) closes erased references within the named limits L1-L10,
+ *   which stay limits, each with its review rule (see the completeness section): no completeness is claimed beyond what
+ *   the check proves. Decorators in a holder chain: only @nestjs/common's Injectable() (L5, commander D847).
+ *
  * Module: KIN_ADMIN_AUDIT_MODULE, default api/src/admin-audit.ts loaded through Node type stripping (Node >= 22.18);
  * the compiled /app/dist/admin-audit (kin-api:ci) is the same rule. The completeness cases read api/src and api/prisma/*.cjs and use
  * api/node_modules/typescript ('npm ci --prefix api --ignore-scripts'), so the repository must be mounted with it; without
@@ -890,7 +900,7 @@ test('the query takes limit (1-100, default 25) and the sealed after only', () =
 //    its object kept, W4), each argument read by W2 or F02; no call, a call not fixed, the helper replaced, taken out or
 //    handed on is unresolved. One callback rule (the `scopeWrite` form): a helper hands a local function to a callback
 //    parameter every caller of the same file writes in place, and each callback only calls (or tests) the function it
-//    receives — those calls are the local function's.
+//    receives — those calls are the local function's. Where W3 stops, W3-C below may go on.
 //  W4 objects: a helper is reached through a class or its instances; every use of what holds one — the class name, `this`
 //    and `super` in its family's code, every value typed as its instance — is a member read, written or called by a key
 //    W1 fixes (a called member a method with a body in the program that nothing replaces, by a dot, a key or through any
@@ -901,6 +911,47 @@ test('the query takes limit (1-100, default 25) and the sealed after only', () =
 //    Prisma.join, a variable, parameter or return typed as a fragment, Array#map's result, a test, or a read of its text;
 //    anything else — an assertion to another type, a parameter typed any, an object, a library — is its own unresolved
 //    candidate there.
+//  W3-C closed calls (Astra S9-U0b audit consult D1-D2). The corpus is the private application: api/src and the Prisma
+//    CJS entry points. An export may be a module boundary inside it, but an export alone proves nothing. Where W3 stops at
+//    a public method, the same reading goes on through it only when the method is closed: a method with a body, not
+//    static, of a named class declaration of the program that extends nothing; neither the method, its parameters nor the
+//    class decorated; the class used only by `new` (and by tests, imports and types); every instance of it from such a
+//    `new` the program owns (W4-C), every holder keeping to W4; and at least one such `new`. Its calls are the accesses
+//    typed as it (W1 keys, on any receiver the checker types as the class); each argument is read by W2, the arguments of
+//    every call united, one unknown leaving the write unresolved. The callback rule then runs across files too: a local
+//    function handed to a parameter of a closed method, which every caller fills with a callback written in place (an
+//    arrow or function expression at the call), each callback only calling (or testing) what it receives. No call, a call
+//    not fixed, the method replaced, its object reached by a key W1 does not fix, the method extracted, bound or handed
+//    on, a callback handed on, kept or returned, a spread, and a recursion not yet proved stay unresolved. W3-C reads
+//    action values only (W2): an exported function, a re-export, a function's result, a reflective call (`call`, `apply`,
+//    `Reflect`) are as before, and so is every SQL rule (F02, W5, W6, the raw composition: an SQL helper of another module
+//    is refused).
+//  W4-C owned objects (D3). A holder of an instance may also be (a) the `new X(...)` of `this.f = new X(...)`, one
+//    statement of the constructor body of the class declaring `f`, and that `this.f`; or the `new X(...)` that initializes
+//    the declaration of `f`; or (b) an argument of `new D(...)` that D's one constructor with a body receives in a
+//    parameter property. The field or parameter property is private (a modifier or a #name), readonly, neither static,
+//    optional nor decorated, typed as a class of the instance's family by a name of its file or of one direct import (X
+//    itself for `new X`), written nowhere else (by a dot, a key W1 fixes or any holder), and the instances of the class
+//    that holds it keep to W4 in turn. The DI instances a facade receives (typed constructor parameters) reach its modules
+//    by (b). Anything else — a local, an any or untyped alias, an opaque consumer, a mutable or public field, a second
+//    write, a factory's result — is still handed on. The private and readonly marks are required, never evidence: the
+//    writes are counted. For every W4 object (Astra AUDIT-CHECKER-U0B review F01): a member of a holder read or called
+//    through an assertion (`as`, `<T>`) to a type that is not the object's own (any, unknown, another class or a
+//    structural type) hands the object on — neither that call nor what the read gives is typed as the object's, so no
+//    call, slot or escape after it would be traced. A member key W1 fixes reads the same member by a dot or an element
+//    access; `!`, parentheses and `satisfies` keep the type.
+//  Rule B′ (Astra AUDIT-CHECKER-U0B consult 2, after a second NEEDS_FIX on a key widened by an assertion or a wider const,
+//    `this['slot' as any]`): the holders and typed calls the check indexes are a search, not the proof. Every member read
+//    through a holder of every W4 object proves, after every other use is read: the receiver typed there is a class of
+//    the family; the member found by the W1 key there is the one the holder's type declares; a member not declared any or
+//    unknown is not read as any or unknown (W1 fixing the key does not fix what the read gives); a member called resolves
+//    to a declaration. A use that only writes (`=`, a destructuring or for-in/of target, `delete`) is counted as a write
+//    (objectWrites, slotWrites); a read-modify-write meets both. A failed obligation hands the object on, so every writer,
+//    client flow or SQL value that depends on it is unresolved where it stands. This closes the class of erased references
+//    inside the trust boundary above; it does not lift the named limits L1-L10. The receiver is read at its apparent type,
+//    so the polymorphic `this` (`this as this`) is its class (Astra review 3 F02). A slot's holder chain carries no
+//    decorator but @nestjs/common's Injectable() on a class (L5): a decorator elsewhere there may install a method body
+//    no call the check reads would show (review 3 F01).
 //  F02 SQL values, before any raw classification: an interpolation is a value (Prisma binds it) when it is a literal, a
 //    result the language makes a primitive (template, arithmetic, comparison, `!`, `typeof`), each side of ?:, ||, ?? and
 //    &&, `new Date()`, an array literal (one parameter), a const or let through its initializer and every assignment, a W3
@@ -941,6 +992,47 @@ test('the query takes limit (1-100, default 25) and the sealed after only', () =
 //    it); L4 an SQL function that executes a text argument inside an ordinary query (dblink_exec and the like). That
 //    none of them is used today is an observation, not a proof: a change that introduces one of these shapes reopens
 //    the limit. The cases are kept as comments beside the negative table (LIMIT L1-L3) so that they are not rediscovered.
+//    The closed world (W3-C, W4-C, rule B′; AUDIT-CHECKER-U0B, commander D844/D847/D856) names six more, so that a shape
+//    outside them is a limit and a review item, not another hardening round. Each limit with the review rule that keeps
+//    product code out of it (the U0b round-2 review checklist and every later change to these files):
+//      L1 Prisma namespace as a value — review: the namespace is only called (`Prisma.sql`, `Prisma.join` ...), never
+//         held, aliased or handed on.
+//      L2 ambient `declare` any from outside the program — review: no new ambient `declare` value in api/src.
+//      L3 code that does not compile — the API image build (tsc) refuses it; review: the build passes.
+//      L4 SQL that runs a text argument (dblink_exec, a database function that executes its argument) — review: no
+//         such function called from product SQL.
+//      L5 @nestjs/common's `Injectable` is trusted as metadata only: it does not rewrite the class's prototype methods.
+//         It is the one class decorator a holder chain (the facade, the DI services it hands on, the modules) may carry,
+//         resolved to that package's declaration with no or literal options; any other decorator there is refused.
+//         Review: no other class decorator, no member, property or parameter decorator and no program-defined decorator
+//         on facade, concern or DI classes; the concern modules carry no decorator at all.
+//      L6 the closed world is api/src and the Prisma CJS entry points: a module, script or test outside it that imports
+//         a concern module and creates or calls it at runtime is not seen (an export alone proves nothing inside, but
+//         nothing outside is read). Review: concern modules are created only by the facade (`new` into its private
+//         readonly fields) and imported at runtime only inside api/src.
+//      L7 the framework's runtime reflection and decorators outside holder chains are taken as Nest metadata: Nest
+//         calling handlers and lifecycle hooks by name, route and guard decorators on controllers, the program's
+//         metadata decorator `Public` (SetMetadata). W3-C refuses any decorated class or method, so these reach only
+//         W3 private helpers of Nest classes. Review: a program-defined decorator only sets metadata (SetMetadata,
+//         applyDecorators of Nest decorators) and never installs or replaces a method or a descriptor.
+//      L8 code built at runtime or patched under the program: `new Function`, an indirect eval, `vm`, a `require` of a
+//         computed path, and a patched prototype of a built-in or library class (Function.prototype.call, PrismaClient,
+//         Object.prototype) are outside what the TypeScript program shows. Review: none of these in product code; a
+//         dynamic member access on a holder (a computed key, a key widened by an assertion) is refused, not a limit.
+//      L9 a decorator applied by hand to a holder class: `Reflect.decorate([install], SynFacade)` with a program
+//         function that replaces a prototype descriptor is no `@` decorator, so the chain check does not see it, and
+//         the class handed to that call is not linked to its instances' prototype (Astra review of 22dad67, F03, N01:
+//         TypeScript diagnostics 0, six verdicts empty, a synthetic run recorded evil.audit for study.arrived). Review:
+//         no manual decorator application — Reflect.decorate, a decorator function called by hand, Object.defineProperty
+//         or Object.assign on a prototype — to facade, concern or DI classes; a program-defined decorator only sets
+//         metadata (L7), and L5/L7 stay as they are.
+//      L10 a class a function returns: a generic mixin `mix<T extends new (...args: any[]) => SynFacade>(Base: T)` that
+//         returns `class extends Base` is not tied to the holder's family, so a call in the returned class (here
+//         through `(this as any)`) is not read (Astra review of 22dad67, F04, N03: diagnostics 0, six verdicts empty,
+//         a synthetic `new Mixed(...).arrived` recorded evil.audit). Review: no mixin or class factory for facade,
+//         concern or DI classes — holders are plain class declarations created with `new` in the facade into private
+//         readonly fields (U0b order section 4), and no facade or concern class is handed to a function or to the
+//         constructor of another holder as a class.
 //  Closure (Astra S7-U3a-AUDIT-SPEC-C-R-001-F03, the conditions of S7-U3a-G-R-001): (a) W1-W6 alone resolve every write of
 //    the baseline and give every other candidate its classification, with no writer left out, no exception by place and
 //    no product change; (b) each enumerated counterexample, alone next to the baseline, leaves its write unresolved and
@@ -1725,8 +1817,94 @@ function scanAuditWrites(sources = auditSources()) {
       result.escape = holderUse(object, node, result.writes);
       if (result.escape) break;
     }
+    // After every other use, so that an object that escapes otherwise keeps its first reason (Astra AUDIT-CHECKER-U0B
+    // review F01): a member read or called through an assertion.
+    for (const node of result.escape ? [] : new Set(holdersOf(object))) {
+      result.escape = assertedRead(object, node);
+      if (result.escape) break;
+    }
+    // Then every member projection is proved (Astra AUDIT-CHECKER-U0B consult 2, rule B′ I2), the earlier reasons kept.
+    for (const node of result.escape ? [] : new Set(holdersOf(object))) {
+      result.escape = projectionIssue(object, node);
+      if (result.escape) break;
+    }
     memo.set(object.declaration, result);
     return result;
+  }
+  /** A use that only writes the member it names: the target of `=`, of a destructuring or a for-in/of, or `delete`'s
+   *  operand. A compound assignment or `++`/`--` reads it too. */
+  const writeOnly = held => {
+    const parent = held.parent;
+    return (ts.isBinaryExpression(parent) && parent.left === held && parent.operatorToken.kind === K.EqualsToken)
+      || ts.isDeleteExpression(parent) || ((ts.isForInStatement(parent) || ts.isForOfStatement(parent)) && parent.initializer === held)
+      || destructured(held);
+  };
+  /**
+   * W4, rule B′ I2 (Astra AUDIT-CHECKER-U0B consult 2): why a member read through a holder is not proved to project the
+   * member its holder declares, with a result the check still follows, else null. W1 fixing the key, TypeScript fixing
+   * the receiver and the member, and the read's value staying in the search are separate obligations: (1) the receiver,
+   * typed where the member is read, is a class of the object's family (not any, unknown, an error or a union); (2) the
+   * member found there by the W1 key — the name's symbol for a dot, the receiver type's property for an element access —
+   * is the one the holder's own type has; (3) a member not declared any or unknown is not read as any or unknown — a key
+   * widened by an assertion or a wider const (`this['slot' as any]`, a `string` key) keeps W1's key while the value read
+   * leaves every holder and call the check follows; (4) a member called there resolves to a declaration. A use that only
+   * writes is counted by holderUse, objectWrites and slotWrites; a key W1 does not fix was refused before this runs.
+   */
+  function projectionIssue(object, start) {
+    let node = start;
+    while (WRAPPERS.has(node.parent.kind)) node = node.parent;
+    const access = node.parent;
+    if (!isAccess(access) || access.expression !== node) return null;   // every other use: holderUse
+    const held = outer(access), { key } = w1(access);
+    if (writeOnly(held)) return null;
+    const at = `at ${where(access)} (\`${snippet(access)}\`)`;
+    if (key === undefined) return `is read by a key the program does not fix ${at}`;
+    const apparent = value => checker.getApparentType(checker.getNonNullableType(checker.getTypeAtLocation(value)));
+    const source = apparent(start), receiver = apparent(node);
+    const family = object.kind === 'instance' ? familyOf(object.declaration) : new Set([object.declaration]);
+    const target = receiver.objectFlags & ts.ObjectFlags.Reference ? receiver.target : receiver;
+    if (receiver.flags & (TF.Any | TF.Unknown) || receiver.isUnion() || !(target.symbol?.declarations ?? []).some(declaration => family.has(declaration))) {
+      return `is read ${at} through a receiver typed \`${typeText(receiver)}\`, not \`${className(object.declaration)}\` (W4 projection: receiver)`;
+    }
+    const expected = resolve(checker.getPropertyOfType(source, key));
+    const observed = resolve(ts.isPropertyAccessExpression(access) ? checker.getSymbolAtLocation(access.name) : checker.getPropertyOfType(receiver, key));
+    if (!expected || !observed || !same(expected, observed)) {
+      return `is read ${at} as a member \`${key}\` that is not the one its holder declares (W4 projection: member)`;
+    }
+    const declared = checker.getTypeOfSymbolAtLocation(expected, start), actual = checker.getTypeAtLocation(access);
+    if (!(declared.flags & (TF.Any | TF.Unknown)) && actual.flags & (TF.Any | TF.Unknown)) {
+      return `is read ${at} as \`${typeText(actual)}\` where \`${key}\` is declared \`${typeText(declared)}\`: what it gives is followed no further (W4 projection: result)`;
+    }
+    const use = held.parent;
+    if (ts.isCallExpression(use) && use.expression === held && !checker.getResolvedSignature(use)?.declaration) {
+      return `is called ${at} without a declaration the check reads (W4 projection: call)`;
+    }
+    return null;
+  }
+  /**
+   * W4 (Astra AUDIT-CHECKER-U0B review F01): why a holder read through an assertion (`as`, `<T>`) hands the object on,
+   * else null. A member read or called there is resolved at the asserted type: when that is not the object's own (any,
+   * unknown, another or a structural type), neither the call nor what the read gives is typed as the object's, so no
+   * call, slot or escape after it is traced — the object no longer keeps to the program. A write there is counted where
+   * it stands (holderUse); `!`, parentheses and `satisfies` keep the type.
+   */
+  function assertedRead(object, start) {
+    let node = start, asserted = null;
+    while (WRAPPERS.has(node.parent.kind)) {
+      node = node.parent;
+      if (ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)) asserted = node;
+    }
+    const parent = node.parent;
+    if (!asserted || !isAccess(parent) || parent.expression !== node || mutated(outer(parent))) return null;
+    // The polymorphic `this` type (`this as this`, `<this>this`) is a type parameter: read at its constraint, as the
+    // projection reads every receiver (Astra review 3 F02).
+    const type = checker.getApparentType(checker.getNonNullableType(checker.getTypeAtLocation(node)));
+    const target = type.objectFlags & ts.ObjectFlags.Reference ? type.target : type;
+    const instance = !!(target.objectFlags & ts.ObjectFlags.Class);
+    const family = object.kind === 'instance' ? familyOf(object.declaration) : new Set([object.declaration]);
+    const kept = instance === (object.kind === 'instance') && !type.isUnion()
+      && (target.symbol?.declarations ?? []).some(declaration => family.has(declaration));
+    return kept ? null : `is read through the assertion \`${snippet(asserted)}\` at ${where(asserted)}, typed \`${typeText(type)}\` there, not as \`${className(object.declaration)}\``;
   }
   /** Why the use `start` (a node holding a class or an instance) may change it or hand it on, else null; a member write is
    *  recorded in `writes` (W4: a write of a member no positive judgement reads, such as a count, stays allowed). */
@@ -1745,6 +1923,10 @@ function scanAuditWrites(sources = auditSources()) {
       if (mutated(member)) writes.push({ key, at: where(parent) });
       return null;
     }
+    // W4-C: an instance the program composes into a slot it owns; `this` is never handed on this way.
+    const owned = object.kind === 'instance' && start.kind !== K.ThisKeyword && start.kind !== K.SuperKeyword
+      ? ownedUse(object, start, node, parent) : undefined;
+    if (owned !== undefined) return owned && `is handed on at ${where(parent)} (W4-C: ${owned})`;
     if (mutated(node)) return `is written at ${where(parent)}`;
     if (inert(node) || ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent) || ts.isImportClause(parent)) return null;
     if (object.kind === 'class' && ts.isNewExpression(parent) && parent.expression === node) return null;
@@ -1774,6 +1956,154 @@ function scanAuditWrites(sources = auditSources()) {
       return `is handed on as \`this\` of \`${snippet(access)}\` at ${where(access)}${replaced ? ` (replaced at ${replaced})` : ''}`;
     }
     return null;
+  }
+
+  // ── W4-C: the objects the program creates and owns (Astra S9-U0b audit consult D3) ──
+  const className = declaration => declaration?.name?.getText() ?? 'an anonymous class';
+  /** The class of the program an identifier names directly — declared in its file, or imported by one import specifier
+   *  that is no re-export — else null: W4-C reads no namespace, re-export, merged or computed class. */
+  function directClass(identifier) {
+    const own = identifier && ts.isIdentifier(identifier) ? checker.getSymbolAtLocation(identifier) : null;
+    if (!own) return null;
+    if (own.flags & ts.SymbolFlags.Alias) {
+      const [declaration] = own.declarations ?? [];
+      const next = declaration && ts.isImportSpecifier(declaration) ? checker.getImmediateAliasedSymbol(own) : null;
+      if (!next || next.flags & ts.SymbolFlags.Alias) return null;
+    }
+    const declarations = resolve(own)?.declarations ?? [];
+    return declarations.length === 1 && ts.isClassDeclaration(declarations[0]) && declarations[0].name && inProgram(declarations[0])
+      ? declarations[0] : null;
+  }
+  /** The class a type annotation names directly (no type arguments, no union), else null. */
+  const namedClass = type => (type && ts.isTypeReferenceNode(type) && !type.typeArguments?.length ? directClass(type.typeName) : null);
+  /** Every write of a field or a parameter property of `owner`: by a dot or a key W1 fixes on a receiver typed as it, and
+   *  through every holder of an instance of `owner` (W4), whatever wrapper or assertion is around it. */
+  function slotWrites(declaration, owner) {
+    const key = declaration.name.text;
+    const symbol = ts.isParameter(declaration) ? checker.getSymbolsOfParameterPropertyDeclaration(declaration, key)?.[1] : symbolAt(declaration.name);
+    const found = new Set();
+    if (symbol) for (const access of memberRefs(symbol).typed) if (mutated(outer(access))) found.add(access);
+    for (const holder of new Set(holdersOf({ kind: 'instance', declaration: owner }))) {
+      let node = holder;
+      while (WRAPPERS.has(node.parent.kind)) node = node.parent;
+      if (isAccess(node.parent) && node.parent.expression === node && w1(node.parent).key === key && mutated(outer(node.parent))) found.add(node.parent);
+    }
+    return [...found];
+  }
+  // Decorators in a holder chain (Astra review 3 F01, commander D847): a decorator runs program or library code with the
+  // class or a member's descriptor in hand and may install another method body, which no call the check reads would show.
+  // The one class decorator taken as metadata only (named limit L5) is @nestjs/common's Injectable.
+  const NEST_COMMON = /[\\/]node_modules[\\/]@nestjs[\\/]common[\\/]/;
+  const literalValue = node => ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isNumericLiteral(node)
+    || node.kind === K.TrueKeyword || node.kind === K.FalseKeyword || node.kind === K.NullKeyword;
+  /** Whether a class decorator is `@Injectable()` of @nestjs/common: its callee resolves through every import and
+   *  re-export (getAliasedSymbol) to the function that package declares, called with no argument or with one object
+   *  literal of literal values. A program decorator, another package's, a local alias or a variable holding it, a call
+   *  that returns a decorator and computed options are not. */
+  function nestInjectable(decorator) {
+    const call = bare(decorator.expression);
+    if (!ts.isCallExpression(call)) return false;
+    const callee = bare(call.expression);
+    const name = ts.isIdentifier(callee) ? callee : ts.isPropertyAccessExpression(callee) ? callee.name : null;
+    const symbol = name ? resolve(checker.getSymbolAtLocation(name)) : null, declarations = symbol?.declarations ?? [];
+    if (symbol?.name !== 'Injectable' || !declarations.length
+      || !declarations.every(declaration => declaration.getSourceFile().isDeclarationFile && NEST_COMMON.test(declaration.getSourceFile().fileName))) return false;
+    if (!call.arguments.length) return true;
+    const options = bare(call.arguments[0]);
+    return call.arguments.length === 1 && ts.isObjectLiteralExpression(options) && options.properties.every(property => ts.isPropertyAssignment(property)
+      && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) && literalValue(bare(property.initializer)));
+  }
+  const decoratorOf = node => (ts.canHaveDecorators(node) ? ts.getDecorators(node)?.[0] : undefined);
+  /** Why a class of a W4-C holder chain — a slot's owner, or the class of what it holds — or one of its program family
+   *  may run code through a decorator, else null: on the class only nestInjectable, on no member, accessor, property or
+   *  parameter any decorator. */
+  function chainDecoratorIssue(declaration) {
+    for (const member of familyOf(declaration)) {
+      const strange = (ts.canHaveDecorators(member) ? ts.getDecorators(member) ?? [] : []).find(decorator => !nestInjectable(decorator));
+      if (strange) return `\`${className(member)}\` is decorated by \`${snippet(strange.expression)}\` at ${where(strange)}, not @nestjs/common's Injectable() (named limit L5)`;
+      for (const item of member.members) {
+        const found = decoratorOf(item) ?? (item.parameters ?? []).map(decoratorOf).find(Boolean);
+        if (found) return `\`${className(member)}\` has the decorator \`${snippet(found.expression)}\` at ${where(found)} on a member, accessor, property or parameter`;
+      }
+    }
+    return null;
+  }
+  /** Why a field or parameter property of `owner` is no slot W4-C owns for an instance of `object`'s family, else null:
+   *  private, readonly, neither static, optional nor decorated, typed as a class of the family by a name W4-C reads,
+   *  written nowhere but at `allowed`, the classes of the chain decorated by nothing but nestInjectable on the class,
+   *  and the instances of `owner` keep to W4. */
+  function slotIssue(declaration, owner, object, allowed = null) {
+    const flags = ts.getCombinedModifierFlags(declaration);
+    const what = `\`${declaration.name.getText()}\` of \`${className(owner)}\``;
+    if (!(flags & ts.ModifierFlags.Private) && !ts.isPrivateIdentifier(declaration.name)) return `${what} is not private`;
+    if (!(flags & ts.ModifierFlags.Readonly)) return `${what} is not readonly`;
+    if (flags & ts.ModifierFlags.Static || decorated(declaration) || declaration.questionToken || declaration.dotDotDotToken
+      || !(ts.isIdentifier(declaration.name) || ts.isPrivateIdentifier(declaration.name))) return `${what} is static, decorated, optional, a rest or not one name`;
+    const typed = namedClass(declaration.type);
+    if (!typed || !familyOf(object.declaration).has(typed)) {
+      return `${what} is not typed as \`${className(object.declaration)}\` (or its family) by a name of its file or of one direct import`;
+    }
+    const written = slotWrites(declaration, owner).filter(node => node !== allowed);
+    if (written.length) return `${what} is written at ${where(written[0])}`;
+    const chained = chainDecoratorIssue(owner) || chainDecoratorIssue(typed);
+    if (chained) return `${what}: ${chained}`;
+    const escape = objectUse({ kind: 'instance', declaration: owner }).escape;
+    return escape ? `${what} is held by an instance of \`${className(owner)}\`, which ${escape}` : null;
+  }
+  /** The class a `new` names directly when it is of `object`'s family, else null. */
+  const created = (call, object) => {
+    const found = ts.isIdentifier(bare(call.expression)) ? directClass(bare(call.expression)) : null;
+    return found && familyOf(object.declaration).has(found) ? found : null;
+  };
+  /** (a) Why `assignment` is not the one initialization `this.f = new X(...)`, a statement of the body of the constructor
+   *  of the class declaring the field `f`, else null. */
+  function initIssue(assignment, object) {
+    const left = bare(assignment.left), right = bare(assignment.right), statement = assignment.parent;
+    const constructor = statement?.parent?.parent;
+    if (!isAccess(left) || bare(left.expression).kind !== K.ThisKeyword || !ts.isNewExpression(right) || !ts.isExpressionStatement(statement)
+      || !ts.isBlock(statement.parent) || !constructor || !ts.isConstructorDeclaration(constructor) || constructor.body !== statement.parent) {
+      return `\`${snippet(assignment)}\` is not one statement \`this.<field> = new <class>(...)\` of a constructor body`;
+    }
+    const made = created(right, object);
+    if (!made) return `\`${snippet(right.expression)}\` is not a class of \`${className(object.declaration)}\`'s family named directly`;
+    const { key } = w1(left), holder = constructor.parent;
+    const field = key === undefined ? null : holder.members.find(member => ts.isPropertyDeclaration(member) && member.name
+      && !ts.isComputedPropertyName(member.name) && member.name.text === key);
+    if (!field) return `\`${snippet(left)}\` is not a field \`${className(holder)}\` declares`;
+    if (field.initializer) return `the field \`${key}\` is initialized where it is declared too`;
+    if (namedClass(field.type) !== made) return `the field \`${key}\` is not typed as \`${className(made)}\``;
+    return slotIssue(field, holder, object, left);
+  }
+  /** (a) Why `new X(...)` initializing the declaration `property` is not owned, else null. */
+  function declaredIssue(property, call, object) {
+    const made = created(call, object);
+    if (!made) return `\`${snippet(call.expression)}\` is not a class of \`${className(object.declaration)}\`'s family named directly`;
+    if (!ts.isClassLike(property.parent)) return `\`${property.name.getText()}\` is no field of a class`;
+    if (namedClass(property.type) !== made) return `the field \`${property.name.getText()}\` is not typed as \`${className(made)}\``;
+    return slotIssue(property, property.parent, object);
+  }
+  /** (b) Why the argument `node` of `new D(...)` is not received by a parameter property W4-C owns, else null. */
+  function argumentIssue(call, node, object) {
+    const index = call.arguments.indexOf(node);
+    if (call.arguments.slice(0, index + 1).some(ts.isSpreadElement)) return `a spread argument of \`new ${snippet(call.expression)}\``;
+    const target = ts.isIdentifier(bare(call.expression)) ? directClass(bare(call.expression)) : null;
+    if (!target) return `\`${snippet(call.expression)}\` is not a class of the program named by its file or one direct import`;
+    const constructors = target.members.filter(ts.isConstructorDeclaration), [constructor] = constructors;
+    if (constructors.length !== 1 || !constructor.body) return `\`${className(target)}\` has not one constructor with a body`;
+    const parameter = constructor.parameters[index];
+    if (!parameter || !ts.isParameterPropertyDeclaration(parameter, constructor)) {
+      return `argument ${index + 1} of \`new ${className(target)}\` is not received by a parameter property`;
+    }
+    return parameterHazard(parameter) || slotIssue(parameter, target, object);
+  }
+  /** W4-C for one use of a holder (`node`, lifted from `start`): null when the program owns what it is handed to, why
+   *  not when the use has one of the owned shapes, undefined for any other use. */
+  function ownedUse(object, start, node, parent) {
+    if (ts.isBinaryExpression(parent) && parent.operatorToken.kind === K.EqualsToken
+      && (parent.left === node || (parent.right === node && ts.isNewExpression(start)))) return initIssue(parent, object);
+    if (ts.isPropertyDeclaration(parent) && parent.initializer === node && ts.isNewExpression(start)) return declaredIssue(parent, start, object);
+    if (ts.isNewExpression(parent) && parent.arguments?.includes(node)) return argumentIssue(parent, node, object);
+    return undefined;
   }
 
   // ── W3: functions, their calls and their callbacks ──
@@ -1814,15 +2144,44 @@ function scanAuditWrites(sources = auditSources()) {
   const W3_KINDS = new Set(['private method', 'function of its file', 'const function', 'callback']);
   /** The node a value reaches its use through: parentheses and type wrappers (W1 notation). */
   const lifted = node => { let at = node; while (at.parent && WRAPPERS.has(at.parent.kind)) at = at.parent; return at; };
-  const calls = { w3: new Map(), flow: new Map() };
+  const closures = new Map();
+  /**
+   * W3-C: why the public method `fn` may run other than by the calls the program has, else null — a method with a body,
+   * not static, of a named class declaration of the program that extends nothing; neither it, its parameters nor the class
+   * decorated; the class handed on nowhere (W4: only `new`, tests, imports and types); its instances kept to the program,
+   * each from a `new` the program owns (W4-C); and at least one such `new`. An export alone proves nothing.
+   */
+  function closedMethod(fn) {
+    if (closures.has(fn)) return closures.get(fn);
+    closures.set(fn, 'it is reached again while its closure is checked');
+    const why = closure(fn);
+    closures.set(fn, why);
+    return why;
+  }
+  function closure(fn) {
+    const owner = fn.parent;
+    if (!ts.isMethodDeclaration(fn) || !fn.body || !owner || !ts.isClassDeclaration(owner) || !owner.name || !inProgram(fn)) {
+      return 'it is not a method with a body of a named class declaration of the program';
+    }
+    if (isStatic(fn) || ts.isComputedPropertyName(fn.name)) return 'it is static or has a computed name';
+    if (decorated(fn) || fn.parameters.some(decorated)) return 'it is decorated';
+    if (owner.heritageClauses?.some(clause => clause.token === K.ExtendsKeyword)) return `\`${className(owner)}\` extends a class`;
+    const escape = objectUse({ kind: 'class', declaration: owner }).escape;
+    if (escape) return `the class \`${className(owner)}\`, which ${escape}`;
+    const made = holdersOf({ kind: 'class', declaration: owner }).filter(node => { const at = lifted(node); return ts.isNewExpression(at.parent) && at.parent.expression === at; });
+    return made.length ? null : `no instance of \`${className(owner)}\` is created by the program (W4-C: an explicit \`new\` it owns)`;
+  }
+  const calls = { w3: new Map(), flow: new Map(), closed: new Map() };
   /**
    * The calls of `fn` (W3), with `escapes` when it may be run some other way. A name's every reference must be the callee
    * of a call, a test, or — the one callback rule W3 has (the `scopeWrite` form) — an argument of a call whose parameter
    * is itself only called or tested where it is received. A method is found by every access W1 keys to its name (one on a
    * value the checker does not type may be it), must be replaced nowhere, and its object must keep to the program (W4).
    * In mode 'w3' (values read through parameters) a function callers outside the program can call is an escape and
-   * callbacks go between helpers of one file; in mode 'flow' (the client and fragment flows) a public method or an
-   * exported function is followed through the references the program has of it.
+   * callbacks go between helpers of one file; in mode 'closed' (W3-C, action values only) a closed public method is
+   * read as a helper and a callback may be handed across files to what such a method receives; in mode 'flow' (the
+   * client and fragment flows) a public method or an exported function is followed through the references the program
+   * has of it.
    */
   function callsOf(fn, mode) {
     const memo = calls[mode];
@@ -1830,7 +2189,9 @@ function scanAuditWrites(sources = auditSources()) {
     memo.set(fn, null);
     const found = [], escapes = [];
     const kind = helperKind(fn);
+    const open = kind.why && mode === 'closed' ? closedMethod(fn) : null;
     if (kind.why && mode === 'w3') escapes.push(`${describe(fn)}, ${kind.why}`);
+    else if (open) escapes.push(`${describe(fn)}: ${open}`);
     else if (!fn.body) escapes.push(`${describe(fn)} (no body)`);
     else {
       for (const reference of carriersOf(fn, escapes)) {
@@ -1839,7 +2200,13 @@ function scanAuditWrites(sources = auditSources()) {
         else if (ts.isCallExpression(parent) && parent.arguments.includes(node)) {
           const index = parent.arguments.indexOf(node);
           const targets = mode === 'w3' && fn.getSourceFile() !== parent.getSourceFile() ? null : argumentTargets(parent, index, mode);
-          if (!targets) { escapes.push(`${where(parent)} (handed to \`${snippet(parent.expression)}\`)`); continue; }
+          if (!targets) {
+            // W3-C names why the parameter it is handed to is not followed, when that is a public method's.
+            const callee = bare(parent.expression), [declaration] = ts.isIdentifier(callee) ? symbolAt(callee)?.declarations ?? [] : [];
+            const open = mode === 'closed' && declaration && ts.isParameter(declaration) && helperKind(declaration.parent).why ? closedMethod(declaration.parent) : null;
+            escapes.push(`${where(parent)} (handed to \`${snippet(parent.expression)}\`${open ? `, a parameter of ${describe(declaration.parent)}: ${open}` : ''})`);
+            continue;
+          }
           for (const target of targets) {
             for (const use of references(symbolAt(target.name))) {
               const at = lifted(use), user = at.parent;
@@ -1895,14 +2262,14 @@ function scanAuditWrites(sources = auditSources()) {
    *  it, W4, and a function a file imports directly), else null. */
   function callees(call, mode) {
     if (ts.isNewExpression(call)) {
-      if (mode === 'w3') return null;
+      if (mode !== 'flow') return null;
       const declaration = classOf(call.expression);
       const constructor = declaration && ts.isClassLike(declaration) ? declaration.members.find(ts.isConstructorDeclaration) : null;
       return constructor?.body ? [constructor] : null;
     }
     return functionsOf(call.expression, mode);
   }
-  const functions = { w3: new Map(), flow: new Map() };
+  const functions = { w3: new Map(), flow: new Map(), closed: new Map() };
   function functionsOf(expression, mode) {
     const node = bare(expression), memo = functions[mode];
     if (memo.has(node)) return memo.get(node) === undefined ? null : memo.get(node);
@@ -1915,7 +2282,7 @@ function scanAuditWrites(sources = auditSources()) {
     if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) return [node];
     if (ts.isIdentifier(node)) {
       const own = checker.getSymbolAtLocation(node);
-      if (own && own.flags & ts.SymbolFlags.Alias && mode === 'w3') return null;   // W3: a helper of the same file
+      if (own && own.flags & ts.SymbolFlags.Alias && mode !== 'flow') return null;   // W3, W3-C: a helper of the same file
       const symbol = symbolAt(node), declarations = symbol?.declarations ?? [], [declaration] = declarations;
       if (declarations.length !== 1) return null;
       if (changedBinding(symbol) || parameterHazard(declaration)) return null;
@@ -1943,6 +2310,8 @@ function scanAuditWrites(sources = auditSources()) {
           const at = bare(argument);
           if (at.kind === K.NullKeyword || (ts.isIdentifier(at) && at.text === 'undefined' && !symbolAt(at)?.declarations?.length)) continue;
           if (mode === 'w3' && argument.getSourceFile() !== node.getSourceFile()) return null;
+          // W3-C: a caller in another file fills the parameter with a callback written where it calls.
+          if (mode === 'closed' && argument.getSourceFile() !== node.getSourceFile() && !ts.isArrowFunction(at) && !ts.isFunctionExpression(at)) return null;
           const inner = functionsOf(argument, mode);
           if (!inner) return null;
           values.push(...inner);
@@ -1957,13 +2326,16 @@ function scanAuditWrites(sources = auditSources()) {
       const receiver = bare(node.expression);
       // W3: a private method called on `this` (or, static, on its class's name) in its own file.
       const named = ts.isIdentifier(receiver) ? classOf(receiver) : null;
-      if (mode === 'w3' && receiver.kind !== K.ThisKeyword && !(named && ts.isClassLike(named))) return null;
       const type = checker.getNonNullableType(checker.getTypeAtLocation(receiver));
       const property = checker.getPropertyOfType(type, key), declarations = property?.declarations ?? [];
       if (!declarations.length || !declarations.every(declaration => ts.isMethodDeclaration(declaration) && declaration.body && inProgram(declaration)
         && ts.isClassLike(declaration.parent))) return null;
-      if (mode === 'w3' && !declarations.every(declaration => helperKind(declaration).kind === 'private method'
-        && declaration.getSourceFile() === node.getSourceFile())) return null;
+      const helpers = declarations.every(declaration => helperKind(declaration).kind === 'private method'
+        && declaration.getSourceFile() === node.getSourceFile());
+      if (mode === 'w3' || (mode === 'closed' && helpers)) {
+        if (receiver.kind !== K.ThisKeyword && !(named && ts.isClassLike(named))) return null;
+        if (!helpers) return null;
+      } else if (mode === 'closed' && !declarations.every(declaration => closedMethod(declaration) === null)) return null;   // W3-C: on any receiver typed as the class
       for (const declaration of declarations) {
         if (memberChanged(symbolAt(declaration.name))) return null;
         const object = holdingObject(declaration);
@@ -2086,21 +2458,31 @@ function scanAuditWrites(sources = auditSources()) {
     }
     return false;
   };
-  /** W3: the values every call the program makes of a helper passes for its parameter. */
+  /** W3: the values every call the program makes of a helper passes for its parameter; where W3 stops, W3-C. */
   function passed(parameter) {
     const owner = parameter.parent, name = parameter.name.getText();
     if (parameter.dotDotDotToken || !ts.isIdentifier(parameter.name)) return [unknown(`${where(parameter)}: \`${name}\` is a rest or destructured parameter`)];
     const kind = helperKind(owner);
-    if (kind.why) return [unknown(`${where(parameter)}: \`${name}\` is a parameter of ${describe(owner)}, ${kind.why}`)];
     const index = owner.parameters.indexOf(parameter) - shift(owner);
-    const { calls: found, escapes } = callsOf(owner, 'w3');
-    if (escapes.length) return [unknown(`${where(parameter)}: \`${name}\` is a parameter of ${describe(owner)}, which is handed on at ${escapes.join(', ')}`)];
+    const w3 = kind.why ? null : callsOf(owner, 'w3');
+    let found = w3?.calls, rule = null;
+    if (!w3 || w3.escapes.length) {
+      // W3-C: the same reading through a closed public method and across files (Astra S9-U0b audit consult D2).
+      const why = kind.why ? `${where(parameter)}: \`${name}\` is a parameter of ${describe(owner)}, ${kind.why}`
+        : `${where(parameter)}: \`${name}\` is a parameter of ${describe(owner)}, which is handed on at ${w3.escapes.join(', ')}`;
+      const closed = callsOf(owner, 'closed');
+      if (closed.escapes.length) return [unknown(w3 && `${closed.escapes}` === `${w3.escapes}` ? why : `${why} (W3-C: ${closed.escapes.join(', ')})`)];
+      if (!closed.calls.length) return [unknown(`${why} (W3-C: nothing in the program calls ${describe(owner)})`)];
+      found = closed.calls;
+      rule = `W3-C every call of ${describe(owner)}`;
+    }
     if (!found.length) return [unknown(`${where(parameter)}: \`${name}\` is a parameter of ${describe(owner)}, which nothing in the program calls`)];
-    return union(...found.map(call => {
+    const read = union(...found.map(call => {
       if (call.arguments.slice(0, index + 1).some(ts.isSpreadElement)) return [unknown(`${where(call)}: a spread argument`)];
       const argument = call.arguments[index];
       return argument ? values(argument) : parameter.initializer ? values(parameter.initializer) : [unknown(`${where(call)}: no argument for \`${name}\``)];
     }));
+    return rule ? tagged(read, rule) : read;
   }
   // W2 (iv): a guard `if (... || !['a', 'b'].includes(x) || ...) throw/return;` before the use.
   const jumps = node => ts.isBreakOrContinueStatement(node) || !!ts.forEachChild(node, child => jumps(child) || undefined);
@@ -4324,6 +4706,156 @@ test('checker self-test: every positive mark reclassified.json replaces is refus
   console.log('ADMIN_AUDIT_RECLASSIFIED ' + JSON.stringify(RECLASSIFIED.map(entry => `${entry.fixture}:${entry.line} ${entry.was} -> `
     + `${entry.now.map(item => `${item.status} ${item.detail}`).join(' + ')} (${entry.rule}${entry.moved_to ? `; alone in ${entry.moved_to}` : ''})`)));
 });
+
+// ── the closed world, W3-C and W4-C (Astra S9-U0b audit consult D4): CW01-CW20 ──
+// REQ-AUDIT-CLOSED-WORLD -> RISK-AUDIT-UNRESOLVED / RISK-AUDIT-ATTACKER-ACTION / RISK-AUDIT-OBJECT-ESCAPE /
+// RISK-AUDIT-SQL-PROVENANCE -> TEST-AUDIT-CLOSED-WORLD CW01-CW20. tests/fixtures/admin-audit-checker/closed-world holds
+// writer.ts (the three helper shapes of the S9-U0b modules, each a public member), callers.ts (the modules calling them from
+// another file), composition.ts (the facade creating and owning them, and the DI service it hands on), monolith.ts (the
+// same writes in one class before the split, CW04) and cases.json (the contract table, what CW01-CW03 expect, and every
+// mutant of CW05-CW20 as exact text edits with the verdict it must give). The fixtures are data read here and placed side by
+// side under api/src/syn-fixture/closed-world/ for these scans only; the product corpus never holds them. Each mutant runs
+// after the unedited corpus passes, alone, and must fail by exactly the classes and entries cases.json names — an unresolved
+// entry by its tagged line (`@cw:<tag>`) and a part of its reason, every other class as named or empty — and parse (a file
+// that does not parse is never a kill).
+const CLOSED = path.join(MEMBER_FIXTURES, 'closed-world');
+const CLOSED_CASES = JSON.parse(fixtureText('cases.json', CLOSED));
+const CLOSED_FILES = ['writer.ts', 'callers.ts', 'composition.ts'];
+const closedSource = (name, text = fixtureText(name, CLOSED)) => ({ file: `api/src/syn-fixture/closed-world/${name}`, text });
+function closedTable() {
+  const { rows, wildcards } = CLOSED_CASES.table;
+  return { rows, wildcards, listed: action => rows.includes(action) || wildcards.some(stem => action.startsWith(stem)) };
+}
+/** The split corpus with a mutant's edits: each `find` occurs exactly once in its file and is replaced. */
+function closedCorpus(edits = []) {
+  const texts = new Map(CLOSED_FILES.map(name => [name, fixtureText(name, CLOSED)]));
+  for (const { file, find, replace } of edits) {
+    assert.ok(texts.has(file), `${file} is a file of the split corpus`);
+    assert.equal(texts.get(file).split(find).length, 2, `${file}: the edited text occurs exactly once: ${find}`);
+    texts.set(file, texts.get(file).replace(find, () => replace));
+  }
+  return CLOSED_FILES.map(name => closedSource(name, texts.get(name)));
+}
+/** Where the tag `@cw:<tag>` is: exactly one line of the corpus. */
+function closedTag(sources, tag) {
+  const found = sources.flatMap(source => source.text.split('\n').flatMap((line, index) =>
+    new RegExp(`@cw:${tag}(?![\\w-])`).test(line) ? [{ file: source.file, line: index + 1 }] : []));
+  assert.equal(found.length, 1, `the tag @cw:${tag} names one line`);
+  return found[0];
+}
+/** The one write the tagged line gives. */
+function closedSite(scan, sources, tag) {
+  const at = closedTag(sources, tag), found = scan.sites.filter(site => site.file === at.file && site.line === at.line);
+  assert.equal(found.length, 1, `one write at @cw:${tag}`);
+  return found[0];
+}
+let closedBaseScan = null;
+/** The unedited split corpus: every candidate as marked, the gate passing on its own. */
+function closedBase() {
+  if (closedBaseScan) return closedBaseScan;
+  const sources = closedCorpus(), scan = scanAuditWrites(sources);
+  for (const source of sources) assertMarked(scan, source);
+  assert.deepEqual(verdict(scan, closedTable()), EMPTY_VERDICT);
+  return closedBaseScan = { sources, scan };
+}
+/** One mutant alone: it parses, and its verdict is exactly what cases.json names. Gives its raw verdict. */
+function closedVariant(id, variant) {
+  const label = `${id} ${variant.name}`, sources = closedCorpus(variant.edits), scan = scanAuditWrites(sources);
+  const found = verdict(scan, closedTable());
+  assert.deepEqual(scan.candidates.filter(entry => entry.kind === 'source file'), [], `${label}: every file parses`);
+  if (variant.expect.pass) {
+    // A must-pass control (CW19, CW20): a normal shape the rules keep, every class empty.
+    assert.deepEqual(found, EMPTY_VERDICT, `${label} must pass: ${JSON.stringify(found)}`);
+    return { variant: variant.name, failing: [], verdict: found };
+  }
+  assert.ok(failing(found).length > 0, `${label} is not detected: ${JSON.stringify(found)}`);
+  if (variant.expect.unresolved_includes) {
+    // A bound counterexample (CW18): the write it attacks is itself unresolved, with the obligation it fails; what else
+    // the escape takes with it is recorded, never counted instead (an unlisted or unwritten row alone is no refusal).
+    for (const item of variant.expect.unresolved_includes) {
+      const at = closedTag(sources, item.tag), there = found.unresolved.filter(entry => entry.startsWith(`${at.file}:${at.line} `));
+      assert.ok(there.length > 0, `${label}: @cw:${item.tag} is not unresolved at all: ${JSON.stringify(found.unresolved)}`);
+      assert.ok(there.some(entry => entry.includes(item.reason)), `${label}: @cw:${item.tag} is unresolved, not for ${JSON.stringify(item.reason)}: ${JSON.stringify(there)}`);
+    }
+    return { variant: variant.name, failing: failing(found), verdict: found };
+  }
+  for (const name of Object.keys(VERDICT)) {
+    if (name !== 'unresolved') { assert.deepEqual(found[name], variant.expect[name] ?? [], `${label}: ${name}`); continue; }
+    const wanted = (variant.expect.unresolved ?? []).map(item => ({ ...item, at: closedTag(sources, item.tag) }));
+    for (const entry of found.unresolved) {
+      const at = wanted.findIndex(item => entry.startsWith(`${item.at.file}:${item.at.line} `) && entry.includes(item.reason));
+      assert.ok(at >= 0, `${label}: an unresolved entry it does not name: ${entry}`);
+      wanted.splice(at, 1);
+    }
+    assert.deepEqual(wanted.map(item => `@cw:${item.tag} ${item.reason}`), [], `${label}: named unresolved entries it does not give`);
+  }
+  return { variant: variant.name, failing: failing(found), verdict: found };
+}
+const closedFile = node => repoPath(node.getSourceFile().fileName).split('/').pop();
+/** CW01-CW03: a positive of cases.json — the write at its tag, its actions and prefixes, where they come from, its rules. */
+function closedPositive(id) {
+  const { sources, scan } = closedBase(), expected = CLOSED_CASES.positive[id], site = closedSite(scan, sources, expected.tag);
+  assert.deepEqual([site.actions, site.prefixes], [[...expected.actions].sort(), []], id);
+  assert.deepEqual(site.origins.map(origin => `${closedFile(origin)} ${origin.text}`).sort(), [...expected.origins].sort(), `${id} origins`);
+  for (const rule of expected.rules) assert.ok(site.rules.some(found => found.startsWith(rule)), `${id}: no rule ${rule} in ${site.rules.join('; ')}`);
+  console.log('ADMIN_AUDIT_CLOSED_WORLD ' + JSON.stringify({ case: id, site: `${site.file}:${site.line}`, actions: site.actions, rules: site.rules, basis: site.basis }));
+  return { sources, scan, site };
+}
+
+test('CW01 a public audit member of an owned module (explicit new into a private readonly field, constructor injection) resolves to exactly the literal actions of its calls', () => {
+  closedPositive('CW01');
+});
+
+test('CW02 the scope callback across files: every callback\'s action resolves, a callback that never takes the audit function too', () => {
+  const { sources, scan } = closedPositive('CW02');
+  // The callback that never writes is still a call of the scope; its candidate-free line stays so.
+  const peek = closedTag(sources, 'peek');
+  assert.deepEqual(scan.candidates.filter(entry => entry.file === peek.file && entry.line === peek.line), []);
+});
+
+test('CW03 the draft transaction callback across files: the finite set its guard leaves `report.${action}`, the direct writer apart', () => {
+  const { sources, scan } = closedPositive('CW03');
+  const guard = closedTag(sources, 'commit-guard'), site = closedSite(scan, sources, CLOSED_CASES.positive.CW03.tag);
+  assert.ok(site.rules.some(rule => rule === `W2(iv) the guard at ${guard.file}:${guard.line}`), site.rules.join('; '));
+  const direct = closedSite(scan, sources, CLOSED_CASES.positive.CW03.direct.tag);
+  assert.deepEqual(direct.actions, CLOSED_CASES.positive.CW03.direct.actions);
+  assert.ok(!site.actions.includes('report.draft.force-discard'), 'the direct writer\'s row is not made a callback action');
+});
+
+test('CW04 the split and wired modules give the writers, actions, prefixes and SQL provenance of the one class they came from, with the DI service handed on', () => {
+  const mono = closedSource('monolith.ts'), before = scanAuditWrites([mono]), { scan: after } = closedBase();
+  assertMarked(before, mono);
+  assert.deepEqual(verdict(before, closedTable()), EMPTY_VERDICT);
+  assert.deepEqual(after.unresolved, []);
+  const writers = scan => scan.sites.map(site => `${site.via} [${site.actions}] [${site.prefixes}] from [${site.origins.map(origin => origin.text).sort()}]`).sort();
+  assert.deepEqual(writers(after), writers(before));
+  const placeless = text => text.replace(/\s*\(api\/src\/[^)]*\)/g, '').replace(/api\/src\/[\w./-]+:\d+/g, '');
+  const sql = scan => scan.candidates.filter(entry => entry.kind.startsWith('raw') || /SQL/.test(entry.kind))
+    .map(entry => `${entry.kind} ${entry.status} ${placeless(entry.reason)} | ${placeless(entry.rule)}`).sort();
+  assert.deepEqual(sql(after), sql(before));
+  assert.ok(sql(after).length > 0, 'the DI service\'s read is a raw candidate of both');
+  // The transaction client reaches the DI service through the parameter property the facade fills, as it does in one
+  // class: the call that hands it on is followed, no candidate there.
+  const { sources } = closedBase(), handed = closedTag(sources, 'scope-require');
+  assert.deepEqual(after.candidates.filter(entry => entry.file === handed.file && entry.line === handed.line), []);
+  console.log('ADMIN_AUDIT_CLOSED_WORLD ' + JSON.stringify({ case: 'CW04', writers: writers(after), sql: sql(after) }));
+});
+
+// CW05-CW20, in cases.json's order: the ids are fixed before any is registered (one test each, nothing merged or dropped).
+// CW17 is Astra's AUDIT-CHECKER-U0B review F01 (a slot read through an assertion, an element access or a closure); CW18
+// binds the 43 closed-world counterexamples of her second consult (X01-X08, N01-N15, K01-K05, E01-E15, edits verbatim),
+// whose P01-P02 are the `u0b-r3-*` cases of tests/fixtures/admin-audit-checker/violations.txt; CW19 binds her 17 review-3
+// inputs as she classified them (A01-A13 refused, P03-P06 must pass); CW20 the decorator allowlist of D847 (L5).
+const CLOSED_MUTANTS = CLOSED_CASES.cases;
+assert.deepEqual(CLOSED_MUTANTS.map(entry => entry.id), Array.from({ length: 16 }, (_, n) => `CW${String(n + 5).padStart(2, '0')}`));
+for (const entry of CLOSED_MUTANTS) {
+  test(`${entry.id} ${entry.title}`, () => {
+    closedBase();
+    const results = entry.variants.map(variant => closedVariant(entry.id, variant));
+    assert.ok(results.length > 0, entry.id);
+    console.log('ADMIN_AUDIT_CLOSED_WORLD ' + JSON.stringify({ case: entry.id, variants: results }));
+  });
+}
 
 // ── the controls over api/src: rewrites by the positions the compiler parsed, and values changed to fail ──
 // No spelling of the product is assumed: the edits are made where the compiler found each write, and every write site keeps

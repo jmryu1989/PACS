@@ -146,6 +146,8 @@ function createSource(options = {}) {
         if (!locations.has(key)) throw new Error(`Unlisted declaration: ${node.name?.getText() || ts.SyntaxKind[node.kind]}`);
       }
     } else {
+      if (spec.facade) validateFacade(locations);
+      if (spec.concerns) validateConcerns(locations);
       // An unremoved old implementation is a duplicate even if the spec points
       // only to the new owner. Forwarders have a different body and are not copies.
       const baselines = new Map(spec.entries.map(e => [e.baseline?.text_sha256, e.id]));
@@ -162,6 +164,129 @@ function createSource(options = {}) {
     }
     return { members: spec.entries.filter(e => e.category === 'member').length,
       declarations: spec.entries.filter(e => e.category === 'declaration').length };
+  }
+  // ── split phase: the facade and the concern files hold exactly what the spec names (order S9-U0b sections 4, 5, 7) ──
+  const keyOf = node => `${node.getSourceFile().fileName}:${node.pos}:${node.end}`;
+  const pathOf = node => 'api/src/' + slash(path.relative(apiSrc, node.getSourceFile().fileName));
+  const decoratorsOf = node => (ts.canHaveDecorators(node) ? ts.getDecorators(node) ?? [] : []);
+  const modifiersOf = node => (node.modifiers ?? []).filter(m => !ts.isDecorator(m)).map(m => ts.SyntaxKind[m.kind]).sort().join(',');
+  const declaredIn = (symbol, file, test) => symbol.declarations.some(d => test(d) && pathOf(d) === file);
+  /** The class decorator is Nest's own Injectable(), resolved through the installed @nestjs/common, without options. */
+  function nestInjectable(decorator) {
+    const call = decorator.expression;
+    if (!ts.isCallExpression(call) || call.arguments.length) return false;
+    return resolveSymbol(call.expression).declarations.some(d =>
+      /[\\/]node_modules[\\/]@nestjs[\\/]common[\\/]/.test(d.getSourceFile().fileName) && d.name?.getText() === 'Injectable');
+  }
+  function validateFacade(locations) {
+    const wanted = spec.facade, file = program.getSourceFile(filename(wanted.file));
+    if (!file) throw new Error(`Unresolved facade file: ${wanted.file}`);
+    const classes = file.statements.filter(ts.isClassDeclaration);
+    if (classes.length !== 1 || classes[0].name?.text !== wanted.class) throw new Error('Missing or duplicate facade class');
+    const cls = classes[0], decorators = decoratorsOf(cls);
+    if (decorators.length !== 1 || !nestInjectable(decorators[0])) throw new Error('Facade class decorator differs');
+    const reexported = [];
+    for (const statement of file.statements) {
+      if (ts.isImportDeclaration(statement) || statement === cls) continue;
+      if (ts.isExportDeclaration(statement) && statement.moduleSpecifier && statement.exportClause && ts.isNamedExports(statement.exportClause)) {
+        reexported.push(...statement.exportClause.elements.map(element => element.name.text));
+        continue;
+      }
+      throw new Error(`Unlisted facade statement: ${ts.SyntaxKind[statement.kind]}`);
+    }
+    if (JSON.stringify([...reexported].sort()) !== JSON.stringify([...wanted.reexports].sort())) throw new Error('Facade re-exports differ');
+    const slots = new Map(wanted.slots.map(slot => [slot.name, slot])), forwards = new Map(wanted.forwards.map(w => [w.name, w]));
+    const seenSlots = new Set(), seenForwards = new Set();
+    let ctor = null;
+    for (const m of cls.members) {
+      if (decoratorsOf(m).length || (ts.isConstructorDeclaration(m) && m.parameters.some(p => decoratorsOf(p).length)))
+        throw new Error('Facade member decorator');
+      if (ts.isConstructorDeclaration(m)) {
+        if (!locations.has(keyOf(m))) throw new Error('Facade constructor is not the mapped one');
+        ctor = m;
+        continue;
+      }
+      const name = m.name?.getText();
+      if (ts.isPropertyDeclaration(m)) {
+        const slot = slots.get(name);
+        if (!slot || seenSlots.has(name)) throw new Error(`Unlisted facade field: ${name}`);
+        if (modifiersOf(m) !== 'PrivateKeyword,ReadonlyKeyword' || m.initializer || !m.type || !ts.isTypeReferenceNode(m.type) ||
+            m.type.typeName.getText() !== slot.class || !declaredIn(resolveSymbol(m.type.typeName), slot.file, ts.isClassDeclaration))
+          throw new Error(`Facade slot differs: ${name}`);
+        seenSlots.add(name);
+        continue;
+      }
+      if (ts.isMethodDeclaration(m) && m.body) {
+        const w = forwards.get(name);
+        if (!w || seenForwards.has(name)) throw new Error(`Unlisted facade method: ${name}`);
+        const signature = lf(file.text.slice(m.getStart(file), m.body.getStart(file))).trimEnd();
+        if (sha256(signature) !== w.signature_sha256) throw new Error(`Facade signature differs: ${name}`);
+        const [only, ...rest] = m.body.statements;
+        const call = !rest.length && only && ts.isReturnStatement(only) && only.expression && ts.isCallExpression(only.expression) ? only.expression : null;
+        const callee = call && ts.isPropertyAccessExpression(call.expression) ? call.expression : null;
+        const holder = callee && ts.isPropertyAccessExpression(callee.expression) &&
+          callee.expression.expression.kind === ts.SyntaxKind.ThisKeyword ? callee.expression : null;
+        const args = call ? call.arguments.map(a => (ts.isIdentifier(a) ? a.text : null)) : [];
+        const params = m.parameters.map(p => (ts.isIdentifier(p.name) && !p.dotDotDotToken ? p.name.text : '?'));
+        if (!holder || holder.name.text !== w.slot || callee.name.text !== name || JSON.stringify(args) !== JSON.stringify(params))
+          throw new Error(`Facade forwarding differs: ${name}`);
+        // the call reaches the moved implementation of the same name on that concern, nothing else
+        if (!resolveSymbol(callee.name).declarations.includes(member(name, 'MethodDeclaration')))
+          throw new Error(`Facade forwarding target differs: ${name}`);
+        seenForwards.add(name);
+        continue;
+      }
+      throw new Error(`Unlisted facade member: ${name ?? ts.SyntaxKind[m.kind]}`);
+    }
+    if (seenSlots.size !== slots.size) throw new Error('Missing facade slot');
+    if (seenForwards.size !== forwards.size) throw new Error('Missing facade forwarding');
+    if (!ctor) throw new Error('Missing facade constructor');
+    const parameters = ctor.parameters.map(p => `${p.name.getText()}:${p.type?.getText()}`);
+    if (JSON.stringify(parameters) !== JSON.stringify(wanted.parameters)) throw new Error('Facade constructor parameters differ');
+    // the body creates every slot once, in the recorded order, from the recorded references (no locals, no locator)
+    const statements = ctor.body?.statements ?? [];
+    if (statements.length !== wanted.slots.length) throw new Error('Facade composition differs');
+    statements.forEach((statement, index) => {
+      const slot = wanted.slots[index];
+      const assign = ts.isExpressionStatement(statement) && ts.isBinaryExpression(statement.expression) &&
+        statement.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken ? statement.expression : null;
+      const left = assign && ts.isPropertyAccessExpression(assign.left) &&
+        assign.left.expression.kind === ts.SyntaxKind.ThisKeyword ? assign.left.name.text : null;
+      const created = assign && ts.isNewExpression(assign.right) ? assign.right : null;
+      const args = (created?.arguments ?? []).map(a => (ts.isPropertyAccessExpression(a) &&
+        a.expression.kind === ts.SyntaxKind.ThisKeyword ? a.name.text : null));
+      if (left !== slot.name || !created || created.expression.getText() !== slot.class || JSON.stringify(args) !== JSON.stringify(slot.args) ||
+          !declaredIn(resolveSymbol(created.expression), slot.file, ts.isClassDeclaration))
+        throw new Error(`Facade composition differs: ${slot.name}`);
+    });
+  }
+  function validateConcerns(locations) {
+    for (const [file, concern] of Object.entries(spec.concerns)) {
+      const source = program.getSourceFile(filename(file));
+      if (!source) throw new Error(`Unresolved concern file: ${file}`);
+      const classes = source.statements.filter(ts.isClassDeclaration);
+      if (JSON.stringify(classes.map(c => c.name?.text)) !== JSON.stringify(concern.class ? [concern.class] : []))
+        throw new Error(`Concern class differs: ${file}`);
+      for (const statement of source.statements) {
+        if (ts.isImportDeclaration(statement) || ts.isClassDeclaration(statement)) continue;
+        for (const node of ts.isVariableStatement(statement) ? [...statement.declarationList.declarations] : [statement])
+          if (!locations.has(keyOf(node))) throw new Error(`Unlisted declaration in ${file}: ${node.name?.getText() ?? ts.SyntaxKind[node.kind]}`);
+      }
+      for (const cls of classes) {
+        if (decoratorsOf(cls).length) throw new Error(`Concern decorator: ${file}`);
+        for (const m of cls.members) {
+          if (decoratorsOf(m).length) throw new Error(`Concern member decorator: ${file}`);
+          if (ts.isConstructorDeclaration(m)) {
+            const parameters = m.parameters.map(p => `${p.name.getText()}:${p.type?.getText()}`);
+            if (JSON.stringify(parameters) !== JSON.stringify(concern.parameters) || m.body?.statements.length ||
+                m.parameters.some(p => decoratorsOf(p).length || modifiersOf(p) !== 'PrivateKeyword,ReadonlyKeyword'))
+              throw new Error(`Concern constructor differs: ${file}`);
+            continue;
+          }
+          if (!locations.has(keyOf(m))) throw new Error(`Unlisted member in ${file}: ${m.name?.getText() ?? ts.SyntaxKind[m.kind]}`);
+        }
+      }
+    }
   }
   function sourceFiles() {
     return sources.map(file => ({ file: 'api/src/' + slash(path.relative(apiSrc, file.fileName)),

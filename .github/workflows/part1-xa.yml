@@ -61,69 +61,27 @@ jobs:
         timeout-minutes: 15
         run: |
           python3 scripts/record-run.py --run-dir tmp/part1-xa-ci/browser --cwd . --tree tests/part1/xa --file worklist-v0/hpacs-lite/xa-playback-model.js --file worklist-v0/hpacs-lite/viewer-xa-playback.js --file .github/workflows/part1-xa.yml -- "$RUNNER_TEMP/part1-xa-python/bin/python" -m playwright install --with-deps chromium
+      - name: Sample download recovery contracts
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-xa-ci/sample-contracts --file tests/part1/archive_download.py --file tests/part1/archive_download_test.py --cwd . --tree tests/part1/xa --file .github/workflows/part1-xa.yml -- python3 -B tests/part1/xa/ci_test.py
+      - name: Declare public sample cache hash list
+        id: sample-plan
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/part1-xa-ci/sample-plan --file tests/part1/archive_download.py --file tests/part1/archive_download_test.py --cwd . --tree tests/part1/xa --file .github/workflows/part1-xa.yml -- python3 -B tests/part1/xa/ci.py plan
+      - name: Cache permitted public samples
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ${{ steps.sample-plan.outputs.cache-paths }}
+          key: ${{ runner.os }}-${{ steps.sample-plan.outputs.cache-key }}
       - name: Fetch public DICOM series and verify every pinned file hash
         if: ${{ !cancelled() }}
         timeout-minutes: 40
         run: |
-          python3 scripts/record-run.py --run-dir tmp/part1-xa-ci/samples --cwd . --tree tests/part1/xa --file worklist-v0/hpacs-lite/xa-playback-model.js --file worklist-v0/hpacs-lite/viewer-xa-playback.js --file .github/workflows/part1-xa.yml -- python3 -c "$(cat <<'PY'
-          import hashlib, json, os, shutil, tempfile, urllib.request, zipfile
-          from pathlib import Path
-          unit = os.environ["PART1_UNIT"]
-          manifest = json.loads(Path("tests/part1/" + unit + "/samples.json").read_text(encoding="utf-8"))
-          rows = manifest["used"] if unit == "mg" else manifest["public"]
-          def digest(path):
-              h = hashlib.sha256()
-              with path.open("rb") as stream:
-                  for block in iter(lambda: stream.read(1024 * 1024), b""):
-                      h.update(block)
-              return h.hexdigest()
-          groups = {}
-          for row in rows:
-              relative = Path(row["path"] if unit == "mg" else row["relpath"])
-              key = manifest["sets"][row["set"]]["root_env"] if unit == "mg" else manifest["root_env"]
-              target = Path(os.environ[key]) / relative
-              target.parent.mkdir(parents=True, exist_ok=True)
-              if target.is_file():
-                  if digest(target) != row["sha256"]:
-                      raise RuntimeError("cached sample hash mismatch: " + row["id"])
-                  print("verified", row["id"], row["sha256"], flush=True)
-                  continue
-              groups.setdefault(relative.parent.name, []).append((row, target))
-          for series, requested in groups.items():
-              # The collection downloads used this public NBIA endpoint. Match archive members
-              # by the pinned FILE digest, never by a server-side ordering or a rewritten header.
-              url = "https://services.cancerimagingarchive.net/nbia-api/services/v1/getImage?SeriesInstanceUID=" + series
-              print("fetch", url, flush=True)
-              with tempfile.TemporaryFile() as archive:
-                  request = urllib.request.Request(url, headers={"User-Agent": "PACS-part1-CI/1.0"})
-                  with urllib.request.urlopen(request, timeout=180) as response:
-                      shutil.copyfileobj(response, archive, 1024 * 1024)
-                  archive.seek(0)
-                  pending = {row["sha256"]: (row, target) for row, target in requested}
-                  with zipfile.ZipFile(archive) as zipped:
-                      for member in zipped.infolist():
-                          if member.is_dir() or member.file_size not in {r["bytes"] for r, _ in pending.values()}:
-                              continue
-                          h = hashlib.sha256()
-                          with zipped.open(member) as stream:
-                              for block in iter(lambda: stream.read(1024 * 1024), b""):
-                                  h.update(block)
-                          match = pending.pop(h.hexdigest(), None)
-                          if match:
-                              row, target = match
-                              # Only a manifest-named destination is written, no archive extraction paths.
-                              with zipped.open(member) as source, target.open("xb") as output:
-                                  shutil.copyfileobj(source, output, 1024 * 1024)
-                              if digest(target) != row["sha256"]:
-                                  raise RuntimeError("downloaded sample hash mismatch: " + row["id"])
-                              print("verified", row["id"], row["sha256"], flush=True)
-                          if not pending:
-                              break
-                  if pending:
-                      raise RuntimeError("NOT RUN: public source lacks pinned samples " + ", ".join(r["id"] for r, _ in pending.values()))
-          print("all public samples verified:", len(rows))
-          PY
-          )"
+          python3 scripts/record-run.py --run-dir tmp/part1-xa-ci/samples --file tests/part1/archive_download.py --file tests/part1/archive_download_test.py --cwd . --tree tests/part1/xa --file worklist-v0/hpacs-lite/xa-playback-model.js --file worklist-v0/hpacs-lite/viewer-xa-playback.js --file .github/workflows/part1-xa.yml -- python3 -B tests/part1/xa/ci.py fetch
       - name: Model behaviour cases
         if: ${{ !cancelled() }}
         timeout-minutes: 5

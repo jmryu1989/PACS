@@ -48,13 +48,23 @@ class ContextLossE2E(mip.VolumeMipE2E):
         viewer.wait_for_function('previous => performance.timeOrigin !== previous', arg=previous, timeout=60000)
         self.recovery_ready(viewer)
 
-    def assert_original_stack(self, viewer, study):
-        state = viewer.evaluate('''() => new Promise((resolve,reject) => {
-          const v=cornerstone.getEnabledElements().map(e=>e.viewport).find(v=>v.type==='stack'&&v.csImage);
-          const event=cornerstone.Enums.Events.IMAGE_RENDERED;
-          const previousReceipt=contextLossRendered.get(v.element);
-          const stop=()=>{clearTimeout(timer);v.element.removeEventListener(event,sample)};
-          const timer=setTimeout(()=>{stop();reject(Error('Current stack canvas did not report IMAGE_RENDERED'))},60000);
+    def assert_original_stack(self, viewer, study, timeout_ms=60000):
+        state = viewer.evaluate('''([studyUid,timeout]) => new Promise((resolve,reject) => {
+          let v,event,previousReceipt,frame;
+          let phase='loaded stack viewport with the expected study image';
+          const stop=()=>{clearTimeout(timer);cancelAnimationFrame(frame);if(v)v.element.removeEventListener(event,sample)};
+          const timer=setTimeout(()=>{stop();reject(Error('Original stack recovery timed out: '+phase+'; study='+studyUid))},timeout);
+          function discover(){
+            v=window.cornerstone?.getEnabledElements().map(e=>e.viewport).find(view=>{
+              if(view.type!=='stack'||!view.csImage||view.csImage.imageId!==view.getCurrentImageId())return false;
+              return cornerstone.metaData.get('instance',view.csImage.imageId)?.StudyInstanceUID===studyUid;
+            });
+            if(!v){frame=requestAnimationFrame(discover);return;}
+            event=cornerstone.Enums.Events.IMAGE_RENDERED;
+            previousReceipt=contextLossRendered.get(v.element);
+            phase='fresh IMAGE_RENDERED receipt for the expected study image';
+            v.element.addEventListener(event,sample);v.render();
+          }
           function sample(){
             try{
               const image=v.csImage,canvas=v.getCanvas(),receipt=contextLossRendered.get(v.element);
@@ -64,6 +74,7 @@ class ContextLossE2E(mip.VolumeMipE2E):
               // Read in the same task as the matching render receipt so a resize
               // cannot clear the canvas between readiness and the pixel oracle.
               const m=cornerstone.metaData.get('instance',v.getCurrentImageId());
+              if(m?.StudyInstanceUID!==studyUid)return;
               const state={study:m.StudyInstanceUID,series:m.SeriesInstanceUID,z:Number(m.ImagePositionPatient[2])/2.5,
                 raw:image.getPixelData()[32*64+32],voi:v.getProperties().voiRange,
                 pixel:canvas.getContext('2d').getImageData(Math.floor(canvas.width/2),Math.floor(canvas.height/2),1,1).data[0],
@@ -73,8 +84,8 @@ class ContextLossE2E(mip.VolumeMipE2E):
           }
           // Even a same-size canvas reset invalidates the previous pixels.
           // Request a new paint and sample only its matching render receipt.
-          v.element.addEventListener(event,sample);v.render();
-        })''')
+          discover();
+        })''', [study.uid, timeout_ms])
         self.assertEqual(state['study'], study.uid)
         self.assertFalse(state['lost'])
         expected = mip.BASE + mip.Z[mip.band(round(state['z']), 33)]

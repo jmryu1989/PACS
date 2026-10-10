@@ -1128,7 +1128,9 @@ class Registration(PreCase):
 
     def both(self, case, outcome, after=None, schedule="default", reference="original", count="actual", delay_ms=0):
         base, keeper = self.kept(f"{case}-{outcome}", schedule, f"{reference}-{count}-{delay_ms}ms")
-        layouts = {"original": Pages.layout(reference, 0), "candidate": Pages.layout("current", count)}
+        # The incremental reference must keep the landed parent's external-script boundaries.
+        layouts = {"original": Pages.layout(reference, "actual" if reference == "previous" else 0),
+                   "candidate": Pages.layout("current", count)}
         reached = {"original": {}, "candidate": {}}
         status = {"original": "not_started", "candidate": "not_started"}
 
@@ -1319,6 +1321,8 @@ class ActualLayout(PreCase):
             "incremental-C3", "answered", reference="previous")
         self.assertEqual([], before_errors)
         self.assertEqual([], errors)
+        for phase in before.values():
+            self.assertEqual("actual", phase["source"]["kind"], "previous parent is delivered without resplitting")
         self.compare_phases(base, before, after, "previous parent to actual", dispatches=True)
 
     def test_actual_held_input_and_leaving_boundaries(self):

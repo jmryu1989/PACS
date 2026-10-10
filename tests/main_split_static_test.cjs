@@ -93,6 +93,48 @@ function analyze(body, movedCount, ownership = homes) {
     }
   });
   const symbolOf = node => checker.getSymbolAtLocation(node);
+  function valueOf(node, seen = new Set()) {
+    if (!node || seen.has(node)) return null;
+    seen.add(node);
+    if (ts.isParenthesizedExpression(node)) return valueOf(node.expression, seen);
+    if (ts.isIdentifier(node)) {
+      const symbol = symbolOf(node);
+      return valueOf(symbol && (symbol.valueDeclaration || symbol.declarations?.[0]), seen);
+    }
+    if (ts.isVariableDeclaration(node) || ts.isPropertyAssignment(node)) return valueOf(node.initializer, seen);
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      const holder = valueOf(node.expression, seen);
+      const name = ts.isPropertyAccessExpression(node) ? node.name : node.argumentExpression;
+      if (!holder || !ts.isObjectLiteralExpression(holder) || !name ||
+          !(ts.isPropertyAccessExpression(node) || ts.isStringLiteral(name))) return null;
+      return valueOf(holder.properties.find(property => property.name &&
+        !ts.isComputedPropertyName(property.name) && property.name.text === name.text), seen);
+    }
+    return node;
+  }
+  const expanding = new Set();
+  function invoke(expression, origin, chain, label, args = null) {
+    const callee = valueOf(expression);
+    if (!callee || !ts.isFunctionLike(callee) || !callee.body || expanding.has(callee)) return;
+    expanding.add(callee);
+    try {
+      const called = [...chain, label];
+      for (const [index, parameter] of (args ? callee.parameters : []).entries()) {
+        if (parameter.initializer && (!args[index] ||
+            (ts.isIdentifier(args[index]) && args[index].text === 'undefined' && !symbolOf(args[index]))))
+          scan(parameter.initializer, origin, 'eager', called);
+      }
+      const body = ts.isBlock(callee.body) ? callee.body.statements : [callee.body];
+      for (const statement of body) {
+        // Async execution is synchronous up to its first await; later task gaps need the browser oracle.
+        let awaits = false;
+        const find = n => { if (ts.isAwaitExpression(n)) awaits = true; if (!ts.isFunctionLike(n)) ts.forEachChild(n, find); };
+        scan(statement, origin, 'eager', called);
+        find(statement);
+        if (awaits) break;
+      }
+    } finally { expanding.delete(callee); }
+  }
   function writeKind(node) {
     const parent = node.parent;
     if (ts.isBinaryExpression(parent) && parent.left === node &&
@@ -124,41 +166,30 @@ function analyze(body, movedCount, ownership = homes) {
       for (const parameter of node.parameters || []) if (parameter.initializer) scan(parameter.initializer, origin, 'deferred', chain);
       const parentCall = node.parent && ts.isCallExpression(node.parent) ? node.parent : null;
       const callbackMode = parentCall ? 'gap' : 'deferred';
-      if (node.body) ts.forEachChild(node.body, child => scan(child, origin, callbackMode, chain));
+      if (node.body) scan(node.body, origin, callbackMode, chain);
       return;
     }
     if (ts.isCallExpression(node) && mode === 'eager') {
-      const target = ts.isIdentifier(node.expression) ? declarations.get(symbolOf(node.expression)) : null;
-      if (target && target.function && !chain.includes(node.expression.text)) {
-        const callee = target.node;
-        for (const statement of callee.body.statements) {
-          // An async function yields at its first top-level await; following callbacks belong to the task-gap oracle.
-          let awaits = false;
-          const find = n => { if (ts.isAwaitExpression(n)) awaits = true; if (!ts.isFunctionLike(n)) ts.forEachChild(n, find); };
-          scan(statement, origin, 'eager', [...chain, node.expression.text]);
-          find(statement);
-          if (awaits) break;
-        }
-      } else if (ts.isArrowFunction(node.expression) || ts.isFunctionExpression(node.expression)) {
-        const body = node.expression.body;
-        ts.forEachChild(body, child => scan(child, origin, 'eager', [...chain, '<IIFE>']));
-      }
+      invoke(node.expression, origin, chain, node.expression.getText(source), node.arguments);
       // These standard array operations synchronously invoke callbacks. Other factory/registration callbacks
       // remain explicit gap possibilities, discharged by the browser's held-boundary/lifecycle cases.
       if (ts.isPropertyAccessExpression(node.expression) && ['forEach', 'map', 'filter', 'reduce', 'some', 'every', 'find']
         .includes(node.expression.name.text)) {
-        for (const argument of node.arguments) if ((ts.isArrowFunction(argument) || ts.isFunctionExpression(argument)) && argument.body)
-          scan(argument.body, origin, 'eager', [...chain, node.expression.name.text + ' callback']);
+        for (const argument of node.arguments)
+          invoke(argument, origin, chain, node.expression.name.text + ' callback');
       }
     }
+    // Promise invokes its executor during construction, unlike then/event/timer callbacks. A local binding
+    // named Promise has its own semantics and must not be assumed to be the native constructor.
+    if (ts.isNewExpression(node) && mode === 'eager' && ts.isIdentifier(node.expression) &&
+        node.expression.text === 'Promise' && !symbolOf(node.expression)?.declarations?.length)
+      invoke(node.arguments?.[0], origin, chain, 'Promise executor');
     ts.forEachChild(node, child => scan(child, origin, mode, chain));
   }
   source.statements.forEach((node, index) => scan(node, index, 'eager'));
-  // Deferred forward references cross browser task gaps. Keep the entire inventory (not the historical count),
-  // with the PRE cases that exercise input/session-end and library lifecycle while each boundary is held.
-  for (const ref of refs) if (ref.classification !== 'eager') ref.coverage = [
-    'EarlyInputSplit: held 6/9/current-study/33/38 and 0/150ms', 'WindowAndSessionEvents',
-    'ActualLayout.test_actual_held_input_and_leaving_boundaries', 'Registration', 'AfterAuthScenarios'];
+  // Keep possible references visible without claiming a held-boundary case was linked to each one.
+  for (const ref of refs) if (ref.classification !== 'eager')
+    ref.coverage = 'unlinked (browser suite is the oracle)';
   return { references: refs, certain };
 }
 
@@ -183,4 +214,43 @@ test('C2: immediate writes and a forward function call are detected independentl
   const observed = analyze(body, 2, ownership);
   assert.deepEqual(observed.certain.map(r => [r.binding, r.access]),
     [['second', 'read'], ['second', 'write'], ['later', 'read']]);
+
+  const eagerForms = [
+    ['const-arrow', 'const run = () => late; run();'],
+    ['const-function', 'const run = function () { late = 1; }; run();'],
+    ['initializer-alias', 'const run = () => late; const alias = run; alias();'],
+    ['object-method', 'const holder = { run() { late++; } }; holder.run();'],
+    ['object-arrow', 'const holder = { run: () => late }; holder.run();'],
+    ['object-alias', 'const holder = { run() { return late; } }; const alias = holder; alias["run"]();'],
+    ['nested-call', 'const inner = () => late; const holder = { run() { inner(); } }; holder.run();'],
+    ['promise-executor', 'new Promise(resolve => resolve(late));'],
+    ['promise-executor-alias', 'const run = resolve => resolve(late); new Promise(run);'],
+    ['parenthesized-iife', '(() => late)();'],
+    ['async-prefix', 'const run = async () => { late++; await 0; }; run();'],
+    ['default-argument', 'const run = (value = late) => value; run();'],
+    ['recursive-call', 'const run = (again = false) => { if (again) run(); late++; }; run();'],
+  ];
+  for (const [form, prefix] of eagerForms) {
+    const probe = prefix + ' let late = 0;';
+    const nodes = statements(probe);
+    const owners = nodes.map((s, i) => ({ ...s, module: i === nodes.length - 1 ? 1 : 0,
+      file: i === nodes.length - 1 ? 'late.js' : 'early.js' }));
+    const checked = analyze(probe, 2, owners);
+    assert.equal(checked.certain.filter(r => r.binding === 'late').length, 1, `${form}: synchronous forward use`);
+    assert.ok(checked.certain.every(r => r.crosses_file), `${form}: actual file boundary`);
+  }
+  for (const prefix of ['const run = () => late;', 'const holder = { run() { return late; } };',
+    'Promise.resolve().then(() => late);', 'const run = async () => { await 0; late++; }; run();',
+    'function Promise(executor) {} new Promise(() => late);',
+    'const run = (value = late) => value; run(1);', 'new Promise((resolve = late) => resolve(0));']) {
+    const probe = prefix + ' let late = 0;', nodes = statements(probe);
+    const owners = nodes.map((s, i) => ({ ...s, module: i === nodes.length - 1 ? 1 : 0,
+      file: i === nodes.length - 1 ? 'late.js' : 'early.js' }));
+    const checked = analyze(probe, 2, owners);
+    assert.deepEqual(checked.certain, [], 'creation/deferred callbacks do not execute eagerly');
+    const possible = checked.references.filter(r => r.binding === 'late');
+    assert.ok(possible.length > 0, 'deferred forward references remain inventoried');
+    assert.ok(possible.every(r => r.coverage === 'unlinked (browser suite is the oracle)'),
+      'no PRE coverage is claimed without a linked held-boundary case');
+  }
 });
