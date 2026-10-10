@@ -15,7 +15,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { scripts } = require('./page_source.cjs');
+const { scripts, readPage, readPageSource } = require('./page_source.cjs');
+const { createHash } = require('node:crypto');
 const { baseline, chunks, statements, verify } = require('./main_move_contract.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -43,7 +44,7 @@ function split(count, outDir, options = {}) {
   const page = path.resolve(options.page || path.join(ROOT, 'worklist-v0/hpacs-lite/main.html'));
   const spec = options.spec ? JSON.parse(fs.readFileSync(options.spec, 'utf8')) : require('./main_move_spec.json');
   const dir = outsideProduct(outDir);
-  const html = fs.readFileSync(page, 'utf8');
+  const html = readPageSource(page);
   const inline = scripts(html).filter(t => !t.src);
   if (inline.length !== 1) throw new Error('The page under test must have exactly one inline script');
   const tag = inline[0];
@@ -59,13 +60,25 @@ function split(count, outDir, options = {}) {
   fs.writeFileSync(target, served);
   verify(html, target, spec); // same statements, bytes and outer markup as the page under test
 
+  const manifest = actual(target, { spec: options.spec, kind: 'generated', source: page });
+  fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest));
+  return manifest;
+}
+
+// Read delivered files again, independently of the generator. Actual layouts are never regenerated: a changed
+// or missing asset must remain visible to the browser and its hash oracle.
+function actual(page, options = {}) {
+  const spec = options.spec ? JSON.parse(fs.readFileSync(options.spec, 'utf8')) : require('./main_move_spec.json');
+  const input = readPage(page), served = input.html, html = input.source;
+  const tag = scripts(html).find(t => !t.src), parts = chunks(html, spec);
+  const count = input.files.length, rest = input.region.find(t => !t.src);
   // Line ranges of every statement in the served layout, from the same AST the contract uses. A range starts at
   // the statement's first token (not its leading comments), so a registration's line names one statement.
   const nodes = statements(tag.body);
   const source = ts.createSourceFile('inline.js', tag.body, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
   if (source.statements.length !== nodes.length) throw new Error('Statement list differs from the move contract');
   source.statements.forEach((node, i) => { nodes[i] = { ...nodes[i], token: node.getStart(source) }; });
-  const restAt = count < parts.length ? served.length - (html.length - tag.end) - '</script>'.length - rest.length : -1;
+  const restAt = rest ? rest.start + rest.tag.indexOf('>') + 1 : -1;
   const restFirst = count < parts.length ? nodes[parts.slice(0, count).reduce((s, q) => s + q.statements, 0)].start : 0;
   const servedLine = lines(served);
   const result = [];
@@ -85,11 +98,17 @@ function split(count, outDir, options = {}) {
     }
   });
   const externals = scripts(served).filter(t => t.src).map(t => t.src);
-  const manifest = { count, page: 'main.html', source: page, scripts: externals,
+  const files = [page, ...input.files];
+  const inputs = Object.fromEntries(files.map(file => {
+    const bytes = fs.readFileSync(file);
+    return [path.basename(file), { bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'),
+      lf_sha256: createHash('sha256').update(bytes.toString('utf8').replace(/\r\n/g, '\n')).digest('hex') }];
+  }));
+  const manifest = { kind: options.kind || 'actual', count, page: path.basename(page), source: options.source || page,
+    scripts: externals, inputs,
     parts: parts.slice(0, count).map(p => p.file),
     modules: parts.map((p, i) => ({ index: i, file: p.file, external: i < count, statements: p.statements })),
     statements: result };
-  fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest));
   return manifest;
 }
 
@@ -123,7 +142,7 @@ function deriveSpec(page, options = {}) {
     if (source.parseDiagnostics.length) throw new Error('Inline script must parse');
     return source.statements.map(node => node.getText(source));
   };
-  const html = fs.readFileSync(page, 'utf8');
+  const html = readPageSource(page);
   const oldTexts = texts(inlineBody(baseHtml)), body = inlineBody(html), newTexts = texts(body);
   const oldModule = base.modules.flatMap((m, i) => m.statements.map(() => i));
   if (oldModule.length !== oldTexts.length) throw new Error('The spec does not describe its baseline page');
@@ -257,7 +276,7 @@ const PRE_UNITS = [['M01', 254], ['M02', 107], ['M03', 115, 'selectedUid'], ['M0
   ['M30', 596], ['M31', 550], ['M32', 551, 'workspaceState'], ['M33', 553], ['M34', 554], ['M35', 558]];
 const QUICK_MATCH = 572, CITATION_INPUT = 352;   // the f1d5406 Quick Match and citation input registrations
 function preMutant(page, id) {
-  const html = fs.readFileSync(page, 'utf8');
+  const html = readPageSource(page);
   const inline = scripts(html).filter(t => !t.src);
   if (inline.length !== 1) throw new Error('Expected one inline script (an unsplit page)');
   const tag = inline[0], at = tag.start + tag.tag.indexOf('>') + 1, body = tag.body;
@@ -336,7 +355,7 @@ function restoredStatement(html, id) {
 }
 // Where the page under test has f1d5406 statements (by index): {f1d5406Index: currentIndex or -1}.
 function locateStatements(page, indexes) {
-  const home = frozenIndexes(fixtureStatements(fs.readFileSync(page, 'utf8')), readFixture().statements);
+  const home = frozenIndexes(fixtureStatements(readPageSource(page)), readFixture().statements);
   return Object.fromEntries(indexes.map(index => [index, home.indexOf(Number(index))]));
 }
 // A mutant as the early-input suite serves it: the page, its derived spec and its 45-part layout, with the part that
@@ -354,7 +373,34 @@ function mutantLayout(page, id, outDir) {
     part: restored && { count: 45, ...manifest.statements[restored.index], parts: manifest.parts } };
 }
 
-module.exports = { split, deriveSpec, fixtureBlocks, freezeFixture, preMutant, restoredStatement, locateStatements,
+function splitMutant(page, id, outDir) {
+  const dir = outsideProduct(outDir), manifest = split(18, dir, { page });
+  const target = path.join(dir, 'main.html');
+  let html = fs.readFileSync(target, 'utf8');
+  if (id === 'S1-M01') {
+    const file = path.join(dir, 'page-core.js'), body = fs.readFileSync(file, 'utf8');
+    const node = statements(body).find(n => n.name === 'apiFail');
+    if (!node) throw new Error('S1-M01: apiFail span missing');
+    const at = body.indexOf(' ', node.start);
+    fs.writeFileSync(file, body.slice(0, at) + '\t' + body.slice(at + 1));
+  } else if (id === 'S1-M02') {
+    fs.unlinkSync(path.join(dir, 'study-corrections.js'));
+  } else if (id === 'S1-M03') {
+    const body = fs.readFileSync(path.join(dir, 'study-corrections.js'), 'utf8');
+    const node = statements(body).find(n => n.name === 'doDelete');
+    const inline = scripts(html).find(t => !t.src), at = inline.start + '<script>'.length;
+    html = html.slice(0, at) + body.slice(node.start) + html.slice(at);
+  } else if (id === 'S1-M04') {
+    html = html.replace('<script src="page-core.js"></script>\n  <script src="study-state.js"></script>',
+      '<script src="study-state.js"></script>\n  <script src="page-core.js"></script>');
+  } else if (id === 'S1-M05') {
+    html = html.replace('<script src="report-dictation.js">', '<script defer src="report-dictation.js">');
+  } else if (id !== 'BASELINE') throw new Error('Unknown byte mutant ' + id);
+  fs.writeFileSync(target, html);
+  return { id, page: target, manifest };
+}
+
+module.exports = { split, actual, splitMutant, deriveSpec, fixtureBlocks, freezeFixture, preMutant, restoredStatement, locateStatements,
   mutantLayout, PRE_UNITS, FIXTURE_BASE, FIXTURE_FILE, REPORT_FIXTURE };
 if (require.main === module) {
   const [op, ...args] = process.argv.slice(2);
@@ -374,7 +420,7 @@ if (require.main === module) {
     const [page, id, outDir] = args;
     process.stdout.write(JSON.stringify(mutantLayout(page, id, outDir)));
   } else if (op === 'frozen-index' && args[0]) {
-    process.stdout.write(JSON.stringify(frozenIndexes(fixtureStatements(fs.readFileSync(args[0], 'utf8')),
+    process.stdout.write(JSON.stringify(frozenIndexes(fixtureStatements(readPageSource(args[0])),
       readFixture().statements)));
   } else if (op === 'locate' && args[1]) {
     const [page, ...indexes] = args;
@@ -384,6 +430,10 @@ if (require.main === module) {
     const same = JSON.stringify(frozen) === JSON.stringify(kept);
     process.stdout.write(JSON.stringify({ same, statements: kept.statements.length }));
     process.exitCode = same ? 0 : 1;
+  } else if (op === 'split-mutant' && args[2]) {
+    process.stdout.write(JSON.stringify(splitMutant(args[0], args[1], args[2])));
+  } else if (op === 'actual' && args[0]) {
+    process.stdout.write(JSON.stringify(actual(args[0], { spec: args[1] })));
   } else if (op === 'split' && args[1]) {
     const [count, outDir, page, spec] = args;
     process.stdout.write(JSON.stringify(split(Number(count), outDir, { page, spec })));

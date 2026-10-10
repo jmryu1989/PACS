@@ -11,12 +11,19 @@ def read_json(path):
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
-def python_results(log, module=None):
+def python_results(log, module=None, runner=False):
     """unittest verbosity=2의 사례 결과와 실행기의 선택 목록만 읽는다."""
     outcomes, selected, pending = {}, [], None
     for line in log.splitlines():
-        if line.startswith("EXACT_TESTS "):
-            selected.extend(json.loads(line[len("EXACT_TESTS "):]))
+        if runner and line.startswith("EXACT_TESTS "):
+            # Only a recorded runner command owns this protocol. Self-tests can
+            # print nested probes (including interleaved stdout/stderr).
+            items = json.loads(line[len("EXACT_TESTS "):])
+            if not isinstance(items, list) or not items or not all(isinstance(item, str) for item in items):
+                raise ValueError("Malformed runner EXACT_TESTS selection")
+            if selected:
+                raise ValueError("Duplicate runner EXACT_TESTS selection")
+            selected = items
         match = re.match(r"^(test\w+) \(([\w.]+)\)(.*)$", line)
         if match:
             method, owner, line = match.groups()
@@ -32,9 +39,11 @@ def python_results(log, module=None):
                                      "건너뜀: " + status if status.startswith("skipped") else
                                      "실패: " + status)
                 pending = None
+    if runner and not selected:
+        raise ValueError("Missing runner EXACT_TESTS selection")
     for test in selected:
         outcomes.setdefault(test, "누락: 선택됐으나 사례 결과 없음")
-    return outcomes
+    return {test: outcomes[test] for test in selected} if runner else outcomes
 
 
 def run_problem(before, after, sha, status, code, log):
@@ -53,8 +62,8 @@ def run_problem(before, after, sha, status, code, log):
     return None
 
 
-def add_python(found, log, source, problem, module=None):
-    outcomes = python_results(log, module)
+def add_python(found, log, source, problem, module=None, runner=False):
+    outcomes = python_results(log, module, runner)
     complete = re.search(r"^Ran [1-9]\d* tests? in ", log, re.M)
     okay = re.search(r"^OK\s*$", log, re.M)
     for test, reason in outcomes.items():
@@ -77,7 +86,8 @@ def record_results(path, sha, found):
     command = record["command"]
     files = [arg.replace("\\", "/") for arg in command if arg.endswith((".py", ".cjs"))]
     module = Path(files[-1]).stem if files else None
-    add_python(found, log, path, problem, module)
+    runner = bool(files and Path(files[0]).name == "run-tests.py")
+    add_python(found, log, path, problem, module, runner)
     # validate.yml의 기존 node --test 파일 명령은 TAP 전체 결과로 대조한다.
     # 필터가 붙은 부분 실행을 전체 파일의 결과로 세지 않는다.
     if "--test" in command:
@@ -124,7 +134,7 @@ def candidate_results(directory, sha, found):
                                   sha, "completed", row["exit"], log)
             if not re.search(r'^PLAN_RESULT .*"status": "passed"', log, re.M) and not problem:
                 problem = "미완료: 실행기 PLAN_RESULT 성공 없음"
-            add_python(cases, log, log_path, problem)
+            add_python(cases, log, log_path, problem, runner=True)
     required = [Path(row["file"]).stem + "." + row["case"] for row in provenance["sequence"]]
     for test in required:
         reasons = [row["reason"] for row in cases.get(test, [])]
