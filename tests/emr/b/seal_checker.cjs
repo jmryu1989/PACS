@@ -371,7 +371,7 @@ async function named(){
     const target={sequence:w.head.sequence,hash:w.head.hash}, read=w.sql.verificationPage.bind(w.sql);
     let rows=0, changed=false;
     w.sql.verificationPage=async(...args)=>{
-      if(!changed){changed=true;await w.commit('B','ok');w.seal.recordIntent('history','unrelated','unrelated','a'.repeat(64),'other-bundle');}
+      if(!changed){changed=true;await w.commit('B','ok');w.journal.coordinator.call('update',state=>{state.intents['history:unrelated']={stream:'history',attemptId:'unrelated',eventId:'unrelated',contentSha256:'a'.repeat(64),bundleId:'other-bundle',owner:w.journal.coordinator.ownerId};});}
       const page=await read(...args);rows+=page.entries.length+(page.first?1:0);return page;
     };
     try { await w.seal.advance('viewing',target); }

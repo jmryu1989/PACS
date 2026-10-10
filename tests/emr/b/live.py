@@ -93,11 +93,13 @@ class EmrBLedgerLive(unittest.TestCase):
     # ── disposable environment ──
 
     @classmethod
-    def start_db(cls, suffix):
+    def start_db(cls, suffix, persistent=False):
         name = "kin-emrb-%s-%s" % (cls.token, suffix)
         cls.created["container"].append(name)
-        run(["docker", "run", "-d", "--name", name, "--label", cls.label, "--network", "none",
-             "--tmpfs", "/var/lib/postgresql/data", "--tmpfs", "/var/lib/postgresql/emr-access:uid=70,gid=70,mode=0700",
+        storage = (["-v", cls.volume(suffix + '-pg') + ':/var/lib/postgresql/data',
+                    '-v', cls.volume(suffix + '-ts') + ':/var/lib/postgresql/emr-access'] if persistent else
+                   ["--tmpfs", "/var/lib/postgresql/data", "--tmpfs", "/var/lib/postgresql/emr-access:uid=70,gid=70,mode=0700"])
+        run(["docker", "run", "-d", "--name", name, "--label", cls.label, "--network", "none", *storage,
              "-e", "POSTGRES_USER=kin", "-e", "POSTGRES_PASSWORD", "-e", "POSTGRES_DB=kin", POSTGRES], env=cls.env)
         for _ in range(240):
             if run(["docker", "exec", name, "pg_isready", "-h", "127.0.0.1", "-U", "kin"], check=False).returncode == 0:
@@ -105,6 +107,8 @@ class EmrBLedgerLive(unittest.TestCase):
             time.sleep(0.25)
         else:
             raise RuntimeError("disposable database did not start")
+        if persistent:
+            run(['docker', 'exec', '-u', '0', name, 'chown', 'postgres:postgres', '/var/lib/postgresql/emr-access'])
         run(["docker", "exec", "-u", "postgres", name, "mkdir", "-m", "700", TABLESPACE])
         return name
 
@@ -366,7 +370,7 @@ class EmrBLedgerLive(unittest.TestCase):
     # ── L03 ──
     def baseline_appends(self, count):
         cls = type(self)
-        if not hasattr(cls, 'baseline_image'):
+        if 'baseline_image' not in cls.__dict__:
             with tempfile.TemporaryDirectory(prefix='emr-live-r3-') as directory:
                 # A mutant's source snapshot has no .git directory. Read only
                 # the pinned baseline from the original checkout supplied by its driver.
@@ -403,7 +407,8 @@ class EmrBLedgerLive(unittest.TestCase):
         GRANT EXECUTE ON FUNCTION public.emrb_measure_lock(text) TO kin_runtime;"""
 
     def measured_appends(self, count):
-        # Both revisions run now, with the same SQL probe, pool and filesystem.
+        # Functional workload and cold diagnostic only. D941 acceptance below
+        # uses fresh matched volumes, warm processes and interleaved blocks.
         baseline = self.baseline_appends(count) if count == 24 else None
         self.ok(self.latency_probe)
         try:
@@ -415,21 +420,20 @@ class EmrBLedgerLive(unittest.TestCase):
         if baseline is None:
             baseline = self.baseline_appends(count)
         print('EMR_BASELINE_THROUGHPUT ' + json.dumps({'count': count, **baseline}), flush=True)
-        self.latency_pair = {'count': count, 'baseline_revision': BASELINE, 'r3': baseline['summary'], 'r4d': data.get('summary')}
+        self.latency_pair = {'purpose': 'cold diagnostic, not acceptance', 'count': count, 'baseline_revision': BASELINE, 'r3': baseline['summary'], 'r4d': data.get('summary')}
         print('EMR_RELATIVE_LATENCY ' + json.dumps(self.latency_pair), flush=True)
         self.assertEqual(len(data.get("results", [])), count, data)
         self.assertEqual(data["summary"]["failures"], 0, data)
         return data["results"]
 
     def assert_relative_latency(self):
-        self.assertLessEqual(self.latency_pair['r4d']['p95_ms'], self.latency_pair['r3']['p95_ms'], self.latency_pair)
+        from live_acceptance import compare
+        compare(self, ['concurrent-' + str(self.latency_pair['count'])])
 
     def test_b03_idempotency_and_concurrent_append(self):
         """Concurrent original events are all ordered once; the same event resent is the same receipt; another content
         under its ID is refused; one verified subject is one identity however many resolve it at once. The appends run
         at once in one server process (its connection pool), the deployment's one API per state volume."""
-        self.measured_appends(1)
-        self.assertLessEqual(self.latency_pair['r4d']['p95_ms'], self.latency_pair['r3']['p95_ms'] * 1.10, self.latency_pair)
         start = self.driver("tail")["sequence"]
         results = self.measured_appends(24)
         self.assertEqual(len(results), 24)
@@ -523,6 +527,11 @@ class EmrBLedgerLive(unittest.TestCase):
         self.chain_ok(stored)
         self.assertEqual(self.driver("recover")["recovered"], 0)
         self.assert_relative_latency()
+
+    def test_b03c_warm_single_sustained_and_verification_plans(self):
+        """D941: live single/sustained non-inferiority and PostgreSQL JIT class guard."""
+        from live_acceptance import compare
+        compare(self, ['single', 'sustained'])
 
     # ── L04 ──
     def test_b04_chain_tail_and_crash_recovery(self):

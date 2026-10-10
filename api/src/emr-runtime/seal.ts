@@ -45,34 +45,12 @@ export class AccessSeal {
     }
   }
   read(): SealState | 'absent' { return this.load().tail ?? 'absent'; }
-  recordIntent(stream: AccessStream, attemptId: string, eventId: string | null, contentSha256: string | null, bundleId: string): void {
-    this.change(state => this.addIntent(state, { stream, attemptId, eventId, contentSha256, bundleId }));
-  }
   private addIntent(state: ExternalState, value: { stream: AccessStream; attemptId: string; eventId: string | null; contentSha256: string | null; bundleId: string }): void {
     const id = key(value.stream, value.attemptId);
     const owned = { ...value, owner: this.journal.coordinator.ownerId };
     if (state.intents[id] && !same(state.intents[id], owned)) refuse('AccessEventIdConflict');
     if (state.terminal[id]) refuse('AttemptAlreadySettled');
     state.intents[id] = owned;
-  }
-  private intents: { value: Parameters<AccessSeal['addIntent']>[1]; resolve: () => void; reject: (error: unknown) => void }[] | null = null;
-  /** Group admitted intents before any head lock. Every waiter already holds its shared DB
-   * writer fence, and none may stage a row until this one durable publication completes.
-   */
-  recordIntentAsync(stream: AccessStream, attemptId: string, eventId: string | null, contentSha256: string | null, bundleId: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const item = { value: { stream, attemptId, eventId, contentSha256, bundleId }, resolve, reject };
-      if (this.intents) { this.intents.push(item); return; }
-      this.intents = [item];
-      // Coalesce the current turn without imposing a fixed delay on isolated requests.
-      void Promise.resolve().then(() => {
-        const group = this.intents; this.intents = null;
-        try {
-          this.change(state => { for (const entry of group) this.addIntent(state, entry.value); }, 'admit');
-          for (const entry of group) entry.resolve();
-        } catch (error) { for (const entry of group) entry.reject(error); }
-      });
-    });
   }
 
   /** Intent and exact reservation share one durable WAL record under the head lock.

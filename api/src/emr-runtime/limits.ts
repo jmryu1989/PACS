@@ -13,11 +13,12 @@ export const EMR_OWNER_RETRY_MS = 25;
 
 /** Bound head-lock waiters before acquiring connections. Two pool slots remain
  * available to receipt verification even when all append lanes are occupied.
- * The API sets an explicit pool size instead of guessing Prisma's CPU-dependent
- * default; explicitly configured smaller pools retain the reserve. */
+ * This is a dedicated EMR client: unrelated API queries cannot consume its
+ * reserve. One lane uses at most one connection, so lanes + reserve is enough;
+ * explicitly configured smaller pools reduce lanes while retaining the reserve. */
 export const EMR_APPEND_LANES = 4;
 export const EMR_VERIFY_RESERVE = 2;
-export const EMR_APPEND_POOL_SIZE = 9;
+export const EMR_APPEND_POOL_SIZE = EMR_APPEND_LANES + EMR_VERIFY_RESERVE;
 
 /** Cold replays may hash at most this many rows through the external seal.
  * Beyond this bound they fail closed (SealUnavailable/replay-verification-limit),

@@ -1,5 +1,6 @@
 """REQ-D878 -> RISK-EMR-RECEIPT-DELAY -> same-run performance/complexity contracts.
 
+Developer smoke check only; NOT a performance acceptance measurement (D941).
 Reuses Opus's real-code A/B DB-boundary harness, with constant-cost MVCC snapshots.
 No DB, network, LiveStack or existing fixture. Baseline is the pinned round-3 blob.
 Optional --image runs both revisions on the same disposable Linux filesystem and
@@ -19,6 +20,7 @@ import subprocess
 import tarfile
 import tempfile
 import uuid
+from noninferiority import noninferiority
 
 ROOT = Path(__file__).resolve().parents[3]
 BASELINE = "9a1df0d1328d5b8ad979fc7d2ef65192d595cf4b"
@@ -144,7 +146,8 @@ def main():
                 subprocess.run(["docker", "volume", "rm", volume], check=True, capture_output=True, timeout=60)
 
     receipt = [json.loads(line) for line in (out / "receipt.jsonl").read_text().splitlines()] if configs else []
-    failures, report = [], {"baseline": BASELINE, "candidate_sources": source_hashes, "repetitions": args.reps,
+    failures, report = [], {"purpose": "developer smoke only; SQL/COMMIT delays are modeled; no acceptance verdict",
+                           "baseline": BASELINE, "candidate_sources": source_hashes, "repetitions": args.reps,
                            "lock": {"choice": "B", "linux_image": args.image, "emulated_pair_ms": args.flock_ms, "state_filesystem": "disposable-local-volume" if args.image else "host"}, "cases": {}}
     for case, count, retained in configs:
         selected = [r for r in receipt if r["label"].startswith(case + "-") and r["concurrency"] == count and r["prefill"] == retained]
@@ -163,8 +166,10 @@ def main():
             failures.append(f"{case}-{count}-{retained}: request failed")
         if stats["r4d"]["p95"] > stats["r3"]["p95"] * (1.0 if case == "concurrent" else 1.10):
             failures.append(f"{case}-{count}-{retained}: candidate p95 exceeds same-run r3 budget (+10%, concurrent +0%)")
-        if case == "sustained" and stats["permutation_p"] >= .05:
-            failures.append("sustained: paired p95 difference does not meet p < 0.05")
+        if case == "sustained" and args.reps >= 2:
+            stats['noninferiority'] = noninferiority([[r['p95']] for r in pair['r3']], [[r['p95']] for r in pair['r4d']])
+            if not stats['noninferiority']['accepted']:
+                failures.append('sustained: one-sided 95% p95 ratio bound exceeds 1.10 (developer smoke)')
         if case == "ledger" and max(r["read_rows"] for r in pair["r4d"]) > 4:
             failures.append(f"ledger-{retained}: single receipt reads retained prefix")
     if "ledger" in cases:

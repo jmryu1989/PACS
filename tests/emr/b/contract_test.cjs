@@ -25,6 +25,14 @@ if (process.argv.includes('--emr-b-live')) {
   contractSuite();
 }
 
+function seedIntents(journal, values) {
+  journal.coordinator.call('update', state => {
+    for (const [stream, attemptId, eventId, contentSha256, bundleId] of values)
+      state.intents[stream + ':' + attemptId] = { stream, attemptId, eventId, contentSha256, bundleId,
+        owner: journal.coordinator.ownerId };
+  });
+}
+
 function errorCode(error) {
   if (!error) return 'unknown';
   if (typeof error.code === 'string' && /^[A-Z][A-Za-z]+$/.test(error.code)) return error.code;
@@ -84,7 +92,8 @@ async function liveDriver() {
   const rawUrl = measuredUrl.toString();
   const admission = fs.existsSync(dist + '/emr-runtime/admission.js') ? require(dist + '/emr-runtime/admission') : null;
   const pool = admission?.appendPoolConfiguration ? admission.appendPoolConfiguration(rawUrl) : { url: rawUrl, poolSize: Number(measuredUrl.searchParams.get('connection_limit')) };
-  const prisma = new PrismaClient({ datasources: { db: { url: pool.url } } });
+  const LedgerClient = fs.existsSync(dist + '/emr-runtime/client.js') ? require(dist + '/emr-runtime/client').EmrLedgerClient : null;
+  const prisma = LedgerClient ? new LedgerClient(pool.url) : new PrismaClient({ datasources: { db: { url: pool.url } } });
   prisma.emrAppendPoolSize = pool.poolSize;
   await prisma.$connect();
   try {
@@ -128,7 +137,7 @@ async function liveDriver() {
     const flat = s => s === 'absent' ? 'absent' : { ...s.streams.viewing, streams: s.streams, sealedAt: s.sealedAt };
     if (operation === 'recover') { const r = await seal.recoverAtStart(); return { ...r, seal: flat(r.seal) }; }
     // A process that writes ledger facts is a started server: its start-up check runs first (B2 calls it before listen).
-    if (['append', 'business', 'writer-fence'].includes(operation)) {
+    if (['append', 'business', 'writer-fence', 'benchmark'].includes(operation)) {
       if (args.measure && !seal.recoverAtStart) await seal.recover(); // Round-3 baseline uses the original startup API.
       else await seal.recoverAtStart();
     }
@@ -136,6 +145,8 @@ async function liveDriver() {
     if (operation === 'journal-add') return journal.record(args.id, 'append-rolled-back', { eventId: args.id, cause: 'business-rollback' });
     if (operation === 'journal') return journal.all().map(record => ({ id: record.id, kind: record.kind, body: record.body }));
     const stream = args.stream ?? 'viewing';
+    if (operation === 'benchmark') return await require('./live_benchmark.cjs').run({
+      prisma, store, seal, sql, Sql: RT.PrismaLedgerSql, event: () => authEvent(A) });
     if (operation === 'writer-fence') {
       let release, staged, provisional;
       const held = new Promise(resolve => { release = resolve; });
@@ -931,7 +942,7 @@ function contractSuite() {
       // A reserved slot holds that lock until outcome, so another writer cannot
       // reuse it while the first transaction remains open.
       const open=authEvent(A);
-      await w.seal.recordIntentAsync('viewing',randomUUID(),open.eventId,C.canonicalPayload(open).contentSha256,randomUUID());
+      seedIntents(w.journal, [['viewing',randomUUID(),open.eventId,C.canonicalPayload(open).contentSha256,randomUUID()]]);
       const own=authEvent(A);assert.equal((await w.store.append(own)).eventId,own.eventId);
       assert(!w.journal.all().some(r=>r.kind==='commit-not-found'));
       await w.restart().seal.recoverAtStart();
@@ -942,7 +953,7 @@ function contractSuite() {
 
   async function stageExpiry(w,through,at) {
     const attemptId=randomUUID(),bundleId=randomUUID(),prefix=await w.seal.expiryPrefix(through);
-    w.seal.recordIntent('viewing',attemptId,null,null,bundleId);w.ledger.checkpoint(through,at);
+    seedIntents(w.journal, [['viewing',attemptId,null,null,bundleId]]);w.ledger.checkpoint(through,at);
     const e=w.ledger.entries.at(-1);
     const binding=w.seal.reserve({stream:'viewing',chainId:w.ledger.chainId,attemptId,bundleId,kind:'expiry',eventId:null,
       sequence:e.sequence,previousHash:e.previousHash,hash:e.hash,contentSha256:e.contentSha256},prefix);
@@ -1265,22 +1276,13 @@ function contractSuite() {
     for (const fail of [false, true]) {
       const w = await world();
       try {
-        const sync = fs.fsyncSync, dataSync = fs.fdatasyncSync; let intentSyncs = 0;
-        fs.fsyncSync = function (...args) { intentSyncs++; return sync.apply(this, args); };
-        fs.fdatasyncSync = function (...args) { intentSyncs++; return dataSync.apply(this, args); };
-        const ids = Array.from({ length: 48 }, () => randomUUID());
-        try { await Promise.all(ids.map(id => w.seal.recordIntentAsync('viewing', id, randomUUID(), 'b'.repeat(64), randomUUID()))); }
-        finally { fs.fsyncSync = sync; fs.fdatasyncSync = dataSync; }
-        assert(intentSyncs <= 2, `admitted intent group disk latency budget: ${intentSyncs} fsyncs`);
-        const intents = w.journal.coordinator.call('read').intents;
-        for (const id of ids) assert(intents['viewing:' + id], 'every group member is durable before staging SQL');
         const provisional = [];
         for (let n = 0; n < 48; n++) {
           const tx = w.ledger.begin(), made = await w.store.appendInTransaction(tx, authEvent(A));
           w.ledger.commit(tx); provisional.push(made);
         }
         const unrelated = randomUUID();
-        w.seal.recordIntent('viewing', unrelated, randomUUID(), 'a'.repeat(64), randomUUID());
+        seedIntents(w.journal, [['viewing', unrelated, randomUUID(), 'a'.repeat(64), randomUUID()]]);
         const originalSync = fs.fsyncSync, originalDataSync = fs.fdatasyncSync;
         let syncs = 0;
         fs.fsyncSync = function (...args) { syncs++; if (fail) throw Object.assign(new Error('synthetic unavailable disk'), { code: 'EIO' }); return originalSync.apply(this, args); };
@@ -1323,7 +1325,7 @@ function contractSuite() {
         return open(file, flags, ...args);
       };
       try {
-        await Promise.all(ids.map(id => w.seal.recordIntentAsync('viewing', id, id, 'a'.repeat(64), randomUUID())));
+        seedIntents(w.journal, ids.map(id => ['viewing', id, id, 'a'.repeat(64), randomUUID()]));
         const results = await Promise.allSettled([w.store.append(authEvent(A))]);
         assert(cut, 'publication compacts the large valid WAL at ' + boundary);
         assert(results.every(r => r.status === 'rejected'));

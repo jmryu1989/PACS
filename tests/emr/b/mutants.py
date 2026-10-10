@@ -416,7 +416,7 @@ def self_test():
             prefix = 'ledger-1-20000: single receipt reads retained prefix'
             sustained = 'sustained-20-20000: candidate p95 exceeds same-run r3 budget'
             concurrent = 'concurrent-24-0: candidate p95 exceeds same-run r3 budget'
-            journal = 'journal: append reads retained prefix'
+            journal = 'journal-150000: append reads retained prefix'
             self.assertEqual(property_failures('ledger', [latency, sustained]), [])
             self.assertEqual(property_failures('ledger', [latency, prefix]), [prefix])
             self.assertEqual(property_failures('sustained', [latency, sustained, concurrent]), [sustained])

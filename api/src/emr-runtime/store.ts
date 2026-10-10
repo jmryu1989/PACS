@@ -106,16 +106,19 @@ export class PrismaLedgerSql {
     return rows.map(entry);
   }
   /** The same snapshot proves the retained anchor and every fetched row's exact
-   * commit marker in one round trip. The page is bounded by the receipt target. */
+   * commit marker in one round trip. SECURITY DEFINER SRFs cannot inline and
+   * otherwise each estimate 1000 rows; multiplying four such estimates invokes
+   * expensive per-execution JIT. Expose the functions' actual cardinality bounds
+   * to the outer planner without changing their permissions or snapshot. */
   async verificationPage(stream: AccessStream, after: number, limit: number): Promise<VerificationPage> {
     const selected = choice(stream, ACCESS_STREAMS);
     const rows = await this.db.$queryRaw<any[]>`SELECT t.chain_id::text AS tail_chain_id,
       t.sequence AS tail_sequence, t.hash AS tail_hash, f.sequence AS first_sequence,
       f.previous_hash AS first_previous_hash, e.*, CASE WHEN m.sequence IS NULL THEN NULL ELSE to_jsonb(m) END AS commit_marker
-      FROM emr_access.chain_tail(${selected}::text) t
-      LEFT JOIN LATERAL emr_access.entries_after(${selected}::text, 0, 1) f ON true
-      LEFT JOIN LATERAL emr_access.entries_after(${selected}::text, ${integer(after)}::bigint, ${integer(limit, 1)}::integer) e ON true
-      LEFT JOIN LATERAL emr_access.commit_marker_for_slot(${selected}::text, e.sequence) m ON true
+      FROM (SELECT * FROM emr_access.chain_tail(${selected}::text) LIMIT 1) t
+      LEFT JOIN LATERAL (SELECT * FROM emr_access.entries_after(${selected}::text, 0, 1) LIMIT 1) f ON true
+      LEFT JOIN LATERAL (SELECT * FROM emr_access.entries_after(${selected}::text, ${integer(after)}::bigint, ${integer(limit, 1)}::integer) LIMIT ${integer(limit, 1)}) e ON true
+      LEFT JOIN LATERAL (SELECT * FROM emr_access.commit_marker_for_slot(${selected}::text, e.sequence) LIMIT 1) m ON true
       ORDER BY e.sequence`;
     const head = rows[0];
     return { tail: { chainId: string(head.tail_chain_id), sequence: toNumber(head.tail_sequence), hash: sha256(head.tail_hash) },

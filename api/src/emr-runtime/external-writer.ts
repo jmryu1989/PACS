@@ -201,7 +201,7 @@ export function executeExternal(request: WriterRequest): any {
   };
   if (operation === 'compact') { compact(); return; }
   if (operation === 'read') return clone(envelope.state);
-  if (!['update', 'admit', 'reserve', 'compare-and-set'].includes(operation)) return fail('SealCorrupt');
+  if (!['update', 'reserve', 'compare-and-set'].includes(operation)) return fail('SealCorrupt');
   const prior = envelope.state;
   if (operation === 'compare-and-set' && value.before !== prior.revision) return { changed: false };
   const state: ExternalState = operation === 'compare-and-set' ? clone(value.state) : clone(prior);
