@@ -98,6 +98,7 @@
       "tests/emr/b/ab_sustained.cjs",
       "tests/emr/b/journal_cost.cjs",
       "tests/emr/b/performance.py",
+      "tests/emr/b/performance_test.py",
       "tests/emr/b/performance_mutants.py",
       "tests/emr/b/lock_test.cjs",
       "tests/emr/b/transaction_options_test.cjs",
@@ -394,7 +395,7 @@
     {
       "req": "REQ-D949",
       "risk": "RISK-EMR-FALSE-PERFORMANCE-ACCEPT/HOST-NOISE/NESTED-JIT",
-      "test": "L03 L03b L03c PLAN-02 PLAN-03 noninferiority_test quiet_host_test power_self_check measurement_ci main deadline clamp restore config preservation"
+      "test": "L03 L03b L03c PLAN-02 PLAN-03 noninferiority_test performance_test (hosted p95 point <=1.25 for all receipt cases; sustained NI statistics recorded only; structural checks retained; loaded by noninferiority_test CI entry) quiet_host_test power_self_check measurement_ci main deadline clamp restore config preservation"
     },
     {
       "req": "REQ-D952",

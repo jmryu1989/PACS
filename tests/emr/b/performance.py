@@ -1,6 +1,6 @@
 """REQ-D878 -> RISK-EMR-RECEIPT-DELAY -> same-run performance/complexity contracts.
 
-Developer smoke check only; NOT a performance acceptance measurement (D941).
+Hosted CI gross-regression gate (D949); NOT a live performance acceptance verdict.
 Reuses Opus's real-code A/B DB-boundary harness, with constant-cost MVCC snapshots.
 No DB, network, LiveStack or existing fixture. Baseline is the pinned round-3 blob.
 Optional --image runs both revisions on the same disposable Linux filesystem and
@@ -24,6 +24,9 @@ from noninferiority import noninferiority
 
 ROOT = Path(__file__).resolve().parents[3]
 BASELINE = "9a1df0d1328d5b8ad979fc7d2ef65192d595cf4b"
+# D949 R7-06: hosted noise makes 1.10/95% and +0% superiority unsuitable
+# for CI; the stricter verdict belongs to commander-ordered live acceptance.
+GROSS_REGRESSION_RATIO = 1.25
 
 
 def permutation(a, b):
@@ -50,6 +53,71 @@ def relative_bound(a, b):
 
 def summarize(rows):
     return {q: statistics.median(row[q] for row in rows) for q in ("p50", "p95", "p99")}
+
+
+def case_result(case, count, retained, pair):
+    """Return recorded statistics and hosted CI failures for paired samples."""
+    failures = []
+    stats = {v: summarize(pair[v]) for v in pair}
+    stats["permutation_p"] = permutation([r["p95"] for r in pair["r3"]], [r["p95"] for r in pair["r4d"]])
+    stats["p95_pct"] = (stats["r4d"]["p95"] / stats["r3"]["p95"] - 1) * 100
+    stats.update(relative_bound([r["p95"] for r in pair["r3"]], [r["p95"] for r in pair["r4d"]]))
+    added = [b["p95"] - a["p95"] for a, b in zip(pair["r3"], pair["r4d"])]
+    stats["added_p95_ms_upper95"] = (statistics.mean(added) + 2.262157 * statistics.stdev(added) / math.sqrt(len(added))) if len(added) == 10 else None
+    stats["added_interval_method"] = "paired difference Student t upper endpoint of two-sided 95% interval, df=9" if len(added) == 10 else "not computed"
+    stats["failures"] = sum(r["failures"] for rows in pair.values() for r in rows)
+    if stats["failures"]:
+        failures.append(f"{case}-{count}-{retained}: request failed")
+    if stats["r4d"]["p95"] > stats["r3"]["p95"] * GROSS_REGRESSION_RATIO:
+        failures.append(f"{case}-{count}-{retained}: candidate p95 exceeds same-run r3 gross-regression bound (x{GROSS_REGRESSION_RATIO})")
+    if case == "sustained" and len(pair["r3"]) >= 2:
+        stats['noninferiority'] = noninferiority([[r['p95']] for r in pair['r3']], [[r['p95']] for r in pair['r4d']])
+        stats['noninferiority']['role'] = 'recorded statistic only; not a CI verdict'
+    if case == "ledger" and max(r["read_rows"] for r in pair["r4d"]) > 4:
+        failures.append(f"ledger-{retained}: single receipt reads retained prefix")
+    return stats, failures
+
+
+def build_report(receipt, configs, cases, repetitions, source_hashes, image=None, flock_ms=None, journal_rows=()):
+    """Assemble the report without IO; structural checks apply independently of latency."""
+    failures, report = [], {"purpose": (f"hosted CI gross-regression gate (D949): p95 point ratio <= {GROSS_REGRESSION_RATIO}; "
+                           "statistics recorded; the 1.10 / 95% verdict belongs to live acceptance; "
+                           "SQL/COMMIT delays are modeled; no acceptance verdict"),
+                           "baseline": BASELINE, "candidate_sources": source_hashes, "repetitions": repetitions,
+                           "lock": {"choice": "B", "linux_image": image, "emulated_pair_ms": flock_ms, "state_filesystem": "disposable-local-volume" if image else "host"}, "cases": {}}
+    for case, count, retained in configs:
+        selected = [r for r in receipt if r["label"].startswith(case + "-") and r["concurrency"] == count and r["prefill"] == retained]
+        pair = {v: [r for r in selected if r["version"] == v] for v in ("r3", "r4d")}
+        assert all(len(pair[v]) == repetitions for v in pair), "missing or duplicated repetitions"
+        stats, case_failures = case_result(case, count, retained, pair)
+        report["cases"][f"{case}-{count}-{retained}"] = stats
+        failures.extend(case_failures)
+    if "ledger" in cases:
+        groups = {n: [r["p95"] for r in receipt if r["version"] == "r4d" and r["concurrency"] == 1 and r["prefill"] == n] for n in (0, 20000, 100000)}
+        comparisons = {}
+        for n in (20000, 100000):
+            p = permutation(groups[0], groups[n])
+            comparisons[str(n)] = {"permutation_p": p, "ratio": statistics.median(groups[n]) / statistics.median(groups[0])}
+            if p < .05 and comparisons[str(n)]["ratio"] > 1.2:
+                failures.append(f"ledger-{n}: size effect exceeds same-run noise")
+        report["ledger_size"] = comparisons
+    if "journal" in cases:
+        rows = journal_rows
+        report["journal"] = {}
+        for n in (0, 10000, 150000):
+            pair = {v: [r for r in rows if r["version"] == v and r["records"] == n] for v in ("r3", "r4d")}
+            report["journal"][str(n)] = {v: summarize(pair[v]) for v in pair}
+            report["journal"][str(n)]["permutation_p"] = permutation([r["p95"] for r in pair["r3"]], [r["p95"] for r in pair["r4d"]])
+            if any(r["read_bytes"] for r in pair["r4d"]):
+                failures.append(f"journal-{n}: append rereads verified bytes")
+            small = [r["p95"] for r in rows if r["version"] == "r4d" and r["records"] == 0]
+            large = [r["p95"] for r in pair["r4d"]]
+            p = permutation(small, large)
+            report["journal"][str(n)]["size_permutation_p"] = p
+            if p < .05 and statistics.median(large) > statistics.median(small) * 1.2:
+                failures.append(f"journal-{n}: size effect exceeds same-run noise")
+    report["failures"] = failures
+    return report
 
 
 def main():
@@ -152,60 +220,12 @@ def main():
                 subprocess.run(["docker", "volume", "rm", volume], check=True, capture_output=True, timeout=60)
 
     receipt = [json.loads(line) for line in (out / "receipt.jsonl").read_text().splitlines()] if configs else []
-    failures, report = [], {"purpose": "developer smoke only; SQL/COMMIT delays are modeled; no acceptance verdict",
-                           "baseline": BASELINE, "candidate_sources": source_hashes, "repetitions": args.reps,
-                           "lock": {"choice": "B", "linux_image": args.image, "emulated_pair_ms": args.flock_ms, "state_filesystem": "disposable-local-volume" if args.image else "host"}, "cases": {}}
-    for case, count, retained in configs:
-        selected = [r for r in receipt if r["label"].startswith(case + "-") and r["concurrency"] == count and r["prefill"] == retained]
-        pair = {v: [r for r in selected if r["version"] == v] for v in ("r3", "r4d")}
-        assert all(len(pair[v]) == args.reps for v in pair), "missing or duplicated repetitions"
-        stats = {v: summarize(pair[v]) for v in pair}
-        stats["permutation_p"] = permutation([r["p95"] for r in pair["r3"]], [r["p95"] for r in pair["r4d"]])
-        stats["p95_pct"] = (stats["r4d"]["p95"] / stats["r3"]["p95"] - 1) * 100
-        stats.update(relative_bound([r["p95"] for r in pair["r3"]], [r["p95"] for r in pair["r4d"]]))
-        added = [b["p95"] - a["p95"] for a, b in zip(pair["r3"], pair["r4d"])]
-        stats["added_p95_ms_upper95"] = (statistics.mean(added) + 2.262157 * statistics.stdev(added) / math.sqrt(len(added))) if len(added) == 10 else None
-        stats["added_interval_method"] = "paired difference Student t upper endpoint of two-sided 95% interval, df=9" if len(added) == 10 else "not computed"
-        stats["failures"] = sum(r["failures"] for r in selected)
-        report["cases"][f"{case}-{count}-{retained}"] = stats
-        if stats["failures"]:
-            failures.append(f"{case}-{count}-{retained}: request failed")
-        if stats["r4d"]["p95"] > stats["r3"]["p95"] * (1.0 if case == "concurrent" else 1.10):
-            failures.append(f"{case}-{count}-{retained}: candidate p95 exceeds same-run r3 budget (+10%, concurrent +0%)")
-        if case == "sustained" and args.reps >= 2:
-            stats['noninferiority'] = noninferiority([[r['p95']] for r in pair['r3']], [[r['p95']] for r in pair['r4d']])
-            if not stats['noninferiority']['accepted']:
-                failures.append('sustained: one-sided 95% p95 ratio bound exceeds 1.10 (developer smoke)')
-        if case == "ledger" and max(r["read_rows"] for r in pair["r4d"]) > 4:
-            failures.append(f"ledger-{retained}: single receipt reads retained prefix")
-    if "ledger" in cases:
-        groups = {n: [r["p95"] for r in receipt if r["version"] == "r4d" and r["concurrency"] == 1 and r["prefill"] == n] for n in (0, 20000, 100000)}
-        comparisons = {}
-        for n in (20000, 100000):
-            p = permutation(groups[0], groups[n])
-            comparisons[str(n)] = {"permutation_p": p, "ratio": statistics.median(groups[n]) / statistics.median(groups[0])}
-            if p < .05 and comparisons[str(n)]["ratio"] > 1.2:
-                failures.append(f"ledger-{n}: size effect exceeds same-run noise")
-        report["ledger_size"] = comparisons
-    if "journal" in cases:
-        rows = json.loads((out / "journal.json").read_text())
-        report["journal"] = {}
-        for n in (0, 10000, 150000):
-            pair = {v: [r for r in rows if r["version"] == v and r["records"] == n] for v in ("r3", "r4d")}
-            report["journal"][str(n)] = {v: summarize(pair[v]) for v in pair}
-            report["journal"][str(n)]["permutation_p"] = permutation([r["p95"] for r in pair["r3"]], [r["p95"] for r in pair["r4d"]])
-            if any(r["read_bytes"] for r in pair["r4d"]):
-                failures.append(f"journal-{n}: append rereads verified bytes")
-            small = [r["p95"] for r in rows if r["version"] == "r4d" and r["records"] == 0]
-            large = [r["p95"] for r in pair["r4d"]]
-            p = permutation(small, large)
-            report["journal"][str(n)]["size_permutation_p"] = p
-            if p < .05 and statistics.median(large) > statistics.median(small) * 1.2:
-                failures.append(f"journal-{n}: size effect exceeds same-run noise")
-    report["failures"] = failures
+    journal_rows = json.loads((out / "journal.json").read_text()) if "journal" in cases else []
+    report = build_report(receipt, configs, cases, args.reps, source_hashes,
+                          args.image, args.flock_ms, journal_rows)
     (out / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report), flush=True)
-    return bool(failures)
+    return bool(report["failures"])
 
 
 if __name__ == "__main__":

@@ -7,6 +7,8 @@ import math
 import unittest
 from unittest.mock import patch
 from noninferiority import noninferiority, concurrent_result, whole_rule_probability, p95, gate_result
+# The existing CI statistics entry also checks the modeled hosted gate (D949).
+from performance_test import PerformanceVerdictTest
 
 
 class NonInferiorityTest(unittest.TestCase):
