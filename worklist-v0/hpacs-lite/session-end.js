@@ -51,6 +51,10 @@
       folderLoadState = 'unknown'; folderAppliedSearch = null; filterCollection = null;
       sharedSearches = []; storedShortcuts = []; shortcutDraft = null; shortcutBusy = false; ++filterReadSequence; ++sharedFilterReadSequence;
       userFilters = []; activeFilterName = null;
+      folderRenderKey = ''; chipCountKey = ''; chipCountRows = [];
+      $('#active-filter-info').hidden = true;
+      $('#active-filter-name').textContent = ''; $('#active-filter-state').textContent = '';
+      $('#worklist-folders-panel').open = false;
       $('#chips')?.replaceChildren(); $('#worklist-folders')?.replaceChildren(); shortcutStatus('');
       // 닫는 화면을 비우는 대입이다(편집이 아니다; 확인되지 않은 글은 위에서 이미 잡았다) — `editReport` 밖의 두 대입 가운데 하나.
       for (const k of RFIELDS) $("#" + k).value = "";

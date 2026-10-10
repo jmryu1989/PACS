@@ -45,7 +45,7 @@
     let state, selected = ['all'], applied = [{ id: 'all', name: 'All Studies', kind: 'all' }], appliedSearch, ended = false;
     const nav = doc.createElement('nav');
     nav.className = 'worklist-folder-tree'; nav.setAttribute('aria-label', 'Folders');
-    const controls = new Map(), collapsed = new Set();
+    const controls = new Map(), collapsed = new Set(), counts = new Map();
     function validate(next) {
       if (!Array.isArray(next.rows) || next.rows.some(row => !object(row))
         || !['complete', 'partial', 'unknown'].includes(next.loadState)
@@ -105,10 +105,12 @@
     }
     function count(item) {
       if (state.loadState === 'unknown' || item.unavailable) return '—';
+      if (counts.has(item.id)) return counts.get(item.id);
       const results = state.rows.map(row => matches(item, row));
-      if (results.includes(null)) return '—';
       const n = results.filter(Boolean).length;
-      return state.loadState === 'partial' ? n + ' · Partial' : String(n);
+      const label = results.includes(null) ? '—' : state.loadState === 'partial' ? n + ' · Partial' : String(n);
+      counts.set(item.id, label);
+      return label;
     }
     function snapshot() {
       return { selectedId: selected.length === 1 ? selected[0] : null, selectedIds: [...selected],
@@ -139,6 +141,7 @@
       if (next.length > 1 && next.some(item => item.kind !== 'modality')) {
         throw new Error('Modality만 함께 선택할 수 있습니다.');
       }
+      counts.clear();
       selected = ids; applied = next.map(item => ({ ...item }));
       appliedSearch = state.searches.find(search => search.id === next[0]?.searchId);
       render();
@@ -159,6 +162,7 @@
     function setApplied(id) { choose(id, null); }
     function update(patch) {
       active();
+      counts.clear();
       try {
         if (!object(patch) || Object.keys(patch).some(key => !['rows', 'loadState', 'searches', 'shortcuts'].includes(key))) {
           throw new Error('폴더 갱신 형식을 확인해 주세요.');

@@ -18,6 +18,8 @@
       filterCollection = JSON.parse(JSON.stringify(snapshot));
       storedShortcuts = filterCollection.shortcuts;
       userFilters = validUserFilters(snapshot.filters);
+      const applied = folderAppliedSearch && userFilters.find(f => 'own:' + f.id === folderAppliedSearch.id);
+      if (applied) activeFilterName = applied.name;
       renderChips();
     }
     function shortcutStatus(message) {
@@ -41,12 +43,12 @@
         const [personal, shared] = results;
         sharedSearches = shared.status === 'fulfilled'
           && JSON.stringify(shared.value?.owner) === JSON.stringify([sess.institution, sess.sub])
-          && Array.isArray(shared.value.filters) ? validUserFilters(shared.value.filters) : [];
+          && Array.isArray(shared.value.filters) ? validUserFilters(shared.value.filters) : [403, 404].includes(shared.reason?.status) ? [] : sharedSearches;
         try {
           if (personal.status === 'rejected') throw personal.reason;
           acceptFilterCollection(personal.value);
           shortcutStatus(shortcutDraft ? '편집 내용을 유지했습니다. 확인 후 Save Shortcuts로 저장하세요.'
-            : shared.status === 'rejected' ? '기관 검색을 불러오지 못했습니다. 해당 바로가기는 Unavailable입니다.' : '');
+            : shared.status === 'rejected' ? '기관 검색을 불러오지 못했습니다. 다시 불러오세요.' : '');
         } catch (error) {
           filterCollection = null;
           shortcutStatus('검색 모음을 읽지 못해 저장을 막았습니다. Reload Shortcuts로 다시 불러오세요. ' + error.message);
@@ -150,35 +152,52 @@
       async readFolders(signal, at = work.capture("document")) {
         const sequence = ++filterReadSequence;
         work.commit(at, () => { filterCollection = null; shortcutStatus('검색 모음을 불러오는 중입니다.'); });
+        try {
         if (await filterWriteReady(signal, at)) throw new Error('폴더 관리는 서버 계정으로 로그인한 뒤 사용할 수 있습니다.');
         const snapshot = await api('GET', '/filter-folders', undefined, signal, at);
         if (!work.admits(at) || sequence !== filterReadSequence) throw staleAnswer();
         if (JSON.stringify(snapshot?.owner) !== JSON.stringify([sess.institution, sess.sub]) || !Array.isArray(snapshot.filters) || !Array.isArray(snapshot.folders))
           throw new Error('계정 또는 검색 모음 응답을 확인할 수 없습니다. 다시 로그인하세요.');
         if (!work.commit(at, () => { acceptFilterCollection(snapshot); shortcutStatus(''); })) throw staleAnswer();
+        shortcutStatus('');
         return snapshot;
+        } catch (error) {
+          work.commit(at, () => { if (sequence !== filterReadSequence) return; filterCollection = null; shortcutStatus('검색 모음을 읽지 못했습니다. 다시 불러오세요. ' + error.message); });
+          throw error;
+        }
       },
       async writeFolders(body, signal, at = work.capture("document")) {
         ++filterReadSequence;
         work.commit(at, () => { filterCollection = null; shortcutStatus('검색 모음을 저장 중입니다.'); });
+        try {
         if (await filterWriteReady(signal, at)) throw new Error('폴더 관리는 서버 계정으로 로그인한 뒤 사용할 수 있습니다.');
         const snapshot = await api('POST', '/filter-folders', body, signal, at);
         if (!work.admits(at)) throw staleAnswer();
         if (JSON.stringify(snapshot?.owner) !== JSON.stringify([sess.institution, sess.sub]) || !Array.isArray(snapshot.filters) || !Array.isArray(snapshot.folders))
           throw new Error('응답을 확인할 수 없습니다. 검색 모음을 다시 불러오세요.');
         if (!work.commit(at, () => { ++filterReadSequence; acceptFilterCollection(snapshot); })) throw staleAnswer();
+        shortcutStatus('');
         return snapshot;
+        } catch (error) {
+          work.commit(at, () => { filterCollection = null; shortcutStatus('검색 모음을 저장하지 못했습니다. 다시 불러오세요. ' + error.message); });
+          throw error;
+        }
       },
       async readShared(signal, at = work.capture("document")) {
         const sequence = ++sharedFilterReadSequence;
-        // An unreadable shared library cannot keep a previously granted target available.
-        work.commit(at, () => { sharedSearches = []; renderChips(); render(); });
+        // An in-flight or transiently failed read does not revoke a previously loaded target.
+        try {
         if (await filterWriteReady(signal, at)) throw new Error('기관 검색은 서버 계정으로 로그인한 뒤 사용할 수 있습니다.');
         const snapshot = await api('GET', '/shared-filters', undefined, signal, at);
         if (!work.admits(at) || sequence !== sharedFilterReadSequence) throw staleAnswer();
         if (JSON.stringify(snapshot?.owner) !== JSON.stringify([sess.institution, sess.sub])) throw new Error('계정이 변경되었습니다. 다시 로그인하세요.');
         work.commit(at, () => { sharedSearches = validUserFilters(snapshot.filters); renderChips(); render(); });
         return snapshot;
+        } catch (error) {
+          if ([403, 404].includes(error.status) && sequence === sharedFilterReadSequence)
+            work.commit(at, () => { sharedSearches = []; renderChips(); render(); });
+          throw error;
+        }
       },
       async writeShared(body, signal, at = work.capture("document")) {
         ++sharedFilterReadSequence;
@@ -242,9 +261,8 @@
       const compoundError = KinCompoundFilter.validate(f.cols?.[KinCompoundFilter.KEY], COLS[f.mode]);
       if (compoundError) { toast('복합 조건을 적용하지 못했습니다: ' + compoundError, 'err'); return false; }
       activeFilterName = userFilters.some(saved => saved.name === f.name) ? f.name : null;
-      const source = folderSearches().find(saved => saved.treeId === (f.treeId || 'own:' + f.id));
+      const source = folderId && folderSearches().find(saved => saved.treeId === (f.treeId || 'own:' + f.id));
       folderAppliedSearch = source ? { id: source.treeId, name: source.name } : null;
-      if (source) activeFilterName = source.name;
       $("#quick").value = f.quick ?? "";
       quickDays = savedFilterDays(f.days);
       document.querySelectorAll("#qf button").forEach(x => x.classList.toggle("on", +x.dataset.days === quickDays));

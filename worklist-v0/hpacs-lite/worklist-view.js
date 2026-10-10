@@ -32,8 +32,8 @@
     function testCol(s, c, values = fval) {
       const v = values?.[c.k] ?? "";
       if (v === "") return true;
-      if (c.k === 'modality') {
-        const selected = Array.isArray(v) ? v : String(v).split(/[,\\]/);
+      if (c.k === 'modality' && Array.isArray(v)) {
+        const selected = v;
         return selected.some(token => KinWorklistFolderTree.matchesModality(s.modality, token));
       }
       const wanted = String(v);

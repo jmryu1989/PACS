@@ -49,7 +49,7 @@ let studies=[
   {uid:'1.2.2',id:'P2',name:'Beta',modality:'CT',date:'2026-09-11',series:1},
   {uid:'1.2.3',id:'P3',name:'Gamma',modality:'MR',date:'2026-09-11',series:1}
 ];
-let worklistFolders=null;
+let worklistFolders=null, sharedSearches=[];
 let fval={name:'manual criterion'},activeFilterName=null,renderCalls=0,managerRefreshes=0;
 const bodyRule=(op,value)=>({version:1,join:'and',rules:[{field:'bodyPart',op,...(value===undefined?{}:{value})}]});
 let userFilters=[{id:7,name:'Chest saved',mode:'Radiology',days:-1,quick:'',cols:{$compound:bodyRule('eq','chest')},sortKey:null,sortDir:0,isDefault:false}];
@@ -105,7 +105,7 @@ class WorklistBodyPartsDOMTest(unittest.TestCase):
         source = read_page_source(MAIN)
         cls.main_functions = "\n".join(fixture_blocks(MAIN, {name: [name] for name in (
             "mountWorklistBodyParts", "bodyPartCountNote", "renderBodyParts", "savedFilterDays",
-            "filteredFor", "filterPredicate", "renderChips", "updateWorklistFolders",
+            "filteredFor", "filterPredicate", "renderChips", "updateWorklistFolders", "folderRenderKey", "folderInputsKey",
         )}).values())
         cls.compound_source = COMPOUND.read_text(encoding="utf-8")
         cls.related_source = RELATED.read_text(encoding="utf-8")

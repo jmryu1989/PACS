@@ -128,7 +128,8 @@ test('C1 bundle artifact: stdlib binary equality and HTMLParser tag proof', () =
 test('C5 complete source projection', () => {
   const helper = process.env.KIN_SPLIT_PROJECTION_HELPER || './page_source.cjs';
   const source = require(helper).readPageSource(process.env.KIN_SPLIT_BYTE_PAGE || page);
-  assert.equal(source, currentProjection(), 'C5 all current statements and outer markup are reconstructed when no inline script remains');
+  const expected = process.env.KIN_SPLIT_BYTE_PAGE ? before : currentProjection();
+  assert.equal(source, expected, 'C5 all statements and outer markup are reconstructed when no inline script remains');
   currentHomes(page);
 });
 

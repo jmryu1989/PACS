@@ -108,7 +108,10 @@
     $("#filterrow").addEventListener("input", e => {
       const el = e.target.closest("[data-f]"); if (!el) return;
       fval[el.dataset.f] = el.value.trim();
-      if (el.dataset.f === 'modality') { folderAppliedSearch = null; activeFilterName = null; }
+      if (el.dataset.f === 'modality') {
+        if (/[,\\]/.test(el.value)) fval.modality = el.value.split(/[,\\]/).map(v => v.trim().toUpperCase()).filter(Boolean);
+        folderAppliedSearch = null;
+      }
       worklistSearch?.change();
       render();
     });

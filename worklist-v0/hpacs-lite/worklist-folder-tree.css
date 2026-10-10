@@ -18,16 +18,13 @@
 .worklist-folder-tree summary { cursor: pointer; padding: 4px; }
 .worklist-folder-tree form { margin-block-start: 12px; }
 .worklist-folder-tree [role=status] { overflow-wrap: anywhere; }
-/* Navigation uses worklist space; opening it must not squeeze the report editor. */
-.left:has(> #worklist-folders-panel) { position: relative; box-sizing: border-box; padding-inline-start: 220px; }
-.left:has(> #worklist-folders-panel:not([open])) { padding-inline-start: 36px; }
+/* Closed navigation occupies no worklist width; the toolbar toggle remains reachable.
+   There is no folders flag in the existing workspace preference schema. */
+.left:has(> #worklist-folders-panel) { position: relative; box-sizing: border-box; }
+.left:has(> #worklist-folders-panel[open]) { padding-inline-start: 220px; }
 #worklist-folders-panel { position: absolute; inset: 0 auto 0 0; width: 220px; min-width: 0; overflow: auto; border-right: 1px solid var(--kin-line); }
 #worklist-folders-panel > summary { padding: 8px; cursor: pointer; }
-#worklist-folders-panel:not([open]) { width: 36px; }
+#worklist-folders-panel:not([open]) { display: none; }
 #shortcuts-status { padding: 8px; overflow-wrap: anywhere; }
-@media (max-width: 1100px) {
-  .left:has(> #worklist-folders-panel) { padding-inline-start: 150px; }
-  .left:has(> #worklist-folders-panel:not([open])) { padding-inline-start: 32px; }
-  #worklist-folders-panel { width: 150px; }
-  #worklist-folders-panel:not([open]) { width: 32px; }
-}
+.left:has(> #worklist-folders-panel[open]) > .statusbar { flex-wrap: wrap; gap: 6px 18px; }
+.left:has(> #worklist-folders-panel[open]) > .statusbar > span { overflow-wrap: anywhere; }

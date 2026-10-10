@@ -897,11 +897,13 @@
     $("#filterrow").addEventListener("input", e => {
       const el = e.target.closest("[data-f]"); if (!el) return;
       fval[el.dataset.f] = el.value.trim();
-      if (el.dataset.f === 'modality') { folderAppliedSearch = null; activeFilterName = null; }
+      if (el.dataset.f === 'modality') {
+        if (/[,\\]/.test(el.value)) fval.modality = el.value.split(/[,\\]/).map(v => v.trim().toUpperCase()).filter(Boolean);
+        folderAppliedSearch = null;
+      }
       worklistSearch?.change();
       render();
     });
-
 
     // ── 데이터 ──
     // S4-U1b session-local KIN observation (renderObservation). Memory only; a page load starts over.
@@ -996,7 +998,6 @@
       columnPrefs?.decorateRelated(mode);
       relatedRowNavigation?.sync();
     }
-
     const relatedParts = KinRelatedParts.create({
       owner:()=>{const key=KinViewerOpening.key(KinAuth.session());return key||null;},
       changed:()=>renderRelated()
@@ -1178,11 +1179,20 @@
       return folderSearches().some(f => f.treeId === folderAppliedSearch.id
         && (!f.treeId.startsWith('shared:') || f.name === folderAppliedSearch.name));
     }
+    let folderRenderKey = '', chipCountKey = '', chipCountRows = [];
+    // Rows can be edited in place (report status, assignments, and body-part answers).
+    // Include those values and the local date, while excluding the quick-search draft.
+    function folderInputsKey() {
+      return JSON.stringify([studies, userFilters, sharedSearches, mode, new Date().toDateString(),
+        studies.map(s => worklistBodyParts.get(s.uid))]);
+    }
     function updateWorklistFolders() {
       if (!worklistFolders) return;
+      const key = JSON.stringify([folderInputsKey(), offline, folderLoadState, folderAppliedSearch, shortcutDraft ?? storedShortcuts]);
+      if (key !== folderRenderKey) {
       const searches = folderSearches().filter(f => Array.isArray(COLS[f.mode])
         && !KinCompoundFilter.validate(f.cols?.[KinCompoundFilter.KEY], COLS[f.mode]))
-        .filter(f => !(folderAppliedSearch?.id === f.treeId && f.treeId.startsWith('shared:') && f.name !== folderAppliedSearch.name))
+        .filter(f => folderAppliedSearch?.id !== f.treeId || folderSearchAvailable())
         .map(f => {
           const criteria = JSON.parse(JSON.stringify(f));
           // Compile once per search update, not once for every row counted in the tree.
@@ -1191,6 +1201,8 @@
         });
       worklistFolders.update({ rows: studies, loadState: offline ? 'unknown' : folderLoadState, searches,
         shortcuts: shortcutDraft ?? storedShortcuts });
+      folderRenderKey = key;
+      }
       if (!folderAppliedSearch) {
         const value = (worklistSearch?.read(searchCriteria()).criteria || searchCriteria()).cols?.modality;
         const tokens = Array.isArray(value) ? value : String(value || '').split(/[,\\]/).map(v => v.trim().toUpperCase()).filter(Boolean);
@@ -1217,18 +1229,22 @@
             return;
           }
           folderAppliedSearch = null; activeFilterName = null;
-          if (item.kind === 'all') delete fval.modality;
-          else fval.modality = [...item.modalities];
+          $('#quick').value = ''; quickDays = -1;
+          document.querySelectorAll('#qf button').forEach(x => x.classList.toggle('on', +x.dataset.days === quickDays));
+          Object.keys(fval).forEach(k => delete fval[k]);
+          if (item.kind !== 'all') fval.modality = [...item.modalities];
           worklistSearch?.apply(); renderHeads(); render();
         },
         onChange: saveFolderShortcuts,
       });
+      const panel = $('#worklist-folders-panel'), toggle = $('#worklist-folders-toggle');
+      toggle.addEventListener('click', () => { panel.open = !panel.open; toggle.setAttribute('aria-expanded', String(panel.open)); });
+      panel.addEventListener('toggle', () => toggle.setAttribute('aria-expanded', String(panel.open)));
       $('#shortcuts-reload').addEventListener('click', () => reloadFolderSearches());
       $('#shortcuts-save').addEventListener('click', () => saveFolderShortcuts(shortcutDraft));
       updateWorklistFolders();
     }
     function filtered() {
-      if (!folderSearchAvailable()) return [];
       const search = worklistSearch?.read(searchCriteria());
       const list = search?.empty ? [] : filteredFor(search?.criteria || searchCriteria());
       const favorites = favoriteList ? favoriteList.filter(list) : list;
@@ -1446,12 +1462,11 @@
       const holder = $('#active-filter-info');
       holder.hidden = activeFilterName === null;
       if (holder.hidden) return;
-      const stored = folderAppliedSearch ? folderSearches().find(f => f.treeId === folderAppliedSearch.id) : userFilters.find(f => f.name === activeFilterName);
-      if (stored && folderSearchAvailable()) activeFilterName = stored.name;
+      const stored = userFilters.find(f => f.name === activeFilterName);
       const modified = !!stored && (filterCriteriaKey(stored) !== filterCriteriaKey(snapshotFilter())
         || !!favoriteList?.key() || !!studyTagList?.key());
       $('#active-filter-name').textContent = activeFilterName;
-      $('#active-filter-state').textContent = !stored || !folderSearchAvailable() ? 'Unavailable' : modified ? 'Search Draft' : 'Saved';
+      $('#active-filter-state').textContent = !stored ? 'Deleted' : modified ? 'Modified' : 'Saved';
       holder.title = !stored ? '저장 검색이 삭제됐습니다. 현재 목록 조건은 유지됩니다.' : modified
         ? '현재 목록 조건과 저장된 조건이 다릅니다. 저장 검색을 다시 적용하거나 현재 조건을 새 검색으로 저장하세요.'
         : '저장된 검색 조건을 적용 중입니다. 결과 건수는 현재 불러온 목록을 기준으로 합니다.';
@@ -1462,12 +1477,17 @@
       const holder = $("#chips");
       if (!holder) return;
       renderActiveFilter();
-      const rows = userFilters.map((uf, i) => {
+      const countKey = folderInputsKey();
+      if (countKey !== chipCountKey) {
+      chipCountRows = userFilters.map((uf, i) => {
         const count = filteredFor(uf).length;
         const note = bodyPartCountNote(uf);
         const label = `${uf.name}, 로드된 목록 기준 ${count}건${uf.isDefault ? ", 기본 필터" : ""}${note ? ' · ' + note : ''}`;
         return { i, uf, count, label, partial: !!note };
       });
+      chipCountKey = countKey;
+      }
+      const rows = chipCountRows;
       // 검색 글자 하나마다 같은 버튼을 다시 만들면 저장 필터에 있던 키보드 포커스가
       // 사라진다. 실제 이름·기본 여부·건수가 바뀔 때만 DOM을 교체한다.
       const signature = JSON.stringify(rows.map(x => [x.uf.id ?? null, x.uf.name, !!x.uf.isDefault, x.count, x.label]));
@@ -1701,7 +1721,6 @@
       render(); refreshRight();
     }
 
-
     /**
      * 날짜 퀵필터. "최근 N일" — **양쪽 끝을 다 본다.**
      *
@@ -1734,8 +1753,8 @@
     function testCol(s, c, values = fval) {
       const v = values?.[c.k] ?? "";
       if (v === "") return true;
-      if (c.k === 'modality') {
-        const selected = Array.isArray(v) ? v : String(v).split(/[,\\]/);
+      if (c.k === 'modality' && Array.isArray(v)) {
+        const selected = v;
         return selected.some(token => KinWorklistFolderTree.matchesModality(s.modality, token));
       }
       const wanted = String(v);
@@ -1775,7 +1794,6 @@
       b.style.display = hidden ? "flex" : "none";
       $("#fold").textContent = hidden ? "▽" : "△";
     });
-
 
     function srTree(dataset, expected) {
       const classes = ['11', '22', '33', '34'].map(n => '1.2.840.10008.5.1.4.1.1.88.' + n);
@@ -9601,7 +9619,6 @@
     $("#m-home").addEventListener("click", load);
     $("#m-filmbox").addEventListener("click", () => { if (selectedUid) openFilmbox(selectedUid); });
 
-
     // ── User Filter List (6.2.1) ──
     // 현재 필터 조합에 이름을 붙여 **계정에** 저장한다. 칩을 누르면 그대로 돌아온다.
     // 정렬(sortKey/sortDir)도 함께 저장한다 — 필터가 같아도 정렬이 다르면 다른 화면이다.
@@ -9620,6 +9637,8 @@
       filterCollection = JSON.parse(JSON.stringify(snapshot));
       storedShortcuts = filterCollection.shortcuts;
       userFilters = validUserFilters(snapshot.filters);
+      const applied = folderAppliedSearch && userFilters.find(f => 'own:' + f.id === folderAppliedSearch.id);
+      if (applied) activeFilterName = applied.name;
       renderChips();
     }
     function shortcutStatus(message) {
@@ -9643,12 +9662,12 @@
         const [personal, shared] = results;
         sharedSearches = shared.status === 'fulfilled'
           && JSON.stringify(shared.value?.owner) === JSON.stringify([sess.institution, sess.sub])
-          && Array.isArray(shared.value.filters) ? validUserFilters(shared.value.filters) : [];
+          && Array.isArray(shared.value.filters) ? validUserFilters(shared.value.filters) : [403, 404].includes(shared.reason?.status) ? [] : sharedSearches;
         try {
           if (personal.status === 'rejected') throw personal.reason;
           acceptFilterCollection(personal.value);
           shortcutStatus(shortcutDraft ? '편집 내용을 유지했습니다. 확인 후 Save Shortcuts로 저장하세요.'
-            : shared.status === 'rejected' ? '기관 검색을 불러오지 못했습니다. 해당 바로가기는 Unavailable입니다.' : '');
+            : shared.status === 'rejected' ? '기관 검색을 불러오지 못했습니다. 다시 불러오세요.' : '');
         } catch (error) {
           filterCollection = null;
           shortcutStatus('검색 모음을 읽지 못해 저장을 막았습니다. Reload Shortcuts로 다시 불러오세요. ' + error.message);
@@ -9752,35 +9771,52 @@
       async readFolders(signal, at = work.capture("document")) {
         const sequence = ++filterReadSequence;
         work.commit(at, () => { filterCollection = null; shortcutStatus('검색 모음을 불러오는 중입니다.'); });
+        try {
         if (await filterWriteReady(signal, at)) throw new Error('폴더 관리는 서버 계정으로 로그인한 뒤 사용할 수 있습니다.');
         const snapshot = await api('GET', '/filter-folders', undefined, signal, at);
         if (!work.admits(at) || sequence !== filterReadSequence) throw staleAnswer();
         if (JSON.stringify(snapshot?.owner) !== JSON.stringify([sess.institution, sess.sub]) || !Array.isArray(snapshot.filters) || !Array.isArray(snapshot.folders))
           throw new Error('계정 또는 검색 모음 응답을 확인할 수 없습니다. 다시 로그인하세요.');
         if (!work.commit(at, () => { acceptFilterCollection(snapshot); shortcutStatus(''); })) throw staleAnswer();
+        shortcutStatus('');
         return snapshot;
+        } catch (error) {
+          work.commit(at, () => { if (sequence !== filterReadSequence) return; filterCollection = null; shortcutStatus('검색 모음을 읽지 못했습니다. 다시 불러오세요. ' + error.message); });
+          throw error;
+        }
       },
       async writeFolders(body, signal, at = work.capture("document")) {
         ++filterReadSequence;
         work.commit(at, () => { filterCollection = null; shortcutStatus('검색 모음을 저장 중입니다.'); });
+        try {
         if (await filterWriteReady(signal, at)) throw new Error('폴더 관리는 서버 계정으로 로그인한 뒤 사용할 수 있습니다.');
         const snapshot = await api('POST', '/filter-folders', body, signal, at);
         if (!work.admits(at)) throw staleAnswer();
         if (JSON.stringify(snapshot?.owner) !== JSON.stringify([sess.institution, sess.sub]) || !Array.isArray(snapshot.filters) || !Array.isArray(snapshot.folders))
           throw new Error('응답을 확인할 수 없습니다. 검색 모음을 다시 불러오세요.');
         if (!work.commit(at, () => { ++filterReadSequence; acceptFilterCollection(snapshot); })) throw staleAnswer();
+        shortcutStatus('');
         return snapshot;
+        } catch (error) {
+          work.commit(at, () => { filterCollection = null; shortcutStatus('검색 모음을 저장하지 못했습니다. 다시 불러오세요. ' + error.message); });
+          throw error;
+        }
       },
       async readShared(signal, at = work.capture("document")) {
         const sequence = ++sharedFilterReadSequence;
-        // An unreadable shared library cannot keep a previously granted target available.
-        work.commit(at, () => { sharedSearches = []; renderChips(); render(); });
+        // An in-flight or transiently failed read does not revoke a previously loaded target.
+        try {
         if (await filterWriteReady(signal, at)) throw new Error('기관 검색은 서버 계정으로 로그인한 뒤 사용할 수 있습니다.');
         const snapshot = await api('GET', '/shared-filters', undefined, signal, at);
         if (!work.admits(at) || sequence !== sharedFilterReadSequence) throw staleAnswer();
         if (JSON.stringify(snapshot?.owner) !== JSON.stringify([sess.institution, sess.sub])) throw new Error('계정이 변경되었습니다. 다시 로그인하세요.');
         work.commit(at, () => { sharedSearches = validUserFilters(snapshot.filters); renderChips(); render(); });
         return snapshot;
+        } catch (error) {
+          if ([403, 404].includes(error.status) && sequence === sharedFilterReadSequence)
+            work.commit(at, () => { sharedSearches = []; renderChips(); render(); });
+          throw error;
+        }
       },
       async writeShared(body, signal, at = work.capture("document")) {
         ++sharedFilterReadSequence;
@@ -9844,9 +9880,8 @@
       const compoundError = KinCompoundFilter.validate(f.cols?.[KinCompoundFilter.KEY], COLS[f.mode]);
       if (compoundError) { toast('복합 조건을 적용하지 못했습니다: ' + compoundError, 'err'); return false; }
       activeFilterName = userFilters.some(saved => saved.name === f.name) ? f.name : null;
-      const source = folderSearches().find(saved => saved.treeId === (f.treeId || 'own:' + f.id));
+      const source = folderId && folderSearches().find(saved => saved.treeId === (f.treeId || 'own:' + f.id));
       folderAppliedSearch = source ? { id: source.treeId, name: source.name } : null;
-      if (source) activeFilterName = source.name;
       $("#quick").value = f.quick ?? "";
       quickDays = savedFilterDays(f.days);
       document.querySelectorAll("#qf button").forEach(x => x.classList.toggle("on", +x.dataset.days === quickDays));
@@ -9967,7 +10002,6 @@
       alignWorklistFolder(null);
       renderHeads(); render();
     });
-
 
     $("#qf").addEventListener("click", e => {
       const b = e.target.closest("button"); if (!b || !b.dataset.days) return;
@@ -10288,6 +10322,10 @@
       folderLoadState = 'unknown'; folderAppliedSearch = null; filterCollection = null;
       sharedSearches = []; storedShortcuts = []; shortcutDraft = null; shortcutBusy = false; ++filterReadSequence; ++sharedFilterReadSequence;
       userFilters = []; activeFilterName = null;
+      folderRenderKey = ''; chipCountKey = ''; chipCountRows = [];
+      $('#active-filter-info').hidden = true;
+      $('#active-filter-name').textContent = ''; $('#active-filter-state').textContent = '';
+      $('#worklist-folders-panel').open = false;
       $('#chips')?.replaceChildren(); $('#worklist-folders')?.replaceChildren(); shortcutStatus('');
       // 닫는 화면을 비우는 대입이다(편집이 아니다; 확인되지 않은 글은 위에서 이미 잡았다) — `editReport` 밖의 두 대입 가운데 하나.
       for (const k of RFIELDS) $("#" + k).value = "";
@@ -10325,7 +10363,6 @@
     KinAuth.beforeLogoutPost(() => releaseHold({ closing: true }));
     // 저장을 확인하지 못한 판독문이 메모리에 있는 동안에는 종료 뒤에도 이 문서를 떠나지 않는다.
     KinAuth.holdLeave(() => !!logoutPrep && ["saving", "failed", "ended"].includes(logoutPrep.state));
-
 
     // ══════════ 시작 ══════════
     // 서버가 살아 있으면 서버 상태로 시작하고, 죽어 있으면 localStorage로 계속 굴러간다.

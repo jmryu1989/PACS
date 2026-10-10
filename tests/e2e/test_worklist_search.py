@@ -29,14 +29,14 @@ class WorklistSearchE2E(ThumbnailSeriesE2E):
         a=self.ct('SYNTHETIC-SEARCH-'+uuid.uuid4().hex[:12],'current','20260801')
         p=self.login();self.select(p,a);self.thumbs(p,1);p.evaluate('clearInterval(poll)')
         p.locator('[data-search-mode]').select_option('manual')
-        p.locator('#filterrow select[data-f="modality"]').select_option('MR')
+        p.locator('#filterrow input[data-f="modality"]').fill('MR')
         p.locator('[data-search-clear]').check()
         expect(p.locator(f'#rows tr[data-uid="{a.uid}"]')).to_have_count(1)
         expect(p.locator('[data-search-status]')).to_contain_text('미적용')
         p.locator('[data-search-apply]').click();expect(p.locator('#rows tr[data-uid]')).to_have_count(0)
-        p.locator('#filterrow select[data-f="modality"]').select_option('CT')
+        p.locator('#filterrow input[data-f="modality"]').fill('CT')
         expect(p.locator('#rows tr[data-uid]')).to_have_count(0)
-        p.locator('#filterrow select[data-f="modality"]').press('Enter')
+        p.locator('#filterrow input[data-f="modality"]').press('Enter')
         expect(p.locator(f'#rows tr[data-uid="{a.uid}"]')).to_have_count(1)
 
     def test_search_02_clear_barrier_saved_apply_and_preference_reload(self):

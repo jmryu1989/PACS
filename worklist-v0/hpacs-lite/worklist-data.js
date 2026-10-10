@@ -180,11 +180,20 @@
       return folderSearches().some(f => f.treeId === folderAppliedSearch.id
         && (!f.treeId.startsWith('shared:') || f.name === folderAppliedSearch.name));
     }
+    let folderRenderKey = '', chipCountKey = '', chipCountRows = [];
+    // Rows can be edited in place (report status, assignments, and body-part answers).
+    // Include those values and the local date, while excluding the quick-search draft.
+    function folderInputsKey() {
+      return JSON.stringify([studies, userFilters, sharedSearches, mode, new Date().toDateString(),
+        studies.map(s => worklistBodyParts.get(s.uid))]);
+    }
     function updateWorklistFolders() {
       if (!worklistFolders) return;
+      const key = JSON.stringify([folderInputsKey(), offline, folderLoadState, folderAppliedSearch, shortcutDraft ?? storedShortcuts]);
+      if (key !== folderRenderKey) {
       const searches = folderSearches().filter(f => Array.isArray(COLS[f.mode])
         && !KinCompoundFilter.validate(f.cols?.[KinCompoundFilter.KEY], COLS[f.mode]))
-        .filter(f => !(folderAppliedSearch?.id === f.treeId && f.treeId.startsWith('shared:') && f.name !== folderAppliedSearch.name))
+        .filter(f => folderAppliedSearch?.id !== f.treeId || folderSearchAvailable())
         .map(f => {
           const criteria = JSON.parse(JSON.stringify(f));
           // Compile once per search update, not once for every row counted in the tree.
@@ -193,6 +202,8 @@
         });
       worklistFolders.update({ rows: studies, loadState: offline ? 'unknown' : folderLoadState, searches,
         shortcuts: shortcutDraft ?? storedShortcuts });
+      folderRenderKey = key;
+      }
       if (!folderAppliedSearch) {
         const value = (worklistSearch?.read(searchCriteria()).criteria || searchCriteria()).cols?.modality;
         const tokens = Array.isArray(value) ? value : String(value || '').split(/[,\\]/).map(v => v.trim().toUpperCase()).filter(Boolean);
@@ -219,18 +230,22 @@
             return;
           }
           folderAppliedSearch = null; activeFilterName = null;
-          if (item.kind === 'all') delete fval.modality;
-          else fval.modality = [...item.modalities];
+          $('#quick').value = ''; quickDays = -1;
+          document.querySelectorAll('#qf button').forEach(x => x.classList.toggle('on', +x.dataset.days === quickDays));
+          Object.keys(fval).forEach(k => delete fval[k]);
+          if (item.kind !== 'all') fval.modality = [...item.modalities];
           worklistSearch?.apply(); renderHeads(); render();
         },
         onChange: saveFolderShortcuts,
       });
+      const panel = $('#worklist-folders-panel'), toggle = $('#worklist-folders-toggle');
+      toggle.addEventListener('click', () => { panel.open = !panel.open; toggle.setAttribute('aria-expanded', String(panel.open)); });
+      panel.addEventListener('toggle', () => toggle.setAttribute('aria-expanded', String(panel.open)));
       $('#shortcuts-reload').addEventListener('click', () => reloadFolderSearches());
       $('#shortcuts-save').addEventListener('click', () => saveFolderShortcuts(shortcutDraft));
       updateWorklistFolders();
     }
     function filtered() {
-      if (!folderSearchAvailable()) return [];
       const search = worklistSearch?.read(searchCriteria());
       const list = search?.empty ? [] : filteredFor(search?.criteria || searchCriteria());
       const favorites = favoriteList ? favoriteList.filter(list) : list;
@@ -448,12 +463,11 @@
       const holder = $('#active-filter-info');
       holder.hidden = activeFilterName === null;
       if (holder.hidden) return;
-      const stored = folderAppliedSearch ? folderSearches().find(f => f.treeId === folderAppliedSearch.id) : userFilters.find(f => f.name === activeFilterName);
-      if (stored && folderSearchAvailable()) activeFilterName = stored.name;
+      const stored = userFilters.find(f => f.name === activeFilterName);
       const modified = !!stored && (filterCriteriaKey(stored) !== filterCriteriaKey(snapshotFilter())
         || !!favoriteList?.key() || !!studyTagList?.key());
       $('#active-filter-name').textContent = activeFilterName;
-      $('#active-filter-state').textContent = !stored || !folderSearchAvailable() ? 'Unavailable' : modified ? 'Search Draft' : 'Saved';
+      $('#active-filter-state').textContent = !stored ? 'Deleted' : modified ? 'Modified' : 'Saved';
       holder.title = !stored ? '저장 검색이 삭제됐습니다. 현재 목록 조건은 유지됩니다.' : modified
         ? '현재 목록 조건과 저장된 조건이 다릅니다. 저장 검색을 다시 적용하거나 현재 조건을 새 검색으로 저장하세요.'
         : '저장된 검색 조건을 적용 중입니다. 결과 건수는 현재 불러온 목록을 기준으로 합니다.';
@@ -464,12 +478,17 @@
       const holder = $("#chips");
       if (!holder) return;
       renderActiveFilter();
-      const rows = userFilters.map((uf, i) => {
+      const countKey = folderInputsKey();
+      if (countKey !== chipCountKey) {
+      chipCountRows = userFilters.map((uf, i) => {
         const count = filteredFor(uf).length;
         const note = bodyPartCountNote(uf);
         const label = `${uf.name}, 로드된 목록 기준 ${count}건${uf.isDefault ? ", 기본 필터" : ""}${note ? ' · ' + note : ''}`;
         return { i, uf, count, label, partial: !!note };
       });
+      chipCountKey = countKey;
+      }
+      const rows = chipCountRows;
       // 검색 글자 하나마다 같은 버튼을 다시 만들면 저장 필터에 있던 키보드 포커스가
       // 사라진다. 실제 이름·기본 여부·건수가 바뀔 때만 DOM을 교체한다.
       const signature = JSON.stringify(rows.map(x => [x.uf.id ?? null, x.uf.name, !!x.uf.isDefault, x.count, x.label]));

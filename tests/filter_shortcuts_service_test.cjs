@@ -17,6 +17,7 @@ function fixture() {
       const pending = tail.then(async () => {
         const copy = structuredClone(db);
         const tx = {
+          sharedFilterLibrary: { async upsert() { return { revision: 1, folders: [{path:'Team',description:'',ordinal:0}], filters: [{id:9,name:'Shared CT',mode:'Radiology',quick:'',days:-1,cols:{modality:'CT'},sortKey:null,sortDir:0,folder:'Team',description:'',ordinal:0}] }; } },
           userFilterCollection: {
             async findUnique({ where }) { return structuredClone(copy.collections[where.owner] ?? null); },
             async upsert({ where, create, update }) {
@@ -29,7 +30,8 @@ function fixture() {
           userFilter: {
             async findMany({ where }) { return structuredClone(copy.filters.filter(f => f.owner === where.owner)); },
             async deleteMany({ where }) { const old = copy.filters.length; copy.filters = copy.filters.filter(f => !(f.owner === where.owner && (typeof where.id === 'number' ? f.id === where.id : where.id.in.includes(f.id)))); return { count: old - copy.filters.length }; },
-            async updateMany() { return { count: 1 }; },
+            async create({ data }) { const row = { id: Math.max(0, ...copy.filters.map(f => f.id)) + 1, ...structuredClone(data) }; copy.filters.push(row); return structuredClone(row); },
+            async updateMany({ where, data }) { const rows = copy.filters.filter(f => f.owner === where.owner && (where.id == null || f.id === where.id)); rows.forEach(f => Object.assign(f, structuredClone(data))); return { count: rows.length }; },
           },
         };
         const result = await run(tx); db = copy; return result;
@@ -95,4 +97,28 @@ test('WS3-SHORTCUTS-VALIDATION: exact bounded fields, stable namespace and detac
   const input = [{ ...first, name: ' <img> ' }];
   assert.deepEqual(shortcutEntries(input), [{ ...first, name: '<img>' }]);
   assert.equal(input[0].name, ' <img> ');
+});
+
+test('WS3-SHORTCUTS-PRESERVE: folder save/move/remove and shared copy keep shortcuts and advance revision', async () => {
+  const f = fixture();
+  let saved = await f.write(await f.read(), [first, absent]);
+  for (const command of [
+    { action:'save-folder', path:'Personal', description:'keep', ordinal:0 },
+    { action:'move-searches', ids:[1], to:'Personal' },
+    { action:'move-folder', from:'Personal', to:'Moved' },
+    { action:'remove-folder', path:'Moved' },
+  ]) {
+    const next = await f.service.writeFilterFolders({ expectedOwner:saved.owner, revision:saved.revision, command }, caller());
+    assert.deepEqual(next.shortcuts, [first, absent]);
+    assert.equal(next.revision, saved.revision + 1);
+    assert.deepEqual(await f.read(), next);
+    saved = next;
+  }
+  const copied = await f.service.copySharedFilters({ expectedOwner:saved.owner, personalRevision:saved.revision,
+    revision:1, from:'Team', to:'Imported', namePrefix:'Copy ' }, caller());
+  assert.deepEqual(copied.shortcuts, [first, absent]);
+  assert.equal(copied.revision, saved.revision + 1);
+  assert.equal(copied.filters.length, 2);
+  assert.equal(copied.filters.find(row => row.name === 'Copy Shared CT').folder, 'Imported');
+  assert.deepEqual(await f.read(), copied);
 });

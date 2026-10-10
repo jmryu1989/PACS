@@ -5,6 +5,9 @@
 })(typeof window === 'object' ? window : null, function () {
   'use strict';
 
+  // Stored Modality Equals conditions and single column values retain exact matching.
+  // Only folder modality arrays and new comma/backslash multi-value column input
+  // (for example CT, MR) use whole-token OR; compound Equals is never reinterpreted.
   const KEY = '$compound';
   const OPS = {
     text: [['contains', '포함'], ['eq', '같음'], ['notContains', '포함하지 않음'],

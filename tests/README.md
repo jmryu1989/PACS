@@ -2372,7 +2372,7 @@ OS monitor placement. The direct source files remain unchanged and all existing 
 
 ## W2 검색·폴더 흐름과 첫 의미 변경
 
-REQ-WS3/REQ-WS7 → RISK-WS3/RISK-WS7 → WS3-SHORTCUTS / WS3-RELATIVE-DATE / WS3-COUNTS.
+REQ-WS3/REQ-WS7 → RISK-WS3/RISK-WS7 → WS3-SHORTCUTS / WS3-RELATIVE-DATE / WS3-COUNTS. Stored single Modality values and compound Modality Equals keep exact matching (CT excludes CT,SR). Folder modality arrays and newly entered comma/backslash lists (CT, MR) use whole-token OR. Folders starts closed without consuming worklist width; selecting a folder replaces previous search/date criteria. `worklist_folders_dom_test.py` compares first paint against served main c8e4f1b and checks complete count/list agreement, D01 Deleted/Modified retention, silent alignment and held-session cleanup.
 이 단위는 실제 제공 main.html과 bundle을 사용하는 `worklist_folders_dom_test.py`와
 실제 Saved Search 편집기를 사용하는 `worklist_body_parts_dom_test.py`에 연결된다.
 

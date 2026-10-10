@@ -111,8 +111,12 @@
       const cols = { ...source.cols };
       dialog.querySelectorAll('[data-col]').forEach(input => {
         const key = input.dataset.col;
-        cols[key] = key === 'modality' && input.value === '' && Array.isArray(source.cols?.modality)
-          && source.cols.modality.length === 0 ? [] : input.value;
+        const original = source.cols?.[key];
+        // Opening and saving a legacy scalar must not reinterpret its Modality.
+        // New multi-value edits and folder selections retain their token-array meaning.
+        cols[key] = key === 'modality' && input.value === String(original ?? '') ? original ?? ''
+          : key === 'modality' && /[,\\]/.test(input.value)
+            ? input.value.split(/[,\\]/).map(v => v.trim().toUpperCase()).filter(Boolean) : input.value;
       });
       function readRules(container) { return [...container.children].map(row => {
         if (row.classList.contains('sfm-group')) return {
