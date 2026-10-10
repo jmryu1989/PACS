@@ -1,9 +1,11 @@
-"""D952: paired ABBA blocks, fresh durable volumes, explicit verdict mode.
+"""D961: paired ABBA blocks, fresh durable volumes, explicit verdict mode.
 
-Single: 10x120, 200 ms idle, first-to-last block starts >=600 seconds.
+Single: 12x100, 200 ms idle, first-to-last block starts >=600 seconds.
 Concurrent: 24 bursts/size/revision, quiet settle before each pair. Sustained: 12x200 at
 20 rps after 20k product appends. CI records the same statistics but only
 point<=1.25 gates; only the commander's reviewed live plan uses the NI bound.
+All p95 rules: point and one-sided 95% t upper bound <=1.10. Concurrent
+median wait: upper bound <=1.10, with no point-at-equality condition.
 """
 import contextlib
 import json
@@ -32,12 +34,15 @@ PASSED_CONTROLS = {}
 
 
 def estimate_duration(plan):
-    """R9 pilot timings plus explicit overhead; refuse unknown case mixes.
+    """R10/R11 pilot timings plus explicit overhead; refuse unknown case mixes.
 
-    Parallel prefill took 128.39 s for 2400 rows/revision: project linearly
+    R11 parallel prefill took 136.61 s for 2400 rows/revision: project linearly
     to 20k and add 10%. Ordinary burst budgets round up the pilot observations;
     busy-host windows are budgeted separately, not multiplied into every burst.
-    The reduced pilot's setup/build/functional/cleanup remainder was <300 s.
+    R10 elapsed 1119.141 s minus recorded first-to-last block start spans,
+    prefill and mandatory final-block request gaps leaves at most 221.33 s
+    for setup/build/functional/cleanup. Round up to 240 s; retain a separate
+    180 s quiet-wait allowance. These are estimates, not deadline guarantees.
     This is a planning estimate, not a guarantee on an arbitrarily busy host.
     """
     expected = [
@@ -54,16 +59,16 @@ def estimate_duration(plan):
     parts = {'single': max(2.8 + MIN_SINGLE_SPAN_SECONDS + block_seconds, SINGLE_BLOCKS * block_seconds),
              'concurrent_24_and_48': CONCURRENT_BLOCKS * ((2.8 + 2 * .6) + (2.8 + 2 * 1.6)),
              'sustained': SUSTAINED_BLOCKS * (2.8 + 2 * ((SUSTAINED_COUNT - 1) / SUSTAINED_RPS + .55)),
-             'parallel_prefill': 128.4 * RETAINED_ROWS / 2400 * 1.10,
+             'parallel_prefill': 136.61 * RETAINED_ROWS / 2400 * 1.10,
              'm36_mutant': CONCURRENT_BLOCKS * (2.8 + 2.3 + 1.0),
-             'setup_builds_functional_cleanup': 300, 'quiet_wait_allowance': 180}
+             'setup_builds_functional_cleanup': 240, 'quiet_wait_allowance': 180}
     total = sum(parts.values())
     cap = min(3000, .85 * plan['timeout_seconds'])
     return {'components_seconds': parts, 'estimated_seconds': total,
             'estimated_minutes': total / 60, 'cap_seconds': cap, 'within_cap': total <= cap,
             'm36_control': 'reuse same-process successful L03; no repeated healthy comparison',
-            'basis': 'D956: 10x120 single at 50ms/receipt with 200ms request gaps, including final block after 600s; R9 pilot prefill 128.39 s/2400 rows/revision',
-            'limitation': '20k parallel prefill is extrapolated, not measured in R9; 10% prefill margin and 180 s extra quiet waiting included; persistent noise can still invalidate before the 3600 s runner cap'}
+            'basis': 'D961: 12x100 single at 50ms/receipt with 200ms request gaps, including final block after 600s; R11 prefill 136.61 s/2400 rows/revision and R10 bounded setup remainder <=221.33 s',
+            'limitation': '20k parallel prefill is extrapolated, not measured; 10% prefill margin and 180 s extra quiet waiting included; persistent noise can still invalidate before the 3600 s runner cap'}
 
 
 def control_key(image):
@@ -148,7 +153,8 @@ def compare(fixture, workloads):
     out = root / ('comparison-' + token)
     out.mkdir(parents=True, exist_ok=False)
     sessions, files = {}, []
-    report = {'decision': 'D952', 'mode': mode, 'dry_run': dry_run, 'workloads': workloads, 'verdict': 'INCOMPLETE',
+    report = {'decision': 'D961', 'mode': mode, 'dry_run': dry_run, 'workloads': workloads, 'verdict': 'INCOMPLETE',
+              'median_claim': 'not more than 10% slower in median wait with 95% confidence',
               'candidate_image': candidate_image, 'baseline_image': cls.baseline_image,
               'design': {w: block_design(w, mode, dry_run) for w in workloads}, 'preflight': preflight,
               'warmup': WARMUP_REQUESTS, 'fresh_db_and_state': True, 'postgres_storage': 'fresh durable local volumes',
@@ -342,7 +348,7 @@ def compare(fixture, workloads):
         (out / 'summary.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
     print('EMR_LIVE_ACCEPTANCE ' + json.dumps({k: v for k, v in report.items() if k not in ('samples', 'cold_and_warmup', 'jit')}), flush=True)
     for workload, result in report['results'].items():
-        fixture.assertTrue(result['gate_passed'], 'D952 ' + mode + ' ' + workload + ': ' + json.dumps(result))
+        fixture.assertTrue(result['gate_passed'], 'D961 ' + mode + ' ' + workload + ': ' + json.dumps(result))
     return report
 
 
@@ -360,7 +366,7 @@ def summarize(directory):
                         'mode': value['mode'], 'verdict': value['verdict'],
                         'design': value['design'], 'results': value['results'],
                         'jit': value.get('jit'), 'raw_directory': value['raw_directory']})
-    print(json.dumps({'decision': 'D952', 'reports': reports}, indent=2))
+    print(json.dumps({'decision': 'D961', 'reports': reports}, indent=2))
 
 
 def summarize_gap_diagnostic(samples):

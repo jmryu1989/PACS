@@ -1,4 +1,4 @@
-"""REQ-D952 -> RISK-EMR-FALSE-PERFORMANCE-ACCEPT -> paired p95/median t bounds.
+"""REQ-D961 -> RISK-EMR-FALSE-PERFORMANCE-ACCEPT -> paired p95/median t bounds.
 
 The experimental unit is a paired block, not a request. The estimand is the
 geometric mean of candidate/baseline block-p95 ratios. Pooled p95 is diagnostic.
@@ -10,16 +10,15 @@ import statistics
 
 LATENCY_RATIO_LIMIT = 1.10
 CONCURRENT_RATIO_LIMIT = 1.10
-CONCURRENT_MEDIAN_LIMIT = 1.00
 CI_RATIO_LIMIT = 1.25
 MIN_ATTRIBUTION = .95
-SINGLE_BLOCKS = 10
-SINGLE_REQUESTS = 120
+SINGLE_BLOCKS = 12
+SINGLE_REQUESTS = 100
 CONCURRENT_BLOCKS = 24
 SUSTAINED_BLOCKS = 12
 
-# One-sided Student t .95 quantiles, df=1..30. Fixed D949 designs use
-# df=29/23/11; small known-input tests and CI also use this table.
+# One-sided Student t .95 quantiles, df=1..30; selected designs and
+# small known-input tests and CI use this table.
 T95 = (None, 6.3137515148, 2.9199855804, 2.3533634348, 2.1318467863,
        2.0150483733, 1.9431802805, 1.8945786051, 1.8595480375,
        1.8331129327, 1.8124611228, 1.7958848187, 1.7822875556,
@@ -67,20 +66,24 @@ def noninferiority(baseline, candidate, limit=LATENCY_RATIO_LIMIT, *, statistic=
         logs.append(math.log(after[-1] / before[-1]))
     result = log_ratio_bound(logs)
     pooled_a, pooled_b = p95(sum(baseline, [])), p95(sum(candidate, []))
+    point_limit = None if statistic == 'median' else limit
     return {**result, 'baseline_block_' + statistic + '_ms': before, 'candidate_block_' + statistic + '_ms': after,
             'block_log_ratios': logs, 'baseline_p95_ms': pooled_a, 'candidate_p95_ms': pooled_b,
-            'pooled_p95_ratio': pooled_b / pooled_a, 'point_limit': limit,
+            'pooled_p95_ratio': pooled_b / pooled_a, 'point_limit': point_limit,
             'upper_limit': LATENCY_RATIO_LIMIT,
-            'accepted': result['point_ratio'] <= limit and result['upper_95_ratio'] <= LATENCY_RATIO_LIMIT,
+            'accepted': (point_limit is None or result['point_ratio'] <= point_limit) and result['upper_95_ratio'] <= LATENCY_RATIO_LIMIT,
             'samples_per_revision': sum(map(len, baseline)), 'paired_blocks': len(baseline),
             'statistic': statistic,
             'method': 'one-sided 95% Student t on paired block-' + statistic + ' log ratios'}
 
 
 def concurrent_result(baseline, candidate):
-    """D952: both complete tail and typical-requester rules must pass."""
+    """D961: median wait is at most 10% slower with 95% confidence.
+
+    The observed median point is reported, not tested against equality.
+    """
     tail = noninferiority(baseline, candidate, CONCURRENT_RATIO_LIMIT)
-    median = noninferiority(baseline, candidate, CONCURRENT_MEDIAN_LIMIT, statistic='median')
+    median = noninferiority(baseline, candidate, statistic='median')
     return {**tail, 'tail_accepted': tail['accepted'], 'median': median,
             'accepted': tail['accepted'] and median['accepted']}
 
@@ -98,9 +101,8 @@ def power_self_check(replicates=20000):
     """Prospective normal log-ratio model, seed/SD fixed before R9 data.
 
     SD=.15 is conservative relative to r7 single (.078), close to c48 (.150).
-    This deliberately includes the median point condition. At equality that
-    condition still caps each concurrent workload near .5; more bursts cannot
-    deliver .80 whole-run power when ALL estimands are equal.
+    Every metric uses the D961 1.10 non-inferiority margin. This reference
+    validates the simulation; empirical whole-plan design is in power_design.
     """
     rng = random.Random(949)
     result = {'seed': 949, 'replicates': replicates, 'sd_log_ratio': .15,
@@ -110,7 +112,7 @@ def power_self_check(replicates=20000):
     result['reference_single_blocks'] = 30
     for name, n, point_limit in [('single', 30, 1.10),
                                   ('concurrent_tail', CONCURRENT_BLOCKS, 1.10),
-                                  ('concurrent_median', CONCURRENT_BLOCKS, 1.00),
+                                  ('concurrent_median', CONCURRENT_BLOCKS, 1.10),
                                   ('sustained', SUSTAINED_BLOCKS, 1.10)]:
         bounds = accepted = 0
         for _ in range(replicates):
@@ -127,8 +129,8 @@ def power_self_check(replicates=20000):
         models[name].update(median_mean=0, median_sd=.15, tail_median_correlation=0)
     result['complete_rules_at_equality'] = whole_rule_probability(models, replicates)['scenarios']['all_estimands_equal']
     result['passed'] = (result['single']['acceptance_power'] >= .94
-                        and .48 <= result['concurrent_median']['acceptance_power'] <= .52
-                        and result['complete_rules_at_equality']['joint'] < .26)
+                        and result['concurrent_median']['acceptance_power'] >= .85
+                        and result['complete_rules_at_equality']['joint'] > .4)
     result['scope'] = 'complete metric, workload and joint rules; reference model uses SD=.15 for all metrics and independent tail/median; passed validates the simulation, not the 80% design target'
     return result
 
@@ -148,7 +150,7 @@ def whole_rule_probability(models, replicates=20000, seed=952):
         n = len(values)
         avg = sum(values) / n
         sd = math.sqrt(sum((v - avg) ** 2 for v in values) / (n - 1))
-        return (mean + avg <= math.log(limit)
+        return ((limit is None or mean + avg <= math.log(limit))
                 and mean + avg + T95[n-1] * sd / math.sqrt(n) <= math.log(1.10))
     for _ in range(replicates):
         outcomes = {s: [] for s in scenarios}
@@ -163,7 +165,7 @@ def whole_rule_probability(models, replicates=20000, seed=952):
             for scenario in scenarios:
                 passed = accepts(tail, model['tail_mean'] if scenario == 'r7_effects' else 0, 1.10)
                 if median is not None:
-                    passed &= accepts(median, 0 if scenario == 'all_estimands_equal' else model['median_mean'], 1.00)
+                    passed &= accepts(median, 0 if scenario == 'all_estimands_equal' else model['median_mean'], None)
                 counts[scenario][name] += passed
                 outcomes[scenario].append(passed)
         for scenario in scenarios:
@@ -175,7 +177,7 @@ def whole_rule_probability(models, replicates=20000, seed=952):
             'equality_target': .80, 'equality_target_met': counts['all_estimands_equal']['joint'] / replicates >= .80,
             'scope': 'joint complete statistical rules of single, sustained, c24 tail+median, c48 tail+median; M36 reuses L03',
             'assumptions': 'normal paired log ratios; r7 plug-in moments, correlated tail/median; independent workloads; no uncertainty in fitted moments; conditional on host, attribution, functional, JIT and M36 validity',
-            'limitation': 'Median point<=1.00 limits each concurrent rule to at most 0.5 at complete equality; the 0.80 joint target is unattainable. Tail-only equality is a different scenario.'}
+            'limitation': 'Reference normal moment model only; empirical whole-plan power and sample-size changes are evaluated in power_design.py.'}
 
 
 def r7_probability(directory, replicates=20000):

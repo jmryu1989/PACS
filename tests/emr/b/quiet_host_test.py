@@ -149,7 +149,7 @@ class QuietHostTests(unittest.TestCase):
             self.assertFalse(acceptance.estimate_duration(full_plan())['within_cap'])
 
     def test_acceptance_sizes_and_ten_minute_single_spread(self):
-        for work, blocks, size in [('single', 10, 120), ('concurrent-24', 24, 24),
+        for work, blocks, size in [('single', 12, 100), ('concurrent-24', 24, 24),
                                     ('concurrent-48', 24, 48), ('sustained', 12, 200)]:
             count, requests, spacing = block_design(work, 'acceptance')
             self.assertEqual((count, requests), (blocks, size))
@@ -157,7 +157,7 @@ class QuietHostTests(unittest.TestCase):
                 self.assertGreaterEqual(spacing * (count-1), 600)
         self.assertEqual(block_design('single', 'ci-gross')[:2], (6, 10))
         self.assertEqual(block_design('single', 'ci-gross', dry_run=True), block_design('single', 'acceptance'))
-        self.assertGreaterEqual(acceptance.estimate_duration(full_plan())['components_seconds']['single'], 660)
+        self.assertGreaterEqual(acceptance.estimate_duration(full_plan())['components_seconds']['single'], 650)
 
     def test_single_experimental_unit_is_one_complete_abba_block(self):
         self.assertEqual(block_segments('single', 0, 40), [('candidate', 20), ('r3', 20), ('r3', 20), ('candidate', 20)])
@@ -165,7 +165,7 @@ class QuietHostTests(unittest.TestCase):
         self.assertEqual(block_segments('concurrent-24', 0, 24) + block_segments('concurrent-24', 1, 24),
                          [('candidate', 24), ('r3', 24), ('r3', 24), ('candidate', 24)])
 
-    def exercise_compare(self, invalid=False, mode='acceptance', attributed_ms=50, stale_plan=False, workloads=None, quiet_delays=None):
+    def exercise_compare(self, invalid=False, mode='acceptance', attributed_ms=50, stale_plan=False, workloads=None, quiet_delays=None, candidate_ratio=1.):
         # Drive the Python director through its pipe boundary. No Docker, clock
         # waiting or product substitute is used as performance evidence.
         calls, clock = [], [0.]
@@ -201,7 +201,8 @@ class QuietHostTests(unittest.TestCase):
                     return 'EMR_BENCHMARK {"plans":[]}\n'
                 clock[0] += command['count'] * .25
                 return 'EMR_BENCHMARK ' + json.dumps({'summary': {'failures': 0},
-                    'results': [{'receipt_ms': 50, 'attributed_ms': attributed_ms}] * command['count']}) + '\n'
+                    'results': [{'receipt_ms': 50 * (candidate_ratio if self.version == 'candidate' else 1),
+                                 'attributed_ms': attributed_ms * (candidate_ratio if self.version == 'candidate' else 1)}] * command['count']}) + '\n'
             def communicate(self, **kwargs): return '', ''
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -236,18 +237,18 @@ class QuietHostTests(unittest.TestCase):
     def test_director_collects_full_blocks_before_one_verdict(self):
         calls, report = self.exercise_compare()
         measured = [(version, request) for version, request in calls if request['count'] != 5]
-        self.assertEqual(len(measured), 40)
+        self.assertEqual(len(measured), 48)
         self.assertEqual([version for version, _ in measured[:4]], ['candidate', 'r3', 'r3', 'candidate'])
-        self.assertTrue(all(request['count'] == 60 and request['idle_ms'] == 200 for _, request in measured))
+        self.assertTrue(all(request['count'] == 50 and request['idle_ms'] == 200 for _, request in measured))
         self.assertEqual(report['verdict'], 'PASS')
         result = report['results']['single']
-        self.assertEqual((result['paired_blocks'], result['samples_per_revision']), (10, 1200))
+        self.assertEqual((result['paired_blocks'], result['samples_per_revision']), (12, 1200))
         self.assertGreaterEqual(result['block_start_span_seconds'], 600)
 
     def test_variable_quiet_wait_does_not_shorten_measured_start_spread(self):
         # A long first quiet window must not move the first measured start past
         # the scheduling origin while leaving the last target unchanged.
-        _, report = self.exercise_compare(quiet_delays=[9.] + [.1] * 9)
+        _, report = self.exercise_compare(quiet_delays=[9.] + [.1] * 11)
         self.assertGreaterEqual(report['results']['single']['block_start_span_seconds'], 600)
 
     def test_changed_plan_cannot_use_an_old_quiet_record(self):
@@ -261,12 +262,13 @@ class QuietHostTests(unittest.TestCase):
         self.assertEqual(report['results']['sustained']['samples_per_revision'], 2400)
 
     def test_director_records_and_applies_both_concurrent_rules(self):
-        _, report = self.exercise_compare(workloads=['concurrent-24', 'concurrent-48'])
+        _, report = self.exercise_compare(workloads=['concurrent-24', 'concurrent-48'], candidate_ratio=1.05)
+        self.assertEqual(report['verdict'], 'PASS')
         for result in report['results'].values():
             self.assertTrue(result['noninferiority_met'])
             self.assertTrue(result['median']['accepted'])
             self.assertEqual(result['point_limit'], 1.10)
-            self.assertEqual(result['median']['point_limit'], 1.)
+            self.assertIsNone(result['median']['point_limit'])
             self.assertEqual(result['median']['upper_limit'], 1.10)
 
     def test_control_reuse_is_bound_to_process_image_run_and_evidence(self):
