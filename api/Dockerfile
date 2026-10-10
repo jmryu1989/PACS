@@ -4,13 +4,7 @@
 # 네이티브 바이너리이고, alpine은 glibc가 아닌 musl을 쓴다. alpine에서는 엔진이 OpenSSL을
 # 못 찾아 "Could not parse schema engine response"로 죽는다. 이미지가 조금 커지는 대신
 # 하루를 아낀다.
-FROM node:22-slim AS lock-build
-RUN apt-get update -y && apt-get install -y --no-install-recommends gcc libc6-dev
-COPY native/flock.c /tmp/flock.c
-RUN cc -O2 -Wall -Wextra -Werror -shared -fPIC -I/usr/local/include/node /tmp/flock.c -o /tmp/flock.node
-
 FROM node:22-slim AS base
-COPY --from=lock-build /tmp/flock.node /app/native/flock.node
 
 # Prisma 엔진이 요구하는 OpenSSL (slim 이미지에는 빠져 있을 수 있음)
 RUN apt-get update -y \

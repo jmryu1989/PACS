@@ -166,12 +166,6 @@ function relativeLoad(node, file, program, checker, known, files) {
   } else return null;
   if (!ts.isStringLiteral(argument) || !/^\.\.?\//.test(argument.text)) return null;
   const offset = codePoint(file, callee.getStart(file));
-  // The image-built N-API component is a trusted native dependency with a single
-  // flock ABI (LOCK-01). This exact loader does not broaden TS module traversal.
-  if (absolute(file.fileName) === SRC + '/emr-runtime/file-lock.ts' &&
-      argument.text === '../../native/flock.node' && ts.isIdentifier(callee) && callee.text === 'require') {
-    return [offset, 'native-flock'];
-  }
   const resolved = ts.resolveModuleName(argument.text, file.fileName, options, host).resolvedModule;
   const destination = resolved && absolute(resolved.resolvedFileName);
   if (!destination || !files.has(destination) || !underSrc(destination) || destination.endsWith('.d.ts')) {
@@ -210,17 +204,19 @@ function fixedPrototypeComparison(node, file) {
   return codePoint(file, node.expression.name.getStart(file));
 }
 
-// Reading the standard Node entry-point identity is not a loader or an evaluator. Accept
-// only the direct if guard, with Node's ambient bindings; retaining/exporting either handle remains refused.
-function nodeMainGuard(node, file, checker) {
-  if (!ts.isIfStatement(node)) return [];
-  const e=node.expression;
-  if (!ts.isBinaryExpression(e)||e.operatorToken.kind!==ts.SyntaxKind.EqualsEqualsEqualsToken ||
-      !ts.isPropertyAccessExpression(e.left)||e.left.questionDotToken||e.left.name.text!=='main'||
-      !ts.isIdentifier(e.left.expression)||e.left.expression.text!=='require'||!ts.isIdentifier(e.right)||e.right.text!=='module') return [];
-  const ids=[e.left.expression,e.right];
-  if(ids.some(id=>checker.getSymbolAtLocation(id)?.declarations?.some(d=>underSrc(absolute(d.getSourceFile().fileName)))))return [];
-  return ids.map(id=>codePoint(file,id.getStart(file)));
+function constructorWithoutReturn(node, file) {
+  if (!ts.isConstructorDeclaration(node) || !node.body) return null;
+  let returns = false;
+  const visit = child => {
+    if (ts.isReturnStatement(child)) { returns = true; return; }
+    // Nested callbacks and classes return from their own scope, never replace
+    // the outer constructor's instance. Use TS's scope nodes rather than text.
+    if (ts.isFunctionLike(child) || ts.isClassLike(child)) return;
+    ts.forEachChild(child, visit);
+  };
+  visit(node.body);
+  const keyword = node.getChildren(file).find(child => child.kind === ts.SyntaxKind.ConstructorKeyword);
+  return !returns && keyword ? codePoint(file, keyword.getStart(file)) : null;
 }
 
 function answer(request) {
@@ -253,10 +249,11 @@ function answer(request) {
     if (!file) continue;
     const broken = program.getSyntacticDiagnostics(file).length > 0;
     const found = [];
-    const loads = [], comparisons = [], mainGuards = [];
+    const loads = [], comparisons = [], constructors = [];
     const visit = node => {
       if (!broken) {
-        mainGuards.push(...nodeMainGuard(node,file,checker));
+        const constructor = constructorWithoutReturn(node, file);
+        if (constructor !== null) constructors.push(constructor);
         const load = relativeLoad(node, file, program, checker, known, files);
         if (load) loads.push(load);
         const comparison = fixedPrototypeComparison(node, file);
@@ -272,7 +269,7 @@ function answer(request) {
     };
     visit(file);
     if (found.length) out[at.slice(SRC.length + 1)] = found;
-    contracts[at.slice(SRC.length + 1)] = { relative_loads: loads, prototype_comparisons: comparisons, node_main_guards: mainGuards };
+    contracts[at.slice(SRC.length + 1)] = { relative_loads: loads, prototype_comparisons: comparisons, constructors_without_return: constructors };
   }
   const declared = {};
   for (const [name, symbol] of decorator) {

@@ -4,11 +4,22 @@
  * start(prepare/proof), outcome(delete+checkpoint transaction), deliver(job completion).
  * A crash/restart probe is made at EVERY reachable cut, including all three actors open.
  * Requirement assertions are about stored facts, receipts, progress, external seal only.
+ * D927 CI profile: append `ci` to the command below. Both retention states are
+ * exhaustive through four scheduler edges, including filesystem crash/restart and
+ * every attack class at each reached state; all named long traces still run.
+ * I1-I4 are unchanged. This does NOT enumerate every 5-9-edge A/B/E interleaving,
+ * or prove unbounded liveness, real SQL scheduling or POSIX durability. The full
+ * bounded graph remains a required recorded non-CI check (omit `ci`):
+ * python3 scripts/record-run.py --run-dir tmp/emr-b1/runs/<new-full-run> --cwd .
+ *   --tree api/src/emr-runtime --tree api/src/emr-contract --file api/package-lock.json
+ *   --file tests/emr/b/seal_checker.cjs -- node tests/emr/b/seal_checker.cjs .
+ *   api/node_modules/typescript tmp/emr-b1/runs/<new-full-run>/checker.json
  */
 const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
 const cp = require('node:child_process'), assert = require('node:assert/strict');
 const [inputRoot = path.resolve(__dirname, '../../..'), tsRoot = path.join(inputRoot, 'api/node_modules/typescript'), output, limitText] = process.argv.slice(2);
 const revision = 'working-tree';
+const ciProfile=limitText==='ci', depthBound=ciProfile?4:Infinity;
 const root=path.resolve(inputRoot);
 const ts = require(path.resolve(tsRoot)), clock = '2026-10-10T00:00:00.000Z', zero = '0'.repeat(64);
 const sha = s => crypto.createHash('sha256').update(s).digest('hex');
@@ -196,7 +207,7 @@ function create(snapshot, eligible=true, recoveryProcess=false) {
     await drain();w.unreadable=false;assert.equal(a.phase,'done');};
   return w;
 }
-const violations={}, witnesses={}, counts={states:0,edges:0,terminal_states:0,restart_probes:0,invariant_checks:0,completed_outcomes:{},duplicate_states:0,attack_checks:0,attack_base_blocked:0,filesystem_cuts_observed:0,filesystem_crash_states:0};
+const violations={}, witnesses={}, counts={states:0,edges:0,terminal_states:0,depth_boundary_states:0,restart_probes:0,invariant_checks:0,completed_outcomes:{},duplicate_states:0,attack_checks:0,attack_base_blocked:0,filesystem_cuts_observed:0,filesystem_crash_states:0};
 const attacked=new Set(),cutSeen=new Set(),rawCutSeen=new Set(),restarted=new Set(),rawRestarted=new Set(),rawAttacked=new Set(),attackCounts={};
 const attackedChains=new Set();
 function finding(id,trace,detail){violations[id]=(violations[id]||0)+1;if(!witnesses[id])witnesses[id]={trace,detail};}
@@ -297,12 +308,16 @@ function stateKey(w){return sha(JSON.stringify({snapshot:semanticSnapshot(w),act
   staged:a.staged,callback:a.callback&&{value:a.callback.value,error:a.callback.error?.code},value:a.value,error:a.error}]))}));}
 async function enumerate(eligible, prefix=[]){
   const initial=create(undefined,eligible);await initial.seed();const seed=clone(initial.snapshot());const seen=new Map();let stopped=false;
-  async function visit(trace){const w=create(seed,eligible);for(let i=0;i<trace.length;i++){w.captureCuts=i===trace.length-1;await act(w,trace[i]);}await filesystemCuts(w,trace);const k=stateKey(w);
+  async function visit(trace){const w=create(seed,eligible);for(let i=0;i<trace.length;i++){w.captureCuts=i===trace.length-1;await act(w,trace[i]);}await filesystemCuts(w,trace);
+    // AB:start consumes one edge; A:start/B:start consumes two. Equivalent states
+    // reached at different depths must retain their different remaining budgets.
+    const k=stateKey(w)+(ciProfile?':'+trace.length:'');
     if(seen.has(k)){counts.duplicate_states++;return seen.get(k);}seen.set(k,null);counts.states++;classify(w,trace);await restartProbe(w,trace);await attackProbe(w,trace);
     if(counts.states%1000===0)console.log(JSON.stringify({progress:{states:counts.states,edges:counts.edges,attack_checks:counts.attack_checks}}));
     const next=options(w);if(!next.length){counts.terminal_states++;for(const [n,a]of Object.entries(w.actors)){const k=n+':'+a.outcome;counts.completed_outcomes[k]=(counts.completed_outcomes[k]||0)+1;}}
     const paths={terminal:next.length?0:1,restart:1};
-    if(limitText&&counts.states>=Number(limitText)){stopped=true;return paths;}
+    if(trace.length>=depthBound){counts.depth_boundary_states++;seen.set(k,paths);return paths;}
+    if(limitText&&!ciProfile&&counts.states>=Number(limitText)){stopped=true;return paths;}
     for(const s of next){counts.edges++;const child=await visit([...trace,s]);paths.terminal+=child.terminal;paths.restart+=child.restart;if(stopped)return paths;}
     seen.set(k,paths);return paths;
   }
@@ -443,10 +458,11 @@ async function named(){
 }
 (async()=>{const begin=performance.now();
   const shard=process.env.EMR_CHECKER_SHARD&&JSON.parse(process.env.EMR_CHECKER_SHARD);
+  assert(!(ciProfile&&shard),'CI profile must explore both complete depth-bounded spaces');
   const namedResults=shard?{}:await named();let spaces=[];
   if(shard)spaces=[await enumerate(shard.eligible,[shard.edge])];
   else if(limitText!=='named') {
-    if(limitText){spaces.push(await enumerate(true));if(counts.states<Number(limitText))spaces.push(await enumerate(false));}
+    if(limitText&&!ciProfile){spaces.push(await enumerate(true));if(counts.states<Number(limitText))spaces.push(await enumerate(false));}
     else {
       // One memo table per retention state shares converging scheduler prefixes.
       // Splitting at first edges duplicates most of this graph on slower CI hosts.
@@ -454,10 +470,12 @@ async function named(){
       spaces.push(await enumerate(true)); spaces.push(await enumerate(false));
     }
   }
-  const summary={revision,source:Object.fromEntries([...source].map(([p,s])=>[p,sha(s)])),...counts,spaces,attackCounts,violations,witnesses,named:namedResults,
-    runtime_s:Number(((performance.now()-begin)/1000).toFixed(3)),bounded_exhaustive:(shard?spaces.length===1:spaces.length===2)&&spaces.every(s=>s.complete)};
+  const profileComplete=(shard?spaces.length===1:spaces.length===2)&&spaces.every(s=>s.complete);
+  const summary={revision,profile:ciProfile?'ci-depth-4':limitText==='named'?'named':'full',depth_bound:ciProfile?depthBound:null,
+    profile_complete:profileComplete,source:Object.fromEntries([...source].map(([p,s])=>[p,sha(s)])),...counts,spaces,attackCounts,violations,witnesses,named:namedResults,
+    runtime_s:Number(((performance.now()-begin)/1000).toFixed(3)),bounded_exhaustive:!ciProfile&&profileComplete};
   if(output)fs.writeFileSync(output,JSON.stringify(summary,null,2)+'\n');
   if(shard)console.log('SHARD_RESULT '+JSON.stringify(summary));
-  else console.log(JSON.stringify({summary:{...counts,spaces,violations,runtime_s:summary.runtime_s,bounded_exhaustive:summary.bounded_exhaustive}}));
-  process.exitCode=Object.keys(violations).length?1:summary.bounded_exhaustive||limitText==='named'?0:3;
+  else console.log(JSON.stringify({summary:{...counts,spaces,violations,profile:summary.profile,profile_complete:profileComplete,runtime_s:summary.runtime_s,bounded_exhaustive:summary.bounded_exhaustive}}));
+  process.exitCode=Object.keys(violations).length?1:profileComplete||limitText==='named'?0:3;
 })().catch(e=>{console.error(e.stack);process.exitCode=2;});

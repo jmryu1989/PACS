@@ -212,7 +212,8 @@ export function executeExternal(request: WriterRequest): any {
   }
   if (state.version !== 2 || state.revision !== prior.revision + 1 || state.generation < prior.generation) return fail('SealCorrupt');
   const body = delta(prior, state);
-  if (operation === 'reserve' && (body.publishing || state.generation !== prior.generation + 1)) return fail('SealCorrupt');
+  if ((operation === 'reserve' || operation === 'compare-and-set' && value.operation === 'reserve') &&
+      (body.publishing || state.generation !== prior.generation + 1)) return fail('SealCorrupt');
   cached.offset += append(log, body, context);
   envelope.state = state;
   if (body.publishing) {
@@ -222,7 +223,7 @@ export function executeExternal(request: WriterRequest): any {
   // Only admission before the first head lock may compact during ordinary work.
   // Synchronous expiry intents and supersession settlement can run under that lock;
   // those updates append only. Startup also compacts behind the writer fence.
-  if (operation === 'admit') compact();
+  if (operation === 'admit' || operation === 'compare-and-set' && value.operation === 'admit') compact();
   // A caller's verification snapshot must not alias the coordinator's live index:
   // another process's WAL suffix can change that index before publication checks it.
   return { changed: true, result: clone(result) };

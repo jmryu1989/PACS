@@ -1,4 +1,4 @@
-/* EMR-B1 contract cases C01-C10 and C13-C18 (REQ-EMR-01/02/06/07/19/20 -> RISK-EMR-* -> TEST-EMR-B-C01..C10).
+/* EMR-B1 contract cases C01-C10 and C13-C21 (REQ-EMR-01/02/06/07/19/20 -> RISK-EMR-* -> TEST-EMR-B-C01..C10).
  *
  * Pure: the A contract, the B runtime modules (api/src/emr-runtime) and the unit declaration, compiled with the installed
  * TypeScript like tests/emr_contract_test.cjs. The ledger store runs its real logic (snapshot, deadline, intent, append,
@@ -6,6 +6,8 @@
  * itself enforces (roles, locks, placement, triggers, the SQL hash) is the live suite tests/emr/b/live.py. Assertions are
  * on returned/stored facts, error codes and order of effects - never on implementation text. Synthetic data only.
  *
+ * C13's file-replacement crash transport requires Linux (rename over an open descriptor).
+ * The complete B contract selection therefore runs on Linux, as does the product runtime.
  * With `--emr-b-live <operation> <json>` this file is instead the live suite's driver inside the production API image: it
  * runs one operation of the compiled /app/dist store against the database named by DATABASE_URL and prints one JSON line.
  */
@@ -370,7 +372,7 @@ function contractSuite() {
   }
   function memorySql(ledger) {
     const sql = {
-      snapshot: async work => work(sql), withWriterFence: async work => work(sql),
+      snapshot: async work => { ledger.guard(); return work(sql); }, withWriterFence: async work => work(sql),
       markerForSlot: async (stream, sequence) => ledger.markers.find(m => m.stream === stream && m.sequence === sequence) ?? null,
       markerForAttempt: async (stream, attemptId) => ledger.markers.find(m => m.stream === stream && m.attemptId === attemptId) ?? null,
       tail: async stream => { ledger.guard(); return { chainId: ledger.streams[stream].chainId, ...ledger.streams[stream].head }; },
@@ -1116,6 +1118,70 @@ function contractSuite() {
     assert.equal(state.state, 'legal-hold'); assert.equal(state.destroyNotBefore, null);
     claim.endedAt = '2027-01-01T00:00:00.000Z';
     assert.throws(() => inSnapshot(rows, () => D.reloadLegalHolds('native')), 'an end timestamp with no actual ending event is refused');
+  });
+
+  // D889 §3.3 A7 -> RISK-EMR-FORGED-RECEIPT -> C20 / M38.
+  test('C20 replay binds sealed DB bytes through the external seal before issuing any receipt', async () => {
+    for (const position of ['below', 'at']) for (const damage of ['hash', 'payload', 'content', 'link']) {
+      const w = await world();
+      try {
+        const event = authEvent(A);
+        await w.store.append(event);
+        if (position === 'below') { await w.store.append(authEvent(A)); await w.store.append(authEvent(A)); }
+        // The replay's new intent retires the first receipt's acknowledged binding.
+        const row = w.ledger.entries[0];
+        if (damage === 'hash') row.hash = 'f'.repeat(64);
+        if (damage === 'link') row.previousHash = 'e'.repeat(64);
+        if (damage === 'content') row.contentSha256 = 'd'.repeat(64);
+        const tx = w.ledger.begin(), provisional = await w.store.appendInTransaction(tx, event);
+        w.ledger.commit(tx);
+        if (damage === 'payload') row.payload += ' ';
+        const before = structuredClone(w.ledger.entries);
+        await assert.rejects(w.store.confirm(provisional), e => ['LedgerChainBroken', 'SealTailMismatch', 'DurableReceiptRefused'].includes(e.code), `${position}/${damage}`);
+        assert.deepEqual(w.ledger.entries, before, 'refusal preserves the evidence');
+      } finally { w.cleanup(); }
+    }
+    // The other permitted A7 path is an exact, recently verified external binding.
+    // Its late response does not need another available database connection.
+    const bound = await world();
+    try {
+      const tx = bound.ledger.begin(), provisional = await bound.store.appendInTransaction(tx, authEvent(A));
+      bound.ledger.commit(tx); await bound.store.confirm(provisional); bound.ledger.down = true;
+      assert(C.isDurableReceipt(await bound.store.confirm(provisional)), 'recent exact external binding has no new DB dependency');
+    } finally { bound.cleanup(); }
+    const w = await world();
+    try {
+      const event = authEvent(A); await w.store.append(event); await w.store.append(authEvent(A));
+      const receipt = await w.store.append(event);
+      assert(C.isDurableReceipt(receipt)); assert.equal(receipt.eventId, event.eventId);
+      assert.equal(w.ledger.entries.length, 2, 'untampered replay remains idempotent');
+    } finally { w.cleanup(); }
+  });
+
+  // D889 publication batching -> RISK-EMR-RECEIPT-DELAY / CRASH -> C21.
+  test('C21 adjacent stream advances share durability barriers and recover together after each publication cut', async () => {
+    for (const cut of [0, 1, 2, 3]) {
+      const w = await world(), original = fs.fdatasyncSync;
+      try {
+        const tx = w.ledger.begin();
+        const provisional = await w.store.appendInTransaction(tx, changeEvent()); w.ledger.commit(tx);
+        let syncs = 0;
+        fs.fdatasyncSync = function (...args) {
+          if (++syncs === cut) throw Object.assign(new Error('synthetic publication crash'), { code: 'EIO' });
+          return original.apply(this, args);
+        };
+        const results = await Promise.allSettled([w.store.confirm(provisional)]);
+        fs.fdatasyncSync = original;
+        if (cut) assert(results.every(r => r.status === 'rejected'), 'no half-published group succeeds');
+        else {
+          assert(results.every(r => r.status === 'fulfilled'));
+          assert(C.isDurableReceipt(results[0].value), 'the actual two-stream store path issues the bound receipt');
+          assert.equal(syncs, 3, 'two adjacent streams share one three-barrier publication');
+        }
+        const recovered = w.restart(); await recovered.seal.recoverAtStart();
+        for (const s of A.ACCESS_STREAMS) assert.equal(recovered.seal.read().streams[s].hash, w.ledger.streams[s].head.hash);
+      } finally { fs.fdatasyncSync = original; w.cleanup(); }
+    }
   });
 
   test('C19 committed receipt groups preserve every binding, ignore unrelated pending work and share durable publication; publication failure sends no receipt', async () => {

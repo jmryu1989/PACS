@@ -804,7 +804,7 @@ class Compiler:
                 self.answers[key].setdefault(API / name, {}).update(
                     relative_loads=dict(contract["relative_loads"]),
                     prototype_comparisons=set(contract["prototype_comparisons"]),
-                    node_main_guards=set(contract["node_main_guards"]))
+                    constructors_without_return=set(contract["constructors_without_return"]))
         return self.answers[key]
 
 
@@ -1179,8 +1179,6 @@ def module_loads(path, source, code, bindings=None):
     found, loaded = [], []
     bindings = judged(path, source) if bindings is None else bindings
     for match in words(LOADER_NAME, code):
-        if match.start() in bindings.get("node_main_guards", ()):
-            continue
         word, at = match.group(1), match.start()
         paren = skip_gap(code, match.end())
         called = code.startswith("(", paren)
@@ -1204,7 +1202,7 @@ def module_loads(path, source, code, bindings=None):
         elif kind == "plain" and module.startswith(("./", "../")):
             # The compiler resolves against exactly the source set the inventory checks, not the filesystem alone.
             followed = bindings.get("relative_loads", {}).get(at)
-            if followed not in ("followed", "native-flock"):
+            if followed != "followed":
                 found.append((line_of(code, at), f"{word}({module!r}): {followed or 'relative binding not followed'}"))
         elif kind == "plain":
             found.append((line_of(code, at), f"{word}({module!r}): not a package the loaders may take"))
@@ -1230,8 +1228,7 @@ def contract_names(path, code, bindings=None):
     constructor reached as a property) or reaches a loader through process or module: each would put route methods
     read under one file's prefix on an instance served under another's, or load a module unread.
     """
-    found = [(line_of(code, match.start()), match.group(0)) for match in words(SEALED_WORD, code)
-             if match.start() not in (bindings or {}).get("node_main_guards", ())]
+    found = [(line_of(code, match.start()), match.group(0)) for match in words(SEALED_WORD, code)]
 
     def add(match, text):
         found.append((line_of(code, match.start()), text))
@@ -1265,7 +1262,7 @@ def contract_names(path, code, bindings=None):
             add(match, "constructor as a property")
         elif not code.startswith("(", paren) or not code.startswith("{", body):
             add(match, "constructor other than a declaration")
-        elif RETURN_WORD.search(code, body, bracket_end(code, body)):
+        elif RETURN_WORD.search(code, body, bracket_end(code, body)) and match.start() not in (bindings or {}).get("constructors_without_return", ()):
             add(match, "return in a constructor")
     if found:
         raise AssertionError(f"{path.name}: a sealed name or a form the source contract does not list: {sorted(found)}")
@@ -2814,7 +2811,6 @@ class ClinicianPolicySpec(unittest.TestCase):
         # controls: an unused import, Reflect's readers, packages loaded by name and a method named require still read
         accepted = {
             "an unused import of a route decorator": {tags: put + sources[tags]},
-            "Node entry-point guard": {outside: plain(inject, "if (require.main === module) { process.stdout.write('entry'); }\n")},
             "Reflect.ownKeys": {outside: plain(inject, "export const keys = (v: object) => Reflect.ownKeys(v);\n")},
             "a package by require and by import()": {outside: plain(inject, (
                 "export const raw = require('express').raw;\n"

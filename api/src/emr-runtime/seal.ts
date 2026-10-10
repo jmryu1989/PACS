@@ -207,6 +207,25 @@ export class AccessSeal {
   async reconcileCommitted(stream: AccessStream, target?: ChainPosition, reader = this.sql, recovering = false): Promise<SealState> {
     return (await this.reconcileState(stream, target, reader, recovering)).tail;
   }
+  private recentlyVerified(state: ExternalState, stream: AccessStream, target: ChainPosition): boolean {
+    const sealed = state.tail.streams[stream];
+    // A retained receipt has an exact protected binding, including
+    // when retention already removed its row. Other replays must prove the DB
+    // bytes through the external seal; a DB event lookup alone is not authority.
+    return Object.values(state.terminal).some(t => t.phase === 'committed' &&
+      t.binding.stream === stream && t.binding.chainId === sealed.chainId &&
+      t.binding.sequence === target.sequence && t.binding.hash === target.hash);
+  }
+  private async bindSealedTarget(sql: PrismaLedgerSql, state: ExternalState, stream: AccessStream, target: ChainPosition): Promise<void> {
+    const sealed = state.tail.streams[stream];
+    const tail = await sql.tail(stream);
+    if (tail.chainId !== sealed.chainId) throw new SealRefused('SealChainMismatch', stream);
+    if (tail.sequence < sealed.sequence) throw new SealRefused('LedgerBehindSeal', stream);
+    const entries = await this.range(sql, stream, sealed.sequence, target.sequence - 1), first = entries[0];
+    if (!first || first.sequence !== target.sequence || first.hash !== target.hash ||
+        chainViolation({ sequence: first.sequence - 1, hash: first.previousHash }, entries, sealed, stream))
+      throw new SealRefused('LedgerChainBroken', 'sealed-target');
+  }
   private async reconcileState(stream: AccessStream, target?: ChainPosition, reader = this.sql, recovering = false): Promise<ExternalState> {
     // A reservation already read and durably updated this protected frontier under
     // the head lock. It is a sufficient starting point for verifying its own new
@@ -221,6 +240,17 @@ export class AccessSeal {
       const sealed = state.tail.streams[stream];
       if (target && target.sequence <= sealed.sequence && !recovering) {
         if (target.sequence === sealed.sequence && target.hash !== sealed.hash) throw new SealRefused('SealTailMismatch', 'target');
+        try {
+          // An exact protected binding has already proved this position. Opening
+          // an otherwise empty SQL snapshot would add a DB availability dependency
+          // and pool contention to a receipt whose authority is already durable.
+          if (!this.recentlyVerified(state, stream, target))
+            await reader.snapshot(sql => this.bindSealedTarget(sql, state, stream, target));
+        }
+        catch (error) {
+          if (!same(this.load().tail.streams[stream], sealed)) continue;
+          throw error;
+        }
         this.reservationState = state;
         return state;
       }
@@ -257,7 +287,7 @@ export class AccessSeal {
       // Reservations/intents in other requests can change the global revision during
       // SQL verification. Merge only this verified frontier under the writer lock;
       // a changed frontier (including expiry) still requires a fresh DB snapshot.
-      const installed = this.change(latest => {
+      const installed = await this.publish(latest => {
         if (!same(latest.tail.streams[stream], result.current)) return null;
         for (const entry of result.unsealed) {
           const position = slot(stream, entry.sequence), q = latest.slots[position];
@@ -281,6 +311,27 @@ export class AccessSeal {
       });
       if (installed) { this.reservationState = installed; return installed; }
     }
+  }
+  private publications: { install: (state: ExternalState) => ExternalState | null;
+    resolve: (state: ExternalState | null) => void; reject: (error: unknown) => void }[] | null = null;
+  /** Adjacent verified advances share one WAL/tail publication. Keep all three
+   * durability barriers: removing the completion barrier would let a later torn
+   * or rolled-back completed tail masquerade as a crash awaiting repair.
+   * Only already-verified frontiers enter this group; it never waits for an
+   * unrelated transaction to commit or acquire a head lock. */
+  private publish(install: (state: ExternalState) => ExternalState | null): Promise<ExternalState | null> {
+    return new Promise((resolve, reject) => {
+      const item = { install, resolve, reject };
+      if (this.publications) { this.publications.push(item); return; }
+      this.publications = [item];
+      setImmediate(() => {
+        const group = this.publications; this.publications = null;
+        try {
+          const result = this.change(state => ({ accepted: group.map(entry => Boolean(entry.install(state))), state }));
+          for (let i = 0; i < group.length; i++) group[i].resolve(result.accepted[i] ? result.state : null);
+        } catch (error) { for (const entry of group) entry.reject(error); }
+      });
+    });
   }
   private readonly advances = new Map<AccessStream, { target: ChainPosition; resolve: (state: ExternalState) => void; reject: (error: unknown) => void }[]>();
   /** Coalesce only requests whose COMMIT already finished. No pending transaction or unrelated

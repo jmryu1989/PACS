@@ -3,7 +3,7 @@
  * pool, 0.5 ms statements and 1 ms COMMIT. Snapshots use an immutable sequence ceiling
  * over append-only rows, without injecting O(retained) copying into the DB double.
  * Both revisions use precise setImmediate timers and real protected-state filesystem IO.
- * Linux uses the actual persistent flock binding; Windows can emulate its measured cost.
+ * Linux uses the actual single-owner flock(1) coordinator; Windows can emulate its measured cost.
  * No DB, network or existing fixture. Each process owns an empty synthetic temp directory.
  * Usage: <checkout> <label> <concurrency/rate> <retained> <out.jsonl> [SQL_MS] [COMMIT_MS] [FLOCK_MS] [POOL]
  */
@@ -130,10 +130,18 @@ const q = (xs, p) => xs[Math.min(xs.length - 1, Math.ceil(xs.length * p) - 1)];
 (async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'opus-ab-'));
   let calls = 0;
-  const lock = process.env.KIN_EMR_LOCK_BINDING ? require(process.env.KIN_EMR_LOCK_BINDING) : null;
-  const lockFd = fs.openSync(path.join(dir, 'writer.lock'), 'a+', 0o600);
   try {
-    const journal = v4 ? new J.FailureJournal(dir, new CO.StateCoordinator(dir, request => { calls++; const t0 = performance.now(); if (lock) lock.flock(lockFd, true); else busy(FLOCK_MS); try { return (request.operation === 'owner-alive' ? false : EW.executeExternal(request)); } finally { if (lock) lock.flock(lockFd, false); (detail.coordinator_ms[request.operation] ||= []).push(performance.now() - t0); } })) : new J.FailureJournal(dir);
+    const coordinator = v4 ? new CO.StateCoordinator(dir, process.platform === 'linux' ? undefined : request => {
+      busy(FLOCK_MS); return request.operation === 'owner-alive' ? false : EW.executeExternal(request);
+    }) : null;
+    if (coordinator) {
+      const call = coordinator.call.bind(coordinator);
+      coordinator.call = (operation, value) => { calls++; const t0 = performance.now();
+        try { return call(operation, value); }
+        finally { (detail.coordinator_ms[operation] ||= []).push(performance.now() - t0); }
+      };
+    }
+    const journal = v4 ? new J.FailureJournal(dir, coordinator) : new J.FailureJournal(dir);
     const seal = new S.AccessSeal(dir, sql, journal);
     if (v4) await seal.recoverAtStart(); else await seal.recover();
     if (PREFILL) {   // an already sealed retained chain of PREFILL viewing entries
@@ -157,7 +165,7 @@ const q = (xs, p) => xs[Math.min(xs.length - 1, Math.ceil(xs.length * p) - 1)];
       try { await store.append(e); return { ms: performance.now() - s }; } catch (error) { return { ms: performance.now() - s, error: error.code || error.name, detail: String(error.message).slice(0, 160) }; } }));
     const wall = performance.now() - started, ok = rows.filter(r => !r.error).map(r => r.ms).sort((a, b) => a - b);
     const all = rows.map(r => r.ms).sort((a, b) => a - b);
-    const result = { label, version: v4 ? 'r4c' : 'r3', concurrency: C_REQ, prefill: PREFILL, sql_ms: SQL_MS, commit_ms: COMMIT_MS, flock_ms: v4 ? FLOCK_MS : null, pool: POOL,
+    const result = { label, version: v4 ? 'r4d' : 'r3', concurrency: C_REQ, prefill: PREFILL, sql_ms: SQL_MS, commit_ms: COMMIT_MS, flock_ms: v4 ? FLOCK_MS : null, pool: POOL,
       failures: rows.length - ok.length, errors: [...new Set(rows.filter(r => r.error).map(r => r.error + ':' + r.detail))],
       p50: +q(all, .5).toFixed(1), p95: +q(all, .95).toFixed(1), p99: +q(all, .99).toFixed(1), max: +all.at(-1).toFixed(1), wall_ms: +wall.toFixed(1),
       read_rows: readRows, coordinator_calls: v4 ? calls : null, sealed_through: (seal.read()).streams.viewing.sequence, at: new Date().toISOString() };
@@ -165,5 +173,5 @@ const q = (xs, p) => xs[Math.min(xs.length - 1, Math.ceil(xs.length * p) - 1)];
       result.detail = { lock_hold_ms: st(detail.lock_hold_ms), lock_wait_ms: st(detail.lock_wait_ms), confirm_ms: st(detail.confirm_ms), coordinator_ms: Object.fromEntries(Object.entries(detail.coordinator_ms).map(([k, v]) => [k, st(v)])) }; }
     fs.appendFileSync(out, JSON.stringify(result) + '\n');
     console.log(JSON.stringify(result));
-  } finally { fs.closeSync(lockFd); fs.rmSync(dir, { recursive: true, force: true }); }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 })().catch(e => { console.error(e.stack || e); process.exitCode = 2; });

@@ -174,7 +174,10 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
   /** After the caller's commit: prove every entry from storage, seal each stream, and only then mint the receipt. */
   async confirm(appended: ProvisionalAppend): Promise<DurableAccessReceipt> {
     let receipt: DurableAccessReceipt | null = null;
-    for (const provisional of appended.entries) {
+    // Both stream rows already committed atomically. Verify them together so
+    // their adjacent protected advances can share one durable publication; the
+    // caller still receives nothing until every stream has passed.
+    const verified = await Promise.allSettled(appended.entries.map(async provisional => {
       const candidate: StoredEntry = { sequence: provisional.sequence, hash: provisional.hash, previousHash: provisional.previousHash,
         payload: provisional.payload, contentSha256: provisional.contentSha256, storedAt: provisional.storedAt,
         kind: provisional.stream === 'viewing' ? 'access' : 'history', eventId: appended.eventId, statutoryAct: null };
@@ -187,7 +190,7 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
       } catch (error) { sealError = error; }
       if (covered) {
         if (provisional.stream === 'viewing') receipt = mintDurableReceipt(candidate, covered.streams.viewing);
-        continue;
+        return;
       }
       let stored: StoredEntry | null;
       try { stored = await this.sql.entryForEvent(provisional.stream, appended.eventId); } catch {
@@ -209,7 +212,8 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
         throw error instanceof SealRefused && error.code !== 'SealUnavailable' ? error : new LedgerFailure('SealUnavailable');
       }
       if (provisional.stream === 'viewing') receipt = mintDurableReceipt(stored, sealed.streams.viewing);
-    }
+    }));
+    for (const result of verified) if (result.status === 'rejected') throw result.reason;
     if (!receipt) refuse('DurableReceiptRefused');
     await Promise.all(appended.entries.map(p => this.seal.acknowledge(p.stream, p.attemptId)));
     return receipt;

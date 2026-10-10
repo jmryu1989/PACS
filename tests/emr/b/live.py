@@ -394,12 +394,12 @@ class EmrBLedgerLive(unittest.TestCase):
         self.assertEqual(data["summary"]["failures"], 0, data)
         if baseline is None:
             baseline = self.baseline_appends(count)
-        self.latency_pair = {'count': count, 'baseline_revision': BASELINE, 'r3': baseline['summary'], 'r4c': data['summary']}
+        self.latency_pair = {'count': count, 'baseline_revision': BASELINE, 'r3': baseline['summary'], 'r4d': data['summary']}
         print('EMR_RELATIVE_LATENCY ' + json.dumps(self.latency_pair), flush=True)
         return data["results"]
 
     def assert_relative_latency(self):
-        self.assertLessEqual(self.latency_pair['r4c']['p95_ms'], self.latency_pair['r3']['p95_ms'] * 1.20, self.latency_pair)
+        self.assertLessEqual(self.latency_pair['r4d']['p95_ms'], self.latency_pair['r3']['p95_ms'], self.latency_pair)
 
     def test_b03_idempotency_and_concurrent_append(self):
         """Concurrent original events are all ordered once; the same event resent is the same receipt; another content
@@ -442,7 +442,7 @@ class EmrBLedgerLive(unittest.TestCase):
         conflict = self.driver("append", {"events": [changed]})["results"][0]
         self.assertIn(conflict["error"], ("AccessEventIdConflict", "EB002"), conflict)
         self.assertEqual(self.ok("SELECT count(*) FROM emr_access.access_entry WHERE event_id = '%s'" % event["eventId"]), ["1"])
-        # Independent processes share the native external writer, including both streams and journal IDs.
+        # Independent processes share the fenced external writer, including both streams and journal IDs.
         from concurrent.futures import ThreadPoolExecutor
         same = self.auth_event()
         with ThreadPoolExecutor(max_workers=3) as workers:
@@ -450,9 +450,9 @@ class EmrBLedgerLive(unittest.TestCase):
         self.assertTrue(all("receipt" in r.get("results", [{}])[0] for r in receipts), receipts)
         self.assertEqual(self.ok("SELECT count(*) FROM emr_access.commit_marker WHERE event_id='%s'" % same["eventId"]), ["1"])
         with ThreadPoolExecutor(max_workers=3) as workers:
-            jobs = list(workers.map(lambda n: self.driver("journal-add", {"id": "L03-native-writer-"+str(n)}), range(6)))
+            jobs = list(workers.map(lambda n: self.driver("journal-add", {"id": "L03-fenced-writer-"+str(n)}), range(6)))
         self.assertEqual(len(jobs), 6)
-        self.assertEqual(sum(r["id"].startswith("L03-native-writer-") for r in self.driver("journal")), 6)
+        self.assertEqual(sum(r["id"].startswith("L03-fenced-writer-") for r in self.driver("journal")), 6)
         with ThreadPoolExecutor(max_workers=2) as workers:
             mixed=list(workers.map(lambda event:self.driver("append",{"events":[event]}),[self.change_event(),self.auth_event()]))
         self.assertTrue(all("receipt" in r.get("results",[{}])[0] for r in mixed),mixed)

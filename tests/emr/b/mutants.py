@@ -133,8 +133,10 @@ MUTANTS = {
     "M35": ("I4: job reports success before its own checkpoint seal", [
         ("api/src/emr-runtime/store.ts", "  await seal.reconcileCommitted('viewing', { sequence: result.checkpointSequence, hash: result.checkpointHash });\n", "")]),
     "M36": ("per-operation Node startup returns to the head-locked writer: concurrent receipt latency exceeds the round-3 budget", [
-        ("api/src/emr-runtime/coordinator.ts", "    try { return executeExternal(request); }",
-         "    require('node:child_process').spawnSync(process.execPath, ['-e', '']); // Reintroduced per-reservation worker startup under the head lock.\n    try { return executeExternal(request); }")]),
+        ("api/src/emr-runtime/coordinator.ts", "      if (this.owner) return executeExternal({ ...request, context: this.owner.context });",
+         "      if (operation === 'reserve') require('node:child_process').spawnSync(process.execPath, ['-e', '']);\n      if (this.owner) return executeExternal({ ...request, context: this.owner.context });")]),
+    "M38": ("A7 replay trusts a sealed DB row without binding its bytes through the external seal", [
+        ("api/src/emr-runtime/seal.ts", "await reader.snapshot(sql => this.bindSealedTarget(sql, state, stream, target));", "void 0; /* missing sealed-target binding */")]),
     "M37": ("a verification snapshot aliases the coordinator index and accepts another writer's changed binding", [
         ("api/src/emr-runtime/external-writer.ts", "return { changed: true, result: clone(result) };", "return { changed: true, result };")]),
 

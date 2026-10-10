@@ -1,21 +1,30 @@
 [
   {
-    "name": "fixed image native flock dependency",
-    "files": {"emr-runtime/file-lock.ts": "export const lock = (fd: number) => require('../../native/flock.node').flock(fd, true);\n"}
-  },
-  {
-    "name": "native dependency exception does not allow another native module",
-    "files": {"emr-runtime/file-lock.ts": "export const lock = () => require('../../native/other.node');\n"},
+    "name": "removed native flock loader is refused",
+    "files": {
+      "emr-runtime/file-lock.ts": "export const lock = (fd: number) => require('../../native/flock.node').flock(fd, true);\n"
+    },
     "refused": "relative module is missing or outside the checked api/src scope"
   },
   {
-    "name": "native dependency exception does not allow another loader site",
-    "files": {"probe.ts": "export const lock = () => require('../native/flock.node');\n"},
+    "name": "another native module is refused",
+    "files": {
+      "emr-runtime/file-lock.ts": "export const lock = () => require('../../native/other.node');\n"
+    },
+    "refused": "relative module is missing or outside the checked api/src scope"
+  },
+  {
+    "name": "native module at another site is refused",
+    "files": {
+      "probe.ts": "export const lock = () => require('../native/flock.node');\n"
+    },
     "refused": "relative module is missing or outside the checked api/src scope"
   },
   {
     "name": "listed IP parser and fixed prototype comparisons",
-    "files": {"probe.ts": "import { isIP } from 'node:net';\nexport const valid = (value: any) => isIP(value) !== 0;\nexport const plain = (value: any) => [null, Object.prototype, Array.prototype].includes(Object.getPrototypeOf(value));\n"}
+    "files": {
+      "probe.ts": "import { isIP } from 'node:net';\nexport const valid = (value: any) => isIP(value) !== 0;\nexport const plain = (value: any) => [null, Object.prototype, Array.prototype].includes(Object.getPrototypeOf(value));\n"
+    }
   },
   {
     "name": "relative require import and import type follow a sibling",
@@ -34,32 +43,44 @@
   },
   {
     "name": "unlisted package is still refused",
-    "files": {"probe.ts": "import { createRequire } from 'node:module';\nexport const load = createRequire;\n"},
+    "files": {
+      "probe.ts": "import { createRequire } from 'node:module';\nexport const load = createRequire;\n"
+    },
     "refused": "a module the source contract does not list"
   },
   {
     "name": "require outside api src is refused",
-    "files": {"probe.ts": "export const load = () => require('../../tests/route_inventory_ts.js');\n"},
+    "files": {
+      "probe.ts": "export const load = () => require('../../tests/route_inventory_ts.js');\n"
+    },
     "refused": "relative module is missing or outside the checked api/src scope"
   },
   {
     "name": "dynamic import outside api src is refused",
-    "files": {"probe.ts": "export const load = () => import('./../../tests/route_inventory_ts.js');\n"},
+    "files": {
+      "probe.ts": "export const load = () => import('./../../tests/route_inventory_ts.js');\n"
+    },
     "refused": "relative module is missing or outside the checked api/src scope"
   },
   {
     "name": "missing relative implementation is refused",
-    "files": {"probe.ts": "export const load = () => require('./absent-probe');\n"},
+    "files": {
+      "probe.ts": "export const load = () => require('./absent-probe');\n"
+    },
     "refused": "relative module is missing or outside the checked api/src scope"
   },
   {
     "name": "relative decorator export cannot bypass binding checks",
-    "files": {"probe.ts": "const { Public: open } = require('./auth.guard');\nexport const apply = open;\n"},
+    "files": {
+      "probe.ts": "const { Public: open } = require('./auth.guard');\nexport const apply = open;\n"
+    },
     "refused": "relative module exports a route or public metadata decorator"
   },
   {
     "name": "dynamic import of decorator exports is refused",
-    "files": {"probe.ts": "export const load = () => import('./auth.guard');\n"},
+    "files": {
+      "probe.ts": "export const load = () => import('./auth.guard');\n"
+    },
     "refused": "relative module exports a route or public metadata decorator"
   },
   {
@@ -72,27 +93,71 @@
   },
   {
     "name": "prototype captured before includes is refused",
-    "files": {"probe.ts": "export const plain = (value: any) => { const captured = Object.getPrototypeOf(value); return [Object.prototype, null].includes(captured); };\n"},
+    "files": {
+      "probe.ts": "export const plain = (value: any) => { const captured = Object.getPrototypeOf(value); return [Object.prototype, null].includes(captured); };\n"
+    },
     "refused": "getPrototypeOf other than compared"
   },
   {
     "name": "prototype assigned inside includes is refused",
-    "files": {"probe.ts": "let captured: any;\nexport const plain = (value: any) => [Object.prototype, null].includes(captured = Object.getPrototypeOf(value));\n"},
+    "files": {
+      "probe.ts": "let captured: any;\nexport const plain = (value: any) => [Object.prototype, null].includes(captured = Object.getPrototypeOf(value));\n"
+    },
     "refused": "getPrototypeOf other than compared"
   },
   {
     "name": "prototype mutation inside includes is refused",
-    "files": {"probe.ts": "export const plain = (value: any) => [Object.prototype, null].includes(Object.assign(Object.getPrototypeOf(value), { hidden: true }));\n"},
+    "files": {
+      "probe.ts": "export const plain = (value: any) => [Object.prototype, null].includes(Object.assign(Object.getPrototypeOf(value), { hidden: true }));\n"
+    },
     "refused": "getPrototypeOf other than compared"
   },
   {
     "name": "variable comparison receiver is refused",
-    "files": {"probe.ts": "export const plain = (list: any, value: any) => list.includes(Object.getPrototypeOf(value));\n"},
+    "files": {
+      "probe.ts": "export const plain = (list: any, value: any) => list.includes(Object.getPrototypeOf(value));\n"
+    },
     "refused": "getPrototypeOf other than compared"
   },
   {
     "name": "spread comparison list is refused",
-    "files": {"probe.ts": "export const plain = (list: any, value: any) => [...list, null].includes(Object.getPrototypeOf(value));\n"},
+    "files": {
+      "probe.ts": "export const plain = (list: any, value: any) => [...list, null].includes(Object.getPrototypeOf(value));\n"
+    },
     "refused": "getPrototypeOf other than compared"
+  },
+  {
+    "name": "removed Node main guard allowance is refused",
+    "files": {
+      "probe.ts": "if (require.main === module) {}\nexport const value = 1;\n"
+    },
+    "refused": "require not called"
+  },
+  {
+    "name": "removed process stdout allowance is refused",
+    "files": {
+      "probe.ts": "process.stdout.write('entry');\nexport const value = 1;\n"
+    },
+    "refused": "process.stdout"
+  },
+  {
+    "name": "constructor callbacks return from their own scopes",
+    "files": {
+      "probe.ts": "export class Peer { constructor() { const first = () => { return 1; }; function next() { return 2; } const third = { run() { return 3; } }; first(); next(); third.run(); } }\n"
+    }
+  },
+  {
+    "name": "direct constructor return stays refused",
+    "files": {
+      "probe.ts": "export class Peer { constructor() { return {}; } }\n"
+    },
+    "refused": "return in a constructor"
+  },
+  {
+    "name": "constructor return inside control flow stays refused",
+    "files": {
+      "probe.ts": "export class Peer { constructor(flag: boolean) { const callback = () => { return 1; }; if (flag) { return {}; } callback(); } }\n"
+    },
+    "refused": "return in a constructor"
   }
 ]
