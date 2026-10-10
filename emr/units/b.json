@@ -61,9 +61,10 @@
       "api/prisma/migrations/20261010120000_emr_seal_attempts/migration.sql",
       "tests/emr/b/seal_checker.cjs",
       "tests/route_inventory_ts.js",
-      "api/native/flock.c",
       "api/src/emr-runtime/file-lock.ts",
-      "tests/fixtures/clinician-source-contract-loads.json"
+      "tests/fixtures/clinician-source-contract-loads.json",
+      "api/src/emr-runtime/state-client.ts",
+      "api/src/emr-runtime/state-client-worker.ts"
     ],
     "B1-B2": [
       "api/src/emr-contract/README.md",
@@ -332,6 +333,21 @@
       "req": "REQ-D878",
       "risk": "RISK-EMR-RECEIPT-DELAY",
       "test": "PERF-ledger PERF-sustained PERF-concurrent-24 PERF-concurrent-48 PERF-journal LOCK-01 MP01 MP02 MP03 MP04 C13 M37"
+    },
+    {
+      "req": "REQ-D889-SEALED-REPLAY",
+      "risk": "RISK-EMR-FORGED-RECEIPT",
+      "test": "TEST-EMR-B-C20 M38"
+    },
+    {
+      "req": "REQ-D889-NO-NATIVE-FENCE",
+      "risk": "RISK-EMR-STALE-WRITER",
+      "test": "LOCK-01 C21 PERF-sustained PERF-concurrent-24 PERF-concurrent-48"
+    },
+    {
+      "req": "REQ-D927-CHECKER-CI",
+      "risk": "RISK-EMR-UNVERIFIED-CONCURRENCY",
+      "test": "seal_checker.cjs ci (both retention states, depth 4, I1-I4 and all named/attack classes); seal_checker.cjs (profile argument omitted; recorded non-CI complete bounded graph)"
     }
   ],
   "cases": {
@@ -353,6 +369,8 @@
         "C16 D24 received evidence keeps independent original, adopted, chart and receipt clocks without a duplicate restart",
         "C17 D24 finite review deadlines escalate without erasing duties or renewing on retries; four evidence-bound decisions close the procedure",
         "C18 D24 claim duties require an actual ending event and preserve an outstanding statutory obligation past internal deadlines",
+        "C20 replay binds sealed DB bytes through the external seal before issuing any receipt",
+        "C21 adjacent stream advances share durability barriers and recover together after each publication cut",
         "C19 committed receipt groups preserve every binding, ignore unrelated pending work and share durable publication; publication failure sends no receipt",
         "C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused"
       ]
@@ -384,9 +402,9 @@
     }
   },
   "expected": {
-    "contract": 17,
+    "contract": 19,
     "live": 12,
-    "mutants": 34,
+    "mutants": 35,
     "profiles": 39,
     "measurements_suites": 20,
     "validate_jobs": 22,
@@ -643,6 +661,13 @@
         "C13"
       ],
       "behaviour": "in-flight verification shares the mutable coordinator index and accepts another writer changed binding"
+    },
+    {
+      "id": "M38",
+      "behaviour": "A7 replay trusts a sealed DB row without binding its bytes through the external seal",
+      "kill": [
+        "C20"
+      ]
     }
   ],
   "candidate_cases": [
