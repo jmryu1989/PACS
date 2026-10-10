@@ -64,7 +64,9 @@
       "api/src/emr-runtime/file-lock.ts",
       "tests/fixtures/clinician-source-contract-loads.json",
       "api/src/emr-runtime/state-client.ts",
-      "api/src/emr-runtime/state-client-worker.ts"
+      "api/src/emr-runtime/state-client-worker.ts",
+      "api/src/emr-runtime/limits.ts",
+      "api/src/emr-runtime/admission.ts"
     ],
     "B1-B2": [
       "api/src/emr-contract/README.md",
@@ -92,7 +94,8 @@
       "tests/emr/b/journal_cost.cjs",
       "tests/emr/b/performance.py",
       "tests/emr/b/performance_mutants.py",
-      "tests/emr/b/lock_test.cjs"
+      "tests/emr/b/lock_test.cjs",
+      "tests/emr/b/transaction_options_test.cjs"
     ]
   },
   "models": {
@@ -348,6 +351,21 @@
       "req": "REQ-D927-CHECKER-CI",
       "risk": "RISK-EMR-UNVERIFIED-CONCURRENCY",
       "test": "seal_checker.cjs ci (both retention states, depth 4, I1-I4 and all named/attack classes); seal_checker.cjs (profile argument omitted; recorded non-CI complete bounded graph)"
+    },
+    {
+      "req": "REQ-D931-POOL-ADMISSION",
+      "risk": "RISK-EMR-POOL-STARVATION",
+      "test": "C22 TX-01 TX-02 M39 L03 L03b"
+    },
+    {
+      "req": "REQ-D931-API-OWNER",
+      "risk": "RISK-EMR-STALE-WRITER",
+      "test": "LOCK-01"
+    },
+    {
+      "req": "REQ-D931-BOUNDED-REPLAY",
+      "risk": "RISK-EMR-RECEIPT-DELAY",
+      "test": "C20 C23 PERF-ledger PERF-sustained"
     }
   ],
   "cases": {
@@ -372,6 +390,8 @@
         "C20 replay binds sealed DB bytes through the external seal before issuing any receipt",
         "C21 adjacent stream advances share durability barriers and recover together after each publication cut",
         "C19 committed receipt groups preserve every binding, ignore unrelated pending work and share durable publication; publication failure sends no receipt",
+        "C22 a four-connection pool admits 24 appends without holding queued head-lock connections ahead of a committed receipt",
+        "C23 a cold replay beyond the named verification cap refuses before acquiring a snapshot",
         "C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused"
       ]
     },
@@ -402,9 +422,9 @@
     }
   },
   "expected": {
-    "contract": 19,
+    "contract": 21,
     "live": 12,
-    "mutants": 35,
+    "mutants": 36,
     "profiles": 39,
     "measurements_suites": 20,
     "validate_jobs": 22,
@@ -653,7 +673,7 @@
       "kill": [
         "L03"
       ],
-      "behaviour": "per-operation Node startup returns to the head-locked writer; receipt latency exceeds round-3 plus 20 percent"
+      "behaviour": "per-operation Node startup returns to the head-locked writer; receipt p95 exceeds same-run round-3 (0 percent margin)"
     },
     {
       "id": "M37",
@@ -668,6 +688,13 @@
       "kill": [
         "C20"
       ]
+    },
+    {
+      "id": "M39",
+      "kill": [
+        "C22"
+      ],
+      "behaviour": "head-lock waiters consume every pool connection ahead of a committed receipt verification"
     }
   ],
   "candidate_cases": [
