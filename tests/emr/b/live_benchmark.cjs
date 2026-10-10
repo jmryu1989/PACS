@@ -44,7 +44,10 @@ async function run({ prisma, store, seal, sql, Sql, event }) {
           }
           results.push(...await Promise.all(pending));
         } else {
-          for (let n = 0; n < command.count; n++) results.push(await probe.run(event()));
+          for (let n = 0; n < command.count; n++) {
+            if (n && command.idle_ms) await pause(command.idle_ms);
+            results.push(await probe.run(event()));
+          }
         }
         await send({ command, results, summary: summary(results), drain_groups: probe.drains,
           elapsed_ms: performance.now() - started, tail: await sql.tail('viewing') });

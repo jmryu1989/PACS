@@ -29,13 +29,27 @@ function planVerdict(document) {
 
 async function check(prisma, Sql) {
   const captured = [], statements = [];
+  // Catalog enumeration includes future STABLE/IMMUTABLE reads. order_facts_for
+  // is the locked read: PostgreSQL classifies its advisory-lock body VOLATILE.
+  const functions = await prisma.$queryRawUnsafe(`SELECT p.oid::regprocedure::text AS signature, p.proconfig
+    FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+    WHERE n.nspname='emr_access' AND p.prokind='f'
+      AND (p.provolatile IN ('s','i') OR p.proname='order_facts_for') ORDER BY signature`);
+  assertFunctionSettings(functions);
   let latest;
   const recorder = { $queryRaw: (strings, ...values) => {
     const text = strings.reduce((s, part, n) => s + (n ? '$' + n : '') + part, '');
     captured.push({ text, values });
     return prisma.$queryRaw(strings, ...values);
   } };
-  const sql = new Sql(recorder), tail = await sql.tail('viewing');
+  const covered = new Set();
+  const sql = new Proxy(new Sql(recorder), { get(target, name, receiver) {
+    const value = Reflect.get(target, name, receiver);
+    if (typeof value !== 'function') return value;
+    return (...args) => { covered.add(name); return value.apply(receiver, args); };
+  } });
+  const tail = await sql.tail('viewing');
+  await sql.placement();
   for (const stream of ['viewing', 'history']) {
     const head = await sql.tail(stream);
     await sql.entriesAfter(stream, 0, 1000);
@@ -56,6 +70,11 @@ async function check(prisma, Sql) {
       captured.length = statementCount; // independent result oracle, not additional plan shapes
     }
   }
+  // Runtime prototype coverage, not a source-string assertion. New read methods
+  // must gain a real invocation here before a green guard is possible.
+  const exclusions = { constructor: 'construction', marker: 'row conversion; exercised by reads',
+    snapshot: 'transaction wrapper with writer advisory lock', withWriterFence: 'writer fence, not a read' };
+  assertPrototypeCoverage(Sql, covered, exclusions);
   // Keep all parameter shapes (one-row, full-page, empty stream). EXPLAIN uses
   // the runtime credential; these statements do not mutate the ledger.
   for (const [n, query] of captured.entries()) {
@@ -84,15 +103,32 @@ async function check(prisma, Sql) {
         const literal = value => typeof value === 'number' ? String(value) : "'" + String(value).replaceAll("'", "''") + "'";
         const name = 'emrb_plan_' + n;
         await tx.$executeRawUnsafe('PREPARE ' + name + ' AS ' + query.text);
+        let failure;
         try {
-          const document = await tx.$queryRawUnsafe('EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE ' + name + '(' + query.values.map(literal).join(',') + ')');
+          const parameters = query.values.length ? '(' + query.values.map(literal).join(',') + ')' : '';
+          const document = await tx.$queryRawUnsafe('EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE ' + name + parameters);
           rows.push({ mode, statement: query.text, values: query.values, plan: document[0]['QUERY PLAN'],
             ...planVerdict(document[0]['QUERY PLAN']) });
-        } finally { await tx.$executeRawUnsafe('DEALLOCATE ' + name); }
+        } catch (error) { failure = error; throw error; }
+        finally {
+          // An aborted transaction rejects DEALLOCATE too; preserve the original
+          // EXPLAIN error. The transaction rollback removes that PREPARE.
+          if (!failure) await tx.$executeRawUnsafe('DEALLOCATE ' + name);
+        }
       }
     }, { maxWait: 10000, timeout: 120000 });
   }
   return { guard: 'L03c verification_plan.cjs', cost_limit: VERIFICATION_PLAN_COST_LIMIT,
-    retained_rows: tail.sequence, result_equivalence: true, comparison, statements: rows };
+    retained_rows: tail.sequence, result_equivalence: true, comparison, statements: rows,
+    jit_off_functions: functions.map(f => f.signature), prototype_coverage: [...covered], exclusions };
 }
-module.exports = { check, planVerdict, VERIFICATION_PLAN_COST_LIMIT };
+function assertFunctionSettings(functions) {
+  assert(functions.length > 0, 'emr_access read functions must exist');
+  for (const fn of functions) assert(fn.proconfig?.includes('jit=off'), `nested JIT must be off: ${fn.signature}`);
+}
+function assertPrototypeCoverage(Sql, covered, exclusions) {
+  for (const name of Object.getOwnPropertyNames(Sql.prototype)) {
+    assert(covered.has(name) || Object.hasOwn(exclusions, name), `uncovered SQL method: ${name}`);
+  }
+}
+module.exports = { check, planVerdict, assertFunctionSettings, assertPrototypeCoverage, VERIFICATION_PLAN_COST_LIMIT };

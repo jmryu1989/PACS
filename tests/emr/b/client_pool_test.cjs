@@ -44,6 +44,20 @@ test('PLAN-01 the guard rejects either JIT or excess cost independently', () => 
   assert.throws(() => planVerdict([{ Plan: { 'Total Cost': 35 }, JIT: { Functions: 17 } }]), /JIT/);
   assert.throws(() => planVerdict([{ Plan: { 'Total Cost': VERIFICATION_PLAN_COST_LIMIT + 1 } }]), /cost/);
 });
+test('PLAN-02 every catalog read needs local jit=off, including an added read', () => {
+  const { assertFunctionSettings } = require('./verification_plan.cjs');
+  assertFunctionSettings([{ signature: 'emr_access.read(text)', proconfig: ['search_path=pg_catalog', 'jit=off'] }]);
+  for (const proconfig of [null, ['jit=on'], ['search_path=pg_catalog']]) {
+    assert.throws(() => assertFunctionSettings([{ signature: 'emr_access.new_read()', proconfig }]), /nested JIT/);
+  }
+  assert.throws(() => assertFunctionSettings([]), /must exist/);
+});
+test('PLAN-03 prototype coverage fails closed when a read is added', () => {
+  const { assertPrototypeCoverage } = require('./verification_plan.cjs');
+  class Reads { first() {} second() {} }
+  assert.throws(() => assertPrototypeCoverage(Reads, new Set(['first']), { constructor: 'construction' }), /uncovered SQL method/);
+  assertPrototypeCoverage(Reads, new Set(['first', 'second']), { constructor: 'construction' });
+});
 test('TIMING-01 repeated warm blocks add exactly one head probe per request', async () => {
   const { instrument } = require('./throughput.cjs');
   let probes = 0, appends = 0;
