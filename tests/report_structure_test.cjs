@@ -14,7 +14,12 @@
 // mapping is pinned here on a synthesized error so a rename or a broadened catch is caught early.
 const test = require('node:test'), assert = require('node:assert/strict');
 const crypto = require('node:crypto');
-const { PacsService } = require('/app/dist/pacs.service');
+// S9-U0b: the report concerns behind PacsService (api/src/pacs/), each holding its part of the moved implementation.
+const { PacsAccess } = require('/app/dist/pacs/access');
+const { PacsAudit } = require('/app/dist/pacs/audit');
+const { PacsReportEvidence } = require('/app/dist/pacs/report-evidence');
+const { PacsReportDraft } = require('/app/dist/pacs/report-draft');
+const { PacsReportCommit } = require('/app/dist/pacs/report-commit');
 const structure = require('/app/dist/report-structure');
 const { Prisma } = require('/app/node_modules/@prisma/client');
 const vectors = require('/tests/report_structure_vectors.json');
@@ -109,10 +114,18 @@ function fixture({ state = STATE,
   };
   const studyAccess = { prepare: async () => {}, require: async () => {}, allowed: async () => new Set() };
   const findings = { readableFindings: async () => [] };
-  const svc = new PacsService(prisma, {}, { usersInGroupWithRole: async () => [] }, studyAccess, findings);
+  // S9-U0b: the catalog seam (P7) lives on the report evidence concern. The write paths and the read are the report
+  // concerns PacsService forwards these four calls to, composed here as the facade composes them, over this fixture's store.
+  const access = new PacsAccess(prisma, studyAccess), audit = new PacsAudit(prisma, studyAccess, access);
+  const evidence = new PacsReportEvidence(prisma, studyAccess, findings, access);
+  const drafts_ = new PacsReportDraft(prisma, studyAccess, access, audit, evidence);
+  const commit = new PacsReportCommit({ usersInGroupWithRole: async () => [] }, studyAccess, evidence, drafts_);
   // P7: the ONLY injection seam. No env var, no header, no route - a test overwrites the field on
   // its own instance, and the product instance keeps the empty constant.
-  svc.structureCatalog = catalog;
+  evidence.structureCatalog = catalog;
+  const svc = { putReport: (...a) => drafts_.putReport(...a), commitReport: (...a) => commit.commitReport(...a),
+    forceDiscardDrafts: (...a) => drafts_.forceDiscardDrafts(...a), reportStructure: (...a) => evidence.reportStructure(...a),
+    get structureCatalog() { return evidence.structureCatalog; }, set structureCatalog(next) { evidence.structureCatalog = next; } };
   // The document that read this fixture's study: every mutation carries its account and the boundary it read, and a
   // draft PUT the whole snapshot - a keep list the case does not name is the draft's current list (nothing dropped).
   const pre = c => ({ expectedOwner: { institution: c.institution, sub: c.sub, author: c.actor }, expectedRevision: `${EPOCH}:${row?.revision ?? 0}` });
@@ -514,9 +527,8 @@ test('the injection seam validates BEFORE it replaces, so a refused catalog chan
    * "non-empty" check would pass even while an injected catalog leaked across instances. What the
    * shipped constant actually IS stays pinned independently, by canonical hash, in the next test.
    */
-  const untouched = new PacsService({}, {}, { usersInGroupWithRole: async () => [] },
-    { prepare: async () => {}, require: async () => {}, allowed: async () => new Set() },
-    { readableFindings: async () => [] });
+  const stubAccess = { prepare: async () => {}, require: async () => {}, allowed: async () => new Set() };
+  const untouched = new PacsReportEvidence({}, stubAccess, { readableFindings: async () => [] }, new PacsAccess({}, stubAccess));
   assert.deepEqual([...untouched.structureCatalog], [...structure.STRUCTURE_CATALOG],
     'an untouched instance must still hold the shipped catalog, not an injected one');
 });
