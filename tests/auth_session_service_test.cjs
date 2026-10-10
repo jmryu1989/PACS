@@ -4925,11 +4925,17 @@ test('CORE_R9_IDENTITY_FORWARD: an older pre-read loses CAS and cannot rewind a 
 
 test('CORE_COMMAND_DB_CLOCK rights boundary uses transaction DB time despite application clock skew',async t=>{
   const w=await world(t),m='syn-db-clock',{admin}=await coreMember(w,m);w.realDatabaseClock=true;let dbTime;
-  w.observe({inst:'I1',model:'$transaction',phase:'started'},async e=>{dbTime=(await e.client.$queryRaw`SELECT now() AS boundary`)[0].boundary;});
-  if(realPG())w.tick(7*24*HOUR);
+  const appClockSkew=7*24*HOUR;
+  w.observe({inst:'I1',model:'$transaction',phase:'started'},async e=>{
+    dbTime=(await e.client.$queryRaw`SELECT now() AS boundary`)[0].boundary;
+    // Anchor the skew to this transaction, not START: wall time can coincide with START + seven days.
+    // setTime changes Date without firing the hourly sweep while this transaction is open.
+    if(realPG())t.mock.timers.setTime(dbTime.getTime()+appClockSkew);
+  });
   assert.equal((await r10Patch(admin,m,{enabled:false})).status,200);
   const row=await w.base.memberRights.findUnique({where:{sub:m}});assert.equal(row.newAuthAfter.getTime(),dbTime.getTime());
   if(realPG())assert.ok(Math.abs(row.newAuthAfter.getTime()-Date.now())>HOUR,'database and application clocks were independently exercised');
+  if(realPG())assert.equal(Date.now()-dbTime.getTime(),appClockSkew,'application clock has the fixed skew from the transaction boundary');
   await w.finish('CORE_COMMAND_DB_CLOCK');
 });
 
