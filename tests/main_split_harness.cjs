@@ -375,16 +375,17 @@ function mutantLayout(page, id, outDir) {
 
 function splitMutant(page, id, outDir) {
   const dir = outsideProduct(outDir);
-  if (id === 'S2-M06') {
+  if (id === 'S2-M06' || id === 'S3-M06') {
     fs.mkdirSync(dir, { recursive: true });
     const source = path.join(dir, 'input.html'), spec = path.join(dir, 'derived-spec.json');
-    fs.writeFileSync(source, preMutant(page, 'M37'));
+    fs.writeFileSync(source, preMutant(page, id === 'S3-M06' ? 'M36' : 'M37'));
     fs.writeFileSync(spec, JSON.stringify(deriveSpec(source)));
-    const destination = path.join(dir, 'actual30');
-    const manifest = split(30, destination, { page: source, spec });
+    const count = id === 'S3-M06' ? 45 : 30;
+    const destination = path.join(dir, 'actual' + count);
+    const manifest = split(count, destination, { page: source, spec });
     return { id, page: path.join(destination, 'main.html'), spec, manifest };
   }
-  const count = id.startsWith('S2-') ? 30 : Math.max(18, readPage(page).files.length);
+  const count = id.startsWith('S1-') ? 18 : id.startsWith('S2-') ? 30 : 45;
   const manifest = split(count, dir, { page });
   const target = path.join(dir, 'main.html');
   let html = fs.readFileSync(target, 'utf8');
@@ -428,6 +429,24 @@ function splitMutant(page, id, outDir) {
     if (node.name !== 'ExpressionStatement after move #2') throw new Error('S2-M04: final move registration missing');
     const inline = scripts(html).find(t => !t.src), at = inline.start + '<script>'.length;
     html = html.slice(0, at) + body.slice(node.start) + html.slice(at);
+  } else if (id === 'S3-M01') {
+    const file = path.join(dir, 'viewer-placement.js'), body = fs.readFileSync(file, 'utf8');
+    const nodes = statements(body);
+    if (nodes[0].name !== 'OHIF_RECT_KEY') throw new Error('S3-M01: first declaration missing');
+    fs.writeFileSync(file, body.slice(nodes[1].start));
+  } else if (id === 'S3-M02') {
+    const first = '<script src="worklist-controls.js"></script>', next = '<script src="saved-filters.js"></script>';
+    if (!html.includes(first + '\n  ' + next)) throw new Error('S3-M02: adjacent tags missing');
+    html = html.replace(first + '\n  ' + next, next + '\n  ' + first);
+  } else if (id === 'S3-M03') {
+    html = html.replace('<script src="page-boot.js"></script>', '<script src="page-boot.js"></script>\n  <script>boot();</script>');
+  } else if (id === 'S3-M04') {
+    html = html.replace('<script src="page-boot.js">', '<script async src="page-boot.js">');
+  } else if (id === 'S3-M05') {
+    // The faulty source helper sees zero inline scripts and loses all external statements.
+    const helper = path.join(dir, 'empty-projection.cjs');
+    fs.writeFileSync(helper, 'exports.readPageSource = () => "";\n');
+    return { id, page: target, manifest, helper };
   } else if (id !== 'BASELINE') throw new Error('Unknown byte mutant ' + id);
   fs.writeFileSync(target, html);
   return { id, page: target, manifest };

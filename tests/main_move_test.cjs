@@ -107,9 +107,16 @@ test('S1 candidate byte contract', () => {
   verify(before, process.env.KIN_SPLIT_BYTE_PAGE || page);
 });
 
+test('C5 complete source projection', () => {
+  const helper = process.env.KIN_SPLIT_PROJECTION_HELPER || './page_source.cjs';
+  const source = require(helper).readPageSource(process.env.KIN_SPLIT_BYTE_PAGE || page);
+  assert.equal(source, before, 'C5 all 661 statements are reconstructed when no inline script remains');
+});
+
 for (const [id, reason] of [['S1-M01', /Moved bytes/], ['S1-M02', /ENOENT/], ['S1-M03', /No dropped/],
   ['S1-M04', /load order/], ['S1-M05', /ordinary blocking classic/],
-  ['S2-M01', /Moved bytes/], ['S2-M02', /load order/], ['S2-M03', /Moved bytes/], ['S2-M04', /No dropped/]]) {
+  ['S2-M01', /Moved bytes/], ['S2-M02', /load order/], ['S2-M03', /Moved bytes/], ['S2-M04', /No dropped/],
+  ['S3-M01', /Moved bytes/], ['S3-M02', /load order/], ['S3-M03', /No dropped/], ['S3-M04', /ordinary blocking classic/]]) {
   test(`C1 rejects ${id}`, t => {
     const dir = scratch(t, 'u0a-part1-mutant-');
     const source = path.join(dir, 'main.html'); fs.writeFileSync(source, before);

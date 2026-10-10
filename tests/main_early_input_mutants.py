@@ -242,6 +242,45 @@ PART2_MUTANTS = [
 S2_EXEC = [{"id": "S2-M06", "case": "Registration.test_a_report_field_input_reaches_its_listeners_in_the_original_order",
             "expect": "the (target, event, listener) invocation order of one focus/keypress"}]
 
+S3_BYTE = [
+    {"id":"S3-M01","expect":"Moved bytes: viewer-placement.js"},
+    {"id":"S3-M02","expect":"Moved script load order differs"},
+    {"id":"S3-M03","expect":"No dropped, duplicated, reordered or changed statement/trivia"},
+    {"id":"S3-M04","expect":"Moved files must use ordinary blocking classic script tags"},
+    {"id":"S3-M05","expect":"C5 all 661 statements are reconstructed","oracle":"C5"},
+]
+S3_EXEC = [{"id":"S3-M06","case":"Registration.test_after_retry_one_quick_match_change_has_one_effect",
+            "expect":"the listeners one Quick Match change reaches after Retry"}]
+PART3_MUTANTS = [
+    {"id":"S3-M07","case":"ActualLayout.test_actual_part3_boot_response_is_complete",
+     "expect":"actual page-boot.js response must arrive","file":HARNESS,
+     "old":'    def _fulfill(self, route, name):\n        body = self.body(name)',
+     "new":'    def _fulfill(self, route, name):\n        if name == "page-boot.js" and self.manifest.get("kind") == "actual":\n            return route.abort("failed")\n        body = self.body(name)'},
+]
+PERMISSION_MUTANTS = [
+    {"id":"PERM-M01","case":"PermissionBoundary.test_change_is_available_immediately_and_twice",
+     "expect":"initial permission change handler exists","file":PAGE_FILE,
+     "old":"monitorPermission.onchange = () => {","new":"const discardedPermissionHandler = () => {"},
+    {"id":"PERM-M02","case":"PermissionBoundary.test_change_is_available_immediately_and_twice",
+     "expect":"initial permission change handler exists","file":PAGE_FILE,
+     "old":"monitorPermission.onchange = () => {",
+     "new":"(await navigator.permissions.query({ name: 'window-management' })).onchange = () => {"},
+    {"id":"PERM-M03","case":"PermissionBoundary.test_change_is_available_immediately_and_twice",
+     "expect":"initial permission change handler exists","file":PAGE_FILE,
+     "old":"monitorPermission.onchange = () => {",
+     "new":"await new Promise(resolve => setTimeout(resolve, 100)); monitorPermission.onchange = () => {"},
+    {"id":"PERM-M04","case":"PermissionBoundary.test_revoke_keeps_saved_position_without_old_screen_clamping",
+     "expect":"revoked permission cannot clamp popup to old screens","file":PAGE_FILE,
+     "old":'return monitorPermission?.state === "granted" ||',"new":"return !!monitorPermission ||"},
+    {"id":"PERM-M05","case":"PermissionBoundary.test_screenschange_updates_the_requested_popup_position",
+     "expect":"screenschange updates actual popup placement request","file":PAGE_FILE,
+     "old":"details.onscreenschange = refresh;","new":"void refresh;"},
+    {"id":"PERM-M06","case":"PermissionBoundary.test_replacement_releases_old_details_and_late_events_do_not_move_popup",
+     "expect":"old details late event cannot corrupt latest popup placement","file":PAGE_FILE,
+     "old":"if (monitorDetails && monitorDetails !== details) monitorDetails.onscreenschange = null;",
+     "new":"if (monitorDetails && monitorDetails !== details) { /* mutant keeps old handler */ }"},
+]
+
 
 def source_hashes():
     files = [*PAGE.parent.glob("*.js"), *PAGE.parent.glob("*.html"), PAGE, HELPER, DOM_TEST,
@@ -340,9 +379,9 @@ def failure_block(output, case):
 
 def prepare(scratch, mutant):
     """The mutant page and, for a declaration mutant, the boundary case bound to its delivered 45-part layout."""
-    if mutant["id"] == "S2-M06":
+    if mutant["id"] in ("S2-M06", "S3-M06"):
         layout = node("split-mutant", PAGE, mutant["id"], scratch / mutant["id"])
-        return dict(mutant, page=layout["page"], spec=layout["spec"], layout={"count": 30, "kind": "actual"})
+        return dict(mutant, page=layout["page"], spec=layout["spec"], layout={"count": layout["manifest"]["count"], "kind": "actual"})
     layout = node("mutant-layout", PAGE, mutant["id"], scratch / mutant["id"])
     mutant = dict(mutant, page=layout["page"], spec=layout["spec"], restored=layout["restored"])
     if "hazard" in mutant:
@@ -387,13 +426,14 @@ def main():
     parser.add_argument("--timeout", type=int, default=600, help="Seconds per child run")
     parser.add_argument("--jobs", type=int, default=2, help="Mutant children at a time")
     parser.add_argument("--anchors-only", action="store_true", help="Write every mutant and its layout (no browser) and stop")
-    parser.add_argument("only", nargs="*", help="Mutant ids (default: all 75 PRE/F2/F3/S1/H178/S2 ids)")
+    parser.add_argument("only", nargs="*", help="Mutant ids (default: all 88 PRE/F2/F3/S1/H178/S2/S3/PERM ids)")
     args = parser.parse_args()
     os.environ["KIN_PRE_MUTANT_EVIDENCE"] = str(pathlib.Path(args.out).resolve().parent / "mutant-children"
         if args.out else pathlib.Path(tempfile.mkdtemp(prefix="kin-pre-mutant-evidence-")))
-    selected = [m for m in MUTANTS + S2_EXEC if not args.only or m["id"] in args.only]
-    selected_f2 = [m for m in F2_MUTANTS + F3_MUTANTS + PART1_MUTANTS + PART2_MUTANTS if not args.only or m["id"] in args.only]
-    selected_byte = [m for m in S1_BYTE + S2_BYTE if not args.only or m["id"] in args.only]
+    selected = [m for m in MUTANTS + S2_EXEC + S3_EXEC if not args.only or m["id"] in args.only]
+    selected_f2 = [m for m in F2_MUTANTS + F3_MUTANTS + PART1_MUTANTS + PART2_MUTANTS + PART3_MUTANTS + PERMISSION_MUTANTS
+                   if not args.only or m["id"] in args.only]
+    selected_byte = [m for m in S1_BYTE + S2_BYTE + S3_BYTE if not args.only or m["id"] in args.only]
     inputs_before = source_hashes()
     before = hashlib.sha256(PAGE.read_bytes()).hexdigest()
     print("%s sha256 %s" % (PAGE.name, before))
@@ -453,7 +493,11 @@ def main():
             for mutant in [{"id": "BYTE-BASELINE"}, *selected_byte]:
                 target = byte_baseline["page"] if mutant["id"] == "BYTE-BASELINE" else byte_pages[mutant["id"]]["page"]
                 environment = dict(os.environ, KIN_SPLIT_BYTE_PAGE=target)
-                command = ["node", "--test", "--test-name-pattern=S1 candidate byte contract", str(ROOT / "tests/main_move_test.cjs")]
+                oracle=mutant.get("oracle","C1")
+                name="C5 complete source projection" if oracle=="C5" else "S1 candidate byte contract"
+                if oracle=="C5":
+                    environment["KIN_SPLIT_PROJECTION_HELPER"]=byte_pages[mutant["id"]]["helper"]
+                command = ["node", "--test", "--test-name-pattern="+name, str(ROOT / "tests/main_move_test.cjs")]
                 done = subprocess.run(command, cwd=ROOT, env=environment, capture_output=True, text=True, encoding="utf-8", errors="replace")
                 output = done.stdout + done.stderr
                 evidence = pathlib.Path(os.environ["KIN_PRE_MUTANT_EVIDENCE"]) / mutant["id"]
@@ -465,8 +509,8 @@ def main():
                     if done.returncode:
                         raise AssertionError("byte baseline must pass before mutation results: " + output[-1500:])
                     continue
-                killed = done.returncode != 0 and mutant["expect"] in output and "S1 candidate byte contract" in output
-                row = {"id": mutant["id"], "oracle": "C1", "child_exit": done.returncode, "killed": killed,
+                killed = done.returncode != 0 and mutant["expect"] in output and name in output
+                row = {"id": mutant["id"], "oracle": oracle, "child_exit": done.returncode, "killed": killed,
                        "expect_matched": mutant["expect"] if killed else "", "inputs": hashes}
                 results.append(row)
                 (evidence / "run.json").write_text(json.dumps(row, indent=2), encoding="utf-8")

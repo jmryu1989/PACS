@@ -374,7 +374,7 @@ class Run:
 
     def __init__(self, case, layout, hold=None, delay_ms=0, auth="answer", filters=(), local_filters=False,
                  dictation=False, second_study=False, init_scripts=(), permissions=(), cache_headers=True, templates=(),
-                 deterministic=False, rows=None, dialogs=(), cookies=()):
+                 deterministic=False, rows=None, dialogs=(), cookies=(), permission_fixture=None):
         self.case, (directory, self.manifest) = case, layout
         # The ORIGINAL page also gets the baseline's own versions of the page's other scripts.
         self.source_side = self.manifest.get("side", "current")
@@ -400,7 +400,8 @@ class Run:
             self.context.add_cookies([{"name": name, "value": value, "url": h.ORIGIN} for name, value in cookies])
         if permissions:
             self.context.grant_permissions(list(permissions), origin=h.ORIGIN)
-        self.context.add_init_script(sh.TRACE_SCRIPT)
+        # A single init script fixes fixture-before-probe ordering; Playwright does not order separate init scripts.
+        self.context.add_init_script((permission_fixture or "") + "\n" + sh.TRACE_SCRIPT)
         if deterministic:
             self.context.add_init_script(sh.LEDGER_SCRIPT)
         self.context.add_init_script(TOAST_RECORDER)
@@ -410,6 +411,9 @@ class Run:
         for script in init_scripts:
             self.context.add_init_script(script)
         self.context.route("**/*", lambda route, request: self.site.handle(route, request))
+        self.permission_load = []
+        if permission_fixture:
+            self.context.route("**/permission-load-barrier", lambda route: self.permission_load.append(route))
         self.context.route(PROBE_URL, lambda route: route.fulfill(body="<!doctype html><title>SYN elsewhere</title>",
                                                                   content_type="text/html; charset=utf-8"))
         self.delivery = sh.Delivery(directory, self.manifest, h.BASE, delay_ms=delay_ms, hold=hold, others=others,
@@ -1033,7 +1037,11 @@ class PreCase(unittest.TestCase):
             comparison = {"phase": name}
             try:
                 orders = (sh.full_order(a, original_provenance), sh.full_order(b, candidate_provenance))
-                comparison.update(registrations=[len(o) for o in orders], difference=sh.order_difference(*orders))
+                names = {name: i for i, entry in enumerate(json.loads(
+                    (ROOT / "tests/main_split_harness_fixture.json").read_text(encoding="utf-8"))["statements"])
+                         if isinstance(entry, list) for name in entry}
+                comparison.update(registrations=[len(o) for o in orders], **sh.registration_comparison(
+                    *orders, (names["initMonitorPermission"], names["cacheMonitorScreens"])))
                 if dispatches:
                     sent = (sh.dispatch_order(a, original_provenance),
                             sh.dispatch_order(b, candidate_provenance))
@@ -1049,6 +1057,7 @@ class PreCase(unittest.TestCase):
                 self.assertTrue((base / name / f"{side}.raw.json").is_file(),
                                 f"{what} {name}: actual raw kept before comparison ({side})")
             self.assertEqual([], comparison["difference"], f"{what} {name}: every registration in order")
+            self.assertEqual([], comparison["per_key_difference"], f"{what} {name}: strict same-target history")
             if dispatches:
                 self.assertEqual([], comparison["dispatch_difference"], f"{what} {name}: every dispatch in order")
             self.assertEqual(*comparison["requests"], f"{what} {name}: the same requests in the same order")
@@ -1279,6 +1288,18 @@ PROBE_PAGE = "<!doctype html><title>SYN trace</title><body><div id=static-a></di
 class ActualLayout(PreCase):
     both = Registration.both
 
+    def test_generated_layout_matrix_registration_dispatch(self):
+        for count in (0,18,30,45):
+            for delay in (0,150):
+                with self.subTest(count=count,delay=delay):
+                    base,(before,_,before_errors),(after,_,errors)=self.both(
+                        "generated-C3","answered",reference="approved",count=count,delay_ms=delay)
+                    self.assertEqual([],before_errors)
+                    self.assertEqual([],errors)
+                    self.compare_phases(base,before,after,"generated layout to approved inline",dispatches=True)
+                    for phase in before:
+                        self.assertEqual(before[phase]["screen"],after[phase]["screen"])
+
     def test_approved_pre_and_actual_layout_keep_registration_dispatch_and_schedule(self):
         for delay in (0, 150):
             for outcome in Registration.OUTCOMES:
@@ -1360,6 +1381,377 @@ class ActualLayout(PreCase):
                              "actual report-draft-save.js response must arrive")
             self.assertEqual([], failures, "actual script requests must succeed")
             self.assertEqual([], run.errors, "actual scripts execute without errors")
+        finally:
+            run.close()
+
+
+    def test_other_async_initializations_start_after_the_final_file(self):
+        run=Run(self,Pages.layout("current","actual"),hold="page-boot.js",deterministic=True)
+        try:
+            run.blocked()
+            self.assertEqual([],run.site.ledger,"no boot request before the final file executes")
+            before=run.steps.raw("before-final-file")
+            run.delivery.release()
+            run.steps.drive(lambda:rows_show(run) and inbox_received(run),"eight startup flow judgement",30000)
+            raw=run.steps.raw("after-boot")
+            fetches=raw["ledger"]["fetches"]
+            paths=[r["path"] for r in fetches]
+            required={"auth":"/api/me","appearance":"/api/reading-appearance",
+                      "preferences":"/api/reading-preferences","roaming":"/api/workspace-layout",
+                      "bootstrap":"/api/bootstrap","actor-names":"/api/colleagues","list":"/api/studies"}
+            judged=[{"flow":"initial granted ScreenDetails","boundary":"31 onward",
+                     "proof":"PermissionBoundary granted/reject/late/replacement/screenschange/revoke placement cases"}]
+            for flow,path in required.items():
+                self.assertIn(path,paths,flow+": startup flow actually reached")
+                request=next(r for r in fetches if r["path"]==path)
+                self.assertEqual("read",request["body"],flow+": response consumed")
+                judged.append({"flow":flow,"request":request,"boundary":"final file boot; no following split script"})
+            for flow,file in (("appearance","reading-appearance-account.js"),("preferences","reading-preferences.js"),
+                              ("roaming","workspace-roaming.js")):
+                request=next(r for r in fetches if r["path"]==required[flow])
+                registrations=[r for r in raw["trace"]["registrations"] if r["frames"] and r["frames"][0][0]==file]
+                self.assertTrue(registrations,flow+": native handlers actually registered")
+                self.assertTrue(all(r["seq"]<request["traceSequence"] for r in registrations),
+                                flow+": handlers precede async inspect and do not re-register after its answer")
+            self.assertLess(paths.index('/api/bootstrap'),paths.index('/api/colleagues'))
+            self.assertLess(paths.index('/api/colleagues'),paths.index('/api/studies'))
+            self.assertEqual(8,len(judged))
+            self.assertEqual([],run.errors)
+            sh.keep(ARTIFACTS/'async-startup','judgement.json',{"before":before,"after":raw,"flows":judged,
+                "other_triggers":"autosave/own-work timers, observers, watches and session details remain under PRE gaps/BFCache; no registration exemption"})
+        finally:
+            run.close()
+
+    def test_actual_part3_boot_response_is_complete(self):
+        layout=Pages.current.layout("actual")
+        self.assertIn("page-boot.js",layout[1]["parts"],"PRECONDITION actual part 3 asset")
+        run=Run(self,layout,hold="page-boot.js")
+        responses=[]
+        run.page.on("response",lambda response:responses.append((urlparse(response.url).path,response.status)))
+        try:
+            run.blocked()
+            run.delivery.release()
+            run.wait("document.readyState==='complete'","actual boot resource load completes")
+            sh.keep(ARTIFACTS/"part3-assets","actual.raw.json",{"responses":responses,"trace":run.trace(),
+                      "delivered":run.delivery.bodies,"manifest":layout[1],"errors":run.errors})
+            self.assertEqual([200],[status for path,status in responses if path.endswith('/page-boot.js')],
+                             "actual page-boot.js response must arrive")
+            run.booted()
+            self.assertEqual([],run.errors)
+        finally:
+            run.close()
+
+
+# REQ-S9-U0a-PRE-ORDER -> RISK-S9-U0a-PERMISSION-GAP -> TEST-S9-U0a-PERMISSION-GAP/IDENTITY.
+# These objects use native EventTarget delivery and native Promises, but emulate the OS permission/screen API.
+# They prove task-gap behaviour, not a physical monitor/OS permission implementation. The native smoke is separate.
+PERMISSION_FIXTURE = r"""(() => {
+  // Hold load/pageshow on BOTH sides while exercising pre-load input. Otherwise an unsplit page's native
+  // pageshow precedes the injected change while a held parser's pageshow follows it: different input schedules.
+  const loadBarrier = new Image(); loadBarrier.src = location.origin + '/permission-load-barrier';
+  const NativeTarget = EventTarget, add = EventTarget.prototype.addEventListener;
+  const remove = EventTarget.prototype.removeEventListener;
+  const log = [], queries = [], detailsRequests = [], statuses = [], details = [], opened = [];
+  const note = (kind, data = {}) => log.push({kind, ...data, executed: [...(window.__kinTrace?.executed || [])]});
+  function property(proto, name, type) {
+    const slots = new WeakMap();
+    Object.defineProperty(proto, name, {configurable:true, get() { return slots.get(this)?.value || null; },
+      set(value) {
+        let slot = slots.get(this);
+        if (!slot) { slot = {value:null, wrapper:e => slot.value?.call(this,e)}; slots.set(this,slot); }
+        if (typeof value === 'function' && !slot.value) add.call(this,type,slot.wrapper);
+        if (typeof value !== 'function' && slot.value) remove.call(this,type,slot.wrapper);
+        slot.value = typeof value === 'function' ? value : null;
+        note(name, {id:this.id, active:!!slot.value});
+      }});
+  }
+  class Status extends NativeTarget { constructor(id,state) { super(); this.id=id; this.state=state; } }
+  class Details extends NativeTarget { constructor(id,screens) { super(); this.id=id; this.screens=screens; this.currentScreen=screens[0]; } }
+  property(Status.prototype,'onchange','change'); property(Details.prototype,'onscreenschange','screenschange');
+  Object.defineProperty(window,'PermissionStatus',{configurable:true,value:Status});
+  Object.defineProperty(window,'ScreenDetails',{configurable:true,value:Details});
+  Permissions.prototype.query = function(descriptor) {
+    note('query',{descriptor, index:queries.length});
+    return new Promise((resolve,reject)=>{
+      const index=queries.length; queries.push({resolve,reject});
+      if (index) { const status=new Status(index,statuses[0]?.state || 'prompt'); statuses[index]=status; resolve(status); }
+    });
+  };
+  window.getScreenDetails = function() {
+    note('details-request',{index:detailsRequests.length});
+    return new Promise((resolve,reject)=>detailsRequests.push({resolve,reject}));
+  };
+  Object.defineProperty(screen,'isExtended',{configurable:true,value:true});
+  // Observe the real product's popup request; a blocked popup avoids starting an OHIF application in this fixture.
+  window.open = function(url,name,features) { opened.push({url,name,features}); note('popup',{features}); return null; };
+  const screens = left => [{availLeft:left,availTop:0,availWidth:1600,availHeight:1000}];
+  window.__permission = {
+    log,queries,detailsRequests,statuses,details,opened,
+    resolveQuery(index,state) { const status=new Status(index,state); statuses[index]=status; note('query-resolve',{index,state}); queries[index].resolve(status); },
+    rejectQuery(index,name) { note('query-reject',{index,name}); queries[index].reject(name==='TypeError'?new TypeError('synthetic query'):new DOMException('synthetic query',name)); },
+    resolveDetails(index,left=0) { const value=new Details(index,screens(left)); details[index]=value; note('details-resolve',{index,left}); detailsRequests[index].resolve(value); },
+    rejectDetails(index) { note('details-reject',{index}); detailsRequests[index].reject(new DOMException('synthetic details','NotAllowedError')); },
+    change(index,state) { statuses[index].state=state; note('change',{index,state}); statuses[index].dispatchEvent(new Event('change')); },
+    screens(index,left) { details[index].screens=screens(left); note('screenschange',{index,left}); details[index].dispatchEvent(new Event('screenschange')); },
+    state() { return {log,queries:queries.length,detailsRequests:detailsRequests.length,opened,
+      visible:getComputedStyle(document.getElementById('b-monitor')).display!=='none',
+      permissionHandlers:statuses.map(s=>!!s.onchange), screenHandlers:details.map(d=>!!d.onscreenschange)}; }
+  };
+})();"""
+
+
+class PermissionBoundary(PreCase):
+    HOLDS = ("viewer-launch.js", "feature-mounts.js", "session-end.js", None)
+
+    def start(self, side="current", hold="viewer-launch.js", unsupported=False, count=None):
+        layout = Pages.layout(side, count if count is not None else "actual" if side in ("current", "previous") else 0)
+        boundary = hold if hold in layout[1]["parts"] else None
+        fixture = PERMISSION_FIXTURE + ("\nwindow.getScreenDetails=undefined;" if unsupported else "")
+        run = Run(self, layout, hold=boundary, deterministic=True, permission_fixture=fixture)
+        if boundary:
+            run.blocked()
+            self.assertNotIn(boundary, run.page.evaluate("window.__kinTrace.executed"), "PRECONDITION held file unexecuted")
+        else:
+            run.steps.drive(lambda: any(q["path"] == "/api/me" for q in run.site.ledger),
+                            "permission auth wait", 10000, holds=(ME_KEY,), delivery_only=True)
+        if not unsupported:
+            run.wait("window.__permission.queries.length === 1", "first permission query")
+        return run
+
+    def state(self, run):
+        return run.page.evaluate("window.__permission.state()")
+
+    def query(self, run, state):
+        if state in ("TypeError", "NotAllowedError"):
+            run.page.evaluate("name => window.__permission.rejectQuery(0,name)", state)
+        else:
+            run.page.evaluate("state => window.__permission.resolveQuery(0,state)", state)
+        # The microtask checkpoint must install the product handler before the next synthetic change.
+        run.page.evaluate("() => Promise.resolve()")
+
+    def finish(self, run, phase="permission"):
+        run.delivery.release()
+        run.steps.drive(lambda: any(q["path"] == "/api/me" for q in run.site.ledger),
+                        "permission files complete", 10000, holds=(ME_KEY,), delivery_only=True)
+        for route in run.permission_load:
+            route.fulfill(status=200, content_type="image/svg+xml", body='<svg xmlns="http://www.w3.org/2000/svg"/>')
+        run.permission_load.clear()
+        run.wait("document.readyState==='complete'", "permission native load completes")
+        raw = run.steps.raw(phase)
+        raw["permission"] = self.state(run)
+        raw["delivered"] = list(run.delivery.bodies)
+        return raw
+
+    def compare(self, label, action, hold="viewer-launch.js", reference="approved", reference_count=None):
+        base = ARTIFACTS / "permission" / label / reference / str(hold)
+        values, raws = [], []
+        for side, key in ((reference,"original"),("current","candidate")):
+            run = self.start(side, hold, count=reference_count if key=="original" else None)
+            try:
+                values.append(action(run))
+                raw = self.finish(run)
+                sh.keep(base / "permission", key+".raw.json", raw)
+                raws.append(raw)
+            finally:
+                # Failed assertions keep their actual event/delivery history too.
+                sh.keep(base, key+".boundary.json", {"state":self.state(run),"trace":run.trace(),
+                                                     "delivered":run.delivery.bodies,"errors":run.errors})
+                run.close()
+        self.assertEqual(values[0], values[1], label+": same user outcome")
+        self.compare_phases(base,{"permission":raws[0]},{"permission":raws[1]},label,dispatches=True)
+        self.assertEqual([],raws[1]["errors"],label+": no page errors")
+
+    def test_query_outcomes_at_every_permission_boundary(self):
+        for hold in self.HOLDS:
+            for status in ("prompt","denied","TypeError","NotAllowedError"):
+                with self.subTest(hold=hold,status=status):
+                    def action(run):
+                        self.query(run,status)
+                        state=self.state(run)
+                        self.assertEqual(status in ("prompt","TypeError"),state["visible"],"permission button follows query outcome")
+                        self.assertEqual(1,state["queries"])
+                        self.assertEqual(0,state["detailsRequests"])
+                        if status not in ("TypeError","NotAllowedError"):
+                            self.assertEqual([True],state["permissionHandlers"],"initial permission change handler exists")
+                        return {k:state[k] for k in ("visible","queries","detailsRequests","permissionHandlers")}
+                    self.compare("query-"+status,action,hold)
+
+    def test_change_is_available_immediately_and_twice(self):
+        def action(run):
+            self.query(run,"prompt")
+            self.assertEqual([True],self.state(run)["permissionHandlers"],"initial permission change handler exists")
+            run.page.evaluate("window.__permission.change(0,'granted')")
+            self.assertFalse(self.state(run)["visible"],"grant immediately hides Monitor")
+            run.page.evaluate("window.__permission.change(0,'prompt')")
+            self.assertTrue(self.state(run)["visible"],"second change immediately restores Monitor")
+            return self.state(run)["visible"]
+        for hold in self.HOLDS:
+            self.compare("two-changes",action,hold)
+
+    def test_granted_details_success_rejection_and_late_resolution(self):
+        for hold in self.HOLDS:
+            for late,reject in ((False,False),(True,False),(False,True)):
+                with self.subTest(hold=hold,late=late,reject=reject):
+                    def action(run):
+                        self.query(run,"granted")
+                        run.wait("window.__permission.detailsRequests.length===1","initial details requested")
+                        if late:
+                            self.finish(run)
+                        run.page.evaluate("window.__permission."+("rejectDetails(0)" if reject else "resolveDetails(0)"))
+                        run.page.evaluate("() => Promise.resolve()")
+                        state=self.state(run)
+                        self.assertEqual([] if reject else [True],state["screenHandlers"],"initial details screenschange handler exists")
+                        self.assertFalse(state["visible"])
+                        if not reject:
+                            run.page.evaluate("window.__permission.screens(0,3000)")
+                        return state["screenHandlers"]
+                    self.compare("details-"+str(late)+"-"+str(reject),action,hold)
+
+    def test_unsupported_api_and_native_permission_smoke(self):
+        run=self.start(unsupported=True)
+        try:
+            self.finish(run)
+            self.assertEqual(0,self.state(run)["queries"])
+            self.assertEqual([],run.errors)
+        finally:
+            run.close()
+
+    def boot(self, run):
+        self.finish(run)
+        run.steps.drive(lambda:rows_show(run) and inbox_received(run),"permission usable worklist",30000)
+        self.assertEqual([],run.errors,"permission boot has no errors")
+
+    def popup_left(self, run):
+        run.page.evaluate("localStorage.setItem('kin.ohif.current.rect',JSON.stringify({left:9000,top:0,width:800,height:600}))")
+        row=run.page.locator("#rows tr",has_text=h.PATIENT).first
+        run.steps.prepare_control(row,"permission popup row")
+        row.dblclick()
+        run.steps.rendered("permission popup requested")
+        features=run.page.evaluate("window.__permission.opened.at(-1)?.features")
+        self.assertTrue(features,"PRECONDITION row double-click requested a popup")
+        return int(re.search(r"(?:^|,)left=(-?\d+)",features).group(1))
+
+    def granted(self,run):
+        self.query(run,"granted")
+        run.wait("window.__permission.detailsRequests.length===1","initial granted details requested")
+        run.page.evaluate("window.__permission.resolveDetails(0)")
+        run.page.evaluate("() => Promise.resolve()")
+
+    def click_monitor(self,run):
+        if not run.page.locator("#toolbar-view").get_attribute("open") == "":
+            run.steps.click_control(run.page.locator("#toolbar-view > summary"),"View menu")
+        run.steps.click_control(run.page.locator("#b-monitor"),"Monitor")
+
+    def test_screenschange_updates_the_requested_popup_position(self):
+        def action(run):
+            self.granted(run)
+            run.page.evaluate("window.__permission.screens(0,3000)")
+            self.boot(run)
+            left=self.popup_left(run)
+            self.assertEqual(3800,left,"screenschange updates actual popup placement request")
+            return left
+        self.compare("screen-placement",action)
+
+    def test_revoke_keeps_saved_position_without_old_screen_clamping(self):
+        def action(run):
+            self.granted(run)
+            run.page.evaluate("window.__permission.change(0,'denied')")
+            self.boot(run)
+            left=self.popup_left(run)
+            self.assertEqual(9000,left,"revoked permission cannot clamp popup to old screens")
+            self.assertEqual([False],self.state(run)["screenHandlers"],"revoke releases old details")
+            return left
+        # Clearing details is an event effect, not an independent startup registration. Compare identical
+        # pre-load schedules on C's generated45 and disk actual45, then the unsplit post-load control.
+        # No removal/clear is granted a commutation exemption.
+        self.compare("revoke-placement",action,reference_count=45)
+        self.compare("revoke-placement-postload",action,hold=None)
+
+    def test_pending_details_after_revoke_and_early_monitor_click(self):
+        def revoked(run):
+            self.query(run,"granted")
+            run.wait("window.__permission.detailsRequests.length===1","initial details pending")
+            run.page.evaluate("window.__permission.change(0,'denied'); window.__permission.resolveDetails(0,6000)")
+            run.page.evaluate("() => Promise.resolve()")
+            self.boot(run)
+            self.assertEqual(9000,self.popup_left(run),"late revoked details cannot change popup placement")
+            self.assertEqual([False],self.state(run)["screenHandlers"])
+            return self.state(run)["screenHandlers"]
+        self.compare("pending-revoke",revoked,reference_count=45)
+        self.compare("pending-revoke-postload",revoked,hold=None)
+
+        def early(run):
+            self.query(run,"prompt")
+            self.assertNotIn("viewer-launch.js",run.page.evaluate("window.__kinTrace.executed"),
+                             "PRECONDITION early Monitor before viewer-launch")
+            self.click_monitor(run)
+            run.wait("window.__permission.detailsRequests.length===1","early Monitor actually requests details")
+            run.page.evaluate("window.__permission.change(0,'granted'); window.__permission.resolveDetails(0,3000)")
+            run.page.evaluate("() => Promise.resolve()")
+            self.assertEqual([False],self.state(run)["screenHandlers"],"unknown session cannot commit early Monitor reply")
+            self.assertNotIn("모니터 배치 허용됨",run.page.locator('body').inner_text(),"ignored early reply is not completed work")
+            return self.state(run)["screenHandlers"]
+        self.compare("early-monitor",early,reference_count=45)
+
+    def test_replacement_releases_old_details_and_late_events_do_not_move_popup(self):
+        def action(run):
+            self.granted(run)
+            self.boot(run)
+            run.page.evaluate("window.__permission.change(0,'prompt')")
+            # Prompt revocation clears details; the visible Monitor click acquires another details object.
+            self.click_monitor(run)
+            run.wait("window.__permission.detailsRequests.length===2","Monitor details requested")
+            run.page.evaluate("window.__permission.change(0,'granted'); window.__permission.resolveDetails(1,3000)")
+            run.page.evaluate("() => Promise.resolve()")
+            self.assertIn("모니터 배치 허용됨",run.page.locator("body").inner_text(),"Monitor success notice")
+            # Use the same native button's event while its permission-dependent display is hidden: this is an
+            # explicit synthetic second request, separate from the visible user click above.
+            run.page.evaluate("document.getElementById('b-monitor').click()")
+            run.wait("window.__permission.detailsRequests.length===3","replacement details requested")
+            run.page.evaluate("window.__permission.resolveDetails(2,4000)")
+            run.page.evaluate("() => Promise.resolve()")
+            run.page.evaluate("window.__permission.screens(1,6000)")
+            left=self.popup_left(run)
+            self.assertEqual(4800,left,"old details late event cannot corrupt latest popup placement")
+            self.assertEqual([False,False,True],self.state(run)["screenHandlers"],"replacement releases old details handler")
+            return left
+        self.compare("replace-details",action)
+
+    def test_click_revoke_order_and_late_context_reply(self):
+        for order in ("revoke-click","click-revoke","prepare-reply"):
+            def action(run):
+                self.query(run,"prompt")
+                self.boot(run)
+                if order=="revoke-click":
+                    run.page.evaluate("window.__permission.change(0,'denied')")
+                    run.page.evaluate("document.getElementById('b-monitor').click()")
+                else:
+                    self.click_monitor(run)
+                    run.page.evaluate("window.__permission.change(0,'denied')")
+                run.wait("window.__permission.detailsRequests.length===1","one Monitor permission request")
+                if order=="prepare-reply":
+                    run.page.evaluate("KinWorkContext.prepare(); window.dispatchEvent(new PageTransitionEvent('pagehide',{persisted:false}))")
+                before=run.page.locator("body").inner_text()
+                run.page.evaluate("window.__permission.resolveDetails(0,6000)")
+                run.page.evaluate("() => Promise.resolve()")
+                self.assertEqual([False],self.state(run)["screenHandlers"],"denied or stale reply cannot install a screen handler")
+                if order=="prepare-reply":
+                    self.assertEqual(before,run.page.locator("body").inner_text(),"stale context reply has no screen effects")
+                return self.state(run)["visible"]
+            with self.subTest(order=order):
+                self.compare(order,action)
+
+
+    def test_native_permission_smoke(self):
+        run=Run(self,Pages.layout("current","actual"),deterministic=True)
+        try:
+            run.steps.drive(lambda:any(q["path"]=="/api/me" for q in run.site.ledger),"native permission",10000,
+                            holds=(ME_KEY,),delivery_only=True)
+            trace=run.trace()
+            sh.keep(ARTIFACTS/"permission","native-smoke.json",run.steps.raw("native"))
+            statuses=[r for r in trace["objects"].values() if r.get("kind")=="PermissionStatus"]
+            self.assertEqual(1,len(statuses),"native Chromium initial PermissionStatus reached")
+            self.assertEqual([],trace["unresolved"])
         finally:
             run.close()
 
@@ -1576,6 +1968,59 @@ class TraceOracle(PreCase):
         self.assertEqual(native, traced, "this, handleEvent, removal, repeated registration, once, capture, passive, "
                                          "signal and on* replacement as without the instrument")
         self.assertTrue(native, "the probe ran")
+
+    def test_refined_oracle_keeps_native_competing_handler_semantics(self):
+        body=r"""() => {
+          const out=[],parent=document.createElement('div'),child=document.createElement('button');
+          parent.append(child);document.body.append(parent);
+          const signal=new AbortController();
+          const later=()=>out.push('readded');
+          parent.addEventListener('click',()=>out.push('capture'),true);
+          parent.addEventListener('click',()=>out.push('bubble'));
+          child.addEventListener('click',()=>{out.push('once');child.addEventListener('click',later);},{once:true});
+          child.addEventListener('click',()=>out.push('shared1'),{signal:signal.signal});
+          parent.addEventListener('click',()=>out.push('shared2'),{signal:signal.signal});
+          const property=()=>out.push('property');child.onclick=property;
+          out.push(child.onclick===property);
+          child.dispatchEvent(new MouseEvent('click',{bubbles:true}));
+          child.onclick=null;child.onclick=property;
+          child.dispatchEvent(new MouseEvent('click',{bubbles:true}));
+          signal.abort();child.removeEventListener('click',later);
+          child.dispatchEvent(new MouseEvent('click',{bubbles:true}));
+          window.onerror=(...args)=>{out.push(['onerror',args.length,args[0],args[4]?.message]);return true;};
+          window.dispatchEvent(new ErrorEvent('error',{message:'synthetic property event',error:new Error('synthetic')}));
+          window.onerror=null;
+          return out;
+        }"""
+        native,_=self.probe(body,instrument=False)
+        seen,trace=self.probe(body)
+        self.assertEqual(native,seen,"native capture/bubble, shared abort, re-registration, once and property reinsertion")
+        self.assertEqual(1,seen.count('once'))
+        self.assertEqual(2,seen.count('shared1'))
+        self.assertEqual(3,seen.count('property'))
+        provenance=sh.Provenance({"statements":[]},[])
+        order=sh.full_order(trace,provenance)
+        result=sh.registration_comparison(order,order,(-1,-2))
+        self.assertEqual([],result["difference"])
+        # No other pair of targets is implicitly independent, even though their final listener sets match.
+        swapped=list(order);swapped[0],swapped[1]=swapped[1],swapped[0]
+        self.assertTrue(sh.registration_comparison(order,swapped,(-1,-2))["difference"])
+
+    def test_native_permission_objects_with_same_descriptor_keep_distinct_identity(self):
+        body=r"""async chosen => {
+          const values=[];
+          for(let i=0;i<2;i++) values.push(await navigator.permissions.query({name:'window-management'}));
+          const called=[];values[chosen].onchange=()=>called.push(chosen);
+          values[0].dispatchEvent(new Event('change'));values[1].dispatchEvent(new Event('change'));
+          return called;
+        }"""
+        runs=[self.probe(body,args=chosen) for chosen in (0,1)]
+        provenance=sh.Provenance({"statements":[]},[])
+        orders=[sh.full_order(trace,provenance) for _,trace in runs]
+        result=sh.registration_comparison(*orders,(-1,-2))
+        self.assertTrue(result["per_key_difference"],"same descriptor never merges distinct PermissionStatus objects")
+        self.assertTrue(result["difference"])
+        self.assertNotEqual(sh.dispatch_order(runs[0][1],provenance),sh.dispatch_order(runs[1][1],provenance))
 
 
 # ── harness self-checks (F2-I05, F2-I06) ──
