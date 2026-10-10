@@ -30,7 +30,7 @@ function program(html, current) {
   const entries = new Map(), mappings = new Map();
   let index = 0;
   for (const tag of scripts(html)) {
-    const moved = spec.modules.some(m => m.file === tag.src);
+    const moved = tag.src === actual.bundle || spec.modules.some(m => m.file === tag.src);
     const name = tag.src || 'remaining-inline.js';
     const body = lf(tag.src ? (current ? fs.readFileSync(path.join(path.dirname(page), tag.src), 'utf8')
       : blob(path.posix.join(path.posix.dirname(spec.page), tag.src))) : tag.body);
@@ -114,7 +114,9 @@ function analyze(body, movedCount, ownership = homes) {
   }
   const expanding = new Set();
   function invoke(expression, origin, chain, label, args = null) {
-    const callee = valueOf(expression);
+    let callee = valueOf(expression);
+    if (callee && (ts.isClassDeclaration(callee) || ts.isClassExpression(callee)))
+      callee = callee.members.find(ts.isConstructorDeclaration);
     if (!callee || !ts.isFunctionLike(callee) || !callee.body || expanding.has(callee)) return;
     expanding.add(callee);
     try {
@@ -173,12 +175,17 @@ function analyze(body, movedCount, ownership = homes) {
       invoke(node.expression, origin, chain, node.expression.getText(source), node.arguments);
       // These standard array operations synchronously invoke callbacks. Other factory/registration callbacks
       // remain explicit gap possibilities, discharged by the browser's held-boundary/lifecycle cases.
-      if (ts.isPropertyAccessExpression(node.expression) && ['forEach', 'map', 'filter', 'reduce', 'some', 'every', 'find']
+      if (ts.isPropertyAccessExpression(node.expression) && ['forEach', 'map', 'filter', 'reduce', 'some', 'every', 'find', 'findIndex', 'flatMap', 'sort']
         .includes(node.expression.name.text)) {
-        for (const argument of node.arguments)
-          invoke(argument, origin, chain, node.expression.name.text + ' callback');
+        invoke(node.arguments[0], origin, chain, node.expression.name.text + ' callback');
       }
     }
+    if (ts.isCallExpression(node) && mode === 'eager' && ts.isPropertyAccessExpression(node.expression) &&
+        ['replace', 'replaceAll'].includes(node.expression.name.text))
+      invoke(node.arguments[1], origin, chain, node.expression.name.text + ' callback');
+    // Local function/class constructors execute synchronously; creating the constructor alone does not.
+    if (ts.isNewExpression(node) && mode === 'eager')
+      invoke(node.expression, origin, chain, 'new ' + node.expression.getText(source), node.arguments || []);
     // Promise invokes its executor during construction, unlike then/event/timer callbacks. A local binding
     // named Promise has its own semantics and must not be assumed to be the native constructor.
     if (ts.isNewExpression(node) && mode === 'eager' && ts.isIdentifier(node.expression) &&
@@ -197,9 +204,11 @@ test('C2: statement/effect order and declaration homes are preserved; eager read
   const body = lf(actual.script), nodes = statements(body);
   assert.deepEqual(nodes.map(n => n.name), homes.map(h => h.name), 'C2 every statement and effect keeps relative order');
   assert.deepEqual(actual.region.filter(t => t.src).map(t => t.src),
-    spec.modules.slice(0, actual.files.length).map(m => m.file), 'C2 file order');
+    actual.bundle ? [actual.bundle] : spec.modules.slice(0, actual.files.length).map(m => m.file), 'C2 file order');
+  if (actual.bundle) assert.deepEqual(require('../scripts/main-split-order.json').sources.map(s => s.file),
+    spec.modules.map(m => m.file), 'C2 editable source order');
   assert.equal(new Set(actual.files).size, actual.files.length, 'C2 no file collision');
-  const current = analyze(body, actual.files.length), baselineAnalysis = analyze(baseBody, 0);
+  const current = analyze(body, actual.bundle ? 0 : actual.files.length), baselineAnalysis = analyze(baseBody, 0);
   report.C2 = { statements: nodes.length, ...current, baseline_certain: baselineAnalysis.certain };
   assert.deepEqual(baselineAnalysis.certain, [], 'C2 baseline certain load-order violations');
   assert.deepEqual(current.certain, [], 'C2 certain load-order violations');
@@ -214,6 +223,17 @@ test('C2: immediate writes and a forward function call are detected independentl
     [['second', 'read'], ['second', 'write'], ['later', 'read']]);
 
   const eagerForms = [
+    ['new-function', 'function Local() { late++; } new Local();'],
+    ['new-function-alias', 'const Local = function () { late++; }; const Alias = Local; new Alias();'],
+    ['new-class', 'class Local { constructor() { late++; } } new Local();'],
+    ['new-class-expression', 'const Local = class { constructor(value = late) {} }; new Local();'],
+    ['sort-callback', '[2, 1].sort((a, b) => late);'],
+    ['sort-alias', 'const compare = (a, b) => late; [2, 1].sort(compare);'],
+    ['replace-callback', '"a".replace(/a/, () => late);'],
+    ['replace-alias', 'const replacement = () => late; "a".replace(/a/, replacement);'],
+    ['replace-all-callback', '"aa".replaceAll(/a/g, () => late);'],
+    ['find-index-callback', '[1].findIndex(() => late);'],
+    ['flat-map-callback', '[1].flatMap(() => late);'],
     ['const-arrow', 'const run = () => late; run();'],
     ['const-function', 'const run = function () { late = 1; }; run();'],
     ['initializer-alias', 'const run = () => late; const alias = run; alias();'],
@@ -237,7 +257,10 @@ test('C2: immediate writes and a forward function call are detected independentl
     assert.equal(checked.certain.filter(r => r.binding === 'late').length, 1, `${form}: synchronous forward use`);
     assert.ok(checked.certain.every(r => r.crosses_file), `${form}: actual file boundary`);
   }
-  for (const prefix of ['const run = () => late;', 'const holder = { run() { return late; } };',
+  for (const prefix of ['function Local() { late++; }', 'class Local { constructor() { late++; } }',
+    'function Local(callback) {} new Local(() => late);',
+    'const initial = () => late; [1].reduce((a, b) => a, initial);',
+    'const run = () => late;', 'const holder = { run() { return late; } };',
     'Promise.resolve().then(() => late);', 'const run = async () => { await 0; late++; }; run();',
     'function Promise(executor) {} new Promise(() => late);',
     'const run = (value = late) => value; run(1);', 'new Promise((resolve = late) => resolve(0));']) {

@@ -1,0 +1,323 @@
+{
+  "migration_state": "pristine",
+  "base": "0261b1c834c4d5ff5c610185b17a40763985097b",
+  "page": "worklist-v0/hpacs-lite/main.html",
+  "artifact": "worklist-v0/hpacs-lite/main-split.bundle.js",
+  "sources": [
+    {
+      "file": "page-core.js",
+      "original_bytes": [
+        0,
+        11334
+      ]
+    },
+    {
+      "file": "study-state.js",
+      "original_bytes": [
+        11334,
+        15375
+      ]
+    },
+    {
+      "file": "order-list-store.js",
+      "original_bytes": [
+        15375,
+        18235
+      ]
+    },
+    {
+      "file": "report-templates.js",
+      "original_bytes": [
+        18235,
+        24767
+      ]
+    },
+    {
+      "file": "report-dictation.js",
+      "original_bytes": [
+        24767,
+        31248
+      ]
+    },
+    {
+      "file": "report-templates-ui.js",
+      "original_bytes": [
+        31248,
+        50767
+      ]
+    },
+    {
+      "file": "worklist-columns-view.js",
+      "original_bytes": [
+        50767,
+        57565
+      ]
+    },
+    {
+      "file": "worklist-state.js",
+      "original_bytes": [
+        57565,
+        64674
+      ]
+    },
+    {
+      "file": "worklist-data.js",
+      "original_bytes": [
+        64674,
+        107427
+      ]
+    },
+    {
+      "file": "worklist-view.js",
+      "original_bytes": [
+        107427,
+        110935
+      ]
+    },
+    {
+      "file": "sr-reader.js",
+      "original_bytes": [
+        110935,
+        124146
+      ]
+    },
+    {
+      "file": "current-study.js",
+      "original_bytes": [
+        124146,
+        130816
+      ]
+    },
+    {
+      "file": "study-info-panel.js",
+      "original_bytes": [
+        130816,
+        143860
+      ]
+    },
+    {
+      "file": "related-studies.js",
+      "original_bytes": [
+        143860,
+        144901
+      ]
+    },
+    {
+      "file": "study-thumbnails.js",
+      "original_bytes": [
+        144901,
+        158026
+      ]
+    },
+    {
+      "file": "order-list.js",
+      "original_bytes": [
+        158026,
+        161408
+      ]
+    },
+    {
+      "file": "study-image-requests.js",
+      "original_bytes": [
+        161408,
+        220830
+      ]
+    },
+    {
+      "file": "study-corrections.js",
+      "original_bytes": [
+        220830,
+        232477
+      ]
+    },
+    {
+      "file": "related-report.js",
+      "original_bytes": [
+        232477,
+        236983
+      ]
+    },
+    {
+      "file": "report-editor.js",
+      "original_bytes": [
+        236983,
+        280524
+      ]
+    },
+    {
+      "file": "report-draft-sync.js",
+      "original_bytes": [
+        280524,
+        297619
+      ]
+    },
+    {
+      "file": "report-structure-pane.js",
+      "original_bytes": [
+        297619,
+        316143
+      ]
+    },
+    {
+      "file": "report-citation-pane.js",
+      "original_bytes": [
+        316143,
+        345824
+      ]
+    },
+    {
+      "file": "report-draft-save.js",
+      "original_bytes": [
+        345824,
+        362595
+      ]
+    },
+    {
+      "file": "report-commit.js",
+      "original_bytes": [
+        362595,
+        395744
+      ]
+    },
+    {
+      "file": "report-hold.js",
+      "original_bytes": [
+        395744,
+        401950
+      ]
+    },
+    {
+      "file": "work-exit.js",
+      "original_bytes": [
+        401950,
+        447927
+      ]
+    },
+    {
+      "file": "worklist-polling.js",
+      "original_bytes": [
+        447927,
+        456381
+      ]
+    },
+    {
+      "file": "report-history.js",
+      "original_bytes": [
+        456381,
+        464562
+      ]
+    },
+    {
+      "file": "report-toolbar.js",
+      "original_bytes": [
+        464562,
+        469422
+      ]
+    },
+    {
+      "file": "viewer-placement.js",
+      "original_bytes": [
+        469422,
+        479699
+      ]
+    },
+    {
+      "file": "viewer-launch.js",
+      "original_bytes": [
+        479699,
+        515796
+      ]
+    },
+    {
+      "file": "feature-mounts.js",
+      "original_bytes": [
+        515796,
+        527898
+      ]
+    },
+    {
+      "file": "clinical-context-panel.js",
+      "original_bytes": [
+        527898,
+        539721
+      ]
+    },
+    {
+      "file": "critical-result-mounts.js",
+      "original_bytes": [
+        539721,
+        542944
+      ]
+    },
+    {
+      "file": "study-questions.js",
+      "original_bytes": [
+        542944,
+        597343
+      ]
+    },
+    {
+      "file": "workspace-panels.js",
+      "original_bytes": [
+        597343,
+        604927
+      ]
+    },
+    {
+      "file": "worklist-controls.js",
+      "original_bytes": [
+        604927,
+        606335
+      ]
+    },
+    {
+      "file": "saved-filters.js",
+      "original_bytes": [
+        606335,
+        622048
+      ]
+    },
+    {
+      "file": "worklist-row-events.js",
+      "original_bytes": [
+        622048,
+        624480
+      ]
+    },
+    {
+      "file": "telerad-request.js",
+      "original_bytes": [
+        624480,
+        627685
+      ]
+    },
+    {
+      "file": "context-menu.js",
+      "original_bytes": [
+        627685,
+        635095
+      ]
+    },
+    {
+      "file": "related-controls.js",
+      "original_bytes": [
+        635095,
+        636754
+      ]
+    },
+    {
+      "file": "session-end.js",
+      "original_bytes": [
+        636754,
+        642550
+      ]
+    },
+    {
+      "file": "page-boot.js",
+      "original_bytes": [
+        642550,
+        668286
+      ]
+    }
+  ]
+}

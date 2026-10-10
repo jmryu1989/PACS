@@ -424,6 +424,7 @@ TRACE_SCRIPT = r"""(() => {
       create(value, kind, name, fr, null, null, n); if (children) children(value, fr); return value; });
   });
   if (typeof Permissions === 'function') promised(Permissions.prototype, 'query', 'PermissionStatus');
+  promised(window, 'getScreenDetails', 'ScreenDetails');
   if (typeof MediaDevices === 'function') promised(MediaDevices.prototype, 'getUserMedia', 'MediaStream',
     (stream, fr) => stream.getTracks().forEach((track, i) => create(track, 'MediaStreamTrack', 'getUserMedia.track', fr, stream, i)));
   // The markup's elements, numbered in parser order (scripts aside); see above.
@@ -508,7 +509,7 @@ TRACE_SCRIPT = r"""(() => {
     const capture = typeof options === 'boolean' ? options : !!(options && options.capture);
     return remove.call(this, type, wrapperFor(this, type, capture, listener, null), options);
   };
-  // on* handler properties: recorded (not wrapped), wherever the browser defines them.
+  // Preserve the native handler slot and getter while observing property-handler dispatch too.
   const holders = [window];
   for (const key of Object.getOwnPropertyNames(window)) {
     const d = Object.getOwnPropertyDescriptor(window, key);
@@ -519,8 +520,24 @@ TRACE_SCRIPT = r"""(() => {
     if (!prop.startsWith('on')) continue;
     const d = Object.getOwnPropertyDescriptor(holder, prop);
     if (!d || typeof d.set !== 'function' || !d.configurable) continue;
-    Object.defineProperty(holder, prop, { configurable: true, enumerable: d.enumerable, get: d.get,
-      set(value) { record(value ? 'property' : 'property-clear', this, prop.slice(2), false, value); return d.set.call(this, value); } });
+    const originals = new WeakMap();
+    Object.defineProperty(holder, prop, { configurable: true, enumerable: d.enumerable,
+      get() { const value = d.get.call(this); return originals.get(value) || value; },
+      set(value) {
+        const entry = record(value ? 'property' : 'property-clear', this, prop.slice(2), false, value);
+        if (typeof value !== 'function') return d.set.call(this, value);
+        const wrapped = function (...args) {
+          const event = args[0], type = event?.type || entry.type;
+          const item = NOISY.has(type) ? null : { seq: ++seq, registration: entry.seq, target: entry.target,
+            object: entry.object, type, trusted: !!event?.isTrusted, error: null };
+          if (item) dispatches.push(item);
+          let completed = false;
+          try { const result = value.apply(this, args); completed = true; return result; }
+          finally { if (!completed && item) { item.error = 'threw'; thrown = item; } }
+        };
+        originals.set(wrapped, value);
+        return d.set.call(this, wrapped);
+      } });
   }
   add.call(document, 'load', event => {
     const el = event.target;
@@ -673,6 +690,68 @@ def dispatch_order(trace, provenance, since=0):
             if "registration" in d and d["seq"] > since]
 
 
+def registration_comparison(expected, observed, permission_sites):
+    """D883: retain every full tuple and same-object history. Only the first startup permission/details
+    property assignment may commute with an independent target's registration. The caller still compares ALL
+    dispatches. permission_sites are frozen AST identities, not selector/constructor equivalence classes.
+    Byte equality plus PermissionBoundary's held-event/result probes supply the independence proof.
+    """
+    def histories(order):
+        out = {}
+        for row in order:
+            out.setdefault((row[1], row[2]), []).append(row)
+        return out
+
+    left, right = histories(expected), histories(observed)
+    per_key = []
+    for key in dict.fromkeys([*left, *right]):
+        a, b = left.get(key, []), right.get(key, [])
+        if a != b:
+            per_key.append({"key": key, "original": a, "observed": b})
+
+    def eligible(row):
+        kind, target, event, capture, once, passive, signal, callback, frames = row
+        if kind != "property" or capture or once or passive is not None or signal is not None or not callback:
+            return False
+        if not target or target[0] != "created" or target[4:] != (1, None, None):
+            return False
+        cls, api, creation = target[1:4]
+        if not creation or not frames:
+            return False
+        start, cache = permission_sites
+        if creation[0][:2] != ("main", start):
+            return False
+        if (cls, api, event) == ("PermissionStatus", "query", "change"):
+            return frames[0][:2] == ("main", start) and len(left.get((target, event), [])) == 1
+        if (cls, api, event) == ("ScreenDetails", "getScreenDetails", "screenschange"):
+            history = left.get((target, event), [])
+            return frames[0][:2] == ("main", cache) and history[:1] == [row] and history.count(row) == 1
+        return False
+
+    # Moving matched rows by adjacent swaps is a proof witness: every crossed pair is recorded. Other rows
+    # are never sorted or collapsed, and an unrecognised order difference stays a failure.
+    work, swaps = list(expected), []
+    if not per_key:
+        for at, wanted in enumerate(observed):
+            if at < len(work) and work[at] == wanted:
+                continue
+            try:
+                found = work.index(wanted, at + 1)
+            except ValueError:
+                break
+            crossed = work[at:found]
+            if all(row[1] != wanted[1] and (eligible(wanted) or eligible(row)) for row in crossed):
+                for row in reversed(crossed):
+                    swaps.append({"first": row, "second": wanted,
+                                  "reason": "D883 initial permission/details property; distinct target, no shared signal; boundary proof"})
+                work.insert(at, work.pop(found))
+            else:
+                break
+    return {"raw_difference": order_difference(expected, observed, max(len(expected), len(observed))),
+            "per_key_difference": per_key, "allowed_swaps": swaps,
+            "difference": order_difference(work, observed, max(len(work), len(observed)))}
+
+
 def order_difference(expected, observed, limit=5):
     """The first places where two ordered lists differ (readable, unlike a list diff of hundreds of tuples)."""
     out = []
@@ -709,7 +788,7 @@ LEDGER_SCRIPT = r"""(() => {
     let path = '', query = '';
     try { const url = new URL(typeof input === 'string' ? input : input.url, location.href); path = url.pathname; query = url.search; } catch (_) {}
     const entry = { n: ++count, method: String((init && init.method) || (input && input.method) || 'GET').toUpperCase(), path, query,
-      at: Date.now(), state: 'pending', status: null, body: 'unread' };
+      at: Date.now(), traceSequence: window.__kinTrace?.now(), state: 'pending', status: null, body: 'unread' };
     entry.canonicalQuery = canonical(query);
     entry.occurrence = 1 + fetches.filter(f => f.method === entry.method && f.path === path &&
       JSON.stringify(f.canonicalQuery) === JSON.stringify(entry.canonicalQuery)).length;

@@ -47,6 +47,14 @@ function chunks(before, contract = spec) {
 function verify(before, page, contract = spec) {
   const parts = chunks(before, contract);
   const actual = readPage(page);
+  if (actual.bundle) {
+    for (const part of parts)
+      assert.equal(fs.readFileSync(path.join(path.dirname(page), part.file), 'utf8'), part.body, `Moved bytes: ${part.file}`);
+    assert.equal(actual.script, scripts(before).find(t => !t.src).body, 'Bundle artifact equals original body');
+    assert.equal(actual.script, parts.map(p => p.body).join(''), 'Bundle artifact equals ordered sources (binary-proven empty boundaries)');
+    assert.equal(actual.source, before, 'Markup outside the original script element must be identical');
+    return { modules: parts.length, statements: parts.reduce((n, m) => n + m.statements, 0), bytes: Buffer.byteLength(actual.script) };
+  }
   const moved = actual.region.filter(t => t.src);
   assert.deepEqual(moved.map(t => t.src), parts.slice(0, moved.length).map(m => m.file), 'Load order = spec order');
   for (let i = 0; i < moved.length; i++)
