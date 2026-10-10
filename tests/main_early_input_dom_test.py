@@ -1919,6 +1919,20 @@ class LoadBudget(PreCase):
         try:
             stack.prepare()
             result["browser"] = self.browser.version
+            result["readiness"] = stack.readiness
+            # Fixed before sampling: one disposable context per revision warms
+            # host services, while every measured cold context remains fresh.
+            result["warmups"] = []
+            for visit_id, side in ((-2, "baseline"), (-1, "candidate")):
+                stack.activate(side)
+                context = self.browser.new_context(viewport={"width": 1400, "height": 900},
+                    locale="ko-KR", timezone_id="Asia/Seoul", ignore_https_errors=True)
+                try:
+                    result["warmups"].append(hosted.visit(stack, context, CLOCK_START, h.PATIENT,
+                        {"mode": "warmup", "visit": visit_id,
+                         "note": "one per revision before sampling; excluded by design"}))
+                finally:
+                    context.close()
             for index in range(5):
                 order = ("baseline", "candidate") if index % 2 == 0 else ("candidate", "baseline")
                 pairs = {"cold": {}, "warm": {}}

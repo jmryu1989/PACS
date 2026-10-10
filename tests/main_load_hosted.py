@@ -24,6 +24,75 @@ from urllib.request import urlopen
 import live_test_gate as gate
 
 ROOT = Path(__file__).resolve().parents[1]
+# Shared CI runners can spend tens of seconds starting the proxy/upstreams.
+# These are failure deadlines, not performance budgets; no sample starts here.
+STACK_READINESS_TIMEOUT_S = 180
+FIRST_AUTH_TIMEOUT_S = 90  # Allow CI scheduling/script compilation; retain every measured millisecond.
+DISCOVERY_PATH = "/auth/realms/kin/.well-known/openid-configuration"
+READINESS_CHECKS = {"api": "/api/health", "auth_realm": DISCOVERY_PATH,
+                    "orthanc": "/worklist/hpacs-lite/main.html"}
+
+
+def probe_endpoint(origin, name, path, timeout_s, document_sha256):
+    """Check the actual HTTPS proxy routes, including the served Orthanc bytes."""
+    try:
+        with urlopen(origin + path, context=ssl._create_unverified_context(), timeout=timeout_s) as response:
+            body = response.read()
+            assert response.status == 200, f"HTTP {response.status}"
+            if name in ("api", "auth_realm"):
+                payload = json.loads(body)
+                assert isinstance(payload, dict), "expected JSON object"
+            if name == "api":
+                assert payload.get("ok") is True, "API not healthy"
+            elif name == "auth_realm":
+                assert payload.get("issuer") == origin + "/auth/realms/kin", "wrong OIDC issuer"
+            else:
+                assert hashlib.sha256(body).hexdigest() == document_sha256, "Orthanc document hash mismatch"
+            return {"ready": True, "status": response.status, "headers": dict(response.headers)}
+    except (OSError, ValueError, AssertionError) as error:
+        return {"ready": False, "error": str(error)}
+
+
+def poll_readiness(origin, document_sha256, record_path, timeout_s=STACK_READINESS_TIMEOUT_S,
+                   probe=probe_endpoint, clock=time.monotonic, sleep=time.sleep):
+    started = clock()
+    deadline = started + timeout_s
+    record = {"origin": origin, "timeout_s": timeout_s, "checks": READINESS_CHECKS,
+              "attempts": [], "ready": False,
+              "auth_backend": "synthetic discovery via existing keycloak alias; no real Keycloak"}
+    try:
+        while clock() < deadline:
+            checks = {}
+            for name, path in READINESS_CHECKS.items():
+                remaining = deadline - clock()
+                if remaining <= 0:
+                    break
+                checks[name] = probe(origin, name, path, min(2, remaining), document_sha256)
+            record["attempts"].append({"elapsed_s": clock() - started, "checks": checks})
+            if len(checks) == len(READINESS_CHECKS) and all(c["ready"] for c in checks.values()) and clock() <= deadline:
+                record["ready"] = True
+                return record
+            sleep(max(0, min(.5, deadline - clock())))
+        raise AssertionError("hosted timeout: stack readiness")
+    finally:
+        record["duration_seconds"] = clock() - started
+        save(record_path, record)
+
+
+def record_auth_timeout(stack, page, waterfall, navigation, auth, result, record_path):
+    """Persist browser state before probing health; a failed probe cannot erase it."""
+    diagnostic = {"timeout_s": FIRST_AUTH_TIMEOUT_S, "url": page.url,
+                  "navigation": list(navigation), "auth_observed": bool(auth),
+                  "server_me_received": stack.me_received.is_set(),
+                  "pending_requests": [dict(row) for row in waterfall.rows.values()
+                                       if "end" not in row and "failed" not in row],
+                  "stack_health": {}}
+    result["first_auth_timeout"] = diagnostic
+    save(record_path, result)
+    for name, path in READINESS_CHECKS.items():
+        diagnostic["stack_health"][name] = probe_endpoint(
+            stack.origin, name, path, 2, stack.versions[stack.side]["main.html"])
+        save(record_path, result)
 
 
 def digest(path):
@@ -169,17 +238,9 @@ class HostedStack:
                     assert mounted["Type"] == "tmpfs", mounted
             assert all(name == self.project for name in container["NetworkSettings"]["Networks"])
         self.command("docker", "image", "inspect", *sorted({c["Image"] for c in inspected}))
-        deadline = time.monotonic() + 60
-        while True:
-            try:
-                with urlopen(self.url, context=ssl._create_unverified_context(), timeout=2) as response:
-                    assert hashlib.sha256(response.read()).hexdigest() == self.versions["baseline"]["main.html"]
-                    save(self.root / "readiness-headers.json", dict(response.headers))
-                break
-            except (OSError, AssertionError):
-                if time.monotonic() >= deadline:
-                    raise
-                time.sleep(.2)
+        self.readiness = poll_readiness(self.origin, self.versions["baseline"]["main.html"],
+                                        self.root / "readiness.json")
+        save(self.root / "readiness-headers.json", self.readiness["attempts"][-1]["checks"]["orthanc"]["headers"])
         self.compose("exec", "-T", "proxy", "nginx", "-T")
         template = self.compose("exec", "-T", "proxy", "cat", "/etc/nginx/templates/default.conf.template").stdout
         assert hashlib.sha256(template).hexdigest() == digest(ROOT / "proxy/nginx.conf.template"), "proxy template mismatch"
@@ -226,6 +287,14 @@ class HostedStack:
                 stack.requests.append({"method": "GET", "path": url.path, "query": url.query, "received": stamp})
                 if url.path == "/api/health":
                     return self.fulfill(json={"ok": True, "synthetic": True})
+                if url.path == DISCOVERY_PATH:
+                    # This fixture already aliases keycloak to the API relay.
+                    # Probe that proxy route without introducing real accounts.
+                    issuer = stack.origin + "/auth/realms/kin"
+                    return self.fulfill(json={"issuer": issuer, "synthetic": True,
+                        "authorization_endpoint": issuer + "/protocol/openid-connect/auth",
+                        "token_endpoint": issuer + "/protocol/openid-connect/token",
+                        "jwks_uri": issuer + "/protocol/openid-connect/certs"})
                 if url.path == "/api/me":
                     stack.me_received.set()
                     if not stack.me_release.wait(30):
@@ -327,10 +396,12 @@ class Waterfall:
         self.session.detach()
 
 
-def wait(page, predicate, label):
-    deadline = time.perf_counter() + 30
+def wait(page, predicate, label, timeout_s=30, on_timeout=None):
+    deadline = time.perf_counter() + timeout_s
     while not predicate():
         if time.perf_counter() >= deadline:
+            if on_timeout:
+                on_timeout()
             raise AssertionError("hosted timeout: " + label)
         page.wait_for_timeout(10)
 
@@ -348,11 +419,18 @@ def visit(stack, browser_context, clock_start, patient, metadata):
     page.on("request", lambda request: auth.append(time.perf_counter()) if urlparse(request.url).path == "/api/me" else None)
     page.on("response", lambda response: responses.append(time.perf_counter()) if urlparse(response.url).path == "/api/me" else None)
     page.on("response", lambda response: static_responses.append(response) if "/worklist/" in urlparse(response.url).path else None)
-    result = {**metadata, "side": stack.side, "url": stack.url, "valid": False}
+    result = {**metadata, "side": stack.side, "url": stack.url, "valid": False,
+              "page_errors": errors, "console_errors": console_errors}
+    record_path = stack.root.parent / f"visit-{metadata['visit']:02d}.json"
+    navigation = []
+    page.on("framenavigated", lambda frame: navigation.append({"url": frame.url, "at": time.perf_counter()})
+            if frame == page.main_frame else None)
     try:
         started = time.perf_counter()
         page.goto(stack.url, wait_until="commit")
-        wait(page, lambda: bool(auth) and stack.me_received.is_set(), "first auth")
+        wait(page, lambda: bool(auth) and stack.me_received.is_set(), "first auth",
+             timeout_s=FIRST_AUTH_TIMEOUT_S,
+             on_timeout=lambda: record_auth_timeout(stack, page, waterfall, navigation, auth, result, record_path))
         answered = time.perf_counter()
         stack.me_release.set()  # same observation point as the PRE route fixture
         wait(page, lambda: patient in page.locator("#rows").inner_text(), "usable list")
@@ -422,7 +500,7 @@ def visit(stack, browser_context, clock_start, patient, metadata):
         return result
     finally:
         result["waterfall"] = list(waterfall.rows.values())
-        save(stack.root.parent / f"visit-{metadata['visit']:02d}.json", result)
+        save(record_path, result)
         waterfall.close()
         page.close()
 
