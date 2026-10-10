@@ -30,7 +30,7 @@ function program(html, current) {
   const entries = new Map(), mappings = new Map();
   let index = 0;
   for (const tag of scripts(html)) {
-    const moved = spec.modules.some(m => m.file === tag.src);
+    const moved = tag.src === actual.bundle || spec.modules.some(m => m.file === tag.src);
     const name = tag.src || 'remaining-inline.js';
     const body = lf(tag.src ? (current ? fs.readFileSync(path.join(path.dirname(page), tag.src), 'utf8')
       : blob(path.posix.join(path.posix.dirname(spec.page), tag.src))) : tag.body);
@@ -166,9 +166,11 @@ test('C2: statement/effect order and declaration homes are preserved; eager read
   const body = lf(actual.script), nodes = statements(body);
   assert.deepEqual(nodes.map(n => n.name), homes.map(h => h.name), 'C2 every statement and effect keeps relative order');
   assert.deepEqual(actual.region.filter(t => t.src).map(t => t.src),
-    spec.modules.slice(0, actual.files.length).map(m => m.file), 'C2 file order');
+    actual.bundle ? [actual.bundle] : spec.modules.slice(0, actual.files.length).map(m => m.file), 'C2 file order');
+  if (actual.bundle) assert.deepEqual(require('../scripts/main-split-order.json').sources.map(s => s.file),
+    spec.modules.map(m => m.file), 'C2 editable source order');
   assert.equal(new Set(actual.files).size, actual.files.length, 'C2 no file collision');
-  const current = analyze(body, actual.files.length), baselineAnalysis = analyze(baseBody, 0);
+  const current = analyze(body, actual.bundle ? 0 : actual.files.length), baselineAnalysis = analyze(baseBody, 0);
   report.C2 = { statements: nodes.length, ...current, baseline_certain: baselineAnalysis.certain };
   assert.deepEqual(baselineAnalysis.certain, [], 'C2 baseline certain load-order violations');
   assert.deepEqual(current.certain, [], 'C2 certain load-order violations');

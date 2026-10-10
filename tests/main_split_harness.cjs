@@ -71,7 +71,7 @@ function actual(page, options = {}) {
   const spec = options.spec ? JSON.parse(fs.readFileSync(options.spec, 'utf8')) : require('./main_move_spec.json');
   const input = readPage(page), served = input.html, html = input.source;
   const tag = scripts(html).find(t => !t.src), parts = chunks(html, spec);
-  const count = input.files.length, rest = input.region.find(t => !t.src);
+  const count = input.bundle ? parts.length : input.files.length, rest = input.region.find(t => !t.src);
   // Line ranges of every statement in the served layout, from the same AST the contract uses. A range starts at
   // the statement's first token (not its leading comments), so a registration's line names one statement.
   const nodes = statements(tag.body);
@@ -88,7 +88,10 @@ function actual(page, options = {}) {
     for (let k = 0; k < p.statements; k++, index++) {
       const n = nodes[index], name = spec.modules[module].statements[k];
       let file, start, end;
-      if (external) {
+      if (input.bundle) {
+        const at = lines(input.script);
+        file = input.bundle; start = at(n.token); end = at(Math.max(n.token, n.end - 1));
+      } else if (external) {
         file = p.file; start = at(n.token - first); end = at(Math.max(n.token - first, n.end - first - 1));
       } else {
         const off = restAt + (n.token - restFirst);
@@ -98,7 +101,7 @@ function actual(page, options = {}) {
     }
   });
   const externals = scripts(served).filter(t => t.src).map(t => t.src);
-  const files = [page, ...input.files];
+  const files = [page, ...input.files, ...(input.bundle ? parts.map(p => path.join(path.dirname(page), p.file)) : [])];
   const inputs = Object.fromEntries(files.map(file => {
     const bytes = fs.readFileSync(file);
     return [path.basename(file), { bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'),
@@ -106,7 +109,7 @@ function actual(page, options = {}) {
   }));
   const manifest = { kind: options.kind || 'actual', count, page: path.basename(page), source: options.source || page,
     scripts: externals, inputs,
-    parts: parts.slice(0, count).map(p => p.file),
+    parts: input.files.map(p => path.basename(p)), bundle: input.bundle || null,
     modules: parts.map((p, i) => ({ index: i, file: p.file, external: i < count, statements: p.statements })),
     statements: result };
   return manifest;

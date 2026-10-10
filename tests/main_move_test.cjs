@@ -107,6 +107,12 @@ test('S1 candidate byte contract', () => {
   verify(before, process.env.KIN_SPLIT_BYTE_PAGE || page);
 });
 
+test('C1 bundle artifact: stdlib binary equality and HTMLParser tag proof', () => {
+  if (!readPage(page).bundle) return; // Historical 0/18/30/45 scratch layouts retain their own C1 checks.
+  execFileSync(process.env.KIN_SPLIT_PYTHON || 'python3', ['-B', 'scripts/build-main-split-bundle.py', '--check'],
+    { cwd: path.resolve(__dirname, '..'), maxBuffer: 2e6 });
+});
+
 test('C5 complete source projection', () => {
   const helper = process.env.KIN_SPLIT_PROJECTION_HELPER || './page_source.cjs';
   const source = require(helper).readPageSource(process.env.KIN_SPLIT_BYTE_PAGE || page);

@@ -1323,6 +1323,14 @@ class ActualLayout(PreCase):
 
     def test_actual_held_input_and_leaving_boundaries(self):
         layout = Pages.current.layout("actual")
+        if layout[1].get("bundle"):
+            # The one real fetch boundary precedes all moved listeners. Generated
+            # 18/30/45 cases still exercise the historical internal split gaps.
+            for hazard in HAZARDS:
+                for delay in (0, 150):
+                    with self.subTest(hazard=hazard, delay=delay, hold=layout[1]["bundle"]):
+                        self.assert_like_original(hazard, self.early(hazard, layout, hold=layout[1]["bundle"], delay_ms=delay))
+            self.assertEqual([], self.leaving(layout, hold=layout[1]["bundle"]), "bundle fetch boundary leaves without error")
         for hazard, module in (("B1-03", "report-templates-ui.js"), ("B1-05", "worklist-columns-view.js"),
                                ("B1-05-TAB", "worklist-columns-view.js"), ("B1-05", "related-studies.js")):
             if module in layout[1]["parts"]:
@@ -1364,8 +1372,9 @@ class ActualLayout(PreCase):
 
     def test_actual_part2_script_responses_are_complete(self):
         layout = Pages.current.layout("actual")
-        self.assertIn("report-draft-save.js", layout[1]["parts"], "PRECONDITION actual part 2 asset")
-        run = Run(self, layout, hold="report-draft-save.js")
+        name = layout[1].get("bundle") or "report-draft-save.js"
+        self.assertIn(name, layout[1]["parts"], "PRECONDITION actual part 2 asset")
+        run = Run(self, layout, hold=name)
         responses, failures = [], []
         run.page.on("response", lambda response: responses.append({"url": response.url, "status": response.status}))
         run.page.on("requestfailed", lambda request: failures.append({"url": request.url, "failure": request.failure}))
@@ -1376,7 +1385,6 @@ class ActualLayout(PreCase):
             raw = {"manifest": layout[1], "delivered": run.delivery.bodies, "responses": responses,
                    "failures": failures, "errors": run.errors, "trace": run.trace()}
             sh.keep(ARTIFACTS / "part2-assets", "actual.raw.json", raw)
-            name = "report-draft-save.js"
             self.assertEqual([200], [r["status"] for r in responses if urlparse(r["url"]).path.endswith('/' + name)],
                              "actual report-draft-save.js response must arrive")
             self.assertEqual([], failures, "actual script requests must succeed")
@@ -1386,7 +1394,8 @@ class ActualLayout(PreCase):
 
 
     def test_other_async_initializations_start_after_the_final_file(self):
-        run=Run(self,Pages.layout("current","actual"),hold="page-boot.js",deterministic=True)
+        layout = Pages.layout("current", "actual")
+        run=Run(self,layout,hold=layout[1].get("bundle") or "page-boot.js",deterministic=True)
         try:
             run.blocked()
             self.assertEqual([],run.site.ledger,"no boot request before the final file executes")
@@ -1424,8 +1433,9 @@ class ActualLayout(PreCase):
 
     def test_actual_part3_boot_response_is_complete(self):
         layout=Pages.current.layout("actual")
-        self.assertIn("page-boot.js",layout[1]["parts"],"PRECONDITION actual part 3 asset")
-        run=Run(self,layout,hold="page-boot.js")
+        name = layout[1].get("bundle") or "page-boot.js"
+        self.assertIn(name,layout[1]["parts"],"PRECONDITION actual part 3 asset")
+        run=Run(self,layout,hold=name)
         responses=[]
         run.page.on("response",lambda response:responses.append((urlparse(response.url).path,response.status)))
         try:
@@ -1434,7 +1444,7 @@ class ActualLayout(PreCase):
             run.wait("document.readyState==='complete'","actual boot resource load completes")
             sh.keep(ARTIFACTS/"part3-assets","actual.raw.json",{"responses":responses,"trace":run.trace(),
                       "delivered":run.delivery.bodies,"manifest":layout[1],"errors":run.errors})
-            self.assertEqual([200],[status for path,status in responses if path.endswith('/page-boot.js')],
+            self.assertEqual([200],[status for path,status in responses if path.endswith('/'+name)],
                              "actual page-boot.js response must arrive")
             run.booted()
             self.assertEqual([],run.errors)
@@ -1542,11 +1552,17 @@ class PermissionBoundary(PreCase):
         raw["delivered"] = list(run.delivery.bodies)
         return raw
 
-    def compare(self, label, action, hold="viewer-launch.js", reference="approved", reference_count=None):
+    def compare(self, label, action, hold="viewer-launch.js", reference="approved", reference_count=None, current_count=None):
+        if reference_count == 45 and current_count is None and Pages.layout("current", "actual")[1].get("bundle"):
+            # Retain the historical internal-gap assertions on generated C45.
+            # The delivered bundle has no such gap: compare its auth-wait input
+            # with B's inline auth-wait, without granting any trace exemption.
+            self.compare(label + "-generated", action, hold, reference, 45, current_count=45)
+            reference_count = 0
         base = ARTIFACTS / "permission" / label / reference / str(hold)
         values, raws = [], []
         for side, key in ((reference,"original"),("current","candidate")):
-            run = self.start(side, hold, count=reference_count if key=="original" else None)
+            run = self.start(side, hold, count=reference_count if key=="original" else current_count)
             try:
                 values.append(action(run))
                 raw = self.finish(run)
@@ -1625,7 +1641,17 @@ class PermissionBoundary(PreCase):
         run.page.evaluate("localStorage.setItem('kin.ohif.current.rect',JSON.stringify({left:9000,top:0,width:800,height:600}))")
         row=run.page.locator("#rows tr",has_text=h.PATIENT).first
         run.steps.prepare_control(row,"permission popup row")
-        row.dblclick()
+        # Playwright's locator double-click can scroll the wide row again and
+        # race its native scroll event against pointerdown. Use the same visible
+        # hit target and render checkpoints as click_control on both pages;
+        # retain every scroll and click dispatch in the full trace comparison.
+        row.hover()
+        run.steps.native_frames()
+        for click_count in (1, 2):
+            run.page.mouse.down(click_count=click_count)
+            run.steps.native_frames()
+            run.page.mouse.up(click_count=click_count)
+            run.steps.native_frames()
         run.steps.rendered("permission popup requested")
         features=run.page.evaluate("window.__permission.opened.at(-1)?.features")
         self.assertTrue(features,"PRECONDITION row double-click requested a popup")
@@ -1682,14 +1708,26 @@ class PermissionBoundary(PreCase):
 
         def early(run):
             self.query(run,"prompt")
-            self.assertNotIn("viewer-launch.js",run.page.evaluate("window.__kinTrace.executed"),
-                             "PRECONDITION early Monitor before viewer-launch")
+            internal_gap = "viewer-launch.js" in run.delivery.manifest["parts"]
+            if internal_gap:
+                self.assertNotIn("viewer-launch.js",run.page.evaluate("window.__kinTrace.executed"),
+                                 "PRECONDITION early Monitor before viewer-launch")
+            else:
+                self.assertTrue(any(q["path"] == "/api/me" and q["held"] and "released_at" not in q for q in run.site.ledger),
+                                "PRECONDITION early Monitor before auth response")
             self.click_monitor(run)
             run.wait("window.__permission.detailsRequests.length===1","early Monitor actually requests details")
             run.page.evaluate("window.__permission.change(0,'granted'); window.__permission.resolveDetails(0,3000)")
             run.page.evaluate("() => Promise.resolve()")
-            self.assertEqual([False],self.state(run)["screenHandlers"],"unknown session cannot commit early Monitor reply")
-            self.assertNotIn("모니터 배치 허용됨",run.page.locator('body').inner_text(),"ignored early reply is not completed work")
+            if internal_gap:
+                self.assertEqual([False],self.state(run)["screenHandlers"],"unknown session cannot commit early Monitor reply")
+                self.assertNotIn("모니터 배치 허용됨",run.page.locator('body').inner_text(),"ignored early reply is not completed work")
+            else:
+                # B's single Script has already initialized the document before
+                # waiting for auth. Preserve that observed result on bundle C;
+                # it is a different phase from the generated pre-boot gap above.
+                self.assertEqual([True],self.state(run)["screenHandlers"],"initialized document keeps the original Monitor reply")
+                self.assertIn("모니터 배치 허용됨",run.page.locator('body').inner_text(),"original Monitor completion remains visible")
             return self.state(run)["screenHandlers"]
         self.compare("early-monitor",early,reference_count=45)
 
@@ -1803,6 +1841,10 @@ class LoadBudget(PreCase):
             page.close()
 
     def test_uninstrumented_paired_load_budget(self):
+        mode = os.environ.get("KIN_PRE_LOAD_MODE", "hosted")
+        if mode == "hosted":
+            return self.hosted_budget()
+        self.assertEqual("route-diagnostic", mode, "unknown load mode")
         layouts = {"baseline": Pages.layout("approved", 0), "candidate": Pages.layout("current", "actual")}
         result = {"cache": "Playwright routing disables HTTP cache; repeat samples are not warm-cache evidence",
                   "warm_status": "not_run: requires hosted HTTP origin", "cold": [], "repeat_cache_disabled": []}
@@ -1838,6 +1880,104 @@ class LoadBudget(PreCase):
                 self.assertLessEqual(delta, limit, metric + " cold load regression budget")
         finally:
             sh.keep(ARTIFACTS / "load-budget", "samples.json", result)
+
+    def hosted_budget(self):
+        import live_test_gate as gate
+        import main_load_hosted as hosted
+        try:
+            gate.require_live_run()
+        except gate.Refused:
+            # The full DOM suite holds no live lease. Only its hosted case enters
+            # the normal runner; a refusal is preserved, never bypassed here.
+            unit = os.environ.get("KIN_PRE_LOAD_UNIT")
+            self.assertTrue(unit, "hosted LoadBudget requires KIN_PRE_LOAD_UNIT for the normal live gate")
+            command = [sys.executable, "-B", str(ROOT / "scripts/run-tests.py"), "--module",
+                       "tests/main_early_input_dom_test.py", "--class", "LoadBudget", "--mode", "live",
+                       "--unit", unit, "--timeout", "600"]
+            completed = subprocess.run(command, cwd=ROOT, capture_output=True)
+            directory = ARTIFACTS / "load-budget"
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "gate.stdout").write_bytes(completed.stdout)
+            (directory / "gate.stderr").write_bytes(completed.stderr)
+            sh.keep(directory, "gate.json", {"command": command, "exit": completed.returncode})
+            self.assertEqual(0, completed.returncode, "hosted LoadBudget gate/child: see load-budget/gate.stderr")
+            return
+
+        result = {"mode": "hosted", "baseline_sha": Pages.commits["approved"], "cold": [], "warm": [],
+                  "visits": [], "budgets": {}, "verdict": "FAIL", "valid_pairs": {"cold": 0, "warm": 0},
+                  "observation": "host monotonic: goto call -> first /api/me request; server auth release -> searchable list",
+                  "cache": "fresh context per side/pair; warm new page immediately after cold in same context; no routing/cache override"}
+        directory = ARTIFACTS / "load-budget"
+        directory.mkdir(parents=True, exist_ok=True)
+        stack = hosted.HostedStack(directory / "stack", PreSite, Pages.commits["approved"], PAGE.parent)
+        errors = []
+        started = time.perf_counter()
+        try:
+            stack.prepare()
+            result["browser"] = self.browser.version
+            for index in range(5):
+                order = ("baseline", "candidate") if index % 2 == 0 else ("candidate", "baseline")
+                pairs = {"cold": {}, "warm": {}}
+                for side in order:
+                    stack.activate(side)
+                    context_id = f"pair-{index + 1}-{side}"
+                    context = self.browser.new_context(viewport={"width": 1400, "height": 900},
+                        locale="ko-KR", timezone_id="Asia/Seoul", ignore_https_errors=True)
+                    try:
+                        for mode in ("cold", "warm"):
+                            metadata = {"pair": index + 1, "order": list(order), "context": context_id,
+                                        "mode": mode, "visit": len(result["visits"]) + 1}
+                            sample = hosted.visit(stack, context, CLOCK_START, h.PATIENT, metadata)
+                            pairs[mode][side] = sample
+                            result["visits"].append(sample)
+                    finally:
+                        context.close()
+                for mode, pair in pairs.items():
+                    result[mode].append(pair)
+                    result["valid_pairs"][mode] += int(all(s["valid"] for s in pair.values()))
+                    try:
+                        hosted.assert_script_requests(pair["baseline"]["script_requests"],
+                                                      pair["candidate"]["script_requests"])
+                    except AssertionError as error:
+                        errors.append(f"{mode} pair {index + 1}: {error}")
+                    for field in ("console_errors", "non_script_requests"):
+                        if Counter(map(str, pair["baseline"][field])) != Counter(map(str, pair["candidate"][field])):
+                            errors.append(f"{mode} pair {index + 1}: different {field}")
+                sh.keep(directory, "samples.json", result)
+            for mode in ("cold", "warm"):
+                result["budgets"][mode] = {}
+                if result["valid_pairs"][mode] != 5:
+                    errors.append(f"{mode}: fewer than 5 valid pairs")
+                for metric in ("navigation_to_auth_ms", "auth_to_usable_ms"):
+                    before = [p["baseline"][metric] for p in result[mode]]
+                    after = [p["candidate"][metric] for p in result[mode]]
+                    limit = max(250, statistics.median(before) * .10)
+                    delta = statistics.median(after) - statistics.median(before)
+                    result["budgets"][mode][metric] = {"baseline_median": statistics.median(before),
+                        "candidate_median": statistics.median(after), "baseline_max": max(before),
+                        "candidate_max": max(after), "delta": delta, "limit": limit, "passed": delta <= limit}
+                    if delta > limit:
+                        errors.append(f"{mode} {metric}: {delta:.3f}ms > {limit:.3f}ms ({delta-limit:.3f}ms over)")
+            hosted.missing_bundle(stack, self.browser)
+            recovery = self.browser.new_context(viewport={"width": 1400, "height": 900},
+                locale="ko-KR", timezone_id="Asia/Seoul", ignore_https_errors=True)
+            try:
+                result["failure_recovery"] = hosted.visit(stack, recovery, CLOCK_START, h.PATIENT,
+                    {"mode": "recovery", "visit": 21, "note": "diagnostic recovery; excluded from timing pairs by design"})
+            finally:
+                recovery.close()
+            result["errors"] = errors
+            self.assertEqual([], errors, "hosted load budget")
+            result["verdict"] = "PASS"
+        finally:
+            try:
+                stack.close()
+            except BaseException:
+                result["verdict"] = "FAIL"
+                raise
+            finally:
+                result["duration_seconds"] = time.perf_counter() - started
+                sh.keep(directory, "samples.json", result)
 
 
 class TraceOracle(PreCase):
@@ -2029,6 +2169,26 @@ class HarnessSelfChecks(PreCase):
                 "cols": {}, "sortKey": None, "sortDir": 0, "isDefault": False}
 
     def test_request_occurrences_release_the_exact_request_and_canonical_query(self):
+        # D934: collection waits must not conceal changed script identities or
+        # duplicate requests. These mutants exercise the hosted comparison itself.
+        from main_load_hosted import assert_script_requests
+        prefix = "/worklist/hpacs-lite/"
+        baseline = [("GET", prefix + "auth.js", ""), ("GET", prefix + "critical-result-inbox.js", "")]
+        candidate = baseline + [("GET", prefix + "main-split.bundle.js", "")]
+        assert_script_requests(baseline, candidate)
+        mutants = {"added": candidate + [("GET", prefix + "extra.js", "")],
+                   "removed": candidate[1:],
+                   "renamed": [("GET", prefix + "renamed.js", "")] + candidate[1:],
+                   "duplicate": candidate + [candidate[0]],
+                   "bundle-missing": baseline,
+                   "query-changed": [("GET", prefix + "auth.js", "v=changed")] + candidate[1:]}
+        for label, requests in mutants.items():
+            with self.subTest(hosted_script_mutant=label):
+                with self.assertRaisesRegex(AssertionError, "different script requests"):
+                    assert_script_requests(baseline, requests)
+        sh.keep(ARTIFACTS / "hosted-request-mutants", "results.json",
+                {"baseline": baseline, "candidate": candidate,
+                 "mutants": [{"id": label, "requests": rows, "killed": True} for label, rows in mutants.items()]})
         run = Run(self, Pages.current.layout("actual"))
         try:
             run.booted()

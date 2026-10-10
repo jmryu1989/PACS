@@ -237,7 +237,7 @@ PART2_MUTANTS = [
     {"id": "S2-M05", "case": "ActualLayout.test_actual_part2_script_responses_are_complete",
      "expect": "actual report-draft-save.js response must arrive", "file": HARNESS,
      "old": '    def _fulfill(self, route, name):\n        body = self.body(name)',
-     "new": '    def _fulfill(self, route, name):\n        if name == "report-draft-save.js" and self.manifest.get("kind") == "actual":\n            return route.abort("failed")\n        body = self.body(name)'},
+     "new": '    def _fulfill(self, route, name):\n        if name == (self.manifest.get("bundle") or "report-draft-save.js") and self.manifest.get("kind") == "actual":\n            return route.abort("failed")\n        body = self.body(name)'},
 ]
 S2_EXEC = [{"id": "S2-M06", "case": "Registration.test_a_report_field_input_reaches_its_listeners_in_the_original_order",
             "expect": "the (target, event, listener) invocation order of one focus/keypress"}]
@@ -255,7 +255,7 @@ PART3_MUTANTS = [
     {"id":"S3-M07","case":"ActualLayout.test_actual_part3_boot_response_is_complete",
      "expect":"actual page-boot.js response must arrive","file":HARNESS,
      "old":'    def _fulfill(self, route, name):\n        body = self.body(name)',
-     "new":'    def _fulfill(self, route, name):\n        if name == "page-boot.js" and self.manifest.get("kind") == "actual":\n            return route.abort("failed")\n        body = self.body(name)'},
+     "new":'    def _fulfill(self, route, name):\n        if name == (self.manifest.get("bundle") or "page-boot.js") and self.manifest.get("kind") == "actual":\n            return route.abort("failed")\n        body = self.body(name)'},
 ]
 PERMISSION_MUTANTS = [
     {"id":"PERM-M01","case":"PermissionBoundary.test_change_is_available_immediately_and_twice",
