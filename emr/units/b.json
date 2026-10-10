@@ -67,7 +67,10 @@
       "api/src/emr-runtime/state-client-worker.ts",
       "api/src/emr-runtime/limits.ts",
       "api/src/emr-runtime/admission.ts",
-      "api/src/emr-runtime/client.ts"
+      "api/src/emr-runtime/client.ts",
+      "api/prisma/migrations/20261010150000_emr_read_jit_off/migration.sql",
+      "tests/emr/b/quiet_host.py",
+      "tests/emr/b/quiet_host_test.py"
     ],
     "B1-B2": [
       "api/src/emr-contract/README.md",
@@ -184,9 +187,10 @@
   "migrations": {
     "added": [
       "20261008120000_emr_b",
-      "20261010120000_emr_seal_attempts"
+      "20261010120000_emr_seal_attempts",
+      "20261010150000_emr_read_jit_off"
     ],
-    "count": 44,
+    "count": 45,
     "latest_before": "20261007200000_designation_subjects"
   },
   "deployment": {
@@ -384,6 +388,11 @@
       "req": "REQ-D941",
       "risk": "RISK-EMR-RECEIPT-JIT/POOL/FALSE-PERFORMANCE-ACCEPT",
       "test": "L03 L03b L03c PLAN-01 POOL-01 POOL-02 noninferiority_test C22 seal_checker ci/full"
+    },
+    {
+      "req": "REQ-D949",
+      "risk": "RISK-EMR-FALSE-PERFORMANCE-ACCEPT/HOST-NOISE/NESTED-JIT",
+      "test": "L03 L03b L03c PLAN-02 PLAN-03 noninferiority_test quiet_host_test power_self_check measurement_ci main deadline clamp restore config preservation"
     }
   ],
   "cases": {

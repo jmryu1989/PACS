@@ -16,6 +16,28 @@ from live_admin_credential_test import ImportedAdminCredentialTests
 
 
 class MeasurementCiTests(unittest.TestCase):
+    def test_main_uses_profile_deadline_to_clamp_commands_and_preserves_cleanup(self):
+        # REQ-D949 -> RISK-CI-DEADLINE-DRIFT: observe the actual subprocess bound
+        # passed by main(), without binding a source string or internal layout.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            calls = []
+            def execute(command, **kwargs):
+                calls.append((command, kwargs['timeout']))
+                return SimpleNamespace(returncode=1 if 'up' in command else 0, stdout=b'', stderr=b'')
+            profile = dict(ci.PROFILES['emr-b'], out=root/'out')
+            with patch.dict(os.environ, {'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted'}, clear=True), \
+                    patch.object(ci, 'ROOT', root), patch.dict(ci.PROFILES, {'emr-b': profile}), \
+                    patch.object(ci, 'seed_source'), patch.object(ci, 'profile_deadline_seconds', return_value=37), \
+                    patch.object(ci.time, 'monotonic', side_effect=[100, 105, 106, 107, 108, 109, 110]), \
+                    patch.object(ci.subprocess, 'check_output', side_effect=[b'', b'', b'unix:///runner.sock']), \
+                    patch.object(ci.subprocess, 'run', side_effect=execute), contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(RuntimeError):
+                    ci.main('emr-b')
+            self.assertEqual(calls[0][1], 32)
+            self.assertEqual([timeout for argv, timeout in calls if 'logs' in argv], [30])
+            self.assertEqual([timeout for argv, timeout in calls if 'down' in argv], [60])
+
     def test_context_loss_profile_selects_only_its_declared_cases_on_a_fresh_runner(self):
         import ast
         import yaml
