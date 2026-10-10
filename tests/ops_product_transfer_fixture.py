@@ -540,14 +540,24 @@ def execute(name, db, sql):
     require(psql(name, db, sql+"; SELECT 'SYNTHETIC-OK';") == b'SYNTHETIC-OK')
 
 
-def provision(name):
+def provision(name, installer='postgres'):
     """The fixed EMR provisioning (cluster roles, a synthetic runtime secret, the tablespace) before any migration or
     restore. pg_dump/pg_restore never carry roles or tablespaces."""
-    command(['docker', 'exec', name, 'mkdir', '-p', '-m', '700', EMR_TABLESPACE])
+    # Standalone test containers start as root; PostgreSQL must own the placement directory.
+    command(['docker', 'exec', '--user', 'postgres', name, 'mkdir', '-p', '-m', '700', EMR_TABLESPACE])
     result = subprocess.run(['docker', 'exec', '-i', '-e', 'KIN_EMR_RUNTIME_PASSWORD='+uuid.uuid4().hex, name, 'psql', '-X',
-                             '-U', 'postgres', '-d', 'postgres', '-v', 'tablespace_location='+EMR_TABLESPACE],
+                             '-U', installer, '-d', 'postgres', '-v', 'tablespace_location='+EMR_TABLESPACE],
                             input=emr_compose.PROVISION_SQL.encode(), capture_output=True, timeout=60)
     require(result.returncode == 0)
+    # D984: observe cluster prerequisites before any migration/restore can supply or hide them.
+    observed = subprocess.run(['docker', 'exec', name, 'psql', '-XqAt', '-U', installer, '-d', 'postgres',
+                               '-v', 'ON_ERROR_STOP=1', '-c',
+                               "SELECT pg_get_userbyid(spcowner), pg_tablespace_location(oid) "
+                               "FROM pg_tablespace WHERE spcname='kin_emr_access'; "
+                               "SELECT rolname FROM pg_roles WHERE rolname IN ("+
+                               ','.join(sql_literal(role) for role in EMR_ROLES)+") ORDER BY rolname;"],
+                              capture_output=True, timeout=30, check=True)
+    require(observed.stdout.decode().splitlines() == ['kin_emr_owner|'+EMR_TABLESPACE, *sorted(EMR_ROLES)])
 
 
 def seed_emr(name, db):

@@ -44,6 +44,7 @@ import time
 import unittest
 from unittest.mock import patch
 import uuid
+import ops_product_transfer_fixture as transfer
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -179,17 +180,19 @@ class AuditStoreDB(unittest.TestCase):
         cls.label = "s7.audit.store.test=" + cls.token
         cls.work = Path(tempfile.mkdtemp(prefix="kin-audit-db-"))
         cls.db = "kin-audit-db-" + cls.token[:12]
+        cls.addClassCleanup(cls.cleanup_cluster)
         docker("run", "-d", "--name", cls.db, "--label", cls.label, "--network", "none",
                "--tmpfs", "/var/lib/postgresql/data", "-e", "POSTGRES_USER=kin", "-e", "POSTGRES_DB=kin",
                "-e", "POSTGRES_HOST_AUTH_METHOD=trust", POSTGRES)
         wait_ready(cls.db, "kin")
+        transfer.provision(cls.db, installer="kin")
         cls.db_image = docker("inspect", "--format", "{{.Image}}", cls.db).stdout.decode().strip()
         cls.deploy("kin")
         # every later database is a copy of this migrated, empty one (CREATE DATABASE ... TEMPLATE)
         cls.sql("CREATE DATABASE audit_template TEMPLATE kin")
 
     @classmethod
-    def tearDownClass(cls):
+    def cleanup_cluster(cls):
         for identity in docker("ps", "-aq", "--filter", "label=" + cls.label).stdout.decode().split():
             docker("rm", "-f", "-v", identity, check=False)
         shutil.rmtree(cls.work, ignore_errors=True)
@@ -312,6 +315,7 @@ class AuditStoreDB(unittest.TestCase):
         docker("run", "-d", "--name", name, "--label", self.label, "--network", "none", "--tmpfs", "/var/lib/postgresql/data",
                "-e", "POSTGRES_HOST_AUTH_METHOD=trust", self.db_image)
         wait_ready(name, "postgres")
+        transfer.provision(name)
         docker("exec", name, "createdb", "-U", "postgres", "kin")
         docker("exec", "-i", name, "pg_restore", "-U", "postgres", "-d", "kin", "--no-owner", "--no-privileges",
                "--exit-on-error", input=(folder / "kin.dump").read_bytes())
@@ -666,8 +670,8 @@ const { PrismaService } = require('/app/dist/prisma.service');
         Deployment ownership/ACL/placement and same-pause state are separately required by the L19 rehearsal.
         """
         db = self.new_database("iv19", rows=3)
-        docker("exec", "-u", "postgres", self.db, "mkdir", "-m", "700", "/tmp/emr-verifier-tablespace")
-        self.ok("CREATE TABLESPACE kin_emr_access OWNER kin_emr_owner LOCATION '/tmp/emr-verifier-tablespace'")
+        self.assertEqual(self.ok("SELECT pg_get_userbyid(spcowner) FROM pg_tablespace "
+                                 "WHERE spcname='kin_emr_access'"), ["kin_emr_owner"])
         self.ok('ALTER TABLE public."AuditLog" SET TABLESPACE kin_emr_access; '
                 'ALTER TABLE emr_access.member_identity SET TABLESPACE kin_emr_access', db)
         root = self.new_root()
