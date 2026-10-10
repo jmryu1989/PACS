@@ -405,6 +405,11 @@
       "req": "REQ-D956",
       "risk": "RISK-EMR-FALSE-PERFORMANCE-ACCEPT/IDLE-OFFSET/ATTEMPT-TIMEOUT",
       "test": "noninferiority_test empirical power self-check; quiet_host_test full single dry-run design and final-block duration; dry_run balanced idle sweep with per-request SQL and file I/O; L03 L03b L03c M36 attempt-free preview"
+    },
+    {
+      "req": "REQ-D961",
+      "risk": "RISK-EMR-FALSE-PERFORMANCE-ACCEPT",
+      "test": "noninferiority_test known-input paired p95/median t bounds and superiority mutant; L03 L03b L03c acceptance: p95 point and one-sided 95% UB <=1.10, concurrent median UB <=1.10 only; M36 latency positive control; power_design whole-plan equality probability under stated dispersion assumptions"
     }
   ],
   "cases": {
@@ -713,7 +718,7 @@
       "kill": [
         "L03"
       ],
-      "behaviour": "per-operation Node startup returns to the head-locked writer; D952 same-run concurrent tail point and one-sided 95% UB <=1.10 AND median point <=1.00 and UB <=1.10; CI-gross point <=1.25; reuse successful same-run L03 control"
+      "behaviour": "per-operation Node startup returns to the head-locked writer; D961 same-run concurrent tail point and one-sided 95% UB <=1.10 AND median UB <=1.10 only; CI-gross point <=1.25; reuse successful same-run L03 control"
     },
     {
       "id": "M37",

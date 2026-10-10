@@ -164,7 +164,7 @@ def reporting_self_test():
                 calls = []
                 def exercise(image, cases, log):
                     calls.append(image)
-                    log.write_text('FAIL: ' + LIVE['L03'] + ' (probe)\nAssertionError: D952 receipt latency\n')
+                    log.write_text('FAIL: ' + LIVE['L03'] + ' (probe)\nAssertionError: D961 receipt latency\n')
                     return SimpleNamespace(wasSuccessful=lambda: False, skipped=[])
                 reused = {'passed': True, 'reused': True, 'image': 'healthy-id', 'log': 'same-run-summary', 'sha256': 'bound'}
                 env = {'KIN_TEST_API_IMAGE': 'healthy', 'KIN_EMR_MUTANT_SOURCE_MANIFEST': 'unused',

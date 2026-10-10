@@ -2,7 +2,7 @@
 
 Explicit entrypoint only: does not call run-tests, grant a live ticket, acquire
 a lease, or masquerade as GitHub Actions. The runner-facing cases retain their
-live guard. Full single and reduced other workloads preview every D952 rule;
+live guard. Full single and reduced other workloads report D961 statistics;
 never final acceptance. D956 also permits a separate instrumented idle sweep.
 """
 import argparse
