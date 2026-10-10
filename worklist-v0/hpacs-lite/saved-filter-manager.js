@@ -648,6 +648,25 @@
     window.addEventListener('beforeunload', e => {
       if (dialog.open && (busy || dirty() || organizerDirty())) { e.preventDefault(); e.returnValue = ''; }
     });
+    function reset() {
+      // Recover Draft can retain this document after logout. Closing the dialog
+      // alone would leave this account's search and organizer drafts accessible.
+      operation?.abort(); operation = null; interruptedAction = null;
+      selected = null; source = {}; baseline = ''; opener = null; editable = false;
+      copying = false; visibleNames = []; missingName = null; cursor = null;
+      collection = null; folderBaseline = ''; collapsed.clear(); checked.clear();
+      sharing.reset();
+      dialog.querySelectorAll('input, textarea, select').forEach(control => {
+        control.value = '';
+        if (control.type === 'checkbox') control.checked = false;
+        control.setCustomValidity('');
+      });
+      for (const id of ['list', 'folders', 'cols', 'rules', 'days', 'sort']) $(id).replaceChildren();
+      lock(false);
+      for (const id of ['count', 'position', 'bulk-count', 'body-parts-status']) $(id).textContent = '';
+      status('');
+      if (dialog.open) dialog.close();
+    }
     work.onInvalidate(event=>{
       if(event.reason==='lifecycle'&&!['active','preparing'].includes(event.state)){operation?.abort();operation=null;if(dialog.open)dialog.close();}
       if(event.reason==='cancel'){
@@ -659,8 +678,8 @@
         },true);
       }
     });
-    return { refreshCounts() { if (dialog.open) count(); }, open({ name } = {}) {
-      if (dialog.open) return;
+    return { reset, refreshCounts() { if (dialog.open) count(); }, open({ name } = {}) {
+      if (dialog.open || !['active', 'preparing'].includes(work.state())) return;
       opener = document.activeElement; $('search').value = ''; status('');
       collection = null; checked.clear();
       sharing.reset();

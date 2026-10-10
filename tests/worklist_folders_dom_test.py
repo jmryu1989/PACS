@@ -566,6 +566,17 @@ class WorklistFoldersDOM(unittest.TestCase):
             };
           }
         """))
+        self.context.route('**/saved-filter-manager.js', lambda route: route.fulfill(
+            content_type='application/javascript', body=(auth.ROOT / 'worklist-v0/hpacs-lite/saved-filter-manager.js').read_text(encoding='utf-8') + """
+          { const mount = KinSavedFilterManager.mount;
+            KinSavedFilterManager.mount = options => {
+              const api = mount(options), reset = api.reset;
+              window.savedSearchLifecycle = api; window.savedSearchResets = 0;
+              if (reset) api.reset = () => { const result = reset(); ++window.savedSearchResets; return result; };
+              return api;
+            };
+          }
+        """))
         self.page.goto(auth.MAIN_URL)
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
         self.page.locator('#rows tr[data-uid]').click()
@@ -574,10 +585,47 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.page.locator('#worklist-folders-toggle').click()
         expect(self.folder('Private shortcut')).to_be_visible()
         old_button = self.folder('Private shortcut').element_handle()
+        nav = self.page.get_by_role('navigation', name='Folders')
+        nav.locator('details > summary').click()
+        nav.get_by_label('Shortcut Name', exact=True).first.fill('SYN private rename draft')
+        nav.get_by_label('Shortcut Name', exact=True).last.fill('SYN private shortcut draft')
+        self.page.locator('#toolbar-filters > summary').click()
+        self.page.locator('#managefilters').click()
+        self.page.locator('#sfm-name').fill('Unsaved search draft')
+        self.page.locator('#sfm-folder').fill('SYN private folder')
+        self.page.locator('#sfm-description').fill('SYN private description')
+        self.page.locator('#sfm-quick').fill('SYN private patient query')
+        self.page.locator('#sfm-default').check()
+        self.page.locator('#sfm-add-rule').click()
+        rule = self.page.locator('#sfm-rules [data-rule-field]')
+        rule.select_option('date')
+        self.page.locator('#sfm-rules [data-rule-op]').select_option('withinLastDays')
+        self.page.locator('#sfm-rules [data-relative-preset]').select_option('7')
+        self.page.locator('#sfm-organize > summary').click()
+        for field in ['folder-path', 'folder-description', 'folder-destination']:
+            self.page.locator('#sfm-' + field).fill('SYN private ' + field)
+        self.page.locator('#sfm-shared > summary').click()
+        for field in ['source', 'destination', 'prefix']:
+            self.page.locator('#sfs-' + field).fill('SYN private ' + field)
+        self.page.locator('#sfm-close').click()
+        expect(self.page.locator('#sfm-name')).to_have_value('Unsaved search draft')
         self.site.ended.add(self.site.cookie)
         self.page.locator('#refresh').click()
         expect(self.page.locator('dialog.kin-logout h2')).to_have_text('Session Ended')
         expect(self.page).to_have_url(auth.MAIN_URL)
+        # W2L4-01 / REQ-WS3 -> RISK-WS3: hiding the manager must not retain an
+        # account's drafts while Recover Draft keeps this document alive.
+        expect(self.page.locator('#sfm-name')).to_have_value('')
+        self.assertGreater(self.page.evaluate('window.savedSearchResets'), 0)
+        self.assertEqual([], self.page.locator('#saved-filter-manager input, #saved-filter-manager textarea, #saved-filter-manager select').evaluate_all(
+            "fields => fields.filter(f => f.type === 'checkbox' ? f.checked : f.value !== '').map(f => ({id:f.id,value:f.value}))"))
+        expect(self.page.locator('#sfm-rules input, #sfm-rules select')).to_have_count(0)
+        self.assertNotIn('SYN private', self.page.locator('body').text_content())
+        self.assertEqual([], self.page.locator('input, textarea').evaluate_all(
+            "fields => fields.filter(f => f.value.includes('SYN private')).map(f => f.value)"))
+        expect(self.page.get_by_role('button', name='Recover Draft', exact=True)).to_be_visible()
+        self.page.evaluate('window.savedSearchLifecycle.open()')
+        expect(self.page.locator('#saved-filter-manager')).not_to_be_visible()
         expect(self.page.locator('#worklist-folders nav')).to_have_count(0)
         # Public module lifecycle: the old owner cannot operate its detached tree.
         self.assertTrue(self.page.evaluate("() => {try {window.folderLifecycle.select('all');return false;} catch(e){return true;}}"))
@@ -597,6 +645,43 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.page.locator('#worklist-folders-toggle').click()
         self.assertNotIn('Private shortcut', self.page.locator('body').text_content())
         self.assertNotIn('Shared CT', self.page.locator('body').text_content())
+
+    def test_session_end_resets_open_manager_with_pending_save(self):
+        # A save response arriving after account end must not restore its editor.
+        self.site.modalities = ['CT']
+        original = self.site.list_body
+        def one_study(account, rename=None):
+            body = original(account, rename)
+            body['studies'][0]['uid'] = auth.UID
+            return body
+        self.site.list_body = one_study
+        pending = []
+        self.context.route('**/api/filters', lambda route, request:
+            pending.append((route, request.post_data_json)) if request.method == 'POST' else route.fallback())
+        self.page.goto(auth.MAIN_URL)
+        self.page.locator('#rows tr[data-uid]').click()
+        expect(self.page.locator('#findings')).to_be_editable()
+        self.page.locator('#findings').fill('SYN report recovery must survive')
+        self.page.locator('#toolbar-filters > summary').click()
+        self.page.locator('#managefilters').click()
+        self.page.locator('#sfm-name').fill('SYN pending saved search')
+        with self.page.expect_request(lambda request: request.method == 'POST' and request.url.endswith('/api/filters')):
+            self.page.locator('#sfm-save').click()
+        expect(self.page.locator('#sfm-save')).to_be_disabled()
+        self.assertEqual(1, len(pending))
+        self.page.evaluate('KinAuth.replaced({session: KinWorkContext.session()})')
+        expect(self.page.locator('dialog.kin-logout h2')).to_have_text('Session Ended')
+        expect(self.page.locator('#sfm-name')).to_have_value('')
+        route, draft = pending.pop()
+        self.site.answer(route, 201, dict(draft, id=41))
+        # Drain browser responses and promise callbacks without reopening the document.
+        self.page.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+        expect(self.page.locator('#saved-filter-manager')).not_to_be_visible()
+        expect(self.page.locator('#saved-filter-manager')).to_have_attribute('aria-busy', 'false')
+        expect(self.page.locator('#sfm-name')).to_have_value('')
+        expect(self.page.locator('#sfm-status')).to_have_text('')
+        self.assertNotIn('SYN pending saved search', self.page.locator('body').text_content())
+        expect(self.page.get_by_role('button', name='Recover Draft', exact=True)).to_be_visible()
 
     def test_manager_read_write_failure_clears_progress_status(self):
         self.open()

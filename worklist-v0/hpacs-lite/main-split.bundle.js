@@ -10345,6 +10345,7 @@
       listLoadSequence++; commitEpoch++;
       markSelectionChanged(null);
       relatedUid = null; studies = [];
+      savedFilterManager.reset();
       worklistFolders?.destroy(); worklistFolders = null;
       folderLoadState = 'unknown'; folderAppliedSearch = null; filterCollection = null;
       sharedSearches = []; storedShortcuts = []; shortcutDraft = null; shortcutBusy = false; ++filterReadSequence; ++sharedFilterReadSequence;
@@ -10390,6 +10391,7 @@
     KinAuth.beforeLogoutPost(() => releaseHold({ closing: true }));
     // 저장을 확인하지 못한 판독문이 메모리에 있는 동안에는 종료 뒤에도 이 문서를 떠나지 않는다.
     KinAuth.holdLeave(() => !!logoutPrep && ["saving", "failed", "ended"].includes(logoutPrep.state));
+
 
     // ══════════ 시작 ══════════
     // 서버가 살아 있으면 서버 상태로 시작하고, 죽어 있으면 localStorage로 계속 굴러간다.

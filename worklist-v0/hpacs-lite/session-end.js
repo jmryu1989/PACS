@@ -47,6 +47,7 @@
       listLoadSequence++; commitEpoch++;
       markSelectionChanged(null);
       relatedUid = null; studies = [];
+      savedFilterManager.reset();
       worklistFolders?.destroy(); worklistFolders = null;
       folderLoadState = 'unknown'; folderAppliedSearch = null; filterCollection = null;
       sharedSearches = []; storedShortcuts = []; shortcutDraft = null; shortcutBusy = false; ++filterReadSequence; ++sharedFilterReadSequence;
