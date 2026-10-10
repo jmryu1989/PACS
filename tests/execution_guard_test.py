@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
 import tempfile
@@ -624,7 +625,7 @@ class ExecutionGuardTests(unittest.TestCase):
             'runner.ROOT=Path('+repr(str(self.tests.parent))+')\n'
             'runner.gate.STATE=Path('+repr(str(self.state))+')\n'
             'runner.__file__=__file__\nraise SystemExit(runner.main())\n', encoding='utf-8')
-        (self.tests/'probe.py').write_text('''import subprocess, sys, time, unittest
+        (self.tests/'probe.py').write_text('''import json, socket, subprocess, sys, time, unittest
 from pathlib import Path
 from live_test_gate import require_live_run
 BASE=Path(__file__).parent
@@ -632,13 +633,42 @@ class Probe(unittest.TestCase):
  def test_pass(self): (BASE/'passed').write_text('yes')
  def test_fail(self): self.fail('intentional synthetic failure')
  def test_live(self): require_live_run(); (BASE/'live').write_text('yes')
- def test_hold(self): require_live_run(); (BASE/'holding').write_text('yes'); time.sleep(2)
+ def test_hold(self):
+  require_live_run()
+  with socket.create_connection(json.loads((BASE/'address.json').read_text()), timeout=75) as ready:
+   ready.sendall(b'R')
+   self.assertEqual(ready.recv(1), b'G')
  def test_timeout(self):
-  subprocess.Popen([sys.executable,'-c',"import time;from pathlib import Path;time.sleep(3);Path("+repr(str(BASE/'escaped'))+").write_text('bad')"])
-  time.sleep(8)
+  child = subprocess.Popen([sys.executable, str(BASE/'descendant.py')])
+  child.wait(timeout=90)
+''', encoding='utf-8')
+        (self.tests/'descendant.py').write_text('''import json, socket
+from pathlib import Path
+base = Path(__file__).parent
+with socket.create_connection(json.loads((base/'address.json').read_text()), timeout=75) as ready:
+ ready.sendall(b'R')
+ if ready.recv(1) == b'G':
+  (base/'escaped').write_text('bad')
+  ready.sendall(b'E')
 ''', encoding='utf-8')
 
-    def plan(self, unit='probe', case='test_pass', mode='pure', timeout=10, attempts=3):
+    def readiness_listener(self):
+        listener = socket.socket()
+        self.addCleanup(listener.close)
+        listener.bind(('127.0.0.1', 0))
+        listener.listen(1)
+        listener.settimeout(20)
+        (self.tests/'address.json').write_text(json.dumps(listener.getsockname()), encoding='utf-8')
+        return listener
+
+    def child_ready(self, listener):
+        connection, _ = listener.accept()
+        self.addCleanup(connection.close)
+        connection.settimeout(45)
+        self.assertEqual(connection.recv(1), b'R', 'Owned child did not signal readiness')
+        return connection
+
+    def plan(self, unit='probe', case='test_pass', mode='pure', timeout=30, attempts=3):
         value = dict(unit=unit, mode=mode, tests=[dict(file='tests/probe.py', case='Probe.'+case)],
                      max_attempts=attempts, timeout_seconds=timeout)
         path = self.path/(unit+'-input.json')
@@ -647,7 +677,7 @@ class Probe(unittest.TestCase):
 
     def run_plan(self, plan):
         return subprocess.run([sys.executable, '-B', str(self.bootstrap), '--plan', str(plan)],
-                              capture_output=True, timeout=20)
+                              capture_output=True, timeout=60)
 
     def test_live_stack_denies_before_configuration_or_network(self):
         import invariants_live as live
@@ -725,20 +755,19 @@ class Probe(unittest.TestCase):
         self.assertEqual(ledger['attempts'][0]['status'], 'interrupted')
 
     def test_live_process_lease_and_release(self):
+        listener = self.readiness_listener()
         first = subprocess.Popen([sys.executable, '-B', str(self.bootstrap), '--plan',
-                                  str(self.plan(unit='first', case='test_hold', mode='live'))],
+                                  str(self.plan(unit='first', case='test_hold', mode='live', timeout=90))],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(lambda: first.kill() if first.poll() is None else None)
-        deadline = time.monotonic()+8
-        while not (self.tests/'holding').exists() and time.monotonic() < deadline:
-            time.sleep(.05)
-        self.assertTrue((self.tests/'holding').exists())
+        ready = self.child_ready(listener)
         second = self.run_plan(self.plan(unit='second', case='test_live', mode='live'))
         self.assertEqual(second.returncode, 125)
         self.assertIn(b'Another run owns', second.stderr)
         self.assertFalse((self.state/'second.json').exists())
         self.assertFalse((self.tests/'live').exists())
-        self.assertEqual(first.wait(timeout=10), 0)
+        ready.sendall(b'G')
+        self.assertEqual(first.wait(timeout=30), 0)
         self.assertEqual(self.run_plan(self.plan(unit='third', case='test_live', mode='live')).returncode, 0)
 
     def test_failed_live_run_stays_closed_for_other_units(self):
@@ -806,13 +835,35 @@ class Probe(unittest.TestCase):
         self.assertEqual(self.run_plan(self.plan(unit='admitted', case='test_live', mode='live')).returncode, 0)
 
     def test_timeout_kills_owned_descendants_and_blocks_retry(self):
-        path = self.plan(case='test_timeout', mode='live', timeout=1)
-        result = self.run_plan(path)
-        self.assertEqual(result.returncode, 124, result.stderr)
-        time.sleep(3)
+        listener = self.readiness_listener()
+        # The budget includes imports/spawning. Readiness must arrive within 20s,
+        # before the 30s deadline, so taskkill sees an already running descendant.
+        path = self.plan(case='test_timeout', mode='live', timeout=30)
+        with subprocess.Popen([sys.executable, '-B', str(self.bootstrap), '--plan', str(path)],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE) as runner:
+            ready = self.child_ready(listener)
+            self.assertIsNone(runner.poll(), 'Runner expired before descendant readiness')
+            stdout, stderr = runner.communicate(timeout=60)
+            self.assertEqual(runner.returncode, 124, stderr)
+        # EOF/reset is an observable closed child, not an arbitrary delay before
+        # checking a file. A surviving child would remain blocked on recv.
+        try:
+            closed = ready.recv(1)
+        except ConnectionResetError:
+            closed = b''
+        self.assertEqual(closed, b'', stdout)
         self.assertFalse((self.tests/'escaped').exists())
         self.assertEqual(self.run_plan(path).returncode, 125)
         self.assertTrue((self.state/'live-needs-inspection.json').exists())
+
+    def test_descendant_fixture_can_observe_release_without_termination(self):
+        listener = self.readiness_listener()
+        with subprocess.Popen([sys.executable, str(self.tests/'descendant.py')]) as child:
+            ready = self.child_ready(listener)
+            ready.sendall(b'G')
+            self.assertEqual(ready.recv(1), b'E')
+            self.assertEqual(child.wait(timeout=30), 0)
+        self.assertEqual((self.tests/'escaped').read_text(), 'bad')
 
 
 # CH08 form: one local prefix reaches two execution calls (login and general branch).

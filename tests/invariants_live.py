@@ -355,7 +355,10 @@ def psql(sql: str) -> list[str]:
     completed = subprocess.run(
         ["docker", "compose", "exec", "-T", "-e", "PGTZ=UTC", "db", "psql", "-U", "kin", "-d", "kin",
          "-v", "ON_ERROR_STOP=1", "-qAt", "-c", sql],
-        cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+        # D736 / TEST-HYGIENE-2: Compose/psql startup can exceed 30s under
+        # concurrent viewer/CI load. Bound this harness operation at 120s;
+        # do not retry a potentially committed write or extend the live plan.
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
     )
     if completed.returncode:
         raise RuntimeError("psql 실패: " + completed.stdout + completed.stderr)

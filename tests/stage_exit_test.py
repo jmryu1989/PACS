@@ -207,6 +207,55 @@ class StageExitTest(unittest.TestCase):
         self.run_fixture()
         self.assert_failure(*self.verdict([TEST, "lean_fixture.LeanFixture.test_forgotten"]), "누락")
 
+    def test_nested_probe_selection_is_not_a_runner_record(self):
+        for probe in ('EXACT_TESTS ["first_failure.Probe.test_body"]test_body (first_failure.Probe) ... FAIL',
+                      'EXACT_TESTS ["first_failure.Probe.test_body"]'):
+            with self.subTest(probe=probe):
+                # The self-test itself passes; its intentionally failing probe
+                # neither owns selection nor invalidates the outer run.
+                self.run_fixture('print(' + repr(probe) + ', flush=True)')
+                code, report = self.verdict()
+                self.assertEqual(code, 0)
+                self.assertTrue(report['all_pass'])
+                # Keep each raw record, and use a new directory for the next probe.
+                self.directory = self.directory / 'next'
+                self.directory.mkdir()
+                self.requirements = self.directory / 'required.json'
+                self.output = self.directory / 'verdict.json'
+
+    def test_runner_selection_malformed_or_missing_fails_closed(self):
+        for selection in ('EXACT_TESTS ["' + TEST + '"] trailing probe',
+                          'EXACT_TESTS [', 'EXACT_TESTS {}', 'prefix EXACT_TESTS ["' + TEST + '"]'):
+            with self.subTest(selection=selection):
+                command = self.fixture('print(' + repr(selection) + ', flush=True)')
+                runner = self.directory / 'run-tests.py'
+                runner.write_text(Path(command[-1]).read_text(encoding='utf-8'), encoding='utf-8')
+                result = subprocess.run(self.record([sys.executable, str(runner)]), capture_output=True, timeout=20)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                code, report = self.verdict()
+                self.assertEqual(code, 1)
+                self.assertFalse(report['all_pass'])
+                self.assertTrue(report['input_errors'])
+                self.directory = self.directory / 'next'
+                self.directory.mkdir()
+                self.requirements = self.directory / 'required.json'
+                self.output = self.directory / 'verdict.json'
+
+    def test_runner_selection_binds_only_the_selected_cases(self):
+        command = self.fixture('print(' + repr('EXACT_TESTS ' + json.dumps([TEST])) + ', flush=True)')
+        runner = self.directory / 'run-tests.py'
+        runner.write_text(Path(command[-1]).read_text(encoding='utf-8'), encoding='utf-8')
+        result = subprocess.run(self.record([sys.executable, str(runner)]), capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        code, report = self.verdict()
+        self.assertEqual(code, 0)
+        self.assertTrue(report['all_pass'])
+        # An otherwise successful summary cannot stand in for a selected case
+        # whose own result is absent.
+        stdout = self.directory / 'run/stdout.log'
+        stdout.write_text('EXACT_TESTS ' + json.dumps([TEST, 'missing.Case.test_missing']) + '\n', encoding='utf-8')
+        self.assert_failure(*self.verdict(['missing.Case.test_missing']), '누락')
+
     def test_node_batch_requires_every_case_to_pass_without_filtering(self):
         tests = ["node:tests/lean_fixture.cjs", "node:tests/second_fixture.cjs"]
         for name, counts, extra, expected in (
