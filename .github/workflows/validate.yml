@@ -18,7 +18,7 @@ concurrency:
 jobs:
   measurements:
     runs-on: ubuntu-24.04
-    # S9-U0a retains A1, C2/C6, the full PRE suite and 75 cumulative mutants.
+    # S9-U0a retains A1, C2/C6, the full PRE suite and 69 part-1 mutants plus 6 S2 mutants (75 total).
     # Keep the existing job and step budgets; execution evidence records actual timings.
     timeout-minutes: 150
     steps:
@@ -244,7 +244,7 @@ jobs:
       # restored statement and first checks that moment (part waiting, consumer registered, binding absent).
       # F2-M01..M12 (trace identity, schedule barrier, run isolation, raw-first comparison; template edit and save,
       # saved search deletion, server searches, Login, Reload List) are killed by their own observations, counted apart.
-      - name: S9-U0a-PRE 37 mutants killed by their own early-input, pagehide and registration cases
+      - name: S9-U0a 69 PRE/F2/F3/S1/H178 plus 6 S2 mutants (75 total), each killed by its designated oracle
         if: ${{ !cancelled() }}
         timeout-minutes: 45
         run: |
