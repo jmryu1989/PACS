@@ -60,3 +60,8 @@ worklist-v0/hpacs-lite/context-menu.js text eol=lf
 worklist-v0/hpacs-lite/related-controls.js text eol=lf
 worklist-v0/hpacs-lite/session-end.js text eol=lf
 worklist-v0/hpacs-lite/page-boot.js text eol=lf
+
+# P3-01: C ends with "boot();\n  "; these exact verbatim bytes are required by
+# the pristine candidate pin. Keep other whitespace checks on both paths.
+worklist-v0/hpacs-lite/page-boot.js whitespace=-blank-at-eol,-blank-at-eof
+worklist-v0/hpacs-lite/main-split.bundle.js whitespace=-blank-at-eol,-blank-at-eof

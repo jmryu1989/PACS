@@ -2,10 +2,11 @@
 """Build the ordered classic script; --check never writes.
 
 REQ-S9-U0a-BYTES -> RISK-BUNDLE-DRIFT/ORDER -> TEST-S9-U0a-BUNDLE.
-Byte pins are intentional: this candidate preserves the original single Script
-body, including trivia and error/hoisting boundaries (AGENTS 1-B.14). A future
-behaviour change must explicitly revise this migration proof, not silently
-normalize or re-freeze its baseline. Developers edit the 45 sources.
+The permanent check compares the artifact with the ordered current sources.
+The candidate pin additionally preserves the original single Script body
+(AGENTS 1-B.14) while migration_state is pristine. The first approved source
+change sets migration_state to modified and rebinds the C1 move spec in that
+same change. Developers edit the 45 sources and regenerate the artifact.
 """
 import argparse
 import hashlib
@@ -53,24 +54,13 @@ class Scripts(HTMLParser):
 
 def assemble(root=ROOT, manifest=None):
     manifest = manifest or json.loads((root / "scripts/main-split-order.json").read_bytes())
-    before = subprocess.check_output(["git", "cat-file", "blob", manifest["base"] + ":" + manifest["page"]], cwd=ROOT)
-    original = Scripts(before)
-    inline = [t for t in original.tags if "src" not in dict(t["attrs"])]
-    assert len(inline) == 1, "Original must have one inline Script"
-    body = before[inline[0]["body_start"]:inline[0]["body_end"]]
     sources = manifest["sources"]
     assert len(sources) == 45 and len({s["file"] for s in sources}) == 45, "45 distinct ordered sources"
-    output, ranges, boundaries, cursor = bytearray(), [], [], 0
+    output, ranges = bytearray(), []
     page_dir = root / Path(manifest["page"]).parent
-    for index, source in enumerate(sources):
-        start, end = source["original_bytes"]
-        assert 0 <= cursor <= start < end <= len(body), "Original slice order"
-        gap = body[cursor:start]
-        if index:
-            output.extend(gap)
-            boundaries.append({"original_bytes": [cursor, start], "hex": gap.hex()})
-        else:
-            prefix = gap
+    # The migration's 44 boundaries are empty: every trivia byte belongs to a
+    # source. Building current sources must not depend on historical Git objects.
+    for source in sources:
         name = source["file"]
         assert Path(name).name == name and name.endswith(".js"), "Plain source filename required"
         data = (page_dir / name).read_bytes()
@@ -79,24 +69,43 @@ def assemble(root=ROOT, manifest=None):
         output.extend(data)
         ranges.append({"file": name, "bytes": [offset, len(output)],
                        "lines": [output[:offset].count(b"\n") + 1, output[:len(output) - 1].count(b"\n") + 1],
-                       "sha256": sha256(data), "equals_original_slice": data == body[start:end]})
-        cursor = end
-    suffix = body[cursor:]
-    bundle = bytes(output)
-    proof = prefix + bundle + suffix == body
-    report = {"base": manifest["base"], "bytes": len(bundle), "sha256": sha256(bundle),
-              "original_body_sha256": sha256(body), "equals_original_body": proof,
-              "prefix_hex": prefix.hex(), "suffix_hex": suffix.hex(), "boundaries": boundaries,
+                       "sha256": sha256(data)})
+    artifact = bytes(output)
+    report = {"bytes": len(artifact), "sha256": sha256(artifact),
               "range_convention": "bytes zero-based half-open; lines one-based inclusive", "sources": ranges}
-    return bundle, report, before, inline[0]
+    return artifact, report
 
 
-def check(root=ROOT, manifest=None):
-    manifest = manifest or json.loads((root / "scripts/main-split-order.json").read_bytes())
-    bundle, report, before, inline = assemble(root, manifest)
-    artifact = (root / manifest["artifact"]).read_bytes()
-    assert artifact == bundle and sha256(artifact) == report["sha256"], "Stale bundle artifact: bytes/SHA-256 differ"
+def candidate_pin(root, manifest, artifact, report, html):
+    before = subprocess.check_output(["git", "cat-file", "blob", manifest["base"] + ":" + manifest["page"]], cwd=ROOT)
+    original = Scripts(before)
+    inline = [t for t in original.tags if "src" not in dict(t["attrs"])]
+    assert len(inline) == 1, "Original must have one inline Script"
+    body = before[inline[0]["body_start"]:inline[0]["body_end"]]
+    cursor, boundaries = 0, []
+    for index, (source, current) in enumerate(zip(manifest["sources"], report["sources"])):
+        start, end = source["original_bytes"]
+        assert start == cursor < end <= len(body), "Original slice order / empty boundaries"
+        if index:
+            boundaries.append({"original_bytes": [cursor, start], "hex": ""})
+        current["equals_original_slice"] = artifact[current["bytes"][0]:current["bytes"][1]] == body[start:end]
+        cursor = end
+    assert cursor == len(body), "Original slices cover the whole body"
+    report.update(base=manifest["base"], original_body_sha256=sha256(body), equals_original_body=artifact == body,
+                  prefix_hex="", suffix_hex="", boundaries=boundaries)
     assert report["equals_original_body"] and all(s["equals_original_slice"] for s in report["sources"]), "Bundle/source differs from original body"
+    name = Path(manifest["artifact"]).name
+    expected = before[:inline[0]["start"]] + ('<script src="' + name + '"></script>').encode() + before[inline[0]["end"]:]
+    assert html == expected, "Markup, existing script order/attributes and bundle position must be preserved"
+
+
+def check(root=ROOT, manifest=None, mode="auto"):
+    manifest = manifest or json.loads((root / "scripts/main-split-order.json").read_bytes())
+    assert manifest.get("migration_state") in ("pristine", "modified"), "Explicit migration_state required"
+    assert mode in ("auto", "permanent", "candidate-pin"), "Unknown check mode"
+    artifact, report = assemble(root, manifest)
+    committed = (root / manifest["artifact"]).read_bytes()
+    assert committed == artifact, "Stale bundle artifact: bytes/SHA-256 differ"
     html = (root / manifest["page"]).read_bytes()
     tags = Scripts(html).tags
     name = Path(manifest["artifact"]).name
@@ -106,25 +115,29 @@ def check(root=ROOT, manifest=None):
     assert len(bundled) == 1 and not direct and all("src" in dict(t["attrs"]) for t in tags), "Bundle tag count / direct source / inline"
     tag = bundled[0]
     assert tag["attrs"] == [("src", name)] and html[tag["start"]:tag["end"]] == ('<script src="' + name + '"></script>').encode(), "Ordinary blocking classic bundle tag"
-    prior = [t for t in Scripts(before).tags if "src" in dict(t["attrs"])]
-    preserved = [t for t in tags if t is not tag]
-    assert len(preserved) == len(prior) == 56, "56 existing scripts"
-    assert [(t["attrs"], t["raw"]) for t in preserved] == [(t["attrs"], t["raw"]) for t in prior], "Existing script order/attributes"
-    expected = before[:inline["start"]] + ('<script src="' + name + '"></script>').encode() + before[inline["end"]:]
-    assert html == expected, "Markup and bundle position must be preserved"
-    report["main_html"] = {"bundle_tags": 1, "source_tags": 0, "existing_tags": 56}
+    pin = mode == "candidate-pin" or (mode == "auto" and manifest["migration_state"] == "pristine")
+    report["checks"] = {"permanent": "PASS", "candidate_pin": "NOT_RUN"}
+    if pin:
+        candidate_pin(root, manifest, artifact, report, html)
+        report["checks"]["candidate_pin"] = "PASS"
+    report["migration_state"] = manifest["migration_state"]
+    report["main_html"] = {"bundle_tags": 1, "source_tags": 0, "existing_tags": len(tags) - 1}
     return report
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--mode", choices=("auto", "permanent", "candidate-pin"), default="auto",
+                        help="auto always checks current sources and pins C only while pristine")
     args = parser.parse_args()
+    if not args.check and args.mode != "auto":
+        parser.error("--mode requires --check")
     if args.check:
-        report = check()
+        report = check(mode=args.mode)
     else:
         manifest = json.loads(MANIFEST.read_bytes())
-        bundle, report, _, _ = assemble()
+        bundle, report = assemble()
         (ROOT / manifest["artifact"]).write_bytes(bundle)
     print(json.dumps(report, ensure_ascii=True, indent=2))
 

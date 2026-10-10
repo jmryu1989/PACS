@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("main_bundle", ROOT / "scripts/build-main-split-bundle.py")
@@ -18,12 +19,64 @@ spec.loader.exec_module(bundle)
 
 
 class BundleContract(unittest.TestCase):
-    def test_committed_artifact_and_original_body(self):
+    def test_committed_artifact_and_manifest_selected_pin(self):
         report = bundle.check()
-        self.assertTrue(report["equals_original_body"])
+        self.assertEqual("PASS", report["checks"]["permanent"])
         self.assertEqual(45, len(report["sources"]))
-        self.assertEqual(44, len(report["boundaries"]))
-        self.assertEqual({"bundle_tags": 1, "source_tags": 0, "existing_tags": 56}, report["main_html"])
+        self.assertEqual(1, report["main_html"]["bundle_tags"])
+        self.assertEqual(0, report["main_html"]["source_tags"])
+        if report["migration_state"] == "pristine":
+            self.assertEqual("PASS", report["checks"]["candidate_pin"])
+            self.assertTrue(report["equals_original_body"])
+            self.assertEqual(44, len(report["boundaries"]))
+            self.assertEqual(56, report["main_html"]["existing_tags"])
+        else:
+            self.assertEqual("NOT_RUN", report["checks"]["candidate_pin"])
+            self.assertNotIn("equals_original_body", report)
+
+    def test_permanent_check_has_no_historical_git_dependency(self):
+        with mock.patch.object(bundle.subprocess, "check_output", side_effect=AssertionError("historical Git read")):
+            report = bundle.check(mode="permanent")
+        self.assertEqual({"permanent": "PASS", "candidate_pin": "NOT_RUN"}, report["checks"])
+        self.assertNotIn("equals_original_body", report)
+
+    def test_approved_source_edit_keeps_stale_check_and_explicit_pin(self):
+        manifest = json.loads((ROOT / "scripts/main-split-order.json").read_bytes())
+        with tempfile.TemporaryDirectory(prefix="u0a-approved-edit-") as scratch:
+            root = Path(scratch)
+            page = root / manifest["page"]
+            page.parent.mkdir(parents=True)
+            page.write_bytes((ROOT / manifest["page"]).read_bytes())
+            for source in manifest["sources"]:
+                (page.parent / source["file"]).write_bytes((ROOT / Path(manifest["page"]).parent / source["file"]).read_bytes())
+            artifact = root / manifest["artifact"]
+            artifact.write_bytes((ROOT / manifest["artifact"]).read_bytes())
+            source = page.parent / manifest["sources"][0]["file"]
+            source.write_bytes(source.read_bytes() + b"\n// synthetic approved source change\n")
+            for state in ("pristine", "modified"):
+                manifest["migration_state"] = state
+                for mode in ("auto", "permanent", "candidate-pin"):
+                    with self.subTest(state=state, mode=mode), self.assertRaisesRegex(AssertionError, "Stale bundle artifact"):
+                        bundle.check(root, manifest, mode)
+            artifact.write_bytes(bundle.assemble(root, manifest)[0])
+            self.assertEqual("PASS", bundle.check(root, manifest, "permanent")["checks"]["permanent"])
+            manifest["migration_state"] = "pristine"
+            with self.assertRaisesRegex(AssertionError, "differs from original body"):
+                bundle.check(root, manifest)
+            manifest["migration_state"] = "modified"
+            self.assertEqual({"permanent": "PASS", "candidate_pin": "NOT_RUN"}, bundle.check(root, manifest)["checks"])
+            with self.assertRaisesRegex(AssertionError, "differs from original body"):
+                bundle.check(root, manifest, "candidate-pin")
+
+    def test_missing_or_unknown_migration_state_fails_closed(self):
+        manifest = json.loads((ROOT / "scripts/main-split-order.json").read_bytes())
+        for state in (None, "pristien", False):
+            manifest["migration_state"] = state
+            with self.subTest(state=state), self.assertRaisesRegex(AssertionError, "Explicit migration_state"):
+                bundle.check(manifest=manifest)
+        del manifest["migration_state"]
+        with self.assertRaisesRegex(AssertionError, "Explicit migration_state"):
+            bundle.check(manifest=manifest)
 
     def test_five_bundle_mutants(self):
         manifest = json.loads((ROOT / "scripts/main-split-order.json").read_bytes())
