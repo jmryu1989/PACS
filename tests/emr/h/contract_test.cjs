@@ -116,7 +116,7 @@ function access(overrides = {}) {
   return { formatVersion: 1, surface: 'GET studies/:uid/report/versions', eventId: 'event-1', userId: known(identity('reader-1')),
     rolesAtTime: known(['radiologist']), actingInstitution: known('hospital-a'), managingInstitution: known('hospital-a'), occurredAt: t0,
     trustedProxyIp: known({ address: '192.0.2.1', source: 'trusted-proxy' }), cause: 'user-view', executor: 'member',
-    context: { basis: 'out-of-context', studyId: null, relatedStudyId: null, reason: 'Synthetic retention verification' },
+    context: { basis: 'worklist', studyId: 'study-1', relatedStudyId: null, reason: null },
     targets: [{ kind: 'report-version', patientLinkSnapshot: known(patient), studyId: known('study-1'), recordId: known('report-1'), versionId: known('version-1') }],
     action: 'provide-prepared', result: 'prepared', requestId: 'request-1', auditLinkId: A.newAuditLinkId(), relatedEventId: null, ...overrides };
 }

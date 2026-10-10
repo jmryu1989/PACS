@@ -897,7 +897,7 @@
           "file": "api/src/emr-report/reads.ts",
           "suite": "contract",
           "case": "C-C11",
-          "assertion_sha256": "755b6ed1180885ef38ecedc91faa4868d2a0d1d4071efeeedf01f6c9baf1a313"
+          "assertion_sha256": "2980dd54dfef938bb169ddbc83a8db7ddaf3a3da16d09e76753056018cefbf9f"
         }
       ],
       "fixes": "C1-R1-11 (O5 only: an archived unit's preservation entry must not reopen ordinary reading)"

@@ -110,7 +110,7 @@ function accessEvent(o = {}) {
     userId: known(id(o.actor ?? 'dr-1')), rolesAtTime: known(['radiologist']), actingInstitution: o.acting ?? known(inst),
     managingInstitution: o.managing ?? known(inst), occurredAt: o.at ?? minute(eventCounter),
     trustedProxyIp: o.ip ?? known({ address: o.address ?? '10.0.0.5', source: 'trusted-proxy' }), cause: 'user-view', executor: 'member',
-    context: { basis: 'out-of-context', studyId: null, relatedStudyId: null, reason: 'Synthetic audit investigation' },
+    context: { basis: 'worklist', studyId: null, relatedStudyId: null, reason: null },
     targets: o.targets ?? [target(o.patient ?? P1, o.study ?? 'study-1', o.record ?? 'rep-1', o.version ?? 'v1')],
     action: o.action ?? 'provide-prepared', result: o.result ?? 'prepared', requestId: `request-${eventCounter}`,
     auditLinkId: `audit:${crypto.randomUUID()}`, relatedEventId: o.related ?? null,
@@ -156,7 +156,7 @@ test('TEST-F-02 patient_replay: unfiltered authentication events replay with no 
   assert.deepEqual(page.rows.map(row => ({ eventId: row.eventId, action: row.action, occurredAt: row.occurredAt,
     actor: row.actor, statutoryAct: row.statutoryAct, targets: row.targets })), events.toReversed().map(event => ({
     eventId: event.eventId, action: event.action, occurredAt: event.occurredAt, actor: event.userId,
-    statutoryAct: 'none', targets: [] })));
+    statutoryAct: 'none', targets: [] })), 'M-F-AUTH-02: authentication is not a statutory record act');
 });
 
 test('TEST-F-02 patient_replay: an auth.login action filter excludes other authentication and record events', async () => {
@@ -178,7 +178,7 @@ test('TEST-F-02 patient_replay: patient, study, record and version filters exclu
   for (const filter of [{ patient: { patientId: P1.patientId, assigningAuthority: P1.assigningAuthority } },
     { studyId: 'study-1' }, { recordId: 'rep-1' }, { versionId: 'v1' }]) {
     const page = await F.readInvestigationPage(F.planInvestigation(auditor, query(filter)), ledger);
-    assert.equal(page.total, 1);
+    assert.equal(page.total, 1, 'M-F-AUTH-01: target filters exclude authentication events');
     assert.deepEqual(page.rows.map(row => row.eventId), [record.eventId]);
   }
 });
@@ -505,7 +505,7 @@ test('TEST-F-02 patient_replay: the investigation is itself an access event for 
   const parsed = AE.parseAccessEvent({ formatVersion: 1, surface: 'GET admin/audit', eventId: 'audit-view-1', userId: known(id('aud-1')),
     rolesAtTime: known(['staff']), actingInstitution: known(INST_X), managingInstitution: known(INST_X), occurredAt: NOW,
     trustedProxyIp: known({ address: '10.0.0.9', source: 'trusted-proxy' }), cause: 'user-view', executor: 'member',
-    context: { basis: 'out-of-context', studyId: null, relatedStudyId: null, reason: 'Synthetic audit investigation' }, targets: event.targets,
+    context: { basis: 'worklist', studyId: null, relatedStudyId: null, reason: null }, targets: event.targets,
     action: event.action, result: 'prepared', requestId: 'audit-view-request', auditLinkId: `audit:${crypto.randomUUID()}`, relatedEventId: null });
   assert.equal(parsed.targets.length, 2);
   const exported = await F.readInvestigationPage(F.planInvestigation(auditor, query(), 'export'), ledger);
@@ -628,7 +628,7 @@ test('TEST-F-03 lawful_issue: the disclosure ledger event built from the package
   const parsed = AE.parseAccessEvent({ formatVersion: 1, surface: 'authorized-disclosure', eventId: 'disclosure-1', userId: known(id('records-officer')),
     rolesAtTime: known(['staff']), actingInstitution: known(INST_X), managingInstitution: known(INST_X), occurredAt: '2026-10-09T03:00:00.000Z',
     trustedProxyIp: known({ address: '10.0.0.9', source: 'trusted-proxy' }), cause: 'user-view', executor: 'member',
-    context: { basis: 'out-of-context', studyId: null, relatedStudyId: null, reason: 'Synthetic audit investigation' }, targets,
+    context: { basis: 'worklist', studyId: null, relatedStudyId: null, reason: null }, targets,
     action: 'disclosure', result: 'succeeded', requestId: 'copy-1', auditLinkId: `audit:${crypto.randomUUID()}`, relatedEventId: null });
   assert.deepEqual(parsed.targets.map(t => [t.kind, t.recordId.value, t.versionId.value, t.patientLinkSnapshot.value.patientId]),
     [['disclosure', 'rep-1', 'v1', 'SYN-P1'], ['disclosure', 'rep-1', 'v2', 'SYN-P1']]);

@@ -39,6 +39,9 @@ TEST = ROOT / "tests" / "emr" / "f" / "contract_test.cjs"
 CRASH_MARKERS = ("SyntaxError:", "ReferenceError:", "Cannot find module", "ERR_MODULE_NOT_FOUND", "ERR_REQUIRE")
 
 MUTANTS = [
+    {'id': 'M-F-AUTH-01', 'title': 'authentication incorrectly matches a patient or record filter', 'file': 'contract.ts', 'old': '  const hit = event.targets.filter(t => targetMatches(f, t));', 'new': "  if (event.formatVersion === 2 && event.branch === 'online-auth') return [];\n  const hit = event.targets.filter(t => targetMatches(f, t));", 'case': 'TEST-F-02 patient_replay: patient, study, record and version filters exclude authentication events', 'expect': 'M-F-AUTH-01: target filters exclude authentication events'},
+    {'id': 'M-F-AUTH-02', 'title': 'authentication is incorrectly replayed as statutory viewing', 'file': 'contract.ts', 'old': 'statutoryAct: statutoryAct(event)', 'new': "statutoryAct: event.formatVersion === 2 && event.branch === 'online-auth' ? '열람' : statutoryAct(event)", 'case': 'TEST-F-02 patient_replay: unfiltered authentication events replay with no statutory act or clinical targets', 'expect': 'M-F-AUTH-02: authentication is not a statutory record act'},
+
     {
         "id": "M-F-01",
         "title": "a general admin is given audit authority without a roster grant",
@@ -605,6 +608,10 @@ MUTANTS += [
 ]
 
 DECLARED_CASES = [
+    'TEST-F-02 patient_replay: unfiltered authentication events replay with no statutory act or clinical targets',
+    'TEST-F-02 patient_replay: an auth.login action filter excludes other authentication and record events',
+    'TEST-F-02 patient_replay: patient, study, record and version filters exclude authentication events',
+
     "TEST-F-07 R9-I01 CE16 hospital MOHW evidence cannot fulfill the operator ISP report",
     "TEST-F-07 R9-I01 CE11a unattributed PIPC KISA reports are evidence only for the operator",
     "TEST-F-07 R9-I01 operator other-law evidence cannot stand in for initial ISP performance",

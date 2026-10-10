@@ -2,7 +2,7 @@ import { AccessEvent, AppendOnlyAccessStore, DurableAccessReceipt, STATUTORY_ACT
 import { ReportFacts, RetentionOnlyEvent, ResumeClinicalUseEvent, validateReportFacts } from '../emr-contract/report-lifecycle';
 import type { VersionReference } from '../emr-contract/signature';
 import { choice, freeze, object, refuse, string, utc } from '../emr-contract/validation';
-import { IngressContext, LedgerEntry, StudyFacts, VerifiedActor, institutionAllows, parseStudyFacts, parseVerifiedActor } from './contract';
+import { ReportWorkContext, workContextFor, IngressContext, LedgerEntry, StudyFacts, VerifiedActor, institutionAllows, parseStudyFacts, parseVerifiedActor } from './contract';
 import { readRetention } from './retention';
 
 /**
@@ -17,7 +17,7 @@ export const READ_SURFACES = freeze({
 } as const);
 export type ReadSurface = keyof typeof READ_SURFACES;
 
-export interface ReadContext {
+export interface ReadContext extends ReportWorkContext {
   actor: VerifiedActor;
   /** The server's existing role decision for this surface (need(), AGENTS §1.5); C keeps no second role table. */
   roleAllowed: boolean;
@@ -45,7 +45,7 @@ function event(ctx: ReadContext, surface: string, action: 'provide-prepared' | '
   const kind = surface === READ_SURFACES.preview && action.startsWith('print') ? 'print' : 'report-version';
   return parseAccessEvent({ formatVersion: 1, surface, eventId, userId: known({ ...ctx.actor.identity }), rolesAtTime: known([...ctx.actor.roles]),
     actingInstitution: known(ctx.actor.institutionId), managingInstitution: known(ctx.study.managingInstitutionId), occurredAt,
-    trustedProxyIp: ctx.ingress.ip, cause: 'user-view', executor: 'member',
+    trustedProxyIp: ctx.ingress.ip, cause: 'user-view', context: workContextFor(ctx), executor: 'member',
     targets: [{ kind, patientLinkSnapshot: known({ ...ctx.study.patient }), studyId: known(ctx.study.studyId), recordId: known(version.recordId),
       versionId: known(version.versionId) }],
     action, result: action === 'provide-prepared' ? 'prepared' : ['client-shown', 'print-done'].includes(action) ? 'reported' : 'succeeded',

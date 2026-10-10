@@ -8,13 +8,13 @@ import { QueueEntry, parseQueueEntry } from '../emr-signature/native-port';
 import { SignatureVerificationPorts, verifySignatureV2 } from '../emr-signature/verify';
 import { CommitResult, envelopeDigest, expectedPreviousVersion, planReportCommand, prepareSignedCommand, reportHistoryDigest } from './commands';
 import {
-  AdoptedEvent, CommitPlan, IngressContext, LedgerEntry, OfflineReceiptEvent, ReportEventResponse, ReportTimes, RetainedInputs, StudyFacts, VerifiedActor,
+  ReportWorkContext, AdoptedEvent, CommitPlan, IngressContext, LedgerEntry, OfflineReceiptEvent, ReportEventResponse, ReportTimes, RetainedInputs, StudyFacts, VerifiedActor,
   institutionAllows, parseCommitReceipt, parseStudyFacts, parseVerifiedActor,
 } from './contract';
 import { GrantReader, checkSignatureGrant } from './offline-grant';
 
 /** Server facts for one arriving offline event; C2 reads them under the report lock in the receiving transaction. */
-export interface ReconcileContext {
+export interface ReconcileContext extends ReportWorkContext {
   actor: VerifiedActor;
   study: StudyFacts;
   facts: ReportFacts;
@@ -136,7 +136,7 @@ export function reconcileOfflineEvent(context: ReconcileContext, entryInput: unk
   const receipt: LedgerEntry = freeze({ kind: 'offline-receipt' as const, act: 'none' as const, event: freeze(receiptEvent) });
   const command = { action: SIGNED_TO_COMMAND[p.action], recordId: facts.recordId, eventId, expectedClaimGeneration: facts.claimGeneration,
     expectedPublishedVersionId: facts.publishedVersion?.versionId ?? null, draft: null, reason: p.reason, reviewerId: null, preservation: null, envelope: { ...entry.envelope } };
-  const planContext = { actor, study, facts, author: context.author, ownDraftRevision, attachments: context.attachments, signature: sig,
+  const planContext = { actor, study, facts, workStudy: context.workStudy, author: context.author, ownDraftRevision, attachments: context.attachments, signature: sig,
     retained: context.retained, receivedAt, ingress: context.ingress, mode: 'offline-reconcile' as const, grantGeneration,
     predecessor: context.predecessor, storedVersions: context.storedVersions };
   // The same validation as any signed command runs first, also for an event that will only be recorded as past.

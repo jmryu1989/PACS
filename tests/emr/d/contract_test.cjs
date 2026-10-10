@@ -102,6 +102,7 @@ function accessEvent(p, a, action, result) {
     rolesAtTime: { status: 'known', value: a.roles }, actingInstitution: { status: 'known', value: a.institutionId },
     managingInstitution: { status: 'known', value: 'inst-a' }, occurredAt: t(500),
     trustedProxyIp: { status: 'known', value: { address: '10.0.0.7', source: 'trusted-proxy' } }, cause: 'user-view', executor: 'member',
+    context: { basis: 'worklist', studyId: (p.access ? p.access.target : p.targets[0]).studyId.value, relatedStudyId: null, reason: null },
     targets: p.access ? [p.access.target] : p.targets, action, result, requestId: randomUUID(), auditLinkId: `audit:${randomUUID()}`, relatedEventId: null };
 }
 function signaturePort({ failSign = false, failVerify = false, verdict = null, signer = null, versionId = null, versionSha256 = null,
