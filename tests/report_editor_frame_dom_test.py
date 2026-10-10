@@ -619,11 +619,88 @@ class ReportEditorFrameDOM(unittest.TestCase):
                 self.assertEqual(self.insert('PASTE'), {'status':'applied'})
                 self.assert_text('abcPASTE def')
 
-    def test_authoritative_equality_is_lf_only(self):
-        """W6EF-F10 / RISK-T4: authoritative text keeps whitespace and Unicode form."""
+    def test_caret_mark_and_scroll_belong_to_the_study_not_the_text(self):
+        """W6EF-F11 / S3-U6: the cursor place belongs to this study's text.
+
+        Another UID (A->B, A->B->A) starts like a new text even when every byte is the same:
+        visible caret, default capture and Paste at the end, scroll as for a different text.
+        The same UID reopened and an authoritative replacement keep the place (W6EF-F09)."""
+        text = "\n".join("line %s " % i + "x" * 100 for i in range(60))
+        end = len(text)
+        state = """() => { const e = editor.element('findings');
+          return [document.activeElement.id, e.selectionStart, e.selectionEnd, e.selectionDirection, e.scrollTop, e.scrollLeft]; }"""
+
+        def visit(start, stop, top, left):
+            # The reader clicks into Findings, moves the caret into the middle and scrolls.
+            self.page.click('#findings')
+            self.page.evaluate("v => { const e = editor.element('findings'); e.setSelectionRange(v[0], v[1], 'backward'); e.scrollTop = v[2]; e.scrollLeft = v[3]; }", [start, stop, top, left])
+
+        for focused in (False, True):
+            # Reference: what a new opening of a different text shows (W6EF-F01 path).
+            self.open('A', **dict.fromkeys(FIELDS, 'old\n' * 200))
+            visit(300, 310, 140, 40)
+            if not focused:
+                self.focus('after')
+            self.open('B', **dict.fromkeys(FIELDS, text))
+            fresh = self.page.evaluate(state)
+            self.assertEqual(fresh[:3], ['findings' if focused else 'after', end, end])
+            self.assertNotEqual(fresh[4:], [140, 40])
+            for boundary in ('other-uid', 'A-B-A', 'same-uid', 'authoritative'):
+                with self.subTest(focused=focused, boundary=boundary):
+                    self.open('A', **dict.fromkeys(FIELDS, text))
+                    visit(300, 310, 140, 40)
+                    if boundary == 'A-B-A':
+                        self.open('B', **dict.fromkeys(FIELDS, text))
+                        visit(500, 520, 200, 60)
+                    if not focused:
+                        self.focus('after')
+                    if boundary == 'authoritative':
+                        texts = dict.fromkeys(FIELDS, text)
+                        texts['recommendation'] = 'server'
+                        self.assertEqual(self.page.evaluate('t=>editor.replaceAuthoritative(t)', texts), {'status': 'switched'})
+                    else:
+                        self.open('B' if boundary == 'other-uid' else 'A', **dict.fromkeys(FIELDS, text))
+                    self.capture()
+                    captured = self.page.evaluate('[at.start, at.end]')
+                    if boundary in ('other-uid', 'A-B-A'):
+                        self.assertEqual(self.page.evaluate(state), fresh)
+                        self.assertEqual(captured, [end, end])
+                        # A program-set selection is not a visit; an unvisited field still answers the end.
+                        self.page.evaluate("editor.element('findings').setSelectionRange(1, 2)")
+                        self.capture()
+                        self.assertEqual(self.page.evaluate('[at.start, at.end]'), [end, end])
+                        self.assertEqual(self.insert('PASTE'), {'status': 'applied'})
+                        self.assert_text(text + 'PASTE')
+                    else:
+                        self.assertEqual(self.page.evaluate(state),
+                                         ['findings' if focused else 'after', 300, 310, 'backward', 140, 40])
+                        self.assertEqual(captured, [300, 310])
+                        self.assertEqual(self.insert('PASTE'), {'status': 'applied'})
+                        self.assert_text(text[:300] + 'PASTE' + text[310:])
+
+    def test_same_study_caret_carry_is_lf_only(self):
+        """W6EF-F10/F13 / RISK-T3: the same-UID caret carry uses LF-only equality, no trim/NFC/NBSP folding."""
         for before, given, same in (
-                ('text', 'text ', False), ('text', 'text\n', False),
-                ('\u00e9', 'e\u0301', False),
+                ('text', 'text ', False), ('text', ' text', False), ('a b', 'a\u00a0b', False),
+                ('text', 'text\n', False), ('\u00e9', 'e\u0301', False),
+                ('a\nb', 'a\rb', True), ('a\nb', 'a\r\nb', True)):
+            with self.subTest(given=ascii(given)):
+                self.open('A', findings=before)
+                self.page.click('#findings')
+                self.page.evaluate("editor.element('findings').setSelectionRange(1, 1)")
+                self.open('A', findings=given)
+                shown = given.replace('\r\n', '\n').replace('\r', '\n')
+                expected = [1, 1] if same else [len(shown), len(shown)]
+                self.assertEqual(self.page.evaluate("[editor.element('findings').selectionStart, editor.element('findings').selectionEnd]"), expected)
+                self.capture()
+                self.assertEqual(self.page.evaluate('[at.start, at.end]'), expected)
+                self.assert_text(shown)
+
+    def test_authoritative_equality_is_lf_only(self):
+        """W6EF-F10/F13 / RISK-T4: authoritative text keeps whitespace and Unicode form."""
+        for before, given, same in (
+                ('text', 'text ', False), ('text', ' text', False), ('a b', 'a\u00a0b', False),
+                ('text', 'text\n', False), ('\u00e9', 'e\u0301', False),
                 ('a\nb', 'a\rb', True), ('a\nb', 'a\r\nb', True)):
             with self.subTest(given=given):
                 self.open('A', findings=before)
@@ -634,10 +711,10 @@ class ReportEditorFrameDOM(unittest.TestCase):
                 self.assert_text(given.replace('\r\n', '\n').replace('\r', '\n'))
 
     def test_same_opening_equality_is_lf_only(self):
-        """W6EF-F10 / RISK-T4: different text needs a new opening, with no silent cleanup."""
+        """W6EF-F10/F13 / RISK-T4: different text needs a new opening, with no silent cleanup."""
         for before, given, same in (
-                ('text', 'text ', False), ('text', 'text\n', False),
-                ('\u00e9', 'e\u0301', False),
+                ('text', 'text ', False), ('text', ' text', False), ('a b', 'a\u00a0b', False),
+                ('text', 'text\n', False), ('\u00e9', 'e\u0301', False),
                 ('a\nb', 'a\rb', True), ('a\nb', 'a\r\nb', True)):
             with self.subTest(given=given):
                 self.open('A', findings=before)
@@ -926,6 +1003,17 @@ MUTANTS = [
         "test_authoritative_equality_is_lf_only", "test_same_opening_equality_is_lf_only"]),
     ("M34-discard-carried-visited-mark", "s.el = next; s.revision = 0;", "s.el = next; s.revision = 0; s.caret = false;", [
         "test_boundary_carries_visited_mark_with_unchanged_selection"]),
+    ("M35-carry-to-other-study-F11", "const sameStudy = opening !== null && opening.uid === context.uid;", "const sameStudy = true;", [
+        "test_caret_mark_and_scroll_belong_to_the_study_not_the_text"]),
+    ("M36-new-text-caret-left-to-browser-F11", "else { s.caret = false; next.setSelectionRange(next.value.length, next.value.length); }", "else s.caret = false;", [
+        "test_caret_mark_and_scroll_belong_to_the_study_not_the_text"]),
+    ("M37-no-carry-in-same-study-F09", "const sameStudy = opening !== null && opening.uid === context.uid;", "const sameStudy = false;", [
+        "test_caret_mark_and_scroll_belong_to_the_study_not_the_text", "test_boundary_carries_visited_mark_with_unchanged_selection",
+        "test_same_study_caret_carry_is_lf_only"]),
+    ("M38-carry-equality-trim-F13", "same: sameStudy && old.value === next.value", "same: sameStudy && old.value.trim() === next.value.trim()", [
+        "test_same_study_caret_carry_is_lf_only"]),
+    ("M39-equality-nbsp-fold-F13", "read(k) === lf(texts[k])", "read(k).replace(/\\u00a0/g, ' ') === lf(texts[k]).replace(/\\u00a0/g, ' ')", [
+        "test_authoritative_equality_is_lf_only", "test_same_opening_equality_is_lf_only"]),
 ]
 
 

@@ -24,7 +24,8 @@
       const start = () => { s.composing = true; };
       const end = () => { s.composing = false; };
       const input = () => { s.revision++; };
-      // 숫자 위치는 브라우저가 소유한다. 이 opening에서 사용한 칸인지 여부만 기억한다.
+      // 숫자 위치는 브라우저가 소유하고 여기서는 사람이 이 칸을 사용했는지만 기억한다. 같은 검사의
+      // 경계에서 글이 같은 칸은 이 표시가 선택과 함께 옮겨 가고, 다른 검사나 바뀐 글에서는 지워진다.
       const caret = () => { if (!writing) s.caret = true; };
       s.el.addEventListener('compositionstart', start);
       s.el.addEventListener('compositionend', end);
@@ -79,7 +80,8 @@
       return open(context, texts);
     }
 
-    // 같은 글의 저장/재조회는 사용자의 Undo와 방문한 커서를 그대로 둔다.
+    // 세 칸 모두 같은 글인 저장/재조회는 Undo와 커서를 그대로 둔다. 한 칸이라도 다르면 새 경계라서
+    // Undo는 세 칸 모두 끊기고, 글이 같은 칸만 커서와 사용 표시를 유지한다.
     function replaceAuthoritative(texts) {
       if (!opening || names.some(k => typeof texts?.[k] !== 'string'))
         throw new TypeError('An open study and all report texts are required');
@@ -93,12 +95,14 @@
       try {
         const active = doc.activeElement;
         const positions = scrolls();
+        // 커서 자리는 그 검사의 그 글의 것이다. 다른 검사의 글이 byte까지 같아도 A의 자리를 B로 옮기지 않는다.
+        const sameStudy = opening !== null && opening.uid === context.uid;
         const replacements = names.map(name => {
           const s = state(name), old = s.el, next = old.cloneNode(true), saved = view(old);
           // Detached initialization creates no undo command. Old commands cannot target a new node.
           next.value = lf(texts[name]);
           next.defaultValue = next.value;
-          return { s, old, next, saved, same: old.value === next.value };
+          return { s, old, next, saved, same: sameStudy && old.value === next.value };
         });
         opening = Object.freeze({ uid: context.uid, selectionSeq: context.selectionSeq });
         for (const { s, old, next, saved, same } of replacements) {
@@ -107,7 +111,8 @@
           bind(s);
           old.replaceWith(next);
           if (same) next.setSelectionRange(saved.start, saved.end, saved.direction);
-          else s.caret = false;
+          // 같은 값을 다시 넣으면 브라우저가 커서를 옮기지 않으므로, 기본 삽입 위치인 끝을 화면에도 둔다.
+          else { s.caret = false; next.setSelectionRange(next.value.length, next.value.length); }
         }
         const focused = replacements.find(item => item.old === active);
         if (focused) focused.next.focus();
