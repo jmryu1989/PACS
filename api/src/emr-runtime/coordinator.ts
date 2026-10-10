@@ -6,6 +6,7 @@ import { protectedDirectory } from './journal-file';
 import { executeExternal, WriterContext } from './external-writer';
 import { lockFile } from './file-lock';
 import { StateClient } from './state-client';
+import { EMR_OWNER_RETRIES, EMR_OWNER_RETRY_MS } from './limits';
 
 export interface WriterRequest { directory: string; operation: string; value?: any; context?: WriterContext }
 export type WriterTransport = (request: WriterRequest) => any;
@@ -25,16 +26,17 @@ export class StateCoordinator {
   private client: StateClient | undefined;
   readonly ownerId = randomUUID();
   private ownerFd: number | undefined;
-  constructor(directory: string, private readonly transport?: WriterTransport) {
+  constructor(directory: string, private readonly transport?: WriterTransport,
+    readonly role: 'api' | 'retention' = 'api') {
     protectedDirectory(directory, 'seal');
     this.directory = path.resolve(directory);
     if (!transport) this.initialize();
   }
   private initialize(): void {
     const ownerDirectory = protectedDirectory(this.directory, 'owners');
-    this.owner = owners.get(this.directory);
+    this.owner = this.role === 'api' ? owners.get(this.directory) : undefined;
     let acquired = false;
-    if (!this.owner) {
+    if (!this.owner && this.role === 'api') {
       const fd = fs.openSync(path.join(this.directory, 'writer.lock'), 'a+', 0o600);
       try {
         if (lockFile(fd, true, true)) { this.owner = { fd, context: this.context }; acquired = true; }
@@ -101,9 +103,12 @@ export class StateCoordinator {
       if (this.owner) return executeExternal({ directory: this.directory, operation, value, context: this.owner.context });
       try { return this.client.call(operation, value); }
       catch (error: any) {
-        if (!error.ownerGone || (!error.beforeConnect && !['read', 'journal-load', 'journal-find', 'journal-record'].includes(operation)) || attempt >= 7) throw error;
+        if (!error.ownerGone || (!error.beforeConnect && !['read', 'journal-load', 'journal-find', 'journal-record'].includes(operation)) || attempt >= EMR_OWNER_RETRIES) {
+          if (this.role === 'retention') console.warn('EMR retention deferred: API state owner unavailable', { operation, attempts: attempt + 1 });
+          throw error;
+        }
         this.initialize();
-        if (!this.owner) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+        if (!this.owner) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, EMR_OWNER_RETRY_MS);
       }
     }
   }
@@ -122,7 +127,7 @@ export class StateCoordinator {
     if (this.transport) return this.transport(request);
     if (process.platform !== 'linux') throw Object.assign(new Error('LinuxExternalWriterRequired'), { code: 'SealUnavailable' });
     try {
-      this.owner ??= owners.get(this.directory);
+      if (this.role === 'api') this.owner ??= owners.get(this.directory);
       if (this.owner) return executeExternal({ ...request, context: this.owner.context });
       if (typeof value !== 'function') return this.remote(operation, value);
       // Closures execute in the requesting role's process. Only the resulting

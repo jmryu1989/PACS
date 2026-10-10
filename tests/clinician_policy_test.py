@@ -178,6 +178,7 @@ IDENTIFIER_CHAR = re.compile(r"[\w$]")
 # only in the forms source_contract lists and every other form is refused; its rule field is what the checks implement.
 CONTRACT = FIXTURES["source_contract"]
 PACKAGES = frozenset(CONTRACT["packages"])
+FILE_PACKAGES = {name: frozenset(packages) for name, packages in CONTRACT.get("file_packages", {}).items()}
 LOADED_PACKAGES = frozenset(CONTRACT["loaded_packages"])
 REFLECT_MEMBERS = frozenset(CONTRACT["reflect_members"])
 PROCESS_MEMBERS = frozenset(CONTRACT["process_members"])
@@ -1272,8 +1273,9 @@ def module_sources(path, statements):
     """Raise on a module statement naming a package source_contract does not list, or a relative module outside api/src
     (S5-U1c-F06): node:module hands out createRequire, node:vm evaluates code, and a file outside api/src would be
     compiled into the app without either inventory reading it."""
+    permitted = PACKAGES | FILE_PACKAGES.get(path.relative_to(ROOT).as_posix(), frozenset())
     unlisted = sorted({s["module"] for s in statements
-                       if s["module"] is not None and not s["module"].startswith("./") and s["module"] not in PACKAGES})
+                       if s["module"] is not None and not s["module"].startswith("./") and s["module"] not in permitted})
     if unlisted:
         raise AssertionError(f"{path.name}: a module the source contract does not list (source_contract.packages, or a "
                              f"file under api/src): {unlisted}")
@@ -2856,7 +2858,8 @@ class ClinicianPolicySpec(unittest.TestCase):
             named |= {s["module"] for s in module_statements(path, source)
                       if s["module"] is not None and not s["module"].startswith("./")}
             loaded |= set(module_loads(path, source, property_names(path, source)))
-        self.assertEqual(sorted(named | loaded), sorted(PACKAGES), "source_contract.packages is what api/src names")
+        self.assertEqual(sorted(named | loaded), sorted(PACKAGES | frozenset().union(*FILE_PACKAGES.values())),
+                         "global and file-scoped packages exactly cover what api/src names")
         self.assertEqual(sorted(loaded), sorted(LOADED_PACKAGES), "source_contract.loaded_packages is what api/src loads")
 
         def reasons_in(message, reasons):
@@ -2973,6 +2976,10 @@ class ClinicianPolicySpec(unittest.TestCase):
             "a constructor by a literal key": service("export const make = (value: any) => value['constructor'];\n"),
             "Object rebound": service("const Object = { keys: () => [] };\nexport const keys = Object.keys;\n"),
             # modules (source_contract.packages, files under api/src, no whole-module binding of a project file or Nest)
+            "process spawning outside the lock owner": service("export const spawn = spawnSync;\n",
+                "import { spawnSync } from 'node:child_process';\n"),
+            "worker spawning outside the IPC transport": service("export const worker = Worker;\n",
+                "import { Worker } from 'node:worker_threads';\n"),
             "createRequire from node:module": service("export const load = createRequire(__filename);\n",
                                                       "import { createRequire } from 'node:module';\n"),
             "runInThisContext from node:vm": service("export const run = runInThisContext;\n",

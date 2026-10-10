@@ -24,6 +24,34 @@ if (process.env.EMR_TIMING_CHILD === '1') process.on('exit', () => fs.writeSync(
 
 function instrument(prisma, store, seal, { headProbe = false } = {}) {
   const scope = new AsyncLocalStorage(), originalSpawn = cp.spawnSync;
+  const drains = [], pending = new Map(), restorers = [];
+  const newRow = () => ({ head_lock_wait_ms: 0, head_lock_and_sql_ms: 0, pool_wait_ms: 0,
+    commit_ms: 0, writer_ms: 0, write_ms: 0, fsync_ms: 0, writes: 0, fsyncs: 0, transactions: [] });
+  // A drain's async context belongs to its whole committed group, not to the
+  // first requester that happened to schedule it. Link its costs explicitly to
+  // every covered request; never charge the leader with other groups' snapshots.
+  if (typeof seal.advanceReceipt === 'function' && typeof seal.reconcileState === 'function') {
+    const advance = seal.advanceReceipt.bind(seal), reconcile = seal.reconcileState.bind(seal);
+    seal.advanceReceipt = async (stream, attempt, eventId, entry) => {
+      const row = scope.getStore(), key = stream + ':' + attempt;
+      if (row) pending.set(key, { row, stream, sequence: entry.sequence });
+      try { return await advance(stream, attempt, eventId, entry); } finally { pending.delete(key); }
+    };
+    seal.reconcileState = (stream, target, ...rest) => {
+      const members = [...pending.values()].filter(p => !p.assigned && p.stream === stream && p.sequence <= (target?.sequence ?? Infinity));
+      // Resolution callbacks run in a later microtask. The next group may start
+      // before those callbacks remove the previous members from pending.
+      for (const member of members) member.assigned = true;
+      const direct = scope.getStore();
+      if (!members.length && direct?.kind === 'request') members.push({ row: direct });
+      const group = { ...newRow(), kind: 'drain', id: 'drain-' + (drains.length + 1), stream,
+        through: target?.sequence, eventIds: [...new Set(members.map(p => p.row.eventId))] };
+      drains.push(group);
+      for (const { row } of members) (row.drain_groups ||= []).push(group.id);
+      return scope.run(group, () => reconcile(stream, target, ...rest));
+    };
+    restorers.push(() => { seal.advanceReceipt = advance; seal.reconcileState = reconcile; });
+  }
   activeScope = scope;
   cp.spawnSync = function (command, args, options) {
     const started = clock(), result = originalSpawn.call(this, command, args, { ...options,
@@ -53,7 +81,7 @@ function instrument(prisma, store, seal, { headProbe = false } = {}) {
       if (row && callbackEnd) {
         const elapsed = clock() - callbackEnd;
         row.commit_ms += elapsed;
-        const field = options?.maxWait === 10000 ? 'append_commit_ms' : 'seal_snapshot_commit_ms';
+        const field = row.kind === 'drain' ? 'seal_snapshot_commit_ms' : 'append_commit_ms';
         row[field] = (row[field] || 0) + elapsed;
       }
     }
@@ -81,9 +109,9 @@ function instrument(prisma, store, seal, { headProbe = false } = {}) {
     finally { if (row) row.head_lock_and_sql_ms += clock() - start; }
   };
   return {
+    drains,
     async run(event) {
-      const row = { eventId: event.eventId, head_lock_wait_ms: 0, head_lock_and_sql_ms: 0, pool_wait_ms: 0,
-        commit_ms: 0, writer_ms: 0, write_ms: 0, fsync_ms: 0, writes: 0, fsyncs: 0, transactions: [] };
+      const row = { ...newRow(), kind: 'request', eventId: event.eventId, drain_groups: [] };
       const start = clock(), before = { ...disk };
       return scope.run(row, async () => {
         try { row.receipt = await store.append(event); }
@@ -94,7 +122,7 @@ function instrument(prisma, store, seal, { headProbe = false } = {}) {
         return row;
       });
     },
-    restore() { prisma.$transaction = originalTransaction; cp.spawnSync = originalSpawn; activeScope = undefined; },
+    restore() { for (const restore of restorers) restore(); prisma.$transaction = originalTransaction; cp.spawnSync = originalSpawn; activeScope = undefined; },
   };
 }
 function summary(rows) {

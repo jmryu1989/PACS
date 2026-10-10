@@ -1,5 +1,6 @@
 import * as path from 'node:path';
 import { MessageChannel, receiveMessageOnPort, Worker } from 'node:worker_threads';
+import { EMR_STATE_IPC_TIMEOUT_MS } from './limits';
 
 /** A synchronous protected-state client must not block its socket's event loop.
  * The worker transports JSON only; it never receives DB handles or credentials. */
@@ -12,7 +13,7 @@ export class StateClient {
     const signal = new Int32Array(new SharedArrayBuffer(4)), { port1, port2 } = new MessageChannel();
     try {
       this.worker.postMessage({ socketPath: this.socketPath, operation, value, signal, reply: port2 }, [port2]);
-      if (Atomics.wait(signal, 0, 0, 15000) === 'timed-out')
+      if (Atomics.wait(signal, 0, 0, EMR_STATE_IPC_TIMEOUT_MS) === 'timed-out')
         throw Object.assign(new Error('StateOwnerUnavailable'), { code: 'SealUnavailable' });
       const response = receiveMessageOnPort(port1)?.message;
       if (!response?.ok) throw Object.assign(new Error(response?.error?.message ?? 'StateOwnerUnavailable'),

@@ -5,6 +5,7 @@ import { ChainTail, StoredEntry, chainViolation, retainedAnchor } from './contra
 import { FailureJournal } from './failure-journal';
 import { ExternalState } from './external-writer';
 import type { PrismaLedgerSql, VerificationPage } from './store';
+import { EMR_REPLAY_VERIFY_ROWS } from './limits';
 
 export interface StreamSeal extends ChainPosition { chainId: string }
 export interface SealState { streams: Readonly<Record<AccessStream, StreamSeal>>; sealedAt: string; generation: number }
@@ -173,13 +174,15 @@ export class AccessSeal {
     const first = page ? page.first : (await sql.entriesAfter(stream, 0, 1))[0];
     this.retainedStarts.set(stream, first?.sequence ?? 1);
     const anchorKey = JSON.stringify([tail.chainId, first?.sequence ?? 0, first?.previousHash ?? tail.hash]);
-    if (!full && this.anchors.get(stream) === anchorKey) {
+    if (!full && (this.anchors.get(stream) === anchorKey ||
+        (current.sequence === 0 && first?.sequence === 1 && first.previousHash === current.hash))) {
       const prefix = page?.entries.map(item => item.entry).filter(entry => entry.sequence <= end.sequence);
       const after = prefix?.length ? prefix[prefix.length - 1].sequence : current.sequence;
       const entries = prefix ? [...prefix, ...(prefix.length && after < end.sequence ? await this.range(sql, stream, end.sequence, after) : [])] :
         await this.range(sql, stream, end.sequence, current.sequence);
       const violation = chainViolation(current, entries, end, stream);
       if (violation) throw new SealRefused('LedgerChainBroken', `${stream}:${violation}`);
+      this.anchors.set(stream, anchorKey);
       return entries;
     }
     const entries = await this.range(sql, stream, tail.sequence), anchor = retainedAnchor(entries);
@@ -244,8 +247,11 @@ export class AccessSeal {
           // An exact protected binding has already proved this position. Opening
           // an otherwise empty SQL snapshot would add a DB availability dependency
           // and pool contention to a receipt whose authority is already durable.
-          if (!this.recentlyVerified(state, stream, target))
+          if (!this.recentlyVerified(state, stream, target)) {
+            if (sealed.sequence - target.sequence + 1 > EMR_REPLAY_VERIFY_ROWS)
+              throw new SealRefused('SealUnavailable', 'replay-verification-limit');
             await reader.snapshot(sql => this.bindSealedTarget(sql, state, stream, target));
+          }
         }
         catch (error) {
           if (!same(this.load().tail.streams[stream], sealed)) continue;
@@ -255,9 +261,18 @@ export class AccessSeal {
         return state;
       }
       let result: {current: StreamSeal; end: ChainPosition; entries: StoredEntry[]; unsealed: StoredEntry[]};
-      try { result = await reader.snapshot(async sql => {
-        const page = !recovering && target && target.sequence > sealed.sequence ?
-          await sql.verificationPage(stream, sealed.sequence, Math.min(1000, target.sequence - sealed.sequence)) : undefined;
+      try {
+        // A complete page is one PostgreSQL statement: tail, retained anchor,
+        // entries and markers share its MVCC snapshot. With an already verified
+        // anchor it needs no interactive transaction (BEGIN/fence/COMMIT).
+        // A changed anchor or a multi-page range still uses RepeatableRead.
+        const page = !recovering && target && target.sequence > sealed.sequence && target.sequence - sealed.sequence <= 1000 ?
+          await reader.verificationPage(stream, sealed.sequence, target.sequence - sealed.sequence) : undefined;
+        const anchorKey = page && JSON.stringify([page.tail.chainId, page.first?.sequence ?? 0, page.first?.previousHash ?? page.tail.hash]);
+        const complete = page && page.entries[page.entries.length - 1]?.entry.sequence === target.sequence &&
+          (this.anchors.get(stream) === anchorKey ||
+          (sealed.sequence === 0 && page.first?.sequence === 1 && page.first.previousHash === sealed.hash));
+        const verifySnapshot = async (sql: PrismaLedgerSql, page?: VerificationPage) => {
         const tail = page?.tail ?? await sql.tail(stream);
         // Freeze an omitted target at this snapshot, including across retries.
         target ??= { sequence: tail.sequence, hash: tail.hash };
@@ -272,7 +287,9 @@ export class AccessSeal {
         const markers = new Map(page?.entries.map(item => [item.entry.sequence, item.marker]));
         for (const entry of unsealed) await this.explain(sql, state, stream, entry, current.chainId, markers.get(entry.sequence));
         return { current, end, entries, unsealed };
-      }); } catch(error) {
+        };
+        result = complete ? await verifySnapshot(reader, page) : await reader.snapshot(sql => verifySnapshot(sql));
+      } catch(error) {
         // A concurrent expiry may replace the prefix after this frontier was read. Re-read
         // under a new DB snapshot only when the protected writer actually advanced its revision.
         if (!same(this.load().tail.streams[stream], sealed)) continue;

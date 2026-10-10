@@ -87,7 +87,7 @@ async function liveDriver() {
     if (operation === 'expire') {
       const reader = new PrismaClient({ datasources: { db: { url: process.env.EMR_READER_URL } } });
       try {
-        const journal = new FailureJournal(process.env.KIN_EMR_STATE_DIR);
+        const journal = FailureJournal.retention(process.env.KIN_EMR_STATE_DIR);
         const seal = new AccessSeal(process.env.KIN_EMR_STATE_DIR, new RT.PrismaLedgerSql(reader), journal);
         const retention = args.exit ? {
           $queryRaw: prisma.$queryRaw.bind(prisma),
@@ -135,10 +135,10 @@ async function liveDriver() {
       let release, staged, provisional;
       const held = new Promise(resolve => { release = resolve; });
       const ready = new Promise(resolve => { staged = resolve; });
-      const writing = prisma.$transaction(async tx => {
+      const writing = store.withAppendTransaction(async tx => {
         provisional = await store.appendInTransaction(tx, authEvent(A));
         staged(); await held;
-      }, { timeout: 15000 });
+      });
       await Promise.race([ready, writing]);
       const recovering = seal.recoverAtStart();
       let waiting = false;
@@ -173,7 +173,7 @@ async function liveDriver() {
         const T = require('./throughput.cjs'), probe = T.instrument(prisma, store, seal, { headProbe: args.headProbe === true });
         try {
           const results = args.concurrent ? await Promise.all(events.map(e => probe.run(e))) : await sequential(events, e => probe.run(e));
-          return { results, summary: T.summary(results) };
+          return { results, summary: T.summary(results), drain_groups: probe.drains };
         } finally { probe.restore(); }
       }
       const run = async event => { try { return { eventId: event.eventId, receipt: await store.append(event) }; } catch (error) { return { eventId: event.eventId, error: errorCode(error) }; } };
@@ -185,7 +185,7 @@ async function liveDriver() {
       const event = args.event ?? authEvent(A);
       let appended, transaction, callbackFailed = false;
       try {
-        appended = await prisma.$transaction(async tx => {
+        appended = await store.withAppendTransaction(async tx => {
           transaction = tx;
           try {
           const [row] = await tx.$queryRaw`INSERT INTO "AuditLog" (actor, action, target, detail) VALUES ('SYNTHETIC-emr-b', 'auth.login', 'SYNTHETIC-sub', ${'{"synthetic":true}'}) RETURNING id`;
@@ -196,7 +196,7 @@ async function liveDriver() {
           if (args.exit === 'before-commit') process.exit(0);
           return made;
           } catch (error) { callbackFailed = true; throw error; }
-        }, { timeout: 15000, maxWait: 10000 });
+        });
       } catch (error) {
         let settled = null;
         try { await store.settleTransaction(transaction, event, error, callbackFailed); } catch (settleError) { settled = errorCode(settleError); }
@@ -1255,6 +1255,84 @@ function contractSuite() {
         assert.deepEqual(Object.keys(restored.intents).sort(), ids.map(id => 'viewing:' + id).sort(), 'every durable intent survives compaction interruption');
       } finally { w.cleanup(); }
     }
+  });
+
+  test('C22 a four-connection pool admits 24 appends without holding queued head-lock connections ahead of a committed receipt', async () => {
+    // Deterministic adverse schedule: after the first COMMIT, the next writer is
+    // paused until its predecessor receives a receipt. Extra head-lock waiters
+    // must remain outside the connection pool. A saturated verification request
+    // exhausts its virtual acquisition deadline; no wall-clock sleep is used.
+    const w = await world(), raw = memorySql(w.ledger);
+    let slots = 4, txId = 0, head = Promise.resolve(), resume, peakPoolUse = 0, peakPoolQueue = 0;
+    const paused = new Promise(resolve => { resume = resolve; }), queue = [];
+    const acquire = () => {
+      if (slots) { slots--; peakPoolUse = Math.max(peakPoolUse, 4 - slots); return Promise.resolve(); }
+      return new Promise(resolve => { queue.push(resolve); peakPoolQueue = Math.max(peakPoolQueue, queue.length); });
+    };
+    const release = () => { const next = queue.shift(); if (next) next(); else slots++; };
+    const query = async work => {
+      await new Promise(resolve => setImmediate(resolve));
+      if (!slots) throw Object.assign(new Error('verification connection deadline exhausted'), { code: 'P2028' });
+      await acquire(); try { return await work(); } finally { release(); }
+    };
+    const pool = { $transaction: async work => {
+      await acquire(); const id = ++txId, before = head; let unlock;
+      head = new Promise(resolve => { unlock = resolve; });
+      await before;
+      try {
+        if (id > 1) await paused;
+        const tx = w.ledger.begin(), value = await work(tx); w.ledger.commit(tx); return value;
+      } finally { unlock(); release(); }
+    } };
+    const sql = { ...raw, verificationPage: (...args) => query(() => raw.verificationPage(...args)),
+      entryForEvent: (...args) => query(() => raw.entryForEvent(...args)),
+      snapshot: work => query(() => work(raw)) };
+    w.store.db = pool; w.store.sql = sql; w.seal.sql = sql;
+    try {
+      const first = w.store.append(authEvent(A)).finally(resume);
+      const rest = Array.from({ length: 23 }, () => w.store.append(authEvent(A)));
+      const results = await Promise.allSettled([first, ...rest]);
+      console.info('EMR_POOL_ADMISSION ' + JSON.stringify({ pool: 4, concurrent: 24,
+        receipts: results.filter(r => r.status === 'fulfilled').length,
+        errors: results.filter(r => r.status === 'rejected').map(r => errorCode(r.reason)), peakPoolUse, peakPoolQueue }));
+      assert.deepEqual(results.filter(r => r.status === 'rejected').map(r => errorCode(r.reason)), [], 'every committed request receives its receipt');
+      assert.equal(w.ledger.entries.length, 24);
+      assert.equal(w.seal.read().streams.viewing.sequence, 24);
+      const probe = require('./throughput.cjs').instrument(pool, w.store, w.seal);
+      try {
+        const traced = await Promise.all(Array.from({ length: 24 }, () => probe.run(authEvent(A))));
+        assert(traced.every(row => row.receipt), 'instrumented requests preserve receipt behaviour');
+        for (const row of traced) {
+          assert.equal(row.transactions.length, 1, 'request owns only its append transaction');
+          assert.equal(row.drain_groups.length, 1, 'a resolved member is not charged to the next drain group');
+          assert(probe.drains.find(group => group.id === row.drain_groups[0]).eventIds.includes(row.eventId));
+        }
+      } finally { probe.restore(); }
+    } finally { resume(); w.cleanup(); }
+  });
+
+  test('C23 a cold replay beyond the named verification cap refuses before acquiring a snapshot', async () => {
+    const w = await world(), { EMR_REPLAY_VERIFY_ROWS } = load('emr-runtime/limits.ts');
+    try {
+      const event = authEvent(A); await w.store.append(event);
+      const originalHash = w.ledger.entries[0].hash;
+      // A legitimate long retained chain, installed through startup verification.
+      for (let i = 0; i < EMR_REPLAY_VERIFY_ROWS; i++) {
+        const tx = w.ledger.begin(), e = authEvent(A), p = C.canonicalPayload(e);
+        w.ledger.append(tx, 'viewing', e.eventId, p.text, 'none'); w.ledger.commit(tx);
+      }
+      w.journal.coordinator.call('update', state => {
+        state.tail.streams.viewing = { chainId: w.ledger.chainId, ...w.ledger.head };
+        state.terminal = {}; state.generation++; state.tail.generation = state.generation;
+      });
+      let snapshots = 0;
+      const sql = memorySql(w.ledger), original = sql.snapshot;
+      sql.snapshot = work => { snapshots++; return original(work); };
+      const seal = new S.AccessSeal(w.state, sql, w.journal);
+      await assert.rejects(seal.advance('viewing', {sequence: 1, hash: originalHash}),
+        error => error.code === 'SealUnavailable' && error.detail === 'replay-verification-limit');
+      assert.equal(snapshots, 0, 'far replay cannot occupy a pool slot');
+    } finally { w.cleanup(); }
   });
 
   test('C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused', () => {

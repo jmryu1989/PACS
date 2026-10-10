@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import statistics
+import math
 import shutil
 import subprocess
 import tarfile
@@ -24,14 +25,25 @@ BASELINE = "9a1df0d1328d5b8ad979fc7d2ef65192d595cf4b"
 
 
 def permutation(a, b):
-    joined = a + b
-    observed = abs(statistics.mean(a) - statistics.mean(b))
-    differences = []
-    for chosen in itertools.combinations(range(len(joined)), len(a)):
-        indexes = set(chosen)
-        differences.append(abs(statistics.mean(joined[i] for i in indexes) -
-                               statistics.mean(joined[i] for i in range(len(joined)) if i not in indexes)))
-    return sum(d >= observed - 1e-12 for d in differences) / len(differences)
+    # Each interleaved repetition is a same-run pair. Enumerate every paired
+    # label swap (2**n), not independent reassignments that discard that pairing.
+    differences = [x - y for x, y in zip(a, b)]
+    observed = abs(sum(differences))
+    choices = list(itertools.product((-1, 1), repeat=len(differences)))
+    return sum(abs(sum(s * d for s, d in zip(signs, differences))) >= observed - 1e-12
+               for signs in choices) / len(choices)
+
+
+def relative_bound(a, b):
+    """Paired geometric ratio, two-sided 95% t interval (10 pairs, df=9)."""
+    ratios = [math.log(y / x) for x, y in zip(a, b)]
+    center = statistics.mean(ratios)
+    # The public measurement uses ten pairs; do not imply a calibrated interval
+    # for shorter diagnostic runs.
+    upper = center + 2.262157 * statistics.stdev(ratios) / math.sqrt(len(ratios)) if len(ratios) == 10 else None
+    return {"paired_geometric_pct": (math.exp(center) - 1) * 100,
+            "paired_upper_95_pct": None if upper is None else (math.exp(upper) - 1) * 100,
+            "interval_method": "paired log-ratio Student t, df=9" if upper is not None else "not computed"}
 
 
 def summarize(rows):
@@ -45,13 +57,14 @@ def main():
     parser.add_argument("--image")
     parser.add_argument("--flock-ms", type=float, help="measured Linux flock pair cost, emulated by the original Windows harness")
     parser.add_argument("--cases", default="ledger,sustained,concurrent,journal")
+    parser.add_argument("--reps", type=int, default=10)
     args = parser.parse_args()
     if not args.image and args.flock_ms is None:
         parser.error('--flock-ms is required without a Linux image; measure lock_test.cjs first')
     candidate_input, out = args.candidate.resolve(), Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     cases = args.cases.split(",")
-    env = {**os.environ, "AB_DURATION_MS": "6000", "JOURNAL_REPS": "5"}
+    env = {**os.environ, "AB_DURATION_MS": "6000", "JOURNAL_REPS": str(args.reps)}
     with tempfile.TemporaryDirectory(prefix="emr-r3-") as scratch:
         baseline, candidate = Path(scratch) / 'baseline', Path(scratch) / 'candidate'
         baseline.mkdir()
@@ -59,7 +72,8 @@ def main():
         shutil.copyfile(candidate_input / 'api/tsconfig.json', candidate / 'api/tsconfig.json')
         source_hashes = {str(p.relative_to(candidate)).replace('\\', '/'): hashlib.sha256(p.read_bytes()).hexdigest()
                          for p in candidate.rglob('*') if p.is_file()}
-        archive = subprocess.check_output(["git", "archive", BASELINE, "api/src", "api/tsconfig.json"], cwd=ROOT)
+        archive = subprocess.check_output(["git", "archive", BASELINE, "api/src", "api/tsconfig.json"],
+                                         cwd=os.environ.get("KIN_EMR_BASELINE_REPOSITORY", ROOT))
         with tarfile.open(fileobj=io.BytesIO(archive)) as bundle:
             bundle.extractall(baseline, filter="data")
 
@@ -78,7 +92,7 @@ def main():
                            "--mount", f"type=volume,source={volume},target=/tmp",
                            "--mount", f"type=bind,source={out},target=/evidence",
                            "-e", "KIN_EMR_TYPESCRIPT=/deps/typescript",
-                           "-e", "AB_DURATION_MS=6000", "-e", "JOURNAL_REPS=5", "--entrypoint", "tail", args.image, "-f", "/dev/null"]
+                           "-e", "AB_DURATION_MS=6000", "-e", "JOURNAL_REPS=" + str(args.reps), "--entrypoint", "tail", args.image, "-f", "/dev/null"]
                 container = subprocess.check_output(command, text=True, timeout=60).strip()
                 # Keep the execution argv private; evidence receives a value copy.
                 (out / 'container.json').write_text(json.dumps({'id': container, 'command': command + []}) + '\n')
@@ -113,7 +127,7 @@ def main():
                 configs += [("sustained", 20, 20000)]
             if "concurrent" in cases:
                 configs += [("concurrent", n, 0) for n in (24, 48)]
-            for rep in range(5):
+            for rep in range(args.reps):
                 # Balance size/workload order as well as revision order.
                 ordered = configs if rep % 2 == 0 else list(reversed(configs))
                 for case, count, retained in ordered:
@@ -130,20 +144,24 @@ def main():
                 subprocess.run(["docker", "volume", "rm", volume], check=True, capture_output=True, timeout=60)
 
     receipt = [json.loads(line) for line in (out / "receipt.jsonl").read_text().splitlines()] if configs else []
-    failures, report = [], {"baseline": BASELINE, "candidate_sources": source_hashes, "repetitions": 5,
+    failures, report = [], {"baseline": BASELINE, "candidate_sources": source_hashes, "repetitions": args.reps,
                            "lock": {"choice": "B", "linux_image": args.image, "emulated_pair_ms": args.flock_ms, "state_filesystem": "disposable-local-volume" if args.image else "host"}, "cases": {}}
     for case, count, retained in configs:
         selected = [r for r in receipt if r["label"].startswith(case + "-") and r["concurrency"] == count and r["prefill"] == retained]
         pair = {v: [r for r in selected if r["version"] == v] for v in ("r3", "r4d")}
-        assert all(len(pair[v]) == 5 for v in pair), "missing or duplicated repetitions"
+        assert all(len(pair[v]) == args.reps for v in pair), "missing or duplicated repetitions"
         stats = {v: summarize(pair[v]) for v in pair}
         stats["permutation_p"] = permutation([r["p95"] for r in pair["r3"]], [r["p95"] for r in pair["r4d"]])
+        stats["p95_pct"] = (stats["r4d"]["p95"] / stats["r3"]["p95"] - 1) * 100
+        stats.update(relative_bound([r["p95"] for r in pair["r3"]], [r["p95"] for r in pair["r4d"]]))
         stats["failures"] = sum(r["failures"] for r in selected)
         report["cases"][f"{case}-{count}-{retained}"] = stats
         if stats["failures"]:
             failures.append(f"{case}-{count}-{retained}: request failed")
-        if case != "ledger" and stats["r4d"]["p95"] > stats["r3"]["p95"] * (1.15 if case == "sustained" else 1.0):
-            failures.append(f"{case}-{count}: candidate p95 exceeds same-run r3 budget (sustained +15%, concurrent +0%)")
+        if stats["r4d"]["p95"] > stats["r3"]["p95"] * (1.0 if case == "concurrent" else 1.10):
+            failures.append(f"{case}-{count}-{retained}: candidate p95 exceeds same-run r3 budget (+10%, concurrent +0%)")
+        if case == "sustained" and stats["permutation_p"] >= .05:
+            failures.append("sustained: paired p95 difference does not meet p < 0.05")
         if case == "ledger" and max(r["read_rows"] for r in pair["r4d"]) > 4:
             failures.append(f"ledger-{retained}: single receipt reads retained prefix")
     if "ledger" in cases:

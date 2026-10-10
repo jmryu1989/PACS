@@ -150,10 +150,32 @@ class EmrBLedgerLive(unittest.TestCase):
 
     def driver(self, operation, args=None, *, db=None, volume=None, url=None):
         env = {**self.env, "DATABASE_URL": url or self.url(), "EMR_READER_URL": self.url("kin_emr_reader")}
-        result = run(["docker", "run", "--rm", "--label", self.label, "--network", "container:" + (db or self.db),
+        # The retention credential stays in the job. A separate API owner process
+        # supplies only protected-state IPC for these one-shot lifecycle cases.
+        # Appending drivers own their own API fence, including measured bursts.
+        owner = None
+        try:
+            if operation == "expire":
+                owner = "kin-emrb-" + self.token + "-owner-" + uuid.uuid4().hex[:6]
+                self.created["container"].append(owner)
+                code = "new (require('/app/dist/emr-runtime/coordinator').StateCoordinator)(process.env.KIN_EMR_STATE_DIR);setImmediate(()=>console.log('EMR_OWNER_READY'));setInterval(()=>{},1000)"
+                run(["docker", "run", "-d", "--name", owner, "--label", self.label, "--network", "none",
+                     "-e", "KIN_EMR_STATE_DIR=" + STATE, "-v", (volume or self.state) + ":" + STATE,
+                     "--entrypoint", "node", self.image, "-e", code])
+                for _ in range(50):
+                    if b"EMR_OWNER_READY" in run(["docker", "logs", owner]).stdout:
+                        break
+                    time.sleep(.1)
+                else:
+                    self.fail("synthetic API state owner did not become ready")
+            result = run(["docker", "run", "--rm", "--label", self.label, "--network", "container:" + (db or self.db),
                       "-e", "DATABASE_URL", "-e", "EMR_READER_URL", "-e", "KIN_EMR_STATE_DIR=" + STATE, "-v", (volume or self.state) + ":" + STATE,
                       "-v", str(DRIVER_DIR) + ":/emr-b:ro", "--entrypoint", "node", self.image,
                       "/emr-b/contract_test.cjs", "--emr-b-live", operation, json.dumps(args or {})], env=env, check=False, timeout=300)
+        finally:
+            if owner:
+                run(["docker", "rm", "-f", owner])
+                self.created["container"].remove(owner)
         lines = [line for line in result.stdout.decode("utf-8", "replace").splitlines() if line.startswith("EMR_B_RESULT ")]
         if len(lines) != 1:
             if result.returncode == 0 and not lines:
@@ -390,12 +412,13 @@ class EmrBLedgerLive(unittest.TestCase):
             self.ok("DROP FUNCTION public.emrb_measure_lock(text)")
         # Raw individual errors/timings are evidence, not just a successful percentile.
         print("EMR_THROUGHPUT " + json.dumps({"count": count, **data}), flush=True)
-        self.assertEqual(len(data.get("results", [])), count, data)
-        self.assertEqual(data["summary"]["failures"], 0, data)
         if baseline is None:
             baseline = self.baseline_appends(count)
-        self.latency_pair = {'count': count, 'baseline_revision': BASELINE, 'r3': baseline['summary'], 'r4d': data['summary']}
+        print('EMR_BASELINE_THROUGHPUT ' + json.dumps({'count': count, **baseline}), flush=True)
+        self.latency_pair = {'count': count, 'baseline_revision': BASELINE, 'r3': baseline['summary'], 'r4d': data.get('summary')}
         print('EMR_RELATIVE_LATENCY ' + json.dumps(self.latency_pair), flush=True)
+        self.assertEqual(len(data.get("results", [])), count, data)
+        self.assertEqual(data["summary"]["failures"], 0, data)
         return data["results"]
 
     def assert_relative_latency(self):
@@ -453,6 +476,11 @@ class EmrBLedgerLive(unittest.TestCase):
             jobs = list(workers.map(lambda n: self.driver("journal-add", {"id": "L03-fenced-writer-"+str(n)}), range(6)))
         self.assertEqual(len(jobs), 6)
         self.assertEqual(sum(r["id"].startswith("L03-fenced-writer-") for r in self.driver("journal")), 6)
+        small_pool = self.driver("append", {"count": 24, "concurrent": True, "measure": True},
+                                 url=self.url() + "?connection_limit=4")
+        print("EMR_SMALL_POOL " + json.dumps(small_pool), flush=True)
+        self.assertEqual(small_pool["summary"]["failures"], 0, small_pool)
+        self.assertEqual(len(small_pool["results"]), 24)
         with ThreadPoolExecutor(max_workers=2) as workers:
             mixed=list(workers.map(lambda event:self.driver("append",{"events":[event]}),[self.change_event(),self.auth_event()]))
         self.assertTrue(all("receipt" in r.get("results",[{}])[0] for r in mixed),mixed)

@@ -29,6 +29,15 @@ MUTANTS = {
 }
 
 
+def property_failures(case, failures):
+    """The negative control must kill its own assertion, never an existing
+    regression in another property. MP01 checks IO complexity; its latency
+    goals remain reported by the complete healthy A/B run."""
+    if case == 'ledger':
+        return [f for f in failures if 'single receipt reads retained prefix' in f]
+    return [f for f in failures if f.startswith(case + '-') or f.startswith(case + ':')]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', type=Path, required=True)
@@ -38,8 +47,6 @@ def main():
     parser.add_argument('--only')
     args = parser.parse_args()
     control = json.loads(args.control.read_text())
-    if control['failures']:
-        raise RuntimeError('healthy A/B control did not pass; no valid mutant verdict')
     for name, expected in control['candidate_sources'].items():
         if hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != expected:
             raise RuntimeError('healthy control source differs: ' + name)
@@ -48,6 +55,12 @@ def main():
     rows = []
     for name, (case, filename, before, after, behaviour) in MUTANTS.items():
         if args.only and name not in args.only.split(','):
+            continue
+        unhealthy = property_failures(case, control['failures'])
+        if unhealthy:
+            rows.append({'id': name, 'property': case, 'killed': None, 'status': 'control_failed',
+                         'control_failures': unhealthy, 'reason': 'No valid mutant verdict: its healthy property control failed.'})
+            print(json.dumps(rows[-1]), flush=True)
             continue
         with tempfile.TemporaryDirectory(prefix='emr-perf-mutant-') as folder:
             candidate = Path(folder)
@@ -68,14 +81,19 @@ def main():
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=1200, env={**os.environ, 'PYTHONIOENCODING': 'utf-8'})
             (out / (name + '.log')).write_text(result.stdout + result.stderr, encoding='utf-8')
             summary = json.loads((run / 'summary.json').read_text()) if (run / 'summary.json').exists() else None
-            killed = result.returncode == 1 and summary is not None and bool(summary['failures'])
+            matching = property_failures(case, summary['failures']) if summary else []
+            killed = result.returncode == 1 and summary is not None and bool(matching)
             rows.append({'id': name, 'property': case, 'behaviour': behaviour, 'exit': result.returncode, 'killed': killed,
+                         'status': 'completed', 'matching_assertions': matching,
+                         'other_control_failures': control['failures'],
                          'source': str(file.relative_to(candidate)), 'before_sha256': hashlib.sha256(original.encode()).hexdigest(),
                          'mutant_sha256': hashlib.sha256(mutated.encode()).hexdigest(), 'failures': summary and summary['failures']})
             print(json.dumps(rows[-1]), flush=True)
-    summary = {'total': len(rows), 'killed': sum(r['killed'] for r in rows), 'survived': [r['id'] for r in rows if not r['killed']], 'results': rows}
+    summary = {'total': len(rows), 'killed': sum(r['killed'] is True for r in rows),
+               'survived': [r['id'] for r in rows if r['killed'] is False],
+               'not_run': [r['id'] for r in rows if r['killed'] is None], 'results': rows}
     (out / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
-    return bool(summary['survived'])
+    return bool(summary['survived'] or summary['not_run'])
 
 
 if __name__ == '__main__':

@@ -3995,13 +3995,21 @@ function scanAuditWrites(sources = auditSources()) {
     const method = bare(call.expression);
     if (!ts.isPropertyAccessExpression(method) || !['set','get','has','delete'].includes(method.name.text)) return false;
     const receiver = bare(method.expression);
-    if (!ts.isPropertyAccessExpression(receiver) || receiver.expression.kind !== K.ThisKeyword) return false;
-    const symbol = symbolAt(receiver.name), declaration = symbol?.declarations?.[0];
-    if (!declaration || !ts.isPropertyDeclaration(declaration) || memberChanged(symbol)) return false;
+    const member = ts.isPropertyAccessExpression(receiver) && receiver.expression.kind === K.ThisKeyword;
+    if (!member && !ts.isIdentifier(receiver)) return false;
+    const symbol = symbolAt(member ? receiver.name : receiver), declaration = symbol?.declarations?.[0];
+    if (!declaration || symbol.declarations.length !== 1) return false;
+    if (member ? !ts.isPropertyDeclaration(declaration) || memberChanged(symbol)
+      : !isConst(declaration) || !!(ts.getCombinedModifierFlags(declaration.parent.parent) & ts.ModifierFlags.Export)) return false;
     const created = declaration.initializer && bare(declaration.initializer);
     if (!created || !ts.isNewExpression(created) || !ts.isIdentifier(created.expression) || created.expression.text !== 'WeakMap'
       || created.arguments?.length || symbolAt(created.expression)?.declarations?.some(d => files.includes(d.getSourceFile()))) return false;
-    return memberRefs(symbol).typed.every(access => {
+    // A constructor/prototype handed elsewhere or overwritten can replace native
+    // key semantics. The source set must use the native constructor only via new.
+    const native = symbolAt(created.expression);
+    if (!native?.declarations?.some(lib) || !references(native).every(use =>
+      ts.isNewExpression(use.parent) && use.parent.expression === use)) return false;
+    return (member ? memberRefs(symbol).typed : references(symbol)).every(access => {
       const held = outer(access), use = held.parent;
       return ts.isPropertyAccessExpression(use) && use.expression === held && ['set','get','has','delete'].includes(use.name.text)
         && ts.isCallExpression(use.parent) && use.parent.expression === use;
@@ -4940,6 +4948,17 @@ test('native WeakMap transaction identity keys do not escape; map values, replac
   for (const body of ["this.map.set({}, tx);", "opaque(this.map); this.map.get(tx);",
     "this.map.set = opaque; this.map.set(tx, 'id');"]) assert(scan(body).unresolved.length, body);
   assert(scan("this.map.set(tx, 'id');", 'declare const WeakMap: any;').unresolved.length);
+  const moduleMap = (body, prefix = '', declaration = 'const') => scanAuditWrites([{
+    file: 'api/src/syn-fixture/module-identity-map.ts', text: `import { Prisma } from '@prisma/client';
+    ${prefix} declare function opaque(value: any): any;
+    ${declaration} cache = new WeakMap<object, any>();
+    export function use(tx: Prisma.TransactionClient) { ${body} }` }]);
+  assert.deepEqual(moduleMap("cache.set(tx, 'id'); cache.get(tx); cache.has(tx); cache.delete(tx);").unresolved, []);
+  for (const body of ["cache.set({}, tx);", "opaque(cache); cache.get(tx);", "cache.get = opaque; cache.get(tx);",
+    "WeakMap.prototype.get = opaque; cache.get(tx);", "const alias = cache; alias.get(tx);"])
+    assert(moduleMap(body).unresolved.length, body);
+  assert(moduleMap('cache.get(tx);', '', 'export const').unresolved.length, 'exported map is not private identity storage');
+  assert(moduleMap('cache.get(tx);', 'declare const WeakMap: any;').unresolved.length, 'shadow constructor is not native');
 });
 test('EMR-B1 ledger provenance: the adapter calls are read; any other emr_access SQL fails where it stands', async t => {
   const product = scanAuditWrites();

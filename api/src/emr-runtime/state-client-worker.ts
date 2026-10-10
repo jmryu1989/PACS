@@ -1,5 +1,6 @@
 import { createConnection } from 'node:net';
 import { parentPort } from 'node:worker_threads';
+import { EMR_STATE_IPC_TIMEOUT_MS } from './limits';
 
 // A fresh connection per operation cannot retain a dead owner's authority. The
 // kernel fence protects the replacement socket and every operation it accepts.
@@ -14,7 +15,7 @@ parentPort.on('message', ({ socketPath, operation, value, signal, reply }) => {
   };
   const unavailable = (ownerGone = false) => finish({ ok: false, error: { code: 'SealUnavailable',
     message: 'StateOwnerUnavailable', ownerGone, beforeConnect: !connected } });
-  socket.setTimeout(15000, () => unavailable());
+  socket.setTimeout(EMR_STATE_IPC_TIMEOUT_MS, () => unavailable());
   socket.on('error', () => unavailable(true)); socket.on('end', () => { if (!finished) unavailable(true); });
   socket.on('connect', () => { connected = true; socket.write(JSON.stringify({ operation, value }) + '\n'); });
   socket.setEncoding('utf8');

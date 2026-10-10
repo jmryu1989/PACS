@@ -13,6 +13,8 @@ import { EmrSnapshot, SnapshotRequest, snapshotFromRows } from './context';
 import { FailureJournal, JournalUnavailable } from './failure-journal';
 import { RawQuery } from './manifest';
 import { AccessSeal, SealRefused, SealState, CommitBinding } from './seal';
+import { admitAppend } from './admission';
+import { EMR_TX_MAX_WAIT_MS, EMR_TX_TIMEOUT_MS, EMR_RECOVERY_TIMEOUT_MS } from './limits';
 
 /**
  * The protected access ledger store (EMR-B1). A ledger fact commits in the same PostgreSQL transaction as the business
@@ -21,7 +23,7 @@ import { AccessSeal, SealRefused, SealState, CommitBinding } from './seal';
  * external seal moved over it. Every path that does not end in a receipt leaves its fact in the failure journal or as a
  * pending intent the next start resolves - never a success, never a second original event for the same attempt.
  *
- * A business change and its fact: the caller's own `$transaction` does the change and `appendInTransaction(tx, event)`
+ * A business change and its fact: `withAppendTransaction` does the caller's change and `appendInTransaction(tx, event)`
  * last; after it returns, `confirm(appended)`; when it throws, `settle(event, error)`. `append(event)` is the same for a
  * fact without a business change. All SQL is parameterized Prisma raw calls of the schema's own functions.
  */
@@ -72,13 +74,13 @@ export class PrismaLedgerSql {
     return this.db.$transaction(async tx => {
       await tx.$queryRaw`SELECT emr_access.enter_writer()::text`;
       return work(new PrismaLedgerSql(tx, true));
-    }, { isolationLevel: 'RepeatableRead', timeout: 15000 });
+    }, { isolationLevel: 'RepeatableRead', maxWait: EMR_TX_MAX_WAIT_MS, timeout: EMR_TX_TIMEOUT_MS });
   }
   async withWriterFence<T>(work: (sql: PrismaLedgerSql) => Promise<T>): Promise<T> {
     return this.db.$transaction(async tx => {
       await tx.$queryRaw`SELECT emr_access.fence_writers()::text`;
       return work(new PrismaLedgerSql(tx, true));
-    }, { timeout: 30000 });
+    }, { maxWait: EMR_TX_MAX_WAIT_MS, timeout: EMR_RECOVERY_TIMEOUT_MS });
   }
   private marker(row: any): CommitBinding | null {
     if (!row) return null;
@@ -132,6 +134,17 @@ export class PrismaLedgerSql {
 export class AccessLedgerStore implements AppendOnlyAccessStore {
   private readonly attempts = new WeakMap<object, { attemptId: string; streams: readonly AccessStream[] }>();
   constructor(private readonly db: PrismaClient, readonly sql: PrismaLedgerSql, readonly seal: AccessSeal, readonly journal: FailureJournal) {}
+
+  /** Both standalone and business writers enter before acquiring a connection.
+   * Callers include their business change and appendInTransaction in this same
+   * callback; confirm remains outside it, after the successful COMMIT. Starting
+   * a raw Prisma transaction first would bypass admission and reintroduce the
+   * head-lock/pool priority inversion for business writes.
+   */
+  withAppendTransaction<T>(work: (tx: any) => Promise<T>): Promise<T> {
+    return admitAppend(this.db, () => this.db.$transaction(work,
+      { maxWait: EMR_TX_MAX_WAIT_MS, timeout: EMR_TX_TIMEOUT_MS }));
+  }
 
   /**
    * Inside the caller's open business transaction, last: A parses the event and names its streams and 의료법 제23조④ act;
@@ -223,11 +236,11 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
   async append(input: AccessEvent, served?: readonly ResolvedRecord[]): Promise<DurableAccessReceipt> {
     let appended: ProvisionalAppend, callbackFailed = false, transaction: object;
     try {
-      appended = await this.db.$transaction(async tx => {
+      appended = await this.withAppendTransaction(async tx => {
         transaction = tx;
         try { return await this.appendInTransaction(tx, input, served); }
         catch (error) { callbackFailed = true; throw error; }
-      }, { timeout: 15000, maxWait: 10000 });
+      });
     } catch (error) {
       await this.settleTransaction(transaction, input, error, callbackFailed, served);
       throw error;
@@ -432,7 +445,7 @@ export async function expireAccessPrefix(retention: PrismaClient, seal: AccessSe
         await tx.$queryRaw`SELECT emr_access.bind_commit('viewing'::text, ${attemptId}::text, ${binding.generation}::bigint, ${binding.proofDigest}::text)::text`;
         return { deleted: toNumber(row.deleted_count), checkpointSequence: toNumber(row.checkpoint_sequence), checkpointHash: sha256(row.checkpoint_hash) };
       } catch (error) { callbackFailed = true; throw error; }
-    }, { timeout: 15000 });
+    }, { maxWait: EMR_TX_MAX_WAIT_MS, timeout: EMR_TX_TIMEOUT_MS });
   } catch (error) {
     seal.recordExpiryFailure(attemptId, callbackFailed);
     if (callbackFailed) seal.abort('viewing', attemptId);

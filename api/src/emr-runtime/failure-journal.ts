@@ -7,6 +7,12 @@ export { JOURNAL_MAX_BYTES, JOURNAL_KINDS, JOURNAL_CAUSES, JournalKind, JournalR
 export class FailureJournal {
   readonly coordinator: StateCoordinator;
   readonly tornBytes: number;
+  /** Retention is always a client of the API's lifetime fence. If the API is
+   * absent, construction fails after bounded retries; the job defers without
+   * acquiring ownership or starting its deleting transaction. */
+  static retention(directory: string): FailureJournal {
+    return new FailureJournal(directory, new StateCoordinator(directory, undefined, 'retention'));
+  }
   constructor(directory: string | undefined, coordinator?: StateCoordinator) {
     this.coordinator = coordinator ?? new StateCoordinator(directory);
     this.tornBytes = this.invoke('journal-load').tornBytes;

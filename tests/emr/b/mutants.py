@@ -129,7 +129,7 @@ MUTANTS = {
     "M33": ("I2: startup vetoes pending before negative settlement", [
         ("api/src/emr-runtime/seal.ts", "    return this.sql.withWriterFence(async sql => {", "    return this.sql.withWriterFence(async sql => {\n      if(Object.keys(this.load().intents).length)throw new SealRefused('UnsealedEntryUnexplained','pending-conflict');")]),
     "M34": ("I3: a healthy own COMMIT waits for every unrelated pending event", [
-        ("api/src/emr-runtime/seal.ts", "      try { result = await reader.snapshot(async sql => {", "      try { result = await reader.snapshot(async sql => {\n        for(const i of Object.values(this.load().intents))if(i.eventId&&!await sql.entryForEvent(i.stream,i.eventId))throw new SealRefused('UnsealedEntryUnexplained','pending-conflict');")]),
+        ("api/src/emr-runtime/seal.ts", "        const verifySnapshot = async (sql: PrismaLedgerSql, page?: VerificationPage) => {", "        const verifySnapshot = async (sql: PrismaLedgerSql, page?: VerificationPage) => {\n        for(const i of Object.values(this.load().intents))if(i.eventId&&!await sql.entryForEvent(i.stream,i.eventId))throw new SealRefused('UnsealedEntryUnexplained','pending-conflict');")]),
     "M35": ("I4: job reports success before its own checkpoint seal", [
         ("api/src/emr-runtime/store.ts", "  await seal.reconcileCommitted('viewing', { sequence: result.checkpointSequence, hash: result.checkpointHash });\n", "")]),
     "M36": ("per-operation Node startup returns to the head-locked writer: concurrent receipt latency exceeds the round-3 budget", [
@@ -137,6 +137,8 @@ MUTANTS = {
          "      if (operation === 'reserve') require('node:child_process').spawnSync(process.execPath, ['-e', '']);\n      if (this.owner) return executeExternal({ ...request, context: this.owner.context });")]),
     "M38": ("A7 replay trusts a sealed DB row without binding its bytes through the external seal", [
         ("api/src/emr-runtime/seal.ts", "await reader.snapshot(sql => this.bindSealedTarget(sql, state, stream, target));", "void 0; /* missing sealed-target binding */")]),
+    "M39": ("head-lock waiters acquire every pool connection ahead of a committed request's verification", [
+        ("api/src/emr-runtime/admission.ts", "  await before;", "  void before; /* admission removed */")]),
     "M37": ("a verification snapshot aliases the coordinator index and accepts another writer's changed binding", [
         ("api/src/emr-runtime/external-writer.ts", "return { changed: true, result: clone(result) };", "return { changed: true, result };")]),
 
@@ -157,13 +159,28 @@ def run(args, *, cwd, env=None, timeout, log):
     return code, round(time.monotonic() - started, 1)
 
 
-def make_copy(target, worktree=False):
+def make_copy(target, worktree=False, source_manifest=None):
     """The committed checkout (HEAD) as files, with this checkout's installed api/node_modules linked in."""
-    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT).decode().strip()
-    archive = subprocess.run(["git", "archive", "--format=tar", head], cwd=ROOT, capture_output=True, check=True).stdout
-    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-        tar.extractall(target, filter="data") if sys.version_info >= (3, 12) else tar.extractall(target)
-    if worktree:
+    if source_manifest:
+        # A Linux copy need not carry the commander's Windows Git metadata.
+        # Copy only the explicitly hash-bound source inventory; reject drift.
+        manifest = json.loads(Path(source_manifest).read_text(encoding="utf-8"))
+        head = manifest["base_head"]
+        for name, expected in manifest["files"].items():
+            origin, destination = ROOT / name, target / name
+            if (Path(name).is_absolute() or '..' in Path(name).parts or
+                    not destination.resolve().is_relative_to(target.resolve()) or
+                    not origin.resolve().is_relative_to(ROOT.resolve()) or sha256(origin) != expected):
+                raise RuntimeError("source manifest mismatch: " + name)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(origin, destination)
+        (target / "mutant-inputs.json").write_text(json.dumps(manifest["files"], sort_keys=True), encoding="utf-8")
+    else:
+        head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT).decode().strip()
+        archive = subprocess.run(["git", "archive", "--format=tar", head], cwd=ROOT, capture_output=True, check=True).stdout
+        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+            tar.extractall(target, filter="data") if sys.version_info >= (3, 12) else tar.extractall(target)
+    if worktree and not source_manifest:
         tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=ROOT).decode().split("\0")
         declaration = json.loads(DECLARATION.read_text(encoding="utf-8"))
         tracked = sorted(set(filter(None, tracked)) | {name for group in declaration["owned_paths"].values() for name in group})
@@ -362,6 +379,43 @@ def self_test():
     import importlib.util
     from unittest.mock import patch
     class VerdictTest(unittest.TestCase):
+        def test_live_control_is_printed_before_candidate_failure(self):
+            from contextlib import redirect_stdout
+            spec = importlib.util.spec_from_file_location('emrb_control_probe', ROOT / 'tests/emr/b/live.py')
+            live = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(live)
+            for count in (24, 48):
+                probe = live.EmrBLedgerLive('test_b03_idempotency_and_concurrent_append')
+                output = io.StringIO()
+                baseline = {'summary': {'count': count, 'failures': 0, 'p95_ms': 123}}
+                with patch.object(probe, 'ok', return_value=[]), \
+                        patch.object(probe, 'driver', return_value={'results': []}), \
+                        patch.object(probe, 'baseline_appends', return_value=baseline), redirect_stdout(output):
+                    with self.assertRaises(AssertionError):
+                        probe.measured_appends(count)
+                rows = output.getvalue().splitlines()
+                control = next(json.loads(row[len('EMR_BASELINE_THROUGHPUT '):])
+                               for row in rows if row.startswith('EMR_BASELINE_THROUGHPUT '))
+                relative = next(json.loads(row[len('EMR_RELATIVE_LATENCY '):])
+                                for row in rows if row.startswith('EMR_RELATIVE_LATENCY '))
+                self.assertEqual(control['summary'], baseline['summary'])
+                self.assertEqual(relative['r3'], baseline['summary'])
+                self.assertIsNone(relative['r4d'])
+
+        def test_performance_mutant_uses_its_own_healthy_property(self):
+            sys.path.insert(0, str(ROOT / 'tests/emr/b'))
+            from performance_mutants import property_failures
+            latency = 'ledger-1-0: candidate p95 exceeds same-run r3 budget'
+            prefix = 'ledger-1-20000: single receipt reads retained prefix'
+            sustained = 'sustained-20-20000: candidate p95 exceeds same-run r3 budget'
+            concurrent = 'concurrent-24-0: candidate p95 exceeds same-run r3 budget'
+            journal = 'journal: append reads retained prefix'
+            self.assertEqual(property_failures('ledger', [latency, sustained]), [])
+            self.assertEqual(property_failures('ledger', [latency, prefix]), [prefix])
+            self.assertEqual(property_failures('sustained', [latency, sustained, concurrent]), [sustained])
+            self.assertEqual(property_failures('concurrent', [sustained, concurrent]), [concurrent])
+            self.assertEqual(property_failures('journal', [journal, concurrent]), [journal])
+
         def test_live_baseline_from_gitless_mutant_copy(self):
             spec = importlib.util.spec_from_file_location('emrb_baseline_probe', ROOT / 'tests/emr/b/live.py')
             live = importlib.util.module_from_spec(spec)
@@ -416,6 +470,7 @@ def main(argv=None):
     parser.add_argument("--self-test", action="store_true", help="verify verdicts and baseline source without Docker")
     parser.add_argument("--only", help="comma-separated mutant IDs")
     parser.add_argument("--worktree", action="store_true", help="snapshot tracked uncommitted inputs; preserve their hashes")
+    parser.add_argument("--source-manifest", type=Path, help="hash-bound LF source inventory for an isolated Linux copy")
     parser.add_argument("--contract-only", action="store_true", help="run contract kill cases only (live ones are reported not_run)")
     args = parser.parse_args(argv)
     if args.self_test:
@@ -433,8 +488,8 @@ def main(argv=None):
     with tempfile.TemporaryDirectory(prefix="kin-emrb-mutants-") as folder:
         copy = Path(folder) / "checkout"
         copy.mkdir()
-        head, link = make_copy(copy, args.worktree)
-        if args.worktree:
+        head, link = make_copy(copy, args.worktree, args.source_manifest)
+        if args.worktree or args.source_manifest:
             shutil.copyfile(copy / "mutant-inputs.json", out / "mutant-inputs.json")
         try:
             baseline_log = out / "baseline-contract.log"
