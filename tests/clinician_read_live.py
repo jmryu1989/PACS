@@ -67,7 +67,8 @@ CLIENT_MAPPERS = (
 
 # Runs inside the api service on the compiled code. It builds the real ViewerController/ViewerService/PacsService on the
 # real Prisma and Orthanc, and pauses at named points ("head", "read", "state"): it prints one event and waits for
-# one line on stdin, while the Python side commits report changes through the public API. Nothing here writes.
+# one line on stdin, while the Python side commits report changes through the public API. Nothing here writes except the
+# service's own idempotent start seed (see list()).
 DRIVER = r"""
 'use strict';
 const readline = require('node:readline');
@@ -131,7 +132,9 @@ async function list() {
     return typeof value === 'function' ? value.bind(target) : value;
   } });
   const pacs = new PacsService(db, orthanc, {}, access, {});
-  await pacs.reloadInstitutions();
+  // S9-U0b: the institution cache is the institutions concern's; it is loaded by the service's own start, as in the API
+  // process (its seed of the institution and order rows is idempotent and was already applied when the stack started).
+  await pacs.onModuleInit();
   let query = args.paged ? { limit: '100' } : {};
   for (let page = 0; page < 1000; page++) {
     let answer;

@@ -6,6 +6,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 const { scripts, readPage } = require('./page_source.cjs');
 const { baseline, chunks, verify } = require('./main_move_contract.cjs');
 const spec = require('./main_move_spec.json');
@@ -24,7 +25,14 @@ function scratch(t, prefix) {
 }
 
 test('A1: not-yet-moved page or moved page preserves every statement, byte and outer markup', () => {
-  assert.equal(verify(before, page).statements, spec.modules.flatMap(m => m.statements).length);
+  const result = verify(before, page), actual = readPage(page);
+  assert.equal(result.statements, spec.modules.flatMap(m => m.statements).length);
+  assert.ok([0, ...spec.parts].includes(result.modules), 'Only the specified cumulative parts are deliverable');
+  const newline = before.includes('\r\n') ? '\r\n' : '\n';
+  actual.region.forEach((tag, i) => {
+    if (tag.src) assert.equal(tag.tag, `<script src="${tag.src}"></script>`, 'Exact classic tag spelling');
+    if (i) assert.equal(actual.html.slice(actual.region[i - 1].end, tag.start), newline + '  ', 'Exact tag separator');
+  });
 });
 
 for (const mutation of ['dropped', 'duplicated', 'swapped']) {
@@ -73,3 +81,39 @@ test('A1/helper: all three split stages reconstruct the original text and enforc
     assert.throws(() => readPage(target), /ENOENT/);
   }
 });
+
+test('C5: actual projection, Python bytes, fixture cuts and delivered asset inventory agree', t => {
+  const { actual, fixtureBlocks, REPORT_FIXTURE } = require('./main_split_harness.cjs');
+  const dir = scratch(t, 'u0a-projection-'), source = path.join(dir, 'main.html');
+  fs.writeFileSync(source, before);
+  const candidate = readPage(page), manifest = actual(page);
+  assert.equal(candidate.source, before);
+  assert.deepEqual(fixtureBlocks(page, REPORT_FIXTURE), fixtureBlocks(source, REPORT_FIXTURE));
+  assert.deepEqual(manifest.parts, candidate.files.map(p => path.basename(p)));
+  assert.deepEqual(manifest.scripts, scripts(candidate.html).filter(t => t.src).map(t => t.src));
+  for (const file of [page, ...candidate.files]) {
+    const body = fs.readFileSync(file), info = manifest.inputs[path.basename(file)];
+    assert.equal(info.sha256, require('node:crypto').createHash('sha256').update(body).digest('hex'));
+    assert.equal(info.bytes, body.length);
+  }
+  const python = process.env.KIN_SPLIT_PYTHON || 'python3';
+  const fromPython = execFileSync(python, ['-B', '-c',
+    'import sys; sys.path.insert(0, "tests"); from page_source import read_page_bytes; sys.stdout.buffer.write(read_page_bytes(sys.argv[1]))', page],
+    { cwd: path.resolve(__dirname, '..'), maxBuffer: 8e6 });
+  assert.deepEqual(fromPython, Buffer.from(before), 'Python adapter preserves projection bytes');
+});
+
+test('S1 candidate byte contract', () => {
+  verify(before, process.env.KIN_SPLIT_BYTE_PAGE || page);
+});
+
+for (const [id, reason] of [['S1-M01', /Moved bytes/], ['S1-M02', /ENOENT/], ['S1-M03', /No dropped/],
+  ['S1-M04', /load order/], ['S1-M05', /ordinary blocking classic/],
+  ['S2-M01', /Moved bytes/], ['S2-M02', /load order/], ['S2-M03', /Moved bytes/], ['S2-M04', /No dropped/]]) {
+  test(`C1 rejects ${id}`, t => {
+    const dir = scratch(t, 'u0a-part1-mutant-');
+    const source = path.join(dir, 'main.html'); fs.writeFileSync(source, before);
+    const candidate = require('./main_split_harness.cjs').splitMutant(source, id, path.join(dir, id));
+    assert.throws(() => verify(before, candidate.page), reason);
+  });
+}

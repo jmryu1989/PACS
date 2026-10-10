@@ -207,6 +207,96 @@ class StageExitTest(unittest.TestCase):
         self.run_fixture()
         self.assert_failure(*self.verdict([TEST, "lean_fixture.LeanFixture.test_forgotten"]), "누락")
 
+    def test_nested_probe_selection_is_not_a_runner_record(self):
+        for probe in ('EXACT_TESTS ["first_failure.Probe.test_body"]test_body (first_failure.Probe) ... FAIL',
+                      'EXACT_TESTS ["first_failure.Probe.test_body"]'):
+            with self.subTest(probe=probe):
+                # The self-test itself passes; its intentionally failing probe
+                # neither owns selection nor invalidates the outer run.
+                self.run_fixture('print(' + repr(probe) + ', flush=True)')
+                code, report = self.verdict()
+                self.assertEqual(code, 0)
+                self.assertTrue(report['all_pass'])
+                # Keep each raw record, and use a new directory for the next probe.
+                self.directory = self.directory / 'next'
+                self.directory.mkdir()
+                self.requirements = self.directory / 'required.json'
+                self.output = self.directory / 'verdict.json'
+
+    def test_runner_selection_malformed_or_missing_fails_closed(self):
+        valid = 'EXACT_TESTS ' + json.dumps([TEST])
+        for selection, reason in (
+                (valid + ' trailing probe', 'Extra data'),
+                ('EXACT_TESTS [', 'Expecting value'),
+                ('EXACT_TESTS {}', 'Malformed runner EXACT_TESTS selection'),
+                ('EXACT_TESTS [1]', 'Malformed runner EXACT_TESTS selection'),
+                ('EXACT_TESTS ' + json.dumps(TEST), 'Malformed runner EXACT_TESTS selection'),
+                ('EXACT_TESTS {"a": 1}', 'Malformed runner EXACT_TESTS selection'),
+                ('EXACT_TESTS []', 'Malformed runner EXACT_TESTS selection'),
+                ('prefix ' + valid, 'Missing runner EXACT_TESTS selection'),
+                (valid + '\n' + valid, 'Duplicate runner EXACT_TESTS selection')):
+            with self.subTest(selection=selection):
+                # Keep subsequent controls independent even when one assertion fails.
+                self.directory = self.directory / 'next'
+                self.directory.mkdir()
+                self.requirements = self.directory / 'required.json'
+                self.output = self.directory / 'verdict.json'
+                command = self.fixture('print(' + repr(selection) + ', flush=True)')
+                runner = self.directory / 'run-tests.py'
+                runner.write_text(Path(command[-1]).read_text(encoding='utf-8'), encoding='utf-8')
+                result = subprocess.run(self.record([sys.executable, str(runner)]), capture_output=True, timeout=20)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                code, report = self.verdict()
+                self.assertEqual(code, 1)
+                self.assertFalse(report['all_pass'])
+                self.assertTrue(report['input_errors'])
+                self.assertEqual(len(report['input_errors']), 1)
+                self.assertIn(reason, report['input_errors'][0])
+
+    def test_runner_selection_binds_only_the_selected_cases(self):
+        command = self.fixture('print(' + repr('EXACT_TESTS ' + json.dumps([TEST])) + ', flush=True)')
+        runner = self.directory / 'run-tests.py'
+        runner.write_text(Path(command[-1]).read_text(encoding='utf-8'), encoding='utf-8')
+        result = subprocess.run(self.record([sys.executable, str(runner)]), capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        code, report = self.verdict()
+        self.assertEqual(code, 0)
+        self.assertTrue(report['all_pass'])
+        # An otherwise successful summary cannot stand in for a selected case
+        # whose own result is absent.
+        stdout = self.directory / 'run/stdout.log'
+        stdout.write_text('EXACT_TESTS ' + json.dumps([TEST, 'missing.Case.test_missing']) + '\n', encoding='utf-8')
+        self.assert_failure(*self.verdict(['missing.Case.test_missing']), '누락')
+
+    def test_unselected_runner_results_do_not_count_toward_verdict(self):
+        unselected = 'req_mod.ReqCase.test_required'
+        for status in ('ok', 'FAIL'):
+            with self.subTest(status=status):
+                self.directory = self.directory / 'next'
+                self.directory.mkdir()
+                self.requirements = self.directory / 'required.json'
+                self.output = self.directory / 'verdict.json'
+                # Nested probes may print results; only the runner's selection
+                # can supply evidence for a required case, even when a probe passes.
+                log = ('EXACT_TESTS ' + json.dumps([TEST]) + '\n' +
+                       'test_required (req_mod.ReqCase) ... ' + status)
+                command = self.fixture('print(' + repr(log) + ', flush=True)')
+                runner = self.directory / 'run-tests.py'
+                runner.write_text(Path(command[-1]).read_text(encoding='utf-8'), encoding='utf-8')
+                result = subprocess.run(self.record([sys.executable, str(runner)]),
+                                        capture_output=True, timeout=20)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                code, report = self.verdict()
+                self.assertEqual(code, 0)
+                self.assertTrue(report['all_pass'])
+                self.assertEqual(report['input_errors'], [])
+                code, report = self.verdict([TEST, unselected])
+                self.assert_failure(code, report, '누락: 결과에 시험 없음')
+                self.assertEqual(report['input_errors'], [])
+                self.assertEqual(report['requirements'][0]['tests'][unselected], [])
+                self.assertEqual([entry['reason'] for entry in
+                                  report['requirements'][0]['tests'][TEST]], ['PASS'])
+
     def test_node_batch_requires_every_case_to_pass_without_filtering(self):
         tests = ["node:tests/lean_fixture.cjs", "node:tests/second_fixture.cjs"]
         for name, counts, extra, expected in (

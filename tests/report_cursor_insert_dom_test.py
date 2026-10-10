@@ -17,6 +17,7 @@ Two files may be replaced through KIN_CURSOR_MAIN / KIN_CURSOR_CITATION_JS so th
 break the product on purpose without ever touching the source tree.
 """
 from page_source import read_page_source
+from main_split_harness import REPORT_FIXTURE, fixture_block
 import json
 import os
 import re
@@ -107,8 +108,9 @@ CITE_HTML = slice_between(MAIN, '<div class="modal" id="cite-preview"', "\n  </d
 PANE_HTML = slice_between(MAIN, '<div class="modal" id="stalemodal"', "\n  </div>") + "\n  </div>"
 STRUCT_HTML = slice_between(MAIN, '<div class="modal" id="structmodal"', "\n  </div>") + "\n  </div>"
 MODAL_CSS = slice_between(MAIN, ".modal { display: none;", "/* ══ 클릭 피드백")
-BASE_BLOCK = slice_between(MAIN, "    let selectionSeq = 0;", "    function reportSource()")
-REPORT_BLOCK = slice_between(MAIN, "    function reportSource() {", "    function heldByOther(s)")
+# The two script runs by the TypeScript-AST fixture projection (S9-U0a-PRE moved some of their declarations ahead of
+# their first callers, so they are no longer one stretch of text).
+# (Computed where the page is built, not at import: main_split_harness.fixture_block.)
 API_FN = extract_function(MAIN, "api")
 WRITE_BLOCK_FN = extract_function(MAIN, "reportWriteBlock")
 EDITOR_BLOCK_FN = extract_function(MAIN, "reportEditorBlock")
@@ -255,8 +257,8 @@ def harness(state, request):
             .replace("WRITEBLOCKFN", WRITE_BLOCK_FN)
             .replace("EDITORBLOCKFN", EDITOR_BLOCK_FN)
             .replace("TEMPLATEGATEFN", TEMPLATE_GATE_FN)
-            .replace("BASEBLOCK", BASE_BLOCK)
-            .replace("REPORTBLOCK", REPORT_BLOCK)
+            .replace("BASEBLOCK", fixture_block(MAIN_PATH, REPORT_FIXTURE, "BASE_BLOCK"))
+            .replace("REPORTBLOCK", fixture_block(MAIN_PATH, REPORT_FIXTURE, "REPORT_BLOCK"))
             .replace("TEMPLATEFN", TEMPLATE_FN)
             .replace("INITIALSTATE", json.dumps(state))
             .replace("REQUESTVALUE", json.dumps(request))

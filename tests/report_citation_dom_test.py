@@ -18,6 +18,7 @@ the shipped 20 s autosave callback runs on demand with its own declared delay as
 replaces a product function.
 """
 from page_source import read_page_source
+from main_split_harness import REPORT_FIXTURE, fixture_block
 import json
 import os
 import unittest
@@ -28,7 +29,8 @@ from report_page_contract import install_contract
 from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
-MAIN = read_page_source(Path(os.environ.get("KIN_CITATION_MAIN", ROOT / "worklist-v0" / "hpacs-lite" / "main.html")))
+MAIN_PATH = Path(os.environ.get("KIN_CITATION_MAIN", ROOT / "worklist-v0" / "hpacs-lite" / "main.html"))
+MAIN = read_page_source(MAIN_PATH)
 CITATION_JS = (ROOT / "worklist-v0" / "hpacs-lite" / "report-citation.js").read_text(encoding="utf-8")
 # S3-structured-report added a block inside REPORT_BLOCK that builds its form object and registers
 # its listeners at the top level. The module and its markup must be here or the sliced script throws
@@ -109,10 +111,11 @@ CITE_HTML = slice_between(MAIN, '<div class="modal" id="cite-preview"', "\n  </d
 PANE_HTML = slice_between(MAIN, '<div class="modal" id="stalemodal"', "\n  </div>") + "\n  </div>"
 STRUCT_HTML = slice_between(MAIN, '<div class="modal" id="structmodal"', "\n  </div>") + "\n  </div>"
 MODAL_CSS = slice_between(MAIN, ".modal { display: none;", "/* ══ 클릭 피드백")
-BASE_BLOCK = slice_between(MAIN, "    let selectionSeq = 0;", "    function reportSource()")
-# One contiguous region: report source, loadReport, the draft bar, the rebase pane, the citation
-# state, the dedicated read, the citation bar, the insertion pane, stashReport and commitReport.
-REPORT_BLOCK = slice_between(MAIN, "    function reportSource() {", "    function heldByOther(s)")
+# The two script runs, by the TypeScript-AST fixture projection (S9-U0a-PRE moved some of their declarations ahead of
+# their first callers, so they are no longer one stretch of text): selectionSeq up to reportSource, and the region of
+# report source, loadReport, the draft bar, the rebase pane, the citation state, the dedicated read, the citation bar,
+# the insertion pane, stashReport and commitReport.
+# (Computed where the page is built, not at import: main_split_harness.fixture_block.)
 # The shipped periodic-save and beforeunload block, so the closing-tab branch is the real one.
 UNLOAD_BLOCK = slice_between(MAIN, "    const AUTOSAVE_MS = 20000;", "    // ② 로그아웃")
 # The shipped logout handler: its draft write is non-keepalive, so it has to stand aside for an
@@ -333,8 +336,8 @@ def harness(state):
             .replace("APIFN", API_FN)
             .replace("WRITEBLOCKFN", WRITE_BLOCK_FN)
             .replace("EDITORBLOCKFN", EDITOR_BLOCK_FN)
-            .replace("BASEBLOCK", BASE_BLOCK)
-            .replace("REPORTBLOCK", REPORT_BLOCK)
+            .replace("BASEBLOCK", fixture_block(MAIN_PATH, REPORT_FIXTURE, "BASE_BLOCK"))
+            .replace("REPORTBLOCK", fixture_block(MAIN_PATH, REPORT_FIXTURE, "REPORT_BLOCK"))
             .replace("SELECTBLOCK", SELECT_BLOCK)
             .replace("UNLOADBLOCK", UNLOAD_BLOCK)
             .replace("LOGOUTBLOCK", LOGOUT_BLOCK)

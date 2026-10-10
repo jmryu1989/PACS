@@ -98,7 +98,18 @@ const EXPECT={
   '2.25.57':rel('SYN-U5-D','not_comparable','match','not_comparable','not_comparable','not_comparable'),
   '2.25.58':rel('SYN-U5-M','mismatch','mismatch','mismatch','mismatch','mismatch')};
 const project=(rows,select)=>select?rows.map(r=>Object.fromEntries(Object.keys(select).map(k=>[k,r[k]]))):rows;
-function setup({policies=()=>[],studies}={}){
+// S9-U0b: the institution cache belongs to the institutions concern. It is filled as the API process fills it, by the
+// service's own start (onModuleInit), over a start-time view of this store: the institution list given here, and the
+// start's seed writes absorbed. The cases begin after the start and keep every refusal of their own store.
+async function start(svc,prisma,names){
+  const saved={institution:prisma.institution,order:prisma.order};
+  prisma.institution={upsert:async()=>({}),findMany:async()=>structuredClone(names)};
+  prisma.order={...prisma.order,count:async()=>1,updateMany:async()=>({count:0})};
+  const log=console.log;console.log=()=>{};
+  try{await svc.onModuleInit();}finally{console.log=log;if(saved.order)prisma.order=saved.order;else delete prisma.order;if(saved.institution)prisma.institution=saved.institution;else delete prisma.institution;}
+  return svc;
+}
+async function setup({policies=()=>[],studies}={}){
   const seq=[],identityReads=[];let policyReads=0;
   const refuse=what=>async()=>{throw new Error('the list must not write: '+what);};
   const prisma={
@@ -114,6 +125,7 @@ function setup({policies=()=>[],studies}={}){
         return project(rows,arg.select);},
       update:refuse('order.update'),updateMany:refuse('order.updateMany'),create:refuse('order.create')},
     report:{findMany:async()=>[]},reportDraft:{findMany:async()=>[]},readerAssignment:{findMany:async()=>[]},gatewayReceipt:{findMany:async()=>[]},
+    readingTemplate:{count:async()=>1,findMany:async()=>[]},userFilter:{findMany:async()=>[]},
     auditLog:{create:refuse('auditLog.create')},
     $queryRaw:async(strings)=>{const sql=strings.join('?');if(sql.includes('StudyAccessPolicy')){seq.push('policy');return policies(++policyReads);}return [];},
   };
@@ -121,7 +133,7 @@ function setup({policies=()=>[],studies}={}){
     studyIdentities:async(...args)=>structuredClone(QIDO).map(r=>({'0020000D':r['0020000D'],'00080080':r['00080080'],...(args[1]?{'00080050':r['00080050']??val('')}:{})})),
     studiesByUid:async uids=>uids.map(uid=>structuredClone(QIDO).find(r=>r['0020000D'].Value[0]===uid))};
   const svc=new PacsService(prisma,orthanc,{},new StudyAccessService(prisma,orthanc,{}));
-  svc.institutions=[{id:'hallym',name:'hallym'},{id:'kin-center',name:'kin-center'}];svc.prefs=async()=>({filters:[],templates:[]});
+  await start(svc,prisma,[{id:'hallym',name:'hallym'},{id:'kin-center',name:'kin-center'}]);
   return {svc,seq,identityReads,prisma};
 }
 async function pages(svc,user=caller){
@@ -138,7 +150,7 @@ const byUid=rows=>Object.fromEntries(rows.map(r=>[r.uid,r.orderIdentity]));
 const RESTRICTED={version:1,restricted:true,startsAt:null,endsAt:null,rules:[{patientId:null,modalities:[],dateFrom:null,dateTo:null,studyUids:['2.25.51','2.25.58']}]};
 
 test('S4-U5 full list (a,b,c,e,f): server-read tags only, own pair only, forged ov/orig are not inputs, no Order value leaves',async()=>{
-  const {svc,seq,identityReads}=setup();
+  const {svc,seq,identityReads}=await setup();
   const r=await svc.listStudies(caller);
   assert.deepEqual(byUid(r.studies),EXPECT);
   const row=r.studies.find(s=>s.uid==='2.25.51');
@@ -157,7 +169,7 @@ test('S4-U5 full list (a,b,c,e,f): server-read tags only, own pair only, forged 
 });
 
 test('S4-U5 paged list (a): every page carries the same relation as the full list',async()=>{
-  const {svc,identityReads}=setup();
+  const {svc,identityReads}=await setup();
   const rows=await pages(svc);
   assert.deepEqual(byUid(rows),EXPECT);
   assert.ok(identityReads.every(read=>read.where.institutionId==='hallym'&&read.where.oid.in.length<=1));
@@ -167,38 +179,38 @@ test('S4-U5 paged list (a): every page carries the same relation as the full lis
 test('S4-U5 restricted caller (d): relations only on permitted rows, no candidates key; unrestricted control',async()=>{
   const policy=[{institution:'hallym',revision:1,policy:RESTRICTED,reason:'SYNTHETIC',updatedBy:null,updatedAt:null}];
   for(const paged of [false,true]){
-    const {svc,identityReads}=setup({policies:()=>policy});
+    const {svc,identityReads}=await setup({policies:()=>policy});
     const rows=paged?await pages(svc):(await svc.listStudies(caller)).studies;
     assert.deepEqual(byUid(rows),{'2.25.51':EXPECT['2.25.51'],'2.25.58':EXPECT['2.25.58']},'paged='+paged);
     assert.ok(!JSON.stringify(rows.map(s=>s.orderIdentity)).includes('candidates'));
     assert.deepEqual([...new Set(identityReads.flatMap(read=>read.where.oid.in))].sort(),['SYN-U5-E','SYN-U5-M']);
   }
-  const control=await setup().svc.listStudies({...caller,sub:'synthetic-other'});
+  const control=await (await setup()).svc.listStudies({...caller,sub:'synthetic-other'});
   assert.equal(Object.keys(byUid(control.studies)).length,8);
 });
 
 test('S4-U5 failures (f,g): no relation without a successful enumeration; a policy change refuses the whole answer',async()=>{
-  const failing=setup({studies:async()=>{throw Object.assign(new Error('Orthanc HTTP 503'),{getStatus:()=>503});}});
+  const failing=await setup({studies:async()=>{throw Object.assign(new Error('Orthanc HTTP 503'),{getStatus:()=>503});}});
   await assert.rejects(failing.svc.listStudies(caller));
   assert.equal(failing.identityReads.length,0);
-  const changed=setup({policies:n=>n===1?[]:[{institution:'hallym',revision:1,policy:RESTRICTED,reason:'SYNTHETIC',updatedBy:null,updatedAt:null}]});
+  const changed=await setup({policies:n=>n===1?[]:[{institution:'hallym',revision:1,policy:RESTRICTED,reason:'SYNTHETIC',updatedBy:null,updatedAt:null}]});
   await assert.rejects(changed.svc.listStudies(caller),e=>e.getStatus()===409);
   assert.equal(changed.identityReads.length,1,'the relation was computed and still not sent');
 });
 
 test('S4-U5 bootstrap (h) is unchanged: no relation and the same order keys; the list never wrote (i)',async()=>{
-  const {svc}=setup();
+  const {svc}=await setup();
   const b=await svc.bootstrap(caller,{states:'omit'});
   for(const o of b.orders)assert.deepEqual(Object.keys(o).sort(),['birth','desc','id','matched','modality','name','oid','reqDoc','sched','sex','studyUid','ward']);
   assert.ok(!JSON.stringify(b).includes('orderIdentity'));
   // Every write method of the fake store throws, so the lists above, which completed, called none of them. The trap is live:
-  const {prisma}=setup();
+  const {prisma}=await setup();
   for(const write of [prisma.studyState.update,prisma.studyState.create,prisma.order.update,prisma.order.updateMany,prisma.auditLog.create])
     await assert.rejects(write({}),/the list must not write/);
 });
 
 // REQ-S4-U5-IDENTITY / SUBJECT-READ -> RISK-ORDER-LEAK/TENANT/P-BODY/ONE-SIDED-UNMATCH -> CORE_R11.
-function r11Store() {
+async function r11Store() {
   const uid='2.25.911', foreign='2.25.912', oid='SYN-R11-ORDER';
   const states=[S(uid,'hallym','M',oid,{rs:'P',preDoc:'old-label',preDocSub:'subject-x',preReviewer:'reviewer',preReviewerSub:'subject-r'}),
     S(foreign,'outside','U',null)];
@@ -210,15 +222,16 @@ function r11Store() {
     findUnique:async({where})=>structuredClone(rows.find(r=>matches(r,where))||null),
     update:async({where,data})=>{const row=rows.find(r=>matches(r,where));assert.ok(row);Object.assign(row,data);return structuredClone(row);}});
   const db={studyState:delegate(states),order:delegate(orders),report:delegate(reports),reportDraft:delegate([]),
+    readingTemplate:{count:async()=>1,findMany:async()=>[]},userFilter:{findMany:async()=>[]},
     auditLog:{create:async({data})=>{audits.push(structuredClone(data));return data;}},$executeRaw:async()=>0,
     $transaction:async fn=>fn(db)};
   const access={prepare:async()=>{},snapshot:async()=>({policy:{restricted:false}}),allowed:async(c,uids)=>new Set(uids),
     require:async()=>{},unchanged:async()=>{}};
-  const svc=new PacsService(db,{}, {},access);svc.institutions=[{id:'hallym',name:'hallym'}];svc.prefs=async()=>({filters:[],templates:[]});
+  const svc=new PacsService(db,{}, {},access);await start(svc,db,[{id:'hallym',name:'hallym'}]);
   return {uid,foreign,oid,states,orders,reports,audits,db,svc};
 }
 test('CORE_R11_BOOTSTRAP scoped orders never enter states; subject-bound P serializer survives rename/recycle',async()=>{
-  const w=r11Store(), x={...caller,roles:['radiologist'],sub:'subject-x',actor:'old-label'};
+  const w=await r11Store(), x={...caller,roles:['radiologist'],sub:'subject-x',actor:'old-label'};
   for(const c of [x,{...x,actor:'renamed-x'},{...x,sub:'subject-r',actor:'renamed-reviewer'}]) {
     const result=await w.svc.bootstrap(c);
     assert.deepEqual(Object.keys(result.states),[w.uid]);
@@ -241,7 +254,7 @@ test('CORE_R11_BOOTSTRAP scoped orders never enter states; subject-bound P seria
 test('CORE_R11_UNMATCH releases study and order together, preserves refusals, audits and returns cleared fields',async()=>{
   const tech={...caller,roles:['technician']};
   for(const scenario of ['role','institution','preliminary','unmatched','tele']) {
-    const w=r11Store();w.states[0].rs='W';let c=tech;
+    const w=await r11Store();w.states[0].rs='W';let c=tech;
     if(scenario==='role')c={...tech,roles:['clinician']};
     if(scenario==='institution')c={...tech,institution:'outside'};
     if(scenario==='preliminary')w.states[0].rs='P';
@@ -251,7 +264,7 @@ test('CORE_R11_UNMATCH releases study and order together, preserves refusals, au
     await assert.rejects(w.svc.unmatch(w.uid,c),e=>e.getStatus()===({role:403,institution:404,preliminary:400,unmatched:400,tele:403})[scenario]);
     assert.deepEqual([w.states,w.orders,w.reports],before);assert.deepEqual(w.audits,[]);
   }
-  const w=r11Store();w.states[0].rs='W';w.states[0].ov='{"name":"overlay"}';
+  const w=await r11Store();w.states[0].rs='W';w.states[0].ov='{"name":"overlay"}';
   const before=structuredClone(w.reports),result=await w.svc.unmatch(w.uid,tech);
   assert.equal(w.states[0].matched,'U');assert.equal(w.states[0].orderOid,null);assert.equal(w.states[0].ov,null);
   assert.equal(w.orders[0].matched,'U');assert.equal(w.orders[0].studyUid,null);
