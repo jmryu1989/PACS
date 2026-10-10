@@ -68,13 +68,13 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 5
         run: |
-          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/sample-contracts --cwd . --tree tests/part1/mg --file .github/workflows/part1-mg.yml -- python3 -B tests/part1/mg/ci_test.py
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/sample-contracts --file tests/part1/archive_download.py --file tests/part1/archive_download_test.py --cwd . --tree tests/part1/mg --file .github/workflows/part1-mg.yml -- python3 -B tests/part1/mg/ci_test.py
       - name: Declare hosted sample scope and cache hash list
         id: sample-plan
         if: ${{ !cancelled() }}
         timeout-minutes: 5
         run: |
-          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/sample-plan --cwd . --tree tests/part1/mg --file .github/workflows/part1-mg.yml -- python3 -B tests/part1/mg/ci.py plan
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/sample-plan --file tests/part1/archive_download.py --file tests/part1/archive_download_test.py --cwd . --tree tests/part1/mg --file .github/workflows/part1-mg.yml -- python3 -B tests/part1/mg/ci.py plan
       - name: Cache permitted public samples
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
@@ -84,7 +84,7 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 40
         run: |
-          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/samples --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml -- python3 -B tests/part1/mg/ci.py fetch
+          python3 scripts/record-run.py --run-dir tmp/part1-mg-ci/samples --file tests/part1/archive_download.py --file tests/part1/archive_download_test.py --cwd . --tree tests/part1/mg --file worklist-v0/hpacs-lite/mammography-model.js --file worklist-v0/hpacs-lite/viewer-mammography.js --file .github/workflows/part1-mg.yml -- python3 -B tests/part1/mg/ci.py fetch
       - name: Verify the committed hash-pinned D744-2 rule table
         if: ${{ !cancelled() }}
         timeout-minutes: 5
