@@ -84,7 +84,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261006120000_member_isolation_call/migration.sql',
               'api/prisma/migrations/20261007120000_provider_change/migration.sql',
               'api/prisma/migrations/20261007170000_member_db_rights/migration.sql',
-              'api/prisma/migrations/20261007200000_designation_subjects/migration.sql']
+              'api/prisma/migrations/20261007200000_designation_subjects/migration.sql',
+              'api/prisma/migrations/20261011120000_filter_shortcuts/migration.sql']
 TABLES = sorted(['AuthSession', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
@@ -208,7 +209,9 @@ def expected_rows(uid):
         mode='Radiology', isDefault=True, quick='SYNTHETIC', days=-1, cols='{}', sortKey='date',
         sortDir=-1, folder='SYNTHETIC/CT', description='SYNTHETIC follow-up', ordinal=7, createdAt=STAMP)]
     rows['UserFilterCollection'] = [dict(owner='SYNTHETIC-reader', revision=3, folders=[
-        dict(path='SYNTHETIC/Empty', description='SYNTHETIC empty folder', ordinal=2)])]
+        dict(path='SYNTHETIC/Empty', description='SYNTHETIC empty folder', ordinal=2)],
+        shortcuts=[dict(id='first', name='SYNTHETIC shortcut', searchId='own:1'),
+                   dict(id='missing', name='SYNTHETIC unavailable', searchId='shared:999')])]
     rows['SharedFilterLibrary'] = [dict(institution='SYNTHETIC-owner', revision=4,
         folders=[dict(path='SYNTHETIC/Shared', description='Shared metadata', ordinal=3)],
         filters=[dict(id=805, name='SYNTHETIC shared search', mode='Radiology', quick='', days=-1,

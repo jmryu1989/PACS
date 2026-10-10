@@ -887,7 +887,7 @@
       $("#heads").innerHTML = shownColumns().map(c => `<th data-key="${c.k}" class="${c.num ? "num" : ""}">${c.t}</th>`).join("");
       $("#filterrow").innerHTML = shownColumns().map(c => {
         if (!c.f) return "<th></th>";
-        if (c.f === "text")
+        if (c.f === "text" || c.k === 'modality')
           return `<th><input data-f="${c.k}" value="${esc(fval[c.k] ?? "")}"></th>`;
         return `<th><select data-f="${c.k}">` +
           ["", ...c.f].map(o => `<option value="${o}"${(fval[c.k] ?? "") === o ? " selected" : ""}>${o}</option>`).join("") +
@@ -897,9 +897,11 @@
     $("#filterrow").addEventListener("input", e => {
       const el = e.target.closest("[data-f]"); if (!el) return;
       fval[el.dataset.f] = el.value.trim();
+      if (el.dataset.f === 'modality') { folderAppliedSearch = null; activeFilterName = null; }
       worklistSearch?.change();
       render();
     });
+
 
     // ── 데이터 ──
     // S4-U1b session-local KIN observation (renderObservation). Memory only; a page load starts over.
@@ -915,6 +917,9 @@
     let favoriteList = null, studyTagList = null, studyTagScope = 'personal';
     let demoMode = false;
     let quickDays = -1, sortKey = null, sortDir = 0, selectedOid = null;
+    let worklistFolders = null, folderLoadState = 'unknown', folderAppliedSearch = null;
+    let filterCollection = null, sharedSearches = [], shortcutDraft = null, shortcutBusy = false, filterReadSequence = 0, sharedFilterReadSequence = 0;
+    let storedShortcuts = [];
     // 워크리스트 선택은 "지금 작성할 검사", Related 선택은 썸네일과 이전 판독문에만 쓴다.
     // 둘을 한 변수로 쓰면 prior를 클릭한 순간 저장·승인 대상까지 prior로 바뀐다.
     let relatedUid = null;
@@ -991,6 +996,7 @@
       columnPrefs?.decorateRelated(mode);
       relatedRowNavigation?.sync();
     }
+
     const relatedParts = KinRelatedParts.create({
       owner:()=>{const key=KinViewerOpening.key(KinAuth.session());return key||null;},
       changed:()=>renderRelated()
@@ -1142,8 +1148,11 @@
     }
     /** 저장된 필터도 현재 목록과 같은 규칙으로 센다. 화면 상태를 바꾸지 않으므로
      * 다른 저장 필터의 건수를 보려고 지금 하던 검색이 흔들리지 않는다. */
-    function filteredFor(filter) {
-      worklistBodyParts.sync(studies);
+    function filteredFor(filter, rows = studies) {
+      if (rows === studies) worklistBodyParts.sync(studies);
+      return rows.filter(filterPredicate(filter));
+    }
+    function filterPredicate(filter) {
       const filterMode = Array.isArray(COLS[filter?.mode]) ? filter.mode : mode;
       const cols = COLS[filterMode].filter(c => c.f);
       const days = savedFilterDays(filter?.days);
@@ -1151,16 +1160,75 @@
       const needsParts = KinCompoundFilter.usesField(values[KinCompoundFilter.KEY], 'bodyPart', COLS[filterMode]);
       const matchCompound = KinCompoundFilter.compile(values[KinCompoundFilter.KEY], COLS[filterMode]);
       const matchQuick = KinCompoundFilter.compileQuick(filter?.quick, values[KinCompoundFilter.KEY], COLS[filterMode]);
-      return studies.filter(s => {
+      return s => {
         if (!matchQuick(s)) return false;
         if (!withinDays(s.date, days)) return false;
         return cols.every(c => testCol(s, c, values))
           && matchCompound(needsParts ? {...s, bodyPart: worklistBodyParts.get(s.uid)} : s);
-      });
+      };
     }
     let consultationFilter = null;
     const searchCriteria = () => ({mode,quick:$('#quick').value,days:quickDays,cols:JSON.parse(JSON.stringify(fval))});
+    function folderSearches() {
+      return [...userFilters.filter(f => Number.isInteger(f.id)).map(f => ({ ...f, treeId: 'own:' + f.id })),
+        ...sharedSearches.map(f => ({ ...f, treeId: 'shared:' + f.id }))];
+    }
+    function folderSearchAvailable() {
+      if (!folderAppliedSearch) return true;
+      return folderSearches().some(f => f.treeId === folderAppliedSearch.id
+        && (!f.treeId.startsWith('shared:') || f.name === folderAppliedSearch.name));
+    }
+    function updateWorklistFolders() {
+      if (!worklistFolders) return;
+      const searches = folderSearches().filter(f => Array.isArray(COLS[f.mode])
+        && !KinCompoundFilter.validate(f.cols?.[KinCompoundFilter.KEY], COLS[f.mode]))
+        .filter(f => !(folderAppliedSearch?.id === f.treeId && f.treeId.startsWith('shared:') && f.name !== folderAppliedSearch.name))
+        .map(f => {
+          const criteria = JSON.parse(JSON.stringify(f));
+          // Compile once per search update, not once for every row counted in the tree.
+          const match = filterPredicate(criteria), unknown = !!bodyPartCountNote(criteria);
+          return { id: f.treeId, name: f.name, matches: row => unknown ? null : match(row) };
+        });
+      worklistFolders.update({ rows: studies, loadState: offline ? 'unknown' : folderLoadState, searches,
+        shortcuts: shortcutDraft ?? storedShortcuts });
+      if (!folderAppliedSearch) {
+        const value = (worklistSearch?.read(searchCriteria()).criteria || searchCriteria()).cols?.modality;
+        const tokens = Array.isArray(value) ? value : String(value || '').split(/[,\\]/).map(v => v.trim().toUpperCase()).filter(Boolean);
+        const ids = Array.isArray(value) || tokens.length ? tokens.map(v => 'modality:' + v) : ['all'];
+        if (JSON.stringify(worklistFolders.snapshot().selectedIds) !== JSON.stringify(ids)) worklistFolders.setApplied(ids);
+      }
+    }
+    function alignWorklistFolder(filter, id) {
+      if (!worklistFolders) return;
+      updateWorklistFolders();
+      if (id) { worklistFolders.setApplied(id); return; }
+      const value = filter?.cols?.modality;
+      const modalities = Array.isArray(value) ? value : String(value || '').split(/[,\\]/).map(v => v.trim().toUpperCase()).filter(Boolean);
+      worklistFolders.setApplied(Array.isArray(value) || modalities.length ? modalities.map(v => 'modality:' + v) : 'all');
+    }
+    function mountWorklistFolders() {
+      if (worklistFolders || !$('#worklist-folders')) return;
+      worklistFolders = KinWorklistFolderTree.mount({ host: $('#worklist-folders'),
+        onSelect(item) {
+          if (!work.admits(work.capture('document'))) return;
+          if (item.kind === 'search' || item.kind === 'shortcut') {
+            const filter = folderSearches().find(f => f.treeId === item.searchId);
+            if (filter) applyFilter(filter, item.id);
+            return;
+          }
+          folderAppliedSearch = null; activeFilterName = null;
+          if (item.kind === 'all') delete fval.modality;
+          else fval.modality = [...item.modalities];
+          worklistSearch?.apply(); renderHeads(); render();
+        },
+        onChange: saveFolderShortcuts,
+      });
+      $('#shortcuts-reload').addEventListener('click', () => reloadFolderSearches());
+      $('#shortcuts-save').addEventListener('click', () => saveFolderShortcuts(shortcutDraft));
+      updateWorklistFolders();
+    }
     function filtered() {
+      if (!folderSearchAvailable()) return [];
       const search = worklistSearch?.read(searchCriteria());
       const list = search?.empty ? [] : filteredFor(search?.criteria || searchCriteria());
       const favorites = favoriteList ? favoriteList.filter(list) : list;
@@ -1176,6 +1244,7 @@
     }
     let resultPage = 0, resultQuery = '', resultPageSize = 100;
     function render(revealUid) {
+      updateWorklistFolders();
       const cols = COLS[mode], shown = shownColumns();
       const list = orderedStudies();
       const appliedSearch = worklistSearch?.read(searchCriteria());
@@ -1377,17 +1446,19 @@
       const holder = $('#active-filter-info');
       holder.hidden = activeFilterName === null;
       if (holder.hidden) return;
-      const stored = userFilters.find(f => f.name === activeFilterName);
+      const stored = folderAppliedSearch ? folderSearches().find(f => f.treeId === folderAppliedSearch.id) : userFilters.find(f => f.name === activeFilterName);
+      if (stored && folderSearchAvailable()) activeFilterName = stored.name;
       const modified = !!stored && (filterCriteriaKey(stored) !== filterCriteriaKey(snapshotFilter())
         || !!favoriteList?.key() || !!studyTagList?.key());
       $('#active-filter-name').textContent = activeFilterName;
-      $('#active-filter-state').textContent = !stored ? 'Deleted' : modified ? 'Modified' : 'Saved';
+      $('#active-filter-state').textContent = !stored || !folderSearchAvailable() ? 'Unavailable' : modified ? 'Search Draft' : 'Saved';
       holder.title = !stored ? '저장 검색이 삭제됐습니다. 현재 목록 조건은 유지됩니다.' : modified
         ? '현재 목록 조건과 저장된 조건이 다릅니다. 저장 검색을 다시 적용하거나 현재 조건을 새 검색으로 저장하세요.'
         : '저장된 검색 조건을 적용 중입니다. 결과 건수는 현재 불러온 목록을 기준으로 합니다.';
       $('#edit-active-filter').disabled = !stored;
     }
     function renderChips() {
+      updateWorklistFolders();
       const holder = $("#chips");
       if (!holder) return;
       renderActiveFilter();
@@ -1434,6 +1505,7 @@
       request: (path, signal, at) => api('GET', path, undefined, signal, at),
       identity: () => { const s = KinAuth.session(); return s?.state === 'approved' ? [s.institution,s.sub] : null; },
       changed: state => {
+        if (state.busy) { folderLoadState = studies.length ? 'partial' : 'unknown'; updateWorklistFolders(); }
         $('#study-fetch').hidden = !state.busy && !state.resumable && !state.message;
         $('#study-fetch-status').textContent = state.message + (state.total == null ? '' : ` (${state.received}/${state.total}건 받음 · 완료 후 목록 반영)`);
         $('#study-fetch-resume').hidden = state.busy || !state.resumable; $('#study-fetch-cancel').hidden = !state.busy;
@@ -1540,6 +1612,7 @@
         // 편집 중인 검사의 판 번호·초안을 되돌려 놓던 블록은 없앴다 — `fromApi`가 그 규칙을
         // 모든 검사에 대해 먼저 적용하므로, 여기서 한 검사만 다시 손보면 규칙이 둘로 갈린다.
           studies = r.studies.map(fromApi);
+          folderLoadState = 'complete';
           applyObservation(r);
           studyPriority.observed(r.studies.map(s=>s.uid));
           worklistAlerts?.observe(r.studies.map(s=>({uid:s.uid,em:s.state.em})));
@@ -1565,6 +1638,7 @@
         // Incomplete page batches never replace the last complete list or report input.
         if (serverMode) {
           work.commit(at, () => {
+            folderLoadState = 'unknown';
             // A superseded or changed-list answer is not a failed observation; the last one still stands.
             if (!e.stale && e.code !== 'STUDY_LIST_CHANGED') markObservationUnavailable();
             $("#err").textContent = "검사 목록을 불러오지 못했습니다. 현재 목록과 입력은 유지했습니다 — " + e.message;
@@ -1627,6 +1701,7 @@
       render(); refreshRight();
     }
 
+
     /**
      * 날짜 퀵필터. "최근 N일" — **양쪽 끝을 다 본다.**
      *
@@ -1659,6 +1734,10 @@
     function testCol(s, c, values = fval) {
       const v = values?.[c.k] ?? "";
       if (v === "") return true;
+      if (c.k === 'modality') {
+        const selected = Array.isArray(v) ? v : String(v).split(/[,\\]/);
+        return selected.some(token => KinWorklistFolderTree.matchesModality(s.modality, token));
+      }
       const wanted = String(v);
       if (c.f === "text") return String(s[c.k] ?? "").toUpperCase().includes(wanted.toUpperCase());
       return String(s[c.k]) === wanted;
@@ -1696,6 +1775,7 @@
       b.style.display = hidden ? "flex" : "none";
       $("#fold").textContent = hidden ? "▽" : "△";
     });
+
 
     function srTree(dataset, expected) {
       const classes = ['11', '22', '33', '34'].map(n => '1.2.840.10008.5.1.4.1.1.88.' + n);
@@ -9498,7 +9578,7 @@
 
     $("#quick").addEventListener("input", () => { worklistSearch?.change(); render(); });
     for (const host of [$('#quick'),$('#filterrow')]) host.addEventListener('keydown',e=>{
-      if(e.key==='Enter'&&!e.isComposing){e.preventDefault();worklistSearch?.apply();}
+      if(e.key==='Enter'&&!e.isComposing&&e.keyCode!==229){e.preventDefault();worklistSearch?.apply();}
     });
     $("#quick-match").addEventListener("change", () => {
       try {
@@ -9521,11 +9601,107 @@
     $("#m-home").addEventListener("click", load);
     $("#m-filmbox").addEventListener("click", () => { if (selectedUid) openFilmbox(selectedUid); });
 
+
     // ── User Filter List (6.2.1) ──
     // 현재 필터 조합에 이름을 붙여 **계정에** 저장한다. 칩을 누르면 그대로 돌아온다.
     // 정렬(sortKey/sortDir)도 함께 저장한다 — 필터가 같아도 정렬이 다르면 다른 화면이다.
     // (HPACS도 2025년에야 "정렬을 적용하여 사용자 필터로 저장"을 넣었다)
     const saveFiltersLocal = () => { try { localStorage.setItem("kin-filters", JSON.stringify(userFilters)); } catch (e) {} };
+    function acceptFilterCollection(snapshot) {
+      if (JSON.stringify(snapshot?.owner) !== JSON.stringify([sess.institution, sess.sub])
+        || !Number.isInteger(snapshot.revision) || snapshot.revision < 0
+        || !Array.isArray(snapshot.filters) || !Array.isArray(snapshot.folders) || !Array.isArray(snapshot.shortcuts)
+        || snapshot.shortcuts.length > 200 || snapshot.shortcuts.some(s => !s || Object.keys(s).sort().join() !== 'id,name,searchId'
+          || [s.id, s.name, s.searchId].some(v => typeof v !== 'string' || !v.trim() || v.length > 400 || /[\r\n]/.test(v))
+          || !/^(own|shared):[1-9]\d*$/.test(s.searchId))
+        || new Set(snapshot.shortcuts.map(s => s.id)).size !== snapshot.shortcuts.length)
+        throw new Error('계정 또는 검색 모음 응답을 확인할 수 없습니다. 다시 불러오세요.');
+      if (filterCollection && snapshot.revision < filterCollection.revision) throw staleAnswer();
+      filterCollection = JSON.parse(JSON.stringify(snapshot));
+      storedShortcuts = filterCollection.shortcuts;
+      userFilters = validUserFilters(snapshot.filters);
+      renderChips();
+    }
+    function shortcutStatus(message) {
+      const status = $('#shortcuts-status');
+      if (status && status.textContent !== message) status.textContent = message;
+      const save = $('#shortcuts-save');
+      if (save) save.disabled = !shortcutDraft || !filterCollection || shortcutBusy || !serverMode || offline || work.state() !== 'active';
+    }
+    async function reloadFolderSearches(at = work.capture('document')) {
+      const sequence = ++filterReadSequence;
+      const sharedSequence = ++sharedFilterReadSequence;
+      filterCollection = null;
+      shortcutStatus('바로가기를 불러오는 중입니다.');
+      if (!serverMode || offline) { shortcutStatus('서버에 연결한 뒤 바로가기를 불러오세요.'); return; }
+      const results = await Promise.allSettled([
+        api('GET', '/filter-folders', undefined, undefined, at),
+        api('GET', '/shared-filters', undefined, undefined, at),
+      ]);
+      if (!work.admits(at) || sequence !== filterReadSequence || sharedSequence !== sharedFilterReadSequence) return;
+      work.commit(at, () => {
+        const [personal, shared] = results;
+        sharedSearches = shared.status === 'fulfilled'
+          && JSON.stringify(shared.value?.owner) === JSON.stringify([sess.institution, sess.sub])
+          && Array.isArray(shared.value.filters) ? validUserFilters(shared.value.filters) : [];
+        try {
+          if (personal.status === 'rejected') throw personal.reason;
+          acceptFilterCollection(personal.value);
+          shortcutStatus(shortcutDraft ? '편집 내용을 유지했습니다. 확인 후 Save Shortcuts로 저장하세요.'
+            : shared.status === 'rejected' ? '기관 검색을 불러오지 못했습니다. 해당 바로가기는 Unavailable입니다.' : '');
+        } catch (error) {
+          filterCollection = null;
+          shortcutStatus('검색 모음을 읽지 못해 저장을 막았습니다. Reload Shortcuts로 다시 불러오세요. ' + error.message);
+        }
+        updateWorklistFolders(); render();
+      });
+    }
+    async function saveFolderShortcuts(next) {
+      if (!Array.isArray(next) || !work.admits(work.capture('document'))) return;
+      shortcutDraft = JSON.parse(JSON.stringify(next));
+      if (shortcutBusy) { shortcutStatus('저장 중입니다. 추가 편집은 현재 저장 뒤에 반영합니다.'); return; }
+      if (!filterCollection || !serverMode || offline) {
+        shortcutStatus('검색 모음 버전을 확인해야 저장할 수 있습니다. Reload Shortcuts로 다시 불러오세요.'); return;
+      }
+      const at = work.capture('document'), sent = JSON.stringify(shortcutDraft);
+      const body = { expectedOwner: [...filterCollection.owner], revision: filterCollection.revision,
+        command: { action: 'replace-shortcuts', shortcuts: JSON.parse(sent) } };
+      shortcutBusy = true; ++filterReadSequence; shortcutStatus('바로가기를 저장 중입니다.');
+      let saved = false;
+      try {
+        await filterWriteReady(undefined, at);
+        const answer = await api('POST', '/filter-folders', body, undefined, at);
+        if (!work.admits(at)) return;
+        work.commit(at, () => {
+          acceptFilterCollection(answer);
+          if (JSON.stringify(shortcutDraft) === sent) shortcutDraft = null;
+          saved = true;
+        });
+      } catch (error) {
+        work.commit(at, () => {
+          filterCollection = null;
+          shortcutStatus('저장 결과를 확인하지 못했습니다. 편집은 유지됩니다. Reload Shortcuts 후 확인해 주세요. ' + error.message);
+        });
+      } finally {
+        work.commit(at, () => {
+          shortcutBusy = false; updateWorklistFolders();
+          if (saved) shortcutStatus('바로가기를 저장했습니다.');
+        });
+      }
+      if (saved && shortcutDraft && work.admits(at)) await saveFolderShortcuts(shortcutDraft);
+    }
+    work.onInvalidate(event => {
+      if (event.reason === 'prepare') {
+        ++filterReadSequence; ++sharedFilterReadSequence;
+        if (shortcutBusy) {
+          shortcutBusy = false; filterCollection = null;
+          shortcutStatus('저장 결과를 확인해야 합니다. 편집으로 돌아온 뒤 Reload Shortcuts로 확인해 주세요.');
+        } else shortcutStatus($('#shortcuts-status')?.textContent || '');
+      } else if (event.reason === 'cancel') {
+        // Resuming never revives the previous write ticket or silently resends its array.
+        shortcutStatus($('#shortcuts-status')?.textContent || '');
+      }
+    });
 
     const snapshotFilter = () => ({
       quick: $("#quick").value, days: quickDays, mode, cols: { ...fval },
@@ -9574,35 +9750,45 @@
         load: refresh => { worklistBodyParts.sync(studies); return worklistBodyParts.load({refresh}); },
         cancel: () => worklistBodyParts.cancel() },
       async readFolders(signal, at = work.capture("document")) {
+        const sequence = ++filterReadSequence;
+        work.commit(at, () => { filterCollection = null; shortcutStatus('검색 모음을 불러오는 중입니다.'); });
         if (await filterWriteReady(signal, at)) throw new Error('폴더 관리는 서버 계정으로 로그인한 뒤 사용할 수 있습니다.');
         const snapshot = await api('GET', '/filter-folders', undefined, signal, at);
-        if (!work.admits(at)) throw staleAnswer();
+        if (!work.admits(at) || sequence !== filterReadSequence) throw staleAnswer();
         if (JSON.stringify(snapshot?.owner) !== JSON.stringify([sess.institution, sess.sub]) || !Array.isArray(snapshot.filters) || !Array.isArray(snapshot.folders))
           throw new Error('계정 또는 검색 모음 응답을 확인할 수 없습니다. 다시 로그인하세요.');
-        if (!work.commit(at, () => { userFilters = validUserFilters(snapshot.filters); renderChips(); })) throw staleAnswer();
+        if (!work.commit(at, () => { acceptFilterCollection(snapshot); shortcutStatus(''); })) throw staleAnswer();
         return snapshot;
       },
       async writeFolders(body, signal, at = work.capture("document")) {
+        ++filterReadSequence;
+        work.commit(at, () => { filterCollection = null; shortcutStatus('검색 모음을 저장 중입니다.'); });
         if (await filterWriteReady(signal, at)) throw new Error('폴더 관리는 서버 계정으로 로그인한 뒤 사용할 수 있습니다.');
         const snapshot = await api('POST', '/filter-folders', body, signal, at);
         if (!work.admits(at)) throw staleAnswer();
         if (JSON.stringify(snapshot?.owner) !== JSON.stringify([sess.institution, sess.sub]) || !Array.isArray(snapshot.filters) || !Array.isArray(snapshot.folders))
           throw new Error('응답을 확인할 수 없습니다. 검색 모음을 다시 불러오세요.');
-        if (!work.commit(at, () => { userFilters = validUserFilters(snapshot.filters); renderChips(); })) throw staleAnswer();
+        if (!work.commit(at, () => { ++filterReadSequence; acceptFilterCollection(snapshot); })) throw staleAnswer();
         return snapshot;
       },
       async readShared(signal, at = work.capture("document")) {
+        const sequence = ++sharedFilterReadSequence;
+        // An unreadable shared library cannot keep a previously granted target available.
+        work.commit(at, () => { sharedSearches = []; renderChips(); render(); });
         if (await filterWriteReady(signal, at)) throw new Error('기관 검색은 서버 계정으로 로그인한 뒤 사용할 수 있습니다.');
         const snapshot = await api('GET', '/shared-filters', undefined, signal, at);
-        if (!work.admits(at)) throw staleAnswer();
+        if (!work.admits(at) || sequence !== sharedFilterReadSequence) throw staleAnswer();
         if (JSON.stringify(snapshot?.owner) !== JSON.stringify([sess.institution, sess.sub])) throw new Error('계정이 변경되었습니다. 다시 로그인하세요.');
+        work.commit(at, () => { sharedSearches = validUserFilters(snapshot.filters); renderChips(); render(); });
         return snapshot;
       },
       async writeShared(body, signal, at = work.capture("document")) {
+        ++sharedFilterReadSequence;
         if (await filterWriteReady(signal, at)) throw new Error('기관 검색은 서버 계정으로 로그인한 뒤 사용할 수 있습니다.');
         const snapshot = await api('POST', '/shared-filters', body, signal, at);
         if (!work.admits(at)) throw staleAnswer();
         if (JSON.stringify(snapshot?.owner) !== JSON.stringify([sess.institution, sess.sub])) throw new Error('응답 계정을 확인할 수 없습니다. 공유 목록을 다시 불러오세요.');
+        work.commit(at, () => { ++sharedFilterReadSequence; sharedSearches = validUserFilters(snapshot.filters); renderChips(); render(); });
         return snapshot;
       },
       async copyShared(body, signal, at = work.capture("document")) {
@@ -9611,7 +9797,7 @@
         if (!work.admits(at)) throw staleAnswer();
         if (JSON.stringify(snapshot?.owner) !== JSON.stringify([sess.institution, sess.sub]) || !Array.isArray(snapshot.filters))
           throw new Error('응답을 확인할 수 없습니다. 개인 폴더를 다시 불러오세요.');
-        if (!work.commit(at, () => { userFilters = validUserFilters(snapshot.filters); renderChips(); })) throw staleAnswer();
+        if (!work.commit(at, () => { ++filterReadSequence; acceptFilterCollection(snapshot); })) throw staleAnswer();
         return snapshot;
       },
       restoreFocus(opener) {
@@ -9627,6 +9813,7 @@
         const saved = local ? filter : await api('POST', '/filters', filter, signal, at);
         if (!work.admits(at)) throw staleAnswer();
         if (!work.commit(at, () => acceptSavedFilter(saved, local))) throw staleAnswer();
+        if (!local) await reloadFolderSearches(at);
         return saved;
       },
       async remove(filter, signal, at = work.capture("document")) {
@@ -9638,6 +9825,7 @@
           if (local) localStorage.setItem('kin-filters', JSON.stringify(next));
           userFilters = next; renderChips();
         })) throw staleAnswer();
+        if (!local) await reloadFolderSearches(at);
       },
       async reload(signal, at = work.capture("document")) {
         const local = await filterWriteReady(signal, at);
@@ -9651,11 +9839,14 @@
     });
     $('#managefilters').addEventListener('click', () => savedFilterManager.open());
     $('#edit-active-filter').addEventListener('click', () => savedFilterManager.open({ name: activeFilterName }));
-    function applyFilter(f) {
+    function applyFilter(f, folderId) {
       if (!f || !Array.isArray(COLS[f.mode])) { toast('저장 검색의 업무 화면을 확인할 수 없습니다.', 'err'); return false; }
       const compoundError = KinCompoundFilter.validate(f.cols?.[KinCompoundFilter.KEY], COLS[f.mode]);
       if (compoundError) { toast('복합 조건을 적용하지 못했습니다: ' + compoundError, 'err'); return false; }
       activeFilterName = userFilters.some(saved => saved.name === f.name) ? f.name : null;
+      const source = folderSearches().find(saved => saved.treeId === (f.treeId || 'own:' + f.id));
+      folderAppliedSearch = source ? { id: source.treeId, name: source.name } : null;
+      if (source) activeFilterName = source.name;
       $("#quick").value = f.quick ?? "";
       quickDays = savedFilterDays(f.days);
       document.querySelectorAll("#qf button").forEach(x => x.classList.toggle("on", +x.dataset.days === quickDays));
@@ -9675,6 +9866,7 @@
       sortKey = okSort ? f.sortKey : null;
       sortDir = okSort ? (f.sortDir ?? 0) : 0;
       worklistSearch?.apply();
+      alignWorklistFolder(f, folderId || (f.cols?.modality ? undefined : source?.treeId));
       renderHeads(); render();
       return true;
     }
@@ -9699,6 +9891,7 @@
         userFilters = validUserFilters(p.filters); templates = p.templates;
         renderChips(); renderTemplates();
       });
+      if (work.admits(at)) await reloadFolderSearches(at);
     }
 
     $("#savefilter").addEventListener("click", () => {
@@ -9764,14 +9957,17 @@
 
     $("#clearfilter").addEventListener("click", () => {
       activeFilterName = null;
+      folderAppliedSearch = null;
       favoriteList?.clear();studyTagList?.clear();consultationFilter=null;
       $("#quick").value = "";
       Object.keys(fval).forEach(k => delete fval[k]);
       quickDays = -1;
       document.querySelectorAll("#qf button").forEach(x => x.classList.toggle("on", x.dataset.days === "-1"));
       worklistSearch?.clear();
+      alignWorklistFolder(null);
       renderHeads(); render();
     });
+
 
     $("#qf").addEventListener("click", e => {
       const b = e.target.closest("button"); if (!b || !b.dataset.days) return;
@@ -10088,6 +10284,11 @@
       listLoadSequence++; commitEpoch++;
       markSelectionChanged(null);
       relatedUid = null; studies = [];
+      worklistFolders?.destroy(); worklistFolders = null;
+      folderLoadState = 'unknown'; folderAppliedSearch = null; filterCollection = null;
+      sharedSearches = []; storedShortcuts = []; shortcutDraft = null; shortcutBusy = false; ++filterReadSequence; ++sharedFilterReadSequence;
+      userFilters = []; activeFilterName = null;
+      $('#chips')?.replaceChildren(); $('#worklist-folders')?.replaceChildren(); shortcutStatus('');
       // 닫는 화면을 비우는 대입이다(편집이 아니다; 확인되지 않은 글은 위에서 이미 잡았다) — `editReport` 밖의 두 대입 가운데 하나.
       for (const k of RFIELDS) $("#" + k).value = "";
       leftNotes.clear();
@@ -10124,6 +10325,7 @@
     KinAuth.beforeLogoutPost(() => releaseHold({ closing: true }));
     // 저장을 확인하지 못한 판독문이 메모리에 있는 동안에는 종료 뒤에도 이 문서를 떠나지 않는다.
     KinAuth.holdLeave(() => !!logoutPrep && ["saving", "failed", "ended"].includes(logoutPrep.state));
+
 
     // ══════════ 시작 ══════════
     // 서버가 살아 있으면 서버 상태로 시작하고, 죽어 있으면 localStorage로 계속 굴러간다.
@@ -10201,6 +10403,8 @@
        * 계정에 붙인다고 해놓고 브라우저에 남은 것을 안 지우면 반쪽이다.
        */
       userFilters = validUserFilters(b.filters);
+      mountWorklistFolders();
+      void reloadFolderSearches();
       templates = Array.isArray(b.templates) ? b.templates : [];
       try { localStorage.removeItem("kin-filters"); localStorage.removeItem("kin-templates"); } catch (e) {}
       renderChips(); renderTemplates();
@@ -10225,6 +10429,8 @@
     function goOffline(e) {
       reportPreview.close();
       serverMode = false; offline = true;
+      folderLoadState = 'unknown'; filterCollection = null; ++filterReadSequence; ++sharedFilterReadSequence;
+      updateWorklistFolders(); shortcutStatus('서버에 연결한 뒤 바로가기를 불러오세요.');
       // 녹음 중이던 받아쓰기는 여기서 멈춘다(보낼 곳이 없다). 받아 둔 글은 Insert가 거절한다.
       dictation.refresh();
       worklistBodyParts.sync(studies);
@@ -10425,6 +10631,8 @@
       renderHeads();
       renderTemplates();
       applyRoleUi();
+      if (!sess.demo) userFilters = [];
+      mountWorklistFolders();
       $('#consultations-open').hidden=!(KinAuth.has('radiologist')||KinAuth.has('admin'));
       imageOpening = KinViewerOpening.mount({ button: $('#image-opening-open'), session: () => KinAuth.session() });
       try {

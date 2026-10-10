@@ -79,13 +79,14 @@
       return [{ id: 'all', name: 'All Studies', kind: 'all' },
         ...state.shortcuts.map(item => ({ ...item, id: 'shortcut:' + item.id, shortcutId: item.id, kind: 'shortcut',
           unavailable: !state.searches.some(search => search.id === item.searchId) })),
+        ...state.searches.map(search => ({ id: search.id, searchId: search.id, name: search.name, kind: 'search' })),
         ...defaultModalities(state.rows).map(modality => ({ id: 'modality:' + modality, name: modality, modality, kind: 'modality' }))];
     }
     function items() {
       const result = availableItems();
       for (const item of applied) {
         const at = result.findIndex(candidate => candidate.id === item.id);
-        if (at < 0) result.push({ ...item, unavailable: item.kind === 'shortcut' });
+        if (at < 0) result.push({ ...item, unavailable: item.kind === 'shortcut' || item.kind === 'search' });
         else if (item.kind === 'shortcut' && result[at].searchId !== item.searchId) {
           result[at] = { ...item, unavailable: true };
         }
@@ -210,6 +211,8 @@
     }
     const status = element('p'); status.setAttribute('role', 'status'); status.setAttribute('lang', 'ko');
     const selectionStatus = element('p'); selectionStatus.setAttribute('role', 'status'); selectionStatus.setAttribute('lang', 'ko');
+    const content = element('div');
+    nav.append(content, status, selectionStatus);
     function attempt(action) {
       status.textContent = '';
       try { action(); } catch (error) { status.textContent = error.message; }
@@ -230,7 +233,7 @@
         control.disabled = !!item.unavailable; li.append(control); parent.append(li); return li;
       }
       const all = items(); itemRow(all[0], list);
-      for (const [kind, title] of [['shortcut', 'My Shortcuts'], ['modality', 'Modality']]) {
+      for (const [kind, title] of [['shortcut', 'My Shortcuts'], ['modality', 'Modality'], ['search', 'Saved Searches']]) {
         const group = element('li'), children = element('ul'); children.hidden = collapsed.has(kind);
         const toggle = button(title, () => { collapsed.has(kind) ? collapsed.delete(kind) : collapsed.add(kind); render(); }, 'section:' + kind);
         toggle.setAttribute('id', sectionPrefix + '-' + kind);
@@ -266,8 +269,9 @@
           controls.get('add-name').value = '';
         });
       };
-      selectionStatus.textContent = selected.length ? '' : '선택된 Modality가 없습니다. All Studies 또는 Modality를 선택해 주세요.';
-      nav.replaceChildren(list, form, status, selectionStatus);
+      const guidance = selected.length ? '' : '선택된 Modality가 없습니다. All Studies 또는 Modality를 선택해 주세요.';
+      if (selectionStatus.textContent !== guidance) selectionStatus.textContent = guidance;
+      content.replaceChildren(list, form);
       for (const [key, value] of drafts) {
         const node = controls.get(key);
         if (node && (node.tagName !== 'SELECT' || state.searches.some(search => search.id === value))) node.value = value;

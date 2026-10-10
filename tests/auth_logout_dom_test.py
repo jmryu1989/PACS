@@ -82,6 +82,8 @@ SERVED_FILES = (
     "worklist-v0/hpacs-lite/report-draft-client.js",
     "worklist-v0/hpacs-lite/main.html",
     "worklist-v0/hpacs-lite/saved-filter-manager.css",
+    "worklist-v0/hpacs-lite/worklist-folder-tree.css",
+    "worklist-v0/hpacs-lite/worklist-folder-tree.js",
     "worklist-v0/hpacs-lite/consultations.css",
     "worklist-v0/hpacs-lite/worklist-columns.css",
     "worklist-v0/hpacs-lite/reading-workspace.css",
@@ -563,6 +565,9 @@ class Site:
                                        "filters": [], "templates": [], "institutions": [{"id": INSTITUTION,
                                        "name": "SYN Hospital A", "type": "hospital"}], "states": {}, "orders": [],
                                        "serverTime": "2026-10-03T00:00:00.000Z"})
+        if method == "GET" and path in ("/api/filter-folders", "/api/shared-filters"):
+            return route.fulfill(json={"owner": [INSTITUTION, account["sub"]], "revision": 0,
+                                       "folders": [], "filters": [], "shortcuts": [], "canManage": False})
         if method == "GET" and path == "/api/studies" and parse_qs(query).get("limit") == ["100"]:
             if self.held_lists is not None:
                 return self.held_lists.append((route, account))

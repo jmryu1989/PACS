@@ -99,7 +99,7 @@
     const compound = KinCompoundFilter;
     const operatorLabels = { contains: 'Contains', eq: 'Equals', notContains: 'Does Not Contain',
       neq: 'Does Not Equal', empty: 'Is Empty', notEmpty: 'Is Not Empty', gte: 'On or After',
-      lte: 'On or Before', between: 'Between (Inclusive)' };
+      lte: 'On or Before', between: 'Between (Inclusive)', withinLastDays: 'Within Last N Days' };
     const named = name => options.list().find(f => f.name === name);
     const status = (message, error = false) => {
       $('status').textContent = message;
@@ -109,7 +109,11 @@
     function value() {
       // Keep columns from the other worklist mode; changing tabs must not erase them.
       const cols = { ...source.cols };
-      dialog.querySelectorAll('[data-col]').forEach(input => { cols[input.dataset.col] = input.value; });
+      dialog.querySelectorAll('[data-col]').forEach(input => {
+        const key = input.dataset.col;
+        cols[key] = key === 'modality' && input.value === '' && Array.isArray(source.cols?.modality)
+          && source.cols.modality.length === 0 ? [] : input.value;
+      });
       function readRules(container) { return [...container.children].map(row => {
         if (row.classList.contains('sfm-group')) return {
           join: row.querySelector(':scope > .sfm-group-join').value,
@@ -174,10 +178,11 @@
       const cols = options.columns[$('mode').value];
       $('cols').replaceChildren(...cols.filter(c => c.f).map(c => {
         const label = document.createElement('label'); label.textContent = c.t;
-        const input = document.createElement(c.f === 'text' ? 'input' : 'select');
+        const input = document.createElement(c.f === 'text' || c.k === 'modality' ? 'input' : 'select');
         input.dataset.col = c.k; input.id = 'sfm-col-' + c.k;
-        if (c.f !== 'text') choices(input, [['', 'All'], ...c.f.map(v => [v, v])], filter.cols?.[c.k] ?? '');
+        if (c.f !== 'text' && c.k !== 'modality') choices(input, [['', 'All'], ...c.f.map(v => [v, v])], filter.cols?.[c.k] ?? '');
         else input.value = filter.cols?.[c.k] ?? '';
+        if (c.k === 'modality') { input.placeholder = 'CT, MR'; input.title = '쉼표로 구분한 Modality 중 하나가 일치하면 포함합니다.'; }
         label.append(input); return label;
       }));
       const sort = cols.some(c => c.k === filter.sortKey) ? filter.sortKey : '';
@@ -198,12 +203,22 @@
       choices(operator, field ? compound.operators(field).map(([op, label]) => [op, field.type === 'tokens' ? label : operatorLabels[op] || op]) : [[rule.op, rule.op]], rule.op);
       const input = make('Value', document.createElement(field?.type === 'select' ? 'select' : 'input'), 'ruleValue');
       if (field?.type === 'select') choices(input, [['', 'Select Value'], ...field.values.map(v => [v, v])], rule.value ?? '');
-      else { input.type = field?.type === 'date' ? 'date' : 'text'; input.maxLength = 1000; input.value = rule.value ?? ''; }
+      else { input.type = field?.type === 'date' ? (rule.op === 'withinLastDays' ? 'number' : 'date') : 'text'; input.maxLength = 1000; input.value = rule.value ?? ''; }
+      const preset = make('Date Range', document.createElement('select'), 'relativePreset');
+      choices(preset, [['0', 'Today'], ['1', 'Since Yesterday'], ['7', 'Last 7 Days'], ['30', 'Last 30 Days'], ['', 'Custom']],
+        ['0', '1', '7', '30'].includes(rule.value) ? rule.value : '');
+      preset.addEventListener('change', () => { if (preset.value !== '') input.value = preset.value; count(); });
+      input.addEventListener('input', () => { preset.value = ['0', '1', '7', '30'].includes(input.value) ? input.value : ''; });
       const end = make('End Date', document.createElement('input'), 'ruleValue2');
       end.type = 'date'; end.value = rule.value2 ?? '';
       const remove = document.createElement('button'); remove.type = 'button'; remove.dataset.ruleRemove = '';
       remove.textContent = 'Remove'; remove.setAttribute('aria-label', 'Remove Rule'); row.append(remove);
       const visibility = () => {
+        const relative = operator.value === 'withinLastDays';
+        if (field?.type === 'date') input.type = relative ? 'number' : 'date';
+        if (relative) { input.min = '0'; input.max = '365'; input.step = '1'; input.title = '오늘을 포함해 로컬 자정부터 계산합니다. 0은 오늘, 1은 어제부터입니다 (0~365).'; }
+        else { input.removeAttribute('min'); input.removeAttribute('max'); input.removeAttribute('step'); input.title = ''; }
+        preset.parentElement.hidden = !relative;
         input.parentElement.hidden = ['empty', 'notEmpty'].includes(operator.value);
         end.parentElement.hidden = operator.value !== 'between';
       };

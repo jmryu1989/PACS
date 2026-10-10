@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <title>워크리스트 — KOREA IMAGING NETWORK</title>
   <link rel="stylesheet" href="saved-filter-manager.css">
+  <link rel="stylesheet" href="worklist-folder-tree.css">
   <link rel="stylesheet" href="consultations.css">
   <link rel="stylesheet" href="worklist-columns.css">
   <link rel="icon" type="image/svg+xml" href="/kin-brand/kin-emblem-j1.svg">
@@ -1201,6 +1202,13 @@
   <div class="split">
     <!-- ══ 좌측: 워크리스트 (6.3) / Study List (8.1) ══ -->
     <div class="left">
+    <details id="worklist-folders-panel" open>
+      <summary>Folders</summary>
+      <div id="worklist-folders"></div>
+      <button type="button" class="chip" id="shortcuts-reload">Reload Shortcuts</button>
+      <button type="button" class="chip" id="shortcuts-save" disabled>Save Shortcuts</button>
+      <p id="shortcuts-status" role="status" lang="ko"></p>
+    </details>
       <!-- Context Menu 버튼 (8.1.3) — Technician 모드에서만 -->
       <div class="ctxbar" id="ctxbar">
         <span class="fold" id="fold">▽</span>
@@ -1894,6 +1902,7 @@
   <script src="consultations.js"></script>
   <script src="critical-result-send.js"></script>
   <script src="critical-result-inbox.js"></script>
+  <script src="worklist-folder-tree.js"></script>
   <script src="main-split.bundle.js"></script>
 </body>
 </html>

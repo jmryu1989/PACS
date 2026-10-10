@@ -33,6 +33,7 @@ FLOWS = (
     # conflict and history flow (the selection 112 -> 114).
     ("e2e/test_tech_note.py", "TechNoteE2E", "test_note_09_attempt_ids_idempotent_resend_reuse_and_reads", "test_note_09_"),
     ("e2e/test_viewer_tech_note.py", "ViewerTechNoteE2E", "test_viewer_note_02_technician_save_conflict_and_history", "test_viewer_note_02_"),
+    ("e2e/test_filter_folders.py", "FilterFoldersE2E", "test_shortcuts_01_folder_edit_save_reapply_relogin", "test_shortcuts_01_"),
 )
 
 
@@ -91,8 +92,8 @@ def exact_selection(target, runner):
         unit = "candidate-flow-" + filename.rsplit("/", 1)[-1].removeprefix("test_").removesuffix(".py").replace("_", "-")
         rows.append((filename, class_name, unit))
         selected.append({"file": "tests/" + filename, "case": class_name + "." + method})
-    require(len(selected) == 114 and len({(x["file"], x["case"]) for x in selected}) == 114,
-            "Candidate selection must contain 114 unique exact cases")
+    require(len(selected) == 115 and len({(x["file"], x["case"]) for x in selected}) == 115,
+            "Candidate selection must contain 115 unique exact cases")
     return rows, selected
 
 

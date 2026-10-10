@@ -166,7 +166,7 @@ class Pure(unittest.TestCase):
     def test_empty_folder_owner_revision_and_metadata_restore_contract(self):
         expected = fixture()[0]['product']
         self.assertEqual(expected['rows']['UserFilterCollection'][0]['folders'][0]['path'], 'SYNTHETIC/Empty')
-        for field, value in [('owner', 'wrong-owner'), ('revision', 0), ('folders', []),
+        for field, value in [('owner', 'wrong-owner'), ('revision', 0), ('folders', []), ('shortcuts', []),
                              ('folders', [dict(path='SYNTHETIC/Empty', description='changed', ordinal=2)])]:
             actual = {key: copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
             actual['rows']['UserFilterCollection'][0][field] = value
@@ -265,7 +265,7 @@ class Pure(unittest.TestCase):
         # S7-U5 then added the provider call in flight to MemberIsolation (three columns): 38 files, still 48 tables and the
         # same rows. S7-U5 D600 replaced it by the provider change records (ProviderChange, the three columns dropped): 39 files,
         # 49 tables, and two records (an unknown disable of the owed member, a settled end of a provider session).
-        self.assertEqual(len(transfer.MIGRATIONS), 42)
+        self.assertEqual(len(transfer.MIGRATIONS), 43)
         self.assertEqual(len(transfer.TABLES), 51)
         self.assertEqual(set(rows), set(transfer.TABLES))
         self.assertEqual((len(rows['Finding']), len(rows['FindingRevision'])), (1, 2))

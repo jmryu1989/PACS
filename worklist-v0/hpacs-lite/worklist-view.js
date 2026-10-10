@@ -32,6 +32,10 @@
     function testCol(s, c, values = fval) {
       const v = values?.[c.k] ?? "";
       if (v === "") return true;
+      if (c.k === 'modality') {
+        const selected = Array.isArray(v) ? v : String(v).split(/[,\\]/);
+        return selected.some(token => KinWorklistFolderTree.matchesModality(s.modality, token));
+      }
       const wanted = String(v);
       if (c.f === "text") return String(s[c.k] ?? "").toUpperCase().includes(wanted.toUpperCase());
       return String(s[c.k]) === wanted;

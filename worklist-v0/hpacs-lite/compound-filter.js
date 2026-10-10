@@ -40,10 +40,7 @@
   }
 
   function operators(field) {
-    // The served editor still uses date inputs; expose relative days at W2-LAND
-    // together with its numeric editor. Stored/module criteria remain supported.
-    return (own(OPS, field?.type) ? OPS[field.type] : [])
-      .filter(([op]) => op !== 'withinLastDays').map(pair => [...pair]);
+    return (own(OPS, field?.type) ? OPS[field.type] : []).map(pair => [...pair]);
   }
 
   function calendarDate(value, exact) {

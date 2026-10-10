@@ -33,7 +33,7 @@ test('TEST-WS3-RELATIVE-SUMMARY: applied summaries substitute days, with Today f
   assert.equal(matcher.describe(expr([{join:'and',rules:relative('7').rules},{join:'and',rules:relative('0').rules}],'or'),columns),
     '((StudyDate Within Last 7 Days) OR (StudyDate Today))');
   const operators = matcher.operators(matcher.fields(columns).find(field => field.k === 'date'));
-  assert.deepEqual(operators.map(([op]) => op), ['eq','neq','gte','lte','between','empty','notEmpty']);
+  assert.deepEqual(operators.map(([op]) => op), ['eq','neq','gte','lte','between','empty','notEmpty','withinLastDays']);
   assert.equal(matcher.describe(relative('366'),columns),'복합 조건 오류');
 });
 function localTest(name, run) {

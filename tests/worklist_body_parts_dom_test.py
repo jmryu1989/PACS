@@ -1,6 +1,7 @@
 # coding: utf-8
 """REQ-D01-BODY-PART-SEARCH / RISK-D01-BODY-PART-UNKNOWN/WRONG/STALE/ACCESS / TEST-WORKLIST-BODY-PARTS."""
 from page_source import read_page_source
+from main_split_harness import fixture_blocks
 import json
 from pathlib import Path
 import re
@@ -9,7 +10,7 @@ import tempfile
 import unittest
 from urllib.parse import unquote
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, expect
 from module_session_harness import CORE, activate
 
 
@@ -22,33 +23,6 @@ BODY_PARTS = LITE / "worklist-body-parts.js"
 MANAGER = LITE / "saved-filter-manager.js"
 MANAGER_CSS = LITE / "saved-filter-manager.css"
 VISUAL_DIR = ROOT / "tmp" / "workspace-ui-ci" / "body-parts-visual"
-
-
-def extract_function(source, name):
-    start = source.index(f"    function {name}(")
-    brace = source.index("{", start)
-    depth = 0
-    quote = None
-    escaped = False
-    for index in range(brace, len(source)):
-        char = source[index]
-        if quote:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == quote:
-                quote = None
-            continue
-        if char in "'\"`":
-            quote = char
-        elif char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return source[start:index + 1]
-    raise AssertionError(f"unterminated function {name}")
 
 
 # S7-U5: the sliced page code passes its writes through the page's work-context gate and registers its end with the
@@ -75,6 +49,7 @@ let studies=[
   {uid:'1.2.2',id:'P2',name:'Beta',modality:'CT',date:'2026-09-11',series:1},
   {uid:'1.2.3',id:'P3',name:'Gamma',modality:'MR',date:'2026-09-11',series:1}
 ];
+let worklistFolders=null;
 let fval={name:'manual criterion'},activeFilterName=null,renderCalls=0,managerRefreshes=0;
 const bodyRule=(op,value)=>({version:1,join:'and',rules:[{field:'bodyPart',op,...(value===undefined?{}:{value})}]});
 let userFilters=[{id:7,name:'Chest saved',mode:'Radiology',days:-1,quick:'',cols:{$compound:bodyRule('eq','chest')},sortKey:null,sortDir:0,isDefault:false}];
@@ -128,10 +103,10 @@ class WorklistBodyPartsDOMTest(unittest.TestCase):
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch(headless=True)
         source = read_page_source(MAIN)
-        cls.main_functions = "\n".join(extract_function(source, name) for name in (
+        cls.main_functions = "\n".join(fixture_blocks(MAIN, {name: [name] for name in (
             "mountWorklistBodyParts", "bodyPartCountNote", "renderBodyParts", "savedFilterDays",
-            "filteredFor", "renderChips",
-        ))
+            "filteredFor", "filterPredicate", "renderChips", "updateWorklistFolders",
+        )}).values())
         cls.compound_source = COMPOUND.read_text(encoding="utf-8")
         cls.related_source = RELATED.read_text(encoding="utf-8")
         cls.body_parts_source = BODY_PARTS.read_text(encoding="utf-8")
@@ -267,12 +242,41 @@ render();
         operator = page.get_by_role("combobox", name=re.compile(r"^Operator\b"))
         self.assertEqual(operator.locator("option").all_inner_texts(),
                          ["Equals", "Does Not Equal", "On or After", "On or Before",
-                          "Between (Inclusive)", "Is Empty", "Is Not Empty"])
+                          "Between (Inclusive)", "Is Empty", "Is Not Empty", "Within Last N Days"])
         operator.select_option(label="On or After")
         value = page.get_by_label("Value", exact=True)
         self.assertEqual(value.get_attribute("type"), "date")
         value.fill("2026-10-01")
         self.assertEqual(value.input_value(), "2026-10-01")
+
+    def test_relative_editor_stored_rule_presets_custom_validation_and_save(self):
+        # WS3-RELATIVE-DATE / W2M-F08/F09 / I01: the served editor's first writer.
+        page = self.new_page(viewport={"width": 1280, "height": 900})
+        page.set_content(MANAGER_HARNESS)
+        activate(page)
+        page.add_style_tag(content=self.manager_css)
+        page.add_script_tag(content=self.compound_source)
+        page.add_script_tag(content=self.manager_source)
+        page.evaluate("""() => {
+          current.cols.$compound={version:1,join:'and',rules:[{field:'date',op:'withinLastDays',value:'7'}]};
+          options.list=()=>[{...current,id:7}];options.save=async value=>{window.saved=value;return value};
+          window.manager=KinSavedFilterManager.mount(options);manager.open({name:'Draft'});
+        }""")
+        value = page.get_by_label('Value', exact=True)
+        expect(value).to_have_attribute('type', 'number')
+        expect(value).to_have_value('7')
+        expect(page.locator('#sfm-count')).not_to_contain_text('오류')
+        for preset in ['0', '1', '7', '30']:
+            page.get_by_role('combobox', name=re.compile(r'^Date Range')).select_option(preset)
+            expect(value).to_have_value(preset)
+        page.get_by_role('combobox', name=re.compile(r'^Date Range')).select_option('')
+        value.fill('366')
+        expect(page.locator('#sfm-count')).to_contain_text('0~365')
+        value.fill('0')
+        page.locator('#sfm-save').click()
+        page.wait_for_function('window.saved !== undefined')
+        self.assertEqual(page.evaluate('saved.cols.$compound.rules'), [{'field':'date','op':'withinLastDays','value':'0'}])
+        self.assertEqual(page.evaluate('KinCompoundFilter.describe(saved.cols.$compound, columns.Radiology)'), '(Study Date Today)')
 
     def test_saved_manager_refreshes_live_counts_and_preserves_dirty_body_part_rule(self):
         page = self.new_page(viewport={"width": 1280, "height": 900})

@@ -8,10 +8,19 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { scripts, readPage } = require('./page_source.cjs');
-const { baseline, chunks, verify } = require('./main_move_contract.cjs');
+const { baseline, chunks, verify, historicalPage, currentHomes } = require('./main_move_contract.cjs');
 const spec = require('./main_move_spec.json');
 const before = baseline();
 const page = path.resolve(__dirname, '..', spec.page);
+function currentProjection() {
+  // Projection byte equality is the contract: independently join the editable
+  // sources and preserve every outer HTML byte. Do not use page_source as its own oracle.
+  const order = require('../scripts/main-split-order.json'), html = fs.readFileSync(page, 'utf8');
+  const tag = '<script src="main-split.bundle.js"></script>';
+  assert.equal(html.split(tag).length, 2, 'one canonical bundle tag');
+  const body = order.sources.map(source => fs.readFileSync(path.join(path.dirname(page), source.file), 'utf8')).join('');
+  return html.replace(tag, () => '<script>' + body + '</script>');
+}
 function scratch(t, prefix) {
   const parent = fs.realpathSync(os.tmpdir());
   const dir = fs.mkdtempSync(path.join(parent, prefix));
@@ -24,8 +33,9 @@ function scratch(t, prefix) {
   return dir;
 }
 
-test('A1: not-yet-moved page or moved page preserves every statement, byte and outer markup', () => {
-  const result = verify(before, page), actual = readPage(page);
+test('A1: landed split preserves every historical statement, byte and outer markup', t => {
+  const frozen = historicalPage(scratch(t, 'u0a-history-'));
+  const result = verify(before, frozen), actual = readPage(frozen);
   assert.equal(result.statements, spec.modules.flatMap(m => m.statements).length);
   assert.ok([0, ...spec.parts].includes(result.modules), 'Only the specified cumulative parts are deliverable');
   const newline = before.includes('\r\n') ? '\r\n' : '\n';
@@ -87,7 +97,9 @@ test('C5: actual projection, Python bytes, fixture cuts and delivered asset inve
   const dir = scratch(t, 'u0a-projection-'), source = path.join(dir, 'main.html');
   fs.writeFileSync(source, before);
   const candidate = readPage(page), manifest = actual(page);
-  assert.equal(candidate.source, before);
+  currentHomes(page);
+  assert.equal(candidate.source, currentProjection());
+  fs.writeFileSync(source, currentProjection());
   assert.deepEqual(fixtureBlocks(page, REPORT_FIXTURE), fixtureBlocks(source, REPORT_FIXTURE));
   assert.deepEqual(manifest.parts, candidate.files.map(p => path.basename(p)));
   assert.deepEqual(manifest.scripts, scripts(candidate.html).filter(t => t.src).map(t => t.src));
@@ -100,11 +112,11 @@ test('C5: actual projection, Python bytes, fixture cuts and delivered asset inve
   const fromPython = execFileSync(python, ['-B', '-c',
     'import sys; sys.path.insert(0, "tests"); from page_source import read_page_bytes; sys.stdout.buffer.write(read_page_bytes(sys.argv[1]))', page],
     { cwd: path.resolve(__dirname, '..'), maxBuffer: 8e6 });
-  assert.deepEqual(fromPython, Buffer.from(before), 'Python adapter preserves projection bytes');
+  assert.deepEqual(fromPython, Buffer.from(candidate.source), 'Python adapter preserves current projection bytes');
 });
 
-test('S1 candidate byte contract', () => {
-  verify(before, process.env.KIN_SPLIT_BYTE_PAGE || page);
+test('S1 historical byte contract', t => {
+  verify(before, process.env.KIN_SPLIT_BYTE_PAGE || historicalPage(scratch(t, 'u0a-history-')));
 });
 
 test('C1 bundle artifact: stdlib binary equality and HTMLParser tag proof', () => {
@@ -116,7 +128,8 @@ test('C1 bundle artifact: stdlib binary equality and HTMLParser tag proof', () =
 test('C5 complete source projection', () => {
   const helper = process.env.KIN_SPLIT_PROJECTION_HELPER || './page_source.cjs';
   const source = require(helper).readPageSource(process.env.KIN_SPLIT_BYTE_PAGE || page);
-  assert.equal(source, before, 'C5 all 661 statements are reconstructed when no inline script remains');
+  assert.equal(source, currentProjection(), 'C5 all current statements and outer markup are reconstructed when no inline script remains');
+  currentHomes(page);
 });
 
 for (const [id, reason] of [['S1-M01', /Moved bytes/], ['S1-M02', /ENOENT/], ['S1-M03', /No dropped/],

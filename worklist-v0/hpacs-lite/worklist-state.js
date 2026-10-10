@@ -14,6 +14,9 @@
     let favoriteList = null, studyTagList = null, studyTagScope = 'personal';
     let demoMode = false;
     let quickDays = -1, sortKey = null, sortDir = 0, selectedOid = null;
+    let worklistFolders = null, folderLoadState = 'unknown', folderAppliedSearch = null;
+    let filterCollection = null, sharedSearches = [], shortcutDraft = null, shortcutBusy = false, filterReadSequence = 0, sharedFilterReadSequence = 0;
+    let storedShortcuts = [];
     // 워크리스트 선택은 "지금 작성할 검사", Related 선택은 썸네일과 이전 판독문에만 쓴다.
     // 둘을 한 변수로 쓰면 prior를 클릭한 순간 저장·승인 대상까지 prior로 바뀐다.
     let relatedUid = null;

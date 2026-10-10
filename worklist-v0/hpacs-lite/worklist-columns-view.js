@@ -98,7 +98,7 @@
       $("#heads").innerHTML = shownColumns().map(c => `<th data-key="${c.k}" class="${c.num ? "num" : ""}">${c.t}</th>`).join("");
       $("#filterrow").innerHTML = shownColumns().map(c => {
         if (!c.f) return "<th></th>";
-        if (c.f === "text")
+        if (c.f === "text" || c.k === 'modality')
           return `<th><input data-f="${c.k}" value="${esc(fval[c.k] ?? "")}"></th>`;
         return `<th><select data-f="${c.k}">` +
           ["", ...c.f].map(o => `<option value="${o}"${(fval[c.k] ?? "") === o ? " selected" : ""}>${o}</option>`).join("") +
@@ -108,6 +108,7 @@
     $("#filterrow").addEventListener("input", e => {
       const el = e.target.closest("[data-f]"); if (!el) return;
       fval[el.dataset.f] = el.value.trim();
+      if (el.dataset.f === 'modality') { folderAppliedSearch = null; activeFilterName = null; }
       worklistSearch?.change();
       render();
     });

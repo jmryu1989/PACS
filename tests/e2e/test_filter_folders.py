@@ -1,6 +1,7 @@
 """TEST-FILTER-FOLDERS: exact personal mutations, revision conflicts and UI preservation."""
 from concurrent.futures import ThreadPoolExecutor
 import os
+import re
 from pathlib import Path
 import unittest
 import uuid
@@ -10,6 +11,53 @@ import test_saved_filter_manager as manager
 
 
 class FilterFoldersE2E(manager.SavedFilterManagerE2E):
+    def test_shortcuts_01_folder_edit_save_reapply_relogin(self):
+        """WS3-SHORTCUTS: the complete doctor flow on served assets and account storage."""
+        prefix = 'W2-' + uuid.uuid4().hex[:10]
+        first = self.fixture(patient_id=prefix+'-A')
+        second = self.fixture(patient_id=prefix+'-B')
+        before = self.snapshot()
+        self.addCleanup(lambda: self.command(self.snapshot(), dict(action='replace-shortcuts', shortcuts=before['shortcuts'])))
+        page = self.login()
+        page.locator('#quick').fill(prefix)
+        nav = page.get_by_role('navigation', name='Folders')
+        nav.get_by_role('button', name=re.compile(r'^CT \(')).click()
+        nav.get_by_role('button', name=re.compile(r'^MR \(')).click()
+        expect(page.locator('#rows tr[data-uid]')).to_have_count(2)
+        self.open_manager(page)
+        page.locator('#sfm-name').fill(prefix)
+        page.locator('#sfm-col-id').fill(second.patient_id)
+        page.locator('#sfm-default').check()
+        saved = self.save(page)
+        page.locator('#sfm-apply').click()
+        expect(page.locator('#rows tr[data-uid]')).to_have_count(1)
+        expect(page.locator(f'#rows tr[data-uid="{second.uid}"]')).to_be_visible()
+        nav.get_by_label('Shortcut Name', exact=True).fill(prefix+' shortcut')
+        nav.get_by_role('combobox', name=re.compile(r'^Saved Search')).select_option('own:'+str(saved['id']))
+        with page.expect_response(lambda r: r.request.method == 'POST' and r.url.endswith('/api/filter-folders')) as response:
+            nav.get_by_role('button', name='Add Shortcut', exact=True).click()
+        self.assertEqual(response.value.status, 201)
+        shortcut = next(s for s in self.snapshot()['shortcuts'] if s['name'] == prefix+' shortcut')
+        self.assertEqual(shortcut['searchId'], 'own:'+str(saved['id']))
+        fresh = self.login()
+        fresh.get_by_role('navigation', name='Folders').get_by_role('button', name=re.compile('^'+prefix+' shortcut')).click()
+        expect(fresh.locator('#rows tr[data-uid]')).to_have_count(1)
+        expect(fresh.locator(f'#rows tr[data-uid="{second.uid}"]')).to_be_visible()
+
+    def test_shortcuts_02_cas_owner_and_missing_target_retention(self):
+        """WS3-SHORTCUTS-CAS: no automatic merge, even when targets disappear."""
+        before = self.snapshot()
+        self.addCleanup(lambda: self.command(self.snapshot(), dict(action='replace-shortcuts', shortcuts=before['shortcuts'])))
+        owned = self.create_search()
+        self.addCleanup(self.remove_filter, owned['id'])
+        before = self.snapshot()
+        item = dict(id='w2-'+uuid.uuid4().hex, name='SYN shortcut', searchId='own:'+str(owned['id']))
+        saved = self.command(before, dict(action='replace-shortcuts', shortcuts=[item]))
+        self.command(before, dict(action='replace-shortcuts', shortcuts=[]), status=409)
+        self.command(saved, dict(action='replace-shortcuts', shortcuts=[]), user='doctor2', status=409)
+        self.remove_filter(owned['id'])
+        self.assertEqual(self.snapshot()['shortcuts'], [item])
+
     def snapshot(self, user='doctor'):
         result = self.stack.request('GET', '/filter-folders', user)
         self.assertEqual(result.status, 200, result.text)

@@ -457,6 +457,7 @@ model UserFilterCollection {
   owner    String @id
   revision Int    @default(0)
   folders  Json   @default("[]")
+  shortcuts Json @default("[]")
 }
 
 model SharedFilterLibrary {

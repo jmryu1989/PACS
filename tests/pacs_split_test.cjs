@@ -11,7 +11,7 @@ const path = require('node:path');
 // before the split (spec.di_source). The counter-cases below each change one thing on synthetic sources and must be
 // refused by their own check.
 const { createSource, targets, sha256 } = require('./pacs_source.cjs');
-const { assertContract, assertEntry, fingerprint, diSnapshot } = require('./pacs_split_contract.cjs');
+const { assertContract, assertEntry, fingerprint, diSnapshot, historicalSource } = require('./pacs_split_contract.cjs');
 const spec = require('./pacs_split_spec.json');
 const apiSrc = path.resolve(__dirname, '../tmp/s9-u0b-relist/virtual-api');
 const file = 'api/src/pacs/worklist.ts', relative = file.slice('api/src/'.length);
@@ -24,11 +24,12 @@ function fixture(text = plain, change = () => {}, extra = {}) {
   change(wanted);
   return createSource({ apiSrc, spec: wanted, overrides: { [path.join(apiSrc, relative)]: text, ...extra } });
 }
-test('U0B-STRUCT-NORMAL all 125 members and 57 declarations resolve in their approved concern with unchanged text and SQL bindings', () => {
+test('U0B-STRUCT-NORMAL historical text/SQL proof and current ownership/forwarding both hold', () => {
   assert.equal(spec.phase, 'split');
   const source = createSource();
   // validate() also holds the facade (slots, composition, 64 forwarders, 13 re-exports) and the 16 concern files to the spec
-  assert.deepEqual(assertContract(source), { members: 125, declarations: 57 });
+  assert.deepEqual(source.validate(), { members: 125, declarations: 57 });
+  assert.deepEqual(assertContract(historicalSource()), { members: 125, declarations: 57 });
   assert.equal(spec.facade.forwards.length, 64);
   assert.equal(spec.facade.slots.length, 15);
   assert.equal(spec.facade.reexports.length, 13);
@@ -78,7 +79,7 @@ for (const [label, statement] of [
 for (const [field, value] of [['name', 'gatewayReceiptt'], ['kind', 'PropertyDeclaration'],
   ['id', 'member:gatewayReceiptt:MethodDeclaration'], ['category', 'declaration'], ['live.kind', undefined]]) {
   test(`U0B-R02 spec ${field} must describe the resolved declaration`, () => {
-    assert.deepEqual(assertContract(createSource()), { members: 125, declarations: 57 });
+    assert.deepEqual(createSource().validate(), { members: 125, declarations: 57 });
     const wrong = structuredClone(spec);
     const entry = wrong.entries.find(item => item.name === 'gatewayReceipt');
     if (field === 'live.kind') delete entry.live.kind;

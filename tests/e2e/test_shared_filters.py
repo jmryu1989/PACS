@@ -1,6 +1,7 @@
 """TEST-SHARED-FILTERS: institution publication and independent personal copies."""
 import json
 import os
+import re
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import unittest
@@ -15,6 +16,42 @@ def literal(value):
 
 
 class SharedFiltersE2E(manager.SavedFilterManagerE2E):
+    def test_shared_10_withdrawn_search_keeps_shortcut_unavailable_after_relogin(self):
+        """WS3-SHORTCUTS-REVOKE: withdrawal removes availability, never the account shortcut."""
+        fixture = self.fixture(patient_id=self.prefix)
+        source, personal = self.seed_folder()
+        published = self.publish(self.library(), personal, source, self.prefix+'/Shared')
+        target = published['filters'][0]['id']
+        before = self.personal('doctor')
+
+        def replace(shortcuts):
+            snapshot = self.personal('doctor')
+            result = self.stack.request('POST', '/filter-folders', 'doctor', dict(
+                expectedOwner=snapshot['owner'], revision=snapshot['revision'],
+                command=dict(action='replace-shortcuts', shortcuts=shortcuts)))
+            self.assertEqual(result.status, 201, result.text)
+
+        self.addCleanup(lambda: replace(before['shortcuts']))
+        shortcut = dict(id=self.prefix, name=self.prefix+' shortcut', searchId='shared:'+str(target))
+        replace(before['shortcuts']+[shortcut])
+        page = self.login()
+        nav = page.get_by_role('navigation', name='Folders')
+        chosen = nav.get_by_role('button', name=re.compile('^'+re.escape(shortcut['name'])+r' \('))
+        chosen.click()
+        expect(page.locator(f'#rows tr[data-uid="{fixture.uid}"]')).to_be_visible()
+        self.change(published, dict(action='delete-searches', ids=[target]))
+        page.locator('#shortcuts-reload').click()
+        expect(chosen).to_be_disabled()
+        expect(chosen).to_contain_text('Unavailable')
+        expect(page.locator('#rows tr[data-uid]')).to_have_count(0)
+        expect(nav.get_by_role('button', name=re.compile(r'^All Studies \('))).not_to_have_attribute('aria-current', 'true')
+        self.assertIn(shortcut, self.personal('doctor')['shortcuts'])
+        fresh = self.login()
+        unavailable = fresh.get_by_role('navigation', name='Folders').get_by_role(
+            'button', name=re.compile('^'+re.escape(shortcut['name'])+r' \('))
+        expect(unavailable).to_be_disabled()
+        expect(unavailable).to_contain_text('Unavailable')
+
     def setUp(self):
         super().setUp();self.libraryInstitutions=set();self.libraryActors=set();self.lastLibrary={}
         self.prefix='LIB-'+uuid.uuid4().hex[:10]

@@ -2,7 +2,7 @@
 
     $("#quick").addEventListener("input", () => { worklistSearch?.change(); render(); });
     for (const host of [$('#quick'),$('#filterrow')]) host.addEventListener('keydown',e=>{
-      if(e.key==='Enter'&&!e.isComposing){e.preventDefault();worklistSearch?.apply();}
+      if(e.key==='Enter'&&!e.isComposing&&e.keyCode!==229){e.preventDefault();worklistSearch?.apply();}
     });
     $("#quick-match").addEventListener("change", () => {
       try {

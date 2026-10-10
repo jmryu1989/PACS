@@ -68,4 +68,38 @@ function baseline() {
   // Git applies only the checkout's existing EOL filter; actual page/chunk comparisons above are byte-exact UTF-8.
   return execFileSync('git', ['cat-file', '--filters', `${spec.base}:${spec.page}`], { cwd: path.resolve(__dirname, '..'), encoding: 'utf8', maxBuffer: 4e6 });
 }
-module.exports = { statements, chunks, verify, baseline };
+// The move proof stays attached to the landed Git objects; later features have
+// their own behavior contracts and must not repin these original bytes.
+const LANDED = 'c8e4f1b485ec05ccbb97589c74a573b3f48b70ce';
+function historicalPage(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  for (const name of ['main.html', 'main-split.bundle.js', ...spec.modules.map(m => m.file)]) {
+    const data = execFileSync('git', ['show', `${LANDED}:worklist-v0/hpacs-lite/${name}`],
+      { cwd: path.resolve(__dirname, '..'), maxBuffer: 8e6 });
+    fs.writeFileSync(path.join(dir, name), data);
+  }
+  return path.join(dir, 'main.html');
+}
+function currentHomes(page) {
+  const actual = readPage(page);
+  const order = require('../scripts/main-split-order.json').sources.map(s => s.file);
+  assert.deepEqual(order, spec.modules.map(m => m.file), 'Current editable source order');
+  const bodies = order.map(file => fs.readFileSync(path.join(path.dirname(page), file), 'utf8'));
+  assert.equal(actual.script, bodies.join(''), 'Current bundle has every source exactly once');
+  const joined = statements(actual.script);
+  let index = 0;
+  const homes = order.flatMap((file, module) => statements(bodies[module]).map(() => ({
+    name: joined[index++].name, module, file,
+  })));
+  assert.equal(index, joined.length, 'No statements cross source boundaries');
+  // Declaration ownership remains a live contract; anonymous effects may change
+  // with the feature, and their execution order is checked on the current AST.
+  for (const original of spec.modules) for (const name of original.statements) {
+    if (/Statement after /.test(name)) continue;
+    const matches = homes.filter(home => home.name === name);
+    assert.equal(matches.length, 1, `Current declaration occurs once: ${name}`);
+    assert.equal(matches[0].file, original.file, `Current declaration owner: ${name}`);
+  }
+  return homes;
+}
+module.exports = { statements, chunks, verify, baseline, historicalPage, currentHomes, LANDED };
