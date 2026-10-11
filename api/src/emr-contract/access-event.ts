@@ -322,7 +322,8 @@ const authRoutes = () => Object.keys(ROUTE_CONTRACTS).filter(r => ROUTE_CONTRACT
 function authSurfaces(action: AuthAction, endCause: AuthEndCause | null): readonly string[] {
   if (action === 'auth.login') return ['GET auth/callback'];
   if (action === 'auth.entry') return ['POST auth/entry'];
-  if (endCause === 'logout') return ['POST auth/logout'];
+  // The recovery login completes an unfinished logout, including its provider probe callback.
+  if (endCause === 'logout') return ['POST auth/logout', 'POST auth/login', 'GET auth/callback'];
   if (endCause === 'account-switch' || endCause === 'reauthentication') return authRoutes().filter(r => r !== 'POST auth/entry');
   if (endCause === 'isolation') return Object.keys(ROUTE_CONTRACTS).filter(r => ROUTE_CONTRACTS[r].operation === 'write' && ROUTE_CONTRACTS[r].kinds.includes('identity-access'));
   if (endCause === 'sweep') return Object.keys(INTERNAL_SURFACES).filter(s => INTERNAL_SURFACES[s].kinds.includes('authentication-session'));
@@ -395,7 +396,10 @@ function parseAuthEventV2(input: unknown): Readonly<AuthAccessEventV2> {
       (endCause === 'isolation' ? !sameIdentity(userId, affectedIdentity) : sameIdentity(userId, affectedIdentity));
   }
   if (!consistent) throw new Error('Unresolved or inconsistent actor context');
-  if (succeeded && (trustedProxyIp.status === 'unresolved' || [rolesAtTime, rightsVersion].some(f => f.status === 'unresolved') ||
+  // Revocation must still end a bound session when ingress cannot be observed. It grants no access; retain the
+  // missing observation instead of inventing an address. Login and entry still require the trusted proxy address.
+  const admission = action === 'auth.login' || action === 'auth.entry';
+  if (succeeded && ((admission && trustedProxyIp.status === 'unresolved') || [rolesAtTime, rightsVersion].some(f => f.status === 'unresolved') ||
       actingInstitution.status === 'unresolved' || managingInstitution.status !== 'known' || session.status !== 'known'))
     throw new Error('A successful authentication fact requires its observed context');
   if (!succeeded && session.status === 'known') throw new Error('A refused or failed login has no product session');

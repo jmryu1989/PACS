@@ -532,9 +532,17 @@ function contractSuite() {
       ['172.18.0.5', { 'x-real-ip': ['192.0.2.10'] }], ['172.18.0.5', { 'x-real-ip': 'attacker' }], ['172.18.0.5', {}],
       [null, { 'x-real-ip': '192.0.2.10' }], ['', { 'x-real-ip': '192.0.2.10' }],
     ]) assert.deepEqual(C.ingressAddress(peer, headers, proxies), unresolved('not-observed'), JSON.stringify([peer, headers]));
-    // A member's success needs the observed address; only an in-process service job has none.
+    // Admission needs the observed address. Revocation keeps a missing observation and grants no access.
     assert.throws(() => A.parseAccessEvent(authEvent(A, { trustedProxyIp: C.ingressAddress('203.0.113.9', { 'x-real-ip': '192.0.2.10' }, proxies) })));
     assert.throws(() => A.parseAccessEvent(authEvent(A, { trustedProxyIp: C.IN_PROCESS_SERVICE })));
+    assert.throws(() => A.parseAccessEvent(authEvent(A, { action: 'auth.entry', surface: 'POST auth/entry',
+      trustedProxyIp: unresolved('not-observed') })));
+    for (const surface of ['POST auth/logout', 'POST auth/login', 'GET auth/callback']) {
+      const end = A.parseAccessEvent(authEvent(A, { action: 'auth.logout', surface,
+        auth: { endCause: 'logout', failureCause: null, trigger: null }, trustedProxyIp: unresolved('not-observed') }));
+      assert.deepEqual(end.trustedProxyIp, unresolved('not-observed'));
+      assert.equal(JSON.parse(C.authProjection(end, 'display@example.test').detail).ip, null);
+    }
     assert.throws(() => A.parseAccessEvent(authEvent(A, { trustedProxyIp: known({ address: '192.0.2.10, 198.51.100.1', source: 'trusted-proxy' }) })));
     assert(A.parseAccessEvent(authEvent(A, { result: 'refused', auth: { endCause: null, failureCause: 'provider-error', trigger: null }, session: unresolved('not-resolved'), trustedProxyIp: unresolved('not-observed') })));
   });

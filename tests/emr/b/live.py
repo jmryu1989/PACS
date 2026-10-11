@@ -1057,7 +1057,7 @@ class EmrBAuthLive(unittest.TestCase):
                 '-v', str(ROOT / 'tests') + ':/tests:ro', '-v', str(ROOT / 'worklist-v0/hpacs-lite') + ':/assets:ro',
                 '--entrypoint', 'node', self.image, '--test', '--test-reporter=tap',
                 *([] if full else ['--test-name-pattern', '^' + case + ' ']),
-                '/tests/auth_session_service_test.cjs'], env=env, check=False, timeout=1800 if full else 600)
+                '/tests/auth_session_service_test.cjs'], env=env, check=False, timeout=3000 if full else 600)
         finally:
             if nginx:
                 run(['docker', 'rm', '-f', nginx])

@@ -188,6 +188,7 @@ export class AuthEventLedger {
   private readonly managingInstitution: string;
   private readonly proxyHost: string;
   private ready = false;
+  private recoveringFailures?: Promise<void>;
   private readonly transactions = new WeakMap<object, { events: AuthAccessEventV2[]; appended: ProvisionalAppend[] }>();
 
   constructor(private readonly prisma: PrismaService) {
@@ -236,7 +237,7 @@ export class AuthEventLedger {
         transaction = tx; this.transactions.set(tx, facts);
         try { return await work(tx); }
         catch (error) { callbackFailed = true; throw error; }
-      }, options);
+      }, options ?? { maxWait: 4000, timeout: 8000 });
     } catch (error) {
       for (const event of facts.events) await this.store!.settleTransaction(transaction!, event, error, callbackFailed);
       // A lost COMMIT response is not a failed login. Keep its original intent for fenced startup recovery.
@@ -326,11 +327,13 @@ export class AuthEventLedger {
     let rights = null;
     if (who) try {
       rights = await this.prisma.$transaction(async tx => {
+        // A refusal must not wait indefinitely for the member lock that just refused admission.
+        await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
         await lockMemberRights(tx, who.target);
         const row = await tx.memberRights.findUnique({ where: { sub: who.target } });
         return row ? { version: row.version, roles: row.roles, institution: row.institution, approved: row.approved, suspended: row.suspended }
           : { version: 0, roles: [], institution: null, approved: false, suspended: false };
-      });
+      }, { maxWait: 4000, timeout: 8000 });
     } catch { /* The missing historical observation is explicit in the durable fact. */ }
     const observation = parseAuthFailureObservation({ eventId: attemptId, auditLinkId: newAuditLinkId(), at,
       requestId: ingress.requestId, managingInstitution: this.managingInstitution, address: ingress.address,
@@ -355,10 +358,15 @@ export class AuthEventLedger {
     this.store!.journal.record(done, 'auth-failure-recovered', { eventId: observation.eventId });
   }
 
-  async recoverFailures() {
+  recoverFailures(): Promise<void> {
     this.assertReady();
-    for (const row of this.store!.journal.all()) if (row.kind === 'auth-failure-observed')
-      await this.recoverFailure(parseAuthFailureObservation(JSON.parse(String(row.body.observation))));
+    // The retry timer can fire again while storage is slow. One recovery pass owns the retained observations;
+    // overlapping passes otherwise exhaust the same pool needed to end sessions and to run the sweep.
+    if (!this.recoveringFailures) this.recoveringFailures = (async () => {
+      for (const row of this.store!.journal.all()) if (row.kind === 'auth-failure-observed')
+        await this.recoverFailure(parseAuthFailureObservation(JSON.parse(String(row.body.observation))));
+    })().finally(() => { this.recoveringFailures = undefined; });
+    return this.recoveringFailures;
   }
 }
 
@@ -414,7 +422,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     if (!caller.sub || request?.sub !== caller.sub || request?.emrIssuer !== process.env.KC_ISSUER ||
         !request.roles?.includes('admin')) throw new Error('VerifiedIsolationExecutorRequired');
     const executorWho = { target: caller.sub, actor: caller.actor, issuer: request.emrIssuer, institution: request.institution };
-    const who = this.storedIdentity(session);
+    const who = this.storedIdentity(session, true);
     const event = await this.ledger.event(tx, { action: AUTH_LOGOUT, who, session, cause: 'isolation',
       ingress: await this.ledger.ingress(request), executorWho });
     await this.ledger.record(tx, event, who.actor, session.institution);
@@ -640,10 +648,16 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 끝난 세션의 신원은 삭제 조건에 쓴 그 관찰의 저장 access token에서 읽는다 — 저장 전에 검증한 토큰이다.
    * 지금 Keycloak 그룹이나 따로 먼저 읽은 다른 관찰로 귀속하지 않는다(기록 시점 기관, D7).
    */
-  private storedIdentity(session: Session): Who {
-    // Only a token admitted by this issuer's verifier may supply the immutable identity of an existing session.
-    // A damaged stored token cannot be repaired with a guessed issuer or display name.
-    const claims = decodeJwt(session.accessToken);
+  private storedIdentity(session: Session, revocation = false): Who {
+    // AuthSession.sub is the subject retained by this deployment's single-issuer admission path. A damaged
+    // token must not prevent revocation of that stored credential; it supplies neither a display name nor a
+    // provider sid. This fallback is used only to record an end, never to verify a token or admit a session.
+    let claims: JWTPayload;
+    try { claims = decodeJwt(session.accessToken); }
+    catch {
+      if (!revocation || !process.env.KC_ISSUER || !session.sub) throw new Error('StoredSessionIdentityInvalid');
+      return { actor: session.sub, target: session.sub, issuer: process.env.KC_ISSUER, institution: session.institution };
+    }
     if (!process.env.KC_ISSUER || claims.iss !== process.env.KC_ISSUER || claims.sub !== session.sub)
       throw new Error('StoredSessionIdentityInvalid');
     return { ...this.identity(claims, session.sub), institution: session.institution };
@@ -769,7 +783,6 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       return await this.ledger.transaction(async tx => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
         if (idpSid) await this.lockIdpSession(tx, idpSid);
-        await this.lockMember(tx, session.sub);
         const { count } = await tx.authSession.deleteMany({ where });
         if (count !== 1) return { ended: false, idpSid: null, change: null };
         const change = await this.endRows(tx, idpSid, [session], cause, ip, options.trigger);
@@ -801,7 +814,6 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
         update: { confirmedAt: null, nextAttemptAt: now },
       });
       const others: Session[] = await tx.authSession.findMany({ where: { idpSid } });
-      for (const subject of [...new Set(others.map(row => row.sub))].sort()) await this.lockMember(tx, subject);
       for (const other of others) {
         const { count } = await tx.authSession.deleteMany({ where: { sid: other.sid } });
         if (count === 1) ended.push(other);
@@ -809,8 +821,9 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       change = await this.recordEnd(tx, idpSid, sub ?? ended[0]?.sub ?? null, mark.attempts);
     }
     for (const row of ended) {
-      await this.lockMember(tx, row.sub);
-      const who = this.storedIdentity(row);
+      // The conditional delete arbitrates with a concurrent rights command. Taking its member lock here would
+      // prevent an end from winning after that command read its session list; plain reads retain committed rights.
+      const who = this.storedIdentity(row, true);
       const event = await this.ledger.event(tx, { who, session: row, ingress: ip, cause, trigger,
         action: cause === 'idle' || cause === 'refresh_failed' || cause === 'sweep' ? AUTH_EXPIRED : AUTH_LOGOUT });
       await this.ledger.record(tx, event, who.actor, row.institution);

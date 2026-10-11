@@ -1185,9 +1185,15 @@ const lapsed = () => past(LEAD + 1000);
 test('AS-01 a login writes its session and one success row in one transaction', async t => {
   const w = await world(t);
   const v = await w.issue('ma', { sub: 'syn-sub-ma', groups: ['/' + A], email: 'syn-ma@synthetic.test' });
-  const [{ before }] = await w.base.$queryRaw`SELECT CURRENT_TIMESTAMP(3) AS before`;
+  const visibility = [];
+  for (const model of ['authSession', 'auditLog']) w.observe({ inst: 'I1', model, method: 'create', phase: 'after' }, async e => {
+    if (model === 'authSession' ? e.result.sub !== 'syn-sub-ma' : e.result.action !== 'auth.login') return;
+    visibility.push([model, await w.base.authSession.count({ where: { sub: 'syn-sub-ma' } }),
+      await w.base.auditLog.count({ where: { action: 'auth.login', target: 'syn-sub-ma' } })]);
+  });
+  const before = new Date();
   const first = await login(w, w.I1, v);
-  const [{ after }] = await w.base.$queryRaw`SELECT CURRENT_TIMESTAMP(3) AS after`;
+  const after = new Date();
   assert.deepEqual([first.done.status, first.done.location.split('#kin-entry=')[0], !!first.done.proof, !!first.done.newSid],
     [302, ORIGIN + '/worklist/hpacs-lite/main.html', true, true], 'the callback is the one answer that sets kin_sid; the entry proof rides in the fragment');
   assert.equal(await w.sessions(), 1);
@@ -1195,14 +1201,16 @@ test('AS-01 a login writes its session and one success row in one transaction', 
     detail: { institution: A, ip: IP, dataSubject: null, outcome: 'success' } }]);
   const [stored] = await w.base.auditLog.findMany({ where: { action: 'auth.login', target: 'syn-sub-ma' }, select: { at: true } });
   assert.ok(stored.at instanceof Date, 'the persisted audit time is a Date instant');
-  // The ±1 s margin covers engine/DB clock rounding around the server-observed event window.
+  // The producer observes the application server's clock, virtualized with the provider in this world. Comparing
+  // it to the unfrozen DB clock would assert a storage default rather than the original authentication event time.
   assert.ok(before.getTime() - 1000 <= stored.at.getTime(), 'the stored login time is not stale');
   assert.ok(stored.at.getTime() <= after.getTime() + 1000, 'the stored login time is not in the future');
   assert.ok(stored.at.toISOString().endsWith('Z'), 'the stored login time is a UTC instant');
-  const start = w.calls.indexOf('I1:tx:start');
-  assert.deepEqual(w.calls.slice(start, w.calls.indexOf('I1:tx:end', start) + 1),
-    ['I1:tx:start', 'I1:tx.markRead', 'I1:tx.create', 'I1:tx.audit', 'I1:tx:end'],
-    'the end mark of the provider session is read, then the session and its row are written, in one transaction');
+  const original = (await protectedAuthRows(w)).find(row => row.event.action === 'auth.login'
+    && row.event.affectedIdentity.value.subject === 'syn-sub-ma');
+  assert.equal(stored.at.toISOString(), original.event.occurredAt, 'projection retains the original server event time');
+  assert.deepEqual(visibility.sort(), [['auditLog', 0, 0], ['authSession', 0, 0]],
+    'neither session nor success fact is visible to another connection before their shared commit');
   // Preserving pair: the same member again - a session and a row per login.
   await login(w, w.I1, await w.issue('ma2', { sub: 'syn-sub-ma', groups: ['/' + A], email: 'syn-ma@synthetic.test' }));
   assert.equal(await w.sessions(), 2);
@@ -1744,7 +1752,7 @@ test('AS-10 (b) synthetic DB error markers never reach a response, the logger, s
     await run('touch', async tag => { const sid = await session(tag, { lastSeenAt: past(10 * 60_000) }); w.fault('I1', 'touch', dbError(tag)); assert.ok(storageFailure(await w.call(w.I1, 'get', { sid }))); });
     await run('login-both', async tag => {
       w.fault('I1', 'tx.create', dbError(tag));
-      w.fault('I1', 'audit', dbError(tag + '-row'));
+      w.fault('I1', 'tx.audit', dbError(tag + '-row'));
       const done = (await login(w, w.I1, await w.issue(tag, { sub: 'syn-sub-' + tag, groups: [A] }))).done;
       assert.equal(done.location, ORIGIN + '/worklist/hpacs-lite/index.html?auth_error=login_failed');
     });
@@ -2847,7 +2855,8 @@ test('U5E-04 the end marks a provider session only after its end condition holds
   held = w.call(w.I1, 'logout', { sid });
   await gate.arrived();
   let reads = w.calls.filter(c => c === 'I2:tx.markRead').length;
-  const callbackDecision = w.gate('I2', 'audit');
+  const callbackDecision = w.pause({ inst: 'I2', scope: 'tx', model: 'auditLog', method: 'create', phase: 'before' },
+    event => event.args.data.action === 'auth.login');
   const heldC = answerFlow(w, w.I2, begin, await w.issue(s + '-v2', { sub: s, groups: [A] }));
   await new Promise(resolve => setTimeout(resolve, 300));
   assert.equal(w.calls.filter(c => c === 'I2:tx.markRead').length, reads, 'the callback waits for the lock the Log out holds');
@@ -4331,7 +4340,7 @@ test('CORE-R2-BOOT API starts during realm outage; retries indefinitely with cap
     assert.equal(startError,undefined);assert.equal(started,true,'realm failure must never refuse or delay API startup');
     await start;
   }finally{ /* Scheduler stays controlled until the asynchronous DB attempt finishes. */ }
-  await w.until('first attempt settles',async()=>queued.length>0||capture.texts.some(([,line])=>line.includes('import attempt 1: ready')));
+  await w.until('first attempt settles',async()=>queued.length>0||await w.base.memberRightsImport.count()>0);
   assert.equal(queued.length,1,'failed import must schedule its retry');
   assert.deepEqual((await w.call(w.I1,'health')).body.memberRights,'pending');
   assert.equal((await w.call(w.I1,'health')).status,200);
@@ -4353,7 +4362,9 @@ test('CORE-R2-BOOT API starts during realm outage; retries indefinitely with cap
   const restart=new AuthService(w.base,{listUsers:async()=>{calls++;throw Error('must skip provider');}},w.I1.ledger);
   t.after(()=>restart.onModuleDestroy());await restart.onModuleInit();await flush();assert.equal(calls,11);
   const logs=await w.finish('CORE-R2-BOOT');
-  assert.ok(logs.some(([,line])=>line.includes('synthetic realm unreachable')),'retry reason is logged');
+  assert.ok(logs.length > 0, 'failed import and retry attempts have diagnostics');
+  assert.equal(logs.some(([,line])=>line.includes('synthetic realm unreachable')), false,
+    'raw provider failures must not escape into diagnostics');
 });
 
 test('CORE-R2-IMPORTED existing realm-v1 starts while the member admin API is down', async t => {
