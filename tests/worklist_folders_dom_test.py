@@ -462,6 +462,10 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.page.locator('#sfm-close').click()
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
         expect(self.page.locator('#active-filter-state')).to_have_text('Deleted')
+        self.page.locator('#quick').fill('')
+        self.page.locator('#worklist-folders-toggle').click()
+        expect(self.folder('CT')).to_have_attribute('aria-pressed', 'false')
+        self.page.locator('#worklist-folders-toggle').click()
         expect(self.page.locator('#active-filter-info')).to_have_attribute('title','저장 검색이 삭제됐습니다. 현재 목록 조건은 유지됩니다.')
         self.page.locator('#worklist-folders-toggle').click()
         self.folder('Shared CT').click()
@@ -505,7 +509,9 @@ class WorklistFoldersDOM(unittest.TestCase):
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(2)
         self.page.locator('#worklist-folders-toggle').click()
         for name, count in [('CT',2),('All Studies',4),('Since yesterday',2)]:
+            self.page.locator('#quick').fill('SYN MR')
             self.folder(name).click()
+            expect(self.page.locator('#quick')).to_have_value('')
             expect(self.page.locator('#rows tr[data-uid]')).to_have_count(count)
             self.assertEqual(str(self.page.locator('#rows tr[data-uid]').count()), re.search(r'\((\d+)\)$',self.folder(name).inner_text()).group(1))
 
@@ -549,6 +555,7 @@ class WorklistFoldersDOM(unittest.TestCase):
     def test_held_session_end_discards_tree_and_account_search_data(self):
         # The retained document is required for Recover Draft; navigation cannot hide stale account data.
         self.site.shortcuts=[dict(id='s',name='Private shortcut',searchId='shared:9')]
+        self.site.filters=[dict(id=1,name='SYN private saved search',mode='Radiology',days=-1,quick='',cols={})]
         self.site.modalities=['CT']
         list_body = self.site.list_body
         def one_study(account, rename=None):
@@ -579,6 +586,7 @@ class WorklistFoldersDOM(unittest.TestCase):
         """))
         self.page.goto(auth.MAIN_URL)
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
+        expect(self.page.locator('#chips')).to_contain_text('SYN private saved search')
         self.page.locator('#rows tr[data-uid]').click()
         expect(self.page.locator('#findings')).to_be_editable()
         self.page.locator('#findings').fill('SYN unsaved recovery text')
@@ -621,6 +629,9 @@ class WorklistFoldersDOM(unittest.TestCase):
             "fields => fields.filter(f => f.type === 'checkbox' ? f.checked : f.value !== '').map(f => ({id:f.id,value:f.value}))"))
         expect(self.page.locator('#sfm-rules input, #sfm-rules select')).to_have_count(0)
         self.assertNotIn('SYN private', self.page.locator('body').text_content())
+        self.assertEqual([], self.page.locator('*').evaluate_all("""elements => elements.flatMap(
+            e => [...e.attributes].filter(a => /SYN private|Private shortcut|Shared CT/.test(a.value))
+              .map(a => ({tag:e.tagName, attribute:a.name, value:a.value})))"""))
         self.assertEqual([], self.page.locator('input, textarea').evaluate_all(
             "fields => fields.filter(f => f.value.includes('SYN private')).map(f => f.value)"))
         expect(self.page.get_by_role('button', name='Recover Draft', exact=True)).to_be_visible()
@@ -775,8 +786,10 @@ class WorklistFoldersDOM(unittest.TestCase):
         field = self.page.locator('#sfm-col-modality')
         for bad in ['CT,', 'CT,,MR', 'CT, UNKNOWN']:
             field.fill(bad)
-            expect(self.page.locator('#sfm-count')).to_contain_text('사용할 수 없는 Modality')
+            expect(self.page.locator('#sfm-count')).not_to_contain_text('오류')
             self.page.locator('#sfm-preview').click()
+            expect(self.page.locator('#sfm-count')).to_contain_text('사용할 수 없는 Modality')
+            expect(self.page.locator('#sfm-count')).not_to_contain_text('복합 조건 오류')
             expect(self.page.locator('#saved-filter-manager')).to_be_visible()
             expect(self.page.locator('#rows tr[data-uid]')).to_have_count(6)
             self.page.locator('#sfm-save').click()
@@ -791,6 +804,76 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.folder('Stable modalities').click()
         expect(self.page.locator('#rows tr[data-uid]')).to_have_count(3)
         expect(self.folder('Stable modalities')).to_have_text('Stable modalities (3)')
+
+    def test_new_modality_typing_normalizes_without_error_toasts(self):
+        self.open()
+        self.page.evaluate("""() => {
+          window.errorToasts = [];
+          const node = document.querySelector('#toast');
+          new MutationObserver(records => {
+            for (const r of records) if (r.type === 'attributes' && r.attributeName === 'class'
+                && node.classList.contains('err')) window.errorToasts.push(node.textContent);
+          }).observe(node, {attributes:true});
+        }""")
+        field = self.page.locator('#filterrow [data-f=modality]')
+        for text, count, normalized in [('ct',1,'CT'), (' CT ',1,'CT'), ('CT',1,'CT'),
+                                        ('ct, mr',3,'CT,MR'), ('CT, MR',3,'CT,MR'),
+                                        ('ct\\mr\\CT',3,'CT,MR')]:
+            with self.subTest(text=text):
+                field.fill('')
+                field.press_sequentially(text)
+                expect(self.page.locator('#rows tr[data-uid]')).to_have_count(count)
+                expect(self.page.locator('.statusbar').first).to_contain_text('Modality('+normalized+')')
+                self.assertEqual([], self.page.evaluate('window.errorToasts'))
+                if count == 1:
+                    expect(self.folder('CT')).to_have_attribute('aria-pressed', 'false')
+        for text, commit in [('CT, UNKNOWN','Enter'), ('CT,','Tab')]:
+            self.page.evaluate('window.errorToasts = []')
+            field.fill(text)
+            self.assertEqual([], self.page.evaluate('window.errorToasts'))
+            expect(self.page.locator('#rows tr[data-uid]')).to_have_count(3)
+            field.press(commit)
+            self.assertEqual(1, len(self.page.evaluate('window.errorToasts')))
+            expect(self.page.locator('#toast')).to_contain_text('사용할 수 없는 Modality')
+
+    def test_editor_normalizes_new_single_and_multiple_modalities(self):
+        self.open()
+        self.page.locator('#toolbar-filters > summary').click()
+        for text, stored, count in [('ct','CT',1), (' CT ','CT',1), ('CT','CT',1),
+                                    ('ct, mr',['CT','MR'],3), ('CT, MR',['CT','MR'],3),
+                                    ('ct\\mr\\CT',['CT','MR'],3)]:
+            with self.subTest(text=text):
+                self.folder('All Studies').click()
+                self.page.locator('#managefilters').click()
+                self.page.locator('#sfm-new').click()
+                self.page.locator('#sfm-name').fill('Typed '+text)
+                field = self.page.locator('#sfm-col-modality')
+                field.fill('')
+                field.press_sequentially(text)
+                expect(self.page.locator('#sfm-count')).not_to_contain_text('오류')
+                self.page.locator('#sfm-save-apply').click()
+                expect(self.page.locator('#saved-filter-manager')).not_to_be_visible()
+                saved = next(f for f in self.site.filters if f['name'] == ('Typed '+text).strip())
+                self.assertEqual(stored, saved['cols']['modality'])
+                expect(self.page.locator('#rows tr[data-uid]')).to_have_count(count)
+
+    def test_manager_transient_shared_failure_keeps_applied_search(self):
+        self.open()
+        self.folder('Shared CT').click()
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
+        self.site.fail_shared = 503
+        self.page.locator('#toolbar-filters > summary').click()
+        self.page.locator('#managefilters').click()
+        self.page.locator('#sfm-shared > summary').click()
+        with self.page.expect_response(lambda r: r.url.endswith('/api/shared-filters')) as response:
+            self.page.locator('#sfs-load').click()
+        response.value.finished()
+        expect(self.page.locator('#sfm-status')).to_have_class(re.compile('sfm-error'))
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(1)
+        self.page.locator('#sfm-close').click()
+        expect(self.folder('Shared CT')).to_be_enabled()
+        expect(self.folder('Shared CT')).not_to_contain_text('Unavailable')
+        expect(self.folder('All Studies')).not_to_have_attribute('aria-current', 'true')
 
 
 if __name__ == '__main__':

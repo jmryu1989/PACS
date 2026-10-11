@@ -97,6 +97,7 @@
     const folderDirty = () => folderBaseline && folderValue() !== folderBaseline;
     const copy = value => JSON.parse(JSON.stringify(value));
     const compound = KinCompoundFilter;
+    const editedModalities = new WeakSet();
     const operatorLabels = { contains: 'Contains', eq: 'Equals', notContains: 'Does Not Contain',
       neq: 'Does Not Equal', empty: 'Is Empty', notEmpty: 'Is Not Empty', gte: 'On or After',
       lte: 'On or Before', between: 'Between (Inclusive)', withinLastDays: 'Within Last N Days' };
@@ -113,14 +114,15 @@
         const key = input.dataset.col;
         const original = source.cols?.[key];
         // Opening and saving a legacy scalar must not reinterpret its Modality.
-        // New multi-value edits and folder selections retain their token-array meaning.
-        cols[key] = key === 'modality' && input.value === String(original ?? '') ? original ?? ''
+        // Normalization belongs to new input, never to an untouched stored condition.
+        cols[key] = key === 'modality' && !editedModalities.has(input) && input.value === String(original ?? '') ? original ?? ''
           : key === 'modality' && /[,\\]/.test(input.value)
-            ? [...new Set(input.value.split(/[,\\]/).map(v => v.trim().toUpperCase()))] : input.value;
+            ? [...new Set(input.value.split(/[,\\]/).map(v => v.trim().toUpperCase()))]
+            : key === 'modality' ? input.value.trim().toUpperCase() : input.value;
         if (key === 'modality') {
           const allowed = options.modalities?.() || options.columns[$('mode').value].find(c => c.k === key)?.f || [];
           const tokens = Array.isArray(cols[key]) ? cols[key] : [cols[key]];
-          const error = input.value !== String(original ?? '') && input.value !== ''
+          const error = (editedModalities.has(input) || input.value !== String(original ?? '')) && input.value.trim() !== ''
             && tokens.some(v => !v || !allowed.includes(v))
             ? '사용할 수 없는 Modality입니다. 빈 값 없이 목록의 Modality를 쉼표로 구분해 입력하세요.' : '';
           input.setCustomValidity(error);
@@ -195,7 +197,7 @@
         input.dataset.col = c.k; input.id = 'sfm-col-' + c.k;
         if (c.f !== 'text' && c.k !== 'modality') choices(input, [['', 'All'], ...c.f.map(v => [v, v])], filter.cols?.[c.k] ?? '');
         else input.value = filter.cols?.[c.k] ?? '';
-        if (c.k === 'modality') { input.placeholder = 'CT, MR'; input.title = '쉼표로 구분한 Modality 중 하나가 일치하면 포함합니다.'; }
+        if (c.k === 'modality') { input.placeholder = 'CT, MR'; input.title = '새 입력은 앞뒤 공백을 제거하고 대문자로 정규화합니다. 한 값은 정확히 일치할 때, 쉼표나 역슬래시로 구분한 목록은 Modality 토큰 중 하나가 일치할 때 포함합니다.'; }
         label.append(input); return label;
       }));
       const sort = cols.some(c => c.k === filter.sortKey) ? filter.sortKey : '';
@@ -280,14 +282,15 @@
       const row = nodeRow(kind === 'group' ? { join:'or', rules:[] } : { field:'id', op:'contains', value:'' }, depth);
       container.append(row); row.querySelector('select').focus(); count();
     }
-    function count() {
+    function count(commitModality = false) {
       const filter = value();
-      const error = dialog.querySelector('[data-col="modality"]')?.validationMessage
-        || compound.validate(filter.cols[compound.KEY], options.columns[filter.mode]);
+      const modalityError = dialog.querySelector('[data-col="modality"]')?.validationMessage;
+      const error = modalityError || compound.validate(filter.cols[compound.KEY], options.columns[filter.mode]);
       const note = error ? '' : options.countNote?.(filter) || '';
-      $('count').textContent = error ? '복합 조건 오류: ' + error
+      $('count').textContent = modalityError ? (commitModality ? 'Modality 오류: ' + modalityError : '')
+        : error ? '복합 조건 오류: ' + error
         : `편집 중 조건: 로드된 목록 기준 ${options.count(filter)}건 · 기본 조건 AND 복합 조건을 적용합니다.` + (note ? ' · ' + note : '');
-      $('count').classList.toggle('sfm-error', !!error);
+      $('count').classList.toggle('sfm-error', !!error && (!modalityError || commitModality));
       const parts = options.bodyParts;
       $('body-parts').hidden = !parts || !compound.usesField(filter.cols[compound.KEY], 'bodyPart', options.columns[filter.mode]);
       if (parts) {
@@ -593,6 +596,7 @@
     });
     $('preview').addEventListener('click', () => {
       if (busy || !editable) return;
+      count(true);
       if (dialog.querySelector('[data-col="modality"]')?.validationMessage) return;
       if (organizerDirty() && !confirm('검색을 적용하고 닫으면 저장하지 않은 폴더 변경은 버립니다. 계속할까요?')) return;
       const next = value();
@@ -608,8 +612,11 @@
     $('clear-rules').addEventListener('click', () => { $('rules').replaceChildren(); count(); });
     $('mode').addEventListener('change', () => { source = value(); columns(source); rules(source); count(); });
     $('form').addEventListener('input', e => {
+      if (e.target.dataset.col === 'modality') editedModalities.add(e.target);
       if (!['sfm-name', 'sfm-folder', 'sfm-description', 'sfm-ordinal', 'sfm-default'].includes(e.target.id)) count();
     });
+    $('form').addEventListener('focusout', e => { if (e.target.dataset.col === 'modality') count(true); });
+    $('form').addEventListener('invalid', e => { if (e.target.dataset.col === 'modality') count(true); }, true);
     $('search').addEventListener('input', list);
     $('prev').addEventListener('click', () => moveSelection(-1));
     $('next').addEventListener('click', () => moveSelection(1));

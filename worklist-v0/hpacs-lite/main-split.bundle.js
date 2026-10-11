@@ -894,17 +894,42 @@
           `</select></th>`;
       }).join("");
     }
+    const reportedModalityInputs = new WeakSet();
+    function commitModalityInput(el) {
+      if (el?.dataset.f !== 'modality') return true;
+      if (el.validationMessage) {
+        if (!reportedModalityInputs.has(el)) toast(el.validationMessage, 'err');
+        reportedModalityInputs.add(el);
+        return false;
+      }
+      el.value = String(fval.modality ?? '');
+      return true;
+    }
+    $('#filterrow').addEventListener('focusout', e => commitModalityInput(e.target));
+    $('#filterrow').addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229 && !commitModalityInput(e.target)) {
+        e.preventDefault(); e.stopImmediatePropagation();
+      }
+    });
+    document.addEventListener('click', e => {
+      if (e.target.closest('[data-search-apply]') && !commitModalityInput($('#filterrow [data-f=modality]'))) {
+        e.preventDefault(); e.stopImmediatePropagation();
+      }
+    }, true);
     $("#filterrow").addEventListener("input", e => {
       const el = e.target.closest("[data-f]"); if (!el) return;
       let value = el.value.trim();
       if (el.dataset.f === 'modality') {
+        reportedModalityInputs.delete(el);
         const tokens = value.split(/[,\\]/).map(v => v.trim().toUpperCase());
         const allowed = KinWorklistFolderTree.defaultModalities(studies);
         const error = value && tokens.some(v => !v || !allowed.includes(v))
           ? '사용할 수 없는 Modality입니다. 빈 값 없이 목록의 Modality를 쉼표로 구분해 입력하세요.' : '';
         el.setCustomValidity(error);
-        if (error) { toast(error, 'err'); return; }
+        // Incomplete tokens keep the last applied criteria while the doctor types.
+        if (error) return;
         if (/[,\\]/.test(el.value)) value = [...new Set(tokens)];
+        else value = tokens[0] || '';
         folderAppliedSearch = null;
       }
       fval[el.dataset.f] = value;
@@ -10355,6 +10380,7 @@
       $('#active-filter-name').textContent = ''; $('#active-filter-state').textContent = '';
       $('#worklist-folders-panel').open = false;
       $('#chips')?.replaceChildren(); $('#worklist-folders')?.replaceChildren(); shortcutStatus('');
+      $('#chips')?.removeAttribute('data-render-signature');
       // 닫는 화면을 비우는 대입이다(편집이 아니다; 확인되지 않은 글은 위에서 이미 잡았다) — `editReport` 밖의 두 대입 가운데 하나.
       for (const k of RFIELDS) $("#" + k).value = "";
       leftNotes.clear();
@@ -10391,7 +10417,6 @@
     KinAuth.beforeLogoutPost(() => releaseHold({ closing: true }));
     // 저장을 확인하지 못한 판독문이 메모리에 있는 동안에는 종료 뒤에도 이 문서를 떠나지 않는다.
     KinAuth.holdLeave(() => !!logoutPrep && ["saving", "failed", "ended"].includes(logoutPrep.state));
-
 
     // ══════════ 시작 ══════════
     // 서버가 살아 있으면 서버 상태로 시작하고, 죽어 있으면 localStorage로 계속 굴러간다.
