@@ -1,5 +1,5 @@
 import { EvidenceFact, ImmutableIdentity, PatientLinkSnapshot, identity, patientLink } from '../emr-contract/access-event';
-import type { AccessEvent } from '../emr-contract/access-event';
+import type { AccessEvent, CauseKind, WorkContext } from '../emr-contract/access-event';
 import type { ResolvedRecord } from '../emr-contract/classification';
 import type { RetentionGraph, RetentionRecord } from '../emr-contract/lawful-defaults';
 import type { LifecycleOutcome, ReportFacts, RetentionOnlyEvent } from '../emr-contract/report-lifecycle';
@@ -50,6 +50,34 @@ export function parseStudyFacts(input: unknown): Readonly<StudyFacts> {
 /** Institution and role are separate checks (AGENTS §1.4/1.5): admin is not an exception to either. */
 export function institutionAllows(actor: VerifiedActor, study: StudyFacts): boolean {
   return study.readingInstitutionIds.includes(actor.institutionId);
+}
+
+/** Server-loaded facts only, never request JSON. U5 currently binds a session, not a study: absent a server
+ * work-study binding, callers must leave workStudy null. The C2 adapter must not infer it from a client UID. */
+export interface ReportWorkContext {
+  workStudy: Pick<StudyFacts, 'studyId' | 'patient'> | null;
+}
+
+/** D-18 describes observed work; it does not grant access. Reuse the facts loaded for this plan, without another read. */
+export function workContextFor(input: ReportWorkContext & {
+  actor: VerifiedActor; study: StudyFacts; facts?: Pick<ReportFacts, 'studyId' | 'preliminary'>; cause?: CauseKind;
+}): Readonly<WorkContext> | null {
+  const { actor, study, facts, workStudy } = input;
+  const cause = input.cause ?? 'user-view';
+  const context = (basis: WorkContext['basis'], studyId = study.studyId, relatedStudyId: string | null = null) =>
+    freeze({ basis, studyId, relatedStudyId, reason: null });
+  if (cause === 'service-job') return actor.kind === 'service' ? context('service-job') : null;
+  if (cause === 'background-fetch') return context('background-fetch');
+  if (actor.kind !== 'member' || !institutionAllows(actor, study)) return null;
+  const preliminary = facts?.studyId === study.studyId ? facts.preliminary : null;
+  if (study.assignment.readerId === actor.identity.id ||
+      preliminary?.authorId === actor.identity.id || preliminary?.reviewerId === actor.identity.id)
+    return context('assigned-reading');
+  if (workStudy && workStudy.studyId !== study.studyId &&
+      workStudy.patient.linkId === study.patient.linkId && workStudy.patient.patientId === study.patient.patientId &&
+      workStudy.patient.assigningAuthority === study.patient.assigningAuthority)
+    return context('same-patient-comparison', workStudy.studyId, study.studyId);
+  return context('worklist');
 }
 
 /** A's retention inputs, loaded by C2's store under the retention lock; C never builds them from request data. */

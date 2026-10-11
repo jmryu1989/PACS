@@ -3569,6 +3569,28 @@ function scanAuditWrites(sources = auditSources()) {
     && tokens.every((token, n) => token.kind !== 'word' || !WRITES.has(token.upper)
       || (token.upper === 'UPDATE' && ['FOR', 'KEY'].includes(tokens[n - 1]?.upper)));
   const isFragment = expression => containsSql(checker.getTypeAtLocation(expression));
+  // EMR-B1: SQL naming schema emr_access reaches the protected access ledger (its facts are A-parsed events, attributed by
+  // the ledger itself, not AuditLog action rows). Such SQL is the ledger adapter's own call only when it is one SELECT with
+  // no row-changing word, in the two adapter files, and every emr_access name is a call of a declared schema function
+  // (migration 20261008120000_emr_b); a direct table write, another function or another file is unresolved where it
+  // stands. No directory is skipped: the adapter's calls are read like every other raw call, interpolations included.
+  const EMR_LEDGER_FILES = new Set(['api/src/emr-runtime/store.ts', 'api/src/emr-runtime/manifest.ts']);
+  const EMR_LEDGER_FUNCTIONS = new Set(['append_reserved', 'chain_tail', 'entries_after', 'entry_for_event', 'storage_placement',
+    'resolve_member_identity', 'record_projection', 'place_hold', 'release_hold', 'holds_for', 'record_duty_request', 'duty_requests',
+    'clause_versions', 'expire_reserved', 'retention_view', 'record_order_fact', 'order_facts_for',
+    'enter_writer', 'fence_writers', 'lock_chain', 'bind_commit', 'commit_marker_for_slot', 'commit_marker_for_attempt']);
+  const namesLedger = tokens => tokens.some(token => (token.kind === 'word' || token.kind === 'ident') && token.name.toLowerCase() === 'emr_access');
+  function ledgerShape(tokens, file) {
+    if (!EMR_LEDGER_FILES.has(file)) return `emr_access SQL outside the EMR ledger adapter (${file})`;
+    if (!readsOnly(tokens)) return 'emr_access SQL that is not one SELECT without a row-changing word (a direct ledger write)';
+    for (const [index, token] of tokens.entries()) {
+      if ((token.kind !== 'word' && token.kind !== 'ident') || token.name.toLowerCase() !== 'emr_access') continue;
+      const [dot, name, open] = tokens.slice(index + 1, index + 4);
+      if (dot?.value !== '.' || name?.kind !== 'word' || !EMR_LEDGER_FUNCTIONS.has(name.name) || !opens(open) || open.value !== '(')
+        return `emr_access reached other than by a declared ledger function call (${[token, dot, name, open].map(shown).join(' ')})`;
+    }
+    return null;
+  }
   // Finite SQL alternatives retain the boundary between text and bound values. Concatenate before
   // lexing, so two innocent-looking fragments cannot hide a table name across their seam.
   class SqlProofError extends Error {}
@@ -3982,6 +4004,11 @@ function scanAuditWrites(sources = auditSources()) {
         && tokens.slice(index + 1, index + 5).some(next => next.kind === 'word'
           && ['FUNCTION', 'PROCEDURE', 'TRIGGER', 'RULE'].includes(next.upper)))))
       return note(call, 'raw call', 'unresolved', 'dynamic SQL execution is not modelled', 'W6');
+    const ledger = namesLedger(tokens);
+    if (ledger) {
+      const why = ledgerShape(tokens, repoPath(call.getSourceFile().fileName));
+      if (why) return note(call, 'raw SQL naming emr_access', 'unresolved', why, 'EMR-B1 ledger adapter');
+    }
     const names = tokens.some(token => (token.kind === 'ident' || token.kind === 'word') && token.name.toLowerCase() === 'auditlog');
     if (names) form = readsOnly(tokens) ? { read: true } : insertForm(tokens);
     const writes = form && !form.read && !form.error;
@@ -4016,6 +4043,8 @@ function scanAuditWrites(sources = auditSources()) {
       return note(call, kind, 'unresolved', problems.map(problem => problem.why).join('; '), [...new Set(problems.map(problem => problem.rule))].join('; '));
     }
     const valued = spans.length ? `every interpolation a value (${[...rules].join('; ')})` : 'no interpolation';
+    if (ledger && !names) return note(call, 'raw SQL naming emr_access', 'proven_non_audit',
+      `a declared EMR ledger function call of the ledger adapter, no AuditLog row; ${valued}`, 'EMR-B1 ledger adapter');
     if (!names) return note(call, 'raw call', 'proven_non_audit', `${parts.some(part => TABLE_WORDS.test(part))
       ? 'AuditLog is only in its strings or comments' : 'its SQL names no AuditLog'}; ${valued}`, 'W6');
     if (!form) return note(call, 'raw call', 'proven_non_audit', `AuditLog is only in its strings or comments; ${valued}`, 'W6');
@@ -4341,6 +4370,33 @@ function scanAuditWrites(sources = auditSources()) {
     const symbol = ts.isIdentifier(target) ? symbolAt(target) : ts.isPropertyAccessExpression(target) ? resolve(checker.getSymbolAtLocation(target.name)) : null;
     return heldClient(symbol);
   };
+  // A native, unexposed WeakMap uses its first argument only as an identity key. It cannot
+  // invoke that client. Values and escaped/replaced maps still follow the normal escape rule.
+  function identityMapKey(call, argument) {
+    if (!ts.isCallExpression(call) || call.arguments[0] !== argument) return false;
+    const method = bare(call.expression);
+    if (!ts.isPropertyAccessExpression(method) || !['set','get','has','delete'].includes(method.name.text)) return false;
+    const receiver = bare(method.expression);
+    const member = ts.isPropertyAccessExpression(receiver) && receiver.expression.kind === K.ThisKeyword;
+    if (!member && !ts.isIdentifier(receiver)) return false;
+    const symbol = symbolAt(member ? receiver.name : receiver), declaration = symbol?.declarations?.[0];
+    if (!declaration || symbol.declarations.length !== 1) return false;
+    if (member ? !ts.isPropertyDeclaration(declaration) || memberChanged(symbol)
+      : !isConst(declaration) || !!(ts.getCombinedModifierFlags(declaration.parent.parent) & ts.ModifierFlags.Export)) return false;
+    const created = declaration.initializer && bare(declaration.initializer);
+    if (!created || !ts.isNewExpression(created) || !ts.isIdentifier(created.expression) || created.expression.text !== 'WeakMap'
+      || created.arguments?.length || symbolAt(created.expression)?.declarations?.some(d => files.includes(d.getSourceFile()))) return false;
+    // A constructor/prototype handed elsewhere or overwritten can replace native
+    // key semantics. The source set must use the native constructor only via new.
+    const native = symbolAt(created.expression);
+    if (!native?.declarations?.some(lib) || !references(native).every(use =>
+      ts.isNewExpression(use.parent) && use.parent.expression === use)) return false;
+    return (member ? memberRefs(symbol).typed : references(symbol)).every(access => {
+      const held = outer(access), use = held.parent;
+      return ts.isPropertyAccessExpression(use) && use.expression === held && ['set','get','has','delete'].includes(use.name.text)
+        && ts.isCallExpression(use.parent) && use.parent.expression === use;
+    });
+  }
   function followClient(start) {
     let node = start;
     for (;;) {
@@ -4363,7 +4419,7 @@ function scanAuditWrites(sources = auditSources()) {
         && (clients.has(parent) || !ts.isIdentifier(parent.name)))
       || (ts.isBinaryExpression(parent) && parent.operatorToken.kind === K.EqualsToken && parent.right === node
         && (assignedClient(parent.left) || ts.isObjectLiteralExpression(bare(parent.left)) || ts.isArrayLiteralExpression(bare(parent.left))))
-      || (argument && receiving) || (owner && callsOf(owner, 'flow').escapes.length === 0) || inert(node)) return;
+      || (argument && (receiving || identityMapKey(parent,node))) || (owner && callsOf(owner, 'flow').escapes.length === 0) || inert(node)) return;
     note(start, 'client value', 'unresolved', `\`${snippet(start)}\`: ` + (argument ? `a client value handed to \`${snippet(parent.expression)}\`, which this check does not follow`
       : owner ? `a client value returned from ${describe(owner)}, which is handed on` : `a client value used in a ${K[parent.kind]}, where this check does not follow it`), 'SPEC-F01 client flow');
   }
@@ -5409,5 +5465,53 @@ export function run(tx: Prisma.TransactionClient) { tx.$queryRaw(h(Prisma.sql\`S
     const scan = scanAuditWrites([source]);
     assert.deepEqual(scan.unresolved, []);
     assert.deepEqual(scan.candidates.filter(entry => entry.kind === 'raw call').map(entry => entry.status), ['proven_non_audit']);
+  });
+});
+
+// ── EMR-B1: the protected access ledger's raw calls (no directory is skipped) ──
+test('native WeakMap transaction identity keys do not escape; map values, replacement and exposure do', () => {
+  const scan = (body, prefix='') => scanAuditWrites([{file:'api/src/syn-fixture/identity-map.ts',text:
+    `import { Prisma } from '@prisma/client'; ${prefix}
+    declare function opaque(value: any): any;
+    class Book { private readonly map = new WeakMap<object,any>();
+      run(tx: Prisma.TransactionClient) { ${body} }
+    }`}]);
+  assert.deepEqual(scan("this.map.set(tx, 'id'); this.map.get(tx); this.map.has(tx); this.map.delete(tx);").unresolved, []);
+  for (const body of ["this.map.set({}, tx);", "opaque(this.map); this.map.get(tx);",
+    "this.map.set = opaque; this.map.set(tx, 'id');"]) assert(scan(body).unresolved.length, body);
+  assert(scan("this.map.set(tx, 'id');", 'declare const WeakMap: any;').unresolved.length);
+  const moduleMap = (body, prefix = '', declaration = 'const') => scanAuditWrites([{
+    file: 'api/src/syn-fixture/module-identity-map.ts', text: `import { Prisma } from '@prisma/client';
+    ${prefix} declare function opaque(value: any): any;
+    ${declaration} cache = new WeakMap<object, any>();
+    export function use(tx: Prisma.TransactionClient) { ${body} }` }]);
+  assert.deepEqual(moduleMap("cache.set(tx, 'id'); cache.get(tx); cache.has(tx); cache.delete(tx);").unresolved, []);
+  for (const body of ["cache.set({}, tx);", "opaque(cache); cache.get(tx);", "cache.get = opaque; cache.get(tx);",
+    "WeakMap.prototype.get = opaque; cache.get(tx);", "const alias = cache; alias.get(tx);"])
+    assert(moduleMap(body).unresolved.length, body);
+  assert(moduleMap('cache.get(tx);', '', 'export const').unresolved.length, 'exported map is not private identity storage');
+  assert(moduleMap('cache.get(tx);', 'declare const WeakMap: any;').unresolved.length, 'shadow constructor is not native');
+});
+test('EMR-B1 ledger provenance: the adapter calls are read; any other emr_access SQL fails where it stands', async t => {
+  const product = scanAuditWrites();
+  const adapter = product.candidates.filter(entry => entry.kind === 'raw SQL naming emr_access');
+  assert.ok(adapter.length >= 15, `the adapter's raw calls are scanned (${adapter.length})`);
+  assert.deepEqual([...new Set(adapter.map(entry => entry.status))], ['proven_non_audit']);
+  assert.deepEqual([...new Set(adapter.map(entry => entry.file))].sort(), ['api/src/emr-runtime/manifest.ts', 'api/src/emr-runtime/store.ts']);
+  const head = "import { Prisma } from '@prisma/client';\nexport async function run(tx: Prisma.TransactionClient, id: string) {\n  ";
+  const adapterFile = 'api/src/emr-runtime/store.ts', other = 'api/src/syn-fixture/ledger.ts';
+  const cases = {
+    'a declared function call in the adapter': [adapterFile, 'await tx.$queryRaw`SELECT * FROM emr_access.entry_for_event(${id}::text)`;', 'proven_non_audit'],
+    'a direct ledger insert in the adapter': [adapterFile, 'await tx.$executeRaw`INSERT INTO emr_access.access_entry (sequence) VALUES (${1})`;', 'unresolved'],
+    'a direct ledger delete in the adapter': [adapterFile, 'await tx.$executeRaw`DELETE FROM emr_access.access_entry WHERE event_id = ${id}`;', 'unresolved'],
+    'an undeclared ledger function in the adapter': [adapterFile, 'await tx.$queryRaw`SELECT emr_access.require_placement()`;', 'unresolved'],
+    'a ledger table read in the adapter': [adapterFile, 'await tx.$queryRaw`SELECT * FROM emr_access.access_entry`;', 'unresolved'],
+    'a declared function call outside the adapter': [other, 'await tx.$queryRaw`SELECT * FROM emr_access.entry_for_event(${id}::text)`;', 'unresolved'],
+    'a quoted schema outside the adapter': [other, 'await tx.$queryRaw`SELECT * FROM "emr_access".chain_tail()`;', 'unresolved'],
+  };
+  for (const [name, [file, statement, status]] of Object.entries(cases)) await t.test(name, () => {
+    const scan = scanAuditWrites([{ file, text: head + statement + '\n}\n' }]);
+    assert.deepEqual(scan.candidates.filter(entry => entry.kind === 'raw SQL naming emr_access').map(entry => entry.status), [status]);
+    assert.equal(scan.unresolved.length, status === 'unresolved' ? 1 : 0);
   });
 });

@@ -1,7 +1,8 @@
 """TEST-S7-AUDIT-STORE-DB (REQ-S7-AUDIT-STORE -> RISK-S7-AUDIT-TAMPER, RISK-S7-AUDIT-LOSS; RA-1, RA-2, RA-4).
 
 On a disposable networkless postgres:16-alpine holding the API image's own migrations (KIN_TEST_API_IMAGE, prisma migrate
-deploy), the runtime role kin (owner and superuser, as in docker-compose.yml) keeps INSERT and SELECT on AuditLog while
+deploy), the installer role kin (owner and superuser; since EMR-B1 the API itself runs as kin_runtime, AS-04b) keeps
+INSERT and SELECT on AuditLog while
 UPDATE, DELETE and TRUNCATE are refused with SQLSTATE 42501; seals are made by the public seal function over pg_dump
 snapshots and judged by the public `ops_audit_integrity.py verify` on copies a superuser tampered with: rows, the guard,
 the digest computation itself (pg_catalog.sha256 replaced, or a public.sha256 on the search path), and the relation. A
@@ -43,6 +44,7 @@ import time
 import unittest
 from unittest.mock import patch
 import uuid
+import ops_product_transfer_fixture as transfer
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -178,17 +180,19 @@ class AuditStoreDB(unittest.TestCase):
         cls.label = "s7.audit.store.test=" + cls.token
         cls.work = Path(tempfile.mkdtemp(prefix="kin-audit-db-"))
         cls.db = "kin-audit-db-" + cls.token[:12]
+        cls.addClassCleanup(cls.cleanup_cluster)
         docker("run", "-d", "--name", cls.db, "--label", cls.label, "--network", "none",
                "--tmpfs", "/var/lib/postgresql/data", "-e", "POSTGRES_USER=kin", "-e", "POSTGRES_DB=kin",
                "-e", "POSTGRES_HOST_AUTH_METHOD=trust", POSTGRES)
         wait_ready(cls.db, "kin")
+        transfer.provision(cls.db, installer="kin")
         cls.db_image = docker("inspect", "--format", "{{.Image}}", cls.db).stdout.decode().strip()
         cls.deploy("kin")
         # every later database is a copy of this migrated, empty one (CREATE DATABASE ... TEMPLATE)
         cls.sql("CREATE DATABASE audit_template TEMPLATE kin")
 
     @classmethod
-    def tearDownClass(cls):
+    def cleanup_cluster(cls):
         for identity in docker("ps", "-aq", "--filter", "label=" + cls.label).stdout.decode().split():
             docker("rm", "-f", "-v", identity, check=False)
         shutil.rmtree(cls.work, ignore_errors=True)
@@ -311,6 +315,7 @@ class AuditStoreDB(unittest.TestCase):
         docker("run", "-d", "--name", name, "--label", self.label, "--network", "none", "--tmpfs", "/var/lib/postgresql/data",
                "-e", "POSTGRES_HOST_AUTH_METHOD=trust", self.db_image)
         wait_ready(name, "postgres")
+        transfer.provision(name)
         docker("exec", name, "createdb", "-U", "postgres", "kin")
         docker("exec", "-i", name, "pg_restore", "-U", "postgres", "-d", "kin", "--no-owner", "--no-privileges",
                "--exit-on-error", input=(folder / "kin.dump").read_bytes())
@@ -576,6 +581,29 @@ const { PrismaService } = require('/app/dist/prisma.service');
                 "DELETE FROM \"Institution\" WHERE id = 'syn-ref'; COMMIT;", db)
         self.assertEqual(self.ok("SELECT count(*) FROM \"Institution\" WHERE id = 'syn-ref'", db), ["0"])
 
+    def test_as04b_emr_runtime_role_holds_insert_and_select_only(self):
+        """AS-04b (EMR-B1): since the EMR migration the API runs as kin_runtime, not as the owner/superuser kin above.
+        Its privileges on AuditLog are INSERT and SELECT only; the trigger above still refuses the rest for every role,
+        and the runtime cannot reach the guard's off switches (session_replication_role, trigger disable)."""
+        db = self.new_database("as04b", rows=1)
+        (line,) = self.ok("SELECT concat_ws(',', has_table_privilege('kin_runtime', 'public.\"AuditLog\"', 'INSERT'),"
+                          " has_table_privilege('kin_runtime', 'public.\"AuditLog\"', 'SELECT'),"
+                          " has_table_privilege('kin_runtime', 'public.\"AuditLog\"', 'UPDATE'),"
+                          " has_table_privilege('kin_runtime', 'public.\"AuditLog\"', 'DELETE'),"
+                          " has_table_privilege('kin_runtime', 'public.\"AuditLog\"', 'TRUNCATE'),"
+                          " has_table_privilege('kin_runtime', 'public.\"AuditLog\"', 'TRIGGER'),"
+                          " has_parameter_privilege('kin_runtime', 'session_replication_role', 'SET'),"
+                          " (SELECT rolsuper FROM pg_roles WHERE rolname = 'kin_runtime'))", db)
+        self.assertEqual(line, "t,t,f,f,f,f,f,f")  # psql's text form of the eight booleans
+        self.ok("SET ROLE kin_runtime; INSERT INTO \"AuditLog\" (actor, action, target) VALUES ('syn-runtime', 'syn.runtime', 'syn')", db)
+        for statement in ('SET ROLE kin_runtime; UPDATE "AuditLog" SET detail = \'x\'',
+                          'SET ROLE kin_runtime; DELETE FROM "AuditLog"',
+                          'SET ROLE kin_runtime; SET session_replication_role = replica',
+                          'SET ROLE kin_runtime; ALTER TABLE "AuditLog" DISABLE TRIGGER USER'):
+            with self.subTest(statement):
+                self.assertEqual(self.refused(statement, db), "42501")
+        self.assertEqual(len(self.rows(db)), 2)
+
     def test_as05_dump_restore_carries_rows_and_guard(self):
         """AS-05 (AO-14, RS-06): the restore options of rehearse and the product transfer fixture."""
         db = self.new_database("as05", rows=6)
@@ -633,6 +661,53 @@ const { PrismaService } = require('/app/dist/prisma.service');
         self.assertEqual(self.refused("UPDATE \"AuditLog\" SET syn_probe = 'x'", "as06"), "42501")
 
     # ── RA-2 / RA-3: seal and verify, computed in the isolated verifier ──
+
+    def test_iv19_emr_tablespace_exports_and_verifier_mutants(self):
+        """REQ-EMR-19/20 -> RISK-EMR-LOSS/TAMPER -> TEST-EMR-B-F09-VERIFIER.
+
+        Real PostgreSQL exports exercise both audit scratch restores, including an AuditLog placed outside pg_default.
+        Removing either compatibility option is a runtime mutant, judged by an actual restore failure, not source text.
+        Deployment ownership/ACL/placement and same-pause state are separately required by the L19 rehearsal.
+        """
+        db = self.new_database("iv19", rows=3)
+        self.assertEqual(self.ok("SELECT pg_get_userbyid(spcowner) FROM pg_tablespace "
+                                 "WHERE spcname='kin_emr_access'"), ["kin_emr_owner"])
+        self.ok('ALTER TABLE public."AuditLog" SET TABLESPACE kin_emr_access; '
+                'ALTER TABLE emr_access.member_identity SET TABLESPACE kin_emr_access', db)
+        root = self.new_root()
+        folder, checkpoint, alarm = self.seal(db, root)
+        self.assertIsNone(alarm)
+        self.assertEqual(checkpoint["count"], 3)
+        manifest = json.loads((folder / "manifest.json").read_text())
+        source = audit.snapshot_source(folder, manifest)
+        code, report = audit.verify(folder / audit.CHECKPOINT, source)
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report["guard"]["state"], "present")
+
+        original = audit.VERIFIER_SCRIPT
+        for name, mutated in (
+            ("F09-AUDIT-ROWS", original.replace(" --no-tablespaces", "", 1)),
+            ("F09-AUDIT-SCHEMA", "".join(original.rsplit(" --no-tablespaces", 1))),
+        ):
+            with self.subTest(mutant=name), patch.object(audit, "VERIFIER_SCRIPT", mutated):
+                code, report = audit.verify(folder / audit.CHECKPOINT, source)
+                self.assertEqual(code, 2, report)
+                self.assertTrue(report["cleanup"]["confirmed"], report)
+            print("EMR_VERIFIER_MUTANT " + json.dumps({"id": name, "killed": code == 2,
+                "expected": "input_error", "exit": code, "cleanup_confirmed": report["cleanup"]["confirmed"],
+                "before_sha256": hashlib.sha256(original.encode()).hexdigest(),
+                "mutated_sha256": hashlib.sha256(mutated.encode()).hexdigest(),
+                "restored_sha256": hashlib.sha256(audit.VERIFIER_SCRIPT.encode()).hexdigest()}), flush=True)
+
+        raw = source.path.read_bytes()
+        try:
+            for contents in (raw + b"tampered", raw[:len(raw) // 2]):
+                source.path.write_bytes(contents)
+                code, report = audit.verify(folder / audit.CHECKPOINT, source)
+                self.assertEqual(code, 2, report)
+                self.assertTrue(report["cleanup"]["confirmed"], report)
+        finally:
+            source.path.write_bytes(raw)
 
     def test_iv01_clean_database_verifies_in_a_networkless_verifier(self):
         """IV-DB-01 (IV-01, IV-02, IV-16)."""

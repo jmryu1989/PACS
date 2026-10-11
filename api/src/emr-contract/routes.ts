@@ -63,9 +63,9 @@ const groups: readonly (RouteContract & { routes: readonly string[] })[] = [
     routes: ['PATCH studies/:uid', 'DELETE studies/:uid'] },
   { kinds: ['patient-match', 'study-correction', 'order', 'received-order', 'report-head', 'private-draft'], operation: 'write', causes: ['user-view'],
     routes: ['POST match', 'POST unmatch'] },
-  { kinds: ['tech-note'], operation: 'read', causes: ['user-view', 'background-fetch'],
+  { kinds: ['tech-note', 'operational-note'], operation: 'read', causes: ['user-view', 'background-fetch'],
     routes: ['GET studies/:uid/tech-note', 'GET studies/:uid/tech-note/history'] },
-  { kinds: ['tech-note'], operation: 'write', causes: ['user-view'],
+  { kinds: ['tech-note', 'operational-note'], operation: 'write', causes: ['user-view'],
     routes: ['POST studies/:uid/tech-note'] },
   { kinds: ['private-draft', 'report-head', 'report-evidence'], operation: 'write', causes: ['user-view', 'background-fetch'],
     routes: ['PUT studies/:uid/report'] },
@@ -154,6 +154,16 @@ export function routeContract(route: string): RouteContract {
 
 export function classifyRoute(route: string): readonly RecordKind[] {
   return routeContract(route).kinds;
+}
+
+/** In-process server work that is not an HTTP request (EMR-B1). The executor is the service identity of that job, never
+ * the member it affects; its events carry `not-applicable: in-process-service` instead of an invented client address.
+ * Closed: a new background job adds its own entry here with the records it touches. */
+export const INTERNAL_SURFACES: Readonly<Record<string, RouteContract>> = freeze({
+  'service:auth-session-sweep': { kinds: ['authentication-session'], operation: 'auth', causes: ['service-job'] },
+});
+for (const surface of Object.keys(INTERNAL_SURFACES)) {
+  if (Object.prototype.hasOwnProperty.call(ROUTE_CONTRACTS, surface)) throw new Error('Internal surface shadows an HTTP route');
 }
 
 /** Not Nest routes: unit N must bind actual SOP/frame manifests, not just auth_request success. */

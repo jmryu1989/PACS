@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { ACCESS_ACTIONS, AccessAction, AccessEvent, NON_RECORD_TARGETS, parseAccessEvent } from '../emr-contract/access-event';
+import { ACCESS_ACTIONS, AUTH_ACTIONS, AccessEvent, NON_RECORD_TARGETS, parseAccessEvent } from '../emr-contract/access-event';
 import { RECORD_CLASSIFICATION, RecordKind } from '../emr-contract/classification';
 import { STATUTORY_MINIMUM } from '../emr-contract/legal-basis';
 import { RetentionRecord, civilPeriodEnd, parseRetentionRecord } from '../emr-contract/lawful-defaults';
@@ -90,6 +90,8 @@ export const ACCESS_STREAM_RULE = freeze({
   // when 시행규칙 제16조② (above 제1177호) or the 고시 after 2023-245 is promulgated; a fixed period there is
   // applied as the longer of that period and this rule.
   'change-history': { clauseIds: [STATUTORY_MINIMUM.access.clauseId, 'medical:23.4'], years: STATUTORY_MINIMUM.access.years, withRecord: true },
+  // 예측: 의료법 제23조④ 위임 보건복지부령이 로그인·로그아웃을 포함한 접속기록의 고정 보존기간을
+  // 정하면 viewing과 non-record도 재검토한다. 확정 전에는 현재 접속기록 하한을 적용한다.
   // D-1 ②: 제공·표시·출력·다운로드. 안전성 확보조치 기준 제8조①2 two-year floor; longer only under a hold.
   viewing: { clauseIds: [STATUTORY_MINIMUM.access.clauseId], years: STATUTORY_MINIMUM.access.years, withRecord: false },
   // D-8: 안전성 확보조치 기준 제5조③ "최소 3년간" for granting, changing or revoking access rights.
@@ -99,12 +101,13 @@ export const ACCESS_STREAM_RULE = freeze({
 });
 
 export interface AccessFacts {
-  action: AccessAction; result: string; targets: readonly { kind: RecordKind; recordId: string | null }[];
+  action: AccessEvent['action']; result: string; targets: readonly { kind: RecordKind; recordId: string | null }[];
 }
-const actions = Object.values(ACCESS_ACTIONS).flat() as readonly AccessAction[];
+const actions = [...Object.values(ACCESS_ACTIONS).flat(), ...AUTH_ACTIONS] as readonly AccessEvent['action'][];
 const kinds = Object.keys(RECORD_CLASSIFICATION) as RecordKind[];
 /** One closed decision per event. Every successful write-family action changes a record's state (서명·공개·취소·
- * Addendum·보존 조치 alike), so it is change history; a read/export of a record is viewing. */
+ * Addendum·보존 조치 alike), so it is change history; a read/export of a record is viewing. Authentication actions are neither
+ * writes nor reads/exports and have no targets, so they fall through to non-record (the existing session rule). */
 export function accessStream(input: AccessFacts): AccessStream {
   const action = choice(input.action, actions), result = string(input.result);
   if (!Array.isArray(input.targets)) refuse('AccessStreamFactsRequired');

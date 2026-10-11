@@ -55,6 +55,8 @@ export function clauseVersionAt(versions: readonly ClauseVersion[], at: string):
 export const HOLD_DUTY_CLAUSES = freeze({
   'privacy:36.2': { law: 'privacy', article: '36.2',
     authority: 'personal-information-controller', condition: 'duty-active' },
+  'nhi:96-4.1': { law: 'nhi', article: '96-4.1',
+    authority: 'medical-institution', condition: 'duty-active' },
 });
 export const STATUTORY_MINIMUM = freeze({
   chart: { clauseId: 'medical-rules:15.1.2', years: 10, basis: '의료법 시행규칙 제15조①2', scope: '진료기록부', verification: '본문 확인' },

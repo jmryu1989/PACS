@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
-import { ACCESS_ACTIONS, identity, parseAccessEvent, patientLink, sealAccessEvent, STATUTORY_ACT } from '../emr-contract/access-event';
-import type { AccessAction, AccessEvent, AccessTarget, EvidenceFact, ImmutableIdentity, PatientLinkSnapshot } from '../emr-contract/access-event';
+import { ACCESS_ACTIONS, AUTH_ACTIONS, identity, parseAccessEvent, patientLink, sealAccessEvent, statutoryAct } from '../emr-contract/access-event';
+import type { AccessEvent, AccessTarget, EvidenceFact, ImmutableIdentity, PatientLinkSnapshot } from '../emr-contract/access-event';
 import { retentionDisposition, verifiedRecord } from '../emr-contract/classification';
 import type { ResolvedRecord } from '../emr-contract/classification';
 import { civilPeriodEnd } from '../emr-contract/lawful-defaults';
@@ -179,7 +179,7 @@ function requireScope(authority: AuditAuthority, scope: RosterScope): Readonly<A
 const CLIENT_AUTHORITY_KEYS = freeze(['auditor', 'admin', 'role', 'roles', 'scope', 'scopes', 'grant', 'grantId', 'institution',
   'institutionId', 'managingInstitution', 'actingInstitution']);
 const QUERY_KEYS = freeze(['patient', 'studyId', 'recordId', 'versionId', 'actorId', 'address', 'from', 'to', 'actions', 'results', 'limit', 'after']);
-const ALL_ACTIONS = Object.values(ACCESS_ACTIONS).flat() as readonly AccessAction[];
+const ALL_ACTIONS = [...Object.values(ACCESS_ACTIONS).flat(), ...AUTH_ACTIONS] as readonly AccessEvent['action'][];
 export const EVENT_RESULTS = freeze(['prepared', 'succeeded', 'aborted', 'refused', 'failed', 'reported'] as const);
 export type EventResult = typeof EVENT_RESULTS[number];
 export const PAGE_LIMIT = freeze({ default: 50, max: 500 });
@@ -189,7 +189,7 @@ export interface InvestigationFilters {
   studyId: string | null; recordId: string | null; versionId: string | null; actorId: string | null;
   /** The trusted-proxy address the event recorded (incident scoping, 안전성 기준 제6조①2). */
   address: string | null;
-  from: string; to: string; actions: readonly AccessAction[] | null; results: readonly EventResult[] | null;
+  from: string; to: string; actions: readonly AccessEvent['action'][] | null; results: readonly EventResult[] | null;
 }
 export interface InvestigationPlan {
   planId: string; mode: 'view' | 'export'; institutionId: string; auditor: ImmutableIdentity;
@@ -291,7 +291,7 @@ export interface ReplayTarget {
 }
 export interface ReplayEntry {
   sequence: number; eventId: string; occurredAt: string; committedAt: string; surface: string;
-  action: AccessAction; statutoryAct: string; result: AccessEvent['result']; cause: AccessEvent['cause']; executor: AccessEvent['executor'];
+  action: AccessEvent['action']; statutoryAct: string; result: AccessEvent['result']; cause: AccessEvent['cause']; executor: AccessEvent['executor'];
   channel: 'online' | 'in-process-service' | 'unresolved';
   actor: AccessEvent['userId']; rolesAtTime: AccessEvent['rolesAtTime'];
   actingInstitution: AccessEvent['actingInstitution']; managingInstitution: AccessEvent['managingInstitution'];
@@ -336,7 +336,7 @@ function replayEntry(sequence: number, committedAt: string, event: Readonly<Acce
   currentLink: CurrentPatientLink | undefined): ReplayEntry {
   return {
     sequence, eventId: event.eventId, occurredAt: event.occurredAt, committedAt, surface: event.surface,
-    action: event.action, statutoryAct: STATUTORY_ACT[event.action], result: event.result, cause: event.cause, executor: event.executor,
+    action: event.action, statutoryAct: statutoryAct(event), result: event.result, cause: event.cause, executor: event.executor,
     channel: event.trustedProxyIp.status === 'known' ? 'online' : event.trustedProxyIp.status === 'not-applicable' ? 'in-process-service' : 'unresolved',
     actor: event.userId, rolesAtTime: event.rolesAtTime, actingInstitution: event.actingInstitution, managingInstitution: event.managingInstitution,
     targets: targets.map(t => replayTarget(t, currentLink)), requestId: event.requestId, relatedEventId: event.relatedEventId,

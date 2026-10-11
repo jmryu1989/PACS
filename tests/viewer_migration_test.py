@@ -473,6 +473,7 @@ report(async()=>{
             if ops.run(['docker','exec',cls.db,'pg_isready','-h','127.0.0.1','-U','postgres'],check=False).returncode==0:break
             time.sleep(.2)
         else: raise RuntimeError('Isolated database did not start')
+        transfer.provision(cls.db)
         cls.sources=[(ROOT/path).read_bytes() for path in transfer.MIGRATIONS]
         cls.source_hashes=[hashlib.sha256(raw).hexdigest() for raw in cls.sources]
         cls.uid='2.25.'+str(uuid.uuid4().int)
@@ -548,7 +549,7 @@ IF refused IS DISTINCT FROM '{constraint}' THEN RAISE EXCEPTION 'SYNTHETIC refus
             path=Path(folder)/'synthetic.dump'
             with path.open('wb') as out:subprocess.run(['docker','exec',self.db,'pg_dump','-U','postgres','-Fc','kin'],stdout=out,check=True,timeout=30)
             with path.open('rb') as incoming:subprocess.run(['docker','exec','-i',self.db,'pg_restore','-U','postgres','-d','foreign_restore',
-                '--no-owner','--no-privileges','--exit-on-error'],stdin=incoming,check=True,timeout=30)
+                '--exit-on-error'],stdin=incoming,check=True,timeout=30)
         self.assertEqual(transfer.observe(self.db,'foreign_restore'),frozen)
         self.sql('foreign_restore',f'DELETE FROM "StudyState" WHERE uid={transfer.sql_literal(self.uid)}',success=False)
         self.sql('foreign_restore','DELETE FROM "ViewerItem"',success=False)

@@ -711,7 +711,31 @@ def test_manifest_shape():
           and manifest["live"]["delivery"]["running_proxy"] == "untouched")
 
 
+def test_emr_provision_before_installer_migration():
+    previous = rollout.run
+    calls = []
+    def command(argv, **kwargs):
+        calls.append(argv)
+        return "db\nemr-provision\napi-migrate\napi\n" if argv[-2:] == ["config", "--services"] else "completed"
+    try:
+        rollout.run = command
+        rollout.apply_migration(HERE)
+        check("EMR provisions before installer migration", [c[-1] for c in calls[1:]] == ["emr-provision", "api-migrate"])
+        calls.clear()
+        def failing(argv, **kwargs):
+            if argv[-1] == "emr-provision":
+                calls.append(argv)
+                raise rollout.Refuse("synthetic provision failure")
+            return command(argv, **kwargs)
+        rollout.run = failing
+        refuses("failed EMR provision prevents migration", lambda: rollout.apply_migration(HERE), "provision failure")
+        check("runtime never runs migration after failed provision", not any(c[-1] == "api-migrate" for c in calls))
+    finally:
+        rollout.run = previous
+
+
 def main():
+    test_emr_provision_before_installer_migration()
     test_allowlist_keeps_the_accepted_path()
     test_allowlist_new_refusals()
     test_network_absent_is_typed_only()
@@ -731,4 +755,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-

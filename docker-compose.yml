@@ -64,6 +64,9 @@ services:
     image: postgres:16-alpine
     container_name: kin-db
     restart: unless-stopped
+    # EMR-B1: 접속원장(emr_access)은 별도 볼륨의 전용 tablespace에 둔다. CREATE TABLESPACE가 쓰려면 그 디렉터리가
+    # postgres 소유여야 하므로 root로 시작하는 이 단계에서 준비하고, 이미지의 원래 entrypoint로 서버를 연다.
+    entrypoint: ["sh", "-c", "install -d -o postgres -g postgres -m 700 /var/lib/postgresql/emr-access/ts && exec docker-entrypoint.sh postgres"]
     environment:
       POSTGRES_USER: kin
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD를 .env에 설정하세요}
@@ -72,11 +75,108 @@ services:
       - "5432:5432"   # DBeaver 등으로 직접 들여다보기 위해 열어둔다
     volumes:
       - pg-db:/var/lib/postgresql/data
+      - emr-access:/var/lib/postgresql/emr-access
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U kin"]
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # ── EMR-B1 설치 단계: 역할·비밀·전용 tablespace (설치 자격, migration transaction 밖) ──
+  # 같은 SQL을 `python scripts/emr-compose.py sql provision`이 출력하고 `check`가 이 본문과 대조한다. 비밀은 환경에서만
+  # 받는다(.env의 KIN_EMR_RUNTIME_PASSWORD, URL에 그대로 쓰는 24자 이상의 [A-Za-z0-9._~-]). 매번 같은 결과로 다시 적용된다.
+  emr-provision:
+    image: postgres:16-alpine
+    container_name: kin-emr-provision
+    restart: "no"
+    environment:
+      PGHOST: db
+      PGUSER: kin
+      PGDATABASE: kin
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD를 .env에 설정하세요}
+      KIN_EMR_RUNTIME_PASSWORD: ${KIN_EMR_RUNTIME_PASSWORD:?KIN_EMR_RUNTIME_PASSWORD를 .env에 설정하세요}
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        psql -X <<'KIN_EMR_SQL'
+        -- EMR-B provisioning, run with the installer credential outside any migration transaction (CREATE TABLESPACE cannot
+        -- run inside one). Idempotent: every run re-asserts the roles, their attributes, the secrets given in the environment
+        -- and the dedicated placement, and fails on any elevated attribute or membership. Secrets are never printed.
+        \set QUIET on
+        \set ON_ERROR_STOP on
+        \if :{?tablespace_location}
+        \else
+        \set tablespace_location /var/lib/postgresql/emr-access/ts
+        \endif
+        SELECT format('CREATE ROLE %I NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT', r)
+          FROM unnest(ARRAY['kin_emr_owner', 'kin_runtime', 'kin_emr_reader', 'kin_emr_retention']) AS r
+          WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = r) \gexec
+        SELECT format('ALTER ROLE %I NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT', r)
+          FROM unnest(ARRAY['kin_emr_owner', 'kin_runtime', 'kin_emr_reader', 'kin_emr_retention']) AS r \gexec
+        ALTER ROLE kin_emr_owner NOLOGIN;
+        \getenv runtime_password KIN_EMR_RUNTIME_PASSWORD
+        \if :{?runtime_password}
+        \else
+        \warn 'KIN_EMR_RUNTIME_PASSWORD is required'
+        SELECT kin_emr_runtime_password_required;
+        \endif
+        SELECT CASE WHEN length(:'runtime_password') >= 24 AND :'runtime_password' ~ '\A[A-Za-z0-9._~-]+\Z'
+          THEN format('ALTER ROLE kin_runtime LOGIN PASSWORD %L', :'runtime_password') ELSE 'SELECT kin_runtime_password_unusable' END \gexec
+        \getenv reader_password KIN_EMR_READER_PASSWORD
+        \if :{?reader_password}
+        SELECT CASE WHEN length(:'reader_password') >= 24 AND :'reader_password' ~ '\A[A-Za-z0-9._~-]+\Z'
+          THEN format('ALTER ROLE kin_emr_reader LOGIN PASSWORD %L', :'reader_password') ELSE 'SELECT kin_emr_reader_password_unusable' END \gexec
+        \else
+        ALTER ROLE kin_emr_reader NOLOGIN;
+        \endif
+        \getenv retention_password KIN_EMR_RETENTION_PASSWORD
+        \if :{?retention_password}
+        SELECT CASE WHEN length(:'retention_password') >= 24 AND :'retention_password' ~ '\A[A-Za-z0-9._~-]+\Z'
+          THEN format('ALTER ROLE kin_emr_retention LOGIN PASSWORD %L', :'retention_password') ELSE 'SELECT kin_emr_retention_password_unusable' END \gexec
+        \else
+        ALTER ROLE kin_emr_retention NOLOGIN;
+        \endif
+        SELECT format('CREATE TABLESPACE kin_emr_access OWNER kin_emr_owner LOCATION %L', :'tablespace_location')
+          WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_tablespace WHERE spcname = 'kin_emr_access') \gexec
+        ALTER TABLESPACE kin_emr_access OWNER TO kin_emr_owner;
+        SELECT CASE WHEN pg_catalog.pg_tablespace_location(oid) = :'tablespace_location' THEN 'SELECT 1 AS kin_emr_tablespace_checked'
+          ELSE 'SELECT kin_emr_tablespace_location_differs' END FROM pg_catalog.pg_tablespace WHERE spcname = 'kin_emr_access' \gexec
+        -- A database migrated before the tablespace existed: move the ledger (tables carry their TOAST; indexes move apart).
+        SELECT format('ALTER TABLE emr_access.%I SET TABLESPACE kin_emr_access', c.relname)
+          FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = 'emr_access' AND c.relkind = 'r'
+            AND c.reltablespace IS DISTINCT FROM (SELECT t.oid FROM pg_catalog.pg_tablespace t WHERE t.spcname = 'kin_emr_access') \gexec
+        SELECT format('ALTER INDEX emr_access.%I SET TABLESPACE kin_emr_access', c.relname)
+          FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = 'emr_access' AND c.relkind = 'i'
+            AND c.reltablespace IS DISTINCT FROM (SELECT t.oid FROM pg_catalog.pg_tablespace t WHERE t.spcname = 'kin_emr_access') \gexec
+        SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname IN ('kin_emr_owner', 'kin_runtime', 'kin_emr_reader', 'kin_emr_retention')
+            AND (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls))
+          OR EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m JOIN pg_catalog.pg_roles g ON g.oid = m.roleid
+            JOIN pg_catalog.pg_roles u ON u.oid = m.member WHERE g.rolname IN ('kin_emr_owner', 'kin_runtime', 'kin_emr_reader', 'kin_emr_retention') OR u.rolname IN ('kin_emr_owner', 'kin_runtime', 'kin_emr_reader', 'kin_emr_retention'))
+          OR EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'kin_emr_owner' AND rolcanlogin)
+          OR pg_catalog.has_parameter_privilege('kin_runtime', 'session_replication_role', 'SET')
+          THEN 'SELECT kin_emr_role_check_failed' ELSE 'SELECT 1 AS kin_emr_roles_checked' END \gexec
+        KIN_EMR_SQL
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # ── EMR-B1 이관: 설치 자격은 이 일회성 프로세스에만 있다. API 서버는 이 자격을 받지 않는다 ──
+  api-migrate:
+    build:
+      context: ./api
+      target: development
+    container_name: kin-api-migrate
+    restart: "no"
+    command: ["./node_modules/.bin/prisma", "migrate", "deploy"]
+    environment:
+      DATABASE_URL: postgresql://kin:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD를 .env에 설정하세요}@db:5432/kin
+    depends_on:
+      emr-provision:
+        condition: service_completed_successfully
+    volumes:
+      - ./api/prisma:/app/prisma:ro
 
   # ── 인증: Keycloak (OIDC) ──
   # 렐름·클라이언트·개발용 계정은 keycloak/kin-realm.json 에서 자동으로 들어온다.
@@ -129,7 +229,10 @@ services:
     container_name: kin-api
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql://kin:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD를 .env에 설정하세요}@db:5432/kin
+      # EMR-B1: 서버는 최소권한 runtime 역할로만 접속한다(업무 DML과 검증된 원장 append 실행만; 소유·superuser·이관 자격 없음).
+      DATABASE_URL: postgresql://kin_runtime:${KIN_EMR_RUNTIME_PASSWORD:?KIN_EMR_RUNTIME_PASSWORD를 .env에 설정하세요}@db:5432/kin
+      # 원장 seal·보호 실패 저널: DB 밖의 이 서버 전용 볼륨(DB 역할은 쓸 수 없다).
+      KIN_EMR_STATE_DIR: /var/lib/kin-emr
       # 인증. iss는 브라우저가 보는 주소, JWKS는 도커 네트워크 안 주소 — 서로 다르다.
       AUTH_REQUIRED: "true"
       # iss는 **브라우저가 본 주소**다 — 토큰에 그렇게 박혀 오기 때문.
@@ -158,6 +261,8 @@ services:
     depends_on:
       db:
         condition: service_healthy   # DB는 준비될 때까지 기다린다 (Prisma가 바로 붙는다)
+      api-migrate:
+        condition: service_completed_successfully   # 검토된 migration과 설치 단계가 끝난 DB에서만 시작한다
       keycloak:
         condition: service_started   # Keycloak은 기다리지 않는다 (첫 요청 때 필요)
       orthanc:
@@ -167,8 +272,11 @@ services:
       # node_modules는 마운트하지 않는다 (윈도우 파일과 리눅스 바이너리가 섞이면 깨진다)
       - ./api/src:/app/src
       - ./api/prisma:/app/prisma
+      - emr-state:/var/lib/kin-emr
 
 volumes:
   orthanc-db:
   pg-db:
   proxy-certs:
+  emr-access:   # EMR-B1 원장 tablespace (DB 데이터 볼륨과 별도)
+  emr-state:    # EMR-B1 원장 seal·실패 저널 (API 전용, DB 밖)

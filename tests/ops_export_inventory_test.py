@@ -158,6 +158,29 @@ class ExportTests(unittest.TestCase):
         self.assertTrue(result['inventory_verified'])
         self.assertFalse(result['source_services_ready'])
 
+    def test_emr_state_roles_and_catalog_must_share_the_database_snapshot(self):
+        self.snapshot['emr'] = {'same_pause': True, 'tablespace': 'kin_emr_access'}
+        for name in export.EMR_FILES:
+            write(self.root / 'snapshot' / name, b'synthetic emr ' + name.encode())
+            record = export.file_record(self.root / 'snapshot' / name)
+            for field in ('bytes', 'sha256'):
+                self.snapshot[field][name] = record[field]
+        self.refresh()
+        self.assertTrue(self.verify()['emr_backup_bound'])
+        self.snapshot['emr']['same_pause'] = False
+        self.refresh()
+        with self.assertRaises(ValueError): self.verify()
+        self.snapshot['emr']['same_pause'] = True
+        self.refresh()
+        for name in export.EMR_FILES:
+            record = self.body['files'].pop('snapshot/' + name)
+            self.seal()
+            with self.subTest(name=name), self.assertRaises(ValueError): self.verify()
+            self.body['files']['snapshot/' + name] = record
+        self.snapshot.pop('emr')
+        self.refresh()
+        with self.assertRaises(ValueError): self.verify()
+
     def test_03_each_required_component_is_required(self):
         for name in list(self.body['files']):
             with self.subTest(name=name):

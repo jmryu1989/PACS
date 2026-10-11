@@ -10,7 +10,7 @@ import { verifiedRecord } from '../emr-contract/classification';
 import { retentionState } from '../emr-contract/lawful-defaults';
 import {
   CommitPlan, CommitReceipt, FailureJournalPort, IngressContext, LedgerEntry, ReportStorePort, RetainedInputs, StudyFacts, VerifiedActor,
-  AdoptedEvent, institutionAllows, parseAdoptedEvent, parseCommitReceipt, parseStudyFacts, parseVerifiedActor,
+  AdoptedEvent, ReportWorkContext, workContextFor, institutionAllows, parseAdoptedEvent, parseCommitReceipt, parseStudyFacts, parseVerifiedActor,
 } from './contract';
 import { signedTransition } from './retention';
 
@@ -70,7 +70,7 @@ export function parseReportCommand(input: unknown): Readonly<ReportCommand> {
 }
 
 /** Server facts for one command; C2 loads them under the report lock. */
-export interface PlanContext {
+export interface PlanContext extends ReportWorkContext {
   actor: VerifiedActor;
   study: StudyFacts;
   facts: ReportFacts;
@@ -132,7 +132,7 @@ function accessEntry(action: AccessAction, command: ReportCommand, ctx: PlanCont
   const targetKind = command.action === 'save' ? 'private-draft' : command.action === 'release' ? 'assignment' : 'report-version';
   const event = parseAccessEvent({ formatVersion: 1, surface: SURFACE[command.action], eventId: `access:${command.eventId}:${action}`,
     userId: known({ ...ctx.actor.identity }), rolesAtTime: known([...ctx.actor.roles]), actingInstitution: known(ctx.actor.institutionId),
-    managingInstitution: known(ctx.study.managingInstitutionId), occurredAt, trustedProxyIp: ctx.ingress.ip, cause: 'user-view', executor: 'member',
+    managingInstitution: known(ctx.study.managingInstitutionId), occurredAt, trustedProxyIp: ctx.ingress.ip, cause: 'user-view', context: workContextFor(ctx), executor: 'member',
     targets: [{ kind: targetKind, patientLinkSnapshot: known({ ...ctx.study.patient }), studyId: known(ctx.study.studyId), recordId: known(command.recordId),
       versionId: known(versionId) }], action, result: 'succeeded', requestId: ctx.ingress.requestId, auditLinkId: newAuditLinkId(), relatedEventId: null });
   return freeze({ kind: 'access-v1' as const, act: STATUTORY_ACT[action], event });
@@ -307,7 +307,7 @@ export function techNoteSigning(input: VerifiedActor): 'author-signs' | 'unsigne
   if (actor.roles.includes('admin')) return 'unsigned-operational';
   return refuse('TechNoteAuthorRefused');
 }
-export interface TechNoteContext {
+export interface TechNoteContext extends ReportWorkContext {
   actor: VerifiedActor;
   study: StudyFacts;
   recordId: string;
@@ -333,7 +333,7 @@ export function planTechNoteRevision(context: TechNoteContext, input: unknown): 
   const entry = (at: string) => {
     const event = parseAccessEvent({ formatVersion: 1, surface: 'POST studies/:uid/tech-note', eventId: `access:${eventId}:${action}`,
       userId: known({ ...actor.identity }), rolesAtTime: known([...actor.roles]), actingInstitution: known(actor.institutionId),
-      managingInstitution: known(study.managingInstitutionId), occurredAt: at, trustedProxyIp: context.ingress.ip, cause: 'user-view', executor: 'member',
+      managingInstitution: known(study.managingInstitutionId), occurredAt: at, trustedProxyIp: context.ingress.ip, cause: 'user-view', context: workContextFor({ ...context, actor, study }), executor: 'member',
       targets: [{ kind: 'tech-note', patientLinkSnapshot: known({ ...study.patient }), studyId: known(study.studyId), recordId: known(string(context.recordId)),
         versionId: known(versionId) }], action, result: 'succeeded', requestId: context.ingress.requestId, auditLinkId: newAuditLinkId(), relatedEventId: null });
     return freeze({ kind: 'access-v1' as const, act: STATUTORY_ACT[action], event });

@@ -1237,6 +1237,10 @@ def verify_backup_components(backup_text, manifest, max_age_seconds=None):
     if body.get("git_sha") != manifest["baseline_sha"] or body.get("git_dirty") is not False:
         raise Refuse("Backup does not describe the clean pinned baseline")
     components = manifest["backup"]["components"]
+    if "emr" in body:
+        if body["emr"].get("same_pause") is not True or body["emr"].get("tablespace") != "kin_emr_access" or not {
+            "cluster-roles.sql", "emr-state.tgz", "emr-catalog.json"}.issubset(components):
+            raise Refuse("EMR backup must bind roles, catalog and external state to the same database pause")
     if set(body.get("sha256") or {}) != set(components) or set(body.get("bytes") or {}) != set(components):
         raise Refuse("Backup component manifest is incomplete")
     for name in components:
@@ -1357,6 +1361,13 @@ def start_services(repo):
 
 
 def apply_migration(repo):
+    services = set(run(compose(repo) + ["config", "--services"], cwd=repo).splitlines())
+    if services & {"emr-provision", "api-migrate"}:
+        if not {"emr-provision", "api-migrate"}.issubset(services):
+            raise Refuse("EMR provisioning and installer migration services must both be present")
+        provision = run(compose(repo) + ["run", "--rm", "--no-deps", "emr-provision"], cwd=repo, timeout=300)
+        migrated = run(compose(repo) + ["run", "--rm", "--no-deps", "api-migrate"], cwd=repo, timeout=1800)
+        return provision + "\n" + migrated
     return run(compose(repo) + ["run", "--rm", "--no-deps", "--entrypoint", "sh", "api", "-c",
                                 "./node_modules/.bin/prisma migrate deploy"], cwd=repo, timeout=1800)
 

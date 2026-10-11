@@ -2,7 +2,8 @@
 # PREPARED, NOT DISPATCHED. Installing this file is a separately reviewed product change; see
 # rehearsal-contract.md. It follows the repository's existing isolated-hosted pattern:
 # ubuntu-24.04, dispatch only, contents: read, pinned action SHAs, persist-credentials false,
-# artifact upload. No product image, no clinical fixture, no credential, no main-server contact.
+# artifact upload. EMR-B also builds this checkout's image and uses disposable PostgreSQL/state volumes,
+# generated synthetic credentials, no published port and no main-server contact.
 name: Stage-2 option-B rollout rehearsal (synthetic)
 
 on:
@@ -28,7 +29,7 @@ env:
   BUNDLE: rehearsal-bundle
   # I7: the manifest's own digest is a literal here, so the checksum file cannot be swapped
   # together with the files it lists.
-  BUNDLE_MANIFEST_SHA256: bf5a5e52d934d37c69049e20cea4fb672dd719821b9629c17bf963754712020d
+  BUNDLE_MANIFEST_SHA256: 10dab5bbee57d2d45cbec11339c2d637f86ef46c82f37a797cc9fc8296bc36b0
 
 jobs:
   rehearsal:
@@ -157,6 +158,15 @@ jobs:
           if missing or failed or malformed:
               raise SystemExit("rehearsal incomplete: " + json.dumps(summary))
           PY
+
+      - name: EMR-B provision, installer migration, runtime and same-point backup restore
+        if: always()
+        run: |
+          python3 -m venv "$RUNNER_TEMP/emr-b-python"
+          "$RUNNER_TEMP/emr-b-python/bin/python" -m pip install PyYAML==6.0.2
+          docker pull postgres:16-alpine
+          docker pull orthancteam/orthanc:24.12.0
+          python3 scripts/record-run.py --run-dir "$RUNNER_TEMP/receipts/emr-b-restore" --tree api/src/emr-runtime --tree api/src/emr-contract --tree api/prisma --file scripts/ops_backup.py --file scripts/ops_audit_integrity.py --file scripts/emr-compose.py --file api/Dockerfile --file api/start-production.sh --file tests/emr/b/live.py -- "$RUNNER_TEMP/emr-b-python/bin/python" -B scripts/run-tests.py --plan rehearsal-bundle/rehearsal/emr-b-restore-plan.json
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()

@@ -107,6 +107,53 @@ class PreflightTests(unittest.TestCase):
             bad = copy.deepcopy(good); bad["Config"][key] = value
             with self.assertRaises(RuntimeError): deploy.check_running_api(bad, request()["previous_api_image"])
 
+    def test_05b_emr_running_api_holds_only_its_state_volume_and_runtime_role(self):
+        """EMR-B1: after the storage is installed the API runs with exactly its state volume and the runtime role."""
+        good = container()
+        good["Mounts"] = [{"Type": "volume", "Name": "kin_emr-state", "Destination": deploy.EMR_STATE, "RW": True}]
+        good["Config"]["Env"] += ["DATABASE_URL=postgresql://kin_runtime:fixture@db:5432/kin", "KIN_EMR_STATE_DIR=" + deploy.EMR_STATE]
+        deploy.check_running_api(good, request()["previous_api_image"], emr=True)
+        with self.assertRaises(RuntimeError): deploy.check_running_api(good, request()["previous_api_image"])
+        for mounts in ([], [{**good["Mounts"][0], "Type": "bind"}], [{**good["Mounts"][0], "Destination": "/app"}],
+                       good["Mounts"] * 2, [{**good["Mounts"][0], "RW": False}]):
+            bad = copy.deepcopy(good); bad["Mounts"] = mounts
+            with self.subTest(mounts=mounts), self.assertRaises(RuntimeError):
+                deploy.check_running_api(bad, request()["previous_api_image"], emr=True)
+        for env in (["DATABASE_URL=postgresql://kin:fixture@db:5432/kin"], ["POSTGRES_PASSWORD=fixture"],
+                    ["KIN_EMR_STATE_DIR=/tmp"], ["DATABASE_URL=not a url::"]):
+            bad = copy.deepcopy(good); bad["Config"]["Env"] = good["Config"]["Env"] + env
+            with self.subTest(env=env[0].split("=")[0]), self.assertRaises(RuntimeError):
+                deploy.check_running_api(bad, request()["previous_api_image"], emr=True)
+
+    def test_03b_emr_introduction_is_never_api_only(self):
+        """EMR-B1: a target that brings the EMR storage is refused before any other compatibility check passes it."""
+        with tempfile.TemporaryDirectory() as folder, patch.object(ops, "ROOT", Path(folder)):
+            def git(*args):
+                return subprocess.check_output(["git", *args], cwd=folder, stderr=subprocess.PIPE).decode().strip()
+            git("init"); git("config", "user.email", "fixture@example.invalid"); git("config", "user.name", "Fixture")
+            for relative in deploy.PROTECTED:
+                path = Path(folder) / relative
+                if "." not in path.name:
+                    path = path / "fixture.txt"
+                path.parent.mkdir(parents=True, exist_ok=True); path.write_text("fixture\n")
+            (Path(folder) / "api/app.txt").write_text("old\n")
+            git("add", "--all"); git("commit", "-m", "previous")
+            body = request(); body["previous_sha"] = git("rev-parse", "HEAD")
+            migration = Path(folder) / deploy.EMR_MIGRATION
+            migration.parent.mkdir(parents=True); migration.write_text("-- synthetic\n")
+            git("add", "--all"); git("commit", "-m", "emr")
+            body["target_sha"] = git("rev-parse", "HEAD")
+            git("checkout", "--detach", body["previous_sha"])
+            with self.assertRaisesRegex(RuntimeError, "EMR-B storage requires provisioning"): deploy.check_repository(body)
+            self.assertFalse(deploy.has_emr_storage(body["previous_sha"]))
+            self.assertTrue(deploy.has_emr_storage(body["target_sha"]))
+            # Both sides already carry it: the ordinary API-only boundary decides (here an unchanged one).
+            git("checkout", "--detach", body["target_sha"])
+            (Path(folder) / "api/app.txt").write_text("new\n"); git("add", "api/app.txt"); git("commit", "-m", "next")
+            later = dict(body, previous_sha=body["target_sha"], target_sha=git("rev-parse", "HEAD"))
+            git("checkout", "--detach", later["previous_sha"])
+            self.assertEqual(len(deploy.check_repository(later)), 2)
+
     def test_06_backup_lock_contention_and_failure_cleanup(self):
         with tempfile.TemporaryDirectory() as folder, patch.object(ops, "ROOT", Path(folder)):
             with ops.lock(), patch.object(ops, "require_local_docker") as probe:

@@ -206,6 +206,21 @@ function fixedPrototypeComparison(node, file) {
   return codePoint(file, node.expression.name.getStart(file));
 }
 
+function constructorWithoutReturn(node, file) {
+  if (!ts.isConstructorDeclaration(node) || !node.body) return null;
+  let returns = false;
+  const visit = child => {
+    if (ts.isReturnStatement(child)) { returns = true; return; }
+    // Nested callbacks and classes return from their own scope, never replace
+    // the outer constructor's instance. Use TS's scope nodes rather than text.
+    if (ts.isFunctionLike(child) || ts.isClassLike(child)) return;
+    ts.forEachChild(child, visit);
+  };
+  visit(node.body);
+  const keyword = node.getChildren(file).find(child => child.kind === ts.SyntaxKind.ConstructorKeyword);
+  return !returns && keyword ? codePoint(file, keyword.getStart(file)) : null;
+}
+
 function answer(request) {
   if (loadError) throw loadError;
   if (typeof request.classPropertySource === 'string') {
@@ -256,9 +271,11 @@ function answer(request) {
     if (!file) continue;
     const broken = program.getSyntacticDiagnostics(file).length > 0;
     const found = [];
-    const loads = [], comparisons = [];
+    const loads = [], comparisons = [], constructors = [];
     const visit = node => {
       if (!broken) {
+        const constructor = constructorWithoutReturn(node, file);
+        if (constructor !== null) constructors.push(constructor);
         const load = relativeLoad(node, file, program, checker, known, files);
         if (load) loads.push(load);
         const comparison = fixedPrototypeComparison(node, file);
@@ -274,7 +291,7 @@ function answer(request) {
     };
     visit(file);
     if (found.length) out[at.slice(SRC.length + 1)] = found;
-    contracts[at.slice(SRC.length + 1)] = { relative_loads: loads, prototype_comparisons: comparisons };
+    contracts[at.slice(SRC.length + 1)] = { relative_loads: loads, prototype_comparisons: comparisons, constructors_without_return: constructors };
   }
   const declared = {};
   for (const [name, symbol] of decorator) {

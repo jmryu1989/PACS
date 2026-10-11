@@ -25,7 +25,7 @@ D590 소비자: B 접속 원장·신원 context·공통 선언, C 판독 작성�
 
 `RECORD_CLASSIFICATION[kind].retention.statutoryMinimum`이 기간의 단일 원천이다. B의 서버 초기 구성은 `composeEmrAdapters({stored, legal, purpose, clinical})`를 프로세스당 한 번 실행한다. private binder로 생성한 동결 capability만 각 resolver가 인정하며 두 번째 구성은 `EmrAdaptersAlreadyComposed`로 거절한다. 요청별 reader 등록 함수는 공개하지 않는다. 등록 뒤 원 reader 메서드를 교체해도 capability는 바뀌지 않는다. 구성 함수를 요청 handler가 최초로 호출하지 않도록 B의 시작 순서와 TypeScript symbol 검사로 결속해야 한다. A 자체가 Prisma·HTTP·서버 시작을 구현하지는 않는다.
 
-`resolveStoredRecord()`는 등록된 capability와 opaque ID로 저장 모델·행 사실·수명주기 사건을 확인한다. 호출자의 model/kind/기간 선언과 복제·역직렬화한 검증 결과는 거절한다. `retentionDisposition()`이 법정/목적/원기록/접속 처리 경로를 도출한다. 실제 적용 class와 `clauseId` 중 최장 기간을 사용한다. 사람이 서명하는 판독은 10년이며 임상 답변·협진은 처방전이 아니다.
+`resolveStoredRecord()`는 등록된 capability와 opaque ID로 저장 모델·행 사실·수명주기 사건을 확인한다. 호출자의 model/kind/기간 선언과 복제·역직렬화한 검증 결과는 거절한다. `retentionDisposition()`이 법정/목적/원기록/접속 처리 경로를 도출한다. 실제 적용 class와 `clauseId` 중 최장 기간을 사용한다. 사람이 서명하는 판독은 영상 소견서로 5년이며(D-19) 임상 답변·협진은 처방전이 아니다.
 
 | 법정 종류 | 기간 | clauseId (의료법 시행규칙 제15조①) |
 |---|---|---|
@@ -37,22 +37,26 @@ D590 소비자: B 접속 원장·신원 context·공통 선언, C 판독 작성�
 | 방사선 사진·영상 및 그 소견서 | 5년 | `medical-rules:15.1.6` |
 | 간호 / 조산 기록부 | 각각 5년 | `medical-rules:15.1.7` / `.8` |
 | 진단서 등 부본 | 3년, 종류별 구분 | `medical-rules:15.1.9` |
-| 접속기록 | 각 사건 2년 | `access-safety:8.1.2` (안전성 확보조치 기준) |
+| 접속기록 | 열람 스트림: 각 사건 2년(첫날 산입, hold·법적 근거로만 연장) / 변경 이력 스트림: 변경한 기록의 보존 종료까지(D-1) | `access-safety:8.1.2` (안전성 확보조치 기준), 의료법 시행규칙 제16조①2·② |
 
 | 제품 내용 | 적용 계약 |
 |---|---|
-| 판독 현재판·불변판·수정·Addendum | 검사/영상 소견 + 진료기록부 후보, 최장 10년 |
-| 임상 Q&A·협진·Critical Result 본문·Finding·임상 비교 설명·Order | 진료기록부 10년 |
+| 판독 현재판·불변판·수정·Addendum·단말 서명 원본 | 영상 소견서·검사소견 5년(D-19, 제15조①6·5). 진료기록부 10년은 기록된 차트 편입(`chart-incorporation`)으로만 |
+| 임상 Q&A·협진·Critical Result 본문·ACK·Finding | 영상 소견서에 부속한 기록 5년(D-19) |
+| 임상 비교 설명 | 영상·검사 소견 5년(D-24 §4) |
+| Order 등록 / 원기재 / 수신 사본 | 출처 지시를 참조한 등록은 목적 자료, 의사의 직접 지시 원기재는 10년, 수신 사본은 검증된 기록별 의무 집합(D-24 §4) |
+| 차트 편입 사실(병원 EMR 편입·치료 의사 차트 기재) | 진료기록부 10년, 편입한 판을 편입 기록이 존속하는 동안 보존. 단순 비교 링크 제외 |
 | 영상·측정·Key Image·수동 SR·외부 SR/SEG·취득 메타데이터 | 검사/영상 5년. 서명 대상 판독 본문은 위 판독 분류 적용 |
-| Tech Note | 검사소견기록 후보 5년, 독립 단위 |
+| Tech Note(방사선사 본인 작성) | 작성자 본인 키 서명판(D-3), 검사소견기록 5년, 독립 단위 |
+| 관리자 운영 메모(같은 화면) | `operational-note`: 서명 없는 운영 문구, 목적 종료(작성자 삭제) |
 | 영상/워크리스트 요청·환자 연결 | 환자 명부 5년 |
-| 임상 인계 완료 ACK | 수신자·고정판을 검증한 `CriticalResultEvent`를 CVR의 part로 보존, 진료기록부 10년 |
-| 별도 접속·단순 전송 영수증 | 각 사건 2년. ACK API의 재전송 영수증도 실제 임상 ACK 원본과 별개 |
+| 임상 인계 완료 ACK | 수신자·고정판을 검증한 `CriticalResultEvent`를 CVR의 part로 보존, CVR과 같은 5년 |
+| 별도 접속·단순 전송 영수증 | 접속기록은 각 사건 2년, 단순 전송·수신 영수증의 2년은 제품 정책. ACK API의 재전송 영수증도 실제 임상 ACK 원본과 별개 |
 | 고정 원기록의 출력·다운로드·썸네일·서명 증거 | `source-record`, 원기록을 따라 파기, 독립 기산 금지 |
 | 개인 초안·dictation | 해당 결과판 서명·명시적 discard 또는 그 intent를 불가능하게 만든 저장 사건에서 목적 종료 |
 | 배치·분류 자유 문구·양식·개인 설정·기타 운영 자료 | 아래 닫힌 목적 종료 사건, 임상 5/10년을 부여하지 않음 |
 
-혼합 모델 목록은 가능한 내용의 영향 조사 목록이다. 저장소 어댑터는 같은 테이블의 모든 종류를 합치지 않고 저장 행의 discriminator와 실제 임상 채택·기재 사건을 확인한다. 예를 들어 단순 ViewerJob 배치는 목적 자료, 임상 설명을 기재한 판은 10년이다. StudyState 메타데이터 정정은 동일 메타데이터 단위의 `correction` part로 검사/영상 5년을 적용하고 이전 판과 `orig`를 보존한다. 환자 매칭은 명부, 배정은 목적 자료 경로다. Order의 `product-authored`는 새 제품 서명을 요구하고 `received-ris`는 검증된 수신 사건·원시스템·원서명 증거에 결속한 `received-order`로 10년을 적용한다. 수신 사건에 제품 서명을 만들어 붙이지 않는다. `source-record`인 썸네일·출력 등은 독립 시계가 없다. 접속기록은 `accessRetention(parsed event)`, 단순 전달은 `deliveryRetention(resolved)`로만 만들고 판독과 섞지 않는다. 임상 ACK는 새 독립 단위로 만들지 않고 같은 CVR에 추가한다.
+혼합 모델 목록은 가능한 내용의 영향 조사 목록이다. 저장소 어댑터는 같은 테이블의 모든 종류를 합치지 않고 저장 행의 discriminator와 실제 임상 채택·기재 사건을 확인한다. 예를 들어 단순 ViewerJob 배치는 목적 자료, 임상 설명을 기재한 판은 영상·검사 소견 5년이다. 기록된 차트 편입은 별도의 10년 retaining unit이다. StudyState 메타데이터 정정은 동일 메타데이터 단위의 `correction` part로 검사/영상 5년을 적용하고 이전 판과 `orig`를 보존한다. 환자 매칭은 명부, 배정은 목적 자료 경로다. Order는 origin만으로 분류하지 않는다. 원 지시 출처가 결속된 등록은 목적 자료, 의사의 코드 선택만으로 내린 직접 지시는 `order-indication`(원기재 10년), 처음부터 검사내용으로 작성한 임상정보는 `exam-clinical-info`(작성자 서명, 5년)이다. `received-order`는 검증된 피드와 기록별 의무 집합을 따른다. 수신 사건에 제품 서명을 만들어 붙이지 않는다. `source-record`인 썸네일·출력 등은 독립 시계가 없다. 접속기록은 `accessRetention(parsed event)`, 단순 전달은 `deliveryRetention(resolved)`로만 만들고 판독과 섞지 않는다. 임상 ACK는 새 독립 단위로 만들지 않고 같은 CVR에 추가한다.
 
 이 어댑터는 HTTP 입력이 아니다. 서버가 저장된 모델을 찾아 행을 읽고 서명 검증·원내용 해시·행위·시각·원판·구성요소와 업무 사건을 대조한다. `verified`/`clinicalEntry` 같은 검증 사실을 클라이언트 body에서 복사하면 계약 위반이다. 저장 후 재적재는 `reloadRetentionRecord()`/`reloadPurposeRecord()`를 사용한다. 서버에 한 번 결속된 reader로 실제 저장된 part와 hold를 재검증한다. `reloadLegalHolds(recordId)`는 `listHolds()`의 명시적 `complete:true`와 hold ID 전수 목록을 요구하고, 각 holdId의 근거·범위·등록 당시 판본·유효 조건·해제 사건을 읽는다. 활성·종료·해제된 hold를 모두 복원하며 현재 시각으로 재등록하거나 시계를 옮기지 않는다. 빈 배열을 직접 넣거나 인증된 집합을 다른 기록에 붙이면 `HoldSetIncomplete`다. 새 기록 생성도 저장 hold 목록 조회를 생략하지 않는다. 실제 DB 조회·암호 검증은 B/C/H가 이행한다.
 
@@ -72,16 +76,17 @@ D590 소비자: B 접속 원장·신원 context·공통 선언, C 판독 작성�
 
 B/H의 저장소 어댑터는 같은 잠금 안에서 역참조 전수 조회·모든 구성요소 및 법적 의무의 현재 상태를 확인하여 `complete/revision/checkedAt`을 공급한다. `destroyAtExpiry()`는 null/undefined/불완전 graph를 거절하고 `withRetentionLock()`이 다시 읽은 최신 snapshot의 내용 전체를 요청 snapshot과 대조한다. 잠금은 시작 원장·삭제·완료까지 유지한다. 잠금 안에서 저장 hold 전수 집합도 다시 읽어 누락·오래된 해제 상태를 거절한다. 기존 단위의 part/연장/hold는 `withRetentionChange()` 안에서 순수 결정을 실행하고 반환 값을 같은 잠금에서 저장한다. 새 편입도 구성요소와 역참조 변경 전체를 같은 잠금에 참여시킨다. `destroyedAt`은 B가 실제 완료/복구 상태에서 확인하는 파기 사실이며, 파기된 기록에는 hold·part를 추가할 수 없다. 조회 실패나 오래된 cache를 빈 목록으로 바꾸면 안 된다. 빈 참조는 완전한 조사 결과 0건일 때만 유효하다. 접속 단위에는 원환자 기록의 참조 의존성을 넣지 않으며 자기 hold/시계만 검사한다. 공통 만료 시점에는 **편입 기록 → 구성요소** 순으로 한 파기 작업을 수행한다. 같이 만료한 직접 편입 기록이 남으면 구성요소 파기는 `IncorporatorStillPresent`로 거절하므로 H가 선행 기록을 파기한 뒤 같은 시점에 재시도한다. 다른 부분만 참조한 후속 기록에서 편입 기록이 물려받은 더 긴 기한은 이 순서 검사로 재전파하지 않는다. 이 경우 구성요소는 자신의 직접 보존기한에 파기하고 관계없는 부분의 보존은 계속한다. 완료 tombstone의 참조는 보존을 연장하지 않는다. 파기 시에는 해당 대상을 보존하는 편입 기록의 완전한 목록·해시를 검사하되 대상 자신의 이미 소실된 outgoing 구성요소는 대상 파기의 근거가 아니다. 무관한 manifest 결함이나 자신의 구성요소 손실 때문에 기록 자체의 hold·적법한 Addendum을 거절하지 않는다. A의 순수 시험은 실제 DB의 잠금·역참조 전수성을 증명하지 않는다.
 
-기간은 **Asia/Seoul 기관 역일**로 민법 제157조·제159조·제160조에 따라 계산한다. 초일은 불산입하되 오전 0시에 시작하면 산입한다. 연 단위는 역으로 계산하고 해당일이 없으면 그 월 말일의 종료까지 보존한다. `civilPeriodEnd()`/`retentionDeadline()`은 **말일이 완전히 끝난 직후 00:00 KST 경계**를 UTC로 반환한다. 파기는 이 경계 이상에서만 가능하다. 경계 직전 1ms도 보존 중이다. 별도 유예기간은 없다.
+기간은 **Asia/Seoul 기관 역일**로 계산한다. 법령이 부과한 의무가 지속되는 기간이므로 행정기본법 제6조②1에 따라 **기산 사건이 속한 날을 첫날로 산입**하고(D-21, 시각 무관), 민법 제159·160조에 따라 말일 종료로 만료하며 토·공휴일에도 그 날 만료한다(제6조②2). 기산 사건은 `PERIOD_START` 표로 고정한다(서명판 시각·취득/수신·연결 사건·접속 사건·연장 결정·hold 근거 기간). 5일 파기 기한도 첫날을 산입한다. 연 단위는 역으로 계산하고 해당일이 없으면 그 월 말일의 종료까지 보존한다. `civilPeriodEnd()`/`retentionDeadline()`은 **말일이 완전히 끝난 직후 00:00 KST 경계**를 UTC로 반환한다. 파기는 이 경계 이상에서만 가능하다. 경계 직전 1ms도 보존 중이다. 별도 유예기간은 없다.
 
 상호 편입으로 단일 파기가 교착되는 경우 H는 `destroyBatchAtExpiry({append, withRetentionBatchLock}, {units, requestedAt, graph}, destroySet)`을 사용한다. 과거 판 편입은 계속 허용한다. 계약은 전체 집합의 최신 graph·전수 hold·완전한 판 목록·각 기한을 먼저 확인하고, 묶음 밖의 미파기 편입 기록이 있으면 시작 원장/삭제 전에 거절한다. 강연결요소(SCC)는 한 집합으로 유지하고 축약 그래프에서 **편입 기록 → 구성요소** 순서로 처리한다. 각 SCC의 모든 시작 원장이 내구성을 얻은 뒤 `destroySet`을 정확히 한 번 호출하며 모든 구성원의 완료를 함께 확인한다. H는 그 집합의 모든 판·복제본·복구 가능한 백업을 원자적으로 파기해야 하며 구성원별 독립 삭제로 구현하면 안 된다. 실패 시 해당 SCC의 실패 원장을 남기고 다음 SCC로 진행하지 않는다. 시작/완료 원장 저장 실패의 복구와 재시도는 실제 저장소의 tombstone·원장 대조로 수행한다. A는 콜백 계약을 검사하며 실제 저장소 원자성을 구현하거나 증명하지 않는다.
 
 | 시작 (KST) / 기간 | 보존 말일 종료 → 최초 파기 가능 경계 (KST) | 반환 UTC |
 |---|---|---|
 | 2026-10-05 00:00 / 5년 | 2031-10-04 종료 → 10-05 00:00 | 2031-10-04T15:00:00.000Z |
-| 2026-10-05 00:01 또는 23:59 / 5년 | 2031-10-05 종료 → 10-06 00:00 | 2031-10-05T15:00:00.000Z |
+| 2026-10-05 00:01 또는 23:59 / 5년 | 2031-10-04 종료 → 10-05 00:00 (첫날 산입) | 2031-10-04T15:00:00.000Z |
+| 2026-10-09 12:00 / 5년 | 2031-10-08 종료 → 10-09 00:00 | 2031-10-08T15:00:00.000Z |
 | 2024-02-29 00:00 또는 23:59 / 5년 | 2029-02-28 종료 → 03-01 00:00 | 2029-02-28T15:00:00.000Z |
-| 2026-10-05 09:00 판독 + 2036-09-01 09:00 Addendum / 각 10년 | 전체 단위 2046-09-01 종료 → 09-02 00:00 | 2046-09-01T15:00:00.000Z |
+| 2026-10-05 09:00 판독 + 2031-09-02 09:00 Addendum / 각 5년 | 전체 단위 2036-09-01 종료 → 09-02 00:00 | 2036-09-01T15:00:00.000Z |
 
 ## 연장·보존 명령·목적 종료와 파기
 
@@ -148,6 +153,35 @@ B의 접속 저장소는 업무 기록과 **별도 저장소**이며 제23조④
 
 `provideAfterDurableEvent()`는 내구성 있는 제공 사건 전에는 본문을 보내지 않는다. 성공 쓰기/서명/공개/접속 append는 함께 commit하고 실패 사건은 업무 rollback과 별개 저널에 남긴다. B의 합성 실환경 시험은 런타임 UPDATE/DELETE/trigger 해제 거절, 저장소 분리, 위변조·누락 탐지, retention 역할의 미만료 삭제 거절, 삭제/checkpoint 중단 원자성·복구를 검증해야 한다. A의 해시 체인 순수 시험은 DB 권한의 실제 이행을 증명하지 않는다.
 
+## EMR-B1: 접속사건 v2·SQL 저장 분류·단말 경계
+
+`formatVersion: 1`의 필드·규칙·체인 바이트는 그대로다. `parseAccessEvent()`는 getter를 실행하지 않고 판본을 읽어 v1과 v2를 나누며 v2는 닫힌 두 분기다.
+
+- **`online-auth`**: `auth.login`·`auth.entry`·`auth.logout`·`auth.session.expired`(법정행위 전부 none, `AUTH_STATUTORY_ACT`). `targets`는 항상 빈 배열이며 임상 대상을 합성하지 않는다. 실행자(`userId`)와 영향 신원(`affectedIdentity`)을 분리한다: 회원 자신의 로그인·종료는 같은 신원, 관리자의 isolation은 다른 회원, 세션 수거는 서비스 신원과 그 회원이다(`service:auth-session-sweep`, `INTERNAL_SURFACES`, IP는 `not-applicable: in-process-service`). 검증 후 거절한 로그인은 known 신원을 남기고 검증 전 거절은 unresolved다. 역할은 확인된 빈 배열도 known이며 DB 권한 판(`rightsVersion`)을 함께 둔다. 기관 미승인 회원의 인증 성공은 `actingInstitution: not-applicable / not-approved`로 임상 접근 성공과 구별한다. 성공은 신뢰 프록시 IP·관리기관·비인증 난수 세션 참조(`authref:<UUID>`)가 필요하고 실패에는 세션이 없다. `auth`의 `endCause`·`failureCause`·`trigger`는 닫힌 값이며 trigger는 재인증 종료에만 있다. 원사건 ID는 서버가 만든 UUID다.
+- **`verified-offline`**: 단말에서 실제로 일어난 임상 행위. IP는 항상 `unresolved: offline`(재접속 IP는 `relatedEventId`의 별도 수신사건), 기기·kid·사전권한·시간 근거/불확실도·기기 순서·대상 manifest·실제 signedAt을 요구하며 이 사실은 서버 시작 시 한 번 구성하는 `composeOfflineReceiptVerifier()`의 결과와 같아야 한다. 본문의 `offline`/`verified` 플래그는 근거가 아니다. C의 실제 키·서명 검증이 없는 현재는 아무것도 구성하지 않으므로 이 분기는 `OfflineVerificationUnsupported`로 거절된다(B2가 main.ts에서 구성 위치를 정한다).
+
+B의 SQL 전용 저장(schema `emr_access`, 전용 tablespace)은 Prisma 모델이 아니므로 `SQL_STORAGE_CLASSIFICATION`에 따로 분류하고 실제 catalog와 양방향 대조한다. 법적 보존 의무·요청(`legal-duty`)과 검토된 조문 판본 이력(`legal-reference`)은 원기록을 따르는 증빙이다(`source-record`). 저장된 접속사건은 `emr_access.access_entry` 모델로 A의 고정 접속 매핑과 같은 사실을 돌려준다.
+
+**접속기록 보존 규칙(지휘 D727/D731, 법령 등록부 최종 §5-11·D-1, Astra 교차 확인 이견 0):** 원장은 두 스트림이다. 열람 스트림은 모든 사건(열람·비기록 사건·변경 사건의 2년 잔여)을 사건일부터 2년(첫날 산입) 보존하고 hold·법적 근거가 있을 때만 더 길게 두며, 기존 prefix 삭제·checkpoint·외부 seal을 쓴다. 변경 이력 스트림은 기록을 바꾼 기재·추가기재·수정 사건을 대상 기록의 보존 종료까지 두고 그 기록의 파기 묶음에서 H가 함께 파기한다(B1에는 그 삭제 경로가 없다). 행에는 만료 시각을 저장하지 않고 `statutory_act`와 대상 기록·판 ID(`emr_access.access_target`)를 결속하며, 기한은 파기 검토 때 `accessDeadline(stream, …)` 하나로 계산한다. A의 `accessStreams`·`statutoryAct`·`sealAccessEvent(…, stream)`·`verifyAccessChain(…, stream)`이 스트림 경계를 고정한다(history payload kind는 `history`). 권한 이력 3년은 B1 저장이 아니다(D-8).
+
+**B1 seal 동시성 신뢰 계약(D867):** 사건 ID와 transaction attempt ID를 분리하고, COMMIT 전 외부의 정확한 chain/slot/hash/generation 예약을 같은 transaction의 `commit_marker`와 대조한다. 실행 중 `reconcileCommitted()`는 확정 사실만 봉인하며, 부재 판정은 모든 API·retention writer가 공유하는 DB fence 뒤 `recoverAtStart()`에서 수행한다. expiry는 자기 checkpoint 봉인 후 성공하고 다음 job은 restart 없이 실행한다. 두 stream과 실패 journal은 같은 커널 잠금 소유 writer가 기록한다. 폐기·대체 proof 및 tail-only replay는 settlement frontier의 generation/high-water로 거절한다. 응답 전달 전에 정상 만료된 사건은 본문 없는 임시 확정 결속으로 receipt를 확인하고 응답 확인 시 정리한다. 다른 프로세스의 시작 fence는 이미 COMMIT된 응답의 전달을 취소하지 않으므로 아직 응답하지 않은 최소 hash/위치 결속은 유지한다. 본문·환자/판독 내용은 이 결속에 복제하지 않는다.
+
+**명명된 한계 B1-ROLLBACK-WITNESS:** B1은 외부에 확정된 history의 변경·삭제·재순서화, 예약되지 않은 unsealed history와 폐기·대체된 proof의 재생을 거절하며, 응답 불명 복구에는 정직한 DB의 transaction finality를 사용한다. DB marker는 독립 COMMIT 증거가 아니다. 특권 공격자가 COMMIT 행·head·marker까지 포함한 DB 전체를 되돌리는 공격(보호 상태 전체를 함께 되돌리는 경우 포함)은 B1 보장 밖이다. 필요한 대책은 독립적이고 rollback 불가능한 finality witness 또는 off-host monotonic high-water이며 Stage 9 운영 강화로 보류한다. 외부 백업은 계속 OFF다.
+
+**명명된 한계 B1-PRESERVE-REFUSE:** 진전 보장은 유한 장애 이후의 정상 도달 상태에 적용한다. F02의 journal·격리 원문 합산 64 MiB 초과, 중간 journal 손상, 외부 seal 소실과 변조는 원문 보존 후 거절하며 관리자·개인정보 보호책임자에게만 알린다. 의사 확인창과 자동 삭제는 추가하지 않는다. Windows 순수 모델은 Linux 커널 잠금·fsync·다중 프로세스 내구성을 대신 증명하지 않는다.
+
+REQ-EMR-06/19 → RISK-EMR-06/19 → C05/C06/C07/C13, `tests/emr/b/seal_checker.cjs` I1–I4 및 L02/L03/L04/L05/L08/L18/L19. 새 migration은 기존 적용 migration을 고치지 않고 marker/ACL을 추가하며 같은 pause의 DB·roles·tablespace·보호 상태 복원에 포함한다.
+
+**동시 열람 지연(D874):** 공유 DB writer fence를 얻은 intent들은 head lock 전에 한 번의 내구 저장으로 묶는다. 정확한 슬롯 예약은 계속 각 transaction의 head lock 아래 COMMIT 전에 내구화한다. Linux writer는 `flock`에 상속한 열린 파일 설명을 직접 유지하고 동기 쓰기·fsync 후 닫으며, 예약마다 Node 프로세스를 새로 실행하지 않는다. 이미 COMMIT된 receipt 요청만 묶어 봉인하고, 검증한 stream frontier와 정확한 예약이 같을 때만 최신 외부 상태에 반영한다. 무관한 intent 변경은 재검증을 유발하지 않고, frontier가 달라졌으면 새 DB snapshot을 검증한다. 미확정 요청을 그룹에 포함하거나 완료를 기다리지 않는다. append timeout 15초·maxWait 10초는 유지한다. REQ-D874-EMR-B-THROUGHPUT → RISK-READING-RECEIPT-LATENCY → C19·L03/L03b·M36 및 그룹 응답 edge를 포함한 I1–I4 checker로 결속한다.
+
+**D-18 업무 문맥(예측 의존):** 모든 접속사건은 서버가 업무 문맥(배정 판독·동일 환자 과거 비교·임상 요청·worklist·background fetch·서비스 작업·인증)에서 자동 결속한 `context`를 가지며 해시 대상이다. 문맥 밖 접근만 한 줄 사유(`out-of-context`, 200자 이하, 줄바꿈 금지)를 요구한다. 사유는 권한이 아니다.
+
+**D-3 Tech Note:** 방사선사 본인 Tech Note는 작성자 본인 키 서명판(`tech-note`, 서명 필수)이고 관리자 메모는 서명 없는 운영 문구(`operational-note`)다. 저장 행의 작성자 역할(`authorRole`)로 구분하고 요청 플래그로 정하지 않는다. 서명 연결은 C다.
+
+D596 단말 경계(`TERMINAL_RECORD_BOUNDARY`, 저장은 C의 단말 대기열): 미전송 서명 원본(`offline-signed-original`)은 서명자 소유, 실제 signedAt부터의 판독/진료기록 기간이며 private-draft의 목적 종료로 지워지지 않고 수신·재인증 시각으로 기산하지 않는다(`TerminalOriginalTimeRefused`). 복구·재검토 작업본(`recovery-working-copy`)은 같은 회원 소유·원본 사건 참조·목적 ID를 가진 목적 자료이며 검증된 원본 수신(`original-received`) 또는 소유자 폐기에서 끝난다. 상태는 `pending-transmission`·`received-unverified`·`verified`·`verification-refused`다.
+
+**A low 이관 상태(B1):** L5-02의 B 부분은 `emr_access.clause_version`(설치 자격만 기록, 수정·삭제 거절)과 결속 reader의 전체 hold 목록(활성·종료·해제, `complete:true`, 조회 실패는 빈 집합이 아님)이다. F/H/I 부분은 남는다. L5-05(main 단일 구성·AST 허용 위치 이동)는 B2, L5-01·03·04·06은 C/F/H/I 그대로다.
+
 ## 서명·키·검증 범위
 
 의료인의 임상 기재는 제22조①·제23조①에 따라 각 작성판을 서명한다. Tech Note·초안 등 인간 작성 작업 자료는 실제 임상 기재 시 서명을 요구한다. 서명 강화 설정은 `required`/`clinical-entry-only` 종류만 허용하며, 장치 영상·썸네일·접속기록·시스템 작업 등에 사람이 하지 않는 서명을 요구할 수 없다. source-evidence는 원서명/출처를 보존하고 신규 임상 의견은 별도 임상 종류로 저장한다. 외부 AI 자료는 원문을 재계산·재해석하지 않는다.
@@ -180,3 +214,22 @@ REQ-EMR-01/17/19 → RISK-EMR-01/17/19 → TEST-EMR-01/17/19-A: 분류·최장 �
 - **D589/D591 반례 검토:** 개인정보 보호법 제21조① 단서는 실제 다른 법령의 보존 의무 범위에 한정된다. 개별 처리 근거·환자 요청은 모든 임상 기록의 일괄 연장 근거가 아니다. 종류별 기간·계속 진료 1회 연장을 유지하고 실제 편입 바이트/수정 전 원본은 완전한 직접 목록과 각 법정기록의 자체 기한으로 보존한다. 단순 비교 인용·상속 기한의 재전파·무조건 한 홉 절단을 모두 금한다.
 - **개정안:** 보건복지부공고 제2026-696호는 공포·시행 법령으로 확인되지 않은 개정안이며 적용하지 않는다. 공포본과 시행일 확인 후 기간/접속기록 계약을 재대조해야 한다.
 - **판본 검증의 한계:** 고시의 부칙 및 시설·장비 기준 제7조의 기관 외 보관 별표는 원문 미확인이다. 본문에서 확인한 제8조①2의 2년 하한, 시설·장비 기준 제3~6조의 서명 검증·이력·백업·보안 보호를 적용하되 미확인 별표나 미래 개정까지 준수 검증을 끝냈다고 표시하지 않는다. 관련 법령 변경은 제품 계약 갱신 대상으로 관리한다.
+
+
+## D-24 주문 사실과 세 증거 수명
+
+| kind | 결속 사실 | 기산·보존 |
+|---|---|---|
+| comparison-description | 판독의 서명 소견 | 영상·검사 5년; 기록된 차트 편입은 별도 10년 |
+| order | 등록 행위자·의뢰의·원 지시 `directionSourceRef` | 미채택 목적 자료; 확인된 이행 사건만 검사 구성요소·명부 5년을 추가 |
+| order-indication | 의사의 직접 결정(코드 선택만인 경우도 포함) | 서명판 생성부터 10년; 서명 하자도 원 생성 증거에 결속; 취소·미실시·후일 채택으로 단축하지 않음 |
+| exam-clinical-info | 처음부터 검사내용으로 작성한 작성자 서명 기재 | 5년 |
+| received-order | 피드 설치 검증·출처 기록/판·최초 수신·기록별 의무 집합 | 단순 사본 purpose / 채택 검사 part는 최초 고유 로컬판 수신 / 수탁 의무는 원 기산을 승계 |
+
+B의 `emr_access.order_fact`는 주문 사실의 추가 전용 이력이다. 상태 사건과 고정 임상 판 사건을 구별하며 재수신·취소가 원 서명판의 시각이나 내용을 바꾸지 못한다. `recordOrderFact`는 같은 기록의 저장 잠금 아래 이전 사건과 대조하고, 같은 ID의 다른 내용·불완전 이력·이미 성립한 의무의 축소를 거절한다. 만료일은 사건 행에 넣지 않는다. C는 기존 Order를 이 계약에 연결하고 이행 확인을 기존 매칭 과정에서 수행한다. B는 정상 판독 화면에 클릭·입력을 추가하지 않는다.
+
+미확인·열림·대사·장애 절차에는 담당 직무/배정자, enteredAt, 유한한 증거·상신·최종 결정 기한, 차상위 결정자, 연장 상한과 새 객관적 근거가 필수다. 무응답·재시도는 기한을 갱신하지 않는다. 기한 경과는 이관할 상태를 반환하며 임상·수탁 의무를 소멸시키지 않는다. 분류 확정, 실제 근거/범위/재검토일의 의무 지속, 원본 보존 검증 후 적법 반환, 불필요 운영자료 파기의 네 결정만 인정한다. `refreshOrderLifecycle`는 같은 고정 임상판의 저장된 후속 사실만 갱신하고 기산은 유지한다. H/I는 유한 설정값, 자동 이관·파기 실행, N일 사본 종료를 연결해야 한다. B는 무응답을 파기 허가나 무기한 보유 근거로 만들지 않는다.
+
+접속·열람 사건은 viewing 스트림의 2년 하한, 변경 이력·원판·원서명·출처·원 기산 증거는 원기록 의무, 단순 전달 영수증은 제품 정책 2년으로 분리한다. 영수증의 2년은 법정 하한이나 원시 payload 전체의 보존 근거가 아니다. `orderReceptionEvidence`는 이 세 참조를 구별하고 원본 증거는 access payload가 아닌 주문 사실 저장소에 둔다. `nhi:96-4.1` 의무는 검토된 조문 이력과 실제 종료 사건을 읽는 법적 의무 어댑터를 요구한다. 종료 사건 공급이 불가능하면 담당자 절차의 의무 지속/적법 반환 경로를 사용하며 시각만으로 해제하지 않는다.
+
+검증: REQ/RISK-EMR-01/06/07/19/20 → B C13–C18, L17–L19 및 A 계약 회귀. synthetic 예외는 소유 실행/seed·검증 실행 ID·내용 해시 대조·실제 검사 연결 없음이 모두 확인된 행만 허용한다. 출처 없는 이관 행은 미확인 절차로 보존하며 synthetic 표식만으로 제외하지 않는다.

@@ -43,14 +43,26 @@ class CandidateCiTests(unittest.TestCase):
         runner = importlib.util.module_from_spec(spec);spec.loader.exec_module(runner)
         rows, selected = candidate.exact_selection(target, runner)
         self.assertEqual([row[2] for row in rows[:2]], ["candidate-invariants", "candidate-worklist"])
-        # S7-U1a: 89 invariants (six CriticalResultInvariantTests) + 15 worklist + 8 flows; S8-CTX: + 2 Tech Note flows
-        self.assertEqual(len(selected), 115)
-        self.assertEqual([item["case"] for item in selected[-11:]],
+        # S7-U1a: 89 invariants (six CriticalResultInvariantTests) + 15 worklist + 8 flows; S8-CTX: + 2 Tech Note flows;
+        # EMR-B1: + the ledger's L01 (emr/units/b.json candidate_cases).
+        # W2: + folder edit/save/reapply/relogin. Union: 89 + 15 + 12 = 116.
+        self.assertEqual(len(selected), 116)
+        self.assertEqual([item["case"] for item in selected[-12:]],
             [class_name + "." + method for _, class_name, method, _ in candidate.FLOWS])
+        declaration = json.loads((target / "emr/units/b.json").read_text(encoding="utf-8"))
+        self.assertEqual(selected[-1:], [{"file": row["file"], "case": row["case"]} for row in declaration["candidate_cases"]])
         for filename, class_name, method, prefix in candidate.FLOWS:
             module = runner.load_module(target / "tests" / filename)
             self.assertTrue(method.startswith(prefix))
             self.assertIn(method, getattr(module, class_name).__dict__)
+        # Every runner unit is its own; the earlier e2e flow units keep their names.
+        self.assertEqual(len({row[2] for row in rows}), len(rows))
+        self.assertEqual(rows[2][2], "candidate-flow-document-session")
+        self.assertEqual(rows[-1], ("emr/b/live.py", "EmrBLedgerLive", "candidate-flow-emr-b-live"))
+        # Two flows that would share a unit are refused, never run under one plan.
+        doubled = candidate.FLOWS + (("emr/b/live.py", "EmrBLedgerLive", "test_b02_business_commit_and_failure_journal", "test_b02_"),)
+        with patch.object(candidate, "FLOWS", doubled), self.assertRaisesRegex(RuntimeError, "units must be unique"):
+            candidate.exact_selection(target, runner)
 
     def test_configuration_uses_target_runner_plans_evidence_and_540_seconds(self):
         class FakeRunner:
@@ -77,14 +89,14 @@ class CandidateCiTests(unittest.TestCase):
             out, selected = candidate.configure(candidate.TOOLS_ROOT, FakeCi, FakeRunner(), plans)
             profile = FakeCi.PROFILES["measurements"]
             self.assertEqual(profile["suite_timeout"], 540)
-            self.assertEqual(len(profile["suites"]), 13)
+            self.assertEqual(len(profile["suites"]), 14)
             command, timeout = FakeCi.guarded_profile_run(profile, *profile["suites"][2], 1000)
             self.assertEqual(Path(command[1]), candidate.TOOLS_ROOT / "scripts/run-tests.py")
             self.assertEqual(command[2], "--plan")
             self.assertEqual(timeout, 575)
             env = FakeCi.profile_environment("measurements", out, {"ORTHANC_PASS": "synthetic"})
             self.assertEqual(env["KIN_EVIDENCE_DIR"], str(out / "screens"))
-            self.assertEqual(len(selected), 115)
+            self.assertEqual(len(selected), 116)
 
     def assert_candidate_workflow(self, workflow):
         # Limited declaration normalisation, not a GitHub expression engine.

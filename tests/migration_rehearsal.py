@@ -10,6 +10,7 @@ from pathlib import Path
 import sys
 import time
 import uuid
+import ops_product_transfer_fixture as transfer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import ops_backup as ops
@@ -62,6 +63,7 @@ def main(directory):
             time.sleep(0.5)
         else:
             raise RuntimeError("Isolated PostgreSQL did not start")
+        transfer.provision(container)
         for database in ("blank", "existing", "drifted"):
             ops.run(["docker", "exec", container, "createdb", "-U", "postgres", database])
             if database != "blank":

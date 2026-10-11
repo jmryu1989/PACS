@@ -54,13 +54,15 @@ NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,62}")
 # only the public AuditLog TABLE and TABLE DATA entries of the export's table of contents (no function, trigger, rule,
 # view, default or extension of the exporting server), and its digests are read before the schema database exists; the
 # schema database then holds the export's whole schema for the guard probe and the shape check.
+# Physical placement is irrelevant to these two audit-only copies. EMR deployment restores in ops_backup.rehearse
+# retain tablespaces, roles, owners and ACLs and compare their catalog before verifying the database/state pair.
 VERIFIER_SCRIPT = r"""set -eu
 cat > /tmp/audit-export.dump
 pg_restore --list /tmp/audit-export.dump > /tmp/audit-toc.list
 grep -E '^[0-9]+; [0-9]+ [0-9]+ (TABLE|TABLE DATA) public AuditLog [^ ]+$' /tmp/audit-toc.list > /tmp/audit-rows.list || true
 createdb -U postgres audit_rows
 if [ -s /tmp/audit-rows.list ]; then
-  pg_restore -U postgres -d audit_rows -L /tmp/audit-rows.list --no-owner --no-privileges --exit-on-error /tmp/audit-export.dump
+  pg_restore -U postgres -d audit_rows -L /tmp/audit-rows.list --no-owner --no-privileges --no-tablespaces --exit-on-error /tmp/audit-export.dump
 fi
 psql -X -q -A -t -U postgres -d audit_rows -v ON_ERROR_STOP=1 -f - <<'AUDIT_ROWS_SQL'
 SELECT pg_catalog.to_regclass('public."AuditLog"') IS NOT NULL AS present \gset
@@ -84,7 +86,7 @@ SELECT pg_catalog.json_build_object('table', false);
 \endif
 AUDIT_ROWS_SQL
 createdb -U postgres audit_schema
-pg_restore -U postgres -d audit_schema --schema-only --no-owner --no-privileges --exit-on-error /tmp/audit-export.dump
+pg_restore -U postgres -d audit_schema --schema-only --no-owner --no-privileges --no-tablespaces --exit-on-error /tmp/audit-export.dump
 psql -X -q -A -t -U postgres -d audit_schema -v ON_ERROR_STOP=1 -f - <<'AUDIT_SCHEMA_SQL'
 CREATE TEMP TABLE audit_probe (statement text PRIMARY KEY, outcome text NOT NULL);
 DO $probe$

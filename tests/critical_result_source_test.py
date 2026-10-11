@@ -36,6 +36,7 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+import ops_product_transfer_fixture as transfer
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -143,6 +144,7 @@ class Database:
                 if time.monotonic() > deadline:
                     raise AssertionError("postgres:16-alpine did not answer")
                 time.sleep(0.5)
+            transfer.provision(self.name)
             # every migration in the order Prisma applies them, in one session
             self.psql(b"\n".join((folder / "migration.sql").read_bytes() for folder in MIGRATIONS))
             self.plans: dict[str, list] = {}
