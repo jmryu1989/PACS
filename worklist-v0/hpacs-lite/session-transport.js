@@ -36,6 +36,22 @@
       || (MISMATCH_STATUSES.includes(status) && code === 'AUTH_SESSION_MISMATCH');
   }
 
+  /** This is a permission contact, not a device queue. C must preserve its encrypted originals when keys lock and must
+   * verify its original key/signature and base version before each send. Network errors do not change the authority. */
+  function recoveryAccess(authority, owner) {
+    const identity = authority?.identity;
+    const sameOwner = identity && owner && typeof owner.issuer === 'string' && !!owner.issuer
+      && typeof owner.subject === 'string' && !!owner.subject && typeof owner.institution === 'string' && !!owner.institution
+      && identity.issuer === owner.issuer && identity.sub === owner.subject && identity.institution === owner.institution;
+    const eligible = authority?.state === 'active' && typeof authority.session === 'string' && !!authority.session
+      && identity?.state === 'approved' && !identity.demo && Number.isSafeInteger(identity.rightsVersion)
+      && identity.rightsVersion >= 0 && Array.isArray(identity.roles) && identity.roles.length > 0 && sameOwner;
+    return Object.freeze({ state: eligible ? 'validation-required' : 'send-after-reauthentication',
+      preserveOriginal: true, preserveQueue: true, read: !!eligible, useKeys: !!eligible,
+      send: false, resign: false, session: eligible ? authority.session : null,
+      rightsVersion: eligible ? identity.rightsVersion : null });
+  }
+
   // DICOM auth_request keeps the AUTH_* header but maps temporary failures to 403.
   // Consumers share this classification; only the transport reports an actual end.
   function refusal(reply) {
@@ -294,7 +310,7 @@
     return shared;
   }
 
-  const api = Object.freeze({ create, page, DEADLINES, refusal, responseError });
+  const api = Object.freeze({ create, page, DEADLINES, refusal, responseError, recoveryAccess });
   if (typeof module === 'object' && module.exports) module.exports = api;
   if (root) root.KinSessionTransport = api;
 })(typeof window === 'object' ? window : null);

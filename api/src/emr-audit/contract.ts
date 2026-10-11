@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
 import { ACCESS_ACTIONS, AUTH_ACTIONS, identity, parseAccessEvent, patientLink, sealAccessEvent, statutoryAct } from '../emr-contract/access-event';
-import type { AccessEvent, AccessTarget, EvidenceFact, ImmutableIdentity, PatientLinkSnapshot } from '../emr-contract/access-event';
+import type { AccessEvent, AccessTarget, AuthAccessEventV2, EvidenceFact, ImmutableIdentity, PatientLinkSnapshot } from '../emr-contract/access-event';
 import { retentionDisposition, verifiedRecord } from '../emr-contract/classification';
 import type { ResolvedRecord } from '../emr-contract/classification';
 import { civilPeriodEnd } from '../emr-contract/lawful-defaults';
@@ -178,7 +178,7 @@ function requireScope(authority: AuditAuthority, scope: RosterScope): Readonly<A
 /** Keys a client might send to claim authority or another institution's scope. They are refused, not ignored. */
 const CLIENT_AUTHORITY_KEYS = freeze(['auditor', 'admin', 'role', 'roles', 'scope', 'scopes', 'grant', 'grantId', 'institution',
   'institutionId', 'managingInstitution', 'actingInstitution']);
-const QUERY_KEYS = freeze(['patient', 'studyId', 'recordId', 'versionId', 'actorId', 'address', 'from', 'to', 'actions', 'results', 'limit', 'after']);
+const QUERY_KEYS = freeze(['patient', 'studyId', 'recordId', 'versionId', 'actorId', 'affectedIdentityId', 'address', 'from', 'to', 'actions', 'results', 'limit', 'after']);
 const ALL_ACTIONS = [...Object.values(ACCESS_ACTIONS).flat(), ...AUTH_ACTIONS] as readonly AccessEvent['action'][];
 export const EVENT_RESULTS = freeze(['prepared', 'succeeded', 'aborted', 'refused', 'failed', 'reported'] as const);
 export type EventResult = typeof EVENT_RESULTS[number];
@@ -187,6 +187,8 @@ export const PAGE_LIMIT = freeze({ default: 50, max: 500 });
 export interface InvestigationFilters {
   patient: { patientId: string; assigningAuthority: string } | null;
   studyId: string | null; recordId: string | null; versionId: string | null; actorId: string | null;
+  /** The member whose authentication changed; an in-process executor is a different identity. */
+  affectedIdentityId: string | null;
   /** The trusted-proxy address the event recorded (incident scoping, 안전성 기준 제6조①2). */
   address: string | null;
   from: string; to: string; actions: readonly AccessEvent['action'][] | null; results: readonly EventResult[] | null;
@@ -227,7 +229,7 @@ function parseInvestigationQuery(input: unknown, mode: 'view' | 'export'): { fil
     const address = optional('address');
     if (address !== null && isIP(address) === 0) throw new Error('Expected an IP address');
     return { filters: { patient, studyId: optional('studyId'), recordId: optional('recordId'), versionId: optional('versionId'),
-      actorId: optional('actorId'), address, from, to, actions, results }, limit, cursor };
+      actorId: optional('actorId'), affectedIdentityId: optional('affectedIdentityId'), address, from, to, actions, results }, limit, cursor };
   });
 }
 
@@ -261,6 +263,8 @@ function eventMatches(plan: InvestigationPlan, event: Readonly<AccessEvent>): re
   const f = plan.filters;
   if (event.occurredAt < f.from || event.occurredAt >= f.to) return null;
   if (f.actorId !== null && !(event.userId.status === 'known' && event.userId.value.id === f.actorId)) return null;
+  if (f.affectedIdentityId !== null && !(event.formatVersion === 2 && event.branch === 'online-auth' &&
+      event.affectedIdentity.status === 'known' && event.affectedIdentity.value.id === f.affectedIdentityId)) return null;
   if (f.address !== null && !(event.trustedProxyIp.status === 'known' && event.trustedProxyIp.value.address === f.address)) return null;
   if (f.actions && !f.actions.includes(event.action)) return null;
   if (f.results && !f.results.includes(event.result)) return null;
@@ -294,6 +298,10 @@ export interface ReplayEntry {
   action: AccessEvent['action']; statutoryAct: string; result: AccessEvent['result']; cause: AccessEvent['cause']; executor: AccessEvent['executor'];
   channel: 'online' | 'in-process-service' | 'unresolved';
   actor: AccessEvent['userId']; rolesAtTime: AccessEvent['rolesAtTime'];
+  affectedIdentity: AuthAccessEventV2['affectedIdentity'] | null;
+  session: AuthAccessEventV2['session'] | null;
+  auth: AuthAccessEventV2['auth'] | null;
+  context: AccessEvent['context'];
   actingInstitution: AccessEvent['actingInstitution']; managingInstitution: AccessEvent['managingInstitution'];
   targets: readonly ReplayTarget[]; requestId: string; relatedEventId: string | null;
 }
@@ -337,6 +345,10 @@ function replayEntry(sequence: number, committedAt: string, event: Readonly<Acce
   return {
     sequence, eventId: event.eventId, occurredAt: event.occurredAt, committedAt, surface: event.surface,
     action: event.action, statutoryAct: statutoryAct(event), result: event.result, cause: event.cause, executor: event.executor,
+    affectedIdentity: event.formatVersion === 2 && event.branch === 'online-auth' ? event.affectedIdentity : null,
+    session: event.formatVersion === 2 && event.branch === 'online-auth' ? event.session : null,
+    auth: event.formatVersion === 2 && event.branch === 'online-auth' ? event.auth : null,
+    context: event.context,
     channel: event.trustedProxyIp.status === 'known' ? 'online' : event.trustedProxyIp.status === 'not-applicable' ? 'in-process-service' : 'unresolved',
     actor: event.userId, rolesAtTime: event.rolesAtTime, actingInstitution: event.actingInstitution, managingInstitution: event.managingInstitution,
     targets: targets.map(t => replayTarget(t, currentLink)), requestId: event.requestId, relatedEventId: event.relatedEventId,

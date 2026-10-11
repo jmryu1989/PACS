@@ -1,7 +1,7 @@
 {
   "unit": "EMR-B",
-  "round": "B1",
-  "base_sha": "8c411b97ff208fa85f0cc0cf625ee11126c4417e",
+  "round": "B2",
+  "base_sha": "dff38dcb35f309b70d1ac609116c455c77e21ff8",
   "dependencies": [
     "EMR-A contract (PR #142, landed in main c4b5bdc)",
     "S8-CTX landing (PR #144, main 2fc7358): migration 20261006000000_tech_note_attempt_id, profile context-loss, G3 114",
@@ -110,6 +110,21 @@
       "tests/emr/b/noninferiority_test.py",
       "tests/emr/b/verification_plan.cjs",
       "tests/emr/b/power_design.py"
+    ],
+    "B2": [
+      "api/src/auth.controller.ts",
+      "api/src/auth.guard.ts",
+      "api/src/auth.service.ts",
+      "api/src/keycloak.service.ts",
+      "api/src/app.module.ts",
+      "api/src/main.ts",
+      "api/src/emr-audit/contract.ts",
+      "worklist-v0/hpacs-lite/auth.js",
+      "worklist-v0/hpacs-lite/session-transport.js",
+      "tests/auth_session_service_test.cjs",
+      "tests/auth_audit_live.py",
+      "tests/auth_entry_dom_test.py",
+      "tests/auth_logout_dom_test.py"
     ]
   },
   "models": {
@@ -438,6 +453,31 @@
         "C22 bounded lanes keep two verification connections free across small pools and shared stores",
         "C23 a cold replay beyond the named verification cap refuses before acquiring a snapshot",
         "C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused"
+      ],
+      "B2": [
+        "C01 v2 authentication facts: v1 keeps its rules with D-18 context; online-auth admits verified success and verified refusal, refuses a clinical write, a mismatched result, an extra key and an audit-namespace credential",
+        "C02 one immutable identity per verified issuer and subject; namesakes stay apart; a name never joins and unverified input is never known",
+        "C03 the observed ingress address and the in-process service; an untrusted forwarded header or an omitted success address is refused",
+        "C04 a verified offline original with its own reception; a self-declared flag, a reconnect address and another content under one ID are refused",
+        "C05 the body follows the commit receipt only; a provisional, enqueued or other event's receipt and any failure send zero bytes",
+        "C06 the stored chain against its trusted tail; a deleted middle or tail, a repeated sequence and an unsealed gap are found",
+        "C07 independent expired prefix and its checkpoint under the one retention rule: a viewing entry ends at the floor, a change's history entry lives as long as the record it changed and never ends while that end is unknown; an unexpired, held or middle deletion and a read-extended clock are refused",
+        "C08 complete hold set and clause history reloaded from the snapshot; a failed read is never empty; another transaction's snapshot is refused",
+        "C09 the signed original and its recovery copy keep owner and original time; a private-draft end or a new authentication never restarts or erases them",
+        "C13 expiry recovery needs external proof of the deleted prefix and its trusted seal, including interrupted recovery",
+        "C14 a torn journal preserves its exact damaged bytes separately and remains appendable across repeated restarts",
+        "C15 D24 registration needs its original direction; code-only native directions keep ten years through cancellation and later adoption",
+        "C16 D24 received evidence keeps independent original, adopted, chart and receipt clocks without a duplicate restart",
+        "C17 D24 finite review deadlines escalate without erasing duties or renewing on retries; four evidence-bound decisions close the procedure",
+        "C18 D24 claim duties require an actual ending event and preserve an outstanding statutory obligation past internal deadlines",
+        "C20 replay binds sealed DB bytes through the external seal before issuing any receipt",
+        "C21 adjacent stream advances share durability barriers and recover together after each publication cut",
+        "C19 committed receipt groups preserve every binding, ignore unrelated pending work and share durable publication; publication failure sends no receipt",
+        "C22 bounded lanes keep two verification connections free across small pools and shared stores",
+        "C23 a cold replay beyond the named verification cap refuses before acquiring a snapshot",
+        "C11 composition is one startup capability; unprepared authentication starts no timers and a second composition is refused",
+        "C12 authentication projection and replay retain identity, causes and UTC facts; recovery contacts preserve originals and isolate accounts",
+        "C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused"
       ]
     },
     "live": {
@@ -448,6 +488,11 @@
           "emr/b/live.py",
           "EmrBLedgerLive",
           "ci-emr-b-ledger"
+        ],
+        [
+          "emr/b/live.py",
+          "EmrBAuthLive",
+          "ci-emr-b-auth"
         ]
       ],
       "B1": [
@@ -464,20 +509,47 @@
         "test_b17_order_fact_history_and_classification",
         "test_b18_external_expiry_proof_and_torn_journal_restarts",
         "test_b19_backup_rehearsal_preserves_database_and_external_state"
+      ],
+      "classes": [
+        "EmrBLedgerLive",
+        "EmrBAuthLive"
+      ],
+      "B2": [
+        "test_b01_ledger_roles_and_restart",
+        "test_b02_business_commit_and_failure_journal",
+        "test_b03_idempotency_and_concurrent_append",
+        "test_b03b_concurrent_48_receipts",
+        "test_b03c_warm_single_sustained_and_verification_plans",
+        "test_b04_chain_tail_and_crash_recovery",
+        "test_b05_expiry_checkpoint_and_holds",
+        "test_b06_complete_reload_and_clause_history",
+        "test_b07_migration_backup_restore_roles",
+        "test_b08_receipt_before_body",
+        "test_b17_order_fact_history_and_classification",
+        "test_b18_external_expiry_proof_and_torn_journal_restarts",
+        "test_b19_backup_rehearsal_preserves_database_and_external_state",
+        "test_b09_auth_login_entry_atomic",
+        "test_b10_end_retry_and_reused_sid",
+        "test_b11_identity_and_institution_history",
+        "test_b12_ingress_and_service_ip",
+        "test_b13_projection_time_and_attribution",
+        "test_b14_disconnect_reauth_and_account_isolation",
+        "test_b15_startup_and_normal_path_friction",
+        "test_b16_auth_failure_recovery_and_no_secrets"
       ]
     }
   },
   "expected": {
-    "contract": 21,
-    "live": 13,
-    "mutants": 39,
+    "contract": 23,
+    "live": 21,
+    "mutants": 42,
     "profiles": 39,
     "measurements_suites": 20,
     "validate_jobs": 22,
     "emr_b_jobs": 1,
     "session_matrix": 8,
-    "candidate": 115,
-    "candidate_rows": 13,
+    "candidate": 117,
+    "candidate_rows": 15,
     "migrations": 45,
     "public_tables": 51,
     "emr_tables": 10,
@@ -526,23 +598,42 @@
     {
       "id": "M06",
       "kill": [
-        "C02"
+        "C02",
+        "L11"
       ],
       "behaviour": "identities are joined by display name"
     },
     {
       "id": "M07",
       "kill": [
-        "C01"
+        "C01",
+        "L09",
+        "L10"
       ],
       "behaviour": "an audit link ID or session reference is accepted as a credential"
     },
     {
       "id": "M08",
       "kill": [
-        "C03"
+        "C03",
+        "L12"
       ],
       "behaviour": "a forwarded address header is trusted without a trusted peer"
+    },
+    {
+      "id": "M09",
+      "kill": [
+        "L10"
+      ],
+      "behaviour": "a retry creates another successful end event"
+    },
+    {
+      "id": "M10",
+      "kill": [
+        "C12",
+        "L14"
+      ],
+      "behaviour": "a disconnect or generic denial ends authentication"
     },
     {
       "id": "M11",
@@ -559,6 +650,14 @@
         "L05"
       ],
       "behaviour": "an unexpired prefix may be deleted"
+    },
+    {
+      "id": "M13",
+      "kill": [
+        "C11",
+        "L15"
+      ],
+      "behaviour": "authentication lifecycle starts before its composition and protected storage are ready"
     },
     {
       "id": "M14",
@@ -768,6 +867,14 @@
     {
       "file": "tests/emr/b/live.py",
       "case": "EmrBLedgerLive.test_b01_ledger_roles_and_restart"
+    },
+    {
+      "file": "tests/emr/b/live.py",
+      "case": "EmrBAuthLive.test_b09_auth_login_entry_atomic"
+    },
+    {
+      "file": "tests/emr/b/live.py",
+      "case": "EmrBAuthLive.test_b14_disconnect_reauth_and_account_isolation"
     }
   ]
 }

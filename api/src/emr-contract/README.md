@@ -216,6 +216,32 @@ REQ-EMR-01/17/19 → RISK-EMR-01/17/19 → TEST-EMR-01/17/19-A: 분류·최장 �
 - **판본 검증의 한계:** 고시의 부칙 및 시설·장비 기준 제7조의 기관 외 보관 별표는 원문 미확인이다. 본문에서 확인한 제8조①2의 2년 하한, 시설·장비 기준 제3~6조의 서명 검증·이력·백업·보안 보호를 적용하되 미확인 별표나 미래 개정까지 준수 검증을 끝냈다고 표시하지 않는다. 관련 법령 변경은 제품 계약 갱신 대상으로 관리한다.
 
 
+## 온라인 인증 생산자와 재인증 접점
+
+`main.ts`는 Nest 앱 생성 뒤 보호 저장소의 역할·manifest·tail을 확인하고 `composeEmrAdapters`를 한 번 결속한다.
+확인이 끝나기 전에는 HTTP와 인증 재시도·수거 타이머를 시작하지 않는다. 배치는 `KIN_EMR_MANAGING_INSTITUTION`에
+검토된 관리기관 식별값, `KIN_EMR_PROXY_HOST`에 신뢰하는 ingress의 DNS 이름을 명시해야 한다. 회원 기관으로
+관리기관을 추정하지 않는다. 요청의 실제 socket peer가 그 ingress에 속하고 nginx가 주소 헤더를 덮어쓴 경우만
+성공 인증 사건의 IP가 known이다.
+
+로그인·일회 진입·실제 세션 삭제는 보호 원장과 기존 `AuditLog` projection을 같은 업무 transaction에 저장한다.
+`emr_access.audit_projection`의 고유 eventId↔Int id 매핑을 사용하며 과거 감사 행은 재작성하지 않는다. issuer+sub의
+불변 신원, transaction에서 확인한 DB MemberRights, 세션의 기관과 원사건 UTC 시각을 보존한다. 수거 서비스의
+실행 주체와 종료 대상 회원은 별개다. audit ID와 session reference는 자격증명이 아니며 토큰·쿠키·진입 증명을
+원장이나 projection에 넣지 않는다. 결과를 잃은 commit은 새 실패 사건으로 단정하지 않는다.
+
+실패 관측은 DB rollback 밖 보호 저널에 사건 ID·관측 시각·당시 확인한 신원과 권한을 보존한다. 권한 조회도 실패했다면
+미관측으로 남기고, 재시도 때 현재 권한으로 과거 사실을 채우지 않는다. 조회 계약의 `affectedIdentityId` 필터와
+nullable `affectedIdentity`·`session`·`auth`는 인증 사건과 기존 임상 사건을 함께 재생한다.
+
+`KinAuth.recoveryAccess(owner)`는 현재 인증의 issuer+sub+기관과 원본 소유자를 대조하는 C용 접점이다. 실제 종료나
+명시적 로그아웃·계정 전환은 키 사용을 잠그고 원본·큐 보존 상태를 반환한다. 단절·timeout·일반 HTTP 오류는 종료
+증거가 아니다. 같은 소유자의 새 인증도 현재 권한, 당시 키·서명, 기준판 검증을 마치기 전에는 전송·재서명을 허용하지
+않는다. 영속 단말 큐, 기기 키, 서명 검증 및 최종 전송 허가는 C의 구현 대상이며 이 접점은 그것을 구현하지 않는다.
+
+REQ-EMR-01/02/06/07/19 → RISK-EMR-01/02/06/07/19 → B C11/C12, L09–L16, M06–M10/M13.
+관리자 격리 transaction의 생산자 연결과 실제 배치 설정은 별도 소유 경로와 함께 통합 검증해야 한다.
+
 ## D-24 주문 사실과 세 증거 수명
 
 | kind | 결속 사실 | 기산·보존 |

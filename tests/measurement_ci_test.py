@@ -89,9 +89,14 @@ class MeasurementCiTests(unittest.TestCase):
                 self.assertNotEqual(profile['out'], other['out'])
                 self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
         module = ast.parse((ci.ROOT/'tests/emr/b/live.py').read_text(encoding='utf-8'))
-        cls = next(n for n in module.body if isinstance(n, ast.ClassDef) and n.name == 'EmrBLedgerLive')
-        self.assertEqual([n.name for n in cls.body if isinstance(n, ast.FunctionDef) and n.name.startswith('test_')],
-                         declaration['cases']['live']['B1'])
+        collected = []
+        for name in declaration['cases']['live']['classes']:
+            cls = next(n for n in module.body if isinstance(n, ast.ClassDef) and n.name == name)
+            collected.extend(n.name for n in cls.body if isinstance(n, ast.FunctionDef) and n.name.startswith('test_'))
+        self.assertEqual(collected, declaration['cases']['live'][declaration['round']])
+        auth_command, _ = ci.guarded_profile_run(profile, *profile['suites'][1], 3900)
+        self.assertEqual(auth_command[auth_command.index('--class')+1], 'EmrBAuthLive')
+        self.assertEqual(auth_command[auth_command.index('--unit')+1], 'ci-emr-b-auth')
         self.assertEqual((ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8').count('--profile emr-b'), 0)
         workflow = yaml.safe_load((ci.ROOT/'.github/workflows/emr-b.yml').read_text(encoding='utf-8'))
         self.assertEqual(list(workflow['jobs']), ['emr-b'])

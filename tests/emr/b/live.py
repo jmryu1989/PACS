@@ -16,6 +16,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import tarfile
 import subprocess
@@ -1008,6 +1009,90 @@ class EmrBLedgerLive(unittest.TestCase):
                 self.assertTrue(result["audit"]["verified"], result)
                 self.assertEqual(result["cleanup_failures"], [])
         self.assertNotIn("error", self.driver("recover"), "backup did not alter the source ledger or seal")
+
+
+class EmrBAuthLive(unittest.TestCase):
+    """REQ-EMR-01/02/06/19 -> RISK-EMR-identity/storage/session -> L09-L16.
+
+    Each case uses a fresh, unconnected PostgreSQL container and the actual compiled U5 controller/guard. The
+    authentication fixture provides signed synthetic Keycloak replies; L12 adds a real nginx hop in that same isolated
+    network namespace. C's device queue and cryptographic approval are deliberately not represented by a mock queue.
+    """
+    label_namespace = 'kin.emrb.live'
+    setUpClass = classmethod(EmrBLedgerLive.setUpClass.__func__)
+    setup_disposable_resources = classmethod(EmrBLedgerLive.setup_disposable_resources.__func__)
+    cleanup_resources = classmethod(EmrBLedgerLive.cleanup_resources.__func__)
+    start_db = classmethod(EmrBLedgerLive.start_db.__func__)
+    provision = classmethod(EmrBLedgerLive.provision.__func__)
+    migrate = classmethod(EmrBLedgerLive.migrate.__func__)
+    volume = classmethod(EmrBLedgerLive.volume.__func__)
+    url = classmethod(EmrBLedgerLive.url.__func__)
+    psql = EmrBLedgerLive.psql
+    ok = EmrBLedgerLive.ok
+
+    def auth_case(self, case):
+        db = self.start_db('auth-' + case.lower())
+        self.provision(db)
+        self.ok('CREATE DATABASE kin_auth_session_test OWNER kin', db=db)
+        env = {**self.env, 'KIN_AUTH_SESSION_DATABASE_URL': self.url('kin', 'kin_auth_session_test'),
+               'KIN_AUTH_RUNTIME_DATABASE_URL': self.url('kin_runtime', 'kin_auth_session_test')}
+        nginx = None
+        config = tempfile.TemporaryDirectory(prefix='kin-emrb-nginx-')
+        self.addCleanup(config.cleanup)
+        if case == 'L12':
+            # This hop has a different real socket address from a caller hitting the API directly. Both inbound
+            # address headers are overwritten, exactly as in the product nginx ingress configuration.
+            Path(config.name, 'nginx.conf').write_text('events {}\nhttp { server { listen 19010; location / {\n'
+                'proxy_pass http://127.0.0.1:19009; proxy_bind 127.0.0.3;\n'
+                'proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-For $remote_addr;\n'
+                '} } }\n', encoding='utf-8')
+            nginx = 'kin-emrb-' + self.token + '-nginx'
+            self.created['container'].append(nginx)
+            run(['docker', 'run', '-d', '--name', nginx, '--label', self.label, '--network', 'container:' + db,
+                 '-v', str(Path(config.name, 'nginx.conf')) + ':/etc/nginx/nginx.conf:ro', 'nginx:alpine'])
+            env['KIN_B2_NGINX_PORT'] = '19010'
+        try:
+            result = run(['docker', 'run', '--rm', '--label', self.label, '--network', 'container:' + db,
+                '-e', 'KIN_AUTH_SESSION_DATABASE_URL', '-e', 'KIN_AUTH_RUNTIME_DATABASE_URL', '-e', 'KIN_B2_NGINX_PORT',
+                '-v', str(ROOT / 'tests') + ':/tests:ro', '-v', str(ROOT / 'worklist-v0/hpacs-lite') + ':/assets:ro',
+                '--entrypoint', 'node', self.image, '--test', '--test-reporter=tap', '--test-name-pattern', '^' + case + ' ',
+                '/tests/auth_session_service_test.cjs'], env=env, check=False, timeout=600)
+        finally:
+            if nginx:
+                run(['docker', 'rm', '-f', nginx])
+                self.created['container'].remove(nginx)
+        output = (result.stdout + result.stderr).decode('utf-8', 'replace')
+        for secret in self.secrets.values():
+            output = output.replace(secret, '[redacted]')
+        print(output, flush=True)
+        self.assertEqual(result.returncode, 0, case + ' compiled authentication contract failed')
+        passed = re.findall(r'^ok \d+ - (' + case + r' .*?)$', output, re.M)
+        self.assertEqual(len(passed), 1, case + ' must actually run once')
+        self.assertNotIn('# SKIP', passed[0])
+
+    def test_b09_auth_login_entry_atomic(self):
+        self.auth_case('L09')
+
+    def test_b10_end_retry_and_reused_sid(self):
+        self.auth_case('L10')
+
+    def test_b11_identity_and_institution_history(self):
+        self.auth_case('L11')
+
+    def test_b12_ingress_and_service_ip(self):
+        self.auth_case('L12')
+
+    def test_b13_projection_time_and_attribution(self):
+        self.auth_case('L13')
+
+    def test_b14_disconnect_reauth_and_account_isolation(self):
+        self.auth_case('L14')
+
+    def test_b15_startup_and_normal_path_friction(self):
+        self.auth_case('L15')
+
+    def test_b16_auth_failure_recovery_and_no_secrets(self):
+        self.auth_case('L16')
 
 
 if __name__ == "__main__":

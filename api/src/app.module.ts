@@ -22,7 +22,7 @@ import { OrthancService } from './orthanc.service';
 import { KeycloakService } from './keycloak.service';
 import { AuthController } from './auth.controller';
 import { AuthGuard } from './auth.guard';
-import { AuthService } from './auth.service';
+import { AuthEventLedger, AuthService } from './auth.service';
 import { AdminController } from './admin.controller';
 import { AdminService } from './admin.service';
 import { ViewerController } from './viewer.controller';
@@ -52,6 +52,7 @@ function adminNoStore(_req: any, res: any, next: () => void) {
 @Module({
   controllers: [DictationController, PacsController, AuthController, AdminController, ViewerController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, ClinicianQuestionController, ImageRequestController, ClinicalContextController, CriticalResultController, StudyAccessController],
   providers: [
+    AuthEventLedger,
     ViewerContextEventService,
     AsrService, StudyAccessService, PrismaService, PacsService, OrthancService, KeycloakService, AuthService, AdminService, ViewerService, FindingService, ViewerJobService, ConnectService, ManualSrService, FavoriteService, StudyTagsService, ReaderAssignmentService, ConsultationService, ClinicianQuestionService, ImageRequestService, ClinicalContextService, CriticalResultService,
     { provide: APP_GUARD, useClass: AuthGuard },

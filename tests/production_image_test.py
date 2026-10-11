@@ -90,6 +90,7 @@ class ProductionImageTests(unittest.TestCase):
             "ORTHANC_USER": "disposable-ci-only", "ORTHANC_PASS": uuid.uuid4().hex,
             "KC_ADMIN_URL": "http://127.0.0.1:1/auth", "KC_REALM": "kin",
             "KC_CLIENT_ID": "kin-api", "KC_CLIENT_SECRET": uuid.uuid4().hex,
+            "KIN_EMR_MANAGING_INSTITUTION": "synthetic-image-test", "KIN_EMR_PROXY_HOST": "127.0.0.1",
         }
         env.update(overrides)
         args = ["--network", "container:" + self.db]

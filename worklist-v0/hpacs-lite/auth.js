@@ -469,7 +469,8 @@ const KinAuth = (() => {
         catch (e) { if (control.signal.aborted) throw e; }
       }
       const code = response.headers.get('X-KIN-Auth-Code') || (body && typeof body.code === 'string' ? body.code : null);
-      return { status: response.status, ok: response.ok, code, body };
+      return { status: response.status, ok: response.ok, code, body,
+        issuer: response.headers.get('X-KIN-Identity-Issuer'), rightsVersion: response.headers.get('X-KIN-Rights-Version') };
     } catch (e) {
       throw Object.assign(new Error(control.signal.aborted ? '서버가 제한 시간 안에 답하지 않았습니다' : '서버에 연결하지 못했습니다'),
         { kind: control.signal.aborted ? 'timeout' : 'network' });
@@ -496,10 +497,12 @@ const KinAuth = (() => {
     }
   }
 
-  function identityOf(body) {
+  function identityOf(body, answer) {
     return {
       state: 'approved',
       sub: typeof body.sub === 'string' ? body.sub : null,
+      issuer: typeof answer?.issuer === 'string' && answer.issuer ? answer.issuer : null,
+      rightsVersion: /^\d+$/.test(answer?.rightsVersion ?? '') ? Number(answer.rightsVersion) : null,
       actor: body.actor ?? body.user ?? '',
       user: body.user ?? body.actor ?? '',
       displayName: body.displayName ?? body.user ?? body.actor ?? '',
@@ -520,7 +523,7 @@ const KinAuth = (() => {
     if (answer.status !== 200) throw Object.assign(new Error(`세션 확인 실패 (HTTP ${answer.status})`),
       { retryable: answer.status >= 500 });
     if (!id) throw new Error('세션 확인 실패 (세션 식별값 없음)');
-    return { id, identity: identityOf(body) };
+    return { id, identity: identityOf(body, answer) };
   }
 
   /**
@@ -1027,6 +1030,12 @@ const KinAuth = (() => {
     },
 
     session() { return cached; },
+
+    /** B's contact with C's future durable queue. No queue or key is stored here. Every use rechecks the current
+     * authenticated document; a new account can never obtain permission for another immutable owner's material. */
+    recoveryAccess(owner) {
+      return window.KinSessionTransport.recoveryAccess({ state, session: sessionId, identity: cached }, owner);
+    },
 
     /** 이 문서가 묶인 세션의 식별값(비밀이 아니다). 일하는 중이 아니면 null. */
     sessionId() { return state === 'active' ? sessionId : null; },

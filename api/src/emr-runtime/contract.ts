@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
 import {
   ACCESS_STREAMS, AccessEvent, AccessExpiryCheckpoint, AccessStream, ACCESS_CHAIN_GENESIS, ChainPosition, DurableAccessReceipt,
-  AppendOnlyAccessStore, ImmutableIdentity, NON_RECORD_TARGETS, StatutoryAct, parseAccessEvent, provideAfterDurableEvent,
+  AppendOnlyAccessStore, AUTH_FAILURE_CAUSES, AuthAccessEventV2, ImmutableIdentity, NON_RECORD_TARGETS, StatutoryAct, parseAccessEvent, provideAfterDurableEvent,
 } from '../emr-contract/access-event';
 import { RECORD_CLASSIFICATION, ResolvedRecord, OrderFacts, parseOrderFacts, RecordEvent, parseRecordEvent } from '../emr-contract/classification';
 import { civilPeriodEnd, validateOrderTransition } from '../emr-contract/lawful-defaults';
@@ -229,6 +229,59 @@ export const IN_PROCESS_SERVICE = freeze({ status: 'not-applicable' as const, re
 /** Audit link IDs and session references are audit-only values; a request presenting one as a credential is refused. */
 export function refuseAuditNamespaceCredential(value: unknown): void {
   if (typeof value !== 'string' || /^(audit|authref):/i.test(value.trim())) refuse('AuditIdentifierIsNotACredential');
+}
+
+/** The existing admin API is a projection of this fact, with its original time and closed legacy detail schema. */
+export function authProjection(input: AuthAccessEventV2, actor: string) {
+  const event = parseAccessEvent(input) as Readonly<AuthAccessEventV2>;
+  const detail: Record<string, unknown> = {
+    institution: event.actingInstitution.status === 'known' ? event.actingInstitution.value : null,
+    ip: event.trustedProxyIp.status === 'known' ? event.trustedProxyIp.value.address : null,
+    dataSubject: null,
+  };
+  if (event.action === 'auth.login') {
+    detail.outcome = event.result === 'succeeded' ? 'success' : 'failure';
+    if (event.auth.failureCause) detail.cause = event.auth.failureCause.replace(/-/g, '_');
+  } else if (event.auth.endCause) {
+    detail.cause = event.auth.endCause.replace(/-/g, '_');
+    if (event.auth.trigger) detail.trigger = event.auth.trigger.replace(/-/g, '_');
+  }
+  return { actor: string(actor), action: event.action,
+    target: event.affectedIdentity.status === 'known' ? event.affectedIdentity.value.subject : '',
+    at: new Date(event.occurredAt), detail: JSON.stringify(detail) };
+}
+
+/** Protected failure-journal input. It contains observed identity/rights, never the tokens that proved that identity.
+ * A missing DB observation remains missing on replay; recovery cannot replace it with today's membership. */
+export function parseAuthFailureObservation(value: unknown) {
+  const v = object(value, ['eventId', 'auditLinkId', 'at', 'requestId', 'managingInstitution', 'address', 'who', 'rights', 'failure']);
+  const uuid = (value: unknown) => {
+    const text = string(value);
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(text)) refuse('AuthFailureObservationRefused');
+    return text;
+  };
+  uuid(v.eventId); uuid(v.requestId);
+  if (!string(v.auditLinkId).startsWith('audit:')) refuse('AuthFailureObservationRefused');
+  uuid(v.auditLinkId.slice(6)); utc(v.at); string(v.managingInstitution);
+  choice(v.failure, [...AUTH_FAILURE_CAUSES.refused, ...AUTH_FAILURE_CAUSES.failed]);
+  const address = v.address.status === 'known' ? object(v.address, ['status', 'value']) : object(v.address, ['status', 'reason']);
+  if (address.status === 'known') {
+    object(address.value, ['address', 'source']);
+    if (!isIP(address.value.address) || address.value.source !== 'trusted-proxy') refuse('AuthFailureObservationRefused');
+  } else if (address.status !== 'unresolved' || address.reason !== 'not-observed') refuse('AuthFailureObservationRefused');
+  if (v.who !== null) {
+    const who = object(v.who, ['issuer', 'target', 'actor', 'institution']);
+    string(who.issuer); string(who.target); string(who.actor);
+    if (who.institution !== null) string(who.institution);
+  }
+  if (v.rights !== null) {
+    const rights = object(v.rights, ['version', 'roles', 'institution', 'approved', 'suspended']);
+    integer(rights.version, 0);
+    if (!Array.isArray(rights.roles) || rights.roles.some(role => typeof role !== 'string') ||
+        typeof rights.approved !== 'boolean' || typeof rights.suspended !== 'boolean') refuse('AuthFailureObservationRefused');
+    if (rights.institution !== null) string(rights.institution);
+  }
+  return freeze(structuredClone(v));
 }
 
 // ── durable receipts ──

@@ -1431,6 +1431,73 @@ function contractSuite() {
     } finally { w.cleanup(); }
   });
 
+  test('C11 composition is one startup capability; unprepared authentication starts no timers and a second composition is refused', async () => {
+    const { AuthService, AuthEventLedger } = load('auth.service.ts');
+    const ledger = new AuthEventLedger({});
+    const service = new AuthService({}, {}, ledger);
+    let scheduled = 0;
+    const interval = global.setInterval;
+    global.setInterval = () => { scheduled++; throw new Error('unprepared timer'); };
+    try {
+      await assert.rejects(service.onModuleInit(), /AuthLedgerNotPrepared/);
+      await assert.rejects(ledger.transaction(async () => { throw new Error('unprepared HTTP'); }), /AuthLedgerNotPrepared/);
+    } finally { global.setInterval = interval; }
+    assert.equal(scheduled, 0);
+    assert.throws(() => M.composeEmrAdapters(CTX.runtimeAdapters), { code: 'EmrAdaptersAlreadyComposed' });
+    const oldInstitution = process.env.KIN_EMR_MANAGING_INSTITUTION, oldProxy = process.env.KIN_EMR_PROXY_HOST;
+    try {
+      delete process.env.KIN_EMR_MANAGING_INSTITUTION; delete process.env.KIN_EMR_PROXY_HOST;
+      await assert.rejects(ledger.prepare(), /EmrAuthDeploymentRequired/);
+    } finally {
+      if (oldInstitution === undefined) delete process.env.KIN_EMR_MANAGING_INSTITUTION; else process.env.KIN_EMR_MANAGING_INSTITUTION = oldInstitution;
+      if (oldProxy === undefined) delete process.env.KIN_EMR_PROXY_HOST; else process.env.KIN_EMR_PROXY_HOST = oldProxy;
+    }
+  });
+
+  test('C12 authentication projection and replay retain identity, causes and UTC facts; recovery contacts preserve originals and isolate accounts', async () => {
+    const F = load('emr-audit/contract.ts');
+    const event = authEvent(A), at = event.occurredAt;
+    const projection = C.authProjection(event, 'display@example.test');
+    assert.equal(projection.action, event.action);
+    assert.equal(projection.at.toISOString(), at);
+    assert.equal(projection.target, event.affectedIdentity.value.subject);
+    assert.deepEqual(JSON.parse(projection.detail), { institution: event.actingInstitution.value,
+      ip: event.trustedProxyIp.value.address, dataSubject: null, outcome: 'success' });
+    assert.deepEqual(Object.keys(projection).sort(), ['action', 'actor', 'at', 'detail', 'target']);
+    const caller = { identity: member('auditor'), institutionId: event.managingInstitution.value, roles: [] };
+    const authority = F.resolveAuditAuthority({ listGrants: subject => ({ subject, complete: true, grants: [{
+      grantId: 'grant', subject, institutionId: caller.institutionId, events: [{ kind: 'granted', eventId: 'grant-event',
+        at: '2026-01-01T00:00:00.000Z', by: caller.identity, capacity: 'privacy-officer', basisDocumentId: 'designation',
+        scopes: ['investigate'], validFrom: '2026-01-01T00:00:00.000Z', validUntil: null }] }] }) }, caller, at);
+    const entry = A.sealAccessEvent({ sequence: 0, hash: '0'.repeat(64) }, event);
+    const ledger = { top: async () => 1, rows: async () => [{ entry, durableAt: at, served: null }] };
+    const query = { from: '2026-01-01T00:00:00.000Z', to: '2027-01-01T00:00:00.000Z', affectedIdentityId: event.affectedIdentity.value.id };
+    const page = await F.readInvestigationPage(F.planInvestigation(authority, query), ledger);
+    assert.equal(page.rows.length, 1);
+    for (const key of ['affectedIdentity', 'session', 'auth', 'context']) assert.deepEqual(page.rows[0][key], event[key]);
+    assert.equal((await F.readInvestigationPage(F.planInvestigation(authority, { ...query, affectedIdentityId: member().id }), ledger)).rows.length, 0);
+    assert.equal((await F.readInvestigationPage(F.planInvestigation(authority, { ...query, patient: { patientId: 'never', assigningAuthority: 'synthetic' } }), ledger)).rows.length, 0);
+    const transport = require(path.join(root, 'worklist-v0/hpacs-lite/session-transport.js'));
+    const owner = { issuer: 'https://identity.example.test', subject: 'owner', institution: 'inst-a' };
+    const active = { state: 'active', session: 'new-session', identity: { state: 'approved', issuer: owner.issuer,
+      sub: owner.subject, institution: owner.institution, rightsVersion: 2, roles: ['radiologist'] } };
+    assert.equal(transport.recoveryAccess(active, owner).state, 'validation-required');
+    for (const changed of [{ ...owner, issuer: 'another-issuer' }, { ...owner, subject: 'namesake' }, { ...owner, institution: 'inst-b' }]) {
+      const denied = transport.recoveryAccess(active, changed);
+      assert.equal(denied.read, false); assert.equal(denied.useKeys, false); assert.equal(denied.send, false); assert.equal(denied.resign, false);
+    }
+    for (const state of ['ending', 'confirmed', 'unconfirmed', 'unknown']) {
+      const held = transport.recoveryAccess({ ...active, state }, owner);
+      assert.equal(held.state, 'send-after-reauthentication'); assert(held.preserveOriginal && held.preserveQueue); assert.equal(held.useKeys, false);
+    }
+    for (const status of [401, 403, 409, 500, 503]) assert.notEqual(transport.refusal({ status }), 'ended');
+    assert.equal(transport.refusal({ status: 401, code: 'AUTH_SESSION_ENDED' }), 'ended');
+    const { newAuthSessionHandle } = load('auth.service.ts');
+    const handle = newAuthSessionHandle();
+    assert.throws(() => C.refuseAuditNamespaceCredential(handle.reference));
+    assert.notEqual(handle.sid, handle.reference); assert.notEqual(handle.loginEventId, handle.reference);
+  });
+
   test('C10 declaration, selection and catalog agree exactly; a missing or doubled owner, an unclassified table, a dropped migration, a collection mismatch and a false exit are refused', () => {
     // The declaration against the contract and the runtime manifest, both ways.
     assert.deepEqual(declaration.models.sql, Cl.SQL_STORAGE_CLASSIFICATION);
@@ -1507,8 +1574,8 @@ function contractSuite() {
         ['doubled-owner', d => d.owned_paths['B1-B2'].push(d.owned_paths.B1[0]), 'owned-path-duplicated'],
         ['dropped-migration', d => { d.migrations.count -= 1; }, 'migration-count'],
         ['renamed-migration', d => { d.migrations.added = ['20261008120000_emr_b_renamed']; }, 'migration-missing'],
-        ['missing-live-case', d => { d.cases.live.B1.pop(); }, 'live-cases-differ'],
-        ['extra-live-case', d => { d.cases.live.B1.push('test_b99_undeclared'); }, 'live-cases-differ'],
+        ['missing-live-case', d => { d.cases.live[d.round].pop(); }, 'live-cases-differ'],
+        ['extra-live-case', d => { d.cases.live[d.round].push('test_b99_undeclared'); }, 'live-cases-differ'],
         ['candidate-case', d => { d.candidate_cases[0].case = 'EmrBLedgerLive.test_b99_absent'; }, 'candidate-case-missing'],
         ['profile', d => { d.cases.live.profile_suites[0][2] = 'ci-emr-b-other'; }, 'profile-differs'],
         ['keys', d => { delete d.restore; }, 'declaration-keys'],

@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { choice, freeze, integer, object, refuse, sha256, string, utc } from '../emr-contract/validation';
+import { parseAuthFailureObservation } from './contract';
 
 /**
  * The protected failure journal (REQ-EMR-06/19): facts that a business rollback, a ledger outage or a process crash must
@@ -14,6 +15,8 @@ import { choice, freeze, integer, object, refuse, sha256, string, utc } from '..
 export const JOURNAL_MAX_BYTES = 64 * 1024 * 1024;
 const RECORD_MAX_BYTES = 4096;
 export const JOURNAL_KINDS = freeze({
+  'auth-failure-observed': ['observation'],
+  'auth-failure-recovered': ['eventId'],
   /** A business change whose ledger append rolled back with it: the attempt itself is the surviving fact. */
   'append-rolled-back': ['eventId', 'cause'],
   /** The ledger could not be reached or refused; the operation reported no success. */
@@ -39,7 +42,8 @@ function canonical(record: JournalRecord): string {
 function parseBody(kind: JournalKind, body: unknown): Readonly<Record<string, string | number>> {
   const keys = JOURNAL_KINDS[kind], v = object(body, [...keys]);
   for (const key of keys) {
-    if (key === 'fromSequence' || key === 'toSequence') integer(v[key]);
+    if (key === 'observation') parseAuthFailureObservation(JSON.parse(string(v[key])));
+    else if (key === 'fromSequence' || key === 'toSequence') integer(v[key]);
     else if (key === 'contentSha256' || key === 'toHash') sha256(v[key]);
     else if (key === 'cause') choice(v[key], JOURNAL_CAUSES);
     else string(v[key]);

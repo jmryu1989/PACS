@@ -72,7 +72,7 @@ delete process.env.AUTH_REQUIRED;
 
 // ── the disposable database ──
 
-let prepared = null;
+let prepared = null, runtime = null;
 function database() {
   prepared ??= (async () => {
     const url = process.env.KIN_AUTH_SESSION_DATABASE_URL;
@@ -90,6 +90,17 @@ function database() {
       WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL`);
     const folders = fs.readdirSync('/app/prisma/migrations', { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name).sort();
     assert.deepEqual(applied.map(row => row.migration_name).sort(), folders, 'every migration of the image applied');
+    const runtimeUrl = new URL(process.env.KIN_AUTH_RUNTIME_DATABASE_URL || url);
+    runtimeUrl.username = 'kin_runtime';
+    if (!process.env.KIN_AUTH_RUNTIME_DATABASE_URL) runtimeUrl.password = '';
+    runtime = new PrismaService({ datasources: { db: { url: runtimeUrl.href } } });
+    await runtime.$connect();
+    process.env.KIN_EMR_MANAGING_INSTITUTION = A;
+    process.env.KIN_EMR_PROXY_HOST = '127.0.0.1';
+    process.env.KIN_EMR_STATE_DIR = fs.mkdtempSync(os.tmpdir() + '/kin-auth-ledger-');
+    fs.chmodSync(process.env.KIN_EMR_STATE_DIR, 0o700);
+    const M = require('/app/dist/emr-contract/composition');
+    M.composeEmrAdapters(require('/app/dist/emr-runtime/context').runtimeAdapters);
     return base;
   })();
   return prepared;
@@ -351,6 +362,7 @@ const reply = {
 };
 
 test.after(async () => {
+  if (runtime) await runtime.$disconnect();
   if (prepared) await (await prepared).$disconnect();
   if (kc.server) {
     // A failed behavioural assertion can leave a deliberately held HTTP response. Teardown must still report the failure.
@@ -482,7 +494,7 @@ const summary = rows => rows.map(r => [r.action, r.detail.cause ?? r.detail.outc
 
 // ── a world: one empty database state, a fresh fake Keycloak state, two service instances ──
 
-const { AuthService } = require('/app/dist/auth.service');
+const { AuthService, AuthEventLedger } = require('/app/dist/auth.service');
 const { KeycloakService } = require('/app/dist/keycloak.service');
 const { AuthGuard } = require('/app/dist/auth.guard');
 const { AuthController } = require('/app/dist/auth.controller');
@@ -507,7 +519,7 @@ async function world(t, { now = START, imported = true } = {}) {
   await base.$executeRawUnsafe('TRUNCATE "MemberRightsImport"');
   await base.$executeRawUnsafe('TRUNCATE "ProviderChange" RESTART IDENTITY');
   await base.$transaction([base.$executeRawUnsafe(`SET LOCAL session_replication_role = replica`),
-    base.$executeRawUnsafe(`TRUNCATE "AuditLog" RESTART IDENTITY`)]);
+    base.$executeRawUnsafe(`TRUNCATE "AuditLog"`)]);
   const [{ left }] = await base.$queryRawUnsafe(`SELECT (SELECT count(*) FROM "AuditLog") + (SELECT count(*) FROM "AuthSession") + (SELECT count(*) FROM "IdpSessionEnd") + (SELECT count(*) FROM "MemberIsolation") + (SELECT count(*) FROM "ProviderChange") AS left`);
   assert.equal(Number(left), 0, 'every world starts with no session, no end mark, no isolation fact, no provider change record and no audit row');
   Object.assign(kc, { held: [], waiters: [], auto: null, logoutMode: 'ok', onLogout: null, logouts: 0, tokens: 0, codes: [],
@@ -580,7 +592,7 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
     if (key === '$transaction') return async (fn, options) => {
       await hit(inst, 'tx.open');
       await observe({ inst, model: '$transaction', phase: 'before' });
-      const result = await base.$transaction(async tx => {
+      const result = await runtime.$transaction(async tx => {
         w.calls.push(inst + ':tx:start');
         await observe({ inst, model: '$transaction', phase: 'started', client: tx });
         const view = new Proxy({}, { get(_t, k) {
@@ -590,7 +602,7 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
           // CORE_COMMAND_DB_CLOCK opts out and proves the boundary against the actual PG transaction clock.
           if (k === '$queryRaw') return async (...args) => {
             const result = await value.apply(tx,args);
-            if (w.realDatabaseClock) return result;
+            if (w.realDatabaseClock || String(args[0]).includes('emr_access.')) return result;
             return result.map(row => Object.fromEntries(Object.entries(row).map(([key,v]) => [key,v instanceof Date ? new Date() : v])));
           };
           if (k === '$executeRaw') return async (...args) => {
@@ -608,19 +620,21 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
       await observe({ inst, model: '$transaction', phase: 'after', result });
       return result;
     };
-    if (['authSession', 'auditLog', 'idpSessionEnd', 'memberIsolation', 'memberRights', 'memberRightsImport', 'providerChange'].includes(key)) return delegate(inst, base, key, 'root');
-    const value = base[key];
-    return typeof value === 'function' ? value.bind(base) : value;
+    if (['authSession', 'auditLog', 'idpSessionEnd', 'memberIsolation', 'memberRights', 'memberRightsImport', 'providerChange'].includes(key)) return delegate(inst, runtime, key, 'root');
+    const value = runtime[key];
+    return typeof value === 'function' ? value.bind(runtime) : value;
   } });
-  const make = name => {
+  const make = async name => {
     // The product's own Keycloak admin client, over the fake's address: each instance its own (its own service token).
     // `prisma` is the instance's recording view, for the other product services a case builds over the same instance.
     const prisma = recorder(name);
-    const service = new AuthService(prisma, new KeycloakService());
-    return { name, service, prisma, guard: new AuthGuard(new Reflector(), service), controller: new AuthController(service), handled: 0 };
+    const ledger = new AuthEventLedger(prisma);
+    await ledger.prepare();
+    const service = new AuthService(prisma, new KeycloakService(), ledger);
+    return { name, service, prisma, ledger, guard: new AuthGuard(new Reflector(), service), controller: new AuthController(service), handled: 0 };
   };
-  w.I1 = make('I1');
-  w.I2 = make('I2');
+  w.I1 = await make('I1');
+  w.I2 = await make('I2');
   /** Another process over the same database: nothing of the others' memory (key set, shared refreshes). */
   w.instance = make;
 
@@ -640,9 +654,9 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
    * gives another (`binding: null` sends none, a string sends that value). The bootstrap `me`, the entry proof and the
    * link logins are the requests a document makes before it knows the id: they send none by default.
    */
-  w.call = async (inst, kind, { sid, cookie, ip = IP, headers = {}, query = {}, body, bearer, binding, csrf = true } = {}) => {
+  w.call = async (inst, kind, { sid, cookie, ip = IP, peer = '127.0.0.1', headers = {}, query = {}, body, bearer, binding, csrf = true } = {}) => {
     const routes = {
-      get: ['GET', '/api/syn/protected', SynProtectedController, SynProtectedController.prototype.read],
+      get: ['GET', '/api/studies', PacsController, PacsController.prototype.studies],
       health: ['GET', '/api/health', PacsController, PacsController.prototype.health],
       me: ['GET', '/api/me', PacsController, PacsController.prototype.me],
       authz: ['GET', '/api/authz/dicom', PacsController, PacsController.prototype.authzDicom],
@@ -658,7 +672,7 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
     const cookies = [sid ? 'kin_sid=' + encodeURIComponent(sid) : null, cookie ?? null].filter(Boolean).join('; ');
     const unbound = ['me', 'entry', 'login', 'register', 'callback'].includes(kind);
     const bound = binding === undefined ? (sid && !unbound ? inst.service.sessionRef(sid) : null) : binding;
-    const req = { method, originalUrl: path, url: path, query, body, headers: {
+    const req = { method, originalUrl: path, url: path, query, body, socket: { remoteAddress: peer }, headers: {
       ...(cookies ? { cookie: cookies } : {}), ...(ip === null ? {} : { 'x-real-ip': ip }),
       ...(method === 'POST' && csrf ? { 'x-kin-csrf': '1' } : {}), ...(bound ? { 'x-kin-session': bound } : {}),
       ...(bearer ? { authorization: 'Bearer ' + bearer } : {}), ...headers } };
@@ -871,6 +885,234 @@ function refuseFlow(w, inst, begin, error, { cookies = [] } = {}) {
 }
 
 const promptOf = out => new URL(out.location).searchParams.get('prompt');
+
+// EMR-B2: actual compiled U5 producer, PostgreSQL runtime role, protected filesystem and real signed provider tokens.
+// The browser transport contact below is exercised without claiming C's absent durable device queue or signing keys.
+async function protectedAuthRows(w) {
+  return (await w.base.$queryRawUnsafe(`SELECT e.event_id, e.payload, p.audit_log_id, a.actor, a.action, a.target, a.at, a.detail
+    FROM emr_access.access_entry e JOIN emr_access.audit_projection p ON p.event_id=e.event_id
+    JOIN "AuditLog" a ON a.id=p.audit_log_id WHERE e.stream='viewing' ORDER BY e.sequence`))
+    .map(row => ({ ...row, event: JSON.parse(row.payload).event, detail: JSON.parse(row.detail) }));
+}
+async function b2Login(w, sub = 'b2-member', extra = {}) {
+  const token = await w.issue('b2-token-' + sub, { sub, ...extra });
+  const { done } = await login(w, w.I1, token);
+  assert.equal(done.cookie, 'S', 'L09 admitted login has its cookie only after durable receipt');
+  return { token, done };
+}
+
+test('L09 auth login and entry commit with one projection each; failed storage grants no session and audit identifiers grant nothing', async t => {
+  const w = await world(t);
+  const { token, done } = await b2Login(w);
+  const first = (await protectedAuthRows(w))[0];
+  assert.equal(first.event.action, 'auth.login');
+  assert.equal(first.event.result, 'succeeded');
+  for (const credential of [first.event.auditLinkId, first.event.session.value]) {
+    assert.equal((await w.call(w.I1, 'me', { sid: credential })).status, 401, 'L09 audit cookie refused');
+    assert.equal((await w.call(w.I1, 'me', { bearer: credential })).status, 401, 'L09 audit Bearer refused');
+    assert.equal((await w.call(w.I1, 'entry', { sid: done.newSid, body: { proof: credential } })).status, 403, 'L09 audit entry proof refused');
+  }
+  assert.equal((await w.call(w.I1, 'entry', { sid: done.newSid, body: { proof: done.proof } })).status, 200);
+  assert.equal((await w.call(w.I1, 'entry', { sid: done.newSid, body: { proof: done.proof } })).status, 403);
+  const rows = await protectedAuthRows(w);
+  assert.equal(rows.length, 2); assert.deepEqual(rows.map(r => r.event.action), ['auth.login', 'auth.entry']);
+  assert.equal(rows[1].event.relatedEventId, first.event.eventId);
+  assert.equal(rows[1].event.session.value, first.event.session.value);
+  assert.notEqual(rows[1].event.eventId, first.event.eventId);
+  w.fault('I1', 'tx.audit', new Error('synthetic projection unavailable'));
+  const denied = await login(w, w.I1, await w.issue('denied', { sub: 'denied' }));
+  assert.equal(denied.done.newSid, null); assert.equal(await w.sessions(), 1);
+  assert.equal((await protectedAuthRows(w)).filter(r => r.event.action === 'auth.login' && r.event.result === 'succeeded').length, 1);
+  const before = (await w.rows()).length;
+  for (let n = 0; n < 4; n++) await w.call(w.I1, 'callback', { query: { state: 'unowned', code: 'unowned' } });
+  assert.equal((await w.rows()).length, before);
+  assert.equal((await w.call(w.I1, 'me', { sid: done.newSid })).status, 200);
+  await w.finish('L09');
+});
+
+test('L10 one end per deleted session; retries and losing requests add none and a reused provider sid needs new authentication', async t => {
+  const w = await world(t);
+  const { token, done } = await b2Login(w, 'same', { authTime: Math.floor(Date.now()/1000) });
+  const references = (await protectedAuthRows(w)).flatMap(row => [row.event.auditLinkId, row.event.session.value]);
+  await Promise.all([w.call(w.I1, 'logout', { sid: done.newSid }), w.call(w.I2, 'logout', { sid: done.newSid })]);
+  await w.told();
+  await w.call(w.I1, 'logout', { sid: done.newSid });
+  assert.equal((await protectedAuthRows(w)).filter(r => r.event.action === 'auth.logout').length, 1, 'L10 duplicate end refused');
+  assert.equal(await w.sessions(), 0);
+  assert.equal((await w.call(w.I1, 'me', { sid: done.newSid })).status, 401);
+  assert.equal((await w.call(w.I1, 'me', { bearer: token.access })).status, 401);
+  assert.equal((await w.call(w.I1, 'entry', { sid: done.newSid, body: { proof: done.proof } })).status, 403);
+  w.tick(2000);
+  const fresh = await b2Login(w, 'same', { idp: token.idp, authTime: Math.floor(Date.now()/1000) });
+  assert.notEqual(fresh.done.newSid, done.newSid);
+  for (const reference of references) {
+    assert.equal((await w.call(w.I1, 'me', { sid: reference })).status, 401, 'L10 an old audit cookie cannot select a new session');
+    assert.equal((await w.call(w.I1, 'me', { bearer: reference })).status, 401, 'L10 an old audit reference cannot become a Bearer');
+  }
+  assert.equal((await w.call(w.I1, 'me', { sid: fresh.done.newSid })).status, 200);
+  assert.equal((await w.call(w.I1, 'me', { bearer: token.access })).status, 401);
+  await w.finish('L10');
+});
+
+test('L11 namesakes and historical institutions stay separate; DB rights and the sweep executor are attributed independently', async t => {
+  const w = await world(t);
+  const first = await b2Login(w, 'subject-a', { email: 'same-name@synthetic.test' });
+  const second = await b2Login(w, 'subject-b', { email: 'same-name@synthetic.test' });
+  const original = await protectedAuthRows(w);
+  assert.notEqual(original[0].event.affectedIdentity.value.id, original[1].event.affectedIdentity.value.id, 'L11 immutable namesakes');
+  await w.base.memberRights.update({ where: { sub: 'subject-a' }, data: { institution: B, roles: ['technician'], version: 2 } });
+  const again = await b2Login(w, 'subject-a', { groups: [Z], roles: ['admin'] });
+  const later = await protectedAuthRows(w);
+  assert.equal(later[2].event.affectedIdentity.value.id, original[0].event.affectedIdentity.value.id);
+  assert.equal(later[2].event.actingInstitution.value, B);
+  assert.deepEqual(later[2].event.rolesAtTime.value, ['technician']);
+  assert.equal(later[0].event.actingInstitution.value, A);
+  assert.equal(later[0].detail.institution, A);
+  const waiting = await b2Login(w, 'pending', { groups: [], roles: [] });
+  const pending = (await protectedAuthRows(w)).find(r => r.event.affectedIdentity.value?.subject === 'pending');
+  assert.equal(pending.event.result, 'succeeded'); assert.deepEqual(pending.event.rolesAtTime.value, []);
+  assert.equal(pending.event.actingInstitution.reason, 'not-approved');
+  assert.equal((await w.call(w.I1, 'me', { sid: waiting.done.newSid })).status, 403);
+  await w.base.authSession.updateMany({ data: { lastSeenAt: new Date(Date.now() - 13*HOUR) } });
+  await w.I2.service.onModuleInit(); t.after(() => w.I2.service.onModuleDestroy()); w.tick(HOUR);
+  await within((async () => { while (await w.sessions()) await new Promise(r => setTimeout(r, 20)); })(), 'sweep stored ends');
+  const swept = (await protectedAuthRows(w)).filter(r => r.event.auth.endCause === 'sweep');
+  assert.equal(swept.length, 4);
+  assert(swept.every(r => r.event.executor === 'service' && r.event.userId.value.id !== r.event.affectedIdentity.value.id));
+  await w.finish('L11');
+});
+
+test('L12 ingress uses the real nginx peer and overwritten address; direct forwarded headers cannot mint a success event', async t => {
+  const w = await world(t);
+  assert(process.env.KIN_B2_NGINX_PORT, 'L12 requires the real isolated nginx fixture');
+  process.env.KIN_EMR_PROXY_HOST = '127.0.0.3';
+  const instance = await w.instance('ingress');
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, 'http://synthetic.test');
+    const result = await w.call(instance, 'callback', { cookie: req.headers.cookie, peer: req.socket.remoteAddress,
+      headers: req.headers, query: Object.fromEntries(url.searchParams) });
+    if (result.newSid) res.setHeader('Set-Cookie', 'kin_sid=' + encodeURIComponent(result.newSid));
+    res.writeHead(result.status, { Location: result.location ?? '' }); res.end();
+  });
+  await new Promise(resolve => server.listen(19009, '127.0.0.1', resolve));
+  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); process.env.KIN_EMR_PROXY_HOST='127.0.0.1'; });
+  const token = await w.issue('nginx-token', { sub: 'nginx-member' });
+  const attempt = async port => {
+    const begin = await w.call(instance, 'login');
+    const state = new URL(begin.location).searchParams.get('state');
+    const code = 'syn-code-' + randomUUID(); w.secret('code', code);
+    kc.auto = () => reply.tokens(token);
+    const response = await fetch(`http://127.0.0.1:${port}/api/auth/callback?` + new URLSearchParams({ state, code }), {
+      redirect: 'manual', headers: { Cookie: begin.pendingCookie, 'X-Real-IP': '203.0.113.66', 'X-Forwarded-For': '203.0.113.66' } });
+    kc.auto = null;
+    return response.headers.has('set-cookie');
+  };
+  assert.equal(await attempt(19009), false, 'L12 direct forged ingress refused');
+  assert.equal(await attempt(process.env.KIN_B2_NGINX_PORT), true, 'L12 nginx ingress admitted');
+  const successes = (await protectedAuthRows(w)).filter(r => r.event.result === 'succeeded');
+  assert.equal(successes.length, 1); assert.equal(successes[0].event.trustedProxyIp.value.address, '127.0.0.1');
+  assert.equal(successes[0].detail.ip, '127.0.0.1');
+  await w.finish('L12');
+});
+
+test('L13 the same event projects its original UTC time and institution once without credentials', async t => {
+  const w = await world(t, { now: Date.now() });
+  w.realDatabaseClock = true;
+  const before = new Date();
+  const { done } = await b2Login(w, 'time-member');
+  await w.call(w.I1, 'entry', { sid: done.newSid, body: { proof: done.proof } });
+  await w.call(w.I1, 'logout', { sid: done.newSid });
+  const after = new Date(), rows = await protectedAuthRows(w);
+  assert.equal(rows.length, 3); assert.equal(new Set(rows.map(r => r.event_id)).size, 3);
+  assert.equal(new Set(rows.map(r => r.audit_log_id)).size, 3);
+  for (const row of rows) {
+    assert.equal(row.at.toISOString(), row.event.occurredAt);
+    assert(row.at >= before && row.at <= after); assert(row.event.occurredAt.endsWith('Z'));
+    assert.equal(row.detail.institution, A); assert.deepEqual(row.event.targets, []);
+    assert.deepEqual(secretHits([row.payload, JSON.stringify(row.detail)], w.secrets), []);
+  }
+  await w.base.memberRights.update({ where: { sub: 'time-member' }, data: { institution: B } });
+  const unchanged = await protectedAuthRows(w);
+  assert.deepEqual(unchanged.map(r => [r.event_id, r.at, r.detail]), rows.map(r => [r.event_id, r.at, r.detail]));
+  const page = await w.base.auditLog.findMany({ orderBy: { id: 'desc' }, take: 2 });
+  const next = await w.base.auditLog.findMany({ where: { id: { lt: page[1].id } }, orderBy: { id: 'desc' }, take: 2 });
+  assert.equal(new Set([...page, ...next].map(r => r.id)).size, 3);
+  await w.finish('L13');
+});
+
+test('L14 disconnected requests do not end authentication; reauthentication contacts preserve originals and isolate accounts', async t => {
+  const w = await world(t);
+  const { done } = await b2Login(w, 'owner');
+  const transport = require('/assets/session-transport.js');
+  const identity = { state: 'approved', issuer: ISSUER, sub: 'owner', institution: A, roles: ['radiologist'], rightsVersion: 1 };
+  const owner = { issuer: ISSUER, subject: 'owner', institution: A };
+  const authority = { state: 'active', session: w.I1.service.sessionRef(done.newSid), identity };
+  let ends = 0;
+  const context = { session: authority.session };
+  const gate = { admits: () => true, onInvalidate: () => {} };
+  for (const mode of ['network', 'timeout', 401, 403, 409, 500, 503]) {
+    const client = transport.create({ gate, deadlineMs: 5, authFailure: () => { ends++; }, fetch: async (_url, init) => {
+      if (mode === 'network') throw new TypeError('offline');
+      if (mode === 'timeout') return new Promise((_r, reject) => init.signal.addEventListener('abort', () => reject(new Error('timeout'))));
+      return new Response('{}', { status: mode });
+    } });
+    try { await client.request('/api/me', { context }); } catch (error) { assert(['network','timeout'].includes(error.transport)); }
+  }
+  assert.equal(ends, 0, 'L14 disconnect is not session end');
+  assert.equal((await w.call(w.I1, 'me', { sid: done.newSid })).status, 200);
+  await w.call(w.I1, 'logout', { sid: done.newSid }); await w.told();
+  authority.state = 'confirmed';
+  const held = transport.recoveryAccess(authority, owner);
+  assert.equal(held.state, 'send-after-reauthentication'); assert(held.preserveOriginal && held.preserveQueue); assert.equal(held.useKeys, false);
+  w.tick(2000);
+  const fresh = await b2Login(w, 'owner', { authTime: Math.floor(Date.now()/1000) });
+  authority.state = 'active'; authority.session = w.I1.service.sessionRef(fresh.done.newSid);
+  assert.equal(transport.recoveryAccess(authority, owner).state, 'validation-required');
+  assert.equal(transport.recoveryAccess({ ...authority, identity: { ...identity, sub: 'other' } }, owner).read, false);
+  assert.equal(transport.recoveryAccess({ ...authority, identity: { ...identity, issuer: 'different' } }, owner).useKeys, false);
+  assert.equal((await w.call(w.I1, 'me', { sid: done.newSid })).status, 401);
+  await w.finish('L14');
+});
+
+test('L15 normal login, automatic entry, refresh and another tab require no additional authentication and startup refuses missing configuration', async t => {
+  const w = await world(t);
+  const { token, done } = await b2Login(w, 'normal');
+  assert.equal((await w.call(w.I1, 'entry', { sid: done.newSid, body: { proof: done.proof } })).status, 200);
+  assert.equal((await w.call(w.I1, 'me', { sid: done.newSid })).status, 200);
+  assert.equal((await w.call(w.I2, 'me', { sid: done.newSid })).status, 200);
+  const renewed = await w.issue('renewed', { sub: 'normal' });
+  kc.auto = () => reply.tokens(renewed);
+  await w.base.authSession.update({ where: { sid: done.newSid }, data: { atExpiresAt: new Date(Date.now()-31000) } });
+  assert.equal((await w.call(w.I1, 'me', { sid: done.newSid })).status, 200);
+  kc.auto = null;
+  assert.equal((await protectedAuthRows(w)).length, 2);
+  assert.equal(await w.sessions(), 1); assert.deepEqual(w.expiries, []);
+  const unprepared = new AuthService(runtime, new KeycloakService(), new AuthEventLedger(runtime));
+  t.after(() => unprepared.onModuleDestroy());
+  await assert.rejects(unprepared.onModuleInit(), /AuthLedgerNotPrepared/);
+  await w.finish('L15');
+});
+
+test('L16 a failed authentication observation survives rollback and recovers under its original identity and time without secrets', async t => {
+  const w = await world(t);
+  const begin = await w.call(w.I1, 'login');
+  w.fault('I1', 'tx.audit', new Error('synthetic failed projection'));
+  await refuseFlow(w, w.I1, begin, 'access_denied');
+  assert.equal(await w.sessions(), 0);
+  assert.equal((await protectedAuthRows(w)).length, 0);
+  const files = fs.readFileSync(process.env.KIN_EMR_STATE_DIR + '/journal/failure-journal.jsonl', 'utf8');
+  const observations = files.split('\n').filter(Boolean).map(line => JSON.parse(line)).filter(row => row.kind === 'auth-failure-observed');
+  const original = JSON.parse(observations.at(-1).body.observation);
+  assert.deepEqual(secretHits([files], w.secrets), []);
+  await w.I2.service.onModuleInit(); t.after(() => w.I2.service.onModuleDestroy());
+  const recovered = await protectedAuthRows(w);
+  assert.equal(recovered.length, 1); assert.equal(recovered[0].event.eventId, original.eventId);
+  assert.equal(recovered[0].event.occurredAt, original.at);
+  await w.I1.ledger.recoverFailures();
+  assert.equal((await protectedAuthRows(w)).length, 1); assert.equal(await w.sessions(), 0);
+  assert.deepEqual(secretHits(recovered.map(r => r.payload), w.secrets), []);
+  await w.finish('L16');
+});
 const atProvider = out => typeof out.location === 'string' && out.location.startsWith(ISSUER + '/protocol/openid-connect/auth?');
 const landing = error => ORIGIN + '/worklist/hpacs-lite/index.html?auth_error=' + error;
 
@@ -2191,7 +2433,7 @@ test('U5S-AMD-04 Keycloak unreachable, slow, failing or unreadable never ends a 
   for (const mode of ['drop', 'error']) {
     const s = 'syn-sub-amd4-jwks-' + mode;
     const sid = await w.session(await w.issue(s, { sub: s, groups: [A] }));
-    const inst = w.instance('J-' + mode);
+    const inst = await w.instance('J-' + mode);
     kc.certs = mode;
     const out = await w.call(inst, 'get', { sid });
     kc.certs = 'ok';
@@ -2237,7 +2479,7 @@ test('U5S-TEST-S05 logout: the revocation and its record commit before Keycloak 
       assert.deepEqual(await w.changes(idpOf(s)), ['done']);
     }
     // The ended session is refused by every process - one that never saw it included (nothing in memory could revive it).
-    for (const inst of [w.I1, w.I2, w.instance('S05-' + mode)]) {
+    for (const inst of [w.I1, w.I2, await w.instance('S05-' + mode)]) {
       const after = await w.call(inst, 'get', { sid });
       assert.deepEqual([...coded(after), after.cookie], [401, 'AUTH_SESSION_ENDED', 'AUTH_SESSION_ENDED', 'K'], mode);
     }
@@ -2640,7 +2882,7 @@ test('U5E-05 (acceptance 5) an end the provider did not confirm survives a resta
   // The restart: a new process, the provider reachable again. Its start resumes the unconfirmed end whatever its due time.
   kc.logoutMode = 'ok';
   const asked = kc.logouts;
-  const restarted = w.instance('R');
+  const restarted = await w.instance('R');
   await restarted.service.onModuleInit();
   try {
     await w.until('the resumed provider end', async () => (await w.mark(X)).confirmedAt !== null);
@@ -2711,7 +2953,7 @@ test('U5E-06 a lost answer of the provider end stays unknown: the end is asked a
     'the provider ended it; the product does not know - that request stays unknown');
   kc.logoutMode = 'ok';
   w.tick(60_000);
-  const restarted = w.instance('R');
+  const restarted = await w.instance('R');
   await restarted.service.onModuleInit();
   try {
     // A new process asks again: "no such session" answers that request - and only that one.
@@ -2859,7 +3101,7 @@ test('U5E-09 the bound start waits for the provider end: unconfirmed is 503 with
   // The service account's token endpoint does not answer: the whole admin call is bounded, the start answers 503.
   const s2 = 'syn-sub-u5e9-hang';
   const sid2 = await w.session(await w.issue(s2, { sub: s2, groups: [B] }));
-  const hung = w.instance('H');
+  const hung = await w.instance('H');
   kc.serviceMode = 'hang';
   const from = performance.now();
   const slow = await w.call(hung, 'switch', { sid: sid2, body: SWITCH });
@@ -3239,7 +3481,7 @@ test('U5E-21 (S7-U5 CE1) a mark covers the ended SSO\'s authentication, not its 
     await w.base.providerChange.count({where:{kind:'end_session',target:X,state:'unknown'}})===0);
   kc.logoutMode = 'ok';
   w.tick(1000);
-  const resumer = w.instance('R21');
+  const resumer = await w.instance('R21');
   await resumer.service.onModuleInit();
   try {
     await w.until('the re-ended SSO confirmed', async () => (await confirmedAt(X)) !== null);
@@ -3323,7 +3565,7 @@ test('U5E-21 (S7-U5 CE1) a mark covers the ended SSO\'s authentication, not its 
   for (const [idp, decided, confirmed] of [['syn-idp-u5e21-reended', 14, 1], ['syn-idp-u5e21-old', 14, 14]])
     await w.base.idpSessionEnd.create({ data: { idpSid: idp, cause: 'logout', decidedAt: at(decided), confirmedAt: at(confirmed),
       attempts: 1, nextAttemptAt: at(decided) } });
-  const sweeper = w.instance('S21');
+  const sweeper = await w.instance('S21');
   await sweeper.service.onModuleInit();
   try {
     w.tick(HOUR);
@@ -3365,7 +3607,7 @@ test('U5E-24 (D600 3) a late end request: another request\'s 204 answered first 
   assert.equal((await w.call(w.I1, 'logout', { sid: sidA })).status, 204);
   await late.arrived();
   // A new process retries the unconfirmed end: that second request is carried out and answered 204 first.
-  const retry = w.instance('R24');
+  const retry = await w.instance('R24');
   await retry.service.onModuleInit();
   try {
     await w.until('the second end request answered', async () => (await w.changes(X)).length === 2 && (await w.changes(X))[1] === 'done');
@@ -3684,7 +3926,7 @@ test('U4 CRASH-CUTS: sid end records preserve recorded uncertainty across store/
         if (cut === 'after-settle') assert.equal(records[0].state, 'done', 'a committed answer survives sender loss');
         else {
           assert.equal(records[0].state, 'unknown', kind + '/' + cut + ': unknown survives');
-          const restarted = w.instance('U4-' + m);
+          const restarted = await w.instance('U4-' + m);
           // Recovery is a new instance over the same facts, never a guessed terminal state.
           const token = await w.issue(m + '-probe', { sub: m, idp: P });
           assert.equal((await w.call(restarted, 'get', { bearer: token.access })).status, 401);
@@ -3702,7 +3944,7 @@ test('U5 SID-RETRY-STALE: confirmation and admission after retry CAS forbid a st
   const w = await world(t, { now: START + 400 }), m = 'syn-u5', P = m + '-idp';
   const pending = holdEnd(P, 'before');
   await w.call(w.I1, 'logout', { sid: await w.session(await w.issue(m, { sub: m, idp: P })) }); await pending.arrived();
-  const retry = w.instance('U5retry');
+  const retry = await w.instance('U5retry');
   const held = w.pause({ inst: 'U5retry', model: 'idpSessionEnd', method: 'updateMany', scope: 'root', phase: 'after' }, e => typeof e.args.data.attempts === 'number');
   await retry.service.onModuleInit(); await held.arrived();
   pending.release(); await w.told(); await w.until('confirmed', async () => !!(await w.mark(P))?.confirmedAt);
@@ -3720,7 +3962,7 @@ test('U9 UNKNOWN-GC-13H: old terminal records are collected; old unknown records
   const unknown = await w.base.providerChange.create({ data: { sub: m, kind: 'end_session', target: P, generation: 1, state: 'unknown', createdAt: at } });
   for (const state of ['done', 'void']) await w.base.providerChange.create({ data: { sub: m, kind: 'end_session', target: P, generation: 1, state, createdAt: at, settledAt: at } });
   await w.base.idpSessionEnd.create({ data: { idpSid: P, cause: 'logout', decidedAt: at, nextAttemptAt: new Date(Date.now() + 2 * HOUR) } });
-  const sweeper = w.instance('U9gc'); await sweeper.service.onModuleInit(); w.tick(HOUR);
+  const sweeper = await w.instance('U9gc'); await sweeper.service.onModuleInit(); w.tick(HOUR);
   await w.until('terminal rows collected', async () => await w.base.providerChange.count({ where: {
     sub: m, state: { in: ['done', 'void'] }, createdAt: { lt: new Date(Date.now() - 13 * HOUR) },
   } }) === 0);
@@ -4054,7 +4296,7 @@ test('CORE-R2-BOOT API starts during realm outage; retries indefinitely with cap
     assert.equal(await w.base.memberRightsImport.count(),0,'marker invisible before commit');
     failedCommit=true;throw new Error('synthetic failure after marker before commit');
   });
-  const service=new AuthService(w.I1.prisma,provider); t.after(()=>service.onModuleDestroy());
+  const service=new AuthService(w.I1.prisma,provider,w.I1.ledger); t.after(()=>service.onModuleDestroy());
   // Only the import scheduler is controlled: no network/readiness sleeps are elided.
   const schedule=()=>{global.setTimeout=(fn,ms,...args)=>{if(![1000,2000,4000,8000,16000,30000].includes(ms))return realTimer(fn,ms,...args);delays.push(ms);queued.push(fn);return {unref(){}};};};
   const flush=async()=>{for(let i=0;i<100;i++)await new Promise(resolve=>setImmediate(resolve));};
@@ -4085,7 +4327,7 @@ test('CORE-R2-BOOT API starts during realm outage; retries indefinitely with cap
   assert.equal((await w.call(w.I1,'get',{bearer:old.access})).status,401);
   w.tick(1000);const fresh=await w.issue(m+'-fresh',{sub:m,authTime:Math.floor(Date.now()/1000)});
   assert.ok((await login(w,w.I2,fresh)).done.newSid);
-  const restart=new AuthService(w.base,{listUsers:async()=>{calls++;throw Error('must skip provider');}});
+  const restart=new AuthService(w.base,{listUsers:async()=>{calls++;throw Error('must skip provider');}},w.I1.ledger);
   t.after(()=>restart.onModuleDestroy());await restart.onModuleInit();await flush();assert.equal(calls,11);
   const logs=await w.finish('CORE-R2-BOOT');
   assert.ok(logs.some(([,line])=>line.includes('synthetic realm unreachable')),'retry reason is logged');
@@ -4094,7 +4336,7 @@ test('CORE-R2-BOOT API starts during realm outage; retries indefinitely with cap
 test('CORE-R2-IMPORTED existing realm-v1 starts while the member admin API is down', async t => {
   const w=await world(t);let read=false,calls=0;
   w.observe({inst:'I1',scope:'root',model:'memberRightsImport',method:'findUnique',phase:'after'},()=>{read=true;});
-  const service=new AuthService(w.I1.prisma,{listUsers:async()=>{calls++;throw Error('synthetic realm down');}});
+  const service=new AuthService(w.I1.prisma,{listUsers:async()=>{calls++;throw Error('synthetic realm down');}},w.I1.ledger);
   t.after(()=>service.onModuleDestroy());await service.onModuleInit();
   await w.until('import read or provider attempt completed',async()=>read||calls>0);
   // The stub fails synchronously, so draining this completed read's continuations settles the import attempt too.
@@ -4417,7 +4659,7 @@ test('CORE_CREDENTIALS_COMMIT_CRASH_SECOND_API U8 intent survives crash before s
   assert.equal((await r10Patch(admin,m,coreBody('Change'))).status,500);assert.equal(crashed,true);
   const record=await w.base.providerChange.findFirst({where:{sub:m,kind:'credentials'}});assert.equal(record.state,'unknown');assert.equal(record.outcome,null);
   assert.ok(!kc.adminCalls.some(x=>/^(PUT|POST|DELETE) /.test(x)));
-  const second=w.instance('crash-restart');await second.service.onModuleInit();t.after(()=>second.service.onModuleDestroy());
+  const second=await w.instance('crash-restart');await second.service.onModuleInit();t.after(()=>second.service.onModuleDestroy());
   w.tick(1000);const token=await w.issue(m+'-new',{sub:m,authTime:Math.floor(Date.now()/1000)});
   const entered=(await login(w,second,token)).done;assert.ok(entered.newSid);
   assert.equal((await w.call(second,'me',{sid:entered.newSid})).body.institution,B);

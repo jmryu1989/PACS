@@ -2,14 +2,22 @@ import {
   HttpException, Injectable, InternalServerErrorException, Logger,
   OnModuleDestroy, OnModuleInit, UnauthorizedException,
 } from '@nestjs/common';
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
-import { isIP } from 'net';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
+import { lookup } from 'node:dns/promises';
 import { createRemoteJWKSet, decodeJwt, jwtVerify, JWTPayload } from 'jose';
 import { PrismaService } from './prisma.service';
 import { ChangeAnswer, KeycloakService, RosterWriteFailure, within } from './keycloak.service';
 import { rightsAllow, lockMemberRights } from './member-rights';
 import { importMemberRights } from './member-rights-import';
 import { clinicianOnly } from './clinician-policy';
+import { AuthAccessEventV2, AuthEndCause, AuthFailureCause, EvidenceFactV2, ImmutableIdentity, newAuditLinkId, parseAccessEvent, ReauthenticationTrigger } from './emr-contract/access-event';
+import { emrAdapters } from './emr-contract/composition';
+import { runtimeAdapters } from './emr-runtime/context';
+import { authProjection, ingressAddress, knownIdentity, parseAuthFailureObservation, refuseAuditNamespaceCredential, verifiedIdentityClaims } from './emr-runtime/contract';
+import { FailureJournal } from './emr-runtime/failure-journal';
+import { verifyRuntimeConnection } from './emr-runtime/manifest';
+import { AccessSeal } from './emr-runtime/seal';
+import { AccessLedgerStore, PrismaLedgerSql, ProvisionalAppend } from './emr-runtime/store';
 
 const SESSION_IDLE_MS = 12 * 60 * 60 * 1000;
 const SESSION_TOUCH_MS = 5 * 60 * 1000;
@@ -94,6 +102,7 @@ const REASON_CAUSE: Record<Reason, EndCause> = {
 type Phase = 'plain' | 'probe' | 'fresh';
 type PendingLogin = {
   state: string; verifier: string; issuedAt: number;
+  auditAttemptId?: string;
   phase: Phase; reason: Reason | null; prompt: 'login' | 'create' | null; restarts: number;
   memberSub?: string; rightsVersion?: number;
 };
@@ -104,7 +113,8 @@ type Session = {
   entryProofHash: string | null; entryProofExpiresAt: Date | null;
   idpSid: string | null; rightsVersion: number; institution: string | null;
 };
-type Who = { actor: string; target: string; institution: string | null };
+type Who = { actor: string; target: string; issuer: string; institution: string | null };
+type AuthIngress = { surface: string; requestId: string; address: AuthAccessEventV2['trustedProxyIp'] };
 export type LoginFailureCause =
   'provider_error' | 'state_mismatch' | 'no_code' | 'exchange_failed' | 'token_invalid' | 'session_failed' | 'idp_session_ended'
   // 격리된 회원(우리 쪽 격리 사실이 있는 회원)의 로그인: 세션을 만들지 않는다.
@@ -158,6 +168,191 @@ export function markAuthCode(res: any, error: any) {
     res.setHeader('X-KIN-Auth-Code', code);
 }
 
+const known = <T>(value: T): EvidenceFactV2<T> => ({ status: 'known', value });
+const unresolved = (reason: 'not-authenticated' | 'not-resolved' | 'not-observed'): any => ({ status: 'unresolved', reason });
+const sessionParts = /^s2\.([0-9a-f-]{36})\.([0-9a-f-]{36})\.[A-Za-z0-9_-]{43}$/;
+
+/** An opaque credential contains public random references beside an independent 256-bit secret. Only the complete
+ * credential authenticates. References alone are never keys to AuthSession, and neither a hash nor any secret bytes go
+ * into the ledger. Old opaque credentials stay valid until their existing end; no historic login is invented for them. */
+export function newAuthSessionHandle() {
+  const loginEventId = randomUUID(), reference = randomUUID();
+  return { sid: `s2.${loginEventId}.${reference}.${randomBytes(32).toString('base64url')}`, loginEventId, reference: `authref:${reference}` };
+}
+
+/** U5's business transaction, protected fact and legacy projection have one commit. Configuration is prepared by main
+ * before Nest lifecycle hooks. It is deliberately not an onModuleInit task: timer order cannot establish readiness. */
+@Injectable()
+export class AuthEventLedger {
+  private store?: AccessLedgerStore;
+  private managingInstitution?: string;
+  private proxyHost?: string;
+  private readonly transactions = new WeakMap<object, { events: AuthAccessEventV2[]; appended: ProvisionalAppend[] }>();
+
+  constructor(private readonly prisma: PrismaService) {}
+
+  async prepare() {
+    if (this.store) throw new Error('AuthLedgerAlreadyPrepared');
+    const institution = process.env.KIN_EMR_MANAGING_INSTITUTION?.trim();
+    const proxyHost = process.env.KIN_EMR_PROXY_HOST?.trim();
+    if (!institution || !proxyHost) throw new Error('EmrAuthDeploymentRequired');
+    await this.prisma.$connect();
+    await verifyRuntimeConnection(this.prisma);
+    const journal = new FailureJournal(process.env.KIN_EMR_STATE_DIR);
+    const sql = new PrismaLedgerSql(this.prisma);
+    const seal = new AccessSeal(process.env.KIN_EMR_STATE_DIR, sql, journal);
+    await seal.recoverAtStart();
+    this.managingInstitution = institution;
+    this.proxyHost = proxyHost;
+    this.store = new AccessLedgerStore(this.prisma, sql, seal, journal);
+    return runtimeAdapters;
+  }
+
+  assertReady() {
+    if (!this.store) throw new Error('AuthLedgerNotPrepared');
+    emrAdapters();
+  }
+
+  async ingress(req: any, surface?: string): Promise<AuthIngress> {
+    this.assertReady();
+    // DNS belongs to the configured container network, not to any request header. Resolve again after proxy restarts;
+    // an absent ingress remains unobserved and cannot authorize a successful authentication event.
+    let peers = new Set<string>();
+    try { peers = new Set((await lookup(this.proxyHost!, { all: true })).map(row => row.address)); } catch { /* refused by the event contract */ }
+    return { surface: surface ?? req?.emrAuthSurface, requestId: randomUUID(),
+      address: ingressAddress(req?.socket?.remoteAddress, req?.headers ?? {}, peers) };
+  }
+
+  async transaction<T>(work: (tx: any) => Promise<T>): Promise<T> {
+    this.assertReady();
+    let transaction: object | undefined, callbackFailed = false;
+    const facts = { events: [] as AuthAccessEventV2[], appended: [] as ProvisionalAppend[] };
+    let answer: T;
+    try {
+      answer = await this.store!.withAppendTransaction(async tx => {
+        transaction = tx; this.transactions.set(tx, facts);
+        try { return await work(tx); }
+        catch (error) { callbackFailed = true; throw error; }
+      });
+    } catch (error) {
+      for (const event of facts.events) await this.store!.settleTransaction(transaction!, event, error, callbackFailed);
+      // A lost COMMIT response is not a failed login. Keep its original intent for fenced startup recovery.
+      // Preserve the caller's permission/lock-timeout verdict after a confirmed rollback. Logging paths below use
+      // closed storage-step names; neither the database message nor credential-bearing arguments are logged.
+      if (callbackFailed && error instanceof Error) {
+        Object.defineProperty(error, 'authCommitState', { value: 'rolled-back' });
+        throw error;
+      }
+      throw Object.assign(new Error('AuthLedgerTransactionFailed'), { authCommitState: 'unknown' });
+    } finally {
+      if (transaction) this.transactions.delete(transaction);
+    }
+    try { for (const appended of facts.appended) await this.store!.confirm(appended); }
+    catch { throw Object.assign(new Error('AuthLedgerReceiptUnavailable'), { authCommitState: 'committed-unsealed' }); }
+    return answer;
+  }
+
+  async event(tx: any, input: { action: AuthAccessEventV2['action']; who: Who | null; session?: Session;
+    ingress: AuthIngress | null; cause?: EndCause; trigger?: Reason; failure?: LoginFailureCause;
+    eventId?: string; at?: Date; rights?: any; auditLinkId?: string; managingInstitution?: string }): Promise<AuthAccessEventV2> {
+    this.assertReady();
+    const { action, who, session, ingress } = input;
+    const service = input.cause === 'sweep';
+    const affected = who ? await knownIdentity(verifiedIdentityClaims(who.issuer, who.target, who.actor),
+      (issuer, subject) => this.store!.resolveIdentity(tx, issuer, subject)) : unresolved('not-authenticated');
+    const rights = who ? Object.prototype.hasOwnProperty.call(input, 'rights') ? input.rights
+      : await tx.memberRights.findUnique({ where: { sub: who.target } }) ?? { version: 0, institution: null, roles: [], approved: false, suspended: false } : null;
+    const reference = session ? sessionParts.exec(session.sid) : null;
+    const userId = service ? await knownIdentity(verifiedIdentityClaims('urn:kin:service', 'auth-session-sweep', null),
+      (issuer, subject) => this.store!.resolveIdentity(tx, issuer, subject)) : affected;
+    const roles = who ? rights ? known(rightsAllow(rights) ? rights.roles : []) : unresolved('not-resolved') : unresolved('not-authenticated');
+    const failure = input.failure?.replace(/_/g, '-') as AuthFailureCause | undefined;
+    const event: AuthAccessEventV2 = {
+      formatVersion: 2, branch: 'online-auth', eventId: input.eventId ?? randomUUID(),
+      surface: service ? 'service:auth-session-sweep' : ingress!.surface,
+      userId, affectedIdentity: affected, rolesAtTime: service ? known(['auth-session-sweep']) : roles,
+      rightsVersion: service ? { status: 'not-applicable', reason: 'in-process-service' }
+        : who ? rights ? known(rights.version) : unresolved('not-resolved') : unresolved('not-authenticated'),
+      actingInstitution: service ? known(this.managingInstitution!) : who
+        ? !rights ? unresolved('not-resolved') : (session ? session.institution : rights.institution)
+          ? known(session ? session.institution : rights.institution) : { status: 'not-applicable', reason: 'not-approved' }
+        : unresolved('not-authenticated'),
+      managingInstitution: known(input.managingInstitution ?? this.managingInstitution!), occurredAt: (input.at ?? new Date()).toISOString(),
+      trustedProxyIp: service ? { status: 'not-applicable', reason: 'in-process-service' } : ingress!.address,
+      cause: service ? 'service-job' : 'user-view', executor: service ? 'service' : who ? 'member' : 'unauthenticated',
+      context: { basis: service ? 'service-job' : 'authentication', studyId: null, relatedStudyId: null, reason: null },
+      session: session ? known(reference ? `authref:${reference[2]}` : `authref:${randomUUID()}`) : unresolved('not-resolved'),
+      targets: [], action, result: failure ? ['session-failed', 'storage-failure'].includes(failure) ? 'failed' : 'refused' : 'succeeded',
+      auth: { endCause: input.cause?.replace(/_/g, '-') as AuthEndCause ?? null, failureCause: failure ?? null,
+        trigger: input.cause === 'reauthentication' ? input.trigger!.replace(/_/g, '-') as ReauthenticationTrigger : null },
+      requestId: ingress?.requestId ?? randomUUID(), auditLinkId: input.auditLinkId ?? newAuditLinkId(),
+      relatedEventId: action !== AUTH_LOGIN && reference ? reference[1] : null,
+    };
+    return parseAccessEvent(event) as AuthAccessEventV2;
+  }
+
+  async record(tx: any, event: AuthAccessEventV2, actor: string, legacyInstitution?: string | null) {
+    const facts = this.transactions.get(tx);
+    if (!facts) throw new Error('AuthLedgerTransactionRequired');
+    facts.events.push(event);
+    // The event-specific lock also serializes a durable failure's recovery after a lost response.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${event.eventId}::text, 1096102))`;
+    const existing = await tx.$queryRaw`SELECT event_id FROM emr_access.entry_for_event('viewing', ${event.eventId}::text)`;
+    const appended = await this.store!.appendInTransaction(tx, event);
+    if (!existing.length) {
+      const data = authProjection(event, actor);
+      // Legacy sweep attribution has always been the ended member's institution, not the service's deployment scope.
+      if (legacyInstitution !== undefined) data.detail = JSON.stringify({ ...JSON.parse(data.detail), institution: legacyInstitution });
+      const row = await tx.auditLog.create({ data });
+      await this.store!.recordProjection(tx, event.eventId, row.id);
+    }
+    facts.appended.push(appended);
+  }
+
+  async failure(ingress: AuthIngress, failure: LoginFailureCause, who: Who | null, attemptId: string) {
+    this.assertReady();
+    const retained = this.store!.journal.find(`auth-failure:${attemptId}`);
+    if (retained) return this.recoverFailure(parseAuthFailureObservation(JSON.parse(String(retained.body.observation))));
+    const at = new Date().toISOString();
+    let rights = null;
+    if (who) try {
+      rights = await this.prisma.$transaction(async tx => {
+        await lockMemberRights(tx, who.target);
+        const row = await tx.memberRights.findUnique({ where: { sub: who.target } });
+        return row ? { version: row.version, roles: row.roles, institution: row.institution, approved: row.approved, suspended: row.suspended }
+          : { version: 0, roles: [], institution: null, approved: false, suspended: false };
+      });
+    } catch { /* The missing historical observation is explicit in the durable fact. */ }
+    const observation = parseAuthFailureObservation({ eventId: attemptId, auditLinkId: newAuditLinkId(), at,
+      requestId: ingress.requestId, managingInstitution: this.managingInstitution, address: ingress.address,
+      who, rights, failure: failure.replace(/_/g, '-') });
+    this.store!.journal.record(`auth-failure:${observation.eventId}`, 'auth-failure-observed', { observation: JSON.stringify(observation) }, at);
+    // A failed append still has the durable observation. Only its confirmed same-event receipt marks recovery.
+    try { await this.recoverFailure(observation); } catch {
+      throw new Error('AuthFailureAwaitingRecovery');
+    }
+  }
+
+  private async recoverFailure(observation: ReturnType<typeof parseAuthFailureObservation>) {
+    const done = `auth-failure-recovered:${observation.eventId}`;
+    if (this.store!.journal.find(done)) return;
+    await this.transaction(async tx => {
+      const event = await this.event(tx, { action: AUTH_LOGIN, who: observation.who, rights: observation.rights,
+        ingress: { surface: 'GET auth/callback', requestId: observation.requestId, address: observation.address },
+        failure: observation.failure.replace(/-/g, '_') as LoginFailureCause, eventId: observation.eventId,
+        at: new Date(observation.at), auditLinkId: observation.auditLinkId, managingInstitution: observation.managingInstitution });
+      await this.record(tx, event, observation.who?.actor ?? 'unknown');
+    });
+    this.store!.journal.record(done, 'auth-failure-recovered', { eventId: observation.eventId });
+  }
+
+  async recoverFailures() {
+    this.assertReady();
+    for (const row of this.store!.journal.all()) if (row.kind === 'auth-failure-observed')
+      await this.recoverFailure(parseAuthFailureObservation(JSON.parse(String(row.body.observation))));
+  }
+}
+
 /**
  * 토큰을 브라우저가 아니라 이 서비스 한 곳에서 다룬다. 콜백과 refresh가 같은 검증 함수를
  * 써야, 최초 로그인만 엄격하고 갱신 토큰은 느슨한 두 번째 인증 경로가 생기지 않는다.
@@ -199,9 +394,11 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    */
   private readonly flying = new Map<string, number>();
 
-  constructor(private prisma: PrismaService, private keycloak: KeycloakService) {}
+  constructor(private prisma: PrismaService, private keycloak: KeycloakService, private ledger: AuthEventLedger) {}
 
   async onModuleInit() {
+    this.ledger.assertReady();
+    await this.ledger.recoverFailures();
     // Realm startup may follow API startup. Entry checks the committed marker while this single task retries.
     void this.importRights(1);
     // 조회 시 idle 검사가 본체다. 타이머는 다시 오지 않는 세션 행을 치우는 수거원이고, 치운 세션도 접속기록에 남긴다.
@@ -210,7 +407,10 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     }, 60 * 60 * 1000);
     this.cleanupTimer.unref();
     // 표식 표가 곧 provider 종료의 대기열이다: 프로세스가 죽어도 잃지 않고, 시작할 때 미확인 행을 기한과 무관하게 다시 청한다.
-    this.idpEndTimer = setInterval(() => { void this.resumeIdpEnds(false); }, IDP_END_TICK_MS);
+    this.idpEndTimer = setInterval(() => {
+      void this.resumeIdpEnds(false);
+      void this.ledger.recoverFailures().catch(() => this.storageWarning('login_failure_row'));
+    }, IDP_END_TICK_MS);
     this.idpEndTimer.unref();
     void this.resumeIdpEnds(true);
   }
@@ -230,7 +430,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`Member rights import attempt ${attempt}: ready`);
     } catch (error: any) {
       const delay = Math.min(30000, 1000 * 2 ** Math.min(attempt - 1, 5));
-      this.logger.warn(`Member rights import attempt ${attempt}: ${error?.message ?? 'storage/provider failure'}; retry in ${delay}ms`);
+      this.logger.warn(`Member rights import attempt ${attempt}: storage/provider failure; retry in ${delay}ms`);
       if (!this.stopping) {
         this.importTimer = setTimeout(() => { void this.importRights(attempt + 1); }, delay);
         this.importTimer.unref();
@@ -397,21 +597,18 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 접속지. 프록시가 X-Real-IP를 클라이언트 주소($remote_addr)로 덮어쓴다. req.ip는 trust proxy가 없어 프록시 주소이고
    * X-Forwarded-For 앞머리는 클라이언트가 위조할 수 있다. IP 문자열이 아니면 기록하지 않는다.
    */
-  private requestIp(req: any): string | null {
-    const value = req?.headers?.['x-real-ip'];
-    return typeof value === 'string' && isIP(value) ? value : null;
+  private requestIp(req: any, surface?: string): Promise<AuthIngress> {
+    return this.ledger.ingress(req, surface);
   }
 
   /** 행의 신원: guard와 같은 유도(actor·sub·그룹이 정확히 하나일 때의 기관). */
   private identity(claims: Record<string, any>, sub: string): Who {
     const target = typeof claims.sub === 'string' ? claims.sub : sub;
-    const groups: string[] = (Array.isArray(claims.groups) ? claims.groups : [])
-      .filter((group: unknown): group is string => typeof group === 'string')
-      .map(group => group.replace(/^\//, ''));
     return {
       actor: String(claims.email ?? claims.preferred_username ?? target),
       target,
-      institution: groups.length === 1 ? groups[0] : null,
+      issuer: String(claims.iss),
+      institution: null,
     };
   }
 
@@ -420,9 +617,11 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 지금 Keycloak 그룹이나 따로 먼저 읽은 다른 관찰로 귀속하지 않는다(기록 시점 기관, D7).
    */
   private storedIdentity(session: Session): Who {
-    let claims: Record<string, any> = {};
-    try { claims = decodeJwt(session.accessToken); }
-    catch { claims = {}; }
+    // Only a token admitted by this issuer's verifier may supply the immutable identity of an existing session.
+    // A damaged stored token cannot be repaired with a guessed issuer or display name.
+    const claims = decodeJwt(session.accessToken);
+    if (!process.env.KC_ISSUER || claims.iss !== process.env.KC_ISSUER || claims.sub !== session.sub)
+      throw new Error('StoredSessionIdentityInvalid');
     return { ...this.identity(claims, session.sub), institution: session.institution };
   }
 
@@ -451,8 +650,11 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     const authTime = Number(claims?.auth_time);
     if (!mark.confirmedAt || !Number.isFinite(authTime)) return true;
     const ended = mark.confirmedAt.getTime();
-    const since = flow?.phase === 'fresh' && flow.issuedAt >= ended ? Math.floor(flow.issuedAt / 1000) * 1000 : ended;
-    return authTime * 1000 < since;
+    const fresh = flow?.phase === 'fresh' && flow.issuedAt >= ended;
+    const since = fresh ? Math.floor(flow.issuedAt / 1000) * 1000 : ended;
+    // An exact-second end also covers the old token. Only the verified fresh flow (or the separately checked admitted
+    // token in refuseEndedIdpSession) can establish a new authentication in the provider's same-second precision.
+    return fresh ? authTime * 1000 < since : authTime * 1000 <= since;
   }
 
   /** 이 세션이 태어난 provider 세션. 열이 생기기 전의 행은 저장된 access token(저장 전에 검증한 토큰)에서 읽는다. */
@@ -534,20 +736,21 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 기다린다 — 그 쓰기는 종료보다 먼저 commit되거나, 종료 뒤에 실패한다. 잠금을 제때 얻지 못하면 끝내지 않고 409다.
    */
   private async endSession(
-    session: Session, cause: EndCause, ip: string | null, options: { idleCutoff?: Date; trigger?: Reason } = {},
+    session: Session, cause: EndCause, ip: AuthIngress | null, options: { idleCutoff?: Date; trigger?: Reason } = {},
   ): Promise<EndResult> {
     const idpSid = this.idpSidOf(session);
     const where = options.idleCutoff
       ? { ...this.version(session), lastSeenAt: { lt: options.idleCutoff } } : this.version(session);
     try {
-      return await this.prisma.$transaction(async tx => {
+      return await this.ledger.transaction(async tx => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
         if (idpSid) await this.lockIdpSession(tx, idpSid);
+        await this.lockMember(tx, session.sub);
         const { count } = await tx.authSession.deleteMany({ where });
         if (count !== 1) return { ended: false, idpSid: null, change: null };
         const change = await this.endRows(tx, idpSid, [session], cause, ip, options.trigger);
         return { ended: true, idpSid, change };
-      }, { maxWait: 4000, timeout: 8000 });
+      });
     } catch (error: any) {
       if (lockWaitExceeded(error)) throw this.conflict();
       this.storageWarning('end_transaction');
@@ -563,7 +766,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * `sub`은 그 요청 기록의 관련 회원이다(주지 않으면 끝낸 행의 회원).
    */
   private async endRows(
-    tx: any, idpSid: string | null, ended: Session[], cause: EndCause, ip: string | null, trigger?: Reason, sub?: string,
+    tx: any, idpSid: string | null, ended: Session[], cause: EndCause, ip: AuthIngress | null, trigger?: Reason, sub?: string,
   ): Promise<Change | null> {
     let change: Change | null = null;
     if (idpSid) {
@@ -574,6 +777,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
         update: { confirmedAt: null, nextAttemptAt: now },
       });
       const others: Session[] = await tx.authSession.findMany({ where: { idpSid } });
+      for (const subject of [...new Set(others.map(row => row.sub))].sort()) await this.lockMember(tx, subject);
       for (const other of others) {
         const { count } = await tx.authSession.deleteMany({ where: { sid: other.sid } });
         if (count === 1) ended.push(other);
@@ -581,16 +785,11 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       change = await this.recordEnd(tx, idpSid, sub ?? ended[0]?.sub ?? null, mark.attempts);
     }
     for (const row of ended) {
+      await this.lockMember(tx, row.sub);
       const who = this.storedIdentity(row);
-      await tx.auditLog.create({ data: {
-        actor: who.actor,
-        // 만료로 세는 것은 이 셋뿐이다. 사람이나 로그인 시작이 부른 종료(새 원인 포함)는 만료로 떨어지지 않는다.
-        action: cause === 'idle' || cause === 'refresh_failed' || cause === 'sweep' ? AUTH_EXPIRED : AUTH_LOGOUT,
-        target: who.target,
-        detail: JSON.stringify(cause === 'reauthentication'
-          ? { institution: who.institution, ip, dataSubject: null, cause, trigger: trigger ?? null }
-          : { institution: who.institution, ip, dataSubject: null, cause }),
-      } });
+      const event = await this.ledger.event(tx, { who, session: row, ingress: ip, cause, trigger,
+        action: cause === 'idle' || cause === 'refresh_failed' || cause === 'sweep' ? AUTH_EXPIRED : AUTH_LOGOUT });
+      await this.ledger.record(tx, event, who.actor, row.institution);
     }
     return change;
   }
@@ -604,7 +803,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** 끝내고, 끝냈으면 provider 종료를 청해 둔다(기다리지 않는다). idle·refresh 거절·수거·평소의 Log out이 쓴다. */
-  private async endAndTell(session: Session, cause: EndCause, ip: string | null, idleCutoff?: Date): Promise<boolean> {
+  private async endAndTell(session: Session, cause: EndCause, ip: AuthIngress | null, idleCutoff?: Date): Promise<boolean> {
     const result = await this.endSession(session, cause, ip, { idleCutoff });
     if (result.ended && result.change) this.tellIdp(result.change);
     return result.ended;
@@ -690,7 +889,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async endByRequest(
-    sid: string, session: Session | null, cause: EndCause, ip: string | null, trigger?: Reason,
+    sid: string, session: Session | null, cause: EndCause, ip: AuthIngress | null, trigger?: Reason,
   ): Promise<EndResult> {
     for (let writes = 0; session; ) {
       if (writes === TRANSITION_LIMIT) throw this.conflict();
@@ -864,7 +1063,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     const verifier = randomBytes(32).toString('base64url');
     const state = randomBytes(32).toString('base64url') + (restarts > 0 ? RESTARTED : '');
     const challenge = createHash('sha256').update(verifier).digest('base64url');
-    const pending: PendingLogin = { state, verifier, issuedAt: Date.now(), phase, reason, prompt, restarts, memberSub: want.memberSub, rightsVersion: want.rightsVersion };
+    const pending: PendingLogin = { state, verifier, issuedAt: Date.now(), auditAttemptId: randomUUID(), phase, reason, prompt, restarts, memberSub: want.memberSub, rightsVersion: want.rightsVersion };
     this.appendCookie(res, `${this.pendingName(state)}=${encodeURIComponent(this.signPending(pending))}; Path=/api/auth; `
       + `HttpOnly; Secure; SameSite=Lax; Max-Age=${PENDING_COOKIE_SECONDS}`);
 
@@ -939,7 +1138,8 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     if (!sid || !session)
       return this.startFlow(req, res, reason === 'register'
         ? { phase: 'plain', reason: null, prompt } : { phase: 'probe', reason, prompt });
-    const end = await this.endByRequest(sid, session, REASON_CAUSE[reason], this.requestIp(req), reason);
+    const end = await this.endByRequest(sid, session, REASON_CAUSE[reason], await this.requestIp(req,
+      reason === 'register' ? 'POST auth/register' : 'POST auth/login'), reason);
     // 그사이 다른 요청이 끝냈거나 provider 세션을 모르는 행이면, 남아 있을지 모르는 SSO는 probe 단계가 알아내 끝낸다.
     if (!end.ended || !end.idpSid) return this.startFlow(req, res, { phase: 'probe', reason, prompt });
     if (!end.change || !await this.confirmIdpEnd(end.change, IDP_END_WAIT_MS))
@@ -965,18 +1165,10 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 콜백의 error 원문·code·state는 남기지 않는다. 기록 실패는 고정 분류만 남기고 콜백 응답을 바꾸지 않는다.
    */
   private async loginFailureRow(req: any, cause: LoginFailureCause, who: Who | null) {
-    try {
-      await this.prisma.auditLog.create({ data: {
-        actor: who?.actor ?? 'unknown',
-        action: AUTH_LOGIN,
-        target: who?.target ?? '',
-        detail: JSON.stringify({
-          institution: who?.institution ?? null, ip: this.requestIp(req), dataSubject: null, outcome: 'failure', cause,
-        }),
-      } });
-    } catch {
-      this.storageWarning('login_failure_row');
-    }
+    // No failure row from arbitrary query/state/error text. One server-signed attempt can add at most one failure fact.
+    if (typeof req.emrLoginAttemptId !== 'string') return;
+    const ingress = await this.requestIp(req, 'GET auth/callback');
+    await this.ledger.failure(ingress, cause, who, req.emrLoginAttemptId);
   }
 
   private proofHash(proof: string): string {
@@ -1021,6 +1213,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     const flows = this.pendingFlows(req);
     const found = state ? flows.find(flow => flow.name === this.pendingName(state)) : undefined;
     const own: Flow | null = found?.pending && found.pending.state === state ? found as Flow : null;
+    req.emrLoginAttemptId = (own?.live ? own.pending : flows.find(flow => flow.live)?.pending)?.auditAttemptId;
     if (own) this.expirePending(res, own.name);
 
     if (!own?.live) {
@@ -1096,7 +1289,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       await this.loginFailureRow(req, 'token_invalid', null);
       return { kind: 'landing', error: 'login_failed' };
     }
-    const ip = this.requestIp(req);
+    const ip = await this.requestIp(req, 'GET auth/callback');
     // 받아 둔 복구 의도는 먼저 시작해 둔 평범한 흐름의 콜백도 낮추지 못한다: 그 콜백은 probe로 다뤄진다.
     const intent = flow.reason ? flow
       : flow.phase === 'plain' ? flows.find(other => other.live && other.name !== own.name && other.pending!.reason)?.pending ?? null
@@ -1105,13 +1298,13 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       const reason = (flow.reason ?? intent?.reason)!;
       let change: Change | null | 'ended';
       try {
-        change = await this.prisma.$transaction(async tx => {
+        change = await this.ledger.transaction(async tx => {
           await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
           await this.lockIdpSession(tx, idpSid!);
           const mark = await tx.idpSessionEnd.findUnique({ where: { idpSid } });
           if (mark?.confirmedAt && this.markCovers(mark, payload, flow)) return 'ended' as const;
           return this.endRows(tx, idpSid, [], REASON_CAUSE[reason], ip, reason, String(payload.sub));
-        }, { maxWait: 4000, timeout: 8000 });
+        });
       } catch {
         this.storageWarning('end_transaction');
         return { kind: 'landing', error: 'login_failed' };
@@ -1159,9 +1352,8 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     // Deliver the proof to its consumer, since a second document cannot reuse a consumed proof.
     const document = who.institution !== null && clinicianOnly(roles) && !roles.includes('gateway')
       && !(typeof payload.azp === 'string' && payload.azp.startsWith('gw-')) ? 'clinician.html' : 'main.html';
-    const sid = randomBytes(32).toString('base64url');
+    const { sid, loginEventId } = newAuthSessionHandle();
     const proof = randomBytes(32).toString('base64url');
-    const detail = JSON.stringify({ institution: who.institution, ip, dataSubject: null, outcome: 'success' });
     let outcome: 'created' | 'blocked' | 'expired' | 'isolated';
     let blocked: Change | null = null;
     let alreadyEnded = false;
@@ -1174,7 +1366,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
        * 평소 로그인은 막히지 않고, 격리는 그 API의 답에 기대지 않는다). 사실의 쓰기와 같은 회원 잠금 안에서 읽는다.
        * 세션 생성과 성공 행은 함께 commit되거나 함께 롤백된다.
        */
-      outcome = await this.prisma.$transaction(async tx => {
+      outcome = await this.ledger.transaction(async tx => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
         await this.lockIdpSession(tx, idpSid!);
         const now = new Date();
@@ -1191,7 +1383,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
           }
           return 'blocked';
         }
-        await tx.authSession.create({ data: {
+        const created = await tx.authSession.create({ data: {
           sid,
           sub: String(payload.sub),
           rightsVersion: observed.version, institution: observed.institution,
@@ -1203,11 +1395,15 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
           entryProofExpiresAt: new Date(now.getTime() + ENTRY_PROOF_MS),
           idpSid,
         } });
-        await tx.auditLog.create({ data: { actor: who.actor, action: AUTH_LOGIN, target: who.target, detail } });
+        const event = await this.ledger.event(tx, { action: AUTH_LOGIN, who, session: created, ingress: ip,
+          rights, eventId: loginEventId, at: now });
+        await this.ledger.record(tx, event, who.actor);
         return 'created';
-      }, { maxWait: 4000, timeout: 8000 });
+      });
     } catch (error: any) {
       this.storageWarning('login_transaction');
+      if (error?.authCommitState && error.authCommitState !== 'rolled-back')
+        return { kind: 'landing', error: 'login_unconfirmed' };
       await this.loginFailureRow(req, error?.getStatus?.() === 401 ? 'member_isolated'
         : error?.getResponse?.()?.code === 'AUTH_STORAGE_FAILURE' ? 'storage_failure' : 'session_failed', who);
       return { kind: 'landing', error: 'login_failed' };
@@ -1262,18 +1458,19 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     const stored = Buffer.from(session.entryProofHash), given = Buffer.from(hash);
     if (stored.length !== given.length || !timingSafeEqual(stored, given)) throw refused();
     const who = this.storedIdentity(session);
-    const detail = JSON.stringify({ institution: who.institution, ip: this.requestIp(req), dataSubject: null });
-    const consumed = await this.storage('entry_transaction', () => this.prisma.$transaction(async tx => {
+    const ingress = await this.requestIp(req, 'POST auth/entry');
+    const consumed = await this.storage('entry_transaction', () => this.ledger.transaction(async tx => {
       await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
       await this.lockMember(tx, session.sub);
-      await this.sessionRights(session, tx);
+      const rights = await this.sessionRights(session, tx);
       // 만료는 DB에 닿는 순간에 다시 본다. 0행이면 그사이 쓰였거나 만료된 것이고, 행을 쓰지 않는다.
       const { count } = await tx.authSession.updateMany({
         where: { sid, entryProofHash: hash, entryProofExpiresAt: { gt: new Date() } },
         data: { entryProofHash: null, entryProofExpiresAt: null },
       });
       if (count !== 1) return false;
-      await tx.auditLog.create({ data: { actor: who.actor, action: AUTH_ENTRY, target: who.target, detail } });
+      const event = await this.ledger.event(tx, { action: AUTH_ENTRY, who, session, ingress, rights });
+      await this.ledger.record(tx, event, who.actor);
       return true;
     }));
     if (!consumed) throw refused();
@@ -1281,6 +1478,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   }
 
   async verifyAccessToken(raw: string): Promise<JWTPayload & Record<string, any>> {
+    try { refuseAuditNamespaceCredential(raw); } catch { throw this.credentialsMissing(); }
     if (!this.jwks) throw new UnauthorizedException('서버에 KC_JWKS_URL이 설정되지 않았습니다');
     try {
       const { payload } = await jwtVerify(raw, this.jwks, {
@@ -1293,7 +1491,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     } catch (error: any) {
       // 공개키를 가져오지 못한 것은 토큰의 잘못이 아니다: 인증 실패(401)로 답하면 멀쩡한 세션이 거절된 것처럼 보인다.
       if (!TOKEN_VERDICTS.has(error?.code)) throw this.idpUnavailable();
-      throw new UnauthorizedException('토큰 검증 실패: ' + error.message);
+      throw new UnauthorizedException('토큰 검증 실패');
     }
   }
 
@@ -1332,7 +1530,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** 응답은 그 요청을 시작한 관찰 S에만 적용한다: 성공은 S 조건부 저장이 count 1일 때만, 거절은 S 조건부 종료. */
-  private async doRefresh(session: Session, ip: string | null): Promise<RefreshOutcome> {
+  private async doRefresh(session: Session, ip: AuthIngress | null): Promise<RefreshOutcome> {
     await this.sessionRights(session);
     const answer = await this.exchangeRefresh(session.refreshToken);
     if (answer.kind === 'unavailable') return { kind: 'unavailable' };
@@ -1360,7 +1558,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** 같은 프로세스의 겹친 요청은 같은 관찰(sid와 두 토큰)일 때만 refresh 하나를 나눈다. 응답 쿠키는 각 요청이 정한다. */
-  private refresh(session: Session, ip: string | null): Promise<RefreshOutcome> {
+  private refresh(session: Session, ip: AuthIngress | null): Promise<RefreshOutcome> {
     const key = createHash('sha256').update(JSON.stringify([session.sid, session.accessToken, session.refreshToken]))
       .digest('base64url');
     const running = this.refreshes.get(key);
@@ -1379,7 +1577,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 끝내지 않는다. 세션이 끝나는 것은 Keycloak이 거절을 답했을 때와 idle뿐이다.
    */
   async authenticateSession(sid: string, res: any): Promise<any> {
-    const ip = this.requestIp(res?.req);
+    const ip = await this.requestIp(res?.req);
     let session = await this.readSession(sid);
     if (!session) throw this.ended('인증 세션이 없습니다');
     // idle → refresh → 진행을 관찰마다 판정한다. 조건부 전이가 0행이면 그 관찰(과 늦은 성공 토큰)을 버리고 다시 읽는다.
@@ -1446,7 +1644,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     if (!sid) return;
     const session = await this.readSession(sid);
     if (!session) return;
-    const end = await this.endByRequest(sid, session, 'logout', this.requestIp(req));
+    const end = await this.endByRequest(sid, session, 'logout', await this.requestIp(req, 'POST auth/logout'));
     if (end.ended && end.change) this.tellIdp(end.change);
   }
 

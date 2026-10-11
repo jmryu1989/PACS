@@ -42,7 +42,8 @@ PROFILES = {
         'out': ROOT / 'tests/e2e/artifacts/emr-b-ci',
         'project_prefix': 'kin-emr-b-ci-',
         'suite_timeout': 3600,
-        'suites': (('emr/b/live.py', 'EmrBLedgerLive', 'ci-emr-b-ledger'),),
+        'suites': (('emr/b/live.py', 'EmrBLedgerLive', 'ci-emr-b-ledger'),
+                   ('emr/b/live.py', 'EmrBAuthLive', 'ci-emr-b-auth')),
     },
     'u5-session-api': {
         'out': ROOT / 'tests/e2e/artifacts/u5-session-api-ci',
@@ -730,6 +731,12 @@ def main(profile_name, credential_provider=None):
         evidence_stage = Path(runner_temp)/('kin-vr-suite-evidence-'+secrets.token_hex(6))
         evidence_stage.mkdir(parents=True, exist_ok=False)
     env = profile_environment(profile_name, out, values, evidence_stage)
+    # The isolated realm has an explicit deployment scope and a Docker-DNS proxy peer. Production operators must
+    # supply their own reviewed values; a member's institution is never an implicit deployment configuration.
+    auth_deployment = out / 'auth-deployment.yml'
+    auth_deployment.write_text('services:\n  api:\n    environment:\n'
+        '      KIN_EMR_MANAGING_INSTITUTION: synthetic-ci\n      KIN_EMR_PROXY_HOST: proxy\n', encoding='utf-8')
+    env['COMPOSE_FILE'] = os.pathsep.join([str(ROOT / 'docker-compose.yml'), str(auth_deployment.resolve())])
     project = profile['project_prefix']+secrets.token_hex(6)
     # Fixed container names mean isolation comes from the empty hosted daemon,
     # not this project name. Helpers must still address the same Compose project.

@@ -1,6 +1,9 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { dictationParser } from './dictation-parser';
+import { AuthEventLedger } from './auth.service';
+import { EmrRuntimeRefused } from './emr-runtime/manifest';
+import { composeEmrAdapters } from './emr-contract/composition';
 
 async function bootstrap() {
   // 설정 실수는 첫 요청의 500/인증 우회가 아니라 기동 실패로 드러나야 한다.
@@ -20,6 +23,7 @@ async function bootstrap() {
       }
 
   const app = await NestFactory.create(AppModule, { rawBody: true });
+  composeEmrAdapters(await app.get(AuthEventLedger).prepare());
   app.use(dictationParser());
   /**
    * 모든 `/api/` 응답의 기본값은 `no-store`다(S7-U5 A016). 예전에는 경로 목록에 든 곳만 그랬고, 목록에 없는 GET(판독 이력·
@@ -52,4 +56,9 @@ async function bootstrap() {
   else
     console.log(`[KIN API] 인증: Keycloak (iss=${process.env.KC_ISSUER})`);
 }
-bootstrap();
+bootstrap().catch(error => {
+  // Database/provider error objects may contain credential-bearing connection strings.
+  console.error(error instanceof EmrRuntimeRefused ? '[KIN API] ' + error.message
+    : '[KIN API] startup refused: authentication ledger is not ready');
+  process.exit(1);
+});

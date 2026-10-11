@@ -46,6 +46,11 @@ export class AuthGuard implements CanActivate {
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
     const req = ctx.switchToHttp().getRequest();
+    req.emrAuthSurface = routeKey(
+      this.reflector.get(METHOD_METADATA, ctx.getHandler()),
+      this.reflector.get(PATH_METADATA, ctx.getClass()),
+      this.reflector.get(PATH_METADATA, ctx.getHandler()),
+    );
 
     if (this.reflector.getAllAndOverride<boolean>('public', [ctx.getHandler(), ctx.getClass()]))
       return true;
@@ -190,6 +195,11 @@ export class AuthGuard implements CanActivate {
     req.roles = rightsAllow(rights) ? rights.roles : [];
     req.institution = rights.institution;
     req.groups = rights.institution ? [rights.institution] : [];
+    if (path === '/api/me') {
+      // Public identity facts for C's future device-key binding. Tokens and cookie identifiers stay on the server.
+      res.setHeader('X-KIN-Identity-Issuer', payload.iss);
+      res.setHeader('X-KIN-Rights-Version', String(rights.version));
+    }
 
     const state = memberState(req.groups, req.roles);
     req.memberState = state;

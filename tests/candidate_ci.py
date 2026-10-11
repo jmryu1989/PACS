@@ -36,15 +36,21 @@ FLOWS = (
     # EMR-B1 L01 (emr/units/b.json candidate_cases): the access ledger's roles, guards and restart in its own disposable
     # database and production API image (the selection 114 -> 115).
     ("emr/b/live.py", "EmrBLedgerLive", "test_b01_ledger_roles_and_restart", "test_b01_"),
+    ("emr/b/live.py", "EmrBAuthLive", "test_b09_auth_login_entry_atomic", "test_b09_"),
+    ("emr/b/live.py", "EmrBAuthLive", "test_b14_disconnect_reauth_and_account_isolation", "test_b14_"),
 )
 
 
-def flow_unit(filename):
+def flow_unit(filename, method=None):
     """The flow's runner unit: e2e/test_x.py keeps its earlier candidate-flow-x; a file outside e2e/ keeps its folders
     (emr/b/live.py -> candidate-flow-emr-b-live), so two flows can never share a unit unnoticed (checked in exact_selection)."""
     parts = filename.removeprefix("e2e/").removesuffix(".py").split("/")
     parts[-1] = parts[-1].removeprefix("test_")
-    return "candidate-flow-" + "-".join(parts).replace("_", "-")
+    unit = "candidate-flow-" + "-".join(parts).replace("_", "-")
+    methods = [row[2] for row in FLOWS if row[0] == filename]
+    if method is not None and methods and method != methods[0]:
+        unit += '-' + method.removeprefix('test_').replace('_', '-')
+    return unit
 
 
 def require(condition, message):
@@ -99,11 +105,11 @@ def exact_selection(target, runner):
         require(isinstance(cls, type) and cls.__module__ == module.__name__, "Flow class must be declared in target source")
         require(method.startswith(prefix) and method in cls.__dict__ and callable(cls.__dict__[method]),
                 "Flow method must be the declared target entry point")
-        rows.append((filename, class_name, flow_unit(filename)))
+        rows.append((filename, class_name, flow_unit(filename, method)))
         selected.append({"file": "tests/" + filename, "case": class_name + "." + method})
     require(len({row[2] for row in rows}) == len(rows), "Candidate runner units must be unique")
-    require(len(selected) == 115 and len({(x["file"], x["case"]) for x in selected}) == 115,
-            "Candidate selection must contain 115 unique exact cases")
+    require(len(selected) == 117 and len({(x["file"], x["case"]) for x in selected}) == 117,
+            "Candidate selection must contain 117 unique exact cases")
     return rows, selected
 
 
@@ -115,9 +121,9 @@ def configure(target, ci, runner, plan_dir):
     rows, selected = exact_selection(target, runner)
     plan_dir.mkdir(mode=0o700)
     plans = {}
-    flow_cases = {(filename, class_name): method for filename, class_name, method, _ in FLOWS}
+    flow_cases = {flow_unit(filename, method): method for filename, class_name, method, _ in FLOWS}
     for filename, class_name, unit in rows:
-        method = flow_cases.get((filename, class_name))
+        method = flow_cases.get(unit)
         if method:
             path = plan_dir / (unit + ".json")
             path.write_text(json.dumps({"unit": unit, "mode": "live", "tests": [

@@ -1732,19 +1732,26 @@ if (process.argv.includes('--emr-inventory-generator')) {
     const result = spawnSync(process.execPath, ['-e', script], { cwd: root, encoding: 'utf8', timeout: 30000 });
     assert.equal(result.status, 0, result.stderr || result.error?.message);
   });
-  test('TEST-EMR-01/19-A R4-09: TypeScript symbols restrict adapter composition calls to the server composition module', () => {
+  test('TEST-EMR-01/19-A R4-09: TypeScript symbols restrict adapter composition to one main startup call', () => {
     const program = ts.createProgram(parsed.fileNames, parsed.options), checker = program.getTypeChecker();
     const resolve = symbol => symbol?.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
     const file = program.getSourceFiles().find(f => f.fileName.replaceAll('\\', '/').endsWith('/emr-contract/composition.ts'));
     const compose = checker.getExportsOfModule(checker.getSymbolAtLocation(file)).find(s => s.name === 'composeEmrAdapters');
     assert(compose);
+    const main = program.getSourceFiles().find(f => f.fileName.replaceAll('\\', '/').endsWith('/src/main.ts'));
+    assert(main);
+    let calls = 0;
     for (const source of program.getSourceFiles().filter(f => parsed.fileNames.includes(f.fileName))) {
       const visit = node => {
-        if (ts.isCallExpression(node) && resolve(checker.getSymbolAtLocation(node.expression)) === compose) assert.equal(source, file);
+        if (ts.isCallExpression(node) && resolve(checker.getSymbolAtLocation(node.expression)) === compose) {
+          assert.equal(source, main);
+          calls++;
+        }
         ts.forEachChild(node, visit);
       };
       visit(source);
     }
+    assert.equal(calls, 1);
   });
   test('TEST-EMR-13/19-A R4-11 Y2c: full processing claims cannot publish a clinical Addendum after expiry under a hold', () => {
     const report = makeRecord('report-1', ['report-version'], t0, 'v1'), held = holdRecord(report);

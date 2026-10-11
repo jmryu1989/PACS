@@ -135,7 +135,7 @@ export class PrismaLedgerSql {
 }
 
 export class AccessLedgerStore implements AppendOnlyAccessStore {
-  private readonly attempts = new WeakMap<object, { attemptId: string; streams: readonly AccessStream[] }>();
+  private readonly attempts = new WeakMap<object, { eventId: string; attemptId: string; streams: readonly AccessStream[] }[]>();
   constructor(private readonly db: PrismaClient, readonly sql: PrismaLedgerSql, readonly seal: AccessSeal, readonly journal: FailureJournal,
     private readonly poolSize: number = (db as PrismaClient & { emrAppendPoolSize?: number })?.emrAppendPoolSize ?? 3) {}
 
@@ -160,7 +160,9 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
     const act = statutoryAct(input, served), entries: ProvisionalEntry[] = [];
     const attemptId = randomUUID(), bundleId = randomUUID();
     await this.enterWriter(tx);
-    this.attempts.set(tx, { attemptId, streams: accessStreams(input, served) });
+    const attempts = this.attempts.get(tx) ?? [];
+    attempts.push({ eventId: input.eventId, attemptId, streams: accessStreams(input, served) });
+    this.attempts.set(tx, attempts);
     let eventId = '';
     for (const stream of accessStreams(input, served)) {
       const { event, text, contentSha256 } = canonicalPayload(input, served, stream);
@@ -285,9 +287,14 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
    * A failed/unknown COMMIT response never uses this negative path merely because a SELECT is empty.
    */
   async settleTransaction(tx: object, input: AccessEvent, error: unknown, callbackFailed: boolean, served?: readonly ResolvedRecord[]): Promise<void> {
-    const attempt = tx && this.attempts.get(tx);
+    const attempts = tx && this.attempts.get(tx);
+    const attempt = attempts?.find(item => item.eventId === input.eventId);
     await this.settle(input, error, served, callbackFailed, attempt);
-    if (tx && callbackFailed) this.attempts.delete(tx);
+    if (tx && callbackFailed && attempts) {
+      const remaining = attempts.filter(item => item !== attempt);
+      if (remaining.length) this.attempts.set(tx, remaining);
+      else this.attempts.delete(tx);
+    }
   }
 
   private note(eventId: string, kind: 'append-rolled-back' | 'ledger-unavailable', cause: string, attemptId = `unassigned:${eventId}`, stream: AccessStream | 'transaction' = 'transaction'): void {

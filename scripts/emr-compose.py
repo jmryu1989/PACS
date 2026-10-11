@@ -124,10 +124,13 @@ def declared_cases(root, declaration, kind):
             module = ast.parse((root / cases["file"]).read_text(encoding="utf-8"))
         except (OSError, SyntaxError, UnicodeDecodeError):
             return None
-        cls = next((n for n in module.body if isinstance(n, ast.ClassDef) and n.name == cases["class"]), None)
-        if cls is None:
-            return None
-        return [n.name for n in cls.body if isinstance(n, ast.FunctionDef) and n.name.startswith("test_")]
+        collected = []
+        for class_name in cases.get('classes', [cases['class']]):
+            cls = next((n for n in module.body if isinstance(n, ast.ClassDef) and n.name == class_name), None)
+            if cls is None:
+                return None
+            collected.extend(n.name for n in cls.body if isinstance(n, ast.FunctionDef) and n.name.startswith('test_'))
+        return collected
     return None
 
 

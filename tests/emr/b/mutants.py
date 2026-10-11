@@ -43,6 +43,10 @@ LIVE = {
     "L03": "test_b03_idempotency_and_concurrent_append", "L04": "test_b04_chain_tail_and_crash_recovery",
     "L05": "test_b05_expiry_checkpoint_and_holds", "L06": "test_b06_complete_reload_and_clause_history",
     "L07": "test_b07_migration_backup_restore_roles", "L08": "test_b08_receipt_before_body",
+    "L09": "test_b09_auth_login_entry_atomic", "L10": "test_b10_end_retry_and_reused_sid",
+    "L11": "test_b11_identity_and_institution_history", "L12": "test_b12_ingress_and_service_ip",
+    "L13": "test_b13_projection_time_and_attribution", "L14": "test_b14_disconnect_reauth_and_account_isolation",
+    "L15": "test_b15_startup_and_normal_path_friction", "L16": "test_b16_auth_failure_recovery_and_no_secrets",
 }
 LIVE_LABEL_KEY = "kin.emrb.live"
 END_OF_MIGRATION = "  emr_access.storage_placement() TO kin_emr_retention;\nCOMMIT;\n"
@@ -73,9 +77,27 @@ MUTANTS = {
          "  const id = string(await resolve(claims.issuer, claims.subject));\n",
          "  const id = string(await resolve(claims.issuer, claims.displayName ?? claims.subject));\n")]),
     "M07": ("an audit link ID or a session reference passes as a credential", [
-        ("api/src/emr-runtime/contract.ts", "/^(audit|authref):/i.test(value.trim())", "/^(?!)/.test(value.trim())")]),
+        ("api/src/emr-runtime/contract.ts", "/^(audit|authref):/i.test(value.trim())", "/^(?!)/.test(value.trim())"),
+        ("api/src/auth.service.ts", "  async authenticateSession(sid: string, res: any): Promise<any> {",
+         "  async authenticateSession(sid: string, res: any): Promise<any> {\n"
+         "    if (/^(audit|authref):/.test(sid)) sid = (await this.prisma.authSession.findFirst())?.sid ?? sid;"),
+        ("api/src/auth.service.ts", "  async verifyAccessToken(raw: string): Promise<JWTPayload & Record<string, any>> {",
+         "  async verifyAccessToken(raw: string): Promise<JWTPayload & Record<string, any>> {\n"
+         "    if (/^(audit|authref):/.test(raw)) raw = (await this.prisma.authSession.findFirst())?.accessToken ?? raw;"),
+        ("api/src/auth.service.ts", "    const hash = this.proofHash(proof);",
+         "    const hash = /^(audit|authref):/.test(proof) ? ((await this.readSession(sid))?.entryProofHash ?? '') : this.proofHash(proof);")]),
     "M08": ("a forwarded address header is believed from any peer", [
         ("api/src/emr-runtime/contract.ts", "if (!peer || !trustedPeers.has(peer) || typeof real", "if (!peer || typeof real")]),
+    "M09": ("one deleted session produces duplicate successful end events", [
+        ("api/src/auth.service.ts", "      await this.ledger.record(tx, event, who.actor, row.institution);",
+         "      await this.ledger.record(tx, event, who.actor, row.institution);\n"
+         "      await this.ledger.record(tx, { ...event, eventId: randomUUID(), auditLinkId: newAuditLinkId() }, who.actor, row.institution);")]),
+    "M10": ("an ordinary refusal falsely ends the document session", [
+        ("worklist-v0/hpacs-lite/session-transport.js", "return (status === 401 && code === 'AUTH_SESSION_ENDED')",
+         "return status >= 400 || (status === 401 && code === 'AUTH_SESSION_ENDED')")]),
+    "M13": ("authentication timers start before protected storage and composition are ready", [
+        ("api/src/auth.service.ts", "    this.ledger.assertReady();\n    await this.ledger.recoverFailures();",
+         "    /* missing startup authentication ledger barrier */")]),
     "M11": ("the sealed tail may be rolled back", [
         ("api/src/emr-runtime/seal.ts", "    if (tail.sequence < current.sequence) throw new SealRefused('LedgerBehindSeal', stream);\n", ""),
         ("api/src/emr-runtime/seal.ts", "    if (sealed.sequence !== current.sequence || sealed.hash !== current.hash) throw new SealRefused('SealTailMismatch', stream);\n", "")]),
@@ -358,7 +380,8 @@ def live_kills(copy, cases, out, name, head, env):
         unit = "emr-b1-mut-%s-%s" % (name.lower(), head[:10])
         plan = out / (name + "-plan.json")
         plan.write_text(json.dumps({"unit": unit, "mode": "live", "max_attempts": 3, "timeout_seconds": 3000,
-            "tests": [{"file": "tests/emr/b/live.py", "case": "EmrBLedgerLive." + LIVE[case]} for case in cases]}), encoding="utf-8")
+            "tests": [{"file": "tests/emr/b/live.py", "case":
+                ('EmrBAuthLive.' if 9 <= int(case[1:]) <= 16 else 'EmrBLedgerLive.') + LIVE[case]} for case in cases]}), encoding="utf-8")
         log = out / (name + "-live.log")
         wait_for_live_gate(copy)
         code, seconds = run([sys.executable, "-B", "scripts/run-tests.py", "--plan", str(plan)], cwd=copy,
@@ -502,7 +525,8 @@ def main(argv=None):
             baseline_log = out / "baseline-contract.log"
             baseline_code, baseline_seconds = run(["node", "--test", "--test-reporter=tap", "tests/emr/b/contract_test.cjs"],
                 cwd=copy, env=env, timeout=900, log=baseline_log)
-            expected_cases = json.loads(DECLARATION.read_text(encoding="utf-8"))["cases"]["contract"]["B1"]
+            declaration = json.loads(DECLARATION.read_text(encoding="utf-8"))
+            expected_cases = declaration["cases"]["contract"][declaration["round"]]
             expected_ids = {case.split()[0] for case in expected_cases}
             passed = re.findall(r"^ok \d+ - (C\d+) ", baseline_log.read_text(encoding="utf-8", errors="replace"), re.M)
             baseline = dict(exit=baseline_code, seconds=baseline_seconds, passed=passed, expected=sorted(expected_ids))

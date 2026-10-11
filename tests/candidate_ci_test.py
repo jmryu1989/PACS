@@ -44,12 +44,12 @@ class CandidateCiTests(unittest.TestCase):
         rows, selected = candidate.exact_selection(target, runner)
         self.assertEqual([row[2] for row in rows[:2]], ["candidate-invariants", "candidate-worklist"])
         # S7-U1a: 89 invariants (six CriticalResultInvariantTests) + 15 worklist + 8 flows; S8-CTX: + 2 Tech Note flows;
-        # EMR-B1: + the ledger's L01 (emr/units/b.json candidate_cases).
-        self.assertEqual(len(selected), 115)
-        self.assertEqual([item["case"] for item in selected[-11:]],
+        # EMR-B1 L01 and B2 L09/L14 are three distinct exact flows.
+        self.assertEqual(len(selected), 117)
+        self.assertEqual([item["case"] for item in selected[-len(candidate.FLOWS):]],
             [class_name + "." + method for _, class_name, method, _ in candidate.FLOWS])
         declaration = json.loads((target / "emr/units/b.json").read_text(encoding="utf-8"))
-        self.assertEqual(selected[-1:], [{"file": row["file"], "case": row["case"]} for row in declaration["candidate_cases"]])
+        self.assertEqual(selected[-3:], [{"file": row["file"], "case": row["case"]} for row in declaration["candidate_cases"]])
         for filename, class_name, method, prefix in candidate.FLOWS:
             module = runner.load_module(target / "tests" / filename)
             self.assertTrue(method.startswith(prefix))
@@ -57,9 +57,10 @@ class CandidateCiTests(unittest.TestCase):
         # Every runner unit is its own; the earlier e2e flow units keep their names.
         self.assertEqual(len({row[2] for row in rows}), len(rows))
         self.assertEqual(rows[2][2], "candidate-flow-document-session")
-        self.assertEqual(rows[-1], ("emr/b/live.py", "EmrBLedgerLive", "candidate-flow-emr-b-live"))
-        # Two flows that would share a unit are refused, never run under one plan.
-        doubled = candidate.FLOWS + (("emr/b/live.py", "EmrBLedgerLive", "test_b02_business_commit_and_failure_journal", "test_b02_"),)
+        self.assertEqual(rows[-3], ("emr/b/live.py", "EmrBLedgerLive", "candidate-flow-emr-b-live"))
+        self.assertEqual([row[1] for row in rows[-2:]], ['EmrBAuthLive', 'EmrBAuthLive'])
+        # A duplicated flow cannot get a second plan or a renewed execution budget.
+        doubled = candidate.FLOWS + (candidate.FLOWS[-1],)
         with patch.object(candidate, "FLOWS", doubled), self.assertRaisesRegex(RuntimeError, "units must be unique"):
             candidate.exact_selection(target, runner)
 
@@ -70,11 +71,13 @@ class CandidateCiTests(unittest.TestCase):
                 return {"tests": [{"file": filename, "case": "Local.test_" + str(i)} for i in range(count)]}
             def load_module(self, path):
                 filename = path.relative_to(candidate.TOOLS_ROOT / "tests").as_posix()
-                row = next(x for x in candidate.FLOWS if x[0] == filename)
-                method = lambda self: None
-                method.__name__ = row[2]
-                cls = type(row[1], (), {"__module__": path.stem, row[2]: method})
-                return SimpleNamespace(__name__=path.stem, **{row[1]: cls})
+                classes = {}
+                for row in candidate.FLOWS:
+                    if row[0] != filename:
+                        continue
+                    cls = classes.setdefault(row[1], type(row[1], (), {"__module__": path.stem}))
+                    setattr(cls, row[2], lambda self: None)
+                return SimpleNamespace(__name__=path.stem, **classes)
         class FakeCi:
             PROFILES = {"measurements": {"out": Path("old"), "suite_timeout": 1, "suites": ()}}
             @staticmethod
@@ -88,14 +91,18 @@ class CandidateCiTests(unittest.TestCase):
             out, selected = candidate.configure(candidate.TOOLS_ROOT, FakeCi, FakeRunner(), plans)
             profile = FakeCi.PROFILES["measurements"]
             self.assertEqual(profile["suite_timeout"], 540)
-            self.assertEqual(len(profile["suites"]), 13)
+            self.assertEqual(len(profile["suites"]), 15)
             command, timeout = FakeCi.guarded_profile_run(profile, *profile["suites"][2], 1000)
             self.assertEqual(Path(command[1]), candidate.TOOLS_ROOT / "scripts/run-tests.py")
             self.assertEqual(command[2], "--plan")
             self.assertEqual(timeout, 575)
             env = FakeCi.profile_environment("measurements", out, {"ORTHANC_PASS": "synthetic"})
             self.assertEqual(env["KIN_EVIDENCE_DIR"], str(out / "screens"))
-            self.assertEqual(len(selected), 115)
+            self.assertEqual(len(selected), 117)
+            for suite in profile['suites'][-2:]:
+                plan = json.loads((plans / (suite[2] + '.json')).read_text())
+                self.assertEqual(plan['tests'], [next(row for row in selected if row['case'].endswith(
+                    'test_b09_auth_login_entry_atomic' if 'b09' in suite[2] else 'test_b14_disconnect_reauth_and_account_isolation'))])
 
     def assert_candidate_workflow(self, workflow):
         # Limited declaration normalisation, not a GitHub expression engine.
