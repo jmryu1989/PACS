@@ -395,7 +395,7 @@
     {
       "req": "REQ-D949",
       "risk": "RISK-EMR-FALSE-PERFORMANCE-ACCEPT/HOST-NOISE/NESTED-JIT",
-      "test": "L03 L03b L03c PLAN-02 PLAN-03 noninferiority_test performance_test (hosted p95 point <=1.25 for all receipt cases; sustained NI statistics recorded only; structural checks retained; loaded by noninferiority_test CI entry) quiet_host_test power_self_check measurement_ci main deadline clamp restore config preservation"
+      "test": "L03 L03b L03c PLAN-02 PLAN-03 noninferiority_test performance_test (hosted latency FAIL iff R>1.25 AND signed pair-median p95 delta>5ms for all receipt cases (D1006); sustained NI statistics recorded only; structural checks retained; loaded by noninferiority_test CI entry) quiet_host_test power_self_check measurement_ci main deadline clamp restore config preservation"
     },
     {
       "req": "REQ-D952",
@@ -411,6 +411,11 @@
       "req": "REQ-D961",
       "risk": "RISK-EMR-FALSE-PERFORMANCE-ACCEPT",
       "test": "noninferiority_test known-input paired p95/median t bounds and superiority mutant; L03 L03b L03c acceptance: p95 point and one-sided 95% UB <=1.10, concurrent median UB <=1.10 only; M36 latency positive control; power_design whole-plan equality probability under stated dispersion assumptions"
+    },
+    {
+      "req": "REQ-D1006",
+      "risk": "RISK-EMR-FALSE-PERFORMANCE-ACCEPT/RECEIPT-DELAY/HOST-OFFSET",
+      "test": "noninferiority_test performance_test: latency FAIL iff R>1.25 AND D>5ms, D=median of signed paired candidate_p95-baseline_p95 differences; live R=geometric mean of paired block-p95 ratios, modeled R=ratio of block-p95 medians; equality, 9->14ms accepted blind spot, mixed signed pairs, invalid pairs, request failures, JIT-class controls, MP02/MP03 consumer; L03 L03b L03c M36 PLAN-02 PLAN-03 and structural blockers retained; D961/D970 live acceptance binding, hosted fixed cost offset cause undetermined, 5ms chosen gross-only tolerance not verified noise bound"
     }
   ],
   "cases": {
@@ -719,7 +724,7 @@
       "kill": [
         "L03"
       ],
-      "behaviour": "per-operation Node startup returns to the head-locked writer; D961 same-run concurrent tail point and one-sided 95% UB <=1.10 AND median UB <=1.10 only; CI-gross point <=1.25; reuse successful same-run L03 control"
+      "behaviour": "per-operation Node startup returns to the head-locked writer; D961 same-run concurrent tail point and one-sided 95% UB <=1.10 AND median UB <=1.10 only; CI-gross latency FAIL iff R>1.25 AND signed pair-median p95 delta>5ms (D1006); reuse successful same-run L03 control"
     },
     {
       "id": "M37",

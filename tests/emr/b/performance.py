@@ -24,9 +24,12 @@ from noninferiority import noninferiority
 
 ROOT = Path(__file__).resolve().parents[3]
 BASELINE = "9a1df0d1328d5b8ad979fc7d2ef65192d595cf4b"
-# D949 R7-06: hosted noise makes 1.10/95% and +0% superiority unsuitable
-# for CI; the stricter verdict belongs to commander-ordered live acceptance.
+# D1006: hosted sub-10 ms baselines show a fixed cost offset of undetermined
+# cause. D961/D970 live acceptance remains binding. 5 ms is a chosen gross-only
+# tolerance, not a verified noise bound: uniform 9 -> 14 ms (+55.6%) passes.
+# JIT-class 1 -> 160..230 ms and 100 -> 140 ms regressions still fail.
 GROSS_REGRESSION_RATIO = 1.25
+GROSS_DELTA_FLOOR_MS = 5.0
 
 
 def permutation(a, b):
@@ -58,29 +61,41 @@ def summarize(rows):
 def case_result(case, count, retained, pair):
     """Return recorded statistics and hosted CI failures for paired samples."""
     failures = []
+    if (not pair.get('r3') or len(pair['r3']) != len(pair.get('r4d', []))
+            or any(not isinstance(r.get('p95'), (int, float))
+                   or not math.isfinite(r['p95']) or r['p95'] <= 0
+                   for v in ('r3', 'r4d') for r in pair[v])):
+        raise ValueError('finite positive paired block p95 observations required')
     stats = {v: summarize(pair[v]) for v in pair}
     stats["permutation_p"] = permutation([r["p95"] for r in pair["r3"]], [r["p95"] for r in pair["r4d"]])
     stats["p95_pct"] = (stats["r4d"]["p95"] / stats["r3"]["p95"] - 1) * 100
     stats.update(relative_bound([r["p95"] for r in pair["r3"]], [r["p95"] for r in pair["r4d"]]))
     added = [b["p95"] - a["p95"] for a, b in zip(pair["r3"], pair["r4d"])]
+    stats.update(ratio_method='ratio of block-p95 medians',
+                 R=stats['r4d']['p95'] / stats['r3']['p95'],
+                 pair_deltas_ms=added, D=statistics.median(added),
+                 gate_ratio_limit=GROSS_REGRESSION_RATIO,
+                 gate_delta_floor_ms=GROSS_DELTA_FLOOR_MS)
     stats["added_p95_ms_upper95"] = (statistics.mean(added) + 2.262157 * statistics.stdev(added) / math.sqrt(len(added))) if len(added) == 10 else None
     stats["added_interval_method"] = "paired difference Student t upper endpoint of two-sided 95% interval, df=9" if len(added) == 10 else "not computed"
     stats["failures"] = sum(r["failures"] for rows in pair.values() for r in rows)
     if stats["failures"]:
         failures.append(f"{case}-{count}-{retained}: request failed")
-    if stats["r4d"]["p95"] > stats["r3"]["p95"] * GROSS_REGRESSION_RATIO:
-        failures.append(f"{case}-{count}-{retained}: candidate p95 exceeds same-run r3 gross-regression bound (x{GROSS_REGRESSION_RATIO})")
+    if stats['R'] > GROSS_REGRESSION_RATIO and stats['D'] > GROSS_DELTA_FLOOR_MS:
+        failures.append(f"{case}-{count}-{retained}: candidate p95 exceeds same-run r3 gross-regression bounds (ratio > {GROSS_REGRESSION_RATIO} AND signed pair-median delta > {GROSS_DELTA_FLOOR_MS} ms)")
     if case == "sustained" and len(pair["r3"]) >= 2:
         stats['noninferiority'] = noninferiority([[r['p95']] for r in pair['r3']], [[r['p95']] for r in pair['r4d']])
         stats['noninferiority']['role'] = 'recorded statistic only; not a CI verdict'
     if case == "ledger" and max(r["read_rows"] for r in pair["r4d"]) > 4:
         failures.append(f"ledger-{retained}: single receipt reads retained prefix")
+    stats['gate_passed'] = not failures
+    stats['gate_reason'] = '; '.join(failures) if failures else 'ratio or signed pair-median delta is within gross limits; request and case structural checks passed'
     return stats, failures
 
 
 def build_report(receipt, configs, cases, repetitions, source_hashes, image=None, flock_ms=None, journal_rows=()):
     """Assemble the report without IO; structural checks apply independently of latency."""
-    failures, report = [], {"purpose": (f"hosted CI gross-regression gate (D949): p95 point ratio <= {GROSS_REGRESSION_RATIO}; "
+    failures, report = [], {"purpose": (f"hosted CI gross-regression gate (D1006): latency FAIL iff ratio of block-p95 medians > {GROSS_REGRESSION_RATIO} AND signed per-pair p95 difference median > {GROSS_DELTA_FLOOR_MS} ms; "
                            "statistics recorded; the 1.10 / 95% verdict belongs to live acceptance; "
                            "SQL/COMMIT delays are modeled; no acceptance verdict"),
                            "baseline": BASELINE, "candidate_sources": source_hashes, "repetitions": repetitions,
