@@ -40,7 +40,7 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/node --cwd . --tree api/src/emr-contract --tree api/src/emr-report --tree api/src/emr-signature --file emr/units/c.json --file tests/emr/c/contract_test.cjs --file tests/emr/c/offline_queue_test.cjs -- node --test --test-reporter=tap --test-reporter-destination=tmp/emr-c-ci/node.tap --test-reporter=spec --test-reporter-destination=stdout tests/emr/c/contract_test.cjs tests/emr/c/offline_queue_test.cjs
       - name: Exact selection of the C1 Node cases (every declared case passed once, none skipped or extra)
         if: ${{ !cancelled() }}
-        run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/node-selection --cwd . --file emr/units/c.json --file tmp/emr-c-ci/node.tap -- node tests/emr/c/contract_test.cjs --judge-tap tmp/emr-c-ci/node.tap
+        run: python3 scripts/record-run.py --run-dir tmp/emr-c-ci/node-selection --cwd . --file emr/units/c.json --file tmp/emr-c-ci/node.tap --file tests/emr/c/contract_test.cjs -- node tests/emr/c/contract_test.cjs --judge-tap tmp/emr-c-ci/node.tap
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         if: ${{ !cancelled() }}
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
