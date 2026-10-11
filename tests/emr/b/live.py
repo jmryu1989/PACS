@@ -1030,7 +1030,7 @@ class EmrBAuthLive(unittest.TestCase):
     psql = EmrBLedgerLive.psql
     ok = EmrBLedgerLive.ok
 
-    def auth_case(self, case, *, full=False):
+    def auth_case(self, case, *, full=False, pattern=None, expected=None):
         db = self.start_db('auth-' + case.lower())
         self.provision(db)
         self.ok('CREATE DATABASE kin_auth_session_test OWNER kin', db=db)
@@ -1056,7 +1056,8 @@ class EmrBAuthLive(unittest.TestCase):
                 '-e', 'KIN_AUTH_SESSION_DATABASE_URL', '-e', 'KIN_AUTH_RUNTIME_DATABASE_URL', '-e', 'KIN_B2_NGINX_PORT',
                 '-v', str(ROOT / 'tests') + ':/tests:ro', '-v', str(ROOT / 'worklist-v0/hpacs-lite') + ':/assets:ro',
                 '--entrypoint', 'node', self.image, '--test', '--test-reporter=tap',
-                *([] if full else ['--test-name-pattern', '^' + case + ' ']),
+                *(['--test-name-pattern', pattern] if pattern is not None else
+                  [] if full else ['--test-name-pattern', '^' + case + ' ']),
                 '/tests/auth_session_service_test.cjs'], env=env, check=False, timeout=3000 if full else 600)
         finally:
             if nginx:
@@ -1071,6 +1072,9 @@ class EmrBAuthLive(unittest.TestCase):
             self.assertRegex(output, r'(?m)^# tests [1-9][0-9]*$')
             self.assertRegex(output, r'(?m)^# fail 0$')
             self.assertRegex(output, r'(?m)^# skipped 0$')
+            if expected is not None:
+                self.assertRegex(output, r'(?m)^# pass ' + str(expected) + r'$')
+                print('AUTH_GROUP ' + json.dumps({'group': case, 'passed': expected, 'pattern': pattern}), flush=True)
             return
         passed = re.findall(r'^ok \d+ - (' + case + r' .*?)$', output, re.M)
         self.assertEqual(len(passed), 1, case + ' must actually run once')

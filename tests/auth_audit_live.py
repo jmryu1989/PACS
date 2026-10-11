@@ -163,8 +163,27 @@ class AuthSessionServiceLive(unittest.TestCase):
     ok = _fixture.EmrBAuthLive.ok
     auth_case = _fixture.EmrBAuthLive.auth_case
 
-    def test_all_compiled_authentication_cases(self):
-        self.auth_case('ALL', full=True)
+    # Disjoint, exhaustive title families keep each gated method below the live
+    # deadline. Counts prove that selection actually executed the intended cases.
+    def test_compiled_01_session_contracts(self):
+        self.auth_case('group-01', full=True,
+                       pattern=r'^(?:U5S[-_]|L(?:09|1[0-6]) |AS-|U5E-|R10-|U[1-59] |ASTRA[-_ ])', expected=77)
+
+    def test_compiled_02_core_lifecycle(self):
+        self.auth_case('group-02', full=True, pattern=r'^CORE-', expected=19)
+
+    def test_compiled_03_command_commit(self):
+        self.auth_case('group-03', full=True, pattern=r'^CORE_(?:COMMAND_CAS_MATRIX|POSTCOMMIT_MATRIX)', expected=48)
+
+    def test_compiled_04_end_races(self):
+        self.auth_case('group-04', full=True, pattern=r'^CORE_COMMAND_END_RACE', expected=30)
+
+    def test_compiled_05_core_revisions(self):
+        self.auth_case('group-05', full=True, pattern=r'^CORE_R(?:9_|10_|11_)', expected=51)
+
+    def test_compiled_06_core_remaining(self):
+        self.auth_case('group-06', full=True,
+                       pattern=r'^CORE_(?!COMMAND_CAS_MATRIX|POSTCOMMIT_MATRIX|COMMAND_END_RACE|R(?:9_|10_|11_))', expected=77)
 
 
 class AuthAuditLive(unittest.TestCase):
