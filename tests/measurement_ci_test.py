@@ -4,6 +4,7 @@ import contextlib
 import csv
 import io
 import hashlib
+import re
 import shlex
 import shutil
 import sys
@@ -200,15 +201,30 @@ class MeasurementCiTests(unittest.TestCase):
             self.assertIn('[REDACTED]', (root/'artifacts'/'database.log').read_text(encoding='utf-8'))
 
     def test_browser_install_cache_and_budgets_cover_pinned_dependencies(self):
-        import yaml
-        workflow = self.catalog.validation()
+        # REQ-W2-LAND-CI -> RISK-CI-SPLIT-OMISSION: every browser installer
+        # needs the hosted APT guard and pip cache, including jobs without profiles.
+        workflow = self.catalog.combined()
+        validation_jobs = self.catalog.validation()['jobs']
         checked = []
         for name, job in workflow['jobs'].items():
-            for index, install in enumerate(job['steps']):
-                if 'playwright install --with-deps chromium' not in install.get('run', ''):
+            for index, install in enumerate(job.get('steps', [])):
+                if not re.search(r'\bplaywright\s+install\b', install.get('run', '')):
                     continue
                 with self.subTest(job=name):
                     checked.append(name)
+                    preceding = job['steps'][:index]
+                    guards = [s for s in preceding if re.search(
+                        r'\bpython3\s+(?:tools/)?scripts/ci_browser_apt\.py(?:\s|$)', s.get('run', ''))]
+                    caches = [s for s in preceding if s.get('uses', '').startswith('actions/cache@')
+                              and s.get('with', {}).get('path') == '~/.cache/pip']
+                    self.assertTrue(guards, 'browser install requires preceding Chrome APT isolation')
+                    self.assertTrue(caches, 'browser install requires preceding pip cache')
+                    self.assertEqual(guards[-1].get('if'), install.get('if'))
+                    self.assertEqual(caches[-1].get('if'), install.get('if'))
+                    self.assertRegex(caches[-1]['uses'], r'^actions/cache@[0-9a-f]{40}$')
+                    # Preserve the existing pinned-profile budget and cache-key contract.
+                    if name not in validation_jobs:
+                        continue
                     self.assertEqual(install['timeout-minutes'], 15)
                     cache = job['steps'][index - 1]
                     self.assertRegex(cache['uses'], r'^actions/cache@[0-9a-f]{40}$')
@@ -234,6 +250,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertIn('volume-slab', checked)
         self.assertIn('measurements', checked)
         self.assertIn('s7-u5-session-contracts', checked)
+        self.assertIn('worklist-ux-measurements', checked)
 
     def exercise_profile_failures(self, exhaust_deadline=False, real_runner=False, inspection_failure=False,
                                   wrong_unit=False, default_unit=False, manual=False, evidence=None,
