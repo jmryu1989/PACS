@@ -132,6 +132,7 @@ export class AuthGuard implements CanActivate {
     const payload = await this.auth.verifyAccessToken(raw);
 
     req.sub = payload.sub;
+    req.emrIssuer = payload.iss;
     req.actor = payload.email ?? payload.preferred_username ?? payload.sub;
     req.displayName = [payload.family_name, payload.given_name].filter(Boolean).join(' ')
       || payload.name || req.actor;

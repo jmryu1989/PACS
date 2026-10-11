@@ -124,7 +124,13 @@
       "tests/auth_session_service_test.cjs",
       "tests/auth_audit_live.py",
       "tests/auth_entry_dom_test.py",
-      "tests/auth_logout_dom_test.py"
+      "tests/auth_logout_dom_test.py",
+      "api/src/admin.service.ts",
+      "tests/report_draft_cas_service_test.cjs",
+      "tests/live/logout_order_live.py",
+      "tests/fixtures/admin_audit_completeness/contract.json",
+      "tests/fixtures/admin_audit_completeness/projection-positive.ts",
+      "tests/fixtures/admin_audit_completeness/projection-negative.ts"
     ]
   },
   "models": {

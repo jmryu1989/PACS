@@ -184,32 +184,35 @@ export function newAuthSessionHandle() {
  * before Nest lifecycle hooks. It is deliberately not an onModuleInit task: timer order cannot establish readiness. */
 @Injectable()
 export class AuthEventLedger {
-  private store?: AccessLedgerStore;
-  private managingInstitution?: string;
-  private proxyHost?: string;
+  private readonly store: AccessLedgerStore;
+  private readonly managingInstitution: string;
+  private readonly proxyHost: string;
+  private ready = false;
   private readonly transactions = new WeakMap<object, { events: AuthAccessEventV2[]; appended: ProvisionalAppend[] }>();
 
-  constructor(private readonly prisma: PrismaService) {}
-
-  async prepare() {
-    if (this.store) throw new Error('AuthLedgerAlreadyPrepared');
+  constructor(private readonly prisma: PrismaService) {
     const institution = process.env.KIN_EMR_MANAGING_INSTITUTION?.trim();
     const proxyHost = process.env.KIN_EMR_PROXY_HOST?.trim();
     if (!institution || !proxyHost) throw new Error('EmrAuthDeploymentRequired');
-    await this.prisma.$connect();
-    await verifyRuntimeConnection(this.prisma);
     const journal = new FailureJournal(process.env.KIN_EMR_STATE_DIR);
     const sql = new PrismaLedgerSql(this.prisma);
     const seal = new AccessSeal(process.env.KIN_EMR_STATE_DIR, sql, journal);
-    await seal.recoverAtStart();
     this.managingInstitution = institution;
     this.proxyHost = proxyHost;
     this.store = new AccessLedgerStore(this.prisma, sql, seal, journal);
+  }
+
+  async prepare() {
+    if (this.ready) throw new Error('AuthLedgerAlreadyPrepared');
+    await this.prisma.$connect();
+    await verifyRuntimeConnection(this.prisma);
+    await this.store.seal.recoverAtStart();
+    this.ready = true;
     return runtimeAdapters;
   }
 
   assertReady() {
-    if (!this.store) throw new Error('AuthLedgerNotPrepared');
+    if (!this.ready) throw new Error('AuthLedgerNotPrepared');
     emrAdapters();
   }
 
@@ -223,7 +226,7 @@ export class AuthEventLedger {
       address: ingressAddress(req?.socket?.remoteAddress, req?.headers ?? {}, peers) };
   }
 
-  async transaction<T>(work: (tx: any) => Promise<T>): Promise<T> {
+  async transaction<T>(work: (tx: any) => Promise<T>, options?: { maxWait: number; timeout: number }): Promise<T> {
     this.assertReady();
     let transaction: object | undefined, callbackFailed = false;
     const facts = { events: [] as AuthAccessEventV2[], appended: [] as ProvisionalAppend[] };
@@ -233,7 +236,7 @@ export class AuthEventLedger {
         transaction = tx; this.transactions.set(tx, facts);
         try { return await work(tx); }
         catch (error) { callbackFailed = true; throw error; }
-      });
+      }, options);
     } catch (error) {
       for (const event of facts.events) await this.store!.settleTransaction(transaction!, event, error, callbackFailed);
       // A lost COMMIT response is not a failed login. Keep its original intent for fenced startup recovery.
@@ -254,17 +257,21 @@ export class AuthEventLedger {
 
   async event(tx: any, input: { action: AuthAccessEventV2['action']; who: Who | null; session?: Session;
     ingress: AuthIngress | null; cause?: EndCause; trigger?: Reason; failure?: LoginFailureCause;
-    eventId?: string; at?: Date; rights?: any; auditLinkId?: string; managingInstitution?: string }): Promise<AuthAccessEventV2> {
+    eventId?: string; at?: Date; rights?: any; auditLinkId?: string; managingInstitution?: string;
+    executorWho?: Who }): Promise<AuthAccessEventV2> {
     this.assertReady();
     const { action, who, session, ingress } = input;
     const service = input.cause === 'sweep';
+    const executor = input.executorWho ?? who;
     const affected = who ? await knownIdentity(verifiedIdentityClaims(who.issuer, who.target, who.actor),
       (issuer, subject) => this.store!.resolveIdentity(tx, issuer, subject)) : unresolved('not-authenticated');
-    const rights = who ? Object.prototype.hasOwnProperty.call(input, 'rights') ? input.rights
-      : await tx.memberRights.findUnique({ where: { sub: who.target } }) ?? { version: 0, institution: null, roles: [], approved: false, suspended: false } : null;
+    const rights = executor ? Object.prototype.hasOwnProperty.call(input, 'rights') ? input.rights
+      : await tx.memberRights.findUnique({ where: { sub: executor.target } }) ?? { version: 0, institution: null, roles: [], approved: false, suspended: false } : null;
     const reference = session ? sessionParts.exec(session.sid) : null;
     const userId = service ? await knownIdentity(verifiedIdentityClaims('urn:kin:service', 'auth-session-sweep', null),
-      (issuer, subject) => this.store!.resolveIdentity(tx, issuer, subject)) : affected;
+      (issuer, subject) => this.store!.resolveIdentity(tx, issuer, subject)) : input.executorWho
+        ? await knownIdentity(verifiedIdentityClaims(executor.issuer, executor.target, executor.actor),
+          (issuer, subject) => this.store!.resolveIdentity(tx, issuer, subject)) : affected;
     const roles = who ? rights ? known(rightsAllow(rights) ? rights.roles : []) : unresolved('not-resolved') : unresolved('not-authenticated');
     const failure = input.failure?.replace(/_/g, '-') as AuthFailureCause | undefined;
     const event: AuthAccessEventV2 = {
@@ -274,8 +281,8 @@ export class AuthEventLedger {
       rightsVersion: service ? { status: 'not-applicable', reason: 'in-process-service' }
         : who ? rights ? known(rights.version) : unresolved('not-resolved') : unresolved('not-authenticated'),
       actingInstitution: service ? known(this.managingInstitution!) : who
-        ? !rights ? unresolved('not-resolved') : (session ? session.institution : rights.institution)
-          ? known(session ? session.institution : rights.institution) : { status: 'not-applicable', reason: 'not-approved' }
+        ? !rights ? unresolved('not-resolved') : (session && !input.executorWho ? session.institution : rights.institution)
+          ? known(session && !input.executorWho ? session.institution : rights.institution) : { status: 'not-applicable', reason: 'not-approved' }
         : unresolved('not-authenticated'),
       managingInstitution: known(input.managingInstitution ?? this.managingInstitution!), occurredAt: (input.at ?? new Date()).toISOString(),
       trustedProxyIp: service ? { status: 'not-applicable', reason: 'in-process-service' } : ingress!.address,
@@ -297,13 +304,15 @@ export class AuthEventLedger {
     facts.events.push(event);
     // The event-specific lock also serializes a durable failure's recovery after a lost response.
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${event.eventId}::text, 1096102))`;
-    const existing = await tx.$queryRaw`SELECT event_id FROM emr_access.entry_for_event('viewing', ${event.eventId}::text)`;
+    const existing = await this.store!.eventInTransaction(tx, event.eventId);
     const appended = await this.store!.appendInTransaction(tx, event);
-    if (!existing.length) {
+    if (!existing) {
       const data = authProjection(event, actor);
       // Legacy sweep attribution has always been the ended member's institution, not the service's deployment scope.
       if (legacyInstitution !== undefined) data.detail = JSON.stringify({ ...JSON.parse(data.detail), institution: legacyInstitution });
-      const row = await tx.auditLog.create({ data });
+      const row = await tx.auditLog.create({ data: {
+        actor: data.actor, action: data.action, target: data.target, at: data.at, detail: data.detail,
+      } });
       await this.store!.recordProjection(tx, event.eventId, row.id);
     }
     facts.appended.push(appended);
@@ -395,6 +404,21 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   private readonly flying = new Map<string, number>();
 
   constructor(private prisma: PrismaService, private keycloak: KeycloakService, private ledger: AuthEventLedger) {}
+
+  /** Rights changes and their session ends use one ledger transaction. Provider convergence remains separate. */
+  memberRightsTransaction<T>(work: (tx: any) => Promise<T>): Promise<T> {
+    return this.ledger.transaction(work, { maxWait: 4000, timeout: 8000 });
+  }
+
+  async recordIsolation(tx: any, session: Session, caller: { sub?: string; actor: string }, request: any): Promise<void> {
+    if (!caller.sub || request?.sub !== caller.sub || request?.emrIssuer !== process.env.KC_ISSUER ||
+        !request.roles?.includes('admin')) throw new Error('VerifiedIsolationExecutorRequired');
+    const executorWho = { target: caller.sub, actor: caller.actor, issuer: request.emrIssuer, institution: request.institution };
+    const who = this.storedIdentity(session);
+    const event = await this.ledger.event(tx, { action: AUTH_LOGOUT, who, session, cause: 'isolation',
+      ingress: await this.ledger.ingress(request), executorWho });
+    await this.ledger.record(tx, event, who.actor, session.institution);
+  }
 
   async onModuleInit() {
     this.ledger.assertReady();

@@ -68,7 +68,9 @@ class ProductionImageTests(unittest.TestCase):
         name = "kin-rehearsal-" + token[:16] + "-" + suffix
         # Register before create/start, so a Docker-client timeout cannot leak it.
         cls.addClassCleanup(ops.remove_owned_if_present, "container", name, token)
-        ops.run(["docker", "create", "--name", name, "--label", "kin.ops.run=" + token, *arguments])
+        ops.run(["docker", "create", "--name", name, "--label", "kin.ops.run=" + token,
+                 "--label", "kin.emrb.live=" + token, *arguments])
+        print(json.dumps({"production_image_resource": name, "label": "kin.emrb.live=" + token}), flush=True)
         ops.run(["docker", "start", name])
         return name
 
@@ -91,6 +93,8 @@ class ProductionImageTests(unittest.TestCase):
             "KC_ADMIN_URL": "http://127.0.0.1:1/auth", "KC_REALM": "kin",
             "KC_CLIENT_ID": "kin-api", "KC_CLIENT_SECRET": uuid.uuid4().hex,
             "KIN_EMR_MANAGING_INSTITUTION": "synthetic-image-test", "KIN_EMR_PROXY_HOST": "127.0.0.1",
+            # The image owns this protected directory; the same container's writable layer survives its restart.
+            "KIN_EMR_STATE_DIR": "/var/lib/kin-emr",
         }
         env.update(overrides)
         args = ["--network", "container:" + self.db]

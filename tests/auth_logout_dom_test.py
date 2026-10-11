@@ -570,6 +570,8 @@ class Site:
                 reply = self.list_answers.pop(0)
                 if reply == "abort":
                     return route.abort("connectionreset")
+                if reply == "timeout":
+                    return route.abort("timedout")
                 status, body = reply
                 return self.answer(route, status, body, {"X-KIN-Auth-Code": body["code"]}
                                    if str(body.get("code", "")).startswith("AUTH_") else None)
@@ -1134,8 +1136,11 @@ class LogoutDOMTest(unittest.TestCase):
                     ("428 no binding", code(428, "AUTH_SESSION_REQUIRED")),
                     ("409 a busy session", code(409, "AUTH_SESSION_BUSY")),
                     ("a 403", (403, {"statusCode": 403, "message": "SYN forbidden"})),
+                    ("a plain 409", (409, {"statusCode": 409, "message": "SYN conflict"})),
                     ("a 500", (500, {"statusCode": 500, "message": "SYN"})),
-                    ("the connection drops", "abort"))
+                    ("a 502", (502, {"statusCode": 502, "message": "SYN"})),
+                    ("a 503", (503, {"statusCode": 503, "message": "SYN"})),
+                    ("the connection drops", "abort"), ("the connection times out", "timeout"))
         self.page.clock.install()
         self.open_main()
         session = self.site.cookie
@@ -1902,8 +1907,10 @@ class LogoutDOMTest(unittest.TestCase):
                     self.log_out_main(other)
                     other.wait_for_url(INDEX_URL)
                 else:
-                    self.site.ended.add(session)
+                    # End on this read: a concurrent background read must not hide Refresh before the click.
+                    self.site.list_answers = [(401, {"code": "AUTH_SESSION_ENDED", "message": "SYN"})]
                     self.refresh()
+                    self.site.ended.add(session)
                 expect(self.panel_title()).to_have_text("Session Ended")
                 self.assert_closed(cause)
                 self.page.wait_for_timeout(300)

@@ -519,6 +519,7 @@ def sanitize(output, secrets_to_hide):
 def profile_environment(profile_name, out, values, evidence_stage=None):
     env = {**os.environ, **values, 'PYTHONIOENCODING':'utf-8', 'PUBLIC_PORT':'9443',
            'PUBLIC_ORIGIN':'https://localhost:9443',
+           'KIN_EMR_MANAGING_INSTITUTION':'synthetic-ci', 'KIN_EMR_PROXY_HOST':'proxy',
            'KIN_TEST_PROXY':'https://localhost:9443',
            'KIN_TEST_API':'https://localhost:9443/api',
            'KIN_TEST_TOKEN_URL':'http://127.0.0.1:8080/auth/realms/kin/protocol/openid-connect/token',

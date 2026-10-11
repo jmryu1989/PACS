@@ -62,6 +62,8 @@ services:
     environment:
       DEPLOYMENT_MODE: production
       KC_ISSUER: https://pacs.koreaimagingnetwork.com/auth/realms/kin
+      KIN_EMR_MANAGING_INSTITUTION: ${KIN_EMR_MANAGING_INSTITUTION:?KIN_EMR_MANAGING_INSTITUTION을 .env에 설정하세요}
+      KIN_EMR_PROXY_HOST: ${KIN_EMR_PROXY_HOST:?KIN_EMR_PROXY_HOST를 .env에 설정하세요}
     ports: !reset []
     # 이미지 안에 빌드된 JS·Prisma 스키마만 쓴다. 운영에서 호스트 파일을 덮으면
     # 배포한 이미지와 실제 실행 코드가 달라져 재현 가능한 롤백이 사라진다.

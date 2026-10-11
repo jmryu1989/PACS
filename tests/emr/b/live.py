@@ -1030,7 +1030,7 @@ class EmrBAuthLive(unittest.TestCase):
     psql = EmrBLedgerLive.psql
     ok = EmrBLedgerLive.ok
 
-    def auth_case(self, case):
+    def auth_case(self, case, *, full=False):
         db = self.start_db('auth-' + case.lower())
         self.provision(db)
         self.ok('CREATE DATABASE kin_auth_session_test OWNER kin', db=db)
@@ -1039,7 +1039,7 @@ class EmrBAuthLive(unittest.TestCase):
         nginx = None
         config = tempfile.TemporaryDirectory(prefix='kin-emrb-nginx-')
         self.addCleanup(config.cleanup)
-        if case == 'L12':
+        if case == 'L12' or full:
             # This hop has a different real socket address from a caller hitting the API directly. Both inbound
             # address headers are overwritten, exactly as in the product nginx ingress configuration.
             Path(config.name, 'nginx.conf').write_text('events {}\nhttp { server { listen 19010; location / {\n'
@@ -1055,8 +1055,9 @@ class EmrBAuthLive(unittest.TestCase):
             result = run(['docker', 'run', '--rm', '--label', self.label, '--network', 'container:' + db,
                 '-e', 'KIN_AUTH_SESSION_DATABASE_URL', '-e', 'KIN_AUTH_RUNTIME_DATABASE_URL', '-e', 'KIN_B2_NGINX_PORT',
                 '-v', str(ROOT / 'tests') + ':/tests:ro', '-v', str(ROOT / 'worklist-v0/hpacs-lite') + ':/assets:ro',
-                '--entrypoint', 'node', self.image, '--test', '--test-reporter=tap', '--test-name-pattern', '^' + case + ' ',
-                '/tests/auth_session_service_test.cjs'], env=env, check=False, timeout=600)
+                '--entrypoint', 'node', self.image, '--test', '--test-reporter=tap',
+                *([] if full else ['--test-name-pattern', '^' + case + ' ']),
+                '/tests/auth_session_service_test.cjs'], env=env, check=False, timeout=1800 if full else 600)
         finally:
             if nginx:
                 run(['docker', 'rm', '-f', nginx])
@@ -1066,6 +1067,11 @@ class EmrBAuthLive(unittest.TestCase):
             output = output.replace(secret, '[redacted]')
         print(output, flush=True)
         self.assertEqual(result.returncode, 0, case + ' compiled authentication contract failed')
+        if full:
+            self.assertRegex(output, r'(?m)^# tests [1-9][0-9]*$')
+            self.assertRegex(output, r'(?m)^# fail 0$')
+            self.assertRegex(output, r'(?m)^# skipped 0$')
+            return
         passed = re.findall(r'^ok \d+ - (' + case + r' .*?)$', output, re.M)
         self.assertEqual(len(passed), 1, case + ' must actually run once')
         self.assertNotIn('# SKIP', passed[0])

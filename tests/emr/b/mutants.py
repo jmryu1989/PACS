@@ -287,11 +287,22 @@ def contract_kills(copy, cases, out, name, env):
     """Run the copy's contract file for these case IDs; each must be reported `not ok`."""
     pattern = "^(" + "|".join(cases) + ") "
     log = out / (name + "-contract.log")
-    code, seconds = run(["node", "--test", "--test-reporter=tap", "--test-name-pattern=" + pattern, "tests/emr/b/contract_test.cjs"],
+    code, seconds = run(contract_command(copy, env, ["--test", "--test-reporter=tap", "--test-name-pattern=" + pattern, "tests/emr/b/contract_test.cjs"]),
                         cwd=copy, env=env, timeout=900, log=log)
     text = log.read_text(encoding="utf-8", errors="replace")
     return {"kind": "contract", "cases": cases, "exit": code, "seconds": seconds, "log": str(log),
             **contract_verdict(text, cases, code)}
+
+
+def contract_command(copy, env, arguments):
+    """Linux filesystem contracts may run in a networkless container; live runs still use the host account's gate."""
+    image = env.get("KIN_EMR_CONTRACT_IMAGE")
+    if not image:
+        return ["node", *arguments]
+    return ["docker", "run", "--rm", "--network", "none", "--user", "0",
+            "--mount", "type=bind,source=%s,target=/src,readonly" % copy,
+            "--mount", "type=bind,source=%s,target=/src/api/node_modules,readonly" % (ROOT / "api/node_modules"),
+            "--workdir", "/src", "--entrypoint", "node", image, *arguments]
 
 
 def invariant_witness(copy, out, name, env):
@@ -328,7 +339,7 @@ def leftovers():
     return found
 
 
-def release_gate(copy, unit, code, log, out, name):
+def release_gate(copy, unit, code, log, out, name, retain=False):
     """After a failed live run: inspect this run's labelled resources, then release through the gate's protocol."""
     sys.path.insert(0, str(copy / "tests"))
     import live_test_gate as gate  # the copy's gate: the same account-wide state directory
@@ -347,6 +358,8 @@ def release_gate(copy, unit, code, log, out, name):
         "inspector": "tests/emr/b/mutants.py", "exit": code, "artifacts": [str(log)],
         "stack": {"label_key": LIVE_LABEL_KEY, "containers": [], "volumes": [], "note": "mutant run; its own labelled resources only"}}),
         encoding="utf-8")
+    if retain:
+        return {"marker": "kept", "record": str(record), "remaining": []}
     gate.release_after_inspection(record)
     return {"marker": "released", "record": str(record)}
 
@@ -377,7 +390,7 @@ def live_kills(copy, cases, out, name, head, env):
         result.update(killed=False, reason="image build failed (not a kill)")
         return result
     try:
-        unit = "emr-b1-mut-%s-%s" % (name.lower(), head[:10])
+        unit = env.get("KIN_EMR_MUTANT_UNIT_PREFIX", "emr-b1-mut") + "-" + name.lower() + "-" + head[:10]
         plan = out / (name + "-plan.json")
         plan.write_text(json.dumps({"unit": unit, "mode": "live", "max_attempts": 3, "timeout_seconds": 3000,
             "tests": [{"file": "tests/emr/b/live.py", "case":
@@ -397,7 +410,8 @@ def live_kills(copy, cases, out, name, head, env):
                       **({} if started else {"status": "not_run", "reason": "live run refused before any case ran (gate lease)"}))
         if not started:
             result["killed"] = None
-        result["gate"] = release_gate(copy, unit, code, log, out, name) if code else {"marker": "not-needed"}
+        result["gate"] = release_gate(copy, unit, code, log, out, name,
+            retain=env.get("KIN_EMR_KEEP_INSPECTION") == "1") if code else {"marker": "not-needed"}
     finally:
         subprocess.run(["docker", "image", "rm", "-f", tag], capture_output=True, timeout=300)
     return result
@@ -502,6 +516,9 @@ def main(argv=None):
     parser.add_argument("--worktree", action="store_true", help="snapshot tracked uncommitted inputs; preserve their hashes")
     parser.add_argument("--source-manifest", type=Path, help="hash-bound LF source inventory for an isolated Linux copy")
     parser.add_argument("--contract-only", action="store_true", help="run contract kill cases only (live ones are reported not_run)")
+    parser.add_argument("--contract-image", help="immutable local Linux Node/Python image for filesystem contracts only")
+    parser.add_argument("--live-unit-prefix", default="emr-b1-mut")
+    parser.add_argument("--keep-inspection", action="store_true", help="inspect but never release a live marker; stop before another live run")
     args = parser.parse_args(argv)
     if args.self_test:
         return self_test()
@@ -514,6 +531,12 @@ def main(argv=None):
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "KIN_EMR_PYTHON": os.environ.get("KIN_EMR_PYTHON", sys.executable), "PYTHONIOENCODING": "utf-8"}
+    if args.contract_image:
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", args.contract_image):
+            parser.error("--contract-image requires an immutable local image ID")
+        env["KIN_EMR_CONTRACT_IMAGE"] = args.contract_image
+    env["KIN_EMR_MUTANT_UNIT_PREFIX"] = args.live_unit_prefix
+    env["KIN_EMR_KEEP_INSPECTION"] = "1" if args.keep_inspection else "0"
     rows = []
     with tempfile.TemporaryDirectory(prefix="kin-emrb-mutants-") as folder:
         copy = Path(folder) / "checkout"
@@ -523,7 +546,7 @@ def main(argv=None):
             shutil.copyfile(copy / "mutant-inputs.json", out / "mutant-inputs.json")
         try:
             baseline_log = out / "baseline-contract.log"
-            baseline_code, baseline_seconds = run(["node", "--test", "--test-reporter=tap", "tests/emr/b/contract_test.cjs"],
+            baseline_code, baseline_seconds = run(contract_command(copy, env, ["--test", "--test-reporter=tap", "tests/emr/b/contract_test.cjs"]),
                 cwd=copy, env=env, timeout=900, log=baseline_log)
             declaration = json.loads(DECLARATION.read_text(encoding="utf-8"))
             expected_cases = declaration["cases"]["contract"][declaration["round"]]
@@ -559,12 +582,16 @@ def main(argv=None):
                 rows.append(row)
                 (out / "mutants.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
                 print("MUTANT %s killed=%s %s" % (name, row["killed"], json.dumps([(r["kind"], r.get("exit"), r.get("failed")) for r in row["runs"]])), flush=True)
+                if args.keep_inspection and any(r.get("gate", {}).get("marker") in {"kept", "foreign"} for r in runs):
+                    print("LIVE_STOP inspection belongs to the commander; remaining mutants not run", flush=True)
+                    break
         finally:
             unlink_modules(link)
     survived = [r["id"] for r in rows if r["killed"] is False]
     print("MUTANTS_RESULT " + json.dumps({"head_sha": head, "chosen": chosen, "survived": survived,
-                                          "not_run": [r["id"] for r in rows if r["killed"] is None]}))
-    return 1 if survived else 0
+                                          "not_run": [m for m in chosen if m not in {r['id'] for r in rows}]
+                                              + [r["id"] for r in rows if r["killed"] is None]}))
+    return 1 if survived or len(rows) != len(chosen) else 0
 
 
 if __name__ == "__main__":

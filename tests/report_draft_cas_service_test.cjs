@@ -48,7 +48,7 @@ Object.assign(process.env, { KC_ISSUER: 'https://syn.test/auth/realms/kin', KC_A
   KC_JWKS_URL: 'http://127.0.0.1:9/realms/kin/protocol/openid-connect/certs' });
 
 const { PacsService } = require('/app/dist/pacs.service');
-const { AuthService } = require('/app/dist/auth.service');
+const { AuthService, AuthEventLedger } = require('/app/dist/auth.service');
 const { StudyAccessService } = require('/app/dist/study-access.service');
 const { AppModule } = require('/app/dist/app.module');
 const { STRUCTURE_CATALOG, renderItem } = require('/app/dist/report-structure');
@@ -61,7 +61,7 @@ const report = line => process.stderr.write('S7-U5-DRAFT-CAS ' + line + '\n');
 
 // ── the disposable database ──
 
-let prepared = null;
+let prepared = null, runtime = null;
 function database() {
   prepared ??= (async () => {
     const url = process.env.KIN_REPORT_DRAFT_DATABASE_URL;
@@ -79,12 +79,21 @@ function database() {
       WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL`);
     const folders = fs.readdirSync('/app/prisma/migrations', { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name).sort();
     assert.deepEqual(applied.map(row => row.migration_name).sort(), folders, 'every migration of the image applied');
+    const runtimeUrl = new URL(url);
+    runtimeUrl.username = 'kin_runtime'; runtimeUrl.password = '';
+    runtime = new PrismaService({ datasources: { db: { url: runtimeUrl.href } } });
+    await runtime.$connect();
+    process.env.KIN_EMR_MANAGING_INSTITUTION = INST;
+    process.env.KIN_EMR_PROXY_HOST = '127.0.0.1';
+    process.env.KIN_EMR_STATE_DIR = fs.mkdtempSync(os.tmpdir() + '/kin-draft-ledger-');
+    fs.chmodSync(process.env.KIN_EMR_STATE_DIR, 0o700);
+    require('/app/dist/emr-contract/composition').composeEmrAdapters(require('/app/dist/emr-runtime/context').runtimeAdapters);
     for (const id of [INST, OTHER]) await base.institution.create({ data: { id, name: id } });
     return base;
   })();
   return prepared;
 }
-test.after(async () => { if (prepared) await (await prepared).$disconnect(); });
+test.after(async () => { if (prepared) await (await prepared).$disconnect(); if (runtime) await runtime.$disconnect(); });
 
 // ── the routes ──
 
@@ -176,15 +185,15 @@ async function world() {
     return typeof value === 'function' ? value.bind(tx) : value;
   } });
   const recorder = new Proxy({}, { get(_t, key) {
-    if (key === '$transaction') return (fn, options) => base.$transaction(async tx => {
+    if (key === '$transaction') return (fn, options) => runtime.$transaction(async tx => {
       await hit('tx-start');
       const out = await fn(view(tx));
       // the work is done and nothing is committed yet: the request holds the study row here
       await hit('commit', async () => { w.backend = (await tx.$queryRawUnsafe('SELECT pg_backend_pid() AS pid'))[0].pid; });
       return out;
     }, options);
-    const value = base[key];
-    return typeof value === 'function' ? value.bind(base) : value;
+    const value = runtime[key];
+    return typeof value === 'function' ? value.bind(runtime) : value;
   } });
   const orthanc = new Proxy({}, { get(_t, key) { return () => { throw new Error('harness: Orthanc.' + String(key) + ' must not be reached'); }; } });
   const build = () => {
@@ -205,12 +214,16 @@ async function world() {
   w.app = build();
   /** A new process: nothing of the old one's memory, the same database. */
   w.restart = () => { w.app = build(); };
-  w.auth = new AuthService(recorder);
+  const ledger = new AuthEventLedger(recorder);
+  await ledger.prepare();
+  w.auth = new AuthService(recorder, undefined, ledger);
   w.suspendReviewer = () => flow.run({label:'suspend'}, async () => {
     const {AdminService}=require('/app/dist/admin.service');
     const provider={getUser:async()=>({id:REVIEWER.sub,username:'reviewer',email:REVIEWER.actor,
       emailVerified:true,firstName:'Synthetic',lastName:'Reviewer',groups:[INST],roles:['radiologist'],enabled:true})};
-    return new AdminService(recorder,provider,null,w.auth).patchUser(REVIEWER.sub,{enabled:false},ADMIN);
+    const req = { ...ADMIN, emrIssuer: process.env.KC_ISSUER, emrAuthSurface: 'PATCH admin/users/:id',
+      socket: { remoteAddress: '127.0.0.1' }, headers: { 'x-real-ip': '192.0.2.4' } };
+    return new AdminService(recorder,provider,null,w.auth,req).patchUser(REVIEWER.sub,{enabled:false},ADMIN);
   });
 
   /** One request through its routed handler. The answer is what the HTTP layer would send: status, code, body. */

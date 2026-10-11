@@ -1126,7 +1126,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(identity['out'].name, 'identity-fields-ci')
         hostile={key:'https://outside.invalid' for key in ['KIN_TEST_PROXY','KIN_TEST_API',
                  'KIN_TEST_TOKEN_URL','KIN_TEST_ORTHANC','KIN_TEST_ORTHANC_USER',
-                 'KIN_TEST_ORTHANC_PASSWORD']}
+                 'KIN_TEST_ORTHANC_PASSWORD','KIN_EMR_MANAGING_INSTITUTION','KIN_EMR_PROXY_HOST']}
         with patch.dict(os.environ, {**hostile, 'KIN_EVIDENCE_DIR':'caller-value'}, clear=False):
             values={'ORTHANC_PASS':'generated-orthanc-password'}
             stage=Path('private-stage')
@@ -1145,6 +1145,7 @@ class MeasurementCiTests(unittest.TestCase):
                 'KIN_TEST_TOKEN_URL':'http://127.0.0.1:8080/auth/realms/kin/protocol/openid-connect/token',
                 'KIN_TEST_ORTHANC':'http://127.0.0.1:8042',
                 'KIN_TEST_ORTHANC_USER':'admin',
+                'KIN_EMR_MANAGING_INSTITUTION':'synthetic-ci', 'KIN_EMR_PROXY_HOST':'proxy',
                 'KIN_TEST_ORTHANC_PASSWORD':'generated-orthanc-password'}
             self.assertEqual({key:measurement_env[key] for key in hostile}, expected)
             self.assertEqual({key:volume_env[key] for key in hostile}, expected)

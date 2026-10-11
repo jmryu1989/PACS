@@ -23,6 +23,7 @@ PROTECTED = ["api/prisma", "api/Dockerfile", "api/start-production.sh", "keycloa
 # None of that is an API-only replacement, so this path refuses it outright.
 EMR_MIGRATION = "api/prisma/migrations/20261008120000_emr_b/migration.sql"
 EMR_STATE = "/var/lib/kin-emr"
+EMR_AUTH_INPUTS = ("KIN_EMR_MANAGING_INSTITUTION", "KIN_EMR_PROXY_HOST")
 FIELDS = {"version", "previous_sha", "target_sha", "previous_api_image", "target_api_image", "compose_files"}
 SHA = re.compile(r"[0-9a-f]{40}")
 IMAGE = re.compile(r"sha256:[0-9a-f]{64}")
@@ -122,6 +123,7 @@ def check_running_api(container, expected_id, emr=False):
     env = dict(item.split("=", 1) for item in config.get("Env", []) if "=" in item)
     require(env.get("DEPLOYMENT_MODE") == "production" and env.get("AUTH_REQUIRED") == "true", "Production authentication settings required")
     if emr:
+        check_emr_auth_inputs(env)
         # The server holds the runtime role only: no installer password and no other database user in its environment.
         try:
             user = urlsplit(env.get("DATABASE_URL", "")).username
@@ -129,6 +131,29 @@ def check_running_api(container, expected_id, emr=False):
             user = None
         require(user == "kin_runtime" and "POSTGRES_PASSWORD" not in env and env.get("KIN_EMR_STATE_DIR") == EMR_STATE,
                 "API must hold only the EMR runtime credential and its state directory")
+
+
+def check_emr_auth_inputs(env):
+    for variable in EMR_AUTH_INPUTS:
+        require(isinstance(env.get(variable), str) and bool(env[variable].strip()),
+                variable + " 설정이 없습니다. 배포 환경의 .env에 값을 설정하고 다시 사전검사하세요.")
+
+
+def check_emr_deployment_inputs():
+    """Check the proposed Compose settings too; an old running API cannot prove the next launch's environment."""
+    command = ["docker", "compose"]
+    for name in COMPOSE:
+        command += ["-f", name]
+    result = ops.run([*command, "config", "--format", "json"], check=False, timeout=30)
+    if result.returncode:
+        error = result.stderr.decode("utf-8", "replace")
+        # Compose output can contain other deployment secrets. Only closed variable names enter the diagnostic.
+        for variable in EMR_AUTH_INPUTS:
+            if variable in error:
+                check_emr_auth_inputs({name: "configured" for name in EMR_AUTH_INPUTS if name != variable})
+        raise RuntimeError("배포 Compose 설정을 읽지 못했습니다. .env와 배포 파일을 확인하세요.")
+    config = json.loads(result.stdout)
+    check_emr_auth_inputs(config.get("services", {}).get("api", {}).get("environment", {}))
 
 
 def inspect_one(args):
@@ -145,7 +170,10 @@ def observe(body):
         identity = body[prefix + "_api_image"]
         check_image(inspect_one(["image", "inspect", identity]), identity, trees[body[prefix + "_sha"]])
     # check_repository refused an EMR introduction, so previous and target agree on the storage shape.
-    check_running_api(inspect_one(["inspect", "kin-api"]), body["previous_api_image"], has_emr_storage(body["previous_sha"]))
+    emr = has_emr_storage(body["previous_sha"])
+    if emr:
+        check_emr_deployment_inputs()
+    check_running_api(inspect_one(["inspect", "kin-api"]), body["previous_api_image"], emr)
     return {"preflight_passed": True, "deployment_authorized": False,
             "automatic_rollback_authorized": False, "schema_unchanged": True,
             "previous_sha": body["previous_sha"], "target_sha": body["target_sha"],

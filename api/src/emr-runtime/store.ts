@@ -145,9 +145,9 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
    * a raw Prisma transaction first would bypass admission and reintroduce the
    * head-lock/pool priority inversion for business writes.
    */
-  withAppendTransaction<T>(work: (tx: any) => Promise<T>): Promise<T> {
+  withAppendTransaction<T>(work: (tx: any) => Promise<T>, options?: { maxWait: number; timeout: number }): Promise<T> {
     return admitAppend(this.db, this.poolSize, () => this.db.$transaction(work,
-      { maxWait: EMR_TX_MAX_WAIT_MS, timeout: EMR_TX_TIMEOUT_MS }));
+      options ?? { maxWait: EMR_TX_MAX_WAIT_MS, timeout: EMR_TX_TIMEOUT_MS }));
   }
 
   /**
@@ -182,6 +182,10 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
   }
   async enterWriter(tx: object): Promise<void> {
     await (tx as RawQuery).$queryRaw`SELECT emr_access.enter_writer()::text`;
+  }
+  /** Same transaction and event lock as the producer: a replay must not create a second legacy projection. */
+  async eventInTransaction(tx: object, eventId: string): Promise<StoredEntry | null> {
+    return this.entryRow(tx, string(eventId));
   }
   async bindCommit(tx: object, binding: CommitBinding): Promise<void> {
     await (tx as RawQuery).$queryRaw`SELECT emr_access.bind_commit(${binding.stream}::text, ${binding.attemptId}::text,

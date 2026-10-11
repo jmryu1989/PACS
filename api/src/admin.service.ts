@@ -1,6 +1,7 @@
 import {
-  BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, ServiceUnavailableException,
+  BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, ServiceUnavailableException,
 } from '@nestjs/common';
+import { REQUEST } from '@nestjs/core';
 import { Prisma } from '@prisma/client';
 import { randomBytes } from 'crypto';
 import {
@@ -35,6 +36,7 @@ export class AdminService {
     private keycloak: KeycloakService,
     private studyAccess: StudyAccessService,
     private auth: AuthService,
+    @Inject(REQUEST) private readonly request: any,
   ) {}
 
   private admin(c: Caller) {
@@ -254,7 +256,7 @@ export class AdminService {
     }
 
     try {
-      const committed = await this.prisma.$transaction(async tx => {
+      const committed = await this.auth.memberRightsTransaction(async tx => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
         await lockMemberRights(tx, id);
         const current = await tx.memberRights.findUnique({ where: { sub: id } });
@@ -275,8 +277,7 @@ export class AdminService {
         for (const session of sessions) {
           const deleted = await tx.authSession.deleteMany({ where: { sid: session.sid } });
           if (deleted.count !== 1) continue;
-          await tx.auditLog.create({ data: { actor: observed.email || observed.username, action: 'auth.logout', target: id,
-            detail: JSON.stringify({ institution: session.institution, ip: null, dataSubject: null, cause: 'isolation' }) } });
+          await this.auth.recordIsolation(tx, session, c, this.request);
         }
         const after = this.row(await tx.memberRights.findUnique({ where: { sub: id } }));
         await tx.auditLog.create({ data: { actor: c.actor, action: `admin.user.${action}`, target: id,
@@ -285,7 +286,7 @@ export class AdminService {
           kind: 'credentials', target: id, sub: id, generation: after.version, state: 'unknown', createdAt: new Date(),
         } }) : null;
         return { after, change, rosterUnconfirmed: !!change || await this.rosterUnconfirmed(id, tx) };
-      }, { maxWait: 4000, timeout: 8000 });
+      });
       if (committed.change) this.auth.publishCredentials({ id: committed.change.id, kind: 'credentials', target: id }, institution!, roles);
       return { ...committed.after, rosterUnconfirmed: committed.rosterUnconfirmed };
     } catch (error) {

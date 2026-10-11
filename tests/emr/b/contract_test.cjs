@@ -1433,24 +1433,30 @@ function contractSuite() {
 
   test('C11 composition is one startup capability; unprepared authentication starts no timers and a second composition is refused', async () => {
     const { AuthService, AuthEventLedger } = load('auth.service.ts');
-    const ledger = new AuthEventLedger({});
-    const service = new AuthService({}, {}, ledger);
+    const names = ['KIN_EMR_MANAGING_INSTITUTION', 'KIN_EMR_PROXY_HOST', 'KIN_EMR_STATE_DIR'];
+    const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
+    const state = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-emrb-startup-'));
     let scheduled = 0;
     const interval = global.setInterval;
-    global.setInterval = () => { scheduled++; throw new Error('unprepared timer'); };
     try {
+      process.env.KIN_EMR_MANAGING_INSTITUTION = 'synthetic-contract';
+      process.env.KIN_EMR_PROXY_HOST = '127.0.0.1';
+      process.env.KIN_EMR_STATE_DIR = state;
+      const ledger = new AuthEventLedger({});
+      const service = new AuthService({}, {}, ledger);
+      global.setInterval = () => { scheduled++; throw new Error('unprepared timer'); };
       await assert.rejects(service.onModuleInit(), /AuthLedgerNotPrepared/);
       await assert.rejects(ledger.transaction(async () => { throw new Error('unprepared HTTP'); }), /AuthLedgerNotPrepared/);
-    } finally { global.setInterval = interval; }
-    assert.equal(scheduled, 0);
-    assert.throws(() => M.composeEmrAdapters(CTX.runtimeAdapters), { code: 'EmrAdaptersAlreadyComposed' });
-    const oldInstitution = process.env.KIN_EMR_MANAGING_INSTITUTION, oldProxy = process.env.KIN_EMR_PROXY_HOST;
-    try {
+      assert.equal(scheduled, 0);
+      assert.throws(() => M.composeEmrAdapters(CTX.runtimeAdapters), { code: 'EmrAdaptersAlreadyComposed' });
       delete process.env.KIN_EMR_MANAGING_INSTITUTION; delete process.env.KIN_EMR_PROXY_HOST;
-      await assert.rejects(ledger.prepare(), /EmrAuthDeploymentRequired/);
+      assert.throws(() => new AuthEventLedger({}), /EmrAuthDeploymentRequired/);
     } finally {
-      if (oldInstitution === undefined) delete process.env.KIN_EMR_MANAGING_INSTITUTION; else process.env.KIN_EMR_MANAGING_INSTITUTION = oldInstitution;
-      if (oldProxy === undefined) delete process.env.KIN_EMR_PROXY_HOST; else process.env.KIN_EMR_PROXY_HOST = oldProxy;
+      global.setInterval = interval;
+      for (const name of names) {
+        if (previous[name] === undefined) delete process.env[name]; else process.env[name] = previous[name];
+      }
+      fs.rmSync(state, { recursive: true, force: true });
     }
   });
 

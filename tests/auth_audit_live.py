@@ -26,6 +26,7 @@ their sessions, ProviderChange and retained MemberRights by exact owned sub, the
 from __future__ import annotations
 
 import html
+import importlib.util
 import http.cookiejar
 import json
 import re
@@ -138,6 +139,32 @@ class Browser:
 
     def sid(self):
         return self.cookie("kin_sid")
+
+
+class AuthSessionServiceLive(unittest.TestCase):
+    """Full compiled regression on B's disposable fixture; no original-stack endpoint is used.
+
+    Selected explicitly through run-tests.py --class AuthSessionServiceLive. The hosted HTTP profile continues to
+    select AuthAuditLive; this adapter adds no alternate gate or test selector.
+    """
+    _spec = importlib.util.spec_from_file_location('emrb_auth_fixture', ROOT / 'tests/emr/b/live.py')
+    _fixture = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_fixture)
+    label_namespace = 'kin.emrb.live'
+    setUpClass = classmethod(_fixture.EmrBAuthLive.setUpClass.__func__)
+    setup_disposable_resources = classmethod(_fixture.EmrBAuthLive.setup_disposable_resources.__func__)
+    cleanup_resources = classmethod(_fixture.EmrBAuthLive.cleanup_resources.__func__)
+    start_db = classmethod(_fixture.EmrBAuthLive.start_db.__func__)
+    provision = classmethod(_fixture.EmrBAuthLive.provision.__func__)
+    migrate = classmethod(_fixture.EmrBAuthLive.migrate.__func__)
+    volume = classmethod(_fixture.EmrBAuthLive.volume.__func__)
+    url = classmethod(_fixture.EmrBAuthLive.url.__func__)
+    psql = _fixture.EmrBAuthLive.psql
+    ok = _fixture.EmrBAuthLive.ok
+    auth_case = _fixture.EmrBAuthLive.auth_case
+
+    def test_all_compiled_authentication_cases(self):
+        self.auth_case('ALL', full=True)
 
 
 class AuthAuditLive(unittest.TestCase):

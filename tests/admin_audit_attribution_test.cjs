@@ -2401,9 +2401,50 @@ function scanAuditWrites(sources = auditSources()) {
     if (ts.isConditionalExpression(node)) return tagged(union(values(node.whenTrue), values(node.whenFalse)), 'W2(ii) ?:');
     if (ts.isIdentifier(node) && node.text === 'undefined' && !symbolAt(node)?.declarations?.length) return [unknown(`${where(node)}: \`undefined\` is no value`)];
     if (ts.isIdentifier(node)) return named(symbolAt(node), node);
-    if (isAccess(node)) return [unknown(`${where(node)}: \`${snippet(node)}\` is a property the program does not fix (W2 reads no property: no enum, \`as const\` table, readonly field or namespace)`)];
+    if (isAccess(node)) return projectionValues(node) ?? [unknown(`${where(node)}: \`${snippet(node)}\` is a property the program does not fix (W2 reads no property: no enum, \`as const\` table, readonly field or namespace)`)];
     if (ts.isBinaryExpression(node)) return [unknown(`${where(node)}: \`${snippet(node)}\` is a ${ts.tokenToString(node.operatorToken.kind)} expression, outside W2`)];
     return [unknown(`${where(node)}: \`${snippet(node)}\` is a ${K[node.kind]}, outside W2`)];
+  }
+  /** W2-P: a fresh projection result, held by one const and never handed on. Each return creates an object whose
+   * final action property is read by W1/W2; a TypeScript literal-union annotation alone is never evidence. */
+  function projectionValues(access) {
+    const key = w1(access), receiver = bare(access.expression);
+    if (key.key === undefined || !ts.isIdentifier(receiver)) return null;
+    const declarations = symbolAt(receiver)?.declarations ?? [];
+    if (declarations.length !== 1 || !isConst(declarations[0]) || !declarations[0].initializer) return null;
+    const holder = declarations[0], call = bare(holder.initializer);
+    if (!ts.isCallExpression(call) || !ts.isIdentifier(bare(call.expression))) return null;
+    const callee = bare(call.expression);
+    if (throughExport(callee)) return null;
+    const bodies = symbolAt(callee)?.declarations ?? [];
+    if (bodies.length !== 1 || !ts.isFunctionDeclaration(bodies[0]) || !bodies[0].body || !bodies[0].type) return null;
+    const body = bodies[0];
+    if (body.asteriskToken || ts.getCombinedModifierFlags(body) & ts.ModifierFlags.Async) return null;
+    if (references(symbolAt(callee)).some(ref => mutated(outer(ref)))) return null;
+    for (const ref of references(symbolAt(receiver))) {
+      const held = outer(ref), member = held.parent;
+      if (!isAccess(member) || member.expression !== held) return null;
+      const field = w1(member);
+      if (field.key === undefined || (field.key === key.key && mutated(outer(member)))) return null;
+      const use = outer(member).parent;
+      if ((ts.isCallExpression(use) && use.expression === outer(member)) || ts.isTaggedTemplateExpression(use)) return null;
+    }
+    const returns = [];
+    const visitReturns = node => {
+      if (ts.isFunctionLike(node)) return;
+      if (ts.isReturnStatement(node)) { returns.push(node.expression); return; }
+      ts.forEachChild(node, visitReturns);
+    };
+    visitReturns(body.body);
+    if (!returns.length) return null;
+    const found = returns.flatMap(expression => {
+      const object = expression && bare(expression);
+      if (!object || !ts.isObjectLiteralExpression(object)) return [unknown('W2-P: a return is not a fresh object literal')];
+      const field = property(object, key.key);
+      return field.node ? values(field.node) : field.shorthand ? named(symbolAt(field.shorthand.name), field.shorthand.name)
+        : [unknown(`W2-P: return property ${field.why}`)];
+    });
+    return tagged(union(found), 'W2-P fresh typed projection, every returned field proved by W1/W2');
   }
   /** Why a name reaches its declaration through something other than its own file or one direct import, else null. */
   function throughExport(use) {
@@ -4014,7 +4055,8 @@ function scanAuditWrites(sources = auditSources()) {
     const writes = form && !form.read && !form.error;
     const slot = writes && form.action.length === 1 && form.action[0].kind === 'param' ? form.action[0] : null;
     const inWith = token => writes && form.form === 'G2' && tokens.indexOf(token) < form.insert;
-    const kind = writes ? 'raw INSERT INTO "AuditLog"' : form ? 'raw SQL naming AuditLog' : 'raw call';
+    const kind = writes ? 'raw INSERT INTO "AuditLog"' : form ? 'raw SQL naming AuditLog'
+      : ledger ? 'raw SQL naming emr_access' : 'raw call';
     // F02 first: what every interpolation is (every one that is not a value or a fixed predicate is named).
     const basis = [], rules = new Set(), fragments = [], problems = [];
     for (const [index, expression] of spans.entries()) {
@@ -4547,6 +4589,36 @@ function fixtureTable(added = {}) {
   const rows = [...table.rows, ...(added.rows ?? [])], wildcards = [...table.wildcards, ...(added.wildcards ?? [])];
   return { rows, wildcards, listed: action => rows.includes(action) || wildcards.some(stem => action.startsWith(stem)) };
 }
+
+test('W2-P projection: literal returns are proved; client fields, mutation, escape and later spreads stay unresolved', () => {
+  const scanProjection = (source, before = '', after = '') => scanAuditWrites([
+    asSource('projection.ts', source),
+    asSource('projection-writer.ts', `import { project } from './projection';
+      declare const tx: any, request: any;
+      const data = project(request); ${before}
+      tx.auditLog.create({ data: { action: data.action, target: data.target } }); ${after}`),
+  ]);
+  for (const fixture of JSON.parse(fixtureText('contract.json')).projection_cases) {
+    const scan = scanProjection(fixtureText(fixture.file));
+    assert.deepEqual(scan.candidates.filter(row => row.kind === 'auditLog.create').map(row => row.status), [fixture.status]);
+    assert.deepEqual(scan.sites.flatMap(row => row.actions).sort(), fixture.actions);
+  }
+  const positive = fixtureText('projection-positive.ts');
+  for (const change of ["data.action = request.action;", "data['action'] = request.action;",
+    'data[request.key] = request.action;', 'request.consume(data);', 'const alias = data;',
+    'Object.assign(data, request);', 'data.target();']) {
+    assert(scanProjection(positive, change).unresolved.length > 0, change);
+    assert(scanProjection(positive, '', change).unresolved.length > 0, 'later ' + change);
+  }
+  for (const source of [
+    "export function project(request: any): any { return { action: 'syn.allowed', ...request }; }",
+    "export function project(request: any): any { return request; }",
+    "export function project(request: any): any { return { get action() { return request.action; } }; }",
+    "export function project(request: any): any { return { action: request.action as 'syn.allowed' }; }",
+    "export async function project(request: any): Promise<any> { return { action: 'syn.allowed' }; }",
+    "export function* project(request: any): any { return { action: 'syn.allowed' }; }",
+  ]) assert(scanProjection(source).unresolved.length > 0, source);
+});
 const RECLASSIFIED = JSON.parse(fixtureText('reclassified.json', MEMBER_FIXTURES)).entries;
 /** The ledger's entries for a fixture of tests/fixtures/admin_audit_completeness, by the file's line. */
 const reclassified = name => new Map(RECLASSIFIED.filter(entry => entry.fixture === `admin_audit_completeness/${name}`).map(entry => [entry.line, entry]));

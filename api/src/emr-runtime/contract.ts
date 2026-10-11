@@ -232,11 +232,14 @@ export function refuseAuditNamespaceCredential(value: unknown): void {
 }
 
 /** The existing admin API is a projection of this fact, with its original time and closed legacy detail schema. */
-export function authProjection(input: AuthAccessEventV2, actor: string) {
+export interface AuthProjection {
+  actor: string; action: AuthAccessEventV2['action']; target: string; at: Date; detail: string;
+}
+export function authProjection(input: AuthAccessEventV2, actor: string): AuthProjection {
   const event = parseAccessEvent(input) as Readonly<AuthAccessEventV2>;
   const detail: Record<string, unknown> = {
     institution: event.actingInstitution.status === 'known' ? event.actingInstitution.value : null,
-    ip: event.trustedProxyIp.status === 'known' ? event.trustedProxyIp.value.address : null,
+    ip: event.auth.endCause !== 'isolation' && event.trustedProxyIp.status === 'known' ? event.trustedProxyIp.value.address : null,
     dataSubject: null,
   };
   if (event.action === 'auth.login') {
@@ -246,9 +249,17 @@ export function authProjection(input: AuthAccessEventV2, actor: string) {
     detail.cause = event.auth.endCause.replace(/-/g, '_');
     if (event.auth.trigger) detail.trigger = event.auth.trigger.replace(/-/g, '_');
   }
-  return { actor: string(actor), action: event.action,
+  const common = { actor: string(actor),
     target: event.affectedIdentity.status === 'known' ? event.affectedIdentity.value.subject : '',
     at: new Date(event.occurredAt), detail: JSON.stringify(detail) };
+  // The legacy schema is a closed compatibility boundary, independent of later ledger action additions.
+  switch (event.action) {
+    case 'auth.login': return { ...common, action: 'auth.login' };
+    case 'auth.entry': return { ...common, action: 'auth.entry' };
+    case 'auth.logout': return { ...common, action: 'auth.logout' };
+    case 'auth.session.expired': return { ...common, action: 'auth.session.expired' };
+    default: throw new Error('AuthProjectionActionRefused');
+  }
 }
 
 /** Protected failure-journal input. It contains observed identity/rights, never the tokens that proved that identity.

@@ -35,12 +35,14 @@ const copy = new Module(path, module);
 copy.filename = path;
 copy.paths = Module._nodeModulePaths('/app/dist');
 copy._compile(source, path);
-const { AuthService } = copy.exports;
+const { AuthService, AuthEventLedger } = copy.exports;
 (async () => {
   const db = new PrismaService(), observer = new PrismaService();
   await db.$connect(); await observer.$connect();
-  // The product's wiring: one Nest provider each, no constructor arguments, the container's environment.
-  const auth = new AuthService(db, new KeycloakService());
+  const ledger = new AuthEventLedger(db);
+  require('/app/dist/emr-contract/composition').composeEmrAdapters(await ledger.prepare());
+  const auth = new AuthService(db, new KeycloakService(), ledger);
+  const proxy = await require('node:dns/promises').lookup(process.env.KIN_EMR_PROXY_HOST);
   const sid = auth.sessionId({headers:{cookie:'kin_sid=' + input.cookie}});
   const row = await observer.authSession.findUnique({where:{sid}});
   if (!row || !row.idpSid) throw Error('The logged-in session must name its provider session');
@@ -65,7 +67,7 @@ const { AuthService } = copy.exports;
   };
   const until = async (done, ms) => { for (const end = Date.now() + ms; Date.now() < end && !(await done()); ) await new Promise(r => setTimeout(r, 50)); };
   try {
-    await auth.logout({sid,headers:{'x-real-ip':'127.0.0.1'}});
+    await auth.logout({sid,headers:{'x-real-ip':'127.0.0.1'},socket:{remoteAddress:proxy.address},emrAuthSurface:'POST auth/logout'});
     // The answer does not wait for Keycloak: wait (bounded) for this session's post-commit provider end and its recorded answer.
     await until(() => observations.some(o => o.sessions === 0), 10000);
     await Promise.allSettled(pending);

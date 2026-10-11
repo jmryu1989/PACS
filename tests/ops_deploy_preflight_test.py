@@ -35,6 +35,25 @@ def container():
 
 
 class PreflightTests(unittest.TestCase):
+    def test_emr_next_launch_inputs_and_redacted_diagnostic(self):
+        valid = {"KIN_EMR_MANAGING_INSTITUTION": "synthetic-emr-managing", "KIN_EMR_PROXY_HOST": "proxy"}
+        def reply(env):
+            return subprocess.CompletedProcess([], 0, json.dumps({"services": {"api": {"environment": env}}}).encode(), b"")
+        with patch.object(ops, "run", return_value=reply(valid)) as run:
+            deploy.check_emr_deployment_inputs()
+            self.assertEqual(run.call_args.args[0][-3:], ["config", "--format", "json"])
+        for variable in valid:
+            for value in (None, "", " "):
+                with patch.object(ops, "run", return_value=reply({**valid, variable: value})):
+                    with self.assertRaisesRegex(RuntimeError, variable):
+                        deploy.check_emr_deployment_inputs()
+            failure = subprocess.CompletedProcess([], 1, b"", (variable + " absent SYN-DO-NOT-LOG").encode())
+            with patch.object(ops, "run", return_value=failure), self.assertRaises(RuntimeError) as error:
+                deploy.check_emr_deployment_inputs()
+            self.assertIn(variable, str(error.exception))
+            self.assertRegex(str(error.exception), "[가-힣]")
+            self.assertNotIn("SYN-DO-NOT-LOG", str(error.exception))
+
     def test_01_strict_request_and_mutable_identity_refusal(self):
         self.assertEqual(parsed(request()), request())
         cases = [("version", True), ("target_sha", "main"), ("target_sha", "--help"),
@@ -57,8 +76,8 @@ class PreflightTests(unittest.TestCase):
     def test_03_real_git_identity_dirty_and_compatibility(self):
         with tempfile.TemporaryDirectory() as folder, patch.object(ops, "ROOT", Path(folder)):
             def git(*args):
-                return subprocess.check_output(["git", *args], cwd=folder, stderr=subprocess.PIPE).decode().strip()
-            git("init"); git("config", "user.email", "fixture@example.invalid"); git("config", "user.name", "Fixture")
+                return subprocess.check_output(["git", "-c", "user.email=fixture@example.invalid", "-c", "user.name=Fixture", *args], cwd=folder, stderr=subprocess.PIPE).decode().strip()
+            git("init")
             for relative in deploy.PROTECTED:
                 path = Path(folder) / relative
                 if "." not in path.name:
@@ -112,6 +131,7 @@ class PreflightTests(unittest.TestCase):
         good = container()
         good["Mounts"] = [{"Type": "volume", "Name": "kin_emr-state", "Destination": deploy.EMR_STATE, "RW": True}]
         good["Config"]["Env"] += ["DATABASE_URL=postgresql://kin_runtime:fixture@db:5432/kin", "KIN_EMR_STATE_DIR=" + deploy.EMR_STATE]
+        good["Config"]["Env"] += ["KIN_EMR_MANAGING_INSTITUTION=synthetic-emr-managing", "KIN_EMR_PROXY_HOST=proxy"]
         deploy.check_running_api(good, request()["previous_api_image"], emr=True)
         with self.assertRaises(RuntimeError): deploy.check_running_api(good, request()["previous_api_image"])
         for mounts in ([], [{**good["Mounts"][0], "Type": "bind"}], [{**good["Mounts"][0], "Destination": "/app"}],
@@ -119,6 +139,16 @@ class PreflightTests(unittest.TestCase):
             bad = copy.deepcopy(good); bad["Mounts"] = mounts
             with self.subTest(mounts=mounts), self.assertRaises(RuntimeError):
                 deploy.check_running_api(bad, request()["previous_api_image"], emr=True)
+
+        # REQ-EMR-07 -> RISK-EMR-07 -> B2 deployment: missing inputs are diagnosed before switching the API.
+        for variable in ("KIN_EMR_MANAGING_INSTITUTION", "KIN_EMR_PROXY_HOST"):
+            for value in (None, "", "   "):
+                bad = copy.deepcopy(good)
+                bad["Config"]["Env"] = [item for item in good["Config"]["Env"] if not item.startswith(variable + "=")]
+                if value is not None:
+                    bad["Config"]["Env"].append(variable + "=" + value)
+                with self.subTest(variable=variable, value=value), self.assertRaisesRegex(RuntimeError, variable):
+                    deploy.check_running_api(bad, request()["previous_api_image"], emr=True)
         for env in (["DATABASE_URL=postgresql://kin:fixture@db:5432/kin"], ["POSTGRES_PASSWORD=fixture"],
                     ["KIN_EMR_STATE_DIR=/tmp"], ["DATABASE_URL=not a url::"]):
             bad = copy.deepcopy(good); bad["Config"]["Env"] = good["Config"]["Env"] + env
@@ -129,8 +159,8 @@ class PreflightTests(unittest.TestCase):
         """EMR-B1: a target that brings the EMR storage is refused before any other compatibility check passes it."""
         with tempfile.TemporaryDirectory() as folder, patch.object(ops, "ROOT", Path(folder)):
             def git(*args):
-                return subprocess.check_output(["git", *args], cwd=folder, stderr=subprocess.PIPE).decode().strip()
-            git("init"); git("config", "user.email", "fixture@example.invalid"); git("config", "user.name", "Fixture")
+                return subprocess.check_output(["git", "-c", "user.email=fixture@example.invalid", "-c", "user.name=Fixture", *args], cwd=folder, stderr=subprocess.PIPE).decode().strip()
+            git("init")
             for relative in deploy.PROTECTED:
                 path = Path(folder) / relative
                 if "." not in path.name:

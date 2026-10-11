@@ -686,7 +686,7 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
       await inst.guard.canActivate(new ExecutionContextHost([req, res], cls, handler));
       if (kind === 'get') { inst.handled++; res.status(200).send({ ok: true }); }
       else if (kind === 'authz') { inst.handled++; res.status(204).send(); }
-      else if (kind === 'health') res.status(200).send(await new PacsController(null, inst.service).health());
+      else if (kind === 'health') res.status(200).send(await new PacsController(null, inst.service, adminRequest()).health());
       else if (kind === 'me') res.status(200).send(new PacsController(null).me(req));
       else if (kind === 'logout') await inst.controller.logout(req, res);
       else if (kind === 'login') await inst.controller.login(req, res, query.prompt);
@@ -1071,6 +1071,25 @@ test('L14 disconnected requests do not end authentication; reauthentication cont
   assert.equal(transport.recoveryAccess({ ...authority, identity: { ...identity, sub: 'other' } }, owner).read, false);
   assert.equal(transport.recoveryAccess({ ...authority, identity: { ...identity, issuer: 'different' } }, owner).useKeys, false);
   assert.equal((await w.call(w.I1, 'me', { sid: done.newSid })).status, 401);
+  await b2Login(w, 'isolation-admin', { groups: [Z], roles: ['admin'] });
+  const caller = { sub: 'isolation-admin', actor: 'isolation-admin@synthetic.test', institution: Z, roles: ['admin'] };
+  const { AdminService } = require('/app/dist/admin.service');
+  const admin = new AdminService(w.I1.prisma, new KeycloakService(), null, w.I1.service, adminRequest(caller));
+  w.fault('I1', 'tx.audit', new Error('synthetic isolation projection refused'));
+  await assert.rejects(admin.patchUser('owner', { enabled: false }, caller));
+  assert.equal((await w.base.memberRights.findUnique({ where: { sub: 'owner' } })).suspended, false);
+  assert.equal((await w.call(w.I1, 'me', { sid: fresh.done.newSid })).status, 200, 'failed isolation preserves the live session');
+  await admin.patchUser('owner', { enabled: false }, caller);
+  const ended = (await protectedAuthRows(w)).filter(r => r.event.auth.endCause === 'isolation');
+  assert.equal(ended.length, 1);
+  assert.equal(ended[0].event.userId.value.subject, caller.sub);
+  assert.equal(ended[0].event.affectedIdentity.value.subject, 'owner');
+  assert.equal(ended[0].event.actingInstitution.value, Z);
+  assert.deepEqual(ended[0].event.rolesAtTime.value, ['admin']);
+  assert.deepEqual(ended[0].detail, { institution: A, ip: null, dataSubject: null, cause: 'isolation' });
+  await admin.patchUser('owner', { enabled: false }, caller);
+  assert.equal((await protectedAuthRows(w)).filter(r => r.event.auth.endCause === 'isolation').length, 1, 'repeated isolation adds no end');
+  assert.equal((await w.call(w.I1, 'me', { sid: fresh.done.newSid })).status, 401);
   await w.finish('L14');
 });
 
@@ -3764,9 +3783,13 @@ test('U5E-LR R1-R3 after a confirmed Log out a plain Login that brings back the 
 
 
 const R10_CALLER = { roles: ['admin'], actor: 'syn-r10-admin@synthetic.test', sub: 'syn-r10-admin' };
+function adminRequest(caller = R10_CALLER) {
+  return { ...caller, emrIssuer: process.env.KC_ISSUER, emrAuthSurface: 'PATCH admin/users/:id',
+    socket: { remoteAddress: '127.0.0.1' }, headers: { 'x-real-ip': IP } };
+}
 function r10Admin(w, inst = w.I1) {
   const { AdminService } = require('/app/dist/admin.service');
-  return new AdminService(inst.prisma, new KeycloakService(), null, inst.service);
+  return new AdminService(inst.prisma, new KeycloakService(), null, inst.service, adminRequest());
 }
 function r10Member(sub, sessions = [], groups = [A], roles = ['radiologist']) {
   kc.members[sub] = { username: sub, email: sub + '@synthetic.test', enabled: true, groups, roles, sessions };
@@ -4407,7 +4430,7 @@ for (const mode of ['temp', 'email']) test(`CORE_R8_PENDING_RESET ${mode}: regis
   const { AdminService } = require('/app/dist/admin.service');
   const provider = new KeycloakService();
   provider.resetPassword = async (id, sentMode, password) => { calls.push({ id, mode: sentMode, password }); };
-  const admin = new AdminService(w.I1.prisma, provider, null, w.I1.service);
+  const admin = new AdminService(w.I1.prisma, provider, null, w.I1.service, adminRequest());
   const reset = caller => r10Answer(admin.resetPassword(sub, { mode }, caller));
   assert.equal((await reset({ actor: 'syn-doctor', roles: ['radiologist'] })).status, 403);
   assert.equal(await w.base.memberRights.count({ where: { sub } }), 0);
@@ -4445,7 +4468,7 @@ test('CORE_R8_RESET_EXISTING_AND_RACE: reset preserves suspended rights, session
   const { AdminService } = require('/app/dist/admin.service');
   const provider = new KeycloakService();
   provider.resetPassword = async () => {};
-  const make = inst => new AdminService(inst.prisma, provider, null, inst.service);
+  const make = inst => new AdminService(inst.prisma, provider, null, inst.service, adminRequest());
   await w.base.memberRights.update({ where: { sub }, data: { suspended: true, newAuthAfter: new Date(START), version: 9 } });
   const before = await w.base.memberRights.findUnique({ where: { sub } });
   const session = await w.base.authSession.findUnique({ where: { sid } });
@@ -4926,7 +4949,7 @@ test('CORE_PENDING_COUNT_UNREGISTERED_PAGED_DELETED counts the merged realm, wit
   // Two new users and one deleted row cannot accidentally cancel each other's count error.
   const users=[...ids.slice(0,4),'syn-count-new-second'].map(id=>({id,username:id,email:id+'@synthetic.test',emailVerified:true,groups:[],roles:[],enabled:true}));
   const provider={listUsers:async page=>({page,pageSize:2,total:users.length,realmUsers:users,users:users.slice((page-1)*2,page*2)})};
-  const {AdminService}=require('/app/dist/admin.service'),admin=new AdminService(w.I1.prisma,provider,null,w.I1.service);
+  const {AdminService}=require('/app/dist/admin.service'),admin=new AdminService(w.I1.prisma,provider,null,w.I1.service,adminRequest());
   const before=await w.base.memberRights.findMany({orderBy:{sub:'asc'}}),listed=[];
   for(const page of [1,2,3]){
     const out=await admin.listUsers(page,R10_CALLER);assert.equal(out.pendingCount,4);assert.equal(out.total,5);listed.push(...out.users);
@@ -5114,7 +5137,7 @@ test('CORE_R9_LIST_ONE_SCAN page selection never multiplies realm admin requests
     if(route.includes('/groups?')||route.endsWith('/role-mappings/realm'))return [];
     assert.fail('unexpected admin request '+route);
   };
-  const {AdminService}=require('/app/dist/admin.service'),admin=new AdminService(w.I1.prisma,provider,null,w.I1.service);
+  const {AdminService}=require('/app/dist/admin.service'),admin=new AdminService(w.I1.prisma,provider,null,w.I1.service,adminRequest());
   const before=await w.base.memberRights.findMany();
   for(const page of [1,2,3,4]){
     calls.length=0;const result=await admin.listUsers(page,R10_CALLER);
@@ -5133,7 +5156,7 @@ for(const command of ['Approve','Change','Suspend','Activate','ResetTemp','Reset
 test(`CORE_R9_IDENTITY_COMMAND ${command}: only a command refreshes current provider identity`,async t=>{
   const w=await world(t),m='syn-r9-identity',setup=await coreSetup(w,m,command),provider=new KeycloakService();
   const {AdminService}=require('/app/dist/admin.service');provider.resetPassword=async()=>{};
-  const admin=new AdminService(w.I1.prisma,provider,null,w.I1.service);
+  const admin=new AdminService(w.I1.prisma,provider,null,w.I1.service,adminRequest());
   const before=await w.base.memberRights.findUnique({where:{sub:m}});
   Object.assign(kc.members[m],{username:'renamed',email:'renamed@synthetic.test',firstName:'Given',lastName:'Family',emailVerified:command==='Approve'});
   assert.equal((await coreRoster(w,m)).email,before.email,'GET cannot refresh a registered row');
@@ -5153,7 +5176,7 @@ test('CORE_R9_IDENTITY_FORWARD: an older pre-read loses CAS and cannot rewind a 
   const original=provider.getUser.bind(provider),arrived=deferred(),release=deferred();let reads=0;
   t.after(()=>release.resolve());
   provider.getUser=async(...args)=>{const result=await original(...args);if(++reads===1){arrived.resolve();await release.promise;}return result;};
-  const admin=inst=>new AdminService(inst.prisma,provider,null,inst.service);
+  const admin=inst=>new AdminService(inst.prisma,provider,null,inst.service,adminRequest());
   const first=r10Patch(admin(w.I1),m,coreBody('Change'));await within(arrived.promise,'older identity captured');
   Object.assign(kc.members[m],{email:'newest@synthetic.test',firstName:'Newest',lastName:'Identity'});
   let second;
@@ -5258,7 +5281,7 @@ for(const path of ['callback','proof','refresh'])test(`CORE_R10_REMOTE_UNLOCKED 
   const {AdminService}=require('/app/dist/admin.service'),provider=new KeycloakService(),original=provider.getUser.bind(provider);
   const arrived=deferred(),release=deferred();t.after(()=>release.resolve());
   provider.getUser=async(...args)=>{const result=await original(...args);arrived.resolve();await release.promise;return result;};
-  const command=r10Patch(new AdminService(w.I1.prisma,provider,null,w.I1.service),m,coreBody('Change'));
+  const command=r10Patch(new AdminService(w.I1.prisma,provider,null,w.I1.service,adminRequest()),m,coreBody('Change'));
   await within(arrived.promise,'pre-read captured');let out;
   try{
     const entry=f.run();
@@ -5284,7 +5307,7 @@ test('CORE_R10_RESET_BUSY reset under member contention returns 409 MEMBER_BUSY 
   }else w.observe({inst:'I1',model:'$executeRaw',phase:'before'},e=>{
     if(e.args[1]===0x4b494e4d)throw Object.assign(Error('synthetic timeout'),{code:'P2010',meta:{code:'55P03'}});
   });
-  const result=await r10Answer(new AdminService(w.I1.prisma,provider,null,w.I1.service).resetPassword(m,{mode:'email'},R10_CALLER));
+  const result=await r10Answer(new AdminService(w.I1.prisma,provider,null,w.I1.service,adminRequest()).resetPassword(m,{mode:'email'},R10_CALLER));
   release?.resolve();if(held)await held;
   assert.equal(result.status,409);assert.equal(result.body.code,'MEMBER_BUSY');assert.equal(sent,0);
   assert.deepEqual(await w.base.memberRights.findUnique({where:{sub:m}}),before);await w.finish('CORE_R10_RESET_BUSY');
@@ -5325,7 +5348,7 @@ test('CORE_R10_RESET_FORWARD a delayed reset pre-read cannot hold a member lock 
   const {AdminService}=require('/app/dist/admin.service'),provider=new KeycloakService(),original=provider.getUser.bind(provider);
   const arrived=deferred(),release=deferred();let reads=0;t.after(()=>release.resolve());provider.resetPassword=async()=>{};
   provider.getUser=async(...args)=>{const result=await original(...args);if(++reads===1){arrived.resolve();await release.promise;}return result;};
-  const admin=inst=>new AdminService(inst.prisma,provider,null,inst.service);
+  const admin=inst=>new AdminService(inst.prisma,provider,null,inst.service,adminRequest());
   const reset=r10Answer(admin(w.I1).resetPassword(m,{mode:'email'},R10_CALLER));await within(arrived.promise,'reset identity captured');
   Object.assign(kc.members[m],{email:'after-reset-read@synthetic.test',firstName:'Newest',lastName:'Identity'});
   let change,before;
@@ -5372,7 +5395,7 @@ test(`CORE_R11_CAS_OUTAGE_MATRIX ${first}->${second}`, async t => {
     const { admin } = await coreMember(w, m);
     const provider = new KeycloakService();
     const { AdminService } = require('/app/dist/admin.service');
-    const contender = new AdminService(w.I2.prisma, provider, null, w.I2.service);
+    const contender = new AdminService(w.I2.prisma, provider, null, w.I2.service, adminRequest());
     const held = w.pause({ inst: 'I2', scope: 'root', model: 'memberRights', method: 'findUnique', phase: 'after' });
     const loser = r10Patch(contender, m, coreBody(second)); await held.arrived();
     assert.equal((await r10Patch(admin, m, coreBody(first))).status, 200);
