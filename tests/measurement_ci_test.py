@@ -12,10 +12,83 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import measurement_ci as ci
+from ci_workflows import WorkflowCatalog
 from live_admin_credential_test import ImportedAdminCredentialTests
 
 
 class MeasurementCiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.catalog = WorkflowCatalog(ci.ROOT)
+
+    def assert_profile_job(self, name, required_runs, artifact_paths):
+        job = self.catalog.job(name)
+        self.assertEqual(job['runs-on'], 'ubuntu-24.04')
+        checkout = [s for s in job['steps'] if s.get('uses', '').startswith('actions/checkout@')]
+        self.assertEqual(len(checkout), 1)
+        self.assertIs(checkout[0]['with']['persist-credentials'], False)
+        uploads = [s for s in job['steps'] if s.get('uses', '').startswith('actions/upload-artifact@')]
+        self.assertEqual(len(uploads), 1)
+        self.assertEqual(uploads[0]['if'], 'always()')
+        self.assertEqual(uploads[0]['with']['if-no-files-found'], 'error')
+        self.assertEqual(uploads[0]['with']['retention-days'], 7)
+        paths = uploads[0]['with']['path'].splitlines()
+        for path in artifact_paths:
+            self.assertIn(path, paths)
+        runs = '\n'.join(s.get('run', '') for s in job['steps'])
+        for required in required_runs:
+            if required.startswith('name: '):
+                self.assertEqual(uploads[0]['with']['name'], required.removeprefix('name: '))
+            else:
+                self.assertIn(required, runs)
+        owners = [row['job'] for row in self.catalog.profile_bindings()[name] if not row['dispatch']]
+        self.assertEqual(owners, [name])
+        return job
+
+    def test_all_profiles_have_unique_workflow_owners_and_report_artifacts(self):
+        report = ci.workflow_report()
+        self.assertEqual(set(report), set(ci.PROFILES))
+        for name, row in report.items():
+            with self.subTest(profile=name):
+                self.assertEqual(self.catalog.owner(row['job'])[0], row['workflow'])
+                self.assertTrue(row['artifacts'])
+                self.assertTrue(any(ci.PROFILES[name]['out'].relative_to(ci.ROOT).as_posix()
+                                    in artifact['path'] for artifact in row['artifacts']))
+        output = ci.ROOT / 'tmp/measurement-ci-contract/workflows.json'
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+        print('WORKFLOW_PROFILES ' + json.dumps({name: row['workflow'] for name, row in report.items()}, sort_keys=True))
+
+    def test_profile_owner_survives_workflow_rename(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            shutil.copytree(ci.ROOT / '.github/workflows', root / '.github/workflows')
+            old = root / self.catalog.owner('volume-rendering')[0]
+            new = old.with_name('renamed-volume.yml')
+            old.rename(new)
+            report = ci.workflow_report(root)
+            self.assertEqual(report['volume-rendering']['workflow'], '.github/workflows/renamed-volume.yml')
+
+    def test_removed_profile_job_is_rejected(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            shutil.copytree(ci.ROOT / '.github/workflows', root / '.github/workflows')
+            (root / self.catalog.owner('volume-rendering')[0]).unlink()
+            with self.assertRaisesRegex(ValueError, "job 'volume-rendering'.*found 0"):
+                ci.workflow_report(root)
+
+    def test_duplicate_job_id_across_workflows_is_rejected(self):
+        import yaml
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            shutil.copytree(ci.ROOT / '.github/workflows', root / '.github/workflows')
+            # Even an inert duplicate with no profile invocation must be refused.
+            (root / '.github/workflows/duplicate.yml').write_text(
+                yaml.safe_dump({'jobs': {'volume-rendering': {'steps': []}}}), encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, "job 'volume-rendering'.*found 2"):
+                ci.workflow_report(root)
+
+
     def test_main_uses_profile_deadline_to_clamp_commands_and_preserves_cleanup(self):
         # REQ-D949 -> RISK-CI-DEADLINE-DRIFT: observe the actual subprocess bound
         # passed by main(), without binding a source string or internal layout.
@@ -55,7 +128,7 @@ class MeasurementCiTests(unittest.TestCase):
             'test_context_03_mpr_batch_late_blob_does_not_commit',
             'test_context_04_mip_batch_late_blob_keeps_job_inputs',
         ])
-        workflow = yaml.safe_load((ci.ROOT / '.github/workflows/validate.yml').read_text(encoding='utf-8'))
+        workflow = self.catalog.combined()
         job = workflow['jobs']['context-loss']
         self.assertEqual(job['runs-on'], 'ubuntu-24.04')
         self.assertEqual(job['timeout-minutes'], 45)
@@ -92,7 +165,7 @@ class MeasurementCiTests(unittest.TestCase):
         cls = next(n for n in module.body if isinstance(n, ast.ClassDef) and n.name == 'EmrBLedgerLive')
         self.assertEqual([n.name for n in cls.body if isinstance(n, ast.FunctionDef) and n.name.startswith('test_')],
                          declaration['cases']['live']['B1'])
-        self.assertEqual((ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8').count('--profile emr-b'), 0)
+        self.assertEqual([row['job'] for row in self.catalog.profile_bindings()['emr-b']], ['emr-b'])
         workflow = yaml.safe_load((ci.ROOT/'.github/workflows/emr-b.yml').read_text(encoding='utf-8'))
         self.assertEqual(list(workflow['jobs']), ['emr-b'])
         steps = workflow['jobs']['emr-b']['steps']
@@ -128,7 +201,7 @@ class MeasurementCiTests(unittest.TestCase):
 
     def test_browser_install_cache_and_budgets_cover_pinned_dependencies(self):
         import yaml
-        workflow = yaml.safe_load((ci.ROOT / '.github/workflows/validate.yml').read_text(encoding='utf-8'))
+        workflow = self.catalog.validation()
         checked = []
         for name, job in workflow['jobs'].items():
             for index, install in enumerate(job['steps']):
@@ -478,7 +551,7 @@ class MeasurementCiTests(unittest.TestCase):
         import yaml
 
         test_file = 'tests/admin_audit_attribution_test.cjs'
-        workflow = yaml.safe_load((ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8'))
+        workflow = self.catalog.combined()
         commands = [shlex.split(step['run']) for job in workflow['jobs'].values()
                     for step in job.get('steps', []) if test_file in step.get('run', '')]
         self.assertEqual(len(commands), 1, 'one recorded attribution test invocation')
@@ -512,28 +585,14 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertSetEqual(set(recorded), read, 'recorded inputs must equal scanner inputs in both directions')
 
     def test_validate_workflow_runs_cell_merge_in_its_own_bounded_job(self):
-        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
-        jobs = text.split('\n  cell-merge:\n')
-        self.assertEqual(len(jobs), 2, 'validate.yml must declare one cell-merge job')
-        body = []
-        for line in jobs[1].splitlines():
-            if line.startswith('  ') and not line.startswith('   '):
-                break
-            body.append(line)
-        job = '\n'.join(body)
-        for required in ['runs-on: ubuntu-24.04',
-                         'persist-credentials: false',
-                         'tests/measurement_ci.py --profile cell-merge',
-                         'tests/execution_selection_test.py',
-                         'tests/e2e/artifacts/cell-merge-ci/',
-                         'if: always()', 'if-no-files-found: error',
-                         'retention-days: 7']:
-            self.assertIn(required, job)
+        text = self.catalog.text()
+        job = self.assert_profile_job('cell-merge',
+            ['tests/measurement_ci.py --profile cell-merge', 'tests/execution_selection_test.py'],
+            ['tests/e2e/artifacts/cell-merge-ci/'])
         # One standing gate, one live step bound like every other e2e job, and no
         # duplicate dispatch entry for the same suite.
         self.assertEqual(text.count('--profile cell-merge'), 1)
-        self.assertNotIn('--profile cell-merge', jobs[0])
-        self.assertEqual(job.count('timeout-minutes: 28'), 1)
+        self.assertEqual(sum(step.get('timeout-minutes') == 28 for step in job['steps']), 1)
         for profile in ['measurements', 'volume-rendering', 'volume-mpr', 'volume-slab', 'hanging-protocols']:
             self.assertEqual(text.count('--profile '+profile), 1)
         dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
@@ -659,7 +718,7 @@ class MeasurementCiTests(unittest.TestCase):
         def always(step):
             return re.fullmatch(r'\s*(\$\{\{\s*always\(\)\s*\}\}|always\(\))\s*', str(step.get('if', ''))) is not None
 
-        workflow = load('validate.yml')
+        workflow = self.catalog.combined()
         requests = [(name, index, found) for name, other in workflow['jobs'].items()
                     for index, step in enumerate(other.get('steps', [])) for found in profiles(step)]
 
@@ -873,28 +932,14 @@ class MeasurementCiTests(unittest.TestCase):
                     self.assertEqual(outer, profile['suite_timeout'] + 35)
 
     def test_validate_workflow_runs_hanging_protocols_in_its_own_bounded_job(self):
-        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
-        jobs = text.split('\n  hanging-protocols:\n')
-        self.assertEqual(len(jobs), 2, 'validate.yml must declare one hanging-protocols job')
-        body = []
-        for line in jobs[1].splitlines():
-            if line.startswith('  ') and not line.startswith('   '):
-                break
-            body.append(line)
-        job = '\n'.join(body)
-        for required in ['runs-on: ubuntu-24.04',
-                         'persist-credentials: false',
-                         'tests/measurement_ci.py --profile hanging-protocols',
-                         'tests/execution_selection_test.py',
-                         'tests/e2e/artifacts/hanging-protocols-ci/',
-                         'if: always()', 'if-no-files-found: error',
-                         'retention-days: 7']:
-            self.assertIn(required, job)
+        text = self.catalog.text()
+        job = self.assert_profile_job('hanging-protocols',
+            ['tests/measurement_ci.py --profile hanging-protocols', 'tests/execution_selection_test.py'],
+            ['tests/e2e/artifacts/hanging-protocols-ci/'])
         # The HP suites must not be appended to another job's budget, and the live
         # step keeps the same 28-minute bound as the existing e2e jobs.
         self.assertEqual(text.count('--profile hanging-protocols'), 1)
-        self.assertNotIn('--profile hanging-protocols', jobs[0])
-        self.assertEqual(job.count('timeout-minutes: 28'), 1)
+        self.assertEqual(sum(step.get('timeout-minutes') == 28 for step in job['steps']), 1)
         # Registering this standing gate must not disturb the gates already green.
         for profile in ['measurements', 'volume-rendering', 'volume-mpr', 'volume-slab']:
             self.assertEqual(text.count('--profile '+profile), 1)
@@ -924,7 +969,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(len(declared), 3)
         self.assertTrue(all(name.startswith('test_cursor_accuracy_') for name in declared))
         # No push gate: the profile reaches CI only through the manual dispatch workflow.
-        validate = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
+        validate = self.catalog.text(automatic_only=True)
         self.assertNotIn('three-d-cursor-accuracy', validate)
         dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
         self.assertIn('- three-d-cursor-accuracy', dispatch)
@@ -961,7 +1006,7 @@ class MeasurementCiTests(unittest.TestCase):
         # own injection call may not appear in it.
         self.assertNotIn('.add_script_tag(', source)
         # No push gate: the profile reaches CI only through the manual dispatch workflow.
-        validate = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
+        validate = self.catalog.text(automatic_only=True)
         self.assertNotIn('three-d-cursor-wiring', validate)
         dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
         self.assertIn('- three-d-cursor-wiring', dispatch)
@@ -1028,10 +1073,10 @@ class MeasurementCiTests(unittest.TestCase):
                         found += [arg.split('=', 1)[1] for arg in rest if arg.startswith('--profile=')]
             return found
         # Dispatch only: no validate.yml step requests the profile.
-        validate = load('validate.yml')
+        validate = self.catalog.combined(automatic_only=True)
         self.assertFalse([step for job in validate['jobs'].values() for step in job.get('steps', [])
                           if 'critical-result-screens' in profiles(step)])
-        self.assertNotIn('critical-result-screens', (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8'))
+        self.assertNotIn('critical-result-screens', self.catalog.text(automatic_only=True))
         dispatch = load('output-integration.yml')
         triggers = dispatch.get('on', dispatch.get(True))
         self.assertEqual(triggers['workflow_dispatch']['inputs']['profile']['options'].count('critical-result-screens'), 1)
@@ -1052,9 +1097,10 @@ class MeasurementCiTests(unittest.TestCase):
                           # u5-fixups is the fix round's five screen regressions (final review part 1, blocker 3).
                           'u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries',
                           'u5-session-mutants', 'u5-session-browser', 'u5-session-end', 'u5-fixups'})
-        validate = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
-        self.assertIn('profile: [u5-session-api, u5-session-draft, u5-session-regression, u5-session-boundaries, '
-                      'u5-session-mutants, u5-session-browser, u5-session-end, u5-fixups]', validate)
+        validate = self.catalog.text(automatic_only=True)
+        self.assertEqual(self.catalog.job('s7-u5-session-contracts')['strategy']['matrix']['profile'],
+                         ['u5-session-api', 'u5-session-draft', 'u5-session-regression', 'u5-session-boundaries',
+                          'u5-session-mutants', 'u5-session-browser', 'u5-session-end', 'u5-fixups'])
         self.assertEqual(ci.PROFILES['u5-session-end']['suites'],
                          (('live/session_end_live.py', 'SessionEndLive', 'ci-u5-session-end'),))
         self.assertEqual(ci.PROFILES['u5-fixups']['suites'], (('e2e/test_u5_fixups.py', None, 'ci-u5-fixups'),))
@@ -1217,24 +1263,11 @@ class MeasurementCiTests(unittest.TestCase):
             self.assertTrue(literals)
 
     def test_validate_workflow_runs_volume_mpr_in_its_own_bounded_job(self):
-        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
-        jobs = text.split('\n  volume-mpr:\n')
-        self.assertEqual(len(jobs), 2, 'validate.yml must declare one volume-mpr job')
-        body = []
-        for line in jobs[1].splitlines():
-            if line.startswith('  ') and not line.startswith('   '):
-                break
-            body.append(line)
-        mpr = '\n'.join(body)
-        for required in ['runs-on: ubuntu-24.04',
-                         'persist-credentials: false',
-                         'tests/measurement_ci.py --profile volume-mpr',
-                         'tests/e2e/artifacts/volume-mpr-ci/',
-                         'if: always()', 'if-no-files-found: error',
-                         'retention-days: 7']:
-            self.assertIn(required, mpr)
+        text = self.catalog.text()
+        mpr = self.assert_profile_job('volume-mpr',
+            ['tests/measurement_ci.py --profile volume-mpr'],
+            ['tests/e2e/artifacts/volume-mpr-ci/'])
         # The MPR suites must not be appended to the volume-rendering job's budget.
-        self.assertNotIn('--profile volume-mpr', jobs[0])
         self.assertEqual(text.count('--profile volume-mpr'), 1)
         self.assertEqual(text.count('--profile volume-rendering'), 1)
         # The existing pure volume model gate stays registered exactly once.
@@ -1309,32 +1342,14 @@ class MeasurementCiTests(unittest.TestCase):
                              if isinstance(node, ast.Constant) and node.value == prefix])
 
     def test_validate_workflow_runs_volume_slab_in_its_own_bounded_job(self):
-        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
-        jobs = text.split('\n  volume-slab:\n')
-        self.assertEqual(len(jobs), 2, 'validate.yml must declare one volume-slab job')
-        body = []
-        for line in jobs[1].splitlines():
-            if line.startswith('  ') and not line.startswith('   '):
-                break
-            body.append(line)
-        job = '\n'.join(body)
-        for required in ['runs-on: ubuntu-24.04',
-                         'persist-credentials: false',
-                         'tests/measurement_ci.py --profile volume-slab',
-                         'tests/execution_selection_test.py',
-                         '--file tests/e2e/test_volume_projection.py',
-                         '--file tests/e2e/test_volume_wheel.py',
-                         '--file tests/e2e/test_volume_average_affine.py',
-                         '--file tests/e2e/test_volume_mip.py',
-                         'tests/e2e/artifacts/volume-slab-ci/',
-                         'if: always()', 'if-no-files-found: error',
-                         'retention-days: 7']:
-            self.assertIn(required, job)
-        self.assertEqual(job.count('timeout-minutes: 28'), 1)
+        text = self.catalog.text()
+        job = self.assert_profile_job('volume-slab',
+            ['tests/measurement_ci.py --profile volume-slab', 'tests/execution_selection_test.py', '--file tests/e2e/test_volume_projection.py', '--file tests/e2e/test_volume_wheel.py', '--file tests/e2e/test_volume_average_affine.py', '--file tests/e2e/test_volume_mip.py'],
+            ['tests/e2e/artifacts/volume-slab-ci/'])
+        self.assertEqual(sum(step.get('timeout-minutes') == 28 for step in job['steps']), 1)
         self.assertEqual(text.count('--profile volume-slab'), 1)
-        self.assertNotIn('--profile volume-slab', jobs[0])
         # The slab suites stay out of the first MPR job's shared deadline.
-        mpr = text.split('\n  volume-mpr:\n')[1].split('\n  volume-slab:\n')[0]
+        mpr = self.catalog.job_text(self.catalog.job('volume-mpr'))
         self.assertNotIn('--profile volume-slab', mpr)
         self.assertEqual(text.count('--profile volume-mpr'), 1)
         # The MIP Viewer model is listed and executed in the existing pure model gate.
@@ -1437,41 +1452,22 @@ class MeasurementCiTests(unittest.TestCase):
         marks = ci.PROFILES['volume-marks']
         self.assertNotIn(suite, {row[0] for row in marks['suites']})
         self.assertNotIn('e2e/test_volume_marks.py', {row[0] for row in ci.PROFILES['volume-path']['suites']})
-        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
+        text = self.catalog.text()
         self.assertEqual(text.count('--file tests/e2e/test_finding_locations.py'), 1)
         self.assertIn('--file tests/e2e/test_finding_locations.py',
-                      text.split('\n  volume-path:\n')[1].split('\n  volume-batch:\n')[0])
+                      self.catalog.job_text(self.catalog.job('volume-path')))
 
     def test_validate_workflow_runs_volume_path_in_its_own_bounded_job(self):
-        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
-        jobs = text.split('\n  volume-path:\n')
-        self.assertEqual(len(jobs), 2, 'validate.yml must declare one volume-path job')
-        body = []
-        for line in jobs[1].splitlines():
-            if line.startswith('  ') and not line.startswith('   '):
-                break
-            body.append(line)
-        job = '\n'.join(body)
-        for required in ['runs-on: ubuntu-24.04',
-                         'persist-credentials: false',
-                         'tests/measurement_ci.py --profile volume-path',
-                         'tests/measurement_ci_test.py',
-                         'tests/viewer_volume_path_dom_test.py',
-                         'tests/execution_selection_test.py',
-                         '--file tests/e2e/test_volume_path.py',
-                         '--file tests/e2e/test_volume_orientation.py',
-                         '--file tests/e2e/test_finding_locations.py',
-                         'tests/e2e/artifacts/volume-path-ci/',
-                         'if: always()', 'if-no-files-found: error',
-                         'retention-days: 7']:
-            self.assertIn(required, job)
-        self.assertEqual(job.count('timeout-minutes: 28'), 1)
+        text = self.catalog.text()
+        job = self.assert_profile_job('volume-path',
+            ['tests/measurement_ci.py --profile volume-path', 'tests/measurement_ci_test.py', 'tests/viewer_volume_path_dom_test.py', 'tests/execution_selection_test.py', '--file tests/e2e/test_volume_path.py', '--file tests/e2e/test_volume_orientation.py', '--file tests/e2e/test_finding_locations.py'],
+            ['tests/e2e/artifacts/volume-path-ci/'])
+        self.assertEqual(sum(step.get('timeout-minutes') == 28 for step in job['steps']), 1)
         self.assertEqual(text.count('--profile volume-path'), 1)
-        self.assertNotIn('--profile volume-path', jobs[0])
         # The path suites stay out of the first two MPR jobs' shared deadlines.
         for other in ('volume-mpr', 'volume-slab'):
             self.assertEqual(text.count('--profile '+other), 1)
-            self.assertNotIn('--profile volume-path', text.split('\n  '+other+':\n')[1].split('\n  volume-path:\n')[0])
+            self.assertNotIn('--profile volume-path', self.catalog.job_text(self.catalog.job(other)))
         # The pure path model runs in the existing pure model gate (listed and executed), and the
         # compiled server Job checks keep running in the runtime gate.
         pure = next(line for line in text.splitlines() if 'tmp/vr-ci/pure-volume-models' in line)
@@ -1556,39 +1552,16 @@ class MeasurementCiTests(unittest.TestCase):
                              if isinstance(node, ast.Constant) and node.value == prefix])
 
     def test_validate_workflow_runs_volume_batch_in_its_own_bounded_job(self):
-        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
-        jobs = text.split('\n  volume-batch:\n')
-        self.assertEqual(len(jobs), 2, 'validate.yml must declare one volume-batch job')
-        body = []
-        for line in jobs[1].splitlines():
-            if line.startswith('  ') and not line.startswith('   '):
-                break
-            body.append(line)
-        job = '\n'.join(body)
-        for required in ['runs-on: ubuntu-24.04',
-                         'persist-credentials: false',
-                         'tests/measurement_ci.py --profile volume-batch',
-                         'tests/measurement_ci_test.py',
-                         'tests/viewer_volume_batch_binding_dom_test.py',
-                         'tests/execution_selection_test.py',
-                         '--file tests/e2e/test_volume_batch.py',
-                         '--file tests/e2e/test_volume_batch_context.py',
-                         '--file tests/e2e/test_volume_batch_save.py',
-                         '--file tests/e2e/test_volume_batch_scout.py',
-                         '--file worklist-v0/hpacs-lite/viewer-volume-batch.js',
-                         '--file worklist-v0/hpacs-lite/viewer-volume-scout.js',
-                         'tests/e2e/artifacts/volume-batch-ci/',
-                         'tests/e2e/artifacts/MPR-batch-*.png',
-                         'if: always()', 'if-no-files-found: error',
-                         'retention-days: 7']:
-            self.assertIn(required, job)
-        self.assertEqual(job.count('timeout-minutes: 28'), 1)
+        text = self.catalog.text()
+        job = self.assert_profile_job('volume-batch',
+            ['tests/measurement_ci.py --profile volume-batch', 'tests/measurement_ci_test.py', 'tests/viewer_volume_batch_binding_dom_test.py', 'tests/execution_selection_test.py', '--file tests/e2e/test_volume_batch.py', '--file tests/e2e/test_volume_batch_context.py', '--file tests/e2e/test_volume_batch_save.py', '--file tests/e2e/test_volume_batch_scout.py', '--file worklist-v0/hpacs-lite/viewer-volume-batch.js', '--file worklist-v0/hpacs-lite/viewer-volume-scout.js'],
+            ['tests/e2e/artifacts/volume-batch-ci/', 'tests/e2e/artifacts/MPR-batch-*.png'])
+        self.assertEqual(sum(step.get('timeout-minutes') == 28 for step in job['steps']), 1)
         self.assertEqual(text.count('--profile volume-batch'), 1)
-        self.assertNotIn('--profile volume-batch', jobs[0])
         # The batch suites stay out of the other MPR jobs' shared deadlines.
         for other in ('volume-mpr', 'volume-slab', 'volume-path'):
             self.assertEqual(text.count('--profile '+other), 1)
-            self.assertNotIn('--profile volume-batch', text.split('\n  '+other+':\n')[1].split('\n  volume-batch:\n')[0])
+            self.assertNotIn('--profile volume-batch', self.catalog.job_text(self.catalog.job(other)))
         # The pure batch and scout models stay listed and executed in the existing pure model gate.
         pure = next(line for line in text.splitlines() if 'tmp/vr-ci/pure-volume-models' in line)
         for model in ('tests/volume_batch_test.cjs', 'tests/volume_batch_scout_test.cjs'):
@@ -1673,38 +1646,16 @@ class MeasurementCiTests(unittest.TestCase):
                              if isinstance(node, ast.Constant) and node.value == prefix])
 
     def test_validate_workflow_runs_volume_sync_preferences_in_its_own_bounded_job(self):
-        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
-        jobs = text.split('\n  volume-sync-preferences:\n')
-        self.assertEqual(len(jobs), 2, 'validate.yml must declare one volume-sync-preferences job')
-        body = []
-        for line in jobs[1].splitlines():
-            if line.startswith('  ') and not line.startswith('   '):
-                break
-            body.append(line)
-        job = '\n'.join(body)
-        for required in ['runs-on: ubuntu-24.04',
-                         'persist-credentials: false',
-                         'tests/measurement_ci.py --profile volume-sync-preferences',
-                         'tests/measurement_ci_test.py',
-                         'tests/viewer_volume_preferences_layout_dom_test.py',
-                         'tests/viewer_volume_sync_layout_dom_test.py',
-                         'tests/execution_selection_test.py',
-                         '--file tests/e2e/test_volume_sync.py',
-                         '--file tests/e2e/test_volume_preferences.py',
-                         '--file worklist-v0/hpacs-lite/viewer-volume-sync.js',
-                         '--file worklist-v0/hpacs-lite/viewer-volume-preferences.js',
-                         '--file worklist-v0/hpacs-lite/viewer-volume-progressive.js',
-                         'tests/e2e/artifacts/volume-sync-preferences-ci/',
-                         'if: always()', 'if-no-files-found: error',
-                         'retention-days: 7']:
-            self.assertIn(required, job)
-        self.assertEqual(job.count('timeout-minutes: 28'), 1)
+        text = self.catalog.text()
+        job = self.assert_profile_job('volume-sync-preferences',
+            ['tests/measurement_ci.py --profile volume-sync-preferences', 'tests/measurement_ci_test.py', 'tests/viewer_volume_preferences_layout_dom_test.py', 'tests/viewer_volume_sync_layout_dom_test.py', 'tests/execution_selection_test.py', '--file tests/e2e/test_volume_sync.py', '--file tests/e2e/test_volume_preferences.py', '--file worklist-v0/hpacs-lite/viewer-volume-sync.js', '--file worklist-v0/hpacs-lite/viewer-volume-preferences.js', '--file worklist-v0/hpacs-lite/viewer-volume-progressive.js'],
+            ['tests/e2e/artifacts/volume-sync-preferences-ci/'])
+        self.assertEqual(sum(step.get('timeout-minutes') == 28 for step in job['steps']), 1)
         self.assertEqual(text.count('--profile volume-sync-preferences'), 1)
-        self.assertNotIn('--profile volume-sync-preferences', jobs[0])
         # These suites stay out of the other MPR jobs' shared deadlines.
         for other in ('volume-mpr', 'volume-slab', 'volume-path', 'volume-batch'):
             self.assertEqual(text.count('--profile '+other), 1)
-            self.assertNotIn('--profile volume-sync-preferences', text.split('\n  '+other+':\n')[1].split('\n  volume-sync-preferences:\n')[0])
+            self.assertNotIn('--profile volume-sync-preferences', self.catalog.job_text(self.catalog.job(other)))
         # The pure preference model stays listed and executed in the existing pure model gate.
         pure = next(line for line in text.splitlines() if 'tmp/vr-ci/pure-volume-models' in line)
         self.assertIn('--file worklist-v0/hpacs-lite/volume-preferences.js', pure)
@@ -1788,37 +1739,16 @@ class MeasurementCiTests(unittest.TestCase):
                              if isinstance(node, ast.Constant) and node.value == prefix])
 
     def test_validate_workflow_runs_volume_marks_in_its_own_bounded_job(self):
-        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
-        jobs = text.split('\n  volume-marks:\n')
-        self.assertEqual(len(jobs), 2, 'validate.yml must declare one volume-marks job')
-        body = []
-        for line in jobs[1].splitlines():
-            if line.startswith('  ') and not line.startswith('   '):
-                break
-            body.append(line)
-        job = '\n'.join(body)
-        for required in ['runs-on: ubuntu-24.04',
-                         'persist-credentials: false',
-                         'tests/measurement_ci.py --profile volume-marks',
-                         'tests/measurement_ci_test.py',
-                         'tests/viewer_volume_marks_progressive_dom_test.py',
-                         'tests/execution_selection_test.py',
-                         '--file tests/e2e/test_volume_marks.py',
-                         '--file tests/e2e/test_volume_mpr_print.py',
-                         '--file worklist-v0/hpacs-lite/viewer-volume-marks.js',
-                         '--file worklist-v0/hpacs-lite/viewer-volume-progressive.js',
-                         '--file worklist-v0/hpacs-lite/viewer-volume-job-print.js',
-                         'tests/e2e/artifacts/volume-marks-ci/',
-                         'if: always()', 'if-no-files-found: error',
-                         'retention-days: 7']:
-            self.assertIn(required, job)
-        self.assertEqual(job.count('timeout-minutes: 28'), 1)
+        text = self.catalog.text()
+        job = self.assert_profile_job('volume-marks',
+            ['tests/measurement_ci.py --profile volume-marks', 'tests/measurement_ci_test.py', 'tests/viewer_volume_marks_progressive_dom_test.py', 'tests/execution_selection_test.py', '--file tests/e2e/test_volume_marks.py', '--file tests/e2e/test_volume_mpr_print.py', '--file worklist-v0/hpacs-lite/viewer-volume-marks.js', '--file worklist-v0/hpacs-lite/viewer-volume-progressive.js', '--file worklist-v0/hpacs-lite/viewer-volume-job-print.js'],
+            ['tests/e2e/artifacts/volume-marks-ci/'])
+        self.assertEqual(sum(step.get('timeout-minutes') == 28 for step in job['steps']), 1)
         self.assertEqual(text.count('--profile volume-marks'), 1)
-        self.assertNotIn('--profile volume-marks', jobs[0])
         # These suites stay out of the other MPR jobs' shared deadlines.
         for other in ('volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences'):
             self.assertEqual(text.count('--profile '+other), 1)
-            self.assertNotIn('--profile volume-marks', text.split('\n  '+other+':\n')[1].split('\n  volume-marks:\n')[0])
+            self.assertNotIn('--profile volume-marks', self.catalog.job_text(self.catalog.job(other)))
         # The pure annotation model stays listed and executed in the existing pure model gate.
         pure = next(line for line in text.splitlines() if 'tmp/vr-ci/pure-volume-models' in line)
         self.assertIn('--file worklist-v0/hpacs-lite/volume-marks.js', pure)
@@ -1904,42 +1834,22 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertNotIn('getTestCaseNames', ast.dump(loader))
 
     def test_validate_workflow_runs_volume_mip_voi_in_its_own_bounded_job(self):
-        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
-        jobs = text.split('\n  volume-mip-voi:\n')
-        self.assertEqual(len(jobs), 2, 'validate.yml must declare one volume-mip-voi job')
-        body = []
-        for line in jobs[1].splitlines():
-            if line.startswith('  ') and not line.startswith('   '):
-                break
-            body.append(line)
-        job = '\n'.join(body)
-        for required in ['runs-on: ubuntu-24.04',
-                         'persist-credentials: false',
-                         'python3 -B tests/measurement_ci_test.py',
-                         'tests/execution_selection_test.py',
-                         '--file tests/e2e/test_volume_mip.py',
-                         '--file tests/e2e/test_volume_mip_voi.py',
-                         '--file worklist-v0/hpacs-lite/volume-voi.js',
-                         '--file worklist-v0/hpacs-lite/viewer-volume-mip.js',
-                         'tests/measurement_ci.py --profile volume-mip-voi',
-                         'name: synthetic-volume-mip-voi-results',
-                         'tests/e2e/artifacts/volume-mip-voi-ci/',
-                         'tmp/mipvoi-ci/',
-                         'if: always()', 'if-no-files-found: error',
-                         'retention-days: 7']:
-            self.assertIn(required, job)
-        self.assertEqual(job.count('timeout-minutes: 28'), 1)
+        text = self.catalog.text()
+        job = self.assert_profile_job('volume-mip-voi',
+            ['python3 -B tests/measurement_ci_test.py', 'tests/execution_selection_test.py', '--file tests/e2e/test_volume_mip.py', '--file tests/e2e/test_volume_mip_voi.py', '--file worklist-v0/hpacs-lite/volume-voi.js', '--file worklist-v0/hpacs-lite/viewer-volume-mip.js', 'tests/measurement_ci.py --profile volume-mip-voi', 'name: synthetic-volume-mip-voi-results', 'tmp/mipvoi-ci/'],
+            ['tests/e2e/artifacts/volume-mip-voi-ci/'])
+        self.assertEqual(sum(step.get('timeout-minutes') == 28 for step in job['steps']), 1)
         self.assertEqual(text.count('--profile volume-mip-voi'), 1)
-        self.assertNotIn('--profile volume-mip-voi', jobs[0])
-        self.assertEqual(text.count('name: synthetic-volume-mip-voi-results'), 1)
+        self.assertEqual(sum(step.get('with', {}).get('name') == 'synthetic-volume-mip-voi-results'
+                             for other in self.catalog.combined()['jobs'].values() for step in other.get('steps', [])), 1)
         # A job of Validate itself, on the same triggers as every other synthetic group.
-        header = text.split('\njobs:\n')[0]
-        self.assertTrue(header.startswith('name: Validate production image\n'))
-        self.assertIn('\n  pull_request:\n', header)
+        owner = self.catalog.documents[self.catalog.owner('volume-mip-voi')[0]]
+        self.assertTrue(owner['name'].startswith('Validate production image'))
+        self.assertIn('pull_request', owner.get('on', owner.get(True)))
         # The other MPR jobs, including the slab job these cases came from, keep their own profile and do not run this one.
         for other in ('volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks'):
             self.assertEqual(text.count('--profile '+other), 1)
-            self.assertNotIn('--profile volume-mip-voi', text.split('\n  '+other+':\n')[1].split('\n  volume-mip-voi:\n')[0])
+            self.assertNotIn('--profile volume-mip-voi', self.catalog.job_text(self.catalog.job(other)))
 
     def test_volume_mip_job_profile_is_exact_bounded_and_isolated(self):
         profile = ci.PROFILES['volume-mip-job']
@@ -2004,43 +1914,22 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertFalse(set(cases) & {node.name for node in base.body if isinstance(node, ast.FunctionDef)})
 
     def test_validate_workflow_runs_volume_mip_job_in_its_own_bounded_job(self):
-        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
-        jobs = text.split('\n  volume-mip-job:\n')
-        self.assertEqual(len(jobs), 2, 'validate.yml must declare one volume-mip-job job')
-        body = []
-        for line in jobs[1].splitlines():
-            if line.startswith('  ') and not line.startswith('   '):
-                break
-            body.append(line)
-        job = '\n'.join(body)
-        for required in ['runs-on: ubuntu-24.04',
-                         'persist-credentials: false',
-                         'python3 -B tests/measurement_ci_test.py',
-                         'tests/execution_selection_test.py',
-                         '--file tests/e2e/test_volume_mip.py',
-                         '--file tests/e2e/test_volume_mip_job.py',
-                         '--file worklist-v0/hpacs-lite/volume-mip-job.js',
-                         '--file worklist-v0/hpacs-lite/viewer-volume-mip.js',
-                         '--file worklist-v0/hpacs-lite/viewer-jobs.js',
-                         'tests/measurement_ci.py --profile volume-mip-job',
-                         'name: synthetic-volume-mip-job-results',
-                         'tests/e2e/artifacts/volume-mip-job-ci/',
-                         'tmp/mipjob-ci/',
-                         'if: always()', 'if-no-files-found: error',
-                         'retention-days: 7']:
-            self.assertIn(required, job)
-        self.assertEqual(job.count('timeout-minutes: 28'), 1)
+        text = self.catalog.text()
+        job = self.assert_profile_job('volume-mip-job',
+            ['python3 -B tests/measurement_ci_test.py', 'tests/execution_selection_test.py', '--file tests/e2e/test_volume_mip.py', '--file tests/e2e/test_volume_mip_job.py', '--file worklist-v0/hpacs-lite/volume-mip-job.js', '--file worklist-v0/hpacs-lite/viewer-volume-mip.js', '--file worklist-v0/hpacs-lite/viewer-jobs.js', 'tests/measurement_ci.py --profile volume-mip-job', 'name: synthetic-volume-mip-job-results', 'tmp/mipjob-ci/'],
+            ['tests/e2e/artifacts/volume-mip-job-ci/'])
+        self.assertEqual(sum(step.get('timeout-minutes') == 28 for step in job['steps']), 1)
         self.assertEqual(text.count('--profile volume-mip-job'), 1)
-        self.assertNotIn('--profile volume-mip-job', jobs[0])
-        self.assertEqual(text.count('name: synthetic-volume-mip-job-results'), 1)
+        self.assertEqual(sum(step.get('with', {}).get('name') == 'synthetic-volume-mip-job-results'
+                             for other in self.catalog.combined()['jobs'].values() for step in other.get('steps', [])), 1)
         # A job of Validate itself, on the same triggers as every other synthetic group.
-        header = text.split('\njobs:\n')[0]
-        self.assertTrue(header.startswith('name: Validate production image\n'))
-        self.assertIn('\n  pull_request:\n', header)
+        owner = self.catalog.documents[self.catalog.owner('volume-mip-job')[0]]
+        self.assertTrue(owner['name'].startswith('Validate production image'))
+        self.assertIn('pull_request', owner.get('on', owner.get(True)))
         # The other MPR jobs, including the VOI Slab job, keep their own profile and do not run this one.
         for other in ('volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi'):
             self.assertEqual(text.count('--profile '+other), 1)
-            self.assertNotIn('--profile volume-mip-job', text.split('\n  '+other+':\n')[1].split('\n  volume-mip-job:\n')[0])
+            self.assertNotIn('--profile volume-mip-job', self.catalog.job_text(self.catalog.job(other)))
         # The pure Job model runs in the existing pure model gate (listed and executed), and the compiled server Job
         # checks keep running in the runtime gate.
         pure = next(line for line in text.splitlines() if 'tmp/vr-ci/pure-volume-models' in line)
@@ -2113,46 +2002,22 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertFalse(set(cases) & {node.name for node in base.body if isinstance(node, ast.FunctionDef)})
 
     def test_validate_workflow_runs_volume_mip_batch_in_its_own_bounded_job(self):
-        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
-        jobs = text.split('\n  volume-mip-batch:\n')
-        self.assertEqual(len(jobs), 2, 'validate.yml must declare one volume-mip-batch job')
-        body = []
-        for line in jobs[1].splitlines():
-            if line.startswith('  ') and not line.startswith('   '):
-                break
-            body.append(line)
-        job = '\n'.join(body)
-        for required in ['runs-on: ubuntu-24.04',
-                         'persist-credentials: false',
-                         'python3 -B tests/measurement_ci_test.py',
-                         'tests/execution_selection_test.py',
-                         '--file tests/e2e/test_volume_mip.py',
-                         '--file tests/e2e/test_volume_mip_job.py',
-                         '--file tests/e2e/test_volume_mip_batch.py',
-                         '--file worklist-v0/hpacs-lite/volume-mip-job.js',
-                         '--file worklist-v0/hpacs-lite/volume-mip-batch.js',
-                         '--file worklist-v0/hpacs-lite/viewer-volume-mip.js',
-                         '--file worklist-v0/hpacs-lite/viewer-volume-orientation.js',
-                         '--file worklist-v0/hpacs-lite/viewer-jobs.js',
-                         'tests/measurement_ci.py --profile volume-mip-batch',
-                         'name: synthetic-volume-mip-batch-results',
-                         'tests/e2e/artifacts/volume-mip-batch-ci/',
-                         'tmp/mipbatch-ci/',
-                         'if: always()', 'if-no-files-found: error',
-                         'retention-days: 7']:
-            self.assertIn(required, job)
-        self.assertEqual(job.count('timeout-minutes: 28'), 1)
+        text = self.catalog.text()
+        job = self.assert_profile_job('volume-mip-batch',
+            ['python3 -B tests/measurement_ci_test.py', 'tests/execution_selection_test.py', '--file tests/e2e/test_volume_mip.py', '--file tests/e2e/test_volume_mip_job.py', '--file tests/e2e/test_volume_mip_batch.py', '--file worklist-v0/hpacs-lite/volume-mip-job.js', '--file worklist-v0/hpacs-lite/volume-mip-batch.js', '--file worklist-v0/hpacs-lite/viewer-volume-mip.js', '--file worklist-v0/hpacs-lite/viewer-volume-orientation.js', '--file worklist-v0/hpacs-lite/viewer-jobs.js', 'tests/measurement_ci.py --profile volume-mip-batch', 'name: synthetic-volume-mip-batch-results', 'tmp/mipbatch-ci/'],
+            ['tests/e2e/artifacts/volume-mip-batch-ci/'])
+        self.assertEqual(sum(step.get('timeout-minutes') == 28 for step in job['steps']), 1)
         self.assertEqual(text.count('--profile volume-mip-batch'), 1)
-        self.assertNotIn('--profile volume-mip-batch', jobs[0])
-        self.assertEqual(text.count('name: synthetic-volume-mip-batch-results'), 1)
+        self.assertEqual(sum(step.get('with', {}).get('name') == 'synthetic-volume-mip-batch-results'
+                             for other in self.catalog.combined()['jobs'].values() for step in other.get('steps', [])), 1)
         # A job of Validate itself, on the same triggers as every other synthetic group.
-        header = text.split('\njobs:\n')[0]
-        self.assertTrue(header.startswith('name: Validate production image\n'))
-        self.assertIn('\n  pull_request:\n', header)
+        owner = self.catalog.documents[self.catalog.owner('volume-mip-batch')[0]]
+        self.assertTrue(owner['name'].startswith('Validate production image'))
+        self.assertIn('pull_request', owner.get('on', owner.get(True)))
         # The other MPR jobs, the MIP Job group included, keep their own profile and do not run this one.
         for other in ('volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job'):
             self.assertEqual(text.count('--profile '+other), 1)
-            self.assertNotIn('--profile volume-mip-batch', text.split('\n  '+other+':\n')[1].split('\n  volume-mip-batch:\n')[0])
+            self.assertNotIn('--profile volume-mip-batch', self.catalog.job_text(self.catalog.job(other)))
         # The pure MIP Batch model runs in the existing pure model gate (listed and executed), beside the capture harness that loads it.
         pure = next(line for line in text.splitlines() if 'tmp/vr-ci/pure-volume-models' in line)
         for name in ('--file worklist-v0/hpacs-lite/volume-mip-batch.js', '--file tests/volume_mip_batch_test.cjs'):
@@ -2227,46 +2092,22 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertFalse(set(cases) & {node.name for node in base.body if isinstance(node, ast.FunctionDef)})
 
     def test_validate_workflow_runs_volume_mip_output_in_its_own_bounded_job(self):
-        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
-        jobs = text.split('\n  volume-mip-output:\n')
-        self.assertEqual(len(jobs), 2, 'validate.yml must declare one volume-mip-output job')
-        body = []
-        for line in jobs[1].splitlines():
-            if line.startswith('  ') and not line.startswith('   '):
-                break
-            body.append(line)
-        job = '\n'.join(body)
-        for required in ['runs-on: ubuntu-24.04',
-                         'persist-credentials: false',
-                         'python3 -B tests/measurement_ci_test.py',
-                         'tests/execution_selection_test.py',
-                         '--file tests/e2e/test_volume_mip_batch.py',
-                         '--file tests/e2e/test_volume_mip_output.py',
-                         '--file worklist-v0/hpacs-lite/volume-mip-output.js',
-                         '--file worklist-v0/hpacs-lite/viewer-volume-mip-print.js',
-                         '--file worklist-v0/hpacs-lite/viewer-volume-job-print.js',
-                         '--file worklist-v0/hpacs-lite/viewer-job-print.js',
-                         '--file worklist-v0/hpacs-lite/viewer-jobs.js',
-                         '--file worklist-v0/hpacs-lite/viewer-tech-note.js',
-                         'tests/measurement_ci.py --profile volume-mip-output',
-                         'name: synthetic-volume-mip-output-results',
-                         'tests/e2e/artifacts/volume-mip-output-ci/',
-                         'tmp/mipout-ci/',
-                         'if: always()', 'if-no-files-found: error',
-                         'retention-days: 7']:
-            self.assertIn(required, job)
-        self.assertEqual(job.count('timeout-minutes: 28'), 1)
+        text = self.catalog.text()
+        job = self.assert_profile_job('volume-mip-output',
+            ['python3 -B tests/measurement_ci_test.py', 'tests/execution_selection_test.py', '--file tests/e2e/test_volume_mip_batch.py', '--file tests/e2e/test_volume_mip_output.py', '--file worklist-v0/hpacs-lite/volume-mip-output.js', '--file worklist-v0/hpacs-lite/viewer-volume-mip-print.js', '--file worklist-v0/hpacs-lite/viewer-volume-job-print.js', '--file worklist-v0/hpacs-lite/viewer-job-print.js', '--file worklist-v0/hpacs-lite/viewer-jobs.js', '--file worklist-v0/hpacs-lite/viewer-tech-note.js', 'tests/measurement_ci.py --profile volume-mip-output', 'name: synthetic-volume-mip-output-results', 'tmp/mipout-ci/'],
+            ['tests/e2e/artifacts/volume-mip-output-ci/'])
+        self.assertEqual(sum(step.get('timeout-minutes') == 28 for step in job['steps']), 1)
         self.assertEqual(text.count('--profile volume-mip-output'), 1)
-        self.assertNotIn('--profile volume-mip-output', jobs[0])
-        self.assertEqual(text.count('name: synthetic-volume-mip-output-results'), 1)
+        self.assertEqual(sum(step.get('with', {}).get('name') == 'synthetic-volume-mip-output-results'
+                             for other in self.catalog.combined()['jobs'].values() for step in other.get('steps', [])), 1)
         # A job of Validate itself, on the same triggers as every other synthetic group.
-        header = text.split('\njobs:\n')[0]
-        self.assertTrue(header.startswith('name: Validate production image\n'))
-        self.assertIn('\n  pull_request:\n', header)
+        owner = self.catalog.documents[self.catalog.owner('volume-mip-output')[0]]
+        self.assertTrue(owner['name'].startswith('Validate production image'))
+        self.assertIn('pull_request', owner.get('on', owner.get(True)))
         # The other MPR jobs, the MIP Batch group included, keep their own profile and do not run this one.
         for other in ('volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch'):
             self.assertEqual(text.count('--profile '+other), 1)
-            self.assertNotIn('--profile volume-mip-output', text.split('\n  '+other+':\n')[1].split('\n  volume-mip-output:\n')[0])
+            self.assertNotIn('--profile volume-mip-output', self.catalog.job_text(self.catalog.job(other)))
         # The pure MIP output model runs in the existing pure model gate (listed and executed), beside the capture harness of its print entry.
         pure = next(line for line in text.splitlines() if 'tmp/vr-ci/pure-volume-models' in line)
         for name in ('--file worklist-v0/hpacs-lite/volume-mip-output.js', '--file tests/volume_mip_output_test.cjs'):
@@ -2331,36 +2172,14 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertFalse(set(cases) & {node.name for node in base.body if isinstance(node, ast.FunctionDef)})
 
     def test_validate_workflow_runs_volume_mip_orient_in_its_own_bounded_job(self):
-        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
-        jobs = text.split('\n  volume-mip-orient:\n')
-        self.assertEqual(len(jobs), 2, 'validate.yml must declare one volume-mip-orient job')
-        body = []
-        for line in jobs[1].splitlines():
-            if line.startswith('  ') and not line.startswith('   '):
-                break
-            body.append(line)
-        job = '\n'.join(body)
-        for required in ['runs-on: ubuntu-24.04',
-                         'persist-credentials: false',
-                         'python3 -B tests/measurement_ci_test.py',
-                         'tests/execution_selection_test.py',
-                         '--file tests/e2e/test_volume_mip_orient.py',
-                         '--file worklist-v0/hpacs-lite/volume-mip.js',
-                         '--file worklist-v0/hpacs-lite/volume-mip-job.js',
-                         '--file worklist-v0/hpacs-lite/volume-mip-output.js',
-                         '--file worklist-v0/hpacs-lite/viewer-volume-mip.js',
-                         '--file worklist-v0/hpacs-lite/viewer-jobs.js',
-                         'tests/measurement_ci.py --profile volume-mip-orient',
-                         'name: synthetic-volume-mip-orient-results',
-                         'tests/e2e/artifacts/volume-mip-orient-ci/',
-                         'tmp/miporient-ci/',
-                         'if: always()', 'if-no-files-found: error',
-                         'retention-days: 7']:
-            self.assertIn(required, job)
-        self.assertEqual(job.count('timeout-minutes: 28'), 1)
+        text = self.catalog.text()
+        job = self.assert_profile_job('volume-mip-orient',
+            ['python3 -B tests/measurement_ci_test.py', 'tests/execution_selection_test.py', '--file tests/e2e/test_volume_mip_orient.py', '--file worklist-v0/hpacs-lite/volume-mip.js', '--file worklist-v0/hpacs-lite/volume-mip-job.js', '--file worklist-v0/hpacs-lite/volume-mip-output.js', '--file worklist-v0/hpacs-lite/viewer-volume-mip.js', '--file worklist-v0/hpacs-lite/viewer-jobs.js', 'tests/measurement_ci.py --profile volume-mip-orient', 'name: synthetic-volume-mip-orient-results', 'tmp/miporient-ci/'],
+            ['tests/e2e/artifacts/volume-mip-orient-ci/'])
+        self.assertEqual(sum(step.get('timeout-minutes') == 28 for step in job['steps']), 1)
         self.assertEqual(text.count('--profile volume-mip-orient'), 1)
-        self.assertNotIn('--profile volume-mip-orient', jobs[0])
-        self.assertEqual(text.count('name: synthetic-volume-mip-orient-results'), 1)
+        self.assertEqual(sum(step.get('with', {}).get('name') == 'synthetic-volume-mip-orient-results'
+                             for other in self.catalog.combined()['jobs'].values() for step in other.get('steps', [])), 1)
         # Every other synthetic group keeps its own profile and does not run this one.
         for other in ('volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output'):
             self.assertEqual(text.count('--profile '+other), 1)
@@ -2752,8 +2571,7 @@ class MeasurementCiTests(unittest.TestCase):
                 self.assertNotEqual(profile['out'], other['out'])
                 self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
         # Dispatch only, through its own workflow: never on push or PR, not through the focused integration dispatcher.
-        validate = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
-        self.assertEqual(validate.count('--profile gateway-e2e'), 0)
+        self.assertEqual([row['job'] for row in self.catalog.profile_bindings()['gateway-e2e']], ['gateway-e2e'])
         dispatch = (ci.ROOT/'.github/workflows/gateway-e2e.yml').read_text(encoding='utf-8')
         self.assertEqual(dispatch.count('--profile gateway-e2e'), 1)
         # The Focused integration dispatcher can never run this profile: none of its steps requests it and none of its

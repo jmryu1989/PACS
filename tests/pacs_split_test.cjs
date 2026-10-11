@@ -235,7 +235,9 @@ test('U0B-RECORDER-INPUTS every record-run that names the facade names all 16 co
   const modules = Object.keys(spec.concerns);
   assert.equal(modules.length, 16);
   let records = 0;
-  for (const workflow of ['.github/workflows/validate.yml', '.github/workflows/gateway-e2e.yml']) {
+  const workflows = fs.readdirSync(path.resolve(__dirname, '../.github/workflows'))
+    .filter(name => name.endsWith('.yml')).sort().map(name => '.github/workflows/' + name);
+  for (const workflow of workflows) {
     const lines = fs.readFileSync(path.resolve(__dirname, '..', workflow), 'utf8').replace(/\r\n/g, '\n').split('\n');
     for (const [index, line] of lines.entries()) {
       if (!line.includes('scripts/record-run.py') || !line.includes(' --file api/src/pacs.service.ts ')) continue;
@@ -245,7 +247,8 @@ test('U0B-RECORDER-INPUTS every record-run that names the facade names all 16 co
     }
   }
   assert.ok(records >= 2, 'the facade is recorded somewhere');
-  const validate = fs.readFileSync(path.resolve(__dirname, '../.github/workflows/validate.yml'), 'utf8').replace(/\r\n/g, '\n');
+  const validate = workflows.map(workflow => fs.readFileSync(path.resolve(__dirname, '..', workflow), 'utf8')
+    .replace(/\r\n/g, '\n')).join('\n');
   const own = validate.split('\n').filter(line => line.includes('--run-dir tmp/workspace-ui-ci/pacs-split-modules '));
   assert.equal(own.length, 1);
   assert.ok(own[0].includes(' --file tests/pacs_split_modules_test.cjs -- node --test --test-reporter=tap tests/pacs_split_modules_test.cjs'), own[0]);

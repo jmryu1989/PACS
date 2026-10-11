@@ -749,7 +749,7 @@ production image tests for main, PRs and tags, recording the exact SHA/image ID.
 It does not deploy, publish a registry image or replace the 69+14 live/browser
 release gates and independent review. No production credentials are used in CI.
 
-Every `scripts/record-run.py --run-dir` in `validate.yml` sits under a path of an `if: always()` `actions/upload-artifact` step of the same job with `if-no-files-found: error`, so each record's `run.json`, `stdout.log` and `stderr.log` reach an artifact whatever the job's outcome. Every job uploads its whole record root except `runtime`, whose `synthetic-runtime-print-identity` names directories one by one and missed eleven of them; `synthetic-runtime-record-runs` uploads all of `tmp/runtime-ci/` (S5-CI2), and the older artifact keeps its name and paths. A unittest module at the default verbosity records only dots and `Ran N`, so the display-scope DOM step passes `-v`; the other record-run steps whose module or `-m unittest` command prints no case names are `identity-fields`, `hanging-protocols`, `cell-merge`, `images-only-loader`, `image-text-loader`, `three-d-cursor-dom` and `identity-position` under `tmp/workspace-ui-ci/`, and `binding-dom` and `orientation-basic-dom` under `tmp/vr-ci/`. The table is extracted from `validate.yml` at that commit (one row per run directory, with the artifacts that cover it); rebuild it from the workflow when a step changes rather than editing rows by hand.
+Every `scripts/record-run.py --run-dir` in the workflows listed below sits under a path of an `if: always()` `actions/upload-artifact` step of the same job with `if-no-files-found: error`, so each record's `run.json`, `stdout.log` and `stderr.log` reach an artifact whatever the job's outcome. Every job uploads its whole record root except `runtime`, whose `synthetic-runtime-print-identity` names directories one by one and missed eleven of them; `synthetic-runtime-record-runs` uploads all of `tmp/runtime-ci/` (S5-CI2), and the older artifact keeps its name and paths. A unittest module at the default verbosity records only dots and `Ran N`, so the display-scope DOM step passes `-v`; the other record-run steps whose module or `-m unittest` command prints no case names are `identity-fields`, `hanging-protocols`, `cell-merge`, `images-only-loader`, `image-text-loader`, `three-d-cursor-dom` and `identity-position` under `tmp/workspace-ui-ci/`, and `binding-dom` and `orientation-basic-dom` under `tmp/vr-ci/`. The table covers `validate.yml`, `worklist-ux.yml` and the named per-job workflows in `.github/workflows/` (one row per run directory, with the artifacts that cover it); rebuild it from the owning workflow when a step changes. A cell with only a job id belongs to `validate.yml`.
 
 | Job | `--run-dir` | Artifact(s) | Step |
 |---|---|---|---|
@@ -835,13 +835,13 @@ Every `scripts/record-run.py --run-dir` in `validate.yml` sits under a path of a
 | `measurements` | `tmp/workspace-ui-ci/admin-gateway-status-dom` | `synthetic-workspace-dom-results` | S5-U6a Members console Gateway Status five states, retry rule, A-B-A guards and wording DOM |
 | `measurements` | `tmp/workspace-ui-ci/admin-metrics-dom` | `synthetic-workspace-dom-results` | S5-U6b Members console Operations metrics states, unknown never 0, A-B-A guard and wording DOM |
 | `measurements` | `tmp/workspace-ui-ci/admin-audit-dom` | `synthetic-workspace-dom-results` | S5-U5b Members console Audit / Security rows, withheld and not recorded, failure not empty, A-B-A guards DOM |
-| `volume-rendering` | `tmp/vr-ci/measurement-ci` | `synthetic-volume-rendering-results` | CI profile safeguards and artifact policy |
-| `volume-rendering` | `tmp/vr-ci/pure-vr` | `synthetic-volume-rendering-results` | Volume rendering, sculpt, and personal preset boundaries |
-| `volume-rendering` | `tmp/vr-ci/pure-volume-models` | `synthetic-volume-rendering-results` | Volume display, batch, crosshair, marks, curved MPR, orientation, job capture and preference models |
-| `volume-rendering` | `tmp/vr-ci/binding-dom` | `synthetic-volume-rendering-results` | VR source binding survives transient MPR layout readiness |
-| `volume-rendering` | `tmp/vr-ci/orientation-basic-dom` | `synthetic-volume-rendering-results` | MPR Basic Orthogonal stays distinct from Reset Planes |
-| `volume-rendering` | `tmp/vr-ci/execution-selection` | `synthetic-volume-rendering-results` | Confirm exact declared VR-only selection |
-| `volume-rendering` | `tmp/vr-ci/recipe-precision` | `synthetic-volume-rendering-results` | Volume batch recipe rounding precision |
+| `volume-rendering.yml` / `volume-rendering` | `tmp/vr-ci/measurement-ci` | `synthetic-volume-rendering-results` | CI profile safeguards and artifact policy |
+| `volume-rendering.yml` / `volume-rendering` | `tmp/vr-ci/pure-vr` | `synthetic-volume-rendering-results` | Volume rendering, sculpt, and personal preset boundaries |
+| `volume-rendering.yml` / `volume-rendering` | `tmp/vr-ci/pure-volume-models` | `synthetic-volume-rendering-results` | Volume display, batch, crosshair, marks, curved MPR, orientation, job capture and preference models |
+| `volume-rendering.yml` / `volume-rendering` | `tmp/vr-ci/binding-dom` | `synthetic-volume-rendering-results` | VR source binding survives transient MPR layout readiness |
+| `volume-rendering.yml` / `volume-rendering` | `tmp/vr-ci/orientation-basic-dom` | `synthetic-volume-rendering-results` | MPR Basic Orthogonal stays distinct from Reset Planes |
+| `volume-rendering.yml` / `volume-rendering` | `tmp/vr-ci/execution-selection` | `synthetic-volume-rendering-results` | Confirm exact declared VR-only selection |
+| `volume-rendering.yml` / `volume-rendering` | `tmp/vr-ci/recipe-precision` | `synthetic-volume-rendering-results` | Volume batch recipe rounding precision |
 | `volume-mpr` | `tmp/mpr-ci/measurement-ci` | `synthetic-volume-mpr-results` | MPR profile isolation, bounded budget and artifact policy |
 | `volume-mpr` | `tmp/mpr-ci/curved-dom` | `synthetic-volume-mpr-results` | Curved MPR editing, stale results and restore rollback on the real panel |
 | `volume-mpr` | `tmp/mpr-ci/execution-selection` | `synthetic-volume-mpr-results` | Confirm exact declared crosshair, display and curved selection |
@@ -853,13 +853,13 @@ Every `scripts/record-run.py --run-dir` in `validate.yml` sits under a path of a
 | `volume-batch` | `tmp/batch-ci/measurement-ci` | `synthetic-volume-batch-results` | Batch profile isolation, bounded budget and artifact policy |
 | `volume-batch` | `tmp/batch-ci/binding-dom` | `synthetic-volume-batch-results` | Batch preview keeps its recipe through render readiness transients on the real panel |
 | `volume-batch` | `tmp/batch-ci/execution-selection` | `synthetic-volume-batch-results` | Confirm exact declared batch preview, context, save and scout selection |
-| `volume-sync-preferences` | `tmp/syncpref-ci/measurement-ci` | `synthetic-volume-sync-preferences-results` | Sync and preferences profile isolation, bounded budget and artifact policy |
-| `volume-sync-preferences` | `tmp/syncpref-ci/preferences-layout-dom` | `synthetic-volume-sync-preferences-results` | Applied MPR mouse setting stays bound on a new layout on the real panel |
-| `volume-sync-preferences` | `tmp/syncpref-ci/sync-layout-dom` | `synthetic-volume-sync-preferences-results` | MPR synchronization choices stay on a Hanging Protocol three-plane layout on the real panel |
-| `volume-sync-preferences` | `tmp/syncpref-ci/execution-selection` | `synthetic-volume-sync-preferences-results` | Confirm exact declared MPR synchronization and preferences selection |
-| `volume-marks` | `tmp/marks-ci/measurement-ci` | `synthetic-volume-marks-results` | Marks profile isolation, bounded budget and artifact policy |
-| `volume-marks` | `tmp/marks-ci/progressive-dom` | `synthetic-volume-marks-results` | Armed 3D annotation pick is not previewed by progressive refinement on the real panel |
-| `volume-marks` | `tmp/marks-ci/execution-selection` | `synthetic-volume-marks-results` | Confirm exact declared manual 3D annotation and annotated output selection |
+| `volume-sync-preferences.yml` / `volume-sync-preferences` | `tmp/syncpref-ci/measurement-ci` | `synthetic-volume-sync-preferences-results` | Sync and preferences profile isolation, bounded budget and artifact policy |
+| `volume-sync-preferences.yml` / `volume-sync-preferences` | `tmp/syncpref-ci/preferences-layout-dom` | `synthetic-volume-sync-preferences-results` | Applied MPR mouse setting stays bound on a new layout on the real panel |
+| `volume-sync-preferences.yml` / `volume-sync-preferences` | `tmp/syncpref-ci/sync-layout-dom` | `synthetic-volume-sync-preferences-results` | MPR synchronization choices stay on a Hanging Protocol three-plane layout on the real panel |
+| `volume-sync-preferences.yml` / `volume-sync-preferences` | `tmp/syncpref-ci/execution-selection` | `synthetic-volume-sync-preferences-results` | Confirm exact declared MPR synchronization and preferences selection |
+| `volume-marks.yml` / `volume-marks` | `tmp/marks-ci/measurement-ci` | `synthetic-volume-marks-results` | Marks profile isolation, bounded budget and artifact policy |
+| `volume-marks.yml` / `volume-marks` | `tmp/marks-ci/progressive-dom` | `synthetic-volume-marks-results` | Armed 3D annotation pick is not previewed by progressive refinement on the real panel |
+| `volume-marks.yml` / `volume-marks` | `tmp/marks-ci/execution-selection` | `synthetic-volume-marks-results` | Confirm exact declared manual 3D annotation and annotated output selection |
 | `volume-mip-voi` | `tmp/mipvoi-ci/measurement-ci` | `synthetic-volume-mip-voi-results` | MIP VOI profile isolation, bounded budget and artifact policy |
 | `volume-mip-voi` | `tmp/mipvoi-ci/execution-selection` | `synthetic-volume-mip-voi-results` | Confirm exact declared MIP Viewer VOI Slab selection |
 | `volume-mip-job` | `tmp/mipjob-ci/measurement-ci` | `synthetic-volume-mip-job-results` | MIP Job profile isolation, bounded budget and artifact policy |
@@ -870,13 +870,13 @@ Every `scripts/record-run.py --run-dir` in `validate.yml` sits under a path of a
 | `volume-mip-output` | `tmp/mipout-ci/execution-selection` | `synthetic-volume-mip-output-results` | Confirm exact declared MIP Viewer output selection |
 | `volume-mip-orient` | `tmp/miporient-ci/measurement-ci` | `synthetic-volume-mip-orient-results` | MIP orientation profile isolation, bounded budget and artifact policy |
 | `volume-mip-orient` | `tmp/miporient-ci/execution-selection` | `synthetic-volume-mip-orient-results` | Confirm exact declared MIP Viewer orientation selection |
-| `hanging-protocols` | `tmp/hp-ci/measurement-ci` | `synthetic-hanging-protocols-results` | Hanging protocol profile isolation, bounded budget and artifact policy |
-| `hanging-protocols` | `tmp/hp-ci/execution-selection` | `synthetic-hanging-protocols-results` | Confirm exact declared invariants, worklist and hanging protocol selection |
-| `hanging-protocols` | `tmp/hp-ci/dictation-refusal-oracle` | `synthetic-hanging-protocols-results` | Dictation refusal oracle behavior, vectors and tagged mutants (S3-ASR-U5) |
+| `hanging-protocols.yml` / `hanging-protocols` | `tmp/hp-ci/measurement-ci` | `synthetic-hanging-protocols-results` | Hanging protocol profile isolation, bounded budget and artifact policy |
+| `hanging-protocols.yml` / `hanging-protocols` | `tmp/hp-ci/execution-selection` | `synthetic-hanging-protocols-results` | Confirm exact declared invariants, worklist and hanging protocol selection |
+| `hanging-protocols.yml` / `hanging-protocols` | `tmp/hp-ci/dictation-refusal-oracle` | `synthetic-hanging-protocols-results` | Dictation refusal oracle behavior, vectors and tagged mutants (S3-ASR-U5) |
 | `cell-merge` | `tmp/cell-merge-ci/measurement-ci` | `synthetic-cell-merge-results` | Cell merge profile isolation, bounded budget and artifact policy |
 | `cell-merge` | `tmp/cell-merge-ci/execution-selection` | `synthetic-cell-merge-results` | Confirm exact declared cell merge selection |
-| `study-arrivals` | `tmp/study-arrivals-ci/measurement-ci` | `synthetic-study-arrivals-results` | Study arrivals profile isolation, bounded budget and artifact policy |
-| `study-arrivals` | `tmp/study-arrivals-ci/execution-selection` | `synthetic-study-arrivals-results` | Confirm exact declared study arrivals selection |
+| `study-arrivals.yml` / `study-arrivals` | `tmp/study-arrivals-ci/measurement-ci` | `synthetic-study-arrivals-results` | Study arrivals profile isolation, bounded budget and artifact policy |
+| `study-arrivals.yml` / `study-arrivals` | `tmp/study-arrivals-ci/execution-selection` | `synthetic-study-arrivals-results` | Confirm exact declared study arrivals selection |
 | `u2b-regressions` | `tmp/u2b-regressions-ci/measurement-ci` | `synthetic-u2b-regressions-results` | U2b regressions profile isolation, bounded budget and artifact policy |
 | `u2b-regressions` | `tmp/u2b-regressions-ci/execution-selection` | `synthetic-u2b-regressions-results` | Confirm exact declared U2b regression selection |
 | `runtime` | `tmp/runtime-ci/job-print-identity` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | Saved comparison print identity model |
@@ -929,11 +929,11 @@ Every `scripts/record-run.py --run-dir` in `validate.yml` sits under a path of a
 | `runtime` | `tmp/runtime-ci/dictation-capture` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | Pure dictation capture and worklet lifecycle |
 | `runtime` | `tmp/runtime-ci/dictation-host` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | Pure dictation host adapter over the shipped session and capture modules |
 | `runtime` | `tmp/runtime-ci/volume-api-models` | `synthetic-runtime-print-identity`, `synthetic-runtime-record-runs` | Compiled volume job command and volume mark boundary models |
-| `asr-engine` | `tmp/asr-ci/fixture-pure` | `synthetic-asr-engine-runtime` | Pure fixture canonicalization and attestation refusals |
-| `asr-engine` | `tmp/asr-ci/generate` | `synthetic-asr-engine-runtime` | Synthesise the pinned non-clinical sentence |
-| `asr-engine` | `tmp/asr-ci/canonicalize` | `synthetic-asr-engine-runtime` | Canonicalize the fixture to the dictation wire format |
-| `asr-engine` | `tmp/asr-ci/attest` | `synthetic-asr-engine-runtime` | Record runtime attestation before starting the engine |
-| `asr-engine` | `tmp/asr-ci/runtime` | `synthetic-asr-engine-runtime` | Drive the shipped compiled service against the real engine |
+| `asr-engine.yml` / `asr-engine` | `tmp/asr-ci/fixture-pure` | `synthetic-asr-engine-runtime` | Pure fixture canonicalization and attestation refusals |
+| `asr-engine.yml` / `asr-engine` | `tmp/asr-ci/generate` | `synthetic-asr-engine-runtime` | Synthesise the pinned non-clinical sentence |
+| `asr-engine.yml` / `asr-engine` | `tmp/asr-ci/canonicalize` | `synthetic-asr-engine-runtime` | Canonicalize the fixture to the dictation wire format |
+| `asr-engine.yml` / `asr-engine` | `tmp/asr-ci/attest` | `synthetic-asr-engine-runtime` | Record runtime attestation before starting the engine |
+| `asr-engine.yml` / `asr-engine` | `tmp/asr-ci/runtime` | `synthetic-asr-engine-runtime` | Drive the shipped compiled service against the real engine |
 | `dictation-capture` | `tmp/dictation-capture-ci/signal` | `synthetic-dictation-capture-results` | S3-ASR-U4b fixture pin, producer-layout mirror and spectral oracle controls (pure) |
 | `dictation-capture` | `tmp/dictation-capture-ci/capture` | `synthetic-dictation-capture-results` | S3-ASR-U4b fake-device capture, worklet, upload bytes, release and refusals in pinned Chromium |
 
@@ -2389,10 +2389,10 @@ REQ-WS3/REQ-WS7 → RISK-WS3/RISK-WS7 → WS3-SHORTCUTS / WS3-RELATIVE-DATE / WS
 
 | Test-ID | 실행·동작 계약 | CI |
 |---|---|---|
-| WS3-SHORTCUTS | `filter_shortcuts_service_test.cjs`의 owner/revision CAS·전체 배열 교체·삭제된 대상 보존, `worklist_folders_dom_test.py`의 draft/IME·저장/재적용/재로그인·철회/rename·읽기 실패·늦은 응답 | measurements `filter-shortcuts`, `worklist-folders` |
-| WS3-RELATIVE-DATE | `compound_filter_test.cjs`, `worklist_body_parts_dom_test.py`의 저장된 상대 조건 재편집 및 0/1/7/30/직접 입력, `WorklistFoldersDOM.test_relative_dates_cross_local_midnight_dst_month_and_year` | runtime compound, measurements body-parts·worklist-folders |
-| WS3-COUNTS | `worklist_folder_tree_test.cjs`, `WorklistFoldersDOM.test_counts_unknown_partial_complete_and_failure`의 n/Partial/— 및 `test_first_paint_tokens_or_and_empty_and_vanished`의 OR/AND·빈 선택·사라진 토큰·status 변경 시만 알림 | runtime worklist-folder-tree, measurements worklist-folders |
-| C3-LIVE | `main_split_landing_dom_test.py`: 현재 소스의 unsplit/실제 bundle 전체 등록·dispatch·Retry 순서, held input·종료 및 제공 바이트 검사 | measurements main-split-landing |
+| WS3-SHORTCUTS | `filter_shortcuts_service_test.cjs`의 owner/revision CAS·전체 배열 교체·삭제된 대상 보존, `worklist_folders_dom_test.py`의 draft/IME·저장/재적용/재로그인·철회/rename·읽기 실패·늦은 응답 | `worklist-ux.yml` worklist-ux-measurements `filter-shortcuts`, `worklist-folders` |
+| WS3-RELATIVE-DATE | `compound_filter_test.cjs`, `worklist_body_parts_dom_test.py`의 저장된 상대 조건 재편집 및 0/1/7/30/직접 입력, `WorklistFoldersDOM.test_relative_dates_cross_local_midnight_dst_month_and_year` | `validate.yml` runtime compound, measurements body-parts; `worklist-ux.yml` worklist-ux-measurements worklist-folders |
+| WS3-COUNTS | `worklist_folder_tree_test.cjs`, `WorklistFoldersDOM.test_counts_unknown_partial_complete_and_failure`의 n/Partial/— 및 `test_first_paint_tokens_or_and_empty_and_vanished`의 OR/AND·빈 선택·사라진 토큰·status 변경 시만 알림 | `worklist-ux.yml` worklist-ux-runtime worklist-folder-tree, worklist-ux-measurements worklist-folders |
+| C3-LIVE | `main_split_landing_dom_test.py`: 현재 소스의 unsplit/실제 bundle 전체 등록·dispatch·Retry 순서, held input·종료 및 제공 바이트 검사 | `worklist-ux.yml` worklist-ux-measurements main-split-landing |
 | WS3-SHORTCUTS-LIVE | `tests/e2e/test_filter_folders.py::FilterFoldersE2E::test_shortcuts_01_folder_edit_save_reapply_relogin` | candidate_ci.py 정확 수집 1건 추가 (총 115), 기존 89+15+10 유지 |
 
 추가 실스택 경계는 같은 클래스 `test_shortcuts_02_cas_owner_and_missing_target_retention`이다.
