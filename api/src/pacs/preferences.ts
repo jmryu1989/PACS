@@ -70,9 +70,10 @@ export class PacsPreferences {
 
   private workspaceValue(value: any) {
     const object = (v: any) => v !== null && typeof v === 'object' && !Array.isArray(v);
-    const fields = value?.version === 2 ? 'landscape,mode,portrait,reading,version' : 'landscape,mode,portrait,version';
+    const fields = value?.version === 3 ? 'landscape,mode,portrait,reading,version,workspace' :
+      value?.version === 2 ? 'landscape,mode,portrait,reading,version' : 'landscape,mode,portrait,version';
     if (!object(value) || Object.keys(value).sort().join(',') !== fields ||
-        ![1, 2].includes(value.version) || !['auto', 'portrait', 'landscape'].includes(value.mode) || JSON.stringify(value).length > 2048)
+        ![1, 2, 3].includes(value.version) || !['auto', 'portrait', 'landscape'].includes(value.mode) || JSON.stringify(value).length > 2048)
       throw new BadRequestException('작업공간 배치 형식이 잘못되었습니다');
     const clean: any = { version: value.version, mode: value.mode, portrait: {}, landscape: {} };
     for (const axis of ['portrait', 'landscape']) {
@@ -84,7 +85,7 @@ export class PacsPreferences {
         clean[axis][key] = Math.round(size);
       }
     }
-    if (value.version === 2) {
+    if (value.version >= 2) {
       const reading = value.reading;
       if (!object(reading) || Object.keys(reading).sort().join(',') !==
           'imageHeight,relatedHeight,relatedHidden,relatedListHeight,reportWidth,version' ||
@@ -98,6 +99,21 @@ export class PacsPreferences {
         clean.reading[key] = size;
       }
       clean.reading.relatedHidden = reading.relatedHidden;
+    }
+    if (value.version === 3) {
+      const workspace = value.workspace;
+      // Drawer visibility belongs to the current opening, never the account's saved layout.
+      if (!object(workspace) || Object.keys(workspace).sort().join(',') !==
+          'prior,rail,railCollapsed,related,studyPanelTab,version,worklist' ||
+          workspace.version !== 1 || typeof workspace.railCollapsed !== 'boolean' ||
+          !['images', 'info', 'templates'].includes(workspace.studyPanelTab))
+        throw new BadRequestException('작업공간 배치 형식이 잘못되었습니다');
+      const size = (v: any) => v === null || Number.isInteger(v) && v >= 1 && v <= 16384;
+      if (!size(workspace.rail) || !size(workspace.worklist) || !size(workspace.related) || !size(workspace.prior))
+        throw new BadRequestException('작업공간 패널 크기가 잘못되었습니다');
+      clean.workspace = { version: 1, rail: workspace.rail, worklist: workspace.worklist,
+        related: workspace.related, prior: workspace.prior, railCollapsed: workspace.railCollapsed,
+        studyPanelTab: workspace.studyPanelTab };
     }
     return clean;
   }
