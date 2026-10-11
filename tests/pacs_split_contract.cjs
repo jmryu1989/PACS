@@ -16,9 +16,12 @@ function historicalSource() {
   const path = require('node:path'), fs = require('node:fs'), os = require('node:os'), { execFileSync } = require('node:child_process');
   const root = path.resolve(__dirname, '..');
   const landed = 'c8e4f1b485ec05ccbb97589c74a573b3f48b70ce';
+  // A closed, virtual API root excludes files added after the approved split.
+  // Overlaying historical blobs on api/src mixed in later EMR consumers.
+  const apiSrc = path.join(root, 'tmp/s9-u0b-relist/historical-api');
   const files = execFileSync('git', ['ls-tree', '-r', '--name-only', landed, 'api/src'],
     { cwd: root, encoding: 'utf8' }).trim().split('\n').filter(f => f.endsWith('.ts'));
-  const overrides = Object.fromEntries(files.map(file => [path.join(root, file),
+  const overrides = Object.fromEntries(files.map(file => [path.join(apiSrc, file.slice('api/src/'.length)),
     execFileSync('git', ['show', `${landed}:${file}`], { cwd: root, encoding: 'utf8', maxBuffer: 8e6 })]));
   // SQL provenance includes imported Prisma declarations. A later additive
   // schema must not change the historical generator output used by that proof.
@@ -37,7 +40,7 @@ function historicalSource() {
     assert.ok(path.basename(resolved).startsWith('pacs-history-'));
     fs.rmSync(resolved, { recursive: true });
   }
-  return require('./pacs_source.cjs').createSource({ overrides });
+  return require('./pacs_source.cjs').createSource({ apiSrc, overrides });
 }
 
 const pair = (field, member) => `${field}.${member}`;

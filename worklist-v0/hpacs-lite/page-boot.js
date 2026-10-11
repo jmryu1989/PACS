@@ -7,6 +7,10 @@
     // 처음부터 회색인 편이 낫다. (서버 검사가 진짜 방어선이고 이건 안내다)
     function applyRoleUi() {
       const rad = KinAuth.has("radiologist"), tec = KinAuth.has("technician");
+      studyPanel?.setAvailable(studyPanelAvailable());
+      document.querySelectorAll('[data-study-panel-tab]').forEach(button => {
+        button.hidden = !studyPanelAvailable().includes(button.dataset.studyPanelTab);
+      });
       // Clear·Paste도 판독문을 고치는 버튼이다. 목록에서 빠져 있어서 기사에게도 열려 있었다.
       ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-addendum", "#b-defer",
        "#b-clear", "#b-paste"].forEach(s => {
@@ -352,15 +356,21 @@
         owner: workspaceOwner ? [sess.institution, sess.sub] : null,
         // A reset or legacy local record still comes from a client that can
         // preserve reading panels; never serialize it as an older v1 writer.
-        read: () => KinWorkspaceLayout.withReading(workspaceState, readingWorkspace.snapshotPanels()),
+        read: () => KinWorkspaceLayout.toVersion3(KinWorkspaceLayout.withReading(workspaceState, readingWorkspace.snapshotPanels())),
         generation: () => workspaceGeneration,
         model: KinWorkspaceLayout, endpoint: API + '/workspace-layout', sessionEndpoint: API + '/me',
         localKept: () => workspaceLocalKept,
         apply: state => {
-          state = KinWorkspaceLayout.mergeLoaded(workspaceState, state);
+          if (!workspaceEditable()) return false;
+          state = KinWorkspaceLayout.toVersion3(KinWorkspaceLayout.mergeLoaded(workspaceState, state));
           if (!state) return false;
           workspaceGeneration++; workspaceState = state; layoutMode = state.mode; applyLayout();
           if (state.reading) readingWorkspace.applyPanels(state.reading);
+          if (studyPanel) {
+            studyPanelRestoring = true;
+            studyPanel.restore({ open: studyPanel.snapshot().open, tab: state.workspace.studyPanelTab });
+            studyPanelRestoring = false;
+          }
           const saved = KinWorkspaceLayout.write(workspaceStorage, workspaceOwner, state);
           workspaceLocalKept = !!saved;
           $("#layout-status").textContent = saved ? "배치 복원됨 · 이 브라우저" : "배치 · 이 창에서만 유지";
@@ -416,5 +426,38 @@
       }
       await load();
     }
+    $('#study-panel-open').addEventListener('click', () => studyPanel ? studyPanel.close() : openStudyPanel());
+    document.querySelectorAll('[data-study-panel-tab]').forEach(button => {
+      button.addEventListener('click', () => openStudyPanel(button.dataset.studyPanelTab));
+    });
+    const studyContextOpener = document.querySelector('#reading-bar [aria-controls="reading-context"]');
+    if (studyContextOpener) {
+      studyContextOpener.setAttribute('aria-controls', 'study-panel-host');
+      studyContextOpener.addEventListener('click', event => {
+        if (!workspaceEditable()) return;
+        event.preventDefault(); event.stopImmediatePropagation();
+        if (studyPanel) studyPanel.close(); else openStudyPanel();
+      }, true);
+    }
+    // Use the existing account-scoped shortcut model. A remapped command wins
+    // over the Templates convenience chord; native input/IME and overlays win.
+    let studyPanelComposing = false;
+    document.addEventListener('compositionstart', () => { studyPanelComposing = true; }, true);
+    document.addEventListener('compositionend', () => { studyPanelComposing = false; }, true);
+    window.addEventListener('keydown', event => {
+      if (!workspaceEditable() || event.defaultPrevented || event.isComposing || studyPanelComposing || event.keyCode === 229
+          || document.querySelector('dialog[open], .modal.show, [popover]:popover-open')) return;
+      // The drawer has priority over the integrated workspace's list Escape.
+      if (event.key === 'Escape' && studyPanel?.element.contains(document.activeElement)
+          && !event.target.closest('select, [aria-expanded="true"]')) {
+        studyPanel.close(); event.preventDefault(); event.stopImmediatePropagation(); return;
+      }
+      const owner = workspaceOwner?.slice(KinWorkspaceLayout.PREFIX.length);
+      const bindings = KinWorkspaceShortcuts.read(workspaceStorage, owner);
+      const command = KinWorkspaceShortcuts.action(bindings, event);
+      const templates = !command && KinWorkspaceShortcuts.action({ ...bindings, context: 'KeyT' }, event) === 'context';
+      if (command !== 'context' && !templates) return;
+      if (openStudyPanel(templates ? 'templates' : undefined)) { event.preventDefault(); event.stopImmediatePropagation(); }
+    }, true);
     boot();
   

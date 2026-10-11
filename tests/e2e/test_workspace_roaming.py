@@ -9,6 +9,38 @@ from document_session import document_request
 from viewer_session import hold_landing, release_after_end
 
 class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
+    def test_roam_06_v3_drawer_account_save_and_relogin(self):
+        """WS1-LAYOUT-ROAM / WS7-RW-RELOCATION on the real preference endpoint."""
+        context = self.device()
+        page = self.sign_in(context)
+        owner = self.owner(page)
+        reading = dict(version=1,reportWidth=540,imageHeight=390,relatedHeight=None,
+                       relatedListHeight=180,relatedHidden=False)
+        page.evaluate('([key,value])=>localStorage.setItem(key,JSON.stringify(value))',
+                      [owner,dict(version=2,mode='auto',portrait={},landscape={},reading=reading)])
+        page.reload()
+        expect(page.locator('#dbstat')).to_contain_text('DB Connected')
+        page.keyboard.press('Control+Alt+t')
+        drawer = page.get_by_role('complementary',name='Study Panel',exact=True)
+        expect(drawer.get_by_role('tab',name='Templates',exact=True)).to_have_attribute('aria-selected','true')
+        saved = self.stored(page)
+        self.assertEqual(3,saved['version'])
+        self.assertEqual(reading,saved['reading'])
+        self.assertEqual({'version','rail','worklist','related','prior','railCollapsed','studyPanelTab'},set(saved['workspace']))
+        page.keyboard.press('Escape')
+        self.action(page,'Save to Account','현재 배치를 계정에 저장')
+        self.assertEqual(saved,self.remote(page)['layout'])
+        self.sign_out(page)
+        page = self.sign_in(context)
+        expect(page.get_by_role('complementary',name='Study Panel',exact=True)).to_have_count(0)
+        self.assertEqual(saved,self.stored(page))
+        fresh = self.sign_in(self.device())
+        self.action(fresh,'Load from Account','서버 배치를 불러왔습니다')
+        self.close_toolbar_groups(fresh,'#workspace-server-menu')
+        fresh.keyboard.press('Control+Alt+5')
+        expect(fresh.get_by_role('tab',name='Templates',exact=True)).to_have_attribute('aria-selected','true')
+        self.assertEqual(saved,self.stored(fresh))
+
     def hashes(self):
         result={}
         for uid in self.stack.active:

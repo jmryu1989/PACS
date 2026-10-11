@@ -1,10 +1,28 @@
 
 
     // ── 패널 크기 조절 ──
+    let workspaceDragCancel = null;
+    function workspaceEditable() {
+      return !workspaceEnded && work.state() === 'active' && workspaceOwner === KinWorkspaceLayout.key(KinAuth.session());
+    }
     function bindPanelResize(selector, axis, resize) {
       const handle = $(selector);
+      handle.tabIndex = 0;
+      handle.addEventListener('keydown', e => {
+        if (!workspaceEditable() || e.isComposing || e.keyCode === 229) return;
+        const direction = typeof axis === 'function' ? axis() : axis;
+        const keys = direction === 'x' ? ['ArrowLeft', 'ArrowRight'] : ['ArrowUp', 'ArrowDown'];
+        if (![...keys, 'Home', 'End'].includes(e.key)) return;
+        e.preventDefault();
+        const box = handle.getBoundingClientRect(), step = e.shiftKey ? 40 : 10;
+        const delta = e.key === 'Home' ? -16384 : e.key === 'End' ? 16384 : e.key === keys[0] ? -step : step;
+        resize({ clientX: box.left + (direction === 'x' ? delta : 0), clientY: box.top + (direction === 'y' ? delta : 0) }, direction);
+        rememberPanelSize(selector);
+      });
       handle.addEventListener("pointerdown", e => {
-        if (e.button !== 0) return;
+        if (e.button !== 0 || !workspaceEditable()) return;
+        workspaceDragCancel?.();
+        const at = work.capture('document');
         workspaceGeneration++;
         e.preventDefault();
         const dragAxis = typeof axis === "function" ? axis() : axis;
@@ -13,7 +31,7 @@
         document.body.classList.add("resizing", dragAxis === "x" ? "resizing-x" : "resizing-y");
 
         const move = event => {
-          if (event.pointerId === e.pointerId) resize(event, dragAxis);
+          if (event.pointerId === e.pointerId) work.commit(at, () => resize(event, dragAxis));
         };
         const end = event => {
           if (event.pointerId !== e.pointerId) return;
@@ -23,9 +41,13 @@
           handle.classList.remove("dragging");
           document.body.classList.remove("resizing", "resizing-x", "resizing-y");
           if (handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId);
-          if (event.type === "pointerup") rememberPanelSize(selector);
-          else applyLayout();
+          workspaceDragCancel = null;
+          work.commit(at, () => {
+            if (event.type === "pointerup") rememberPanelSize(selector);
+            else applyLayout();
+          });
         };
+        workspaceDragCancel = () => end({ pointerId: e.pointerId, type: 'pointercancel' });
         handle.addEventListener("pointermove", move);
         handle.addEventListener("pointerup", end);
         handle.addEventListener("pointercancel", end);
@@ -37,26 +59,34 @@
     // 말해도 되는지를 이것이 정한다 — 남기지 못했으면 새로고침하면 사라진다고 말한다(workspace-roaming.js).
     let workspaceLocalKept = true;
     function saveWorkspace() {
+      if (!workspaceEditable()) return;
       workspaceGeneration++;
       workspaceState.mode = layoutMode;
-      workspaceState = KinWorkspaceLayout.withReading(workspaceState, readingWorkspace.snapshotPanels());
+      workspaceState = KinWorkspaceLayout.toVersion3(KinWorkspaceLayout.withReading(workspaceState, readingWorkspace.snapshotPanels()));
       const saved = KinWorkspaceLayout.write(workspaceStorage, workspaceOwner, workspaceState);
       workspaceLocalKept = !!saved;
       $("#layout-status").textContent = saved ? "배치 저장됨 · 이 브라우저" : "배치 저장 안 됨 · 이 창에서만 유지";
     }
     function rememberPanelSize(selector) {
+      if (!workspaceEditable()) return;
+      if (selector === '#resize-rail') {
+        workspaceState.workspace.rail = Math.round($('#worklist-folders-panel').getBoundingClientRect().width);
+        saveWorkspace(); return;
+      }
       const targets = { "#resize-main": ["main", ".left"], "#resize-top": ["top", ".rw"],
         "#resize-related": ["related", ".related-p"], "#resize-prior": ["prior", ".related-list-pane"] };
       const [name, panel] = targets[selector];
       const dimension = !portraitLayout() && ["main", "related"].includes(name) ? "width" : "height";
       workspaceState[workspaceAxis()][name] = Math.round($(panel).getBoundingClientRect()[dimension]);
+      const field = { main: 'worklist', related: 'related', prior: 'prior' }[name];
+      if (field) workspaceState.workspace[field] = workspaceState[workspaceAxis()][name];
       saveWorkspace();
     }
     function restoreWorkspace() {
       workspaceOwner = KinWorkspaceLayout.key(sess);
       try { workspaceStorage = localStorage; } catch (_) { workspaceStorage = null; }
       const result = KinWorkspaceLayout.read(workspaceStorage, workspaceOwner);
-      workspaceState = result.state;
+      workspaceState = KinWorkspaceLayout.toVersion3(result.state);
       workspaceLocalKept = !["disabled", "unavailable"].includes(result.status);
       layoutMode = workspaceState.mode;
       readingWorkspace.applyPanels(workspaceState.reading || KinReadingPanelLayout.defaults());
@@ -65,15 +95,17 @@
       applyLayout();
     }
     $("#layout-toggle").addEventListener("click", () => {
+      if (!workspaceEditable()) return;
       layoutMode = layoutMode === "auto" ? "portrait" : layoutMode === "portrait" ? "landscape" : "auto";
       applyLayout();
       saveWorkspace();
     });
     $("#layout-reset").addEventListener("click", () => {
+      if (!workspaceEditable()) return;
       workspaceGeneration++;
       const removed = KinWorkspaceLayout.remove(workspaceStorage, workspaceOwner);
       workspaceLocalKept = !!removed;
-      workspaceState = KinWorkspaceLayout.defaults(); layoutMode = "auto";
+      workspaceState = KinWorkspaceLayout.toVersion3(KinWorkspaceLayout.defaults()); layoutMode = "auto";
       readingWorkspace.applyPanels(KinReadingPanelLayout.defaults());
       applyLayout();
       $("#layout-status").textContent = removed ? "기본 배치 · 이 브라우저" : "초기화 저장 안 됨 · 이 창에서만 유지";
@@ -90,16 +122,50 @@
      */
     const workArea = $(".split");
     let splitFrame = 0, splitSize = "";
-    new ResizeObserver(() => {
-      if (!workArea.isConnected) return;
-      const box = workArea.getBoundingClientRect(), size = Math.round(box.width) + "x" + Math.round(box.height);
-      if (size === splitSize || splitFrame) { splitSize = size; return; }
-      splitSize = size;
+    const workspaceObservedSizes = new WeakMap();
+    const workspaceObserver = new ResizeObserver(entries => {
+      if (workspaceEnded || !workArea.isConnected) return;
+      const at = work.capture('document');
+      let changed = false;
+      for (const entry of entries) {
+        const box = entry.target.getBoundingClientRect(), size = box.width + 'x' + box.height;
+        if (entry.target === workArea) {
+          if (splitSize !== size) changed = true;
+          splitSize = size;
+        } else {
+          if (workspaceObservedSizes.get(entry.target) !== size) changed = true;
+          workspaceObservedSizes.set(entry.target, size);
+        }
+      }
+      if (!changed || splitFrame) return;
       splitFrame = requestAnimationFrame(() => {
         splitFrame = 0;
-        if (workArea.isConnected && !document.body.classList.contains("resizing")) applyLayout();
+        work.commit(at, () => {
+          if (!workspaceEnded && workArea.isConnected && !document.body.classList.contains("resizing")) applyLayout();
+        });
       });
-    }).observe(workArea);
+    });
+    workspaceObserver.observe(workArea);
+    // A notice or wrapped filter changes the row floor even in a fixed window.
+    for (const node of [...$('.related-list-pane').children, $('#relrows')]) workspaceObserver.observe(node);
+    function stopWorkspaceLayout() {
+      workspaceEnded = true; workspaceGeneration++;
+      workspaceDragCancel?.(); workspaceObserver.disconnect(); cancelAnimationFrame(splitFrame); splitFrame = 0;
+      window.removeEventListener('resize', applyLayout);
+      studyPanel?.destroy(); studyPanel = null;
+      document.body.classList.remove('study-panel-open');
+    }
+    window.addEventListener('pagehide', stopWorkspaceLayout, { once: true });
+    work.onInvalidate(event => { if (event.reason === 'prepare') workspaceDragCancel?.(); });
+    $('#rail-collapse').addEventListener('click', () => {
+      if (!workspaceEditable()) return;
+      workspaceState.workspace.railCollapsed = !workspaceState.workspace.railCollapsed;
+      applyLayout(); saveWorkspace();
+    });
+    bindPanelResize('#resize-rail', 'x', e => {
+      const left = $('.left').getBoundingClientRect();
+      document.body.style.setProperty('--workspace-rail-width', clampPanel(e.clientX - left.left, 160, innerWidth / 3) + 'px');
+    });
     applyLayout();
 
     bindPanelResize("#resize-main", () => portraitLayout() ? "y" : "x", (e, axis) => {

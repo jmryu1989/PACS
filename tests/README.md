@@ -2,12 +2,19 @@
 
 REQ-S7-U5-DB-RIGHTS (D621/D623) → RISK-STALE-CREDENTIAL / RISK-LOST-REVOCATION → `auth_session_service_test.cjs`: DB 차단·권한 버전·새 인증·CAS·commit 경계, R10-05/06/09와 sid 종료 U1–5/9. Migration은 46개, 복원 표는 51개다. `20261007170000_member_db_rights` 적용 후 트래픽과 회원 변경을 멈춘 상태에서 `node prisma/import-member-rights.cjs`를 실행한다. 모든 realm 회원과 기존 세션을 이관하며 기존 provider-disabled/미확인 회원 변경은 차단으로 보존한다. 이관 실패·누락은 JWT 권한으로 대체하지 않는다. 외부 realm 사전 대조와 실제 이관은 배포 관문이다. 기존 disabled 회원의 일회성 legacy enable과 운영자 `--retry-roster` 복구는 core다. B01–B08 명부 수렴·회원 provider 조정 장치는 U5b에 남는다. 정상 회원 진입에는 새 클릭·prompt·관리 API 조회를 추가하지 않는다. 아래 과거 S7-U5 전체 코스 설명 중 회원 provider 격리·15초 Activate·U5E-13/14/17~20/22~27 기대는 `fable/s7-u5b-20261007`에 보류되며 core 완료 근거가 아니다. core의 U5E-15는 차단 중 거절·명령 후 새 인증·옛 권한 거절을 검사한다. 실제 realm 이관, core 권한 fixture를 반영한 live/CE1–4, 새 SHA PR CI·G3·독립 검수는 최종 전달 관문이다. 배포 유의(D631): round 3 `e3d16b5` 이전 빌드로 이미 realm 가져오기를 끝낸 DB가 있으면 트래픽 전에 `MemberRights.newAuthAfter`를 `MemberRightsImport.completedAt`으로 보정한다(새 코드는 marker가 있으면 가져오기를 건너뛰므로 자동 보정되지 않는다; 2026-10-07 확인 기준 그런 DB는 없다).
 
-REQ-S8-CTX → RISK-CTX-BLANK/WORK/SESSION/TENANT → `viewer_context_loss_dom_test.py`·`viewer_context_event_service_test.cjs`·`e2e/test_context_loss.py`: CTX/VR 결합의 CTX-VR-01~04는 실제 두 모듈과 U5 세션을 함께 실행한다. access 확인은 access 사유만, CTX 정리는 context 사유만 지우며 session 종료는 뷰어를 폐기한다. VR 안의 Recovery 버튼은 전체 VR cover 아래 잠기므로 Close VR로 돌아가 원본의 Reload Viewer를 사용한다. 준비 중에는 재불러오지 않는다. DOM은 합성 renderer 경계이며 실제 OHIF/GPU 재열람 증거는 별도 스택 코스다. CI: measurements의 CTX DOM, runtime의 context-event Node/Tech Note PG16 Node, 별도 `context-loss` hosted 프로필(직접 선언 4건). CTX 포함 validate는 22 jobs, measurement_ci는 39 profiles·83 suite 등록(고유 모듈 78개, measurements 자체 20 suite)이다. G3는 기존 89+15+10 선택을 유지하고 W2 폴더→편집→저장→재적용→재로그인 1건과 EMR-B1 원장 L01 1건을 더해 116건·14 suite다. 현재 migration 46개/복원 51표·90행, controller/ROUTES 138개, clinician business 21개이며 `clinician_policy_live.py`의 context event 행도 성공·역할 거절·기관 거절을 선언한다.
+REQ-S8-CTX → RISK-CTX-BLANK/WORK/SESSION/TENANT → `viewer_context_loss_dom_test.py`·`viewer_context_event_service_test.cjs`·`e2e/test_context_loss.py`: CTX/VR 결합의 CTX-VR-01~04는 실제 두 모듈과 U5 세션을 함께 실행한다. access 확인은 access 사유만, CTX 정리는 context 사유만 지우며 session 종료는 뷰어를 폐기한다. VR 안의 Recovery 버튼은 전체 VR cover 아래 잠기므로 Close VR로 돌아가 원본의 Reload Viewer를 사용한다. 준비 중에는 재불러오지 않는다. DOM은 합성 renderer 경계이며 실제 OHIF/GPU 재열람 증거는 별도 스택 코스다. CI: measurements의 CTX DOM, runtime의 context-event Node/Tech Note PG16 Node, 별도 `context-loss` hosted 프로필(직접 선언 4건). CTX 포함 validate는 22 jobs, measurement_ci는 39 profiles·83 suite 등록(고유 모듈 78개, measurements 자체 20 suite)이다. G3는 기존 89+15+10 선택을 유지하고 W2 폴더→편집→저장→재적용→재로그인 1건, W3 drawer→v3 계정 저장→재로그인 1건과 EMR-B1 원장 L01 1건을 더해 117건·15 suite다. 현재 migration 46개/복원 51표·90행, controller/ROUTES 138개, clinician business 21개이며 `clinician_policy_live.py`의 context event 행도 성공·역할 거절·기관 거절을 선언한다.
 
 
 REQ-SITE-NOTICE → RISK-FALSE-FACT/OMISSION/UNVERIFIED-CITATION → TEST-LEGAL-PAGES: `python -B tests/legal_pages_test.py`는 표준 라이브러리 HTML 파서로 `/worklist/legal/`의 문서 존재·한국어·정적 문서 구조, 초안 v2의 공개 절 제목과 문장, 각 사업 사실 자리표시자의 `확정 전` 표시, API manifest/lock의 전체 의존성·버전·라이선스, 로컬 링크·문의 앵커와 법령 식별자를 검사한다. `fixtures/legal/draft-contract.json`은 게시 대상 문안만, `verified-statutes.md`와 `verified-statutes-addendum-20261006.md`는 원본과 2026-10-06 보충 검증표에서 추출한 공개 조문 식별자만 보존한다. 시험은 glob 없이 저장소 안의 고정된 두 표(`tests/fixtures/legal/`)만 읽고, 저장소 밖 경로·환경 변수 지정·대체 경로는 없다. 표 파일 누락·조문 미수록은 실패한다. 조문 대조 단위는 법령 종류와 조 번호(가지번호 포함)이며 법률 해석·항호의 실체 검증을 대신하지 않는다. 추가 8개 조문은 시행판 원문을 확인한 보충표(`verified-statutes-addendum-20261006.md`)와 대조한다. 로컬 설치본·vendored 소스가 없는 `busboy@1.6.0`과 `streamsearch@1.1.0`은 `라이선스 파일 없음 — 배포 전 확인` 표시를 명시적으로 단언하며 건너뛰지 않는다. `validate.yml`의 순수 시험 단계에 등록하며 브라우저·Docker·네트워크는 사용하지 않는다. 약관은 확정된 본문이 없어 생성하지 않는다. 실제 HTTPS 제공·라이선스 원문/NOTICE·배포 상태 확인은 별도다.
 
 REQ-D02-IDENTITY-POSITION → RISK-D02-WRONG-IDENTITY/OCCLUSION/PREFERENCE-LOSS/STALE → TEST-VIEWER-IDENTITY-POSITION: `viewer_identity_position_dom_test.py`는 현재/비교 정보 묶음의 네 모서리 배치·복사, 작은 viewport와 native overlay 겹침, 원본 식별/교체/소유자 경계 및 이전 설정 이행을 격리 DOM에서 검사한다. `reading_appearance_position_live.py`는 v7→v8 계정 왕복, viewer v2 위치의 엄격한 형식, 원자적 거절·구버전 작성자와 소유자 분리를 검사한다. `e2e/test_viewer_identity_position.py`는 실제 영상에서 위치 변경→복사→계정 저장/다른 브라우저 복원과 영상·편집 보존, 기존 로컬 설정·늦은 응답을 검사한다. 두 live 모듈은 각각 선언한 시험만 선택하며 fresh hosted CI가 기존 표시 설정 API 회귀와 함께 실행한다. 로컬 원본 연결 fixture는 실행하지 않는다. 필드별/modality별 배치·발표 모드·물리 모니터는 별도 잔여다.
+
+
+REQ-WS1/WS2 → RISK-WS1/WS2 (계정 혼합·배치 손실·크기·오래된 응답) → **WS1-LAYOUT-ROAM**: `study_panel_page_dom_test.py`, `workspace_layout_test.cjs`, `workspace_layout_v3_service_test.cjs`, `workspace_roaming_test.cjs`, `workspace_roaming_live.py`와 `e2e/test_workspace_roaming.py`의 `WorkspaceRoamingE2E.test_roam_06_v3_drawer_account_save_and_relogin`이 v1/v2→v3, reading 보존, 계정/revision 충돌·읽기 실패 후 쓰기 차단·재읽기 복구, 크기 조절·200%·재로그인을 확인한다. G3는 위 정확한 새 E2E id를 포함한 117건이며 실제 수집 목록을 `candidate_ci_test.py`에서 대조한다.
+
+REQ-WS7 → RISK-WS7 (노드·포커스 손실·늦은 콜백) → **WS7-RW-RELOCATION**: `study_panel_test.cjs`와 `study_panel_page_dom_test.py`는 기존 Images/Info/Templates 노드와 listener의 동일성, 역할별 preferred/shown tab 분리, Ctrl+Alt+5/T·IME/Esc·포커스 복귀, 종료 후 callback 무효화를 확인한다. drawer는 첫 명시적 열기에서 기존 노드를 이동하고 닫을 때 같은 위치로 돌려놓는다. 열림 상태는 저장하지 않으며 v3에는 탭만 저장한다. 빈/v1/v2의 첫 화면 geometry는 고정 W2 입력 `9d4ba0f`와 비교한다.
+
+REQ-WS2 → RISK-WS2 (Related 행 가림) → **S7-RL-NOTICE-PORTRAIT**: `related_layout_dom_test.py`의 `RelatedLayoutDOMTest.test_s7_rl_notice_portrait_row_hit_area_and_first_line`은 900×1200·768×1024 및 800/840/860×768에서 안내 보임/숨김, 행 1개/다수/저장 크기를 대조한다. 행 viewport 비율 1.0·15점 hit test·중심 클릭과 이전 판독문 첫 줄의 상태별 노출을 검증한다.
 
 ## 실행 입구와 중단 조건 (2026-09-11)
 
@@ -190,6 +197,11 @@ REQ-S3-ASR-U5-AUTHZ/PARITY/INERT/ORDER/INPUT/SESSION/PROOF → RISK-U5-WEAKER-CO
 시험 구현·단언·불변조건을 삭제하거나 약화하지 않는다. 이 문서는 실행 시점을 조정하며 CI 구조·트리거를 변경하지 않는다. 자동으로 실행되는 기존 CI 결과는 그대로 확인한다. 의사 확인과 운영 검증은 자동시험 통과와 별도 조건이다.
 
 ## 기능별 시험 카탈로그
+
+- `study_panel_test.cjs`: Study Panel move/destroy·tab role·focus·IME 모듈 계약 (WS7-RW-RELOCATION).
+- `workspace_layout_v3_service_test.cjs`: 실제 preferences concern/facade의 v3 whitelist·bounds·reading 보존·CAS·downgrade 거절 (WS1-LAYOUT-ROAM).
+- `study_panel_page_dom_test.py`: 제공 페이지 drawer/배치/계정 복구·W2 첫 화면, `tmp/workspace-ui-ci/w3-pilot`의 가로/세로 8 PNG.
+
 
 REQ-S9-U0a-PRE-ORDER → RISK-B1-03/05/15/41/42/45/57/58·PRE-X1~X3·PRE-P3(classic script를 18/30/45개로 나눈 페이지의 틈에서 입력·떠나기·창/세션 사건이 아직 없는 선언을 만남) → TEST-S9-U0a-PRE: `tests/main_early_input_dom_test.py`(설계 이름 `main_pre_order_dom_test.py`, 하니스 `main_split_harness.py`/`.cjs` = `main_pre_contract.cjs`)가 임시 분할 페이지(경계 hold에 부분 사이 0/150 ms, 45개는 150 ms 시차)의 결과를 f1d5406 원본 페이지의 한 시점과 비교하고, 세션 답 대기·답함·실패·실패→Retry·반복 실패→Retry마다 등록 전체 순서(대상은 생성으로 이름 붙인 객체 하나씩 = markup 원소는 parser 순서, 만든 객체는 생성 API·f1d5406 문장 기준 호출 위치·그 위치의 생성 차수, 등록마다 같은 기준의 호출 stack)와 (target, event)별 등록이 원본과 같음을 본다. 등록 비교는 멈춘 시계 위에서 요청을 도착 순서대로 하나씩 답하고 다음 timer까지만 시간을 진행하는 결정적 일정(기본·inbox 답 보류·목록 본문 보류)으로 하며, 양쪽 원시 trace를 비교 전에 남긴다. 세션 종료는 오류 0이 아니라 남는 화면·원문·저장·닫힘으로, 인증 뒤 상용구 미리보기를 연 채 Log out, 상용구 행 메뉴 Edit(편집창·원값·초점, 보류된 저장 중 입력 보존·한 번의 요청·wire 본문, 서버 재조회·View·재편집·새 페이지·Insert), 열린 Filters에서 Saved→Modified→Deleted→Saved(다른 검색)와 조건·목록·선택·판독 원문 보존, 저장 검색 저장소(없음·있음·손상·잘못된 값·키 읽기 실패·저장소 전체 거부→안내→복구→Login)와 서버 검색 적용, 잘못된 mode/복합 조건 거절과 prefs 읽기 실패 뒤 Reload List 회복, A→B→A 뒤 늦은 받아쓰기(full Chromium·가짜 마이크), 실제 back/forward cache 복귀를 원본과 같은 결과로, 각 쪽 결과를 먼저 요구 결과로 확인한다. `tests/main_early_input_mutants.py`는 35개 이동을 하나씩 되돌린 변이와 M36(Retry가 Quick Match 등록 추가)·M37(받아쓰기 편집 알림을 citation input 뒤로)을 각자의 사례로 죽인다 — 선언 변이의 사례는 실제 전달된 45개 분할 manifest에서 되돌린 문장이 든 파일을 보류하고, 그 순간(파일 미실행·소비자 등록·binding 없음)을 먼저 확인한다. F2-M01~M12(생성 식별·signal·listener 의미·barrier·Run 격리·원시 기록 순서의 하니스 변이와 상용구 Edit·저장, 검색 삭제 반영, 서버 검색 채택, Login, Reload List의 페이지 변이)는 따로 세며 각자의 관측 단언으로 죽는다. `node --test tests/main_move_test.cjs`(A1)는 `tests/main_move_spec.json`(base = 이동 커밋)을, `node tests/main_split_harness.cjs fixture-check`는 report 하니스 시험이 읽는 f1d5406 문장 목록(`tests/main_split_harness_fixture.json`)을 결속한다. 실스택·네트워크·자격증명 없음.
 
@@ -753,6 +765,8 @@ Every `scripts/record-run.py --run-dir` in `validate.yml` sits under a path of a
 
 | Job | `--run-dir` | Artifact(s) | Step |
 |---|---|---|---|
+| `measurements` | `tmp/workspace-ui-ci/w3-server-prep` | `synthetic-workspace-dom-results` | W3 layout v3 server preparation and accepted module contracts |
+| `measurements` | `tmp/workspace-ui-ci/w3-drawer-dom`, `tmp/workspace-ui-ci/w3-pilot` | `synthetic-workspace-dom-results` | W3 drawer relocation, layout v3, account recovery and W2 first paint |
 | `measurements` | `tmp/workspace-ui-ci/pacs-split` | `synthetic-workspace-dom-results` | S9-U0b RELIST AST movement contract and independent structure mutants |
 | `measurements` | `tmp/workspace-ui-ci/pacs-split-modules` | `synthetic-workspace-dom-results` | S9-U0b concern modules and the PacsService facade over test doubles |
 | `measurements` | `tmp/workspace-ui-ci/pacs-source-behaviour` | `synthetic-workspace-dom-results` | S9-U0b RELIST source service behaviour gaps |
@@ -2129,7 +2143,7 @@ REQ-S5-U5a-CLINICIAN-ROLE-ROUNDTRIP → RISK-S5-U5a-SILENT-ROLE-DROP/LABEL-RULE 
   - "글이 보인다"는 요소 상자가 아니라 글자로 판정한다: 글자 노드 Range의 첫 줄 사각형을 viewport와 잘라내는 모든 조상(overflow가 visible이 아닌 상자)의 padding 상자로 자르고, 8px 이상과 그 중심의 `elementFromPoint`를 본다. 매번 그 요소의 IntersectionObserver 사각형과 대조해 어긋나면 도구 오류로 실패한다. 시험은 역할·접근 이름·보이는 글자와 "두 이정표를 담는 가장 작은 요소"만 쓰고 id·class·`data-*`·스타일 글자·페이지 함수를 읽지 않는다. 저장 배치 키(`kin-workspace:v1:`)는 저장된 사용자 문서의 형식으로만 쓴다.
   - R-EQ `python -B tests/related_layout_dom_test.py RelatedLayoutEquivalence -v` (CI 밖, 후보에서 한 번 기록): 기준 B의 `main.html`(고정 커밋, LF sha256 고정, `report_actions_dom_test.fixed_file`)과 이 화면을 자식 프로세스에서 같은 자료로 부팅해 가로 1600x1050·1366x768·1920x1080·1280x800·1024x768, 세로 900x1400·900x1200·768x1024(미선택·판독문 표시)의 이정표 경계·보이는 사각형과 본문 첫 글줄 사각형, 900x600·900x700의 Report window 이정표를 ±0.5px로 비교한다(RL-06·RL-08). 기준이 열 밖에 그리던 Clinical Info 이정표는 열 안의 보이는 부분만 비교한다. 이정표에 Related 패널 상자 자체를 더했다. 예외(`EQ_EXCEPTION`, D383) 하나: 900x1200·768x1024에서 패널 안의 Related table·separator·`Related Report`·본문 첫 글줄은 CH04의 세 값 때문에 움직일 수 있고 각 이유를 시험에 적는다. 그 차이는 `excepted`로 측정 줄에 남기며, 패널 상자와 패널 밖은 그대로 비교한다.
   - 저장소 밖 변이(단위 증거의 run 기록): MU-01(기준 화면)~MU-13은 이름 댄 단언에서 실패하고 보존 변형 PV-01(같은 크기를 컨테이너 단위·flex-basis로)·PV-04(상태 문구 여백을 margin으로, 띠 안의 41px)는 통과해야 한다. CH04 변이(fix3): 세 값을 모두 되돌린 MU-P0, 목록 164px를 되돌린 MU-P1, 바닥 116px를 되돌린 MU-P2(이전 판독문 창이 패널 밖 14px), 68px만 둔 A안 MU-P4는 rl10에서 실패한다. 표 영역 68px만 되돌린 MU-P3은 이 host에서 rl10을 통과한다 — 목록 164px이 flex로 이미 표 영역에 68px을 주므로 고정 줄이 96px인 동안 그 값은 관찰되는 차이를 만들지 않는다(결정대로 둔다). PV-02는 rl01·rl09의 자료 변형 자체다. PV-03(읽기 글자 16px)은 하니스에서 Appearance 단추가 꺼져 있어(계정 답 없음, FC-7) 실행하지 않는다.
-- CI(`.github/workflows/validate.yml`): measurements 새 단계 `S7-RELATED-LAYOUT small-window Related panel, …`(S7-U3b 단계 뒤, `tmp/workspace-ui-ci/related-layout-dom`, 5분, `RelatedLayoutDOMTest -v`). `--file`은 그 하니스 단계의 제공 파일 목록 전부 + 새 시험이고, 실제로 제공된 파일은 시험 끝의 `S7-RELATED-LAYOUT served page files:` 줄과 대조한다(양방향 대조는 단위 증거). 업로드는 measurements의 통째 업로드가 맡는다. 다른 단계·선택·트리거는 바꾸지 않았다.
+- CI(`.github/workflows/validate.yml`): measurements 새 단계 `S7-RELATED-LAYOUT small-window Related panel, …`(S7-U3b 단계 뒤, `tmp/workspace-ui-ci/related-layout-dom`, 20분(W3 안내·세로/좁은 창·모든 판독문 상태 행렬 포함), `RelatedLayoutDOMTest -v`). `--file`은 그 하니스 단계의 제공 파일 목록 전부 + 새 시험이고, 실제로 제공된 파일은 시험 끝의 `S7-RELATED-LAYOUT served page files:` 줄과 대조한다(양방향 대조는 단위 증거). 업로드는 measurements의 통째 업로드가 맡는다. 다른 단계·선택·트리거는 바꾸지 않았다.
 - 실스택 live(지휘자 기록 작업; 이 단위의 커밋 작업에서는 실행하지 않음, 원본과 격리된 합성 스택, `python scripts/run-tests.py --plan <계획> --mode live`, 단위마다 상한 3회, 자동 재시도·같은 SHA의 같은 실패 반복 없음, D239 이름):
   - L-0 `s7-related-layout-exit-before-0856c1bda1b4`(기준 B 화면, 1800초): 아래 L-1의 다섯 사례. 기대: `test_d03d_01`·`_02` ok, `test_d03d_03` ERROR(`test_related_filter.py:128`), `test_d03b_03` FAIL(`test_related_context.py:155`, `#prior-report-content`), `test_d03c_03` ok → exit 125. `_03b`가 통과하면 그 사례는 live 반례가 아니라고 적고 계속한다.
   - L-1 `s7-related-layout-exit-<S12>`(최종 후보 S, 1800초) = D211 종료 조건: `tests/e2e/test_related_filter.py` `RelatedFilterE2E.test_d03d_01_exact_tokens_scope_empty_refresh_and_literal_text`·`test_d03d_02_hidden_view_keeps_thumbnail_report_draft_and_hold`·`test_d03d_03_keyboard_delayed_report_small_windows_and_target_reset`, `tests/e2e/test_related_context.py` `RelatedContextE2E.test_d03b_03_delayed_reply_and_failure_keep_context_in_small_windows`, `tests/e2e/test_return_to_current.py` `ReturnToCurrentE2E.test_d03c_03_keyboard_return_keeps_input_hold_and_disabled_guards`. 기대: 5 ok, skip 0, exit 0. 종료 사례 파일은 바꾸지 않았다.
@@ -2363,7 +2377,7 @@ build metadata. The served request list continues to contain the bundle, not 45 
 Hosted LoadBudget uses the real unchanged HTTPS proxy/Orthanc path without browser routing or clock injection.
 Cold/warm each use five alternating BC/CB pairs; host monotonic remains the verdict and native CDP timings are
 reported alongside it. Each metric must satisfy median(C)-median(B) <= max(250ms, 10% of median(B)).
-It checks real response hashes, MIME, protocol/cache/status, baseline 56 / candidate 58 script requests, console errors, same-origin CSP
+It checks real response hashes, MIME, protocol/cache/status, baseline 56 / candidate 59 script requests, console errors, same-origin CSP
 compatibility, real missing-bundle failure and recovery. Actual CSP headers are retained; missing inheritance is
 not reported as enforced policy. Synthetic API success responses complete startup for both sides. Host/native timing is frozen at the usable-list boundary; request collection then waits for the first received-inbox response on both sides before comparing the complete startup request sets. This wait does not move either budget clock.
 The normal live gate applies: set KIN_PRE_LOAD_UNIT to the authorized run unit. Inspection refusal means waiting;
@@ -2411,8 +2425,8 @@ PRE의 과거 original/approved/parent 동등성 전체 코스와 기존 mutants
 고정 landed 페이지와 의존 파일을 제공해 유지한다. 현재 동작을 과거 화면 구조와 같다고 주장하지 않으며,
 현재 PRE 순서/동작은 C3-LIVE와 아래 소비자 시험에 결속한다. 기존 PRE 단언이나 원본 바이트 핀은 삭제하지 않는다.
 Hosted LoadBudget은 역사적 오버라이드와 무관하게 현재 제품 디렉터리를 candidate로 사용한다.
-baseline은 기존 approved PRE blob이며 script 요청 수는 baseline 56 / candidate 58이다. W2는 bundle 앞에 `worklist-folder-tree.js`와 해당 CSS를 추가하며, 추가 요청은 JS 1개·CSS 1개 및 계정 검색 GET 2개로 정확히 제한한다.
-CSS도 응답 hash·status·cache 기록에 포함된다. 시간 예산·쌍 개수·캐시 조건은 유지하며 새 measurement profile은 없다.
+baseline은 기존 approved PRE blob이며 script 요청 수는 baseline 56 / candidate 59이다. W2는 bundle 앞에 `worklist-folder-tree.js`와 해당 CSS를 추가하며, 추가 요청은 JS 1개·CSS 1개 및 계정 검색 GET 2개로 정확히 제한한다.
+W3는 `study-panel.js`와 `study-panel.css`를 bundle 앞에 추가한다(JS 1개·CSS 1개, 새 계정 GET 없음). CSS도 응답 hash·status·cache 기록에 포함된다. 시간 예산·쌍 개수·캐시 조건은 유지하며 새 measurement profile은 없다.
 
 `page_source` 소비자 DOM 목록(개별 파일을 그대로 실행):
 - `tests/admin_metrics_dom_test.py`
@@ -2440,3 +2454,8 @@ CSS도 응답 hash·status·cache 기록에 포함된다. 시간 예산·쌍 개
 - `tests/worklist_header_dom_test.py`
 - `tests/worklist_image_thumbnails_dom_test.py`
 - `tests/worklist_toolbar_dom_test.py`
+
+
+W3의 U0b 이력 계약(C6)은 `U0B-HISTORY`에서 승인된 U0b Git blob의 member/SQL 해시를 계속 검사한다. `U0B-STRUCT-NORMAL`과 R02는 현재 concern 소유권·facade forwarding·DI를 검사하고 v3 동작은 `workspace_layout_v3_service_test.cjs`가 검사한다. citation/structure migration의 `assert_behaviour`는 현재 소유권과 고정 이력을 모두 실행한다. 역사 기준 SHA·baseline은 바꾸지 않는다.
+
+Related의 RL06/08 동등성도 C6에 따라 고정 pre-UX landed 입력(c8e4f1b)에 결속한다. 원래 S7 기준 SHA·geometry 단언·허용 예외는 그대로이며, 현재 화면의 Related 동작과 W2 첫 화면은 별도 현재 소비자 시험으로 검증한다.

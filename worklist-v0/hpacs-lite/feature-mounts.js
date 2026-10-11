@@ -96,12 +96,56 @@
     } catch (_) {}
     // 읽기 작업공간의 종료(pagehide)가 부르는 배치 적용이다. 분할된 script 사이에서 페이지를 떠나도 정의돼 있게 생성보다 앞에 둔다(S9-U0a-PRE).
     let layoutMode = "auto";
-    let workspaceState = KinWorkspaceLayout.defaults();
+    let workspaceState = KinWorkspaceLayout.toVersion3(KinWorkspaceLayout.defaults());
+    let workspaceEnded = false, studyPanel = null, studyPanelRestoring = false;
+    const studyPanelAvailable = () => KinAuth.has('radiologist') ? ['images', 'info', 'templates'] : ['images', 'info'];
+    function openStudyPanel(tab) {
+      if (workspaceEnded || work.state() !== 'active') return false;
+      if (tab && !studyPanelAvailable().includes(tab)) return false;
+      if (!studyPanel) {
+        // Mount on the explicit open: legacy layouts keep their first paint.
+        // destroy() returns these same nodes, with their listeners, to the row.
+        studyPanel = KinStudyPanel({ host: $('#study-panel-host'), opener: document.activeElement,
+          content: { images: $('.s-thumb'), info: $('.s-clinical'), templates: $('.s-template') },
+          available: studyPanelAvailable(), fallbackFocus: () => [$('#findings'), $('#quick'), $('#study-panel-open')]
+            .find(node => node?.isConnected && !node.disabled && !node.closest('[hidden], [inert]')
+              && node.getClientRects().length && getComputedStyle(node).visibility === 'visible'),
+          escapeClaimed: () => !!document.querySelector('dialog[open], .modal.show, [popover]:popover-open'),
+          onChange: state => {
+            $('#study-panel-open').setAttribute('aria-expanded', String(state.open));
+            document.querySelector('#reading-bar [aria-controls="study-panel-host"]')?.setAttribute('aria-expanded', String(state.open));
+            if (!studyPanelRestoring && workspaceState.workspace.studyPanelTab !== state.tab) {
+              workspaceState.workspace.studyPanelTab = state.tab; saveWorkspace();
+            }
+            $('#study-panel-status').textContent = state.open ? 'Study Panel을 열었습니다.' : 'Study Panel을 닫았습니다.';
+            if (!state.open && !studyPanelRestoring) {
+              const panel = studyPanel; studyPanel = null; panel?.destroy();
+              document.body.classList.remove('study-panel-open');
+            }
+          },
+        });
+        studyPanelRestoring = true;
+        studyPanel.restore({ open: false, tab: workspaceState.workspace.studyPanelTab });
+        studyPanelRestoring = false;
+      }
+      document.body.classList.add('study-panel-open');
+      const opened = studyPanel.open(tab);
+      applyLayout();
+      return opened;
+    }
     const portraitLayout = () => document.body.classList.contains("portrait");
     const workspaceAxis = () => portraitLayout() ? "portrait" : "landscape";
     function applyLayout() {
-      const portrait = layoutMode === "portrait" || (layoutMode === "auto" && innerHeight > innerWidth);
+      if (workspaceEnded) return;
+      // A selected study needs a usable row hit area even in a narrow landscape
+      // window. The stacked panels scroll vertically without changing saved sizes.
+      const narrow = innerWidth < 900 && innerHeight <= innerWidth && !!selectedUid;
+      const portrait = narrow || layoutMode === "portrait" || (layoutMode === "auto" && innerHeight > innerWidth);
       document.body.classList.toggle("portrait", portrait);
+      document.body.classList.toggle('workspace-narrow', narrow);
+      // A strip consumes height only in stacked layouts. Short side-by-side
+      // windows retain their existing prior-report line; View opens the drawer.
+      document.body.classList.toggle('workspace-strip', portrait && innerWidth <= 1100 && !!selectedUid);
       $("#layout-toggle").textContent = {
         auto: "Layout: Auto", portrait: "Layout: Portrait", landscape: "Layout: Landscape",
       }[layoutMode];
@@ -117,7 +161,14 @@
       }
       // A temporary small window must not overwrite the user's preferred size.
       // Reapply stored pixels within today's bounds, separately for each orientation.
-      const sizes = workspaceState[workspaceAxis()];
+      const sizes = { ...workspaceState[workspaceAxis()] }, geometry = workspaceState.workspace;
+      if (geometry) {
+        for (const [name, field] of [['main', 'worklist'], ['related', 'related'], ['prior', 'prior']])
+          if (geometry[field] !== null && sizes[name] == null) sizes[name] = geometry[field];
+        document.body.classList.toggle('workspace-rail-collapsed', geometry.railCollapsed);
+        document.body.style.setProperty('--workspace-rail-width', clampPanel(geometry.rail ?? 220, 160, Math.max(160, innerWidth / 3)) + 'px');
+        $('#rail-collapse')?.setAttribute('aria-expanded', String(!geometry.railCollapsed));
+      }
       const left = $(".left"), related = $(".related-p"), top = $(".rw"), prior = $(".related-list-pane");
       left.style[portrait ? "height" : "width"] = "";
       related.style[portrait ? "height" : "width"] = "";
@@ -134,6 +185,36 @@
       if (sizes.prior != null) {
         prior.style.flex = "none";
         prior.style.height = clampPanel(sizes.prior, 150, related.getBoundingClientRect().height - 136) + "px";
+      }
+      if (selectedUid && !document.body.classList.contains('reading') && (portrait || innerWidth < 900)) {
+        // Wrapped controls and the hidden-filter notice belong above the table,
+        // not on top of its selected row. Keep a full header + row hit area.
+        const grid = prior.querySelector('.grid2'), table = grid.querySelector('table');
+        const fixed = [...prior.children].filter(child => child !== grid && !child.matches('[popover]'))
+          .reduce((sum, child) => sum + child.getBoundingClientRect().height, 0);
+        const floor = Math.ceil(fixed + (table.tHead?.getBoundingClientRect().height || 24)
+          + (table.tBodies[0]?.rows[0]?.getBoundingClientRect().height || 41) + 2);
+        if (portrait) {
+          prior.style.maxHeight = ''; prior.style.overflowY = '';
+          related.querySelector('.prior-report-pane').style.minHeight = '';
+          prior.style.minHeight = floor + 'px';
+          related.style.minHeight = (floor + 6 + 116) + 'px';
+        } else {
+          prior.style.maxHeight = 'calc(100% - 49px)'; prior.style.overflowY = 'auto';
+          related.querySelector('.prior-report-pane').style.minHeight = '43px';
+        }
+      } else {
+        prior.style.minHeight = ''; prior.style.maxHeight = ''; prior.style.overflowY = '';
+        related.style.minHeight = ''; related.querySelector('.prior-report-pane').style.minHeight = '';
+      }
+      if (studyPanel) {
+        const box = $('.right').getBoundingClientRect();
+        const host = $('#study-panel-host');
+        const scale = parseFloat(getComputedStyle(document.body).zoom) || 1;
+        host.style.setProperty('--study-panel-scale', scale);
+        host.style.setProperty('--study-panel-small-height', (innerHeight * .55 / scale) + 'px');
+        host.style.top = (Math.max(0, box.top) / scale) + 'px';
+        host.style.height = (Math.max(120, innerHeight - Math.max(0, box.top) - 12) / scale) + 'px';
       }
     }
     const readingWorkspace = KinReadingWorkspace({

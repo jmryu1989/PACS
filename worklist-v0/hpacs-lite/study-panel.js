@@ -15,7 +15,7 @@
       throw new TypeError('Study Panel requires three separate content elements');
     }
     const listeners = [], moved = [], tabs = [], panels = [];
-    let state = { open: false, tab: available[0] || 'images' }, opener = null, destroyed = false, composing = false;
+    let state = { open: false, tab: available[0] || 'images' }, opener = resolve(app.opener) || null, destroyed = false, composing = false;
     let movingFocus = false;
     const node = (tag, text, parent) => {
       const el = doc.createElement(tag); if (text) el.textContent = text;
@@ -23,6 +23,7 @@
     };
     const listen = (el, type, fn) => { el.addEventListener(type, fn); listeners.push(() => el.removeEventListener(type, fn)); };
     const drawer = node('aside', '', host); drawer.className = 'study-panel';
+    drawer.setAttribute('role', 'complementary');
     drawer.id = host.id + '-study-panel'; drawer.setAttribute('aria-label', 'Study Panel');
     const header = node('div', '', drawer); header.className = 'study-panel-head';
     node('h2', 'Study Panel', header);
@@ -71,8 +72,8 @@
       // Drawer controls and unknown focus must not replace the outside destination.
       if (outsideElement(el)) opener = el;
     }
-    function returnFocus(needed) {
-      const saved = opener; opener = null;
+    function returnFocus(needed, saved = opener) {
+      opener = null;
       // Decide before hiding/removing DOM: browsers can then move focus to body.
       // An outside editor belongs to the user and must not be touched on close.
       if (!needed) return;
@@ -93,12 +94,16 @@
     function open(tab) {
       // Explicit unavailable requests are refused; omitted tab opens the shown fallback.
       if (destroyed || !available.length || (tab !== undefined && !available.includes(tab))) return false;
+      if (!state.open && !opener) opener = resolve(app.opener) || null;
       return applyState({ open: true, tab: tab === undefined ? state.tab : tab });
     }
     function close() {
       if (destroyed || !state.open) return false;
-      const returnNeeded = drawer.contains(doc.activeElement);
-      state.open = false; render(); returnFocus(returnNeeded); changed(); return true;
+      const returnNeeded = drawer.contains(doc.activeElement), saved = opener;
+      state.open = false; render();
+      // The page may return moved content from onChange. An opener inside that
+      // content becomes focusable only after it has returned to its original row.
+      changed(); returnFocus(returnNeeded, saved); return true;
     }
     function select(tab) {
       if (destroyed || !available.includes(tab)) return false;
@@ -152,12 +157,13 @@
       const returnNeeded = state.open && drawer.contains(doc.activeElement);
       destroyed = true; state.open = false;
       listeners.forEach(remove => remove());
-      returnFocus(returnNeeded);
+      const saved = opener;
       for (const { content, marker } of moved) {
         if (marker.parentNode) marker.parentNode.replaceChild(content, marker);
         else content.remove();
       }
       drawer.remove();
+      returnFocus(returnNeeded, saved);
     }
     render();
     return { open, close, toggle: () => state.open ? close() : open(), select, setAvailable, snapshot, restore, destroy,

@@ -24,15 +24,21 @@ function fixture(text = plain, change = () => {}, extra = {}) {
   change(wanted);
   return createSource({ apiSrc, spec: wanted, overrides: { [path.join(apiSrc, relative)]: text, ...extra } });
 }
-test('U0B-STRUCT-NORMAL historical text/SQL proof and current ownership/forwarding both hold', () => {
+// C6: STRUCT/R02/FACADE/DI are current ownership contracts. HISTORY retains
+// every approved text/SQL hash; synthetic M21..25 and CORRESPONDENCE still prove
+// their individual historical or structural rejection. Workspace v3 behavior is
+// exercised through the public facade by workspace_layout_v3_service_test.cjs.
+test('U0B-STRUCT-NORMAL current ownership and forwarding hold', () => {
   assert.equal(spec.phase, 'split');
   const source = createSource();
   // validate() also holds the facade (slots, composition, 64 forwarders, 13 re-exports) and the 16 concern files to the spec
   assert.deepEqual(source.validate(), { members: 125, declarations: 57 });
-  assert.deepEqual(assertContract(historicalSource()), { members: 125, declarations: 57 });
   assert.equal(spec.facade.forwards.length, 64);
   assert.equal(spec.facade.slots.length, 15);
   assert.equal(spec.facade.reexports.length, 13);
+});
+test('U0B-HISTORY approved split text and SQL provenance stay pinned', () => {
+  assert.deepEqual(assertContract(historicalSource()), { members: 125, declarations: 57 });
 });
 test('U0B-STRUCT-SPLIT explicit moved location and re-export resolve in one Program', () => {
   const source = fixture(plain, () => {}, { [path.join(apiSrc, 'pacs.service.ts')]: "export { Worklist } from './pacs/worklist';" });
@@ -86,7 +92,7 @@ for (const [field, value] of [['name', 'gatewayReceiptt'], ['kind', 'PropertyDec
     else entry[field] = value;
     // Keep the allocation internally valid so the identity assertion is the oracle.
     wrong.allocation_sha256 = sha256(JSON.stringify(wrong.entries.map(e => [e.id, e.target])));
-    assert.throws(() => assertContract(createSource({ spec: wrong })), /Inconsistent spec identity/);
+    assert.throws(() => createSource({ spec: wrong }).validate(), /Inconsistent spec identity/);
   });
 }
 test('U0B-DUPLICATE-OLD an old unremoved implementation is rejected outside the live spec location', () => {
