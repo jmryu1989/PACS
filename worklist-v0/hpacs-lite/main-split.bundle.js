@@ -8206,12 +8206,13 @@
     } catch (_) {}
     // 읽기 작업공간의 종료(pagehide)가 부르는 배치 적용이다. 분할된 script 사이에서 페이지를 떠나도 정의돼 있게 생성보다 앞에 둔다(S9-U0a-PRE).
     let layoutMode = "auto";
-    let workspaceState = KinWorkspaceLayout.toVersion3(KinWorkspaceLayout.defaults());
+    let workspaceState = KinWorkspaceLayout.defaults();
     let workspaceEnded = false, studyPanel = null, studyPanelRestoring = false;
     const studyPanelAvailable = () => KinAuth.has('radiologist') ? ['images', 'info', 'templates'] : ['images', 'info'];
     function openStudyPanel(tab) {
       if (workspaceEnded || work.state() !== 'active') return false;
       if (tab && !studyPanelAvailable().includes(tab)) return false;
+      workspaceState = KinWorkspaceLayout.toVersion3(workspaceState);
       if (!studyPanel) {
         // Mount on the explicit open: legacy layouts keep their first paint.
         // destroy() returns these same nodes, with their listeners, to the row.
@@ -8360,6 +8361,7 @@
         cite: (request, origin) => openCitePreview(request, origin),
       });
     } catch (_) { toast('영상 소견 목록을 불러오지 못했습니다. 영상 화면의 Findings를 사용하세요.', 'err'); }
+
 
     // ── 임상 정보 패널(S7-U4b) ──
     // REQ-S7-U4b-PANEL → RISK-S7-U4b-STALE-PANEL/FAIL-AS-EMPTY → TEST-S7-U4b-DOM (tests/clinical_context_dom_test.py가 이 절을
@@ -9677,6 +9679,7 @@
     }
     function rememberPanelSize(selector) {
       if (!workspaceEditable()) return;
+      workspaceState = KinWorkspaceLayout.toVersion3(workspaceState);
       if (selector === '#resize-rail') {
         workspaceState.workspace.rail = Math.round($('#worklist-folders-panel').getBoundingClientRect().width);
         saveWorkspace(); return;
@@ -9694,7 +9697,9 @@
       workspaceOwner = KinWorkspaceLayout.key(sess);
       try { workspaceStorage = localStorage; } catch (_) { workspaceStorage = null; }
       const result = KinWorkspaceLayout.read(workspaceStorage, workspaceOwner);
-      workspaceState = KinWorkspaceLayout.toVersion3(result.state);
+      // Restore legacy display state as it was saved. Adopt v3 only on an
+      // explicit edit/open/save, so new geometry cannot affect the first paint.
+      workspaceState = result.state;
       workspaceLocalKept = !["disabled", "unavailable"].includes(result.status);
       layoutMode = workspaceState.mode;
       readingWorkspace.applyPanels(workspaceState.reading || KinReadingPanelLayout.defaults());
@@ -9767,6 +9772,7 @@
     work.onInvalidate(event => { if (event.reason === 'prepare') workspaceDragCancel?.(); });
     $('#rail-collapse').addEventListener('click', () => {
       if (!workspaceEditable()) return;
+      workspaceState = KinWorkspaceLayout.toVersion3(workspaceState);
       workspaceState.workspace.railCollapsed = !workspaceState.workspace.railCollapsed;
       applyLayout(); saveWorkspace();
     });
@@ -9801,6 +9807,7 @@
       list.style.flex = "none";
       list.style.height = clampPanel(e.clientY - box.top, 150, box.height - 136) + "px";
     });
+
 
     $("#quick").addEventListener("input", () => { worklistSearch?.change(); render(); });
     for (const host of [$('#quick'),$('#filterrow')]) host.addEventListener('keydown',e=>{

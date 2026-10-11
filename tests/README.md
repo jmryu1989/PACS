@@ -12,7 +12,7 @@ REQ-D02-IDENTITY-POSITION → RISK-D02-WRONG-IDENTITY/OCCLUSION/PREFERENCE-LOSS/
 
 REQ-WS1/WS2 → RISK-WS1/WS2 (계정 혼합·배치 손실·크기·오래된 응답) → **WS1-LAYOUT-ROAM**: `study_panel_page_dom_test.py`, `workspace_layout_test.cjs`, `workspace_layout_v3_service_test.cjs`, `workspace_roaming_test.cjs`, `workspace_roaming_live.py`와 `e2e/test_workspace_roaming.py`의 `WorkspaceRoamingE2E.test_roam_06_v3_drawer_account_save_and_relogin`이 v1/v2→v3, reading 보존, 계정/revision 충돌·읽기 실패 후 쓰기 차단·재읽기 복구, 크기 조절·200%·재로그인을 확인한다. G3는 위 정확한 새 E2E id를 포함한 117건이며 실제 수집 목록을 `candidate_ci_test.py`에서 대조한다.
 
-REQ-WS7 → RISK-WS7 (노드·포커스 손실·늦은 콜백) → **WS7-RW-RELOCATION**: `study_panel_test.cjs`와 `study_panel_page_dom_test.py`는 기존 Images/Info/Templates 노드와 listener의 동일성, 역할별 preferred/shown tab 분리, Ctrl+Alt+5/T·IME/Esc·포커스 복귀, 종료 후 callback 무효화를 확인한다. drawer는 첫 명시적 열기에서 기존 노드를 이동하고 닫을 때 같은 위치로 돌려놓는다. 열림 상태는 저장하지 않으며 v3에는 탭만 저장한다. 빈/v1/v2의 첫 화면 geometry는 고정 W2 입력 `9d4ba0f`와 비교한다.
+REQ-WS7 → RISK-WS7 (노드·포커스 손실·늦은 콜백) → **WS7-RW-RELOCATION**: `study_panel_test.cjs`와 `study_panel_page_dom_test.py`는 기존 Images/Info/Templates 노드와 listener의 동일성, 역할별 preferred/shown tab 분리, Ctrl+Alt+5/T·IME/Esc·포커스 복귀, 종료 후 callback 무효화를 확인한다. drawer는 첫 명시적 열기에서 기존 노드를 이동하고 닫을 때 같은 위치로 돌려놓는다. 열림 상태는 저장하지 않으며 v3에는 탭만 저장한다. 빈/v1/v2의 첫 화면 geometry는 고정 W2 입력 `9d4ba0f`와 비교하며, 1920×1080·900×1200에서는 알려진 SVG logo raster 변동 영역만 제외한 픽셀 동일성도 단언한다. viewport 전환 후 패널 크기 비교는 화면에서 측정한 stacked 배치가 적용된 뒤 수행한다.
 
 REQ-WS2 → RISK-WS2 (Related 행 가림) → **S7-RL-NOTICE-PORTRAIT**: `related_layout_dom_test.py`의 `RelatedLayoutDOMTest.test_s7_rl_notice_portrait_row_hit_area_and_first_line`은 900×1200·768×1024 및 800/840/860×768에서 안내 보임/숨김, 행 1개/다수/저장 크기를 대조한다. 행 viewport 비율 1.0·15점 hit test·중심 클릭과 이전 판독문 첫 줄의 상태별 노출을 검증한다.
 

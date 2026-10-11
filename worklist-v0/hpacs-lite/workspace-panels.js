@@ -69,6 +69,7 @@
     }
     function rememberPanelSize(selector) {
       if (!workspaceEditable()) return;
+      workspaceState = KinWorkspaceLayout.toVersion3(workspaceState);
       if (selector === '#resize-rail') {
         workspaceState.workspace.rail = Math.round($('#worklist-folders-panel').getBoundingClientRect().width);
         saveWorkspace(); return;
@@ -86,7 +87,9 @@
       workspaceOwner = KinWorkspaceLayout.key(sess);
       try { workspaceStorage = localStorage; } catch (_) { workspaceStorage = null; }
       const result = KinWorkspaceLayout.read(workspaceStorage, workspaceOwner);
-      workspaceState = KinWorkspaceLayout.toVersion3(result.state);
+      // Restore legacy display state as it was saved. Adopt v3 only on an
+      // explicit edit/open/save, so new geometry cannot affect the first paint.
+      workspaceState = result.state;
       workspaceLocalKept = !["disabled", "unavailable"].includes(result.status);
       layoutMode = workspaceState.mode;
       readingWorkspace.applyPanels(workspaceState.reading || KinReadingPanelLayout.defaults());
@@ -159,6 +162,7 @@
     work.onInvalidate(event => { if (event.reason === 'prepare') workspaceDragCancel?.(); });
     $('#rail-collapse').addEventListener('click', () => {
       if (!workspaceEditable()) return;
+      workspaceState = KinWorkspaceLayout.toVersion3(workspaceState);
       workspaceState.workspace.railCollapsed = !workspaceState.workspace.railCollapsed;
       applyLayout(); saveWorkspace();
     });

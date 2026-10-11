@@ -96,12 +96,13 @@
     } catch (_) {}
     // 읽기 작업공간의 종료(pagehide)가 부르는 배치 적용이다. 분할된 script 사이에서 페이지를 떠나도 정의돼 있게 생성보다 앞에 둔다(S9-U0a-PRE).
     let layoutMode = "auto";
-    let workspaceState = KinWorkspaceLayout.toVersion3(KinWorkspaceLayout.defaults());
+    let workspaceState = KinWorkspaceLayout.defaults();
     let workspaceEnded = false, studyPanel = null, studyPanelRestoring = false;
     const studyPanelAvailable = () => KinAuth.has('radiologist') ? ['images', 'info', 'templates'] : ['images', 'info'];
     function openStudyPanel(tab) {
       if (workspaceEnded || work.state() !== 'active') return false;
       if (tab && !studyPanelAvailable().includes(tab)) return false;
+      workspaceState = KinWorkspaceLayout.toVersion3(workspaceState);
       if (!studyPanel) {
         // Mount on the explicit open: legacy layouts keep their first paint.
         // destroy() returns these same nodes, with their listeners, to the row.

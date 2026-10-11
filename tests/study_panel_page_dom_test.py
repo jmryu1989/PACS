@@ -271,6 +271,14 @@ class StudyPanelPageDOM(unittest.TestCase):
         # A tall portrait has room for a resizable context panel. Only short
         # narrow landscapes compact it; the portrait pilot retains manual sizes.
         self.page.set_viewport_size(dict(width=768,height=1024))
+        # Wait for the tall, stacked layout's visible geometry, including its
+        # resize-driven reflow, before comparing a keyboard resize with it.
+        self.page.wait_for_function("""() => {
+            const panel = document.querySelector('.rw').getBoundingClientRect();
+            const left = document.querySelector('.left').getBoundingClientRect();
+            const right = document.querySelector('.right').getBoundingClientRect();
+            return panel.height >= 140 && right.top >= left.bottom;
+        }""")
         before = self.page.locator('.rw').bounding_box()['height']
         self.page.locator('#resize-top').focus()
         self.page.keyboard.press('ArrowUp')
@@ -311,7 +319,7 @@ class StudyPanelPageDOM(unittest.TestCase):
 
     def test_first_paint_matches_w2_for_empty_v1_and_v2_records(self):
         # D1004 requires identical first paint. This fixed landed-input comparison
-        # is a deliberate byte-provenance use; the oracle compares visible geometry.
+        # is a deliberate byte-provenance use; compare visible geometry and pixels.
         current = auth.ROOT
         with tempfile.TemporaryDirectory(prefix='kin-w3-w2-') as temporary:
             raw = subprocess.check_output(['git', 'archive', '--format=zip', '9d4ba0f',
@@ -321,7 +329,8 @@ class StudyPanelPageDOM(unittest.TestCase):
                 for version in (None, 1, 2):
                     for width,height in ((1366,768),(1920,1080),(2560,1440),(900,1200),(768,1024)):
                         facts = []
-                        for asset_root in (Path(temporary), current):
+                        pixels = []
+                        for label, asset_root in (('w2', Path(temporary)), ('current', current)):
                             auth.ROOT = asset_root
                             site = WorkspaceSite()
                             context = self.browser.new_context(viewport=dict(width=width,height=height))
@@ -339,12 +348,25 @@ class StudyPanelPageDOM(unittest.TestCase):
                                 facts.append(page.evaluate("""() => ({focus:document.activeElement.id || document.activeElement.tagName,
                                   panels:['.left','.right','.rw','.related-p','.report-p'].map(s=>{
                                     const r=document.querySelector(s).getBoundingClientRect();return [r.x,r.y,r.width,r.height]}),
+                                  toolbar:[...document.querySelectorAll('.menubar input, .userfilter > *')].filter(n=>n.getClientRects().length).map(n=>{
+                                    const r=n.getBoundingClientRect();return [n.textContent,n.value,n.checked,r.x,r.y,r.width,r.height]}),
                                   folders:document.querySelector('#worklist-folders-panel').open,
                                   headings:[...document.querySelectorAll('.rw h3')].map(n=>n.textContent)})"""))
+                                if (width, height) in ((1920,1080), (900,1200)):
+                                    # The SVG logo has independent raster variance on
+                                    # the fixed W2 tree too. No control is masked.
+                                    picture_dir = Path(os.environ.get('KIN_W3_PILOT_DIR', ROOT / 'tmp/w3-land/pilot')) / 'first-paint'
+                                    picture_dir.mkdir(parents=True, exist_ok=True)
+                                    pixels.append(page.screenshot(animations='disabled', caret='hide',
+                                        mask=[page.locator('.brand img')],
+                                        path=str(picture_dir / f'{label}-v{version or 0}-{width}x{height}.png')))
                                 self.assertEqual([],site.violations)
                             finally:
                                 context.close()
-                        self.assertEqual(facts[0],facts[1],(version,width,height))
+                        with self.subTest(version=version, width=width, height=height):
+                            self.assertEqual(facts[0],facts[1])
+                            if pixels:
+                                self.assertTrue(pixels[0] == pixels[1], 'first-paint pixels differ outside the logo')
             finally:
                 auth.ROOT = current
 
