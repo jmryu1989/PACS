@@ -10,7 +10,12 @@ import statistics
 
 LATENCY_RATIO_LIMIT = 1.10
 CONCURRENT_RATIO_LIMIT = 1.10
+# D1006: hosted sub-10 ms baselines show a fixed cost offset of undetermined
+# cause. D961/D970 live acceptance remains binding. 5 ms is a chosen gross-only
+# tolerance, not a verified noise bound: uniform 9 -> 14 ms (+55.6%) passes.
+# JIT-class 1 -> 160..230 ms and 100 -> 140 ms regressions still fail.
 CI_RATIO_LIMIT = 1.25
+CI_DELTA_FLOOR_MS = 5.0
 MIN_ATTRIBUTION = .95
 SINGLE_BLOCKS = 12
 SINGLE_REQUESTS = 100
@@ -89,12 +94,40 @@ def concurrent_result(baseline, candidate):
 
 
 def gate_result(statistics_result, mode):
-    """CI records NI statistics without using the bound as a hosted gate."""
-    if mode == 'ci-gross':
-        return statistics_result['point_ratio'] <= CI_RATIO_LIMIT
-    if mode == 'acceptance':
-        return statistics_result['accepted']
-    raise ValueError('explicit ci-gross or commander acceptance mode required')
+    """Record the gate decision in the statistics and return its boolean verdict.
+
+    CI retains the geometric mean of paired block-p95 ratios, not the ratio
+    of medians used by performance.py. Acceptance retains its NI conditions.
+    """
+    if mode not in ('ci-gross', 'acceptance'):
+        raise ValueError('explicit ci-gross or commander acceptance mode required')
+    before = statistics_result.get('baseline_block_p95_ms', [])
+    after = statistics_result.get('candidate_block_p95_ms', [])
+    ratio = statistics_result.get('point_ratio')
+    valid = (len(before) == len(after) == statistics_result.get('paired_blocks')
+             and 2 <= len(before) <= len(T95)
+             and all(isinstance(v, (int, float)) and math.isfinite(v) and v > 0
+                     for v in [*before, *after, ratio]))
+    deltas = [b - a for a, b in zip(before, after)] if valid else []
+    delta = statistics.median(deltas) if valid else None
+    if not valid:
+        passed, reason = False, 'invalid or missing paired p95 observations'
+    elif statistics_result.get('failures', 0):
+        passed, reason = False, 'request failed'
+    elif mode == 'ci-gross':
+        passed = not (ratio > CI_RATIO_LIMIT and delta > CI_DELTA_FLOOR_MS)
+        reason = ('ratio and signed pair-median delta exceed gross limits' if not passed
+                  else 'ratio or signed pair-median delta is within gross limits')
+    else:
+        passed = statistics_result['accepted']
+        reason = 'noninferiority accepted' if passed else 'noninferiority rejected'
+    statistics_result.update(
+        ratio_method='geometric mean of paired block-p95 ratios', R=ratio,
+        pair_deltas_ms=deltas, D=delta,
+        gate_ratio_limit=CI_RATIO_LIMIT if mode == 'ci-gross' else LATENCY_RATIO_LIMIT,
+        gate_delta_floor_ms=CI_DELTA_FLOOR_MS if mode == 'ci-gross' else None,
+        gate_passed=passed, gate_reason=reason)
+    return passed
 
 
 def power_self_check(replicates=20000):

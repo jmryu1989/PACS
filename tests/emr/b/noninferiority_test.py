@@ -12,6 +12,52 @@ from performance_test import PerformanceVerdictTest
 
 
 class NonInferiorityTest(unittest.TestCase):
+    def test_hosted_signed_pair_delta_and_ratio_boundaries(self):
+        # REQ-D1006 -> RISK-EMR-FALSE-PERFORMANCE-ACCEPT: known inputs,
+        # including the explicitly accepted 9 -> 14 ms blind spot.
+        for baseline, candidate, passed in [(9, 12, True), (9, 14, True),
+                (9, 14.01, False), (100, 124, True), (100, 125, True),
+                (100, 125.01, False), (1, 160, False), (1, 230, False),
+                (100, 90, True), (100, 140, False)]:
+            with self.subTest(baseline=baseline, candidate=candidate):
+                result = noninferiority([[baseline]] * 6, [[candidate]] * 6)
+                self.assertEqual(gate_result(result, 'ci-gross'), passed)
+                self.assertEqual(result['gate_passed'], passed)
+                self.assertAlmostEqual(result['R'], candidate / baseline)
+                self.assertEqual(result['pair_deltas_ms'], [candidate - baseline] * 6)
+                self.assertEqual(result['D'], candidate - baseline)
+                self.assertEqual(result['gate_ratio_limit'], 1.25)
+                self.assertEqual(result['gate_delta_floor_ms'], 5.)
+                self.assertTrue(result['gate_reason'])
+
+    def test_hosted_delta_is_signed_pair_median_and_ratio_is_geometric(self):
+        result = noninferiority([[v] for v in [1, 5, 100] * 2],
+                               [[v] for v in [6, 105, 11] * 2])
+        self.assertTrue(gate_result(result, 'ci-gross'))
+        self.assertEqual(result['pair_deltas_ms'], [5, 100, -89] * 2)
+        self.assertEqual(result['D'], 5)
+        self.assertAlmostEqual(result['R'], (6 * 21 * .11) ** (1/3))
+        self.assertEqual(result['ratio_method'], 'geometric mean of paired block-p95 ratios')
+
+    def test_gross_tolerance_does_not_change_acceptance(self):
+        result = noninferiority([[100.]] * 6, [[111.]] * 6)
+        self.assertTrue(gate_result(result, 'ci-gross'))
+        self.assertFalse(gate_result(result, 'acceptance'))
+        self.assertEqual(result['gate_ratio_limit'], 1.10)
+        self.assertIsNone(result['gate_delta_floor_ms'])
+
+    def test_incomplete_nonfinite_or_failed_observations_never_pass(self):
+        valid = noninferiority([[100.]] * 6, [[90.]] * 6)
+        for invalid in ({'candidate_block_p95_ms': []}, {'paired_blocks': 5},
+                {'candidate_block_p95_ms': [90.] * 5 + [float('nan')]},
+                {'point_ratio': float('nan')}, {'failures': 1}):
+            with self.subTest(invalid=invalid):
+                result = {**valid, **invalid}
+                self.assertFalse(gate_result(result, 'ci-gross'))
+                self.assertFalse(result['gate_passed'])
+                self.assertTrue(result['gate_reason'])
+        self.assertFalse(gate_result({}, 'ci-gross'))
+
     def test_superiority_mutant_is_killed_by_known_median_contract(self):
         def mutant(*args, **kwargs):
             result = noninferiority(*args, **kwargs)
