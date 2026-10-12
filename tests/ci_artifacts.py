@@ -39,6 +39,28 @@ def gh_json(*args):
     return json.loads(subprocess.check_output(['gh', *args], text=True, encoding='utf-8'))
 
 
+def artifact_runs(query, workflow, artifact, owners):
+    """Runs of `workflow` that uploaded `artifact`, found through the artifact name.
+
+    A G3 run started by hand (`--ref main -f candidate_sha=X`) carries the dispatch
+    ref's tip as head_sha, so only the artifact name ties it to X. Expired uploads
+    still count, so an expired latest run is refused rather than skipped.
+    """
+    pages = query('api', '--paginate', '--slurp',
+                  f'repos/{{owner}}/{{repo}}/actions/artifacts?name={artifact}&per_page=100')
+    ids = sorted({item['workflow_run']['id'] for page in pages for item in page['artifacts']
+                  if item['name'] == artifact})
+    runs = []
+    for run_id in ids:
+        run = query('api', f'repos/{{owner}}/{{repo}}/actions/runs/{run_id}')
+        uploader = run['path'].split('@')[0]
+        if uploader not in owners:
+            raise ValueError(f'{artifact}: uploaded by undeclared workflow {run["path"]} (run {run_id})')
+        if uploader == workflow:
+            runs.append(run)
+    return runs
+
+
 def download(root, sha, stage, out, query=gh_json, execute=subprocess.check_call):
     if not re.fullmatch('[0-9a-f]{40}', sha):
         raise ValueError('full candidate SHA required')
@@ -59,10 +81,18 @@ def download(root, sha, stage, out, query=gh_json, execute=subprocess.check_call
     save()
     try:
         for workflow in sorted({row['workflow'] for row in selected}):
-            name = Path(workflow).name
-            pages = query('api', '--paginate', '--slurp',
-                          f'repos/{{owner}}/{{repo}}/actions/workflows/{name}/runs?head_sha={sha}&per_page=100')
-            runs = [run for page in pages for run in page['workflow_runs'] if run['head_sha'] == sha]
+            names = {row['artifact'] for row in selected if row['workflow'] == workflow}
+            if CANDIDATE in names:
+                # The candidate SHA is a dispatch input there, not necessarily the run's commit.
+                lookup = 'artifact'
+                owners = {row['workflow'] for row in selected if row['artifact'] == CANDIDATE}
+                runs = artifact_runs(query, workflow, CANDIDATE.replace('${{ env.CANDIDATE_SHA }}', sha), owners)
+            else:
+                lookup = 'head_sha'
+                name = Path(workflow).name
+                pages = query('api', '--paginate', '--slurp',
+                              f'repos/{{owner}}/{{repo}}/actions/workflows/{name}/runs?head_sha={sha}&per_page=100')
+                runs = [run for page in pages for run in page['workflow_runs'] if run['head_sha'] == sha]
             if not runs:
                 raise ValueError(f'{workflow}: no run for {sha}')
             run = max(runs, key=lambda item: (item['created_at'], item['id']))
@@ -71,13 +101,13 @@ def download(root, sha, stage, out, query=gh_json, execute=subprocess.check_call
             # Do not silently substitute an older passing run for a failed rerun.
             if run['status'] != 'completed' or run['conclusion'] != 'success':
                 raise ValueError(f'{workflow}: latest run {run["id"]} is not completed/success')
-            manifest['runs'].append({'workflow': workflow, 'id': run['id'], 'sha': run['head_sha'],
+            manifest['runs'].append({'workflow': workflow, 'id': run['id'], 'lookup': lookup,
+                                     'sha': sha, 'run_head_sha': run['head_sha'], 'event': run.get('event'),
                                      'attempt': run['run_attempt'], 'conclusion': run['conclusion']})
             save()
             pages = query('api', '--paginate', '--slurp',
                           f'repos/{{owner}}/{{repo}}/actions/runs/{run["id"]}/artifacts?per_page=100')
             artifacts = [item for page in pages for item in page['artifacts']]
-            names = {row['artifact'] for row in selected if row['workflow'] == workflow}
             for template in sorted(names):
                 artifact = template.replace('${{ env.CANDIDATE_SHA }}', sha)
                 matches = [item for item in artifacts if item['name'] == artifact and not item['expired']]

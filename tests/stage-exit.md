@@ -85,6 +85,12 @@ D621에 따라 provider reconciliation은 U5b 범위다. DB Suspend 뒤 살아 �
 `tests/ci_artifacts.py`는 `tests/ci_workflows.py`의 job → workflow 매핑으로 업로드 출처를
 찾고, workflow별로 후보 SHA의 최신 실행 ID와 attempt를 조회한다. 실패·진행 중 실행을
 이전 성공으로 대체하지 않으며, SHA/소유 workflow 불일치·누락·만료 artifact는 거절한다.
+G3(candidate.yml)는 손으로 시작한 실행(`--ref main -f candidate_sha=<sha>`)의 commit이
+main 끝이므로 commit이 아니라 artifact 이름 `candidate-<sha>`로 실행을 찾는다. 그 이름을
+올린 실행이 모두 candidate.yml 소유인지 확인하고(다른 workflow가 올렸으면 거절), 그중
+최신 실행이 성공·완료일 때만 그 실행의 `candidate-<sha>` 하나를 받는다. 업로드 전에
+멈춘 실행은 이름으로 보이지 않으므로 G3가 끝난 뒤 수집하며, 판정기의 provenance
+`candidate_sha` 대조는 그대로 둔다.
 동명 artifact가 validate와 Worklist UX 양쪽에 있으면 **둘 다** 별도 경로에 받는다.
 workflow 파일명 변경이나 job 이동은 고정 validate 실행 ID로 우회하지 않는다.
 
@@ -163,7 +169,7 @@ foreach ($item in $live) {
 클래스의 뷰어 사례에는 `KIN_U5_DICOM_SOURCE` 공개 CT 입력도 필요하다(`tests/README.md`).
 실행기는 `--class`에 그 클래스가 직접 선언한 사례를 고정하므로 상속한 worklist 시험은 추가하지 않는다.
 
-앞서 받은 validate artifact의 `run.json`에서 Node service/scope, DOM, AuditStore DB,
+앞서 수집기가 소유 workflow 실행마다 받은 artifact(`hosted/runs/<workflow>/<run>/<artifact>`)의 `run.json`에서 Node service/scope, DOM, AuditStore DB,
 integrity, backup-safety, production-image를 읽는다.
 여덟 U5 artifact는 위 표의 보조 원문으로 보존하되 SHA 없는 `results.json`만으로 위 live
 기록을 대체하지 않는다. G3 artifact 이름은 `candidate-<최종 40자리 SHA>`이며,

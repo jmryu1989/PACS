@@ -111,6 +111,10 @@ def workflow_contract_inputs(files, trees, cwd):
         'tests/candidate_ci_test.py', 'tests/ci_artifacts.py', 'tests/ci_artifacts_test.py',
         'tests/ci_workflow_consumers.cjs', 'tests/ci_workflow_consumers_test.py',
         'tests/record_run_test.py',
+        # They import, load or run a reader above (ci_workflow_consumers_test's import fixpoint).
+        'tests/candidate_ci.py', 'tests/execution_guard_test.py', 'tests/execution_selection_test.py',
+        'tests/e2e/test_critical_result.py', 'tests/e2e/test_dictation_live.py',
+        'tests/report_citation_migration_test.py', 'tests/report_structure_migration_test.py',
     }
     requested = set()
     for name in files:
