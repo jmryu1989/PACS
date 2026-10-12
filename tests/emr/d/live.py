@@ -232,7 +232,9 @@ class EmrDLive(unittest.TestCase):
 
     def prepared_sr(self, uid, item, author="r1"):
         """A prepared manual SR copy of `uid` (the bytes this server would have built), not yet attempted."""
-        sr, sop, data = str(uuid.uuid4()), uid + ".77." + str(next(_studies)), ("SYNTHETIC-DICOM-" + uuid.uuid4().hex).encode()
+        # A DICOM-shaped synthetic file (128-byte preamble, DICM, synthetic payload): the table keeps 132 B to 512 KiB.
+        sr, sop = str(uuid.uuid4()), uid + ".77." + str(next(_studies))
+        data = b"\0" * 128 + b"DICM" + ("SYNTHETIC-SR-" + uuid.uuid4().hex).encode()
         self.ok('INSERT INTO "ManualSr" (id, "studyUid", "authorSub", "authorActor", "requestId", fingerprint, selection, dataset, dicom, sha256) '
                 "VALUES (%s::uuid, %s, %s, %s, %s::uuid, %s, %s::jsonb, %s::jsonb, decode(%s, 'hex'), %s);"
                 % (self.literal(sr), self.literal(uid), self.literal(PEOPLE[author]), self.literal(author + "@synthetic.test"),
@@ -366,11 +368,11 @@ class EmrDLive(unittest.TestCase):
             self.assertEqual(facts[record]["sha"], sha(data), key + ": the bytes are kept by D (only unit H erases)")
         self.assertEqual((facts[a]["attempted"], facts[a]["stored"], facts[d]["attempted"], facts[d]["stored"], facts[e]["attempted"]),
                          (True, True, True, False, False))
-        adopted = self.json("SELECT json_agg(record_id ORDER BY record_id) FROM emr_clinical.sr_adoption WHERE record_id IN (%s)"
-                            % ",".join(self.literal(x) for x in (a, d, e)))
-        self.assertEqual(adopted, sorted([a, d]), "an adoption exists exactly for the signed store intents")
-        ended = self.json("SELECT json_agg(record_id ORDER BY record_id) FROM emr_clinical.sr_purpose_end WHERE record_id IN (%s)"
-                          % ",".join(self.literal(r[0]) for r in rows.values()))
+        adopted = self.json("SELECT json_agg(record_id) FROM emr_clinical.sr_adoption WHERE record_id IN (%s)"
+                            % ",".join(self.literal(x) for x in (a, d, e))) or []
+        self.assertEqual(sorted(adopted), sorted([a, d]), "an adoption exists exactly for the signed store intents")
+        ended = self.json("SELECT json_agg(record_id) FROM emr_clinical.sr_purpose_end WHERE record_id IN (%s)"
+                          % ",".join(self.literal(r[0]) for r in rows.values())) or []
         self.assertEqual(ended, [rows["b"][0]], "only the unattempted copy Orthanc does not hold reached its purpose end")
         deferred = self.json('SELECT count(*) FROM "AuditLog" WHERE action = \'manualSr.expire-deferred\' AND target = %s' % self.literal(sr["uid"]))
         self.assertEqual(deferred, 0, "the clean-up completed")
@@ -560,6 +562,7 @@ class EmrDLive(unittest.TestCase):
     def test_m_d_04_adopted_sr_cleared(self):
         sr = self.run_sr(mutant="M-D-04")
         rows = sr["rows"]
+        self.assertTrue(sr["out"]["store:" + rows["a"][0]]["ok"], "the signed store intents committed before the clean-up ran")
         ended = self.json("SELECT json_agg(record_id) FROM emr_clinical.sr_purpose_end WHERE record_id IN (%s)"
                           % ",".join(self.literal(r[0]) for r in rows.values())) or []
         # The mutated planner hands the adopted, store-attempted copy D over; the schema refuses that purpose end (ED006),
