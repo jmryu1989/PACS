@@ -44,7 +44,8 @@ DECLARATION = json.loads((ROOT / "emr" / "units" / "d.json").read_text(encoding=
 REFUSED = "42501"
 PEOPLE = {"c1": "c1000000-0000-4000-8000-000000000001", "c2": "c2000000-0000-4000-8000-000000000002",
           "r1": "a1000000-0000-4000-8000-000000000001", "r2": "a2000000-0000-4000-8000-000000000002",
-          "t1": "b1000000-0000-4000-8000-000000000001", "rb": "e1000000-0000-4000-8000-000000000001"}
+          "t1": "b1000000-0000-4000-8000-000000000001", "ad": "d1000000-0000-4000-8000-000000000001",
+          "rb": "e1000000-0000-4000-8000-000000000001"}
 TEXT = {"question": "SYN 흉통 지속\n이전 CT와 비교 바랍니다 é ", "answer": "SYN 이전 CT 대비 변화 없음.", "request": "SYN 외부 병원 영상 요청 사유",
         "close": "SYN 외부 영상 수신 처리 완료 기록", "consult": "SYN 자문 의뢰: 결절 성상", "reply": "SYN 자문 답변: 양성 소견"}
 # The live mutants (emr/units/d.json): one change of the compiled /app/dist each, applied in a copy by the driver.
