@@ -309,11 +309,12 @@ export class SqlClinicalStore {
       signed: { kid: inspected.kid, signedAt: inspected.payload.signedAt, payloadSha256: createHash('sha256').update(inspected.payloadBytes).digest('hex') } };
   }
 
-  private async sealDirect(permit: OriginalPermit, code: string): Promise<RequestObservation> {
+  /** A terminal rejection the store decides itself; dispatched: the original reached commit-dispatched (cause rollback). */
+  private async sealDirect(permit: OriginalPermit, code: string, dispatched = true): Promise<RequestObservation> {
     const o = permit.original, k = keyValues(o.receiptKey), terminal = rejected(o, permit.epoch, code);
     const request: RequestIdentity = { receiptKey: o.receiptKey, fingerprint: o.fingerprint };
     await this.call(() => this.db.$queryRaw`SELECT emr_clinical.seal_rejected(${k.record}::text, ${k.actorId}::text, ${k.requestId}::text,
-      ${string(o.originalId)}::uuid, ${integer(permit.epoch)}::integer, 'rollback'::text, ${JSON.stringify(terminal)}::text)::text AS done`);
+      ${string(o.originalId)}::uuid, ${integer(permit.epoch)}::integer, ${dispatched ? 'rollback' : 'not-dispatched'}::text, ${JSON.stringify(terminal)}::text)::text AS done`);
     await this.noteAttempt({ attemptId: randomUUID(), request, originalId: o.originalId, code });
     return this.observe(request, randomUUID(), false);
   }
@@ -348,7 +349,7 @@ export class SqlClinicalStore {
     this.facts.set(row.original_id, JSON.parse(row.facts));
     let seed: WriteInput;
     try { seed = seedFrom(row.seed); }
-    catch { return { kind: 'observer', observation: await this.sealDirect(permitOf(original, row.epoch), 'AttachmentRefused') }; }
+    catch { return { kind: 'observer', observation: await this.sealDirect(permitOf(original, row.epoch), 'AttachmentRefused', row.phase === 'commit-dispatched') }; }
     return { kind: 'owner', execution: { permit: permitOf(original, row.epoch), seed, checkpoint: row.checkpoint === null ? null : JSON.parse(row.checkpoint) } };
   }
 

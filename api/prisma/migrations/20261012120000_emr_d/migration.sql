@@ -235,7 +235,8 @@ $$;
 -- One transaction lock per register key: admission, checkpoints, sealing, recovery and the commit serialize on it.
 CREATE FUNCTION emr_clinical.lock_request(p_record text, p_actor text, p_request text) RETURNS void
   LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-  SELECT pg_advisory_xact_lock(hashtextextended('emr-clinical-request:' || p_record || chr(0) || p_actor || chr(0) || p_request, 0));
+  -- The key as a JSON array: unambiguous for any text (PostgreSQL text holds no NUL separator).
+  SELECT pg_advisory_xact_lock(hashtextextended('emr-clinical-request:' || pg_catalog.json_build_array(p_record, p_actor, p_request)::text, 0));
 $$;
 
 -- The register row as one result shape for admission, observation and recovery.
