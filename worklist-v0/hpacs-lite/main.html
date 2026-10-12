@@ -1049,6 +1049,15 @@
        worklist width on first paint. A narrow window keeps a scrollable sheet. */
     body.workspace-narrow .rw { height: 48px !important; min-height: 48px; overflow: auto; }
     body.workspace-narrow .left { height: 180px !important; }
+    /* A list column whose controls leave the list less than its header and one
+       whole row keeps that floor (feature-mounts.js) and scrolls vertically. The
+       open Folders rail stays where it is while the list and its controls scroll:
+       the same box as at first paint, held in the column's view instead of
+       scrolling away (it takes no height, like the absolute rail). */
+    body.workspace-list-scroll .left { overflow-y: auto; scrollbar-width: thin; }
+    body.workspace-list-scroll .left > #worklist-folders-panel[open] { position: sticky; top: 0; bottom: auto; left: auto; flex: none;
+      height: var(--workspace-list-height); margin-block-end: calc(-1 * var(--workspace-list-height)); margin-inline-start: calc(-1 * var(--workspace-rail-width, 220px)); }
+    body.workspace-list-scroll.workspace-rail-collapsed .left > #worklist-folders-panel[open] { margin-inline-start: -78px; }
     .study-panel-strip { display: none; }
     body.workspace-strip .study-panel-strip { display: flex; flex: none; gap: 6px; padding: 2px 8px; border-top: 1px solid var(--kin-line2); background: var(--kin-panel); }
     /* A compact row: in a stacked 768x1024 window every pixel below the list floor

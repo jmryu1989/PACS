@@ -8213,7 +8213,7 @@
     // 읽기 작업공간의 종료(pagehide)가 부르는 배치 적용이다. 분할된 script 사이에서 페이지를 떠나도 정의돼 있게 생성보다 앞에 둔다(S9-U0a-PRE).
     let layoutMode = "auto";
     let workspaceState = KinWorkspaceLayout.defaults();
-    let workspaceEnded = false, studyPanel = null, studyPanelRestoring = false;
+    let workspaceEnded = false, studyPanel = null, studyPanelRestoring = false, workspaceWasNarrow = false;
     const studyPanelAvailable = () => KinAuth.has('radiologist') ? ['images', 'info', 'templates'] : ['images', 'info'];
     function openStudyPanel(tab) {
       if (workspaceEnded || work.state() !== 'active') return false;
@@ -8294,20 +8294,52 @@
       const split = $(".split").getBoundingClientRect();
       if (sizes.main != null) left.style[portrait ? "height" : "width"] = clampPanel(sizes.main,
         portrait ? 180 : 500, portrait ? split.height - 420 : split.width - 426) + "px";
-      // A stacked worklist keeps its column header and one whole row in view, as
-      // in the approved portrait picture (W3R-09; the Related list follows the same
-      // rule, D383). Wrapped list controls take their own height, not the rows'.
-      // The narrow landscape sheet keeps its fixed list band (no room for both).
+      // Every worklist keeps its column header and one whole row in view, as in the
+      // approved portrait picture (W3R-09; the Related list follows the same rule,
+      // D383). Wrapped list controls take their own height, not the rows'. A stacked
+      // list grows into the work area below it. A side-by-side list column, and the
+      // narrow sheet's fixed band (which also shows the next row, so the next study
+      // is one click away), keep that floor and scroll vertically instead: past the
+      // minimums the page scrolls, nothing is clipped (design v4 §1, v5 §2).
       left.style.minHeight = "";
-      if (portrait && !narrow && !document.body.classList.contains("reading")) {
-        const grid = left.querySelector(":scope > .grid"), table = grid?.querySelector("table");
-        if (table?.tHead && grid.getClientRects().length) {
-          const need = table.tHead.getBoundingClientRect().height
-            + (table.tBodies[0]?.rows[0]?.getBoundingClientRect().height || 41) + grid.offsetHeight - grid.clientHeight;
-          const short = need - grid.getBoundingClientRect().height;
-          if (short > 0) left.style.minHeight = Math.ceil(left.getBoundingClientRect().height + short) + "px";
+      const listGrid = left.querySelector(":scope > .grid"), listTable = listGrid?.querySelector("table");
+      // Each pass measures the list without its floor; a re-measure (rendered rows,
+      // a resize) keeps where the reader had scrolled the column and the list.
+      const listScroll = [left.scrollTop, listGrid?.scrollTop || 0];
+      if (listGrid) listGrid.style.minHeight = "";
+      document.body.classList.remove("workspace-list-scroll");
+      if (!document.body.classList.contains("reading") && listTable?.tHead && listGrid.getClientRects().length) {
+        const grid = listGrid, table = listTable, rows = table.tBodies[0]?.rows || [];
+        const rowHeight = index => rows[index]?.getBoundingClientRect().height || 41;
+        const need = table.tHead.getBoundingClientRect().height + rowHeight(0) + grid.offsetHeight - grid.clientHeight;
+        const short = need - grid.getBoundingClientRect().height;
+        if (portrait && !narrow) {
+          // Grow by whole pixels: the work area below moves down unchanged, keeping
+          // the sub-pixel position each of its lines and borders had at first paint.
+          if (short > 0) left.style.minHeight = left.getBoundingClientRect().height + Math.ceil(short) + "px";
+        } else {
+          const floor = need + (narrow && rows.length > 1 ? rowHeight(1) : 0);
+          if (floor - grid.getBoundingClientRect().height > 0.5) {
+            grid.style.minHeight = Math.ceil(floor) + "px";
+            document.body.classList.add("workspace-list-scroll");
+            left.style.setProperty("--workspace-list-height", left.clientHeight + "px");
+            [left.scrollTop, grid.scrollTop] = listScroll;
+          }
+        }
+        // Becoming the narrow sheet at selection reflows the list: bring the list's
+        // top and the selected row back into view inside the list only.
+        if (narrow && !workspaceWasNarrow) {
+          left.scrollTop = 0;
+          const selected = selectedUid && table.tBodies[0]?.querySelector(`tr[data-uid="${CSS.escape(selectedUid)}"]`);
+          if (selected) {
+            const area = grid.getBoundingClientRect(), box = selected.getBoundingClientRect();
+            const top = area.top + table.tHead.getBoundingClientRect().height, bottom = area.bottom - (grid.offsetHeight - grid.clientHeight);
+            if (box.top < top) grid.scrollTop -= top - box.top;
+            else if (box.bottom > bottom) grid.scrollTop += box.bottom - bottom;
+          }
         }
       }
+      workspaceWasNarrow = narrow;
       if (sizes.top != null) top.style.height = clampPanel(sizes.top, 140, $(".right").getBoundingClientRect().height - 266) + "px";
       const row = $(".workrow").getBoundingClientRect();
       if (sizes.related != null) related.style[portrait ? "height" : "width"] = clampPanel(sizes.related,

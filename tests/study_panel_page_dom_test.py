@@ -8,6 +8,7 @@ import base64
 import copy
 import io
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -24,8 +25,9 @@ if os.environ.get('KIN_W3_ASSET_ROOT'):
 KEY = 'kin-workspace:v1:' + json.dumps([auth.INSTITUTION, auth.RAD['sub']], separators=(',', ':'))
 READING = dict(version=1, reportWidth=540, imageHeight=390, relatedHeight=None,
                relatedListHeight=180, relatedHidden=False)
-# Landed W2 page (main after PR #164); CI fetches this exact commit.
-W2_LANDED = 'a86ecf1655c8c587012cef5fd16e233e121ae7dc'
+# Landed W2 page: main after PR #164 (W2-LAND) and PR #168 (W2-FU, whose footer
+# counts wrap between items with Folders open); CI fetches this exact commit.
+W2_LANDED = '9d6984b1ba3af76f7522b1c6d6179c398c513b57'
 
 
 # W3R-08: a picture or a measurement is taken only after web fonts have loaded and
@@ -40,11 +42,62 @@ SETTLE = '''async () => {
   for (let i = 0; i < 180 && same < 3; i++) { await frame(); const now = boxes(); same = now === last ? same + 1 : 0; last = now; }
   return same >= 3;
 }'''
+# First-paint landmarks and how each may move where W3's stacked list grows (W3R5-04):
+# grow = the list column (and the Folders rail spanning it); below-list = the separator
+# under it; work-area = the area below, which gives up that height; band = the report
+# window band (it may also yield); below-band = everything under the band, moved only.
+PANELS = [('.left', 'grow'), ('#worklist-folders-panel', 'grow'), ('#resize-main', 'below-list'), ('.right', 'work-area'),
+          ('.rw', 'band'), ('#resize-top', 'below-band'), ('.workrow', 'below-band'), ('.related-p', 'below-band'),
+          ('.related-list-pane', 'below-band'), ('.prior-report-pane', 'below-band'), ('.report-p', 'below-band'),
+          ('.rbtns', 'below-band'), ('#findings', 'below-band'), ('#conclusion', 'below-band')]
 # The worklist list area: what a stacked list needs to show its header and one whole row.
 LIST = '''() => { const grid = document.querySelector('.left > .grid'), table = grid.querySelector('table');
   const box = grid.getBoundingClientRect(), row = table.tBodies[0].rows[0];
   return {grid: [box.top, box.bottom], head: table.tHead.getBoundingClientRect().height,
           row: row ? row.getBoundingClientRect().height : null, scrollbar: grid.offsetHeight - grid.clientHeight}; }'''
+
+
+# W3R5-01/02: what a reader sees of the worklist. A box is cut by every ancestor
+# that clips (the list, a scrolling list column, the work area) and by the window;
+# a row is "whole" when nothing of it is cut and it lies below the sticky header.
+# "hit": the centre of its visible part reaches the row. "point": the centre of its
+# widest visible plain cell (a click on a control in the row runs that control).
+VISIBLE = '''(() => {
+  const clip = (node, r) => { r = {top: r.top, bottom: r.bottom, left: r.left, right: r.right};
+    for (let e = node.parentElement; e && e !== document.documentElement; e = e.parentElement) {
+      const s = getComputedStyle(e);
+      if (s.overflowX === 'visible' && s.overflowY === 'visible') continue;
+      const c = e.getBoundingClientRect(), top = c.top + e.clientTop, left = c.left + e.clientLeft;
+      r = {top: Math.max(r.top, top), bottom: Math.min(r.bottom, top + e.clientHeight),
+           left: Math.max(r.left, left), right: Math.min(r.right, left + e.clientWidth)}; }
+    return {top: Math.max(r.top, 0), bottom: Math.min(r.bottom, innerHeight), left: Math.max(r.left, 0), right: Math.min(r.right, innerWidth)}; };
+  const seen = (node, r = node.getBoundingClientRect()) => { const v = clip(node, r);
+    return {box: [r.left, r.top, r.width, r.height], visible: [v.left, v.top, Math.max(0, v.right - v.left), Math.max(0, v.bottom - v.top)],
+            whole: v.top <= r.top + 0.5 && v.bottom >= r.bottom - 0.5 && v.right > v.left && v.bottom > v.top}; };
+  return {clip, seen};
+})()'''
+ROWS = '''(count) => { const {clip, seen} = ''' + VISIBLE + ''';
+  const grid = document.querySelector('.left > .grid'), head = grid.querySelector('thead').getBoundingClientRect();
+  return {head: seen(grid.querySelector('thead')), rows: [...document.querySelectorAll('#rows tr[data-uid]')].slice(0, count).map(row => {
+    const r = row.getBoundingClientRect(), v = clip(row, r), fact = seen(row);
+    fact.whole = fact.whole && r.top >= head.bottom - 0.5;
+    const at = (x, y) => document.elementFromPoint(x, y)?.closest('tr') === row;
+    const y = Math.max(v.top, head.bottom) / 2 + Math.min(v.bottom, r.bottom) / 2;
+    fact.hit = v.right > v.left && v.bottom > Math.max(v.top, head.bottom) && at((v.left + v.right) / 2, y);
+    const cells = [...row.cells].filter(c => !c.querySelector('button, a, input, select, label, textarea')).map(c => {
+      const b = c.getBoundingClientRect(); return [Math.max(b.left, v.left), Math.min(b.right, v.right)]; })
+      .filter(([a, z]) => z - a >= 8).sort((p, q) => (q[1] - q[0]) - (p[1] - p[0]));
+    fact.point = cells.length ? [(cells[0][0] + cells[0][1]) / 2, y] : null;
+    fact.point_hit = !!fact.point && at(...fact.point);
+    fact.selected = row.classList.contains('sel');
+    return fact; })}; }'''
+# D383 in the same page: the Related list's header and the first text line of the
+# prior report pane (at least 8 px of it, T8) are in view together with the list.
+RELATED = '''() => { const {clip, seen} = ''' + VISIBLE + ''';
+  const body = document.querySelector('.prior-report-body'), walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+  let text = walker.nextNode(); while (text && !text.nodeValue.trim()) text = walker.nextNode();
+  const range = document.createRange(); range.selectNodeContents(text); const line = range.getClientRects()[0], v = clip(text, line);
+  return {head: seen(document.querySelector('.related-list-pane thead')), line: text.nodeValue.trim().slice(0, 40), line_visible: v.bottom - v.top}; }'''
 
 
 def settle(page):
@@ -79,28 +132,35 @@ def first_paint_pixels(page, path, clip=None):
 # Pixels count as different above 16/255 in any channel; a 1 px move of a border
 # or a glyph differs by far more and fails.
 ANTIALIAS = 16
-COMPARE = '''async ([a, b, tolerance]) => {
+# Regions [x, width, y in a, y in b, height]: the same columns of the two pictures,
+# each region of b compared with the region of a it was moved from (W3R5-04).
+COMPARE = '''async ([a, b, tolerance, regions]) => {
   const load = src => new Promise((resolve, reject) => { const img = new Image();
     img.onload = () => resolve(img); img.onerror = reject; img.src = 'data:image/png;base64,' + src; });
   const [x, y] = await Promise.all([load(a), load(b)]);
-  if (x.width !== y.width || x.height !== y.height) return {size: [x.width, x.height, y.width, y.height]};
+  if (x.width !== y.width || x.height !== y.height) return [{size: [x.width, x.height, y.width, y.height]}];
   const data = img => { const canvas = new OffscreenCanvas(img.width, img.height), g = canvas.getContext('2d');
     g.drawImage(img, 0, 0); return g.getImageData(0, 0, img.width, img.height).data; };
-  const p = data(x), q = data(y); let over = 0, max = 0;
-  for (let i = 0; i < p.length; i += 4) {
-    const d = Math.max(Math.abs(p[i] - q[i]), Math.abs(p[i + 1] - q[i + 1]), Math.abs(p[i + 2] - q[i + 2]));
-    if (d > max) max = d;
-    if (d > tolerance) over++;
-  }
-  return {over, max};
+  const p = data(x), q = data(y), w = x.width;
+  return (regions || [[0, w, 0, 0, x.height]]).map(([left, width, ya, yb, height]) => {
+    if (left < 0 || width <= 0 || height < 0 || left + width > w || ya < 0 || yb < 0 || ya + height > x.height || yb + height > y.height)
+      return {region: [left, width, ya, yb, height], outside: true};
+    let over = 0, max = 0;
+    for (let r = 0; r < height; r++) for (let c = left; c < left + width; c++) {
+      const i = ((ya + r) * w + c) * 4, j = ((yb + r) * w + c) * 4;
+      const d = Math.max(Math.abs(p[i] - q[j]), Math.abs(p[i + 1] - q[j + 1]), Math.abs(p[i + 2] - q[j + 2]));
+      if (d > max) max = d;
+      if (d > tolerance) over++;
+    }
+    return {region: [left, width, ya, yb, height], over, max}; });
 }'''
 
 
-def picture_difference(browser, a, b):
-    """Pixels whose largest channel difference exceeds ANTIALIAS, and the largest difference."""
+def picture_difference(browser, a, b, regions=None):
+    """Per region: pixels whose largest channel difference exceeds ANTIALIAS, and the largest difference."""
     context = browser.new_context()
     try:
-        return context.new_page().evaluate(COMPARE, [base64.b64encode(a).decode(), base64.b64encode(b).decode(), ANTIALIAS])
+        return context.new_page().evaluate(COMPARE, [base64.b64encode(a).decode(), base64.b64encode(b).decode(), ANTIALIAS, regions])
     finally:
         context.close()
 
@@ -410,10 +470,9 @@ class StudyPanelPageDOM(unittest.TestCase):
                     page.goto(auth.MAIN_URL)
                     expect(page.locator('#rows')).to_contain_text(auth.PATIENT)
                     self.assertEqual(scale, page.evaluate('devicePixelRatio'))
-                    # Keyboard selection: a short window's list header can cover the row.
-                    page.locator('#rows tr[data-uid]').first.focus()
-                    page.keyboard.press('Enter')
-                    expect(page.locator('#rows tr[data-uid]').first).to_have_class(re.compile(r'\bsel\b'))
+                    # W3R5-01: the zoomed window's list keeps its header and one whole row.
+                    settle(page)
+                    self.click_row(page, 0, f'{scale:g}x zoom')
                     page.keyboard.press('Control+Alt+5')
                     expect(page.get_by_role('complementary', name='Study Panel', exact=True)).to_be_visible()
                     settle(page)
@@ -445,13 +504,8 @@ class StudyPanelPageDOM(unittest.TestCase):
                     expect(page.locator('#rows')).to_contain_text(auth.PATIENT)
                     settle(page)
                     unselected = page.evaluate(geometry)
-                    row = page.locator('#rows tr[data-uid]').first
-                    if height > width:
-                        row.click()  # W3R-09 keeps the row reachable by mouse in stacked layouts
-                    else:
-                        row.focus(); page.keyboard.press('Enter')
-                    expect(row).to_have_class(re.compile(r'\bsel\b'))
-                    settle(page)
+                    # W3R-09 / W3R5-01: a reader clicks the row where it is seen, at every size.
+                    self.click_row(page, 0, f'{width}x{height}')
                     selected = page.evaluate(geometry)
                     if height > width and width <= 1100:
                         self.assertNotIn('workspace-strip', unselected['classes'])
@@ -501,6 +555,133 @@ class StudyPanelPageDOM(unittest.TestCase):
                     self.assertEqual([], site.violations)
                 finally:
                     context.close()
+
+    def page_at(self, width, height, studies=2):
+        """A fresh login at one window size serving one or two studies; returns (page, site, context)."""
+        site = WorkspaceSite()
+        site.second_study = studies > 1
+        context = self.browser.new_context(viewport=dict(width=width, height=height))
+        context.route('**/*', lambda route, request: site.handle(route, request))
+        self.addCleanup(context.close)
+        page = context.new_page()
+        errors = []
+        page.on('pageerror', lambda e: errors.append(str(e)))
+        self.addCleanup(lambda: self.assertEqual([], errors))
+        self.addCleanup(lambda: self.assertEqual([], site.violations))
+        page.goto(auth.MAIN_URL)
+        expect(page.locator('#rows tr[data-uid]')).to_have_count(studies)
+        settle(page)
+        return page, site, context
+
+    def assert_row_in_view(self, page, index, what):
+        facts = page.evaluate(ROWS, index + 1)
+        self.assertTrue(facts['head']['whole'], f'{what}: list header in view {facts["head"]}')
+        row = facts['rows'][index]
+        self.assertTrue(row['whole'], f'{what}: row {index} whole in view {row}')
+        self.assertTrue(row['hit'] and row['point_hit'], f'{what}: row {index} on top {row}')
+        return row
+
+    def click_row(self, page, index, what):
+        """A reader's click on the row where it is seen (no scrolling by the test)."""
+        row = self.assert_row_in_view(page, index, what)
+        page.mouse.click(*row['point'])
+        expect(page.locator('#rows tr[data-uid]').nth(index)).to_have_class(re.compile(r'\bsel\b'))
+        settle(page)
+        # The document itself never scrolls: a reader could not scroll it back.
+        self.assertEqual([0, 0], page.evaluate("() => [document.scrollingElement.scrollTop, document.querySelector('.split').scrollTop]"))
+
+    def wheel_row_into_view(self, page, index, what):
+        """The next study: the wheel over the list brings it under the pointer."""
+        for _ in range(12):
+            facts = page.evaluate(ROWS, index + 1)
+            if facts['rows'][index]['whole']:
+                return
+            grid = page.evaluate("() => { const r = document.querySelector('.left > .grid').getBoundingClientRect(); return [r.left + 30, r.top + r.height / 2]; }")
+            page.mouse.move(*grid)
+            page.mouse.wheel(0, 40)
+            settle(page)
+        self.fail(f'{what}: the wheel did not bring row {index} into view')
+
+    def assert_column_controls_reachable(self, page, what):
+        """Past the list floor the column scrolls; its last control (the status bar) can be reached
+        by the wheel, and the open Folders rail stays where it was."""
+        rail = page.locator('#worklist-folders-panel').bounding_box()
+        status = page.locator('.left > .statusbar')
+        for _ in range(30):
+            box, seen = status.bounding_box(), page.evaluate("(node) => (" + VISIBLE + ").seen(node)", status.element_handle())
+            if seen['whole']:
+                break
+            left = page.locator('.left').bounding_box()
+            page.mouse.move(left['x'] + left['width'] - 40, left['y'] + left['height'] - 8)
+            page.mouse.wheel(0, 80)
+            settle(page)
+        self.assertTrue(seen['whole'], f'{what}: status bar reachable {seen}')
+        self.assertEqual(rail, page.locator('#worklist-folders-panel').bounding_box(), f'{what}: Folders rail moved')
+
+    def test_short_landscape_login_list_keeps_header_row_and_next_study(self):
+        """W3R5-01: Folders opens on every login (D1041 6-②). In short landscape windows
+        its rail narrows the list column so far that the wrapped list controls left
+        0-19 px of rows. The list keeps its header and one whole row at first paint, a
+        click on that row selects it, the wheel brings the next study into the list and
+        a click selects it; the controls below scroll with the column, nothing is clipped."""
+        for width, height in ((840, 768), (860, 700), (900, 768), (1024, 768), (900, 600), (1280, 720)):
+            with self.subTest(width=width, height=height):
+                page, _, _ = self.page_at(width, height)
+                expect(page.get_by_role('button', name='Folders', exact=True)).to_have_attribute('aria-expanded', 'true')
+                self.assertNotIn('portrait', page.evaluate('document.body.className'))
+                area = page.evaluate(LIST)
+                self.assertGreaterEqual(area['grid'][1] - area['grid'][0] + 0.5, area['head'] + area['row'] + area['scrollbar'])
+                self.click_row(page, 0, 'login')
+                self.wheel_row_into_view(page, 1, 'next study')
+                self.click_row(page, 1, 'next study')
+                expect(page.locator('#rows tr[data-uid]').first).not_to_have_class(re.compile(r'\bsel\b'))
+                self.assert_column_controls_reachable(page, 'column')
+                self.doCleanups()
+
+    def test_narrow_sheet_keeps_header_selected_and_next_row(self):
+        """W3R5-02: a narrow landscape window stacks the work area when a study is
+        selected; its fixed list band keeps the header, the selected row and the next
+        row whole (no keyboard-only path), right after the selection and after a
+        drawer round trip, together with the Related header and the prior report's
+        first line (D383)."""
+        for width, height in ((840, 768), (860, 700), (800, 768)):
+            with self.subTest(width=width, height=height):
+                page, _, _ = self.page_at(width, height)
+                self.click_row(page, 0, 'login')
+                self.assertIn('workspace-narrow', page.evaluate('document.body.className'))
+                for phase in ('selected', 'drawer round trip'):
+                    if phase == 'drawer round trip':
+                        page.keyboard.press('Control+Alt+5')
+                        expect(page.get_by_role('complementary', name='Study Panel', exact=True)).to_be_visible()
+                        page.keyboard.press('Escape')
+                        expect(page.get_by_role('complementary', name='Study Panel', exact=True)).to_have_count(0)
+                        settle(page)
+                    self.assertTrue(self.assert_row_in_view(page, 0, phase)['selected'])
+                    self.assert_row_in_view(page, 1, phase)
+                    related = page.evaluate(RELATED)
+                    self.assertTrue(related['head']['whole'], f'{phase}: Related header {related}')
+                    self.assertGreaterEqual(related['line_visible'], 8, f'{phase}: prior report first line {related}')
+                self.click_row(page, 1, 'next row')
+                self.assertIn('workspace-narrow', page.evaluate('document.body.className'))
+                self.assert_column_controls_reachable(page, 'band')
+                self.doCleanups()
+
+    def test_list_floor_follows_a_row_height_change(self):
+        """W3R5-05: only the rows' typography changes after first paint (no control or
+        pager changes size); the list floor follows the taller row in a stacked list
+        and in a short side-by-side column."""
+        for width, height in ((768, 1024), (860, 700)):
+            with self.subTest(width=width, height=height):
+                page, _, _ = self.page_at(width, height, studies=1)
+                controls = page.evaluate("() => [...document.querySelectorAll('.left > :not(.grid):not(#worklist-folders-panel)')].map(n => n.getBoundingClientRect().height)")
+                page.add_style_tag(content='#rows tr:first-child td { height: 100px !important; padding-top: 20px !important; padding-bottom: 20px !important; }')
+                settle(page)
+                self.assertEqual(controls, page.evaluate("() => [...document.querySelectorAll('.left > :not(.grid):not(#worklist-folders-panel)')].map(n => n.getBoundingClientRect().height)"))
+                area = page.evaluate(LIST)
+                self.assertGreater(area['row'], 100)
+                self.assertGreaterEqual(area['grid'][1] - area['grid'][0] + 0.5, area['head'] + area['row'] + area['scrollbar'])
+                self.click_row(page, 0, 'taller row')
+                self.doCleanups()
 
     def test_sizes_stay_with_their_orientation(self):
         """W3R-07: a size is applied only in the orientation it was set in. A landscape
@@ -683,7 +864,7 @@ class StudyPanelPageDOM(unittest.TestCase):
         expect(self.page.get_by_role('complementary', name='Study Panel', exact=True, include_hidden=True)).to_have_count(0)
         self.assertEqual(saved, self.local())
 
-    def first_paint(self, asset_root, version, width, height, rail=None, picture=None, clip=None):
+    def first_paint(self, asset_root, version, width, height, rail=None, picture=None):
         """Serve one tree at one size; return its first-paint facts, list area, Rail box and picture."""
         auth.ROOT = asset_root
         site = WorkspaceSite()
@@ -699,37 +880,83 @@ class StudyPanelPageDOM(unittest.TestCase):
             page.goto(auth.MAIN_URL)
             expect(page.locator('#rows')).to_contain_text(auth.PATIENT)
             settle(page)
-            facts = page.evaluate("""() => ({focus:document.activeElement.id || document.activeElement.tagName,
-              panels:['.left','.right','.rw','.related-p','.report-p'].map(s=>{
+            facts = page.evaluate("""(names) => ({focus:document.activeElement.id || document.activeElement.tagName,
+              panels:names.map(s=>{
                 const r=document.querySelector(s).getBoundingClientRect();return [r.x,r.y,r.width,r.height]}),
               toolbar:[...document.querySelectorAll('.menubar input, .userfilter > *')].filter(n=>n.getClientRects().length).map(n=>{
                 const r=n.getBoundingClientRect();return [n.textContent,n.value,n.checked,r.x,r.y,r.width,r.height]}),
               folders:document.querySelector('#worklist-folders-panel').open,
-              headings:[...document.querySelectorAll('.rw h3')].map(n=>n.textContent)})""")
+              headings:[...document.querySelectorAll('.rw h3')].map(n=>n.textContent)})""", [name for name, _ in PANELS])
+            facts['related_line'] = page.evaluate(RELATED)['line_visible']
             area = page.evaluate(LIST)
             control = page.get_by_role('button', name='Rail', exact=True)
             box = control.bounding_box() if control.count() else None
             pixels = None
             if picture:
                 cover(page, [rail])
-                pixels = first_paint_pixels(page, picture, clip(area) if callable(clip) else clip)
+                pixels = first_paint_pixels(page, picture)
             self.assertEqual([], site.violations)
             return facts, area, box and [box['x'], box['y'], box['width'], box['height']], pixels
         finally:
             context.close()
 
+    def assert_moved_work_area(self, w2, w2_area, mine, width, height, difference_of):
+        """W3R-09 / W3R5-04: where W2's stacked list cannot show its header and one whole
+        row, W3's list grows by that height in whole pixels (g) and the report window band
+        may yield (y) so that D383's prior report line stays in view. Nothing else changes:
+        every panel below is W2's panel moved down by g (the band and everything below it
+        by g - y), and so are its pixels. Only the grown list (with the Folders rail that
+        spans it) and the band's yielded strip are not compared."""
+        index = {name: i for i, (name, _) in enumerate(PANELS)}
+        grown = mine['panels'][index['.left']][3] - w2['panels'][index['.left']][3]
+        missing = w2_area['head'] + w2_area['row'] + w2_area['scrollbar'] - (w2_area['grid'][1] - w2_area['grid'][0])
+        self.assertTrue(missing <= grown < missing + 1, (missing, grown))
+        self.assertAlmostEqual(round(grown), grown, delta=0.001)
+        band = index['.rw']
+        yielded = w2['panels'][band][3] - mine['panels'][band][3]
+        self.assertAlmostEqual(round(yielded), yielded, delta=0.001)
+        self.assertGreaterEqual(yielded, 0)
+        self.assertGreaterEqual(mine['panels'][band][3], 140)
+        if yielded:
+            self.assertGreaterEqual(mine['related_line'], 8, 'the band yields only to keep the prior report line in view')
+        g, y = round(grown), round(yielded)
+        for (name, move), theirs, ours in zip(PANELS, w2['panels'], mine['panels']):
+            dy, dh = {'grow': (0, g), 'below-list': (g, 0), 'work-area': (g, -g), 'band': (g, -y), 'below-band': (g - y, 0)}[move]
+            expected = [theirs[0], theirs[1] + dy, theirs[2], theirs[3] + dh]
+            for a, b in zip(expected, ours):
+                self.assertAlmostEqual(a, b, delta=0.01, msg=f'{name}: expected {expected}, got {ours}')
+        if difference_of is None:
+            return
+        rail = w2['panels'][index['#worklist-folders-panel']]
+        list_bottom, column_bottom = w2_area['grid'][1], w2['panels'][index['.left']][1] + w2['panels'][index['.left']][3]
+        band_bottom = w2['panels'][band][1] + w2['panels'][band][3]
+        rail_right, top, top_up = math.ceil(rail[0] + rail[2]), math.floor(list_bottom), math.ceil(list_bottom)
+        column, column_up = math.floor(column_bottom), math.ceil(column_bottom)
+        band_end, below = math.floor(band_bottom - y) - (1 if y else 0), math.floor(band_bottom)
+        regions = [[0, width, 0, 0, top],                                                        # above W2's list bottom
+                   [0, rail_right, top, top, column - top],                                      # the Folders rail stays
+                   [rail_right, width - rail_right, top_up, top_up + g, column - top_up],        # list controls move by g
+                   [0, width, column_up, column_up + g, band_end - column_up],                   # band moves by g, less its yield
+                   [0, width, below, below + g - y, height - below - (g - y)]]                   # all below the band by g - y
+        for result in difference_of(regions):
+            self.assertFalse(result.get('outside') or result.get('size'), result)
+            self.assertEqual(0, result['over'], f'moved first-paint pixels differ: {result}')
+
     def test_first_paint_matches_w2_for_empty_v1_and_v2_records(self):
         # D1004 requires identical first paint. This fixed landed-input comparison
         # is a deliberate byte-provenance use; compare visible geometry and pixels.
-        # The baseline is the landed W2 (main a86ecf1, PR #164): D1041 6-② made
-        # W2 open Folders on every login, so W2's own first paint changed by
-        # decision after the earlier W2 input 9d4ba0f. Two decided differences:
+        # The baseline is the landed W2 (main 9d6984b: PR #164 W2-LAND + PR #168
+        # W2-FU): D1041 6-② made W2 open Folders on every login, so W2's own first
+        # paint changed by decision after the earlier W2 input 9d4ba0f, and W2-FU
+        # then changed how the footer wraps beside it. Two decided differences:
         # - W3's Rail control shows in that open panel's title row; its measured
         #   box is masked in both pictures (the folder tree keeps W2's place).
         # - W3R-09: where W2's stacked list cannot show its header and one whole
-        #   row, W3's list grows by exactly the missing height. Toolbar, focus,
-        #   Folders and the list's place stay W2's, the work area below moves down
-        #   by that height, and the pictures are identical above W2's list bottom.
+        #   row, W3's list grows by the missing height in whole pixels. Toolbar,
+        #   focus, Folders and the list's place stay W2's; every panel below is W2's
+        #   panel moved down (the report window band may yield for D383's prior
+        #   report line), geometry and pixels alike (assert_moved_work_area).
+        # Pixels count as equal within ANTIALIAS (16/255 per channel), not exact.
         current = auth.ROOT
         pictures = Path(os.environ.get('KIN_W3_PILOT_DIR', ROOT / 'tmp/w3-land/pilot')) / 'first-paint'
         pictures.mkdir(parents=True, exist_ok=True)
@@ -743,35 +970,28 @@ class StudyPanelPageDOM(unittest.TestCase):
                         mine, area, rail, _ = self.first_paint(current, version, width, height)
                         self.assertIsNotNone(rail)
                         name = f'v{version or 0}-{width}x{height}.png'
-                        picture = (width, height) in ((1920,1080), (900,1200), (1080,1920))
-                        lacking = lambda a: a['head'] + a['row'] + a['scrollbar'] - (a['grid'][1] - a['grid'][0])
-                        clip = lambda a: dict(x=0, y=0, width=width, height=a['grid'][1]) if lacking(a) > 0.5 else None
+                        picture = (width, height) in ((1920,1080), (900,1200), (1080,1920), (768,1024))
                         w2, w2_area, w2_rail, w2_pixels = self.first_paint(Path(temporary), version, width, height, rail,
-                            pictures / ('w2-' + name) if picture else None, clip)
+                            pictures / ('w2-' + name) if picture else None)
                         self.assertIsNone(w2_rail)
-                        missing = lacking(w2_area)
+                        missing = w2_area['head'] + w2_area['row'] + w2_area['scrollbar'] - (w2_area['grid'][1] - w2_area['grid'][0])
+                        pixels = None
                         if picture:
-                            again, _, _, pixels = self.first_paint(current, version, width, height, rail,
-                                pictures / ('current-' + name), clip(w2_area))
+                            again, _, _, pixels = self.first_paint(current, version, width, height, rail, pictures / ('current-' + name))
                             self.assertEqual(mine, again)
-                        difference = picture_difference(self.browser, w2_pixels, pixels) if picture else None
-                        with self.subTest(version=version, width=width, height=height, pixels=difference):
+                        difference_of = (lambda regions: picture_difference(self.browser, w2_pixels, pixels, regions)) if picture else None
+                        with self.subTest(version=version, width=width, height=height):
                             if missing <= 0.5:
                                 self.assertEqual(w2, mine)
                                 if picture:
-                                    self.assertEqual(0, difference.get('over'), 'first-paint pixels differ outside the logo/native checkbox/Rail')
+                                    self.assertEqual(0, difference_of(None)[0].get('over'), 'first-paint pixels differ outside the logo/native checkbox/Rail')
                                 continue
                             self.assertGreater(height, width, 'only a stacked list grows')
                             need = area['head'] + area['row'] + area['scrollbar']
                             self.assertAlmostEqual(need, area['grid'][1] - area['grid'][0], delta=1)
-                            grown = mine['panels'][0][3] - w2['panels'][0][3]
-                            self.assertAlmostEqual(missing, grown, delta=1)
                             for key in ('focus', 'toolbar', 'folders', 'headings'):
                                 self.assertEqual(w2[key], mine[key], key)
-                            self.assertEqual(w2['panels'][0][:3], mine['panels'][0][:3])
-                            self.assertAlmostEqual(w2['panels'][1][1] + grown, mine['panels'][1][1], delta=0.01)
-                            if picture:
-                                self.assertEqual(0, difference.get('over'), 'first-paint pixels differ above the list bottom')
+                            self.assert_moved_work_area(w2, w2_area, mine, width, height, difference_of)
             finally:
                 auth.ROOT = current
 
