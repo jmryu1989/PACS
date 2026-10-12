@@ -2477,7 +2477,7 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
             (repo / name).write_text("services: {}\n")
         (repo / ".env").write_text("POSTGRES_PASSWORD=installer-placeholder-0001\n")
         backups = self.root / "production-backups"
-        backups.mkdir()
+        backups.mkdir(mode=0o700)   # the backup root is private (IRT2-03); a POSIX run checks it at L-01
         target = target_fixture(repository=str(repo))
         plan = plan_fixture(target)
         plan.update(backup_root=str(backups))

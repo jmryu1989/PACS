@@ -1007,8 +1007,9 @@ class Records:
         """IRT2-15: browser profile folders (cookies of a session) that a crashed or killed process left in the secrets
         directory go at the next phase start and at the plan's end; a link there is removed, never followed. Returns how
         many went (the count is recorded, nothing of their contents)."""
-        if not self.secrets.is_dir():
+        if not os.path.lexists(self.secrets):
             return 0
+        require(not self.secrets.is_symlink() and self.secrets.is_dir(), "The secrets directory is not a plain folder")
         swept = 0
         for item in sorted(self.secrets.iterdir()):
             if not re.fullmatch(r"browser-(?:profile|probe)-[0-9a-f]{8}", item.name):
@@ -4226,8 +4227,18 @@ class HostRecords(Records):
         return self.host.read_secure(path, limit=16 * 1024 * 1024)
 
     def discard(self, path):
+        parent = Path(path).parent
+        if not os.path.lexists(parent):
+            return   # nothing was ever written there (e.g. a plan that never needed a working secret)
+        self.host.protected(parent, private=True, directory=True)
         super().discard(path)
-        self.host.sync_dir(Path(path).parent)
+        self.host.sync_dir(parent)
+
+    def sweep_working_folders(self):
+        if not os.path.lexists(self.secrets):
+            return 0
+        self.host.protected(self.secrets, private=True, directory=True)
+        return super().sweep_working_folders()
 
 
 class IntroductionHost:
