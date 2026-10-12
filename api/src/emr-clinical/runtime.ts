@@ -266,7 +266,8 @@ let composed: ClinicalRuntime | null = null;
 export function composeClinicalRuntime(parts: ClinicalRuntimeParts): ClinicalRuntime {
   if (composed || clinicalServices.port) refuse('ClinicalRuntimeAlreadyComposed');
   for (const key of ['db', 'ledger', 'context', 'studies', 'signatures'] as const) if (!parts?.[key]) refuse('ClinicalRuntimePartRequired');
-  composed = new ClinicalRuntime(freeze({ ...parts }) as ClinicalRuntimeParts);
+  // The set of parts is fixed (a shallow freeze): the clients and stores themselves stay live objects.
+  composed = new ClinicalRuntime(Object.freeze({ ...parts }) as ClinicalRuntimeParts);
   clinicalServices.port = composed;
   return composed;
 }
