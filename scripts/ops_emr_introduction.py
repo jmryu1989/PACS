@@ -1484,8 +1484,11 @@ class Introduction:
         return out
 
     def warn(self, kind, **facts):
-        """A recovery phase goes on despite this fact (D05/D06): recorded now and in the phase's result."""
+        """A recovery phase goes on despite this fact (D05/D06): recorded now and in the phase's result - once per phase
+        (each later resolution of the same overlay meets the same fact)."""
         warning = {"kind": kind, **facts}
+        if warning in self.warnings:
+            return
         self.warnings.append(warning)
         self.event("recovery-warning", warning=warning)
 
@@ -3603,8 +3606,9 @@ class HostOps:
         if intro.state.pop("env_written", False):
             self.write_env((b0 / ".env").read_bytes())
             reverted.append("env")
-        require(self.compose_digest_now() == intro.plan["compose"]["before_sha256"], "Previous configuration was not restored")
+        # D05: the recovery's overlays first (a changed or vanished overlay file -> the pinned bytes), then the digest.
         self.prepare(intro)
+        require(self.compose_digest_now() == intro.plan["compose"]["before_sha256"], "Previous configuration was not restored")
         if intro.state.pop("db_recreated", False):
             self.compose(["up", "-d", "--no-deps", "--no-build", "--pull", "never", "--force-recreate", "db"], override=self.pins(intro), timeout=180)
             self.db_ready(120, "Database did not become ready")
@@ -3818,8 +3822,9 @@ class HostOps:
             self.checkout(intro, "previous")
         previous_env = (b0 / ".env").read_bytes()
         self.write_env(previous_env)
-        require(self.compose_digest_now() == intro.plan["compose"]["before_sha256"], "Previous configuration was not restored")
+        # D05: the recovery's overlays first (a changed or vanished overlay file -> the pinned bytes), then the digest.
         self.prepare(intro)
+        require(self.compose_digest_now() == intro.plan["compose"]["before_sha256"], "Previous configuration was not restored")
         project = self.recovery_project(intro)
         recovery = {"project": project, "pg": project + "_pg-db", "orthanc": project + "_orthanc-db", "persisted": False}
         for name in (recovery["pg"], recovery["orthanc"]):
