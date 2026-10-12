@@ -16,7 +16,7 @@ import type { SurfaceKey } from './emr-clinical/contract';
 import type { ClinicalBody, ClinicalWritePlan, CommitOutcome } from './emr-clinical/records';
 import { ClinicalServed, ProjectionRefused, clinicalCount, clinicalEchoRefusal, clinicalHttpError, clinicalRefusal, clinicalText, outcomeCode,
   projectedCaller, readClinicalRows, readClinicalSources, readClinicalUnits, registerClinicalProjection, requireClinicalRuntime } from './emr-clinical/services';
-import type { SourceRef } from './emr-clinical/sources';
+import { SourceRef, citedSource } from './emr-clinical/sources';
 
 const denied = () => { throw new ForbiddenException('소견에 접근할 수 없습니다'); };
 const conflict = () => { throw new ConflictException('소견 또는 요청이 변경되었습니다'); };
@@ -665,6 +665,10 @@ export class FindingService {
     if (findingFingerprint(studyId, id ?? null, command) !== fingerprint) throw new ProjectionRefused('ProjectionConflict');
     const planned = { studies: p.plan.studies.map(study => clinicalText(study)), checked: new Set(p.plan.checked.map(study => clinicalText(study))),
       frames: new Map(p.plan.frames.map(([jobId, frame]) => [clinicalText(jobId), clinicalText(frame)] as [string, string])) };
+    // The source versions this version cites are read again first (DR3-04): one gone since admission is that source's change,
+    // refused as the stale source (ClinicalSourceMissing) - never as a missing record, whatever compose would say of a head
+    // that went with it (a head is removed only after its revisions).
+    await readClinicalSources(tx, v.attachments.map(citedSource));
     const composed = await this.compose(tx, studyId, c, command, planned, id);
     if (composed.serialized !== v.text) throw new ProjectionRefused('FINDING_SOURCE_STALE');
     // The version cites exactly the source versions this commit copies, in the same order (DR2-05).

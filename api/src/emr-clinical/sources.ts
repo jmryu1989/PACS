@@ -28,6 +28,18 @@ const SOURCE_EVENT = new RegExp(`^viewer-(revision|job):(${UUID}):([1-9][0-9]{0,
 export function sourceEventId(ref: SourceRef): string {
   return ref.kind === 'item' ? `viewer-revision:${ref.itemId}:${ref.revision}` : `viewer-job:${ref.jobId}:${ref.revision}`;
 }
+/**
+ * The source version an attachment reference of a planned version cites (its record and A's 'revision:N'; a saved
+ * comparison is cited as a comparison layout, a viewer item as its measurement or key image), to read it again.
+ */
+export function citedSource(a: { kind: string; recordId: string; versionId: string }): SourceRef {
+  const match = /^revision:([1-9][0-9]{0,9})$/.exec(typeof a?.versionId === 'string' ? a.versionId : '');
+  if (!match) refuse('ClinicalSourceRefused');
+  const revision = Number(match[1]), recordId = string(a.recordId);
+  if (a.kind === 'comparison-layout') return freeze({ kind: 'job' as const, jobId: recordId, revision });
+  if (Object.values(ITEM_TYPES).includes(a.kind as 'measurement' | 'key-image')) return freeze({ kind: 'item' as const, itemId: recordId, revision });
+  return refuse('ClinicalSourceRefused');
+}
 /** The source a stored reference names (a recovery re-reads it), or null for any other stored record. */
 export function sourceRefOf(recordId: string, eventId: string): SourceRef | null {
   const match = SOURCE_EVENT.exec(eventId);

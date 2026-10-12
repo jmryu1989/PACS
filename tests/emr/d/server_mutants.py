@@ -55,7 +55,7 @@ CASE = {
     "consultation-result": "TEST-D-04 atomic_retry server: a consultation step resent after a later step answers that step's own result - its state, its text and who wrote it - through the durable provision of its own versions",
     "legacy": "TEST-D-03 read_scope server: a finding written before unit D answers neither its text nor its typed reasons; a signed finding's reasons leave only through their durable provision, and a refused revision carries none",
     "copies": "TEST-D-02 versions_and_sr server: copies of one source version - two marks of one saved comparison, its saved view and a mark on it - are one fixed reference, planned, signed, stored and recovered alike, every copy kept in the text",
-    "stale": "TEST-D-04 atomic_retry server: a recovery whose cited source is gone keeps the stale-source refusal for the original and every resend; storage that cannot be read leaves it pending for the next recovery",
+    "stale": "TEST-D-04 atomic_retry server: a cited source gone before the commit keeps the stale-source refusal - in a recovery, for the original and every resend, and in a commit itself; storage that cannot be read leaves it pending for the next recovery",
 }
 MUTANTS = [
     {"id": "M-D-R3-DR2-01", "finding": "DR2-01", "title": "an adoption without a durable ledger receipt is reported confirmed",
@@ -138,6 +138,10 @@ MUTANTS = [
      "old": "    if (error instanceof ContractError && error.code !== 'ClinicalSourcesNotComposed') refuse('ClinicalSourceMissing');",
      "new": "    refuse('ClinicalSourceMissing');",
      "case": CASE["stale"], "expect": "DR3-04: a transient failure leaves the original pending"},
+    {"id": "M-D-R4-DR3-04c", "finding": "DR3-04", "title": "a commit meeting a cited source that went after admission refuses it as a missing record",
+     "file": "api/src/finding.service.ts",
+     "old": "    await readClinicalSources(tx, v.attachments.map(citedSource));\n", "new": "",
+     "case": CASE["stale"], "expect": "DR3-04: a commit whose cited source went after admission is refused as that stale source"},
     {"id": "M-D-R4-DR3-05a", "finding": "DR3-05", "title": "the server record no longer hashes the migrations its declaration case reads",
      "file": ".github/workflows/emr-d.yml",
      "old": "--run-dir tmp/emr-d-ci/server --cwd . --tree api/src --tree api/prisma --tree tests/emr/d",

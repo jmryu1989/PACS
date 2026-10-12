@@ -889,9 +889,9 @@ test('TEST-D-02 versions_and_sr server: copies of one source version - two marks
   }
 });
 
-test('TEST-D-04 atomic_retry server: a recovery whose cited source is gone keeps the stale-source refusal for the original and every resend; storage that cannot be read leaves it pending for the next recovery', async () => {
+test('TEST-D-04 atomic_retry server: a cited source gone before the commit keeps the stale-source refusal - in a recovery, for the original and every resend, and in a commit itself; storage that cannot be read leaves it pending for the next recovery', async () => {
   const I = isolated({ SV: 'emr-clinical/services.ts', RT: 'emr-clinical/runtime.ts', R: 'emr-clinical/records.ts', SOURCES: 'emr-clinical/sources.ts',
-    COMPOSITION: 'emr-contract/composition.ts', CTX: 'emr-runtime/context.ts', F: 'finding.service.ts' });
+    COMPOSITION: 'emr-contract/composition.ts', CTX: 'emr-runtime/context.ts', F: 'finding.service.ts', FI: 'finding-input.ts' });
   I.COMPOSITION.composeEmrAdapters({ ...I.CTX.runtimeAdapters, stored: I.SOURCES.clinicalStoredReader(I.CTX.runtimeAdapters.stored) });
   const item = randomUUID(), ref = { kind: 'item', itemId: item, revision: 1 };
   const rows = [{ itemId: item, revision: 1, action: 'create', at: new Date('2026-10-12T01:00:00.000Z'), studyUid: study.studyId,
@@ -925,6 +925,19 @@ test('TEST-D-04 atomic_retry server: a recovery whose cited source is gone keeps
   const refusal = await service.write(study.studyId, Buffer.from(JSON.stringify(body)), caller, undefined, {}).then(() => null, e => e);
   assert.deepEqual([statusOf(refusal), refusal?.getResponse?.().code], [409, 'FINDING_SOURCE_STALE'], 'DR3-04: the resend answers FINDING_SOURCE_STALE');
   assert.deepEqual([seen.commits, projected], [0, 0]);
+  // The same change met by a commit itself (the measurement's revision and head removed between admission and commit): the
+  // finding's own projection refuses it as the stale source, not as a missing record.
+  const command = I.FI.findingCommand(Buffer.from(JSON.stringify(body)), true);
+  const projection = { caller, body: JSON.stringify(body), fingerprint: I.FI.findingFingerprint(study.studyId, null, command), id: null,
+    plan: { studies: [study.studyId], checked: [], frames: [] } };
+  const tx = { $executeRaw: async () => 0, $queryRaw: async strings => {
+    const sql = strings.join('?');
+    if (sql.includes('"StudyState"')) return [{ uid: study.studyId, institutionId: 'inst-a', teleInstitutionId: null, rs: 'W' }];
+    if (sql.includes('"ViewerItem"') || sql.includes('"ViewerRevision"')) return [];
+    throw new Error('unexpected SQL ' + sql);
+  } };
+  await assert.rejects(I.SV.clinicalServices.projectors.get('finding')(tx, I.R.planClinicalWrite(finding), projection), e => e?.code === 'ClinicalSourceMissing',
+    'DR3-04: a commit whose cited source went after admission is refused as that stale source');
 });
 
 // ---------------- the declaration ----------------

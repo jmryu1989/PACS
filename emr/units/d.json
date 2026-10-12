@@ -274,7 +274,7 @@
         "TEST-D-04 atomic_retry server: a consultation step resent after a later step answers that step's own result - its state, its text and who wrote it - through the durable provision of its own versions",
         "TEST-D-03 read_scope server: a finding written before unit D answers neither its text nor its typed reasons; a signed finding's reasons leave only through their durable provision, and a refused revision carries none",
         "TEST-D-02 versions_and_sr server: copies of one source version - two marks of one saved comparison, its saved view and a mark on it - are one fixed reference, planned, signed, stored and recovered alike, every copy kept in the text",
-        "TEST-D-04 atomic_retry server: a recovery whose cited source is gone keeps the stale-source refusal for the original and every resend; storage that cannot be read leaves it pending for the next recovery",
+        "TEST-D-04 atomic_retry server: a cited source gone before the commit keeps the stale-source refusal - in a recovery, for the original and every resend, and in a commit itself; storage that cannot be read leaves it pending for the next recovery",
         "EMR-D-R2 declaration: d.json lists exactly the collected server and live cases, existing owned paths and the newest migration"
       ],
       "round3_findings": {
@@ -291,7 +291,7 @@
         "DR3-01 (same class, consultation write answers)": "TEST-D-04 atomic_retry server: a consultation step resent after a later step answers that step's own result - its state, its text and who wrote it - through the durable provision of its own versions",
         "DR3-02": "TEST-D-03 read_scope server: a finding written before unit D answers neither its text nor its typed reasons; a signed finding's reasons leave only through their durable provision, and a refused revision carries none",
         "DR3-03": "TEST-D-02 versions_and_sr server: copies of one source version - two marks of one saved comparison, its saved view and a mark on it - are one fixed reference, planned, signed, stored and recovered alike, every copy kept in the text",
-        "DR3-04": "TEST-D-04 atomic_retry server: a recovery whose cited source is gone keeps the stale-source refusal for the original and every resend; storage that cannot be read leaves it pending for the next recovery",
+        "DR3-04": "TEST-D-04 atomic_retry server: a cited source gone before the commit keeps the stale-source refusal - in a recovery, for the original and every resend, and in a commit itself; storage that cannot be read leaves it pending for the next recovery",
         "DR3-05/06": "EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each record hashes what its command consumes"
       }
     },
@@ -356,7 +356,7 @@
       "note": "rounds 3 and 4: each reverts one fix of Astra's DR2-01..08 on bfddc3d or DR3-01..06 on a980357 (or removes the signing-time check of Astra's AM10) in a copy and runs tests/emr/d/server_test.cjs; the DR3-06 equivalents write the workflow in other shell notation and must leave the workflow case passing",
       "ids": ["M-D-R3-DR2-01", "M-D-R3-DR2-02", "M-D-R3-DR2-03", "M-D-R3-DR2-04", "M-D-R3-DR2-05", "M-D-R3-DR2-06", "M-D-R3-DR2-07a",
         "M-D-R3-DR2-07b", "M-D-R3-DR2-08", "M-D-R3-AM10", "M-D-R4-DR3-01a", "M-D-R4-DR3-01b", "M-D-R4-DR3-01c", "M-D-R4-DR3-02", "M-D-R4-DR3-03", "M-D-R4-DR3-04a",
-        "M-D-R4-DR3-04b", "M-D-R4-DR3-05a", "M-D-R4-DR3-05b", "M-D-R4-DR3-05c", "M-D-R4-DR3-05d", "M-D-R4-DR3-06"],
+        "M-D-R4-DR3-04b", "M-D-R4-DR3-04c", "M-D-R4-DR3-05a", "M-D-R4-DR3-05b", "M-D-R4-DR3-05c", "M-D-R4-DR3-05d", "M-D-R4-DR3-06"],
       "equivalents": ["E-D-R4-DR3-06a", "E-D-R4-DR3-06b"]
     },
     "live": [
