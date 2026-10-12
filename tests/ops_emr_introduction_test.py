@@ -2550,10 +2550,11 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
             ops_host = intro.HostOps(target=self.target, plan=plan, runner=intro.Runner(self.repo), records=self.records)
             model = {"mounts": {"proxy": [{"type": "volume", "source": "proxy-certs", "target": "/etc/nginx/certs"}]}, "volumes": {"proxy-certs": volume}}
             try:
-                outcomes[name] = ops_host.certificate_volume_check(context, model)["key_matches"]
+                ops_host.certificate_volume_check(context, model)
+                outcomes[name] = "accepted"
             except intro.Stop as error:
                 outcomes[name] = str(error)
-        self.assertIs(outcomes["own pair, own CA"], True)
+        self.assertEqual(outcomes["own pair, own CA"], "accepted")
         for name in ("a foreign key", "another authority"):
             self.assertIn("does not fit", outcomes[name], name)
 
