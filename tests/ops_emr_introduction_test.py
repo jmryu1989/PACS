@@ -77,6 +77,7 @@ def plan_fixture(target=None, kind="production"):
                         "logins": {"kin_emr_reader": False, "kin_emr_retention": False}, "env_next_sha256": "e" * 64},
             "migrations": {"before": copy.deepcopy(MIGRATIONS_BEFORE), "after": copy.deepcopy(MIGRATIONS_AFTER)},
             "storage": {"tablespace_path": intro.TABLESPACE, "postgres_uid": 70, "postgres_gid": 70, "node_uid": 1000, "node_gid": 1000},
+            "members": {"realm_members": 3, "disabled": 1, "service_accounts": 1},
             "smoke": {"frame": {"path": "/dicom-web/studies/1.2/series/1.3/instances/1.4/frames/1", "bytes": 64, "sha256": "f" * 64}},
             "probe": {"study": "SYNTHETIC-release-probe", "event_id": "12345678-1234-4123-8123-123456789abc",
                       "institution": "kin-center", "approved_by": "commander", "approved_at": "2026-10-12T00:00:00Z"},
@@ -331,7 +332,7 @@ def baseline_observed(plan):
             "running": {role: True for role in intro.ROLES}, "restarting": {role: False for role in intro.ROLES},
             "migrations": [[name, checksum, True, False] for name, checksum in plan["migrations"]["before"]],
             "catalog": {"roles": [{"rolname": "kin"}], "schemas": ["public"], "tablespaces": [{"name": "pg_default"}]},
-            "emr_volumes": [], "api_state_mounts": 0, "cron": "matched"}
+            "emr_volumes": [], "api_state_mounts": 0, "cron": "matched", "members": dict(plan["members"])}
 
 
 def provisioned_catalog():
@@ -383,8 +384,13 @@ class PreflightAdditionTests(unittest.TestCase):
                  "history": lambda o: o["migrations"].pop(),
                  "role": lambda o: o["catalog"]["roles"].append({"rolname": "kin_runtime"}),
                  "schema": lambda o: o["catalog"]["schemas"].append("emr_access"),
+                 "later EMR schema": lambda o: o["catalog"]["schemas"].append("emr_clinical"),
+                 "tablespace": lambda o: o["catalog"]["tablespaces"].append({"name": "kin_emr_access"}),
                  "volume": lambda o: o.__setitem__("emr_volumes", ["pacs-starter-kit_emr-state"]),
-                 "mount": lambda o: o.__setitem__("api_state_mounts", 1), "cron": lambda o: o.__setitem__("cron", "mismatch")}
+                 "mount": lambda o: o.__setitem__("api_state_mounts", 1), "cron": lambda o: o.__setitem__("cron", "mismatch"),
+                 "members": lambda o: o["members"].__setitem__("realm_members", 4),
+                 "disabled": lambda o: o["members"].__setitem__("disabled", 0),
+                 "service accounts": lambda o: o["members"].__setitem__("service_accounts", 2)}
         for name, change in cases.items():
             observed = baseline_observed(plan)
             change(observed)
@@ -470,6 +476,54 @@ class PreflightAdditionTests(unittest.TestCase):
             pre.check_projection_preserved(before, {"Report": {"columns": ["id"], "count": 2, "sha256": "c" * 64}})
         with self.assertRaisesRegex(RuntimeError, "disappeared"):
             pre.check_projection_preserved(before, {})
+
+    def test_55_provision_first_refuses_a_database_migrated_before_it_was_provisioned(self):
+        """DR2-09: emr-compose's PROVISION_SQL does not move existing TOAST storage or later EMR schemas into the
+        tablespace, so the mode refuses that shape instead of repairing it."""
+        plan = plan_fixture()
+        clean = {"roles": [{"rolname": "kin"}], "schemas": ["public"], "tablespaces": [{"name": "pg_default"}]}
+        before = [[name, checksum, True, False] for name, checksum in plan["migrations"]["before"]]
+        pre.check_provision_first(clean, before, plan)
+        migrated = before + [[intro.EMR_MIGRATION, "4" * 64, True, False]]
+        with self.assertRaisesRegex(RuntimeError, "differ"):
+            pre.check_provision_first(clean, migrated, plan)
+        for change in (lambda c: c["roles"].append({"rolname": "kin_emr_owner"}), lambda c: c["schemas"].append("emr_access"),
+                       lambda c: c["schemas"].append("emr_clinical"), lambda c: c["tablespaces"].append({"name": "kin_emr_access"})):
+            catalog = copy.deepcopy(clean)
+            change(catalog)
+            with self.assertRaisesRegex(RuntimeError, "migrated before provisioned"):
+                pre.check_provision_first(catalog, before, plan)
+
+    def test_56_every_emr_relation_and_its_toast_storage_is_in_the_tablespace(self):
+        rows = [{"relation": "emr_access.access_entry", "tablespace": "kin_emr_access"},
+                {"relation": "emr_access.access_entry:toast", "tablespace": "kin_emr_access"},
+                {"relation": "emr_access.access_entry:toast-index", "tablespace": "kin_emr_access"}]
+        pre.check_placement(rows)
+        for index in range(len(rows)):
+            bad = copy.deepcopy(rows)
+            bad[index]["tablespace"] = "database-default"
+            with self.subTest(relation=bad[index]["relation"]), self.assertRaisesRegex(RuntimeError, bad[index]["relation"]):
+                pre.check_placement(bad)
+        bad = rows + [{"relation": "emr_clinical.sr_purpose_end:toast", "tablespace": "database-default"}]
+        with self.assertRaisesRegex(RuntimeError, "emr_clinical"):
+            pre.check_placement(bad)
+        for empty in ([], None):
+            with self.assertRaises(RuntimeError):
+                pre.check_placement(empty)
+
+    def test_57_member_expectation_is_part_of_the_plan(self):
+        plan = plan_fixture()
+        for change in ({"disabled": 4}, {"realm_members": -1}, {"service_accounts": "1"}):
+            bad = copy.deepcopy(plan)
+            bad["members"].update(change)
+            with self.subTest(change=change):
+                refuses(self, intro.plan_valid, bad)
+        changed = copy.deepcopy(plan)
+        changed["members"]["realm_members"] = 4
+        self.assertNotEqual(intro.plan_core(plan), intro.plan_core(changed))
+        pre.check_member_counts(dict(plan["members"]), plan["members"])
+        with self.assertRaisesRegex(RuntimeError, "Realm members differ"):
+            pre.check_member_counts({**plan["members"], "disabled": 0}, plan["members"])
 
     def test_21_introduced_api_runs_as_node_with_runtime_role_and_one_state_volume(self):
         arguments = {"name": "kin-api", "image": image("6"), "release": "b" * 40, "working_dir": "/srv/kin/repository",

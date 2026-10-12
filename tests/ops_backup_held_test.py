@@ -186,6 +186,12 @@ class HeldCaptureTests(unittest.TestCase):
         host.emr_roles = True
         with self.assertRaisesRegex(RuntimeError, "pre-EMR capture found EMR storage"):
             host.capture()
+        for extra in ({"schemas": ["public", "emr_clinical"]}, {"tablespaces": [{"name": "kin_emr_access"}]}):
+            host = FakeHost(tempfile.mkdtemp(dir=self.folder))
+            original = host.catalog
+            host.catalog = lambda original=original, extra=extra: {**original(), **extra}
+            with self.subTest(extra=extra), self.assertRaisesRegex(RuntimeError, "pre-EMR capture found EMR storage"):
+                host.capture()
         host = FakeHost(tempfile.mkdtemp(dir=self.folder), shape="post")
         host.emr_roles = False
         with self.assertRaisesRegex(RuntimeError, "Post-EMR capture resources differ"):
@@ -244,6 +250,13 @@ class HeldCaptureTests(unittest.TestCase):
             ops.capture_held(host.repo / "inside", RESOURCES, shape="pre", label="emr-b0")
         with host.bound(), self.assertRaisesRegex(RuntimeError, "Invalid configuration component"):
             ops.capture_held(host.parent, RESOURCES, shape="pre", label="emr-b0", config={"kin.dump": host.repo / ".env"})
+        for facts in ({"origin": 1}, {"../x": "y"}, {"origin": "x" * 2000}):
+            with host.bound(), self.subTest(facts=facts), self.assertRaisesRegex(RuntimeError, "Invalid capture facts"):
+                ops.capture_held(host.parent, RESOURCES, shape="pre", label="emr-b0", facts=facts)
+        self.assertFalse(host.parent.exists())
+        directory = host.capture(facts={"origin": "https://pacs.example.invalid", "tls_certificate": "/etc/x/fullchain.pem"})
+        self.assertEqual(json.loads((directory / "metadata.json").read_text())["facts"],
+                         {"origin": "https://pacs.example.invalid", "tls_certificate": "/etc/x/fullchain.pem"})
 
     def test_09_rehearse_restores_a_held_capture_in_isolation(self):
         host = FakeHost(self.folder)

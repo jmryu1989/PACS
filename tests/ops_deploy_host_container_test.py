@@ -329,7 +329,7 @@ class SyntheticStack:
         if os.name == "posix":
             path.chmod(0o600)
 
-    def plan(self, images, seed=None):
+    def plan(self, images, seed=None, members=None):
         def digest(sha, env_path):
             entries = [(item, blob(self.repo, sha, item) if not os.path.isabs(item) else Path(item).read_bytes())
                        for item in self.target["compose_files"]]
@@ -351,6 +351,8 @@ class SyntheticStack:
                 "storage": {"tablespace_path": intro.TABLESPACE, "postgres_uid": uid(images["release"]["db"], "postgres", "-u"),
                             "postgres_gid": uid(images["release"]["db"], "postgres", "-g"),
                             "node_uid": uid(images["release"]["api"], "node", "-u"), "node_gid": uid(images["release"]["api"], "node", "-g")},
+                # Phase P's read-only observation of the realm; a stack still being set up plans with zero members first.
+                "members": members or {"realm_members": 0, "disabled": 0, "service_accounts": 0},
                 "smoke": {"frame": None},
                 "probe": {"study": "SYNTHETIC-rehearsal-" + self.token, "event_id": str(uuid.uuid4()), "institution": "kin-center",
                           "approved_by": "synthetic-rehearsal", "approved_at": now.isoformat()},
@@ -482,6 +484,10 @@ class EmrIntroductionRehearsal(unittest.TestCase):
                     " INSERT INTO \"AuditLog\"(actor, action, target, detail) VALUES ('SYNTHETIC-rehearsal', 'synthetic.seed', "
                     f"'{SYNTHETIC_STUDY}', '{{\"synthetic\":true}}');")
         source.keycloak(images["previous"]["api"], "disable", "admin")
+        # Phase P: the realm as observed read-only (counts only) becomes the plan's member-import expectation.
+        members = json.loads(source.psql(intro.REALM_MEMBERS_SQL, "keycloak"))
+        self.assertGreaterEqual(members["disabled"], 1)
+        source.plan(images, members=members)
         source.phase("capture", "HELD")
         b0 = json.loads((source.records.directory / "state.json").read_text())["b0"]
         source.remove()
@@ -491,7 +497,7 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         copy_dir = root / "b0-copy" / Path(b0["dir"]).name
         shutil_copy = __import__("shutil").copytree
         shutil_copy(b0["dir"], copy_dir)
-        clone.plan(images, seed={"b0_dir": str(copy_dir), "b0_manifest_sha256": b0["manifest_sha256"]})
+        clone.plan(images, seed={"b0_dir": str(copy_dir), "b0_manifest_sha256": b0["manifest_sha256"]}, members=members)
         clone.certificates(images["previous"]["proxy"])
         clone.phase("seed", "SEEDED")
         self.assertEqual(clone.psql(f"SELECT \"preDoc\" FROM \"StudyState\" WHERE uid='{SYNTHETIC_STUDY}';"), "doctor@kin.kr")

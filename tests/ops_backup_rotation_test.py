@@ -121,11 +121,39 @@ class RotationTests(unittest.TestCase):
             {"kind": "seal", "seq": 1, "backup": daily(1), "checkpoint_sha256": "a" * 64, "created_utc": created,
              "retain_until": (NOW + timedelta(days=700)).isoformat(), "previous_verification": {"state": "none"}}]}
         (self.root.path / audit.LEDGER).write_text(json.dumps(ledger))
+        self.assertEqual(self.rotate(dry_run=True)["would_thin"], [daily(1)])
         result = self.rotate()
         self.assertEqual(result["retained"], {daily(1): "audit-retention", daily(2): "audit-undeclared"})
         self.assertTrue((self.root.path / daily(1)).is_dir() and (self.root.path / daily(2)).is_dir())
         self.assertEqual(result["deleted"], [daily(3), daily(4)])
         self.assertTrue((self.root.path / audit.LEDGER).is_file())
+        # What the ledger's retention reads stays; only the Orthanc archive of the ledger-only set goes, marker first.
+        self.assertEqual(result["thinned"], [daily(1)])
+        kept = self.root.path / daily(1)
+        self.assertEqual(sorted(path.name for path in kept.iterdir()), sorted([audit.CHECKPOINT, "manifest.json", ops.THINNED_FILE]))
+        self.assertTrue((self.root.path / daily(2) / "orthanc.tgz").is_file(), "an undeclared checkpoint keeps its whole set")
+        self.assertEqual(self.rotate()["thinned"], [])
+
+    def test_12_a_thinned_set_is_never_taken_for_a_restorable_one(self):
+        for day in range(1, 10):
+            folder = self.root.daily(daily(day))
+            (folder / "kin.dump").write_bytes(b"synthetic dump")
+        created = (NOW - timedelta(days=40)).isoformat()
+        ledger = {"format": audit.FORMAT, "ledger_id": "f" * 32, "entries": [
+            {"kind": "init", "at": created, "years": 2},
+            {"kind": "seal", "seq": 1, "backup": daily(1), "checkpoint_sha256": "a" * 64, "created_utc": created,
+             "retain_until": (NOW + timedelta(days=700)).isoformat(), "previous_verification": {"state": "none"}}]}
+        (self.root.path / audit.LEDGER).write_text(json.dumps(ledger))
+        self.assertEqual(self.rotate()["thinned"], [daily(1)])
+        self.assertTrue((self.root.path / daily(1) / "kin.dump").is_file())
+        with self.assertRaisesRegex(RuntimeError, "thinned by rotation"):
+            ops.validate_backup(self.root.path / daily(1))
+        # A hold on a ledger-retained set keeps all of it.
+        (self.root.path / daily(1) / ops.THINNED_FILE).unlink()
+        (self.root.path / daily(1) / "orthanc.tgz").write_bytes(b"restored archive")
+        (self.root.path / daily(1) / ops.HOLD_FILE).write_text("{}")
+        self.assertEqual(self.rotate()["thinned"], [])
+        self.assertTrue((self.root.path / daily(1) / "orthanc.tgz").is_file())
 
     def test_07_an_unreadable_ledger_or_record_refuses_rotation(self):
         for day in range(1, 11):
@@ -202,16 +230,23 @@ class BackupCommandTests(unittest.TestCase):
 
     def test_11_backup_rotates_only_after_a_complete_backup_and_protects_it(self):
         made = Path("/backups/20261012-200002-abcdef01")
-        rotation = self.run_main(["backup", "--output", "/backups", "--rotate-keep", "7"], lambda *a: made)
+        # D1047: the daily backup keeps seven generations without any extra argument (the existing schedule line).
+        rotation = self.run_main(["backup", "--output", "/backups"], lambda *a: made)
         rotation.assert_called_once()
         self.assertEqual(rotation.call_args.args[1:], (7, {made.name}))
+        rotation = self.run_main(["backup", "--output", "/backups", "--rotate-keep", "10"], lambda *a: made)
+        self.assertEqual(rotation.call_args.args[1:], (10, {made.name}))
 
         def failed(*args):
             raise RuntimeError("Write services need recovery: kin-api")
-        rotation = self.run_main(["backup", "--output", "/backups", "--rotate-keep", "7"], failed)
+        rotation = self.run_main(["backup", "--output", "/backups"], failed)
         rotation.assert_not_called()
-        rotation = self.run_main(["backup", "--output", "/backups"], lambda *a: made)
+        rotation = self.run_main(["backup", "--output", "/backups", "--no-rotate"], lambda *a: made)
         rotation.assert_not_called()
+        calls = []
+        rotation = self.run_main(["backup", "--output", "/backups", "--rotate-keep", "0"], lambda *a: calls.append(1) or made)
+        rotation.assert_not_called()
+        self.assertEqual(calls, [], "an invalid rotation refuses before the backup")
 
 
 if __name__ == "__main__":

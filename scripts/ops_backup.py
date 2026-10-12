@@ -1,15 +1,17 @@
 """Consistent KIN backup and isolated restore rehearsal; never restores over production.
 
-Usage: python scripts/ops_backup.py backup --output <outside-repository-directory> [--rotate-keep N]
+Usage: python scripts/ops_backup.py backup --output <outside-repository-directory> [--rotate-keep N | --no-rotate]
        python scripts/ops_backup.py rehearse <completed-backup-directory>
-       python scripts/ops_backup.py rotate --root <backup-root> --keep N [--protect NAME ...] [--dry-run]
+       python scripts/ops_backup.py rotate --root <backup-root> [--keep N] [--protect NAME ...] [--dry-run]
 The running write services pause during backup and are resumed in finally. A complete backup's AuditLog rows are then
 sealed into audit-checkpoint.json and the backup root's ledger (scripts/ops_audit_integrity.py; the root needs a one-time
 `ops_audit_integrity.py init`), and rehearse verifies its restored copy against that seal.
 
 The EMR-introduction release mode (scripts/ops_emr_introduction.py) uses capture_held() instead of backup(): it captures a
 snapshot while the caller keeps every writer fenced and never resumes them itself (the release decides when they return).
-rotate() keeps the newest N complete daily sets and never touches release, held, audit-retained or protected sets.
+After a complete, error-free backup the older daily sets rotate (D1047: keep 7): rotate() deletes complete daily sets
+beyond the newest N, never a release, held, protected, latest-verified or incomplete set, and only thins (Orthanc archive
+removed) a set the audit ledger still retains.
 """
 from __future__ import annotations
 
@@ -408,6 +410,8 @@ def validate_backup(directory):
     manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
     if manifest.get("format") != 1 or not manifest.get("complete"):
         raise RuntimeError("Backup is incomplete")
+    if (directory / THINNED_FILE).exists():
+        raise RuntimeError("Backup was thinned by rotation (audit retention only); it is not a restorable set")
     # Snapshot validity is independent of the source application's readiness.
     # A failed restart is exactly when an intact snapshot must remain usable.
     # A declared audit checkpoint is a component like the others; an undeclared one is not trusted or required.
@@ -678,15 +682,20 @@ def _volume_of(container, destination):
     return mounts[0]["Name"]
 
 
-def capture_held(output, resources, *, shape, label, config=(), ready_free=512 * 1024 * 1024):
+def capture_held(output, resources, *, shape, label, config=(), facts=None, ready_free=512 * 1024 * 1024):
     """One consistent snapshot while the caller holds every writer fenced; returns the new directory.
 
     shape 'pre' is the Stage-5 form (no EMR storage may exist yet); 'post' requires the EMR storage and archives its API
     state volume at the same pause. This function stops and starts nothing: writers that are running refuse the
     capture, and on any failure they stay as the caller left them. The caller releases them (or rolls back) explicitly.
+    facts: the caller's secret-free identifiers recorded in metadata.json (e.g. origin, TLS certificate path).
     """
     if shape not in ("pre", "post") or type(label) is not str or not HELD_LABEL.fullmatch(label):
         raise RuntimeError("Invalid held capture request")
+    facts = dict(facts or {})
+    if any(type(key) is not str or not CONFIG_NAME.fullmatch(key) or type(value) is not str or len(value) > 1024
+           for key, value in facts.items()):
+        raise RuntimeError("Invalid capture facts")
     containers, volumes = _held_resources(resources)
     if shape == "post" and not RESOURCE_NAME.fullmatch(str(volumes.get("emr_state", ""))):
         raise RuntimeError("Post-EMR capture needs the EMR state volume")
@@ -722,7 +731,9 @@ def capture_held(output, resources, *, shape, label, config=(), ready_free=512 *
     roles = role_catalog(db_name)
     present = {role["rolname"] for role in roles["roles"]} & set(EMR_ROLES)
     if shape == "pre":
-        if present or "emr_access" in roles["schemas"] or any(m.get("Destination") == EMR_STATE for m in by_role["api"].get("Mounts") or []):
+        if (present or any(str(name).startswith("emr_") for name in roles["schemas"])
+                or any(space.get("name") == "kin_emr_access" for space in roles["tablespaces"])
+                or any(m.get("Destination") == EMR_STATE for m in by_role["api"].get("Mounts") or [])):
             raise RuntimeError("A pre-EMR capture found EMR storage")
         state_volume = None
     else:
@@ -793,7 +804,7 @@ def capture_held(output, resources, *, shape, label, config=(), ready_free=512 *
                 item = json.loads(found.stdout.decode("utf-8"))[0]
                 volume_ids[key] = {"name": item["Name"], "created": item.get("CreatedAt"), "driver": item.get("Driver")}
         write_json(directory / "metadata.json", {"env_names": env_names(ROOT / ".env"), "volumes": volume_ids,
-                                                  "config": sorted([*FILES[3:], *extra])})
+                                                  "config": sorted([*FILES[3:], *extra]), "facts": facts})
         components = held_components(manifest, extra)
         for name in components:
             path = directory / name
@@ -853,7 +864,9 @@ def validate_held(directory, manifest_sha256=None):
 # ── Rotation of the daily backup sets (D1047: the host kept every daily set) ──
 DAILY_NAME = re.compile(r"\d{8}-\d{6}-[a-f0-9]{8}")   # the folders backup() creates; ops_monitor reads the same names
 HOLD_FILE = "restore-hold.json"
+THINNED_FILE = "thinned.json"
 ROTATING = ".rotating-"
+DAILY_GENERATIONS = 7   # D1047 (user, 2026-10-12): the last seven daily sets beside the release sets
 
 
 def _retention_window(root, now):
@@ -880,8 +893,10 @@ def rotate(root, keep, protect=(), dry_run=False, now=None):
     Never deleted: any name that is not a daily set (s4-/s5-/stage/release/held captures, logs, latest-verified-*.json),
     the protected names (the set just written), a set with restore-hold.json, a set named by latest-verified-*.json, an
     incomplete or unreadable set, a set the audit ledger still retains or a declared checkpoint it does not list. A
-    deletion first renames the set out of the daily namespace, so a reader never sees half a set. The caller holds the
-    operations lock (no backup or rehearsal runs meanwhile)."""
+    deletion first renames the set out of the daily namespace, so a reader never sees half a set. A set beyond the kept
+    generations that only the audit ledger retains is thinned instead: its Orthanc archive is removed after a
+    thinned.json marker, everything the ledger's retention reads stays. The caller holds the operations lock (no backup
+    or rehearsal runs meanwhile)."""
     if type(keep) is not int or not 1 <= keep <= 365:
         raise RuntimeError("Rotation keeps between 1 and 365 generations")
     root = Path(root)
@@ -925,12 +940,18 @@ def rotate(root, keep, protect=(), dry_run=False, now=None):
             complete.append(entry.name)
     generations = sorted(complete, reverse=True)[:keep]
     candidates = [name for name in sorted(complete) if name not in generations and name not in retained]
+    # A complete set older than the kept generations that only the audit ledger still retains: the ledger's retention
+    # (ops_audit_integrity.retention) needs the folder, its manifest, kin.dump and the checkpoint, not the Orthanc
+    # archive. That archive (most of a set's bytes) goes; the database dumps, roles, EMR state and catalog stay.
+    thinnable = [name for name in sorted(complete) if name not in generations and retained.get(name) == "audit-retention"
+                 and ((root / name / "orthanc.tgz").exists() or (root / name / "orthanc.tgz").is_symlink())]
     leftovers = sorted(item.name for item in root.iterdir() if item.name.startswith(ROTATING) and item.is_dir()
                        and not item.is_symlink() and DAILY_NAME.fullmatch(item.name[len(ROTATING):]))
     result = {"root": str(root), "keep": keep, "dry_run": dry_run, "generations": generations, "retained": retained,
-              "would_delete" if dry_run else "deleted": [], "resumed": []}
+              "would_delete" if dry_run else "deleted": [], "would_thin" if dry_run else "thinned": [], "resumed": []}
     if dry_run:
         result["would_delete"] = candidates
+        result["would_thin"] = thinnable
         result["leftovers"] = leftovers
         return result
     for name in candidates:
@@ -941,6 +962,17 @@ def rotate(root, keep, protect=(), dry_run=False, now=None):
         os.rename(source, moved)
         shutil.rmtree(moved)
         result["deleted"].append(name)
+    for name in thinnable:
+        source = root / name
+        archive = source / "orthanc.tgz"
+        if source.is_symlink() or not source.is_dir() or (source / HOLD_FILE).exists() or archive.is_symlink() or not archive.is_file():
+            raise RuntimeError("Rotation candidate changed: " + name)
+        # The marker comes first: a reader (or validate_backup, which then refuses the set) never takes a thinned set
+        # for a restorable one, and an interrupted thinning finishes on the next run.
+        write_json(source / THINNED_FILE, {"removed": ["orthanc.tgz"], "at": now.isoformat(), "keep": keep,
+                                           "reason": "audit-retained beyond the kept daily generations"})
+        archive.unlink()
+        result["thinned"].append(name)
     for name in leftovers:
         shutil.rmtree(root / name)
         result["resumed"].append(name)
@@ -955,12 +987,13 @@ def main():
     backup_parser = commands.add_parser("backup")
     backup_parser.add_argument("--output", required=True, help="Parent directory outside the repository")
     backup_parser.add_argument("--ready-timeout", type=int, default=120, help="Seconds to wait after resuming writers (1-900)")
-    backup_parser.add_argument("--rotate-keep", type=int, default=None,
-                               help="After a complete, error-free backup, keep this many daily generations (1-365)")
+    backup_parser.add_argument("--rotate-keep", type=int, default=DAILY_GENERATIONS,
+                               help="After a complete, error-free backup, keep this many daily generations (1-365, default 7)")
+    backup_parser.add_argument("--no-rotate", action="store_true", help="Leave the older daily sets as they are")
     commands.add_parser("rehearse").add_argument("directory")
     rotate_parser = commands.add_parser("rotate")
     rotate_parser.add_argument("--root", required=True, help="The backup root holding the daily sets")
-    rotate_parser.add_argument("--keep", type=int, required=True)
+    rotate_parser.add_argument("--keep", type=int, default=DAILY_GENERATIONS)
     rotate_parser.add_argument("--protect", action="append", default=[], help="A set name never to delete")
     rotate_parser.add_argument("--dry-run", action="store_true", help="List what would be deleted; change nothing")
     args = parser.parse_args()
@@ -972,10 +1005,12 @@ def main():
     require_local_docker()
     with lock():
         if args.action == "backup":
-            if args.rotate_keep is not None and not 1 <= args.rotate_keep <= 365:
+            if not 1 <= args.rotate_keep <= 365:
                 raise RuntimeError("Rotation keeps between 1 and 365 generations")
+            # backup() raises on any incomplete set, resume/readiness failure or backup_error: rotation follows only a
+            # complete, error-free set, and never touches that set.
             directory = backup(args.output, args.ready_timeout)
-            if args.rotate_keep is not None:
+            if not args.no_rotate:
                 print(json.dumps({"rotation": rotate(args.output, args.rotate_keep, {directory.name})}), flush=True)
         else:
             rehearse(args.directory)

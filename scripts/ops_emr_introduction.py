@@ -76,7 +76,8 @@ COMPOSE_NAME = re.compile(r"docker-compose(?:\.[a-z0-9-]+)?\.yml")
 PROJECT = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}")
 TAG = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 FENCED = "#kin-emr-introduction-fenced# "
-TOOL_FILES = ("ops_emr_introduction.py", "ops_emr_probe.py", "ops_backup.py", "ops_deploy_preflight.py")
+TOOL_FILES = ("ops_emr_introduction.py", "ops_emr_probe.py", "ops_backup.py", "ops_deploy_preflight.py", "ops_deploy_host.py",
+              "ops_audit_integrity.py")
 OPERATOR_SMOKE_CHECKS = ("login_pkce", "logout_old_session_refused", "worklist_uid", "ohif_frame", "w2_folders",
                          "w2_modality", "w2_shortcuts", "realm_v1_pending_zero")
 # The Stage-5 configuration names a clone must replace before it starts (rehearsal.md §2). Values are compared in memory.
@@ -184,7 +185,8 @@ def migrations_valid(value):
 
 
 PLAN_KEYS = ("schema", "mode", "unit", "target_kind", "target_manifest_sha256", "previous", "release", "compose", "secrets",
-             "migrations", "storage", "smoke", "probe", "window", "budget", "backup_root", "tool", "seed", "projection_exempt")
+             "migrations", "storage", "members", "smoke", "probe", "window", "budget", "backup_root", "tool", "seed",
+             "projection_exempt")
 
 
 def plan_valid(plan):
@@ -223,6 +225,12 @@ def plan_valid(plan):
     require(storage["tablespace_path"] == TABLESPACE, "The tablespace path is fixed by the product")
     for key in ("postgres_uid", "postgres_gid", "node_uid", "node_gid"):
         _int(storage[key], 1, 65535, key)
+    # The member-rights import's expectation, from the plan's read-only observation of the realm: every member is imported
+    # once; the disabled ones keep a PACS suspension; service accounts are never members.
+    members = _keys(plan["members"], ("realm_members", "disabled", "service_accounts"), "members")
+    for key in members:
+        _int(members[key], 0, 100000, key)
+    require(members["disabled"] <= members["realm_members"], "Invalid member expectation")
     smoke = _keys(plan["smoke"], ("frame",), "smoke")
     if smoke["frame"] is not None:
         frame = _keys(smoke["frame"], ("path", "bytes", "sha256"), "smoke frame")
@@ -267,7 +275,7 @@ def plan_core(plan):
     """What a rehearsal must have rehearsed: the same release, history, storage and secret roles (not host specifics)."""
     secrets = plan["secrets"]
     return sha256_bytes(canonical({"previous": plan["previous"], "release": plan["release"], "migrations": plan["migrations"],
-                                   "storage": plan["storage"], "probe_study": plan["probe"]["study"],
+                                   "storage": plan["storage"], "members": plan["members"], "probe_study": plan["probe"]["study"],
                                    "secrets": {key: secrets[key] for key in ("required", "absent", "runtime", "installer", "logins")}}))
 
 
@@ -1052,6 +1060,29 @@ print('KIN_RESULT ' + json.dumps({'ohif.js': single('/etc/orthanc/ohif.js'), 'or
 """
 
 
+REALM_MEMBERS_SQL = """SELECT json_build_object(
+  'realm_members', count(*) FILTER (WHERE NOT service),
+  'disabled', count(*) FILTER (WHERE NOT service AND NOT enabled),
+  'service_accounts', count(*) FILTER (WHERE service)) FROM (
+  SELECT u.enabled, (u.service_account_client_link IS NOT NULL OR u.username LIKE 'service-account-%') AS service
+  FROM user_entity u JOIN realm r ON r.id = u.realm_id WHERE r.name = 'kin') m"""
+# Every relation of every emr_* schema with each table's TOAST table and TOAST index: emr_access.storage_placement()'s rule
+# (relkinds r/i/p/m), applied to all EMR schemas, read as the installer (the function itself exists only after L-07).
+PLACEMENT_SQL = """WITH own AS (
+  SELECT c.oid, n.nspname || '.' || c.relname AS relation, c.reltablespace, c.reltoastrelid
+  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname LIKE 'emr\\_%' AND c.relkind IN ('r', 'i', 'p', 'm')
+), every AS (
+  SELECT relation, reltablespace FROM own
+  UNION ALL SELECT own.relation || ':toast', t.reltablespace FROM own JOIN pg_class t ON t.oid = own.reltoastrelid
+  UNION ALL SELECT own.relation || ':toast-index', i.reltablespace
+    FROM own JOIN pg_index x ON x.indrelid = own.reltoastrelid JOIN pg_class i ON i.oid = x.indexrelid
+)
+SELECT coalesce(json_agg(json_build_object('relation', relation, 'tablespace',
+  coalesce((SELECT spcname::text FROM pg_tablespace s WHERE s.oid = every.reltablespace), 'database-default'))
+  ORDER BY relation), '[]'::json) FROM every"""
+
+
 def result_line(raw):
     lines = [line for line in raw.decode("utf-8", errors="replace").splitlines() if line.startswith("KIN_RESULT ")]
     require(len(lines) == 1, "Helper produced no single result")
@@ -1403,13 +1434,18 @@ class HostOps:
                     "images": images, "running": running, "restarting": restarting,
                     "migrations": ops.migration_rows(self.names["db"]), "catalog": ops.role_catalog(self.names["db"]),
                     "emr_volumes": existing, "api_state_mounts": sum(1 for m in api.get("Mounts") or [] if m.get("Destination") == ops.EMR_STATE),
-                    "cron": cron}
+                    "cron": cron, "members": self.realm_members()}
         pre.check_baseline(observed, intro.plan)
         free = shutil.disk_usage(intro.plan["backup_root"] if Path(intro.plan["backup_root"]).exists() else Path(intro.plan["backup_root"]).parent).free
         require(free >= intro.plan["budget"]["min_free_bytes"], "Free disk space below the plan")
         return {"head": observed["head"], "images": images, "migrations": len(observed["migrations"]), "cron": cron, "free_bytes": free,
-                "realm_members": int(self.psql("SELECT count(*) FROM user_entity u JOIN realm r ON r.id=u.realm_id "
-                                               "WHERE r.name='kin' AND u.service_account_client_link IS NULL;", "keycloak"))}
+                "members": observed["members"]}
+
+    def realm_members(self):
+        """Realm kin's people by count only (read-only SQL on the Keycloak database): members as the product counts them
+        (keycloak.service.ts excludes service accounts, also by their reserved name), the disabled ones, service accounts."""
+        value = json.loads(self.psql(REALM_MEMBERS_SQL, "keycloak"))
+        return {key: int(value[key]) for key in ("realm_members", "disabled", "service_accounts")}
 
     def freeze(self, intro):
         running = self.running()
@@ -1441,7 +1477,9 @@ class HostOps:
         printed = io.StringIO()
         with bound_ops(self.repo, self.run), redirect_stdout(printed):
             directory = ops.capture_held(intro.plan["backup_root"], self.resources(), shape=shape, label=label,
-                                         config=self.capture_config())
+                                         config=self.capture_config(),
+                                         facts={"origin": self.t["origin"], "project": self.t["project"],
+                                                "tls_certificate": self.t["tls_certificate"], "checkout": self.text(["git", "rev-parse", "HEAD"])})
             _, manifest, digest = ops.validate_held(directory)
         self.records.log(label + ".out", printed.getvalue().encode())
         self.hold(directory, intro.plan_sha256, True)
@@ -1533,9 +1571,14 @@ class HostOps:
         os.replace(temporary, path)
 
     def image_ids(self, image, user):
+        """The account's numeric IDs inside the exact image (never a number assumed from a test). The helper container is
+        named and labelled, so even a timed-out client cannot leave an unowned container behind."""
         out = []
-        for flag in ("-u", "-g"):
-            out.append(int(self.text(["docker", "run", "--rm", "--network", "none", "--entrypoint", "id", image, flag, user], timeout=60)))
+        with bound_ops(self.repo, self.run):
+            for flag in ("-u", "-g"):
+                value = ops.temporary_run(["--network", "none", "--read-only", "--entrypoint", "id", image, flag, user], timeout=60)
+                require(re.fullmatch(r"[0-9]{1,5}", value or "") is not None, "Image account IDs are unreadable")
+                out.append(int(value))
         return tuple(out)
 
     def tablespace_observed(self):
@@ -1589,6 +1632,9 @@ class HostOps:
         return {"name": item["Name"], "created": item.get("CreatedAt")}
 
     def provision(self, intro):
+        # Provision-first (DR2-09): this database must still be the previous release's, without any EMR object or EMR
+        # migration. emr-compose's PROVISION_SQL cannot repair a database migrated before it was provisioned.
+        pre.check_provision_first(ops.role_catalog(self.names["db"]), ops.migration_rows(self.names["db"]), intro.plan)
         out = self.one_shot(intro, "emr-provision", [], timeout=300, name="emr-provision")
         require(out["exit"] == 0 and out["container_exit"] == 0, "emr-provision failed")
         catalog = ops.role_catalog(self.names["db"])
@@ -1630,7 +1676,10 @@ class HostOps:
         rows = ops.migration_rows(self.names["db"])
         pre.check_migration_rows(rows, intro.plan["migrations"]["after"])
         pre.check_emr_catalog(ops.emr_catalog(self.names["db"], "kin"))
-        return {"exit": out["exit"], "logs": out["logs"], "migrations": len(rows), "preserved": self.preserved(intro)}
+        placement = json.loads(self.psql(PLACEMENT_SQL))
+        pre.check_placement(placement)
+        return {"exit": out["exit"], "logs": out["logs"], "migrations": len(rows), "placement": len(placement),
+                "preserved": self.preserved(intro)}
 
     def serverinfo(self, intro):
         env = parse_env(self.env_file().read_bytes())
@@ -1648,6 +1697,11 @@ class HostOps:
 
     def member_import(self, intro):
         roster = self.helper(intro, ROSTER_SCRIPT, name="kc-roster")["users"]
+        # The roster the product reads must be the realm the plan observed: the same members, the same disabled ones.
+        counted = self.realm_members()
+        pre.check_member_counts(counted, intro.plan["members"])
+        pre.check_member_counts({"realm_members": len(roster), "disabled": sum(1 for user in roster if not user["enabled"]),
+                                 "service_accounts": counted["service_accounts"]}, intro.plan["members"])
         out = self.one_shot(intro, "api", ["prisma/import-member-rights.cjs"], timeout=600, entrypoint="node", name="member-import")
         require(out["exit"] == 0 and b"Member rights import completed" in out["stdout"], "Member rights import failed")
         retried = False
@@ -1785,9 +1839,23 @@ class HostOps:
         names = {item.split("=", 1)[0] for item in api["Config"].get("Env") or []}
         require(names - image_names == set(model["api_environment"]) - image_names, "API environment names differ from the release")
         pre.check_migration_rows(ops.migration_rows(self.names["db"]), intro.plan["migrations"]["after"])
+        # Retention stays OFF: its role (and the reader) keep the planned login state; nothing was granted since L-06b.
+        logins = {"kin_emr_owner": False, "kin_runtime": True, **intro.plan["secrets"]["logins"]}
+        pre.check_provisioned(ops.role_catalog(self.names["db"]), intro.plan["storage"], logins)
         pre.check_keycloak_serverinfo(self.keycloak_selected(intro))
         require(not self.one_shots_alive(intro), "A one-shot worker of this release exists")
-        return {"images": images, "api_environment": sorted(names - image_names)}
+        return {"images": images, "api_environment": sorted(names - image_names), "backup": self.backup_readiness(intro)}
+
+    def backup_readiness(self, intro):
+        """The daily backup of the introduced release seals each set into the backup root's audit ledger
+        (ops_audit_integrity); without a readable ledger every daily backup would end in backup_error. That is a gate
+        failure here, never a silent pass. The ledger is initialised once (G09) before the capture takes the lock."""
+        import ops_audit_integrity as audit
+        try:
+            ledger = audit.read_ledger(Path(intro.plan["backup_root"]))
+        except Exception as error:
+            raise Stop("The backup root has no readable audit ledger (" + type(error).__name__ + ")") from None
+        return {"audit_ledger": "readable", "seals": sum(1 for entry in ledger["entries"] if entry["kind"] == "seal")}
 
     def keycloak_selected(self, intro):
         """serverinfo once Keycloak answers (it may still be starting after a resume)."""

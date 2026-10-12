@@ -59,7 +59,7 @@ def main():
             except Exception:
                 body = None
             if type(body) is dict and body.get("mode") == "emr-introduction":
-                for name in ("ops_emr_introduction", "ops_emr_probe"):
+                for name in ("ops_emr_introduction", "ops_emr_probe", "ops_audit_integrity"):
                     if not (library / (name + ".py")).is_file():
                         raise RuntimeError()
                 from ops_emr_introduction import IntroductionHost

@@ -179,6 +179,14 @@ def check_migration_rows(rows, expected):
     require(all(row[2] is True and row[3] is False for row in rows), "A migration is unfinished or rolled back")
 
 
+def emr_storage_present(catalog):
+    """Any trace of the EMR storage in a cluster catalog: an EMR role, an emr_* schema (emr_access, and the later units'
+    emr_clinical and the like) or the dedicated tablespace."""
+    roles = {role["rolname"] for role in catalog["roles"]}
+    return bool(roles & set(EMR_ROLES) or any(str(name).startswith("emr_") for name in catalog["schemas"])
+                or any(space["name"] == "kin_emr_access" for space in catalog["tablespaces"]))
+
+
 def check_baseline(observed, plan):
     """Before anything changes: the host is exactly the plan's previous release (fresh observation, not the old record)."""
     previous = plan["previous"]
@@ -187,13 +195,34 @@ def check_baseline(observed, plan):
     require(all(observed["running"].get(role) is True for role in ("db", *WRITERS)), "A service of the previous release is not running")
     require(not any(observed["restarting"].values()), "A service is restarting")
     check_migration_rows(observed["migrations"], plan["migrations"]["before"])
-    roles = {role["rolname"] for role in observed["catalog"]["roles"]}
-    require(not roles & set(EMR_ROLES) and "emr_access" not in observed["catalog"]["schemas"]
-            and not any(space["name"] == "kin_emr_access" for space in observed["catalog"]["tablespaces"]),
-            "EMR storage already exists on the source")
+    require(not emr_storage_present(observed["catalog"]), "EMR storage already exists on the source")
     require(observed["emr_volumes"] == [], "EMR volumes already exist on the source")
     require(observed["api_state_mounts"] == 0, "The previous API already has an EMR state mount")
     require(observed["cron"] in ("matched", "not-managed"), "Scheduled jobs differ from the target manifest")
+    check_member_counts(observed["members"], plan["members"])
+
+
+def check_member_counts(observed, expected):
+    """The realm's people as the plan recorded them in its read-only observation: members (service accounts are not
+    members), how many of them are disabled, and the service accounts counted apart."""
+    require(observed == expected, "Realm members differ from the plan")
+
+
+def check_provision_first(catalog, rows, plan):
+    """Provision-first only (Astra DR2-09): the provisioning runs on exactly the previous release's database, before any
+    EMR migration. A database that already carries EMR roles, an emr_* schema, the tablespace or any migration beyond the
+    previous history (a database migrated before it was provisioned) is refused, never repaired: emr-compose's
+    PROVISION_SQL does not move existing relations' TOAST storage or later units' schemas into the tablespace."""
+    check_migration_rows(rows, plan["migrations"]["before"])
+    require(not emr_storage_present(catalog), "EMR storage exists before provisioning (migrated before provisioned); refused, not repaired")
+
+
+def check_placement(rows):
+    """Every relation of every emr_* schema - tables, indexes, sequences and each table's TOAST table and TOAST index -
+    sits in kin_emr_access (what emr_access.require_placement demands, for all EMR schemas)."""
+    require(type(rows) is list and rows, "EMR placement is unreadable or empty")
+    outside = sorted(row["relation"] for row in rows if row["tablespace"] != "kin_emr_access")
+    require(not outside, "EMR relations outside kin_emr_access: " + ",".join(outside)[:400])
 
 
 def check_write_freeze(observed):

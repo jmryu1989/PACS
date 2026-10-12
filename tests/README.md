@@ -1384,7 +1384,8 @@ cache option, member-rights import, API as node/kin_runtime, UI/proxy, ingress s
 smoke, the one-shot EMR probe `scripts/ops_emr_probe.py`, B1 and its same-point restore) → reopen; release (before any
 database change) and rollback (B0 into fresh recovery volumes) are the exits. Production's introduce requires the
 local-restore receipt a rehearsal target produced from the same B0 (seed → … → rollback → receipt); external backup
-stays OFF and no offsite receipt is claimed.
+stays OFF and no offsite receipt is claimed. Reopen requires the executor's browser-level smoke record and a readable
+audit ledger at the backup root (the introduced release's daily backup seals into it).
 
 - `python -B tests/ops_emr_introduction_test.py`: plan/target/request/approval/receipt validation, the clone/target
   allowlist, the preflight additions of `ops_deploy_preflight.py` as functions of observed facts, and the phase state
@@ -1392,10 +1393,16 @@ stays OFF and no offsite receipt is claimed.
   no one-shot worker can be alive, none after an unknown end or past the point of no return). Its root-only class
   needs an isolated Linux root fixture.
 - `python -B tests/ops_backup_held_test.py`: `ops_backup.capture_held()` never starts or stops a container, refuses
-  running writers before writing, and its result validates as a held capture and as the backup format
-  `ops_backup.rehearse()` restores. `python -B tests/ops_backup_rotation_test.py`: `ops_backup.py rotate` /
-  `backup --rotate-keep N` keep N complete daily sets and never delete release/held/protected/latest-verified,
-  incomplete or audit-retained sets.
+  running writers before writing, refuses any EMR trace (EMR role, `emr_*` schema, tablespace) in the pre-EMR shape,
+  and its result validates as a held capture and as the backup format `ops_backup.rehearse()` restores.
+  `python -B tests/ops_backup_rotation_test.py`: after a complete, error-free `backup` (default `--rotate-keep 7`,
+  D1047; `--no-rotate` leaves the sets) and in `ops_backup.py rotate [--dry-run]`, rotation keeps N complete daily sets,
+  never deletes release/held/protected/latest-verified/incomplete sets, and only thins (Orthanc archive removed after a
+  `thinned.json` marker; `validate_backup` then refuses the set) a set that the audit ledger alone still retains.
+- The provision-first rule (Astra DR2-09): the mode refuses a database that already carries an EMR role, an `emr_*`
+  schema, the tablespace or a migration beyond the previous history before provisioning, instead of repairing it;
+  after the migration every relation of every `emr_*` schema, with its TOAST table and TOAST index, must be in
+  `kin_emr_access`.
 - `python -B tests/ops_emr_probe_test.py`: the probe verdict; with `KIN_TEST_API_IMAGE` set it runs the probe script
   in that production image against a disposable provisioned and migrated PostgreSQL.
 - `tests/ops_deploy_host_container_test.py EmrIntroductionRehearsal` (opt-in `KIN_TEST_EMR_REHEARSAL=1` plus
@@ -1404,6 +1411,7 @@ stays OFF and no offsite receipt is claimed.
   compose files on a local daemon - a source stack's B0 seeds a clone with other names and secrets, which runs every
   phase through rollback and produces the receipt. It is not a rehearsal of a production backup copy, a real realm,
   production TLS or data volume; that is the separate rehearsal on a disposable host.
+
 # 뷰어 반전 정밀도
 
 `node --test tests/viewer_precision_test.cjs`는 고정 upstream 함수 fingerprint,
