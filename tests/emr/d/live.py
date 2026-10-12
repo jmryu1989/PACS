@@ -497,7 +497,8 @@ class EmrDLive(unittest.TestCase):
         qid = out["ids"]["question"]
         # A row moved outside the clinical path (a fixture change as the installer) diverges from the versions: the next
         # write rolls back whole and is sealed with the service's own code.
-        self.ok('UPDATE "StudyQuestion" SET revision = revision + 7 WHERE id = %s::uuid;' % self.literal(qid))
+        # (revision and entryCount move together: the table's own CHECK keeps them equal)
+        self.ok('UPDATE "StudyQuestion" SET revision = revision + 7, "entryCount" = "entryCount" + 7 WHERE id = %s::uuid;' % self.literal(qid))
         diverged = self.driver("d04-diverged", {"study": uid, "question": qid})
         self.assertEqual((diverged["reply"]["ok"], diverged["reply"]["error"]["code"]), (False, "QUESTION_CHANGED"))
         self.assertEqual(len(self.versions(qid)), 1)
@@ -505,7 +506,7 @@ class EmrDLive(unittest.TestCase):
         [register] = self.register(diverged["requestId"])
         self.assertEqual((register["state"], register["terminal"]["proof"]["code"]), ("rejected", "QUESTION_CHANGED"))
         self.assertEqual(len(self.change_events(qid)), 2, "the rolled-back commit appended no change event")
-        self.ok('UPDATE "StudyQuestion" SET revision = revision - 7 WHERE id = %s::uuid;' % self.literal(qid))
+        self.ok('UPDATE "StudyQuestion" SET revision = revision - 7, "entryCount" = "entryCount" - 7 WHERE id = %s::uuid;' % self.literal(qid))
 
     def test_d_flow_write_amend_reopen(self):
         """G3 flow: a finding is written, amended by a signed correction keeping the original, and reopened by a new process."""
