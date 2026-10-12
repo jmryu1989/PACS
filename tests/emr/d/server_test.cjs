@@ -334,7 +334,9 @@ test('TEST-D-04 atomic_retry server: an allocation request keeps its identity - 
   // The allocation row's revision (3: the row existed before unit D, or a channel close moved it) is not D's unit revision.
   const body = { requestId: randomUUID(), expectedOwner: owner(t1), revision: 3, readerSub: null }, recordId = 'assignment-' + randomUUID();
   const opening = input('assignment.write', t1, null, body, { ids: { recordId, versionId: randomUUID() } });
-  const plan = R.planClinicalWrite(opening);
+  let plan;
+  try { plan = R.planClinicalWrite(opening); }
+  catch (error) { assert.fail('DR2-04: an allocation carrying its row\'s revision plans whatever D\'s unit revision is (' + error.message + ')'); }
   assert.equal(plan.version.entry, 'assignment');
   const unit = R.applyPlan(null, plan);
   const resend = R.prepareClinicalWrite(input('assignment.write', t1, unit, body, { ids: { recordId, versionId: randomUUID() } }));
@@ -377,7 +379,8 @@ test('TEST-D-03 read_scope server: a response serving many units hands out no te
   assert.equal(sent, false, 'TEST-D-03: no text without every provision durable');
   // DR2-02: a projection whose author is not the version's, or rows not read from storage, get nothing (and log nothing).
   appended.length = 0;
-  await refusedAsync(runtime.provide({}, { route: 'GET questions', caller, units: provisions({ author: 'sub-someone-else' }), send: async () => 'SYN' }), 'ProjectionMismatch');
+  await refusedAsync(runtime.provide({}, { route: 'GET questions', caller, units: provisions({ author: 'sub-someone-else' }), send: async () => 'SYN' }), 'ProjectionMismatch',
+    'DR2-02: a projection naming another author is refused');
   await refusedAsync(runtime.provide({}, { route: 'GET questions', caller, units: [{ ...provisions()[0], rows: unitRows(questions[0]) }], send: async () => 'SYN' }), 'NotFound');
   const consultation = R.applyPlan(null, R.planClinicalWrite(input('consultation.create', r1, null, { requestId: randomUUID(), expectedOwner: owner(r1),
     recipientSub: t1.identity.subject, reason: Q }, { recipientId: t1.identity.id })));
@@ -408,7 +411,8 @@ test('TEST-D-02 versions_and_sr server: a manual SR adoption counts only once it
   } };
   const appended = [];
   const down = { ...fakeLedger(db), append: async () => { throw Object.assign(new Error('SYN seal unavailable'), { name: 'LedgerFailure' }); } };
-  await assert.rejects(new RT.ClinicalRuntime({ db, ledger: down, context: {}, studies: {}, signatures: device.ports }).confirmedSrAdoption(id), /SYN seal unavailable/);
+  await assert.rejects(new RT.ClinicalRuntime({ db, ledger: down, context: {}, studies: {}, signatures: device.ports }).confirmedSrAdoption(id), /SYN seal unavailable/,
+    'DR2-01: an adoption the ledger cannot make durable is never reported confirmed');
   assert.deepEqual([confirms, adoption.confirmed], [0, false], 'not durable: the adoption stays unconfirmed (nothing may be published)');
   const runtime = new RT.ClinicalRuntime({ db, ledger: fakeLedger(db, appended), context: {}, studies: {}, signatures: device.ports });
   const confirmed = await runtime.confirmedSrAdoption(id);
@@ -522,7 +526,7 @@ test('TEST-D-02 versions_and_sr server: what a finding incorporates is a fixed r
   let projected = 0;
   SV.registerClinicalProjection('finding', async () => { projected++; });
   const runtime = new RT.ClinicalRuntime({ db, ledger: fakeLedger(db), context: {}, studies: {}, signatures: device.ports, recoveryDelayMs: 3600000 });
-  assert.equal((await runtime.recover(R.prepareClinicalWrite(finding))).status, 'replayed');
+  assert.equal((await runtime.recover(R.prepareClinicalWrite(finding))).status, 'replayed', 'DR2-05: the recovered original resolves the same sources again and commits');
   assert.deepEqual([seen.commits, projected], [1, 1]);
   assert.deepEqual([seen.versions[0].versionId, seen.versions[0].attachments, seen.versions[0].text], [plan.version.versionId, expected, content],
     'the recovered commit stores exactly the references the author signed');
@@ -537,7 +541,8 @@ test('TEST-D-04 atomic_retry server: the runtime is composed once with every por
   assert.equal(SV.requireClinicalRuntime(), composed, 'the composition binds the port of the owning services to this runtime');
   assert.throws(() => RT.composeClinicalRuntime(parts), e => e instanceof V.ContractError && e.code === 'ClinicalRuntimeAlreadyComposed');
   // DR2-08: the port is bound once at server start; no later binding (no request path) can replace it.
-  assert.throws(() => SV.bindClinicalPort({ write: async () => ({}) }), e => e instanceof V.ContractError && e.code === 'ClinicalRuntimeAlreadyComposed');
+  assert.throws(() => SV.bindClinicalPort({ write: async () => ({}) }), e => e instanceof V.ContractError && e.code === 'ClinicalRuntimeAlreadyComposed',
+    'DR2-08: no later binding replaces the port bound at server start');
   assert.equal(SV.requireClinicalRuntime(), composed);
 });
 

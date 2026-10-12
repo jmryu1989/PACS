@@ -55,7 +55,8 @@
       "tests/emr/d/live_driver.cjs"
     ],
     "R3-server": [
-      "api/src/emr-clinical/sources.ts"
+      "api/src/emr-clinical/sources.ts",
+      "tests/emr/d/server_mutants.py"
     ],
     "R2-migration-same-commit": [
       "tests/production_image_test.py",
@@ -322,6 +323,12 @@
   },
   "mutants": {
     "pure": "tests/emr/d/mutants.py (R1: M-D-01..05 and M-D-R1-*, against tests/emr/d/contract_test.cjs)",
+    "server": {
+      "file": "tests/emr/d/server_mutants.py",
+      "note": "round 3: each reverts one fix of Astra's DR2-01..08 on bfddc3d (or removes the signing-time check of Astra's AM10) in a copy and runs tests/emr/d/server_test.cjs",
+      "ids": ["M-D-R3-DR2-01", "M-D-R3-DR2-02", "M-D-R3-DR2-03", "M-D-R3-DR2-04", "M-D-R3-DR2-05", "M-D-R3-DR2-06", "M-D-R3-DR2-07a",
+        "M-D-R3-DR2-07b", "M-D-R3-DR2-08", "M-D-R3-AM10"]
+    },
     "live": [
       {
         "id": "M-D-01",
