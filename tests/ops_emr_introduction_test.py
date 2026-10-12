@@ -433,12 +433,14 @@ class RequestApprovalReceiptTests(unittest.TestCase):
                  "production host": {"host_key_sha256": "a" * 64}, "offsite kind": {"kind": "offsite-restore"},
                  "not passed": {"passed": False}, "another tool": {"tool": {name: "1" * 64 for name in intro.TOOL_FILES}},
                  "old schema": {"schema": 1}}
+        # Each case: the admitted receipt with its own bundle and one change (never refused only for a missing bundle).
         for name, change in cases.items():
             with self.subTest(case=name):
-                refuses(self, intro.receipt_valid, self.receipt(plan, **change), plan, "8" * 64, production)
-        missing = self.receipt(plan)
+                body = {**copy.deepcopy(receipt), **change}
+                refuses(self, lambda: intro.receipt_valid(body, plan, "8" * 64, production, bundle=bundle))
+        missing = copy.deepcopy(receipt)
         del missing["phases"]["rollback"]
-        refuses(self, intro.receipt_valid, missing, plan, "8" * 64, production, message="phases")
+        refuses(self, lambda: intro.receipt_valid(missing, plan, "8" * 64, production, bundle=bundle), message="phases")
 
     def test_59_a_receipt_binds_its_run_artifacts_plan_host_time_and_one_use(self):
         """IRT-02: every way a receipt can be other than one real rehearsal of this plan's B0 is refused."""
@@ -448,13 +450,22 @@ class RequestApprovalReceiptTests(unittest.TestCase):
         self.assertIs(intro.receipt_valid(good, plan, "8" * 64, production, now=now, b0_created_utc=(now - timedelta(days=1)).isoformat(),
                                           bundle=bundle), good)
 
+        # Each case is the admitted receipt (with its own bundle) and exactly one change, so a case is refused by its own
+        # rule, not by a receipt that never matched the bundle.
+        def variant(created=None, **changes):
+            body = copy.deepcopy(good)
+            body.update(changes)
+            if created is not None:
+                body["created_utc"] = created.isoformat()
+            return body
+
         def phases(change):
-            body = self.receipt(plan)
+            body = variant()
             change(body["phases"])
             return body
 
         def evidence(change):
-            body = self.receipt(plan)
+            body = variant()
             change(body["evidence"])
             return body
         other_target = target_fixture()
@@ -468,9 +479,9 @@ class RequestApprovalReceiptTests(unittest.TestCase):
             "no result file hash": phases(lambda p: p["rollback"].__setitem__("result_sha256", "short")),
             "one request for two phases": phases(lambda p: p["verify"].__setitem__("request_sha256", p["introduce"]["request_sha256"])),
             "rollback never reopened": phases(lambda p: p.pop("rollback_reopen")),
-            "another B1": self.receipt(plan, rehearsal_b1_manifest_sha256="0" * 64),
-            "another B0 of the rehearsal": self.receipt(plan, rehearsal_b0_manifest_sha256="0" * 64),
-            "another Bfail": self.receipt(plan, bfail_manifest_sha256="0" * 64),
+            "another B1": variant(rehearsal_b1_manifest_sha256="0" * 64),
+            "another B0 of the rehearsal": variant(rehearsal_b0_manifest_sha256="0" * 64),
+            "another Bfail": variant(bfail_manifest_sha256="0" * 64),
             "B1 restore check missing": evidence(lambda e: e["verify"].__setitem__("b1_restore_check", False)),
             "probe replayed twice": evidence(lambda e: e["verify"]["probe"].__setitem__("replay_duplicates", 1)),
             "recovery volume of another project": evidence(lambda e: e["rollback"]["recovery"].__setitem__("pg", "pacs-starter-kit_pg-db")),
@@ -478,11 +489,11 @@ class RequestApprovalReceiptTests(unittest.TestCase):
             "rollback smoke on another frame": evidence(lambda e: e["rollback_reopen"]["smoke"].__setitem__("frame_sha256", "0" * 64)),
             "rollback smoke without the worklist": evidence(lambda e: e["rollback_reopen"]["smoke"].__setitem__("worklist_uid", "9.9")),
             "rollback smoke with an old token": evidence(lambda e: e["rollback_reopen"]["smoke"].__setitem__("token_after_restore", False)),
-            "stale": self.receipt(plan, created=now - timedelta(days=8)),
-            "from the year 2000": self.receipt(plan, created_utc="2000-01-01T00:00:00Z"),
-            "dated in the future": self.receipt(plan, created=now + timedelta(hours=1)),
-            "another rehearsal host": self.receipt(plan, host_key_sha256="c" * 64),
-            "for another production plan": self.receipt(plan, production_plan_sha256="0" * 64),
+            "stale": variant(created=now - timedelta(days=8)),
+            "from the year 2000": variant(created_utc="2000-01-01T00:00:00Z"),
+            "dated in the future": variant(created=now + timedelta(hours=1)),
+            "another rehearsal host": variant(host_key_sha256="c" * 64),
+            "for another production plan": variant(production_plan_sha256="0" * 64),
         }
         for name, body in cases.items():
             with self.subTest(case=name):
@@ -2294,8 +2305,10 @@ LINGERING_BROWSER = r"""
 import json, os, subprocess, sys, time
 spec = json.loads(sys.stdin.read())
 os.makedirs(spec["profile_dir"], exist_ok=True)
-# A child that outlives this process: it inherits the output pipes and sleeps (a Chromium renderer left behind).
-child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+# A child that outlives this process: it inherits the output pipes and sleeps (a Chromium renderer left behind) - far
+# longer than the test's bounds (a refusal within 60 s, the child gone 10 s later), short enough that a tool which
+# waits on its pipes is seen failing within minutes rather than hanging the suite.
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(90)"])
 with open(%r, "w") as handle:
     handle.write(str(child.pid))
 if %r:
@@ -2807,6 +2820,8 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
                     body = store["clients"]
                 elif self.command == "DELETE":
                     store["deleted"].append(path)
+                    for kind in ("users", "clients"):
+                        store[kind] = [item for item in store[kind] if path != "/admin/realms/kin/%s/%s" % (kind, item["id"])]
                 raw = json.dumps(body).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -2816,6 +2831,7 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
             do_GET = do_POST = do_PUT = do_DELETE = respond
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         env = {**os.environ, "KC_ADMIN_URL": "http://127.0.0.1:%d" % server.server_address[1], "KIN_KC_ADMIN_USER": "admin",
                "KIN_KC_ADMIN_PASSWORD": "synthetic", "KIN_SMOKE_PASSWORD": "synthetic"}
@@ -2830,6 +2846,16 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
         self.assertEqual(removed.returncode, 0, removed.stderr)
         self.assertEqual(intro.result_line(removed.stdout), {"user_absent": True, "client_absent": True, "foreign_users": 1, "foreign_clients": 1})
         self.assertEqual(store["deleted"], [], "nothing this run did not make was deleted")
+        # A creation whose answer was lost (or that failed half-way) left this run's own marked account and client: the
+        # cleanup finds them by the marker and removes exactly those.
+        store["users"].append({"id": "own-user", "username": "kin-smoke-y", "lastName": "m" * 32})
+        store["clients"].append({"id": "own-client", "clientId": "kin-smoke-y-client", "description": "kin-smoke " + "m" * 32})
+        removed = run("remove", {"username": "kin-smoke-y", "client_ids": ["kin-smoke-y-client"], "marker": "m" * 32})
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertEqual(intro.result_line(removed.stdout), {"user_absent": True, "client_absent": True, "foreign_users": 0, "foreign_clients": 0})
+        self.assertEqual(store["deleted"], ["/admin/realms/kin/users/own-user", "/admin/realms/kin/clients/own-client"])
+        self.assertEqual([item["id"] for item in store["users"]], ["foreign-user"])
+        self.assertEqual([item["id"] for item in store["clients"]], ["foreign-client"])
 
     def test_114_the_ended_sessions_original_cookie_is_sent_again_from_outside_the_browser(self):
         """IRT2-12: after the product logout, the ended session's original cookie (and its binding) goes to /api/me again
@@ -2863,6 +2889,22 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
         revoked["value"] = True
         self.assertEqual(intro.session_replay(spec, headers), 401)
         self.assertEqual(seen[-1], ("/api/me", "kin_sid=still-valid", "binding"))
+
+    def test_115_the_seeds_clone_changes_touch_only_their_keycloak_tables(self):
+        """IRT2-24: after the exact restore, the seed's own recorded changes (client secrets, origin, mail, identity
+        providers) are compared on their own: only their Keycloak tables may differ from the seed's values; any other
+        changed, lost or new table of either database is named (by table only, never a value)."""
+        seed = {"kin": {"public.Report": [2, "a" * 64]}, "keycloak": {"public.client": [3, "b" * 64], "public.user_entity": [5, "c" * 64]}}
+        after = copy.deepcopy(seed)
+        self.assertEqual(intro.value_changes(seed, after), set())
+        after["keycloak"]["public.client"] = [3, "d" * 64]
+        self.assertEqual(intro.value_changes(seed, after), {"keycloak:public.client"})
+        self.assertLessEqual(intro.value_changes(seed, after), intro.SEED_TRANSFORMED_TABLES)
+        after["keycloak"]["public.user_entity"] = [4, "e" * 64]
+        after["kin"]["archive.new"] = [1, "f" * 64]
+        del after["kin"]["public.Report"]
+        self.assertEqual(intro.value_changes(seed, after) - intro.SEED_TRANSFORMED_TABLES,
+                         {"keycloak:public.user_entity", "kin:archive.new", "kin:public.Report"})
 
     @unittest.skipUnless(shutil.which("node"), "needs node (the Linux root fixture has it)")
     def test_98_keycloak_readiness_waits_for_200_and_a_refused_administrator_stops_at_once(self):

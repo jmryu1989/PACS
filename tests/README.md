@@ -1397,22 +1397,51 @@ Reopen requires the executor's browser-level smoke record and a readable audit l
 introduced release's daily backup seals into it).
 
 The target manifest names the host's own wiring instead of tolerating drift: `declared_overlays` (a compose file
-outside the checkout, e.g. `/etc/kin-deploy/overlays/docker-compose.halo-reports.yml`, its sha256, service and binds;
-listed in `compose_files` after any rehearsal override, because that override replaces the proxy's volumes) with
-`external_networks` per service; `tracked_overlay_reconcile` puts a modified tracked compose file back to the commit
-only after Compose renders the current files, the commit plus the overlay, and the declared list byte-identically.
-Every phase start checks the overlay file (hash, not writable by others) and its bind sources, and resolves compose
-variables the `.env` lacks from the running containers (environment or bind source; names and hashes recorded). With
-`fix_checkout_mode` the capture first makes the checkout 0700 and `.git` not group/other-writable (recorded). A clone's
-seed refuses a proxy certificate volume that is absent or empty (read-only check; the volume is filled before the
-first proxy start). Unattended (policy `smoke.browser_cmd`, D1062): a temporary member `kin-smoke-<run>` with a
-generated password in the run folder (discarded with the member) signs in through headless Chromium - the product's
-own sign-in and logout (the ended session must then be refused, with its binding and by its cookie alone), then a
-temporary public client's Authorization Code + PKCE login for the token the API checks (the chain is verified first
-and the browser trusts only that leaf's SPKI pin; the origin's host:port maps to the maintenance port; the code is
-read from an unresolvable `.invalid` redirect; the profile lives in the run folder and is removed) - the eight checks
-become the executor's record, and the member is disabled and deleted before any reopen. The browser command carries
-its browsers' path itself (`/usr/bin/env PLAYWRIGHT_BROWSERS_PATH=/opt/kin-smoke/browsers ...`).
+outside the checkout, e.g. `/etc/kin-deploy/overlays/docker-compose.halo-reports.yml`, its sha256, service and binds)
+with `external_networks` per service. In `compose_files` a production target lists the overlay immediately after
+`docker-compose.prod.yml` (where Compose renders the host's modified file byte-identically); a rehearsal lists
+`docker-compose.prod.yml`, its one rehearsal override (which replaces the proxy's volumes), then the overlay (D09).
+`tracked_overlay_reconcile` (only `docker-compose.prod.yml`) puts the modified tracked file back to the commit only
+after Compose renders the current files, the commit plus the overlay, and the declared list byte-identically. With
+declared overlays L-00b also writes `COMPOSE_FILE=<the declared list>` into the checkout's `.env` (IRT2-10), so a plain
+`docker compose up -d <service>` typed in the checkout - after the release and after a rollback - keeps the overlay's
+bind and network; the plan's compose digest therefore covers a `.env` with that line (`prepare-env --target` and
+`compose-digest --target` produce it), and the staged env, the final allowlist and the recovery handover refuse a
+`.env` without it. Every phase start checks the overlay file (hash) and every folder above it (root or the allowed
+owner, not writable by others, no link; IRT2-19) and its bind sources. The plan's first phase pins the overlay's
+verified bytes in its run folder; a rollback whose overlay file later changed or vanished goes on with the pinned copy
+and records a warning, a forward phase refuses (D05). Compose variables the `.env` lacks are resolved from the running
+containers (environment or bind source) and kept, 0600, in the plan's secrets folder `state/emr-secrets/<plan>/`, so
+a rollback in a new process with the proxy gone still gives Compose the same value (D04; records hold names and
+hashes only; the file goes when the plan ends). Before a seed nothing runs to resolve from: a VM target that lists
+`docker-compose.monitor.yml` needs `KIN_MONITOR_PUBLIC_DIR` in the clone's `.env` - inside the clone's checkout for a
+rehearsal, whose binds outside the checkout are refused - or does not list that file; the seed names the variable
+(D28). With `fix_checkout_mode` the capture first makes the checkout 0700 and `.git` not group/other-writable
+(recorded); a rollback finds a reopened mode, checks owner and links, restores the modes and records a warning (D06).
+L-01 compares the running containers themselves with the checked model (Compose project and service labels, volume and
+bind mounts, networks, published ports; IRT2-02) and accepts as backup root this tool's own private folder or the
+operating account's 0700 folder (policy `repository_owner`; B0/B1/Bfail are then handed to that account, whose daily
+backups and ledger live there; IRT2-03). A clone's seed refuses a proxy certificate volume that is absent, empty, or
+whose key is not the certificate's own or whose chain does not verify against `ca_file` (D30), and compares the
+restored rows with the seed's `values.json` before and after its own recorded Keycloak changes (only their tables may
+differ; IRT2-24). Unattended (policy `smoke.browser_cmd`, D1062): L-01 proves the browser command (an executable file;
+a blank page within 60 s; `PLAYWRIGHT_BROWSERS_PATH` resolves) and the planned member's realm roles and top-level group
+(D01/D02). A temporary member `kin-smoke-<run>` (marked as this run's; a same-named account or client is never changed
+or deleted, IRT2-23) with a generated password in the secrets folder (never among the records; discarded with the
+member, IRT2-15) signs in through headless Chromium - the product's own sign-in; the worklist row and its Modality
+cell, the folders, the Reading Workspace with OHIF, the shortcuts dialog and the standalone viewer's image (IRT2-11);
+the logout, after which the ended session's original cookie is sent again from outside the browser and must be
+refused (IRT2-12) - then a temporary public client's Authorization Code + PKCE login for the token the API checks (the
+chain is verified first and the browser trusts only that leaf's SPKI pin; the origin's host:port maps to the
+maintenance port; the code is read from an unresolvable `.invalid` redirect; the profile lives in the secrets folder
+and is removed). The browser runs in its own process group (Windows: job object) and a timeout ends the whole tree
+(D17). A settled smoke failure gets one retry within 120 s with its own client and profile, the first attempt's record
+kept beside (D07); the eight checks become the executor's record, and the member is disabled and deleted before any
+reopen. The browser command carries its browsers' path itself (`/usr/bin/env
+PLAYWRIGHT_BROWSERS_PATH=/opt/kin-smoke/browsers ...`). Production's receipt is admitted only together with its
+producer's run bundle: the rehearsal run directory's `result-*.json` and `journal.jsonl`, copied to
+`state/emr-bundles/<receipt sha256>/` (protected like the state) before the introduce request (IRT2-01). A step whose
+host could not be observed before it does not run; after a change it ends UNKNOWN (IRT2-22).
 
 - `python -B tests/ops_emr_introduction_test.py`: plan/target/request/approval/receipt validation, the clone/target
   allowlist, the preflight additions of `ops_deploy_preflight.py` as functions of observed facts, and the phase state
@@ -1424,14 +1453,22 @@ its browsers' path itself (`/usr/bin/env PLAYWRIGHT_BROWSERS_PATH=/opt/kin-smoke
   a rollback could not rebuild exactly (a further LOGIN role, role settings, another database or tablespace) in the
   pre-EMR shape, and its result validates as a held capture; `ops_backup.restore_pre_snapshot()` replays the further
   NOLOGIN roles and memberships, restores kin and keycloak with `--create` (owners and privileges kept) and compares
-  the whole catalog, also in the isolated B0 restore check.
+  the whole catalog, also in the isolated B0 restore check. The catalog covers column, type, large-object and
+  foreign-server privileges, publications, event triggers, user mappings, function/view/trigger definitions and
+  sequence states; a membership another role than kin granted, and a kin whose attributes differ from a fresh
+  cluster's bootstrap kin, are refused at capture (IRT2-16/17); `values.json` (row count and SHA-256 per table of
+  every schema of both databases) is compared after every held restore (IRT2-24). Daily EMR sets record their role
+  catalog in the manifest and `rehearse` replays it in a kin-bootstrapped cluster (D23; older sets keep the
+  `pg_dumpall` path, which PostgreSQL 16 refuses for a `GRANTED BY kin` membership). Its real-cluster class needs the
+  local image `postgres:16-alpine`.
   `python -B tests/ops_backup_rotation_test.py`: after a complete, error-free `backup` (default `--rotate-keep 7`,
   D1047; `--no-rotate` leaves the sets) and in `ops_backup.py rotate [--dry-run]` (the dry run lists exactly the plan
   the run executes), rotation keeps N physically whole daily sets (every manifest component with its size and
   SHA-256), never counts or deletes an incomplete set, never deletes release/held/protected/latest-verified sets,
   re-judges an interrupted deletion (`.rotating-<name>`) by its original name and folder and leaves it in place when
   anything protects it, and only thins (Orthanc archive removed after a `thinned.json` marker; `validate_backup` then
-  refuses the set) a set that the audit ledger alone still retains.
+  refuses the set) a set that the audit ledger alone still retains. Right before each deletion or thinning the set's
+  completeness is checked again; a set that became incomplete after the plan is kept and the reason recorded (IRT2-21).
 - The provision-first rule (Astra DR2-09): the mode refuses a database that already carries an EMR role, an `emr_*`
   schema, the tablespace or a migration beyond the previous history before provisioning, instead of repairing it;
   after the migration every relation of every `emr_*` schema, with its TOAST table and TOAST index, must be in

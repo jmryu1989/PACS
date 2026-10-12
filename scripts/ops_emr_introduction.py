@@ -1268,6 +1268,21 @@ BUDGET = {"capture": "capture_s", "release": "capture_s", "introduce": "introduc
           "rollback": "rollback_s", "rollback_reopen": "rollback_s", "seed": "seed_s", "receipt": "capture_s"}
 
 
+# IRT2-24: the only tables the seed's recorded clone changes (keycloak_isolation) may touch after the exact restore.
+SEED_TRANSFORMED_TABLES = frozenset("keycloak:public." + table for table in ("client", "redirect_uris", "web_origins", "realm_smtp_config",
+                                                                             "identity_provider"))
+
+
+def value_changes(before, after):
+    """The tables ("database:schema.table") whose value digest differs between two value catalogs (ops.value_catalog),
+    a table present in only one of them included. Names only - the digests never leave this function."""
+    changed = set()
+    for database in sorted(set(before or {}) | set(after or {})):
+        left, right = (before or {}).get(database) or {}, (after or {}).get(database) or {}
+        changed |= {database + ":" + table for table in set(left) | set(right) if left.get(table) != right.get(table)}
+    return changed
+
+
 def observed(snapshot):
     """IRT2-22: whether an observation around a step is complete. Required: the observer answered (containers, checkout,
     lock); the applied migration history whenever the database container runs. Not required (normally unobservable):
@@ -4048,6 +4063,13 @@ class HostOps:
                     "Seeded row values differ from the seed")
         source_env, clone_env = parse_env((seed / ".env").read_bytes()), parse_env(self.env_file().read_bytes())
         isolation = self.keycloak_isolation(intro, source_env, clone_env, source_env.get("PUBLIC_ORIGIN", "https://pacs.koreaimagingnetwork.com"))
+        with self.bind():
+            transformed = ops.value_catalog(self.names["db"])
+        # IRT2-24: the clone's approved changes compared on their own - only their Keycloak tables differ from the seed
+        # (every other table of both databases is still the seed's); the changed tables are recorded by name only.
+        changed = value_changes(json.loads((seed / "values.json").read_text(encoding="utf-8")), transformed)
+        require(changed <= SEED_TRANSFORMED_TABLES, "The clone's Keycloak changes reached other tables: " + ", ".join(sorted(changed - SEED_TRANSFORMED_TABLES)))
+        isolation["changed_tables"] = sorted(changed)
         # The restored master realm keeps the source administrator (whose password the clone must not know); the clone
         # gets its own administrator with the clone's KC_ADMIN_PASSWORD, through Keycloak's own recovery command.
         admin = self.one_shot(intro, "keycloak", ["bootstrap-admin", "user", "--username", self.t["keycloak_admin"],

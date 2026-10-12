@@ -128,7 +128,8 @@ class FakeHost:
             # The value catalog (IRT2-24): one digest per table of the database asked.
             database = args[args.index("-d") + 1]
             name = "public.Report" if database == "kin" else "public.realm"
-            return SimpleNamespace(returncode=0, stdout=json.dumps({name: [2, "c" * 64]}).encode(), stderr=b"")
+            answer = {name: [2, "c" * 64], **(getattr(self, "value_changes", None) or {}).get(database, {})}
+            return SimpleNamespace(returncode=0, stdout=json.dumps(answer).encode(), stderr=b"")
         if "pg_dump" in args or "pg_dumpall" in args:
             if self.dump_failure and "pg_dump" in args:
                 raise self.dump_failure
@@ -313,6 +314,24 @@ class HeldCaptureTests(unittest.TestCase):
         restores = [command for command in host.commands if "pg_restore" in command]
         self.assertEqual(len(restores), 2)
         self.assertTrue(all("--create" in command and "--no-owner" not in command and "--no-privileges" not in command for command in restores))
+
+    def test_13_a_restore_whose_row_values_differ_is_refused_with_equal_counts(self):
+        """IRT2-24: the held restore check compares every table's value digest of both databases (any schema) with the
+        capture's values.json: a changed Keycloak value, a changed row of the kin database, or a table of another schema
+        that appeared is a refused rehearsal although the row counts agree; the record says so."""
+        for name, change in (("a Keycloak row value", {"keycloak": {"public.realm": [2, "d" * 64]}}),
+                             ("a kin row value", {"kin": {"public.Report": [2, "e" * 64]}}),
+                             ("a non-public table", {"kin": {"archive.kept": [1, "f" * 64]}})):
+            host = FakeHost(tempfile.mkdtemp(dir=self.folder))
+            directory = host.capture()
+            self.assertEqual(json.loads((directory / "values.json").read_text()),
+                             {"kin": {"public.Report": [2, "c" * 64]}, "keycloak": {"public.realm": [2, "c" * 64]}})
+            host.value_changes = change
+            with self.subTest(change=name), host.bound(), patch.object(ops, "remove_owned_if_present"):
+                with self.assertRaisesRegex(RuntimeError, "Restored row values differ from the snapshot"):
+                    ops.rehearse(directory)
+                (record,) = directory.glob("rehearsal-*.json")
+                self.assertFalse(json.loads(record.read_text())["success"])
 
     def test_11_a_post_emr_capture_is_restored_exactly_in_a_kin_bootstrap_cluster(self):
         """B1's restore check replays its roles (EMR logins without a password) and memberships as the cluster's own
