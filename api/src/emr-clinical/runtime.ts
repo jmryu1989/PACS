@@ -174,8 +174,10 @@ export class ClinicalRuntime implements ClinicalServicePort {
     const unit = unitFromRows(string(r.recordId), r.rows);
     if (!unit || unit.record !== r.record || (r.studyId !== undefined && unit.studyId !== r.studyId)) refuse('NotFound');
     const plan: Readonly<ReadPlan> = planClinicalRead({ actor: facts.actor, unit, scope: r.scope });
-    const context: WorkContext = { basis: facts.actor.roles.includes('clinician') && (r.record === 'question' || r.record === 'image-request') &&
-      unit.parties.authorId === facts.actor.identity.id ? 'clinical-request' : 'worklist', studyId: unit.studyId, relatedStudyId: null, reason: null };
+    // The author of a question or an image request reads it as that clinical request (only a clinician opens one); anyone else
+    // reads it from the worklist/record view of the study.
+    const context: WorkContext = { basis: (r.record === 'question' || r.record === 'image-request') && unit.parties.authorId === facts.actor.identity.id
+      ? 'clinical-request' : 'worklist', studyId: unit.studyId, relatedStudyId: null, reason: null };
     const event: AccessEventV1 = { formatVersion: 1, surface: plan.route, eventId: `clinical-read:${randomUUID()}`, userId: known({ ...facts.actor.identity }),
       rolesAtTime: known([...facts.actor.roles]), actingInstitution: known(facts.actor.institutionId), managingInstitution: known(unit.managingInstitutionId),
       occurredAt: new Date().toISOString(), trustedProxyIp: facts.trustedProxyIp, cause: 'user-view', context, executor: 'member',

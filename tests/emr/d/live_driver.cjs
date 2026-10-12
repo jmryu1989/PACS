@@ -19,7 +19,9 @@ const send = result => process.stdout.write('EMR_D_RESULT ' + JSON.stringify(res
 const describe = error => ({ status: typeof error?.getStatus === 'function' ? error.getStatus() : null,
   code: (typeof error?.getResponse === 'function' ? error.getResponse()?.code : null) ?? error?.code ?? null,
   name: error?.name ?? null, message: String(error?.message ?? error).slice(0, 400) });
-main().then(send, error => send({ crashed: describe(error), stack: String(error?.stack ?? '').slice(0, 1500) }));
+// Only `node live_driver.cjs <operation> <json>` runs a scenario; loaded any other way (a test runner's glob) it does nothing.
+if (require.main === module && process.argv.length > 2)
+  main().then(send, error => send({ crashed: describe(error), stack: String(error?.stack ?? '').slice(0, 1500) }));
 
 const ISSUER = 'https://identity.example.test/realms/synthetic';
 const PEOPLE = {

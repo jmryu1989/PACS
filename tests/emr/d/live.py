@@ -433,12 +433,12 @@ class EmrDLive(unittest.TestCase):
         self.assertEqual(sorted(r["name"] for r in relations if r["kind"] == "r"), sorted(schema["tables"]))
         self.assertTrue(all(r["owner"] == schema["owner"] and r["tablespace"] == schema["tablespace"] for r in relations), relations)
         self.assertEqual(self.json("SELECT to_json(pg_get_userbyid(nspowner)::text) FROM pg_namespace WHERE nspname = 'emr_clinical'"), schema["owner"])
-        functions = "SELECT json_agg(p.proname || '(' || replace(oidvectortypes(p.proargtypes), ' ', '') || ')' ORDER BY 1) FROM pg_proc p " \
+        functions = "SELECT json_agg(p.proname || '(' || replace(oidvectortypes(p.proargtypes), ' ', '') || ')') FROM pg_proc p " \
                     "JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'emr_clinical' AND has_function_privilege(%s, p.oid, 'EXECUTE')"
-        self.assertEqual(self.json(functions % "'kin_runtime'"), sorted(schema["runtime_functions"]))
-        self.assertEqual(self.json(functions % "'kin_emr_reader'"), sorted(schema["reader_functions"]))
+        self.assertEqual(sorted(self.json(functions % "'kin_runtime'") or []), sorted(schema["runtime_functions"]))
+        self.assertEqual(sorted(self.json(functions % "'kin_emr_reader'") or []), sorted(schema["reader_functions"]))
         self.assertEqual(self.json(functions % "'kin_emr_retention'"), None, "the retention job has no D function")
-        definers = self.json("SELECT json_agg(p.proname ORDER BY 1) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+        definers = self.json("SELECT json_agg(p.proname) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
                              "WHERE n.nspname = 'emr_clinical' AND has_function_privilege('kin_runtime', p.oid, 'EXECUTE') AND NOT p.prosecdef")
         self.assertIsNone(definers, "every runtime entry point runs as the owner")
         privileges = self.json("SELECT json_agg(json_build_object('table', c.relname, 'runtime', has_table_privilege('kin_runtime', c.oid, "
