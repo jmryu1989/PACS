@@ -4,7 +4,7 @@ import { PrismaService } from './prisma.service';
 import { StudyAccessService } from './study-access.service';
 import { CLINICIAN_ROLE } from './clinician-policy';
 import type { Caller } from './pacs.service';
-import type { ClinicalWritePlan } from './emr-clinical/records';
+import type { ClinicalBody, ClinicalWritePlan } from './emr-clinical/records';
 import { ClinicalWriteResult, clinicalHttpError, clinicalRefusal, clinicalText, outcomeCode, projectedCaller, readClinicalRows, registerClinicalProjection,
   requireClinicalRuntime } from './emr-clinical/services';
 
@@ -52,6 +52,12 @@ const revision = (value: any) => Number.isInteger(value) && value >= 1 && value 
 const holds = (c: Caller, role: string) => Array.isArray(c.roles) && c.roles.includes(role);
 const iso = (value: any) => value == null ? null : value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 
+/** A legacy thread entry against the signed version it projects: position, kind, author, time and text (DR2-02). */
+function sameEntry(e: any, b: ClinicalBody): boolean {
+  const kind = b.sequence === 1 ? 'question' : b.state.to === 'Closed' ? 'close' : b.kind === 'clinical-answer' ? 'answer' : 'followup';
+  return e.seq === b.sequence && e.kind === kind && e.authorSub === b.author.subject && iso(e.at) === b.at && e.body === (b.text ?? '');
+}
+
 const error = (code: string, message: string) => ({ code, message });
 const invalid = (message = '질문 요청의 형식을 확인하세요') => new BadRequestException(error('QUESTION_INPUT_INVALID', message));
 const roleRequired = () => new ForbiddenException(error('QUESTION_ROLE_REQUIRED', '이 질문 동작에 필요한 역할이 없습니다'));
@@ -72,7 +78,7 @@ const OWN: Readonly<Record<string, () => HttpException>> = Object.freeze({
   StaleRevision: changed, QUESTION_CHANGED: changed, ProjectionConflict: changed, QUESTION_ENTRY_LIMIT: entryLimit, QUESTION_CLOSED: closedError,
   QUESTION_STATE: stateError, STUDY_NOT_FOUND: studyMissing, QUESTION_NOT_FOUND: questionMissing, ProjectionNotFound: questionMissing,
   NotFound: questionMissing, ActorPathRefused: actionForbidden, QUESTION_ACTION_FORBIDDEN: actionForbidden, OwnerChanged: ownerChanged,
-  RequestIdReused: reused, QUESTION_INPUT_INVALID: () => invalid(), QUESTION_BUSY: busy,
+  RequestIdReused: reused, QUESTION_INPUT_INVALID: () => invalid(), QUESTION_BUSY: busy, ProjectionMismatch: changed,
 });
 
 @Injectable()
@@ -302,8 +308,10 @@ export class ClinicianQuestionService {
   }
 
   /**
-   * #2 스레드 전체. 본문은 이 판들(질문의 전체 이력)에 대한 열람 사건이 원장에 내구 기록된 뒤에만 나간다. 판과 기존 행은
-   * 같은 RepeatableRead 스냅샷에서 읽고, 기존 행이 판의 접힘과 다르면 본문 없이 409다.
+   * #2 스레드 전체. 본문은 이 판들(질문의 전체 이력)에 대한 열람 사건이 원장에 내구 기록된 뒤에만 나가고, 나가는 본문은
+   * 서명된 판의 글이다. 판과 기존 행은 같은 RepeatableRead 스냅샷에서 읽고, 기존 행의 의미(항목 수·순서·종류·작성자·시각·
+   * 본문·상태·판 번호, 질문 작성자)가 판과 하나라도 다르면 본문 없이 409다 — 기존 행만 바뀐 손상이나 다른 경로의 쓰기를
+   * 서명된 기록처럼 내보내지 않는다(DR2-02).
    */
   async read(id: string, c: QuestionCaller, request?: unknown) {
     this.member(c);
@@ -314,12 +322,16 @@ export class ClinicianQuestionService {
     return this.run(c, async tx => {
       const { row, rs } = await this.question(tx, id.toLowerCase(), c, scope, false);
       const entries: any[] = await tx.studyQuestionEntry.findMany({ where: { questionId: row.id }, orderBy: { seq: 'asc' } });
-      const item = this.thread(row, entries, await this.anchor(tx, row.studyUid, rs));
+      const anchor = await this.anchor(tx, row.studyUid, rs);
       const rows = await readClinicalRows(tx, row.id);
       return runtime.read(request, { record: 'question', recordId: row.id, studyId: row.studyUid, scope: 'history', rows,
-        caller: { subject: c.sub, institutionId: c.institution }, send: async (_bodies, unit) => {
-          if (unit.versions.length !== entries.length || unit.revision !== row.revision) throw changed();
-          return { owner: this.owner(c), item };
+        parties: { author: row.authorSub }, caller: { subject: c.sub, institutionId: c.institution }, send: async (bodies, unit) => {
+          if (unit.revision !== row.revision || unit.state !== row.state || bodies.length !== entries.length ||
+              (row.state === 'Closed' && iso(row.closedAt) !== bodies[bodies.length - 1].at) ||
+              entries.some((e, i) => !sameEntry(e, bodies[i]))) throw changed();
+          // The text served is the signed version's own (equal to the row's after the comparison above).
+          const signed = entries.map((e, i) => ({ ...e, body: bodies[i].text ?? '' }));
+          return { owner: this.owner(c), item: this.thread(row, signed, anchor) };
         } });
     }, true);
   }

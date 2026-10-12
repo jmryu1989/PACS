@@ -16,9 +16,11 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 
 const send = result => process.stdout.write('EMR_D_RESULT ' + JSON.stringify(result) + '\n', () => process.exit(0));
+// `body` is the whole error body a client receives (for the check that no refusal carries clinical text).
 const describe = error => ({ status: typeof error?.getStatus === 'function' ? error.getStatus() : null,
   code: (typeof error?.getResponse === 'function' ? error.getResponse()?.code : null) ?? error?.code ?? null,
-  name: error?.name ?? null, message: String(error?.message ?? error).slice(0, 400) });
+  name: error?.name ?? null, message: String(error?.message ?? error).slice(0, 400),
+  body: typeof error?.getResponse === 'function' ? JSON.stringify(error.getResponse()).slice(0, 2000) : null });
 // Only `node live_driver.cjs <operation> <json>` runs a scenario; loaded any other way (a test runner's glob) it does nothing.
 if (require.main === module && process.argv.length > 2)
   main().then(send, error => send({ crashed: describe(error), stack: String(error?.stack ?? '').slice(0, 1500) }));
@@ -56,7 +58,9 @@ async function main() {
   }
   const req = name => require(path.join(dist, name));
   require('/app/node_modules/reflect-metadata');
-  req('emr-contract/composition').composeEmrAdapters(req('emr-runtime/context').runtimeAdapters);
+  // The server start's composition (B2's main.ts): B's adapters, its stored-record reader wrapped with D's sources.
+  const { runtimeAdapters } = req('emr-runtime/context');
+  req('emr-contract/composition').composeEmrAdapters({ ...runtimeAdapters, stored: req('emr-clinical/sources').clinicalStoredReader(runtimeAdapters.stored) });
   const RTS = req('emr-runtime/store'), { FailureJournal } = req('emr-runtime/failure-journal'), { AccessSeal } = req('emr-runtime/seal');
   const { EmrLedgerClient } = req('emr-runtime/client'), { appendPoolConfiguration } = req('emr-runtime/admission');
   const K = req('emr-signature/keys'), CV = req('emr-signature/canonical-v2');
@@ -112,18 +116,21 @@ async function main() {
     },
     async assignmentReaders() { return []; },
   };
-  const orthancStored = new Map(), orthancFailing = new Set(args.orthancFailing ?? []);
+  const orthancStored = new Map(), orthancFailing = new Set(args.orthancFailing ?? []), orthancUploads = [];
   for (const [sop, hex] of Object.entries(args.orthancHolds ?? {})) orthancStored.set(sop, Buffer.from(hex, 'hex'));
   const md5 = bytes => crypto.createHash('md5').update(bytes).digest('hex');
   const common = require('/app/node_modules/@nestjs/common');
   const orthanc = {
     async viewerReference(sop) { return args.tags?.[sop] ?? null; },
+    // Every synthetic study belongs to the one synthetic patient (a comparison study is the same patient's).
+    async connectStudyIdentity() { return { patientId: 'SYN-PATIENT-1' }; },
     async manualSrLocation(sop, bytes) {
       const stored = orthancStored.get(sop); if (!stored) return null;
       if (md5(stored) !== md5(bytes)) throw new common.BadRequestException('동일 SR 식별자의 원문이 다릅니다');
       return md5(stored).slice(0, 8) + '-00000000-00000000-00000000-00000000';
     },
     async storeManualSr(sop, bytes) {
+      orthancUploads.push(sop);
       if (orthancFailing.has(sop)) throw new common.ServiceUnavailableException('SR 저장 결과를 확인할 수 없습니다');
       orthancStored.set(sop, Buffer.from(bytes)); return this.manualSrLocation(sop, bytes);
     },
@@ -138,17 +145,22 @@ async function main() {
     assignments: new (req('reader-assignment.service').ReaderAssignmentService)(prisma, keycloak, access),
   };
 
-  /** What the author's device signs for one write: the signing request records.ts plans for exactly these facts. */
+  /**
+   * What the author's device signs for one write: the signing request records.ts plans for exactly these facts (C2's
+   * signing-request route will hand the page this plan; here the driver makes it). `sources` are the source versions a
+   * finding's text copies: their A-resolved references are part of what is signed.
+   */
   async function request(name, surface, recordId, body, { studyId, content = null, navigation = [], recipientSub = null, readerSub = null,
-    reading = null, change = null, signWith = null, kid = null, unsigned = false } = {}) {
+    reading = null, change = null, signWith = null, kid = null, unsigned = false, sources = [] } = {}) {
     const actor = await actorFacts(name);
     if (unsigned || !PEOPLE[name].sign) return { actor, signature: null };
     const spec = CT.CLINICAL_SURFACES[surface], study = await studies.facts(prisma, studyId), unit = await runtime.store.unit(recordId);
     const recipientId = recipientSub && spec.record === 'consultation' && !unit ? (await identityOf(recipientSub)).id : null;
     const readerId = spec.record === 'assignment' && readerSub ? (await identityOf(readerSub)).id : null;
+    const attachments = sources.length ? await SV.readClinicalSources(prisma, sources) : [];
     let plan;
     // A write the server will refuse has no plan to sign: the device sends nothing and the server answers the refusal.
-    try { plan = R.planClinicalWrite({ surface, actor, study, unit, body, content, attachments: [], navigation, recipientId, readerId,
+    try { plan = R.planClinicalWrite({ surface, actor, study, unit, body, content, attachments, navigation, recipientId, readerId,
       workContext: reading ? { kind: 'reading', studyId, referenceId: reading } : null, ids: { recordId, versionId: uuid() }, at: new Date().toISOString() }); }
     catch { return { actor, signature: null }; }
     if (!plan.signing) return { actor, signature: null };
@@ -166,13 +178,21 @@ async function main() {
     }
     return canonical({ schemaVersion: 1, title: item.title, text: item.text, hidden: item.hidden ?? false, primary: item.primary ?? 0, sources: copies });
   }
+  /** The snapshot of an edit that keeps every source pair: the finding head's frozen copies, whatever the items' heads are now. */
+  async function findingTextFrozen(findingId, item) {
+    const [head] = await prisma.$queryRaw`SELECT snapshot::text AS snapshot FROM "Finding" WHERE id = ${findingId}::uuid`;
+    return canonical({ schemaVersion: 1, title: item.title, text: item.text, hidden: item.hidden ?? false, primary: item.primary ?? 0,
+      sources: JSON.parse(head.snapshot).sources });
+  }
+  /** The source versions a finding item copies (an item's ID at its revision). */
+  const sourcesOf = item => item.sources.map(s => ({ kind: 'item', itemId: s.itemId, revision: s.revision }));
   const body = value => Buffer.from(JSON.stringify(value));
 
   try {
     const scenario = SCENARIOS[operation];
     if (!scenario) return { crashed: { code: 'UnknownOperation' } };
     const result = await scenario({ args, S, R, SV, req, studies, runtime, request, attempt, caller, owner, actorFacts, identityOf, findingText, body, PEOPLE,
-      TEXT, dev, ledger, seal, journal, STATE, prisma, ledgerDb, orthancStored });
+      TEXT, dev, ledger, seal, journal, STATE, prisma, ledgerDb, orthancStored, orthancUploads, findingTextFrozen, sourcesOf });
     fs.writeFileSync(saved, JSON.stringify(dev.save()));
     return result;
   } finally {
@@ -213,7 +233,7 @@ const SCENARIOS = {
   },
 
   /** TEST-D-02: every change is an exact version; a legacy overwrite never loses the earlier text; SR adoption and clean-up. */
-  async d02({ args, S, request, attempt, caller, owner, findingText, body, TEXT, prisma }) {
+  async d02({ args, S, request, attempt, caller, owner, findingText, body, TEXT, prisma, sourcesOf }) {
     const uid = args.study, out = {};
     // consultation: r1 asks r2; r2 accepts; r2 answers.
     const cr = { requestId: uuid(), expectedOwner: owner('r1'), recipientSub: args.recipientSub, reason: TEXT.consult }, cid = cr.requestId.toLowerCase();
@@ -233,7 +253,7 @@ const SCENARIOS = {
     const fc = { requestId: uuid(), item }, fid = fc.requestId.toLowerCase();
     out.finding = await attempt(async () => {
       return S.findings.write(uid, body(fc), caller('r1'), undefined,
-        await request('r1', 'finding.create', fid, fc, { studyId: uid, content: await findingText(uid, item, item.sources) }));
+        await request('r1', 'finding.create', fid, fc, { studyId: uid, content: await findingText(uid, item, item.sources), sources: sourcesOf(item) }));
     });
     const created = out.finding.ok ? out.finding.value.id : null;
     if (created) {
@@ -241,14 +261,14 @@ const SCENARIOS = {
       const [state] = await prisma.$queryRaw`SELECT "draftEpoch"::text AS epoch FROM "StudyState" WHERE uid = ${uid}`;
       const hide = { requestId: uuid(), expectedRevision: 1, action: 'hide', item };
       out.hide = await attempt(async () => S.findings.write(uid, body(hide), caller('r1'), created, await request('r1', 'finding.hide', created, hide,
-        { studyId: uid, content: await findingText(uid, { ...item, hidden: true }, item.sources), reading: 'hold:' + state.epoch })));
+        { studyId: uid, content: await findingText(uid, { ...item, hidden: true }, item.sources), reading: 'hold:' + state.epoch, sources: sourcesOf(item) })));
       await prisma.$executeRaw`UPDATE "StudyState" SET holder = NULL, "heldAt" = NULL WHERE uid = ${uid}`;
       const restore = { requestId: uuid(), expectedRevision: 2, action: 'restore', item, reason: 'SYN 오기재 복원' };
       out.restore = await attempt(async () => S.findings.write(uid, body(restore), caller('r1'), created, await request('r1', 'finding.restore', created, restore,
-        { studyId: uid, content: await findingText(uid, item, item.sources) })));
+        { studyId: uid, content: await findingText(uid, item, item.sources), sources: sourcesOf(item) })));
       const noReason = { requestId: uuid(), expectedRevision: 3, action: 'hide', item };
       out.hideOutOfContext = await attempt(async () => S.findings.write(uid, body(noReason), caller('r1'), created, await request('r1', 'finding.hide', created, noReason,
-        { studyId: uid, content: await findingText(uid, { ...item, hidden: true }, item.sources) })));
+        { studyId: uid, content: await findingText(uid, { ...item, hidden: true }, item.sources), sources: sourcesOf(item) })));
     }
     out.ids = { consultation: cid, imageRequest: irid, finding: created };
     return out;
@@ -354,18 +374,18 @@ const SCENARIOS = {
   },
 
   /** The candidate flow: write -> amend (a signed correction keeping the original) -> reopen in another process. */
-  async 'flow-write'({ args, S, request, attempt, caller, owner, findingText, body, TEXT }) {
+  async 'flow-write'({ args, S, request, attempt, caller, owner, findingText, body, TEXT, sourcesOf }) {
     const uid = args.study, out = {};
     const item = { schemaVersion: 1, title: 'SYN 결절', text: 'SYN 좌하엽 6 mm 결절', sources: [{ itemId: args.itemId, revision: 1 }] };
     const fc = { requestId: uuid(), item }, fid = fc.requestId.toLowerCase();
     out.create = await attempt(async () => S.findings.write(uid, body(fc), caller('r1'), undefined,
-      await request('r1', 'finding.create', fid, fc, { studyId: uid, content: await findingText(uid, item, item.sources) })));
+      await request('r1', 'finding.create', fid, fc, { studyId: uid, content: await findingText(uid, item, item.sources), sources: sourcesOf(item) })));
     const id = out.create.ok ? out.create.value.id : null;
     if (id) {
       const amended = { ...item, text: 'SYN 좌하엽 7 mm 결절 (재측정)' };
       const edit = { requestId: uuid(), expectedRevision: 1, action: 'edit', item: amended };
       out.edit = await attempt(async () => S.findings.write(uid, body(edit), caller('r1'), id,
-        await request('r1', 'finding.edit', id, edit, { studyId: uid, content: await findingText(uid, amended, amended.sources) })));
+        await request('r1', 'finding.edit', id, edit, { studyId: uid, content: await findingText(uid, amended, amended.sources), sources: sourcesOf(amended) })));
     }
     const q = { requestId: uuid(), expectedOwner: owner('c1'), body: TEXT.question }, qid = q.requestId.toLowerCase();
     out.question = await attempt(async () => S.questions.create(uid, caller('c1'), q, await request('c1', 'question.create', qid, q, { studyId: uid })));
@@ -386,9 +406,168 @@ const SCENARIOS = {
           return { versionId, signedVersion: v.payload.versionId, text: v.payload.text.body, integrity: v.integrity, key: v.keyAtSigningTime }; }
         catch (e) { return { versionId, error: describe(e) }; }
       }) };
-    out.revisions = await attempt(async () => S.findings.list(args.study, {}, caller('r1'), args.finding, '2'));
+    out.revisions = await attempt(async () => S.findings.list(args.study, {}, caller('r1'), args.finding, '2', { actor: await actorFacts('r1'), signature: null }));
     out.thread = await attempt(async () => S.questions.read(args.question, caller('c1'), { actor: await actorFacts('c1'), signature: null }));
     out.open = await runtime.recoverOpen();
     return out;
+  },
+
+  // ---------------- round 3: the behaviour of each finding of Astra's review of bfddc3d (DR2-01..05) ----------------
+
+  /**
+   * DR2-01: the store steps of one run (`steps`: a store, signed or a resend without a signature, or two concurrent stores
+   * of one SR with one signature). With `seal: 'down'` B1's seal tail is unwritable for the whole run: an adoption commits
+   * but its event cannot be made durable. `uploads` are the SOPs this run handed to Orthanc.
+   */
+  async 'dr2-01-sr'({ args, S, R, studies, attempt, caller, actorFacts, dev, prisma, STATE, journal, orthancUploads }) {
+    const uid = args.study, out = {}, tail = path.join(STATE, 'seal', 'tail.json');
+    async function signed(id) {
+      const [row] = await prisma.$queryRaw`SELECT sha256, dataset->>'SOPInstanceUID' AS sop, "createdAt" FROM "ManualSr" WHERE id = ${id}::uuid`;
+      const actor = await actorFacts('r1');
+      const sr = { id, studyId: uid, authorId: actor.identity.id, createdAt: row.createdAt.toISOString(), attemptedAt: null, storedAt: null, bytesSha256: row.sha256,
+        sopInstanceUid: row.sop, adoptedVersion: null, referencedBy: [], holdIds: [], orthanc: 'unknown' };
+      const plan = R.planManualSrAdoption({ actor, study: await studies.facts(prisma, uid), sr, versionId: uuid(), at: new Date().toISOString() });
+      return { actor, signature: dev.sign(plan.signing, { kid: 'kid-r1', eventId: id }) };
+    }
+    const store = (id, facts) => attempt(async () => S.srs.store(uid, id, Buffer.from('{}'), caller('r1'), facts));
+    if (args.seal === 'down') fs.chmodSync(tail, 0o400);
+    try {
+      for (const step of args.steps) {
+        if (step.kind === 'signed') out[step.name] = await store(step.id, await signed(step.id));
+        if (step.kind === 'resend') out[step.name] = await store(step.id, { actor: await actorFacts('r1'), signature: null });
+        if (step.kind === 'concurrent') { const facts = await signed(step.id); out[step.name] = await Promise.all([store(step.id, facts), store(step.id, facts)]); }
+      }
+    } finally { if (args.seal === 'down') fs.chmodSync(tail, 0o600); }
+    out.uploads = [...orthancUploads];
+    out.sealRefused = journal.all().some(r => r.kind === 'ledger-unavailable' && r.body?.cause === 'seal-unavailable');
+    return out;
+  },
+
+  /** DR2-02: a question with its answer, a completed consultation and a declined image request, each signed by its author. */
+  async 'dr2-02'({ args, S, request, attempt, caller, owner, TEXT }) {
+    const uid = args.study, out = {};
+    const q = { requestId: uuid(), expectedOwner: owner('c1'), body: TEXT.question }, qid = q.requestId.toLowerCase();
+    out.question = await attempt(async () => S.questions.create(uid, caller('c1'), q, await request('c1', 'question.create', qid, q, { studyId: uid })));
+    const a = { requestId: uuid(), expectedOwner: owner('r1'), revision: 1, body: TEXT.answer };
+    out.answer = await attempt(async () => S.questions.reply(qid, caller('r1'), a, await request('r1', 'question.reply', qid, a, { studyId: uid })));
+    const cr = { requestId: uuid(), expectedOwner: owner('r1'), recipientSub: args.recipientSub, reason: TEXT.consult }, cid = cr.requestId.toLowerCase();
+    out.consult = await attempt(async () => S.consultations.create(uid, caller('r1'), cr, await request('r1', 'consultation.create', cid, cr, { studyId: uid, recipientSub: args.recipientSub })));
+    const acc = { requestId: uuid(), expectedOwner: owner('r2'), revision: 1, action: 'accept', note: '' };
+    out.consultAccept = await attempt(async () => S.consultations.change(cid, caller('r2'), acc, await request('r2', 'consultation.accept', cid, acc, { studyId: uid })));
+    const done = { requestId: uuid(), expectedOwner: owner('r2'), revision: 2, action: 'complete', note: TEXT.reply };
+    out.consultComplete = await attempt(async () => S.consultations.change(cid, caller('r2'), done, await request('r2', 'consultation.complete', cid, done, { studyId: uid })));
+    const ir = { requestId: uuid(), expectedOwner: owner('c1'), kind: 'external-image', counterparty: 'SYN 외부병원', counterpartyInstitutionId: null,
+      reason: TEXT.request }, irid = ir.requestId.toLowerCase();
+    out.imageRequest = await attempt(async () => S.requests.create(uid, caller('c1'), ir, await request('c1', 'image-request.create', irid, ir, { studyId: uid })));
+    const decline = { requestId: uuid(), expectedOwner: owner('t1'), revision: 1, action: 'decline', note: TEXT.close };
+    out.decline = await attempt(async () => S.requests.change(irid, caller('t1'), decline, await request('t1', 'image-request.decline', irid, decline, { studyId: uid })));
+    out.ids = { question: qid, consultation: cid, imageRequest: irid };
+    return out;
+  },
+  /** DR2-02: the reads and lists serving those texts, as their own readers see them. */
+  async 'dr2-02-read'({ args, S, attempt, caller, actorFacts }) {
+    const as = async name => ({ actor: await actorFacts(name), signature: null }), ids = args.ids;
+    return {
+      question: await attempt(async () => S.questions.read(ids.question, caller('c1'), await as('c1'))),
+      consultation: await attempt(async () => S.consultations.read(ids.consultation, caller('r1'), await as('r1'))),
+      consultations: await attempt(async () => S.consultations.list(caller('r1'), { direction: 'sent' }, await as('r1'))),
+      imageRequest: await attempt(async () => S.requests.read(ids.imageRequest, caller('r1'), await as('r1'))),
+      studyRequests: await attempt(async () => S.requests.forStudy(args.study, caller('r1'), await as('r1'))),
+    };
+  },
+
+  /**
+   * DR2-03: everything that serves clinical text, written once: a consultation r1 -> r2 completed, an image request the
+   * technician closed, a finding. `replays` are write requests whose answers are asked for again later.
+   */
+  async 'dr2-03'({ args, S, request, attempt, caller, owner, findingText, body, TEXT, sourcesOf }) {
+    const uid = args.study, out = {};
+    const cr = { requestId: uuid(), expectedOwner: owner('r1'), recipientSub: args.recipientSub, reason: TEXT.consult }, cid = cr.requestId.toLowerCase();
+    out.consult = await attempt(async () => S.consultations.create(uid, caller('r1'), cr, await request('r1', 'consultation.create', cid, cr, { studyId: uid, recipientSub: args.recipientSub })));
+    const acc = { requestId: uuid(), expectedOwner: owner('r2'), revision: 1, action: 'accept', note: '' };
+    out.consultAccept = await attempt(async () => S.consultations.change(cid, caller('r2'), acc, await request('r2', 'consultation.accept', cid, acc, { studyId: uid })));
+    const done = { requestId: uuid(), expectedOwner: owner('r2'), revision: 2, action: 'complete', note: TEXT.reply };
+    out.consultComplete = await attempt(async () => S.consultations.change(cid, caller('r2'), done, await request('r2', 'consultation.complete', cid, done, { studyId: uid })));
+    const ir = { requestId: uuid(), expectedOwner: owner('c1'), kind: 'image-transfer', counterparty: 'SYN 협력병원', counterpartyInstitutionId: null,
+      reason: TEXT.request }, irid = ir.requestId.toLowerCase();
+    out.imageRequest = await attempt(async () => S.requests.create(uid, caller('c1'), ir, await request('c1', 'image-request.create', irid, ir, { studyId: uid })));
+    const close = { requestId: uuid(), expectedOwner: owner('t1'), revision: 1, action: 'close', note: TEXT.close };
+    out.close = await attempt(async () => S.requests.change(irid, caller('t1'), close, await request('t1', 'image-request.close', irid, close, { studyId: uid })));
+    const item = { schemaVersion: 1, title: 'SYN 결절', text: 'SYN 우상엽 8 mm 결절', sources: [{ itemId: args.itemId, revision: 1 }] };
+    const fc = { requestId: uuid(), item }, fid = fc.requestId.toLowerCase();
+    out.finding = await attempt(async () => S.findings.write(uid, body(fc), caller('r1'), undefined,
+      await request('r1', 'finding.create', fid, fc, { studyId: uid, content: await findingText(uid, item, item.sources), sources: sourcesOf(item) })));
+    out.ids = { consultation: cid, imageRequest: irid, finding: fid };
+    out.replays = { consultation: done, finding: fc };
+    return out;
+  },
+  /**
+   * DR2-03: the responses that carry that text - the lists, a study's requests, the record reads, the finding revisions and
+   * the answers of the write requests asked again - with B1's seal tail unwritable (`down`: no provision can be durable) or
+   * writable; when writable, also two refusals (409) whose bodies are checked for clinical text.
+   */
+  async 'dr2-03-serve'({ args, S, attempt, caller, actorFacts, STATE, journal, body }) {
+    const as = async name => ({ actor: await actorFacts(name), signature: null }), ids = args.ids, uid = args.study;
+    const tail = path.join(STATE, 'seal', 'tail.json'), out = {};
+    if (args.down) fs.chmodSync(tail, 0o400);
+    try {
+      out.consultations = await attempt(async () => S.consultations.list(caller('r1'), { direction: 'sent' }, await as('r1')));
+      out.consultation = await attempt(async () => S.consultations.read(ids.consultation, caller('r2'), await as('r2')));
+      out.consultationAnswer = await attempt(async () => S.consultations.change(ids.consultation, caller('r2'), args.replays.consultation, await as('r2')));
+      out.imageRequests = await attempt(async () => S.requests.list(caller('t1'), { view: 'queue', state: 'all' }, await as('t1')));
+      out.studyRequests = await attempt(async () => S.requests.forStudy(uid, caller('c1'), await as('c1')));
+      out.imageRequest = await attempt(async () => S.requests.read(ids.imageRequest, caller('c1'), await as('c1')));
+      out.findings = await attempt(async () => S.findings.list(uid, {}, caller('r1'), undefined, '2', await as('r1')));
+      out.revisions = await attempt(async () => S.findings.list(uid, {}, caller('r1'), ids.finding, '2', await as('r1')));
+      out.findingAnswer = await attempt(async () => S.findings.write(uid, body(args.replays.finding), caller('r1'), undefined, await as('r1')));
+      if (!args.down) {
+        out.stale = await attempt(async () => S.consultations.change(ids.consultation, caller('r2'),
+          { ...args.replays.consultation, requestId: uuid(), revision: 1 }, await as('r2')));
+        out.reused = await attempt(async () => S.consultations.change(ids.consultation, caller('r2'),
+          { ...args.replays.consultation, note: 'SYN 다른 답변' }, await as('r2')));
+      }
+    } finally { if (args.down) fs.chmodSync(tail, 0o600); }
+    out.sealRefused = journal.all().some(r => r.kind === 'ledger-unavailable' && r.body?.cause === 'seal-unavailable');
+    return out;
+  },
+
+  /**
+   * DR2-04: an allocation and its exact resend, two identical requests at once, another reader under a used request ID,
+   * and an allocation row written before unit D (`legacyStudy`, its revision 3) allocated and resent.
+   */
+  async 'dr2-04'({ args, S, attempt, caller, owner, actorFacts, PEOPLE }) {
+    const write = async (uid, b) => attempt(async () => S.assignments.write(uid, caller('t1'), b, { actor: await actorFacts('t1'), signature: null }));
+    const first = { requestId: uuid(), expectedOwner: owner('t1'), revision: 0, readerSub: PEOPLE.r1.sub };
+    const out = { first: await write(args.study, first) };
+    out.resend = await write(args.study, first);
+    const parallel = { requestId: uuid(), expectedOwner: owner('t1'), revision: 1, readerSub: PEOPLE.r2.sub };
+    out.parallel = await Promise.all([write(args.study, parallel), write(args.study, parallel)]);
+    out.reused = await write(args.study, { ...first, readerSub: PEOPLE.r2.sub });
+    const legacy = { requestId: uuid(), expectedOwner: owner('t1'), revision: 3, readerSub: PEOPLE.r1.sub };
+    out.legacy = await write(args.legacyStudy, legacy);
+    out.legacyResend = await write(args.legacyStudy, legacy);
+    return out;
+  },
+
+  /**
+   * DR2-05: a finding that copies a measurement of its own study and one of a same-patient comparison study (navigation to
+   * that study). `dr2-05-edit` amends the text later keeping both pairs (the frozen copies), after the measurement moved on.
+   */
+  async 'dr2-05'({ args, S, request, attempt, caller, findingText, body, sourcesOf }) {
+    const uid = args.study;
+    const item = { schemaVersion: 1, title: 'SYN 결절', text: 'SYN 우하엽 결절, 이전 검사와 비교',
+      sources: [{ itemId: args.item, revision: 1 }, { itemId: args.comparisonItem, revision: 1 }] };
+    const fc = { requestId: uuid(), item }, fid = fc.requestId.toLowerCase();
+    const create = await attempt(async () => S.findings.write(uid, body(fc), caller('r1'), undefined,
+      await request('r1', 'finding.create', fid, fc, { studyId: uid, content: await findingText(uid, item, item.sources), navigation: [args.comparison],
+        sources: sourcesOf(item) })));
+    return { create, finding: fid, item };
+  },
+  async 'dr2-05-edit'({ args, S, request, attempt, caller, findingTextFrozen, body, sourcesOf }) {
+    const amended = { ...args.item, text: 'SYN 우하엽 결절, 크기 변화 없음' };
+    const edit = { requestId: uuid(), expectedRevision: 1, action: 'edit', item: amended };
+    return { edit: await attempt(async () => S.findings.write(args.study, body(edit), caller('r1'), args.finding,
+      await request('r1', 'finding.edit', args.finding, edit, { studyId: args.study, content: await findingTextFrozen(args.finding, amended),
+        navigation: [args.comparison], sources: sourcesOf(amended) }))) };
   },
 };

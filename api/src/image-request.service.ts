@@ -6,8 +6,8 @@ import { CLINICIAN_ROLE } from './clinician-policy';
 import type { Caller } from './pacs.service';
 import type { ClinicalWritePlan } from './emr-clinical/records';
 import type { SurfaceKey } from './emr-clinical/contract';
-import { ClinicalWriteResult, clinicalHttpError, clinicalRefusal, clinicalText, outcomeCode, projectedCaller, readClinicalRows, registerClinicalProjection,
-  requireClinicalRuntime } from './emr-clinical/services';
+import { ClinicalServed, ClinicalWriteResult, clinicalHttpError, clinicalRefusal, clinicalText, outcomeCode, projectedCaller, readClinicalRows,
+  readClinicalUnits, registerClinicalProjection, requireClinicalRuntime } from './emr-clinical/services';
 
 /**
  * S5-U4c 외부영상(ARCH-143)·영상전송(ARCH-144) 요청의 등록과 처리 상태(계약 S5-U4p §3-§13, 지휘자 결정 D33).
@@ -22,8 +22,9 @@ import { ClinicalWriteResult, clinicalHttpError, clinicalRefusal, clinicalText, 
  *
  * EMR-D 2라운드: 등록·처리·취소는 각각 emr_clinical의 추가 전용 판이다. 요청한 임상의 본인의 사유·취소 사유는 임상
  * 지시/의견 기재로 작성자 단말 서명이 있어야 커밋되고, 방사선사·관리자의 처리 note는 서명 없는 업무 기재로 남는다
- * (대리 서명 없음). note를 덮어쓰는 기존 행(StudyImageRequest.note)은 투영이며 이전 note는 판에 그대로 남는다. 본문을
- * 싣는 한 건 읽기(#8)는 열람 사건이 원장에 내구 기록된 뒤에만 응답한다.
+ * (대리 서명 없음). note를 덮어쓰는 기존 행(StudyImageRequest.note)은 투영이며 이전 note는 판에 그대로 남는다. 사유·note를
+ * 싣는 모든 응답(한 건 #8, 목록 #7, 검사별 #9)은 그 판들의 열람 사건이 원장에 내구 기록된 뒤에만 서명 판의 글로 응답한다.
+ * 쓰기 응답(applied)에는 글이 없다.
  */
 export const IMAGE_REQUEST_AUDIT_ACTION = 'study.image-request';
 export const IMAGE_REQUEST_KINDS: readonly string[] = Object.freeze(['external-image', 'image-transfer']);
@@ -92,7 +93,7 @@ const OWN: Readonly<Record<string, () => HttpException>> = Object.freeze({
   IMAGE_REQUEST_STATE: stateError, IMAGE_REQUEST_ACTIVE_EXISTS: activeExists, IMAGE_REQUEST_COUNTERPARTY_INVALID: counterpartyInvalid,
   STUDY_NOT_FOUND: studyMissing, IMAGE_REQUEST_NOT_FOUND: requestMissing, ProjectionNotFound: requestMissing, NotFound: requestMissing,
   ActorPathRefused: actionForbidden, IMAGE_REQUEST_ACTION_FORBIDDEN: actionForbidden, OwnerChanged: ownerChanged, RequestIdReused: reused,
-  IMAGE_REQUEST_INPUT_INVALID: () => invalid(), IMAGE_REQUEST_BUSY: busy,
+  IMAGE_REQUEST_INPUT_INVALID: () => invalid(), IMAGE_REQUEST_BUSY: busy, ProjectionMismatch: changed,
 });
 
 @Injectable()
@@ -262,20 +263,52 @@ export class ImageRequestService {
     return this.answer(result, b.requestId.toLowerCase(), c);
   }
 
-  /** 응답 DTO(§3.3). *Sub·기관 id·영수증 열은 싣지 않고, 키 이름에 전송·수신을 뜻하는 말을 쓰지 않는다. */
-  private dto(row: any) {
+  /**
+   * 응답 DTO(§3.3). *Sub·기관 id·영수증 열은 싣지 않고, 키 이름에 전송·수신을 뜻하는 말을 쓰지 않는다. 사유(reason)와
+   * note는 열람 사건이 내구 기록된 서명 판의 글이고(EMR-D, DR2-02/03), 기존 행의 의미(요청자·상태·판 번호·시각·사유·
+   * note)가 판과 하나라도 다르면 본문 없이 409다. 판이 없는 행(단위 D 이전에 쓰인 요청)은 글 없이(null) 나간다.
+   */
+  private dto(row: any, served: ClinicalServed | null) {
+    let reason: string | null = null, note: string | null = null;
+    if (served) {
+      const { unit, bodies } = served, first = bodies[0], last = bodies[bodies.length - 1];
+      note = unit.revision > 1 ? last.text : null;
+      if (first.sequence !== 1 || last.sequence !== unit.revision || unit.revision !== row.revision || unit.state !== row.state ||
+          first.author.subject !== row.requesterSub || first.text !== row.reason || (row.note ?? null) !== note ||
+          iso(row.createdAt) !== first.at || iso(row.updatedAt) !== last.at) throw changed();
+      reason = first.text;
+    }
     return { id: row.id, studyUid: row.studyUid, kind: row.kind, state: row.state, revision: row.revision,
       requester: { actor: row.requesterActor, name: row.requesterName },
       counterparty: { text: row.counterpartyText, institutionId: row.counterpartyInstitutionId ?? null },
-      reason: row.reason,
+      reason,
       handler: row.handlerActor == null ? null : { actor: row.handlerActor, name: row.handlerName },
-      note: row.note ?? null,
+      note,
       createdAt: iso(row.createdAt), updatedAt: iso(row.updatedAt) };
   }
 
-  /** #7 목록. view=mine은 clinician 역할의 자기 요청, view=queue는 판독의·방사선사·관리자의 기관 대기열. 총개수는 싣지 않는다. */
-  async list(c: RequestCaller, q: ListQuery) {
+  /**
+   * Rows of one response with their signed text: every row that has a D unit is served through the runtime's provision
+   * (its reason and note only after the provide-prepared event for exactly those versions is durable); read in `tx`, the
+   * caller's read snapshot of the rows.
+   */
+  private async served(tx: any, request: unknown, route: string, rows: any[], c: Caller) {
+    const runtime = requireClinicalRuntime();
+    const units = await readClinicalUnits(tx, rows.map(row => row.id));
+    const signed = rows.filter(row => units.get(row.id).length);
+    return runtime.provide(request, { route, caller: { subject: c.sub, institutionId: c.institution },
+      units: signed.map(row => ({ record: 'image-request' as const, recordId: row.id, studyId: row.studyUid, scope: 'texts' as const, rows: units.get(row.id),
+        parties: { author: row.requesterSub } })),
+      send: async served => rows.map(row => this.dto(row, served.find(s => s.unit.recordId === row.id) ?? null)) });
+  }
+
+  /**
+   * #7 목록. view=mine은 clinician 역할의 자기 요청, view=queue는 판독의·방사선사·관리자의 기관 대기열. 총개수는 싣지 않는다.
+   * 한 RepeatableRead 스냅샷에서 행과 판을 읽고, 사유·note는 그 판들의 열람 사건이 내구 기록된 뒤에만 나간다(DR2-03).
+   */
+  async list(c: RequestCaller, q: ListQuery, request?: unknown) {
     this.member(c);
+    requireClinicalRuntime();
     const query = object(q) ? q : {};
     if (Object.keys(query).some(k => !['view', 'state', 'kind', 'cursor'].includes(k)) || Object.values(query).some(v => typeof v !== 'string')
       || !['mine', 'queue'].includes(query.view)) throw invalid('요청 목록 구분(view)을 확인하세요');
@@ -300,22 +333,23 @@ export class ImageRequestService {
       } catch (_) { throw invalid('요청 목록 페이지를 확인하세요'); }
     }
     // 불변인 생성 기관과 **현재** 소유 기관을 함께 JOIN한다 — 옮겨 간 검사의 요청은 어느 쪽 목록에도 나오지 않는다.
-    // 한 문장이라 한 스냅샷이다. 여러 문장을 조합하는 #8·#9만 읽기 트랜잭션을 쓴다.
     const before = cursor?.at ?? '9999-12-31T00:00:00.000Z', beforeId = cursor?.id ?? 'ffffffff-ffff-ffff-ffff-ffffffffffff';
-    const rows: any[] = await this.prisma.$queryRaw`SELECT r.*
-      FROM "StudyImageRequest" r JOIN "StudyState" s ON s.uid=r."studyUid" AND s."institutionId"=r."institutionId"
-      WHERE r."institutionId"=${c.institution} AND (NOT ${restricted} OR r."studyUid"=ANY(${scope}::text[]))
-        AND (NOT ${mine} OR r."requesterSub"=${c.sub}) AND r.state::text=ANY(${states}::text[])
-        AND (${kind}::text='all' OR r.kind::text=${kind}::text)
-        AND (r."createdAt",r.id)<((${before}::timestamptz AT TIME ZONE 'UTC'),${beforeId}::uuid)
-      ORDER BY r."createdAt" DESC,r.id DESC LIMIT 51`;
-    const items = rows.slice(0, IMAGE_REQUEST_PAGE), last = items[items.length - 1];
-    return { owner: this.owner(c), items: items.map(row => this.dto(row)),
-      nextCursor: rows.length > IMAGE_REQUEST_PAGE
-        ? Buffer.from(JSON.stringify({ at: iso(last.createdAt), id: last.id, r: accessPolicy.revision })).toString('base64url') : null };
+    return this.run(c, async tx => {
+      const rows: any[] = await tx.$queryRaw`SELECT r.*
+        FROM "StudyImageRequest" r JOIN "StudyState" s ON s.uid=r."studyUid" AND s."institutionId"=r."institutionId"
+        WHERE r."institutionId"=${c.institution} AND (NOT ${restricted} OR r."studyUid"=ANY(${scope}::text[]))
+          AND (NOT ${mine} OR r."requesterSub"=${c.sub}) AND r.state::text=ANY(${states}::text[])
+          AND (${kind}::text='all' OR r.kind::text=${kind}::text)
+          AND (r."createdAt",r.id)<((${before}::timestamptz AT TIME ZONE 'UTC'),${beforeId}::uuid)
+        ORDER BY r."createdAt" DESC,r.id DESC LIMIT 51`;
+      const items = rows.slice(0, IMAGE_REQUEST_PAGE), last = items[items.length - 1];
+      return { owner: this.owner(c), items: await this.served(tx, request, 'GET image-requests', items, c),
+        nextCursor: rows.length > IMAGE_REQUEST_PAGE
+          ? Buffer.from(JSON.stringify({ at: iso(last.createdAt), id: last.id, r: accessPolicy.revision })).toString('base64url') : null };
+    }, true);
   }
 
-  /** #8 요청 한 건. 사유·note는 이 요청의 판들에 대한 열람 사건이 원장에 내구 기록된 뒤에만 나간다. */
+  /** #8 요청 한 건. 사유·note는 이 요청의 판들에 대한 열람 사건이 원장에 내구 기록된 뒤에만 나간다(서명 판의 글). */
   async read(id: string, c: RequestCaller, request?: unknown) {
     this.member(c);
     const runtime = requireClinicalRuntime();
@@ -325,17 +359,16 @@ export class ImageRequestService {
     return this.run(c, async tx => {
       const row = await this.request(tx, id.toLowerCase(), c, scope, false);
       const rows = await readClinicalRows(tx, row.id);
-      return runtime.read(request, { record: 'image-request', recordId: row.id, studyId: row.studyUid, scope: 'history', rows,
-        caller: { subject: c.sub, institutionId: c.institution }, send: async (_bodies, unit) => {
-          if (unit.revision !== row.revision || unit.state !== row.state) throw changed();
-          return { owner: this.owner(c), item: this.dto(row) };
-        } });
+      return runtime.read(request, { record: 'image-request', recordId: row.id, studyId: row.studyUid, scope: 'texts', rows,
+        parties: { author: row.requesterSub }, caller: { subject: c.sub, institutionId: c.institution },
+        send: async (bodies, unit) => ({ owner: this.owner(c), item: this.dto(row, { unit, bodies }) }) });
     }, true);
   }
 
-  /** #9 한 검사의 요청(최신 50개). 임상의는 자기 요청만. */
-  async forStudy(uid: string, c: RequestCaller) {
+  /** #9 한 검사의 요청(최신 50개). 임상의는 자기 요청만. 사유·note는 열람 사건이 내구 기록된 뒤에만 나간다(DR2-03). */
+  async forStudy(uid: string, c: RequestCaller, request?: unknown) {
     this.member(c);
+    requireClinicalRuntime();
     const scope = this.scope(c);
     if (!studyUid(uid)) throw invalid('검사 UID를 확인하세요');
     await this.studyAccess.prepare(c, [uid]);
@@ -345,7 +378,7 @@ export class ImageRequestService {
       const rows: any[] = await tx.$queryRaw`SELECT r.* FROM "StudyImageRequest" r
         WHERE r."studyUid"=${uid} AND r."institutionId"=${c.institution} AND (NOT ${own} OR r."requesterSub"=${c.sub})
         ORDER BY r."createdAt" DESC,r.id DESC LIMIT 50`;
-      return { owner: this.owner(c), items: rows.map(row => this.dto(row)) };
+      return { owner: this.owner(c), items: await this.served(tx, request, 'GET studies/:uid/image-requests', rows, c) };
     }, true);
   }
 

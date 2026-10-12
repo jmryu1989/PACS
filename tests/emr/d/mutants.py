@@ -100,7 +100,9 @@ MUTANTS = [
         "old": "  const admitted = await checkedRequest(ports.store, input, attemptId);",
         "new": "  const admitted = await checkedRequest(ports.store, input, attemptId); planClinicalWrite(input);",
         "case": "TEST-D-04 atomic_retry: an opening write replays from the re-read unit; a new amendment still needs its reason",
-        "expect": "M-D-R1-01: the first assignment replays from the re-read unit",
+        # Round 3 (DR2-04): an allocation's revision is the allocation row's, not compared with D's unit revision, so no rule
+        # can stop an allocation's replay; the Tech Note's base version and reason rules are the ones run too early here.
+        "expect": "M-D-R1-01: the first Tech Note replays without a reason",
     },
     {
         "id": "M-D-R1-02",

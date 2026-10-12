@@ -1,7 +1,11 @@
 {
   "unit": "EMR-D",
-  "round": "R2-server",
+  "round": "R3-server",
   "base_sha": "1414783eb6274a50b3475daf8eb0f3bb53a20fd1",
+  "round_bases": {
+    "R2-server": "1414783eb6274a50b3475daf8eb0f3bb53a20fd1",
+    "R3-server": "bfddc3d09cadf50cfa87e42518d30e910f7eaf4f"
+  },
   "dependencies": {
     "landed": [
       "EMR-A contract (PR #142): RecordKind, VersionReference, PatientLinkSnapshot, access events, routes, signature v1",
@@ -50,6 +54,9 @@
       "tests/emr/d/live.py",
       "tests/emr/d/live_driver.cjs"
     ],
+    "R3-server": [
+      "api/src/emr-clinical/sources.ts"
+    ],
     "R2-migration-same-commit": [
       "tests/production_image_test.py",
       "tests/ops_product_transfer_fixture.py",
@@ -88,6 +95,17 @@
       "consultation": "GET consultations/:id",
       "image-request": "GET image-requests/:id"
     },
+    "responses_with_text_logged_before_body": {
+      "consultation list": "GET consultations",
+      "consultation write answer": "POST studies/:uid/consultations, POST consultations/:id",
+      "image-request list": "GET image-requests",
+      "image-request study list": "GET studies/:uid/image-requests",
+      "finding list": "GET studies/:uid/findings",
+      "finding revisions": "GET studies/:uid/findings/:id/revisions",
+      "finding write answer": "POST studies/:uid/findings, POST studies/:uid/findings/:id/revisions",
+      "manual SR store answer": "POST studies/:uid/manual-sr/:id/store"
+    },
+    "responses_without_text": "question list (#1) and study list (#3), question and image-request write answers (applied receipts), assignment answers, every error body",
     "added": [],
     "note": "D adds no Nest route; the six controllers pass the request itself so that B2/C ports read the verified context and the carried device signature from it"
   },
@@ -169,6 +187,7 @@
       "note_attempt(text,text,text,text,text,uuid)",
       "open_requests(integer)",
       "unit_for(text)",
+      "units_for(text[])",
       "references_to(text)",
       "adopt_sr(text,text,text,text,text,text,text,text,text,text)",
       "confirm_sr(text)",
@@ -209,13 +228,15 @@
     "latest_before": "20261010150000_emr_read_jit_off"
   },
   "composition": {
+    "adapters": "before the runtime: composeEmrAdapters({ ...runtimeAdapters, stored: clinicalStoredReader(runtimeAdapters.stored) }) (api/src/emr-clinical/sources.ts) so that A resolves the source versions a finding incorporates; composeClinicalRuntime refuses (ClinicalSourcesNotComposed) otherwise",
     "call": "composeClinicalRuntime({ db, ledger, context, studies, signatures }) once at server start, then runtime.start() (restart scan of open originals and unconfirmed SR adoptions)",
     "db": "B1 EmrLedgerClient (the ledger's own pool)",
     "ledger": "B1 AccessLedgerStore after seal.recoverAtStart()",
     "context": "B2 ClinicalContextSource.facts(request): verified ActorFacts (immutable identity, roles, institution, signing registration), trusted ingress address, request ID, member(subject) resolver, and C's carried device signature {jws, osUserId}",
     "studies": "C ClinicalStudySource.facts(db, studyId): managing institution and patient link snapshot",
     "signatures": "C SignatureVerificationPorts: KeyReader of registered device keys, KeyPolicy (production: tpm-nonexportable only), AnchorReader, reviewed TimePolicy",
-    "services": "the six owning services import only api/src/emr-clinical/services.ts (port, projections, readClinicalRows, wording); composeClinicalRuntime binds the runtime there by assignment, so no call connects their code with B1's adapter",
+    "services": "the six owning services reach unit D through api/src/emr-clinical/services.ts (the port, projection registration, readClinicalRows/readClinicalUnits/readClinicalSources, wording); Nest constructs them before the server start has B1's ledger, B2's context and C's ports, so the start binds the composed runtime once (bindClinicalPort; a second binding is refused, nothing per request replaces it)",
+    "raw_sql_check": "tests/admin_audit_attribution_test.cjs (shared, CI writer) must read the real composition: see the EMR-D round 3 result integration_remaining DR2-08 for the observed unresolved candidates and the exact rule change",
     "absent": "every owning service answers 503 EMR_CLINICAL_RUNTIME_REQUIRED before any database work; no legacy write or body path remains"
   },
   "cases": {
@@ -236,9 +257,25 @@
         "TEST-D-03 read_scope server: a write's access event names exactly its version, in both streams, with the bound context",
         "TEST-D-04 atomic_retry server: without the EMR composition every owning service refuses before touching the database",
         "TEST-D-01 clinical_vs_operational server: refusals reach the caller as closed errors without clinical text",
+        "TEST-D-04 atomic_retry server: a recovery releases the original it took over - after a transient store failure the next recovery commits it once, and an original still executing is never fenced",
+        "TEST-D-04 atomic_retry server: an allocation request keeps its identity - the same request before and after its first commit, at any unit revision; another meaning under its request ID is another request",
+        "TEST-D-03 read_scope server: a response serving many units hands out no text before every provision naming exactly its versions is durable; a projection naming another author or recipient is refused",
+        "TEST-D-02 versions_and_sr server: a manual SR adoption counts only once its access event is durable - a ledger that cannot confirm it leaves it unconfirmed, and the same event confirms it later",
+        "EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each record hashes what its command consumes",
+        "TEST-D-04 atomic_retry server: the runtime is not composed unless A's stored-record reader serves the sources D cites",
+        "TEST-D-02 versions_and_sr server: what a finding incorporates is a fixed reference to its source's exact version - planned, signed, stored and recovered alike; a navigation link is none",
         "TEST-D-04 atomic_retry server: the runtime is composed once with every port and refuses a second composition",
         "EMR-D-R2 declaration: d.json lists exactly the collected server and live cases, existing owned paths and the newest migration"
-      ]
+      ],
+      "round3_findings": {
+        "DR2-04": "TEST-D-04 atomic_retry server: an allocation request keeps its identity - the same request before and after its first commit, at any unit revision; another meaning under its request ID is another request",
+        "DR2-06": "TEST-D-04 atomic_retry server: a recovery releases the original it took over - after a transient store failure the next recovery commits it once, and an original still executing is never fenced",
+        "DR2-01": "TEST-D-02 versions_and_sr server: a manual SR adoption counts only once its access event is durable - a ledger that cannot confirm it leaves it unconfirmed, and the same event confirms it later",
+        "DR2-02/03": "TEST-D-03 read_scope server: a response serving many units hands out no text before every provision naming exactly its versions is durable; a projection naming another author or recipient is refused",
+        "DR2-05": "TEST-D-02 versions_and_sr server: what a finding incorporates is a fixed reference to its source's exact version - planned, signed, stored and recovered alike; a navigation link is none",
+        "DR2-07": "EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each record hashes what its command consumes",
+        "DR2-08": "TEST-D-04 atomic_retry server: the runtime is composed once with every port and refuses a second composition"
+      }
     },
     "live": {
       "file": "tests/emr/d/live.py",
@@ -262,9 +299,26 @@
         "test_m_d_02_version_text_dropped",
         "test_m_d_03_unbound_signature_succeeds",
         "test_m_d_04_adopted_sr_cleared",
-        "test_m_d_05_institution_boundary_skipped"
+        "test_m_d_05_institution_boundary_skipped",
+        "test_dr2_01_sr_published_only_when_durable",
+        "test_dr2_02_signed_text_served",
+        "test_dr2_03_text_needs_durable_provision",
+        "test_dr2_04_assignment_same_request",
+        "test_dr2_05_incorporated_sources_fixed"
       ]
     }
+  },
+  "ci": {
+    "live_inputs": [
+      "emr/units/d.json",
+      "tests/emr/d",
+      "api/prisma/migrations",
+      "scripts/emr-compose.py",
+      "scripts/run-tests.py",
+      "tests/live_test_gate.py",
+      "tmp/emr-d-ci/image-identity.txt"
+    ],
+    "note": "what the live run consumes: its declaration (live.py reads it), the driver and device files it mounts, the migrations the image applies, B's provisioning SQL, the gate and the runner, and the identity of the image it runs (id and revision label); the workflow test of server_test.cjs checks the live record hashes each"
   },
   "mutants": {
     "pure": "tests/emr/d/mutants.py (R1: M-D-01..05 and M-D-R1-*, against tests/emr/d/contract_test.cjs)",
@@ -308,8 +362,8 @@
     ]
   },
   "expected": {
-    "server": 8,
-    "live": 12,
+    "server": 15,
+    "live": 17,
     "live_mutants": 5,
     "migrations": 46,
     "note": "declared before running; never generated from a run's own result"

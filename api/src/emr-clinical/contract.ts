@@ -158,8 +158,13 @@ export const CLINICAL_SURFACES = freeze({
     action: 'restore', act: 'correction', attachments: FINDING_SOURCES, navigation: true, contextReason: ['reading'],
     paths: [{ relation: 'author', role: 'radiologist', capacity: C, kind: 'finding' }], from: ['Hidden'], to: 'Visible' },
   // reader-assignment.service.ts:79 write: allocation only, no free text exists to smuggle a clinical entry through.
+  // The client's `revision` is the allocation row's own revision, which a tele-channel close also moves without any D
+  // version (closeReaderAssignments). It stays part of the request's meaning (its identity: the same request replays,
+  // another revision under the same request ID is refused) and the row's owner checks it under its row lock; the D unit
+  // guards its own history by head and sequence (commit_version, StaleHead). Comparing it with the D revision would turn
+  // an exact resend into a conflict after the first commit.
   'assignment.write': { ...base, record: 'assignment', model: 'ReaderAssignment', route: 'POST studies/:uid/reader-assignment', opens: 'if-absent',
-    client: ['requestId', 'expectedOwner', 'revision', 'readerSub'], normalize: { readerSub: 'lower' }, textField: null, text: 'none', revisionField: 'revision', act: 'additional-entry',
+    client: ['requestId', 'expectedOwner', 'revision', 'readerSub'], normalize: { readerSub: 'lower' }, textField: null, text: 'none', revisionField: null, act: 'additional-entry',
     paths: ['admin', 'technician', 'radiologist'].map(role => ({ relation: 'any' as const, role, capacity: S, kind: 'assignment' as const })),
     from: [null, 'Assigned', 'Unassigned'], to: 'reader' },
   // pacs.service.ts:1181 saveTechNote (base version, whole text, trimmed reason, attempt ID). The radiographer signs their

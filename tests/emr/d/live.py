@@ -14,6 +14,7 @@ Assertions are stored facts, SQLSTATEs and closed error codes. Synthetic data on
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
 import json
@@ -223,7 +224,8 @@ class EmrDLive(unittest.TestCase):
         return uid
 
     def measurement(self, uid, author="r1"):
-        """A stored manual length measurement on a CT image of `uid`, and the Orthanc tags that verify it."""
+        """A stored manual length measurement on a CT image of `uid` (its head and its revision 1, as the viewer writes both),
+        and the Orthanc tags that verify it."""
         item, series, sop, frame = str(uuid.uuid4()), uid + ".1", uid + ".1.1", uid + ".9"
         snapshot = {"kind": "length", "seriesUid": series, "sopUid": sop, "frame": 1, "frameOfReferenceUid": frame, "label": "SYN length",
                     "points": [[10, 10, 0], [20, 20, 0]], "viewPlaneNormal": [0, 0, 1], "viewUp": [0, -1, 0], "baseline": None,
@@ -231,10 +233,22 @@ class EmrDLive(unittest.TestCase):
         self.ok('INSERT INTO "ViewerItem" (id, "studyUid", "authorSub", "authorActor", revision, snapshot, "updatedAt") VALUES (%s::uuid, %s, %s, %s, 1, %s::jsonb, now());'
                 % (self.literal(item), self.literal(uid), self.literal(PEOPLE[author]), self.literal(author + "@synthetic.test"),
                    self.literal(json.dumps(snapshot))))
+        self.revision(item, 1, snapshot, author, "create")
         tags = {"StudyInstanceUID": uid, "SeriesInstanceUID": series, "SOPInstanceUID": sop, "SOPClassUID": "1.2.840.10008.5.1.4.1.1.2",
                 "FrameOfReferenceUID": frame, "Rows": 512, "Columns": 512, "ImagePositionPatient": "0\\0\\0", "ImageOrientationPatient": "1\\0\\0\\0\\1\\0",
                 "PixelSpacing": "1\\1", "Modality": "CT", "PatientID": "SYN-PATIENT-1", "_kinSourceDigest": "ab" * 32}
         return item, sop, tags
+
+    def revision(self, item, revision, snapshot, author, action):
+        """The immutable viewer revision row of `item` (payloadBytes as the table's CHECK computes it)."""
+        self.ok('INSERT INTO "ViewerRevision" ("itemId", revision, snapshot, action, reason, actor, "payloadBytes", at) '
+                "SELECT %s::uuid, %d, s, %s, '', %s, octet_length(convert_to(s::text, 'UTF8')), now() FROM (SELECT %s::jsonb AS s) x;"
+                % (self.literal(item), revision, self.literal(action), self.literal(author + "@synthetic.test"), self.literal(json.dumps(snapshot))))
+
+    def source_digest(self, item, revision):
+        """SHA-256 of the canonical JSON (sorted keys) of one stored viewer revision: what a finding citing it pins."""
+        snapshot = self.json('SELECT snapshot FROM "ViewerRevision" WHERE "itemId" = %s::uuid AND revision = %d' % (self.literal(item), revision))
+        return sha(json.dumps(snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
 
     def prepared_sr(self, uid, item, author="r1"):
         """A prepared manual SR copy of `uid` (the bytes this server would have built), not yet attempted."""
@@ -591,6 +605,196 @@ class EmrDLive(unittest.TestCase):
         self.assertTrue(out["runtimeForeign"]["ok"], "another institution's verified reader received a body through the runtime")
         with self.assertRaises(AssertionError):
             self.check_d03(out)
+
+    # ── round 3: Astra's findings on bfddc3d (DR2-01..05), each as the behaviour its acceptance names ──
+
+    def no_text(self, answer, label, extra=()):
+        """No clinical text of this suite anywhere in a driver answer (an error body included)."""
+        dumped = json.dumps(answer, ensure_ascii=False)
+        for text in (*TEXT.values(), *extra):
+            self.assertNotIn(json.dumps(text, ensure_ascii=False)[1:-1], dumped, label)
+
+    def sr_facts(self, ids):
+        rows = self.json("SELECT json_object_agg(m.id::text, json_build_array(m.\"attemptedAt\" IS NOT NULL, m.\"storedAt\" IS NOT NULL, "
+                         "(SELECT s.confirmed FROM emr_clinical.sr_adoption s WHERE s.record_id = m.id::text), "
+                         "(SELECT count(*) FROM emr_clinical.sr_adoption s WHERE s.record_id = m.id::text))) FROM \"ManualSr\" m WHERE m.id IN (%s)"
+                         % ",".join(self.literal(i) + "::uuid" for i in ids))
+        return {key: tuple(value) for key, value in rows.items()}
+
+    def test_dr2_01_sr_published_only_when_durable(self):
+        """DR2-01: an SR whose signed adoption is not durable in the ledger is never uploaded or answered as stored - first store,
+        resend, two concurrent stores (one finds it adopted) and an adoption that cannot be read; once durable, published once."""
+        uid = self.study()
+        self.driver("d03", {"study": uid})  # B1's seal holds committed entries before its tail is made unwritable
+        item, sop, tags = self.measurement(uid)
+        a, sop_a, _data_a = self.prepared_sr(uid, item)
+        b, sop_b, _data_b = self.prepared_sr(uid, item)
+        base = {"study": uid, "tags": {sop: tags}}
+        down = self.driver("dr2-01-sr", {**base, "seal": "down", "steps": [{"kind": "signed", "id": a, "name": "first"},
+                                                                          {"kind": "resend", "id": a, "name": "resend"},
+                                                                          {"kind": "concurrent", "id": b, "name": "concurrent"}]})
+        self.assertTrue(down["sealRefused"], "the fault reached B1's sealing")
+        for name, answer in (("first", down["first"]), ("resend", down["resend"]), ("concurrent-1", down["concurrent"][0]),
+                             ("concurrent-2", down["concurrent"][1])):
+            self.assertEqual((answer["ok"], err(answer).get("status"), err(answer).get("code")), (False, 503, "CLINICAL_OUTCOME_PENDING"), name)
+        self.assertEqual(down["uploads"], [], "nothing was handed to Orthanc")
+        self.assertEqual(self.sr_facts([a, b]), {a: (True, False, False, 1), b: (True, False, False, 1)},
+                         "committed intents with unconfirmed adoptions, one each; nothing recorded as stored")
+        self.ok("REVOKE EXECUTE ON FUNCTION emr_clinical.sr_adoption_for(text) FROM kin_runtime;")
+        try:
+            lookup = self.driver("dr2-01-sr", {**base, "steps": [{"kind": "resend", "id": a, "name": "unreadable"}]})
+        finally:
+            self.ok("GRANT EXECUTE ON FUNCTION emr_clinical.sr_adoption_for(text) TO kin_runtime;")
+        self.assertEqual((lookup["unreadable"]["ok"], err(lookup["unreadable"]).get("status")), (False, 503), "an adoption that cannot be read is no adoption")
+        self.assertEqual(lookup["uploads"], [])
+        self.assertEqual(self.sr_facts([a]), {a: (True, False, False, 1)})
+        up = self.driver("dr2-01-sr", {**base, "steps": [{"kind": "resend", "id": a, "name": "retry"}, {"kind": "resend", "id": a, "name": "again"},
+                                                        {"kind": "resend", "id": b, "name": "retryB"}]})
+        for name, sop_uid in (("retry", sop_a), ("again", sop_a), ("retryB", sop_b)):
+            self.assertTrue(up[name]["ok"], (name, up[name]))
+            self.assertEqual((up[name]["value"]["stored"], up[name]["value"]["dataset"]["SOPInstanceUID"]), (True, sop_uid), name)
+        self.assertEqual(up["uploads"], [sop_a, sop_b], "each SR handed to Orthanc exactly once, after its adoption was confirmed")
+        self.assertEqual(self.sr_facts([a, b]), {a: (True, True, True, 1), b: (True, True, True, 1)})
+        events = self.json("SELECT json_agg(e.event_id ORDER BY e.event_id) FROM emr_access.access_entry e WHERE e.stream = 'viewing' "
+                           "AND e.event_id IN (%s)" % ",".join(self.literal("clinical-sr:" + i) for i in (a, b)))
+        self.assertEqual(events, sorted("clinical-sr:" + i for i in (a, b)), "the original adoption event was sealed, never a second one")
+
+    def test_dr2_02_signed_text_served(self):
+        """DR2-02: reads and lists serve the signed versions' text; a projection whose text, recipient or author differs from its
+        versions is refused without text, and serves the original again once the projection is back."""
+        uid = self.study()
+        written = self.driver("dr2-02", {"study": uid, "recipientSub": PEOPLE["r2"]})
+        for step in ("question", "answer", "consult", "consultAccept", "consultComplete", "imageRequest", "decline"):
+            self.assertTrue(written[step]["ok"], (step, written[step]))
+        ids, args = written["ids"], {"study": uid, "ids": written["ids"]}
+        control = self.driver("dr2-02-read", args)
+        for name in control:
+            self.assertTrue(control[name]["ok"], (name, control[name]))
+        self.assertEqual([e["body"] for e in control["question"]["value"]["item"]["entries"]], [TEXT["question"], TEXT["answer"]])
+        self.assertEqual((control["consultation"]["value"]["item"]["reason"], control["consultation"]["value"]["item"]["reply"]), (TEXT["consult"], TEXT["reply"]))
+        self.assertEqual((control["imageRequest"]["value"]["item"]["reason"], control["imageRequest"]["value"]["item"]["note"]), (TEXT["request"], TEXT["close"]))
+        before = self.json("SELECT json_build_array((SELECT body FROM \"StudyQuestionEntry\" WHERE \"questionId\" = %s::uuid AND seq = 1), "
+                           "(SELECT \"recipientSub\" FROM \"StudyConsultation\" WHERE id = %s::uuid), (SELECT \"requesterSub\" FROM \"StudyImageRequest\" WHERE id = %s::uuid))"
+                           % (self.literal(ids["question"]), self.literal(ids["consultation"]), self.literal(ids["imageRequest"])))
+        forged = "SYN unsigned projection replacement"
+
+        def project(body, recipient, requester):
+            self.ok('UPDATE "StudyQuestionEntry" SET body = %s WHERE "questionId" = %s::uuid AND seq = 1; '
+                    'UPDATE "StudyConsultation" SET "recipientSub" = %s WHERE id = %s::uuid; UPDATE "StudyImageRequest" SET "requesterSub" = %s WHERE id = %s::uuid;'
+                    % (self.literal(body), self.literal(ids["question"]), self.literal(recipient), self.literal(ids["consultation"]),
+                       self.literal(requester), self.literal(ids["imageRequest"])))
+        # The projections change outside the clinical path (as the installer): the question's text, the consultation's recipient
+        # (its reference) and the image request's author.
+        project(forged, PEOPLE["c2"], PEOPLE["c2"])
+        try:
+            tampered = self.driver("dr2-02-read", args)
+        finally:
+            project(*before)
+        for name, code in (("question", "QUESTION_CHANGED"), ("consultation", None), ("consultations", None), ("imageRequest", "IMAGE_REQUEST_CHANGED"),
+                           ("studyRequests", "IMAGE_REQUEST_CHANGED")):
+            self.assertEqual((tampered[name]["ok"], err(tampered[name]).get("status")), (False, 409), name)
+            if code:
+                self.assertEqual(err(tampered[name]).get("code"), code, name)
+            self.no_text(tampered[name], name, (forged,))
+        self.assertEqual(self.driver("dr2-02-read", args), control, "the original projection serves the signed text again")
+
+    def test_dr2_03_text_needs_durable_provision(self):
+        """DR2-03: every response carrying clinical text - consultation list, read and write answer, image-request list, study list
+        and read, finding list, revisions and write answer - serves none while B1 cannot make its provision durable, and serves
+        the signed text once it can; refusals (409) carry none."""
+        uid = self.study()
+        item, _sop, _tags = self.measurement(uid)
+        written = self.driver("dr2-03", {"study": uid, "recipientSub": PEOPLE["r2"], "itemId": item})
+        for step in ("consult", "consultAccept", "consultComplete", "imageRequest", "close", "finding"):
+            self.assertTrue(written[step]["ok"], (step, written[step]))
+        ids, finding_text = written["ids"], "SYN 우상엽 8 mm 결절"
+        args = {"study": uid, "ids": ids, "replays": written["replays"]}
+        served = ("consultations", "consultation", "consultationAnswer", "imageRequests", "studyRequests", "imageRequest", "findings", "revisions", "findingAnswer")
+        down = self.driver("dr2-03-serve", {**args, "down": True})
+        self.assertTrue(down["sealRefused"], "the fault reached B1's sealing")
+        for name in served:
+            self.assertEqual((down[name]["ok"], err(down[name]).get("status")), (False, 503), name)
+            self.no_text(down[name], name, (finding_text,))
+        for name in ("consultationAnswer", "findingAnswer"):
+            self.assertEqual(err(down[name]).get("code"), "CLINICAL_OUTCOME_PENDING", "the committed write's answer stays pending: " + name)
+        up = self.driver("dr2-03-serve", {**args, "down": False})
+        for name in served:
+            self.assertTrue(up[name]["ok"], (name, up[name]))
+        mine = lambda items, key: next(i for i in items if i["id"] == ids[key])
+        for consultation in (mine(up["consultations"]["value"]["items"], "consultation"), up["consultation"]["value"]["item"],
+                             up["consultationAnswer"]["value"]["item"]):
+            self.assertEqual((consultation["reason"], consultation["reply"]), (TEXT["consult"], TEXT["reply"]))
+        for request in (mine(up["imageRequests"]["value"]["items"], "imageRequest"), mine(up["studyRequests"]["value"]["items"], "imageRequest"),
+                        up["imageRequest"]["value"]["item"]):
+            self.assertEqual((request["reason"], request["note"]), (TEXT["request"], TEXT["close"]))
+        for snapshot in (mine(up["findings"]["value"]["items"], "finding")["item"], up["revisions"]["value"]["revisions"][0]["item"],
+                         up["findingAnswer"]["value"]["item"]):
+            self.assertEqual(snapshot["text"], finding_text)
+        for name in ("stale", "reused"):
+            self.assertEqual((up[name]["ok"], err(up[name]).get("status")), (False, 409), name)
+            self.no_text(up[name], name, (finding_text,))
+        routes = {e["surface"] for e in self.provisions(ids["consultation"])}
+        self.assertTrue({"GET consultations", "GET consultations/:id", "POST consultations/:id"} <= routes, routes)
+        routes = {e["surface"] for e in self.provisions(ids["finding"])}
+        self.assertTrue({"GET studies/:uid/findings", "GET studies/:uid/findings/:id/revisions", "POST studies/:uid/findings"} <= routes, routes)
+
+    def test_dr2_04_assignment_same_request(self):
+        """DR2-04: an allocation resent, or sent twice at once, gives the same result and one version; only another meaning under
+        a used request ID is refused; a row written before unit D keeps its own revision as the request's."""
+        uid, legacy = self.study(), self.study()
+        self.ok('INSERT INTO "ReaderAssignment" ("studyUid", "institutionId", revision, "changedBy", "lastRequest", "lastFingerprint", "updatedAt") '
+                "VALUES (%s, 'inst-a', 3, 'legacy@synthetic.test', %s::uuid, 'legacy', now());" % (self.literal(legacy), self.literal(uuid.uuid4())))
+        out = self.driver("dr2-04", {"study": uid, "legacyStudy": legacy})
+        self.assertTrue(out["first"]["ok"], out["first"])
+        self.assertEqual(out["resend"], out["first"], "the resend answers the same result")
+        self.assertTrue(all(a["ok"] for a in out["parallel"]), out["parallel"])
+        self.assertEqual(out["parallel"][0], out["parallel"][1], "two identical requests at once answer the same result")
+        self.assertEqual(out["parallel"][0]["value"]["revision"], 2)
+        self.assertEqual((out["reused"]["ok"], err(out["reused"]).get("status")), (False, 409), "another reader under a used request ID")
+        self.assertTrue(out["legacy"]["ok"], out["legacy"])
+        self.assertEqual(out["legacyResend"], out["legacy"])
+        self.assertEqual(out["legacy"]["value"]["revision"], 4, "the row's own revision 3 was the request's")
+        unit = lambda study: "assignment:" + sha(json.dumps([study, "inst-a"], separators=(",", ":")).encode())
+        self.assertEqual([v["entry"] for v in self.versions(unit(uid))], ["assignment", "assignment"], "one version per request")
+        self.assertEqual([v["entry"] for v in self.versions(unit(legacy))], ["assignment"])
+        self.assertEqual(self.json('SELECT count(*) FROM "AuditLog" WHERE action = \'reader.assignment\' AND target = %s' % self.literal(uid)), 2)
+
+    def test_dr2_05_incorporated_sources_fixed(self):
+        """DR2-05: the measurements a finding copies are fixed references to their exact versions in every version, the signed
+        payload and the reference index H reads; a later revision of the measurement does not move them; the comparison study
+        linked for navigation is no reference."""
+        uid, comparison = self.study(), self.study()
+        item, _sop, _tags = self.measurement(uid)
+        other, _sop2, _tags2 = self.measurement(comparison)
+        written = self.driver("dr2-05", {"study": uid, "comparison": comparison, "item": item, "comparisonItem": other})
+        self.assertTrue(written["create"]["ok"], written["create"])
+        fid = written["finding"]
+        snapshot = self.json('SELECT snapshot FROM "ViewerItem" WHERE id = %s::uuid' % self.literal(item))
+        moved = {**snapshot, "label": "SYN length re-measured"}
+        self.ok('UPDATE "ViewerItem" SET revision = 2, snapshot = %s::jsonb, "updatedAt" = now() WHERE id = %s::uuid;'
+                % (self.literal(json.dumps(moved)), self.literal(item)))
+        self.revision(item, 2, moved, "r1", "edit")
+        edited = self.driver("dr2-05-edit", {"study": uid, "comparison": comparison, "finding": fid, "item": written["item"]})
+        self.assertTrue(edited["edit"]["ok"], edited["edit"])
+        expected = [["measurement", item, "revision:1", self.source_digest(item, 1)], ["measurement", other, "revision:1", self.source_digest(other, 1)]]
+        self.assertNotEqual(self.source_digest(item, 2), expected[0][3], "control: the moved revision has other content")
+        versions = self.versions(fid)
+        self.assertEqual(len(versions), 2)
+        for v in versions:
+            self.assertEqual([[a["kind"], a["recordId"], a["versionId"], a["sha256"]] for a in v["body"]["attachments"]], expected)
+            self.assertEqual(v["body"]["navigation"], [comparison], "the comparison study is linked for navigation")
+            payload = v["signature"]["envelope"]["jws"]["payload"]
+            signed = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+            self.assertEqual([[a["kind"], a["recordId"], a["versionId"], a["sha256"]] for a in signed["attachments"]], expected, "signed by the author")
+        stored = self.json("SELECT json_agg(json_build_array(sequence, kind, ref_record_id, ref_version_id, ref_sha256) ORDER BY sequence, position) "
+                           "FROM emr_clinical.attachment WHERE record_id = %s" % self.literal(fid))
+        self.assertEqual(stored, [[sequence] + e for sequence in (1, 2) for e in expected])
+        code, out, state = self.psql("SELECT json_agg(json_build_array(record_id, kind) ORDER BY version_id) FROM emr_clinical.references_to(%s);"
+                                     % self.literal(item), user="kin_emr_reader")
+        self.assertEqual((code, state), (0, None))
+        self.assertEqual(json.loads(out), [[fid, "measurement"], [fid, "measurement"]], "H's retention lookup finds both versions citing it")
+        code, out, state = self.psql("SELECT count(*) FROM emr_clinical.references_to(%s);" % self.literal(comparison), user="kin_emr_reader")
+        self.assertEqual((code, out, state), (0, "0", None), "navigation alone is no reference")
 
 if __name__ == "__main__":
     raise SystemExit("Run through scripts/run-tests.py --mode live")

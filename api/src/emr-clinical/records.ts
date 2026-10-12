@@ -607,14 +607,39 @@ export interface ReadPlan {
 }
 export interface ClinicalBody {
   versionId: string; sequence: number; entry: EntryClass; kind: RecordKind; author: ImmutableIdentity; at: string;
-  text: string | null; reason: string | null; state: { from: string | null; to: string }; attachments: readonly AttachmentReference[];
+  text: string | null; reason: string | null; reasonSource: ClinicalVersion['reasonSource']; state: { from: string | null; to: string };
+  attachments: readonly AttachmentReference[];
 }
 // Bodies stay out of the plan object itself, so nothing can hand them out before the access event is durable.
 const planBodies = new WeakMap<object, readonly ClinicalBody[]>();
 
-export function planClinicalRead(input: { actor: ActorFacts; unit: ClinicalUnit; scope: 'current' | 'history' }): Readonly<ReadPlan> {
+/**
+ * Which versions a response serves, and so which versions its provide-prepared event names: current = the head; history
+ * = every version; texts = every version whose text the response shows (a request's reason, its answer or note) plus the
+ * head whose state it shows; sequences = exactly those versions (a page of a history, the version a write answers with).
+ */
+export type ClinicalReadScope = 'current' | 'history' | 'texts' | Readonly<{ sequences: readonly number[] }>;
+function readScope(input: unknown): ClinicalReadScope {
+  if (input === 'current' || input === 'history' || input === 'texts') return input;
+  let s: Record<string, any>;
+  try { s = object(input, ['sequences']); } catch { refuse('ReadScopeRefused'); }
+  if (!Array.isArray(s.sequences) || !s.sequences.length) refuse('ReadScopeRefused');
+  const sequences: number[] = s.sequences.map(n => Number.isSafeInteger(n) && n >= 1 ? n as number : refuse('ReadScopeRefused'));
+  if (sequences.some((n, i) => i > 0 && n <= sequences[i - 1])) refuse('ReadScopeRefused');
+  return freeze({ sequences });
+}
+function servedVersions(unit: ClinicalUnit, scope: ClinicalReadScope): ClinicalVersion[] {
+  const all = unit.versions, last = all.length - 1;
+  if (scope === 'current') return [all[last]];
+  if (scope === 'history') return [...all];
+  if (scope === 'texts') return all.filter((v, i) => v.text !== null || i === last);
+  if (scope.sequences[scope.sequences.length - 1] > all.length) refuse('ReadScopeRefused');
+  return scope.sequences.map(n => all[n - 1]);
+}
+
+export function planClinicalRead(input: { actor: ActorFacts; unit: ClinicalUnit; scope: ClinicalReadScope }): Readonly<ReadPlan> {
   const r = object(input, ['actor', 'unit', 'scope']);
-  const actor = actorFacts(r.actor), unit: ClinicalUnit = r.unit, scope = choice(r.scope, ['current', 'history']);
+  const actor = actorFacts(r.actor), unit: ClinicalUnit = r.unit, scope = readScope(r.scope);
   const { parties } = projectUnit(unit);
   if (actor.kind !== 'member' || !institutionAdmits(actor.institutionId, unit.managingInstitutionId))
     refuse('NotFound');
@@ -624,7 +649,7 @@ export function planClinicalRead(input: { actor: ActorFacts; unit: ClinicalUnit;
     (s.relation === 'any' || (s.relation === 'author' && isAuthor) || (s.relation === 'party' && isParty)));
   // Same answer as an absent record: a refused reader learns nothing about another person's thread or another institution.
   if (!permitted) refuse('NotFound');
-  const served = scope === 'current' ? [unit.versions[unit.versions.length - 1]] : [...unit.versions];
+  const served = servedVersions(unit, scope);
   const plan = freeze(structuredClone({
     route: READ_ROUTES[unit.record], record: unit.record, recordId: unit.recordId, actorId: actor.identity.id, actingInstitutionId: actor.institutionId,
     managingInstitutionId: unit.managingInstitutionId,
@@ -633,7 +658,7 @@ export function planClinicalRead(input: { actor: ActorFacts; unit: ClinicalUnit;
       recordId: { status: 'known', value: v.recordId }, versionId: { status: 'known', value: v.versionId } })),
   })) as Readonly<ReadPlan>;
   planBodies.set(plan, freeze(structuredClone(served.map(v => ({ versionId: v.versionId, sequence: v.sequence, entry: v.entry, kind: v.kind,
-    author: v.author, at: v.at, text: v.text, reason: v.reason, state: v.state, attachments: v.attachments })))));
+    author: v.author, at: v.at, text: v.text, reason: v.reason, reasonSource: v.reasonSource, state: v.state, attachments: v.attachments })))));
   return plan;
 }
 
@@ -653,6 +678,31 @@ export async function provideClinicalRead<T>(store: AppendOnlyAccessStore, event
       e.actingInstitution.status !== 'known' || e.actingInstitution.value !== plan.actingInstitutionId ||
       e.managingInstitution.status !== 'known' || e.managingInstitution.value !== plan.managingInstitutionId) refuse('AccessTargetMismatch');
   return provideAfterDurableEvent(store, event, receipt => send(bodies, receipt));
+}
+
+const sameTarget = (t: AccessTarget, p: AccessTarget) => t.kind === p.kind && JSON.stringify([t.patientLinkSnapshot, t.studyId, t.recordId, t.versionId]) ===
+  JSON.stringify([p.patientLinkSnapshot, p.studyId, p.recordId, p.versionId]);
+/**
+ * One response serving several units (a list, a write that answers with its record): the bodies of every plan are handed
+ * to `send` only after every event is durable, and the events' targets, in order, are exactly the plans' targets - one
+ * response may need several events when its versions do not fit one ledger entry. Every event names the route that serves
+ * the response, the reader and both institutions of the plans. Nothing is sent when any event is not durable.
+ */
+export async function provideClinicalReads<T>(store: AppendOnlyAccessStore, route: string, events: readonly AccessEvent[], plans: readonly ReadPlan[],
+  send: (bodies: readonly (readonly ClinicalBody[])[], receipts: readonly DurableAccessReceipt[]) => Promise<T>): Promise<T> {
+  const bodies = plans.map(plan => planBodies.get(plan) ?? refuse('ReadPlanRequired'));
+  const parsed = events.map(event => parseAccessEvent(event));
+  const planned = plans.flatMap(plan => plan.targets), named = parsed.flatMap(e => e.targets as readonly AccessTarget[]);
+  const first = plans[0];
+  if (named.length !== planned.length || named.some((t, i) => !sameTarget(t, planned[i])) || parsed.some(e => !e.targets.length) ||
+      plans.some(p => p.actorId !== first.actorId || p.actingInstitutionId !== first.actingInstitutionId ||
+        p.managingInstitutionId !== first.managingInstitutionId) ||
+      parsed.some(e => e.surface !== route || e.action !== 'provide-prepared' || e.userId.status !== 'known' || e.userId.value.id !== first.actorId ||
+        e.actingInstitution.status !== 'known' || e.actingInstitution.value !== first.actingInstitutionId ||
+        e.managingInstitution.status !== 'known' || e.managingInstitution.value !== first.managingInstitutionId)) refuse('AccessTargetMismatch');
+  const receipts: DurableAccessReceipt[] = [];
+  for (const event of events) receipts.push(await provideAfterDurableEvent(store, event, async receipt => receipt));
+  return send(bodies, receipts);
 }
 
 /** List and summary rows: identifiers and state only, no clinical text, reason or attachment. */

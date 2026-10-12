@@ -452,6 +452,17 @@ CREATE FUNCTION emr_clinical.unit_for(p_record_id text) RETURNS TABLE (
   WHERE u.record_id = p_record_id ORDER BY v.sequence;
 $$;
 
+-- Several units with their complete histories (a page of a list read in one snapshot), in unit and sequence order.
+CREATE FUNCTION emr_clinical.units_for(p_record_ids text[]) RETURNS TABLE (
+  record_id text, record text, study_id text, managing_institution_id text, patient text, author_id text, recipient_id text, state text,
+  revision integer, head_version_id text, head_sha256 text, clinical_entry boolean, sequence integer, version_id text, body text, signature text)
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+  SELECT u.record_id, u.record, u.study_id, u.managing_institution_id, u.patient, u.author_id, u.recipient_id, u.state, u.revision,
+    u.head_version_id, u.head_sha256, u.clinical_entry, v.sequence, v.version_id, v.body, v.signature
+  FROM emr_clinical.unit u JOIN emr_clinical.version v ON v.record_id = u.record_id
+  WHERE u.record_id = ANY (p_record_ids) ORDER BY u.record_id, v.sequence;
+$$;
+
 -- What retained versions incorporate or cite a record (the reference index).
 CREATE FUNCTION emr_clinical.references_to(p_record_id text) RETURNS TABLE (record_id text, version_id text, sha256 text, kind text)
   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
@@ -525,7 +536,7 @@ GRANT EXECUTE ON FUNCTION
   emr_clinical.commit_version(text, text, text, uuid, integer, text, text, text, text, text, text, text, boolean, integer, text, text, text, text, text, text, text, text),
   emr_clinical.seal_rejected(text, text, text, uuid, integer, text, text), emr_clinical.recover(text, text, text, text),
   emr_clinical.confirm_request(text, text, text, uuid), emr_clinical.note_attempt(text, text, text, text, text, uuid),
-  emr_clinical.open_requests(integer), emr_clinical.unit_for(text), emr_clinical.references_to(text),
+  emr_clinical.open_requests(integer), emr_clinical.unit_for(text), emr_clinical.units_for(text[]), emr_clinical.references_to(text),
   emr_clinical.adopt_sr(text, text, text, text, text, text, text, text, text, text), emr_clinical.confirm_sr(text), emr_clinical.open_sr_adoptions(integer),
   emr_clinical.sr_adoption_for(text), emr_clinical.record_sr_purpose_end(text, text, text), emr_clinical.sr_purpose_ends(text[])
   TO kin_runtime;

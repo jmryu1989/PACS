@@ -9,8 +9,8 @@ const caller = (req: any): Caller => ({ sub: req.sub, actor: req.actor, roles: r
 const SCHEMA = 'X-KIN-Finding-Schema';
 const announce = (res: any) => { res.setHeader(SCHEMA, '2'); };
 const requested = (req: any) => { const value = req.headers?.['x-kin-finding-schema']; return typeof value === 'string' ? value : undefined; };
-// EMR-D: a write also passes the request itself; the verified context (B2) and the carried device signature (C) are read
-// from it by server ports only, never from body fields.
+// EMR-D: writes and the reads that carry finding text (the list, a finding's revisions) also pass the request itself; the
+// verified context (B2) and the carried device signature (C) are read from it by server ports only, never from body fields.
 
 @Controller()
 export class FindingController {
@@ -19,7 +19,7 @@ export class FindingController {
   @Get('studies/:uid/findings')
   list(@Param('uid') uid: string, @Query() query: any, @Req() req: any, @Res({ passthrough: true }) res: any) {
     announce(res);
-    return this.svc.list(uid, query, caller(req), undefined, requested(req));
+    return this.svc.list(uid, query, caller(req), undefined, requested(req), req);
   }
 
   @Post('studies/:uid/findings')
@@ -32,7 +32,7 @@ export class FindingController {
   @Get('studies/:uid/findings/:id/revisions')
   revisions(@Param('uid') uid: string, @Param('id') id: string, @Query() query: any, @Req() req: any, @Res({ passthrough: true }) res: any) {
     announce(res);
-    return this.svc.list(uid, query, caller(req), id, requested(req));
+    return this.svc.list(uid, query, caller(req), id, requested(req), req);
   }
 
   @Post('studies/:uid/findings/:id/revisions')

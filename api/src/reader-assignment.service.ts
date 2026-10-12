@@ -17,9 +17,10 @@ const ACTION='reader.assignment';
 const key=(studyUid:string,institutionId:string)=>({studyUid_institutionId:{studyUid,institutionId}});
 /**
  * EMR-D: each user write of an assignment is one operational version of the D unit of (study, institution): allocation
- * only, no text, never a clinical signature (records.ts 'assignment.write'). The unit's revision counts D versions; the
- * request's revision is the legacy row's, which also counts the channel closes below, and is checked under its row lock in
- * project(). The D request therefore carries the unit's own revision.
+ * only, no text, never a clinical signature (records.ts 'assignment.write'). The request goes to D exactly as received:
+ * its revision is the allocation row's (which the channel closes below also move) and is part of the request's identity,
+ * so a resend of the same request answers the same result and only another meaning under the same request ID is refused
+ * (DR2-04). The row's revision is checked under its row lock in project(); D keeps its own history by head and sequence.
  */
 const unitId=(studyUid:string,institutionId:string)=>'assignment:'+createHash('sha256').update(JSON.stringify([studyUid,institutionId])).digest('hex');
 const OWN:Readonly<Record<string,()=>HttpException>>=Object.freeze({
@@ -131,8 +132,7 @@ export class ReaderAssignmentService {
     const recordId=unitId(uid,c.institution!);
     let result:ClinicalWriteResult;
     try{
-      const unit=await runtime.unit(recordId);
-      result=await runtime.write(request,{surface:'assignment.write',studyId:uid,recordId,body:{...b,revision:unit?.revision??0},readerSubject:readerSub,
+      result=await runtime.write(request,{surface:'assignment.write',studyId:uid,recordId,body:b,readerSubject:readerSub,
         caller:{subject:c.sub,institutionId:c.institution},
         projection:{caller:{kind:c.kind,institution:c.institution,sub:c.sub,actor:c.actor,roles:[...c.roles]},fingerprint,revision:b.revision,reader:user?this.publicReader(user):null}});
     }catch(e){throw clinicalRefusal(e,OWN);}

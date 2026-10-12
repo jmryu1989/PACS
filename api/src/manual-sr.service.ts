@@ -9,7 +9,8 @@ import { Caller } from './pacs.service';
 import { canonical, viewerJson, viewerUid, viewerUuid, verifyViewerReference, isManualMeasurement } from './viewer-input';
 import { srDataset, srFile, srMeasurement } from './manual-sr-dicom';
 import type { PreparedSr } from './emr-clinical/records';
-import { ClinicalServicePort, SrAdoptionFact, clinicalRefusal, clinicalRuntime, recordSrPurposeEnd, requireClinicalRuntime } from './emr-clinical/services';
+import { ClinicalServicePort, SrAdoptionFact, clinicalEchoRefusal, clinicalHttpError, clinicalRefusal, clinicalRuntime, recordSrPurposeEnd,
+  requireClinicalRuntime } from './emr-clinical/services';
 
 const denied = (): never => { throw new ForbiddenException('이 측정의 SR을 만들거나 저장할 수 없습니다'); };
 const conflict = (): never => { throw new ConflictException('측정 또는 SR 요청이 변경되었습니다. 최신 측정을 확인하세요'); };
@@ -38,8 +39,9 @@ function selection(raw: Buffer) {
 }
 
 /**
- * EMR-D 2라운드: SR 저장 의도는 작성 판독의 본인이 정확한 DICOM 바이트·SOP에 단말로 서명한 채택이며(records.ts
- * planManualSrAdoption), C 검증을 통과한 서명·채택·접속 사건·기존 의도 행이 한 트랜잭션으로 커밋되어야 Orthanc로 보낸다.
+ * EMR-D: SR 저장 의도는 작성 판독의 본인이 정확한 DICOM 바이트·SOP에 단말로 서명한 채택이며(records.ts
+ * planManualSrAdoption), C 검증을 통과한 서명·채택·접속 사건·기존 의도 행이 한 트랜잭션으로 커밋되고 그 접속 사건이 원장에
+ * 내구 확정(채택 confirmed)된 뒤에만 Orthanc로 보내고 저장 완료로 답한다. 확정하지 못하면 같은 요청이 다시 확인한다.
  * 24시간 준비 창은 시도·채택·참조·보전 어느 것도 없는 준비본이고 Orthanc가 갖고 있지 않음을 확인했을 때만 끝나며
  * (planManualSrCleanup), 끝난 준비본은 바이트를 지우지 않고 단위 H의 목적 종료 파기에 넘긴다. Orthanc 대사는 이 서버가
  * 승인한 바이트(같은 SOP·같은 해시)만 채택한다.
@@ -191,27 +193,29 @@ export class ManualSrService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Orthanc reconciliation (records.ts reconcileManualSr): only an attempted SR whose stored bytes still hash to what this
-   * server authorized - and, with an adoption, to what its author signed - is adopted when Orthanc holds exactly those
-   * bytes under that SOP. Another instance under the SOP is a conflict and is never reported as stored.
+   * Orthanc reconciliation (records.ts reconcileManualSr): only an attempted SR whose author's signed adoption of exactly
+   * these bytes and SOP is confirmed durable in the ledger, and whose stored bytes still hash to what was signed, is
+   * recorded as stored when Orthanc holds exactly those bytes under that SOP. An adoption that cannot be read now, one not
+   * yet confirmed, or none at all keeps the copy attempted (never stored); another instance under the SOP is a conflict.
    */
   private async reconcile(row: any, orthancId?: string) {
     if (row.storedAt) return row;
     if (!row.attemptedAt || !row.dicom) return null;
+    // Without the EMR composition nothing is adopted: the copy stays attempted and is reconciled once one exists.
+    const runtime = clinicalRuntime();
+    if (!runtime) return null;
+    let adoption: SrAdoptionFact | null;
+    try { adoption = await runtime.srAdoption(row.id); } catch { return null; }
+    if (!adoption || !adoption.confirmed || !this.adopts(adoption, row)) return null;
     if (!orthancId) orthancId = await this.orthanc.manualSrLocation(row.dataset.SOPInstanceUID, Buffer.from(row.dicom));
     if (!orthancId) return null;
-    const runtime = clinicalRuntime();
-    let adoption: SrAdoptionFact | null = null;
-    try { adoption = runtime ? await runtime.srAdoption(row.id) : null; } catch { adoption = null; }
     const facts = { id: row.id, studyId: row.studyUid, authorId: row.authorSub, createdAt: iso(row.createdAt), attemptedAt: iso(row.attemptedAt),
       storedAt: null, bytesSha256: row.sha256, sopInstanceUid: row.dataset.SOPInstanceUID,
-      adoptedVersion: adoption ? { recordId: row.id, versionId: adoption.versionId, sha256: adoption.sha256 } : null,
+      adoptedVersion: { recordId: row.id, versionId: adoption.versionId, sha256: adoption.sha256 },
       referencedBy: [], holdIds: [], orthanc: 'present' as const };
     // Orthanc matched the stored bytes (its uncompressed MD5); the hash compared here is of those bytes as stored now.
-    // Without the EMR composition nothing is adopted: the copy stays attempted and is reconciled once one exists.
-    if (!runtime) return null;
     const outcome = runtime.reconcileSr(facts, { status: 'present', sopInstanceUid: row.dataset.SOPInstanceUID, sha256: bytesHash(row.dicom) }).outcome;
-    if (outcome !== 'adopt' || (adoption && (adoption.bytesSha256 !== row.sha256 || adoption.sopInstanceUid !== row.dataset.SOPInstanceUID))) {
+    if (outcome !== 'adopt') {
       this.logger.warn('Manual SR reconciliation refused: stored bytes, SOP or adoption differ');
       return null;
     }
@@ -267,9 +271,40 @@ export class ManualSrService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  /** The signed adoption is of exactly this copy: its bytes (as stored now) and its SOP. */
+  private adopts(adoption: SrAdoptionFact, row: any): boolean {
+    return adoption.bytesSha256 === row.sha256 && adoption.sopInstanceUid === row.dataset?.SOPInstanceUID && !!row.dicom && bytesHash(row.dicom) === row.sha256;
+  }
+  /**
+   * The upload decision (DR2-01): the author's signed adoption of these exact bytes, made durable in the ledger - confirmed
+   * now when its receipt was lost - before anything leaves for Orthanc or is recorded as stored. A ledger that cannot
+   * confirm it, or an adoption that cannot be read, leaves the result pending for the same request (no upload); an
+   * attempted copy without a signed adoption of these bytes is never published by this server.
+   */
+  private async confirmedAdoption(runtime: ClinicalServicePort, row: any): Promise<SrAdoptionFact> {
+    let adoption: SrAdoptionFact | null;
+    try { adoption = await runtime.confirmedSrAdoption(row.id); }
+    catch (error) { throw error instanceof HttpException ? error : clinicalHttpError('OutcomeUnknown', OWN); }
+    if (!adoption || !this.adopts(adoption, row)) conflict();
+    return adoption;
+  }
+  /**
+   * The store route's answer carries the SR document (the author's adopted measurements): it is handed back only after a
+   * provide-prepared event for the adoption is durable (DR2-03); a copy stored before unit D has no adoption and is
+   * answered without its document.
+   */
+  private async answer(runtime: ClinicalServicePort, request: unknown, row: any, c: Caller) {
+    try {
+      if (!(await runtime.srAdoption(row.id))) return { ...this.receipt(row), dataset: null };
+      return await runtime.provideSrAdoption(request, { recordId: row.id, studyId: row.studyUid, route: 'POST studies/:uid/manual-sr/:id/store',
+        caller: { subject: c.sub, institutionId: c.institution }, send: async () => this.receipt(row) });
+    } catch (error) { throw clinicalEchoRefusal(error, OWN); }
+  }
+
   /**
    * The store intent is the author's signed adoption of these exact bytes, committed with the intent row and its access
-   * event before any upload (runtime.adoptManualSr). No verified signature, no intent and no upload.
+   * event (runtime.adoptManualSr), and confirmed durable in the ledger before any upload. No verified signature, no intent;
+   * no durable adoption, no upload and no stored answer.
    */
   async store(uid: string, id: string, raw: Buffer, c: Caller, request?: unknown) {
     viewerUid(uid); viewerUuid(id);
@@ -282,7 +317,7 @@ export class ManualSrService implements OnModuleInit, OnModuleDestroy {
     const recovered = await this.reconcile(row);
     access(await this.prisma.studyState.findUnique({ where: { uid } }), c);
     await this.studyAccess.require(c,[uid]);
-    if (recovered) return this.receipt(recovered);
+    if (recovered) return this.answer(runtime, request, recovered, c);
     this.receipt(row);
     const heads = await this.heads(this.prisma, uid, row.selection as any[], c);
     await this.sources(uid, heads, false);
@@ -313,14 +348,16 @@ export class ManualSrService implements OnModuleInit, OnModuleDestroy {
       intent = await this.prisma.manualSr.findUnique({ where: { id } });
       if (!intent?.attemptedAt) conflict();
     }
-    if (intent.storedAt) return this.receipt(intent);
-    // The committed authorization is the upload decision. Network I/O cannot
-    // hold the clinical study lock or block unrelated reading/measurement work.
+    if (intent.storedAt) return this.answer(runtime, request, intent, c);
+    // The durable signed adoption is the upload decision; an attempt that a previous call left (its receipt lost, an
+    // upload that failed, a concurrent store) passes the same gate. Network I/O cannot hold the clinical study lock or
+    // block unrelated reading/measurement work.
+    await this.confirmedAdoption(runtime, intent);
     const orthancId = await this.orthanc.storeManualSr((intent.dataset as any).SOPInstanceUID, Buffer.from(intent.dicom));
     const saved = await this.reconcile(intent, orthancId);
     if (!saved) throw new ServiceUnavailableException('SR 저장 결과를 확인하지 못했습니다. 같은 요청으로 다시 시도하세요');
     access(await this.prisma.studyState.findUnique({ where: { uid } }), c);
     await this.studyAccess.require(c,[uid]);
-    return this.receipt(saved);
+    return this.answer(runtime, request, saved, c);
   }
 }

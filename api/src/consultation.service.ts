@@ -6,10 +6,11 @@ import { KeycloakService, KeycloakUser } from './keycloak.service';
 import type { Caller } from './pacs.service';
 import type { ClinicalWritePlan } from './emr-clinical/records';
 import type { SurfaceKey } from './emr-clinical/contract';
-import { ClinicalWriteResult, ProjectionRefused, clinicalHttpError, clinicalRefusal, clinicalText, outcomeCode, projectedCaller, readClinicalRows,
-  registerClinicalProjection, requireClinicalRuntime } from './emr-clinical/services';
+import { ClinicalServed, ClinicalWriteResult, ProjectionRefused, clinicalEchoRefusal, clinicalHttpError, clinicalRefusal, clinicalText, outcomeCode,
+  projectedCaller, readClinicalRows, readClinicalUnits, registerClinicalProjection, requireClinicalRuntime } from './emr-clinical/services';
 
 const uuid = (value:any) => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+const iso = (value:any) => value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 const object = (value:any) => value && typeof value === 'object' && !Array.isArray(value);
 const text = (value:any) => typeof value === 'string' && value.trim().length > 0 && value.length <= 2000;
 const fingerprint = (value:any) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -23,14 +24,14 @@ const busy = () => new ServiceUnavailableException('자문 처리 중입니다. 
  * EMR-D 2라운드: 의뢰·수락·완료(답변)·취소는 emr_clinical의 추가 전용 판이다. 판독의 본인의 의뢰 사유·답변·취소 사유는
  * 작성자 단말 서명이 있어야 커밋되고, 수락은 서명 없는 상태 변경, 관리자의 취소 사유는 서명 없는 업무 기재다. 수신자는
  * 여는 판에 고정된 사람이며 투영 행(StudyConsultation)으로 바뀌지 않는다. 기존 행은 커밋 트랜잭션 안의 project()만 바꾸고
- * 덮어쓰기 전 원문(reason·reply·cancelReason)은 판에 남는다. 본문을 싣는 한 건 읽기는 열람 사건이 원장에 내구 기록된
- * 뒤에만 응답한다.
+ * 덮어쓰기 전 원문(reason·reply·cancelReason)은 판에 남는다. 사유·답변을 싣는 모든 응답(한 건 읽기, 목록, 쓰기의 응답)은
+ * 그 판들의 열람 사건이 원장에 내구 기록된 뒤에만 서명 판의 글로 응답한다.
  */
 /** The service's own wording for each refusal of the clinical commit (D codes and its own projection codes). */
 const OWN: Readonly<Record<string, () => HttpException>> = Object.freeze({
   StaleRevision: conflict, StateTransitionRefused: conflict, ProjectionConflict: conflict, UnitExists: conflict, OwnerChanged: conflict,
   RequestIdReused: conflict, CONSULTATION_ACTIVE_EXISTS: activeExists, NotFound: missing, ProjectionNotFound: missing,
-  ActorPathRefused: forbidden, ProjectionForbidden: forbidden,
+  ActorPathRefused: forbidden, ProjectionForbidden: forbidden, ProjectionMismatch: conflict,
 });
 /** What the commit transaction needs besides the plan; kept with the original for recovery (no secret, no token). */
 type ConsultationProjection = { caller: Caller; mark: string; recipient: { sub: string; actor: string; name: string } | null; action: string | null };
@@ -56,14 +57,15 @@ export class ConsultationService {
       .filter(u=>this.eligible(u,c)).map(u=>({sub:u.id,actor:u.email||u.username,
         name:([u.lastName,u.firstName].filter(Boolean).join(' ')||u.username).slice(0,256)}))};
   }
-  private async run<T>(c:Caller,fn:(tx:any)=>Promise<T>,read=false):Promise<T> {
+  /** `echo`: the answer of a committed write - a ledger that cannot make its provision durable leaves the result pending. */
+  private async run<T>(c:Caller,fn:(tx:any)=>Promise<T>,read=false,echo=false):Promise<T> {
     try { return await this.prisma.$transaction(async tx=>{
       await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`; await this.studyAccess.snapshot(c,tx); return fn(tx);
     },read?{isolationLevel:'RepeatableRead',maxWait:4000,timeout:8000}:{maxWait:4000,timeout:8000}); }
     catch(e:any) {
       if (e?.code==='P2002') throw conflict();
       if (['P2028','P2034'].includes(e?.code) || e?.code==='P2010' && ['55P03','57014','40P01'].includes(e?.meta?.code)) throw busy();
-      throw clinicalRefusal(e, OWN);
+      throw echo ? clinicalEchoRefusal(e, OWN) : clinicalRefusal(e, OWN);
     }
   }
   private async study(tx:any,uid:string,c:Caller,lock=false) {
@@ -78,9 +80,25 @@ export class ConsultationService {
       throw missing();
     }
   }
-  private result(row:any,c:Caller) {
+  /**
+   * One consultation as answered: operational fields from the row; its reason, reply and cancel reason are the signed
+   * versions' text, served after their provision is durable (DR2-02/03). A row whose meaning (requester, recipient, state,
+   * revision, times, texts) differs from its versions is refused without text; a row without a D unit (written before
+   * unit D) is answered without text (null).
+   */
+  private item(row:any,served:ClinicalServed|null) {
     const {creationFingerprint,lastFingerprint,lastRequest,...item}=row;
-    return {owner:[c.institution,c.sub],item};
+    if (!served) return {...item,reason:null,reply:null,cancelReason:null};
+    const {unit,bodies}=served, first=bodies[0], last=bodies[bodies.length-1];
+    const reply=unit.state==='Completed'?last.text:null, cancelReason=unit.state==='Cancelled'?last.text:null;
+    if (first.sequence!==1 || last.sequence!==unit.revision || unit.revision!==row.revision || unit.state!==row.state ||
+        first.author.subject!==row.requesterSub || first.text!==row.reason || (row.reply??null)!==reply || (row.cancelReason??null)!==cancelReason ||
+        iso(row.createdAt)!==first.at || iso(row.updatedAt)!==last.at) throw conflict();
+    return {...item,reason:first.text,reply,cancelReason};
+  }
+  private provision(row:any,rows:readonly object[]) {
+    return {record:'consultation' as const,recordId:row.id,studyId:row.studyUid,scope:'texts' as const,rows,
+      parties:{author:row.requesterSub,recipient:row.recipientSub}};
   }
 
   /**
@@ -125,28 +143,32 @@ export class ConsultationService {
     } catch(e) { throw clinicalRefusal(e,OWN); }
     const code=outcomeCode(result.outcome);
     if (code!==null) throw clinicalHttpError(code,OWN);
-    const row=await this.prisma.studyConsultation.findUnique({where:{id:recordId}});
-    if (!row) throw busy();
-    this.access(row,c); return this.result(row,c);
+    // The answer carries the record's text: it is handed back through the same durable provision as a read (DR2-03).
+    const route=surface==='consultation.create'?'POST studies/:uid/consultations':'POST consultations/:id';
+    return this.run(c,async tx=>{
+      const row=await tx.studyConsultation.findUnique({where:{id:recordId}});
+      if (!row) throw busy();
+      this.access(row,c);
+      return runtime.provide(request,{route,caller:{subject:c.sub,institutionId:c.institution},units:[this.provision(row,await readClinicalRows(tx,row.id))],
+        send:async served=>({owner:[c.institution,c.sub],item:this.item(row,served[0])})});
+    },true,true);
   }
 
-  /** 한 건 읽기. 사유·답변은 이 의뢰의 판들에 대한 열람 사건이 원장에 내구 기록된 뒤에만 나간다. */
+  /** 한 건 읽기. 사유·답변은 이 의뢰의 판들에 대한 열람 사건이 원장에 내구 기록된 뒤에만, 서명 판의 글로 나간다. */
   async read(id:string,c:Caller,request?:unknown) {
     this.member(c); const runtime=requireClinicalRuntime(); await this.studyAccess.prepare(c);
     if (!uuid(id)) throw missing();
     return this.run(c,async tx=>{
       const row=await tx.studyConsultation.findUnique({where:{id:id.toLowerCase()}});
       this.access(row,c); await this.study(tx,row.studyUid,c);
-      const rows=await readClinicalRows(tx,row.id);
-      return runtime.read(request,{record:'consultation',recordId:row.id,studyId:row.studyUid,scope:'history',rows,
-        caller:{subject:c.sub,institutionId:c.institution},send:async(_bodies,unit)=>{
-          if (unit.revision!==row.revision || unit.state!==row.state) throw conflict();
-          return this.result(row,c);
-        }});
+      const rows=await readClinicalRows(tx,row.id), p=this.provision(row,rows);
+      return runtime.read(request,{...p,caller:{subject:c.sub,institutionId:c.institution},
+        send:async(bodies,unit)=>({owner:[c.institution,c.sub],item:this.item(row,{unit,bodies})})});
     },true);
   }
-  async list(c:Caller,q:any) {
-    this.member(c);
+  /** 목록. 행과 판은 한 RepeatableRead 스냅샷에서 읽고, 사유·답변은 그 판들의 열람 사건이 내구 기록된 뒤에만 나간다(DR2-03). */
+  async list(c:Caller,q:any,request?:unknown) {
+    this.member(c); const runtime=requireClinicalRuntime();
     if (!object(q) || Object.keys(q).some(k=>!['direction','cursor'].includes(k)) || !['received','sent'].includes(q.direction)) {
       throw new BadRequestException('자문 목록 구분을 확인하세요');
     }
@@ -164,15 +186,21 @@ export class ConsultationService {
     // Join the current source institution as well as the immutable request institution.
     const received=q.direction==='received', before=cursor?.at??'9999-12-31T00:00:00.000Z';
     const beforeId=cursor?.id??'ffffffff-ffff-ffff-ffff-ffffffffffff';
-    const rows:any[]=await this.prisma.$queryRaw`SELECT c.* FROM "StudyConsultation" c
-      JOIN "StudyState" s ON s.uid=c."studyUid" AND s."institutionId"=c."institutionId"
-      WHERE c."institutionId"=${c.institution} AND (NOT ${accessPolicy.policy.restricted} OR c."studyUid"=ANY(${scope}::text[])) AND
-        ((${received} AND c."recipientSub"=${c.sub}) OR (NOT ${received} AND c."requesterSub"=${c.sub}))
-        AND (c."createdAt",c.id)<((${before}::timestamptz AT TIME ZONE 'UTC'),${beforeId}::uuid)
-      ORDER BY c."createdAt" DESC,c.id DESC LIMIT 51`;
-    const items=rows.slice(0,50), last=items[items.length-1];
-    return {owner:[c.institution,c.sub],direction:q.direction,items:items.map(row=>this.result(row,c).item),
-      nextCursor:rows.length>50?Buffer.from(JSON.stringify({at:last.createdAt.toISOString(),id:last.id,r:accessPolicy.revision})).toString('base64url'):null};
+    return this.run(c,async tx=>{
+      const rows:any[]=await tx.$queryRaw`SELECT c.* FROM "StudyConsultation" c
+        JOIN "StudyState" s ON s.uid=c."studyUid" AND s."institutionId"=c."institutionId"
+        WHERE c."institutionId"=${c.institution} AND (NOT ${accessPolicy.policy.restricted} OR c."studyUid"=ANY(${scope}::text[])) AND
+          ((${received} AND c."recipientSub"=${c.sub}) OR (NOT ${received} AND c."requesterSub"=${c.sub}))
+          AND (c."createdAt",c.id)<((${before}::timestamptz AT TIME ZONE 'UTC'),${beforeId}::uuid)
+        ORDER BY c."createdAt" DESC,c.id DESC LIMIT 51`;
+      const items=rows.slice(0,50), last=items[items.length-1];
+      const units=await readClinicalUnits(tx,items.map(row=>row.id)), signed=items.filter(row=>units.get(row.id).length);
+      return runtime.provide(request,{route:'GET consultations',caller:{subject:c.sub,institutionId:c.institution},
+        units:signed.map(row=>this.provision(row,units.get(row.id))),
+        send:async served=>({owner:[c.institution,c.sub],direction:q.direction,
+          items:items.map(row=>this.item(row,served.find(s=>s.unit.recordId===row.id)??null)),
+          nextCursor:rows.length>50?Buffer.from(JSON.stringify({at:last.createdAt.toISOString(),id:last.id,r:accessPolicy.revision})).toString('base64url'):null})});
+    },true);
   }
   async create(uid:string,c:Caller,b:any,request?:unknown) {
     this.member(c); requireClinicalRuntime();

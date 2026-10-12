@@ -13,9 +13,10 @@ import { comparisonStudies, copyJob, copySource, findingCommand, findingFingerpr
   FindingSourceRef, FINDING_LIMITS, isJobRef, jobAbsent, jobFrame, jobLocation, jobMark, jobStudies, refKey, sourceRef, sourceStudies } from './finding-input';
 import { holdAlive } from './pacs/values';
 import type { SurfaceKey } from './emr-clinical/contract';
-import type { ClinicalWritePlan, CommitOutcome } from './emr-clinical/records';
-import { ProjectionRefused, clinicalCount, clinicalHttpError, clinicalRefusal, clinicalText, outcomeCode, projectedCaller, registerClinicalProjection,
-  requireClinicalRuntime } from './emr-clinical/services';
+import type { ClinicalBody, ClinicalWritePlan, CommitOutcome } from './emr-clinical/records';
+import { ClinicalServed, ProjectionRefused, clinicalCount, clinicalEchoRefusal, clinicalHttpError, clinicalRefusal, clinicalText, outcomeCode,
+  projectedCaller, readClinicalRows, readClinicalSources, readClinicalUnits, registerClinicalProjection, requireClinicalRuntime } from './emr-clinical/services';
+import type { SourceRef } from './emr-clinical/sources';
 
 const denied = () => { throw new ForbiddenException('소견에 접근할 수 없습니다'); };
 const conflict = () => { throw new ConflictException('소견 또는 요청이 변경되었습니다'); };
@@ -50,8 +51,18 @@ const OWN: Readonly<Record<string, () => HttpException>> = Object.freeze({
   FINDING_SCHEMA_VERSION: () => new ConflictException({ code: 'FINDING_SCHEMA_VERSION', message: '이 소견은 새 판 형식입니다. 화면을 새로고침한 뒤 다시 시도하세요' }),
   NotFound: () => new NotFoundException('소견이 없습니다'), ProjectionNotFound: () => new NotFoundException('소견이 없습니다'),
   ActorPathRefused: () => new ForbiddenException('소견에 접근할 수 없습니다'), ProjectionForbidden: () => new ForbiddenException('소견에 접근할 수 없습니다'),
-  OwnerChanged: () => new ForbiddenException('소견에 접근할 수 없습니다'),
+  OwnerChanged: () => new ForbiddenException('소견에 접근할 수 없습니다'), ProjectionMismatch: () => new ConflictException('소견 또는 요청이 변경되었습니다'),
+  ClinicalSourceMissing: () => new ConflictException({ code: 'FINDING_SOURCE_STALE', message: '연결할 표식의 최신판을 확인하세요' }),
 });
+/** The action a finding revision row records, from the version it projects (create, hide, restore, or an edit keeping visibility). */
+const versionAction = (b: ClinicalBody) => b.sequence === 1 ? 'create' : b.state.from === 'Visible' && b.state.to === 'Hidden' ? 'hide' :
+  b.state.from === 'Hidden' && b.state.to === 'Visible' ? 'restore' : 'edit';
+/** The reason a revision row keeps: the author's typed line; a reason the server bound from the reading context is not typed. */
+const typedReason = (b: ClinicalBody) => b.reasonSource === 'stated' ? b.reason : '';
+/** The fixed source of one copied source (an item revision or a saved comparison revision); navigation alone is none. */
+const sourceOf = (source: any): SourceRef => source?.kind === 'job' ? { kind: 'job', jobId: source.jobId, revision: source.revision }
+  : { kind: 'item', itemId: source.itemId, revision: source.revision };
+const sameReference = (a: any, b: any) => a.kind === b.kind && a.recordId === b.recordId && a.versionId === b.versionId && a.sha256 === b.sha256;
 /** What the commit transaction needs besides the plan; kept with the original for recovery (no secret, no token). */
 // The request body is kept as received (valid UTF-8, viewerJson): the commit parses it again with the same rules.
 type FindingProjection = { caller: Caller; body: string; fingerprint: string; id: string | null;
@@ -129,10 +140,12 @@ function timestamp(value: Date | string) {
 }
 // A shipped (version 1) client reads only version 1 rows; anything else would be dropped by it silently.
 const legacyOnly = (items: any[]) => items.every(item => item?.schemaVersion === 1);
+// `item` is the signed version's snapshot; null when the finding has no D version (written before unit D, no text served).
 function result(head: any, revision?: any) {
+  const item = revision?.snapshot ?? head.snapshot ?? null;
   return { id: head.id, studyUid: head.studyUid, authorSub: head.authorSub, authorActor: head.authorActor,
-    revision: revision?.revision ?? head.revision, createdAt: timestamp(head.createdAt), hidden: (revision?.snapshot ?? head.snapshot).hidden,
-    updatedAt: timestamp(revision?.at ?? head.updatedAt), item: revision?.snapshot ?? head.snapshot };
+    revision: revision?.revision ?? head.revision, createdAt: timestamp(head.createdAt), hidden: item ? item.hidden : head.hidden,
+    updatedAt: timestamp(revision?.at ?? head.updatedAt), item };
 }
 function replayMismatch(replay: any, fingerprint: string, uid: string, c: Caller, id?: string) {
   return replay.fingerprint !== fingerprint || replay.finding.studyUid !== uid || replay.finding.authorSub !== c.sub ||
@@ -196,9 +209,23 @@ export class FindingService {
       finding: { id: row.id, studyUid: row.studyUid, authorSub: row.authorSub, authorActor: row.authorActor, createdAt: row.createdAt } };
   }
 
+  /**
+   * Finding text (a finding's snapshot: title, text, copied sources) of every listed finding or revision is the signed
+   * version's, served only after the provide-prepared event naming exactly those versions is durable (EMR-D, DR2-02/03);
+   * the page rows and the versions are read in one RepeatableRead snapshot and a row whose meaning differs from its
+   * version is refused without text. A finding without a D unit (written before unit D) is listed without text (null).
+   */
+  private signedItem(row: { revision: number; snapshot: unknown; at: Date | string }, b: ClinicalBody | undefined) {
+    if (!b) return null;
+    if (b.sequence !== row.revision || b.text !== canonical(row.snapshot) || timestamp(row.at).toISOString() !== b.at) conflict();
+    return JSON.parse(b.text);
+  }
+
   // `schema` is the X-KIN-Finding-Schema request header: without '2' a page holding any other version is refused whole.
-  async list(uid: string, query: any, c: Caller, id?: string, schema?: string) {
-    member(c); viewerUid(uid); visible(await this.prisma.studyState.findUnique({ where: { uid } }), c);
+  async list(uid: string, query: any, c: Caller, id?: string, schema?: string, request?: unknown) {
+    member(c); viewerUid(uid);
+    const runtime = requireClinicalRuntime(), reader = { subject: c.sub, institutionId: c.institution };
+    visible(await this.prisma.studyState.findUnique({ where: { uid } }), c);
     // Comparison studies are found only inside the read transaction, which cannot fetch access
     // metadata, so a metadata-rule policy is prepared for every study first (ViewerJob.list).
     await this.studyAccess.prepare(c);
@@ -209,7 +236,7 @@ export class FindingService {
     // a link state is never taken from a second, unlocked read of the item heads. The link state
     // is a database fact (head revision/hidden/presence) and is distinct from the viewer's
     // Orthanc-backed verified/unverified status, which stays on the viewer-items list.
-    return this.bounded(async tx => {
+    return this.clinical(() => this.bounded(async tx => {
       const parent = Prisma.sql`SELECT uid FROM "StudyState" WHERE uid = ${uid}
         AND ("institutionId" = ${c.institution} OR "teleInstitutionId" = ${c.institution})
         AND (rs <> 'P' OR (CASE WHEN "preDocSub" IS NOT NULL THEN "preDocSub" = ${c.sub} ELSE "preDoc" = ${c.actor} END) OR (CASE WHEN "preReviewerSub" IS NOT NULL THEN "preReviewerSub" = ${c.sub} ELSE "preReviewer" = ${c.actor} END))`;
@@ -231,18 +258,30 @@ export class FindingService {
             AND ${readableLineage(studies)})
           SELECT EXISTS(SELECT 1 FROM parent) AS allowed, EXISTS(SELECT 1 FROM head) AS present,
             COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY page.revision) FROM (
-              SELECT r.revision, r.snapshot, r.action, r.reason, r.actor, r."payloadBytes", r.at
+              SELECT r.revision, r.snapshot, r.action, r.reason, r.actor, r."authorSub", r."payloadBytes", r.at
               FROM "FindingRevision" r JOIN head h ON h.id = r."findingId"
               WHERE (${page.cursor}::int IS NULL OR r.revision > ${page.cursor}::int)
               ORDER BY r.revision LIMIT ${page.limit + 1}) page), '[]'::jsonb)::text AS rows`;
         if (!pageRow.allowed) denied();
         // An unreadable finding answers exactly like an absent id.
         if (!pageRow.present) absent();
-        const rows: any[] = parsed(pageRow.rows);
-        const revisions = rows.slice(0, page.limit).map(row => ({ revision: row.revision, action: row.action,
-          reason: row.reason, actor: row.actor, at: timestamp(row.at), payloadBytes: row.payloadBytes, item: row.snapshot }));
-        if (schema !== '2' && !legacyOnly(revisions.map(r => r.item))) clientOutdated();
-        return { revisions, nextCursor: rows.length > page.limit ? revisions[revisions.length - 1].revision : null };
+        const rows: any[] = parsed(pageRow.rows), shown = rows.slice(0, page.limit);
+        const units = await readClinicalRows(tx, id.toLowerCase());
+        const reply = (served: readonly ClinicalServed[]) => {
+          const bodies = served[0]?.bodies ?? [];
+          const revisions = shown.map(row => {
+            const b = bodies.find(x => x.sequence === row.revision);
+            if (b && (versionAction(b) !== row.action || typedReason(b) !== row.reason || b.author.subject !== row.authorSub)) conflict();
+            return { revision: row.revision, action: row.action, reason: row.reason, actor: row.actor, at: timestamp(row.at), payloadBytes: row.payloadBytes,
+              item: units.length ? this.signedItem(row, b ?? conflict()) : null };
+          });
+          if (schema !== '2' && !legacyOnly(revisions.map(r => r.item).filter(item => item !== null))) clientOutdated();
+          return { revisions, nextCursor: rows.length > page.limit ? revisions[revisions.length - 1].revision : null };
+        };
+        if (!units.length || !shown.length) return reply([]);
+        return runtime.provide(request, { route: 'GET studies/:uid/findings/:id/revisions', caller: reader,
+          units: [{ record: 'finding', recordId: id.toLowerCase(), studyId: uid, scope: { sequences: shown.map(row => row.revision) }, rows: units,
+            parties: { author: shown[0].authorSub } }], send: async served => reply(served) });
       }
       // Item links are the shipped entries byte for byte; a job entry reports the job head of this anchor.
       const [pageRow] = await tx.$queryRaw<any[]>`WITH parent AS (${parent})
@@ -255,11 +294,22 @@ export class FindingService {
               AND ${readableLineage(studies)}
             ORDER BY f.id LIMIT ${page.limit + 1}) page), '[]'::jsonb)::text AS rows`;
       if (!pageRow.allowed) denied();
-      const rows: any[] = parsed(pageRow.rows);
-      const items = rows.slice(0, page.limit).map(row => ({ ...result(row), links: row.links }));
-      if (schema !== '2' && !legacyOnly(items.map(i => i.item))) clientOutdated();
-      return { items, nextCursor: rows.length > page.limit ? items[items.length - 1].id : null };
-    }, true);
+      const rows: any[] = parsed(pageRow.rows), shown = rows.slice(0, page.limit);
+      const units = await readClinicalUnits(tx, shown.map(row => row.id)), signed = shown.filter(row => units.get(row.id).length);
+      return runtime.provide(request, { route: 'GET studies/:uid/findings', caller: reader,
+        units: signed.map(row => ({ record: 'finding' as const, recordId: row.id, studyId: uid, scope: 'current' as const, rows: units.get(row.id),
+          parties: { author: row.authorSub } })),
+        send: async served => {
+          const items = shown.map(row => {
+            const head = served.find(s => s.unit.recordId === row.id)?.bodies[0];
+            const item = units.get(row.id).length ? this.signedItem({ ...row, at: row.updatedAt }, head ?? conflict()) : null;
+            if (item && item.hidden !== row.hidden) conflict();
+            return { ...result({ ...row, snapshot: item }), links: row.links };
+          });
+          if (schema !== '2' && !legacyOnly(items.map(i => i.item).filter(item => item !== null))) clientOutdated();
+          return { items, nextCursor: rows.length > page.limit ? items[items.length - 1].id : null };
+        } });
+    }, true));
   }
 
   /**
@@ -405,30 +455,48 @@ export class FindingService {
     // version of exactly this record before the server has written anything.
     const recordId = id ?? command.requestId.toLowerCase();
     const known = await this.clinical(() => runtime.lookup(request, { surface, studyId: uid, recordId, body, caller, projection: null }));
-    if (known) return this.answer(known, c, command.requestId);
+    if (known) return this.answer(known, c, command.requestId, request, id);
     const plan = await this.plan(uid, anchor, command, fingerprint, c, id);
-    const composed = await this.bounded(tx => this.compose(tx, uid, c, command, plan, id));
+    // What the snapshot copies is incorporated: each copy's source version becomes a fixed reference, resolved in the same
+    // snapshot under the same locks as the copy (DR2-05). The comparison study itself is navigation only.
+    const composed = await this.clinical(() => this.bounded(async tx => {
+      const made = await this.compose(tx, uid, c, command, plan, id);
+      return { ...made, attachments: await readClinicalSources(tx, made.refs) };
+    }));
     // Server fact: the author holds this study's reading (a live hold) - a hide/restore there needs no typed reason (D-18).
     const reading = holdAlive(anchor) && anchor.holder === c.actor ? { referenceId: 'hold:' + anchor.draftEpoch } : null;
     const projection: FindingProjection = { caller: { kind: c.kind, institution: c.institution, sub: c.sub, actor: c.actor, roles: [...c.roles] },
       body: raw.toString('utf8'), fingerprint, id: id ?? null, plan: { studies: [...plan.studies], checked: [...plan.checked], frames: [...plan.frames] } };
     const result = await this.clinical(() => runtime.write(request, { surface, studyId: uid, recordId, body, content: composed.serialized,
-      navigation: composed.navigation, reading, caller, projection }));
-    return this.answer(result.outcome, c, command.requestId);
+      attachments: composed.attachments, navigation: composed.navigation, reading, caller, projection }));
+    return this.answer(result.outcome, c, command.requestId, request, id);
   }
 
   private async clinical<T>(work: () => Promise<T>): Promise<T> {
     try { return await work(); } catch (error) { throw clinicalRefusal(error, OWN); }
   }
 
-  /** The stored revision row of a committed or replayed request; a failure carries this service's wording and no text. */
-  private async answer(outcome: CommitOutcome, c: Caller, requestId: string) {
+  /**
+   * The stored revision row of a committed or replayed request, its snapshot the signed version's and handed back only
+   * after the provide-prepared event for that version is durable (DR2-03). A failure carries this service's wording and no
+   * text; a committed write whose answer cannot be provided yet stays pending for the same request.
+   */
+  private async answer(outcome: CommitOutcome, c: Caller, requestId: string, request: unknown, id?: string) {
     const code = outcomeCode(outcome);
     if (code === 'ReasonRequired') throw new BadRequestException('숨김/복원에는 사유가 필요합니다');
     if (code !== null) throw clinicalHttpError(code, OWN);
-    const replay = await this.replayRow(this.prisma, c.sub, requestId);
-    if (!replay) throw new ServiceUnavailableException('소견 저장이 지연되었습니다. 같은 요청 ID로 다시 시도하세요');
-    return result(replay.finding, replay);
+    const runtime = requireClinicalRuntime();
+    try {
+      return await this.bounded(async tx => {
+        const replay = await this.replayRow(tx, c.sub, requestId);
+        if (!replay) throw new ServiceUnavailableException('소견 저장이 지연되었습니다. 같은 요청 ID로 다시 시도하세요');
+        const rows = await readClinicalRows(tx, replay.findingId);
+        return runtime.provide(request, { route: id === undefined ? 'POST studies/:uid/findings' : 'POST studies/:uid/findings/:id/revisions',
+          caller: { subject: c.sub, institutionId: c.institution }, units: [{ record: 'finding', recordId: replay.findingId, studyId: replay.finding.studyUid,
+            scope: { sequences: [replay.revision] }, rows, parties: { author: replay.finding.authorSub } }],
+          send: async served => result(replay.finding, { ...replay, snapshot: this.signedItem(replay, served[0].bodies[0]) }) });
+      }, true);
+    } catch (error) { throw clinicalEchoRefusal(error, OWN); }
   }
 
   /**
@@ -550,8 +618,10 @@ export class FindingService {
     const added = head ? 0 : 1;
     if (usage.findings + added > FINDING_LIMITS.findings || usage.revisions + 1 > FINDING_LIMITS.revisions ||
         Number(usage.bytes) + bytes > FINDING_LIMITS.bytes) storageLimit();
-    // Comparison studies linked for navigation only (never incorporated components of the version).
-    return { head, serialized, bytes, hidden, sources: sources.length, navigation: comparisonStudies(uid, sources.flatMap(sourceStudies)) };
+    // Comparison studies linked for navigation only (never incorporated components of the version); every copied source is
+    // incorporated and is cited by the fixed reference of the version it was copied from.
+    return { head, serialized, bytes, hidden, sources: sources.length, refs: sources.map(sourceOf),
+      navigation: comparisonStudies(uid, sources.flatMap(sourceStudies)) };
   }
 
   /** The finding rows of one committed version: the head and its revision carry the exact counted JSON. */
@@ -591,6 +661,11 @@ export class FindingService {
       frames: new Map(p.plan.frames.map(([jobId, frame]) => [clinicalText(jobId), clinicalText(frame)] as [string, string])) };
     const composed = await this.compose(tx, studyId, c, command, planned, id);
     if (composed.serialized !== v.text) throw new ProjectionRefused('FINDING_SOURCE_STALE');
+    // The version cites exactly the source versions this commit copies, in the same order (DR2-05).
+    const cited = await readClinicalSources(tx, composed.refs);
+    if (cited.length !== v.attachments.length || cited.some((r, i) => !r.kinds.includes(v.attachments[i].kind) ||
+        !sameReference({ kind: v.attachments[i].kind, recordId: r.recordId, versionId: r.event.versionId, sha256: r.event.sha256 }, v.attachments[i])))
+      throw new ProjectionRefused('FINDING_SOURCE_STALE');
     if (id === undefined ? composed.head !== null || v.sequence !== 1 : composed.head?.revision !== v.sequence - 1) throw new ProjectionRefused('ProjectionConflict');
     await this.persist(tx, studyId, c, command, fingerprint, composed, recordId, new Date(v.at));
   }

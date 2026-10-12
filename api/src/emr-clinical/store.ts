@@ -1,15 +1,15 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { AccessEvent, AccessEventV1, AppendOnlyAccessStore, DurableAccessReceipt, EvidenceFact, WorkContext, newAuditLinkId,
   parseAccessEvent } from '../emr-contract/access-event';
-import { ResolvedRecord, resolveStoredRecord, verifiedRecord } from '../emr-contract/classification';
-import { emrAdapters } from '../emr-contract/composition';
+import { verifiedRecord } from '../emr-contract/classification';
 import { ContractError, freeze, integer, refuse, string } from '../emr-contract/validation';
 import type { HoldRow } from '../emr-runtime/contract';
 import type { ProvisionalAppend } from '../emr-runtime/store';
 import { inspectEnvelopeV2 } from '../emr-signature/canonical-v2';
 import type { ClinicalRecord, ClinicalUnit, ClinicalVersion } from './contract';
-import { ClinicalProjector, ProjectionRefused, clinicalServices } from './services';
+import { ClinicalProjector, ProjectionRefused, clinicalServices, readClinicalSources } from './services';
 import type { SignedEnvelope } from './signing';
+import { SourceRef, sourceRefOf } from './sources';
 import {
   ClinicalStorePort, ClinicalWritePlan, CommitRolledBack, OriginalAdmission, OriginalCheckpoint, OriginalIdentity, OriginalPermit,
   RejectionEvidence, RequestAttemptEvent, RequestIdentity, RequestObservation, UnitOfWork, WriteInput, projectUnit,
@@ -124,16 +124,18 @@ type Row = { kind: 'owner' | 'observer' | 'fenced'; original_id: string; epoch: 
   state: 'pending' | 'committed' | 'rejected'; seed: string; facts: string; envelope: string | null; checkpoint: string | null; terminal: string | null;
   record_id: string | null; access_event: string | null; confirmed: boolean };
 
-// Attachments are A capabilities; the register keeps their stored-record references and re-resolves them through A's
-// composed reader on recovery (an unresolvable reference refuses, it never becomes an empty list).
+// Attachments are A capabilities; the register keeps their stored-record references and recovery resolves the same
+// immutable source versions again through A (sources.ts): an unresolvable reference refuses, never an empty list.
 function seedText(input: WriteInput): string {
   const attachments = input.attachments.map(a => { const r = verifiedRecord(a); return { recordId: r.recordId, eventId: r.event.eventId }; });
   return JSON.stringify({ ...input, attachments });
 }
-function seedFrom(text: string): WriteInput {
+async function seedFrom(db: ClinicalDatabase, text: string): Promise<WriteInput> {
   const seed = JSON.parse(text);
-  const attachments: ResolvedRecord[] = (seed.attachments as { recordId: string; eventId: string }[])
-    .map(a => resolveStoredRecord(emrAdapters().stored, a.recordId, a.eventId));
+  const refs: SourceRef[] = (seed.attachments as { recordId: string; eventId: string }[])
+    .map(a => sourceRefOf(string(a.recordId), string(a.eventId)) ?? refuse('AttachmentRefused'));
+  const attachments = await readClinicalSources(db, refs);
+  if (attachments.some((a, i) => a.recordId !== seed.attachments[i].recordId || a.event.eventId !== seed.attachments[i].eventId)) refuse('AttachmentRefused');
   return { ...seed, attachments };
 }
 
@@ -183,10 +185,14 @@ export class SqlClinicalStore {
       noteAttempt: event => this.noteAttempt(event),
     };
   }
-  /** The port of the server's recovery worker: it admits nothing, it only resumes registered originals. */
-  recoveryPort(): ClinicalStorePort {
+  /**
+   * The port of the server's recovery worker: it admits nothing, it only resumes registered originals. `acquired` learns
+   * the original this recovery took ownership of, so that the caller releases it whatever the recovery's end.
+   */
+  recoveryPort(acquired: (originalId: string) => void = () => {}): ClinicalStorePort {
     const port = this.port(null as any, null);
-    return { ...port, admitOrObserve: async () => refuse('RecoveryAdmitsNothing') };
+    return { ...port, admitOrObserve: async () => refuse('RecoveryAdmitsNothing'),
+      recoverOriginal: (request, attemptId) => this.recoverOriginal(request, attemptId, acquired) };
   }
 
   private async call<T>(work: () => Promise<T>): Promise<T> {
@@ -328,9 +334,9 @@ export class SqlClinicalStore {
     return this.observe(request, attemptId, false);
   }
 
-  async recoverOriginal(request: RequestIdentity, attemptId: string): Promise<OriginalAdmission> {
+  async recoverOriginal(request: RequestIdentity, attemptId: string, acquired: (originalId: string) => void = () => {}): Promise<OriginalAdmission> {
     const k = keyValues(request.receiptKey);
-    // This process's own live owner is never fenced: it is still executing and answers for itself.
+    // This process's own live owner (a write, or another recovery, still executing) is never fenced: it answers for itself.
     const current = await this.observe(request, attemptId, false);
     if (current.state === 'pending' && this.active.has(current.original.originalId)) return { kind: 'observer', observation: current };
     const rows = await this.call(() => this.db.$queryRaw<Row[]>`SELECT * FROM emr_clinical.recover(${k.record}::text, ${k.actorId}::text,
@@ -347,9 +353,14 @@ export class SqlClinicalStore {
     this.active.add(row.original_id);
     this.carried.set(row.original_id, row.envelope === null ? null : JSON.parse(row.envelope));
     this.facts.set(row.original_id, JSON.parse(row.facts));
+    acquired(row.original_id);
     let seed: WriteInput;
-    try { seed = seedFrom(row.seed); }
-    catch { return { kind: 'observer', observation: await this.sealDirect(permitOf(original, row.epoch), 'AttachmentRefused', row.phase === 'commit-dispatched') }; }
+    try { seed = await seedFrom(this.db, row.seed); }
+    catch (error) {
+      // Storage that cannot be read now is no proof that a source is gone: the original stays pending for the next recovery.
+      if (!(error instanceof ContractError)) throw error;
+      return { kind: 'observer', observation: await this.sealDirect(permitOf(original, row.epoch), 'AttachmentRefused', row.phase === 'commit-dispatched') };
+    }
     return { kind: 'owner', execution: { permit: permitOf(original, row.epoch), seed, checkpoint: row.checkpoint === null ? null : JSON.parse(row.checkpoint) } };
   }
 
@@ -377,11 +388,6 @@ export class SqlClinicalStore {
 }
 
 // ── reads a caller may run in its own transaction (its read snapshot): one schema function each ──
-const storedUnits = new WeakSet<object>();
-/** Whether `unit` came from readClinicalUnit (a body is only ever served for a unit read from storage). */
-export function isStoredUnit(unit: unknown): unit is Readonly<ClinicalUnit> {
-  return !!unit && typeof unit === 'object' && storedUnits.has(unit);
-}
 /** The unit with its whole history, verified as the fold of its versions; null when it does not exist. */
 export async function readClinicalUnit(db: ClinicalDatabase, recordId: string): Promise<Readonly<ClinicalUnit> | null> {
   let rows: any[];
@@ -400,9 +406,7 @@ export function unitFromRows(recordId: string, rows: readonly any[]): Readonly<C
   };
   if (last.version_id !== first.head_version_id) refuse('UnitHistoryBroken');
   projectUnit(unit);
-  const stored = freeze(unit);
-  storedUnits.add(stored);
-  return stored;
+  return freeze(unit);
 }
 export async function readClinicalSignatures(db: ClinicalDatabase, recordId: string): Promise<ReadonlyMap<string, unknown | null>> {
   let rows: any[];
@@ -420,6 +424,15 @@ export async function readSrAdoption(db: ClinicalDatabase, recordId: string) {
   try { rows = await db.$queryRaw<any[]>`SELECT * FROM emr_clinical.sr_adoption_for(${string(recordId)}::text)`; } catch (error) { sqlRefusal(error); }
   return rows.length ? freeze({ versionId: rows[0].version_id as string, sha256: rows[0].sha256 as string, bytesSha256: rows[0].bytes_sha256 as string,
     sopInstanceUid: rows[0].sop_instance_uid as string, confirmed: rows[0].confirmed === true }) : null;
+}
+/** The signed adoption with its planned adoption facts (records.ts planManualSrAdoption) and the exact access event committed with it. */
+export async function readSrAdoptionRecord(db: ClinicalDatabase, recordId: string) {
+  let rows: any[];
+  try { rows = await db.$queryRaw<any[]>`SELECT * FROM emr_clinical.sr_adoption_for(${string(recordId)}::text)`; } catch (error) { sqlRefusal(error); }
+  if (!rows.length) return null;
+  const r = rows[0];
+  return { fact: freeze({ versionId: string(r.version_id), sha256: string(r.sha256), bytesSha256: string(r.bytes_sha256), sopInstanceUid: string(r.sop_instance_uid),
+    confirmed: r.confirmed === true }), adoption: JSON.parse(string(r.body)), accessEvent: JSON.parse(string(r.access_event)) };
 }
 
 /** The prepared SRs among `recordIds` whose purpose end is already recorded. */
