@@ -1461,14 +1461,18 @@ function contractSuite() {
       const observe = async who => { const o = observation(who); await journal.observeAuthenticationFailure(o); return o.eventId; };
       // The API admits concurrent refusals; group commit shares one append and fdatasync among each batch.
       const flood = async (who, total, workers) => {
-        let left = total;
+        let left = total; const refused = {};
         await Promise.all(Array.from({ length: workers }, async () => {
-          while (left-- > 0) await journal.completeAuthenticationFailure(await observe(who));
+          while (left-- > 0) {
+            try { await journal.completeAuthenticationFailure(await observe(who)); }
+            catch (error) { const code = error.code ?? String(error.message); refused[code] = (refused[code] ?? 0) + 1; }
+          }
         }));
+        return refused;
       };
       const started = process.hrtime.bigint();
-      await flood(null, 20000, 32);
-      await flood(suspended, 20000, 12);
+      assert.deepEqual(await flood(null, 20000, 32), {}, 'every anonymous refusal is recorded and completed');
+      assert.deepEqual(await flood(suspended, 20000, 12), {}, 'every refusal of one suspended member is recorded and completed');
       const floodSeconds = Number(process.hrtime.bigint() - started) / 1e9;
       const after = tick();
       const bytes = kind => fs.statSync(path.join(spoolState, kind + '-failures/failure-journal.jsonl')).size;
