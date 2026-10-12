@@ -1,7 +1,9 @@
 name: EMR-D clinical attached-record contracts
 
-# Round 1 of unit D: the pure/contract cases and the mutants of api/src/emr-clinical only. It calls no B consumer that
-# has not landed, adds nothing to the candidate selection (tests/candidate_ci.py) and uses no synthetic stack.
+# Unit D: round 1's pure/contract cases and mutants of api/src/emr-clinical; round 2's server cases (tests/emr/d/server_test.cjs)
+# and the live suite tests/emr/d/live.py (EmrDLive: TEST-D-01..04 server halves, the write/amend/reopen flow, the live
+# mutants M-D-01..05) on the production API image of this commit, one disposable database, through scripts/run-tests.py.
+# Nothing here is added to the candidate selection (tests/candidate_ci.py) or a shared profile; that is integration's.
 on:
   pull_request:
   push:
@@ -23,7 +25,7 @@ concurrency:
 jobs:
   emr-d:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 75
     env:
       TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}
     steps:
@@ -52,6 +54,19 @@ jobs:
       - name: Retained 14 and invariant 12 mutants (contract models distinguished; M-D-06 is round 2)
         if: ${{ !cancelled() }}
         run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/mutants --cwd . --tree api/src/emr-clinical --tree api/src/emr-contract --file tests/emr/d/mutants.py --file tests/emr/d/contract_test.cjs -- python3 -B tests/emr/d/mutants.py
+      - name: D round 2 server cases and the d.json declaration (TEST-D-01..04 pure halves)
+        if: ${{ !cancelled() }}
+        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/server --cwd . --tree api/src --tree tests/emr/d --file emr/units/d.json --file api/tsconfig.json --file api/package-lock.json -- node --test tests/emr/d/server_test.cjs
+      - name: Production API image of this commit
+        if: ${{ !cancelled() }}
+        timeout-minutes: 20
+        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/image --cwd . --tree api/src --tree api/prisma --file api/Dockerfile --file api/start-production.sh --file api/package.json --file api/package-lock.json -- docker build --target production --build-arg "VCS_REF=${{ github.sha }}" -t "kin-emrd-ci:${{ github.sha }}" api
+      - name: EMR-D live (EmrDLive) on an empty hosted daemon through scripts/run-tests.py
+        if: ${{ !cancelled() }}
+        timeout-minutes: 45
+        env:
+          KIN_TEST_API_IMAGE: kin-emrd-ci:${{ github.sha }}
+        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/live --cwd . --tree tests/emr/d --tree api/prisma/migrations --file scripts/emr-compose.py --file scripts/run-tests.py --file tests/live_test_gate.py -- python3 -B scripts/run-tests.py --module tests/emr/d/live.py --unit emr-d-ci-live --mode live --timeout 2700
       - name: EMR-D evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

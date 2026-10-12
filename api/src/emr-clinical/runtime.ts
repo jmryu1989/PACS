@@ -1,0 +1,274 @@
+import { randomUUID } from 'node:crypto';
+import { AccessEvent, AccessEventV1, DurableAccessReceipt, EvidenceFact, ImmutableIdentity, WorkContext, newAuditLinkId,
+  parseAccessEvent } from '../emr-contract/access-event';
+import { freeze, integer, refuse, string } from '../emr-contract/validation';
+import type { ProvisionalAppend } from '../emr-runtime/store';
+import { inspectEnvelopeV2 } from '../emr-signature/canonical-v2';
+import type { SignatureVerificationPorts } from '../emr-signature/verify';
+import { ActorFacts, CLINICAL_SURFACES, ClinicalUnit, StudyFacts, SurfaceSpec } from './contract';
+import {
+  CommitOutcome, PreparedSr, ReadPlan, RequestIdentity, WriteInput, commitClinicalWrite, decideRequestOutcome, planClinicalRead,
+  planClinicalWrite, planManualSrAdoption, planManualSrCleanup, prepareClinicalWrite, provideClinicalRead, reconcileManualSr, recoverClinicalWrite,
+} from './records';
+import {
+  ClinicalReadRequest, ClinicalServicePort, ClinicalWriteRequest, ClinicalWriteResult, ManualSrAdoption, ManualSrAdoptionRequest, clinicalServices,
+} from './services';
+import { SignedEnvelope, deviceSignaturePort } from './signing';
+import {
+  ClinicalDatabase, ClinicalFacts, ClinicalLedger, SqlClinicalStore, clinicalSqlState, readSrAdoption, readSrPurposeEnds, unitFromRows,
+} from './store';
+
+/**
+ * EMR-D round 2: the one server composition of unit D. Server start (B2's main.ts, after B1's ledger and C2's
+ * verification ports exist) calls composeClinicalRuntime exactly once, which binds this runtime as the owning services'
+ * port (services.ts); they refuse with 503 EMR_CLINICAL_RUNTIME_REQUIRED while nothing is composed - there is no unsigned
+ * or unledgered fallback path for a clinical write or a clinical body.
+ *
+ * Every fact comes from a server port: the verified actor, ingress and the carried device signature from B2/C (context),
+ * the patient link snapshot and managing institution of the study from C (studies), the key/anchor/policy readers
+ * from C (signatures), the ledger from B1. A request body is only the request's own meaning (records.ts refuses claims).
+ */
+
+/** B2 (verified authentication context) and C (device signature channel) for one HTTP request. */
+export interface ClinicalRequestFacts {
+  actor: ActorFacts;
+  trustedProxyIp: EvidenceFact<{ address: string; source: 'trusted-proxy' }>;
+  requestId: string;
+  /** The immutable identity of another member of the same verified issuer (a consultation recipient, an assigned reader). */
+  member(subject: string): Promise<ImmutableIdentity>;
+  /** The device signature that came with this request, or null. */
+  signature: { jws: unknown; osUserId: string } | null;
+}
+export interface ClinicalContextSource { facts(request: unknown): Promise<ClinicalRequestFacts> }
+/** C's clinical study reader: the managing institution and the patient link snapshot of a study, read in `db`. */
+export interface ClinicalStudySource { facts(db: ClinicalDatabase, studyId: string): Promise<StudyFacts> }
+export interface ClinicalRuntimeParts {
+  /** The EMR ledger client (B1 EmrLedgerClient): D's reads and B1's commit transactions share it. */
+  db: ClinicalDatabase;
+  ledger: ClinicalLedger;
+  context: ClinicalContextSource;
+  studies: ClinicalStudySource;
+  signatures: SignatureVerificationPorts;
+  /** Delay before an unknown outcome is recovered in-process; the restart scan covers a dead process. */
+  recoveryDelayMs?: number;
+}
+
+export type { ClinicalWriteRequest, ClinicalWriteResult };
+
+const known = <T>(value: T) => ({ status: 'known' as const, value });
+const sleep = (ms: number) => new Promise<void>(resolve => { const t = setTimeout(resolve, ms); (t as any).unref?.(); });
+
+export class ClinicalRuntime implements ClinicalServicePort {
+  readonly store: SqlClinicalStore;
+  private readonly recovering = new Set<string>();
+  private timer: ReturnType<typeof setInterval> | null = null;
+
+  constructor(private readonly parts: ClinicalRuntimeParts) {
+    this.store = new SqlClinicalStore(parts.db, parts.ledger);
+    this.store.onWake(request => this.scheduleRecovery(request));
+  }
+
+  private signaturePort() {
+    return deviceSignaturePort(this.parts.signatures, originalId => this.store.carriedSignature(originalId));
+  }
+
+  /** One clinical write (records.ts commitClinicalWrite) with every server fact bound here. */
+  async write(request: unknown, w: ClinicalWriteRequest): Promise<ClinicalWriteResult> {
+    const spec: SurfaceSpec = CLINICAL_SURFACES[w.surface];
+    if (!spec) refuse('ClinicalSurfaceUnknown');
+    const facts = await this.parts.context.facts(request);
+    // The service's own row checks ran for the guard's caller; a different verified person never writes through them.
+    if (facts.actor.identity.subject !== w.caller?.subject || facts.actor.institutionId !== w.caller?.institutionId) refuse('OwnerChanged');
+    const unit = await this.store.unit(string(w.recordId));
+    const study = await this.parts.studies.facts(this.parts.db, string(w.studyId));
+    const recipientId = w.recipientSubject ? (await facts.member(w.recipientSubject)).id : null;
+    const readerId = w.readerSubject ? (await facts.member(w.readerSubject)).id : null;
+    // The device names the version it signed; verify() binds every other fact of the plan to that same payload.
+    const versionId = facts.signature ? inspectEnvelopeV2(facts.signature.jws).payload.versionId : randomUUID();
+    const input: WriteInput = {
+      surface: w.surface, actor: facts.actor, study, unit, body: w.body, content: w.content ?? null, attachments: [], navigation: [...(w.navigation ?? [])],
+      recipientId: spec.record === 'consultation' && unit === null ? recipientId : null, readerId: spec.record === 'assignment' ? readerId : null,
+      workContext: w.reading ? { kind: 'reading', studyId: study.studyId, referenceId: string(w.reading.referenceId) } : null,
+      ids: { recordId: w.recordId, versionId }, at: new Date().toISOString(),
+    };
+    // A clinical entry is admitted only with its author's device signature; without one nothing is registered and the
+    // request ID stays usable. A replay (its plan no longer applies to the stored unit) goes on to the lookup below.
+    let signing = false;
+    try { signing = planClinicalWrite(input).signing !== null; } catch { signing = false; }
+    if (signing && !facts.signature) {
+      await this.store.noteAttempt({ attemptId: randomUUID(), request: prepareClinicalWrite(input), originalId: null, code: 'SignatureRequired' }).catch(() => {});
+      return freeze({ outcome: freeze({ status: 'failed' as const, code: 'SignatureRequired', retry: 'same-request' as const }), unit });
+    }
+    const requestId = (w.body as any)?.[spec.requestField ?? 'requestId'];
+    const carried: SignedEnvelope | null = facts.signature ? { jws: facts.signature.jws as any, osUserId: facts.signature.osUserId, eventId: string(requestId).toLowerCase() } : null;
+    const clinical: ClinicalFacts = { event: { rolesAtTime: [...facts.actor.roles], trustedProxyIp: facts.trustedProxyIp, requestId: facts.requestId,
+      reading: !!w.reading }, projection: w.projection };
+    let originalId: string | null = null;
+    try {
+      const outcome = await commitClinicalWrite({ store: this.store.port(clinical, carried, id => { originalId = id; }), signature: this.signaturePort() }, input);
+      return freeze({ outcome, unit: outcome.status === 'committed' || outcome.status === 'replayed' ? await this.store.unit(w.recordId) : unit });
+    } finally { this.store.release(originalId); }
+  }
+
+  /**
+   * The stored outcome of a write's request ID when one is registered, else null - before any expensive or locking
+   * preparation (the finding's source copy). It never plans, signs or commits.
+   */
+  async lookup(request: unknown, w: ClinicalWriteRequest): Promise<CommitOutcome | null> {
+    const facts = await this.parts.context.facts(request);
+    if (facts.actor.identity.subject !== w.caller?.subject || facts.actor.institutionId !== w.caller?.institutionId) refuse('OwnerChanged');
+    const study = await this.parts.studies.facts(this.parts.db, string(w.studyId));
+    const unit = await this.store.unit(string(w.recordId));
+    const input: WriteInput = { surface: w.surface, actor: facts.actor, study, unit, body: w.body, content: w.content ?? null, attachments: [],
+      navigation: [...(w.navigation ?? [])], recipientId: null, readerId: null, workContext: null, ids: { recordId: w.recordId, versionId: randomUUID() },
+      at: new Date().toISOString() };
+    const identity = prepareClinicalWrite(input);
+    const observed = await this.store.observe(identity, randomUUID(), true);
+    if (observed.state === 'absent') return null;
+    return decideRequestOutcome(identity, observed, 'observer');
+  }
+
+  /** The server's recovery of one original (never an HTTP retry): restart scan, or an unknown outcome after a delay. */
+  async recover(request: RequestIdentity): Promise<CommitOutcome> {
+    return recoverClinicalWrite({ store: this.store.recoveryPort(), signature: this.signaturePort() }, request);
+  }
+  private scheduleRecovery(request: RequestIdentity): void {
+    const key = JSON.stringify([request.receiptKey.record, request.receiptKey.actorId, request.receiptKey.requestId]);
+    if (this.recovering.has(key)) return;
+    this.recovering.add(key);
+    void sleep(this.parts.recoveryDelayMs ?? 5000).then(() => this.recover(request)).catch(() => {}).finally(() => this.recovering.delete(key));
+  }
+  /** Restart scan: every pending original and every committed one whose ledger receipt is not yet durable. */
+  async recoverOpen(limit: number = 100): Promise<number> {
+    const open = await this.store.openRequests(limit);
+    for (const request of open) await this.recover(request).catch(() => {});
+    const rows = await this.parts.db.$queryRaw<{ record_id: string; access_event: string }[]>`SELECT * FROM emr_clinical.open_sr_adoptions(${integer(limit, 1)}::integer)`;
+    for (const row of rows) {
+      try {
+        await this.parts.ledger.append(JSON.parse(row.access_event));
+        await this.parts.db.$queryRaw`SELECT emr_clinical.confirm_sr(${string(row.record_id)}::text)::text AS done`;
+      } catch { /* the next scan retries; the adoption stays unconfirmed, never reported as stored */ }
+    }
+    return open.length + rows.length;
+  }
+  start(intervalMs = 60000): void {
+    if (this.timer) return;
+    void this.recoverOpen().catch(() => {});
+    this.timer = setInterval(() => { void this.recoverOpen().catch(() => {}); }, intervalMs);
+    (this.timer as any).unref?.();
+  }
+  stop(): void { if (this.timer) clearInterval(this.timer); this.timer = null; }
+
+  /** The unit with its whole history in the runtime's own client, or null. */
+  unit(recordId: string): Promise<Readonly<ClinicalUnit> | null> { return this.store.unit(recordId); }
+
+  /**
+   * A clinical body is handed to `send` only after the provide-prepared event for exactly the served versions is durable
+   * (records.ts provideClinicalRead over B1). The caller reads the unit's rows with services.ts readClinicalRows in its own
+   * read snapshot, so the legacy rows it answers with and the versions logged are the same state; any other value is refused.
+   */
+  async read<T>(request: unknown, r: ClinicalReadRequest<T>): Promise<T> {
+    const facts = await this.parts.context.facts(request);
+    if (facts.actor.identity.subject !== r.caller?.subject || facts.actor.institutionId !== r.caller?.institutionId) refuse('NotFound');
+    if (!r.rows || !clinicalServices.readRows.has(r.rows)) refuse('NotFound');
+    const unit = unitFromRows(string(r.recordId), r.rows);
+    if (!unit || unit.record !== r.record || (r.studyId !== undefined && unit.studyId !== r.studyId)) refuse('NotFound');
+    const plan: Readonly<ReadPlan> = planClinicalRead({ actor: facts.actor, unit, scope: r.scope });
+    const context: WorkContext = { basis: facts.actor.roles.includes('clinician') && (r.record === 'question' || r.record === 'image-request') &&
+      unit.parties.authorId === facts.actor.identity.id ? 'clinical-request' : 'worklist', studyId: unit.studyId, relatedStudyId: null, reason: null };
+    const event: AccessEventV1 = { formatVersion: 1, surface: plan.route, eventId: `clinical-read:${randomUUID()}`, userId: known({ ...facts.actor.identity }),
+      rolesAtTime: known([...facts.actor.roles]), actingInstitution: known(facts.actor.institutionId), managingInstitution: known(unit.managingInstitutionId),
+      occurredAt: new Date().toISOString(), trustedProxyIp: facts.trustedProxyIp, cause: 'user-view', context, executor: 'member',
+      targets: [...plan.targets], action: 'provide-prepared', result: 'prepared', requestId: facts.requestId, auditLinkId: newAuditLinkId(), relatedEventId: null };
+    return provideClinicalRead(this.parts.ledger, parseAccessEvent(event) as AccessEvent, plan, (bodies, receipt) => r.send(bodies, unit, receipt));
+  }
+
+  /**
+   * A manual SR store intent: the author's device signature over the exact SOP and DICOM bytes (records.ts
+   * planManualSrAdoption), verified by C, then ONE transaction with the adoption, the owning service's intent rows
+   * (`project`) and the access event. No signature, no intent: nothing is uploaded.
+   */
+  async adoptManualSr(request: unknown, a: ManualSrAdoptionRequest): Promise<ManualSrAdoption> {
+    const facts = await this.parts.context.facts(request);
+    // The row's author is a subject of the guard; the adoption's author is the verified immutable identity of that subject.
+    if (facts.actor.identity.subject !== a.sr.authorSubject) refuse('ActorPathRefused');
+    if (!facts.signature) refuse('SignatureRequired');
+    const study = await this.parts.studies.facts(this.parts.db, string(a.studyId));
+    const versionId = inspectEnvelopeV2(facts.signature.jws).payload.versionId;
+    const { authorSubject: _subject, ...rest } = a.sr;
+    const sr: PreparedSr = { ...rest, authorId: facts.actor.identity.id };
+    const plan = planManualSrAdoption({ actor: facts.actor, study, sr, versionId, at: new Date().toISOString() });
+    const carried: SignedEnvelope = { jws: facts.signature.jws as any, osUserId: facts.signature.osUserId, eventId: a.sr.id };
+    const port = deviceSignaturePort(this.parts.signatures, () => carried);
+    const signed = await port.sign(plan.signing, { originalId: `manual-sr:${a.sr.id}` }) as SignedEnvelope;
+    const evidence = await port.verify(signed, plan.signing);
+    const event = parseAccessEvent({ formatVersion: 1, surface: plan.access.route, eventId: `clinical-sr:${a.sr.id}`, userId: known({ ...facts.actor.identity }),
+      rolesAtTime: known([...facts.actor.roles]), actingInstitution: known(facts.actor.institutionId), managingInstitution: known(study.managingInstitutionId),
+      occurredAt: plan.adoption.at, trustedProxyIp: facts.trustedProxyIp, cause: 'user-view',
+      context: { basis: 'worklist', studyId: study.studyId, relatedStudyId: null, reason: null }, executor: 'member',
+      targets: [{ kind: 'manual-sr', patientLinkSnapshot: known({ ...study.patient }), studyId: known(study.studyId), recordId: known(a.sr.id),
+        versionId: known(versionId) }], action: 'write', result: 'succeeded', requestId: facts.requestId, auditLinkId: newAuditLinkId(), relatedEventId: null } as AccessEventV1);
+    const inspected = inspectEnvelopeV2(signed.jws);
+    const signature = JSON.stringify({ envelope: signed, evidence, signed: { kid: inspected.kid, signedAt: inspected.payload.signedAt } });
+    let appended: ProvisionalAppend, transaction: object, callbackFailed = false;
+    try {
+      appended = await this.parts.ledger.withAppendTransaction(async tx => {
+        transaction = tx;
+        try {
+          await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+          await tx.$queryRaw`SELECT emr_clinical.adopt_sr(${string(a.sr.id)}::text, ${string(versionId)}::text, ${string(plan.adoption.sha256)}::text,
+            ${string(a.sr.bytesSha256)}::text, ${string(a.sr.sopInstanceUid)}::text, ${string(study.studyId)}::text,
+            ${string(study.managingInstitutionId)}::text, ${JSON.stringify(plan.adoption)}::text, ${signature}::text,
+            ${JSON.stringify(event)}::text)::text AS done`;
+          await a.project(tx);
+          return await this.parts.ledger.appendInTransaction(tx, event);
+        } catch (error) { callbackFailed = true; throw error; }
+      });
+    } catch (error) {
+      try { await this.parts.ledger.settleTransaction(transaction, event, error, callbackFailed); } catch { /* journal only */ }
+      // A concurrent store of the same SR committed its signed adoption first: this attempt changed nothing.
+      if (clinicalSqlState(error) === 'ED006') return freeze({ adopted: 'earlier' as const, receipt: null });
+      throw error;
+    }
+    let receipt: DurableAccessReceipt | null = null;
+    try {
+      receipt = await this.parts.ledger.confirm(appended);
+      await this.parts.db.$queryRaw`SELECT emr_clinical.confirm_sr(${string(a.sr.id)}::text)::text AS done`;
+    } catch { receipt = null; /* committed; the restart scan confirms it before it is reported as stored */ }
+    return freeze({ adopted: 'now' as const, receipt });
+  }
+
+  /** The signed adoption of a prepared SR, or null (the reference fact for clean-up and reconciliation). */
+  srAdoption(recordId: string) { return readSrAdoption(this.parts.db, recordId); }
+  /** The prepared SRs among `recordIds` whose purpose end is already recorded. */
+  srPurposeEnds(recordIds: readonly string[]): Promise<ReadonlySet<string>> { return readSrPurposeEnds(this.parts.db, recordIds); }
+  /** Retained versions that incorporate or cite this record (the reference index). */
+  referencesTo(recordId: string) { return this.store.referencesTo(recordId); }
+  /** records.ts planManualSrCleanup: which expired copies reach their purpose end (the rest is kept). */
+  planSrCleanup(facts: readonly PreparedSr[], at: string) { return planManualSrCleanup(facts, at); }
+  /** records.ts reconcileManualSr: whether Orthanc's observation of an attempted SR adopts it. */
+  reconcileSr(facts: PreparedSr, observation: unknown) { return reconcileManualSr(facts, observation); }
+  /** Legal hold IDs on a record, read through B1's own adapter (D issues no emr_access SQL), for the clean-up's hold check. */
+  async holdIds(recordId: string): Promise<readonly string[]> {
+    const rows = await this.parts.ledger.holdRows(this.parts.db, string(recordId));
+    const released = new Set(rows.filter(r => r.phase === 'released').map(r => r.holdId));
+    return [...new Set(rows.filter(r => r.phase === 'placed' && !released.has(r.holdId)).map(r => r.holdId))].sort();
+  }
+}
+
+let composed: ClinicalRuntime | null = null;
+/**
+ * Server start only, once (B2's main.ts). A second composition is refused; nothing per request can replace a port. The
+ * owning services see the runtime only as their port (services.ts clinicalServices), bound here by assignment.
+ */
+export function composeClinicalRuntime(parts: ClinicalRuntimeParts): ClinicalRuntime {
+  if (composed || clinicalServices.port) refuse('ClinicalRuntimeAlreadyComposed');
+  for (const key of ['db', 'ledger', 'context', 'studies', 'signatures'] as const) if (!parts?.[key]) refuse('ClinicalRuntimePartRequired');
+  composed = new ClinicalRuntime(freeze({ ...parts }) as ClinicalRuntimeParts);
+  clinicalServices.port = composed;
+  return composed;
+}
+export function clinicalRuntime(): ClinicalRuntime {
+  if (!composed) refuse('EmrClinicalRuntimeRequired');
+  return composed;
+}

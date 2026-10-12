@@ -1,9 +1,12 @@
-import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { Injectable, BadRequestException, ConflictException, ForbiddenException, HttpException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { PrismaService } from './prisma.service';
 import { StudyAccessService } from './study-access.service';
 import { CLINICIAN_ROLE } from './clinician-policy';
 import type { Caller } from './pacs.service';
+import type { ClinicalWritePlan } from './emr-clinical/records';
+import { ClinicalWriteResult, clinicalHttpError, clinicalRefusal, clinicalText, outcomeCode, projectedCaller, readClinicalRows, registerClinicalProjection,
+  requireClinicalRuntime } from './emr-clinical/services';
 
 /**
  * S5-U4a 임상의 질문 스레드(계약 S5-U4p §3-§13, 지휘자 결정 D33).
@@ -13,6 +16,12 @@ import type { Caller } from './pacs.service';
  * 역할은 동작마다 명시한 집합으로 판정하고 need()를 쓰지 않는다: need()의 admin 예외가 있으면 판독의가 아닌
  * 관리자가 임상 답변을 쓰게 된다(OQ-3). 이 서비스는 Orthanc·Connect를 주입받지 않는다. 원본 태그 읽기는
  * StudyAccessService.prepare()가 권한 판정을 위해 트랜잭션·잠금 전에 할 뿐이다(§4.1).
+ *
+ * EMR-D 2라운드: 질문·추가 질문·답변·닫기는 각각 emr_clinical의 추가 전용 판 하나다(api/src/emr-clinical). 임상
+ * 기재(작성자 본인의 질문·답변)는 작성자 단말의 서명이 C 검증을 통과해야만 판·원장 사건·기존 행이 한 트랜잭션으로
+ * 커밋된다. 서명·원장·저장이 실패하면 성공 응답도 행 변경도 없고 같은 요청 ID는 그 결과만 다시 받는다. 기존 행
+ * (StudyQuestion·StudyQuestionEntry·AuditLog)은 판의 투영이며 커밋 트랜잭션 안의 project()만 바꾼다. 본문을 싣는
+ * 스레드 읽기(#2)는 그 판들에 대한 열람 사건이 원장에 내구 기록된 뒤에만 응답한다. 목록·요약에는 본문이 없다.
  */
 export const QUESTION_AUDIT_ACTION = 'study.question';
 export const QUESTION_BODY_MAX = 2000;
@@ -29,6 +38,8 @@ const CONTROL = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/;
 export type QuestionCaller = Caller & { name?: string };
 type Scope = 'all' | 'own';
 type Step = { action: string; kind: string; to: string; role: string; body: string };
+/** What the commit transaction needs besides the plan; kept with the original for recovery (no secret, no token). */
+type QuestionProjection = { caller: QuestionCaller; mark: string };
 
 const fingerprint = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const object = (value: any) => !!value && typeof value === 'object' && !Array.isArray(value);
@@ -54,10 +65,21 @@ const closedError = () => new ConflictException(error('QUESTION_CLOSED', '닫힌
 const stateError = () => new ConflictException(error('QUESTION_STATE', '지금 상태에서 할 수 없는 질문 동작입니다'));
 const entryLimit = () => new ConflictException(error('QUESTION_ENTRY_LIMIT', '질문 스레드의 항목 수 상한에 도달했습니다'));
 const busy = () => new ServiceUnavailableException(error('QUESTION_BUSY', '질문 처리 중입니다. 같은 요청으로 다시 시도하세요'));
+const closeReason = () => invalid('작성자가 아닌 사람이 질문을 닫을 때는 사유를 입력하세요');
+
+/** The service's own wording for each refusal of the clinical commit (D codes and its own projection codes). */
+const OWN: Readonly<Record<string, () => HttpException>> = Object.freeze({
+  StaleRevision: changed, QUESTION_CHANGED: changed, ProjectionConflict: changed, QUESTION_ENTRY_LIMIT: entryLimit, QUESTION_CLOSED: closedError,
+  QUESTION_STATE: stateError, STUDY_NOT_FOUND: studyMissing, QUESTION_NOT_FOUND: questionMissing, ProjectionNotFound: questionMissing,
+  NotFound: questionMissing, ActorPathRefused: actionForbidden, QUESTION_ACTION_FORBIDDEN: actionForbidden, OwnerChanged: ownerChanged,
+  RequestIdReused: reused, QUESTION_INPUT_INVALID: () => invalid(), QUESTION_BUSY: busy,
+});
 
 @Injectable()
 export class ClinicianQuestionService {
-  constructor(private prisma: PrismaService, private studyAccess: StudyAccessService) {}
+  constructor(private prisma: PrismaService, private studyAccess: StudyAccessService) {
+    registerClinicalProjection('question', (tx, plan, projection) => this.project(tx, plan, projection as QuestionProjection));
+  }
 
   private member(c: QuestionCaller) {
     if (c.kind !== 'member' || ![c.institution, c.sub, c.actor].every(v => typeof v === 'string' && v.length > 0 && v.length <= 256))
@@ -101,7 +123,7 @@ export class ClinicianQuestionService {
       if (e?.code === 'P2002') throw reused();
       if (['P2024', 'P2028', 'P2034'].includes(e?.code) || e?.code === 'P2010' && ['55P03', '57014', '40P01'].includes(e?.meta?.code))
         throw busy();
-      throw e;
+      throw clinicalRefusal(e, OWN);
     }
   }
 
@@ -143,15 +165,6 @@ export class ClinicianQuestionService {
     return { rs: typeof rs === 'string' ? rs : 'W', version: Number.isSafeInteger(version) && version > 0 ? version : null };
   }
 
-  /**
-   * 적용된 requestId의 재전송은 그 영수증에 저장한 결과를 그대로 돌려준다. 가시성 판정 뒤, revision·상태 판정 앞이라
-   * 접근을 잃으면 재전송도 거절되고, 뒤이은 전이·종결 뒤에도 같은 답이다. 내용·경로·부모·사용자가 다르면 409.
-   */
-  private replay(receipt: any, mark: string, questionId: string, c: Caller) {
-    if (receipt.fingerprint !== mark || receipt.questionId !== questionId || !object(receipt.result)) throw reused();
-    return { owner: this.owner(c), applied: receipt.result, replayed: true };
-  }
-
   /** 영수증 한 행과 감사 한 행을 같은 트랜잭션에 쓴다. 감사에는 본문·사유·환자 식별자가 없다(§11). */
   private async receipt(tx: any, c: Caller, applied: any, mark: string, body: string, role: string, anchor: any, at: Date, name: string) {
     await tx.studyQuestionEntry.create({ data: { id: applied.requestId, questionId: applied.id, seq: applied.entry.seq,
@@ -163,8 +176,8 @@ export class ClinicianQuestionService {
         from: applied.from, to: applied.to, revision: applied.revision, requestId: applied.requestId, role }) } });
   }
 
-  private async apply(tx: any, c: QuestionCaller, row: any, rs: any, requestId: string, mark: string, step: Step) {
-    const at = new Date(), seq = row.entryCount + 1, next = row.revision + 1, name = this.name(c);
+  private async apply(tx: any, c: QuestionCaller, row: any, rs: any, requestId: string, mark: string, step: Step, at: Date) {
+    const seq = row.entryCount + 1, next = row.revision + 1, name = this.name(c);
     const anchor = await this.anchor(tx, row.studyUid, rs);
     const applied = { id: row.id, studyUid: row.studyUid, requestId, action: step.action,
       entry: { id: requestId, seq, kind: step.kind }, from: row.state, to: step.to, revision: next, at: at.toISOString() };
@@ -172,7 +185,64 @@ export class ClinicianQuestionService {
     await tx.studyQuestion.update({ where: { id: row.id },
       data: { state: step.to, revision: next, entryCount: seq, changedBy: c.actor, updatedAt: at, ...closing } });
     await this.receipt(tx, c, applied, mark, step.body, step.role, anchor, at, name);
-    return { owner: this.owner(c), applied, replayed: false };
+  }
+
+  /**
+   * The legacy rows of one committed question version, inside the clinical commit transaction (registered projector).
+   * Visibility, the row's revision and state and the entry bounds are checked again under the row locks; the legacy row
+   * must be exactly the fold before this version, otherwise the whole commit rolls back.
+   */
+  private async project(tx: any, plan: Readonly<ClinicalWritePlan>, p: QuestionProjection) {
+    const c: QuestionCaller = projectedCaller(p.caller), v = plan.version, at = new Date(v.at), body = v.text ?? '';
+    const studyId = clinicalText(v.studyId), recordId = clinicalText(v.recordId), requestId = clinicalText(plan.requestId), mark = clinicalText(p.mark);
+    await this.studyAccess.snapshot(c, tx);
+    if (plan.surface === 'question.create') {
+      const state = await this.study(tx, studyId, c, true, studyMissing);
+      const name = this.name(c), anchor = await this.anchor(tx, studyId, state.rs);
+      const applied = { id: recordId, studyUid: studyId, requestId, action: 'create',
+        entry: { id: requestId, seq: 1, kind: 'question' }, from: null, to: 'Open', revision: 1, at: v.at };
+      await tx.studyQuestion.create({ data: { id: recordId, studyUid: studyId, institutionId: c.institution, authorSub: c.sub,
+        authorActor: c.actor, authorName: name, state: 'Open', revision: 1, entryCount: 1, changedBy: c.actor, createdAt: at, updatedAt: at } });
+      await this.receipt(tx, c, applied, mark, body, 'clinician', anchor, at, name);
+      return;
+    }
+    const { row, rs } = await this.question(tx, recordId, c, this.scope(c), true);
+    if (row.revision !== v.sequence - 1 || row.state !== v.state.from) throw changed();
+    if (plan.surface === 'question.reply') {
+      // 마지막 한 칸은 닫기 몫이다. 답변·추가 질문이 100칸을 모두 채우면 그 스레드는 닫을 수 없게 된다.
+      if (row.entryCount >= QUESTION_ENTRY_LIMIT - 1) throw entryLimit();
+      const answer = v.kind === 'clinical-answer';
+      return this.apply(tx, c, row, rs, requestId, mark, answer
+        ? { action: 'answer', kind: 'answer', to: 'Answered', role: RADIOLOGIST, body }
+        : { action: 'followup', kind: 'followup', to: 'Open', role: 'clinician', body }, at);
+    }
+    if (row.entryCount >= QUESTION_ENTRY_LIMIT) throw entryLimit();
+    const role = v.capacity === 'operational-staff' ? ADMIN : v.kind === 'clinical-answer' ? RADIOLOGIST : 'clinician';
+    return this.apply(tx, c, row, rs, requestId, mark, { action: 'close', kind: 'close', to: 'Closed', role, body }, at);
+  }
+
+  /** The stored receipt of a committed or replayed write; a failure carries this service's wording and no text. */
+  private async answer(result: ClinicalWriteResult, requestId: string, c: Caller) {
+    const o = result.outcome, code = outcomeCode(o);
+    if (code !== null) {
+      if (code === 'StateTransitionRefused') throw result.unit?.state === 'Closed' ? closedError() : stateError();
+      if (code === 'TextRequired') throw closeReason();
+      throw clinicalHttpError(code, OWN);
+    }
+    const entry = await this.prisma.studyQuestionEntry.findUnique({ where: { id: requestId } });
+    if (!entry || !object(entry.result)) throw busy();
+    return { owner: this.owner(c), applied: entry.result, replayed: o.status === 'replayed' };
+  }
+
+  private async write(request: unknown, c: QuestionCaller, surface: 'question.create' | 'question.reply' | 'question.close',
+    studyId: string, recordId: string, b: any, mark: string) {
+    const runtime = requireClinicalRuntime();
+    let result: ClinicalWriteResult;
+    try {
+      result = await runtime.write(request, { surface, studyId, recordId, body: b, caller: { subject: c.sub, institutionId: c.institution },
+        projection: { caller: { kind: c.kind, institution: c.institution, sub: c.sub, actor: c.actor, roles: [...c.roles], name: c.name }, mark } });
+    } catch (e) { throw clinicalRefusal(e, OWN); }
+    return this.answer(result, b.requestId.toLowerCase(), c);
   }
 
   private summary(row: any, lastEntryAt: any) {
@@ -231,16 +301,26 @@ export class ClinicianQuestionService {
         ? Buffer.from(JSON.stringify({ at: iso(last.createdAt), id: last.id, r: accessPolicy.revision })).toString('base64url') : null };
   }
 
-  /** #2 스레드 전체. */
-  async read(id: string, c: QuestionCaller) {
+  /**
+   * #2 스레드 전체. 본문은 이 판들(질문의 전체 이력)에 대한 열람 사건이 원장에 내구 기록된 뒤에만 나간다. 판과 기존 행은
+   * 같은 RepeatableRead 스냅샷에서 읽고, 기존 행이 판의 접힘과 다르면 본문 없이 409다.
+   */
+  async read(id: string, c: QuestionCaller, request?: unknown) {
     this.member(c);
+    const runtime = requireClinicalRuntime();
     const scope = this.scope(c);
     if (!uuid(id)) throw questionMissing();
     await this.studyAccess.prepare(c);
     return this.run(c, async tx => {
       const { row, rs } = await this.question(tx, id.toLowerCase(), c, scope, false);
       const entries: any[] = await tx.studyQuestionEntry.findMany({ where: { questionId: row.id }, orderBy: { seq: 'asc' } });
-      return { owner: this.owner(c), item: this.thread(row, entries, await this.anchor(tx, row.studyUid, rs)) };
+      const item = this.thread(row, entries, await this.anchor(tx, row.studyUid, rs));
+      const rows = await readClinicalRows(tx, row.id);
+      return runtime.read(request, { record: 'question', recordId: row.id, studyId: row.studyUid, scope: 'history', rows,
+        caller: { subject: c.sub, institutionId: c.institution }, send: async (_bodies, unit) => {
+          if (unit.versions.length !== entries.length || unit.revision !== row.revision) throw changed();
+          return { owner: this.owner(c), item };
+        } });
     }, true);
   }
 
@@ -263,8 +343,9 @@ export class ClinicianQuestionService {
   }
 
   /** #4 질문 등록. 작성자·기관·역할 표지는 토큰에서만 오고 body에는 정확히 세 키만 받는다. */
-  async create(uid: string, c: QuestionCaller, b: any) {
+  async create(uid: string, c: QuestionCaller, b: any, request?: unknown) {
     this.member(c);
+    requireClinicalRuntime();
     if (!holds(c, CLINICIAN_ROLE)) throw roleRequired();
     if (!studyUid(uid)) throw invalid('검사 UID를 확인하세요');
     if (!exactKeys(b, ['requestId', 'expectedOwner', 'body']) || !uuid(b.requestId) || !text(b.body))
@@ -273,76 +354,40 @@ export class ClinicianQuestionService {
     const requestId = b.requestId.toLowerCase();
     const mark = fingerprint({ uid, institution: c.institution, subject: c.sub, body: b.body });
     await this.studyAccess.prepare(c, [uid]);
-    return this.run(c, async tx => {
-      const state = await this.study(tx, uid, c, true, studyMissing);
-      const receipt = await tx.studyQuestionEntry.findUnique({ where: { id: requestId } });
-      if (receipt) return this.replay(receipt, mark, requestId, c);
-      const at = new Date(), name = this.name(c), anchor = await this.anchor(tx, uid, state.rs);
-      const applied = { id: requestId, studyUid: uid, requestId, action: 'create', entry: { id: requestId, seq: 1, kind: 'question' },
-        from: null, to: 'Open', revision: 1, at: at.toISOString() };
-      await tx.studyQuestion.create({ data: { id: requestId, studyUid: uid, institutionId: c.institution, authorSub: c.sub,
-        authorActor: c.actor, authorName: name, state: 'Open', revision: 1, entryCount: 1, changedBy: c.actor,
-        createdAt: at, updatedAt: at } });
-      await this.receipt(tx, c, applied, mark, b.body, 'clinician', anchor, at, name);
-      return { owner: this.owner(c), applied, replayed: false };
-    });
+    // Visibility first, without a lock: an absent, foreign or refused study registers nothing.
+    await this.run(c, tx => this.study(tx, uid, c, false, studyMissing), true);
+    return this.write(request, c, 'question.create', uid, requestId, b, mark);
   }
 
   /** #5 답변 또는 추가 질문. 종류는 서버가 정한다: 작성자면 followup(clinician), 아니면 answer(radiologist). */
-  async reply(id: string, c: QuestionCaller, b: any) {
+  async reply(id: string, c: QuestionCaller, b: any, request?: unknown) {
     this.member(c);
+    requireClinicalRuntime();
     if (!holds(c, CLINICIAN_ROLE) && !holds(c, RADIOLOGIST)) throw roleRequired();
     if (!exactKeys(b, ['requestId', 'expectedOwner', 'revision', 'body']) || !uuid(b.requestId) || !revision(b.revision) || !text(b.body))
       throw invalid('요청 ID·기준 revision과 1~2,000자의 내용을 입력하세요');
     this.expectOwner(c, b);
     if (!uuid(id)) throw questionMissing();
-    const questionId = id.toLowerCase(), requestId = b.requestId.toLowerCase(), scope = this.scope(c);
+    const questionId = id.toLowerCase(), scope = this.scope(c);
     const mark = fingerprint({ id: questionId, institution: c.institution, subject: c.sub, revision: b.revision, action: 'reply', body: b.body });
     await this.studyAccess.prepare(c);
-    return this.run(c, async tx => {
-      const { row, rs } = await this.question(tx, questionId, c, scope, true);
-      const receipt = await tx.studyQuestionEntry.findUnique({ where: { id: requestId } });
-      if (receipt) return this.replay(receipt, mark, questionId, c);
-      if (row.revision !== b.revision) throw changed();
-      if (row.state === 'Closed') throw closedError();
-      if (!['Open', 'Answered'].includes(row.state)) throw stateError();
-      const author = row.authorSub === c.sub;
-      if (author ? !holds(c, CLINICIAN_ROLE) : !holds(c, RADIOLOGIST)) throw actionForbidden();
-      // 마지막 한 칸은 닫기 몫이다. 답변·추가 질문이 100칸을 모두 채우면 그 스레드는 닫을 수 없게 된다.
-      if (row.entryCount >= QUESTION_ENTRY_LIMIT - 1) throw entryLimit();
-      return this.apply(tx, c, row, rs, requestId, mark, author
-        ? { action: 'followup', kind: 'followup', to: 'Open', role: 'clinician', body: b.body }
-        : { action: 'answer', kind: 'answer', to: 'Answered', role: RADIOLOGIST, body: b.body });
-    });
+    const { row } = await this.run(c, tx => this.question(tx, questionId, c, scope, false), true);
+    return this.write(request, c, 'question.reply', row.studyUid, questionId, b, mark);
   }
 
   /** #6 닫기. 작성자(clinician)는 사유를 비울 수 있고, 판독의·관리자가 남의 질문을 닫을 때는 사유가 필요하다. */
-  async close(id: string, c: QuestionCaller, b: any) {
+  async close(id: string, c: QuestionCaller, b: any, request?: unknown) {
     this.member(c);
+    requireClinicalRuntime();
     if (!holds(c, CLINICIAN_ROLE) && !holds(c, RADIOLOGIST) && !holds(c, ADMIN)) throw roleRequired();
     if (!exactKeys(b, ['requestId', 'expectedOwner', 'revision', 'note']) || !uuid(b.requestId) || !revision(b.revision)
       || b.note !== '' && !text(b.note)) throw invalid('요청 ID·기준 revision과 2,000자 이하의 사유를 확인하세요');
     this.expectOwner(c, b);
     if (!uuid(id)) throw questionMissing();
-    const questionId = id.toLowerCase(), requestId = b.requestId.toLowerCase(), scope = this.scope(c);
+    const questionId = id.toLowerCase(), scope = this.scope(c);
     const mark = fingerprint({ id: questionId, institution: c.institution, subject: c.sub, revision: b.revision, action: 'close', note: b.note });
     await this.studyAccess.prepare(c);
-    return this.run(c, async tx => {
-      const { row, rs } = await this.question(tx, questionId, c, scope, true);
-      const receipt = await tx.studyQuestionEntry.findUnique({ where: { id: requestId } });
-      if (receipt) return this.replay(receipt, mark, questionId, c);
-      if (row.revision !== b.revision) throw changed();
-      if (row.state === 'Closed') throw closedError();
-      if (!['Open', 'Answered'].includes(row.state)) throw stateError();
-      const author = row.authorSub === c.sub;
-      let role: string;
-      if (author && holds(c, CLINICIAN_ROLE)) role = 'clinician';
-      else if (!author && (holds(c, RADIOLOGIST) || holds(c, ADMIN))) {
-        if (b.note === '') throw invalid('작성자가 아닌 사람이 질문을 닫을 때는 사유를 입력하세요');
-        role = holds(c, RADIOLOGIST) ? RADIOLOGIST : ADMIN;
-      } else throw actionForbidden();
-      if (row.entryCount >= QUESTION_ENTRY_LIMIT) throw entryLimit();
-      return this.apply(tx, c, row, rs, requestId, mark, { action: 'close', kind: 'close', to: 'Closed', role, body: b.note });
-    });
+    const { row } = await this.run(c, tx => this.question(tx, questionId, c, scope, false), true);
+    return this.write(request, c, 'question.close', row.studyUid, questionId, b, mark);
   }
 }

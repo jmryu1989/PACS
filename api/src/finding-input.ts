@@ -77,7 +77,10 @@ export function findingCommand(raw: Buffer, create: boolean): FindingCommand {
   const action = create ? 'create' : body.action;
   if (!['create', 'edit', 'hide', 'restore'].includes(action) || (!create && action === 'create')) invalid();
   const reason = text(body.reason === undefined ? '' : body.reason, 1000);
-  if ((action === 'hide' || action === 'restore') ? !reason.trim() : reason !== '') invalid('숨김/복원에는 사유가 필요합니다');
+  // EMR-D (D-18): hide and restore inside the author's own reading need no typed reason - the server binds it from that
+  // context (api/src/emr-clinical records.ts); outside it the clinical commit refuses with ReasonRequired. An edit and a
+  // create still carry none.
+  if (action !== 'hide' && action !== 'restore' && reason !== '') invalid('숨김/복원에만 사유를 적습니다');
   const item = body.item;
   const version: 1 | 2 = item && typeof item === 'object' && !Array.isArray(item) && item.schemaVersion === 2 ? 2 : 1;
   if (version === 2) object(item, ['schemaVersion', 'title', 'text', 'characteristics', 'sources'], ['primary']);

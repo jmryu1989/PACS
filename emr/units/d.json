@@ -1,0 +1,344 @@
+{
+  "unit": "EMR-D",
+  "round": "R2-server",
+  "base_sha": "1414783eb6274a50b3475daf8eb0f3bb53a20fd1",
+  "dependencies": {
+    "landed": [
+      "EMR-A contract (PR #142): RecordKind, VersionReference, PatientLinkSnapshot, access events, routes, signature v1",
+      "EMR-B1 (PR #163/#165): AccessLedgerStore withAppendTransaction/appendInTransaction/confirm/settleTransaction, migrations 20261008120000_emr_b, 20261010120000_emr_seal_attempts, 20261010150000_emr_read_jit_off, roles kin_emr_owner/kin_runtime/kin_emr_reader/kin_emr_retention, tablespace kin_emr_access",
+      "EMR-C1 (PR #154, unwired modules): api/src/emr-signature verifySignatureV2, KeyReader/AnchorReader/KeyPolicy/TimePolicy ports, canonicalPayloadV2",
+      "EMR-D-R1 (PR #154): api/src/emr-clinical/contract.ts, records.ts (ClinicalStorePort, SignaturePort, plans)",
+      "EMR-H-R1 (PR #154, unwired modules): api/src/emr-retention"
+    ],
+    "not_landed": [
+      "EMR-B2 verified authentication context and the server start composition in main.ts (ClinicalContextSource; composeClinicalRuntime call)",
+      "EMR-C2 key registry, anchor and policy storage (SignatureVerificationPorts), the clinical study reader (ClinicalStudySource) and the page/native signature channel",
+      "EMR-H-R2 purpose-end destruction of emr_clinical.sr_purpose_end candidates"
+    ]
+  },
+  "owned_paths": {
+    "R1": [
+      "api/src/emr-clinical/contract.ts",
+      "api/src/emr-clinical/records.ts",
+      "tests/emr/d/contract_test.cjs",
+      "tests/emr/d/mutants.py",
+      ".github/workflows/emr-d.yml"
+    ],
+    "R2-server": [
+      "api/src/emr-clinical/store.ts",
+      "api/src/emr-clinical/signing.ts",
+      "api/src/emr-clinical/runtime.ts",
+      "api/src/emr-clinical/services.ts",
+      "api/src/clinician-question.service.ts",
+      "api/src/image-request.service.ts",
+      "api/src/consultation.service.ts",
+      "api/src/finding.service.ts",
+      "api/src/manual-sr.service.ts",
+      "api/src/reader-assignment.service.ts",
+      "api/src/clinician-question.controller.ts",
+      "api/src/image-request.controller.ts",
+      "api/src/consultation.controller.ts",
+      "api/src/finding.controller.ts",
+      "api/src/manual-sr.controller.ts",
+      "api/src/reader-assignment.controller.ts",
+      "api/src/finding-input.ts",
+      "api/src/manual-sr-dicom.ts",
+      "api/prisma/migrations/20261012120000_emr_d/migration.sql",
+      "emr/units/d.json",
+      "tests/emr/d/server_test.cjs",
+      "tests/emr/d/device.cjs",
+      "tests/emr/d/live.py",
+      "tests/emr/d/live_driver.cjs"
+    ],
+    "R2-migration-same-commit": [
+      "tests/production_image_test.py",
+      "tests/ops_product_transfer_fixture.py",
+      "tests/ops_product_transfer_test.py"
+    ],
+    "R2-page (another worker, after W6)": [
+      "worklist-v0/hpacs-lite/consultations.js",
+      "worklist-v0/hpacs-lite/finding-command.js",
+      "worklist-v0/hpacs-lite/finding-link-model.js",
+      "worklist-v0/hpacs-lite/reading-findings.js",
+      "worklist-v0/hpacs-lite/viewer-findings.js",
+      "worklist-v0/hpacs-lite/reader-assignment.js",
+      "tests/clinician_question_dom_test.py",
+      "tests/clinician_request_dom_test.py",
+      "tests/finding_command_test.cjs",
+      "tests/e2e/test_consultations.py",
+      "tests/e2e/test_manual_sr.py"
+    ]
+  },
+  "routes": {
+    "writes": {
+      "question.create": "POST studies/:uid/questions",
+      "question.reply": "POST questions/:id/entries",
+      "question.close": "POST questions/:id/close",
+      "consultation.create": "POST studies/:uid/consultations",
+      "consultation.accept|complete|cancel": "POST consultations/:id",
+      "image-request.create": "POST studies/:uid/image-requests",
+      "image-request.accept|close|decline|cancel": "POST image-requests/:id",
+      "finding.create": "POST studies/:uid/findings",
+      "finding.edit|hide|restore": "POST studies/:uid/findings/:id/revisions",
+      "assignment.write": "POST studies/:uid/reader-assignment",
+      "manual-sr adoption": "POST studies/:uid/manual-sr/:id/store"
+    },
+    "reads_logged_before_body": {
+      "question": "GET questions/:id",
+      "consultation": "GET consultations/:id",
+      "image-request": "GET image-requests/:id"
+    },
+    "added": [],
+    "note": "D adds no Nest route; the six controllers pass the request itself so that B2/C ports read the verified context and the carried device signature from it"
+  },
+  "records": {
+    "kinds_written": [
+      "clinical-question",
+      "clinical-answer",
+      "consultation",
+      "image-request",
+      "finding",
+      "assignment",
+      "manual-sr"
+    ],
+    "signed": "a clinical-entry version only, by its own author's registered device key (C v2 verification); no proxy, no service account, no server key",
+    "unsigned": "operational notes (technician/administrator processing), state changes and assignments"
+  },
+  "schema": {
+    "name": "emr_clinical",
+    "owner": "kin_emr_owner",
+    "tablespace": "kin_emr_access",
+    "tables": {
+      "unit": [
+        "clinical-question",
+        "clinical-answer",
+        "consultation",
+        "image-request",
+        "finding",
+        "assignment",
+        "tech-note",
+        "operational-note"
+      ],
+      "version": [
+        "clinical-question",
+        "clinical-answer",
+        "consultation",
+        "image-request",
+        "finding",
+        "assignment",
+        "tech-note",
+        "operational-note",
+        "signature-evidence"
+      ],
+      "attachment": [
+        "clinical-question",
+        "consultation",
+        "finding",
+        "image-request"
+      ],
+      "request": [
+        "clinical-question",
+        "clinical-answer",
+        "consultation",
+        "image-request",
+        "finding",
+        "assignment",
+        "tech-note",
+        "operational-note"
+      ],
+      "attempt": [
+        "system-operation"
+      ],
+      "sr_adoption": [
+        "manual-sr",
+        "signature-evidence"
+      ],
+      "sr_purpose_end": [
+        "manual-sr"
+      ]
+    },
+    "runtime_functions": [
+      "storage_placement()",
+      "admit(text,text,text,text,text,text,text,text)",
+      "observe(text,text,text,text,text,boolean)",
+      "checkpoint(text,text,text,uuid,integer,text,text,text)",
+      "commit_version(text,text,text,uuid,integer,text,text,text,text,text,text,text,boolean,integer,text,text,text,text,text,text,text,text)",
+      "seal_rejected(text,text,text,uuid,integer,text,text)",
+      "recover(text,text,text,text)",
+      "confirm_request(text,text,text,uuid)",
+      "note_attempt(text,text,text,text,text,uuid)",
+      "open_requests(integer)",
+      "unit_for(text)",
+      "references_to(text)",
+      "adopt_sr(text,text,text,text,text,text,text,text,text,text)",
+      "confirm_sr(text)",
+      "open_sr_adoptions(integer)",
+      "sr_adoption_for(text)",
+      "record_sr_purpose_end(text,text,text)",
+      "sr_purpose_ends(text[])"
+    ],
+    "reader_functions": [
+      "storage_placement()",
+      "unit_for(text)",
+      "references_to(text)",
+      "sr_adoption_for(text)",
+      "sr_purpose_ends(text[])"
+    ],
+    "reader_tables": [
+      "unit",
+      "version",
+      "attachment",
+      "sr_adoption",
+      "sr_purpose_end"
+    ],
+    "sqlstates": {
+      "ED001": "EmrClinicalPlacementRequired",
+      "ED002": "RequestIdReused",
+      "ED003": "StaleRevision",
+      "ED004": "PermitFenced",
+      "ED005": "ClinicalVersionInvalid",
+      "ED006": "SrAlreadyAdopted"
+    },
+    "classification_note": "A's SQL_STORAGE_CLASSIFICATION (api/src/emr-contract/classification.ts, not a D path) lists emr_access only; registering emr_clinical there is the A/B owner's exact one-table patch (see the D result blockers)"
+  },
+  "migrations": {
+    "added": [
+      "20261012120000_emr_d"
+    ],
+    "count": 46,
+    "latest_before": "20261010150000_emr_read_jit_off"
+  },
+  "composition": {
+    "call": "composeClinicalRuntime({ db, ledger, context, studies, signatures }) once at server start, then runtime.start() (restart scan of open originals and unconfirmed SR adoptions)",
+    "db": "B1 EmrLedgerClient (the ledger's own pool)",
+    "ledger": "B1 AccessLedgerStore after seal.recoverAtStart()",
+    "context": "B2 ClinicalContextSource.facts(request): verified ActorFacts (immutable identity, roles, institution, signing registration), trusted ingress address, request ID, member(subject) resolver, and C's carried device signature {jws, osUserId}",
+    "studies": "C ClinicalStudySource.facts(db, studyId): managing institution and patient link snapshot",
+    "signatures": "C SignatureVerificationPorts: KeyReader of registered device keys, KeyPolicy (production: tpm-nonexportable only), AnchorReader, reviewed TimePolicy",
+    "services": "the six owning services import only api/src/emr-clinical/services.ts (port, projections, readClinicalRows, wording); composeClinicalRuntime binds the runtime there by assignment, so no call connects their code with B1's adapter",
+    "absent": "every owning service answers 503 EMR_CLINICAL_RUNTIME_REQUIRED before any database work; no legacy write or body path remains"
+  },
+  "cases": {
+    "contract": {
+      "file": "tests/emr/d/contract_test.cjs",
+      "round": "R1",
+      "count": 106,
+      "skipped": [
+        "CONSULT C52 actual view ABA and account-generation application"
+      ]
+    },
+    "server": {
+      "file": "tests/emr/d/server_test.cjs",
+      "cases": [
+        "TEST-D-01 clinical_vs_operational server: the author's device signature over the planned entry is accepted for that author only",
+        "TEST-D-04 atomic_retry server: an absent, altered, held, inactive, offline or foreign-request signature is refused before any commit",
+        "TEST-D-02 versions_and_sr server: a manual SR adoption is the author's signature over the exact SOP and bytes",
+        "TEST-D-03 read_scope server: a write's access event names exactly its version, in both streams, with the bound context",
+        "TEST-D-04 atomic_retry server: without the EMR composition every owning service refuses before touching the database",
+        "TEST-D-01 clinical_vs_operational server: refusals reach the caller as closed errors without clinical text",
+        "TEST-D-04 atomic_retry server: the runtime is composed once with every port and refuses a second composition",
+        "EMR-D-R2 declaration: d.json lists exactly the collected server and live cases, existing owned paths and the newest migration"
+      ]
+    },
+    "live": {
+      "file": "tests/emr/d/live.py",
+      "class": "EmrDLive",
+      "profile_suites": [
+        [
+          "emr/d/live.py",
+          "EmrDLive",
+          "ci-emr-d"
+        ]
+      ],
+      "cases": [
+        "test_d00_schema_roles_and_placement",
+        "test_d01_clinical_vs_operational",
+        "test_d02_versions_and_sr",
+        "test_d03_read_scope",
+        "test_d04_atomic_retry",
+        "test_d_flow_write_amend_reopen",
+        "test_m_d_01_clinical_entry_as_assignment",
+        "test_m_d_02_version_text_dropped",
+        "test_m_d_03_unbound_signature_succeeds",
+        "test_m_d_04_adopted_sr_cleared",
+        "test_m_d_05_institution_boundary_skipped"
+      ]
+    }
+  },
+  "mutants": {
+    "pure": "tests/emr/d/mutants.py (R1: M-D-01..05 and M-D-R1-*, against tests/emr/d/contract_test.cjs)",
+    "live": [
+      {
+        "id": "M-D-01",
+        "file": "emr-clinical/contract.js",
+        "kill": "test_m_d_01_clinical_entry_as_assignment",
+        "behaviour": "a clinician's question is recorded as an assignment: committed without a signature (TEST-D-01 check of test_d01_clinical_vs_operational)"
+      },
+      {
+        "id": "M-D-02",
+        "file": "emr-clinical/store.js",
+        "kill": "test_m_d_02_version_text_dropped",
+        "behaviour": "a version is stored without its text: the earlier note is not retrievable after the legacy row is overwritten (TEST-D-02 check of test_d02_versions_and_sr)"
+      },
+      {
+        "id": "M-D-03",
+        "file": "emr-clinical/signing.js",
+        "kill": "test_m_d_03_unbound_signature_succeeds",
+        "behaviour": "a signature over another text is accepted: a write answers success and commits (TEST-D-04 check of test_d04_atomic_retry)"
+      },
+      {
+        "id": "M-D-04",
+        "file": "emr-clinical/records.js",
+        "kill": "test_m_d_04_adopted_sr_cleared",
+        "behaviour": "the 24-hour window ends an adopted, upload-pending SR: the clean-up no longer completes with the adopted bytes kept (TEST-D-02 SR check of test_d02_versions_and_sr)"
+      },
+      {
+        "id": "M-D-05",
+        "file": "emr-clinical/records.js",
+        "kill": "test_m_d_05_institution_boundary_skipped",
+        "behaviour": "the institution boundary is skipped: another institution's verified reader receives a body through the runtime (TEST-D-03 check of test_d03_read_scope)"
+      }
+    ],
+    "not_run": [
+      {
+        "id": "M-D-06",
+        "reason": "the delayed-response sequence check lives in page code (TEST-D-05 ui_reopen), the page round's"
+      }
+    ]
+  },
+  "expected": {
+    "server": 8,
+    "live": 11,
+    "live_mutants": 5,
+    "migrations": 46,
+    "note": "declared before running; never generated from a run's own result"
+  },
+  "candidate_flow": "EmrDLive.test_d_flow_write_amend_reopen",
+  "req_risk_test": [
+    {
+      "req": "REQ-EMR-01/03/04",
+      "risk": "RISK-D-01",
+      "test": "TEST-D-01 clinical_vs_operational: server_test cases 1 and 6, live test_d01_clinical_vs_operational, M-D-01"
+    },
+    {
+      "req": "REQ-EMR-03/05/17",
+      "risk": "RISK-D-02",
+      "test": "TEST-D-02 versions_and_sr: server_test case 3, live test_d02_versions_and_sr and test_d_flow_write_amend_reopen, M-D-02, M-D-04"
+    },
+    {
+      "req": "REQ-EMR-07/10",
+      "risk": "RISK-D-03",
+      "test": "TEST-D-03 read_scope: server_test case 4, live test_d03_read_scope, M-D-05"
+    },
+    {
+      "req": "REQ-EMR-01/07",
+      "risk": "RISK-D-04",
+      "test": "TEST-D-04 atomic_retry: server_test cases 2, 5 and 7, live test_d04_atomic_retry, M-D-03"
+    },
+    {
+      "req": "REQ-EMR-10",
+      "risk": "RISK-D-05",
+      "test": "TEST-D-05 ui_reopen: page round (not in this round)"
+    }
+  ]
+}

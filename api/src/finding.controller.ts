@@ -9,6 +9,8 @@ const caller = (req: any): Caller => ({ sub: req.sub, actor: req.actor, roles: r
 const SCHEMA = 'X-KIN-Finding-Schema';
 const announce = (res: any) => { res.setHeader(SCHEMA, '2'); };
 const requested = (req: any) => { const value = req.headers?.['x-kin-finding-schema']; return typeof value === 'string' ? value : undefined; };
+// EMR-D: a write also passes the request itself; the verified context (B2) and the carried device signature (C) are read
+// from it by server ports only, never from body fields.
 
 @Controller()
 export class FindingController {
@@ -24,7 +26,7 @@ export class FindingController {
   @HttpCode(200)
   create(@Param('uid') uid: string, @Req() req: any, @Res({ passthrough: true }) res: any) {
     announce(res);
-    return this.svc.write(uid, req.rawBody, caller(req));
+    return this.svc.write(uid, req.rawBody, caller(req), undefined, req);
   }
 
   @Get('studies/:uid/findings/:id/revisions')
@@ -37,6 +39,6 @@ export class FindingController {
   @HttpCode(200)
   revise(@Param('uid') uid: string, @Param('id') id: string, @Req() req: any, @Res({ passthrough: true }) res: any) {
     announce(res);
-    return this.svc.write(uid, req.rawBody, caller(req), id);
+    return this.svc.write(uid, req.rawBody, caller(req), id, req);
   }
 }

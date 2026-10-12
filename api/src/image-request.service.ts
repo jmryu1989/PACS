@@ -1,9 +1,13 @@
-import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { Injectable, BadRequestException, ConflictException, ForbiddenException, HttpException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { PrismaService } from './prisma.service';
 import { StudyAccessService } from './study-access.service';
 import { CLINICIAN_ROLE } from './clinician-policy';
 import type { Caller } from './pacs.service';
+import type { ClinicalWritePlan } from './emr-clinical/records';
+import type { SurfaceKey } from './emr-clinical/contract';
+import { ClinicalWriteResult, clinicalHttpError, clinicalRefusal, clinicalText, outcomeCode, projectedCaller, readClinicalRows, registerClinicalProjection,
+  requireClinicalRuntime } from './emr-clinical/services';
 
 /**
  * S5-U4c 외부영상(ARCH-143)·영상전송(ARCH-144) 요청의 등록과 처리 상태(계약 S5-U4p §3-§13, 지휘자 결정 D33).
@@ -15,6 +19,11 @@ import type { Caller } from './pacs.service';
  * 역할은 동작마다 명시한 집합으로 판정하고 pacs.service의 need 판정(admin 예외)을 쓰지 않는다: 처리(accept·close·decline)는 technician·admin,
  * 판독의는 읽기만, 취소는 요청한 임상의 또는 admin이다(OQ-5 a). 소유 기관만 참여하고 원격판독 기관과 상대 기관은
  * 어떤 역할로도 읽지 못한다(OQ-1 a, T-5).
+ *
+ * EMR-D 2라운드: 등록·처리·취소는 각각 emr_clinical의 추가 전용 판이다. 요청한 임상의 본인의 사유·취소 사유는 임상
+ * 지시/의견 기재로 작성자 단말 서명이 있어야 커밋되고, 방사선사·관리자의 처리 note는 서명 없는 업무 기재로 남는다
+ * (대리 서명 없음). note를 덮어쓰는 기존 행(StudyImageRequest.note)은 투영이며 이전 note는 판에 그대로 남는다. 본문을
+ * 싣는 한 건 읽기(#8)는 열람 사건이 원장에 내구 기록된 뒤에만 응답한다.
  */
 export const IMAGE_REQUEST_AUDIT_ACTION = 'study.image-request';
 export const IMAGE_REQUEST_KINDS: readonly string[] = Object.freeze(['external-image', 'image-transfer']);
@@ -46,6 +55,8 @@ type CreateRequest = { requestId: string; expectedOwner: unknown; kind: 'externa
   counterparty: string; counterpartyInstitutionId: string | null; reason: string };
 type ListQuery = { view?: string; state?: string; kind?: string; cursor?: string };
 type Scope = 'all' | 'own';
+/** What the commit transaction needs besides the plan; kept with the original for recovery (no secret, no token). */
+type RequestProjection = { caller: RequestCaller; mark: string; create: CreateRequest | null; action: string | null };
 
 const fingerprint = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const object = (value: any) => !!value && typeof value === 'object' && !Array.isArray(value);
@@ -75,9 +86,20 @@ const stateError = () => new ConflictException(error('IMAGE_REQUEST_STATE', '지
 const activeExists = () => new ConflictException(error('IMAGE_REQUEST_ACTIVE_EXISTS', '같은 검사·종류로 처리 중인 요청이 이미 있습니다'));
 const busy = () => new ServiceUnavailableException(error('IMAGE_REQUEST_BUSY', '영상 요청 처리 중입니다. 같은 요청으로 다시 시도하세요'));
 
+/** The service's own wording for each refusal of the clinical commit (D codes and its own projection codes). */
+const OWN: Readonly<Record<string, () => HttpException>> = Object.freeze({
+  StaleRevision: changed, IMAGE_REQUEST_CHANGED: changed, ProjectionConflict: changed, StateTransitionRefused: stateError,
+  IMAGE_REQUEST_STATE: stateError, IMAGE_REQUEST_ACTIVE_EXISTS: activeExists, IMAGE_REQUEST_COUNTERPARTY_INVALID: counterpartyInvalid,
+  STUDY_NOT_FOUND: studyMissing, IMAGE_REQUEST_NOT_FOUND: requestMissing, ProjectionNotFound: requestMissing, NotFound: requestMissing,
+  ActorPathRefused: actionForbidden, IMAGE_REQUEST_ACTION_FORBIDDEN: actionForbidden, OwnerChanged: ownerChanged, RequestIdReused: reused,
+  IMAGE_REQUEST_INPUT_INVALID: () => invalid(), IMAGE_REQUEST_BUSY: busy,
+});
+
 @Injectable()
 export class ImageRequestService {
-  constructor(private prisma: PrismaService, private studyAccess: StudyAccessService) {}
+  constructor(private prisma: PrismaService, private studyAccess: StudyAccessService) {
+    registerClinicalProjection('image-request', (tx, plan, projection) => this.project(tx, plan, projection as RequestProjection));
+  }
 
   private member(c: RequestCaller) {
     if (c.kind !== 'member' || ![c.institution, c.sub, c.actor].every(v => typeof v === 'string' && v.length > 0 && v.length <= 256))
@@ -125,7 +147,7 @@ export class ImageRequestService {
       }
       if (['P2024', 'P2028', 'P2034'].includes(e?.code) || e?.code === 'P2010' && ['55P03', '57014', '40P01'].includes(e?.meta?.code))
         throw busy();
-      throw e;
+      throw clinicalRefusal(e, OWN);
     }
   }
 
@@ -161,17 +183,6 @@ export class ImageRequestService {
     return row;
   }
 
-  /**
-   * 적용된 requestId의 재전송은 그 영수증에 저장한 결과를 그대로 돌려준다. 가시성 판정 뒤, revision·상태·활성 중복 판정
-   * 앞이라 접근을 잃으면 재전송도 거절되고, 뒤이은 전이·종결·새 활성 요청 뒤에도 같은 답이다. 내용·경로·부모·사용자가
-   * 다르면 409.
-   */
-  private replay(receipt: any, mark: string, imageRequestId: string, c: Caller) {
-    if (receipt.fingerprint !== mark || receipt.imageRequestId !== imageRequestId || receipt.subjectSub !== c.sub || !object(receipt.result))
-      throw reused();
-    return { owner: this.owner(c), applied: receipt.result, replayed: true };
-  }
-
   /** 영수증 한 행과 감사 한 행을 같은 트랜잭션에 쓴다. 감사에는 사유·note·상대 기관 문장·환자 식별자가 없다(§11). */
   private async receipt(tx: any, c: Caller, applied: any, mark: string, counterpartyInstitutionId: string | null, role: string, at: Date) {
     await tx.studyImageRequestReceipt.create({ data: { requestId: applied.requestId, imageRequestId: applied.id, subjectSub: c.sub,
@@ -182,8 +193,8 @@ export class ImageRequestService {
         counterpartyInstitutionId, role }) } });
   }
 
-  private async apply(tx: any, c: RequestCaller, row: any, requestId: string, mark: string, action: string, to: string, role: string, note: string) {
-    const at = new Date(), next = row.revision + 1;
+  private async apply(tx: any, c: RequestCaller, row: any, requestId: string, mark: string, action: string, to: string, role: string, note: string, at: Date) {
+    const next = row.revision + 1;
     const applied = { id: row.id, studyUid: row.studyUid, requestId, kind: row.kind, action, from: row.state, to, revision: next,
       at: at.toISOString() };
     // 처리자는 처리 상태를 바꾼 직원(technician·admin)이다. 요청한 임상의 자신의 취소는 처리자를 바꾸지 않는다.
@@ -191,7 +202,64 @@ export class ImageRequestService {
     await tx.studyImageRequest.update({ where: { id: row.id },
       data: { state: to, revision: next, note: action === 'accept' ? null : note, changedBy: c.actor, updatedAt: at, ...handler } });
     await this.receipt(tx, c, applied, mark, row.counterpartyInstitutionId ?? null, role, at);
-    return { owner: this.owner(c), applied, replayed: false };
+  }
+
+  /**
+   * The legacy rows of one committed image-request version, inside the clinical commit transaction (registered
+   * projector). Visibility, the counterparty, the one-active rule and the row's revision/state are checked again under
+   * the row locks; the legacy row must be exactly the fold before this version, otherwise the whole commit rolls back.
+   */
+  private async project(tx: any, plan: Readonly<ClinicalWritePlan>, p: RequestProjection) {
+    const c: RequestCaller = projectedCaller(p.caller), v = plan.version, at = new Date(v.at);
+    const studyId = clinicalText(v.studyId), recordId = clinicalText(v.recordId), requestId = clinicalText(plan.requestId), mark = clinicalText(p.mark), sub = clinicalText(c.sub);
+    await this.studyAccess.snapshot(c, tx);
+    if (plan.surface === 'image-request.create') {
+      const b = p.create, kind = clinicalText(b.kind);
+      const counterpartyId = b.counterpartyInstitutionId === null ? null : clinicalText(b.counterpartyInstitutionId);
+      await this.study(tx, studyId, c, true, studyMissing);
+      if (counterpartyId !== null) {
+        // 잠금은 그 기관 행이 커밋 전에 지워지거나 id가 바뀌지 않게 할 뿐이다. 상대 기관에 어떤 열람도 생기지 않는다.
+        const known: any[] = await tx.$queryRaw`SELECT id FROM "Institution" WHERE id=${counterpartyId} FOR KEY SHARE`;
+        if (!known.length) throw counterpartyInvalid();
+      }
+      // 검사 행을 잠근 뒤라 같은 검사의 생성·변경은 여기서 줄을 선다. 부분 unique는 같은 규칙의 마지막 방어선이다.
+      const active: any[] = await tx.$queryRaw`SELECT id FROM "StudyImageRequest" WHERE "studyUid"=${studyId} AND kind=${kind}
+        AND "requesterSub"=${sub} AND state::text=ANY(${[...ACTIVE]}::text[])`;
+      if (active.length) throw activeExists();
+      const name = this.name(c);
+      const applied = { id: recordId, studyUid: studyId, requestId, kind, action: 'create', from: null, to: 'Requested',
+        revision: 1, at: v.at };
+      await tx.studyImageRequest.create({ data: { id: recordId, studyUid: studyId, institutionId: c.institution, kind,
+        requesterSub: sub, requesterActor: c.actor, requesterName: name, counterpartyText: b.counterparty,
+        counterpartyInstitutionId: counterpartyId, reason: v.text, state: 'Requested', revision: 1,
+        changedBy: c.actor, createdAt: at, updatedAt: at } });
+      await this.receipt(tx, c, applied, mark, counterpartyId, CLINICIAN_ROLE, at);
+      return;
+    }
+    const row = await this.request(tx, recordId, c, this.scope(c), true);
+    if (row.revision !== v.sequence - 1 || row.state !== v.state.from) throw changed();
+    const step = TRANSITIONS[p.action];
+    if (!step || step.to !== v.state.to || !step.from.includes(row.state)) throw stateError();
+    const role = v.capacity === 'clinical-author' ? CLINICIAN_ROLE : p.action !== 'cancel' && holds(c, TECHNICIAN) ? TECHNICIAN : ADMIN;
+    await this.apply(tx, c, row, requestId, mark, p.action, step.to, role, v.text ?? '', at);
+  }
+
+  /** The stored receipt of a committed or replayed write; a failure carries this service's wording and no text. */
+  private async answer(result: ClinicalWriteResult, requestId: string, c: Caller) {
+    const code = outcomeCode(result.outcome);
+    if (code !== null) throw clinicalHttpError(code, OWN);
+    const receipt = await this.prisma.studyImageRequestReceipt.findUnique({ where: { requestId } });
+    if (!receipt || receipt.subjectSub !== c.sub || !object(receipt.result)) throw busy();
+    return { owner: this.owner(c), applied: receipt.result, replayed: result.outcome.status === 'replayed' };
+  }
+
+  private async write(request: unknown, c: RequestCaller, surface: SurfaceKey, studyId: string, recordId: string, b: any, projection: RequestProjection) {
+    const runtime = requireClinicalRuntime();
+    let result: ClinicalWriteResult;
+    try {
+      result = await runtime.write(request, { surface, studyId, recordId, body: b, caller: { subject: c.sub, institutionId: c.institution }, projection });
+    } catch (e) { throw clinicalRefusal(e, OWN); }
+    return this.answer(result, b.requestId.toLowerCase(), c);
   }
 
   /** 응답 DTO(§3.3). *Sub·기관 id·영수증 열은 싣지 않고, 키 이름에 전송·수신을 뜻하는 말을 쓰지 않는다. */
@@ -247,15 +315,21 @@ export class ImageRequestService {
         ? Buffer.from(JSON.stringify({ at: iso(last.createdAt), id: last.id, r: accessPolicy.revision })).toString('base64url') : null };
   }
 
-  /** #8 요청 한 건. */
-  async read(id: string, c: RequestCaller) {
+  /** #8 요청 한 건. 사유·note는 이 요청의 판들에 대한 열람 사건이 원장에 내구 기록된 뒤에만 나간다. */
+  async read(id: string, c: RequestCaller, request?: unknown) {
     this.member(c);
+    const runtime = requireClinicalRuntime();
     const scope = this.scope(c);
     if (!uuid(id)) throw requestMissing();
     await this.studyAccess.prepare(c);
     return this.run(c, async tx => {
       const row = await this.request(tx, id.toLowerCase(), c, scope, false);
-      return { owner: this.owner(c), item: this.dto(row) };
+      const rows = await readClinicalRows(tx, row.id);
+      return runtime.read(request, { record: 'image-request', recordId: row.id, studyId: row.studyUid, scope: 'history', rows,
+        caller: { subject: c.sub, institutionId: c.institution }, send: async (_bodies, unit) => {
+          if (unit.revision !== row.revision || unit.state !== row.state) throw changed();
+          return { owner: this.owner(c), item: this.dto(row) };
+        } });
     }, true);
   }
 
@@ -279,8 +353,9 @@ export class ImageRequestService {
    * #10 요청 등록. 요청자·기관·역할 표지는 토큰에서만 오고 body에는 정확히 여섯 키만 받는다. 상대 기관 id는 키가
    * 반드시 있고 값은 null 또는 등록된 다른 기관이다. 같은 검사·종류·요청자의 활성 요청은 하나다(OQ-7 a).
    */
-  async create(uid: string, c: RequestCaller, b: CreateRequest) {
+  async create(uid: string, c: RequestCaller, b: CreateRequest, request?: unknown) {
     this.member(c);
+    requireClinicalRuntime();
     if (!holds(c, CLINICIAN_ROLE)) throw roleRequired();
     if (!studyUid(uid)) throw invalid('검사 UID를 확인하세요');
     if (!exactKeys(b, ['requestId', 'expectedOwner', 'kind', 'counterparty', 'counterpartyInstitutionId', 'reason']) || !uuid(b.requestId)
@@ -293,37 +368,20 @@ export class ImageRequestService {
     const mark = fingerprint({ uid, institution: c.institution, subject: c.sub, kind: b.kind, counterparty: b.counterparty,
       counterpartyInstitutionId: b.counterpartyInstitutionId, reason: b.reason });
     await this.studyAccess.prepare(c, [uid]);
-    return this.run(c, async tx => {
-      await this.study(tx, uid, c, true, studyMissing);
-      const receipt = await tx.studyImageRequestReceipt.findUnique({ where: { requestId } });
-      if (receipt) return this.replay(receipt, mark, requestId, c);
-      if (b.counterpartyInstitutionId !== null) {
-        // 잠금은 그 기관 행이 커밋 전에 지워지거나 id가 바뀌지 않게 할 뿐이다. 상대 기관에 어떤 열람도 생기지 않는다.
-        const known: any[] = await tx.$queryRaw`SELECT id FROM "Institution" WHERE id=${b.counterpartyInstitutionId} FOR KEY SHARE`;
-        if (!known.length) throw counterpartyInvalid();
-      }
-      // 검사 행을 잠근 뒤라 같은 검사의 생성·변경은 여기서 줄을 선다. 부분 unique는 같은 규칙의 마지막 방어선이다.
-      const active: any[] = await tx.$queryRaw`SELECT id FROM "StudyImageRequest" WHERE "studyUid"=${uid} AND kind=${b.kind}
-        AND "requesterSub"=${c.sub} AND state::text=ANY(${[...ACTIVE]}::text[])`;
-      if (active.length) throw activeExists();
-      const at = new Date(), name = this.name(c);
-      const applied = { id: requestId, studyUid: uid, requestId, kind: b.kind, action: 'create', from: null, to: 'Requested', revision: 1,
-        at: at.toISOString() };
-      await tx.studyImageRequest.create({ data: { id: requestId, studyUid: uid, institutionId: c.institution, kind: b.kind,
-        requesterSub: c.sub, requesterActor: c.actor, requesterName: name, counterpartyText: b.counterparty,
-        counterpartyInstitutionId: b.counterpartyInstitutionId, reason: b.reason, state: 'Requested', revision: 1,
-        changedBy: c.actor, createdAt: at, updatedAt: at } });
-      await this.receipt(tx, c, applied, mark, b.counterpartyInstitutionId, CLINICIAN_ROLE, at);
-      return { owner: this.owner(c), applied, replayed: false };
-    });
+    // Visibility first, without a lock: an absent, foreign or refused study registers nothing.
+    await this.run(c, tx => this.study(tx, uid, c, false, studyMissing), true);
+    return this.write(request, c, 'image-request.create', uid, requestId, b, {
+      caller: this.callerFacts(c), mark, action: null,
+      create: { requestId, expectedOwner: null, kind: b.kind, counterparty: b.counterparty, counterpartyInstitutionId: b.counterpartyInstitutionId, reason: '' } });
   }
 
   /**
    * #11 상태 변경. accept는 빈 note, close·decline·cancel은 1~2,000자 note. 처리 동작은 technician·admin, 취소는
    * 요청한 임상의 또는 admin이다. 동작별 역할은 body의 action을 읽은 뒤 트랜잭션 전에 판정한다.
    */
-  async change(id: string, c: RequestCaller, b: any) {
+  async change(id: string, c: RequestCaller, b: any, request?: unknown) {
     this.member(c);
+    requireClinicalRuntime();
     if (!holds(c, CLINICIAN_ROLE) && !staff(c)) throw roleRequired();
     if (!exactKeys(b, ['requestId', 'expectedOwner', 'revision', 'action', 'note']) || !uuid(b.requestId) || !revision(b.revision)
       || !IMAGE_REQUEST_ACTIONS.includes(b.action) || (b.action === 'accept' ? b.note !== '' : !text(b.note, IMAGE_REQUEST_TEXT_MAX)))
@@ -331,22 +389,15 @@ export class ImageRequestService {
     if (b.action === 'cancel' ? !holds(c, CLINICIAN_ROLE) && !holds(c, ADMIN) : !staff(c)) throw roleRequired();
     this.expectOwner(c, b);
     if (!uuid(id)) throw requestMissing();
-    const imageRequestId = id.toLowerCase(), requestId = b.requestId.toLowerCase(), scope = this.scope(c);
+    const imageRequestId = id.toLowerCase(), scope = this.scope(c);
     const mark = fingerprint({ id: imageRequestId, institution: c.institution, subject: c.sub, revision: b.revision, action: b.action, note: b.note });
-    const step = TRANSITIONS[b.action];
     await this.studyAccess.prepare(c);
-    return this.run(c, async tx => {
-      const row = await this.request(tx, imageRequestId, c, scope, true);
-      const receipt = await tx.studyImageRequestReceipt.findUnique({ where: { requestId } });
-      if (receipt) return this.replay(receipt, mark, imageRequestId, c);
-      if (row.revision !== b.revision) throw changed();
-      if (!step.from.includes(row.state)) throw stateError();
-      let role: string;
-      if (b.action !== 'cancel') role = holds(c, TECHNICIAN) ? TECHNICIAN : ADMIN;
-      else if (row.requesterSub === c.sub && holds(c, CLINICIAN_ROLE)) role = CLINICIAN_ROLE;
-      else if (holds(c, ADMIN)) role = ADMIN;
-      else throw actionForbidden();
-      return this.apply(tx, c, row, requestId, mark, b.action, step.to, role, b.note);
-    });
+    const row = await this.run(c, tx => this.request(tx, imageRequestId, c, scope, false), true);
+    return this.write(request, c, ('image-request.' + b.action) as SurfaceKey, row.studyUid, imageRequestId, b,
+      { caller: this.callerFacts(c), mark, action: b.action, create: null });
+  }
+
+  private callerFacts(c: RequestCaller): RequestCaller {
+    return { kind: c.kind, institution: c.institution, sub: c.sub, actor: c.actor, roles: [...c.roles], name: c.name };
   }
 }
