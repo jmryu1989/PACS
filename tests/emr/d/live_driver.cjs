@@ -171,7 +171,7 @@ async function main() {
   try {
     const scenario = SCENARIOS[operation];
     if (!scenario) return { crashed: { code: 'UnknownOperation' } };
-    const result = await scenario({ args, S, R, req, studies, runtime, request, attempt, caller, owner, actorFacts, identityOf, findingText, body, PEOPLE,
+    const result = await scenario({ args, S, R, SV, req, studies, runtime, request, attempt, caller, owner, actorFacts, identityOf, findingText, body, PEOPLE,
       TEXT, dev, ledger, seal, STATE, prisma, ledgerDb, orthancStored });
     fs.writeFileSync(saved, JSON.stringify(dev.save()));
     return result;
@@ -294,7 +294,7 @@ const SCENARIOS = {
   },
 
   /** TEST-D-03: bodies only to permitted readers of the managing institution, after the durable access event. */
-  async d03({ args, S, runtime, request, attempt, caller, owner, actorFacts, TEXT, prisma }) {
+  async d03({ args, S, SV, runtime, request, attempt, caller, owner, actorFacts, TEXT, prisma }) {
     const uid = args.study, out = {};
     const q = { requestId: uuid(), expectedOwner: owner('c1'), body: TEXT.question }, qid = q.requestId.toLowerCase();
     out.question = await attempt(async () => S.questions.create(uid, caller('c1'), q, await request('c1', 'question.create', qid, q, { studyId: uid })));

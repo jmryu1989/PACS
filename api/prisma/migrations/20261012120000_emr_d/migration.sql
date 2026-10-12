@@ -180,10 +180,14 @@ CREATE TABLE emr_clinical.sr_purpose_end (
 
 CREATE FUNCTION emr_clinical.refuse_change() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
-  IF TG_OP = 'UPDATE' AND TG_TABLE_NAME = 'unit' AND current_setting('kin.emr_clinical', true) = 'commit' THEN RETURN NEW; END IF;
-  IF TG_OP = 'UPDATE' AND TG_TABLE_NAME = 'request' AND current_setting('kin.emr_clinical', true) IN ('register', 'commit') THEN RETURN NEW; END IF;
-  IF TG_OP = 'UPDATE' AND TG_TABLE_NAME = 'sr_adoption' AND current_setting('kin.emr_clinical', true) = 'register'
-     AND NEW.confirmed AND NOT OLD.confirmed AND (to_jsonb(NEW) - 'confirmed') = (to_jsonb(OLD) - 'confirmed') THEN RETURN NEW; END IF;
+  -- Row fields are read only for the one table that has them (a statement-level TRUNCATE trigger has no row at all).
+  IF TG_OP = 'UPDATE' THEN
+    IF TG_TABLE_NAME = 'unit' AND current_setting('kin.emr_clinical', true) = 'commit' THEN RETURN NEW; END IF;
+    IF TG_TABLE_NAME = 'request' AND current_setting('kin.emr_clinical', true) IN ('register', 'commit') THEN RETURN NEW; END IF;
+    IF TG_TABLE_NAME = 'sr_adoption' AND current_setting('kin.emr_clinical', true) = 'register' THEN
+      IF NEW.confirmed AND NOT OLD.confirmed AND (to_jsonb(NEW) - 'confirmed') = (to_jsonb(OLD) - 'confirmed') THEN RETURN NEW; END IF;
+    END IF;
+  END IF;
   RAISE EXCEPTION 'emr_clinical is append-only: % on % refused', TG_OP, TG_TABLE_NAME USING ERRCODE = 'insufficient_privilege';
 END
 $$;
