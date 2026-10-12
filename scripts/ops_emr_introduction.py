@@ -823,6 +823,16 @@ class Records:
         self.write(self.directory / name, raw)
         return sha256_bytes(raw)
 
+    def discard(self, path):
+        """A private file of this run that must not outlive its use (the smoke member's password once the member is
+        gone). Missing is fine; only files directly in the run directory."""
+        path = Path(path)
+        require(path.parent == self.directory, "Records stay in the plan's run directory")
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
 
 # ── the shared operations lock, retained between phases ──
 
@@ -1584,7 +1594,10 @@ const base=(process.env.KC_ADMIN_URL||'').replace(/\/$/,'');
 const [operation, raw]=process.argv.slice(1); const input=JSON.parse(raw);
 const out=v=>process.stdout.write('KIN_RESULT '+JSON.stringify(v)+'\n');
 (async()=>{const form=new URLSearchParams({grant_type:'password',client_id:'admin-cli',username:process.env.KIN_KC_ADMIN_USER,password:process.env.KIN_KC_ADMIN_PASSWORD});
- const granted=await fetch(base+'/realms/master/protocol/openid-connect/token',{method:'POST',body:form});
+ // Keycloak may still be starting (writers resumed a moment ago, or a restore): wait for its answer, at most two minutes.
+ let granted=null;for(let i=0;i<60;i++){try{granted=await fetch(base+'/realms/master/protocol/openid-connect/token',{method:'POST',body:form});
+  if(granted.status<500)break;}catch(e){granted=null;}await new Promise(r=>setTimeout(r,2000));}
+ if(!granted)throw new Error('keycloak unreachable');
  if(granted.status!==200)throw new Error('admin');
  const token=(await granted.json()).access_token;
  const call=async(method,path,body)=>{const r=await fetch(base+'/admin/realms/kin'+path,{method,headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
@@ -2277,6 +2290,11 @@ class HostOps:
         private file of this run's directory; recorded (created) in the state before anything uses it."""
         spec = intro.plan["smoke"]["member"]
         require(spec is not None, "The plan names no smoke member for the unattended smoke")
+        earlier = intro.state.get("smoke_member")
+        if earlier and not earlier.get("deleted_at"):
+            # An earlier member of this plan (e.g. the release's, before a rollback restored the realm) is removed - and
+            # its password discarded - before its record is replaced.
+            self.remove_smoke_member_now(intro)
         run = intro.request_sha256[:10]
         username = SMOKE_PREFIX + run
         password = token_source.token_urlsafe(32)
@@ -2363,6 +2381,9 @@ class HostOps:
             member["deleted_at"] = utc_now().isoformat()
             intro.save()
             intro.records.journal({"event": "smoke-member-deleted", "plan_sha256": intro.plan_sha256, "username": member["username"]})
+        if member and member.get("deleted_at"):
+            # The password of a member that no longer exists is not kept.
+            intro.records.discard(intro.records.directory / member["credentials"])
         require(self.psql(SMOKE_MEMBERS_SQL, "keycloak") == "0", "The smoke member still exists")
         return {"member": member["username"] if member else None, "deleted": bool(member)}
 
@@ -3431,6 +3452,10 @@ class HostRecords(Records):
     def read(self, path):
         return self.host.read_secure(path, limit=16 * 1024 * 1024)
 
+    def discard(self, path):
+        super().discard(path)
+        self.host.sync_dir(self.directory)
+
 
 class IntroductionHost:
     """Installed with the C1 library; reached through /opt/kin-deploy/entry.py for requests of mode emr-introduction."""
@@ -3604,11 +3629,11 @@ def browser_smoke(spec):
                     if request.url.startswith(spec["redirect_uri"]) and "url" not in landed:
                         landed["url"] = request.url
                 page.on("request", capture)
-                page.goto(spec["origin"] + "/auth/realms/kin/protocol/openid-connect/auth?" + query, wait_until="domcontentloaded", timeout=60000)
+                browser_stage(page, "the sign-in page", lambda: page.goto(spec["origin"] + "/auth/realms/kin/protocol/openid-connect/auth?" + query,
+                                                                          wait_until="domcontentloaded", timeout=60000))
                 agent = re.search(r"Chrome/([0-9.]+)", page.evaluate("navigator.userAgent") or "")
                 version = agent.group(1) if agent else "unknown"
-                page.fill("#username", spec["username"])
-                page.fill("#password", spec["password"])
+                browser_stage(page, "the sign-in form", lambda: (page.fill("#username", spec["username"]), page.fill("#password", spec["password"])))
                 try:
                     page.click("#kc-login")
                 except Exception:
@@ -3657,15 +3682,31 @@ def sign_in(page, spec):
     page.click("#kc-login")
 
 
+def browser_stage(page, name, action):
+    """One browser stage; a failure names the stage, the error type and the page it stopped on (path and title only:
+    never a query, a fragment or a form value)."""
+    try:
+        return action()
+    except Stop:
+        raise
+    except Exception as error:
+        try:
+            where = urlsplit(page.url).path[:80] + ": " + re.sub(r"[^\w .:-]", "", page.title() or "")[:60]
+        except Exception:
+            where = "unreadable"
+        raise Stop("The browser stopped at %s (%s, page %s)" % (name, type(error).__name__, where)) from None
+
+
 def product_session_check(page, spec):
     """The product's own sign-in (its client, through /api/auth/login and its callback) in this browser until its
     document has entered the session; then, from a neutral page of the same origin, the product's logout and the ended
     session asked again with its binding and by its cookie alone. Statuses only; the session id stays in the browser."""
     from urllib.parse import parse_qs
     origin = spec["origin"]
-    page.goto(origin + "/api/auth/login", wait_until="domcontentloaded", timeout=60000)
-    sign_in(page, spec)
-    page.wait_for_url(lambda url: url.startswith(origin + "/worklist/"), timeout=60000)
+    browser_stage(page, "the product sign-in page", lambda: page.goto(origin + "/api/auth/login", wait_until="domcontentloaded", timeout=60000))
+    browser_stage(page, "the product sign-in form", lambda: sign_in(page, spec))
+    browser_stage(page, "the product's return", lambda: page.wait_for_url(lambda url: url.startswith(origin + "/worklist/"),
+                                                                           wait_until="commit", timeout=60000))
     sid = None
     for _ in range(120):
         try:
@@ -3679,10 +3720,11 @@ def product_session_check(page, spec):
     if sid is None:
         error = (parse_qs(urlsplit(page.url).query).get("auth_error") or [""])[0]
         raise Stop("The product sign-in did not open a session" + (" (" + re.sub(r"[^\w-]", "", error)[:40] + ")" if error else ""))
-    page.goto(origin + "/auth/realms/kin/.well-known/openid-configuration", wait_until="domcontentloaded", timeout=60000)
-    logout = page.evaluate(PRODUCT_LOGOUT_JS, sid)
-    bound = page.evaluate(PRODUCT_ME_JS, sid).get("status")
-    cookie = page.evaluate(PRODUCT_ME_JS, None).get("status")
+    browser_stage(page, "a neutral page", lambda: page.goto(origin + "/auth/realms/kin/.well-known/openid-configuration",
+                                                             wait_until="domcontentloaded", timeout=60000))
+    logout = browser_stage(page, "the product logout", lambda: page.evaluate(PRODUCT_LOGOUT_JS, sid))
+    bound = browser_stage(page, "the ended session", lambda: page.evaluate(PRODUCT_ME_JS, sid).get("status"))
+    cookie = browser_stage(page, "the ended session's cookie", lambda: page.evaluate(PRODUCT_ME_JS, None).get("status"))
     return {"signed_in": True, "logout_status": logout, "old_session_status": bound, "old_cookie_status": cookie}
 
 

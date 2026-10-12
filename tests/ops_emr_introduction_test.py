@@ -1882,6 +1882,7 @@ class CommanderAdditionsTests(HostHarness, unittest.TestCase):
         self.assertEqual(list(self.records.directory.glob("browser-profile-*")), [], "the browser profile is removed after the login")
         ops_host.remove_smoke_member(context)
         self.assertIsNotNone(context.state["smoke_member"]["deleted_at"])
+        self.assertFalse(credentials.exists(), "the password does not outlive the member")
         for path in self.records.directory.rglob("*"):
             if path.is_file() and path != credentials:
                 self.assertNotIn(password.encode(), path.read_bytes(), path.name)
@@ -1925,6 +1926,23 @@ class CommanderAdditionsTests(HostHarness, unittest.TestCase):
         context.state["rollback_smoke"] = {"member": True}
         refuses(self, ops_host.reopen_previous_ingress, context, message="still exists")
         self.assertEqual(docker.mutating(), [])
+
+    def test_89_a_later_smoke_member_first_removes_an_earlier_one_and_its_password(self):
+        """IRT-14: a member made after a rollback restored the realm never leaves the release's member record (or its
+        password file) behind: the earlier one is removed first."""
+        ops_host, docker, context = self.unattended_host()
+        first = ops_host.create_smoke_member(context, "release")
+        earlier = self.records.directory / first["credentials"]
+        self.assertTrue(earlier.is_file())
+        context.request_sha256 = "d" * 64
+        second = ops_host.create_smoke_member(context, "previous")
+        self.assertIsNotNone(first["deleted_at"])
+        self.assertFalse(earlier.exists())
+        self.assertEqual(context.state["smoke_member"]["username"], second["username"])
+        self.assertNotEqual(second["username"], first["username"])
+        removals = [call for call in docker.calls if call[:2] == ["docker", "compose"] and "run" in call
+                    and any("kc-smoke-remove" in item for item in call)]
+        self.assertEqual(len(removals), 1, "one removal of the earlier member")
 
     def test_85_a_declared_overlay_lives_outside_the_checkout_and_is_in_effect_exactly_as_declared(self):
         """IRT-11 (D1066): the overlay file is outside the checkout, pinned by hash and listed after any rehearsal

@@ -1406,11 +1406,13 @@ variables the `.env` lacks from the running containers (environment or bind sour
 `fix_checkout_mode` the capture first makes the checkout 0700 and `.git` not group/other-writable (recorded). A clone's
 seed refuses a proxy certificate volume that is absent or empty (read-only check; the volume is filled before the
 first proxy start). Unattended (policy `smoke.browser_cmd`, D1062): a temporary member `kin-smoke-<run>` with a
-generated password in the run folder logs in once in headless Chromium (Authorization Code + PKCE; the chain is
-verified first and the browser trusts only that leaf's SPKI pin; the origin's host:port maps to the maintenance port;
-the code is read from an unresolvable `.invalid` redirect; the profile lives in the run folder and is removed), the
-eight checks become the executor's record, and the member is disabled and deleted before any reopen. The browser
-command carries its browsers' path itself (`/usr/bin/env PLAYWRIGHT_BROWSERS_PATH=/opt/kin-smoke/browsers ...`).
+generated password in the run folder (discarded with the member) signs in through headless Chromium - the product's
+own sign-in and logout (the ended session must then be refused, with its binding and by its cookie alone), then a
+temporary public client's Authorization Code + PKCE login for the token the API checks (the chain is verified first
+and the browser trusts only that leaf's SPKI pin; the origin's host:port maps to the maintenance port; the code is
+read from an unresolvable `.invalid` redirect; the profile lives in the run folder and is removed) - the eight checks
+become the executor's record, and the member is disabled and deleted before any reopen. The browser command carries
+its browsers' path itself (`/usr/bin/env PLAYWRIGHT_BROWSERS_PATH=/opt/kin-smoke/browsers ...`).
 
 - `python -B tests/ops_emr_introduction_test.py`: plan/target/request/approval/receipt validation, the clone/target
   allowlist, the preflight additions of `ops_deploy_preflight.py` as functions of observed facts, and the phase state

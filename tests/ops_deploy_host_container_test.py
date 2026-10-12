@@ -284,7 +284,14 @@ const base='http://keycloak:8080/auth', admin=async()=>{const form=new URLSearch
 const call=async(token,method,path,body)=>{const r=await fetch(base+'/admin/realms/kin'+path,{method,headers:{Authorization:'Bearer '+token,
  'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});if(r.status>=300)throw new Error(method+' '+path+' '+r.status);
  const text=await r.text();return text?JSON.parse(text):null;};
-(async()=>{const token=await admin();const [user]=await call(token,'GET','/users?exact=true&username='+process.env.KC_MEMBER);
+(async()=>{const token=await admin();
+ if(process.argv[1]==='origin'){
+  // The stand-in for production's realm, which names its own origin: the BFF client's callback at this stack's origin.
+  const [client]=await call(token,'GET','/clients?clientId=kin-bff');
+  const redirectUris=[...new Set([...(client.redirectUris||[]),process.env.KC_ORIGIN+'/api/auth/callback'])];
+  await call(token,'PUT','/clients/'+client.id,{...client,redirectUris});
+  process.stdout.write('KIN_RESULT {"origin":true}\n');return;}
+ const [user]=await call(token,'GET','/users?exact=true&username='+process.env.KC_MEMBER);
  if(process.argv[1]==='disable'){await call(token,'PUT','/users/'+user.id,{enabled:false});process.stdout.write('KIN_RESULT {"disabled":true}\n');return;}
  // A temporary PKCE client for one real authorization-code login: Keycloak 26.7.3 direct grants never carry the
  // authentication time (AUTH_TIME) that the product requires after the member import (newAuthAfter).
@@ -562,11 +569,11 @@ class SyntheticStack:
         password = secrets.token_urlsafe(18)
         environment = {**os.environ, "KC_USER": admin_user, "KC_PASS": self.env["KC_ADMIN_PASSWORD"],
                        "KC_MEMBER": "tech" if operation == "disable" else "doctor", "KC_MEMBER_PASS": password,
-                       "KC_REDIRECT": self.origin + "/worklist/hpacs-lite/index.html"}
+                       "KC_REDIRECT": self.origin + "/worklist/hpacs-lite/index.html", "KC_ORIGIN": self.origin}
         deadline = time.monotonic() + 420
         while True:
             result = subprocess.run(["docker", "run", "--rm", "--network", network or self.target["networks"]["default"], "--label", "kin.ops.run=" + self.token,
-                                     "-e", "KC_USER", "-e", "KC_PASS", "-e", "KC_MEMBER", "-e", "KC_MEMBER_PASS", "-e", "KC_REDIRECT",
+                                     "-e", "KC_USER", "-e", "KC_PASS", "-e", "KC_MEMBER", "-e", "KC_MEMBER_PASS", "-e", "KC_REDIRECT", "-e", "KC_ORIGIN",
                                      "--entrypoint", "node", image, "-e", KC_SCRIPT, operation], env=environment, capture_output=True, timeout=180)
             if result.returncode == 0 or time.monotonic() > deadline:
                 break
@@ -641,6 +648,8 @@ class EmrIntroductionRehearsal(unittest.TestCase):
                                   input=synthetic_dicom(), capture_output=True, timeout=120)
         self.assertEqual(uploaded.returncode, 0, uploaded.stderr[-2000:])
         source.keycloak(images["previous"]["api"], "disable", "admin")
+        # Production's realm names its own origin for the BFF client; the seed rewrites it to the clone's.
+        source.keycloak(images["previous"]["api"], "origin", "admin")
         # Phase P: the realm as observed read-only (counts only) becomes the plan's member-import expectation.
         members = json.loads(source.psql(intro.REALM_MEMBERS_SQL, "keycloak"))
         self.assertGreaterEqual(members["disabled"], 1)
@@ -707,6 +716,7 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         self.assertTrue(all(record["checks"].values()))
         realm_smoke = "SELECT count(*) FROM user_entity u JOIN realm r ON r.id=u.realm_id WHERE r.name='kin' AND u.username LIKE 'kin-smoke-%';"
         self.assertEqual(clone.psql(realm_smoke, "keycloak"), "0", "the smoke member is gone before any reopen")
+        self.assertEqual(list(clone.records.directory.glob("smoke-member-*.json")), [], "its password is gone with it")
 
         def halo_wired(stage):
             """IRT-11: every proxy (re)creation used the declared file set: the overlay's bind and network are there."""
@@ -723,6 +733,7 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         reopened = clone.phase("rollback_reopen", "ROLLED_BACK")
         halo_wired("previous proxy after the rollback")
         self.assertEqual(clone.psql(realm_smoke, "keycloak"), "0")
+        self.assertEqual(list(clone.records.directory.glob("smoke-member-*.json")), [])
         self.assertTrue(json.loads((clone.records.directory / "operator-smoke-previous.json").read_text())["passed"])
         self.assertEqual([step["outcome"] for step in reopened["steps"]], ["PASS"] * len(intro.STEPS["rollback_reopen"]))
         state = json.loads((clone.records.directory / "state.json").read_text())
