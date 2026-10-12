@@ -2,6 +2,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { FailureJournal as JournalFile, syncDirectory } from './journal-file';
+import { AuthFailureSpool, AuthSpoolKind } from './auth-failure-spool';
+import { parseAuthFailureObservation } from './contract';
 import type { WriterRequest } from './coordinator';
 
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -34,7 +36,7 @@ export interface ExternalState {
 }
 interface Envelope { state: ExternalState; publishing: boolean; digest: string }
 interface Cached { base: string; offset: number; envelope: Envelope }
-export interface WriterContext { tailFile?: { file: string; ino: number; fd: number }; checkpoint?: { stamp: string; envelope: Envelope }; journal?: JournalFile; anonymousJournal?: JournalFile; settlement?: Cached; log?: { file: string; ino: number; fd: number } }
+export interface WriterContext { tailFile?: { file: string; ino: number; fd: number }; checkpoint?: { stamp: string; envelope: Envelope }; journal?: JournalFile; spools?: Partial<Record<AuthSpoolKind, AuthFailureSpool>>; settlement?: Cached; log?: { file: string; ino: number; fd: number } }
 const clone = <T>(value: T): T => value === undefined ? value : JSON.parse(JSON.stringify(value));
 function readTail(file: string, context: WriterContext): any {
   const info = fs.lstatSync(file, { throwIfNoEntry: false });
@@ -130,21 +132,44 @@ function delta(before: ExternalState, state: ExternalState): any {
   const publishing = hash(before.tail) !== hash(state.tail);
   return { revision: state.revision, generation: state.generation, patch, publishing, ...(publishing ? { tail: state.tail } : {}) };
 }
+/**
+ * Failed sign-ins (B2R2-01). A new observation goes to the spool its verified identity selects (none: anonymous); a
+ * completion goes where its observation is - a spool, or the business journal of an older deployment that still holds
+ * it. Spool writes return a promise (group-committed off the event loop); finds and the pending index are in memory.
+ */
+function authenticationFailures(directory: string, operation: string, value: any, context: WriterContext): any {
+  const journal = context.journal ??= new JournalFile(directory);
+  journal.refresh();
+  const spools = context.spools ??= {};
+  const spool = (kind: AuthSpoolKind) => spools[kind] ??= new AuthFailureSpool(directory, kind);
+  const both = () => [spool('anonymous'), spool('member')];
+  if (operation === 'auth-failure-observe') {
+    const observation = parseAuthFailureObservation(JSON.parse(String(value?.body?.observation)));
+    return spool(observation.who === null ? 'anonymous' : 'member').record(value.id, 'auth-failure-observed', value.body, value.at);
+  }
+  if (operation === 'auth-failure-complete') {
+    const eventId = String(value?.eventId), done = `auth-failure-recovered:${eventId}`;
+    if (journal.find(`auth-failure:${eventId}`)) return Promise.resolve(journal.record(done, 'auth-failure-recovered', { eventId }));
+    const holder = both().find(candidate => candidate.holds(eventId));
+    return holder ? holder.record(done, 'auth-failure-recovered', { eventId }) : Promise.resolve(null);
+  }
+  if (operation === 'auth-failure-find') return journal.find(value) ?? both().map(candidate => candidate.find(value)).find(Boolean);
+  if (operation === 'auth-failure-pending')
+    return [...journal.pendingAuthentication(), ...both().flatMap(candidate => candidate.pendingAuthentication())];
+  return fail('SealCorrupt');
+}
+
 /** Called only by the lock-owning writer. Tests substitute OS/FS transport, not state transitions. */
 export function executeExternal(request: WriterRequest): any {
-  const { directory, value } = request, context = request.context ?? {};
-  let operation = request.operation;
+  const { directory, operation, value } = request, context = request.context ?? {};
   try {
-  if (operation.startsWith('journal-') || operation.startsWith('anonymous-journal-')) {
-    const anonymous = operation.startsWith('anonymous-');
-    const journal = anonymous ? context.anonymousJournal ??= new JournalFile(directory, true)
-      : context.journal ??= new JournalFile(directory);
-    if (anonymous) operation = operation.slice('anonymous-'.length);
+  if (operation.startsWith('auth-failure-')) return authenticationFailures(directory, operation, value, context);
+  if (operation.startsWith('journal-')) {
+    const journal = context.journal ??= new JournalFile(directory);
     journal.refresh();
     if (operation === 'journal-load') return { records: journal.all(), tornBytes: journal.tornBytes };
     if (operation === 'journal-record') return journal.record(value.id, value.kind, value.body, value.at);
     if (operation === 'journal-find') return journal.find(value);
-    if (operation === 'journal-auth-pending') return journal.pendingAuthentication();
     return fail('SealCorrupt');
   }
   const file = path.join(directory, 'seal', 'settlement.json'), tailFile = path.join(directory, 'seal', 'tail.json');

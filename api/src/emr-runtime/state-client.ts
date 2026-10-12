@@ -21,4 +21,20 @@ export class StateClient {
       return response.result;
     } finally { port1.close(); }
   }
+  /** The same request without blocking this thread: the reply port settles the promise (bounded by the same timeout). */
+  callAsync(operation: string, value?: unknown): Promise<any> {
+    this.worker ??= new Worker(path.join(__dirname, 'state-client-worker.js'));
+    this.worker.unref();
+    const signal = new Int32Array(new SharedArrayBuffer(4)), { port1, port2 } = new MessageChannel();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { port1.close();
+        reject(Object.assign(new Error('StateOwnerUnavailable'), { code: 'SealUnavailable' })); }, EMR_STATE_IPC_TIMEOUT_MS + 100);
+      port1.once('message', response => {
+        clearTimeout(timer); port1.close();
+        if (response?.ok) resolve(response.result);
+        else reject(Object.assign(new Error(response?.error?.message ?? 'StateOwnerUnavailable'), response?.error ?? { code: 'SealUnavailable' }));
+      });
+      this.worker!.postMessage({ socketPath: this.socketPath, operation, value, signal, reply: port2 }, [port2]);
+    });
+  }
 }

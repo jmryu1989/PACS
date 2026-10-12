@@ -495,6 +495,8 @@ const summary = rows => rows.map(r => [r.action, r.detail.cause ?? r.detail.outc
 // ── a world: one empty database state, a fresh fake Keycloak state, two service instances ──
 
 const { AuthService, AuthEventLedger } = require('/app/dist/auth.service');
+// The declared per-account limit of unrecovered refusals in the member spool (B2R2-01), as the product exports it.
+const { MEMBER_PENDING_PER_IDENTITY: MEMBER_PENDING_LIMIT } = require('/app/dist/emr-runtime/auth-failure-spool');
 const { KeycloakService } = require('/app/dist/keycloak.service');
 const { AuthGuard } = require('/app/dist/auth.guard');
 const { AuthController } = require('/app/dist/auth.controller');
@@ -862,7 +864,7 @@ async function login(w, inst, v, { ip = IP } = {}) {
 }
 
 /** The provider answers a started flow with a code for token version v: the browser comes back to the callback. */
-async function answerFlow(w, inst, begin, v, { ip = IP, sid, cookies = [], nonce } = {}) {
+async function answerFlow(w, inst, begin, v, { ip = IP, sid, cookies = [], nonce, peer } = {}) {
   const state = new URL(begin.location).searchParams.get('state');
   w.secret('state', state);
   const code = 'syn-code-' + randomUUID();
@@ -872,7 +874,7 @@ async function answerFlow(w, inst, begin, v, { ip = IP, sid, cookies = [], nonce
     .setIssuedAt().setExpirationTime(Math.floor(Date.now()/1000)+3600).sign(KEYS.main.privateKey);
   w.secret('id-token', identity);
   kc.auto = form => form.grant_type === 'authorization_code' ? [200, {...reply.tokens(v)[1], id_token: identity}] : reply.reject();
-  const done = await w.call(inst, 'callback', { sid, cookie: [begin.pendingCookie, ...cookies].join('; '), ip, query: { code, state } });
+  const done = await w.call(inst, 'callback', { sid, cookie: [begin.pendingCookie, ...cookies].join('; '), ip, peer, query: { code, state } });
   kc.auto = null;
   for (const entry of kc.codes) w.secret('verifier', entry.verifier);
   return done;
@@ -894,6 +896,19 @@ async function protectedAuthRows(w) {
     FROM emr_access.access_entry e JOIN emr_access.audit_projection p ON p.event_id=e.event_id
     JOIN "AuditLog" a ON a.id=p.audit_log_id WHERE e.stream='viewing' ORDER BY e.sequence`))
     .map(row => ({ ...row, event: JSON.parse(row.payload).event, detail: JSON.parse(row.detail) }));
+}
+// B2R2-01/B2R2-10: the protected state as stored. B1's lifetime recovery journal (its size), and an authentication spool
+// (anonymous or member): its records and the observations still without their completion record.
+function businessJournalBytes() {
+  try { return fs.statSync(process.env.KIN_EMR_STATE_DIR + '/journal/failure-journal.jsonl').size; } catch { return 0; }
+}
+function authSpool(kind) {
+  let text = '';
+  try { text = fs.readFileSync(process.env.KIN_EMR_STATE_DIR + '/' + kind + '-failures/failure-journal.jsonl', 'utf8'); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  const rows = text.split('\n').filter(Boolean).map(line => JSON.parse(line));
+  const completed = new Set(rows.filter(row => row.kind === 'auth-failure-recovered').map(row => 'auth-failure:' + row.body.eventId));
+  return { text, rows, pending: rows.filter(row => row.kind === 'auth-failure-observed' && !completed.has(row.id)) };
 }
 async function b2Login(w, sub = 'b2-member', extra = {}) {
   const token = await w.issue('b2-token-' + sub, { sub, ...extra });
@@ -980,6 +995,47 @@ test('L09 auth login and entry commit with one projection each; failed storage g
     && row.body.cause === 'seal-unavailable'), 'receipt failure belongs to this committed login event');
   await w.instance('receipt-recovery');
   assert.equal((await protectedAuthRows(w)).filter(r => r.event.result === 'succeeded').length, successful + 1);
+
+  // B2R2-05 / B2R2-09: on an event path a slow, hanging or failing resolver only delays (bounded); a recently verified proxy
+  // stays observed, a 300 ms resolver still admits a cold instance, and a verified answer expires so a new proxy is observed.
+  const resolve = (address, ms = 0) => () => new Promise(done => setTimeout(() => done([{ address, family: 4 }]), ms));
+  const peerLogin = async (inst, sub, peer) => {
+    const begin = await w.call(inst, 'login', { peer });
+    return answerFlow(w, inst, begin, await w.issue('peer-' + sub, { sub }), { peer });
+  };
+  try {
+    const warm = await w.instance('dns-warm');
+    dns.lookup = resolve('127.0.0.1');
+    const held = await peerLogin(warm, 'dns-warm', '127.0.0.1');
+    assert.equal(held.cookie, 'S', 'a verified proxy admits the login');
+    w.tick(6000);
+    dns.lookup = () => new Promise(() => {});
+    const started = performance.now();
+    const out = await within(w.call(warm, 'logout', { sid: held.newSid }), 'logout with a hanging resolver', 1000);
+    assert.equal(out.status, 204);
+    assert.ok(performance.now() - started < 1000, 'a hanging resolver delays an end by a bounded wait only');
+    const ended = (await protectedAuthRows(w)).filter(r => r.event.action === 'auth.logout').at(-1);
+    assert.deepEqual(ended.event.trustedProxyIp.value, { address: IP, source: 'trusted-proxy' }, 'the recently verified proxy stays observed');
+    dns.lookup = () => Promise.reject(Object.assign(new Error('synthetic resolver failure'), { code: 'ESERVFAIL' }));
+    w.tick(6000);
+    assert.equal((await peerLogin(warm, 'dns-failing', '127.0.0.1')).cookie, 'S', 'a failing resolver keeps the verified proxy');
+    dns.lookup = () => new Promise(() => {});
+    const cold = await w.instance('dns-cold');
+    const refused = await within(peerLogin(cold, 'dns-cold', '127.0.0.1'), 'cold login with a hanging resolver', 2500);
+    assert.equal(refused.location, landing('login_failed'), 'without any verified proxy an unobserved ingress is refused');
+    assert.equal(refused.newSid, null);
+    dns.lookup = resolve('127.0.0.1', 300);
+    assert.equal((await peerLogin(await w.instance('dns-slow'), 'dns-slow', '127.0.0.1')).cookie, 'S', 'a 300 ms resolver admits a cold login');
+    dns.lookup = resolve('127.0.0.1');
+    const moving = await w.instance('dns-moving');
+    assert.equal((await peerLogin(moving, 'dns-before', '127.0.0.1')).cookie, 'S');
+    dns.lookup = resolve('127.0.0.9');
+    w.tick(6000);
+    const after = await peerLogin(moving, 'dns-after', '127.0.0.9');
+    assert.equal(after.cookie, 'S', 'after expiry the new proxy address is resolved and observed');
+    const success = (await protectedAuthRows(w)).filter(r => r.event.result === 'succeeded').at(-1);
+    assert.equal(success.event.trustedProxyIp.value.address, IP);
+  } finally { dns.lookup = originalLookup; }
   await w.finish('L09');
 });
 
@@ -1153,7 +1209,46 @@ test('L14 disconnected requests do not end authentication; reauthentication cont
   await admin.patchUser('owner', { enabled: false }, caller);
   assert.equal((await protectedAuthRows(w)).filter(r => r.event.auth.endCause === 'isolation').length, 1, 'repeated isolation adds no end');
   assert.equal((await w.call(w.I1, 'me', { sid: fresh.done.newSid })).status, 401);
-  await w.finish('L14');
+
+  // B2R2-01: suspension is the PACS decision and the provider account stays enabled (provider convergence is U5b), so the
+  // provider keeps issuing credentials. Every way from them into PACS is refused here, before any session: the callback (no
+  // session, cookie or proof), a Bearer token issued after the suspension, the old cookie, and a stored session whose token
+  // is due for refresh (refused before the provider is asked). Each refused login is recorded through the member spool and
+  // completed after its ledger receipt: B1's lifetime recovery journal does not grow, however many refusals there are.
+  const business = businessJournalBytes(), waiting = authSpool('member').pending.length;
+  const isolatedRows = async () => (await protectedAuthRows(w)).filter(r => r.event.auth.failureCause === 'member-isolated').length;
+  const refusedBefore = await isolatedRows();
+  const provider = await w.issue('owner-after-suspension', { sub: 'owner' });
+  for (let n = 0; n < 2 * MEMBER_PENDING_LIMIT; n++) {
+    const { done: refused } = await login(w, w.I1, provider);
+    assert.deepEqual([refused.location, refused.newSid, refused.sidCookies, refused.proof],
+      [landing('login_failed'), null, 0, undefined], 'L14 a suspended member gets no session');
+  }
+  assert.equal(await isolatedRows(), refusedBefore + 2 * MEMBER_PENDING_LIMIT, 'every refusal is recorded once');
+  assert.equal(authSpool('member').pending.length, waiting, 'each refusal is completed after its receipt');
+  const tokens = kc.tokens;
+  assert.equal((await w.call(w.I1, 'me', { bearer: provider.access })).status, 401, 'a Bearer issued after suspension is refused');
+  assert.equal((await w.call(w.I1, 'me', { sid: fresh.done.newSid })).status, 401, 'the old cookie stays refused');
+  const stored = await w.session(provider, { atExpiresAt: new Date(Date.now() - LEAD) });
+  assert.equal((await w.call(w.I1, 'me', { sid: stored })).status, 401, 'a stored session is refused before its refresh');
+  assert.equal(kc.tokens, tokens, 'none of them reaches the provider token endpoint');
+  // During a ledger outage one account holds at most its own pending limit; the next refusal is still refused, unrecorded,
+  // and the operator is told the closed cause at once. The held observations are recovered once the ledger answers.
+  for (let n = 0; n < MEMBER_PENDING_LIMIT; n++)
+    w.fault('I1', 'tx.ledger', Object.assign(new Error('synthetic ledger unavailable'), { code: 'P1001' }));
+  for (let n = 0; n <= MEMBER_PENDING_LIMIT; n++)
+    assert.equal((await login(w, w.I1, provider)).done.location, landing('login_failed'), 'the answer never depends on the record');
+  assert.equal(w.faults.length, 0, 'the limit refused the last observation before any ledger attempt');
+  assert.equal(authSpool('member').pending.length, waiting + MEMBER_PENDING_LIMIT, 'one account holds at most its pending limit');
+  assert.equal(await isolatedRows(), refusedBefore + 2 * MEMBER_PENDING_LIMIT);
+  await w.I1.ledger.recoverFailures();
+  assert.equal(authSpool('member').pending.length, 0, 'recovery completes every held observation');
+  assert.equal(await isolatedRows(), refusedBefore + 3 * MEMBER_PENDING_LIMIT, 'held observations recover under their original events');
+  assert.equal(businessJournalBytes(), business, 'B1 recovery journal unchanged by refusals, rollbacks and recoveries');
+  const logs = await w.finish('L14');
+  const notices = logs.map(([, line]) => line).filter(line => line.includes('로그인 거절을 접속기록 없이 처리했습니다'));
+  assert.equal(notices.length, 1, 'the unrecorded refusal is reported to the operator once');
+  assert.match(notices[0], /1건\(보관소 member, 원인 identity-limit\)/);
 });
 
 test('L15 normal login, automatic entry, refresh and another tab require no additional authentication and startup refuses missing configuration', async t => {
@@ -1177,9 +1272,13 @@ test('L15 normal login, automatic entry, refresh and another tab require no addi
 
 test('L16 a failed authentication observation survives rollback and recovers under its original identity and time without secrets', async t => {
   const w = await world(t);
+  // B2R2-10: at the record-writing code, anonymous refusals (one rolled back and recovered) never touch B1's journal.
+  const business = businessJournalBytes(), waiting = authSpool('anonymous').pending.length;
   const begin = await w.call(w.I1, 'login');
   w.fault('I1', 'tx.audit', new Error('synthetic failed projection'));
   await refuseFlow(w, w.I1, begin, 'access_denied');
+  assert.equal(authSpool('anonymous').pending.length, waiting + 1, 'the rolled-back refusal waits in the anonymous spool');
+  assert.equal(businessJournalBytes(), business, 'its rollback leaves no note in B1 recovery journal');
   assert.equal(await w.sessions(), 0);
   assert.equal((await protectedAuthRows(w)).length, 0);
   const files = fs.readFileSync(process.env.KIN_EMR_STATE_DIR + '/anonymous-failures/failure-journal.jsonl', 'utf8');
@@ -1201,6 +1300,14 @@ test('L16 a failed authentication observation survives rollback and recovers und
   assert.equal(failures.length, 2);
   assert.deepEqual(failures.map(row => row.event.auth.failureCause), ['state-mismatch', 'provider-error']);
   assert.notEqual(failures[0].event.eventId, failures[1].event.eventId);
+  const live = await w.call(w.I1, 'login');
+  for (let n = 0; n < 6; n++)
+    await w.call(w.I1, 'callback', { cookie: live.pendingCookie, query: { state: 'stray-' + n, code: 'stray' } });
+  assert.equal((await protectedAuthRows(w)).length, 9, 'every anonymous refusal has its own protected event');
+  const spool = authSpool('anonymous');
+  assert.equal(spool.pending.length, 0, 'every anonymous observation is completed in its spool');
+  assert.ok(spool.rows.filter(row => row.kind === 'auth-failure-recovered').length >= 9);
+  assert.equal(businessJournalBytes(), business, 'B1 recovery journal unchanged by anonymous refusals and their recovery');
   await w.finish('L16');
 });
 const atProvider = out => typeof out.location === 'string' && out.location.startsWith(ISSUER + '/protocol/openid-connect/auth?');
@@ -5010,6 +5117,21 @@ test('CORE_REALM_404 a realm read 404 is a failed import, never a ready empty re
   assert.equal(await w.base.memberRightsImport.count(),0);assert.equal((await w.call(w.I1,'health')).body.memberRights,'pending');
   kc.beforeAdmin=name=>name==='GET read'?404:undefined;
   assert.equal(await new KeycloakService().getUser('syn-absent'),null,'single-user lookup retains its absence contract');
+  // B2R2-04: an incomplete listing (an empty page before the announced total) and an unstable one (a member listed twice)
+  // are the provider's data: the retry warning names provider-data-invalid, never local storage.
+  const member=id=>({id,username:id,email:id+'@synthetic.test',emailVerified:true,enabled:true,groups:[A],roles:['radiologist']});
+  const listings={incomplete:async page=>({total:2,users:page===1?[member('syn-listed')]:[]}),
+    unstable:async()=>({total:2,users:[member('syn-twice'),member('syn-twice')]})};
+  const {importMemberRights,MemberRightsImportFailure}=require('/app/dist/member-rights-import');
+  for(const [label,listUsers] of Object.entries(listings)){
+    await assert.rejects(importMemberRights(w.I1.prisma,{listUsers}),e=>e instanceof MemberRightsImportFailure&&e.reason==='provider-data-invalid',label);
+    const service=new AuthService(w.I1.prisma,{listUsers},w.I1.ledger),from=capture.texts.length;t.after(()=>service.onModuleDestroy());
+    await service.onModuleInit();
+    await w.until(label+' retry warning',async()=>capture.texts.slice(from).some(([,line])=>line.includes('provider-data-invalid')));
+    assert.equal(capture.texts.slice(from).some(([,line])=>line.includes('storage')),false,label+' is not a storage failure');
+    service.onModuleDestroy();
+  }
+  assert.equal(await w.base.memberRightsImport.count(),0);
   await w.finish('CORE_REALM_404');
 });
 

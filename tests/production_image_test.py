@@ -226,6 +226,13 @@ assert(state.isDirectory()); assert.strictEqual(state.uid,process.getuid()); ass
         self.assertRegex(logs, r"[가-힣]")
         for problem in ("not-the-runtime-role", "rolsuper"):
             self.assertIn(problem, logs)
+        # B2R2-03: a declaration missing while the module graph is built names that declaration in Korean, instead of
+        # the framework's English exception line and stack.
+        missing = self.stopped_with_error(self.api("no-institution", KIN_EMR_MANAGING_INSTITUTION=""))
+        self.assertIn("KIN_EMR_MANAGING_INSTITUTION 설정이 없습니다", missing)
+        self.assertIn("기동을 중단합니다", missing)
+        self.assertNotIn("ExceptionHandler", missing)
+        self.assertNotRegex(missing, r"\n\s+at ")
 
     def test_04_production_refuses_disabled_auth(self):
         """TEST-C1-03: packaging must retain the production authentication guard."""

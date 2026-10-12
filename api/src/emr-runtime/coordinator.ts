@@ -12,6 +12,9 @@ export interface WriterRequest { directory: string; operation: string; value?: a
 export type WriterTransport = (request: WriterRequest) => any;
 interface Owner { fd: number; context: WriterContext; server?: Server }
 const owners = new Map<string, Owner>();
+// Reads and keyed journal/spool writes: the same ID and body return the original record, so a replay is safe.
+const REPLAY_SAFE = ['read', 'journal-load', 'journal-find', 'journal-record',
+  'auth-failure-find', 'auth-failure-pending', 'auth-failure-observe', 'auth-failure-complete'];
 
 /** One process owns the kernel fence for this protected state for its entire lifetime.
  * Other writers send state operations over local IPC. Their DB transactions and
@@ -73,16 +76,14 @@ export class StateCoordinator {
             bytes += part;
             if (!bytes.endsWith('\n')) return;
             done = true;
-            let response: any;
-            try {
+            // Spool writes answer with a promise (their fsync runs off this event loop): reply once it settles.
+            void Promise.resolve().then(() => {
               const request = JSON.parse(bytes);
-              response = { ok: true, result: executeExternal({ directory: this.directory,
-                operation: request.operation, value: request.value, context: owner.context }) };
-            } catch (error: any) {
-              response = { ok: false, error: { code: error.code ?? 'SealUnavailable', name: error.name,
-                message: error.message, detail: error.detail } };
-            }
-            socket.end(JSON.stringify(response) + '\n');
+              return executeExternal({ directory: this.directory, operation: request.operation, value: request.value,
+                context: owner.context });
+            }).then(result => ({ ok: true, result }), (error: any) => ({ ok: false, error: { code: error.code ?? 'SealUnavailable',
+              name: error.name, message: error.message, detail: error.detail } }))
+              .then(response => { socket.end(JSON.stringify(response) + '\n'); });
           });
         });
         server.listen(socketPath); server.unref(); owner.server = server;
@@ -103,15 +104,27 @@ export class StateCoordinator {
       if (this.owner) return executeExternal({ directory: this.directory, operation, value, context: this.owner.context });
       try { return this.client.call(operation, value); }
       catch (error: any) {
-        if (!error.ownerGone || (!error.beforeConnect && !['read', 'journal-load', 'journal-find', 'journal-record',
-          'journal-auth-pending', 'anonymous-journal-find', 'anonymous-journal-record', 'anonymous-journal-auth-pending'].includes(operation)) || attempt >= EMR_OWNER_RETRIES) {
-          if (this.role === 'retention') console.warn('EMR retention deferred: API state owner unavailable', { operation, attempts: attempt + 1 });
-          throw error;
-        }
+        if (!this.retryable(error, operation, attempt)) throw error;
         this.initialize();
         if (!this.owner) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, EMR_OWNER_RETRY_MS);
       }
     }
+  }
+  private async remoteAsync(operation: string, value?: any): Promise<any> {
+    for (let attempt = 0; ; attempt++) {
+      if (this.owner) return await executeExternal({ directory: this.directory, operation, value, context: this.owner.context });
+      try { return await this.client.callAsync(operation, value); }
+      catch (error: any) {
+        if (!this.retryable(error, operation, attempt)) throw error;
+        this.initialize();
+        if (!this.owner) await new Promise(resolve => setTimeout(resolve, EMR_OWNER_RETRY_MS));
+      }
+    }
+  }
+  private retryable(error: any, operation: string, attempt: number): boolean {
+    if (error.ownerGone && (error.beforeConnect || REPLAY_SAFE.includes(operation)) && attempt < EMR_OWNER_RETRIES) return true;
+    if (this.role === 'retention') console.warn('EMR retention deferred: API state owner unavailable', { operation, attempts: attempt + 1 });
+    return false;
   }
   ownerAlive(owner: string): boolean {
     if (this.transport) return this.call('owner-alive', owner);
@@ -144,8 +157,23 @@ export class StateCoordinator {
       }
     }
     catch (error: any) {
-      if (/^(Seal|FailureJournal|EmrState)/.test(error.code || '') || error.name === 'ContractError') throw error;
-      throw Object.assign(new Error('ExternalWriterUnavailable'), { code: 'SealUnavailable' });
+      throw StateCoordinator.closed(error);
     }
+  }
+  /** The same operations for callers that must not wait on this event loop: a spool write resolves once durable. */
+  async callAsync<T = any>(operation: string, value?: any): Promise<T> {
+    const request = { directory: this.directory, operation, value, context: this.context };
+    try {
+      if (this.transport) return await this.transport(request);
+      if (process.platform !== 'linux') throw Object.assign(new Error('LinuxExternalWriterRequired'), { code: 'SealUnavailable' });
+      if (this.role === 'api') this.owner ??= owners.get(this.directory);
+      return await this.remoteAsync(operation, value);
+    } catch (error: any) {
+      throw StateCoordinator.closed(error);
+    }
+  }
+  private static closed(error: any): Error {
+    if (/^(Seal|FailureJournal|EmrState)/.test(error.code || '') || error.name === 'ContractError') return error;
+    return Object.assign(new Error('ExternalWriterUnavailable'), { code: 'SealUnavailable' });
   }
 }

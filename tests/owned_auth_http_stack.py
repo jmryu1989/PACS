@@ -3,6 +3,9 @@
 REQ-EMR-07 -> RISK-EMR-ORIGINAL-FIXTURE -> B2 AuthAuditLive/LogoutOrderLive.
 The default hosted suites still use their existing externally provisioned stack. This fixture owns only its generated
 Compose project; it refuses occupied loopback ports and never starts, stops, inspects secrets or removes another project.
+Compose selects that project only through the inherited COMPOSE_PROJECT_NAME / COMPOSE_FILE that start() places in this
+process's environment (and close() restores): every Compose call below runs from the repository root with no project, file
+or environment argument (execution guard TG-02). Cleanup also removes the images Compose built for the project.
 """
 import json
 import os
@@ -20,6 +23,7 @@ import live_test_gate as gate
 from measurement_ci import sanitize
 
 ROOT = Path(__file__).resolve().parents[1]
+LABEL = 'kin.emrb.auth.http'
 
 
 def start_if_requested(case):
@@ -33,25 +37,24 @@ def start_if_requested(case):
 
 class OwnedAuthStack:
     def __init__(self):
-        self.project = 'kin-emrb-r9b-' + secrets.token_hex(6)
-        self.out = ROOT / 'tmp/emr-b2/runs' / ('r9-http-' + self.project)
+        self.project = 'kin-emrb-auth-' + secrets.token_hex(6)
+        self.out = ROOT / 'tmp/owned-auth-http' / self.project
         self.out.mkdir(parents=True, exist_ok=False)
         self.values = {key: secrets.token_hex(32) for key in (
             'POSTGRES_PASSWORD', 'KIN_EMR_RUNTIME_PASSWORD', 'ORTHANC_PASS', 'KC_ADMIN_PASSWORD',
             'KC_CLIENT_SECRET', 'KC_WEB_SECRET', 'KIN_COOKIE_SECRET')}
         self.previous = {}
         self.started = False
-        self.command = ['docker', 'compose', '-p', self.project]
-        self.env = {**os.environ, **self.values, 'COMPOSE_PROJECT_NAME': self.project,
+        self.env = {**self.values, 'COMPOSE_PROJECT_NAME': self.project,
                     'COMPOSE_FILE': str(self.out / 'compose.yml'), 'COMPOSE_ENV_FILES': '',
                     'PUBLIC_ORIGIN': 'https://localhost:9443', 'PUBLIC_PORT': '9443',
-                    'KIN_EMR_MANAGING_INSTITUTION': 'synthetic-emrb-r9', 'KIN_EMR_PROXY_HOST': 'proxy',
+                    'KIN_EMR_MANAGING_INSTITUTION': 'synthetic-emrb-auth', 'KIN_EMR_PROXY_HOST': 'proxy',
                     'KIN_SYNTHETIC_REALM': '1', 'KIN_TEST_PROXY': 'https://localhost:9443',
                     'KIN_TEST_API': 'https://localhost:9443/api', 'KIN_TEST_ORTHANC': 'http://127.0.0.1:8042',
                     'KIN_TEST_TOKEN_URL': 'http://127.0.0.1:8080/auth/realms/kin/protocol/openid-connect/token'}
 
-    def run(self, name, args, timeout=600, check=True):
-        result = subprocess.run(args, cwd=ROOT, env=self.env, capture_output=True, timeout=timeout)
+    def record(self, name, result, check=True):
+        """Keeps a sanitized log of one finished call; never the generated secrets or an OIDC query string."""
         output = (result.stdout + result.stderr).decode('utf-8', 'replace')
         output = sanitize(output, self.values.values())
         # nginx's request line contains OIDC callback codes and state even though no response body is logged.
@@ -70,7 +73,7 @@ class OwnedAuthStack:
         for name, service in config['services'].items():
             service['container_name'] = self.project + '-' + name
             service['restart'] = 'no'
-            service['labels'] = {'kin.emrb.r9.http': self.project, 'kin.emrb.live': self.project}
+            service['labels'] = {LABEL: self.project, 'kin.emrb.live': self.project}
             if 'build' in service:
                 build = service['build']
                 if isinstance(build, str):
@@ -99,20 +102,25 @@ class OwnedAuthStack:
         config['services']['api']['environment']['DEPLOYMENT_MODE'] = 'production'
         # Docker Desktop does not publish ports of an internal bridge. Use a new bridge with loopback-only published
         # ports; no existing network, volume, account or connection target is reused.
-        config['networks'] = {'default': {'labels': {'kin.emrb.r9.http': self.project}}}
-        config['volumes'] = {name: {'labels': {'kin.emrb.r9.http': self.project}} for name in config['volumes']}
+        config['networks'] = {'default': {'labels': {LABEL: self.project}}}
+        config['volumes'] = {name: {'labels': {LABEL: self.project}} for name in config['volumes']}
         (self.out / 'compose.yml').write_text(yaml.safe_dump(config, allow_unicode=True), encoding='utf-8')
         assert all(service['container_name'].startswith(self.project + '-') for service in config['services'].values())
+        # Compose reads the project and file from this process's environment; close() restores every value.
         for key, value in self.env.items():
             if os.environ.get(key) != value:
                 self.previous[key] = os.environ.get(key)
                 os.environ[key] = value
         self.started = True
-        self.run('database', self.command + ['up', '-d', '--wait', 'db'])
-        self.run('database-tcp', self.command + ['exec', '-T', 'db', 'sh', '-c',
-                 'for n in $(seq 1 60); do pg_isready -h 127.0.0.1 -U kin && exit 0; sleep 1; done; exit 1'], timeout=70)
-        self.run('keycloak-database', self.command + ['exec', '-T', 'db', 'createdb', '-U', 'kin', 'keycloak'])
-        self.run('stack', self.command + ['up', '-d', '--build'], timeout=900)
+        self.record('database', subprocess.run(['docker', 'compose', 'up', '-d', '--wait', 'db'],
+                                               cwd=ROOT, capture_output=True, timeout=600))
+        self.record('database-tcp', subprocess.run(
+            ['docker', 'compose', 'exec', '-T', 'db', 'sh', '-c',
+             'for n in $(seq 1 60); do pg_isready -h 127.0.0.1 -U kin && exit 0; sleep 1; done; exit 1'],
+            cwd=ROOT, capture_output=True, timeout=70))
+        self.record('keycloak-database', subprocess.run(['docker', 'compose', 'exec', '-T', 'db', 'createdb', '-U', 'kin', 'keycloak'],
+                                                        cwd=ROOT, capture_output=True, timeout=600))
+        self.record('stack', subprocess.run(['docker', 'compose', 'up', '-d', '--build'], cwd=ROOT, capture_output=True, timeout=900))
         for endpoint in ('/api/health', '/auth/realms/kin/.well-known/openid-configuration'):
             deadline = time.monotonic() + 240
             while True:
@@ -133,18 +141,26 @@ class OwnedAuthStack:
         os.environ['KIN_LIVE_IMPORTED_ADMIN_PASSWORD'] = password
         (self.out / 'isolation.json').write_text(json.dumps({'project': self.project, 'ports': 'loopback only',
             'credentials': 'generated in memory', 'network': 'new bridge, no existing network reused', 'volumes': 'new project volumes',
-            'original_resources_touched': False}, indent=2) + '\n')
+            'images': 'images built for the project are removed at cleanup', 'original_resources_touched': False}, indent=2) + '\n')
 
     def close(self):
         try:
             if self.started:
                 try:
-                    self.run('service-logs', self.command + ['logs', '--no-color'], check=False)
+                    self.record('service-logs', subprocess.run(['docker', 'compose', 'logs', '--no-color'],
+                                                               cwd=ROOT, capture_output=True, timeout=600), check=False)
                 finally:
-                    self.run('cleanup', self.command + ['down', '--volumes', '--remove-orphans'], timeout=180)
-                for kind, argv in [('containers', ['ps', '-aq']), ('volumes', ['volume', 'ls', '-q']), ('networks', ['network', 'ls', '-q'])]:
-                    result = self.run('remaining-' + kind, ['docker', *argv, '--filter', 'label=kin.emrb.r9.http=' + self.project])
-                    if result.stdout.strip():
+                    # --rmi local: the proxy image Compose built for this project (images named by `image:` stay).
+                    self.record('cleanup', subprocess.run(['docker', 'compose', 'down', '--volumes', '--remove-orphans', '--rmi', 'local'],
+                                                          cwd=ROOT, capture_output=True, timeout=300))
+                selector = 'label=' + LABEL + '=' + self.project
+                for kind, result in [
+                        ('containers', subprocess.run(['docker', 'ps', '-aq', '--filter', selector], capture_output=True, timeout=120)),
+                        ('volumes', subprocess.run(['docker', 'volume', 'ls', '-q', '--filter', selector], capture_output=True, timeout=120)),
+                        ('networks', subprocess.run(['docker', 'network', 'ls', '-q', '--filter', selector], capture_output=True, timeout=120)),
+                        ('images', subprocess.run(['docker', 'image', 'ls', '-q', '--filter', 'reference=' + self.project + '-*'],
+                                                  capture_output=True, timeout=120))]:
+                    if self.record('remaining-' + kind, result).stdout.strip():
                         raise RuntimeError('Owned authentication cleanup left ' + kind)
         finally:
             for key, value in self.previous.items():

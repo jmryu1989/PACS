@@ -1,16 +1,22 @@
 # 살아 있는 불변조건 테스트
 
-REQ-EMR-06/07/19 → RISK-EMR-RECOVERY-STARVATION/DNS-AVAILABILITY/UNCONFIRMED-LOGIN → B2 C11·L09·L10·L16:
-익명 로그인 실패는 업무 복구 저널과 분리된 1 MiB 공간에 보존하며, 영수증이 확인된 관측만 압축한다.
-미복구 공간이 차면 새 관측의 원장 작업을 시작하지 않는다. 복구 틱은 미완료 관측만 제한된 수로 읽는다.
-C11은 실제 파일 IO로 20,000건 전후 조회 비용·용량 포화·재시작 보존을 검사하고 수치를 출력한다.
-L09는 DNS 단절 중 정상 인증/영상 요청과 원장 append 실패·commit 뒤 영수증 실패의 서로 다른 계약을 검사한다.
-L10은 issuer 변경 뒤 종료, L16은 서로 다른 콜백 실패와 롤백 이후 원 관측의 복구를 검사한다.
+REQ-EMR-06/07/19 → RISK-EMR-RECOVERY-STARVATION/DNS-AVAILABILITY/UNCONFIRMED-LOGIN → B2 C11·L09·L10·L14·L16:
+로그인 실패 관측은 업무 복구 저널(B1의 64 MiB 수명 공간)에 쓰지 않는다. 신원이 없는 거절은 `anonymous-failures`, 검증된
+신원의 거절(예: 정지된 회원 — provider 계정은 켜져 있다)은 `member-failures`의 각 1 MiB 보관소에 두고, 원장 영수증이 확인된
+관측만 압축으로 지운다. 업무 복구 저널은 이전 배포가 남긴 관측의 완료만 받는다. 회원 한 명의 미복구 관측은 상한
+(`MEMBER_PENDING_PER_IDENTITY`)까지이고, 보관하지 못한 거절은 거절 그대로 두되 운영자 로그에 고정 분류와 건수를 남긴다.
+보관소 쓰기는 묶음마다 한 번의 비동기 fdatasync로 API 이벤트 루프를 막지 않는다. 복구 틱은 미완료 관측만 제한된 수로 읽는다.
+C11은 실제 파일 IO로 익명·정지 회원 각 20,000건 전후 조회 비용·용량 포화·회원별 상한·재시작 보존과 B1 기록 수용을 검사하고
+수치를 출력한다. L09는 DNS 단절 중 정상 인증/영상 요청, 원장 append 실패·commit 뒤 영수증 실패, 느린/실패/무응답 DNS에서의
+제한된 지연(최근 검증된 proxy 유지)과 만료 뒤 새 proxy 주소를 검사한다. L10은 issuer 변경 뒤 종료, L14는 정지 회원의 콜백·
+Bearer·저장 세션 거절(토큰 교환 없음)과 거절 기록의 회원 보관소 경로, L16은 서로 다른 콜백 실패와 롤백 이후 원 관측의 복구가
+업무 복구 저널을 키우지 않음을 검사한다.
 
 로컬의 `AuthAuditLive`·`LogoutOrderLive`는 `KIN_TEST_OWNED_AUTH_HTTP=1`과 이 checkout에서 빌드한
 `KIN_TEST_API_IMAGE`를 지정하면 게이트 안에서 `owned_auth_http_stack.py`가 별도 합성 스택을 만든다.
-새 자격증명·고유 컨테이너/볼륨·새 네트워크를 쓰고 기존 localhost 포트 점유 시 거절한다.
-원본 컨테이너를 기동하지 않으며 종료 시 자기 Compose 프로젝트만 정리한다. 자격증명은 메모리에만 두고 로그는 비식별화한다.
+새 자격증명·고유 컨테이너/볼륨·새 네트워크를 쓰고 기존 localhost 포트 점유 시 거절한다. Compose 프로젝트는 상속한
+`COMPOSE_PROJECT_NAME`·`COMPOSE_FILE`로만 고르고(실행 가드 TG-02), 종료 시 자기 프로젝트와 그 프로젝트가 빌드한 이미지만 정리한다.
+원본 컨테이너를 기동하지 않는다. 자격증명은 메모리에만 두고 로그는 비식별화한다.
 CAS 서비스 시험은 `scripts/run-tests.py --module tests/auth_audit_live.py --class ReportDraftServiceLive --mode live --unit <고정된-단위> --timeout 3600`으로 실행한다.
 이 adapter는 별도 networkless PostgreSQL의 빈 `kin_report_draft_test` DB를 만들고, 해당 DB URL을
 `KIN_REPORT_DRAFT_DATABASE_URL` 환경으로 컨테이너에 전달하여 42개 사례를 실행한다. 공개 CI의 기존 선택은 유지한다.

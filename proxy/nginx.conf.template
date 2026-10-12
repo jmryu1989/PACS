@@ -3,6 +3,10 @@
 
 limit_req_zone $binary_remote_addr zone=kin_registration:10m rate=10r/m;
 limit_req_zone $binary_remote_addr zone=kin_token:10m rate=30r/m;
+# 로그인 시작과 콜백(B2R2-08): 거절된 콜백마다 보호 원장 사건이 생기므로 한 접속지가 만들 수 있는 실패 기록의 속도를 묶는다.
+# 크기는 병원 NAT 하나 뒤의 출근 시간 기준이다 — 로그인 한 번이 시작·콜백과 많아야 두 번의 자동 재시작(약 4요청)이므로,
+# burst 60은 30명 안팎이 같은 분에 로그인해도 지연 없이 받고, 그 뒤로도 분당 120요청(30명 안팎/분)이 계속 통한다.
+limit_req_zone $binary_remote_addr zone=kin_auth_flow:10m rate=120r/m;
 limit_req_status 429;
 
 include /etc/nginx/snippets/default-servers.conf;
@@ -94,6 +98,19 @@ server {
     # 제출을 같은 제한 구역에 넣어 새 계정 생성 입력면을 양쪽에서 막는다.
     location = /api/auth/register {
         limit_req zone=kin_registration burst=5 nodelay;
+        client_max_body_size 2m;
+        proxy_pass http://api:3000;
+    }
+
+    # 로그인 시작(GET 링크·POST 재인증)과 콜백만 이 구역이다. 로그아웃·진입 증명·세션 요청은 제한하지 않는다.
+    location = /api/auth/login {
+        limit_req zone=kin_auth_flow burst=60 nodelay;
+        client_max_body_size 2m;
+        proxy_pass http://api:3000;
+    }
+
+    location = /api/auth/callback {
+        limit_req zone=kin_auth_flow burst=60 nodelay;
         client_max_body_size 2m;
         proxy_pass http://api:3000;
     }

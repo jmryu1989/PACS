@@ -22,7 +22,11 @@ async function bootstrap() {
         process.exit(1);
       }
 
-  const app = await NestFactory.create(AppModule, { rawBody: true });
+  // B2R2-03: a provider that fails while the module graph is built (e.g. a missing KIN_EMR_MANAGING_INSTITUTION) must reach
+  // the Korean message below. Nest's default logs its English exception and stack and exits first; with abortOnError off the
+  // error is rethrown here, and the buffered construction logs (which hold that raw error) are printed only on success.
+  const app = await NestFactory.create(AppModule, { rawBody: true, abortOnError: false, bufferLogs: true, autoFlushLogs: false });
+  app.flushLogs();
   composeEmrAdapters(await app.get(AuthEventLedger).prepare());
   app.use(dictationParser());
   /**

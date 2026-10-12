@@ -14,7 +14,7 @@ import { AuthAccessEventV2, AuthEndCause, AuthFailureCause, EvidenceFactV2, Immu
 import { emrAdapters } from './emr-contract/composition';
 import { runtimeAdapters } from './emr-runtime/context';
 import { authProjection, ingressAddress, knownIdentity, parseAuthFailureObservation, refuseAuditNamespaceCredential, verifiedIdentityClaims } from './emr-runtime/contract';
-import { FailureJournal } from './emr-runtime/failure-journal';
+import { FailureJournal, JournalUnavailable } from './emr-runtime/failure-journal';
 import { verifyRuntimeConnection } from './emr-runtime/manifest';
 import { AccessSeal } from './emr-runtime/seal';
 import { AccessLedgerStore, PrismaLedgerSql, ProvisionalAppend } from './emr-runtime/store';
@@ -68,6 +68,19 @@ const REFRESH_LEAD_MS = 30_000;
 const TOKEN_MARGIN_MS = 2000;
 // 로그인 직후의 진입 증명이 통하는 시간(U5S-REQ-09). 콜백의 이동과 첫 요청 사이만 덮는다.
 const ENTRY_PROOF_MS = 120_000;
+/**
+ * 신뢰 프록시 주소 조회(B2R-02, B2R2-05). 검증된 답은 5초 동안 다시 쓴다. 조회가 느리거나 실패해도 최근(60초 안) 검증된 주소가
+ * 있으면 그것으로 판정하고 기다림은 200 ms뿐이다 — 느린 DNS가 성공 로그인을 거절로 바꾸지 않는다. 늦게 온 성공 답도 반영한다.
+ * 검증된 주소가 아직 없을 때만 조금 더(500 ms) 기다린 뒤 빈 집합(미관측 접속지)으로 판정한다. 답하지 않는 조회는 5초 뒤 새
+ * 조회로 바꾼다.
+ */
+const PEER_FRESH_MS = 5000;
+const PEER_STALE_MS = 60_000;
+const PEER_WAIT_MS = 200;
+const PEER_COLD_WAIT_MS = 500;
+const PEER_LOOKUP_ABANDON_MS = 5000;
+// 기록하지 못한 로그인 거절의 운영자 안내 간격(B2R2-06): 첫 건은 바로, 그 뒤에는 이 간격마다 그동안의 건수를 한 줄로.
+const UNRECORDED_NOTICE_MS = 60_000;
 
 // S7-U5 접속기록(FACT-S7-RETENTION): 로그인 성공·실패, 로그아웃·계정 전환·재인증, 세션 만료, 로그인 뒤 진입.
 const AUTH_LOGIN = 'auth.login';
@@ -189,9 +202,11 @@ export class AuthEventLedger {
   private readonly proxyHost: string;
   private ready = false;
   private recoveringFailures?: Promise<void>;
-  private proxyPeers?: { expires: number; peers: Set<string> };
-  private resolvingProxy?: Promise<Set<string>>;
+  private proxyPeers?: { expires: number; verifiedAt: number; startedAt: number; peers: Set<string> };
+  private resolvingProxy?: { startedAt: number; answer: Promise<Set<string>> };
   private readonly transactions = new WeakMap<object, { events: AuthAccessEventV2[]; appended: ProvisionalAppend[] }>();
+  private readonly logger = new Logger('AuthLedger');
+  private readonly unrecorded = { counts: new Map<string, number>(), quiet: false };
 
   constructor(private readonly prisma: PrismaService) {
     const institution = process.env.KIN_EMR_MANAGING_INSTITUTION?.trim();
@@ -229,17 +244,28 @@ export class AuthEventLedger {
   }
 
   private async trustedPeers(): Promise<Set<string>> {
-    if (this.proxyPeers && this.proxyPeers.expires > Date.now()) return this.proxyPeers.peers;
-    if (!this.resolvingProxy) this.resolvingProxy = (async () => {
-      let timer: NodeJS.Timeout;
-      const timedOut = new Promise<Set<string>>(resolve => { timer = setTimeout(() => resolve(new Set()), 200); });
-      try {
-        const peers = await Promise.race([lookup(this.proxyHost, { all: true }).then(rows => new Set(rows.map(row => row.address)), () => new Set<string>()), timedOut]);
-        this.proxyPeers = { peers, expires: Date.now() + (peers.size ? 5000 : 1000) };
+    const now = Date.now();
+    if (this.proxyPeers && this.proxyPeers.expires > now) return this.proxyPeers.peers;
+    const stale = this.proxyPeers && now - this.proxyPeers.verifiedAt < PEER_STALE_MS ? this.proxyPeers.peers : null;
+    if (!this.resolvingProxy || now - this.resolvingProxy.startedAt > PEER_LOOKUP_ABANDON_MS) {
+      const startedAt = now;
+      const answer = lookup(this.proxyHost, { all: true }).then(rows => {
+        const peers = new Set(rows.map(row => row.address));
+        // Only a verified, non-empty answer replaces the cache; an older lookup's late answer never overwrites a newer one.
+        if (peers.size && startedAt >= (this.proxyPeers?.startedAt ?? Number.NEGATIVE_INFINITY))
+          this.proxyPeers = { peers, startedAt, verifiedAt: Date.now(), expires: Date.now() + PEER_FRESH_MS };
         return peers;
-      } finally { clearTimeout(timer!); this.resolvingProxy = undefined; }
-    })();
-    return this.resolvingProxy;
+      }, () => new Set<string>());
+      const resolving = { startedAt, answer };
+      this.resolvingProxy = resolving;
+      void answer.finally(() => { if (this.resolvingProxy === resolving) this.resolvingProxy = undefined; });
+    }
+    let timer: NodeJS.Timeout;
+    const waited = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), stale ? PEER_WAIT_MS : PEER_COLD_WAIT_MS); });
+    try {
+      const answer = await Promise.race([this.resolvingProxy!.answer, waited]);
+      return answer?.size ? answer : stale ?? new Set<string>();
+    } finally { clearTimeout(timer!); }
   }
 
   async transaction<T>(work: (tx: any) => Promise<T>, options?: { maxWait: number; timeout: number }): Promise<T> {
@@ -334,10 +360,15 @@ export class AuthEventLedger {
     facts.appended.push(appended);
   }
 
+  /**
+   * A refused sign-in (B2R-01, B2R2-01): its observation is made durable in an authentication spool (never B1's lifetime
+   * recovery journal) before the ledger event is tried, and completed only after that event's receipt. Rejects when the
+   * refusal could not be recorded (logged for the operator) or still awaits recovery; the caller's answer does not change.
+   */
   async failure(ingress: AuthIngress, failure: LoginFailureCause, who: Who | null, attemptId: string) {
     this.assertReady();
     const journal = this.store!.journal;
-    const retained = journal.find(`auth-failure:${attemptId}`) ?? journal.anonymousFind(`auth-failure:${attemptId}`);
+    const retained = journal.findAuthenticationRecord(`auth-failure:${attemptId}`);
     if (retained) return this.recoverFailure(parseAuthFailureObservation(JSON.parse(String(retained.body.observation))));
     const at = new Date().toISOString();
     let rights = null;
@@ -354,8 +385,8 @@ export class AuthEventLedger {
     const observation = parseAuthFailureObservation({ eventId: attemptId, auditLinkId: newAuditLinkId(), at,
       requestId: ingress.requestId, managingInstitution: this.managingInstitution, address: ingress.address,
       who, rights, failure: failure.replace(/_/g, '-') });
-    const record = who ? journal.record.bind(journal) : journal.anonymousRecord.bind(journal);
-    record(`auth-failure:${observation.eventId}`, 'auth-failure-observed', { observation: JSON.stringify(observation) }, at);
+    try { await journal.observeAuthenticationFailure(observation); }
+    catch (error) { this.refusalUnrecorded(who ? 'member' : 'anonymous', error); throw error; }
     // A failed append still has the durable observation. Only its confirmed same-event receipt marks recovery.
     try { await this.recoverFailure(observation); } catch {
       throw new Error('AuthFailureAwaitingRecovery');
@@ -363,11 +394,8 @@ export class AuthEventLedger {
   }
 
   private async recoverFailure(observation: ReturnType<typeof parseAuthFailureObservation>) {
-    const done = `auth-failure-recovered:${observation.eventId}`;
     const journal = this.store!.journal;
-    // Complete anonymous observations retained by older deployments in their original recovery journal.
-    const protectedObservation = !!journal.find(`auth-failure:${observation.eventId}`);
-    if (journal.find(done) || journal.anonymousFind(done)) return;
+    if (journal.findAuthenticationRecord(`auth-failure-recovered:${observation.eventId}`)) return;
     await this.transaction(async tx => {
       const event = await this.event(tx, { action: AUTH_LOGIN, who: observation.who, rights: observation.rights,
         ingress: { surface: 'GET auth/callback', requestId: observation.requestId, address: observation.address },
@@ -375,8 +403,37 @@ export class AuthEventLedger {
         at: new Date(observation.at), auditLinkId: observation.auditLinkId, managingInstitution: observation.managingInstitution });
       await this.record(tx, event, observation.who?.actor ?? 'unknown');
     });
-    const record = protectedObservation ? journal.record.bind(journal) : journal.anonymousRecord.bind(journal);
-    record(done, 'auth-failure-recovered', { eventId: observation.eventId });
+    // The writer completes it where it is stored: its spool, or the journal of an older deployment that still holds it.
+    await journal.completeAuthenticationFailure(observation.eventId);
+  }
+
+  /**
+   * B2R2-06: a refusal whose observation could not be stored (spool full, one member's pending limit, storage failure) is
+   * still refused, but without an access record. The operator learns it at once and then once per interval with the count;
+   * only closed classes are printed - never an identity, address or event.
+   */
+  private refusalUnrecorded(spool: 'anonymous' | 'member', error: unknown) {
+    const code = error instanceof JournalUnavailable ? error.code : 'FailureJournalUnavailable';
+    const detail = (error as any)?.detail === 'identity-limit' || (error as any)?.detail === 'capacity' ? (error as any).detail : null;
+    const cause = code === 'FailureJournalFull' ? detail ?? 'capacity' : code === 'FailureJournalUnavailable' ? 'storage'
+      : code === 'FailureJournalConflict' ? 'conflict' : 'corrupt';
+    const key = `보관소 ${spool}, 원인 ${cause}`;
+    this.unrecorded.counts.set(key, (this.unrecorded.counts.get(key) ?? 0) + 1);
+    const notice = () => {
+      const summary = [...this.unrecorded.counts].map(([what, count]) => `${count}건(${what})`).join(', ');
+      this.unrecorded.counts.clear();
+      this.logger.warn(`로그인 거절을 접속기록 없이 처리했습니다: ${summary}. `
+        + '인증 실패 기록 보관소(KIN_EMR_STATE_DIR)와 접속 원장 상태를 확인하십시오');
+    };
+    if (this.unrecorded.quiet) return;
+    notice();
+    this.unrecorded.quiet = true;
+    const again = () => {
+      if (!this.unrecorded.counts.size) { this.unrecorded.quiet = false; return; }
+      notice();
+      setTimeout(again, UNRECORDED_NOTICE_MS).unref();
+    };
+    setTimeout(again, UNRECORDED_NOTICE_MS).unref();
   }
 
   recoverFailures(): Promise<void> {
@@ -1223,13 +1280,15 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * 로그인 실패 행(OP-2 A). 이 서버가 시작한 로그인(서명·기한이 맞는 pending)에만 쓴다 — 익명 콜백이 행을 만들지 못하게.
-   * 콜백의 error 원문·code·state는 남기지 않는다. 기록 실패는 고정 분류만 남기고 콜백 응답을 바꾸지 않는다.
+   * 콜백의 error 원문·code·state는 남기지 않는다. 기록 실패는 콜백 응답을 바꾸지 않는다(B2R2-06): 보관하지 못한 거절은 원장이
+   * 고정 분류로 운영자에게 알리고, 보관했지만 원장 기록을 마치지 못한 관측은 재시도 주기가 복구한다.
    */
   private async loginFailureRow(req: any, cause: LoginFailureCause, who: Who | null) {
     // Each observed callback has its own attempt key; arbitrary query/state/error text alone supplies none.
     if (typeof req.emrLoginAttemptId !== 'string') return;
     const ingress = await this.requestIp(req, 'GET auth/callback');
-    await this.ledger.failure(ingress, cause, who, req.emrLoginAttemptId);
+    try { await this.ledger.failure(ingress, cause, who, req.emrLoginAttemptId); }
+    catch { /* unrecorded: already reported by the ledger; awaiting recovery: retried by the recovery timer */ }
   }
 
   private proofHash(proof: string): string {

@@ -1440,10 +1440,12 @@ function contractSuite() {
   });
 
   test('C11 composition is one startup capability; unprepared authentication starts no timers and a second composition is refused', async () => {
-    // B2R-01 / REQ-EMR-06/19 -> RISK-EMR-RECOVERY-STARVATION: real fenced journal IO, including restart and saturation.
-    // The timer consumes this pending query; historical failures must never enlarge its scan or the business journal.
-    const spoolState = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-emrb-anonymous-'));
+    // B2R-01 / B2R2-01 / REQ-EMR-06/19 -> RISK-EMR-RECOVERY-STARVATION: real fenced journal and spool IO, including restart
+    // and saturation. Failed sign-ins - anonymous ones and those of a verified identity (a suspended member whose provider
+    // login still works) - never spend B1's lifetime recovery journal and never enlarge the recovery timer's scan.
+    const spoolState = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-emrb-spools-'));
     try {
+      const AFS = load('emr-runtime/auth-failure-spool.ts');
       const journal = new J.FailureJournal(spoolState);
       const tick = () => {
         const start = process.hrtime.bigint();
@@ -1451,41 +1453,71 @@ function contractSuite() {
         return Number(process.hrtime.bigint() - start) / 1e6 / 100;
       };
       const before = tick();
-      const observe = () => {
-        const eventId = randomUUID();
-        const observation = C.parseAuthFailureObservation({ eventId, auditLinkId: A.newAuditLinkId(),
-          at: new Date().toISOString(), requestId: randomUUID(), managingInstitution: 'synthetic-capacity',
-          address: unresolved('not-observed'), who: null, rights: null, failure: 'provider-error' });
-        journal.anonymousRecord('auth-failure:' + eventId, 'auth-failure-observed', { observation: JSON.stringify(observation) }, observation.at);
-        return eventId;
+      const suspended = { issuer: 'https://identity.example.test', target: randomUUID(), actor: 'synthetic.suspended@example.test', institution: null };
+      const observation = who => C.parseAuthFailureObservation({ eventId: randomUUID(), auditLinkId: A.newAuditLinkId(),
+        at: new Date().toISOString(), requestId: randomUUID(), managingInstitution: 'synthetic-capacity', address: unresolved('not-observed'),
+        who, rights: who ? { version: 2, roles: ['radiologist'], institution: 'synthetic-a', approved: true, suspended: true } : null,
+        failure: who ? 'member-isolated' : 'provider-error' });
+      const observe = async who => { const o = observation(who); await journal.observeAuthenticationFailure(o); return o.eventId; };
+      // The API admits concurrent refusals; group commit shares one append and fdatasync among each batch.
+      const flood = async (who, total, workers) => {
+        let left = total;
+        await Promise.all(Array.from({ length: workers }, async () => {
+          while (left-- > 0) await journal.completeAuthenticationFailure(await observe(who));
+        }));
       };
-      for (let n = 0; n < 20000; n++) {
-        const id = observe();
-        journal.anonymousRecord('auth-failure-recovered:' + id, 'auth-failure-recovered', { eventId: id });
+      const started = process.hrtime.bigint();
+      await flood(null, 20000, 32);
+      await flood(suspended, 20000, 12);
+      const floodSeconds = Number(process.hrtime.bigint() - started) / 1e9;
+      const after = tick();
+      const bytes = kind => fs.statSync(path.join(spoolState, kind + '-failures/failure-journal.jsonl')).size;
+      const anonymousBytes = bytes('anonymous'), memberBytes = bytes('member');
+      assert(anonymousBytes <= AFS.AUTH_SPOOL_MAX_BYTES && memberBytes <= AFS.AUTH_SPOOL_MAX_BYTES);
+      assert.equal(journal.all().length, 0, 'failed sign-ins consumed zero business recovery records');
+      assert(after < Math.max(10, before * 5), 'idle tick cost stays flat after 40,000 failures');
+      // The business journal itself refuses a new sign-in observation and the completion of one it does not hold.
+      assert.throws(() => journal.record('auth-failure:' + randomUUID(), 'auth-failure-observed',
+        { observation: JSON.stringify(observation(suspended)) }), { code: 'FailureJournalConflict' });
+      const foreign = randomUUID();
+      assert.throws(() => journal.record('auth-failure-recovered:' + foreign, 'auth-failure-recovered', { eventId: foreign }),
+        { code: 'FailureJournalConflict' });
+      // Saturation while nothing can be completed: one account is held to its own limit, others are still recorded.
+      const held = [];
+      for (;;) {
+        try { held.push(await observe(suspended)); }
+        catch (error) { assert.equal(error.code, 'FailureJournalFull'); assert.equal(error.detail, 'identity-limit'); break; }
+        assert(held.length <= 64, 'one account is bounded before admission');
       }
-      const after = tick(), anonymousBytes = fs.statSync(path.join(spoolState, 'anonymous-failures/failure-journal.jsonl')).size;
-      assert(anonymousBytes <= 1024 * 1024);
-      assert.equal(journal.all().length, 0, 'anonymous failures consumed zero business recovery records');
-      assert(after < Math.max(10, before * 5), 'idle tick cost stays flat after 20,000 failures');
+      assert.equal(held.length, AFS.MEMBER_PENDING_PER_IDENTITY);
+      held.push(await observe({ ...suspended, target: randomUUID() }));
       const ids = [];
       for (;;) {
-        try { ids.push(observe()); }
-        catch (error) { assert.equal(error.code, 'FailureJournalFull'); break; }
+        try { ids.push(await observe(null)); }
+        catch (error) { assert.equal(error.code, 'FailureJournalFull'); assert.equal(error.detail, 'capacity'); break; }
         assert(ids.length < 1000, 'unrecovered anonymous work is bounded before admission');
       }
-      journal.record('business-recovery', 'ledger-unavailable', { eventId: randomUUID(), cause: 'ledger-unreachable' });
-      assert.equal(journal.all().length, 1, 'business recovery capacity survives anonymous saturation');
-      // A second coordinator in this process shares the existing writer cache. Read the durable spool afresh to
+      // B1's own recovery facts are still accepted after both spools refused.
+      const b1 = [['business-recovery', 'ledger-unavailable', { eventId: randomUUID(), cause: 'ledger-unreachable' }],
+        ['seal-recovered:' + randomUUID(), 'seal-recovered', { chainId: randomUUID(), fromSequence: 1, toSequence: 2, toHash: 'a'.repeat(64) }],
+        ['commit-not-found:' + randomUUID(), 'commit-not-found', { eventId: randomUUID(), contentSha256: 'b'.repeat(64) }],
+        ['append-rolled-back:' + randomUUID(), 'append-rolled-back', { eventId: randomUUID(), cause: 'business-rollback' }]];
+      for (const [id, kind, body] of b1) journal.record(id, kind, body);
+      assert.equal(journal.all().length, b1.length, 'business recovery capacity survives saturated spools');
+      // A second coordinator in this process shares the existing writer cache. Read the durable spools afresh to
       // prove cold reconstruction instead of mistaking that shared cache for a restart.
-      const reloaded = new (load('emr-runtime/journal-file.ts').FailureJournal)(spoolState, true);
-      for (const id of ids) assert(reloaded.find('auth-failure:' + id), 'unrecovered observation survives cold reload');
-      assert.equal(reloaded.pendingAuthentication(ids.length).length, ids.length);
-      for (const id of ids) journal.anonymousRecord('auth-failure-recovered:' + id, 'auth-failure-recovered', { eventId: id });
+      const anonymous = new AFS.AuthFailureSpool(spoolState, 'anonymous'), members = new AFS.AuthFailureSpool(spoolState, 'member');
+      for (const id of ids) assert(anonymous.find('auth-failure:' + id), 'unrecovered observation survives cold reload');
+      for (const id of held) assert(members.find('auth-failure:' + id), 'unrecovered member observation survives cold reload');
+      assert.equal(anonymous.pendingAuthentication(ids.length).length, ids.length);
+      assert.equal(members.pendingAuthentication(held.length).length, held.length);
+      await Promise.all([...ids, ...held].map(id => journal.completeAuthenticationFailure(id)));
       assert.equal(journal.pendingAuthentication().length, 0);
-      assert(observe(), 'recovered bounded capacity can admit the next refusal');
-      console.log('B2R01_MEASUREMENT ' + JSON.stringify({ failures: 20000, before_ms_per_tick: before,
-        after_ms_per_tick_20k: after, anonymous_bytes: anonymousBytes, business_records_after_20k: 0,
-        saturated_pending: ids.length, capacity_protected: true }));
+      assert(await observe(null) && await observe(suspended), 'recovered bounded capacity admits the next refusals');
+      console.log('B2R01_MEASUREMENT ' + JSON.stringify({ failures: { anonymous: 20000, suspended_member: 20000 },
+        flood_seconds: floodSeconds, before_ms_per_tick: before, after_ms_per_tick_40k: after, anonymous_bytes: anonymousBytes,
+        member_bytes: memberBytes, business_records_after_40k: 0, saturated_pending: { anonymous: ids.length, member: held.length },
+        capacity_protected: true }));
     } finally { fs.rmSync(spoolState, { recursive: true, force: true }); }
     const { AuthService, AuthEventLedger } = load('auth.service.ts');
     const names = ['KIN_EMR_MANAGING_INSTITUTION', 'KIN_EMR_PROXY_HOST', 'KIN_EMR_STATE_DIR'];
@@ -1512,10 +1544,16 @@ function contractSuite() {
         [new Error('EmrProxyHostRequired'), 'KIN_EMR_PROXY_HOST'],
         [Object.assign(new Error('synthetic-secret'), { code: 'SealCorrupt' }), 'seal tail'],
         [new EmrRuntimeRefused(['not-the-runtime-role']), 'kin_runtime'],
+        // B2R2-03: an unmapped failure (here a database client error whose text carries a connection string) is named by
+        // its error class only; its message never reaches the operator line.
+        [Object.assign(new Error('Can not reach postgresql://kin_runtime:synthetic-secret@db:5432/kin'),
+          { name: 'PrismaClientInitializationError' }), '서비스 초기화 실패(PrismaClientInitializationError)'],
+        [Object.assign(new Error('synthetic-secret in a provider constructor'), { name: 'not a class name; synthetic-secret' }),
+          '서비스 초기화 실패(Error)'],
       ]) {
         const message = startupFailureMessage(failure);
-        assert.ok(message.includes(expected)); assert.ok(message.includes('기동을 중단합니다'));
-        assert.ok(!message.includes('synthetic-secret'));
+        assert.ok(message.includes(expected), expected); assert.ok(message.includes('기동을 중단합니다'));
+        assert.ok(!message.includes('synthetic-secret') && !message.includes('postgresql://'), 'no raw failure text');
       }
     } finally {
       global.setInterval = interval;

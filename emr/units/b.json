@@ -130,7 +130,11 @@
       "tests/live/logout_order_live.py",
       "tests/fixtures/admin_audit_completeness/contract.json",
       "tests/fixtures/admin_audit_completeness/projection-positive.ts",
-      "tests/fixtures/admin_audit_completeness/projection-negative.ts"
+      "tests/fixtures/admin_audit_completeness/projection-negative.ts",
+      "api/src/emr-runtime/auth-failure-spool.ts",
+      "api/src/member-rights-import.ts",
+      "proxy/nginx.conf.template",
+      "tests/owned_auth_http_stack.py"
     ]
   },
   "models": {

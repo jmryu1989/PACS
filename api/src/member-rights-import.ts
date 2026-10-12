@@ -29,9 +29,12 @@ export async function importMemberRights(prisma: PrismaService, keycloak: Keyclo
     expectedTotal = result.total;
     users.push(...result.users);
     if (users.length >= result.total) break;
-    if (!result.users.length) throw new Error('Incomplete realm member import');
+    // An empty page before the announced total, or a listing that changed or repeated members while it was read, is the
+    // provider's data (B2R2-04): the retry warning names it as such, never as local storage.
+    if (!result.users.length) throw new MemberRightsImportFailure('provider-data-invalid');
   }
-  if (users.length !== expectedTotal || new Set(users.map(user => user.id)).size !== users.length) throw new Error('Unstable realm member import');
+  if (users.length !== expectedTotal || new Set(users.map(user => user.id)).size !== users.length)
+    throw new MemberRightsImportFailure('provider-data-invalid');
   const changes = await prisma.$transaction(async tx => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(${0x4b494e4d}::int4, ${0}::int4)`;
     if (await tx.memberRightsImport.findUnique({ where: { id: 'realm-v1' } })) return { legacy: [], bound: 0 };

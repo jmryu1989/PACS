@@ -13,10 +13,9 @@ import { parseAuthFailureObservation } from './contract';
  * cookie, token, proof, password, raw error or request text.
  */
 export const JOURNAL_MAX_BYTES = 64 * 1024 * 1024;
-// Pre-authentication refusals cannot spend the recovery journal's capacity. Completed observations can be removed
-// from this bounded spool only after their original event has a durable ledger receipt.
-export const ANONYMOUS_JOURNAL_MAX_BYTES = 1024 * 1024;
-const RECORD_MAX_BYTES = 4096;
+// Failed sign-ins never spend this lifetime capacity (B2R2-01): their observations live in the compacted
+// authentication spools (auth-failure-spool.ts). This journal only completes observations an older deployment left here.
+export const RECORD_MAX_BYTES = 4096;
 export const JOURNAL_KINDS = freeze({
   'auth-failure-observed': ['observation'],
   'auth-failure-recovered': ['eventId'],
@@ -39,10 +38,25 @@ export class JournalUnavailable extends Error {
   }
 }
 
-function canonical(record: JournalRecord): string {
+export function canonical(record: JournalRecord): string {
   return JSON.stringify({ id: record.id, kind: record.kind, at: record.at, body: record.body });
 }
-function parseBody(kind: JournalKind, body: unknown): Readonly<Record<string, string | number>> {
+/** One durable line: the canonical record and its digest. */
+export function journalLine(record: JournalRecord): string {
+  const text = canonical(record);
+  return JSON.stringify({ ...JSON.parse(text), sha256: createHash('sha256').update(text).digest('hex') }) + '\n';
+}
+/** A stored line, verified against its digest; any defect is corruption, never a skipped record. */
+export function parseJournalLine(line: string): JournalRecord {
+  try {
+    const v = object(JSON.parse(line), ['id', 'kind', 'at', 'body', 'sha256']);
+    const record: JournalRecord = { id: string(v.id), kind: choice(v.kind, Object.keys(JOURNAL_KINDS) as JournalKind[]), at: utc(v.at), body: {} };
+    record.body = parseBody(record.kind, v.body);
+    if (createHash('sha256').update(canonical(record)).digest('hex') !== v.sha256) throw new Error('digest');
+    return record;
+  } catch { throw new JournalUnavailable('FailureJournalCorrupt'); }
+}
+export function parseBody(kind: JournalKind, body: unknown): Readonly<Record<string, string | number>> {
   const keys = JOURNAL_KINDS[kind], v = object(body, [...keys]);
   for (const key of keys) {
     if (key === 'observation') parseAuthFailureObservation(JSON.parse(string(v[key])));
@@ -82,6 +96,28 @@ export function syncDirectory(dir: string): void {
   try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 }
 
+/** Archive a torn final line durably, then truncate the good file to its last complete record. */
+export function quarantineTornTail(file: string, raw: Buffer, goodLength: number): void {
+  const dir = path.dirname(file), torn = raw.subarray(goodLength);
+  const target = path.join(dir, `torn-${createHash('sha256').update(raw).digest('hex')}.bin`);
+  const temporary = path.join(dir, `.tmp-${randomBytes(8).toString('hex')}`);
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(temporary, 'wx', 0o600);
+    fs.writeFileSync(fd, torn); fs.fsyncSync(fd); fs.closeSync(fd); fd = undefined;
+    try { fs.linkSync(temporary, target); } catch (error: any) {
+      if (error?.code !== 'EEXIST' || !fs.readFileSync(target).equals(torn)) throw error;
+    }
+    syncDirectory(dir);
+    // A restart before this point sees the same bytes and the same archive; after it, only valid records remain.
+    fd = fs.openSync(file, 'r+'); fs.ftruncateSync(fd, goodLength); fs.fsyncSync(fd);
+  } catch { throw new JournalUnavailable('FailureJournalUnavailable'); }
+  finally {
+    if (fd !== undefined) fs.closeSync(fd);
+    try { fs.rmSync(temporary, { force: true }); } catch { /* never remove the durable archive */ }
+  }
+}
+
 export class FailureJournal {
   private readonly file: string;
   private records = new Map<string, JournalRecord>();
@@ -94,14 +130,14 @@ export class FailureJournal {
   /** Bytes of a torn final line, durably quarantined before the good journal is truncated. */
   readonly tornBytes: number;
 
-  constructor(stateDirectory: string | undefined, private readonly anonymous = false) {
-    this.file = path.join(protectedDirectory(stateDirectory, anonymous ? 'anonymous-failures' : 'journal'), 'failure-journal.jsonl');
+  constructor(stateDirectory: string | undefined) {
+    this.file = path.join(protectedDirectory(stateDirectory, 'journal'), 'failure-journal.jsonl');
     let raw: Buffer = Buffer.alloc(0);
     try { raw = fs.readFileSync(this.file); } catch (error: any) { if (error?.code !== 'ENOENT') throw new JournalUnavailable('FailureJournalUnavailable'); }
     const goodLength = raw.lastIndexOf(10) + 1;
     this.tornBytes = raw.length - goodLength;
     this.accept(raw.subarray(0, goodLength));
-    if (this.tornBytes) this.quarantine(raw, goodLength);
+    if (this.tornBytes) quarantineTornTail(this.file, raw, goodLength);
     this.bytes = this.loadedBytes = goodLength;
     this.refreshArchives();
   }
@@ -125,13 +161,7 @@ export class FailureJournal {
 
   private accept(raw: Buffer): void {
     for (const line of raw.toString('utf8').split('\n').filter(Boolean)) {
-      let record: JournalRecord;
-      try {
-        const v = object(JSON.parse(line), ['id', 'kind', 'at', 'body', 'sha256']);
-        record = { id: string(v.id), kind: choice(v.kind, Object.keys(JOURNAL_KINDS) as JournalKind[]), at: utc(v.at), body: {} };
-        record.body = parseBody(record.kind, v.body);
-        if (createHash('sha256').update(canonical(record)).digest('hex') !== v.sha256) throw new Error('digest');
-      } catch { throw new JournalUnavailable('FailureJournalCorrupt'); }
+      const record = parseJournalLine(line);
       if (this.records.has(record.id)) throw new JournalUnavailable('FailureJournalCorrupt');
       this.records.set(record.id, freeze(record));
       this.indexAuth(record);
@@ -143,27 +173,11 @@ export class FailureJournal {
     if (record.kind === 'auth-failure-recovered') this.pendingAuth.delete(`auth-failure:${record.body.eventId}`);
   }
 
-  /** Called by the fenced writer; neither the timer nor IPC serializes historical completed records. */
+  /** Observations an older deployment left here, still without their receipt. Bounded per call. */
   pendingAuthentication(limit = 32): readonly Readonly<JournalRecord>[] {
     const rows: JournalRecord[] = [];
     for (const row of this.pendingAuth.values()) { rows.push(row); if (rows.length >= limit) break; }
     return rows;
-  }
-
-  private compactAnonymous(): void {
-    const retained = [...this.pendingAuth.values()];
-    const text = retained.map(record => JSON.stringify({ ...record,
-      sha256: createHash('sha256').update(canonical(record)).digest('hex') }) + '\n').join('');
-    const temporary = this.file + '.tmp-' + randomBytes(8).toString('hex');
-    let fd: number | undefined;
-    try {
-      fd = fs.openSync(temporary, 'wx', 0o600);
-      fs.writeFileSync(fd, text); fs.fsyncSync(fd); fs.closeSync(fd); fd = undefined;
-      fs.renameSync(temporary, this.file); syncDirectory(path.dirname(this.file));
-    } catch { this.unavailable = true; throw new JournalUnavailable('FailureJournalUnavailable'); }
-    finally { if (fd !== undefined) fs.closeSync(fd); }
-    this.records = new Map(retained.map(record => [record.id, record]));
-    this.loadedBytes = Buffer.byteLength(text); this.bytes = this.loadedBytes + this.archiveBytes;
   }
 
   /** Called under the shared writer lock. Only another process's new bytes need
@@ -185,31 +199,10 @@ export class FailureJournal {
     } finally { fs.closeSync(fd); }
     const good = raw.lastIndexOf(10) + 1;
     this.accept(raw.subarray(0, good));
-    if (good < raw.length) this.quarantine(fs.readFileSync(this.file), this.loadedBytes + good);
+    if (good < raw.length) quarantineTornTail(this.file, fs.readFileSync(this.file), this.loadedBytes + good);
     this.loadedBytes += good;
     this.bytes += good;
     this.refreshArchives();
-  }
-
-  private quarantine(raw: Buffer, goodLength: number): void {
-    const dir = path.dirname(this.file), torn = raw.subarray(goodLength);
-    const target = path.join(dir, `torn-${createHash('sha256').update(raw).digest('hex')}.bin`);
-    const temporary = path.join(dir, `.tmp-${randomBytes(8).toString('hex')}`);
-    let fd: number | undefined;
-    try {
-      fd = fs.openSync(temporary, 'wx', 0o600);
-      fs.writeFileSync(fd, torn); fs.fsyncSync(fd); fs.closeSync(fd); fd = undefined;
-      try { fs.linkSync(temporary, target); } catch (error: any) {
-        if (error?.code !== 'EEXIST' || !fs.readFileSync(target).equals(torn)) throw error;
-      }
-      syncDirectory(dir);
-      // A restart before this point sees the same bytes and the same archive; after it, only valid records remain.
-      fd = fs.openSync(this.file, 'r+'); fs.ftruncateSync(fd, goodLength); fs.fsyncSync(fd);
-    } catch { throw new JournalUnavailable('FailureJournalUnavailable'); }
-    finally {
-      if (fd !== undefined) fs.closeSync(fd);
-      try { fs.rmSync(temporary, { force: true }); } catch { /* never remove the durable archive */ }
-    }
   }
 
   private write(text: string): void {
@@ -239,20 +232,14 @@ export class FailureJournal {
       if (existing.kind === record.kind && JSON.stringify(existing.body) === JSON.stringify(record.body)) return existing;
       throw new JournalUnavailable('FailureJournalConflict');
     }
-    const text = canonical(record);
-    const line = JSON.stringify({ ...JSON.parse(text), sha256: createHash('sha256').update(text).digest('hex') }) + '\n';
+    // B1's lifetime capacity is reserved for B1's own recovery facts. A sign-in failure is observed in an
+    // authentication spool; here only the completion of an observation this journal still holds is accepted.
+    if (kind === 'auth-failure-observed' ||
+        (kind === 'auth-failure-recovered' && !this.pendingAuth.has(`auth-failure:${record.body.eventId}`)))
+      throw new JournalUnavailable('FailureJournalConflict');
+    const line = journalLine(record);
     if (Buffer.byteLength(line) > RECORD_MAX_BYTES) refuse('FailureJournalRecordTooLarge');
-    if (this.anonymous) {
-      if (!['auth-failure-observed', 'auth-failure-recovered'].includes(kind) ||
-          (kind === 'auth-failure-observed' && parseAuthFailureObservation(JSON.parse(String(body.observation))).who !== null))
-        throw new JournalUnavailable('FailureJournalConflict');
-      // Reserve a completion record for every admitted observation, including when the database is unavailable.
-      const pendingAfter = this.pendingAuth.size + (kind === 'auth-failure-observed' ? 1
-        : this.pendingAuth.has(`auth-failure:${body.eventId}`) ? -1 : 0);
-      const required = Buffer.byteLength(line) + pendingAfter * RECORD_MAX_BYTES;
-      if (this.bytes + required > ANONYMOUS_JOURNAL_MAX_BYTES) this.compactAnonymous();
-      if (this.bytes + required > ANONYMOUS_JOURNAL_MAX_BYTES) throw new JournalUnavailable('FailureJournalFull');
-    } else if (this.bytes + Buffer.byteLength(line) > JOURNAL_MAX_BYTES) throw new JournalUnavailable('FailureJournalFull');
+    if (this.bytes + Buffer.byteLength(line) > JOURNAL_MAX_BYTES) throw new JournalUnavailable('FailureJournalFull');
     this.write(line);
     const frozen = freeze(record);
     this.records.set(record.id, frozen);
