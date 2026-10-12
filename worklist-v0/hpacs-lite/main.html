@@ -1051,7 +1051,9 @@
     body.workspace-narrow .left { height: 180px !important; }
     .study-panel-strip { display: none; }
     body.workspace-strip .study-panel-strip { display: flex; flex: none; gap: 6px; padding: 4px 8px; border-top: 1px solid var(--kin-line2); background: var(--kin-panel); }
-    #study-panel-host { position: fixed; right: 12px; width: 360px; max-width: calc(100vw / var(--study-panel-scale, 1) - 24px); z-index: 90; pointer-events: none; }
+    /* Overlay the left work area on demand; adding a column would squeeze the
+       worklist/related lists and the report when Folders is also open. */
+    #study-panel-host { position: fixed; left: 12px; width: 360px; max-width: calc(100vw / var(--study-panel-scale, 1) - 24px); z-index: 90; pointer-events: none; }
     #study-panel-host .study-panel { height: 100%; box-sizing: border-box; pointer-events: auto; box-shadow: 0 8px 24px #0008; }
     #study-panel-host .study-panel-head button, #study-panel-host [role="tab"] { font: inherit; color: var(--kin-text); background: var(--kin-panel2); border: 1px solid var(--kin-line2); border-radius: 4px; padding: 6px 10px; cursor: pointer; }
     #study-panel-host [role="tab"][aria-selected="true"] { background: var(--kin-row-sel); border-color: var(--kin-accent); text-decoration: none; }
@@ -1228,6 +1230,7 @@
   <!-- 우클릭 메뉴 (내용은 상황에 따라 JS가 채움) -->
   <div class="ctx" id="ctx"></div>
 
+  <div id="study-panel-host"></div>
   <div class="split">
     <!-- ══ 좌측: 워크리스트 (6.3) / Study List (8.1) ══ -->
     <div class="left">
@@ -1627,7 +1630,6 @@
     <button type="button" class="chip" data-study-panel-tab="info" aria-controls="study-panel-host">Info</button>
     <button type="button" class="chip" data-study-panel-tab="templates" aria-controls="study-panel-host">Templates</button>
   </nav>
-  <div id="study-panel-host"></div>
 
   <div id="toast"></div>
   <div id="leftnotes" role="status" aria-live="polite"></div>

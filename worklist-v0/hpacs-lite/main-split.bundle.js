@@ -9668,12 +9668,22 @@
     // 이 브라우저에 배치를 남겼는가(마지막 쓰기·읽기의 결과). 계정 배치를 확인하지 못했을 때 "이 브라우저에서 계속 쓴다"고
     // 말해도 되는지를 이것이 정한다 — 남기지 못했으면 새로고침하면 사라진다고 말한다(workspace-roaming.js).
     let workspaceLocalKept = true;
+    // The v3 tab belongs to this login. A layout saved by an earlier login may
+    // restore sizes, but must not replace the pilot's initial Info tab.
+    const studyPanelSessionKey = () => workspaceOwner ? 'kin-study-panel-session:' + workspaceOwner : null;
+    function rememberStudyPanelSession() {
+      try {
+        const key = studyPanelSessionKey();
+        if (key && work.session()) workspaceStorage?.setItem(key, work.session());
+      } catch (_) { /* Unavailable storage keeps the current document's tab. */ }
+    }
     function saveWorkspace() {
       if (!workspaceEditable()) return;
       workspaceGeneration++;
       workspaceState.mode = layoutMode;
       workspaceState = KinWorkspaceLayout.toVersion3(KinWorkspaceLayout.withReading(workspaceState, readingWorkspace.snapshotPanels()));
       const saved = KinWorkspaceLayout.write(workspaceStorage, workspaceOwner, workspaceState);
+      if (saved) rememberStudyPanelSession();
       workspaceLocalKept = !!saved;
       $("#layout-status").textContent = saved ? "배치 저장됨 · 이 브라우저" : "배치 저장 안 됨 · 이 창에서만 유지";
     }
@@ -9700,6 +9710,11 @@
       // Restore legacy display state as it was saved. Adopt v3 only on an
       // explicit edit/open/save, so new geometry cannot affect the first paint.
       workspaceState = result.state;
+      if (workspaceState.workspace) {
+        let sameSession = false;
+        try { sameSession = !!work.session() && workspaceStorage?.getItem(studyPanelSessionKey()) === work.session(); } catch (_) {}
+        if (!sameSession) workspaceState.workspace.studyPanelTab = 'info';
+      }
       workspaceLocalKept = !["disabled", "unavailable"].includes(result.status);
       layoutMode = workspaceState.mode;
       readingWorkspace.applyPanels(workspaceState.reading || KinReadingPanelLayout.defaults());
@@ -10955,6 +10970,7 @@
             studyPanelRestoring = false;
           }
           const saved = KinWorkspaceLayout.write(workspaceStorage, workspaceOwner, state);
+          if (saved) rememberStudyPanelSession();
           workspaceLocalKept = !!saved;
           $("#layout-status").textContent = saved ? "배치 복원됨 · 이 브라우저" : "배치 · 이 창에서만 유지";
           return saved;

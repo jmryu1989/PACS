@@ -372,6 +372,7 @@
             studyPanelRestoring = false;
           }
           const saved = KinWorkspaceLayout.write(workspaceStorage, workspaceOwner, state);
+          if (saved) rememberStudyPanelSession();
           workspaceLocalKept = !!saved;
           $("#layout-status").textContent = saved ? "배치 복원됨 · 이 브라우저" : "배치 · 이 창에서만 유지";
           return saved;

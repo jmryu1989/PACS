@@ -123,13 +123,13 @@ function active(f, label) {
 
 test('D-01/A-01: 기본 닫힘, 세 탭 중 하나 활성, 열기/닫기와 마지막 탭', () => {
   const f = fixture();
-  assert.deepEqual(f.panel.snapshot(), { open: false, tab: 'images' });
+  assert.deepEqual(f.panel.snapshot(), { open: false, tab: 'info' });
   assert.equal(f.panel.element.hidden, true); assert.equal(f.panel.element.inert, true);
   assert.equal(f.panel.element.getAttribute('aria-label'), 'Study Panel');
   assert.equal(f.role('complementary').length, 1);
-  assert.equal(f.role('tablist').length, 1); assert.equal(f.role('tab').length, 3); active(f, 'Images');
+  assert.equal(f.role('tablist').length, 1); assert.equal(f.role('tab').length, 3); active(f, 'Info');
   assert.equal(f.doc.activeElement, f.opener);
-  f.panel.open(); assert.equal(f.panel.element.hidden, false); assert.equal(f.doc.activeElement, f.tab('Images'));
+  f.panel.open(); assert.equal(f.panel.element.hidden, false); assert.equal(f.doc.activeElement, f.tab('Info'));
   f.tab('Templates').dispatch('click'); active(f, 'Templates');
   f.close.dispatch('click'); assert.equal(f.panel.element.hidden, true); assert.equal(f.doc.activeElement, f.opener);
   f.panel.toggle(); active(f, 'Templates'); assert.equal(f.doc.activeElement, f.tab('Templates'));
@@ -139,8 +139,8 @@ test('D-01/A-01: 기본 닫힘, 세 탭 중 하나 활성, 열기/닫기와 마�
 
 test('A-01: 좌우 순환, Home/End 자동 활성화, Tab/Shift+Tab 비가로채기', () => {
   const f = fixture(); f.panel.open();
-  for (const [key, expected] of [['ArrowLeft', 'Templates'], ['ArrowRight', 'Images'],
-    ['ArrowRight', 'Info'], ['End', 'Templates'], ['Home', 'Images']]) {
+  for (const [key, expected] of [['ArrowLeft', 'Images'], ['ArrowLeft', 'Templates'],
+    ['ArrowRight', 'Images'], ['ArrowRight', 'Info'], ['End', 'Templates'], ['Home', 'Images']]) {
     const event = f.doc.activeElement.dispatch('keydown', { key });
     assert.equal(event.defaultPrevented, true); assert.equal(event.stopped, true);
     active(f, expected); assert.equal(f.doc.activeElement, f.tab(expected));
@@ -513,8 +513,8 @@ test('D-06/10: 통합 측 Esc 우선권·초기 포커스 확장점', () => {
 });
 
 test('상태 export/restore는 분리된 값이며 잘못된 입력은 현재 상태 보존', () => {
-  const f = fixture(), initial = f.panel.snapshot(); initial.open = true; initial.tab = 'info';
-  assert.equal(f.panel.snapshot().tab, 'images');
+  const f = fixture(), initial = f.panel.snapshot(); initial.open = true; initial.tab = 'images';
+  assert.equal(f.panel.snapshot().tab, 'info');
   assert.equal(f.panel.restore({ open: false, tab: 'info' }), true);
   assert.equal(f.doc.activeElement, f.opener); active(f, 'Info');
   f.panel.toggle(); assert.equal(f.doc.activeElement, f.tab('Info'));

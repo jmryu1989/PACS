@@ -10,7 +10,7 @@
   const defaults = () => ({ version: 1, mode: 'auto', portrait: {}, landscape: {} });
   const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
   const workspaceDefaults = () => ({ version: 1, rail: null, worklist: null, related: null,
-    prior: null, railCollapsed: false, studyPanelTab: 'images' });
+    prior: null, railCollapsed: false, studyPanelTab: 'info' });
   function normalizeV3(value) {
     if (Object.keys(value).some(k => !['version', 'mode', 'portrait', 'landscape', 'reading', 'workspace'].includes(k))) return null;
     const legacy = normalize({ version: 2, mode: value.mode, portrait: value.portrait,

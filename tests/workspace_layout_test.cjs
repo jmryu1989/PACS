@@ -135,7 +135,7 @@ test('M-02: 유효 v1/v2 생성 사례의 모든 기존 멤버 보존, geometry 
       assert.ok(valid); assert.equal(result.version, 3);
       for (const key of Object.keys(valid).filter(k => k !== 'version')) assert.deepEqual(result[key], valid[key]);
       assert.deepEqual(result.workspace, { version: 1, rail: null, worklist: null, related: null, prior: null,
-        railCollapsed: false, studyPanelTab: 'images' });
+        railCollapsed: false, studyPanelTab: 'info' });
       const loaded = layout.toVersion3(valid, current);
       assert.deepEqual(loaded.reading, version === 2 ? valid.reading : current.reading);
       assert.deepEqual(loaded.workspace, current.workspace); assert.deepEqual(valid, before);

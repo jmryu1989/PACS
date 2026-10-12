@@ -15,7 +15,7 @@
       throw new TypeError('Study Panel requires three separate content elements');
     }
     const listeners = [], moved = [], tabs = [], panels = [];
-    let state = { open: false, tab: available[0] || 'images' }, opener = resolve(app.opener) || null, destroyed = false, composing = false;
+    let state = { open: false, tab: available.includes('info') ? 'info' : available[0] || 'info' }, opener = resolve(app.opener) || null, destroyed = false, composing = false;
     let movingFocus = false;
     const node = (tag, text, parent) => {
       const el = doc.createElement(tag); if (text) el.textContent = text;

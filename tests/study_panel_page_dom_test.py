@@ -178,6 +178,17 @@ class StudyPanelPageDOM(unittest.TestCase):
                                     railCollapsed=False, studyPanelTab='templates'))
         self.boot(value)
         self.open_drawer()
+        # A prior login's saved preference cannot change the new-login default.
+        expect(self.drawer().get_by_role('tab', name='Info', exact=True)).to_have_attribute('aria-selected', 'true')
+        self.page.keyboard.press('Escape')
+        # Explicit account Load remains a deliberate restore of a preferred tab,
+        # including one hidden by the current role.
+        self.site.layout = value
+        self.account_menu()
+        self.page.get_by_role('button', name='Load from Account', exact=True).click()
+        expect(self.page.locator('#workspace-server-status')).to_contain_text('서버 배치를 불러왔습니다')
+        self.page.locator('#toolbar-view > summary').click()
+        self.open_drawer()
         expect(self.drawer().get_by_role('tab')).to_have_count(2)
         expect(self.drawer().get_by_role('tab', name='Images', exact=True)).to_have_attribute('aria-selected', 'true')
         self.assertEqual('templates', self.local()['workspace']['studyPanelTab'])
@@ -263,6 +274,11 @@ class StudyPanelPageDOM(unittest.TestCase):
                 self.assertGreaterEqual(box['x'], 0)
                 self.assertLessEqual(box['x']+box['width'], width)
                 self.assertLessEqual(box['y']+box['height'], height+1)
+                if width > 1100 and width > height:
+                    self.assertAlmostEqual(12, box['x'], delta=1)
+                    self.assertAlmostEqual(360, box['width'], delta=1)
+                    report = self.page.locator('.report-p').bounding_box()
+                    self.assertLessEqual(box['x'] + box['width'], report['x'])
                 if width in (1920,900):
                     self.page.screenshot(path=str(pictures/(prefix+'-'+name.lower()+'.png')))
             self.page.keyboard.press('Escape')
@@ -297,6 +313,91 @@ class StudyPanelPageDOM(unittest.TestCase):
         after = self.page.locator('.rw').bounding_box()['height']
         self.assertGreaterEqual(after,140)
         self.assertLess(after,before)
+
+    def test_info_first_session_choice_and_new_login(self):
+        """D1041-INFO/LOGIN: old v3 choice, same-login reload and same-owner login."""
+        value = dict(version=3, mode='auto', portrait={}, landscape={}, reading=READING,
+                     workspace=dict(version=1, rail=240, worklist=700, related=250, prior=180,
+                                    railCollapsed=False, studyPanelTab='templates'))
+        self.boot()
+        self.page.evaluate('([k,v]) => localStorage.setItem(k,JSON.stringify(v))', [KEY, value])
+        self.page.reload()
+        expect(self.page.locator('#rows')).to_contain_text(auth.PATIENT)
+        # The visible default must not depend on what the last login saved.
+        self.open_drawer()
+        info = self.drawer().get_by_role('tab', name='Info', exact=True)
+        expect(info).to_have_attribute('aria-selected', 'true')
+        expect(info).to_be_focused()
+        for name in ('Images', 'Templates'):
+            self.drawer().get_by_role('tab', name=name, exact=True).click()
+            self.page.keyboard.press('Escape')
+            self.open_drawer()
+            expect(self.drawer().get_by_role('tab', name=name, exact=True)).to_have_attribute('aria-selected', 'true')
+        # Reload retains only what the real page wrote, without a fixture reset.
+        saved = self.local()
+        self.assertEqual('templates', saved['workspace']['studyPanelTab'])
+        self.page.reload()
+        expect(self.page.locator('#rows')).to_contain_text(auth.PATIENT)
+        expect(self.drawer()).to_have_count(0)
+        self.open_drawer()
+        expect(self.drawer().get_by_role('tab', name='Templates', exact=True)).to_have_attribute('aria-selected', 'true')
+        self.page.keyboard.press('Escape')
+        # A new server-issued session for the SAME owner, in the SAME browser.
+        # No storage clearing can mask leakage across logins.
+        old_session = self.site.cookie
+        self.site.ended.add(old_session)
+        self.site.sign_in(auth.RAD)
+        self.assertNotEqual(old_session, self.site.cookie)
+        self.page.reload()
+        expect(self.page.locator('#rows')).to_contain_text(auth.PATIENT)
+        self.open_drawer()
+        expect(self.drawer().get_by_role('tab', name='Info', exact=True)).to_have_attribute('aria-selected', 'true')
+        self.drawer().get_by_role('tab', name='Images', exact=True).click()
+        self.assertEqual(saved['reading'], self.local()['reading'])
+        for key in ('rail', 'worklist', 'related', 'prior', 'railCollapsed'):
+            self.assertEqual(saved['workspace'][key], self.local()['workspace'][key])
+
+    def test_left_overlay_preserves_folders_report_geometry_and_keyboard(self):
+        """D1041-LEFT: left work area overlap is intentional; no extra grid column."""
+        self.boot()
+        self.page.locator('#rows tr[data-uid]').first.click()
+        self.page.get_by_role('button', name='Folders', exact=True).click()
+        panels = ['.left', '.right', '.related-p', '.report-p', '#worklist-folders-panel']
+        before = [self.page.locator(s).bounding_box() for s in panels]
+        self.page.locator('#findings').fill('SYN left drawer keeps this draft')
+        self.open_drawer()
+        box = self.drawer().bounding_box()
+        self.assertAlmostEqual(12, box['x'], delta=1)
+        self.assertAlmostEqual(360, box['width'], delta=1)
+        self.assertLessEqual(box['x'] + box['width'], before[3]['x'])
+        self.assertEqual(before, [self.page.locator(s).bounding_box() for s in panels])
+        self.page.keyboard.press('ArrowRight')
+        expect(self.drawer().get_by_role('tab', name='Templates', exact=True)).to_be_focused()
+        self.page.keyboard.press('ArrowLeft')
+        expect(self.drawer().get_by_role('tab', name='Info', exact=True)).to_be_focused()
+        self.page.keyboard.press('Shift+Tab')
+        expect(self.drawer().get_by_role('button', name='Close', exact=True)).to_be_focused()
+        self.page.keyboard.press('Tab')
+        expect(self.drawer().get_by_role('tab', name='Info', exact=True)).to_be_focused()
+        self.page.keyboard.press('Escape')
+        expect(self.page.locator('#findings')).to_be_focused()
+        expect(self.page.locator('#findings')).to_have_value('SYN left drawer keeps this draft')
+        expect(self.page.get_by_role('button', name='Folders', exact=True)).to_have_attribute('aria-expanded', 'true')
+        self.assertEqual(before, [self.page.locator(s).bounding_box() for s in panels])
+        # Integrated reading has an image viewport on the left. The same overlay
+        # leaves its/report geometry and resize directions intact.
+        self.page.route('**/ohif/**', lambda route: route.fulfill(content_type='text/html',
+            body='<!doctype html><title>SYN viewer</title>'))
+        self.page.get_by_role('button', name='Reading Workspace', exact=True).click()
+        opener = self.page.get_by_role('button', name='Study Info & Templates', exact=True)
+        expect(opener).to_be_visible()
+        before = [self.page.locator(s).bounding_box() for s in ('#reading-viewer', '.report-p')]
+        opener.click()
+        box = self.drawer().bounding_box()
+        self.assertLessEqual(box['x'] + box['width'], before[1]['x'])
+        self.assertEqual(before, [self.page.locator(s).bounding_box() for s in ('#reading-viewer', '.report-p')])
+        self.page.keyboard.press('Escape')
+        expect(opener).to_be_focused()
 
     def test_rail_and_panel_keyboard_resize_persist_as_v3(self):
         self.boot()
