@@ -114,6 +114,8 @@ class FakeHost:
             return json.dumps(self.catalog())
         if ops.MIGRATIONS_SQL in args:
             return json.dumps([["0_init", "1" * 64, True, False]])
+        if ops.VALUE_TABLES_SQL in args:
+            return json.dumps([["public", "Report"]] if args[args.index("-d") + 1] == "kin" else [["public", "realm"]])
         if "information_schema.columns" in joined:
             return json.dumps({"Report": ["id", "body"]})
         if "json_object_agg(name, d)" in joined:
@@ -122,6 +124,11 @@ class FakeHost:
 
     def run(self, args, *, output=None, input_file=None, timeout=600, check=True):
         self.commands.append(list(args))
+        if "psql" in args and "-f" in args and input_file is not None:
+            # The value catalog (IRT2-24): one digest per table of the database asked.
+            database = args[args.index("-d") + 1]
+            name = "public.Report" if database == "kin" else "public.realm"
+            return SimpleNamespace(returncode=0, stdout=json.dumps({name: [2, "c" * 64]}).encode(), stderr=b"")
         if "pg_dump" in args or "pg_dumpall" in args:
             if self.dump_failure and "pg_dump" in args:
                 raise self.dump_failure
@@ -312,7 +319,7 @@ class HeldCaptureTests(unittest.TestCase):
         superuser, creates the EMR tablespace, restores with owners and privileges, and compares the whole catalog."""
         host = FakeHost(tempfile.mkdtemp(dir=self.folder), shape="post")
         host.extra_roles.append(role("legacy_reader"))
-        host.memberships.append({"granted": "legacy_reader", "member": "kin_emr_reader", "admin_option": False,
+        host.memberships.append({"granted": "legacy_reader", "member": "kin_emr_reader", "grantor": "kin", "admin_option": False,
                                  "inherit_option": True, "set_option": True})
         directory = host.capture(label="emr-b1")
         host.commands.clear()
@@ -341,7 +348,7 @@ class HeldCaptureTests(unittest.TestCase):
             self.assertFalse(any("pg_dump" in command or "pg_dumpall" in command for command in host.commands))
         host = FakeHost(tempfile.mkdtemp(dir=self.folder))
         host.extra_roles.append(role("legacy_reader"))
-        host.memberships.append({"granted": "pg_read_all_data", "member": "legacy_reader", "admin_option": False,
+        host.memberships.append({"granted": "pg_read_all_data", "member": "legacy_reader", "grantor": "kin", "admin_option": False,
                                  "inherit_option": True, "set_option": True})
         directory = host.capture()
         self.assertIn("legacy_reader", {item["rolname"] for item in json.loads((directory / "catalog.json").read_text())["roles"]})
@@ -376,7 +383,7 @@ class FakeCluster:
                                 "rolconnlimit": int(words[words.index("LIMIT") + 1]), "rolvaliduntil": None, "rolconfig": None}
         for granted, member, admin, inherit, setting in pattern.findall(
                 r'GRANT "([^"]+)" TO "([^"]+)" WITH ADMIN (TRUE|FALSE), INHERIT (TRUE|FALSE), SET (TRUE|FALSE);', sql):
-            self.memberships.append({"granted": granted, "member": member, "admin_option": admin == "TRUE",
+            self.memberships.append({"granted": granted, "member": member, "grantor": "kin", "admin_option": admin == "TRUE",
                                      "inherit_option": inherit == "TRUE", "set_option": setting == "TRUE"})
 
     def text(self, args, **kwargs):
@@ -414,9 +421,9 @@ class ExactRestoreTests(unittest.TestCase):
     def snapshot(self, folder):
         roles = [role("kin", superuser=True, login=True), role("legacy_group", inherit=False), role("legacy_reader", connlimit=3)]
         catalog = {"roles": roles,
-                   "memberships": [{"granted": "legacy_group", "member": "legacy_reader", "admin_option": False, "inherit_option": True,
+                   "memberships": [{"granted": "legacy_group", "member": "legacy_reader", "grantor": "kin", "admin_option": False, "inherit_option": True,
                                     "set_option": True},
-                                   {"granted": "pg_read_all_data", "member": "legacy_group", "admin_option": True, "inherit_option": False,
+                                   {"granted": "pg_read_all_data", "member": "legacy_group", "grantor": "kin", "admin_option": True, "inherit_option": False,
                                     "set_option": False}],
                    "databases": [{"name": "keycloak", "owner": "kin", "acl": None},
                                  {"name": "kin", "owner": "kin", "acl": "{=Tc/kin,kin=CTc/kin,legacy_reader=c/kin}"},
@@ -582,6 +589,71 @@ class RealClusterTests(unittest.TestCase):
                 self.assertEqual(ops.restore_pre_snapshot(self.start(), whole)["catalog"], "equal")
                 with self.assertRaisesRegex(RuntimeError, "Restored catalog differs from the snapshot: objects"):
                     ops.restore_pre_snapshot(self.start(), lost)
+
+    def test_irt2_16_24_every_lost_or_changed_object_privilege_grantor_value_or_sequence_is_seen(self):
+        """IRT2-16/IRT2-24 on real PostgreSQL: after one exact restore (catalog and values equal), each single change -
+        a column, type, large-object or server privilege, a publication, an event trigger, a user mapping, a function or
+        view definition, a trigger's state, a membership's grantor, a sequence state, a Keycloak row value, a row of a
+        non-public kin schema - makes the compared catalog or value catalog differ; a membership granted by another role
+        than kin and a kin with non-default attributes (IRT2-17) are refused at capture."""
+        source = self.start()
+        self.ok(source, "CREATE DATABASE keycloak OWNER kin;")
+        self.ok(source, """
+            CREATE ROLE reader NOLOGIN; CREATE ROLE delegator NOLOGIN; CREATE ROLE leaf NOLOGIN;
+            CREATE TABLE public.r(id int, n text); INSERT INTO public.r VALUES (1, 'before');
+            CREATE SCHEMA archive; CREATE TABLE archive.kept(id int); INSERT INTO archive.kept VALUES (1), (2);
+            CREATE SEQUENCE public.seq; SELECT nextval('public.seq');
+            CREATE TYPE public.choice AS ENUM ('a', 'b'); GRANT SELECT (n) ON public.r TO reader; GRANT USAGE ON TYPE public.choice TO reader;
+            SELECT lo_create(123456); GRANT SELECT ON LARGE OBJECT 123456 TO reader;
+            CREATE FOREIGN DATA WRAPPER dummy; CREATE SERVER srv FOREIGN DATA WRAPPER dummy; GRANT USAGE ON FOREIGN SERVER srv TO reader;
+            CREATE USER MAPPING FOR reader SERVER srv;
+            CREATE PUBLICATION pub FOR TABLE public.r;
+            CREATE FUNCTION public.onddl() RETURNS event_trigger LANGUAGE plpgsql AS $$BEGIN END$$;
+            CREATE EVENT TRIGGER et ON ddl_command_end EXECUTE FUNCTION public.onddl();
+            CREATE FUNCTION public.guard() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NEW; END$$;
+            CREATE TRIGGER r_guard BEFORE UPDATE ON public.r FOR EACH ROW EXECUTE FUNCTION public.guard();
+            CREATE VIEW public.v AS SELECT id FROM public.r;
+            GRANT reader TO leaf;
+        """)
+        self.ok(source, "CREATE TABLE public.sessions(id int, value text); INSERT INTO public.sessions VALUES (1, 'before');", database="keycloak")
+        catalog = ops.cluster_catalog(source)
+        values = ops.value_catalog(source)
+        self.assertEqual(set(values["kin"]), {"archive.kept", "public.r"})
+        self.assertEqual(set(values["keycloak"]), {"public.sessions"})
+        with tempfile.TemporaryDirectory() as folder:
+            whole = self.dump(source, Path(folder) / "whole", catalog)
+            target = self.start()
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(ops.restore_pre_snapshot(target, whole)["catalog"], "equal")
+        self.assertEqual(ops.value_catalog(target), values, "the restore reproduces every row value")
+        changes = [("column privilege", "REVOKE SELECT (n) ON public.r FROM reader", "kin", "catalog"),
+                   ("type privilege", "REVOKE USAGE ON TYPE public.choice FROM reader", "kin", "catalog"),
+                   ("large object", "SELECT lo_unlink(123456)", "kin", "catalog"),
+                   ("user mapping", "DROP USER MAPPING FOR reader SERVER srv", "kin", "catalog"),
+                   ("foreign server privilege", "REVOKE USAGE ON FOREIGN SERVER srv FROM reader", "kin", "catalog"),
+                   ("publication", "DROP PUBLICATION pub", "kin", "catalog"),
+                   ("event trigger", "DROP EVENT TRIGGER et", "kin", "catalog"),
+                   ("function definition", "CREATE OR REPLACE FUNCTION public.guard() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN OLD; END$$",
+                    "kin", "catalog"),
+                   ("trigger state", "ALTER TABLE public.r DISABLE TRIGGER r_guard", "kin", "catalog"),
+                   ("view definition", "CREATE OR REPLACE VIEW public.v AS SELECT id FROM public.r WHERE id > 0", "kin", "catalog"),
+                   ("membership grantor", "GRANT reader TO delegator WITH ADMIN OPTION; REVOKE reader FROM leaf; "
+                                          "SET ROLE delegator; GRANT reader TO leaf; RESET ROLE", "kin", "catalog"),
+                   ("sequence state", "ALTER SEQUENCE public.seq RESTART WITH 987654; SELECT nextval('public.seq')", "kin", "catalog"),
+                   ("Keycloak row value", "UPDATE public.sessions SET value = 'changed'", "keycloak", "values"),
+                   ("non-public row", "DELETE FROM archive.kept WHERE id = 2", "kin", "values")]
+        for name, statement, database, compared in changes:
+            before = ops.cluster_catalog(target) if compared == "catalog" else ops.value_catalog(target)
+            self.ok(target, statement, database)
+            after = ops.cluster_catalog(target) if compared == "catalog" else ops.value_catalog(target)
+            with self.subTest(change=name):
+                self.assertNotEqual(after, before)
+        # The grantor change above made a membership that kin did not grant: such a cluster is refused at capture.
+        with self.assertRaisesRegex(RuntimeError, "granted by another role than kin"):
+            ops.supported_pre_catalog(ops.role_catalog(target))
+        self.ok(target, "ALTER ROLE kin CONNECTION LIMIT 7;")
+        with self.assertRaisesRegex(RuntimeError, "attributes a fresh cluster's kin does not"):
+            ops.supported_pre_catalog(ops.role_catalog(target))
 
     def test_d23_pg_dumpall_roles_fail_in_a_postgres_cluster_and_the_catalog_replay_rebuilds_them(self):
         """D23: a kin-bootstrapped cluster's membership is dumped by pg_dumpall as GRANTED BY kin, which PostgreSQL 16

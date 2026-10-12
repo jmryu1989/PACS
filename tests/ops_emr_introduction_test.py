@@ -2304,10 +2304,9 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
                 patch.object(intro, "worklist_row", return_value={"uid": FRAME_STUDY, "modality": "CT"}),
                 patch.object(intro, "https_get", side_effect=https), patch.object(intro, "https_post", return_value=(204, b"")))
 
-    def test_95_one_bounded_smoke_retry_before_an_automatic_rollback(self):
-        """D07: an unattended release smoke that fails once is retried once - its own login client, a new browser profile,
-        within SMOKE_RETRY_S - and the retry and its reason are recorded; both login clients go with the member. A retry
-        that fails too, or exceeds its bound, is the step's STOP (the automatic rollback follows)."""
+    def test_95_a_retried_unattended_smoke_has_its_own_login_client_profile_and_record(self):
+        """D07 at the host: the retry of the release smoke (the phase's retrying flag) makes its own login client and a new
+        browser profile, keeps the first attempt's record beside its own, and the member's removal names both clients."""
         marker = self.root / "first-attempt"
         flaky = FAKE_BROWSER.replace("spec = json.loads(sys.stdin.read())",
                                      "spec = json.loads(sys.stdin.read())\nimport pathlib\nmark = pathlib.Path(%r)\nif not mark.exists():\n"
@@ -2317,33 +2316,19 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
         ops_host, docker, context = self.unattended(flaky)
         patches = self.smoke_patches()
         with patches[0], patches[1], patches[2], patches[3]:
+            refuses(self, ops_host.unattended_release_smoke, context, ("127.0.0.1", 19444), message="synthetic first-attempt failure")
+            (self.records.directory / "operator-smoke.json").write_text('{"first": "attempt"}\n')
+            context.retrying = True
             result = ops_host.unattended_release_smoke(context, ("127.0.0.1", 19444))
-        self.assertEqual(result["retry"], {"reason": "The smoke browser login failed: synthetic first-attempt failure", "passed": True})
-        retry = context.state["smoke_retry"]
-        self.assertEqual((retry["passed"], retry["bound_s"], retry["reason"]), (True, intro.SMOKE_RETRY_S, result["retry"]["reason"]))
+        self.assertTrue(all(result["checks"].values()))
         self.assertTrue(json.loads((self.records.directory / "operator-smoke.json").read_text())["passed"])
-        journal = [json.loads(line) for line in (self.records.directory / "journal.jsonl").read_text().splitlines()]
-        self.assertEqual([entry["reason"] for entry in journal if entry["event"] == "smoke-retry"], [retry["reason"]])
+        self.assertEqual(json.loads((self.records.directory / "operator-smoke-attempt-1.json").read_text()), {"first": "attempt"})
         member = context.state["smoke_member"]
         self.assertEqual(len(member["client_ids"]), 2, "the retry made its own login client")
         self.assertEqual(list(self.records.directory.glob("browser-profile-*")), [])
         ops_host.remove_smoke_member(context)
         removal = next(call for call in docker.calls if any("kc-smoke-remove" in item for item in call))
         self.assertEqual(sorted(json.loads(removal[-1])["client_ids"]), sorted(member["client_ids"]))
-        for name, script, bound in (("fails twice", FAKE_BROWSER.replace('"logout_status": 204', '"logout_status": 409'), None),
-                                    ("retry beyond its bound", flaky.replace("print(\"KIN_RESULT \"", "time.sleep(3)\nprint(\"KIN_RESULT \""), 2)):
-            self.setUp()
-            marker.unlink(missing_ok=True)
-            ops_host, docker, context = self.unattended(script)
-            patches = self.smoke_patches()
-            with self.subTest(case=name), patches[0], patches[1], patches[2], patches[3], \
-                    patch.object(intro, "SMOKE_RETRY_S", bound or intro.SMOKE_RETRY_S):
-                with self.assertRaises(intro.Stop) as caught:
-                    ops_host.unattended_release_smoke(context, ("127.0.0.1", 19444))
-                self.assertIs(context.state["smoke_retry"]["passed"], False)
-                self.assertNotIn("operator_smoke", context.state)
-                if bound:
-                    self.assertIn("exceeded its bound", str(caught.exception))
 
     def test_96_a_browser_timeout_ends_its_whole_process_tree_and_removes_the_profile(self):
         """D17: a browser that runs past its time - or ends while a child it started keeps running with its pipes - is
@@ -2641,6 +2626,79 @@ class RoundThreeMachineTests(MachineHarness, unittest.TestCase):
         journal = [json.loads(line) for line in (self.records.directory / "journal.jsonl").read_text().splitlines()]
         start = next(entry for entry in journal if entry["event"] == "phase-start" and entry["phase"] == "introduce")
         self.assertEqual(start["receipt_clock"], {"tolerance_s": 300, "ahead_of_production_s": 180.0})
+
+    def test_103_the_release_smoke_gets_one_bounded_retry_before_an_automatic_rollback(self):
+        """D07 (IRT2-08): a settled refusal of the fenced smoke is retried once within SMOKE_RETRY_S, recorded (state,
+        journal, the step's detail); a passing retry verifies without any rollback, the step list stays exact (a receipt
+        still sees every step once) and nothing else repeats. A retry that fails, or exceeds its bound, is the step's STOP
+        and the settled-failure path rolls back; an unknown end is never retried."""
+        holder = self
+
+        class Flaky(FakeOps):
+            def __init__(self, failures, slow=False):
+                super().__init__()
+                self.failures, self.slow = failures, slow
+
+            def effect_fenced_smoke(self, context):
+                if self.slow and self.calls.count("fenced_smoke") == 2:
+                    holder.clock.value += intro.SMOKE_RETRY_S + 1
+                if self.calls.count("fenced_smoke") <= self.failures:
+                    raise intro.Stop("synthetic transient browser startup")
+                return {"checks": "passed"}
+        for name, ops_object, status in (("first attempt fails", Flaky(1), "VERIFIED"), ("both attempts fail", Flaky(2), "RESTORED"),
+                                         ("the retry exceeds its bound", Flaky(1, slow=True), "RESTORED")):
+            self.setUp()
+            self.ops = ops_object
+            self.deploy_through("introduce")
+            with self.subTest(case=name):
+                result = self.run_phase("verify")
+                self.assertEqual(result["status"], status)
+                self.assertEqual(self.ops.calls.count("fenced_smoke"), 2)
+                self.assertEqual((self.ops.calls.count("migrate"), self.ops.calls.count("probe")), (1, 0 if status != "VERIFIED" else 1))
+                state = self.records.state()
+                self.assertEqual((state["smoke_retry"]["reason"], state["smoke_retry"]["passed"]),
+                                 ("synthetic transient browser startup", status == "VERIFIED"))
+                journal = [json.loads(line) for line in (self.records.directory / "journal.jsonl").read_text().splitlines()]
+                self.assertEqual(sum(1 for entry in journal if entry["event"] == "smoke-retry"), 1)
+                (written,) = self.records.directory.glob("result-verify-*.json")
+                steps = json.loads(written.read_text())["steps"]
+                self.assertEqual([step["step"] for step in steps if step["step"] == "L-10a"], ["L-10a"])
+                if status == "VERIFIED":
+                    self.assertEqual([step["step"] for step in steps], [sid for sid, _, _, _ in intro.STEPS["verify"]])
+                    self.assertEqual(steps[0]["detail"]["retry"], {"reason": "synthetic transient browser startup", "passed": True})
+                else:
+                    self.assertIn("preserve_failed", self.ops.calls)
+        self.setUp()
+        self.deploy_through("introduce")
+        self.ops.faults["fenced_smoke"] = intro.Unknown("browser state unknown")
+        self.assertEqual(self.run_phase("verify")["status"], "NEEDS_ATTENTION")
+        self.assertEqual(self.ops.calls.count("fenced_smoke"), 1, "an unknown end is never retried")
+
+    def test_104_a_step_whose_host_cannot_be_observed_never_passes(self):
+        """IRT2-22: no observation before a step - it does not run (the capture changes nothing, the lock is freed); no
+        observation after a changing step - its end is unknown (NEEDS_ATTENTION, no automatic rollback); after a read-only
+        step - a refusal; a running database whose migration history cannot be read is no observation."""
+        with patch.object(self.ops, "snapshot", side_effect=OSError("synthetic observer unavailable")):
+            result = self.run_phase("capture")
+        self.assertEqual((result["status"], result["phase_passed"]), ("NEW", False))
+        self.assertEqual(self.ops.calls, [])
+        self.assertEqual(result["steps"][0]["code"], "The host could not be observed before this step")
+        self.assertFalse(self.lock_held())
+        original = self.ops.snapshot
+        calls = {"n": 0}
+
+        def after_fence_fails(context):
+            calls["n"] += 1
+            if "fence" in self.ops.calls and calls["n"] > 0 and self.ops.calls[-1] == "fence":
+                return {"unobservable": "OSError"}
+            return original(context)
+        with patch.object(self.ops, "snapshot", side_effect=after_fence_fails):
+            result = self.run_phase("capture")
+        self.assertEqual(result["status"], "NEEDS_ATTENTION")
+        self.assertEqual([(step["step"], step["outcome"]) for step in result["steps"]][-1], ("L-04a", "UNKNOWN"))
+        self.assertTrue(self.lock_held())
+        self.assertFalse(intro.observed({"running": {"db": image("3")}, "migrations": {"unobservable": "RuntimeError"}}))
+        self.assertTrue(intro.observed({"running": {"db": None}, "migrations": {"unobservable": "RuntimeError"}}))
 
     def test_94_recovery_warnings_are_in_the_result_and_the_kept_values_end_with_the_plan(self):
         """D05/D06: warnings handed to a phase (the entry's) or recorded by its steps are in its result, its result file

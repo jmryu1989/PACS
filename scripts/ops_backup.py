@@ -214,17 +214,35 @@ def wait_ready(origin, timeout=120):
 
 
 def prepare_backup_parent(parent):
+    """The private backup parent; None, or the (uid, gid) of the operating account whose existing private parent root
+    writes into (IRT2-03: the protected entry runs as root, the production backup root is the operating account's 0700
+    folder with its audit ledger). What root then creates there is given to that account at the end, so the account's own
+    daily backups, rotation and ledger keep working; the parent itself is never chown/chmod-ed."""
     if parent.exists():
         if not parent.is_dir():
             raise RuntimeError("Backup parent is not a directory")
         if os.name == "posix":
             info = parent.stat()
-            if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
-                raise RuntimeError("Existing backup parent must be private and owned by the current user")
+            if stat.S_IMODE(info.st_mode) & 0o077 or not (info.st_uid == os.geteuid() or (os.geteuid() == 0 and info.st_uid != 0)):
+                raise RuntimeError("Existing backup parent must be private and owned by the current user (or, for root, by one "
+                                   "operating account)")
+            if info.st_uid != os.geteuid():
+                return info.st_uid, info.st_gid
     else:
         # Never chmod an existing /tmp, home, mount or other shared directory.
         # A racing creator also fails here; only our new leaf receives mode 700.
         parent.mkdir(parents=True, mode=0o700)
+    return None
+
+
+def give_to(path, owner):
+    """A folder root made in an operating account's backup parent, with everything in it, becomes that account's (no link
+    is followed; modes stay)."""
+    if owner is None or os.name != "posix":
+        return
+    path = Path(path)
+    for item in [path, *sorted(path.rglob("*"))]:
+        os.chown(item, owner[0], owner[1], follow_symlinks=False)
 
 
 def reload_proxy():
@@ -283,7 +301,9 @@ def backup(output, ready_timeout=120):
     initial_running = [name for name in CONTAINERS[:-1] if by_name[name]["State"]["Running"]]
     api_env = dict(entry.split("=", 1) for entry in by_name["kin-api"]["Config"].get("Env", []) if "=" in entry)
     origin = api_env.get("PUBLIC_ORIGIN", "https://localhost:9443").rstrip("/")
-    prepare_backup_parent(parent)
+    if prepare_backup_parent(parent) is not None:
+        # The daily backup is the owning account's own job (its sets, its ledger); root never writes one for it.
+        raise RuntimeError("Run the daily backup as the account that owns the backup parent")
     volume_kib = int(temporary_run(["--network", "none", "--read-only",
                                     "--mount", f"type=volume,source={volume},target=/source,readonly",
                                     "--entrypoint", "du", by_name["kin-db"]["Image"], "-sk", "/source"]).split()[0])
@@ -543,6 +563,9 @@ def rehearse_held(directory, manifest, *, daily=False):
             before = json.loads((directory / "projection.json").read_text(encoding="utf-8"))
             if projection(name, columns={table: value["columns"] for table, value in before.items()}) != before:
                 raise RuntimeError("Restored rows differ from the snapshot's projection")
+            # IRT2-24: every row of both databases, every schema, as captured.
+            if value_catalog(name) != json.loads((directory / "values.json").read_text(encoding="utf-8")):
+                raise RuntimeError("Restored row values differ from the snapshot")
         if shape == "post":
             if emr_catalog(name, "kin") != json.loads((directory / "emr-catalog.json").read_text(encoding="utf-8")):
                 raise RuntimeError("Restored EMR owner/ACL/roles/tablespace differ")
@@ -686,7 +709,7 @@ WRITER_ROLES = ("api", "keycloak", "orthanc", "proxy")
 HELD_KIND = "held-capture"
 HELD_LABEL = re.compile(r"[a-z][a-z0-9]{0,15}(?:-[a-z0-9]{1,16}){0,3}")
 HELD_NAME = re.compile(r"[a-z][a-z0-9-]{0,63}-\d{8}T\d{6}Z-[a-f0-9]{8}")
-HELD_EXTRA = ("cluster-roles.sql", "catalog.json", "migrations.json", "projection.json", "metadata.json")
+HELD_EXTRA = ("cluster-roles.sql", "catalog.json", "migrations.json", "projection.json", "values.json", "metadata.json")
 EMR_ROLES = ("kin_emr_owner", "kin_runtime", "kin_emr_reader", "kin_emr_retention")
 RESOURCE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
@@ -706,8 +729,9 @@ ROLE_CATALOG_SQL = """SET TimeZone='UTC'; SET DateStyle='ISO, YMD'; SELECT json_
     (SELECT rolname, rolsuper, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolinherit,
             rolconnlimit, rolvaliduntil::text AS rolvaliduntil, rolconfig
      FROM pg_roles WHERE rolname !~ '^pg_') r),
-  'memberships', (SELECT coalesce(json_agg(r ORDER BY granted, member), '[]'::json) FROM
-    (SELECT a.rolname AS granted, b.rolname AS member, m.admin_option, m.inherit_option, m.set_option
+  'memberships', (SELECT coalesce(json_agg(r ORDER BY granted, member, grantor), '[]'::json) FROM
+    (SELECT a.rolname AS granted, b.rolname AS member, pg_get_userbyid(m.grantor) AS grantor, m.admin_option, m.inherit_option,
+            m.set_option
      FROM pg_auth_members m JOIN pg_roles a ON a.oid=m.roleid
      JOIN pg_roles b ON b.oid=m.member WHERE a.rolname !~ '^pg_' OR b.rolname !~ '^pg_') r),
   'databases', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
@@ -720,19 +744,28 @@ ROLE_CATALOG_SQL = """SET TimeZone='UTC'; SET DateStyle='ISO, YMD'; SELECT json_
 # Per database: owners and privileges of every schema, relation, function and default privilege outside the system
 # schemas (what pg_restore with owners and privileges must reproduce, compared after a restore, never inferred); D22 adds
 # column privileges (only columns that carry any), types and domains (not the automatic array and table row types), large
-# objects, publications with their tables, event triggers, foreign-data wrappers, foreign servers and user mappings.
+# objects, publications with their tables, event triggers, foreign-data wrappers, foreign servers and user mappings;
+# IRT2-16/24 add the definitions of views, functions and triggers (as hashes), trigger enabled state and each sequence's
+# state (pg_sequence_last_value: NULL until called).
 OBJECT_CATALOG_SQL = """SELECT json_build_object(
   'schemas', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
     (SELECT nspname::text AS name, pg_get_userbyid(nspowner) AS owner, """ + _acl("nspacl", "'n'::\"char\"", "nspowner") + """ AS acl
      FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname <> 'information_schema') r),
   'relations', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
     (SELECT n.nspname || '.' || c.relname AS name, c.relkind::text AS kind, pg_get_userbyid(c.relowner) AS owner,
-     """ + _acl("c.relacl", "(CASE WHEN c.relkind = 'S' THEN 's' ELSE 'r' END)::\"char\"", "c.relowner") + """ AS acl
+     """ + _acl("c.relacl", "(CASE WHEN c.relkind = 'S' THEN 's' ELSE 'r' END)::\"char\"", "c.relowner") + """ AS acl,
+     CASE WHEN c.relkind IN ('v', 'm') THEN md5(pg_get_viewdef(c.oid)) END AS definition,
+     CASE WHEN c.relkind = 'S' THEN pg_sequence_last_value(c.oid)::text END AS sequence_last_value
      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
      WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')) r),
   'functions', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
-    (SELECT p.oid::regprocedure::text AS name, pg_get_userbyid(p.proowner) AS owner, """ + _acl("p.proacl", "'f'::\"char\"", "p.proowner") + """ AS acl
+    (SELECT p.oid::regprocedure::text AS name, pg_get_userbyid(p.proowner) AS owner, """ + _acl("p.proacl", "'f'::\"char\"", "p.proowner") + """ AS acl,
+     CASE WHEN p.prokind IN ('f', 'p') THEN md5(pg_get_functiondef(p.oid)) END AS definition
      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema') r),
+  'triggers', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
+    (SELECT n.nspname || '.' || c.relname || '.' || t.tgname AS name, t.tgenabled::text AS enabled, md5(pg_get_triggerdef(t.oid)) AS definition
+     FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE NOT t.tgisinternal AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema') r),
   'default_acl', (SELECT coalesce(json_agg(r ORDER BY owner, scope, kind), '[]'::json) FROM
     (SELECT pg_get_userbyid(d.defaclrole) AS owner, coalesce(n.nspname, '') AS scope, d.defaclobjtype::text AS kind,
      (SELECT coalesce(json_agg(x::text ORDER BY x::text), '[]'::json) FROM unnest(d.defaclacl) x) AS acl
@@ -806,6 +839,11 @@ def _unsupported(message):
     raise RuntimeError("Unsupported pre-EMR catalog: " + message)
 
 
+# The bootstrap superuser of a fresh cluster of the product's image (POSTGRES_USER=kin), as pg_roles shows it.
+BOOTSTRAP_KIN = {"rolsuper": True, "rolcreaterole": True, "rolcreatedb": True, "rolcanlogin": True, "rolreplication": True,
+                 "rolbypassrls": True, "rolinherit": True, "rolconnlimit": -1, "rolvaliduntil": None, "rolconfig": None}
+
+
 def supported_pre_catalog(catalog):
     """A pre-EMR cluster this tool can rebuild exactly in a fresh cluster, or a refusal before anything changes.
 
@@ -832,6 +870,10 @@ def supported_catalog(catalog, *, shape):
     installer = roles.get("kin")
     if not installer or installer.get("rolsuper") is not True or installer.get("rolcanlogin") is not True:
         _unsupported("the installer superuser kin is missing")
+    # IRT2-17: a fresh cluster's bootstrap kin has exactly these attributes and the replay never alters it, so a kin that
+    # differs (connection limit, validity, settings, a dropped attribute) could not be rebuilt: refused at capture.
+    if {key: installer.get(key) for key in BOOTSTRAP_KIN} != BOOTSTRAP_KIN:
+        _unsupported("the installer superuser kin has attributes a fresh cluster's kin does not")
     for name, role in roles.items():
         if any(key not in role for key in ("rolsuper", "rolcreaterole", "rolcreatedb", "rolcanlogin", "rolreplication",
                                            "rolbypassrls", "rolinherit", "rolconnlimit", "rolvaliduntil", "rolconfig")):
@@ -851,6 +893,9 @@ def supported_catalog(catalog, *, shape):
                 _unsupported("a membership names an unknown role")
         if any(type(membership.get(key)) is not bool for key in ("admin_option", "inherit_option", "set_option")):
             _unsupported("membership options are unreadable")
+        # IRT2-16: the replay grants as the bootstrap kin, so only memberships kin granted can be rebuilt with their grantor.
+        if membership.get("grantor") != "kin":
+            _unsupported("a membership was granted by another role than kin")
     databases = {item.get("name"): item for item in catalog.get("databases") or []}
     if not set(PRE_DATABASES) <= set(databases) or not set(databases) <= {*PRE_DATABASES, "postgres"}:
         _unsupported("the databases are not exactly kin and keycloak")
@@ -981,6 +1026,45 @@ def projection(container, database="kin", user="kin", columns=None):
             for table, names in columns.items()}
 
 
+VALUE_TABLES_SQL = """SELECT coalesce(json_agg(json_build_array(n.nspname, c.relname) ORDER BY n.nspname, c.relname), '[]'::json)
+  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE c.relkind = 'r' AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'"""
+
+
+def _identifier(name):
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def psql_json_stdin(container, database, sql, user="kin", timeout=1800):
+    """psql_json with the statement on stdin (a statement over every table can exceed a command line)."""
+    import tempfile
+    with tempfile.TemporaryFile() as handle:
+        handle.write(sql.encode("utf-8"))
+        handle.flush()
+        handle.seek(0)
+        result = run(["docker", "exec", "-i", container, "psql", "-X", "-U", user, "-d", database, "-v", "ON_ERROR_STOP=1", "-qAt", "-f", "-"],
+                     input_file=handle, timeout=timeout)
+    return json.loads(result.stdout.decode("utf-8").strip())
+
+
+def value_catalog(container, user="kin"):
+    """IRT2-24: every row value of both databases at one point - per table of every schema (kin's public and others,
+    Keycloak's), its row count and a SHA-256 over its whole rows' text in a fixed order (sequence states are in the object
+    catalog). A restore must reproduce it exactly; nothing of the rows leaves PostgreSQL but the digests."""
+    out = {}
+    for database in PRE_DATABASES:
+        tables = psql_json(container, database, VALUE_TABLES_SQL, user)
+        selects = []
+        for schema, table in tables:
+            label = (schema + "." + table).replace("'", "''")
+            selects.append(f"SELECT '{label}' AS name, (SELECT json_build_array(count(*), encode(sha256(convert_to(coalesce("
+                           f"string_agg(t::text, E'\\n' ORDER BY t::text COLLATE \"C\"), ''), 'UTF8')), 'hex')) FROM "
+                           f"{_identifier(schema)}.{_identifier(table)} t) AS d")
+        out[database] = psql_json_stdin(container, database, PROJECTION_SETTINGS + "SELECT coalesce(json_object_agg(name, d), '{}'::json) FROM ("
+                                        + " UNION ALL ".join(selects) + ") x;", user) if selects else {}
+    return out
+
+
 def env_names(path):
     """Variable names of an env file, never values."""
     names = []
@@ -1070,12 +1154,14 @@ def capture_held(output, resources, *, shape, label, config=(), facts=None, read
         state_volume = _volume_of(by_role["api"], EMR_STATE)
         if state_volume != volumes["emr_state"] or present != set(EMR_ROLES):
             raise RuntimeError("Post-EMR capture resources differ from the target manifest")
+        # Its restore check rebuilds it the same way: refused before anything is written, not in the check cluster.
+        supported_catalog(roles, shape="post")
     active = text(["docker", "exec", db_name, "psql", "-X", "-U", "kin", "-d", "kin", "-qAt", "-c",
                    "SELECT count(*) FROM pg_stat_activity WHERE datname IN ('kin','keycloak') "
                    "AND backend_type='client backend' AND pid<>pg_backend_pid();"])
     if active != "0":
         raise RuntimeError("Database clients remain while writers are fenced")
-    prepare_backup_parent(parent)
+    owner = prepare_backup_parent(parent)
     sizes = [int(temporary_run(["--network", "none", "--read-only", "--mount",
                                 f"type=volume,source={volume},target=/source,readonly", "--entrypoint", "du",
                                 db["Image"], "-sk", "/source"]).split()[0]) for volume in (volumes["orthanc"], state_volume) if volume]
@@ -1104,6 +1190,8 @@ def capture_held(output, resources, *, shape, label, config=(), facts=None, read
         write_json(directory / "migrations.json", migration_rows(db_name))
         stage = "projection"
         write_json(directory / "projection.json", projection(db_name))
+        stage = "values"
+        write_json(directory / "values.json", value_catalog(db_name))
         if shape == "post":
             write_json(directory / "emr-catalog.json", emr_catalog(db_name, "kin"))
         with (directory / "cluster-roles.sql").open("wb") as handle:
@@ -1151,6 +1239,8 @@ def capture_held(output, resources, *, shape, label, config=(), facts=None, read
     finally:
         manifest["capture_seconds"] = round(time.monotonic() - started, 3)
         write_json(directory / "manifest.json", manifest)
+        # IRT2-03: in the operating account's backup parent the capture is that account's, like its daily sets.
+        give_to(directory, owner)
         print(json.dumps({"capture": str(directory), "shape": shape, "complete": manifest["complete"],
                           "backup_error": manifest.get("backup_error"), "writers_resumed": False}), flush=True)
     return directory
@@ -1264,6 +1354,11 @@ def rotate(root, keep, protect=(), dry_run=False, now=None):
         if source.is_symlink() or not source.is_dir() or not still_free(name, source):
             result["retained"][name] = "changed before deletion"
             continue
+        # IRT2-21: right before it goes, the set is still physically whole (an incomplete set is never deleted).
+        whole = _daily_whole(source)
+        if whole is not None:
+            result["retained"][name] = "incomplete before deletion: " + whole
+            continue
         moved = root / (ROTATING + name)
         os.rename(source, moved)
         if not still_free(name, moved):
@@ -1278,6 +1373,10 @@ def rotate(root, keep, protect=(), dry_run=False, now=None):
         if (source.is_symlink() or not source.is_dir() or archive.is_symlink() or not archive.is_file()
                 or _retention_reason(name, source, set(protect), _referenced(root), *_retention_window(root, now)) != "audit-retention"):
             result["retained"][name] = "changed before thinning"
+            continue
+        whole = _daily_whole(source)
+        if whole is not None:
+            result["retained"][name] = "incomplete before thinning: " + whole
             continue
         # The marker comes first: a reader (or validate_backup, which then refuses the set) never takes a thinned set
         # for a restorable one, and an interrupted thinning finishes on the next run.

@@ -65,7 +65,7 @@ def daily_role_catalog():
     return {"roles": [pg_role("kin", superuser=True, login=True), pg_role("kin_emr_owner"), pg_role("kin_emr_reader"),
                       pg_role("kin_emr_retention"), pg_role("kin_legacy_group", inherit=False), pg_role("kin_legacy_reader", connlimit=3),
                       pg_role("kin_runtime", login=True)],
-            "memberships": [{"granted": "kin_legacy_group", "member": "kin_legacy_reader", "admin_option": False, "inherit_option": True,
+            "memberships": [{"granted": "kin_legacy_group", "member": "kin_legacy_reader", "grantor": "kin", "admin_option": False, "inherit_option": True,
                              "set_option": True}],
             "databases": [{"name": "keycloak", "owner": "kin", "acl": ["=Tc/kin", "kin=CTc/kin"]},
                           {"name": "kin", "owner": "kin", "acl": ["=Tc/kin", "kin=CTc/kin", "kin_legacy_reader=c/kin"]},
@@ -118,7 +118,7 @@ class DailyCluster:
                                     "rolconnlimit": int(words[words.index("LIMIT") + 1])}
             for granted, member, admin, inherit, setting in pattern.findall(
                     r'GRANT "([^"]+)" TO "([^"]+)" WITH ADMIN (TRUE|FALSE), INHERIT (TRUE|FALSE), SET (TRUE|FALSE);', sql):
-                self.memberships.append({"granted": granted, "member": member, "admin_option": admin == "TRUE",
+                self.memberships.append({"granted": granted, "member": member, "grantor": "kin", "admin_option": admin == "TRUE",
                                          "inherit_option": inherit == "TRUE", "set_option": setting == "TRUE"})
         elif "CREATE TABLESPACE kin_emr_access" in joined:
             self.tablespace = True

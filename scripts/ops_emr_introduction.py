@@ -117,6 +117,8 @@ SMOKE_RETRY_S = 120
 # phases (a rollback whose source container is gone) in this private file of the run directory, never in a record.
 COMPOSE_VALUES = "compose-env-values.json"
 RECOVERY_PHASES = ("rollback", "rollback_reopen")
+# D07: the one step a settled refusal of which is retried once (read-only, fenced): the release smoke.
+RETRIED_ONCE = ("fenced_smoke",)
 # The Stage-5 configuration names a clone must replace before it starts (rehearsal.md §2). Values are compared in memory.
 CLONE_SECRETS = ("POSTGRES_PASSWORD", "KC_ADMIN_PASSWORD", "KC_CLIENT_SECRET", "KC_WEB_SECRET", "KIN_COOKIE_SECRET",
                  "ORTHANC_PASS", "KIN_EMR_RUNTIME_PASSWORD", "KIN_EMR_READER_PASSWORD", "KIN_EMR_RETENTION_PASSWORD")
@@ -1104,6 +1106,16 @@ BUDGET = {"capture": "capture_s", "release": "capture_s", "introduce": "introduc
           "rollback": "rollback_s", "rollback_reopen": "rollback_s", "seed": "seed_s", "receipt": "capture_s"}
 
 
+def observed(snapshot):
+    """IRT2-22: whether an observation around a step is complete. Required: the observer answered (containers, checkout,
+    lock); the applied migration history whenever the database container runs. Not required (normally unobservable):
+    the history while no database container runs (before a seed's restore, between a removal and a recreate)."""
+    if type(snapshot) is not dict or "unobservable" in snapshot:
+        return False
+    migrations, running = snapshot.get("migrations"), snapshot.get("running") or {}
+    return not (isinstance(migrations, dict) and "unobservable" in migrations and running.get("db"))
+
+
 def new_state(plan_sha256, plan):
     return {"schema": 1, "mode": MODE, "plan_sha256": plan_sha256, "target_kind": plan["target_kind"], "status": "NEW",
             "lock_token": None, "db_changed": False, "ponr": None, "fenced": None, "checkout": "previous",
@@ -1128,6 +1140,7 @@ class Introduction:
         # that changed or vanished): recorded in the phase-start event, the result file and the result.
         self.warnings = list(warnings)
         self.receipt_facts = None
+        self.retried = self.retrying = False
 
     # ── bookkeeping ──
     def save(self):
@@ -1160,13 +1173,20 @@ class Introduction:
         self.records.context = {"step": sid, "part": "step"}
         outcome = None
         try:
+            # IRT2-22: a step whose host could not be observed before it does not run (nothing changed yet).
+            require(observed(record["before"]), "The host could not be observed before this step")
             if mutating:
                 self.guard()
             if db_change and not self.state["db_changed"]:
                 # Durable before the first database change: from here on, only a full B0 restore is a rollback.
                 self.state["db_changed"] = True
                 self.save()
-            detail = getattr(self.ops, name)(self) or {}
+            try:
+                detail = getattr(self.ops, name)(self) or {}
+            except Stop as error:
+                if name not in RETRIED_ONCE or self.retried:
+                    raise
+                detail = self.retry_step(name, error)
             outcome = "PASS"
         except Unknown as error:
             outcome = "UNKNOWN"
@@ -1177,15 +1197,50 @@ class Introduction:
             record.update(code=code_of(error))
             raise Stop(record["code"]) from None
         finally:
+            record["after"] = self.observe(sid, "after")
+            if outcome == "PASS" and not observed(record["after"]):
+                # IRT2-22: a step that ran but whose result could not be observed never passes - after a change its end
+                # state is unknown (no automatic rollback), after a read-only step it is a settled refusal.
+                outcome = "UNKNOWN" if mutating else "STOP"
+                record["code"] = "The host could not be observed after this step"
             record["outcome"] = outcome or "UNKNOWN"
             record["seconds"] = round(self.clock() - started, 3)
             if outcome == "PASS":
                 record["detail"] = detail
-            record["after"] = self.observe(sid, "after")
             record["commands"] = {"file": self.records.commands_file, "first": first, "last": self.records.seq}
             self.steps.append(record)
             self.event("step-end", step=sid, outcome=record["outcome"], **({"code": record["code"]} if "code" in record else {}))
+        if outcome == "UNKNOWN":
+            raise Unknown(record["code"])
+        if outcome == "STOP":
+            raise Stop(record["code"])
         return detail
+
+    def retry_step(self, name, error):
+        """D07: the fenced smoke failed with a settled refusal (a browser that did not start, a moment's HTTP hiccup) - an
+        environmental failure must not cost a full B0 rollback by itself. The same read-only step runs once more, within
+        SMOKE_RETRY_S, and the retry, its reason and its outcome are recorded (state, journal, the step's detail). Nothing
+        else repeats (no migration, no probe); the retry's own failure is the step's STOP and the settled-failure path
+        (workers, point of no return, then the rollback) follows."""
+        reason = code_of(error)
+        self.retried = True
+        started = self.clock()
+        self.state["smoke_retry"] = {"step": name, "reason": reason, "at": self.now().isoformat(), "bound_s": SMOKE_RETRY_S, "passed": None}
+        self.save()
+        self.event("smoke-retry", reason=reason, bound_s=SMOKE_RETRY_S)
+        self.retrying = True
+        try:
+            detail = getattr(self.ops, name)(self) or {}
+            require(self.clock() - started <= SMOKE_RETRY_S, "The smoke retry exceeded its bound of %d s" % SMOKE_RETRY_S)
+        except Stop as second:
+            self.state["smoke_retry"].update(passed=False, retry_code=code_of(second))
+            self.save()
+            raise
+        finally:
+            self.retrying = False
+        self.state["smoke_retry"].update(passed=True, seconds=round(self.clock() - started, 3))
+        self.save()
+        return {**detail, "retry": {"reason": reason, "passed": True}}
 
     def observe(self, sid=None, part=None):
         """The host as seen around a step (selected, secret-free); an unobservable host is recorded as such."""
@@ -2673,41 +2728,24 @@ class HostOps:
     def unattended_release_smoke(self, intro, connect):
         """L-10a unattended: the eight operator checks, by the executor (D1062), with the smoke member made at L-08b. The
         product's own sign-in and logout run in the browser (the ended session must be refused); the worklist, frame and
-        W2 checks use the temporary client's fresh token. D07: a failed attempt (an environmental hiccup must not cost a
-        full B0 rollback) is retried once - a new login client and a new browser profile, all of it within SMOKE_RETRY_S -
-        and the retry and its reason are recorded (state, journal, the step's detail; the first attempt's record kept as
-        operator-smoke-attempt-1.json). Only the retry's failure is the step's STOP."""
-        try:
-            return self.release_smoke_attempt(intro, connect)
-        except Stop as error:
-            reason = code_of(error)
-        started = time.monotonic()
-        first = intro.records.directory / "operator-smoke.json"
-        kept = None
-        if first.exists():
-            raw = intro.records.read(first)
-            intro.records.write(intro.records.directory / "operator-smoke-attempt-1.json", raw)
-            intro.records.discard(first)
-            kept = sha256_bytes(raw)
-        intro.state.pop("operator_smoke", None)
-        intro.state["smoke_retry"] = {"reason": reason, "at": utc_now().isoformat(), "bound_s": SMOKE_RETRY_S,
-                                      "first_record_sha256": kept, "passed": None}
-        intro.save()
-        intro.records.journal({"event": "smoke-retry", "plan_sha256": intro.plan_sha256, "reason": reason, "bound_s": SMOKE_RETRY_S})
-        try:
-            result = self.release_smoke_attempt(intro, connect, attempt=2, timeout=max(10, SMOKE_RETRY_S - 5))
-            require(time.monotonic() - started <= SMOKE_RETRY_S, "The smoke retry exceeded its bound of %d s" % SMOKE_RETRY_S)
-        except Stop as error:
-            intro.state["smoke_retry"].update(passed=False, retry_code=code_of(error))
+        W2 checks use the temporary client's fresh token. D07: when the phase retries this step (intro.retrying), the
+        attempt has its own login client and browser profile within SMOKE_RETRY_S, and the first attempt's record is kept
+        as operator-smoke-attempt-1.json."""
+        retrying = bool(getattr(intro, "retrying", False))
+        if retrying:
+            first = intro.records.directory / "operator-smoke.json"
+            if first.exists():
+                raw = intro.records.read(first)
+                intro.records.write(intro.records.directory / "operator-smoke-attempt-1.json", raw)
+                intro.records.discard(first)
             intro.state.pop("operator_smoke", None)
             intro.save()
-            raise
-        intro.state["smoke_retry"].update(passed=True, seconds=round(time.monotonic() - started, 3))
-        intro.save()
-        return {**result, "retry": {"reason": reason, "passed": True}}
+        return self.release_smoke_attempt(intro, connect, timeout=max(10, SMOKE_RETRY_S - 5) if retrying else None)
 
-    def release_smoke_attempt(self, intro, connect, *, attempt=1, timeout=None):
+    def release_smoke_attempt(self, intro, connect, *, timeout=None):
         """One attempt of the unattended release smoke (see unattended_release_smoke)."""
+        member = intro.state.get("smoke_member") or {}
+        attempt = len(member.get("client_ids") or []) + 1
         token, refresh, client_id, value = self.browser_login(intro, connect=connect, product_session=True, timeout=timeout, attempt=attempt)
         issued = token_claims(token).get("iat")
         require(type(issued) is int and issued >= int(parse_utc(intro.state["imported_at"]).timestamp()), "The smoke login predates the member import")
@@ -3398,6 +3436,9 @@ class HostOps:
                 "Recovery database is not on its fresh volume")
         with self.bind():
             restored = ops.restore_pre_snapshot(self.names["db"], b0)
+            # IRT2-24: every row of kin (every schema) and of Keycloak is B0's, before anything starts on it.
+            require(ops.value_catalog(self.names["db"]) == json.loads((b0 / "values.json").read_text(encoding="utf-8")),
+                    "Restored row values differ from B0")
         with open(b0 / "orthanc.tgz", "rb") as handle:
             self.cmd(["docker", "run", "--rm", "-i", "--network", "none", "--label", "kin.ops.recovery=" + intro.plan_sha256[:16],
                       "--mount", "type=volume,source=" + recovery["orthanc"] + ",target=/restore", "--entrypoint", "tar",
@@ -3654,6 +3695,10 @@ class HostOps:
             restored = ops.restore_pre_snapshot(self.names["db"], seed)
             for database in ("kin", "keycloak"):
                 require(ops.counts(self.names["db"], database, "kin") == manifest["counts"][database], "Seeded row counts differ: " + database)
+            # IRT2-24: the restored copy is the seed's exactly (every row of both databases) before the clone's own,
+            # recorded changes below (client secrets, origin, mail, identity providers, its administrator) are made.
+            require(ops.value_catalog(self.names["db"]) == json.loads((seed / "values.json").read_text(encoding="utf-8")),
+                    "Seeded row values differ from the seed")
         source_env, clone_env = parse_env((seed / ".env").read_bytes()), parse_env(self.env_file().read_bytes())
         isolation = self.keycloak_isolation(intro, source_env, clone_env, source_env.get("PUBLIC_ORIGIN", "https://pacs.koreaimagingnetwork.com"))
         # The restored master realm keeps the source administrator (whose password the clone must not know); the clone
