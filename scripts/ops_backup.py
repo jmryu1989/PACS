@@ -677,6 +677,13 @@ ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 SQL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")   # quoted into SQL text: plain identifiers only
 CONFIG_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 
+def _acl(column, kind, owner):
+    """An object's privileges as a sorted list of aclitems, with a NULL ACL read as its default for the owner: pg_dump
+    drops an explicit ACL that equals the default, so the raw text would differ after a faithful restore."""
+    return (f"(SELECT coalesce(json_agg(x::text ORDER BY x::text), '[]'::json) FROM "
+            f"unnest(coalesce({column}, acldefault({kind}, {owner}))) x)")
+
+
 # Fixed session settings first: a role's VALID UNTIL is a timestamp whose text must not depend on the session.
 ROLE_CATALOG_SQL = """SET TimeZone='UTC'; SET DateStyle='ISO, YMD'; SELECT json_build_object(
   'roles', (SELECT coalesce(json_agg(r ORDER BY rolname), '[]'::json) FROM
@@ -688,7 +695,8 @@ ROLE_CATALOG_SQL = """SET TimeZone='UTC'; SET DateStyle='ISO, YMD'; SELECT json_
      FROM pg_auth_members m JOIN pg_roles a ON a.oid=m.roleid
      JOIN pg_roles b ON b.oid=m.member WHERE a.rolname !~ '^pg_' OR b.rolname !~ '^pg_') r),
   'databases', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
-    (SELECT datname AS name, pg_get_userbyid(datdba) AS owner, datacl::text AS acl FROM pg_database WHERE NOT datistemplate) r),
+    (SELECT datname AS name, pg_get_userbyid(datdba) AS owner, """ + _acl("datacl", "'d'::\"char\"", "datdba") + """ AS acl
+     FROM pg_database WHERE NOT datistemplate) r),
   'tablespaces', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
     (SELECT spcname AS name, pg_get_userbyid(spcowner) AS owner, pg_tablespace_location(oid) AS location FROM pg_tablespace) r),
   'schemas', (SELECT coalesce(json_agg(nspname::text ORDER BY nspname), '[]'::json) FROM pg_namespace
@@ -697,17 +705,19 @@ ROLE_CATALOG_SQL = """SET TimeZone='UTC'; SET DateStyle='ISO, YMD'; SELECT json_
 # schemas (what pg_restore with owners and privileges must reproduce, compared after a restore, never inferred).
 OBJECT_CATALOG_SQL = """SELECT json_build_object(
   'schemas', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
-    (SELECT nspname::text AS name, pg_get_userbyid(nspowner) AS owner, nspacl::text AS acl FROM pg_namespace
-     WHERE nspname !~ '^pg_' AND nspname <> 'information_schema') r),
+    (SELECT nspname::text AS name, pg_get_userbyid(nspowner) AS owner, """ + _acl("nspacl", "'n'::\"char\"", "nspowner") + """ AS acl
+     FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname <> 'information_schema') r),
   'relations', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
-    (SELECT n.nspname || '.' || c.relname AS name, c.relkind::text AS kind, pg_get_userbyid(c.relowner) AS owner, c.relacl::text AS acl
+    (SELECT n.nspname || '.' || c.relname AS name, c.relkind::text AS kind, pg_get_userbyid(c.relowner) AS owner,
+     """ + _acl("c.relacl", "(CASE WHEN c.relkind = 'S' THEN 's' ELSE 'r' END)::\"char\"", "c.relowner") + """ AS acl
      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
      WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')) r),
   'functions', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
-    (SELECT p.oid::regprocedure::text AS name, pg_get_userbyid(p.proowner) AS owner, p.proacl::text AS acl
+    (SELECT p.oid::regprocedure::text AS name, pg_get_userbyid(p.proowner) AS owner, """ + _acl("p.proacl", "'f'::\"char\"", "p.proowner") + """ AS acl
      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema') r),
   'default_acl', (SELECT coalesce(json_agg(r ORDER BY owner, scope, kind), '[]'::json) FROM
-    (SELECT pg_get_userbyid(d.defaclrole) AS owner, coalesce(n.nspname, '') AS scope, d.defaclobjtype::text AS kind, d.defaclacl::text AS acl
+    (SELECT pg_get_userbyid(d.defaclrole) AS owner, coalesce(n.nspname, '') AS scope, d.defaclobjtype::text AS kind,
+     (SELECT coalesce(json_agg(x::text ORDER BY x::text), '[]'::json) FROM unnest(d.defaclacl) x) AS acl
      FROM pg_default_acl d LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace) r))"""
 PRE_DATABASES = ("kin", "keycloak")
 DEFAULT_TABLESPACES = ("pg_default", "pg_global")

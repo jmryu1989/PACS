@@ -62,7 +62,8 @@ def target_fixture(kind="production", repository="/srv/kin/repository"):
             "networks": {"default": "kin-rh-0001_default", "workflow": "kin-rh-0001-workflow"},
             "ports": {"maintenance": "127.0.0.1:19444:443", "public": ["127.0.0.1:19443:443"]},
             "tls_certificate": "/etc/nginx/certs/kin.crt", "cron": None, "ca_file": "/srv/kin/clone-ca.pem",
-            "keycloak_admin": "kin-clone-admin"}
+            "keycloak_admin": "kin-clone-admin", "external_networks": {}, "declared_overlays": [], "tracked_overlay_reconcile": [],
+            "fix_checkout_mode": False}
 
 
 def plan_fixture(target=None, kind="production"):
@@ -81,7 +82,8 @@ def plan_fixture(target=None, kind="production"):
             "migrations": {"before": copy.deepcopy(MIGRATIONS_BEFORE), "after": copy.deepcopy(MIGRATIONS_AFTER)},
             "storage": {"tablespace_path": intro.TABLESPACE, "postgres_uid": 70, "postgres_gid": 70, "node_uid": 1000, "node_gid": 1000},
             "members": {"realm_members": 3, "disabled": 1, "service_accounts": 1},
-            "smoke": {"frame": {"path": "/dicom-web/studies/1.2/series/1.3/instances/1.4/frames/1", "bytes": 64, "sha256": "f" * 64}},
+            "smoke": {"frame": {"path": "/dicom-web/studies/1.2/series/1.3/instances/1.4/frames/1", "bytes": 64, "sha256": "f" * 64},
+                      "member": {"roles": ["radiologist"], "group": "hallym"}},
             "probe": {"study": "SYNTHETIC-release-probe", "event_id": "12345678-1234-4123-8123-123456789abc",
                       "institution": "kin-center", "approved_by": "commander", "approved_at": "2026-10-12T00:00:00Z"},
             "window": {"start": "2026-10-13T00:00:00Z", "end": "2026-10-13T12:00:00Z"},
@@ -137,6 +139,9 @@ def resolved_model(target, *, target_checkout, maintenance, images=None, recover
     mounts["orthanc"] += [{"type": "volume", "source": "orthanc-db", "target": "/var/lib/orthanc/db"},
                           {"type": "bind", "source": target["repository"] + "/config/orthanc.json", "target": "/etc/orthanc/orthanc.json"}]
     mounts["proxy"].append({"type": "volume", "source": "proxy-certs", "target": "/etc/nginx/certs"})
+    for overlay in target["declared_overlays"]:
+        mounts[overlay["service"]] += [{"type": "bind", "source": bind["source"], "target": bind["target"], "read_only": bind["read_only"]}
+                                       for bind in overlay["binds"]]
     if target_checkout:
         volumes.update({"emr-access": target["volumes"]["emr_access"], "emr-state": target["volumes"]["emr_state"]})
         mounts["db"].append({"type": "volume", "source": "emr-access", "target": "/var/lib/postgresql/emr-access"})
@@ -146,8 +151,15 @@ def resolved_model(target, *, target_checkout, maintenance, images=None, recover
     if target["kind"] == "production":
         ports["orthanc"], ports["keycloak"] = ["127.0.0.1:8042:8042"], ["127.0.0.1:8080:8080"]
     origin = target["origin"]
+    networks = {role: ["default"] for role in services}
+    networks["proxy"] = ["default", "workflow"]
+    for role, entries in target["external_networks"].items():
+        networks[role] = sorted(set(networks[role]) | set(entries))
+    declared = {key: name for entries in target["external_networks"].values() for key, name in entries.items()}
     return {"project": project, "containers": {role: target["containers"][role] for role in services}, "volumes": volumes,
-            "networks": {"default": project + "_default" if recovery else target["networks"]["default"], "workflow": target["networks"]["workflow"]},
+            "networks": {"default": project + "_default" if recovery else target["networks"]["default"], "workflow": target["networks"]["workflow"],
+                         **declared},
+            "service_networks": networks,
             "mounts": mounts, "ports": ports, "images": dict(images) if images else {role: None for role in services},
             "origin": {"api_KC_ISSUER": origin + "/auth/realms/kin", "keycloak_KC_HOSTNAME": origin + "/auth", "api_PUBLIC_ORIGIN": origin},
             "api_environment": ["AUTH_REQUIRED", "DATABASE_URL"], "proxy_ports": ports["proxy"]}
@@ -949,7 +961,7 @@ class StateMachineTests(MachineHarness, unittest.TestCase):
         self.ops.faults["baseline"] = RuntimeError("Running service images differ from the previous release")
         result = self.run_phase("capture")
         self.assertEqual((result["status"], result["phase_passed"]), ("NEW", False))
-        self.assertEqual(self.ops.calls, ["baseline"])
+        self.assertEqual(self.ops.calls, ["checkout_mode", "reconcile_checkout", "baseline"])
         self.assertFalse(self.lock_held())
         self.assertEqual(result["steps"][-1]["code"], "Running service images differ from the previous release")
 
@@ -1276,7 +1288,8 @@ class FakeDocker:
     keeps every call, so a test can tell read-only commands from mutating ones."""
 
     READ_ONLY = (("docker", "inspect"), ("docker", "volume", "inspect"), ("docker", "image", "inspect"), ("docker", "ps"),
-                 ("git", "rev-parse"), ("git", "status"), ("git", "cat-file"), ("crontab", "-u"))
+                 ("git", "rev-parse"), ("git", "status"), ("git", "cat-file"), ("crontab", "-u"),
+                 ("docker", "run", "--rm", "--network", "none", "--read-only"))
 
     def __init__(self, target, plan):
         self.target, self.plan = target, plan
@@ -1290,6 +1303,9 @@ class FakeDocker:
         self.failing = None        # a predicate over argv: those calls exit 1
         self.crontab = ""
         self.image_labels = {}
+        self.config_for = None     # (argv, env) -> model, when the model depends on the files or the environment given
+        self.blobs = {}            # "HEAD:<path>" -> committed bytes
+        self.checkouts, self.on_checkout = [], None
 
     def result(self, code=0, stdout=b"", stderr=b""):
         return SimpleNamespace(returncode=code, stdout=stdout if isinstance(stdout, bytes) else stdout.encode(), stderr=stderr)
@@ -1303,9 +1319,18 @@ class FakeDocker:
             return self.result(1, stderr=b"synthetic failure")
         if args[:2] == ["docker", "compose"]:
             if "config" in args:
+                if self.config_for is not None:
+                    return self.result(stdout=json.dumps(self.config_for(args, env or {})))
                 return self.result(stdout=json.dumps(self.config["pinned" if "--project-name" in args else "plain"]))
             if "run" in args:
-                return self.result(stdout=self.run_output)
+                return self.result(stdout=self.run_output(args) if callable(self.run_output) else self.run_output)
+            return self.result()
+        if args[:3] == ["git", "cat-file", "blob"]:
+            return self.result(stdout=self.blobs.get(args[3], b""))
+        if args[:3] == ["git", "checkout", "--"]:
+            self.checkouts.append(args[3])
+            if self.on_checkout:
+                self.on_checkout(args[3])
             return self.result()
         if args[:2] == ["docker", "inspect"]:
             if args[2] == "--format":
@@ -1341,7 +1366,8 @@ class FakeDocker:
                 and not (call[:2] == ["docker", "exec"] and "psql" in call and "-i" not in call)]
 
 
-def compose_config(target, *, project=None, recovery=None, names=None, workflow=None, origin=None, previous_images=None, proxy_ports=None):
+def compose_config(target, *, project=None, recovery=None, names=None, workflow=None, origin=None, previous_images=None, proxy_ports=None,
+                   extra_networks=None, extra_binds=None):
     """A `docker compose config --format json` model of the previous release for a target (or a corrupted one)."""
     project = project or (recovery["project"] if recovery else target["project"])
     names = names or target["containers"]
@@ -1362,17 +1388,18 @@ def compose_config(target, *, project=None, recovery=None, names=None, workflow=
                     "volumes": [{"type": "volume", "source": "orthanc-db", "target": "/var/lib/orthanc/db"},
                                 {"type": "bind", "source": target["repository"] + "/config/orthanc.json", "target": "/etc/orthanc/orthanc.json"}]},
         "proxy": {"container_name": names["proxy"], "image": images.get("proxy"), "ports": public,
-                  "volumes": [{"type": "volume", "source": "proxy-certs", "target": "/etc/nginx/certs"}]}}
+                  "networks": {"default": None, "workflow": None, **{key: None for key in (extra_networks or {})}},
+                  "volumes": [{"type": "volume", "source": "proxy-certs", "target": "/etc/nginx/certs"}, *(extra_binds or [])]}}
     return {"name": project, "services": services,
             "volumes": {"pg-db": {"name": recovery["pg"] if recovery else project + "_pg-db"},
                         "orthanc-db": {"name": recovery["orthanc"] if recovery else project + "_orthanc-db"},
                         "proxy-certs": {"name": target["project"] + "_proxy-certs"}},
-            "networks": {"default": {"name": project + "_default"}, "workflow": {"name": workflow or target["networks"]["workflow"]}}}
+            "networks": {"default": {"name": project + "_default"}, "workflow": {"name": workflow or target["networks"]["workflow"]},
+                         **{key: {"name": name, "external": True} for key, name in (extra_networks or {}).items()}}}
 
 
-class HostBoundaryTests(unittest.TestCase):
-    """HostOps against the fixed-binary boundary: IRT-03 seed allowlist, IRT-05 persisted recovery, IRT-06 previous-version
-    smoke, IRT-10 command records."""
+class HostHarness:
+    """HostOps against FakeDocker in a temporary rehearsal checkout with its seed copy and records."""
 
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
@@ -1413,6 +1440,8 @@ class HostBoundaryTests(unittest.TestCase):
         docker = FakeDocker(self.target, plan)
         docker.config["pinned"] = compose_config(self.target, previous_images=plan["previous"]["images"])
         docker.config["plain"] = compose_config(self.target)
+        # The clone's certificate volume, filled before the seed (the read-only certificate check passes).
+        docker.volumes[self.target["project"] + "_proxy-certs"] = {"Name": self.target["project"] + "_proxy-certs"}
         ops_host = intro.HostOps(target=self.target, plan=plan, runner=docker, records=self.records,
                                  token_reader=(lambda: token) if token else None)
         return ops_host, docker, SimpleNamespace(plan=plan, plan_sha256="a" * 64, state={"checkout": "previous"}, records=self.records,
@@ -1421,6 +1450,11 @@ class HostBoundaryTests(unittest.TestCase):
     def seed_check(self, ops_host, context):
         with patch.object(ops, "validate_held", return_value=(self.seed, {"shape": "pre"}, "8" * 64)):
             return ops_host.seed_check(context)
+
+
+class HostBoundaryTests(HostHarness, unittest.TestCase):
+    """HostOps against the fixed-binary boundary: IRT-03 seed allowlist, IRT-05 persisted recovery, IRT-06 previous-version
+    smoke, IRT-10 command records."""
 
     def test_65_seed_refuses_every_wrong_target_before_any_docker_change(self):
         """IRT-03: production names, the production workflow network, another origin, a reused secret or a missing
@@ -1510,7 +1544,7 @@ class HostBoundaryTests(unittest.TestCase):
                                      records=records, repository=folder, host_key="a" * 64, tool=plan["tool"], clock=Clock(), now=lambda: NOW)
         machine.run({"version": 1, "mode": intro.MODE, "phase": "capture", "plan_sha256": "a" * 64, "nonce": "4" * 32}, "4" * 64)
         (result,) = records.directory.glob("result-capture-*.json")
-        step = json.loads(result.read_text())["steps"][0]
+        step = next(item for item in json.loads(result.read_text())["steps"] if item["step"] == "L-01")
         entries = [json.loads(line) for line in (records.directory / step["commands"]["file"]).read_text().splitlines()]
         linked = [entry for entry in entries if step["commands"]["first"] <= entry["seq"] <= step["commands"]["last"]]
         self.assertEqual([(entry["step"], entry["part"], entry["argv"][:2]) for entry in linked],
@@ -1636,6 +1670,437 @@ class HostBoundaryTests(unittest.TestCase):
             answers[path] = original
         with self.assertRaises(intro.Stop):
             intro.smoke("https://x.invalid", token=None, frame=frame, worklist_uid=FRAME_STUDY)
+
+
+HALO_OVERLAY = (b"services:\n  proxy:\n    networks:\n      halo_reports: {}\n    volumes:\n"
+                b"      - /srv/halo-reports/nginx/report.conf:/etc/nginx/conf.d/halo-report.conf:ro\n\n"
+                b"networks:\n  halo_reports:\n    external: true\n    name: halo_reports_private\n")
+FAKE_BROWSER = r"""
+import base64, json, os, sys, time
+spec = json.loads(sys.stdin.read())
+# A browser that leaves its profile (with the member's session cookie) behind; the redirect is the unresolvable callback.
+assert spec["redirect_uri"].startswith("https://kin-smoke-callback.invalid/"), spec["redirect_uri"]
+os.makedirs(spec["profile_dir"])
+with open(os.path.join(spec["profile_dir"], "Cookies"), "w") as handle:
+    handle.write("KEYCLOAK_SESSION=synthetic")
+claims = {"sub": spec["username"].replace("kin-smoke-", "id-"), "iat": int(time.time())}
+body = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+print("KIN_RESULT " + json.dumps({"flow": "authorization_code+S256", "browser": "fake", "access_token": "e30." + body + ".sig",
+                                  "refresh_token": "refresh-" + spec["client_id"], "subject": claims["sub"]}))
+"""
+
+
+class CommanderAdditionsTests(HostHarness, unittest.TestCase):
+    """IRT-11 declared overlay and networks, IRT-12 environment from the running stack, IRT-14 unattended smoke."""
+
+    def production_host(self, *, declared=True):
+        """A production-kind target whose host carries a modified docker-compose.prod.yml (the Halo Reports wiring) and
+        declares its equivalent overlay; FakeDocker renders a model from the given files the way Compose merges them."""
+        self.head = b"services:\n  proxy:\n    networks:\n      default: {}\n      workflow: {}\n"
+        self.modified = self.head.replace(b"      workflow: {}\n", b"      workflow: {}\n      halo_reports: {}\n") + b"# + halo bind\n"
+        (self.repo / "docker-compose.prod.yml").write_bytes(self.modified)
+        (self.repo / "docker-compose.monitor.yml").write_text("services: {}\n")
+        # The overlay lives outside the checkout (D1066), e.g. /etc/kin-deploy/overlays/, with the host file it binds.
+        self.overlays = self.root / "kin-deploy" / "overlays"
+        self.overlays.mkdir(parents=True)
+        self.overlay = self.overlays / "docker-compose.halo-reports.yml"
+        self.overlay.write_bytes(HALO_OVERLAY)
+        self.report_conf = self.root / "halo-reports" / "nginx" / "report.conf"
+        self.report_conf.parent.mkdir(parents=True)
+        self.report_conf.write_text("# synthetic Halo Reports stand-in\n")
+        overlay_text = HALO_OVERLAY.replace(b"/srv/halo-reports/nginx/report.conf", str(self.report_conf).replace("\\", "/").encode())
+        self.overlay.write_bytes(overlay_text)
+        target = target_fixture("production", str(self.repo))
+        target["compose_files"] = ["docker-compose.yml", "docker-compose.prod.yml", str(self.overlay), "docker-compose.monitor.yml"]
+        target["external_networks"] = {"proxy": {"halo_reports": "halo_reports_private"}} if declared else {}
+        self.halo_bind = {"source": str(self.report_conf), "target": "/etc/nginx/conf.d/halo-report.conf", "read_only": True}
+        target["declared_overlays"] = [{"file": str(self.overlay), "sha256": intro.sha256_bytes(overlay_text), "service": "proxy",
+                                        "binds": [dict(self.halo_bind)]}]
+        target["tracked_overlay_reconcile"] = [{"path": "docker-compose.prod.yml", "expected_sha256_before": intro.sha256_bytes(self.modified),
+                                                "override_file": str(self.overlay), "override_sha256": intro.sha256_bytes(overlay_text)}]
+        intro.target_valid(target)
+        self.target = target
+        plan = plan_fixture(target)
+        docker = FakeDocker(target, plan)
+        docker.blobs["HEAD:docker-compose.prod.yml"] = self.head
+
+        def restored(path):
+            (self.repo / path).write_bytes(self.head)
+        docker.on_checkout = restored
+        self.equivalent = True
+
+        def config_for(args, env):
+            files = [args[index + 1] for index, item in enumerate(args) if item == "-f"]
+            names = {Path(item).name for item in files}
+            prod = Path(next(item for item in files if Path(item).name in ("docker-compose.prod.yml", "head-docker-compose.prod.yml"))).read_bytes()
+            halo = b"halo_reports" in prod or ("docker-compose.halo-reports.yml" in names and self.equivalent)
+            return compose_config(target, previous_images=plan["previous"]["images"],
+                                  extra_networks={"halo_reports": "halo_reports_private"} if halo else None,
+                                  extra_binds=[{"type": "bind", **self.halo_bind}] if halo else None)
+        docker.config_for = config_for
+        ops_host = intro.HostOps(target=target, plan=plan, runner=docker, records=self.records)
+        context = SimpleNamespace(plan=plan, plan_sha256="a" * 64, state={"checkout": "previous"}, records=self.records, save=lambda: None,
+                                  request_sha256="9" * 64)
+        return ops_host, docker, context
+
+    def test_76_a_declared_overlay_replaces_the_modified_file_only_when_the_configuration_is_identical(self):
+        """IRT-11: current files, committed file + overlay, and the declared list after the restore must render the same
+        model; otherwise nothing changes."""
+        ops_host, docker, context = self.production_host()
+        done = ops_host.reconcile_checkout(context)["reconciled"][0]
+        self.assertEqual(done["state"], "restored to the commit")
+        self.assertEqual(len(set(done["config_sha256"].values())), 1)
+        self.assertEqual((self.repo / "docker-compose.prod.yml").read_bytes(), self.head)
+        self.assertEqual(docker.checkouts, ["docker-compose.prod.yml"])
+        self.assertEqual(ops_host.reconcile_checkout(context)["reconciled"][0]["state"], "already the commit")
+        cases = {"the overlay renders another configuration": lambda: setattr(self, "equivalent", False),
+                 "the overlay's bytes differ": lambda: self.overlay.write_bytes(HALO_OVERLAY + b"# other\n"),
+                 "the modified file is not the declared one": lambda: (self.repo / "docker-compose.prod.yml").write_bytes(self.modified + b"#\n")}
+        for name, change in cases.items():
+            self.setUp()
+            ops_host, docker, context = self.production_host()
+            change()
+            before = (self.repo / "docker-compose.prod.yml").read_bytes()
+            with self.subTest(case=name), self.assertRaises(intro.Stop):
+                ops_host.reconcile_checkout(context)
+            self.assertEqual((self.repo / "docker-compose.prod.yml").read_bytes(), before)
+            self.assertEqual(docker.checkouts, [], "nothing is restored when the overlay is not equivalent")
+
+    def test_77_only_declared_external_networks_are_accepted(self):
+        """IRT-11: the proxy network check is {default, workflow} plus the manifest's declared networks."""
+        self.production_host()
+        target = self.target
+        images = plan_fixture(target)["previous"]["images"]
+        model = resolved_model(target, target_checkout=False, maintenance=False, images=images)
+        intro.check_resolved(model, target, target_checkout=False, maintenance=False, images=images)
+        undeclared = copy.deepcopy(target)
+        undeclared["external_networks"] = {}
+        with self.assertRaisesRegex(intro.Stop, "undeclared network"):
+            intro.check_resolved(model, undeclared, target_checkout=False, maintenance=False, images=images)
+        missing = copy.deepcopy(model)
+        missing["service_networks"]["proxy"] = ["default", "workflow"]
+        with self.assertRaisesRegex(intro.Stop, "service networks"):
+            intro.check_resolved(missing, target, target_checkout=False, maintenance=False, images=images)
+        elsewhere = copy.deepcopy(model)
+        elsewhere["service_networks"]["api"] = ["default", "halo_reports"]
+        with self.assertRaisesRegex(intro.Stop, "service networks"):
+            intro.check_resolved(elsewhere, target, target_checkout=False, maintenance=False, images=images)
+        for change in (lambda t: t["compose_files"].append("/srv/extra/docker-compose.other.yml"),
+                       lambda t: t.__setitem__("compose_files", [t["compose_files"][0], t["compose_files"][2], t["compose_files"][1], t["compose_files"][3]]),
+                       lambda t: t["external_networks"].__setitem__("proxy", {"workflow": "x"})):
+            bad = copy.deepcopy(target)
+            change(bad)
+            with self.assertRaises(intro.Stop):
+                intro.target_valid(bad)
+
+    def test_78_compose_variables_come_from_the_running_stack(self):
+        """IRT-12: a variable the compose files require and the .env lacks takes the value the running container carries
+        (here a bind source), recorded as name, hash and place only; an unresolvable one refuses."""
+        (self.repo / "docker-compose.prod.yml").write_text("services:\n  proxy:\n    volumes:\n      - type: bind\n"
+                                                            "        source: ${KIN_MONITOR_PUBLIC_DIR:?Set it}\n"
+                                                            "        target: /var/run/kin-monitor-public\n"
+                                                            "  api:\n    environment:\n      X: ${OPTIONAL_THING:-fallback}\n")
+        ops_host, docker, context = self.host()
+        value = "/home/ubuntu/.kin-monitor-public"
+
+        def config_for(args, env):
+            model = compose_config(self.target)
+            source = env.get("KIN_MONITOR_PUBLIC_DIR")
+            if source:
+                model["services"]["proxy"]["volumes"].append({"type": "bind", "source": source, "target": "/var/run/kin-monitor-public"})
+            return model
+        docker.config_for = config_for
+        docker.containers[self.target["containers"]["proxy"]] = {"Image": image("2"), "State": {"Running": False}, "Config": {"Env": []},
+                                                                 "Mounts": [{"Destination": "/var/run/kin-monitor-public", "Source": value}]}
+        result = ops_host.prepare(context)
+        entry = result["resolved_from_running_stack"]["KIN_MONITOR_PUBLIC_DIR"]
+        self.assertEqual((entry["sha256"], entry["from"]), (intro.sha256_bytes(value.encode()), ["mount:proxy"]))
+        self.assertNotIn("OPTIONAL_THING", result["resolved_from_running_stack"], "a defaulted variable is not required")
+        self.assertEqual(context.state["compose_env"]["KIN_MONITOR_PUBLIC_DIR"]["sha256"], entry["sha256"])
+        ops_host.compose(["ps"], mutating=False)
+        self.assertEqual(docker.calls[-1][:2], ["docker", "compose"])
+        for path in self.records.directory.rglob("*"):
+            if path.is_file():
+                self.assertNotIn(value.encode(), path.read_bytes(), path.name)
+        # The value a later phase finds must be the same one.
+        docker.containers[self.target["containers"]["proxy"]]["Mounts"][0]["Source"] = "/tmp/elsewhere"
+        refuses(self, ops_host.prepare, context, message="changed")
+        # No container carries it: a refusal.
+        docker.containers.pop(self.target["containers"]["proxy"])
+        context.state.pop("compose_env")
+        refuses(self, ops_host.prepare, context, message="Unresolvable compose variable: KIN_MONITOR_PUBLIC_DIR")
+        self.assertEqual(intro.referenced_variables([b"a: ${A}\nb: ${B:-x}\nc: $C\nd: $${D}\n# e: ${E}\nf: ${F:?m}\n"]),
+                         {"A": True, "B": False, "C": True, "F": True})
+
+    def unattended_host(self):
+        ops_host, docker, context = self.host()
+        ops_host.browser_cmd = [sys.executable, "-c", FAKE_BROWSER]
+        context.request_sha256 = "c" * 64
+        context.state.update(imported_at=(datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat())
+
+        def run_output(args):
+            operation = args[args.index("-e") + 3] if "-e" in args else ""
+            name = args[args.index("--name") + 1]
+            if "kc-smoke-create-member" in name:
+                payload = json.loads(args[-1])
+                return ("KIN_RESULT " + json.dumps({"id": payload["username"].replace("kin-smoke-", "id-"), "username": payload["username"]}) + "\n").encode()
+            if "kc-smoke-create-client" in name:
+                return b'KIN_RESULT {"id": "client-id", "client_id": "c"}\n'
+            if "kc-smoke-remove" in name:
+                return b'KIN_RESULT {"user_absent": true, "client_absent": true}\n'
+            return b"KIN_RESULT {}\n" if operation is not None else b""
+        docker.run_output = run_output
+        docker.psql[intro.SMOKE_MEMBERS_SQL[:40]] = "0"
+        return ops_host, docker, context
+
+    def test_79_the_unattended_smoke_writes_the_operator_record_and_removes_its_member(self):
+        """IRT-14 (D1062): the member exists before the import, the browser login is that member's, the eight checks
+        are the executor's record, and the member is gone before anything reopens."""
+        ops_host, docker, context = self.unattended_host()
+        member = ops_host.create_smoke_member(context, "release")
+        credentials = self.records.directory / member["credentials"]
+        password = json.loads(credentials.read_text())["password"]
+        if os.name == "posix":
+            self.assertEqual(credentials.stat().st_mode & 0o777, 0o600)
+        full = {"health": True, "auth_refusal": True, "member": True, "worklist": True, "frame": True}
+
+        def https(origin, path, *, token=None, **kwargs):
+            if path == "/api/me":
+                return 401, "application/json", b"{}"
+            return 200, "application/json", b"[]"
+        with patch.object(intro, "smoke", return_value=full), patch.object(intro, "worklist_row", return_value={"uid": FRAME_STUDY, "modality": "CT"}), \
+                patch.object(intro, "https_get", side_effect=https), patch.object(intro, "https_post", return_value=(204, b"")):
+            result = ops_host.unattended_release_smoke(context, ("127.0.0.1", 19444))
+        record = json.loads((self.records.directory / "operator-smoke.json").read_text())
+        intro.operator_smoke_valid(record, context.plan_sha256)
+        self.assertEqual((record["by"], set(record["checks"])), ("Opus executor (D1062)", set(intro.OPERATOR_SMOKE_CHECKS)))
+        self.assertTrue(all(record["checks"].values()) and result["record_sha256"] == context.state["operator_smoke"]["sha256"])
+        self.assertEqual(list(self.records.directory.glob("browser-profile-*")), [], "the browser profile is removed after the login")
+        ops_host.remove_smoke_member(context)
+        self.assertIsNotNone(context.state["smoke_member"]["deleted_at"])
+        for path in self.records.directory.rglob("*"):
+            if path.is_file() and path != credentials:
+                self.assertNotIn(password.encode(), path.read_bytes(), path.name)
+        # The browser's spec carried the password on stdin only; the command record keeps its hash.
+        entries = [json.loads(line) for line in (self.records.directory / self.records.commands_file).read_text().splitlines()]
+        self.assertTrue(any(entry["argv"][:1] == [sys.executable] and "input" in entry for entry in entries))
+
+    def test_80_the_unattended_smoke_refuses_anything_short_of_the_members_own_fresh_login(self):
+        ops_host, docker, context = self.unattended_host()
+        ops_host.create_smoke_member(context, "release")
+        full = {"health": True, "auth_refusal": True, "member": True, "worklist": True, "frame": True}
+        good = lambda origin, path, *, token=None, **kwargs: (401, "", b"{}") if path == "/api/me" else (200, "", b"[]")
+        cases = {"another subject": ([sys.executable, "-c", FAKE_BROWSER.replace('replace("kin-smoke-", "id-")', 'replace("kin-smoke-", "other-")')], good, {}),
+                 "a login before the import": (None, good, {"imported_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()}),
+                 "the old token still accepted": (None, lambda origin, path, *, token=None, **kwargs: (200, "", b"[]"), {}),
+                 "a W2 check failing": (None, lambda origin, path, *, token=None, **kwargs: (401, "", b"{}") if path == "/api/me" else (404, "", b""), {})}
+        refused = intro.HostOps.old_token_refused
+        for name, (browser, https, state) in cases.items():
+            if browser:
+                ops_host.browser_cmd = browser
+            context.state.update(state)
+            context.state.pop("operator_smoke", None)
+            with self.subTest(case=name), patch.object(intro, "smoke", return_value=full), \
+                    patch.object(intro, "worklist_row", return_value={"uid": FRAME_STUDY, "modality": "CT"}), \
+                    patch.object(intro, "https_get", side_effect=https), patch.object(intro, "https_post", return_value=(204, b"")), \
+                    patch.object(intro.HostOps, "old_token_refused", lambda self, token, *, connect, seconds=20: refused(self, token, connect=connect, seconds=0)):
+                with self.assertRaises(intro.Stop):
+                    ops_host.unattended_release_smoke(context, ("127.0.0.1", 19444))
+                self.assertNotIn("operator_smoke", context.state)
+            ops_host.browser_cmd = [sys.executable, "-c", FAKE_BROWSER]
+            context.state["imported_at"] = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+
+    def test_81_nothing_reopens_while_a_smoke_member_exists(self):
+        """IRT-14: the reopen refuses when the smoke member was not removed (state) or any smoke member is in the realm."""
+        ops_host, docker, context = self.unattended_host()
+        docker.psql[intro.SMOKE_MEMBERS_SQL[:40]] = "1"
+        refuses(self, ops_host.remove_smoke_member_now, context, message="still exists")
+        context.state["recovery"] = {"persisted": True}
+        context.state["rollback_smoke"] = {"member": True}
+        refuses(self, ops_host.reopen_previous_ingress, context, message="still exists")
+        self.assertEqual(docker.mutating(), [])
+
+    def test_85_a_declared_overlay_lives_outside_the_checkout_and_is_in_effect_exactly_as_declared(self):
+        """IRT-11 (D1066): the overlay file is outside the checkout, pinned by hash and listed after any rehearsal
+        override; its binds are the only host paths a rehearsal may bind outside its checkout, and they must be in the
+        resolved model exactly (source, target, read-only); its file and bind sources are checked and recorded."""
+        ops_host, docker, context = self.production_host()
+        target = self.target
+        images = plan_fixture(target)["previous"]["images"]
+        model = resolved_model(target, target_checkout=False, maintenance=False, images=images)
+        intro.check_resolved(model, target, target_checkout=False, maintenance=False, images=images)
+        for name, change in {
+                "the overlay inside the checkout": lambda t: (t["declared_overlays"][0].__setitem__("file", str(self.repo / "halo.yml")),
+                                                              t["compose_files"].__setitem__(2, str(self.repo / "halo.yml")),
+                                                              t["tracked_overlay_reconcile"][0].__setitem__("override_file", str(self.repo / "halo.yml"))),
+                "a listed absolute file that is not declared": lambda t: t["compose_files"].append("/etc/kin-deploy/overlays/other.yml"),
+                "a declared overlay that is not listed": lambda t: t["compose_files"].remove(str(self.overlay)),
+                "the reconcile hash differs from the declaration": lambda t: t["tracked_overlay_reconcile"][0].__setitem__("override_sha256", "0" * 64),
+                "a relative bind source": lambda t: t["declared_overlays"][0]["binds"][0].__setitem__("source", "nginx/report.conf")}.items():
+            bad = copy.deepcopy(target)
+            change(bad)
+            with self.subTest(case=name), self.assertRaises(intro.Stop):
+                intro.target_valid(bad)
+        # The shape: an overlay merged too early loses its bind (Compose's `volumes: !override` of a later file).
+        for name, change in {"bind missing": lambda m: m["mounts"]["proxy"].pop(),
+                             "bind writable": lambda m: m["mounts"]["proxy"][-1].__setitem__("read_only", False),
+                             "bind elsewhere": lambda m: m["mounts"]["proxy"][-1].__setitem__("target", "/etc/nginx/conf.d/other.conf")}.items():
+            bad = copy.deepcopy(model)
+            change(bad)
+            with self.subTest(case=name):
+                refuses(self, lambda: intro.check_resolved(bad, target, target_checkout=False, maintenance=False, images=images),
+                        message="declared overlay bind is missing")
+        # A rehearsal: the override first, then the overlay; only the declared bind may leave the checkout.
+        rehearsal = target_fixture("rehearsal", str(self.repo))
+        rehearsal.update(compose_files=["docker-compose.yml", "docker-compose.prod.yml", str(self.override), str(self.overlay)],
+                         external_networks=copy.deepcopy(target["external_networks"]), declared_overlays=copy.deepcopy(target["declared_overlays"]))
+        intro.target_valid(rehearsal)
+        early = copy.deepcopy(rehearsal)
+        early["compose_files"] = ["docker-compose.yml", "docker-compose.prod.yml", str(self.overlay), str(self.override)]
+        refuses(self, intro.target_valid, early, message="after the rehearsal override")
+        clone_model = resolved_model(rehearsal, target_checkout=False, maintenance=False)
+        check = lambda model: intro.check_resolved(model, rehearsal, target_checkout=False, maintenance=False)
+        check(clone_model)
+        undeclared = copy.deepcopy(clone_model)
+        undeclared["mounts"]["proxy"].append({"type": "bind", "source": str(self.root / "elsewhere.conf"), "target": "/etc/nginx/conf.d/x.conf",
+                                              "read_only": True})
+        refuses(self, check, undeclared, message="outside its checkout")
+        elsewhere = copy.deepcopy(clone_model)
+        elsewhere["mounts"]["api"].append(dict(elsewhere["mounts"]["proxy"][-1]))
+        refuses(self, check, elsewhere, message="outside its checkout")
+        # The host files: the overlay's bytes, its bind source, both recorded (hash; mode and owner on POSIX).
+        facts = ops_host.declared_overlay_facts()
+        self.assertEqual((facts[0]["sha256"], facts[0]["binds"][0]["sha256"], facts[0]["binds"][0]["kind"]),
+                         (target["declared_overlays"][0]["sha256"], intro.sha256_bytes(self.report_conf.read_bytes()), "file"))
+        self.report_conf.unlink()
+        refuses(self, ops_host.declared_overlay_facts, message="bind source is missing")
+        self.report_conf.write_text("# synthetic Halo Reports stand-in\n")
+        if os.name == "posix":
+            self.overlay.chmod(0o666)
+            refuses(self, ops_host.declared_overlay_facts, message="writable by others")
+            self.overlay.chmod(0o644)
+            self.overlays.chmod(0o777)
+            refuses(self, ops_host.declared_overlay_facts, message="writable by others")
+            self.overlays.chmod(0o755)
+        self.overlay.write_bytes(self.overlay.read_bytes() + b"# changed\n")
+        refuses(self, ops_host.declared_overlay_facts, message="differs from the manifest")
+
+    @unittest.skipUnless(shutil.which("docker"), "needs the docker CLI (`docker compose config` only: no container, no daemon change)")
+    def test_86_compose_itself_drops_an_overlay_merged_before_the_rehearsal_override(self):
+        """IRT-11 (D1066): the product's compose files, the generated rehearsal override (`volumes: !override` on the
+        proxy) and the overlay, rendered by Compose: after the override the overlay's bind and network are in the model and
+        the check passes; before it, Compose drops the bind and the check refuses."""
+        source = Path(__file__).resolve().parents[1]
+        for name in ("docker-compose.yml", "docker-compose.prod.yml"):
+            (self.repo / name).write_bytes((source / name).read_bytes())
+        conf = self.root / "halo-reports" / "report.conf"
+        conf.parent.mkdir()
+        conf.write_text("# synthetic Halo Reports stand-in\n")
+        overlay = self.root / "overlays" / "docker-compose.halo-reports.yml"
+        overlay.parent.mkdir()
+        overlay.write_text("services:\n  proxy:\n    networks:\n      halo_reports: {}\n    volumes:\n      - type: bind\n        source: "
+                           + json.dumps(str(conf)) + "\n        target: /etc/nginx/conf.d/halo-report.conf\n        read_only: true\n\n"
+                           "networks:\n  halo_reports:\n    external: true\n    name: halo_reports_private\n", newline="\n")
+        target = target_fixture("rehearsal", str(self.repo))
+        self.override.write_text(intro.rehearsal_override(target, target["origin"]), newline="\n")
+        target.update(external_networks={"proxy": {"halo_reports": "halo_reports_private"}},
+                      declared_overlays=[{"file": str(overlay), "sha256": intro.sha256_bytes(overlay.read_bytes()), "service": "proxy",
+                                          "binds": [{"source": str(conf), "target": "/etc/nginx/conf.d/halo-report.conf", "read_only": True}]}])
+        texts = [path.read_bytes() for path in (self.repo / "docker-compose.yml", self.repo / "docker-compose.prod.yml", self.override, overlay)]
+        required = sorted(name for name, needed in intro.referenced_variables(texts).items() if needed)
+        self.write_env("".join(name + "=synthetic-placeholder\n" for name in required) + "PUBLIC_ORIGIN=" + target["origin"] + "\n")
+        plan = plan_fixture(target, "rehearsal")
+        outcomes = {}
+        for order, files in (("after", [str(self.override), str(overlay)]), ("before", [str(overlay), str(self.override)])):
+            target["compose_files"] = ["docker-compose.yml", "docker-compose.prod.yml", *files]
+            ops_host = intro.HostOps(target=target, plan=plan, runner=intro.Runner(self.repo), records=self.records)
+            model = ops_host.resolved(SimpleNamespace(plan=plan, state={"checkout": "target"}), maintenance=True)
+            self.assertIn("halo_reports", model["service_networks"]["proxy"])
+            try:
+                intro.check_resolved(model, target, target_checkout=True, maintenance=True, images=plan["release"]["images"])
+                outcomes[order] = "accepted"
+            except intro.Stop as error:
+                outcomes[order] = str(error)
+        self.assertEqual(outcomes["after"], "accepted")
+        self.assertIn("declared overlay bind is missing", outcomes["before"])
+
+    def test_87_the_seed_refuses_a_clone_certificate_volume_that_is_absent_or_empty(self):
+        """D1066: the clone's certificate volume must hold the clone's certificate before the proxy first starts; the
+        seed check refuses an absent volume (never creating it) or a failed read-only certificate check, with no change."""
+        ops_host, docker, context = self.host()
+        result = self.seed_check(ops_host, context)
+        self.assertEqual(result["certificate"]["volume"], self.target["project"] + "_proxy-certs")
+        check = [call for call in docker.calls if call[:2] == ["docker", "run"]]
+        self.assertEqual(len(check), 1)
+        self.assertTrue({"--read-only", "none"} <= set(check[0]) and any(item.endswith("target=/certs,readonly") for item in check[0]))
+        self.assertEqual(docker.mutating(), [])
+        for name, change in {"absent": lambda d: d.volumes.pop(self.target["project"] + "_proxy-certs"),
+                             "empty or not this origin's": lambda d: setattr(d, "failing", lambda args: args[:2] == ["docker", "run"])}.items():
+            ops_host, docker, context = self.host()
+            change(docker)
+            with self.subTest(case=name):
+                refuses(self, self.seed_check, ops_host, context, message="certificate volume")
+                self.assertEqual(docker.mutating(), [])
+                if name == "absent":
+                    self.assertFalse(any(call[:2] == ["docker", "run"] for call in docker.calls), "the check never creates the volume")
+
+    def test_88_the_browser_trusts_exactly_the_verified_leaf_key(self):
+        """IRT-14 (D1066): the pin is base64(sha256(SPKI)) as openssl computes it (known answer); a malformed certificate
+        is refused; the browser spec is refused before any browser starts unless its profile folder is new and the redirect
+        is the unresolvable callback."""
+        der = base64.b64decode("".join(KAT_CERTIFICATE.strip().splitlines()[1:-1]))
+        self.assertEqual(intro.spki_pin(der), KAT_PIN)
+        for broken in (der[:-1], b"\x30\x03\x02\x01\x01", der[:40]):
+            with self.assertRaises(intro.Stop):
+                intro.spki_pin(broken)
+        spec = {"origin": "https://localhost:19443", "connect": ["127.0.0.1", 19444], "ca_file": None, "username": "kin-smoke-x",
+                "password": "p", "client_id": "c", "redirect_uri": "https://kin-smoke-callback.invalid/kin-smoke-x",
+                "profile_dir": str(self.root / "profile")}
+        (self.root / "used").mkdir()
+        for name, change in {"an existing profile": {"profile_dir": str(self.root / "used")},
+                             "a relative profile": {"profile_dir": "profile"},
+                             "a redirect that resolves": {"redirect_uri": "https://localhost:19443/kin-smoke-callback"},
+                             "a non-loopback ingress": {"connect": ["10.0.0.1", 443]}}.items():
+            with self.subTest(case=name), patch.object(intro, "verified_pin", side_effect=AssertionError("no network before the checks")):
+                refuses(self, intro.browser_smoke, {**spec, **change})
+
+
+KAT_CERTIFICATE = """-----BEGIN CERTIFICATE-----
+MIIBhDCCASmgAwIBAgIUHMwta1xp38hRm9r5BfdXB95i7a4wCgYIKoZIzj0EAwIw
+FjEUMBIGA1UEAwwLa2F0LmludmFsaWQwIBcNMjYxMDEyMTIyMDIwWhgPMjEyNjA5
+MTgxMjIwMjBaMBYxFDASBgNVBAMMC2thdC5pbnZhbGlkMFkwEwYHKoZIzj0CAQYI
+KoZIzj0DAQcDQgAEkJyl0hyQrt2oSAhUJD/FXfzVfrLDqPb+mMuVLZQFzZe4xU0h
+JzwfiQo4JkdUHG0b3pxxWpsSFQ+1uS8Z1nxLv6NTMFEwHQYDVR0OBBYEFCarPFrg
+XZdjjSZ1IY6VyxRiSck8MB8GA1UdIwQYMBaAFCarPFrgXZdjjSZ1IY6VyxRiSck8
+MA8GA1UdEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDSQAwRgIhAKD4TkyT+K8Jb5aK
+E5fskFBtmacQj376iCIO54dOHeHkAiEAjLtoXmWWTS74kOyTgpxzpgEQBrGmmzV/
+6AR2cyf1IN8=
+-----END CERTIFICATE-----"""
+# openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | openssl base64
+KAT_PIN = "PyJTCx3uWmj6EtrTxESiV8YPH/rzxpVd9q3uZb1lR8k="
+
+
+class UnattendedReopenTests(MachineHarness, unittest.TestCase):
+    """IRT-14 at the phase entry: an unattended reopen needs the record verify wrote and a removed smoke member."""
+
+    def test_82_unattended_reopen_requires_the_executor_record_and_no_smoke_member(self):
+        self.deploy_through("verify")
+        self.ops.unattended = True
+        state = self.records.state()
+        refuses(self, self.run_phase, "reopen", {}, message="Operator smoke record required")
+        record = {"schema": 1, "kind": "operator-smoke", "plan_sha256": self.plan_sha256, "checks": {name: True for name in intro.OPERATOR_SMOKE_CHECKS},
+                  "passed": True, "by": intro.SMOKE_BY, "at": NOW.isoformat()}
+        digest = self.records.put("operator-smoke.json", record)
+        state = self.records.state()
+        state.update(operator_smoke={"file": "operator-smoke.json", "sha256": digest},
+                     smoke_member={"username": "kin-smoke-x", "deleted_at": None})
+        self.records.save(state)
+        calls = list(self.ops.calls)
+        refuses(self, self.run_phase, "reopen", {}, message="The smoke member still exists")
+        self.assertEqual(self.ops.calls, calls)
+        state["smoke_member"]["deleted_at"] = NOW.isoformat()
+        self.records.save(state)
+        self.assertEqual(self.run_phase("reopen", {})["status"], "DEPLOYED")
 
 
 class HelperTests(unittest.TestCase):
@@ -1808,8 +2273,12 @@ class ProtectedHostTests(unittest.TestCase):
         host = intro.IntroductionHost(self.policy_path)
         self.assertEqual(host.owner, owner)
         self.repo.chmod(0o770)
+        # The checkout's own mode is judged per request (IRT-13: only a declared capture correction may meet it open).
+        host = intro.IntroductionHost(self.policy_path)
+        raw = self.request()
+        self.approve(raw)
         with self.assertRaisesRegex(intro.Stop, "writable by others"):
-            intro.IntroductionHost(self.policy_path)
+            host.execute(raw)
         self.repo.chmod(0o700)
         os.chown(self.repo, 1001, 1001)
         with self.assertRaisesRegex(intro.Stop, "another owner"):
@@ -1841,7 +2310,7 @@ class ProtectedHostTests(unittest.TestCase):
         self.assertEqual((info.st_uid, info.st_gid, info.st_mode & 0o777), (1000, 1000, 0o600))
         intro.owned_private(repo / ".env", owner, private=True)
 
-    def installed_run(self, *, prepare=None):
+    def installed_run(self, *, prepare=None, target_changes=None):
         """A real IntroductionHost.execute of a capture request on the protected install: policy, documents, approval,
         one-use marker, HostRecords and the state machine are the product's; only the fixed binaries answer from
         FakeDocker. The plan's window is now, so L-04a (the fence's crontab write, made to fail) is the first refusal."""
@@ -1852,8 +2321,9 @@ class ProtectedHostTests(unittest.TestCase):
         (repo / ".env").write_text("POSTGRES_PASSWORD=installer-placeholder-0001\n")
         (repo / ".env").chmod(0o600)
         backups = self.root / "backups"
-        backups.mkdir(mode=0o700)
+        backups.mkdir(mode=0o700, exist_ok=True)
         target = target_fixture(repository=str(repo))
+        target.update(target_changes or {})
         self.document("emr-targets", target)
         plan = plan_fixture(target)
         now = datetime.now(timezone.utc)
@@ -1918,6 +2388,28 @@ class ProtectedHostTests(unittest.TestCase):
                 shutil.rmtree(runs)
                 self.setUp()
                 elsewhere.mkdir(mode=0o700, exist_ok=True)
+
+    def test_83_a_declared_checkout_mode_correction_is_applied_recorded_and_then_checked(self):
+        """IRT-13: an open checkout (0775, .git 0775) passes only with fix_checkout_mode: the capture's L-00a makes it 0700
+        and its .git 0755 (no recursion), records both modes, and the privacy check then runs as usual."""
+        (self.repo / "inner").mkdir(mode=0o775)
+        self.repo.chmod(0o775)
+        (self.repo / ".git").chmod(0o775)
+        (self.repo / "inner").chmod(0o775)
+        result, runs, docker = self.installed_run(target_changes={"fix_checkout_mode": True})
+        first = json.loads(next(runs.glob("result-capture-*.json")).read_text())["steps"][0]
+        self.assertEqual((first["step"], first["outcome"]), ("L-00a", "PASS"))
+        self.assertEqual(first["detail"], {"fixed": True, "before": {"checkout": "0o775", ".git": "0o775"},
+                                           "after": {"checkout": "0o700", ".git": "0o755"}})
+        self.assertEqual(((self.repo.stat().st_mode & 0o777), ((self.repo / "inner").stat().st_mode & 0o777)), (0o700, 0o775))
+        self.assertEqual(result["status"], "CAPTURE_FAILED", "the run went on past L-00a (to the fence made to fail)")
+
+    def test_84_an_open_checkout_without_the_declaration_is_refused_before_any_step(self):
+        self.repo.chmod(0o775)
+        with self.assertRaises(RuntimeError):
+            self.installed_run()
+        self.assertEqual((self.repo.stat().st_mode & 0o777), 0o775)
+        self.assertFalse(any((self.state / "emr-runs").iterdir()))
 
     def test_74_two_approved_host_entries_never_act_together(self):
         """IRT-04 through the installed entry: of two distinct approved introduce requests, one acts, the other is refused."""

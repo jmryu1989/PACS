@@ -399,16 +399,34 @@ class SyntheticStack:
         names = {role: self.project + "-" + role for role in (*intro.ROLES, *intro.ONE_SHOTS)}
         self.ca = self.root / "clone-ca.pem"
         self.override_path = self.root / "rehearsal-override.yml"
+        self.halo_network, declared, external, overlay = None, [], {}, []
+        if label == "clone":
+            # IRT-11 (D1066): a declared overlay outside the checkout, listed after the rehearsal override, that joins the
+            # proxy to an external network and binds one host file (a synthetic stand-in for the Halo Reports wiring).
+            self.halo_conf = self.root / "halo-reports" / "nginx" / "report.conf"
+            self.halo_conf.parent.mkdir(parents=True)
+            self.halo_conf.write_text("# synthetic Halo Reports stand-in (IRT-11)\n", encoding="utf-8", newline="\n")
+            self.halo_network = self.project + "-halo"
+            path = self.root / "kin-deploy" / "overlays" / "docker-compose.halo-reports.yml"
+            path.parent.mkdir(parents=True)
+            path.write_text("services:\n  proxy:\n    networks:\n      halo_reports: {}\n    volumes:\n      - type: bind\n        source: "
+                            + json.dumps(str(self.halo_conf)) + "\n        target: /etc/nginx/conf.d/halo-report.conf\n        read_only: true\n\n"
+                            "networks:\n  halo_reports:\n    external: true\n    name: " + self.halo_network + "\n", encoding="utf-8", newline="\n")
+            self.halo_bind = {"source": str(self.halo_conf), "target": "/etc/nginx/conf.d/halo-report.conf", "read_only": True}
+            declared = [{"file": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "service": "proxy",
+                         "binds": [dict(self.halo_bind)]}]
+            external, overlay = {"proxy": {"halo_reports": self.halo_network}}, [str(path)]
         self.target = {"schema": 1, "kind": "rehearsal", "host_key_sha256": "b" * 64, "origin": self.origin, "project": self.project,
                        "repository": str(self.repo),
-                       "compose_files": ["docker-compose.yml", "docker-compose.prod.yml", str(self.override_path)],
+                       "compose_files": ["docker-compose.yml", "docker-compose.prod.yml", str(self.override_path), *overlay],
                        "containers": names,
                        "volumes": {"pg": self.project + "_pg-db", "orthanc": self.project + "_orthanc-db",
                                    "emr_access": self.project + "_emr-access", "emr_state": self.project + "_emr-state"},
                        "networks": {"default": self.project + "_default", "workflow": self.project + "-workflow"},
                        "ports": {"maintenance": "127.0.0.1:%d:443" % self.maintenance, "public": ["127.0.0.1:%d:443" % self.public]},
                        "tls_certificate": "/etc/nginx/certs/kin.crt", "cron": None, "ca_file": str(self.ca),
-                       "keycloak_admin": "kin-clone-admin" if label == "clone" else "admin"}
+                       "keycloak_admin": "kin-clone-admin" if label == "clone" else "admin",
+                       "external_networks": external, "declared_overlays": declared, "tracked_overlay_reconcile": [], "fix_checkout_mode": False}
         intro.target_valid(self.target)
         self.override_path.write_text(intro.rehearsal_override(self.target, self.origin), encoding="utf-8", newline="\n")
         self.env = {"POSTGRES_PASSWORD": secrets.token_urlsafe(24), "KC_ADMIN_PASSWORD": secrets.token_urlsafe(24),
@@ -424,6 +442,8 @@ class SyntheticStack:
         self.previous_sha, self.target_sha = previous_sha, target_sha
         test.addCleanup(self.remove)
         test.addCleanup(self.keep_records)
+        if self.halo_network:
+            subprocess.run(["docker", "network", "create", "--label", "kin.ops.run=" + self.token, self.halo_network], check=True, capture_output=True)
 
     def keep_records(self):
         """KIN_TEST_EMR_REHEARSAL_EVIDENCE: copy this stack's run records (journal, step results, one-shot logs; synthetic
@@ -462,7 +482,7 @@ class SyntheticStack:
                             "node_uid": uid(images["release"]["api"], "node", "-u"), "node_gid": uid(images["release"]["api"], "node", "-g")},
                 # Phase P's read-only observation of the realm; a stack still being set up plans with zero members first.
                 "members": members or {"realm_members": 0, "disabled": 0, "service_accounts": 0},
-                "smoke": {"frame": frame or SYNTHETIC_FRAME},
+                "smoke": {"frame": frame or SYNTHETIC_FRAME, "member": {"roles": ["radiologist"], "group": "hallym"}},
                 "probe": {"study": "SYNTHETIC-rehearsal", "event_id": str(uuid.uuid4()), "institution": "kin-center",
                           "approved_by": "synthetic-rehearsal", "approved_at": now.isoformat()},
                 "window": {"start": (now - timedelta(hours=1)).isoformat(), "end": (now + timedelta(hours=8)).isoformat()},
@@ -476,9 +496,11 @@ class SyntheticStack:
         return plan
 
     def ops(self):
+        """The unattended smoke (D1062) with the reference headless browser of the mode (Playwright Chromium)."""
         runner = intro.Runner(self.repo)
         return runner, intro.HostOps(target=self.target, plan=self.plan_document, runner=runner, records=self.records, env_next=self.env_next,
-                                     token_reader=lambda: json.loads(self.token_file.read_text()))
+                                     token_reader=lambda: json.loads(self.token_file.read_text()),
+                                     browser_cmd=[sys.executable, intro.__file__, "browser-smoke"])
 
     def phase(self, phase, expected):
         runner, host_ops = self.ops()
@@ -510,12 +532,15 @@ class SyntheticStack:
             host_ops.api_health(member_rights=False)
         return host_ops
 
-    def certificates(self, proxy_image):
-        """The clone's own TLS certificate in its proxy volume before the first proxy start, and its CA file."""
+    def certificates(self, proxy_image, fill=True):
+        """The clone's own TLS certificate in its proxy volume before the first proxy start, and its CA file (fill=False:
+        the volume only, empty)."""
         volume = self.project + "_proxy-certs"
         subprocess.run(["docker", "volume", "create", "--label", "com.docker.compose.project=" + self.project,
                         "--label", "com.docker.compose.volume=proxy-certs", "--label", "kin.ops.run=" + self.token, volume],
                        check=True, capture_output=True)
+        if not fill:
+            return
         subprocess.run(["docker", "run", "--rm", "--network", "none", "--mount", "type=volume,source=" + volume + ",target=/certs",
                         "--entrypoint", "sh", proxy_image, "-c",
                         "openssl req -x509 -nodes -newkey rsa:2048 -days 30 -keyout /certs/kin.key -out /certs/kin.crt "
@@ -575,6 +600,8 @@ class SyntheticStack:
         for volume in volumes:
             subprocess.run(["docker", "volume", "rm", volume], capture_output=True)
         for network in (network for name in projects for network in ids("network", "com.docker.compose.project=" + name)):
+            subprocess.run(["docker", "network", "rm", network], capture_output=True)
+        for network in ids("network", "kin.ops.run=" + self.token):
             subprocess.run(["docker", "network", "rm", network], capture_output=True)
 
 
@@ -637,7 +664,22 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         clone.plan(images, seed={"b0_dir": str(copy_dir), "b0_manifest_sha256": b0["manifest_sha256"],
                                  "production_plan_sha256": intro.plan_identity(production_plan)}, members=members)
         self.assertEqual(intro.plan_core(clone.plan_document), intro.plan_core(production_plan))
-        clone.certificates(images["previous"]["proxy"])
+        # D1066: the seed's read-only certificate check refuses an absent volume (and never creates it) and an empty one;
+        # the clone's certificate goes into the volume before the first proxy start.
+        runner, host_ops = clone.ops()
+        context = SimpleNamespace(plan=clone.plan_document, state={"checkout": "previous"})
+        volume = clone.project + "_proxy-certs"
+        with intro.bound_ops(clone.repo, runner):
+            model = host_ops.resolved(context, maintenance=False)
+            with self.assertRaisesRegex(intro.Stop, "does not exist"):
+                host_ops.certificate_volume_check(context, model)
+            self.assertNotEqual(subprocess.run(["docker", "volume", "inspect", volume], capture_output=True).returncode, 0)
+            clone.certificates(images["previous"]["proxy"], fill=False)
+            with self.assertRaisesRegex(intro.Stop, "empty"):
+                host_ops.certificate_volume_check(context, model)
+            clone.certificates(images["previous"]["proxy"])
+            self.assertEqual(host_ops.certificate_volume_check(context, model)["volume"], volume)
+        print(json.dumps({"certificate_volume_check": "absent and empty refused, filled accepted"}), flush=True)
         clone.phase("seed", "SEEDED")
         self.assertEqual(clone.psql(f"SELECT \"preDoc\" FROM \"StudyState\" WHERE uid='{SYNTHETIC_STUDY}';"), "doctor@kin.kr")
         self.assertEqual(json.loads(clone.psql(LEGACY_FACTS_SQL)), legacy, "the seed keeps the further roles, owners and grants")
@@ -647,29 +689,37 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         self.assertEqual(clone.psql(f"SELECT enabled FROM user_entity WHERE username='tech' AND realm_id={realm};", "keycloak"), "t")
         self.assertEqual(clone.psql("SELECT suspended FROM \"MemberRights\" WHERE username='tech';"), "t")
         self.assertEqual(clone.psql(f"SELECT \"preDocSub\" IS NOT NULL FROM \"StudyState\" WHERE uid='{SYNTHETIC_STUDY}';"), "t")
-        login = clone.keycloak(images["release"]["api"], "client", clone.target["keycloak_admin"])
-        # auth_time and newAuthAfter have whole-second resolution: authenticate in a later second than the import.
+        # D1062 unattended: the smoke member was made before the import and imported like every member.
+        smoke = json.loads((clone.records.directory / "state.json").read_text())["smoke_member"]
+        rights = clone.psql("SELECT json_build_object('suspended', suspended, 'approved', approved, 'roles', roles, 'institution', institution) "
+                            f"FROM \"MemberRights\" WHERE username='{smoke['username']}';")
+        self.assertEqual(json.loads(rights), {"suspended": False, "approved": True, "roles": ["radiologist"], "institution": "hallym"})
+        # auth_time and newAuthAfter have whole-second resolution: the browser logs in in a later second than the import.
         time.sleep(1.1)
-        token = interactive_token(clone.origin, ("127.0.0.1", clone.maintenance), str(clone.ca), login["client_id"], "doctor", login["password"])
-        clone.token_file.write_text(json.dumps(token))
-        claims = json.loads(__import__("base64").urlsafe_b64decode(token["access_token"].split(".")[1] + "=="))
-        rights = clone.psql("SELECT json_build_object('suspended', suspended, 'approved', approved, 'newAuthAfter', "
-                            "extract(epoch from \"newAuthAfter\")) FROM \"MemberRights\" WHERE username='doctor';")
-        print(json.dumps({"token_claims": sorted(claims), "auth_time": claims.get("auth_time"), "iss": claims.get("iss"),
-                          "aud": claims.get("aud"), "doctor_rights": json.loads(rights or "null")}), flush=True)
         verified = clone.phase("verify", "VERIFIED")
         self.assertEqual(verified["probe"]["receipt"]["eventId"], clone.plan_document["probe"]["event_id"])
+        record = json.loads((clone.records.directory / "operator-smoke.json").read_text())
+        self.assertEqual((record["by"], record["passed"], sorted(record["checks"])), ("Opus executor (D1062)", True, sorted(intro.OPERATOR_SMOKE_CHECKS)))
+        self.assertTrue(all(record["checks"].values()))
+        realm_smoke = "SELECT count(*) FROM user_entity u JOIN realm r ON r.id=u.realm_id WHERE r.name='kin' AND u.username LIKE 'kin-smoke-%';"
+        self.assertEqual(clone.psql(realm_smoke, "keycloak"), "0", "the smoke member is gone before any reopen")
+
+        def halo_wired(stage):
+            """IRT-11: every proxy (re)creation used the declared file set: the overlay's bind and network are there."""
+            item = json.loads(subprocess.run(["docker", "inspect", clone.target["containers"]["proxy"]], check=True, capture_output=True).stdout)[0]
+            binds = [(m.get("Destination"), m.get("RW")) for m in item["Mounts"] if m.get("Type") == "bind"]
+            self.assertIn((clone.halo_bind["target"], False), binds, stage)
+            self.assertIn(clone.halo_network, item["NetworkSettings"]["Networks"], stage)
+        halo_wired("release proxy after verify")
         clone.phase("rollback", "RESTORED")
         state = json.loads((clone.records.directory / "state.json").read_text())
         recovery = state["recovery"]
-        # RESTORED: nothing reopened; the previous version must prove itself first with a login made after the restore.
-        refused = clone.phase("rollback_reopen", "RESTORED")
-        self.assertEqual(refused["steps"][-1]["code"], "The smoke token was issued before this rollback restored the previous version")
-        login = clone.keycloak(images["previous"]["api"], "client", clone.target["keycloak_admin"], network=recovery["project"] + "_default")
-        time.sleep(1.1)
-        clone.token_file.write_text(json.dumps(interactive_token(clone.origin, ("127.0.0.1", clone.maintenance), str(clone.ca),
-                                                                 login["client_id"], "doctor", login["password"])))
+        # RESTORED: nothing reopened; rollback_reopen makes a smoke member in the restored realm (a login necessarily
+        # after the restore), proves the previous version, deletes the member, and only then opens.
         reopened = clone.phase("rollback_reopen", "ROLLED_BACK")
+        halo_wired("previous proxy after the rollback")
+        self.assertEqual(clone.psql(realm_smoke, "keycloak"), "0")
+        self.assertTrue(json.loads((clone.records.directory / "operator-smoke-previous.json").read_text())["passed"])
         self.assertEqual([step["outcome"] for step in reopened["steps"]], ["PASS"] * len(intro.STEPS["rollback_reopen"]))
         state = json.loads((clone.records.directory / "state.json").read_text())
         self.assertEqual(state["rollback_smoke"]["frame_sha256"], SYNTHETIC_FRAME["sha256"])

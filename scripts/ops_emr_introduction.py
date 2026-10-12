@@ -46,6 +46,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import http.client
 import io
+import ipaddress
 import json
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -54,6 +55,7 @@ import secrets as token_source
 import shutil
 import socket
 import ssl
+import stat as stat_module
 import subprocess
 import sys
 import time
@@ -89,6 +91,14 @@ TOOL_FILES = ("ops_emr_introduction.py", "ops_emr_probe.py", "ops_backup.py", "o
               "ops_audit_integrity.py")
 OPERATOR_SMOKE_CHECKS = ("login_pkce", "logout_old_session_refused", "worklist_uid", "ohif_frame", "w2_folders",
                          "w2_modality", "w2_shortcuts", "realm_v1_pending_zero")
+# IRT-14 (D1062): the unattended smoke's temporary member and the checks it proves of the previous version after a restore
+# (the previous release has no W2 features and no member-rights import; its old-token refusal is not asserted).
+SMOKE_PREFIX = "kin-smoke-"
+SMOKE_BY = "Opus executor (D1062)"
+# The smoke client's registered redirect: a name that never resolves (RFC 2606 .invalid; the browser also maps it to
+# NOTFOUND), so the authorization code is read from the browser's own request and never reaches any server or log.
+SMOKE_REDIRECT_HOST = "kin-smoke-callback.invalid"
+PREVIOUS_SMOKE_CHECKS = ("login_pkce", "worklist_uid", "ohif_frame")
 # The Stage-5 configuration names a clone must replace before it starts (rehearsal.md §2). Values are compared in memory.
 CLONE_SECRETS = ("POSTGRES_PASSWORD", "KC_ADMIN_PASSWORD", "KC_CLIENT_SECRET", "KC_WEB_SECRET", "KIN_COOKIE_SECRET",
                  "ORTHANC_PASS", "KIN_EMR_RUNTIME_PASSWORD", "KIN_EMR_READER_PASSWORD", "KIN_EMR_RETENTION_PASSWORD")
@@ -243,8 +253,15 @@ def plan_valid(plan):
     require(members["disabled"] <= members["realm_members"], "Invalid member expectation")
     # Every target reads one real frame of a study that exists in B0: the forward smoke of the new release and the
     # previous-version smoke after a rollback (login, worklist UID, frame bytes) both bind to it.
-    smoke = _keys(plan["smoke"], ("frame",), "smoke")
+    smoke = _keys(plan["smoke"], ("frame", "member"), "smoke")
     require(smoke["frame"] is not None, "A smoke reads a real frame")
+    if smoke["member"] is not None:
+        # IRT-14: the temporary member of the unattended smoke - realm roles (never admin or gateway) and the one group
+        # (institution) that sees the smoke study.
+        member = _keys(smoke["member"], ("roles", "group"), "smoke member")
+        require(type(member["roles"]) is list and member["roles"] and len(set(member["roles"])) == len(member["roles"])
+                and set(member["roles"]) <= set(pre.APP_ROLES) - {"admin"}, "Invalid smoke member roles")
+        _str(member["group"], re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"), "smoke member group")
     frame = _keys(smoke["frame"], ("path", "bytes", "sha256"), "smoke frame")
     require(type(frame["path"]) is str and FRAME_PATH.fullmatch(frame["path"]), "Invalid smoke frame path")
     _int(frame["bytes"], 1, 16 * 1024 * 1024, "smoke frame bytes")
@@ -306,7 +323,9 @@ def frame_study(plan):
 
 
 TARGET_KEYS = ("schema", "kind", "host_key_sha256", "origin", "project", "repository", "compose_files", "containers",
-               "volumes", "networks", "ports", "tls_certificate", "cron", "ca_file", "keycloak_admin")
+               "volumes", "networks", "ports", "tls_certificate", "cron", "ca_file", "keycloak_admin", "external_networks",
+               "declared_overlays", "tracked_overlay_reconcile", "fix_checkout_mode")
+NETWORK_KEY = re.compile(r"[a-z][a-z0-9_]{0,31}")
 IDENTITY_KEYS = ("host_key_sha256", "origin", "project", "containers", "volumes", "networks")
 
 
@@ -328,17 +347,71 @@ def target_valid(target):
     _abs(target["repository"], "repository")
     files = target["compose_files"]
     require(type(files) is list and files and len(files) == len(set(files)), "Invalid compose files")
+    # IRT-11: a declared overlay is a compose file OUTSIDE the checkout (a file the checkout tracked at one commit only
+    # would vanish or block the other commit's checkout), pinned by its hash, with the binds it brings for one service.
+    repository = PurePosixPath(target["repository"].replace("\\", "/"))
+    declared_overlays = target["declared_overlays"]
+    require(type(declared_overlays) is list and len(declared_overlays) <= 8, "Invalid declared overlays")
+    overlays = {}
+    for entry in declared_overlays:
+        _keys(entry, ("file", "sha256", "service", "binds"), "declared overlay")
+        _abs(entry["file"], "declared overlay file")
+        location = PurePosixPath(entry["file"].replace("\\", "/"))
+        require(entry["file"] in files and location != repository and repository not in location.parents,
+                "A declared overlay is listed and lives outside the checkout")
+        _str(entry["sha256"], HASH, "declared overlay hash")
+        require(entry["service"] in ROLES, "Invalid declared overlay service")
+        require(type(entry["binds"]) is list and len(entry["binds"]) <= 8, "Invalid declared overlay binds")
+        for bind in entry["binds"]:
+            _keys(bind, ("source", "target", "read_only"), "declared bind")
+            _abs(bind["source"], "declared bind source")
+            require(type(bind["target"]) is str and PurePosixPath(bind["target"]).is_absolute() and type(bind["read_only"]) is bool,
+                    "Invalid declared bind")
+        overlays[entry["file"]] = entry
+    require(len(overlays) == len(declared_overlays), "An overlay is declared once")
+    # A tracked file that the host carries modified is replaced by the declared overlay that reproduces the change: the
+    # overlay follows the file it reconciles, so Compose merges it at the same place.
+    reconcile = target["tracked_overlay_reconcile"]
+    require(type(reconcile) is list and len(reconcile) <= 8, "Invalid overlay reconciliation")
+    used = []
+    for entry in reconcile:
+        _keys(entry, ("path", "expected_sha256_before", "override_file", "override_sha256"), "overlay reconciliation")
+        require(type(entry["path"]) is str and COMPOSE_NAME.fullmatch(entry["path"]) and entry["path"] in files
+                and entry["override_file"] in overlays and files.index(entry["override_file"]) > files.index(entry["path"]),
+                "A declared overlay must follow the tracked compose file it reconciles")
+        _str(entry["expected_sha256_before"], HASH, "modified file hash")
+        require(entry["override_sha256"] == overlays[entry["override_file"]]["sha256"], "Overlay hash differs from its declaration")
+        used.append(entry["override_file"])
+    require(len(set(used)) == len(used), "An overlay reconciles one file")
     for item in files:
-        require(type(item) is str and (COMPOSE_NAME.fullmatch(item) or (target["kind"] == "rehearsal" and _abs(item, "override"))),
+        require(type(item) is str and (COMPOSE_NAME.fullmatch(item) or ((target["kind"] == "rehearsal" or item in overlays) and _abs(item, "override"))),
                 "Invalid compose file")
     require(files[0] == "docker-compose.yml", "The base compose file comes first")
+    # A rehearsal override replaces the proxy's volumes (`volumes: !override`); an overlay merged before it would lose
+    # its binds, so every declared overlay comes after every other override file.
+    others = [index for index, item in enumerate(files) if item not in overlays and not COMPOSE_NAME.fullmatch(item)]
+    require(all(files.index(item) > max(others, default=-1) for item in overlays), "A declared overlay must come after the rehearsal override")
+    require(type(target["fix_checkout_mode"]) is bool, "Invalid checkout mode flag")
     containers = _keys(target["containers"], (*ROLES, *ONE_SHOTS), "containers")
     volumes = _keys(target["volumes"], VOLUMES, "volumes")
     networks = _keys(target["networks"], ("default", "workflow"), "networks")
     for group in (containers, volumes, networks):
         for value in group.values():
             _str(value, NAME, "resource name")
-    names = [*containers.values(), *volumes.values(), *networks.values()]
+    # Further networks a service joins on this host (e.g. the proxy and an external service's network), declared with
+    # their exact names; nothing else may appear in the resolved model.
+    external = target["external_networks"]
+    require(type(external) is dict and set(external) <= set(ROLES), "Invalid external networks")
+    declared = []
+    for service, entries in external.items():
+        require(type(entries) is dict and entries, "Invalid external networks")
+        for key, name in entries.items():
+            require(type(key) is str and NETWORK_KEY.fullmatch(key) and key not in ("default", "workflow"), "Invalid external network key")
+            _str(name, NAME, "external network name")
+            declared.append((key, name))
+    require(len({key for key, _ in declared}) == len({pair for pair in declared}) == len({name for _, name in declared}),
+            "An external network key names one network")
+    names = [*containers.values(), *volumes.values(), *networks.values(), *sorted({name for _, name in declared})]
     require(len(names) == len(set(names)), "Resource names must be distinct")
     ports = _keys(target["ports"], ("maintenance", "public"), "ports")
     require(type(ports["maintenance"]) is str and re.fullmatch(r"127\.0\.0\.1:[1-9][0-9]{0,4}:443", ports["maintenance"]),
@@ -412,23 +485,41 @@ def check_resolved(model, target, *, target_checkout, maintenance=None, images=N
     require(all(name in volumes.values() or (type(name) is str and name.startswith(prefixes)) for name in model["volumes"].values()),
             "A resolved volume belongs to another project")
     networks = {"default": project + "_default" if recovery else target["networks"]["default"], "workflow": target["networks"]["workflow"]}
-    require(model["networks"] == networks, "Resolved network names differ")
+    declared = {}
+    for entries in target["external_networks"].values():
+        declared.update(entries)
+    require(model["networks"] == {**networks, **declared}, "Resolved networks differ from the target manifest (an undeclared network?)")
+    for role in expected:
+        joined = set(model["service_networks"].get(role) or [])
+        own = set(target["external_networks"].get(role, {}))
+        require(joined <= {"default", "workflow"} | own and own <= joined, "Resolved service networks differ: " + role)
+        if role == "proxy":
+            require(joined == {"default", "workflow"} | own, "Resolved service networks differ: proxy")
     mounts = {"db": {"/var/lib/postgresql/data": "pg-db"}, "orthanc": {"/var/lib/orthanc/db": "orthanc-db"}}
     if target_checkout:
         mounts["db"]["/var/lib/postgresql/emr-access"] = "emr-access"
         mounts["api"] = {EMR_STATE_DIR: "emr-state"}
+    # Drive-letter paths (a Windows rehearsal host) compare without regard to case, as that file system does.
+    fold = (lambda text: text.lower()) if PureWindowsPath(target["repository"]).drive else (lambda text: text)
+    path_of = lambda value: PurePosixPath(fold(str(value).replace("\\", "/")))
+    declared_binds = {}
+    for overlay in target["declared_overlays"]:
+        for bind in overlay["binds"]:
+            declared_binds.setdefault(overlay["service"], []).append((path_of(bind["source"]), bind["target"], bind["read_only"]))
+    require(set(declared_binds) <= set(expected), "A declared overlay names a service outside the model")
     for role in expected:
         named = {entry["target"]: entry["source"] for entry in model["mounts"].get(role, []) if entry["type"] == "volume"}
         require(all(named.get(path) == key for path, key in mounts.get(role, {}).items()), "Resolved mounts differ: " + role)
         require(set(named.values()) <= set(model["volumes"]), "A resolved mount names an undeclared volume: " + role)
+        binds = [(path_of(entry["source"]), entry["target"], bool(entry.get("read_only"))) for entry in model["mounts"].get(role, [])
+                 if entry["type"] == "bind"]
+        # IRT-11: a declared overlay is in effect exactly as declared (an overlay merged too early loses its binds).
+        require(all(bind in binds for bind in declared_binds.get(role, [])), "A declared overlay bind is missing from the resolved model: " + role)
         if target["kind"] == "rehearsal":
-            # Drive-letter paths (a Windows rehearsal host) compare without regard to case, as that file system does.
-            fold = (lambda text: text.lower()) if PureWindowsPath(target["repository"]).drive else (lambda text: text)
-            repository = PurePosixPath(fold(target["repository"].replace("\\", "/")))
-            for entry in model["mounts"].get(role, []):
-                if entry["type"] == "bind":
-                    source = PurePosixPath(fold(str(entry["source"]).replace("\\", "/")))
-                    require(source == repository or repository in source.parents, "A rehearsal binds a host path outside its checkout: " + role)
+            repository = path_of(target["repository"])
+            for bind in binds:
+                require(bind[0] == repository or repository in bind[0].parents or bind in declared_binds.get(role, []),
+                        "A rehearsal binds a host path outside its checkout: " + role)
     for role, ports in model["ports"].items():
         if role == "proxy":
             wanted = [target["ports"]["maintenance"]] if maintenance else list(target["ports"]["public"])
@@ -467,22 +558,23 @@ def is_introduction(raw):
     return type(body) is dict and body.get("mode") == MODE
 
 
-def evidence_for(phase, kind):
+def evidence_for(phase, kind, unattended=False):
     """Production's introduce needs the rehearsal's local-restore receipt (a rehearsal is that receipt's producer);
-    every reopen needs the operator's browser-level smoke record."""
+    every reopen needs the browser-level smoke record - the operator's, or, unattended (D1062), the one the verify phase
+    itself wrote, which the plan's state holds."""
     if phase == "introduce" and kind == "production":
         return ("local-restore",)
-    if phase == "reopen":
+    if phase == "reopen" and not unattended:
         return ("operator-smoke",)
     return ()
 
 
-def approval_valid(approval, request_sha256, phase, now, kind="production"):
+def approval_valid(approval, request_sha256, phase, now, kind="production", unattended=False):
     _keys(approval, ("schema", "mode", "request_sha256", "expires_at", "evidence"), "approval")
     require(approval["schema"] == 1 and approval["mode"] == MODE and approval["request_sha256"] == request_sha256, "Approval is not bound to this request")
     require(type(approval["expires_at"]) is int and now < approval["expires_at"] <= now + 86400, "Approval expired or too long")
     evidence = approval["evidence"]
-    require(type(evidence) is dict and set(evidence) == set(evidence_for(phase, kind)), "Approval evidence differs from the phase")
+    require(type(evidence) is dict and set(evidence) == set(evidence_for(phase, kind, unattended)), "Approval evidence differs from the phase")
     for value in evidence.values():
         _str(value, HASH, "evidence hash")
     return approval
@@ -792,6 +884,29 @@ def https_get(origin, path, *, connect=None, ca_file=None, token=None, limit=655
         connection.close()
 
 
+def https_post(origin, path, form, *, connect=None, ca_file=None):
+    from urllib.parse import urlencode
+    parsed = urlsplit(origin)
+    address, port = connect or (parsed.hostname, parsed.port or 443)
+    connection = PinnedHTTPS(address, port, parsed.hostname, ssl.create_default_context(cafile=ca_file))
+    try:
+        connection.request("POST", path, body=urlencode(form).encode("ascii"),
+                           headers={"Host": parsed.netloc, "Content-Type": "application/x-www-form-urlencoded"})
+        response = connection.getresponse()
+        raw = response.read(65537)
+        require(len(raw) <= 65536, "Response too large")
+        return response.status, raw
+    finally:
+        connection.close()
+
+
+def discovery_check(origin, *, connect=None, ca_file=None):
+    """The ingress serves the realm's sign-in for this origin (the issuer the API trusts)."""
+    code, _, raw = https_get(origin, "/auth/realms/kin/.well-known/openid-configuration", connect=connect, ca_file=ca_file)
+    require(code == 200 and json.loads(raw).get("issuer") == origin + "/auth/realms/kin", "The realm's sign-in is not served for this origin")
+    return True
+
+
 def refusal_code(raw):
     """Only the API's fixed refusal code (e.g. AUTH_RIGHTS_PENDING) leaves a refused response; never its body."""
     try:
@@ -825,8 +940,8 @@ def health_check(origin, *, connect=None, ca_file=None, member_rights=True):
     return {"health": True, "auth_refusal": True}
 
 
-def worklist_has(origin, uid, *, connect=None, ca_file=None, token=None, pages=1000):
-    """The signed-in member's worklist lists the study (the product's paged list: limit 100, follow 'next')."""
+def worklist_row(origin, uid, *, connect=None, ca_file=None, token=None, pages=1000):
+    """The signed-in member's worklist row of the study, or None (the product's paged list: limit 100, follow 'next')."""
     after = None
     for _ in range(pages):
         query = "/api/studies?limit=100" + ("&after=" + quote(after, safe="") if after else "")
@@ -835,12 +950,17 @@ def worklist_has(origin, uid, *, connect=None, ca_file=None, token=None, pages=1
         listed = json.loads(raw)
         rows = listed.get("studies") if isinstance(listed, dict) else None
         require(type(rows) is list, "Worklist response has no study rows")
-        if any(isinstance(row, dict) and row.get("uid") == uid for row in rows):
-            return True
+        for row in rows:
+            if isinstance(row, dict) and row.get("uid") == uid:
+                return row
         after = ((listed.get("pagination") or {}).get("next"))
         if not after:
-            return False
+            return None
     raise Stop("Worklist did not end within the page limit")
+
+
+def worklist_has(origin, uid, **kwargs):
+    return worklist_row(origin, uid, **kwargs) is not None
 
 
 def smoke(origin, *, connect=None, ca_file=None, token, frame, worklist_uid, member_rights=True):
@@ -890,14 +1010,16 @@ def token_valid(value):
 # ── the phase state machine ──
 
 STEPS = {
-    "capture": (("L-01", "baseline", False, False), ("L-04a", "fence", True, False), ("L-04b", "capture_b0", False, False),
-                ("L-04c", "restore_check_b0", False, False)),
+    # L-00a/L-00b are the recorded pre-fence corrections a target manifest may declare (checkout mode IRT-13, a modified
+    # tracked compose file replaced by its equivalent overlay IRT-11); without a declaration they only observe.
+    "capture": (("L-00a", "checkout_mode", True, False), ("L-00b", "reconcile_checkout", True, False), ("L-01", "baseline", False, False),
+                ("L-04a", "fence", True, False), ("L-04b", "capture_b0", False, False), ("L-04c", "restore_check_b0", False, False)),
     "release": (("RL-01", "unfence", True, False), ("RL-02", "public_check_previous", False, False)),
     "introduce": (("I-00", "recheck_fence", False, False), ("L-06a", "storage", True, False), ("L-06b", "provision", True, True),
                   ("L-07", "migrate", True, True), ("L-08a", "keycloak", True, True), ("L-08b", "member_import", True, True),
                   ("L-09a", "api", True, True), ("L-09b", "proxy_ui", True, True)),
     "verify": (("L-10a", "fenced_smoke", False, False), ("L-10b", "probe", True, True), ("L-10c", "capture_b1", True, True),
-               ("L-10d", "resume", True, True)),
+               ("L-10d", "resume", True, True), ("L-10e", "remove_smoke_member", True, True)),
     "reopen": (("L-11a", "final_allowlist", False, False), ("L-11b", "restore_jobs", True, False),
                ("L-11c", "reopen_ingress", True, False), ("L-11d", "public_smoke", False, False)),
     # The rollback restores (RB-00..RB-03) and stops behind the maintenance ingress with the lock and the fence kept; only
@@ -1021,7 +1143,8 @@ class Introduction:
         out = {"mode": MODE, "phase": self.phase, "status": status, "phase_passed": passed, "plan_sha256": self.plan_sha256,
                "request_sha256": self.request_sha256, "target_kind": self.plan["target_kind"],
                "lock_retained": bool(self.state["lock_token"]) and lock_owned(self.repository, self.state["lock_token"]),
-               "db_changed": self.state["db_changed"], "ponr": self.state["ponr"], "steps": steps}
+               "db_changed": self.state["db_changed"], "ponr": self.state["ponr"], "steps": steps,
+               "compose_env_resolved": sorted(self.state.get("compose_env") or {})}
         if extra:
             out.update(extra)
         return out
@@ -1104,6 +1227,20 @@ class Introduction:
             self.save()
         bind = getattr(self.ops, "bind", None)
         with (bind() if bind else nullcontext()):
+            prepare = getattr(self.ops, "prepare", None)
+            if prepare is not None:
+                # IRT-12: the compose environment of the running stack, before any step of this phase uses it.
+                try:
+                    self.environment = prepare(self)
+                except (Stop, Unknown, RuntimeError, OSError) as error:
+                    self.state["running"] = None
+                    if self.phase in ("capture", "seed") and self.state.get("lock_token"):
+                        release_lock(self.repository, self.state["lock_token"])
+                        self.state["lock_token"] = None
+                    self.save()
+                    raise Stop("Compose environment: " + code_of(error)) from None
+                # Names, hashes and places only (IRT-12), and the declared overlays' files and bind sources (IRT-11).
+                self.event("compose-environment", **(self.environment or {}))
             return getattr(self, "phase_" + self.phase)()
 
     def check_evidence(self):
@@ -1116,8 +1253,18 @@ class Introduction:
                           b0_created_utc=self.state["b0"].get("created_utc"), used=self.state["receipts_used"])
             return receipt_sha256(receipt)
         if self.phase == "reopen":
-            require(type(self.evidence.get("operator-smoke")) is dict, "Operator smoke record required")
-            operator_smoke_valid(self.evidence["operator-smoke"], self.plan_sha256)
+            if getattr(self.ops, "unattended", False):
+                # D1062: the record the verify phase wrote with its own browser login; the smoke member is gone.
+                recorded = self.state.get("operator_smoke")
+                require(recorded is not None, "Operator smoke record required")
+                raw = self.records.read(self.records.directory / recorded["file"])
+                require(sha256_bytes(raw) == recorded["sha256"], "Operator smoke record changed")
+                operator_smoke_valid(decode(raw), self.plan_sha256)
+                member = self.state.get("smoke_member")
+                require(member is None or member.get("deleted_at"), "The smoke member still exists")
+            else:
+                require(type(self.evidence.get("operator-smoke")) is dict, "Operator smoke record required")
+                operator_smoke_valid(self.evidence["operator-smoke"], self.plan_sha256)
         return None
 
     def steps_of(self, phase):
@@ -1126,15 +1273,18 @@ class Introduction:
 
     # ── phases ──
     def phase_capture(self):
+        fence = [item[1] for item in STEPS["capture"]].index("fence")
         try:
-            self.run_step(*STEPS["capture"][0])
+            for item in STEPS["capture"][:fence]:
+                self.run_step(*item)
         except Stop:
-            # Nothing changed yet: free the lock and leave the plan where it was.
+            # Nothing was fenced yet (the pre-fence corrections keep the running configuration identical): free the lock
+            # and leave the plan where it was.
             return self.finish(self.state["status"], False, release=True)
         except Unknown:
             return self.finish("NEEDS_ATTENTION", False)
         try:
-            for item in STEPS["capture"][1:]:
+            for item in STEPS["capture"][fence:]:
                 self.run_step(*item)
         except Stop:
             # The writers stay fenced: a failed capture is never "resumed" behind the operator's back.
@@ -1319,6 +1469,25 @@ def parse_env(raw):
     return values
 
 
+VARIABLE_BRACED = re.compile(r"(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)(:?[-?+])?")
+VARIABLE_PLAIN = re.compile(r"(?<![$\w])\$([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def referenced_variables(texts):
+    """{name: required} for every variable the compose files interpolate (comments ignored, $$ is a literal). Required
+    means a value must exist: ${NAME}, ${NAME?..}, ${NAME:?..} or $NAME; a default or alternative form is not required."""
+    names = {}
+    for raw in texts:
+        for line in raw.decode("utf-8").splitlines():
+            line = re.sub(r"(^|\s)#.*$", r"\1", line)
+            for match in VARIABLE_BRACED.finditer(line):
+                required = match.group(2) in (None, "?", ":?")
+                names[match.group(1)] = names.get(match.group(1), False) or required
+            for match in VARIABLE_PLAIN.finditer(line):
+                names[match.group(1)] = True
+    return names
+
+
 def compose_digest(entries):
     """sha256 over (name, length, bytes) of each compose file then .env, as ops_deploy_host.compose_digest does."""
     digest = hashlib.sha256()
@@ -1392,6 +1561,48 @@ const {PrismaClient}=require('/app/node_modules/@prisma/client');const db=new Pr
  const changes=(await db.providerChange.findMany({orderBy:{id:'asc'}})).map(c=>({kind:c.kind,target:c.kind==='credentials'?c.target:null,sub:c.sub,state:c.state}));
  const isolated=(await db.memberIsolation.findMany()).map(m=>m.sub).sort();
  process.stdout.write('KIN_RESULT '+JSON.stringify({markers,rights,legacy,changes,isolated})+'\n');})().catch(()=>{process.exitCode=1;}).finally(()=>db.$disconnect());
+"""
+SMOKE_MEMBERS_SQL = ("SELECT count(*) FROM user_entity u JOIN realm r ON r.id = u.realm_id "
+                     "WHERE r.name = 'kin' AND u.username LIKE 'kin-smoke-%'")
+SMOKE_ADMIN_SCRIPT = r"""
+const base=(process.env.KC_ADMIN_URL||'').replace(/\/$/,'');
+const [operation, raw]=process.argv.slice(1); const input=JSON.parse(raw);
+const out=v=>process.stdout.write('KIN_RESULT '+JSON.stringify(v)+'\n');
+(async()=>{const form=new URLSearchParams({grant_type:'password',client_id:'admin-cli',username:process.env.KIN_KC_ADMIN_USER,password:process.env.KIN_KC_ADMIN_PASSWORD});
+ const granted=await fetch(base+'/realms/master/protocol/openid-connect/token',{method:'POST',body:form});
+ if(granted.status!==200)throw new Error('admin');
+ const token=(await granted.json()).access_token;
+ const call=async(method,path,body)=>{const r=await fetch(base+'/admin/realms/kin'+path,{method,headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+   body:body===undefined?undefined:JSON.stringify(body)});if(r.status===404)return null;if(r.status>=300)throw new Error(method+' '+r.status);
+   const text=await r.text();return text?JSON.parse(text):null;};
+ const users=async()=>((await call('GET','/users?exact=true&username='+encodeURIComponent(input.username)))||[]).filter(u=>u.username===input.username);
+ const clients=async()=>input.client_id?((await call('GET','/clients?clientId='+encodeURIComponent(input.client_id)))||[]):[];
+ if(operation==='create-member'){
+  if((await users()).length)throw new Error('exists');
+  await call('POST','/users',{username:input.username,enabled:true,emailVerified:true,firstName:'Release',lastName:'Smoke',requiredActions:[]});
+  const [user]=await users();
+  await call('PUT','/users/'+user.id+'/reset-password',{type:'password',value:process.env.KIN_SMOKE_PASSWORD,temporary:false});
+  const roles=[];for(const name of input.roles){roles.push(await call('GET','/roles/'+encodeURIComponent(name)));}
+  if(roles.some(r=>!r))throw new Error('role');
+  await call('POST','/users/'+user.id+'/role-mappings/realm',roles);
+  const group=((await call('GET','/groups?exact=true&search='+encodeURIComponent(input.group)))||[]).find(g=>g.name===input.group);
+  if(!group)throw new Error('group');
+  await call('PUT','/users/'+user.id+'/groups/'+group.id);
+  out({id:user.id,username:user.username});return;}
+ if(operation==='create-client'){
+  if((await clients()).length)throw new Error('exists');
+  await call('POST','/clients',{clientId:input.client_id,enabled:true,publicClient:true,standardFlowEnabled:true,directAccessGrantsEnabled:false,
+   protocol:'openid-connect',redirectUris:[input.redirect_uri],attributes:{'pkce.code.challenge.method':'S256'},
+   protocolMappers:[{name:'kin-api-audience',protocol:'openid-connect',protocolMapper:'oidc-audience-mapper',config:{'included.custom.audience':'kin-api','access.token.claim':'true','id.token.claim':'false'}},
+    {name:'kin-institution-groups',protocol:'openid-connect',protocolMapper:'oidc-group-membership-mapper',config:{'full.path':'false','access.token.claim':'true','id.token.claim':'false','userinfo.token.claim':'false','claim.name':'groups'}},
+    {name:'kin-authentication-time',protocol:'openid-connect',protocolMapper:'oidc-usersessionmodel-note-mapper',config:{'user.session.note':'AUTH_TIME','claim.name':'auth_time','jsonType.label':'long','access.token.claim':'true','id.token.claim':'true'}}]});
+  const [client]=await clients();out({id:client.id,client_id:client.clientId});return;}
+ if(operation==='remove'){
+  for(const user of await users()){await call('PUT','/users/'+user.id,{enabled:false});await call('DELETE','/users/'+user.id);}
+  for(const client of await clients()){await call('DELETE','/clients/'+client.id);}
+  out({user_absent:(await users()).length===0,client_absent:(await clients()).length===0});return;}
+ throw new Error('operation');
+})().catch(e=>{process.stderr.write(String((e&&e.message)||e).slice(0,80)+'\n');process.exitCode=1;});
 """
 # The realm's own role and group definitions (read-only, Keycloak database): the import must not change them.
 REALM_DEFINITIONS_SQL = """SELECT json_build_object(
@@ -1500,21 +1711,24 @@ class Runner:
                               stdout=output or subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, **identity)
 
 
-def owned_private(path, owner, *, directory=False, private=False):
+def owned_private(path, owner, *, directory=False, private=False, own_mode=True):
     """The production checkout as the host keeps it: owned by its operating account (C1's own rule is root). Every
-    ancestor is root's or that account's, none is a link or writable by others (a sticky directory excepted)."""
+    ancestor is root's or that account's, none is a link or writable by others (a sticky directory excepted).
+    own_mode=False leaves the path's own mode bits to a later check (a declared, recorded correction may come first)."""
     import stat as kinds
     path = Path(path)
     require(os.name == "posix" and os.geteuid() == 0 and path.is_absolute() and ".." not in path.parts, "Invalid protected path")
     for item in reversed((path, *path.parents)):
         info = item.lstat()
         require(not kinds.S_ISLNK(info.st_mode) and info.st_uid in (0, owner["uid"]), "A path component is a link or has another owner")
+        if item == path and not own_mode:
+            continue
         require(not info.st_mode & 0o022 or (item != path and kinds.S_ISDIR(info.st_mode) and info.st_mode & kinds.S_ISVTX),
                 "A path component is writable by others")
     info = path.lstat()
     require(info.st_uid == owner["uid"], "Path is not owned by the repository account")
     require(kinds.S_ISDIR(info.st_mode) if directory else (kinds.S_ISREG(info.st_mode) and info.st_nlink == 1), "Unexpected file type")
-    require(not private or not info.st_mode & 0o077, "Path is not private")
+    require(not private or not own_mode or not info.st_mode & 0o077, "Path is not private")
     return path
 
 
@@ -1545,14 +1759,25 @@ class HostOps:
     """The docker/compose/git/crontab operations of each step, against one target manifest only. Every command goes
     through cmd(), which records it (records.command) whatever its outcome."""
 
-    def __init__(self, *, target, plan, runner, records, env_next=None, token_reader=None, secure=None, owner=None):
+    def __init__(self, *, target, plan, runner, records, env_next=None, token_reader=None, secure=None, owner=None,
+                 browser_cmd=None, repository_check=None):
         self.t, self.plan, self.run, self.records = target, plan, runner, records
         self.owner = owner
         self.repo = Path(target["repository"])
         self.names = target["containers"]
         self.env_next = env_next          # path of the staged .env for the target (private)
-        self.token_reader = token_reader  # () -> {"access_token", "subject"}
+        self.token_reader = token_reader  # () -> {"access_token", "subject"} (the operator's login; not used when unattended)
         self.secure = secure or (lambda path: None)
+        # IRT-14: the configured headless-browser command (argv; the login spec arrives on stdin) for the unattended smoke.
+        self.browser_cmd = list(browser_cmd) if browser_cmd else None
+        # IRT-13: the protected-path check of the checkout itself (the host's; none outside a protected install).
+        self.repository_check = repository_check or (lambda: None)
+        # IRT-12: compose variables the .env lacks, resolved from the running stack (values in memory only).
+        self.compose_env = {}
+
+    @property
+    def unattended(self):
+        return self.browser_cmd is not None
 
     # ── primitives ──
     def cmd(self, args, *, timeout=60, input=None, env=None, check=True, mutating=False, stdin=None, output=None, quiet=False):
@@ -1613,10 +1838,11 @@ class HostOps:
             out += ["-f", item if PurePosixPath(item).is_absolute() or PureWindowsPath(item).is_absolute() else str(self.repo / item)]
         return out
 
-    def compose(self, args, *, override=None, timeout=180, env=None, mutating=True, check=True, project=None):
+    def compose(self, args, *, override=None, timeout=180, env=None, mutating=True, check=True, project=None, files=None):
         command = ["docker", "compose", "--project-directory", str(self.repo), "--project-name", project or self.t["project"],
-                   *self.compose_files(), *(["-f", "-"] if override else []), *args]
-        return self.cmd(command, input=override.encode() if override else None, timeout=timeout, env=env,
+                   *(files if files is not None else self.compose_files()), *(["-f", "-"] if override else []), *args]
+        environment = {**self.compose_env, **(env or {})} or None
+        return self.cmd(command, input=override.encode() if override else None, timeout=timeout, env=environment,
                         mutating=mutating, check=check)
 
     def pins(self, intro, *, maintenance=True):
@@ -1750,7 +1976,7 @@ class HostOps:
                                mutating=False, project=project).stdout
         else:
             raw = self.cmd(["docker", "compose", "--project-directory", str(self.repo), *self.compose_files(), "config", "--format", "json"],
-                           timeout=60).stdout
+                           timeout=60, env=dict(self.compose_env) or None).stdout
         model = json.loads(raw)
         services = {name: service or {} for name, service in (model.get("services") or {}).items() if name in (*ROLES, *ONE_SHOTS)}
 
@@ -1764,10 +1990,12 @@ class HostOps:
                 "containers": {name: service.get("container_name") for name, service in services.items()},
                 "volumes": {key: (value or {}).get("name") for key, value in (model.get("volumes") or {}).items()},
                 "networks": {key: (value or {}).get("name") for key, value in (model.get("networks") or {}).items()},
-                "mounts": {name: [{"type": item.get("type"), "source": item.get("source"), "target": item.get("target")}
+                "mounts": {name: [{"type": item.get("type"), "source": item.get("source"), "target": item.get("target"),
+                                   "read_only": item.get("read_only") is True}
                                   for item in service.get("volumes") or []] for name, service in services.items()},
                 "ports": {name: [port(item) for item in service.get("ports") or []] for name, service in services.items()},
                 "images": {name: service.get("image") for name, service in services.items()},
+                "service_networks": {name: sorted(service.get("networks") or {"default": None}) for name, service in services.items()},
                 "origin": {"api_KC_ISSUER": setting("api", "KC_ISSUER"), "keycloak_KC_HOSTNAME": setting("keycloak", "KC_HOSTNAME"),
                            "api_PUBLIC_ORIGIN": setting("api", "PUBLIC_ORIGIN")},
                 "api_environment": sorted(services.get("api", {}).get("environment") or {}),
@@ -1864,12 +2092,298 @@ class HostOps:
         require(self.token_reader is not None, "No smoke token configured")
         return token_valid(self.token_reader())
 
+    # ── IRT-12: the compose environment as the running stack resolved it ──
+    def compose_path(self, item):
+        return Path(item) if PurePosixPath(item).is_absolute() or PureWindowsPath(item).is_absolute() else self.repo / item
+
+    def declared_overlay_facts(self):
+        """IRT-11, before any phase step: each declared overlay is exactly the declared bytes in a file (no link) that only
+        its owner (root or this tool's user) can change, in a folder only that owner can change; each bind source it brings
+        exists (Compose would otherwise create an empty folder in its place). Recorded: path, mode, owner and sha256 of the
+        overlay and of each bind source file (a folder: mode and owner)."""
+        def protection(path, what):
+            if os.name != "posix":
+                return None, None
+            info = os.lstat(path)
+            require(info.st_uid in (0, os.geteuid()) and not info.st_mode & 0o022, what + " is writable by others: " + str(path))
+            return oct(info.st_mode & 0o7777), info.st_uid
+        facts = []
+        for entry in self.t["declared_overlays"]:
+            path = Path(entry["file"])
+            require(path.is_file() and not path.is_symlink(), "A declared overlay is missing: " + entry["file"])
+            require(sha256_bytes(path.read_bytes()) == entry["sha256"], "A declared overlay differs from the manifest: " + entry["file"])
+            mode, owner = protection(path, "A declared overlay")
+            protection(path.parent, "A declared overlay's folder")
+            binds = []
+            for bind in entry["binds"]:
+                source = Path(bind["source"])
+                require(source.exists(), "A declared bind source is missing: " + bind["source"])
+                info = os.stat(source)
+                binds.append({"source": bind["source"], "target": bind["target"], "read_only": bind["read_only"],
+                              "mode": oct(info.st_mode & 0o7777) if os.name == "posix" else None,
+                              "owner": info.st_uid if os.name == "posix" else None,
+                              "sha256": sha256_bytes(source.read_bytes()) if source.is_file() else None,
+                              "kind": "file" if source.is_file() else "directory"})
+            facts.append({"file": entry["file"], "sha256": entry["sha256"], "mode": mode, "owner": owner, "service": entry["service"],
+                          "binds": binds})
+        return facts
+
+    def prepare(self, intro):
+        """Before any phase step: every variable the compose files require that the checkout's .env lacks is resolved from
+        the running (or stopped) containers - the value a service's environment or bind mount actually carries - by
+        rendering the model once with a unique marker per variable and reading the container at exactly the place the
+        marker landed. Values stay in memory; the state keeps each name with the hash of its value and where it came from,
+        and a later phase must resolve the same. A required variable that no container carries is a refusal."""
+        overlays = self.declared_overlay_facts()
+        texts = [self.compose_path(item).read_bytes() for item in self.t["compose_files"]]
+        present = set(parse_env(self.env_file().read_bytes()))
+        needed = sorted(name for name, required in referenced_variables(texts).items() if required and name not in present)
+        resolved, record = {}, {}
+        if needed:
+            markers = {name: "kin-resolve-" + uuid.uuid4().hex for name in needed}
+            raw = self.cmd(["docker", "compose", "--project-directory", str(self.repo), "--project-name", self.t["project"],
+                            *self.compose_files(), "config", "--format", "json"], timeout=60, env=markers).stdout.decode("utf-8")
+            model = json.loads(raw)
+            services = model.get("services") or {}
+            for name, marker in markers.items():
+                places = []
+                for service, spec in services.items():
+                    for key, value in ((spec or {}).get("environment") or {}).items():
+                        if type(value) is str and marker in value:
+                            require(value == marker and service in ROLES, "Unresolvable compose variable: " + name)
+                            places.append(("environment", service, key))
+                    for mount in (spec or {}).get("volumes") or []:
+                        if marker in str(mount.get("source")):
+                            require(mount.get("source") == marker and service in ROLES, "Unresolvable compose variable: " + name)
+                            places.append(("mount", service, mount.get("target")))
+                require(places and raw.count(marker) == len(places), "Unresolvable compose variable: " + name)
+                values = set()
+                for kind, service, key in places:
+                    item = self.inspect(service)
+                    require(item is not None, "Unresolvable compose variable: " + name)
+                    if kind == "environment":
+                        env = dict(entry.split("=", 1) for entry in (item.get("Config") or {}).get("Env") or [] if "=" in entry)
+                        require(key in env, "Unresolvable compose variable: " + name)
+                        values.add(env[key])
+                    else:
+                        sources = [m.get("Source") for m in item.get("Mounts") or [] if m.get("Destination") == key]
+                        require(len(sources) == 1 and sources[0], "Unresolvable compose variable: " + name)
+                        values.add(sources[0])
+                require(len(values) == 1, "Unresolvable compose variable: " + name)
+                resolved[name] = values.pop()
+                record[name] = {"sha256": sha256_bytes(resolved[name].encode("utf-8")), "from": sorted({kind + ":" + service for kind, service, _ in places})}
+        known = intro.state.setdefault("compose_env", {})
+        for name, entry in record.items():
+            require(known.get(name, entry)["sha256"] == entry["sha256"], "A resolved compose variable changed: " + name)
+        known.update(record)
+        intro.save()
+        self.compose_env = resolved
+        return {"resolved_from_running_stack": record, "declared_overlays": overlays}
+
+    # ── IRT-13 / IRT-11: recorded pre-fence corrections of the checkout ──
+    def checkout_mode(self, intro):
+        """With the manifest's fix_checkout_mode: the checkout becomes 0700 and its .git loses group/other write (never
+        recursively), modes recorded before and after; then the checkout is checked as private like any other run."""
+        git = self.repo / ".git"
+        before = {"checkout": oct(self.repo.stat().st_mode & 0o7777), ".git": oct(git.stat().st_mode & 0o7777)}
+        if self.t["fix_checkout_mode"]:
+            os.chmod(self.repo, 0o700)
+            os.chmod(git, git.stat().st_mode & 0o7777 & ~0o022)
+        after = {"checkout": oct(self.repo.stat().st_mode & 0o7777), ".git": oct(git.stat().st_mode & 0o7777)}
+        self.repository_check()
+        return {"fixed": self.t["fix_checkout_mode"], "before": before, "after": after}
+
+    def config_bytes(self, files):
+        args = []
+        for item in files:
+            args += ["-f", str(self.compose_path(item))]
+        return self.compose(["config", "--format", "json"], files=args, timeout=60, mutating=False).stdout
+
+    def reconcile_checkout(self, intro):
+        """A tracked compose file the host carries modified (e.g. the proxy joining an external service's network) is
+        replaced by its declared overlay only when that reproduces the running configuration byte for byte: the model of
+        the current files, the model of the committed file plus the overlay (from a copy, before anything changes) and,
+        after the file is restored to the commit, the model of the declared file list - all three identical. Only hashes
+        are recorded (the model carries interpolated secrets). A mismatch changes nothing."""
+        done = []
+        for entry in self.t["tracked_overlay_reconcile"]:
+            path = self.repo / entry["path"]
+            head = self.cmd(["git", "cat-file", "blob", "HEAD:" + entry["path"]]).stdout
+            current = path.read_bytes()
+            overlay = self.compose_path(entry["override_file"]).read_bytes()
+            require(sha256_bytes(overlay) == entry["override_sha256"], "The overlay differs from the manifest")
+            if sha256_bytes(current) == sha256_bytes(head):
+                done.append({"path": entry["path"], "state": "already the commit"})
+                continue
+            require(sha256_bytes(current) == entry["expected_sha256_before"], "The modified tracked file is not the declared one")
+            running = [item for item in self.t["compose_files"] if item != entry["override_file"]]
+            before = self.config_bytes(running)
+            copy = intro.records.directory / ("head-" + Path(entry["path"]).name)
+            intro.records.write(copy, head)
+            candidate = self.config_bytes([str(copy) if item == entry["path"] else item for item in self.t["compose_files"]])
+            require(candidate == before, "The overlay does not reproduce the modified compose file")
+            self.cmd(["git", "checkout", "--", entry["path"]], mutating=True)
+            require(sha256_bytes(path.read_bytes()) == sha256_bytes(head), "The tracked file was not restored")
+            after = self.config_bytes(self.t["compose_files"])
+            require(after == before, "The declared file list does not reproduce the running configuration")
+            done.append({"path": entry["path"], "state": "restored to the commit", "modified_sha256": sha256_bytes(current),
+                         "config_sha256": {"current_files": sha256_bytes(before), "commit_with_overlay": sha256_bytes(candidate),
+                                           "declared_files": sha256_bytes(after)}})
+        return {"reconciled": done}
+
     def token_since(self, moment, what):
         """The smoke token, issued (iat) no earlier than the given moment: a login made for this attempt, never an older one."""
         token = self.token()
         issued = token_claims(token).get("iat")
         require(type(issued) is int and issued >= int(parse_utc(moment).timestamp()), "The smoke token was issued before " + what)
         return token
+
+    # ── IRT-14: the unattended smoke (D1062) - a temporary member, a real browser login, the checks, the record ──
+    def smoke_project(self, intro):
+        recovery = intro.state.get("recovery")
+        return recovery["project"] if recovery and intro.state.get("restored_at") else None
+
+    def smoke_admin(self, intro, operation, payload, *, password=None):
+        """Keycloak administration for the smoke member and its login client, from a one-shot of the running API image
+        with the target's administrator (values only in the one-shot's environment)."""
+        env = {"KIN_KC_ADMIN_USER": self.t["keycloak_admin"], "KIN_KC_ADMIN_PASSWORD": parse_env(self.env_file().read_bytes()).get("KC_ADMIN_PASSWORD", "")}
+        if password is not None:
+            env["KIN_SMOKE_PASSWORD"] = password
+        out = self.one_shot(intro, "api", ["-e", SMOKE_ADMIN_SCRIPT, operation, json.dumps(payload)], timeout=180, env=env,
+                            entrypoint="node", name="kc-smoke-" + operation, project=self.smoke_project(intro))
+        require(out["exit"] == 0 and out["container_exit"] == 0, "Smoke member administration failed: " + operation)
+        return result_line(out["stdout"])
+
+    def create_smoke_member(self, intro, side):
+        """The temporary member kin-smoke-<run> with the plan's roles and group, a generated password kept only in a
+        private file of this run's directory; recorded (created) in the state before anything uses it."""
+        spec = intro.plan["smoke"]["member"]
+        require(spec is not None, "The plan names no smoke member for the unattended smoke")
+        run = intro.request_sha256[:10]
+        username = SMOKE_PREFIX + run
+        password = token_source.token_urlsafe(32)
+        credentials = "smoke-member-" + side + ".json"
+        intro.records.write(intro.records.directory / credentials, canonical({"username": username, "password": password}) + b"\n")
+        intro.state["smoke_member"] = {"username": username, "id": None, "side": side, "client_id": None, "credentials": credentials,
+                                       "created_at": None, "deleted_at": None}
+        intro.save()
+        created = self.smoke_admin(intro, "create-member", {"username": username, "roles": spec["roles"], "group": spec["group"]},
+                                   password=password)
+        intro.state["smoke_member"].update(id=created["id"], created_at=utc_now().isoformat())
+        intro.save()
+        intro.records.journal({"event": "smoke-member-created", "plan_sha256": intro.plan_sha256, "username": username, "side": side})
+        return intro.state["smoke_member"]
+
+    def run_browser(self, spec):
+        """The configured headless browser (policy smoke_browser_cmd): the login spec, with the password, goes on stdin;
+        its one KIN_RESULT line returns the tokens. Recorded like every command (argv, input and output hashes only)."""
+        entry = {"argv": redact_argv(self.browser_cmd), "env": [], "mutating": False, "timeout_s": 300, "started_utc": utc_now().isoformat(),
+                 "input": output_record(json.dumps(spec).encode())}
+        started = time.monotonic()
+        try:
+            result = subprocess.run(self.browser_cmd, input=json.dumps(spec).encode(), capture_output=True, timeout=300)
+        except subprocess.TimeoutExpired:
+            entry.update(outcome="timeout", seconds=round(time.monotonic() - started, 3))
+            self.records.command(entry)
+            raise Stop("The smoke browser timed out") from None
+        except OSError as error:
+            entry.update(outcome="error", error=type(error).__name__, seconds=round(time.monotonic() - started, 3))
+            self.records.command(entry)
+            raise Stop("The smoke browser could not be started") from None
+        entry.update(outcome="exit", exit=result.returncode, seconds=round(time.monotonic() - started, 3),
+                     stdout=output_record(result.stdout), stderr=output_record(result.stderr))
+        self.records.command(entry)
+        require(result.returncode == 0, "The smoke browser login failed")
+        value = result_line(result.stdout)
+        require(type(value) is dict and value.get("flow") == "authorization_code+S256" and type(value.get("refresh_token")) is str,
+                "The smoke browser did not return an authorization-code login")
+        return value
+
+    def browser_login(self, intro, *, connect):
+        """One real Authorization Code + PKCE login of the smoke member in the headless browser, through a temporary public
+        client (removed with the member); the token must belong to that member."""
+        member = intro.state["smoke_member"]
+        credentials = json.loads(intro.records.read(intro.records.directory / member["credentials"]))
+        client_id = member["username"] + "-client"
+        redirect = "https://" + SMOKE_REDIRECT_HOST + "/" + member["username"]
+        member["client_id"] = client_id
+        intro.save()
+        self.smoke_admin(intro, "create-client", {"client_id": client_id, "redirect_uri": redirect})
+        # The browser's profile (its cookies are this member's session) lives in this run's private folder and is gone
+        # after the login, whatever the browser did.
+        profile = intro.records.directory / ("browser-profile-" + uuid.uuid4().hex[:8])
+        try:
+            value = self.run_browser({"origin": self.t["origin"], "connect": list(connect) if connect else None, "ca_file": self.t["ca_file"],
+                                      "username": credentials["username"], "password": credentials["password"], "client_id": client_id,
+                                      "redirect_uri": redirect, "profile_dir": str(profile)})
+        finally:
+            shutil.rmtree(profile, ignore_errors=True)
+            require(not profile.exists(), "The browser profile could not be removed")
+        token = token_valid({"access_token": value.get("access_token"), "subject": value.get("subject")})
+        require(token["subject"] == member["id"], "The browser login belongs to another subject")
+        return token, value["refresh_token"], client_id
+
+    def end_session(self, refresh_token, client_id, *, connect):
+        code, _ = https_post(self.t["origin"], "/auth/realms/kin/protocol/openid-connect/logout",
+                             {"client_id": client_id, "refresh_token": refresh_token}, connect=connect, ca_file=self.t["ca_file"])
+        require(code in (200, 204), "The smoke login session could not be ended")
+
+    def old_token_refused(self, token, *, connect, seconds=20):
+        deadline = time.monotonic() + seconds
+        while True:
+            code = https_get(self.t["origin"], "/api/me", connect=connect, ca_file=self.t["ca_file"], token=token["access_token"])[0]
+            if code in (401, 403):
+                return True
+            require(time.monotonic() < deadline, "A token of an ended session is still accepted")
+            time.sleep(1)
+
+    def remove_smoke_member_now(self, intro):
+        member = intro.state.get("smoke_member")
+        if member and not member.get("deleted_at"):
+            removed = self.smoke_admin(intro, "remove", {"username": member["username"], "client_id": member.get("client_id")})
+            require(removed.get("user_absent") is True and removed.get("client_absent") is True, "The smoke member or its client is still present")
+            member["deleted_at"] = utc_now().isoformat()
+            intro.save()
+            intro.records.journal({"event": "smoke-member-deleted", "plan_sha256": intro.plan_sha256, "username": member["username"]})
+        require(self.psql(SMOKE_MEMBERS_SQL, "keycloak") == "0", "The smoke member still exists")
+        return {"member": member["username"] if member else None, "deleted": bool(member)}
+
+    def write_smoke_record(self, intro, checks, name):
+        record = {"schema": 1, "kind": "operator-smoke", "plan_sha256": intro.plan_sha256, "checks": checks,
+                  "passed": all(value is True for value in checks.values()), "by": SMOKE_BY, "at": utc_now().isoformat()}
+        digest = intro.records.put(name, record)
+        return record, {"file": name, "sha256": digest}
+
+    def unattended_release_smoke(self, intro, connect):
+        """L-10a unattended: the eight operator checks, by the executor (D1062), with the smoke member made at L-08b."""
+        token, refresh, client_id = self.browser_login(intro, connect=connect)
+        issued = token_claims(token).get("iat")
+        require(type(issued) is int and issued >= int(parse_utc(intro.state["imported_at"]).timestamp()), "The smoke login predates the member import")
+        result = smoke(self.t["origin"], connect=connect, ca_file=self.t["ca_file"], token=token, frame=self.frame(intro),
+                       worklist_uid=frame_study(intro.plan))
+        require(smoke_passed(result), "The fenced smoke did not run every check")
+        row = worklist_row(self.t["origin"], frame_study(intro.plan), connect=connect, ca_file=self.t["ca_file"], token=token["access_token"])
+        checks = {"login_pkce": True, "worklist_uid": True, "ohif_frame": True, "realm_v1_pending_zero": True,
+                  "w2_modality": type((row or {}).get("modality")) is str and bool(row["modality"])}
+        for name, path in (("w2_folders", "/api/filter-folders"), ("w2_shortcuts", "/api/workspace-shortcuts")):
+            code, _, raw = https_get(self.t["origin"], path, connect=connect, ca_file=self.t["ca_file"], token=token["access_token"])
+            try:
+                checks[name] = code == 200 and json.loads(raw) is not None
+            except ValueError:
+                checks[name] = False
+        self.end_session(refresh, client_id, connect=connect)
+        checks["logout_old_session_refused"] = self.old_token_refused(token, connect=connect)
+        record, stored = self.write_smoke_record(intro, {name: checks[name] for name in OPERATOR_SMOKE_CHECKS}, "operator-smoke.json")
+        require(record["passed"], "The unattended smoke failed: " + ",".join(sorted(name for name, value in checks.items() if not value)))
+        operator_smoke_valid(record, intro.plan_sha256)
+        intro.state["operator_smoke"] = stored
+        intro.save()
+        return {**result, "checks": checks, "record_sha256": stored["sha256"]}
+
+    def remove_smoke_member(self, intro):
+        """L-10e: before anything reopens, the smoke member and its client are disabled and deleted and the realm holds no
+        smoke member (a smoke account with a password this tool knows never meets the public ingress)."""
+        return self.remove_smoke_member_now(intro)
 
     # ── capture ──
     def baseline(self, intro):
@@ -2086,6 +2600,8 @@ class HostOps:
         intro.save()
         self.write_env(raw)
         require(self.compose_digest_now() == intro.plan["compose"]["after_sha256"], "Target compose files or .env differ from the plan")
+        # The target's compose files may require other variables: resolve again (the same values, else a refusal).
+        self.prepare(intro)
         check_resolved(self.resolved(intro), self.t, target_checkout=True, maintenance=True, images=intro.plan["release"]["images"])
         intro.state["db_recreated"] = True
         intro.save()
@@ -2178,11 +2694,18 @@ class HostOps:
 
     def member_import(self, intro):
         realm_before = self.realm_definitions()
-        roster = self.helper(intro, ROSTER_SCRIPT, name="kc-roster")["users"]
         # The roster the product reads must be the realm the plan observed: the same members, the same disabled ones.
         counted = self.realm_members()
         pre.check_member_counts(counted, intro.plan["members"])
-        pre.check_member_counts({"realm_members": len(roster), "disabled": sum(1 for user in roster if not user["enabled"]),
+        smoke_member = None
+        if self.unattended:
+            # D1062: the unattended smoke's temporary member exists before the import, so the product's own import gives
+            # it its rights exactly as for every other member (it is removed again before anything reopens).
+            smoke_member = self.create_smoke_member(intro, "release")["username"]
+        roster = self.helper(intro, ROSTER_SCRIPT, name="kc-roster")["users"]
+        planned = [user for user in roster if user["username"] != smoke_member]
+        require(len(planned) == len(roster) - (1 if smoke_member else 0), "The smoke member is missing from the roster")
+        pre.check_member_counts({"realm_members": len(planned), "disabled": sum(1 for user in planned if not user["enabled"]),
                                  "service_accounts": counted["service_accounts"]}, intro.plan["members"])
         out = self.one_shot(intro, "api", ["prisma/import-member-rights.cjs"], timeout=600, entrypoint="node", name="member-import")
         require(out["exit"] == 0 and out["container_exit"] == 0 and b"Member rights import completed" in out["stdout"], "Member rights import failed")
@@ -2267,6 +2790,7 @@ class HostOps:
             self.write_env((b0 / ".env").read_bytes())
             reverted.append("env")
         require(self.compose_digest_now() == intro.plan["compose"]["before_sha256"], "Previous configuration was not restored")
+        self.prepare(intro)
         if intro.state.pop("db_recreated", False):
             self.compose(["up", "-d", "--no-deps", "--no-build", "--pull", "never", "--force-recreate", "db"], override=self.pins(intro), timeout=180)
             self.db_ready(120, "Database did not become ready")
@@ -2282,10 +2806,13 @@ class HostOps:
         return intro.plan["smoke"]["frame"]
 
     def fenced_smoke(self, intro):
-        token = self.token_since(intro.state["imported_at"], "the member import")
-        result = smoke(self.t["origin"], connect=self.maintenance(), ca_file=self.t["ca_file"], token=token, frame=self.frame(intro),
-                       worklist_uid=frame_study(intro.plan))
-        require(smoke_passed(result), "The fenced smoke did not run every check")
+        if self.unattended:
+            result = self.unattended_release_smoke(intro, self.maintenance())
+        else:
+            token = self.token_since(intro.state["imported_at"], "the member import")
+            result = smoke(self.t["origin"], connect=self.maintenance(), ca_file=self.t["ca_file"], token=token, frame=self.frame(intro),
+                           worklist_uid=frame_study(intro.plan))
+            require(smoke_passed(result), "The fenced smoke did not run every check")
         check_resolved(self.resolved(intro), self.t, target_checkout=True, maintenance=True, images=intro.plan["release"]["images"])
         return result
 
@@ -2336,6 +2863,8 @@ class HostOps:
             pre.check_provisioned(ops.role_catalog(self.names["db"]), intro.plan["storage"], logins)
         pre.check_keycloak_serverinfo(self.keycloak_selected(intro))
         require(not self.one_shots_alive(intro), "A one-shot worker of this release exists")
+        # No smoke member (or any account named like one) may meet the public ingress.
+        require(self.psql(SMOKE_MEMBERS_SQL, "keycloak") == "0", "The smoke member still exists")
         return {"images": images, "api_environment": sorted(names - image_names), "backup": self.backup_readiness(intro)}
 
     def backup_readiness(self, intro):
@@ -2385,6 +2914,11 @@ class HostOps:
         return out
 
     def public_smoke(self, intro):
+        if self.unattended:
+            # The authenticated checks ran fenced through the same proxy configuration; the smoke member is gone, so the
+            # public ingress proves health, the unauthenticated refusal and the realm's sign-in for this origin.
+            result = health_check(self.t["origin"], ca_file=self.t["ca_file"], member_rights=True)
+            return {**result, "discovery": discovery_check(self.t["origin"], ca_file=self.t["ca_file"]), "authenticated": "fenced (L-10a)"}
         token = self.token_since(intro.state["imported_at"], "the member import")
         result = smoke(self.t["origin"], ca_file=self.t["ca_file"], token=token, frame=self.frame(intro), worklist_uid=frame_study(intro.plan))
         require(smoke_passed(result), "The public smoke did not run every check")
@@ -2469,6 +3003,7 @@ class HostOps:
         previous_env = (b0 / ".env").read_bytes()
         self.write_env(previous_env)
         require(self.compose_digest_now() == intro.plan["compose"]["before_sha256"], "Previous configuration was not restored")
+        self.prepare(intro)
         project = self.recovery_project(intro)
         recovery = {"project": project, "pg": project + "_pg-db", "orthanc": project + "_orthanc-db", "persisted": False}
         for name in (recovery["pg"], recovery["orthanc"]):
@@ -2575,10 +3110,32 @@ class HostOps:
         require(smoke_passed(result), "The previous-version smoke did not run every check")
         return result
 
+    def unattended_previous_smoke(self, intro, connect):
+        """RB-04b unattended: a smoke member made in the restored realm (so its login is necessarily after the restore),
+        the headless-browser login, the previous version's own checks, then the member deleted again - whatever happened."""
+        self.create_smoke_member(intro, "previous")
+        try:
+            token, refresh, client_id = self.browser_login(intro, connect=connect)
+            issued = token_claims(token).get("iat")
+            require(type(issued) is int and issued >= int(parse_utc(intro.state["restored_at"]).timestamp()),
+                    "The smoke login predates this rollback's restore")
+            result = smoke(self.t["origin"], connect=connect, ca_file=self.t["ca_file"], token=token, frame=self.frame(intro),
+                           worklist_uid=frame_study(intro.plan), member_rights=False)
+            require(smoke_passed(result), "The previous-version smoke did not run every check")
+            self.end_session(refresh, client_id, connect=connect)
+            record, stored = self.write_smoke_record(intro, {name: True for name in PREVIOUS_SMOKE_CHECKS}, "operator-smoke-previous.json")
+            intro.state["rollback_smoke_record"] = stored
+        finally:
+            self.remove_smoke_member_now(intro)
+        return result
+
     def fenced_previous_smoke(self, intro):
         """RB-04b: the previous version proves itself before anything opens: a login made after the restore, the worklist
         listing the plan's study and the exact frame bytes, through the maintenance ingress."""
-        result = self.previous_smoke(intro, connect=self.maintenance())
+        if self.unattended:
+            result = self.unattended_previous_smoke(intro, self.maintenance())
+        else:
+            result = self.previous_smoke(intro, connect=self.maintenance())
         frame = self.frame(intro)
         intro.state["rollback_smoke"] = {"member": True, "token_after_restore": True, "worklist_uid": frame_study(intro.plan),
                                          "frame_sha256": frame["sha256"], "frame_bytes": frame["bytes"]}
@@ -2591,6 +3148,7 @@ class HostOps:
 
     def reopen_previous_ingress(self, intro):
         require(intro.state.get("rollback_smoke") and intro.state["recovery"].get("persisted"), "The previous version has not proved itself")
+        require(self.psql(SMOKE_MEMBERS_SQL, "keycloak") == "0", "The smoke member still exists")
         self.compose(["up", "-d", "--no-deps", "--no-build", "--pull", "never", "--force-recreate", "proxy"],
                      override=self.pins(intro, maintenance=False), timeout=180, project=intro.state["recovery"]["project"])
         self.wait(lambda: self.proxy_observed(intro)["running"], 60, "Proxy did not start")
@@ -2601,6 +3159,9 @@ class HostOps:
         return {"proxy": observed, "ports": ports}
 
     def public_previous_smoke(self, intro):
+        if self.unattended:
+            result = health_check(self.t["origin"], ca_file=self.t["ca_file"], member_rights=False)
+            return {**result, "discovery": discovery_check(self.t["origin"], ca_file=self.t["ca_file"]), "authenticated": "fenced (RB-04b)"}
         return self.previous_smoke(intro, connect=None)
 
     # ── rehearsal seed ──
@@ -2631,7 +3192,38 @@ class HostOps:
                 "Clone volumes already exist")
         require(intro.state["checkout"] == "previous" and self.text(["git", "rev-parse", "HEAD"]) == intro.plan["previous"]["sha"],
                 "Clone checkout is not the previous release")
-        return {"source_manifest_sha256": digest, "secrets_isolated": True, "resolved": "target manifest"}
+        certificate = self.certificate_volume_check(intro, model)
+        return {"source_manifest_sha256": digest, "secrets_isolated": True, "resolved": "target manifest", "certificate": certificate}
+
+    def certificate_volume_check(self, intro, model):
+        """D1066: the clone's proxy reads its certificate from a named volume, which must already hold the clone's kin.crt
+        and kin.key before the proxy first starts (an empty volume would make the image generate a self-signed pair that
+        the CA file does not trust). The seed never fills it: an absent or empty volume, or a certificate that does not
+        fit the origin's host, the CA file or the next seven days, is a refusal before any change. Read-only check: a
+        networkless, read-only container of the previous proxy image with the volume and the CA file mounted read-only
+        (the volume is inspected first, so the check never creates it)."""
+        sources = [entry["source"] for entry in model["mounts"].get("proxy", []) if entry["type"] == "volume" and entry["target"] == "/etc/nginx/certs"]
+        require(len(sources) == 1 and model["volumes"].get(sources[0]), "The clone proxy has no certificate volume")
+        volume = model["volumes"][sources[0]]
+        require(self.cmd(["docker", "volume", "inspect", volume], check=False).returncode == 0,
+                "The clone certificate volume does not exist; fill it with kin.crt and kin.key before the seed: " + volume)
+        host = urlsplit(self.t["origin"]).hostname
+        script = ('test -s /certs/kin.crt && test -s /certs/kin.key && openssl x509 -in /certs/kin.crt -noout -checkend 604800 >/dev/null '
+                  '&& openssl x509 -in /certs/kin.crt -noout "$2" "$1" | grep -q " does match " '
+                  '&& { [ ! -e /kin-ca.pem ] || openssl verify -CAfile /kin-ca.pem /certs/kin.crt >/dev/null; }')
+        command = ["docker", "run", "--rm", "--network", "none", "--read-only", "--label", "kin.ops.run=" + uuid.uuid4().hex[:12],
+                   "--mount", "type=volume,source=" + volume + ",target=/certs,readonly"]
+        if self.t["ca_file"]:
+            command += ["--mount", "type=bind,source=" + self.t["ca_file"] + ",target=/kin-ca.pem,readonly"]
+        try:
+            ipaddress.ip_address(host)
+            flag = "-checkip"
+        except ValueError:
+            flag = "-checkhost"
+        command += ["--entrypoint", "sh", intro.plan["previous"]["images"]["proxy"], "-c", script, "certificate-check", host, flag]
+        result = self.cmd(command, timeout=120, check=False)
+        require(result.returncode == 0, "The clone certificate volume is empty or its certificate does not fit the origin and the CA file: " + volume)
+        return {"volume": volume, "host": host, "ca_file": bool(self.t["ca_file"]), "valid_days_at_least": 7}
 
     def keycloak_isolation(self, intro, source_env, clone_env, source_origin):
         """The restored realm keeps every member/role/group row; only the clone's client secrets, origin and mail change."""
@@ -2745,9 +3337,15 @@ def policy_valid(policy):
         require(type(policy[key]) is str and policy[key].startswith("/") and "\x00" not in policy[key], "Invalid policy path")
     identity_valid(policy["production"])
     require(type(policy["targets_allowed"]) is list and policy["targets_allowed"] in (["production"], ["rehearsal"]), "Invalid targets")
-    smoke_policy = _keys(policy["smoke"], ("token_file", "ca_file"), "policy smoke")
+    smoke_policy = _keys(policy["smoke"], ("token_file", "ca_file", "browser_cmd"), "policy smoke")
     require(type(smoke_policy["token_file"]) is str and smoke_policy["token_file"].startswith("/"), "Invalid token file")
     require(smoke_policy["ca_file"] is None or (type(smoke_policy["ca_file"]) is str and smoke_policy["ca_file"].startswith("/")), "Invalid CA file")
+    # IRT-14 (D1062): null keeps the operator's login and smoke record; an argv (absolute program first) runs the
+    # unattended smoke through that headless browser (on this host, or a wrapper reaching the browser host).
+    browser = smoke_policy["browser_cmd"]
+    require(browser is None or (type(browser) is list and 0 < len(browser) <= 16 and all(type(item) is str and 0 < len(item) <= 512
+                                                                                        and "\x00" not in item for item in browser)
+                                and browser[0].startswith("/")), "Invalid smoke browser command")
     # null: the C1 rule (a root-owned checkout). Otherwise the operating account that owns the production checkout
     # (e.g. /home/ubuntu/pacs-starter-kit); policy, state, approvals and evidence stay root-owned either way.
     owner = policy["repository_owner"]
@@ -2822,12 +3420,15 @@ class IntroductionHost:
         self.policy = policy_valid(host.decode(host.read_secure(policy_path)))
         require(self.policy["enabled"] is True, "Introduction policy is disabled")
         self.owner = self.policy["repository_owner"]
+        # The checkout's own mode bits are judged per request (a target manifest may declare the recorded correction of
+        # IRT-13); its path, owner and every ancestor are judged here.
         if self.owner is None:
-            self.repository = host.protected(self.policy["repository"], private=True, directory=True)
-            host.protected(self.repository / ".git", directory=True)
+            self.repository = Path(self.policy["repository"])
+            host.protected(self.repository.parent, directory=True)
+            require(self.repository.lstat().st_uid == 0 and not stat_module.S_ISLNK(self.repository.lstat().st_mode), "Repository is not root's")
         else:
-            self.repository = owned_private(self.policy["repository"], self.owner, private=True, directory=True)
-            owned_private(self.repository / ".git", self.owner, directory=True)
+            self.repository = owned_private(self.policy["repository"], self.owner, directory=True, own_mode=False)
+            owned_private(self.repository / ".git", self.owner, directory=True, own_mode=False)
         self.state = host.protected(self.policy["state_dir"], private=True, directory=True)
         for name in EMR_DIRS:
             host.protected(self.state / name, private=True, directory=True)
@@ -2846,8 +3447,21 @@ class IntroductionHost:
         require(plan["target_kind"] in self.policy["targets_allowed"], "This host does not run that target kind")
         target = target_valid(self.document("emr-targets", plan["target_manifest_sha256"]))
         require(target["repository"] == str(self.repository), "Target repository is not the protected repository")
+        browser_cmd = self.policy["smoke"]["browser_cmd"]
+
+        def repository_check():
+            if self.owner is None:
+                host.protected(self.repository, private=True, directory=True)
+                host.protected(self.repository / ".git", directory=True)
+            else:
+                owned_private(self.repository, self.owner, private=True, directory=True)
+                owned_private(self.repository / ".git", self.owner, directory=True)
+        if not (target["fix_checkout_mode"] and request["phase"] == "capture"):
+            # Only a capture whose manifest declares the correction may meet an open checkout (its L-00a fixes and records
+            # it); every other request requires the private checkout first.
+            repository_check()
         approval = approval_valid(decode(host.read_secure(self.state / "emr-approvals" / (digest + ".json"))), digest,
-                                  request["phase"], int(time.time()), plan["target_kind"])
+                                  request["phase"], int(time.time()), plan["target_kind"], unattended=browser_cmd is not None)
         evidence = {kind: self.document("emr-evidence", value) for kind, value in approval["evidence"].items()}
         # One use: a replayed request with the same bytes can never run a phase twice.
         host.write_secure(self.state / "emr-used" / (digest + ".json"), {"request_sha256": digest, "consumed_at": int(time.time())},
@@ -2864,7 +3478,8 @@ class IntroductionHost:
                 return host.protected(path, private=True)
             return owned_private(path, self.owner, private=True)
         ops_host = HostOps(target=target, plan=plan, runner=runner, records=records, env_next=staged,
-                           token_reader=lambda: host.decode(host.read_secure(token_file, 32768)), secure=secure, owner=self.owner)
+                           token_reader=lambda: host.decode(host.read_secure(token_file, 32768)), secure=secure, owner=self.owner,
+                           browser_cmd=browser_cmd, repository_check=repository_check)
         intro = Introduction(plan=plan, plan_sha256=request["plan_sha256"], target=target, production=self.policy["production"],
                              ops=ops_host, records=records, repository=self.repository, host_key=local_host_key(),
                              tool=tool_hashes(), evidence=evidence)
@@ -2876,6 +3491,123 @@ class IntroductionHost:
                         "request_sha256": digest, "code": code_of(error)}
 
 
+# ── IRT-14: the reference headless browser of the unattended smoke ──
+
+def _der(data, offset):
+    """One DER element at offset: (tag, start of its content, end of the element)."""
+    require(offset + 2 <= len(data), "Truncated certificate")
+    tag, length, offset = data[offset], data[offset + 1], offset + 2
+    if length & 0x80:
+        count = length & 0x7F
+        require(1 <= count <= 4 and offset + count <= len(data), "Unsupported certificate encoding")
+        length, offset = int.from_bytes(data[offset:offset + count], "big"), offset + count
+    require(offset + length <= len(data), "Truncated certificate")
+    return tag, offset, offset + length
+
+
+def spki_pin(der):
+    """base64(sha256(SubjectPublicKeyInfo)) of a DER certificate: the form Chromium's --ignore-certificate-errors-spki-list
+    takes. TBSCertificate = [0] version (optional), serialNumber, signature, issuer, validity, subject, SPKI, ..."""
+    tag, start, end = _der(der, 0)
+    require(tag == 0x30 and end == len(der), "Not a certificate")
+    tag, start, end = _der(der, start)
+    require(tag == 0x30, "Not a certificate")
+    fields, offset = [], start
+    while offset < end:
+        tag, _, stop = _der(der, offset)
+        fields.append((tag, offset, stop))
+        offset = stop
+    if fields and fields[0][0] == 0xA0:
+        fields = fields[1:]
+    require(len(fields) >= 6 and fields[0][0] == 0x02 and all(field[0] == 0x30 for field in fields[1:6]), "Unexpected certificate layout")
+    _, begin, stop = fields[5]
+    return base64.b64encode(hashlib.sha256(der[begin:stop]).digest()).decode("ascii")
+
+
+def verified_pin(host, port, connect, ca_file):
+    """The chain of the server the browser will reach, verified here (the CA file of a clone, else the system trust
+    store) for the origin's host name; the leaf's SPKI pin is then the only certificate the browser accepts."""
+    context = ssl.create_default_context(cafile=ca_file) if ca_file else ssl.create_default_context()
+    with socket.create_connection(tuple(connect) if connect else (host, port), timeout=20) as raw, \
+            context.wrap_socket(raw, server_hostname=host) as tls:
+        return spki_pin(tls.getpeercert(binary_form=True))
+
+
+def browser_smoke(spec):
+    """One real Authorization Code + PKCE login in headless Chromium (Playwright): the realm's own sign-in page, the
+    member's credentials typed in, the code taken at the registered redirect before it reaches any application, and
+    exchanged with its S256 verifier. Chromium does not use the system trust store, so the chain is verified here first
+    (ca_file or the system store) and the browser accepts exactly that leaf key (--ignore-certificate-errors-spki-list,
+    honoured with a user-data-dir only). With `connect` (the fenced maintenance ingress) the browser maps the origin's
+    host:port to it (--host-resolver-rules), so every redirect keeps the real origin. The profile lives in the given
+    folder (the run's private folder) and is removed afterwards. The policy's browser command carries the browsers' path
+    explicitly (the entry clears the environment), e.g. /usr/bin/env PLAYWRIGHT_BROWSERS_PATH=/opt/kin-smoke/browsers
+    /usr/bin/python3 <repository>/scripts/ops_emr_introduction.py browser-smoke."""
+    from urllib.parse import parse_qs, urlencode
+    origin = urlsplit(origin_valid(spec["origin"]))
+    host, port = origin.hostname, origin.port or 443
+    connect = tuple(spec["connect"]) if spec.get("connect") else None
+    require(connect is None or (len(connect) == 2 and connect[0] == "127.0.0.1" and type(connect[1]) is int), "The browser connects to loopback only")
+    profile = Path(spec["profile_dir"])
+    require(profile.is_absolute() and not profile.exists() and profile.parent.is_dir(), "The browser profile folder must be new")
+    redirect = urlsplit(spec["redirect_uri"])
+    require(redirect.scheme == "https" and redirect.hostname == SMOKE_REDIRECT_HOST, "The smoke redirect must be the unresolvable callback")
+    from playwright.sync_api import sync_playwright
+    pin = verified_pin(host, port, connect, spec.get("ca_file"))
+    verifier = token_source.token_urlsafe(48)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).decode("ascii").rstrip("=")
+    state = uuid.uuid4().hex
+    query = urlencode({"client_id": spec["client_id"], "response_type": "code", "scope": "openid", "redirect_uri": spec["redirect_uri"],
+                       "state": state, "nonce": state, "code_challenge": challenge, "code_challenge_method": "S256"})
+    landed = {}
+    rules =["MAP %s ~NOTFOUND" % SMOKE_REDIRECT_HOST]
+    if connect:
+        rules.insert(0, "MAP %s:%d %s:%d" % (host, port, connect[0], connect[1]))
+    args = ["--ignore-certificate-errors-spki-list=" + pin, "--host-resolver-rules=" + ", ".join(rules)]
+    profile.mkdir(mode=0o700)
+    try:
+        with sync_playwright() as playwright:
+            context = playwright.chromium.launch_persistent_context(str(profile), headless=True, args=args, ignore_https_errors=False)
+            try:
+                page = context.pages[0] if context.pages else context.new_page()
+
+                def capture(request):
+                    # Redirects are not routed; the request event sees the redirect target before it fails to resolve.
+                    if request.url.startswith(spec["redirect_uri"]) and "url" not in landed:
+                        landed["url"] = request.url
+                page.on("request", capture)
+                page.goto(spec["origin"] + "/auth/realms/kin/protocol/openid-connect/auth?" + query, wait_until="domcontentloaded", timeout=60000)
+                agent = re.search(r"Chrome/([0-9.]+)", page.evaluate("navigator.userAgent") or "")
+                version = agent.group(1) if agent else "unknown"
+                page.fill("#username", spec["username"])
+                page.fill("#password", spec["password"])
+                try:
+                    page.click("#kc-login")
+                except Exception:
+                    # The navigation to the unresolvable callback fails by design; only a click before it is an error.
+                    if "url" not in landed:
+                        raise
+                for _ in range(120):
+                    if "url" in landed:
+                        break
+                    page.wait_for_timeout(250)
+            finally:
+                context.close()
+    finally:
+        shutil.rmtree(profile, ignore_errors=True)
+    require("url" in landed, "The sign-in did not return to the registered redirect")
+    params = parse_qs(urlsplit(landed["url"]).query)
+    require(params.get("state") == [state] and len(params.get("code", [])) == 1, "The sign-in returned another login's code")
+    code, raw = https_post(spec["origin"], "/auth/realms/kin/protocol/openid-connect/token",
+                           {"client_id": spec["client_id"], "grant_type": "authorization_code", "code": params["code"][0],
+                            "redirect_uri": spec["redirect_uri"], "code_verifier": verifier}, connect=connect, ca_file=spec.get("ca_file"))
+    require(code == 200, "The authorization code was not exchanged")
+    tokens = json.loads(raw)
+    claims = token_claims({"access_token": tokens["access_token"]})
+    return {"flow": "authorization_code+S256", "browser": "chromium " + version, "access_token": tokens["access_token"],
+            "refresh_token": tokens["refresh_token"], "subject": claims.get("sub")}
+
+
 # ── CLI helpers: no host change ──
 
 EXAMPLE_POLICY = {"schema": 1, "enabled": False, "repository": "/srv/kin/repository", "state_dir": "/var/lib/kin-deploy",
@@ -2885,7 +3617,8 @@ EXAMPLE_POLICY = {"schema": 1, "enabled": False, "repository": "/srv/kin/reposit
                                  "volumes": {"pg": "pacs-starter-kit_pg-db", "orthanc": "pacs-starter-kit_orthanc-db",
                                              "emr_access": "pacs-starter-kit_emr-access", "emr_state": "pacs-starter-kit_emr-state"},
                                  "networks": {"default": "pacs-starter-kit_default", "workflow": "kin-workflow"}},
-                  "targets_allowed": ["production"], "smoke": {"token_file": "/etc/kin-deploy/smoke-token.json", "ca_file": None},
+                  "targets_allowed": ["production"], "smoke": {"token_file": "/etc/kin-deploy/smoke-token.json", "ca_file": None,
+                                                               "browser_cmd": None},
                   "repository_owner": None}
 
 
@@ -2896,7 +3629,8 @@ def example_target():
             "ports": {"maintenance": "127.0.0.1:9444:443", "public": ["80:80", "443:443"]},
             "tls_certificate": "/etc/letsencrypt/live/pacs.example.invalid/fullchain.pem",
             "cron": {"user": "ubuntu", "tags": ["kin-pacs-reviewed-backup", "kin-pacs-reviewed-monitor"]}, "ca_file": None,
-            "keycloak_admin": "admin"}
+            "keycloak_admin": "admin", "external_networks": {}, "declared_overlays": [], "tracked_overlay_reconcile": [],
+            "fix_checkout_mode": False}
 
 
 def main(argv=None):
@@ -2925,7 +3659,15 @@ def main(argv=None):
     receipt.add_argument("--b0-created-utc")
     receipt.add_argument("--policy", type=Path, required=True)
     receipt.add_argument("--bundle", type=Path, help="The rehearsal's run directory: re-verify every phase result and the journal")
+    sub.add_parser("browser-smoke", help="The reference headless browser of the unattended smoke: login spec on stdin, KIN_RESULT out")
     args = parser.parse_args(argv)
+    if args.command == "browser-smoke":
+        try:
+            print("KIN_RESULT " + json.dumps(browser_smoke(json.loads(sys.stdin.buffer.read(65536).decode("utf-8")))))
+            return 0
+        except Exception as error:   # never the spec or a token in the message
+            print(json.dumps({"valid": False, "error": code_of(error)}), file=sys.stderr)
+            return 1
     try:
         if args.command == "example":
             print(json.dumps(EXAMPLE_POLICY if args.what == "policy" else example_target(), indent=1))
