@@ -998,6 +998,13 @@ def smoke_passed(result):
     return (isinstance(result, dict) and all(result.get(key) is True for key in ("health", "auth_refusal", "member", "worklist", "frame")))
 
 
+def product_logout_refused(session):
+    """The browser's product-session check: signed in through the product, its logout answered 204, and the ended
+    session is then refused (401) both with its binding header and by its cookie alone."""
+    return (type(session) is dict and session.get("signed_in") is True and session.get("logout_status") == 204
+            and session.get("old_session_status") == 401 and session.get("old_cookie_status") == 401)
+
+
 def token_claims(token):
     """The (unverified) claims of the smoke token; the API verifies the token, this only reads when it was issued."""
     try:
@@ -1587,7 +1594,8 @@ const out=v=>process.stdout.write('KIN_RESULT '+JSON.stringify(v)+'\n');
  const clients=async()=>input.client_id?((await call('GET','/clients?clientId='+encodeURIComponent(input.client_id)))||[]):[];
  if(operation==='create-member'){
   if((await users()).length)throw new Error('exists');
-  await call('POST','/users',{username:input.username,enabled:true,emailVerified:true,firstName:'Release',lastName:'Smoke',requiredActions:[]});
+  await call('POST','/users',{username:input.username,email:input.username+'@kin-smoke.invalid',enabled:true,emailVerified:true,
+   firstName:'Release',lastName:'Smoke',requiredActions:[]});
   const [user]=await users();
   await call('PUT','/users/'+user.id+'/reset-password',{type:'password',value:process.env.KIN_SMOKE_PASSWORD,temporary:false});
   const roles=[];for(const name of input.roles){roles.push(await call('GET','/roles/'+encodeURIComponent(name)));}
@@ -2303,15 +2311,22 @@ class HostOps:
         entry.update(outcome="exit", exit=result.returncode, seconds=round(time.monotonic() - started, 3),
                      stdout=output_record(result.stdout), stderr=output_record(result.stderr))
         self.records.command(entry)
-        require(result.returncode == 0, "The smoke browser login failed")
+        if result.returncode:
+            # The browser's own record-safe failure code (a fixed check message or an error type; see code_of).
+            try:
+                reason = json.loads(result.stderr.decode("utf-8").strip().splitlines()[-1]).get("error")
+            except (ValueError, IndexError, AttributeError, UnicodeDecodeError):
+                reason = None
+            raise Stop("The smoke browser login failed" + (": " + reason[:160] if type(reason) is str else ""))
         value = result_line(result.stdout)
         require(type(value) is dict and value.get("flow") == "authorization_code+S256" and type(value.get("refresh_token")) is str,
                 "The smoke browser did not return an authorization-code login")
         return value
 
-    def browser_login(self, intro, *, connect):
+    def browser_login(self, intro, *, connect, product_session=False):
         """One real Authorization Code + PKCE login of the smoke member in the headless browser, through a temporary public
-        client (removed with the member); the token must belong to that member."""
+        client (removed with the member); the token must belong to that member. product_session (the introduced release):
+        first the product's own sign-in, its logout and the refusal of the ended session, in the same browser."""
         member = intro.state["smoke_member"]
         credentials = json.loads(intro.records.read(intro.records.directory / member["credentials"]))
         client_id = member["username"] + "-client"
@@ -2325,27 +2340,20 @@ class HostOps:
         try:
             value = self.run_browser({"origin": self.t["origin"], "connect": list(connect) if connect else None, "ca_file": self.t["ca_file"],
                                       "username": credentials["username"], "password": credentials["password"], "client_id": client_id,
-                                      "redirect_uri": redirect, "profile_dir": str(profile)})
+                                      "redirect_uri": redirect, "profile_dir": str(profile), "product_session": product_session})
         finally:
             shutil.rmtree(profile, ignore_errors=True)
             require(not profile.exists(), "The browser profile could not be removed")
         token = token_valid({"access_token": value.get("access_token"), "subject": value.get("subject")})
         require(token["subject"] == member["id"], "The browser login belongs to another subject")
-        return token, value["refresh_token"], client_id
+        return token, value["refresh_token"], client_id, value
 
     def end_session(self, refresh_token, client_id, *, connect):
+        """The temporary client's own sign-in session ends with the smoke (its access token is a bearer credential the API
+        checks statelessly until it expires; the product's session logout is the browser's check)."""
         code, _ = https_post(self.t["origin"], "/auth/realms/kin/protocol/openid-connect/logout",
                              {"client_id": client_id, "refresh_token": refresh_token}, connect=connect, ca_file=self.t["ca_file"])
         require(code in (200, 204), "The smoke login session could not be ended")
-
-    def old_token_refused(self, token, *, connect, seconds=20):
-        deadline = time.monotonic() + seconds
-        while True:
-            code = https_get(self.t["origin"], "/api/me", connect=connect, ca_file=self.t["ca_file"], token=token["access_token"])[0]
-            if code in (401, 403):
-                return True
-            require(time.monotonic() < deadline, "A token of an ended session is still accepted")
-            time.sleep(1)
 
     def remove_smoke_member_now(self, intro):
         member = intro.state.get("smoke_member")
@@ -2365,16 +2373,20 @@ class HostOps:
         return record, {"file": name, "sha256": digest}
 
     def unattended_release_smoke(self, intro, connect):
-        """L-10a unattended: the eight operator checks, by the executor (D1062), with the smoke member made at L-08b."""
-        token, refresh, client_id = self.browser_login(intro, connect=connect)
+        """L-10a unattended: the eight operator checks, by the executor (D1062), with the smoke member made at L-08b. The
+        product's own sign-in and logout run in the browser (the ended session must be refused); the worklist, frame and
+        W2 checks use the temporary client's fresh token."""
+        token, refresh, client_id, value = self.browser_login(intro, connect=connect, product_session=True)
         issued = token_claims(token).get("iat")
         require(type(issued) is int and issued >= int(parse_utc(intro.state["imported_at"]).timestamp()), "The smoke login predates the member import")
         result = smoke(self.t["origin"], connect=connect, ca_file=self.t["ca_file"], token=token, frame=self.frame(intro),
                        worklist_uid=frame_study(intro.plan))
         require(smoke_passed(result), "The fenced smoke did not run every check")
         row = worklist_row(self.t["origin"], frame_study(intro.plan), connect=connect, ca_file=self.t["ca_file"], token=token["access_token"])
-        checks = {"login_pkce": True, "worklist_uid": True, "ohif_frame": True, "realm_v1_pending_zero": True,
-                  "w2_modality": type((row or {}).get("modality")) is str and bool(row["modality"])}
+        session = value.get("product_session")
+        checks = {"login_pkce": type(session) is dict and session.get("signed_in") is True, "worklist_uid": True, "ohif_frame": True,
+                  "realm_v1_pending_zero": True, "w2_modality": type((row or {}).get("modality")) is str and bool(row["modality"]),
+                  "logout_old_session_refused": product_logout_refused(session)}
         for name, path in (("w2_folders", "/api/filter-folders"), ("w2_shortcuts", "/api/workspace-shortcuts")):
             code, _, raw = https_get(self.t["origin"], path, connect=connect, ca_file=self.t["ca_file"], token=token["access_token"])
             try:
@@ -2382,7 +2394,6 @@ class HostOps:
             except ValueError:
                 checks[name] = False
         self.end_session(refresh, client_id, connect=connect)
-        checks["logout_old_session_refused"] = self.old_token_refused(token, connect=connect)
         record, stored = self.write_smoke_record(intro, {name: checks[name] for name in OPERATOR_SMOKE_CHECKS}, "operator-smoke.json")
         require(record["passed"], "The unattended smoke failed: " + ",".join(sorted(name for name, value in checks.items() if not value)))
         operator_smoke_valid(record, intro.plan_sha256)
@@ -3125,7 +3136,7 @@ class HostOps:
         the headless-browser login, the previous version's own checks, then the member deleted again - whatever happened."""
         self.create_smoke_member(intro, "previous")
         try:
-            token, refresh, client_id = self.browser_login(intro, connect=connect)
+            token, refresh, client_id, _ = self.browser_login(intro, connect=connect)
             issued = token_claims(token).get("iat")
             require(type(issued) is int and issued >= int(parse_utc(intro.state["restored_at"]).timestamp()),
                     "The smoke login predates this rollback's restore")
@@ -3577,11 +3588,16 @@ def browser_smoke(spec):
         rules.insert(0, "MAP %s:%d %s:%d" % (host, port, connect[0], connect[1]))
     args = ["--ignore-certificate-errors-spki-list=" + pin, "--host-resolver-rules=" + ", ".join(rules)]
     profile.mkdir(mode=0o700)
+    product = None
     try:
         with sync_playwright() as playwright:
             context = playwright.chromium.launch_persistent_context(str(profile), headless=True, args=args, ignore_https_errors=False)
             try:
                 page = context.pages[0] if context.pages else context.new_page()
+                if spec.get("product_session"):
+                    product = product_session_check(page, spec)
+                    # A new sign-in session for the temporary client (the ended one must not be continued by SSO).
+                    context.clear_cookies()
 
                 def capture(request):
                     # Redirects are not routed; the request event sees the redirect target before it fails to resolve.
@@ -3603,11 +3619,14 @@ def browser_smoke(spec):
                     if "url" in landed:
                         break
                     page.wait_for_timeout(250)
+                if "url" not in landed:
+                    # Where the sign-in stopped (a page title such as a required action; never a value of the form).
+                    landed["title"] = re.sub(r"[^\w .:-]", "", page.title() or "")[:60]
             finally:
                 context.close()
     finally:
         shutil.rmtree(profile, ignore_errors=True)
-    require("url" in landed, "The sign-in did not return to the registered redirect")
+    require("url" in landed, "The sign-in did not return to the registered redirect (page: " + landed.get("title", "") + ")")
     params = parse_qs(urlsplit(landed["url"]).query)
     require(params.get("state") == [state] and len(params.get("code", [])) == 1, "The sign-in returned another login's code")
     code, raw = https_post(spec["origin"], "/auth/realms/kin/protocol/openid-connect/token",
@@ -3617,7 +3636,54 @@ def browser_smoke(spec):
     tokens = json.loads(raw)
     claims = token_claims({"access_token": tokens["access_token"]})
     return {"flow": "authorization_code+S256", "browser": "chromium " + version, "access_token": tokens["access_token"],
-            "refresh_token": tokens["refresh_token"], "subject": claims.get("sub")}
+            "refresh_token": tokens["refresh_token"], "subject": claims.get("sub"), "product_session": product}
+
+
+# The product's own session requests as its web documents send them (worklist-v0/hpacs-lite/auth.js: X-KIN-CSRF, and
+# X-KIN-Session once the document knows its session); GET /api/me without the binding is the product's bootstrap call.
+PRODUCT_ME_JS = ("async (sid) => { const h = {'X-KIN-CSRF': '1'}; if (sid) h['X-KIN-Session'] = sid;"
+                 " const r = await fetch('/api/me', {headers: h, credentials: 'same-origin', cache: 'no-store'});"
+                 " let b = {}; try { b = await r.json(); } catch (e) {}"
+                 " return {status: r.status, sid: typeof b.sessionId === 'string' && b.sessionId ? b.sessionId : null}; }")
+PRODUCT_LOGOUT_JS = ("async (sid) => (await fetch('/api/auth/logout', {method: 'POST', credentials: 'same-origin',"
+                     " headers: {'X-KIN-CSRF': '1', 'X-KIN-Session': sid}})).status")
+
+
+def sign_in(page, spec):
+    """The realm's sign-in form, filled with the smoke member's credentials."""
+    page.wait_for_selector("#username", timeout=60000)
+    page.fill("#username", spec["username"])
+    page.fill("#password", spec["password"])
+    page.click("#kc-login")
+
+
+def product_session_check(page, spec):
+    """The product's own sign-in (its client, through /api/auth/login and its callback) in this browser until its
+    document has entered the session; then, from a neutral page of the same origin, the product's logout and the ended
+    session asked again with its binding and by its cookie alone. Statuses only; the session id stays in the browser."""
+    from urllib.parse import parse_qs
+    origin = spec["origin"]
+    page.goto(origin + "/api/auth/login", wait_until="domcontentloaded", timeout=60000)
+    sign_in(page, spec)
+    page.wait_for_url(lambda url: url.startswith(origin + "/worklist/"), timeout=60000)
+    sid = None
+    for _ in range(120):
+        try:
+            answer = page.evaluate(PRODUCT_ME_JS, None)
+            if answer.get("status") == 200 and answer.get("sid"):
+                sid = answer["sid"]
+                break
+        except Exception:
+            pass   # the document is still navigating (its entry step)
+        page.wait_for_timeout(500)
+    if sid is None:
+        error = (parse_qs(urlsplit(page.url).query).get("auth_error") or [""])[0]
+        raise Stop("The product sign-in did not open a session" + (" (" + re.sub(r"[^\w-]", "", error)[:40] + ")" if error else ""))
+    page.goto(origin + "/auth/realms/kin/.well-known/openid-configuration", wait_until="domcontentloaded", timeout=60000)
+    logout = page.evaluate(PRODUCT_LOGOUT_JS, sid)
+    bound = page.evaluate(PRODUCT_ME_JS, sid).get("status")
+    cookie = page.evaluate(PRODUCT_ME_JS, None).get("status")
+    return {"signed_in": True, "logout_status": logout, "old_session_status": bound, "old_cookie_status": cookie}
 
 
 # ── CLI helpers: no host change ──

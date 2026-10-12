@@ -1687,8 +1687,10 @@ with open(os.path.join(spec["profile_dir"], "Cookies"), "w") as handle:
     handle.write("KEYCLOAK_SESSION=synthetic")
 claims = {"sub": spec["username"].replace("kin-smoke-", "id-"), "iat": int(time.time())}
 body = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+# The product's sign-in, logout and the refusal of the ended session (statuses as the browser saw them).
+product = {"signed_in": True, "logout_status": 204, "old_session_status": 401, "old_cookie_status": 401} if spec["product_session"] else None
 print("KIN_RESULT " + json.dumps({"flow": "authorization_code+S256", "browser": "fake", "access_token": "e30." + body + ".sig",
-                                  "refresh_token": "refresh-" + spec["client_id"], "subject": claims["sub"]}))
+                                  "refresh_token": "refresh-" + spec["client_id"], "subject": claims["sub"], "product_session": product}))
 """
 
 
@@ -1892,11 +1894,14 @@ class CommanderAdditionsTests(HostHarness, unittest.TestCase):
         ops_host.create_smoke_member(context, "release")
         full = {"health": True, "auth_refusal": True, "member": True, "worklist": True, "frame": True}
         good = lambda origin, path, *, token=None, **kwargs: (401, "", b"{}") if path == "/api/me" else (200, "", b"[]")
-        cases = {"another subject": ([sys.executable, "-c", FAKE_BROWSER.replace('replace("kin-smoke-", "id-")', 'replace("kin-smoke-", "other-")')], good, {}),
+        fake = lambda old, new: [sys.executable, "-c", FAKE_BROWSER.replace(old, new)]
+        cases = {"another subject": (fake('replace("kin-smoke-", "id-")', 'replace("kin-smoke-", "other-")'), good, {}),
                  "a login before the import": (None, good, {"imported_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()}),
-                 "the old token still accepted": (None, lambda origin, path, *, token=None, **kwargs: (200, "", b"[]"), {}),
+                 "the ended product session still accepted": (fake('"old_session_status": 401', '"old_session_status": 200'), good, {}),
+                 "the ended session's cookie still accepted": (fake('"old_cookie_status": 401', '"old_cookie_status": 200'), good, {}),
+                 "the product logout not confirmed": (fake('"logout_status": 204', '"logout_status": 409'), good, {}),
+                 "no product sign-in": (fake("if spec[\"product_session\"] else None", "if False else None"), good, {}),
                  "a W2 check failing": (None, lambda origin, path, *, token=None, **kwargs: (401, "", b"{}") if path == "/api/me" else (404, "", b""), {})}
-        refused = intro.HostOps.old_token_refused
         for name, (browser, https, state) in cases.items():
             if browser:
                 ops_host.browser_cmd = browser
@@ -1904,8 +1909,7 @@ class CommanderAdditionsTests(HostHarness, unittest.TestCase):
             context.state.pop("operator_smoke", None)
             with self.subTest(case=name), patch.object(intro, "smoke", return_value=full), \
                     patch.object(intro, "worklist_row", return_value={"uid": FRAME_STUDY, "modality": "CT"}), \
-                    patch.object(intro, "https_get", side_effect=https), patch.object(intro, "https_post", return_value=(204, b"")), \
-                    patch.object(intro.HostOps, "old_token_refused", lambda self, token, *, connect, seconds=20: refused(self, token, connect=connect, seconds=0)):
+                    patch.object(intro, "https_get", side_effect=https), patch.object(intro, "https_post", return_value=(204, b"")):
                 with self.assertRaises(intro.Stop):
                     ops_host.unattended_release_smoke(context, ("127.0.0.1", 19444))
                 self.assertNotIn("operator_smoke", context.state)
