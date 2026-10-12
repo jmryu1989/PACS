@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import shutil
 import subprocess
 import sys
@@ -2671,6 +2671,12 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
         db = ops_host.t["containers"]["db"]
         docker.containers[db]["Mounts"].append({"Type": "volume", "Name": "a" * 64, "Destination": "/var/lib/postgresql/extra"})
         ops_host.baseline(context)
+        if PureWindowsPath(ops_host.t["repository"]).drive:
+            # Docker Desktop reports a file bind as /run/desktop/mnt/host/<drive>/<path> (r3-rehearsal-04): the same file.
+            orthanc = docker.containers[ops_host.t["containers"]["orthanc"]]["Mounts"][1]
+            windows = PureWindowsPath(orthanc["Source"])
+            orthanc["Source"] = "/run/desktop/mnt/host/" + windows.drive[0].lower() + "/" + "/".join(windows.parts[1:])
+            ops_host.baseline(context)
         cases = {"a foreign volume": ("db", lambda item: item["Mounts"][0].__setitem__("Name", "pacs-old_pg-db"), "mounts"),
                  "another project": ("api", lambda item: item["Config"]["Labels"].__setitem__("com.docker.compose.project", "other"), "project"),
                  "another network": ("proxy", lambda item: item["NetworkSettings"]["Networks"].__setitem__("foreign_net", {}), "networks"),
@@ -3146,6 +3152,15 @@ class RoundThreeMachineTests(MachineHarness, unittest.TestCase):
 
 
 class HelperTests(unittest.TestCase):
+    def test_118_docker_desktop_bind_sources_name_the_host_path_only_on_a_windows_rehearsal(self):
+        """IRT2-02/D04 on a Windows rehearsal host (r3-rehearsal-04): Docker Desktop reports a bind made through the mount
+        API as /run/desktop/mnt/host/<drive>/<path>; that is the host path <drive>:/<path>. A Linux target (production,
+        the VM) gets every source exactly as reported."""
+        self.assertEqual(intro.host_bind_source("/run/desktop/mnt/host/c/Users/x/report.conf", r"C:\work\repo"), "C:/Users/x/report.conf")
+        self.assertEqual(intro.host_bind_source(r"C:\Users\x\folder", r"C:\work\repo"), r"C:\Users\x\folder")
+        for source in ("/run/desktop/mnt/host/c/Users/x", "/home/ubuntu/.kin-monitor-public"):
+            self.assertEqual(intro.host_bind_source(source, "/srv/kin/repository"), source)
+
     def test_44_env_parsing_compose_digest_and_override(self):
         values = intro.parse_env(b"# comment\nA=1\nB='two words'\n export=x\nC=\"q\"\nbad line\n")
         self.assertEqual(values, {"A": "1", "B": "two words", "C": "q", "export": "x"})

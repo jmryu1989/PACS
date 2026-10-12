@@ -572,13 +572,30 @@ def check_resolved(model, target, *, target_checkout, maintenance=None, images=N
 ANONYMOUS_VOLUME = re.compile(r"[0-9a-f]{64}")
 
 
+def host_bind_source(value, repository):
+    """A bind source as the host names it. Docker Desktop (a Windows rehearsal host) reports a bind made through the
+    mount API as /run/desktop/mnt/host/<drive>/<path>, which is <drive>:/<path> on that host (a folder bind given as a
+    Windows path keeps that form). Linux hosts - production, the VM - are returned unchanged."""
+    text = str(value)
+    if PureWindowsPath(str(repository)).drive:
+        desktop = re.fullmatch(r"/run/desktop/mnt/host/([A-Za-z])/(.*)", text.replace("\\", "/"))
+        if desktop:
+            return desktop.group(1).upper() + ":/" + desktop.group(2)
+    return text
+
+
 def check_running(inspections, model, target):
     """IRT2-02, L-01 before anything changes: every running container of the previous release is what the checked model
     says - its Compose project and service labels, every named volume and bind at its path (an image's own anonymous
     volumes aside), its networks and its published ports - not only its name and image. A container that runs on another
     project's volume, joins another network or publishes another port is refused before any fence."""
-    fold = (lambda text: text.lower()) if PureWindowsPath(target["repository"]).drive else (lambda text: text)
-    path_of = lambda value: PurePosixPath(fold(str(value).replace("\\", "/")))
+    windows = bool(PureWindowsPath(target["repository"]).drive)
+
+    def path_of(value):
+        # A rehearsal on Docker Desktop (Windows) compares host paths case-insensitively and in one form (see
+        # host_bind_source); production and the VM are Linux paths, compared exactly.
+        text = host_bind_source(value, target["repository"]).replace("\\", "/")
+        return PurePosixPath(text.lower() if windows else text)
     named = set(model["volumes"].values())
     for role in ROLES:
         item = inspections[role]
@@ -599,7 +616,8 @@ def check_running(inspections, model, target):
                 actual[mount.get("Destination")] = ("volume", mount.get("Name"))
             elif mount.get("Type") == "bind":
                 actual[mount.get("Destination")] = ("bind", path_of(mount.get("Source")))
-        require(actual == expected, "A running service's mounts differ from the checked model: " + role)
+        differing = sorted(str(key) for key in set(actual) | set(expected) if actual.get(key) != expected.get(key))
+        require(not differing, "A running service's mounts differ from the checked model: " + role + " (" + ", ".join(differing) + ")")
         networks = set(((item.get("NetworkSettings") or {}).get("Networks") or {}))
         require(networks == {model["networks"][key] for key in model["service_networks"].get(role, ["default"])},
                 "A running service's networks differ from the checked model: " + role)
@@ -2798,7 +2816,7 @@ class HostOps:
                     else:
                         sources = [m.get("Source") for m in item.get("Mounts") or [] if m.get("Destination") == key]
                         require(len(sources) == 1 and sources[0], "Unresolvable compose variable: " + name)
-                        values.add(sources[0])
+                        values.add(host_bind_source(sources[0], self.t["repository"]))
                     carriers.add(kind + ":" + service)
                 require(len(values) <= 1, "Unresolvable compose variable: " + name)
                 if values:
