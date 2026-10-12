@@ -1409,8 +1409,11 @@ audit ledger at the backup root (the introduced release's daily backup seals int
   `KIN_TEST_PREVIOUS_API_IMAGE`, `KIN_TEST_PREVIOUS_PROXY_IMAGE` built from the previous commit and
   `KIN_TEST_API_IMAGE`, `KIN_TEST_PROXY_IMAGE` from the target): the fully synthetic rehearsal with the product's own
   compose files on a local daemon - a source stack's B0 seeds a clone with other names and secrets, which runs every
-  phase through rollback and produces the receipt. It is not a rehearsal of a production backup copy, a real realm,
-  production TLS or data volume; that is the separate rehearsal on a disposable host.
+  phase through rollback and produces the receipt. The fenced smoke's token comes from one real Authorization Code +
+  PKCE login through the clone's loopback maintenance ingress (a direct grant carries no `auth_time`, which the product
+  refuses after the member import). `KIN_TEST_EMR_REHEARSAL_EVIDENCE=<dir>` keeps each stack's run records. It is not a
+  rehearsal of a production backup copy, a real realm, production TLS or data volume; that is the separate rehearsal
+  on a disposable host.
 
 # 뷰어 반전 정밀도
 
