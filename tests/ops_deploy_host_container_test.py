@@ -8,12 +8,16 @@ successful operational deployment. No SMTP or operational approval is used.
 EmrIntroductionRehearsal (INTERIM-RELEASE-TOOLS, opt-in: KIN_TEST_EMR_REHEARSAL=1 with the four images below) is the
 fully synthetic rehearsal of the EMR-introduction release mode on a local Docker daemon, with the product's own compose
 files at the previous (Stage-5-shaped) and target commits. A source stack S stands in for production: it starts the
-previous release with a synthetic realm, a synthetic study row and a disabled member, and the mode's capture phase takes
-B0 from it. S is then removed. A clone stack C (other names, other secrets, its own Keycloak administrator) is seeded
-from that B0 copy and runs seed -> capture -> introduce (provision, installer migration, Keycloak cache option, member
-import, API as node/kin_runtime, UI/proxy) -> verify (fenced HTTPS smoke with a test-minted token, the EMR probe, B1 and
-its same-point restore) -> rollback (B0 into fresh recovery volumes, previous images) -> receipt; the receipt is then
-checked as production's introduce would check it. Every resource is named kin-rehearsal-*, labelled and removed.
+previous release with a synthetic realm, a synthetic study (row and one DICOM instance whose frame is every plan's smoke
+frame), further NOLOGIN roles with a membership, an owned schema and grants, and a disabled member; the mode's capture
+phase takes B0 from it. S is then removed. A clone stack C (other names, other secrets, its own Keycloak administrator)
+is seeded from that B0 copy and runs seed -> capture -> introduce (provision, installer migration, Keycloak cache option,
+member import, API as node/kin_runtime, UI/proxy) -> verify (fenced HTTPS smoke with an interactive login, worklist UID
+and frame bytes, the EMR probe, B1 and its same-point restore) -> rollback (B0 into fresh recovery volumes of a recovery
+project, previous images; RESTORED) -> rollback_reopen (refused with the pre-restore token, then passed with a login made
+after the restore) -> an ordinary compose recreate (still the recovery volumes and previous images) -> receipt; the
+receipt is then checked as production's introduce would check it (and refused a second time). Every resource is named
+kin-rehearsal-*, labelled and removed.
 """
 import json
 import os
@@ -226,6 +230,53 @@ import ops_emr_introduction as intro  # noqa: E402
 
 REHEARSAL_IMAGES = ("KIN_TEST_PREVIOUS_API_IMAGE", "KIN_TEST_PREVIOUS_PROXY_IMAGE", "KIN_TEST_API_IMAGE", "KIN_TEST_PROXY_IMAGE")
 SYNTHETIC_STUDY = "1.2.826.0.1.3680043.10.543.7001"
+SYNTHETIC_SERIES, SYNTHETIC_SOP = SYNTHETIC_STUDY + ".1", SYNTHETIC_STUDY + ".1.1"
+# One synthetic 16x16 16-bit CT frame: the smoke frame of every plan (forward and previous-version smoke read it).
+SYNTHETIC_PIXELS = bytes(range(256)) * 2
+SYNTHETIC_FRAME = {"path": "/dicom-web/studies/%s/series/%s/instances/%s/frames/1" % (SYNTHETIC_STUDY, SYNTHETIC_SERIES, SYNTHETIC_SOP),
+                   "bytes": len(SYNTHETIC_PIXELS), "sha256": hashlib.sha256(SYNTHETIC_PIXELS).hexdigest()}
+# Further pre-EMR roles the B0 must carry through seed and rollback (IRT-07): NOLOGIN, a membership, an owned schema,
+# a table grant and a database grant.
+LEGACY_ROLES_SQL = ("CREATE ROLE kin_legacy_group NOLOGIN NOINHERIT; CREATE ROLE kin_legacy_reader NOLOGIN CONNECTION LIMIT 3; "
+                    "GRANT kin_legacy_group TO kin_legacy_reader; GRANT SELECT ON \"AuditLog\" TO kin_legacy_reader; "
+                    "CREATE SCHEMA legacy_archive AUTHORIZATION kin_legacy_group; GRANT CONNECT ON DATABASE kin TO kin_legacy_reader;")
+LEGACY_FACTS_SQL = ("SELECT json_build_object("
+                    "'roles', (SELECT json_agg(json_build_array(rolname, rolcanlogin, rolinherit, rolconnlimit) ORDER BY rolname) "
+                    "FROM pg_roles WHERE rolname LIKE 'kin_legacy_%'), "
+                    "'members', (SELECT json_agg(a.rolname || '>' || b.rolname) FROM pg_auth_members m JOIN pg_roles a ON a.oid=m.roleid "
+                    "JOIN pg_roles b ON b.oid=m.member WHERE a.rolname LIKE 'kin_legacy_%'), "
+                    "'schema_owner', (SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='legacy_archive'), "
+                    "'table_acl', (SELECT relacl::text FROM pg_class WHERE relname='AuditLog' AND relnamespace='public'::regnamespace), "
+                    "'database_acl', (SELECT datacl::text FROM pg_database WHERE datname='kin'))")
+UPLOAD_SCRIPT = r"""
+import base64, json, os, sys, urllib.request
+password = json.loads(os.environ['ORTHANC__REGISTERED_USERS'])['admin']
+request = urllib.request.Request('http://127.0.0.1:8042/instances', data=sys.stdin.buffer.read(), method='POST',
+    headers={'Content-Type': 'application/dicom', 'Authorization': 'Basic ' + base64.b64encode(('admin:' + password).encode()).decode()})
+print(json.loads(urllib.request.urlopen(request, timeout=30).read())['Status'])
+"""
+
+
+def synthetic_dicom():
+    """The synthetic study's one instance (pydicom, as the product's tests make theirs)."""
+    import io
+    from pydicom.dataset import FileDataset, FileMetaDataset
+    from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian
+    meta = FileMetaDataset()
+    meta.MediaStorageSOPClassUID, meta.MediaStorageSOPInstanceUID, meta.TransferSyntaxUID = CTImageStorage, SYNTHETIC_SOP, ExplicitVRLittleEndian
+    data = FileDataset(None, {}, file_meta=meta, preamble=b"\0" * 128)
+    data.SOPClassUID, data.SOPInstanceUID = CTImageStorage, SYNTHETIC_SOP
+    data.StudyInstanceUID, data.SeriesInstanceUID = SYNTHETIC_STUDY, SYNTHETIC_SERIES
+    data.PatientName, data.PatientID, data.Modality, data.StudyDate = "SYNTHETIC^REHEARSAL", "SYNTHETIC-RH", "CT", "20261012"
+    data.InstitutionName, data.SeriesNumber, data.InstanceNumber = "hallym", 1, 1
+    data.Rows = data.Columns = 16
+    data.BitsAllocated, data.BitsStored, data.HighBit, data.PixelRepresentation = 16, 16, 15, 0
+    data.SamplesPerPixel, data.PhotometricInterpretation = 1, "MONOCHROME2"
+    data.PixelData = SYNTHETIC_PIXELS
+    data.is_little_endian, data.is_implicit_VR = True, False
+    stream = io.BytesIO()
+    data.save_as(stream, write_like_original=False)
+    return stream.getvalue()
 KC_SCRIPT = r"""
 const base='http://keycloak:8080/auth', admin=async()=>{const form=new URLSearchParams({grant_type:'password',client_id:'admin-cli',
  username:process.env.KC_USER,password:process.env.KC_PASS});const r=await fetch(base+'/realms/master/protocol/openid-connect/token',{method:'POST',body:form});
@@ -387,7 +438,7 @@ class SyntheticStack:
         if os.name == "posix":
             path.chmod(0o600)
 
-    def plan(self, images, seed=None, members=None):
+    def plan(self, images, seed=None, members=None, frame=None):
         def digest(sha, env_path):
             entries = [(item, blob(self.repo, sha, item) if not os.path.isabs(item) else Path(item).read_bytes())
                        for item in self.target["compose_files"]]
@@ -411,14 +462,15 @@ class SyntheticStack:
                             "node_uid": uid(images["release"]["api"], "node", "-u"), "node_gid": uid(images["release"]["api"], "node", "-g")},
                 # Phase P's read-only observation of the realm; a stack still being set up plans with zero members first.
                 "members": members or {"realm_members": 0, "disabled": 0, "service_accounts": 0},
-                "smoke": {"frame": None},
-                "probe": {"study": "SYNTHETIC-rehearsal-" + self.token, "event_id": str(uuid.uuid4()), "institution": "kin-center",
+                "smoke": {"frame": frame or SYNTHETIC_FRAME},
+                "probe": {"study": "SYNTHETIC-rehearsal", "event_id": str(uuid.uuid4()), "institution": "kin-center",
                           "approved_by": "synthetic-rehearsal", "approved_at": now.isoformat()},
                 "window": {"start": (now - timedelta(hours=1)).isoformat(), "end": (now + timedelta(hours=8)).isoformat()},
                 "budget": {"capture_s": 3600, "introduce_s": 5400, "verify_s": 3600, "reopen_s": 1800, "rollback_s": 3600, "seed_s": 3600,
                            "min_free_bytes": 1024 ** 3},
                 "backup_root": str(self.backups), "tool": intro.tool_hashes(),
-                "seed": seed or {"b0_dir": str(self.root / "unused-seed"), "b0_manifest_sha256": "0" * 64}, "projection_exempt": []}
+                "seed": seed or {"b0_dir": str(self.root / "unused-seed"), "b0_manifest_sha256": "0" * 64, "production_plan_sha256": "0" * 64},
+                "projection_exempt": [], "rehearsal_host": None}
         self.plan_document = intro.plan_valid(plan)
         self.plan_sha256 = hashlib.sha256(intro.canonical(plan)).hexdigest()
         return plan
@@ -477,17 +529,18 @@ class SyntheticStack:
         return subprocess.run(["docker", "exec", self.target["containers"]["db"], "psql", "-X", "-U", "kin", "-d", database, "-qAt", "-v",
                                "ON_ERROR_STOP=1", "-c", sql], check=True, capture_output=True, text=True).stdout.strip()
 
-    def keycloak(self, image, operation, admin_user):
+    def keycloak(self, image, operation, admin_user, network=None):
         """Test-side realm work through the admin REST API (as the executor would): Keycloak may still be starting.
         'disable' disables the member tech; 'client' prepares one interactive login of doctor (a temporary PKCE client and
-        a new synthetic password) and returns the client and that password for interactive_token()."""
+        a new synthetic password) and returns the client and that password for interactive_token(). After a rollback the
+        services live in the recovery project, whose default network is named after it."""
         password = secrets.token_urlsafe(18)
         environment = {**os.environ, "KC_USER": admin_user, "KC_PASS": self.env["KC_ADMIN_PASSWORD"],
                        "KC_MEMBER": "tech" if operation == "disable" else "doctor", "KC_MEMBER_PASS": password,
                        "KC_REDIRECT": self.origin + "/worklist/hpacs-lite/index.html"}
         deadline = time.monotonic() + 420
         while True:
-            result = subprocess.run(["docker", "run", "--rm", "--network", self.target["networks"]["default"], "--label", "kin.ops.run=" + self.token,
+            result = subprocess.run(["docker", "run", "--rm", "--network", network or self.target["networks"]["default"], "--label", "kin.ops.run=" + self.token,
                                      "-e", "KC_USER", "-e", "KC_PASS", "-e", "KC_MEMBER", "-e", "KC_MEMBER_PASS", "-e", "KC_REDIRECT",
                                      "--entrypoint", "node", image, "-e", KC_SCRIPT, operation], env=environment, capture_output=True, timeout=180)
             if result.returncode == 0 or time.monotonic() > deadline:
@@ -502,16 +555,26 @@ class SyntheticStack:
             listing = ["docker", kind, "ls", "-q", "--filter", "label=" + label] if kind != "container" else \
                 ["docker", "ps", "-a", "-q", "--filter", "label=" + label]
             return subprocess.run(listing, capture_output=True, text=True).stdout.split()
-        project = "com.docker.compose.project=" + self.project
-        for container in ids("container", project):
-            subprocess.run(["docker", "rm", "-f", "-v", container], capture_output=True)
+        projects = [self.project]
+        try:
+            recovered = (json.loads((self.records.directory / "state.json").read_text()).get("recovery") or {}).get("project")
+        except (OSError, ValueError):
+            recovered = None
+        if recovered and recovered.startswith(self.project):
+            projects.append(recovered)
+            for role in ("api", "proxy"):
+                subprocess.run(["docker", "image", "rm", recovered + "-" + role + ":latest"], capture_output=True)
+        for project in ("com.docker.compose.project=" + name for name in projects):
+            for container in ids("container", project):
+                subprocess.run(["docker", "rm", "-f", "-v", container], capture_output=True)
         for container in ids("container", "kin.ops.run=" + self.token):
             subprocess.run(["docker", "rm", "-f", "-v", container], capture_output=True)
         plan16 = getattr(self, "plan_sha256", "")[:16]
-        volumes = ids("volume", project) + (ids("volume", "kin.ops.recovery=" + plan16) if plan16 else [])
+        volumes = [volume for name in projects for volume in ids("volume", "com.docker.compose.project=" + name)]
+        volumes += ids("volume", "kin.ops.recovery=" + plan16) if plan16 else []
         for volume in volumes:
             subprocess.run(["docker", "volume", "rm", volume], capture_output=True)
-        for network in ids("network", project):
+        for network in (network for name in projects for network in ids("network", "com.docker.compose.project=" + name)):
             subprocess.run(["docker", "network", "rm", network], capture_output=True)
 
 
@@ -545,6 +608,11 @@ class EmrIntroductionRehearsal(unittest.TestCase):
                     f"VALUES ('{SYNTHETIC_STUDY}', 'hallym', 'P', 'doctor@kin.kr', 'doctor2@kin.kr', now());"
                     " INSERT INTO \"AuditLog\"(actor, action, target, detail) VALUES ('SYNTHETIC-rehearsal', 'synthetic.seed', "
                     f"'{SYNTHETIC_STUDY}', '{{\"synthetic\":true}}');")
+        source.psql(LEGACY_ROLES_SQL)
+        legacy = json.loads(source.psql(LEGACY_FACTS_SQL))
+        uploaded = subprocess.run(["docker", "exec", "-i", source.target["containers"]["orthanc"], "python3", "-c", UPLOAD_SCRIPT],
+                                  input=synthetic_dicom(), capture_output=True, timeout=120)
+        self.assertEqual(uploaded.returncode, 0, uploaded.stderr[-2000:])
         source.keycloak(images["previous"]["api"], "disable", "admin")
         # Phase P: the realm as observed read-only (counts only) becomes the plan's member-import expectation.
         members = json.loads(source.psql(intro.REALM_MEMBERS_SQL, "keycloak"))
@@ -554,15 +622,25 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         b0 = json.loads((source.records.directory / "state.json").read_text())["b0"]
         source.remove()
 
-        # C: the disposable clone, seeded from S's B0 copy (no S resource is reachable any more).
+        # C: the disposable clone, seeded from S's B0 copy (no S resource is reachable any more). The production plan the
+        # rehearsal rehearses exists first; the clone's plan names its identity.
         clone = SyntheticStack(self, root, "clone", previous_sha, target_sha)
         copy_dir = root / "b0-copy" / Path(b0["dir"]).name
         shutil_copy = __import__("shutil").copytree
         shutil_copy(b0["dir"], copy_dir)
-        clone.plan(images, seed={"b0_dir": str(copy_dir), "b0_manifest_sha256": b0["manifest_sha256"]}, members=members)
+        production_target = intro.example_target()
+        production_target.update(host_key_sha256="a" * 64)
+        production_plan = copy.deepcopy(clone.plan(images, members=members))
+        production_plan.update(target_kind="production", seed=None, rehearsal_host="b" * 64,
+                               target_manifest_sha256=hashlib.sha256(intro.canonical(production_target)).hexdigest())
+        intro.plan_valid(production_plan)
+        clone.plan(images, seed={"b0_dir": str(copy_dir), "b0_manifest_sha256": b0["manifest_sha256"],
+                                 "production_plan_sha256": intro.plan_identity(production_plan)}, members=members)
+        self.assertEqual(intro.plan_core(clone.plan_document), intro.plan_core(production_plan))
         clone.certificates(images["previous"]["proxy"])
         clone.phase("seed", "SEEDED")
         self.assertEqual(clone.psql(f"SELECT \"preDoc\" FROM \"StudyState\" WHERE uid='{SYNTHETIC_STUDY}';"), "doctor@kin.kr")
+        self.assertEqual(json.loads(clone.psql(LEGACY_FACTS_SQL)), legacy, "the seed keeps the further roles, owners and grants")
         clone.phase("capture", "HELD")
         clone.phase("introduce", "INTRODUCED")
         realm = "(SELECT id FROM realm WHERE name='kin')"
@@ -581,30 +659,69 @@ class EmrIntroductionRehearsal(unittest.TestCase):
                           "aud": claims.get("aud"), "doctor_rights": json.loads(rights or "null")}), flush=True)
         verified = clone.phase("verify", "VERIFIED")
         self.assertEqual(verified["probe"]["receipt"]["eventId"], clone.plan_document["probe"]["event_id"])
-        clone.phase("rollback", "ROLLED_BACK")
+        clone.phase("rollback", "RESTORED")
         state = json.loads((clone.records.directory / "state.json").read_text())
-        # Back at the same pre-EMR point: history, data, realm (kin and keycloak together) and the previous images.
+        recovery = state["recovery"]
+        # RESTORED: nothing reopened; the previous version must prove itself first with a login made after the restore.
+        refused = clone.phase("rollback_reopen", "RESTORED")
+        self.assertEqual(refused["steps"][-1]["code"], "The smoke token was issued before this rollback restored the previous version")
+        login = clone.keycloak(images["previous"]["api"], "client", clone.target["keycloak_admin"], network=recovery["project"] + "_default")
+        time.sleep(1.1)
+        clone.token_file.write_text(json.dumps(interactive_token(clone.origin, ("127.0.0.1", clone.maintenance), str(clone.ca),
+                                                                 login["client_id"], "doctor", login["password"])))
+        reopened = clone.phase("rollback_reopen", "ROLLED_BACK")
+        self.assertEqual([step["outcome"] for step in reopened["steps"]], ["PASS"] * len(intro.STEPS["rollback_reopen"]))
+        state = json.loads((clone.records.directory / "state.json").read_text())
+        self.assertEqual(state["rollback_smoke"]["frame_sha256"], SYNTHETIC_FRAME["sha256"])
+        # Back at the same pre-EMR point: history, data, realm (kin and keycloak together), the further roles with their
+        # owners and grants (IRT-07), and the previous images.
         rows = json.loads(clone.psql("SELECT json_agg(json_build_array(migration_name, checksum, finished_at IS NOT NULL, rolled_back_at IS NOT NULL)"
                                      " ORDER BY migration_name COLLATE \"C\") FROM \"_prisma_migrations\";"))
         pre.check_migration_rows(rows, clone.plan_document["migrations"]["before"])
         self.assertEqual(clone.psql(f"SELECT enabled FROM user_entity WHERE username='tech' AND realm_id={realm};", "keycloak"), "f")
         self.assertEqual(clone.psql("SELECT count(*) FROM pg_roles WHERE rolname LIKE 'kin_emr_%' OR rolname='kin_runtime';"), "0")
-        api = json.loads(subprocess.run(["docker", "inspect", clone.target["containers"]["api"]], check=True, capture_output=True).stdout)[0]
-        self.assertEqual(api["Image"], images["previous"]["api"])
-        db = json.loads(subprocess.run(["docker", "inspect", clone.target["containers"]["db"]], check=True, capture_output=True).stdout)[0]
-        self.assertEqual({m["Destination"]: m.get("Name") for m in db["Mounts"]}["/var/lib/postgresql/data"], state["recovery"]["pg"])
-        for name in (clone.target["volumes"]["pg"], clone.target["volumes"]["emr_access"], clone.target["volumes"]["emr_state"]):
+        self.assertEqual(json.loads(clone.psql(LEGACY_FACTS_SQL)), legacy, "the rollback keeps the further roles, owners and grants")
+        inspect = lambda name: json.loads(subprocess.run(["docker", "inspect", name], check=True, capture_output=True).stdout)[0]
+        self.assertEqual(inspect(clone.target["containers"]["api"])["Image"], images["previous"]["api"])
+        self.assertEqual({m["Destination"]: m.get("Name") for m in inspect(clone.target["containers"]["db"])["Mounts"]}["/var/lib/postgresql/data"],
+                         recovery["pg"])
+        failed = (clone.target["volumes"]["pg"], clone.target["volumes"]["orthanc"], clone.target["volumes"]["emr_access"],
+                  clone.target["volumes"]["emr_state"])
+        for name in failed:
             self.assertEqual(subprocess.run(["docker", "volume", "inspect", name], capture_output=True).returncode, 0, "failed volume kept: " + name)
+        # IRT-05: an ordinary compose recreate of this checkout (no project flag, no pins, as an operator would run it)
+        # keeps pg and Orthanc on the recovery volumes and the previous images; the failed volumes stay detached.
+        files = [arg for item in clone.target["compose_files"]
+                 for arg in ("-f", item if os.path.isabs(item) else str(clone.repo / item))]
+        recreate = subprocess.run(["docker", "compose", "--project-directory", str(clone.repo), *files, "up", "-d", "--no-deps",
+                                   "--no-build", "--pull", "never", "--force-recreate", "db", "orthanc", "api"], capture_output=True, timeout=600)
+        self.assertEqual(recreate.returncode, 0, recreate.stderr[-3000:])
+        mounts = lambda role, path: {m["Destination"]: m.get("Name") for m in inspect(clone.target["containers"][role])["Mounts"]}.get(path)
+        self.assertEqual((mounts("db", "/var/lib/postgresql/data"), mounts("orthanc", "/var/lib/orthanc/db")), (recovery["pg"], recovery["orthanc"]))
+        for role in ("db", "orthanc", "api"):
+            item = inspect(clone.target["containers"][role])
+            self.assertEqual((item["Image"], item["Config"]["Labels"]["com.docker.compose.project"]),
+                             (images["previous"][role], recovery["project"]), role)
+        for name in failed:
+            users = subprocess.run(["docker", "ps", "-a", "--filter", "volume=" + name, "--format", "{{.Names}}"], capture_output=True, text=True).stdout
+            self.assertEqual(users.strip(), "", "failed volume detached: " + name)
+        runner, host_ops = clone.ops()
+        with intro.bound_ops(clone.repo, runner):
+            host_ops.db_ready(180, "Recreated database did not become ready")
+            host_ops.api_health(member_rights=False)
+            host_ops.reload_proxy()
+        print(json.dumps({"recreated_with_ordinary_compose": True, "health": intro.health_check(clone.origin, ca_file=str(clone.ca), member_rights=False)}),
+              flush=True)
         result = clone.phase("receipt", "RECEIPTED")
         receipt = json.loads((clone.records.directory / "local-restore-receipt.json").read_text())
-        production_plan = copy.deepcopy(clone.plan_document)
-        production_plan.update(target_kind="production", seed=None,
-                               smoke={"frame": {"path": "/dicom-web/studies/1.2/series/1.3/instances/1.4/frames/1", "bytes": 1, "sha256": "0" * 64}})
-        intro.plan_valid(production_plan)
-        intro.receipt_valid(receipt, production_plan, b0["manifest_sha256"], {**intro.EXAMPLE_POLICY["production"], "host_key_sha256": "a" * 64})
+        production = {**intro.EXAMPLE_POLICY["production"], "host_key_sha256": "a" * 64}
+        intro.receipt_valid(receipt, production_plan, b0["manifest_sha256"], production, b0_created_utc=b0["created_utc"])
+        self.assertTrue(intro.bundle_valid(receipt, clone.records.directory))
+        with self.assertRaisesRegex(intro.Stop, "already used"):
+            intro.receipt_valid(receipt, production_plan, b0["manifest_sha256"], production, used=[intro.receipt_sha256(receipt)])
         print(json.dumps({"synthetic_rehearsal": "PASS", "receipt_sha256": result["receipt"]["sha256"],
                           "source_b0_manifest_sha256": b0["manifest_sha256"], "b1_manifest_sha256": state["b1"]["manifest_sha256"],
-                          "bfail": state["bfail"]["manifest_sha256"], "recovery": state["recovery"],
+                          "bfail": state["bfail"]["manifest_sha256"], "recovery": recovery, "legacy_roles": legacy,
                           "migrations": [len(clone.plan_document["migrations"]["before"]), len(clone.plan_document["migrations"]["after"])]}),
               flush=True)
 

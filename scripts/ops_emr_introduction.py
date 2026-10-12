@@ -2612,17 +2612,20 @@ class HostOps:
         with self.bind():
             _, manifest, digest = ops.validate_held(seed["b0_dir"], seed["b0_manifest_sha256"])
         require(manifest["shape"] == "pre", "The seed is not a pre-EMR snapshot")
-        ops.supported_pre_catalog(json.loads((Path(seed["b0_dir"]) / "catalog.json").read_text(encoding="utf-8")))
+        # The target first: what the clone's compose actually resolves to must be exactly the manifest's clone.
+        model = self.resolved(intro, maintenance=False)
+        check_resolved(model, self.t, target_checkout=False, maintenance=False, images=intro.plan["previous"]["images"])
         self.secure(self.env_file())
+        require(self.compose_digest_now() == intro.plan["compose"]["before_sha256"], "Clone compose files or .env differ from the plan")
         source = parse_env((Path(seed["b0_dir"]) / ".env").read_bytes())
         clone = parse_env(self.env_file().read_bytes())
         shared = [name for name in CLONE_SECRETS if name in source and name in clone and source[name] == clone[name]]
         require(not shared, "The clone reuses a source secret")
         require(all(clone.get(name) for name in CLONE_SECRETS if source.get(name)), "The clone lacks its own value for a source secret")
         require(clone.get("PUBLIC_ORIGIN") == self.t["origin"], "The clone's PUBLIC_ORIGIN is not the target origin")
-        require(self.compose_digest_now() == intro.plan["compose"]["before_sha256"], "Clone compose files or .env differ from the plan")
-        model = self.resolved(intro, maintenance=False)
-        check_resolved(model, self.t, target_checkout=False, maintenance=False, images=intro.plan["previous"]["images"])
+        catalog = Path(seed["b0_dir"]) / "catalog.json"
+        require(catalog.is_file(), "The seed has no cluster catalog")
+        ops.supported_pre_catalog(json.loads(catalog.read_text(encoding="utf-8")))
         require(not any(self.inspect(role) for role in ROLES), "Clone containers already exist")
         require(not any(self.cmd(["docker", "volume", "inspect", name], check=False).returncode == 0 for name in self.t["volumes"].values()),
                 "Clone volumes already exist")

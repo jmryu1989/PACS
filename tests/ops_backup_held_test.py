@@ -29,6 +29,13 @@ RESOURCES = {"containers": {"db": "kin-rh-db", "api": "kin-rh-api", "keycloak": 
                          "emr_state": "kin-rh_emr-state"}}
 
 
+def role(name, *, superuser=False, login=False, inherit=True, connlimit=-1, valid=None, config=None):
+    """One pg_roles row as the role catalog reads it."""
+    return {"rolname": name, "rolsuper": superuser, "rolcreaterole": superuser, "rolcreatedb": superuser, "rolcanlogin": login,
+            "rolreplication": superuser, "rolbypassrls": superuser, "rolinherit": inherit, "rolconnlimit": connlimit,
+            "rolvaliduntil": valid, "rolconfig": config}
+
+
 def archive(entries=(("./index", b"x"),)):
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode="w:gz") as handle:
@@ -52,6 +59,7 @@ class FakeHost:
         self.commands = []
         self.dump_failure = None
         self.emr_roles = shape == "post"
+        self.extra_roles, self.memberships, self.extra_databases, self.extra_tablespaces = [], [], [], []
 
     def containers(self):
         out = []
@@ -69,9 +77,18 @@ class FakeHost:
         return out
 
     def catalog(self):
-        roles = [{"rolname": "kin"}] + ([{"rolname": name} for name in ops.EMR_ROLES] if self.emr_roles else [])
-        return {"roles": roles, "memberships": [], "databases": [], "tablespaces": [],
+        roles = [role("kin", superuser=True, login=True)] + ([role(name, login=name == "kin_runtime") for name in ops.EMR_ROLES]
+                                                              if self.emr_roles else []) + list(self.extra_roles)
+        return {"roles": roles, "memberships": list(self.memberships),
+                "databases": [{"name": name, "owner": "kin", "acl": None} for name in ("keycloak", "kin", "postgres", *self.extra_databases)],
+                "tablespaces": [{"name": "pg_default", "owner": "kin", "location": ""}, {"name": "pg_global", "owner": "kin", "location": ""},
+                                *self.extra_tablespaces],
                 "schemas": ["public", *(["emr_access"] if self.emr_roles else [])]}
+
+    def objects(self, database):
+        return {"schemas": [{"name": "public", "owner": "pg_database_owner", "acl": None}],
+                "relations": [{"name": "public.Report", "kind": "r", "owner": "kin", "acl": None}] if database == "kin" else [],
+                "functions": [], "default_acl": []}
 
     def text(self, args, **kwargs):
         self.commands.append(list(args))
@@ -80,6 +97,12 @@ class FakeHost:
             return json.dumps(self.containers())
         if "pg_stat_activity" in joined:
             return self.clients
+        if ops.OBJECT_CATALOG_SQL in args:
+            return json.dumps(self.objects(args[args.index("-d") + 1]))
+        if "datname='keycloak'" in joined:
+            return "0:1"
+        if "n.nspname='public'" in joined:
+            return "0"
         if "pg_database_size" in joined:
             return "4096"
         if args[:2] == ["git", "rev-parse"]:
@@ -275,6 +298,151 @@ class HeldCaptureTests(unittest.TestCase):
         self.assertTrue(cleanup.called)
         # A record beside the snapshot is not a component: the capture still validates exactly.
         ops.validate_held(directory)
+        self.assertEqual(result["catalog"]["catalog"], "equal")
+        # Owners and privileges are restored, never stripped (IRT-07): no --no-owner/--no-privileges restore.
+        restores = [command for command in host.commands if "pg_restore" in command]
+        self.assertEqual(len(restores), 2)
+        self.assertTrue(all("--create" in command and "--no-owner" not in command and "--no-privileges" not in command for command in restores))
+
+    def test_10_an_unsupported_pre_emr_catalog_is_refused_before_anything_is_written(self):
+        """IRT-07: a B0 that a rollback could not rebuild exactly never becomes a B0."""
+        cases = {"further login role": lambda host: host.extra_roles.append(role("legacy_app", login=True)),
+                 "role settings": lambda host: host.extra_roles.append(role("legacy_cfg", config=["search_path=x"])),
+                 "another database": lambda host: host.extra_databases.append("orthanc_index"),
+                 "another tablespace": lambda host: host.extra_tablespaces.append({"name": "fast", "owner": "kin", "location": "/x"})}
+        for name, change in cases.items():
+            host = FakeHost(tempfile.mkdtemp(dir=self.folder))
+            change(host)
+            with self.subTest(case=name), self.assertRaisesRegex(RuntimeError, "Unsupported pre-EMR catalog"):
+                host.capture()
+            self.assertFalse(host.parent.exists())
+            self.assertFalse(any("pg_dump" in command or "pg_dumpall" in command for command in host.commands))
+        host = FakeHost(tempfile.mkdtemp(dir=self.folder))
+        host.extra_roles.append(role("legacy_reader"))
+        host.memberships.append({"granted": "pg_read_all_data", "member": "legacy_reader", "admin_option": False,
+                                 "inherit_option": True, "set_option": True})
+        directory = host.capture()
+        self.assertIn("legacy_reader", {item["rolname"] for item in json.loads((directory / "catalog.json").read_text())["roles"]})
+
+
+class FakeCluster:
+    """A fresh product-shaped PostgreSQL cluster (POSTGRES_USER kin) that applies what a restore sends it: CREATE ROLE /
+    GRANT statements on stdin, DROP DATABASE, and pg_restore --create of a dump, which brings the snapshot's database
+    and the owners/privileges of its objects (as the real pg_restore does); `strip` simulates a restore that lost some."""
+
+    def __init__(self, snapshot):
+        self.snapshot = snapshot
+        self.roles = {"kin": role("kin", superuser=True, login=True)}
+        self.memberships = []
+        self.databases = {"kin": {"name": "kin", "owner": "kin", "acl": None}, "postgres": {"name": "postgres", "owner": "kin", "acl": None}}
+        self.objects = {}
+        self.commands = []
+        self.strip = None
+
+    def catalog(self):
+        return {"roles": [self.roles[name] for name in sorted(self.roles)], "memberships": sorted(self.memberships, key=lambda m: (m["granted"], m["member"])),
+                "databases": [self.databases[name] for name in sorted(self.databases)], "tablespaces": self.snapshot["tablespaces"],
+                "schemas": self.snapshot["schemas"] if "kin" in self.objects else ["public"]}
+
+    def apply(self, sql):
+        import re as pattern
+        for name, flags in pattern.findall(r'CREATE ROLE "([^"]+)" WITH ([^;]+);', sql):
+            words = flags.split()
+            self.roles[name] = {"rolname": name, "rolsuper": "SUPERUSER" in words, "rolcreaterole": "CREATEROLE" in words,
+                                "rolcreatedb": "CREATEDB" in words, "rolcanlogin": "LOGIN" in words, "rolreplication": "REPLICATION" in words,
+                                "rolbypassrls": "BYPASSRLS" in words, "rolinherit": "INHERIT" in words,
+                                "rolconnlimit": int(words[words.index("LIMIT") + 1]), "rolvaliduntil": None, "rolconfig": None}
+        for granted, member, admin, inherit, setting in pattern.findall(
+                r'GRANT "([^"]+)" TO "([^"]+)" WITH ADMIN (TRUE|FALSE), INHERIT (TRUE|FALSE), SET (TRUE|FALSE);', sql):
+            self.memberships.append({"granted": granted, "member": member, "admin_option": admin == "TRUE",
+                                     "inherit_option": inherit == "TRUE", "set_option": setting == "TRUE"})
+
+    def text(self, args, **kwargs):
+        self.commands.append(list(args))
+        joined = " ".join(args)
+        if ops.ROLE_CATALOG_SQL in args:
+            return json.dumps(self.catalog())
+        if ops.OBJECT_CATALOG_SQL in args:
+            database = args[args.index("-d") + 1]
+            return json.dumps(self.objects.get(database, {"schemas": [], "relations": [], "functions": [], "default_acl": []}))
+        if "datname='keycloak'" in joined:
+            return "%d:%d" % ("keycloak" in self.databases, "kin" in self.databases)
+        if "n.nspname='public'" in joined:
+            return str(len((self.objects.get("kin") or {}).get("relations", [])))
+        raise AssertionError("unexpected command " + joined[:80])
+
+    def run(self, args, *, output=None, input_file=None, timeout=600, check=True):
+        self.commands.append(list(args))
+        if "psql" in args and input_file is not None:
+            self.apply(input_file.read().decode())
+        elif "DROP DATABASE kin WITH (FORCE);" in args:
+            self.databases.pop("kin")
+        elif "pg_restore" in args:
+            database = Path(input_file.name).name.split(".")[0]
+            self.databases[database] = dict(next(item for item in self.snapshot["databases"] if item["name"] == database))
+            self.objects[database] = json.loads(json.dumps(self.snapshot["objects"][database]))
+            if self.strip and database == "kin":
+                self.objects[database]["relations"][0]["acl"] = None
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+
+class ExactRestoreTests(unittest.TestCase):
+    """IRT-07: a pre-EMR B0 with further NOLOGIN roles, memberships and their owned/granted objects is rebuilt exactly."""
+
+    def snapshot(self, folder):
+        roles = [role("kin", superuser=True, login=True), role("legacy_group", inherit=False), role("legacy_reader", connlimit=3)]
+        catalog = {"roles": roles,
+                   "memberships": [{"granted": "legacy_group", "member": "legacy_reader", "admin_option": False, "inherit_option": True,
+                                    "set_option": True},
+                                   {"granted": "pg_read_all_data", "member": "legacy_group", "admin_option": True, "inherit_option": False,
+                                    "set_option": False}],
+                   "databases": [{"name": "keycloak", "owner": "kin", "acl": None},
+                                 {"name": "kin", "owner": "kin", "acl": "{=Tc/kin,kin=CTc/kin,legacy_reader=c/kin}"},
+                                 {"name": "postgres", "owner": "kin", "acl": None}],
+                   "tablespaces": [{"name": "pg_default", "owner": "kin", "location": ""}, {"name": "pg_global", "owner": "kin", "location": ""}],
+                   "schemas": ["legacy_archive", "public"],
+                   "objects": {"kin": {"schemas": [{"name": "legacy_archive", "owner": "legacy_group", "acl": None}],
+                                       "relations": [{"name": "public.AuditLog", "kind": "r", "owner": "kin",
+                                                      "acl": "{kin=arwdDxtm/kin,legacy_reader=r/kin}"}],
+                                       "functions": [], "default_acl": []},
+                               "keycloak": {"schemas": [], "relations": [], "functions": [], "default_acl": []}}}
+        directory = Path(folder)
+        (directory / "catalog.json").write_text(json.dumps(catalog))
+        for database in ("kin", "keycloak"):
+            (directory / (database + ".dump")).write_bytes(b"synthetic dump")
+        return directory, catalog
+
+    def restore(self, cluster, directory):
+        with patch.object(ops, "text", side_effect=cluster.text), patch.object(ops, "run", side_effect=cluster.run):
+            return ops.restore_pre_snapshot("kin-rh-db", directory)
+
+    def test_01_roles_memberships_owners_and_grants_are_rebuilt_and_compared(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory, catalog = self.snapshot(folder)
+            cluster = FakeCluster(catalog)
+            result = self.restore(cluster, directory)
+            self.assertEqual(result["roles_created"], ["legacy_group", "legacy_reader"])
+            self.assertEqual(result["memberships_granted"], 2)
+            self.assertEqual(cluster.catalog()["roles"], catalog["roles"])
+            restores = [command for command in cluster.commands if "pg_restore" in command]
+            self.assertTrue(all("--create" in command and "--no-owner" not in command for command in restores))
+
+    def test_02_a_restore_that_loses_a_grant_or_meets_another_role_is_refused(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory, catalog = self.snapshot(folder)
+            cluster = FakeCluster(catalog)
+            cluster.strip = True
+            with self.assertRaisesRegex(RuntimeError, "Restored catalog differs from the snapshot: objects"):
+                self.restore(cluster, directory)
+            cluster = FakeCluster(catalog)
+            cluster.roles["legacy_reader"] = role("legacy_reader", connlimit=7)
+            with self.assertRaisesRegex(RuntimeError, "fresh cluster differs from the snapshot: legacy_reader"):
+                self.restore(cluster, directory)
+            self.assertFalse(any("pg_restore" in command for command in cluster.commands))
+            cluster = FakeCluster(catalog)
+            cluster.objects["kin"] = {"relations": [{"name": "public.Old"}]}
+            with self.assertRaisesRegex(RuntimeError, "not a fresh cluster"):
+                self.restore(cluster, directory)
 
 
 if __name__ == "__main__":

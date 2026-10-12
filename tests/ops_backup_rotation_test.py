@@ -8,6 +8,7 @@ backup" rule.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import io
 import json
 import os
@@ -35,15 +36,24 @@ class Root:
         self.path = Path(folder) / "backups"
         self.path.mkdir(mode=0o700)
 
-    def daily(self, name, complete=True, manifest=True, created=None):
+    def daily(self, name, complete=True, manifest=True, created=None, checkpoint=False):
+        """A physically whole daily set as backup() leaves it: the six components and a manifest with their SHA-256 and
+        sizes (plus a declared audit checkpoint when asked)."""
         folder = self.path / name
         folder.mkdir(mode=0o700)
+        sums, sizes = {}, {}
+        for component in (*ops.FILES, *((audit.CHECKPOINT,) if checkpoint else ())):
+            raw = ("synthetic " + component + " of " + name).encode()
+            (folder / component).write_bytes(raw)
+            sums[component], sizes[component] = hashlib.sha256(raw).hexdigest(), len(raw)
         if manifest:
             stamp = (created or NOW).isoformat()
             (folder / "manifest.json").write_text(json.dumps({"format": 1, "complete": complete, "created_utc": stamp,
-                                                              "ready": True, "resume_failures": []}))
-        (folder / "orthanc.tgz").write_bytes(b"synthetic archive bytes")
+                                                              "ready": True, "resume_failures": [], "sha256": sums, "bytes": sizes}))
         return folder
+
+    def manifest(self, name):
+        return json.loads((self.path / name / "manifest.json").read_text())
 
     def names(self):
         return sorted(entry.name for entry in self.path.iterdir())
@@ -107,20 +117,18 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(result["would_delete"], [daily(1), daily(2), daily(3)])
         self.assertEqual(self.root.names(), before)
 
+    def ledger(self, *names):
+        created = (NOW - timedelta(days=40)).isoformat()
+        entries = [{"kind": "init", "at": created, "years": 2}]
+        for seq, name in enumerate(names, 1):
+            entries.append({"kind": "seal", "seq": seq, "backup": name, "checkpoint_sha256": "a" * 64, "created_utc": created,
+                            "retain_until": (NOW + timedelta(days=700)).isoformat(), "previous_verification": {"state": "none"}})
+        (self.root.path / audit.LEDGER).write_text(json.dumps({"format": audit.FORMAT, "ledger_id": "f" * 32, "entries": entries}))
+
     def test_06_audit_ledger_retention_and_undeclared_checkpoints_win_over_generations(self):
         for day in range(1, 12):
-            folder = self.root.daily(daily(day))
-            if day in (1, 2):
-                (folder / audit.CHECKPOINT).write_text("{}")
-                manifest = json.loads((folder / "manifest.json").read_text())
-                manifest["sha256"] = {audit.CHECKPOINT: "a" * 64}
-                (folder / "manifest.json").write_text(json.dumps(manifest))
-        created = (NOW - timedelta(days=40)).isoformat()
-        ledger = {"format": audit.FORMAT, "ledger_id": "f" * 32, "entries": [
-            {"kind": "init", "at": created, "years": 2},
-            {"kind": "seal", "seq": 1, "backup": daily(1), "checkpoint_sha256": "a" * 64, "created_utc": created,
-             "retain_until": (NOW + timedelta(days=700)).isoformat(), "previous_verification": {"state": "none"}}]}
-        (self.root.path / audit.LEDGER).write_text(json.dumps(ledger))
+            self.root.daily(daily(day), checkpoint=day in (1, 2))
+        self.ledger(daily(1))
         self.assertEqual(self.rotate(dry_run=True)["would_thin"], [daily(1)])
         result = self.rotate()
         self.assertEqual(result["retained"], {daily(1): "audit-retention", daily(2): "audit-undeclared"})
@@ -130,14 +138,99 @@ class RotationTests(unittest.TestCase):
         # What the ledger's retention reads stays; only the Orthanc archive of the ledger-only set goes, marker first.
         self.assertEqual(result["thinned"], [daily(1)])
         kept = self.root.path / daily(1)
-        self.assertEqual(sorted(path.name for path in kept.iterdir()), sorted([audit.CHECKPOINT, "manifest.json", ops.THINNED_FILE]))
+        self.assertEqual(sorted(path.name for path in kept.iterdir()),
+                         sorted([*(name for name in ops.FILES if name != "orthanc.tgz"), audit.CHECKPOINT, "manifest.json", ops.THINNED_FILE]))
         self.assertTrue((self.root.path / daily(2) / "orthanc.tgz").is_file(), "an undeclared checkpoint keeps its whole set")
         self.assertEqual(self.rotate()["thinned"], [])
 
+    def test_13_an_interrupted_deletion_is_rejudged_and_kept_when_anything_protects_it(self):
+        """IRT-09: a .rotating-<name> left by an interrupted run is judged again by its original name and its folder."""
+        for day in range(10, 18):
+            self.root.daily(daily(day))
+        cases = {daily(1): "hold", daily(2): "protected", daily(3): "latest-verified", daily(4): "audit-retention",
+                 daily(5): "audit-undeclared", daily(6): None}
+        for day, (name, reason) in enumerate(cases.items(), 1):
+            folder = self.root.path / (ops.ROTATING + name)
+            folder.mkdir()
+            (folder / "kin.dump").write_bytes(b"synthetic preserved dump")
+            if reason == "hold":
+                (folder / ops.HOLD_FILE).write_text("{}")
+            if reason == "audit-undeclared":
+                (folder / audit.CHECKPOINT).write_text("{}")
+                (folder / "manifest.json").write_text(json.dumps({"format": 1, "complete": True, "sha256": {audit.CHECKPOINT: "b" * 64}}))
+        (self.root.path / "latest-verified-C.json").write_text(json.dumps({"backup": str(self.root.path / daily(3)), "success": True}))
+        self.ledger(daily(4))
+        planned = self.rotate(protect={daily(2)}, dry_run=True)
+        result = self.rotate(protect={daily(2)})
+        expected = {ops.ROTATING + name: reason for name, reason in cases.items() if reason}
+        self.assertEqual(planned["kept_leftovers"], expected)
+        self.assertEqual(result["kept_leftovers"], expected)
+        self.assertEqual((planned["would_resume"], result["resumed"]), ([ops.ROTATING + daily(6)], [ops.ROTATING + daily(6)]))
+        for name, reason in cases.items():
+            self.assertEqual((self.root.path / (ops.ROTATING + name)).is_dir(), reason is not None, name)
+
+    def test_14_physically_incomplete_sets_are_neither_counted_nor_deleted(self):
+        """IRT-09: completeness is the files and their checksums, not the manifest's flag."""
+        for day in range(1, 13):
+            self.root.daily(daily(day))
+        breaks = {daily(12): lambda folder: (folder / "orthanc.tgz").unlink(),
+                  daily(11): lambda folder: (folder / "kin.dump").write_bytes(b"other bytes of the same name"),
+                  daily(2): lambda folder: (folder / "keycloak.dump").write_bytes(b"x"),
+                  daily(1): lambda folder: self.rewrite(folder, bytes={})}
+        for name, change in breaks.items():
+            change(self.root.path / name)
+        planned = self.rotate(dry_run=True)
+        result = self.rotate()
+        self.assertEqual(result["generations"], [daily(day) for day in range(10, 3, -1)])
+        self.assertEqual((planned["would_delete"], result["deleted"]), ([daily(3)], [daily(3)]))
+        self.assertEqual(set(result["incomplete"]), set(breaks))
+        self.assertEqual({name: result["retained"][name] for name in breaks}, {name: "incomplete" for name in breaks})
+        for name in breaks:
+            self.assertTrue((self.root.path / name).is_dir(), name)
+
+    def rewrite(self, folder, **changes):
+        manifest = json.loads((folder / "manifest.json").read_text())
+        manifest.update(changes)
+        (folder / "manifest.json").write_text(json.dumps(manifest))
+
+    def test_15_dry_run_is_exactly_the_plan_the_run_executes(self):
+        for day in range(1, 16):
+            self.root.daily(daily(day), checkpoint=day == 1)
+        (self.root.path / daily(5) / ops.HOLD_FILE).write_text("{}")
+        (self.root.path / (ops.ROTATING + daily(20))).mkdir()
+        self.ledger(daily(1))
+        for name in ("s5-b9690cc-20260927T105611Z", "emr-b0-20261013T010000Z-0123abcd"):
+            (self.root.path / name).mkdir()
+        planned = self.rotate(protect={daily(15)}, dry_run=True)
+        before = self.root.names()
+        self.assertEqual(self.root.names(), before)
+        result = self.rotate(protect={daily(15)})
+        for key in ("generations", "retained", "incomplete", "kept_leftovers"):
+            self.assertEqual(planned[key], result[key], key)
+        self.assertEqual((planned["would_delete"], planned["would_thin"], planned["would_resume"]),
+                         (result["deleted"], result["thinned"], result["resumed"]))
+        self.assertEqual(result["deleted"], [daily(day) for day in (2, 3, 4, 6, 7, 8)])
+        for name in (daily(15), daily(5), "s5-b9690cc-20260927T105611Z", "emr-b0-20261013T010000Z-0123abcd"):
+            self.assertTrue((self.root.path / name).is_dir(), name)
+
+    def test_16_a_hold_arriving_after_the_plan_keeps_the_set(self):
+        for day in range(1, 10):
+            self.root.daily(daily(day))
+        real = ops.os.rename
+
+        def rename_then_hold(source, target):
+            real(source, target)
+            if Path(source).name == daily(1):
+                (Path(target) / ops.HOLD_FILE).write_text("{}")
+        with patch.object(ops.os, "rename", side_effect=rename_then_hold):
+            result = self.rotate()
+        self.assertEqual(result["deleted"], [daily(2)])
+        self.assertIn(ops.ROTATING + daily(1), result["kept_leftovers"])
+        self.assertTrue((self.root.path / (ops.ROTATING + daily(1)) / "kin.dump").is_file())
+
     def test_12_a_thinned_set_is_never_taken_for_a_restorable_one(self):
         for day in range(1, 10):
-            folder = self.root.daily(daily(day))
-            (folder / "kin.dump").write_bytes(b"synthetic dump")
+            self.root.daily(daily(day))
         created = (NOW - timedelta(days=40)).isoformat()
         ledger = {"format": audit.FORMAT, "ledger_id": "f" * 32, "entries": [
             {"kind": "init", "at": created, "years": 2},

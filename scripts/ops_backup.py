@@ -1190,10 +1190,21 @@ def _referenced(root):
 
 
 def _retention_reason(name, folder, protect, referenced, audit_kept, undeclared):
-    """Why a set (by its original daily name, read in its actual folder) must stay, or None."""
-    return ("protected" if name in protect else "hold" if (folder / HOLD_FILE).exists() or (folder / HOLD_FILE).is_symlink()
-            else "latest-verified" if name in referenced else "audit-retention" if name in audit_kept
-            else "audit-undeclared" if name in undeclared else None)
+    """Why a set (by its original daily name, read in its actual folder) must stay, or None. A folder outside the daily
+    namespace (an interrupted deletion) is also kept while it declares an audit checkpoint the ledger does not list."""
+    reason = ("protected" if name in protect else "hold" if (folder / HOLD_FILE).exists() or (folder / HOLD_FILE).is_symlink()
+              else "latest-verified" if name in referenced else "audit-retention" if name in audit_kept
+              else "audit-undeclared" if name in undeclared else None)
+    if reason is None and folder.name != name:
+        import ops_audit_integrity as audit
+        if audit.declared(folder) is not None:
+            try:
+                listed = {entry["backup"] for entry in audit.read_ledger(folder.parent)["entries"] if entry["kind"] == "seal"}
+            except audit.LedgerMissing:
+                listed = set()
+            if name not in listed:
+                reason = "audit-undeclared"
+    return reason
 
 
 def _daily_whole(folder):
