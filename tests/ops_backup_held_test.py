@@ -77,7 +77,7 @@ class FakeHost:
         return out
 
     def catalog(self):
-        roles = [role("kin", superuser=True, login=True)] + ([role(name, login=name == "kin_runtime") for name in ops.EMR_ROLES]
+        roles = [{**role("kin", superuser=True, login=True), **getattr(self, "kin_changes", {})}] + ([role(name, login=name == "kin_runtime") for name in ops.EMR_ROLES]
                                                               if self.emr_roles else []) + list(self.extra_roles)
         return {"roles": roles, "memberships": list(self.memberships),
                 "databases": [{"name": name, "owner": "kin", "acl": None} for name in ("keycloak", "kin", "postgres", *self.extra_databases)],
@@ -333,9 +333,37 @@ class HeldCaptureTests(unittest.TestCase):
         self.assertTrue(any("CREATE TABLESPACE kin_emr_access OWNER kin_emr_owner" in " ".join(command) for command in host.commands))
         self.assertFalse(any("cluster-roles.sql" in str(command) or "--no-owner" in command for command in host.commands))
 
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() == 0, "Linux root (the protected entry's user)")
+    def test_12_root_captures_into_the_operating_accounts_private_backup_root_and_gives_the_capture_to_it(self):
+        """IRT2-03: the protected entry (root) writes B0 into the operating account's 0700 backup root as production has
+        it; the capture becomes that account's (its daily backups, rotation and ledger stay its own); an open root or
+        root-owned one is not changed; a group/other-accessible parent is refused before anything is written."""
+        host = FakeHost(self.folder)
+        host.parent.mkdir(mode=0o700)
+        os.chown(host.parent, 1000, 1000)
+        directory = host.capture()
+        for path in (directory, *directory.iterdir()):
+            self.assertEqual((path.stat().st_uid, path.stat().st_gid), (1000, 1000), path.name)
+        info = host.parent.stat()
+        self.assertEqual((info.st_uid, info.st_mode & 0o777), (1000, 0o700))
+        host = FakeHost(tempfile.mkdtemp(dir=self.folder))
+        host.parent.mkdir()
+        host.parent.chmod(0o750)
+        os.chown(host.parent, 1000, 1000)
+        with self.assertRaisesRegex(RuntimeError, "must be private"):
+            host.capture()
+        self.assertEqual(list(host.parent.iterdir()), [])
+
     def test_10_an_unsupported_pre_emr_catalog_is_refused_before_anything_is_written(self):
         """IRT-07: a B0 that a rollback could not rebuild exactly never becomes a B0."""
         cases = {"further login role": lambda host: host.extra_roles.append(role("legacy_app", login=True)),
+                 # IRT2-17: a kin the fresh cluster's bootstrap kin is not (it would only fail in the restore).
+                 "kin with its own connection limit": lambda host: setattr(host, "kin_changes", {"rolconnlimit": 7}),
+                 "kin with a validity": lambda host: setattr(host, "kin_changes", {"rolvaliduntil": "2027-01-01 00:00:00+00"}),
+                 # IRT2-16: a membership another role granted (the replay grants as kin).
+                 "a membership granted by another role": lambda host: (host.extra_roles.extend([role("delegate"), role("leaf")]),
+                                                                      host.memberships.append({"granted": "delegate", "member": "leaf", "grantor": "delegate",
+                                                                                               "admin_option": False, "inherit_option": True, "set_option": True})),
                  "role settings": lambda host: host.extra_roles.append(role("legacy_cfg", config=["search_path=x"])),
                  "another database": lambda host: host.extra_databases.append("orthanc_index"),
                  "another tablespace": lambda host: host.extra_tablespaces.append({"name": "fast", "owner": "kin", "location": "/x"})}

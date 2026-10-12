@@ -2672,6 +2672,198 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
                 refuses(self, ops_host.baseline, context, message=message)
                 self.assertEqual([call for call in docker.mutating() if not any("kc-serverinfo" in item for item in call)], [])
 
+    def test_107_each_smoke_check_needs_its_screen_and_its_api_contract(self):
+        """IRT2-11: a W2 answer that is JSON but not its contract (e.g. `false`) fails its check, and every screen behind
+        the checks - the worklist row, its Modality cell, the folders, the Reading Workspace with OHIF, the shortcuts
+        dialog, the standalone viewer's image - must have been reached in the real browser; any one missing is no pass."""
+        self.assertTrue(intro.folders_valid(json.loads(W2_ANSWERS["/api/filter-folders"])))
+        self.assertTrue(intro.shortcuts_valid(json.loads(W2_ANSWERS["/api/workspace-shortcuts"])))
+        for body in (False, None, [], {"owner": ["a", "b"], "revision": -1, "folders": [], "filters": []},
+                     {"owner": ["a", "b"], "revision": 0, "folders": [{"path": "x"}], "filters": []}):
+            self.assertFalse(intro.folders_valid(body), body)
+        for body in (False, {"owner": ["a", "b"], "revision": 0, "bindings": {"list": "KeyC"}, "invalid": False},
+                     {"owner": ["a", "b"], "revision": 0, "bindings": None}):
+            self.assertFalse(intro.shortcuts_valid(body), body)
+        ops_host, docker, context = self.unattended(FAKE_BROWSER)
+        patches = self.smoke_patches()
+        with patches[0], patches[1], patch.object(intro, "https_get", return_value=(200, "application/json", b"false")), patches[3]:
+            refuses(self, ops_host.unattended_release_smoke, context, ("127.0.0.1", 19444), message="w2_folders,w2_shortcuts")
+        for screen, check in (("worklist_row", "worklist_uid"), ("modality_rendered", "w2_modality"), ("folders_loaded", "w2_folders"),
+                              ("reading_workspace", "ohif_frame"), ("shortcuts_dialog", "w2_shortcuts"), ("viewer_rendered", "ohif_frame")):
+            self.setUp()
+            ops_host, docker, context = self.unattended(FAKE_BROWSER.replace('"%s",' % screen if screen != "viewer_rendered" else '"viewer_rendered")',
+                                                                             '' if screen != "viewer_rendered" else ')'))
+            patches = self.smoke_patches()
+            with self.subTest(screen=screen), patches[0], patches[1], patches[2], patches[3]:
+                refuses(self, ops_host.unattended_release_smoke, context, ("127.0.0.1", 19444), message=check)
+
+    def test_108_a_failed_member_creation_leaves_no_password_and_secrets_never_live_among_the_records(self):
+        """IRT2-15: the smoke member's password, the browser profiles and the kept compose values live in the run's secrets
+        directory, never in the run (evidence) directory; a creation that fails drops the password at once."""
+        ops_host, docker, context = CommanderAdditionsTests.unattended_host(self)
+        with patch.object(ops_host, "smoke_admin", side_effect=intro.Stop("synthetic create failure")):
+            refuses(self, ops_host.create_smoke_member, context, "release", message="synthetic create failure")
+        self.assertEqual(list(self.records.directory.glob("smoke-member-*.json")), [])
+        self.assertEqual(list(self.records.secrets.glob("smoke-member-*.json")), [], "a refused creation keeps no password")
+        member = ops_host.create_smoke_member(context, "release")
+        self.assertTrue((self.records.secrets / member["credentials"]).is_file())
+        self.assertFalse((self.records.directory / member["credentials"]).exists())
+        self.assertNotEqual(self.records.secrets.resolve(), self.records.directory.resolve())
+        self.assertNotIn(self.records.directory.resolve(), self.records.secrets.resolve().parents)
+
+    def test_109_the_checkout_env_names_the_declared_compose_list_for_ordinary_commands(self):
+        """IRT2-10: with a declared overlay, L-00b writes COMPOSE_FILE (the declared list) into the checkout's .env (once;
+        recorded by hash), the staged env of the target must carry the same line, and the final allowlist / the recovery
+        handover refuse a .env without it; a target without overlays changes nothing."""
+        ops_host, docker, context = CommanderAdditionsTests.production_host(self)
+        env = self.repo / ".env"
+        env.write_text("POSTGRES_PASSWORD=placeholder-0001\n", newline="\n")
+        detail = ops_host.reconcile_checkout(context)["ordinary_entry"]
+        self.assertEqual(detail["compose_file"], "written")
+        self.assertEqual(intro.parse_env(env.read_bytes())["COMPOSE_FILE"], os.pathsep.join(ops_host.t["compose_files"]))
+        self.assertEqual(ops_host.reconcile_checkout(context)["ordinary_entry"], {"compose_file": "already named"})
+        self.assertEqual(ops_host.ordinary_entry_kept(), {"compose_file": "declared list"})
+        env.write_text("POSTGRES_PASSWORD=placeholder-0001\n", newline="\n")
+        refuses(self, ops_host.ordinary_entry_kept, message="COMPOSE_FILE")
+        staged = self.root / "env.next"
+        staged.write_bytes(b"POSTGRES_PASSWORD=placeholder-0001\n")
+        self.assertNotEqual(intro.env_with_compose_file(staged.read_bytes(), ops_host.t), staged.read_bytes())
+        plain = target_fixture(repository=str(self.repo))
+        self.assertEqual(intro.env_with_compose_file(b"A=1\n", plain), b"A=1\n")
+
+    @unittest.skipUnless(shutil.which("docker"), "needs the docker CLI (`docker compose config` only)")
+    def test_110_a_plain_compose_in_the_checkout_keeps_the_overlay_through_compose_file(self):
+        """IRT2-10 with real Compose: in a checkout whose .env names the declared list, a plain `docker compose config`
+        (no -f, as an operator types it) renders the overlay's bind and network on the proxy; without the line it does
+        not."""
+        source = Path(__file__).resolve().parents[1]
+        for name in ("docker-compose.yml", "docker-compose.prod.yml"):
+            (self.repo / name).write_bytes((source / name).read_bytes())
+        conf = self.root / "halo-reports" / "report.conf"
+        conf.parent.mkdir()
+        conf.write_text("# synthetic\n")
+        overlay = self.root / "overlays" / "docker-compose.halo-reports.yml"
+        overlay.parent.mkdir()
+        overlay.write_bytes(HALO_OVERLAY.replace(b"/srv/halo-reports/nginx/report.conf", conf.as_posix().encode()))
+        target = target_fixture(repository=str(self.repo))
+        target.update(compose_files=["docker-compose.yml", "docker-compose.prod.yml", str(overlay)],
+                      declared_overlays=[{"file": str(overlay), "sha256": intro.sha256_bytes(overlay.read_bytes()), "service": "proxy",
+                                          "binds": [{"source": str(conf), "target": "/etc/nginx/conf.d/halo-report.conf", "read_only": True}]}])
+        texts = [path.read_bytes() for path in (self.repo / "docker-compose.yml", self.repo / "docker-compose.prod.yml")]
+        base = "".join(name + "=synthetic-placeholder\n" for name, needed in intro.referenced_variables(texts).items() if needed).encode()
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("COMPOSE_")}
+
+        def proxy(env_raw):
+            (self.repo / ".env").write_bytes(env_raw)
+            result = subprocess.run(["docker", "compose", "config", "--format", "json"], cwd=str(self.repo), env=environment,
+                                    capture_output=True, timeout=120)
+            self.assertEqual(result.returncode, 0, result.stderr[-800:])
+            return json.loads(result.stdout)["services"]["proxy"]
+        wired = proxy(intro.env_with_compose_file(base, target))
+        self.assertIn("halo_reports", wired["networks"])
+        self.assertTrue(any(entry.get("target") == "/etc/nginx/conf.d/halo-report.conf" for entry in wired["volumes"]))
+        bare = proxy(base)
+        self.assertNotIn("halo_reports", bare.get("networks") or {})
+
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() == 0, "POSIX root (ancestor owners and modes)")
+    def test_111_every_folder_above_a_declared_overlay_is_protected(self):
+        """IRT2-19: a folder above the overlay's own folder that others can write, or a link on the path, refuses the
+        overlay; the normal root-owned path is accepted."""
+        ops_host, docker, context = CommanderAdditionsTests.production_host(self)
+        ops_host.declared_overlay_facts()
+        self.overlays.parent.chmod(0o777)
+        refuses(self, ops_host.declared_overlay_facts, message="writable by others")
+        self.overlays.parent.chmod(0o755)
+        os.chown(self.overlays.parent, 1000, 1000)
+        refuses(self, ops_host.declared_overlay_facts, message="another owner")
+        os.chown(self.overlays.parent, 0, 0)
+        moved = self.root / "real-kin-deploy"
+        self.overlays.parent.rename(moved)
+        (self.root / "kin-deploy").symlink_to(moved, target_is_directory=True)
+        refuses(self, ops_host.declared_overlay_facts, message="link")
+
+    @unittest.skipUnless(shutil.which("node"), "needs node (the Linux root fixture has it)")
+    def test_112_a_same_named_account_or_client_is_never_deleted(self):
+        """IRT2-23 with the real administration script: a pre-existing account and client with the smoke names make the
+        creation refuse ('exists'), and the cleanup deletes only what carries this run's marker - the foreign account and
+        client stay."""
+        import http.server
+        import threading
+        store = {"users": [{"id": "foreign-user", "username": "kin-smoke-x", "lastName": "someone"}],
+                 "clients": [{"id": "foreign-client", "clientId": "kin-smoke-x-client", "description": "not ours"}], "deleted": []}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def respond(self):
+                path = self.path.split("?")[0]
+                body, status = {}, 200
+                if path.endswith("/token"):
+                    body = {"access_token": "t"}
+                elif path == "/admin/realms/kin/users":
+                    body = store["users"]
+                elif path == "/admin/realms/kin/clients":
+                    body = store["clients"]
+                elif self.command == "DELETE":
+                    store["deleted"].append(path)
+                raw = json.dumps(body).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+            do_GET = do_POST = do_PUT = do_DELETE = respond
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        env = {**os.environ, "KC_ADMIN_URL": "http://127.0.0.1:%d" % server.server_address[1], "KIN_KC_ADMIN_USER": "admin",
+               "KIN_KC_ADMIN_PASSWORD": "synthetic", "KIN_SMOKE_PASSWORD": "synthetic"}
+        run = lambda operation, payload: subprocess.run(["node", "-e", intro.SMOKE_ADMIN_SCRIPT, operation, json.dumps(payload)], env=env,
+                                                        capture_output=True, timeout=120)
+        created = run("create-member", {"username": "kin-smoke-x", "roles": ["radiologist"], "group": "hallym", "marker": "m" * 32})
+        self.assertNotEqual(created.returncode, 0)
+        self.assertIn(b"exists", created.stderr)
+        client = run("create-client", {"client_id": "kin-smoke-x-client", "redirect_uri": "https://kin-smoke-callback.invalid/x", "marker": "m" * 32})
+        self.assertIn(b"exists", client.stderr)
+        removed = run("remove", {"username": "kin-smoke-x", "client_ids": ["kin-smoke-x-client"], "marker": "m" * 32})
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertEqual(intro.result_line(removed.stdout), {"user_absent": True, "client_absent": True, "foreign_users": 1, "foreign_clients": 1})
+        self.assertEqual(store["deleted"], [], "nothing this run did not make was deleted")
+
+    def test_114_the_ended_sessions_original_cookie_is_sent_again_from_outside_the_browser(self):
+        """IRT2-12: after the product logout, the ended session's original cookie (and its binding) goes to /api/me again
+        from a separate connection; a server that only cleared the cookie and still accepts the session answers 200 there,
+        which is no 'old session refused'. Only the status leaves."""
+        import http.server
+        import threading
+        revoked = {"value": False}
+        seen = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                seen.append((self.path, self.headers.get("Cookie"), self.headers.get("X-KIN-Session")))
+                accepted = self.headers.get("Cookie") == "kin_sid=still-valid" and not revoked["value"]
+                self.send_response(200 if accepted else 401)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        spec = {"origin": "http://127.0.0.1:%d" % server.server_address[1]}
+        headers = {"Cookie": "kin_sid=still-valid", "X-KIN-CSRF": "1", "X-KIN-Session": "binding"}
+        self.assertEqual(intro.session_replay(spec, headers), 200, "a session the server kept is seen as accepted")
+        session = {"signed_in": True, "logout_status": 204, "old_session_status": 200, "old_cookie_status": 200}
+        self.assertFalse(intro.product_logout_refused(session))
+        revoked["value"] = True
+        self.assertEqual(intro.session_replay(spec, headers), 401)
+        self.assertEqual(seen[-1], ("/api/me", "kin_sid=still-valid", "binding"))
+
     @unittest.skipUnless(shutil.which("node"), "needs node (the Linux root fixture has it)")
     def test_98_keycloak_readiness_waits_for_200_and_a_refused_administrator_stops_at_once(self):
         """D18/D19: the administration and serverinfo helpers wait while Keycloak answers 404 (realms still loading) and
@@ -2715,10 +2907,10 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
         seen.clear()
         answers.update({("GET", "/realms/kin"): [(404, {}), (404, {}), (200, {})], ("POST", "/realms/master/protocol/openid-connect/token"): token,
                         ("GET", "/admin/realms/kin/users"): [(200, [])], ("GET", "/admin/realms/kin/clients"): [(200, [])]})
-        payload = json.dumps({"username": "kin-smoke-x", "client_ids": ["kin-smoke-x-client", "kin-smoke-x-client-2"]})
+        payload = json.dumps({"username": "kin-smoke-x", "client_ids": ["kin-smoke-x-client", "kin-smoke-x-client-2"], "marker": "m" * 32})
         out = subprocess.run(["node", "-e", intro.SMOKE_ADMIN_SCRIPT, "remove", payload], env=env, capture_output=True, timeout=120)
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertEqual(intro.result_line(out.stdout), {"user_absent": True, "client_absent": True})
+        self.assertEqual(intro.result_line(out.stdout), {"user_absent": True, "client_absent": True, "foreign_users": 0, "foreign_clients": 0})
         self.assertEqual(seen.count(("GET", "/realms/kin")), 3)
         self.assertEqual(seen.count(("GET", "/admin/realms/kin/clients")), 4, "each login client is looked up before and after")
         answers[("POST", "/realms/master/protocol/openid-connect/token")] = [(401, {})]
@@ -2771,7 +2963,7 @@ class RoundThreeMachineTests(MachineHarness, unittest.TestCase):
 
             def effect_fenced_smoke(self, context):
                 if self.slow and self.calls.count("fenced_smoke") == 2:
-                    holder.clock.value += intro.SMOKE_RETRY_S + 1
+                    holder.clock.value += 121   # beyond the 120 s bound of the retry
                 if self.calls.count("fenced_smoke") <= self.failures:
                     raise intro.Stop("synthetic transient browser startup")
                 return {"checks": "passed"}
@@ -3062,7 +3254,33 @@ class ProtectedHostTests(unittest.TestCase):
         self.assertEqual((info.st_uid, info.st_gid, info.st_mode & 0o777), (1000, 1000, 0o600))
         intro.owned_private(repo / ".env", owner, private=True)
 
-    def installed_run(self, *, prepare=None, target_changes=None):
+    def test_113_the_backup_root_of_the_operating_account_is_accepted_at_l01_and_any_other_owner_is_refused(self):
+        """IRT2-03: the protected entry runs as root; the production backup root is the checkout's operating account's
+        private folder (with its ledger). L-01 accepts it when that account is the policy's repository owner, refuses
+        another owner or an open mode before any fence, and changes nothing of it."""
+        owner = {"uid": 1000, "gid": 1000}
+        policy = json.loads(self.policy_path.read_bytes())
+        policy["repository_owner"] = owner
+        self.write(self.policy_path, policy)
+        for path in (self.repo, self.repo / ".git"):
+            os.chown(path, 1000, 1000)
+        for name, (uid, mode, outcome) in {"the operating account's 0700 folder": (1000, 0o700, "PASS"),
+                                           "another account's folder": (1001, 0o700, "STOP"),
+                                           "an open folder": (1000, 0o750, "STOP")}.items():
+            with self.subTest(case=name):
+                result, runs, docker = self.installed_run(backup_owner=(uid, mode), prepare=lambda runs: os.chown(self.repo / ".env", 1000, 1000))
+                steps = {step["step"]: step for step in result["steps"]}
+                self.assertEqual(steps["L-01"]["outcome"], outcome, result)
+                if outcome == "STOP":
+                    self.assertIn("backup root", steps["L-01"]["code"])
+                    self.assertNotIn("L-04a", steps)
+                info = (self.root / "backups").stat()
+                self.assertEqual((info.st_uid, info.st_mode & 0o777), (uid, mode), "the backup root is never changed")
+                shutil.rmtree(runs)
+                shutil.rmtree(self.root / "backups")
+                (self.repo / ".kin-ops.lock").unlink(missing_ok=True)
+
+    def installed_run(self, *, prepare=None, target_changes=None, backup_owner=None):
         """A real IntroductionHost.execute of a capture request on the protected install: policy, documents, approval,
         one-use marker, HostRecords and the state machine are the product's; only the fixed binaries answer from
         FakeDocker. The plan's window is now, so L-04a (the fence's crontab write, made to fail) is the first refusal."""
@@ -3074,6 +3292,9 @@ class ProtectedHostTests(unittest.TestCase):
         (repo / ".env").chmod(0o600)
         backups = self.root / "backups"
         backups.mkdir(mode=0o700, exist_ok=True)
+        if backup_owner:
+            os.chown(backups, backup_owner[0], backup_owner[0])
+            backups.chmod(backup_owner[1])
         target = target_fixture(repository=str(repo))
         target.update(target_changes or {})
         self.document("emr-targets", target)
