@@ -133,6 +133,9 @@ def compare(fixture, workloads):
         raise ValueError('at least one reviewed workload required')
     if dry_run and mode != 'ci-gross':
         raise ValueError('dry run requires the hosted ci-gross path')
+    if mode == 'ci-gross' and not dry_run:
+        from hosted_diagnostics import compare_hosted
+        return compare_hosted(fixture, workloads)
     if mode == 'acceptance':
         if os.environ.get('GITHUB_ACTIONS') == 'true':
             raise ValueError('hosted CI cannot run the NI acceptance verdict')
@@ -369,6 +372,16 @@ def summarize(directory):
                         'mode': value['mode'], 'verdict': value['verdict'],
                         'design': value['design'], 'results': value['results'],
                         'jit': value.get('jit'), 'raw_directory': value['raw_directory']})
+        if 'run_qualification' in value:
+            reports[-1].update(run_qualification=value['run_qualification'],
+                               controls=value.get('controls', {}), pairs=value.get('pairs', {}),
+                               diagnostic_design=value.get('diagnostic_design'))
+    if any('run_qualification' in r for r in reports):
+        from hosted_diagnostics import run_qualification
+        qualification = run_qualification(reports)
+        print(json.dumps({'decision': 'D961', 'reports': reports,
+                          'run_qualification': qualification}, indent=2))
+        return
     print(json.dumps({'decision': 'D961', 'reports': reports}, indent=2))
 
 

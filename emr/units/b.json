@@ -413,6 +413,11 @@
       "test": "noninferiority_test known-input paired p95/median t bounds and superiority mutant; L03 L03b L03c acceptance: p95 point and one-sided 95% UB <=1.10, concurrent median UB <=1.10 only; M36 latency positive control; power_design whole-plan equality probability under stated dispersion assumptions"
     },
     {
+      "req": "REQ-D1038",
+      "risk": "RISK-HOST-OFFSET/START-ORDER",
+      "test": "hosted_diagnostics_test TEST-HOSTED-AA/ORDER: ci-gross only, six fresh A/B pairs alternate actual preparation/start order r3-first/candidate-first (3/3); unchanged ABBA single request blocks and alternating indivisible concurrent/sustained blocks; pre-sustained plans on both revisions; after A/B, six candidate/candidate pairs on the same digest and independent fresh durable DB/state for single and sustained, same warmup/prefill/plans; record control_R, control_D_ms, control_pair_deltas_ms, control_qualifies, per-pair start_order, D_ms_by_start_order and run_qualification.would_be VALID/INVALID; invalid/missing controls or order never qualify; record-only, no A/B threshold/verdict or D961 acceptance change; later proposal only: INVALID -> re-run, never PASS"
+    },
+    {
       "req": "REQ-D1006",
       "risk": "RISK-EMR-FALSE-PERFORMANCE-ACCEPT/RECEIPT-DELAY/HOST-OFFSET",
       "test": "noninferiority_test performance_test: latency FAIL iff R>1.25 AND D>5ms, D=median of signed paired candidate_p95-baseline_p95 differences; live R=geometric mean of paired block-p95 ratios, modeled R=ratio of block-p95 medians; equality, 9->14ms accepted blind spot, mixed signed pairs, invalid pairs, request failures, JIT-class controls, MP02/MP03 consumer; L03 L03b L03c M36 PLAN-02 PLAN-03 and structural blockers retained; D961/D970 live acceptance binding, hosted fixed cost offset cause undetermined, 5ms chosen gross-only tolerance not verified noise bound"
