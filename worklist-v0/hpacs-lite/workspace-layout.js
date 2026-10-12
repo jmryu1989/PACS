@@ -23,8 +23,12 @@
     for (const name of ['rail', 'worklist', 'related', 'prior']) {
       const size = workspace[name];
       if (size !== null && (!Number.isInteger(size) || size < 1 || size > 16384)) return null;
-      clean[name] = size;
     }
+    // Panel sizes are kept per orientation in portrait/landscape. The shared
+    // worklist/related/prior fields carry no axis, and a landscape width must
+    // never become a portrait height: records from earlier builds read them as
+    // null, and no build writes them.
+    clean.rail = workspace.rail;
     clean.railCollapsed = workspace.railCollapsed; clean.studyPanelTab = workspace.studyPanelTab;
     return { ...legacy, version: 3, workspace: clean };
   }

@@ -89,8 +89,6 @@
       const [name, panel] = targets[selector];
       const dimension = !portraitLayout() && ["main", "related"].includes(name) ? "width" : "height";
       workspaceState[workspaceAxis()][name] = Math.round($(panel).getBoundingClientRect()[dimension]);
-      const field = { main: 'worklist', related: 'related', prior: 'prior' }[name];
-      if (field) workspaceState.workspace[field] = workspaceState[workspaceAxis()][name];
       saveWorkspace();
     }
     function restoreWorkspace() {
@@ -155,17 +153,23 @@
           workspaceObservedSizes.set(entry.target, size);
         }
       }
-      if (!changed || splitFrame) return;
+      if (changed) scheduleWorkspaceLayout(at);
+    });
+    // One layout pass before the next paint, coalesced with any pending one.
+    function scheduleWorkspaceLayout(at = work.capture('document')) {
+      if (workspaceEnded || splitFrame) return;
       splitFrame = requestAnimationFrame(() => {
         splitFrame = 0;
         work.commit(at, () => {
           if (!workspaceEnded && workArea.isConnected && !document.body.classList.contains("resizing")) applyLayout();
         });
       });
-    });
+    }
     workspaceObserver.observe(workArea);
-    // A notice or wrapped filter changes the row floor even in a fixed window.
-    for (const node of [...$('.related-list-pane').children, $('#relrows')]) workspaceObserver.observe(node);
+    // A notice, wrapped filter or list control changes a row floor even in a
+    // fixed window, and so do the first rendered rows.
+    for (const node of [...$('.related-list-pane').children, $('#relrows'), $('.left > .grid thead'), $('#rows'),
+      ...[...$('.left').children].filter(child => !child.matches('.grid, #worklist-folders-panel'))]) workspaceObserver.observe(node);
     function stopWorkspaceLayout() {
       workspaceEnded = true; workspaceGeneration++;
       workspaceDragCancel?.(); workspaceObserver.disconnect(); cancelAnimationFrame(splitFrame); splitFrame = 0;
@@ -174,7 +178,13 @@
       document.body.classList.remove('study-panel-open');
     }
     window.addEventListener('pagehide', stopWorkspaceLayout, { once: true });
-    work.onInvalidate(event => { if (event.reason === 'prepare') workspaceDragCancel?.(); });
+    work.onInvalidate(event => {
+      if (event.reason === 'prepare') workspaceDragCancel?.();
+      // The tab strip, the narrow stacking and the row floors follow the selected
+      // study: settle them before the selection's first paint, so opening the
+      // drawer later moves nothing (W3R-03).
+      if (event.reason === 'select') scheduleWorkspaceLayout();
+    });
     $('#rail-collapse').addEventListener('click', () => {
       if (!workspaceEditable()) return;
       workspaceState = KinWorkspaceLayout.toVersion3(workspaceState);

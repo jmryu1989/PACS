@@ -4,11 +4,13 @@ Serve the real page and dependency assets. Only HTTP answers are synthetic.
 Node identity is itself the relocation contract; all other assertions observe
 public controls, focus, geometry and stored preferences. No product instrumentation.
 """
+import base64
 import copy
 import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -26,7 +28,39 @@ READING = dict(version=1, reportWidth=540, imageHeight=390, relatedHeight=None,
 W2_LANDED = 'a86ecf1655c8c587012cef5fd16e233e121ae7dc'
 
 
-def first_paint_pixels(page, path):
+# W3R-08: a picture or a measurement is taken only after web fonts have loaded and
+# every element's box has stayed the same for three consecutive frames (late list,
+# observer-driven layout and toast transitions included).
+SETTLE = '''async () => {
+  await document.fonts.ready;
+  const frame = () => new Promise(resolve => requestAnimationFrame(() => resolve()));
+  const boxes = () => JSON.stringify([...document.querySelectorAll('body *')].map(node => {
+    const box = node.getBoundingClientRect(); return [box.x, box.y, box.width, box.height]; }));
+  let last = null, same = 0;
+  for (let i = 0; i < 180 && same < 3; i++) { await frame(); const now = boxes(); same = now === last ? same + 1 : 0; last = now; }
+  return same >= 3;
+}'''
+# The worklist list area: what a stacked list needs to show its header and one whole row.
+LIST = '''() => { const grid = document.querySelector('.left > .grid'), table = grid.querySelector('table');
+  const box = grid.getBoundingClientRect(), row = table.tBodies[0].rows[0];
+  return {grid: [box.top, box.bottom], head: table.tHead.getBoundingClientRect().height,
+          row: row ? row.getBoundingClientRect().height : null, scrollbar: grid.offsetHeight - grid.clientHeight}; }'''
+
+
+def settle(page):
+    assert page.evaluate(SETTLE), 'layout did not settle'
+
+
+def cover(page, rects):
+    # A test-only box on top of the page at the same viewport rect in both pages;
+    # it is then masked like the logo, so both pictures carry the identical mask.
+    page.evaluate('''rects => rects.forEach(([x, y, w, h]) => { const box = document.createElement('div');
+      box.className = 'kin-test-cover';
+      box.style.cssText = `position:fixed;left:${x}px;top:${y}px;width:${w}px;height:${h}px;pointer-events:none`;
+      document.documentElement.append(box); })''', rects)
+
+
+def first_paint_pixels(page, path, clip=None):
     # W3S-03: W2 itself has two native-checkbox raster states after fonts/blur/
     # double-rAF. Playwright masks the element's measured bounding box, never a
     # fixed pixel range. Geometry/checked state remain independently compared.
@@ -34,8 +68,41 @@ def first_paint_pixels(page, path):
     expect(checkbox).to_have_count(1)
     expect(checkbox).to_be_checked()
     assert checkbox.bounding_box() is not None
-    return page.screenshot(animations='disabled', caret='hide',
-        mask=[page.locator('.brand img'), checkbox], path=str(path))
+    settle(page)
+    return page.screenshot(animations='disabled', caret='hide', clip=clip,
+        mask=[page.locator('.brand img'), checkbox, page.locator('.kin-test-cover')], path=str(path))
+
+
+# W3R-08: two pages with identical element geometry still differ by raster
+# anti-aliasing on rounded edges (measured: at most 7/255 per channel, on edges in
+# one 256 px tile column; each tree alone reproduces its own picture exactly).
+# Pixels count as different above 16/255 in any channel; a 1 px move of a border
+# or a glyph differs by far more and fails.
+ANTIALIAS = 16
+COMPARE = '''async ([a, b, tolerance]) => {
+  const load = src => new Promise((resolve, reject) => { const img = new Image();
+    img.onload = () => resolve(img); img.onerror = reject; img.src = 'data:image/png;base64,' + src; });
+  const [x, y] = await Promise.all([load(a), load(b)]);
+  if (x.width !== y.width || x.height !== y.height) return {size: [x.width, x.height, y.width, y.height]};
+  const data = img => { const canvas = new OffscreenCanvas(img.width, img.height), g = canvas.getContext('2d');
+    g.drawImage(img, 0, 0); return g.getImageData(0, 0, img.width, img.height).data; };
+  const p = data(x), q = data(y); let over = 0, max = 0;
+  for (let i = 0; i < p.length; i += 4) {
+    const d = Math.max(Math.abs(p[i] - q[i]), Math.abs(p[i + 1] - q[i + 1]), Math.abs(p[i + 2] - q[i + 2]));
+    if (d > max) max = d;
+    if (d > tolerance) over++;
+  }
+  return {over, max};
+}'''
+
+
+def picture_difference(browser, a, b):
+    """Pixels whose largest channel difference exceeds ANTIALIAS, and the largest difference."""
+    context = browser.new_context()
+    try:
+        return context.new_page().evaluate(COMPARE, [base64.b64encode(a).decode(), base64.b64encode(b).decode(), ANTIALIAS])
+    finally:
+        context.close()
 
 
 class WorkspaceSite(auth.Site):
@@ -258,40 +325,50 @@ class StudyPanelPageDOM(unittest.TestCase):
                 self.assertEqual(before, len(self.site.layout_writes))
                 self.assertEqual(saved, self.local())
 
-    def test_drawer_geometries_zoom_and_pilot_pictures(self):
+    def assert_drawer_place(self, page, width, height):
+        """D1041: LEFT 12/360 px beside the report in wide landscape windows; the approved
+        bottom panel (4-①) in stacked portrait layouts at any width and up to 1100 px."""
+        drawer = page.get_by_role('complementary', name='Study Panel', exact=True)
+        box = drawer.bounding_box()
+        self.assertGreaterEqual(box['x'], 0)
+        self.assertLessEqual(box['x'] + box['width'], width + 0.5)
+        self.assertLessEqual(box['y'] + box['height'], height + 0.5)
+        expect(drawer.get_by_role('button', name='Close', exact=True)).to_be_in_viewport()
+        self.assertAlmostEqual(12, box['x'], delta=1)
+        if width <= 1100 or height > width:
+            self.assertAlmostEqual(width - 24, box['width'], delta=1)
+            self.assertAlmostEqual(height - 12, box['y'] + box['height'], delta=1)
+            self.assertAlmostEqual(height * .55, box['height'], delta=1)
+        else:
+            self.assertAlmostEqual(360, box['width'], delta=1)
+            report = page.locator('.report-p').bounding_box()
+            self.assertLessEqual(box['x'] + box['width'], report['x'])
+        return box
+
+    def test_drawer_geometries_and_pilot_pictures(self):
         self.boot()
         self.page.locator('#rows tr[data-uid]').first.click()
         pictures = Path(os.environ.get('KIN_W3_PILOT_DIR', ROOT / 'tmp/w3-land/pilot'))
         pictures.mkdir(parents=True, exist_ok=True)
-        for width, height in ((1920,1080), (900,1200), (1366,768), (2560,1440), (768,1024), (640,480), (900,768), (1024,768)):
+        # W3R-01: portrait screens wider than 1100 px (medical portrait monitors)
+        # get the same bottom panel as 900x1200, never the landscape left column.
+        for width, height in ((1920,1080), (900,1200), (1366,768), (2560,1440), (768,1024), (640,480), (900,768), (1024,768),
+                              (1200,1920), (1440,2560), (1536,2048), (1080,1920)):
             self.page.set_viewport_size(dict(width=width, height=height))
+            settle(self.page)
             prefix = f'{width}x{height}'
-            if width in (1920,900):
+            if width in (1920,900,1200):
                 self.page.screenshot(path=str(pictures/(prefix+'-closed.png')))
             self.open_drawer()
             for name in ('Images','Info','Templates'):
                 self.drawer().get_by_role('tab', name=name, exact=True).click()
-                box = self.drawer().bounding_box()
-                self.assertGreater(box['width'], 200)
-                self.assertGreaterEqual(box['x'], 0)
-                self.assertLessEqual(box['x']+box['width'], width)
-                self.assertLessEqual(box['y']+box['height'], height+1)
-                if width > 1100 and width > height:
-                    self.assertAlmostEqual(12, box['x'], delta=1)
-                    self.assertAlmostEqual(360, box['width'], delta=1)
-                    report = self.page.locator('.report-p').bounding_box()
-                    self.assertLessEqual(box['x'] + box['width'], report['x'])
-                if width in (1920,900):
+                with self.subTest(width=width, height=height, tab=name):
+                    self.assert_drawer_place(self.page, width, height)
+                if width in (1920,900,1200):
                     self.page.screenshot(path=str(pictures/(prefix+'-'+name.lower()+'.png')))
             self.page.keyboard.press('Escape')
             if height == 768 and 900 <= width <= 1100:
                 expect(self.page.get_by_role('navigation', name='Study Panel', exact=True)).to_be_hidden()
-        self.page.set_viewport_size(dict(width=960,height=540))
-        self.page.evaluate("document.body.style.zoom='2'")
-        self.open_drawer()
-        expect(self.drawer().get_by_role('button', name='Close', exact=True)).to_be_in_viewport()
-        self.page.keyboard.press('Escape')
-        self.page.evaluate("document.body.style.zoom='1'")
         self.page.set_viewport_size(dict(width=840,height=768))
         strip = self.page.get_by_role('navigation', name='Study Panel', exact=True)
         expect(strip).to_be_in_viewport()
@@ -300,7 +377,9 @@ class StudyPanelPageDOM(unittest.TestCase):
         self.page.keyboard.press('Escape')
         # A tall portrait has room for a resizable context panel. Only short
         # narrow landscapes compact it; the portrait pilot retains manual sizes.
-        self.page.set_viewport_size(dict(width=768,height=1024))
+        # (At 768x1024 the W3R-09 list floor and D383's prior-report line leave
+        # the band at its 140 px minimum, so the pilot's 900x1200 is used here.)
+        self.page.set_viewport_size(dict(width=900,height=1200))
         # Wait for the tall, stacked layout's visible geometry, including its
         # resize-driven reflow, before comparing a keyboard resize with it.
         self.page.wait_for_function("""() => {
@@ -315,6 +394,170 @@ class StudyPanelPageDOM(unittest.TestCase):
         after = self.page.locator('.rw').bounding_box()['height']
         self.assertGreaterEqual(after,140)
         self.assertLess(after,before)
+
+    def test_browser_zoom_keeps_drawer_in_view(self):
+        """W3R-02: browser zoom (Ctrl +) gives a CSS-pixel viewport with a device
+        scale factor; 200 % and 150 % of 1920x1080 and 125 % of 1366x768."""
+        for width, height, scale in ((960, 540, 2), (1280, 720, 1.5), (1093, 614, 1.25)):
+            with self.subTest(width=width, height=height, scale=scale):
+                site = WorkspaceSite()
+                context = self.browser.new_context(viewport=dict(width=width, height=height), device_scale_factor=scale)
+                context.route('**/*', lambda route, request: site.handle(route, request))
+                try:
+                    page = context.new_page()
+                    errors = []
+                    page.on('pageerror', lambda e: errors.append(str(e)))
+                    page.goto(auth.MAIN_URL)
+                    expect(page.locator('#rows')).to_contain_text(auth.PATIENT)
+                    self.assertEqual(scale, page.evaluate('devicePixelRatio'))
+                    # Keyboard selection: a short window's list header can cover the row.
+                    page.locator('#rows tr[data-uid]').first.focus()
+                    page.keyboard.press('Enter')
+                    expect(page.locator('#rows tr[data-uid]').first).to_have_class(re.compile(r'\bsel\b'))
+                    page.keyboard.press('Control+Alt+5')
+                    expect(page.get_by_role('complementary', name='Study Panel', exact=True)).to_be_visible()
+                    settle(page)
+                    self.assert_drawer_place(page, width, height)
+                    page.keyboard.press('Escape')
+                    expect(page.get_by_role('complementary', name='Study Panel', exact=True)).to_have_count(0)
+                    self.assertEqual([], errors)
+                    self.assertEqual([], site.violations)
+                finally:
+                    context.close()
+
+    def test_selection_settles_layout_before_drawer_open(self):
+        """W3R-03: the Study Panel strip (stacked, <= 1100 px), the narrow stacking
+        (landscape < 900 px) and the row floors follow the selected study when it is
+        selected; opening and closing the drawer then moves no panel."""
+        geometry = """() => ({classes: ['portrait', 'workspace-strip', 'workspace-narrow'].filter(c => document.body.classList.contains(c)),
+          panels: ['.menubar', '.left', '.right', '.rw', '.related-p', '.related-list-pane', '.report-p', '.study-panel-strip'].map(s => {
+            const node = document.querySelector(s), box = node.getBoundingClientRect();
+            return [s, getComputedStyle(node).display, box.x, box.y, box.width, box.height]; }),
+          scroll: [document.querySelector('.right').scrollTop, document.querySelector('.split').scrollTop]})"""
+        for width, height in ((900, 1200), (768, 1024), (1080, 1920), (840, 768)):
+            with self.subTest(width=width, height=height):
+                site = WorkspaceSite()
+                context = self.browser.new_context(viewport=dict(width=width, height=height))
+                context.route('**/*', lambda route, request: site.handle(route, request))
+                try:
+                    page = context.new_page()
+                    page.goto(auth.MAIN_URL)
+                    expect(page.locator('#rows')).to_contain_text(auth.PATIENT)
+                    settle(page)
+                    unselected = page.evaluate(geometry)
+                    row = page.locator('#rows tr[data-uid]').first
+                    if height > width:
+                        row.click()  # W3R-09 keeps the row reachable by mouse in stacked layouts
+                    else:
+                        row.focus(); page.keyboard.press('Enter')
+                    expect(row).to_have_class(re.compile(r'\bsel\b'))
+                    settle(page)
+                    selected = page.evaluate(geometry)
+                    if height > width and width <= 1100:
+                        self.assertNotIn('workspace-strip', unselected['classes'])
+                        self.assertIn('workspace-strip', selected['classes'])
+                        expect(page.get_by_role('navigation', name='Study Panel', exact=True)).to_be_in_viewport()
+                    if width < 900 and height <= width:
+                        self.assertNotIn('portrait', unselected['classes'])
+                        self.assertIn('portrait', selected['classes'])
+                        self.assertIn('workspace-narrow', selected['classes'])
+                    page.keyboard.press('Control+Alt+5')
+                    expect(page.get_by_role('complementary', name='Study Panel', exact=True)).to_be_visible()
+                    settle(page)
+                    self.assertEqual(selected, page.evaluate(geometry), 'opening the drawer moved a panel')
+                    page.keyboard.press('Escape')
+                    expect(page.get_by_role('complementary', name='Study Panel', exact=True)).to_have_count(0)
+                    settle(page)
+                    self.assertEqual(selected, page.evaluate(geometry), 'closing the drawer moved a panel')
+                    self.assertEqual([], site.violations)
+                finally:
+                    context.close()
+
+    def test_stacked_list_shows_header_and_one_whole_row(self):
+        """W3R-09: at portrait widths whose wrapped list controls left 17 px (or less)
+        of the first row, the stacked list keeps its header and one whole row, and a
+        click on that row's centre selects it."""
+        for width, height in ((768, 1024), (800, 1024), (834, 1112), (900, 1200), (768, 1366)):
+            with self.subTest(width=width, height=height):
+                site = WorkspaceSite()
+                context = self.browser.new_context(viewport=dict(width=width, height=height))
+                context.route('**/*', lambda route, request: site.handle(route, request))
+                try:
+                    page = context.new_page()
+                    page.goto(auth.MAIN_URL)
+                    expect(page.locator('#rows')).to_contain_text(auth.PATIENT)
+                    settle(page)
+                    self.assertIn('portrait', page.evaluate('document.body.className'))
+                    area = page.evaluate(LIST)
+                    self.assertGreaterEqual(area['grid'][1] - area['grid'][0] + 0.5, area['head'] + area['row'] + area['scrollbar'])
+                    row = page.locator('#rows tr[data-uid]').first
+                    box = row.bounding_box()
+                    self.assertLessEqual(box['y'] + box['height'], area['grid'][1] + 0.5)
+                    hit = page.evaluate('([x, y]) => !!document.elementFromPoint(x, y)?.closest("#rows tr[data-uid]")',
+                                        [box['x'] + min(box['width'], width - box['x']) / 2, box['y'] + box['height'] / 2])
+                    self.assertTrue(hit)
+                    row.click()
+                    expect(row).to_have_class(re.compile(r'\bsel\b'))
+                    self.assertEqual([], site.violations)
+                finally:
+                    context.close()
+
+    def test_sizes_stay_with_their_orientation(self):
+        """W3R-07: a size is applied only in the orientation it was set in. A landscape
+        worklist width never becomes a portrait height (and back); v3 records written
+        by earlier W3 builds carry an orientation-free copy, which is not applied."""
+        self.page.set_viewport_size(dict(width=900, height=1200))
+        self.boot()
+        settle(self.page)
+        portrait_default = self.page.locator('.left').bounding_box()['height']
+        self.page.set_viewport_size(dict(width=1600, height=1000))
+        settle(self.page)
+        landscape_default = self.page.locator('.left').bounding_box()['width']
+        main = self.page.locator('#resize-main')
+        main.focus()
+        for _ in range(4):
+            self.page.keyboard.press('Shift+ArrowRight')
+        width = self.page.locator('.left').bounding_box()['width']
+        self.assertGreater(width, landscape_default + 100)
+        related = self.page.locator('.related-p').bounding_box()['width']
+        stored = self.local()
+        self.assertEqual(round(width), stored['landscape']['main'])
+        self.assertEqual({}, stored['portrait'])
+        self.assertEqual([None, None, None], [stored['workspace'][k] for k in ('worklist', 'related', 'prior')])
+        self.page.set_viewport_size(dict(width=900, height=1200))
+        settle(self.page)
+        self.assertAlmostEqual(portrait_default, self.page.locator('.left').bounding_box()['height'], delta=1)
+        main.focus()
+        self.page.keyboard.press('Shift+ArrowDown')
+        tall = self.page.locator('.left').bounding_box()['height']
+        self.assertGreater(tall, portrait_default + 20)
+        stored = self.local()
+        self.assertEqual(round(tall), stored['portrait']['main'])
+        self.assertEqual(round(width), stored['landscape']['main'])
+        self.page.set_viewport_size(dict(width=1600, height=1000))
+        settle(self.page)
+        self.assertAlmostEqual(width, self.page.locator('.left').bounding_box()['width'], delta=1)
+        self.page.reload()
+        expect(self.page.locator('#rows')).to_contain_text(auth.PATIENT)
+        settle(self.page)
+        self.assertAlmostEqual(width, self.page.locator('.left').bounding_box()['width'], delta=1)
+        self.assertAlmostEqual(related, self.page.locator('.related-p').bounding_box()['width'], delta=1)
+        # An earlier W3 build wrote the landscape width into the shared field too.
+        earlier = dict(version=3, mode='auto', portrait={}, landscape={'main': 767}, reading=READING,
+                       workspace=dict(version=1, rail=None, worklist=767, related=None, prior=None,
+                                      railCollapsed=False, studyPanelTab='info'))
+        self.page.evaluate('([k, v]) => localStorage.setItem(k, JSON.stringify(v))', [KEY, earlier])
+        self.page.set_viewport_size(dict(width=900, height=1200))
+        self.page.reload()
+        expect(self.page.locator('#rows')).to_contain_text(auth.PATIENT)
+        settle(self.page)
+        self.assertAlmostEqual(portrait_default, self.page.locator('.left').bounding_box()['height'], delta=1)
+        self.open_drawer()
+        self.drawer().get_by_role('tab', name='Images', exact=True).click()
+        self.page.keyboard.press('Escape')
+        stored = self.local()
+        self.assertEqual({'main': 767}, stored['landscape'])
+        self.assertIsNone(stored['workspace']['worklist'])
 
     def test_info_first_session_choice_and_new_login(self):
         """D1041-INFO/LOGIN: old v3 choice, same-login reload and same-owner login."""
@@ -440,56 +683,95 @@ class StudyPanelPageDOM(unittest.TestCase):
         expect(self.page.get_by_role('complementary', name='Study Panel', exact=True, include_hidden=True)).to_have_count(0)
         self.assertEqual(saved, self.local())
 
+    def first_paint(self, asset_root, version, width, height, rail=None, picture=None, clip=None):
+        """Serve one tree at one size; return its first-paint facts, list area, Rail box and picture."""
+        auth.ROOT = asset_root
+        site = WorkspaceSite()
+        context = self.browser.new_context(viewport=dict(width=width, height=height))
+        context.route('**/*', lambda route, request: site.handle(route, request))
+        try:
+            if version:
+                value = dict(version=version, mode='auto', landscape={'main': 650}, portrait={'main': 310})
+                if version == 2:
+                    value['reading'] = READING
+                context.add_init_script('localStorage.setItem('+json.dumps(KEY)+','+json.dumps(json.dumps(value))+')')
+            page = context.new_page()
+            page.goto(auth.MAIN_URL)
+            expect(page.locator('#rows')).to_contain_text(auth.PATIENT)
+            settle(page)
+            facts = page.evaluate("""() => ({focus:document.activeElement.id || document.activeElement.tagName,
+              panels:['.left','.right','.rw','.related-p','.report-p'].map(s=>{
+                const r=document.querySelector(s).getBoundingClientRect();return [r.x,r.y,r.width,r.height]}),
+              toolbar:[...document.querySelectorAll('.menubar input, .userfilter > *')].filter(n=>n.getClientRects().length).map(n=>{
+                const r=n.getBoundingClientRect();return [n.textContent,n.value,n.checked,r.x,r.y,r.width,r.height]}),
+              folders:document.querySelector('#worklist-folders-panel').open,
+              headings:[...document.querySelectorAll('.rw h3')].map(n=>n.textContent)})""")
+            area = page.evaluate(LIST)
+            control = page.get_by_role('button', name='Rail', exact=True)
+            box = control.bounding_box() if control.count() else None
+            pixels = None
+            if picture:
+                cover(page, [rail])
+                pixels = first_paint_pixels(page, picture, clip(area) if callable(clip) else clip)
+            self.assertEqual([], site.violations)
+            return facts, area, box and [box['x'], box['y'], box['width'], box['height']], pixels
+        finally:
+            context.close()
+
     def test_first_paint_matches_w2_for_empty_v1_and_v2_records(self):
         # D1004 requires identical first paint. This fixed landed-input comparison
         # is a deliberate byte-provenance use; compare visible geometry and pixels.
         # The baseline is the landed W2 (main a86ecf1, PR #164): D1041 6-② made
         # W2 open Folders on every login, so W2's own first paint changed by
-        # decision after the earlier W2 input 9d4ba0f.
+        # decision after the earlier W2 input 9d4ba0f. Two decided differences:
+        # - W3's Rail control shows in that open panel's title row; its measured
+        #   box is masked in both pictures (the folder tree keeps W2's place).
+        # - W3R-09: where W2's stacked list cannot show its header and one whole
+        #   row, W3's list grows by exactly the missing height. Toolbar, focus,
+        #   Folders and the list's place stay W2's, the work area below moves down
+        #   by that height, and the pictures are identical above W2's list bottom.
         current = auth.ROOT
+        pictures = Path(os.environ.get('KIN_W3_PILOT_DIR', ROOT / 'tmp/w3-land/pilot')) / 'first-paint'
+        pictures.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='kin-w3-w2-') as temporary:
             raw = subprocess.check_output(['git', 'archive', '--format=zip', W2_LANDED,
                 'worklist-v0/hpacs-lite', 'scripts/main-split-order.json', 'proxy/branding'], cwd=ROOT)
             zipfile.ZipFile(io.BytesIO(raw)).extractall(temporary)
             try:
                 for version in (None, 1, 2):
-                    for width,height in ((1366,768),(1920,1080),(2560,1440),(900,1200),(768,1024)):
-                        facts = []
-                        pixels = []
-                        for label, asset_root in (('w2', Path(temporary)), ('current', current)):
-                            auth.ROOT = asset_root
-                            site = WorkspaceSite()
-                            context = self.browser.new_context(viewport=dict(width=width,height=height))
-                            context.route('**/*', lambda route, request: site.handle(route, request))
-                            try:
-                                if version:
-                                    value = dict(version=version, mode='auto', landscape={'main': 650}, portrait={'main': 310})
-                                    if version == 2:
-                                        value['reading'] = READING
-                                    context.add_init_script('localStorage.setItem('+json.dumps(KEY)+','+json.dumps(json.dumps(value))+')')
-                                page = context.new_page()
-                                page.goto(auth.MAIN_URL)
-                                expect(page.locator('#rows')).to_contain_text(auth.PATIENT)
-                                page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
-                                facts.append(page.evaluate("""() => ({focus:document.activeElement.id || document.activeElement.tagName,
-                                  panels:['.left','.right','.rw','.related-p','.report-p'].map(s=>{
-                                    const r=document.querySelector(s).getBoundingClientRect();return [r.x,r.y,r.width,r.height]}),
-                                  toolbar:[...document.querySelectorAll('.menubar input, .userfilter > *')].filter(n=>n.getClientRects().length).map(n=>{
-                                    const r=n.getBoundingClientRect();return [n.textContent,n.value,n.checked,r.x,r.y,r.width,r.height]}),
-                                  folders:document.querySelector('#worklist-folders-panel').open,
-                                  headings:[...document.querySelectorAll('.rw h3')].map(n=>n.textContent)})"""))
-                                if (width, height) in ((1920,1080), (900,1200)):
-                                    picture_dir = Path(os.environ.get('KIN_W3_PILOT_DIR', ROOT / 'tmp/w3-land/pilot')) / 'first-paint'
-                                    picture_dir.mkdir(parents=True, exist_ok=True)
-                                    pixels.append(first_paint_pixels(page,
-                                        picture_dir / f'{label}-v{version or 0}-{width}x{height}.png'))
-                                self.assertEqual([],site.violations)
-                            finally:
-                                context.close()
-                        with self.subTest(version=version, width=width, height=height):
-                            self.assertEqual(facts[0],facts[1])
-                            if pixels:
-                                self.assertTrue(pixels[0] == pixels[1], 'first-paint pixels differ outside the logo/native checkbox')
+                    for width, height in ((1366,768),(1920,1080),(2560,1440),(900,1200),(768,1024),(1080,1920)):
+                        mine, area, rail, _ = self.first_paint(current, version, width, height)
+                        self.assertIsNotNone(rail)
+                        name = f'v{version or 0}-{width}x{height}.png'
+                        picture = (width, height) in ((1920,1080), (900,1200), (1080,1920))
+                        lacking = lambda a: a['head'] + a['row'] + a['scrollbar'] - (a['grid'][1] - a['grid'][0])
+                        clip = lambda a: dict(x=0, y=0, width=width, height=a['grid'][1]) if lacking(a) > 0.5 else None
+                        w2, w2_area, w2_rail, w2_pixels = self.first_paint(Path(temporary), version, width, height, rail,
+                            pictures / ('w2-' + name) if picture else None, clip)
+                        self.assertIsNone(w2_rail)
+                        missing = lacking(w2_area)
+                        if picture:
+                            again, _, _, pixels = self.first_paint(current, version, width, height, rail,
+                                pictures / ('current-' + name), clip(w2_area))
+                            self.assertEqual(mine, again)
+                        difference = picture_difference(self.browser, w2_pixels, pixels) if picture else None
+                        with self.subTest(version=version, width=width, height=height, pixels=difference):
+                            if missing <= 0.5:
+                                self.assertEqual(w2, mine)
+                                if picture:
+                                    self.assertEqual(0, difference.get('over'), 'first-paint pixels differ outside the logo/native checkbox/Rail')
+                                continue
+                            self.assertGreater(height, width, 'only a stacked list grows')
+                            need = area['head'] + area['row'] + area['scrollbar']
+                            self.assertAlmostEqual(need, area['grid'][1] - area['grid'][0], delta=1)
+                            grown = mine['panels'][0][3] - w2['panels'][0][3]
+                            self.assertAlmostEqual(missing, grown, delta=1)
+                            for key in ('focus', 'toolbar', 'folders', 'headings'):
+                                self.assertEqual(w2[key], mine[key], key)
+                            self.assertEqual(w2['panels'][0][:3], mine['panels'][0][:3])
+                            self.assertAlmostEqual(w2['panels'][1][1] + grown, mine['panels'][1][1], delta=0.01)
+                            if picture:
+                                self.assertEqual(0, difference.get('over'), 'first-paint pixels differ above the list bottom')
             finally:
                 auth.ROOT = current
 

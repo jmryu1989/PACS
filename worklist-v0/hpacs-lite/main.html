@@ -1050,10 +1050,13 @@
     body.workspace-narrow .rw { height: 48px !important; min-height: 48px; overflow: auto; }
     body.workspace-narrow .left { height: 180px !important; }
     .study-panel-strip { display: none; }
-    body.workspace-strip .study-panel-strip { display: flex; flex: none; gap: 6px; padding: 4px 8px; border-top: 1px solid var(--kin-line2); background: var(--kin-panel); }
+    body.workspace-strip .study-panel-strip { display: flex; flex: none; gap: 6px; padding: 2px 8px; border-top: 1px solid var(--kin-line2); background: var(--kin-panel); }
+    /* A compact row: in a stacked 768x1024 window every pixel below the list floor
+       is the Related panel's (its prior report's first line, D383). */
+    .study-panel-strip .chip { height: 28px; }
     /* Overlay the left work area on demand; adding a column would squeeze the
        worklist/related lists and the report when Folders is also open. */
-    #study-panel-host { position: fixed; left: 12px; width: 360px; max-width: calc(100vw / var(--study-panel-scale, 1) - 24px); z-index: 90; pointer-events: none; }
+    #study-panel-host { position: fixed; left: 12px; width: 360px; max-width: calc(100vw - 24px); z-index: 90; pointer-events: none; }
     #study-panel-host .study-panel { height: 100%; box-sizing: border-box; pointer-events: auto; box-shadow: 0 8px 24px #0008; }
     #study-panel-host .study-panel-head button, #study-panel-host [role="tab"] { font: inherit; color: var(--kin-text); background: var(--kin-panel2); border: 1px solid var(--kin-line2); border-radius: 4px; padding: 6px 10px; cursor: pointer; }
     #study-panel-host [role="tab"][aria-selected="true"] { background: var(--kin-row-sel); border-color: var(--kin-accent); text-decoration: none; }
@@ -1065,11 +1068,20 @@
     .left:has(> #worklist-folders-panel[open]) { padding-inline-start: var(--workspace-rail-width, 220px); }
     #worklist-folders-panel { width: var(--workspace-rail-width, 220px); }
     #resize-rail { position: absolute; right: 0; top: 0; bottom: 0; width: 6px; cursor: col-resize; }
+    /* Folders is open on every login (D1041 6-②): the Rail control sits in the
+       panel's title row, so the folder tree keeps its first-paint position. */
+    #rail-collapse { position: absolute; top: 6px; right: 10px; }
+    body.workspace-rail-collapsed #rail-collapse { position: static; margin: 0 8px 4px; }
     body.workspace-rail-collapsed .left:has(> #worklist-folders-panel[open]) { padding-inline-start: 78px; }
     body.workspace-rail-collapsed #worklist-folders-panel { width: 78px; }
     body.workspace-rail-collapsed #worklist-folders-panel > :not(summary):not(#rail-collapse) { display: none; }
+    /* Stacked (portrait) layouts at any width, and small windows, get the approved
+       bottom panel (D1041 4-①). A 360 px column in a tall window would cover the
+       report toolbar and the start of every report line. */
+    body.portrait.study-panel-open #study-panel-host { top: auto !important; bottom: 12px; height: 55vh !important; width: calc(100vw - 24px); }
+    body.portrait.study-panel-open #study-panel-host .study-panel-head { flex: none; }
     @media (max-width: 1100px) {
-      body.study-panel-open #study-panel-host { top: auto !important; bottom: 12px; height: var(--study-panel-small-height, 55vh) !important; width: calc(100vw - 24px); }
+      body.study-panel-open #study-panel-host { top: auto !important; bottom: 12px; height: 55vh !important; width: calc(100vw - 24px); }
       body.study-panel-open #study-panel-host .study-panel-head { flex: none; }
     }
   </style>

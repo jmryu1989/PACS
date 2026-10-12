@@ -341,6 +341,7 @@ class HostedStack:
         self.candidate_dir = Path(candidate_dir)
         self.project = "kin-load-" + uuid.uuid4().hex[:12]
         self.commands, self.requests, self.violations = [], [], []
+        self.ledger = threading.Lock()  # handler threads update request entries
         self.me_received, self.me_release = threading.Event(), threading.Event()
         self.server = self.thread = None
         self.started = False
@@ -502,6 +503,10 @@ class HostedStack:
                     self.send_header(name, value)
                 self.end_headers()
                 self.wfile.write(body)
+                entry = getattr(self, "ledger_entry", None)
+                if entry is not None:
+                    with stack.ledger:
+                        entry.update(status=status, answered=time.perf_counter())
 
             def do_GET(self):
                 site, requests = stack.site, stack.requests
@@ -514,7 +519,9 @@ class HostedStack:
 
                 stamp = time.perf_counter()
                 url = urlparse(self.path)
-                requests.append({"method": "GET", "path": url.path, "query": url.query, "received": stamp})
+                self.ledger_entry = {"method": "GET", "path": url.path, "query": url.query, "received": stamp}
+                with stack.ledger:
+                    requests.append(self.ledger_entry)
                 if url.path == "/api/health":
                     return self.fulfill(json={"ok": True, "synthetic": True})
                 if url.path == DISCOVERY_PATH:
@@ -656,6 +663,13 @@ def collect_startup_requests(page, waterfall, result, record_path):
          on_timeout=diagnostic)
 
 
+def server_ledger(stack):
+    """A copy of the synthetic server's requests: path, received and, once the
+    response was written, status and answered (host perf_counter seconds)."""
+    with stack.ledger:
+        return copy.deepcopy(stack.requests)
+
+
 def visit(stack, browser_context, clock_start, patient, metadata):
     stack.reset()
     page = browser_context.new_page()  # a new Document; never reload/history/BFCache
@@ -721,7 +735,7 @@ def visit(stack, browser_context, clock_start, patient, metadata):
                 "note": "native responseEnd differs from retained host auth-release observation; diagnostic only"},
             resources=performance["resources"], navigation=performance["navigation"],
             non_script_requests=[(r["method"], r["path"], r["query"]) for r in stack.requests],
-            server_requests=list(stack.requests), inputs=stack.versions[stack.side])
+            inputs=stack.versions[stack.side])
         result["script_requests"] = [(r["method"], urlparse(r["url"]).path, urlparse(r["url"]).query)
                                      for r in waterfall.rows.values() if r.get("type") == "Script"]
         assert not errors, errors
@@ -755,6 +769,10 @@ def visit(stack, browser_context, clock_start, patient, metadata):
         result["console_errors"] = list(console_errors)
         result["page_errors"] = list(errors)
         result["fixture_violations"] = list(stack.visit_violations)
+        # W3R-06: the synthetic server's own ledger, taken before the release
+        # below, for failed visits too. An entry without "answered" is a request
+        # the fixture received and still held (e.g. a second /api/me).
+        result["server_requests"] = server_ledger(stack)
         # A failed navigation/auth wait may leave a synthetic handler held.
         # Release this visit's event before its page closes and reset replaces it.
         stack.me_release.set()

@@ -86,7 +86,9 @@ test('TEST-W3-SERVER-01 v1/v2/v3 retain their formats on GET and upgrade without
 test('TEST-W3-SERVER-02 accepted client records roundtrip via facade; all tabs and size endpoints survive', async () => {
   for (const tab of ['images', 'info', 'templates']) for (const size of [null, 1, 16384]) {
     const f = fixture(), value = layout();
-    value.workspace = { version: 1, rail: size, worklist: size, related: size, prior: size,
+    // The client keeps panel sizes per orientation; its shared worklist/related/prior
+    // fields are always null (W3R-07). The server still accepts sizes there.
+    value.workspace = { version: 1, rail: size, worklist: null, related: null, prior: null,
       railCollapsed: size !== null, studyPanelTab: tab };
     value.reading.relatedHidden = true;
     const source = client.normalize(clone(value)); assert.deepEqual(source, value);
@@ -96,6 +98,13 @@ test('TEST-W3-SERVER-02 accepted client records roundtrip via facade; all tabs a
     assert.deepEqual(await f.service.workspaceLayout(caller), saved);
     assert.deepEqual(client.normalize(saved.layout), value);
   }
+  // A record saved by an earlier W3 build keeps its shared sizes on the server; the
+  // client reads them as null instead of applying them to the current orientation.
+  const f = fixture(); f.seed(layout());
+  const earlier = (await f.service.workspaceLayout(caller)).layout;
+  assert.equal(earlier.workspace.worklist, 304);
+  assert.deepEqual(client.normalize(earlier).workspace, { ...layout().workspace, worklist: null, related: null, prior: null });
+  assert.deepEqual(client.normalize(earlier).landscape, layout().landscape);
 });
 
 test('TEST-W3-SERVER-03 strict v3 envelopes reject missing/unknown keys, transient drawer state and oversized data', async () => {

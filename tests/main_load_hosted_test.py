@@ -116,9 +116,10 @@ class FirstAuthDiagnostic(unittest.TestCase):
                 event = threading.Event()
                 if not browser_request:
                     event.set()
+                held = {"method": "GET", "path": "/api/me", "query": "", "received": 0}
                 stack = SimpleNamespace(root=root / "stack", side="baseline", origin="https://fixture",
                     url="https://fixture/worklist/hpacs-lite/main.html", me_received=event,
-                    me_release=threading.Event(), visit_violations=[],
+                    me_release=threading.Event(), visit_violations=[], requests=[held], ledger=threading.Lock(),
                     reset=Mock(), versions={"baseline": {"main.html": "sha"}})
                 handlers = {}
                 page = Mock(url=stack.url)
@@ -156,6 +157,10 @@ class FirstAuthDiagnostic(unittest.TestCase):
                 self.assertTrue(all(c["error"] == "HTTP 502" for c in diagnostic["stack_health"].values()))
                 self.assertTrue(captured[0]["wait_failed"])
                 self.assertTrue(stack.me_release.is_set())
+                # W3R-06: the failed record keeps the fixture's own ledger as it
+                # was before the release: the held /api/me has no answer yet.
+                self.assertEqual([held], captured[0]["server_requests"])
+                self.assertNotIn("answered", captured[0]["server_requests"][0])
 
 
 def sample(metadata, side="baseline", network=False):
@@ -575,6 +580,36 @@ class VisitLifecycle(unittest.TestCase):
             self.assertEqual(["BrokenPipeError('closed page')"], old_violations)
             self.assertEqual(old_violations, stack.violations)
             self.assertEqual([], stack.visit_violations)
+
+    def test_server_ledger_marks_answered_and_held_requests(self):
+        """W3R-06: each fixture request records status and answer time once its
+        response is written; a request still held has neither."""
+        with tempfile.TemporaryDirectory() as directory:
+            stack = hosted.HostedStack(Path(directory) / "stack", lambda: Mock(), "sha", Path(directory))
+            with patch.object(hosted, "ThreadingHTTPServer") as server, patch.object(hosted.threading, "Thread"):
+                stack.start_api()
+            handler_type = server.call_args.args[1]
+
+            def handler(path):
+                h = object.__new__(handler_type)
+                h.path, h.headers, h.wfile = path, {}, io.BytesIO()
+                h.send_response = h.send_header = h.end_headers = lambda *args: None
+                return h
+
+            handler("/api/health").do_GET()
+            during = []
+            release = Mock()
+            release.wait.side_effect = lambda timeout: (during.append(hosted.server_ledger(stack)), False)[1]
+            stack.me_release = release
+            handler("/api/me").do_GET()
+            ledger = hosted.server_ledger(stack)
+            self.assertEqual(["/api/health", "/api/me"], [r["path"] for r in ledger])
+            self.assertEqual([200, 504], [r["status"] for r in ledger])
+            self.assertTrue(all(r["answered"] >= r["received"] for r in ledger))
+            held = during[0][1]
+            self.assertEqual("/api/me", held["path"])
+            self.assertNotIn("answered", held)
+            self.assertNotIn("status", held)
 
 
 if __name__ == "__main__":

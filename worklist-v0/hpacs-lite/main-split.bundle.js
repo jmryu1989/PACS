@@ -8279,11 +8279,10 @@
         $(".related-p").style.height = "";
       }
       // A temporary small window must not overwrite the user's preferred size.
-      // Reapply stored pixels within today's bounds, separately for each orientation.
-      const sizes = { ...workspaceState[workspaceAxis()] }, geometry = workspaceState.workspace;
+      // Reapply stored pixels within today's bounds, separately for each orientation:
+      // a landscape width is never a portrait height (W3R-07).
+      const sizes = workspaceState[workspaceAxis()], geometry = workspaceState.workspace;
       if (geometry) {
-        for (const [name, field] of [['main', 'worklist'], ['related', 'related'], ['prior', 'prior']])
-          if (geometry[field] !== null && sizes[name] == null) sizes[name] = geometry[field];
         document.body.classList.toggle('workspace-rail-collapsed', geometry.railCollapsed);
         document.body.style.setProperty('--workspace-rail-width', clampPanel(geometry.rail ?? 220, 160, Math.max(160, innerWidth / 3)) + 'px');
         $('#rail-collapse')?.setAttribute('aria-expanded', String(!geometry.railCollapsed));
@@ -8297,6 +8296,20 @@
       const split = $(".split").getBoundingClientRect();
       if (sizes.main != null) left.style[portrait ? "height" : "width"] = clampPanel(sizes.main,
         portrait ? 180 : 500, portrait ? split.height - 420 : split.width - 426) + "px";
+      // A stacked worklist keeps its column header and one whole row in view, as
+      // in the approved portrait picture (W3R-09; the Related list follows the same
+      // rule, D383). Wrapped list controls take their own height, not the rows'.
+      // The narrow landscape sheet keeps its fixed list band (no room for both).
+      left.style.minHeight = "";
+      if (portrait && !narrow && !document.body.classList.contains("reading")) {
+        const grid = left.querySelector(":scope > .grid"), table = grid?.querySelector("table");
+        if (table?.tHead && grid.getClientRects().length) {
+          const need = table.tHead.getBoundingClientRect().height
+            + (table.tBodies[0]?.rows[0]?.getBoundingClientRect().height || 41) + grid.offsetHeight - grid.clientHeight;
+          const short = need - grid.getBoundingClientRect().height;
+          if (short > 0) left.style.minHeight = Math.ceil(left.getBoundingClientRect().height + short) + "px";
+        }
+      }
       if (sizes.top != null) top.style.height = clampPanel(sizes.top, 140, $(".right").getBoundingClientRect().height - 266) + "px";
       const row = $(".workrow").getBoundingClientRect();
       if (sizes.related != null) related.style[portrait ? "height" : "width"] = clampPanel(sizes.related,
@@ -8326,14 +8339,19 @@
         prior.style.minHeight = ''; prior.style.maxHeight = ''; prior.style.overflowY = '';
         related.style.minHeight = ''; related.querySelector('.prior-report-pane').style.minHeight = '';
       }
+      // The worklist floor must not push the prior report's first line out of a
+      // stacked work area (D383). The report window band yields first, only as much
+      // as needed and never below its 140 px drag minimum; a stored size wins.
+      if (portrait && !narrow && sizes.top == null && !document.body.classList.contains("reading")) {
+        const area = $(".right"), body = related.querySelector(".prior-report-body"), style = getComputedStyle(body);
+        const line = body.getBoundingClientRect().top + area.scrollTop + parseFloat(style.paddingTop) + 2 * parseFloat(style.fontSize);
+        const over = line - area.getBoundingClientRect().bottom;
+        if (over > 0) top.style.height = Math.max(140, Math.floor(top.getBoundingClientRect().height - over)) + "px";
+      }
       if (studyPanel) {
-        const box = $('.right').getBoundingClientRect();
-        const host = $('#study-panel-host');
-        const scale = parseFloat(getComputedStyle(document.body).zoom) || 1;
-        host.style.setProperty('--study-panel-scale', scale);
-        host.style.setProperty('--study-panel-small-height', (innerHeight * .55 / scale) + 'px');
-        host.style.top = (Math.max(0, box.top) / scale) + 'px';
-        host.style.height = (Math.max(120, innerHeight - Math.max(0, box.top) - 12) / scale) + 'px';
+        const edge = Math.max(0, $('.right').getBoundingClientRect().top), host = $('#study-panel-host');
+        host.style.top = edge + 'px';
+        host.style.height = Math.max(120, innerHeight - edge - 12) + 'px';
       }
     }
     const readingWorkspace = KinReadingWorkspace({
@@ -8369,7 +8387,6 @@
         cite: (request, origin) => openCitePreview(request, origin),
       });
     } catch (_) { toast('영상 소견 목록을 불러오지 못했습니다. 영상 화면의 Findings를 사용하세요.', 'err'); }
-
 
     // ── 임상 정보 패널(S7-U4b) ──
     // REQ-S7-U4b-PANEL → RISK-S7-U4b-STALE-PANEL/FAIL-AS-EMPTY → TEST-S7-U4b-DOM (tests/clinical_context_dom_test.py가 이 절을
@@ -9707,8 +9724,6 @@
       const [name, panel] = targets[selector];
       const dimension = !portraitLayout() && ["main", "related"].includes(name) ? "width" : "height";
       workspaceState[workspaceAxis()][name] = Math.round($(panel).getBoundingClientRect()[dimension]);
-      const field = { main: 'worklist', related: 'related', prior: 'prior' }[name];
-      if (field) workspaceState.workspace[field] = workspaceState[workspaceAxis()][name];
       saveWorkspace();
     }
     function restoreWorkspace() {
@@ -9773,17 +9788,23 @@
           workspaceObservedSizes.set(entry.target, size);
         }
       }
-      if (!changed || splitFrame) return;
+      if (changed) scheduleWorkspaceLayout(at);
+    });
+    // One layout pass before the next paint, coalesced with any pending one.
+    function scheduleWorkspaceLayout(at = work.capture('document')) {
+      if (workspaceEnded || splitFrame) return;
       splitFrame = requestAnimationFrame(() => {
         splitFrame = 0;
         work.commit(at, () => {
           if (!workspaceEnded && workArea.isConnected && !document.body.classList.contains("resizing")) applyLayout();
         });
       });
-    });
+    }
     workspaceObserver.observe(workArea);
-    // A notice or wrapped filter changes the row floor even in a fixed window.
-    for (const node of [...$('.related-list-pane').children, $('#relrows')]) workspaceObserver.observe(node);
+    // A notice, wrapped filter or list control changes a row floor even in a
+    // fixed window, and so do the first rendered rows.
+    for (const node of [...$('.related-list-pane').children, $('#relrows'), $('.left > .grid thead'), $('#rows'),
+      ...[...$('.left').children].filter(child => !child.matches('.grid, #worklist-folders-panel'))]) workspaceObserver.observe(node);
     function stopWorkspaceLayout() {
       workspaceEnded = true; workspaceGeneration++;
       workspaceDragCancel?.(); workspaceObserver.disconnect(); cancelAnimationFrame(splitFrame); splitFrame = 0;
@@ -9792,7 +9813,13 @@
       document.body.classList.remove('study-panel-open');
     }
     window.addEventListener('pagehide', stopWorkspaceLayout, { once: true });
-    work.onInvalidate(event => { if (event.reason === 'prepare') workspaceDragCancel?.(); });
+    work.onInvalidate(event => {
+      if (event.reason === 'prepare') workspaceDragCancel?.();
+      // The tab strip, the narrow stacking and the row floors follow the selected
+      // study: settle them before the selection's first paint, so opening the
+      // drawer later moves nothing (W3R-03).
+      if (event.reason === 'select') scheduleWorkspaceLayout();
+    });
     $('#rail-collapse').addEventListener('click', () => {
       if (!workspaceEditable()) return;
       workspaceState = KinWorkspaceLayout.toVersion3(workspaceState);
@@ -9830,7 +9857,6 @@
       list.style.flex = "none";
       list.style.height = clampPanel(e.clientY - box.top, 150, box.height - 136) + "px";
     });
-
 
     $("#quick").addEventListener("input", () => { worklistSearch?.change(); render(); });
     for (const host of [$('#quick'),$('#filterrow')]) host.addEventListener('keydown',e=>{

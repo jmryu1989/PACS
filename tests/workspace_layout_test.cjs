@@ -105,7 +105,10 @@ test('M-01: v3 왕복·분리 복사·reading 갱신은 workspace와 계정 경�
   source.workspace = { version: 1, rail: 232, worklist: 304, related: 184, prior: 200,
     railCollapsed: true, studyPanelTab: 'templates' };
   source.reading.reportWidth = 570;
+  // W3R-07: the shared worklist/related/prior sizes carry no orientation, so a
+  // record from an earlier build reads them as null (sizes stay per orientation).
   const expected = structuredClone(source);
+  Object.assign(expected.workspace, { worklist: null, related: null, prior: null });
   assert.equal(layout.write(s, k, source), true); source.workspace.rail = 100;
   assert.deepEqual(layout.read(s, k), { state: expected, status: 'restored' });
   assert.equal(layout.read(s, layout.key({ ...session, sub: 'other' })).status, 'empty');
@@ -182,8 +185,9 @@ test('M-03: v3 whitelist·필수 멤버·타입·수치·변환 오류는 저장
     for (const size of [0, -1, 16385, 1.1, NaN, Infinity, '100', true, undefined, {}, []]) {
       invalid.push({ ...valid, workspace: { ...valid.workspace, [key]: size } });
     }
+    // Valid shared sizes are accepted; only the orientation-free rail keeps its value (W3R-07).
     for (const size of [null, 1, 16384]) assert.equal(layout.normalize({ ...valid,
-      workspace: { ...valid.workspace, [key]: size } }).workspace[key], size);
+      workspace: { ...valid.workspace, [key]: size } }).workspace[key], key === 'rail' ? size : null);
   }
   for (const value of invalid) {
     assert.equal(layout.normalize(value), null); assert.equal(layout.toVersion3(value), null);
@@ -201,7 +205,7 @@ test('M-03/05: 2048자 cap 경계, 최대 v3 크기, 손상 기록 및 기존 ow
   const s = store(), k = layout.key(session), raw = JSON.stringify(value);
   assert.equal(layout.PREFIX, 'kin-workspace:v1:'); assert.equal(k, 'kin-workspace:v1:["hospital-a","account-a"]');
   assert.ok(raw.length <= 2048); assert.equal(layout.write(s, k, value), true);
-  assert.deepEqual(layout.read(s, k).state, value);
+  assert.deepEqual(layout.read(s, k).state, { ...value, workspace: { ...value.workspace, worklist: null, related: null, prior: null } });
   s.setItem(k, raw.padEnd(2048, ' ')); assert.equal(layout.read(s, k).status, 'restored');
   s.setItem(k, raw.padEnd(2049, ' ')); assert.equal(layout.read(s, k).status, 'invalid');
   assert.deepEqual(layout.read(s, k).state, layout.defaults());
