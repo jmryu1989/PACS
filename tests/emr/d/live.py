@@ -188,6 +188,11 @@ class EmrDLive(unittest.TestCase):
         self.assertNotIn("mutantAnchor", value, "a mutant anchor must occur exactly once: %s" % value)
         return value
 
+    def as_root(self, command):
+        """One shell command on this run's ledger state volume as root (B1's live cases change file modes the same way)."""
+        run(["docker", "run", "--rm", "--label", self.label, "--network", "none", "-u", "0", "-v", self.state + ":" + STATE,
+             "--entrypoint", "sh", self.image, "-c", command])
+
     def psql(self, sql, user="kin"):
         """(exit, stdout, first SQLSTATE) of one psql run (local socket, trust) as the given role."""
         result = run(["docker", "exec", "-i", self.db, "psql", "-X", "-q", "-A", "-t", "-U", user, "-d", "kin", "-v", "ON_ERROR_STOP=1"],
@@ -487,7 +492,12 @@ class EmrDLive(unittest.TestCase):
         out, _uid = self.run_d03()
         self.check_d03(out)
         before = len(self.provisions(out["ids"]["question"]))
-        down = self.driver("d03-ledger-down", {"question": out["ids"]["question"]})
+        # B1's durable intent log unwritable before the reading process starts: the provision cannot be made durable.
+        self.as_root("chmod 400 %s/seal/settlement.jsonl" % STATE)
+        try:
+            down = self.driver("d03-ledger-down", {"question": out["ids"]["question"]})
+        finally:
+            self.as_root("chmod 600 %s/seal/settlement.jsonl" % STATE)
         self.assertEqual((down["read"]["ok"], down["read"]["error"]["status"], down["read"]["error"]["code"]), (False, 503, "CLINICAL_STORAGE_UNAVAILABLE"),
                          "no body when the provision is not durable")
         self.assertNotIn("value", down["read"])

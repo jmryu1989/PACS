@@ -314,14 +314,11 @@ const SCENARIOS = {
     return out;
   },
   /**
-   * TEST-D-03: with B1's durable intent file unwritable (the seal's append-only settlement log, as B1's own live case
-   * refuses it) the access record cannot be made durable and no body is handed out.
+   * TEST-D-03: started with B1's durable intent log unwritable (live.py changes its mode before this process starts, as
+   * B1's own live case does) the access record cannot be made durable and no body is handed out.
    */
-  async 'd03-ledger-down'({ args, S, attempt, caller, actorFacts, STATE }) {
-    const intents = path.join(STATE, 'seal', 'settlement.jsonl');
-    fs.chmodSync(intents, 0o400);
-    try { return { read: await attempt(async () => S.questions.read(args.question, caller('c1'), { actor: await actorFacts('c1'), signature: null })) }; }
-    finally { fs.chmodSync(intents, 0o600); }
+  async 'd03-ledger-down'({ args, S, attempt, caller, actorFacts }) {
+    return { read: await attempt(async () => S.questions.read(args.question, caller('c1'), { actor: await actorFacts('c1'), signature: null })) };
   },
 
   /** TEST-D-04: one commit per request, replays answer the stored receipt, every failure commits nothing and keeps the input. */
