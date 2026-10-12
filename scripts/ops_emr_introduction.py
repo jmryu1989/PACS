@@ -2326,6 +2326,11 @@ def env_with_compose_file(raw, target):
     return set_env_line(raw, "COMPOSE_FILE", declared_compose_file(target), pattern=COMPOSE_FILE_VALUE)
 
 
+def names_declared_list(raw, target):
+    """Whether .env bytes already name the declared compose list (wherever the line stands), or need not."""
+    return not target["declared_overlays"] or parse_env(raw).get("COMPOSE_FILE") == declared_compose_file(target)
+
+
 class HostOps:
     """The docker/compose/git/crontab operations of each step, against one target manifest only. Every command goes
     through cmd(), which records it (records.command) whatever its outcome."""
@@ -2903,9 +2908,9 @@ class HostOps:
         if not self.t["declared_overlays"]:
             return "no declared overlay"
         raw = self.env_file().read_bytes()
-        wanted = env_with_compose_file(raw, self.t)
-        if wanted == raw:
+        if names_declared_list(raw, self.t):
             return {"compose_file": "already named"}
+        wanted = env_with_compose_file(raw, self.t)
         self.write_env(wanted)
         return {"compose_file": "written", "env_sha256": {"before": sha256_bytes(raw), "after": sha256_bytes(wanted)}}
 
@@ -3340,7 +3345,7 @@ class HostOps:
         require(sha256_bytes(raw) == intro.plan["secrets"]["env_next_sha256"], "Staged env differs from the plan")
         pre.check_env_secrets(parse_env(raw), intro.plan["secrets"])
         # IRT2-10: the target's .env keeps the ordinary entry (COMPOSE_FILE = the declared list) once it replaces this one.
-        require(raw == env_with_compose_file(raw, self.t), "The staged env does not name the declared compose files (COMPOSE_FILE)")
+        require(names_declared_list(raw, self.t), "The staged env does not name the declared compose files (COMPOSE_FILE)")
         return raw
 
     def checkout(self, intro, side):
@@ -4804,7 +4809,8 @@ def main(argv=None):
                 # 43 URL-safe characters; generated here and written only to the private staged file, never printed.
                 raw = raw.rstrip(b"\n") + b"\nKIN_EMR_RUNTIME_PASSWORD=" + token_source.token_urlsafe(32).encode() + b"\n"
             if args.target:
-                raw = env_with_compose_file(raw, target_valid(decode(args.target.read_bytes())))
+                declared_target = target_valid(decode(args.target.read_bytes()))
+                raw = raw if names_declared_list(raw, declared_target) else env_with_compose_file(raw, declared_target)
             fd = os.open(args.out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "wb") as stream:
                 stream.write(raw)
@@ -4819,7 +4825,9 @@ def main(argv=None):
                                                          check=True, capture_output=True).stdout))
             env_raw = args.env.read_bytes()
             if args.target:
-                env_raw = env_with_compose_file(env_raw, target_valid(decode(args.target.read_bytes())))
+                # The .env as L-00b leaves it: an existing COMPOSE_FILE line naming the declared list stays where it is.
+                declared_target = target_valid(decode(args.target.read_bytes()))
+                env_raw = env_raw if names_declared_list(env_raw, declared_target) else env_with_compose_file(env_raw, declared_target)
             entries.append((".env", env_raw))
             print(json.dumps({"sha256": compose_digest(entries)}))
         elif args.command == "rehearsal-override":

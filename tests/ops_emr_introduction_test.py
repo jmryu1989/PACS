@@ -2742,6 +2742,14 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
         self.assertEqual(intro.parse_env(env.read_bytes())["COMPOSE_FILE"], os.pathsep.join(ops_host.t["compose_files"]))
         self.assertEqual(ops_host.reconcile_checkout(context)["ordinary_entry"], {"compose_file": "already named"})
         self.assertEqual(ops_host.ordinary_entry_kept(), {"compose_file": "declared list"})
+        # A line that already names the list stays where it stands (the plan's digest covers these bytes; r3-rehearsal-05
+        # found the staged env refused only because its COMPOSE_FILE line was not the last one).
+        middle = ("COMPOSE_FILE=" + intro.declared_compose_file(ops_host.t) + "\nPOSTGRES_PASSWORD=placeholder-0001\n").encode()
+        self.assertTrue(intro.names_declared_list(middle, ops_host.t))
+        env.write_bytes(middle)
+        self.assertEqual(ops_host.reconcile_checkout(context)["ordinary_entry"], {"compose_file": "already named"})
+        self.assertEqual(env.read_bytes(), middle)
+        self.assertFalse(intro.names_declared_list(b"COMPOSE_FILE=docker-compose.yml\n", ops_host.t))
         env.write_text("POSTGRES_PASSWORD=placeholder-0001\n", newline="\n")
         refuses(self, ops_host.ordinary_entry_kept, message="COMPOSE_FILE")
         staged = self.root / "env.next"
