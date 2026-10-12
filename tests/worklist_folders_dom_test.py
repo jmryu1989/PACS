@@ -2,6 +2,9 @@
 """REQ-WS3/WS7 -> RISK-WS3/WS7 -> WS3-SHORTCUTS / WS3-COUNTS / WS3-RELATIVE-DATE.
 D1041 replaces W2R-05/W2R-02: login-open Folders and saved Modality token OR.
 REQ-WS3/WS7 -> RISK-WS3/WS7 -> WS3-LOGIN-OPEN / WS3-SAVED-MODALITY.
+W2-FU (W2R4-01/02/04/05/06): Does Not Equal complements Equals with its Korean help shown,
+footer counts stay whole with Folders open, and the per-login/per-tab close is driven only by
+doctor actions (header or toolbar, reload, second tab, logout/login), never by storage keys.
 Serve the committed page/bundle and dependency assets; only HTTP answers are synthetic.
 """
 import copy
@@ -143,12 +146,8 @@ class WorklistFoldersDOM(unittest.TestCase):
 
     def test_first_paint_tokens_or_and_empty_and_vanished(self):
         self.open()
-        # An older boolean or account-only preference must not close a new login.
-        for old in ('false', '{"open":false}', 'invalid JSON'):
-            self.page.evaluate('(old) => sessionStorage.setItem("kin-worklist-folders", old)', old)
-            self.page.reload()
-            expect(self.page.locator('#rows tr[data-uid]')).to_have_count(6)
-            expect(self.page.locator('#worklist-folders-toggle')).to_have_attribute('aria-expanded', 'true')
+        # W2R4-05 (D73 §16): a close left by an earlier login is exercised below through
+        # the doctor's own close/logout/login path, not by writing the product's storage key.
         expect(self.folder('All Studies')).to_have_attribute('aria-current', 'true')
         expect(self.page.locator('#quick')).to_have_value('')
         expect(self.folder('MG')).to_be_visible()
@@ -210,6 +209,171 @@ class WorklistFoldersDOM(unittest.TestCase):
         self.assertEqual(3, self.site.logins)
         self.assertEqual(3, len(self.site.entries))
         self.assertEqual([], self.dialogs, 'D1041 adds no prompt to the normal login/search path')
+
+    def folders_state(self, page=None):
+        page = page or self.page
+        toggle = page.locator('#worklist-folders-toggle')
+        expanded = toggle.get_attribute('aria-expanded')
+        visible = page.get_by_role('navigation', name='Folders').is_visible()
+        self.assertEqual(expanded == 'true', visible, 'toolbar state and panel visibility agree')
+        return expanded
+
+    def test_panel_header_close_is_kept_for_the_login_like_the_toolbar(self):
+        # W2R4-06 (mutant O9): closing through the panel's own "Folders" header is the
+        # same doctor action as the toolbar button and lasts for that login in the tab.
+        self.open()
+        toggle = self.page.locator('#worklist-folders-toggle')
+        header = self.page.locator('#' + toggle.get_attribute('aria-controls') + ' > summary')
+        expect(header).to_have_text('Folders')
+        header.click()
+        expect(toggle).to_have_attribute('aria-expanded', 'false')
+        for _ in range(2):
+            self.page.reload()
+            expect(self.page.locator('#rows tr[data-uid]')).to_have_count(6)
+            expect(toggle).to_have_attribute('aria-expanded', 'false')
+            self.assertEqual('false', self.folders_state())
+        toggle.click()
+        expect(toggle).to_have_attribute('aria-expanded', 'true')
+        header.click()
+        expect(toggle).to_have_attribute('aria-expanded', 'false')
+        self.page.locator('#logout').click()
+        expect(self.page).to_have_url(re.compile('index.html'))
+        self.site.login_as = auth.RAD
+        self.page.get_by_role('button', name=auth.SIGN_IN).click()
+        expect(self.page).to_have_url(auth.MAIN_URL)
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(6)
+        expect(toggle).to_have_attribute('aria-expanded', 'true')
+        self.assertEqual('true', self.folders_state())
+        self.assertEqual([], self.dialogs)
+
+    def test_closed_for_this_login_is_per_tab_not_whole_browser(self):
+        # W2R4-06 (mutant O11): README promises "closing it lasts for that login in the tab".
+        # A second tab of the same login starts open; each tab keeps its own choice.
+        self.open()
+        self.page.locator('#worklist-folders-toggle').click()
+        expect(self.page.locator('#worklist-folders-toggle')).to_have_attribute('aria-expanded', 'false')
+        second = self.context.new_page()
+        second.on('pageerror', lambda e: self.errors.append(str(e)))
+        second.goto(auth.MAIN_URL)
+        expect(second.locator('#rows tr[data-uid]')).to_have_count(6)
+        expect(second.locator('#worklist-folders-toggle')).to_have_attribute('aria-expanded', 'true')
+        self.assertEqual('true', self.folders_state(second))
+        self.page.reload()
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(6)
+        expect(self.page.locator('#worklist-folders-toggle')).to_have_attribute('aria-expanded', 'false')
+        second.reload()
+        expect(second.locator('#rows tr[data-uid]')).to_have_count(6)
+        expect(second.locator('#worklist-folders-toggle')).to_have_attribute('aria-expanded', 'true')
+        second.close()
+
+    def test_storage_unavailable_still_opens_and_closes_for_the_page(self):
+        # When the tab's session storage throws (blocked by browser policy), the doctor still
+        # gets the panel open on load and a working close, without page errors; this binds to
+        # no storage key name. (With every site storage blocked the page returns to sign-in
+        # before W2 code runs: the existing sign-in layer, outside this unit.)
+        self.context.add_init_script('''(() => {
+          for (const name of ['getItem', 'setItem']) {
+            const original = Storage.prototype[name];
+            Storage.prototype[name] = function (...args) {
+              if (this === window.sessionStorage) throw new DOMException('blocked', 'SecurityError');
+              return original.apply(this, args);
+            };
+          }
+        })()''')
+        self.open()
+        self.page.locator('#worklist-folders-toggle').click()
+        expect(self.page.locator('#worklist-folders-toggle')).to_have_attribute('aria-expanded', 'false')
+        self.assertEqual('false', self.folders_state())
+        self.page.reload()
+        expect(self.page.locator('#rows tr[data-uid]')).to_have_count(6)
+        expect(self.page.locator('#worklist-folders-toggle')).to_have_attribute('aria-expanded', 'true')
+
+    def test_footer_counts_stay_whole_with_folders_open(self):
+        # W2R4-04: D1041 makes the open panel every login's first screen. Each status count
+        # ("W:6", "Unverified:0") wraps only between items, never mid-word, and nothing clips.
+        facts = """() => {
+          const bar = document.querySelector('#countlist').closest('.statusbar');
+          const box = bar.getBoundingClientRect();
+          const items = [...document.querySelectorAll('#countlist .count')].map(item => {
+            const lines = new Set();
+            const walker = document.createTreeWalker(item, NodeFilter.SHOW_TEXT);
+            for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+              if (!node.textContent.trim()) continue;
+              const range = document.createRange(); range.selectNodeContents(node);
+              for (const rect of range.getClientRects()) if (rect.width > 0) lines.add(Math.round(rect.top));
+            }
+            const r = item.getBoundingClientRect();
+            return {text: item.textContent, lines: lines.size, inside: r.left >= box.left - 0.5 && r.right <= box.right + 0.5};
+          });
+          return {items, barOverflow: bar.scrollWidth - bar.clientWidth, panel: document.querySelector('#worklist-folders-toggle').getAttribute('aria-expanded')};
+        }"""
+        for width in (1280, 1500, 1920):
+            with self.subTest(width=width):
+                self.page.set_viewport_size({'width': width, 'height': 1000})
+                self.open()
+                self.page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
+                observed = self.page.evaluate(facts)
+                print('W2R4-04 footer', width, json.dumps(observed, ensure_ascii=False))
+                self.assertEqual('true', observed['panel'])
+                texts = [i['text'] for i in observed['items']]
+                self.assertGreaterEqual(len(texts), 6, texts)
+                for text in texts:
+                    self.assertRegex(text, r'^[A-Za-z]+:\d+$')
+                self.assertTrue(texts[0].startswith('W:') and texts[-1].startswith('Unverified:'), texts)
+                for item in observed['items']:
+                    self.assertEqual(1, item['lines'], (width, item))
+                    self.assertTrue(item['inside'], (width, item))
+                self.assertLessEqual(observed['barOverflow'], 0, width)
+
+    def test_compound_modality_does_not_equal_complements_equals_in_editor(self):
+        # W2R4-01: D1041 7-② ("CT,SR is a CT study") makes Does Not Equal the token
+        # complement of Equals; switching operators keeps the same Modality list input.
+        # W2R4-02: the Korean explanation is visible on that input for both operators.
+        self.open()
+        self.page.locator('#toolbar-filters > summary').click()
+        self.page.locator('#managefilters').click()
+        self.page.locator('#sfm-name').fill('Not CT')
+        self.page.locator('#sfm-add-rule').click()
+        row = self.page.locator('#sfm-rules .sfm-rule')
+        row.locator('[data-rule-field]').select_option('modality')
+        row.locator('[data-rule-op]').select_option('eq')
+        value = row.locator('[data-rule-value]')
+        value.fill('ct, mr')
+        expect(value).to_have_attribute('title', re.compile(r'[가-힣].*CT,SR'))
+        equals_title = value.get_attribute('title')
+        expect(self.page.locator('#sfm-count')).to_contain_text('목록 기준 3건')
+        row.locator('[data-rule-op]').select_option('neq')
+        expect(value).to_have_value('ct, mr')
+        expect(value).to_have_attribute('title', re.compile(r'[가-힣].*CT,SR'))
+        self.assertNotEqual(equals_title, value.get_attribute('title'))
+        expect(self.page.locator('#sfm-count')).to_contain_text('목록 기준 3건')
+        expect(self.page.locator('#sfm-count')).not_to_contain_text('오류')
+        value.fill('CT')
+        expect(self.page.locator('#sfm-count')).to_contain_text('목록 기준 4건')
+        self.page.locator('#sfm-save-apply').click()
+        expect(self.page.locator('#saved-filter-manager')).not_to_be_visible()
+        # Rows are MR, MG, XA and CTA; both CT and CT,SR are excluded.
+        expected = [auth.UID + '.' + str(i) for i, mod in enumerate(self.site.modalities) if mod in ('MR', 'MG', 'XA', 'CTA')]
+        self.assertEqual(sorted(expected), sorted(self.page.locator('#rows tr[data-uid]').evaluate_all(
+            'rows => rows.map(r => r.dataset.uid)')))
+        self.assertEqual({'version': 1, 'join': 'and', 'rules': [{'field': 'modality', 'op': 'neq', 'value': 'CT'}]},
+                         self.site.filters[0]['cols']['$compound'])
+        expect(self.folder('Not CT')).to_have_text('Not CT (4)')
+        # A saved rule reopens with the same input and its explanation.
+        self.page.locator('#edit-active-filter').click()
+        value = self.page.locator('#sfm-rules [data-rule-value]')
+        expect(value).to_have_value('CT')
+        expect(value).to_have_attribute('title', re.compile(r'[가-힣].*CT,SR'))
+        # Equals CT AND Does Not Equal CT can no longer share a study.
+        self.page.locator('#sfm-add-rule').click()
+        second = self.page.locator('#sfm-rules .sfm-rule').nth(1)
+        second.locator('[data-rule-field]').select_option('modality')
+        second.locator('[data-rule-op]').select_option('eq')
+        second.locator('[data-rule-value]').fill('CT')
+        expect(self.page.locator('#sfm-count')).to_contain_text('목록 기준 0건')
+        self.page.locator('#sfm-join').select_option('or')
+        expect(self.page.locator('#sfm-count')).to_contain_text('목록 기준 6건')
+        self.assertEqual([], self.dialogs)
 
     def test_search_draft_ime_apply_save_shortcut_and_relogin(self):
         self.open()

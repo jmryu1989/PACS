@@ -1781,7 +1781,6 @@
       render(); refreshRight();
     }
 
-
     /**
      * 날짜 퀵필터. "최근 N일" — **양쪽 끝을 다 본다.**
      *
@@ -1852,7 +1851,6 @@
       b.style.display = hidden ? "flex" : "none";
       $("#fold").textContent = hidden ? "▽" : "△";
     });
-
 
     function srTree(dataset, expected) {
       const classes = ['11', '22', '33', '34'].map(n => '1.2.840.10008.5.1.4.1.1.88.' + n);
