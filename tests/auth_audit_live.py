@@ -35,6 +35,7 @@ import sys
 import time
 import unittest
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from ipaddress import ip_address
 from urllib.error import HTTPError
@@ -698,8 +699,15 @@ class AuthAuditLive(unittest.TestCase):
         status, headers, _ = browser.call("GET", "/api/auth/login")
         self.assertEqual(status, 302)
         self.secret("state", parse_qs(urlparse(headers["Location"]).query)["state"][0])
+        flow = next(c for c in browser.jar if c.name.startswith("kin_pending_"))
+        self.secret("pending", flow.value)
         floor = int(psql('SELECT coalesce(max(id), 0) FROM "AuditLog";')[0])
-        answers = [browser.call("GET", f"/api/auth/callback?state=stray-{n}&code=stray")[0] for n in range(150)]
+        # Arriving together, as a flood does: sequential requests would be paced by the API itself and stay inside the
+        # zone's refill. Each request carries the same live flow, so every one the proxy lets through is recorded.
+        stray = lambda n: Browser(self.stack).call("GET", f"/api/auth/callback?state=stray-{n}&code=stray",
+                                                   headers={"Cookie": flow.name + "=" + flow.value})[0]
+        with ThreadPoolExecutor(max_workers=50) as pool:
+            answers = list(pool.map(stray, range(150)))
         burst = [int(i) for i in psql('SELECT id FROM "AuditLog" WHERE action=\'auth.login\' AND target=\'\' AND id > '
                                       + str(floor) + ' ORDER BY id;')]
         type(self).failure_ids = list(self.failure_ids) + burst
