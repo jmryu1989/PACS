@@ -70,6 +70,28 @@ def incomplete_requests(result):
     return [row for row in result.get("waterfall", []) if "end" not in row and "failed" not in row]
 
 
+def account_exchange_exclusion(result):
+    """W3S-04: issued account requests need an observed terminal exchange.
+
+    status plus loadingFinished proves a response completed. loadingFailed with
+    an errorText is the documented CDP terminal alternative; it does not excuse
+    console, fixture or product assertions. Timing is never an admission input.
+    """
+    pending = [row for row in result.get("waterfall", [])
+               if urlparse(row.get("url", "")).path.startswith('/api/')
+               and not (row.get("status") is not None and "end" in row)
+               and not row.get("failed", {}).get("errorText")]
+    if pending:
+        return {"reason": "incomplete account startup exchange", "requests": copy.deepcopy(pending)}
+    return None
+
+
+def sample_exclusion(result):
+    if network_changed(result):
+        return {"reason": "network change"}
+    return account_exchange_exclusion(result)
+
+
 def sampling_policy():
     return {"warmup_attempts": WARMUP_ATTEMPTS,
             "settle_window_s": NETWORK_SETTLE_WINDOW_S,
@@ -77,7 +99,7 @@ def sampling_policy():
             "collection_deadline_s": STARTUP_COLLECTION_TIMEOUT_S,
             "max_replaced_pairs_per_phase": MAX_REPLACED_PAIRS_PER_PHASE,
             "required_valid_pairs": 5,
-            "invalidity": "status None plus CDP ERR_NETWORK_CHANGED, or console ERR_NETWORK_CHANGED plus a row without status/end; dependent warm invalid after invalid cold",
+            "invalidity": "network change or issued /api/ request without response status plus loadingFinished or loadingFailed.errorText; dependent warm invalid after invalid cold; excluded pairs retain reason and raw requests",
             "warmup_retry": "wait failure or network change; otherwise successful visits with pending (not completed/failed) requests; never retry unrelated assertions",
             "replacement": "after five planned pairs, at most two additional rounds; accept only deficient phases chosen before each round; timing never selects pairs; alternate order by physical round without rebalancing accepted pairs",
             "overall_bound": "existing run-tests.py 600s deadline still applies to all phases and attempts",
@@ -201,14 +223,18 @@ def collect_pairs(stack, browser, clock_start, patient, result, visit_fn=None):
                             pairs[mode][side] = sample
                 finally:
                     context.close()
-            cold_invalid = any(network_changed(sample) for sample in pairs["cold"].values())
+            exclusions = {mode: {side: sample_exclusion(sample) for side, sample in pair.items()
+                                  if sample_exclusion(sample)} for mode, pair in pairs.items()}
+            cold_invalid = bool(exclusions["cold"])
             for mode in phases:
                 pair = pairs[mode]
-                invalid = any(network_changed(sample) for sample in pair.values()) or (mode == "warm" and cold_invalid)
+                invalid = bool(exclusions[mode]) or (mode == "warm" and cold_invalid)
                 if invalid:
-                    attempt.setdefault("invalid", {})[mode] = "network change" if mode == "cold" or not cold_invalid else "network change in preceding cold visit"
+                    attempt.setdefault("invalid", {})[mode] = {
+                        "reason": "pair excluded", "samples": exclusions[mode],
+                        "preceding_cold": exclusions["cold"] if mode == "warm" and cold_invalid else {}}
                     continue
-                assert all(sample["valid"] for sample in pair.values()), "invalid visit without network-change evidence"
+                assert all(sample["valid"] for sample in pair.values()), "invalid visit without declared exclusion evidence"
                 result[mode].append(pair)
                 result["valid_pairs"][mode] += 1
                 attempt["accepted"].append(mode)
@@ -733,7 +759,8 @@ def visit(stack, browser_context, clock_start, patient, metadata):
         # Release this visit's event before its page closes and reset replaces it.
         stack.me_release.set()
         result["network_changed"] = network_changed(result)
-        if result["network_changed"]:
+        result["sample_exclusion"] = sample_exclusion(result)
+        if result["sample_exclusion"]:
             result["valid"] = False
         save(record_path, result)
         waterfall.close()

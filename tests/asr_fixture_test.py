@@ -11,6 +11,7 @@ the model hash and the transcript all come from the hosted `asr-engine` job.
 
 from __future__ import annotations
 
+from ci_workflows import WorkflowCatalog
 import contextlib
 import copy
 import hashlib
@@ -335,8 +336,8 @@ class AttestationTests(unittest.TestCase):
         self.assertEqual(json.loads(json.dumps(attest_module.PINS)), attest_module.PINS)
 
     def test_19_the_model_revision_is_read_from_the_declared_url_not_copied_from_the_pins(self):
-        workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows"
-                    / "validate.yml").read_text(encoding="utf-8")
+        catalog = WorkflowCatalog(Path(__file__).resolve().parents[1])
+        workflow = catalog.job_text(catalog.job("asr-engine"))
         declared = re.findall(r'--model-source-url "([^"]+)"', workflow)
         self.assertEqual(len(declared), 1, declared)
         self.assertEqual(attest_module.model_source(declared[0]),

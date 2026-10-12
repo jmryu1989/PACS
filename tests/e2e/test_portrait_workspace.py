@@ -182,6 +182,10 @@ class PortraitWorkspaceE2E(base.WorklistE2E):
         expect(page.locator("#findings")).to_have_value(expected)
         self.snapshot(page, "template-draft")
         page.reload()
+        expect(page.locator("#dbstat")).to_contain_text("DB Connected")
+        # At 768px, wrapped controls also cover the default W2 list. Expose
+        # its rows with the existing user resize before testing draft reopening.
+        self.drag(page, "#resize-main", 120)
         self.select(page, current)
         self.reachable(page, "#findings")
         expect(page.locator("#findings")).to_have_value(expected)
@@ -201,6 +205,8 @@ class PortraitWorkspaceE2E(base.WorklistE2E):
         tech = self.login("tech")
         self.portrait(tech, 768, 1024)
         tech.locator('[data-tab="Technician"]').click()
+        # Technician controls consume more of the narrow list's default height.
+        self.drag(tech, "#resize-main", 120)
         self.select(tech, fixture)
         self.wait_thumbnail(tech)
         expect(tech.locator(".s-template")).to_be_hidden()

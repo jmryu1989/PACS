@@ -24,6 +24,18 @@ READING = dict(version=1, reportWidth=540, imageHeight=390, relatedHeight=None,
                relatedListHeight=180, relatedHidden=False)
 
 
+def first_paint_pixels(page, path):
+    # W3S-03: W2 itself has two native-checkbox raster states after fonts/blur/
+    # double-rAF. Playwright masks the element's measured bounding box, never a
+    # fixed pixel range. Geometry/checked state remain independently compared.
+    checkbox = page.get_by_role('group', name='Status', exact=True).get_by_role('checkbox')
+    expect(checkbox).to_have_count(1)
+    expect(checkbox).to_be_checked()
+    assert checkbox.bounding_box() is not None
+    return page.screenshot(animations='disabled', caret='hide',
+        mask=[page.locator('.brand img'), checkbox], path=str(path))
+
+
 class WorkspaceSite(auth.Site):
     def __init__(self):
         super().__init__()
@@ -353,20 +365,17 @@ class StudyPanelPageDOM(unittest.TestCase):
                                   folders:document.querySelector('#worklist-folders-panel').open,
                                   headings:[...document.querySelectorAll('.rw h3')].map(n=>n.textContent)})"""))
                                 if (width, height) in ((1920,1080), (900,1200)):
-                                    # The SVG logo has independent raster variance on
-                                    # the fixed W2 tree too. No control is masked.
                                     picture_dir = Path(os.environ.get('KIN_W3_PILOT_DIR', ROOT / 'tmp/w3-land/pilot')) / 'first-paint'
                                     picture_dir.mkdir(parents=True, exist_ok=True)
-                                    pixels.append(page.screenshot(animations='disabled', caret='hide',
-                                        mask=[page.locator('.brand img')],
-                                        path=str(picture_dir / f'{label}-v{version or 0}-{width}x{height}.png')))
+                                    pixels.append(first_paint_pixels(page,
+                                        picture_dir / f'{label}-v{version or 0}-{width}x{height}.png'))
                                 self.assertEqual([],site.violations)
                             finally:
                                 context.close()
                         with self.subTest(version=version, width=width, height=height):
                             self.assertEqual(facts[0],facts[1])
                             if pixels:
-                                self.assertTrue(pixels[0] == pixels[1], 'first-paint pixels differ outside the logo')
+                                self.assertTrue(pixels[0] == pixels[1], 'first-paint pixels differ outside the logo/native checkbox')
             finally:
                 auth.ROOT = current
 

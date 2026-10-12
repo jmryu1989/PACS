@@ -388,6 +388,74 @@ class MeasuredPairs(unittest.TestCase):
         self.assertEqual({"cold": 0, "warm": 0}, result["replacements"])
         self.assertEqual([200000] * 5, [p["candidate"]["auth_to_usable_ms"] for p in result["warm"]])
 
+    def test_incomplete_account_exchange_excludes_pair_with_raw_reason(self):
+        # W3S-04: a served-list mismatch caused by an issued but unfinished
+        # account GET is not a product request-list difference.
+        for pending in ({}, {"status": 200}, {"end": 3}):
+            with self.subTest(pending=pending):
+                request = {"id": "account", "method": "GET", "url": "https://fixture/api/study-access",
+                           "start": 1, **pending}
+                def alter(result):
+                    if result['visit'] == 6:
+                        result['waterfall'] = [request]
+                result = self.collect(alter)
+                self.assertEqual({'cold': 5, 'warm': 5}, result['valid_pairs'])
+                self.assertEqual([1, 3, 4, 5, 6], [p['baseline']['pair'] for p in result['warm']])
+                self.assertEqual({'cold': 0, 'warm': 1}, result['replacements'])
+                exclusion = result['pair_attempts'][1]['invalid']['warm']
+                self.assertEqual('pair excluded', exclusion['reason'])
+                self.assertEqual([request], exclusion['samples']['candidate']['requests'])
+                self.assertEqual('incomplete account startup exchange', exclusion['samples']['candidate']['reason'])
+
+    def test_incomplete_cold_exchange_also_excludes_dependent_warm(self):
+        def alter(result):
+            if result['visit'] == 1:
+                result['waterfall'] = [{'url': 'https://fixture/api/study-access'}]
+        result = self.collect(alter)
+        self.assertEqual({'cold': 1, 'warm': 1}, result['replacements'])
+        self.assertTrue(result['pair_attempts'][0]['invalid']['warm']['preceding_cold'])
+
+    def test_complete_response_or_documented_terminal_failure_is_not_pending(self):
+        for terminal in ({'status': 200, 'end': 3}, {'failed': {'errorText': 'net::ERR_ABORTED'}}):
+            with self.subTest(terminal=terminal):
+                def alter(result):
+                    result['waterfall'] = [{'url': 'https://fixture/api/study-access', **terminal}]
+                result = self.collect(alter)
+                self.assertEqual({'cold': 0, 'warm': 0}, result['replacements'])
+                self.assertEqual({'cold': 5, 'warm': 5}, result['valid_pairs'])
+
+    def test_incomplete_account_replacement_budget_retains_shortfall(self):
+        result = self.collect(lambda r: r.update(waterfall=[{'url': 'https://fixture/api/study-access'}]))
+        self.assertEqual({'cold': 0, 'warm': 0}, result['valid_pairs'])
+        self.assertEqual(5 + hosted.MAX_REPLACED_PAIRS_PER_PHASE, len(result['pair_attempts']))
+
+    def test_complete_but_different_account_request_list_still_fails(self):
+        def alter(result):
+            paths = ['/api/me', '/api/study-access']
+            if result['side'] == 'candidate':
+                paths.append('/api/extra-account-request')
+            result['waterfall'] = [{'url': 'https://fixture' + p, 'method': 'GET', 'status': 200, 'end': 3} for p in paths]
+            result['non_script_requests'] = [('GET', p, '') for p in paths]
+        result = self.collect(alter)
+        self.assertEqual({'cold': 5, 'warm': 5}, result['valid_pairs'])
+        self.assertEqual({'cold': 0, 'warm': 0}, result['replacements'])
+        pair = result['warm'][0]
+        with self.assertRaisesRegex(AssertionError, 'different account startup requests'):
+            hosted.assert_account_requests(pair['baseline']['non_script_requests'], pair['candidate']['non_script_requests'])
+
+    def test_incomplete_account_does_not_hide_an_unrelated_assertion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stack = SimpleNamespace(root=Path(directory)/'stack', side=None)
+            stack.activate = lambda side: setattr(stack, 'side', side)
+            result = {'cold': [], 'warm': [], 'visits': [], 'valid_pairs': {'cold': 0, 'warm': 0}}
+            def visit(stack, context, clock, patient, metadata):
+                row = sample(metadata, stack.side)
+                row.update(valid=False, waterfall=[{'url': 'https://fixture/api/study-access'}])
+                raise hosted.VisitFailure(AssertionError('body hash differs'), row)
+            with self.assertRaisesRegex(hosted.VisitFailure, 'body hash differs'):
+                hosted.collect_pairs(stack, Mock(), None, 'patient', result, visit)
+            self.assertEqual(1, len(result['visits']))
+
     def test_network_replacement_budget_exhaustion_retains_shortfall(self):
         result = self.collect(lambda r: r.update(sample(r, r["side"], network=True)))
         self.assertEqual({"cold": 0, "warm": 0}, result["valid_pairs"])

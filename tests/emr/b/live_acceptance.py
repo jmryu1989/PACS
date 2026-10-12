@@ -3,7 +3,7 @@
 Single: 12x100, 200 ms idle, first-to-last block starts >=600 seconds.
 Concurrent: 24 bursts/size/revision, quiet settle before each pair. Sustained: 12x200 at
 20 rps after 20k product appends. CI records the same statistics but only
-point<=1.25 gates; only the commander's reviewed live plan uses the NI bound.
+R>1.25 AND signed pair-median delta>5ms fails latency (D1006); only the commander's reviewed live plan uses the NI bound.
 All p95 rules: point and one-sided 95% t upper bound <=1.10. Concurrent
 median wait: upper bound <=1.10, with no point-at-equality condition.
 """
@@ -290,6 +290,8 @@ def compare(fixture, workloads):
             result['gate_passed'] = gate_result(result, mode)
             if mode == 'acceptance':
                 result['gate_passed'] = result['gate_passed'] and result['attribution_met']
+                if not result['attribution_met']:
+                    result['gate_reason'] += '; insufficient attribution'
             result['noninferiority_met'] = result.pop('accepted')
             result['acceptance_preview'] = result['noninferiority_met'] and result['attribution_met']
             result['block_start_monotonic'] = block_starts
@@ -325,6 +327,7 @@ def compare(fixture, workloads):
                       runner_attempt_consumed=mode == 'acceptance', verdict_preview='INVALID')
         for result in report['results'].values():
             result['gate_passed'] = None
+            result['gate_reason'] = 'invalid run: ' + str(error)
         (out / 'invalid.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
         raise
     finally:

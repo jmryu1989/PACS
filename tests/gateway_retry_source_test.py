@@ -12,6 +12,7 @@ cases, the live route case and the restore probes are hosted-only and prove the 
 # S9-U0b RELIST: PACS permission/data assertions run compiled suites through pacs_source.
 # Remaining non-PACS source checks are unchanged U0f carry-over.
 # The receipt-rule byte pin retains the S4-U4 requirement that the independent U3 rule is unchanged.
+from ci_workflows import WorkflowCatalog
 from pacs_source import assert_behaviour
 from page_source import read_page_source
 import ast
@@ -50,7 +51,8 @@ ARRIVALS = text("worklist-v0", "hpacs-lite", "study-arrivals.js")
 AUTH = text("worklist-v0", "hpacs-lite", "auth.js")
 INVARIANTS = text("tests", "invariants_live.py")
 FIXTURE = text("tests", "ops_product_transfer_fixture.py")
-WORKFLOW = text(".github", "workflows", "validate.yml")
+CATALOG = WorkflowCatalog(ROOT)
+WORKFLOW = CATALOG.text()
 EPOCH = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 F01 = "같은 바이트로는 성공할 수 없습니다 — 지원 범위 밖(F-01)"
 # U3 surfaces this unit must not touch, as they are at 9152f43 (LF-normalised sha256).

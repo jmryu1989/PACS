@@ -95,6 +95,62 @@ def write_record(path, record):
         stream.write("\n")
 
 
+def workflow_contract_inputs(files, trees, cwd):
+    """D1021: workflow readers consume the full catalogue after job relocation.
+
+    Keep legacy workflow commands byte-identical. Expand only explicitly recorded
+    CI contract consumers, and expose the expansion in the manifest. No imports,
+    shell execution or general dependency inference is performed here.
+    """
+    consumers = {
+        'tests/measurement_ci.py', 'tests/measurement_ci_test.py',
+        'tests/asr_fixture_test.py', 'tests/gateway_pipeline_contract_test.py',
+        'tests/gateway_receipt_source_test.py', 'tests/gateway_retry_source_test.py',
+        'tests/order_reconciliation_source_test.py', 'tests/study_identity_source_test.py',
+        'tests/stage_exit_test.py', 'tests/pacs_split_test.cjs', 'tests/ci_workflows.py',
+    }
+    requested = set()
+    for name in files:
+        path = Path(name)
+        try:
+            requested.add((cwd / path).resolve().relative_to(cwd).as_posix())
+        except ValueError:
+            pass
+    for name in trees:
+        directory = (cwd / name).resolve()
+        requested.update(consumer for consumer in consumers
+                         if (cwd / consumer).is_relative_to(directory))
+    if not requested.intersection(consumers):
+        return [], []
+    extra_files = [name for name in ('tests/ci_workflows.py', 'scripts/record-run.py')
+                   if name not in requested]
+    extra_trees = [] if '.github/workflows' in trees else ['.github/workflows']
+    return extra_files, extra_trees
+
+
+def served_page_inputs(files, trees, cwd):
+    """Retain the asset directory consumed by an explicitly recorded main page.
+
+    A split workflow keeps its original command, while the page may gain local
+    scripts/styles. Recording the bounded served directory also captures assets
+    added by the child, without inferring dependencies from product source text.
+    """
+    directory = 'worklist-v0/hpacs-lite'
+    triggers = {directory + '/main.html', directory + '/main-split.bundle.js'}
+    requested = {(cwd / name).resolve() for name in files}
+    if not requested.intersection((cwd / name).resolve() for name in triggers):
+        return [], []
+    covered = any((cwd / directory).resolve().is_relative_to((cwd / name).resolve()) for name in trees)
+    recorder = 'scripts/record-run.py'
+    extras = [] if (cwd / recorder).resolve() in requested else [recorder]
+    # Related's historical oracle imports the approved split pin after W3.
+    if (cwd / 'tests/related_layout_dom_test.py').resolve() in requested:
+        history = 'tests/main_split_historical.py'
+        if (cwd / history).resolve() not in requested:
+            extras.append(history)
+    return extras, [] if covered else [directory]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, epilog=(
         "Arguments and output are recorded verbatim. Do not supply secrets or "
@@ -116,6 +172,11 @@ def main(argv=None):
         parser.error("a command after -- is required")
     run_dir = Path(args.run_dir).resolve()
     cwd = Path(args.cwd).resolve()
+    extra_files, extra_trees = workflow_contract_inputs(args.file, args.tree, cwd)
+    page_files, page_trees = served_page_inputs(args.file + extra_files, args.tree + extra_trees, cwd)
+    workflow_files, workflow_trees = extra_files[:], extra_trees[:]
+    extra_files += page_files
+    extra_trees += page_trees
     try:
         # Exclusive mkdir claims this run before any command or evidence is written.
         run_dir.mkdir(parents=True, exist_ok=False)
@@ -128,8 +189,10 @@ def main(argv=None):
         "status": "preparing", "started_at_utc": None, "ended_at_utc": None,
         "exit_code": None, "recorder_exit_code": None, "launch_error": None,
         "git_head_before": git_head(cwd), "git_head_after": None,
-        "files_before": file_snapshot(args.file, cwd) + tree_snapshot(args.tree, cwd), "files_after": None,
+        "files_before": file_snapshot(args.file + extra_files, cwd) + tree_snapshot(args.tree + extra_trees, cwd), "files_after": None,
         "stdout": "stdout.log", "stderr": "stderr.log", "log_files": None,
+        "workflow_contract_inputs": {"files": workflow_files, "trees": workflow_trees},
+        "served_page_inputs": {"files": page_files, "trees": page_trees},
     }
     metadata = run_dir / "run.json"
     try:
@@ -154,7 +217,7 @@ def main(argv=None):
             record.update(ended_at_utc=utc_now(), duration_seconds=time.monotonic() - started)
         record.update(
             git_head_after=git_head(cwd),
-            files_after=file_snapshot(args.file, cwd) + tree_snapshot(args.tree, cwd),
+            files_after=file_snapshot(args.file + extra_files, cwd) + tree_snapshot(args.tree + extra_trees, cwd),
             log_files=file_snapshot(["stdout.log", "stderr.log"], run_dir),
         )
         # A successful child is not proof of complete evidence if a requested hash failed.

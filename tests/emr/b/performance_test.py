@@ -1,4 +1,4 @@
-"""REQ-D949 -> RISK-EMR-HOST-NOISE/RECEIPT-DELAY -> hosted verdict controls.
+"""REQ-D1006 -> RISK-EMR-FALSE-PERFORMANCE-ACCEPT/RECEIPT-DELAY -> hosted verdict controls.
 
 Known observations exercise the report and negative-control consumer, without
 timing a machine, pinning source text, or changing the live acceptance rule.
@@ -15,25 +15,61 @@ def sample(p95, **values):
             'read_rows': 0, 'read_bytes': 0, **values}
 
 
-def pairs(ratio=1., repetitions=10):
-    return {'r3': [sample(100.) for _ in range(repetitions)],
-            'r4d': [sample(100. * ratio) for _ in range(repetitions)]}
+def pairs(baseline=100., candidate=100., repetitions=10):
+    return {'r3': [sample(baseline) for _ in range(repetitions)],
+            'r4d': [sample(candidate) for _ in range(repetitions)]}
 
 
 class PerformanceVerdictTest(unittest.TestCase):
     def test_gross_point_boundary_for_every_receipt_workload(self):
         for case, count, retained in [('ledger', 1, 0), ('sustained', 20, 20000),
                                       ('concurrent', 24, 0), ('concurrent', 48, 0)]:
-            for ratio, fails in [(1.24, False), (1.25, False), (1.26, True)]:
-                with self.subTest(case=case, count=count, ratio=ratio):
-                    _, failures = case_result(case, count, retained, pairs(ratio))
+            for baseline, candidate, fails in [(9, 12, False), (9, 14, False),
+                    (9, 14.01, True), (100, 124, False), (100, 125, False),
+                    (100, 125.01, True), (1, 160, True), (1, 230, True),
+                    (100, 90, False), (100, 140, True)]:
+                with self.subTest(case=case, count=count, baseline=baseline, candidate=candidate):
+                    stats, failures = case_result(case, count, retained, pairs(baseline, candidate))
                     self.assertEqual(bool(failures), fails)
+                    self.assertEqual(stats['gate_passed'], not fails)
+                    self.assertEqual(stats['R'], candidate / baseline)
+                    self.assertEqual(stats['pair_deltas_ms'], [candidate - baseline] * 10)
+                    self.assertEqual(stats['D'], candidate - baseline)
+                    self.assertEqual(stats['gate_ratio_limit'], 1.25)
+                    self.assertEqual(stats['gate_delta_floor_ms'], 5.)
+                    self.assertTrue(stats['gate_reason'])
+
+    def test_delta_is_signed_pair_median_and_ratio_is_ratio_of_medians(self):
+        pair = {'r3': [sample(v) for v in [1, 5, 100] * 2],
+                'r4d': [sample(v) for v in [6, 105, 11] * 2]}
+        stats, failures = case_result('sustained', 20, 0, pair)
+        self.assertFalse(failures)
+        self.assertTrue(stats['gate_passed'])
+        self.assertEqual(stats['pair_deltas_ms'], [5, 100, -89] * 2)
+        self.assertEqual(stats['D'], 5)
+        self.assertEqual(stats['R'], 11 / 5)
+        self.assertEqual(stats['ratio_method'], 'ratio of block-p95 medians')
+
+    def test_missing_mismatched_or_nonfinite_pairs_never_pass(self):
+        for bad in ({}, {'r3': [], 'r4d': []}, {'r3': [sample(1)], 'r4d': []},
+                    {'r3': [sample(1)], 'r4d': [sample(float('nan'))]},
+                    {'r3': [sample(1)], 'r4d': [sample(float('inf'))]},
+                    {'r3': [sample(0)], 'r4d': [sample(1)]},
+                    {'r3': [sample(1)], 'r4d': [{}]}):
+            with self.subTest(pair=bad), self.assertRaises(ValueError):
+                case_result('ledger', 1, 0, bad)
 
     def test_concurrent_does_not_require_superiority(self):
         for count in (24, 48):
-            stats, failures = case_result('concurrent', count, 0, pairs(1.05))
+            stats, failures = case_result('concurrent', count, 0, pairs(100, 105))
             self.assertFalse(failures)
             self.assertAlmostEqual(stats['p95_pct'], 5.)
+
+    def test_gross_pass_does_not_imply_noninferiority_acceptance(self):
+        stats, failures = case_result('sustained', 20, 20000, pairs(100, 111))
+        self.assertFalse(failures)
+        self.assertTrue(stats['gate_passed'])
+        self.assertFalse(stats['noninferiority']['accepted'])
 
     def test_sustained_uncertainty_is_recorded_without_veto(self):
         pair = pairs(repetitions=3)
@@ -49,7 +85,7 @@ class PerformanceVerdictTest(unittest.TestCase):
         self.assertEqual(stats['noninferiority']['role'], 'recorded statistic only; not a CI verdict')
 
     def test_ten_pair_statistics_are_preserved(self):
-        stats, failures = case_result('ledger', 1, 0, pairs(1.24))
+        stats, failures = case_result('ledger', 1, 0, pairs(100, 124))
         self.assertFalse(failures)
         self.assertAlmostEqual(stats['permutation_p'], 2 / 1024)
         self.assertAlmostEqual(stats['paired_geometric_pct'], 24.)
@@ -60,11 +96,12 @@ class PerformanceVerdictTest(unittest.TestCase):
     def test_request_failure_in_either_revision_still_fails(self):
         for case in ('ledger', 'sustained', 'concurrent'):
             for version in ('r3', 'r4d'):
-                pair = pairs()
+                pair = pairs(100, 90)
                 pair[version][0]['failures'] = 1
                 stats, failures = case_result(case, 1, 0, pair)
                 self.assertEqual(stats['failures'], 1)
                 self.assertEqual(len(failures), 1)
+                self.assertFalse(stats['gate_passed'])
 
     def test_single_receipt_prefix_read_still_fails(self):
         for read_rows, fails in [(4, False), (5, True)]:
@@ -98,10 +135,12 @@ class PerformanceVerdictTest(unittest.TestCase):
             report = build_report([], [], ['journal'], repetitions, {}, journal_rows=rows)
             self.assertEqual(len(report['failures']), 2 if fails else 0)
 
-    def test_latency_mutants_use_the_gross_gate(self):
+    def test_latency_mutants_require_both_ratio_and_signed_delta(self):
         for case, count in [('sustained', 20), ('concurrent', 24), ('concurrent', 48)]:
-            for ratio, fails in [(1.24, False), (1.26, True)]:
-                _, failures = case_result(case, count, 0, pairs(ratio))
+            for baseline, candidate, fails in [(9, 12, False), (9, 14, False),
+                    (9, 14.01, True), (100, 124, False), (100, 125, False),
+                    (100, 125.01, True), (1, 160, True), (1, 230, True)]:
+                _, failures = case_result(case, count, 0, pairs(baseline, candidate))
                 self.assertEqual(bool(property_failures(case, failures)), fails)
                 other = 'concurrent' if case == 'sustained' else 'sustained'
                 self.assertFalse(property_failures(other, failures))

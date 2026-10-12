@@ -13,6 +13,47 @@ RECORDER = Path(__file__).resolve().parents[1] / "scripts" / "record-run.py"
 
 
 class RecordRunTest(unittest.TestCase):
+    def test_served_page_records_local_assets_before_and_after_child(self):
+        # REQ-W3-LAND-CI -> RISK-UNRECORDED-ASSET: workflow relocation must
+        # retain dependencies even when a page adds another script or stylesheet.
+        for name in ('worklist-v0/hpacs-lite/main.html', 'worklist-v0/hpacs-lite/drawer.css',
+                     'scripts/record-run.py'):
+            target = self.root / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text('fixture\n', encoding='utf-8')
+        child = "from pathlib import Path; Path('worklist-v0/hpacs-lite/added.js').write_text('added')"
+        result = self.run_command([sys.executable, '-c', child], files=['worklist-v0/hpacs-lite/main.html'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = self.record()
+        for field in ('files_before', 'files_after'):
+            rows = {row['requested']: row for row in record[field]}
+            self.assertEqual(rows['worklist-v0/hpacs-lite/drawer.css']['status'], 'present')
+            self.assertTrue(rows['worklist-v0/hpacs-lite/drawer.css']['sha256'])
+        self.assertNotIn('worklist-v0/hpacs-lite/added.js', {r['requested'] for r in record['files_before']})
+        self.assertIn('worklist-v0/hpacs-lite/added.js', {r['requested'] for r in record['files_after']})
+        self.assertEqual(record['served_page_inputs']['trees'], ['worklist-v0/hpacs-lite'])
+
+    def test_workflow_contract_inputs_capture_relocated_and_new_workflows(self):
+        # REQ-W2-LAND-CI -> RISK-UNRECORDED-WORKFLOW: both snapshots include
+        # the catalogue/helper; a workflow created by the child is visible after.
+        for name in ('tests/measurement_ci_test.py', 'tests/ci_workflows.py', 'scripts/record-run.py',
+                     '.github/workflows/relocated.yml'):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('fixture\n', encoding='utf-8')
+        child = "from pathlib import Path; Path('.github/workflows/added.yml').write_text('added')"
+        result = self.run_command([sys.executable, '-c', child], files=['tests/measurement_ci_test.py'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = self.record()
+        before = {row['requested']: row for row in record['files_before']}
+        after = {row['requested']: row for row in record['files_after']}
+        expected = {'tests/measurement_ci_test.py', 'tests/ci_workflows.py', 'scripts/record-run.py',
+                    '.github/workflows/relocated.yml'}
+        self.assertEqual(set(before), expected)
+        self.assertEqual(set(after), expected | {'.github/workflows/added.yml'})
+        self.assertTrue(all(row['status'] == 'present' and row['sha256'] for row in after.values()))
+        self.assertEqual(record['workflow_contract_inputs']['trees'], ['.github/workflows'])
+
     def test_unreadable_file_has_no_raw_or_normalized_success_hash(self):
         (self.root / "directory").mkdir()
         result = self.run_command([sys.executable, "-c", "pass"], files=["directory"])

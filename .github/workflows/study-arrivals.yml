@@ -1,0 +1,70 @@
+name: Validate production image — study-arrivals
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+# Public PR code runs without production credentials or a persisted Git token.
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-study-arrivals-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  study-arrivals:
+    # S4-U1a wires the existing `study-arrivals` profile (unchanged: one suite, the four
+    # declared StudyArrivalsE2E native cases, 900s cap) into the standing gate. It was only
+    # reachable through the manual dispatch workflow, so the accepted native regression was
+    # never selected by a normal candidate run; the `tests/worklist_arrivals_dom_test.py`
+    # step in `measurements` is a pure DOM harness and is not this evidence. A separate
+    # job, not a second profile call inside `measurements`: that step already lets the
+    # 20-suite profile claim measurement_ci.py's whole 25-minute deadline, so a serial
+    # second invocation could not fit its 28-minute bound. Recorded dispatch history for
+    # this profile (runs 34637295074/34638528855/34639191206): suite 201-207s, stack
+    # setup about 52s, cleanup about 12s, so (900+35)s stays inside the 1500s deadline
+    # with 565s for the stack. Same 40-minute job policy and 28-minute live step as the
+    # existing e2e jobs; cleanup failure still fails the profile and the artifact is
+    # uploaded on every outcome.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Study arrivals profile isolation, bounded budget and artifact policy
+        run: python3 scripts/record-run.py --run-dir tmp/study-arrivals-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file tests/e2e/test_prior_selection.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_related_filter.py --file tests/e2e/test_favorites.py --file tests/e2e/test_source_keys.py --file tests/e2e/test_study_access.py --file tests/e2e/test_study_access_refs.py --file tests/e2e/test_study_tags.py -- python3 -B tests/measurement_ci_test.py
+      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
+      - name: Install synthetic DICOM and pinned browser test dependencies
+        timeout-minutes: 15
+        run: |
+          python3 -m venv "$RUNNER_TEMP/study-arrivals-python"
+          "$RUNNER_TEMP/study-arrivals-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+          "$RUNNER_TEMP/study-arrivals-python/bin/python" -m playwright install --with-deps chromium
+      - name: Confirm exact declared study arrivals selection
+        run: python3 scripts/record-run.py --run-dir tmp/study-arrivals-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_study_arrivals.py --file worklist-v0/hpacs-lite/study-arrivals.js --file api/src/pacs.service.ts --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/study-pages.js --file tests/e2e/test_prior_selection.py --file tests/e2e/test_related_filter.py --file tests/invariants_live.py --file tests/finding_api_test.py --file tests/e2e/test_critical_result.py --file worklist-v0/hpacs-lite/main-split.bundle.js --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py --file .gitattributes --file api/src/pacs/values.ts --file api/src/pacs/access.ts --file api/src/pacs/institutions.ts --file api/src/pacs/worklist.ts --file api/src/pacs/dicom-gateway.ts --file api/src/pacs/preferences.ts --file api/src/pacs/filters.ts --file api/src/pacs/study-state.ts --file api/src/pacs/tech-note.ts --file api/src/pacs/report-draft.ts --file api/src/pacs/report-evidence.ts --file api/src/pacs/report-commit.ts --file api/src/pacs/hold.ts --file api/src/pacs/clinician.ts --file api/src/pacs/audit.ts --file api/src/pacs/metrics.ts --file worklist-v0/hpacs-lite/page-core.js --file worklist-v0/hpacs-lite/study-state.js --file worklist-v0/hpacs-lite/order-list-store.js --file worklist-v0/hpacs-lite/report-templates.js --file worklist-v0/hpacs-lite/report-dictation.js --file worklist-v0/hpacs-lite/report-templates-ui.js --file worklist-v0/hpacs-lite/worklist-columns-view.js --file worklist-v0/hpacs-lite/worklist-state.js --file worklist-v0/hpacs-lite/worklist-data.js --file worklist-v0/hpacs-lite/worklist-view.js --file worklist-v0/hpacs-lite/sr-reader.js --file worklist-v0/hpacs-lite/current-study.js --file worklist-v0/hpacs-lite/study-info-panel.js --file worklist-v0/hpacs-lite/related-studies.js --file worklist-v0/hpacs-lite/study-thumbnails.js --file worklist-v0/hpacs-lite/order-list.js --file worklist-v0/hpacs-lite/study-image-requests.js --file worklist-v0/hpacs-lite/study-corrections.js --file worklist-v0/hpacs-lite/related-report.js --file worklist-v0/hpacs-lite/report-editor.js --file worklist-v0/hpacs-lite/report-draft-sync.js --file worklist-v0/hpacs-lite/report-structure-pane.js --file worklist-v0/hpacs-lite/report-citation-pane.js --file worklist-v0/hpacs-lite/report-draft-save.js --file worklist-v0/hpacs-lite/report-commit.js --file worklist-v0/hpacs-lite/report-hold.js --file worklist-v0/hpacs-lite/work-exit.js --file worklist-v0/hpacs-lite/worklist-polling.js --file worklist-v0/hpacs-lite/report-history.js --file worklist-v0/hpacs-lite/report-toolbar.js --file worklist-v0/hpacs-lite/viewer-placement.js --file worklist-v0/hpacs-lite/viewer-launch.js --file worklist-v0/hpacs-lite/feature-mounts.js --file worklist-v0/hpacs-lite/clinical-context-panel.js --file worklist-v0/hpacs-lite/critical-result-mounts.js --file worklist-v0/hpacs-lite/study-questions.js --file worklist-v0/hpacs-lite/workspace-panels.js --file worklist-v0/hpacs-lite/worklist-controls.js --file worklist-v0/hpacs-lite/saved-filters.js --file worklist-v0/hpacs-lite/worklist-row-events.js --file worklist-v0/hpacs-lite/telerad-request.js --file worklist-v0/hpacs-lite/context-menu.js --file worklist-v0/hpacs-lite/related-controls.js --file worklist-v0/hpacs-lite/session-end.js --file worklist-v0/hpacs-lite/page-boot.js --file worklist-v0/hpacs-lite/worklist-folder-tree.js --file worklist-v0/hpacs-lite/worklist-folder-tree.css --file tests/page_source.py --file tests/page_source.cjs --file tests/main_split_harness.cjs --file tests/main_move_contract.cjs --file tests/dictation_refusal_oracle.py --file tests/live_admin_credential.py --file tests/live_test_gate.py -- "$RUNNER_TEMP/study-arrivals-python/bin/python" -B tests/execution_selection_test.py
+      - name: Isolated declared study arrivals tests
+        timeout-minutes: 28
+        run: |
+          "$RUNNER_TEMP/study-arrivals-python/bin/python" tests/measurement_ci.py --profile study-arrivals
+      - name: Sanitized synthetic study arrivals evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-study-arrivals-results
+          path: |
+            tests/e2e/artifacts/study-arrivals-ci/
+            tests/e2e/artifacts/STUDY-ARRIVALS-*.png
+            tmp/study-arrivals-ci/
+          if-no-files-found: error
+          retention-days: 7
