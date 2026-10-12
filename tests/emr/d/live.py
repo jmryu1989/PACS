@@ -799,5 +799,182 @@ class EmrDLive(unittest.TestCase):
         code, out, state = self.psql("SELECT count(*) FROM emr_clinical.references_to(%s);" % self.literal(comparison), user="kin_emr_reader")
         self.assertEqual((code, out, state), (0, "0", None), "navigation alone is no reference")
 
+    # ── round 4: Astra's findings on a980357 (DR3-01..04), each as the behaviour its acceptance names ──
+
+    CHECKPOINT = "emr_clinical.checkpoint(text,text,text,uuid,integer,text,text,text)"
+
+    def assignment_unit(self, study):
+        return "assignment:" + sha(json.dumps([study, "inst-a"], separators=(",", ":")).encode())
+
+    def test_dr3_01_assignment_answer_of_its_request(self):
+        """DR3-01: an allocation request answers its own committed result - after a later allocation, beside a parallel
+        duplicate, after its reader's account was disabled - and nothing where its study is not visible today."""
+        uid = self.study()
+        out = self.driver("dr3-01", {"study": uid})
+        for name in ("first", "later", "replay"):
+            self.assertTrue(out[name]["ok"], (name, out[name]))
+        first, later = out["first"]["value"], out["later"]["value"]
+        self.assertEqual((first["revision"], first["reader"]["sub"], later["revision"], later["reader"]["sub"]), (1, PEOPLE["r1"], 2, PEOPLE["r2"]))
+        self.assertEqual([h["detail"]["revision"] for h in first["history"]], [1], "the history up to its own revision")
+        self.assertEqual([h["detail"]["revision"] for h in later["history"]], [2, 1])
+        self.assertEqual(out["replay"], out["first"], "DR3-01: the earlier request answers its own result after a later allocation")
+        self.assertEqual(out["replayLookups"], [], "a registered request asks the identity provider nothing")
+        self.assertTrue(all(a["ok"] for a in out["parallel"]), out["parallel"])
+        self.assertEqual(out["parallel"][0], out["parallel"][1], "two identical requests at once answer the same result")
+        self.assertEqual(out["parallel"][0]["value"]["revision"], 3)
+        self.assertEqual((out["reused"]["ok"], err(out["reused"]).get("status")), (False, 409), "another reader under a used request ID")
+        for step in ("consult", "consultAccept", "consultComplete", "consultAcceptAgain"):
+            self.assertTrue(out[step]["ok"], (step, out[step]))
+        self.assertEqual(out["consultAcceptAgain"], out["consultAccept"], "the same for a consultation: the acceptance resent answers the acceptance")
+        accepted = out["consultAccept"]["value"]["item"]
+        self.assertEqual((accepted["state"], accepted["revision"], accepted["reply"], accepted["changedBy"]), ("Accepted", 2, None, "r2@synthetic.test"))
+        self.assertEqual(out["consultComplete"]["value"]["item"]["reply"], TEXT["reply"])
+        fresh = {"requestId": str(uuid.uuid4()), "expectedOwner": ["inst-a", PEOPLE["t1"]], "revision": 3, "readerSub": PEOPLE["r1"]}
+        after = self.driver("dr3-01-after", {"study": uid, "a": out["bodies"]["a"], "fresh": fresh, "disabled": ["r1"]})
+        self.assertEqual(after["replay"], out["first"], "DR3-01: its reader's account is disabled now - still the original result")
+        self.assertEqual(after["replayLookups"], [], "the disabled account was never looked up for the registered request")
+        self.assertEqual((after["fresh"]["ok"], err(after["fresh"]).get("status")), (False, 400), "a new request needs a reader assignable today")
+        self.ok('UPDATE "StudyState" SET "institutionId" = \'inst-z\' WHERE uid = %s;' % self.literal(uid))
+        try:
+            moved = self.driver("dr3-01-after", {"study": uid, "a": out["bodies"]["a"]})
+        finally:
+            self.ok('UPDATE "StudyState" SET "institutionId" = \'inst-a\' WHERE uid = %s;' % self.literal(uid))
+        self.assertEqual((moved["replay"]["ok"], err(moved["replay"]).get("status")), (False, 404), "a study not visible today answers nothing")
+        self.assertEqual([v["entry"] for v in self.versions(self.assignment_unit(uid))], ["assignment"] * 3, "one version per committed request")
+        self.assertEqual(self.json('SELECT count(*) FROM "AuditLog" WHERE action = \'reader.assignment\' AND target = %s' % self.literal(uid)), 3)
+        self.assertEqual(self.json('SELECT revision FROM "ReaderAssignment" WHERE "studyUid" = %s' % self.literal(uid)), 3)
+
+    def test_dr3_02_legacy_finding_without_text(self):
+        """DR3-02: a finding written before unit D (no signed version) answers its revisions as operational summaries - none
+        of its typed reasons, ledger up or down; a signed finding's reasons leave only through their durable provision, and a
+        diverged revision is refused without any reason."""
+        uid = self.study()
+        item, _sop, _tags = self.measurement(uid)
+        reasons = {"hide": "SYN 숨김 사유: 다른 환자 검사로 보임", "restore": "SYN 복원 사유: 같은 환자로 확인"}
+        written = self.driver("dr3-02", {"study": uid, "itemId": item, "reasons": reasons})
+        for step in ("create", "hide", "restore"):
+            self.assertTrue(written[step]["ok"], (step, written[step]))
+        signed = written["finding"]
+        snapshot = self.json('SELECT snapshot FROM "Finding" WHERE id = %s::uuid' % self.literal(signed))
+        legacy, legacy_reasons = str(uuid.uuid4()), ("SYN LEGACY 숨김 사유", "SYN LEGACY 복원 사유")
+        self.ok('INSERT INTO "Finding" (id, "studyUid", "authorSub", "authorActor", revision, hidden, snapshot, "updatedAt") '
+                "VALUES (%s::uuid, %s, %s, 'r1@synthetic.test', 4, false, %s::jsonb, now());"
+                % (self.literal(legacy), self.literal(uid), self.literal(PEOPLE["r1"]), self.literal(json.dumps(snapshot))))
+        for revision, action, reason, hidden in ((1, "create", "", False), (2, "edit", "", False), (3, "hide", legacy_reasons[0], True),
+                                                 (4, "restore", legacy_reasons[1], False)):
+            self.ok('INSERT INTO "FindingRevision" ("findingId", revision, action, reason, "authorSub", actor, "requestId", fingerprint, snapshot, "payloadBytes") '
+                    "SELECT %s::uuid, %d, %s, %s, %s, 'r1@synthetic.test', %s::uuid, %s, s, octet_length(convert_to(s::text, 'UTF8')) FROM (SELECT %s::jsonb AS s) x;"
+                    % (self.literal(legacy), revision, self.literal(action), self.literal(reason), self.literal(PEOPLE["r1"]), self.literal(uuid.uuid4()),
+                       self.literal("ab" * 32), self.literal(json.dumps({**snapshot, "hidden": hidden}))))
+        args = {"study": uid, "legacy": legacy, "signed": signed}
+        down = self.driver("dr3-02-serve", {**args, "down": True})
+        up = self.driver("dr3-02-serve", {**args, "down": False})
+        self.assertTrue(down["sealRefused"], "the fault reached B1's sealing")
+        for name, served in (("down", down), ("up", up)):
+            self.assertTrue(served["legacy"]["ok"], (name, served["legacy"]))
+            self.assertEqual([(r["revision"], r["action"], r["reason"], r["item"]) for r in served["legacy"]["value"]["revisions"]],
+                             [(1, "create", None, None), (2, "edit", None, None), (3, "hide", None, None), (4, "restore", None, None)],
+                             "DR3-02: the summary of a revision written before unit D, ledger " + name)
+            self.no_text(served["legacy"], "legacy revisions " + name, legacy_reasons + tuple(reasons.values()) + ("SYN 우상엽",))
+            self.no_text(served["list"], "finding list " + name, legacy_reasons)
+        self.assertEqual(self.provisions(legacy), [], "nothing of the finding written before unit D was provided")
+        self.assertEqual((down["signed"]["ok"], err(down["signed"]).get("status")), (False, 503))
+        self.no_text(down["signed"], "signed revisions down", tuple(reasons.values()) + ("SYN 우상엽",))
+        self.assertTrue(up["signed"]["ok"], up["signed"])
+        self.assertEqual([r["reason"] for r in up["signed"]["value"]["revisions"]], ["", reasons["hide"], reasons["restore"]], "the signed versions' own reasons")
+        self.assertIn("GET studies/:uid/findings/:id/revisions", {e["surface"] for e in self.provisions(signed)})
+        self.ok('UPDATE "FindingRevision" SET reason = \'SYN 다른 사유\' WHERE "findingId" = %s::uuid AND revision = 2;' % self.literal(signed))
+        try:
+            diverged = self.driver("dr3-02-serve", {**args, "down": False})
+        finally:
+            self.ok('UPDATE "FindingRevision" SET reason = %s WHERE "findingId" = %s::uuid AND revision = 2;' % (self.literal(reasons["hide"]), self.literal(signed)))
+        self.assertEqual((diverged["signed"]["ok"], err(diverged["signed"]).get("status")), (False, 409))
+        self.no_text(diverged["signed"], "diverged revisions", tuple(reasons.values()) + ("SYN 다른 사유",))
+
+    def saved_comparison(self, uid):
+        """A stored saved comparison of `uid` (its head and revision 1) whose version 6 snapshot holds two 3D marks on one
+        volume, and the image server's tags of that volume's first original."""
+        job, marks = str(uuid.uuid4()), [str(uuid.uuid4()), str(uuid.uuid4())]
+        series, sop, frame = uid + ".5", uid + ".5.1", uid + ".59"
+        snapshot = {"version": 6, "volume": {"study": uid, "series": series, "sops": [sop], "sourceDigest": "cd" * 32},
+                    "marks": {"marks": [{"id": m, "label": "SYN mark %d" % i, "point": [i, 2, 3]} for i, m in enumerate(marks)]}}
+        self.ok('INSERT INTO "ViewerJob" (id, "studyUid", "authorSub", "authorActor", studies, fingerprint, snapshot, title, description, hidden, revision, "updatedAt") '
+                "VALUES (%s::uuid, %s, %s, 'r1@synthetic.test', ARRAY[%s], %s, %s::jsonb, 'SYN saved comparison', '', false, 1, now());"
+                % (self.literal(job), self.literal(uid), self.literal(PEOPLE["r1"]), self.literal(uid), self.literal("ef" * 32), self.literal(json.dumps(snapshot))))
+        self.ok('INSERT INTO "ViewerJobRevision" ("jobId", revision, title, description, hidden, reason, actor) '
+                "VALUES (%s::uuid, 1, 'SYN saved comparison', '', false, '', 'r1@synthetic.test');" % self.literal(job))
+        tags = {sop: {"StudyInstanceUID": uid, "SeriesInstanceUID": series, "SOPInstanceUID": sop, "FrameOfReferenceUID": frame}}
+        return job, marks, tags
+
+    def test_dr3_03_marks_of_one_job_one_reference(self):
+        """DR3-03: a finding citing two marks of one saved comparison, and one citing its saved view and a mark on it, each keep
+        every copy in the text and cite that comparison revision once - planned, signed, stored, recovered and found by H."""
+        uid = self.study()
+        job, marks, tags = self.saved_comparison(uid)
+        args = {"study": uid, "job": job, "marks": marks, "tags": tags}
+        written = self.driver("dr3-03", args)
+        for name in ("A", "B"):
+            self.assertTrue(written[name]["ok"], ("DR3-03: refused as a duplicate reference", name, written[name]))
+        stored = self.json('SELECT json_build_object(\'studyUid\', "studyUid", \'studies\', to_json(studies), \'snapshot\', snapshot, \'title\', title, '
+                           '\'description\', description, \'hidden\', hidden) FROM "ViewerJob" WHERE id = %s::uuid' % self.literal(job))
+        digest = sha(json.dumps(stored, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+        expected = [["comparison-layout", job, "revision:1", digest]]
+        self.ok("REVOKE EXECUTE ON FUNCTION %s FROM kin_runtime;" % self.CHECKPOINT)
+        try:
+            pending = self.driver("dr3-03", {**args, "only": "C"})
+        finally:
+            self.ok("GRANT EXECUTE ON FUNCTION %s TO kin_runtime;" % self.CHECKPOINT)
+        self.assertEqual((pending["C"]["ok"], err(pending["C"]).get("code")), (False, "CLINICAL_OUTCOME_PENDING"), pending["C"])
+        self.assertEqual([r["state"] for r in self.register(pending["ids"]["C"])], ["pending"])
+        recovered = self.driver("recover-open", {"resend": {"study": uid, "body": pending["bodies"]["C"]}})
+        self.assertTrue(recovered["resend"]["ok"], ("the recovered original answers its resend", recovered["resend"]))
+        texts = {"A": [marks[0], marks[1]], "B": [None, marks[0]], "C": [marks[1], marks[0]]}
+        ids = {**written["ids"], "C": pending["ids"]["C"]}
+        for name, fid in ids.items():
+            [v] = self.versions(fid)
+            self.assertEqual([[a["kind"], a["recordId"], a["versionId"], a["sha256"]] for a in v["body"]["attachments"]], expected,
+                             "DR3-03: %s cites the comparison revision once" % name)
+            payload = v["signature"]["envelope"]["jws"]["payload"]
+            signed = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+            self.assertEqual([[a["kind"], a["recordId"], a["versionId"], a["sha256"]] for a in signed["attachments"]], expected, name + ": signed by its author")
+            self.assertEqual([(s.get("mark") or {}).get("id") for s in json.loads(v["body"]["text"])["sources"]], texts[name], name + ": every copy kept")
+            self.assertEqual(self.json("SELECT count(*) FROM emr_clinical.attachment WHERE record_id = %s" % self.literal(fid)), 1, name)
+        code, out, state = self.psql("SELECT json_agg(record_id ORDER BY record_id) FROM emr_clinical.references_to(%s);" % self.literal(job), user="kin_emr_reader")
+        self.assertEqual((code, state), (0, None))
+        self.assertEqual(json.loads(out), sorted(ids.values()), "H's retention lookup finds each citing finding once")
+
+    def test_dr3_04_recovery_keeps_stale_source(self):
+        """DR3-04: a pending original whose cited measurement version is gone is sealed as that stale source, and its resend
+        answers FINDING_SOURCE_STALE; while the source cannot be read, it stays pending; nothing is ever committed without it."""
+        uid = self.study()
+        item, _sop, _tags = self.measurement(uid)
+        self.ok("REVOKE EXECUTE ON FUNCTION %s FROM kin_runtime;" % self.CHECKPOINT)
+        try:
+            written = self.driver("dr3-04-write", {"study": uid, "itemId": item})
+        finally:
+            self.ok("GRANT EXECUTE ON FUNCTION %s TO kin_runtime;" % self.CHECKPOINT)
+        fid = written["finding"]
+        self.assertEqual((written["create"]["ok"], err(written["create"]).get("code")), (False, "CLINICAL_OUTCOME_PENDING"), written["create"])
+        self.assertEqual([r["state"] for r in self.register(fid)], ["pending"])
+        self.ok('REVOKE SELECT ON "ViewerRevision" FROM kin_runtime;')
+        try:
+            unreadable = self.driver("recover-open", {})
+        finally:
+            self.ok('GRANT SELECT ON "ViewerRevision" TO kin_runtime;')
+        self.assertGreaterEqual(unreadable["recovered"], 1)
+        self.assertEqual([r["state"] for r in self.register(fid)], ["pending"], "DR3-04: a source that cannot be read now leaves the original pending")
+        self.assertEqual(self.versions(fid), [])
+        self.ok('DELETE FROM "ViewerRevision" WHERE "itemId" = %s::uuid AND revision = 1;' % self.literal(item))
+        gone = self.driver("recover-open", {"resend": {"study": uid, "body": written["body"]}})
+        [register] = self.register(fid)
+        self.assertEqual((register["state"], register["terminal"]["proof"]["code"]), ("rejected", "ClinicalSourceMissing"),
+                         "DR3-04: the recovery keeps the stale source as such")
+        self.assertEqual((gone["resend"]["ok"], err(gone["resend"]).get("status"), err(gone["resend"]).get("code")), (False, 409, "FINDING_SOURCE_STALE"),
+                         "DR3-04: the resend answers FINDING_SOURCE_STALE")
+        self.no_text(gone["resend"], "stale resend", ("SYN 좌상엽",))
+        self.assertEqual(self.versions(fid), [], "nothing committed: never a version without its reference")
+        self.assertEqual(self.json('SELECT count(*) FROM "Finding" WHERE id = %s::uuid' % self.literal(fid)), 0)
+        self.assertEqual(self.change_events(fid), [])
+
 if __name__ == "__main__":
     raise SystemExit("Run through scripts/run-tests.py --mode live")

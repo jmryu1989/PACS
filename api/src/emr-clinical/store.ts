@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { AccessEvent, AccessEventV1, AppendOnlyAccessStore, DurableAccessReceipt, EvidenceFact, WorkContext, newAuditLinkId,
   parseAccessEvent } from '../emr-contract/access-event';
-import { verifiedRecord } from '../emr-contract/classification';
+import { ResolvedRecord, verifiedRecord } from '../emr-contract/classification';
 import { ContractError, freeze, integer, refuse, string } from '../emr-contract/validation';
 import type { HoldRow } from '../emr-runtime/contract';
 import type { ProvisionalAppend } from '../emr-runtime/store';
@@ -130,12 +130,24 @@ function seedText(input: WriteInput): string {
   const attachments = input.attachments.map(a => { const r = verifiedRecord(a); return { recordId: r.recordId, eventId: r.event.eventId }; });
   return JSON.stringify({ ...input, attachments });
 }
+/**
+ * The admitted input with its cited sources resolved again. A cited source version that no longer resolves - its row is
+ * gone, or what is stored is not citable any more - is that source's change: ClinicalSourceMissing, the stale source the
+ * owning service answers as such (DR3-04). A reference that is not a D source at all is the register's own damage
+ * (AttachmentRefused). Storage that cannot be read throws as it is: no proof that anything is gone.
+ */
 async function seedFrom(db: ClinicalDatabase, text: string): Promise<WriteInput> {
   const seed = JSON.parse(text);
   const refs: SourceRef[] = (seed.attachments as { recordId: string; eventId: string }[])
     .map(a => sourceRefOf(string(a.recordId), string(a.eventId)) ?? refuse('AttachmentRefused'));
-  const attachments = await readClinicalSources(db, refs);
-  if (attachments.some((a, i) => a.recordId !== seed.attachments[i].recordId || a.event.eventId !== seed.attachments[i].eventId)) refuse('AttachmentRefused');
+  let attachments: readonly ResolvedRecord[];
+  try { attachments = await readClinicalSources(db, refs); }
+  catch (error) {
+    if (error instanceof ContractError && error.code !== 'ClinicalSourcesNotComposed') refuse('ClinicalSourceMissing');
+    throw error;
+  }
+  if (attachments.length !== refs.length ||
+      attachments.some((a, i) => a.recordId !== seed.attachments[i].recordId || a.event.eventId !== seed.attachments[i].eventId)) refuse('AttachmentRefused');
   return { ...seed, attachments };
 }
 
@@ -235,6 +247,18 @@ export class SqlClinicalStore {
       ${k.requestId}::text, ${string(o.originalId)}::uuid, ${integer(permit.epoch)}::integer, ${string(value.phase)}::text,
       ${JSON.stringify(value)}::text, NULL::text) AS done`);
     return row.done === true;
+  }
+
+  /**
+   * The owning service's projection facts kept with the committed original of a request (what it admitted that request
+   * with), or null when the request did not commit. They are the service's own facts, handed back to the same service only.
+   */
+  async projectionOf(request: RequestIdentity): Promise<unknown> {
+    const k = keyValues(request.receiptKey);
+    const rows = await this.call(() => this.db.$queryRaw<Row[]>`SELECT * FROM emr_clinical.observe(${k.record}::text, ${k.actorId}::text,
+      ${k.requestId}::text, ${string(request.fingerprint)}::text, ${string(randomUUID())}::text, false)`);
+    if (!rows.length || rows[0].state !== 'committed') return null;
+    return (JSON.parse(rows[0].facts) as ClinicalFacts).projection ?? null;
   }
 
   private async factsFor(original: OriginalIdentity): Promise<ClinicalFacts> {
@@ -357,9 +381,14 @@ export class SqlClinicalStore {
     let seed: WriteInput;
     try { seed = await seedFrom(this.db, row.seed); }
     catch (error) {
-      // Storage that cannot be read now is no proof that a source is gone: the original stays pending for the next recovery.
-      if (!(error instanceof ContractError)) throw error;
-      return { kind: 'observer', observation: await this.sealDirect(permitOf(original, row.epoch), 'AttachmentRefused', row.phase === 'commit-dispatched') };
+      // Storage that cannot be read now (or a composition that does not serve D's sources) is no proof that a source is
+      // gone: the original stays pending for the next recovery, which resumes it with the same request.
+      if (!(error instanceof ContractError) || error.code === 'ClinicalSourcesNotComposed') throw error;
+      // A cited source that is gone or changed is kept as exactly that (DR3-04): the stored refusal answers every resend of
+      // this request with the owning service's stale-source refusal, never as an ordinary input error, never as success.
+      // Anything else here is the register's own damaged seed (AttachmentRefused).
+      const code = error.code === 'ClinicalSourceMissing' ? 'ClinicalSourceMissing' : 'AttachmentRefused';
+      return { kind: 'observer', observation: await this.sealDirect(permitOf(original, row.epoch), code, row.phase === 'commit-dispatched') };
     }
     return { kind: 'owner', execution: { permit: permitOf(original, row.epoch), seed, checkpoint: row.checkpoint === null ? null : JSON.parse(row.checkpoint) } };
   }

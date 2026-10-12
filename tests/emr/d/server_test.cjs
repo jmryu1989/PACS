@@ -25,9 +25,10 @@ const ts = require(path.join(api, 'node_modules/typescript'));
 const config = ts.readConfigFile(path.join(api, 'tsconfig.json'), ts.sys.readFile);
 assert.equal(config.error, undefined);
 const options = ts.parseJsonConfigFileContent(config.config, ts.sys, api).options;
-const previousLoader = require.extensions['.ts'];
-require.extensions['.ts'] = (module, filename) => module._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'),
+const compileTs = (module, filename) => module._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'),
   { compilerOptions: options, fileName: filename }).outputText, filename);
+const previousLoader = require.extensions['.ts'];
+require.extensions['.ts'] = compileTs;
 require(path.join(api, 'node_modules/reflect-metadata'));
 const load = file => require(path.join(SRC, file));
 const A = load('emr-contract/access-event.ts');
@@ -256,7 +257,7 @@ test('TEST-D-01 clinical_vs_operational server: refusals reach the caller as clo
 
 /** A deterministic stand-in of the register's SQL functions for one original (the PostgreSQL behaviour of migration 46). */
 function registerDb(row, { failCheckpoints = 0, commitHold = null, sources = null } = {}) {
-  const seen = { checkpoints: 0, recoveries: 0, commits: 0, versions: [] };
+  const seen = { checkpoints: 0, recoveries: 0, commits: 0, versions: [], seals: 0 };
   let failing = failCheckpoints;
   const db = { $executeRaw: async () => 0, $queryRaw: async (strings, ...v) => {
     const sql = strings.join('?');
@@ -284,6 +285,13 @@ function registerDb(row, { failCheckpoints = 0, commitHold = null, sources = nul
     }
     if (sql.includes('emr_clinical.confirm_request')) { row.confirmed = true; return [{ done: true }]; }
     if (sql.includes('emr_clinical.note_attempt')) return [{ done: null }];
+    if (sql.includes('emr_clinical.seal_rejected')) {
+      seen.seals++;
+      if (v[3] !== row.original_id || v[4] !== row.epoch || row.state !== 'pending') return [{ done: false }];
+      row.state = 'rejected'; row.terminal = v[6];
+      return [{ done: true }];
+    }
+    if (sql.includes('emr_clinical.unit_for')) return [];
     throw new Error('unexpected SQL ' + sql);
   } };
   return { db, seen };
@@ -423,8 +431,40 @@ test('TEST-D-02 versions_and_sr server: a manual SR adoption counts only once it
   assert.equal(await runtime.confirmedSrAdoption(id), null, 'no adoption: nothing to publish');
 });
 
-/** Shell words of one command line (single and double quotes; no expansion). */
-const words = line => [...line.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].map(m => m[1] ?? m[2] ?? m[3]);
+/**
+ * DR3-06: what the runner itself does with a workflow `run:` line, by installed parsers only - Python's shlex splits it as
+ * a POSIX shell does (no parser of ours), and each recorder line is then run as scripts/record-run.py itself (its own
+ * options, a scratch run directory, a child that does nothing). Its record lists the inputs that recorder hashes (with
+ * their status: present, missing). `words` are other lines split the same way (the Dockerfile's COPY lines).
+ */
+const RUNNER = [
+  'import json, os, shlex, subprocess, sys, tempfile',
+  'root, todo = sys.argv[1], json.load(sys.stdin)',
+  'out = {"words": [shlex.split(line) for line in todo["words"]], "records": []}',
+  'with tempfile.TemporaryDirectory() as scratch:',
+  '    for i, line in enumerate(todo["records"]):',
+  '        argv = shlex.split(line)',
+  '        split = argv.index("--")',
+  '        run_dir = os.path.join(scratch, str(i))',
+  '        done = subprocess.run([sys.executable, "-B", os.path.join(root, argv[1]), *argv[2:split], "--run-dir", run_dir, "--",',
+  '                               sys.executable, "-c", ""], cwd=root, capture_output=True, text=True)',
+  '        with open(os.path.join(run_dir, "run.json"), encoding="utf-8") as stream: record = json.load(stream)',
+  '        out["records"].append({"program": argv[:2], "command": argv[split + 1:], "exit": done.returncode, "inputs": [',
+  '            {"requested": f["requested"], "tree": f.get("tree"), "status": f["status"]} for f in record["files_before"]]})',
+  'print(json.dumps(out))',
+].join('\n');
+const python = process.env.KIN_EMR_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
+function asRun(records, words = []) {
+  const done = spawnSync(python, ['-B', '-I', '-c', RUNNER, root], { input: JSON.stringify({ records, words }), encoding: 'utf8' });
+  assert.equal(done.status, 0, done.stderr);
+  return JSON.parse(done.stdout);
+}
+/** The values of an option in argv as the program's own parser takes them (`--name value` or `--name=value`). */
+const optionValues = (argv, ...names) => argv.flatMap((word, i) => names.includes(word) ? [argv[i + 1]]
+  : names.filter(name => word.startsWith(name + '=')).map(name => word.slice(name.length + 1)));
+/** Whether a record hashed `file` as present: the file itself or a requested tree holding it. */
+const hashes = (record, file) => record.inputs.some(i => i.status === 'present' && (i.tree === null ? i.requested === file : file === i.tree || file.startsWith(i.tree + '/')));
+
 test('EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each record hashes what its command consumes', () => {
   const yaml = require(path.join(api, 'node_modules/js-yaml'));
   const flow = yaml.load(fs.readFileSync(path.join(root, '.github/workflows/emr-d.yml'), 'utf8'));
@@ -432,47 +472,80 @@ test('EMR-D workflow: the checkout, the image (label and tag), the live run and 
   assert.equal(job.env.TARGET_SHA, '${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}', 'a PR checks its head, a dispatch its candidate');
   for (const step of job.steps) assert.ok(!/github\.sha|GITHUB_SHA|github\.ref\b/.test(JSON.stringify(step)), 'only TARGET_SHA names the source: ' + step.name);
   assert.equal(job.steps.find(s => String(s.uses).startsWith('actions/checkout@')).with.ref, target);
-  const recorded = step => {
-    const argv = words(step.run), split = argv.indexOf('--');
-    const options = argv.slice(0, split), files = [], trees = [];
-    options.forEach((word, i) => { if (word === '--file') files.push(options[i + 1]); if (word === '--tree') trees.push(options[i + 1]); });
-    return { files, trees, command: argv.slice(split + 1) };
-  };
-  const covers = (r, file) => r.files.includes(file) || r.trees.some(tree => file === tree || file.startsWith(tree + '/'));
-  const imageStep = job.steps.find(s => /\bdocker build\b/.test(s.run ?? '')), image = recorded(imageStep);
-  const tag = image.command[image.command.indexOf('-t') + 1];
-  assert.equal(image.command[image.command.indexOf('--build-arg') + 1], 'VCS_REF=' + target, 'the image is labelled with the requested source');
-  assert.equal(tag, 'kin-emrd-ci:' + target);
-  // Every input the production image copies from its build context (api/), and the Dockerfile itself, is hashed by the record.
-  const dockerfile = fs.readFileSync(path.join(api, 'Dockerfile'), 'utf8').split(/\r?\n/);
-  const copied = dockerfile.filter(line => /^COPY\s/.test(line) && !/--from=/.test(line)).flatMap(line => words(line).slice(1, -1)).map(src => 'api/' + src);
+  const declaration = JSON.parse(fs.readFileSync(path.join(root, 'emr/units/d.json'), 'utf8'));
+  const consumed = declaration.ci.recorded_inputs, ids = Object.keys(consumed);
+  const steps = ids.map(id => job.steps.find(s => s.id === id));
+  steps.forEach((step, i) => assert.ok(step, 'the declared record ' + ids[i] + ' is a step of the workflow'));
+  // Every step that records (its argv starts with the recorder) is a declared one: no record escapes the declaration.
+  const lines = job.steps.filter(s => typeof s.run === 'string').map(s => s.run);
+  const recorders = asRun([], lines).words.map((argv, i) => argv[1] === 'scripts/record-run.py' ? job.steps.filter(s => typeof s.run === 'string')[i] : null).filter(Boolean);
+  assert.deepEqual(recorders.map(s => s.id).sort(), [...ids].sort(), 'the recorders of the workflow are exactly the declared records');
+  // Every Dockerfile COPY of the build context (api/) is an input of the image record, and the record hashes it.
+  const dockerfile = fs.readFileSync(path.join(api, 'Dockerfile'), 'utf8').split(/\r?\n/).filter(line => /^COPY\s/.test(line));
+  const ran = asRun(steps.map(s => s.run), dockerfile), record = id => ran.records[ids.indexOf(id)];
+  const copied = ran.words.filter(argv => !optionValues(argv, '--from').length).flatMap(argv => argv.slice(1, -1).filter(word => !word.startsWith('--')))
+    .map(source => 'api/' + source);
   assert.ok(copied.length >= 5);
-  for (const file of [...copied, 'api/Dockerfile']) assert.ok(covers(image, file), 'the image record hashes ' + file);
-  const liveStep = job.steps.find(s => (s.run ?? '').includes('scripts/run-tests.py --module tests/emr/d/live.py')), live = recorded(liveStep);
-  assert.equal(liveStep.env.KIN_TEST_API_IMAGE, tag, 'the live run uses exactly the image built from the requested source');
-  const declared = JSON.parse(fs.readFileSync(path.join(root, 'emr/units/d.json'), 'utf8')).ci.live_inputs;
-  for (const input of declared) assert.ok(covers(live, input), 'the live record hashes ' + input);
-  const order = job.steps.map(s => s.name);
-  const labelStep = job.steps.find(s => (s.run ?? '').includes('org.opencontainers.image.revision') && (s.run ?? '').includes('image-identity.txt'));
-  assert.ok(labelStep && order.indexOf(labelStep.name) > order.indexOf(imageStep.name) && order.indexOf(labelStep.name) < order.indexOf(liveStep.name),
+  for (const file of copied) assert.ok(consumed.image.includes(file), 'the image declaration names ' + file);
+  // DR3-05: each record hashes, as present, every input its command consumes; nothing it names is missing, except what an
+  // earlier step of the same run produces (the image identity).
+  for (const id of ids) {
+    const r = record(id);
+    assert.deepEqual([r.program, r.exit], [['python3', 'scripts/record-run.py'], 0], id + ': the recorder runs');
+    for (const file of consumed[id]) assert.ok(hashes(r, file) || file.startsWith('tmp/emr-d-ci/'), 'the ' + id + ' record hashes ' + file);
+    for (const input of r.inputs) assert.ok(input.status === 'present' || input.requested.startsWith('tmp/emr-d-ci/'), id + ' names ' + input.requested + ': ' + input.status);
+  }
+  for (const file of ['api/prisma/migrations', 'api/package-lock.json', 'api/tsconfig.json'])
+    for (const id of ['server', 'server-mutants']) assert.ok(consumed[id].includes(file), 'DR3-05: the ' + id + ' declaration names ' + file);
+  for (const file of ['api/tsconfig.json', 'api/package-lock.json']) assert.ok(consumed.mutants.includes(file), 'DR3-05: the mutants declaration names ' + file);
+  // The image: labelled with and tagged by the requested source; the live run uses exactly that tag.
+  const image = record('image').command, live = record('live').command;
+  assert.deepEqual(image.slice(0, 2), ['docker', 'build']);
+  assert.ok(optionValues(image, '--build-arg').includes('VCS_REF=' + target), 'the image is labelled with the requested source');
+  const [tag] = optionValues(image, '-t', '--tag');
+  assert.equal(tag, 'kin-emrd-ci:' + target);
+  assert.deepEqual(optionValues(live, '--module'), ['tests/emr/d/live.py']);
+  assert.equal(steps[ids.indexOf('live')].env.KIN_TEST_API_IMAGE, tag, 'the live run uses exactly the image built from the requested source');
+  const order = job.steps.map(s => s.id ?? s.name);
+  const identity = job.steps.find(s => s.id === 'image-identity');
+  assert.ok(identity && identity.run.includes('org.opencontainers.image.revision') && identity.run.includes('image-identity.txt'));
+  assert.ok(order.indexOf('image') < order.indexOf('image-identity') && order.indexOf('image-identity') < order.indexOf('live'),
     'the image revision is checked between the build and the live run');
-  // The last step's own check, run on synthetic records: one record of another commit fails it, all of TARGET_SHA pass.
-  const check = job.steps.find(s => (s.run ?? '').includes("<<'PY'\n"));
-  assert.equal(order.indexOf(check.name), order.length - 2, 'the check runs after every record, before the evidence upload');
-  const script = check.run.slice(check.run.indexOf("<<'PY'\n") + 7, check.run.lastIndexOf('PY'));
-  const python = process.env.KIN_EMR_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
+  // DR3-06: the shell's words decide, never their notation - escaped quotes and quoted concatenation split as a shell does,
+  // and the workflow written with quoted concatenation, single quotes and backslash escapes records the same inputs and
+  // runs the same commands.
+  assert.deepEqual(asRun([], ['python -c "print(\\"ok\\")"', '--file "api"/tsconfig.json']).words, [['python', '-c', 'print("ok")'], ['--file', 'api/tsconfig.json']],
+    'DR3-06: escaped quotes and quoted concatenation split as a shell splits them');
+  const renoted = steps.map(s => s.run.replace('"VCS_REF=${{ env.TARGET_SHA }}"', '"VCS_REF="\'${{ env.TARGET_SHA }}\'')
+    .replace(' --file api/Dockerfile ', ' --file "api"/Dockerfile ').replace(' --file emr/units/d.json ', " --file 'emr/units/d.json' ")
+    .replace(' --tree tests/emr/d ', ' --tree tests\\/emr/d ').replace(' --file api/tsconfig.json ', ' --file api\\/"tsconfig".json '));
+  assert.ok(renoted.every((line, i) => line !== steps[i].run), 'control: every recorder line is written differently');
+  assert.deepEqual(asRun(renoted).records, ran.records, 'DR3-06: the shell\'s words, not their notation, decide the record and the command');
+  // The last step (tests/emr/d/same_source.py), on synthetic records: all of TARGET_SHA hashing their declared inputs pass;
+  // a record of another commit, or one that did not hash a declared input, fails it.
+  const check = job.steps.find(s => s.id === 'same-source');
+  assert.deepEqual(asRun([], [check.run]).words[0], ['python3', '-B', 'tests/emr/d/same_source.py']);
+  assert.equal(order.indexOf('same-source'), order.length - 2, 'the check runs after every record, before the evidence upload');
   const sha = 'a'.repeat(40);
-  const runCheck = heads => {
+  const runCheck = change => {
     const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'emr-d-check-'));
-    fs.mkdirSync(path.join(dir, 'tmp/emr-d-ci'), { recursive: true });
-    heads.forEach((head, i) => { fs.mkdirSync(path.join(dir, 'tmp/emr-d-ci', 'step' + i)); fs.writeFileSync(path.join(dir, 'tmp/emr-d-ci', 'step' + i, 'run.json'),
-      JSON.stringify({ git_head_before: head, git_head_after: head })); });
-    fs.writeFileSync(path.join(dir, 'tmp/emr-d-ci/image-identity.txt'), 'sha256:' + 'f'.repeat(64) + ' ' + sha + '\n');
-    try { return spawnSync(python, ['-B', '-c', script], { cwd: dir, env: { ...process.env, TARGET_SHA: sha }, encoding: 'utf8' }).status; }
-    finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    try {
+      fs.mkdirSync(path.join(dir, 'emr/units'), { recursive: true });
+      fs.copyFileSync(path.join(root, 'emr/units/d.json'), path.join(dir, 'emr/units/d.json'));
+      for (const id of ids) {
+        const run = { git_head_before: sha, git_head_after: sha, files_before: consumed[id].map(file =>
+          ({ requested: file + '/synthetic.txt', tree: file, status: 'present' })) };
+        fs.mkdirSync(path.join(dir, 'tmp/emr-d-ci', id), { recursive: true });
+        fs.writeFileSync(path.join(dir, 'tmp/emr-d-ci', id, 'run.json'), JSON.stringify(change(id, run)));
+      }
+      fs.writeFileSync(path.join(dir, 'tmp/emr-d-ci/image-identity.txt'), 'sha256:' + 'f'.repeat(64) + ' ' + sha + '\n');
+      return spawnSync(python, ['-B', path.join(root, 'tests/emr/d/same_source.py')], { cwd: dir, env: { ...process.env, TARGET_SHA: sha }, encoding: 'utf8' }).status;
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   };
-  assert.equal(runCheck([sha, sha]), 0, 'every record of TARGET_SHA passes');
-  assert.equal(runCheck([sha, 'b'.repeat(40)]), 1, 'a record of another commit fails the check');
+  assert.equal(runCheck((_id, run) => run), 0, 'every record of TARGET_SHA hashing its declared inputs passes');
+  assert.equal(runCheck((id, run) => id === 'live' ? { ...run, git_head_after: 'b'.repeat(40) } : run), 1, 'a record of another commit fails the check');
+  assert.equal(runCheck((id, run) => id === 'server' ? { ...run, files_before: run.files_before.filter(f => f.tree !== 'api/prisma/migrations') } : run), 1,
+    'DR3-05: a record that did not hash a declared input fails the check');
 });
 
 test('TEST-D-04 atomic_retry server: the runtime is not composed unless A\'s stored-record reader serves the sources D cites', () => {
@@ -544,6 +617,314 @@ test('TEST-D-04 atomic_retry server: the runtime is composed once with every por
   assert.throws(() => SV.bindClinicalPort({ write: async () => ({}) }), e => e instanceof V.ContractError && e.code === 'ClinicalRuntimeAlreadyComposed',
     'DR2-08: no later binding replaces the port bound at server start');
   assert.equal(SV.requireClinicalRuntime(), composed);
+});
+
+// ---------------- round 4 (Astra NEEDS_FIX DR3-01..06 on a980357): each finding's behaviour, on the product code ----------------
+
+/**
+ * A separate module graph of api/src for a case that binds a runtime (or composes A's adapters) of its own: the services'
+ * port is bound once per server start (DR2-08), so the case gets its own graph and the shared one stays as it was.
+ */
+function isolated(files) {
+  const inSrc = key => key.startsWith(SRC + path.sep);
+  const shared = Object.fromEntries(Object.entries(require.cache).filter(([key]) => inSrc(key)));
+  for (const key of Object.keys(shared)) delete require.cache[key];
+  const loader = require.extensions['.ts'];
+  require.extensions['.ts'] = compileTs;
+  try { return Object.fromEntries(Object.entries(files).map(([name, file]) => [name, load(file)])); }
+  finally {
+    for (const key of Object.keys(require.cache)) if (inSrc(key)) delete require.cache[key];
+    Object.assign(require.cache, shared);
+    if (loader) require.extensions['.ts'] = loader; else delete require.extensions['.ts'];
+  }
+}
+const sqlError = code => Object.assign(new Error('SYN ' + code), { meta: { code } });
+/**
+ * A deterministic stand-in of the emr_clinical register and version store for any number of requests (the functions of
+ * migration 46 as the runtime calls them, keyed by record/actor/request); `legacy` answers the owning service's own tables.
+ */
+function clinicalStore(legacy) {
+  const requests = new Map(), units = new Map(), seen = { admitted: 0, commits: 0 };
+  const key = v => JSON.stringify([v[0], v[1], v[2]]);
+  const view = (row, kind) => [{ ...row, kind }];
+  const db = { $executeRaw: async () => 0, $queryRaw: async (strings, ...v) => {
+    const sql = strings.join('?');
+    if (sql.includes('emr_clinical.unit_for')) return units.get(v[0]) ?? [];
+    if (sql.includes('emr_clinical.admit(')) {
+      const found = requests.get(key(v));
+      if (found) { if (found.fingerprint !== v[3]) throw sqlError('ED002'); return view(found, 'observer'); }
+      const row = { fingerprint: v[3], original_id: randomUUID(), epoch: 1, phase: 'admitted', state: 'pending', seed: v[4], facts: v[5], envelope: v[6],
+        checkpoint: null, terminal: null, record_id: null, access_event: null, confirmed: false };
+      requests.set(key(v), row); seen.admitted++;
+      return view(row, 'owner');
+    }
+    if (sql.includes('emr_clinical.observe(')) {
+      const found = requests.get(key(v));
+      if (!found) return [];
+      if (found.fingerprint !== v[3]) throw sqlError('ED002');
+      return view(found, 'observer');
+    }
+    if (sql.includes('emr_clinical.checkpoint(')) {
+      const row = requests.get(key(v));
+      if (!row || row.original_id !== v[3] || row.epoch !== v[4] || row.state !== 'pending' || row.phase === 'commit-dispatched') return [{ done: false }];
+      row.phase = v[5]; row.checkpoint = v[6];
+      return [{ done: true }];
+    }
+    if (sql.includes('emr_clinical.commit_version(')) {
+      const row = requests.get(key(v)), previous = units.get(v[5]) ?? [];
+      if (!row || row.original_id !== v[3] || row.epoch !== v[4] || row.phase !== 'commit-dispatched' || row.state !== 'pending') throw sqlError('ED004');
+      if (v[13] !== previous.length + 1) throw sqlError('ED003');
+      const head = { record: v[0], study_id: v[6], managing_institution_id: v[7], patient: v[8], author_id: previous[0]?.author_id ?? v[9],
+        recipient_id: previous.length ? previous[0].recipient_id : v[10], state: v[11], revision: v[13], head_version_id: v[14], head_sha256: v[15], clinical_entry: v[12] };
+      units.set(v[5], [...previous, { sequence: v[13], version_id: v[14], body: v[18], signature: v[19] }].map(r => ({ ...r, ...head })));
+      row.state = 'committed'; row.terminal = v[20]; row.access_event = v[21]; row.record_id = v[5]; seen.commits++;
+      return [{ done: null }];
+    }
+    if (sql.includes('emr_clinical.confirm_request(')) { const row = requests.get(key(v)); if (row?.state === 'committed') row.confirmed = true; return [{ done: !!row }]; }
+    if (sql.includes('emr_clinical.note_attempt(')) return [{ done: null }];
+    return legacy(sql, v);
+  } };
+  db.$transaction = async work => work(db);
+  return { db, requests, units, seen };
+}
+const statusOf = error => (typeof error?.getStatus === 'function' ? error.getStatus() : null);
+
+test('TEST-D-04 atomic_retry server: an allocation request answers its own committed result - after a later allocation, beside a parallel duplicate and after its reader\'s account changed; only another meaning under its request ID is refused, and nothing is answered where the study is not visible today', async () => {
+  const I = isolated({ SV: 'emr-clinical/services.ts', RT: 'emr-clinical/runtime.ts', A: 'reader-assignment.service.ts' });
+  const tech = actor('77777777-7777-4777-8777-777777777777', ['technician']);
+  // Readers are chosen by their identity provider subject (a UUID, as the assignment body requires).
+  const [ra, rb] = ['78787878-7878-4787-8787-787878787871', '78787878-7878-4787-8787-787878787872'].map(id =>
+    ({ ...actor(id, ['radiologist']), identity: { id, issuer: 'https://identity.example.test', subject: id.replace('7878-4787', '7979-4797') } }));
+  const identities = new Map([tech, ra, rb].map(a => [a.identity.subject, a.identity]));
+  const state = { uid: study.studyId, institutionId: 'inst-a', teleInstitutionId: null, rs: 'W', holder: null, heldAt: null };
+  const rows = new Map(), audit = [];
+  const store = clinicalStore(async sql => {
+    if (sql.includes('"StudyState"')) return [{ ...state }];
+    if (sql.includes('"AuditLog"')) return [];
+    throw new Error('unexpected SQL ' + sql);
+  });
+  const db = store.db;
+  db.readerAssignment = {
+    findUnique: async ({ where }) => rows.get(where.studyUid_institutionId.institutionId) ?? null,
+    upsert: async ({ where, create, update }) => {
+      const k = where.studyUid_institutionId.institutionId, row = rows.has(k) ? { ...rows.get(k), ...update } : { ...create };
+      rows.set(k, row); return row;
+    },
+  };
+  db.auditLog = { create: async ({ data }) => { audit.push(data); return data; } };
+  const disabled = new Set(), lookups = [];
+  const keycloak = { getUser: async sub => {
+    lookups.push(sub);
+    const reader = [ra, rb].find(r => r.identity.subject === sub);
+    return reader ? { id: sub, enabled: !disabled.has(sub), serviceAccountClientId: null, groups: ['inst-a'], roles: ['radiologist'],
+      email: sub + '@synthetic.test', username: sub, firstName: 'SYN', lastName: 'reader' } : null;
+  } };
+  const runtime = new I.RT.ClinicalRuntime({ db, ledger: fakeLedger(db), studies: { facts: async () => study }, signatures: device.ports, recoveryDelayMs: 3600000,
+    context: { facts: async () => ({ actor: tech, trustedProxyIp: known({ address: '10.0.0.7', source: 'trusted-proxy' }), requestId: 'request-' + randomUUID(),
+      member: async subject => identities.get(subject) ?? who('unknown-' + subject), signature: null }) } });
+  I.SV.bindClinicalPort(runtime);
+  const service = new I.A.ReaderAssignmentService(db, keycloak, { snapshot: async () => ({}), require: async () => {}, prepare: async () => {} });
+  const caller = { kind: 'member', institution: 'inst-a', sub: tech.identity.subject, actor: 'tech@synthetic.test', roles: ['technician'] };
+  const send = body => service.write(study.studyId, caller, body, {});
+  const allocation = (revision, reader) => ({ requestId: randomUUID(), expectedOwner: owner(tech), revision, readerSub: reader ? reader.identity.subject : null });
+  const a = allocation(0, ra), b = allocation(1, rb);
+  const first = await send(a), later = await send(b);
+  assert.deepEqual([first.revision, first.reader?.sub, later.revision, later.reader?.sub], [1, ra.identity.subject, 2, rb.identity.subject]);
+  const asked = lookups.length;
+  assert.deepEqual(await send(a), first, 'DR3-01: the earlier request answers its own result after a later allocation');
+  assert.equal(lookups.length, asked, 'DR3-01: a registered request is answered without asking the identity provider again');
+  disabled.add(ra.identity.subject);
+  assert.deepEqual(await send(a), first, 'DR3-01: its reader\'s account changed since - still the original result');
+  await assert.rejects(send(allocation(2, ra)), e => statusOf(e) === 400, 'a new request still needs a reader who can be assigned today');
+  await assert.rejects(send({ ...a, readerSub: rb.identity.subject }), e => statusOf(e) === 409, 'another meaning under a used request ID');
+  const c = allocation(2, null);
+  const [one, two] = await Promise.all([send(c), send(c)]);
+  assert.deepEqual(one, two, 'two identical requests at once answer the same result');
+  assert.deepEqual([one.revision, one.reader], [3, null]);
+  assert.deepEqual(await send(a), first, 'DR3-01: and still after the duplicates');
+  assert.deepEqual([store.seen.commits, audit.length, rows.get('inst-a').revision], [3, 3, 3], 'one commit, one row change and one audit entry per request');
+  assert.deepEqual([...store.units.values()].map(u => u.length), [3], 'one operational version per committed request');
+  state.institutionId = 'inst-z';
+  await assert.rejects(send(a), e => statusOf(e) === 404, 'a study this institution cannot see today answers nothing, a resend included');
+});
+
+test('TEST-D-04 atomic_retry server: a consultation step resent after a later step answers that step\'s own result - its state, its text and who wrote it - through the durable provision of its own versions', async () => {
+  const I = isolated({ SV: 'emr-clinical/services.ts', RT: 'emr-clinical/runtime.ts', C: 'consultation.service.ts' });
+  const recipient = { ...actor('79797979-7979-4797-8797-797979797979', ['radiologist']),
+    identity: { id: '79797979-7979-4797-8797-797979797979', issuer: 'https://identity.example.test', subject: '7a7a7a7a-7a7a-47a7-87a7-7a7a7a7a7a7a' } };
+  device.register(recipient.identity, recipient.signingRegistrationId, 'inst-a');
+  const identities = new Map([r1, recipient].map(a => [a.identity.subject, a.identity]));
+  const rows = new Map(), audit = [];
+  const store = clinicalStore(async sql => {
+    if (sql.includes('"StudyState"')) return [{ uid: study.studyId, institutionId: 'inst-a' }];
+    throw new Error('unexpected SQL ' + sql);
+  });
+  const db = store.db;
+  db.studyConsultation = {
+    findUnique: async ({ where }) => rows.has(where.id) ? { ...rows.get(where.id) } : null,
+    findFirst: async ({ where }) => [...rows.values()].find(r => r.studyUid === where.studyUid && r.recipientSub === where.recipientSub && where.state.in.includes(r.state)) ?? null,
+    create: async ({ data }) => { rows.set(data.id, { reply: null, cancelReason: null, ...data }); return { ...rows.get(data.id) }; },
+    update: async ({ where, data }) => { rows.set(where.id, { ...rows.get(where.id), ...data }); return { ...rows.get(where.id) }; },
+  };
+  db.auditLog = { create: async ({ data }) => { audit.push(data); return data; } };
+  const keycloak = { getUser: async sub => sub === recipient.identity.subject ? { id: sub, enabled: true, serviceAccountClientId: null, groups: ['inst-a'],
+    roles: ['radiologist'], email: 'recipient@synthetic.test', username: 'recipient', firstName: 'SYN', lastName: 'recipient' } : null };
+  const runtime = new I.RT.ClinicalRuntime({ db, ledger: fakeLedger(db), studies: { facts: async () => study }, signatures: device.ports, recoveryDelayMs: 3600000,
+    context: { facts: async request => ({ actor: request.actor, trustedProxyIp: known({ address: '10.0.0.7', source: 'trusted-proxy' }), requestId: 'request-' + randomUUID(),
+      member: async subject => identities.get(subject) ?? who('unknown-' + subject), signature: request.signature }) } });
+  I.SV.bindClinicalPort(runtime);
+  const service = new I.C.ConsultationService(db, keycloak, { snapshot: async () => ({}), require: async () => {}, prepare: async () => {} });
+  const callerOf = (a, name) => ({ kind: 'member', institution: 'inst-a', sub: a.identity.subject, actor: name + '@synthetic.test', roles: ['radiologist'] });
+  // The author's device signs the version the server will plan for this body (C2's signing route hands the page this plan).
+  const signedBy = async (a, surface, body, extra = {}) => {
+    const unit = await runtime.unit(id);
+    const plan = R.planClinicalWrite(input(surface, a, unit, body, { ids: { recordId: id, versionId: randomUUID() }, ...extra }));
+    return { actor: a, signature: plan.signing ? carried(plan, a) : null };
+  };
+  const cr = { requestId: randomUUID(), expectedOwner: owner(r1), recipientSub: recipient.identity.subject, reason: Q }, id = cr.requestId.toLowerCase();
+  const created = await service.create(study.studyId, callerOf(r1, 'author'), cr, await signedBy(r1, 'consultation.create', cr, { recipientId: recipient.identity.id }));
+  const acc = { requestId: randomUUID(), expectedOwner: owner(recipient), revision: 1, action: 'accept', note: '' };
+  const accepted = await service.change(id, callerOf(recipient, 'recipient'), acc, await signedBy(recipient, 'consultation.accept', acc));
+  const done = { requestId: randomUUID(), expectedOwner: owner(recipient), revision: 2, action: 'complete', note: 'SYN 자문 답변: 양성' };
+  const completed = await service.change(id, callerOf(recipient, 'recipient'), done, await signedBy(recipient, 'consultation.complete', done));
+  assert.deepEqual([created.item.state, accepted.item.state, completed.item.state, completed.item.reply], ['Requested', 'Accepted', 'Completed', done.note]);
+  const resend = (body, a, name) => service.change(id, callerOf(a, name), body, { actor: a, signature: null });
+  assert.deepEqual(await resend(acc, recipient, 'recipient'), accepted, 'DR3-01: the acceptance resent after the completion answers the acceptance');
+  assert.deepEqual([accepted.item.revision, accepted.item.reply, accepted.item.changedBy], [2, null, 'recipient@synthetic.test']);
+  assert.deepEqual(await resend(done, recipient, 'recipient'), completed, 'the completion resent answers the completion');
+  assert.deepEqual(await service.create(study.studyId, callerOf(r1, 'author'), cr, { actor: r1, signature: null }), created, 'the request resent answers the request');
+  assert.deepEqual([store.seen.commits, audit.length, rows.get(id).revision], [3, 3, 3], 'one commit per request');
+});
+
+test('TEST-D-03 read_scope server: a finding written before unit D answers neither its text nor its typed reasons; a signed finding\'s reasons leave only through their durable provision, and a refused revision carries none', async () => {
+  const I = isolated({ SV: 'emr-clinical/services.ts', RT: 'emr-clinical/runtime.ts', F: 'finding.service.ts', VI: 'viewer-input.ts' });
+  const uid = study.studyId, legacyId = randomUUID(), signedId = randomUUID();
+  const reasons = { hide: 'SYN 숨김 사유: 다른 환자 검사로 보임', restore: 'SYN 복원 사유: 같은 환자로 확인' };
+  const snapshot = hidden => ({ schemaVersion: 1, title: 'SYN 결절', text: 'SYN 우상엽 8 mm 결절', hidden, primary: 0, sources: [] });
+  let unit = null;
+  for (const [surface, body, hidden] of [['finding.create', { requestId: signedId, item: {} }, false],
+    ['finding.hide', { requestId: randomUUID(), expectedRevision: 1, action: 'hide', item: {}, reason: reasons.hide }, true],
+    ['finding.restore', { requestId: randomUUID(), expectedRevision: 2, action: 'restore', item: {}, reason: reasons.restore }, false]])
+    unit = R.applyPlan(unit, R.planClinicalWrite(input(surface, r1, unit, body, { content: I.VI.canonical(snapshot(hidden)), ids: { recordId: signedId, versionId: randomUUID() } })));
+  const signedRows = unit.versions.map(v => ({ revision: v.sequence, snapshot: JSON.parse(v.text), action: ['create', 'hide', 'restore'][v.sequence - 1],
+    reason: v.reasonSource === 'stated' ? v.reason : '', actor: 'r1@synthetic.test', authorSub: r1.identity.subject, payloadBytes: 120, at: v.at.replace('Z', '') }));
+  const legacyRows = [['create', ''], ['edit', ''], ['hide', 'SYN LEGACY 숨김 사유'], ['restore', 'SYN LEGACY 복원 사유']].map(([action, reason], i) =>
+    ({ revision: i + 1, snapshot: snapshot(action === 'hide'), action, reason, actor: 'r1@synthetic.test', authorSub: r1.identity.subject, payloadBytes: 120,
+      at: '2026-10-01T01:02:0' + i + '.000' }));
+  let page = null, down = false;
+  const appended = [];
+  const db = { $executeRaw: async () => 0, studyState: { findUnique: async () => ({ uid, institutionId: 'inst-a', teleInstitutionId: null, rs: 'W' }) },
+    $queryRaw: async (strings, ...v) => {
+      const sql = strings.join('?');
+      if (sql.includes('SELECT DISTINCT l.uid')) return [];
+      if (sql.includes('AS present')) return [{ allowed: true, present: true, rows: JSON.stringify(page) }];
+      if (sql.includes('emr_clinical.unit_for')) return v[0] === signedId ? unitRows(unit) : [];
+      throw new Error('unexpected SQL ' + sql);
+    } };
+  db.$transaction = async work => work(db);
+  const ledger = { ...fakeLedger(db), append: async event => {
+    if (down) throw Object.assign(new Error('SYN seal unavailable'), { name: 'LedgerFailure' });
+    appended.push(event); return { eventId: event.eventId, durableAt: new Date().toISOString() };
+  } };
+  I.SV.bindClinicalPort(new I.RT.ClinicalRuntime({ db, ledger, context: providerContext(r1), studies: { facts: async () => study }, signatures: device.ports }));
+  const service = new I.F.FindingService(db, { prepare: async () => {}, require: async () => {}, allowed: async () => new Set(), snapshot: async () => ({}) }, {});
+  const caller = { kind: 'member', institution: 'inst-a', sub: r1.identity.subject, actor: 'r1@synthetic.test', roles: ['radiologist'] };
+  const revisions = id => service.list(uid, {}, caller, id, '2', {});
+  // Written before unit D: no signed version, so an operational summary only - ledger up or down, nothing of the author's.
+  page = legacyRows;
+  for (const state of [true, false]) {
+    down = state;
+    const answer = await revisions(legacyId);
+    assert.deepEqual(answer.revisions.map(r => [r.revision, r.action, r.reason, r.item]),
+      [[1, 'create', null, null], [2, 'edit', null, null], [3, 'hide', null, null], [4, 'restore', null, null]], 'DR3-02: the summary of a revision written before unit D');
+    assert.ok(!JSON.stringify(answer).includes('SYN'), 'DR3-02: no typed reason or text of a finding written before unit D, ledger ' + (state ? 'down' : 'up'));
+  }
+  assert.equal(appended.length, 0, 'nothing was provided: nothing clinical was served');
+  // Signed: the reasons are the versions' own, served after one durable provision naming exactly those versions.
+  page = signedRows; down = false;
+  const served = await revisions(signedId);
+  assert.deepEqual(served.revisions.map(r => r.reason), ['', reasons.hide, reasons.restore]);
+  assert.deepEqual(appended.map(e => e.targets.map(t => t.versionId.value)), [unit.versions.map(v => v.versionId)]);
+  down = true;
+  await assert.rejects(revisions(signedId), e => statusOf(e) === 503 && !JSON.stringify(e.getResponse()).includes('SYN'), 'no durable provision: no reason');
+  down = false;
+  page = signedRows.map(r => r.revision === 2 ? { ...r, reason: 'SYN 다른 사유' } : r);
+  await assert.rejects(revisions(signedId), e => statusOf(e) === 409 && !JSON.stringify(e.getResponse()).includes('SYN'), 'a diverged revision is refused without any reason');
+});
+
+test('TEST-D-02 versions_and_sr server: copies of one source version - two marks of one saved comparison, its saved view and a mark on it - are one fixed reference, planned, signed, stored and recovered alike, every copy kept in the text', async () => {
+  const I = isolated({ SV: 'emr-clinical/services.ts', RT: 'emr-clinical/runtime.ts', R: 'emr-clinical/records.ts', SOURCES: 'emr-clinical/sources.ts',
+    COMPOSITION: 'emr-contract/composition.ts', CTX: 'emr-runtime/context.ts', FI: 'finding-input.ts', VI: 'viewer-input.ts' });
+  I.COMPOSITION.composeEmrAdapters({ ...I.CTX.runtimeAdapters, stored: I.SOURCES.clinicalStoredReader(I.CTX.runtimeAdapters.stored) });
+  const job = randomUUID(), marks = [randomUUID(), randomUUID()], frame = '1.2.840.99.1.5.9';
+  const volume = { study: study.studyId, series: study.studyId + '.5', sops: [study.studyId + '.5.1'], sourceDigest: 'ab'.repeat(32) };
+  const saved = { version: 6, volume, marks: { marks: marks.map((id, i) => ({ id, label: 'SYN mark ' + i, point: [i, 2, 3] })) } };
+  const row = { jobId: job, revision: 1, at: new Date('2026-10-12T01:00:00.000Z'), title: 'SYN saved comparison', description: '', hidden: false, studyUid: study.studyId,
+    studies: [study.studyId], snapshot: JSON.stringify(saved) };
+  const sourceDb = { $queryRaw: async strings => strings.join('?').includes('"ViewerJobRevision"') ? [row] : [] };
+  const ref = { kind: 'job', jobId: job, revision: 1 };
+  const [single] = await I.SV.readClinicalSources(sourceDb, [ref]);
+  const copy = markId => I.FI.copyJob({ id: job, revision: 1, title: row.title, authorActor: 'r1@synthetic.test' }, row.studies, saved,
+    I.FI.jobMark(saved, row.studies, markId), markId === undefined ? null : frame);
+  for (const [label, markIds] of [['two marks of one saved comparison', marks], ['the saved view and a mark on it', [undefined, marks[0]]]]) {
+    // What the finding service cites for its copies: each copy names the job revision it was copied from.
+    const resolved = await I.SV.readClinicalSources(sourceDb, markIds.map(() => ref));
+    assert.deepEqual(resolved.map(r => [r.recordId, r.event.versionId, r.event.sha256]), [[single.recordId, single.event.versionId, single.event.sha256]],
+      'DR3-03: ' + label + ' cite that version once');
+    const content = I.VI.canonical({ schemaVersion: 2, title: 'SYN 두 위치', text: 'SYN 두 위치 비교', characteristics: '', hidden: false, primary: 0, sources: markIds.map(copy) });
+    const finding = input('finding.create', r1, null, { requestId: randomUUID(), item: { schemaVersion: 2 } }, { content, attachments: resolved });
+    const plan = I.R.planClinicalWrite(finding);
+    const expected = [{ kind: single.kinds[0], recordId: job, versionId: 'revision:1', sha256: single.event.sha256 }];
+    assert.deepEqual([plan.version.attachments, plan.signing.attachments], [expected, expected], label + ': one fixed reference, planned and signed');
+    assert.deepEqual(JSON.parse(plan.version.text).sources.map(s => s.mark?.id ?? null), markIds.map(id => id ?? null), label + ': every copy stays in the text');
+    const signed = carried(plan, r1), port = portFor(signed);
+    await port.verify(await port.sign(plan.signing, { originalId: 'o' }), plan.signing);
+    // The registered original resolves the same one reference again in its recovery and stores exactly it.
+    const seed = JSON.parse(JSON.stringify({ ...finding, attachments: resolved.map(r => ({ recordId: r.recordId, eventId: r.event.eventId })) }));
+    const { db, seen } = registerDb(registerRow(seed, facts(r1, true), signed), { sources: () => [row] });
+    I.SV.registerClinicalProjection('finding', async () => {});
+    const runtime = new I.RT.ClinicalRuntime({ db, ledger: fakeLedger(db), context: {}, studies: {}, signatures: device.ports, recoveryDelayMs: 3600000 });
+    assert.equal((await runtime.recover(I.R.prepareClinicalWrite(finding))).status, 'replayed', label + ': recovered');
+    assert.deepEqual([seen.commits, seen.versions[0].attachments, seen.versions[0].text], [1, expected, content], label + ': stored with the one reference');
+  }
+});
+
+test('TEST-D-04 atomic_retry server: a recovery whose cited source is gone keeps the stale-source refusal for the original and every resend; storage that cannot be read leaves it pending for the next recovery', async () => {
+  const I = isolated({ SV: 'emr-clinical/services.ts', RT: 'emr-clinical/runtime.ts', R: 'emr-clinical/records.ts', SOURCES: 'emr-clinical/sources.ts',
+    COMPOSITION: 'emr-contract/composition.ts', CTX: 'emr-runtime/context.ts', F: 'finding.service.ts' });
+  I.COMPOSITION.composeEmrAdapters({ ...I.CTX.runtimeAdapters, stored: I.SOURCES.clinicalStoredReader(I.CTX.runtimeAdapters.stored) });
+  const item = randomUUID(), ref = { kind: 'item', itemId: item, revision: 1 };
+  const rows = [{ itemId: item, revision: 1, action: 'create', at: new Date('2026-10-12T01:00:00.000Z'), studyUid: study.studyId,
+    snapshot: JSON.stringify({ kind: 'length', label: 'SYN source' }) }];
+  const resolved = await I.SV.readClinicalSources({ $queryRaw: async () => rows }, [ref]);
+  const body = { requestId: randomUUID(), item: { schemaVersion: 1, title: 'SYN title', text: 'SYN copied source', sources: [{ itemId: item, revision: 1 }] } };
+  const finding = input('finding.create', r1, null, body, { content: 'SYN copied source', attachments: resolved });
+  const signed = carried(I.R.planClinicalWrite(finding), r1);
+  const row = registerRow({ ...finding, attachments: resolved.map(r => ({ recordId: r.recordId, eventId: r.event.eventId })) }, facts(r1, true), signed);
+  let sources = () => { throw new Error('SYN connection reset'); }, projected = 0;
+  const { db, seen } = registerDb(row, { sources: sql => sources(sql) });
+  I.SV.registerClinicalProjection('finding', async () => { projected++; });
+  const runtime = new I.RT.ClinicalRuntime({ db, ledger: fakeLedger(db), context: providerContext(r1), studies: { facts: async () => study },
+    signatures: device.ports, recoveryDelayMs: 3600000 });
+  const identity = I.R.prepareClinicalWrite(finding);
+  // Storage that cannot be read now is no proof that the source is gone: pending, nothing sealed, nothing committed.
+  const transient = await runtime.recover(identity);
+  assert.deepEqual([transient.status, row.state, seen.seals, seen.commits, projected], ['unknown', 'pending', 0, 0, 0],
+    'DR3-04: a transient failure leaves the original pending');
+  // The cited source version is gone: the stored refusal is the source's change, never an input error, never a success.
+  sources = () => [];
+  const sealed = await runtime.recover(identity);
+  assert.deepEqual([sealed.status, sealed.code], ['failed', 'ClinicalSourceMissing'], 'DR3-04: the recovery keeps the stale source as such');
+  assert.deepEqual([row.state, seen.commits, projected], ['rejected', 0, 0], 'nothing committed: never a version without its reference');
+  assert.equal((await runtime.recover(identity)).code, 'ClinicalSourceMissing', 'the stored refusal answers every later recovery');
+  // The author's resend through the public route answers the service's stale-source refusal.
+  I.SV.bindClinicalPort(runtime);
+  const service = new I.F.FindingService({ studyState: { findUnique: async () => ({ uid: study.studyId, institutionId: 'inst-a', teleInstitutionId: null, rs: 'W' }) } },
+    { require: async () => {} }, {});
+  const caller = { kind: 'member', institution: 'inst-a', sub: r1.identity.subject, actor: 'r1@synthetic.test', roles: ['radiologist'] };
+  const refusal = await service.write(study.studyId, Buffer.from(JSON.stringify(body)), caller, undefined, {}).then(() => null, e => e);
+  assert.deepEqual([statusOf(refusal), refusal?.getResponse?.().code], [409, 'FINDING_SOURCE_STALE'], 'DR3-04: the resend answers FINDING_SOURCE_STALE');
+  assert.deepEqual([seen.commits, projected], [0, 0]);
 });
 
 // ---------------- the declaration ----------------

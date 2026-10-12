@@ -410,8 +410,11 @@ def tap_cases(stdout):
             continue
         block = []
         if i < len(lines) and lines[i].strip() == "---":
+            # The block ends at '...' on the indentation of its own '---': an assertion diff inside it may hold a deeper
+            # "..." line (node elides unchanged lines with one), which is part of the block, not its end.
+            end = lines[i][:len(lines[i]) - len(lines[i].lstrip())] + "..."
             i += 1
-            while i < len(lines) and lines[i].strip() != "...":
+            while i < len(lines) and lines[i].rstrip() != end:
                 block.append(lines[i])
                 i += 1
             i += 1

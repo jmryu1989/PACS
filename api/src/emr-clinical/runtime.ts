@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { AccessEvent, AccessEventV1, AccessTarget, DurableAccessReceipt, EvidenceFact, ImmutableIdentity, WorkContext, newAuditLinkId,
   parseAccessEvent, provideAfterDurableEvent } from '../emr-contract/access-event';
-import { freeze, integer, refuse, string } from '../emr-contract/validation';
+import { ContractError, freeze, integer, refuse, string } from '../emr-contract/validation';
 import type { ProvisionalAppend } from '../emr-runtime/store';
 import { inspectEnvelopeV2 } from '../emr-signature/canonical-v2';
 import type { SignatureVerificationPorts } from '../emr-signature/verify';
 import { ActorFacts, CLINICAL_SURFACES, ClinicalUnit, READ_ROUTES, StudyFacts, SurfaceSpec } from './contract';
 import {
-  CommitOutcome, PreparedSr, ReadPlan, RequestIdentity, WriteInput, commitClinicalWrite, decideRequestOutcome, institutionAdmits, planClinicalRead,
+  CommitOutcome, PreparedSr, ReadPlan, RequestIdentity, RequestObservation, WriteInput, commitClinicalWrite, decideRequestOutcome, institutionAdmits, planClinicalRead,
   planClinicalWrite, planManualSrAdoption, planManualSrCleanup, prepareClinicalWrite, provideClinicalReads, reconcileManualSr, recoverClinicalWrite,
 } from './records';
 import {
@@ -78,7 +78,11 @@ export class ClinicalRuntime implements ClinicalServicePort {
     return deviceSignaturePort(this.parts.signatures, originalId => this.store.carriedSignature(originalId));
   }
 
-  /** One clinical write (records.ts commitClinicalWrite) with every server fact bound here. */
+  /**
+   * One clinical write (records.ts commitClinicalWrite) with every server fact bound here. A request already registered is
+   * answered by its own stored outcome first (DR3-01): at any later revision of the unit, whatever happened to its parties
+   * since, nothing of it is resolved, checked or signed again - only another meaning under its request ID is refused.
+   */
   async write(request: unknown, w: ClinicalWriteRequest): Promise<ClinicalWriteResult> {
     const spec: SurfaceSpec = CLINICAL_SURFACES[w.surface];
     if (!spec) refuse('ClinicalSurfaceUnknown');
@@ -87,6 +91,10 @@ export class ClinicalRuntime implements ClinicalServicePort {
     if (facts.actor.identity.subject !== w.caller?.subject || facts.actor.institutionId !== w.caller?.institutionId) refuse('OwnerChanged');
     const unit = await this.store.unit(string(w.recordId));
     const study = await this.parts.studies.facts(this.parts.db, string(w.studyId));
+    const registered = await this.registered(this.identityOf(facts, w, unit, study), unit, w.recordId);
+    if (registered) return registered;
+    // A new request: the owning service's own admission (facts checked today) resolves its projection facts.
+    const projection = w.admission ? await w.admission() : w.projection;
     const recipientId = w.recipientSubject ? (await facts.member(w.recipientSubject)).id : null;
     const readerId = w.readerSubject ? (await facts.member(w.readerSubject)).id : null;
     // The device names the version it signed; verify() binds every other fact of the plan to that same payload.
@@ -104,12 +112,12 @@ export class ClinicalRuntime implements ClinicalServicePort {
     try { signing = planClinicalWrite(input).signing !== null; } catch { signing = false; }
     if (signing && !facts.signature) {
       await this.store.noteAttempt({ attemptId: randomUUID(), request: prepareClinicalWrite(input), originalId: null, code: 'SignatureRequired' }).catch(() => {});
-      return freeze({ outcome: freeze({ status: 'failed' as const, code: 'SignatureRequired', retry: 'same-request' as const }), unit });
+      return freeze({ outcome: freeze({ status: 'failed' as const, code: 'SignatureRequired', retry: 'same-request' as const }), unit, projection: null });
     }
     const requestId = (w.body as any)?.[spec.requestField ?? 'requestId'];
     const carried: SignedEnvelope | null = facts.signature ? { jws: facts.signature.jws as any, osUserId: facts.signature.osUserId, eventId: string(requestId).toLowerCase() } : null;
     const clinical: ClinicalFacts = { event: { rolesAtTime: [...facts.actor.roles], trustedProxyIp: facts.trustedProxyIp, requestId: facts.requestId,
-      reading: !!w.reading }, projection: w.projection };
+      reading: !!w.reading }, projection };
     let originalId: string | null = null, outcome: CommitOutcome;
     try {
       outcome = await commitClinicalWrite({ store: this.store.port(clinical, carried, id => { originalId = id; }), signature: this.signaturePort() }, input);
@@ -117,7 +125,47 @@ export class ClinicalRuntime implements ClinicalServicePort {
     // Not this call's original: another call of the same request (a parallel duplicate, a resend while the first still
     // runs) executes it, and its decided result is this call's result as well.
     if (originalId === null && outcome.status === 'unknown') outcome = await this.settle(prepareClinicalWrite(input), outcome);
-    return freeze({ outcome, unit: outcome.status === 'committed' || outcome.status === 'replayed' ? await this.store.unit(w.recordId) : unit });
+    return this.answered(prepareClinicalWrite(input), outcome, unit, w.recordId);
+  }
+
+  /** The request identity of a write (register key and fingerprint): the body's meaning only, no party or source resolved. */
+  private identityOf(facts: ClinicalRequestFacts, w: ClinicalWriteRequest, unit: Readonly<ClinicalUnit> | null, study: StudyFacts): RequestIdentity | null {
+    try {
+      return prepareClinicalWrite({ surface: w.surface, actor: facts.actor, study, unit, body: w.body, content: w.content ?? null, attachments: [],
+        navigation: [...(w.navigation ?? [])], recipientId: null, readerId: null, workContext: null, ids: { recordId: w.recordId, versionId: randomUUID() },
+        at: new Date().toISOString() });
+    } catch { return null; }   // refused by the full path below, with its journal entry
+  }
+  /**
+   * The stored outcome of a registered request (settled for a bounded time when another call still executes it), or null
+   * when the register holds no such request. A register that cannot be read leaves the outcome unknown (the same request
+   * again), never a new admission; another meaning under the request ID is refused (RequestIdReused).
+   */
+  private async registered(identity: RequestIdentity | null, unit: Readonly<ClinicalUnit> | null, recordId: string): Promise<ClinicalWriteResult | null> {
+    if (!identity) return null;
+    let observed: RequestObservation;
+    try { observed = await this.store.observe(identity, randomUUID(), true); }
+    catch (error) {
+      if (error instanceof ContractError && error.code === 'RequestIdReused') throw error;
+      await this.store.noteAttempt({ attemptId: randomUUID(), request: identity, originalId: null, code: 'ObservationUnavailable' }).catch(() => {});
+      return freeze({ outcome: freeze({ status: 'unknown' as const, code: 'OutcomeUnknown', retry: 'same-request' as const }), unit, projection: null });
+    }
+    if (observed.state === 'absent') return null;
+    const outcome = await this.settle(identity, decideRequestOutcome(identity, observed, 'observer'));
+    if (outcome.status === 'unknown') this.scheduleRecovery(identity);
+    return this.answered(identity, outcome, unit, recordId);
+  }
+  /**
+   * A decided outcome with the unit as it now is and the projection facts kept with the committed original (the owning
+   * service's own, for an answer bound to that request). Storage that cannot be read now leaves the answer unknown.
+   */
+  private async answered(identity: RequestIdentity, outcome: CommitOutcome, unit: Readonly<ClinicalUnit> | null, recordId: string): Promise<ClinicalWriteResult> {
+    if (outcome.status !== 'committed' && outcome.status !== 'replayed') return freeze({ outcome, unit, projection: null });
+    try {
+      return freeze({ outcome, unit: await this.store.unit(recordId), projection: await this.store.projectionOf(identity) });
+    } catch {
+      return freeze({ outcome: freeze({ status: 'unknown' as const, code: 'OutcomeUnknown', retry: 'same-request' as const }), unit, projection: null });
+    }
   }
 
   /** The decided outcome of a request another call is still executing, waited for a bounded time; else `outcome` as it is. */

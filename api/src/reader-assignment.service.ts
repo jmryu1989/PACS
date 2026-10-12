@@ -21,6 +21,12 @@ const key=(studyUid:string,institutionId:string)=>({studyUid_institutionId:{stud
  * its revision is the allocation row's (which the channel closes below also move) and is part of the request's identity,
  * so a resend of the same request answers the same result and only another meaning under the same request ID is refused
  * (DR2-04). The row's revision is checked under its row lock in project(); D keeps its own history by head and sequence.
+ *
+ * The answer of a write is that request's own committed result (DR3-01): the revision it wrote, the reader it assigned (the
+ * display facts it was admitted with, kept with its original) and the history up to that revision - the same at every
+ * resend, after any later assignment, whatever happened to that reader's account since. The reader's eligibility is a
+ * fact of a new request only (D's admission hook). What is checked today: that the caller may still read the study, and
+ * the caller's own controls (canManage, blocked).
  */
 const unitId=(studyUid:string,institutionId:string)=>'assignment:'+createHash('sha256').update(JSON.stringify([studyUid,institutionId])).digest('hex');
 const OWN:Readonly<Record<string,()=>HttpException>>=Object.freeze({
@@ -123,21 +129,62 @@ export class ReaderAssignmentService {
     if(!b||typeof b!=='object'||Array.isArray(b)||Object.keys(b).sort().join()!=='expectedOwner,readerSub,requestId,revision'||!Number.isInteger(b.revision)||b.revision<0||b.revision>=2147483647||!uuid(b.requestId)||(b.readerSub!==null&&!uuid(b.readerSub)))throw new BadRequestException('배정 요청 형식을 확인하세요');
     if(JSON.stringify(b.expectedOwner)!==JSON.stringify([c.institution,c.sub]))throw conflict();
     await this.study(this.prisma,uid,c);
-    const readerSub=b.readerSub?.toLowerCase()??null,requestId=b.requestId.toLowerCase();
+    const readerSub=b.readerSub?.toLowerCase()??null;
     const fingerprint=createHash('sha256').update(JSON.stringify({subject:c.sub,institution:c.institution,uid,readerSub,revision:b.revision})).digest('hex');
-    const previous=await this.prisma.readerAssignment.findUnique({where:key(uid,c.institution!)});
-    const replay=previous?.lastRequest===requestId&&previous?.lastFingerprint===fingerprint;
-    const user=readerSub&&!replay?await this.keycloak.getUser(readerSub):null;
-    if(readerSub&&!replay&&!this.eligible(user,c))throw new BadRequestException('현재 같은 기관의 활성 판독의를 선택하세요');
     const recordId=unitId(uid,c.institution!);
     let result:ClinicalWriteResult;
     try{
       result=await runtime.write(request,{surface:'assignment.write',studyId:uid,recordId,body:b,readerSubject:readerSub,
-        caller:{subject:c.sub,institutionId:c.institution},
-        projection:{caller:{kind:c.kind,institution:c.institution,sub:c.sub,actor:c.actor,roles:[...c.roles]},fingerprint,revision:b.revision,reader:user?this.publicReader(user):null}});
+        caller:{subject:c.sub,institutionId:c.institution},projection:null,
+        // A request D has not registered yet: the reader must be assignable now, and its display facts are kept with it.
+        admission:async()=>{
+          const user=readerSub?await this.keycloak.getUser(readerSub):null;
+          if(readerSub&&!this.eligible(user,c))throw new BadRequestException('현재 같은 기관의 활성 판독의를 선택하세요');
+          const projection:AssignmentProjection={caller:{kind:c.kind,institution:c.institution,sub:c.sub,actor:c.actor,roles:[...c.roles]},fingerprint,
+            revision:b.revision,reader:user?this.publicReader(user):null};
+          return projection;
+        }});
     }catch(e){throw clinicalRefusal(e,OWN);}
     const code=outcomeCode(result.outcome);
     if(code!==null)throw clinicalHttpError(code,OWN);
-    return this.run(c,async tx=>this.result(tx,await this.study(tx,uid,c,'share'),c));
+    return this.answer(uid,c,b.revision+1,readerSub,result.projection);
+  }
+
+  /**
+   * The committed result of one allocation request (DR3-01): the row revision it wrote (its request revision + 1, which the
+   * projection admitted only at that row revision), the reader it assigned as kept with its original, and this
+   * institution's history up to that revision since the channel close before it. Read under today's visibility of the study;
+   * owner, canManage and blocked are the caller's controls now.
+   */
+  private async answer(uid:string,c:Caller,revision:number,readerSub:string|null,kept:unknown){
+    let reader:AssignmentProjection['reader']=null;
+    if(readerSub!==null){
+      const r=(kept as AssignmentProjection|null|undefined)?.reader;
+      // Without the facts the original was committed with there is no answer of this request yet (the same request again).
+      if(!r||typeof r.sub!=='string'||r.sub.toLowerCase()!==readerSub)throw busy();
+      reader={sub:r.sub,actor:r.actor,name:r.name};
+    }
+    return this.run(c,async tx=>{
+      const s=await this.study(tx,uid,c,'share');
+      return {owner:[c.institution,c.sub],studyUid:s.uid,revision,reader,canManage:this.manager(c),blocked:this.blocked(s),
+        history:await this.historyThrough(tx,s.uid,c.institution!,revision)};
+    });
+  }
+  /**
+   * This institution's entries with revisions up to `through`, after the last channel close before it (its closedRevision
+   * then): the history the write of revision `through` was answered with, whatever was written after it.
+   */
+  private async historyThrough(tx:any,uid:string,institution:string,through:number){
+    const history:any[]=await tx.$queryRaw`SELECT h.at, h.actor, h.detail FROM "AuditLog" h
+      WHERE h.target = ${uid} AND h.action = ${ACTION}
+        AND CASE WHEN h.action = ${ACTION} THEN (h.detail::jsonb ->> 'institution') = ${institution}
+          AND (h.detail::jsonb ->> 'revision')::int <= ${through}
+          AND (h.detail::jsonb ->> 'revision')::int > (SELECT COALESCE(max((f.detail::jsonb ->> 'revision')::int), 0) FROM "AuditLog" f
+            WHERE f.target = ${uid} AND f.action = ${ACTION}
+              AND CASE WHEN f.action = ${ACTION} THEN (f.detail::jsonb ->> 'institution') = ${institution}
+                AND (f.detail::jsonb ->> 'closed') IS NOT NULL AND (f.detail::jsonb ->> 'revision')::int < ${through} ELSE FALSE END)
+          ELSE FALSE END
+      ORDER BY h.at DESC, h.id DESC LIMIT 20`;
+    return history.map((h:any)=>({at:h.at,actor:h.actor,detail:JSON.parse(h.detail)}));
   }
 }

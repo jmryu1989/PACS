@@ -1,6 +1,7 @@
 # coding: utf-8
-"""TEST-D round 3 server mutants: each reverts one round-3 fix of Astra's findings on bfddc3d (DR2-01..08) or removes the
-signing-time check Astra's own mutant AM10 removed, in a COPY of the source, and runs tests/emr/d/server_test.cjs there.
+"""TEST-D server mutants: each reverts one fix of Astra's findings - round 3 (DR2-01..08 on bfddc3d), round 4 (DR3-01..06
+on a980357) - or removes the signing-time check Astra's own mutant AM10 removed, in a COPY of the source, and runs
+tests/emr/d/server_test.cjs there. DR3-06's notation equivalents run the same way and must leave their case passing.
 
 REQ-EMR-01/03/04/05/07/10/17 -> RISK-D-01..04 -> TEST-D-01..04 server cases (tests/emr/d/server_test.cjs).
 
@@ -10,10 +11,12 @@ A mutant counts as killed only when ALL of these hold (the rules of tests/emr/d/
   * the child exits non-zero, the named case is reported `not ok` in the TAP stream with failureType testCodeFailure and
     code ERR_ASSERTION, and the mutant's own expect text is inside that case's failure block;
   * no crash marker (syntax/reference/module errors) appears: an import or process failure is never a kill.
+An equivalent (EQUIVALENTS: the same meaning written differently) holds only when its anchor occurs exactly once, the child
+exits 0 and the named case is reported `ok` with no crash marker.
 
-The copy is a temporary root with api/src, the declaration, the workflow, the Dockerfile and tests/emr/d; api/node_modules
-is linked (a junction on Windows), never copied, and the link is removed before the copy is. The source tree is never
-modified. stdlib only. Usage: python -B tests/emr/d/server_mutants.py [--anchors-only] [--out PATH]; node from KIN_NODE or PATH.
+The copy is a temporary root with what server_test.cjs reads (COPIED); api/node_modules is linked (a junction on Windows),
+never copied, and the link is removed before the copy is. The source tree is never modified. stdlib only.
+Usage: python -B tests/emr/d/server_mutants.py [--anchors-only] [--out PATH]; node from KIN_NODE or PATH.
 """
 import argparse
 import hashlib
@@ -32,8 +35,12 @@ if hasattr(sys.stdout, "reconfigure"):
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 TEST = ROOT / "tests" / "emr" / "d" / "server_test.cjs"
 CRASH_MARKERS = ("SyntaxError:", "ReferenceError:", "Cannot find module", "ERR_MODULE_NOT_FOUND", "ERR_REQUIRE")
-COPIED = ["api/src", "api/prisma/migrations", "api/tsconfig.json", "api/Dockerfile", "emr/units/d.json", ".github/workflows/emr-d.yml",
-          "tests/emr/d/server_test.cjs", "tests/emr/d/device.cjs", "tests/emr/d/live.py"]
+# What server_test.cjs reads (emr/units/d.json ci.recorded_inputs "server-mutants"): the sources it compiles, the Prisma tree, the
+# declaration, the workflow and the build-context files whose recorders its workflow case runs, the recorder, gate, runner
+# and provisioning script, and tests/emr/d (live.py, device.cjs, same_source.py, ...). api/node_modules is linked.
+COPIED = ["api/src", "api/prisma", "api/tsconfig.json", "api/nest-cli.json", "api/package.json", "api/package-lock.json", "api/start-production.sh",
+          "api/.dockerignore", "api/Dockerfile", "emr/units/d.json", ".github/workflows/emr-d.yml", "tests/emr/d", "scripts/record-run.py",
+          "scripts/emr-compose.py", "scripts/run-tests.py", "tests/live_test_gate.py"]
 
 CASE = {
     "recovery": "TEST-D-04 atomic_retry server: a recovery releases the original it took over - after a transient store failure the next recovery commits it once, and an original still executing is never fenced",
@@ -44,6 +51,11 @@ CASE = {
     "sources": "TEST-D-02 versions_and_sr server: what a finding incorporates is a fixed reference to its source's exact version - planned, signed, stored and recovered alike; a navigation link is none",
     "composed": "TEST-D-04 atomic_retry server: the runtime is composed once with every port and refuses a second composition",
     "signature": "TEST-D-04 atomic_retry server: an absent, altered, held, inactive, offline or foreign-request signature is refused before any commit",
+    "own-result": "TEST-D-04 atomic_retry server: an allocation request answers its own committed result - after a later allocation, beside a parallel duplicate and after its reader's account changed; only another meaning under its request ID is refused, and nothing is answered where the study is not visible today",
+    "consultation-result": "TEST-D-04 atomic_retry server: a consultation step resent after a later step answers that step's own result - its state, its text and who wrote it - through the durable provision of its own versions",
+    "legacy": "TEST-D-03 read_scope server: a finding written before unit D answers neither its text nor its typed reasons; a signed finding's reasons leave only through their durable provision, and a refused revision carries none",
+    "copies": "TEST-D-02 versions_and_sr server: copies of one source version - two marks of one saved comparison, its saved view and a mark on it - are one fixed reference, planned, signed, stored and recovered alike, every copy kept in the text",
+    "stale": "TEST-D-04 atomic_retry server: a recovery whose cited source is gone keeps the stale-source refusal for the original and every resend; storage that cannot be read leaves it pending for the next recovery",
 }
 MUTANTS = [
     {"id": "M-D-R3-DR2-01", "finding": "DR2-01", "title": "an adoption without a durable ledger receipt is reported confirmed",
@@ -65,7 +77,7 @@ MUTANTS = [
      "case": CASE["allocation"], "expect": "DR2-04: an allocation carrying its row"},
     {"id": "M-D-R3-DR2-05", "finding": "DR2-05", "title": "a recovered original drops the sources its text incorporates",
      "file": "api/src/emr-clinical/store.ts",
-     "old": "  const attachments = await readClinicalSources(db, refs);", "new": "  const attachments = await readClinicalSources(db, []);",
+     "old": "  try { attachments = await readClinicalSources(db, refs); }", "new": "  try { attachments = await readClinicalSources(db, []); }",
      "case": CASE["sources"], "expect": "DR2-05: the recovered original resolves the same sources again and commits"},
     {"id": "M-D-R3-DR2-06", "finding": "DR2-06", "title": "a recovery keeps the original it took over after it ends",
      "file": "api/src/emr-clinical/runtime.ts",
@@ -90,6 +102,80 @@ MUTANTS = [
      "old": "if (verified.time.status !== 'verified') refuse('SignatureTimeUnverified');",
      "new": "if (false && verified.time.status !== 'verified') refuse('SignatureTimeUnverified');",
      "case": CASE["signature"], "expect": "a reboot between anchor and signing"},
+    # Round 4: Astra's review of a980357 (DR3-01..06).
+    {"id": "M-D-R4-DR3-01a", "finding": "DR3-01", "title": "an allocation request answers the allocation's current state, not its own result",
+     "file": "api/src/reader-assignment.service.ts",
+     "old": "    return this.answer(uid,c,b.revision+1,readerSub,result.projection);",
+     "new": "    return this.run(c,async tx=>this.result(tx,await this.study(tx,uid,c,'share'),c));",
+     "case": CASE["own-result"], "expect": "DR3-01: the earlier request answers its own result after a later allocation"},
+    {"id": "M-D-R4-DR3-01b", "finding": "DR3-01", "title": "a registered request is admitted again (its reader's eligibility asked again) before its stored outcome",
+     "file": "api/src/emr-clinical/runtime.ts",
+     "old": "    if (registered) return registered;", "new": "    if (false && registered) return registered;",
+     "case": CASE["own-result"], "expect": "DR3-01: a registered request is answered without asking the identity provider again"},
+    {"id": "M-D-R4-DR3-01c", "finding": "DR3-01 (same class: consultation write answers)",
+     "title": "a consultation write answers the record's current state, not its own request's result (round 3's answer)",
+     "file": "api/src/consultation.service.ts",
+     "old": "        units:[{...this.provision(row,await readClinicalRows(tx,row.id)),scope:{sequences:[...new Set([1,receipt.revision])]}}],\n"
+            "        send:async served=>({owner:[c.institution,c.sub],item:this.answered(row,served[0],receipt,result.projection)})});",
+     "new": "        units:[this.provision(row,await readClinicalRows(tx,row.id))],\n"
+            "        send:async served=>({owner:[c.institution,c.sub],item:this.item(row,served[0])})});",
+     "case": CASE["consultation-result"], "expect": "DR3-01: the acceptance resent after the completion answers the acceptance"},
+    {"id": "M-D-R4-DR3-02", "finding": "DR3-02", "title": "a revision written before unit D answers its typed reason",
+     "file": "api/src/finding.service.ts",
+     "old": "            if (!units.length) return answer(null, null);", "new": "            if (!units.length) return answer(row.reason, null);",
+     "case": CASE["legacy"], "expect": "DR3-02: the summary of a revision written before unit D"},
+    {"id": "M-D-R4-DR3-03", "finding": "DR3-03", "title": "every copy of one source version is cited again",
+     "file": "api/src/emr-clinical/sources.ts",
+     "old": "    if (loaded.has(sourceEventId(ref))) continue;\n", "new": "",
+     "case": CASE["copies"], "expect": "DR3-03: two marks of one saved comparison cite that version once"},
+    {"id": "M-D-R4-DR3-04a", "finding": "DR3-04", "title": "a recovery whose cited source is gone is sealed as an ordinary input error",
+     "file": "api/src/emr-clinical/store.ts",
+     "old": "      const code = error.code === 'ClinicalSourceMissing' ? 'ClinicalSourceMissing' : 'AttachmentRefused';",
+     "new": "      const code = 'AttachmentRefused';",
+     "case": CASE["stale"], "expect": "DR3-04: the recovery keeps the stale source as such"},
+    {"id": "M-D-R4-DR3-04b", "finding": "DR3-04", "title": "a source that cannot be read now is settled as gone",
+     "file": "api/src/emr-clinical/store.ts",
+     "old": "    if (error instanceof ContractError && error.code !== 'ClinicalSourcesNotComposed') refuse('ClinicalSourceMissing');",
+     "new": "    refuse('ClinicalSourceMissing');",
+     "case": CASE["stale"], "expect": "DR3-04: a transient failure leaves the original pending"},
+    {"id": "M-D-R4-DR3-05a", "finding": "DR3-05", "title": "the server record no longer hashes the migrations its declaration case reads",
+     "file": ".github/workflows/emr-d.yml",
+     "old": "--run-dir tmp/emr-d-ci/server --cwd . --tree api/src --tree api/prisma --tree tests/emr/d",
+     "new": "--run-dir tmp/emr-d-ci/server --cwd . --tree api/src --file api/prisma/schema.prisma --tree tests/emr/d",
+     "case": CASE["workflow"], "expect": "the server record hashes api/prisma/migrations"},
+    {"id": "M-D-R4-DR3-05b", "finding": "DR3-05", "title": "the R1 mutants record no longer hashes the lock that pins its compiler",
+     "file": ".github/workflows/emr-d.yml",
+     "old": "--file tests/emr/d/contract_test.cjs --file api/tsconfig.json --file api/package-lock.json -- python3 -B tests/emr/d/mutants.py",
+     "new": "--file tests/emr/d/contract_test.cjs --file api/tsconfig.json -- python3 -B tests/emr/d/mutants.py",
+     "case": CASE["workflow"], "expect": "the mutants record hashes api/package-lock.json"},
+    {"id": "M-D-R4-DR3-05c", "finding": "DR3-05", "title": "the declaration drops the migrations from what the server step consumes",
+     "file": "emr/units/d.json",
+     "old": "      \"server\": [\"api/src\", \"api/prisma/migrations\", ", "new": "      \"server\": [\"api/src\", ",
+     "case": CASE["workflow"], "expect": "DR3-05: the server declaration names api/prisma/migrations"},
+    {"id": "M-D-R4-DR3-05d", "finding": "DR3-05", "title": "the last step no longer checks that each record hashed its declared inputs",
+     "file": "tests/emr/d/same_source.py",
+     "old": "        bad.extend(\"%s: %s not hashed\" % (record, need) for need in inputs if not hashed(run, need))",
+     "new": "        pass",
+     "case": CASE["workflow"], "expect": "DR3-05: a record that did not hash a declared input fails the check"},
+    {"id": "M-D-R4-DR3-06", "finding": "DR3-06", "title": "the workflow case splits lines on whitespace (a parser of its own) instead of as the shell does",
+     "file": "tests/emr/d/server_test.cjs",
+     "old": "  'out = {\"words\": [shlex.split(line) for line in todo[\"words\"]], \"records\": []}',",
+     "new": "  'out = {\"words\": [line.split() for line in todo[\"words\"]], \"records\": []}',",
+     "case": CASE["workflow"], "expect": "DR3-06: escaped quotes and quoted concatenation split as a shell splits them"},
+]
+# DR3-06: the same workflow written in other shell notation must leave the workflow case passing (round 3's own word
+# splitter failed both: it cut a quoted concatenation into two arguments).
+EQUIVALENTS = [
+    {"id": "E-D-R4-DR3-06a", "finding": "DR3-06", "title": "the image's build argument and tag written as quoted concatenations",
+     "file": ".github/workflows/emr-d.yml",
+     "old": "--build-arg \"VCS_REF=${{ env.TARGET_SHA }}\" -t \"kin-emrd-ci:${{ env.TARGET_SHA }}\"",
+     "new": "--build-arg VCS_REF=\"${{ env.TARGET_SHA }}\" -t 'kin-emrd-ci:'\"${{ env.TARGET_SHA }}\"",
+     "case": CASE["workflow"]},
+    {"id": "E-D-R4-DR3-06b", "finding": "DR3-06", "title": "the image record's inputs written with quoted parts, a backslash escape and single quotes",
+     "file": ".github/workflows/emr-d.yml",
+     "old": "--file api/Dockerfile --file api/.dockerignore --file api/start-production.sh",
+     "new": "--file \"api\"/Dockerfile --file api\\/.dockerignore --file 'api/start-production.sh'",
+     "case": CASE["workflow"]},
 ]
 
 
@@ -104,7 +190,7 @@ def read_lf(path):
 
 def check_anchors():
     return [f"{m['id']}: anchor occurs {read_lf(ROOT / m['file']).count(m['old'])} times in {m['file']}"
-            for m in MUTANTS if read_lf(ROOT / m["file"]).count(m["old"]) != 1]
+            for m in MUTANTS + EQUIVALENTS if read_lf(ROOT / m["file"]).count(m["old"]) != 1]
 
 
 def node_binary():
@@ -177,8 +263,11 @@ def tap_cases(stdout):
             continue
         block = []
         if i < len(lines) and lines[i].strip() == "---":
+            # The block ends at '...' on the indentation of its own '---': an assertion diff inside it may hold a deeper
+            # "..." line (node elides unchanged lines with one), which is part of the block, not its end.
+            end = lines[i][:len(lines[i]) - len(lines[i].lstrip())] + "..."
             i += 1
-            while i < len(lines) and lines[i].strip() != "...":
+            while i < len(lines) and lines[i].rstrip() != end:
                 block.append(lines[i])
                 i += 1
             i += 1
@@ -208,14 +297,30 @@ def judge(mutant, code, stdout, stderr):
     return {"killed": not reasons, "reasons": reasons, "case_block": entry[2] if entry else []}
 
 
+def judge_equivalent(equivalent, code, stdout, stderr):
+    """An equivalent holds when its case passes on the copy written in the other notation (and nothing crashed)."""
+    entry = tap_cases(stdout).get(equivalent["case"])
+    reasons = []
+    if code != 0:
+        reasons.append("child exited %d" % code)
+    if entry is None:
+        reasons.append("named case not reported")
+    elif entry[0] != "ok" or entry[1]:
+        reasons.append(f"named case reported {entry[0]} {entry[1] or ''}".strip())
+    crash = [marker for marker in CRASH_MARKERS if marker in stdout or marker in stderr]
+    if crash:
+        reasons.append("crash markers: " + ", ".join(crash))
+    return {"holds": not reasons, "reasons": reasons, "case_block": entry[2] if entry else []}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--anchors-only", action="store_true")
     parser.add_argument("--out")
     args = parser.parse_args()
     problems = check_anchors()
-    summary = {"sources": {m["file"]: sha((ROOT / m["file"]).read_bytes()) for m in MUTANTS}, "anchors": problems or "ok", "baseline": None,
-               "control": None, "mutants": []}
+    summary = {"sources": {m["file"]: sha((ROOT / m["file"]).read_bytes()) for m in MUTANTS + EQUIVALENTS}, "anchors": problems or "ok",
+               "baseline": None, "control": None, "mutants": [], "equivalents": []}
     if problems or args.anchors_only:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return 1 if problems else 0
@@ -239,12 +344,18 @@ def main():
             code, stdout, stderr = run(node, copy.root / "tests/emr/d/server_test.cjs", [mutant["case"], *mutant.get("with", [])])
         summary["mutants"].append({**{k: mutant[k] for k in ("id", "finding", "title", "file", "case", "expect")}, "exit": code,
                                    **copy.hashes, **judge(mutant, code, stdout, stderr), "stdout": stdout, "stderr": stderr})
-    summary["result"] = {"killed": sum(m["killed"] for m in summary["mutants"]), "total": len(MUTANTS)}
+    for equivalent in EQUIVALENTS:
+        with Copy(equivalent) as copy:
+            code, stdout, stderr = run(node, copy.root / "tests/emr/d/server_test.cjs", [equivalent["case"]])
+        summary["equivalents"].append({**{k: equivalent[k] for k in ("id", "finding", "title", "file", "case")}, "exit": code,
+                                       **copy.hashes, **judge_equivalent(equivalent, code, stdout, stderr), "stdout": stdout, "stderr": stderr})
+    summary["result"] = {"killed": sum(m["killed"] for m in summary["mutants"]), "total": len(MUTANTS),
+                         "equivalents_holding": sum(e["holds"] for e in summary["equivalents"]), "equivalents": len(EQUIVALENTS)}
     text = json.dumps(summary, ensure_ascii=False, indent=2)
     if args.out:
         pathlib.Path(args.out).write_text(text, encoding="utf-8")
     print(text)
-    return 0 if all(m["killed"] for m in summary["mutants"]) else 1
+    return 0 if all(m["killed"] for m in summary["mutants"]) and all(e["holds"] for e in summary["equivalents"]) else 1
 
 
 if __name__ == "__main__":

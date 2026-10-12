@@ -93,17 +93,23 @@ function resolveAll(loaded: ReadonlyMap<string, unknown>, refs: readonly SourceR
     throw error;
   }
 }
-/** A's resolutions of `refs`, in order, from the version rows the caller read (services.ts readClinicalSources). */
+/**
+ * A's resolutions of the distinct source versions `refs` cite, in the order each is first cited, from the version rows the
+ * caller read (services.ts readClinicalSources). Copies of one source version - two marks of one saved comparison, or the
+ * saved view and a mark on it - are one fixed reference to that version (DR3-03): the text keeps every copy, the version
+ * cites the record/version once.
+ */
 export function resolveSourceRows(refs: readonly SourceRef[], itemRows: readonly any[], jobRows: readonly any[]): readonly ResolvedRecord[] {
-  const loaded = new Map<string, unknown>();
+  const loaded = new Map<string, unknown>(), cited: SourceRef[] = [];
   for (const ref of refs) {
+    if (loaded.has(sourceEventId(ref))) continue;
     const row = ref.kind === 'item' ? itemRows.find(r => r.itemId === ref.itemId && r.revision === ref.revision)
       : jobRows.find(r => r.jobId === ref.jobId && r.revision === ref.revision);
     if (!row) refuse('ClinicalSourceMissing');
     loaded.set(sourceEventId(ref), ref.kind === 'item' ? itemRecord(ref, row) : jobRecord(ref, row));
+    cited.push(ref);
   }
-  if (loaded.size !== refs.length) refuse('ClinicalSourceRefused');
-  return Object.freeze(resolveAll(loaded, refs));
+  return Object.freeze(resolveAll(loaded, cited));
 }
 
 /** Server start: A's composed reader must serve D's sources, or the runtime is not composed (no write could cite one). */

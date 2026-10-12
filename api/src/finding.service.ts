@@ -213,7 +213,8 @@ export class FindingService {
    * Finding text (a finding's snapshot: title, text, copied sources) of every listed finding or revision is the signed
    * version's, served only after the provide-prepared event naming exactly those versions is durable (EMR-D, DR2-02/03);
    * the page rows and the versions are read in one RepeatableRead snapshot and a row whose meaning differs from its
-   * version is refused without text. A finding without a D unit (written before unit D) is listed without text (null).
+   * version is refused without text. A finding without a D unit (written before unit D) is listed without text (null), and
+   * its revisions without their typed reasons (null).
    */
   private signedItem(row: { revision: number; snapshot: unknown; at: Date | string }, b: ClinicalBody | undefined) {
     if (!b) return null;
@@ -270,10 +271,15 @@ export class FindingService {
         const reply = (served: readonly ClinicalServed[]) => {
           const bodies = served[0]?.bodies ?? [];
           const revisions = shown.map(row => {
-            const b = bodies.find(x => x.sequence === row.revision);
-            if (b && (versionAction(b) !== row.action || typedReason(b) !== row.reason || b.author.subject !== row.authorSub)) conflict();
-            return { revision: row.revision, action: row.action, reason: row.reason, actor: row.actor, at: timestamp(row.at), payloadBytes: row.payloadBytes,
-              item: units.length ? this.signedItem(row, b ?? conflict()) : null };
+            const answer = (reason: string | null, item: unknown) => ({ revision: row.revision, action: row.action, reason, actor: row.actor,
+              at: timestamp(row.at), payloadBytes: row.payloadBytes, item });
+            // A finding written before unit D has no signed version: its revisions are answered as operational summaries, the
+            // author's typed reason withheld like its text (DR3-02) - no clinical text leaves without a signed version and its
+            // durable provision.
+            if (!units.length) return answer(null, null);
+            const b = bodies.find(x => x.sequence === row.revision) ?? conflict();
+            if (versionAction(b) !== row.action || typedReason(b) !== row.reason || b.author.subject !== row.authorSub) conflict();
+            return answer(typedReason(b), this.signedItem(row, b));
           });
           if (schema !== '2' && !legacyOnly(revisions.map(r => r.item).filter(item => item !== null))) clientOutdated();
           return { revisions, nextCursor: rows.length > page.limit ? revisions[revisions.length - 1].revision : null };

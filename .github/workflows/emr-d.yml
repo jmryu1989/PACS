@@ -7,7 +7,9 @@ name: EMR-D clinical attached-record contracts
 # One source for everything (DR2-07): TARGET_SHA is checked out, labelled into the image and names its tag, the live run
 # uses exactly that tag, and the last step proves that every record and the image name that same SHA - for a pull request
 # (its head, not the merge ref), a push and a dispatch of another candidate_sha alike. Each record hashes what its command
-# consumes (the image build: every file the Dockerfile copies; the live run: its declaration, driver, gate and image).
+# consumes (DR3-05): the step `id` names its declared inputs in emr/units/d.json ci.recorded_inputs - the compiler
+# configuration and lock, the Prisma schema and migrations, the declaration, driver, gate and image - and the last step
+# (tests/emr/d/same_source.py) refuses a record that did not hash one of them.
 on:
   pull_request:
   push:
@@ -51,24 +53,31 @@ jobs:
         working-directory: api
         run: ./node_modules/.bin/prisma generate
       - name: API typecheck including api/src/emr-clinical
-        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/typecheck --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json -- api/node_modules/.bin/tsc --noEmit -p api
+        id: typecheck
+        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/typecheck --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json --file api/prisma/schema.prisma -- api/node_modules/.bin/tsc --noEmit -p api
       - name: D contracts and C01-C56 model selection (C52 explicitly deferred to R2 DOM)
+        id: contract
         if: ${{ !cancelled() }}
         run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/contract --cwd . --tree api/src/emr-clinical --tree api/src/emr-contract --file tests/emr/d/contract_test.cjs --file api/tsconfig.json --file api/package-lock.json -- docker run --rm --network none --read-only --tmpfs /tmp -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/emr/d/contract_test.cjs
       - name: Retained 14 and invariant 12 mutants (contract models distinguished; M-D-06 is round 2)
+        id: mutants
         if: ${{ !cancelled() }}
-        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/mutants --cwd . --tree api/src/emr-clinical --tree api/src/emr-contract --file tests/emr/d/mutants.py --file tests/emr/d/contract_test.cjs -- python3 -B tests/emr/d/mutants.py
+        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/mutants --cwd . --tree api/src/emr-clinical --tree api/src/emr-contract --file tests/emr/d/mutants.py --file tests/emr/d/contract_test.cjs --file api/tsconfig.json --file api/package-lock.json -- python3 -B tests/emr/d/mutants.py
       - name: D server cases and the d.json declaration (TEST-D-01..04 pure halves, this workflow's source binding)
+        id: server
         if: ${{ !cancelled() }}
-        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/server --cwd . --tree api/src --tree tests/emr/d --file emr/units/d.json --file api/tsconfig.json --file api/package-lock.json --file api/Dockerfile --file .github/workflows/emr-d.yml -- node --test tests/emr/d/server_test.cjs
-      - name: Round 3 server mutants (each fix of DR2-01..08 reverted, and Astra's AM10)
+        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/server --cwd . --tree api/src --tree api/prisma --tree tests/emr/d --file emr/units/d.json --file api/tsconfig.json --file api/nest-cli.json --file api/package.json --file api/package-lock.json --file api/start-production.sh --file api/.dockerignore --file api/Dockerfile --file .github/workflows/emr-d.yml --file scripts/record-run.py --file scripts/emr-compose.py --file scripts/run-tests.py --file tests/live_test_gate.py -- node --test tests/emr/d/server_test.cjs
+      - name: Server mutants (each fix of DR2-01..08 and DR3-01..05 reverted, Astra's AM10; the DR3-06 notation equivalents)
+        id: server-mutants
         if: ${{ !cancelled() }}
-        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/server-mutants --cwd . --tree api/src --tree tests/emr/d --file emr/units/d.json --file api/tsconfig.json --file api/Dockerfile --file .github/workflows/emr-d.yml -- python3 -B tests/emr/d/server_mutants.py
+        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/server-mutants --cwd . --tree api/src --tree api/prisma --tree tests/emr/d --file emr/units/d.json --file api/tsconfig.json --file api/nest-cli.json --file api/package.json --file api/package-lock.json --file api/start-production.sh --file api/.dockerignore --file api/Dockerfile --file .github/workflows/emr-d.yml --file scripts/record-run.py --file scripts/emr-compose.py --file scripts/run-tests.py --file tests/live_test_gate.py -- python3 -B tests/emr/d/server_mutants.py
       - name: Production API image of this commit
+        id: image
         if: ${{ !cancelled() }}
         timeout-minutes: 20
-        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/image --cwd . --tree api/src --tree api/prisma --file api/Dockerfile --file api/start-production.sh --file api/package.json --file api/package-lock.json --file api/tsconfig.json --file api/nest-cli.json -- docker build --target production --build-arg "VCS_REF=${{ env.TARGET_SHA }}" -t "kin-emrd-ci:${{ env.TARGET_SHA }}" api
+        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/image --cwd . --tree api/src --tree api/prisma --file api/Dockerfile --file api/.dockerignore --file api/start-production.sh --file api/package.json --file api/package-lock.json --file api/tsconfig.json --file api/nest-cli.json -- docker build --target production --build-arg "VCS_REF=${{ env.TARGET_SHA }}" -t "kin-emrd-ci:${{ env.TARGET_SHA }}" api
       - name: The image is of the requested source (its revision label is TARGET_SHA)
+        id: image-identity
         if: ${{ !cancelled() }}
         run: |
           revision="$(docker image inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "kin-emrd-ci:$TARGET_SHA")"
@@ -76,28 +85,16 @@ jobs:
           mkdir -p tmp/emr-d-ci
           docker image inspect -f '{{ .Id }} {{ index .Config.Labels "org.opencontainers.image.revision" }}' "kin-emrd-ci:$TARGET_SHA" > tmp/emr-d-ci/image-identity.txt
       - name: EMR-D live (EmrDLive) on an empty hosted daemon through scripts/run-tests.py
+        id: live
         if: ${{ !cancelled() }}
         timeout-minutes: 45
         env:
           KIN_TEST_API_IMAGE: kin-emrd-ci:${{ env.TARGET_SHA }}
         run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/live --cwd . --tree tests/emr/d --tree api/prisma/migrations --file emr/units/d.json --file scripts/emr-compose.py --file scripts/run-tests.py --file tests/live_test_gate.py --file tmp/emr-d-ci/image-identity.txt -- python3 -B scripts/run-tests.py --module tests/emr/d/live.py --unit emr-d-ci-live --mode live --timeout 2700
-      - name: Every record and the image are of TARGET_SHA (source = image = evidence)
+      - name: Every record and the image are of TARGET_SHA, and each record hashed what its command consumes (source = image = evidence)
+        id: same-source
         if: ${{ !cancelled() }}
-        run: |
-          python3 - <<'PY'
-          import json, os, pathlib, sys
-          sha, bad = os.environ["TARGET_SHA"], []
-          records = sorted(pathlib.Path("tmp/emr-d-ci").glob("*/run.json"))
-          for record in records:
-              run = json.loads(record.read_text(encoding="utf-8"))
-              if run.get("git_head_before") != sha or run.get("git_head_after") != sha:
-                  bad.append(str(record))
-          identity = pathlib.Path("tmp/emr-d-ci/image-identity.txt")
-          if not identity.is_file() or identity.read_text().split()[1:] != [sha]:
-              bad.append(str(identity))
-          print("\n".join(bad) if bad else "source = image = evidence = %s (%d records)" % (sha, len(records)))
-          sys.exit(1 if bad or not records else 0)
-          PY
+        run: python3 -B tests/emr/d/same_source.py
       - name: EMR-D evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -41,8 +41,18 @@ export interface ClinicalWriteRequest {
   caller: { subject: string; institutionId: string | null };
   /** The owning service's projection facts, kept with the original for its commit and recovery. */
   projection: unknown;
+  /**
+   * The owning service's admission of a request its register does not hold yet (a fact checked today, such as whether an
+   * assigned reader may still be assigned), resolving the projection facts in place of `projection`. A request already
+   * registered never runs it: it answers its own stored outcome, whatever changed since (DR3-01).
+   */
+  admission?: () => Promise<unknown>;
 }
-export type ClinicalWriteResult = Readonly<{ outcome: CommitOutcome; unit: Readonly<ClinicalUnit> | null }>;
+/**
+ * `projection` is the owning service's projection facts kept with the committed original of this request (its own facts,
+ * for an answer bound to that request rather than to the record's current state); null unless committed or replayed.
+ */
+export type ClinicalWriteResult = Readonly<{ outcome: CommitOutcome; unit: Readonly<ClinicalUnit> | null; projection: unknown }>;
 /**
  * One unit a response serves. `rows` are the unit's stored rows read with readClinicalRows/readClinicalUnits in the
  * caller's own read snapshot (together with the legacy rows it answers with). `parties` are the subjects the served
@@ -85,6 +95,7 @@ export interface SrProvideRequest<T> {
 
 /** What the composed runtime offers the owning services (runtime.ts ClinicalRuntime). */
 export interface ClinicalServicePort {
+  /** One write; a request already registered is answered by its stored outcome before anything is resolved again. */
   write(request: unknown, w: ClinicalWriteRequest): Promise<ClinicalWriteResult>;
   /** The stored outcome of a write's request ID when one is registered, else null; it never plans, signs or commits. */
   lookup(request: unknown, w: ClinicalWriteRequest): Promise<CommitOutcome | null>;
@@ -267,8 +278,9 @@ export async function readClinicalUnits(db: ClinicalRowReader, recordIds: readon
 }
 /**
  * The fixed references of what a write incorporates (sources.ts): each source's immutable version read in the caller's
- * transaction - a viewer item revision, a saved comparison revision with its immutable snapshot - and resolved by A.
- * A source whose version row is missing is refused, never left out.
+ * transaction - a viewer item revision, a saved comparison revision with its immutable snapshot - and resolved by A, one
+ * reference per distinct source version (several copies of one version cite it once). A source whose version row is
+ * missing is refused, never left out.
  */
 export async function readClinicalSources(db: ClinicalRowReader, refs: readonly SourceRef[]): Promise<readonly ResolvedRecord[]> {
   const items = refs.filter(ref => ref.kind === 'item') as Extract<SourceRef, { kind: 'item' }>[];

@@ -66,7 +66,7 @@ async function main() {
   const K = req('emr-signature/keys'), CV = req('emr-signature/canonical-v2');
   const R = req('emr-clinical/records'), CT = req('emr-clinical/contract'), RT = req('emr-clinical/runtime'), SV = req('emr-clinical/services');
   const { PrismaService } = req('prisma.service'), { StudyAccessService } = req('study-access.service');
-  const { copySource } = req('finding-input'), { canonical } = req('viewer-input');
+  const { copySource, copyJob, jobFrame, jobMark, jobStudies } = req('finding-input'), { canonical } = req('viewer-input');
   const STATE = process.env.KIN_EMR_STATE_DIR;
 
   const pool = appendPoolConfiguration(process.env.DATABASE_URL);
@@ -108,11 +108,14 @@ async function main() {
   const runtime = RT.composeClinicalRuntime({ db: ledgerDb, ledger, context, studies, signatures: dev.ports, recoveryDelayMs: 200 });
 
   // ---- recording stand-ins for the identity provider and the image server ----
+  // `args.disabled`: people whose accounts are disabled in this run; every account lookup is recorded.
+  const keycloakCalls = [];
   const keycloak = {
     async getUser(sub) {
+      keycloakCalls.push(sub);
       const name = nameOf(sub); if (!name) return null;
-      return { id: sub, enabled: true, serviceAccountClientId: null, groups: [PEOPLE[name].institution], roles: [...PEOPLE[name].roles],
-        email: name + '@synthetic.test', username: name, firstName: 'SYN', lastName: name };
+      return { id: sub, enabled: !(args.disabled ?? []).includes(name), serviceAccountClientId: null, groups: [PEOPLE[name].institution],
+        roles: [...PEOPLE[name].roles], email: name + '@synthetic.test', username: name, firstName: 'SYN', lastName: name };
     },
     async assignmentReaders() { return []; },
   };
@@ -184,15 +187,31 @@ async function main() {
     return canonical({ schemaVersion: 1, title: item.title, text: item.text, hidden: item.hidden ?? false, primary: item.primary ?? 0,
       sources: JSON.parse(head.snapshot).sources });
   }
-  /** The source versions a finding item copies (an item's ID at its revision). */
-  const sourcesOf = item => item.sources.map(s => ({ kind: 'item', itemId: s.itemId, revision: s.revision }));
+  /** The source versions a finding item copies (an item's ID at its revision, or a saved comparison at its revision). */
+  const sourcesOf = item => item.sources.map(s => s.jobId ? { kind: 'job', jobId: s.jobId, revision: s.revision } : { kind: 'item', itemId: s.itemId, revision: s.revision });
+  /**
+   * The canonical snapshot of a version 2 finding whose sources are saved comparisons (the view, or a mark on it): each copy
+   * as finding-input copyJob makes it from the stored job head, a mark with the Frame of Reference of its volume's first
+   * original (the image server stand-in's tags of this run).
+   */
+  async function findingJobText(uid, item) {
+    const copies = [];
+    for (const ref of item.sources) {
+      const [job] = await prisma.$queryRaw`SELECT id::text AS id, "studyUid", studies, hidden, revision, title, "authorActor", snapshot::text AS snapshot
+        FROM "ViewerJob" WHERE id = ${ref.jobId}::uuid`;
+      const studies = jobStudies(uid, job), snapshot = JSON.parse(job.snapshot), mark = jobMark(snapshot, studies, ref.markId);
+      copies.push(copyJob(job, studies, snapshot, mark, mark ? jobFrame(args.tags?.[mark.volume.sop] ?? null, mark.volume) : null));
+    }
+    return canonical({ schemaVersion: 2, title: item.title, text: item.text, characteristics: item.characteristics, hidden: item.hidden ?? false,
+      primary: item.primary ?? 0, sources: copies });
+  }
   const body = value => Buffer.from(JSON.stringify(value));
 
   try {
     const scenario = SCENARIOS[operation];
     if (!scenario) return { crashed: { code: 'UnknownOperation' } };
     const result = await scenario({ args, S, R, SV, req, studies, runtime, request, attempt, caller, owner, actorFacts, identityOf, findingText, body, PEOPLE,
-      TEXT, dev, ledger, seal, journal, STATE, prisma, ledgerDb, orthancStored, orthancUploads, findingTextFrozen, sourcesOf });
+      TEXT, dev, ledger, seal, journal, STATE, prisma, ledgerDb, orthancStored, orthancUploads, findingTextFrozen, sourcesOf, findingJobText, keycloakCalls });
     fs.writeFileSync(saved, JSON.stringify(dev.save()));
     return result;
   } finally {
@@ -569,5 +588,109 @@ const SCENARIOS = {
     return { edit: await attempt(async () => S.findings.write(args.study, body(edit), caller('r1'), args.finding,
       await request('r1', 'finding.edit', args.finding, edit, { studyId: args.study, content: await findingTextFrozen(args.finding, amended),
         navigation: [args.comparison], sources: sourcesOf(amended) }))) };
+  },
+
+  // ---------------- round 4: the behaviour of each finding of Astra's review of a980357 (DR3-01..04) ----------------
+
+  /**
+   * DR3-01: allocation A (reader r1), then B (reader r2), then A again; two identical requests C at once; another reader
+   * under A's request ID. `lookups` are the identity provider lookups the resend of A made.
+   */
+  async 'dr3-01'({ args, S, request, attempt, caller, owner, actorFacts, PEOPLE, TEXT, keycloakCalls }) {
+    const write = async b => attempt(async () => S.assignments.write(args.study, caller('t1'), b, { actor: await actorFacts('t1'), signature: null }));
+    const a = { requestId: uuid(), expectedOwner: owner('t1'), revision: 0, readerSub: PEOPLE.r1.sub };
+    const b = { requestId: uuid(), expectedOwner: owner('t1'), revision: 1, readerSub: PEOPLE.r2.sub };
+    const out = { first: await write(a), later: await write(b) };
+    const asked = keycloakCalls.length;
+    out.replay = await write(a);
+    out.replayLookups = keycloakCalls.slice(asked);
+    const c = { requestId: uuid(), expectedOwner: owner('t1'), revision: 2, readerSub: null };
+    out.parallel = await Promise.all([write(c), write(c)]);
+    out.reused = await write({ ...a, readerSub: PEOPLE.r2.sub });
+    out.bodies = { a, b, c };
+    // The same for a consultation's write answers: r1 asks r2, r2 accepts and answers, then the acceptance is sent again.
+    const uid = args.study, cr = { requestId: uuid(), expectedOwner: owner('r1'), recipientSub: PEOPLE.r2.sub, reason: TEXT.consult }, cid = cr.requestId.toLowerCase();
+    out.consult = await attempt(async () => S.consultations.create(uid, caller('r1'), cr, await request('r1', 'consultation.create', cid, cr, { studyId: uid, recipientSub: PEOPLE.r2.sub })));
+    const acc = { requestId: uuid(), expectedOwner: owner('r2'), revision: 1, action: 'accept', note: '' };
+    out.consultAccept = await attempt(async () => S.consultations.change(cid, caller('r2'), acc, await request('r2', 'consultation.accept', cid, acc, { studyId: uid })));
+    const done = { requestId: uuid(), expectedOwner: owner('r2'), revision: 2, action: 'complete', note: TEXT.reply };
+    out.consultComplete = await attempt(async () => S.consultations.change(cid, caller('r2'), done, await request('r2', 'consultation.complete', cid, done, { studyId: uid })));
+    out.consultAcceptAgain = await attempt(async () => S.consultations.change(cid, caller('r2'), acc, { actor: await actorFacts('r2'), signature: null }));
+    return out;
+  },
+  /** DR3-01 in a later process: A sent again (its reader's account may be disabled now) and, with `fresh`, a new request. */
+  async 'dr3-01-after'({ args, S, attempt, caller, actorFacts, keycloakCalls }) {
+    const write = async b => attempt(async () => S.assignments.write(args.study, caller('t1'), b, { actor: await actorFacts('t1'), signature: null }));
+    const out = { replay: await write(args.a) };
+    out.replayLookups = [...keycloakCalls];
+    if (args.fresh) out.fresh = await write(args.fresh);
+    return out;
+  },
+
+  /** DR3-02: a signed finding hidden and restored with stated reasons (outside the author's reading). */
+  async 'dr3-02'({ args, S, request, attempt, caller, findingText, body, sourcesOf }) {
+    const uid = args.study, out = {};
+    const item = { schemaVersion: 1, title: 'SYN 결절', text: 'SYN 우상엽 8 mm 결절', sources: [{ itemId: args.itemId, revision: 1 }] };
+    const fc = { requestId: uuid(), item }, fid = fc.requestId.toLowerCase();
+    out.create = await attempt(async () => S.findings.write(uid, body(fc), caller('r1'), undefined,
+      await request('r1', 'finding.create', fid, fc, { studyId: uid, content: await findingText(uid, item, item.sources), sources: sourcesOf(item) })));
+    const hide = { requestId: uuid(), expectedRevision: 1, action: 'hide', item, reason: args.reasons.hide };
+    out.hide = await attempt(async () => S.findings.write(uid, body(hide), caller('r1'), fid, await request('r1', 'finding.hide', fid, hide,
+      { studyId: uid, content: await findingText(uid, { ...item, hidden: true }, item.sources), sources: sourcesOf(item) })));
+    const restore = { requestId: uuid(), expectedRevision: 2, action: 'restore', item, reason: args.reasons.restore };
+    out.restore = await attempt(async () => S.findings.write(uid, body(restore), caller('r1'), fid, await request('r1', 'finding.restore', fid, restore,
+      { studyId: uid, content: await findingText(uid, item, item.sources), sources: sourcesOf(item) })));
+    out.finding = fid;
+    return out;
+  },
+  /** DR3-02: the revisions and the list of the study's findings, with B1's seal tail unwritable (`down`) or writable. */
+  async 'dr3-02-serve'({ args, S, attempt, caller, actorFacts, STATE, journal }) {
+    const as = async () => ({ actor: await actorFacts('r1'), signature: null }), tail = path.join(STATE, 'seal', 'tail.json'), out = {};
+    if (args.down) fs.chmodSync(tail, 0o400);
+    try {
+      out.legacy = await attempt(async () => S.findings.list(args.study, {}, caller('r1'), args.legacy, '2', await as()));
+      out.signed = await attempt(async () => S.findings.list(args.study, {}, caller('r1'), args.signed, '2', await as()));
+      out.list = await attempt(async () => S.findings.list(args.study, { includeHidden: 'true' }, caller('r1'), undefined, '2', await as()));
+    } finally { if (args.down) fs.chmodSync(tail, 0o600); }
+    out.sealRefused = journal.all().some(r => r.kind === 'ledger-unavailable' && r.body?.cause === 'seal-unavailable');
+    return out;
+  },
+
+  /**
+   * DR3-03: findings over one saved comparison (`job`, its marks): A cites both marks, B the saved view and a mark on it.
+   * With `only`, just that finding (`pending`: written while the register's checkpoint is unavailable).
+   */
+  async 'dr3-03'({ args, S, request, attempt, caller, body, sourcesOf, findingJobText }) {
+    const uid = args.study, out = {}, ids = {}, bodies = {};
+    const items = {
+      A: [{ jobId: args.job, revision: 1, markId: args.marks[0] }, { jobId: args.job, revision: 1, markId: args.marks[1] }],
+      B: [{ jobId: args.job, revision: 1 }, { jobId: args.job, revision: 1, markId: args.marks[0] }],
+      C: [{ jobId: args.job, revision: 1, markId: args.marks[1] }, { jobId: args.job, revision: 1, markId: args.marks[0] }],
+    };
+    for (const name of args.only ? [args.only] : ['A', 'B']) {
+      const item = { schemaVersion: 2, title: 'SYN 두 위치 ' + name, text: 'SYN 저장 비교의 두 위치', characteristics: 'SYN 경계 명확', sources: items[name] };
+      const fc = { requestId: uuid(), item }, fid = fc.requestId.toLowerCase();
+      out[name] = await attempt(async () => S.findings.write(uid, body(fc), caller('r1'), undefined,
+        await request('r1', 'finding.create', fid, fc, { studyId: uid, content: await findingJobText(uid, item), sources: sourcesOf(item) })));
+      ids[name] = fid; bodies[name] = fc;
+    }
+    return { ...out, ids, bodies };
+  },
+
+  /** DR3-04: a finding citing a measurement, written while the register's checkpoint is unavailable (its original stays pending). */
+  async 'dr3-04-write'({ args, S, request, attempt, caller, findingText, body, sourcesOf }) {
+    const uid = args.study;
+    const item = { schemaVersion: 1, title: 'SYN 결절', text: 'SYN 좌상엽 5 mm 결절', sources: [{ itemId: args.itemId, revision: 1 }] };
+    const fc = { requestId: uuid(), item }, fid = fc.requestId.toLowerCase();
+    const create = await attempt(async () => S.findings.write(uid, body(fc), caller('r1'), undefined,
+      await request('r1', 'finding.create', fid, fc, { studyId: uid, content: await findingText(uid, item, item.sources), sources: sourcesOf(item) })));
+    return { create, finding: fid, body: fc };
+  },
+  /** The server's restart scan of open originals (runtime.recoverOpen), then, with `resend`, the author's resend of a finding request. */
+  async 'recover-open'({ args, S, runtime, attempt, caller, actorFacts, body }) {
+    const out = { recovered: await runtime.recoverOpen() };
+    if (args.resend) out.resend = await attempt(async () => S.findings.write(args.resend.study, body(args.resend.body), caller('r1'), undefined,
+      { actor: await actorFacts('r1'), signature: null }));
+    return out;
   },
 };

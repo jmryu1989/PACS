@@ -1,10 +1,11 @@
 {
   "unit": "EMR-D",
-  "round": "R3-server",
+  "round": "R4-server",
   "base_sha": "1414783eb6274a50b3475daf8eb0f3bb53a20fd1",
   "round_bases": {
     "R2-server": "1414783eb6274a50b3475daf8eb0f3bb53a20fd1",
-    "R3-server": "bfddc3d09cadf50cfa87e42518d30e910f7eaf4f"
+    "R3-server": "bfddc3d09cadf50cfa87e42518d30e910f7eaf4f",
+    "R4-server": "a980357ac43fe3ce8a1f5a9574ed4968c7d76c6a"
   },
   "dependencies": {
     "landed": [
@@ -57,6 +58,9 @@
     "R3-server": [
       "api/src/emr-clinical/sources.ts",
       "tests/emr/d/server_mutants.py"
+    ],
+    "R4-server": [
+      "tests/emr/d/same_source.py"
     ],
     "R2-migration-same-commit": [
       "tests/production_image_test.py",
@@ -266,6 +270,11 @@
         "TEST-D-04 atomic_retry server: the runtime is not composed unless A's stored-record reader serves the sources D cites",
         "TEST-D-02 versions_and_sr server: what a finding incorporates is a fixed reference to its source's exact version - planned, signed, stored and recovered alike; a navigation link is none",
         "TEST-D-04 atomic_retry server: the runtime is composed once with every port and refuses a second composition",
+        "TEST-D-04 atomic_retry server: an allocation request answers its own committed result - after a later allocation, beside a parallel duplicate and after its reader's account changed; only another meaning under its request ID is refused, and nothing is answered where the study is not visible today",
+        "TEST-D-04 atomic_retry server: a consultation step resent after a later step answers that step's own result - its state, its text and who wrote it - through the durable provision of its own versions",
+        "TEST-D-03 read_scope server: a finding written before unit D answers neither its text nor its typed reasons; a signed finding's reasons leave only through their durable provision, and a refused revision carries none",
+        "TEST-D-02 versions_and_sr server: copies of one source version - two marks of one saved comparison, its saved view and a mark on it - are one fixed reference, planned, signed, stored and recovered alike, every copy kept in the text",
+        "TEST-D-04 atomic_retry server: a recovery whose cited source is gone keeps the stale-source refusal for the original and every resend; storage that cannot be read leaves it pending for the next recovery",
         "EMR-D-R2 declaration: d.json lists exactly the collected server and live cases, existing owned paths and the newest migration"
       ],
       "round3_findings": {
@@ -276,6 +285,14 @@
         "DR2-05": "TEST-D-02 versions_and_sr server: what a finding incorporates is a fixed reference to its source's exact version - planned, signed, stored and recovered alike; a navigation link is none",
         "DR2-07": "EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each record hashes what its command consumes",
         "DR2-08": "TEST-D-04 atomic_retry server: the runtime is composed once with every port and refuses a second composition"
+      },
+      "round4_findings": {
+        "DR3-01": "TEST-D-04 atomic_retry server: an allocation request answers its own committed result - after a later allocation, beside a parallel duplicate and after its reader's account changed; only another meaning under its request ID is refused, and nothing is answered where the study is not visible today",
+        "DR3-01 (same class, consultation write answers)": "TEST-D-04 atomic_retry server: a consultation step resent after a later step answers that step's own result - its state, its text and who wrote it - through the durable provision of its own versions",
+        "DR3-02": "TEST-D-03 read_scope server: a finding written before unit D answers neither its text nor its typed reasons; a signed finding's reasons leave only through their durable provision, and a refused revision carries none",
+        "DR3-03": "TEST-D-02 versions_and_sr server: copies of one source version - two marks of one saved comparison, its saved view and a mark on it - are one fixed reference, planned, signed, stored and recovered alike, every copy kept in the text",
+        "DR3-04": "TEST-D-04 atomic_retry server: a recovery whose cited source is gone keeps the stale-source refusal for the original and every resend; storage that cannot be read leaves it pending for the next recovery",
+        "DR3-05/06": "EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each record hashes what its command consumes"
       }
     },
     "live": {
@@ -305,29 +322,42 @@
         "test_dr2_02_signed_text_served",
         "test_dr2_03_text_needs_durable_provision",
         "test_dr2_04_assignment_same_request",
-        "test_dr2_05_incorporated_sources_fixed"
+        "test_dr2_05_incorporated_sources_fixed",
+        "test_dr3_01_assignment_answer_of_its_request",
+        "test_dr3_02_legacy_finding_without_text",
+        "test_dr3_03_marks_of_one_job_one_reference",
+        "test_dr3_04_recovery_keeps_stale_source"
       ]
     }
   },
   "ci": {
-    "live_inputs": [
-      "emr/units/d.json",
-      "tests/emr/d",
-      "api/prisma/migrations",
-      "scripts/emr-compose.py",
-      "scripts/run-tests.py",
-      "tests/live_test_gate.py",
-      "tmp/emr-d-ci/image-identity.txt"
-    ],
-    "note": "what the live run consumes: its declaration (live.py reads it), the driver and device files it mounts, the migrations the image applies, B's provisioning SQL, the gate and the runner, and the identity of the image it runs (id and revision label); the workflow test of server_test.cjs checks the live record hashes each"
+    "recorded_inputs": {
+      "typecheck": ["api/src", "api/tsconfig.json", "api/package-lock.json", "api/prisma/schema.prisma"],
+      "contract": ["api/src/emr-clinical", "api/src/emr-contract", "tests/emr/d/contract_test.cjs", "api/tsconfig.json", "api/package-lock.json"],
+      "mutants": ["api/src/emr-clinical", "api/src/emr-contract", "tests/emr/d/mutants.py", "tests/emr/d/contract_test.cjs", "api/tsconfig.json",
+        "api/package-lock.json"],
+      "server": ["api/src", "api/prisma/migrations", "api/prisma/schema.prisma", "api/tsconfig.json", "api/nest-cli.json", "api/package.json",
+        "api/package-lock.json", "api/start-production.sh", "api/.dockerignore", "api/Dockerfile", "tests/emr/d", "emr/units/d.json",
+        ".github/workflows/emr-d.yml", "scripts/record-run.py", "scripts/emr-compose.py", "scripts/run-tests.py", "tests/live_test_gate.py"],
+      "server-mutants": ["api/src", "api/prisma/migrations", "api/prisma/schema.prisma", "api/tsconfig.json", "api/nest-cli.json", "api/package.json",
+        "api/package-lock.json", "api/start-production.sh", "api/.dockerignore", "api/Dockerfile", "tests/emr/d", "emr/units/d.json",
+        ".github/workflows/emr-d.yml", "scripts/record-run.py", "scripts/emr-compose.py", "scripts/run-tests.py", "tests/live_test_gate.py"],
+      "image": ["api/Dockerfile", "api/.dockerignore", "api/package.json", "api/package-lock.json", "api/prisma", "api/tsconfig.json", "api/nest-cli.json",
+        "api/src", "api/start-production.sh"],
+      "live": ["emr/units/d.json", "tests/emr/d", "api/prisma/migrations", "scripts/emr-compose.py", "scripts/run-tests.py", "tests/live_test_gate.py",
+        "tmp/emr-d-ci/image-identity.txt"]
+    },
+    "note": "DR3-05: what each recording step's command consumes, by step id (= its run directory under tmp/emr-d-ci). typecheck: the sources, the compiler configuration and the lock that pins the compiler and the type packages, and the Prisma schema the generated client is typed from; contract and mutants: the D/A sources, the contract test (and the mutant driver), the compiler configuration and lock; server: every source it compiles, the migration directory its declaration case reads, the declaration, the workflow, Dockerfile and build context files its workflow case runs the recorders over, the recorder itself, the gate, runner and provisioning script; server-mutants: what it copies and links for every mutant (the same set) and its own baseline run; image: the Dockerfile, its ignore file and every path its COPY lines take from the build context; live: its declaration (live.py reads it), the driver and device files it mounts, the migrations the image applies, B's provisioning SQL, the gate and the runner, and the identity of the image it runs (id and revision label). server_test.cjs checks the workflow's recorders against this table; tests/emr/d/same_source.py checks every record of a run against it"
   },
   "mutants": {
     "pure": "tests/emr/d/mutants.py (R1: M-D-01..05 and M-D-R1-*, against tests/emr/d/contract_test.cjs)",
     "server": {
       "file": "tests/emr/d/server_mutants.py",
-      "note": "round 3: each reverts one fix of Astra's DR2-01..08 on bfddc3d (or removes the signing-time check of Astra's AM10) in a copy and runs tests/emr/d/server_test.cjs",
+      "note": "rounds 3 and 4: each reverts one fix of Astra's DR2-01..08 on bfddc3d or DR3-01..06 on a980357 (or removes the signing-time check of Astra's AM10) in a copy and runs tests/emr/d/server_test.cjs; the DR3-06 equivalents write the workflow in other shell notation and must leave the workflow case passing",
       "ids": ["M-D-R3-DR2-01", "M-D-R3-DR2-02", "M-D-R3-DR2-03", "M-D-R3-DR2-04", "M-D-R3-DR2-05", "M-D-R3-DR2-06", "M-D-R3-DR2-07a",
-        "M-D-R3-DR2-07b", "M-D-R3-DR2-08", "M-D-R3-AM10"]
+        "M-D-R3-DR2-07b", "M-D-R3-DR2-08", "M-D-R3-AM10", "M-D-R4-DR3-01a", "M-D-R4-DR3-01b", "M-D-R4-DR3-01c", "M-D-R4-DR3-02", "M-D-R4-DR3-03", "M-D-R4-DR3-04a",
+        "M-D-R4-DR3-04b", "M-D-R4-DR3-05a", "M-D-R4-DR3-05b", "M-D-R4-DR3-05c", "M-D-R4-DR3-05d", "M-D-R4-DR3-06"],
+      "equivalents": ["E-D-R4-DR3-06a", "E-D-R4-DR3-06b"]
     },
     "live": [
       {
@@ -369,8 +399,8 @@
     ]
   },
   "expected": {
-    "server": 15,
-    "live": 17,
+    "server": 20,
+    "live": 21,
     "live_mutants": 5,
     "migrations": 46,
     "note": "declared before running; never generated from a run's own result"

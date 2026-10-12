@@ -100,6 +100,21 @@ export class ConsultationService {
     return {record:'consultation' as const,recordId:row.id,studyId:row.studyUid,scope:'texts' as const,rows,
       parties:{author:row.requesterSub,recipient:row.recipientSub}};
   }
+  /**
+   * The answer of one write is the consultation as that request left it (DR3-01 for every write answer): its own version's
+   * state, revision, time and text (the reply or cancel reason it wrote), the reason of the opening version, and the
+   * person whose request it was (kept with its original) - the same at every resend, after any later step. Its fixed facts
+   * (requester, recipient, reason, creation) must be the row's, or nothing is answered.
+   */
+  private answered(row:any,served:ClinicalServed,receipt:{versionId:string;revision:number;state:string},kept:unknown) {
+    const {creationFingerprint,lastFingerprint,lastRequest,...item}=row;
+    const first=served.bodies.find(b=>b.sequence===1), own=served.bodies.find(b=>b.sequence===receipt.revision);
+    const changedBy=(kept as ConsultationProjection|null)?.caller?.actor;
+    if (!first || !own || own.versionId!==receipt.versionId || own.state.to!==receipt.state || first.author.subject!==row.requesterSub ||
+        first.text!==row.reason || iso(row.createdAt)!==first.at || typeof changedBy!=='string') throw conflict();
+    return {...item,reason:first.text,reply:receipt.state==='Completed'?own.text:null,cancelReason:receipt.state==='Cancelled'?own.text:null,
+      state:receipt.state,revision:receipt.revision,changedBy,updatedAt:own.at};
+  }
 
   /**
    * The legacy row of one committed consultation version, inside the clinical commit transaction (registered projector).
@@ -143,14 +158,17 @@ export class ConsultationService {
     } catch(e) { throw clinicalRefusal(e,OWN); }
     const code=outcomeCode(result.outcome);
     if (code!==null) throw clinicalHttpError(code,OWN);
-    // The answer carries the record's text: it is handed back through the same durable provision as a read (DR2-03).
+    // The answer carries the record's text: it is handed back through the same durable provision as a read (DR2-03), as
+    // this request's own result (its versions: the opening one and its own).
+    const receipt=(result.outcome as {receipt:{versionId:string;revision:number;state:string}}).receipt;
     const route=surface==='consultation.create'?'POST studies/:uid/consultations':'POST consultations/:id';
     return this.run(c,async tx=>{
       const row=await tx.studyConsultation.findUnique({where:{id:recordId}});
       if (!row) throw busy();
       this.access(row,c);
-      return runtime.provide(request,{route,caller:{subject:c.sub,institutionId:c.institution},units:[this.provision(row,await readClinicalRows(tx,row.id))],
-        send:async served=>({owner:[c.institution,c.sub],item:this.item(row,served[0])})});
+      return runtime.provide(request,{route,caller:{subject:c.sub,institutionId:c.institution},
+        units:[{...this.provision(row,await readClinicalRows(tx,row.id)),scope:{sequences:[...new Set([1,receipt.revision])]}}],
+        send:async served=>({owner:[c.institution,c.sub],item:this.answered(row,served[0],receipt,result.projection)})});
     },true,true);
   }
 
