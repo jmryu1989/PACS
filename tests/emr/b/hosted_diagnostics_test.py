@@ -9,6 +9,8 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -94,7 +96,8 @@ class HostedDiagnosticsTest(unittest.TestCase):
         self.assertNotIn('concurrent-24', plan['phases'][1]['pairs'][0]['workloads'])
 
     def exercise(self, *, ab_latency=10, base_latency=10, control_latency=10, failure=None,
-                 request_failures=False, workloads=None, elapsed=0, crash_aa=False):
+                 request_failures=False, workloads=None, elapsed=0, crash_aa=False,
+                 failure_measurement_only=False):
         events, clock = [], [0.]
         class Fixture(unittest.TestCase):
             image, baseline_image = 'sha256:candidate', 'sha256:r3'
@@ -137,7 +140,8 @@ class HostedDiagnosticsTest(unittest.TestCase):
                     return 'EMR_BENCHMARK {"ready":true}\n'
                 request = self.request
                 events.append(('command', self.name, dict(request)))
-                if failure and (self.phase, request['kind'], self.version) == failure:
+                if (failure and (self.phase, request['kind'], self.version) == failure
+                        and (not failure_measurement_only or 'idle_ms' in request)):
                     return 'EMR_BENCHMARK {"error":"injected request/plan failure"}\n'
                 if request['kind'] == 'prefill':
                     return 'EMR_BENCHMARK ' + json.dumps({'before': 5, 'after': 5+request['count']}) + '\n'
@@ -280,6 +284,22 @@ class HostedDiagnosticsTest(unittest.TestCase):
             if pair['phase'] == 'ab':
                 self.assertIn('error', details['plans']['r3'])
 
+    def test_ab_single_error_is_a_failure_during_warmup_and_measurement(self):
+        for options in ({}, {'failure_measurement_only': True}):
+            with self.subTest(options=options):
+                report, events, error, summary = self.exercise(failure=('ab', 'single', 'r3'), **options)
+                self.assertIsInstance(error, AssertionError)
+                self.assertEqual(report['verdict'], 'INCOMPLETE')
+                self.assertEqual(report['run_qualification']['would_be'], 'INVALID')
+                self.assertEqual(summary['run_qualification']['would_be'], 'INVALID')
+                requests = [event[2] for event in events if event[0] == 'command']
+                if options:
+                    self.assertIn('idle_ms', requests[-1])
+                else:
+                    # A rejected warm-up must stop before either slot is measured.
+                    self.assertEqual(len(requests), 1)
+                    self.assertNotIn('idle_ms', requests[0])
+
     def test_ab_compare_mode_and_both_gross_limits(self):
         for baseline, candidate, expected in [(10, 12, 'CI_PASS'), (10, 16, 'FAIL'),
                                                (100, 120, 'CI_PASS'), (100, 125, 'CI_PASS'),
@@ -321,10 +341,21 @@ class HostedDiagnosticsTest(unittest.TestCase):
         with patch.object(h, 'unit_elapsed_seconds', side_effect=OSError('unavailable')):
             self.assertFalse(h.control_budget(report)['allowed'])
 
-    def test_budget_clock_includes_interpreter_age(self):
+    def test_budget_clock_is_nonnegative_and_monotonic(self):
         elapsed = h.unit_elapsed_seconds()
         self.assertGreaterEqual(elapsed, 0)
         self.assertGreaterEqual(h.unit_elapsed_seconds(), elapsed)
+
+    def test_budget_clock_includes_interpreter_age(self):
+        result = subprocess.run(
+            [sys.executable, '-B', '-c',
+             'import time; time.sleep(1.5); import hosted_diagnostics; '
+             'print(hosted_diagnostics.unit_elapsed_seconds())'],
+            cwd=Path(__file__).resolve().parent, capture_output=True, text=True,
+            check=True, timeout=30)
+        elapsed = float(result.stdout.strip())
+        self.assertGreaterEqual(elapsed, 1.5)
+        self.assertLess(elapsed, 30)
 
     def test_run_qualification_uses_shared_gross_constants(self):
         report, _, _, _ = self.exercise(control_latency=12)
