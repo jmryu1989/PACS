@@ -1219,7 +1219,7 @@ class Introduction:
         """A recovery phase goes on despite this fact (D05/D06): recorded now and in the phase's result."""
         warning = {"kind": kind, **facts}
         self.warnings.append(warning)
-        self.event("recovery-warning", **warning)
+        self.event("recovery-warning", warning=warning)
 
     def finish(self, status, passed, release=False, extra=None):
         self.state["status"] = status

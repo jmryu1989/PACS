@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -2165,6 +2166,13 @@ def process_alive(pid):
         kernel32.CloseHandle(ctypes.c_void_p(handle))
 
 
+PROXY_TEST_IMAGE = os.environ.get("KIN_TEST_PREVIOUS_PROXY_IMAGE", "release-tools-rehearsal/proxy:previous")
+
+
+def uuid_hex():
+    return os.urandom(16).hex()
+
+
 MONITOR_COMPOSE = ("services:\n  proxy:\n    volumes:\n      - type: bind\n        source: ${KIN_MONITOR_PUBLIC_DIR:?Set a dedicated public-only "
                    "monitor directory}\n        target: /var/run/kin-monitor-public\n        read_only: true\n")
 FAKE_PROBE = r"""
@@ -2345,7 +2353,7 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
             ops_host, docker, context = self.unattended(LINGERING_BROWSER % (str(pids), parent_waits))
             with self.subTest(parent_waits=parent_waits), patch.object(intro, "BROWSER_TIMEOUT_S", 4):
                 started = time.monotonic()
-                refuses(self, ops_host.browser_login, context, message="timed out", connect=("127.0.0.1", 19444))
+                refuses(self, lambda: ops_host.browser_login(context, connect=("127.0.0.1", 19444)), message="timed out")
                 self.assertLess(time.monotonic() - started, 60)
                 child = int(pids.read_text())
                 deadline = time.monotonic() + 10
@@ -2411,8 +2419,143 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
             ops_host, docker, context = self.baseline_host(**options)
             with self.subTest(case=name), patch.object(intro, "BROWSER_PROBE_S", 4):
                 refuses(self, ops_host.baseline, context, message=message)
-                self.assertEqual(docker.mutating(), [], "L-01 changes nothing")
+                # Nothing but L-01's own read-only Keycloak helper (a labelled one-shot, removed after its exit).
+                self.assertEqual([call for call in docker.mutating() if not any("kc-serverinfo" in item for item in call)], [],
+                                 "L-01 changes nothing")
                 self.assertEqual(list(self.records.directory.glob("browser-probe-*")), [])
+
+    def test_99_a_declared_overlay_sits_right_after_docker_compose_prod_yml(self):
+        """D09: production lists the overlay immediately after docker-compose.prod.yml (where Compose renders production's
+        modified file byte-identically); a rehearsal lists docker-compose.prod.yml, its rehearsal override, the overlay.
+        Anything else - after the monitor file, a file between - is refused by the manifest check, not at L-00b."""
+        CommanderAdditionsTests.production_host(self)
+        production = self.target
+        overlay = str(self.overlay)
+        intro.target_valid(production)
+        rehearsal = target_fixture("rehearsal", str(self.repo))
+        rehearsal.update(compose_files=["docker-compose.yml", "docker-compose.prod.yml", str(self.override), overlay, "docker-compose.monitor.yml"],
+                         external_networks=copy.deepcopy(production["external_networks"]), declared_overlays=copy.deepcopy(production["declared_overlays"]))
+        intro.target_valid(rehearsal)
+        refused = {
+            "production: the overlay after the monitor file": (production, ["docker-compose.yml", "docker-compose.prod.yml", "docker-compose.monitor.yml", overlay]),
+            "production: the overlay before docker-compose.prod.yml": (production, ["docker-compose.yml", overlay, "docker-compose.prod.yml", "docker-compose.monitor.yml"]),
+            "rehearsal: the monitor file between the override and the overlay": (
+                rehearsal, ["docker-compose.yml", "docker-compose.prod.yml", str(self.override), "docker-compose.monitor.yml", overlay]),
+            "rehearsal: the monitor file between docker-compose.prod.yml and the override": (
+                rehearsal, ["docker-compose.yml", "docker-compose.prod.yml", "docker-compose.monitor.yml", str(self.override), overlay]),
+        }
+        for name, (base, files) in refused.items():
+            bad = copy.deepcopy(base)
+            bad["compose_files"] = files
+            with self.subTest(case=name):
+                refuses(self, intro.target_valid, bad, message="docker-compose.prod.yml")
+        other = copy.deepcopy(production)
+        other["tracked_overlay_reconcile"][0]["path"] = "docker-compose.yml"
+        refuses(self, intro.target_valid, other, message="docker-compose.prod.yml")
+
+    @unittest.skipUnless(shutil.which("docker"), "needs the docker CLI (`docker compose config` only: no container, no daemon change)")
+    def test_100_compose_renders_production_s_modified_file_only_with_the_overlay_right_after_it(self):
+        """D09 with real `docker compose config` (the product's compose files at this commit): production's modified
+        docker-compose.prod.yml (the proxy joins the Halo network and binds report.conf) renders byte-identically to the
+        committed file followed directly by the overlay, and differently with the overlay after the monitor file (the
+        order D09 now refuses). The rehearsal order (prod, override, overlay) gives the proxy exactly that network entry
+        and bind entry."""
+        source = Path(__file__).resolve().parents[1]
+        for name in ("docker-compose.yml", "docker-compose.prod.yml", "docker-compose.monitor.yml"):
+            (self.repo / name).write_bytes((source / name).read_bytes())
+        head = (self.repo / "docker-compose.prod.yml").read_text(encoding="utf-8")
+        conf = (self.root / "halo-reports" / "report.conf").as_posix()
+        modified = head.replace("      workflow: {}\n", "      workflow: {}\n      halo_reports: {}\n", 1)
+        modified = modified.replace("      - /etc/kin-workflow/nginx:/etc/nginx/workflow:ro\n",
+                                    "      - /etc/kin-workflow/nginx:/etc/nginx/workflow:ro\n      - " + conf + ":/etc/nginx/conf.d/halo-report.conf:ro\n", 1)
+        modified = modified.replace("\nnetworks:\n", "\nnetworks:\n  halo_reports:\n    external: true\n    name: halo_reports_private\n", 1)
+        self.assertNotEqual(modified, head)
+        changed = self.root / "modified" / "docker-compose.prod.yml"
+        changed.parent.mkdir()
+        changed.write_text(modified, encoding="utf-8", newline="\n")
+        overlay = self.root / "overlays" / "docker-compose.halo-reports.yml"
+        overlay.parent.mkdir()
+        overlay.write_bytes(HALO_OVERLAY.replace(b"/srv/halo-reports/nginx/report.conf", conf.encode()))
+        texts = [path.read_bytes() for path in (self.repo / "docker-compose.yml", self.repo / "docker-compose.prod.yml", self.repo / "docker-compose.monitor.yml")]
+        required = sorted(name for name, needed in intro.referenced_variables(texts).items() if needed)
+        self.write_env("".join(name + "=synthetic-placeholder\n" for name in required if name != "KIN_MONITOR_PUBLIC_DIR")
+                       + "KIN_MONITOR_PUBLIC_DIR=/home/ubuntu/.kin-monitor-public\nPUBLIC_ORIGIN=https://pacs.example.invalid\n")
+
+        def config(files, project="pacs-starter-kit"):
+            args = ["docker", "compose", "--project-directory", str(self.repo), "--project-name", project]
+            for item in files:
+                args += ["-f", str(item)]
+            result = subprocess.run(args + ["config", "--format", "json"], capture_output=True, timeout=120)
+            self.assertEqual(result.returncode, 0, result.stderr[-800:])
+            return result.stdout
+        base, monitor, prod = self.repo / "docker-compose.yml", self.repo / "docker-compose.monitor.yml", self.repo / "docker-compose.prod.yml"
+        production_render = config([base, changed, monitor])
+        self.assertEqual(config([base, prod, overlay, monitor]), production_render, "the overlay right after docker-compose.prod.yml")
+        self.assertNotEqual(config([base, prod, monitor, overlay]), production_render, "the overlay after the monitor file")
+        rendered = json.loads(production_render)["services"]["proxy"]
+        target = target_fixture("rehearsal", str(self.repo))
+        self.override.write_text(intro.rehearsal_override(target, target["origin"]), newline="\n")
+        rehearsal = json.loads(config([base, prod, self.override, overlay], project=target["project"]))["services"]["proxy"]
+        halo = lambda proxy: ([entry for entry in proxy["volumes"] if entry.get("target") == "/etc/nginx/conf.d/halo-report.conf"],
+                              proxy["networks"].get("halo_reports", "absent"))
+        self.assertEqual(halo(rehearsal), halo(rendered))
+        self.assertEqual(len(halo(rendered)[0]), 1)
+
+    @unittest.skipUnless(shutil.which("docker") and subprocess.run(["docker", "image", "inspect", PROXY_TEST_IMAGE], capture_output=True).returncode == 0
+                         if shutil.which("docker") else False, "needs the docker daemon and the local proxy image " + PROXY_TEST_IMAGE)
+    def test_102_the_certificate_check_refuses_a_foreign_key_and_a_foreign_chain(self):
+        """D30, with the product's proxy image and real openssl: a clone certificate volume passes only when its kin.key is
+        the certificate's own key and the certificate verifies against the CA file; a volume whose key belongs to another
+        certificate, or a CA file of another authority, is refused (networkless, read-only check containers)."""
+        token = uuid_hex()
+        created = []
+
+        def docker(*args, **kwargs):
+            result = subprocess.run(["docker", *args], capture_output=True, timeout=120, **kwargs)
+            self.assertEqual(result.returncode, 0, result.stderr[-800:])
+            return result.stdout
+
+        def filled(name, script):
+            volume = "kin-rehearsal-" + token[:12] + "-" + name
+            docker("volume", "create", "--label", "kin.ops.run=" + token, volume)
+            created.append(volume)
+            docker("run", "--rm", "--network", "none", "--label", "kin.ops.run=" + token, "--mount", "type=volume,source=" + volume + ",target=/certs",
+                   "--entrypoint", "sh", PROXY_TEST_IMAGE, "-c", script)
+            return volume
+
+        def remove():
+            for volume in created:
+                subprocess.run(["docker", "volume", "rm", volume], capture_output=True)
+        self.addCleanup(remove)
+        pair = ("openssl req -x509 -nodes -newkey rsa:2048 -days 30 -keyout /certs/kin.key -out /certs/kin.crt -subj /CN=localhost "
+                "-addext subjectAltName=DNS:localhost,IP:127.0.0.1 2>/dev/null")
+        good = filled("good", pair)
+        foreign = filled("foreign-key", pair + " && openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /certs/kin.key 2>/dev/null")
+        other = filled("other-authority", pair)
+        read = lambda volume: docker("run", "--rm", "--network", "none", "--mount", "type=volume,source=" + volume + ",target=/certs,readonly",
+                                     "--entrypoint", "cat", PROXY_TEST_IMAGE, "/certs/kin.crt")
+        own_ca, other_ca, foreign_ca = self.root / "own-ca.pem", self.root / "other-ca.pem", self.root / "foreign-ca.pem"
+        own_ca.write_bytes(read(good))
+        other_ca.write_bytes(read(other))
+        # The foreign-key volume's certificate is its own authority: only the key differs.
+        foreign_ca.write_bytes(read(foreign))
+        plan = self.plan()
+        plan["previous"]["images"]["proxy"] = json.loads(docker("image", "inspect", PROXY_TEST_IMAGE))[0]["Id"]
+        self.target.update(origin="https://localhost:19443")
+        context = SimpleNamespace(plan=plan)
+        outcomes = {}
+        for name, volume, ca in (("own pair, own CA", good, own_ca), ("a foreign key", foreign, foreign_ca),
+                                 ("another authority", good, other_ca)):
+            self.target["ca_file"] = str(ca)
+            ops_host = intro.HostOps(target=self.target, plan=plan, runner=intro.Runner(self.repo), records=self.records)
+            model = {"mounts": {"proxy": [{"type": "volume", "source": "proxy-certs", "target": "/etc/nginx/certs"}]}, "volumes": {"proxy-certs": volume}}
+            try:
+                outcomes[name] = ops_host.certificate_volume_check(context, model)["key_matches"]
+            except intro.Stop as error:
+                outcomes[name] = str(error)
+        self.assertIs(outcomes["own pair, own CA"], True)
+        for name in ("a foreign key", "another authority"):
+            self.assertIn("does not fit", outcomes[name], name)
 
     @unittest.skipUnless(shutil.which("node"), "needs node (the Linux root fixture has it)")
     def test_98_keycloak_readiness_waits_for_200_and_a_refused_administrator_stops_at_once(self):
@@ -2761,7 +2904,8 @@ class ProtectedHostTests(unittest.TestCase):
             docker.containers[target["containers"][role]] = {"Image": plan["previous"]["images"][role], "State": {"Running": True},
                                                              "Mounts": [], "Config": {"Labels": {}}}
         docker.psql = {"_prisma_migrations": json.dumps([[n, c, True, False] for n, c in plan["migrations"]["before"]]),
-                       "rolconnlimit": json.dumps(pre_catalog()), "service_account_client_link": json.dumps(plan["members"])}
+                       "rolconnlimit": json.dumps(pre_catalog()), "service_account_client_link": json.dumps(plan["members"]),
+                       "parent_group": json.dumps({"roles": ["radiologist"], "top_level_groups": ["hallym"]})}
         docker.failing = lambda args: args[:1] == ["crontab"] and args[-1] == "-"
         if prepare:
             prepare(self.state / "emr-runs" / plan_sha)

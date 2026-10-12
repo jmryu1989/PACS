@@ -467,5 +467,145 @@ class ExactRestoreTests(unittest.TestCase):
                 self.restore(cluster, directory)
 
 
+    def test_03_a_restore_that_loses_a_column_grant_is_refused(self):
+        """D22: column privileges are part of the compared catalog; a restore without one is refused."""
+        with tempfile.TemporaryDirectory() as folder:
+            directory, catalog = self.snapshot(folder)
+            catalog["objects"]["kin"]["columns"] = [{"name": "public.AuditLog.actor", "acl": ["legacy_reader=r/kin"]}]
+            (directory / "catalog.json").write_text(json.dumps(catalog))
+            self.restore(FakeCluster(catalog), directory)
+            cluster = FakeCluster(catalog)
+            original = cluster.run
+
+            def losing(args, **kwargs):
+                result = original(args, **kwargs)
+                if "pg_restore" in args and "kin" in cluster.objects:
+                    cluster.objects["kin"]["columns"] = []
+                return result
+            cluster.run = losing
+            with self.assertRaisesRegex(RuntimeError, "Restored catalog differs from the snapshot: objects"):
+                self.restore(cluster, directory)
+
+
+POSTGRES_IMAGE = "postgres:16-alpine"
+
+
+def _image_present(name):
+    import shutil
+    import subprocess
+    return bool(shutil.which("docker")) and subprocess.run(["docker", "image", "inspect", name], capture_output=True).returncode == 0
+
+
+@unittest.skipUnless(_image_present(POSTGRES_IMAGE), "needs the docker daemon and the local image " + POSTGRES_IMAGE)
+class RealClusterTests(unittest.TestCase):
+    """D22/D23 against real PostgreSQL 16 (postgres:16-alpine): networkless single containers named kin-rehearsal-*,
+    labelled and removed. Proves on the real catalog what the fake clusters above assume."""
+
+    def start(self, superuser="kin"):
+        import subprocess
+        import time as clock
+        import uuid
+        token = uuid.uuid4().hex
+        name = "kin-rehearsal-" + token[:16]
+        subprocess.run(["docker", "run", "-d", "--name", name, "--label", "kin.ops.run=" + token, "--network", "none",
+                        "-e", "POSTGRES_USER=" + superuser, "-e", "POSTGRES_DB=kin", "-e", "POSTGRES_HOST_AUTH_METHOD=trust", POSTGRES_IMAGE],
+                       check=True, capture_output=True)
+        self.addCleanup(subprocess.run, ["docker", "rm", "-f", "-v", name], capture_output=True)
+        deadline = clock.monotonic() + 90
+        while subprocess.run(["docker", "exec", name, "pg_isready", "-h", "127.0.0.1", "-U", superuser], capture_output=True).returncode:
+            self.assertLess(clock.monotonic(), deadline, "PostgreSQL did not start")
+            clock.sleep(0.5)
+        return name
+
+    def sql(self, name, statement, database="kin", user="kin"):
+        import subprocess
+        result = subprocess.run(["docker", "exec", "-i", name, "psql", "-X", "-U", user, "-d", database, "-v", "ON_ERROR_STOP=1", "-qAt"],
+                                input=statement.encode(), capture_output=True)
+        return result
+
+    def ok(self, name, statement, database="kin"):
+        result = self.sql(name, statement, database)
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace")[-800:])
+        return result.stdout.decode().strip()
+
+    def dump(self, name, directory, catalog):
+        import subprocess
+        directory.mkdir()
+        (directory / "catalog.json").write_text(json.dumps(catalog))
+        for database in ("kin", "keycloak"):
+            with open(directory / (database + ".dump"), "wb") as handle:
+                subprocess.run(["docker", "exec", name, "pg_dump", "-U", "kin", "-d", database, "-Fc", "--create"], stdout=handle, check=True)
+        return directory
+
+    def test_d22_column_type_large_object_publication_event_trigger_and_fdw_privileges_restore_exactly(self):
+        """D22: the extended catalog reads column, type, large-object, foreign-server privileges, publications, event
+        triggers and user mappings; pg_dump/pg_restore --create reproduce all of them exactly (no false refusal of a
+        rollback); a dump that lost one column grant is refused by restore_pre_snapshot."""
+        source = self.start()
+        self.ok(source, "CREATE DATABASE keycloak OWNER kin;")
+        self.ok(source, """
+            CREATE ROLE kin_legacy_reader NOLOGIN;
+            CREATE TABLE public."Report"(id int, body text, secret text);
+            GRANT SELECT (id, body) ON public."Report" TO kin_legacy_reader;
+            CREATE TYPE public.kin_mood AS ENUM ('a', 'b');
+            REVOKE USAGE ON TYPE public.kin_mood FROM PUBLIC;
+            GRANT USAGE ON TYPE public.kin_mood TO kin_legacy_reader;
+            CREATE DOMAIN public.kin_code AS text;
+            SELECT lo_from_bytea(424242, 'synthetic');
+            GRANT SELECT ON LARGE OBJECT 424242 TO kin_legacy_reader;
+            CREATE PUBLICATION kin_pub FOR TABLE public."Report";
+            CREATE FUNCTION public.kin_evt() RETURNS event_trigger LANGUAGE plpgsql AS $$BEGIN END$$;
+            CREATE EVENT TRIGGER kin_evt ON ddl_command_end EXECUTE FUNCTION public.kin_evt();
+            CREATE EXTENSION postgres_fdw;
+            CREATE SERVER kin_remote FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host 'remote.invalid', dbname 'x');
+            GRANT USAGE ON FOREIGN SERVER kin_remote TO kin_legacy_reader;
+            CREATE USER MAPPING FOR kin_legacy_reader SERVER kin_remote OPTIONS (user 'x');
+        """)
+        catalog = ops.cluster_catalog(source)
+        objects = catalog["objects"]["kin"]
+        self.assertIn({"name": "public.Report.id", "acl": ["kin_legacy_reader=r/kin"]}, objects["columns"])
+        mood = next(item for item in objects["types"] if item["name"] == "public.kin_mood")
+        self.assertIn("kin_legacy_reader=U/kin", mood["acl"])
+        self.assertTrue(any(item["name"] == "public.kin_code" and item["kind"] == "d" for item in objects["types"]))
+        self.assertEqual([item["id"] for item in objects["large_objects"]], [424242])
+        self.assertIn("kin_legacy_reader=r/kin", objects["large_objects"][0]["acl"])
+        self.assertEqual([(item["name"], item["relations"]) for item in objects["publications"]], [("kin_pub", ['"Report"'])])
+        self.assertEqual([item["name"] for item in objects["event_triggers"]], ["kin_evt"])
+        self.assertEqual([item["name"] for item in objects["foreign_data_wrappers"]], ["postgres_fdw"])
+        self.assertIn("kin_legacy_reader=U/kin", objects["foreign_servers"][0]["acl"])
+        self.assertEqual(objects["user_mappings"], [{"server": "kin_remote", "member": "kin_legacy_reader"}])
+        with tempfile.TemporaryDirectory() as folder:
+            whole = self.dump(source, Path(folder) / "whole", catalog)
+            self.ok(source, 'REVOKE SELECT (id) ON public."Report" FROM kin_legacy_reader;')
+            lost = self.dump(source, Path(folder) / "lost", catalog)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(ops.restore_pre_snapshot(self.start(), whole)["catalog"], "equal")
+                with self.assertRaisesRegex(RuntimeError, "Restored catalog differs from the snapshot: objects"):
+                    ops.restore_pre_snapshot(self.start(), lost)
+
+    def test_d23_pg_dumpall_roles_fail_in_a_postgres_cluster_and_the_catalog_replay_rebuilds_them(self):
+        """D23: a kin-bootstrapped cluster's membership is dumped by pg_dumpall as GRANTED BY kin, which PostgreSQL 16
+        refuses when replayed in a cluster whose bootstrap superuser is postgres (the older daily rehearsal); the catalog
+        replay rebuilds the same roles and memberships in a cluster bootstrapped as kin."""
+        import subprocess
+        source = self.start()
+        self.ok(source, "CREATE DATABASE keycloak OWNER kin;")
+        self.ok(source, "CREATE ROLE kin_legacy_group NOLOGIN NOINHERIT; CREATE ROLE kin_legacy_reader NOLOGIN CONNECTION LIMIT 3; "
+                        "GRANT kin_legacy_group TO kin_legacy_reader;")
+        roles = subprocess.run(["docker", "exec", source, "pg_dumpall", "-U", "kin", "--roles-only", "--no-role-passwords"],
+                               check=True, capture_output=True).stdout
+        self.assertIn(b"GRANTED BY", roles)
+        legacy = self.start("postgres")
+        replayed = subprocess.run(["docker", "exec", "-i", legacy, "psql", "-X", "-U", "postgres", "-v", "ON_ERROR_STOP=1"], input=roles,
+                                  capture_output=True)
+        self.assertNotEqual(replayed.returncode, 0)
+        self.assertIn(b"ADMIN option", replayed.stderr)
+        catalog = ops.role_catalog(source)
+        target = self.start()
+        result = ops.replay_roles(target, catalog, shape="pre")
+        self.assertEqual(sorted(result["created"]), ["kin_legacy_group", "kin_legacy_reader"])
+        self.assertEqual(ops.role_catalog(target)["memberships"], catalog["memberships"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
