@@ -27,4 +27,7 @@
 #worklist-folders-panel:not([open]) { display: none; }
 #shortcuts-status { padding: 8px; overflow-wrap: anywhere; }
 .left:has(> #worklist-folders-panel[open]) > .statusbar { flex-wrap: wrap; gap: 6px 18px; }
-.left:has(> #worklist-folders-panel[open]) > .statusbar > span { overflow-wrap: anywhere; }
+/* Counts wrap between items, never inside one ("Unverified:0" stays whole); free text may still break anywhere. */
+.left:has(> #worklist-folders-panel[open]) > .statusbar > span:not(#countlist) { overflow-wrap: anywhere; }
+.left:has(> #worklist-folders-panel[open]) > .statusbar > #countlist { flex-wrap: wrap; gap: 6px 18px; }
+.left:has(> #worklist-folders-panel[open]) > .statusbar > #countlist .count { white-space: nowrap; }

@@ -5,7 +5,7 @@
 })(typeof window === 'object' ? window : null, function () {
   'use strict';
 
-  // D1041: saved and newly entered Modality Equals/column values share token OR.
+  // D1041: saved and newly entered Modality Equals/Does Not Equal/column values share token OR.
   // Interpret old scalars in place; stored search values need no migration.
   const KEY = '$compound';
   const OPS = {
@@ -110,7 +110,7 @@
       if (!own(rule, 'value') || typeof rule.value !== 'string' || !rule.value.trim() || rule.value.length > 1000) {
         return '검색 값은 공백이 아닌 1~1,000자 문자열이어야 합니다.';
       }
-      const choices = field.k === 'modality' && rule.op === 'eq'
+      const choices = field.k === 'modality' && (rule.op === 'eq' || rule.op === 'neq')
         ? rule.value.split(/[,\\]/).map(value => value.trim().toUpperCase()) : [rule.value.toUpperCase()];
       if (field.type === 'select' && !choices.every(choice => field.values.some(value => value.toUpperCase() === choice))) {
         return '검색 항목에서 선택할 수 없는 값입니다.';
@@ -195,7 +195,10 @@
       if (rule.op === 'notEmpty') return !blank(value);
       // Missing values are not unequal values; use the explicit empty operator.
       if (blank(value) || typeof value !== 'string') return false;
+      // D1041 7-②: a CT,SR study is a CT study, so for any study with a Modality
+      // Does Not Equal is the token complement of Equals; no study satisfies both.
       if (rule.field === 'modality' && rule.op === 'eq') return matchesModality(value, rule.value);
+      if (rule.field === 'modality' && rule.op === 'neq') return modalityTokens(value).length > 0 && !matchesModality(value, rule.value);
       if (available.get(rule.field).type === 'date') {
         const actual = calendarDate(value, false), wanted = calendarDate(rule.value, true);
         if (actual === null) return false;

@@ -216,11 +216,16 @@
       choices(fieldInput, fields.map(f => [f.k, f.k === 'date' && f.t === '검사일' ? 'Study Date' : f.t]), rule.field);
       const operator = make('Operator', document.createElement('select'), 'ruleOp');
       choices(operator, field ? compound.operators(field).map(([op, label]) => [op, field.type === 'tokens' ? label : operatorLabels[op] || op]) : [[rule.op, rule.op]], rule.op);
-      const modalityEquals = field?.k === 'modality' && rule.op === 'eq';
-      const input = make('Value', document.createElement(field?.type === 'select' && !modalityEquals ? 'select' : 'input'), 'ruleValue');
-      if (field?.type === 'select' && !modalityEquals) choices(input, [['', 'Select Value'], ...field.values.map(v => [v, v])], rule.value ?? '');
+      // Equals and Does Not Equal take the same Modality list, so switching between them keeps the typed value.
+      const modalityList = field?.k === 'modality';
+      const input = make('Value', document.createElement(field?.type === 'select' && !modalityList ? 'select' : 'input'), 'ruleValue');
+      if (field?.type === 'select' && !modalityList) choices(input, [['', 'Select Value'], ...field.values.map(v => [v, v])], rule.value ?? '');
       else { input.type = field?.type === 'date' ? (rule.op === 'withinLastDays' ? 'number' : 'date') : 'text'; input.maxLength = 1000; input.value = rule.value ?? ''; }
-      if (modalityEquals) { input.placeholder = 'CT, MR'; input.title = '검사의 Modality 목록에 입력한 값 중 하나가 있으면 포함합니다. CT는 CT,SR 검사도 포함합니다.'; }
+      if (modalityList) input.placeholder = 'CT, MR';
+      const modalityHelp = {
+        eq: '검사의 Modality 목록에 입력한 값 중 하나가 있으면 포함합니다. CT는 CT,SR 검사도 포함합니다.',
+        neq: '검사의 Modality 목록에 입력한 값이 하나도 없을 때만 포함합니다. CT를 제외하면 CT,SR 검사도 제외됩니다.',
+      };
       const preset = make('Date Range', document.createElement('select'), 'relativePreset');
       choices(preset, [['0', 'Today'], ['1', 'Since Yesterday'], ['7', 'Last 7 Days'], ['30', 'Last 30 Days'], ['', 'Custom']],
         ['0', '1', '7', '30'].includes(rule.value) ? rule.value : '');
@@ -234,7 +239,7 @@
         const relative = operator.value === 'withinLastDays';
         if (field?.type === 'date') input.type = relative ? 'number' : 'date';
         if (relative) { input.min = '0'; input.max = '365'; input.step = '1'; input.title = '오늘을 포함해 로컬 자정부터 계산합니다. 0은 오늘, 1은 어제부터입니다 (0~365).'; }
-        else { input.removeAttribute('min'); input.removeAttribute('max'); input.removeAttribute('step'); input.title = ''; }
+        else { input.removeAttribute('min'); input.removeAttribute('max'); input.removeAttribute('step'); input.title = modalityList ? modalityHelp[operator.value] || '' : ''; }
         preset.parentElement.hidden = !relative;
         input.parentElement.hidden = ['empty', 'notEmpty'].includes(operator.value);
         end.parentElement.hidden = operator.value !== 'between';
