@@ -453,7 +453,7 @@ class SyntheticStack:
                                  override=host_ops.pins(context, maintenance=False), timeout=300)
                 if role == "db":
                     # As the product's installation does (tests/measurement_ci.py): Keycloak's database is created once.
-                    host_ops.wait(lambda: host_ops.healthy("db"), 120, "Source database did not start")
+                    host_ops.db_ready(120, "Source database did not start")
                     host_ops.cmd(["docker", "exec", self.target["containers"]["db"], "createdb", "-U", "kin", "keycloak"])
             host_ops.api_health(member_rights=False)
         return host_ops

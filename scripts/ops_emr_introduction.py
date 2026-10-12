@@ -1033,8 +1033,12 @@ const {PrismaClient}=require('/app/node_modules/@prisma/client');const db=new Pr
 SERVERINFO_SCRIPT = r"""
 const base=(process.env.KC_ADMIN_URL||'').replace(/\/$/,'');
 (async()=>{const form=new URLSearchParams({grant_type:'password',client_id:'admin-cli',username:process.env.KIN_KC_ADMIN_USER,password:process.env.KIN_KC_ADMIN_PASSWORD});
- const t=await (await fetch(base+'/realms/master/protocol/openid-connect/token',{method:'POST',body:form})).json();
- const info=await (await fetch(base+'/admin/serverinfo',{headers:{Authorization:'Bearer '+t.access_token}})).json();
+ const granted=await fetch(base+'/realms/master/protocol/openid-connect/token',{method:'POST',body:form});
+ if(granted.status!==200)throw new Error('admin');
+ const t=await granted.json();
+ const answered=await fetch(base+'/admin/serverinfo',{headers:{Authorization:'Bearer '+t.access_token}});
+ if(answered.status!==200)throw new Error('serverinfo');
+ const info=await answered.json();
  const caches=info?.providers?.userSessions?.providers?.infinispan?.operationalInfo?.useCaches;
  const features=Array.isArray(info.features)?info.features:[];
  const persistent=features.find(f=>f&&f.name==='PERSISTENT_USER_SESSIONS');
@@ -1282,6 +1286,17 @@ class HostOps:
         item = self.inspect(role)
         return bool(item and item["State"]["Running"] and (item["State"].get("Health") or {}).get("Status") == "healthy")
 
+    def db_ready(self, seconds, message):
+        """The database's final server. On a fresh volume the image first runs a Unix-socket-only init server that the
+        Compose healthcheck (pg_isready over the socket) already reports healthy before it stops and restarts; only the
+        final server listens on TCP, so a restore never races that restart (ops_backup.rehearse waits the same way)."""
+        def ready():
+            if not self.healthy("db"):
+                return False
+            probe = self.cmd(["docker", "exec", self.names["db"], "pg_isready", "-h", "127.0.0.1", "-U", "kin"], timeout=20, check=False)
+            return probe.returncode == 0
+        self.wait(ready, seconds, message)
+
     def one_shot(self, intro, service, args, *, timeout, env=None, entrypoint=None, name, worker=True):
         """A named, labelled one-shot (never --rm before its exit is recorded). A worker (anything that writes) carries
         this release's label, so a later rollback can see whether it may still be alive; its client timeout is an
@@ -1446,8 +1461,11 @@ class HostOps:
         pre.check_baseline(observed, intro.plan)
         free = shutil.disk_usage(intro.plan["backup_root"] if Path(intro.plan["backup_root"]).exists() else Path(intro.plan["backup_root"]).parent).free
         require(free >= intro.plan["budget"]["min_free_bytes"], "Free disk space below the plan")
+        # L-08a reads the Keycloak server options with the target's administrator. Prove that credential now, read-only,
+        # so that a wrong administrator name or password stops here instead of after the first database change.
+        keycloak = self.keycloak_selected(intro)
         return {"head": observed["head"], "images": images, "migrations": len(observed["migrations"]), "cron": cron, "free_bytes": free,
-                "members": observed["members"]}
+                "members": observed["members"], "keycloak_admin": "verified", "keycloak_before": keycloak}
 
     def realm_members(self):
         """Realm kin's people by count only (read-only SQL on the Keycloak database): members as the product counts them
@@ -1623,7 +1641,7 @@ class HostOps:
         intro.state["db_recreated"] = True
         intro.save()
         self.compose(["up", "-d", "--no-deps", "--no-build", "--pull", "never", "--force-recreate", "db"], override=self.pins(intro), timeout=180)
-        self.wait(lambda: self.healthy("db"), 120, "Database did not become healthy")
+        self.db_ready(120, "Database did not become ready")
         db = self.inspect("db")
         mounts = {m.get("Destination"): m.get("Name") for m in db.get("Mounts") or []}
         require(mounts.get("/var/lib/postgresql/data") == self.t["volumes"]["pg"]
@@ -1790,7 +1808,7 @@ class HostOps:
         require(self.compose_digest_now() == intro.plan["compose"]["before_sha256"], "Previous configuration was not restored")
         if intro.state.pop("db_recreated", False):
             self.compose(["up", "-d", "--no-deps", "--no-build", "--pull", "never", "--force-recreate", "db"], override=self.pins(intro), timeout=180)
-            self.wait(lambda: self.healthy("db"), 120, "Database did not become healthy")
+            self.db_ready(120, "Database did not become ready")
             reverted.append("db")
         intro.save()
         catalog = ops.role_catalog(self.names["db"])
@@ -1974,7 +1992,7 @@ class HostOps:
         intro.state["recovery"]["override_sha256"] = intro.records.put("recovery-override.json", {"yaml": override})
         intro.save()
         self.compose(["up", "-d", "--no-deps", "--no-build", "--pull", "never", "--force-recreate", "db"], override=override, timeout=180)
-        self.wait(lambda: self.healthy("db"), 180, "Recovery database did not become healthy")
+        self.db_ready(180, "Recovery database did not become ready")
         db = self.inspect("db")
         require({m.get("Destination"): m.get("Name") for m in db.get("Mounts") or []}.get("/var/lib/postgresql/data") == recovery["pg"],
                 "Recovery database is not on its fresh volume")
@@ -2092,7 +2110,7 @@ class HostOps:
             _, manifest, _ = ops.validate_held(seed, intro.plan["seed"]["b0_manifest_sha256"])
         override = self.pins(intro)
         self.compose(["up", "-d", "--no-deps", "--no-build", "--pull", "never", "db"], override=override, timeout=180)
-        self.wait(lambda: self.healthy("db"), 180, "Clone database did not become healthy")
+        self.db_ready(180, "Clone database did not become ready")
         self.restore_dumps(seed)
         source_env, clone_env = parse_env((seed / ".env").read_bytes()), parse_env(self.env_file().read_bytes())
         isolation = self.keycloak_isolation(intro, source_env, clone_env, source_env.get("PUBLIC_ORIGIN", "https://pacs.koreaimagingnetwork.com"))
