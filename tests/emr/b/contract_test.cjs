@@ -1475,10 +1475,11 @@ function contractSuite() {
       assert.deepEqual(await flood(suspended, 20000, 12), {}, 'every refusal of one suspended member is recorded and completed');
       const floodSeconds = Number(process.hrtime.bigint() - started) / 1e9;
       const after = tick();
-      const bytes = kind => fs.statSync(path.join(spoolState, kind + '-failures/failure-journal.jsonl')).size;
-      const anonymousBytes = bytes('anonymous'), memberBytes = bytes('member');
-      assert(anonymousBytes <= AFS.AUTH_SPOOL_MAX_BYTES && memberBytes <= AFS.AUTH_SPOOL_MAX_BYTES);
       assert.equal(journal.all().length, 0, 'failed sign-ins consumed zero business recovery records');
+      const bytes = kind => fs.statSync(path.join(spoolState, kind + '-failures/failure-journal.jsonl'), { throwIfNoEntry: false })?.size ?? 0;
+      const anonymousBytes = bytes('anonymous'), memberBytes = bytes('member');
+      assert(anonymousBytes > 0 && memberBytes > 0, 'each kind of refusal was stored in its own spool');
+      assert(anonymousBytes <= AFS.AUTH_SPOOL_MAX_BYTES && memberBytes <= AFS.AUTH_SPOOL_MAX_BYTES);
       assert(after < Math.max(10, before * 5), 'idle tick cost stays flat after 40,000 failures');
       // B2R2-08: a spool write leaves the event loop free until it is durable - other work runs while its fsync is pending.
       let yielded = false;
