@@ -41,6 +41,8 @@ and the number of days the page script applies from it - from an explicit list, 
 S7-PINS fix1 (Astra S7-COMMAND-R-001-F09): the two fixed commits are read by tests/report_actions_dom_test.py
 fixed_file(). A clone without them fetches them from origin; if they still cannot be read, or are not the pinned bytes,
 the equivalence cases fail - they never skip.
+W2R-05: Folders adds a keyboard-reachable entry beside Filters while the panel starts closed.
+The historical regrouping pins stay fixed; current geometry and keyboard order include this new control.
 """
 from page_source import read_page_source
 import hashlib
@@ -102,7 +104,8 @@ GIVEN_IDS = {
 # no limit, All selected.
 DATE_FILTERS = [('Today', 0), ('3 Days', 3), ('Week', 7), ('1 Month', 30), ('2 Months', 60), ('All', -1)]
 DATE_FILTER_AT_OPEN = 'All'
-# The new containers; nothing else is new in the toolbar markup.
+# The original regrouping containers plus the explicitly requested W2 folder entry.
+FOLDER_ENTRY_IDS = ['worklist-folders-toggle']
 GROUP_IDS = ['toolbar-search', 'toolbar-filters', 'toolbar-refresh', 'toolbar-refresh-menu', 'toolbar-view',
              'toolbar-more', 'toolbar-status']
 # Where every base toolbar id now lives. Primary groups are always in view; menus are <details>.
@@ -135,15 +138,15 @@ BASE_STYLE_SHA256 = '00e22c847a1c7db387ad651bc8fb980046cb521e1054e9725104b14f721
 BASE_ELEMENTS_SHA256 = '530d61cc70107006d92628d98e7199a41471ab360dc046c90249059978e4aa99'
 
 # The direct children of the toolbar, in order: the seven groups in view. 'search-row' is worklist-search.js's row.
-TOP = ['toolbar-search', 'toolbar-filters', 'toolbar-refresh', 'toolbar-view', 'toolbar-more', 'toolbar-status',
+TOP = ['toolbar-search', 'worklist-folders-toggle', 'toolbar-filters', 'toolbar-refresh', 'toolbar-view', 'toolbar-more', 'toolbar-status',
        'search-row']
 # The row: one box per top-level group (the <details> groups draw only their summary).
 SEARCH_ROW = '.userfilter > span:has(> button[data-search-apply])'
-ROW = ['#toolbar-search', '#toolbar-filters > summary', '#refresh', '#toolbar-refresh-menu > summary',
+ROW = ['#toolbar-search', '#worklist-folders-toggle', '#toolbar-filters > summary', '#refresh', '#toolbar-refresh-menu > summary',
        '#toolbar-view > summary', '#toolbar-more > summary', '#toolbar-status', SEARCH_ROW]
 # Tab order through the closed toolbar, left to right. The status group is a focus stop of its own (fix1 F01): focus
 # there shows its texts in full. It is not a control, so the list of controls in view leaves it out.
-TAB_ORDER = ['quick', 'quick-match', 'clearfilter', 'toolbar-filters>summary', 'refresh', 'toolbar-refresh-menu>summary',
+TAB_ORDER = ['quick', 'quick-match', 'clearfilter', 'worklist-folders-toggle', 'toolbar-filters>summary', 'refresh', 'toolbar-refresh-menu>summary',
              'toolbar-view>summary', 'toolbar-more>summary', 'toolbar-status', '[data-search-mode]', '[data-search-apply]',
              '[data-search-clear]']
 CONTROLS_IN_VIEW = [key for key in TAB_ORDER if key != 'toolbar-status']
@@ -418,8 +421,8 @@ class WorklistToolbarStructureTest(unittest.TestCase):
                 self.assertEqual(1, self.text.count(f'id="{key}"'), key)
         toolbar = ids_in(self.parts['toolbar'])
         self.assertEqual(len(toolbar), len(set(toolbar)))
-        self.assertEqual(set(BASE_TOOLBAR_IDS) | set(GIVEN_IDS) | set(GROUP_IDS), set(toolbar))
-        for key in list(GIVEN_IDS) + GROUP_IDS:
+        self.assertEqual(set(BASE_TOOLBAR_IDS) | set(GIVEN_IDS) | set(GROUP_IDS) | set(FOLDER_ENTRY_IDS), set(toolbar))
+        for key in list(GIVEN_IDS) + GROUP_IDS + FOLDER_ENTRY_IDS:
             self.assertEqual(1, self.text.count(f'id="{key}"'), key)
         # The declared groups account for every base id exactly once.
         declared = [i for ids in list(PRIMARY.values()) + list(MENUS.values()) for i in ids]
@@ -532,7 +535,7 @@ class WorklistToolbarDOMTest(unittest.TestCase):
             top = page.evaluate("""()=>[...document.querySelector('.userfilter').children].map(e=>e.id||
               (e.querySelector(':scope > button[data-search-apply]')?'search-row':e.outerHTML.slice(0,60)))""")
             self.assertEqual(TOP, top)
-            self.assertLessEqual(len(top), MAX_PRIMARY)
+            self.assertLessEqual(len([key for key in top if key not in FOLDER_ENTRY_IDS]), MAX_PRIMARY)
             shown = page.evaluate("""()=>[...document.querySelectorAll('.userfilter :is(button,input,select,summary)')]
               .filter(e=>e.getClientRects().length).map(e=>e.id||(e.tagName==='SUMMARY'?e.parentElement.id+'>summary':
               ['data-search-mode','data-search-apply','data-search-clear'].map(a=>e.hasAttribute(a)?'['+a+']':'').join('')))""")

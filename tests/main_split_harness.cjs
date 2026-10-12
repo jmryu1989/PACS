@@ -17,7 +17,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { scripts, readPage, readPageSource } = require('./page_source.cjs');
 const { createHash } = require('node:crypto');
-const { baseline, chunks, statements, verify } = require('./main_move_contract.cjs');
+const { baseline, chunks, statements, verify, currentHomes } = require('./main_move_contract.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 const ts = require(require.resolve('typescript', { paths: [path.join(ROOT, 'api')] }));
@@ -68,8 +68,12 @@ function split(count, outDir, options = {}) {
 // Read delivered files again, independently of the generator. Actual layouts are never regenerated: a changed
 // or missing asset must remain visible to the browser and its hash oracle.
 function actual(page, options = {}) {
-  const spec = options.spec ? JSON.parse(fs.readFileSync(options.spec, 'utf8')) : require('./main_move_spec.json');
+  let spec = options.spec ? JSON.parse(fs.readFileSync(options.spec, 'utf8')) : require('./main_move_spec.json');
   const input = readPage(page), served = input.html, html = input.source;
+  if (input.bundle && !options.spec) {
+    const homes = currentHomes(page);
+    spec = { ...spec, modules: spec.modules.map(m => ({ ...m, statements: homes.filter(h => h.file === m.file).map(h => h.name) })) };
+  }
   const tag = scripts(html).find(t => !t.src), parts = chunks(html, spec);
   const count = input.bundle ? parts.length : input.files.length, rest = input.region.find(t => !t.src);
   // Line ranges of every statement in the served layout, from the same AST the contract uses. A range starts at
@@ -246,6 +250,12 @@ function fixtureBlocks(page, ranges) {
   const home = frozenIndexes(current, base);
   const result = {};
   for (const [key, [first, end]] of Object.entries(ranges)) {
+    if (end === undefined) {
+      const matches = current.filter(statement => statement.names.includes(first));
+      if (matches.length !== 1) throw new Error(`Fixture ${key}: expected one declaration ${first}`);
+      result[key] = matches[0].full;
+      continue;
+    }
     const lo = byName.get(first), hi = byName.get(end);
     if (lo === undefined || hi === undefined || lo >= hi) throw new Error(`Fixture ${key}: no run from ${first} to ${end}`);
     const picked = [];

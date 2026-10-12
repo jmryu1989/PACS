@@ -46,6 +46,12 @@ jobs:
         timeout-minutes: 5
         run: |
           python3 scripts/record-run.py --run-dir tmp/part1-xa-ci/venv --cwd . --tree tests/part1/xa --file worklist-v0/hpacs-lite/xa-playback-model.js --file worklist-v0/hpacs-lite/viewer-xa-playback.js --file .github/workflows/part1-xa.yml --file tests/e2e/requirements.txt -- python3 -m venv "$RUNNER_TEMP/part1-xa-python"
+      - name: Cache pinned Python downloads
+        if: ${{ !cancelled() }}
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt') }}
       - name: Install the versions used by the unit tests
         if: ${{ !cancelled() }}
         timeout-minutes: 15

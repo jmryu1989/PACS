@@ -97,9 +97,10 @@
     const folderDirty = () => folderBaseline && folderValue() !== folderBaseline;
     const copy = value => JSON.parse(JSON.stringify(value));
     const compound = KinCompoundFilter;
+    const editedModalities = new WeakSet();
     const operatorLabels = { contains: 'Contains', eq: 'Equals', notContains: 'Does Not Contain',
       neq: 'Does Not Equal', empty: 'Is Empty', notEmpty: 'Is Not Empty', gte: 'On or After',
-      lte: 'On or Before', between: 'Between (Inclusive)' };
+      lte: 'On or Before', between: 'Between (Inclusive)', withinLastDays: 'Within Last N Days' };
     const named = name => options.list().find(f => f.name === name);
     const status = (message, error = false) => {
       $('status').textContent = message;
@@ -109,7 +110,25 @@
     function value() {
       // Keep columns from the other worklist mode; changing tabs must not erase them.
       const cols = { ...source.cols };
-      dialog.querySelectorAll('[data-col]').forEach(input => { cols[input.dataset.col] = input.value; });
+      dialog.querySelectorAll('[data-col]').forEach(input => {
+        const key = input.dataset.col;
+        const original = source.cols?.[key];
+        // Opening and saving a legacy scalar must not reinterpret its Modality.
+        // Normalization belongs to new input, never to an untouched stored condition.
+        cols[key] = key === 'modality' && !editedModalities.has(input) && input.value === String(original ?? '') ? original ?? ''
+          : key === 'modality' && /[,\\]/.test(input.value)
+            ? [...new Set(input.value.split(/[,\\]/).map(v => v.trim().toUpperCase()))]
+            : key === 'modality' ? input.value.trim().toUpperCase() : input.value;
+        if (key === 'modality') {
+          const allowed = options.modalities?.() || options.columns[$('mode').value].find(c => c.k === key)?.f || [];
+          const tokens = Array.isArray(cols[key]) ? cols[key] : [cols[key]];
+          const error = (editedModalities.has(input) || input.value !== String(original ?? '')) && input.value.trim() !== ''
+            && tokens.some(v => !v || !allowed.includes(v))
+            ? '사용할 수 없는 Modality입니다. 빈 값 없이 목록의 Modality를 쉼표로 구분해 입력하세요.' : '';
+          input.setCustomValidity(error);
+          if (error) cols[key] = original ?? '';
+        }
+      });
       function readRules(container) { return [...container.children].map(row => {
         if (row.classList.contains('sfm-group')) return {
           join: row.querySelector(':scope > .sfm-group-join').value,
@@ -174,10 +193,11 @@
       const cols = options.columns[$('mode').value];
       $('cols').replaceChildren(...cols.filter(c => c.f).map(c => {
         const label = document.createElement('label'); label.textContent = c.t;
-        const input = document.createElement(c.f === 'text' ? 'input' : 'select');
+        const input = document.createElement(c.f === 'text' || c.k === 'modality' ? 'input' : 'select');
         input.dataset.col = c.k; input.id = 'sfm-col-' + c.k;
-        if (c.f !== 'text') choices(input, [['', 'All'], ...c.f.map(v => [v, v])], filter.cols?.[c.k] ?? '');
+        if (c.f !== 'text' && c.k !== 'modality') choices(input, [['', 'All'], ...c.f.map(v => [v, v])], filter.cols?.[c.k] ?? '');
         else input.value = filter.cols?.[c.k] ?? '';
+        if (c.k === 'modality') { input.placeholder = 'CT, MR'; input.title = '검사의 Modality 목록에 입력한 값 중 하나가 있으면 포함합니다. CT는 CT,SR 검사도 포함하며, CT, MR은 CT 또는 MR을 뜻합니다.'; }
         label.append(input); return label;
       }));
       const sort = cols.some(c => c.k === filter.sortKey) ? filter.sortKey : '';
@@ -196,14 +216,26 @@
       choices(fieldInput, fields.map(f => [f.k, f.k === 'date' && f.t === '검사일' ? 'Study Date' : f.t]), rule.field);
       const operator = make('Operator', document.createElement('select'), 'ruleOp');
       choices(operator, field ? compound.operators(field).map(([op, label]) => [op, field.type === 'tokens' ? label : operatorLabels[op] || op]) : [[rule.op, rule.op]], rule.op);
-      const input = make('Value', document.createElement(field?.type === 'select' ? 'select' : 'input'), 'ruleValue');
-      if (field?.type === 'select') choices(input, [['', 'Select Value'], ...field.values.map(v => [v, v])], rule.value ?? '');
-      else { input.type = field?.type === 'date' ? 'date' : 'text'; input.maxLength = 1000; input.value = rule.value ?? ''; }
+      const modalityEquals = field?.k === 'modality' && rule.op === 'eq';
+      const input = make('Value', document.createElement(field?.type === 'select' && !modalityEquals ? 'select' : 'input'), 'ruleValue');
+      if (field?.type === 'select' && !modalityEquals) choices(input, [['', 'Select Value'], ...field.values.map(v => [v, v])], rule.value ?? '');
+      else { input.type = field?.type === 'date' ? (rule.op === 'withinLastDays' ? 'number' : 'date') : 'text'; input.maxLength = 1000; input.value = rule.value ?? ''; }
+      if (modalityEquals) { input.placeholder = 'CT, MR'; input.title = '검사의 Modality 목록에 입력한 값 중 하나가 있으면 포함합니다. CT는 CT,SR 검사도 포함합니다.'; }
+      const preset = make('Date Range', document.createElement('select'), 'relativePreset');
+      choices(preset, [['0', 'Today'], ['1', 'Since Yesterday'], ['7', 'Last 7 Days'], ['30', 'Last 30 Days'], ['', 'Custom']],
+        ['0', '1', '7', '30'].includes(rule.value) ? rule.value : '');
+      preset.addEventListener('change', () => { if (preset.value !== '') input.value = preset.value; count(); });
+      input.addEventListener('input', () => { preset.value = ['0', '1', '7', '30'].includes(input.value) ? input.value : ''; });
       const end = make('End Date', document.createElement('input'), 'ruleValue2');
       end.type = 'date'; end.value = rule.value2 ?? '';
       const remove = document.createElement('button'); remove.type = 'button'; remove.dataset.ruleRemove = '';
       remove.textContent = 'Remove'; remove.setAttribute('aria-label', 'Remove Rule'); row.append(remove);
       const visibility = () => {
+        const relative = operator.value === 'withinLastDays';
+        if (field?.type === 'date') input.type = relative ? 'number' : 'date';
+        if (relative) { input.min = '0'; input.max = '365'; input.step = '1'; input.title = '오늘을 포함해 로컬 자정부터 계산합니다. 0은 오늘, 1은 어제부터입니다 (0~365).'; }
+        else { input.removeAttribute('min'); input.removeAttribute('max'); input.removeAttribute('step'); input.title = ''; }
+        preset.parentElement.hidden = !relative;
         input.parentElement.hidden = ['empty', 'notEmpty'].includes(operator.value);
         end.parentElement.hidden = operator.value !== 'between';
       };
@@ -252,13 +284,15 @@
       const row = nodeRow(kind === 'group' ? { join:'or', rules:[] } : { field:'id', op:'contains', value:'' }, depth);
       container.append(row); row.querySelector('select').focus(); count();
     }
-    function count() {
+    function count(commitModality = false) {
       const filter = value();
-      const error = compound.validate(filter.cols[compound.KEY], options.columns[filter.mode]);
+      const modalityError = dialog.querySelector('[data-col="modality"]')?.validationMessage;
+      const error = modalityError || compound.validate(filter.cols[compound.KEY], options.columns[filter.mode]);
       const note = error ? '' : options.countNote?.(filter) || '';
-      $('count').textContent = error ? '복합 조건 오류: ' + error
+      $('count').textContent = modalityError ? (commitModality ? 'Modality 오류: ' + modalityError : '')
+        : error ? '복합 조건 오류: ' + error
         : `편집 중 조건: 로드된 목록 기준 ${options.count(filter)}건 · 기본 조건 AND 복합 조건을 적용합니다.` + (note ? ' · ' + note : '');
-      $('count').classList.toggle('sfm-error', !!error);
+      $('count').classList.toggle('sfm-error', !!error && (!modalityError || commitModality));
       const parts = options.bodyParts;
       $('body-parts').hidden = !parts || !compound.usesField(filter.cols[compound.KEY], 'bodyPart', options.columns[filter.mode]);
       if (parts) {
@@ -564,6 +598,8 @@
     });
     $('preview').addEventListener('click', () => {
       if (busy || !editable) return;
+      count(true);
+      if (dialog.querySelector('[data-col="modality"]')?.validationMessage) return;
       if (organizerDirty() && !confirm('검색을 적용하고 닫으면 저장하지 않은 폴더 변경은 버립니다. 계속할까요?')) return;
       const next = value();
       const error = compound.validate(next.cols[compound.KEY], options.columns[next.mode]);
@@ -578,8 +614,11 @@
     $('clear-rules').addEventListener('click', () => { $('rules').replaceChildren(); count(); });
     $('mode').addEventListener('change', () => { source = value(); columns(source); rules(source); count(); });
     $('form').addEventListener('input', e => {
+      if (e.target.dataset.col === 'modality') editedModalities.add(e.target);
       if (!['sfm-name', 'sfm-folder', 'sfm-description', 'sfm-ordinal', 'sfm-default'].includes(e.target.id)) count();
     });
+    $('form').addEventListener('focusout', e => { if (e.target.dataset.col === 'modality') count(true); });
+    $('form').addEventListener('invalid', e => { if (e.target.dataset.col === 'modality') count(true); }, true);
     $('search').addEventListener('input', list);
     $('prev').addEventListener('click', () => moveSelection(-1));
     $('next').addEventListener('click', () => moveSelection(1));
@@ -618,6 +657,25 @@
     window.addEventListener('beforeunload', e => {
       if (dialog.open && (busy || dirty() || organizerDirty())) { e.preventDefault(); e.returnValue = ''; }
     });
+    function reset() {
+      // Recover Draft can retain this document after logout. Closing the dialog
+      // alone would leave this account's search and organizer drafts accessible.
+      operation?.abort(); operation = null; interruptedAction = null;
+      selected = null; source = {}; baseline = ''; opener = null; editable = false;
+      copying = false; visibleNames = []; missingName = null; cursor = null;
+      collection = null; folderBaseline = ''; collapsed.clear(); checked.clear();
+      sharing.reset();
+      dialog.querySelectorAll('input, textarea, select').forEach(control => {
+        control.value = '';
+        if (control.type === 'checkbox') control.checked = false;
+        control.setCustomValidity('');
+      });
+      for (const id of ['list', 'folders', 'cols', 'rules', 'days', 'sort']) $(id).replaceChildren();
+      lock(false);
+      for (const id of ['count', 'position', 'bulk-count', 'body-parts-status']) $(id).textContent = '';
+      status('');
+      if (dialog.open) dialog.close();
+    }
     work.onInvalidate(event=>{
       if(event.reason==='lifecycle'&&!['active','preparing'].includes(event.state)){operation?.abort();operation=null;if(dialog.open)dialog.close();}
       if(event.reason==='cancel'){
@@ -629,8 +687,8 @@
         },true);
       }
     });
-    return { refreshCounts() { if (dialog.open) count(); }, open({ name } = {}) {
-      if (dialog.open) return;
+    return { reset, refreshCounts() { if (dialog.open) count(); }, open({ name } = {}) {
+      if (dialog.open || !['active', 'preparing'].includes(work.state())) return;
       opener = document.activeElement; $('search').value = ''; status('');
       collection = null; checked.clear();
       sharing.reset();

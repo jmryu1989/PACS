@@ -247,7 +247,7 @@ S3_BYTE = [
     {"id":"S3-M02","expect":"Moved script load order differs"},
     {"id":"S3-M03","expect":"No dropped, duplicated, reordered or changed statement/trivia"},
     {"id":"S3-M04","expect":"Moved files must use ordinary blocking classic script tags"},
-    {"id":"S3-M05","expect":"C5 all 661 statements are reconstructed","oracle":"C5"},
+    {"id":"S3-M05","expect":"C5 all statements and outer markup are reconstructed","oracle":"C5"},
 ]
 S3_EXEC = [{"id":"S3-M06","case":"Registration.test_after_retry_one_quick_match_change_has_one_effect",
             "expect":"the listeners one Quick Match change reaches after Retry"}]
@@ -290,8 +290,10 @@ def source_hashes():
 
 def scratch_copy(scratch, mutant):
     """The mutated copy and how the DOM test runs with it: {script, page, assets, pythonpath}."""
+    historical_assets = os.environ.get('KIN_PRE_ASSETS')
+    dependency = pathlib.Path(historical_assets) / pathlib.Path(mutant['file']).name if historical_assets and mutant['file'].startswith('worklist-v0/') else ROOT / mutant['file']
     source = (subprocess.check_output(["node", str(ROOT / "tests/page_source.cjs"), "source", str(PAGE)], cwd=ROOT).decode("utf-8")
-              if mutant["file"] == PAGE_FILE else (ROOT / mutant["file"]).read_bytes().decode("utf-8"))
+              if mutant["file"] == PAGE_FILE else dependency.read_bytes().decode("utf-8"))
     newline = "\r\n" if "\r\n" in source else "\n"
     body = source.replace("\r\n", "\n")
     if body.count(mutant["old"]) != 1:
@@ -322,6 +324,8 @@ def scratch_copy(scratch, mutant):
         (folder / "main.html").write_bytes(mutated.encode("utf-8"))
         run["page"] = folder / "main.html"
     else:
+        if historical_assets:
+            shutil.copytree(historical_assets, folder, dirs_exist_ok=True)
         (folder / pathlib.Path(mutant["file"]).name).write_bytes(mutated.encode("utf-8"))
         run["assets"] = str(folder)
     return run
@@ -334,7 +338,7 @@ def node(*args):
 
 def run_cases(page, cases, timeout, boundary=(), spec=None, script=None, assets=None, pythonpath=None, evidence_id="BASELINE"):
     environment = dict(os.environ, KIN_PRE_PAGE=str(page), PYTHONIOENCODING="utf-8")
-    for key in ("KIN_PRE_SPEC", "KIN_PRE_TRACE_DIR", "KIN_PRE_BOUNDARY", "KIN_PRE_ASSETS"):
+    for key in ("KIN_PRE_SPEC", "KIN_PRE_TRACE_DIR", "KIN_PRE_BOUNDARY"):
         environment.pop(key, None)
     if boundary:
         environment["KIN_PRE_BOUNDARY"] = json.dumps(list(boundary))
@@ -354,6 +358,7 @@ def run_cases(page, cases, timeout, boundary=(), spec=None, script=None, assets=
     from page_source import moved_files
     for candidate in moved_files(pathlib.Path(page)):
         inputs[str(candidate)] = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    assets = environment.get("KIN_PRE_ASSETS")
     if assets:
         inputs.update({str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in pathlib.Path(assets).glob("*") if p.is_file()})
     done = subprocess.run(command, cwd=str(ROOT), env=environment, capture_output=True, text=True,
@@ -490,14 +495,15 @@ def main():
 
         if selected_byte:
             byte_baseline = node("split-mutant", PAGE, "BASELINE", scratch / "byte-baseline")
-            for mutant in [{"id": "BYTE-BASELINE"}, *selected_byte]:
-                target = byte_baseline["page"] if mutant["id"] == "BYTE-BASELINE" else byte_pages[mutant["id"]]["page"]
+            for mutant in [{"id": "BYTE-BASELINE", "oracle": "C1"}, {"id": "PROJECTION-BASELINE", "oracle": "C5"}, *selected_byte]:
+                is_baseline = mutant["id"].endswith("-BASELINE")
+                target = byte_baseline["page"] if is_baseline else byte_pages[mutant["id"]]["page"]
                 environment = dict(os.environ, KIN_SPLIT_BYTE_PAGE=target)
                 oracle=mutant.get("oracle","C1")
-                name="C5 complete source projection" if oracle=="C5" else "S1 candidate byte contract"
-                if oracle=="C5":
+                name="C5 complete source projection" if oracle=="C5" else "S1 historical byte contract"
+                if oracle=="C5" and not is_baseline:
                     environment["KIN_SPLIT_PROJECTION_HELPER"]=byte_pages[mutant["id"]]["helper"]
-                command = ["node", "--test", "--test-name-pattern="+name, str(ROOT / "tests/main_move_test.cjs")]
+                command = ["node", "--test", "--test-reporter=tap", "--test-name-pattern="+name, str(ROOT / "tests/main_move_test.cjs")]
                 done = subprocess.run(command, cwd=ROOT, env=environment, capture_output=True, text=True, encoding="utf-8", errors="replace")
                 output = done.stdout + done.stderr
                 evidence = pathlib.Path(os.environ["KIN_PRE_MUTANT_EVIDENCE"]) / mutant["id"]
@@ -505,11 +511,12 @@ def main():
                 (evidence / "stdout.log").write_text(done.stdout, encoding="utf-8")
                 (evidence / "stderr.log").write_text(done.stderr, encoding="utf-8")
                 hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in pathlib.Path(target).parent.iterdir() if p.is_file()}
-                if mutant["id"] == "BYTE-BASELINE":
-                    if done.returncode:
+                if is_baseline:
+                    if done.returncode or not re.search(r"^ok \d+ - " + re.escape(name) + r"$", output, re.MULTILINE):
                         raise AssertionError("byte baseline must pass before mutation results: " + output[-1500:])
                     continue
-                killed = done.returncode != 0 and mutant["expect"] in output and name in output
+                killed = (done.returncode != 0 and mutant["expect"] in output
+                          and bool(re.search(r"^not ok \d+ - " + re.escape(name) + r"$", output, re.MULTILINE)))
                 row = {"id": mutant["id"], "oracle": oracle, "child_exit": done.returncode, "killed": killed,
                        "expect_matched": mutant["expect"] if killed else "", "inputs": hashes}
                 results.append(row)

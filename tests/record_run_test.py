@@ -17,6 +17,27 @@ RECORDER = Path(__file__).resolve().parents[1] / "scripts" / "record-run.py"
 
 
 class RecordRunTest(unittest.TestCase):
+    def test_workflow_contract_inputs_capture_relocated_and_new_workflows(self):
+        # REQ-W2-LAND-CI -> RISK-UNRECORDED-WORKFLOW: both snapshots include
+        # the catalogue/helper; a workflow created by the child is visible after.
+        for name in ('tests/measurement_ci_test.py', 'tests/ci_workflows.py', 'scripts/record-run.py',
+                     '.github/workflows/relocated.yml'):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('fixture\n', encoding='utf-8')
+        child = "from pathlib import Path; Path('.github/workflows/added.yml').write_text('added')"
+        result = self.run_command([sys.executable, '-c', child], files=['tests/measurement_ci_test.py'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = self.record()
+        before = {row['requested']: row for row in record['files_before']}
+        after = {row['requested']: row for row in record['files_after']}
+        expected = {'tests/measurement_ci_test.py', 'tests/ci_workflows.py', 'scripts/record-run.py',
+                    '.github/workflows/relocated.yml'}
+        self.assertEqual(set(before), expected)
+        self.assertEqual(set(after), expected | {'.github/workflows/added.yml'})
+        self.assertTrue(all(row['status'] == 'present' and row['sha256'] for row in after.values()))
+        self.assertEqual(record['workflow_contract_inputs']['trees'], ['.github/workflows'])
+
     def test_workflow_consumer_hashes_all_workflows_before_and_after(self):
         for name in ('tests/candidate_ci_test.py', 'tests/ci_workflows.py', 'scripts/record-run.py',
                      '.github/workflows/relocated.yml'):
