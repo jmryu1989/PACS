@@ -61,6 +61,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import secrets as token_source
 import shutil
+import signal
 import socket
 import ssl
 import stat as stat_module
@@ -107,6 +108,15 @@ SMOKE_BY = "Opus executor (D1062)"
 # NOTFOUND), so the authorization code is read from the browser's own request and never reaches any server or log.
 SMOKE_REDIRECT_HOST = "kin-smoke-callback.invalid"
 PREVIOUS_SMOKE_CHECKS = ("login_pkce", "worklist_uid", "ohif_frame")
+# The headless browser's bounds: one login (D17: on its end the whole process tree goes), the pre-fence probe of L-01
+# (D01) and the single retry of an unattended release smoke before an automatic rollback (D07).
+BROWSER_TIMEOUT_S = 300
+BROWSER_PROBE_S = 60
+SMOKE_RETRY_S = 120
+# D04: the values of compose variables the .env lacks, resolved once from the running stack, kept for the plan's later
+# phases (a rollback whose source container is gone) in this private file of the run directory, never in a record.
+COMPOSE_VALUES = "compose-env-values.json"
+RECOVERY_PHASES = ("rollback", "rollback_reopen")
 # The Stage-5 configuration names a clone must replace before it starts (rehearsal.md §2). Values are compared in memory.
 CLONE_SECRETS = ("POSTGRES_PASSWORD", "KC_ADMIN_PASSWORD", "KC_CLIENT_SECRET", "KC_WEB_SECRET", "KIN_COOKIE_SECRET",
                  "ORTHANC_PASS", "KIN_EMR_RUNTIME_PASSWORD", "KIN_EMR_READER_PASSWORD", "KIN_EMR_RETENTION_PASSWORD")
@@ -384,9 +394,9 @@ def target_valid(target):
     used = []
     for entry in reconcile:
         _keys(entry, ("path", "expected_sha256_before", "override_file", "override_sha256"), "overlay reconciliation")
-        require(type(entry["path"]) is str and COMPOSE_NAME.fullmatch(entry["path"]) and entry["path"] in files
+        require(type(entry["path"]) is str and entry["path"] == "docker-compose.prod.yml" and entry["path"] in files
                 and entry["override_file"] in overlays and files.index(entry["override_file"]) > files.index(entry["path"]),
-                "A declared overlay must follow the tracked compose file it reconciles")
+                "A declared overlay must follow the tracked compose file it reconciles (docker-compose.prod.yml)")
         _str(entry["expected_sha256_before"], HASH, "modified file hash")
         require(entry["override_sha256"] == overlays[entry["override_file"]]["sha256"], "Overlay hash differs from its declaration")
         used.append(entry["override_file"])
@@ -399,6 +409,19 @@ def target_valid(target):
     # its binds, so every declared overlay comes after every other override file.
     others = [index for index, item in enumerate(files) if item not in overlays and not COMPOSE_NAME.fullmatch(item)]
     require(all(files.index(item) > max(others, default=-1) for item in overlays), "A declared overlay must come after the rehearsal override")
+    if overlays:
+        # D09: the overlays reproduce production's change of docker-compose.prod.yml, and Compose renders that change
+        # byte-identically only when they are merged right where the file is (an overlay after the monitor file renders
+        # another order of the proxy's mounts; the reconcile would refuse at L-00b). Production: docker-compose.prod.yml,
+        # then the overlays. A rehearsal: docker-compose.prod.yml, its rehearsal override, then the overlays.
+        require("docker-compose.prod.yml" in files, "A declared overlay needs docker-compose.prod.yml in the list")
+        start = files.index("docker-compose.prod.yml") + 1
+        if target["kind"] == "rehearsal":
+            require(start < len(files) and files[start] not in overlays and not COMPOSE_NAME.fullmatch(files[start]),
+                    "A declared overlay must come right after the rehearsal override that follows docker-compose.prod.yml")
+            start += 1
+        require(set(files[start:start + len(overlays)]) == set(overlays),
+                "A declared overlay must come right after docker-compose.prod.yml (a rehearsal: after the rehearsal override that follows it)")
     require(type(target["fix_checkout_mode"]) is bool, "Invalid checkout mode flag")
     containers = _keys(target["containers"], (*ROLES, *ONE_SHOTS), "containers")
     volumes = _keys(target["volumes"], VOLUMES, "volumes")
@@ -621,10 +644,12 @@ def receipt_valid(receipt, plan, b0_manifest_sha256, production, *, now=None, b0
     require(receipt["host_key_sha256"] != production["host_key_sha256"], "Receipt was produced on the production host")
     require(receipt["host_key_sha256"] == plan["rehearsal_host"], "Receipt comes from a host the plan does not allow")
     created, now = parse_utc(receipt["created_utc"]), now or utc_now()
+    # D12: created_utc is the rehearsal host's clock, now and the B0 time are production's; up to CLOCK_SKEW of difference
+    # between the two clocks is tolerated in both directions (receipt_clock records what was observed).
     require(created <= now + CLOCK_SKEW, "Receipt is dated in the future")
     require(now - created <= RECEIPT_MAX_AGE, "Receipt is stale")
     if b0_created_utc is not None:
-        require(created >= parse_utc(b0_created_utc), "Receipt predates the B0 snapshot it rehearsed")
+        require(created >= parse_utc(b0_created_utc) - CLOCK_SKEW, "Receipt predates the B0 snapshot it rehearsed")
     phases = receipt["phases"]
     require(type(phases) is dict and set(phases) == set(RECEIPT_PHASES), "Receipt phases incomplete")
     requests = []
@@ -658,6 +683,16 @@ def receipt_valid(receipt, plan, b0_manifest_sha256, production, *, now=None, b0
         "frame_bytes": frame["bytes"]}, "Receipt previous-version smoke differs from this plan's frame")
     require(receipt_sha256(receipt) not in set(used), "Receipt was already used")
     return receipt
+
+
+def receipt_clock(receipt, now, b0_created_utc=None):
+    """The clock facts of an accepted receipt (D12): how far its creation lies ahead of production's clock (0 when it is
+    not ahead) and how long after the B0 it rehearsed it was made (negative within the tolerated skew), in seconds."""
+    created = parse_utc(receipt["created_utc"])
+    facts = {"tolerance_s": int(CLOCK_SKEW.total_seconds()), "ahead_of_production_s": round(max(0.0, (created - now).total_seconds()), 3)}
+    if b0_created_utc is not None:
+        facts["after_b0_s"] = round((created - parse_utc(b0_created_utc)).total_seconds(), 3)
+    return facts
 
 
 def bundle_valid(receipt, directory):
@@ -1082,13 +1117,17 @@ class Introduction:
     order, the durable state, the lock, budgets, windows, the automatic-rollback decision and the records."""
 
     def __init__(self, *, plan, plan_sha256, target, production, ops, records, repository, host_key, tool, evidence=None,
-                 clock=time.monotonic, now=utc_now):
+                 clock=time.monotonic, now=utc_now, warnings=()):
         self.plan, self.plan_sha256, self.target, self.production = plan, plan_sha256, target, production
         self.ops, self.records, self.repository = ops, records, Path(repository)
         self.host_key, self.tool, self.evidence = host_key, tool, evidence or {}
         self.clock, self.now = clock, now
         self.state = None
         self.steps = []
+        # D05/D06: what a recovery phase went on despite (a reopened checkout mode found by the entry, an overlay file
+        # that changed or vanished): recorded in the phase-start event, the result file and the result.
+        self.warnings = list(warnings)
+        self.receipt_facts = None
 
     # ── bookkeeping ──
     def save(self):
@@ -1170,18 +1209,30 @@ class Introduction:
                "lock_retained": bool(self.state["lock_token"]) and lock_owned(self.repository, self.state["lock_token"]),
                "db_changed": self.state["db_changed"], "ponr": self.state["ponr"], "steps": steps,
                "compose_env_resolved": sorted(self.state.get("compose_env") or {})}
+        if self.warnings:
+            out["warnings"] = list(self.warnings)
         if extra:
             out.update(extra)
         return out
+
+    def warn(self, kind, **facts):
+        """A recovery phase goes on despite this fact (D05/D06): recorded now and in the phase's result."""
+        warning = {"kind": kind, **facts}
+        self.warnings.append(warning)
+        self.event("recovery-warning", **warning)
 
     def finish(self, status, passed, release=False, extra=None):
         self.state["status"] = status
         if release and self.state["lock_token"]:
             release_lock(self.repository, self.state["lock_token"])
             self.state["lock_token"] = None
-        digest = self.records.put("result-" + self.phase + "-" + self.request_sha256[:16] + ".json",
-                                  {"steps": self.steps, "status": status, "phase": self.phase, "request_sha256": self.request_sha256,
-                                   "commands_file": self.records.commands_file})
+            # D04: the plan ended; the resolved compose values it kept for its later phases are not kept beyond it.
+            self.records.discard(self.records.directory / COMPOSE_VALUES)
+        written = {"steps": self.steps, "status": status, "phase": self.phase, "request_sha256": self.request_sha256,
+                   "commands_file": self.records.commands_file}
+        if self.warnings:
+            written["warnings"] = list(self.warnings)
+        digest = self.records.put("result-" + self.phase + "-" + self.request_sha256[:16] + ".json", written)
         self.state["history"].append({"phase": self.phase, "status": "PASS" if passed else status,
                                       "request_sha256": self.request_sha256, "seconds": round(self.clock() - self.started, 3),
                                       "result_sha256": digest, "steps": [[step["step"], step["outcome"]] for step in self.steps]})
@@ -1203,7 +1254,7 @@ class Introduction:
 
     def run_exclusive(self):
         self.started = self.clock()
-        self.recovering = self.phase in ("rollback", "rollback_reopen")
+        self.recovering = self.phase in RECOVERY_PHASES
         self.state = self.records.state() or new_state(self.plan_sha256, self.plan)
         require(self.state["plan_sha256"] == self.plan_sha256 and self.state["mode"] == MODE, "State belongs to another plan")
         if self.state.get("running"):
@@ -1240,7 +1291,8 @@ class Introduction:
             # The local-restore receipt is spent by this attempt, whatever its outcome (one production attempt, once).
             self.state["receipts_used"].append(claimed)
         self.save()
-        self.event("phase-start", **({"receipt_sha256": claimed} if claimed else {}))
+        self.event("phase-start", **({"receipt_sha256": claimed, "receipt_clock": self.receipt_facts} if claimed else {}),
+                   **({"warnings": list(self.warnings)} if self.warnings else {}))
         if self.phase in ("capture", "seed"):
             # A new exclusive lock; a competing backup, rehearsal or API-only deployment cannot hold it meanwhile.
             try:
@@ -1274,8 +1326,10 @@ class Introduction:
             require(self.state["b0"] is not None, "No B0 snapshot")
             require(type(self.evidence.get("local-restore")) is dict, "Local-restore receipt required")
             receipt = self.evidence["local-restore"]
-            receipt_valid(receipt, self.plan, self.state["b0"]["manifest_sha256"], self.production, now=self.now(),
+            now = self.now()
+            receipt_valid(receipt, self.plan, self.state["b0"]["manifest_sha256"], self.production, now=now,
                           b0_created_utc=self.state["b0"].get("created_utc"), used=self.state["receipts_used"])
+            self.receipt_facts = receipt_clock(receipt, now, self.state["b0"].get("created_utc"))
             return receipt_sha256(receipt)
         if self.phase == "reopen":
             if getattr(self.ops, "unattended", False):
@@ -1594,9 +1648,12 @@ const base=(process.env.KC_ADMIN_URL||'').replace(/\/$/,'');
 const [operation, raw]=process.argv.slice(1); const input=JSON.parse(raw);
 const out=v=>process.stdout.write('KIN_RESULT '+JSON.stringify(v)+'\n');
 (async()=>{const form=new URLSearchParams({grant_type:'password',client_id:'admin-cli',username:process.env.KIN_KC_ADMIN_USER,password:process.env.KIN_KC_ADMIN_PASSWORD});
- // Keycloak may still be starting (writers resumed a moment ago, or a restore): wait for its answer, at most two minutes.
- let granted=null;for(let i=0;i<60;i++){try{granted=await fetch(base+'/realms/master/protocol/openid-connect/token',{method:'POST',body:form});
-  if(granted.status<500)break;}catch(e){granted=null;}await new Promise(r=>setTimeout(r,2000));}
+ // Keycloak may still be starting (writers resumed a moment ago, or a restore): ready means the realm kin answers 200 -
+ // a 404 while it loads its realms is not ready (D18) - then the administrator's token; at most two minutes each.
+ const until=async probe=>{for(let i=0;i<60;i++){try{const v=await probe();if(v)return v;}catch(e){}await new Promise(r=>setTimeout(r,2000));}return null;};
+ if(!await until(async()=>(await fetch(base+'/realms/kin')).status===200))throw new Error('keycloak not ready');
+ const granted=await until(async()=>{const r=await fetch(base+'/realms/master/protocol/openid-connect/token',{method:'POST',body:form});
+  return r.status<500&&r.status!==404?r:null;});
  if(!granted)throw new Error('keycloak unreachable');
  if(granted.status!==200)throw new Error('admin');
  const token=(await granted.json()).access_token;
@@ -1604,7 +1661,9 @@ const out=v=>process.stdout.write('KIN_RESULT '+JSON.stringify(v)+'\n');
    body:body===undefined?undefined:JSON.stringify(body)});if(r.status===404)return null;if(r.status>=300)throw new Error(method+' '+r.status);
    const text=await r.text();return text?JSON.parse(text):null;};
  const users=async()=>((await call('GET','/users?exact=true&username='+encodeURIComponent(input.username)))||[]).filter(u=>u.username===input.username);
- const clients=async()=>input.client_id?((await call('GET','/clients?clientId='+encodeURIComponent(input.client_id)))||[]):[];
+ // One login client per attempt (a retry makes its own): the removal names every one of them.
+ const ids=input.client_ids||(input.client_id?[input.client_id]:[]);
+ const clients=async()=>{const out=[];for(const id of ids){out.push(...(((await call('GET','/clients?clientId='+encodeURIComponent(id)))||[]).filter(c=>c.clientId===id)));}return out;};
  if(operation==='create-member'){
   if((await users()).length)throw new Error('exists');
   await call('POST','/users',{username:input.username,email:input.username+'@kin-smoke.invalid',enabled:true,emailVerified:true,
@@ -1638,20 +1697,36 @@ REALM_DEFINITIONS_SQL = """SELECT json_build_object(
   'roles', (SELECT coalesce(json_agg(k.name ORDER BY k.name), '[]'::json) FROM keycloak_role k WHERE k.realm_id = r.id AND NOT k.client_role),
   'groups', (SELECT coalesce(json_agg(g.name ORDER BY g.name), '[]'::json) FROM keycloak_group g WHERE g.realm_id = r.id))
   FROM realm r WHERE r.name = 'kin'"""
+# D02: what the smoke member's creation needs from the realm, read before the fence: its realm roles and the top-level
+# groups (the administration script finds the member's group among the top-level groups; Keycloak marks one by an
+# empty or blank parent).
+SMOKE_REALM_SQL = """SELECT json_build_object(
+  'roles', (SELECT coalesce(json_agg(k.name ORDER BY k.name), '[]'::json) FROM keycloak_role k WHERE k.realm_id = r.id AND NOT k.client_role),
+  'top_level_groups', (SELECT coalesce(json_agg(g.name ORDER BY g.name), '[]'::json) FROM keycloak_group g
+    WHERE g.realm_id = r.id AND (g.parent_group IS NULL OR btrim(g.parent_group) = '')))
+  FROM realm r WHERE r.name = 'kin'"""
 SERVERINFO_SCRIPT = r"""
 const base=(process.env.KC_ADMIN_URL||'').replace(/\/$/,'');
 (async()=>{const form=new URLSearchParams({grant_type:'password',client_id:'admin-cli',username:process.env.KIN_KC_ADMIN_USER,password:process.env.KIN_KC_ADMIN_PASSWORD});
- const granted=await fetch(base+'/realms/master/protocol/openid-connect/token',{method:'POST',body:form});
+ // Its own readiness (D19): the master realm answers 200 (a 404 while Keycloak loads is not ready), then the token, then
+ // serverinfo answers 200; a refused administrator stops at once; at most two minutes each.
+ const until=async probe=>{for(let i=0;i<60;i++){try{const v=await probe();if(v)return v;}catch(e){if(e&&e.refused)throw e;}
+  await new Promise(r=>setTimeout(r,2000));}return null;};
+ if(!await until(async()=>(await fetch(base+'/realms/master')).status===200))throw new Error('keycloak not ready');
+ const granted=await until(async()=>{const r=await fetch(base+'/realms/master/protocol/openid-connect/token',{method:'POST',body:form});
+  return r.status<500&&r.status!==404?r:null;});
+ if(!granted)throw new Error('keycloak unreachable');
  if(granted.status!==200)throw new Error('admin');
  const t=await granted.json();
- const answered=await fetch(base+'/admin/serverinfo',{headers:{Authorization:'Bearer '+t.access_token}});
- if(answered.status!==200)throw new Error('serverinfo');
+ const answered=await until(async()=>{const r=await fetch(base+'/admin/serverinfo',{headers:{Authorization:'Bearer '+t.access_token}});
+  if(r.status===401||r.status===403)throw Object.assign(new Error('serverinfo'),{refused:true});return r.status===200?r:null;});
+ if(!answered)throw new Error('serverinfo');
  const info=await answered.json();
  const caches=info?.providers?.userSessions?.providers?.infinispan?.operationalInfo?.useCaches;
  const features=Array.isArray(info.features)?info.features:[];
  const persistent=features.find(f=>f&&f.name==='PERSISTENT_USER_SESSIONS');
  process.stdout.write('KIN_RESULT '+JSON.stringify({useCaches:caches===undefined?null:String(caches),persistentUserSessions:persistent?persistent.enabled===true:null})+'\n');
-})().catch(()=>{process.exitCode=1;});
+})().catch(e=>{process.stderr.write(String((e&&e.message)||e).slice(0,80)+'\n');process.exitCode=1;});
 """
 STATE_VOLUME_SCRIPT = r"""
 const fs=require('fs'),p='/var/lib/kin-emr',s=fs.statSync(p);let writable=false;
@@ -1707,6 +1782,109 @@ def result_line(raw):
     lines = [line for line in raw.decode("utf-8", errors="replace").splitlines() if line.startswith("KIN_RESULT ")]
     require(len(lines) == 1, "Helper produced no single result")
     return json.loads(lines[0][len("KIN_RESULT "):])
+
+
+class _ProcessTree:
+    """D17: the process group (POSIX) or job object (Windows) of one command, so that every process it started - a
+    browser's renderer, GPU and zygote children included - ends with it. On Windows the job kills what is left when it
+    closes; the command starts suspended and resumes only once it is in the job, so no child can escape it."""
+
+    def __init__(self, argv):
+        self.job = None
+        if os.name == "posix":
+            self.process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                            start_new_session=True)
+            return
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        class Basic(ctypes.Structure):
+            _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                        ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                        ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                        ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD), ("SchedulingClass", wintypes.DWORD)]
+
+        class Extended(ctypes.Structure):
+            _fields_ = [("BasicLimitInformation", Basic), ("IoInfo", ctypes.c_uint64 * 6), ("ProcessMemoryLimit", ctypes.c_size_t),
+                        ("JobMemoryLimit", ctypes.c_size_t), ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p)
+        kernel32.SetInformationJobObject.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD)
+        kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+        kernel32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        self.kernel32 = kernel32
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            raise OSError("job object")
+        limits = Extended()
+        limits.BasicLimitInformation.LimitFlags = 0x2000   # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+            kernel32.CloseHandle(job)
+            raise OSError("job object limits")
+        self.job = job
+        self.process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        creationflags=0x00000004)   # CREATE_SUSPENDED
+        ntdll = ctypes.WinDLL("ntdll")
+        ntdll.NtResumeProcess.argtypes = (wintypes.HANDLE,)
+        if not kernel32.AssignProcessToJobObject(job, int(self.process._handle)) or ntdll.NtResumeProcess(int(self.process._handle)) != 0:
+            self.kill()
+            raise OSError("job assignment")
+
+    def kill(self):
+        """Every process of the tree ends (a no-op when none is left)."""
+        if os.name == "posix":
+            try:
+                os.killpg(self.process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        elif self.job:
+            self.kernel32.TerminateJobObject(self.job, 1)
+            self.kernel32.CloseHandle(self.job)
+            self.job = None
+        if self.process.poll() is None:
+            try:
+                self.process.kill()
+            except OSError:
+                pass
+
+
+def run_tree(argv, *, input, timeout):
+    """Run a command with its input; on its timeout - and after it ended, for whatever it left running - kill its whole
+    process tree (D17). Returns (exit code, stdout, stderr) or raises subprocess.TimeoutExpired once the tree is gone."""
+    tree = _ProcessTree(argv)
+    try:
+        try:
+            stdout, stderr = tree.process.communicate(input, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            tree.kill()
+            try:
+                tree.process.communicate(timeout=30)
+            except (subprocess.TimeoutExpired, ValueError, OSError):
+                pass
+            raise subprocess.TimeoutExpired(argv, timeout) from None
+        return tree.process.returncode, stdout, stderr
+    finally:
+        tree.kill()
+        for stream in (tree.process.stdout, tree.process.stderr, tree.process.stdin):
+            try:
+                if stream:
+                    stream.close()
+            except OSError:
+                pass
+
+
+def remove_profile(path, seconds=15):
+    """A browser profile folder (a member's session cookies) goes once its browser has ended; on Windows a killed
+    browser's files may stay locked for a moment, so the removal is retried for a bounded time."""
+    deadline = time.monotonic() + seconds
+    while True:
+        shutil.rmtree(path, ignore_errors=True)
+        if not Path(path).exists() or time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
+    require(not Path(path).exists(), "The browser profile could not be removed")
 
 
 class Runner:
@@ -1803,8 +1981,12 @@ class HostOps:
         self.browser_cmd = list(browser_cmd) if browser_cmd else None
         # IRT-13: the protected-path check of the checkout itself (the host's; none outside a protected install).
         self.repository_check = repository_check or (lambda: None)
-        # IRT-12: compose variables the .env lacks, resolved from the running stack (values in memory only).
+        # IRT-12: compose variables the .env lacks, resolved from the running stack (in memory; D04: also kept in the run
+        # directory's private values file for the plan's later phases).
         self.compose_env = {}
+        # D05: a recovery phase whose declared overlay file changed or vanished uses the bytes pinned at the plan's first
+        # phase instead ({declared file: pinned copy}); every compose command and digest then reads the copy.
+        self.overlay_paths = {}
 
     @property
     def unattended(self):
@@ -1866,7 +2048,7 @@ class HostOps:
     def compose_files(self):
         out = []
         for item in self.t["compose_files"]:
-            out += ["-f", item if PurePosixPath(item).is_absolute() or PureWindowsPath(item).is_absolute() else str(self.repo / item)]
+            out += ["-f", str(self.compose_path(item))]
         return out
 
     def compose(self, args, *, override=None, timeout=180, env=None, mutating=True, check=True, project=None, files=None):
@@ -2060,10 +2242,7 @@ class HostOps:
         return out
 
     def compose_digest_now(self):
-        entries = []
-        for item in self.t["compose_files"]:
-            path = Path(item) if PurePosixPath(item).is_absolute() or PureWindowsPath(item).is_absolute() else self.repo / item
-            entries.append((item, path.read_bytes()))
+        entries = [(item, self.compose_path(item).read_bytes()) for item in self.t["compose_files"]]
         entries.append((".env", self.env_file().read_bytes()))
         return compose_digest(entries)
 
@@ -2125,13 +2304,31 @@ class HostOps:
 
     # ── IRT-12: the compose environment as the running stack resolved it ──
     def compose_path(self, item):
+        if item in self.overlay_paths:
+            return Path(self.overlay_paths[item])
         return Path(item) if PurePosixPath(item).is_absolute() or PureWindowsPath(item).is_absolute() else self.repo / item
 
-    def declared_overlay_facts(self):
+    def pinned_overlay(self, intro, entry):
+        """The overlay bytes this plan pinned (D05) as a private copy in its run directory, verified against the declared
+        hash; None when nothing was pinned or the copy differs."""
+        pin = ((intro.state.get("overlay_pins") or {}) if intro is not None else {}).get(entry["file"])
+        if not pin:
+            return None
+        path = intro.records.directory / pin["copy"]
+        try:
+            raw = intro.records.read(path)
+        except (OSError, RuntimeError):
+            return None
+        return path if sha256_bytes(raw) == entry["sha256"] == pin["sha256"] else None
+
+    def declared_overlay_facts(self, intro=None):
         """IRT-11, before any phase step: each declared overlay is exactly the declared bytes in a file (no link) that only
         its owner (root or this tool's user) can change, in a folder only that owner can change; each bind source it brings
         exists (Compose would otherwise create an empty folder in its place). Recorded: path, mode, owner and sha256 of the
-        overlay and of each bind source file (a folder: mode and owner)."""
+        overlay and of each bind source file (a folder: mode and owner).
+        D05: the plan's first phase pins the verified bytes (a private copy in its run directory). A recovery phase
+        (rollback, rollback_reopen, or the revert/rollback after a settled failure) whose overlay file changed, vanished or
+        lost its protection goes on with those pinned bytes and records a warning; every other phase refuses."""
         def protection(path, what):
             if os.name != "posix":
                 return None, None
@@ -2139,12 +2336,32 @@ class HostOps:
             require(info.st_uid in (0, os.geteuid()) and not info.st_mode & 0o022, what + " is writable by others: " + str(path))
             return oct(info.st_mode & 0o7777), info.st_uid
         facts = []
+        recovering = bool(getattr(intro, "recovering", False))
+        self.overlay_paths = {}
         for entry in self.t["declared_overlays"]:
             path = Path(entry["file"])
-            require(path.is_file() and not path.is_symlink(), "A declared overlay is missing: " + entry["file"])
-            require(sha256_bytes(path.read_bytes()) == entry["sha256"], "A declared overlay differs from the manifest: " + entry["file"])
-            mode, owner = protection(path, "A declared overlay")
-            protection(path.parent, "A declared overlay's folder")
+            used = "declared file"
+            try:
+                require(path.is_file() and not path.is_symlink(), "A declared overlay is missing: " + entry["file"])
+                raw = path.read_bytes()
+                require(sha256_bytes(raw) == entry["sha256"], "A declared overlay differs from the manifest: " + entry["file"])
+                mode, owner = protection(path, "A declared overlay")
+                protection(path.parent, "A declared overlay's folder")
+            except (Stop, OSError) as error:
+                pinned = self.pinned_overlay(intro, entry) if recovering else None
+                if pinned is None:
+                    raise Stop(code_of(error) if isinstance(error, Stop) else "A declared overlay is unreadable: " + entry["file"]) from None
+                self.overlay_paths[entry["file"]] = str(pinned)
+                intro.warn("declared-overlay", file=entry["file"], reason=code_of(error) if isinstance(error, Stop) else type(error).__name__,
+                           used="the bytes pinned at the plan's first phase", sha256=entry["sha256"])
+                mode = owner = None
+                used = "pinned copy"
+            else:
+                if intro is not None and entry["file"] not in (intro.state.get("overlay_pins") or {}):
+                    copy = "overlay-" + entry["sha256"][:16] + ".yml"
+                    intro.records.write(intro.records.directory / copy, raw)
+                    intro.state.setdefault("overlay_pins", {})[entry["file"]] = {"sha256": entry["sha256"], "copy": copy}
+                    intro.save()
             binds = []
             for bind in entry["binds"]:
                 source = Path(bind["source"])
@@ -2156,19 +2373,43 @@ class HostOps:
                               "sha256": sha256_bytes(source.read_bytes()) if source.is_file() else None,
                               "kind": "file" if source.is_file() else "directory"})
             facts.append({"file": entry["file"], "sha256": entry["sha256"], "mode": mode, "owner": owner, "service": entry["service"],
-                          "binds": binds})
+                          "binds": binds, "used": used})
         return facts
+
+    def kept_compose_values(self, intro):
+        """D04: the values this plan resolved earlier, from its private values file, each still the value whose hash the
+        state recorded (a changed file is a refusal, never a value)."""
+        path = intro.records.directory / COMPOSE_VALUES
+        if not path.exists():
+            return {}
+        values = decode(intro.records.read(path))
+        known = intro.state.get("compose_env") or {}
+        require(type(values) is dict and all(type(value) is str and name in known
+                                             and sha256_bytes(value.encode("utf-8")) == known[name]["sha256"]
+                                             for name, value in values.items()), "A kept compose value differs from its recorded hash")
+        return values
 
     def prepare(self, intro):
         """Before any phase step: every variable the compose files require that the checkout's .env lacks is resolved from
         the running (or stopped) containers - the value a service's environment or bind mount actually carries - by
         rendering the model once with a unique marker per variable and reading the container at exactly the place the
-        marker landed. Values stay in memory; the state keeps each name with the hash of its value and where it came from,
-        and a later phase must resolve the same. A required variable that no container carries is a refusal."""
-        overlays = self.declared_overlay_facts()
-        texts = [self.compose_path(item).read_bytes() for item in self.t["compose_files"]]
+        marker landed. The state keeps each name with the hash of its value and where it came from, and a later phase must
+        resolve the same. D04: the value itself is kept in the run directory's private values file (root, 0600; never in a
+        journal, result or command record), so a later phase whose source container no longer exists (a rollback after
+        L-09b removed the proxy) uses the value resolved before; a container that exists must still carry that value. A
+        required variable that neither a container nor the kept values hold is a refusal. D28: before the seed no clone
+        stack runs, so the clone's .env must carry every required variable; the refusal names each one and its files."""
+        overlays = self.declared_overlay_facts(intro)
+        files = list(self.t["compose_files"])
+        texts = [self.compose_path(item).read_bytes() for item in files]
         present = set(parse_env(self.env_file().read_bytes()))
         needed = sorted(name for name, required in referenced_variables(texts).items() if required and name not in present)
+        if needed and getattr(intro, "phase", None) == "seed":
+            requiring = {name: [Path(item).name for item, text in zip(files, texts) if referenced_variables([text]).get(name)]
+                         for name in needed}
+            raise Stop("The clone's .env must set " + "; ".join(name + " (required by " + ", ".join(requiring[name]) + ")" for name in needed)
+                       + " before the seed: no clone stack runs yet to resolve it from")
+        kept = self.kept_compose_values(intro) if needed else {}
         resolved, record = {}, {}
         if needed:
             markers = {name: "kin-resolve-" + uuid.uuid4().hex for name in needed}
@@ -2188,10 +2429,12 @@ class HostOps:
                             require(mount.get("source") == marker and service in ROLES, "Unresolvable compose variable: " + name)
                             places.append(("mount", service, mount.get("target")))
                 require(places and raw.count(marker) == len(places), "Unresolvable compose variable: " + name)
-                values = set()
+                values, carriers = set(), set()
                 for kind, service, key in places:
                     item = self.inspect(service)
-                    require(item is not None, "Unresolvable compose variable: " + name)
+                    if item is None:
+                        # The container is gone (D04): the value resolved before, if any, stands in for it.
+                        continue
                     if kind == "environment":
                         env = dict(entry.split("=", 1) for entry in (item.get("Config") or {}).get("Env") or [] if "=" in entry)
                         require(key in env, "Unresolvable compose variable: " + name)
@@ -2200,13 +2443,23 @@ class HostOps:
                         sources = [m.get("Source") for m in item.get("Mounts") or [] if m.get("Destination") == key]
                         require(len(sources) == 1 and sources[0], "Unresolvable compose variable: " + name)
                         values.add(sources[0])
-                require(len(values) == 1, "Unresolvable compose variable: " + name)
-                resolved[name] = values.pop()
-                record[name] = {"sha256": sha256_bytes(resolved[name].encode("utf-8")), "from": sorted({kind + ":" + service for kind, service, _ in places})}
+                    carriers.add(kind + ":" + service)
+                require(len(values) <= 1, "Unresolvable compose variable: " + name)
+                if values:
+                    resolved[name] = values.pop()
+                    origin = sorted(carriers)
+                else:
+                    require(name in kept, "Unresolvable compose variable: " + name)
+                    resolved[name] = kept[name]
+                    origin = ["kept"]
+                record[name] = {"sha256": sha256_bytes(resolved[name].encode("utf-8")), "from": origin}
         known = intro.state.setdefault("compose_env", {})
         for name, entry in record.items():
             require(known.get(name, entry)["sha256"] == entry["sha256"], "A resolved compose variable changed: " + name)
-        known.update(record)
+        for name, entry in record.items():
+            known[name] = {**entry, "kept": True}
+        if resolved and any(kept.get(name) != value for name, value in resolved.items()):
+            intro.records.write(intro.records.directory / COMPOSE_VALUES, canonical({**kept, **resolved}) + b"\n")
         intro.save()
         self.compose_env = resolved
         return {"resolved_from_running_stack": record, "declared_overlays": overlays}
@@ -2310,58 +2563,78 @@ class HostOps:
         intro.records.journal({"event": "smoke-member-created", "plan_sha256": intro.plan_sha256, "username": username, "side": side})
         return intro.state["smoke_member"]
 
-    def run_browser(self, spec):
-        """The configured headless browser (policy smoke_browser_cmd): the login spec, with the password, goes on stdin;
-        its one KIN_RESULT line returns the tokens. Recorded like every command (argv, input and output hashes only)."""
-        entry = {"argv": redact_argv(self.browser_cmd), "env": [], "mutating": False, "timeout_s": 300, "started_utc": utc_now().isoformat(),
-                 "input": output_record(json.dumps(spec).encode())}
+    def run_browser(self, spec, *, timeout=None, what="login"):
+        """The configured headless browser (policy smoke_browser_cmd): the spec (a login's with the password, or the L-01
+        probe's) goes on stdin; its one KIN_RESULT line is the answer. Recorded like every command (argv, input and output
+        hashes only). D17: the browser runs as its own process tree, which is killed whole on the timeout and after the
+        browser ended (no Chromium child outlives it)."""
+        timeout = timeout or BROWSER_TIMEOUT_S
+        entry = {"argv": redact_argv(self.browser_cmd), "env": [], "mutating": False, "timeout_s": timeout, "started_utc": utc_now().isoformat(),
+                 "input": output_record(json.dumps(spec).encode()), "browser": what}
         started = time.monotonic()
         try:
-            result = subprocess.run(self.browser_cmd, input=json.dumps(spec).encode(), capture_output=True, timeout=300)
+            code, stdout, stderr = run_tree(self.browser_cmd, input=json.dumps(spec).encode(), timeout=timeout)
         except subprocess.TimeoutExpired:
-            entry.update(outcome="timeout", seconds=round(time.monotonic() - started, 3))
+            entry.update(outcome="timeout", seconds=round(time.monotonic() - started, 3), tree="killed")
             self.records.command(entry)
             raise Stop("The smoke browser timed out") from None
         except OSError as error:
             entry.update(outcome="error", error=type(error).__name__, seconds=round(time.monotonic() - started, 3))
             self.records.command(entry)
             raise Stop("The smoke browser could not be started") from None
-        entry.update(outcome="exit", exit=result.returncode, seconds=round(time.monotonic() - started, 3),
-                     stdout=output_record(result.stdout), stderr=output_record(result.stderr))
+        entry.update(outcome="exit", exit=code, seconds=round(time.monotonic() - started, 3),
+                     stdout=output_record(stdout), stderr=output_record(stderr))
         self.records.command(entry)
-        if result.returncode:
+        if code:
             # The browser's own record-safe failure code (a fixed check message or an error type; see code_of).
             try:
-                reason = json.loads(result.stderr.decode("utf-8").strip().splitlines()[-1]).get("error")
+                reason = json.loads(stderr.decode("utf-8").strip().splitlines()[-1]).get("error")
             except (ValueError, IndexError, AttributeError, UnicodeDecodeError):
                 reason = None
-            raise Stop("The smoke browser login failed" + (": " + reason[:160] if type(reason) is str else ""))
-        value = result_line(result.stdout)
-        require(type(value) is dict and value.get("flow") == "authorization_code+S256" and type(value.get("refresh_token")) is str,
-                "The smoke browser did not return an authorization-code login")
-        return value
+            raise Stop("The smoke browser " + what + " failed" + (": " + reason[:160] if type(reason) is str else ""))
+        return result_line(stdout)
 
-    def browser_login(self, intro, *, connect, product_session=False):
+    def browser_check(self, intro):
+        """D01 (L-01, before the fence): the policy's browser command is an executable file and the browser it runs opens a
+        blank page in a new profile folder and ends with exit 0 within BROWSER_PROBE_S; the browsers' folder it names
+        (PLAYWRIGHT_BROWSERS_PATH) resolves. A missing or broken browser stops here, not after the migration."""
+        program = Path(self.browser_cmd[0])
+        require(program.is_absolute() and program.is_file() and os.access(program, os.X_OK),
+                "The smoke browser command is not an executable file: " + str(program))
+        profile = intro.records.directory / ("browser-probe-" + uuid.uuid4().hex[:8])
+        try:
+            value = self.run_browser({"probe": True, "profile_dir": str(profile)}, timeout=BROWSER_PROBE_S, what="probe")
+        finally:
+            remove_profile(profile)
+        require(type(value) is dict and value.get("probe") == "ok" and type(value.get("browser")) is str,
+                "The smoke browser did not open a blank page")
+        return {"program": str(program), "browser": value["browser"][:80], "browsers_path": value.get("browsers_path")}
+
+    def browser_login(self, intro, *, connect, product_session=False, timeout=None, attempt=1):
         """One real Authorization Code + PKCE login of the smoke member in the headless browser, through a temporary public
-        client (removed with the member); the token must belong to that member. product_session (the introduced release):
-        first the product's own sign-in, its logout and the refusal of the ended session, in the same browser."""
+        client (removed with the member; a retry makes its own); the token must belong to that member. product_session
+        (the introduced release): first the product's own sign-in, its logout and the refusal of the ended session, in
+        the same browser."""
         member = intro.state["smoke_member"]
         credentials = json.loads(intro.records.read(intro.records.directory / member["credentials"]))
-        client_id = member["username"] + "-client"
+        client_id = member["username"] + "-client" + ("" if attempt == 1 else "-" + str(attempt))
         redirect = "https://" + SMOKE_REDIRECT_HOST + "/" + member["username"]
         member["client_id"] = client_id
+        member["client_ids"] = sorted({*(member.get("client_ids") or []), client_id})
         intro.save()
         self.smoke_admin(intro, "create-client", {"client_id": client_id, "redirect_uri": redirect})
         # The browser's profile (its cookies are this member's session) lives in this run's private folder and is gone
-        # after the login, whatever the browser did.
+        # after the login, whatever the browser did; every attempt has a new one.
         profile = intro.records.directory / ("browser-profile-" + uuid.uuid4().hex[:8])
         try:
             value = self.run_browser({"origin": self.t["origin"], "connect": list(connect) if connect else None, "ca_file": self.t["ca_file"],
                                       "username": credentials["username"], "password": credentials["password"], "client_id": client_id,
-                                      "redirect_uri": redirect, "profile_dir": str(profile), "product_session": product_session})
+                                      "redirect_uri": redirect, "profile_dir": str(profile), "product_session": product_session},
+                                     timeout=timeout)
         finally:
-            shutil.rmtree(profile, ignore_errors=True)
-            require(not profile.exists(), "The browser profile could not be removed")
+            remove_profile(profile)
+        require(type(value) is dict and value.get("flow") == "authorization_code+S256" and type(value.get("refresh_token")) is str,
+                "The smoke browser did not return an authorization-code login")
         token = token_valid({"access_token": value.get("access_token"), "subject": value.get("subject")})
         require(token["subject"] == member["id"], "The browser login belongs to another subject")
         return token, value["refresh_token"], client_id, value
@@ -2376,7 +2649,8 @@ class HostOps:
     def remove_smoke_member_now(self, intro):
         member = intro.state.get("smoke_member")
         if member and not member.get("deleted_at"):
-            removed = self.smoke_admin(intro, "remove", {"username": member["username"], "client_id": member.get("client_id")})
+            clients = sorted({*(member.get("client_ids") or []), *([member["client_id"]] if member.get("client_id") else [])})
+            removed = self.smoke_admin(intro, "remove", {"username": member["username"], "client_ids": clients})
             require(removed.get("user_absent") is True and removed.get("client_absent") is True, "The smoke member or its client is still present")
             member["deleted_at"] = utc_now().isoformat()
             intro.save()
@@ -2396,8 +2670,42 @@ class HostOps:
     def unattended_release_smoke(self, intro, connect):
         """L-10a unattended: the eight operator checks, by the executor (D1062), with the smoke member made at L-08b. The
         product's own sign-in and logout run in the browser (the ended session must be refused); the worklist, frame and
-        W2 checks use the temporary client's fresh token."""
-        token, refresh, client_id, value = self.browser_login(intro, connect=connect, product_session=True)
+        W2 checks use the temporary client's fresh token. D07: a failed attempt (an environmental hiccup must not cost a
+        full B0 rollback) is retried once - a new login client and a new browser profile, all of it within SMOKE_RETRY_S -
+        and the retry and its reason are recorded (state, journal, the step's detail; the first attempt's record kept as
+        operator-smoke-attempt-1.json). Only the retry's failure is the step's STOP."""
+        try:
+            return self.release_smoke_attempt(intro, connect)
+        except Stop as error:
+            reason = code_of(error)
+        started = time.monotonic()
+        first = intro.records.directory / "operator-smoke.json"
+        kept = None
+        if first.exists():
+            raw = intro.records.read(first)
+            intro.records.write(intro.records.directory / "operator-smoke-attempt-1.json", raw)
+            intro.records.discard(first)
+            kept = sha256_bytes(raw)
+        intro.state.pop("operator_smoke", None)
+        intro.state["smoke_retry"] = {"reason": reason, "at": utc_now().isoformat(), "bound_s": SMOKE_RETRY_S,
+                                      "first_record_sha256": kept, "passed": None}
+        intro.save()
+        intro.records.journal({"event": "smoke-retry", "plan_sha256": intro.plan_sha256, "reason": reason, "bound_s": SMOKE_RETRY_S})
+        try:
+            result = self.release_smoke_attempt(intro, connect, attempt=2, timeout=max(10, SMOKE_RETRY_S - 5))
+            require(time.monotonic() - started <= SMOKE_RETRY_S, "The smoke retry exceeded its bound of %d s" % SMOKE_RETRY_S)
+        except Stop as error:
+            intro.state["smoke_retry"].update(passed=False, retry_code=code_of(error))
+            intro.state.pop("operator_smoke", None)
+            intro.save()
+            raise
+        intro.state["smoke_retry"].update(passed=True, seconds=round(time.monotonic() - started, 3))
+        intro.save()
+        return {**result, "retry": {"reason": reason, "passed": True}}
+
+    def release_smoke_attempt(self, intro, connect, *, attempt=1, timeout=None):
+        """One attempt of the unattended release smoke (see unattended_release_smoke)."""
+        token, refresh, client_id, value = self.browser_login(intro, connect=connect, product_session=True, timeout=timeout, attempt=attempt)
         issued = token_claims(token).get("iat")
         require(type(issued) is int and issued >= int(parse_utc(intro.state["imported_at"]).timestamp()), "The smoke login predates the member import")
         result = smoke(self.t["origin"], connect=connect, ca_file=self.t["ca_file"], token=token, frame=self.frame(intro),
@@ -2460,9 +2768,28 @@ class HostOps:
         # L-08a reads the Keycloak server options with the target's administrator. Prove that credential now, read-only,
         # so that a wrong administrator name or password stops here instead of after the first database change.
         keycloak = self.keycloak_selected(intro)
+        # D01/D02: what the unattended smoke will need after the migration is proved before the fence - the plan's smoke
+        # member can be made in this realm (its roles and group exist) and the configured browser runs.
+        member = self.smoke_member_realm(intro)
+        browser = self.browser_check(intro) if self.unattended else "not configured (operator smoke)"
         return {"head": observed["head"], "images": images, "migrations": len(observed["migrations"]), "cron": cron, "free_bytes": free,
                 "members": observed["members"], "keycloak_admin": "verified", "keycloak_before": keycloak,
-                "roles": sorted(role["rolname"] for role in catalog["roles"])}
+                "roles": sorted(role["rolname"] for role in catalog["roles"]), "smoke_member_realm": member, "smoke_browser": browser}
+
+    def smoke_member_realm(self, intro):
+        """D02: the unattended smoke needs a plan member, and every role and the group the plan gives it exist in realm kin
+        (realm roles; a top-level group, as the administration script looks it up); otherwise L-01 stops."""
+        member = intro.plan["smoke"]["member"]
+        require(member is not None or not self.unattended, "The plan names no smoke member for the unattended smoke")
+        if member is None:
+            return "no smoke member planned"
+        realm = json.loads(self.psql(SMOKE_REALM_SQL, "keycloak"))
+        require(type(realm) is dict and type(realm.get("roles")) is list and type(realm.get("top_level_groups")) is list,
+                "The realm kin is not readable")
+        missing = sorted(set(member["roles"]) - set(realm["roles"]))
+        require(not missing, "The plan's smoke member roles are not realm roles: " + ",".join(missing))
+        require(member["group"] in realm["top_level_groups"], "The plan's smoke member group is not a top-level group of the realm: " + member["group"])
+        return {"roles": sorted(member["roles"]), "group": member["group"]}
 
     def realm_members(self):
         """Realm kin's people by count only (read-only SQL on the Keycloak database): members as the product counts them
@@ -3250,10 +3577,15 @@ class HostOps:
         require(self.cmd(["docker", "volume", "inspect", volume], check=False).returncode == 0,
                 "The clone certificate volume does not exist; fill it with kin.crt and kin.key before the seed: " + volume)
         host = urlsplit(self.t["origin"]).hostname
+        # D30: the key is the certificate's own (their public keys are equal, any key type), and the chain verifies against
+        # the CA file (else the image's trust store), intermediates taken from the certificate file itself.
         script = ('test -s /certs/kin.crt && test -s /certs/kin.key && openssl x509 -in /certs/kin.crt -noout -checkend 604800 >/dev/null '
                   '&& openssl x509 -in /certs/kin.crt -noout "$2" "$1" | grep -q " does match " '
-                  '&& { [ ! -e /kin-ca.pem ] || openssl verify -CAfile /kin-ca.pem /certs/kin.crt >/dev/null; }')
-        command = ["docker", "run", "--rm", "--network", "none", "--read-only", "--label", "kin.ops.run=" + uuid.uuid4().hex[:12],
+                  '&& certificate_key="$(openssl x509 -in /certs/kin.crt -noout -pubkey)" && private_key="$(openssl pkey -in /certs/kin.key -pubout)" '
+                  '&& [ -n "$certificate_key" ] && [ "$certificate_key" = "$private_key" ] '
+                  '&& if [ -e /kin-ca.pem ]; then openssl verify -CAfile /kin-ca.pem -untrusted /certs/kin.crt /certs/kin.crt >/dev/null; '
+                  'else openssl verify -untrusted /certs/kin.crt /certs/kin.crt >/dev/null; fi')
+        command = ["docker", "run", "--rm", "--network", "none", "--read-only", "--user", "0:0", "--label", "kin.ops.run=" + uuid.uuid4().hex[:12],
                    "--mount", "type=volume,source=" + volume + ",target=/certs,readonly"]
         if self.t["ca_file"]:
             # A missing bind source would be a refusal for the wrong reason (and some engines create it on the host).
@@ -3266,8 +3598,10 @@ class HostOps:
             flag = "-checkhost"
         command += ["--entrypoint", "sh", intro.plan["previous"]["images"]["proxy"], "-c", script, "certificate-check", host, flag]
         result = self.cmd(command, timeout=120, check=False)
-        require(result.returncode == 0, "The clone certificate volume is empty or its certificate does not fit the origin and the CA file: " + volume)
-        return {"volume": volume, "host": host, "ca_file": bool(self.t["ca_file"]), "valid_days_at_least": 7}
+        require(result.returncode == 0, "The clone certificate volume is empty or its key, origin or chain does not fit (key = certificate, "
+                                        "host, CA file, seven days): " + volume)
+        return {"volume": volume, "host": host, "ca_file": bool(self.t["ca_file"]), "valid_days_at_least": 7, "key_matches": True,
+                "chain": "CA file" if self.t["ca_file"] else "image trust store"}
 
     def keycloak_isolation(self, intro, source_env, clone_env, source_origin):
         """The restored realm keeps every member/role/group row; only the clone's client secrets, origin and mail change."""
@@ -3504,10 +3838,32 @@ class IntroductionHost:
             else:
                 owned_private(self.repository, self.owner, private=True, directory=True)
                 owned_private(self.repository / ".git", self.owner, directory=True)
+
+        def ownership_check():
+            """Everything repository_check requires except the mode bits of the checkout and of its .git: owner, no link,
+            the ancestors' owners and modes."""
+            if self.owner is None:
+                host.protected(self.repository.parent, directory=True)
+                for path in (self.repository, self.repository / ".git"):
+                    info = path.lstat()
+                    require(info.st_uid == 0 and stat_module.S_ISDIR(info.st_mode), "Repository is not root's")
+            else:
+                owned_private(self.repository, self.owner, directory=True, own_mode=False)
+                owned_private(self.repository / ".git", self.owner, directory=True, own_mode=False, deferred=(self.repository,))
+        warnings = []
         if not (target["fix_checkout_mode"] and request["phase"] == "capture"):
             # Only a capture whose manifest declares the correction may meet an open checkout (its L-00a fixes and records
-            # it); every other request requires the private checkout first.
-            repository_check()
+            # it); every other request requires the private checkout first - except a recovery (D06): a rollback goes on
+            # when only the checkout's mode was reopened since the capture (owner, links and ancestors still checked),
+            # and records it as a warning; introduce, verify and reopen keep refusing.
+            try:
+                repository_check()
+            except RuntimeError as error:
+                if request["phase"] not in RECOVERY_PHASES:
+                    raise
+                ownership_check()
+                modes = {name: oct(path.lstat().st_mode & 0o7777) for name, path in (("checkout", self.repository), (".git", self.repository / ".git"))}
+                warnings.append({"kind": "checkout-mode", "reason": code_of(error), "modes": modes})
         approval = approval_valid(decode(host.read_secure(self.state / "emr-approvals" / (digest + ".json"))), digest,
                                   request["phase"], int(time.time()), plan["target_kind"], unattended=browser_cmd is not None)
         evidence = {kind: self.document("emr-evidence", value) for kind, value in approval["evidence"].items()}
@@ -3530,7 +3886,7 @@ class IntroductionHost:
                            browser_cmd=browser_cmd, repository_check=repository_check)
         intro = Introduction(plan=plan, plan_sha256=request["plan_sha256"], target=target, production=self.policy["production"],
                              ops=ops_host, records=records, repository=self.repository, host_key=local_host_key(),
-                             tool=tool_hashes(), evidence=evidence)
+                             tool=tool_hashes(), evidence=evidence, warnings=warnings)
         with bound_ops(self.repository, runner):
             try:
                 return intro.run(request, digest)
@@ -3579,6 +3935,37 @@ def verified_pin(host, port, connect, ca_file):
     with socket.create_connection(tuple(connect) if connect else (host, port), timeout=20) as raw, \
             context.wrap_socket(raw, server_hostname=host) as tls:
         return spki_pin(tls.getpeercert(binary_form=True))
+
+
+def browser_probe(spec):
+    """D01, L-01's check of the reference browser before the fence: the browsers' folder this command was given
+    (PLAYWRIGHT_BROWSERS_PATH, carried explicitly because the entry clears the environment) resolves to a folder that
+    holds the Chromium Playwright will start, and that Chromium starts headless in a new profile folder, opens a blank
+    page and closes. The profile folder is removed afterwards."""
+    profile = Path(spec["profile_dir"])
+    require(profile.is_absolute() and not profile.exists() and profile.parent.is_dir(), "The browser profile folder must be new")
+    browsers = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if browsers is not None:
+        require(Path(browsers).is_absolute() and Path(browsers).is_dir(), "PLAYWRIGHT_BROWSERS_PATH does not name a folder")
+    from playwright.sync_api import sync_playwright
+    profile.mkdir(mode=0o700)
+    try:
+        with sync_playwright() as playwright:
+            executable = Path(playwright.chromium.executable_path)
+            require(executable.is_file(), "The Chromium of this Playwright is not installed")
+            if browsers is not None:
+                require(Path(browsers).resolve() in executable.resolve().parents, "The Chromium does not come from PLAYWRIGHT_BROWSERS_PATH")
+            context = playwright.chromium.launch_persistent_context(str(profile), headless=True)
+            try:
+                page = context.pages[0] if context.pages else context.new_page()
+                page.goto("about:blank")
+                agent = re.search(r"Chrome/([0-9.]+)", page.evaluate("navigator.userAgent") or "")
+            finally:
+                context.close()
+    finally:
+        shutil.rmtree(profile, ignore_errors=True)
+    return {"probe": "ok", "browser": "chromium " + (agent.group(1) if agent else "unknown"),
+            "browsers_path": "given" if browsers is not None else "default"}
 
 
 def browser_smoke(spec):
@@ -3783,7 +4170,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.command == "browser-smoke":
         try:
-            print("KIN_RESULT " + json.dumps(browser_smoke(json.loads(sys.stdin.buffer.read(65536).decode("utf-8")))))
+            spec = json.loads(sys.stdin.buffer.read(65536).decode("utf-8"))
+            require(type(spec) is dict, "Invalid browser spec")
+            print("KIN_RESULT " + json.dumps(browser_probe(spec) if spec.get("probe") is True else browser_smoke(spec)))
             return 0
         except Exception as error:   # never the spec or a token in the message
             print(json.dumps({"valid": False, "error": code_of(error)}), file=sys.stderr)

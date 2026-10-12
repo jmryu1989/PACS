@@ -1293,7 +1293,7 @@ class FakeDocker:
 
     def __init__(self, target, plan):
         self.target, self.plan = target, plan
-        self.calls, self.inputs = [], []
+        self.calls, self.inputs, self.envs = [], [], []
         self.containers, self.volumes, self.tags = {}, {}, {}
         self.head = plan["previous"]["sha"]
         self.config = {}           # "pinned" / "plain" -> the compose config model (dict)
@@ -1313,6 +1313,7 @@ class FakeDocker:
     def __call__(self, args, *, input=None, timeout=60, env=None, output=None, stdin=None):
         args = list(args)
         self.calls.append(args)
+        self.envs.append(dict(env or {}))
         if input is not None:
             self.inputs.append(input)
         if self.failing and self.failing(args):
@@ -1823,15 +1824,19 @@ class CommanderAdditionsTests(HostHarness, unittest.TestCase):
         self.assertEqual(context.state["compose_env"]["KIN_MONITOR_PUBLIC_DIR"]["sha256"], entry["sha256"])
         ops_host.compose(["ps"], mutating=False)
         self.assertEqual(docker.calls[-1][:2], ["docker", "compose"])
+        # The value itself only in the run directory's private values file (D04), never in a journal, result or command
+        # record.
+        kept = self.records.directory / intro.COMPOSE_VALUES
         for path in self.records.directory.rglob("*"):
-            if path.is_file():
+            if path.is_file() and path != kept:
                 self.assertNotIn(value.encode(), path.read_bytes(), path.name)
         # The value a later phase finds must be the same one.
         docker.containers[self.target["containers"]["proxy"]]["Mounts"][0]["Source"] = "/tmp/elsewhere"
         refuses(self, ops_host.prepare, context, message="changed")
-        # No container carries it: a refusal.
+        # No container carries it and nothing was kept: a refusal.
         docker.containers.pop(self.target["containers"]["proxy"])
         context.state.pop("compose_env")
+        kept.unlink()
         refuses(self, ops_host.prepare, context, message="Unresolvable compose variable: KIN_MONITOR_PUBLIC_DIR")
         self.assertEqual(intro.referenced_variables([b"a: ${A}\nb: ${B:-x}\nc: $C\nd: $${D}\n# e: ${E}\nf: ${F:?m}\n"]),
                          {"A": True, "B": False, "C": True, "F": True})
@@ -2128,6 +2133,394 @@ class UnattendedReopenTests(MachineHarness, unittest.TestCase):
         state["smoke_member"]["deleted_at"] = NOW.isoformat()
         self.records.save(state)
         self.assertEqual(self.run_phase("reopen", {})["status"], "DEPLOYED")
+
+
+class Context(SimpleNamespace):
+    """What a HostOps step reads of its phase (Introduction's plan, state, records, phase, recovery flag), with the
+    warnings a recovery records."""
+
+    def warn(self, kind, **facts):
+        self.warnings.append({"kind": kind, **facts})
+
+
+def process_alive(pid):
+    """Whether a process still runs (a zombie waiting for its reaper does not)."""
+    if os.name == "posix":
+        try:
+            with open("/proc/%d/stat" % pid) as handle:
+                return handle.read().rsplit(") ", 1)[1][0] != "Z"
+        except FileNotFoundError:
+            return False
+    import ctypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    handle = kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return False
+    try:
+        code = ctypes.c_ulong()
+        kernel32.GetExitCodeProcess(ctypes.c_void_p(handle), ctypes.byref(code))
+        return code.value == 259
+    finally:
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
+
+
+MONITOR_COMPOSE = ("services:\n  proxy:\n    volumes:\n      - type: bind\n        source: ${KIN_MONITOR_PUBLIC_DIR:?Set a dedicated public-only "
+                   "monitor directory}\n        target: /var/run/kin-monitor-public\n        read_only: true\n")
+FAKE_PROBE = r"""
+import json, os, sys
+spec = json.loads(sys.stdin.read())
+assert spec.get("probe") is True and not os.path.exists(spec["profile_dir"]), spec
+os.makedirs(spec["profile_dir"])
+print("KIN_RESULT " + json.dumps({"probe": "ok", "browser": "chromium fake", "browsers_path": "given"}))
+"""
+LINGERING_BROWSER = r"""
+import json, os, subprocess, sys, time
+spec = json.loads(sys.stdin.read())
+os.makedirs(spec["profile_dir"], exist_ok=True)
+# A child that outlives this process: it inherits the output pipes and sleeps (a Chromium renderer left behind).
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+with open(%r, "w") as handle:
+    handle.write(str(child.pid))
+if %r:
+    time.sleep(600)
+"""
+
+
+class RoundThreeHostTests(HostHarness, unittest.TestCase):
+    """Round 3 (D1084): the defects round 2 recorded itself, as the commander decided them, against the fixed-binary
+    boundary (FakeDocker) and real child processes."""
+
+    def context(self, plan, phase="capture", **state):
+        return Context(plan=plan, plan_sha256="a" * 64, state={"checkout": "previous", "lock_token": None, **state}, records=self.records,
+                       save=lambda: None, phase=phase, recovering=phase in intro.RECOVERY_PHASES, warnings=[], request_sha256="c" * 64)
+
+    def monitor_stack(self):
+        """The production shape of IRT-12/D04: a compose file binds ${KIN_MONITOR_PUBLIC_DIR} into the proxy, the .env lacks
+        it, and the running proxy carries it as its bind source."""
+        (self.repo / "docker-compose.prod.yml").write_text(MONITOR_COMPOSE, newline="\n")
+        ops_host, docker, _ = self.host()
+        value = "/home/ubuntu/.kin-monitor-public"
+
+        def config_for(args, env):
+            model = compose_config(self.target)
+            if env.get("KIN_MONITOR_PUBLIC_DIR"):
+                model["services"]["proxy"]["volumes"].append({"type": "bind", "source": env["KIN_MONITOR_PUBLIC_DIR"],
+                                                              "target": "/var/run/kin-monitor-public"})
+            return model
+        docker.config_for = config_for
+        docker.containers[self.target["containers"]["proxy"]] = {"Image": image("2"), "State": {"Running": False}, "Config": {"Env": []},
+                                                                 "Mounts": [{"Destination": "/var/run/kin-monitor-public", "Source": value}]}
+        return ops_host, docker, value
+
+    def test_90_a_value_resolved_from_the_stack_is_kept_for_a_rollback_whose_container_is_gone(self):
+        """D04: the capture resolves KIN_MONITOR_PUBLIC_DIR from the proxy's bind and keeps the value in the run's private
+        values file. A settled failure at L-09b removed the proxy; the rollback (a new process: nothing in memory) still
+        gives every compose command the same value. A kept value that differs from its recorded hash is a refusal."""
+        ops_host, docker, value = self.monitor_stack()
+        plan = ops_host.plan
+        context = self.context(plan)
+        ops_host.prepare(context)
+        kept = self.records.directory / intro.COMPOSE_VALUES
+        self.assertEqual(json.loads(kept.read_text()), {"KIN_MONITOR_PUBLIC_DIR": value})
+        if os.name == "posix":
+            self.assertEqual(kept.stat().st_mode & 0o777, 0o600)
+        docker.containers.pop(self.target["containers"]["proxy"])
+        rollback = intro.HostOps(target=self.target, plan=plan, runner=docker, records=self.records)
+        context.phase, context.recovering = "rollback", True
+        result = rollback.prepare(context)
+        self.assertEqual(result["resolved_from_running_stack"]["KIN_MONITOR_PUBLIC_DIR"]["from"], ["kept"])
+        rollback.compose(["up", "-d", "--no-deps", "proxy"], mutating=True)
+        self.assertEqual(docker.envs[-1].get("KIN_MONITOR_PUBLIC_DIR"), value)
+        kept.write_text(json.dumps({"KIN_MONITOR_PUBLIC_DIR": "/tmp/elsewhere"}))
+        refuses(self, intro.HostOps(target=self.target, plan=plan, runner=docker, records=self.records).prepare, context,
+                message="kept compose value differs")
+
+    def test_91_the_seed_names_each_compose_variable_the_clone_env_lacks(self):
+        """D28: before the seed no clone stack runs, so a VM target whose compose files require KIN_MONITOR_PUBLIC_DIR
+        needs it in the clone's .env; the seed refuses with the variable and the file named, before any command."""
+        (self.repo / "docker-compose.monitor.yml").write_text(MONITOR_COMPOSE, newline="\n")
+        self.target["compose_files"] = [*self.target["compose_files"], "docker-compose.monitor.yml"]
+        ops_host, docker, _ = self.host()
+        context = self.context(ops_host.plan, phase="seed")
+        with self.assertRaises(intro.Stop) as caught:
+            ops_host.prepare(context)
+        self.assertIn("KIN_MONITOR_PUBLIC_DIR (required by docker-compose.monitor.yml)", str(caught.exception))
+        self.assertIn("before the seed", str(caught.exception))
+        self.assertEqual(docker.calls, [], "no command before the refusal")
+        self.write_env((self.repo / ".env").read_text() + "KIN_MONITOR_PUBLIC_DIR=/srv/kin-monitor-public\n")
+        self.assertEqual(ops_host.prepare(context)["resolved_from_running_stack"], {})
+
+    def test_92_a_recovery_uses_the_pinned_overlay_when_its_file_changed_or_vanished(self):
+        """D05: the plan's first phase pins the declared overlay's verified bytes in its run directory. A recovery whose
+        overlay file changed or vanished goes on with those bytes (every compose command and the configuration digest
+        read the pinned copy) and records a warning; a forward phase refuses; a pinned copy that differs is no fallback."""
+        ops_host, docker, base = CommanderAdditionsTests.production_host(self)
+        declared = self.overlay.read_bytes()
+        capture = self.context(base.plan)
+        ops_host.declared_overlay_facts(capture)
+        pin = capture.state["overlay_pins"][str(self.overlay)]
+        copy_path = self.records.directory / pin["copy"]
+        self.assertEqual(copy_path.read_bytes(), declared)
+        expected_digest = ops_host.compose_digest_now()
+        for change in ("changed", "vanished"):
+            with self.subTest(change=change):
+                if change == "changed":
+                    self.overlay.write_bytes(declared + b"# changed by hand\n")
+                else:
+                    self.overlay.unlink()
+                forward = self.context(base.plan, phase="introduce", overlay_pins=dict(capture.state["overlay_pins"]))
+                refuses(self, ops_host.declared_overlay_facts, forward)
+                recovery = self.context(base.plan, phase="rollback", overlay_pins=dict(capture.state["overlay_pins"]))
+                facts = ops_host.declared_overlay_facts(recovery)
+                self.assertEqual(facts[0]["used"], "pinned copy")
+                self.assertEqual([warning["kind"] for warning in recovery.warnings], ["declared-overlay"])
+                self.assertIn(str(copy_path), ops_host.compose_files())
+                self.assertNotIn(str(self.overlay), ops_host.compose_files())
+                self.assertEqual(ops_host.compose_digest_now(), expected_digest)
+                self.overlay.write_bytes(declared)
+        copy_path.write_bytes(declared + b"#")
+        self.overlay.unlink()
+        refuses(self, ops_host.declared_overlay_facts, self.context(base.plan, phase="rollback", overlay_pins=dict(capture.state["overlay_pins"])))
+
+    def unattended(self, script):
+        ops_host, docker, context = CommanderAdditionsTests.unattended_host(self)
+        ops_host.browser_cmd = [sys.executable, "-c", script]
+        ops_host.create_smoke_member(context, "release")
+        return ops_host, docker, context
+
+    def smoke_patches(self):
+        full = {"health": True, "auth_refusal": True, "member": True, "worklist": True, "frame": True}
+        https = lambda origin, path, *, token=None, **kwargs: (401, "", b"{}") if path == "/api/me" else (200, "", b"[]")
+        return (patch.object(intro, "smoke", return_value=full),
+                patch.object(intro, "worklist_row", return_value={"uid": FRAME_STUDY, "modality": "CT"}),
+                patch.object(intro, "https_get", side_effect=https), patch.object(intro, "https_post", return_value=(204, b"")))
+
+    def test_95_one_bounded_smoke_retry_before_an_automatic_rollback(self):
+        """D07: an unattended release smoke that fails once is retried once - its own login client, a new browser profile,
+        within SMOKE_RETRY_S - and the retry and its reason are recorded; both login clients go with the member. A retry
+        that fails too, or exceeds its bound, is the step's STOP (the automatic rollback follows)."""
+        marker = self.root / "first-attempt"
+        flaky = FAKE_BROWSER.replace("spec = json.loads(sys.stdin.read())",
+                                     "spec = json.loads(sys.stdin.read())\nimport pathlib\nmark = pathlib.Path(%r)\nif not mark.exists():\n"
+                                     "    mark.write_text('1')\n    os.makedirs(spec['profile_dir'])\n"
+                                     "    print(json.dumps({'valid': False, 'error': 'synthetic first-attempt failure'}), file=sys.stderr)\n"
+                                     "    sys.exit(1)" % str(marker))
+        ops_host, docker, context = self.unattended(flaky)
+        patches = self.smoke_patches()
+        with patches[0], patches[1], patches[2], patches[3]:
+            result = ops_host.unattended_release_smoke(context, ("127.0.0.1", 19444))
+        self.assertEqual(result["retry"], {"reason": "The smoke browser login failed: synthetic first-attempt failure", "passed": True})
+        retry = context.state["smoke_retry"]
+        self.assertEqual((retry["passed"], retry["bound_s"], retry["reason"]), (True, intro.SMOKE_RETRY_S, result["retry"]["reason"]))
+        self.assertTrue(json.loads((self.records.directory / "operator-smoke.json").read_text())["passed"])
+        journal = [json.loads(line) for line in (self.records.directory / "journal.jsonl").read_text().splitlines()]
+        self.assertEqual([entry["reason"] for entry in journal if entry["event"] == "smoke-retry"], [retry["reason"]])
+        member = context.state["smoke_member"]
+        self.assertEqual(len(member["client_ids"]), 2, "the retry made its own login client")
+        self.assertEqual(list(self.records.directory.glob("browser-profile-*")), [])
+        ops_host.remove_smoke_member(context)
+        removal = next(call for call in docker.calls if any("kc-smoke-remove" in item for item in call))
+        self.assertEqual(sorted(json.loads(removal[-1])["client_ids"]), sorted(member["client_ids"]))
+        for name, script, bound in (("fails twice", FAKE_BROWSER.replace('"logout_status": 204', '"logout_status": 409'), None),
+                                    ("retry beyond its bound", flaky.replace("print(\"KIN_RESULT \"", "time.sleep(3)\nprint(\"KIN_RESULT \""), 2)):
+            self.setUp()
+            marker.unlink(missing_ok=True)
+            ops_host, docker, context = self.unattended(script)
+            patches = self.smoke_patches()
+            with self.subTest(case=name), patches[0], patches[1], patches[2], patches[3], \
+                    patch.object(intro, "SMOKE_RETRY_S", bound or intro.SMOKE_RETRY_S):
+                with self.assertRaises(intro.Stop) as caught:
+                    ops_host.unattended_release_smoke(context, ("127.0.0.1", 19444))
+                self.assertIs(context.state["smoke_retry"]["passed"], False)
+                self.assertNotIn("operator_smoke", context.state)
+                if bound:
+                    self.assertIn("exceeded its bound", str(caught.exception))
+
+    def test_96_a_browser_timeout_ends_its_whole_process_tree_and_removes_the_profile(self):
+        """D17: a browser that runs past its time - or ends while a child it started keeps running with its pipes - is
+        killed with every process it started (POSIX process group / Windows job object), and its profile folder goes."""
+        for parent_waits in (True, False):
+            pids = self.root / ("pid-%s" % parent_waits)
+            ops_host, docker, context = self.unattended(LINGERING_BROWSER % (str(pids), parent_waits))
+            with self.subTest(parent_waits=parent_waits), patch.object(intro, "BROWSER_TIMEOUT_S", 4):
+                started = time.monotonic()
+                refuses(self, ops_host.browser_login, context, message="timed out", connect=("127.0.0.1", 19444))
+                self.assertLess(time.monotonic() - started, 60)
+                child = int(pids.read_text())
+                deadline = time.monotonic() + 10
+                while process_alive(child) and time.monotonic() < deadline:
+                    time.sleep(0.2)
+                self.assertFalse(process_alive(child), "the browser's child outlived the timeout")
+                self.assertEqual(list(self.records.directory.glob("browser-profile-*")), [])
+            self.setUp()
+
+    def baseline_host(self, *, member=None, browser=None, realm=None):
+        """HostOps.baseline (L-01) of a production target against FakeDocker: the previous release as the plan observed it."""
+        repo = self.root / "production"
+        repo.mkdir()
+        for name in ("docker-compose.yml", "docker-compose.prod.yml", "docker-compose.monitor.yml"):
+            (repo / name).write_text("services: {}\n")
+        (repo / ".env").write_text("POSTGRES_PASSWORD=installer-placeholder-0001\n")
+        backups = self.root / "production-backups"
+        backups.mkdir()
+        target = target_fixture(repository=str(repo))
+        plan = plan_fixture(target)
+        plan.update(backup_root=str(backups))
+        plan["budget"]["min_free_bytes"] = 1024 ** 3
+        if member is not None:
+            plan["smoke"]["member"] = member or None
+        entries = [(name, (repo / name).read_bytes()) for name in target["compose_files"]] + [(".env", (repo / ".env").read_bytes())]
+        plan["compose"]["before_sha256"] = intro.compose_digest(entries)
+        docker = FakeDocker(target, plan)
+        docker.config["pinned"] = compose_config(target, previous_images=plan["previous"]["images"])
+        docker.crontab = "".join("0 3 * * * /usr/bin/true # " + tag + "\n" for tag in target["cron"]["tags"])
+        docker.image_labels = {"org.opencontainers.image.revision": plan["previous"]["sha"]}
+        for role in intro.ROLES:
+            docker.containers[target["containers"][role]] = {"Image": plan["previous"]["images"][role], "State": {"Running": True},
+                                                             "Mounts": [], "Config": {"Labels": {}}}
+        docker.psql = {"_prisma_migrations": json.dumps([[n, c, True, False] for n, c in plan["migrations"]["before"]]),
+                       "rolconnlimit": json.dumps(pre_catalog()), "service_account_client_link": json.dumps(plan["members"]),
+                       "parent_group": json.dumps(realm or {"roles": ["admin", "clinician", "radiologist"], "top_level_groups": ["hallym", "kin-center"]})}
+        ops_host = intro.HostOps(target=target, plan=plan, runner=docker, records=self.records, browser_cmd=browser)
+        return ops_host, docker, self.context(plan)
+
+    def test_97_the_smoke_browser_and_the_smoke_member_are_proved_at_l01_before_the_fence(self):
+        """D01/D02: L-01 refuses a smoke browser command that is no executable file, a browser that fails or does not end
+        within its bound, a planned smoke member whose role or group the realm lacks, and an unattended smoke without a
+        planned member; a working browser and a fitting member pass (the probe's profile folder is removed)."""
+        good = [sys.executable, "-c", FAKE_PROBE]
+        ops_host, docker, context = self.baseline_host(browser=good)
+        detail = ops_host.baseline(context)
+        self.assertEqual(detail["smoke_browser"]["browser"], "chromium fake")
+        self.assertEqual(detail["smoke_member_realm"], {"roles": ["radiologist"], "group": "hallym"})
+        self.assertEqual(list(self.records.directory.glob("browser-probe-*")), [])
+        cases = {
+            "no executable file": ({"browser": [str(self.root / "no-such-browser"), "browser-smoke"]}, "not an executable file"),
+            "a browser that fails": ({"browser": [sys.executable, "-c", "import sys, json; print(json.dumps({'error': 'chromium missing'}), "
+                                                                       "file=sys.stderr); sys.exit(1)"]}, "probe failed: chromium missing"),
+            "a browser that does not end": ({"browser": [sys.executable, "-c", "import time; time.sleep(600)"]}, "timed out"),
+            "a role the realm lacks": ({"browser": good, "realm": {"roles": ["clinician"], "top_level_groups": ["hallym"]}},
+                                       "roles are not realm roles: radiologist"),
+            "a group the realm lacks (or only below another)": ({"browser": good, "realm": {"roles": ["radiologist"], "top_level_groups": ["kin-center"]}},
+                                                                "group is not a top-level group of the realm: hallym"),
+            "an unattended smoke without a member": ({"browser": good, "member": {}}, "names no smoke member"),
+        }
+        for name, (options, message) in cases.items():
+            self.setUp()
+            ops_host, docker, context = self.baseline_host(**options)
+            with self.subTest(case=name), patch.object(intro, "BROWSER_PROBE_S", 4):
+                refuses(self, ops_host.baseline, context, message=message)
+                self.assertEqual(docker.mutating(), [], "L-01 changes nothing")
+                self.assertEqual(list(self.records.directory.glob("browser-probe-*")), [])
+
+    @unittest.skipUnless(shutil.which("node"), "needs node (the Linux root fixture has it)")
+    def test_98_keycloak_readiness_waits_for_200_and_a_refused_administrator_stops_at_once(self):
+        """D18/D19: the administration and serverinfo helpers wait while Keycloak answers 404 (realms still loading) and
+        then work; a refused administrator ends the helper at once (no two-minute wait)."""
+        import http.server
+        import threading
+        answers = {}
+        seen = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def respond(self):
+                path = self.path.split("?")[0]
+                seen.append((self.command, path))
+                queue = answers.get((self.command, path)) or answers.get(("*", path)) or [(200, [])]
+                status, body = queue.pop(0) if len(queue) > 1 else queue[0]
+                raw = json.dumps(body).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+            do_GET = do_POST = do_PUT = do_DELETE = respond
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        env = {**os.environ, "KC_ADMIN_URL": "http://127.0.0.1:%d" % server.server_address[1], "KIN_KC_ADMIN_USER": "admin",
+               "KIN_KC_ADMIN_PASSWORD": "synthetic"}
+        token = [(200, {"access_token": "t"})]
+        info = {"providers": {"userSessions": {"providers": {"infinispan": {"operationalInfo": {"useCaches": "false"}}}}},
+                "features": [{"name": "PERSISTENT_USER_SESSIONS", "enabled": True}]}
+        answers.update({("GET", "/realms/master"): [(404, {}), (200, {})], ("POST", "/realms/master/protocol/openid-connect/token"): token,
+                        ("GET", "/admin/serverinfo"): [(404, {}), (200, info)]})
+        out = subprocess.run(["node", "-e", intro.SERVERINFO_SCRIPT], env=env, capture_output=True, timeout=120)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(intro.result_line(out.stdout), {"useCaches": "false", "persistentUserSessions": True})
+        self.assertEqual(seen.count(("GET", "/realms/master")), 2)
+        self.assertEqual(seen.count(("GET", "/admin/serverinfo")), 2)
+        seen.clear()
+        answers.update({("GET", "/realms/kin"): [(404, {}), (404, {}), (200, {})], ("POST", "/realms/master/protocol/openid-connect/token"): token,
+                        ("GET", "/admin/realms/kin/users"): [(200, [])], ("GET", "/admin/realms/kin/clients"): [(200, [])]})
+        payload = json.dumps({"username": "kin-smoke-x", "client_ids": ["kin-smoke-x-client", "kin-smoke-x-client-2"]})
+        out = subprocess.run(["node", "-e", intro.SMOKE_ADMIN_SCRIPT, "remove", payload], env=env, capture_output=True, timeout=120)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(intro.result_line(out.stdout), {"user_absent": True, "client_absent": True})
+        self.assertEqual(seen.count(("GET", "/realms/kin")), 3)
+        self.assertEqual(seen.count(("GET", "/admin/realms/kin/clients")), 4, "each login client is looked up before and after")
+        answers[("POST", "/realms/master/protocol/openid-connect/token")] = [(401, {})]
+        for script, args in ((intro.SERVERINFO_SCRIPT, []), (intro.SMOKE_ADMIN_SCRIPT, ["remove", payload])):
+            started = time.monotonic()
+            out = subprocess.run(["node", "-e", script, *args], env=env, capture_output=True, timeout=120)
+            self.assertNotEqual(out.returncode, 0)
+            self.assertIn(b"admin", out.stderr)
+            self.assertLess(time.monotonic() - started, 30, "a refused administrator stops at once")
+
+
+class RoundThreeMachineTests(MachineHarness, unittest.TestCase):
+    """Round 3 at the phase level: the D12 receipt clock and the recorded warnings and kept values of a plan."""
+
+    def test_101_a_receipt_tolerates_five_minutes_of_clock_skew_and_the_skew_is_recorded(self):
+        """D12: the rehearsal host's clock may run up to five minutes ahead of production's (receipt 'in the future') or
+        behind it (receipt 'before' the B0 it rehearsed); more is refused; what was observed is recorded at admission."""
+        plan, production = plan_fixture(), production_identity()
+        now = datetime.now(timezone.utc)
+        for created, b0, accepted in ((now + timedelta(minutes=4), None, True), (now + timedelta(minutes=6), None, False),
+                                      (now - timedelta(hours=1), now - timedelta(hours=1) + timedelta(minutes=4), True),
+                                      (now - timedelta(hours=1), now - timedelta(hours=1) + timedelta(minutes=6), False)):
+            receipt = receipt_fixture(plan, created=created)
+            with self.subTest(created=created.isoformat(), b0=b0 and b0.isoformat()):
+                check = lambda: intro.receipt_valid(receipt, plan, "8" * 64, production, now=now, b0_created_utc=b0 and b0.isoformat())
+                if accepted:
+                    check()
+                else:
+                    refuses(self, check)
+        self.run_phase("capture")
+        evidence = {"local-restore": receipt_fixture(plan_fixture(target_fixture(repository=str(self.repository))),
+                                                     created=NOW + timedelta(minutes=3))}
+        self.assertEqual(self.run_phase("introduce", evidence)["status"], "INTRODUCED")
+        journal = [json.loads(line) for line in (self.records.directory / "journal.jsonl").read_text().splitlines()]
+        start = next(entry for entry in journal if entry["event"] == "phase-start" and entry["phase"] == "introduce")
+        self.assertEqual(start["receipt_clock"], {"tolerance_s": 300, "ahead_of_production_s": 180.0})
+
+    def test_94_recovery_warnings_are_in_the_result_and_the_kept_values_end_with_the_plan(self):
+        """D05/D06: warnings handed to a phase (the entry's) or recorded by its steps are in its result, its result file
+        and its phase-start record. D04: the private values file is kept while the plan runs and removed when it ends."""
+        self.deploy_through("introduce")
+        values = self.records.directory / intro.COMPOSE_VALUES
+        values.write_text('{"KIN_MONITOR_PUBLIC_DIR":"/srv/x"}\n')
+        machine = self.machine({})
+        machine.warnings = [{"kind": "checkout-mode", "reason": "A path component is writable by others", "modes": {"checkout": "0o775"}}]
+
+        class Warning(FakeOps):
+            def effect_classify(self, context):
+                context.warn("declared-overlay", file="/etc/kin-deploy/overlays/x.yml", reason="A declared overlay is missing")
+        self.ops = Warning()
+        machine.ops = self.ops
+        request = {"version": 1, "mode": intro.MODE, "phase": "rollback", "plan_sha256": self.plan_sha256, "nonce": "5" * 32}
+        result = machine.run(request, "5" * 64)
+        self.assertEqual(result["status"], "RESTORED")
+        self.assertEqual([warning["kind"] for warning in result["warnings"]], ["checkout-mode", "declared-overlay"])
+        (written,) = self.records.directory.glob("result-rollback-*.json")
+        self.assertEqual(json.loads(written.read_text())["warnings"], result["warnings"])
+        self.assertTrue(values.exists(), "kept while the plan still holds its lock")
+        self.assertEqual(self.run_phase("rollback_reopen")["status"], "ROLLED_BACK")
+        self.assertFalse(values.exists(), "removed when the plan ended")
 
 
 class HelperTests(unittest.TestCase):
@@ -2491,6 +2884,54 @@ class ProtectedHostTests(unittest.TestCase):
         self.approve(raw)
         with self.assertRaisesRegex(intro.Stop, "Document bytes differ"):
             host.execute(raw)
+
+    def test_93_a_rollback_goes_on_with_a_reopened_checkout_mode_and_records_it_forward_phases_refuse(self):
+        """D06: after the capture the checkout (0700) and its .git were opened again (chmod 0775). A rollback request is
+        not refused for that: it runs, and its result, result file and phase-start record carry the warning with the
+        modes; introduce and verify requests keep refusing; an ownership change still refuses the rollback too."""
+        target = target_fixture(repository=str(self.repo))
+        plan = plan_fixture(target)
+        now = datetime.now(timezone.utc)
+        plan.update(window={"start": (now - timedelta(hours=1)).isoformat(), "end": (now + timedelta(hours=2)).isoformat()},
+                    tool=intro.tool_hashes())
+        plan_sha = self.document("emr-plans", plan)
+        runs = self.state / "emr-runs" / plan_sha
+        runs.mkdir(mode=0o700)
+        token = intro.acquire_lock(self.repo)
+        state = intro.new_state(plan_sha, plan)
+        state.update(status="INTRODUCED", lock_token=token, db_changed=True, checkout="target",
+                     b0={"dir": "/b0", "manifest_sha256": "8" * 64}, fenced={"running_before": []})
+        self.write(runs / "state.json", state)
+        self.repo.chmod(0o775)
+        (self.repo / ".git").chmod(0o775)
+        shared = FakeOps()
+
+        def request(phase):
+            raw = json.dumps({"version": 1, "mode": intro.MODE, "phase": phase, "plan_sha256": plan_sha, "nonce": os.urandom(16).hex()}).encode()
+            self.approve(raw)
+            return raw
+        with patch.object(intro, "HostOps", lambda **kwargs: shared), patch.object(intro, "local_host_key", lambda: "a" * 64):
+            for phase in ("introduce", "verify"):
+                with self.subTest(phase=phase), self.assertRaisesRegex(RuntimeError, "Invalid protected deployment state"):
+                    intro.IntroductionHost(self.policy_path).execute(request(phase))
+            self.assertEqual(shared.calls, [], "no forward step ran")
+            result = intro.IntroductionHost(self.policy_path).execute(request("rollback"))
+        self.assertEqual(result["status"], "RESTORED", result)
+        (warning,) = result["warnings"]
+        self.assertEqual((warning["kind"], warning["modes"]), ("checkout-mode", {"checkout": "0o775", ".git": "0o775"}))
+        (written,) = runs.glob("result-rollback-*.json")
+        self.assertEqual(json.loads(written.read_text())["warnings"], result["warnings"])
+        journal = [json.loads(line) for line in (runs / "journal.jsonl").read_text().splitlines()]
+        start = [entry for entry in journal if entry["event"] == "phase-start" and entry["phase"] == "rollback"]
+        self.assertEqual(start[0]["warnings"], result["warnings"])
+        # Owner and links are still the rule for a rollback.
+        state = json.loads((runs / "state.json").read_text())
+        state.update(status="INTRODUCED", rollback_attempted=False)
+        self.write(runs / "state.json", state)
+        os.chown(self.repo / ".git", 1000, 1000)
+        with patch.object(intro, "HostOps", lambda **kwargs: shared), patch.object(intro, "local_host_key", lambda: "a" * 64), \
+                self.assertRaises(RuntimeError):
+            intro.IntroductionHost(self.policy_path).execute(request("rollback"))
 
 
 if __name__ == "__main__":

@@ -324,6 +324,11 @@ def backup(output, ready_timeout=120):
         if active != "0":
             raise RuntimeError("Database clients remain after stopping writers")
         write_json(directory / "emr-catalog.json", emr_catalog("kin-db", "kin"))
+        # D23: the cluster's roles, memberships, databases, tablespaces and schemas at the same pause, so that rehearse
+        # rebuilds them by the catalog replay (as the held captures do) instead of replaying pg_dumpall's GRANTED BY
+        # statements, which PostgreSQL 16 refuses in a cluster whose bootstrap superuser is not kin. Kept in the manifest:
+        # the set's component files stay exactly the ones its consumers (validation, rotation, export inventory) know.
+        manifest["role_catalog"] = role_catalog("kin-db")
         with (directory / "cluster-roles.sql").open("wb") as handle:
             run(["docker", "exec", "kin-db", "pg_dumpall", "-U", "kin", "--roles-only", "--no-role-passwords"], output=handle)
         for database in ("kin", "keycloak"):
@@ -476,15 +481,16 @@ def remove_owned_if_present(kind, name, token, timeout=600):
         raise RuntimeError("Could not verify temporary resource cleanup")
 
 
-def rehearse_audit(directory, manifest, container):
+def rehearse_audit(directory, manifest, container, user="postgres"):
     """RA-4: the copy this rehearsal restored, not the snapshot file, is compared with the sealed checkpoint. The export
-    of the restored kin (pg_dump in the rehearsal container) is judged in a new isolated verifier; nothing the restored
-    server computes is trusted. Success is the verifier's exit 0: a past event recorded in the checkpoint is carried,
-    a current guard or shape defect of the restored copy fails. Backups taken before sealing existed are not_sealed."""
+    of the restored kin (pg_dump in the rehearsal container, as that cluster's superuser `user`) is judged in a new
+    isolated verifier; nothing the restored server computes is trusted. Success is the verifier's exit 0: a past event
+    recorded in the checkpoint is carried, a current guard or shape defect of the restored copy fails. Backups taken
+    before sealing existed are not_sealed."""
     import ops_audit_integrity as audit
     if AUDIT_CHECKPOINT not in manifest.get("sha256", {}):
         return "not_sealed"
-    code, report = audit.verify(directory / AUDIT_CHECKPOINT, audit.DatabaseExport(container, "kin", "postgres"))
+    code, report = audit.verify(directory / AUDIT_CHECKPOINT, audit.DatabaseExport(container, "kin", user))
     return {"verified": code == 0, **report}
 
 
@@ -497,13 +503,16 @@ new AccessSeal(dir,new PrismaLedgerSql(db),new FailureJournal(dir)).recoverAtSta
 .then(()=>console.log('EMR_RESTORE_VERIFIED')).catch(()=>{process.exitCode=1}).finally(()=>db.$disconnect());"""
 
 
-def rehearse_held(directory, manifest):
+def rehearse_held(directory, manifest, *, daily=False):
     """The isolated restore check of a held capture (L-04c for B0, L-10c for B1): restored exactly as a rollback would,
     in a fresh networkless cluster of the product's shape (bootstrap superuser kin), with its roles replayed and owners
     and privileges kept; then the whole catalog, the row counts, the per-table projection and the Orthanc index with
     every attachment. B1 also gets its EMR tablespace, its EMR catalog (owners, ACL, placement) and its state archive,
-    whose seal must recover against the restored ledger."""
-    shape = manifest["shape"]
+    whose seal must recover against the restored ledger.
+    daily (D23): a daily EMR set that carries its role catalog in the manifest goes the same way in the post-EMR shape -
+    its roles and memberships replayed by the catalog (never pg_dumpall's GRANTED BY statements), the restored cluster's
+    role catalog compared with the manifest's, the AuditLog seal verified as kin (no projection: a daily set has none)."""
+    shape = "post" if daily else manifest["shape"]
     token = uuid.uuid4().hex
     name = "kin-rehearsal-" + token[:16]
     volume, state_volume = name + "-orthanc", name + "-emr-state"
@@ -526,13 +535,14 @@ def rehearse_held(directory, manifest):
             raise RuntimeError("Isolated PostgreSQL did not become ready")
         if shape == "post":
             run(["docker", "exec", "-u", "postgres", name, "mkdir", "-m", "700", EMR_TABLESPACE])
-        result["catalog"] = restore_snapshot(name, directory, "kin", shape)
+        result["catalog"] = restore_snapshot(name, directory, "kin", shape, source=manifest["role_catalog"] if daily else None)
         for database in PRE_DATABASES:
             if counts(name, database, "kin") != manifest["counts"][database]:
                 raise RuntimeError("Restored database row counts differ: " + database)
-        before = json.loads((directory / "projection.json").read_text(encoding="utf-8"))
-        if projection(name, columns={table: value["columns"] for table, value in before.items()}) != before:
-            raise RuntimeError("Restored rows differ from the snapshot's projection")
+        if not daily:
+            before = json.loads((directory / "projection.json").read_text(encoding="utf-8"))
+            if projection(name, columns={table: value["columns"] for table, value in before.items()}) != before:
+                raise RuntimeError("Restored rows differ from the snapshot's projection")
         if shape == "post":
             if emr_catalog(name, "kin") != json.loads((directory / "emr-catalog.json").read_text(encoding="utf-8")):
                 raise RuntimeError("Restored EMR owner/ACL/roles/tablespace differ")
@@ -545,7 +555,7 @@ def rehearse_held(directory, manifest):
             if checked != "EMR_RESTORE_VERIFIED":
                 raise RuntimeError("Restored database and external state do not agree")
             result["emr"] = {"owner_acl_preserved": True, "database_state_verified": True}
-        result["audit"] = rehearse_audit(directory, manifest, name)
+        result["audit"] = rehearse_audit(directory, manifest, name, user="kin")
         if result["audit"] != "not_sealed" and not result["audit"]["verified"]:
             raise RuntimeError("Restored AuditLog is not verified against its sealed checkpoint")
         temporary_run(["--network", "none", "--read-only",
@@ -555,7 +565,8 @@ def rehearse_held(directory, manifest):
         orthanc = json.loads(temporary_run(["--network", "none", "--read-only",
                                             "--mount", f"type=volume,source={volume},target=/restore,readonly",
                                             "--entrypoint", "python3", manifest["orthanc_image"], "-c", SQLITE_CHECK], timeout=300))
-        result.update(success=True, databases=list(PRE_DATABASES), orthanc=orthanc, projection="equal")
+        result.update(success=True, databases=list(PRE_DATABASES), orthanc=orthanc, projection="not captured" if daily else "equal",
+                      roles="catalog replay")
     finally:
         failures = []
         for kind, resource in (("container", name), ("volume", volume), *((("volume", state_volume),) if shape == "post" else ())):
@@ -575,6 +586,11 @@ def rehearse(directory):
     directory, manifest = validate_backup(directory)
     if manifest.get("kind") == HELD_KIND:
         return rehearse_held(directory, manifest)
+    if "emr" in manifest and manifest.get("role_catalog") is not None:
+        # D23: a daily EMR set made since its role catalog is captured: the catalog replay of the held path.
+        return rehearse_held(directory, manifest, daily=True)
+    # An older set (no role catalog): its pg_dumpall roles are replayed into a cluster bootstrapped as postgres, which
+    # PostgreSQL 16 refuses for a membership recorded as GRANTED BY kin (a known limit of such sets; see D23).
     token = uuid.uuid4().hex
     name = "kin-rehearsal-" + token[:16]
     volume = name + "-orthanc"
@@ -702,7 +718,9 @@ ROLE_CATALOG_SQL = """SET TimeZone='UTC'; SET DateStyle='ISO, YMD'; SELECT json_
   'schemas', (SELECT coalesce(json_agg(nspname::text ORDER BY nspname), '[]'::json) FROM pg_namespace
     WHERE nspname !~ '^pg_' AND nspname <> 'information_schema'))"""
 # Per database: owners and privileges of every schema, relation, function and default privilege outside the system
-# schemas (what pg_restore with owners and privileges must reproduce, compared after a restore, never inferred).
+# schemas (what pg_restore with owners and privileges must reproduce, compared after a restore, never inferred); D22 adds
+# column privileges (only columns that carry any), types and domains (not the automatic array and table row types), large
+# objects, publications with their tables, event triggers, foreign-data wrappers, foreign servers and user mappings.
 OBJECT_CATALOG_SQL = """SELECT json_build_object(
   'schemas', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
     (SELECT nspname::text AS name, pg_get_userbyid(nspowner) AS owner, """ + _acl("nspacl", "'n'::\"char\"", "nspowner") + """ AS acl
@@ -718,7 +736,41 @@ OBJECT_CATALOG_SQL = """SELECT json_build_object(
   'default_acl', (SELECT coalesce(json_agg(r ORDER BY owner, scope, kind), '[]'::json) FROM
     (SELECT pg_get_userbyid(d.defaclrole) AS owner, coalesce(n.nspname, '') AS scope, d.defaclobjtype::text AS kind,
      (SELECT coalesce(json_agg(x::text ORDER BY x::text), '[]'::json) FROM unnest(d.defaclacl) x) AS acl
-     FROM pg_default_acl d LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace) r))"""
+     FROM pg_default_acl d LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace) r),
+  'columns', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
+    (SELECT n.nspname || '.' || c.relname || '.' || a.attname AS name,
+     (SELECT json_agg(x::text ORDER BY x::text) FROM unnest(a.attacl) x) AS acl
+     FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE a.attnum > 0 AND NOT a.attisdropped AND a.attacl IS NOT NULL AND cardinality(a.attacl) > 0
+       AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema') r),
+  'types', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
+    (SELECT n.nspname || '.' || t.typname AS name, t.typtype::text AS kind, pg_get_userbyid(t.typowner) AS owner,
+     """ + _acl("t.typacl", "'T'::\"char\"", "t.typowner") + """ AS acl
+     FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+     WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+       AND NOT EXISTS (SELECT 1 FROM pg_type e WHERE e.typarray = t.oid)
+       AND (t.typrelid = 0 OR (SELECT c.relkind FROM pg_class c WHERE c.oid = t.typrelid) = 'c')) r),
+  'large_objects', (SELECT coalesce(json_agg(r ORDER BY id), '[]'::json) FROM
+    (SELECT l.oid::bigint AS id, pg_get_userbyid(l.lomowner) AS owner, """ + _acl("l.lomacl", "'L'::\"char\"", "l.lomowner") + """ AS acl
+     FROM pg_largeobject_metadata l) r),
+  'publications', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
+    (SELECT p.pubname::text AS name, pg_get_userbyid(p.pubowner) AS owner, p.puballtables AS all_tables,
+     json_build_array(p.pubinsert, p.pubupdate, p.pubdelete, p.pubtruncate, p.pubviaroot) AS actions,
+     (SELECT coalesce(json_agg(pr.prrelid::regclass::text ORDER BY pr.prrelid::regclass::text), '[]'::json)
+      FROM pg_publication_rel pr WHERE pr.prpubid = p.oid) AS relations
+     FROM pg_publication p) r),
+  'event_triggers', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
+    (SELECT e.evtname::text AS name, e.evtevent::text AS event, pg_get_userbyid(e.evtowner) AS owner,
+     e.evtfoid::regprocedure::text AS function, e.evtenabled::text AS enabled, e.evttags AS tags FROM pg_event_trigger e) r),
+  'foreign_data_wrappers', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
+    (SELECT w.fdwname::text AS name, pg_get_userbyid(w.fdwowner) AS owner, """ + _acl("w.fdwacl", "'F'::\"char\"", "w.fdwowner") + """ AS acl
+     FROM pg_foreign_data_wrapper w) r),
+  'foreign_servers', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
+    (SELECT s.srvname::text AS name, w.fdwname::text AS wrapper, pg_get_userbyid(s.srvowner) AS owner,
+     """ + _acl("s.srvacl", "'S'::\"char\"", "s.srvowner") + """ AS acl
+     FROM pg_foreign_server s JOIN pg_foreign_data_wrapper w ON w.oid = s.srvfdw) r),
+  'user_mappings', (SELECT coalesce(json_agg(r ORDER BY server, member), '[]'::json) FROM
+    (SELECT m.srvname::text AS server, m.usename::text AS member FROM pg_user_mappings m) r))"""
 PRE_DATABASES = ("kin", "keycloak")
 DEFAULT_TABLESPACES = ("pg_default", "pg_global")
 MIGRATIONS_SQL = """SELECT coalesce(json_agg(json_build_array(migration_name, checksum, finished_at IS NOT NULL,
@@ -867,11 +919,15 @@ def restore_pre_snapshot(container, directory, user="kin"):
     return restore_snapshot(container, directory, user, shape="pre")
 
 
-def restore_snapshot(container, directory, user="kin", shape="pre"):
+def restore_snapshot(container, directory, user="kin", shape="pre", source=None):
     """restore_pre_snapshot for either held shape; a post-EMR snapshot also gets its EMR tablespace (owned by the
-    replayed kin_emr_owner, at the product's fixed path) before its databases are restored."""
+    replayed kin_emr_owner, at the product's fixed path) before its databases are restored. source: a daily set's role
+    catalog (D23; from its manifest, without per-object owners and privileges), compared as the role catalog only;
+    otherwise the snapshot's catalog.json, compared whole."""
     directory = Path(directory)
-    source = json.loads((directory / "catalog.json").read_text(encoding="utf-8"))
+    whole = source is None
+    if whole:
+        source = json.loads((directory / "catalog.json").read_text(encoding="utf-8"))
     replayed = replay_roles(container, source, user, shape)
     probe = ["docker", "exec", container, "psql", "-X", "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-qAt", "-c"]
     if shape == "post":
@@ -887,7 +943,7 @@ def restore_snapshot(container, directory, user="kin", shape="pre"):
         with (directory / (database + ".dump")).open("rb") as handle:
             run(["docker", "exec", "-i", container, "pg_restore", "-U", user, "-d", "postgres", "--create", "--exit-on-error"],
                 input_file=handle, timeout=1800)
-    restored = cluster_catalog(container, user)
+    restored = cluster_catalog(container, user) if whole else role_catalog(container, user)
     if restored != source:
         differing = sorted(key for key in set(restored) | set(source) if restored.get(key) != source.get(key))
         raise RuntimeError("Restored catalog differs from the snapshot: " + ",".join(differing))
