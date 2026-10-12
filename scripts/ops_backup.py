@@ -1,10 +1,15 @@
 """Consistent KIN backup and isolated restore rehearsal; never restores over production.
 
-Usage: python scripts/ops_backup.py backup --output <outside-repository-directory>
+Usage: python scripts/ops_backup.py backup --output <outside-repository-directory> [--rotate-keep N]
        python scripts/ops_backup.py rehearse <completed-backup-directory>
+       python scripts/ops_backup.py rotate --root <backup-root> --keep N [--protect NAME ...] [--dry-run]
 The running write services pause during backup and are resumed in finally. A complete backup's AuditLog rows are then
 sealed into audit-checkpoint.json and the backup root's ledger (scripts/ops_audit_integrity.py; the root needs a one-time
 `ops_audit_integrity.py init`), and rehearse verifies its restored copy against that seal.
+
+The EMR-introduction release mode (scripts/ops_emr_introduction.py) uses capture_held() instead of backup(): it captures a
+snapshot while the caller keeps every writer fenced and never resumes them itself (the release decides when they return).
+rotate() keeps the newest N complete daily sets and never touches release, held, audit-retained or protected sets.
 """
 from __future__ import annotations
 
@@ -395,6 +400,7 @@ def backup(output, ready_timeout=120):
     if manifest.get("backup_error"):
         raise RuntimeError("Backup preserved; audit " + manifest["backup_error"]["stage"] + " needs an operator: "
                            + manifest["backup_error"]["type"])
+    return directory
 
 
 def validate_backup(directory):
@@ -567,6 +573,380 @@ new AccessSeal(dir,new PrismaLedgerSql(db),new FailureJournal(dir)).recoverAtSta
     print(json.dumps(result))
 
 
+# ── Held capture: the EMR-introduction release mode's B0 (before the EMR storage) and B1 (after it) ──
+# The legacy manifest keys of running_images name roles ("kin-api" is "the API"), so ops.rehearse() and validate_backup()
+# accept a held capture unchanged. The actual container names come from the caller's target manifest.
+ROLE_KEYS = {"api": "kin-api", "keycloak": "kin-keycloak", "orthanc": "kin-orthanc", "db": "kin-db", "proxy": "kin-proxy"}
+WRITER_ROLES = ("api", "keycloak", "orthanc", "proxy")
+HELD_KIND = "held-capture"
+HELD_LABEL = re.compile(r"[a-z][a-z0-9]{0,15}(?:-[a-z0-9]{1,16}){0,3}")
+HELD_NAME = re.compile(r"[a-z][a-z0-9-]{0,63}-\d{8}T\d{6}Z-[a-f0-9]{8}")
+HELD_EXTRA = ("cluster-roles.sql", "catalog.json", "migrations.json", "projection.json", "metadata.json")
+EMR_ROLES = ("kin_emr_owner", "kin_runtime", "kin_emr_reader", "kin_emr_retention")
+RESOURCE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
+SQL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")   # quoted into SQL text: plain identifiers only
+CONFIG_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+
+ROLE_CATALOG_SQL = """SELECT json_build_object(
+  'roles', (SELECT coalesce(json_agg(r ORDER BY rolname), '[]'::json) FROM
+    (SELECT rolname, rolsuper, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolinherit
+     FROM pg_roles WHERE rolname !~ '^pg_') r),
+  'memberships', (SELECT coalesce(json_agg(r ORDER BY granted, member), '[]'::json) FROM
+    (SELECT a.rolname AS granted, b.rolname AS member FROM pg_auth_members m JOIN pg_roles a ON a.oid=m.roleid
+     JOIN pg_roles b ON b.oid=m.member WHERE a.rolname !~ '^pg_' OR b.rolname !~ '^pg_') r),
+  'databases', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
+    (SELECT datname AS name, pg_get_userbyid(datdba) AS owner FROM pg_database WHERE NOT datistemplate) r),
+  'tablespaces', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
+    (SELECT spcname AS name, pg_get_userbyid(spcowner) AS owner, pg_tablespace_location(oid) AS location FROM pg_tablespace) r),
+  'schemas', (SELECT coalesce(json_agg(nspname::text ORDER BY nspname), '[]'::json) FROM pg_namespace
+    WHERE nspname !~ '^pg_' AND nspname <> 'information_schema'))"""
+MIGRATIONS_SQL = """SELECT coalesce(json_agg(json_build_array(migration_name, checksum, finished_at IS NOT NULL,
+  rolled_back_at IS NOT NULL) ORDER BY migration_name COLLATE "C"), '[]'::json) FROM "_prisma_migrations\""""
+# Fixed output settings: a projection must not change because a session's display defaults differ.
+PROJECTION_SETTINGS = ("SET TimeZone='UTC'; SET DateStyle='ISO, YMD'; SET IntervalStyle='postgres'; "
+                       "SET extra_float_digits=1; SET bytea_output='hex'; ")
+
+
+def psql_json(container, database, sql, user="kin", timeout=300):
+    return json.loads(text(["docker", "exec", container, "psql", "-X", "-U", user, "-d", database, "-v", "ON_ERROR_STOP=1",
+                            "-qAt", "-c", sql], timeout=timeout))
+
+
+def role_catalog(container, user="kin"):
+    """Cluster roles, memberships, database owners, tablespaces and schemas: what pg_dump never carries."""
+    return psql_json(container, "kin", ROLE_CATALOG_SQL, user)
+
+
+def migration_rows(container, user="kin"):
+    """The applied Prisma history as [name, checksum, finished, rolled_back], in Prisma's name order."""
+    return psql_json(container, "kin", MIGRATIONS_SQL, user)
+
+
+def projection(container, database="kin", user="kin", columns=None):
+    """Per public table: row count and a SHA-256 over the rows of the given columns (default: every current column).
+
+    Recomputed after a migration with the snapshot's own column lists, it proves the existing rows kept every value they
+    had: a new column is outside the projection, a changed, dropped or rewritten value is a different digest."""
+    if columns is None:
+        found = psql_json(container, database, """SELECT coalesce(json_object_agg(t.tablename, (SELECT json_agg(c.column_name::text
+          ORDER BY c.ordinal_position) FROM information_schema.columns c WHERE c.table_schema='public'
+          AND c.table_name=t.tablename)), '{}'::json) FROM pg_tables t WHERE t.schemaname='public'""", user)
+        columns = {name: found[name] for name in sorted(found)}
+    if not columns:
+        raise RuntimeError("Empty projection source")
+    selects = []
+    for table, names in columns.items():
+        if not SQL_NAME.fullmatch(table) or not names or any(not SQL_NAME.fullmatch(name) for name in names):
+            raise RuntimeError("Unexpected table or column name")
+        row = "ROW(" + ", ".join('"' + name + '"' for name in names) + ")::text"
+        selects.append(f"SELECT '{table}' AS name, (SELECT json_build_array(count(*), encode(sha256(convert_to("
+                       f"coalesce(string_agg(r, E'\\n' ORDER BY r COLLATE \"C\"), ''), 'UTF8')), 'hex')) FROM "
+                       f"(SELECT {row} AS r FROM public.\"{table}\") s) AS d")
+    result = psql_json(container, database, PROJECTION_SETTINGS + "SELECT json_object_agg(name, d) FROM ("
+                       + " UNION ALL ".join(selects) + ") x", user)
+    return {table: {"columns": list(names), "count": result[table][0], "sha256": result[table][1]}
+            for table, names in columns.items()}
+
+
+def env_names(path):
+    """Variable names of an env file, never values."""
+    names = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            name = stripped.split("=", 1)[0].strip()
+            if ENV_NAME.fullmatch(name):
+                names.append(name)
+    return sorted(set(names))
+
+
+def _held_resources(resources):
+    containers, volumes = resources.get("containers"), resources.get("volumes")
+    if (type(containers) is not dict or set(containers) != set(ROLE_KEYS) or type(volumes) is not dict
+            or not {"orthanc", "pg"} <= set(volumes)
+            or any(type(name) is not str or not RESOURCE_NAME.fullmatch(name)
+                   for name in (*containers.values(), *volumes.values()))):
+        raise RuntimeError("Incomplete capture resources")
+    return containers, volumes
+
+
+def _volume_of(container, destination):
+    mounts = [m for m in container.get("Mounts") or [] if m.get("Destination") == destination]
+    if len(mounts) != 1 or mounts[0].get("Type") != "volume":
+        raise RuntimeError("Expected one named volume at " + destination)
+    return mounts[0]["Name"]
+
+
+def capture_held(output, resources, *, shape, label, config=(), ready_free=512 * 1024 * 1024):
+    """One consistent snapshot while the caller holds every writer fenced; returns the new directory.
+
+    shape 'pre' is the Stage-5 form (no EMR storage may exist yet); 'post' requires the EMR storage and archives its API
+    state volume at the same pause. This function stops and starts nothing: writers that are running refuse the
+    capture, and on any failure they stay as the caller left them. The caller releases them (or rolls back) explicitly.
+    """
+    if shape not in ("pre", "post") or type(label) is not str or not HELD_LABEL.fullmatch(label):
+        raise RuntimeError("Invalid held capture request")
+    containers, volumes = _held_resources(resources)
+    if shape == "post" and not RESOURCE_NAME.fullmatch(str(volumes.get("emr_state", ""))):
+        raise RuntimeError("Post-EMR capture needs the EMR state volume")
+    parent = Path(output).resolve()
+    if parent == ROOT or ROOT in parent.parents:
+        raise RuntimeError("Backups containing secrets must be outside the Git repository")
+    extra = {}
+    for name, source in dict(config).items():
+        if not CONFIG_NAME.fullmatch(name) or name in (*FILES, *HELD_EXTRA, *EMR_FILES, "manifest.json"):
+            raise RuntimeError("Invalid configuration component name")
+        extra[name] = Path(source)
+    for name in FILES[3:]:
+        if not (ROOT / name).is_file():
+            raise RuntimeError("Configuration file missing: " + name)
+    info = json.loads(text(["docker", "inspect", *containers.values()]))
+    by_role = {}
+    for role, name in containers.items():
+        found = [item for item in info if item.get("Name") == "/" + name]
+        if len(found) != 1:
+            raise RuntimeError("Capture resource not found: " + role)
+        by_role[role] = found[0]
+    db = by_role["db"]
+    if not db["State"]["Running"] or any(item["State"].get("Restarting") for item in by_role.values()):
+        raise RuntimeError("PostgreSQL must run and nothing may be restarting")
+    running = [role for role in WRITER_ROLES if by_role[role]["State"]["Running"]]
+    if running:
+        raise RuntimeError("Writers are not fenced: " + ", ".join(running))
+    if _volume_of(by_role["orthanc"], "/var/lib/orthanc/db") != volumes["orthanc"]:
+        raise RuntimeError("Orthanc volume differs from the target manifest")
+    if _volume_of(db, "/var/lib/postgresql/data") != volumes["pg"]:
+        raise RuntimeError("Database volume differs from the target manifest")
+    db_name = containers["db"]
+    roles = role_catalog(db_name)
+    present = {role["rolname"] for role in roles["roles"]} & set(EMR_ROLES)
+    if shape == "pre":
+        if present or "emr_access" in roles["schemas"] or any(m.get("Destination") == EMR_STATE for m in by_role["api"].get("Mounts") or []):
+            raise RuntimeError("A pre-EMR capture found EMR storage")
+        state_volume = None
+    else:
+        state_volume = _volume_of(by_role["api"], EMR_STATE)
+        if state_volume != volumes["emr_state"] or present != set(EMR_ROLES):
+            raise RuntimeError("Post-EMR capture resources differ from the target manifest")
+    active = text(["docker", "exec", db_name, "psql", "-X", "-U", "kin", "-d", "kin", "-qAt", "-c",
+                   "SELECT count(*) FROM pg_stat_activity WHERE datname IN ('kin','keycloak') "
+                   "AND backend_type='client backend' AND pid<>pg_backend_pid();"])
+    if active != "0":
+        raise RuntimeError("Database clients remain while writers are fenced")
+    prepare_backup_parent(parent)
+    sizes = [int(temporary_run(["--network", "none", "--read-only", "--mount",
+                                f"type=volume,source={volume},target=/source,readonly", "--entrypoint", "du",
+                                db["Image"], "-sk", "/source"]).split()[0]) for volume in (volumes["orthanc"], state_volume) if volume]
+    database_bytes = int(text(["docker", "exec", db_name, "psql", "-X", "-U", "kin", "-d", "kin", "-qAt", "-c",
+                               "SELECT pg_database_size('kin') + pg_database_size('keycloak');"]))
+    if shutil.disk_usage(parent).free < 2 * (sum(sizes) * 1024 + database_bytes) + ready_free:
+        raise RuntimeError("Insufficient free space for the capture and its restore margin")
+    now = datetime.now(timezone.utc)
+    directory = parent / (label + "-" + now.strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8])
+    directory.mkdir(mode=0o700)
+    manifest = {"format": 1, "kind": HELD_KIND, "shape": shape, "label": label, "complete": False,
+                "created_utc": now.isoformat(), "hold": {"writers_fenced": list(WRITER_ROLES), "resumed_by_capture": False},
+                "git_sha": text(["git", "rev-parse", "HEAD"]),
+                "git_dirty": bool(text(["git", "status", "--porcelain", "--untracked-files=no"])),
+                "postgres_image": db["Image"], "orthanc_image": by_role["orthanc"]["Image"],
+                "running_images": {ROLE_KEYS[role]: {"id": item["Image"], "configured": item["Config"].get("Image")}
+                                   for role, item in by_role.items()},
+                "resources": {"containers": dict(containers), "volumes": dict(volumes)}, "counts": {}}
+    if shape == "post":
+        manifest["emr"] = {"state_volume": state_volume, "tablespace": "kin_emr_access", "same_pause": True}
+    write_json(directory / "manifest.json", manifest)
+    started = time.monotonic()
+    stage = "catalog"
+    try:
+        write_json(directory / "catalog.json", roles)
+        write_json(directory / "migrations.json", migration_rows(db_name))
+        stage = "projection"
+        write_json(directory / "projection.json", projection(db_name))
+        if shape == "post":
+            write_json(directory / "emr-catalog.json", emr_catalog(db_name, "kin"))
+        with (directory / "cluster-roles.sql").open("wb") as handle:
+            run(["docker", "exec", db_name, "pg_dumpall", "-U", "kin", "--roles-only", "--no-role-passwords"], output=handle)
+        for database in ("kin", "keycloak"):
+            stage = "dump " + database
+            manifest["counts"][database] = counts(db_name, database, "kin")
+            with (directory / (database + ".dump")).open("wb") as handle:
+                run(["docker", "exec", db_name, "pg_dump", "-U", "kin", "-d", database, "-Fc", "--create"], output=handle)
+        stage = "archive Orthanc"
+        with (directory / "orthanc.tgz").open("wb") as handle:
+            temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={volumes['orthanc']},target=/source,readonly",
+                           "--entrypoint", "tar", db["Image"], "-czf", "-", "-C", "/source", "."], timeout=1800, output=handle)
+        if shape == "post":
+            stage = "archive EMR state at the same pause"
+            with (directory / "emr-state.tgz").open("wb") as handle:
+                temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={state_volume},target=/source,readonly",
+                               "--entrypoint", "tar", db["Image"], "-czf", "-", "-C", "/source", "."], timeout=1800, output=handle)
+        stage = "copy configuration and metadata"
+        for name in FILES[3:]:
+            shutil.copyfile(ROOT / name, directory / name)
+        for name, source in extra.items():
+            shutil.copyfile(source, directory / name)
+        volume_ids = {}
+        for key, volume in sorted(volumes.items()):
+            found = run(["docker", "volume", "inspect", volume], check=False)
+            if found.returncode == 0:
+                item = json.loads(found.stdout.decode("utf-8"))[0]
+                volume_ids[key] = {"name": item["Name"], "created": item.get("CreatedAt"), "driver": item.get("Driver")}
+        write_json(directory / "metadata.json", {"env_names": env_names(ROOT / ".env"), "volumes": volume_ids,
+                                                  "config": sorted([*FILES[3:], *extra])})
+        components = held_components(manifest, extra)
+        for name in components:
+            path = directory / name
+            path.chmod(0o600)
+            if not path.stat().st_size:
+                raise RuntimeError("Empty capture component")
+        manifest["sha256"] = {name: digest(directory / name) for name in components}
+        manifest["bytes"] = {name: (directory / name).stat().st_size for name in components}
+        manifest["config"] = sorted(extra)
+        manifest["complete"] = True
+    except BaseException as error:
+        manifest["backup_error"] = {"stage": stage, "type": type(error).__name__}
+        raise
+    finally:
+        manifest["capture_seconds"] = round(time.monotonic() - started, 3)
+        write_json(directory / "manifest.json", manifest)
+        print(json.dumps({"capture": str(directory), "shape": shape, "complete": manifest["complete"],
+                          "backup_error": manifest.get("backup_error"), "writers_resumed": False}), flush=True)
+    return directory
+
+
+def held_components(manifest, extra=()):
+    base = (*FILES, *HELD_EXTRA, *(EMR_FILES if manifest.get("shape") == "post" else ()))
+    return tuple(dict.fromkeys((*base, *sorted(extra))))
+
+
+def validate_held(directory, manifest_sha256=None):
+    """A complete held capture: manifest (optionally its exact bytes), every component's checksum, safe archives."""
+    directory = Path(directory).resolve(strict=True)
+    raw = (directory / "manifest.json").read_bytes()
+    if manifest_sha256 is not None and hashlib.sha256(raw).hexdigest() != manifest_sha256:
+        raise RuntimeError("Held capture manifest differs from the recorded one")
+    manifest = json.loads(raw.decode("utf-8"))
+    if (manifest.get("format") != 1 or manifest.get("kind") != HELD_KIND or manifest.get("complete") is not True
+            or manifest.get("shape") not in ("pre", "post") or not HELD_NAME.fullmatch(directory.name)):
+        raise RuntimeError("Held capture is incomplete or of an unknown form")
+    components = held_components(manifest, manifest.get("config") or ())
+    if set(manifest.get("sha256", {})) != set(components):
+        raise RuntimeError("Held capture components differ from its shape")
+    for name in components:
+        path = directory / name
+        if path.is_symlink() or not path.is_file() or digest(path) != manifest["sha256"][name]:
+            raise RuntimeError("Held capture component checksum mismatch: " + name)
+    for archive_name, index in (("orthanc.tgz", True), *((("emr-state.tgz", False),) if manifest["shape"] == "post" else ())):
+        found_index = False
+        with tarfile.open(directory / archive_name, "r|gz") as archive:
+            for entry in archive:
+                member = PurePosixPath(entry.name)
+                if member.is_absolute() or ".." in member.parts or not (entry.isfile() or entry.isdir()):
+                    raise RuntimeError("Unsafe archive entry: " + archive_name)
+                found_index |= str(member) == "index" and entry.isfile()
+        if index and not found_index:
+            raise RuntimeError("Orthanc archive has no SQLite index")
+    return directory, manifest, hashlib.sha256(raw).hexdigest()
+
+
+# ── Rotation of the daily backup sets (D1047: the host kept every daily set) ──
+DAILY_NAME = re.compile(r"\d{8}-\d{6}-[a-f0-9]{8}")   # the folders backup() creates; ops_monitor reads the same names
+HOLD_FILE = "restore-hold.json"
+ROTATING = ".rotating-"
+
+
+def _retention_window(root, now):
+    """Sets the audit ledger still keeps (ops_audit_integrity retention), and declared checkpoints it does not list."""
+    import ops_audit_integrity as audit
+    try:
+        ledger = audit.read_ledger(root)
+    except audit.LedgerMissing:
+        return set(), set(audit.declared_folders(root))
+    years = audit.ledger_years(ledger["entries"])
+    kept = set()
+    for entry in ledger["entries"]:
+        if entry["kind"] == "seal":
+            created = audit.parse_utc(entry["created_utc"])
+            if now < max(audit.parse_utc(entry["retain_until"]), audit.years_after(created, years)):
+                kept.add(entry["backup"])
+    listed = {entry["backup"] for entry in ledger["entries"] if entry["kind"] == "seal"}
+    return kept, {name for name in audit.declared_folders(root) if name not in listed}
+
+
+def rotate(root, keep, protect=(), dry_run=False, now=None):
+    """Keep the newest `keep` complete daily sets; delete only older complete daily sets that nothing else retains.
+
+    Never deleted: any name that is not a daily set (s4-/s5-/stage/release/held captures, logs, latest-verified-*.json),
+    the protected names (the set just written), a set with restore-hold.json, a set named by latest-verified-*.json, an
+    incomplete or unreadable set, a set the audit ledger still retains or a declared checkpoint it does not list. A
+    deletion first renames the set out of the daily namespace, so a reader never sees half a set. The caller holds the
+    operations lock (no backup or rehearsal runs meanwhile)."""
+    if type(keep) is not int or not 1 <= keep <= 365:
+        raise RuntimeError("Rotation keeps between 1 and 365 generations")
+    root = Path(root)
+    if root.is_symlink() or not root.is_dir():
+        raise RuntimeError("Backup root is not a directory")
+    root = root.resolve()
+    if root == ROOT or ROOT in root.parents:
+        raise RuntimeError("The backup root must be outside the Git repository")
+    if os.name == "posix":
+        info = root.stat()
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
+            raise RuntimeError("Backup root must be private and owned by the current user")
+    now = now or datetime.now(timezone.utc)
+    audit_kept, undeclared = _retention_window(root, now)
+    referenced = set()
+    for path in root.glob("latest-verified-*.json"):
+        try:
+            named = Path(json.loads(path.read_text(encoding="utf-8")).get("backup", "")).name
+        except (OSError, ValueError, AttributeError):
+            raise RuntimeError("Unreadable latest-verified record: " + path.name) from None
+        referenced.add(named)
+    retained, complete = {}, []
+    for entry in sorted(root.iterdir(), key=lambda item: item.name):
+        if not DAILY_NAME.fullmatch(entry.name):
+            continue
+        if entry.is_symlink() or not entry.is_dir():
+            raise RuntimeError("Invalid backup directory: " + entry.name)
+        reason = ("protected" if entry.name in protect else "hold" if (entry / HOLD_FILE).exists()
+                  else "latest-verified" if entry.name in referenced else "audit-retention" if entry.name in audit_kept
+                  else "audit-undeclared" if entry.name in undeclared else None)
+        try:
+            manifest = json.loads((entry / "manifest.json").read_text(encoding="utf-8"))
+            whole = manifest.get("format") == 1 and manifest.get("complete") is True
+        except (OSError, ValueError):
+            whole = False
+        if not whole:
+            reason = reason or "incomplete"
+        if reason:
+            retained[entry.name] = reason
+        if whole:
+            complete.append(entry.name)
+    generations = sorted(complete, reverse=True)[:keep]
+    candidates = [name for name in sorted(complete) if name not in generations and name not in retained]
+    leftovers = sorted(item.name for item in root.iterdir() if item.name.startswith(ROTATING) and item.is_dir()
+                       and not item.is_symlink() and DAILY_NAME.fullmatch(item.name[len(ROTATING):]))
+    result = {"root": str(root), "keep": keep, "dry_run": dry_run, "generations": generations, "retained": retained,
+              "would_delete" if dry_run else "deleted": [], "resumed": []}
+    if dry_run:
+        result["would_delete"] = candidates
+        result["leftovers"] = leftovers
+        return result
+    for name in candidates:
+        source = root / name
+        if source.is_symlink() or not source.is_dir() or (source / HOLD_FILE).exists():
+            raise RuntimeError("Rotation candidate changed: " + name)
+        moved = root / (ROTATING + name)
+        os.rename(source, moved)
+        shutil.rmtree(moved)
+        result["deleted"].append(name)
+    for name in leftovers:
+        shutil.rmtree(root / name)
+        result["resumed"].append(name)
+    return result
+
+
 def main():
     if hasattr(os, "umask"):
         os.umask(0o077)
@@ -575,12 +955,28 @@ def main():
     backup_parser = commands.add_parser("backup")
     backup_parser.add_argument("--output", required=True, help="Parent directory outside the repository")
     backup_parser.add_argument("--ready-timeout", type=int, default=120, help="Seconds to wait after resuming writers (1-900)")
+    backup_parser.add_argument("--rotate-keep", type=int, default=None,
+                               help="After a complete, error-free backup, keep this many daily generations (1-365)")
     commands.add_parser("rehearse").add_argument("directory")
+    rotate_parser = commands.add_parser("rotate")
+    rotate_parser.add_argument("--root", required=True, help="The backup root holding the daily sets")
+    rotate_parser.add_argument("--keep", type=int, required=True)
+    rotate_parser.add_argument("--protect", action="append", default=[], help="A set name never to delete")
+    rotate_parser.add_argument("--dry-run", action="store_true", help="List what would be deleted; change nothing")
     args = parser.parse_args()
+    if args.action == "rotate":
+        # Rotation reads and deletes host files only; it needs no Docker, but the lock keeps backup/rehearse out.
+        with lock():
+            print(json.dumps(rotate(args.root, args.keep, set(args.protect), args.dry_run)))
+        return
     require_local_docker()
     with lock():
         if args.action == "backup":
-            backup(args.output, args.ready_timeout)
+            if args.rotate_keep is not None and not 1 <= args.rotate_keep <= 365:
+                raise RuntimeError("Rotation keeps between 1 and 365 generations")
+            directory = backup(args.output, args.ready_timeout)
+            if args.rotate_keep is not None:
+                print(json.dumps({"rotation": rotate(args.output, args.rotate_keep, {directory.name})}), flush=True)
         else:
             rehearse(args.directory)
 

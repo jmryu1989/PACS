@@ -1372,6 +1372,38 @@ checks ownership labels and removes only the fixture's containers/network/tag.
 The isolated `ops_deploy_entry.py` requires a separately provisioned root-owned
 policy/library/repository and request-bound operator evidence. Running scripts
 from a developer checkout does not grant deployment authority.
+
+## EMR-introduction release mode (INTERIM-RELEASE-TOOLS)
+
+The API-only runner keeps refusing a release that brings the EMR-B storage; `scripts/ops_emr_introduction.py` is
+that release's own mode (requests with `"mode": "emr-introduction"` are routed there by `ops_deploy_entry.py`, with
+its own disabled-by-default policy `/etc/kin-deploy/emr-introduction.json`; `python scripts/ops_emr_introduction.py
+example policy|target` prints placeholders). Phases follow one another only: capture (observe-before, write fence,
+pre-EMR B0 with the writers held, isolated B0 restore check) → introduce (provisioning, installer migration, Keycloak
+cache option, member-rights import, API as node/kin_runtime, UI/proxy, ingress still fenced) → verify (fenced HTTPS
+smoke, the one-shot EMR probe `scripts/ops_emr_probe.py`, B1 and its same-point restore) → reopen; release (before any
+database change) and rollback (B0 into fresh recovery volumes) are the exits. Production's introduce requires the
+local-restore receipt a rehearsal target produced from the same B0 (seed → … → rollback → receipt); external backup
+stays OFF and no offsite receipt is claimed.
+
+- `python -B tests/ops_emr_introduction_test.py`: plan/target/request/approval/receipt validation, the clone/target
+  allowlist, the preflight additions of `ops_deploy_preflight.py` as functions of observed facts, and the phase state
+  machine (order, retained lock, budget/window, revert before the first database change, automatic rollback only when
+  no one-shot worker can be alive, none after an unknown end or past the point of no return). Its root-only class
+  needs an isolated Linux root fixture.
+- `python -B tests/ops_backup_held_test.py`: `ops_backup.capture_held()` never starts or stops a container, refuses
+  running writers before writing, and its result validates as a held capture and as the backup format
+  `ops_backup.rehearse()` restores. `python -B tests/ops_backup_rotation_test.py`: `ops_backup.py rotate` /
+  `backup --rotate-keep N` keep N complete daily sets and never delete release/held/protected/latest-verified,
+  incomplete or audit-retained sets.
+- `python -B tests/ops_emr_probe_test.py`: the probe verdict; with `KIN_TEST_API_IMAGE` set it runs the probe script
+  in that production image against a disposable provisioned and migrated PostgreSQL.
+- `tests/ops_deploy_host_container_test.py EmrIntroductionRehearsal` (opt-in `KIN_TEST_EMR_REHEARSAL=1` plus
+  `KIN_TEST_PREVIOUS_API_IMAGE`, `KIN_TEST_PREVIOUS_PROXY_IMAGE` built from the previous commit and
+  `KIN_TEST_API_IMAGE`, `KIN_TEST_PROXY_IMAGE` from the target): the fully synthetic rehearsal with the product's own
+  compose files on a local daemon - a source stack's B0 seeds a clone with other names and secrets, which runs every
+  phase through rollback and produces the receipt. It is not a rehearsal of a production backup copy, a real realm,
+  production TLS or data volume; that is the separate rehearsal on a disposable host.
 # 뷰어 반전 정밀도
 
 `node --test tests/viewer_precision_test.cjs`는 고정 upstream 함수 fingerprint,

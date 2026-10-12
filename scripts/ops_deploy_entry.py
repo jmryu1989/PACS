@@ -36,10 +36,9 @@ def main():
         os.umask(0o077)
         sys.dont_write_bytecode = True
         sys.path.insert(0, str(library))
-        from ops_deploy_host import HostAdapter
-        adapter = HostAdapter("/etc/kin-deploy/policy.json")
         if sys.argv[1:] == ["notify"]:
-            result = adapter.drain()
+            from ops_deploy_host import HostAdapter
+            result = HostAdapter("/etc/kin-deploy/policy.json").drain()
         elif len(sys.argv) == 1:
             raw = bytearray()
             deadline = time.monotonic() + 10
@@ -53,11 +52,26 @@ def main():
                 raw.extend(chunk)
                 if len(raw) > 8192:
                     raise RuntimeError()
-            result = adapter.execute(bytes(raw))
+            # The EMR-introduction release mode has its own policy, request schema and module; every other request
+            # takes the unchanged API-only path, which validates (and refuses) it in full.
+            try:
+                body = json.loads(bytes(raw).decode("utf-8"))
+            except Exception:
+                body = None
+            if type(body) is dict and body.get("mode") == "emr-introduction":
+                for name in ("ops_emr_introduction", "ops_emr_probe"):
+                    if not (library / (name + ".py")).is_file():
+                        raise RuntimeError()
+                from ops_emr_introduction import IntroductionHost
+                result = IntroductionHost("/etc/kin-deploy/emr-introduction.json").execute(bytes(raw))
+            else:
+                from ops_deploy_host import HostAdapter
+                result = HostAdapter("/etc/kin-deploy/policy.json").execute(bytes(raw))
         else:
             raise RuntimeError()
         print(json.dumps(result))
-        return 0 if result.get("status") == "DEPLOYED" or "notifications_accepted" in result else 1
+        return 0 if (result.get("status") == "DEPLOYED" or "notifications_accepted" in result
+                     or result.get("phase_passed") is True) else 1
     except Exception:
         print('{"status":"REJECTED","stage":"entry"}', file=sys.stderr)
         return 1

@@ -160,6 +160,188 @@ def preflight(body):
         return observe(body)
 
 
+# ── EMR introduction (INTERIM-RELEASE-TOOLS, D1039/D1043): checks over facts the introduction mode observed ──
+# scripts/ops_emr_introduction.py is the only caller. Everything above stays the API-only path, which keeps refusing a
+# release that brings the EMR-B storage. Each check raises RuntimeError with a fixed message (the STOP code); none of
+# them reads a secret value into its message, and none of them mutates anything.
+MIGRATION_NAME = re.compile(r"0_init|\d{14}_[a-z0-9_]{1,80}")
+EMR_ROLES = ("kin_emr_owner", "kin_runtime", "kin_emr_reader", "kin_emr_retention")
+ELEVATED = ("rolsuper", "rolcreatedb", "rolcreaterole", "rolreplication", "rolbypassrls")
+WRITERS = ("api", "keycloak", "orthanc", "proxy")
+SECRET_FORM = re.compile(r"[A-Za-z0-9._~-]{24,}")
+APP_ROLES = ("radiologist", "technician", "admin", "clinician")
+
+
+def check_migration_rows(rows, expected):
+    """The applied history equals the expected list exactly: names and SQL checksums, every one finished, none rolled back."""
+    require(type(rows) is list and all(type(row) is list and len(row) == 4 for row in rows), "Unreadable migration history")
+    require([[row[0], row[1]] for row in rows] == [list(item) for item in expected], "Migration names or checksums differ")
+    require(all(row[2] is True and row[3] is False for row in rows), "A migration is unfinished or rolled back")
+
+
+def check_baseline(observed, plan):
+    """Before anything changes: the host is exactly the plan's previous release (fresh observation, not the old record)."""
+    previous = plan["previous"]
+    require(observed["head"] == previous["sha"] and observed["dirty"] is False, "Checkout is not the clean previous release")
+    require(observed["images"] == previous["images"], "Running service images differ from the previous release")
+    require(all(observed["running"].get(role) is True for role in ("db", *WRITERS)), "A service of the previous release is not running")
+    require(not any(observed["restarting"].values()), "A service is restarting")
+    check_migration_rows(observed["migrations"], plan["migrations"]["before"])
+    roles = {role["rolname"] for role in observed["catalog"]["roles"]}
+    require(not roles & set(EMR_ROLES) and "emr_access" not in observed["catalog"]["schemas"]
+            and not any(space["name"] == "kin_emr_access" for space in observed["catalog"]["tablespaces"]),
+            "EMR storage already exists on the source")
+    require(observed["emr_volumes"] == [], "EMR volumes already exist on the source")
+    require(observed["api_state_mounts"] == 0, "The previous API already has an EMR state mount")
+    require(observed["cron"] in ("matched", "not-managed"), "Scheduled jobs differ from the target manifest")
+
+
+def check_write_freeze(observed):
+    """Every write entry point is closed: HTTPS ingress (proxy), DICOM receive and REST (Orthanc), gateway and member
+    administration (API), account changes (Keycloak), scheduled jobs; and no database client remains."""
+    require(all(observed["running"].get(role) is False for role in WRITERS), "A writer is still running")
+    require(observed["running"].get("db") is True, "The database must keep running for the capture")
+    require(observed["db_clients"] == 0, "Database clients remain after the fence")
+    require(observed["cron"] in ("fenced", "not-managed"), "Scheduled jobs are not fenced")
+    require(observed["one_shots"] == [], "A one-shot worker of this release is still present")
+
+
+def check_tablespace_directory(observed, storage, fresh):
+    """The tablespace directory belongs to the DB image's real postgres account, 0700; empty before CREATE TABLESPACE.
+    An existing tablespace keeps its path and owner and is never emptied or chmodded to pass."""
+    require(observed["path"] == storage["tablespace_path"] and observed["type"] == "directory", "Tablespace path differs")
+    require((observed["uid"], observed["gid"]) == (storage["postgres_uid"], storage["postgres_gid"]), "Tablespace directory owner differs")
+    require(observed["mode"] == "700", "Tablespace directory mode is not 0700")
+    require(observed["entries"] == 0 if fresh else observed["entries"] >= 0, "Tablespace directory is not empty before CREATE TABLESPACE")
+
+
+def check_env_secrets(env, secrets):
+    """Secret names only by shape: the runtime secret exists in its URL-safe form and is not the installer's; reader and
+    retention stay unset (NOLOGIN) unless the plan names them. Values never leave this function."""
+    for name in secrets["required"]:
+        require(type(env.get(name)) is str and env[name] != "", "A required secret name is missing")
+    for name in secrets["absent"]:
+        require(name not in env, "A secret that must stay unset is present")
+    runtime, installer = env.get(secrets["runtime"], ""), env.get(secrets["installer"], "")
+    require(SECRET_FORM.fullmatch(runtime) is not None, "Runtime secret form is unusable")
+    require(runtime != installer, "Runtime secret reuses the installer secret")
+
+
+def check_provisioned(catalog, storage, logins):
+    """emr-provision's outcome: owner NOLOGIN, runtime LOGIN, reader/retention as planned; nothing elevated; no
+    membership; the dedicated tablespace at the planned path, owned by kin_emr_owner."""
+    roles = {role["rolname"]: role for role in catalog["roles"]}
+    require(set(EMR_ROLES) <= set(roles), "An EMR role is missing")
+    for name in EMR_ROLES:
+        require(not any(roles[name][key] for key in ELEVATED), "An EMR role holds an elevated attribute")
+        require(roles[name]["rolcanlogin"] is logins[name], "An EMR role login state differs from the plan")
+    require(not any(m["granted"] in EMR_ROLES or m["member"] in EMR_ROLES for m in catalog["memberships"]),
+            "An EMR role has a membership")
+    spaces = [space for space in catalog["tablespaces"] if space["name"] == "kin_emr_access"]
+    require(len(spaces) == 1 and spaces[0]["owner"] == "kin_emr_owner"
+            and spaces[0]["location"] == storage["tablespace_path"], "EMR tablespace differs from the plan")
+
+
+def check_emr_catalog(catalog):
+    """After the migration: every ledger relation in the dedicated tablespace, owned by kin_emr_owner; the runtime role
+    owns nothing; SECURITY DEFINER functions belong to the owner."""
+    require(catalog["schema"]["owner"] == "kin_emr_owner", "EMR schema owner differs")
+    require(catalog["tablespace"]["owner"] == "kin_emr_owner", "EMR tablespace owner differs")
+    require(catalog["tables"] and all(item["owner"] == "kin_emr_owner" and item["tablespace"] == "kin_emr_access"
+                                      for item in catalog["tables"]), "A ledger relation is outside its owner or tablespace")
+    require(all(item["owner"] == "kin_emr_owner" for item in catalog["functions"] or []), "A ledger function has another owner")
+
+
+def check_projection_preserved(before, after):
+    """Every pre-existing table kept every row value of its pre-existing columns (counts and digests equal)."""
+    require(set(before) <= set(after), "A pre-existing table disappeared")
+    changed = sorted(name for name in before if (after[name]["count"], after[name]["sha256"]) != (before[name]["count"], before[name]["sha256"]))
+    require(not changed, "Existing rows changed: " + ",".join(changed)[:400])
+
+
+def check_counts_preserved(before, after):
+    require(all(after.get(name) == count for name, count in before.items()), "Row counts of existing tables changed")
+
+
+def check_introduced_api(container, *, name, image, release, working_dir, state_volume):
+    """The running API of the introduced release: OS user node, DB role kin_runtime only, production authentication,
+    exactly one RW named state volume and no host port; no installer secret in its environment."""
+    require(container.get("Name") == "/" + name, "Wrong API container")
+    require(container.get("Image") == image and (container.get("State") or {}).get("Running") is True, "API is not the running target image")
+    config = container.get("Config") or {}
+    labels = config.get("Labels") or {}
+    require(labels.get("kin.deploy.release") == release, "API release label differs")
+    require(labels.get("com.docker.compose.project.working_dir") == working_dir and labels.get("com.docker.compose.service") == "api",
+            "Wrong Compose working directory or service")
+    require(config.get("User") == "node", "Running API is not the production user")
+    mounts = container.get("Mounts")
+    require(type(mounts) is list and len(mounts) == 1 and mounts[0].get("Type") == "volume"
+            and mounts[0].get("Name") == state_volume and mounts[0].get("Destination") == EMR_STATE
+            and mounts[0].get("RW") is True, "API must run with only its EMR state volume")
+    network = container.get("NetworkSettings") or {}
+    require("Ports" in network and not any((network["Ports"] or {}).values()), "API host ports are exposed or unknown")
+    host = container.get("HostConfig") or {}
+    require(host.get("NetworkMode") not in (None, "host") and not host.get("PortBindings") and host.get("Privileged") is not True,
+            "Unsafe API network mode, host bindings or privilege")
+    env = dict(item.split("=", 1) for item in config.get("Env", []) if "=" in item)
+    require(env.get("DEPLOYMENT_MODE") == "production" and env.get("AUTH_REQUIRED") == "true", "Production authentication settings required")
+    try:
+        user = urlsplit(env.get("DATABASE_URL", "")).username
+    except ValueError:
+        user = None
+    require(user == "kin_runtime" and env.get("KIN_EMR_STATE_DIR") == EMR_STATE, "API must hold the EMR runtime credential and state directory")
+    require(not {"POSTGRES_PASSWORD", "PGPASSWORD", "KIN_EMR_READER_PASSWORD", "KIN_EMR_RETENTION_PASSWORD"} & set(env),
+            "API holds an installer, reader or retention secret")
+
+
+def check_state_volume(observed, storage):
+    """The API state volume as the node account sees it: owner node, 0700, and a file can be created, synced, renamed."""
+    require((observed["uid"], observed["gid"]) == (storage["node_uid"], storage["node_gid"]), "State volume owner differs")
+    require(observed["mode"] == "700" and observed["writable"] is True, "State volume mode or write test failed")
+
+
+def check_keycloak_serverinfo(selected):
+    """Process options of the running Keycloak (keycloak/README.md): user-session caches off, persistent sessions on."""
+    require(selected.get("useCaches") == "false", "Keycloak user-session caches are not off")
+    require(selected.get("persistentUserSessions") is True, "Keycloak persistent user sessions are not on")
+
+
+def check_member_import(observed):
+    """realm-v1: one marker, ready, every realm member imported once, each row consistent with its realm facts, every
+    legacy-enable publication confirmed and reflected in the realm; service accounts are never members."""
+    require(observed["markers"] == ["realm-v1"] and observed["state"] == "ready", "Member rights import marker missing")
+    roster = {user["id"]: user for user in observed["roster_before"]}
+    rows = {row["sub"]: row for row in observed["rights"]}
+    require(len(rows) == len(observed["rights"]) and set(rows) == set(roster), "Imported members differ from the realm members")
+    for sub, row in rows.items():
+        user = roster[sub]
+        require(row["username"] == user["username"], "An imported member identity differs")
+        if row["approved"]:
+            require(user["groups"] == [row["institution"]] and row["roles"] and set(row["roles"]) <= set(user["roles"])
+                    and set(row["roles"]) <= set(APP_ROLES), "An imported member's institution or roles differ")
+        else:
+            require(row["institution"] is None and row["roles"] == [], "An unapproved member holds rights")
+        require(row["suspended"] or user["enabled"], "A disabled member was imported as active")
+    legacy = {change["sub"]: change for change in observed["legacy_enable"]}
+    disabled = {sub for sub, user in roster.items() if not user["enabled"]}
+    require(set(legacy) == disabled and len(legacy) == len(observed["legacy_enable"]), "Legacy enable intents differ from disabled members")
+    require(all(change["state"] == "done" for change in legacy.values()), "A roster publication is unconfirmed")
+    after = {user["id"]: user for user in observed["roster_after"]}
+    require(all(after.get(sub, {}).get("enabled") is True for sub in legacy), "A confirmed legacy enable is not in the realm")
+    require(all(rows[sub]["suspended"] for sub in disabled), "A legacy-disabled member lost its PACS suspension")
+
+
+def check_proxy(observed, image):
+    require(observed["image"] == image and observed["running"] is True, "Proxy is not the running target image")
+    require(observed["nginx_test"] == 0, "nginx configuration test failed")
+    require(observed["certificate_valid_days"] is True, "Proxy certificate is missing or expires within seven days")
+
+
+def check_served_bytes(observed, expected):
+    """UI and viewer configuration served by the Orthanc container equal the target tree (whole files, not a sample)."""
+    require(observed == expected, "Served UI or viewer configuration differs from the target tree")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("request", type=Path)
