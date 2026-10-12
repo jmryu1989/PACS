@@ -8,11 +8,36 @@ import sys
 import tempfile
 import unittest
 
+# Keep the dependency guard in the existing recorder CI entry point.
+from ci_workflow_consumers_test import WorkflowConsumerTests
+from ci_artifacts_test import ArtifactTests
+
 
 RECORDER = Path(__file__).resolve().parents[1] / "scripts" / "record-run.py"
 
 
 class RecordRunTest(unittest.TestCase):
+    def test_workflow_consumer_hashes_all_workflows_before_and_after(self):
+        for name in ('tests/candidate_ci_test.py', 'tests/ci_workflows.py', 'scripts/record-run.py',
+                     '.github/workflows/relocated.yml'):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'before\n')
+        result = self.run_command([
+            sys.executable, '-c',
+            "from pathlib import Path; Path('.github/workflows/new.yml').write_bytes(b'new\\n')",
+        ], files=['tests/candidate_ci_test.py'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = self.record()
+        before = {row['requested']: row for row in record['files_before']}
+        after = {row['requested']: row for row in record['files_after']}
+        self.assertIn('.github/workflows/relocated.yml', before)
+        self.assertNotIn('.github/workflows/new.yml', before)
+        self.assertEqual(after['.github/workflows/new.yml']['sha256'], hashlib.sha256(b'new\n').hexdigest())
+        self.assertEqual(set(after) - set(before), {'.github/workflows/new.yml'})
+        self.assertEqual(before['.github/workflows/relocated.yml'], after['.github/workflows/relocated.yml'])
+        self.assertEqual(record['workflow_contract_inputs']['trees'], ['.github/workflows'])
+
     def test_unreadable_file_has_no_raw_or_normalized_success_hash(self):
         (self.root / "directory").mkdir()
         result = self.run_command([sys.executable, "-c", "pass"], files=["directory"])

@@ -95,6 +95,48 @@ def write_record(path, record):
         stream.write("\n")
 
 
+def workflow_contract_inputs(files, trees, cwd):
+    """D1021: workflow readers consume the full catalogue after job relocation.
+
+    Keep legacy workflow commands byte-identical. Expand only explicitly recorded
+    CI contract consumers, and expose the expansion in the manifest. No imports,
+    shell execution or general dependency inference is performed here.
+    """
+    consumers = {
+        'tests/measurement_ci.py', 'tests/measurement_ci_test.py',
+        'tests/asr_fixture_test.py', 'tests/gateway_pipeline_contract_test.py',
+        'tests/gateway_receipt_source_test.py', 'tests/gateway_retry_source_test.py',
+        'tests/order_reconciliation_source_test.py', 'tests/study_identity_source_test.py',
+        'tests/stage_exit_test.py', 'tests/pacs_split_test.cjs', 'tests/ci_workflows.py',
+        'tests/candidate_ci_test.py', 'tests/ci_artifacts.py', 'tests/ci_artifacts_test.py',
+        'tests/ci_workflow_consumers.cjs', 'tests/ci_workflow_consumers_test.py',
+        'tests/record_run_test.py',
+    }
+    requested = set()
+    for name in files:
+        path = Path(name)
+        try:
+            requested.add((cwd / path).resolve().relative_to(cwd).as_posix())
+        except ValueError:
+            pass
+    for name in trees:
+        directory = (cwd / name).resolve()
+        requested.update(consumer for consumer in consumers
+                         if (cwd / consumer).is_relative_to(directory))
+    if not requested.intersection(consumers):
+        return [], []
+    extra_files = [name for name in ('tests/ci_workflows.py', 'scripts/record-run.py')
+                   if name not in requested]
+    extra_trees = [] if '.github/workflows' in trees else ['.github/workflows']
+    # The recorder's AST guard scans tests rather than just its own source file.
+    if requested.intersection({'tests/record_run_test.py', 'tests/ci_workflow_consumers_test.py'}):
+        if 'tests' not in trees:
+            extra_trees.append('tests')
+        if 'api/package-lock.json' not in requested:
+            extra_files.append('api/package-lock.json')
+    return extra_files, extra_trees
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, epilog=(
         "Arguments and output are recorded verbatim. Do not supply secrets or "
@@ -116,6 +158,7 @@ def main(argv=None):
         parser.error("a command after -- is required")
     run_dir = Path(args.run_dir).resolve()
     cwd = Path(args.cwd).resolve()
+    extra_files, extra_trees = workflow_contract_inputs(args.file, args.tree, cwd)
     try:
         # Exclusive mkdir claims this run before any command or evidence is written.
         run_dir.mkdir(parents=True, exist_ok=False)
@@ -128,8 +171,9 @@ def main(argv=None):
         "status": "preparing", "started_at_utc": None, "ended_at_utc": None,
         "exit_code": None, "recorder_exit_code": None, "launch_error": None,
         "git_head_before": git_head(cwd), "git_head_after": None,
-        "files_before": file_snapshot(args.file, cwd) + tree_snapshot(args.tree, cwd), "files_after": None,
+        "files_before": file_snapshot(args.file + extra_files, cwd) + tree_snapshot(args.tree + extra_trees, cwd), "files_after": None,
         "stdout": "stdout.log", "stderr": "stderr.log", "log_files": None,
+        "workflow_contract_inputs": {"files": extra_files, "trees": extra_trees},
     }
     metadata = run_dir / "run.json"
     try:
@@ -154,7 +198,7 @@ def main(argv=None):
             record.update(ended_at_utc=utc_now(), duration_seconds=time.monotonic() - started)
         record.update(
             git_head_after=git_head(cwd),
-            files_after=file_snapshot(args.file, cwd) + tree_snapshot(args.tree, cwd),
+            files_after=file_snapshot(args.file + extra_files, cwd) + tree_snapshot(args.tree + extra_trees, cwd),
             log_files=file_snapshot(["stdout.log", "stderr.log"], run_dir),
         )
         # A successful child is not proof of complete evidence if a requested hash failed.

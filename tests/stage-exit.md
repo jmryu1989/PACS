@@ -9,7 +9,7 @@ PR CI/독립 검토를 대신하지 않는다. 기존 CI와 시험 실행 예산
 
 - `record-run.py`: `run.json`, `stdout.log`, `stderr.log`. Python 사례는 verbosity=2의
   `module.Class.test_method`로, Node 파일 전체는 `node:tests/파일.cjs`로 적는다.
-  Node는 기존 validate.yml의 필터 없는 `node --test` TAP 출력이어야 한다.
+  Node는 해당 job의 소유 workflow에서 실행한 필터 없는 `node --test` TAP 출력이어야 한다.
 - `candidate.yml`: `candidate-provenance.json`, `results.json`, 각 단계의 `.log`.
   `candidate-ci` 항목은 provenance의 **모든 실제 선택 사례**와 정리 결과를 검사한다.
   선택 수는 `candidate_ci.py`가 관리하며 이 목록에 복제하지 않는다.
@@ -80,9 +80,13 @@ D621에 따라 provider reconciliation은 U5b 범위다. DB Suspend 뒤 살아 �
 최종 main을 깨끗하게 checkout한 **원본과 분리된 합성 환경**에서 다음 PowerShell 명령을 쓴다.
 이 문서의 실행 예시는 환경 기동이나 원본 연결을 허가하지 않는다. `record-run.py`는 HEAD와
 파일 해시를 기록하지만 dirty tree 자체를 증명하지 않으므로 실행 전에 수정 상태를 확인한다.
-기본 입력은 동일 SHA의 validate `synthetic-runtime-record-runs`와
+기본 입력은 동일 SHA의 모든 소유 workflow에 있는 `synthetic-runtime-record-runs`와
 `synthetic-workspace-dom-results`, G3 `candidate-<sha>` artifact다.
-`$validateRun`과 `$candidateRun`에는 해당 SHA의 실행 ID를 지정한다.
+`tests/ci_artifacts.py`는 `tests/ci_workflows.py`의 job → workflow 매핑으로 업로드 출처를
+찾고, workflow별로 후보 SHA의 최신 실행 ID와 attempt를 조회한다. 실패·진행 중 실행을
+이전 성공으로 대체하지 않으며, SHA/소유 workflow 불일치·누락·만료 artifact는 거절한다.
+동명 artifact가 validate와 Worklist UX 양쪽에 있으면 **둘 다** 별도 경로에 받는다.
+workflow 파일명 변경이나 job 이동은 고정 validate 실행 ID로 우회하지 않는다.
 
 ```powershell
 $sha = (git rev-parse HEAD).Trim()
@@ -94,9 +98,26 @@ $out = "tmp/stage7-final-$shortSha"
 
 | artifact | 업로드 원래 경로 | 수령 명령 |
 |---|---|---|
-| `synthetic-runtime-record-runs` | `tmp/runtime-ci/` | `gh run download $validateRun -n synthetic-runtime-record-runs -D "$out/validate/runtime"` |
-| `synthetic-workspace-dom-results` | `tmp/workspace-ui-ci/` | `gh run download $validateRun -n synthetic-workspace-dom-results -D "$out/validate/workspace"` |
-| `candidate-<sha>` | `target/tests/e2e/artifacts/candidate-ci/` | `gh run download $candidateRun -n "candidate-$sha" -D "$out/candidate"` |
+| `synthetic-runtime-record-runs` | `tmp/runtime-ci/` | 아래 수집기의 모든 소유 workflow 실행 → `hosted/runs/<workflow>/<run>/<artifact>` |
+| `synthetic-workspace-dom-results` | `tmp/workspace-ui-ci/` | 아래 수집기의 모든 소유 workflow 실행 → `hosted/runs/<workflow>/<run>/<artifact>` |
+| `candidate-<sha>` | `target/tests/e2e/artifacts/candidate-ci/` | 아래 수집기의 candidate 실행 → `hosted/candidate/<workflow>/<run>/<artifact>` |
+
+먼저 **모든 workflow의 모든 업로드 이름과 소유 workflow/job**을 나열한다.
+matrix·실행 ID·SHA 표현식이 있는 이름은 원래 템플릿으로 표시하므로 목록에서 빠지지 않는다.
+수집기는 같은 전체 목록을 `artifact-inventory.json`에, 선택한 실행과 실제 다운로드 출처를
+`artifact-downloads.json`에 보존한다. Stage 7/8에 필요한 이름만 다운로드하며 각 이름의
+소유 workflow를 하나도 생략하지 않는다. 아래 목록/수집 명령은 live 시험을 실행하지 않는다.
+
+```powershell
+python -B tests/ci_artifacts.py --list
+if ($LASTEXITCODE -ne 0) { throw '전체 artifact 출처 목록 확인 실패' }
+python -B tests/ci_artifacts.py --sha $sha --stage 7 --out "$out/hosted"
+if ($LASTEXITCODE -ne 0) { throw '동일 SHA의 workflow별 artifact 수집 실패; 원문 보존 후 확인' }
+$downloads = Get-Content -Raw "$out/hosted/artifact-downloads.json" | ConvertFrom-Json
+$candidateArtifacts = @($downloads.downloads | Where-Object { $_.artifact -eq "candidate-$sha" })
+if ($candidateArtifacts.Count -ne 1) { throw 'candidate artifact 출처는 정확히 하나여야 함' }
+$candidateDirectory = $candidateArtifacts[0].destination
+```
 
 위 artifact를 받은 뒤 아래 기록기 loop는 필요한 live 클래스만 보충한다.
 기존 동일 SHA의 적격 기록은 재사용한다.
@@ -155,7 +176,7 @@ integrity, backup-safety, production-image를 읽는다.
 CI 기록의 누락·실패도 성공으로 간주하지 않는다.
 
 ```powershell
-python scripts/stage-exit.py --list tests/stage7-exit.json --sha $sha --runs "$out/validate" --runs "$out/live" --candidate "$out/candidate" --output "$out/verdict.json"
+python scripts/stage-exit.py --list tests/stage7-exit.json --sha $sha --runs "$out/hosted/runs" --runs "$out/live" --candidate $candidateDirectory --output "$out/verdict.json"
 $LASTEXITCODE
 ```
 
@@ -240,13 +261,15 @@ Stage 7 절차와 기존 영구 원장을 따르고 실패 기록을 별도 보�
 
 | 동일 최종 SHA의 hosted 입력 | artifact / 내부 기록 | 용도 |
 |---|---|---|
-| validate `runtime` | `synthetic-runtime-record-runs`: `viewer-context-event`, `tech-note-attempt`, `findings-migration`, `production-image` | 서버 사건·실제 PG 저장 시도·dump/restore·기동 |
-| validate `measurements` | `synthetic-workspace-dom-results`: `viewer-context-loss-dom`, `viewer-tech-note-dom`, `emr-contract` | CTX/VR 결합 포함 DOM·두 Note 소비자·EMR-A 순수 계약 |
-| validate `volume-rendering` | `synthetic-volume-rendering-results`: `tmp/vr-ci/pure-vr`, `tmp/vr-ci/binding-dom` (artifact 내부 경로 유지) | VR 순수 모델 3파일·접근/세션 DOM |
-| validate `volume-rendering`, `context-loss` | `synthetic-volume-rendering-results`, `synthetic-context-loss`의 profile 결과/로그/영상 | hosted native 보조 근거; 아래 local 기록 대체 불가 |
+| `runtime` 및 동명 artifact의 모든 소유 workflow | `synthetic-runtime-record-runs`: `viewer-context-event`, `tech-note-attempt`, `findings-migration`, `production-image` | 서버 사건·실제 PG 저장 시도·dump/restore·기동 |
+| `measurements` 및 동명 artifact의 모든 소유 workflow | `synthetic-workspace-dom-results`: `viewer-context-loss-dom`, `viewer-tech-note-dom`, `emr-contract` | CTX/VR 결합 포함 DOM·두 Note 소비자·EMR-A 순수 계약 |
+| `volume-rendering`의 소유 workflow | `synthetic-volume-rendering-results`: `tmp/vr-ci/pure-vr`, `tmp/vr-ci/binding-dom` (artifact 내부 경로 유지) | VR 순수 모델 3파일·접근/세션 DOM |
+| 각각 `volume-rendering`, `context-loss`의 소유 workflow | `synthetic-volume-rendering-results`, `synthetic-context-loss`의 profile 결과/로그/영상 | hosted native 보조 근거; 아래 local 기록 대체 불가 |
 | candidate.yml | `candidate-<최종 40자리 SHA>` | `candidate-provenance.json`과 전 선택/cleanup 결과 |
 
-validate 전체 jobs의 성공·headSha·attempt와 artifact 출처를 별도 보존한다.
+전체 소유 workflow의 성공·headSha·attempt와 artifact 출처를 별도 보존한다.
+분할 후 `volume-rendering`은 `volume-rendering.yml`에서 찾으며 validate 실행에서 받지 않는다.
+Worklist UX의 동명 workspace/runtime artifact도 각 소유 실행에서 따로 받는다.
 build 및 나머지 회귀 jobs를 생략하지 않는다. 위 artifact의 profile `results.json`/
 개별 `.log`는 `run.json`이 없으므로 `--runs`의 적격 live 근거가 아니다.
 `synthetic-context-loss`는 보조 폴더에 받아 판정기의 `--runs`로 넘기지 않는다.
@@ -259,12 +282,15 @@ VR `pure-vr`는 기존 CI에서 **세 파일을 함께** 필터 없이 실행한
 `S8-NOTE-SVR storage: postgresql`이 있어야 하며 stand-in 결과로 DB 원자성을 주장하지 않는다.
 
 ```powershell
-gh run download $validateRun -n synthetic-runtime-record-runs -D "$out/validate/runtime"
-gh run download $validateRun -n synthetic-workspace-dom-results -D "$out/validate/workspace"
-gh run download $validateRun -n synthetic-volume-rendering-results -D "$out/validate/vr"
-gh run download $validateRun -n synthetic-context-loss -D "$out/support/context-loss"
-gh run download $candidateRun -n "candidate-$sha" -D "$out/candidate"
-python scripts/record-run.py --run-dir "$out/verdict-run" --cwd . --file scripts/stage-exit.py --file tests/stage8-exit.json -- python scripts/stage-exit.py --list tests/stage8-exit.json --sha $sha --runs "$out/validate" --runs "$out/live" --candidate "$out/candidate" --output "$out/verdict.json"
+python -B tests/ci_artifacts.py --list
+if ($LASTEXITCODE -ne 0) { throw '전체 artifact 출처 목록 확인 실패' }
+python -B tests/ci_artifacts.py --sha $sha --stage 8 --out "$out/hosted"
+if ($LASTEXITCODE -ne 0) { throw '동일 SHA의 workflow별 artifact 수집 실패; 원문 보존 후 확인' }
+$downloads = Get-Content -Raw "$out/hosted/artifact-downloads.json" | ConvertFrom-Json
+$candidateArtifacts = @($downloads.downloads | Where-Object { $_.artifact -eq "candidate-$sha" })
+if ($candidateArtifacts.Count -ne 1) { throw 'candidate artifact 출처는 정확히 하나여야 함' }
+$candidateDirectory = $candidateArtifacts[0].destination
+python scripts/record-run.py --run-dir "$out/verdict-run" --cwd . --file scripts/stage-exit.py --file tests/stage8-exit.json -- python scripts/stage-exit.py --list tests/stage8-exit.json --sha $sha --runs "$out/hosted/runs" --runs "$out/live" --candidate $candidateDirectory --output "$out/verdict.json"
 if ($LASTEXITCODE -ne 0) { throw 'Stage 8 필수 시험 미충족: verdict.json 확인' }
 ```
 
