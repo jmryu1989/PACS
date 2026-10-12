@@ -70,6 +70,11 @@ def run(args, *, env=None, input=None, timeout=300, check=True):
     return result
 
 
+def err(answer) -> dict:
+    """The error of a driver answer, or an empty one: a missing refusal fails as an assertion, never as a KeyError."""
+    return answer.get("error") or {}
+
+
 def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -288,13 +293,13 @@ class EmrDLive(unittest.TestCase):
                          [("history", "기재"), ("history", "추가기재"), ("viewing", "기재"), ("viewing", "추가기재")])
         self.assertEqual(self.json('SELECT count(*) FROM "StudyQuestionEntry" WHERE "questionId" = %s::uuid' % self.literal(ids["question"])), 2)
         # No signature: refused before admission, nothing written anywhere.
-        self.assertEqual((out["unsigned"]["ok"], out["unsigned"]["error"]["status"], out["unsigned"]["error"]["code"]),
+        self.assertEqual((out["unsigned"]["ok"], err(out["unsigned"]).get("status"), err(out["unsigned"]).get("code")),
                          (False, 403, "CLINICAL_SIGNATURE_REQUIRED"))
         for refused in ("unsigned", "proxy"):
             self.assertEqual(self.json('SELECT count(*) FROM "StudyQuestion" WHERE id = %s::uuid' % self.literal(ids[refused])), 0, refused)
             self.assertEqual(self.versions(ids[refused]), [], refused)
         self.assertEqual(self.register(ids["unsigned"]), [])
-        self.assertEqual((out["proxy"]["ok"], out["proxy"]["error"]["code"]), (False, "CLINICAL_SIGNATURE_REFUSED"))
+        self.assertEqual((out["proxy"]["ok"], err(out["proxy"]).get("code")), (False, "CLINICAL_SIGNATURE_REFUSED"))
         [proxy] = self.register(ids["proxy"])
         self.assertEqual((proxy["state"], proxy["terminal"]["proof"]["code"]), ("rejected", "SignatureFailed"))
         # An assignment is an operational version: no text, no signature.
@@ -333,7 +338,7 @@ class EmrDLive(unittest.TestCase):
                 self.assertEqual(current["body"]["previousVersion"], {"recordId": previous["body"]["recordId"],
                                  "versionId": previous["body"]["versionId"], "sha256": previous["sha256"]}, "each version extends the one before")
         # Outside the reading, a hide without a stated reason commits nothing.
-        self.assertEqual((out["hideOutOfContext"]["ok"], out["hideOutOfContext"]["error"]["status"]), (False, 400))
+        self.assertEqual((out["hideOutOfContext"]["ok"], err(out["hideOutOfContext"]).get("status")), (False, 400))
         self.assertEqual(len(self.versions(ids["finding"])), 3)
         self.assertEqual(self.json('SELECT count(*) FROM "FindingRevision" WHERE "findingId" = %s::uuid' % self.literal(ids["finding"])), 3)
         row = self.json('SELECT json_build_object(\'reason\', reason, \'reply\', reply, \'state\', state, \'revision\', revision) FROM "StudyConsultation" '
@@ -362,7 +367,7 @@ class EmrDLive(unittest.TestCase):
         self.assertTrue(out["store:" + a]["ok"], out["store:" + a])
         self.assertTrue(out["store:" + a]["value"]["stored"])
         self.assertFalse(out["store:" + d]["ok"], "the upload of D failed after its adoption committed")
-        self.assertEqual((out["unsignedStore"]["ok"], out["unsignedStore"]["error"]["code"]), (False, "CLINICAL_SIGNATURE_REQUIRED"))
+        self.assertEqual((out["unsignedStore"]["ok"], err(out["unsignedStore"]).get("code")), (False, "CLINICAL_SIGNATURE_REQUIRED"))
         facts = self.json('SELECT json_object_agg(id::text, json_build_object(\'attempted\', "attemptedAt" IS NOT NULL, \'stored\', "storedAt" IS NOT NULL, '
                           '\'sha\', encode(sha256(dicom), \'hex\'))) FROM "ManualSr" WHERE "studyUid" = %s' % self.literal(sr["uid"]))
         for key, (record, data) in rows.items():
@@ -397,10 +402,10 @@ class EmrDLive(unittest.TestCase):
             self.assertTrue(read["ok"], (name, read))
             self.assertEqual([e["body"] for e in read["value"]["item"]["entries"]], [TEXT["question"], TEXT["answer"]], name)
         for name in ("c2", "rb"):
-            self.assertEqual((out["read:" + name]["ok"], out["read:" + name]["error"]["status"]), (False, 404), name)
-        self.assertEqual((out["runtimeForeign"]["ok"], out["runtimeForeign"]["error"]["code"]), (False, "NotFound"),
+            self.assertEqual((out["read:" + name]["ok"], err(out["read:" + name]).get("status")), (False, 404), name)
+        self.assertEqual((out["runtimeForeign"]["ok"], err(out["runtimeForeign"]).get("code")), (False, "NotFound"),
                          "another institution gets no body through the runtime either")
-        self.assertEqual((out["runtimeForged"]["ok"], out["runtimeForged"]["error"]["code"]), (False, "NotFound"),
+        self.assertEqual((out["runtimeForged"]["ok"], err(out["runtimeForged"]).get("code")), (False, "NotFound"),
                          "rows that were not read from storage are never served")
         provided = self.provisions(qid)
         self.assertEqual(sorted(e["userId"]["value"]["subject"] for e in provided), sorted(PEOPLE[n] for n in ("c1", "r1", "ad")),
@@ -419,17 +424,17 @@ class EmrDLive(unittest.TestCase):
         self.assertEqual((out["first"]["value"]["replayed"], out["replay"]["value"]["replayed"]), (False, True))
         self.assertEqual(out["replay"]["value"]["applied"], out["first"]["value"]["applied"], "a replay answers the stored receipt")
         self.assertEqual((out["replayUnsigned"]["ok"], out["replayUnsigned"]["value"]["replayed"]), (True, True))
-        self.assertEqual((out["reused"]["ok"], out["reused"]["error"]["code"]), (False, "REQUEST_ID_REUSED"))
+        self.assertEqual((out["reused"]["ok"], err(out["reused"]).get("code")), (False, "REQUEST_ID_REUSED"))
         self.assertEqual(len(self.versions(ids["question"])), 1, "one commit per request")
         self.assertEqual(len(self.change_events(ids["question"])), 2, "one change event, in both streams")
         for key in ("tampered", "tamperedAgain"):
-            self.assertEqual((out[key]["ok"], out[key]["error"]["code"]), (False, "CLINICAL_SIGNATURE_REFUSED"), key)
+            self.assertEqual((out[key]["ok"], err(out[key]).get("code")), (False, "CLINICAL_SIGNATURE_REFUSED"), key)
         self.assertEqual(self.json('SELECT count(*) FROM "StudyQuestion" WHERE id = %s::uuid' % self.literal(ids["tampered"])), 0)
         self.assertEqual(self.versions(ids["tampered"]), [])
         [tampered] = self.register(ids["tampered"])
         self.assertEqual((tampered["state"], tampered["terminal"]["proof"]["code"]), ("rejected", "SignatureFailed"))
         self.assertEqual(json.loads(tampered["seed"])["body"]["body"], TEXT["question"], "the author's input is preserved with the refused original")
-        self.assertEqual((out["stale"]["ok"], out["stale"]["error"]["code"]), (False, "QUESTION_CHANGED"))
+        self.assertEqual((out["stale"]["ok"], err(out["stale"]).get("code")), (False, "QUESTION_CHANGED"))
         self.assertEqual(self.json('SELECT revision FROM "StudyQuestion" WHERE id = %s::uuid' % self.literal(ids["question"])), 1)
 
     # ── the cases ──
@@ -496,7 +501,7 @@ class EmrDLive(unittest.TestCase):
         qid = out["ids"]["question"]
         before = len(self.provisions(qid))
         down = self.driver("d03-ledger-down", {"question": qid})
-        self.assertEqual((down["read"]["ok"], down["read"]["error"]["status"], down["read"]["error"]["code"]), (False, 503, "CLINICAL_STORAGE_UNAVAILABLE"),
+        self.assertEqual((down["read"]["ok"], err(down["read"]).get("status"), err(down["read"]).get("code")), (False, 503, "CLINICAL_STORAGE_UNAVAILABLE"),
                          "no body when the provision is not durable")
         self.assertNotIn("value", down["read"])
         self.assertTrue(down["sealRefused"], "B1's failure journal records that the provision could not be sealed")
@@ -512,7 +517,7 @@ class EmrDLive(unittest.TestCase):
         # (revision and entryCount move together: the table's own CHECK keeps them equal)
         self.ok('UPDATE "StudyQuestion" SET revision = revision + 7, "entryCount" = "entryCount" + 7 WHERE id = %s::uuid;' % self.literal(qid))
         diverged = self.driver("d04-diverged", {"study": uid, "question": qid})
-        self.assertEqual((diverged["reply"]["ok"], diverged["reply"]["error"]["code"]), (False, "QUESTION_CHANGED"))
+        self.assertEqual((diverged["reply"]["ok"], err(diverged["reply"]).get("code")), (False, "QUESTION_CHANGED"))
         self.assertEqual(len(self.versions(qid)), 1)
         self.assertEqual(self.json('SELECT count(*) FROM "StudyQuestionEntry" WHERE "questionId" = %s::uuid' % self.literal(qid)), 1)
         [register] = self.register(diverged["requestId"])
