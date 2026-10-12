@@ -22,6 +22,8 @@ if os.environ.get('KIN_W3_ASSET_ROOT'):
 KEY = 'kin-workspace:v1:' + json.dumps([auth.INSTITUTION, auth.RAD['sub']], separators=(',', ':'))
 READING = dict(version=1, reportWidth=540, imageHeight=390, relatedHeight=None,
                relatedListHeight=180, relatedHidden=False)
+# Landed W2 page (main after PR #164); CI fetches this exact commit.
+W2_LANDED = 'a86ecf1655c8c587012cef5fd16e233e121ae7dc'
 
 
 def first_paint_pixels(page, path):
@@ -361,7 +363,9 @@ class StudyPanelPageDOM(unittest.TestCase):
         """D1041-LEFT: left work area overlap is intentional; no extra grid column."""
         self.boot()
         self.page.locator('#rows tr[data-uid]').first.click()
-        self.page.get_by_role('button', name='Folders', exact=True).click()
+        # D1041 6-②: the landed W2 opens Folders on every login; the drawer
+        # opens beside an already open Folders panel (no click closes it).
+        expect(self.page.get_by_role('button', name='Folders', exact=True)).to_have_attribute('aria-expanded', 'true')
         panels = ['.left', '.right', '.related-p', '.report-p', '#worklist-folders-panel']
         before = [self.page.locator(s).bounding_box() for s in panels]
         self.page.locator('#findings').fill('SYN left drawer keeps this draft')
@@ -401,7 +405,10 @@ class StudyPanelPageDOM(unittest.TestCase):
 
     def test_rail_and_panel_keyboard_resize_persist_as_v3(self):
         self.boot()
-        self.page.get_by_role('button', name='Folders', exact=True).click()
+        # D1041 6-②: Folders is open on login (landed W2), so its rail is
+        # reachable without a click; a click here would close the panel.
+        folders = self.page.get_by_role('button', name='Folders', exact=True)
+        expect(folders).to_have_attribute('aria-expanded', 'true')
         rail = self.page.get_by_role('separator', name='폴더 너비 조절', exact=True)
         rail.focus()
         self.page.keyboard.press('ArrowRight')
@@ -410,7 +417,10 @@ class StudyPanelPageDOM(unittest.TestCase):
         self.assertTrue(self.local()['workspace']['railCollapsed'])
         self.page.reload()
         expect(self.page.locator('#rows')).to_contain_text(auth.PATIENT)
-        expect(self.page.get_by_role('button', name='Folders', exact=True)).to_have_attribute('aria-expanded', 'false')
+        # Same login: W2 keeps the never-closed panel open; W3 restores the
+        # collapsed rail from the v3 record.
+        expect(folders).to_have_attribute('aria-expanded', 'true')
+        expect(self.page.get_by_role('button', name='Rail', exact=True)).to_have_attribute('aria-expanded', 'false')
 
     def test_end_invalidates_resize_and_drawer_callbacks(self):
         self.boot()
@@ -433,9 +443,12 @@ class StudyPanelPageDOM(unittest.TestCase):
     def test_first_paint_matches_w2_for_empty_v1_and_v2_records(self):
         # D1004 requires identical first paint. This fixed landed-input comparison
         # is a deliberate byte-provenance use; compare visible geometry and pixels.
+        # The baseline is the landed W2 (main a86ecf1, PR #164): D1041 6-② made
+        # W2 open Folders on every login, so W2's own first paint changed by
+        # decision after the earlier W2 input 9d4ba0f.
         current = auth.ROOT
         with tempfile.TemporaryDirectory(prefix='kin-w3-w2-') as temporary:
-            raw = subprocess.check_output(['git', 'archive', '--format=zip', '9d4ba0f',
+            raw = subprocess.check_output(['git', 'archive', '--format=zip', W2_LANDED,
                 'worklist-v0/hpacs-lite', 'scripts/main-split-order.json', 'proxy/branding'], cwd=ROOT)
             zipfile.ZipFile(io.BytesIO(raw)).extractall(temporary)
             try:

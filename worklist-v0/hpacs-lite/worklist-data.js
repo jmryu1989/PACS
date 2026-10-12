@@ -197,9 +197,8 @@
       if (filter.quick || savedFilterDays(filter.days) !== -1
         || Object.entries(filter.cols || {}).some(([key, value]) => key !== 'modality' && value !== '' && value != null)) return [];
       const value = filter.cols?.modality;
-      // Scalars, including old comma-delimited saved values, mean exact equality.
-      // Only a newly created array represents modality folder tokens.
-      return Array.isArray(value) ? value.map(v => 'modality:' + v) : value ? [] : ['all'];
+      return Array.isArray(value) || value
+        ? [...new Set(KinCompoundFilter.modalityTokens(value))].map(v => 'modality:' + v) : ['all'];
     }
     function updateWorklistFolders() {
       if (!worklistFolders) return;
@@ -258,8 +257,18 @@
         onChange: saveFolderShortcuts,
       });
       const panel = $('#worklist-folders-panel'), toggle = $('#worklist-folders-toggle');
+      // Keep a tab's choice across reloads only for this login, never for an account's next login.
+      const panelKey = 'kin-worklist-folders', panelSession = work.session();
+      let panelPreference;
+      try { panelPreference = JSON.parse(sessionStorage.getItem(panelKey)); } catch (_) {}
+      panel.open = panelPreference?.session === panelSession && typeof panelPreference?.open === 'boolean'
+        ? panelPreference.open : true;
+      toggle.setAttribute('aria-expanded', String(panel.open));
       toggle.addEventListener('click', () => { panel.open = !panel.open; toggle.setAttribute('aria-expanded', String(panel.open)); });
-      panel.addEventListener('toggle', () => toggle.setAttribute('aria-expanded', String(panel.open)));
+      panel.addEventListener('toggle', () => {
+        toggle.setAttribute('aria-expanded', String(panel.open));
+        try { sessionStorage.setItem(panelKey, JSON.stringify({session: panelSession, open: panel.open})); } catch (_) {}
+      });
       $('#shortcuts-reload').addEventListener('click', () => reloadFolderSearches());
       $('#shortcuts-save').addEventListener('click', () => saveFolderShortcuts(shortcutDraft));
       updateWorklistFolders();

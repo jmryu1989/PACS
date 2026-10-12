@@ -5,9 +5,8 @@
 })(typeof window === 'object' ? window : null, function () {
   'use strict';
 
-  // Stored Modality Equals conditions and single column values retain exact matching.
-  // Only folder modality arrays and new comma/backslash multi-value column input
-  // (for example CT, MR) use whole-token OR; compound Equals is never reinterpreted.
+  // D1041: saved and newly entered Modality Equals/column values share token OR.
+  // Interpret old scalars in place; stored search values need no migration.
   const KEY = '$compound';
   const OPS = {
     text: [['contains', '포함'], ['eq', '같음'], ['notContains', '포함하지 않음'],
@@ -22,6 +21,12 @@
   const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
   const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
   const blank = value => value === undefined || value === null || value === '';
+  const modalityTokens = value => (Array.isArray(value) ? value : [value]).flatMap(part =>
+    typeof part === 'string' ? part.split(/[,\\]/).map(token => token.trim().toUpperCase()).filter(Boolean) : []);
+  function matchesModality(value, wanted) {
+    const actual = modalityTokens(value);
+    return modalityTokens(wanted).some(token => actual.includes(token));
+  }
 
   function fields(columns) {
     if (!Array.isArray(columns)) return [];
@@ -105,7 +110,9 @@
       if (!own(rule, 'value') || typeof rule.value !== 'string' || !rule.value.trim() || rule.value.length > 1000) {
         return '검색 값은 공백이 아닌 1~1,000자 문자열이어야 합니다.';
       }
-      if (field.type === 'select' && !field.values.some(value => value.toUpperCase() === rule.value.toUpperCase())) {
+      const choices = field.k === 'modality' && rule.op === 'eq'
+        ? rule.value.split(/[,\\]/).map(value => value.trim().toUpperCase()) : [rule.value.toUpperCase()];
+      if (field.type === 'select' && !choices.every(choice => field.values.some(value => value.toUpperCase() === choice))) {
         return '검색 항목에서 선택할 수 없는 값입니다.';
       }
       if (field.type === 'date') {
@@ -188,6 +195,7 @@
       if (rule.op === 'notEmpty') return !blank(value);
       // Missing values are not unequal values; use the explicit empty operator.
       if (blank(value) || typeof value !== 'string') return false;
+      if (rule.field === 'modality' && rule.op === 'eq') return matchesModality(value, rule.value);
       if (available.get(rule.field).type === 'date') {
         const actual = calendarDate(value, false), wanted = calendarDate(rule.value, true);
         if (actual === null) return false;
@@ -240,5 +248,5 @@
     }
     return groupText(expression);
   }
-  return { KEY, fields, operators, validate, matches, compile, describe, usesField, quickMode, withQuickMode, compileQuick };
+  return { KEY, fields, operators, validate, matches, compile, describe, usesField, quickMode, withQuickMode, compileQuick, modalityTokens, matchesModality };
 });
