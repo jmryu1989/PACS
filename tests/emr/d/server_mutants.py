@@ -1,7 +1,10 @@
 # coding: utf-8
 """TEST-D server mutants: each reverts one fix of Astra's findings - round 3 (DR2-01..08 on bfddc3d), round 4 (DR3-01..06
 on a980357) - or removes the signing-time check Astra's own mutant AM10 removed, in a COPY of the source, and runs
-tests/emr/d/server_test.cjs there. DR3-06's notation equivalents run the same way and must leave their case passing.
+tests/emr/d/server_test.cjs there. Round 5 part d adds Astra's own AR4-M08/AR4-M09 (e01ca30) as she wrote them and boundary
+mutants of the evidence check and the workflow (R5-21..23) - several keep or move the checking text while its effect is
+gone, which only a behaviour assertion can see. Equivalents (the same meaning written differently: notation, an if statement,
+an extracted function, renamed names, other quotes, a `./` path) run the same way and must leave every case they name passing.
 
 REQ-EMR-01/03/04/05/07/10/17 -> RISK-D-01..04 -> TEST-D-01..04 server cases (tests/emr/d/server_test.cjs).
 
@@ -48,6 +51,7 @@ CASE = {
     "provide": "TEST-D-03 read_scope server: a response serving many units hands out no text before every provision naming exactly its versions is durable; a projection naming another author or recipient is refused",
     "adoption": "TEST-D-02 versions_and_sr server: a manual SR adoption counts only once its access event is durable - a ledger that cannot confirm it leaves it unconfirmed, and the same event confirms it later",
     "workflow": "EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each record hashes what its command consumes",
+    "evidence": "EMR-D evidence: same_source.py passes only records of TARGET_SHA that hashed, unchanged, every file their step consumes as TARGET_SHA holds it, with their logs, exits and declared cases, and the image of TARGET_SHA",
     "sources": "TEST-D-02 versions_and_sr server: what a finding incorporates is a fixed reference to its source's exact version - planned, signed, stored and recovered alike; a navigation link is none",
     "composed": "TEST-D-04 atomic_retry server: the runtime is composed once with every port and refuses a second composition",
     "signature": "TEST-D-04 atomic_retry server: an absent, altered, held, inactive, offline or foreign-request signature is refused before any commit",
@@ -57,6 +61,9 @@ CASE = {
     "copies": "TEST-D-02 versions_and_sr server: copies of one source version - two marks of one saved comparison, its saved view and a mark on it - are one fixed reference, planned, signed, stored and recovered alike, every copy kept in the text",
     "stale": "TEST-D-04 atomic_retry server: a cited source gone before the commit keeps the stale-source refusal - in a recovery, for the original and every resend, and in a commit itself; storage that cannot be read leaves it pending for the next recovery",
 }
+# The image identity step's two lines (.github/workflows/emr-d.yml), as Astra's AR4-M09 anchors them.
+IDENTITY_READ = "          revision=\"$(docker image inspect -f '{{ index .Config.Labels \"org.opencontainers.image.revision\" }}' \"kin-emrd-ci:$TARGET_SHA\")\""
+IDENTITY_CHECK = "          test \"$revision\" = \"$TARGET_SHA\" || { echo \"image revision '$revision' is not $TARGET_SHA\"; exit 1; }"
 MUTANTS = [
     {"id": "M-D-R3-DR2-01", "finding": "DR2-01", "title": "an adoption without a durable ledger receipt is reported confirmed",
      "file": "api/src/emr-clinical/runtime.ts",
@@ -146,7 +153,7 @@ MUTANTS = [
      "file": ".github/workflows/emr-d.yml",
      "old": "--run-dir tmp/emr-d-ci/server --cwd . --tree api/src --tree api/prisma --tree tests/emr/d",
      "new": "--run-dir tmp/emr-d-ci/server --cwd . --tree api/src --file api/prisma/schema.prisma --tree tests/emr/d",
-     "case": CASE["workflow"], "expect": "the server record hashes api/prisma/migrations"},
+     "case": CASE["workflow"], "expect": "the server record hashes api/prisma"},
     {"id": "M-D-R4-DR3-05b", "finding": "DR3-05", "title": "the R1 mutants record no longer hashes the lock that pins its compiler",
      "file": ".github/workflows/emr-d.yml",
      "old": "--file tests/emr/d/contract_test.cjs --file api/tsconfig.json --file api/package-lock.json -- python3 -B tests/emr/d/mutants.py",
@@ -154,18 +161,94 @@ MUTANTS = [
      "case": CASE["workflow"], "expect": "the mutants record hashes api/package-lock.json"},
     {"id": "M-D-R4-DR3-05c", "finding": "DR3-05", "title": "the declaration drops the migrations from what the server step consumes",
      "file": "emr/units/d.json",
-     "old": "      \"server\": [\"api/src\", \"api/prisma/migrations\", ", "new": "      \"server\": [\"api/src\", ",
+     "old": "      \"server\": [\"api/src\", \"api/prisma\", \"api/prisma/migrations\", ", "new": "      \"server\": [\"api/src\", \"api/prisma\", ",
      "case": CASE["workflow"], "expect": "DR3-05: the server declaration names api/prisma/migrations"},
     {"id": "M-D-R4-DR3-05d", "finding": "DR3-05", "title": "the last step no longer checks that each record hashed its declared inputs",
      "file": "tests/emr/d/same_source.py",
-     "old": "        bad.extend(\"%s: %s not hashed\" % (record, need) for need in inputs if not hashed(run, need))",
-     "new": "        pass",
-     "case": CASE["workflow"], "expect": "DR3-05: a record that did not hash a declared input fails the check"},
+     "old": "    for tree in sorted(trees | {normal(need) for need in needs}):",
+     "new": "    for tree in sorted(trees):",
+     "case": CASE["evidence"], "expect": "DR3-05: a record that did not hash a declared input fails the check"},
     {"id": "M-D-R4-DR3-06", "finding": "DR3-06", "title": "the workflow case splits lines on whitespace (a parser of its own) instead of as the shell does",
      "file": "tests/emr/d/server_test.cjs",
      "old": "  'out = {\"words\": [shlex.split(line) for line in todo[\"words\"]], \"records\": []}',",
      "new": "  'out = {\"words\": [line.split() for line in todo[\"words\"]], \"records\": []}',",
      "case": CASE["workflow"], "expect": "DR3-06: escaped quotes and quoted concatenation split as a shell splits them"},
+    # Round 5 part d (Astra's design consultation R5-21..23 and her round-4 review DR4-06/07 on e01ca30): Astra's own
+    # AR4-M08/AR4-M09 as she wrote them, and boundary mutants that keep or move the checking text while its effect is gone.
+    {"id": "AR4-M08", "finding": "DR4-06 (Astra's own mutant)", "title": "a record of another commit passes when only one of its heads differs",
+     "file": "tests/emr/d/same_source.py",
+     "old": "run.get(\"git_head_before\") != sha or run.get(\"git_head_after\") != sha",
+     "new": "run.get(\"git_head_before\") != sha and run.get(\"git_head_after\") != sha",
+     "case": CASE["workflow"], "expect": "a record of another commit fails the check"},
+    {"id": "AR4-M09", "finding": "DR4-07 (Astra's own mutant)", "title": "the image identity step no longer compares the revision",
+     "file": ".github/workflows/emr-d.yml", "old": IDENTITY_CHECK, "new": "          : # revision comparison removed",
+     "case": CASE["workflow"], "expect": "image identity must refuse a wrong image"},
+    {"id": "M-D-R5-21a", "finding": "R5-21 / DR4-06", "title": "the last step no longer compares what a record hashed with TARGET_SHA's objects",
+     "file": "tests/emr/d/same_source.py", "old": "        elif digests[name] != before[name][1]:", "new": "        elif False:",
+     "case": CASE["evidence"], "expect": "R5-21: a migration changed in the checkout is refused"},
+    {"id": "M-D-R5-21c", "finding": "R5-21 / DR4-06", "title": "a file of TARGET_SHA a record did not hash (a removed migration) passes",
+     "file": "tests/emr/d/same_source.py",
+     "old": "        bad.extend(\"%s: a file of %s in %s the record did not hash\" % (name, sha, tree) for name in members if name not in before)",
+     "new": "        pass",
+     "case": CASE["evidence"], "expect": "R5-21: a migration file removed from the checkout is refused"},
+    {"id": "M-D-R5-21e", "finding": "R5-21", "title": "a log changed after the run passes",
+     "file": "tests/emr/d/same_source.py",
+     "old": "        elif not (folder / name).is_file() or file_sha256(folder / name) != item[\"sha256\"]:", "new": "        elif False:",
+     "case": CASE["evidence"], "expect": "R5-21: a log changed after the run is refused"},
+    {"id": "M-D-R5-21f", "finding": "R5-21", "title": "a declared step that did not run counts as a pass",
+     "file": "tests/emr/d/same_source.py",
+     "old": "        result.update(verdict=\"unrun\", problems=[\"no record: the step did not run\"])", "new": "        result.update(verdict=\"pass\")",
+     "case": CASE["evidence"], "expect": "R5-21: a declared step that did not run is refused"},
+    {"id": "M-D-R5-21g", "finding": "R5-21", "title": "a failing command counts as a pass",
+     "file": "tests/emr/d/same_source.py",
+     "old": "    if run[\"exit_code\"] != 0 or run[\"recorder_exit_code\"] != 0:", "new": "    if False:",
+     "case": CASE["evidence"], "expect": "R5-21: a failing command is refused"},
+    {"id": "M-D-R5-21h", "finding": "R5-21", "title": "a skipped declared case counts as a pass",
+     "file": "tests/emr/d/same_source.py", "old": "        if cases[\"skipped\"]:", "new": "        if False:",
+     "case": CASE["evidence"], "expect": "R5-21: a declared server case skipped is refused"},
+    {"id": "M-D-R5-21i", "finding": "R5-21", "title": "the declaration is read from the working tree, not from TARGET_SHA",
+     "file": "tests/emr/d/same_source.py",
+     "old": "        declaration = json.loads(commit.read(DECLARATION).decode(\"utf-8\"))",
+     "new": "        declaration = json.loads(pathlib.Path(DECLARATION).read_text(encoding=\"utf-8\"))",
+     "case": CASE["evidence"], "expect": "R5-21: a declaration weakened in the working tree is not the reference is refused"},
+    {"id": "M-D-R5-21j", "finding": "R5-21", "title": "an input the run produced (the image identity) is not bound to the file the live run consumed",
+     "file": "tests/emr/d/same_source.py",
+     "old": "        if not pathlib.Path(name).is_file() or lf_sha256(pathlib.Path(name).read_bytes()) != before[name][1]:", "new": "        if False:",
+     "case": CASE["evidence"], "expect": "R5-21: the image identity changed after the live run consumed it is refused"},
+    {"id": "M-D-R5-21k", "finding": "R5-21 / DR3-05", "title": "the declaration drops the migrations the live run's image applies",
+     "file": "emr/units/d.json", "old": "\"live\": [\"emr/units/d.json\", \"tests/emr/d\", \"api/prisma/migrations\", ",
+     "new": "\"live\": [\"emr/units/d.json\", \"tests/emr/d\", ",
+     "case": CASE["workflow"], "expect": "R5-21: the live declaration names api/prisma/migrations"},
+    {"id": "M-D-R5-21l", "finding": "R5-21 / DR3-05", "title": "the live record no longer hashes the migration tree",
+     "file": ".github/workflows/emr-d.yml", "old": "--tree tests/emr/d --tree api/prisma/migrations --file emr/units/d.json --file scripts/emr-compose.py",
+     "new": "--tree tests/emr/d --file emr/units/d.json --file scripts/emr-compose.py",
+     "case": CASE["workflow"], "expect": "the live record hashes api/prisma/migrations"},
+    {"id": "M-D-R5-22a", "finding": "R5-22 / DR4-07", "title": "the revision comparison stays written but no longer stops the run",
+     "file": ".github/workflows/emr-d.yml", "old": IDENTITY_CHECK, "new": IDENTITY_CHECK.replace("; exit 1; }", "; }"),
+     "case": CASE["workflow"], "expect": "image identity must refuse a wrong image"},
+    {"id": "M-D-R5-22b", "finding": "R5-22 / DR4-07", "title": "the revision is compared with the requested source itself",
+     "file": ".github/workflows/emr-d.yml", "old": IDENTITY_CHECK, "new": IDENTITY_CHECK.replace("test \"$revision\"", "test \"$TARGET_SHA\""),
+     "case": CASE["workflow"], "expect": "image identity must refuse a wrong image"},
+    {"id": "M-D-R5-22c", "finding": "R5-22 / DR4-07", "title": "the identity step reads a label the build never sets",
+     "file": ".github/workflows/emr-d.yml", "old": IDENTITY_READ, "new": IDENTITY_READ.replace("image.revision", "image.version"),
+     "case": CASE["workflow"], "expect": "R5-22: the image of the requested source passes the identity check"},
+    {"id": "M-D-R5-22d", "finding": "R5-22 / DR2-07", "title": "the image is built without the requested source as its revision",
+     "file": ".github/workflows/emr-d.yml", "old": "--target production --build-arg \"VCS_REF=${{ env.TARGET_SHA }}\" -t",
+     "new": "--target production -t",
+     "case": CASE["workflow"], "expect": "R5-22: the image of the requested source passes the identity check"},
+    {"id": "M-D-R5-22e", "finding": "R5-22", "title": "the checkout is compared with itself, not with TARGET_SHA",
+     "file": ".github/workflows/emr-d.yml", "old": "run: test \"$(git rev-parse HEAD)\" = \"$TARGET_SHA\"",
+     "new": "run: test \"$(git rev-parse HEAD)\" = \"$(git rev-parse HEAD)\"",
+     "case": CASE["workflow"], "expect": "R5-22: a checkout of another commit than TARGET_SHA is refused"},
+    {"id": "M-D-R5-22g", "finding": "R5-22 / R5-21", "title": "the last step accepts an image identity of another revision",
+     "file": "tests/emr/d/same_source.py", "old": "IMAGE_ID.fullmatch(words[0]) and words[1] == sha)", "new": "IMAGE_ID.fullmatch(words[0]))",
+     "case": CASE["evidence"], "expect": "R5-22: an image identity of another revision is refused"},
+    {"id": "M-D-R5-23a", "finding": "R5-23 / DR4-07", "title": "the revision comparison kept word for word as the arguments of a no-op command",
+     "file": ".github/workflows/emr-d.yml", "old": IDENTITY_CHECK, "new": IDENTITY_CHECK.replace("          test ", "          : test ", 1),
+     "case": CASE["workflow"], "expect": "image identity must refuse a wrong image"},
+    {"id": "M-D-R5-23b", "finding": "R5-23 / R5-21", "title": "the before/after comparison kept word for word behind a condition that never holds",
+     "file": "tests/emr/d/same_source.py", "old": "        elif before[name] != after[name]:", "new": "        elif False and before[name] != after[name]:",
+     "case": CASE["evidence"], "expect": "R5-21: a migration changed while the command ran is refused"},
 ]
 # DR3-06: the same workflow written in other shell notation must leave the workflow case passing (round 3's own word
 # splitter failed both: it cut a quoted concatenation into two arguments).
@@ -174,12 +257,51 @@ EQUIVALENTS = [
      "file": ".github/workflows/emr-d.yml",
      "old": "--build-arg \"VCS_REF=${{ env.TARGET_SHA }}\" -t \"kin-emrd-ci:${{ env.TARGET_SHA }}\"",
      "new": "--build-arg VCS_REF=\"${{ env.TARGET_SHA }}\" -t 'kin-emrd-ci:'\"${{ env.TARGET_SHA }}\"",
-     "case": CASE["workflow"]},
+     "case": CASE["workflow"], "with": [CASE["evidence"]]},
     {"id": "E-D-R4-DR3-06b", "finding": "DR3-06", "title": "the image record's inputs written with quoted parts, a backslash escape and single quotes",
      "file": ".github/workflows/emr-d.yml",
      "old": "--file api/Dockerfile --file api/.dockerignore --file api/start-production.sh",
      "new": "--file \"api\"/Dockerfile --file api\\/.dockerignore --file 'api/start-production.sh'",
+     "case": CASE["workflow"], "with": [CASE["evidence"]]},
+    # Round 5 (R5-22/23): the same checks written differently - an if statement, a function with --format and a compact
+    # template, a nested helper, renamed names and other quotes, a `./` recorder path - must leave their cases passing.
+    {"id": "E-D-R5-22a", "finding": "R5-22 / R5-23", "title": "the revision comparison written as an if statement with [ ]",
+     "file": ".github/workflows/emr-d.yml", "old": IDENTITY_CHECK,
+     "new": "          if [ \"$revision\" != \"$TARGET_SHA\" ]; then\n            echo \"image revision '$revision' is not $TARGET_SHA\"\n            exit 1\n          fi",
      "case": CASE["workflow"]},
+    {"id": "E-D-R5-22b", "finding": "R5-22 / R5-23", "title": "the label read by an extracted shell function with --format and a compact template",
+     "file": ".github/workflows/emr-d.yml", "old": IDENTITY_READ,
+     "new": "          label() { docker image inspect --format '{{index .Config.Labels \"'\"$1\"'\"}}' \"kin-emrd-ci:$TARGET_SHA\"; }\n"
+            "          revision=\"$(label org.opencontainers.image.revision)\"",
+     "case": CASE["workflow"]},
+    {"id": "E-D-R5-23a", "finding": "R5-23 / R5-21", "title": "the before/after comparison extracted into a nested helper with other names",
+     "file": "tests/emr/d/same_source.py",
+     "old": "    for name in sorted(set(before) | set(after)):\n"
+            "        if name not in after:\n"
+            "            bad.append(\"%s: gone or unhashed after the command\" % name)\n"
+            "        elif name not in before:\n"
+            "            bad.append(\"%s: appeared during the command\" % name)\n"
+            "        elif before[name] != after[name]:\n"
+            "            bad.append(\"%s: changed while the command ran\" % name)\n",
+     "new": "    def drift(first, second):\n"
+            "        for path in sorted(set(first) | set(second)):\n"
+            "            if path not in second:\n"
+            "                yield \"%s: gone or unhashed after the command\" % path\n"
+            "            elif path not in first:\n"
+            "                yield \"%s: appeared during the command\" % path\n"
+            "            elif first[path] != second[path]:\n"
+            "                yield \"%s: changed while the command ran\" % path\n"
+            "    bad.extend(drift(before, after))\n",
+     "case": CASE["evidence"], "with": [CASE["workflow"]]},
+    {"id": "E-D-R5-23b", "finding": "R5-23", "title": "a helper renamed in its body and written with other quotes",
+     "file": "tests/emr/d/same_source.py",
+     "old": "def normal(name):\n    return posixpath.normpath(str(name).replace(\"\\\\\", \"/\"))\n",
+     "new": "def normal(path_name):\n    return posixpath.normpath(str(path_name).replace('\\\\', '/'))\n",
+     "case": CASE["evidence"], "with": [CASE["workflow"]]},
+    {"id": "E-D-R5-23c", "finding": "R5-23 / DR3-06", "title": "the image recorder named by a ./ path and its run directory quoted",
+     "file": ".github/workflows/emr-d.yml", "old": "run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/image ",
+     "new": "run: python3 ./scripts/record-run.py --run-dir \"tmp/emr-d-ci/image\" ",
+     "case": CASE["workflow"], "with": [CASE["evidence"]]},
 ]
 
 
@@ -302,19 +424,21 @@ def judge(mutant, code, stdout, stderr):
 
 
 def judge_equivalent(equivalent, code, stdout, stderr):
-    """An equivalent holds when its case passes on the copy written in the other notation (and nothing crashed)."""
-    entry = tap_cases(stdout).get(equivalent["case"])
-    reasons = []
+    """An equivalent holds when every case it names passes on the copy written differently (and nothing crashed)."""
+    cases, reasons, blocks = tap_cases(stdout), [], {}
     if code != 0:
         reasons.append("child exited %d" % code)
-    if entry is None:
-        reasons.append("named case not reported")
-    elif entry[0] != "ok" or entry[1]:
-        reasons.append(f"named case reported {entry[0]} {entry[1] or ''}".strip())
+    for name in [equivalent["case"], *equivalent.get("with", [])]:
+        entry = cases.get(name)
+        blocks[name] = entry[2] if entry else []
+        if entry is None:
+            reasons.append("named case not reported: " + name)
+        elif entry[0] != "ok" or entry[1]:
+            reasons.append(f"named case reported {entry[0]} {entry[1] or ''}: {name}")
     crash = [marker for marker in CRASH_MARKERS if marker in stdout or marker in stderr]
     if crash:
         reasons.append("crash markers: " + ", ".join(crash))
-    return {"holds": not reasons, "reasons": reasons, "case_block": entry[2] if entry else []}
+    return {"holds": not reasons, "reasons": reasons, "case_blocks": blocks}
 
 
 def main():
@@ -334,7 +458,7 @@ def main():
     cases = tap_cases(stdout)
     failing = sorted(name for name, (status, skip, _) in cases.items() if status != "ok" or skip)
     summary["baseline"] = {"exit": code, "collected": len(cases), "not_passing": failing}
-    named = sorted({m["case"] for m in MUTANTS})
+    named = sorted({m["case"] for m in MUTANTS} | {c for e in EQUIVALENTS for c in [e["case"], *e.get("with", [])]})
     with Copy() as copy:
         code2, stdout2, stderr2 = run(node, copy.root / "tests/emr/d/server_test.cjs", named)
     control = tap_cases(stdout2)
@@ -350,8 +474,8 @@ def main():
                                    **copy.hashes, **judge(mutant, code, stdout, stderr), "stdout": stdout, "stderr": stderr})
     for equivalent in EQUIVALENTS:
         with Copy(equivalent) as copy:
-            code, stdout, stderr = run(node, copy.root / "tests/emr/d/server_test.cjs", [equivalent["case"]])
-        summary["equivalents"].append({**{k: equivalent[k] for k in ("id", "finding", "title", "file", "case")}, "exit": code,
+            code, stdout, stderr = run(node, copy.root / "tests/emr/d/server_test.cjs", [equivalent["case"], *equivalent.get("with", [])])
+        summary["equivalents"].append({**{k: equivalent[k] for k in ("id", "finding", "title", "file", "case")}, "with": equivalent.get("with", []), "exit": code,
                                        **copy.hashes, **judge_equivalent(equivalent, code, stdout, stderr), "stdout": stdout, "stderr": stderr})
     summary["result"] = {"killed": sum(m["killed"] for m in summary["mutants"]), "total": len(MUTANTS),
                          "equivalents_holding": sum(e["holds"] for e in summary["equivalents"]), "equivalents": len(EQUIVALENTS)}

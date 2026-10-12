@@ -8,8 +8,12 @@ name: EMR-D clinical attached-record contracts
 # uses exactly that tag, and the last step proves that every record and the image name that same SHA - for a pull request
 # (its head, not the merge ref), a push and a dispatch of another candidate_sha alike. Each record hashes what its command
 # consumes (DR3-05): the step `id` names its declared inputs in emr/units/d.json ci.recorded_inputs - the compiler
-# configuration and lock, the Prisma schema and migrations, the declaration, driver, gate and image - and the last step
-# (tests/emr/d/same_source.py) refuses a record that did not hash one of them.
+# configuration and lock, the Prisma schema and migrations, the declaration, driver, gate and image. The last step
+# (tests/emr/d/same_source.py, R5-21) compares every record with TARGET_SHA's own git objects: an input missing, without a
+# valid hash, changed while its command ran, added, removed or different from TARGET_SHA, a log changed afterwards, a
+# non-zero exit, collected cases (node's junit report, the mutant summaries, the runner's lines) other than the declared
+# ones, an unrun step or an image identity of another revision fails the run. The node test steps report as junit so that
+# the collected cases are read by an installed XML parser, skips kept apart from passes.
 on:
   pull_request:
   push:
@@ -36,6 +40,7 @@ jobs:
       TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Requested source is a full commit SHA
+        id: target-sha
         run: |
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "TARGET_SHA must be a full lowercase 40-character SHA"; exit 1; }
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -43,6 +48,7 @@ jobs:
           ref: ${{ env.TARGET_SHA }}
           persist-credentials: false
       - name: Checked-out source is the requested SHA
+        id: checkout-identity
         run: test "$(git rev-parse HEAD)" = "$TARGET_SHA"
       - name: TypeScript, Nest and Prisma pinned by api/package-lock.json (no lifecycle scripts)
         timeout-minutes: 5
@@ -58,7 +64,7 @@ jobs:
       - name: D contracts and C01-C56 model selection (C52 explicitly deferred to R2 DOM)
         id: contract
         if: ${{ !cancelled() }}
-        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/contract --cwd . --tree api/src/emr-clinical --tree api/src/emr-contract --file tests/emr/d/contract_test.cjs --file api/tsconfig.json --file api/package-lock.json -- docker run --rm --network none --read-only --tmpfs /tmp -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/emr/d/contract_test.cjs
+        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/contract --cwd . --tree api/src/emr-clinical --tree api/src/emr-contract --file tests/emr/d/contract_test.cjs --file api/tsconfig.json --file api/package-lock.json -- docker run --rm --network none --read-only --tmpfs /tmp -v "$PWD:/src:ro" -w /src node:22-alpine node --test --test-reporter=junit tests/emr/d/contract_test.cjs
       - name: Retained 14 and invariant 12 mutants (contract models distinguished; M-D-06 is round 2)
         id: mutants
         if: ${{ !cancelled() }}
@@ -66,7 +72,7 @@ jobs:
       - name: D server cases and the d.json declaration (TEST-D-01..04 pure halves, this workflow's source binding)
         id: server
         if: ${{ !cancelled() }}
-        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/server --cwd . --tree api/src --tree api/prisma --tree tests/emr/d --file emr/units/d.json --file api/tsconfig.json --file api/nest-cli.json --file api/package.json --file api/package-lock.json --file api/start-production.sh --file api/.dockerignore --file api/Dockerfile --file .github/workflows/emr-d.yml --file scripts/record-run.py --file scripts/emr-compose.py --file scripts/run-tests.py --file tests/live_test_gate.py -- node --test tests/emr/d/server_test.cjs
+        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/server --cwd . --tree api/src --tree api/prisma --tree tests/emr/d --file emr/units/d.json --file api/tsconfig.json --file api/nest-cli.json --file api/package.json --file api/package-lock.json --file api/start-production.sh --file api/.dockerignore --file api/Dockerfile --file .github/workflows/emr-d.yml --file scripts/record-run.py --file scripts/emr-compose.py --file scripts/run-tests.py --file tests/live_test_gate.py -- node --test --test-reporter=junit tests/emr/d/server_test.cjs
       - name: Server mutants (each fix of DR2-01..08 and DR3-01..05 reverted, Astra's AM10; the DR3-06 notation equivalents)
         id: server-mutants
         if: ${{ !cancelled() }}

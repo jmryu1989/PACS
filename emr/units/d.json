@@ -1,11 +1,12 @@
 {
   "unit": "EMR-D",
-  "round": "R4-server",
+  "round": "R5d-workflow",
   "base_sha": "1414783eb6274a50b3475daf8eb0f3bb53a20fd1",
   "round_bases": {
     "R2-server": "1414783eb6274a50b3475daf8eb0f3bb53a20fd1",
     "R3-server": "bfddc3d09cadf50cfa87e42518d30e910f7eaf4f",
-    "R4-server": "a980357ac43fe3ce8a1f5a9574ed4968c7d76c6a"
+    "R4-server": "a980357ac43fe3ce8a1f5a9574ed4968c7d76c6a",
+    "R5d-workflow": "e01ca30ee641277bab141e001dcf0da627eaa1f8"
   },
   "dependencies": {
     "landed": [
@@ -267,6 +268,7 @@
         "TEST-D-03 read_scope server: a response serving many units hands out no text before every provision naming exactly its versions is durable; a projection naming another author or recipient is refused",
         "TEST-D-02 versions_and_sr server: a manual SR adoption counts only once its access event is durable - a ledger that cannot confirm it leaves it unconfirmed, and the same event confirms it later",
         "EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each record hashes what its command consumes",
+        "EMR-D evidence: same_source.py passes only records of TARGET_SHA that hashed, unchanged, every file their step consumes as TARGET_SHA holds it, with their logs, exits and declared cases, and the image of TARGET_SHA",
         "TEST-D-04 atomic_retry server: the runtime is not composed unless A's stored-record reader serves the sources D cites",
         "TEST-D-02 versions_and_sr server: what a finding incorporates is a fixed reference to its source's exact version - planned, signed, stored and recovered alike; a navigation link is none",
         "TEST-D-04 atomic_retry server: the runtime is composed once with every port and refuses a second composition",
@@ -293,6 +295,10 @@
         "DR3-03": "TEST-D-02 versions_and_sr server: copies of one source version - two marks of one saved comparison, its saved view and a mark on it - are one fixed reference, planned, signed, stored and recovered alike, every copy kept in the text",
         "DR3-04": "TEST-D-04 atomic_retry server: a cited source gone before the commit keeps the stale-source refusal - in a recovery, for the original and every resend, and in a commit itself; storage that cannot be read leaves it pending for the next recovery",
         "DR3-05/06": "EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each record hashes what its command consumes"
+      },
+      "round5d_findings": {
+        "DR4-06 / R5-21 / DR3-05": "EMR-D evidence: same_source.py passes only records of TARGET_SHA that hashed, unchanged, every file their step consumes as TARGET_SHA holds it, with their logs, exits and declared cases, and the image of TARGET_SHA",
+        "DR4-07 / R5-22": "EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each record hashes what its command consumes"
       }
     },
     "live": {
@@ -336,10 +342,10 @@
       "contract": ["api/src/emr-clinical", "api/src/emr-contract", "tests/emr/d/contract_test.cjs", "api/tsconfig.json", "api/package-lock.json"],
       "mutants": ["api/src/emr-clinical", "api/src/emr-contract", "tests/emr/d/mutants.py", "tests/emr/d/contract_test.cjs", "api/tsconfig.json",
         "api/package-lock.json"],
-      "server": ["api/src", "api/prisma/migrations", "api/prisma/schema.prisma", "api/tsconfig.json", "api/nest-cli.json", "api/package.json",
+      "server": ["api/src", "api/prisma", "api/prisma/migrations", "api/prisma/schema.prisma", "api/tsconfig.json", "api/nest-cli.json", "api/package.json",
         "api/package-lock.json", "api/start-production.sh", "api/.dockerignore", "api/Dockerfile", "tests/emr/d", "emr/units/d.json",
         ".github/workflows/emr-d.yml", "scripts/record-run.py", "scripts/emr-compose.py", "scripts/run-tests.py", "tests/live_test_gate.py"],
-      "server-mutants": ["api/src", "api/prisma/migrations", "api/prisma/schema.prisma", "api/tsconfig.json", "api/nest-cli.json", "api/package.json",
+      "server-mutants": ["api/src", "api/prisma", "api/prisma/migrations", "api/prisma/schema.prisma", "api/tsconfig.json", "api/nest-cli.json", "api/package.json",
         "api/package-lock.json", "api/start-production.sh", "api/.dockerignore", "api/Dockerfile", "tests/emr/d", "emr/units/d.json",
         ".github/workflows/emr-d.yml", "scripts/record-run.py", "scripts/emr-compose.py", "scripts/run-tests.py", "tests/live_test_gate.py"],
       "image": ["api/Dockerfile", "api/.dockerignore", "api/package.json", "api/package-lock.json", "api/prisma", "api/tsconfig.json", "api/nest-cli.json",
@@ -347,17 +353,30 @@
       "live": ["emr/units/d.json", "tests/emr/d", "api/prisma/migrations", "scripts/emr-compose.py", "scripts/run-tests.py", "tests/live_test_gate.py",
         "tmp/emr-d-ci/image-identity.txt"]
     },
+    "produced_inputs": ["tmp/emr-d-ci/image-identity.txt"],
+    "outputs": {
+      "typecheck": {"kind": "exit"},
+      "contract": {"kind": "junit", "declared": "contract"},
+      "mutants": {"kind": "mutants"},
+      "server": {"kind": "junit", "declared": "server"},
+      "server-mutants": {"kind": "mutants", "declared": "server"},
+      "image": {"kind": "exit"},
+      "live": {"kind": "run-tests", "declared": "live"}
+    },
+    "outputs_note": "R5-21: what each recording step's stdout.log holds and the declaration its collected cases must equal - junit: node's junit report (cases.<declared>: exactly its cases, none skipped; or its count and exactly its declared skips); mutants: the driver's JSON summary (every mutant killed, every equivalent holding; mutants.<declared>: exactly its ids and equivalents); run-tests: scripts/run-tests.py's EXACT_TESTS and PLAN_RESULT lines (cases.<declared>: its class and exactly its cases, plan passed); exit: the exit code alone. produced_inputs: inputs an earlier step of the same run writes, compared with that file as it is when tests/emr/d/same_source.py runs; every other input is compared with TARGET_SHA's git objects",
     "note": "DR3-05: what each recording step's command consumes, by step id (= its run directory under tmp/emr-d-ci). typecheck: the sources, the compiler configuration and the lock that pins the compiler and the type packages, and the Prisma schema the generated client is typed from; contract and mutants: the D/A sources, the contract test (and the mutant driver), the compiler configuration and lock; server: every source it compiles, the migration directory its declaration case reads, the declaration, the workflow, Dockerfile and build context files its workflow case runs the recorders over, the recorder itself, the gate, runner and provisioning script; server-mutants: what it copies and links for every mutant (the same set) and its own baseline run; image: the Dockerfile, its ignore file and every path its COPY lines take from the build context; live: its declaration (live.py reads it), the driver and device files it mounts, the migrations the image applies, B's provisioning SQL, the gate and the runner, and the identity of the image it runs (id and revision label). server_test.cjs checks the workflow's recorders against this table; tests/emr/d/same_source.py checks every record of a run against it"
   },
   "mutants": {
     "pure": "tests/emr/d/mutants.py (R1: M-D-01..05 and M-D-R1-*, against tests/emr/d/contract_test.cjs)",
     "server": {
       "file": "tests/emr/d/server_mutants.py",
-      "note": "rounds 3 and 4: each reverts one fix of Astra's DR2-01..08 on bfddc3d or DR3-01..06 on a980357 (or removes the signing-time check of Astra's AM10) in a copy and runs tests/emr/d/server_test.cjs; the DR3-06 equivalents write the workflow in other shell notation and must leave the workflow case passing",
+      "note": "rounds 3 and 4: each reverts one fix of Astra's DR2-01..08 on bfddc3d or DR3-01..06 on a980357 (or removes the signing-time check of Astra's AM10) in a copy and runs tests/emr/d/server_test.cjs; round 5 part d: Astra's AR4-M08/AR4-M09 on e01ca30 and boundary mutants of the evidence check and the workflow (R5-21..23, several keeping the checking text while its effect is gone); the equivalents write the workflow, the identity step and the evidence check differently (notation, an if statement, an extracted function, renamed names, other quotes, a ./ path) and must leave every case they name passing",
       "ids": ["M-D-R3-DR2-01", "M-D-R3-DR2-02", "M-D-R3-DR2-03", "M-D-R3-DR2-04", "M-D-R3-DR2-05", "M-D-R3-DR2-06", "M-D-R3-DR2-07a",
         "M-D-R3-DR2-07b", "M-D-R3-DR2-08", "M-D-R3-AM10", "M-D-R4-DR3-01a", "M-D-R4-DR3-01b", "M-D-R4-DR3-01c", "M-D-R4-DR3-02", "M-D-R4-DR3-03", "M-D-R4-DR3-04a",
-        "M-D-R4-DR3-04b", "M-D-R4-DR3-04c", "M-D-R4-DR3-05a", "M-D-R4-DR3-05b", "M-D-R4-DR3-05c", "M-D-R4-DR3-05d", "M-D-R4-DR3-06"],
-      "equivalents": ["E-D-R4-DR3-06a", "E-D-R4-DR3-06b"]
+        "M-D-R4-DR3-04b", "M-D-R4-DR3-04c", "M-D-R4-DR3-05a", "M-D-R4-DR3-05b", "M-D-R4-DR3-05c", "M-D-R4-DR3-05d", "M-D-R4-DR3-06",
+        "AR4-M08", "AR4-M09", "M-D-R5-21a", "M-D-R5-21c", "M-D-R5-21e", "M-D-R5-21f", "M-D-R5-21g", "M-D-R5-21h", "M-D-R5-21i", "M-D-R5-21j",
+        "M-D-R5-21k", "M-D-R5-21l", "M-D-R5-22a", "M-D-R5-22b", "M-D-R5-22c", "M-D-R5-22d", "M-D-R5-22e", "M-D-R5-22g", "M-D-R5-23a", "M-D-R5-23b"],
+      "equivalents": ["E-D-R4-DR3-06a", "E-D-R4-DR3-06b", "E-D-R5-22a", "E-D-R5-22b", "E-D-R5-23a", "E-D-R5-23b", "E-D-R5-23c"]
     },
     "live": [
       {
@@ -399,7 +418,7 @@
     ]
   },
   "expected": {
-    "server": 20,
+    "server": 21,
     "live": 21,
     "live_mutants": 5,
     "migrations": 46,
