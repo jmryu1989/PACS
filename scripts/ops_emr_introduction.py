@@ -665,13 +665,15 @@ def receipt_sha256(receipt):
     return sha256_bytes(canonical(receipt))
 
 
-def receipt_valid(receipt, plan, b0_manifest_sha256, production, *, now=None, b0_created_utc=None, used=()):
+def receipt_valid(receipt, plan, b0_manifest_sha256, production, *, now=None, b0_created_utc=None, used=(), bundle=None):
     """A local-restore receipt is the rehearsal's own run record, never an offsite claim. It is accepted only for the
     production plan it names, on the rehearsal host that plan allows, for this production attempt's B0, within its
     freshness window and once (used: the receipts this plan already admitted). Every rehearsal phase must carry its
     exact step list (all PASS), its request and its result file's hash; the artifacts it names (B0, B1 and its restore
     check, the probe, Bfail, the recovery volumes and the previous-version smoke over this plan's frame) must agree
-    with each other. Anything short of that is a refusal before any change."""
+    with each other. IRT2-01: and with the producer's own run - the bundle (its result files and journal, see
+    bundle_valid) is required and checked here, so no receipt is admitted on its claims alone. Anything short of that is
+    a refusal before any change."""
     _keys(receipt, RECEIPT_KEYS, "local-restore receipt")
     require(receipt["schema"] == 2 and receipt["kind"] == "local-restore" and receipt["passed"] is True, "Receipt is not a passed local restore")
     _str(receipt["receipt_id"], NONCE, "receipt ID")
@@ -726,6 +728,8 @@ def receipt_valid(receipt, plan, b0_manifest_sha256, production, *, now=None, b0
         "member": True, "token_after_restore": True, "worklist_uid": frame_study(plan), "frame_sha256": frame["sha256"],
         "frame_bytes": frame["bytes"]}, "Receipt previous-version smoke differs from this plan's frame")
     require(receipt_sha256(receipt) not in set(used), "Receipt was already used")
+    require(bundle is not None, "A local-restore receipt is admitted only with its producer's run bundle")
+    bundle_valid(receipt, bundle)
     return receipt
 
 
@@ -739,22 +743,91 @@ def receipt_clock(receipt, now, b0_created_utc=None):
     return facts
 
 
-def bundle_valid(receipt, directory):
-    """Re-verify a receipt against the rehearsal's run directory: every phase result file it names exists with that hash
-    and records exactly the steps the receipt claims, and the journal is the one it hashed."""
-    directory = Path(directory)
+class DirectoryBundle:
+    """A rehearsal run's files (its result files and journal) read from a folder: the rehearsal's own run directory, or
+    the copy an operator places for production (IntroductionHost reads it from its protected emr-bundles folder)."""
+
+    def __init__(self, directory, reader=None):
+        self.directory = Path(directory)
+        self.reader = reader or (lambda path: path.read_bytes())
+
+    def read(self, name):
+        require(re.fullmatch(r"(?:result-[a-z_]+-[0-9a-f]{16}\.json|journal\.jsonl)", name) is not None, "Invalid bundle file name")
+        try:
+            return self.reader(self.directory / name)
+        except (OSError, RuntimeError):
+            raise Stop("The rehearsal bundle lacks " + name) from None
+
+
+def _step(result, sid):
+    found = [step for step in result.get("steps") or [] if type(step) is dict and step.get("step") == sid]
+    require(len(found) == 1 and found[0].get("outcome") == "PASS" and type(found[0].get("detail")) is dict,
+            "The rehearsal result has no passed step " + sid)
+    return found[0]["detail"]
+
+
+def bundle_valid(receipt, bundle):
+    """IRT2-01: the receipt against its producer's run, the rehearsal's own records. Every phase's result file is the one
+    the receipt hashed and records that phase of the rehearsal plan, under the receipt's request, ended in the phase's
+    passing status with exactly the receipt's steps, all passed; the journal is the hashed one and holds each phase's
+    start (with that request) and its passing end, in the phases' order, for that plan; and the artifacts the receipt
+    claims are the ones the steps recorded - the seed's source B0, the rehearsal's B0 and its restore check, B1 and its
+    restore check, the probe's evidence, Bfail, the recovery volumes, the persisted recovery and the previous-version
+    smoke. A fixture or an adjusted claim, another request's or a failed run's results are refused."""
+    if not hasattr(bundle, "read"):
+        bundle = DirectoryBundle(bundle)
+    results = {}
     for phase in RECEIPT_PHASES:
         item = receipt["phases"][phase]
-        path = directory / ("result-" + phase + "-" + item["request_sha256"][:16] + ".json")
-        raw = path.read_bytes()
+        raw = bundle.read("result-" + phase + "-" + item["request_sha256"][:16] + ".json")
         require(sha256_bytes(raw) == item["result_sha256"], "Rehearsal result file differs from the receipt: " + phase)
         result = decode(raw)
-        require(result.get("phase") == phase and [[step["step"], step["outcome"]] for step in result.get("steps", [])] == item["steps"],
+        require(type(result) is dict and result.get("phase") == phase and result.get("request_sha256") == item["request_sha256"]
+                and result.get("status") == DONE[phase] and result.get("plan_sha256") == receipt["rehearsal_plan_sha256"],
+                "Rehearsal result is not this rehearsal's passed phase: " + phase)
+        require([[step.get("step"), step.get("outcome")] for step in result.get("steps") or []] == item["steps"],
                 "Rehearsal result steps differ from the receipt: " + phase)
-    with open(directory / "journal.jsonl", "rb") as stream:
-        prefix = stream.read(receipt["journal_bytes"])
+        results[phase] = result
+    raw = bundle.read("journal.jsonl")
+    prefix = raw[:receipt["journal_bytes"]]
     require(len(prefix) == receipt["journal_bytes"] and sha256_bytes(prefix) == receipt["journal_sha256"],
             "Rehearsal journal differs from the receipt")
+    try:
+        events = [json.loads(line) for line in prefix.decode("utf-8").splitlines() if line.strip()]
+    except ValueError:
+        raise Stop("Rehearsal journal is unreadable") from None
+    position = 0
+    for phase in RECEIPT_PHASES:
+        request = receipt["phases"][phase]["request_sha256"]
+        starts = [index for index, event in enumerate(events) if index >= position and event.get("event") == "phase-start"
+                  and event.get("phase") == phase and event.get("request_sha256") == request
+                  and event.get("plan_sha256") == receipt["rehearsal_plan_sha256"]]
+        require(starts, "Rehearsal journal has no start of " + phase + " for its request")
+        ends = [index for index, event in enumerate(events) if index > starts[0] and event.get("event") == "phase-end"
+                and event.get("phase") == phase and event.get("status") == DONE[phase]
+                and event.get("plan_sha256") == receipt["rehearsal_plan_sha256"]]
+        require(ends, "Rehearsal journal has no passing end of " + phase)
+        position = ends[0] + 1
+    evidence = receipt["evidence"]
+    require(_step(results["seed"], "S-01").get("source_manifest_sha256") == receipt["source_b0_manifest_sha256"],
+            "The rehearsal seeded another B0")
+    require(_step(results["capture"], "L-04b").get("manifest_sha256") == receipt["rehearsal_b0_manifest_sha256"]
+            and _step(results["capture"], "L-04c").get("success") is True, "The rehearsal's B0 or its restore check differs from the receipt")
+    b1 = _step(results["verify"], "L-10c")
+    require(b1.get("manifest_sha256") == receipt["rehearsal_b1_manifest_sha256"] and (b1.get("restore_check") or {}).get("success") is True,
+            "The rehearsal's B1 or its restore check differs from the receipt")
+    probe = _step(results["verify"], "L-10b")
+    require({key: probe.get(key) for key in ("added", "replay_duplicates", "restart", "evidence_sha256")} == evidence["verify"]["probe"],
+            "The rehearsal's probe differs from the receipt")
+    require(_step(results["rollback"], "RB-01").get("manifest_sha256") == receipt["bfail_manifest_sha256"], "The rehearsal's Bfail differs from the receipt")
+    recovery = _step(results["rollback"], "RB-02").get("recovery") or {}
+    require({key: recovery.get(key) for key in ("project", "pg", "orthanc")} == evidence["rollback"]["recovery"],
+            "The rehearsal's recovery volumes differ from the receipt")
+    require(_step(results["rollback_reopen"], "RB-04a").get("project") == evidence["rollback"]["recovery"]["project"],
+            "The rehearsal's persisted recovery differs from the receipt")
+    smoke_result = _step(results["rollback_reopen"], "RB-04b")
+    require(all(smoke_result.get(key) is True for key in ("health", "auth_refusal", "member", "worklist", "frame")),
+            "The rehearsal's previous-version smoke did not pass every check")
     return True
 
 
@@ -1105,6 +1178,35 @@ def smoke_passed(result):
     return (isinstance(result, dict) and all(result.get(key) is True for key in ("health", "auth_refusal", "member", "worklist", "frame")))
 
 
+SHORTCUT_KEYS = ("list", "image", "prior", "report", "context", "note", "tools", "nativeTools", "previous", "next")
+
+
+def _owner_valid(value):
+    return type(value) is list and len(value) == 2 and all(type(item) is str and item for item in value)
+
+
+def folders_valid(body):
+    """IRT2-11: GET /api/filter-folders by its contract (api/src/pacs/filters.ts): the member's owner pair, a revision
+    and the folder and saved-search lists with their fields - not merely any JSON."""
+    return (type(body) is dict and _owner_valid(body.get("owner")) and type(body.get("revision")) is int and body["revision"] >= 0
+            and type(body.get("folders")) is list and all(type(item) is dict and type(item.get("path")) is str
+                                                          and type(item.get("description")) is str and type(item.get("ordinal")) is int
+                                                          for item in body["folders"])
+            and type(body.get("filters")) is list and all(type(item) is dict and type(item.get("name")) is str and "id" in item
+                                                          for item in body["filters"]))
+
+
+def shortcuts_valid(body):
+    """IRT2-11: GET /api/workspace-shortcuts by its contract (api/src/pacs/preferences.ts): owner, revision, the invalid
+    flag, and either no bindings yet or exactly the ten workspace keys bound to allowed keys."""
+    if not (type(body) is dict and _owner_valid(body.get("owner")) and type(body.get("revision")) is int and body["revision"] >= 0
+            and type(body.get("invalid")) is bool):
+        return False
+    bindings = body.get("bindings")
+    return bindings is None or (type(bindings) is dict and set(bindings) == set(SHORTCUT_KEYS) and all(
+        type(value) is str and re.fullmatch(r"Digit[1-79]|Key[ABD-Z]|ArrowLeft|ArrowRight", value) for value in bindings.values()))
+
+
 def product_logout_refused(session):
     """The browser's product-session check: signed in through the product, its logout answered 204, and the ended
     session is then refused (401) both with its binding header and by its cookie alone."""
@@ -1344,7 +1446,7 @@ class Introduction:
             # D04: the plan ended; the resolved compose values it kept for its later phases are not kept beyond it.
             self.records.discard_secret(COMPOSE_VALUES)
         written = {"steps": self.steps, "status": status, "phase": self.phase, "request_sha256": self.request_sha256,
-                   "commands_file": self.records.commands_file}
+                   "plan_sha256": self.plan_sha256, "commands_file": self.records.commands_file}
         if self.warnings:
             written["warnings"] = list(self.warnings)
         digest = self.records.put("result-" + self.phase + "-" + self.request_sha256[:16] + ".json", written)
@@ -1406,7 +1508,8 @@ class Introduction:
             # The local-restore receipt is spent by this attempt, whatever its outcome (one production attempt, once).
             self.state["receipts_used"].append(claimed)
         self.save()
-        self.event("phase-start", **({"receipt_sha256": claimed, "receipt_clock": self.receipt_facts} if claimed else {}),
+        self.event("phase-start", request_sha256=self.request_sha256,
+                   **({"receipt_sha256": claimed, "receipt_clock": self.receipt_facts} if claimed else {}),
                    **({"warnings": list(self.warnings)} if self.warnings else {}))
         if self.phase in ("capture", "seed"):
             # A new exclusive lock; a competing backup, rehearsal or API-only deployment cannot hold it meanwhile.
@@ -1441,7 +1544,8 @@ class Introduction:
             receipt = self.evidence["local-restore"]
             now = self.now()
             receipt_valid(receipt, self.plan, self.state["b0"]["manifest_sha256"], self.production, now=now,
-                          b0_created_utc=self.state["b0"].get("created_utc"), used=self.state["receipts_used"])
+                          b0_created_utc=self.state["b0"].get("created_utc"), used=self.state["receipts_used"],
+                          bundle=self.evidence.get("local-restore-bundle"))
             self.receipt_facts = receipt_clock(receipt, now, self.state["b0"].get("created_utc"))
             return receipt_sha256(receipt)
         if self.phase == "reopen":
@@ -1968,13 +2072,57 @@ class _ProcessTree:
                 pass
         elif self.job:
             self.kernel32.TerminateJobObject(self.job, 1)
-            self.kernel32.CloseHandle(self.job)
-            self.job = None
         if self.process.poll() is None:
             try:
                 self.process.kill()
             except OSError:
                 pass
+
+    def remaining(self):
+        """How many processes of the tree still run (zombies waiting for a reaper do not run)."""
+        if os.name == "posix":
+            proc = Path("/proc")
+            if not proc.is_dir():
+                try:
+                    os.killpg(self.process.pid, 0)
+                    return 1
+                except (ProcessLookupError, PermissionError):
+                    return 0
+            count = 0
+            for entry in proc.iterdir():
+                if entry.name.isdigit():
+                    try:
+                        fields = (entry / "stat").read_text().rsplit(") ", 1)[1].split()
+                    except (OSError, IndexError):
+                        continue
+                    if fields[0] != "Z" and int(fields[2]) == self.process.pid:
+                        count += 1
+            return count
+        if not self.job:
+            return 0
+        import ctypes
+        from ctypes import wintypes
+
+        class Accounting(ctypes.Structure):
+            _fields_ = [("Times", ctypes.c_int64 * 4), ("TotalPageFaultCount", wintypes.DWORD), ("TotalProcesses", wintypes.DWORD),
+                        ("ActiveProcesses", wintypes.DWORD), ("TotalTerminatedProcesses", wintypes.DWORD)]
+        info = Accounting()
+        self.kernel32.QueryInformationJobObject.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p)
+        if not self.kernel32.QueryInformationJobObject(self.job, 1, ctypes.byref(info), ctypes.sizeof(info), None):
+            return 1
+        return int(info.ActiveProcesses)
+
+    def gone(self, seconds=10):
+        """IRT2-13: after the kill, every process of the tree is observed gone within the time (then the job closes)."""
+        deadline = time.monotonic() + seconds
+        while self.remaining() and time.monotonic() < deadline:
+            self.kill()
+            time.sleep(0.2)
+        done = self.remaining() == 0
+        if os.name != "posix" and self.job and done:
+            self.kernel32.CloseHandle(self.job)
+            self.job = None
+        return done
 
 
 def run_tree(argv, *, input, timeout):
@@ -2000,6 +2148,18 @@ def run_tree(argv, *, input, timeout):
                     stream.close()
             except OSError:
                 pass
+        # IRT2-13: nothing of the browser may outlive this call (a later smoke or a rollback starts only after).
+        require(tree.gone(), "The smoke browser left processes running")
+
+
+def follow_folder_owner(path):
+    """A file root wrote into a folder an operating account owns (a capture given to that account) becomes that account's
+    too (IRT2-03); elsewhere nothing changes."""
+    if os.name != "posix" or os.geteuid() != 0:
+        return
+    folder = os.stat(Path(path).parent)
+    if folder.st_uid != 0:
+        os.chown(path, folder.st_uid, folder.st_gid, follow_symlinks=False)
 
 
 def remove_profile(path, seconds=15):
@@ -2084,11 +2244,31 @@ def bound_ops(repository, runner):
         ops.ROOT, ops.run = previous
 
 
-def set_env_line(raw, name, value):
+def set_env_line(raw, name, value, *, pattern=r"[A-Za-z0-9_.-]{1,128}"):
     """The .env bytes with exactly one NAME=value line for this name (any earlier one removed), everything else kept."""
-    require(ops.ENV_NAME.fullmatch(name) is not None and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", value) is not None, "Invalid env line")
+    require(ops.ENV_NAME.fullmatch(name) is not None and re.fullmatch(pattern, value) is not None, "Invalid env line")
     kept = [line for line in raw.decode("utf-8").splitlines() if line.strip().split("=", 1)[0].strip() != name]
     return ("\n".join(kept) + "\n" + name + "=" + value + "\n").lstrip("\n").encode("utf-8")
+
+
+# A compose file list as an .env value: paths without blanks, quotes or shell/Compose interpolation characters.
+COMPOSE_FILE_VALUE = r"[A-Za-z0-9_./:;\\-]{1,2048}"
+
+
+def declared_compose_file(target):
+    """IRT2-10: the target's compose file list as Compose's COMPOSE_FILE value (this host's path separator). Written into
+    the checkout's .env, it makes every ordinary `docker compose` in the checkout - an operator's recreate of the proxy
+    after the release or after a rollback - use exactly the declared list, external overlay included."""
+    value = os.pathsep.join(target["compose_files"])
+    require(re.fullmatch(COMPOSE_FILE_VALUE, value) is not None, "The declared compose files cannot be named in COMPOSE_FILE")
+    return value
+
+
+def env_with_compose_file(raw, target):
+    """The .env bytes naming the declared compose list (only when the target declares an external overlay)."""
+    if not target["declared_overlays"]:
+        return raw
+    return set_env_line(raw, "COMPOSE_FILE", declared_compose_file(target), pattern=COMPOSE_FILE_VALUE)
 
 
 class HostOps:
@@ -2392,6 +2572,7 @@ class HostOps:
             path.write_text(json.dumps({"plan_sha256": plan_sha256, "reason": "emr-introduction"}) + "\n", encoding="utf-8")
             if os.name == "posix":
                 path.chmod(0o600)
+            follow_folder_owner(path)
         elif path.exists():
             path.unlink()
 
@@ -2652,7 +2833,29 @@ class HostOps:
             done.append({"path": entry["path"], "state": "restored to the commit", "modified_sha256": sha256_bytes(current),
                          "config_sha256": {"current_files": sha256_bytes(before), "commit_with_overlay": sha256_bytes(candidate),
                                            "declared_files": sha256_bytes(after)}})
-        return {"reconciled": done}
+        return {"reconciled": done, "ordinary_entry": self.ordinary_entry()}
+
+    def ordinary_entry(self):
+        """IRT2-10, the ordinary entry: with a declared external overlay, the checkout's .env names the declared compose
+        list in COMPOSE_FILE, so an operator's plain `docker compose ...` in the checkout (no -f), after the release or
+        after a rollback, uses exactly that list, overlay included (an explicit -f, like the API-only runner's, still
+        wins). Written here when absent or different (recorded by hash; the plan's compose digest is computed over the
+        .env with this line); the rollback restores B0's .env, which carries it."""
+        if not self.t["declared_overlays"]:
+            return "no declared overlay"
+        raw = self.env_file().read_bytes()
+        wanted = env_with_compose_file(raw, self.t)
+        if wanted == raw:
+            return {"compose_file": "already named"}
+        self.write_env(wanted)
+        return {"compose_file": "written", "env_sha256": {"before": sha256_bytes(raw), "after": sha256_bytes(wanted)}}
+
+    def ordinary_entry_kept(self):
+        """The .env still names the declared list (reopen and rollback_reopen check it before anything opens)."""
+        if self.t["declared_overlays"]:
+            require(parse_env(self.env_file().read_bytes()).get("COMPOSE_FILE") == declared_compose_file(self.t),
+                    "The checkout's .env does not name the declared compose files (COMPOSE_FILE)")
+        return {"compose_file": "declared list" if self.t["declared_overlays"] else "not needed"}
 
     def token_since(self, moment, what):
         """The smoke token, issued (iat) no earlier than the given moment: a login made for this attempt, never an older one."""
@@ -2778,7 +2981,8 @@ class HostOps:
         try:
             value = self.run_browser({"origin": self.t["origin"], "connect": list(connect) if connect else None, "ca_file": self.t["ca_file"],
                                       "username": credentials["username"], "password": credentials["password"], "client_id": client_id,
-                                      "redirect_uri": redirect, "profile_dir": str(profile), "product_session": product_session},
+                                      "redirect_uri": redirect, "profile_dir": str(profile), "product_session": product_session,
+                                      "study_uid": frame_study(intro.plan) if product_session else None},
                                      timeout=timeout)
         finally:
             remove_profile(profile)
@@ -2849,13 +3053,20 @@ class HostOps:
         require(smoke_passed(result), "The fenced smoke did not run every check")
         row = worklist_row(self.t["origin"], frame_study(intro.plan), connect=connect, ca_file=self.t["ca_file"], token=token["access_token"])
         session = value.get("product_session")
-        checks = {"login_pkce": type(session) is dict and session.get("signed_in") is True, "worklist_uid": True, "ohif_frame": True,
-                  "realm_v1_pending_zero": True, "w2_modality": type((row or {}).get("modality")) is str and bool(row["modality"]),
+        screens = session.get("screens") if type(session) is dict else None
+        screen = lambda name: type(screens) is dict and screens.get(name) is True
+        # IRT2-11: each check is its API answer (by its contract) and the screen that uses it, both.
+        checks = {"login_pkce": type(session) is dict and session.get("signed_in") is True,
+                  "worklist_uid": screen("worklist_row"),
+                  "ohif_frame": screen("viewer_rendered") and screen("reading_workspace"),
+                  "realm_v1_pending_zero": True,
+                  "w2_modality": type((row or {}).get("modality")) is str and bool(row["modality"]) and screen("modality_rendered"),
                   "logout_old_session_refused": product_logout_refused(session)}
-        for name, path in (("w2_folders", "/api/filter-folders"), ("w2_shortcuts", "/api/workspace-shortcuts")):
+        for name, path, valid, shown in (("w2_folders", "/api/filter-folders", folders_valid, "folders_loaded"),
+                                         ("w2_shortcuts", "/api/workspace-shortcuts", shortcuts_valid, "shortcuts_dialog")):
             code, _, raw = https_get(self.t["origin"], path, connect=connect, ca_file=self.t["ca_file"], token=token["access_token"])
             try:
-                checks[name] = code == 200 and json.loads(raw) is not None
+                checks[name] = code == 200 and valid(json.loads(raw)) and screen(shown)
             except ValueError:
                 checks[name] = False
         self.end_session(refresh, client_id, connect=connect)
@@ -2902,6 +3113,7 @@ class HostOps:
                     "emr_volumes": existing, "api_state_mounts": sum(1 for m in api.get("Mounts") or [] if m.get("Destination") == ops.EMR_STATE),
                     "cron": cron, "members": self.realm_members()}
         pre.check_baseline(observed, intro.plan)
+        backup_owner = self.backup_owner(intro)
         free = shutil.disk_usage(intro.plan["backup_root"] if Path(intro.plan["backup_root"]).exists() else Path(intro.plan["backup_root"]).parent).free
         require(free >= intro.plan["budget"]["min_free_bytes"], "Free disk space below the plan")
         # L-08a reads the Keycloak server options with the target's administrator. Prove that credential now, read-only,
@@ -2913,7 +3125,31 @@ class HostOps:
         browser = self.browser_check(intro) if self.unattended else "not configured (operator smoke)"
         return {"head": observed["head"], "images": images, "migrations": len(observed["migrations"]), "cron": cron, "free_bytes": free,
                 "members": observed["members"], "keycloak_admin": "verified", "keycloak_before": keycloak,
-                "roles": sorted(role["rolname"] for role in catalog["roles"]), "smoke_member_realm": member, "smoke_browser": browser}
+                "roles": sorted(role["rolname"] for role in catalog["roles"]), "smoke_member_realm": member, "smoke_browser": browser,
+                "backup_root_owner": "the operating account" if backup_owner else "this tool's user"}
+
+    def backup_owner(self, intro):
+        """IRT2-03: the backup root (B0, B1, Bfail, the audit ledger) is this tool's own private folder, or - the observed
+        production shape - the private folder of the checkout's operating account (policy repository_owner), whose daily
+        backups and ledger live there; then what this tool writes there is given to that account. Any other owner, a link
+        or a folder open to others is refused here at L-01, before any fence; nothing existing is chown/chmod-ed. Returns
+        None or (uid, gid) of that account."""
+        root = Path(intro.plan["backup_root"])
+        if not root.exists() and not root.is_symlink():
+            return None
+        info = os.lstat(root)
+        require(stat_module.S_ISDIR(info.st_mode), "The backup root is not a folder (or is a link)")
+        if os.name != "posix" or info.st_uid == os.geteuid():
+            require(os.name != "posix" or not info.st_mode & 0o077, "The backup root is open to others")
+            return None
+        require(os.geteuid() == 0 and self.owner is not None and info.st_uid == self.owner["uid"] and info.st_gid == self.owner["gid"],
+                "The backup root belongs to neither this tool's user nor the checkout's operating account")
+        require(not info.st_mode & 0o077, "The backup root is open to others")
+        return info.st_uid, info.st_gid
+
+    def give_to_backup_owner(self, intro, path):
+        """What this tool wrote into the operating account's backup root becomes that account's (IRT2-03)."""
+        ops.give_to(path, self.backup_owner(intro))
 
     def smoke_member_realm(self, intro):
         """D02: the unattended smoke needs a plan member, and every role and the group the plan gives it exist in realm kin
@@ -2989,8 +3225,12 @@ class HostOps:
         (roles replayed, owners and privileges kept, whole catalog, counts, projection), a post-EMR B1 with owners/ACL,
         tablespace and seal recovery; the Orthanc index with every attachment."""
         printed = io.StringIO()
-        with self.bind(), redirect_stdout(printed):
-            ops.rehearse(directory)
+        try:
+            with self.bind(), redirect_stdout(printed):
+                ops.rehearse(directory)
+        finally:
+            for record in Path(directory).glob("rehearsal-*.json"):
+                follow_folder_owner(record)
         self.records.log("restore-check-" + Path(directory).name + ".out", printed.getvalue().encode())
         found = sorted(Path(directory).glob("rehearsal-*.json"), key=lambda path: path.stat().st_mtime)
         result = json.loads(found[-1].read_text(encoding="utf-8"))
@@ -3040,6 +3280,8 @@ class HostOps:
         raw = Path(self.env_next).read_bytes()
         require(sha256_bytes(raw) == intro.plan["secrets"]["env_next_sha256"], "Staged env differs from the plan")
         pre.check_env_secrets(parse_env(raw), intro.plan["secrets"])
+        # IRT2-10: the target's .env keeps the ordinary entry (COMPOSE_FILE = the declared list) once it replaces this one.
+        require(raw == env_with_compose_file(raw, self.t), "The staged env does not name the declared compose files (COMPOSE_FILE)")
         return raw
 
     def checkout(self, intro, side):
@@ -3373,7 +3615,8 @@ class HostOps:
         require(not self.one_shots_alive(intro), "A one-shot worker of this release exists")
         # No smoke member (or any account named like one) may meet the public ingress.
         require(self.psql(SMOKE_MEMBERS_SQL, "keycloak") == "0", "The smoke member still exists")
-        return {"images": images, "api_environment": sorted(names - image_names), "backup": self.backup_readiness(intro)}
+        return {"images": images, "api_environment": sorted(names - image_names), "backup": self.backup_readiness(intro),
+                "ordinary_entry": self.ordinary_entry_kept()}
 
     def backup_readiness(self, intro):
         """The daily backup of the introduced release seals each set into the backup root's audit ledger
@@ -3480,6 +3723,7 @@ class HostOps:
         (directory / "manifest.json").write_text(json.dumps(manifest, sort_keys=True, indent=1) + "\n", encoding="utf-8")
         if os.name == "posix":
             (directory / "manifest.json").chmod(0o600)
+        self.give_to_backup_owner(intro, directory)
         intro.state["bfail"] = {"dir": str(directory), "manifest_sha256": ops.digest(directory / "manifest.json"), "volumes": identities}
         intro.save()
         return intro.state["bfail"]
@@ -3599,7 +3843,9 @@ class HostOps:
             require(not users.strip(), "A failed volume is attached to a container: " + key)
             failed[key] = identity
         require(self.compose_digest_now() == recovery["compose_sha256"], "The recovery configuration changed")
+        entry = self.ordinary_entry_kept()
         baseline = {"schema": 1, "kind": "recovery-baseline", "plan_sha256": intro.plan_sha256, "project": recovery["project"],
+                    "ordinary_entry": entry,
                     "volumes": {"pg": recovery["pg"], "orthanc": recovery["orthanc"]}, "images": intro.plan["previous"]["images"],
                     "previous_sha": intro.plan["previous"]["sha"], "env_sha256": recovery["env_sha256"],
                     "compose_sha256": recovery["compose_sha256"], "failed_volumes_kept": failed,
@@ -3695,6 +3941,9 @@ class HostOps:
         require(not shared, "The clone reuses a source secret")
         require(all(clone.get(name) for name in CLONE_SECRETS if source.get(name)), "The clone lacks its own value for a source secret")
         require(clone.get("PUBLIC_ORIGIN") == self.t["origin"], "The clone's PUBLIC_ORIGIN is not the target origin")
+        # IRT2-10: a clone with a declared overlay names the declared list in its .env from the start (the VM preparer
+        # writes it; the plan's digest covers it), as production's capture writes it at L-00b.
+        self.ordinary_entry_kept()
         catalog = Path(seed["b0_dir"]) / "catalog.json"
         require(catalog.is_file(), "The seed has no cluster catalog")
         ops.supported_pre_catalog(json.loads(catalog.read_text(encoding="utf-8")))
@@ -4008,12 +4257,28 @@ class IntroductionHost:
             except RuntimeError as error:
                 if request["phase"] not in RECOVERY_PHASES:
                     raise
+                # IRT2-07: owner, links and ancestors still hold; only the mode of the checkout and its .git was opened
+                # again. The capture's own correction is made again (checkout 0700, .git without group/other write, never
+                # recursive), recorded, and the full check must then pass; the rollback's steps check the content (a clean
+                # tracked tree, the planned compose files and .env) before they use it.
                 ownership_check()
-                modes = {name: oct(path.lstat().st_mode & 0o7777) for name, path in (("checkout", self.repository), (".git", self.repository / ".git"))}
-                warnings.append({"kind": "checkout-mode", "reason": code_of(error), "modes": modes})
+                git = self.repository / ".git"
+                before = {name: oct(path.lstat().st_mode & 0o7777) for name, path in (("checkout", self.repository), (".git", git))}
+                os.chmod(self.repository, 0o700)
+                os.chmod(git, git.lstat().st_mode & 0o7777 & ~0o022)
+                after = {name: oct(path.lstat().st_mode & 0o7777) for name, path in (("checkout", self.repository), (".git", git))}
+                repository_check()
+                warnings.append({"kind": "checkout-mode", "reason": code_of(error), "modes": before, "restored": after})
         approval = approval_valid(decode(host.read_secure(self.state / "emr-approvals" / (digest + ".json"))), digest,
                                   request["phase"], int(time.time()), plan["target_kind"], unattended=browser_cmd is not None)
         evidence = {kind: self.document("emr-evidence", value) for kind, value in approval["evidence"].items()}
+        if "local-restore" in evidence:
+            # IRT2-01: the producer's run bundle of exactly this receipt, in the protected state (root-owned, private):
+            # emr-bundles/<receipt sha256>/ with the rehearsal's result-*.json files and journal.jsonl.
+            folder = self.state / "emr-bundles" / receipt_sha256(evidence["local-restore"])
+            if folder.exists() or folder.is_symlink():
+                host.protected(folder, private=True, directory=True)
+                evidence["local-restore-bundle"] = DirectoryBundle(folder, reader=lambda path: host.read_secure(path, 16 * 1024 * 1024))
         # One use: a replayed request with the same bytes can never run a phase twice.
         host.write_secure(self.state / "emr-used" / (digest + ".json"), {"request_sha256": digest, "consumed_at": int(time.time())},
                           exclusive=True)
@@ -4254,6 +4519,8 @@ def product_session_check(page, spec):
     if sid is None:
         error = (parse_qs(urlsplit(page.url).query).get("auth_error") or [""])[0]
         raise Stop("The product sign-in did not open a session" + (" (" + re.sub(r"[^\w-]", "", error)[:40] + ")" if error else ""))
+    # IRT2-11: the product's real screens, as the signed-in member sees them, before the session ends.
+    screens = product_screens_check(page, spec, sid) if spec.get("study_uid") else None
     # IRT2-12: the session's own cookies (HttpOnly included) as the browser holds them before the logout, in memory only;
     # after the logout they are sent again from outside the browser, so a server that only clears the cookie and keeps
     # the session is caught (the browser itself no longer has the cookie to send).
@@ -4265,7 +4532,99 @@ def product_session_check(page, spec):
     logout = browser_stage(page, "the product logout", lambda: page.evaluate(PRODUCT_LOGOUT_JS, sid))
     bound = session_replay(spec, {"Cookie": jar, "X-KIN-CSRF": "1", "X-KIN-Session": sid})
     cookie_only = session_replay(spec, {"Cookie": jar, "X-KIN-CSRF": "1"})
-    return {"signed_in": True, "logout_status": logout, "old_session_status": bound, "old_cookie_status": cookie_only}
+    return {"signed_in": True, "logout_status": logout, "old_session_status": bound, "old_cookie_status": cookie_only, "screens": screens}
+
+
+SCREEN_CHECKS = ("worklist_row", "modality_rendered", "folders_loaded", "reading_workspace", "shortcuts_dialog", "viewer_rendered")
+# The signed-in document's own paged list (as study-pages.js asks for it): the plan's study and its patient ID and
+# modality, which stay in the browser (only booleans leave it).
+SCREEN_STUDY_JS = ("async ([uid, sid]) => { const h = {'X-KIN-CSRF': '1', 'X-KIN-Session': sid}; let after = null;"
+                   " for (let n = 0; n < 500; n++) { const r = await fetch('/api/studies?limit=100' + (after ? '&after=' + encodeURIComponent(after) : ''),"
+                   " {headers: h, credentials: 'same-origin', cache: 'no-store'}); if (r.status !== 200) return {status: r.status};"
+                   " const body = await r.json(); const row = (body.studies || []).find(s => s && s.uid === uid);"
+                   " if (row) return {status: 200, found: true, patient: typeof row.id === 'string' ? row.id : null,"
+                   " modality: typeof row.modality === 'string' ? row.modality : null};"
+                   " after = body.pagination && body.pagination.next; if (!after) break; } return {status: 200, found: false}; }")
+# The rendered row's Modality cell: the column whose header key is 'modality' (worklist-columns-view.js).
+SCREEN_MODALITY_JS = ("uid => { const heads = [...document.querySelectorAll('#heads th')];"
+                      " const index = heads.findIndex(e => e.dataset.key === 'modality'); if (index < 0) return null;"
+                      " const row = document.querySelector('#rows tr[data-uid=\"' + CSS.escape(uid) + '\"]'); if (!row) return null;"
+                      " const cell = row.querySelectorAll('td')[index]; return cell ? cell.textContent.trim() : null; }")
+# A displayed image: every cornerstone canvas of the viewer has a drawing context, a size and real contrast (as the
+# product's own viewer tests judge it; a blank or failed viewport has none).
+SCREEN_CANVAS_JS = ("() => { const cs = [...document.querySelectorAll('.cornerstone-canvas')]; return cs.length > 0 && cs.every(c => {"
+                    " const ctx = c.getContext('2d'); if (!ctx || !c.width || !c.height) return false;"
+                    " const d = ctx.getImageData(0, 0, c.width, c.height).data; let lo = 255, hi = 0;"
+                    " for (let i = 0; i < d.length; i += 16) { lo = Math.min(lo, d[i]); hi = Math.max(hi, d[i]); } return hi - lo > 40; }); }")
+
+
+def canvas_rendered(page, timeout=60000):
+    """Whether the page's viewer drew the image within the time (see SCREEN_CANVAS_JS)."""
+    try:
+        page.wait_for_function(SCREEN_CANVAS_JS, timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def product_screens_check(page, spec, sid):
+    """IRT2-11: the screens behind the eight checks, in the product's own document, signed in as the smoke member:
+    the worklist row of the plan's study (found by its patient ID in the product's quick search) with its Modality cell
+    as the API gives it; the saved-search manager loading its folders (W2); the Reading Workspace connecting its viewer
+    and its Workspace Shortcuts dialog opening (W2); and OHIF opened for the study drawing its image. Only booleans
+    leave the browser; a step that does not reach its state within its time is False, never skipped."""
+    origin, uid = spec["origin"], spec["study_uid"]
+    out = {name: False for name in SCREEN_CHECKS}
+    row = '#rows tr[data-uid="' + uid + '"]'
+    browser_stage(page, "the worklist", lambda: page.wait_for_function(
+        "() => ((document.querySelector('#dbstat') || {}).textContent || '').includes('DB Connected')", timeout=60000))
+    study = browser_stage(page, "the worklist's own list", lambda: page.evaluate(SCREEN_STUDY_JS, [uid, sid]))
+    require(type(study) is dict and study.get("status") == 200 and study.get("found") is True, "The product's list does not hold the plan's study")
+    try:
+        if study.get("patient"):
+            page.fill("#quick", study["patient"])
+        page.wait_for_selector(row, timeout=90000)
+        out["worklist_row"] = True
+        rendered = page.evaluate(SCREEN_MODALITY_JS, uid)
+        out["modality_rendered"] = bool(rendered) and rendered == (study.get("modality") or "").strip()
+    except Exception:
+        pass
+    try:
+        page.click("#toolbar-filters > summary")
+        page.click("#managefilters")
+        page.wait_for_selector("#saved-filter-manager", state="visible", timeout=30000)
+        page.click("#sfm-organize > summary")
+        page.click("#sfm-load-folders")
+        page.wait_for_function("() => ((document.querySelector('#sfm-status') || {}).textContent || '').includes('검색 모음을 불러왔습니다')"
+                               " && (document.querySelector('#saved-filter-manager') || {}).getAttribute('aria-busy') === 'false'", timeout=30000)
+        out["folders_loaded"] = True
+        page.keyboard.press("Escape")
+        page.wait_for_selector("#saved-filter-manager", state="hidden", timeout=10000)
+    except Exception:
+        pass
+    if out["worklist_row"]:
+        try:
+            page.click(row)
+            page.click("#m-reading")
+            page.wait_for_function("() => ((document.querySelector('#reading-status') || {}).textContent || '').includes('영상 작업공간 연결됨')",
+                                   timeout=90000)
+            out["reading_workspace"] = True
+            page.click("#workspace-shortcuts-edit")
+            page.wait_for_selector("#workspace-shortcuts-dialog", state="visible", timeout=30000)
+            page.wait_for_selector("#workspace-shortcut-list", timeout=30000)
+            out["shortcuts_dialog"] = True
+            page.click("#workspace-shortcuts-cancel")
+        except Exception:
+            pass
+    viewer = page.context.new_page()
+    try:
+        viewer.goto(origin + "/ohif/viewer?StudyInstanceUIDs=" + quote(uid, safe=""), wait_until="domcontentloaded", timeout=60000)
+        out["viewer_rendered"] = canvas_rendered(viewer)
+    except Exception:
+        out["viewer_rendered"] = False
+    finally:
+        viewer.close()
+    return out
 
 
 def session_replay(spec, headers):
@@ -4324,10 +4683,13 @@ def main(argv=None):
     prepare = sub.add_parser("prepare-env", help="Copy .env and add a generated KIN_EMR_RUNTIME_PASSWORD unless one exists")
     prepare.add_argument("--env", type=Path, required=True)
     prepare.add_argument("--out", type=Path, required=True)
+    prepare.add_argument("--target", type=Path, help="A target manifest with a declared overlay: the copy names its compose list "
+                                                    "(COMPOSE_FILE, IRT2-10)")
     digest = sub.add_parser("compose-digest")
     digest.add_argument("--repository", type=Path, required=True)
     digest.add_argument("--sha", required=True)
     digest.add_argument("--env", type=Path, required=True)
+    digest.add_argument("--target", type=Path, help="Digest the .env as the capture leaves it: with the target's COMPOSE_FILE line (IRT2-10)")
     digest.add_argument("files", nargs="+")
     over = sub.add_parser("rehearsal-override")
     over.add_argument("target", type=Path)
@@ -4338,7 +4700,7 @@ def main(argv=None):
     receipt.add_argument("--b0-manifest-sha256", required=True)
     receipt.add_argument("--b0-created-utc")
     receipt.add_argument("--policy", type=Path, required=True)
-    receipt.add_argument("--bundle", type=Path, help="The rehearsal's run directory: re-verify every phase result and the journal")
+    receipt.add_argument("--bundle", type=Path, required=True, help="The rehearsal's run directory (its result files and journal)")
     sub.add_parser("browser-smoke", help="The reference headless browser of the unattended smoke: login spec on stdin, KIN_RESULT out")
     args = parser.parse_args(argv)
     if args.command == "browser-smoke":
@@ -4365,6 +4727,8 @@ def main(argv=None):
             if "KIN_EMR_RUNTIME_PASSWORD" not in values:
                 # 43 URL-safe characters; generated here and written only to the private staged file, never printed.
                 raw = raw.rstrip(b"\n") + b"\nKIN_EMR_RUNTIME_PASSWORD=" + token_source.token_urlsafe(32).encode() + b"\n"
+            if args.target:
+                raw = env_with_compose_file(raw, target_valid(decode(args.target.read_bytes())))
             fd = os.open(args.out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "wb") as stream:
                 stream.write(raw)
@@ -4377,7 +4741,10 @@ def main(argv=None):
                 else:
                     entries.append((item, subprocess.run(["git", "-C", str(args.repository), "cat-file", "blob", args.sha + ":" + item],
                                                          check=True, capture_output=True).stdout))
-            entries.append((".env", args.env.read_bytes()))
+            env_raw = args.env.read_bytes()
+            if args.target:
+                env_raw = env_with_compose_file(env_raw, target_valid(decode(args.target.read_bytes())))
+            entries.append((".env", env_raw))
             print(json.dumps({"sha256": compose_digest(entries)}))
         elif args.command == "rehearsal-override":
             target = target_valid(decode(args.target.read_bytes()))
@@ -4389,10 +4756,9 @@ def main(argv=None):
             plan = plan_valid(decode(args.plan.read_bytes()))
             policy = policy_valid(decode(args.policy.read_bytes()))
             receipt = decode(args.receipt.read_bytes())
-            receipt_valid(receipt, plan, args.b0_manifest_sha256, policy["production"], b0_created_utc=args.b0_created_utc)
-            if args.bundle:
-                bundle_valid(receipt, args.bundle)
-            print(json.dumps({"valid": True, "receipt_sha256": receipt_sha256(receipt), "bundle": bool(args.bundle)}))
+            receipt_valid(receipt, plan, args.b0_manifest_sha256, policy["production"], b0_created_utc=args.b0_created_utc,
+                          bundle=DirectoryBundle(args.bundle))
+            print(json.dumps({"valid": True, "receipt_sha256": receipt_sha256(receipt), "bundle": True}))
     except (Stop, OSError, ValueError, subprocess.CalledProcessError) as error:
         print(json.dumps({"valid": False, "error": code_of(error)}), file=sys.stderr)
         return 1

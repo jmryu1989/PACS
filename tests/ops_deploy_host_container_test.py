@@ -468,6 +468,9 @@ class SyntheticStack:
                     "KC_CLIENT_SECRET": secrets.token_urlsafe(24), "KC_WEB_SECRET": secrets.token_urlsafe(24),
                     "KIN_COOKIE_SECRET": secrets.token_urlsafe(24), "ORTHANC_PASS": secrets.token_urlsafe(24),
                     "PUBLIC_ORIGIN": self.origin, "KIN_REVISION": previous_sha}
+        if declared:
+            # IRT2-10: with a declared overlay the checkout's .env names the declared list (the VM preparer writes it).
+            self.env["COMPOSE_FILE"] = intro.declared_compose_file(self.target)
         self.write_env(self.repo / ".env", self.env)
         self.env_next = self.root / "env.next"
         self.write_env(self.env_next, {**self.env, "KIN_EMR_RUNTIME_PASSWORD": secrets.token_urlsafe(32)})
@@ -808,13 +811,13 @@ class EmrIntroductionRehearsal(unittest.TestCase):
                   clone.target["volumes"]["emr_state"])
         for name in failed:
             self.assertEqual(subprocess.run(["docker", "volume", "inspect", name], capture_output=True).returncode, 0, "failed volume kept: " + name)
-        # IRT-05: an ordinary compose recreate of this checkout (no project flag, no pins, as an operator would run it)
-        # keeps pg and Orthanc on the recovery volumes and the previous images; the failed volumes stay detached.
-        files = [arg for item in clone.target["compose_files"]
-                 for arg in ("-f", item if os.path.isabs(item) else str(clone.repo / item))]
-        recreate = subprocess.run(["docker", "compose", "--project-directory", str(clone.repo), *files, "up", "-d", "--no-deps",
-                                   "--no-build", "--pull", "never", "--force-recreate", "db", "orthanc", "api"], capture_output=True, timeout=600)
+        # IRT-05 / IRT2-10: an ordinary compose recreate in this checkout - no project flag, no file list, no pins, as an
+        # operator would type it - keeps pg and Orthanc on the recovery volumes and the previous images, and the proxy
+        # keeps the declared overlay's bind and network (the .env names the project and the declared compose list).
+        recreate = subprocess.run(["docker", "compose", "up", "-d", "--no-deps", "--no-build", "--pull", "never", "--force-recreate",
+                                   "db", "orthanc", "api", "proxy"], cwd=str(clone.repo), capture_output=True, timeout=600)
         self.assertEqual(recreate.returncode, 0, recreate.stderr[-3000:])
+        halo_wired("previous proxy after an ordinary recreate")
         mounts = lambda role, path: {m["Destination"]: m.get("Name") for m in inspect(clone.target["containers"][role])["Mounts"]}.get(path)
         self.assertEqual((mounts("db", "/var/lib/postgresql/data"), mounts("orthanc", "/var/lib/orthanc/db")), (recovery["pg"], recovery["orthanc"]))
         for role in ("db", "orthanc", "api"):
@@ -834,10 +837,13 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         result = clone.phase("receipt", "RECEIPTED")
         receipt = json.loads((clone.records.directory / "local-restore-receipt.json").read_text())
         production = {**intro.EXAMPLE_POLICY["production"], "host_key_sha256": "a" * 64}
-        intro.receipt_valid(receipt, production_plan, b0["manifest_sha256"], production, b0_created_utc=b0["created_utc"])
+        bundle = intro.DirectoryBundle(clone.records.directory)
+        intro.receipt_valid(receipt, production_plan, b0["manifest_sha256"], production, b0_created_utc=b0["created_utc"], bundle=bundle)
         self.assertTrue(intro.bundle_valid(receipt, clone.records.directory))
+        with self.assertRaisesRegex(intro.Stop, "run bundle"):
+            intro.receipt_valid(receipt, production_plan, b0["manifest_sha256"], production, b0_created_utc=b0["created_utc"])
         with self.assertRaisesRegex(intro.Stop, "already used"):
-            intro.receipt_valid(receipt, production_plan, b0["manifest_sha256"], production, used=[intro.receipt_sha256(receipt)])
+            intro.receipt_valid(receipt, production_plan, b0["manifest_sha256"], production, used=[intro.receipt_sha256(receipt)], bundle=bundle)
         print(json.dumps({"synthetic_rehearsal": "PASS", "receipt_sha256": result["receipt"]["sha256"],
                           "source_b0_manifest_sha256": b0["manifest_sha256"], "b1_manifest_sha256": state["b1"]["manifest_sha256"],
                           "bfail": state["bfail"]["manifest_sha256"], "recovery": recovery, "legacy_roles": legacy,

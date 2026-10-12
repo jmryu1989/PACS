@@ -129,6 +129,39 @@ def receipt_fixture(plan, *, created=None, **changes):
     return body
 
 
+def receipt_bundle(plan, folder, *, created=None, receipt_id="1" * 32, details=None, status=None):
+    """A receipt and the producer run bundle it hashes (IRT2-01): one result file per rehearsal phase as finish() writes it
+    (the steps with the details the real steps record) and a journal with each phase's start and passing end. details /
+    status replace what one step recorded or how one phase ended, for the refusals."""
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    body = receipt_fixture(plan, created=created, receipt_id=receipt_id)
+    recovery = body["evidence"]["rollback"]["recovery"]
+    recorded = {("seed", "S-01"): {"source_manifest_sha256": body["source_b0_manifest_sha256"]},
+                ("capture", "L-04b"): {"manifest_sha256": body["rehearsal_b0_manifest_sha256"]}, ("capture", "L-04c"): {"success": True},
+                ("verify", "L-10b"): dict(body["evidence"]["verify"]["probe"]),
+                ("verify", "L-10c"): {"manifest_sha256": body["rehearsal_b1_manifest_sha256"], "restore_check": {"success": True}},
+                ("rollback", "RB-01"): {"manifest_sha256": body["bfail_manifest_sha256"]}, ("rollback", "RB-02"): {"recovery": dict(recovery)},
+                ("rollback_reopen", "RB-04a"): {"project": recovery["project"]},
+                ("rollback_reopen", "RB-04b"): {"health": True, "auth_refusal": True, "member": True, "worklist": True, "frame": True}}
+    recorded.update(details or {})
+    events = []
+    for phase in intro.RECEIPT_PHASES:
+        item = body["phases"][phase]
+        steps = [{"step": sid, "outcome": "PASS", "detail": recorded.get((phase, sid), {})} for sid, _, _, _ in intro.STEPS[phase]]
+        ended = (status or {}).get(phase, intro.DONE[phase])
+        raw = intro.canonical({"steps": steps, "status": ended, "phase": phase, "request_sha256": item["request_sha256"],
+                               "plan_sha256": body["rehearsal_plan_sha256"], "commands_file": "commands.jsonl"}) + b"\n"
+        (folder / ("result-" + phase + "-" + item["request_sha256"][:16] + ".json")).write_bytes(raw)
+        item["result_sha256"] = intro.sha256_bytes(raw)
+        events += [{"event": "phase-start", "plan_sha256": body["rehearsal_plan_sha256"], "phase": phase, "request_sha256": item["request_sha256"]},
+                   {"event": "phase-end", "plan_sha256": body["rehearsal_plan_sha256"], "phase": phase, "status": ended}]
+    journal = b"".join(intro.canonical(event) + b"\n" for event in events)
+    (folder / "journal.jsonl").write_bytes(journal)
+    body.update(journal_sha256=intro.sha256_bytes(journal), journal_bytes=len(journal))
+    return body, intro.DirectoryBundle(folder)
+
+
 def resolved_model(target, *, target_checkout, maintenance, images=None, recovery=None):
     """The selected, secret-free fields HostOps.resolved() reads from `docker compose config`, for a correct target."""
     project = recovery["project"] if recovery else target["project"]
@@ -387,9 +420,15 @@ class RequestApprovalReceiptTests(unittest.TestCase):
     def receipt(self, plan, **changes):
         return receipt_fixture(plan, **changes)
 
+    def bundled(self, plan, **kwargs):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        return receipt_bundle(plan, Path(folder.name) / "bundle", **kwargs)
+
     def test_12_local_restore_receipt_replaces_offsite_only_for_the_same_release_and_snapshot(self):
         plan, production = plan_fixture(), production_identity()
-        intro.receipt_valid(self.receipt(plan), plan, "8" * 64, production)
+        receipt, bundle = self.bundled(plan)
+        intro.receipt_valid(receipt, plan, "8" * 64, production, bundle=bundle)
         cases = {"another snapshot": {"source_b0_manifest_sha256": "7" * 64}, "another release": {"plan_core_sha256": "0" * 64},
                  "production host": {"host_key_sha256": "a" * 64}, "offsite kind": {"kind": "offsite-restore"},
                  "not passed": {"passed": False}, "another tool": {"tool": {name: "1" * 64 for name in intro.TOOL_FILES}},
@@ -405,8 +444,9 @@ class RequestApprovalReceiptTests(unittest.TestCase):
         """IRT-02: every way a receipt can be other than one real rehearsal of this plan's B0 is refused."""
         plan, production = plan_fixture(), production_identity()
         now = datetime.now(timezone.utc)
-        good = self.receipt(plan)
-        self.assertIs(intro.receipt_valid(good, plan, "8" * 64, production, now=now, b0_created_utc=(now - timedelta(days=1)).isoformat()), good)
+        good, bundle = self.bundled(plan)
+        self.assertIs(intro.receipt_valid(good, plan, "8" * 64, production, now=now, b0_created_utc=(now - timedelta(days=1)).isoformat(),
+                                          bundle=bundle), good)
 
         def phases(change):
             body = self.receipt(plan)
@@ -446,12 +486,45 @@ class RequestApprovalReceiptTests(unittest.TestCase):
         }
         for name, body in cases.items():
             with self.subTest(case=name):
-                refuses(self, intro.receipt_valid, body, plan, "8" * 64, production)
-        refuses(self, intro.receipt_valid, good, other_plan, "8" * 64, production, message="another production plan")
+                refuses(self, lambda: intro.receipt_valid(body, plan, "8" * 64, production, bundle=bundle))
+        refuses(self, lambda: intro.receipt_valid(good, other_plan, "8" * 64, production, bundle=bundle), message="another production plan")
         with self.assertRaisesRegex(intro.Stop, "predates"):
-            intro.receipt_valid(good, plan, "8" * 64, production, b0_created_utc=now.isoformat())
+            intro.receipt_valid(good, plan, "8" * 64, production, b0_created_utc=now.isoformat(), bundle=bundle)
         with self.assertRaisesRegex(intro.Stop, "already used"):
-            intro.receipt_valid(good, plan, "8" * 64, production, used=[intro.receipt_sha256(good)])
+            intro.receipt_valid(good, plan, "8" * 64, production, used=[intro.receipt_sha256(good)], bundle=bundle)
+
+    def test_106_a_receipt_is_admitted_only_with_its_producers_run_bundle(self):
+        """IRT2-01: without the bundle, with a bundle whose phase ended otherwise, ran under another request, whose journal
+        lacks the run, or whose recorded artifact differs from the receipt's claim (B1 changed in both the receipt and
+        its evidence), the receipt is refused; only the matching bundle admits it."""
+        plan, production = plan_fixture(), production_identity()
+        good, bundle = self.bundled(plan)
+        refuses(self, lambda: intro.receipt_valid(good, plan, "8" * 64, production), message="run bundle")
+        changed_b1 = copy.deepcopy(good)
+        changed_b1["rehearsal_b1_manifest_sha256"] = changed_b1["evidence"]["verify"]["b1_manifest_sha256"] = "0" * 64
+        refuses(self, lambda: intro.receipt_valid(changed_b1, plan, "8" * 64, production, bundle=bundle), message="B1")
+        for name, kwargs, message in (("a phase that needed attention", {"status": {"verify": "NEEDS_ATTENTION"}}, "passed phase: verify"),
+                                      ("a probe that replayed", {"details": {("verify", "L-10b"): {"added": 1, "replay_duplicates": 1,
+                                                                                                   "restart": "same chain and seal",
+                                                                                                   "evidence_sha256": "5" * 64}}}, "probe"),
+                                      ("a seed of another B0", {"details": {("seed", "S-01"): {"source_manifest_sha256": "0" * 64}}}, "another B0"),
+                                      ("a failed previous smoke", {"details": {("rollback_reopen", "RB-04b"): {"health": True}}}, "previous-version smoke")):
+            receipt, other = self.bundled(plan, **kwargs)
+            with self.subTest(case=name):
+                refuses(self, lambda: intro.receipt_valid(receipt, plan, "8" * 64, production, bundle=other), message=message)
+        # Another request's results, and a journal of no run, under the receipt's own hashes.
+        receipt, other = self.bundled(plan)
+        (path,) = [item for item in other.directory.glob("result-capture-*.json")]
+        body = json.loads(path.read_text())
+        body["request_sha256"] = "0" * 64
+        path.write_bytes(intro.canonical(body) + b"\n")
+        receipt["phases"]["capture"]["result_sha256"] = intro.sha256_bytes(path.read_bytes())
+        refuses(self, lambda: intro.bundle_valid(receipt, other), message="passed phase: capture")
+        receipt, other = self.bundled(plan)
+        journal = b'{"event":"no-rehearsal-was-executed"}\n'
+        (other.directory / "journal.jsonl").write_bytes(journal)
+        receipt.update(journal_sha256=intro.sha256_bytes(journal), journal_bytes=len(journal))
+        refuses(self, lambda: intro.bundle_valid(receipt, other), message="no start of seed")
 
     def test_13_operator_smoke_record(self):
         good = {"schema": 1, "kind": "operator-smoke", "plan_sha256": "a" * 64, "checks": {name: True for name in intro.OPERATOR_SMOKE_CHECKS},
@@ -824,14 +897,21 @@ class FakeOps:
     def effect_fence(self, context):
         context.state["fenced"] = {"running_before": list(pre.WRITERS)}
 
+    # The steps' details as the real ones record them (the receipt's producer bundle is checked against them, IRT2-01).
+    def effect_seed_check(self, context):
+        return {"source_manifest_sha256": context.plan["seed"]["b0_manifest_sha256"]}
+
     def effect_capture_b0(self, context):
         context.state["b0"] = {"dir": "/backups/emr-b0", "manifest_sha256": "8" * 64}
+        return context.state["b0"]
 
     def effect_restore_check_b0(self, context):
         context.state["b0"]["restore_check"] = {"success": True}
+        return context.state["b0"]["restore_check"]
 
     def effect_capture_b1(self, context):
         context.state["b1"] = {"dir": "/backups/emr-b1", "manifest_sha256": "7" * 64, "restore_check": {"success": True}}
+        return context.state["b1"]
 
     def effect_storage(self, context):
         context.state["checkout"] = "target"
@@ -842,24 +922,29 @@ class FakeOps:
     def effect_probe(self, context):
         context.state["probe"] = {"event_id": "e", "receipt": {}, "evidence_sha256": "5" * 64, "added": 1, "replay_duplicates": 0,
                                   "restart": "same chain and seal"}
+        return context.state["probe"]
 
     def effect_seed_restore(self, context):
         context.state["seed"] = {"source_manifest_sha256": "8" * 64}
 
     def effect_preserve_failed(self, context):
         context.state["bfail"] = {"dir": "/backups/emr-bfail", "manifest_sha256": "6" * 64, "volumes": {}}
+        return context.state["bfail"]
 
     def effect_restore_b0(self, context):
         context.state["recovery"] = {"project": "kin-rh-0001-rbabcdef01", "pg": "kin-rh-0001-rbabcdef01_pg-db",
                                      "orthanc": "kin-rh-0001-rbabcdef01_orthanc-db", "persisted": False}
+        return {"recovery": context.state["recovery"]}
 
     def effect_recovery_persisted(self, context):
         context.state["recovery"]["persisted"] = True
+        return {"project": context.state["recovery"]["project"]}
 
     def effect_fenced_previous_smoke(self, context):
         frame = context.plan["smoke"]["frame"]
         context.state["rollback_smoke"] = {"member": True, "token_after_restore": True, "worklist_uid": intro.frame_study(context.plan),
                                            "frame_sha256": frame["sha256"], "frame_bytes": frame["bytes"]}
+        return {"health": True, "auth_refusal": True, "member": True, "worklist": True, "frame": True}
 
     def effect_write_receipt(self, context):
         context.state["receipt"] = {"sha256": context.records.put("local-restore-receipt.json", intro.make_receipt(context))}
@@ -903,10 +988,12 @@ class MachineHarness:
         request = {"version": 1, "mode": intro.MODE, "phase": phase, "plan_sha256": self.plan_sha256, "nonce": os.urandom(16).hex()}
         return machine.run(request, hashlib.sha256(json.dumps(request).encode()).hexdigest())
 
-    def local_restore(self):
-        # The production plan this machine runs (its target names the test's repository): the receipt names exactly it.
+    def local_restore(self, receipt_id="1" * 32):
+        # The production plan this machine runs (its target names the test's repository): the receipt names exactly it,
+        # with the producer's run bundle (IRT2-01).
         plan = plan_fixture(target_fixture(self.kind, repository=str(self.repository)), kind=self.kind)
-        return {"local-restore": receipt_fixture(plan, created=NOW - timedelta(hours=1))}
+        receipt, bundle = receipt_bundle(plan, self.root / ("bundle-" + receipt_id), created=NOW - timedelta(hours=1), receipt_id=receipt_id)
+        return {"local-restore": receipt, "local-restore-bundle": bundle}
 
     def operator_smoke(self):
         return {"operator-smoke": {"schema": 1, "kind": "operator-smoke", "plan_sha256": "a" * 64,
@@ -1142,7 +1229,7 @@ class StateMachineTests(MachineHarness, unittest.TestCase):
         receipt = json.loads((self.records.directory / "local-restore-receipt.json").read_text())
         production_plan = plan_fixture()
         intro.receipt_valid(receipt, production_plan, plan_fixture(kind="rehearsal")["seed"]["b0_manifest_sha256"], production_identity(),
-                            now=NOW)
+                            now=NOW, bundle=intro.DirectoryBundle(self.records.directory))
         self.assertEqual(self.records.state()["receipt"]["sha256"], intro.sha256_bytes(intro.canonical(receipt) + b"\n"))
         # The run bundle re-verifies: every phase's result file and the journal prefix are the receipt's.
         self.assertTrue(intro.bundle_valid(receipt, self.records.directory))
@@ -1196,9 +1283,7 @@ class RoundTwoStateMachineTests(MachineHarness, unittest.TestCase):
         self.ops.faults.clear()
         refuses(self, self.run_phase, "introduce", self.local_restore(), message="already used")
         self.assertEqual(self.ops.calls, calls, "a reused receipt is refused before any step")
-        fresh = {"local-restore": receipt_fixture(plan_fixture(target_fixture(repository=str(self.repository))),
-                                                  created=NOW - timedelta(hours=1), receipt_id="2" * 32)}
-        self.assertEqual(self.run_phase("introduce", fresh)["status"], "INTRODUCED")
+        self.assertEqual(self.run_phase("introduce", self.local_restore(receipt_id="2" * 32))["status"], "INTRODUCED")
 
     def test_62_two_approved_requests_of_one_plan_never_run_together(self):
         """IRT-04: the second of two concurrent requests (introduce/introduce, verify/rollback) is refused before it reads
@@ -1248,9 +1333,11 @@ class RoundTwoStateMachineTests(MachineHarness, unittest.TestCase):
             "plan = t.plan_fixture(target)\n"
             "machine = intro.Introduction(plan=plan, plan_sha256='a' * 64, target=target, production=t.production_identity(), ops=Dying(),\n"
             "    records=intro.Records(%r), repository=%r, host_key='a' * 64, tool=plan['tool'],\n"
-            "    evidence={'local-restore': t.receipt_fixture(plan, created=t.NOW - t.timedelta(hours=1))}, clock=t.Clock(), now=lambda: t.NOW)\n"
+            "    evidence=dict(zip(('local-restore', 'local-restore-bundle'), t.receipt_bundle(plan, %r, created=t.NOW - t.timedelta(hours=1)))),\n"
+            "    clock=t.Clock(), now=lambda: t.NOW)\n"
             "machine.run({'version': 1, 'mode': intro.MODE, 'phase': 'introduce', 'plan_sha256': 'a' * 64, 'nonce': '3' * 32}, '3' * 64)\n"
-        ) % (str(Path(intro.__file__).parent), str(Path(__file__).parent), str(self.repository), str(self.records.directory), str(self.repository))
+        ) % (str(Path(intro.__file__).parent), str(Path(__file__).parent), str(self.repository), str(self.records.directory), str(self.repository),
+             str(self.root / "bundle-dying"))
         died = subprocess.run([sys.executable, "-c", script], capture_output=True)
         self.assertEqual(died.returncode, 9, died.stderr[-2000:])
         state = self.records.state()
@@ -1694,6 +1781,10 @@ class HostBoundaryTests(HostHarness, unittest.TestCase):
 HALO_OVERLAY = (b"services:\n  proxy:\n    networks:\n      halo_reports: {}\n    volumes:\n"
                 b"      - /srv/halo-reports/nginx/report.conf:/etc/nginx/conf.d/halo-report.conf:ro\n\n"
                 b"networks:\n  halo_reports:\n    external: true\n    name: halo_reports_private\n")
+# W2 answers by their contracts (api/src/pacs/filters.ts, preferences.ts): a new member's empty folders and no shortcuts.
+W2_ANSWERS = {"/api/filter-folders": json.dumps({"owner": ["hallym", "id-x"], "revision": 0, "folders": [], "filters": []}).encode(),
+              "/api/workspace-shortcuts": json.dumps({"owner": ["hallym", "id-x"], "revision": 0, "bindings": None,
+                                                      "invalid": False}).encode()}
 FAKE_BROWSER = r"""
 import base64, json, os, sys, time
 spec = json.loads(sys.stdin.read())
@@ -1705,7 +1796,9 @@ with open(os.path.join(spec["profile_dir"], "Cookies"), "w") as handle:
 claims = {"sub": spec["username"].replace("kin-smoke-", "id-"), "iat": int(time.time())}
 body = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
 # The product's sign-in, logout and the refusal of the ended session (statuses as the browser saw them).
-product = {"signed_in": True, "logout_status": 204, "old_session_status": 401, "old_cookie_status": 401} if spec["product_session"] else None
+product = {"signed_in": True, "logout_status": 204, "old_session_status": 401, "old_cookie_status": 401,
+           "screens": {name: True for name in ("worklist_row", "modality_rendered", "folders_loaded", "reading_workspace", "shortcuts_dialog",
+                                               "viewer_rendered")}} if spec["product_session"] else None
 print("KIN_RESULT " + json.dumps({"flow": "authorization_code+S256", "browser": "fake", "access_token": "e30." + body + ".sig",
                                   "refresh_token": "refresh-" + spec["client_id"], "subject": claims["sub"], "product_session": product}))
 """
@@ -1892,7 +1985,7 @@ class CommanderAdditionsTests(HostHarness, unittest.TestCase):
         def https(origin, path, *, token=None, **kwargs):
             if path == "/api/me":
                 return 401, "application/json", b"{}"
-            return 200, "application/json", b"[]"
+            return 200, "application/json", W2_ANSWERS.get(path, b"[]")
         with patch.object(intro, "smoke", return_value=full), patch.object(intro, "worklist_row", return_value={"uid": FRAME_STUDY, "modality": "CT"}), \
                 patch.object(intro, "https_get", side_effect=https), patch.object(intro, "https_post", return_value=(204, b"")):
             result = ops_host.unattended_release_smoke(context, ("127.0.0.1", 19444))
@@ -1915,7 +2008,7 @@ class CommanderAdditionsTests(HostHarness, unittest.TestCase):
         ops_host, docker, context = self.unattended_host()
         ops_host.create_smoke_member(context, "release")
         full = {"health": True, "auth_refusal": True, "member": True, "worklist": True, "frame": True}
-        good = lambda origin, path, *, token=None, **kwargs: (401, "", b"{}") if path == "/api/me" else (200, "", b"[]")
+        good = lambda origin, path, *, token=None, **kwargs: (401, "", b"{}") if path == "/api/me" else (200, "", W2_ANSWERS.get(path, b"[]"))
         fake = lambda old, new: [sys.executable, "-c", FAKE_BROWSER.replace(old, new)]
         cases = {"another subject": (fake('replace("kin-smoke-", "id-")', 'replace("kin-smoke-", "other-")'), good, {}),
                  "a login before the import": (None, good, {"imported_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()}),
@@ -2314,7 +2407,7 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
 
     def smoke_patches(self):
         full = {"health": True, "auth_refusal": True, "member": True, "worklist": True, "frame": True}
-        https = lambda origin, path, *, token=None, **kwargs: (401, "", b"{}") if path == "/api/me" else (200, "", b"[]")
+        https = lambda origin, path, *, token=None, **kwargs: (401, "", b"{}") if path == "/api/me" else (200, "", W2_ANSWERS.get(path, b"[]"))
         return (patch.object(intro, "smoke", return_value=full),
                 patch.object(intro, "worklist_row", return_value={"uid": FRAME_STUDY, "modality": "CT"}),
                 patch.object(intro, "https_get", side_effect=https), patch.object(intro, "https_post", return_value=(204, b"")))
@@ -2648,17 +2741,18 @@ class RoundThreeMachineTests(MachineHarness, unittest.TestCase):
         for created, b0, accepted in ((now + timedelta(minutes=4), None, True), (now + timedelta(minutes=6), None, False),
                                       (now - timedelta(hours=1), now - timedelta(hours=1) + timedelta(minutes=4), True),
                                       (now - timedelta(hours=1), now - timedelta(hours=1) + timedelta(minutes=6), False)):
-            receipt = receipt_fixture(plan, created=created)
+            receipt, bundle = receipt_bundle(plan, self.root / ("bundle-" + created.isoformat().replace(":", "-")), created=created)
             with self.subTest(created=created.isoformat(), b0=b0 and b0.isoformat()):
-                check = lambda: intro.receipt_valid(receipt, plan, "8" * 64, production, now=now, b0_created_utc=b0 and b0.isoformat())
+                check = lambda: intro.receipt_valid(receipt, plan, "8" * 64, production, now=now, b0_created_utc=b0 and b0.isoformat(),
+                                                    bundle=bundle)
                 if accepted:
                     check()
                 else:
                     refuses(self, check)
         self.run_phase("capture")
-        evidence = {"local-restore": receipt_fixture(plan_fixture(target_fixture(repository=str(self.repository))),
-                                                     created=NOW + timedelta(minutes=3))}
-        self.assertEqual(self.run_phase("introduce", evidence)["status"], "INTRODUCED")
+        receipt, bundle = receipt_bundle(plan_fixture(target_fixture(repository=str(self.repository))), self.root / "bundle-ahead",
+                                         created=NOW + timedelta(minutes=3))
+        self.assertEqual(self.run_phase("introduce", {"local-restore": receipt, "local-restore-bundle": bundle})["status"], "INTRODUCED")
         journal = [json.loads(line) for line in (self.records.directory / "journal.jsonl").read_text().splitlines()]
         start = next(entry for entry in journal if entry["event"] == "phase-start" and entry["phase"] == "introduce")
         self.assertEqual(start["receipt_clock"], {"tolerance_s": 300, "ahead_of_production_s": 180.0})
@@ -3088,7 +3182,15 @@ class ProtectedHostTests(unittest.TestCase):
         state = intro.new_state(plan_sha, plan)
         state.update(status="HELD", lock_token=token, b0={"dir": "/b0", "manifest_sha256": "8" * 64}, fenced={"running_before": []})
         self.write(runs / "state.json", state)
-        evidence = self.document("emr-evidence", receipt_fixture(plan))
+        staging = self.root / "bundle-staging"
+        receipt, _ = receipt_bundle(plan, staging)
+        # The producer's run bundle where the installed entry reads it (IRT2-01): root's, private.
+        bundles = self.state / "emr-bundles" / intro.receipt_sha256(receipt)
+        bundles.mkdir(mode=0o700)
+        for path in staging.iterdir():
+            (bundles / path.name).write_bytes(path.read_bytes())
+            (bundles / path.name).chmod(0o600)
+        evidence = self.document("emr-evidence", receipt)
         entered, release = threading.Event(), threading.Event()
 
         class Blocking(FakeOps):
@@ -3156,7 +3258,9 @@ class ProtectedHostTests(unittest.TestCase):
             result = intro.IntroductionHost(self.policy_path).execute(request("rollback"))
         self.assertEqual(result["status"], "RESTORED", result)
         (warning,) = result["warnings"]
-        self.assertEqual((warning["kind"], warning["modes"]), ("checkout-mode", {"checkout": "0o775", ".git": "0o775"}))
+        self.assertEqual((warning["kind"], warning["modes"], warning["restored"]),
+                         ("checkout-mode", {"checkout": "0o775", ".git": "0o775"}, {"checkout": "0o700", ".git": "0o755"}))
+        self.assertEqual(((self.repo.stat().st_mode & 0o777), ((self.repo / ".git").stat().st_mode & 0o777)), (0o700, 0o755))
         (written,) = runs.glob("result-rollback-*.json")
         self.assertEqual(json.loads(written.read_text())["warnings"], result["warnings"])
         journal = [json.loads(line) for line in (runs / "journal.jsonl").read_text().splitlines()]
