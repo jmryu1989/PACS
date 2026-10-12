@@ -188,10 +188,6 @@ class EmrDLive(unittest.TestCase):
         self.assertNotIn("mutantAnchor", value, "a mutant anchor must occur exactly once: %s" % value)
         return value
 
-    def as_root(self, command):
-        """One shell command on this run's ledger state volume as root (B1's live cases change file modes the same way)."""
-        run(["docker", "run", "--rm", "--label", self.label, "--network", "none", "-u", "0", "-v", self.state + ":" + STATE,
-             "--entrypoint", "sh", self.image, "-c", command])
 
     def psql(self, sql, user="kin"):
         """(exit, stdout, first SQLSTATE) of one psql run (local socket, trust) as the given role."""
@@ -488,20 +484,23 @@ class EmrDLive(unittest.TestCase):
         self.check_sr(self.run_sr())
 
     def test_d03_read_scope(self):
-        """TEST-D-03: bodies only to permitted readers of the managing institution after a durable provision; none when not durable."""
+        """TEST-D-03: bodies only to permitted readers of the managing institution, each after its own durable provision."""
         out, _uid = self.run_d03()
         self.check_d03(out)
-        before = len(self.provisions(out["ids"]["question"]))
-        # B1's durable intent log unwritable before the reading process starts: the provision cannot be made durable.
-        self.as_root("chmod 400 %s/seal/settlement.jsonl" % STATE)
-        try:
-            down = self.driver("d03-ledger-down", {"question": out["ids"]["question"]})
-        finally:
-            self.as_root("chmod 600 %s/seal/settlement.jsonl" % STATE)
+
+    def test_d03b_provision_not_durable(self):
+        """TEST-D-03: when the provision cannot be made durable (B1 refuses to seal it), no body is handed out."""
+        out, _uid = self.run_d03()
+        for step in ("question", "answer", "read:c1"):
+            self.assertTrue(out[step]["ok"], (step, out[step]))
+        qid = out["ids"]["question"]
+        before = len(self.provisions(qid))
+        down = self.driver("d03-ledger-down", {"question": qid})
         self.assertEqual((down["read"]["ok"], down["read"]["error"]["status"], down["read"]["error"]["code"]), (False, 503, "CLINICAL_STORAGE_UNAVAILABLE"),
                          "no body when the provision is not durable")
         self.assertNotIn("value", down["read"])
-        self.assertGreaterEqual(len(self.provisions(out["ids"]["question"])), before)
+        self.assertTrue(down["sealRefused"], "B1's failure journal records that the provision could not be sealed")
+        self.assertEqual(len(self.provisions(qid)), before + 1, "the provision row was committed, yet without its seal no body left the server")
 
     def test_d04_atomic_retry(self):
         """TEST-D-04: one commit per request; replays answer the stored receipt; refused or diverged commits change nothing."""

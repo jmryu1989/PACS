@@ -172,7 +172,7 @@ async function main() {
     const scenario = SCENARIOS[operation];
     if (!scenario) return { crashed: { code: 'UnknownOperation' } };
     const result = await scenario({ args, S, R, SV, req, studies, runtime, request, attempt, caller, owner, actorFacts, identityOf, findingText, body, PEOPLE,
-      TEXT, dev, ledger, seal, STATE, prisma, ledgerDb, orthancStored });
+      TEXT, dev, ledger, seal, journal, STATE, prisma, ledgerDb, orthancStored });
     fs.writeFileSync(saved, JSON.stringify(dev.save()));
     return result;
   } finally {
@@ -314,11 +314,18 @@ const SCENARIOS = {
     return out;
   },
   /**
-   * TEST-D-03: started with B1's durable intent log unwritable (live.py changes its mode before this process starts, as
-   * B1's own live case does) the access record cannot be made durable and no body is handed out.
+   * TEST-D-03: in a started server, B1's seal tail made unwritable (B1 publishes it in place after each commit, as B1's own
+   * contract case refuses it): the provision cannot be sealed, so no durable receipt exists and no body is handed out.
    */
-  async 'd03-ledger-down'({ args, S, attempt, caller, actorFacts }) {
-    return { read: await attempt(async () => S.questions.read(args.question, caller('c1'), { actor: await actorFacts('c1'), signature: null })) };
+  async 'd03-ledger-down'({ args, S, attempt, caller, actorFacts, STATE, journal }) {
+    const tail = path.join(STATE, 'seal', 'tail.json');
+    fs.chmodSync(tail, 0o400);
+    let read;
+    try { read = await attempt(async () => S.questions.read(args.question, caller('c1'), { actor: await actorFacts('c1'), signature: null })); }
+    finally { fs.chmodSync(tail, 0o600); }
+    // B1's own failure journal names why: the committed provision could not be sealed.
+    const sealRefused = journal.all().some(r => r.kind === 'ledger-unavailable' && r.body?.cause === 'seal-unavailable');
+    return { read, sealRefused };
   },
 
   /** TEST-D-04: one commit per request, replays answer the stored receipt, every failure commits nothing and keeps the input. */

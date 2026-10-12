@@ -255,6 +255,7 @@
         "test_d01_clinical_vs_operational",
         "test_d02_versions_and_sr",
         "test_d03_read_scope",
+        "test_d03b_provision_not_durable",
         "test_d04_atomic_retry",
         "test_d_flow_write_amend_reopen",
         "test_m_d_01_clinical_entry_as_assignment",
@@ -308,7 +309,7 @@
   },
   "expected": {
     "server": 8,
-    "live": 11,
+    "live": 12,
     "live_mutants": 5,
     "migrations": 46,
     "note": "declared before running; never generated from a run's own result"
@@ -328,7 +329,7 @@
     {
       "req": "REQ-EMR-07/10",
       "risk": "RISK-D-03",
-      "test": "TEST-D-03 read_scope: server_test case 4, live test_d03_read_scope, M-D-05"
+      "test": "TEST-D-03 read_scope: server_test case 4, live test_d03_read_scope and test_d03b_provision_not_durable, M-D-05"
     },
     {
       "req": "REQ-EMR-01/07",
