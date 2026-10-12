@@ -692,6 +692,21 @@ class AuthAuditLive(unittest.TestCase):
         for key in "ABZ":
             self.assertFalse({row for row in self.admin_view(key) if row[1] == ""}, key + " sees no failure row")
         self.check_rows("AL-08", rows)
+        # B2R2-08: one address cannot produce refused callbacks (each a protected failure record) faster than the proxy's
+        # documented allowance for the login flow: a burst far beyond it is answered 429 by nginx, not by the API.
+        browser = Browser(self.stack)
+        status, headers, _ = browser.call("GET", "/api/auth/login")
+        self.assertEqual(status, 302)
+        self.secret("state", parse_qs(urlparse(headers["Location"]).query)["state"][0])
+        floor = int(psql('SELECT coalesce(max(id), 0) FROM "AuditLog";')[0])
+        answers = [browser.call("GET", f"/api/auth/callback?state=stray-{n}&code=stray")[0] for n in range(150)]
+        burst = [int(i) for i in psql('SELECT id FROM "AuditLog" WHERE action=\'auth.login\' AND target=\'\' AND id > '
+                                      + str(floor) + ' ORDER BY id;')]
+        type(self).failure_ids = list(self.failure_ids) + burst
+        self.assertIn(429, answers, "the login-flow zone refuses a burst beyond its allowance")
+        self.assertEqual(len(burst), answers.count(302), "only callbacks the proxy let through reach the record")
+        self.assertLess(len(burst), 150)
+        time.sleep(35)  # the zone refills (120 requests/min) before the next case logs in through the same proxy
 
     def test_09_bearer_logout_writes_nothing(self):
         actor = self.stack.actor("u5-admin-a")

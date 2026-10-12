@@ -1476,6 +1476,11 @@ function contractSuite() {
       assert(anonymousBytes <= AFS.AUTH_SPOOL_MAX_BYTES && memberBytes <= AFS.AUTH_SPOOL_MAX_BYTES);
       assert.equal(journal.all().length, 0, 'failed sign-ins consumed zero business recovery records');
       assert(after < Math.max(10, before * 5), 'idle tick cost stays flat after 40,000 failures');
+      // B2R2-08: a spool write leaves the event loop free until it is durable - other work runs while its fsync is pending.
+      let yielded = false;
+      setImmediate(() => { yielded = true; });
+      await journal.completeAuthenticationFailure(await observe(null));
+      assert.equal(yielded, true, 'a refusal record does not hold the event loop until it is durable');
       // The business journal itself refuses a new sign-in observation and the completion of one it does not hold.
       assert.throws(() => journal.record('auth-failure:' + randomUUID(), 'auth-failure-observed',
         { observation: JSON.stringify(observation(suspended)) }), { code: 'FailureJournalConflict' });
