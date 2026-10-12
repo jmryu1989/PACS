@@ -4,6 +4,7 @@ List every upload declaration (including expression templates). Stage downloads
 select all owners of each required artifact; workflow names are never pinned.
 """
 import argparse
+from datetime import date, timedelta
 import json
 from pathlib import Path
 import re
@@ -18,6 +19,8 @@ STAGE_ARTIFACTS = {
           'synthetic-volume-rendering-results', 'synthetic-context-loss'),
 }
 CANDIDATE = 'candidate-${{ env.CANDIDATE_SHA }}'
+# candidate.yml's run-name: a run is titled with its candidate before it uploads anything.
+TITLE = re.compile('candidate ([0-9a-f]{40})')
 
 
 def inventory(root):
@@ -61,6 +64,57 @@ def artifact_runs(query, workflow, artifact, owners):
     return runs
 
 
+def run_candidate(query, run):
+    """The candidate SHA a G3 run validated, or None when the run does not show it.
+
+    Its upload names the candidate; failing that, the `candidate <sha>` run-name;
+    failing that, a pull_request run validates its head commit. A hand-started run
+    from before the run-name that uploaded nothing cannot be attributed.
+    """
+    pages = query('api', '--paginate', '--slurp',
+                  f'repos/{{owner}}/{{repo}}/actions/runs/{run["id"]}/artifacts?per_page=100')
+    named = {item['name'][len('candidate-'):] for page in pages for item in page['artifacts']
+             if re.fullmatch('candidate-[0-9a-f]{40}', item['name'])}
+    if len(named) == 1:
+        return named.pop()
+    if named:
+        return None
+    title = TITLE.fullmatch(run.get('display_title') or '')
+    if title:
+        return title.group(1)
+    return run['head_sha'] if run.get('event') == 'pull_request' else None
+
+
+def candidate_runs(query, workflow, sha, owners):
+    """(runs of `workflow` that validated `sha`, later runs whose candidate is unknown).
+
+    The uploads find the candidate's runs; every run of the workflow created since
+    the latest upload is then attributed, so a run for `sha` that failed, was
+    cancelled, is still running or never uploaded stays the latest run and is
+    refused instead of being hidden behind an older success.
+    """
+    uploaded = artifact_runs(query, workflow, CANDIDATE.replace('${{ env.CANDIDATE_SHA }}', sha), owners)
+    if not uploaded:
+        return [], []
+    since = max(run['created_at'] for run in uploaded)
+    # The server filter is by day (one day early for time zones); the exact cut is made here.
+    day = (date.fromisoformat(since[:10]) - timedelta(days=1)).isoformat()
+    pages = query('api', '--paginate', '--slurp', f'repos/{{owner}}/{{repo}}/actions/workflows/'
+                  f'{Path(workflow).name}/runs?created=%3E%3D{day}&per_page=100')
+    known = {run['id'] for run in uploaded}
+    mine, unknown = list(uploaded), []
+    for run in (run for page in pages for run in page['workflow_runs']):
+        if run['created_at'] < since or run['id'] in known:
+            continue
+        known.add(run['id'])
+        candidate = run_candidate(query, run)
+        if candidate == sha:
+            mine.append(run)
+        elif candidate is None:
+            unknown.append(run)
+    return mine, unknown
+
+
 def download(root, sha, stage, out, query=gh_json, execute=subprocess.check_call):
     if not re.fullmatch('[0-9a-f]{40}', sha):
         raise ValueError('full candidate SHA required')
@@ -86,9 +140,9 @@ def download(root, sha, stage, out, query=gh_json, execute=subprocess.check_call
                 # The candidate SHA is a dispatch input there, not necessarily the run's commit.
                 lookup = 'artifact'
                 owners = {row['workflow'] for row in selected if row['artifact'] == CANDIDATE}
-                runs = artifact_runs(query, workflow, CANDIDATE.replace('${{ env.CANDIDATE_SHA }}', sha), owners)
+                runs, unknown = candidate_runs(query, workflow, sha, owners)
             else:
-                lookup = 'head_sha'
+                lookup, unknown = 'head_sha', []
                 name = Path(workflow).name
                 pages = query('api', '--paginate', '--slurp',
                               f'repos/{{owner}}/{{repo}}/actions/workflows/{name}/runs?head_sha={sha}&per_page=100')
@@ -98,6 +152,13 @@ def download(root, sha, stage, out, query=gh_json, execute=subprocess.check_call
             run = max(runs, key=lambda item: (item['created_at'], item['id']))
             if run['path'].split('@')[0] != workflow:
                 raise ValueError(f'{workflow}: unexpected run owner {run["path"]}')
+            later = sorted(other['id'] for other in unknown
+                           if (other['created_at'], other['id']) > (run['created_at'], run['id']))
+            if later:
+                # Conservative: any of them may be a failed or unfinished run for this candidate.
+                raise ValueError(f'{workflow}: STOP: later run(s) {later} do not show their candidate '
+                                 f'(no candidate-<sha> upload, no "candidate <sha>" run-name); '
+                                 f'let them finish, or run G3 for {sha} again and collect after it ends')
             # Do not silently substitute an older passing run for a failed rerun.
             if run['status'] != 'completed' or run['conclusion'] != 'success':
                 raise ValueError(f'{workflow}: latest run {run["id"]} is not completed/success')

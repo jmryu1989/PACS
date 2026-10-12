@@ -152,6 +152,40 @@ class WorkflowConsumerTests(unittest.TestCase):
         self.assertEqual(missing_consumers({'tests/uses_inventory.py', 'tests/nested/loads_by_path.py'}),
                          ['tests/nested/loads_by_path.py', 'tests/uses_inventory.py'])
 
+    def test_reading_propagates_through_any_depth_of_imports(self):
+        # A twelve-hop chain whose names do not sort in chain order, crossing Python and JS
+        # (a JS file runs a Python file by name and a Python file runs that JS file), with
+        # branches and a cycle hanging off it; every importer consumes workflows.
+        chain = ['q_hop', 'b_hop', 'x_hop', 'd_hop', 'k_hop', 'a_hop', 'w_hop', 'f_hop']
+        sources = {'zz_reader.py': "WORKFLOWS = '.github/workflows'\n"}
+        previous = 'zz_reader'
+        for name in chain:
+            sources[name + '.py'] = f'import {previous}\n'
+            previous = name
+        sources.update({
+            'm_runner.cjs': "const { spawnSync } = require('node:child_process');\n"
+                            "spawnSync('python', ['tests/f_hop.py']);\n",
+            'c_last.py': "import subprocess\nsubprocess.run(['node', 'tests/m_runner.cjs'])\n",
+            'branch_one.py': 'import d_hop\n',
+            'branch_two.py': 'from k_hop import *\n',
+            'cycle_a.py': 'import cycle_b\nimport c_last\n',
+            'cycle_b.py': 'import cycle_a\n',
+            # Negatives: a deep chain and a cycle that never reach a reader.
+            'plain_0.py': 'x = 1\n',
+            'plain_1.py': 'import plain_0\n', 'plain_2.py': 'import plain_1\n', 'plain_3.py': 'import plain_2\n',
+            'plain_4.py': 'import plain_3\n', 'plain_5.py': 'import plain_4\n',
+            'loop_a.py': 'import loop_b\n', 'loop_b.py': 'import loop_a\nimport plain_5\n',
+        })
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'tests').mkdir()
+            for name, source in sources.items():
+                (root / 'tests' / name).write_text(source, encoding='utf-8')
+            found = consumers(root)
+        readers = ['zz_reader.py', *(name + '.py' for name in chain), 'm_runner.cjs', 'c_last.py',
+                   'branch_one.py', 'branch_two.py', 'cycle_a.py', 'cycle_b.py']
+        self.assertEqual(found, {'tests/' + name for name in readers})
+
     def test_scanning_guard_records_the_test_corpus(self):
         for name in ('tests/record_run_test.py', 'tests/ci_workflow_consumers_test.py'):
             with self.subTest(name=name):

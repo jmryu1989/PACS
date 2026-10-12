@@ -4,8 +4,8 @@ The real YAML upload declarations are the contract. Synthetic relocations and
 duplicate artifact names prove collection never borrows another workflow's run.
 The fake below answers the GitHub REST endpoints the collector uses (workflow
 runs, artifacts by name, one run, a run's artifacts) from a list of runs; it
-serves every run of a workflow regardless of head_sha, so SHA filtering is the
-collector's own duty.
+serves every run of a workflow regardless of head_sha or creation date, so SHA
+and date filtering are the collector's own duty.
 """
 import json
 from pathlib import Path
@@ -17,7 +17,7 @@ import unittest
 from urllib.parse import parse_qs, urlsplit
 
 import yaml
-from ci_artifacts import CANDIDATE, ROOT, download, inventory
+from ci_artifacts import CANDIDATE, ROOT, TITLE, download, inventory
 from ci_workflows import WorkflowCatalog
 
 SHA = 'a' * 40
@@ -37,10 +37,12 @@ class FakeGitHub:
                      event='pull_request' if file == 'candidate.yml' else 'push')
 
     def add(self, file, names, run_id, head_sha=SHA, created_at='2026-10-12T00:00:00Z', event='push',
-            status='completed', conclusion='success', expired=False, path=None):
+            status='completed', conclusion='success', expired=False, path=None, title=None):
+        # GitHub's default titles: the workflow name, or the pull request title.
+        title = title or ('Some pull request' if event == 'pull_request' else 'Workflow ' + file)
         run = {'id': run_id, 'head_sha': head_sha, 'path': path or '.github/workflows/' + file,
                'listed_under': file, 'created_at': created_at, 'run_attempt': 1, 'event': event,
-               'status': status, 'conclusion': conclusion,
+               'status': status, 'conclusion': conclusion, 'display_title': title,
                'artifacts': [{'id': run_id * 100 + i, 'name': name, 'expired': expired}
                              for i, name in enumerate(names)]}
         self.runs.append(run)
@@ -171,14 +173,16 @@ class ArtifactTests(unittest.TestCase):
 
     def test_latest_run_decides_and_an_older_success_never_substitutes(self):
         older, newer = '2026-10-12T00:00:00Z', '2026-10-12T01:00:00Z'
-        # Same creation second: the higher run id is the later run.
-        for latest, created in (('failure', newer), ('success', newer), ('failure', older), ('success', older)):
-            with self.subTest(latest=latest, created=created), tempfile.TemporaryDirectory() as folder:
+        # Same creation second: the higher run id is the later run. Otherwise the creation
+        # time decides, even when the later run carries the lower id (5 < the first run's 11).
+        for latest, created, run_id in (('failure', newer, 90), ('success', newer, 90), ('failure', older, 90),
+                                        ('success', older, 90), ('failure', newer, 5), ('success', newer, 5)):
+            with self.subTest(latest=latest, created=created, run_id=run_id), tempfile.TemporaryDirectory() as folder:
                 root, uploads = self.fixture(folder)
                 github = FakeGitHub(uploads)
                 first = github.run('renamed-volume.yml')
                 first['conclusion'] = 'success' if latest == 'failure' else 'failure'
-                second = github.add('renamed-volume.yml', ['synthetic-volume-rendering-results'], run_id=90,
+                second = github.add('renamed-volume.yml', ['synthetic-volume-rendering-results'], run_id=run_id,
                                     created_at=created, conclusion=latest)
                 first['created_at'] = older
                 if latest == 'failure':
@@ -239,7 +243,8 @@ class ArtifactTests(unittest.TestCase):
                 self.assertEqual((row['sha'], row['run_head_sha']), (SHA, run['head_sha']))
 
     def test_g3_lookup_refuses_absent_unsuccessful_superseded_or_foreign_uploads(self):
-        for defect in ('absent', 'failed', 'pending', 'latest-failed', 'foreign-workflow', 'expired'):
+        for defect in ('absent', 'failed', 'pending', 'latest-failed', 'foreign-workflow', 'foreign-workflow-expired',
+                       'expired', 'expired-latest'):
             with self.subTest(defect=defect), tempfile.TemporaryDirectory() as folder:
                 root, uploads = self.fixture(folder)
                 github = FakeGitHub(uploads)
@@ -254,13 +259,106 @@ class ArtifactTests(unittest.TestCase):
                 elif defect == 'latest-failed':
                     github.add('candidate.yml', [real_name(CANDIDATE)], run_id=92, head_sha=MAIN_TIP,
                                created_at='2026-10-12T06:00:00Z', event='workflow_dispatch', conclusion='failure')
-                elif defect == 'foreign-workflow':
-                    github.add('rogue.yml', [real_name(CANDIDATE)], run_id=93, head_sha=SHA)
-                else:
+                elif defect.startswith('foreign-workflow'):
+                    # An undeclared uploader is a refusal even after its upload expired.
+                    github.add('rogue.yml', [real_name(CANDIDATE)], run_id=93, head_sha=SHA,
+                               expired=defect.endswith('expired'))
+                elif defect == 'expired':
                     for item in run['artifacts']:
                         item['expired'] = True
+                else:
+                    # The older run still holds a valid upload; the latest run's upload expired.
+                    github.add('candidate.yml', [real_name(CANDIDATE)], run_id=94, head_sha=MAIN_TIP,
+                               created_at='2026-10-12T06:00:00Z', event='workflow_dispatch', expired=True)
                 calls = self.refused(root, github)
                 self.assertEqual(self.candidate_downloads(calls), [])
+
+    def g3_after_older_success(self, folder, **later):
+        """An older hand-started G3 run for SHA that succeeded and uploaded, then one later run."""
+        root, uploads = self.fixture(folder)
+        github = FakeGitHub(uploads)
+        older = github.run('candidate.yml')
+        older.update(head_sha=MAIN_TIP, event='workflow_dispatch', display_title='candidate ' + SHA)
+        later = dict(dict(head_sha=MAIN_TIP, event='workflow_dispatch', title='candidate ' + SHA,
+                          created_at='2026-10-12T03:00:00Z'), **later)
+        github.add('candidate.yml', later.pop('names', []), run_id=later.pop('run_id', 95), **later)
+        return root, github, older
+
+    def test_a_later_g3_run_for_the_candidate_is_never_bypassed_by_an_older_success(self):
+        other_title = 'Workflow candidate.yml'  # a hand-started run from before the run-name
+        cases = {
+            'failed before upload': {'conclusion': 'failure'},
+            'cancelled': {'conclusion': 'cancelled'},
+            'in progress': {'status': 'in_progress', 'conclusion': None},
+            'queued': {'status': 'queued', 'conclusion': None},
+            'success without upload': {},
+            'pull request for the candidate': {'event': 'pull_request', 'head_sha': SHA, 'title': 'Some pull request',
+                                               'conclusion': 'failure'},
+            'untitled hand-started failure': {'title': other_title, 'conclusion': 'failure'},
+            'untitled hand-started run in progress': {'title': other_title, 'status': 'in_progress',
+                                                      'conclusion': None},
+            'untitled hand-started success without upload': {'title': other_title},
+            # Created later with a lower id: the creation time orders runs.
+            'later failure with a lower id': {'conclusion': 'failure', 'run_id': 5},
+            'failure created in the same second': {'conclusion': 'failure', 'created_at': '2026-10-12T00:00:00Z'},
+        }
+        for case, later in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as folder:
+                root, github, older = self.g3_after_older_success(folder, **later)
+                calls = self.refused(root, github)
+                self.assertEqual(self.candidate_downloads(calls), [])
+                manifest = json.loads((root / 'out/artifact-downloads.json').read_text())
+                self.assertNotIn(older['id'], [run['id'] for run in manifest['runs']])
+        with tempfile.TemporaryDirectory() as folder:
+            root, github, _ = self.g3_after_older_success(folder, title=other_title, conclusion='failure', run_id=96)
+            with self.assertRaisesRegex(ValueError, r'STOP.*\b96\b'):
+                self.collect(root, github)
+
+    def test_later_g3_runs_of_other_candidates_do_not_block(self):
+        other = 'c' * 40
+        cases = {
+            # Started from the candidate's own commit, but validating another candidate.
+            'hand-started from the commit for another candidate': {'head_sha': SHA, 'title': 'candidate ' + other,
+                                                                   'conclusion': 'failure'},
+            'pull request with another head': {'event': 'pull_request', 'head_sha': other,
+                                               'title': 'Some pull request', 'conclusion': 'failure'},
+            'titled pull request run in progress': {'event': 'pull_request', 'head_sha': other,
+                                                    'title': 'candidate ' + other, 'status': 'in_progress',
+                                                    'conclusion': None},
+            'untitled hand-started run that uploaded another candidate': {
+                'title': 'Workflow candidate.yml', 'names': ['candidate-' + other], 'conclusion': 'failure'},
+            'untitled run created before the candidate run': {'title': 'Workflow candidate.yml',
+                                                              'created_at': '2026-10-11T23:00:00Z',
+                                                              'conclusion': 'failure'},
+            'untitled run in the same second with a lower id': {'title': 'Workflow candidate.yml',
+                                                                'created_at': '2026-10-12T00:00:00Z',
+                                                                'run_id': 7, 'conclusion': 'failure'},
+            'older failure with a higher id': {'created_at': '2026-10-11T23:00:00Z', 'run_id': 999,
+                                               'conclusion': 'failure'},
+        }
+        for case, later in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as folder:
+                root, github, older = self.g3_after_older_success(folder, **later)
+                result, calls = self.collect(root, github)
+                self.assertEqual(result['status'], 'completed')
+                self.assertEqual(self.candidate_downloads(calls), [older['id']])
+
+    def test_g3_runs_are_titled_with_the_candidate_they_upload(self):
+        # A run that stops before its upload is attributed through its run-name alone.
+        def terms(value):  # the expression's operands, ignoring spacing and parentheses
+            return re.findall(r'[\w.]+|\|\|', value)
+
+        owners = {row['workflow'] for row in inventory(ROOT) if row['artifact'] == CANDIDATE}
+        self.assertTrue(owners)
+        for workflow in owners:
+            parsed = yaml.safe_load((ROOT / workflow).read_text(encoding='utf-8'))
+            sources = [terms(dict(parsed.get('env', {}), **job.get('env', {}))['CANDIDATE_SHA'])
+                       for job in parsed['jobs'].values()
+                       if any(step.get('with', {}).get('name') == CANDIDATE for step in job.get('steps', []))]
+            title = parsed['run-name']
+            self.assertTrue(title.startswith('candidate ${{'), workflow)
+            self.assertEqual(sources, [terms(title[len('candidate '):])], workflow)
+        self.assertEqual(TITLE.fullmatch('candidate ' + SHA).group(1), SHA)
 
     def test_duplicate_yaml_keys_are_rejected(self):
         with tempfile.TemporaryDirectory() as folder:

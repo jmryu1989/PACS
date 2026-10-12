@@ -87,9 +87,15 @@ D621에 따라 provider reconciliation은 U5b 범위다. DB Suspend 뒤 살아 �
 이전 성공으로 대체하지 않으며, SHA/소유 workflow 불일치·누락·만료 artifact는 거절한다.
 G3(candidate.yml)는 손으로 시작한 실행(`--ref main -f candidate_sha=<sha>`)의 commit이
 main 끝이므로 commit이 아니라 artifact 이름 `candidate-<sha>`로 실행을 찾는다. 그 이름을
-올린 실행이 모두 candidate.yml 소유인지 확인하고(다른 workflow가 올렸으면 거절), 그중
-최신 실행이 성공·완료일 때만 그 실행의 `candidate-<sha>` 하나를 받는다. 업로드 전에
-멈춘 실행은 이름으로 보이지 않으므로 G3가 끝난 뒤 수집하며, 판정기의 provenance
+올린 실행이 모두 candidate.yml 소유인지 확인하고(다른 workflow가 올렸으면 거절, 만료된
+업로드도 같다), 마지막 업로드 이후에 만든 candidate.yml 실행을 모두 후보별로 가른다.
+후보는 그 실행의 `candidate-*` 업로드, 없으면 run-name `candidate <sha>`, 없으면
+pull_request 실행의 head commit으로 정한다. 그래서 업로드 전에 실패·취소된 실행,
+진행·대기 중인 실행, 성공했지만 올리지 않은 실행도 그 후보의 최신 실행으로 남아 이전
+성공을 대신 받지 않고 거절한다. 다른 후보의 실행은 막지 않는다. run-name이 생기기 전에
+손으로 시작해 아무것도 올리지 않은 실행은 후보를 알 수 없으므로, 그런 실행이 후보의 최신
+실행보다 나중이면 실행 ID를 적은 STOP으로 거절한다(보수적 처리: 그 실행이 끝나 업로드하거나
+G3를 다시 돌린 뒤 수집). 실행 순서는 생성 시각, 같은 초면 실행 ID다. 판정기의 provenance
 `candidate_sha` 대조는 그대로 둔다.
 동명 artifact가 validate와 Worklist UX 양쪽에 있으면 **둘 다** 별도 경로에 받는다.
 workflow 파일명 변경이나 job 이동은 고정 validate 실행 ID로 우회하지 않는다.
