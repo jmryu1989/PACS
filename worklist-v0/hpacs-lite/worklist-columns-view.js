@@ -98,16 +98,52 @@
       $("#heads").innerHTML = shownColumns().map(c => `<th data-key="${c.k}" class="${c.num ? "num" : ""}">${c.t}</th>`).join("");
       $("#filterrow").innerHTML = shownColumns().map(c => {
         if (!c.f) return "<th></th>";
-        if (c.f === "text")
+        if (c.f === "text" || c.k === 'modality')
           return `<th><input data-f="${c.k}" value="${esc(fval[c.k] ?? "")}"></th>`;
         return `<th><select data-f="${c.k}">` +
           ["", ...c.f].map(o => `<option value="${o}"${(fval[c.k] ?? "") === o ? " selected" : ""}>${o}</option>`).join("") +
           `</select></th>`;
       }).join("");
     }
+    const reportedModalityInputs = new WeakSet();
+    function commitModalityInput(el) {
+      if (el?.dataset.f !== 'modality') return true;
+      if (el.validationMessage) {
+        if (!reportedModalityInputs.has(el)) toast(el.validationMessage, 'err');
+        reportedModalityInputs.add(el);
+        return false;
+      }
+      el.value = String(fval.modality ?? '');
+      return true;
+    }
+    $('#filterrow').addEventListener('focusout', e => commitModalityInput(e.target));
+    $('#filterrow').addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229 && !commitModalityInput(e.target)) {
+        e.preventDefault(); e.stopImmediatePropagation();
+      }
+    });
+    document.addEventListener('click', e => {
+      if (e.target.closest('[data-search-apply]') && !commitModalityInput($('#filterrow [data-f=modality]'))) {
+        e.preventDefault(); e.stopImmediatePropagation();
+      }
+    }, true);
     $("#filterrow").addEventListener("input", e => {
       const el = e.target.closest("[data-f]"); if (!el) return;
-      fval[el.dataset.f] = el.value.trim();
+      let value = el.value.trim();
+      if (el.dataset.f === 'modality') {
+        reportedModalityInputs.delete(el);
+        const tokens = value.split(/[,\\]/).map(v => v.trim().toUpperCase());
+        const allowed = KinWorklistFolderTree.defaultModalities(studies);
+        const error = value && tokens.some(v => !v || !allowed.includes(v))
+          ? '사용할 수 없는 Modality입니다. 빈 값 없이 목록의 Modality를 쉼표로 구분해 입력하세요.' : '';
+        el.setCustomValidity(error);
+        // Incomplete tokens keep the last applied criteria while the doctor types.
+        if (error) return;
+        if (/[,\\]/.test(el.value)) value = [...new Set(tokens)];
+        else value = tokens[0] || '';
+        folderAppliedSearch = null;
+      }
+      fval[el.dataset.f] = value;
       worklistSearch?.change();
       render();
     });

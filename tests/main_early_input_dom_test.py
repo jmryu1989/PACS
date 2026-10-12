@@ -260,6 +260,12 @@ class PreSite(h.Site):
         return body
 
     def api(self, route, request, method, path, query):
+        if method == 'GET' and path == '/api/filter-folders':
+            account, refused = self.authenticate(request, strict=True)
+            if refused:
+                return self.refuse(route, *refused)
+            return route.fulfill(json={'owner':[h.INSTITUTION, account['sub']], 'revision':0,
+                                       'filters':self.filters, 'folders':[], 'shortcuts':[]})
         if method == "GET" and path == "/api/bootstrap":
             account, refused = self.authenticate(request, strict=True)
             if refused:
@@ -732,8 +738,11 @@ class Pages:
                 source.parent.mkdir(parents=True)
                 source.write_bytes(cls.blob_file(which, "main.html"))
                 # Previous parts may already be external: materialize their own Git blobs, never today's files.
+                bundled = 'src="main-split.bundle.js"' in source.read_text(encoding="utf-8")
+                if bundled:
+                    (source.parent / 'main-split.bundle.js').write_bytes(cls.blob_file(which, 'main-split.bundle.js'))
                 for module in json.loads(MOVE_SPEC.read_text(encoding="utf-8"))["modules"]:
-                    if f'src="{module["file"]}"' in source.read_text(encoding="utf-8"):
+                    if bundled or f'src="{module["file"]}"' in source.read_text(encoding="utf-8"):
                         (source.parent / module["file"]).write_bytes(cls.blob_file(which, module["file"]))
                 setattr(cls, which, sh.ScratchPages(page=source, spec=MOVE_SPEC, root=cls.current.root / which))
                 cls.frozen[which] = sh.frozen_indexes(source)
@@ -1915,7 +1924,8 @@ class LoadBudget(PreCase):
         directory = ARTIFACTS / "load-budget"
         directory.mkdir(parents=True, exist_ok=True)
         sh.keep(directory, "samples.json", result)  # Declare exclusions before any browser visit.
-        stack = hosted.HostedStack(directory / "stack", PreSite, Pages.commits["approved"], PAGE.parent)
+        # Historical PRE source overrides never replace the current performance candidate.
+        stack = hosted.HostedStack(directory / "stack", PreSite, Pages.commits["approved"], sh.PRODUCT_DIR)
         errors = []
         started = time.perf_counter()
         try:
@@ -1931,10 +1941,12 @@ class LoadBudget(PreCase):
                     pair_number = pair["baseline"]["pair"]
                     try:
                         hosted.assert_script_requests(pair["baseline"]["script_requests"],
-                                                      pair["candidate"]["script_requests"])
+                                                      pair["candidate"]["script_requests"], landing=True)
+                        hosted.assert_account_requests(pair['baseline']['non_script_requests'],
+                                                       pair['candidate']['non_script_requests'])
                     except AssertionError as error:
                         errors.append(f"{mode} pair {pair_number}: {error}")
-                    for field in ("console_errors", "non_script_requests"):
+                    for field in ("console_errors",):
                         if Counter(map(str, pair["baseline"][field])) != Counter(map(str, pair["candidate"][field])):
                             errors.append(f"{mode} pair {pair_number}: different {field}")
             for mode in ("cold", "warm"):

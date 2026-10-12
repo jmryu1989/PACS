@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <title>워크리스트 — KOREA IMAGING NETWORK</title>
   <link rel="stylesheet" href="saved-filter-manager.css">
+  <link rel="stylesheet" href="worklist-folder-tree.css">
   <link rel="stylesheet" href="consultations.css">
   <link rel="stylesheet" href="worklist-columns.css">
   <link rel="icon" type="image/svg+xml" href="/kin-brand/kin-emblem-j1.svg">
@@ -1100,6 +1101,7 @@
       <select id="quick-match" aria-label="Patient Search Match"><option value="contains">Contains</option><option value="prefix">Starts With</option><option value="exact">Exact</option></select>
       <button class="chip" id="clearfilter">Clear</button>
     </div>
+    <button class="chip" id="worklist-folders-toggle" type="button" aria-controls="worklist-folders-panel" aria-expanded="true" title="폴더 목록을 열거나 닫습니다.">Folders</button>
     <details class="toolbar-menu" id="toolbar-filters" name="kin-toolbar-menu">
       <summary class="chip" title="검사일·저장 검색·즐겨찾기·검사 태그·부위 조건을 펼칩니다. 단추 앞의 점 표시는 검사일·저장 검색·즐겨찾기·검사 태그 중 하나 이상의 조건이 적용 중이라는 뜻입니다.">Filters<span class="toolbar-caret" aria-hidden="true">▾</span></summary>
       <!-- 검사일 → 주요 동작 → 저장 검색 목록·적용 상태 순서다. 저장 검색 칩과 이름은 개수·길이에 상한이 없어 맨 아래 제 줄에
@@ -1201,6 +1203,13 @@
   <div class="split">
     <!-- ══ 좌측: 워크리스트 (6.3) / Study List (8.1) ══ -->
     <div class="left">
+    <details id="worklist-folders-panel" open>
+      <summary>Folders</summary>
+      <div id="worklist-folders"></div>
+      <button type="button" class="chip" id="shortcuts-reload">Reload Shortcuts</button>
+      <button type="button" class="chip" id="shortcuts-save" disabled>Save Shortcuts</button>
+      <p id="shortcuts-status" role="status" lang="ko"></p>
+    </details>
       <!-- Context Menu 버튼 (8.1.3) — Technician 모드에서만 -->
       <div class="ctxbar" id="ctxbar">
         <span class="fold" id="fold">▽</span>
@@ -1894,6 +1903,7 @@
   <script src="consultations.js"></script>
   <script src="critical-result-send.js"></script>
   <script src="critical-result-inbox.js"></script>
+  <script src="worklist-folder-tree.js"></script>
   <script src="main-split.bundle.js"></script>
 </body>
 </html>
