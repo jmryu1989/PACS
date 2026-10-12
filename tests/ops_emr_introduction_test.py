@@ -1415,6 +1415,8 @@ class HostHarness:
         self.target["compose_files"] = ["docker-compose.yml", "docker-compose.prod.yml", str(self.override)]
         self.target["volumes"] = {key: self.target["project"] + "_" + value.split("_", 1)[1] for key, value in self.target["volumes"].items()}
         self.target["networks"]["default"] = self.target["project"] + "_default"
+        self.target["ca_file"] = str(self.root / "clone-ca.pem")
+        (self.root / "clone-ca.pem").write_text("-----BEGIN CERTIFICATE-----\nsynthetic\n-----END CERTIFICATE-----\n")
         self.seed = self.root / "seed"
         self.seed.mkdir()
         (self.seed / ".env").write_text("POSTGRES_PASSWORD=source-placeholder-0001\nKC_ADMIN_PASSWORD=source-admin-0001\n"
@@ -2034,15 +2036,18 @@ class CommanderAdditionsTests(HostHarness, unittest.TestCase):
         self.assertEqual(len(check), 1)
         self.assertTrue({"--read-only", "none"} <= set(check[0]) and any(item.endswith("target=/certs,readonly") for item in check[0]))
         self.assertEqual(docker.mutating(), [])
-        for name, change in {"absent": lambda d: d.volumes.pop(self.target["project"] + "_proxy-certs"),
-                             "empty or not this origin's": lambda d: setattr(d, "failing", lambda args: args[:2] == ["docker", "run"])}.items():
+        for name, (change, message) in {
+                "absent": (lambda d: d.volumes.pop(self.target["project"] + "_proxy-certs"), "certificate volume does not exist"),
+                "the CA file missing": (lambda d: Path(self.target["ca_file"]).unlink(), "CA file is missing"),
+                "empty or not this origin's": (lambda d: setattr(d, "failing", lambda args: args[:2] == ["docker", "run"]), "certificate volume is empty")}.items():
+            self.setUp()
             ops_host, docker, context = self.host()
             change(docker)
             with self.subTest(case=name):
-                refuses(self, self.seed_check, ops_host, context, message="certificate volume")
+                refuses(self, self.seed_check, ops_host, context, message=message)
                 self.assertEqual(docker.mutating(), [])
-                if name == "absent":
-                    self.assertFalse(any(call[:2] == ["docker", "run"] for call in docker.calls), "the check never creates the volume")
+                if name != "empty or not this origin's":
+                    self.assertFalse(any(call[:2] == ["docker", "run"] for call in docker.calls), "no check container (nothing created)")
 
     def test_88_the_browser_trusts_exactly_the_verified_leaf_key(self):
         """IRT-14 (D1066): the pin is base64(sha256(SPKI)) as openssl computes it (known answer); a malformed certificate
@@ -2358,7 +2363,8 @@ class ProtectedHostTests(unittest.TestCase):
         stdout/stderr (0600) and the phase result."""
         result, runs, docker = self.installed_run()
         self.assertEqual((result["status"], result["phase_passed"]), ("CAPTURE_FAILED", False), result)
-        self.assertEqual([step["outcome"] for step in result["steps"]], ["PASS", "STOP"])
+        self.assertEqual([(step["step"], step["outcome"]) for step in result["steps"]],
+                         [("L-00a", "PASS"), ("L-00b", "PASS"), ("L-01", "PASS"), ("L-04a", "STOP")])
         helper = sorted((runs / "logs").glob("*-kc-serverinfo-*.out"))
         self.assertEqual(len(helper), 1)
         self.assertIn(b"KIN_RESULT", helper[0].read_bytes())
@@ -2382,8 +2388,11 @@ class ProtectedHostTests(unittest.TestCase):
         for name, prepare in cases.items():
             with self.subTest(case=name):
                 result, runs, docker = self.installed_run(prepare=prepare)
-                self.assertEqual(result["steps"][0]["outcome"], "STOP", result)
-                self.assertEqual(result["steps"][0]["code"], "Invalid protected deployment state")
+                # The pre-fence checks write no log; the first step that does (L-01's first helper) stops, nothing after it runs.
+                self.assertEqual([(step["step"], step["outcome"]) for step in result["steps"]],
+                                 [("L-00a", "PASS"), ("L-00b", "PASS"), ("L-01", "STOP")], result)
+                self.assertEqual(result["steps"][-1]["code"], "Invalid protected deployment state")
+                self.assertFalse(any(call[:1] == ["crontab"] and call[-1] == "-" for call in docker.calls), "the fence never ran")
                 self.assertEqual(list(elsewhere.iterdir()), [])
                 shutil.rmtree(runs)
                 self.setUp()

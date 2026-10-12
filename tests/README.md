@@ -1396,6 +1396,22 @@ local-restore receipt that a rehearsal of exactly that production plan and B0 pr
 Reopen requires the executor's browser-level smoke record and a readable audit ledger at the backup root (the
 introduced release's daily backup seals into it).
 
+The target manifest names the host's own wiring instead of tolerating drift: `declared_overlays` (a compose file
+outside the checkout, e.g. `/etc/kin-deploy/overlays/docker-compose.halo-reports.yml`, its sha256, service and binds;
+listed in `compose_files` after any rehearsal override, because that override replaces the proxy's volumes) with
+`external_networks` per service; `tracked_overlay_reconcile` puts a modified tracked compose file back to the commit
+only after Compose renders the current files, the commit plus the overlay, and the declared list byte-identically.
+Every phase start checks the overlay file (hash, not writable by others) and its bind sources, and resolves compose
+variables the `.env` lacks from the running containers (environment or bind source; names and hashes recorded). With
+`fix_checkout_mode` the capture first makes the checkout 0700 and `.git` not group/other-writable (recorded). A clone's
+seed refuses a proxy certificate volume that is absent or empty (read-only check; the volume is filled before the
+first proxy start). Unattended (policy `smoke.browser_cmd`, D1062): a temporary member `kin-smoke-<run>` with a
+generated password in the run folder logs in once in headless Chromium (Authorization Code + PKCE; the chain is
+verified first and the browser trusts only that leaf's SPKI pin; the origin's host:port maps to the maintenance port;
+the code is read from an unresolvable `.invalid` redirect; the profile lives in the run folder and is removed), the
+eight checks become the executor's record, and the member is disabled and deleted before any reopen. The browser
+command carries its browsers' path itself (`/usr/bin/env PLAYWRIGHT_BROWSERS_PATH=/opt/kin-smoke/browsers ...`).
+
 - `python -B tests/ops_emr_introduction_test.py`: plan/target/request/approval/receipt validation, the clone/target
   allowlist, the preflight additions of `ops_deploy_preflight.py` as functions of observed facts, and the phase state
   machine (order, retained lock, budget/window, revert before the first database change, automatic rollback only when
@@ -1426,9 +1442,12 @@ introduced release's daily backup seals into it).
   compose files on a local daemon - a source stack's B0 (with a synthetic DICOM frame and further NOLOGIN roles, a
   membership, an owned schema and grants) seeds a clone with other names and secrets, which runs every phase through
   rollback, rollback_reopen and an ordinary compose recreate, and produces the receipt (checked for its production
-  plan once, refused the second time). The smoke tokens come from real Authorization Code +
-  PKCE login through the clone's loopback maintenance ingress (a direct grant carries no `auth_time`, which the product
-  refuses after the member import). `KIN_TEST_EMR_REHEARSAL_EVIDENCE=<dir>` keeps each stack's run records. It is not a
+  plan once, refused the second time). The clone carries a declared overlay (an external network and a host-file bind
+  outside its checkout, after the rehearsal override) that every proxy recreation keeps, and its certificate volume
+  check is shown refusing an absent and an empty volume first. The smoke runs unattended with the mode's reference
+  browser (`ops_emr_introduction.py browser-smoke`, Playwright Chromium): real Authorization Code + PKCE logins through
+  the clone's loopback maintenance ingress (a direct grant carries no `auth_time`, which the product refuses after the
+  member import). `KIN_TEST_EMR_REHEARSAL_EVIDENCE=<dir>` keeps each stack's run records. It is not a
   rehearsal of a production backup copy, a real realm, production TLS or data volume; that is the separate rehearsal
   on a disposable host.
 

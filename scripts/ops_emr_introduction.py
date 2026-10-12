@@ -35,7 +35,15 @@ process); a phase that never recorded its end is classified NEEDS_ATTENTION, nev
 before and after it and every command it ran (commands-<phase>-<request>.jsonl). Secrets are read only into memory;
 logs and records carry names, modes, hashes and exits, never values.
 
-CLI helpers (no host change): example, check-plan, prepare-env, compose-digest, rehearsal-override, verify-receipt.
+Host wiring is declared, never tolerated: declared_overlays (compose files outside the checkout, hash-pinned, with
+their binds) and external_networks; tracked_overlay_reconcile (a modified tracked file goes back to the commit only
+when its overlay renders byte-identically); compose variables the .env lacks resolve from the running stack;
+fix_checkout_mode (recorded chmod before the capture). With the policy's smoke.browser_cmd the smoke runs unattended
+(D1062): a temporary member, one real browser login, the eight checks as the executor's record, the member deleted
+before any reopen.
+
+CLI helpers (no host change): example, check-plan, prepare-env, compose-digest, rehearsal-override, verify-receipt;
+browser-smoke (the reference headless browser: login spec on stdin, one KIN_RESULT line on stdout).
 """
 from __future__ import annotations
 
@@ -1711,17 +1719,19 @@ class Runner:
                               stdout=output or subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, **identity)
 
 
-def owned_private(path, owner, *, directory=False, private=False, own_mode=True):
+def owned_private(path, owner, *, directory=False, private=False, own_mode=True, deferred=()):
     """The production checkout as the host keeps it: owned by its operating account (C1's own rule is root). Every
     ancestor is root's or that account's, none is a link or writable by others (a sticky directory excepted).
-    own_mode=False leaves the path's own mode bits to a later check (a declared, recorded correction may come first)."""
+    own_mode=False leaves the path's own mode bits (and those of the deferred ancestors, e.g. the checkout above its
+    .git) to a later check: a declared, recorded correction may come first. Owner and link rules still apply to all."""
     import stat as kinds
     path = Path(path)
     require(os.name == "posix" and os.geteuid() == 0 and path.is_absolute() and ".." not in path.parts, "Invalid protected path")
+    later = {path, *map(Path, deferred)} if not own_mode else set()
     for item in reversed((path, *path.parents)):
         info = item.lstat()
         require(not kinds.S_ISLNK(info.st_mode) and info.st_uid in (0, owner["uid"]), "A path component is a link or has another owner")
-        if item == path and not own_mode:
+        if item in later:
             continue
         require(not info.st_mode & 0o022 or (item != path and kinds.S_ISDIR(info.st_mode) and info.st_mode & kinds.S_ISVTX),
                 "A path component is writable by others")
@@ -3214,7 +3224,9 @@ class HostOps:
         command = ["docker", "run", "--rm", "--network", "none", "--read-only", "--label", "kin.ops.run=" + uuid.uuid4().hex[:12],
                    "--mount", "type=volume,source=" + volume + ",target=/certs,readonly"]
         if self.t["ca_file"]:
-            command += ["--mount", "type=bind,source=" + self.t["ca_file"] + ",target=/kin-ca.pem,readonly"]
+            # A missing bind source would be a refusal for the wrong reason (and some engines create it on the host).
+            require(Path(self.t["ca_file"]).is_file(), "The clone CA file is missing: " + self.t["ca_file"])
+            command +=["--mount", "type=bind,source=" + self.t["ca_file"] + ",target=/kin-ca.pem,readonly"]
         try:
             ipaddress.ip_address(host)
             flag = "-checkip"
@@ -3428,7 +3440,7 @@ class IntroductionHost:
             require(self.repository.lstat().st_uid == 0 and not stat_module.S_ISLNK(self.repository.lstat().st_mode), "Repository is not root's")
         else:
             self.repository = owned_private(self.policy["repository"], self.owner, directory=True, own_mode=False)
-            owned_private(self.repository / ".git", self.owner, directory=True, own_mode=False)
+            owned_private(self.repository / ".git", self.owner, directory=True, own_mode=False, deferred=(self.repository,))
         self.state = host.protected(self.policy["state_dir"], private=True, directory=True)
         for name in EMR_DIRS:
             host.protected(self.state / name, private=True, directory=True)

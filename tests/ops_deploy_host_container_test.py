@@ -674,7 +674,11 @@ class EmrIntroductionRehearsal(unittest.TestCase):
             with self.assertRaisesRegex(intro.Stop, "does not exist"):
                 host_ops.certificate_volume_check(context, model)
             self.assertNotEqual(subprocess.run(["docker", "volume", "inspect", volume], capture_output=True).returncode, 0)
-            clone.certificates(images["previous"]["proxy"], fill=False)
+            with self.assertRaisesRegex(intro.Stop, "CA file is missing"):
+                clone.certificates(images["previous"]["proxy"], fill=False)
+                host_ops.certificate_volume_check(context, model)
+            # An empty volume with a CA file in place (the source's, until the clone's own replaces it).
+            clone.ca.write_bytes(source.ca.read_bytes())
             with self.assertRaisesRegex(intro.Stop, "empty"):
                 host_ops.certificate_volume_check(context, model)
             clone.certificates(images["previous"]["proxy"])
