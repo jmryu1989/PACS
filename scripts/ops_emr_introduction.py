@@ -569,6 +569,48 @@ def check_resolved(model, target, *, target_checkout, maintenance=None, images=N
         require(all(model["images"].get(role) == images[role] for role in ROLES), "Resolved images differ from the plan")
 
 
+ANONYMOUS_VOLUME = re.compile(r"[0-9a-f]{64}")
+
+
+def check_running(inspections, model, target):
+    """IRT2-02, L-01 before anything changes: every running container of the previous release is what the checked model
+    says - its Compose project and service labels, every named volume and bind at its path (an image's own anonymous
+    volumes aside), its networks and its published ports - not only its name and image. A container that runs on another
+    project's volume, joins another network or publishes another port is refused before any fence."""
+    fold = (lambda text: text.lower()) if PureWindowsPath(target["repository"]).drive else (lambda text: text)
+    path_of = lambda value: PurePosixPath(fold(str(value).replace("\\", "/")))
+    named = set(model["volumes"].values())
+    for role in ROLES:
+        item = inspections[role]
+        labels = (item.get("Config") or {}).get("Labels") or {}
+        require(labels.get("com.docker.compose.project") == model["project"] and labels.get("com.docker.compose.service") == role,
+                "A running service belongs to another Compose project or service: " + role)
+        expected = {}
+        for entry in model["mounts"].get(role, []):
+            if entry["type"] == "volume":
+                expected[entry["target"]] = ("volume", model["volumes"].get(entry["source"]))
+            elif entry["type"] == "bind":
+                expected[entry["target"]] = ("bind", path_of(entry["source"]))
+        actual = {}
+        for mount in item.get("Mounts") or []:
+            if mount.get("Type") == "volume":
+                if ANONYMOUS_VOLUME.fullmatch(str(mount.get("Name"))) and mount.get("Name") not in named:
+                    continue
+                actual[mount.get("Destination")] = ("volume", mount.get("Name"))
+            elif mount.get("Type") == "bind":
+                actual[mount.get("Destination")] = ("bind", path_of(mount.get("Source")))
+        require(actual == expected, "A running service's mounts differ from the checked model: " + role)
+        networks = set(((item.get("NetworkSettings") or {}).get("Networks") or {}))
+        require(networks == {model["networks"][key] for key in model["service_networks"].get(role, ["default"])},
+                "A running service's networks differ from the checked model: " + role)
+        published = []
+        for port, values in (((item.get("HostConfig") or {}).get("PortBindings")) or {}).items():
+            for value in values or []:
+                host = value.get("HostIp") or ""
+                published.append((host + ":" if host and host not in ("0.0.0.0", "::") else "") + str(value.get("HostPort")) + ":" + port.split("/")[0])
+        require(sorted(set(published)) == sorted(set(model["ports"].get(role, []))), "A running service's published ports differ from the checked model: " + role)
+
+
 REQUEST_KEYS = ("version", "mode", "phase", "plan_sha256", "nonce")
 
 
@@ -778,14 +820,29 @@ class Records:
     (commands-<phase>-<request>.jsonl): every command with its redacted argv, environment names, input hash, start,
     duration, outcome (exit code, timeout or launch error) and the hashes of its outputs, tagged with its step."""
 
-    def __init__(self, directory):
+    def __init__(self, directory, secrets=None):
         self.directory = Path(directory)
+        # IRT2-15: a run's working secrets (the smoke member's password, the browser profiles with its session cookies,
+        # resolved compose values) live apart from its records, which are evidence: never in the run directory.
+        self.secrets = Path(secrets) if secrets is not None else self.directory.with_name(self.directory.name + ".secrets")
         self.commands_file = None
         self.seq = 0
         self.context = {}
 
     def ensure(self, directory):
         Path(directory).mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    def secret(self, name):
+        """The path of one working secret of this run (a plain name, directly in the secrets directory)."""
+        require(type(name) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", name) is not None, "Invalid secret name")
+        self.ensure(self.secrets)
+        return self.secrets / name
+
+    def write_secret(self, name, raw):
+        self.write(self.secret(name), raw)
+
+    def read_secret(self, name):
+        return self.read(self.secret(name))
 
     def open_lease(self, path):
         return os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
@@ -862,13 +919,16 @@ class Records:
 
     def discard(self, path):
         """A private file of this run that must not outlive its use (the smoke member's password once the member is
-        gone). Missing is fine; only files directly in the run directory."""
+        gone, a record moved aside). Missing is fine; only files directly in the run or secrets directory."""
         path = Path(path)
-        require(path.parent == self.directory, "Records stay in the plan's run directory")
+        require(path.parent in (self.directory, self.secrets), "Records stay in the plan's run directory")
         try:
             os.unlink(path)
         except FileNotFoundError:
             pass
+
+    def discard_secret(self, name):
+        self.discard(self.secrets / name)
 
 
 # ── the shared operations lock, retained between phases ──
@@ -1282,7 +1342,7 @@ class Introduction:
             release_lock(self.repository, self.state["lock_token"])
             self.state["lock_token"] = None
             # D04: the plan ended; the resolved compose values it kept for its later phases are not kept beyond it.
-            self.records.discard(self.records.directory / COMPOSE_VALUES)
+            self.records.discard_secret(COMPOSE_VALUES)
         written = {"steps": self.steps, "status": status, "phase": self.phase, "request_sha256": self.request_sha256,
                    "commands_file": self.records.commands_file}
         if self.warnings:
@@ -1700,28 +1760,36 @@ SMOKE_ADMIN_SCRIPT = r"""
 const base=(process.env.KC_ADMIN_URL||'').replace(/\/$/,'');
 const [operation, raw]=process.argv.slice(1); const input=JSON.parse(raw);
 const out=v=>process.stdout.write('KIN_RESULT '+JSON.stringify(v)+'\n');
+// Every request has its own deadline (IRT2-14): a hanging Keycloak ends this helper, never blocks it.
+const get=(url,options={})=>fetch(url,{...options,signal:AbortSignal.timeout(15000)});
 (async()=>{const form=new URLSearchParams({grant_type:'password',client_id:'admin-cli',username:process.env.KIN_KC_ADMIN_USER,password:process.env.KIN_KC_ADMIN_PASSWORD});
  // Keycloak may still be starting (writers resumed a moment ago, or a restore): ready means the realm kin answers 200 -
  // a 404 while it loads its realms is not ready (D18) - then the administrator's token; at most two minutes each.
  const until=async probe=>{for(let i=0;i<60;i++){try{const v=await probe();if(v)return v;}catch(e){}await new Promise(r=>setTimeout(r,2000));}return null;};
- if(!await until(async()=>(await fetch(base+'/realms/kin')).status===200))throw new Error('keycloak not ready');
- const granted=await until(async()=>{const r=await fetch(base+'/realms/master/protocol/openid-connect/token',{method:'POST',body:form});
+ if(!await until(async()=>(await get(base+'/realms/kin')).status===200))throw new Error('keycloak not ready');
+ const granted=await until(async()=>{const r=await get(base+'/realms/master/protocol/openid-connect/token',{method:'POST',body:form});
   return r.status<500&&r.status!==404?r:null;});
  if(!granted)throw new Error('keycloak unreachable');
  if(granted.status!==200)throw new Error('admin');
  const token=(await granted.json()).access_token;
- const call=async(method,path,body)=>{const r=await fetch(base+'/admin/realms/kin'+path,{method,headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+ const call=async(method,path,body)=>{const r=await get(base+'/admin/realms/kin'+path,{method,headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
    body:body===undefined?undefined:JSON.stringify(body)});if(r.status===404)return null;if(r.status>=300)throw new Error(method+' '+r.status);
    const text=await r.text();return text?JSON.parse(text):null;};
+ // IRT2-23: this run's own objects carry its marker (the member's last name, each client's description); a same-named
+ // account or client without it was not made here and is never changed or deleted.
+ const mine=u=>!!input.marker&&u.lastName===input.marker;
+ const mineClient=c=>!!input.marker&&c.description==='kin-smoke '+input.marker;
  const users=async()=>((await call('GET','/users?exact=true&username='+encodeURIComponent(input.username)))||[]).filter(u=>u.username===input.username);
  // One login client per attempt (a retry makes its own): the removal names every one of them.
  const ids=input.client_ids||(input.client_id?[input.client_id]:[]);
  const clients=async()=>{const out=[];for(const id of ids){out.push(...(((await call('GET','/clients?clientId='+encodeURIComponent(id)))||[]).filter(c=>c.clientId===id)));}return out;};
  if(operation==='create-member'){
+  if(!input.marker)throw new Error('marker');
   if((await users()).length)throw new Error('exists');
   await call('POST','/users',{username:input.username,email:input.username+'@kin-smoke.invalid',enabled:true,emailVerified:true,
-   firstName:'Release',lastName:'Smoke',requiredActions:[]});
-  const [user]=await users();
+   firstName:'Release',lastName:input.marker,requiredActions:[]});
+  const [user]=(await users()).filter(mine);
+  if(!user)throw new Error('ownership');
   await call('PUT','/users/'+user.id+'/reset-password',{type:'password',value:process.env.KIN_SMOKE_PASSWORD,temporary:false});
   const roles=[];for(const name of input.roles){roles.push(await call('GET','/roles/'+encodeURIComponent(name)));}
   if(roles.some(r=>!r))throw new Error('role');
@@ -1731,17 +1799,22 @@ const out=v=>process.stdout.write('KIN_RESULT '+JSON.stringify(v)+'\n');
   await call('PUT','/users/'+user.id+'/groups/'+group.id);
   out({id:user.id,username:user.username});return;}
  if(operation==='create-client'){
+  if(!input.marker)throw new Error('marker');
   if((await clients()).length)throw new Error('exists');
-  await call('POST','/clients',{clientId:input.client_id,enabled:true,publicClient:true,standardFlowEnabled:true,directAccessGrantsEnabled:false,
-   protocol:'openid-connect',redirectUris:[input.redirect_uri],attributes:{'pkce.code.challenge.method':'S256'},
+  await call('POST','/clients',{clientId:input.client_id,description:'kin-smoke '+input.marker,enabled:true,publicClient:true,standardFlowEnabled:true,
+   directAccessGrantsEnabled:false,protocol:'openid-connect',redirectUris:[input.redirect_uri],attributes:{'pkce.code.challenge.method':'S256'},
    protocolMappers:[{name:'kin-api-audience',protocol:'openid-connect',protocolMapper:'oidc-audience-mapper',config:{'included.custom.audience':'kin-api','access.token.claim':'true','id.token.claim':'false'}},
     {name:'kin-institution-groups',protocol:'openid-connect',protocolMapper:'oidc-group-membership-mapper',config:{'full.path':'false','access.token.claim':'true','id.token.claim':'false','userinfo.token.claim':'false','claim.name':'groups'}},
     {name:'kin-authentication-time',protocol:'openid-connect',protocolMapper:'oidc-usersessionmodel-note-mapper',config:{'user.session.note':'AUTH_TIME','claim.name':'auth_time','jsonType.label':'long','access.token.claim':'true','id.token.claim':'true'}}]});
-  const [client]=await clients();out({id:client.id,client_id:client.clientId});return;}
+  const [client]=(await clients()).filter(mineClient);
+  if(!client)throw new Error('ownership');
+  out({id:client.id,client_id:client.clientId});return;}
  if(operation==='remove'){
-  for(const user of await users()){await call('PUT','/users/'+user.id,{enabled:false});await call('DELETE','/users/'+user.id);}
-  for(const client of await clients()){await call('DELETE','/clients/'+client.id);}
-  out({user_absent:(await users()).length===0,client_absent:(await clients()).length===0});return;}
+  const found=await users(),listed=await clients();
+  for(const user of found.filter(mine)){await call('PUT','/users/'+user.id,{enabled:false});await call('DELETE','/users/'+user.id);}
+  for(const client of listed.filter(mineClient)){await call('DELETE','/clients/'+client.id);}
+  out({user_absent:(await users()).filter(mine).length===0,client_absent:(await clients()).filter(mineClient).length===0,
+   foreign_users:found.filter(u=>!mine(u)).length,foreign_clients:listed.filter(c=>!mineClient(c)).length});return;}
  throw new Error('operation');
 })().catch(e=>{process.stderr.write(String((e&&e.message)||e).slice(0,80)+'\n');process.exitCode=1;});
 """
@@ -1760,18 +1833,19 @@ SMOKE_REALM_SQL = """SELECT json_build_object(
   FROM realm r WHERE r.name = 'kin'"""
 SERVERINFO_SCRIPT = r"""
 const base=(process.env.KC_ADMIN_URL||'').replace(/\/$/,'');
+const get=(url,options={})=>fetch(url,{...options,signal:AbortSignal.timeout(15000)});
 (async()=>{const form=new URLSearchParams({grant_type:'password',client_id:'admin-cli',username:process.env.KIN_KC_ADMIN_USER,password:process.env.KIN_KC_ADMIN_PASSWORD});
  // Its own readiness (D19): the master realm answers 200 (a 404 while Keycloak loads is not ready), then the token, then
  // serverinfo answers 200; a refused administrator stops at once; at most two minutes each.
  const until=async probe=>{for(let i=0;i<60;i++){try{const v=await probe();if(v)return v;}catch(e){if(e&&e.refused)throw e;}
   await new Promise(r=>setTimeout(r,2000));}return null;};
- if(!await until(async()=>(await fetch(base+'/realms/master')).status===200))throw new Error('keycloak not ready');
- const granted=await until(async()=>{const r=await fetch(base+'/realms/master/protocol/openid-connect/token',{method:'POST',body:form});
+ if(!await until(async()=>(await get(base+'/realms/master')).status===200))throw new Error('keycloak not ready');
+ const granted=await until(async()=>{const r=await get(base+'/realms/master/protocol/openid-connect/token',{method:'POST',body:form});
   return r.status<500&&r.status!==404?r:null;});
  if(!granted)throw new Error('keycloak unreachable');
  if(granted.status!==200)throw new Error('admin');
  const t=await granted.json();
- const answered=await until(async()=>{const r=await fetch(base+'/admin/serverinfo',{headers:{Authorization:'Bearer '+t.access_token}});
+ const answered=await until(async()=>{const r=await get(base+'/admin/serverinfo',{headers:{Authorization:'Bearer '+t.access_token}});
   if(r.status===401||r.status===403)throw Object.assign(new Error('serverinfo'),{refused:true});return r.status===200?r:null;});
  if(!answered)throw new Error('serverinfo');
  const info=await answered.json();
@@ -2383,10 +2457,18 @@ class HostOps:
         (rollback, rollback_reopen, or the revert/rollback after a settled failure) whose overlay file changed, vanished or
         lost its protection goes on with those pinned bytes and records a warning; every other phase refuses."""
         def protection(path, what):
+            """IRT2-19: the overlay and every folder above it - no link, owned by root or this tool's user, writable by no
+            one else (a sticky folder above excepted, as ops_deploy_host.protected allows)."""
             if os.name != "posix":
                 return None, None
+            path = Path(path)
+            for item in reversed((path, *path.parents)):
+                info = os.lstat(item)
+                require(not stat_module.S_ISLNK(info.st_mode), what + " has a link on its path: " + str(item))
+                require(info.st_uid in (0, os.geteuid()), what + " has another owner on its path: " + str(item))
+                require(not info.st_mode & 0o022 or (item != path and stat_module.S_ISDIR(info.st_mode) and info.st_mode & stat_module.S_ISVTX),
+                        what + " is writable by others: " + str(item))
             info = os.lstat(path)
-            require(info.st_uid in (0, os.geteuid()) and not info.st_mode & 0o022, what + " is writable by others: " + str(path))
             return oct(info.st_mode & 0o7777), info.st_uid
         facts = []
         recovering = bool(getattr(intro, "recovering", False))
@@ -2399,7 +2481,6 @@ class HostOps:
                 raw = path.read_bytes()
                 require(sha256_bytes(raw) == entry["sha256"], "A declared overlay differs from the manifest: " + entry["file"])
                 mode, owner = protection(path, "A declared overlay")
-                protection(path.parent, "A declared overlay's folder")
             except (Stop, OSError) as error:
                 pinned = self.pinned_overlay(intro, entry) if recovering else None
                 if pinned is None:
@@ -2432,10 +2513,10 @@ class HostOps:
     def kept_compose_values(self, intro):
         """D04: the values this plan resolved earlier, from its private values file, each still the value whose hash the
         state recorded (a changed file is a refusal, never a value)."""
-        path = intro.records.directory / COMPOSE_VALUES
+        path = intro.records.secrets / COMPOSE_VALUES
         if not path.exists():
             return {}
-        values = decode(intro.records.read(path))
+        values = decode(intro.records.read_secret(COMPOSE_VALUES))
         known = intro.state.get("compose_env") or {}
         require(type(values) is dict and all(type(value) is str and name in known
                                              and sha256_bytes(value.encode("utf-8")) == known[name]["sha256"]
@@ -2512,7 +2593,7 @@ class HostOps:
         for name, entry in record.items():
             known[name] = {**entry, "kept": True}
         if resolved and any(kept.get(name) != value for name, value in resolved.items()):
-            intro.records.write(intro.records.directory / COMPOSE_VALUES, canonical({**kept, **resolved}) + b"\n")
+            intro.records.write_secret(COMPOSE_VALUES, canonical({**kept, **resolved}) + b"\n")
         intro.save()
         self.compose_env = resolved
         out = {"resolved_from_running_stack": record, "declared_overlays": overlays}
@@ -2610,12 +2691,22 @@ class HostOps:
         username = SMOKE_PREFIX + run
         password = token_source.token_urlsafe(32)
         credentials = "smoke-member-" + side + ".json"
-        intro.records.write(intro.records.directory / credentials, canonical({"username": username, "password": password}) + b"\n")
-        intro.state["smoke_member"] = {"username": username, "id": None, "side": side, "client_id": None, "credentials": credentials,
-                                       "created_at": None, "deleted_at": None}
+        # IRT2-23: this run's ownership marker - the member's last name and each login client's description carry it,
+        # and the cleanup deletes only accounts and clients that carry it (a same-named account it did not make stays).
+        marker = uuid.uuid4().hex
+        # IRT2-15: the password lives in the run's secrets directory, never among its records (evidence).
+        intro.records.write_secret(credentials, canonical({"username": username, "password": password}) + b"\n")
+        intro.state["smoke_member"] = {"username": username, "id": None, "side": side, "client_id": None, "client_ids": [],
+                                       "credentials": credentials, "marker": marker, "created_at": None, "deleted_at": None}
         intro.save()
-        created = self.smoke_admin(intro, "create-member", {"username": username, "roles": spec["roles"], "group": spec["group"]},
-                                   password=password)
+        try:
+            created = self.smoke_admin(intro, "create-member", {"username": username, "roles": spec["roles"], "group": spec["group"],
+                                                                "marker": marker}, password=password)
+        except Stop:
+            # Refused (e.g. the name is taken) or ended unknown: no login will use the password; a member this run made
+            # anyway is found by its marker and removed by the cleanup.
+            intro.records.discard_secret(credentials)
+            raise
         intro.state["smoke_member"].update(id=created["id"], created_at=utc_now().isoformat())
         intro.save()
         intro.records.journal({"event": "smoke-member-created", "plan_sha256": intro.plan_sha256, "username": username, "side": side})
@@ -2659,7 +2750,7 @@ class HostOps:
         program = Path(self.browser_cmd[0])
         require(program.is_absolute() and program.is_file() and os.access(program, os.X_OK),
                 "The smoke browser command is not an executable file: " + str(program))
-        profile = intro.records.directory / ("browser-probe-" + uuid.uuid4().hex[:8])
+        profile = intro.records.secret("browser-probe-" + uuid.uuid4().hex[:8])
         try:
             value = self.run_browser({"probe": True, "profile_dir": str(profile)}, timeout=BROWSER_PROBE_S, what="probe")
         finally:
@@ -2674,16 +2765,16 @@ class HostOps:
         (the introduced release): first the product's own sign-in, its logout and the refusal of the ended session, in
         the same browser."""
         member = intro.state["smoke_member"]
-        credentials = json.loads(intro.records.read(intro.records.directory / member["credentials"]))
+        credentials = json.loads(intro.records.read_secret(member["credentials"]))
         client_id = member["username"] + "-client" + ("" if attempt == 1 else "-" + str(attempt))
         redirect = "https://" + SMOKE_REDIRECT_HOST + "/" + member["username"]
         member["client_id"] = client_id
         member["client_ids"] = sorted({*(member.get("client_ids") or []), client_id})
         intro.save()
-        self.smoke_admin(intro, "create-client", {"client_id": client_id, "redirect_uri": redirect})
-        # The browser's profile (its cookies are this member's session) lives in this run's private folder and is gone
+        self.smoke_admin(intro, "create-client", {"client_id": client_id, "redirect_uri": redirect, "marker": member["marker"]})
+        # The browser's profile (its cookies are this member's session) lives in this run's secrets folder and is gone
         # after the login, whatever the browser did; every attempt has a new one.
-        profile = intro.records.directory / ("browser-profile-" + uuid.uuid4().hex[:8])
+        profile = intro.records.secret("browser-profile-" + uuid.uuid4().hex[:8])
         try:
             value = self.run_browser({"origin": self.t["origin"], "connect": list(connect) if connect else None, "ca_file": self.t["ca_file"],
                                       "username": credentials["username"], "password": credentials["password"], "client_id": client_id,
@@ -2708,14 +2799,18 @@ class HostOps:
         member = intro.state.get("smoke_member")
         if member and not member.get("deleted_at"):
             clients = sorted({*(member.get("client_ids") or []), *([member["client_id"]] if member.get("client_id") else [])})
-            removed = self.smoke_admin(intro, "remove", {"username": member["username"], "client_ids": clients})
+            # IRT2-23: only what carries this run's marker is removed; a same-named account or client stays (and the
+            # realm check below then refuses any reopen while an account named like a smoke member exists).
+            removed = self.smoke_admin(intro, "remove", {"username": member["username"], "client_ids": clients, "marker": member["marker"]})
             require(removed.get("user_absent") is True and removed.get("client_absent") is True, "The smoke member or its client is still present")
             member["deleted_at"] = utc_now().isoformat()
+            member["foreign_kept"] = {"users": removed.get("foreign_users", 0), "clients": removed.get("foreign_clients", 0)}
             intro.save()
-            intro.records.journal({"event": "smoke-member-deleted", "plan_sha256": intro.plan_sha256, "username": member["username"]})
+            intro.records.journal({"event": "smoke-member-deleted", "plan_sha256": intro.plan_sha256, "username": member["username"],
+                                   "foreign_kept": member["foreign_kept"]})
         if member and member.get("deleted_at"):
             # The password of a member that no longer exists is not kept.
-            intro.records.discard(intro.records.directory / member["credentials"])
+            intro.records.discard_secret(member["credentials"])
         require(self.psql(SMOKE_MEMBERS_SQL, "keycloak") == "0", "The smoke member still exists")
         return {"member": member["username"] if member else None, "deleted": bool(member)}
 
@@ -2782,11 +2877,14 @@ class HostOps:
         check_resolved(model, self.t, target_checkout=False, maintenance=False, images=intro.plan["previous"]["images"])
         self.secure(self.env_file())
         require(self.compose_digest_now() == intro.plan["compose"]["before_sha256"], "Compose files or .env differ from the plan")
-        running, restarting, images = {}, {}, {}
+        running, restarting, images, inspections = {}, {}, {}, {}
         for role in ROLES:
             item = self.inspect(role)
             require(item is not None, "A service of the previous release does not exist: " + role)
             running[role], restarting[role], images[role] = item["State"]["Running"], bool(item["State"].get("Restarting")), item["Image"]
+            inspections[role] = item
+        # IRT2-02: the running containers themselves are the checked model's (project, mounts, networks, ports).
+        check_running(inspections, model, self.t)
         api = self.inspect("api")
         existing = [name for name in (self.t["volumes"]["emr_access"], self.t["volumes"]["emr_state"])
                     if self.cmd(["docker", "volume", "inspect", name], check=False).returncode == 0]
@@ -3753,7 +3851,8 @@ def local_host_key(path="/etc/ssh/ssh_host_ed25519_key.pub"):
 # ── the protected entrypoint adapter ──
 
 POLICY_KEYS = ("schema", "enabled", "repository", "state_dir", "production", "targets_allowed", "smoke", "repository_owner")
-EMR_DIRS = ("emr-plans", "emr-targets", "emr-approvals", "emr-evidence", "emr-used", "emr-runs", "emr-staged")
+EMR_DIRS = ("emr-plans", "emr-targets", "emr-approvals", "emr-evidence", "emr-used", "emr-runs", "emr-staged", "emr-secrets",
+            "emr-bundles")
 
 
 def policy_valid(policy):
@@ -3786,16 +3885,16 @@ class HostRecords(Records):
     """The run records of one plan under the protected state directory: root-owned 0700 directories (the plan's run
     directory and its logs/) that this class creates itself, 0600 files written without following links."""
 
-    def __init__(self, directory, host):
-        super().__init__(directory)
+    def __init__(self, directory, host, secrets=None):
+        super().__init__(directory, secrets)
         self.host = host
 
     def ensure(self, directory):
-        """Create a records directory (the run directory itself or one level below it) as 0700 if it is missing, then
-        accept it only as ops_deploy_host.protected accepts a private directory: no link, root-owned, nothing for group
-        or others, along the whole path. A new directory is made durable in its parent."""
+        """Create a records directory (the run directory itself or one level below it, or the plan's secrets directory) as
+        0700 if it is missing, then accept it only as ops_deploy_host.protected accepts a private directory: no link,
+        root-owned, nothing for group or others, along the whole path. A new directory is made durable in its parent."""
         directory = Path(directory)
-        require(directory == self.directory or directory.parent == self.directory, "Records stay in the plan's run directory")
+        require(directory in (self.directory, self.secrets) or directory.parent == self.directory, "Records stay in the plan's run directory")
         try:
             os.mkdir(directory, 0o700)
             created = True
@@ -3836,7 +3935,7 @@ class HostRecords(Records):
 
     def discard(self, path):
         super().discard(path)
-        self.host.sync_dir(self.directory)
+        self.host.sync_dir(Path(path).parent)
 
 
 class IntroductionHost:
@@ -3918,7 +4017,7 @@ class IntroductionHost:
         # One use: a replayed request with the same bytes can never run a phase twice.
         host.write_secure(self.state / "emr-used" / (digest + ".json"), {"request_sha256": digest, "consumed_at": int(time.time())},
                           exclusive=True)
-        records = HostRecords(self.state / "emr-runs" / request["plan_sha256"], host)
+        records = HostRecords(self.state / "emr-runs" / request["plan_sha256"], host, secrets=self.state / "emr-secrets" / request["plan_sha256"])
         records.ensure(records.directory)
         runner = Runner(self.repository, fixed=True, base_env=host.ENV, owner=self.owner)
         token_file = self.policy["smoke"]["token_file"]
@@ -4155,12 +4254,38 @@ def product_session_check(page, spec):
     if sid is None:
         error = (parse_qs(urlsplit(page.url).query).get("auth_error") or [""])[0]
         raise Stop("The product sign-in did not open a session" + (" (" + re.sub(r"[^\w-]", "", error)[:40] + ")" if error else ""))
+    # IRT2-12: the session's own cookies (HttpOnly included) as the browser holds them before the logout, in memory only;
+    # after the logout they are sent again from outside the browser, so a server that only clears the cookie and keeps
+    # the session is caught (the browser itself no longer has the cookie to send).
+    jar = "; ".join(cookie["name"] + "=" + cookie["value"] for cookie in page.context.cookies([origin])
+                    if "/api/me".startswith(cookie.get("path") or "/"))
+    require(jar, "The product sign-in left no session cookie")
     browser_stage(page, "a neutral page", lambda: page.goto(origin + "/auth/realms/kin/.well-known/openid-configuration",
                                                              wait_until="domcontentloaded", timeout=60000))
     logout = browser_stage(page, "the product logout", lambda: page.evaluate(PRODUCT_LOGOUT_JS, sid))
-    bound = browser_stage(page, "the ended session", lambda: page.evaluate(PRODUCT_ME_JS, sid).get("status"))
-    cookie = browser_stage(page, "the ended session's cookie", lambda: page.evaluate(PRODUCT_ME_JS, None).get("status"))
-    return {"signed_in": True, "logout_status": logout, "old_session_status": bound, "old_cookie_status": cookie}
+    bound = session_replay(spec, {"Cookie": jar, "X-KIN-CSRF": "1", "X-KIN-Session": sid})
+    cookie_only = session_replay(spec, {"Cookie": jar, "X-KIN-CSRF": "1"})
+    return {"signed_in": True, "logout_status": logout, "old_session_status": bound, "old_cookie_status": cookie_only}
+
+
+def session_replay(spec, headers):
+    """GET /api/me sent again with the ended session's original cookie (and binding), from a separate connection - the
+    maintenance ingress when the spec names one, the origin's certificate checked as https_get does. Only the status
+    leaves this function."""
+    parsed = urlsplit(spec["origin"])
+    https = parsed.scheme == "https"
+    address, port = tuple(spec["connect"]) if spec.get("connect") else (parsed.hostname, parsed.port or (443 if https else 80))
+    if https:
+        connection = PinnedHTTPS(address, port, parsed.hostname, ssl.create_default_context(cafile=spec.get("ca_file")))
+    else:
+        connection = http.client.HTTPConnection(address, port, timeout=10)
+    try:
+        connection.request("GET", "/api/me", headers={"Host": parsed.netloc, "Accept": "application/json", **headers})
+        response = connection.getresponse()
+        response.read(65536)
+        return response.status
+    finally:
+        connection.close()
 
 
 # ── CLI helpers: no host change ──

@@ -1400,6 +1400,21 @@ def compose_config(target, *, project=None, recovery=None, names=None, workflow=
                          **{key: {"name": name, "external": True} for key, name in (extra_networks or {}).items()}}}
 
 
+def running_from(config, role, image_id):
+    """`docker inspect` of the container Compose made for one service of a config model (compose_config above): its
+    project and service labels, named volumes and binds, networks and published ports."""
+    service = config["services"][role]
+    mounts = [{"Type": "volume", "Name": config["volumes"][entry["source"]]["name"], "Destination": entry["target"]} if entry["type"] == "volume"
+              else {"Type": "bind", "Source": entry["source"], "Destination": entry["target"]} for entry in service.get("volumes") or []]
+    networks = {config["networks"][key]["name"]: {} for key in (service.get("networks") or {"default": None})}
+    bindings = {}
+    for port in service.get("ports") or []:
+        bindings.setdefault(str(port["target"]) + "/tcp", []).append({"HostIp": port.get("host_ip", ""), "HostPort": str(port["published"])})
+    return {"Image": image_id, "State": {"Running": True}, "Mounts": mounts, "NetworkSettings": {"Networks": networks},
+            "HostConfig": {"PortBindings": bindings},
+            "Config": {"Labels": {"com.docker.compose.project": config["name"], "com.docker.compose.service": role}, "Env": []}}
+
+
 class HostHarness:
     """HostOps against FakeDocker in a temporary rehearsal checkout with its seed copy and records."""
 
@@ -1827,7 +1842,7 @@ class CommanderAdditionsTests(HostHarness, unittest.TestCase):
         self.assertEqual(docker.calls[-1][:2], ["docker", "compose"])
         # The value itself only in the run directory's private values file (D04), never in a journal, result or command
         # record.
-        kept = self.records.directory / intro.COMPOSE_VALUES
+        kept = self.records.secrets / intro.COMPOSE_VALUES
         for path in self.records.directory.rglob("*"):
             if path.is_file() and path != kept:
                 self.assertNotIn(value.encode(), path.read_bytes(), path.name)
@@ -1868,7 +1883,7 @@ class CommanderAdditionsTests(HostHarness, unittest.TestCase):
         are the executor's record, and the member is gone before anything reopens."""
         ops_host, docker, context = self.unattended_host()
         member = ops_host.create_smoke_member(context, "release")
-        credentials = self.records.directory / member["credentials"]
+        credentials = self.records.secrets / member["credentials"]
         password = json.loads(credentials.read_text())["password"]
         if os.name == "posix":
             self.assertEqual(credentials.stat().st_mode & 0o777, 0o600)
@@ -1885,7 +1900,7 @@ class CommanderAdditionsTests(HostHarness, unittest.TestCase):
         intro.operator_smoke_valid(record, context.plan_sha256)
         self.assertEqual((record["by"], set(record["checks"])), ("Opus executor (D1062)", set(intro.OPERATOR_SMOKE_CHECKS)))
         self.assertTrue(all(record["checks"].values()) and result["record_sha256"] == context.state["operator_smoke"]["sha256"])
-        self.assertEqual(list(self.records.directory.glob("browser-profile-*")), [], "the browser profile is removed after the login")
+        self.assertEqual(list(self.records.secrets.glob("browser-profile-*")), [], "the browser profile is removed after the login")
         ops_host.remove_smoke_member(context)
         self.assertIsNotNone(context.state["smoke_member"]["deleted_at"])
         self.assertFalse(credentials.exists(), "the password does not outlive the member")
@@ -1938,7 +1953,7 @@ class CommanderAdditionsTests(HostHarness, unittest.TestCase):
         password file) behind: the earlier one is removed first."""
         ops_host, docker, context = self.unattended_host()
         first = ops_host.create_smoke_member(context, "release")
-        earlier = self.records.directory / first["credentials"]
+        earlier = self.records.secrets / first["credentials"]
         self.assertTrue(earlier.is_file())
         context.request_sha256 = "d" * 64
         second = ops_host.create_smoke_member(context, "previous")
@@ -2229,7 +2244,7 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
         plan = ops_host.plan
         context = self.context(plan)
         ops_host.prepare(context)
-        kept = self.records.directory / intro.COMPOSE_VALUES
+        kept = self.records.secrets / intro.COMPOSE_VALUES
         self.assertEqual(json.loads(kept.read_text()), {"KIN_MONITOR_PUBLIC_DIR": value})
         if os.name == "posix":
             self.assertEqual(kept.stat().st_mode & 0o777, 0o600)
@@ -2325,7 +2340,7 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
         self.assertEqual(json.loads((self.records.directory / "operator-smoke-attempt-1.json").read_text()), {"first": "attempt"})
         member = context.state["smoke_member"]
         self.assertEqual(len(member["client_ids"]), 2, "the retry made its own login client")
-        self.assertEqual(list(self.records.directory.glob("browser-profile-*")), [])
+        self.assertEqual(list(self.records.secrets.glob("browser-profile-*")), [])
         ops_host.remove_smoke_member(context)
         removal = next(call for call in docker.calls if any("kc-smoke-remove" in item for item in call))
         self.assertEqual(sorted(json.loads(removal[-1])["client_ids"]), sorted(member["client_ids"]))
@@ -2345,7 +2360,7 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
                 while process_alive(child) and time.monotonic() < deadline:
                     time.sleep(0.2)
                 self.assertFalse(process_alive(child), "the browser's child outlived the timeout")
-                self.assertEqual(list(self.records.directory.glob("browser-profile-*")), [])
+                self.assertEqual(list(self.records.secrets.glob("browser-profile-*")), [])
             self.setUp()
 
     def baseline_host(self, *, member=None, browser=None, realm=None):
@@ -2370,8 +2385,7 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
         docker.crontab = "".join("0 3 * * * /usr/bin/true # " + tag + "\n" for tag in target["cron"]["tags"])
         docker.image_labels = {"org.opencontainers.image.revision": plan["previous"]["sha"]}
         for role in intro.ROLES:
-            docker.containers[target["containers"][role]] = {"Image": plan["previous"]["images"][role], "State": {"Running": True},
-                                                             "Mounts": [], "Config": {"Labels": {}}}
+            docker.containers[target["containers"][role]] = running_from(docker.config["pinned"], role, plan["previous"]["images"][role])
         docker.psql = {"_prisma_migrations": json.dumps([[n, c, True, False] for n, c in plan["migrations"]["before"]]),
                        "rolconnlimit": json.dumps(pre_catalog()), "service_account_client_link": json.dumps(plan["members"]),
                        "parent_group": json.dumps(realm or {"roles": ["admin", "clinician", "radiologist"], "top_level_groups": ["hallym", "kin-center"]})}
@@ -2387,7 +2401,7 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
         detail = ops_host.baseline(context)
         self.assertEqual(detail["smoke_browser"]["browser"], "chromium fake")
         self.assertEqual(detail["smoke_member_realm"], {"roles": ["radiologist"], "group": "hallym"})
-        self.assertEqual(list(self.records.directory.glob("browser-probe-*")), [])
+        self.assertEqual(list(self.records.secrets.glob("browser-probe-*")), [])
         cases = {
             "no executable file": ({"browser": [str(self.root / "no-such-browser"), "browser-smoke"]}, "not an executable file"),
             "a browser that fails": ({"browser": [sys.executable, "-c", "import sys, json; print(json.dumps({'error': 'chromium missing'}), "
@@ -2407,7 +2421,7 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
                 # Nothing but L-01's own read-only Keycloak helper (a labelled one-shot, removed after its exit).
                 self.assertEqual([call for call in docker.mutating() if not any("kc-serverinfo" in item for item in call)], [],
                                  "L-01 changes nothing")
-                self.assertEqual(list(self.records.directory.glob("browser-probe-*")), [])
+                self.assertEqual(list(self.records.secrets.glob("browser-probe-*")), [])
 
     def test_99_a_declared_overlay_sits_right_after_docker_compose_prod_yml(self):
         """D09: production lists the overlay immediately after docker-compose.prod.yml (where Compose renders production's
@@ -2542,6 +2556,28 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
         self.assertEqual(outcomes["own pair, own CA"], "accepted")
         for name in ("a foreign key", "another authority"):
             self.assertIn("does not fit", outcomes[name], name)
+
+    def test_105_l01_compares_the_running_containers_with_the_checked_model(self):
+        """IRT2-02: same names and images, but a container on another project's volume, of another Compose project, on
+        another network or publishing another port is refused at L-01, with nothing changed; an image's own anonymous
+        volume is not a difference."""
+        ops_host, docker, context = self.baseline_host()
+        db = ops_host.t["containers"]["db"]
+        docker.containers[db]["Mounts"].append({"Type": "volume", "Name": "a" * 64, "Destination": "/var/lib/postgresql/extra"})
+        ops_host.baseline(context)
+        cases = {"a foreign volume": ("db", lambda item: item["Mounts"][0].__setitem__("Name", "pacs-old_pg-db"), "mounts"),
+                 "another project": ("api", lambda item: item["Config"]["Labels"].__setitem__("com.docker.compose.project", "other"), "project"),
+                 "another network": ("proxy", lambda item: item["NetworkSettings"]["Networks"].__setitem__("foreign_net", {}), "networks"),
+                 "another published port": ("orthanc", lambda item: item["HostConfig"]["PortBindings"].__setitem__("8042/tcp", [{"HostIp": "", "HostPort": "8042"}]),
+                                            "published ports"),
+                 "a bind elsewhere": ("orthanc", lambda item: item["Mounts"][1].__setitem__("Source", "/srv/other/orthanc.json"), "mounts")}
+        for name, (role, change, message) in cases.items():
+            self.setUp()
+            ops_host, docker, context = self.baseline_host()
+            change(docker.containers[ops_host.t["containers"][role]])
+            with self.subTest(case=name):
+                refuses(self, ops_host.baseline, context, message=message)
+                self.assertEqual([call for call in docker.mutating() if not any("kc-serverinfo" in item for item in call)], [])
 
     @unittest.skipUnless(shutil.which("node"), "needs node (the Linux root fixture has it)")
     def test_98_keycloak_readiness_waits_for_200_and_a_refused_administrator_stops_at_once(self):
@@ -2704,7 +2740,7 @@ class RoundThreeMachineTests(MachineHarness, unittest.TestCase):
         """D05/D06: warnings handed to a phase (the entry's) or recorded by its steps are in its result, its result file
         and its phase-start record. D04: the private values file is kept while the plan runs and removed when it ends."""
         self.deploy_through("introduce")
-        values = self.records.directory / intro.COMPOSE_VALUES
+        values = self.records.secret(intro.COMPOSE_VALUES)
         values.write_text('{"KIN_MONITOR_PUBLIC_DIR":"/srv/x"}\n')
         machine = self.machine({})
         machine.warnings = [{"kind": "checkout-mode", "reason": "A path component is writable by others", "modes": {"checkout": "0o775"}}]
@@ -2960,8 +2996,7 @@ class ProtectedHostTests(unittest.TestCase):
         docker.crontab = "".join("0 3 * * * /usr/bin/true # " + tag + "\n" for tag in target["cron"]["tags"])
         docker.image_labels = {"org.opencontainers.image.revision": plan["previous"]["sha"]}
         for role in intro.ROLES:
-            docker.containers[target["containers"][role]] = {"Image": plan["previous"]["images"][role], "State": {"Running": True},
-                                                             "Mounts": [], "Config": {"Labels": {}}}
+            docker.containers[target["containers"][role]] = running_from(docker.config["pinned"], role, plan["previous"]["images"][role])
         docker.psql = {"_prisma_migrations": json.dumps([[n, c, True, False] for n, c in plan["migrations"]["before"]]),
                        "rolconnlimit": json.dumps(pre_catalog()), "service_account_client_link": json.dumps(plan["members"]),
                        "parent_group": json.dumps({"roles": ["radiologist"], "top_level_groups": ["hallym"]})}

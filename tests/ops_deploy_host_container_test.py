@@ -770,7 +770,7 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         self.assertTrue(all(record["checks"].values()))
         realm_smoke = "SELECT count(*) FROM user_entity u JOIN realm r ON r.id=u.realm_id WHERE r.name='kin' AND u.username LIKE 'kin-smoke-%';"
         self.assertEqual(clone.psql(realm_smoke, "keycloak"), "0", "the smoke member is gone before any reopen")
-        self.assertEqual(list(clone.records.directory.glob("smoke-member-*.json")), [], "its password is gone with it")
+        self.assertEqual(list(clone.records.secrets.glob("smoke-member-*.json")), [], "its password is gone with it")
 
         def halo_wired(stage):
             """IRT-11: every proxy (re)creation used the declared file set: the overlay's bind and network are there."""
@@ -787,7 +787,7 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         reopened = clone.phase("rollback_reopen", "ROLLED_BACK")
         halo_wired("previous proxy after the rollback")
         self.assertEqual(clone.psql(realm_smoke, "keycloak"), "0")
-        self.assertEqual(list(clone.records.directory.glob("smoke-member-*.json")), [])
+        self.assertEqual(list(clone.records.secrets.glob("smoke-member-*.json")), [])
         self.assertTrue(json.loads((clone.records.directory / "operator-smoke-previous.json").read_text())["passed"])
         self.assertEqual([step["outcome"] for step in reopened["steps"]], ["PASS"] * len(intro.STEPS["rollback_reopen"]))
         state = json.loads((clone.records.directory / "state.json").read_text())
@@ -882,7 +882,7 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         stack.phase("capture", "HELD")
         state = json.loads((stack.records.directory / "state.json").read_text())
         self.assertEqual(state["compose_env"]["KIN_MONITOR_PUBLIC_DIR"]["from"], ["mount:proxy"])
-        self.assertTrue((stack.records.directory / intro.COMPOSE_VALUES).is_file())
+        self.assertTrue((stack.records.secrets / intro.COMPOSE_VALUES).is_file())
         overlay = Path(stack.target["declared_overlays"][0]["file"])
         declared = overlay.read_bytes()
 
@@ -909,7 +909,7 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         reopened = stack.phase("rollback_reopen", "ROLLED_BACK")
         self.assertEqual([warning["kind"] for warning in reopened["warnings"]], ["declared-overlay"])
         self.assertEqual(json.loads(stack.psql(LEGACY_FACTS_SQL)), legacy, "the rollback keeps the further roles, owners and grants")
-        self.assertFalse((stack.records.directory / intro.COMPOSE_VALUES).exists(), "the kept values end with the plan")
+        self.assertFalse((stack.records.secrets / intro.COMPOSE_VALUES).exists(), "the kept values end with the plan")
         self.assertEqual(inspect(stack.target["containers"]["api"])["Image"], images["previous"]["api"])
         print(json.dumps({"forced_l09b_failure": "RESTORED then ROLLED_BACK", "warnings": introduced["warnings"],
                           "kept_value_used": True, "legacy_roles": legacy}), flush=True)

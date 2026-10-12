@@ -143,6 +143,32 @@ class RotationTests(unittest.TestCase):
         self.assertTrue((self.root.path / daily(2) / "orthanc.tgz").is_file(), "an undeclared checkpoint keeps its whole set")
         self.assertEqual(self.rotate()["thinned"], [])
 
+    def test_17_a_set_that_became_incomplete_after_the_plan_is_neither_deleted_nor_thinned(self):
+        """IRT2-21: right before a deletion or a thinning the set is checked whole again (files, sizes, SHA-256); one that
+        lost a component or changed one since the plan stays, with the reason, and the other planned sets go."""
+        for day in range(1, 12):
+            self.root.daily(daily(day), checkpoint=day == 4)
+        self.ledger(daily(4))
+        original = ops._rotation_plan
+
+        def plan_then_damage(*args):
+            planned = original(*args)
+            self.assertEqual((planned["delete"], planned["thin"]), ([daily(1), daily(2), daily(3)], [daily(4)]))
+            (self.root.path / daily(1) / "kin.dump").unlink()
+            (self.root.path / daily(2) / "keycloak.dump").write_bytes(b"changed after the plan")
+            (self.root.path / daily(4) / "kin.dump").unlink()
+            return planned
+        with patch.object(ops, "_rotation_plan", side_effect=plan_then_damage):
+            result = self.rotate()
+        self.assertEqual(result["deleted"], [daily(3)])
+        self.assertEqual(result["thinned"], [])
+        self.assertTrue(result["retained"][daily(1)].startswith("incomplete before deletion: component missing: kin.dump"))
+        self.assertTrue(result["retained"][daily(2)].startswith("incomplete before deletion: component differs: keycloak.dump"))
+        self.assertTrue(result["retained"][daily(4)].startswith("incomplete before thinning"))
+        for day in (1, 2, 4):
+            self.assertTrue((self.root.path / daily(day)).is_dir())
+        self.assertTrue((self.root.path / daily(4) / "orthanc.tgz").is_file())
+
     def test_13_an_interrupted_deletion_is_rejudged_and_kept_when_anything_protects_it(self):
         """IRT-09: a .rotating-<name> left by an interrupted run is judged again by its original name and its folder."""
         for day in range(10, 18):
