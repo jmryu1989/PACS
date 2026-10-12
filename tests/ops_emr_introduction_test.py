@@ -3064,6 +3064,31 @@ class RoundThreeMachineTests(MachineHarness, unittest.TestCase):
         self.assertFalse(intro.observed({"running": {"db": image("3")}, "migrations": {"unobservable": "RuntimeError"}}))
         self.assertTrue(intro.observed({"running": {"db": None}, "migrations": {"unobservable": "RuntimeError"}}))
 
+    def test_116_browser_profiles_a_crash_left_go_at_the_next_phase_start(self):
+        """IRT2-15: a browser profile folder (its session cookies) that a killed process left in the secrets directory is
+        removed when the next phase starts, the count recorded, nothing of its contents; a link there is removed without
+        following it; other secrets (the kept values) stay."""
+        left = self.records.secret("browser-profile-0123abcd")
+        left.mkdir()
+        (left / "Cookies").write_bytes(b"synthetic cookie store")
+        outside = self.root / "outside-profile"
+        outside.mkdir()
+        (outside / "keep").write_text("x")
+        linked = self.records.secrets / "browser-probe-89abcdef"
+        if os.name == "posix":
+            linked.symlink_to(outside, target_is_directory=True)
+        values = self.records.secret(intro.COMPOSE_VALUES)
+        values.write_text("{}\n")
+        self.assertEqual(self.run_phase("capture")["status"], "HELD")
+        self.assertFalse(left.exists())
+        self.assertFalse(os.path.lexists(linked))
+        self.assertTrue((outside / "keep").exists(), "a link is never followed")
+        self.assertTrue(values.exists())
+        journal = [json.loads(line) for line in (self.records.directory / "journal.jsonl").read_text().splitlines()]
+        swept = [entry for entry in journal if entry["event"] == "secrets-swept"]
+        self.assertEqual([entry["browser_profiles"] for entry in swept], [2 if os.name == "posix" else 1])
+        self.assertNotIn("synthetic cookie store", (self.records.directory / "journal.jsonl").read_text())
+
     def test_94_recovery_warnings_are_in_the_result_and_the_kept_values_end_with_the_plan(self):
         """D05/D06: warnings handed to a phase (the entry's) or recorded by its steps are in its result, its result file
         and its phase-start record. D04: the private values file is kept while the plan runs and removed when it ends."""

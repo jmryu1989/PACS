@@ -1003,6 +1003,23 @@ class Records:
     def discard_secret(self, name):
         self.discard(self.secrets / name)
 
+    def sweep_working_folders(self):
+        """IRT2-15: browser profile folders (cookies of a session) that a crashed or killed process left in the secrets
+        directory go at the next phase start and at the plan's end; a link there is removed, never followed. Returns how
+        many went (the count is recorded, nothing of their contents)."""
+        if not self.secrets.is_dir():
+            return 0
+        swept = 0
+        for item in sorted(self.secrets.iterdir()):
+            if not re.fullmatch(r"browser-(?:profile|probe)-[0-9a-f]{8}", item.name):
+                continue
+            if item.is_symlink() or not item.is_dir():
+                item.unlink()
+            else:
+                shutil.rmtree(item)
+            swept += 1
+        return swept
+
 
 # ── the shared operations lock, retained between phases ──
 
@@ -1460,6 +1477,7 @@ class Introduction:
             self.state["lock_token"] = None
             # D04: the plan ended; the resolved compose values it kept for its later phases are not kept beyond it.
             self.records.discard_secret(COMPOSE_VALUES)
+            self.records.sweep_working_folders()
         written = {"steps": self.steps, "status": status, "phase": self.phase, "request_sha256": self.request_sha256,
                    "plan_sha256": self.plan_sha256, "commands_file": self.records.commands_file}
         if self.warnings:
@@ -1526,6 +1544,9 @@ class Introduction:
         self.event("phase-start", request_sha256=self.request_sha256,
                    **({"receipt_sha256": claimed, "receipt_clock": self.receipt_facts} if claimed else {}),
                    **({"warnings": list(self.warnings)} if self.warnings else {}))
+        swept = self.records.sweep_working_folders()
+        if swept:
+            self.event("secrets-swept", browser_profiles=swept)
         if self.phase in ("capture", "seed"):
             # A new exclusive lock; a competing backup, rehearsal or API-only deployment cannot hold it meanwhile.
             try:
