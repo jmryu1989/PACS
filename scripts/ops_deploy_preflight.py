@@ -196,6 +196,9 @@ def check_baseline(observed, plan):
     require(not any(observed["restarting"].values()), "A service is restarting")
     check_migration_rows(observed["migrations"], plan["migrations"]["before"])
     require(not emr_storage_present(observed["catalog"]), "EMR storage already exists on the source")
+    # A B0 the rollback could not rebuild exactly (a further LOGIN role, role settings, another database or tablespace)
+    # is refused here, before the fence or any capture.
+    ops.supported_pre_catalog(observed["catalog"])
     require(observed["emr_volumes"] == [], "EMR volumes already exist on the source")
     require(observed["api_state_mounts"] == 0, "The previous API already has an EMR state mount")
     require(observed["cron"] in ("matched", "not-managed"), "Scheduled jobs differ from the target manifest")
@@ -335,28 +338,54 @@ def check_keycloak_serverinfo(selected):
     require(selected.get("persistentUserSessions") is True, "Keycloak persistent user sessions are not on")
 
 
+def expected_member_rights(user, isolated, unconfirmed):
+    """The row the product's import (api/src/member-rights-import.ts importMemberRights) writes for one realm member:
+    the realm roles within APP_ROLES; approved only with exactly one group (the institution), at least one such role and
+    no gateway role; an unapproved member holds no institution and no roles; suspended when the realm account is
+    disabled, the member is isolated or a disable/enable of it is unconfirmed."""
+    roles = sorted(role for role in user["roles"] if role in APP_ROLES)
+    approved = len(user["groups"]) == 1 and bool(roles) and "gateway" not in user["roles"]
+    return {"username": user["username"], "approved": approved, "institution": user["groups"][0] if approved else None,
+            "roles": roles if approved else [],
+            "suspended": user["enabled"] is not True or user["id"] in isolated or user["id"] in unconfirmed}
+
+
 def check_member_import(observed):
-    """realm-v1: one marker, ready, every realm member imported once, each row consistent with its realm facts, every
-    legacy-enable publication confirmed and reflected in the realm; service accounts are never members."""
+    """realm-v1: one marker, ready, every realm member imported once with exactly the rights the product's rule gives
+    its realm facts (identity, institution, every role, approval, suspension), every legacy-enable publication confirmed
+    and no provider change left unconfirmed; and the realm itself unchanged by the import except those confirmed
+    enables (the same members, names, groups and roles, the same realm role and group definitions)."""
     require(observed["markers"] == ["realm-v1"] and observed["state"] == "ready", "Member rights import marker missing")
     roster = {user["id"]: user for user in observed["roster_before"]}
+    require(len(roster) == len(observed["roster_before"]), "The realm roster lists a member twice")
     rows = {row["sub"]: row for row in observed["rights"]}
     require(len(rows) == len(observed["rights"]) and set(rows) == set(roster), "Imported members differ from the realm members")
+    changes = observed["changes"]
+    isolated = set(observed["isolated"])
+    unconfirmed = {change["sub"] for change in changes if change["kind"] in ("disable", "enable") and change["state"] == "unknown"}
     for sub, row in rows.items():
-        user = roster[sub]
-        require(row["username"] == user["username"], "An imported member identity differs")
-        if row["approved"]:
-            require(user["groups"] == [row["institution"]] and row["roles"] and set(row["roles"]) <= set(user["roles"])
-                    and set(row["roles"]) <= set(APP_ROLES), "An imported member's institution or roles differ")
-        else:
-            require(row["institution"] is None and row["roles"] == [], "An unapproved member holds rights")
-        require(row["suspended"] or user["enabled"], "A disabled member was imported as active")
+        actual = {"username": row["username"], "approved": row["approved"], "institution": row["institution"],
+                  "roles": sorted(row["roles"]), "suspended": row["suspended"]}
+        require(actual == expected_member_rights(roster[sub], isolated, unconfirmed),
+                "An imported member's rights differ from the realm (identity, institution, roles, approval or suspension)")
     legacy = {change["sub"]: change for change in observed["legacy_enable"]}
     disabled = {sub for sub, user in roster.items() if not user["enabled"]}
     require(set(legacy) == disabled and len(legacy) == len(observed["legacy_enable"]), "Legacy enable intents differ from disabled members")
     require(all(change["state"] == "done" for change in legacy.values()), "A roster publication is unconfirmed")
+    require(all(change["kind"] != "credentials" or change["target"] == "legacy-enable:" + str(change["sub"]) for change in changes),
+            "The import left a roster change other than the legacy enables")
+    require(not any(change["state"] == "unknown" for change in changes), "A provider change is unconfirmed")
     after = {user["id"]: user for user in observed["roster_after"]}
-    require(all(after.get(sub, {}).get("enabled") is True for sub in legacy), "A confirmed legacy enable is not in the realm")
+    require(set(after) == set(roster) and len(after) == len(observed["roster_after"]), "Realm members were added or removed during the import")
+    for sub, user in roster.items():
+        other = after[sub]
+        require(other["username"] == user["username"] and sorted(other["groups"]) == sorted(user["groups"])
+                and sorted(other["roles"]) == sorted(user["roles"]), "A realm member's name, groups or roles changed during the import")
+        if sub in legacy:
+            require(user["enabled"] is False and other["enabled"] is True, "A confirmed legacy enable is not in the realm")
+        else:
+            require(other["enabled"] == user["enabled"], "A realm member's enabled state changed without a legacy enable")
+    require(observed["realm_before"] == observed["realm_after"], "Realm roles or groups changed during the import")
     require(all(rows[sub]["suspended"] for sub in disabled), "A legacy-disabled member lost its PACS suspension")
 
 

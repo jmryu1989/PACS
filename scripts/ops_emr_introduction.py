@@ -18,17 +18,22 @@ Phases, one request each (a phase may only follow the one before it):
   verify     L-10 fenced HTTPS smoke, the one-shot EMR probe (scripts/ops_emr_probe.py), post-EMR capture B1 with the
              writers held, and B1's same-point restore check into fresh isolated volumes.
   reopen     L-11 final allowlist, jobs restored, public ingress (the point of no return is recorded first).
-  rollback   RB-00..RB-04: refused while a one-shot worker may be alive; failed state preserved (Bfail); B0 restored
-             into FRESH recovery volumes (kin + keycloak at the same point, Orthanc index + files together); previous
-             images, compose and env; failed EMR volumes kept with their identifiers.
+  rollback   RB-00..RB-03: refused while a one-shot worker may be alive; failed state preserved (Bfail); B0 restored
+             into FRESH recovery volumes of a recovery Compose project that the checkout's .env then names (kin +
+             keycloak at the same point with their roles, owners and privileges, Orthanc index + files together);
+             previous images; failed volumes kept detached with their identifiers. Ends RESTORED, still fenced.
+  rollback_reopen  RB-04: the ordinary compose resolution is the recovery mapping; the previous version's own login
+             (made after the restore), worklist and frame bytes through the maintenance ingress; then jobs and ingress.
   seed       rehearsal targets only: a verified B0 copy restored into the disposable clone, with clone-only secrets.
   receipt    rehearsal targets only: the local-restore receipt (replaces the offsite-restore proof while the external
-             backup stays OFF) that production's introduce requires.
+             backup stays OFF) that production's introduce requires, once, for the production plan it names.
 
 A settled failure after the first database change rolls back automatically only when every one-shot worker of this
 release has ended and the public ingress was never reopened; a timeout or any other unknown end retains the lock and
-stops (NEEDS_ATTENTION) without rollback. Secrets are read only into memory; logs and records carry names, modes,
-hashes and exits, never values.
+stops (NEEDS_ATTENTION) without rollback. One phase of a plan runs at a time (an OS lease the kernel frees with a dead
+process); a phase that never recorded its end is classified NEEDS_ATTENTION, never re-run. Every step records the host
+before and after it and every command it ran (commands-<phase>-<request>.jsonl). Secrets are read only into memory;
+logs and records carry names, modes, hashes and exits, never values.
 
 CLI helpers (no host change): example, check-plan, prepare-env, compose-digest, rehearsal-override, verify-receipt.
 """
@@ -36,7 +41,7 @@ from __future__ import annotations
 
 import argparse
 import base64
-from contextlib import contextmanager, redirect_stdout
+from contextlib import contextmanager, nullcontext, redirect_stdout
 from datetime import datetime, timedelta, timezone
 import hashlib
 import http.client
@@ -52,7 +57,7 @@ import ssl
 import subprocess
 import sys
 import time
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 import uuid
 
 import ops_backup as ops
@@ -64,10 +69,14 @@ TABLESPACE = "/var/lib/postgresql/emr-access/ts"
 ROLES = ("db", "api", "keycloak", "orthanc", "proxy")
 ONE_SHOTS = ("emr-provision", "api-migrate")
 WRITERS = pre.WRITERS
+EMR_STATE_DIR = ops.EMR_STATE
 FENCE_ORDER = ("proxy", "api", "keycloak", "orthanc")
 RESUME_ORDER = ("orthanc", "keycloak", "api", "proxy")
 VOLUMES = ("pg", "orthanc", "emr_access", "emr_state")
-PHASES = ("capture", "release", "introduce", "verify", "reopen", "rollback", "seed", "receipt")
+PHASES = ("capture", "release", "introduce", "verify", "reopen", "rollback", "rollback_reopen", "seed", "receipt")
+RECEIPT_PHASES = ("seed", "capture", "introduce", "verify", "rollback", "rollback_reopen")
+RECEIPT_MAX_AGE = timedelta(days=7)
+CLOCK_SKEW = timedelta(minutes=5)
 HASH, SHA, IMAGE = pre.HASH, pre.SHA, pre.IMAGE
 NONCE = re.compile(r"[0-9a-f]{32}")
 UUID4 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
@@ -186,7 +195,8 @@ def migrations_valid(value):
 
 PLAN_KEYS = ("schema", "mode", "unit", "target_kind", "target_manifest_sha256", "previous", "release", "compose", "secrets",
              "migrations", "storage", "members", "smoke", "probe", "window", "budget", "backup_root", "tool", "seed",
-             "projection_exempt")
+             "projection_exempt", "rehearsal_host")
+FRAME_PATH = re.compile(r"/dicom-web/studies/([0-9.]{1,64})/series/[0-9.]{1,64}/instances/[0-9.]{1,64}/frames/[1-9][0-9]{0,7}")
 
 
 def plan_valid(plan):
@@ -231,16 +241,14 @@ def plan_valid(plan):
     for key in members:
         _int(members[key], 0, 100000, key)
     require(members["disabled"] <= members["realm_members"], "Invalid member expectation")
+    # Every target reads one real frame of a study that exists in B0: the forward smoke of the new release and the
+    # previous-version smoke after a rollback (login, worklist UID, frame bytes) both bind to it.
     smoke = _keys(plan["smoke"], ("frame",), "smoke")
-    if smoke["frame"] is not None:
-        frame = _keys(smoke["frame"], ("path", "bytes", "sha256"), "smoke frame")
-        require(type(frame["path"]) is str and re.fullmatch(
-            r"/dicom-web/studies/[0-9.]{1,64}/series/[0-9.]{1,64}/instances/[0-9.]{1,64}/frames/[1-9][0-9]{0,7}", frame["path"]),
-            "Invalid smoke frame path")
-        _int(frame["bytes"], 1, 16 * 1024 * 1024, "smoke frame bytes")
-        _str(frame["sha256"], HASH, "smoke frame hash")
-    if plan["target_kind"] == "production":
-        require(smoke["frame"] is not None, "A production smoke reads a real frame")
+    require(smoke["frame"] is not None, "A smoke reads a real frame")
+    frame = _keys(smoke["frame"], ("path", "bytes", "sha256"), "smoke frame")
+    require(type(frame["path"]) is str and FRAME_PATH.fullmatch(frame["path"]), "Invalid smoke frame path")
+    _int(frame["bytes"], 1, 16 * 1024 * 1024, "smoke frame bytes")
+    _str(frame["sha256"], HASH, "smoke frame hash")
     probe = _keys(plan["probe"], ("study", "event_id", "institution", "approved_by", "approved_at"), "probe")
     require(type(probe["study"]) is str and re.fullmatch(r"SYNTHETIC-[A-Za-z0-9.-]{1,64}", probe["study"]), "Probe study must be a synthetic selector")
     _str(probe["event_id"], UUID4, "probe event ID")
@@ -261,22 +269,40 @@ def plan_valid(plan):
     for key in TOOL_FILES:
         _str(plan["tool"][key], HASH, "tool hash")
     if plan["target_kind"] == "rehearsal":
-        seed = _keys(plan["seed"], ("b0_dir", "b0_manifest_sha256"), "seed")
+        # The rehearsal names the production plan it rehearses (its identity, fixed before the production capture) and
+        # the verified copy of that production attempt's B0; its receipt is only ever valid for exactly that pair.
+        seed = _keys(plan["seed"], ("b0_dir", "b0_manifest_sha256", "production_plan_sha256"), "seed")
         _abs(seed["b0_dir"], "seed B0 directory")
         _str(seed["b0_manifest_sha256"], HASH, "seed B0 manifest hash")
+        _str(seed["production_plan_sha256"], HASH, "rehearsed production plan")
+        require(plan["rehearsal_host"] is None, "A rehearsal plan names no rehearsal host")
     else:
         require(plan["seed"] is None, "Only a rehearsal plan seeds from a B0 copy")
+        # The one disposable host whose local-restore receipt production accepts (its ed25519 key fingerprint).
+        _str(plan["rehearsal_host"], HASH, "rehearsal host key")
     exempt = plan["projection_exempt"]
     require(type(exempt) is list and all(type(name) is str and ops.RESOURCE_NAME.fullmatch(name) for name in exempt), "Invalid projection exemptions")
     return plan
 
 
 def plan_core(plan):
-    """What a rehearsal must have rehearsed: the same release, history, storage and secret roles (not host specifics)."""
+    """What a rehearsal must have rehearsed: the same release, history, storage, secret roles and smoke frame (not host
+    specifics)."""
     secrets = plan["secrets"]
     return sha256_bytes(canonical({"previous": plan["previous"], "release": plan["release"], "migrations": plan["migrations"],
                                    "storage": plan["storage"], "members": plan["members"], "probe_study": plan["probe"]["study"],
+                                   "smoke_frame": plan["smoke"]["frame"],
                                    "secrets": {key: secrets[key] for key in ("required", "absent", "runtime", "installer", "logins")}}))
+
+
+def plan_identity(plan):
+    """The identity of one plan document (its canonical form): what a rehearsal names as the production plan it rehearses."""
+    return sha256_bytes(canonical(plan))
+
+
+def frame_study(plan):
+    """The worklist UID the smoke expects: the study of the plan's smoke frame."""
+    return FRAME_PATH.fullmatch(plan["smoke"]["frame"]["path"]).group(1)
 
 
 TARGET_KEYS = ("schema", "kind", "host_key_sha256", "origin", "project", "repository", "compose_files", "containers",
@@ -364,19 +390,59 @@ def check_target(target, production, kind, local_host_key):
         require(not set(target[group].values()) & set(production[group].values()), "Rehearsal reuses a production " + group[:-1] + " name")
 
 
-def check_resolved(model, target, *, target_checkout):
-    """The resolved Compose model (selected fields only) assigns exactly the manifest's names."""
-    require(model["project"] == target["project"], "Resolved compose project differs")
+def check_resolved(model, target, *, target_checkout, maintenance=None, images=None, recovery=None):
+    """The resolved Compose model (selected, secret-free fields) is exactly the manifest's target before anything uses it:
+    project, container names, every named volume (and which service mounts which at which path), networks, published
+    ports (proxy only on the planned ingress, any other service on loopback only), origin settings and, when the caller
+    pins them, images. A rehearsal binds nothing outside its own checkout. recovery: after a rollback the project and
+    the pg/Orthanc volumes are the recovery ones."""
+    project = recovery["project"] if recovery else target["project"]
+    require(model["project"] == project, "Resolved compose project differs")
     expected = {role: target["containers"][role] for role in ROLES}
     if target_checkout:
         expected.update({name: target["containers"][name] for name in ONE_SHOTS})
     require(model["containers"] == expected, "Resolved container names differ from the target manifest")
-    volumes = {"pg-db": target["volumes"]["pg"], "orthanc-db": target["volumes"]["orthanc"]}
+    volumes = {"pg-db": recovery["pg"] if recovery else target["volumes"]["pg"],
+               "orthanc-db": recovery["orthanc"] if recovery else target["volumes"]["orthanc"]}
     if target_checkout:
         volumes.update({"emr-access": target["volumes"]["emr_access"], "emr-state": target["volumes"]["emr_state"]})
     require(all(model["volumes"].get(key) == name for key, name in volumes.items()), "Resolved volume names differ")
-    require(model["networks"].get("default") == target["networks"]["default"]
-            and model["networks"].get("workflow") == target["networks"]["workflow"], "Resolved network names differ")
+    # Any other declared volume belongs to this project (or the original project's own certificate volume of a clone).
+    prefixes = tuple({target["project"] + "_", project + "_"})
+    require(all(name in volumes.values() or (type(name) is str and name.startswith(prefixes)) for name in model["volumes"].values()),
+            "A resolved volume belongs to another project")
+    networks = {"default": project + "_default" if recovery else target["networks"]["default"], "workflow": target["networks"]["workflow"]}
+    require(model["networks"] == networks, "Resolved network names differ")
+    mounts = {"db": {"/var/lib/postgresql/data": "pg-db"}, "orthanc": {"/var/lib/orthanc/db": "orthanc-db"}}
+    if target_checkout:
+        mounts["db"]["/var/lib/postgresql/emr-access"] = "emr-access"
+        mounts["api"] = {EMR_STATE_DIR: "emr-state"}
+    for role in expected:
+        named = {entry["target"]: entry["source"] for entry in model["mounts"].get(role, []) if entry["type"] == "volume"}
+        require(all(named.get(path) == key for path, key in mounts.get(role, {}).items()), "Resolved mounts differ: " + role)
+        require(set(named.values()) <= set(model["volumes"]), "A resolved mount names an undeclared volume: " + role)
+        if target["kind"] == "rehearsal":
+            # Drive-letter paths (a Windows rehearsal host) compare without regard to case, as that file system does.
+            fold = (lambda text: text.lower()) if PureWindowsPath(target["repository"]).drive else (lambda text: text)
+            repository = PurePosixPath(fold(target["repository"].replace("\\", "/")))
+            for entry in model["mounts"].get(role, []):
+                if entry["type"] == "bind":
+                    source = PurePosixPath(fold(str(entry["source"]).replace("\\", "/")))
+                    require(source == repository or repository in source.parents, "A rehearsal binds a host path outside its checkout: " + role)
+    for role, ports in model["ports"].items():
+        if role == "proxy":
+            wanted = [target["ports"]["maintenance"]] if maintenance else list(target["ports"]["public"])
+            require(sorted(ports) == sorted(wanted), "Resolved proxy ports differ from the planned ingress")
+        else:
+            require(all(port.startswith("127.0.0.1:") for port in ports), "A resolved service publishes a port beyond loopback: " + role)
+    origin = target["origin"]
+    # A clone must never carry the production origin; production's own PUBLIC_ORIGIN line is Phase P's observation (G04).
+    require(model["origin"].get("api_KC_ISSUER") == origin + "/auth/realms/kin"
+            and model["origin"].get("keycloak_KC_HOSTNAME") == origin + "/auth"
+            and (target["kind"] == "production" or model["origin"].get("api_PUBLIC_ORIGIN") == origin),
+            "Resolved origin settings differ from the target")
+    if images is not None:
+        require(all(model["images"].get(role) == images[role] for role in ROLES), "Resolved images differ from the plan")
 
 
 REQUEST_KEYS = ("version", "mode", "phase", "plan_sha256", "nonce")
@@ -422,23 +488,95 @@ def approval_valid(approval, request_sha256, phase, now, kind="production"):
     return approval
 
 
-def receipt_valid(receipt, plan, b0_manifest_sha256, production):
-    """A local-restore receipt is a rehearsal's own record (kind, phases, hashes); it is never an offsite claim."""
-    _keys(receipt, ("schema", "kind", "passed", "plan_core_sha256", "rehearsal_plan_sha256", "source_b0_manifest_sha256",
-                    "rehearsal_b0_manifest_sha256", "rehearsal_b1_manifest_sha256", "tool", "host_key_sha256", "phases",
-                    "created_utc"), "local-restore receipt")
-    require(receipt["schema"] == 1 and receipt["kind"] == "local-restore" and receipt["passed"] is True, "Receipt is not a passed local restore")
+RECEIPT_KEYS = ("schema", "kind", "passed", "receipt_id", "plan_core_sha256", "production_plan_sha256", "rehearsal_plan_sha256",
+                "rehearsal_target_manifest_sha256", "source_b0_manifest_sha256", "rehearsal_b0_manifest_sha256",
+                "rehearsal_b1_manifest_sha256", "bfail_manifest_sha256", "tool", "host_key_sha256", "phases", "evidence",
+                "journal_sha256", "journal_bytes", "created_utc")
+
+
+def receipt_sha256(receipt):
+    return sha256_bytes(canonical(receipt))
+
+
+def receipt_valid(receipt, plan, b0_manifest_sha256, production, *, now=None, b0_created_utc=None, used=()):
+    """A local-restore receipt is the rehearsal's own run record, never an offsite claim. It is accepted only for the
+    production plan it names, on the rehearsal host that plan allows, for this production attempt's B0, within its
+    freshness window and once (used: the receipts this plan already admitted). Every rehearsal phase must carry its
+    exact step list (all PASS), its request and its result file's hash; the artifacts it names (B0, B1 and its restore
+    check, the probe, Bfail, the recovery volumes and the previous-version smoke over this plan's frame) must agree
+    with each other. Anything short of that is a refusal before any change."""
+    _keys(receipt, RECEIPT_KEYS, "local-restore receipt")
+    require(receipt["schema"] == 2 and receipt["kind"] == "local-restore" and receipt["passed"] is True, "Receipt is not a passed local restore")
+    _str(receipt["receipt_id"], NONCE, "receipt ID")
+    for key in ("plan_core_sha256", "production_plan_sha256", "rehearsal_plan_sha256", "rehearsal_target_manifest_sha256",
+                "source_b0_manifest_sha256", "rehearsal_b0_manifest_sha256", "rehearsal_b1_manifest_sha256", "bfail_manifest_sha256",
+                "host_key_sha256", "journal_sha256"):
+        _str(receipt[key], HASH, "receipt hash")
+    _int(receipt["journal_bytes"], 1, 2 ** 40, "receipt journal length")
     require(receipt["plan_core_sha256"] == plan_core(plan), "Receipt rehearsed another release")
+    require(plan["target_kind"] == "production" and receipt["production_plan_sha256"] == plan_identity(plan),
+            "Receipt was made for another production plan")
     require(receipt["source_b0_manifest_sha256"] == b0_manifest_sha256, "Receipt rehearsed another B0 snapshot")
     require(receipt["tool"] == plan["tool"], "Receipt was produced by another tool")
     require(receipt["host_key_sha256"] != production["host_key_sha256"], "Receipt was produced on the production host")
+    require(receipt["host_key_sha256"] == plan["rehearsal_host"], "Receipt comes from a host the plan does not allow")
+    created, now = parse_utc(receipt["created_utc"]), now or utc_now()
+    require(created <= now + CLOCK_SKEW, "Receipt is dated in the future")
+    require(now - created <= RECEIPT_MAX_AGE, "Receipt is stale")
+    if b0_created_utc is not None:
+        require(created >= parse_utc(b0_created_utc), "Receipt predates the B0 snapshot it rehearsed")
     phases = receipt["phases"]
-    require(type(phases) is dict and set(phases) == {"seed", "capture", "introduce", "verify", "rollback"}
-            and all(type(item) is dict and item.get("status") == "PASS" for item in phases.values()), "Receipt phases incomplete")
-    for key in ("rehearsal_plan_sha256", "rehearsal_b0_manifest_sha256", "rehearsal_b1_manifest_sha256"):
-        _str(receipt[key], HASH, "receipt hash")
-    parse_utc(receipt["created_utc"])
+    require(type(phases) is dict and set(phases) == set(RECEIPT_PHASES), "Receipt phases incomplete")
+    requests = []
+    for phase in RECEIPT_PHASES:
+        item = _keys(phases[phase], ("request_sha256", "result_sha256", "seconds", "steps"), "receipt phase")
+        _str(item["request_sha256"], HASH, "receipt phase request")
+        _str(item["result_sha256"], HASH, "receipt phase result")
+        require(type(item["seconds"]) in (int, float) and item["seconds"] >= 0, "Invalid receipt phase duration")
+        require(item["steps"] == [[sid, "PASS"] for sid, _, _, _ in STEPS[phase]], "Receipt phase did not pass every step: " + phase)
+        requests.append(item["request_sha256"])
+    require(len(set(requests)) == len(requests), "Receipt phases reuse one request")
+    evidence = _keys(receipt["evidence"], ("seed", "capture", "verify", "rollback", "rollback_reopen"), "receipt evidence")
+    require(evidence["seed"] == {"source_b0_manifest_sha256": receipt["source_b0_manifest_sha256"]}, "Receipt seed evidence differs")
+    require(evidence["capture"] == {"b0_manifest_sha256": receipt["rehearsal_b0_manifest_sha256"], "restore_check": True},
+            "Receipt B0 evidence differs")
+    verify = _keys(evidence["verify"], ("b1_manifest_sha256", "b1_restore_check", "probe"), "receipt verify evidence")
+    require(verify["b1_manifest_sha256"] == receipt["rehearsal_b1_manifest_sha256"] and verify["b1_restore_check"] is True,
+            "Receipt B1 evidence differs")
+    probe = _keys(verify["probe"], ("added", "replay_duplicates", "restart", "evidence_sha256"), "receipt probe evidence")
+    require(probe["added"] == 1 and probe["replay_duplicates"] == 0 and probe["restart"] == "same chain and seal"
+            and type(probe["evidence_sha256"]) is str and HASH.fullmatch(probe["evidence_sha256"]), "Receipt probe evidence differs")
+    rollback = _keys(evidence["rollback"], ("bfail_manifest_sha256", "recovery"), "receipt rollback evidence")
+    require(rollback["bfail_manifest_sha256"] == receipt["bfail_manifest_sha256"], "Receipt Bfail evidence differs")
+    recovery = _keys(rollback["recovery"], ("project", "pg", "orthanc"), "receipt recovery")
+    require(type(recovery["project"]) is str and PROJECT.fullmatch(recovery["project"]) and recovery["pg"] == recovery["project"] + "_pg-db"
+            and recovery["orthanc"] == recovery["project"] + "_orthanc-db", "Receipt recovery volumes differ")
+    reopened = _keys(evidence["rollback_reopen"], ("recovery_persisted", "smoke"), "receipt reopen evidence")
+    frame = plan["smoke"]["frame"]
+    require(reopened["recovery_persisted"] is True and reopened["smoke"] == {
+        "member": True, "token_after_restore": True, "worklist_uid": frame_study(plan), "frame_sha256": frame["sha256"],
+        "frame_bytes": frame["bytes"]}, "Receipt previous-version smoke differs from this plan's frame")
+    require(receipt_sha256(receipt) not in set(used), "Receipt was already used")
     return receipt
+
+
+def bundle_valid(receipt, directory):
+    """Re-verify a receipt against the rehearsal's run directory: every phase result file it names exists with that hash
+    and records exactly the steps the receipt claims, and the journal is the one it hashed."""
+    directory = Path(directory)
+    for phase in RECEIPT_PHASES:
+        item = receipt["phases"][phase]
+        path = directory / ("result-" + phase + "-" + item["request_sha256"][:16] + ".json")
+        raw = path.read_bytes()
+        require(sha256_bytes(raw) == item["result_sha256"], "Rehearsal result file differs from the receipt: " + phase)
+        result = decode(raw)
+        require(result.get("phase") == phase and [[step["step"], step["outcome"]] for step in result.get("steps", [])] == item["steps"],
+                "Rehearsal result steps differ from the receipt: " + phase)
+    with open(directory / "journal.jsonl", "rb") as stream:
+        prefix = stream.read(receipt["journal_bytes"])
+    require(len(prefix) == receipt["journal_bytes"] and sha256_bytes(prefix) == receipt["journal_sha256"],
+            "Rehearsal journal differs from the receipt")
+    return True
 
 
 def operator_smoke_valid(record, plan_sha256):
@@ -452,14 +590,101 @@ def operator_smoke_valid(record, plan_sha256):
 
 # ── durable records: state, journal and step logs (private files) ──
 
+def _lock_descriptor(descriptor):
+    """An exclusive, non-blocking OS lock on an open file. The kernel releases it when the holding process ends, so a
+    crashed phase never keeps it; a live one always does (also against another thread of the same process)."""
+    if os.name == "posix":
+        import fcntl
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    else:
+        import msvcrt
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+
+
+def _unlock_descriptor(descriptor):
+    if os.name == "posix":
+        import fcntl
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+    else:
+        import msvcrt
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+
+
+SECRET_NAME = re.compile(r"(?i)password|secret|token|passwd|credential")
+
+
+def redact_argv(args):
+    """A command's identity for the records: names stay, a NAME=value whose name says secret keeps only the name, and a
+    long or multi-line argument (an inline script or SQL) is kept as its hash and length."""
+    out = []
+    for item in args:
+        text = str(item)
+        name = text.split("=", 1)[0] if "=" in text else None
+        if name is not None and SECRET_NAME.search(name):
+            out.append(name + "=<redacted>")
+        elif len(text) > 200 or "\n" in text:
+            out.append("<text sha256=%s bytes=%d>" % (sha256_bytes(text.encode("utf-8")), len(text.encode("utf-8"))))
+        else:
+            out.append(text)
+    return out
+
+
+def output_record(raw):
+    return None if raw is None else {"sha256": sha256_bytes(raw), "bytes": len(raw)}
+
+
 class Records:
-    """Portable durable files under one private directory; the host binds write/read to ops_deploy_host's protections."""
+    """Portable durable files under one private directory; the host binds write/read to ops_deploy_host's protections.
+    Besides state, journal, step logs and phase results it keeps one command record per phase run
+    (commands-<phase>-<request>.jsonl): every command with its redacted argv, environment names, input hash, start,
+    duration, outcome (exit code, timeout or launch error) and the hashes of its outputs, tagged with its step."""
 
     def __init__(self, directory):
         self.directory = Path(directory)
+        self.commands_file = None
+        self.seq = 0
+        self.context = {}
+
+    def ensure(self, directory):
+        Path(directory).mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    def open_lease(self, path):
+        return os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
+
+    @contextmanager
+    def lease(self):
+        """One phase of this plan at a time (separate from the retained operations lock)."""
+        self.ensure(self.directory)
+        descriptor = self.open_lease(self.directory / "phase.lock")
+        try:
+            try:
+                _lock_descriptor(descriptor)
+            except OSError:
+                raise Stop("Another phase of this plan is running") from None
+            try:
+                yield
+            finally:
+                _unlock_descriptor(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def begin(self, phase, request_sha256):
+        self.commands_file = "commands-" + phase + "-" + request_sha256[:16] + ".jsonl"
+        self.seq = 0
+        self.context = {}
+
+    def command(self, entry):
+        """Durable before the caller acts on the outcome; returns the command's sequence number in this phase run."""
+        if self.commands_file is None:
+            return None
+        self.seq += 1
+        self.write(self.directory / self.commands_file, canonical({"seq": self.seq, **self.context, **entry}) + b"\n", append=True)
+        return self.seq
 
     def write(self, path, raw, *, append=False):
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.ensure(path.parent)
         if append:
             with open(path, "ab") as stream:
                 stream.write(raw)
@@ -588,29 +813,70 @@ def frame_payload(kind, raw):
     return parts[0].get_payload(decode=True)
 
 
-def smoke(origin, *, connect=None, ca_file=None, token=None, frame=None, member_rights=True):
-    """health (and memberRights=ready for the introduced release), unauthenticated refusal, the token's subject, and the
-    exact frame bytes; a 200 alone is never a pass."""
+def health_check(origin, *, connect=None, ca_file=None, member_rights=True):
+    """health (and memberRights=ready for the introduced release) and the unauthenticated refusal only. Used where no
+    database object changed (the previous release resumed as it was); never the pass of a rollback or a release."""
     code, _, raw = https_get(origin, "/api/health", connect=connect, ca_file=ca_file)
     health = json.loads(raw)
     require(code == 200 and health.get("ok") is True and health.get("auth") is True, "Health or authentication flag failed")
     if member_rights:
         require(health.get("memberRights") == "ready", "Member rights are not ready")
     require(https_get(origin, "/api/me", connect=connect, ca_file=ca_file)[0] == 401, "Unauthenticated request was not refused")
-    result = {"health": True, "auth_refusal": True, "member": None, "frame": None}
-    if token is not None:
-        code, _, raw = https_get(origin, "/api/me", connect=connect, ca_file=ca_file, token=token["access_token"])
-        require(code == 200, "Authenticated identity check refused (HTTP %d %s)" % (code, refusal_code(raw)))
-        require(json.loads(raw).get("sub") == token["subject"], "Authenticated identity is another subject")
-        result["member"] = True
-        if frame is not None:
-            code, kind, raw = https_get(origin, frame["path"], connect=connect, ca_file=ca_file, token=token["access_token"],
-                                        limit=frame["bytes"] + 65536, accept='multipart/related; type="application/octet-stream"')
-            require(code == 200, "Frame request failed")
-            payload = frame_payload(kind, raw)
-            require(len(payload) == frame["bytes"] and sha256_bytes(payload) == frame["sha256"], "Frame bytes differ")
-            result["frame"] = True
+    return {"health": True, "auth_refusal": True}
+
+
+def worklist_has(origin, uid, *, connect=None, ca_file=None, token=None, pages=1000):
+    """The signed-in member's worklist lists the study (the product's paged list: limit 100, follow 'next')."""
+    after = None
+    for _ in range(pages):
+        query = "/api/studies?limit=100" + ("&after=" + quote(after, safe="") if after else "")
+        code, _, raw = https_get(origin, query, connect=connect, ca_file=ca_file, token=token, limit=8 * 1024 * 1024)
+        require(code == 200, "Worklist request refused (HTTP %d %s)" % (code, refusal_code(raw)))
+        listed = json.loads(raw)
+        rows = listed.get("studies") if isinstance(listed, dict) else None
+        require(type(rows) is list, "Worklist response has no study rows")
+        if any(isinstance(row, dict) and row.get("uid") == uid for row in rows):
+            return True
+        after = ((listed.get("pagination") or {}).get("next"))
+        if not after:
+            return False
+    raise Stop("Worklist did not end within the page limit")
+
+
+def smoke(origin, *, connect=None, ca_file=None, token, frame, worklist_uid, member_rights=True):
+    """The authenticated smoke of a release that is about to serve users: health (memberRights for the introduced
+    release), unauthenticated refusal, the token's subject, the worklist listing the smoke study, and the exact frame
+    bytes. Each check must run and pass; a 200, a missing token or an unrun check is never a pass."""
+    require(token is not None and frame is not None and worklist_uid, "The authenticated smoke needs a token, a worklist UID and a frame")
+    result = health_check(origin, connect=connect, ca_file=ca_file, member_rights=member_rights)
+    code, _, raw = https_get(origin, "/api/me", connect=connect, ca_file=ca_file, token=token["access_token"])
+    require(code == 200, "Authenticated identity check refused (HTTP %d %s)" % (code, refusal_code(raw)))
+    require(json.loads(raw).get("sub") == token["subject"], "Authenticated identity is another subject")
+    result["member"] = True
+    require(worklist_has(origin, worklist_uid, connect=connect, ca_file=ca_file, token=token["access_token"]),
+            "The worklist does not list the smoke study")
+    result["worklist"] = True
+    code, kind, raw = https_get(origin, frame["path"], connect=connect, ca_file=ca_file, token=token["access_token"],
+                                limit=frame["bytes"] + 65536, accept='multipart/related; type="application/octet-stream"')
+    require(code == 200, "Frame request failed")
+    payload = frame_payload(kind, raw)
+    require(len(payload) == frame["bytes"] and sha256_bytes(payload) == frame["sha256"], "Frame bytes differ")
+    result["frame"] = True
     return result
+
+
+def smoke_passed(result):
+    """Only a result in which every authenticated check ran and passed counts (a stubbed or partial result does not)."""
+    return (isinstance(result, dict) and all(result.get(key) is True for key in ("health", "auth_refusal", "member", "worklist", "frame")))
+
+
+def token_claims(token):
+    """The (unverified) claims of the smoke token; the API verifies the token, this only reads when it was issued."""
+    try:
+        body = token["access_token"].split(".")[1]
+        return json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+    except Exception:
+        raise Stop("The smoke token is not a readable JWT") from None
 
 
 def token_valid(value):
@@ -634,26 +900,34 @@ STEPS = {
                ("L-10d", "resume", True, True)),
     "reopen": (("L-11a", "final_allowlist", False, False), ("L-11b", "restore_jobs", True, False),
                ("L-11c", "reopen_ingress", True, False), ("L-11d", "public_smoke", False, False)),
+    # The rollback restores (RB-00..RB-03) and stops behind the maintenance ingress with the lock and the fence kept; only
+    # rollback_reopen (RB-04) opens anything, after the previous version proved itself with a login made after the
+    # restore, the worklist and the frame bytes. Until then the status is RESTORED, never ROLLED_BACK.
     "rollback": (("RB-00", "classify", True, False), ("RB-01", "preserve_failed", False, False), ("RB-02", "restore_b0", True, False),
-                 ("RB-03", "previous_services", True, False), ("RB-04", "verify_and_reopen", True, False)),
+                 ("RB-03", "previous_services", True, False)),
+    "rollback_reopen": (("RB-04a", "recovery_persisted", False, False), ("RB-04b", "fenced_previous_smoke", False, False),
+                        ("RB-04c", "restore_jobs_after_rollback", True, False), ("RB-04d", "reopen_previous_ingress", True, False),
+                        ("RB-04e", "public_previous_smoke", False, False)),
     "seed": (("S-01", "seed_check", False, False), ("S-02", "seed_restore", True, False), ("S-03", "seed_services", True, False)),
     "receipt": (("RC-01", "write_receipt", False, False),),
 }
 # Which statuses each phase may start from.
-FROM = {"capture": ("NEW", "SEEDED"), "release": ("HELD", "CAPTURE_FAILED"), "introduce": ("HELD",), "verify": ("INTRODUCED",),
-        "reopen": ("VERIFIED",), "rollback": ("INTRODUCED", "VERIFIED", "NEEDS_ATTENTION", "INTRODUCE_FAILED", "VERIFY_FAILED"),
-        "seed": ("NEW",), "receipt": ("ROLLED_BACK",)}
+FROM = {"capture": ("NEW", "SEEDED"), "release": ("HELD", "CAPTURE_FAILED", "NEEDS_ATTENTION"), "introduce": ("HELD",),
+        "verify": ("INTRODUCED",), "reopen": ("VERIFIED",),
+        "rollback": ("INTRODUCED", "VERIFIED", "NEEDS_ATTENTION", "INTRODUCE_FAILED", "VERIFY_FAILED"),
+        "rollback_reopen": ("RESTORED",), "seed": ("NEW",), "receipt": ("ROLLED_BACK",)}
 DONE = {"capture": "HELD", "release": "RELEASED", "introduce": "INTRODUCED", "verify": "VERIFIED", "reopen": "DEPLOYED",
-        "rollback": "ROLLED_BACK", "seed": "SEEDED", "receipt": "RECEIPTED"}
+        "rollback": "RESTORED", "rollback_reopen": "ROLLED_BACK", "seed": "SEEDED", "receipt": "RECEIPTED"}
 BUDGET = {"capture": "capture_s", "release": "capture_s", "introduce": "introduce_s", "verify": "verify_s", "reopen": "reopen_s",
-          "rollback": "rollback_s", "seed": "seed_s", "receipt": "capture_s"}
+          "rollback": "rollback_s", "rollback_reopen": "rollback_s", "seed": "seed_s", "receipt": "capture_s"}
 
 
 def new_state(plan_sha256, plan):
     return {"schema": 1, "mode": MODE, "plan_sha256": plan_sha256, "target_kind": plan["target_kind"], "status": "NEW",
             "lock_token": None, "db_changed": False, "ponr": None, "fenced": None, "checkout": "previous",
             "b0": None, "b1": None, "bfail": None, "seed": None, "recovery": None, "rollback_attempted": False,
-            "history": [], "probe": None, "receipt": None}
+            "history": [], "probe": None, "receipt": None, "running": None, "receipts_used": [], "restored_at": None,
+            "rollback_smoke": None}
 
 
 class Introduction:
@@ -690,11 +964,15 @@ class Introduction:
             require(lock_owned(self.repository, self.state["lock_token"]), "Operations lock ownership changed")
 
     def run_step(self, sid, name, mutating, db_change):
+        """Every step (read-only ones too) records the host before and after it, its outcome, its duration and the
+        range of commands it ran (commands-<phase>-<request>.jsonl), so the record shows which command a step reached."""
         record = {"step": sid, "action": name, "mutating": mutating, "started_utc": self.now().isoformat()}
         self.event("step-start", step=sid)
         started = self.clock()
-        if mutating:
-            record["before"] = self.observe()
+        first = self.records.seq + 1
+        record["before"] = self.observe(sid, "before")
+        self.records.context = {"step": sid, "part": "step"}
+        outcome = None
         try:
             if mutating:
                 self.guard()
@@ -703,34 +981,38 @@ class Introduction:
                 self.state["db_changed"] = True
                 self.save()
             detail = getattr(self.ops, name)(self) or {}
+            outcome = "PASS"
         except Unknown as error:
-            record.update(outcome="UNKNOWN", code=code_of(error), seconds=round(self.clock() - started, 3), after=self.observe())
-            self.steps.append(record)
-            self.event("step-end", step=sid, outcome="UNKNOWN", code=record["code"])
+            outcome = "UNKNOWN"
+            record.update(code=code_of(error))
             raise
         except Exception as error:
-            record.update(outcome="STOP", code=code_of(error), seconds=round(self.clock() - started, 3))
-            if mutating:
-                record["after"] = self.observe()
-            self.steps.append(record)
-            self.event("step-end", step=sid, outcome="STOP", code=record["code"])
+            outcome = "STOP"
+            record.update(code=code_of(error))
             raise Stop(record["code"]) from None
-        record.update(outcome="PASS", seconds=round(self.clock() - started, 3), detail=detail)
-        if mutating:
-            record["after"] = self.observe()
-        self.steps.append(record)
-        self.event("step-end", step=sid, outcome="PASS")
+        finally:
+            record["outcome"] = outcome or "UNKNOWN"
+            record["seconds"] = round(self.clock() - started, 3)
+            if outcome == "PASS":
+                record["detail"] = detail
+            record["after"] = self.observe(sid, "after")
+            record["commands"] = {"file": self.records.commands_file, "first": first, "last": self.records.seq}
+            self.steps.append(record)
+            self.event("step-end", step=sid, outcome=record["outcome"], **({"code": record["code"]} if "code" in record else {}))
         return detail
 
-    def observe(self):
-        """The host as seen around a mutating step (selected, secret-free); an unobservable host is recorded as such."""
+    def observe(self, sid=None, part=None):
+        """The host as seen around a step (selected, secret-free); an unobservable host is recorded as such."""
         snapshot = getattr(self.ops, "snapshot", None)
         if snapshot is None:
-            return None
+            return {"unobservable": "no observer"}
+        self.records.context = {"step": sid, "part": part}
         try:
             return snapshot(self)
         except Exception as error:
             return {"unobservable": type(error).__name__}
+        finally:
+            self.records.context = {}
 
     def result(self, status, passed, extra=None):
         steps = []
@@ -746,26 +1028,47 @@ class Introduction:
 
     def finish(self, status, passed, release=False, extra=None):
         self.state["status"] = status
-        self.state["history"].append({"phase": self.phase, "status": "PASS" if passed else status,
-                                      "request_sha256": self.request_sha256, "seconds": round(self.clock() - self.started, 3)})
         if release and self.state["lock_token"]:
             release_lock(self.repository, self.state["lock_token"])
             self.state["lock_token"] = None
+        digest = self.records.put("result-" + self.phase + "-" + self.request_sha256[:16] + ".json",
+                                  {"steps": self.steps, "status": status, "phase": self.phase, "request_sha256": self.request_sha256,
+                                   "commands_file": self.records.commands_file})
+        self.state["history"].append({"phase": self.phase, "status": "PASS" if passed else status,
+                                      "request_sha256": self.request_sha256, "seconds": round(self.clock() - self.started, 3),
+                                      "result_sha256": digest, "steps": [[step["step"], step["outcome"]] for step in self.steps]})
+        # The phase ended (settled or kept for an operator): no longer running.
+        self.state["running"] = None
         self.save()
-        self.records.put("result-" + self.phase + "-" + self.request_sha256[:16] + ".json",
-                         {"steps": self.steps, "status": status, "phase": self.phase})
         self.event("phase-end", status=status)
         return self.result(status, passed, extra)
 
     # ── entry ──
     def run(self, request, request_sha256):
+        """One phase, exclusively: the per-plan lease (an OS lock the kernel frees if this process dies) is held from
+        before the state is read until the result is durable, so two approved requests can never both act."""
         self.phase = request["phase"]
         self.request_sha256 = request_sha256
-        self.started = self.clock()
-        self.recovering = self.phase == "rollback"
         require(request["plan_sha256"] == self.plan_sha256, "Request names another plan")
+        with self.records.lease():
+            return self.run_exclusive()
+
+    def run_exclusive(self):
+        self.started = self.clock()
+        self.recovering = self.phase in ("rollback", "rollback_reopen")
         self.state = self.records.state() or new_state(self.plan_sha256, self.plan)
         require(self.state["plan_sha256"] == self.plan_sha256 and self.state["mode"] == MODE, "State belongs to another plan")
+        if self.state.get("running"):
+            # A phase began and never wrote its end (crash, kill, lost host): nothing is re-run automatically; the
+            # retained lock stays and the plan needs an operator (release or rollback decide from NEEDS_ATTENTION).
+            stale = self.state["running"]
+            self.state.update(running=None, status="NEEDS_ATTENTION")
+            self.state["history"].append({"phase": stale["phase"], "status": "INTERRUPTED", "request_sha256": stale["request_sha256"],
+                                          "seconds": None, "result_sha256": None, "steps": []})
+            self.save()
+            self.records.journal({"event": "interrupted-phase", "plan_sha256": self.plan_sha256, "phase": stale["phase"],
+                                  "request_sha256": stale["request_sha256"], "classified": "NEEDS_ATTENTION"})
+            raise Stop("Phase " + stale["phase"] + " did not finish (process ended); classified NEEDS_ATTENTION, inspect before the next request")
         self.budget = self.plan["budget"][BUDGET[self.phase]]
         require(self.state["status"] in FROM[self.phase], "Phase " + self.phase + " cannot follow " + self.state["status"])
         if self.phase in ("seed", "receipt"):
@@ -773,31 +1076,49 @@ class Introduction:
         if self.phase == "rollback":
             require(self.state["ponr"] is None, "Ingress was reopened: no automatic or requested rollback past this point")
             require(self.state["db_changed"] and not self.state["rollback_attempted"], "Rollback is not applicable or was already attempted")
+        if self.phase == "release":
+            require(not self.state["db_changed"] and self.state["checkout"] == "previous", "Release is only for an unchanged database")
         require(self.tool == self.plan["tool"], "Installed tool differs from the plan")
         check_target(self.target, self.production, self.plan["target_kind"], self.host_key)
         require(sha256_bytes(canonical(self.target)) == self.plan["target_manifest_sha256"], "Target manifest differs from the plan")
-        self.check_evidence()
-        self.event("phase-start")
+        claimed = self.check_evidence()
+        if self.phase not in ("capture", "seed", "receipt"):
+            require(self.state["lock_token"] and lock_owned(self.repository, self.state["lock_token"]),
+                    "This release no longer owns the operations lock")
+        # Durable before any external effect: this phase is running (a crash leaves it for the classification above).
+        self.records.begin(self.phase, self.request_sha256)
+        self.state["running"] = {"phase": self.phase, "request_sha256": self.request_sha256, "started_utc": self.now().isoformat()}
+        if claimed:
+            # The local-restore receipt is spent by this attempt, whatever its outcome (one production attempt, once).
+            self.state["receipts_used"].append(claimed)
+        self.save()
+        self.event("phase-start", **({"receipt_sha256": claimed} if claimed else {}))
         if self.phase in ("capture", "seed"):
             # A new exclusive lock; a competing backup, rehearsal or API-only deployment cannot hold it meanwhile.
             try:
                 self.state["lock_token"] = acquire_lock(self.repository)
             except FileExistsError:
+                self.state["running"] = None
+                self.save()
                 raise Stop("Operations lock is held by another operation") from None
             self.save()
-        elif self.phase != "receipt":
-            require(self.state["lock_token"] and lock_owned(self.repository, self.state["lock_token"]),
-                    "This release no longer owns the operations lock")
-        return getattr(self, "phase_" + self.phase)()
+        bind = getattr(self.ops, "bind", None)
+        with (bind() if bind else nullcontext()):
+            return getattr(self, "phase_" + self.phase)()
 
     def check_evidence(self):
+        """Evidence the phase needs, verified before anything runs. Returns the receipt this attempt spends, if any."""
         if self.phase == "introduce" and self.plan["target_kind"] == "production":
             require(self.state["b0"] is not None, "No B0 snapshot")
             require(type(self.evidence.get("local-restore")) is dict, "Local-restore receipt required")
-            receipt_valid(self.evidence["local-restore"], self.plan, self.state["b0"]["manifest_sha256"], self.production)
+            receipt = self.evidence["local-restore"]
+            receipt_valid(receipt, self.plan, self.state["b0"]["manifest_sha256"], self.production, now=self.now(),
+                          b0_created_utc=self.state["b0"].get("created_utc"), used=self.state["receipts_used"])
+            return receipt_sha256(receipt)
         if self.phase == "reopen":
             require(type(self.evidence.get("operator-smoke")) is dict, "Operator smoke record required")
             operator_smoke_valid(self.evidence["operator-smoke"], self.plan_sha256)
+        return None
 
     def steps_of(self, phase):
         for sid, name, mutating, db_change in STEPS[phase]:
@@ -823,7 +1144,6 @@ class Introduction:
         return self.finish("HELD", True, extra={"b0": self.state["b0"]})
 
     def phase_release(self):
-        require(not self.state["db_changed"] and self.state["checkout"] == "previous", "Release is only for an unchanged database")
         try:
             self.steps_of("release")
         except (Stop, Unknown):
@@ -884,9 +1204,10 @@ class Introduction:
         return self.finish("DEPLOYED", True, release=True)
 
     def rollback_steps(self, explicit):
-        """RB-00..RB-04 under the rollback budget. Automatic after a settled failure, or an explicit phase; once only.
+        """RB-00..RB-03 under the rollback budget. Automatic after a settled failure, or an explicit phase; once only.
         RB-00 only classifies (workers quiet, writers fenced) and changes no data: its refusal leaves the single attempt
-        unused, so a rollback can be requested again once the worker has ended. From RB-01 on, a failure is final."""
+        unused, so a rollback can be requested again once the worker has ended. From RB-01 on, a failure is final. A
+        restored rollback keeps the maintenance ingress, the fenced jobs and the lock: RESTORED, not yet rolled back."""
         self.enter_recovery()
         try:
             self.run_step(*STEPS["rollback"][0])
@@ -900,12 +1221,31 @@ class Introduction:
                 self.run_step(*item)
         except (Stop, Unknown):
             return self.finish("NEEDS_ATTENTION", False, extra={"rollback": "failed; maintenance and lock kept, no retry"})
-        return self.finish("ROLLED_BACK", explicit, release=True,
-                           extra={"rollback": "completed", "data_restored": True, "recovery": self.state["recovery"],
-                                  "bfail": self.state["bfail"]})
+        self.state["restored_at"] = self.now().isoformat()
+        return self.finish("RESTORED", explicit,
+                           extra={"rollback": "restored; the previous version stays behind the maintenance ingress until "
+                                              "rollback_reopen passes its smoke with a login made after this restore",
+                                  "data_restored": True, "recovery": self.state["recovery"], "bfail": self.state["bfail"]})
 
     def phase_rollback(self):
         return self.rollback_steps(explicit=True)
+
+    def phase_rollback_reopen(self):
+        """RB-04: the recovery mapping is what normal operations resolve, then the previous version's own login, worklist
+        and frame through the maintenance ingress; only then the jobs and the public ingress, and the public smoke. A
+        refusal before the ingress opens keeps RESTORED (fence and lock kept; a corrected request may follow)."""
+        opened = False
+        try:
+            for item in STEPS["rollback_reopen"]:
+                if item[1] == "reopen_previous_ingress":
+                    opened = True
+                self.run_step(*item)
+        except (Stop, Unknown):
+            return self.finish("NEEDS_ATTENTION" if opened else "RESTORED", False,
+                               extra={"rollback": "previous-version smoke or reopen failed; " +
+                                                  ("ingress was opened" if opened else "ingress stays closed, lock kept")})
+        return self.finish("ROLLED_BACK", True, release=True,
+                           extra={"rollback": "completed", "recovery": self.state["recovery"], "smoke": self.state["rollback_smoke"]})
 
     def enter_recovery(self):
         """Recovery steps (revert, rollback) run under the rollback budget; the window's end never blocks them."""
@@ -928,18 +1268,38 @@ class Introduction:
 
 
 def make_receipt(intro):
-    """The rehearsal's local-restore receipt, from its own durable history only."""
+    """The rehearsal's local-restore receipt, from its own durable history and artifacts only (see receipt_valid)."""
     state, plan = intro.state, intro.plan
     phases = {}
     for item in state["history"]:
-        if item["phase"] in ("seed", "capture", "introduce", "verify", "rollback") and item["status"] == "PASS":
-            phases[item["phase"]] = {"status": "PASS", "seconds": item["seconds"], "request_sha256": item["request_sha256"]}
-    require(set(phases) == {"seed", "capture", "introduce", "verify", "rollback"}, "The rehearsal did not pass every phase")
-    require(state["b0"] and state["b1"] and state["seed"], "Rehearsal snapshots missing")
-    return {"schema": 1, "kind": "local-restore", "passed": True, "plan_core_sha256": plan_core(plan),
-            "rehearsal_plan_sha256": intro.plan_sha256, "source_b0_manifest_sha256": plan["seed"]["b0_manifest_sha256"],
+        if item["phase"] in RECEIPT_PHASES and item["status"] == "PASS":
+            phases[item["phase"]] = {"request_sha256": item["request_sha256"], "result_sha256": item["result_sha256"],
+                                     "seconds": item["seconds"], "steps": item["steps"]}
+    require(set(phases) == set(RECEIPT_PHASES), "The rehearsal did not pass every phase")
+    require(state["b0"] and state["b1"] and state["seed"] and state["bfail"] and state["recovery"] and state["rollback_smoke"]
+            and state["probe"], "Rehearsal snapshots missing")
+    journal = intro.records.read(intro.records.directory / "journal.jsonl")
+    smoke_record = state["rollback_smoke"]
+    return {"schema": 2, "kind": "local-restore", "passed": True, "receipt_id": uuid.uuid4().hex, "plan_core_sha256": plan_core(plan),
+            "production_plan_sha256": plan["seed"]["production_plan_sha256"], "rehearsal_plan_sha256": intro.plan_sha256,
+            "rehearsal_target_manifest_sha256": plan["target_manifest_sha256"],
+            "source_b0_manifest_sha256": plan["seed"]["b0_manifest_sha256"],
             "rehearsal_b0_manifest_sha256": state["b0"]["manifest_sha256"], "rehearsal_b1_manifest_sha256": state["b1"]["manifest_sha256"],
-            "tool": plan["tool"], "host_key_sha256": intro.host_key, "phases": phases, "created_utc": intro.now().isoformat()}
+            "bfail_manifest_sha256": state["bfail"]["manifest_sha256"], "tool": plan["tool"], "host_key_sha256": intro.host_key,
+            "phases": phases,
+            "evidence": {"seed": {"source_b0_manifest_sha256": state["seed"]["source_manifest_sha256"]},
+                         "capture": {"b0_manifest_sha256": state["b0"]["manifest_sha256"],
+                                     "restore_check": (state["b0"].get("restore_check") or {}).get("success") is True},
+                         "verify": {"b1_manifest_sha256": state["b1"]["manifest_sha256"],
+                                    "b1_restore_check": (state["b1"].get("restore_check") or {}).get("success") is True,
+                                    "probe": {"added": state["probe"]["added"], "replay_duplicates": state["probe"]["replay_duplicates"],
+                                              "restart": state["probe"]["restart"], "evidence_sha256": state["probe"]["evidence_sha256"]}},
+                         "rollback": {"bfail_manifest_sha256": state["bfail"]["manifest_sha256"],
+                                      "recovery": {key: state["recovery"][key] for key in ("project", "pg", "orthanc")}},
+                         "rollback_reopen": {"recovery_persisted": state["recovery"].get("persisted") is True,
+                                             "smoke": {key: smoke_record[key] for key in ("member", "token_after_restore", "worklist_uid",
+                                                                                          "frame_sha256", "frame_bytes")}}},
+            "journal_sha256": sha256_bytes(journal), "journal_bytes": len(journal), "created_utc": intro.now().isoformat()}
 
 
 # ── host operations ──
@@ -1012,8 +1372,9 @@ def rehearsal_override(target, origin):
                                    "      PUBLIC_PORT: " + yaml_scalar(str(parsed.port or 443)),
                                    "    volumes: !override [\"proxy-certs:/etc/nginx/certs\", \"rehearsal-workflow:/etc/nginx/workflow:ro\"]"])):
         lines += ["  " + role + ":", "    container_name: " + yaml_scalar(names[role]), *extra]
+    # The clone's certificate volume is named outright, so a recovery project (after a rollback) keeps the same certificate.
     lines += ["networks:", "  workflow:", "    name: " + yaml_scalar(target["networks"]["workflow"]),
-              "volumes:", "  rehearsal-workflow: {}", ""]
+              "volumes:", "  rehearsal-workflow: {}", "  proxy-certs:", "    name: " + yaml_scalar(target["project"] + "_proxy-certs"), ""]
     return "\n".join(lines)
 
 
@@ -1028,8 +1389,15 @@ const {PrismaClient}=require('/app/node_modules/@prisma/client');const db=new Pr
 (async()=>{const markers=(await db.memberRightsImport.findMany()).map(m=>m.id).sort();
  const rights=(await db.memberRights.findMany()).map(r=>({sub:r.sub,username:r.username,approved:r.approved,suspended:r.suspended,institution:r.institution,roles:[...r.roles].sort()}));
  const legacy=(await db.providerChange.findMany({where:{kind:'credentials'}})).filter(c=>c.target==='legacy-enable:'+c.sub).map(c=>({sub:c.sub,state:c.state}));
- process.stdout.write('KIN_RESULT '+JSON.stringify({markers,rights,legacy})+'\n');})().catch(()=>{process.exitCode=1;}).finally(()=>db.$disconnect());
+ const changes=(await db.providerChange.findMany({orderBy:{id:'asc'}})).map(c=>({kind:c.kind,target:c.kind==='credentials'?c.target:null,sub:c.sub,state:c.state}));
+ const isolated=(await db.memberIsolation.findMany()).map(m=>m.sub).sort();
+ process.stdout.write('KIN_RESULT '+JSON.stringify({markers,rights,legacy,changes,isolated})+'\n');})().catch(()=>{process.exitCode=1;}).finally(()=>db.$disconnect());
 """
+# The realm's own role and group definitions (read-only, Keycloak database): the import must not change them.
+REALM_DEFINITIONS_SQL = """SELECT json_build_object(
+  'roles', (SELECT coalesce(json_agg(k.name ORDER BY k.name), '[]'::json) FROM keycloak_role k WHERE k.realm_id = r.id AND NOT k.client_role),
+  'groups', (SELECT coalesce(json_agg(g.name ORDER BY g.name), '[]'::json) FROM keycloak_group g WHERE g.realm_id = r.id))
+  FROM realm r WHERE r.name = 'kin'"""
 SERVERINFO_SCRIPT = r"""
 const base=(process.env.KC_ADMIN_URL||'').replace(/\/$/,'');
 (async()=>{const form=new URLSearchParams({grant_type:'password',client_id:'admin-cli',username:process.env.KIN_KC_ADMIN_USER,password:process.env.KIN_KC_ADMIN_PASSWORD});
@@ -1166,8 +1534,16 @@ def bound_ops(repository, runner):
         ops.ROOT, ops.run = previous
 
 
+def set_env_line(raw, name, value):
+    """The .env bytes with exactly one NAME=value line for this name (any earlier one removed), everything else kept."""
+    require(ops.ENV_NAME.fullmatch(name) is not None and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", value) is not None, "Invalid env line")
+    kept = [line for line in raw.decode("utf-8").splitlines() if line.strip().split("=", 1)[0].strip() != name]
+    return ("\n".join(kept) + "\n" + name + "=" + value + "\n").lstrip("\n").encode("utf-8")
+
+
 class HostOps:
-    """The docker/compose/git/crontab operations of each step, against one target manifest only."""
+    """The docker/compose/git/crontab operations of each step, against one target manifest only. Every command goes
+    through cmd(), which records it (records.command) whatever its outcome."""
 
     def __init__(self, *, target, plan, runner, records, env_next=None, token_reader=None, secure=None, owner=None):
         self.t, self.plan, self.run, self.records = target, plan, runner, records
@@ -1180,19 +1556,53 @@ class HostOps:
 
     # ── primitives ──
     def cmd(self, args, *, timeout=60, input=None, env=None, check=True, mutating=False, stdin=None, output=None, quiet=False):
-        """quiet: the command carries a secret on stdin, so its error text (which may quote that input) is never kept."""
+        """Run one fixed-binary command and record it before acting on its outcome: redacted argv, environment names (never
+        values), input hash, start, duration, outcome (exit code, timeout or launch error), output hashes. quiet: the
+        command carries a secret on stdin, so its error text (which may quote that input) is never kept."""
+        args = list(args)
+        entry = {"argv": redact_argv(args), "env": sorted(env or {}), "mutating": mutating, "timeout_s": timeout,
+                 "started_utc": utc_now().isoformat()}
+        if input is not None:
+            entry["input"] = output_record(input)
+        if stdin is not None:
+            entry["stdin"] = Path(str(getattr(stdin, "name", "stream"))).name
+        if output is not None:
+            entry["stdout_to"] = Path(str(getattr(output, "name", "stream"))).name
+        started = time.monotonic()
+        label = args[0] + " " + (args[1] if len(args) > 1 else "")
         try:
             result = self.run(args, input=input, timeout=timeout, env=env, stdin=stdin, output=output)
         except subprocess.TimeoutExpired:
+            entry.update(outcome="timeout", seconds=round(time.monotonic() - started, 3))
+            self.records.command(entry)
             if mutating:
-                raise Unknown(args[0] + " " + (args[1] if len(args) > 1 else "") + " timed out; its end state is unknown") from None
-            raise Stop(args[0] + " timed out") from None
+                raise Unknown(label + " timed out; its end state is unknown") from None
+            raise Stop(label.strip() + " timed out") from None
+        except OSError as error:
+            entry.update(outcome="error", error=type(error).__name__, seconds=round(time.monotonic() - started, 3))
+            self.records.command(entry)
+            raise Stop(label.strip() + " could not be started") from None
+        entry.update(outcome="exit", exit=result.returncode, seconds=round(time.monotonic() - started, 3),
+                     stdout=output_record(result.stdout if output is None else None), stderr=output_record(result.stderr))
+        if check and result.returncode and not quiet:
+            entry["failure_log"] = self.records.log("failed-" + uuid.uuid4().hex[:12] + ".err",
+                                                    (" ".join(redact_argv(args[:3])) + "\n").encode() + (result.stderr or b"")[-16384:])
+        self.records.command(entry)
         if check and result.returncode:
-            if not quiet:
-                self.records.log("failed-" + uuid.uuid4().hex[:12] + ".err",
-                                 (" ".join(args[:3]) + "\n").encode() + (result.stderr or b"")[-16384:])
-            raise Stop(f"{args[0]} {args[1] if len(args) > 1 else ''} failed (exit {result.returncode})")
+            raise Stop(f"{label} failed (exit {result.returncode})")
         return result
+
+    @contextmanager
+    def bind(self):
+        """ops_backup's helpers (captures, restores, catalogs) run against this repository through cmd(), recorded."""
+        def run(args, *, output=None, input_file=None, timeout=600, check=True):
+            return self.cmd(list(args), output=output, stdin=input_file, timeout=timeout, check=check)
+        previous = ops.ROOT, ops.run
+        ops.ROOT, ops.run = self.repo, run
+        try:
+            yield
+        finally:
+            ops.ROOT, ops.run = previous
 
     def text(self, args, **kwargs):
         return self.cmd(args, **kwargs).stdout.decode("utf-8").strip()
@@ -1203,13 +1613,13 @@ class HostOps:
             out += ["-f", item if PurePosixPath(item).is_absolute() or PureWindowsPath(item).is_absolute() else str(self.repo / item)]
         return out
 
-    def compose(self, args, *, override=None, timeout=180, env=None, mutating=True, check=True):
-        command = ["docker", "compose", "--project-directory", str(self.repo), "--project-name", self.t["project"],
+    def compose(self, args, *, override=None, timeout=180, env=None, mutating=True, check=True, project=None):
+        command = ["docker", "compose", "--project-directory", str(self.repo), "--project-name", project or self.t["project"],
                    *self.compose_files(), *(["-f", "-"] if override else []), *args]
         return self.cmd(command, input=override.encode() if override else None, timeout=timeout, env=env,
                         mutating=mutating, check=check)
 
-    def pins(self, intro, *, release=None, maintenance=True, recovery=None):
+    def pins(self, intro, *, maintenance=True):
         """Image IDs for every service of the current checkout, the API release label, the fenced proxy ports."""
         side = "release" if intro.state["checkout"] == "target" else "previous"
         images = intro.plan[side]["images"]
@@ -1220,12 +1630,7 @@ class HostOps:
             services["emr-provision"] = {"image": images["db"], "container_name": self.names["emr-provision"]}
         if maintenance:
             services["proxy"]["ports"] = ("!override", [self.t["ports"]["maintenance"]])
-        volumes = None
-        if recovery:
-            services["db"]["volumes"] = ["kin-recovery-pg:/var/lib/postgresql/data"]
-            services["orthanc"]["volumes"] = ["kin-recovery-orthanc:/var/lib/orthanc/db"]
-            volumes = {"kin-recovery-pg": recovery["pg"], "kin-recovery-orthanc": recovery["orthanc"]}
-        return override_yaml(services, volumes=volumes)
+        return override_yaml(services)
 
     def inspect(self, role):
         result = self.cmd(["docker", "inspect", self.names[role]], check=False)
@@ -1251,17 +1656,20 @@ class HostOps:
                              "AND backend_type='client backend' AND pid<>pg_backend_pid();"))
 
     def snapshot(self, intro):
-        """Around each mutating step: which image each role runs (or none), the checkout, the applied history's head."""
-        running = {}
+        """Around each step: which image each role runs (or none) and its Compose project, the checkout, the applied
+        history's head, the lock."""
+        running, projects = {}, {}
         for role in ROLES:
             item = self.inspect(role)
             running[role] = item["Image"] if item and item["State"]["Running"] else None
+            projects[role] = ((item or {}).get("Config") or {}).get("Labels", {}).get("com.docker.compose.project") if item else None
         try:
-            rows = ops.migration_rows(self.names["db"])
+            with self.bind():
+                rows = ops.migration_rows(self.names["db"])
             history = {"count": len(rows), "last": rows[-1][0] if rows else None}
         except Exception as error:
             history = {"unobservable": type(error).__name__}
-        return {"running": running, "head": self.text(["git", "rev-parse", "HEAD"]), "migrations": history,
+        return {"running": running, "projects": projects, "head": self.text(["git", "rev-parse", "HEAD"]), "migrations": history,
                 "lock": lock_owned(self.repo, intro.state["lock_token"]) if intro.state.get("lock_token") else False}
 
     def one_shots_alive(self, intro):
@@ -1297,10 +1705,11 @@ class HostOps:
             return probe.returncode == 0
         self.wait(ready, seconds, message)
 
-    def one_shot(self, intro, service, args, *, timeout, env=None, entrypoint=None, name, worker=True):
+    def one_shot(self, intro, service, args, *, timeout, env=None, entrypoint=None, name, worker=True, project=None):
         """A named, labelled one-shot (never --rm before its exit is recorded). A worker (anything that writes) carries
         this release's label, so a later rollback can see whether it may still be alive; its client timeout is an
-        unknown end. A read-only helper that times out is removed and is a settled refusal."""
+        unknown end. A read-only helper that times out is removed and is a settled refusal. The result carries both the
+        client's and the container's own exit; callers require both."""
         token = uuid.uuid4().hex[:12]
         container = self.t["project"] + "-" + name + "-" + token
         command = ["run", "--no-deps", "-T", "--name", container, "--label", "kin.ops.run=" + token]
@@ -1312,7 +1721,7 @@ class HostOps:
             command += ["--entrypoint", entrypoint]
         command += [service, *args]
         try:
-            result = self.compose(command, override=self.pins(intro), timeout=timeout, env=env, check=False, mutating=True)
+            result = self.compose(command, override=self.pins(intro), timeout=timeout, env=env, check=False, mutating=True, project=project)
         except Unknown:
             state = self.cmd(["docker", "inspect", "--format", "{{.State.Running}}", container], check=False)
             alive = state.returncode == 0 and state.stdout.decode().strip() == "true"
@@ -1322,28 +1731,47 @@ class HostOps:
             raise Unknown(name + (" worker is still running" if alive else " ended without a recorded exit")) from None
         logs = {"stdout": self.records.log(container + ".out", result.stdout), "stderr": self.records.log(container + ".err", result.stderr)}
         exited = self.cmd(["docker", "inspect", "--format", "{{.State.ExitCode}}", container], check=False)
-        exit_code = int(exited.stdout.decode().strip()) if exited.returncode == 0 else None
+        exit_code = int(exited.stdout.decode().strip()) if exited.returncode == 0 and exited.stdout.decode().strip().isdigit() else None
         if exit_code is not None:
             self.cmd(["docker", "rm", container], check=False)
         return {"container": container, "exit": result.returncode, "container_exit": exit_code, "logs": logs, "stdout": result.stdout}
 
     def helper(self, intro, script, *, env=None, name="helper", timeout=120, args=()):
         out = self.one_shot(intro, "api", ["-e", script, *args], timeout=timeout, env=env, entrypoint="node", name=name, worker=False)
-        require(out["exit"] == 0, name + " helper failed")
+        require(out["exit"] == 0 and out["container_exit"] == 0, name + " helper failed")
         return result_line(out["stdout"])
 
-    def resolved(self, intro):
-        raw = self.compose(["config", "--format", "json"], override=self.pins(intro), timeout=60, mutating=False).stdout
+    def resolved(self, intro, *, pinned=True, maintenance=True, project=None):
+        """The Compose model this checkout resolves to: with this mode's pins (pinned) or exactly as an ordinary
+        `docker compose` in the checkout would (no project flag, no override: what any later operation uses). Only
+        names, mounts, ports, images and the origin settings leave this function; the model carries interpolated secrets."""
+        if pinned:
+            raw = self.compose(["config", "--format", "json"], override=self.pins(intro, maintenance=maintenance), timeout=60,
+                               mutating=False, project=project).stdout
+        else:
+            raw = self.cmd(["docker", "compose", "--project-directory", str(self.repo), *self.compose_files(), "config", "--format", "json"],
+                           timeout=60).stdout
         model = json.loads(raw)
-        # Only names leave this function; the resolved model carries interpolated secrets.
+        services = {name: service or {} for name, service in (model.get("services") or {}).items() if name in (*ROLES, *ONE_SHOTS)}
+
+        def port(item):
+            return (item.get("host_ip") + ":" if item.get("host_ip") else "") + str(item.get("published")) + ":" + str(item.get("target"))
+
+        def setting(service, key):
+            value = (services.get(service, {}).get("environment") or {}).get(key)
+            return value if type(value) is str else None
         return {"project": model.get("name"),
-                "containers": {name: (service or {}).get("container_name") for name, service in (model.get("services") or {}).items()
-                               if name in (*ROLES, *ONE_SHOTS)},
+                "containers": {name: service.get("container_name") for name, service in services.items()},
                 "volumes": {key: (value or {}).get("name") for key, value in (model.get("volumes") or {}).items()},
                 "networks": {key: (value or {}).get("name") for key, value in (model.get("networks") or {}).items()},
-                "api_environment": sorted(((model.get("services") or {}).get("api") or {}).get("environment") or {}),
-                "proxy_ports": [f"{p.get('host_ip') + ':' if p.get('host_ip') else ''}{p.get('published')}:{p.get('target')}"
-                                for p in ((model.get("services") or {}).get("proxy") or {}).get("ports") or []]}
+                "mounts": {name: [{"type": item.get("type"), "source": item.get("source"), "target": item.get("target")}
+                                  for item in service.get("volumes") or []] for name, service in services.items()},
+                "ports": {name: [port(item) for item in service.get("ports") or []] for name, service in services.items()},
+                "images": {name: service.get("image") for name, service in services.items()},
+                "origin": {"api_KC_ISSUER": setting("api", "KC_ISSUER"), "keycloak_KC_HOSTNAME": setting("keycloak", "KC_HOSTNAME"),
+                           "api_PUBLIC_ORIGIN": setting("api", "PUBLIC_ORIGIN")},
+                "api_environment": sorted(services.get("api", {}).get("environment") or {}),
+                "proxy_ports": [port(item) for item in services.get("proxy", {}).get("ports") or []]}
 
     def cron(self):
         if self.t["cron"] is None:
@@ -1432,10 +1860,21 @@ class HostOps:
         host, port, _ = self.t["ports"]["maintenance"].split(":")
         return (host, int(port))
 
+    def token(self):
+        require(self.token_reader is not None, "No smoke token configured")
+        return token_valid(self.token_reader())
+
+    def token_since(self, moment, what):
+        """The smoke token, issued (iat) no earlier than the given moment: a login made for this attempt, never an older one."""
+        token = self.token()
+        issued = token_claims(token).get("iat")
+        require(type(issued) is int and issued >= int(parse_utc(moment).timestamp()), "The smoke token was issued before " + what)
+        return token
+
     # ── capture ──
     def baseline(self, intro):
-        model = self.resolved(intro)
-        check_resolved(model, self.t, target_checkout=False)
+        model = self.resolved(intro, maintenance=False)
+        check_resolved(model, self.t, target_checkout=False, maintenance=False, images=intro.plan["previous"]["images"])
         self.secure(self.env_file())
         require(self.compose_digest_now() == intro.plan["compose"]["before_sha256"], "Compose files or .env differ from the plan")
         running, restarting, images = {}, {}, {}
@@ -1452,10 +1891,11 @@ class HostOps:
             _, tagged = self.cron_lines(raw, self.t["cron"]["tags"])
             cron = "matched" if all(len(lines) == 1 and not lines[0].lstrip().startswith("#") for lines in tagged.values()) else "mismatch"
         self.image_revision(intro.plan["previous"])
+        with self.bind():
+            migrations, catalog = ops.migration_rows(self.names["db"]), ops.role_catalog(self.names["db"])
         observed = {"head": self.text(["git", "rev-parse", "HEAD"]),
                     "dirty": bool(self.text(["git", "status", "--porcelain", "--untracked-files=no"])),
-                    "images": images, "running": running, "restarting": restarting,
-                    "migrations": ops.migration_rows(self.names["db"]), "catalog": ops.role_catalog(self.names["db"]),
+                    "images": images, "running": running, "restarting": restarting, "migrations": migrations, "catalog": catalog,
                     "emr_volumes": existing, "api_state_mounts": sum(1 for m in api.get("Mounts") or [] if m.get("Destination") == ops.EMR_STATE),
                     "cron": cron, "members": self.realm_members()}
         pre.check_baseline(observed, intro.plan)
@@ -1465,13 +1905,17 @@ class HostOps:
         # so that a wrong administrator name or password stops here instead of after the first database change.
         keycloak = self.keycloak_selected(intro)
         return {"head": observed["head"], "images": images, "migrations": len(observed["migrations"]), "cron": cron, "free_bytes": free,
-                "members": observed["members"], "keycloak_admin": "verified", "keycloak_before": keycloak}
+                "members": observed["members"], "keycloak_admin": "verified", "keycloak_before": keycloak,
+                "roles": sorted(role["rolname"] for role in catalog["roles"])}
 
     def realm_members(self):
         """Realm kin's people by count only (read-only SQL on the Keycloak database): members as the product counts them
         (keycloak.service.ts excludes service accounts, also by their reserved name), the disabled ones, service accounts."""
         value = json.loads(self.psql(REALM_MEMBERS_SQL, "keycloak"))
         return {key: int(value[key]) for key in ("realm_members", "disabled", "service_accounts")}
+
+    def realm_definitions(self):
+        return json.loads(self.psql(REALM_DEFINITIONS_SQL, "keycloak"))
 
     def freeze(self, intro):
         running = self.running()
@@ -1501,7 +1945,7 @@ class HostOps:
 
     def capture(self, intro, shape, label):
         printed = io.StringIO()
-        with bound_ops(self.repo, self.run), redirect_stdout(printed):
+        with self.bind(), redirect_stdout(printed):
             directory = ops.capture_held(intro.plan["backup_root"], self.resources(), shape=shape, label=label,
                                          config=self.capture_config(),
                                          facts={"origin": self.t["origin"], "project": self.t["project"],
@@ -1509,7 +1953,8 @@ class HostOps:
             _, manifest, digest = ops.validate_held(directory)
         self.records.log(label + ".out", printed.getvalue().encode())
         self.hold(directory, intro.plan_sha256, True)
-        return {"dir": str(directory), "manifest_sha256": digest, "shape": shape, "counts": manifest["counts"]}
+        return {"dir": str(directory), "manifest_sha256": digest, "shape": shape, "counts": manifest["counts"],
+                "created_utc": manifest["created_utc"]}
 
     def capture_b0(self, intro):
         self.freeze(intro)
@@ -1518,15 +1963,18 @@ class HostOps:
         return intro.state["b0"]
 
     def restore_check(self, directory):
-        """ops.rehearse(): fresh networkless containers and volumes, counts, (post) owners/ACL/tablespace and seal recovery."""
+        """ops.rehearse(): fresh networkless containers and volumes; a pre-EMR B0 restored exactly as a rollback would
+        (roles replayed, owners and privileges kept, whole catalog, counts, projection), a post-EMR B1 with owners/ACL,
+        tablespace and seal recovery; the Orthanc index with every attachment."""
         printed = io.StringIO()
-        with bound_ops(self.repo, self.run), redirect_stdout(printed):
+        with self.bind(), redirect_stdout(printed):
             ops.rehearse(directory)
         self.records.log("restore-check-" + Path(directory).name + ".out", printed.getvalue().encode())
         found = sorted(Path(directory).glob("rehearsal-*.json"), key=lambda path: path.stat().st_mtime)
         result = json.loads(found[-1].read_text(encoding="utf-8"))
         require(result.get("success") is True and not result.get("cleanup_failures"), "Same-point restore check failed")
-        return {"success": True, "seconds": result.get("seconds"), "emr": result.get("emr"), "orthanc": result.get("orthanc")}
+        return {"success": True, "seconds": result.get("seconds"), "emr": result.get("emr"), "orthanc": result.get("orthanc"),
+                "catalog": result.get("catalog")}
 
     def restore_check_b0(self, intro):
         intro.state["b0"]["restore_check"] = self.restore_check(intro.state["b0"]["dir"])
@@ -1555,12 +2003,13 @@ class HostOps:
         return out
 
     def public_check_previous(self, intro):
-        return smoke(self.t["origin"], ca_file=self.t["ca_file"], member_rights=False)
+        # Nothing in the database changed: the previous containers resumed as they were (health and refusal only).
+        return health_check(self.t["origin"], ca_file=self.t["ca_file"], member_rights=False)
 
     # ── introduce ──
     def recheck_fence(self, intro):
         observed = self.freeze(intro)
-        with bound_ops(self.repo, self.run):
+        with self.bind():
             ops.validate_held(intro.state["b0"]["dir"], intro.state["b0"]["manifest_sha256"])
         return {"freeze": observed, "b0": "valid"}
 
@@ -1600,7 +2049,7 @@ class HostOps:
         """The account's numeric IDs inside the exact image (never a number assumed from a test). The helper container is
         named and labelled, so even a timed-out client cannot leave an unowned container behind."""
         out = []
-        with bound_ops(self.repo, self.run):
+        with self.bind():
             for flag in ("-u", "-g"):
                 value = ops.temporary_run(["--network", "none", "--read-only", "--entrypoint", "id", image, flag, user], timeout=60)
                 require(re.fullmatch(r"[0-9]{1,5}", value or "") is not None, "Image account IDs are unreadable")
@@ -1637,7 +2086,7 @@ class HostOps:
         intro.save()
         self.write_env(raw)
         require(self.compose_digest_now() == intro.plan["compose"]["after_sha256"], "Target compose files or .env differ from the plan")
-        check_resolved(self.resolved(intro), self.t, target_checkout=True)
+        check_resolved(self.resolved(intro), self.t, target_checkout=True, maintenance=True, images=intro.plan["release"]["images"])
         intro.state["db_recreated"] = True
         intro.save()
         self.compose(["up", "-d", "--no-deps", "--no-build", "--pull", "never", "--force-recreate", "db"], override=self.pins(intro), timeout=180)
@@ -1660,13 +2109,16 @@ class HostOps:
     def provision(self, intro):
         # Provision-first (DR2-09): this database must still be the previous release's, without any EMR object or EMR
         # migration. emr-compose's PROVISION_SQL cannot repair a database migrated before it was provisioned.
-        pre.check_provision_first(ops.role_catalog(self.names["db"]), ops.migration_rows(self.names["db"]), intro.plan)
+        with self.bind():
+            pre.check_provision_first(ops.role_catalog(self.names["db"]), ops.migration_rows(self.names["db"]), intro.plan)
         out = self.one_shot(intro, "emr-provision", [], timeout=300, name="emr-provision")
         require(out["exit"] == 0 and out["container_exit"] == 0, "emr-provision failed")
-        catalog = ops.role_catalog(self.names["db"])
+        with self.bind():
+            catalog = ops.role_catalog(self.names["db"])
         logins = {"kin_emr_owner": False, "kin_runtime": True, **intro.plan["secrets"]["logins"]}
         pre.check_provisioned(catalog, intro.plan["storage"], logins)
-        return {"exit": out["exit"], "logs": out["logs"], "roles": sorted(role["rolname"] for role in catalog["roles"])}
+        return {"exit": out["exit"], "container_exit": out["container_exit"], "logs": out["logs"],
+                "roles": sorted(role["rolname"] for role in catalog["roles"])}
 
     IMPORT_BOOKKEEPING = ("updatedAt",)
 
@@ -1678,10 +2130,11 @@ class HostOps:
         before = json.loads((b0 / "projection.json").read_text(encoding="utf-8"))
         exempt = {"_prisma_migrations", *intro.plan["projection_exempt"]}
         before = {name: value for name, value in before.items() if name not in exempt}
-        after = ops.projection(self.names["db"], columns={name: value["columns"] for name, value in before.items()})
-        pre.check_projection_preserved(before, after)
-        reduced = {name: [column for column in value["columns"] if column not in self.IMPORT_BOOKKEEPING] for name, value in before.items()}
-        reference = ops.projection(self.names["db"], columns={name: columns for name, columns in reduced.items() if columns})
+        with self.bind():
+            after = ops.projection(self.names["db"], columns={name: value["columns"] for name, value in before.items()})
+            pre.check_projection_preserved(before, after)
+            reduced = {name: [column for column in value["columns"] if column not in self.IMPORT_BOOKKEEPING] for name, value in before.items()}
+            reference = ops.projection(self.names["db"], columns={name: columns for name, columns in reduced.items() if columns})
         intro.state["import_reference_sha256"] = intro.records.put("projection-before-import.json", reference)
         intro.save()
         return {"tables": len(before)}
@@ -1691,7 +2144,8 @@ class HostOps:
         raw = intro.records.read(path)
         require(sha256_bytes(raw) == intro.state.get("import_reference_sha256"), "Import reference projection changed")
         reference = json.loads(raw)
-        after = ops.projection(self.names["db"], columns={name: value["columns"] for name, value in reference.items()})
+        with self.bind():
+            after = ops.projection(self.names["db"], columns={name: value["columns"] for name, value in reference.items()})
         pre.check_projection_preserved(reference, after)
         return {"tables": len(reference), "ignored_columns": list(self.IMPORT_BOOKKEEPING)}
 
@@ -1699,13 +2153,14 @@ class HostOps:
         timeout = max(60, min(3600, int(intro.deadline_left())))
         out = self.one_shot(intro, "api-migrate", [], timeout=timeout, name="api-migrate")
         require(out["exit"] == 0 and out["container_exit"] == 0, "Installer migration failed")
-        rows = ops.migration_rows(self.names["db"])
-        pre.check_migration_rows(rows, intro.plan["migrations"]["after"])
-        pre.check_emr_catalog(ops.emr_catalog(self.names["db"], "kin"))
+        with self.bind():
+            rows = ops.migration_rows(self.names["db"])
+            pre.check_migration_rows(rows, intro.plan["migrations"]["after"])
+            pre.check_emr_catalog(ops.emr_catalog(self.names["db"], "kin"))
         placement = json.loads(self.psql(PLACEMENT_SQL))
         pre.check_placement(placement)
-        return {"exit": out["exit"], "logs": out["logs"], "migrations": len(rows), "placement": len(placement),
-                "preserved": self.preserved(intro)}
+        return {"exit": out["exit"], "container_exit": out["container_exit"], "logs": out["logs"], "migrations": len(rows),
+                "placement": len(placement), "preserved": self.preserved(intro)}
 
     def serverinfo(self, intro):
         env = parse_env(self.env_file().read_bytes())
@@ -1722,6 +2177,7 @@ class HostOps:
         return selected
 
     def member_import(self, intro):
+        realm_before = self.realm_definitions()
         roster = self.helper(intro, ROSTER_SCRIPT, name="kc-roster")["users"]
         # The roster the product reads must be the realm the plan observed: the same members, the same disabled ones.
         counted = self.realm_members()
@@ -1729,21 +2185,26 @@ class HostOps:
         pre.check_member_counts({"realm_members": len(roster), "disabled": sum(1 for user in roster if not user["enabled"]),
                                  "service_accounts": counted["service_accounts"]}, intro.plan["members"])
         out = self.one_shot(intro, "api", ["prisma/import-member-rights.cjs"], timeout=600, entrypoint="node", name="member-import")
-        require(out["exit"] == 0 and b"Member rights import completed" in out["stdout"], "Member rights import failed")
+        require(out["exit"] == 0 and out["container_exit"] == 0 and b"Member rights import completed" in out["stdout"], "Member rights import failed")
         retried = False
         rights = self.helper(intro, RIGHTS_SCRIPT, name="rights")
         if any(change["state"] != "done" for change in rights["legacy"]):
             # The reviewed explicit recovery of the CLI, once; still unconfirmed is a STOP, never a pass.
             retry = self.one_shot(intro, "api", ["prisma/import-member-rights.cjs", "--retry-roster"], timeout=600,
                                   entrypoint="node", name="member-retry")
-            retried = {"exit": retry["exit"], "logs": retry["logs"]}
+            retried = {"exit": retry["exit"], "container_exit": retry["container_exit"], "logs": retry["logs"]}
+            require(retry["exit"] == 0 and retry["container_exit"] == 0, "The member roster retry left unconfirmed publications")
             rights = self.helper(intro, RIGHTS_SCRIPT, name="rights")
         after = self.helper(intro, ROSTER_SCRIPT, name="kc-roster")["users"]
+        realm_after = self.realm_definitions()
         state = "ready" if rights["markers"] == ["realm-v1"] else "pending"
         pre.check_member_import({"markers": rights["markers"], "state": state, "roster_before": roster, "rights": rights["rights"],
-                                 "legacy_enable": rights["legacy"], "roster_after": after})
-        return {"members": len(roster), "legacy_enable": len(rights["legacy"]), "retried": retried,
-                "logs": out["logs"], "preserved": self.preserved_after_import(intro)}
+                                 "legacy_enable": rights["legacy"], "roster_after": after, "changes": rights["changes"],
+                                 "isolated": rights["isolated"], "realm_before": realm_before, "realm_after": realm_after})
+        intro.state["imported_at"] = utc_now().isoformat()
+        intro.save()
+        return {"members": len(roster), "legacy_enable": len(rights["legacy"]), "retried": retried, "exit": out["exit"],
+                "container_exit": out["container_exit"], "logs": out["logs"], "preserved": self.preserved_after_import(intro)}
 
     def api(self, intro):
         self.compose(["up", "--no-deps", "--no-build", "--pull", "never", "--force-recreate", "--no-start", "api"],
@@ -1811,25 +2272,28 @@ class HostOps:
             self.db_ready(120, "Database did not become ready")
             reverted.append("db")
         intro.save()
-        catalog = ops.role_catalog(self.names["db"])
+        with self.bind():
+            catalog = ops.role_catalog(self.names["db"])
         require(not {role["rolname"] for role in catalog["roles"]} & set(pre.EMR_ROLES), "EMR roles exist after a revert")
         return {"reverted": reverted}
 
     # ── verify ──
-    def token(self):
-        require(self.token_reader is not None, "No smoke token configured")
-        return token_valid(self.token_reader())
+    def frame(self, intro):
+        return intro.plan["smoke"]["frame"]
 
     def fenced_smoke(self, intro):
-        result = smoke(self.t["origin"], connect=self.maintenance(), ca_file=self.t["ca_file"], token=self.token(),
-                       frame=intro.plan["smoke"]["frame"])
-        check_resolved(self.resolved(intro), self.t, target_checkout=True)
+        token = self.token_since(intro.state["imported_at"], "the member import")
+        result = smoke(self.t["origin"], connect=self.maintenance(), ca_file=self.t["ca_file"], token=token, frame=self.frame(intro),
+                       worklist_uid=frame_study(intro.plan))
+        require(smoke_passed(result), "The fenced smoke did not run every check")
+        check_resolved(self.resolved(intro), self.t, target_checkout=True, maintenance=True, images=intro.plan["release"]["images"])
         return result
 
     def probe(self, intro):
         import ops_emr_probe as probe
         result = probe.run(self, intro)
-        intro.state["probe"] = {"event_id": result["event_id"], "receipt": result["receipt"], "evidence_sha256": result["evidence_sha256"]}
+        intro.state["probe"] = {"event_id": result["event_id"], "receipt": result["receipt"], "evidence_sha256": result["evidence_sha256"],
+                                "added": result["added"], "replay_duplicates": result["replay_duplicates"], "restart": result["restart"]}
         intro.save()
         return intro.state["probe"]
 
@@ -1860,14 +2324,16 @@ class HostOps:
         pre.check_introduced_api(api, name=self.names["api"], image=intro.plan["release"]["images"]["api"], release=intro.plan["release"]["sha"],
                                  working_dir=str(self.repo), state_volume=self.t["volumes"]["emr_state"])
         model = self.resolved(intro)
+        check_resolved(model, self.t, target_checkout=True, maintenance=True, images=intro.plan["release"]["images"])
         image = json.loads(self.text(["docker", "image", "inspect", intro.plan["release"]["images"]["api"]]))[0]
         image_names = {item.split("=", 1)[0] for item in (image.get("Config") or {}).get("Env") or []}
         names = {item.split("=", 1)[0] for item in api["Config"].get("Env") or []}
         require(names - image_names == set(model["api_environment"]) - image_names, "API environment names differ from the release")
-        pre.check_migration_rows(ops.migration_rows(self.names["db"]), intro.plan["migrations"]["after"])
-        # Retention stays OFF: its role (and the reader) keep the planned login state; nothing was granted since L-06b.
-        logins = {"kin_emr_owner": False, "kin_runtime": True, **intro.plan["secrets"]["logins"]}
-        pre.check_provisioned(ops.role_catalog(self.names["db"]), intro.plan["storage"], logins)
+        with self.bind():
+            pre.check_migration_rows(ops.migration_rows(self.names["db"]), intro.plan["migrations"]["after"])
+            # Retention stays OFF: its role (and the reader) keep the planned login state; nothing was granted since L-06b.
+            logins = {"kin_emr_owner": False, "kin_runtime": True, **intro.plan["secrets"]["logins"]}
+            pre.check_provisioned(ops.role_catalog(self.names["db"]), intro.plan["storage"], logins)
         pre.check_keycloak_serverinfo(self.keycloak_selected(intro))
         require(not self.one_shots_alive(intro), "A one-shot worker of this release exists")
         return {"images": images, "api_environment": sorted(names - image_names), "backup": self.backup_readiness(intro)}
@@ -1919,7 +2385,10 @@ class HostOps:
         return out
 
     def public_smoke(self, intro):
-        return smoke(self.t["origin"], ca_file=self.t["ca_file"], token=self.token(), frame=intro.plan["smoke"]["frame"])
+        token = self.token_since(intro.state["imported_at"], "the member import")
+        result = smoke(self.t["origin"], ca_file=self.t["ca_file"], token=token, frame=self.frame(intro), worklist_uid=frame_study(intro.plan))
+        require(smoke_passed(result), "The public smoke did not run every check")
+        return result
 
     # ── rollback ──
     def classify(self, intro):
@@ -1950,7 +2419,7 @@ class HostOps:
                          output=handle, timeout=1800)
         with open(directory / "cluster-roles.sql", "wb") as handle:
             self.cmd(["docker", "exec", self.names["db"], "pg_dumpall", "-U", "kin", "--roles-only", "--no-role-passwords"], output=handle)
-        with bound_ops(self.repo, self.run):
+        with self.bind():
             (directory / "catalog.json").write_text(json.dumps(ops.role_catalog(self.names["db"]), sort_keys=True) + "\n", encoding="utf-8")
             (directory / "migrations.json").write_text(json.dumps(ops.migration_rows(self.names["db"])) + "\n", encoding="utf-8")
             if has_state:
@@ -1973,30 +2442,55 @@ class HostOps:
         intro.save()
         return intro.state["bfail"]
 
+    def remove_container(self, role):
+        """The failed state's container goes (stopped first); its volumes stay - Bfail recorded every one of them."""
+        item = self.inspect(role)
+        if item is None:
+            return False
+        if item["State"]["Running"]:
+            self.cmd(["docker", "stop", "--time", "45", self.names[role]], timeout=120, mutating=True)
+        self.cmd(["docker", "rm", self.names[role]], timeout=60, mutating=True)
+        return True
+
+    def recovery_project(self, intro):
+        base = self.t["project"][:52].rstrip("-_")
+        return base + "-rb" + uuid.uuid4().hex[:8]
+
     def restore_b0(self, intro):
+        """B0 into FRESH recovery volumes of a recovery Compose project, never over the migrated database. The checkout's
+        own configuration then names that project (COMPOSE_PROJECT_NAME in .env): any later compose command of this
+        checkout - the API-only runner, an operator's recreate - resolves pg and Orthanc to the recovery volumes, never
+        to the failed ones, which stay detached and kept under their original names."""
         b0 = Path(intro.state["b0"]["dir"])
-        with bound_ops(self.repo, self.run):
+        with self.bind():
             _, manifest, _ = ops.validate_held(b0, intro.state["b0"]["manifest_sha256"])
         if intro.state["checkout"] != "previous":
             self.checkout(intro, "previous")
-        self.write_env((b0 / ".env").read_bytes())
+        previous_env = (b0 / ".env").read_bytes()
+        self.write_env(previous_env)
         require(self.compose_digest_now() == intro.plan["compose"]["before_sha256"], "Previous configuration was not restored")
-        suffix = uuid.uuid4().hex[:8]
-        recovery = {"pg": self.t["volumes"]["pg"] + "-recovery-" + suffix, "orthanc": self.t["volumes"]["orthanc"] + "-recovery-" + suffix}
-        # Durable before creation: a failed restore still names exactly the volumes it made.
-        intro.state["recovery"] = {**recovery, "override_sha256": None}
+        project = self.recovery_project(intro)
+        recovery = {"project": project, "pg": project + "_pg-db", "orthanc": project + "_orthanc-db", "persisted": False}
+        for name in (recovery["pg"], recovery["orthanc"]):
+            require(self.cmd(["docker", "volume", "inspect", name], check=False).returncode != 0, "A recovery volume name is taken: " + name)
+        # Durable before creation: a failed restore still names exactly the project and volumes it made.
+        intro.state["recovery"] = recovery
         intro.save()
-        for name in recovery.values():
-            self.cmd(["docker", "volume", "create", "--label", "kin.ops.recovery=" + intro.plan_sha256[:16], name], mutating=True)
-        override = self.pins(intro, recovery=recovery)
-        intro.state["recovery"]["override_sha256"] = intro.records.put("recovery-override.json", {"yaml": override})
+        for key, name in (("pg-db", recovery["pg"]), ("orthanc-db", recovery["orthanc"])):
+            self.cmd(["docker", "volume", "create", "--label", "com.docker.compose.project=" + project, "--label", "com.docker.compose.volume=" + key,
+                      "--label", "kin.ops.recovery=" + intro.plan_sha256[:16], name], mutating=True)
+        self.remove_container("db")
+        recovery_env = set_env_line(previous_env, "COMPOSE_PROJECT_NAME", project)
+        self.write_env(recovery_env)
+        recovery.update(env_sha256=sha256_bytes(recovery_env), compose_sha256=self.compose_digest_now())
         intro.save()
-        self.compose(["up", "-d", "--no-deps", "--no-build", "--pull", "never", "--force-recreate", "db"], override=override, timeout=180)
+        self.compose(["up", "-d", "--no-deps", "--no-build", "--pull", "never", "db"], override=self.pins(intro), timeout=180, project=project)
         self.db_ready(180, "Recovery database did not become ready")
         db = self.inspect("db")
         require({m.get("Destination"): m.get("Name") for m in db.get("Mounts") or []}.get("/var/lib/postgresql/data") == recovery["pg"],
                 "Recovery database is not on its fresh volume")
-        self.restore_dumps(b0)
+        with self.bind():
+            restored = ops.restore_pre_snapshot(self.names["db"], b0)
         with open(b0 / "orthanc.tgz", "rb") as handle:
             self.cmd(["docker", "run", "--rm", "-i", "--network", "none", "--label", "kin.ops.recovery=" + intro.plan_sha256[:16],
                       "--mount", "type=volume,source=" + recovery["orthanc"] + ",target=/restore", "--entrypoint", "tar",
@@ -2005,67 +2499,136 @@ class HostOps:
                                         "type=volume,source=" + recovery["orthanc"] + ",target=/restore,readonly", "--entrypoint", "python3",
                                         intro.plan["previous"]["images"]["orthanc"], "-c", ops.SQLITE_CHECK], timeout=600))
         require(checked.get("integrity") == "ok", "Restored Orthanc index failed")
-        with bound_ops(self.repo, self.run):
+        with self.bind():
             for database in ("kin", "keycloak"):
                 require(ops.counts(self.names["db"], database, "kin") == manifest["counts"][database], "Restored row counts differ: " + database)
             pre.check_migration_rows(ops.migration_rows(self.names["db"]), intro.plan["migrations"]["before"])
             before = json.loads((b0 / "projection.json").read_text(encoding="utf-8"))
             pre.check_projection_preserved(before, ops.projection(self.names["db"], columns={k: v["columns"] for k, v in before.items()}))
             roles = {role["rolname"] for role in ops.role_catalog(self.names["db"])["roles"]}
-            require(not roles & set(pre.EMR_ROLES), "EMR roles exist in the restored cluster")
-        return {"recovery": recovery, "orthanc": checked}
-
-    def restore_dumps(self, directory):
-        """A pre-EMR snapshot into a freshly initialised cluster: kin into its empty database (created by the image's init
-        as POSTGRES_DB), keycloak created by the dump. Owners and privileges are restored, never stripped."""
-        source = json.loads((Path(directory) / "catalog.json").read_text(encoding="utf-8"))
-        fresh = {role["rolname"] for role in ops.role_catalog(self.names["db"])["roles"]}
-        require({role["rolname"] for role in source["roles"]} <= fresh, "The snapshot needs roles the fresh cluster lacks")
-        require(self.psql("SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public';") == "0"
-                and self.psql("SELECT count(*) FROM pg_database WHERE datname='keycloak';") == "0", "The restore target is not a fresh cluster")
-        for database, args in (("kin", ["-d", "kin"]), ("keycloak", ["-d", "postgres", "--create"])):
-            with open(Path(directory) / (database + ".dump"), "rb") as handle:
-                self.cmd(["docker", "exec", "-i", self.names["db"], "pg_restore", "-U", "kin", *args, "--exit-on-error"],
-                         stdin=handle, timeout=1800, mutating=True)
+        require(not roles & set(pre.EMR_ROLES), "EMR roles exist in the restored cluster")
+        return {"recovery": recovery, "orthanc": checked, "catalog": restored}
 
     def previous_services(self, intro):
-        override = self.pins(intro, recovery=intro.state["recovery"])
+        recovery = intro.state["recovery"]
+        override = self.pins(intro)
         for role in ("keycloak", "orthanc", "api", "proxy"):
-            self.compose(["up", "-d", "--no-deps", "--no-build", "--pull", "never", "--force-recreate", role], override=override, timeout=240)
+            self.remove_container(role)
+            self.compose(["up", "-d", "--no-deps", "--no-build", "--pull", "never", role], override=override, timeout=240, project=recovery["project"])
+        # Compose's own image name of each built service of the recovery project names the previous image, so an ordinary
+        # `compose up` of this checkout uses exactly the previous API and proxy.
+        for role in ("api", "proxy"):
+            self.cmd(["docker", "image", "tag", intro.plan["previous"]["images"][role], recovery["project"] + "-" + role + ":latest"], mutating=True)
         self.api_health(member_rights=False)
+        self.wait(lambda: self.proxy_observed(intro)["running"], 60, "Proxy did not start")
         orthanc = self.inspect("orthanc")
         require({m.get("Destination"): m.get("Name") for m in orthanc.get("Mounts") or []}.get("/var/lib/orthanc/db")
-                == intro.state["recovery"]["orthanc"], "Orthanc is not on its recovery volume")
+                == recovery["orthanc"], "Orthanc is not on its recovery volume")
         api = self.inspect("api")
         require(api["Image"] == intro.plan["previous"]["images"]["api"]
                 and not any(m.get("Destination") == ops.EMR_STATE for m in api.get("Mounts") or []), "Previous API differs or holds EMR state")
-        return {"images": {role: self.inspect(role)["Image"] for role in ROLES}}
+        images = {role: self.inspect(role)["Image"] for role in ROLES}
+        require(images == intro.plan["previous"]["images"], "Recovery services do not run the previous images")
+        return {"images": images, "project": recovery["project"]}
 
-    def verify_and_reopen(self, intro):
-        fenced = smoke(self.t["origin"], connect=self.maintenance(), ca_file=self.t["ca_file"], member_rights=False)
-        cron = self.restore_cron(intro)
-        override = self.pins(intro, recovery=intro.state["recovery"], maintenance=False)
-        self.compose(["up", "-d", "--no-deps", "--no-build", "--pull", "never", "--force-recreate", "proxy"], override=override, timeout=180)
+    def recovery_persisted(self, intro):
+        """RB-04a: what an ordinary compose command of this checkout resolves to (no project flag, no pins) is the
+        recovery project, its pg/Orthanc volumes and the previous images; every service runs in that project; the
+        failed volumes exist with their recorded identities and no container uses them. Recorded as the handover."""
+        recovery = intro.state["recovery"]
+        model = self.resolved(intro, pinned=False)
+        check_resolved(model, self.t, target_checkout=False, maintenance=False, recovery=recovery)
+        for role in ("api", "proxy"):
+            tagged = json.loads(self.text(["docker", "image", "inspect", recovery["project"] + "-" + role + ":latest"]))[0]
+            require(tagged.get("Id") == intro.plan["previous"]["images"][role], "The recovery project's " + role + " image is not the previous one")
+        for role in ROLES:
+            item = self.inspect(role)
+            require(item and item["State"]["Running"] and item["Image"] == intro.plan["previous"]["images"][role]
+                    and (item["Config"].get("Labels") or {}).get("com.docker.compose.project") == recovery["project"],
+                    "A service does not run the previous image in the recovery project: " + role)
+        failed = {}
+        for key, identity in (intro.state["bfail"]["volumes"] or {}).items():
+            require(self.volume_identity(identity["name"]) == identity, "A failed volume changed: " + key)
+            users = self.text(["docker", "ps", "-a", "--filter", "volume=" + identity["name"], "--format", "{{.Names}}"])
+            require(not users.strip(), "A failed volume is attached to a container: " + key)
+            failed[key] = identity
+        require(self.compose_digest_now() == recovery["compose_sha256"], "The recovery configuration changed")
+        baseline = {"schema": 1, "kind": "recovery-baseline", "plan_sha256": intro.plan_sha256, "project": recovery["project"],
+                    "volumes": {"pg": recovery["pg"], "orthanc": recovery["orthanc"]}, "images": intro.plan["previous"]["images"],
+                    "previous_sha": intro.plan["previous"]["sha"], "env_sha256": recovery["env_sha256"],
+                    "compose_sha256": recovery["compose_sha256"], "failed_volumes_kept": failed,
+                    "bfail_manifest_sha256": intro.state["bfail"]["manifest_sha256"],
+                    "handover": ["The checkout's .env names COMPOSE_PROJECT_NAME=" + recovery["project"] + "; keep it.",
+                                 "An API-only deployment needs its policy's compose_sha256 set to compose_sha256 above.",
+                                 "The failed volumes are kept for analysis; nothing in this mode deletes or reattaches them."]}
+        recovery["baseline_sha256"] = intro.records.put("recovery-baseline.json", baseline)
+        recovery["persisted"] = True
+        intro.save()
+        return {"project": recovery["project"], "volumes": baseline["volumes"], "failed_volumes_kept": sorted(failed),
+                "baseline_sha256": recovery["baseline_sha256"]}
+
+    def previous_smoke(self, intro, *, connect):
+        token = self.token_since(intro.state["restored_at"], "this rollback restored the previous version")
+        frame = self.frame(intro)
+        result = smoke(self.t["origin"], connect=connect, ca_file=self.t["ca_file"], token=token, frame=frame,
+                       worklist_uid=frame_study(intro.plan), member_rights=False)
+        require(smoke_passed(result), "The previous-version smoke did not run every check")
+        return result
+
+    def fenced_previous_smoke(self, intro):
+        """RB-04b: the previous version proves itself before anything opens: a login made after the restore, the worklist
+        listing the plan's study and the exact frame bytes, through the maintenance ingress."""
+        result = self.previous_smoke(intro, connect=self.maintenance())
+        frame = self.frame(intro)
+        intro.state["rollback_smoke"] = {"member": True, "token_after_restore": True, "worklist_uid": frame_study(intro.plan),
+                                         "frame_sha256": frame["sha256"], "frame_bytes": frame["bytes"]}
+        intro.save()
+        return result
+
+    def restore_jobs_after_rollback(self, intro):
+        require(intro.state.get("rollback_smoke"), "The previous-version smoke has not passed")
+        return self.restore_cron(intro)
+
+    def reopen_previous_ingress(self, intro):
+        require(intro.state.get("rollback_smoke") and intro.state["recovery"].get("persisted"), "The previous version has not proved itself")
+        self.compose(["up", "-d", "--no-deps", "--no-build", "--pull", "never", "--force-recreate", "proxy"],
+                     override=self.pins(intro, maintenance=False), timeout=180, project=intro.state["recovery"]["project"])
         self.wait(lambda: self.proxy_observed(intro)["running"], 60, "Proxy did not start")
-        public = smoke(self.t["origin"], ca_file=self.t["ca_file"], member_rights=False)
-        return {"fenced": fenced, "public": public, "cron": cron, "recovery_override_sha256": intro.state["recovery"]["override_sha256"]}
+        observed = self.proxy_observed(intro)
+        pre.check_proxy(observed, intro.plan["previous"]["images"]["proxy"])
+        ports = self.resolved_public(intro)
+        require(sorted(ports) == sorted(self.t["ports"]["public"]), "Public ports differ from the target manifest")
+        return {"proxy": observed, "ports": ports}
+
+    def public_previous_smoke(self, intro):
+        return self.previous_smoke(intro, connect=None)
 
     # ── rehearsal seed ──
     def seed_check(self, intro):
+        """S-01, before any change: the seed is a verified pre-EMR B0 copy this tool can rebuild exactly; the clone's own
+        configuration is the planned one (digest), resolves to exactly the target manifest (names, volumes and mounts,
+        networks, ports, origin, images) and carries its own secrets and origin; no clone resource exists yet."""
         seed = intro.plan["seed"]
-        with bound_ops(self.repo, self.run):
+        with self.bind():
             _, manifest, digest = ops.validate_held(seed["b0_dir"], seed["b0_manifest_sha256"])
         require(manifest["shape"] == "pre", "The seed is not a pre-EMR snapshot")
+        ops.supported_pre_catalog(json.loads((Path(seed["b0_dir"]) / "catalog.json").read_text(encoding="utf-8")))
+        self.secure(self.env_file())
         source = parse_env((Path(seed["b0_dir"]) / ".env").read_bytes())
         clone = parse_env(self.env_file().read_bytes())
         shared = [name for name in CLONE_SECRETS if name in source and name in clone and source[name] == clone[name]]
         require(not shared, "The clone reuses a source secret")
+        require(all(clone.get(name) for name in CLONE_SECRETS if source.get(name)), "The clone lacks its own value for a source secret")
+        require(clone.get("PUBLIC_ORIGIN") == self.t["origin"], "The clone's PUBLIC_ORIGIN is not the target origin")
+        require(self.compose_digest_now() == intro.plan["compose"]["before_sha256"], "Clone compose files or .env differ from the plan")
+        model = self.resolved(intro, maintenance=False)
+        check_resolved(model, self.t, target_checkout=False, maintenance=False, images=intro.plan["previous"]["images"])
         require(not any(self.inspect(role) for role in ROLES), "Clone containers already exist")
         require(not any(self.cmd(["docker", "volume", "inspect", name], check=False).returncode == 0 for name in self.t["volumes"].values()),
                 "Clone volumes already exist")
         require(intro.state["checkout"] == "previous" and self.text(["git", "rev-parse", "HEAD"]) == intro.plan["previous"]["sha"],
                 "Clone checkout is not the previous release")
-        return {"source_manifest_sha256": digest, "secrets_isolated": True}
+        return {"source_manifest_sha256": digest, "secrets_isolated": True, "resolved": "target manifest"}
 
     def keycloak_isolation(self, intro, source_env, clone_env, source_origin):
         """The restored realm keeps every member/role/group row; only the clone's client secrets, origin and mail change."""
@@ -2106,12 +2669,15 @@ class HostOps:
 
     def seed_restore(self, intro):
         seed = Path(intro.plan["seed"]["b0_dir"])
-        with bound_ops(self.repo, self.run):
+        with self.bind():
             _, manifest, _ = ops.validate_held(seed, intro.plan["seed"]["b0_manifest_sha256"])
         override = self.pins(intro)
         self.compose(["up", "-d", "--no-deps", "--no-build", "--pull", "never", "db"], override=override, timeout=180)
         self.db_ready(180, "Clone database did not become ready")
-        self.restore_dumps(seed)
+        with self.bind():
+            restored = ops.restore_pre_snapshot(self.names["db"], seed)
+            for database in ("kin", "keycloak"):
+                require(ops.counts(self.names["db"], database, "kin") == manifest["counts"][database], "Seeded row counts differ: " + database)
         source_env, clone_env = parse_env((seed / ".env").read_bytes()), parse_env(self.env_file().read_bytes())
         isolation = self.keycloak_isolation(intro, source_env, clone_env, source_env.get("PUBLIC_ORIGIN", "https://pacs.koreaimagingnetwork.com"))
         # The restored master realm keeps the source administrator (whose password the clone must not know); the clone
@@ -2119,18 +2685,17 @@ class HostOps:
         admin = self.one_shot(intro, "keycloak", ["bootstrap-admin", "user", "--username", self.t["keycloak_admin"],
                                                  "--password:env", "KC_BOOTSTRAP_ADMIN_PASSWORD", "--no-prompt"],
                               timeout=600, entrypoint="/opt/keycloak/bin/kc.sh", name="kc-bootstrap-admin")
-        require(admin["exit"] == 0, "The clone Keycloak administrator could not be created")
+        require(admin["exit"] == 0 and admin["container_exit"] == 0, "The clone Keycloak administrator could not be created")
         isolation["administrator"] = {"created": self.t["keycloak_admin"], "logs": admin["logs"]}
         self.compose(["up", "--no-deps", "--no-build", "--pull", "never", "--no-start", "orthanc"], override=override, timeout=180)
         with open(seed / "orthanc.tgz", "rb") as handle:
             self.cmd(["docker", "run", "--rm", "-i", "--network", "none", "--mount", "type=volume,source=" + self.t["volumes"]["orthanc"] + ",target=/restore",
                       "--entrypoint", "tar", intro.plan["previous"]["images"]["db"], "-xzf", "-", "-C", "/restore"], stdin=handle, timeout=1800, mutating=True)
-        with bound_ops(self.repo, self.run):
-            require(ops.counts(self.names["db"], "kin", "kin") == manifest["counts"]["kin"], "Seeded row counts differ")
+        with self.bind():
             pre.check_migration_rows(ops.migration_rows(self.names["db"]), intro.plan["migrations"]["before"])
             before = json.loads((seed / "projection.json").read_text(encoding="utf-8"))
             pre.check_projection_preserved(before, ops.projection(self.names["db"], columns={k: v["columns"] for k, v in before.items()}))
-        intro.state["seed"] = {"source_manifest_sha256": intro.plan["seed"]["b0_manifest_sha256"], "isolation": isolation}
+        intro.state["seed"] = {"source_manifest_sha256": intro.plan["seed"]["b0_manifest_sha256"], "isolation": isolation, "catalog": restored}
         intro.save()
         return intro.state["seed"]
 
@@ -2142,7 +2707,7 @@ class HostOps:
         self.api_health(member_rights=False)
         self.wait(lambda: self.proxy_observed(intro)["running"], 60, "Proxy did not start")
         self.reload_proxy()
-        return {"public": smoke(self.t["origin"], ca_file=self.t["ca_file"], member_rights=False)}
+        return {"public": health_check(self.t["origin"], ca_file=self.t["ca_file"], member_rights=False)}
 
     def write_receipt(self, intro):
         receipt = make_receipt(intro)
@@ -2191,12 +2756,38 @@ def policy_valid(policy):
 
 
 class HostRecords(Records):
+    """The run records of one plan under the protected state directory: root-owned 0700 directories (the plan's run
+    directory and its logs/) that this class creates itself, 0600 files written without following links."""
+
     def __init__(self, directory, host):
         super().__init__(directory)
         self.host = host
 
+    def ensure(self, directory):
+        """Create a records directory (the run directory itself or one level below it) as 0700 if it is missing, then
+        accept it only as ops_deploy_host.protected accepts a private directory: no link, root-owned, nothing for group
+        or others, along the whole path. A new directory is made durable in its parent."""
+        directory = Path(directory)
+        require(directory == self.directory or directory.parent == self.directory, "Records stay in the plan's run directory")
+        try:
+            os.mkdir(directory, 0o700)
+            created = True
+        except FileExistsError:
+            created = False
+        self.host.protected(directory, private=True, directory=True)
+        if created:
+            self.host.sync_dir(directory.parent)
+
+    def open_lease(self, path):
+        descriptor = os.open(str(path), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        info = os.fstat(descriptor)
+        if not (info.st_uid == 0 and info.st_nlink == 1 and not info.st_mode & 0o077):
+            os.close(descriptor)
+            raise Stop("The phase lease file is not private")
+        return descriptor
+
     def write(self, path, raw, *, append=False):
-        self.host.protected(path.parent, private=True, directory=True)
+        self.ensure(path.parent)
         if append:
             with open(path, "ab", opener=lambda name, flags: os.open(name, flags | os.O_NOFOLLOW, 0o600)) as stream:
                 stream.write(raw)
@@ -2258,10 +2849,8 @@ class IntroductionHost:
         # One use: a replayed request with the same bytes can never run a phase twice.
         host.write_secure(self.state / "emr-used" / (digest + ".json"), {"request_sha256": digest, "consumed_at": int(time.time())},
                           exclusive=True)
-        runs = self.state / "emr-runs" / request["plan_sha256"]
-        if not runs.exists():
-            runs.mkdir(mode=0o700)
-        records = HostRecords(runs, host)
+        records = HostRecords(self.state / "emr-runs" / request["plan_sha256"], host)
+        records.ensure(records.directory)
         runner = Runner(self.repository, fixed=True, base_env=host.ENV, owner=self.owner)
         token_file = self.policy["smoke"]["token_file"]
         staged = self.state / "emr-staged" / (plan["secrets"]["env_next_sha256"] + ".env")
@@ -2330,7 +2919,9 @@ def main(argv=None):
     receipt.add_argument("receipt", type=Path)
     receipt.add_argument("plan", type=Path)
     receipt.add_argument("--b0-manifest-sha256", required=True)
+    receipt.add_argument("--b0-created-utc")
     receipt.add_argument("--policy", type=Path, required=True)
+    receipt.add_argument("--bundle", type=Path, help="The rehearsal's run directory: re-verify every phase result and the journal")
     args = parser.parse_args(argv)
     try:
         if args.command == "example":
@@ -2370,8 +2961,11 @@ def main(argv=None):
         else:
             plan = plan_valid(decode(args.plan.read_bytes()))
             policy = policy_valid(decode(args.policy.read_bytes()))
-            receipt_valid(decode(args.receipt.read_bytes()), plan, args.b0_manifest_sha256, policy["production"])
-            print(json.dumps({"valid": True}))
+            receipt = decode(args.receipt.read_bytes())
+            receipt_valid(receipt, plan, args.b0_manifest_sha256, policy["production"], b0_created_utc=args.b0_created_utc)
+            if args.bundle:
+                bundle_valid(receipt, args.bundle)
+            print(json.dumps({"valid": True, "receipt_sha256": receipt_sha256(receipt), "bundle": bool(args.bundle)}))
     except (Stop, OSError, ValueError, subprocess.CalledProcessError) as error:
         print(json.dumps({"valid": False, "error": code_of(error)}), file=sys.stderr)
         return 1
