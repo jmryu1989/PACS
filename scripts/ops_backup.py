@@ -746,7 +746,8 @@ ROLE_CATALOG_SQL = """SET TimeZone='UTC'; SET DateStyle='ISO, YMD'; SELECT json_
 # column privileges (only columns that carry any), types and domains (not the automatic array and table row types), large
 # objects, publications with their tables, event triggers, foreign-data wrappers, foreign servers and user mappings;
 # IRT2-16/24 add the definitions of views, functions and triggers (as hashes), trigger enabled state and each sequence's
-# state (pg_sequence_last_value: NULL until called).
+# state - its own last_value and is_called, read from the sequence itself (pg_sequence_last_value hides a RESTART that
+# was never called) - and its parameters.
 OBJECT_CATALOG_SQL = """SELECT json_build_object(
   'schemas', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
     (SELECT nspname::text AS name, pg_get_userbyid(nspowner) AS owner, """ + _acl("nspacl", "'n'::\"char\"", "nspowner") + """ AS acl
@@ -755,7 +756,10 @@ OBJECT_CATALOG_SQL = """SELECT json_build_object(
     (SELECT n.nspname || '.' || c.relname AS name, c.relkind::text AS kind, pg_get_userbyid(c.relowner) AS owner,
      """ + _acl("c.relacl", "(CASE WHEN c.relkind = 'S' THEN 's' ELSE 'r' END)::\"char\"", "c.relowner") + """ AS acl,
      CASE WHEN c.relkind IN ('v', 'm') THEN md5(pg_get_viewdef(c.oid)) END AS definition,
-     CASE WHEN c.relkind = 'S' THEN pg_sequence_last_value(c.oid)::text END AS sequence_last_value
+     CASE WHEN c.relkind = 'S' THEN (SELECT (xpath('/row/last_value/text()', x))[1]::text || ' ' || (xpath('/row/is_called/text()', x))[1]::text
+       FROM query_to_xml(format('SELECT last_value, is_called FROM %I.%I', n.nspname, c.relname), false, true, '') AS x) END AS sequence_state,
+     CASE WHEN c.relkind = 'S' THEN (SELECT concat_ws(' ', s.seqtypid::regtype, s.seqstart, s.seqincrement, s.seqmax, s.seqmin, s.seqcache,
+       s.seqcycle) FROM pg_sequence s WHERE s.seqrelid = c.oid) END AS sequence_parameters
      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
      WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')) r),
   'functions', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM

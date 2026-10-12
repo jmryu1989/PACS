@@ -687,6 +687,10 @@ class RealClusterTests(unittest.TestCase):
                    ("membership grantor", "GRANT reader TO delegator WITH ADMIN OPTION; REVOKE reader FROM leaf; "
                                           "SET ROLE delegator; GRANT reader TO leaf; RESET ROLE", "kin", "catalog"),
                    ("sequence state", "ALTER SEQUENCE public.seq RESTART WITH 987654; SELECT nextval('public.seq')", "kin", "catalog"),
+                   # A RESTART never followed by nextval: pg_sequence_last_value shows NULL before and after; the
+                   # sequence's own last_value/is_called differ (Astra's postgres_catalog_repros sequence_value case).
+                   ("sequence restart without a call", "ALTER SEQUENCE public.seq RESTART WITH 555", "kin", "catalog"),
+                   ("sequence parameters", "ALTER SEQUENCE public.seq INCREMENT BY 5", "kin", "catalog"),
                    ("Keycloak row value", "UPDATE public.sessions SET value = 'changed'", "keycloak", "values"),
                    ("non-public row", "DELETE FROM archive.kept WHERE id = 2", "kin", "values")]
         for name, statement, database, compared in changes:
