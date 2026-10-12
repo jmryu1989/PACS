@@ -34,7 +34,7 @@ const PEOPLE = {
   rb: { sub: 'e1000000-0000-4000-8000-000000000001', roles: ['radiologist'], institution: 'inst-b', sign: true },
 };
 const TEXT = {
-  question: 'SYN 흉통 지속\r\n이전 CT와 비교 바랍니다 é ', answer: 'SYN 이전 CT 대비 변화 없음.', followup: 'SYN 추가 질문: 조영 증강 여부',
+  question: 'SYN 흉통 지속\n이전 CT와 비교 바랍니다 é ', answer: 'SYN 이전 CT 대비 변화 없음.', followup: 'SYN 추가 질문: 조영 증강 여부',
   request: 'SYN 외부 병원 영상 요청 사유', close: 'SYN 외부 영상 수신 처리 완료 기록', consult: 'SYN 자문 의뢰: 결절 성상', reply: 'SYN 자문 답변: 양성 소견',
 };
 const uuid = () => crypto.randomUUID();

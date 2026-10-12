@@ -45,7 +45,7 @@ REFUSED = "42501"
 PEOPLE = {"c1": "c1000000-0000-4000-8000-000000000001", "c2": "c2000000-0000-4000-8000-000000000002",
           "r1": "a1000000-0000-4000-8000-000000000001", "r2": "a2000000-0000-4000-8000-000000000002",
           "t1": "b1000000-0000-4000-8000-000000000001", "rb": "e1000000-0000-4000-8000-000000000001"}
-TEXT = {"question": "SYN 흉통 지속\r\n이전 CT와 비교 바랍니다 é ", "answer": "SYN 이전 CT 대비 변화 없음.", "request": "SYN 외부 병원 영상 요청 사유",
+TEXT = {"question": "SYN 흉통 지속\n이전 CT와 비교 바랍니다 é ", "answer": "SYN 이전 CT 대비 변화 없음.", "request": "SYN 외부 병원 영상 요청 사유",
         "close": "SYN 외부 영상 수신 처리 완료 기록", "consult": "SYN 자문 의뢰: 결절 성상", "reply": "SYN 자문 답변: 양성 소견"}
 # The live mutants (emr/units/d.json): one change of the compiled /app/dist each, applied in a copy by the driver.
 MUTANTS = {
@@ -178,6 +178,11 @@ class EmrDLive(unittest.TestCase):
             self.fail("driver %s gave no single result (exit %d): %s" % (operation, result.returncode,
                                                                           result.stderr.decode("utf-8", "replace")[-1500:]))
         value = json.loads(lines[0][len("EMR_D_RESULT "):])
+        # Every driver answer (synthetic data only) is kept beside the run records for the inspection of a failed case.
+        kept = ROOT / "tmp" / "emr-d" / "runs" / "driver"
+        kept.mkdir(parents=True, exist_ok=True)
+        (kept / ("%s-%s-%s%s.json" % (self.token, self._testMethodName, operation, "-" + mutant if mutant else ""))).write_text(
+            json.dumps(value, ensure_ascii=False, indent=1), encoding="utf-8")
         self.assertNotIn("crashed", value, "driver %s crashed: %s" % (operation, value))
         self.assertNotIn("mutantAnchor", value, "a mutant anchor must occur exactly once: %s" % value)
         return value
@@ -381,6 +386,8 @@ class EmrDLive(unittest.TestCase):
 
     def check_d03(self, out):
         qid = out["ids"]["question"]
+        for step in ("question", "answer"):
+            self.assertTrue(out[step]["ok"], (step, out[step]))
         for name in ("c1", "r1", "ad"):
             read = out["read:" + name]
             self.assertTrue(read["ok"], (name, read))
@@ -523,11 +530,13 @@ class EmrDLive(unittest.TestCase):
         self.assertEqual([e["body"] for e in reopened["thread"]["value"]["item"]["entries"]], [TEXT["question"], TEXT["answer"]])
         self.assertEqual(reopened["open"], 0, "nothing is left open for recovery")
 
-    # ── the live mutants: each change of the compiled code must make its behaviour check fail ──
+    # ── the live mutants: each change of the compiled code shows its own symptom and makes its behaviour check fail ──
 
     def test_m_d_01_clinical_entry_as_assignment(self):
         uid = self.study()
         out = self.driver("d01", {"study": uid}, mutant="M-D-01")
+        stored = [v["entry"] for v in self.versions(out["ids"]["question"])]
+        self.assertNotEqual(stored, ["clinical-entry", "clinical-entry"], "the question and its answer are no longer stored as clinical entries")
         with self.assertRaises(AssertionError):
             self.check_d01(out, uid)
 
@@ -535,24 +544,34 @@ class EmrDLive(unittest.TestCase):
         uid = self.study()
         item, _sop, _tags = self.measurement(uid)
         out = self.driver("d02", {"study": uid, "recipientSub": PEOPLE["r2"], "itemId": item}, mutant="M-D-02")
+        first = self.versions(out["ids"]["consultation"])[:1]
+        self.assertEqual([(v["entry"], v["body"]["text"]) for v in first], [("clinical-entry", None)], "the stored version lost its text")
         with self.assertRaises(AssertionError):
             self.check_d02(out, uid)
 
     def test_m_d_03_unbound_signature_succeeds(self):
         out, _uid = self.run_d04(mutant="M-D-03")
+        self.assertTrue(out["tampered"]["ok"], "a signature over another text is accepted for the server's text")
         with self.assertRaises(AssertionError):
             self.check_d04(out)
 
     def test_m_d_04_adopted_sr_cleared(self):
         sr = self.run_sr(mutant="M-D-04")
+        rows = sr["rows"]
+        ended = self.json("SELECT json_agg(record_id) FROM emr_clinical.sr_purpose_end WHERE record_id IN (%s)"
+                          % ",".join(self.literal(r[0]) for r in rows.values())) or []
+        # The mutated planner hands the adopted, store-attempted copy D over; the schema refuses that purpose end (ED006),
+        # so this clean-up transaction ends nothing at all - not even the unclaimed copy B.
+        self.assertEqual(ended, [], "the clean-up that included an adopted copy committed nothing")
         with self.assertRaises(AssertionError):
             self.check_sr(sr)
 
     def test_m_d_05_institution_boundary_skipped(self):
         out, _uid = self.run_d03(mutant="M-D-05")
+        # The service's own row check still hides the row from rb; the runtime boundary itself now hands out the body.
+        self.assertTrue(out["runtimeForeign"]["ok"], "another institution's verified reader received a body through the runtime")
         with self.assertRaises(AssertionError):
             self.check_d03(out)
-
 
 if __name__ == "__main__":
     raise SystemExit("Run through scripts/run-tests.py --mode live")
