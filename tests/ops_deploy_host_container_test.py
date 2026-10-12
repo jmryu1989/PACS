@@ -239,7 +239,10 @@ SYNTHETIC_FRAME = {"path": "/dicom-web/studies/%s/series/%s/instances/%s/frames/
 # a table grant and a database grant.
 LEGACY_ROLES_SQL = ("CREATE ROLE kin_legacy_group NOLOGIN NOINHERIT; CREATE ROLE kin_legacy_reader NOLOGIN CONNECTION LIMIT 3; "
                     "GRANT kin_legacy_group TO kin_legacy_reader; GRANT SELECT ON \"AuditLog\" TO kin_legacy_reader; "
-                    "CREATE SCHEMA legacy_archive AUTHORIZATION kin_legacy_group; GRANT CONNECT ON DATABASE kin TO kin_legacy_reader;")
+                    "CREATE SCHEMA legacy_archive AUTHORIZATION kin_legacy_group; GRANT CONNECT ON DATABASE kin TO kin_legacy_reader; "
+                    # D22: a column grant and a type's privileges the exact restore must carry too.
+                    "GRANT SELECT (actor) ON \"AuditLog\" TO kin_legacy_group; CREATE TYPE legacy_archive.kin_legacy_mood AS ENUM ('a', 'b'); "
+                    "REVOKE USAGE ON TYPE legacy_archive.kin_legacy_mood FROM PUBLIC; GRANT USAGE ON TYPE legacy_archive.kin_legacy_mood TO kin_legacy_reader;")
 LEGACY_FACTS_SQL = ("SELECT json_build_object("
                     "'roles', (SELECT json_agg(json_build_array(rolname, rolcanlogin, rolinherit, rolconnlimit) ORDER BY rolname) "
                     "FROM pg_roles WHERE rolname LIKE 'kin_legacy_%'), "
@@ -247,6 +250,8 @@ LEGACY_FACTS_SQL = ("SELECT json_build_object("
                     "JOIN pg_roles b ON b.oid=m.member WHERE a.rolname LIKE 'kin_legacy_%'), "
                     "'schema_owner', (SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='legacy_archive'), "
                     "'table_acl', (SELECT relacl::text FROM pg_class WHERE relname='AuditLog' AND relnamespace='public'::regnamespace), "
+                    "'column_acl', (SELECT attacl::text FROM pg_attribute WHERE attrelid='public.\"AuditLog\"'::regclass AND attname='actor'), "
+                    "'type_acl', (SELECT typacl::text FROM pg_type WHERE typname='kin_legacy_mood'), "
                     "'database_acl', (SELECT datacl::text FROM pg_database WHERE datname='kin'))")
 UPLOAD_SCRIPT = r"""
 import base64, json, os, sys, urllib.request
@@ -365,6 +370,22 @@ def interactive_token(origin, connect, ca_file, client_id, username, password):
     return {"access_token": access, "subject": claims["sub"]}
 
 
+FLAKY_BROWSER = r'''
+import json, os, subprocess, sys
+raw = sys.stdin.buffer.read()
+spec = json.loads(raw)
+marker = %(marker)r
+if spec.get("product_session") and not os.path.exists(marker):
+    # D07 (rehearsal): the first login of the release smoke fails once, as a browser hiccup would; every other call is the
+    # mode's reference browser itself.
+    with open(marker, "w") as handle:
+        handle.write("failed once")
+    print(json.dumps({"valid": False, "error": "forced first-attempt failure (rehearsal D07)"}), file=sys.stderr)
+    sys.exit(1)
+sys.exit(subprocess.run([sys.executable, %(tool)r, "browser-smoke"], input=raw).returncode)
+'''
+
+
 def free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -406,8 +427,15 @@ class SyntheticStack:
         names = {role: self.project + "-" + role for role in (*intro.ROLES, *intro.ONE_SHOTS)}
         self.ca = self.root / "clone-ca.pem"
         self.override_path = self.root / "rehearsal-override.yml"
-        self.halo_network, declared, external, overlay = None, [], {}, []
-        if label == "clone":
+        self.halo_network, declared, external, overlay, monitor = None, [], {}, [], []
+        if label == "failure":
+            # D04: production's monitor file binds ${KIN_MONITOR_PUBLIC_DIR} into the proxy and its .env lacks it (the
+            # operator's shell gave it when the stack started); the tool resolves it from the running proxy. A rehearsal
+            # binds nothing outside its checkout but declared overlay binds, so the folder is an untracked one inside it.
+            self.monitor_dir = self.repo / ".kin-monitor-public"
+            self.monitor_dir.mkdir()
+            monitor = ["docker-compose.monitor.yml"]
+        if label in ("clone", "failure"):
             # IRT-11 (D1066): a declared overlay outside the checkout, listed after the rehearsal override, that joins the
             # proxy to an external network and binds one host file (a synthetic stand-in for the Halo Reports wiring).
             self.halo_conf = self.root / "halo-reports" / "nginx" / "report.conf"
@@ -425,7 +453,7 @@ class SyntheticStack:
             external, overlay = {"proxy": {"halo_reports": self.halo_network}}, [str(path)]
         self.target = {"schema": 1, "kind": "rehearsal", "host_key_sha256": "b" * 64, "origin": self.origin, "project": self.project,
                        "repository": str(self.repo),
-                       "compose_files": ["docker-compose.yml", "docker-compose.prod.yml", str(self.override_path), *overlay],
+                       "compose_files": ["docker-compose.yml", "docker-compose.prod.yml", str(self.override_path), *overlay, *monitor],
                        "containers": names,
                        "volumes": {"pg": self.project + "_pg-db", "orthanc": self.project + "_orthanc-db",
                                    "emr_access": self.project + "_emr-access", "emr_state": self.project + "_emr-state"},
@@ -457,7 +485,10 @@ class SyntheticStack:
         values only) out of the temporary folder before it is removed."""
         target = os.environ.get("KIN_TEST_EMR_REHEARSAL_EVIDENCE")
         if target and self.records.directory.exists():
-            __import__("shutil").copytree(self.records.directory, Path(target) / ("records-" + self.label), dirs_exist_ok=True)
+            # The private values file (D04) is never evidence, whatever it holds.
+            shutil = __import__("shutil")
+            shutil.copytree(self.records.directory, Path(target) / ("records-" + self.label), dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns(intro.COMPOSE_VALUES))
 
     @staticmethod
     def write_env(path, values):
@@ -502,15 +533,23 @@ class SyntheticStack:
         self.plan_sha256 = hashlib.sha256(intro.canonical(plan)).hexdigest()
         return plan
 
-    def ops(self):
-        """The unattended smoke (D1062) with the reference headless browser of the mode (Playwright Chromium)."""
+    def ops(self, ops_class=None):
+        """The unattended smoke (D1062) with the reference headless browser of the mode (Playwright Chromium); with
+        fail_first_login (D07) the browser command is a wrapper whose first login of the release smoke fails once."""
         runner = intro.Runner(self.repo)
-        return runner, intro.HostOps(target=self.target, plan=self.plan_document, runner=runner, records=self.records, env_next=self.env_next,
-                                     token_reader=lambda: json.loads(self.token_file.read_text()),
-                                     browser_cmd=[sys.executable, intro.__file__, "browser-smoke"])
+        browser = [sys.executable, intro.__file__, "browser-smoke"]
+        if getattr(self, "fail_first_login", False):
+            wrapper = self.root / "flaky-browser.py"
+            if not wrapper.exists():
+                wrapper.write_text(FLAKY_BROWSER % {"marker": str(self.root / "first-login-failed"), "tool": intro.__file__},
+                                   encoding="utf-8", newline="\n")
+            browser = [sys.executable, str(wrapper)]
+        return runner, (ops_class or intro.HostOps)(target=self.target, plan=self.plan_document, runner=runner, records=self.records,
+                                                    env_next=self.env_next, token_reader=lambda: json.loads(self.token_file.read_text()),
+                                                    browser_cmd=browser)
 
-    def phase(self, phase, expected):
-        runner, host_ops = self.ops()
+    def phase(self, phase, expected, ops_class=None):
+        runner, host_ops = self.ops(ops_class)
         machine = intro.Introduction(plan=self.plan_document, plan_sha256=self.plan_sha256, target=self.target,
                                      production=copy.deepcopy(intro.EXAMPLE_POLICY["production"]) | {"host_key_sha256": "a" * 64},
                                      ops=host_ops, records=self.records, repository=self.repo, host_key="b" * 64, tool=intro.tool_hashes())
@@ -527,6 +566,9 @@ class SyntheticStack:
     def compose_up(self, images, roles):
         """Test-side bring-up of the source stack (the stand-in for a running Stage-5 host)."""
         runner, host_ops = self.ops()
+        if self.label == "failure":
+            # The operator's shell gave the monitor folder when the production stack was started (its .env lacks it).
+            host_ops.compose_env = {"KIN_MONITOR_PUBLIC_DIR": str(self.monitor_dir)}
         context = SimpleNamespace(state={"checkout": "previous"}, plan={"previous": {"sha": self.previous_sha, "images": images}})
         with intro.bound_ops(self.repo, runner):
             for role in roles:
@@ -696,7 +738,14 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         clone.phase("seed", "SEEDED")
         self.assertEqual(clone.psql(f"SELECT \"preDoc\" FROM \"StudyState\" WHERE uid='{SYNTHETIC_STUDY}';"), "doctor@kin.kr")
         self.assertEqual(json.loads(clone.psql(LEGACY_FACTS_SQL)), legacy, "the seed keeps the further roles, owners and grants")
+        # D07: the clone's browser command fails the release smoke's first login once (forced); every other call is real.
+        clone.fail_first_login = True
         clone.phase("capture", "HELD")
+        (captured,) = clone.records.directory.glob("result-capture-*.json")
+        baseline = next(step for step in json.loads(captured.read_text())["steps"] if step["step"] == "L-01")["detail"]
+        # D01/D02: the browser itself and the smoke member's roles and group were proved before the fence.
+        self.assertTrue(baseline["smoke_browser"]["browser"].startswith("chromium "), baseline["smoke_browser"])
+        self.assertEqual(baseline["smoke_member_realm"], {"roles": ["radiologist"], "group": "hallym"})
         clone.phase("introduce", "INTRODUCED")
         realm = "(SELECT id FROM realm WHERE name='kin')"
         self.assertEqual(clone.psql(f"SELECT enabled FROM user_entity WHERE username='tech' AND realm_id={realm};", "keycloak"), "t")
@@ -711,6 +760,11 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         time.sleep(1.1)
         verified = clone.phase("verify", "VERIFIED")
         self.assertEqual(verified["probe"]["receipt"]["eventId"], clone.plan_document["probe"]["event_id"])
+        # D07: the forced first failure was retried once (new login client, new profile) and passed; recorded.
+        retry = json.loads((clone.records.directory / "state.json").read_text())["smoke_retry"]
+        self.assertEqual((retry["passed"], retry["reason"]), (True, "The smoke browser login failed: forced first-attempt failure (rehearsal D07)"))
+        self.assertLessEqual(retry["seconds"], intro.SMOKE_RETRY_S)
+        print(json.dumps({"smoke_retry": retry}), flush=True)
         record = json.loads((clone.records.directory / "operator-smoke.json").read_text())
         self.assertEqual((record["by"], record["passed"], sorted(record["checks"])), ("Opus executor (D1062)", True, sorted(intro.OPERATOR_SMOKE_CHECKS)))
         self.assertTrue(all(record["checks"].values()))
@@ -789,6 +843,76 @@ class EmrIntroductionRehearsal(unittest.TestCase):
                           "bfail": state["bfail"]["manifest_sha256"], "recovery": recovery, "legacy_roles": legacy,
                           "migrations": [len(clone.plan_document["migrations"]["before"]), len(clone.plan_document["migrations"]["after"])]}),
               flush=True)
+
+    def test_emr_introduction_rehearsal_forced_l09b_failure_rolls_back_with_kept_values_and_the_pinned_overlay(self):
+        """Round 3 (D04/D05): a production-shaped stack whose monitor file binds ${KIN_MONITOR_PUBLIC_DIR} (absent from its
+        .env, given by the operator's shell at start) and whose declared overlay joins the Halo network. capture -> introduce,
+        where L-09b fails as a failed proxy recreate leaves it: the proxy container is gone, and meanwhile the overlay file
+        was edited by hand. The automatic rollback resolves the variable from the kept value and recreates the services
+        from the overlay bytes pinned at the capture (warning recorded): RESTORED; rollback_reopen (a new process, overlay
+        still edited) proves the previous version and reopens: ROLLED_BACK."""
+        ops.require_local_docker()
+        folder = tempfile.TemporaryDirectory(prefix="kin-emr-failure-")
+        self.addCleanup(folder.cleanup)
+        root = Path(folder.name)
+        previous_sha = os.environ.get("KIN_TEST_PREVIOUS_SHA", "b9690cc9790d5360829cee861462aac14f5ab0c7")
+        source_repo = Path(__file__).resolve().parents[1]
+        target_sha = os.environ.get("KIN_TEST_TARGET_SHA") or subprocess.run(["git", "-C", str(source_repo), "rev-parse", "HEAD"],
+                                                                             check=True, capture_output=True, text=True).stdout.strip()
+        shared = {"db": self.image_id("postgres:16-alpine"), "keycloak": self.image_id("quay.io/keycloak/keycloak:26.7.3"),
+                  "orthanc": self.image_id("orthancteam/orthanc:24.12.0")}
+        images = {"previous": {"api": self.image_id(os.environ["KIN_TEST_PREVIOUS_API_IMAGE"]),
+                               "proxy": self.image_id(os.environ["KIN_TEST_PREVIOUS_PROXY_IMAGE"]), **shared},
+                  "release": {"api": self.image_id(os.environ["KIN_TEST_API_IMAGE"]), "proxy": self.image_id(os.environ["KIN_TEST_PROXY_IMAGE"]), **shared}}
+        stack = SyntheticStack(self, root, "failure", previous_sha, target_sha)
+        stack.plan(images)
+        stack.certificates(images["previous"]["proxy"])
+        stack.compose_up(images["previous"], ("db", "keycloak", "orthanc", "api", "proxy"))
+        self.assertNotIn("KIN_MONITOR_PUBLIC_DIR", (stack.repo / ".env").read_text())
+        stack.psql('INSERT INTO "StudyState"(uid, "institutionId", rs, "preDoc", "preReviewer", "updatedAt") '
+                   f"VALUES ('{SYNTHETIC_STUDY}', 'hallym', 'P', 'doctor@kin.kr', 'doctor2@kin.kr', now());")
+        stack.psql(LEGACY_ROLES_SQL)
+        legacy = json.loads(stack.psql(LEGACY_FACTS_SQL))
+        uploaded = subprocess.run(["docker", "exec", "-i", stack.target["containers"]["orthanc"], "python3", "-c", UPLOAD_SCRIPT],
+                                  input=synthetic_dicom(), capture_output=True, timeout=120)
+        self.assertEqual(uploaded.returncode, 0, uploaded.stderr[-2000:])
+        stack.keycloak(images["previous"]["api"], "origin", "admin")
+        members = json.loads(stack.psql(intro.REALM_MEMBERS_SQL, "keycloak"))
+        stack.plan(images, members=members)
+        stack.phase("capture", "HELD")
+        state = json.loads((stack.records.directory / "state.json").read_text())
+        self.assertEqual(state["compose_env"]["KIN_MONITOR_PUBLIC_DIR"]["from"], ["mount:proxy"])
+        self.assertTrue((stack.records.directory / intro.COMPOSE_VALUES).is_file())
+        overlay = Path(stack.target["declared_overlays"][0]["file"])
+        declared = overlay.read_bytes()
+
+        class FailedProxyRecreate(intro.HostOps):
+            def proxy_ui(self, machine):
+                # What a failed `compose up --force-recreate proxy` leaves: no proxy container; meanwhile the overlay
+                # file was edited by hand on the host.
+                subprocess.run(["docker", "rm", "-f", self.names["proxy"]], check=True, capture_output=True)
+                overlay.write_bytes(declared + b"# edited by hand during the window\n")
+                raise intro.Stop("synthetic L-09b failure: the proxy recreate failed")
+        introduced = stack.phase("introduce", "RESTORED", ops_class=FailedProxyRecreate)
+        self.assertEqual([step["outcome"] for step in introduced["steps"] if step["step"] == "L-09b"], ["STOP"])
+        self.assertEqual([warning["kind"] for warning in introduced["warnings"]], ["declared-overlay"])
+        journal = [json.loads(line) for line in (stack.records.directory / "journal.jsonl").read_text().splitlines()]
+        kept = [entry for entry in journal if entry["event"] == "compose-environment"
+                and entry.get("resolved_from_running_stack", {}).get("KIN_MONITOR_PUBLIC_DIR", {}).get("from") == ["kept"]]
+        self.assertTrue(kept, "the rollback resolved KIN_MONITOR_PUBLIC_DIR from the kept value")
+        inspect = lambda name: json.loads(subprocess.run(["docker", "inspect", name], check=True, capture_output=True).stdout)[0]
+        proxy = inspect(stack.target["containers"]["proxy"])
+        monitor = [m for m in proxy["Mounts"] if m.get("Destination") == "/var/run/kin-monitor-public"]
+        self.assertEqual(len(monitor), 1)
+        self.assertEqual(Path(monitor[0]["Source"]).name, stack.monitor_dir.name)
+        self.assertIn(stack.halo_network, proxy["NetworkSettings"]["Networks"])
+        reopened = stack.phase("rollback_reopen", "ROLLED_BACK")
+        self.assertEqual([warning["kind"] for warning in reopened["warnings"]], ["declared-overlay"])
+        self.assertEqual(json.loads(stack.psql(LEGACY_FACTS_SQL)), legacy, "the rollback keeps the further roles, owners and grants")
+        self.assertFalse((stack.records.directory / intro.COMPOSE_VALUES).exists(), "the kept values end with the plan")
+        self.assertEqual(inspect(stack.target["containers"]["api"])["Image"], images["previous"]["api"])
+        print(json.dumps({"forced_l09b_failure": "RESTORED then ROLLED_BACK", "warnings": introduced["warnings"],
+                          "kept_value_used": True, "legacy_roles": legacy}), flush=True)
 
 
 if __name__ == "__main__":

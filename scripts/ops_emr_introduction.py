@@ -1316,8 +1316,6 @@ class Introduction:
                         self.state["lock_token"] = None
                     self.save()
                     raise Stop("Compose environment: " + code_of(error)) from None
-                # Names, hashes and places only (IRT-12), and the declared overlays' files and bind sources (IRT-11).
-                self.event("compose-environment", **(self.environment or {}))
             return getattr(self, "phase_" + self.phase)()
 
     def check_evidence(self):
@@ -2462,7 +2460,12 @@ class HostOps:
             intro.records.write(intro.records.directory / COMPOSE_VALUES, canonical({**kept, **resolved}) + b"\n")
         intro.save()
         self.compose_env = resolved
-        return {"resolved_from_running_stack": record, "declared_overlays": overlays}
+        out = {"resolved_from_running_stack": record, "declared_overlays": overlays}
+        # Names, hashes and places only (IRT-12), and the declared overlays' files and bind sources (IRT-11): at every
+        # resolution, the phase start's and each later one (the target checkout, a revert, a rollback).
+        intro.records.journal({"event": "compose-environment", "plan_sha256": getattr(intro, "plan_sha256", None),
+                               "phase": getattr(intro, "phase", None), **out})
+        return out
 
     # ── IRT-13 / IRT-11: recorded pre-fence corrections of the checkout ──
     def checkout_mode(self, intro):
