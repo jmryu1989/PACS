@@ -1016,6 +1016,10 @@ test('L09 auth login and entry commit with one projection each; failed storage g
     assert.ok(performance.now() - started < 1000, 'a hanging resolver delays an end by a bounded wait only');
     const ended = (await protectedAuthRows(w)).filter(r => r.event.action === 'auth.logout').at(-1);
     assert.deepEqual(ended.event.trustedProxyIp.value, { address: IP, source: 'trusted-proxy' }, 'the recently verified proxy stays observed');
+    // The hung lookup never answers. Once the verified answer is too old to keep, a working resolver must be asked again.
+    dns.lookup = resolve('127.0.0.1');
+    w.tick(61_000);
+    assert.equal((await peerLogin(warm, 'dns-recovered', '127.0.0.1')).cookie, 'S', 'a hung lookup is replaced, not waited on forever');
     dns.lookup = () => Promise.reject(Object.assign(new Error('synthetic resolver failure'), { code: 'ESERVFAIL' }));
     w.tick(6000);
     assert.equal((await peerLogin(warm, 'dns-failing', '127.0.0.1')).cookie, 'S', 'a failing resolver keeps the verified proxy');
@@ -1236,7 +1240,8 @@ test('L14 disconnected requests do not end authentication; reauthentication cont
   // and the operator is told the closed cause at once. The held observations are recovered once the ledger answers.
   for (let n = 0; n < MEMBER_PENDING_LIMIT; n++)
     w.fault('I1', 'tx.ledger', Object.assign(new Error('synthetic ledger unavailable'), { code: 'P1001' }));
-  for (let n = 0; n <= MEMBER_PENDING_LIMIT; n++)
+  // Two refusals beyond the limit: the operator is told at once, and the second one waits for the next interval's summary.
+  for (let n = 0; n < MEMBER_PENDING_LIMIT + 2; n++)
     assert.equal((await login(w, w.I1, provider)).done.location, landing('login_failed'), 'the answer never depends on the record');
   assert.equal(w.faults.length, 0, 'the limit refused the last observation before any ledger attempt');
   assert.equal(authSpool('member').pending.length, waiting + MEMBER_PENDING_LIMIT, 'one account holds at most its pending limit');
@@ -1247,7 +1252,7 @@ test('L14 disconnected requests do not end authentication; reauthentication cont
   assert.equal(businessJournalBytes(), business, 'B1 recovery journal unchanged by refusals, rollbacks and recoveries');
   const logs = await w.finish('L14');
   const notices = logs.map(([, line]) => line).filter(line => line.includes('로그인 거절을 접속기록 없이 처리했습니다'));
-  assert.equal(notices.length, 1, 'the unrecorded refusal is reported to the operator once');
+  assert.equal(notices.length, 1, 'unrecorded refusals within one interval are reported to the operator once');
   assert.match(notices[0], /1건\(보관소 member, 원인 identity-limit\)/);
 });
 
