@@ -267,8 +267,10 @@ class WorklistFoldersDOM(unittest.TestCase):
         second.close()
 
     def test_storage_unavailable_still_opens_and_closes_for_the_page(self):
-        # Browsers with blocked site storage (policy or private mode) must not cost the
-        # doctor the panel or raise errors; this binds to no storage key name.
+        # When the tab's session storage throws (blocked by browser policy), the doctor still
+        # gets the panel open on load and a working close, without page errors; this binds to
+        # no storage key name. (With every site storage blocked the page returns to sign-in
+        # before W2 code runs: the existing sign-in layer, outside this unit.)
         self.context.add_init_script('''(() => {
           for (const name of ['getItem', 'setItem']) {
             const original = Storage.prototype[name];
