@@ -235,18 +235,76 @@ const call=async(token,method,path,body)=>{const r=await fetch(base+'/admin/real
  const text=await r.text();return text?JSON.parse(text):null;};
 (async()=>{const token=await admin();const [user]=await call(token,'GET','/users?exact=true&username='+process.env.KC_MEMBER);
  if(process.argv[1]==='disable'){await call(token,'PUT','/users/'+user.id,{enabled:false});process.stdout.write('KIN_RESULT {"disabled":true}\n');return;}
+ // A temporary PKCE client for one real authorization-code login: Keycloak 26.7.3 direct grants never carry the
+ // authentication time (AUTH_TIME) that the product requires after the member import (newAuthAfter).
  const clientId='kin-rehearsal-smoke-'+Date.now();
- await call(token,'POST','/clients',{clientId,enabled:true,publicClient:true,standardFlowEnabled:false,directAccessGrantsEnabled:true,protocol:'openid-connect',
+ await call(token,'POST','/clients',{clientId,enabled:true,publicClient:true,standardFlowEnabled:true,directAccessGrantsEnabled:false,protocol:'openid-connect',
+  redirectUris:[process.env.KC_REDIRECT],attributes:{'pkce.code.challenge.method':'S256'},
   protocolMappers:[{name:'kin-api-audience',protocol:'openid-connect',protocolMapper:'oidc-audience-mapper',config:{'included.custom.audience':'kin-api','access.token.claim':'true','id.token.claim':'false'}},
    {name:'kin-institution-groups',protocol:'openid-connect',protocolMapper:'oidc-group-membership-mapper',config:{'full.path':'false','access.token.claim':'true','id.token.claim':'false','userinfo.token.claim':'false','claim.name':'groups'}},
    {name:'kin-authentication-time',protocol:'openid-connect',protocolMapper:'oidc-usersessionmodel-note-mapper',config:{'user.session.note':'AUTH_TIME','claim.name':'auth_time','jsonType.label':'long','access.token.claim':'true','id.token.claim':'true'}}]});
  await call(token,'PUT','/users/'+user.id+'/reset-password',{type:'password',value:process.env.KC_MEMBER_PASS,temporary:false});
  await call(token,'PUT','/users/'+user.id,{requiredActions:[],emailVerified:true});
- const form=new URLSearchParams({grant_type:'password',client_id:clientId,username:process.env.KC_MEMBER,password:process.env.KC_MEMBER_PASS,scope:'openid'});
- const r=await fetch(base+'/realms/kin/protocol/openid-connect/token',{method:'POST',body:form});if(r.status!==200)throw new Error('member token '+r.status);
- const access=(await r.json()).access_token;const payload=JSON.parse(Buffer.from(access.split('.')[1],'base64url').toString());
- process.stdout.write('KIN_RESULT '+JSON.stringify({access_token:access,subject:payload.sub})+'\n');})().catch(e=>{process.stderr.write(String(e.message)+'\n');process.exitCode=1;});
+ process.stdout.write('KIN_RESULT '+JSON.stringify({client_id:clientId})+'\n');})().catch(e=>{process.stderr.write(String(e.message)+'\n');process.exitCode=1;});
 """
+
+
+def interactive_token(origin, connect, ca_file, client_id, username, password):
+    """One real Authorization Code + PKCE login through the clone's fenced (loopback) ingress, as tests/invariants_live.py
+    does through its proxy: Keycloak supplies auth_time itself. Returns {"access_token", "subject"} for the mode's smoke."""
+    import base64
+    import html
+    import re
+    import ssl
+    from urllib.parse import parse_qs, urlencode, urlsplit
+    parsed = urlsplit(origin)
+    context = ssl.create_default_context(cafile=ca_file)
+    cookies = {}
+
+    def call(method, target, body=None, headers=None):
+        url = urlsplit(target)
+        connection = intro.PinnedHTTPS(connect[0], connect[1], parsed.hostname, context)
+        try:
+            sent = {"Host": parsed.netloc, **(headers or {})}
+            if cookies:
+                sent["Cookie"] = "; ".join(name + "=" + value for name, value in cookies.items())
+            connection.request(method, (url.path or "/") + ("?" + url.query if url.query else ""), body=body, headers=sent)
+            response = connection.getresponse()
+            raw = response.read()
+            for value in response.headers.get_all("Set-Cookie") or []:
+                name, _, rest = value.partition("=")
+                cookies[name.strip()] = rest.split(";", 1)[0]
+            return response.status, response.headers, raw
+        finally:
+            connection.close()
+
+    redirect = origin + "/worklist/hpacs-lite/index.html"
+    state, verifier = uuid.uuid4().hex, uuid.uuid4().hex + uuid.uuid4().hex
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).decode("ascii").rstrip("=")
+    query = urlencode({"client_id": client_id, "response_type": "code", "scope": "openid profile email", "redirect_uri": redirect,
+                       "state": state, "nonce": state, "code_challenge": challenge, "code_challenge_method": "S256"})
+    status, _, page = call("GET", origin + "/auth/realms/kin/protocol/openid-connect/auth?" + query)
+    form = re.search(r'<form[^>]+action="([^"]+)"', page.decode("utf-8", errors="replace"), re.I)
+    if status != 200 or not form:
+        raise RuntimeError("The clone did not show its credential form (HTTP %d)" % status)
+    status, headers, _ = call("POST", html.unescape(form.group(1)),
+                              urlencode({"username": username, "password": password, "credentialId": ""}).encode("utf-8"),
+                              {"Content-Type": "application/x-www-form-urlencoded"})
+    location = urlsplit(headers.get("Location", "") if status == 302 else "")
+    params = parse_qs(location.query)
+    if location._replace(query="", fragment="").geturl() != redirect or params.get("state") != [state] or len(params.get("code", [])) != 1:
+        raise RuntimeError("The interactive login did not return this login's authorization code (HTTP %d)" % status)
+    status, _, raw = call("POST", origin + "/auth/realms/kin/protocol/openid-connect/token",
+                          urlencode({"client_id": client_id, "grant_type": "authorization_code", "code": params["code"][0],
+                                     "redirect_uri": redirect, "code_verifier": verifier}).encode("ascii"),
+                          {"Content-Type": "application/x-www-form-urlencoded"})
+    if status != 200:
+        raise RuntimeError("The authorization code was not exchanged (HTTP %d)" % status)
+    access = json.loads(raw)["access_token"]
+    claims = json.loads(base64.urlsafe_b64decode(access.split(".")[1] + "=" * (-len(access.split(".")[1]) % 4)))
+    if type(claims.get("auth_time")) is not int or claims["auth_time"] <= 0:
+        raise RuntimeError("Keycloak did not provide the interactive authentication time")
+    return {"access_token": access, "subject": claims["sub"]}
 
 
 def free_port():
@@ -420,19 +478,23 @@ class SyntheticStack:
                                "ON_ERROR_STOP=1", "-c", sql], check=True, capture_output=True, text=True).stdout.strip()
 
     def keycloak(self, image, operation, admin_user):
-        """Test-side realm work through the admin REST API (as the executor would): Keycloak may still be starting."""
+        """Test-side realm work through the admin REST API (as the executor would): Keycloak may still be starting.
+        'disable' disables the member tech; 'client' prepares one interactive login of doctor (a temporary PKCE client and
+        a new synthetic password) and returns the client and that password for interactive_token()."""
+        password = secrets.token_urlsafe(18)
         environment = {**os.environ, "KC_USER": admin_user, "KC_PASS": self.env["KC_ADMIN_PASSWORD"],
-                       "KC_MEMBER": "tech" if operation == "disable" else "doctor", "KC_MEMBER_PASS": secrets.token_urlsafe(18)}
+                       "KC_MEMBER": "tech" if operation == "disable" else "doctor", "KC_MEMBER_PASS": password,
+                       "KC_REDIRECT": self.origin + "/worklist/hpacs-lite/index.html"}
         deadline = time.monotonic() + 420
         while True:
             result = subprocess.run(["docker", "run", "--rm", "--network", self.target["networks"]["default"], "--label", "kin.ops.run=" + self.token,
-                                     "-e", "KC_USER", "-e", "KC_PASS", "-e", "KC_MEMBER", "-e", "KC_MEMBER_PASS", "--entrypoint", "node", image,
-                                     "-e", KC_SCRIPT, operation], env=environment, capture_output=True, timeout=180)
+                                     "-e", "KC_USER", "-e", "KC_PASS", "-e", "KC_MEMBER", "-e", "KC_MEMBER_PASS", "-e", "KC_REDIRECT",
+                                     "--entrypoint", "node", image, "-e", KC_SCRIPT, operation], env=environment, capture_output=True, timeout=180)
             if result.returncode == 0 or time.monotonic() > deadline:
                 break
             time.sleep(5)
         self.test.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace")[-1000:])
-        return intro.result_line(result.stdout)
+        return {**intro.result_line(result.stdout), "password": password}
 
     def remove(self):
         """Only resources carrying this stack's compose project or its recovery label; never anything else."""
@@ -507,7 +569,10 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         self.assertEqual(clone.psql(f"SELECT enabled FROM user_entity WHERE username='tech' AND realm_id={realm};", "keycloak"), "t")
         self.assertEqual(clone.psql("SELECT suspended FROM \"MemberRights\" WHERE username='tech';"), "t")
         self.assertEqual(clone.psql(f"SELECT \"preDocSub\" IS NOT NULL FROM \"StudyState\" WHERE uid='{SYNTHETIC_STUDY}';"), "t")
-        token = clone.keycloak(images["release"]["api"], "token", clone.target["keycloak_admin"])
+        login = clone.keycloak(images["release"]["api"], "client", clone.target["keycloak_admin"])
+        # auth_time and newAuthAfter have whole-second resolution: authenticate in a later second than the import.
+        time.sleep(1.1)
+        token = interactive_token(clone.origin, ("127.0.0.1", clone.maintenance), str(clone.ca), login["client_id"], "doctor", login["password"])
         clone.token_file.write_text(json.dumps(token))
         claims = json.loads(__import__("base64").urlsafe_b64decode(token["access_token"].split(".")[1] + "=="))
         rights = clone.psql("SELECT json_build_object('suspended', suspended, 'approved', approved, 'newAuthAfter', "

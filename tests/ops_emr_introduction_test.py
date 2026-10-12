@@ -856,6 +856,20 @@ class StateMachineTests(unittest.TestCase):
         self.assertTrue(self.lock_held())
         refuses(self, self.run_phase, "rollback", message="already attempted")
 
+    def test_58_a_classification_refusal_leaves_the_single_rollback_unused(self):
+        self.deploy_through("introduce")
+        self.ops.faults["classify"] = RuntimeError("A one-shot worker may still be alive; observe only")
+        result = self.run_phase("rollback")
+        self.assertEqual(result["status"], "NEEDS_ATTENTION")
+        self.assertIn("RB-00", result["rollback"])
+        self.assertNotIn("preserve_failed", self.ops.calls)
+        self.assertFalse(self.records.state()["rollback_attempted"])
+        self.assertTrue(self.lock_held())
+        # Once the worker has ended, the rollback runs (once).
+        self.ops.faults.clear()
+        self.assertEqual(self.run_phase("rollback")["status"], "ROLLED_BACK")
+        self.assertTrue(self.records.state()["rollback_attempted"])
+
     def test_38_verify_failure_rolls_back_from_the_held_b0(self):
         self.deploy_through("introduce")
         self.ops.faults["probe"] = RuntimeError("The replay added a ledger entry")

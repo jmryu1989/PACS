@@ -884,12 +884,20 @@ class Introduction:
         return self.finish("DEPLOYED", True, release=True)
 
     def rollback_steps(self, explicit):
-        """RB-00..RB-04 under the rollback budget. Automatic after a settled failure, or an explicit phase; once only."""
-        self.state["rollback_attempted"] = True
-        self.save()
+        """RB-00..RB-04 under the rollback budget. Automatic after a settled failure, or an explicit phase; once only.
+        RB-00 only classifies (workers quiet, writers fenced) and changes no data: its refusal leaves the single attempt
+        unused, so a rollback can be requested again once the worker has ended. From RB-01 on, a failure is final."""
         self.enter_recovery()
         try:
-            self.steps_of("rollback")
+            self.run_step(*STEPS["rollback"][0])
+        except (Stop, Unknown):
+            return self.finish("NEEDS_ATTENTION", False,
+                               extra={"rollback": "withheld: RB-00 refused (a worker may be alive or the database is not quiet)"})
+        self.state["rollback_attempted"] = True
+        self.save()
+        try:
+            for item in STEPS["rollback"][1:]:
+                self.run_step(*item)
         except (Stop, Unknown):
             return self.finish("NEEDS_ATTENTION", False, extra={"rollback": "failed; maintenance and lock kept, no retry"})
         return self.finish("ROLLED_BACK", explicit, release=True,
