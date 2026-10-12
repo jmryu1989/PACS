@@ -630,16 +630,19 @@ class EmrDLive(unittest.TestCase):
         a, sop_a, _data_a = self.prepared_sr(uid, item)
         b, sop_b, _data_b = self.prepared_sr(uid, item)
         base = {"study": uid, "tags": {sop: tags}}
+        # Two concurrent stores of SR b, in a process whose seal has not failed yet: one adopts (its event cannot be sealed),
+        # the other finds it adopted (ED006); B1 refuses new appends after a seal failure, so each part runs in its own process.
+        concurrent = self.driver("dr2-01-sr", {**base, "seal": "down", "steps": [{"kind": "concurrent", "id": b, "name": "stores"}]})
         down = self.driver("dr2-01-sr", {**base, "seal": "down", "steps": [{"kind": "signed", "id": a, "name": "first"},
-                                                                          {"kind": "resend", "id": a, "name": "resend"},
-                                                                          {"kind": "concurrent", "id": b, "name": "concurrent"}]})
-        self.assertTrue(down["sealRefused"], "the fault reached B1's sealing")
-        for name, answer in (("first", down["first"]), ("resend", down["resend"]), ("concurrent-1", down["concurrent"][0]),
-                             ("concurrent-2", down["concurrent"][1])):
+                                                                          {"kind": "resend", "id": a, "name": "resend"}]})
+        for run in (concurrent, down):
+            self.assertTrue(run["sealRefused"], "the fault reached B1's sealing")
+            self.assertEqual(run["uploads"], [], "nothing was handed to Orthanc")
+        for name, answer in (("concurrent-1", concurrent["stores"][0]), ("concurrent-2", concurrent["stores"][1]), ("first", down["first"]),
+                             ("resend", down["resend"])):
             self.assertEqual((answer["ok"], err(answer).get("status"), err(answer).get("code")), (False, 503, "CLINICAL_OUTCOME_PENDING"), name)
-        self.assertEqual(down["uploads"], [], "nothing was handed to Orthanc")
         self.assertEqual(self.sr_facts([a, b]), {a: (True, False, False, 1), b: (True, False, False, 1)},
-                         "committed intents with unconfirmed adoptions, one each; nothing recorded as stored")
+                         "committed intents with unconfirmed adoptions, one each (the concurrent store adopted nothing); nothing stored")
         self.ok("REVOKE EXECUTE ON FUNCTION emr_clinical.sr_adoption_for(text) FROM kin_runtime;")
         try:
             lookup = self.driver("dr2-01-sr", {**base, "steps": [{"kind": "resend", "id": a, "name": "unreadable"}]})
