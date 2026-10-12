@@ -13,6 +13,9 @@ import { parseAuthFailureObservation } from './contract';
  * cookie, token, proof, password, raw error or request text.
  */
 export const JOURNAL_MAX_BYTES = 64 * 1024 * 1024;
+// Pre-authentication refusals cannot spend the recovery journal's capacity. Completed observations can be removed
+// from this bounded spool only after their original event has a durable ledger receipt.
+export const ANONYMOUS_JOURNAL_MAX_BYTES = 1024 * 1024;
 const RECORD_MAX_BYTES = 4096;
 export const JOURNAL_KINDS = freeze({
   'auth-failure-observed': ['observation'],
@@ -82,6 +85,7 @@ export function syncDirectory(dir: string): void {
 export class FailureJournal {
   private readonly file: string;
   private records = new Map<string, JournalRecord>();
+  private pendingAuth = new Map<string, JournalRecord>();
   private bytes = 0;
   private loadedBytes = 0;
   private archiveBytes = 0;
@@ -90,8 +94,8 @@ export class FailureJournal {
   /** Bytes of a torn final line, durably quarantined before the good journal is truncated. */
   readonly tornBytes: number;
 
-  constructor(stateDirectory: string | undefined) {
-    this.file = path.join(protectedDirectory(stateDirectory, 'journal'), 'failure-journal.jsonl');
+  constructor(stateDirectory: string | undefined, private readonly anonymous = false) {
+    this.file = path.join(protectedDirectory(stateDirectory, anonymous ? 'anonymous-failures' : 'journal'), 'failure-journal.jsonl');
     let raw: Buffer = Buffer.alloc(0);
     try { raw = fs.readFileSync(this.file); } catch (error: any) { if (error?.code !== 'ENOENT') throw new JournalUnavailable('FailureJournalUnavailable'); }
     const goodLength = raw.lastIndexOf(10) + 1;
@@ -130,7 +134,36 @@ export class FailureJournal {
       } catch { throw new JournalUnavailable('FailureJournalCorrupt'); }
       if (this.records.has(record.id)) throw new JournalUnavailable('FailureJournalCorrupt');
       this.records.set(record.id, freeze(record));
+      this.indexAuth(record);
     }
+  }
+
+  private indexAuth(record: JournalRecord): void {
+    if (record.kind === 'auth-failure-observed') this.pendingAuth.set(record.id, record);
+    if (record.kind === 'auth-failure-recovered') this.pendingAuth.delete(`auth-failure:${record.body.eventId}`);
+  }
+
+  /** Called by the fenced writer; neither the timer nor IPC serializes historical completed records. */
+  pendingAuthentication(limit = 32): readonly Readonly<JournalRecord>[] {
+    const rows: JournalRecord[] = [];
+    for (const row of this.pendingAuth.values()) { rows.push(row); if (rows.length >= limit) break; }
+    return rows;
+  }
+
+  private compactAnonymous(): void {
+    const retained = [...this.pendingAuth.values()];
+    const text = retained.map(record => JSON.stringify({ ...record,
+      sha256: createHash('sha256').update(canonical(record)).digest('hex') }) + '\n').join('');
+    const temporary = this.file + '.tmp-' + randomBytes(8).toString('hex');
+    let fd: number | undefined;
+    try {
+      fd = fs.openSync(temporary, 'wx', 0o600);
+      fs.writeFileSync(fd, text); fs.fsyncSync(fd); fs.closeSync(fd); fd = undefined;
+      fs.renameSync(temporary, this.file); syncDirectory(path.dirname(this.file));
+    } catch { this.unavailable = true; throw new JournalUnavailable('FailureJournalUnavailable'); }
+    finally { if (fd !== undefined) fs.closeSync(fd); }
+    this.records = new Map(retained.map(record => [record.id, record]));
+    this.loadedBytes = Buffer.byteLength(text); this.bytes = this.loadedBytes + this.archiveBytes;
   }
 
   /** Called under the shared writer lock. Only another process's new bytes need
@@ -209,10 +242,21 @@ export class FailureJournal {
     const text = canonical(record);
     const line = JSON.stringify({ ...JSON.parse(text), sha256: createHash('sha256').update(text).digest('hex') }) + '\n';
     if (Buffer.byteLength(line) > RECORD_MAX_BYTES) refuse('FailureJournalRecordTooLarge');
-    if (this.bytes + Buffer.byteLength(line) > JOURNAL_MAX_BYTES) throw new JournalUnavailable('FailureJournalFull');
+    if (this.anonymous) {
+      if (!['auth-failure-observed', 'auth-failure-recovered'].includes(kind) ||
+          (kind === 'auth-failure-observed' && parseAuthFailureObservation(JSON.parse(String(body.observation))).who !== null))
+        throw new JournalUnavailable('FailureJournalConflict');
+      // Reserve a completion record for every admitted observation, including when the database is unavailable.
+      const pendingAfter = this.pendingAuth.size + (kind === 'auth-failure-observed' ? 1
+        : this.pendingAuth.has(`auth-failure:${body.eventId}`) ? -1 : 0);
+      const required = Buffer.byteLength(line) + pendingAfter * RECORD_MAX_BYTES;
+      if (this.bytes + required > ANONYMOUS_JOURNAL_MAX_BYTES) this.compactAnonymous();
+      if (this.bytes + required > ANONYMOUS_JOURNAL_MAX_BYTES) throw new JournalUnavailable('FailureJournalFull');
+    } else if (this.bytes + Buffer.byteLength(line) > JOURNAL_MAX_BYTES) throw new JournalUnavailable('FailureJournalFull');
     this.write(line);
     const frozen = freeze(record);
     this.records.set(record.id, frozen);
+    this.indexAuth(record);
     return frozen;
   }
 

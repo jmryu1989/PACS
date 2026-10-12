@@ -34,7 +34,7 @@ export interface ExternalState {
 }
 interface Envelope { state: ExternalState; publishing: boolean; digest: string }
 interface Cached { base: string; offset: number; envelope: Envelope }
-export interface WriterContext { tailFile?: { file: string; ino: number; fd: number }; checkpoint?: { stamp: string; envelope: Envelope }; journal?: JournalFile; settlement?: Cached; log?: { file: string; ino: number; fd: number } }
+export interface WriterContext { tailFile?: { file: string; ino: number; fd: number }; checkpoint?: { stamp: string; envelope: Envelope }; journal?: JournalFile; anonymousJournal?: JournalFile; settlement?: Cached; log?: { file: string; ino: number; fd: number } }
 const clone = <T>(value: T): T => value === undefined ? value : JSON.parse(JSON.stringify(value));
 function readTail(file: string, context: WriterContext): any {
   const info = fs.lstatSync(file, { throwIfNoEntry: false });
@@ -132,14 +132,19 @@ function delta(before: ExternalState, state: ExternalState): any {
 }
 /** Called only by the lock-owning writer. Tests substitute OS/FS transport, not state transitions. */
 export function executeExternal(request: WriterRequest): any {
-  const { directory, operation, value } = request, context = request.context ?? {};
+  const { directory, value } = request, context = request.context ?? {};
+  let operation = request.operation;
   try {
-  if (operation.startsWith('journal-')) {
-    const journal = context.journal ??= new JournalFile(directory);
+  if (operation.startsWith('journal-') || operation.startsWith('anonymous-journal-')) {
+    const anonymous = operation.startsWith('anonymous-');
+    const journal = anonymous ? context.anonymousJournal ??= new JournalFile(directory, true)
+      : context.journal ??= new JournalFile(directory);
+    if (anonymous) operation = operation.slice('anonymous-'.length);
     journal.refresh();
     if (operation === 'journal-load') return { records: journal.all(), tornBytes: journal.tornBytes };
     if (operation === 'journal-record') return journal.record(value.id, value.kind, value.body, value.at);
     if (operation === 'journal-find') return journal.find(value);
+    if (operation === 'journal-auth-pending') return journal.pendingAuthentication();
     return fail('SealCorrupt');
   }
   const file = path.join(directory, 'seal', 'settlement.json'), tailFile = path.join(directory, 'seal', 'tail.json');

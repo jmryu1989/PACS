@@ -1,5 +1,20 @@
 # 살아 있는 불변조건 테스트
 
+REQ-EMR-06/07/19 → RISK-EMR-RECOVERY-STARVATION/DNS-AVAILABILITY/UNCONFIRMED-LOGIN → B2 C11·L09·L10·L16:
+익명 로그인 실패는 업무 복구 저널과 분리된 1 MiB 공간에 보존하며, 영수증이 확인된 관측만 압축한다.
+미복구 공간이 차면 새 관측의 원장 작업을 시작하지 않는다. 복구 틱은 미완료 관측만 제한된 수로 읽는다.
+C11은 실제 파일 IO로 20,000건 전후 조회 비용·용량 포화·재시작 보존을 검사하고 수치를 출력한다.
+L09는 DNS 단절 중 정상 인증/영상 요청과 원장 append 실패·commit 뒤 영수증 실패의 서로 다른 계약을 검사한다.
+L10은 issuer 변경 뒤 종료, L16은 서로 다른 콜백 실패와 롤백 이후 원 관측의 복구를 검사한다.
+
+로컬의 `AuthAuditLive`·`LogoutOrderLive`는 `KIN_TEST_OWNED_AUTH_HTTP=1`과 이 checkout에서 빌드한
+`KIN_TEST_API_IMAGE`를 지정하면 게이트 안에서 `owned_auth_http_stack.py`가 별도 합성 스택을 만든다.
+새 자격증명·고유 컨테이너/볼륨·새 네트워크를 쓰고 기존 localhost 포트 점유 시 거절한다.
+원본 컨테이너를 기동하지 않으며 종료 시 자기 Compose 프로젝트만 정리한다. 자격증명은 메모리에만 두고 로그는 비식별화한다.
+CAS 서비스 시험은 `scripts/run-tests.py --module tests/auth_audit_live.py --class ReportDraftServiceLive --mode live --unit <고정된-단위> --timeout 3600`으로 실행한다.
+이 adapter는 별도 networkless PostgreSQL의 빈 `kin_report_draft_test` DB를 만들고, 해당 DB URL을
+`KIN_REPORT_DRAFT_DATABASE_URL` 환경으로 컨테이너에 전달하여 42개 사례를 실행한다. 공개 CI의 기존 선택은 유지한다.
+
 REQ-EMR-01/02/06/07/19 → RISK-EMR-01/02/06/07/19 → EMR-B2 C11–C12·L09–L16: 인증 성공·진입·종료와 legacy AuditLog 투영의 동일 트랜잭션, 검증된 issuer+sub, 당시 DB 권한, 실제 nginx peer, 중복 종료·원시 자격증명 거절을 검사한다. `tests/emr/b/contract_test.cjs`와 `tests/emr_contract_test.cjs`는 순수 계약이고, 실제 PG/서명 토큰/nginx 경로는 `scripts/run-tests.py --module tests/emr/b/live.py --class EmrBAuthLive --mode live --unit <고정된-단위> --timeout 3600`으로 실행한다. 기존 B1 `EmrBLedgerLive`와 함께 선언을 대조하며, 현재 tree의 계약·live·mutant·후보 목록은 `emr/units/b.json`과 `scripts/emr-compose.py check`가 결속한다. 후보에는 B2의 L09·L14 두 흐름만 추가한다. `performance_test.py`는 CI gross gate이며 지연 비열등성 승인 근거가 아니다. 재인증·계정 분리 시험은 C의 보존 큐에 전달할 권한 접점을 검사하며, 영속 장치 큐나 재서명 완료를 뜻하지 않는다. 실제 명시적 기관 및 proxy 설정, 계정 격리 producer의 연결과 최종 live 재검증은 별도 수용 조건이다.
 
 REQ-S7-U5-DB-RIGHTS (D621/D623) → RISK-STALE-CREDENTIAL / RISK-LOST-REVOCATION → `auth_session_service_test.cjs`: DB 차단·권한 버전·새 인증·CAS·commit 경계, R10-05/06/09와 sid 종료 U1–5/9. Migration은 42개, 복원 표는 51개다. `20261007170000_member_db_rights` 적용 후 트래픽과 회원 변경을 멈춘 상태에서 `node prisma/import-member-rights.cjs`를 실행한다. 모든 realm 회원과 기존 세션을 이관하며 기존 provider-disabled/미확인 회원 변경은 차단으로 보존한다. 이관 실패·누락은 JWT 권한으로 대체하지 않는다. 외부 realm 사전 대조와 실제 이관은 배포 관문이다. 기존 disabled 회원의 일회성 legacy enable과 운영자 `--retry-roster` 복구는 core다. B01–B08 명부 수렴·회원 provider 조정 장치는 U5b에 남는다. 정상 회원 진입에는 새 클릭·prompt·관리 API 조회를 추가하지 않는다. 아래 과거 S7-U5 전체 코스 설명 중 회원 provider 격리·15초 Activate·U5E-13/14/17~20/22~27 기대는 `fable/s7-u5b-20261007`에 보류되며 core 완료 근거가 아니다. core의 U5E-15는 차단 중 거절·명령 후 새 인증·옛 권한 거절을 검사한다. 실제 realm 이관, core 권한 fixture를 반영한 live/CE1–4, 새 SHA PR CI·G3·독립 검수는 최종 전달 관문이다. 배포 유의(D631): round 3 `e3d16b5` 이전 빌드로 이미 realm 가져오기를 끝낸 DB가 있으면 트래픽 전에 `MemberRights.newAuthAfter`를 `MemberRightsImport.completedAt`으로 보정한다(새 코드는 marker가 있으면 가져오기를 건너뛰므로 자동 보정되지 않는다; 2026-10-07 확인 기준 그런 DB는 없다).

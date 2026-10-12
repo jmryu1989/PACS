@@ -1440,6 +1440,53 @@ function contractSuite() {
   });
 
   test('C11 composition is one startup capability; unprepared authentication starts no timers and a second composition is refused', async () => {
+    // B2R-01 / REQ-EMR-06/19 -> RISK-EMR-RECOVERY-STARVATION: real fenced journal IO, including restart and saturation.
+    // The timer consumes this pending query; historical failures must never enlarge its scan or the business journal.
+    const spoolState = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-emrb-anonymous-'));
+    try {
+      const journal = new J.FailureJournal(spoolState);
+      const tick = () => {
+        const start = process.hrtime.bigint();
+        for (let n = 0; n < 100; n++) assert.equal(journal.pendingAuthentication().length, 0);
+        return Number(process.hrtime.bigint() - start) / 1e6 / 100;
+      };
+      const before = tick();
+      const observe = () => {
+        const eventId = randomUUID();
+        const observation = C.parseAuthFailureObservation({ eventId, auditLinkId: A.newAuditLinkId(),
+          at: new Date().toISOString(), requestId: randomUUID(), managingInstitution: 'synthetic-capacity',
+          address: unresolved('not-observed'), who: null, rights: null, failure: 'provider-error' });
+        journal.anonymousRecord('auth-failure:' + eventId, 'auth-failure-observed', { observation: JSON.stringify(observation) }, observation.at);
+        return eventId;
+      };
+      for (let n = 0; n < 20000; n++) {
+        const id = observe();
+        journal.anonymousRecord('auth-failure-recovered:' + id, 'auth-failure-recovered', { eventId: id });
+      }
+      const after = tick(), anonymousBytes = fs.statSync(path.join(spoolState, 'anonymous-failures/failure-journal.jsonl')).size;
+      assert(anonymousBytes <= 1024 * 1024);
+      assert.equal(journal.all().length, 0, 'anonymous failures consumed zero business recovery records');
+      assert(after < Math.max(10, before * 5), 'idle tick cost stays flat after 20,000 failures');
+      const ids = [];
+      for (;;) {
+        try { ids.push(observe()); }
+        catch (error) { assert.equal(error.code, 'FailureJournalFull'); break; }
+        assert(ids.length < 1000, 'unrecovered anonymous work is bounded before admission');
+      }
+      journal.record('business-recovery', 'ledger-unavailable', { eventId: randomUUID(), cause: 'ledger-unreachable' });
+      assert.equal(journal.all().length, 1, 'business recovery capacity survives anonymous saturation');
+      // A second coordinator in this process shares the existing writer cache. Read the durable spool afresh to
+      // prove cold reconstruction instead of mistaking that shared cache for a restart.
+      const reloaded = new (load('emr-runtime/journal-file.ts').FailureJournal)(spoolState, true);
+      for (const id of ids) assert(reloaded.find('auth-failure:' + id), 'unrecovered observation survives cold reload');
+      assert.equal(reloaded.pendingAuthentication(ids.length).length, ids.length);
+      for (const id of ids) journal.anonymousRecord('auth-failure-recovered:' + id, 'auth-failure-recovered', { eventId: id });
+      assert.equal(journal.pendingAuthentication().length, 0);
+      assert(observe(), 'recovered bounded capacity can admit the next refusal');
+      console.log('B2R01_MEASUREMENT ' + JSON.stringify({ failures: 20000, before_ms_per_tick: before,
+        after_ms_per_tick_20k: after, anonymous_bytes: anonymousBytes, business_records_after_20k: 0,
+        saturated_pending: ids.length, capacity_protected: true }));
+    } finally { fs.rmSync(spoolState, { recursive: true, force: true }); }
     const { AuthService, AuthEventLedger } = load('auth.service.ts');
     const names = ['KIN_EMR_MANAGING_INSTITUTION', 'KIN_EMR_PROXY_HOST', 'KIN_EMR_STATE_DIR'];
     const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
@@ -1458,7 +1505,18 @@ function contractSuite() {
       assert.equal(scheduled, 0);
       assert.throws(() => M.composeEmrAdapters(CTX.runtimeAdapters), { code: 'EmrAdaptersAlreadyComposed' });
       delete process.env.KIN_EMR_MANAGING_INSTITUTION; delete process.env.KIN_EMR_PROXY_HOST;
-      assert.throws(() => new AuthEventLedger({}), /EmrAuthDeploymentRequired/);
+      assert.throws(() => new AuthEventLedger({}), /EmrManagingInstitutionRequired/);
+      const { startupFailureMessage, EmrRuntimeRefused } = load('emr-runtime/manifest.ts');
+      for (const [failure, expected] of [
+        [new Error('EmrManagingInstitutionRequired'), 'KIN_EMR_MANAGING_INSTITUTION'],
+        [new Error('EmrProxyHostRequired'), 'KIN_EMR_PROXY_HOST'],
+        [Object.assign(new Error('synthetic-secret'), { code: 'SealCorrupt' }), 'seal tail'],
+        [new EmrRuntimeRefused(['not-the-runtime-role']), 'kin_runtime'],
+      ]) {
+        const message = startupFailureMessage(failure);
+        assert.ok(message.includes(expected)); assert.ok(message.includes('기동을 중단합니다'));
+        assert.ok(!message.includes('synthetic-secret'));
+      }
     } finally {
       global.setInterval = interval;
       for (const name of names) {

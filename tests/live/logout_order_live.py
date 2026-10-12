@@ -84,6 +84,8 @@ const { AuthService, AuthEventLedger } = copy.exports;
 class LogoutOrderLive(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        from owned_auth_http_stack import start_if_requested
+        start_if_requested(cls)
         setup_stack(cls)
 
     def probe(self, mutant):

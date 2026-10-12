@@ -103,7 +103,8 @@ export class StateCoordinator {
       if (this.owner) return executeExternal({ directory: this.directory, operation, value, context: this.owner.context });
       try { return this.client.call(operation, value); }
       catch (error: any) {
-        if (!error.ownerGone || (!error.beforeConnect && !['read', 'journal-load', 'journal-find', 'journal-record'].includes(operation)) || attempt >= EMR_OWNER_RETRIES) {
+        if (!error.ownerGone || (!error.beforeConnect && !['read', 'journal-load', 'journal-find', 'journal-record',
+          'journal-auth-pending', 'anonymous-journal-find', 'anonymous-journal-record', 'anonymous-journal-auth-pending'].includes(operation)) || attempt >= EMR_OWNER_RETRIES) {
           if (this.role === 'retention') console.warn('EMR retention deferred: API state owner unavailable', { operation, attempts: attempt + 1 });
           throw error;
         }

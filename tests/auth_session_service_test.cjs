@@ -601,6 +601,7 @@ const w ={ t, base, calls: [], gates: [], faults: [], secrets: [], labels: new M
           // The scenarios advance a virtual provider/application clock. Project DB timestamps onto that timeline;
           // CORE_COMMAND_DB_CLOCK opts out and proves the boundary against the actual PG transaction clock.
           if (k === '$queryRaw') return async (...args) => {
+            if (String(args[0]).includes('emr_access.append_reserved')) await hit(inst, 'tx.ledger');
             const result = await value.apply(tx,args);
             if (w.realDatabaseClock || String(args[0]).includes('emr_access.')) return result;
             return result.map(row => Object.fromEntries(Object.entries(row).map(([key,v]) => [key,v instanceof Date ? new Date() : v])));
@@ -927,6 +928,58 @@ test('L09 auth login and entry commit with one projection each; failed storage g
   for (let n = 0; n < 4; n++) await w.call(w.I1, 'callback', { query: { state: 'unowned', code: 'unowned' } });
   assert.equal((await w.rows()).length, before);
   assert.equal((await w.call(w.I1, 'me', { sid: done.newSid })).status, 200);
+  // B2R-02: normal authenticated and image authorization requests never depend on DNS, even on a fresh instance.
+  const dns = require('node:dns/promises'), originalLookup = dns.lookup;
+  const other = await w.instance('dns-down');
+  let lookups = 0;
+  dns.lookup = () => { lookups++; return new Promise(() => {}); };
+  try {
+    assert.equal((await within(w.call(other, 'me', { sid: done.newSid }), 'normal request with DNS down', 1000)).status, 200);
+    assert.equal((await within(w.call(other, 'authz', { sid: done.newSid }), 'image authorization with DNS down', 1000)).status, 204);
+    const refreshed = await w.issue('dns-refreshed', { sub: 'b2-member' });
+    kc.auto = () => reply.tokens(refreshed);
+    await w.base.authSession.update({ where: { sid: done.newSid }, data: { atExpiresAt: new Date(Date.now() - LEAD) } });
+    assert.equal((await within(w.call(other, 'me', { sid: done.newSid }), 'successful refresh with DNS down', 1000)).status, 200);
+    assert.equal(lookups, 0);
+  } finally { dns.lookup = originalLookup; kc.auto = null; }
+
+  // B2R-03 / OM13: fail the protected SQL append, before any projection. A successful session cannot escape rollback.
+  const successful = (await protectedAuthRows(w)).filter(r => r.event.result === 'succeeded').length;
+  const journalRows = () => fs.readFileSync(process.env.KIN_EMR_STATE_DIR + '/journal/failure-journal.jsonl', 'utf8')
+    .split('\n').filter(Boolean).map(JSON.parse);
+  const beforeLedgerFailure = new Set(journalRows().map(row => row.id));
+  w.fault('I1', 'tx.ledger', Object.assign(new Error('synthetic ledger unavailable'), { code: 'P1001' }));
+  const ledgerDenied = await login(w, w.I1, await w.issue('ledger-denied', { sub: 'ledger-denied' }));
+  assert.equal(ledgerDenied.done.status, 302);
+  assert.equal(ledgerDenied.done.location, landing('login_failed'));
+  assert.equal(ledgerDenied.done.newSid, null); assert.equal(ledgerDenied.done.sidCookies, 0);
+  assert.equal(await w.sessions(), 1);
+  assert.equal((await protectedAuthRows(w)).filter(r => r.event.result === 'succeeded').length, successful);
+  assert.ok(journalRows().some(row => !beforeLedgerFailure.has(row.id) && row.kind === 'append-rolled-back'),
+    'this ledger failure leaves a new durable rollback fact');
+
+  // B2R-03 / OM14, L08: commit stands when its receipt fails. Return no credential/proof and never invent rollback.
+  const realOpen = fs.openSync;
+  let receiptFailures = 0;
+  fs.openSync = (file, flags, ...args) => {
+    if (String(file) === process.env.KIN_EMR_STATE_DIR + '/seal/tail.json' && flags === 'r+') {
+      receiptFailures++; throw Object.assign(new Error('synthetic receipt unavailable'), { code: 'EROFS' });
+    }
+    return realOpen(file, flags, ...args);
+  };
+  let unconfirmed;
+  try { unconfirmed = await login(w, w.I1, await w.issue('receipt-denied', { sub: 'receipt-denied' })); }
+  finally { fs.openSync = realOpen; }
+  assert.ok(receiptFailures > 0, 'receipt publication fault was exercised');
+  assert.equal(unconfirmed.done.status, 302); assert.equal(unconfirmed.done.location, landing('login_unconfirmed'));
+  assert.equal(unconfirmed.done.newSid, null); assert.equal(unconfirmed.done.sidCookies, 0); assert.equal(unconfirmed.done.proof, undefined);
+  assert.equal(await w.sessions(), 2, 'the committed session remains internal; no credential was delivered');
+  const committed = (await protectedAuthRows(w)).filter(r => r.event.result === 'succeeded');
+  assert.equal(committed.length, successful + 1);
+  assert.ok(journalRows().some(row => row.body.eventId === committed.at(-1).event.eventId
+    && row.body.cause === 'seal-unavailable'), 'receipt failure belongs to this committed login event');
+  await w.instance('receipt-recovery');
+  assert.equal((await protectedAuthRows(w)).filter(r => r.event.result === 'succeeded').length, successful + 1);
   await w.finish('L09');
 });
 
@@ -951,6 +1004,16 @@ test('L10 one end per deleted session; retries and losing requests add none and 
   }
   assert.equal((await w.call(w.I1, 'me', { sid: fresh.done.newSid })).status, 200);
   assert.equal((await w.call(w.I1, 'me', { bearer: token.access })).status, 401);
+  // B2R-08: revocation uses the persisted issuer/sub identity after deployment issuer rotation.
+  const originalIssuer = process.env.KC_ISSUER;
+  process.env.KC_ISSUER = 'https://rotated.synthetic.test/auth/realms/kin';
+  try {
+    assert.equal((await w.call(w.I1, 'logout', { sid: fresh.done.newSid })).status, 204);
+    assert.equal(await w.sessions(), 0);
+    const ended = (await protectedAuthRows(w)).filter(row => row.event.action === 'auth.logout').at(-1);
+    assert.equal(ended.event.affectedIdentity.value.issuer, originalIssuer);
+    assert.equal(ended.event.affectedIdentity.value.id, (await protectedAuthRows(w))[0].event.affectedIdentity.value.id);
+  } finally { process.env.KC_ISSUER = originalIssuer; }
   await w.finish('L10');
 });
 
@@ -1119,7 +1182,7 @@ test('L16 a failed authentication observation survives rollback and recovers und
   await refuseFlow(w, w.I1, begin, 'access_denied');
   assert.equal(await w.sessions(), 0);
   assert.equal((await protectedAuthRows(w)).length, 0);
-  const files = fs.readFileSync(process.env.KIN_EMR_STATE_DIR + '/journal/failure-journal.jsonl', 'utf8');
+  const files = fs.readFileSync(process.env.KIN_EMR_STATE_DIR + '/anonymous-failures/failure-journal.jsonl', 'utf8');
   const observations = files.split('\n').filter(Boolean).map(line => JSON.parse(line)).filter(row => row.kind === 'auth-failure-observed');
   const original = JSON.parse(observations.at(-1).body.observation);
   assert.deepEqual(secretHits([files], w.secrets), []);
@@ -1130,6 +1193,14 @@ test('L16 a failed authentication observation survives rollback and recovers und
   await w.I1.ledger.recoverFailures();
   assert.equal((await protectedAuthRows(w)).length, 1); assert.equal(await w.sessions(), 0);
   assert.deepEqual(secretHits(recovered.map(r => r.payload), w.secrets), []);
+  // B2R-05: a stray callback must not absorb the eventual failure of the live flow whose cookie accompanied it.
+  const flow = await w.call(w.I1, 'login');
+  await w.call(w.I1, 'callback', { cookie: flow.pendingCookie, query: { state: 'stray', code: 'stray' } });
+  await refuseFlow(w, w.I1, flow, 'access_denied');
+  const failures = (await protectedAuthRows(w)).slice(1);
+  assert.equal(failures.length, 2);
+  assert.deepEqual(failures.map(row => row.event.auth.failureCause), ['state-mismatch', 'provider-error']);
+  assert.notEqual(failures[0].event.eventId, failures[1].event.eventId);
   await w.finish('L16');
 });
 const atProvider = out => typeof out.location === 'string' && out.location.startsWith(ISSUER + '/protocol/openid-connect/auth?');
@@ -4363,6 +4434,8 @@ test('CORE-R2-BOOT API starts during realm outage; retries indefinitely with cap
   t.after(()=>restart.onModuleDestroy());await restart.onModuleInit();await flush();assert.equal(calls,11);
   const logs=await w.finish('CORE-R2-BOOT');
   assert.ok(logs.length > 0, 'failed import and retry attempts have diagnostics');
+  assert.ok(logs.some(([,line]) => line.includes('provider-unavailable')), 'provider import retry reason is logged');
+  assert.ok(logs.some(([,line]) => line.includes('storage')), 'storage import retry reason is logged');
   assert.equal(logs.some(([,line])=>line.includes('synthetic realm unreachable')), false,
     'raw provider failures must not escape into diagnostics');
 });

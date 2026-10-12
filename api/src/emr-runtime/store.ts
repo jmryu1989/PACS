@@ -302,6 +302,9 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
   }
 
   private note(eventId: string, kind: 'append-rolled-back' | 'ledger-unavailable', cause: string, attemptId = `unassigned:${eventId}`, stream: AccessStream | 'transaction' = 'transaction'): void {
+    // The observation is already durable outside this transaction and remains pending until receipt. In particular,
+    // retries of an anonymous refusal must not spill unlimited settlement notes into the business recovery journal.
+    if (this.journal.hasAuthenticationObservation(eventId)) return;
     try { this.journal.record(`${kind}:${stream}:${attemptId}:${cause}`, kind, { eventId, cause }); }
     catch (error) {
       // Without the journal there is no surviving record of this failure: surface that, never a success.

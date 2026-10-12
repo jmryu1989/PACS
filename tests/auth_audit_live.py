@@ -186,6 +186,42 @@ class AuthSessionServiceLive(unittest.TestCase):
                        pattern=r'^CORE_(?!COMMAND_CAS_MATRIX|POSTCOMMIT_MATRIX|COMMAND_END_RACE|R(?:9_|10_|11_))', expected=77)
 
 
+class ReportDraftServiceLive(unittest.TestCase):
+    """The compiled draft CAS contract on the same networkless, disposable PostgreSQL fixture."""
+    label_namespace = 'kin.emrb.live'
+    setUpClass = classmethod(AuthSessionServiceLive.setUpClass.__func__)
+    setup_disposable_resources = classmethod(AuthSessionServiceLive.setup_disposable_resources.__func__)
+    cleanup_resources = classmethod(AuthSessionServiceLive.cleanup_resources.__func__)
+    start_db = classmethod(AuthSessionServiceLive.start_db.__func__)
+    provision = classmethod(AuthSessionServiceLive.provision.__func__)
+    migrate = classmethod(AuthSessionServiceLive.migrate.__func__)
+    volume = classmethod(AuthSessionServiceLive.volume.__func__)
+    url = classmethod(AuthSessionServiceLive.url.__func__)
+    psql = AuthSessionServiceLive.psql
+    ok = AuthSessionServiceLive.ok
+
+    def test_compiled_report_draft_cas(self):
+        db = self.start_db('draft-cas')
+        self.provision(db)
+        self.ok('CREATE DATABASE kin_report_draft_test OWNER kin', db=db)
+        env = {**self.env, 'KIN_REPORT_DRAFT_DATABASE_URL': self.url('kin', 'kin_report_draft_test')}
+        result = self.__class__._run([
+            'docker', 'run', '--rm', '--label', self.label, '--network', 'container:' + db,
+            '-e', 'KIN_REPORT_DRAFT_DATABASE_URL', '-v', str(ROOT / 'tests') + ':/tests:ro',
+            '--entrypoint', 'node', self.image, '--test', '--test-reporter=tap', '/tests/report_draft_cas_service_test.cjs'],
+            env=env, check=False, timeout=3000)
+        output = (result.stdout + result.stderr).decode('utf-8', 'replace')
+        for value in self.secrets.values():
+            output = output.replace(value, '[redacted]')
+        print(output, flush=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertRegex(output, r'(?m)^# pass 42$')
+        self.assertRegex(output, r'(?m)^# fail 0$')
+        self.assertRegex(output, r'(?m)^# skipped 0$')
+
+    _run = staticmethod(AuthSessionServiceLive._fixture.run)
+
+
 class AuthAuditLive(unittest.TestCase):
     secrets: list = []
     provider_sessions: list = []
@@ -195,6 +231,8 @@ class AuthAuditLive(unittest.TestCase):
         declared = [name for name in sorted(vars(cls)) if name.startswith("test_")]
         if list(CASES) != declared:
             raise RuntimeError(f"CASES {CASES} differ from the declared cases {declared}")
+        from owned_auth_http_stack import start_if_requested
+        start_if_requested(cls)
         cls.stack = LiveStack()
         cls.addClassCleanup(cls.stack.cleanup_test_identities)
         cls.run_id = uuid.uuid4().hex[:12]

@@ -1,9 +1,15 @@
 import { decodeJwt } from 'jose';
 import { APP_ROLES } from './clinician-policy';
-import { Logger } from '@nestjs/common';
+import { Logger, ServiceUnavailableException } from '@nestjs/common';
 import { KeycloakService, KeycloakUser, RosterWriteFailure } from './keycloak.service';
 import { PrismaService } from './prisma.service';
 import { lockMemberRights, rosterOverlap } from './member-rights';
+
+export class MemberRightsImportFailure extends ServiceUnavailableException {
+  constructor(readonly reason: 'provider-unavailable' | 'provider-data-invalid') {
+    super('회원 권한 정보를 가져올 수 없습니다');
+  }
+}
 
 /** Run once with member administration stopped, before enabling traffic for the new schema.
  * Reads every realm member, including those without an AuthSession. Never import again over DB rights.
@@ -15,9 +21,11 @@ export async function importMemberRights(prisma: PrismaService, keycloak: Keyclo
   const users: KeycloakUser[] = [];
   let expectedTotal: number | null = null;
   for (let page = 1; ; page++) {
-    const result = await keycloak.listUsers(page, signal);
+    let result: Awaited<ReturnType<KeycloakService['listUsers']>>;
+    try { result = await keycloak.listUsers(page, signal); }
+    catch { throw new MemberRightsImportFailure('provider-unavailable'); }
     if (!Number.isInteger(result.total) || result.total < 0 || (expectedTotal !== null && result.total !== expectedTotal))
-      throw new Error('Unstable realm member import');
+      throw new MemberRightsImportFailure('provider-data-invalid');
     expectedTotal = result.total;
     users.push(...result.users);
     if (users.length >= result.total) break;

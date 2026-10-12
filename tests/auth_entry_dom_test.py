@@ -728,7 +728,7 @@ class AuthEntryDOMTest(unittest.TestCase):
         # as the refused start, no login started by itself. The opposite side: refusals that a later press does resolve
         # (the provider briefly unavailable, a login not finished) keep their own guidance and do not send the person to
         # the administrator.
-        for notice, administrator in (("end_unconfirmed", True), ("sso_unidentified", False), ("login_failed", False)):
+        for notice, administrator in (("end_unconfirmed", True), ("sso_unidentified", False), ("login_failed", False), ("login_unconfirmed", False)):
             with self.subTest(notice=notice):
                 self.renew()
                 self.me_absent = True
@@ -738,6 +738,9 @@ class AuthEntryDOMTest(unittest.TestCase):
                 else:
                     expect(self.page.locator("#msg")).not_to_have_text("")
                     self.assertNotIn(self.ADMIN_GUIDANCE, self.page.locator("#msg").inner_text())
+                    self.assertNotIn(notice, self.page.locator("#msg").inner_text())
+                    if notice == "login_unconfirmed":
+                        expect(self.page.locator("#msg")).to_contain_text("로그인 확인을 마치지 못했습니다")
                 self.page.wait_for_timeout(1000)
                 self.assertEqual((urlparse(self.page.url).path, self.starts()), (BASE + "index.html", []), "no login by itself")
 

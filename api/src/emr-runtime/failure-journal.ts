@@ -29,4 +29,15 @@ export class FailureJournal {
   }
   all(): readonly Readonly<JournalRecord>[] { return this.invoke('journal-load').records; }
   find(id: string): Readonly<JournalRecord> | undefined { return this.invoke('journal-find', id); }
+  anonymousRecord(id: string, kind: JournalKind, body: Record<string, string | number>, at = new Date().toISOString()): Readonly<JournalRecord> {
+    return this.invoke('anonymous-journal-record', { id, kind, body, at });
+  }
+  anonymousFind(id: string): Readonly<JournalRecord> | undefined { return this.invoke('anonymous-journal-find', id); }
+  pendingAuthentication(): readonly Readonly<JournalRecord>[] {
+    return [...this.invoke('journal-auth-pending'), ...this.invoke('anonymous-journal-auth-pending')];
+  }
+  hasAuthenticationObservation(eventId: string): boolean {
+    const id = `auth-failure:${eventId}`;
+    return !!(this.find(id) ?? this.anonymousFind(id));
+  }
 }

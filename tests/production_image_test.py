@@ -221,7 +221,9 @@ assert(state.isDirectory()); assert.strictEqual(state.uid,process.getuid()); ass
         """EMR-B1 start boundary: in production the server opens only as the least-privilege runtime role."""
         name = self.api("installer", DATABASE_URL=INSTALLER_URL)
         logs = self.stopped_with_error(name)
-        self.assertIn("EmrRuntimeRefused", logs)
+        # Deployment diagnostics identify the required role in Korean; an internal exception class is not the contract.
+        self.assertIn("kin_runtime", logs)
+        self.assertRegex(logs, r"[가-힣]")
         for problem in ("not-the-runtime-role", "rolsuper"):
             self.assertIn(problem, logs)
 

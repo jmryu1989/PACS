@@ -43,6 +43,35 @@ export class EmrRuntimeRefused extends Error {
   constructor(readonly problems: readonly string[]) { super(`EmrRuntimeRefused: ${problems.join(', ')}`); this.name = 'EmrRuntimeRefused'; }
 }
 
+/** Operator diagnostics contain deployment declarations and closed failure classes, never provider/SQL error text. */
+export function startupFailureMessage(error: unknown): string {
+  if (error instanceof EmrRuntimeRefused)
+    return `접속 원장 역할/저장소 검증 실패(kin_runtime): ${error.problems.join(', ')}. 기동을 중단합니다.`;
+  const messages: Record<string, string> = {
+    EmrManagingInstitutionRequired: 'KIN_EMR_MANAGING_INSTITUTION 설정이 없습니다',
+    EmrProxyHostRequired: 'KIN_EMR_PROXY_HOST 설정이 없습니다',
+    EmrStateDirectoryRequired: 'KIN_EMR_STATE_DIR 경로가 없거나 보호 디렉터리가 아닙니다',
+    EmrStateDirectoryExposed: 'KIN_EMR_STATE_DIR 디렉터리 권한이 노출되어 있습니다',
+    AuthLedgerNotPrepared: '접속 원장 초기화가 완료되지 않았습니다',
+    SealUnavailable: '접속 원장 seal tail에 접근할 수 없습니다',
+    SealCorrupt: '접속 원장 seal tail 검증에 실패했습니다',
+    SealMissing: '접속 원장 seal tail이 없습니다',
+    SealChainMismatch: '접속 원장 seal tail의 체인 식별자가 다릅니다',
+    LedgerBehindSeal: '접속 원장이 보존된 seal tail보다 뒤에 있습니다',
+    SealTailMismatch: '접속 원장과 보존된 seal tail이 일치하지 않습니다',
+    LedgerChainBroken: '접속 원장의 체인 연결 검증에 실패했습니다',
+    UnsealedEntryUnexplained: '접속 원장 seal tail 이후의 기록을 복구할 수 없습니다',
+    SealUpgradeRequired: '접속 원장 seal tail 형식의 검토된 갱신이 필요합니다',
+    FailureJournalUnavailable: '접속 원장 복구 저널에 접근할 수 없습니다',
+    FailureJournalFull: '접속 원장 복구 저널 용량이 가득 찼습니다',
+    FailureJournalCorrupt: '접속 원장 복구 저널 검증에 실패했습니다',
+  };
+  const value = error as { code?: string; message?: string; name?: string };
+  const message = messages[value?.code ?? ''] ?? messages[value?.message ?? ''];
+  const name = /^(?:[A-Za-z][A-Za-z0-9]{0,63})?(?:Error|Exception)$/.test(value?.name ?? '') ? value.name : 'Error';
+  return `${message ?? `서비스 초기화 실패(${name})`}. 기동을 중단합니다.`;
+}
+
 /**
  * The runtime connection is the least-privilege application role and the ledger is placed: refuse otherwise. Reads only
  * catalog facts the role can see; reports closed problem codes, never connection strings or secrets.

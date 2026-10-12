@@ -8,7 +8,7 @@ import { createRemoteJWKSet, decodeJwt, jwtVerify, JWTPayload } from 'jose';
 import { PrismaService } from './prisma.service';
 import { ChangeAnswer, KeycloakService, RosterWriteFailure, within } from './keycloak.service';
 import { rightsAllow, lockMemberRights } from './member-rights';
-import { importMemberRights } from './member-rights-import';
+import { importMemberRights, MemberRightsImportFailure } from './member-rights-import';
 import { clinicianOnly } from './clinician-policy';
 import { AuthAccessEventV2, AuthEndCause, AuthFailureCause, EvidenceFactV2, ImmutableIdentity, newAuditLinkId, parseAccessEvent, ReauthenticationTrigger } from './emr-contract/access-event';
 import { emrAdapters } from './emr-contract/composition';
@@ -189,12 +189,15 @@ export class AuthEventLedger {
   private readonly proxyHost: string;
   private ready = false;
   private recoveringFailures?: Promise<void>;
+  private proxyPeers?: { expires: number; peers: Set<string> };
+  private resolvingProxy?: Promise<Set<string>>;
   private readonly transactions = new WeakMap<object, { events: AuthAccessEventV2[]; appended: ProvisionalAppend[] }>();
 
   constructor(private readonly prisma: PrismaService) {
     const institution = process.env.KIN_EMR_MANAGING_INSTITUTION?.trim();
     const proxyHost = process.env.KIN_EMR_PROXY_HOST?.trim();
-    if (!institution || !proxyHost) throw new Error('EmrAuthDeploymentRequired');
+    if (!institution) throw new Error('EmrManagingInstitutionRequired');
+    if (!proxyHost) throw new Error('EmrProxyHostRequired');
     const journal = new FailureJournal(process.env.KIN_EMR_STATE_DIR);
     const sql = new PrismaLedgerSql(this.prisma);
     const seal = new AccessSeal(process.env.KIN_EMR_STATE_DIR, sql, journal);
@@ -219,12 +222,24 @@ export class AuthEventLedger {
 
   async ingress(req: any, surface?: string): Promise<AuthIngress> {
     this.assertReady();
-    // DNS belongs to the configured container network, not to any request header. Resolve again after proxy restarts;
-    // an absent ingress remains unobserved and cannot authorize a successful authentication event.
-    let peers = new Set<string>();
-    try { peers = new Set((await lookup(this.proxyHost!, { all: true })).map(row => row.address)); } catch { /* refused by the event contract */ }
+    // DNS is needed only for an event. A failed lookup still permits revocation with unobserved ingress.
+    const peers = await this.trustedPeers();
     return { surface: surface ?? req?.emrAuthSurface, requestId: randomUUID(),
       address: ingressAddress(req?.socket?.remoteAddress, req?.headers ?? {}, peers) };
+  }
+
+  private async trustedPeers(): Promise<Set<string>> {
+    if (this.proxyPeers && this.proxyPeers.expires > Date.now()) return this.proxyPeers.peers;
+    if (!this.resolvingProxy) this.resolvingProxy = (async () => {
+      let timer: NodeJS.Timeout;
+      const timedOut = new Promise<Set<string>>(resolve => { timer = setTimeout(() => resolve(new Set()), 200); });
+      try {
+        const peers = await Promise.race([lookup(this.proxyHost, { all: true }).then(rows => new Set(rows.map(row => row.address)), () => new Set<string>()), timedOut]);
+        this.proxyPeers = { peers, expires: Date.now() + (peers.size ? 5000 : 1000) };
+        return peers;
+      } finally { clearTimeout(timer!); this.resolvingProxy = undefined; }
+    })();
+    return this.resolvingProxy;
   }
 
   async transaction<T>(work: (tx: any) => Promise<T>, options?: { maxWait: number; timeout: number }): Promise<T> {
@@ -321,7 +336,8 @@ export class AuthEventLedger {
 
   async failure(ingress: AuthIngress, failure: LoginFailureCause, who: Who | null, attemptId: string) {
     this.assertReady();
-    const retained = this.store!.journal.find(`auth-failure:${attemptId}`);
+    const journal = this.store!.journal;
+    const retained = journal.find(`auth-failure:${attemptId}`) ?? journal.anonymousFind(`auth-failure:${attemptId}`);
     if (retained) return this.recoverFailure(parseAuthFailureObservation(JSON.parse(String(retained.body.observation))));
     const at = new Date().toISOString();
     let rights = null;
@@ -338,7 +354,8 @@ export class AuthEventLedger {
     const observation = parseAuthFailureObservation({ eventId: attemptId, auditLinkId: newAuditLinkId(), at,
       requestId: ingress.requestId, managingInstitution: this.managingInstitution, address: ingress.address,
       who, rights, failure: failure.replace(/_/g, '-') });
-    this.store!.journal.record(`auth-failure:${observation.eventId}`, 'auth-failure-observed', { observation: JSON.stringify(observation) }, at);
+    const record = who ? journal.record.bind(journal) : journal.anonymousRecord.bind(journal);
+    record(`auth-failure:${observation.eventId}`, 'auth-failure-observed', { observation: JSON.stringify(observation) }, at);
     // A failed append still has the durable observation. Only its confirmed same-event receipt marks recovery.
     try { await this.recoverFailure(observation); } catch {
       throw new Error('AuthFailureAwaitingRecovery');
@@ -347,7 +364,10 @@ export class AuthEventLedger {
 
   private async recoverFailure(observation: ReturnType<typeof parseAuthFailureObservation>) {
     const done = `auth-failure-recovered:${observation.eventId}`;
-    if (this.store!.journal.find(done)) return;
+    const journal = this.store!.journal;
+    // Complete anonymous observations retained by older deployments in their original recovery journal.
+    const protectedObservation = !!journal.find(`auth-failure:${observation.eventId}`);
+    if (journal.find(done) || journal.anonymousFind(done)) return;
     await this.transaction(async tx => {
       const event = await this.event(tx, { action: AUTH_LOGIN, who: observation.who, rights: observation.rights,
         ingress: { surface: 'GET auth/callback', requestId: observation.requestId, address: observation.address },
@@ -355,7 +375,8 @@ export class AuthEventLedger {
         at: new Date(observation.at), auditLinkId: observation.auditLinkId, managingInstitution: observation.managingInstitution });
       await this.record(tx, event, observation.who?.actor ?? 'unknown');
     });
-    this.store!.journal.record(done, 'auth-failure-recovered', { eventId: observation.eventId });
+    const record = protectedObservation ? journal.record.bind(journal) : journal.anonymousRecord.bind(journal);
+    record(done, 'auth-failure-recovered', { eventId: observation.eventId });
   }
 
   recoverFailures(): Promise<void> {
@@ -363,7 +384,7 @@ export class AuthEventLedger {
     // The retry timer can fire again while storage is slow. One recovery pass owns the retained observations;
     // overlapping passes otherwise exhaust the same pool needed to end sessions and to run the sweep.
     if (!this.recoveringFailures) this.recoveringFailures = (async () => {
-      for (const row of this.store!.journal.all()) if (row.kind === 'auth-failure-observed')
+      for (const row of this.store!.journal.pendingAuthentication())
         await this.recoverFailure(parseAuthFailureObservation(JSON.parse(String(row.body.observation))));
     })().finally(() => { this.recoveringFailures = undefined; });
     return this.recoveringFailures;
@@ -462,7 +483,8 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`Member rights import attempt ${attempt}: ready`);
     } catch (error: any) {
       const delay = Math.min(30000, 1000 * 2 ** Math.min(attempt - 1, 5));
-      this.logger.warn(`Member rights import attempt ${attempt}: storage/provider failure; retry in ${delay}ms`);
+      const reason = error instanceof MemberRightsImportFailure ? error.reason : 'storage';
+      this.logger.warn(`회원 권한 가져오기 ${attempt}회: ${reason}; ${delay}ms 후 재시도합니다`);
       if (!this.stopping) {
         this.importTimer = setTimeout(() => { void this.importRights(attempt + 1); }, delay);
         this.importTimer.unref();
@@ -658,6 +680,8 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       if (!revocation || !process.env.KC_ISSUER || !session.sub) throw new Error('StoredSessionIdentityInvalid');
       return { actor: session.sub, target: session.sub, issuer: process.env.KC_ISSUER, institution: session.institution };
     }
+    if (revocation && session.sub && typeof claims.iss === 'string' && claims.iss && claims.sub === session.sub)
+      return { ...this.identity(claims, session.sub), institution: session.institution };
     if (!process.env.KC_ISSUER || claims.iss !== process.env.KC_ISSUER || claims.sub !== session.sub)
       throw new Error('StoredSessionIdentityInvalid');
     return { ...this.identity(claims, session.sub), institution: session.institution };
@@ -1202,7 +1226,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 콜백의 error 원문·code·state는 남기지 않는다. 기록 실패는 고정 분류만 남기고 콜백 응답을 바꾸지 않는다.
    */
   private async loginFailureRow(req: any, cause: LoginFailureCause, who: Who | null) {
-    // No failure row from arbitrary query/state/error text. One server-signed attempt can add at most one failure fact.
+    // Each observed callback has its own attempt key; arbitrary query/state/error text alone supplies none.
     if (typeof req.emrLoginAttemptId !== 'string') return;
     const ingress = await this.requestIp(req, 'GET auth/callback');
     await this.ledger.failure(ingress, cause, who, req.emrLoginAttemptId);
@@ -1250,7 +1274,8 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
     const flows = this.pendingFlows(req);
     const found = state ? flows.find(flow => flow.name === this.pendingName(state)) : undefined;
     const own: Flow | null = found?.pending && found.pending.state === state ? found as Flow : null;
-    req.emrLoginAttemptId = (own?.live ? own.pending : flows.find(flow => flow.live)?.pending)?.auditAttemptId;
+    // A stray callback and the eventual callback of a live flow are separate observations, even in one browser.
+    req.emrLoginAttemptId = flows.some(flow => flow.live) ? randomUUID() : undefined;
     if (own) this.expirePending(res, own.name);
 
     if (!own?.live) {
@@ -1567,12 +1592,12 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** 응답은 그 요청을 시작한 관찰 S에만 적용한다: 성공은 S 조건부 저장이 count 1일 때만, 거절은 S 조건부 종료. */
-  private async doRefresh(session: Session, ip: AuthIngress | null): Promise<RefreshOutcome> {
+  private async doRefresh(session: Session, ip: () => Promise<AuthIngress>): Promise<RefreshOutcome> {
     await this.sessionRights(session);
     const answer = await this.exchangeRefresh(session.refreshToken);
     if (answer.kind === 'unavailable') return { kind: 'unavailable' };
     if (answer.kind === 'refused')
-      return await this.endAndTell(session, 'refresh_failed', ip) ? { kind: 'ended' } : { kind: 'conflict' };
+      return await this.endAndTell(session, 'refresh_failed', await ip()) ? { kind: 'ended' } : { kind: 'conflict' };
     // 갱신은 같은 사람의 같은 provider 세션을 잇는 것이다. 다른 sub·다른 provider 세션의 토큰은 이 세션의 것이 아니다 —
     // 저장하지 않고, 세션을 끝내지도 않는다(인증 서버의 답이 이상한 것이지 이 세션이 끝난 것이 아니다).
     const idpSid = this.idpSidOfClaims(answer.payload), known = this.idpSidOf(session);
@@ -1595,7 +1620,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** 같은 프로세스의 겹친 요청은 같은 관찰(sid와 두 토큰)일 때만 refresh 하나를 나눈다. 응답 쿠키는 각 요청이 정한다. */
-  private refresh(session: Session, ip: AuthIngress | null): Promise<RefreshOutcome> {
+  private refresh(session: Session, ip: () => Promise<AuthIngress>): Promise<RefreshOutcome> {
     const key = createHash('sha256').update(JSON.stringify([session.sid, session.accessToken, session.refreshToken]))
       .digest('base64url');
     const running = this.refreshes.get(key);
@@ -1614,7 +1639,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
    * 끝내지 않는다. 세션이 끝나는 것은 Keycloak이 거절을 답했을 때와 idle뿐이다.
    */
   async authenticateSession(sid: string, res: any): Promise<any> {
-    const ip = await this.requestIp(res?.req);
+    const ip = () => this.requestIp(res?.req);
     let session = await this.readSession(sid);
     if (!session) throw this.ended('인증 세션이 없습니다');
     // idle → refresh → 진행을 관찰마다 판정한다. 조건부 전이가 0행이면 그 관찰(과 늦은 성공 토큰)을 버리고 다시 읽는다.
@@ -1626,7 +1651,7 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
       let ended: string;
       if (session.lastSeenAt.getTime() < cutoff.getTime()) {
         writes++;
-        if (await this.endAndTell(session, 'idle', ip, cutoff)) throw this.ended('인증 세션이 만료되었습니다');
+        if (await this.endAndTell(session, 'idle', await ip(), cutoff)) throw this.ended('인증 세션이 만료되었습니다');
         ended = '인증 세션이 만료되었습니다';
       } else if (session.atExpiresAt.getTime() <= now && now < session.atExpiresAt.getTime() + REFRESH_LEAD_MS - TOKEN_MARGIN_MS) {
         // 갱신할 때가 됐고 토큰은 아직 유효하다: 이 요청은 저장된 토큰으로 가고, 갱신은 아래에서 시작만 한다.

@@ -1744,7 +1744,9 @@ if (process.argv.includes('--emr-inventory-generator')) {
     for (const source of program.getSourceFiles().filter(f => parsed.fileNames.includes(f.fileName))) {
       const visit = node => {
         if (ts.isCallExpression(node) && resolve(checker.getSymbolAtLocation(node.expression)) === compose) {
-          assert.equal(source, main);
+          // Comparing whole SourceFile objects makes a failing location assertion format the entire cyclic AST.
+          // File identity is the composition boundary; report the two paths without expanding compiler state.
+          assert.equal(source.fileName, main.fileName, 'Adapter composition belongs to main startup');
           calls++;
         }
         ts.forEachChild(node, visit);

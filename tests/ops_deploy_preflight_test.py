@@ -36,7 +36,10 @@ def container():
 
 class PreflightTests(unittest.TestCase):
     def test_emr_next_launch_inputs_and_redacted_diagnostic(self):
-        valid = {"KIN_EMR_MANAGING_INSTITUTION": "synthetic-emr-managing", "KIN_EMR_PROXY_HOST": "proxy"}
+        valid = {"KIN_EMR_MANAGING_INSTITUTION": "hospital-operations", "KIN_EMR_PROXY_HOST": "proxy"}
+        for placeholder in ("synthetic-emr-managing", "SYNTHETIC-hospital", "example-hospital", "placeholder", "change-me", "your-institution"):
+            with self.subTest(placeholder=placeholder), self.assertRaisesRegex(RuntimeError, "실제 관리기관 식별자"):
+                deploy.check_emr_auth_inputs({**valid, "KIN_EMR_MANAGING_INSTITUTION": placeholder})
         def reply(env):
             return subprocess.CompletedProcess([], 0, json.dumps({"services": {"api": {"environment": env}}}).encode(), b"")
         with patch.object(ops, "run", return_value=reply(valid)) as run:
@@ -131,7 +134,7 @@ class PreflightTests(unittest.TestCase):
         good = container()
         good["Mounts"] = [{"Type": "volume", "Name": "kin_emr-state", "Destination": deploy.EMR_STATE, "RW": True}]
         good["Config"]["Env"] += ["DATABASE_URL=postgresql://kin_runtime:fixture@db:5432/kin", "KIN_EMR_STATE_DIR=" + deploy.EMR_STATE]
-        good["Config"]["Env"] += ["KIN_EMR_MANAGING_INSTITUTION=synthetic-emr-managing", "KIN_EMR_PROXY_HOST=proxy"]
+        good["Config"]["Env"] += ["KIN_EMR_MANAGING_INSTITUTION=hospital-operations", "KIN_EMR_PROXY_HOST=proxy"]
         deploy.check_running_api(good, request()["previous_api_image"], emr=True)
         with self.assertRaises(RuntimeError): deploy.check_running_api(good, request()["previous_api_image"])
         for mounts in ([], [{**good["Mounts"][0], "Type": "bind"}], [{**good["Mounts"][0], "Destination": "/app"}],

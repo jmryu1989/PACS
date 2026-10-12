@@ -267,7 +267,8 @@ async function world() {
   w.session = async principal => {
     const sid = randomBytes(32).toString('base64url');
     const b64 = value => Buffer.from(JSON.stringify(value)).toString('base64url');
-    const token = `${b64({ alg: 'none' })}.${b64({ sub: principal.sub, email: principal.actor, groups: [principal.institution] })}.syn`;
+    // This persisted fixture represents an admitted session; its retained identity includes the verified issuer.
+    const token = `${b64({ alg: 'none' })}.${b64({ iss: process.env.KC_ISSUER, sub: principal.sub, email: principal.actor, groups: [principal.institution] })}.syn`;
     await base.authSession.create({ data: { sid, sub: principal.sub, institution: principal.institution, rightsVersion: 1, accessToken: token, refreshToken: 'syn-rt-' + randomUUID(),
       atExpiresAt: new Date(Date.now() + 3600_000), lastSeenAt: new Date() } });
     return sid;

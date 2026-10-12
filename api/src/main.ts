@@ -2,7 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { dictationParser } from './dictation-parser';
 import { AuthEventLedger } from './auth.service';
-import { EmrRuntimeRefused } from './emr-runtime/manifest';
+import { startupFailureMessage } from './emr-runtime/manifest';
 import { composeEmrAdapters } from './emr-contract/composition';
 
 async function bootstrap() {
@@ -58,7 +58,6 @@ async function bootstrap() {
 }
 bootstrap().catch(error => {
   // Database/provider error objects may contain credential-bearing connection strings.
-  console.error(error instanceof EmrRuntimeRefused ? '[KIN API] ' + error.message
-    : '[KIN API] startup refused: authentication ledger is not ready');
+  console.error('[KIN API] ' + startupFailureMessage(error));
   process.exit(1);
 });

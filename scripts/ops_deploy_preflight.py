@@ -137,6 +137,10 @@ def check_emr_auth_inputs(env):
     for variable in EMR_AUTH_INPUTS:
         require(isinstance(env.get(variable), str) and bool(env[variable].strip()),
                 variable + " 설정이 없습니다. 배포 환경의 .env에 값을 설정하고 다시 사전검사하세요.")
+    institution = env["KIN_EMR_MANAGING_INSTITUTION"].strip().lower()
+    require(not institution.startswith(("synthetic-", "example", "placeholder", "change-me", "changeme"))
+            and institution not in {"test", "demo", "your-institution", "your-institution-id"},
+            "KIN_EMR_MANAGING_INSTITUTION에 예시 값이 지정되었습니다. 실제 관리기관 식별자를 설정하세요.")
 
 
 def check_emr_deployment_inputs():
