@@ -82,6 +82,7 @@ class FakeHost:
         return {"roles": roles, "memberships": list(self.memberships),
                 "databases": [{"name": name, "owner": "kin", "acl": None} for name in ("keycloak", "kin", "postgres", *self.extra_databases)],
                 "tablespaces": [{"name": "pg_default", "owner": "kin", "location": ""}, {"name": "pg_global", "owner": "kin", "location": ""},
+                                *([{"name": "kin_emr_access", "owner": "kin_emr_owner", "location": ops.EMR_TABLESPACE}] if self.emr_roles else []),
                                 *self.extra_tablespaces],
                 "schemas": ["public", *(["emr_access"] if self.emr_roles else [])]}
 
@@ -139,6 +140,8 @@ class FakeHost:
             return ""
         if "python3" in args:
             return json.dumps({"integrity": "ok", "attachments": 0, "attachment_bytes": 0})
+        if "node" in args:
+            return "EMR_RESTORE_VERIFIED"
         return ""
 
     @contextlib.contextmanager
@@ -303,6 +306,25 @@ class HeldCaptureTests(unittest.TestCase):
         restores = [command for command in host.commands if "pg_restore" in command]
         self.assertEqual(len(restores), 2)
         self.assertTrue(all("--create" in command and "--no-owner" not in command and "--no-privileges" not in command for command in restores))
+
+    def test_11_a_post_emr_capture_is_restored_exactly_in_a_kin_bootstrap_cluster(self):
+        """B1's restore check replays its roles (EMR logins without a password) and memberships as the cluster's own
+        superuser, creates the EMR tablespace, restores with owners and privileges, and compares the whole catalog."""
+        host = FakeHost(tempfile.mkdtemp(dir=self.folder), shape="post")
+        host.extra_roles.append(role("legacy_reader"))
+        host.memberships.append({"granted": "legacy_reader", "member": "kin_emr_reader", "admin_option": False,
+                                 "inherit_option": True, "set_option": True})
+        directory = host.capture(label="emr-b1")
+        host.commands.clear()
+        with host.bound(), patch.object(ops, "remove_owned_if_present"):
+            ops.rehearse(directory)
+        (record,) = directory.glob("rehearsal-*.json")
+        result = json.loads(record.read_text())
+        self.assertTrue(result["success"] and result["emr"]["database_state_verified"])
+        started = next(command for command in host.commands if command[:3] == ["docker", "run", "-d"])
+        self.assertIn("POSTGRES_USER=kin", started)
+        self.assertTrue(any("CREATE TABLESPACE kin_emr_access OWNER kin_emr_owner" in " ".join(command) for command in host.commands))
+        self.assertFalse(any("cluster-roles.sql" in str(command) or "--no-owner" in command for command in host.commands))
 
     def test_10_an_unsupported_pre_emr_catalog_is_refused_before_anything_is_written(self):
         """IRT-07: a B0 that a rollback could not rebuild exactly never becomes a B0."""

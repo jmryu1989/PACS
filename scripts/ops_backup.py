@@ -488,18 +488,33 @@ def rehearse_audit(directory, manifest, container):
     return {"verified": code == 0, **report}
 
 
-def rehearse_held_pre(directory, manifest):
-    """L-04c for a pre-EMR held capture (B0): restore it exactly as a rollback would, in a fresh networkless cluster of
-    the product's shape (POSTGRES_USER kin), with its roles replayed and owners/privileges kept; then the whole catalog,
-    the row counts, the per-table projection and the Orthanc index with every attachment."""
+EMR_RECOVERY_SCRIPT = """const {PrismaClient}=require('/app/node_modules/@prisma/client');
+const {PrismaLedgerSql}=require('/app/dist/emr-runtime/store');
+const {AccessSeal}=require('/app/dist/emr-runtime/seal');
+const {FailureJournal}=require('/app/dist/emr-runtime/failure-journal');
+const db=new PrismaClient(); const dir='/var/lib/kin-emr';
+new AccessSeal(dir,new PrismaLedgerSql(db),new FailureJournal(dir)).recoverAtStart()
+.then(()=>console.log('EMR_RESTORE_VERIFIED')).catch(()=>{process.exitCode=1}).finally(()=>db.$disconnect());"""
+
+
+def rehearse_held(directory, manifest):
+    """The isolated restore check of a held capture (L-04c for B0, L-10c for B1): restored exactly as a rollback would,
+    in a fresh networkless cluster of the product's shape (bootstrap superuser kin), with its roles replayed and owners
+    and privileges kept; then the whole catalog, the row counts, the per-table projection and the Orthanc index with
+    every attachment. B1 also gets its EMR tablespace, its EMR catalog (owners, ACL, placement) and its state archive,
+    whose seal must recover against the restored ledger."""
+    shape = manifest["shape"]
     token = uuid.uuid4().hex
     name = "kin-rehearsal-" + token[:16]
-    volume = name + "-orthanc"
+    volume, state_volume = name + "-orthanc", name + "-emr-state"
     started = time.monotonic()
-    result = {"backup": directory.name, "git_sha": manifest["git_sha"], "success": False, "shape": "pre"}
+    result = {"backup": directory.name, "git_sha": manifest["git_sha"], "success": False, "shape": shape}
     try:
         run(["docker", "volume", "create", "--label", "kin.ops.run=" + token, volume])
+        if shape == "post":
+            run(["docker", "volume", "create", "--label", "kin.ops.run=" + token, state_volume])
         run(["docker", "run", "-d", "--name", name, "--label", "kin.ops.run=" + token, "--network", "none",
+             *(["--tmpfs", "/var/lib/postgresql/emr-access:uid=70,gid=70,mode=0700"] if shape == "post" else []),
              "-e", "POSTGRES_USER=kin", "-e", "POSTGRES_DB=kin", "-e", "POSTGRES_HOST_AUTH_METHOD=trust", manifest["postgres_image"]])
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
@@ -509,13 +524,27 @@ def rehearse_held_pre(directory, manifest):
             time.sleep(0.5)
         else:
             raise RuntimeError("Isolated PostgreSQL did not become ready")
-        result["catalog"] = restore_pre_snapshot(name, directory, "kin")
+        if shape == "post":
+            run(["docker", "exec", "-u", "postgres", name, "mkdir", "-m", "700", EMR_TABLESPACE])
+        result["catalog"] = restore_snapshot(name, directory, "kin", shape)
         for database in PRE_DATABASES:
             if counts(name, database, "kin") != manifest["counts"][database]:
                 raise RuntimeError("Restored database row counts differ: " + database)
         before = json.loads((directory / "projection.json").read_text(encoding="utf-8"))
         if projection(name, columns={table: value["columns"] for table, value in before.items()}) != before:
             raise RuntimeError("Restored rows differ from the snapshot's projection")
+        if shape == "post":
+            if emr_catalog(name, "kin") != json.loads((directory / "emr-catalog.json").read_text(encoding="utf-8")):
+                raise RuntimeError("Restored EMR owner/ACL/roles/tablespace differ")
+            temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={state_volume},target=/restore",
+                           "--mount", f"type=bind,source={directory},target=/backup,readonly", "--entrypoint", "tar",
+                           manifest["postgres_image"], "-xzf", "/backup/emr-state.tgz", "-C", "/restore"], timeout=1800)
+            checked = temporary_run(["--network", "container:" + name, "--read-only", "-e", "DATABASE_URL=postgresql://kin@127.0.0.1:5432/kin",
+                                     "--mount", f"type=volume,source={state_volume},target={EMR_STATE}", "--entrypoint", "node",
+                                     manifest["running_images"]["kin-api"]["id"], "-e", EMR_RECOVERY_SCRIPT])
+            if checked != "EMR_RESTORE_VERIFIED":
+                raise RuntimeError("Restored database and external state do not agree")
+            result["emr"] = {"owner_acl_preserved": True, "database_state_verified": True}
         result["audit"] = rehearse_audit(directory, manifest, name)
         if result["audit"] != "not_sealed" and not result["audit"]["verified"]:
             raise RuntimeError("Restored AuditLog is not verified against its sealed checkpoint")
@@ -529,7 +558,7 @@ def rehearse_held_pre(directory, manifest):
         result.update(success=True, databases=list(PRE_DATABASES), orthanc=orthanc, projection="equal")
     finally:
         failures = []
-        for kind, resource in (("container", name), ("volume", volume)):
+        for kind, resource in (("container", name), ("volume", volume), *((("volume", state_volume),) if shape == "post" else ())):
             try:
                 remove_owned_if_present(kind, resource, token)
             except Exception:
@@ -544,8 +573,8 @@ def rehearse_held_pre(directory, manifest):
 
 def rehearse(directory):
     directory, manifest = validate_backup(directory)
-    if manifest.get("kind") == HELD_KIND and manifest.get("shape") == "pre":
-        return rehearse_held_pre(directory, manifest)
+    if manifest.get("kind") == HELD_KIND:
+        return rehearse_held(directory, manifest)
     token = uuid.uuid4().hex
     name = "kin-rehearsal-" + token[:16]
     volume = name + "-orthanc"
@@ -723,6 +752,13 @@ def supported_pre_catalog(catalog):
     among them (and predefined pg_* roles), the databases kin and keycloak (plus the image's postgres), and only the
     default tablespaces. Refused: a further LOGIN role (its password is never captured, so a restore could not
     reproduce it), per-role settings, another database or tablespace, a name that is not a plain identifier."""
+    return supported_catalog(catalog, shape="pre")
+
+
+def supported_catalog(catalog, *, shape):
+    """supported_pre_catalog's rule; a post-EMR capture (B1, restored only into an isolated check cluster) may also hold
+    the EMR roles (kin_runtime and a planned reader/retention LOGIN, replayed there without a password) and the EMR
+    tablespace."""
     if type(catalog) is not dict:
         _unsupported("unreadable")
     roles = {}
@@ -740,7 +776,7 @@ def supported_pre_catalog(catalog):
             _unsupported("role attributes are incomplete")
         if role.get("rolconfig"):
             _unsupported("a role carries its own settings")
-        if name != "kin" and role.get("rolcanlogin") is not False:
+        if name != "kin" and role.get("rolcanlogin") is not False and not (shape == "post" and name in EMR_ROLES):
             _unsupported("a further LOGIN role exists (its password cannot be restored)")
         if role.get("rolvaliduntil") is not None and not re.fullmatch(r"[0-9A-Za-z :+.-]{1,40}", str(role["rolvaliduntil"])):
             _unsupported("a role validity is unreadable")
@@ -758,8 +794,12 @@ def supported_pre_catalog(catalog):
         _unsupported("the databases are not exactly kin and keycloak")
     if any(databases[name].get("owner") != "kin" for name in databases if name != "keycloak") or databases["keycloak"].get("owner") not in roles:
         _unsupported("a database owner differs")
-    if any(space.get("name") not in DEFAULT_TABLESPACES for space in catalog.get("tablespaces") or []):
+    allowed = (*DEFAULT_TABLESPACES, *(("kin_emr_access",) if shape == "post" else ()))
+    if any(space.get("name") not in allowed for space in catalog.get("tablespaces") or []):
         _unsupported("a further tablespace exists")
+    if shape == "post" and not any(space.get("name") == "kin_emr_access" and space.get("location") == EMR_TABLESPACE
+                                   for space in catalog.get("tablespaces") or []):
+        _unsupported("the EMR tablespace is missing or elsewhere")
     return catalog
 
 
@@ -767,10 +807,12 @@ def _sql_literal(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def replay_roles(container, source, user="kin"):
-    """Rebuild a supported snapshot's roles and memberships in a fresh cluster (no passwords: every replayed role is
-    NOLOGIN), then prove the cluster now has exactly the snapshot's roles and memberships."""
-    supported_pre_catalog(source)
+def replay_roles(container, source, user="kin", shape="pre"):
+    """Rebuild a supported snapshot's roles and memberships in a fresh cluster whose bootstrap superuser is kin, as the
+    product's (no passwords: a pre-EMR snapshot's replayed roles are all NOLOGIN; a post-EMR check cluster's EMR logins
+    have none). Memberships are granted by that superuser (PG16 refuses a recorded grantor without ADMIN OPTION), then
+    the cluster must have exactly the snapshot's roles and memberships."""
+    supported_catalog(source, shape=shape)
     fresh = role_catalog(container, user)
     present = {role["rolname"]: role for role in fresh["roles"]}
     statements = []
@@ -812,10 +854,18 @@ def restore_pre_snapshot(container, directory, user="kin"):
     its roles replayed, the image's empty kin database replaced, kin and keycloak restored with --create (database
     owners, privileges and settings included), never with --no-owner/--no-privileges; then the cluster's whole catalog
     (roles, memberships, databases, tablespaces, schemas, every object's owner and privileges) equals the snapshot's."""
+    return restore_snapshot(container, directory, user, shape="pre")
+
+
+def restore_snapshot(container, directory, user="kin", shape="pre"):
+    """restore_pre_snapshot for either held shape; a post-EMR snapshot also gets its EMR tablespace (owned by the
+    replayed kin_emr_owner, at the product's fixed path) before its databases are restored."""
     directory = Path(directory)
     source = json.loads((directory / "catalog.json").read_text(encoding="utf-8"))
-    replayed = replay_roles(container, source, user)
+    replayed = replay_roles(container, source, user, shape)
     probe = ["docker", "exec", container, "psql", "-X", "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-qAt", "-c"]
+    if shape == "post":
+        run(probe + ["CREATE TABLESPACE kin_emr_access OWNER kin_emr_owner LOCATION '" + EMR_TABLESPACE + "';"])
     fresh = text(probe + ["SELECT (SELECT count(*) FROM pg_database WHERE datname='keycloak') || ':' || "
                           "(SELECT count(*) FROM pg_database WHERE datname='kin');"])
     tables = text(["docker", "exec", container, "psql", "-X", "-U", user, "-d", "kin", "-v", "ON_ERROR_STOP=1", "-qAt", "-c",

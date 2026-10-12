@@ -1381,11 +1381,20 @@ its own disabled-by-default policy `/etc/kin-deploy/emr-introduction.json`; `pyt
 example policy|target` prints placeholders). Phases follow one another only: capture (observe-before, write fence,
 pre-EMR B0 with the writers held, isolated B0 restore check) → introduce (provisioning, installer migration, Keycloak
 cache option, member-rights import, API as node/kin_runtime, UI/proxy, ingress still fenced) → verify (fenced HTTPS
-smoke, the one-shot EMR probe `scripts/ops_emr_probe.py`, B1 and its same-point restore) → reopen; release (before any
-database change) and rollback (B0 into fresh recovery volumes) are the exits. Production's introduce requires the
-local-restore receipt a rehearsal target produced from the same B0 (seed → … → rollback → receipt); external backup
-stays OFF and no offsite receipt is claimed. Reopen requires the executor's browser-level smoke record and a readable
-audit ledger at the backup root (the introduced release's daily backup seals into it).
+smoke with a login made after the member import, the worklist UID and the frame bytes, the one-shot EMR probe
+`scripts/ops_emr_probe.py`, B1 and its same-point restore) → reopen; release (before any database change) and rollback
+are the exits. A rollback restores B0 into fresh volumes of a recovery Compose project that the checkout's `.env`
+then names (`COMPOSE_PROJECT_NAME`, previous images tagged for it), so an ordinary compose recreate keeps the recovery
+volumes; it ends RESTORED behind the maintenance ingress, and only `rollback_reopen` (the previous version's own login
+made after the restore, worklist UID and frame bytes) opens anything. One phase of a plan runs at a time (an OS lease
+the kernel frees with a dead process); a phase that never recorded its end is classified NEEDS_ATTENTION, never re-run.
+Every step records the host before and after it and every command it ran (`commands-<phase>-<request>.jsonl`: redacted
+argv, environment names, input hash, exit/timeout, output hashes). Production's introduce requires, once, the v2
+local-restore receipt that a rehearsal of exactly that production plan and B0 produced on the plan's rehearsal host
+(per-phase steps and result hashes, B0/B1/Bfail/recovery/previous-version smoke cross-checked, at most seven days old;
+`verify-receipt --bundle` re-checks the run directory); external backup stays OFF and no offsite receipt is claimed.
+Reopen requires the executor's browser-level smoke record and a readable audit ledger at the backup root (the
+introduced release's daily backup seals into it).
 
 - `python -B tests/ops_emr_introduction_test.py`: plan/target/request/approval/receipt validation, the clone/target
   allowlist, the preflight additions of `ops_deploy_preflight.py` as functions of observed facts, and the phase state
@@ -1393,12 +1402,18 @@ audit ledger at the backup root (the introduced release's daily backup seals int
   no one-shot worker can be alive, none after an unknown end or past the point of no return). Its root-only class
   needs an isolated Linux root fixture.
 - `python -B tests/ops_backup_held_test.py`: `ops_backup.capture_held()` never starts or stops a container, refuses
-  running writers before writing, refuses any EMR trace (EMR role, `emr_*` schema, tablespace) in the pre-EMR shape,
-  and its result validates as a held capture and as the backup format `ops_backup.rehearse()` restores.
+  running writers before writing, refuses any EMR trace (EMR role, `emr_*` schema, tablespace) and any pre-EMR catalog
+  a rollback could not rebuild exactly (a further LOGIN role, role settings, another database or tablespace) in the
+  pre-EMR shape, and its result validates as a held capture; `ops_backup.restore_pre_snapshot()` replays the further
+  NOLOGIN roles and memberships, restores kin and keycloak with `--create` (owners and privileges kept) and compares
+  the whole catalog, also in the isolated B0 restore check.
   `python -B tests/ops_backup_rotation_test.py`: after a complete, error-free `backup` (default `--rotate-keep 7`,
-  D1047; `--no-rotate` leaves the sets) and in `ops_backup.py rotate [--dry-run]`, rotation keeps N complete daily sets,
-  never deletes release/held/protected/latest-verified/incomplete sets, and only thins (Orthanc archive removed after a
-  `thinned.json` marker; `validate_backup` then refuses the set) a set that the audit ledger alone still retains.
+  D1047; `--no-rotate` leaves the sets) and in `ops_backup.py rotate [--dry-run]` (the dry run lists exactly the plan
+  the run executes), rotation keeps N physically whole daily sets (every manifest component with its size and
+  SHA-256), never counts or deletes an incomplete set, never deletes release/held/protected/latest-verified sets,
+  re-judges an interrupted deletion (`.rotating-<name>`) by its original name and folder and leaves it in place when
+  anything protects it, and only thins (Orthanc archive removed after a `thinned.json` marker; `validate_backup` then
+  refuses the set) a set that the audit ledger alone still retains.
 - The provision-first rule (Astra DR2-09): the mode refuses a database that already carries an EMR role, an `emr_*`
   schema, the tablespace or a migration beyond the previous history before provisioning, instead of repairing it;
   after the migration every relation of every `emr_*` schema, with its TOAST table and TOAST index, must be in
@@ -1408,8 +1423,10 @@ audit ledger at the backup root (the introduced release's daily backup seals int
 - `tests/ops_deploy_host_container_test.py EmrIntroductionRehearsal` (opt-in `KIN_TEST_EMR_REHEARSAL=1` plus
   `KIN_TEST_PREVIOUS_API_IMAGE`, `KIN_TEST_PREVIOUS_PROXY_IMAGE` built from the previous commit and
   `KIN_TEST_API_IMAGE`, `KIN_TEST_PROXY_IMAGE` from the target): the fully synthetic rehearsal with the product's own
-  compose files on a local daemon - a source stack's B0 seeds a clone with other names and secrets, which runs every
-  phase through rollback and produces the receipt. The fenced smoke's token comes from one real Authorization Code +
+  compose files on a local daemon - a source stack's B0 (with a synthetic DICOM frame and further NOLOGIN roles, a
+  membership, an owned schema and grants) seeds a clone with other names and secrets, which runs every phase through
+  rollback, rollback_reopen and an ordinary compose recreate, and produces the receipt (checked for its production
+  plan once, refused the second time). The smoke tokens come from real Authorization Code +
   PKCE login through the clone's loopback maintenance ingress (a direct grant carries no `auth_time`, which the product
   refuses after the member import). `KIN_TEST_EMR_REHEARSAL_EVIDENCE=<dir>` keeps each stack's run records. It is not a
   rehearsal of a production backup copy, a real realm, production TLS or data volume; that is the separate rehearsal
