@@ -10,7 +10,10 @@ Pure stdlib, no browser, no stack; Node only through tests/page_source.py, which
      absence surface, failure paths in main.html, the page client hand-off).
   3. The first S4 touch of main.html keeps every Stage 3 anchor: the id, top-level function and
      $('#...') selector inventories of the pre-S4 blob (e15c69c) are pinned by digest, and only the
-     named S4-U1b additions may appear. The mutant scripts' own --anchors-only checks are run
+     named additions may appear in the fixed landed split. D73: this inventory proves historical
+     movement preservation; it does not freeze later UX implementation names or counts. Current
+     receipt behaviour is covered by worklist_arrivals_dom_test.py and the source checks below.
+     The mutant scripts' own --anchors-only checks still use current sources and are run
      beside this file by the same CI step.
 """
 # S9-U0b RELIST: PACS permission/data assertions run compiled suites through pacs_source.
@@ -23,6 +26,8 @@ import hashlib
 import json
 import re
 import sys
+import subprocess
+import tempfile
 import unittest
 from collections import Counter
 from datetime import datetime
@@ -655,7 +660,14 @@ def extract_function(source, name):
 
 class Stage3Anchors(unittest.TestCase):
     def test_pre_s4_inventory_is_intact_and_only_named_additions_appear(self):
-        current = inventory(read_page_source(MAIN))
+        # Preserve the original digest and every named addition. The first semantic
+        # landing must not turn this move proof into new W2 function-name pins.
+        landed = 'c8e4f1b485ec05ccbb97589c74a573b3f48b70ce'
+        with tempfile.TemporaryDirectory(prefix='study-observation-history-') as directory:
+            for name in ('main.html', 'main-split.bundle.js'):
+                Path(directory, name).write_bytes(subprocess.check_output(
+                    ['git', 'show', f'{landed}:worklist-v0/hpacs-lite/{name}'], cwd=ROOT))
+            current = inventory(read_page_source(Path(directory, 'main.html')))
         for kind, (keys, digest) in BASE.items():
             with self.subTest(kind):
                 rest = Counter(current[kind])

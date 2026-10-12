@@ -18,12 +18,16 @@ function historicalSource() {
   const landed = 'c8e4f1b485ec05ccbb97589c74a573b3f48b70ce';
   const files = execFileSync('git', ['ls-tree', '-r', '--name-only', landed, 'api/src'],
     { cwd: root, encoding: 'utf8' }).trim().split('\n').filter(f => f.endsWith('.ts'));
-  const overrides = Object.fromEntries(files.map(file => [path.join(root, file),
-    execFileSync('git', ['show', `${landed}:${file}`], { cwd: root, encoding: 'utf8', maxBuffer: 8e6 })]));
   // SQL provenance includes imported Prisma declarations. A later additive
   // schema must not change the historical generator output used by that proof.
   const parent = fs.realpathSync(os.tmpdir()), dir = fs.mkdtempSync(path.join(parent, 'pacs-history-'));
   try {
+    // An overlay on today's api/src retains files added after the landed commit.
+    // Resolve the historical Program in its own source root so later imports
+    // cannot bind against older declarations or contaminate the SQL proof.
+    const apiSrc = path.join(dir, 'src');
+    const overrides = Object.fromEntries(files.map(file => [path.join(apiSrc, file.slice('api/src/'.length)),
+      execFileSync('git', ['show', `${landed}:${file}`], { cwd: root, encoding: 'utf8', maxBuffer: 8e6 })]));
     const output = path.join(dir, 'client');
     const schema = execFileSync('git', ['show', `${landed}:api/prisma/schema.prisma`], { cwd: root, encoding: 'utf8' })
       .replace('provider = "prisma-client-js"', `provider = ${JSON.stringify('node ' + path.join(root, 'api/node_modules/@prisma/client/generator-build/index.js').replace(/\\/g, '/'))}\n  output = ${JSON.stringify(output.replace(/\\/g, '/'))}`);
@@ -31,13 +35,15 @@ function historicalSource() {
     execFileSync(process.execPath, [path.join(root, 'api/node_modules/prisma/build/index.js'), 'generate', '--schema', path.join(dir, 'schema.prisma')],
       { cwd: root, env: { ...process.env, PRISMA_GENERATE_SKIP_AUTOINSTALL: 'true' }, maxBuffer: 8e6, timeout: 60000 });
     overrides[path.join(root, 'api/node_modules/.prisma/client/index.d.ts')] = fs.readFileSync(path.join(output, 'index.d.ts'), 'utf8');
+    const source = require('./pacs_source.cjs').createSource({ apiSrc, overrides });
+    assert.deepEqual(source.sourceFiles().map(file => file.file).sort(), [...files].sort(), 'exact landed source corpus');
+    return source;
   } finally {
     const resolved = fs.realpathSync(dir);
     assert.equal(path.dirname(resolved), parent);
     assert.ok(path.basename(resolved).startsWith('pacs-history-'));
     fs.rmSync(resolved, { recursive: true });
   }
-  return require('./pacs_source.cjs').createSource({ overrides });
 }
 
 const pair = (field, member) => `${field}.${member}`;

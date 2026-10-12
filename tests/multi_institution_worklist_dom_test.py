@@ -917,9 +917,11 @@ class MultiInstitutionWorklist(unittest.TestCase):
         self.type_filter(screen, HOSPITAL, "Tele")      # the label is not a filter value
         screen.wait_rows([])
         self.type_filter(screen, HOSPITAL, "center")
-        screen.filter_box("Modality").select_option("CT")
+        self.type_filter(screen, "Modality", "CT")
+        screen.filter_box("Modality").press("Enter")
         screen.wait_rows(["SYN-B-CT"])
-        screen.filter_box("Modality").select_option("")
+        self.type_filter(screen, "Modality", "")
+        screen.filter_box("Modality").press("Enter")
         screen.wait_rows(["SYN-B-CT", "SYN-B-MR"])
         # The hidden-column note keeps the condition visible.
         dialog = screen.open_columns()
