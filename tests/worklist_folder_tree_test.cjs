@@ -22,7 +22,8 @@ function setup(options = {}) {
   const api = tree.mount({ host, onSelect: (...args) => selections.push(args), onChange: value => changes.push(value), ...options });
   return { host, doc, api, changes, selections };
 }
-const searches = [{ id: 'ct', name: 'CT Exact', matches: compound.compile({ version: 1, join: 'and', rules: [{field:'modality',op:'eq',value:'CT'}] }, [{k:'modality',f:['CT','MR']}]) }];
+// D1041: the stored Equals adapter includes CT,SR, as does the modality folder.
+const searches = [{ id: 'ct', name: 'CT Search', matches: compound.compile({ version: 1, join: 'and', rules: [{field:'modality',op:'eq',value:'CT'}] }, [{k:'modality',f:['CT','MR']}]) }];
 const shortcut = (id, name = id) => ({ id, name, searchId: 'ct' });
 const get = (api, id) => api.snapshot().items.find(item => item.id === id);
 const button = (host, label) => nodes(host).find(node => node.tagName === 'BUTTON' && node.textContent === label);
@@ -290,7 +291,7 @@ test('TEST-WS3-COUNTS: unknown, partial and complete remain distinct, including 
   api.update({ loadState: 'complete' });
   assert.equal(get(api, 'modality:CT').count, '2');
   assert.equal(get(api, 'modality:MR').count, '0');
-  assert.equal(get(api, 'shortcut:one').count, '1');
+  assert.equal(get(api, 'shortcut:one').count, '2');
   api.select('modality:CT');
   assert.deepEqual(api.filter(rows).map(row => row.uid), ['a','b']);
   assert.equal(get(api, 'modality:DX').count, '1');

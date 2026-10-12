@@ -1228,9 +1228,8 @@
       if (filter.quick || savedFilterDays(filter.days) !== -1
         || Object.entries(filter.cols || {}).some(([key, value]) => key !== 'modality' && value !== '' && value != null)) return [];
       const value = filter.cols?.modality;
-      // Scalars, including old comma-delimited saved values, mean exact equality.
-      // Only a newly created array represents modality folder tokens.
-      return Array.isArray(value) ? value.map(v => 'modality:' + v) : value ? [] : ['all'];
+      return Array.isArray(value) || value
+        ? [...new Set(KinCompoundFilter.modalityTokens(value))].map(v => 'modality:' + v) : ['all'];
     }
     function updateWorklistFolders() {
       if (!worklistFolders) return;
@@ -1289,8 +1288,18 @@
         onChange: saveFolderShortcuts,
       });
       const panel = $('#worklist-folders-panel'), toggle = $('#worklist-folders-toggle');
+      // Keep a tab's choice across reloads only for this login, never for an account's next login.
+      const panelKey = 'kin-worklist-folders', panelSession = work.session();
+      let panelPreference;
+      try { panelPreference = JSON.parse(sessionStorage.getItem(panelKey)); } catch (_) {}
+      panel.open = panelPreference?.session === panelSession && typeof panelPreference?.open === 'boolean'
+        ? panelPreference.open : true;
+      toggle.setAttribute('aria-expanded', String(panel.open));
       toggle.addEventListener('click', () => { panel.open = !panel.open; toggle.setAttribute('aria-expanded', String(panel.open)); });
-      panel.addEventListener('toggle', () => toggle.setAttribute('aria-expanded', String(panel.open)));
+      panel.addEventListener('toggle', () => {
+        toggle.setAttribute('aria-expanded', String(panel.open));
+        try { sessionStorage.setItem(panelKey, JSON.stringify({session: panelSession, open: panel.open})); } catch (_) {}
+      });
       $('#shortcuts-reload').addEventListener('click', () => reloadFolderSearches());
       $('#shortcuts-save').addEventListener('click', () => saveFolderShortcuts(shortcutDraft));
       updateWorklistFolders();
@@ -1772,6 +1781,7 @@
       render(); refreshRight();
     }
 
+
     /**
      * 날짜 퀵필터. "최근 N일" — **양쪽 끝을 다 본다.**
      *
@@ -1804,10 +1814,7 @@
     function testCol(s, c, values = fval) {
       const v = values?.[c.k] ?? "";
       if (v === "") return true;
-      if (c.k === 'modality' && Array.isArray(v)) {
-        const selected = v;
-        return selected.some(token => KinWorklistFolderTree.matchesModality(s.modality, token));
-      }
+      if (c.k === 'modality') return KinCompoundFilter.matchesModality(s.modality, v);
       const wanted = String(v);
       if (c.f === "text") return String(s[c.k] ?? "").toUpperCase().includes(wanted.toUpperCase());
       return String(s[c.k]) === wanted;
@@ -1845,6 +1852,7 @@
       b.style.display = hidden ? "flex" : "none";
       $("#fold").textContent = hidden ? "▽" : "△";
     });
+
 
     function srTree(dataset, expected) {
       const classes = ['11', '22', '33', '34'].map(n => '1.2.840.10008.5.1.4.1.1.88.' + n);

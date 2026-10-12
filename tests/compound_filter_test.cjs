@@ -1,4 +1,7 @@
 // Pure matcher tests: no browser, network, storage, patient records or DB writes.
+// D1041 pilot decision replaces W2R-02's exact-match compatibility requirement:
+// REQ-WS3 -> RISK-WS3 -> TEST-WS3-RELATIVE-COMPATIBILITY now requires token OR
+// for existing saved scalars as well as new Modality Equals conditions (no migration).
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
@@ -91,9 +94,17 @@ localTest('TEST-WS3-RELATIVE-MIDNIGHT: an already compiled condition follows the
   assert.equal(compiled({ date: '20270101' }), true);
 });
 
-test('TEST-WS3-RELATIVE-COMPATIBILITY: saved modality comparisons retain exact matching', () => {
-  assert.equal(match({ modality: 'CT,SR' }, expr([rule('modality', 'eq', 'CT')])), false);
-  assert.equal(match({ modality: 'CT' }, expr([rule('modality', 'eq', 'CT')])), true);
+test('TEST-WS3-RELATIVE-COMPATIBILITY: D1041 saved Modality Equals uses whole-token OR', () => {
+  for (const wanted of ['CT', 'ct', ' CT ', 'CT, MR', 'ct\\mr']) {
+    const condition = expr([rule('modality', 'eq', wanted)]);
+    valid(condition);
+    for (const actual of ['CT', 'CT,SR', 'SR,ct']) assert.equal(match({modality: actual}, condition), true);
+    assert.equal(match({modality: 'MR,SR'}, condition), /MR/i.test(wanted));
+    for (const actual of ['CTA', 'SR', '', null]) assert.equal(match({modality: actual}, condition), false);
+  }
+  for (const wanted of ['CT,', 'CT,,MR', 'CT, UNKNOWN']) invalid(expr([rule('modality', 'eq', wanted)]));
+  // Other operators retain their contract; the pilot changed Equals, not exclusions.
+  assert.equal(match({modality: 'CT,SR'}, expr([rule('modality', 'neq', 'CT')])), true);
   const expression = relative('1');
   assert.deepEqual(matcher.withQuickMode(matcher.withQuickMode(expression, 'exact', columns), 'contains', columns), expression);
 });

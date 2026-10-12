@@ -197,7 +197,7 @@
         input.dataset.col = c.k; input.id = 'sfm-col-' + c.k;
         if (c.f !== 'text' && c.k !== 'modality') choices(input, [['', 'All'], ...c.f.map(v => [v, v])], filter.cols?.[c.k] ?? '');
         else input.value = filter.cols?.[c.k] ?? '';
-        if (c.k === 'modality') { input.placeholder = 'CT, MR'; input.title = '새 입력은 앞뒤 공백을 제거하고 대문자로 정규화합니다. 한 값은 정확히 일치할 때, 쉼표나 역슬래시로 구분한 목록은 Modality 토큰 중 하나가 일치할 때 포함합니다.'; }
+        if (c.k === 'modality') { input.placeholder = 'CT, MR'; input.title = '검사의 Modality 목록에 입력한 값 중 하나가 있으면 포함합니다. CT는 CT,SR 검사도 포함하며, CT, MR은 CT 또는 MR을 뜻합니다.'; }
         label.append(input); return label;
       }));
       const sort = cols.some(c => c.k === filter.sortKey) ? filter.sortKey : '';
@@ -216,9 +216,11 @@
       choices(fieldInput, fields.map(f => [f.k, f.k === 'date' && f.t === '검사일' ? 'Study Date' : f.t]), rule.field);
       const operator = make('Operator', document.createElement('select'), 'ruleOp');
       choices(operator, field ? compound.operators(field).map(([op, label]) => [op, field.type === 'tokens' ? label : operatorLabels[op] || op]) : [[rule.op, rule.op]], rule.op);
-      const input = make('Value', document.createElement(field?.type === 'select' ? 'select' : 'input'), 'ruleValue');
-      if (field?.type === 'select') choices(input, [['', 'Select Value'], ...field.values.map(v => [v, v])], rule.value ?? '');
+      const modalityEquals = field?.k === 'modality' && rule.op === 'eq';
+      const input = make('Value', document.createElement(field?.type === 'select' && !modalityEquals ? 'select' : 'input'), 'ruleValue');
+      if (field?.type === 'select' && !modalityEquals) choices(input, [['', 'Select Value'], ...field.values.map(v => [v, v])], rule.value ?? '');
       else { input.type = field?.type === 'date' ? (rule.op === 'withinLastDays' ? 'number' : 'date') : 'text'; input.maxLength = 1000; input.value = rule.value ?? ''; }
+      if (modalityEquals) { input.placeholder = 'CT, MR'; input.title = '검사의 Modality 목록에 입력한 값 중 하나가 있으면 포함합니다. CT는 CT,SR 검사도 포함합니다.'; }
       const preset = make('Date Range', document.createElement('select'), 'relativePreset');
       choices(preset, [['0', 'Today'], ['1', 'Since Yesterday'], ['7', 'Last 7 Days'], ['30', 'Last 30 Days'], ['', 'Custom']],
         ['0', '1', '7', '30'].includes(rule.value) ? rule.value : '');
