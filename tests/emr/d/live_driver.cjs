@@ -313,12 +313,15 @@ const SCENARIOS = {
     out.ids = { question: qid };
     return out;
   },
-  /** TEST-D-03: with the ledger's external seal unwritable the access record is not durable and no body is handed out. */
+  /**
+   * TEST-D-03: with B1's durable intent file unwritable (the seal's append-only settlement log, as B1's own live case
+   * refuses it) the access record cannot be made durable and no body is handed out.
+   */
   async 'd03-ledger-down'({ args, S, attempt, caller, actorFacts, STATE }) {
-    const tail = path.join(STATE, 'seal', 'tail.json');
-    fs.chmodSync(tail, 0o400);
+    const intents = path.join(STATE, 'seal', 'settlement.jsonl');
+    fs.chmodSync(intents, 0o400);
     try { return { read: await attempt(async () => S.questions.read(args.question, caller('c1'), { actor: await actorFacts('c1'), signature: null })) }; }
-    finally { fs.chmodSync(tail, 0o600); }
+    finally { fs.chmodSync(intents, 0o600); }
   },
 
   /** TEST-D-04: one commit per request, replays answer the stored receipt, every failure commits nothing and keeps the input. */
