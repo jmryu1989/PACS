@@ -2778,7 +2778,11 @@ class HostOps:
                             places.append(("environment", service, key))
                     for mount in (spec or {}).get("volumes") or []:
                         if marker in str(mount.get("source")):
-                            require(mount.get("source") == marker and service in ROLES, "Unresolvable compose variable: " + name)
+                            # Compose renders a relative bind source (the marker is one) against the project directory:
+                            # the variable is the whole source exactly when the rendered source is the marker or that path.
+                            source = str(mount.get("source"))
+                            require((source == marker or (mount.get("type") == "bind" and Path(source) == self.repo / marker))
+                                    and service in ROLES, "Unresolvable compose variable: " + name)
                             places.append(("mount", service, mount.get("target")))
                 require(places and raw.count(marker) == len(places), "Unresolvable compose variable: " + name)
                 values, carriers = set(), set()

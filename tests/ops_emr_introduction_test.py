@@ -2890,6 +2890,37 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
         self.assertEqual(intro.session_replay(spec, headers), 401)
         self.assertEqual(seen[-1], ("/api/me", "kin_sid=still-valid", "binding"))
 
+    @unittest.skipUnless(shutil.which("docker"), "needs the docker CLI (`docker compose config` only: no container)")
+    def test_117_a_bind_source_variable_resolves_with_the_real_compose_rendering(self):
+        """IRT-12/D04 with real Compose rendering (found by the forced rehearsal r3-rehearsal-forced-03): the product's
+        docker-compose.monitor.yml binds ${KIN_MONITOR_PUBLIC_DIR}; Compose renders the resolution marker, a relative
+        source, against the project directory - still the variable's whole source, so the value comes from the running
+        proxy's mount. A source that only contains the variable (/srv/${...}) stays unresolvable."""
+        source = Path(__file__).resolve().parents[1]
+        (self.repo / "docker-compose.yml").write_text("services:\n  proxy:\n    image: synthetic/proxy:1\n", newline="\n")
+        monitor = (source / "docker-compose.monitor.yml").read_text(encoding="utf-8")
+        self.assertIn("${KIN_MONITOR_PUBLIC_DIR:?", monitor)
+        (self.repo / "docker-compose.monitor.yml").write_text(monitor, encoding="utf-8", newline="\n")
+        self.target["compose_files"] = [*self.target["compose_files"], "docker-compose.monitor.yml"]
+        ops_host, docker, context = self.host()
+        value = "/home/ubuntu/.kin-monitor-public"
+        clean = {key: item for key, item in os.environ.items() if not key.startswith("COMPOSE_")}
+
+        def config_for(args, env):
+            result = subprocess.run(args, env={**clean, **env}, capture_output=True, timeout=120)
+            self.assertEqual(result.returncode, 0, result.stderr[-800:])
+            return json.loads(result.stdout)
+        docker.config_for = config_for
+        docker.containers[self.target["containers"]["proxy"]] = {"Image": image("2"), "State": {"Running": True}, "Config": {"Env": []},
+                                                                 "Mounts": [{"Destination": "/var/run/kin-monitor-public", "Source": value}]}
+        entry = ops_host.prepare(self.context(ops_host.plan))["resolved_from_running_stack"]["KIN_MONITOR_PUBLIC_DIR"]
+        self.assertEqual((entry["sha256"], entry["from"]), (intro.sha256_bytes(value.encode()), ["mount:proxy"]))
+        (self.repo / "docker-compose.monitor.yml").write_text(monitor.replace("source: ${KIN_MONITOR_PUBLIC_DIR", "source: /srv/${KIN_MONITOR_PUBLIC_DIR"),
+                                                              encoding="utf-8", newline="\n")
+        self.records.discard_secret(intro.COMPOSE_VALUES)   # another plan: nothing kept
+        refuses(self, intro.HostOps(target=self.target, plan=ops_host.plan, runner=docker, records=self.records).prepare,
+                self.context(ops_host.plan), message="Unresolvable compose variable: KIN_MONITOR_PUBLIC_DIR")
+
     def test_115_the_seeds_clone_changes_touch_only_their_keycloak_tables(self):
         """IRT2-24: after the exact restore, the seed's own recorded changes (client secrets, origin, mail, identity
         providers) are compared on their own: only their Keycloak tables may differ from the seed's values; any other
