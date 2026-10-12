@@ -6,6 +6,7 @@ run-tests live permission. Pinned: the harness shape (A1 timing, scoped Compose,
 teardown order, the A3 handoff), the gateway-e2e finally path in measurement_ci, the dispatch-only workflow (A2) and
 the one D-7 pure step in validate.yml.
 """
+from ci_workflows import WorkflowCatalog
 import ast
 import copy
 import json
@@ -23,7 +24,9 @@ LIVE_TREE = ast.parse(LIVE)
 CI = (ROOT / 'tests' / 'measurement_ci.py').read_text(encoding='utf-8')
 CI_TREE = ast.parse(CI)
 WORKFLOW = (ROOT / '.github' / 'workflows' / 'gateway-e2e.yml').read_text(encoding='utf-8')
-VALIDATE = (ROOT / '.github' / 'workflows' / 'validate.yml').read_text(encoding='utf-8')
+CATALOG = WorkflowCatalog(ROOT)
+VALIDATE = '\n'.join(CATALOG.job_text(job) for name, job in CATALOG.combined()['jobs'].items()
+                     if name not in ('gateway-e2e', 'output-integration'))
 VECTORS = json.loads((ROOT / 'tests' / 'gateway_pipeline_vectors.json').read_text(encoding='utf-8'))
 METHODS = ['test_eg1_1_normal_transfer_and_late_delta', 'test_eg1_2_multibatch_outage_restart_resume',
            'test_eg1_3_storage_stall_crash_restart_now_retry', 'test_eg1_4_oversized_f01_boundary_bounded_repeat',
@@ -383,7 +386,7 @@ class WorkflowPins(unittest.TestCase):
     def test_validate_runs_only_the_pure_contract_in_the_measurements_job(self):
         # D-7: one pure step on push and PR; the live profile stays dispatch only.
         self.assertEqual(VALIDATE.count('-- python3 -B tests/gateway_pipeline_contract_test.py'), 1)
-        job = VALIDATE.split('\n  measurements:\n')[1].split('\n  volume-rendering:\n')[0]
+        job = CATALOG.job_text(CATALOG.job('measurements'))
         self.assertIn('--run-dir tmp/workspace-ui-ci/gateway-pipeline-contract ', job)
         self.assertIn('-- python3 -B tests/gateway_pipeline_contract_test.py', job)
         self.assertNotIn('--profile gateway-e2e', VALIDATE)

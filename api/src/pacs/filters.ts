@@ -5,7 +5,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import type { PrismaService } from '../prisma.service';
-import { folderAction, folderEntries, folderPath } from '../filter-folders';
+import { folderAction, folderEntries, folderPath, shortcutEntries } from '../filter-folders';
 import { copySearchFolder, mergeCopiedFolders, sharedKeys, sharedLibrary, sharedSearch } from '../shared-filters';
 import { parse, dump } from './values';
 import { need, inst } from './access';
@@ -112,6 +112,7 @@ export class PacsFilters {
     const filters = await tx.userFilter.findMany({ where: { owner: c.actor }, orderBy: { id: 'asc' } });
     return { owner: this.filterCollectionOwner(c), revision: collection?.revision ?? 0,
       folders: folderEntries(collection?.folders ?? []),
+      shortcuts: shortcutEntries(collection?.shortcuts ?? []),
       filters: filters.map(filter => ({ ...filter, cols: parse(filter.cols) ?? {} })) };
   }
 
@@ -133,6 +134,13 @@ export class PacsFilters {
       const collection = await this.lockFilterCollection(tx, c.actor);
       if (collection.revision !== body.revision + 1)
         throw new ConflictException('다른 화면에서 검색 모음이 변경되었습니다. 편집 내용을 확인한 뒤 다시 불러오세요');
+      if (body.command?.action === 'replace-shortcuts') {
+        if (Object.keys(body.command).sort().join(',') !== 'action,shortcuts')
+          throw new BadRequestException('바로가기 교체 요청 형식을 확인하세요');
+        const shortcuts = shortcutEntries(body.command.shortcuts);
+        await tx.userFilterCollection.update({ where: { owner: c.actor }, data: { shortcuts } });
+        return this.filterCollectionSnapshot(tx, c);
+      }
       const searches = await tx.userFilter.findMany({ where: { owner: c.actor }, select: { id: true, folder: true } });
       const result = folderAction(collection.folders, searches, body.command);
       for (const move of result.moves) {

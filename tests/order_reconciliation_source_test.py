@@ -15,6 +15,7 @@ source says. That is the hosted evidence named in the unit report.
 """
 # S9-U0b RELIST: PACS permission/data assertions run compiled suites through pacs_source.
 # Remaining non-PACS source checks are unchanged U0f carry-over.
+from ci_workflows import WorkflowCatalog
 from pacs_source import assert_behaviour
 from page_source import read_page_source
 import json
@@ -51,7 +52,8 @@ CLIENT = text("worklist-v0", "hpacs-lite", "order-reconciliation.js")
 PAGES = text("worklist-v0", "hpacs-lite", "study-pages.js")
 MAIN = read_page_source(ROOT.joinpath("worklist-v0", "hpacs-lite", "main.html"))
 HARNESS = text("tests", "worklist_arrivals_dom_test.py")
-WORKFLOW = text(".github", "workflows", "validate.yml")
+CATALOG = WorkflowCatalog(ROOT)
+WORKFLOW = CATALOG.text()
 
 
 # ── 1. Independent model ──────────────────────────────────────────────────────────────────────────

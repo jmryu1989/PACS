@@ -76,6 +76,8 @@
        * 계정에 붙인다고 해놓고 브라우저에 남은 것을 안 지우면 반쪽이다.
        */
       userFilters = validUserFilters(b.filters);
+      mountWorklistFolders();
+      void reloadFolderSearches();
       templates = Array.isArray(b.templates) ? b.templates : [];
       try { localStorage.removeItem("kin-filters"); localStorage.removeItem("kin-templates"); } catch (e) {}
       renderChips(); renderTemplates();
@@ -100,6 +102,8 @@
     function goOffline(e) {
       reportPreview.close();
       serverMode = false; offline = true;
+      folderLoadState = 'unknown'; filterCollection = null; ++filterReadSequence; ++sharedFilterReadSequence;
+      updateWorklistFolders(); shortcutStatus('서버에 연결한 뒤 바로가기를 불러오세요.');
       // 녹음 중이던 받아쓰기는 여기서 멈춘다(보낼 곳이 없다). 받아 둔 글은 Insert가 거절한다.
       dictation.refresh();
       worklistBodyParts.sync(studies);
@@ -300,6 +304,8 @@
       renderHeads();
       renderTemplates();
       applyRoleUi();
+      if (!sess.demo) userFilters = [];
+      mountWorklistFolders();
       $('#consultations-open').hidden=!(KinAuth.has('radiologist')||KinAuth.has('admin'));
       imageOpening = KinViewerOpening.mount({ button: $('#image-opening-open'), session: () => KinAuth.session() });
       try {
