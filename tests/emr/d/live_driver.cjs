@@ -230,7 +230,7 @@ const SCENARIOS = {
     out.decline = await attempt(async () => S.requests.change(irid, caller('t1'), decline, await request('t1', 'image-request.decline', irid, decline, { studyId: uid })));
     // finding: create, then hide inside the author's reading (no typed reason), then restore with a stated reason.
     const item = { schemaVersion: 1, title: 'SYN 결절', text: 'SYN 우상엽 8 mm 결절', sources: [{ itemId: args.itemId, revision: 1 }] };
-    const fc = { requestId: uuid(), item }, fid = uuid();
+    const fc = { requestId: uuid(), item }, fid = fc.requestId.toLowerCase();
     out.finding = await attempt(async () => {
       return S.findings.write(uid, body(fc), caller('r1'), undefined,
         await request('r1', 'finding.create', fid, fc, { studyId: uid, content: await findingText(uid, item, item.sources) }));
@@ -353,7 +353,7 @@ const SCENARIOS = {
   async 'flow-write'({ args, S, request, attempt, caller, owner, findingText, body, TEXT }) {
     const uid = args.study, out = {};
     const item = { schemaVersion: 1, title: 'SYN 결절', text: 'SYN 좌하엽 6 mm 결절', sources: [{ itemId: args.itemId, revision: 1 }] };
-    const fc = { requestId: uuid(), item }, fid = uuid();
+    const fc = { requestId: uuid(), item }, fid = fc.requestId.toLowerCase();
     out.create = await attempt(async () => S.findings.write(uid, body(fc), caller('r1'), undefined,
       await request('r1', 'finding.create', fid, fc, { studyId: uid, content: await findingText(uid, item, item.sources) })));
     const id = out.create.ok ? out.create.value.id : null;

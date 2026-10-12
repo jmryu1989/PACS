@@ -2,7 +2,6 @@ import { canReadPreliminary } from './preliminary-reader';
 import { StudyAccessService } from './study-access.service';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, HttpException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { randomUUID } from 'node:crypto';
 import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
 // Type-only: the report service now imports this one for the citation gate, and a value import
@@ -402,7 +401,9 @@ export class FindingService {
     await this.studyAccess.require(c, [uid]);
     const surface = (id === undefined ? 'finding.create' : 'finding.' + command.action) as SurfaceKey;
     const caller = { subject: c.sub, institutionId: c.institution };
-    const recordId = id ?? randomUUID();
+    // A new finding's ID is its request ID (as for questions, requests and consultations): the author's device signs the
+    // version of exactly this record before the server has written anything.
+    const recordId = id ?? command.requestId.toLowerCase();
     const known = await this.clinical(() => runtime.lookup(request, { surface, studyId: uid, recordId, body, caller, projection: null }));
     if (known) return this.answer(known, c, command.requestId);
     const plan = await this.plan(uid, anchor, command, fingerprint, c, id);
