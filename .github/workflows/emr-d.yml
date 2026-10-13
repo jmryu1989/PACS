@@ -34,8 +34,10 @@ concurrency:
 
 jobs:
   emr-d:
+    needs: emr-d-server-mutants
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 120
     env:
       TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}
     steps:
@@ -60,7 +62,7 @@ jobs:
         run: ./node_modules/.bin/prisma generate
       - name: API typecheck including api/src/emr-clinical
         id: typecheck
-        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/typecheck --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json --file api/prisma/schema.prisma -- api/node_modules/.bin/tsc --noEmit -p api
+        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/typecheck --cwd . --tree api/src --file api/tsconfig.json --file api/package-lock.json --file api/prisma/schema.prisma -- node api/node_modules/typescript/bin/tsc --noEmit --incremental false --listFiles --extendedDiagnostics --pretty false -p api
       - name: D contracts and C01-C56 model selection (C52 explicitly deferred to R2 DOM)
         id: contract
         if: ${{ !cancelled() }}
@@ -68,15 +70,11 @@ jobs:
       - name: Retained 14 and invariant 12 mutants (contract models distinguished; M-D-06 is round 2)
         id: mutants
         if: ${{ !cancelled() }}
-        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/mutants --cwd . --tree api/src/emr-clinical --tree api/src/emr-contract --file tests/emr/d/mutants.py --file tests/emr/d/contract_test.cjs --file api/tsconfig.json --file api/package-lock.json -- python3 -B tests/emr/d/mutants.py
+        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/mutants --cwd . --tree api/src/emr-clinical --tree api/src/emr-contract --file tests/emr/d/mutants.py --file tests/emr/d/same_source.py --file scripts/record-run.py --file tests/emr/d/contract_test.cjs --file api/tsconfig.json --file api/package-lock.json -- python3 -B tests/emr/d/mutants.py
       - name: D server cases and the d.json declaration (TEST-D-01..04 pure halves, this workflow's source binding)
         id: server
         if: ${{ !cancelled() }}
         run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/server --cwd . --tree api/src --tree api/prisma --tree tests/emr/d --file emr/units/d.json --file api/tsconfig.json --file api/nest-cli.json --file api/package.json --file api/package-lock.json --file api/start-production.sh --file api/.dockerignore --file api/Dockerfile --file .github/workflows/emr-d.yml --file scripts/record-run.py --file scripts/emr-compose.py --file scripts/run-tests.py --file tests/live_test_gate.py -- node --test --test-reporter=junit tests/emr/d/server_test.cjs
-      - name: Server mutants (each fix of DR2-01..08 and DR3-01..05 reverted, Astra's AM10; the DR3-06 notation equivalents)
-        id: server-mutants
-        if: ${{ !cancelled() }}
-        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/server-mutants --cwd . --tree api/src --tree api/prisma --tree tests/emr/d --file emr/units/d.json --file api/tsconfig.json --file api/nest-cli.json --file api/package.json --file api/package-lock.json --file api/start-production.sh --file api/.dockerignore --file api/Dockerfile --file .github/workflows/emr-d.yml --file scripts/record-run.py --file scripts/emr-compose.py --file scripts/run-tests.py --file tests/live_test_gate.py -- python3 -B tests/emr/d/server_mutants.py
       - name: Production API image of this commit
         id: image
         if: ${{ !cancelled() }}
@@ -95,8 +93,15 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 45
         env:
+          KIN_EMR_D_IMAGE_IDENTITY: tmp/emr-d-ci/image-identity.txt
           KIN_TEST_API_IMAGE: kin-emrd-ci:${{ env.TARGET_SHA }}
         run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/live --cwd . --tree tests/emr/d --tree api/prisma/migrations --file emr/units/d.json --file scripts/emr-compose.py --file scripts/run-tests.py --file tests/live_test_gate.py --file tmp/emr-d-ci/image-identity.txt -- python3 -B scripts/run-tests.py --module tests/emr/d/live.py --unit emr-d-ci-live --mode live --timeout 2700
+      - name: Collect the server mutant recorder from the same workflow run
+        if: ${{ !cancelled() }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: emr-d-server-mutants
+          path: tmp/emr-d-ci/
       - name: Every record and the image are of TARGET_SHA, and each record hashed what its command consumes (source = image = evidence)
         id: same-source
         if: ${{ !cancelled() }}
@@ -106,6 +111,37 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: emr-d-results
+          path: tmp/emr-d-ci/
+          if-no-files-found: error
+          retention-days: 7
+
+  emr-d-server-mutants:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 270
+    env:
+      TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          persist-credentials: false
+      - name: Verify source and install the pinned compiler
+        timeout-minutes: 5
+        run: |
+          [ "$(git rev-parse HEAD)" = "$TARGET_SHA" ]
+          npm ci --prefix api --ignore-scripts --no-audit --no-fund
+      - name: Generate the Prisma client for the server imports
+        working-directory: api
+        run: ./node_modules/.bin/prisma generate
+      - name: Server mutants (each fix of DR2-01..08 and DR3-01..05 reverted, Astra's AM10; the DR3-06 notation equivalents)
+        id: server-mutants
+        if: ${{ !cancelled() }}
+        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/server-mutants --cwd . --tree api/src --tree api/prisma --tree tests/emr/d --file emr/units/d.json --file api/tsconfig.json --file api/nest-cli.json --file api/package.json --file api/package-lock.json --file api/start-production.sh --file api/.dockerignore --file api/Dockerfile --file .github/workflows/emr-d.yml --file scripts/record-run.py --file scripts/emr-compose.py --file scripts/run-tests.py --file tests/live_test_gate.py -- python3 -B tests/emr/d/server_mutants.py
+      - name: Preserve every mutant execution including failures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: emr-d-server-mutants
           path: tmp/emr-d-ci/
           if-no-files-found: error
           retention-days: 7

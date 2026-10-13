@@ -28,12 +28,47 @@ import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ElementTree
+import time
+import signal
 
 RUNS = pathlib.Path("tmp/emr-d-ci")
 DECLARATION = "emr/units/d.json"
 HEX = re.compile(r"[0-9a-f]{64}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+def recorded_execution(command, cwd, env, folder, timeout, selected):
+    """Shared recorder owns raw streams; the caller retains selection and interruption state outside disposable copies."""
+    folder = pathlib.Path(folder).resolve()
+    folder.parent.mkdir(parents=True, exist_ok=True)
+    argv = [sys.executable, "-B", str(pathlib.Path(__file__).resolve().parents[3] / "scripts/record-run.py"),
+            "--run-dir", str(folder), "--cwd", str(cwd), "--tree", "api/src", "--tree", "tests/emr/d",
+            "--file", "api/tsconfig.json", "--file", "api/package-lock.json", "--", *command]
+    started = time.monotonic()
+    status, code, error = "completed", None, None
+    with (folder.parent / (folder.name + "-recorder.stdout.log")).open("wb") as out, (folder.parent / (folder.name + "-recorder.stderr.log")).open("wb") as err:
+        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=out, stderr=err,
+                                start_new_session=os.name != "nt")
+        try:
+            code = proc.wait(timeout=timeout)
+        except (subprocess.TimeoutExpired, KeyboardInterrupt) as exc:
+            status, code, error = "interrupted", 124, type(exc).__name__
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+            else:
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+    folder.mkdir(exist_ok=True)
+    stdout = (folder / "stdout.log").read_text(encoding="utf-8", errors="replace") if (folder / "stdout.log").exists() else ""
+    stderr = (folder / "stderr.log").read_text(encoding="utf-8", errors="replace") if (folder / "stderr.log").exists() else ""
+    # This result never upgrades an unfinished recorder to completed.
+    result = {"status": status, "exit": code, "recorder_process_exit": proc.returncode,
+              "exit_note": "124 denotes wrapper timeout/interruption; unfinished child exit is unknown" if status != "completed" else None,
+              "error": error, "selected": selected,
+              "duration_seconds": time.monotonic() - started, "record": str(folder / "run.json")}
+    (folder / "execution.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    return code, stdout, stderr
 
 
 class GitError(Exception):
@@ -60,7 +95,7 @@ class Commit:
     """The files of one commit, read from git's object store."""
 
     def __init__(self, sha):
-        self.sha, self.blobs, self.cache = sha, {}, {}
+        self.sha, self.blobs, self.cache, self.raw_cache = sha, {}, {}, {}
         listing = git("ls-tree", "-r", "-z", "--full-tree", "--format=%(objecttype) %(objectname) %(path)", sha)
         for entry in filter(None, listing.split(b"\0")):
             kind, oid, name = entry.decode("utf-8").split(" ", 2)
@@ -84,7 +119,10 @@ class Commit:
                 if len(header) != 3 or header[0] != oid:
                     raise GitError("cat-file answered %r for %s" % (header, oid))
                 size = int(header[2])
-                self.cache[oid] = lf_sha256(out[end + 1:end + 1 + size])
+                original = out[end + 1:end + 1 + size]
+                lf = original.replace(b"\r\n", b"\n")
+                self.cache[oid] = lf_sha256(original)
+                self.raw_cache[oid] = {hashlib.sha256(b).hexdigest() for b in (original, lf, lf.replace(b"\n", b"\r\n"))}
                 at = end + 1 + size + 1
         return {name: self.cache[self.blobs[name]] for name in names}
 
@@ -124,13 +162,10 @@ def junit(path, section):
         if names != sorted(section["cases"]):
             bad.append("collected cases are not the declared ones: missing %s, not declared %s"
                        % (sorted(set(section["cases"]) - set(names)), sorted(set(names) - set(section["cases"]))))
-        if cases["skipped"]:
+        if sorted(cases["skipped"]) != sorted(section.get("skipped", [])):
             bad.append("declared cases skipped, not passed: %s" % cases["skipped"])
     else:
-        if len(names) != section["count"]:
-            bad.append("%d cases collected, %d declared" % (len(names), section["count"]))
-        if sorted(cases["skipped"]) != sorted(section.get("skipped", [])):
-            bad.append("skipped %s, declared skipped %s" % (cases["skipped"], section.get("skipped", [])))
+        bad.append("no independent exact case declaration")
     return cases, bad, bool(cases["failed"])
 
 
@@ -144,6 +179,8 @@ def mutant_summary(path, section):
     if data["result"]["killed"] != data["result"]["total"] or data["result"]["total"] != len(mutants):
         bad.append("the summary does not count its own mutants: %r" % data["result"])
     if section is not None:
+        if data.get("not_run", []) != section.get("not_run", []):
+            bad.append("not_run differs from the explicit exclusions")
         if [m["id"] for m in mutants] != section["ids"]:
             bad.append("mutants run %s, declared %s" % ([m["id"] for m in mutants], section["ids"]))
         if [e["id"] for e in equivalents] != section.get("equivalents", []):
@@ -152,16 +189,22 @@ def mutant_summary(path, section):
 
 
 def runner_lines(path, section):
-    exact, plans = [], []
+    exact, plans, images = [], [], []
     for line in pathlib.Path(path).read_text(encoding="utf-8").splitlines():
         if line.startswith("EXACT_TESTS "):
             exact.append(json.loads(line[len("EXACT_TESTS "):]))
         elif line.startswith("PLAN_RESULT "):
             plans.append(json.loads(line[len("PLAN_RESULT "):]))
+        elif line.startswith("EMR_D_USED_IMAGE "):
+            images.append(json.loads(line[len("EMR_D_USED_IMAGE "):]))
     if len(exact) != 1 or len(plans) != 1:
         return None, ["%d EXACT_TESTS and %d PLAN_RESULT lines, one of each expected" % (len(exact), len(plans))], False
     parts = [test.rsplit(".", 2)[-2:] for test in exact[0]]
     cases, bad = {"collected": exact[0], "plan": plans[0]}, []
+    identity = (RUNS / "image-identity.txt").read_text(encoding="utf-8").split()
+    if len(identity) != 2 or images != [{"id": identity[0], "revision": identity[1]}]:
+        bad.append("live used image does not match verified image identity: %r" % images)
+    cases["used_image"] = images
     if sorted(method for _, method in parts) != sorted(section["cases"]) or any(cls != section["class"] for cls, _ in parts):
         bad.append("collected %s, declared %s.%s" % (exact[0], section["class"], section["cases"]))
     return cases, bad, plans[0].get("status") != "passed"
@@ -172,6 +215,16 @@ def collected(output, stdout, declaration):
     if kind == "exit":
         return None, [], False
     try:
+        if kind == "tsc":
+            text = pathlib.Path(stdout).read_text(encoding="utf-8")
+            metrics = dict(re.findall(r"^(Files|Types|Check time|Total time):\s+([0-9.]+)s?\s*$", text, re.M))
+            files = [normal(line.strip()) for line in text.splitlines() if line.strip().endswith(".ts")]
+            expected = sorted(str(p.resolve()).replace("\\", "/") for p in pathlib.Path("api/src").rglob("*.ts"))
+            missing = sorted(set(expected) - set(files))
+            bad = []
+            if set(metrics) != {"Files", "Types", "Check time", "Total time"} or not files or missing:
+                bad.append("typecheck did not report a complete TypeScript check: missing files %s, metrics %s" % (missing, metrics))
+            return {"files": files, "metrics": metrics}, bad, False
         if kind == "junit":
             return junit(stdout, declaration["cases"][output["declared"]])
         if kind == "mutants":
@@ -202,6 +255,17 @@ def check_step(step, needs, produced, output, declaration, commit):
         result.update(verdict="invalid", problems=["not a completed run: status %r" % (run.get("status") if isinstance(run, dict) else run)])
         return result
     result.update(exit_code=run["exit_code"], recorder_exit_code=run["recorder_exit_code"])
+    if output.get("kind") == "tsc":
+        # This is the public CLI identity, not a substring search of a shell
+        # command. Bash has already produced argv; options are judged by the
+        # compiler's file list, diagnostics and exit, not by a second parser.
+        command = run.get("command")
+        valid_cli = (isinstance(command, list) and len(command) >= 2
+                     and all(isinstance(word, str) for word in command)
+                     and normal(command[0]).rsplit("/", 1)[-1].lower() in ("node", "node.exe", "nodejs", "nodejs.exe")
+                     and pathlib.Path(command[1]).resolve() == pathlib.Path("api/node_modules/typescript/bin/tsc").resolve())
+        if not valid_cli:
+            bad.append("typecheck: record does not identify the installed TypeScript CLI")
     if run.get("git_head_before") != sha or run.get("git_head_after") != sha:
         bad.append("a record of another commit (%s before, %s after), not of %s" % (run.get("git_head_before"), run.get("git_head_after"), sha))
     before, trees = snapshot(run["files_before"], "before", bad)
@@ -220,6 +284,12 @@ def check_step(step, needs, produced, output, declaration, commit):
             bad.append("%s: not a file of %s (added, untracked or produced by the run)" % (name, sha))
         elif digests[name] != before[name][1]:
             bad.append("%s: differs from %s" % (name, sha))
+        else:
+            # Raw hashes must describe the commit's bytes or a permitted whole
+            # LF/CRLF conversion, not merely accompany a plausible LF hash.
+            allowed = commit.raw_cache[commit.blobs[name]]
+            if before[name][0] not in allowed:
+                bad.append("%s: raw hash differs from TARGET_SHA under the LF/CRLF policy" % name)
     for name in sorted(produced & set(before)):
         if not pathlib.Path(name).is_file() or lf_sha256(pathlib.Path(name).read_bytes()) != before[name][1]:
             bad.append("%s: not the file the run produced (changed or removed since)" % name)
@@ -234,6 +304,26 @@ def check_step(step, needs, produced, output, declaration, commit):
         if not members:
             bad.append("%s: neither a file nor a tree of %s" % (tree, sha))
         bad.extend("%s: a file of %s in %s the record did not hash" % (name, sha, tree) for name in members if name not in before)
+    # The final checkout is another boundary: a valid historical record alone
+    # cannot certify files changed after the child returned.
+    final_names = set(tracked)
+    for need in sorted(trees | set(map(normal, needs))):
+        if need in produced:
+            continue
+        members = commit.under(need)
+        if members:
+            actual = {p.as_posix() for p in pathlib.Path(need).rglob("*") if p.is_file()}
+            expected = set(members)
+            bad.extend("%s: final checkout path added under %s" % (p, need) for p in sorted(actual - expected))
+            bad.extend("%s: final checkout path removed under %s" % (p, need) for p in sorted(expected - actual))
+            final_names.update(expected)
+        else:
+            final_names.add(need)
+    final_digests = commit.digests([n for n in final_names if n in commit.blobs])
+    for name in sorted(final_names):
+        path = pathlib.Path(name)
+        if not path.is_file() or name not in final_digests or lf_sha256(path.read_bytes()) != final_digests[name]:
+            bad.append("%s: final checkout differs from TARGET_SHA" % name)
     bad.extend("%s: a declared input the record did not hash" % need for need in sorted(produced & set(map(normal, needs))) if need not in before)
     logs = {item.get("requested"): item for item in run["log_files"] if isinstance(item, dict)}
     for name in ("stdout.log", "stderr.log"):
@@ -262,6 +352,8 @@ def main():
         if not COMMIT.fullmatch(sha):
             raise GitError("TARGET_SHA is not a full lowercase 40-character commit SHA")
         commit = Commit(sha)
+        if git("rev-parse", "HEAD").decode().strip() != sha:
+            problems.append("final checkout HEAD differs from TARGET_SHA")
         declaration = json.loads(commit.read(DECLARATION).decode("utf-8"))
     except (GitError, KeyError, ValueError) as error:
         problems.append("no declaration of %r: %s" % (sha, error))

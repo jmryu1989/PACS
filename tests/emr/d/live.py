@@ -19,6 +19,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import shutil
@@ -80,6 +81,19 @@ def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def verified_image(image, identity_file, target_sha):
+    """Pin the inspected tag to the identity accepted by CI before any DB work."""
+    words = Path(identity_file).read_text(encoding="utf-8").split()
+    if len(words) != 2 or not re.fullmatch(r"sha256:[0-9a-f]{64}", words[0]) or words[1] != target_sha:
+        raise RuntimeError("EMR-D image identity does not name TARGET_SHA")
+    inspected = json.loads(run(["docker", "image", "inspect", image]).stdout)[0]
+    revision = (inspected.get("Config", {}).get("Labels") or {}).get("org.opencontainers.image.revision")
+    if inspected.get("Id") != words[0] or revision != target_sha:
+        raise RuntimeError("EMR-D selected image ID/revision differs from verified identity")
+    print("EMR_D_USED_IMAGE " + json.dumps({"id": inspected["Id"], "revision": revision}), flush=True)
+    return inspected["Id"]
+
+
 class EmrDLive(unittest.TestCase):
     label_namespace = "kin.emrd.live"
 
@@ -95,7 +109,8 @@ class EmrDLive(unittest.TestCase):
         cls.env = {**os.environ, **cls.secrets}
         image = os.environ.get("KIN_TEST_API_IMAGE")
         if image:
-            cls.image = json.loads(run(["docker", "image", "inspect", image]).stdout)[0]["Id"]
+            cls.image = verified_image(image, os.environ.get("KIN_EMR_D_IMAGE_IDENTITY", str(ROOT / "tmp/emr-d-ci/image-identity.txt")),
+                                       os.environ.get("TARGET_SHA", ""))
         else:
             tag = "kin-emrd-live:" + cls.token
             run(["docker", "build", "--target", "production", "--label", cls.label, "--build-arg", "VCS_REF=emr-d-live",
