@@ -942,6 +942,8 @@ class ReportEditorFramePageDOM(unittest.TestCase):
     source = SOURCE
     bundle_source = None
     html_source = None
+    dictation_source = None
+    session_source = None
 
     @classmethod
     def setUpClass(cls):
@@ -962,6 +964,12 @@ class ReportEditorFramePageDOM(unittest.TestCase):
         self.context.route("**/*", lambda route, request: self.site.handle(route, request))
         self.context.route("**/report-editor-frame.js", lambda route: route.fulfill(
             body=self.source, content_type="text/javascript; charset=utf-8"))
+        if self.dictation_source is not None:
+            self.context.route("**/dictation.js", lambda route: route.fulfill(
+                body=self.dictation_source, content_type="text/javascript; charset=utf-8"))
+        if self.session_source is not None:
+            self.context.route("**/dictation-session.js", lambda route: route.fulfill(
+                body=self.session_source, content_type="text/javascript; charset=utf-8"))
         if self.bundle_source is not None:
             self.context.route("**/main-split.bundle.js", lambda route: route.fulfill(
                 body=self.bundle_source, content_type="text/javascript; charset=utf-8"))
@@ -991,6 +999,284 @@ class ReportEditorFramePageDOM(unittest.TestCase):
 
     def switch(self, patient):
         self.page.locator('#rows tr', has_text=patient).first.click()
+
+    def record_dictation(self):
+        """Shipped controller/session + page adapter; synthetic microphone bytes and HTTP transcript."""
+        self.context.route('**/dictation', lambda route: route.fulfill(json={
+            'text':'SYN delayed', 'seconds':1, 'languagePin':'ko', 'enginePin':'synthetic', 'modelPin':'synthetic'}))
+        self.page.evaluate("""async () => {
+          window.recorded = KinDictation.createController({
+            session:KinDictationSession,
+            capture:{available:()=>true,createCapture:()=>({start:async()=>{},stop:async()=>new Uint8Array(48),cancel:()=>{}})},
+            env:{isSecureContext:true,navigator:{mediaDevices:{getUserMedia(){}}}}, apiBase:API,
+            readContext:dictationContext, block:dictationBlock, insert:dictationInsert,
+            busy:()=>commitInFlight||insertInFlight
+          });
+          recorded.setServerCapability({available:true,maxBytes:1048576,timeoutMs:120000,
+            languagePin:'ko',enginePin:'synthetic',modelPin:'synthetic'});
+          await recorded.start();
+        }""")
+        self.assertEqual(self.page.evaluate('recorded.snapshot().state'), 'recording')
+
+    def review_dictation(self):
+        self.page.evaluate('recorded.stop()')
+        self.page.wait_for_function("recorded.snapshot().state === 'review'")
+
+    def test_page_record_type_undo_refuses_late_dictation(self):
+        self.page.locator('#findings').fill('KEEP')
+        self.page.locator('#findings').focus()
+        self.record_dictation()
+        self.page.keyboard.type('X')
+        self.page.keyboard.press('Control+z')
+        self.assertEqual(self.texts()['findings'], 'KEEP')
+        self.review_dictation()
+        before = self.texts()
+        result = self.page.evaluate('recorded.insert()')
+        self.assertFalse(result['inserted'])
+        self.assertEqual(result['reason'], 'insert-refused')
+        self.assertIn('판독문이 그 사이 바뀌어 받아쓴 글을 넣지 않았습니다', self.page.evaluate('recorded.view().status'))
+        self.assertEqual(self.texts(), before)
+        self.page.locator('#findings').focus()
+        self.page.keyboard.press('Control+y')
+        self.assertEqual(self.texts()['findings'], 'KEEPX')
+
+    def test_page_record_unchanged_accepts_original_caret(self):
+        self.page.locator('#conclusion').fill('first\nlast')
+        self.page.locator('#conclusion').evaluate('e=>e.setSelectionRange(0,5)')
+        self.record_dictation()
+        self.page.locator('#conclusion').evaluate('e=>e.setSelectionRange(e.value.length,e.value.length)')
+        self.page.locator('#findings').focus()
+        self.review_dictation()
+        result = self.page.evaluate('recorded.insert()')
+        self.assertTrue(result['inserted'])
+        self.assertEqual(self.texts(), {'findings':'','conclusion':'first\nSYN delayed\nlast','recommendation':''})
+
+    def test_page_record_switch_study_refuses_late_dictation(self):
+        self.record_dictation()
+        self.review_dictation()
+        self.switch(self.h.PATIENT_B)
+        self.switch(self.h.PATIENT)
+        before = self.texts()
+        self.assertIsNone(self.page.evaluate('recorded.insert()'))
+        self.assertEqual(self.page.evaluate('recorded.snapshot().state'), 'cancelled')
+        self.assertEqual(self.texts(), before)
+
+    def test_page_record_explicit_repin_accepts_new_capture(self):
+        self.record_dictation()
+        self.page.locator('#findings').fill('changed')
+        self.review_dictation()
+        self.assertEqual(self.page.evaluate('recorded.insert().then(r=>r.reason)'), 'field-changed')
+        self.page.locator('#conclusion').focus()
+        self.assertTrue(self.page.evaluate('recorded.repin().then(r=>r.ok)'))
+        self.assertTrue(self.page.evaluate('recorded.insert().then(r=>r.inserted)'))
+        self.assertEqual(self.texts(), {'findings':'changed','conclusion':'SYN delayed','recommendation':''})
+
+    def frame_text(self, **texts):
+        """Replace authoritative synthetic report via the delivered page's load adapter."""
+        self.page.evaluate("""texts => {
+          appState[selectedUid] = {...appState[selectedUid], ...texts, draft:null};
+          loadReport({force:true});
+        }""", {k:texts.get(k, '') for k in FIELDS})
+
+    def frame_capture(self, field='findings', start=None, end=None):
+        self.page.evaluate("x=>{window.ticket=reportFrame.capture(x.field,x.range)}", {
+            'field':field, 'range':None if start is None else {'start':start,'end':end}})
+
+    def frame_insert(self, text):
+        return self.page.evaluate('text=>reportFrame.insert(ticket,text)', text)
+
+    def test_integrated_history_boundary(self):
+        self.page.locator('#findings').focus()
+        self.page.keyboard.type('PRIVATE')
+        self.page.keyboard.press('Control+a')
+        self.page.keyboard.press('Delete')
+        self.switch(self.h.PATIENT_B)
+        self.page.locator('#findings').focus()
+        for key in ('Control+z','Control+z','Control+y','Control+Shift+z'):
+            self.page.keyboard.press(key)
+            self.assertEqual(self.texts(), dict.fromkeys(FIELDS,''))
+
+    def test_integrated_same_opening(self):
+        self.page.locator('#findings').focus()
+        self.page.keyboard.type('typed')
+        same = 'reportFrame.switchStudy({uid:selectedUid,selectionSeq},reportFrame.read())'
+        self.assertEqual(self.page.evaluate(same), {'status':'unchanged'})
+        self.page.keyboard.press('Control+z')
+        self.assertEqual(self.texts()['findings'], '')
+        self.assertEqual(self.page.evaluate("reportFrame.switchStudy({uid:selectedUid,selectionSeq},{findings:'new',conclusion:'',recommendation:''})"), {'status':'refused','reason':'same-opening'})
+
+    def test_integrated_retired_ticket(self):
+        self.frame_capture()
+        self.switch(self.h.PATIENT_B)
+        self.switch(self.h.PATIENT)
+        self.assertEqual(self.frame_insert('LATE')['status'], 'refused')
+        self.assertEqual(self.texts(), dict.fromkeys(FIELDS,''))
+
+    def test_integrated_native_text_and_history(self):
+        self.page.locator('#findings').focus()
+        # Single keystrokes keep this contract independent of Chromium splitting slow typing groups.
+        self.page.keyboard.type('T')
+        self.frame_capture()
+        text = '<b>plain</b>\nline\n'
+        self.assertEqual(self.frame_insert(text), {'status':'applied'})
+        self.assertEqual(self.texts()['findings'], 'T'+text)
+        self.page.keyboard.type('Y')
+        for expected in ('T'+text,'T',''):
+            self.page.keyboard.press('Control+z')
+            self.assertEqual(self.texts()['findings'], expected)
+        for key, expected in [('Control+y','T'),('Control+Shift+z','T'+text),('Control+y','T'+text+'Y')]:
+            self.page.keyboard.press(key)
+            self.assertEqual(self.texts()['findings'], expected)
+
+    def test_integrated_captured_selection(self):
+        self.frame_text(conclusion='0123456789')
+        self.page.locator('#conclusion').focus()
+        self.page.locator('#conclusion').evaluate('e=>e.setSelectionRange(2,5)')
+        self.frame_capture('conclusion')
+        self.page.keyboard.press('End')
+        self.page.locator('#b-copy').focus()
+        self.assertEqual(self.frame_insert('X'), {'status':'applied'})
+        self.assertEqual(self.texts()['conclusion'], '01X56789')
+
+    def test_integrated_insert_and_clear_separate_following_typing(self):
+        for clear in (False, True):
+            with self.subTest(clear=clear):
+                self.frame_text()
+                self.page.locator('#findings').focus()
+                self.page.keyboard.type('T')
+                self.frame_capture(start=0 if clear else 1, end=1)
+                self.assertEqual(self.frame_insert('' if clear else 'X'), {'status':'applied'})
+                inserted = '' if clear else 'TX'
+                self.page.keyboard.type('Y')
+                for expected in (inserted, 'T', ''):
+                    self.page.keyboard.press('Control+z')
+                    self.assertEqual(self.texts()['findings'], expected)
+                for expected in ('T', inserted, inserted+'Y'):
+                    self.page.keyboard.press('Control+y')
+                    self.assertEqual(self.texts()['findings'], expected)
+
+    def test_integrated_composing_insert_and_switch(self):
+        self.page.locator('#findings').focus()
+        cdp = self.context.new_cdp_session(self.page)
+        cdp.send('Input.imeSetComposition', {'text':'한','selectionStart':1,'selectionEnd':1})
+        self.frame_capture()
+        before = self.texts()
+        self.assertEqual(self.frame_insert('X'), {'status':'refused','reason':'composing'})
+        self.frame_capture('conclusion')
+        self.assertEqual(self.frame_insert('X'), {'status':'refused','reason':'composing'})
+        self.assertEqual(self.page.evaluate('reportFrame.switchStudy({uid:selectedUid,selectionSeq:selectionSeq+1},reportFrame.read())'), {'status':'refused','reason':'composing'})
+        self.assertEqual(self.texts(), before)
+        cdp.send('Input.insertText', {'text':'한'})
+        self.frame_capture()
+        self.assertEqual(self.frame_insert('X'), {'status':'applied'})
+        cdp.detach()
+
+    def test_integrated_sent_snapshot(self):
+        self.frame_text(findings='ACTUAL')
+        self.frame_capture()
+        self.assertEqual(self.page.evaluate("reportFrame.applyServer(ticket,{sent:'invented',text:'BAD'})"), {'status':'refused','reason':'sent-mismatch'})
+        self.assertEqual(self.texts()['findings'], 'ACTUAL')
+
+    def test_integrated_permissions_and_native_failure(self):
+        self.frame_text(findings='KEEP')
+        self.frame_capture()
+        self.page.evaluate('appState[selectedUid].prelimHidden=true')
+        self.assertEqual(self.frame_insert('BAD')['status'], 'refused')
+        self.page.evaluate('appState[selectedUid].prelimHidden=false')
+        self.page.locator('#b-copy').focus()
+        self.page.locator('#findings').evaluate("e=>e.addEventListener('focus',()=>{appState[selectedUid].prelimHidden=true},{once:true})")
+        self.assertEqual(self.frame_insert('BAD')['status'], 'refused')
+        self.page.evaluate('appState[selectedUid].prelimHidden=false')
+        self.page.evaluate('document.execCommand=()=>false')
+        self.assertEqual(self.frame_insert('BAD'), {'status':'refused','reason':'native-edit'})
+        self.assertEqual(self.texts()['findings'], 'KEEP')
+
+    def test_integrated_scroll_preserved(self):
+        self.frame_text(findings='\n'.join('long '+str(i) for i in range(100)))
+        self.page.locator('#findings').focus()
+        self.page.evaluate("reportFrame.element('findings').setSelectionRange(10,12); document.querySelector('.redit').scrollTop=80")
+        before = self.page.locator('.redit').evaluate('e=>e.scrollTop')
+        self.assertGreater(before, 0)
+        self.frame_capture()
+        self.assertEqual(self.frame_insert('REPLACE'), {'status':'applied'})
+        self.assertEqual(self.page.locator('.redit').evaluate('e=>e.scrollTop'), before)
+
+    def test_integrated_focus_and_unvisited(self):
+        self.frame_text(findings='old')
+        self.page.locator('#findings').focus()
+        self.page.locator('#findings').evaluate('e=>e.setSelectionRange(1,2)')
+        self.frame_text(findings='new value', conclusion='untouched')
+        self.assertEqual(self.page.evaluate('document.activeElement.id'), 'findings')
+        self.page.keyboard.type('X')
+        self.assertEqual(self.texts()['findings'], 'new valueX')
+        self.page.locator('#conclusion').evaluate('e=>e.setSelectionRange(1,2)')
+        self.frame_capture('conclusion')
+        self.assertEqual(self.frame_insert('TAIL'), {'status':'applied'})
+        self.assertEqual(self.texts()['conclusion'], 'untouchedTAIL')
+
+    def test_integrated_typing_and_read(self):
+        self.page.locator('#findings').focus()
+        self.page.keyboard.type('abc')
+        self.assertEqual(self.page.evaluate('reportFrame.read()'), {'findings':'abc','conclusion':'','recommendation':''})
+        self.assertEqual(self.texts()['findings'], 'abc')
+
+    def test_integrated_hidden_and_length_refusal(self):
+        self.page.locator('#findings').fill('KEEP')
+        self.frame_capture('recommendation')
+        self.page.locator('#recommendation').evaluate("e=>e.style.display='none'")
+        self.assertEqual(self.frame_insert('BAD'), {'status':'refused','reason':'unavailable'})
+        self.assertEqual(self.texts(), {'findings':'KEEP','conclusion':'','recommendation':''})
+        self.frame_capture()
+        self.page.locator('#findings').evaluate('e=>e.maxLength=5')
+        self.assertEqual(self.frame_insert('TOO LONG'), {'status':'refused','reason':'length'})
+        self.assertEqual(self.texts()['findings'], 'KEEP')
+
+    def test_integrated_authoritative_boundary(self):
+        self.page.locator('#findings').fill('old')
+        self.frame_capture()
+        self.frame_text(findings='server')
+        self.assertEqual(self.texts()['findings'], 'server')
+        self.assertEqual(self.frame_insert('late')['status'], 'refused')
+        self.page.locator('#findings').focus()
+        self.page.keyboard.press('Control+z')
+        self.assertEqual(self.texts()['findings'], 'server')
+
+    def test_integrated_batch_focus_precheck(self):
+        self.frame_text(findings='KEEP', conclusion='KEEP', recommendation='KEEP')
+        self.page.evaluate("window.batch=RFIELDS.map(k=>({at:reportFrame.capture(k,{start:0,end:4}),text:'CHANGED'}));document.querySelector('#recommendation').style.display='none';window.inputs=0;document.addEventListener('input',()=>inputs++)")
+        before = self.texts()
+        self.assertEqual(self.page.evaluate('reportFrame.insertMany(batch)')['status'], 'refused')
+        self.assertEqual(self.texts(), before)
+        self.assertEqual(self.page.evaluate('inputs'), 0)
+
+    def test_integrated_authoritative_reentry(self):
+        self.frame_text(findings='KEEP')
+        self.page.locator('#b-copy').focus()
+        self.frame_capture()
+        self.page.locator('#findings').evaluate("e=>e.addEventListener('focus',()=>{window.reentry=reportFrame.replaceAuthoritative({findings:'BAD',conclusion:'',recommendation:''})},{once:true})")
+        self.assertEqual(self.frame_insert('X'), {'status':'applied'})
+        self.assertEqual(self.page.evaluate('reentry'), {'status':'refused','reason':'busy'})
+        self.assertEqual(self.texts()['findings'], 'KEEPX')
+
+    def test_integrated_equality_lf_only(self):
+        for before, after in [('text',' text'), ('a b','a\u00a0b'), ('é','e\u0301')]:
+            with self.subTest(after=after):
+                self.frame_text(findings=before)
+                self.frame_text(findings=after)
+                self.assertEqual(self.texts()['findings'], after)
+
+    def test_integrated_partial_equal_caret(self):
+        self.frame_text(findings='abc def', conclusion='old')
+        self.page.locator('#findings').focus()
+        self.page.keyboard.press('Home')
+        self.page.keyboard.press('ArrowRight')
+        self.page.keyboard.press('ArrowRight')
+        self.page.keyboard.press('ArrowRight')
+        self.page.locator('#b-copy').focus()
+        self.frame_text(findings='abc def', conclusion='new')
+        self.frame_capture()
+        self.assertEqual(self.frame_insert('X'), {'status':'applied'})
+        self.assertEqual(self.texts()['findings'], 'abcX def')
 
     def test_page_f11_identical_text_a_b_a_focus_and_blur(self):
         text = 'same\ntext'
@@ -1134,8 +1420,7 @@ class ReportEditorFramePageDOM(unittest.TestCase):
         self.page.locator('#b-copy').focus()
         self.assertTrue(self.page.evaluate("insertTemplate({findings:'F',conclusion:'C',recommendation:'R'})"))
         self.assertEqual(self.page.evaluate('dictationContext().field'), 'findings')
-        context = self.page.evaluate('dictationContext()')
-        self.assertTrue(self.page.evaluate("x=>dictationInsert({...x,expectedValue:x.value,text:'SYN dictated'})", context))
+        self.assertTrue(self.page.evaluate("() => { const x=dictationContext(); return dictationInsert({...x,expectedValue:x.value,text:'SYN dictated'}); }"))
         self.assertIn('SYN dictated', self.texts()['findings'])
         self.assertEqual(self.texts()['recommendation'], 'R')
 
@@ -1143,8 +1428,7 @@ class ReportEditorFramePageDOM(unittest.TestCase):
         self.switch(self.h.PATIENT_B)
         self.switch(self.h.PATIENT)
         self.page.locator('#conclusion').focus()
-        context = self.page.evaluate('dictationContext()')
-        self.assertTrue(self.page.evaluate("x=>dictationInsert({...x,expectedValue:x.value,text:'SYN dictated'})", context))
+        self.assertTrue(self.page.evaluate("() => { const x=dictationContext(); return dictationInsert({...x,expectedValue:x.value,text:'SYN dictated'}); }"))
         self.assertEqual(self.texts(), {'findings':'','conclusion':'SYN dictated','recommendation':''})
 
     def test_page_composition_refuses_a_queued_study_activation(self):
@@ -1292,6 +1576,18 @@ MUTANTS = [
 
 
 PAGE_MUTANTS = [
+    ('W6-PAGE-05-recording-capture', 'dictation.js',
+     'if (field === undefined) editorCapture = live?.capture ?? null;',
+     'editorCapture = live?.capture ?? null;', 'test_page_record_type_undo_refuses_late_dictation'),
+    ('W6-PAGE-05-unchanged', 'dictation.js',
+     'capture: editorCapture', 'capture: null', 'test_page_record_unchanged_accepts_original_caret'),
+    ('W6-PAGE-05-switch', 'dictation-session.js',
+     "else if (reason === 'select') cancel('study-changed');",
+     "else if (reason === 'select') {}", 'test_page_record_switch_study_refuses_late_dictation'),
+    ('W6-PAGE-05-repin', 'dictation.js',
+     'if (field === undefined) editorCapture = live?.capture ?? null;',
+     'if (field === undefined && !editorCapture) editorCapture = live?.capture ?? null;',
+     'test_page_record_explicit_repin_accepts_new_capture'),
     ('W6-PAGE-03', 'report-templates-ui.js',
      'result = changes.length === 1 ? frame.insert(changes[0].at, changes[0].text) : frame.insertMany(changes);',
      "result = {status:'unchanged'};", 'test_page_native_input_once_final_three_field_payload_and_hold'),
@@ -1347,12 +1643,15 @@ def run_page_mutants():
     originals = {row['file']:(lite / row['file']).read_text(encoding='utf-8') for row in order}
     killed = 0
     for row, file, old, new, name in PAGE_MUTANTS:
-        source = SOURCE if file == MODULE.name else originals[file]
+        source = SOURCE if file == MODULE.name else (originals[file] if file in originals else (lite / file).read_text(encoding='utf-8'))
         if source.count(old) != 1:
             raise AssertionError('PAGE mutation location not unique: ' + row)
         changed = source.replace(old, new, 1)
         case.source = changed if file == MODULE.name else SOURCE
+        case.dictation_source = changed if file == 'dictation.js' else None
         case.bundle_source = ''.join(changed if item['file'] == file else originals[item['file']] for item in order)
+        # Standalone session scripts are served separately from the generated bundle.
+        case.session_source = changed if file == 'dictation-session.js' else None
         output = io.StringIO()
         result = unittest.TextTestRunner(stream=output, verbosity=2).run(unittest.TestSuite([case(name)]))
         caught = result.testsRun == 1 and bool(result.failures) and not result.errors and not result.skipped
@@ -1361,8 +1660,56 @@ def run_page_mutants():
         killed += int(caught)
     case.source = SOURCE
     case.bundle_source = None
+    case.dictation_source = None
+    case.session_source = None
     print('PAGE mutants killed: %s/%s' % (killed, len(PAGE_MUTANTS)))
     return 0 if killed == len(PAGE_MUTANTS) else 1
+
+
+INTEGRATED_MODULE_CASES = [
+    'test_integrated_history_boundary', 'test_integrated_same_opening', 'test_integrated_retired_ticket',
+    'test_integrated_native_text_and_history', 'test_integrated_captured_selection', 'test_integrated_insert_and_clear_separate_following_typing',
+    'test_integrated_composing_insert_and_switch', 'test_integrated_composing_insert_and_switch',
+    'test_page_record_type_undo_refuses_late_dictation', 'test_page_record_type_undo_refuses_late_dictation',
+    'test_integrated_sent_snapshot', 'test_integrated_permissions_and_native_failure', 'test_integrated_permissions_and_native_failure',
+    'test_integrated_scroll_preserved', 'test_integrated_focus_and_unvisited', 'test_integrated_composing_insert_and_switch',
+    'test_integrated_typing_and_read', 'test_integrated_composing_insert_and_switch',
+    'test_page_single_scroll_tab_shortcut_and_thousand_lines', 'test_integrated_permissions_and_native_failure',
+    'test_integrated_typing_and_read', 'test_integrated_hidden_and_length_refusal', 'test_integrated_hidden_and_length_refusal',
+    'test_integrated_focus_and_unvisited', 'test_integrated_focus_and_unvisited', 'test_integrated_authoritative_boundary',
+    'test_integrated_batch_focus_precheck', 'test_integrated_native_text_and_history', 'test_integrated_native_text_and_history',
+    'test_page_authoritative_equal_keeps_undo_partial_equal_keeps_caret', 'test_integrated_authoritative_reentry',
+    'test_integrated_equality_lf_only', 'test_integrated_equality_lf_only', 'test_integrated_partial_equal_caret',
+]
+
+
+def run_integrated_module_mutants(labels=()):
+    """Original fa2de4f M01..M34 applied to the frame served by the actual main page."""
+    case = ReportEditorFramePageDOM
+    rows = list(zip(MUTANTS[:34], INTEGRATED_MODULE_CASES, strict=True))
+    if labels:
+        unknown = set(labels) - {row[0][0] for row in rows}
+        if unknown:
+            raise ValueError('Unknown integrated mutation labels: ' + ', '.join(sorted(unknown)))
+        rows = [row for row in rows if row[0][0] in labels]
+    baseline = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(case(n) for n in sorted({row[1] for row in rows})))
+    if not baseline.wasSuccessful() or baseline.skipped:
+        print('INTEGRATED MODULE BASELINE FAILED; no kills claimed')
+        return 1
+    killed = 0
+    for (label, old, new, _), name in rows:
+        if SOURCE.count(old) != 1:
+            raise AssertionError('Module mutation location not unique: ' + label)
+        case.source = SOURCE.replace(old, new, 1)
+        output = io.StringIO()
+        result = unittest.TextTestRunner(stream=output, verbosity=2).run(unittest.TestSuite([case(name)]))
+        caught = result.testsRun == 1 and bool(result.failures) and not result.errors and not result.skipped
+        print(label, name, 'KILLED' if caught else 'NOT PROVEN', flush=True)
+        print(output.getvalue(), end='')
+        killed += int(caught)
+    case.source = SOURCE
+    print('Integrated original module mutants killed: %s/%s' % (killed, len(rows)))
+    return 0 if killed == len(rows) else 1
 
 
 def run_mutants():
@@ -1394,8 +1741,11 @@ def main():
     parser.add_argument("--mutants", action="store_true")
     parser.add_argument("--page", action="store_true", help="Run the actual delivered-page integration cases")
     parser.add_argument("--page-mutants", action="store_true")
+    parser.add_argument("--integrated-module-mutants", action="store_true")
     parser.add_argument("tests", nargs="*")
     args = parser.parse_args()
+    if args.integrated_module_mutants:
+        return run_integrated_module_mutants(args.tests)
     if args.page_mutants:
         return run_page_mutants()
     if args.mutants:

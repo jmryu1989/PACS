@@ -28,14 +28,16 @@
       const a = appState[selectedUid] ?? {};
       return { blocked: !!reportEditorBlock(), uid: selectedUid, selectionSeq,
         baseVersion: reportBaseVersion(selectedUid, a.draft?.baseVersion ?? a.version ?? 0),
-        field: target, value: el.value, caret: caretAt(target) ?? { start: el.value.length, end: el.value.length } };
+        field: target, value: el.value, caret: caretAt(target) ?? { start: el.value.length, end: el.value.length },
+        // The placement caret above and this whole-field replacement ticket are one recording snapshot.
+        capture: reportFrame?.capture(target, { start: 0, end: el.value.length }) ?? null };
     }
     /**
      * Insert 한 번의 쓰기. 세션이 방금 확인한 그 화면인지 여기서 **동기로** 다시 본다 — 확정·다른 삽입이
      * 나가 있는지는 세션이 모르고, 그 사이에 넣은 글은 확정 응답의 다시 그리기가 지운다.
      */
     function dictationInsert(ins) {
-      if (commitInFlight || insertInFlight || dictationBlock()) return false;
+      if (!ins.capture || commitInFlight || insertInFlight || dictationBlock()) return false;
       const live = dictationContext(ins.field);
       if (!live || live.uid !== ins.uid || live.selectionSeq !== ins.selectionSeq ||
           live.baseVersion !== ins.baseVersion || live.value !== ins.expectedValue) return false;
@@ -44,7 +46,7 @@
       const plan = KinReportCitation.placeBlock(el.value, KinReportCitation.toLf(ins.text), ins.caret,
                                                 citationGuards(ins.field));
       // 타이핑·상용구처럼 표시를 세우고 점유를 시작하며, 저장은 기존 자동 저장이 한 번 가져간다.
-      return editReport([reportEditOf(ins.field, plan.text, plan.end)]);
+      return editReport([{ field: ins.field, at: ins.capture, text: plan.text, caret: plan.end }]);
     }
     function dictationPlacement(pin, text) {
       const el = $("#" + pin.field);

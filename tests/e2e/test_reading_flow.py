@@ -3,11 +3,12 @@
 
 Visible queue order and keyboard movement must retain report/viewer ownership.
 """
-import os, sys, unittest
+import json, os, re, sys, unittest
 from pathlib import Path
 from playwright.sync_api import expect
 from test_reading_workspace import ReadingWorkspaceE2E
 from test_prior_selection import canvas_ready
+from test_template_preservation import TemplatePreservationE2E
 
 
 class ReadingFlowE2E(ReadingWorkspaceE2E):
@@ -97,6 +98,90 @@ class ReadingFlowE2E(ReadingWorkspaceE2E):
   p.get_by_role('button',name='Study Info & Templates',exact=True).click()
   p.get_by_role('button',name='Back to Worklist',exact=True).click();p.locator('#m-reading').click()
   expect(p.get_by_role('button',name='Study Info & Templates',exact=True)).to_have_attribute('aria-expanded','false')
+
+
+class W6DoctorPathE2E(TemplatePreservationE2E):
+ """REQ-WS6 -> RISK-WS6 -> TEST-WS6: measured report path, explicit live selection.
+
+ Real BFF, study, template, save and approval; browser fake microphone and one
+ declared synthetic ASR response. Browser microphone permission UI is suppressed;
+ this measures app clicks/prompts, not first-use permission friction or speech accuracy.
+ Kept outside the three reading-flow selections so their existing budget stays fixed.
+ """
+ @classmethod
+ def setUpClass(cls):
+  super().setUpClass()
+  cls.browser.close()
+  cls.browser=cls.pw.chromium.launch(channel='chromium',headless=True,args=[
+   '--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream'])
+  cls.addClassCleanup(cls.browser.close)
+
+ def test_w6_doctor_path_clicks_and_prompts(self):
+  fixture=self.fixture();self.seed_report(fixture)
+  template=self.template(findings='SYN W6 TEMPLATE',conclusion='SYN W6 CONCLUSION',recommendation='')
+  context=self.browser.new_context(ignore_https_errors=True,viewport=dict(width=1680,height=1100))
+  self.contexts.append(context)
+  clicks=[];prompts=[];caps={};completed=[]
+  page=context.new_page();page.set_default_timeout(20000)
+  page.expose_binding('w6ObserveClick',lambda source,value:clicks.append(value))
+  context.add_init_script("""document.addEventListener('click', e => {
+    if (e.isTrusted) window.w6ObserveClick({id:e.target.id || '', tag:e.target.tagName});
+  }, true);""")
+  page.on('dialog',lambda dialog:(prompts.append(dialog.type),dialog.dismiss()))
+  def bootstrap(route):
+   response=route.fetch();body=response.json();caps.update(body['dictation'])
+   body['dictation']['available']=True
+   route.fulfill(response=response,json=body)
+  context.route('**/api/bootstrap*',bootstrap)
+  def transcript(route):
+   route.fulfill(status=200,content_type='application/json',body=json.dumps({
+    'text':'SYN W6 DICTATION','seconds':1.0,
+    **{k:caps[k] for k in ('languagePin','enginePin','modelPin')}}))
+  context.route('**/api/studies/'+fixture.uid+'/dictation',transcript)
+  def checkpoint(name):
+   expect(page.locator('dialog[open], [role="dialog"]:visible, .modal:visible')).to_have_count(0)
+   completed.append(name)
+  try:
+   page.goto(self.stack.proxy+'/')
+   try:
+    page.locator('#username').fill(self.stack.username('doctor'))
+    page.locator('#password').fill(self.stack.passwords['doctor'])
+    page.locator('#kc-login').click()
+   except Exception:
+    raise RuntimeError('Synthetic BFF login could not be submitted') from None
+   page.wait_for_url('**/worklist/hpacs-lite/main.html')
+   expect(page.locator('#dbstat')).to_contain_text('DB Connected');checkpoint('login/worklist')
+   self.select(page,fixture);checkpoint('open study')
+   page.locator('#findings').click();page.keyboard.press('Control+A');page.keyboard.type('SYN W6 TYPED')
+   checkpoint('type')
+   page.locator('#tpl-search').fill(template['title'])
+   page.locator('#tplrows').get_by_text(template['title'],exact=True).dblclick()
+   expect(page.locator('#findings')).to_have_value('SYN W6 TYPED\nSYN W6 TEMPLATE')
+   checkpoint('template')
+   # A multi-field template ends in Conclusion; choose the intended dictation field.
+   page.locator('#findings').click()
+   page.locator('#b-dictate').click();expect(page.locator('#dictation-stop')).to_be_visible()
+   page.wait_for_timeout(500)
+   page.locator('#dictation-stop').click();expect(page.locator('#dictation-insert')).to_be_enabled()
+   page.locator('#dictation-insert').click()
+   expect(page.locator('#findings')).to_have_value(re.compile('SYN W6 DICTATION'))
+   checkpoint('dictation')
+   self.commit(page,fixture,'#b-save','T');checkpoint('save')
+   self.commit(page,fixture,'#b-approve','A');checkpoint('approve')
+   expected=page.locator('#findings').input_value()
+   self.assertIn('SYN W6 TYPED',expected);self.assertIn('SYN W6 TEMPLATE',expected)
+   versions=self.versions(fixture);self.assertEqual(versions[-1]['findings'],expected)
+   with page.expect_event('close'):
+    page.close(run_before_unload=True)
+   self.assertTrue(page.is_closed());completed.append('close')
+   self.assertEqual(prompts,[])
+   self.assertTrue(any(x['id']=='kc-login' for x in clicks),'login click must be observed across navigation')
+  finally:
+   print('W6-DOCTOR-PATH '+json.dumps({'completed':completed,'click_count':len(clicks),'clicks':clicks,
+    'native_prompts':prompts,'custom_dialog_checkpoint_count':len([x for x in completed if x!='close']),
+    'browser_microphone_permission_prompts':'not measured (fake UI)',
+    'browser_close_actions':int('close' in completed),'synthetic_asr':True,
+    'baseline_comparison':'not measured; no incremental-friction verdict'},ensure_ascii=False),flush=True)
 
 
 def load_tests(loader,tests,pattern):

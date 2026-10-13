@@ -2465,8 +2465,9 @@ CSS도 응답 hash·status·cache 기록에 포함된다. 시간 예산·쌍 개
 
 
 W6-LAND (WIP): REQ-WS5/WS6/WS7 → RISK-UID/HISTORY/DUPLICATE-INPUT →
-`report_editor_frame_dom_test.py` (TEST-REF-*; `--page` 실제 제공 HTML/bundle 연결, `--mutants` 모듈 반례, `--page-mutants` PAGE 연결 반례).
-`worklist-ux.yml`의 measurements가 네 실행의 원문과 source tree/45-source order 입력을
+`report_editor_frame_dom_test.py` (TEST-REF-*; `--page` 실제 제공 HTML/bundle 연결, `--mutants` 모듈 반례, `--page-mutants` PAGE 연결 반례, `--integrated-module-mutants` 원래 M01..M34를 제공 페이지에서 검증).
+PAGE-05는 녹음 시점 문서·필드·커서·본문과 frame capture를 함께 보존한다. 녹음→입력→Undo→늦은 Insert 거절, 무변경 수용, 검사 전환 거절과 명시적 재고정을 실제 controller/session으로 검사한다.
+`worklist-ux.yml`의 measurements가 다섯 실행의 원문과 source tree/45-source order 입력을
 `tmp/workspace-ui-ci/report-editor-frame*`에 기록한다. 숨긴 Recommendation을 포함한 세 필드의
 저장 계약은 유지하며, 서버 CAS/migration/candidate 선택 ID는 변경하지 않는다.
 한글 OS IME와 의사 직접 확인, post-W3 통합 live 및 후보 CI/G3/교차 검수는 별도 관문이다.

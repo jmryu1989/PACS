@@ -82,6 +82,9 @@ jobs:
       - name: W6 page connection mutation counterexamples
         if: ${{ !cancelled() }}
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-editor-frame-page-mutants --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py --file api/package-lock.json -- $RUNNER_TEMP/measurement-python/bin/python -B tests/report_editor_frame_dom_test.py --page-mutants
+      - name: W6 original module mutations on the delivered page
+        if: ${{ !cancelled() }}
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-editor-frame-integrated-mutants --cwd . --tree worklist-v0/hpacs-lite --tree tests --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py --file api/package-lock.json -- $RUNNER_TEMP/measurement-python/bin/python -B tests/report_editor_frame_dom_test.py --integrated-module-mutants
       - name: Synthetic workspace DOM evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -48,7 +48,7 @@ class ReportTemplateE2E(previous.TemplatePreservationE2E):
         self.select(page, current)
         # W6 exposes two editing sections while the third saved field remains part of the report.
         for key in ("findings", "conclusion"):
-            expect(page.get_by_label(key.title(), exact=True)).to_be_visible()
+            expect(page.locator(".report-p").get_by_label(key.title(), exact=True)).to_be_visible()
         expect(page.locator("#recommendation")).to_have_value(values["recommendation"])
         page.locator(f'#relrows tr[data-uid="{prior.uid}"]').click()
         expect(page.locator("#prior-findings")).to_contain_text(prior.secret)
