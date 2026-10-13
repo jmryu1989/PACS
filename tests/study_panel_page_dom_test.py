@@ -388,9 +388,30 @@ class StudyPanelPageDOM(unittest.TestCase):
                 self.assertEqual(before, len(self.site.layout_writes))
                 self.assertEqual(saved, self.local())
 
+    def assert_report_usable(self, page, what):
+        """W3R5-03 ②: with the panel open, the report's buttons and fields keep every
+        visible pixel and stay on top: nothing of Approve/Save/Prelim, Findings or
+        Conclusion that a reader saw before is under the panel."""
+        facts = page.evaluate('''(names) => { const {seen} = ''' + VISIBLE + ''';
+          const panel = document.querySelector('#study-panel-host .study-panel')?.getBoundingClientRect();
+          return names.map(s => { const node = document.querySelector(s); if (!node || !node.getClientRects().length) return [s, null];
+            const fact = seen(node), [x, y, w, h] = fact.visible;
+            const covered = !!panel && w > 0 && h > 0 && x < panel.right && x + w > panel.left && y < panel.bottom && y + h > panel.top;
+            const points = w > 0 && h > 0 ? [[x + 2, y + 2], [x + w - 2, y + 2], [x + w / 2, y + h / 2], [x + 2, y + h - 2], [x + w - 2, y + h - 2]] : [];
+            return [s, {...fact, covered, on_top: points.every(([px, py]) => { const hit = document.elementFromPoint(px, py); return hit === node || node.contains(hit); })}]; }); }''',
+            ['#b-approve', '#b-save', '#b-prelim', '#findings', '#conclusion'])
+        for name, fact in facts:
+            if fact is None or fact['visible'][3] <= 0:
+                continue
+            self.assertFalse(fact['covered'], f'{what}: {name} under the open panel {fact}')
+            self.assertTrue(fact['on_top'], f'{what}: {name} not on top {fact}')
+        return dict(facts)
+
     def assert_drawer_place(self, page, width, height):
-        """D1041: LEFT 12/360 px beside the report in wide landscape windows; the approved
-        bottom panel (4-①) in stacked portrait layouts at any width and up to 1100 px."""
+        """D1041: LEFT 12/360 px beside the report in wide landscape windows. Stacked
+        portrait layouts at any width, and windows up to 1100 px, expand it across the
+        window (4-①) over the work area above the report section, 12 px above it
+        (W3R5-03 ②: the report's buttons and fields stay visible and usable)."""
         drawer = page.get_by_role('complementary', name='Study Panel', exact=True)
         box = drawer.bounding_box()
         self.assertGreaterEqual(box['x'], 0)
@@ -400,13 +421,62 @@ class StudyPanelPageDOM(unittest.TestCase):
         self.assertAlmostEqual(12, box['x'], delta=1)
         if width <= 1100 or height > width:
             self.assertAlmostEqual(width - 24, box['width'], delta=1)
-            self.assertAlmostEqual(height - 12, box['y'] + box['height'], delta=1)
-            self.assertAlmostEqual(height * .55, box['height'], delta=1)
+            area, report = page.locator('.split').bounding_box(), page.locator('.report-p').bounding_box()
+            self.assertAlmostEqual(max(0, area['y']), box['y'], delta=1)
+            bottom = min(report['y'], area['y'] + area['height'], height) - 12
+            if bottom - box['y'] >= 120:
+                self.assertAlmostEqual(min(bottom - box['y'], height * .55), box['height'], delta=1)
         else:
             self.assertAlmostEqual(360, box['width'], delta=1)
             report = page.locator('.report-p').bounding_box()
             self.assertLessEqual(box['x'] + box['width'], report['x'])
+        self.assert_report_usable(page, f'{width}x{height}')
         return box
+
+    def test_open_panel_keeps_report_buttons_and_fields_usable(self):
+        """W3R5-03 ② / W3R-01: at 1200x1920 (and the other portrait monitors, the
+        pilot's 900x1200 and short windows up to 1100 px) the open panel leaves
+        Approve/Save/Prelim and Findings/Conclusion as visible and clickable as with
+        it closed; where the report is below the window, the panel follows it up as
+        the work area scrolls, so the report never slides under it."""
+        for width, height in ((1200, 1920), (1440, 2560), (1536, 2048), (1080, 1920), (900, 1200), (768, 1024), (1024, 768), (900, 768)):
+            with self.subTest(width=width, height=height):
+                page, _, _ = self.page_at(width, height)
+                self.click_row(page, 0, 'select')
+                closed = self.assert_report_usable(page, 'closed')
+                page.keyboard.press('Control+Alt+5')
+                expect(page.get_by_role('complementary', name='Study Panel', exact=True)).to_be_visible()
+                settle(page)
+                self.assert_drawer_place(page, width, height)
+                opened = self.assert_report_usable(page, 'open')
+                for name, fact in closed.items():
+                    if fact:
+                        self.assertEqual(fact['visible'], opened[name]['visible'], f'{name} visible part changed')
+                if width >= 1080 and height >= 1920:
+                    for name in ('#b-approve', '#b-save', '#findings', '#conclusion'):
+                        self.assertTrue(opened[name]['whole'], f'{name} whole in view with the panel open')
+                # Where the report starts low in the window, the reader turns the wheel over
+                # the work area below the panel until the buttons and the start of Findings
+                # are in view; the panel follows the report up and never covers it.
+                # (In the 180 px portrait report section of 900x1200 and 768x1024 the report
+                # editor itself is squeezed by the panels below it, on main as well; the
+                # fields' own visibility there is not this panel's to change.)
+                for _ in range(24):
+                    now = self.assert_report_usable(page, 'scrolling to the report')
+                    if now['#b-approve']['whole'] and now['#b-save']['whole']:
+                        break
+                    panel = page.get_by_role('complementary', name='Study Panel', exact=True).bounding_box()
+                    report = page.locator('.report-p').bounding_box()
+                    page.mouse.move(width - 30, (panel['y'] + panel['height'] + min(report['y'], height)) / 2)
+                    page.mouse.wheel(0, 60)
+                    settle(page)
+                self.assert_drawer_place(page, width, height)
+                scrolled = self.assert_report_usable(page, 'scrolled to the report')
+                for name in ('#b-approve', '#b-save'):
+                    self.assertTrue(scrolled[name]['whole'], f'{name} whole after scrolling to the report {scrolled[name]}')
+                page.keyboard.press('Escape')
+                expect(page.get_by_role('complementary', name='Study Panel', exact=True)).to_have_count(0)
+                self.doCleanups()
 
     def test_drawer_geometries_and_pilot_pictures(self):
         self.boot()

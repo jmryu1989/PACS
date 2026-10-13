@@ -1084,13 +1084,15 @@
     body.workspace-rail-collapsed .left:has(> #worklist-folders-panel[open]) { padding-inline-start: 78px; }
     body.workspace-rail-collapsed #worklist-folders-panel { width: 78px; }
     body.workspace-rail-collapsed #worklist-folders-panel > :not(summary):not(#rail-collapse) { display: none; }
-    /* Stacked (portrait) layouts at any width, and small windows, get the approved
-       bottom panel (D1041 4-①). A 360 px column in a tall window would cover the
-       report toolbar and the start of every report line. */
-    body.portrait.study-panel-open #study-panel-host { top: auto !important; bottom: 12px; height: 55vh !important; width: calc(100vw - 24px); }
+    /* Stacked (portrait) layouts at any width, and small windows, expand the panel
+       across the window (D1041 4-①) over the work area above the report section;
+       feature-mounts.js places it so the report's Approve/Save/Prelim and its fields
+       stay visible and usable while the panel is open (W3R5-03 ②). A 360 px column
+       in a tall window would cover the report toolbar and every line's start. */
+    body.portrait.study-panel-open #study-panel-host { width: calc(100vw - 24px); }
     body.portrait.study-panel-open #study-panel-host .study-panel-head { flex: none; }
     @media (max-width: 1100px) {
-      body.study-panel-open #study-panel-host { top: auto !important; bottom: 12px; height: 55vh !important; width: calc(100vw - 24px); }
+      body.study-panel-open #study-panel-host { width: calc(100vw - 24px); }
       body.study-panel-open #study-panel-host .study-panel-head { flex: none; }
     }
   </style>

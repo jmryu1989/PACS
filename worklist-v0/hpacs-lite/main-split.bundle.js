@@ -8403,12 +8403,31 @@
           else if (box.bottom > bottom) listGrid.scrollTop += box.bottom - bottom;
         }
       }
-      if (studyPanel) {
-        const edge = Math.max(0, $('.right').getBoundingClientRect().top), host = $('#study-panel-host');
-        host.style.top = edge + 'px';
-        host.style.height = Math.max(120, innerHeight - edge - 12) + 'px';
-      }
+      if (studyPanel) placeStudyPanel();
     }
+    // The open Study Panel never covers the report section (W3R5-03 ②). Wide
+    // landscape: the 360 px column left of the report, from the work area's top.
+    // Stacked layouts and small windows: across the window from the work area's top,
+    // the approved 55 % of the window high at most and ending 12 px above the report
+    // section; it follows the report as the work area scrolls, so Approve/Save/Prelim
+    // and the fields stay where the reader sees them, and the work area below the
+    // panel stays in view to scroll to the report.
+    function placeStudyPanel() {
+      const host = $('#study-panel-host');
+      if (portraitLayout() || innerWidth <= 1100) {
+        const area = $('.split').getBoundingClientRect(), report = $('.report-p').getBoundingClientRect();
+        const top = Math.max(0, area.top), bottom = Math.min(report.top, area.bottom, innerHeight) - 12;
+        host.style.top = top + 'px';
+        host.style.height = Math.max(120, Math.min(innerHeight * 0.55, bottom - top)) + 'px';
+        return;
+      }
+      const edge = Math.max(0, $('.right').getBoundingClientRect().top);
+      host.style.top = edge + 'px';
+      host.style.height = Math.max(120, innerHeight - edge - 12) + 'px';
+    }
+    document.addEventListener('scroll', event => {
+      if (studyPanel && !workspaceEnded && event.target instanceof Element && event.target.matches('.split, .right')) placeStudyPanel();
+    }, { capture: true, passive: true });
     const readingWorkspace = KinReadingWorkspace({
       current: () => selectedUid, study: uid => studies.find(s => s.uid === uid),
       prior: autoPrior, move, select, queue: orderedStudies, layout: () => applyLayout(), popup: openOhifWindow,
