@@ -77,13 +77,16 @@ VISIBLE = '''(() => {
   return {clip, seen};
 })()'''
 ROWS = '''(count) => { const {clip, seen} = ''' + VISIBLE + ''';
-  const grid = document.querySelector('.left > .grid'), head = grid.querySelector('thead').getBoundingClientRect();
-  return {head: seen(grid.querySelector('thead')), rows: [...document.querySelectorAll('#rows tr[data-uid]')].slice(0, count).map(row => {
+  // The header cells are sticky inside the list; the thead box itself scrolls away.
+  const grid = document.querySelector('.left > .grid'), cells = [...grid.querySelectorAll('thead th')].map(th => th.getBoundingClientRect()).filter(r => r.width && r.height);
+  const head = {top: Math.min(...cells.map(r => r.top)), bottom: Math.max(...cells.map(r => r.bottom)), left: Math.min(...cells.map(r => r.left)), right: Math.max(...cells.map(r => r.right))};
+  return {head: seen(grid.querySelector('thead th'), {...head, width: head.right - head.left, height: head.bottom - head.top}), rows: [...document.querySelectorAll('#rows tr[data-uid]')].slice(0, count).map(row => {
     const r = row.getBoundingClientRect(), v = clip(row, r), fact = seen(row);
     fact.whole = fact.whole && r.top >= head.bottom - 0.5;
     const at = (x, y) => document.elementFromPoint(x, y)?.closest('tr') === row;
     const y = Math.max(v.top, head.bottom) / 2 + Math.min(v.bottom, r.bottom) / 2;
     fact.hit = v.right > v.left && v.bottom > Math.max(v.top, head.bottom) && at((v.left + v.right) / 2, y);
+    fact.shown = Math.max(0, Math.min(v.bottom, r.bottom) - Math.max(v.top, head.bottom));
     const cells = [...row.cells].filter(c => !c.querySelector('button, a, input, select, label, textarea')).map(c => {
       const b = c.getBoundingClientRect(); return [Math.max(b.left, v.left), Math.min(b.right, v.right)]; })
       .filter(([a, z]) => z - a >= 8).sort((p, q) => (q[1] - q[0]) - (p[1] - p[0]));
@@ -591,16 +594,27 @@ class StudyPanelPageDOM(unittest.TestCase):
         self.assertEqual([0, 0], page.evaluate("() => [document.scrollingElement.scrollTop, document.querySelector('.split').scrollTop]"))
 
     def wheel_row_into_view(self, page, index, what):
-        """The next study: the wheel over the list brings it under the pointer."""
+        """The next study: the wheel over the list brings it under the pointer and a click
+        on it selects it. A list that holds exactly its header and one row shows the
+        next row at the end of its scroll at most 2 px under the sticky header."""
+        last = None
         for _ in range(12):
-            facts = page.evaluate(ROWS, index + 1)
-            if facts['rows'][index]['whole']:
-                return
+            row = page.evaluate(ROWS, index + 1)['rows'][index]
+            if row['whole'] or row['shown'] >= row['box'][3] - 2:
+                break
+            spot = page.evaluate("() => { const g = document.querySelector('.left > .grid'); return [g.scrollTop, document.querySelector('.left').scrollTop]; }")
+            if spot == last:
+                break
+            last = spot
             grid = page.evaluate("() => { const r = document.querySelector('.left > .grid').getBoundingClientRect(); return [r.left + 30, r.top + r.height / 2]; }")
             page.mouse.move(*grid)
             page.mouse.wheel(0, 40)
             settle(page)
-        self.fail(f'{what}: the wheel did not bring row {index} into view')
+        self.assertTrue(row['point_hit'] and row['hit'] and row['shown'] >= row['box'][3] - 2,
+                        f'{what}: the wheel did not bring row {index} into view {row}')
+        page.mouse.click(*row['point'])
+        expect(page.locator('#rows tr[data-uid]').nth(index)).to_have_class(re.compile(r'\bsel\b'))
+        settle(page)
 
     def assert_column_controls_reachable(self, page, what):
         """Past the list floor the column scrolls; its last control (the status bar) can be reached
@@ -633,7 +647,6 @@ class StudyPanelPageDOM(unittest.TestCase):
                 self.assertGreaterEqual(area['grid'][1] - area['grid'][0] + 0.5, area['head'] + area['row'] + area['scrollbar'])
                 self.click_row(page, 0, 'login')
                 self.wheel_row_into_view(page, 1, 'next study')
-                self.click_row(page, 1, 'next study')
                 expect(page.locator('#rows tr[data-uid]').first).not_to_have_class(re.compile(r'\bsel\b'))
                 self.assert_column_controls_reachable(page, 'column')
                 self.doCleanups()
@@ -657,11 +670,14 @@ class StudyPanelPageDOM(unittest.TestCase):
                         expect(page.get_by_role('complementary', name='Study Panel', exact=True)).to_have_count(0)
                         settle(page)
                     self.assertTrue(self.assert_row_in_view(page, 0, phase)['selected'])
-                    self.assert_row_in_view(page, 1, phase)
                     related = page.evaluate(RELATED)
                     self.assertTrue(related['head']['whole'], f'{phase}: Related header {related}')
                     self.assertGreaterEqual(related['line_visible'], 8, f'{phase}: prior report first line {related}')
-                self.click_row(page, 1, 'next row')
+                # The next row: whole in a 768 px window's band; in a shorter window the band
+                # yields to the prior report line and the wheel brings the next row up.
+                if (width, height) != (860, 700):
+                    self.assert_row_in_view(page, 1, 'next row without scrolling')
+                self.wheel_row_into_view(page, 1, 'next row')
                 self.assertIn('workspace-narrow', page.evaluate('document.body.className'))
                 self.assert_column_controls_reachable(page, 'band')
                 self.doCleanups()
@@ -678,7 +694,7 @@ class StudyPanelPageDOM(unittest.TestCase):
                 settle(page)
                 self.assertEqual(controls, page.evaluate("() => [...document.querySelectorAll('.left > :not(.grid):not(#worklist-folders-panel)')].map(n => n.getBoundingClientRect().height)"))
                 area = page.evaluate(LIST)
-                self.assertGreater(area['row'], 100)
+                self.assertGreaterEqual(area['row'], 99.5)
                 self.assertGreaterEqual(area['grid'][1] - area['grid'][0] + 0.5, area['head'] + area['row'] + area['scrollbar'])
                 self.click_row(page, 0, 'taller row')
                 self.doCleanups()

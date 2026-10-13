@@ -182,9 +182,9 @@
       // approved portrait picture (W3R-09; the Related list follows the same rule,
       // D383). Wrapped list controls take their own height, not the rows'. A stacked
       // list grows into the work area below it. A side-by-side list column, and the
-      // narrow sheet's fixed band (which also shows the next row, so the next study
-      // is one click away), keep that floor and scroll vertically instead: past the
-      // minimums the page scrolls, nothing is clipped (design v4 §1, v5 §2).
+      // narrow sheet's band (which also shows the next row where it has room, so the
+      // next study is one click away), keep that floor and scroll vertically instead:
+      // past the minimums the page scrolls, nothing is clipped (design v4 §1, v5 §2).
       left.style.minHeight = "";
       const listGrid = left.querySelector(":scope > .grid"), listTable = listGrid?.querySelector("table");
       // Each pass measures the list without its floor; a re-measure (rendered rows,
@@ -192,35 +192,30 @@
       const listScroll = [left.scrollTop, listGrid?.scrollTop || 0];
       if (listGrid) listGrid.style.minHeight = "";
       document.body.classList.remove("workspace-list-scroll");
+      let listNeed = 0, listFloor = 0;
+      const becameNarrow = narrow && !workspaceWasNarrow;
+      const keepListFloor = () => {
+        const scrolling = document.body.classList.contains("workspace-list-scroll");
+        if (listFloor - listGrid.getBoundingClientRect().height > 0.5) {
+          listGrid.style.minHeight = Math.ceil(listFloor) + "px";
+          document.body.classList.add("workspace-list-scroll");
+        }
+        if (!document.body.classList.contains("workspace-list-scroll")) return;
+        left.style.setProperty("--workspace-list-height", left.clientHeight + "px");
+        if (!scrolling && !becameNarrow) [left.scrollTop, listGrid.scrollTop] = listScroll;
+      };
       if (!document.body.classList.contains("reading") && listTable?.tHead && listGrid.getClientRects().length) {
         const grid = listGrid, table = listTable, rows = table.tBodies[0]?.rows || [];
         const rowHeight = index => rows[index]?.getBoundingClientRect().height || 41;
-        const need = table.tHead.getBoundingClientRect().height + rowHeight(0) + grid.offsetHeight - grid.clientHeight;
+        const need = listNeed = table.tHead.getBoundingClientRect().height + rowHeight(0) + grid.offsetHeight - grid.clientHeight;
         const short = need - grid.getBoundingClientRect().height;
         if (portrait && !narrow) {
           // Grow by whole pixels: the work area below moves down unchanged, keeping
           // the sub-pixel position each of its lines and borders had at first paint.
           if (short > 0) left.style.minHeight = left.getBoundingClientRect().height + Math.ceil(short) + "px";
         } else {
-          const floor = need + (narrow && rows.length > 1 ? rowHeight(1) : 0);
-          if (floor - grid.getBoundingClientRect().height > 0.5) {
-            grid.style.minHeight = Math.ceil(floor) + "px";
-            document.body.classList.add("workspace-list-scroll");
-            left.style.setProperty("--workspace-list-height", left.clientHeight + "px");
-            [left.scrollTop, grid.scrollTop] = listScroll;
-          }
-        }
-        // Becoming the narrow sheet at selection reflows the list: bring the list's
-        // top and the selected row back into view inside the list only.
-        if (narrow && !workspaceWasNarrow) {
-          left.scrollTop = 0;
-          const selected = selectedUid && table.tBodies[0]?.querySelector(`tr[data-uid="${CSS.escape(selectedUid)}"]`);
-          if (selected) {
-            const area = grid.getBoundingClientRect(), box = selected.getBoundingClientRect();
-            const top = area.top + table.tHead.getBoundingClientRect().height, bottom = area.bottom - (grid.offsetHeight - grid.clientHeight);
-            if (box.top < top) grid.scrollTop -= top - box.top;
-            else if (box.bottom > bottom) grid.scrollTop += box.bottom - bottom;
-          }
+          listFloor = need + (narrow && rows.length > 1 ? rowHeight(1) : 0);
+          keepListFloor();
         }
       }
       workspaceWasNarrow = narrow;
@@ -261,6 +256,36 @@
         const line = body.getBoundingClientRect().top + area.scrollTop + parseFloat(style.paddingTop) + 2 * parseFloat(style.fontSize);
         const over = line - area.getBoundingClientRect().bottom;
         if (over > 0) top.style.height = Math.max(140, Math.floor(top.getBoundingClientRect().height - over)) + "px";
+      }
+      // In the narrow sheet the list band yields to that line the same way, only as
+      // much as needed and never below the list's header and one whole row; the
+      // next row is then a wheel turn away inside the band.
+      if (narrow && listNeed) {
+        const area = $(".right"), body = related.querySelector(".prior-report-body"), style = getComputedStyle(body);
+        const line = body.getBoundingClientRect().top + area.scrollTop + parseFloat(style.paddingTop) + 2 * parseFloat(style.fontSize);
+        const over = line - area.getBoundingClientRect().bottom;
+        if (over > 0) {
+          const band = Math.max(Math.ceil(listNeed), Math.floor(left.getBoundingClientRect().height - over));
+          left.style.setProperty("height", band + "px", "important");
+          left.style.minHeight = band + "px";
+          // The list then fills the shorter band and scrolls inside it.
+          listFloor = Math.max(listNeed, Math.min(listFloor, band));
+          listGrid.style.minHeight = "";
+          keepListFloor();
+        }
+      }
+      // Becoming the narrow sheet at selection reflows the list: bring the band's
+      // top and the selected row back into view, scrolling inside the band only.
+      if (becameNarrow && listNeed) {
+        left.scrollTop = 0;
+        const selected = selectedUid && listTable.tBodies[0]?.querySelector(`tr[data-uid="${CSS.escape(selectedUid)}"]`);
+        if (selected) {
+          const area = listGrid.getBoundingClientRect(), box = selected.getBoundingClientRect();
+          const top = area.top + listTable.tHead.getBoundingClientRect().height;
+          const bottom = Math.min(area.bottom - (listGrid.offsetHeight - listGrid.clientHeight), left.getBoundingClientRect().top + left.clientHeight);
+          if (box.top < top) listGrid.scrollTop -= top - box.top;
+          else if (box.bottom > bottom) listGrid.scrollTop += box.bottom - bottom;
+        }
       }
       if (studyPanel) {
         const edge = Math.max(0, $('.right').getBoundingClientRect().top), host = $('#study-panel-host');
