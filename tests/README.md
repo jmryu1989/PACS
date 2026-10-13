@@ -86,6 +86,12 @@ REQ-D-WORKSPACE-WINDOWS → RISK-D-WORKSPACE-IDENTITY/UNSAVED/STALE → TEST-VIE
 단위별 기록 스크립트를 새로 만들지 않고 Python 3.9+ 표준 라이브러리 기록기를 재사용한다.
 저장소 루트에서 `python scripts/record-run.py --run-dir <새-실행-폴더> --cwd . --file scripts/record-run.py --file tests/record_run_test.py -- python -B tests/record_run_test.py`로 실행한다.
 `--file`은 작업 디렉터리 기준으로 반복 지정한다. 새 폴더의 `run.json`에는 명령 인자·cwd·UTC 시작/종료·실제 자식 exit·전후 파일 SHA256·조회 가능한 Git HEAD를, `stdout.log`/`stderr.log`에는 원문 바이트를 남긴다.
+CI-TOOLING-1a의 `ci_workflow_consumers_test.py`는 Python AST와 TypeScript AST로 workflow 소비자를 찾고 import 고정점으로 전파한다.
+Python dotted `importlib.import_module`/`__import__`, TS import-equals, 같은 파일의 JS const/const 별칭 require와
+구분자가 붙은 workflow 경로 조각을 포함한다. JS const는 선언 symbol로 구분하며 비소비자 import와 주석/docstring은 음성 대조다.
+지원 밖 동적 module 인수는 소비자로 보수적으로 포함한다. 명단은 정확한 실행 의존성 분석이 아니므로 과잉 포함할 수 있다.
+감사가 찾은 모든 경로는 `scripts/record-run.py`의 소비자 명단에 있어야 하며 새 누락은 시험 실패다.
+Stage 7/8 비후보 artifact 수집과 수동 G3 입력의 분리, 재실행 STOP 및 dry-run 의미는 `tests/stage-exit.md`를 따른다.
 기존 실행 폴더는 거절하며 명령 실패 코드를 유지한다. 실행 불가는 자식 exit를 `null`로 기록하고 127, 기록 실패는 125로 종료한다. 원래 명령의 실패를 시험 통과로 해석하지 않는다.
 명령 인자와 출력은 가리지 않고 그대로 보존하므로 비밀값·환자 자료를 입력/출력하지 않게 하고, 게시 전 별도로 확인한다. 환경변수 전체 수집·자동 게시·Git 쓰기는 하지 않는다. 이 기록기는 DB/DICOM 보존 검사나 실제 시험을 대신하지 않는다.
 

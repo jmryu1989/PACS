@@ -5,8 +5,26 @@ const ts = require('../api/node_modules/typescript');
 function scan(source, filename) {
   const tree = ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true);
   if (tree.parseDiagnostics.length) throw new Error(`Cannot parse ${filename}`);
+  // Bind identifiers to declarations so shadowed constants cannot hide a reader.
+  const host = ts.createCompilerHost({ noLib: true, allowJs: true });
+  host.getSourceFile = name => name === filename ? tree : undefined;
+  host.fileExists = name => name === filename;
+  host.readFile = name => name === filename ? source : undefined;
+  const program = ts.createProgram([filename], { noLib: true, allowJs: true }, host);
+  const checker = program.getTypeChecker();
+  function constant(node, seen = new Set()) {
+    if (ts.isStringLiteralLike(node)) return node.text;
+    if (ts.isParenthesizedExpression(node)) return constant(node.expression, seen);
+    if (!ts.isIdentifier(node)) return undefined;
+    const symbol = checker.getSymbolAtLocation(node);
+    const declaration = symbol?.valueDeclaration;
+    if (!declaration || !ts.isVariableDeclaration(declaration) || !declaration.initializer ||
+        !(declaration.parent.flags & ts.NodeFlags.Const) || seen.has(declaration)) return undefined;
+    return constant(declaration.initializer, new Set([...seen, declaration]));
+  }
   const literals = [];
   const modules = [];
+  let unresolved = false;
   function visit(node) {
     // Template pieces count too: `${root}/.github/workflows` has no plain string literal.
     if (ts.isStringLiteralLike(node) || ts.isTemplateHead(node) || ts.isTemplateMiddle(node) ||
@@ -14,6 +32,8 @@ function scan(source, filename) {
     let specifier;
     if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) {
       specifier = node.moduleSpecifier;
+    } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
+      specifier = node.moduleReference.expression;
     } else if (ts.isCallExpression(node) && node.arguments.length &&
                (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
                 (ts.isIdentifier(node.expression) && node.expression.text === 'require') ||
@@ -21,20 +41,23 @@ function scan(source, filename) {
                  ts.isIdentifier(node.expression.expression) && node.expression.expression.text === 'require'))) {
       specifier = node.arguments[0];
     }
-    if (specifier && ts.isStringLiteralLike(specifier)) {
-      modules.push(specifier.text.replaceAll('\\', '/').split('/').pop().replace(/\.[^.]*$/, ''));
+    if (specifier) {
+      const value = constant(specifier);
+      if (value === undefined) unresolved = true; // Conservative inclusion of unsupported dynamic loading.
+      else modules.push(value.replaceAll('\\', '/').split('/').pop().replace(/\.(?:[cm]?js|ts)$/, ''));
     }
     ts.forEachChild(node, visit);
   }
   visit(tree);
   return {
-    reads: consumesLiterals(literals),
+    reads: unresolved || consumesLiterals(literals),
     modules,
-    files: literals.map(s => s.split('/').pop()).filter(s => s.includes('.')),
+    files: literals.flatMap(s => s.split(/[\s/"']+/)).filter(s => s.includes('.')),
   };
 }
 
 function consumesLiterals(literals) {
+  literals = literals.map(s => s.replace(/\/+$/, ''));
   return literals.some(s => s.includes('.github/workflows') || /(^|\/)ci_workflows(\.py)?$/.test(s)) ||
     (literals.includes('.github') && literals.includes('workflows'));
 }

@@ -39,11 +39,19 @@ def python_scan(source):
                 reads = True
         if isinstance(node, ast.Constant) and id(node) not in docstrings and isinstance(node.value, str):
             values.append(node.value.replace('\\', '/'))
+        if isinstance(node, ast.Call) and (
+                isinstance(node.func, ast.Name) and node.func.id == '__import__'
+                or isinstance(node.func, ast.Attribute) and node.func.attr == 'import_module'):
+            if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                modules.update(node.args[0].value.split('.'))
+            else:
+                reads = True  # Unknown dynamic module: conservatively record the workflows.
+    values = [value.rstrip('/') for value in values]
     reads = (reads or any('.github/workflows' in value or value == 'ci_workflows' for value in values)
             or ('.github' in values and 'workflows' in values))
     # importlib/runpy/subprocess name a module by string; plain names count like imports.
     modules.update(value for value in values if value.isidentifier())
-    files = {value.rsplit('/', 1)[-1] for value in values if '.' in value.rsplit('/', 1)[-1]}
+    files = {part for value in values for part in value.replace('/', ' ').split() if '.' in part}
     return reads, modules, files
 
 
@@ -185,6 +193,54 @@ class WorkflowConsumerTests(unittest.TestCase):
         readers = ['zz_reader.py', *(name + '.py' for name in chain), 'm_runner.cjs', 'c_last.py',
                    'branch_one.py', 'branch_two.py', 'cycle_a.py', 'cycle_b.py']
         self.assertEqual(found, {'tests/' + name for name in readers})
+
+    def test_dotted_dynamic_imports_ts_import_equals_and_constant_require(self):
+        sources = {
+            'leaf.py': "p = '.github/workflows'",
+            'leaf.cjs': "const p = '.github/workflows';",
+            'dynamic.py': "import importlib; m = importlib.import_module('tests.leaf')",
+            'builtin.py': "m = __import__('tests.leaf', fromlist=['x'])",
+            'equals.ts': "import x = require('./leaf');",
+            'indirect.cjs': "const n = './leaf'; require(n);",
+            'alias.cjs': "const n = './leaf'; const a = n; require(a);",
+            'scoped.cjs': "const n = './plain'; function f() { const n = './leaf'; require(n); }",
+            'plain.py': "x = 1",
+            'plain.cjs': "module.exports = 1;",
+            'negative.py': "import importlib; m = importlib.import_module('tests.plain')",
+            'negative.ts': "import x = require('./plain');",
+            'negative.cjs': "const n = './plain'; require(n); // require('./leaf')",
+            'shadowed.cjs': "const n = './leaf'; function f() { const n = './plain'; require(n); }",
+            'unresolved.py': "import importlib; importlib.import_module(name)",
+            'unresolved.cjs': "require(process.env.MODULE);",
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'tests').mkdir()
+            for name, source in sources.items():
+                (root / 'tests' / name).write_text(source, encoding='utf-8')
+            found = consumers(root)
+        expected = {'leaf.py', 'leaf.cjs', 'dynamic.py', 'builtin.py', 'equals.ts', 'indirect.cjs',
+                    'alias.cjs', 'scoped.cjs', 'unresolved.py', 'unresolved.cjs'}
+        self.assertEqual(found, {'tests/' + name for name in expected})
+
+    def test_joined_paths_and_recorder_command_spellings(self):
+        for source in ("p = Path('.') / '.github/' / 'workflows' / 'candidate.yml'",
+                       "p = Path('.') / '.github\\\\' / 'workflows' / 'candidate.yml'"):
+            self.assertTrue(python_consumer(source))
+        sources = ["const p = path.join('.', '.github/', 'workflows');",
+                   "const p = path.join('.', '.github\\\\', 'workflows');",
+                   "const p = path.join('.', '.githubish/', 'workflows');",
+                   "// path.join('.', '.github/', 'workflows')\nconst p = 'docs';"]
+        self.assertEqual(javascript_consumers([{'filename': 'p.cjs', 'source': s} for s in sources]),
+                         [True, True, False, False])
+        for path in ('${{ github.workspace }}/scripts/record-run.py', './scripts/record-run.py',
+                     'python scripts\\record-run.py'):
+            py = python_scan('command = ' + repr(path))
+            js = javascript_scan([{'filename': 'p.cjs', 'source': 'const command = ' + json.dumps(path)}])[0]
+            self.assertIn('record-run.py', py[2], path)
+            self.assertIn('record-run.py', js['files'], path)
+            self.assertFalse(py[0])
+            self.assertFalse(js['reads'])
 
     def test_scanning_guard_records_the_test_corpus(self):
         for name in ('tests/record_run_test.py', 'tests/ci_workflow_consumers_test.py'):

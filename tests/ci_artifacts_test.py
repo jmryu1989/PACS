@@ -2,11 +2,12 @@
 
 The real YAML upload declarations are the contract. Synthetic relocations and
 duplicate artifact names prove collection never borrows another workflow's run.
-The fake below answers the GitHub REST endpoints the collector uses (workflow
-runs, artifacts by name, one run, a run's artifacts) from a list of runs; it
-serves every run of a workflow regardless of head_sha or creation date, so SHA
-and date filtering are the collector's own duty.
+The fake answers paged workflow/run/artifact REST requests and ID downloads.
+It deliberately returns foreign SHA rows too, so the collector must fail closed
+on contradictory filtered responses. G3 requests must stop before any lookup.
 """
+import copy
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -14,10 +15,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+import zipfile
 from urllib.parse import parse_qs, urlsplit
 
 import yaml
-from ci_artifacts import CANDIDATE, ROOT, TITLE, download, inventory
+from ci_artifacts import CANDIDATE, ROOT, download, inventory, listing, gh_get
 from ci_workflows import WorkflowCatalog
 
 SHA = 'a' * 40
@@ -31,6 +34,7 @@ def real_name(template):
 class FakeGitHub:
     def __init__(self, uploads):
         self.runs, self.urls = [], []
+        self.page_size = 100
         for index, (file, jobs) in enumerate(uploads.items()):
             names = [real_name(a) for artifacts in jobs.values() for a in artifacts]
             self.add(file, names, run_id=index + 10,
@@ -43,7 +47,9 @@ class FakeGitHub:
         run = {'id': run_id, 'head_sha': head_sha, 'path': path or '.github/workflows/' + file,
                'listed_under': file, 'created_at': created_at, 'run_attempt': 1, 'event': event,
                'status': status, 'conclusion': conclusion, 'display_title': title,
-               'artifacts': [{'id': run_id * 100 + i, 'name': name, 'expired': expired}
+               'updated_at': '2026-10-12T12:00:00Z',
+               'artifacts': [{'id': run_id * 100 + i, 'name': name, 'expired': expired,
+                              'workflow_run': {'id': run_id, 'head_sha': head_sha}}
                              for i, name in enumerate(names)]}
         self.runs.append(run)
         return run
@@ -55,21 +61,33 @@ class FakeGitHub:
     def public(run):
         return {key: value for key, value in run.items() if key not in ('artifacts', 'listed_under')}
 
-    def __call__(self, *args):
-        url = urlsplit(args[-1])
-        self.urls.append(args[-1])
+    def __call__(self, endpoint):
+        url = urlsplit(endpoint)
+        self.urls.append(endpoint)
         params = parse_qs(url.query)
         listing = re.search(r'/actions/workflows/([^/]+)/runs$', url.path)
         if listing:
-            return [{'workflow_runs': [self.public(run) for run in self.runs
-                                       if run['listed_under'] == listing.group(1)]}]
-        if url.path.endswith('/actions/artifacts'):
-            name = params['name'][0]
-            return [{'artifacts': [dict(item, workflow_run={'id': run['id'], 'head_sha': run['head_sha']})
-                                   for run in self.runs for item in run['artifacts'] if item['name'] == name]}]
-        one = re.search(r'/actions/runs/(\d+)(/artifacts)?$', url.path)
-        run = next(run for run in self.runs if run['id'] == int(one.group(1)))
-        return [{'artifacts': run['artifacts']}] if one.group(2) else self.public(run)
+            rows = [self.public(run) for run in self.runs if run['listed_under'] == listing.group(1)]
+            key = 'workflow_runs'
+        else:
+            artifact = re.search(r'/artifacts/(\d+)$', url.path)
+            if artifact:
+                return copy.deepcopy(next(a for r in self.runs for a in r['artifacts']
+                                          if a['id'] == int(artifact[1]))), {}
+            one = re.search(r'/actions/runs/(\d+)(/artifacts)?$', url.path)
+            run = next(run for run in self.runs if run['id'] == int(one.group(1)))
+            if not one.group(2):
+                return copy.deepcopy(self.public(run)), {}
+            rows, key = run['artifacts'], 'artifacts'
+        page = int(params.get('page', ['1'])[0])
+        start = (page - 1) * self.page_size
+        headers = {}
+        if start + self.page_size < len(rows):
+            base = endpoint.split('&page=')[0]
+            if not base.startswith('https:'):
+                base = 'https://api.github.com/' + base
+            headers['Link'] = f'<{base}&page={page + 1}>; rel="next"'
+        return copy.deepcopy({'total_count': len(rows), key: rows[start:start + self.page_size]}), headers
 
 
 class ArtifactTests(unittest.TestCase):
@@ -92,11 +110,16 @@ class ArtifactTests(unittest.TestCase):
         # A direct download picks one run by hand and can skip an owning workflow,
         # whatever variable or flag spelling it uses.
         doc = (ROOT / 'tests/stage-exit.md').read_text(encoding='utf-8')
-        self.assertIsNone(re.search(r'\bgh\s+run\s+download\b', doc, re.IGNORECASE))
+        self.assertIn('CI-TOOLING-1b', doc)
+        for command in re.finditer(r'\bgh\s+run\s+download\b[^\r\n]*', doc, re.IGNORECASE):
+            self.assertRegex(command[0], r'-n "candidate-\$sha"')
+            self.assertIn('$candidateRun', command[0])
         self.assertIsNone(re.search(r'/artifacts/[^\s/]+/zip\b', doc))
         blocks = re.findall(r'```powershell\n(.*?)```', doc, re.DOTALL)
         collecting = [block for block in blocks if re.search(r'tests/ci_artifacts\.py --sha \$sha --stage [78]\b', block)]
         self.assertEqual(len(collecting), 2)
+        for block in collecting:
+            self.assertIn('--non-candidate', block)
 
     def fixture(self, folder, omit=()):
         root = Path(folder)
@@ -118,10 +141,21 @@ class ArtifactTests(unittest.TestCase):
             (workflows / file).write_text(yaml.safe_dump(value), encoding='utf-8')
         return root, uploads
 
-    def collect(self, root, github, stage='8'):
+    def collect(self, root, github, stage='8', fetch=None, dry_run=False):
         calls = []
+        def archive(endpoint, path):
+            ident = int(endpoint.split('/')[-2])
+            run, item = next((r, a) for r in github.runs for a in r['artifacts'] if a['id'] == ident)
+            # Keep the existing owner assertions, but observe the actual ID endpoint.
+            calls.append(['gh', 'api', endpoint, str(run['id']), '-n', item['name'], '-D', str(path.with_suffix(''))])
+            if fetch:
+                fetch(endpoint, path)
+            else:
+                with zipfile.ZipFile(path, 'w') as zipped:
+                    zipped.writestr('evidence.txt', endpoint)
         try:
-            return download(root, SHA, stage, root / 'out', github, calls.append), calls
+            return download(root, SHA, stage, root / 'out', github, archive,
+                            non_candidate=True, dry_run=dry_run, repository='o/r'), calls
         finally:
             self.calls = calls
 
@@ -137,7 +171,14 @@ class ArtifactTests(unittest.TestCase):
             github = FakeGitHub(uploads)
             result, calls = self.collect(root, github)
             self.assertEqual(result['status'], 'completed')
-            self.assertEqual(len(calls), 7)
+            self.assertEqual(len(calls), 6)
+            self.assertEqual(result['scope'], 'non-candidate')
+            self.assertFalse(any('candidate.yml' in url for url in github.urls))
+            for row, call in zip(result['downloads'], calls):
+                self.assertEqual(call[2], f'repos/o/r/actions/artifacts/{row["artifact_id"]}/zip')
+                self.assertEqual(row['attempt'], 1)
+                self.assertEqual((Path(row['destination']) / 'evidence.txt').read_text(), call[2])
+                self.assertEqual(row['digest'], 'sha256:' + hashlib.sha256(Path(row['archive']).read_bytes()).hexdigest())
             for call in calls:
                 run_id, name, destination = int(call[3]), call[5], Path(call[7])
                 owner = next(run['listed_under'] for run in github.runs if run['id'] == run_id)
@@ -220,145 +261,159 @@ class ArtifactTests(unittest.TestCase):
                 'candidate.yml': {'candidate': [CANDIDATE]}}), stage='7')
             self.assertEqual(result['status'], 'completed')
 
-    def candidate_downloads(self, calls):
-        return [int(call[3]) for call in calls if call[5] == real_name(CANDIDATE)]
 
-    def test_hand_started_and_pull_request_g3_runs_are_found_by_their_artifact(self):
-        for event in ('workflow_dispatch', 'pull_request'):
-            with self.subTest(event=event), tempfile.TemporaryDirectory() as folder:
+    def test_g3_resolution_refuses_all_prior_attribution_scenarios_before_io(self):
+        cases = [dict(event='pull_request'), dict(event='workflow_dispatch', head_sha=MAIN_TIP),
+                 dict(conclusion='failure'), dict(status='in_progress'), dict(expired=True),
+                 dict(title='candidate ' + 'b' * 40), dict(path='.github/workflows/foreign.yml')]
+        for values in cases:
+            with self.subTest(values=values), tempfile.TemporaryDirectory() as folder:
                 root, uploads = self.fixture(folder)
                 github = FakeGitHub(uploads)
-                run = github.run('candidate.yml')
-                run['event'] = event
-                if event == 'workflow_dispatch':
-                    # `--ref main -f candidate_sha=SHA`: the run's commit is main's tip.
-                    run['head_sha'] = MAIN_TIP
-                    # Another hand-started run *from* SHA's commit validated a different candidate.
-                    github.add('candidate.yml', ['candidate-' + 'c' * 40], run_id=91, head_sha=SHA,
-                               created_at='2026-10-12T05:00:00Z', event=event, conclusion='failure')
-                result, calls = self.collect(root, github)
-                self.assertEqual(result['status'], 'completed')
-                self.assertEqual(self.candidate_downloads(calls), [run['id']])
-                row = next(row for row in result['runs'] if row['id'] == run['id'])
-                self.assertEqual((row['sha'], row['run_head_sha']), (SHA, run['head_sha']))
+                github.add('candidate.yml', [], 99, **values)
+                calls = []
+                with self.assertRaisesRegex(ValueError, 'STOP.*CI-TOOLING-1b'):
+                    download(root, SHA, '8', root / 'out', github, calls.append)
+                self.assertEqual(github.urls, [])
+                self.assertEqual(calls, [])
+                self.assertFalse((root / 'out').exists())
 
-    def test_g3_lookup_refuses_absent_unsuccessful_superseded_or_foreign_uploads(self):
-        for defect in ('absent', 'failed', 'pending', 'latest-failed', 'foreign-workflow', 'foreign-workflow-expired',
-                       'expired', 'expired-latest'):
+    def test_candidate_owner_cannot_be_collected_in_non_candidate_scope(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root, uploads = self.fixture(folder)
+            p = root / '.github/workflows/candidate.yml'
+            doc = yaml.safe_load(p.read_text())
+            doc['jobs']['candidate']['steps'][0]['with']['name'] = 'synthetic-runtime-record-runs'
+            p.write_text(yaml.safe_dump(doc))
+            github = FakeGitHub(uploads)
+            with self.assertRaisesRegex(ValueError, 'STOP.*CI-TOOLING-1b'):
+                self.collect(root, github)
+            self.assertEqual(github.urls, [])
+
+    def test_old_or_ambiguous_attempt_artifacts_and_older_run_reruns_refuse(self):
+        for outcome in ('success', 'failure', 'cancelled', 'in_progress', 'queued'):
+            for artifacts in ('old-only', 'old-and-new', 'none'):
+                with self.subTest(outcome=outcome, artifacts=artifacts), tempfile.TemporaryDirectory() as folder:
+                    root, uploads = self.fixture(folder)
+                    github = FakeGitHub(uploads)
+                    run = github.run('renamed-volume.yml')
+                    run.update(run_attempt=2, created_at='2026-10-11T00:00:00Z',
+                               run_started_at='2026-10-13T00:00:00Z', conclusion=outcome)
+                    if artifacts == 'none':
+                        run['artifacts'] = []
+                    if artifacts == 'old-and-new':
+                        run['artifacts'].append(dict(run['artifacts'][0], id=999))
+                    github.add('renamed-volume.yml', ['synthetic-volume-rendering-results'], 90)
+                    with self.assertRaisesRegex(ValueError, 'STOP.*attempt=2'):
+                        self.collect(root, github)
+                    self.assertEqual(self.calls, [])
+                    self.assertEqual(json.loads((root / 'out/artifact-downloads.json').read_text())['status'], 'incomplete')
+
+    def test_rerun_or_revision_change_during_download_refuses(self):
+        for field, value in (('run_attempt', 2), ('updated_at', '2026-10-13T00:00:00Z'), ('status', 'in_progress')):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as folder:
+                root, uploads = self.fixture(folder)
+                github = FakeGitHub(uploads)
+                def racing(endpoint, path):
+                    with zipfile.ZipFile(path, 'w') as z:
+                        z.writestr('evidence', 'synthetic')
+                    github.run('renamed-volume.yml')[field] = value
+                with self.assertRaisesRegex(ValueError, 'STOP.*artifact_id=1100'):
+                    self.collect(root, github, fetch=racing)
+                self.assertEqual(json.loads((root / 'out/artifact-downloads.json').read_text())['status'], 'incomplete')
+
+    def test_final_recheck_detects_earlier_owner_change_and_new_run(self):
+        for change in ('rerun', 'new-run'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as folder:
+                root, uploads = self.fixture(folder)
+                github = FakeGitHub(uploads)
+                calls = []
+                def racing(endpoint, path):
+                    calls.append(endpoint)
+                    with zipfile.ZipFile(path, 'w') as z:
+                        z.writestr('evidence', 'synthetic')
+                    if len(calls) == 6:
+                        if change == 'rerun':
+                            github.run('renamed-volume.yml')['run_attempt'] = 2
+                        else:
+                            github.add('renamed-volume.yml', [], 900, created_at='2026-10-13T00:00:00Z', conclusion='failure')
+                with self.assertRaisesRegex(ValueError, 'STOP'):
+                    self.collect(root, github, fetch=racing)
+
+    def test_checked_id_is_used_when_same_name_is_replaced(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root, uploads = self.fixture(folder)
+            github = FakeGitHub(uploads)
+            checked = github.run('renamed-volume.yml')['artifacts'][0]['id']
+            def replaced(endpoint, path):
+                self.assertEqual(endpoint, f'repos/o/r/actions/artifacts/{checked}/zip')
+                github.run('renamed-volume.yml')['artifacts'][0]['id'] = 99999
+                raise FileNotFoundError('checked artifact deleted')
+            with self.assertRaisesRegex(ValueError, f'STOP.*artifact_id={checked}'):
+                self.collect(root, github, fetch=replaced)
+
+    def test_digest_invalid_zip_and_unsafe_members_refuse(self):
+        for defect in ('digest', 'zip', 'traversal'):
             with self.subTest(defect=defect), tempfile.TemporaryDirectory() as folder:
                 root, uploads = self.fixture(folder)
                 github = FakeGitHub(uploads)
-                run = github.run('candidate.yml')
-                run['head_sha'], run['event'] = MAIN_TIP, 'workflow_dispatch'
-                if defect == 'absent':
-                    run['artifacts'] = []
-                elif defect == 'failed':
-                    run['conclusion'] = 'failure'
-                elif defect == 'pending':
-                    run['status'] = 'in_progress'
-                elif defect == 'latest-failed':
-                    github.add('candidate.yml', [real_name(CANDIDATE)], run_id=92, head_sha=MAIN_TIP,
-                               created_at='2026-10-12T06:00:00Z', event='workflow_dispatch', conclusion='failure')
-                elif defect.startswith('foreign-workflow'):
-                    # An undeclared uploader is a refusal even after its upload expired.
-                    github.add('rogue.yml', [real_name(CANDIDATE)], run_id=93, head_sha=SHA,
-                               expired=defect.endswith('expired'))
-                elif defect == 'expired':
-                    for item in run['artifacts']:
-                        item['expired'] = True
+                fetch = None
+                if defect == 'digest':
+                    github.run('renamed-volume.yml')['artifacts'][0]['digest'] = 'sha256:' + '0' * 64
+                elif defect == 'zip':
+                    fetch = lambda endpoint, path: path.write_bytes(b'not zip')
                 else:
-                    # The older run still holds a valid upload; the latest run's upload expired.
-                    github.add('candidate.yml', [real_name(CANDIDATE)], run_id=94, head_sha=MAIN_TIP,
-                               created_at='2026-10-12T06:00:00Z', event='workflow_dispatch', expired=True)
-                calls = self.refused(root, github)
-                self.assertEqual(self.candidate_downloads(calls), [])
+                    def fetch(endpoint, path):
+                        with zipfile.ZipFile(path, 'w') as z:
+                            z.writestr('../outside', 'bad')
+                with self.assertRaisesRegex(ValueError, 'STOP'):
+                    self.collect(root, github, fetch=fetch)
 
-    def g3_after_older_success(self, folder, **later):
-        """An older hand-started G3 run for SHA that succeeded and uploaded, then one later run."""
-        root, uploads = self.fixture(folder)
-        github = FakeGitHub(uploads)
-        older = github.run('candidate.yml')
-        older.update(head_sha=MAIN_TIP, event='workflow_dispatch', display_title='candidate ' + SHA)
-        later = dict(dict(head_sha=MAIN_TIP, event='workflow_dispatch', title='candidate ' + SHA,
-                          created_at='2026-10-12T03:00:00Z'), **later)
-        github.add('candidate.yml', later.pop('names', []), run_id=later.pop('run_id', 95), **later)
-        return root, github, older
+    def test_link_pagination_reaches_last_page_for_runs_and_artifacts(self):
+        for failed in (False, True):
+            with self.subTest(failed=failed), tempfile.TemporaryDirectory() as folder:
+                root, uploads = self.fixture(folder)
+                github = FakeGitHub(uploads)
+                github.page_size = 1
+                github.add('renamed-volume.yml', ['synthetic-volume-rendering-results'], 90,
+                           created_at='2026-10-13T00:00:00Z', conclusion='failure' if failed else 'success')
+                if failed:
+                    self.refused(root, github)
+                    self.assertEqual(self.calls, [])
+                else:
+                    result, _ = self.collect(root, github)
+                    self.assertEqual(len(result['downloads']), 6)
+                    self.assertTrue(any('/artifacts?' in u and 'page=3' in u for u in github.urls))
+                self.assertTrue(any('/runs?' in u and 'page=2' in u for u in github.urls))
 
-    def test_a_later_g3_run_for_the_candidate_is_never_bypassed_by_an_older_success(self):
-        other_title = 'Workflow candidate.yml'  # a hand-started run from before the run-name
-        cases = {
-            'failed before upload': {'conclusion': 'failure'},
-            'cancelled': {'conclusion': 'cancelled'},
-            'in progress': {'status': 'in_progress', 'conclusion': None},
-            'queued': {'status': 'queued', 'conclusion': None},
-            'success without upload': {},
-            'pull request for the candidate': {'event': 'pull_request', 'head_sha': SHA, 'title': 'Some pull request',
-                                               'conclusion': 'failure'},
-            'untitled hand-started failure': {'title': other_title, 'conclusion': 'failure'},
-            'untitled hand-started run in progress': {'title': other_title, 'status': 'in_progress',
-                                                      'conclusion': None},
-            'untitled hand-started success without upload': {'title': other_title},
-            # Created later with a lower id: the creation time orders runs.
-            'later failure with a lower id': {'conclusion': 'failure', 'run_id': 5},
-            'failure created in the same second': {'conclusion': 'failure', 'created_at': '2026-10-12T00:00:00Z'},
-        }
-        for case, later in cases.items():
-            with self.subTest(case=case), tempfile.TemporaryDirectory() as folder:
-                root, github, older = self.g3_after_older_success(folder, **later)
-                calls = self.refused(root, github)
-                self.assertEqual(self.candidate_downloads(calls), [])
-                manifest = json.loads((root / 'out/artifact-downloads.json').read_text())
-                self.assertNotIn(older['id'], [run['id'] for run in manifest['runs']])
+    def test_cap_count_contradiction_and_duplicate_rows_stop(self):
+        endpoint = 'repos/o/r/actions/workflows/w.yml/runs?head_sha=' + SHA + '&per_page=100'
+        cases = [({'total_count': n, 'workflow_runs': [{'id': 1}]}, {}) for n in (0, 2, 1000, 1002, '2500+', None)]
+        # A capped count can equal the visible row count. Equality alone is not completeness.
+        cases.append(({'total_count': 1000, 'workflow_runs': [{'id': i + 1} for i in range(1000)]}, {}))
+        cases += [({'total_count': 2, 'workflow_runs': [{'id': 1}, {'id': 1}]}, {}),
+                  ({'total_count': 1, 'workflow_runs': [{'id': 1}]}, {'Link': '<https://evil.invalid/x>; rel="next"'})]
+        for payload, headers in cases:
+            with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, 'STOP'):
+                listing(lambda _: (payload, headers), endpoint, 'workflow_runs')
+        # The workflow search cap must not be applied to the artifact endpoint.
+        rows = [{'id': i + 1} for i in range(1001)]
+        self.assertEqual(listing(lambda _: ({'total_count': len(rows), 'artifacts': rows}, {}),
+                                 'repos/o/r/actions/runs/1/artifacts?per_page=100', 'artifacts'), rows)
+
+    def test_http_headers_are_used_and_dry_run_is_never_completed(self):
+        raw = 'HTTP/2.0 200 OK\nLink: <https://api.github.com/repos/o/r/actions/runs?page=2>; rel="next"\n\n{"total_count":0,"workflow_runs":[]}'
+        with patch('ci_artifacts.subprocess.check_output', return_value=raw) as command:
+            body, headers = gh_get('repos/o/r/actions/runs')
+        self.assertIn('Link', headers)
+        self.assertEqual(body['total_count'], 0)
+        self.assertIn('GET', command.call_args.args[0])
         with tempfile.TemporaryDirectory() as folder:
-            root, github, _ = self.g3_after_older_success(folder, title=other_title, conclusion='failure', run_id=96)
-            with self.assertRaisesRegex(ValueError, r'STOP.*\b96\b'):
-                self.collect(root, github)
-
-    def test_later_g3_runs_of_other_candidates_do_not_block(self):
-        other = 'c' * 40
-        cases = {
-            # Started from the candidate's own commit, but validating another candidate.
-            'hand-started from the commit for another candidate': {'head_sha': SHA, 'title': 'candidate ' + other,
-                                                                   'conclusion': 'failure'},
-            'pull request with another head': {'event': 'pull_request', 'head_sha': other,
-                                               'title': 'Some pull request', 'conclusion': 'failure'},
-            'titled pull request run in progress': {'event': 'pull_request', 'head_sha': other,
-                                                    'title': 'candidate ' + other, 'status': 'in_progress',
-                                                    'conclusion': None},
-            'untitled hand-started run that uploaded another candidate': {
-                'title': 'Workflow candidate.yml', 'names': ['candidate-' + other], 'conclusion': 'failure'},
-            'untitled run created before the candidate run': {'title': 'Workflow candidate.yml',
-                                                              'created_at': '2026-10-11T23:00:00Z',
-                                                              'conclusion': 'failure'},
-            'untitled run in the same second with a lower id': {'title': 'Workflow candidate.yml',
-                                                                'created_at': '2026-10-12T00:00:00Z',
-                                                                'run_id': 7, 'conclusion': 'failure'},
-            'older failure with a higher id': {'created_at': '2026-10-11T23:00:00Z', 'run_id': 999,
-                                               'conclusion': 'failure'},
-        }
-        for case, later in cases.items():
-            with self.subTest(case=case), tempfile.TemporaryDirectory() as folder:
-                root, github, older = self.g3_after_older_success(folder, **later)
-                result, calls = self.collect(root, github)
-                self.assertEqual(result['status'], 'completed')
-                self.assertEqual(self.candidate_downloads(calls), [older['id']])
-
-    def test_g3_runs_are_titled_with_the_candidate_they_upload(self):
-        # A run that stops before its upload is attributed through its run-name alone.
-        def terms(value):  # the expression's operands, ignoring spacing and parentheses
-            return re.findall(r'[\w.]+|\|\|', value)
-
-        owners = {row['workflow'] for row in inventory(ROOT) if row['artifact'] == CANDIDATE}
-        self.assertTrue(owners)
-        for workflow in owners:
-            parsed = yaml.safe_load((ROOT / workflow).read_text(encoding='utf-8'))
-            sources = [terms(dict(parsed.get('env', {}), **job.get('env', {}))['CANDIDATE_SHA'])
-                       for job in parsed['jobs'].values()
-                       if any(step.get('with', {}).get('name') == CANDIDATE for step in job.get('steps', []))]
-            title = parsed['run-name']
-            self.assertTrue(title.startswith('candidate ${{'), workflow)
-            self.assertEqual(sources, [terms(title[len('candidate '):])], workflow)
-        self.assertEqual(TITLE.fullmatch('candidate ' + SHA).group(1), SHA)
+            root, uploads = self.fixture(folder)
+            result, calls = self.collect(root, FakeGitHub(uploads), dry_run=True)
+            self.assertEqual(result['status'], 'planned')
+            self.assertEqual(calls, [])
+            self.assertTrue(all(not row['downloaded'] for row in result['downloads']))
 
     def test_duplicate_yaml_keys_are_rejected(self):
         with tempfile.TemporaryDirectory() as folder:

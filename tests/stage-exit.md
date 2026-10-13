@@ -85,18 +85,31 @@ D621에 따라 provider reconciliation은 U5b 범위다. DB Suspend 뒤 살아 �
 `tests/ci_artifacts.py`는 `tests/ci_workflows.py`의 job → workflow 매핑으로 업로드 출처를
 찾고, workflow별로 후보 SHA의 최신 실행 ID와 attempt를 조회한다. 실패·진행 중 실행을
 이전 성공으로 대체하지 않으며, SHA/소유 workflow 불일치·누락·만료 artifact는 거절한다.
-G3(candidate.yml)는 손으로 시작한 실행(`--ref main -f candidate_sha=<sha>`)의 commit이
-main 끝이므로 commit이 아니라 artifact 이름 `candidate-<sha>`로 실행을 찾는다. 그 이름을
-올린 실행이 모두 candidate.yml 소유인지 확인하고(다른 workflow가 올렸으면 거절, 만료된
-업로드도 같다), 마지막 업로드 이후에 만든 candidate.yml 실행을 모두 후보별로 가른다.
-후보는 그 실행의 `candidate-*` 업로드, 없으면 run-name `candidate <sha>`, 없으면
-pull_request 실행의 head commit으로 정한다. 그래서 업로드 전에 실패·취소된 실행,
-진행·대기 중인 실행, 성공했지만 올리지 않은 실행도 그 후보의 최신 실행으로 남아 이전
-성공을 대신 받지 않고 거절한다. 다른 후보의 실행은 막지 않는다. run-name이 생기기 전에
-손으로 시작해 아무것도 올리지 않은 실행은 후보를 알 수 없으므로, 그런 실행이 후보의 최신
-실행보다 나중이면 실행 ID를 적은 STOP으로 거절한다(보수적 처리: 그 실행이 끝나 업로드하거나
-G3를 다시 돌린 뒤 수집). 실행 순서는 생성 시각, 같은 초면 실행 ID다. 판정기의 provenance
-`candidate_sha` 대조는 그대로 둔다.
+G3(candidate.yml) 자동 조회는 **CI-TOOLING-1b**로 분리했다. 기본 수집 호출은 STOP하며,
+비후보 수집은 `--non-candidate`를 명시해야 한다. manifest의 scope는 non-candidate이고
+G3는 NOT_COLLECTED다. 이는 전체 stage 통과가 아니다. candidate.yml의 기존 run-name 한 줄은
+1b의 provenance로 보존하며 1a는 제목·artifact 이름·PR head로 G3를 탐색하지 않는다.
+G3 증거는 기존처럼 **해당 dispatch 응답/공식 후보 기록에 남긴 run id**를 사람이 확인해 받는다.
+최신 공식 실행의 완료/성공, candidate.yml 소유, 실제 attempt와 artifact 출처를 확인하고,
+이전 성공 run으로 대체하지 않는다. 출처를 증명할 수 없으면 STOP한다.
+
+비후보는 push/pull_request의 head_sha를 대조하고 모든 Link 페이지를 끝까지 읽는다.
+[workflow runs 계약](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-workflow)의
+head_sha 검색 상한 1,000건에 닿으면 STOP한다. total_count는 반복 횟수가 아니라 일관성 검사다.
+[2026-09-25 count 변경](https://github.blog/changelog/2026-09-25-changes-to-query-results-in-the-github-actions-api-and-ui/)의
+상한/비정확 count, 누락·중복·변동도 거절한다. [Link pagination](https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api)을
+따르며 artifact 목록에는 run 검색의 1,000 상한을 적용하지 않는다.
+[artifact REST](https://docs.github.com/en/rest/actions/artifacts)에는 attempt 식별자가 없다.
+현재 producer도 이를 결속하지 않으므로 **attempt 1만 수집**한다. 같은 SHA의 관련 실행 중
+재실행(attempt 2 이상)이 하나라도 있으면 오래된 생성 시각이어도 STOP한다. 정상 재실행과
+부분 job 재실행도 이 제한에 포함된다. 시각·동명 artifact의 순서로 attempt를 추정하지 않는다.
+재실행을 수집하려면 후속 producer provenance 계약이 필요하며 새 실행을 강제로 만들지는 않는다.
+새 run끼리는 생성 시각, 같은 초면 ID로 최신을 고르고 최신 실패·대기·진행·누락·만료는 거절한다.
+검사한 artifact ID로 archive를 받고 제공된 digest와 대조하며, 실제 archive SHA256을 남긴다.
+각 다운로드 직후 run attempt/updated_at과 metadata를 재조회하고 마지막에 전체 run 집합을
+다시 대조한 뒤에만 completed를 쓴다. STOP에는 run id/attempt/artifact id(미확정은 unknown)가 남는다.
+`--dry-run`은 archive를 받지 않으며 status=planned다. verified_at은 조회 시점일 뿐 미래의
+재실행/삭제나 REST 다중 요청의 원자성을 보장하지 않는다. 병합 전에는 재확인한다.
 동명 artifact가 validate와 Worklist UX 양쪽에 있으면 **둘 다** 별도 경로에 받는다.
 workflow 파일명 변경이나 job 이동은 고정 validate 실행 ID로 우회하지 않는다.
 
@@ -112,7 +125,7 @@ $out = "tmp/stage7-final-$shortSha"
 |---|---|---|
 | `synthetic-runtime-record-runs` | `tmp/runtime-ci/` | 아래 수집기의 모든 소유 workflow 실행 → `hosted/runs/<workflow>/<run>/<artifact>` |
 | `synthetic-workspace-dom-results` | `tmp/workspace-ui-ci/` | 아래 수집기의 모든 소유 workflow 실행 → `hosted/runs/<workflow>/<run>/<artifact>` |
-| `candidate-<sha>` | `target/tests/e2e/artifacts/candidate-ci/` | 아래 수집기의 candidate 실행 → `hosted/candidate/<workflow>/<run>/<artifact>` |
+| `candidate-<sha>` | `target/tests/e2e/artifacts/candidate-ci/` | 공식 dispatch run id에서 수동 수령 → `$candidateDirectory` |
 
 먼저 **모든 workflow의 모든 업로드 이름과 소유 workflow/job**을 나열한다.
 matrix·실행 ID·SHA 표현식이 있는 이름은 원래 템플릿으로 표시하므로 목록에서 빠지지 않는다.
@@ -123,12 +136,13 @@ matrix·실행 ID·SHA 표현식이 있는 이름은 원래 템플릿으로 표�
 ```powershell
 python -B tests/ci_artifacts.py --list
 if ($LASTEXITCODE -ne 0) { throw '전체 artifact 출처 목록 확인 실패' }
-python -B tests/ci_artifacts.py --sha $sha --stage 7 --out "$out/hosted"
+python -B tests/ci_artifacts.py --sha $sha --stage 7 --non-candidate --out "$out/hosted"
 if ($LASTEXITCODE -ne 0) { throw '동일 SHA의 workflow별 artifact 수집 실패; 원문 보존 후 확인' }
-$downloads = Get-Content -Raw "$out/hosted/artifact-downloads.json" | ConvertFrom-Json
-$candidateArtifacts = @($downloads.downloads | Where-Object { $_.artifact -eq "candidate-$sha" })
-if ($candidateArtifacts.Count -ne 1) { throw 'candidate artifact 출처는 정확히 하나여야 함' }
-$candidateDirectory = $candidateArtifacts[0].destination
+# $candidateRun은 이 후보의 공식 dispatch 기록에서 확인한 run id (최신 검색으로 추측하지 않음).
+if (-not $candidateRun) { throw '공식 dispatch run id 및 attempt 확인 필요' }
+$candidateDirectory = "$out/hosted/candidate/$candidateRun/candidate-$sha"
+gh run download $candidateRun -n "candidate-$sha" -D $candidateDirectory
+if ($LASTEXITCODE -ne 0) { throw '공식 G3 artifact 수령 실패; 이전 성공 대체 금지' }
 ```
 
 위 artifact를 받은 뒤 아래 기록기 loop는 필요한 live 클래스만 보충한다.
@@ -296,12 +310,13 @@ VR `pure-vr`는 기존 CI에서 **세 파일을 함께** 필터 없이 실행한
 ```powershell
 python -B tests/ci_artifacts.py --list
 if ($LASTEXITCODE -ne 0) { throw '전체 artifact 출처 목록 확인 실패' }
-python -B tests/ci_artifacts.py --sha $sha --stage 8 --out "$out/hosted"
+python -B tests/ci_artifacts.py --sha $sha --stage 8 --non-candidate --out "$out/hosted"
 if ($LASTEXITCODE -ne 0) { throw '동일 SHA의 workflow별 artifact 수집 실패; 원문 보존 후 확인' }
-$downloads = Get-Content -Raw "$out/hosted/artifact-downloads.json" | ConvertFrom-Json
-$candidateArtifacts = @($downloads.downloads | Where-Object { $_.artifact -eq "candidate-$sha" })
-if ($candidateArtifacts.Count -ne 1) { throw 'candidate artifact 출처는 정확히 하나여야 함' }
-$candidateDirectory = $candidateArtifacts[0].destination
+# $candidateRun은 이 후보의 공식 dispatch 기록에서 확인한 run id (최신 검색으로 추측하지 않음).
+if (-not $candidateRun) { throw '공식 dispatch run id 및 attempt 확인 필요' }
+$candidateDirectory = "$out/hosted/candidate/$candidateRun/candidate-$sha"
+gh run download $candidateRun -n "candidate-$sha" -D $candidateDirectory
+if ($LASTEXITCODE -ne 0) { throw '공식 G3 artifact 수령 실패; 이전 성공 대체 금지' }
 python scripts/record-run.py --run-dir "$out/verdict-run" --cwd . --file scripts/stage-exit.py --file tests/stage8-exit.json -- python scripts/stage-exit.py --list tests/stage8-exit.json --sha $sha --runs "$out/hosted/runs" --runs "$out/live" --candidate $candidateDirectory --output "$out/verdict.json"
 if ($LASTEXITCODE -ne 0) { throw 'Stage 8 필수 시험 미충족: verdict.json 확인' }
 ```
