@@ -15,6 +15,7 @@
  * Nothing here re-implements a reducer, a permission, a terminal choice or a response body. Synthetic data only.
  */
 const path = require('node:path');
+const assert = require('node:assert/strict');
 const { createHash, randomUUID } = require('node:crypto');
 
 /** A unit's stored rows as emr_clinical.unit_for gives them (store.ts unitFromRows reads them back). */
@@ -187,7 +188,7 @@ function compose(dist = '/app/dist') {
     const provided = [], fault = { provide: 0, receipt: 0 }, rights = new Map(), pinned = new Set();
     const store = database({ R, attach: tables, open: () => w.client(transaction()), done: (tx, how) => finish(tx, how) });
     const w = {
-      store, provided, fault, rights,
+      store, provided, fault, rights, responses: [],
       know: c => { if (!pinned.has(c.sub)) rights.set(c.sub, { sub: c.sub, approved: true, suspended: false, institution: c.institution, roles: [...c.roles] }); },
       pin: (sub, row) => { pinned.add(sub); rights.set(sub, row); },
       frozen: () => store.frozen(),
@@ -237,10 +238,17 @@ function compose(dist = '/app/dist') {
     const { controller, handler } = route(controllers, name), writes = [];
     const response = Object.fromEntries(['write', 'end', 'send', 'json', 'render', 'writeHead', 'flushHeaders'].map(k => [k, () => writes.push(k)]));
     const context = { getHandler: () => handler, getClass: () => controller, switchToHttp: () => ({ getRequest: () => req, getResponse: () => response }) };
-    const result = new B.ClinicalResponseInterceptor().intercept(context, { handle: () => of(value) });
-    const body = JSON.parse(JSON.stringify(await firstValueFrom(result)));
-    if (writes.length) throw new Error('response bytes before the boundary: ' + writes.join(','));
-    return body;
+    const observation = { writes, bodies: 0 };
+    world().responses.push(observation);
+    try {
+      const result = new B.ClinicalResponseInterceptor().intercept(context, { handle: () => of(value) });
+      const body = JSON.parse(JSON.stringify(await firstValueFrom(result)));
+      observation.bodies++;
+      return body;
+    } finally {
+      // A refusal must not bypass observation, and assertion failures must not become ordinary HTTP refusals.
+      assert.deepEqual(writes, [], 'response bytes before the boundary');
+    }
   }
 
   composed = { runtime, device, R, load, attach, request, answer, actorOf, uuidOf };

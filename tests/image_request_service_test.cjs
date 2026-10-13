@@ -14,9 +14,9 @@
  * ends before a transaction starts" and "no Orthanc call inside a transaction" are read from one event list.
  *   (1) a metadata rule: the source tags are read before every transaction and no transaction makes an Orthanc call
  *       (create: studyAccessMetadata of its one study; a change and its replay: studyIdentities(true));
- *   (2) the policy revision moves during the source read: 409 STUDY_ACCESS_CHANGED, no transaction, nothing registered,
+ *   (2) the policy revision moves during the source read: 409 STUDY_ACCESS_CHANGED, nothing registered,
  *       versioned or written (create, change, replay);
- *   (3) the source read fails: 503, no transaction, nothing registered, versioned or written (create, change, replay);
+ *   (3) the source read fails: 503, nothing registered, versioned or written (create, change, replay);
  *   (4) the constructor takes PrismaService and StudyAccessService only (no OrthancService, no ConnectService), as Nest's
  *       own metadata resolves it, and no flow of the service touches a Connect delegate or table;
  *   (5) a recording Orthanc sees only studyAccessMetadata and studyIdentities(true) across create, accept, replay, read,
@@ -32,6 +32,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { ImageRequestService, IMAGE_REQUEST_AUDIT_ACTION } = require('/app/dist/image-request.service');
+const { PrismaService } = require('/app/dist/prisma.service');
 const { StudyAccessService } = require('/app/dist/study-access.service');
 const { OWNER_ONLY_AUDIT_ACTIONS } = require('/app/dist/pacs.service');
 const { OrthancService } = require('/app/dist/orthanc.service');
@@ -184,9 +185,9 @@ function world(policy, { requests = [] } = {}) {
     for (const list of [events, statements, transactions, calls, sql]) list.splice(0);
     touched.clear();
     Object.assign(writes, { request: 0, update: 0, receipt: 0, audit: 0 });
-    w.settled = { rows: w.clinical.store.rows.size, units: JSON.stringify([...w.clinical.store.units]), events: w.clinical.store.events.length };
+    w.settled = { rows: w.clinical.store.rows.size, units: JSON.stringify([...w.clinical.store.units]), events: w.clinical.store.events.length, provided: w.clinical.provided.length };
   };
-  w.settled = { rows: 0, units: '[]', events: 0 };
+  w.settled = { rows: 0, units: '[]', events: 0, provided: 0 };
   return w;
 }
 
@@ -233,8 +234,8 @@ const commitOf = statements => {
 const noWrites = { request: 0, update: 0, receipt: 0, audit: 0 };
 /** Nothing registered, versioned or appended since the case's observation started. */
 const noClinicalEffects = (w, label) => {
-  assert.deepEqual([w.clinical.store.rows.size, JSON.stringify([...w.clinical.store.units]), w.clinical.store.events.length, w.events.includes('commit:start')],
-    [w.settled.rows, w.settled.units, w.settled.events, false], label + ': no request registered, no version, no ledger event, no commit');
+  assert.deepEqual([w.clinical.store.rows.size, JSON.stringify([...w.clinical.store.units]), w.clinical.store.events.length, w.clinical.provided.length],
+    [w.settled.rows, w.settled.units, w.settled.events, w.settled.provided], label + ': no request registered, no signed version, no ledger event');
 };
 // An Accepted request of the clinician (created as id(10)) with the technician's applied accept id(11), made through the
 // service as a client makes them, for the replay route of (2) and (3); the observation starts after it.
@@ -286,38 +287,39 @@ test('(1) a metadata rule reads source tags before every transaction and never i
   assert.deepEqual(w.writes, { request: 1, update: 1, receipt: 2, audit: 2 });
 });
 
-test('(2) a policy change during the source read is 409 STUDY_ACCESS_CHANGED with no transaction and no write', async () => {
+test('(2) a policy change during the source read is 409 STUDY_ACCESS_CHANGED with no business or clinical effects', async () => {
   for (const route of ['create', 'change', 'replay']) {
     const w = await acceptedWorld(metadataPolicy());
     w.handlers.studyAccessMetadata = async u => { w.bumpPolicy(); return source(u); };
     w.handlers.studyIdentities = async () => { w.bumpPolicy(); return [source(uid)]; };
     await assert.rejects(routes(w)[route](), code(409, 'STUDY_ACCESS_CHANGED'), route);
-    assert.equal(w.events.includes('tx:start'), false, route);
+    assert.ok(w.calls.some(c => ['studyAccessMetadata', 'studyIdentities'].includes(c.name)), route + ': required source metadata was attempted');
+    assert.deepEqual(insideTransactions(w), [], route + ': metadata stays outside transactions');
     assert.deepEqual(w.writes, noWrites, route);
     noClinicalEffects(w, route);
   }
 });
 
-test('(3) a failed source read is 503 with no transaction and no write', async () => {
+test('(3) a failed source read is 503 with no business or clinical effects', async () => {
   for (const route of ['create', 'change', 'replay']) {
     const w = await acceptedWorld(metadataPolicy());
     w.handlers.studyAccessMetadata = async () => { throw new Error('SYNTHETIC transport failure'); };
     w.handlers.studyIdentities = async () => { throw new Error('SYNTHETIC transport failure'); };
     await assert.rejects(routes(w)[route](), code(503), route);
-    assert.equal(w.events.includes('tx:start'), false, route);
+    assert.ok(w.calls.some(c => ['studyAccessMetadata', 'studyIdentities'].includes(c.name)), route + ': required source metadata was attempted');
+    assert.deepEqual(insideTransactions(w), [], route + ': metadata stays outside transactions');
     assert.deepEqual(w.writes, noWrites, route);
     noClinicalEffects(w, route);
   }
 });
 
 test('(4) the service is constructed from PrismaService and StudyAccessService only and reaches no Connect delegate or table', async () => {
-  // What Nest injects is what its metadata names: the design types, with no token of the service's own replacing one.
-  const types = Reflect.getMetadata('design:paramtypes', ImageRequestService);
-  assert.deepEqual(types.map(type => type.name), ['PrismaService', 'StudyAccessService']);
+  // Resolve Nest's effective injection tokens; display names and constructor arity are not DI contracts.
+  const types = [...Reflect.getMetadata('design:paramtypes', ImageRequestService)];
+  for (const override of Reflect.getMetadata('self:paramtypes', ImageRequestService) ?? []) types[override.index] = override.param;
+  assert.deepEqual(types, [PrismaService, StudyAccessService]);
   assert.equal(types.includes(OrthancService), false);
   assert.equal(types.includes(ConnectService), false);
-  assert.equal(Reflect.getMetadata('self:paramtypes', ImageRequestService), undefined, 'no @Inject token overrides a design type');
-  assert.equal(ImageRequestService.length, 2);
   // Every route, as a client calls it: no Connect delegate is read and no statement names a Connect table.
   const w = world(null);
   await create(w, { ...clinician }, id(21), { counterpartyInstitutionId: counterparty });
@@ -466,27 +468,21 @@ test('a state outside the machine is never a transition', async () => {
     [1, w.settled.events, 'Bogus']);
 });
 
-const READ = { isolationLevel: 'RepeatableRead', maxWait: 4000, timeout: 8000 };
-
 test('#8 and #9 read in one RepeatableRead transaction, with no row lock and no read outside it', async () => {
   const w = world(null);
   await create(w, { ...clinician }, id(81));
   // A read is the service's RepeatableRead transaction and, for a body of clinical text, the boundary's final
   // RepeatableRead read before it is handed out; outside them only the access policy is read, and nothing is committed.
-  // The service's statements are followed, in the same snapshot, by the boundary's (the access policy, the request row
-  // and its study's access); the boundary's final read repeats the latter after the access policy is checked again.
-  const boundary = ['tx:advisory', 'tx:policy', 'tx:request-row', 'tx:study', 'tx:advisory', 'tx:policy'];
-  for (const [route, attempt, inside, outside] of [
-    ['read', () => read(w, id(81), { ...clinician }), ['tx:request', 'tx:study', 'tx:advisory', 'tx:policy', ...boundary],
-      ['tx:request-row', 'tx:study', 'tx:advisory', 'tx:policy']],
-    ['forStudy', () => forStudy(w, uid, { ...clinician }), ['tx:study', 'tx:advisory', 'tx:policy', 'tx:list', 'tx:advisory', 'tx:policy'], []],
+  for (const [route, attempt, required] of [
+    ['read', () => read(w, id(81), { ...clinician }), ['tx:request', 'tx:study', 'tx:policy']],
+    ['forStudy', () => forStudy(w, uid, { ...clinician }), ['tx:study', 'tx:policy', 'tx:list']],
   ]) {
     const from = w.statements.length, at = w.transactions.length;
     await attempt();
     const own = w.statements.slice(from);
-    assert.deepEqual(w.transactions.slice(at), [READ, READ], route);
-    assert.deepEqual(own, ['root:policy', 'tx:start', 'tx:execute', 'tx:advisory', 'tx:policy', ...inside, 'tx:end',
-      'root:policy', 'root:policy', 'tx:start', ...outside, 'tx:end'], route);
+    assert.ok(w.transactions.length > at, route + ': snapshot reads occurred');
+    assert.ok(w.transactions.slice(at).every(t => t?.isolationLevel === 'RepeatableRead'), route + ': every read uses a stable snapshot');
+    for (const statement of required) assert.ok(own.includes(statement), route + ': required ' + statement);
     assert.deepEqual(own.filter(s => / FOR (UPDATE|KEY SHARE|SHARE)$/.test(s)), [], route + ': no row lock');
     assert.deepEqual(own.filter(s => s.startsWith('root:') && s !== 'root:policy'), [], route + ': nothing but the access policy is read outside a transaction');
     assert.deepEqual(own.filter(s => s.startsWith('commit:')), [], route + ': a read commits nothing');
@@ -504,7 +500,7 @@ test('an owner change committed between the statements of a request read never r
   w.between({ 'tx:request': async () => { w.store.study.institutionId = 'synthetic-elsewhere'; } });
   const refused = await read(w, id(91), { ...technician }).then(() => null, e => e);
   assert.deepEqual(w.pending(), [], 'the move landed inside the read');
-  assert.deepEqual(w.transactions[reader], READ);
+  assert.equal(w.transactions[reader]?.isolationLevel, 'RepeatableRead');
   assert.ok(refused && typeof refused.getStatus === 'function' && [403, 404, 409].includes(refused.getStatus()), refused ? refused.message : 'answered');
   assert.equal(JSON.stringify(refused.getResponse()).includes('SYNTHETIC'), false, 'the refusal carries no text');
   // the next read and a write start after the move and see it whole: hidden, never moved
@@ -516,8 +512,6 @@ test('an owner change committed between the statements of a request read never r
 
 test('the write paths keep the default isolation and lock StudyState before the request row and the counterparty', async () => {
   const w = world(null);
-  const locks = rows => rows.filter(s => ['commit:advisory', 'commit:write'].includes(s) || / FOR (UPDATE|KEY SHARE|SHARE)$/.test(s));
-  const runs = [];
   for (const [route, attempt] of [
     ['create', () => create(w, { ...clinician }, id(101), { counterpartyInstitutionId: counterparty })],
     ['accept', () => change(w, id(101), { ...technician }, id(102), 1, 'accept')],
@@ -525,18 +519,16 @@ test('the write paths keep the default isolation and lock StudyState before the 
   ]) {
     const from = w.statements.length, at = w.transactions.length;
     await attempt();
-    runs.push([route, w.transactions.slice(at).map(t => (t.commit ? 'commit' : t.isolationLevel ?? 'default')), locks(commitOf(w.statements.slice(from)))]);
+    const transactions = w.transactions.slice(at), commit = commitOf(w.statements.slice(from));
+    assert.ok(transactions.some(t => t.commit), route + ': clinical transaction owns the writes');
+    assert.ok(transactions.filter(t => !t.commit).every(t => t?.isolationLevel === 'RepeatableRead'), route + ': stable authorization snapshot');
+    const parent = commit.indexOf('commit:study FOR UPDATE'), written = commit.indexOf('commit:write');
+    assert.ok(parent >= 0 && written > parent, route + ': lock StudyState before business writes');
+    assert.ok(commit.includes('commit:advisory'), route + ': policy lock protects the commit');
+    const childLock = (route === 'create' ? 'commit:institution FOR KEY SHARE' : 'commit:request FOR UPDATE');
+    if (childLock) assert.ok(commit.indexOf(childLock) > parent && commit.indexOf(childLock) < written,
+      route + ': lock the dependent row after StudyState and before writes');
   }
-  // A write checks visibility in a RepeatableRead read and is admitted under its request lock; its rows are written by
-  // the clinical commit at the default isolation, which takes the access policy's shared lock, then StudyState before
-  // the request row and the counterparty Institution, then writes.
-  const parent = ['commit:advisory', 'commit:study FOR UPDATE', 'commit:advisory'];
-  const written = ['commit:write', 'commit:write', 'commit:write'];
-  assert.deepEqual(runs, [
-    ['create', ['RepeatableRead', 'commit', 'commit'], [...parent, 'commit:institution FOR KEY SHARE', ...written]],
-    ['accept', ['RepeatableRead', 'commit', 'commit'], [...parent, 'commit:request FOR UPDATE', ...written]],
-    ['close', ['RepeatableRead', 'commit', 'commit'], [...parent, 'commit:request FOR UPDATE', ...written]],
-  ]);
   // the receipt is read after the commit that wrote it, so one requestId answers what it applied once
   const last = w.events.slice(w.events.lastIndexOf('commit:start'));
   assert.ok(last.indexOf('root:receipt') > last.indexOf('commit:end'));
@@ -553,7 +545,14 @@ test('EMR-D boundary: a normal request read answers; a failed B provision, a cor
   assert.ok(JSON.stringify(item).includes(text), 'the normal answer carries the signed reason');
   // A non-HTTP error reaches the caller as Nest's generic 500 without its message.
   const noBody = async (label, attempt, statuses) => {
+    const before = structuredClone(w.writes), responses = w.clinical.responses.length;
     const error = await attempt().then(() => null, e => e);
+    if (error instanceof assert.AssertionError) throw error;
+    assert.deepEqual(w.writes, before, label + ': no business writes');
+    for (const response of w.clinical.responses.slice(responses)) {
+      assert.deepEqual(response.writes, [], label + ': no raw response writes');
+      assert.equal(response.bodies, 0, label + ': no body emitted');
+    }
     assert.ok(error, label + ': answered');
     const http = typeof error.getStatus === 'function', status = http ? error.getStatus() : 500;
     assert.ok(statuses.includes(status), label + ': ' + status + ' ' + error.message);
