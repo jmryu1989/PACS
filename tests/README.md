@@ -1375,6 +1375,69 @@ from a developer checkout does not grant deployment authority.
 
 ## EMR-introduction release mode (INTERIM-RELEASE-TOOLS)
 
+Round 4 수용 계약: 이 절은 배포 가능 판정이 아니다. 같은 최종 bytes의 Windows/Linux-root 행렬,
+기존 재현 시험과 mutant, 정상·강제 L-09b 합성 리허설, 독립 검수까지 완료해야 한다.
+관측은 `OK(value)`·성공한 조회의 `ABSENT`·`ERROR(reason)`을 구분한다. 변경 또는 미결 작업 뒤
+관측 실패는 durable UNKNOWN이며 새 phase 요청으로 해제하지 않는다. 모든 보조 작업의 서버 쪽 종료를
+확인한 뒤 정리·재시도·복원한다. 최초 cron 재개 전 L-11b, 복구 cron 재개 전 RB-04c에 표지를 보존한다.
+DB 무변경 release도 RL-01의 첫 해제 전에 PONR을 기록한다. Part A 작업 중 Linux browser는 기존
+process group을 전체 종료 증거로 사용하지 않고 실행 전에 거절한다. Part B의 systemd/cgroup 설치와 검증이
+끝나기 전에는 무인 릴리스를 실행할 수 없다.
+
+지원 운영 명령은 root 보호 설치본의 `/opt/kin-deploy/entry.py compose config` 및
+`/opt/kin-deploy/entry.py compose recreate [db|api|keycloak|orthanc|proxy ...]`다. checkout 밖의
+`<state_dir>/compose-entries/<generation>/`에 논리 파일·고정 bytes·환경·runtime override의 해시를
+보존하고 완전한 세대만 active pointer로 활성화한다. 기본 tag가 오래되어도 고정 image ID를 사용한다.
+원시 env/config는 증거 export에 넣지 않는다. bare Compose와 기존 explicit `-f` 운영 절차는 폐기한다.
+interim policy가 설치되어 있으면 보호 entry의 기존 API 배포 lane은 거절한다. runner/host bytes는 유지한다.
+임의 root 명령까지 차단한다고 주장하지 않는다. 미이관 cron/helper가 하나라도 실행 가능하면 배포 불가다.
+
+Compose 소비자 inventory와 현재 연결:
+
+| 소비자 | 입력 수명·연결 또는 차단 | 필요한 실행 증거 |
+|---|---|---|
+| HostOps의 capture/introduce/verify/reopen 및 re-entry | `compose()` → active immutable entry; 직접 초기 config는 변경 전 입력 고정에만 사용 | phase별 관측 행렬·실제 config |
+| I-RV, rollback, rollback_reopen | 같은 entry, 이전 이미지 ID와 fresh recovery project/volume 세대 | 복원 뒤 새 프로세스 recreate |
+| one-shot provision/migrate/Keycloak/helper | 같은 entry와 등록된 worker; 비밀은 private 입력, 명령 기록은 해시 | CLI 실패 뒤 서버 종료·UNKNOWN 보존 |
+| backup/restore의 docker run/exec | Compose 호출 없음; HostOps의 등록·이미지·자원 경계로 실행 | daemon worker 종료·보존 |
+| 보호 설치 확인·운영자 recreate | `entry.py compose config/recreate`; 종료 상태·동일 plan/tool/host/entry, 실제 allowlist를 변경 전에 확인 | 원본 overlay/env/proxy가 없어도 새 명령 실행 |
+| 기존 API-only entry | interim policy 존재 시 실행 거절; runner/host 원본 유지 | 보호 설치의 거절 시험 |
+| `ops_deploy_preflight.py`의 COMPOSE 목록 | API-only 읽기 검증의 선언; 실행 caller가 아니며 interim entry에 목록을 제공하지 않음 | consumer 소스 대조 |
+| `emr-compose.py` | 선언 검사·SQL 출력만 수행; Docker/DB 실행 없음 | consumer 소스 대조 |
+| monitor/notify | 직접 Compose 실행 없음 | 설치된 실제 cron/timer/스크립트의 해시·명령 목록 대조 |
+| cron/helper 및 기존 runbook | 공통 entry 이관 또는 실행 불가를 설치 담당자가 입증; `.env`만 바꾼 이관은 불인정 | G04/G05/G06/G13/W4의 대상별 실행 증거, 미이관 0 |
+
+생산 논리 순서는 `docker-compose.yml`, `docker-compose.prod.yml`,
+`/etc/kin-deploy/overlays/docker-compose.halo-reports.yml`, `docker-compose.monitor.yml`이다.
+VM은 prod 다음, Halo 앞에 rehearsal override를 삽입한다. 마지막 생성 runtime override는 이미지·포트·복구
+project/volume만 담는다. v1에서 service `env_file` 의존성은 bundle admission 거절 대상이다.
+
+최종 stage-exit의 실환경 선행 관문:
+
+| 관문 | 배포 전에 보존할 관측·실행 근거 |
+|---|---|
+| R3-01/05/09 | 보호 설치 Python과 browser pin으로 Linux root `env -i` Chromium 실행, 실제 Keycloak 버전·필드, Docker 29 inspect 대조 |
+| R3-03/10 | 실제 B0의 소요·최대 메모리·disk/inode·WAL 여유 측정, backup root 소유권과 audit ledger 확인 |
+| R3-11/15 | 최종 plan·bundle digest, 동일 최종 change SHA의 CI·G3·독립 판정·두 합성 리허설 |
+| R3-07 | 고정 host key의 인증 SSH로 root 보호 저장소에 원자 전송, host/plan/B0/tool/run 및 1회 사용 receipt 결속 |
+| R3-13 | D1034 여유 RAM 10 GiB·다른 kin.emrb.live/kin.ops.run 부재를 기록하고 한 자기 stack만 실행; 이전 위반 기록 보존 |
+| R3-17 | 실제 realm OTP 흐름·network 소비자 목록·TLS/AppArmor·audit·bind 대조 및 미이관 자동 소비자 0 |
+
+수용된 제한의 고정 문구:
+
+- R3-04: ordinary daily는 기존 counts/catalog/EMR 검증 범위 유지. held B0/B1 exact 검증과 구별하며 daily exact-value 통과라고 보고하지 않음
+- R3-06: 이번 고정 release DOM locator 사용 가능. 제품 DOM/문구를 시험 때문에 바꾸지 않음. Stage9 최종 release에서 다시 검증
+- R3-07: 별도 producer 서명은 추가하지 않음. 승인 executor·host-key 고정 SSH·root 보호 저장·hash manifest·원자 설치·one-use로 신뢰 경계를 닫음. 임의 전달 bundle은 거절
+- R3-12: r2 비밀번호 6개 덮어쓰기 사실 보존; 해당 파일을 원시 증거로 인용하지 않음. r4 원시 기록은 수정 없이 별도 보존
+- R3-14: native 오류/exit 의미를 그대로 기록. signature 적응은 허용하되 원 acceptance와 positive control을 유지. “오류가 났으니 취약성 소멸” 판정 금지
+- R3-16: PurePosixPath/Desktop 정규화는 유지. 임의 플랫폼 확대 불필요. 실제 VM manifest 경로의 config/inspect 일치는 별도 필수
+- 범용 PG 기능 미지원은 실제 inventory 조사 후 admission 거절
+
+UNKNOWN/호스트 상실은 자동 rollback 보장 밖의 **보존 정지**로 명시하고, 담당자의 수동 진단·복구 경로와
+연락 책임을 실행 계획에 둔다. 야간 응답자가 없으면 다음 담당자 확인까지 maintenance/lock을 유지하는 장애
+시간을 수용해야 한다. 사람 부재를 이유로 강제 재개하지 않는다. 외부 backup OFF·retention/reader NOLOGIN·
+서비스 감사 이력 유지도 바꾸지 않는다.
+
 The API-only runner keeps refusing a release that brings the EMR-B storage; `scripts/ops_emr_introduction.py` is
 that release's own mode (requests with `"mode": "emr-introduction"` are routed there by `ops_deploy_entry.py`, with
 its own disabled-by-default policy `/etc/kin-deploy/emr-introduction.json`; `python scripts/ops_emr_introduction.py
@@ -1383,9 +1446,9 @@ pre-EMR B0 with the writers held, isolated B0 restore check) → introduce (prov
 cache option, member-rights import, API as node/kin_runtime, UI/proxy, ingress still fenced) → verify (fenced HTTPS
 smoke with a login made after the member import, the worklist UID and the frame bytes, the one-shot EMR probe
 `scripts/ops_emr_probe.py`, B1 and its same-point restore) → reopen; release (before any database change) and rollback
-are the exits. A rollback restores B0 into fresh volumes of a recovery Compose project that the checkout's `.env`
-then names (`COMPOSE_PROJECT_NAME`, previous images tagged for it), so an ordinary compose recreate keeps the recovery
-volumes; it ends RESTORED behind the maintenance ingress, and only `rollback_reopen` (the previous version's own login
+are the exits. A rollback restores B0 into fresh volumes of a recovery Compose project pinned in the immutable common
+entry with the previous image IDs. The supported recreate command retains those recovery volumes; the restore ends
+RESTORED behind the maintenance ingress, and only `rollback_reopen` (the previous version's own login
 made after the restore, worklist UID and frame bytes) opens anything. One phase of a plan runs at a time (an OS lease
 the kernel frees with a dead process); a phase that never recorded its end is classified NEEDS_ATTENTION, never re-run.
 Every step records the host before and after it and every command it ran (`commands-<phase>-<request>.jsonl`: redacted
@@ -1403,20 +1466,17 @@ with `external_networks` per service. In `compose_files` a production target lis
 `docker-compose.prod.yml`, its one rehearsal override (which replaces the proxy's volumes), then the overlay (D09).
 `tracked_overlay_reconcile` (only `docker-compose.prod.yml`) puts the modified tracked file back to the commit only
 after Compose renders the current files, the commit plus the overlay, and the declared list byte-identically. With
-declared overlays L-00b also writes `COMPOSE_FILE=<the declared list>` into the checkout's `.env` (IRT2-10), so a plain
-`docker compose up -d <service>` typed in the checkout - after the release and after a rollback - keeps the overlay's
-bind and network; the plan's compose digest therefore covers a `.env` with that line (`prepare-env --target` and
-`compose-digest --target` produce it), and the staged env, the final allowlist and the recovery handover refuse a
-`.env` without it. Every phase start checks the overlay file (hash) and every folder above it (root or the allowed
-owner, not writable by others, no link; IRT2-19) and its bind sources. The plan's first phase pins the overlay's
-verified bytes in its run folder; a rollback whose overlay file later changed or vanished goes on with the pinned copy
-and records a warning, a forward phase refuses (D05). Compose variables the `.env` lacks are resolved from the running
-containers (environment or bind source) and kept, 0600, in the plan's secrets folder `state/emr-secrets/<plan>/`, so
-a rollback in a new process with the proxy gone still gives Compose the same value (D04; records hold names and
-hashes only; the file goes when the plan ends). Before a seed nothing runs to resolve from: a VM target that lists
-`docker-compose.monitor.yml` needs `KIN_MONITOR_PUBLIC_DIR` in the clone's `.env` - inside the clone's checkout for a
-rehearsal, whose binds outside the checkout are refused - or does not list that file; the seed names the variable
-(D28). With `fix_checkout_mode` the capture first makes the checkout 0700 and `.git` not group/other-writable
+declared overlays L-00b retains the legacy `COMPOSE_FILE=<the declared list>` line for the plan's compose digest
+(`prepare-env --target` and `compose-digest --target` produce it). That line does not authorize bare Compose or
+override explicit `-f` callers. Re-entry loads the immutable generation; first admission checks the overlay file
+(hash) and every folder above it (root or the allowed
+owner, not writable by others, no link; IRT2-19) and its bind sources. The first admission captures the verified
+overlay bytes and all effective interpolation values into the persistent immutable bundle. Subsequent calls and
+ordinary recreate read that bundle after the original inputs or proxy vanish. Any bundle corruption is a refusal;
+there is no checkout fallback. Temporary working copies remain private and may be removed after the plan ends;
+the active entry's inputs remain. Before a seed nothing runs to resolve from: the required VM monitor file needs
+`KIN_MONITOR_PUBLIC_DIR` in the clone's `.env`, inside its checkout. Omitting monitor is not an alternative.
+With `fix_checkout_mode` the capture first makes the checkout 0700 and `.git` not group/other-writable
 (recorded); a rollback finds a reopened mode, checks owner and links, restores the modes and records a warning (D06).
 L-01 compares the running containers themselves with the checked model (Compose project and service labels, volume and
 bind mounts, networks, published ports; IRT2-02) and accepts as backup root this tool's own private folder or the

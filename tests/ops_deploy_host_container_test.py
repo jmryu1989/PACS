@@ -428,14 +428,14 @@ class SyntheticStack:
         self.ca = self.root / "clone-ca.pem"
         self.override_path = self.root / "rehearsal-override.yml"
         self.halo_network, declared, external, overlay, monitor = None, [], {}, [], []
-        if label == "failure":
+        if label in ("source", "clone", "failure"):
             # D04: production's monitor file binds ${KIN_MONITOR_PUBLIC_DIR} into the proxy and its .env lacks it (the
             # operator's shell gave it when the stack started); the tool resolves it from the running proxy. A rehearsal
             # binds nothing outside its checkout but declared overlay binds, so the folder is an untracked one inside it.
             self.monitor_dir = self.repo / ".kin-monitor-public"
             self.monitor_dir.mkdir()
             monitor = ["docker-compose.monitor.yml"]
-        if label in ("clone", "failure"):
+        if label in ("source", "clone", "failure"):
             # IRT-11 (D1066): a declared overlay outside the checkout, listed after the rehearsal override, that joins the
             # proxy to an external network and binds one host file (a synthetic stand-in for the Halo Reports wiring).
             self.halo_conf = self.root / "halo-reports" / "nginx" / "report.conf"
@@ -468,6 +468,8 @@ class SyntheticStack:
                     "KC_CLIENT_SECRET": secrets.token_urlsafe(24), "KC_WEB_SECRET": secrets.token_urlsafe(24),
                     "KIN_COOKIE_SECRET": secrets.token_urlsafe(24), "ORTHANC_PASS": secrets.token_urlsafe(24),
                     "PUBLIC_ORIGIN": self.origin, "KIN_REVISION": previous_sha}
+        if label != "failure":
+            self.env["KIN_MONITOR_PUBLIC_DIR"] = str(self.monitor_dir)
         if declared:
             # IRT2-10: with a declared overlay the checkout's .env names the declared list (the VM preparer writes it).
             self.env["COMPOSE_FILE"] = intro.declared_compose_file(self.target)
@@ -573,10 +575,19 @@ class SyntheticStack:
             # The operator's shell gave the monitor folder when the production stack was started (its .env lacks it).
             host_ops.compose_env = {"KIN_MONITOR_PUBLIC_DIR": str(self.monitor_dir)}
         context = SimpleNamespace(state={"checkout": "previous"}, plan={"previous": {"sha": self.previous_sha, "images": images}})
+        # Fixture bootstrap precedes the release's first admission. It is not an operational bypass of the common
+        # entry: the source is a new, owned synthetic stack whose running baseline the tool will subsequently capture.
+        runtime = self.root / "fixture-bootstrap-runtime.yml"
+        runtime.write_text(host_ops.pins(context, maintenance=False), encoding="utf-8", newline="\n")
+        command = ["docker", "compose", "--project-directory", str(self.repo), "--project-name", self.project,
+                   "--env-file", str(self.repo / ".env")]
+        for name in self.target["compose_files"]:
+            command.extend(("-f", str(self.repo / name) if not os.path.isabs(name) else name))
+        command.extend(("-f", str(runtime)))
         with intro.bound_ops(self.repo, runner):
             for role in roles:
-                host_ops.compose(["up", "-d", "--no-deps", "--no-build", "--pull", "never", role],
-                                 override=host_ops.pins(context, maintenance=False), timeout=300)
+                host_ops.cmd([*command, "up", "-d", "--no-deps", "--no-build", "--pull", "never", role],
+                             env=host_ops.compose_env, mutating=True, timeout=300)
                 if role == "db":
                     # As the product's installation does (tests/measurement_ci.py): Keycloak's database is created once.
                     host_ops.db_ready(120, "Source database did not start")
@@ -711,6 +722,8 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         shutil_copy(b0["dir"], copy_dir)
         production_target = intro.example_target()
         production_target.update(host_key_sha256="a" * 64)
+        production_target["declared_overlays"][0]["sha256"] = clone.target["declared_overlays"][0]["sha256"]
+        intro.target_valid(production_target, operational=True)
         production_plan = copy.deepcopy(clone.plan(images, members=members))
         production_plan.update(target_kind="production", seed=None, rehearsal_host="b" * 64,
                                target_manifest_sha256=hashlib.sha256(intro.canonical(production_target)).hexdigest())

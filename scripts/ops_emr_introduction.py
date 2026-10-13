@@ -97,7 +97,7 @@ PROJECT = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}")
 TAG = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 FENCED = "#kin-emr-introduction-fenced# "
 TOOL_FILES = ("ops_emr_introduction.py", "ops_emr_probe.py", "ops_backup.py", "ops_deploy_preflight.py", "ops_deploy_host.py",
-              "ops_audit_integrity.py")
+              "ops_audit_integrity.py", "ops_deploy_entry.py", "ops_deploy_runner.py")
 OPERATOR_SMOKE_CHECKS = ("login_pkce", "logout_old_session_refused", "worklist_uid", "ohif_frame", "w2_folders",
                          "w2_modality", "w2_shortcuts", "realm_v1_pending_zero")
 # IRT-14 (D1062): the unattended smoke's temporary member and the checks it proves of the previous version after a restore
@@ -357,7 +357,7 @@ def origin_valid(value):
     return value
 
 
-def target_valid(target):
+def target_valid(target, *, operational=False):
     """A target manifest names every resource this mode touches; no docker command uses a name from elsewhere."""
     _keys(target, TARGET_KEYS, "target manifest")
     require(target["schema"] == 1 and type(target["schema"]) is int and target["kind"] in ("production", "rehearsal"), "Unsupported target manifest")
@@ -425,6 +425,21 @@ def target_valid(target):
         require(set(files[start:start + len(overlays)]) == set(overlays),
                 "A declared overlay must come right after docker-compose.prod.yml (a rehearsal: after the rehearsal override that follows it)")
     require(type(target["fix_checkout_mode"]) is bool, "Invalid checkout mode flag")
+    if operational:
+        halo = "/etc/kin-deploy/overlays/docker-compose.halo-reports.yml"
+        require(set(overlays) == {halo}, "중간 릴리스에는 고정 Halo overlay 한 개가 필요합니다")
+        expected = ["docker-compose.yml", "docker-compose.prod.yml"]
+        if target["kind"] == "rehearsal":
+            require(len(others) == 1 and others[0] == 2, "VM override는 prod 바로 다음 한 개여야 합니다")
+            expected.append(files[2])
+        expected.extend((halo, "docker-compose.monitor.yml"))
+        require(files == expected, "중간 릴리스의 Compose 입력 목록 또는 순서가 다릅니다")
+        require(overlays[halo]["service"] == "proxy" and
+                overlays[halo]["binds"] == [{"source": "/srv/halo-reports/nginx/report.conf",
+                                           "target": "/etc/nginx/conf.d/halo-report.conf", "read_only": True}],
+                "Halo 보고서의 RO bind 선언이 다릅니다")
+        require(target["external_networks"].get("proxy", {}).get("halo_reports") == "halo_reports_private",
+                "Halo 보고서의 외부 network 선언이 다릅니다")
     containers = _keys(target["containers"], (*ROLES, *ONE_SHOTS), "containers")
     volumes = _keys(target["volumes"], VOLUMES, "volumes")
     networks = _keys(target["networks"], ("default", "workflow"), "networks")
@@ -584,7 +599,7 @@ def host_bind_source(value, repository):
     return text
 
 
-def check_running(inspections, model, target):
+def check_running(inspections, model, target, image_volumes=None, *, roles=ROLES):
     """IRT2-02, L-01 before anything changes: every running container of the previous release is what the checked model
     says - its Compose project and service labels, every named volume and bind at its path (an image's own anonymous
     volumes aside), its networks and its published ports - not only its name and image. A container that runs on another
@@ -597,36 +612,74 @@ def check_running(inspections, model, target):
         text = host_bind_source(value, target["repository"]).replace("\\", "/")
         return PurePosixPath(text.lower() if windows else text)
     named = set(model["volumes"].values())
-    for role in ROLES:
+    require(set(roles) <= set(ROLES) and set(inspections) == set(roles), "실제 컨테이너 관측 대상이 다릅니다")
+    for role in roles:
         item = inspections[role]
+        require(item.get("Image") == model["images"].get(role) and IMAGE.fullmatch(str(item.get("Image"))),
+                "실제 컨테이너의 immutable image ID가 다릅니다: " + role)
         labels = (item.get("Config") or {}).get("Labels") or {}
         require(labels.get("com.docker.compose.project") == model["project"] and labels.get("com.docker.compose.service") == role,
                 "A running service belongs to another Compose project or service: " + role)
         expected = {}
         for entry in model["mounts"].get(role, []):
+            require(entry["target"] not in expected, "선언 mount 목적지가 중복됩니다: " + role)
+            readonly = entry.get("read_only") is True
+            require(not entry.get("consistency") or entry["consistency"] == "consistent", "지원하지 않는 mount consistency입니다")
+            require(not entry.get("volume") or set(entry["volume"]) <= {"nocopy"} and entry["volume"].get("nocopy") is False,
+                    "관측 계약이 없는 volume 옵션입니다")
+            require(not entry.get("tmpfs"), "관측 계약이 없는 tmpfs 옵션입니다")
+            require(not entry.get("bind") or set(entry["bind"]) <= {"propagation", "create_host_path", "selinux"}
+                    and not entry["bind"].get("selinux"), "관측 계약이 없는 bind 옵션입니다")
             if entry["type"] == "volume":
-                expected[entry["target"]] = ("volume", model["volumes"].get(entry["source"]))
+                expected[entry["target"]] = ("volume", model["volumes"].get(entry["source"]), readonly)
             elif entry["type"] == "bind":
-                expected[entry["target"]] = ("bind", path_of(entry["source"]))
+                expected[entry["target"]] = ("bind", path_of(entry["source"]), readonly)
+            elif entry["type"] == "tmpfs":
+                expected[entry["target"]] = ("tmpfs", None, readonly)
+            else:
+                raise Stop("지원하지 않는 mount 종류입니다: " + role)
         actual = {}
         for mount in item.get("Mounts") or []:
+            destination = mount.get("Destination")
+            require(type(destination) is str and destination not in actual and type(mount.get("RW")) is bool,
+                    "실제 mount 관측이 불완전하거나 중복됩니다: " + role)
+            readonly = not mount["RW"]
             if mount.get("Type") == "volume":
                 if ANONYMOUS_VOLUME.fullmatch(str(mount.get("Name"))) and mount.get("Name") not in named:
-                    continue
-                actual[mount.get("Destination")] = ("volume", mount.get("Name"))
+                    approved = (image_volumes or {}).get(role, {})
+                    require(destination not in expected and approved.get(destination) == {"read_only": readonly},
+                            "고정 이미지에 선언되지 않은 익명 volume 또는 권한입니다: " + role)
+                    expected[destination] = ("volume", mount["Name"], readonly)
+                actual[destination] = ("volume", mount.get("Name"), readonly)
             elif mount.get("Type") == "bind":
-                actual[mount.get("Destination")] = ("bind", path_of(mount.get("Source")))
+                actual[destination] = ("bind", path_of(mount.get("Source")), readonly)
+                declaration = next((m for m in model["mounts"].get(role, []) if m["target"] == destination), {})
+                propagation = (declaration.get("bind") or {}).get("propagation", "rprivate")
+                require(mount.get("Propagation", "rprivate") == propagation, "bind propagation이 선언과 다릅니다: " + role)
+            elif mount.get("Type") == "tmpfs":
+                actual[destination] = ("tmpfs", None, readonly)
+            else:
+                raise Stop("실제 mount 종류를 허용할 수 없습니다: " + role)
         differing = sorted(str(key) for key in set(actual) | set(expected) if actual.get(key) != expected.get(key))
         require(not differing, "A running service's mounts differ from the checked model: " + role + " (" + ", ".join(differing) + ")")
         networks = set(((item.get("NetworkSettings") or {}).get("Networks") or {}))
         require(networks == {model["networks"][key] for key in model["service_networks"].get(role, ["default"])},
                 "A running service's networks differ from the checked model: " + role)
+        if "network_observations" in model:
+            for name, endpoint in item["NetworkSettings"]["Networks"].items():
+                network = model["network_observations"][name]
+                peer = network["Containers"].get(item["Id"])
+                require(endpoint.get("NetworkID") == network["Id"] and peer is not None
+                        and endpoint.get("EndpointID") and endpoint["EndpointID"] == peer.get("EndpointID"),
+                        "network 연결 대상 신원이 다릅니다: " + role)
         published = []
         for port, values in (((item.get("HostConfig") or {}).get("PortBindings")) or {}).items():
             for value in values or []:
                 host = value.get("HostIp") or ""
-                published.append((host + ":" if host and host not in ("0.0.0.0", "::") else "") + str(value.get("HostPort")) + ":" + port.split("/")[0])
-        require(sorted(set(published)) == sorted(set(model["ports"].get(role, []))), "A running service's published ports differ from the checked model: " + role)
+                require(re.fullmatch(r"[0-9]+/(tcp|udp|sctp)", port) is not None, "게시 protocol 관측이 불완전합니다")
+                published.append((host + ":" if host and host not in ("0.0.0.0", "::") else "") + str(value.get("HostPort")) + ":" + port)
+        wanted_ports = [p if "/" in p else p + "/tcp" for p in model["ports"].get(role, [])]
+        require(sorted(set(published)) == sorted(set(wanted_ports)), "A running service's published ports differ from the checked model: " + role)
 
 
 REQUEST_KEYS = ("version", "mode", "phase", "plan_sha256", "nonce")
@@ -984,6 +1037,11 @@ class Records:
         os.replace(temporary, path)
         if os.name == "posix":
             os.chmod(path, 0o600)
+            descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
 
     def read(self, path):
         return path.read_bytes()
@@ -1319,14 +1377,175 @@ def value_changes(before, after):
     return changed
 
 
+OBSERVATION_FIELDS = frozenset(("checkout", "compose_entry", "lock", "containers", "database", "fences", "workers"))
+DB_ABSENCE_CHECKPOINTS = (("S-01", "before"), ("S-01", "after"), ("S-02", "before"), ("RB-02", "db-removed"))
+
+
+def fact(value):
+    return {"outcome": "OK", "value": value}
+
+
+def absent():
+    return {"outcome": "ABSENT"}
+
+
+def observation_error(error):
+    # A transport's exception may quote credentials; retain only its class.
+    return {"outcome": "ERROR", "reason": type(error).__name__}
+
+
 def observed(snapshot):
-    """IRT2-22: whether an observation around a step is complete. Required: the observer answered (containers, checkout,
-    lock); the applied migration history whenever the database container runs. Not required (normally unobservable):
-    the history while no database container runs (before a seed's restore, between a removal and a recreate)."""
-    if type(snapshot) is not dict or "unobservable" in snapshot:
+    """C-OBS: completeness is a closed schema, never the absence of an error string.
+
+    ABSENT containers are facts (a successful daemon listing proved their absence). Whether a particular absence is
+    allowed belongs to the step. Database absence is only observable at the explicitly named seed checkpoints.
+    """
+    def complete(value):
+        if type(value) is not dict:
+            return False
+        if value.get("outcome") == "OK":
+            return set(value) == {"outcome", "value"}
+        return value == absent()
+
+    if type(snapshot) is not dict or set(snapshot) != {"schema", "facts", "checkpoint"} or type(snapshot["schema"]) is not int or snapshot["schema"] != 1:
         return False
-    migrations, running = snapshot.get("migrations"), snapshot.get("running") or {}
-    return not (isinstance(migrations, dict) and "unobservable" in migrations and running.get("db"))
+    if type(snapshot["checkpoint"]) is not list or len(snapshot["checkpoint"]) != 2 or not all(
+            item is None or type(item) is str for item in snapshot["checkpoint"]):
+        return False
+    fields = snapshot["facts"]
+    if type(fields) is not dict or set(fields) != OBSERVATION_FIELDS or not all(complete(v) for v in fields.values()):
+        return False
+    if any(fields[name].get("outcome") != "OK" for name in OBSERVATION_FIELDS - {"database"}):
+        return False
+    containers = fields["containers"]["value"]
+    if type(containers) is not dict or set(containers) != set(ROLES) or not all(complete(v) for v in containers.values()):
+        return False
+    for item in containers.values():
+        if item["outcome"] == "OK":
+            data = item["value"]
+            if type(data) is not dict or set(data) != {"id", "image", "running", "restarting", "project", "service"}:
+                return False
+            if not all(type(data[k]) is str and data[k] for k in ("id", "image", "project", "service")):
+                return False
+            if type(data["running"]) is not bool or type(data["restarting"]) is not bool:
+                return False
+    db = fields["database"]
+    if db["outcome"] == "ABSENT":
+        if tuple(snapshot["checkpoint"]) not in DB_ABSENCE_CHECKPOINTS:
+            return False
+        if containers["db"] != absent():
+            return False
+    else:
+        value = db["value"]
+        if type(value) is not dict or set(value) != {"ready", "migrations"} or value["ready"] is not True:
+            return False
+        if type(value["migrations"]) is not list or not all(
+                type(row) is list and len(row) == 4 and type(row[0]) is str and row[0]
+                and type(row[1]) is str and HASH.fullmatch(row[1]) is not None
+                and type(row[2]) is bool and type(row[3]) is bool for row in value["migrations"]):
+            return False
+    checkout = fields["checkout"]["value"]
+    entry = fields["compose_entry"]["value"]
+    lock = fields["lock"]["value"]
+    fences = fields["fences"]["value"]
+    workers = fields["workers"]["value"]
+    return (type(checkout) is dict and set(checkout) == {"sha"} and type(checkout["sha"]) is str
+            and SHA.fullmatch(checkout["sha"]) is not None
+            and type(entry) is dict and set(entry) == {"generation", "sha256"}
+            and type(entry["generation"]) is str and (entry["generation"] == "admission" or HASH.fullmatch(entry["generation"]) is not None)
+            and type(entry["sha256"]) is str and HASH.fullmatch(entry["sha256"]) is not None
+            and type(lock) is dict and set(lock) == {"owned"} and type(lock["owned"]) is bool
+            and type(fences) is dict and set(fences) == {"writers", "cron", "ingress", "db_clients"}
+            and type(fences["writers"]) is dict and set(fences["writers"]) == set(WRITERS)
+            and all(type(v) is bool for v in fences["writers"].values())
+            and fences["cron"] in ("open", "fenced", "not-managed")
+            and fences["ingress"] in ("public", "maintenance", "closed")
+            and type(fences["db_clients"]) is int and fences["db_clients"] >= 0
+            and type(workers) is dict and set(workers) == {"quiet", "pending"}
+            and type(workers["quiet"]) is bool and type(workers["pending"]) is list
+            and workers["quiet"] == (not workers["pending"]))
+
+
+def workers_quiet(snapshot):
+    return observed(snapshot) and snapshot["facts"]["workers"]["value"]["quiet"]
+
+
+# Completed boundary contracts. A failed command is compared only for observation completeness: a known partial
+# result is STOP, whereas pretending the success postcondition held would hide precisely the state rollback needs.
+BOUNDARY_RUNNING = {
+    "L-00a": "all", "L-00b": "all", "L-01": "all", "L-04a": "db", "L-04b": "db", "L-04c": "db",
+    "RL-01": "all", "RL-02": "all", "I-00": "db", "L-06a": "db", "L-06b": "db", "L-07": "db",
+    "L-08a": "db keycloak", "L-08b": "db keycloak", "L-09a": "db keycloak api", "L-09b": "all",
+    "L-10a": "all", "L-10b": "all", "L-10c": "db", "L-10d": "all", "L-10e": "all",
+    "L-11a": "all", "L-11b": "all", "L-11c": "all", "L-11d": "all",
+    "RB-00": "db", "RB-01": "db", "RB-02": "db", "RB-03": "all",
+    "RB-04a": "all", "RB-04b": "all", "RB-04c": "all", "RB-04d": "all", "RB-04e": "all",
+    "S-01": "", "S-02": "db", "S-03": "all", "RC-01": "all", "I-RV": "db",
+}
+PUBLIC_BOUNDARIES = frozenset(("L-00a", "L-00b", "L-01", "RL-01", "RL-02", "L-11c", "L-11d", "RB-04d", "RB-04e", "S-03", "RC-01"))
+OPEN_CRON_BOUNDARIES = PUBLIC_BOUNDARIES | {"L-11b", "RB-04c"}
+BEFORE_BOUNDARY = {
+    "L-00a": "L-01", "L-00b": "L-00a", "L-01": "L-00b", "L-04a": "L-01", "L-04b": "L-04a", "L-04c": "L-04b",
+    "RL-01": "L-04a", "RL-02": "RL-01", "I-00": "L-04c", "L-06a": "I-00", "L-06b": "L-06a", "L-07": "L-06b",
+    "L-08a": "L-07", "L-08b": "L-08a", "L-09a": "L-08b", "L-09b": "L-09a",
+    "L-10a": "L-09b", "L-10b": "L-10a", "L-10c": "L-10b", "L-10d": "L-10c", "L-10e": "L-10d",
+    "L-11a": "L-10e", "L-11b": "L-11a", "L-11c": "L-11b", "L-11d": "L-11c",
+    "RB-01": "RB-00", "RB-02": "RB-01", "RB-03": "RB-02", "RB-04a": "RB-03", "RB-04b": "RB-04a",
+    "RB-04c": "RB-04b", "RB-04d": "RB-04c", "RB-04e": "RB-04d", "S-01": "S-01", "S-02": "S-01", "S-03": "S-02", "RC-01": "RC-01",
+}
+
+
+def checkpoint_valid(snapshot, context, sid):
+    require(workers_quiet(snapshot), "필수 관측 또는 작업 종료가 미결입니다")
+    require(sid in BOUNDARY_RUNNING, "미선언 단계의 관측 계약입니다")
+    fields = snapshot["facts"]
+    require(fields["lock"]["value"]["owned"] == bool(context.state.get("lock_token"))
+            and (bool(context.state.get("lock_token")) or sid == "RC-01"), "작업 잠금 소유권이 다릅니다")
+    side = "release" if context.state["checkout"] == "target" else "previous"
+    require(fields["checkout"]["value"]["sha"] == context.plan[side]["sha"], "관측된 checkout이 계획과 다릅니다")
+    if context.state.get("compose_entry"):
+        expected = context.state["compose_entry"]
+        require(fields["compose_entry"]["value"] == {"generation": expected["generation"], "sha256": expected["sha256"]},
+                "관측된 Compose 세대가 활성화한 세대와 다릅니다")
+    desired = set(ROLES) if BOUNDARY_RUNNING[sid] == "all" else set(BOUNDARY_RUNNING[sid].split())
+    containers = fields["containers"]["value"]
+    running = {role for role, fact_ in containers.items() if fact_.get("outcome") == "OK" and fact_["value"]["running"]}
+    require(running == desired, "단계 종료의 서비스 실행 상태가 계약과 다릅니다")
+    for role, fact_ in containers.items():
+        if fact_ == absent():
+            require(sid in ("S-01", "S-02", "RB-00", "RB-01", "RB-02") and role not in desired,
+                    "단계 종료에 필요한 컨테이너가 없습니다")
+            continue
+        item = fact_["value"]
+        require(not item["restarting"] and item["service"] == role, "컨테이너 실행 또는 service 신원이 다릅니다")
+        expected_projects = {context.target["project"]}
+        recovery = context.state.get("recovery")
+        if recovery:
+            expected_projects.add(recovery["project"])
+        require(item["project"] in expected_projects and item["image"] in (context.plan["previous"]["images"][role], context.plan["release"]["images"][role]),
+                "컨테이너 project 또는 image 신원이 계획 밖입니다")
+        partial_failure = sid in ("RB-00", "RB-01") or (sid == "RB-02" and role != "db")
+        if not partial_failure:
+            previous_roles = {"L-06a": {"api", "proxy", "keycloak", "orthanc"},
+                              "L-06b": {"api", "proxy", "keycloak", "orthanc"},
+                              "L-07": {"api", "proxy", "keycloak", "orthanc"},
+                              "L-08a": {"api", "proxy", "orthanc"}, "L-08b": {"api", "proxy", "orthanc"},
+                              "L-09a": {"proxy", "orthanc"}}
+            image_side = "previous" if side == "previous" or role in previous_roles.get(sid, set()) else "release"
+            require(item["image"] == context.plan[image_side]["images"][role], "단계별 실제 이미지 ID가 다릅니다")
+            expected_project = recovery["project"] if recovery and (sid not in ("RB-02",) or role == "db") else context.target["project"]
+            require(item["project"] == expected_project, "단계별 실제 Compose project가 다릅니다")
+    fences = fields["fences"]["value"]
+    require(fences["writers"] == {role: role in desired for role in WRITERS}, "writer 관측과 컨테이너 관측이 다릅니다")
+    ingress = "public" if sid in PUBLIC_BOUNDARIES else ("maintenance" if "proxy" in desired else "closed")
+    require(fences["ingress"] == ingress, "단계 종료의 ingress 경계가 다릅니다")
+    require(fences["cron"] in (("open", "not-managed") if sid in OPEN_CRON_BOUNDARIES or sid in ("S-01", "S-02")
+                               else ("fenced", "not-managed")), "단계 종료의 예약 작업 경계가 다릅니다")
+    if desired <= {"db"}:
+        require(fences["db_clients"] == 0, "writer 차단 뒤 데이터베이스 연결이 남아 있습니다")
+    if fields["database"] != absent() and sid not in ("RB-00", "RB-01"):
+        after = sid in {"L-07", "L-08a", "L-08b", "L-09a", "L-09b", "L-10a", "L-10b", "L-10c", "L-10d", "L-10e", "L-11a", "L-11b", "L-11c", "L-11d"}
+        pre.check_migration_rows(fields["database"]["value"]["migrations"], context.plan["migrations"]["after" if after else "before"])
 
 
 def new_state(plan_sha256, plan):
@@ -1334,7 +1553,7 @@ def new_state(plan_sha256, plan):
             "lock_token": None, "db_changed": False, "ponr": None, "fenced": None, "checkout": "previous",
             "b0": None, "b1": None, "bfail": None, "seed": None, "recovery": None, "rollback_attempted": False,
             "history": [], "probe": None, "receipt": None, "running": None, "receipts_used": [], "restored_at": None,
-            "rollback_smoke": None}
+            "rollback_smoke": None, "unknown_hold": None, "host_changed": False, "recovery_reopen": None}
 
 
 class Introduction:
@@ -1376,52 +1595,84 @@ class Introduction:
             require(lock_owned(self.repository, self.state["lock_token"]), "Operations lock ownership changed")
 
     def run_step(self, sid, name, mutating, db_change):
-        """Every step (read-only ones too) records the host before and after it, its outcome, its duration and the
-        range of commands it ran (commands-<phase>-<request>.jsonl), so the record shows which command a step reached."""
+        """Collect command and observation results before classifying once (C-OBS).
+
+        Raising from a command's except clause would bypass the final classification when after-observation also fails.
+        No exception is propagated until the durable outcome includes both observations and worker termination.
+        """
         record = {"step": sid, "action": name, "mutating": mutating, "started_utc": self.now().isoformat()}
         self.event("step-start", step=sid)
         started = self.clock()
         first = self.records.seq + 1
         record["before"] = self.observe(sid, "before")
         self.records.context = {"step": sid, "part": "step"}
-        outcome = None
+        outcome, detail, launched = None, {}, False
+        pending_before = bool(self.state.get("host_changed") or self.state.get("fenced") or self.state.get("db_changed"))
         try:
-            # IRT2-22: a step whose host could not be observed before it does not run (nothing changed yet).
-            require(observed(record["before"]), "The host could not be observed before this step")
-            if mutating:
-                self.guard()
+            if not workers_quiet(record["before"]):
+                if pending_before:
+                    raise Unknown("이전 변경 뒤 필수 관측 또는 작업 종료를 확인하지 못했습니다")
+                raise Stop("변경 전 필수 관측 또는 작업 종료를 확인하지 못했습니다")
+            self.guard()
+            if sid in BEFORE_BOUNDARY:
+                checkpoint_valid(record["before"], self, BEFORE_BOUNDARY[sid])
+            else:
+                require(sid in ("RB-00", "I-RV"), "미선언 단계의 시작 관측 계약입니다")
+                fences = record["before"]["facts"]["fences"]["value"]
+                require(fences["cron"] in ("fenced", "not-managed") and fences["ingress"] != "public"
+                        and self.state.get("ponr") is None and not self.state.get("unknown_hold"),
+                        "복구 시작 전 예약 작업·ingress 차단 경계를 확인하지 못했습니다")
             if db_change and not self.state["db_changed"]:
                 # Durable before the first database change: from here on, only a full B0 restore is a rollback.
                 self.state["db_changed"] = True
                 self.save()
+            if mutating:
+                self.state["host_changed"] = True
+                self.save()
+            launched = True
             try:
                 detail = getattr(self.ops, name)(self) or {}
             except Stop as error:
                 if name not in RETRIED_ONCE or self.retried:
                     raise
+                # Even a nominally read-only smoke creates accounts, helpers and a browser. Its settled first failure
+                # must be observed before a second attempt can launch anything.
+                settled = self.observe(sid, "after")
+                record["first_attempt_after"] = settled
+                if not workers_quiet(settled):
+                    raise Unknown("smoke 실패 뒤 필수 관측 또는 작업 종료를 확인하지 못했습니다") from None
                 detail = self.retry_step(name, error)
             outcome = "PASS"
         except Unknown as error:
             outcome = "UNKNOWN"
             record.update(code=code_of(error))
-            raise
         except Exception as error:
             outcome = "STOP"
             record.update(code=code_of(error))
-            raise Stop(record["code"]) from None
         finally:
             record["after"] = self.observe(sid, "after")
-            if outcome == "PASS" and not observed(record["after"]):
-                # IRT2-22: a step that ran but whose result could not be observed never passes - after a change its end
-                # state is unknown (no automatic rollback), after a read-only step it is a settled refusal.
-                outcome = "UNKNOWN" if mutating else "STOP"
-                record["code"] = "The host could not be observed after this step"
+            if not workers_quiet(record["after"]):
+                # STOP-after and PASS-after have the same obligation. The state flag includes helpers launched by
+                # steps whose old mutating flag was false, plus changes made by an earlier phase.
+                uncertain = pending_before or self.state.get("host_changed") or (launched and mutating)
+                outcome = "UNKNOWN" if uncertain or outcome == "UNKNOWN" else "STOP"
+                record["command_code"] = record.get("code")
+                record["code"] = "단계 이후 필수 관측 또는 작업 종료를 확인하지 못했습니다"
+            elif outcome == "PASS":
+                try:
+                    checkpoint_valid(record["after"], self, sid)
+                except Stop as error:
+                    outcome, record["code"] = "STOP", code_of(error)
             record["outcome"] = outcome or "UNKNOWN"
             record["seconds"] = round(self.clock() - started, 3)
             if outcome == "PASS":
                 record["detail"] = detail
             record["commands"] = {"file": self.records.commands_file, "first": first, "last": self.records.seq}
             self.steps.append(record)
+            if outcome == "UNKNOWN":
+                self.state["unknown_hold"] = {"step": sid, "request_sha256": self.request_sha256,
+                                               "reason": record["code"], "at": self.now().isoformat()}
+                self.save()
             self.event("step-end", step=sid, outcome=record["outcome"], **({"code": record["code"]} if "code" in record else {}))
         if outcome == "UNKNOWN":
             raise Unknown(record["code"])
@@ -1460,13 +1711,14 @@ class Introduction:
         snapshot = getattr(self.ops, "snapshot", None)
         if snapshot is None:
             return {"unobservable": "no observer"}
+        previous_context = self.records.context
         self.records.context = {"step": sid, "part": part}
         try:
             return snapshot(self)
         except Exception as error:
             return {"unobservable": type(error).__name__}
         finally:
-            self.records.context = {}
+            self.records.context = previous_context
 
     def result(self, status, passed, extra=None):
         steps = []
@@ -1493,6 +1745,8 @@ class Introduction:
         self.event("recovery-warning", warning=warning)
 
     def finish(self, status, passed, release=False, extra=None):
+        if self.state.get("unknown_hold"):
+            status, passed, release = "NEEDS_ATTENTION", False, False
         self.state["status"] = status
         if release and self.state["lock_token"]:
             release_lock(self.repository, self.state["lock_token"])
@@ -1534,12 +1788,15 @@ class Introduction:
             # retained lock stays and the plan needs an operator (release or rollback decide from NEEDS_ATTENTION).
             stale = self.state["running"]
             self.state.update(running=None, status="NEEDS_ATTENTION")
+            self.state["unknown_hold"] = {"step": "interrupted-phase", "request_sha256": stale["request_sha256"],
+                                           "reason": "이전 실행의 종료를 확인하지 못했습니다", "at": self.now().isoformat()}
             self.state["history"].append({"phase": stale["phase"], "status": "INTERRUPTED", "request_sha256": stale["request_sha256"],
                                           "seconds": None, "result_sha256": None, "steps": []})
             self.save()
             self.records.journal({"event": "interrupted-phase", "plan_sha256": self.plan_sha256, "phase": stale["phase"],
                                   "request_sha256": stale["request_sha256"], "classified": "NEEDS_ATTENTION"})
             raise Stop("Phase " + stale["phase"] + " did not finish (process ended); classified NEEDS_ATTENTION, inspect before the next request")
+        require(not self.state.get("unknown_hold"), "UNKNOWN 보류 중입니다. 같은 실행의 별도 조정 근거 없이 새 단계를 시작할 수 없습니다")
         self.budget = self.plan["budget"][BUDGET[self.phase]]
         require(self.state["status"] in FROM[self.phase], "Phase " + self.phase + " cannot follow " + self.state["status"])
         if self.phase in ("seed", "receipt"):
@@ -1566,10 +1823,7 @@ class Introduction:
         self.event("phase-start", request_sha256=self.request_sha256,
                    **({"receipt_sha256": claimed, "receipt_clock": self.receipt_facts} if claimed else {}),
                    **({"warnings": list(self.warnings)} if self.warnings else {}))
-        swept = self.records.sweep_working_folders()
-        if swept:
-            self.event("secrets-swept", browser_profiles=swept)
-        if self.phase in ("capture", "seed"):
+        if self.phase in ("capture", "seed", "receipt"):
             # A new exclusive lock; a competing backup, rehearsal or API-only deployment cannot hold it meanwhile.
             try:
                 self.state["lock_token"] = acquire_lock(self.repository)
@@ -1580,18 +1834,24 @@ class Introduction:
             self.save()
         bind = getattr(self.ops, "bind", None)
         with (bind() if bind else nullcontext()):
+            if any(row.get("state") != "QUIET" for row in self.state.get("workers", {}).values()):
+                self.state["unknown_hold"] = {"step": "worker-admission", "request_sha256": self.request_sha256,
+                                               "reason": "이전 작업의 종료가 미결입니다", "at": self.now().isoformat()}
+                return self.finish("NEEDS_ATTENTION", False)
             prepare = getattr(self.ops, "prepare", None)
             if prepare is not None:
                 # IRT-12: the compose environment of the running stack, before any step of this phase uses it.
                 try:
                     self.environment = prepare(self)
                 except (Stop, Unknown, RuntimeError, OSError) as error:
-                    self.state["running"] = None
-                    if self.phase in ("capture", "seed") and self.state.get("lock_token"):
-                        release_lock(self.repository, self.state["lock_token"])
-                        self.state["lock_token"] = None
-                    self.save()
-                    raise Stop("Compose environment: " + code_of(error)) from None
+                    if self.state.get("host_changed") or self.state.get("fenced") or isinstance(error, Unknown):
+                        self.state["unknown_hold"] = {"step": "prepare", "request_sha256": self.request_sha256,
+                                                       "reason": code_of(error), "at": self.now().isoformat()}
+                        return self.finish("NEEDS_ATTENTION", False)
+                    return self.finish(self.state["status"], False, release=True)
+            swept = self.records.sweep_working_folders()
+            if swept:
+                self.event("secrets-swept", browser_profiles=swept)
             return getattr(self, "phase_" + self.phase)()
 
     def check_evidence(self):
@@ -1649,7 +1909,11 @@ class Introduction:
 
     def phase_release(self):
         try:
-            self.steps_of("release")
+            for item in STEPS["release"]:
+                if item[1] == "unfence":
+                    self.state["ponr"] = {"step": item[0], "at": self.now().isoformat()}
+                    self.save()
+                self.run_step(*item)
         except (Stop, Unknown):
             return self.finish("NEEDS_ATTENTION", False)
         return self.finish("RELEASED", True, release=True)
@@ -1698,12 +1962,14 @@ class Introduction:
     def phase_reopen(self):
         try:
             for item in STEPS["reopen"]:
-                if item[1] == "reopen_ingress":
-                    # The point of no return is durable before the public ingress opens.
+                if item[1] == "restore_jobs":
+                    # Scheduled writers can change the database before public ingress opens.
                     self.state["ponr"] = {"step": item[0], "at": self.now().isoformat()}
                     self.save()
                 self.run_step(*item)
-        except (Stop, Unknown):
+        except Unknown:
+            return self.finish("NEEDS_ATTENTION", False)
+        except Stop:
             return self.finish("NEEDS_ATTENTION" if self.state["ponr"] else "VERIFIED", False)
         return self.finish("DEPLOYED", True, release=True)
 
@@ -1738,13 +2004,17 @@ class Introduction:
         """RB-04: the recovery mapping is what normal operations resolve, then the previous version's own login, worklist
         and frame through the maintenance ingress; only then the jobs and the public ingress, and the public smoke. A
         refusal before the ingress opens keeps RESTORED (fence and lock kept; a corrected request may follow)."""
-        opened = False
+        opened = bool(self.state.get("recovery_reopen"))
         try:
             for item in STEPS["rollback_reopen"]:
-                if item[1] == "reopen_previous_ingress":
+                if item[1] == "restore_jobs_after_rollback":
                     opened = True
+                    self.state["recovery_reopen"] = {"step": item[0], "at": self.now().isoformat()}
+                    self.save()
                 self.run_step(*item)
-        except (Stop, Unknown):
+        except Unknown:
+            return self.finish("NEEDS_ATTENTION", False, extra={"rollback": "복구 재개 상태 불명: 자료와 잠금을 보존했습니다"})
+        except Stop:
             return self.finish("NEEDS_ATTENTION" if opened else "RESTORED", False,
                                extra={"rollback": "previous-version smoke or reopen failed; " +
                                                   ("ingress was opened" if opened else "ingress stays closed, lock kept")})
@@ -1766,8 +2036,10 @@ class Introduction:
     def phase_receipt(self):
         try:
             self.steps_of("receipt")
-        except (Stop, Unknown):
-            return self.finish("ROLLED_BACK", False, release=False)
+        except Unknown:
+            return self.finish("NEEDS_ATTENTION", False)
+        except Stop:
+            return self.finish("ROLLED_BACK", False, release=True)
         return self.finish("RECEIPTED", True, release=True, extra={"receipt": self.state["receipt"]})
 
 
@@ -2254,6 +2526,9 @@ class Runner:
             environment = dict(os.environ)
         if env:
             environment.update(env)
+        if args[:2] == ["docker", "compose"]:
+            # Compose must never inherit interpolation or COMPOSE_* values from the launcher's shell.
+            environment = compose_environment(env)
         identity = {}
         if args[0] == "git":
             command = [command[0], "-c", "core.hooksPath=" + os.devnull, "-c", "core.fsmonitor=false", *command[1:]]
@@ -2334,12 +2609,154 @@ def names_declared_list(raw, target):
     return not target["declared_overlays"] or parse_env(raw).get("COMPOSE_FILE") == declared_compose_file(target)
 
 
+def compose_environment(values=None):
+    """Only OS transport necessities and the pinned interpolation values enter Compose."""
+    if os.name == "posix":
+        environment = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "LANG": "C.UTF-8",
+                       "DOCKER_HOST": "unix:///var/run/docker.sock"}
+    else:
+        environment = {key: os.environ[key] for key in ("PATH", "SystemRoot", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP")
+                       if key in os.environ}
+    environment.update(values or {})
+    return environment
+
+
+class ComposeEntry:
+    """C-COMPOSE: a closed, immutable generation outside the checkout and run/secret lifetimes.
+
+    The pointer names a fully synced manifest. A partial generation can never become an implicit fallback. Source paths
+    are audit identities only: every invocation reads the pinned bytes, private env and generated runtime override.
+    """
+    def __init__(self, root):
+        self.root = Path(root).absolute()
+
+    @staticmethod
+    def protect(path, *, private=False):
+        path = Path(path)
+        require(path.is_absolute() and ".." not in path.parts, "Compose entry 경로가 절대 경로가 아닙니다")
+        for part in (*reversed(path.parents), path):
+            info = part.lstat()
+            require(not stat_module.S_ISLNK(info.st_mode) and not (getattr(info, "st_file_attributes", 0) & 0x400),
+                    "Compose entry 경로에 링크가 있습니다")
+            if os.name == "posix":
+                require(info.st_uid == 0 and not info.st_mode & 0o022, "Compose entry 조상의 root 소유권 또는 쓰기 권한이 잘못됐습니다")
+        info = path.lstat()
+        if private and os.name == "posix":
+            require(not info.st_mode & 0o077, "Compose entry 비밀 파일이 다른 계정에 열려 있습니다")
+        if not stat_module.S_ISDIR(info.st_mode):
+            require(stat_module.S_ISREG(info.st_mode) and info.st_nlink == 1, "Compose entry 파일 종류 또는 hardlink가 잘못됐습니다")
+        return path
+
+    @staticmethod
+    def sync(path):
+        if os.name == "posix":
+            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+
+    def write(self, path, raw):
+        self.protect(path.parent, private=True)
+        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600), "wb") as out:
+            out.write(raw)
+            out.flush()
+            os.fsync(out.fileno())
+
+    def load(self, pointer=None):
+        self.protect(self.root, private=True)
+        pointer = pointer or decode(self.protect(self.root / "active.json", private=True).read_bytes())
+        _keys(pointer, ("generation", "sha256"), "Compose entry pointer")
+        _str(pointer["generation"], HASH, "Compose generation")
+        _str(pointer["sha256"], HASH, "Compose manifest hash")
+        directory = self.protect(self.root / pointer["generation"], private=True)
+        raw = self.protect(directory / "manifest.json", private=True).read_bytes()
+        require(sha256_bytes(raw) == pointer["sha256"], "Compose entry manifest 해시가 다릅니다")
+        manifest = decode(raw)
+        _keys(manifest, ("schema", "generation", "repository", "project", "logical_files", "files", "runtime", "plan_sha256"), "Compose manifest")
+        require(type(manifest["schema"]) is int and manifest["schema"] == 1 and manifest["generation"] == pointer["generation"], "Compose entry 세대가 다릅니다")
+        _str(manifest["project"], PROJECT, "Compose project")
+        _str(manifest["plan_sha256"], HASH, "Compose plan")
+        _abs(manifest["repository"], "Compose checkout")
+        core = {name: manifest[name] for name in ("repository", "project", "logical_files", "files", "plan_sha256")}
+        require(sha256_bytes(canonical(core)) == pointer["generation"], "Compose entry 내용과 세대 신원이 다릅니다")
+        require(type(manifest["logical_files"]) is list and manifest["logical_files"], "Compose 논리 입력이 없습니다")
+        require(type(manifest["files"]) is dict and {"environment.json", "inputs.env", "runtime.yml"} <= set(manifest["files"]),
+                "Compose entry 구성 파일이 빠졌습니다")
+        for name, digest in manifest["files"].items():
+            require(Path(name).name == name and name not in (".", ".."), "Compose entry 파일명이 잘못됐습니다")
+            data = self.protect(directory / name, private=True).read_bytes()
+            require(sha256_bytes(data) == digest, "Compose entry 구성 파일 해시가 다릅니다")
+        require(set(p.name for p in directory.iterdir()) == set(manifest["files"]) | {"manifest.json"}, "Compose entry에 미선언 파일이 있습니다")
+        for item in manifest["logical_files"]:
+            _keys(item, ("logical", "pinned", "sha256"), "Compose source")
+            require(manifest["files"].get(item["pinned"]) == item["sha256"], "Compose 논리 입력과 고정 bytes가 다릅니다")
+        require([item["pinned"] for item in manifest["logical_files"]] ==
+                ["source-%02d.yml" % index for index in range(len(manifest["logical_files"]))], "Compose 고정 입력 순서가 다릅니다")
+        require(set(manifest["files"]) == {"environment.json", "inputs.env", "runtime.yml"} |
+                {item["pinned"] for item in manifest["logical_files"]}, "Compose 고정 파일 목록이 닫혀 있지 않습니다")
+        require(manifest["runtime"] == {"pinned": "runtime.yml", "sha256": manifest["files"]["runtime.yml"]},
+                "Compose runtime override 결속이 다릅니다")
+        values = decode((directory / "environment.json").read_bytes())
+        require(type(values) is dict and all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k) and type(v) is str and "\x00" not in v
+                                            for k, v in values.items()), "Compose 환경 입력이 잘못됐습니다")
+        require(not any(k.startswith("COMPOSE_") or k.startswith("DOCKER_") for k in values), "Compose 환경에 실행 제어 변수가 있습니다")
+        return pointer, manifest, values
+
+    def argv(self, args, pointer=None):
+        pointer, manifest, values = self.load(pointer)
+        directory = self.root / pointer["generation"]
+        command = ["docker", "compose", "--project-directory", manifest["repository"], "--project-name", manifest["project"],
+                   "--env-file", str(directory / "inputs.env")]
+        for item in manifest["logical_files"]:
+            command.extend(("-f", str(directory / item["pinned"])))
+        command.extend(("-f", str(directory / "runtime.yml")))
+        return [*command, *args], values
+
+    def publish(self, *, repository, project, sources, env_raw, values, runtime, plan_sha256, validate):
+        require(self.root != repository and Path(repository) not in self.root.parents, "Compose entry는 checkout 밖에 있어야 합니다")
+        if not self.root.exists():
+            self.protect(self.root.parent, private=True)
+            self.root.mkdir(mode=0o700)
+            self.sync(self.root.parent)
+        self.protect(self.root, private=True)
+        files = {"inputs.env": env_raw, "environment.json": canonical(values) + b"\n", "runtime.yml": runtime.encode("utf-8")}
+        logical = []
+        for index, (name, data) in enumerate(sources):
+            pinned = "source-%02d.yml" % index
+            files[pinned] = data
+            logical.append({"logical": name, "pinned": pinned, "sha256": sha256_bytes(data)})
+        core = {"repository": str(repository), "project": project, "logical_files": logical,
+                "files": {k: sha256_bytes(v) for k, v in files.items()}, "plan_sha256": plan_sha256}
+        generation = sha256_bytes(canonical(core))
+        manifest = {"schema": 1, "generation": generation, **core,
+                    "runtime": {"pinned": "runtime.yml", "sha256": core["files"]["runtime.yml"]}}
+        raw = canonical(manifest) + b"\n"
+        pointer = {"generation": generation, "sha256": sha256_bytes(raw)}
+        directory = self.root / generation
+        if not directory.exists():
+            directory.mkdir(mode=0o700)
+            for name, data in files.items():
+                self.write(directory / name, data)
+            self.write(directory / "manifest.json", raw)
+            self.sync(directory)
+            self.sync(self.root)
+        self.load(pointer)
+        command, effective = self.argv(["config", "--format", "json"], pointer)
+        validate(command, effective)
+        temporary = self.root / (".active-" + uuid.uuid4().hex)
+        self.write(temporary, canonical(pointer) + b"\n")
+        os.replace(temporary, self.root / "active.json")
+        self.sync(self.root)
+        return pointer
+
+
 class HostOps:
     """The docker/compose/git/crontab operations of each step, against one target manifest only. Every command goes
     through cmd(), which records it (records.command) whatever its outcome."""
 
     def __init__(self, *, target, plan, runner, records, env_next=None, token_reader=None, secure=None, owner=None,
-                 browser_cmd=None, repository_check=None):
+                 browser_cmd=None, repository_check=None, entry_root=None):
         self.t, self.plan, self.run, self.records = target, plan, runner, records
         self.owner = owner
         self.repo = Path(target["repository"])
@@ -2357,6 +2774,18 @@ class HostOps:
         # D05: a recovery phase whose declared overlay file changed or vanished uses the bytes pinned at the plan's first
         # phase instead ({declared file: pinned copy}); every compose command and digest then reads the copy.
         self.overlay_paths = {}
+        self.intro = None
+        default_root = records.directory.parent
+        if default_root.name == "emr-runs":
+            default_root = default_root.parent
+        self.entry = ComposeEntry(entry_root or default_root / "compose-entries")
+        transient_roots = [records.directory, records.secrets]
+        transient_roots.extend(parent for path in transient_roots.copy() for parent in path.parents
+                               if parent.name in ("emr-runs", "emr-secrets"))
+        for transient in transient_roots:
+            require(self.entry.root != transient.absolute() and transient.absolute() not in self.entry.root.parents,
+                    "지속 Compose entry를 일시 실행·비밀 자료 안에 둘 수 없습니다")
+        self.entry_inputs = None
 
     @property
     def unattended(self):
@@ -2368,6 +2797,43 @@ class HostOps:
         values), input hash, start, duration, outcome (exit code, timeout or launch error), output hashes. quiet: the
         command carries a secret on stdin, so its error text (which may quote that input) is never kept."""
         args = list(args)
+        worker = None
+        remove_after = False
+        pending = [row for row in self.intro.state.get("workers", {}).values() if row.get("state") != "QUIET"] if self.intro else []
+        own_launch = (len(pending) == 1 and pending[0]["state"] == "PLANNED" and pending[0]["kind"] == "compose-run"
+                      and args[:2] == ["docker", "compose"] and "run" in args and "--name" in args
+                      and args[args.index("--name") + 1] == pending[0]["resource"])
+        if pending and not own_launch and (mutating or args[:2] in (["docker", "run"], ["docker", "exec"])):
+            raise Unknown("이전 작업 종료가 미결이므로 새 작업·정리·복원을 시작할 수 없습니다")
+        if self.intro is not None and args[:2] in (["docker", "run"], ["docker", "exec"]):
+            kind = args[1]
+            if kind == "run":
+                remove_after = "--rm" in args
+                args = [arg for arg in args if arg != "--rm"]
+                if "--name" not in args:
+                    args[2:2] = ["--name", "kin-release-helper-" + uuid.uuid4().hex]
+                resource = args[args.index("--name") + 1]
+                args[2:2] = ["--label", "kin.emr-introduction=" + self.intro.plan_sha256[:16]]
+                require(self.inspect_container(resource) is None, "보조 작업 이름을 기존 컨테이너가 사용 중입니다")
+            else:
+                # Every exec in this module uses fixed, separate option arguments. Refuse unfamiliar forms rather
+                # than registering the wrong container and mistaking the client's death for the server's exit.
+                offset = 2
+                while offset < len(args) and args[offset].startswith("-"):
+                    option = args[offset]
+                    require(option in ("-i", "-t", "-it", "--interactive", "--tty", "-u", "--user", "-e", "--env", "-w", "--workdir"),
+                            "등록할 수 없는 Docker exec 옵션입니다")
+                    offset += 2 if option in ("-u", "--user", "-e", "--env", "-w", "--workdir") else 1
+                require(offset < len(args), "Docker exec 대상이 없습니다")
+                resource = args[offset]
+                prior = self.inspect_container(resource)
+                require(prior is not None and "ExecIDs" in prior and prior["ExecIDs"] in (None, []), "컨테이너의 기존 exec 작업 종료를 확인하지 못했습니다")
+            worker = self.register_worker(kind, resource, timeout)
+            if kind == "exec":
+                worker["container_id"] = prior["Id"]
+                self.intro.save()
+            else:
+                args[2:2] = ["--label", "kin.release.worker=" + worker["nonce"]]
         entry = {"argv": redact_argv(args), "env": sorted(env or {}), "mutating": mutating, "timeout_s": timeout,
                  "started_utc": utc_now().isoformat()}
         if input is not None:
@@ -2383,12 +2849,19 @@ class HostOps:
         except subprocess.TimeoutExpired:
             entry.update(outcome="timeout", seconds=round(time.monotonic() - started, 3))
             self.records.command(entry)
-            if mutating:
+            if worker is not None:
+                worker["state"] = "UNKNOWN"
+                self.intro.save()
+            if mutating or worker is not None:
                 raise Unknown(label + " timed out; its end state is unknown") from None
             raise Stop(label.strip() + " timed out") from None
         except OSError as error:
             entry.update(outcome="error", error=type(error).__name__, seconds=round(time.monotonic() - started, 3))
             self.records.command(entry)
+            if worker is not None:
+                worker["state"] = "UNKNOWN"
+                self.intro.save()
+                raise Unknown("등록한 작업의 시작·종료를 확인하지 못했습니다") from None
             raise Stop(label.strip() + " could not be started") from None
         entry.update(outcome="exit", exit=result.returncode, seconds=round(time.monotonic() - started, 3),
                      stdout=output_record(result.stdout if output is None else None), stderr=output_record(result.stderr))
@@ -2396,21 +2869,76 @@ class HostOps:
             entry["failure_log"] = self.records.log("failed-" + uuid.uuid4().hex[:12] + ".err",
                                                     (" ".join(redact_argv(args[:3])) + "\n").encode() + (result.stderr or b"")[-16384:])
         self.records.command(entry)
+        if worker is not None:
+            self.settle_worker(worker, result.returncode)
+            if remove_after and not worker.get("resource_absent"):
+                self.cmd(["docker", "rm", worker["resource"]], mutating=True)
+                require(self.inspect_container(worker["resource"]) is None, "종료한 보조 컨테이너의 제거를 확인하지 못했습니다")
+            if check and worker.get("server_exit") not in (None, 0):
+                raise Stop("보조 컨테이너의 실제 종료 코드가 실패입니다")
         if check and result.returncode:
             raise Stop(f"{label} failed (exit {result.returncode})")
         return result
+
+    def register_worker(self, kind, resource, timeout):
+        require(self.intro is not None, "작업 등록에 실행 문맥이 필요합니다")
+        if any(row.get("state") != "QUIET" for row in self.intro.state.get("workers", {}).values()):
+            raise Unknown("이전 작업 종료가 미결이므로 다음 작업을 등록할 수 없습니다")
+        nonce = uuid.uuid4().hex
+        worker = {"nonce": nonce, "kind": kind, "resource": resource, "state": "PLANNED",
+                  "plan_sha256": self.intro.plan_sha256, "request_sha256": self.intro.request_sha256,
+                  "step": self.records.context.get("step"), "attempt": int(self.intro.retrying),
+                  "deadline_utc": (utc_now() + timedelta(seconds=timeout)).isoformat()}
+        self.intro.state.setdefault("workers", {})[nonce] = worker
+        self.intro.state["host_changed"] = True
+        self.intro.save()
+        return worker
+
+    def settle_worker(self, worker, client_exit):
+        try:
+            item = self.inspect_container(worker["resource"])
+            if worker["kind"] == "exec":
+                require(item is not None and item["Id"] == worker["container_id"] and "ExecIDs" in item and item["ExecIDs"] in (None, []),
+                        "Docker exec 서버 작업 종료를 확인하지 못했습니다")
+                server_exit = client_exit
+            else:
+                if item is None and client_exit != 0:
+                    worker.update(state="QUIET", client_exit=client_exit, server_exit=None, resource_absent=True)
+                    self.intro.save()
+                    return
+                require(item is not None and item["State"]["Running"] is False and item["State"]["Restarting"] is False
+                        and item["State"].get("Status") in ("exited", "dead") and type(item["State"].get("ExitCode")) is int,
+                        "보조 컨테이너 종료를 확인하지 못했습니다")
+                labels = (item.get("Config") or {}).get("Labels") or {}
+                require(labels.get("kin.emr-introduction") == self.intro.plan_sha256[:16]
+                        and labels.get("kin.release.worker") == worker["nonce"],
+                        "보조 컨테이너가 등록한 실행의 자원이 아닙니다")
+                server_exit = item["State"]["ExitCode"]
+            worker.update(state="QUIET", client_exit=client_exit, server_exit=server_exit)
+            self.intro.save()
+        except Exception:
+            worker["state"] = "UNKNOWN"
+            self.intro.save()
+            raise Unknown("등록한 서버 작업의 종료를 확인하지 못했습니다") from None
 
     @contextmanager
     def bind(self):
         """ops_backup's helpers (captures, restores, catalogs) run against this repository through cmd(), recorded."""
         def run(args, *, output=None, input_file=None, timeout=600, check=True):
             return self.cmd(list(args), output=output, stdin=input_file, timeout=timeout, check=check)
-        previous = ops.ROOT, ops.run
+        previous = ops.ROOT, ops.run, ops.remove_owned, ops.remove_owned_if_present
+        def guarded_cleanup(function):
+            def cleanup(*args, **kwargs):
+                if self.intro is not None and any(row.get("state") != "QUIET" for row in self.intro.state.get("workers", {}).values()):
+                    raise Unknown("미결 작업이 있어 보조 자료 정리를 보류했습니다")
+                return function(*args, **kwargs)
+            return cleanup
         ops.ROOT, ops.run = self.repo, run
+        ops.remove_owned, ops.remove_owned_if_present = guarded_cleanup(previous[2]), guarded_cleanup(previous[3])
         try:
             yield
         finally:
-            ops.ROOT, ops.run = previous
+            ops.ROOT, ops.run, ops.remove_owned, ops.remove_owned_if_present = previous
 
     def text(self, args, **kwargs):
         return self.cmd(args, **kwargs).stdout.decode("utf-8").strip()
@@ -2422,14 +2950,31 @@ class HostOps:
         return out
 
     def compose(self, args, *, override=None, timeout=180, env=None, mutating=True, check=True, project=None, files=None):
+        pending = [row for row in self.intro.state.get("workers", {}).values() if row.get("state") != "QUIET"] if self.intro else []
+        own_launch = (len(pending) == 1 and pending[0]["state"] == "PLANNED" and pending[0]["kind"] == "compose-run"
+                      and args[:1] == ["run"] and "--name" in args
+                      and args[args.index("--name") + 1] == pending[0]["resource"])
+        if pending and not own_launch:
+            raise Unknown("작업 종료가 미결이므로 Compose entry와 서비스를 변경할 수 없습니다")
+        if self.entry_inputs is not None and files is None:
+            pointer = self.publish_entry(override, project)
+            command, environment = self.entry.argv(args, pointer)
+            # Helpers may pass their private container environment with -e; this is scoped to this invocation.
+            require(all(key not in environment or environment[key] == value for key, value in (env or {}).items()),
+                    "보조 작업 환경이 고정 Compose 입력을 덮으려 합니다")
+            environment.update(env or {})
+            return self.cmd(command, timeout=timeout, env=environment, mutating=mutating, check=check)
+        require(not mutating, "지속 Compose entry 준비 전에 서비스를 변경할 수 없습니다")
         command = ["docker", "compose", "--project-directory", str(self.repo), "--project-name", project or self.t["project"],
                    *(files if files is not None else self.compose_files()), *(["-f", "-"] if override else []), *args]
         environment = {**self.compose_env, **(env or {})} or None
         return self.cmd(command, input=override.encode() if override else None, timeout=timeout, env=environment,
                         mutating=mutating, check=check)
 
-    def pins(self, intro, *, maintenance=True):
+    def pins(self, intro, *, maintenance=None):
         """Image IDs for every service of the current checkout, the API release label, the fenced proxy ports."""
+        if maintenance is None:
+            maintenance = bool(intro.state.get("fenced")) and not (intro.state.get("ponr") or intro.state.get("recovery_reopen"))
         side = "release" if intro.state["checkout"] == "target" else "previous"
         images = intro.plan[side]["images"]
         services = {role: {"image": images[role]} for role in ROLES}
@@ -2439,15 +2984,30 @@ class HostOps:
             services["emr-provision"] = {"image": images["db"], "container_name": self.names["emr-provision"]}
         if maintenance:
             services["proxy"]["ports"] = ("!override", [self.t["ports"]["maintenance"]])
-        return override_yaml(services)
+        recovery = intro.state.get("recovery")
+        volumes = {"pg-db": recovery["pg"], "orthanc-db": recovery["orthanc"]} if recovery else None
+        return override_yaml(services, volumes=volumes)
 
     def inspect(self, role):
-        result = self.cmd(["docker", "inspect", self.names[role]], check=False)
-        if result.returncode:
+        return self.inspect_container(self.names[role])
+
+    def inspect_container(self, name):
+        # A failed inspect is not absence. First obtain a successful, exact-name daemon inventory.
+        listed = self.cmd(["docker", "container", "ls", "--all", "--filter", "name=^/" + name + "$", "--format", "{{.Names}}"])
+        names = listed.stdout.decode("utf-8").splitlines()
+        require(all(value == name for value in names) and len(names) <= 1, "컨테이너 목록 응답이 선언과 다릅니다")
+        if not names:
             return None
+        result = self.cmd(["docker", "inspect", name])
         items = json.loads(result.stdout)
-        require(type(items) is list and len(items) == 1, "Unexpected Docker inspection")
+        require(type(items) is list and len(items) == 1 and type(items[0]) is dict, "Docker 관측 응답을 해석할 수 없습니다")
         return items[0]
+
+    def volume_exists(self, name):
+        listed = self.text(["docker", "volume", "ls", "--filter", "name=^" + name + "$", "--format", "{{.Name}}"])
+        names = listed.splitlines()
+        require(all(value == name for value in names) and len(names) <= 1, "볼륨 목록 응답이 선언과 다릅니다")
+        return bool(names)
 
     def running(self):
         state = {}
@@ -2455,6 +3015,32 @@ class HostOps:
             item = self.inspect(role)
             state[role] = bool(item and item["State"]["Running"])
         return state
+
+    def verify_networks(self, inspections, model, image_volumes, *, roles=ROLES):
+        networks = {}
+        names = {name for item in inspections.values() for name in item["NetworkSettings"]["Networks"]}
+        for name in sorted(names):
+            result = decode(self.cmd(["docker", "network", "inspect", name]).stdout)
+            require(type(result) is list and len(result) == 1 and result[0].get("Name") == name,
+                    "network 관측 응답이 선언과 다릅니다")
+            networks[name] = result[0]
+        check_running(inspections, {**model, "network_observations": networks}, self.t, image_volumes, roles=roles)
+
+    def verify_running(self, model, *, absent_roles=()):
+        require(set(absent_roles) <= set(ROLES), "부재를 허용한 운영 대상이 잘못됐습니다")
+        inspections = {role: self.inspect(role) for role in ROLES}
+        require(all(item is not None or role in absent_roles for role, item in inspections.items()),
+                "허용하지 않은 운영 컨테이너가 없습니다")
+        inspections = {role: item for role, item in inspections.items() if item is not None}
+        require(all(item and item["State"]["Running"] and not item["State"]["Restarting"] for item in inspections.values()),
+                "allowlist 대조에 필요한 컨테이너가 실행 중이 아닙니다")
+        image_volumes = {}
+        for role, item in inspections.items():
+            image = decode(self.cmd(["docker", "image", "inspect", item["Image"]]).stdout)[0]
+            require(image["Id"] == model["images"][role], "고정 이미지 신원이 다릅니다")
+            image_volumes[role] = {path: {"read_only": False} for path in (image.get("Config") or {}).get("Volumes") or {}}
+        self.verify_networks(inspections, model, image_volumes, roles=tuple(inspections))
+        return inspections
 
     def psql(self, sql, database="kin"):
         return self.text(["docker", "exec", self.names["db"], "psql", "-X", "-U", "kin", "-d", database, "-v", "ON_ERROR_STOP=1",
@@ -2465,27 +3051,106 @@ class HostOps:
                              "AND backend_type='client backend' AND pid<>pg_backend_pid();"))
 
     def snapshot(self, intro):
-        """Around each step: which image each role runs (or none) and its Compose project, the checkout, the applied
-        history's head, the lock."""
-        running, projects = {}, {}
+        """C-OBS's mandatory observations, with transport failure retained separately from confirmed absence."""
+        self.intro = intro
+        fields, containers, inspected = {}, {}, {}
+
+        def read(name, action):
+            try:
+                fields[name] = fact(action())
+            except Exception as error:
+                fields[name] = observation_error(error)
+
         for role in ROLES:
-            item = self.inspect(role)
-            running[role] = item["Image"] if item and item["State"]["Running"] else None
-            projects[role] = ((item or {}).get("Config") or {}).get("Labels", {}).get("com.docker.compose.project") if item else None
-        try:
+            try:
+                item = inspected[role] = self.inspect(role)
+                if item is None:
+                    containers[role] = absent()
+                else:
+                    labels = item["Config"]["Labels"]
+                    containers[role] = fact({"id": item["Id"], "image": item["Image"], "running": item["State"]["Running"],
+                                             "restarting": item["State"]["Restarting"],
+                                             "project": labels["com.docker.compose.project"], "service": labels["com.docker.compose.service"]})
+            except Exception as error:
+                containers[role] = observation_error(error)
+        fields["containers"] = fact(containers)
+        read("checkout", lambda: {"sha": self.text(["git", "rev-parse", "HEAD"])})
+        read("compose_entry", lambda: self.entry_observation())
+        read("lock", lambda: {"owned": bool(intro.state.get("lock_token")) and lock_owned(self.repo, intro.state["lock_token"])})
+
+        def database():
+            item = inspected["db"]
+            require(item is not None and item["State"]["Running"] and not item["State"]["Restarting"], "데이터베이스가 실행 준비 상태가 아닙니다")
+            ready = self.cmd(["docker", "exec", self.names["db"], "pg_isready", "-h", "127.0.0.1", "-U", "kin"], timeout=20, check=False)
+            require(ready.returncode == 0, "데이터베이스가 연결을 받을 준비가 아닙니다")
             with self.bind():
                 rows = ops.migration_rows(self.names["db"])
-            history = {"count": len(rows), "last": rows[-1][0] if rows else None}
-        except Exception as error:
-            history = {"unobservable": type(error).__name__}
-        return {"running": running, "projects": projects, "head": self.text(["git", "rev-parse", "HEAD"]), "migrations": history,
-                "lock": lock_owned(self.repo, intro.state["lock_token"]) if intro.state.get("lock_token") else False}
+            return {"ready": True, "migrations": rows}
+
+        checkpoint = [self.records.context.get("step"), self.records.context.get("part")]
+        if containers["db"] == absent() and tuple(checkpoint) in DB_ABSENCE_CHECKPOINTS:
+            fields["database"] = absent()
+        else:
+            read("database", database)
+
+        def fences():
+            require(set(inspected) == set(ROLES), "writer 관측이 불완전합니다")
+            raw = self.cron()
+            cron = "not-managed"
+            if raw is not None:
+                _, tagged = self.cron_lines(raw, self.t["cron"]["tags"])
+                require(all(len(rows) == 1 for rows in tagged.values()), "예약 작업 목록이 선언과 다릅니다")
+                cron = "fenced" if all(rows[0].startswith(FENCED) for rows in tagged.values()) else "open"
+            proxy = inspected["proxy"]
+            ingress = "closed"
+            if proxy is not None and proxy["State"]["Running"]:
+                ports = self.resolved_public(intro)
+                if ports == [self.t["ports"]["maintenance"]]:
+                    ingress = "maintenance"
+                else:
+                    require(sorted(ports) == sorted(self.t["ports"]["public"]), "진입 포트가 선언과 다릅니다")
+                    ingress = "public"
+            clients = 0 if fields["database"] == absent() else self.db_clients()
+            return {"writers": {r: bool(inspected[r] and inspected[r]["State"]["Running"]) for r in WRITERS},
+                    "cron": cron, "ingress": ingress, "db_clients": clients}
+
+        read("fences", fences)
+        def workers():
+            pending = self.one_shots_alive(intro)
+            return {"quiet": not pending, "pending": pending}
+        read("workers", workers)
+        return {"schema": 1, "checkpoint": checkpoint, "facts": fields}
+
+    def entry_observation(self):
+        if self.entry_inputs is not None or (self.entry.root / "active.json").exists():
+            pointer, _, _ = self.entry.load()
+            return pointer
+        return {"generation": "admission", "sha256": self.compose_digest_now()}
+
+    def publish_entry(self, runtime=None, project=None):
+        require(self.intro is not None and self.entry_inputs is not None, "Compose entry 입력이 준비되지 않았습니다")
+        inputs = self.entry_inputs
+        if runtime is None:
+            runtime = self.pins(self.intro)
+        project = project or (self.intro.state.get("recovery") or {}).get("project") or self.t["project"]
+        def validate(command, effective):
+            result = self.cmd(command, env=effective, timeout=60, quiet=True)
+            require(type(decode(result.stdout)) is dict, "고정 Compose config가 유효하지 않습니다")
+        self.intro.state["host_changed"] = True
+        self.intro.save()
+        pointer = self.entry.publish(repository=self.repo, project=project, runtime=runtime,
+                                     plan_sha256=self.intro.plan_sha256, validate=validate, **inputs)
+        self.intro.state["compose_entry"] = {**pointer, "root": str(self.entry.root)}
+        self.intro.state["entry_checkout"] = self.intro.state["checkout"]
+        self.intro.save()
+        return pointer
 
     def one_shots_alive(self, intro):
         """Every one-shot container of this release that still exists (running or not removed yet)."""
         out = self.text(["docker", "ps", "-a", "--filter", "label=kin.emr-introduction=" + intro.plan_sha256[:16],
                          "--format", "{{.Names}} {{.State}}"])
-        return [line for line in out.splitlines() if line.strip() and not line.endswith(" exited")]
+        pending = [row["nonce"] for row in intro.state.get("workers", {}).values() if row.get("state") != "QUIET"]
+        return pending + [line for line in out.splitlines() if line.strip() and not line.endswith(" exited")]
 
     def wait(self, predicate, seconds, message):
         deadline = time.monotonic() + seconds
@@ -2515,34 +3180,40 @@ class HostOps:
         self.wait(ready, seconds, message)
 
     def one_shot(self, intro, service, args, *, timeout, env=None, entrypoint=None, name, worker=True, project=None):
-        """A named, labelled one-shot (never --rm before its exit is recorded). A worker (anything that writes) carries
-        this release's label, so a later rollback can see whether it may still be alive; its client timeout is an
-        unknown end. A read-only helper that times out is removed and is a settled refusal. The result carries both the
-        client's and the container's own exit; callers require both."""
+        """Every one-shot is registered, including reads: a timed-out CLI cannot prove its daemon worker ended.
+        Keep the container until its terminal state is observed. Callers require both client and server exit codes."""
+        if any(row.get("state") != "QUIET" for row in intro.state.get("workers", {}).values()):
+            raise Unknown("이전 작업 종료가 미결이므로 보조 작업을 시작할 수 없습니다")
         token = uuid.uuid4().hex[:12]
         container = self.t["project"] + "-" + name + "-" + token
         command = ["run", "--no-deps", "-T", "--name", container, "--label", "kin.ops.run=" + token]
-        if worker:
-            command += ["--label", "kin.emr-introduction=" + intro.plan_sha256[:16]]
+        command += ["--label", "kin.emr-introduction=" + intro.plan_sha256[:16]]
         for key in (env or {}):
             command += ["-e", key]
         if entrypoint:
             command += ["--entrypoint", entrypoint]
         command += [service, *args]
+        require(self.inspect_container(container) is None, "보조 작업 이름을 기존 컨테이너가 사용 중입니다")
+        registered = self.register_worker("compose-run", container, timeout)
+        command[1:1] = ["--label", "kin.release.worker=" + registered["nonce"]]
         try:
             result = self.compose(command, override=self.pins(intro), timeout=timeout, env=env, check=False, mutating=True, project=project)
         except Unknown:
-            state = self.cmd(["docker", "inspect", "--format", "{{.State.Running}}", container], check=False)
-            alive = state.returncode == 0 and state.stdout.decode().strip() == "true"
-            if not worker:
-                self.cmd(["docker", "rm", "-f", container], check=False)
-                raise Stop(name + " helper timed out") from None
-            raise Unknown(name + (" worker is still running" if alive else " ended without a recorded exit")) from None
+            registered["state"] = "UNKNOWN"
+            self.intro.save()
+            raise Unknown("보조 작업 종료 불명: 컨테이너와 작업 자료를 보존했습니다") from None
+        except Stop:
+            # A refused config/launch is settled only if a successful daemon query proves that the named worker
+            # never appeared (or attests its terminal state). An unavailable query remains UNKNOWN.
+            registered["launch_refused"] = True
+            self.settle_worker(registered, None)
+            raise
+        self.settle_worker(registered, result.returncode)
         logs = {"stdout": self.records.log(container + ".out", result.stdout), "stderr": self.records.log(container + ".err", result.stderr)}
-        exited = self.cmd(["docker", "inspect", "--format", "{{.State.ExitCode}}", container], check=False)
-        exit_code = int(exited.stdout.decode().strip()) if exited.returncode == 0 and exited.stdout.decode().strip().isdigit() else None
-        if exit_code is not None:
-            self.cmd(["docker", "rm", container], check=False)
+        exit_code = registered["server_exit"]
+        if not registered.get("resource_absent"):
+            self.cmd(["docker", "rm", container], mutating=True)
+            require(self.inspect_container(container) is None, "종료한 보조 컨테이너의 제거를 확인하지 못했습니다")
         return {"container": container, "exit": result.returncode, "container_exit": exit_code, "logs": logs, "stdout": result.stdout}
 
     def helper(self, intro, script, *, env=None, name="helper", timeout=120, args=()):
@@ -2558,13 +3229,16 @@ class HostOps:
             raw = self.compose(["config", "--format", "json"], override=self.pins(intro, maintenance=maintenance), timeout=60,
                                mutating=False, project=project).stdout
         else:
-            raw = self.cmd(["docker", "compose", "--project-directory", str(self.repo), *self.compose_files(), "config", "--format", "json"],
-                           timeout=60, env=dict(self.compose_env) or None).stdout
+            command, environment = self.entry.argv(["config", "--format", "json"])
+            raw = self.cmd(command, timeout=60, env=environment).stdout
         model = json.loads(raw)
         services = {name: service or {} for name, service in (model.get("services") or {}).items() if name in (*ROLES, *ONE_SHOTS)}
 
         def port(item):
-            return (item.get("host_ip") + ":" if item.get("host_ip") else "") + str(item.get("published")) + ":" + str(item.get("target"))
+            protocol = item.get("protocol", "tcp")
+            require(protocol in ("tcp", "udp", "sctp"), "Compose 게시 protocol을 해석할 수 없습니다")
+            return ((item.get("host_ip") + ":" if item.get("host_ip") else "") + str(item.get("published")) + ":" + str(item.get("target"))
+                    + ("/" + protocol if protocol != "tcp" else ""))
 
         def setting(service, key):
             value = (services.get(service, {}).get("environment") or {}).get(key)
@@ -2574,7 +3248,8 @@ class HostOps:
                 "volumes": {key: (value or {}).get("name") for key, value in (model.get("volumes") or {}).items()},
                 "networks": {key: (value or {}).get("name") for key, value in (model.get("networks") or {}).items()},
                 "mounts": {name: [{"type": item.get("type"), "source": item.get("source"), "target": item.get("target"),
-                                   "read_only": item.get("read_only") is True}
+                                   "read_only": item.get("read_only") is True,
+                                   **{key: item[key] for key in ("bind", "volume", "tmpfs", "consistency") if key in item}}
                                   for item in service.get("volumes") or []] for name, service in services.items()},
                 "ports": {name: [port(item) for item in service.get("ports") or []] for name, service in services.items()},
                 "images": {name: service.get("image") for name, service in services.items()},
@@ -2631,13 +3306,22 @@ class HostOps:
 
     def hold(self, directory, plan_sha256, on):
         path = Path(directory) / ops.HOLD_FILE
+        expected = {"plan_sha256": plan_sha256, "reason": "emr-introduction"}
+        if path.exists() or path.is_symlink():
+            require(not path.is_symlink() and path.is_file() and path.stat().st_nlink == 1
+                    and decode(path.read_bytes()) == expected, "다른 실행의 보존 표식을 변경할 수 없습니다")
         if on:
-            path.write_text(json.dumps({"plan_sha256": plan_sha256, "reason": "emr-introduction"}) + "\n", encoding="utf-8")
-            if os.name == "posix":
-                path.chmod(0o600)
-            follow_folder_owner(path)
+            temporary = path.with_name(".hold-" + uuid.uuid4().hex)
+            with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600), "wb") as stream:
+                stream.write(canonical(expected) + b"\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            follow_folder_owner(temporary)
+            os.replace(temporary, path)
+            ComposeEntry.sync(path.parent)
         elif path.exists():
             path.unlink()
+            ComposeEntry.sync(path.parent)
 
     def stop_writers(self):
         for role in FENCE_ORDER:
@@ -2777,6 +3461,33 @@ class HostOps:
         L-09b removed the proxy) uses the value resolved before; a container that exists must still carry that value. A
         required variable that neither a container nor the kept values hold is a refusal. D28: before the seed no clone
         stack runs, so the clone's .env must carry every required variable; the refusal names each one and its files."""
+        self.intro = intro
+        self.entry_inputs = None
+        saved = intro.state.get("compose_entry")
+        if saved and intro.state.get("entry_checkout") == intro.state["checkout"]:
+            pointer = {key: saved[key] for key in ("generation", "sha256")}
+            _, manifest, values = self.entry.load(pointer)
+            require(manifest["plan_sha256"] == intro.plan_sha256 and manifest["repository"] == str(self.repo),
+                    "지속 Compose 입력이 현재 계획과 다릅니다")
+            directory = self.entry.root / pointer["generation"]
+            self.entry_inputs = {"sources": [(row["logical"], (directory / row["pinned"]).read_bytes()) for row in manifest["logical_files"]],
+                                 "env_raw": (directory / "inputs.env").read_bytes(), "values": values}
+            self.overlay_paths = {row["logical"]: directory / row["pinned"] for row in manifest["logical_files"]
+                                  if Path(row["logical"]).is_absolute()}
+            self.compose_env = values
+            for name, record in intro.state.get("compose_env", {}).items():
+                require(name in values and type(record.get("places")) is list, "확정 환경값의 원본 위치 기록이 없습니다")
+                for kind, service, key in record["places"]:
+                    item = self.inspect(service)
+                    if item is None:
+                        continue
+                    if kind == "environment":
+                        present = dict(row.split("=", 1) for row in item["Config"].get("Env") or [] if "=" in row)
+                        require(present.get(key) == values[name], "확정한 Compose 환경값과 실제 컨테이너 값이 다릅니다")
+                    else:
+                        sources = [host_bind_source(m["Source"], self.t["repository"]) for m in item.get("Mounts") or [] if m.get("Destination") == key]
+                        require(sources == [values[name]], "확정한 Compose mount와 실제 컨테이너 경로가 다릅니다")
+            return {"immutable_entry": pointer}
         overlays = self.declared_overlay_facts(intro)
         files = list(self.t["compose_files"])
         texts = [self.compose_path(item).read_bytes() for item in files]
@@ -2834,7 +3545,7 @@ class HostOps:
                     require(name in kept, "Unresolvable compose variable: " + name)
                     resolved[name] = kept[name]
                     origin = ["kept"]
-                record[name] = {"sha256": sha256_bytes(resolved[name].encode("utf-8")), "from": origin}
+                record[name] = {"sha256": sha256_bytes(resolved[name].encode("utf-8")), "from": origin, "places": places}
         known = intro.state.setdefault("compose_env", {})
         for name, entry in record.items():
             require(known.get(name, entry)["sha256"] == entry["sha256"], "A resolved compose variable changed: " + name)
@@ -2849,7 +3560,34 @@ class HostOps:
         # resolution, the phase start's and each later one (the target checkout, a revert, a rollback).
         intro.records.journal({"event": "compose-environment", "plan_sha256": getattr(intro, "plan_sha256", None),
                                "phase": getattr(intro, "phase", None), **out})
+        self.prepare_entry(intro)
         return out
+
+    def prepare_entry(self, intro):
+        """Freeze all effective interpolation inputs using Compose's own dotenv evaluator, before service mutation."""
+        command = ["docker", "compose", "--project-directory", str(self.repo), "--project-name", self.t["project"],
+                   "--env-file", str(self.env_file()), *self.compose_files(), "config", "--environment"]
+        raw = self.cmd(command, env=dict(self.compose_env), quiet=True).stdout.decode("utf-8")
+        values = {}
+        for line in raw.splitlines():
+            name, separator, value = line.partition("=")
+            require(separator and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) and name not in values,
+                    "Compose 환경값의 경계를 확정할 수 없습니다")
+            values[name] = value
+        values = {k: v for k, v in values.items() if not k.startswith(("COMPOSE_", "DOCKER_"))}
+        sources = [(name, self.compose_path(name).read_bytes()) for name in self.t["compose_files"]]
+        # Compare actual rendering with the frozen environment, including $, quotes, spaces and empty values.
+        rendering = [*command[:-2], "config", "--format", "json"]
+        before = self.cmd(rendering, env=dict(self.compose_env), quiet=True).stdout
+        after = self.cmd(rendering, env=values, quiet=True).stdout
+        require(before == after, "Compose 환경값 고정 전후 config가 다릅니다")
+        unresolved = self.cmd([*command[:-2], "config", "--no-env-resolution", "--format", "json"],
+                              env=values, quiet=True).stdout
+        require(not any(service.get("env_file") for service in decode(unresolved).get("services", {}).values()),
+                "v1 Compose bundle은 외부 service env_file을 지원하지 않습니다")
+        self.entry_inputs = {"sources": sources, "env_raw": self.env_file().read_bytes(), "values": values}
+        self.publish_entry(self.pins(intro, maintenance=bool(intro.state.get("fenced"))
+                                     and not (intro.state.get("ponr") or intro.state.get("recovery_reopen"))))
 
     # ── IRT-13 / IRT-11: recorded pre-fence corrections of the checkout ──
     def checkout_mode(self, intro):
@@ -2900,7 +3638,12 @@ class HostOps:
             done.append({"path": entry["path"], "state": "restored to the commit", "modified_sha256": sha256_bytes(current),
                          "config_sha256": {"current_files": sha256_bytes(before), "commit_with_overlay": sha256_bytes(candidate),
                                            "declared_files": sha256_bytes(after)}})
-        return {"reconciled": done, "ordinary_entry": self.ordinary_entry()}
+        ordinary = self.ordinary_entry()
+        # L-00b changed the source bytes. The operational generation must contain the reconciled sources and env,
+        # rather than the pre-correction copy prepared at phase admission.
+        self.intro = intro
+        self.prepare_entry(intro)
+        return {"reconciled": done, "ordinary_entry": ordinary}
 
     def ordinary_entry(self):
         """IRT2-10, the ordinary entry: with a declared external overlay, the checkout's .env names the declared compose
@@ -2918,11 +3661,10 @@ class HostOps:
         return {"compose_file": "written", "env_sha256": {"before": sha256_bytes(raw), "after": sha256_bytes(wanted)}}
 
     def ordinary_entry_kept(self):
-        """The .env still names the declared list (reopen and rollback_reopen check it before anything opens)."""
-        if self.t["declared_overlays"]:
-            require(parse_env(self.env_file().read_bytes()).get("COMPOSE_FILE") == declared_compose_file(self.t),
-                    "The checkout's .env does not name the declared compose files (COMPOSE_FILE)")
-        return {"compose_file": "declared list" if self.t["declared_overlays"] else "not needed"}
+        pointer, manifest, _ = self.entry.load()
+        require([row["logical"] for row in manifest["logical_files"]] == self.t["compose_files"], "지속 Compose 입력 순서가 다릅니다")
+        require(manifest["repository"] == str(self.repo), "지속 Compose entry가 다른 checkout을 가리킵니다")
+        return {"entry": str(self.entry.root), **pointer, "supported": "보호된 공통 entry만 사용"}
 
     def token_since(self, moment, what):
         """The smoke token, issued (iat) no earlier than the given moment: a login made for this attempt, never an older one."""
@@ -2973,8 +3715,8 @@ class HostOps:
             created = self.smoke_admin(intro, "create-member", {"username": username, "roles": spec["roles"], "group": spec["group"],
                                                                 "marker": marker}, password=password)
         except Stop:
-            # Refused (e.g. the name is taken) or ended unknown: no login will use the password; a member this run made
-            # anyway is found by its marker and removed by the cleanup.
+            # A settled refusal cannot use this password. UNKNOWN is a different exception and keeps the credentials
+            # with the registered worker for diagnosis; cleanup may run only after that worker is known to have ended.
             intro.records.discard_secret(credentials)
             raise
         intro.state["smoke_member"].update(id=created["id"], created_at=utc_now().isoformat())
@@ -2988,19 +3730,36 @@ class HostOps:
         hashes only). D17: the browser runs as its own process tree, which is killed whole on the timeout and after the
         browser ended (no Chromium child outlives it)."""
         timeout = timeout or BROWSER_TIMEOUT_S
+        # The legacy POSIX process group cannot attest detached descendants. Part B supplies the systemd/cgroup
+        # supervisor; until installed, refuse before launch rather than recording that unobserved tree as QUIET.
+        require(os.name == "nt", "Linux browser의 systemd/cgroup 감독 설치가 완료되지 않았습니다")
+        worker = self.register_worker("browser", "kin-browser-" + uuid.uuid4().hex, timeout)
         entry = {"argv": redact_argv(self.browser_cmd), "env": [], "mutating": False, "timeout_s": timeout, "started_utc": utc_now().isoformat(),
                  "input": output_record(json.dumps(spec).encode()), "browser": what}
         started = time.monotonic()
         try:
             code, stdout, stderr = run_tree(self.browser_cmd, input=json.dumps(spec).encode(), timeout=timeout)
         except subprocess.TimeoutExpired:
+            worker.update(state="QUIET", supervisor="windows-job", termination="confirmed-timeout")
+            self.intro.save()
             entry.update(outcome="timeout", seconds=round(time.monotonic() - started, 3), tree="killed")
             self.records.command(entry)
-            raise Stop("The smoke browser timed out") from None
+            raise Stop("smoke browser가 제한 시간 안에 끝나지 않아 전체 Job 종료를 확인했습니다") from None
         except OSError as error:
+            # Assignment/spawn may have partly succeeded. Only an affirmative supervisor result permits cleanup.
+            worker.update(state="UNKNOWN")
+            self.intro.save()
             entry.update(outcome="error", error=type(error).__name__, seconds=round(time.monotonic() - started, 3))
             self.records.command(entry)
-            raise Stop("The smoke browser could not be started") from None
+            raise Unknown("smoke browser의 시작·전체 종료를 확인하지 못했습니다") from None
+        except Exception:
+            worker.update(state="UNKNOWN")
+            self.intro.save()
+            entry.update(outcome="unknown", seconds=round(time.monotonic() - started, 3))
+            self.records.command(entry)
+            raise Unknown("smoke browser의 전체 종료를 확인하지 못했습니다") from None
+        worker.update(state="QUIET", supervisor="windows-job", client_exit=code, termination="confirmed")
+        self.intro.save()
         entry.update(outcome="exit", exit=code, seconds=round(time.monotonic() - started, 3),
                      stdout=output_record(stdout), stderr=output_record(stderr))
         self.records.command(entry)
@@ -3013,6 +3772,15 @@ class HostOps:
             raise Stop("The smoke browser " + what + " failed" + (": " + reason[:160] if type(reason) is str else ""))
         return result_line(stdout)
 
+    def cleanup_browser_profile(self, profile):
+        pending = [item for item in self.intro.state.get("workers", {}).values() if item.get("state") != "QUIET"]
+        if pending:
+            raise Unknown("작업 종료가 미결이므로 browser profile을 보존했습니다")
+        try:
+            remove_profile(profile)
+        except Exception:
+            raise Unknown("browser profile 정리를 확인하지 못했습니다") from None
+
     def browser_check(self, intro):
         """D01 (L-01, before the fence): the policy's browser command is an executable file and the browser it runs opens a
         blank page in a new profile folder and ends with exit 0 within BROWSER_PROBE_S; the browsers' folder it names
@@ -3024,7 +3792,7 @@ class HostOps:
         try:
             value = self.run_browser({"probe": True, "profile_dir": str(profile)}, timeout=BROWSER_PROBE_S, what="probe")
         finally:
-            remove_profile(profile)
+            self.cleanup_browser_profile(profile)
         require(type(value) is dict and value.get("probe") == "ok" and type(value.get("browser")) is str,
                 "The smoke browser did not open a blank page")
         return {"program": str(program), "browser": value["browser"][:80], "browsers_path": value.get("browsers_path")}
@@ -3052,7 +3820,7 @@ class HostOps:
                                       "study_uid": frame_study(intro.plan) if product_session else None},
                                      timeout=timeout)
         finally:
-            remove_profile(profile)
+            self.cleanup_browser_profile(profile)
         require(type(value) is dict and value.get("flow") == "authorization_code+S256" and type(value.get("refresh_token")) is str,
                 "The smoke browser did not return an authorization-code login")
         token = token_valid({"access_token": value.get("access_token"), "subject": value.get("subject")})
@@ -3067,6 +3835,8 @@ class HostOps:
         require(code in (200, 204), "The smoke login session could not be ended")
 
     def remove_smoke_member_now(self, intro):
+        if any(row.get("state") != "QUIET" for row in intro.state.get("workers", {}).values()):
+            raise Unknown("작업 종료가 미결이므로 임시 계정과 비밀 자료를 보존했습니다")
         member = intro.state.get("smoke_member")
         if member and not member.get("deleted_at"):
             clients = sorted({*(member.get("client_ids") or []), *([member["client_id"]] if member.get("client_id") else [])})
@@ -3162,10 +3932,16 @@ class HostOps:
             running[role], restarting[role], images[role] = item["State"]["Running"], bool(item["State"].get("Restarting")), item["Image"]
             inspections[role] = item
         # IRT2-02: the running containers themselves are the checked model's (project, mounts, networks, ports).
-        check_running(inspections, model, self.t)
+        image_volumes = {}
+        for role, item in inspections.items():
+            image = json.loads(self.text(["docker", "image", "inspect", item["Image"]]))[0]
+            require(image.get("Id") == intro.plan["previous"]["images"][role], "고정 이미지 신원이 다릅니다: " + role)
+            image_volumes[role] = {path: {"read_only": False} for path in (image.get("Config") or {}).get("Volumes") or {}}
+        check_running(inspections, model, self.t, image_volumes)
+        self.verify_networks(inspections, model, image_volumes)
         api = self.inspect("api")
         existing = [name for name in (self.t["volumes"]["emr_access"], self.t["volumes"]["emr_state"])
-                    if self.cmd(["docker", "volume", "inspect", name], check=False).returncode == 0]
+                    if self.volume_exists(name)]
         cron = "not-managed"
         raw = self.cron()
         if raw is not None:
@@ -3333,7 +4109,17 @@ class HostOps:
 
     def public_check_previous(self, intro):
         # Nothing in the database changed: the previous containers resumed as they were (health and refusal only).
+        self.keep_operational_volumes(intro)
         return health_check(self.t["origin"], ca_file=self.t["ca_file"], member_rights=False)
+
+    def keep_operational_volumes(self, intro):
+        """A later recreate must not let Compose silently replace a missing data volume with an empty one."""
+        model = self.resolved(intro, pinned=False)
+        identities = {name: self.volume_identity(name) for name in sorted(set(model["volumes"].values()))}
+        require(all(type(item.get("created")) is str and item["created"] for item in identities.values()),
+                "운영 인계 volume의 생성 신원을 확인하지 못했습니다")
+        intro.state["operational_volumes"] = identities
+        intro.save()
 
     # ── introduce ──
     def recheck_fence(self, intro):
@@ -3668,8 +4454,9 @@ class HostOps:
         api = self.inspect("api")
         pre.check_introduced_api(api, name=self.names["api"], image=intro.plan["release"]["images"]["api"], release=intro.plan["release"]["sha"],
                                  working_dir=str(self.repo), state_volume=self.t["volumes"]["emr_state"])
-        model = self.resolved(intro)
+        model = self.resolved(intro, pinned=False)
         check_resolved(model, self.t, target_checkout=True, maintenance=True, images=intro.plan["release"]["images"])
+        self.verify_running(model)
         image = json.loads(self.text(["docker", "image", "inspect", intro.plan["release"]["images"]["api"]]))[0]
         image_names = {item.split("=", 1)[0] for item in (image.get("Config") or {}).get("Env") or []}
         names = {item.split("=", 1)[0] for item in api["Config"].get("Env") or []}
@@ -3729,10 +4516,14 @@ class HostOps:
         for port, values in bindings.items():
             for value in values or []:
                 host = value.get("HostIp") or ""
-                out.append((host + ":" if host and host not in ("0.0.0.0", "::") else "") + value.get("HostPort") + ":" + port.split("/")[0])
+                target, protocol = port.split("/")
+                require(protocol in ("tcp", "udp", "sctp"), "게시 protocol을 해석할 수 없습니다")
+                out.append((host + ":" if host and host not in ("0.0.0.0", "::") else "") + value.get("HostPort") + ":" + target
+                           + ("/" + protocol if protocol != "tcp" else ""))
         return out
 
     def public_smoke(self, intro):
+        self.keep_operational_volumes(intro)
         if self.unattended:
             # The authenticated checks ran fenced through the same proxy configuration; the smoke member is gone, so the
             # public ingress proves health, the unauthenticated refusal and the realm's sign-in for this origin.
@@ -3747,22 +4538,34 @@ class HostOps:
     def classify(self, intro):
         alive = self.one_shots_alive(intro)
         require(not alive, "A one-shot worker may still be alive; observe only")
+        require(intro.state.get("db_changed") is True and not intro.state.get("ponr")
+                and not intro.state.get("recovery_reopen") and not intro.state.get("unknown_hold")
+                and not intro.state.get("rollback_attempted"), "데이터 복원 admission 상태가 아닙니다")
+        b0 = intro.state.get("b0")
+        require(type(b0) is dict and (b0.get("restore_check") or {}).get("success") is True,
+                "B0의 완전한 복원 확인이 없습니다")
+        directory = Path(b0["dir"])
+        hold = directory / ops.HOLD_FILE
+        require(not directory.is_symlink() and not hold.is_symlink() and hold.is_file() and hold.stat().st_nlink == 1,
+                "B0 보존 표식이 없거나 경로가 안전하지 않습니다")
+        require(decode(hold.read_bytes()) == {"plan_sha256": intro.plan_sha256, "reason": "emr-introduction"},
+                "B0 보존 표식이 현재 실행에 속하지 않습니다")
+        with self.bind():
+            ops.validate_held(directory, b0["manifest_sha256"])
+        require(shutil.disk_usage(intro.plan["backup_root"]).free >= intro.plan["budget"]["min_free_bytes"],
+                "실패 자료 보존과 복원에 필요한 여유 공간이 없습니다")
         self.stop_writers()
         observed = self.freeze_without_cron(intro)
-        return {"workers": "quiet", "freeze": observed}
+        return {"workers": "quiet", "freeze": observed, "held_b0": b0["manifest_sha256"], "reserve": "checked"}
 
     def freeze_without_cron(self, intro):
-        running = self.running()
-        observed = {"running": running, "db_clients": self.db_clients(), "cron": "fenced" if self.t["cron"] else "not-managed",
-                    "one_shots": self.one_shots_alive(intro)}
-        pre.check_write_freeze(observed)
-        return observed
+        return self.freeze(intro)
 
     def preserve_failed(self, intro):
         """Bfail: the failed database (with whatever EMR state exists) and the identities of every volume this attempt
         touched. Nothing is deleted or reused."""
         state_volume = self.t["volumes"]["emr_state"]
-        has_state = self.cmd(["docker", "volume", "inspect", state_volume], check=False).returncode == 0
+        has_state = self.volume_exists(state_volume)
         directory = Path(intro.plan["backup_root"]) / ("emr-bfail-" + utc_now().strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8])
         directory.mkdir(mode=0o700, parents=False)
         components = {}
@@ -3781,7 +4584,7 @@ class HostOps:
                                        "--entrypoint", "tar", intro.plan["release"]["images"]["db"], "-czf", "-", "-C", "/source", "."],
                                       timeout=1800, output=handle)
         identities = {key: self.volume_identity(name) for key, name in self.t["volumes"].items()
-                      if self.cmd(["docker", "volume", "inspect", name], check=False).returncode == 0}
+                      if self.volume_exists(name)}
         for path in sorted(directory.iterdir()):
             if os.name == "posix":
                 path.chmod(0o600)
@@ -3828,20 +4631,38 @@ class HostOps:
         project = self.recovery_project(intro)
         recovery = {"project": project, "pg": project + "_pg-db", "orthanc": project + "_orthanc-db", "persisted": False}
         for name in (recovery["pg"], recovery["orthanc"]):
-            require(self.cmd(["docker", "volume", "inspect", name], check=False).returncode != 0, "A recovery volume name is taken: " + name)
+            require(not self.volume_exists(name), "A recovery volume name is taken: " + name)
         # Durable before creation: a failed restore still names exactly the project and volumes it made.
         intro.state["recovery"] = recovery
         intro.save()
         for key, name in (("pg-db", recovery["pg"]), ("orthanc-db", recovery["orthanc"])):
             self.cmd(["docker", "volume", "create", "--label", "com.docker.compose.project=" + project, "--label", "com.docker.compose.volume=" + key,
                       "--label", "kin.ops.recovery=" + intro.plan_sha256[:16], name], mutating=True)
+        # Only this named interval admits absence. Persist the exact target before removal; an interrupted interval
+        # remains a running/unknown phase and is never interpreted as permission to repeat the restore.
+        intro.state["db_transition"] = {"step": "RB-02", "container": self.names["db"],
+                                        "volume": recovery["pg"], "state": "REMOVING"}
+        intro.save()
         self.remove_container("db")
+        checkpoint = intro.observe("RB-02", "db-removed")
+        intro.records.put("checkpoint-rb02-db-removed.json", checkpoint)
+        if not workers_quiet(checkpoint):
+            raise Unknown("DB 제거 뒤 생성 전 필수 관측을 확인하지 못했습니다")
+        facts = checkpoint["facts"]
+        fence = facts["fences"]["value"]
+        require(facts["database"] == absent() and facts["lock"]["value"]["owned"]
+                and not any(fence["writers"].values()) and fence["cron"] in ("fenced", "not-managed")
+                and fence["ingress"] == "closed", "DB 생성 전 부재·writer 차단 상태가 다릅니다")
+        intro.state["db_transition"]["state"] = "ABSENT_CONFIRMED"
+        intro.save()
         recovery_env = set_env_line(previous_env, "COMPOSE_PROJECT_NAME", project)
         self.write_env(recovery_env)
         recovery.update(env_sha256=sha256_bytes(recovery_env), compose_sha256=self.compose_digest_now())
         intro.save()
         self.compose(["up", "-d", "--no-deps", "--no-build", "--pull", "never", "db"], override=self.pins(intro), timeout=180, project=project)
         self.db_ready(180, "Recovery database did not become ready")
+        intro.state["db_transition"]["state"] = "READY"
+        intro.save()
         db = self.inspect("db")
         require({m.get("Destination"): m.get("Name") for m in db.get("Mounts") or []}.get("/var/lib/postgresql/data") == recovery["pg"],
                 "Recovery database is not on its fresh volume")
@@ -3874,10 +4695,6 @@ class HostOps:
         for role in ("keycloak", "orthanc", "api", "proxy"):
             self.remove_container(role)
             self.compose(["up", "-d", "--no-deps", "--no-build", "--pull", "never", role], override=override, timeout=240, project=recovery["project"])
-        # Compose's own image name of each built service of the recovery project names the previous image, so an ordinary
-        # `compose up` of this checkout uses exactly the previous API and proxy.
-        for role in ("api", "proxy"):
-            self.cmd(["docker", "image", "tag", intro.plan["previous"]["images"][role], recovery["project"] + "-" + role + ":latest"], mutating=True)
         self.api_health(member_rights=False)
         self.wait(lambda: self.proxy_observed(intro)["running"], 60, "Proxy did not start")
         orthanc = self.inspect("orthanc")
@@ -3896,10 +4713,8 @@ class HostOps:
         failed volumes exist with their recorded identities and no container uses them. Recorded as the handover."""
         recovery = intro.state["recovery"]
         model = self.resolved(intro, pinned=False)
-        check_resolved(model, self.t, target_checkout=False, maintenance=False, recovery=recovery)
-        for role in ("api", "proxy"):
-            tagged = json.loads(self.text(["docker", "image", "inspect", recovery["project"] + "-" + role + ":latest"]))[0]
-            require(tagged.get("Id") == intro.plan["previous"]["images"][role], "The recovery project's " + role + " image is not the previous one")
+        check_resolved(model, self.t, target_checkout=False, maintenance=True, recovery=recovery, images=intro.plan["previous"]["images"])
+        self.verify_running(model)
         for role in ROLES:
             item = self.inspect(role)
             require(item and item["State"]["Running"] and item["Image"] == intro.plan["previous"]["images"][role]
@@ -3911,7 +4726,6 @@ class HostOps:
             users = self.text(["docker", "ps", "-a", "--filter", "volume=" + identity["name"], "--format", "{{.Names}}"])
             require(not users.strip(), "A failed volume is attached to a container: " + key)
             failed[key] = identity
-        require(self.compose_digest_now() == recovery["compose_sha256"], "The recovery configuration changed")
         entry = self.ordinary_entry_kept()
         baseline = {"schema": 1, "kind": "recovery-baseline", "plan_sha256": intro.plan_sha256, "project": recovery["project"],
                     "ordinary_entry": entry,
@@ -3919,9 +4733,9 @@ class HostOps:
                     "previous_sha": intro.plan["previous"]["sha"], "env_sha256": recovery["env_sha256"],
                     "compose_sha256": recovery["compose_sha256"], "failed_volumes_kept": failed,
                     "bfail_manifest_sha256": intro.state["bfail"]["manifest_sha256"],
-                    "handover": ["The checkout's .env names COMPOSE_PROJECT_NAME=" + recovery["project"] + "; keep it.",
-                                 "An API-only deployment needs its policy's compose_sha256 set to compose_sha256 above.",
-                                 "The failed volumes are kept for analysis; nothing in this mode deletes or reattaches them."]}
+                    "handover": ["운영 재생성은 /opt/kin-deploy/entry.py compose recreate를 사용합니다.",
+                                 "기존 API 배포 경로와 bare/explicit-f Compose 절차는 중간 릴리스에서 지원하지 않습니다.",
+                                 "실패 볼륨은 분석을 위해 보존하며 재연결하거나 삭제하지 않습니다."]}
         recovery["baseline_sha256"] = intro.records.put("recovery-baseline.json", baseline)
         recovery["persisted"] = True
         intro.save()
@@ -3985,6 +4799,7 @@ class HostOps:
         return {"proxy": observed, "ports": ports}
 
     def public_previous_smoke(self, intro):
+        self.keep_operational_volumes(intro)
         if self.unattended:
             result = health_check(self.t["origin"], ca_file=self.t["ca_file"], member_rights=False)
             return {**result, "discovery": discovery_check(self.t["origin"], ca_file=self.t["ca_file"]), "authenticated": "fenced (RB-04b)"}
@@ -4017,7 +4832,7 @@ class HostOps:
         require(catalog.is_file(), "The seed has no cluster catalog")
         ops.supported_pre_catalog(json.loads(catalog.read_text(encoding="utf-8")))
         require(not any(self.inspect(role) for role in ROLES), "Clone containers already exist")
-        require(not any(self.cmd(["docker", "volume", "inspect", name], check=False).returncode == 0 for name in self.t["volumes"].values()),
+        require(not any(self.volume_exists(name) for name in self.t["volumes"].values()),
                 "Clone volumes already exist")
         require(intro.state["checkout"] == "previous" and self.text(["git", "rev-parse", "HEAD"]) == intro.plan["previous"]["sha"],
                 "Clone checkout is not the previous release")
@@ -4034,7 +4849,7 @@ class HostOps:
         sources = [entry["source"] for entry in model["mounts"].get("proxy", []) if entry["type"] == "volume" and entry["target"] == "/etc/nginx/certs"]
         require(len(sources) == 1 and model["volumes"].get(sources[0]), "The clone proxy has no certificate volume")
         volume = model["volumes"][sources[0]]
-        require(self.cmd(["docker", "volume", "inspect", volume], check=False).returncode == 0,
+        require(self.volume_exists(volume),
                 "The clone certificate volume does not exist; fill it with kin.crt and kin.key before the seed: " + volume)
         host = urlsplit(self.t["origin"]).hostname
         # D30: the key is the certificate's own (their public keys are equal, any key type), and the chain verifies against
@@ -4163,7 +4978,11 @@ class HostOps:
 
 def tool_hashes(directory=None):
     directory = Path(directory or Path(__file__).resolve().parent)
-    return {name: sha256_bytes((directory / name).read_bytes()) for name in TOOL_FILES}
+    # The protected launcher lives beside lib, not in it. Bind the entry that actually receives requests so a
+    # partial installation cannot retain an old caller while presenting the new library's receipt hashes.
+    entry = directory.parent / "entry.py" if directory == Path("/opt/kin-deploy/lib") else directory / "ops_deploy_entry.py"
+    return {name: sha256_bytes((entry if name == "ops_deploy_entry.py" else directory / name).read_bytes())
+            for name in TOOL_FILES}
 
 
 def local_host_key(path="/etc/ssh/ssh_host_ed25519_key.pub"):
@@ -4303,13 +5122,95 @@ class IntroductionHost:
         require(sha256_bytes(raw) == digest, "Document bytes differ from their name")
         return decode(raw)
 
+    def compose_operation(self, arguments):
+        """The supported root operator command. No caller-supplied Compose file, env, project, image or volume options."""
+        require(arguments and arguments[0] in ("config", "recreate"), "지원 운영 명령은 config 또는 recreate입니다")
+        roles = arguments[1:]
+        require(len(roles) == len(set(roles)) and all(role in ROLES for role in roles), "지원 서비스 목록이 아닙니다")
+        require(arguments[0] != "config" or not roles, "config 명령에는 추가 인수를 넣을 수 없습니다")
+        entry = ComposeEntry(self.state / "compose-entries")
+        pointer, manifest, _ = entry.load()
+        require(manifest["repository"] == str(self.repository), "운영 entry가 다른 저장소를 가리킵니다")
+        plan = plan_valid(self.document("emr-plans", manifest["plan_sha256"]))
+        target = target_valid(self.document("emr-targets", plan["target_manifest_sha256"]), operational=True)
+        require(plan["target_kind"] in self.policy["targets_allowed"], "이 호스트에 허용된 운영 대상이 아닙니다")
+        check_target(target, self.policy["production"], plan["target_kind"], local_host_key())
+        require(tool_hashes() == plan["tool"], "설치 도구가 운영 entry의 계획과 다릅니다")
+        if self.owner is None:
+            self.host.protected(self.repository, private=True, directory=True)
+            self.host.protected(self.repository / ".git", directory=True)
+        else:
+            owned_private(self.repository, self.owner, private=True, directory=True)
+            owned_private(self.repository / ".git", self.owner, private=True, directory=True)
+        require([row["logical"] for row in manifest["logical_files"]] == target["compose_files"],
+                "운영 entry의 논리 입력이 대상 선언과 다릅니다")
+        state = decode(self.host.read_secure(self.state / "emr-runs" / manifest["plan_sha256"] / "state.json", 16 * 1024 * 1024))
+        require(state.get("plan_sha256") == manifest["plan_sha256"] and not state.get("running") and not state.get("unknown_hold")
+                and all(row.get("state") == "QUIET" for row in state.get("workers", {}).values()),
+                "진행 중이거나 종료 미결인 릴리스의 운영 entry를 사용할 수 없습니다")
+        require(state.get("status") in ("DEPLOYED", "ROLLED_BACK", "RELEASED") and state.get("lock_token") is None,
+                "릴리스의 검증된 공개 재개가 끝나지 않았습니다")
+        require({k: state.get("compose_entry", {}).get(k) for k in pointer} == pointer,
+                "릴리스 종료 상태와 운영 entry의 세대가 다릅니다")
+        runner = Runner(self.repository, fixed=True, base_env=self.host.ENV, owner=self.owner)
+        records = HostRecords(self.state / "emr-runs" / ("operator-" + uuid.uuid4().hex), self.host)
+        records.ensure(records.directory)
+        records.begin("compose", sha256_bytes(canonical(arguments)))
+        token = acquire_lock(self.repository)
+        records.put("state.json", {"status": "RUNNING", "entry": pointer, "arguments": arguments, "lock_token": token})
+        changed = False
+        try:
+            command, environment = entry.argv(["config", "--format", "json"], pointer)
+            configured = runner(command, env=environment, timeout=60)
+            require(configured.returncode == 0, "고정 Compose 설정을 검증하지 못했습니다")
+            model = decode(configured.stdout)
+            images = {role: model["services"][role]["image"] for role in ROLES}
+            side = "release" if state["status"] == "DEPLOYED" else "previous"
+            require(images == plan[side]["images"], "고정 Compose 이미지 ID가 종료 상태의 계획과 다릅니다")
+            require(model["name"] == manifest["project"], "고정 Compose project가 다릅니다")
+            observer = HostOps(target=target, plan=plan, runner=runner, records=records, entry_root=entry.root)
+            resolved = observer.resolved(None, pinned=False)
+            check_resolved(resolved, target, target_checkout=side == "release", maintenance=False,
+                           images=images, recovery=state.get("recovery"))
+            expected_volumes = state.get("operational_volumes")
+            require(type(expected_volumes) is dict and set(expected_volumes) == set(resolved["volumes"].values()),
+                    "완료 릴리스의 volume 인계 목록이 없습니다")
+            current_volumes = {name: observer.volume_identity(name) for name in sorted(expected_volumes)}
+            require(current_volumes == expected_volumes and all(type(item.get("created")) is str and item["created"]
+                                                               for item in current_volumes.values()),
+                    "운영 volume이 없거나 완료 릴리스 이후 교체됐습니다")
+            if arguments[0] == "recreate":
+                observer.verify_running(resolved, absent_roles=roles or ROLES)
+                changed = True
+                records.put("state.json", {"status": "RUNNING", "entry": pointer, "arguments": arguments,
+                                            "lock_token": token, "change_started": True})
+                for role in roles or ROLES:
+                    command, environment = entry.argv(["up", "-d", "--no-deps", "--no-build", "--pull", "never", "--force-recreate", role], pointer)
+                    result = runner(command, env=environment, timeout=240)
+                    records.command({"service": role, "exit": result.returncode, "entry": pointer})
+                    require(result.returncode == 0, "고정 Compose 재생성 명령이 실패했습니다")
+                observer.verify_running(resolved)
+            require(entry.load()[0] == pointer, "운영 중 active Compose entry가 바뀌었습니다")
+            result = {"phase_passed": True, "entry": pointer, "images": images, "project": manifest["project"],
+                      "config_sha256": sha256_bytes(configured.stdout), "recreated": (roles or list(ROLES)) if arguments[0] == "recreate" else []}
+            records.put("state.json", {"status": "PASS", **result})
+            release_lock(self.repository, token)
+            return result
+        except Exception:
+            records.put("state.json", {"status": "UNKNOWN" if changed else "STOP", "entry": pointer,
+                                        "lock_token": token if changed else None,
+                                        "reason": "운영 명령 변경 뒤 확인 불가" if changed else "운영 명령 변경 전 거절"})
+            if not changed:
+                release_lock(self.repository, token)
+            raise
+
     def execute(self, raw):
         host = self.host
         request = request_valid(raw)
         digest = sha256_bytes(raw)
         plan = plan_valid(self.document("emr-plans", request["plan_sha256"]))
         require(plan["target_kind"] in self.policy["targets_allowed"], "This host does not run that target kind")
-        target = target_valid(self.document("emr-targets", plan["target_manifest_sha256"]))
+        target = target_valid(self.document("emr-targets", plan["target_manifest_sha256"]), operational=True)
         require(target["repository"] == str(self.repository), "Target repository is not the protected repository")
         browser_cmd = self.policy["smoke"]["browser_cmd"]
 
@@ -4381,7 +5282,7 @@ class IntroductionHost:
             return owned_private(path, self.owner, private=True)
         ops_host = HostOps(target=target, plan=plan, runner=runner, records=records, env_next=staged,
                            token_reader=lambda: host.decode(host.read_secure(token_file, 32768)), secure=secure, owner=self.owner,
-                           browser_cmd=browser_cmd, repository_check=repository_check)
+                           browser_cmd=browser_cmd, repository_check=repository_check, entry_root=self.state / "compose-entries")
         intro = Introduction(plan=plan, plan_sha256=request["plan_sha256"], target=target, production=self.policy["production"],
                              ops=ops_host, records=records, repository=self.repository, host_key=local_host_key(),
                              tool=tool_hashes(), evidence=evidence, warnings=warnings)
@@ -4749,12 +5650,17 @@ EXAMPLE_POLICY = {"schema": 1, "enabled": False, "repository": "/srv/kin/reposit
 
 def example_target():
     production = EXAMPLE_POLICY["production"]
+    halo = "/etc/kin-deploy/overlays/docker-compose.halo-reports.yml"
     return {"schema": 1, "kind": "production", **{key: production[key] for key in IDENTITY_KEYS},
-            "repository": "/srv/kin/repository", "compose_files": ["docker-compose.yml", "docker-compose.prod.yml", "docker-compose.monitor.yml"],
+            "repository": "/srv/kin/repository", "compose_files": ["docker-compose.yml", "docker-compose.prod.yml", halo, "docker-compose.monitor.yml"],
             "ports": {"maintenance": "127.0.0.1:9444:443", "public": ["80:80", "443:443"]},
             "tls_certificate": "/etc/letsencrypt/live/pacs.example.invalid/fullchain.pem",
             "cron": {"user": "ubuntu", "tags": ["kin-pacs-reviewed-backup", "kin-pacs-reviewed-monitor"]}, "ca_file": None,
-            "keycloak_admin": "admin", "external_networks": {}, "declared_overlays": [], "tracked_overlay_reconcile": [],
+            "keycloak_admin": "admin", "external_networks": {"proxy": {"halo_reports": "halo_reports_private"}},
+            "declared_overlays": [{"file": halo, "sha256": "REPLACE_WITH_OBSERVED_SHA256", "service": "proxy",
+                                   "binds": [{"source": "/srv/halo-reports/nginx/report.conf",
+                                              "target": "/etc/nginx/conf.d/halo-report.conf", "read_only": True}]}],
+            "tracked_overlay_reconcile": [],
             "fix_checkout_mode": False}
 
 

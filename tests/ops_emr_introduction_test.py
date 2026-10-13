@@ -49,6 +49,10 @@ def production_identity():
 def target_fixture(kind="production", repository="/srv/kin/repository"):
     if kind == "production":
         target = intro.example_target()
+        # Minimal synthetic model for individual invariants. Protected-entry fixtures below use the complete
+        # operational list, including the real Halo logical path and an independently hashed synthetic overlay.
+        target.update(compose_files=["docker-compose.yml", "docker-compose.prod.yml", "docker-compose.monitor.yml"],
+                      external_networks={}, declared_overlays=[])
         target.update({key: copy.deepcopy(value) for key, value in production_identity().items()})
         target["repository"] = repository
         return target
@@ -884,6 +888,11 @@ class FakeOps:
         self.calls = []
         self.faults = {}
         self.alive = []
+        self.live_roles = {"db", "api", "keycloak", "orthanc", "proxy"}
+        self.cron_state = "open"
+        self.ingress_state = "public"
+        self.migrated = False
+        self.loaded_host = False
 
     def __getattr__(self, name):
         if name not in {step[1] for steps in intro.STEPS.values() for step in steps} | {"revert_configuration"}:
@@ -895,7 +904,43 @@ class FakeOps:
             if isinstance(fault, BaseException):
                 raise fault
             effect = getattr(self, "effect_" + name, None)
-            return effect(context) if effect else {}
+            result = effect(context) if effect else {}
+            if name in ("fence", "storage", "provision", "migrate", "capture_b1", "classify", "restore_b0", "revert_configuration", "seed_restore"):
+                self.live_roles = {"db"}
+                self.ingress_state = "closed"
+            if name in ("keycloak", "member_import"):
+                self.live_roles = {"db", "keycloak"}
+            if name == "api":
+                self.live_roles = {"db", "keycloak", "api"}
+            if name in ("proxy_ui", "resume", "previous_services", "unfence", "seed_services"):
+                self.live_roles = {"db", "keycloak", "api", "orthanc", "proxy"}
+                self.ingress_state = "public" if name in ("unfence", "seed_services") else "maintenance"
+            if name == "fence":
+                self.cron_state = "fenced"
+            if name in ("restore_jobs", "restore_jobs_after_rollback", "unfence"):
+                self.cron_state = "open"
+            if name in ("reopen_ingress", "reopen_previous_ingress"):
+                self.ingress_state = "public"
+            if name == "migrate":
+                self.migrated = True
+            if name in ("restore_b0", "revert_configuration", "seed_restore"):
+                self.migrated = False
+                context.state["checkout"] = "previous"
+            if name == "seed_check":
+                self.live_roles = set()
+                self.ingress_state = "closed"
+            image_sides = context.state.setdefault("fixture_images", {role: "previous" for role in intro.ROLES})
+            for role in {"storage": ("db",), "keycloak": ("keycloak",), "api": ("api",), "proxy_ui": ("orthanc", "proxy")}.get(name, ()):
+                image_sides[role] = "release"
+            if name in ("restore_b0", "seed_restore"):
+                image_sides["db"] = "previous"
+            if name in ("previous_services", "revert_configuration", "seed_services"):
+                image_sides.update({role: "previous" for role in intro.ROLES})
+            if name == "previous_services":
+                context.state["fixture_recovered_services"] = True
+            context.state["fixture_host"] = {"live_roles": sorted(self.live_roles), "cron_state": self.cron_state,
+                                              "ingress_state": self.ingress_state, "migrated": self.migrated}
+            return result
         return step
 
     def one_shots_alive(self, context):
@@ -903,13 +948,40 @@ class FakeOps:
         return list(self.alive)
 
     def snapshot(self, context):
-        return {"db_changed": context.state["db_changed"], "checkout": context.state["checkout"]}
+        # Independent, complete C-OBS fixture. Missing facts are failures, not a shortcut for pure state tests.
+        if not self.loaded_host:
+            saved = context.state.get("fixture_host")
+            if saved:
+                self.live_roles = set(saved["live_roles"])
+                self.cron_state, self.ingress_state, self.migrated = saved["cron_state"], saved["ingress_state"], saved["migrated"]
+            self.loaded_host = True
+        side = "release" if context.state["checkout"] == "target" else "previous"
+        ok = lambda value: {"outcome": "OK", "value": value}
+        snapshot = {"schema": 1, "checkpoint": [context.records.context.get("step"), context.records.context.get("part")], "facts": {
+            "checkout": ok({"sha": context.plan[side]["sha"]}),
+            "compose_entry": ok({"generation": "c" * 64, "sha256": "c" * 64}),
+            "lock": ok({"owned": bool(context.state.get("lock_token"))}),
+            "containers": ok({role: ok({"id": "container-" + role, "image": context.plan[context.state.get("fixture_images", {}).get(role, "previous")]["images"][role],
+                                         "running": role in self.live_roles, "restarting": False,
+                                          "project": (context.state.get("recovery") or {}).get("project", context.target["project"])
+                                          if role == "db" or context.state.get("fixture_recovered_services") else context.target["project"], "service": role})
+                              for role in ("db", "api", "keycloak", "orthanc", "proxy")}),
+            "database": ok({"ready": True, "migrations": [row + [True, False] for row in context.plan["migrations"]["after" if self.migrated else "before"]]}),
+            "fences": ok({"writers": {role: role in self.live_roles for role in ("api", "keycloak", "orthanc", "proxy")},
+                           "cron": self.cron_state, "ingress": self.ingress_state, "db_clients": 0}),
+            "workers": ok({"quiet": not self.alive, "pending": list(self.alive)})}}
+        if not self.live_roles:
+            snapshot["facts"]["containers"] = ok({role: {"outcome": "ABSENT"} for role in ("db", "api", "keycloak", "orthanc", "proxy")})
+            snapshot["facts"]["database"] = {"outcome": "ABSENT"}
+        return snapshot
 
     def effect_fence(self, context):
         context.state["fenced"] = {"running_before": list(pre.WRITERS)}
 
     # The steps' details as the real ones record them (the receipt's producer bundle is checked against them, IRT2-01).
     def effect_seed_check(self, context):
+        # The real seed admission starts and settles a certificate-inspection helper container.
+        context.state["host_changed"] = True
         return {"source_manifest_sha256": context.plan["seed"]["b0_manifest_sha256"]}
 
     def effect_capture_b0(self, context):
@@ -995,6 +1067,9 @@ class MachineHarness:
                                   tool=plan["tool"], evidence=evidence, clock=self.clock, now=lambda: NOW)
 
     def run_phase(self, phase, evidence=None):
+        if phase == "seed" and self.records.state() is None:
+            self.ops.live_roles = set()
+            self.ops.ingress_state = "closed"
         machine = self.machine(evidence)
         request = {"version": 1, "mode": intro.MODE, "phase": phase, "plan_sha256": self.plan_sha256, "nonce": os.urandom(16).hex()}
         return machine.run(request, hashlib.sha256(json.dumps(request).encode()).hexdigest())
@@ -1033,7 +1108,7 @@ class StateMachineTests(MachineHarness, unittest.TestCase):
         self.assertFalse(self.lock_held())
         state = self.records.state()
         self.assertEqual(state["status"], "DEPLOYED")
-        self.assertEqual(state["ponr"]["step"], "L-11c")
+        self.assertEqual(state["ponr"]["step"], "L-11b")
         journal = [json.loads(line) for line in (self.records.directory / "journal.jsonl").read_text().splitlines()]
         ponr_record = [entry for entry in journal if entry.get("step") == "L-11c" and entry["event"] == "step-start"]
         self.assertEqual(len(ponr_record), 1)
@@ -1110,13 +1185,13 @@ class StateMachineTests(MachineHarness, unittest.TestCase):
         self.ops.alive = ["kin-api-migrate-1 running"]
         result = self.run_phase("introduce", self.local_restore())
         self.assertEqual(result["status"], "NEEDS_ATTENTION")
-        self.assertIn("alive", result["rollback"])
+        self.assertIsNotNone(self.records.state()["unknown_hold"])
         self.assertNotIn("classify", self.ops.calls)
         self.assertTrue(self.lock_held())
-        # An explicit rollback re-observes; the real RB-00 refuses while a worker exists (tested on the host).
+        # A later quiet inventory cannot erase the previous uncertainty without a separate manual reconciliation.
         self.ops.alive = []
         self.ops.faults.clear()
-        self.assertEqual(self.run_phase("rollback")["status"], "RESTORED")
+        refuses(self, self.run_phase, "rollback", message="UNKNOWN")
 
     def test_32_unknown_end_never_rolls_back(self):
         self.run_phase("capture")
@@ -1152,7 +1227,7 @@ class StateMachineTests(MachineHarness, unittest.TestCase):
         # Forward: the first mutating step after the window is refused; nothing in the database changed, so revert only.
         self.assertEqual(result["status"], "HELD")
         self.assertNotIn("storage", self.ops.calls)
-        self.assertEqual(result["steps"][1]["code"], "Outside the approved window")
+        self.assertEqual(next(step for step in result["steps"] if step["step"] == "I-00")["code"], "Outside the approved window")
         self.assertEqual(self.ops.calls[-1], "revert_configuration")
 
     def test_35_reopen_requires_operator_smoke_and_rollback_is_refused_after_the_point_of_no_return(self):
@@ -1164,14 +1239,14 @@ class StateMachineTests(MachineHarness, unittest.TestCase):
         self.assertIsNotNone(result["ponr"])
         refuses(self, self.run_phase, "rollback", message="Ingress was reopened")
 
-    def test_36_reopen_failure_before_ingress_keeps_the_verified_release_fenced(self):
+    def test_36_scheduled_writer_reopen_failure_retains_point_of_no_return(self):
         self.deploy_through("verify")
         self.ops.faults["restore_jobs"] = RuntimeError("Scheduled jobs were not restored exactly")
         result = self.run_phase("reopen", self.operator_smoke())
-        self.assertEqual((result["status"], result["ponr"]), ("VERIFIED", None))
+        self.assertEqual((result["status"], result["ponr"]["step"]), ("NEEDS_ATTENTION", "L-11b"))
         self.assertNotIn("reopen_ingress", self.ops.calls)
         self.assertTrue(self.lock_held())
-        self.assertEqual(self.run_phase("rollback")["status"], "RESTORED")
+        refuses(self, self.run_phase, "rollback", message="Ingress was reopened")
 
     def test_37_failed_rollback_is_never_retried(self):
         self.deploy_through("verify")
@@ -1255,6 +1330,10 @@ class StateMachineTests(MachineHarness, unittest.TestCase):
 
     def test_52_every_step_records_the_host_before_and_after(self):
         """IRT-10: read-only steps (L-01, L-04b/c, I-00, L-10a, L-11a/d, RB-01, ...) too, not only the mutating ones."""
+        def provision(context):
+            self.assertTrue(self.records.state()["db_changed"])
+            return {}
+        self.ops.effect_provision = provision
         results = self.deploy_through("reopen")
         for phase in ("capture", "introduce", "verify", "reopen"):
             (record,) = self.records.directory.glob("result-" + phase + "-*.json")
@@ -1262,14 +1341,14 @@ class StateMachineTests(MachineHarness, unittest.TestCase):
             self.assertEqual(set(steps), {sid for sid, _, _, _ in intro.STEPS[phase]})
             for sid in steps:
                 with self.subTest(step=sid):
-                    self.assertIsInstance(steps[sid]["before"], dict)
-                    self.assertIsInstance(steps[sid]["after"], dict)
+                    for boundary in ("before", "after"):
+                        self.assertEqual(set(steps[sid][boundary]["facts"]),
+                                         {"checkout", "compose_entry", "lock", "containers", "database", "fences", "workers"})
+                        self.assertTrue(intro.observed(steps[sid][boundary]))
                     self.assertEqual(set(steps[sid]["commands"]), {"file", "first", "last"})
         (record,) = self.records.directory.glob("result-introduce-*.json")
         steps = {step["step"]: step for step in json.loads(record.read_text())["steps"]}
-        # The first database change is durable between its before and after observations.
-        self.assertEqual((steps["L-06b"]["before"]["db_changed"], steps["L-06b"]["after"]["db_changed"]), (False, True))
-        self.assertEqual(steps["L-06a"]["after"]["checkout"], "target")
+        self.assertEqual(steps["L-06a"]["after"]["facts"]["checkout"]["value"]["sha"], self.machine().plan["release"]["sha"])
         self.assertEqual(results["introduce"]["status"], "INTRODUCED")
 
     def test_43_receipt_needs_every_rehearsal_phase(self):
@@ -1360,8 +1439,9 @@ class RoundTwoStateMachineTests(MachineHarness, unittest.TestCase):
         self.assertEqual((state["status"], state["running"]), ("NEEDS_ATTENTION", None))
         self.assertEqual(state["history"][-1]["status"], "INTERRUPTED")
         self.assertTrue(self.lock_held())
-        # Never re-run automatically; the operator's explicit rollback (workers re-observed in RB-00) is the way back.
-        self.assertEqual(self.run_phase("rollback")["status"], "RESTORED")
+        # Explicit recovery is also blocked until separately reviewed reconciliation of this interrupted execution.
+        self.assertIsNotNone(state["unknown_hold"])
+        refuses(self, self.run_phase, "rollback", message="UNKNOWN")
 
     def test_64_rollback_never_reopens_before_the_previous_version_proved_itself(self):
         """IRT-06: a failed previous-version smoke keeps RESTORED with the fence and the lock; nothing opens."""
@@ -1386,7 +1466,9 @@ class FakeDocker:
     """The fixed-binary boundary of HostOps (git, docker, crontab): answers by command purpose from configured facts and
     keeps every call, so a test can tell read-only commands from mutating ones."""
 
-    READ_ONLY = (("docker", "inspect"), ("docker", "volume", "inspect"), ("docker", "image", "inspect"), ("docker", "ps"),
+    READ_ONLY = (("docker", "inspect"), ("docker", "container", "ls"), ("docker", "volume", "ls"),
+                 ("docker", "volume", "inspect"), ("docker", "image", "inspect"), ("docker", "ps"),
+                 ("docker", "network", "inspect"),
                  ("git", "rev-parse"), ("git", "status"), ("git", "cat-file"), ("crontab", "-u"),
                  ("docker", "run", "--rm", "--network", "none", "--read-only"))
 
@@ -1402,6 +1484,7 @@ class FakeDocker:
         self.failing = None        # a predicate over argv: those calls exit 1
         self.crontab = ""
         self.image_labels = {}
+        self.image_volumes = {}
         self.config_for = None     # (argv, env) -> model, when the model depends on the files or the environment given
         self.blobs = {}            # "HEAD:<path>" -> committed bytes
         self.checkouts, self.on_checkout = [], None
@@ -1419,12 +1502,34 @@ class FakeDocker:
             return self.result(1, stderr=b"synthetic failure")
         if args[:2] == ["docker", "compose"]:
             if "config" in args:
+                if "--environment" in args:
+                    values = intro.parse_env((Path(self.target["repository"]) / ".env").read_bytes())
+                    values.update(env or {})
+                    return self.result(stdout="\n".join(name + "=" + value for name, value in sorted(values.items())) + "\n")
                 if self.config_for is not None:
                     return self.result(stdout=json.dumps(self.config_for(args, env or {})))
                 return self.result(stdout=json.dumps(self.config["pinned" if "--project-name" in args else "plain"]))
             if "run" in args:
+                name = args[args.index("--name") + 1]
+                self.containers[name] = {"Id": "helper-" + name, "ExecIDs": None,
+                                         "Config": {"Labels": dict(args[index + 1].split("=", 1) for index, arg in enumerate(args) if arg == "--label")},
+                                         "State": {"Running": False, "Restarting": False, "Status": "exited", "ExitCode": 0}}
                 return self.result(stdout=self.run_output(args) if callable(self.run_output) else self.run_output)
             return self.result()
+        if args[:3] in (["docker", "container", "ls"], ["docker", "volume", "ls"]):
+            name = args[args.index("--filter") + 1].split("=^", 1)[1].removeprefix("/").removesuffix("$")
+            inventory = self.containers if args[1] == "container" else self.volumes
+            return self.result(stdout=name + "\n" if name in inventory else "")
+        if args[:2] == ["docker", "rm"]:
+            self.containers.pop(args[-1], None)
+            return self.result()
+        if args[:2] == ["docker", "run"]:
+            if "--name" in args:
+                name = args[args.index("--name") + 1]
+                self.containers[name] = {"Id": "helper-" + name, "ExecIDs": None,
+                                         "Config": {"Labels": dict(args[index + 1].split("=", 1) for index, arg in enumerate(args) if arg == "--label")},
+                                         "State": {"Running": False, "Restarting": False, "Status": "exited", "ExitCode": 0}}
+            return self.result(stdout=self.run_output(args) if callable(self.run_output) else self.run_output)
         if args[:3] == ["git", "cat-file", "blob"]:
             return self.result(stdout=self.blobs.get(args[3], b""))
         if args[:3] == ["git", "checkout", "--"]:
@@ -1442,7 +1547,13 @@ class FakeDocker:
             return self.result(stdout=json.dumps([item])) if item else self.result(1, stderr=b"no such volume")
         if args[:3] == ["docker", "image", "inspect"]:
             return self.result(stdout=json.dumps([{"Id": self.tags.get(args[3], args[3]),
-                                                   "Config": {"User": "node", "Labels": dict(self.image_labels), "Env": []}}]))
+                                                   "Config": {"User": "node", "Labels": dict(self.image_labels), "Env": [],
+                                                              "Volumes": self.image_volumes.get(args[3], {})}}]))
+        if args[:3] == ["docker", "network", "inspect"]:
+            name = args[3]
+            members = {item["Id"]: {"EndpointID": item["NetworkSettings"]["Networks"][name]["EndpointID"]}
+                       for item in self.containers.values() if name in item.get("NetworkSettings", {}).get("Networks", {})}
+            return self.result(stdout=json.dumps([{"Name": name, "Id": "network-" + name, "Containers": members}]))
         if args[:1] == ["crontab"] and args[-1] == "-l":
             return self.result(stdout=self.crontab)
         if args[:2] == ["docker", "ps"]:
@@ -1486,7 +1597,7 @@ def compose_config(target, *, project=None, recovery=None, names=None, workflow=
         "keycloak": {"container_name": names["keycloak"], "image": images.get("keycloak"), "environment": {"KC_HOSTNAME": origin + "/auth"}},
         "orthanc": {"container_name": names["orthanc"], "image": images.get("orthanc"),
                     "volumes": [{"type": "volume", "source": "orthanc-db", "target": "/var/lib/orthanc/db"},
-                                {"type": "bind", "source": target["repository"] + "/config/orthanc.json", "target": "/etc/orthanc/orthanc.json"}]},
+                                {"type": "bind", "source": target["repository"] + "/config/orthanc.json", "target": "/etc/orthanc/orthanc.json", "read_only": True}]},
         "proxy": {"container_name": names["proxy"], "image": images.get("proxy"), "ports": public,
                   "networks": {"default": None, "workflow": None, **{key: None for key in (extra_networks or {})}},
                   "volumes": [{"type": "volume", "source": "proxy-certs", "target": "/etc/nginx/certs"}, *(extra_binds or [])]}}
@@ -1504,11 +1615,17 @@ def running_from(config, role, image_id):
     service = config["services"][role]
     mounts = [{"Type": "volume", "Name": config["volumes"][entry["source"]]["name"], "Destination": entry["target"]} if entry["type"] == "volume"
               else {"Type": "bind", "Source": entry["source"], "Destination": entry["target"]} for entry in service.get("volumes") or []]
-    networks = {config["networks"][key]["name"]: {} for key in (service.get("networks") or {"default": None})}
+    for mount, declared in zip(mounts, service.get("volumes") or []):
+        mount["RW"] = not declared.get("read_only", False)
+        if mount["Type"] == "bind":
+            mount["Propagation"] = (declared.get("bind") or {}).get("propagation", "rprivate")
+    networks = {config["networks"][key]["name"]: {"NetworkID": "network-" + config["networks"][key]["name"],
+                                                  "EndpointID": "endpoint-" + role + "-" + key}
+                for key in (service.get("networks") or {"default": None})}
     bindings = {}
     for port in service.get("ports") or []:
-        bindings.setdefault(str(port["target"]) + "/tcp", []).append({"HostIp": port.get("host_ip", ""), "HostPort": str(port["published"])})
-    return {"Image": image_id, "State": {"Running": True}, "Mounts": mounts, "NetworkSettings": {"Networks": networks},
+        bindings.setdefault(str(port["target"]) + "/" + port.get("protocol", "tcp"), []).append({"HostIp": port.get("host_ip", ""), "HostPort": str(port["published"])})
+    return {"Id": "container-" + role, "Image": image_id, "ExecIDs": None, "State": {"Running": True, "Restarting": False}, "Mounts": mounts, "NetworkSettings": {"Networks": networks},
             "HostConfig": {"PortBindings": bindings},
             "Config": {"Labels": {"com.docker.compose.project": config["name"], "com.docker.compose.service": role}, "Env": []}}
 
@@ -1517,7 +1634,7 @@ class HostHarness:
     """HostOps against FakeDocker in a temporary rehearsal checkout with its seed copy and records."""
 
     def setUp(self):
-        folder = tempfile.TemporaryDirectory()
+        folder = tempfile.TemporaryDirectory(dir="/root" if os.name == "posix" and os.geteuid() == 0 else None)
         self.addCleanup(folder.cleanup)
         self.root = Path(folder.name)
         self.repo = self.root / "repo"
@@ -1552,7 +1669,7 @@ class HostHarness:
         plan["compose"]["before_sha256"] = intro.compose_digest(entries)
         return plan
 
-    def host(self, plan=None, *, token=None):
+    def host(self, plan=None, *, token=None, prepare=True):
         plan = plan or self.plan()
         docker = FakeDocker(self.target, plan)
         docker.config["pinned"] = compose_config(self.target, previous_images=plan["previous"]["images"])
@@ -1561,8 +1678,12 @@ class HostHarness:
         docker.volumes[self.target["project"] + "_proxy-certs"] = {"Name": self.target["project"] + "_proxy-certs"}
         ops_host = intro.HostOps(target=self.target, plan=plan, runner=docker, records=self.records,
                                  token_reader=(lambda: token) if token else None)
-        return ops_host, docker, SimpleNamespace(plan=plan, plan_sha256="a" * 64, state={"checkout": "previous"}, records=self.records,
-                                                 save=lambda: None)
+        context = SimpleNamespace(plan=plan, plan_sha256="a" * 64, request_sha256="f" * 64, retrying=False,
+                                  state={"checkout": "previous"}, records=self.records, save=lambda: self.records.save(context.state))
+        ops_host.intro = context
+        if prepare:
+            ops_host.prepare_entry(context)
+        return ops_host, docker, context
 
     def seed_check(self, ops_host, context):
         with patch.object(ops, "validate_held", return_value=(self.seed, {"shape": "pre"}, "8" * 64)):
@@ -1578,7 +1699,8 @@ class HostBoundaryTests(HostHarness, unittest.TestCase):
         override stop S-01 with zero mutating commands; the correct clone passes."""
         ops_host, docker, context = self.host()
         self.assertEqual(self.seed_check(ops_host, context)["resolved"], "target manifest")
-        self.assertEqual(docker.mutating(), [])
+        self.assertTrue(all(row["state"] == "QUIET" for row in context.state["workers"].values()))
+        self.assertFalse(docker.containers)
         production = production_identity()
         cases = {
             "production names (override missing from the model)": lambda d: d.config.__setitem__(
@@ -1607,12 +1729,14 @@ class HostBoundaryTests(HostHarness, unittest.TestCase):
         values of secret environment, secret stdin and secret-bearing output never reach a record."""
         secret = "Sup3rSecretValue-" + "x" * 20
         ops_host, docker, context = self.host()
+        self.records.begin("command-fixture", "c" * 64)
+        docker.containers["db"] = {"Id": "fixture-db", "ExecIDs": None}
         docker.run_output = b"KIN_RESULT {}\n"
         ops_host.cmd(["docker", "compose", "--project-directory", str(self.repo), "config"], env={"KC_ADMIN_PASSWORD": secret})
         docker.failing = lambda args: args[:2] == ["docker", "exec"]
-        with self.assertRaisesRegex(intro.Stop, "exit 1"):
+        with self.assertRaises(intro.Stop):
             ops_host.cmd(["docker", "exec", "-i", "db", "psql"], input=("UPDATE client SET secret='" + secret + "';").encode(), quiet=True)
-        with self.assertRaisesRegex(intro.Stop, "exit 1"):
+        with self.assertRaises(intro.Stop):
             ops_host.cmd(["docker", "exec", "db", "psql", "-c", "SELECT 1"])
         docker.failing = None
 
@@ -1631,7 +1755,9 @@ class HostBoundaryTests(HostHarness, unittest.TestCase):
         ops_host.run = lambda *a, **k: SimpleNamespace(returncode=0, stdout=("password=" + secret).encode(), stderr=b"")
         ops_host.cmd(["docker", "compose", "config", "--format", "json"])
         entries = [json.loads(line) for line in (self.records.directory / self.records.commands_file).read_text().splitlines()]
-        self.assertEqual([entry["seq"] for entry in entries], list(range(1, 8)))
+        self.assertEqual([entry["seq"] for entry in entries], list(range(1, len(entries) + 1)))
+        entries = [entry for entry in entries if entry["argv"][:2] in (["docker", "compose"], ["docker", "exec"])
+                   or entry["argv"] == ["docker", "inspect", "x"]]
         self.assertEqual([entry["outcome"] for entry in entries], ["exit", "exit", "exit", "timeout", "error", "timeout", "exit"])
         self.assertEqual([entry.get("exit") for entry in entries], [0, 1, 1, None, None, None, 0])
         self.assertEqual(entries[0]["env"], ["KC_ADMIN_PASSWORD"])
@@ -1677,14 +1803,15 @@ class HostBoundaryTests(HostHarness, unittest.TestCase):
         failed = {"pg": {"name": self.target["volumes"]["pg"], "created": "2026-10-12T00:00:00Z"},
                   "emr_state": {"name": self.target["volumes"]["emr_state"], "created": "2026-10-12T00:00:01Z"}}
         context.state.update(recovery=recovery, bfail={"manifest_sha256": "6" * 64, "volumes": failed})
-        docker.config["plain"] = compose_config(self.target, recovery=recovery)
+        docker.config["pinned"] = compose_config(self.target, recovery=recovery, previous_images=plan["previous"]["images"],
+                                                 proxy_ports=[self.target["ports"]["maintenance"]])
         for identity in failed.values():
             docker.volumes[identity["name"]] = {"Name": identity["name"], "CreatedAt": identity["created"]}
         for role in intro.ROLES:
-            docker.containers[self.target["containers"][role]] = {"Image": plan["previous"]["images"][role], "State": {"Running": True},
-                                                                  "Config": {"Labels": {"com.docker.compose.project": recovery["project"]}}}
+            docker.containers[self.target["containers"][role]] = running_from(docker.config["pinned"], role, plan["previous"]["images"][role])
         for role in ("api", "proxy"):
-            docker.tags[recovery["project"] + "-" + role + ":latest"] = plan["previous"]["images"][role]
+            docker.tags[recovery["project"] + "-" + role + ":latest"] = image("6")
+        ops_host.publish_entry(ops_host.pins(context), project=recovery["project"])
         return ops_host, docker, context
 
     def test_68_the_recovery_mapping_is_what_ordinary_operations_resolve(self):
@@ -1701,13 +1828,13 @@ class HostBoundaryTests(HostHarness, unittest.TestCase):
         self.assertEqual(set(baseline["failed_volumes_kept"]), {"pg", "emr_state"})
         self.assertEqual(docker.mutating(), [])
         failed_pg = self.target["volumes"]["pg"]
-        cases = {"plain compose still the original project": lambda d, c: d.config.__setitem__("plain", compose_config(self.target)),
+        cases = {"common entry still the original project": lambda d, c: d.config.__setitem__("pinned", compose_config(self.target)),
                  "failed volume attached": lambda d, c: d.attached.__setitem__(failed_pg, ["kin-rh-0001-db"]),
                  "failed volume replaced": lambda d, c: d.volumes[failed_pg].__setitem__("CreatedAt", "2026-10-13T00:00:00Z"),
-                 "compose image name not the previous one": lambda d, c: d.tags.__setitem__(c.state["recovery"]["project"] + "-api:latest", image("6")),
+                 "common entry image not the previous one": lambda d, c: d.config["pinned"]["services"]["api"].__setitem__("image", image("6")),
                  "a service in the old project": lambda d, c: d.containers[self.target["containers"]["db"]]["Config"]["Labels"].__setitem__(
                      "com.docker.compose.project", self.target["project"]),
-                 "recovery configuration changed": lambda d, c: self.write_env("PUBLIC_ORIGIN=" + self.target["origin"] + "\n")}
+                 "recovery bundle damaged": lambda d, c: (self.root / "compose-entries" / c.state["compose_entry"]["generation"] / "runtime.yml").write_bytes(b"broken")}
         for name, change in cases.items():
             self.setUp()
             ops_host, docker, context = self.recovered(self.plan())
@@ -1856,8 +1983,14 @@ class CommanderAdditionsTests(HostHarness, unittest.TestCase):
 
         def config_for(args, env):
             files = [args[index + 1] for index, item in enumerate(args) if item == "-f"]
-            names = {Path(item).name for item in files}
-            prod = Path(next(item for item in files if Path(item).name in ("docker-compose.prod.yml", "head-docker-compose.prod.yml"))).read_bytes()
+            logical = {str(path): Path(path).name for path in files}
+            for path in files:
+                manifest = Path(path).parent / "manifest.json"
+                if manifest.exists():
+                    for row in json.loads(manifest.read_bytes())["logical_files"]:
+                        logical[str(manifest.parent / row["pinned"])] = Path(row["logical"]).name
+            names = set(logical.values())
+            prod = Path(next(item for item in files if logical[item] in ("docker-compose.prod.yml", "head-docker-compose.prod.yml"))).read_bytes()
             halo = b"halo_reports" in prod or ("docker-compose.halo-reports.yml" in names and self.equivalent)
             return compose_config(target, previous_images=plan["previous"]["images"],
                                   extra_networks={"halo_reports": "halo_reports_private"} if halo else None,
@@ -1925,7 +2058,7 @@ class CommanderAdditionsTests(HostHarness, unittest.TestCase):
                                                             "        source: ${KIN_MONITOR_PUBLIC_DIR:?Set it}\n"
                                                             "        target: /var/run/kin-monitor-public\n"
                                                             "  api:\n    environment:\n      X: ${OPTIONAL_THING:-fallback}\n")
-        ops_host, docker, context = self.host()
+        ops_host, docker, context = self.host(prepare=False)
         value = "/home/ubuntu/.kin-monitor-public"
 
         def config_for(args, env):
@@ -1952,17 +2085,25 @@ class CommanderAdditionsTests(HostHarness, unittest.TestCase):
                 self.assertNotIn(value.encode(), path.read_bytes(), path.name)
         # The value a later phase finds must be the same one.
         docker.containers[self.target["containers"]["proxy"]]["Mounts"][0]["Source"] = "/tmp/elsewhere"
-        refuses(self, ops_host.prepare, context, message="changed")
-        # No container carries it and nothing was kept: a refusal.
+        with self.assertRaises(intro.Stop):
+            ops_host.prepare(context)
+        # Removed carrier and run secrets cannot remove the independently retained operational input.
         docker.containers.pop(self.target["containers"]["proxy"])
         context.state.pop("compose_env")
         kept.unlink()
-        refuses(self, ops_host.prepare, context, message="Unresolvable compose variable: KIN_MONITOR_PUBLIC_DIR")
+        ops_host.prepare(context)
+        self.assertEqual(ops_host.entry.load()[2]["KIN_MONITOR_PUBLIC_DIR"], value)
+        (ops_host.entry.root / "active.json").unlink()
+        # This phase has a generation identity; corruption of its pinned data still refuses without live inference.
+        (ops_host.entry.root / context.state["compose_entry"]["generation"] / "environment.json").write_bytes(b"{}")
+        with self.assertRaises((intro.Stop, OSError)):
+            ops_host.prepare(context)
         self.assertEqual(intro.referenced_variables([b"a: ${A}\nb: ${B:-x}\nc: $C\nd: $${D}\n# e: ${E}\nf: ${F:?m}\n"]),
                          {"A": True, "B": False, "C": True, "F": True})
 
     def unattended_host(self):
         ops_host, docker, context = self.host()
+        docker.containers[self.target["containers"]["db"]] = {"Id": "fixture-db", "ExecIDs": None}
         ops_host.browser_cmd = [sys.executable, "-c", FAKE_BROWSER]
         context.request_sha256 = "c" * 64
         context.state.update(imported_at=(datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat())
@@ -2182,7 +2323,8 @@ class CommanderAdditionsTests(HostHarness, unittest.TestCase):
         check = [call for call in docker.calls if call[:2] == ["docker", "run"]]
         self.assertEqual(len(check), 1)
         self.assertTrue({"--read-only", "none"} <= set(check[0]) and any(item.endswith("target=/certs,readonly") for item in check[0]))
-        self.assertEqual(docker.mutating(), [])
+        self.assertFalse(docker.containers)
+        self.assertTrue(all(row["state"] == "QUIET" for row in context.state["workers"].values()))
         for name, (change, message) in {
                 "absent": (lambda d: d.volumes.pop(self.target["project"] + "_proxy-certs"), "certificate volume does not exist"),
                 "the CA file missing": (lambda d: Path(self.target["ca_file"]).unlink(), "CA file is missing"),
@@ -2192,8 +2334,9 @@ class CommanderAdditionsTests(HostHarness, unittest.TestCase):
             change(docker)
             with self.subTest(case=name):
                 refuses(self, self.seed_check, ops_host, context, message=message)
-                self.assertEqual(docker.mutating(), [])
+                self.assertFalse(docker.containers)
                 if name != "empty or not this origin's":
+                    self.assertEqual(docker.mutating(), [])
                     self.assertFalse(any(call[:2] == ["docker", "run"] for call in docker.calls), "no check container (nothing created)")
 
     def test_88_the_browser_trusts_exactly_the_verified_leaf_key(self):
@@ -2321,14 +2464,16 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
     boundary (FakeDocker) and real child processes."""
 
     def context(self, plan, phase="capture", **state):
-        return Context(plan=plan, plan_sha256="a" * 64, state={"checkout": "previous", "lock_token": None, **state}, records=self.records,
-                       save=lambda: None, phase=phase, recovering=phase in intro.RECOVERY_PHASES, warnings=[], request_sha256="c" * 64)
+        context = Context(plan=plan, plan_sha256="a" * 64, state={"checkout": "previous", "lock_token": None, **state}, records=self.records,
+                          phase=phase, recovering=phase in intro.RECOVERY_PHASES, warnings=[], request_sha256="c" * 64, retrying=False)
+        context.save = lambda: self.records.save(context.state)
+        return context
 
     def monitor_stack(self):
         """The production shape of IRT-12/D04: a compose file binds ${KIN_MONITOR_PUBLIC_DIR} into the proxy, the .env lacks
         it, and the running proxy carries it as its bind source."""
         (self.repo / "docker-compose.prod.yml").write_text(MONITOR_COMPOSE, newline="\n")
-        ops_host, docker, _ = self.host()
+        ops_host, docker, _ = self.host(prepare=False)
         value = "/home/ubuntu/.kin-monitor-public"
 
         def config_for(args, env):
@@ -2358,19 +2503,23 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
         rollback = intro.HostOps(target=self.target, plan=plan, runner=docker, records=self.records)
         context.phase, context.recovering = "rollback", True
         result = rollback.prepare(context)
-        self.assertEqual(result["resolved_from_running_stack"]["KIN_MONITOR_PUBLIC_DIR"]["from"], ["kept"])
+        self.assertEqual(result["immutable_entry"]["generation"], context.state["compose_entry"]["generation"])
         rollback.compose(["up", "-d", "--no-deps", "proxy"], mutating=True)
         self.assertEqual(docker.envs[-1].get("KIN_MONITOR_PUBLIC_DIR"), value)
-        kept.write_text(json.dumps({"KIN_MONITOR_PUBLIC_DIR": "/tmp/elsewhere"}))
-        refuses(self, intro.HostOps(target=self.target, plan=plan, runner=docker, records=self.records).prepare, context,
-                message="kept compose value differs")
+        kept.unlink()
+        reopened = intro.HostOps(target=self.target, plan=plan, runner=docker, records=self.records)
+        reopened.prepare(context)
+        self.assertEqual(reopened.entry.load()[2]["KIN_MONITOR_PUBLIC_DIR"], value)
+        (reopened.entry.root / context.state["compose_entry"]["generation"] / "environment.json").write_bytes(b"{}")
+        with self.assertRaises(intro.Stop):
+            intro.HostOps(target=self.target, plan=plan, runner=docker, records=self.records).prepare(context)
 
     def test_91_the_seed_names_each_compose_variable_the_clone_env_lacks(self):
         """D28: before the seed no clone stack runs, so a VM target whose compose files require KIN_MONITOR_PUBLIC_DIR
         needs it in the clone's .env; the seed refuses with the variable and the file named, before any command."""
         (self.repo / "docker-compose.monitor.yml").write_text(MONITOR_COMPOSE, newline="\n")
         self.target["compose_files"] = [*self.target["compose_files"], "docker-compose.monitor.yml"]
-        ops_host, docker, _ = self.host()
+        ops_host, docker, _ = self.host(prepare=False)
         context = self.context(ops_host.plan, phase="seed")
         with self.assertRaises(intro.Stop) as caught:
             ops_host.prepare(context)
@@ -2448,7 +2597,8 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
         self.assertEqual(len(member["client_ids"]), 2, "the retry made its own login client")
         self.assertEqual(list(self.records.secrets.glob("browser-profile-*")), [])
         ops_host.remove_smoke_member(context)
-        removal = next(call for call in docker.calls if any("kc-smoke-remove" in item for item in call))
+        removal = next(call for call in docker.calls if call[:2] == ["docker", "compose"] and "run" in call
+                       and any("kc-smoke-remove" in item for item in call))
         self.assertEqual(sorted(json.loads(removal[-1])["client_ids"]), sorted(member["client_ids"]))
 
     def test_96_a_browser_timeout_ends_its_whole_process_tree_and_removes_the_profile(self):
@@ -2459,7 +2609,9 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
             ops_host, docker, context = self.unattended(LINGERING_BROWSER % (str(pids), parent_waits))
             with self.subTest(parent_waits=parent_waits), patch.object(intro, "BROWSER_TIMEOUT_S", 4):
                 started = time.monotonic()
-                refuses(self, lambda: ops_host.browser_login(context, connect=("127.0.0.1", 19444)), message="timed out")
+                refuses(self, lambda: ops_host.browser_login(context, connect=("127.0.0.1", 19444)))
+                browser = [row for row in context.state["workers"].values() if row["kind"] == "browser"]
+                self.assertEqual([(row["state"], row["termination"]) for row in browser], [("QUIET", "confirmed-timeout")])
                 self.assertLess(time.monotonic() - started, 60)
                 child = int(pids.read_text())
                 deadline = time.monotonic() + 10
@@ -2496,7 +2648,9 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
                        "rolconnlimit": json.dumps(pre_catalog()), "service_account_client_link": json.dumps(plan["members"]),
                        "parent_group": json.dumps(realm or {"roles": ["admin", "clinician", "radiologist"], "top_level_groups": ["hallym", "kin-center"]})}
         ops_host = intro.HostOps(target=target, plan=plan, runner=docker, records=self.records, browser_cmd=browser)
-        return ops_host, docker, self.context(plan)
+        context = self.context(plan)
+        ops_host.prepare(context)
+        return ops_host, docker, context
 
     def test_97_the_smoke_browser_and_the_smoke_member_are_proved_at_l01_before_the_fence(self):
         """D01/D02: L-01 refuses a smoke browser command that is no executable file, a browser that fails or does not end
@@ -2512,7 +2666,7 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
             "no executable file": ({"browser": [str(self.root / "no-such-browser"), "browser-smoke"]}, "not an executable file"),
             "a browser that fails": ({"browser": [sys.executable, "-c", "import sys, json; print(json.dumps({'error': 'chromium missing'}), "
                                                                        "file=sys.stderr); sys.exit(1)"]}, "probe failed: chromium missing"),
-            "a browser that does not end": ({"browser": [sys.executable, "-c", "import time; time.sleep(600)"]}, "timed out"),
+            "a browser that does not end": ({"browser": [sys.executable, "-c", "import time; time.sleep(600)"]}, None),
             "a role the realm lacks": ({"browser": good, "realm": {"roles": ["clinician"], "top_level_groups": ["hallym"]}},
                                        "roles are not realm roles: radiologist"),
             "a group the realm lacks (or only below another)": ({"browser": good, "realm": {"roles": ["radiologist"], "top_level_groups": ["kin-center"]}},
@@ -2524,6 +2678,9 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
             ops_host, docker, context = self.baseline_host(**options)
             with self.subTest(case=name), patch.object(intro, "BROWSER_PROBE_S", 4):
                 refuses(self, ops_host.baseline, context, message=message)
+                if name == "a browser that does not end":
+                    browser = [row for row in context.state["workers"].values() if row["kind"] == "browser"]
+                    self.assertEqual([(row["state"], row["termination"]) for row in browser], [("QUIET", "confirmed-timeout")])
                 # Nothing but L-01's own read-only Keycloak helper (a labelled one-shot, removed after its exit).
                 self.assertEqual([call for call in docker.mutating() if not any("kc-serverinfo" in item for item in call)], [],
                                  "L-01 changes nothing")
@@ -2669,7 +2826,8 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
         volume is not a difference."""
         ops_host, docker, context = self.baseline_host()
         db = ops_host.t["containers"]["db"]
-        docker.containers[db]["Mounts"].append({"Type": "volume", "Name": "a" * 64, "Destination": "/var/lib/postgresql/extra"})
+        docker.containers[db]["Mounts"].append({"Type": "volume", "Name": "a" * 64, "Destination": "/var/lib/postgresql/extra", "RW": True})
+        docker.image_volumes[ops_host.plan["previous"]["images"]["db"]] = {"/var/lib/postgresql/extra": {}}
         ops_host.baseline(context)
         if PureWindowsPath(ops_host.t["repository"]).drive:
             # Docker Desktop reports a file bind as /run/desktop/mnt/host/<drive>/<path> (r3-rehearsal-04): the same file.
@@ -2741,7 +2899,10 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
         self.assertEqual(detail["compose_file"], "written")
         self.assertEqual(intro.parse_env(env.read_bytes())["COMPOSE_FILE"], os.pathsep.join(ops_host.t["compose_files"]))
         self.assertEqual(ops_host.reconcile_checkout(context)["ordinary_entry"], {"compose_file": "already named"})
-        self.assertEqual(ops_host.ordinary_entry_kept(), {"compose_file": "declared list"})
+        ops_host.intro = context
+        ops_host.prepare_entry(context)
+        active = ops_host.ordinary_entry_kept()
+        self.assertEqual(active["generation"], context.state["compose_entry"]["generation"])
         # A line that already names the list stays where it stands (the plan's digest covers these bytes; r3-rehearsal-05
         # found the staged env refused only because its COMPOSE_FILE line was not the last one).
         middle = ("COMPOSE_FILE=" + intro.declared_compose_file(ops_host.t) + "\nPOSTGRES_PASSWORD=placeholder-0001\n").encode()
@@ -2749,9 +2910,10 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
         env.write_bytes(middle)
         self.assertEqual(ops_host.reconcile_checkout(context)["ordinary_entry"], {"compose_file": "already named"})
         self.assertEqual(env.read_bytes(), middle)
+        active = ops_host.ordinary_entry_kept()
         self.assertFalse(intro.names_declared_list(b"COMPOSE_FILE=docker-compose.yml\n", ops_host.t))
         env.write_text("POSTGRES_PASSWORD=placeholder-0001\n", newline="\n")
-        refuses(self, ops_host.ordinary_entry_kept, message="COMPOSE_FILE")
+        self.assertEqual(ops_host.ordinary_entry_kept(), active, "handover uses the immutable entry, independently of checkout .env")
         staged = self.root / "env.next"
         staged.write_bytes(b"POSTGRES_PASSWORD=placeholder-0001\n")
         self.assertNotEqual(intro.env_with_compose_file(staged.read_bytes(), ops_host.t), staged.read_bytes())
@@ -3091,7 +3253,7 @@ class RoundThreeMachineTests(MachineHarness, unittest.TestCase):
             result = self.run_phase("capture")
         self.assertEqual((result["status"], result["phase_passed"]), ("NEW", False))
         self.assertEqual(self.ops.calls, [])
-        self.assertEqual(result["steps"][0]["code"], "The host could not be observed before this step")
+        self.assertEqual(result["steps"][0]["outcome"], "STOP")
         self.assertFalse(self.lock_held())
         original = self.ops.snapshot
         calls = {"n": 0}
@@ -3107,7 +3269,7 @@ class RoundThreeMachineTests(MachineHarness, unittest.TestCase):
         self.assertEqual([(step["step"], step["outcome"]) for step in result["steps"]][-1], ("L-04a", "UNKNOWN"))
         self.assertTrue(self.lock_held())
         self.assertFalse(intro.observed({"running": {"db": image("3")}, "migrations": {"unobservable": "RuntimeError"}}))
-        self.assertTrue(intro.observed({"running": {"db": None}, "migrations": {"unobservable": "RuntimeError"}}))
+        self.assertFalse(intro.observed({"running": {"db": None}, "migrations": {"unobservable": "RuntimeError"}}))
 
     def test_116_browser_profiles_a_crash_left_go_at_the_next_phase_start(self):
         """IRT2-15: a browser profile folder (its session cookies) that a killed process left in the secrets directory is
@@ -3245,16 +3407,21 @@ class HelperTests(unittest.TestCase):
     def test_48_examples_validate_and_stay_disabled(self):
         policy = intro.policy_valid(copy.deepcopy(intro.EXAMPLE_POLICY))
         self.assertIs(policy["enabled"], False)
-        intro.target_valid(intro.example_target())
+        example = intro.example_target()
+        with self.assertRaises(intro.Stop):
+            intro.target_valid(example, operational=True)
+        example["declared_overlays"][0]["sha256"] = "1" * 64
+        intro.target_valid(example, operational=True)
         intro.identity_valid(policy["production"])
 
 
-@unittest.skipUnless(os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() == 0, "isolated Linux root fixture required")
+@unittest.skipUnless(os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() == 0
+                     and os.environ.get("KIN_TEST_ISOLATED_INSTALL") == "1", "isolated Linux root fixture required")
 class ProtectedHostTests(unittest.TestCase):
     """The entry adapter's root-owned policy, documents by hash and one-use approval (as ops_deploy_host's HostTests)."""
 
     def setUp(self):
-        folder = tempfile.TemporaryDirectory(prefix="kin-emr-host-")
+        folder = tempfile.TemporaryDirectory(prefix="kin-emr-host-", dir="/root")
         self.addCleanup(folder.cleanup)
         self.root = Path(folder.name)
         self.repo, self.state = self.root / "repo", self.root / "state"
@@ -3267,10 +3434,30 @@ class ProtectedHostTests(unittest.TestCase):
         policy.update(enabled=True, repository=str(self.repo), state_dir=str(self.state))
         policy["production"] = production_identity()
         self.policy_path = self.write(self.root / "policy.json", policy)
-        target = target_fixture(repository=str(self.repo))
+        self.halo = Path("/etc/kin-deploy/overlays/docker-compose.halo-reports.yml")
+        self.halo.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        overlay = {"services": {"proxy": {"networks": {"halo_reports": None},
+                    "volumes": [{"type": "bind", "source": "/srv/halo-reports/nginx/report.conf",
+                                 "target": "/etc/nginx/conf.d/halo-report.conf", "read_only": True}]}},
+                   "networks": {"halo_reports": {"external": True, "name": "halo_reports_private"}}}
+        self.halo.write_bytes(intro.canonical(overlay))
+        self.halo.chmod(0o600)
+        bind = Path("/srv/halo-reports/nginx/report.conf")
+        bind.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+        bind.write_text("# isolated synthetic Halo binding\n", encoding="utf-8", newline="\n")
+        bind.chmod(0o644)
+        target = self.operational_target()
         self.target_sha = self.document("emr-targets", target)
         plan = plan_fixture(target)
         self.plan_sha = self.document("emr-plans", plan)
+
+    def operational_target(self):
+        target = target_fixture(repository=str(self.repo))
+        example = intro.example_target()
+        for key in ("compose_files", "declared_overlays", "external_networks"):
+            target[key] = example[key]
+        target["declared_overlays"][0]["sha256"] = intro.sha256_bytes(self.halo.read_bytes())
+        return target
 
     def write(self, path, value):
         raw = intro.canonical(value)
@@ -3416,7 +3603,7 @@ class ProtectedHostTests(unittest.TestCase):
         if backup_owner:
             os.chown(backups, backup_owner[0], backup_owner[0])
             backups.chmod(backup_owner[1])
-        target = target_fixture(repository=str(repo))
+        target = self.operational_target()
         target.update(target_changes or {})
         self.document("emr-targets", target)
         plan = plan_fixture(target)
@@ -3428,7 +3615,9 @@ class ProtectedHostTests(unittest.TestCase):
         plan["budget"]["min_free_bytes"] = 1024 ** 3
         plan_sha = self.document("emr-plans", plan)
         docker = FakeDocker(target, plan)
-        docker.config["pinned"] = compose_config(target, previous_images=plan["previous"]["images"])
+        docker.config["pinned"] = compose_config(target, previous_images=plan["previous"]["images"],
+                                                extra_networks=target["external_networks"]["proxy"],
+                                                extra_binds=[{"type": "bind", **bind} for bind in target["declared_overlays"][0]["binds"]])
         docker.crontab = "".join("0 3 * * * /usr/bin/true # " + tag + "\n" for tag in target["cron"]["tags"])
         docker.image_labels = {"org.opencontainers.image.revision": plan["previous"]["sha"]}
         for role in intro.ROLES:
@@ -3512,7 +3701,7 @@ class ProtectedHostTests(unittest.TestCase):
     def test_74_two_approved_host_entries_never_act_together(self):
         """IRT-04 through the installed entry: of two distinct approved introduce requests, one acts, the other is refused."""
         import threading
-        target = target_fixture(repository=str(self.repo))
+        target = self.operational_target()
         plan = plan_fixture(target)
         now = datetime.now(timezone.utc)
         plan.update(window={"start": (now - timedelta(hours=1)).isoformat(), "end": (now + timedelta(hours=2)).isoformat()},
@@ -3571,7 +3760,7 @@ class ProtectedHostTests(unittest.TestCase):
         """D06: after the capture the checkout (0700) and its .git were opened again (chmod 0775). A rollback request is
         not refused for that: it runs, and its result, result file and phase-start record carry the warning with the
         modes; introduce and verify requests keep refusing; an ownership change still refuses the rollback too."""
-        target = target_fixture(repository=str(self.repo))
+        target = self.operational_target()
         plan = plan_fixture(target)
         now = datetime.now(timezone.utc)
         plan.update(window={"start": (now - timedelta(hours=1)).isoformat(), "end": (now + timedelta(hours=2)).isoformat()},

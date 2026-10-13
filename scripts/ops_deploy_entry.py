@@ -39,6 +39,9 @@ def main():
         if sys.argv[1:] == ["notify"]:
             from ops_deploy_host import HostAdapter
             result = HostAdapter("/etc/kin-deploy/policy.json").drain()
+        elif len(sys.argv) >= 3 and sys.argv[1] == "compose":
+            from ops_emr_introduction import IntroductionHost
+            result = IntroductionHost("/etc/kin-deploy/emr-introduction.json").compose_operation(sys.argv[2:])
         elif len(sys.argv) == 1:
             raw = bytearray()
             deadline = time.monotonic() + 10
@@ -65,6 +68,10 @@ def main():
                 from ops_emr_introduction import IntroductionHost
                 result = IntroductionHost("/etc/kin-deploy/emr-introduction.json").execute(bytes(raw))
             else:
+                # The old API lane has a fixed three-file Compose command. While the interim policy is installed,
+                # only the common immutable entry can operate this stack; changing runner/host bytes is unnecessary.
+                if os.path.lexists("/etc/kin-deploy/emr-introduction.json"):
+                    raise RuntimeError("중간 릴리스 설치 중에는 기존 API 배포 경로를 사용할 수 없습니다")
                 from ops_deploy_host import HostAdapter
                 result = HostAdapter("/etc/kin-deploy/policy.json").execute(bytes(raw))
         else:
