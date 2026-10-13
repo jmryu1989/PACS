@@ -132,9 +132,12 @@ $metadata = gh api "repos/$repository/actions/artifacts/$artifactId" | ConvertFr
 if ($LASTEXITCODE -ne 0 -or $metadata.workflow_run.id -ne $stoppedRun) { throw 'artifact 실행 출처 불일치' }
 $archive = "$out/manual-$stoppedRun-$artifactId.zip"
 # Windows PowerShell의 native stdout 재인코딩을 피하고 원본 zip 바이트를 보존한다.
-python -c 'import subprocess,sys; f=open(sys.argv[2], "xb"); subprocess.run(["gh","api",sys.argv[1]], stdout=f, check=True)' "repos/$repository/actions/artifacts/$artifactId/zip" $archive
+python -c 'import subprocess,sys; f=open(sys.argv[2], ''xb''); subprocess.run([''gh'',''api'',sys.argv[1]], stdout=f, check=True)' "repos/$repository/actions/artifacts/$artifactId/zip" $archive
 if ($LASTEXITCODE -ne 0) { throw '수동 archive 수령 실패' }
-$digest = 'sha256:' + (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+$stream = [System.IO.File]::OpenRead($archive)
+$hasher = [System.Security.Cryptography.SHA256]::Create()
+try { $digest = 'sha256:' + ([System.BitConverter]::ToString($hasher.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }
+finally { $stream.Dispose(); $hasher.Dispose() }
 if ($metadata.digest -and $metadata.digest -ne $digest) { throw '수동 archive digest 불일치' }
 @{ run = ($stopped | ConvertFrom-Json); artifact_id = $artifactId; metadata = $metadata; digest = $digest; use = 'diagnostic-only' } | ConvertTo-Json -Depth 12 | Set-Content -Encoding utf8 "$out/manual-$stoppedRun-$artifactId.json"
 ```
@@ -370,3 +373,9 @@ if ($LASTEXITCODE -ne 0) { throw 'Stage 8 필수 시험 미충족: verdict.json 
 headSha만 믿지 않고 `candidate-provenance.json.candidate_sha`를 최종 SHA와 대조한다.
 13개 요구 그룹의 자동 PASS와 독립 Astra의 Stage 8 종료 판정은 별개다. 이후 관문은
 같은 SHA의 원문을 대상으로 요구→실제 단언→기록을 대조한다.
+
+W2C-05 입력 계약: recorder 명령을 실행하는 각 workflow step이 그 명령의 입력을 선언한다.
+`--file tests/**` 및 tests를 포함하는 `--tree`는 소비자 등록 없이 workflow catalogue 전체를 전후 해시한다.
+`node tests/ci_workflow_consumers.cjs --audit .`는 step별 누락 입력/미해석 shell 명령을 보고하는 진단 도구다.
+수동 소비자 명단이나 새 미등록 시험에 대한 required check는 없다. 지원 loader와 정적 분석 경계는 tests/README.md를 따른다.
+누락 입력은 recorder non-zero이며, 감사 결과가 없는 것을 stage-exit PASS로 간주하지 않는다.

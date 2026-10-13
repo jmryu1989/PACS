@@ -242,7 +242,9 @@ def download(root, sha, stage, out, query=gh_get, fetch=fetch_archive, *,
             if not runs:
                 stop(f'{workflow}: no run for {sha}')
             manifest['listings'][workflow] = sorted([list(revision(run)) for run in runs])
-            run = max(runs, key=lambda item: (item['created_at'], item['id']))
+            run = max(runs, key=lambda item: (
+                datetime.fromisoformat(item['created_at'].replace('Z', '+00:00')).astimezone(timezone.utc),
+                item['id']))
             context = run
             current, _ = query(f'{base}/runs/{run["id"]}')
             if revision(current) != revision(run):

@@ -8,8 +8,7 @@ import sys
 import tempfile
 import unittest
 
-# Keep the dependency guard in the existing recorder CI entry point.
-from ci_workflow_consumers_test import WorkflowConsumerTests
+# Collector behaviour remains in the existing recorder CI entry point.
 from ci_artifacts_test import ArtifactTests
 
 
@@ -17,21 +16,50 @@ RECORDER = Path(__file__).resolve().parents[1] / "scripts" / "record-run.py"
 
 
 class RecordRunTest(unittest.TestCase):
+    def test_tree_only_unregistered_input_gets_workflow_catalogue(self):
+        for name in ('tests/new/nested_probe.py', 'tests/ci_workflows.py', 'scripts/record-run.py',
+                     '.github/workflows/new.yml'):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'synthetic\n')
+        result = self.run_command([sys.executable, '-c', 'pass'], trees=['tests/new'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = self.record()
+        self.assertIn('.github/workflows', record['workflow_contract_inputs']['trees'])
+        for key in ('files_before', 'files_after'):
+            self.assertIn('.github/workflows/new.yml', {row['requested'] for row in record[key]})
+
+    def test_unregistered_nested_tree_hashes_workflows_and_missing_input_fails(self):
+        for name in ('tests/new/nested_probe.py', 'tests/ci_workflows.py', 'scripts/record-run.py',
+                     '.github/workflows/new.yml'):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'synthetic\n')
+        result = self.run_command([sys.executable, '-c', 'pass'],
+                                  files=['tests/new/missing.py'], trees=['tests/new'])
+        self.assertEqual(result.returncode, 125)
+        record = self.record()
+        self.assertEqual(record['exit_code'], 0)
+        for key in ('files_before', 'files_after'):
+            rows = {row['requested']: row for row in record[key]}
+            self.assertEqual(rows['tests/new/missing.py']['status'], 'missing')
+            self.assertEqual(rows['.github/workflows/new.yml']['sha256'], hashlib.sha256(b'synthetic\n').hexdigest())
+
     def test_workflow_contract_inputs_capture_relocated_and_new_workflows(self):
         # REQ-W2-LAND-CI -> RISK-UNRECORDED-WORKFLOW: both snapshots include
         # the catalogue/helper; a workflow created by the child is visible after.
-        for name in ('tests/measurement_ci_test.py', 'tests/ci_workflows.py', 'scripts/record-run.py',
+        for name in ('tests/new_unregistered_test.py', 'tests/ci_workflows.py', 'scripts/record-run.py',
                      '.github/workflows/relocated.yml'):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('fixture\n', encoding='utf-8')
         child = "from pathlib import Path; Path('.github/workflows/added.yml').write_text('added')"
-        result = self.run_command([sys.executable, '-c', child], files=['tests/measurement_ci_test.py'])
+        result = self.run_command([sys.executable, '-c', child], files=['tests/new_unregistered_test.py'])
         self.assertEqual(result.returncode, 0, result.stderr)
         record = self.record()
         before = {row['requested']: row for row in record['files_before']}
         after = {row['requested']: row for row in record['files_after']}
-        expected = {'tests/measurement_ci_test.py', 'tests/ci_workflows.py', 'scripts/record-run.py',
+        expected = {'tests/new_unregistered_test.py', 'tests/ci_workflows.py', 'scripts/record-run.py',
                     '.github/workflows/relocated.yml'}
         self.assertEqual(set(before), expected)
         self.assertEqual(set(after), expected | {'.github/workflows/added.yml'})
@@ -73,7 +101,7 @@ class RecordRunTest(unittest.TestCase):
         raw = b"x" * (1024 * 1024 - 1) + b"\r\nfirst\nsecond\r\n\x00\xfflone\rend\r"
         (self.root / "mixed.bin").write_bytes(raw)
         result = self.run_command([sys.executable, "-c", "pass"], files=["mixed.bin", "absent"])
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 125, result.stderr)
         record = self.record()
         for field in ["files_before", "files_after"]:
             self.assertEqual(record[field][0]["sha256"], hashlib.sha256(raw).hexdigest())
@@ -128,7 +156,7 @@ class RecordRunTest(unittest.TestCase):
 
     def test_missing_tree_records_one_missing_directory(self):
         result = self.run_command([sys.executable, "-c", "pass"], trees=["absent"])
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 125, result.stderr)
         for field in ["files_before", "files_after"]:
             self.assertEqual(self.record()[field], [{
                 "requested": "absent", "path": str((self.root / "absent").resolve()),
@@ -220,7 +248,7 @@ class RecordRunTest(unittest.TestCase):
             sys.executable, "-c",
             "from pathlib import Path; Path('changed.bin').write_bytes(b'after'); Path('created.bin').write_bytes(b'new')",
         ], files=["changed.bin", "stable.bin", "created.bin"])
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 125, result.stderr)
         before = self.record()["files_before"]
         after = self.record()["files_after"]
         self.assertEqual(before[0]["sha256"], hashlib.sha256(original).hexdigest())

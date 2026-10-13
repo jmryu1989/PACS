@@ -76,17 +76,31 @@ function scan(source, filename) {
       else modules.push(value.replaceAll('\\', '/'));
     }
     if (ts.isCallExpression(node)) {
-      const name = ts.isIdentifier(node.expression) ? node.expression.text :
+      let name = ts.isIdentifier(node.expression) ? node.expression.text :
         ts.isPropertyAccessExpression(node.expression) ? node.expression.name.text : '';
+      if (ts.isIdentifier(node.expression)) {
+        const symbol = checker.getSymbolAtLocation(node.expression);
+        const declaration = symbol?.valueDeclaration || symbol?.declarations?.find(ts.isBindingElement);
+        if (declaration && ts.isBindingElement(declaration) && declaration.propertyName) {
+          name = declaration.propertyName.text;
+        }
+      }
+      if (['exec', 'execSync'].includes(name)) unresolved = true;
+      if (name === 'fork') {
+        const target = node.arguments[0] && constant(node.arguments[0]);
+        if (target === undefined) unresolved = true;
+        else files.push(target);
+      }
       if (['spawn', 'spawnSync', 'execFile', 'execFileSync'].includes(name)) {
         const command = node.arguments[0] && constant(node.arguments[0]);
         const argv = node.arguments[1];
         const values = argvValues(argv);
-        files.push(...values.filter(value => value && /\.(py|cjs)$/.test(value)).map(value => value.replaceAll('\\', '/')));
+        files.push(...values.filter(value => value && /\.(py|cjs|js|mjs|ts)$/.test(value)).map(value => value.replaceAll('\\', '/')));
         if (values.includes(undefined)) unresolved = true;
+        if (values.some(value => ['-e', '--eval', '-r', '--require'].includes(value))) unresolved = true;
         if (argv && ts.isArrayLiteralExpression(argv)) {
           const args = argv.elements.map(item => constant(item));
-          files.push(...args.filter(value => value && /\.(py|cjs)$/.test(value)).map(value => value.replaceAll('\\', '/')));
+          files.push(...args.filter(value => value && /\.(py|cjs|js|mjs|ts)$/.test(value)).map(value => value.replaceAll('\\', '/')));
           if (command && /(^|[/\\])python(?:[\d.]*)?(?:\.exe)?$/.test(command) && args[0] === '-m' && args[1]) {
             files.push(args[1].replaceAll('.', '/') + '.py');
           }
@@ -114,7 +128,14 @@ function consumes(source, filename) {
 }
 
 if (require.main === module) {
-  const requests = JSON.parse(fs.readFileSync(0, 'utf8'));
-  process.stdout.write(JSON.stringify(requests.map(row => scan(row.source, row.filename))));
+  if (process.argv[2] === '--audit') {
+    const result = require('node:child_process').spawnSync(process.env.PYTHON || 'python',
+      ['-B', require('node:path').join(__dirname, 'ci_workflow_consumers_test.py'), '--audit', process.argv[3] || '.'],
+      { stdio: 'inherit' });
+    process.exitCode = result.status ?? 1;
+  } else {
+    const requests = JSON.parse(fs.readFileSync(0, 'utf8'));
+    process.stdout.write(JSON.stringify(requests.map(row => scan(row.source, row.filename))));
+  }
 }
 module.exports = { consumes, scan };

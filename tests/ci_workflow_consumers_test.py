@@ -8,6 +8,9 @@ import ast
 import importlib.util
 import json
 import posixpath
+import re
+import shlex
+import sys
 from pathlib import Path
 import subprocess
 import tempfile
@@ -28,10 +31,16 @@ def python_scan(source, filename='tests/probe.py'):
             if node.body and isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Constant):
                 docstrings.add(id(node.body[0].value))
     values, modules, files, reads = [], set(), set(), False
+    aliases = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            aliases.update((item.asname, item.name) for item in node.names if item.asname)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            aliases.update((item.asname or item.name, node.module + '.' + item.name) for item in node.names)
 
     def call_name(node):
         if isinstance(node, ast.Name):
-            return node.id
+            return aliases.get(node.id, node.id)
         if isinstance(node, ast.Attribute):
             return call_name(node.value) + '.' + node.attr
         return ''
@@ -142,7 +151,7 @@ def python_scan(source, filename='tests/probe.py'):
                 if (source == 'tests' or source.startswith('tests/')) and destination.startswith('/'):
                     mounts.append((source, destination))
         for value in args:
-            if not value or not value.endswith(('.py', '.cjs')):
+            if not value or not value.endswith(('.py', '.cjs', '.js', '.mjs', '.ts')):
                 continue
             for source, destination in mounts:
                 if value.startswith(destination + '/'):
@@ -196,6 +205,8 @@ def python_scan(source, filename='tests/probe.py'):
                 argv = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg == 'args'), None)
                 resolved_args = resolved(argv)
                 loader_files(resolved_args)
+                if resolved_args & {'-e', '--eval', '-r', '--require'}:
+                    reads = True  # Inline/preloaded code needs runtime attribution.
                 if None in resolved_args or not isinstance(argv, (ast.List, ast.Tuple, ast.Name, ast.IfExp, ast.BinOp)):
                     reads = True
                 if isinstance(argv, (ast.List, ast.Tuple)):
@@ -207,6 +218,11 @@ def python_scan(source, filename='tests/probe.py'):
                         if (args[0] and Path(args[0]).name.startswith('python') or
                                 call_name(executable) == 'sys.executable') and args[2]:
                             modules.add(args[2])
+                            if args[2] in ('unittest', 'pytest'):
+                                modules.update(value for value in args[3:] if value and not value.startswith('-'))
+            elif loader in ('os.system', 'os.popen', 'asyncio.create_subprocess_shell',
+                            'asyncio.create_subprocess_exec'):
+                reads = True  # Shell/async launch is explicitly unresolved, never silently ignored.
     values = [value.rstrip('/') for value in values]
     # Several pure suites add tests/e2e before importing its modules. Resolve that
     # explicit local search root; a bare module still never matches global stems.
@@ -306,7 +322,138 @@ def missing_consumers(found, expand=recorder.workflow_contract_inputs):
     return sorted(name for name in found if '.github/workflows' not in expand([name], [], ROOT)[1])
 
 
+def workflow_step_audit(root):
+    """Diagnostic only: attribute missing recorder inputs to workflow/job/step.
+
+    shlex handles the literal command subset used by current workflows. Dynamic
+    shell expressions are reported as unresolved, never a completeness verdict.
+    """
+    from ci_workflows import WorkflowCatalog
+    graph = {}
+    readers = consumers(root, audit=graph)
+    rows = []
+    for workflow, doc in WorkflowCatalog(root).documents.items():
+        for job_id, job in doc['jobs'].items():
+            for index, step in enumerate(job.get('steps', [])):
+                run = str(step.get('run', '')).replace('\\\n', ' ').replace('`\n', ' ')
+                for line_number, line in enumerate(run.splitlines(), 1):
+                    line = line.replace('\\', '/')
+                    if 'scripts/record-run.py' not in line:
+                        continue
+                    line = re.sub(r'\$\{\{\s*github.workspace\s*\}\}/', '', line)
+                    row = dict(workflow=workflow, job=job_id, step=index, name=step.get('name'),
+                               line=line_number, missing=[], unresolved=[])
+                    rows.append(row)
+                    try:
+                        words = shlex.split(line, comments=True)
+                        pos = next(i for i, word in enumerate(words) if word.lstrip('./') == 'scripts/record-run.py')
+                        divider = words.index('--', pos)
+                    except (ValueError, StopIteration) as error:
+                        row['unresolved'].append('recorder command: ' + str(error))
+                        continue
+                    options, command = words[pos + 1:divider], words[divider + 1:]
+                    declared, trees = [], []
+                    for i, word in enumerate(options):
+                        for option, values in (('--file', declared), ('--tree', trees)):
+                            if word == option and i + 1 < len(options):
+                                values.append(options[i + 1].removeprefix('./'))
+                            elif word.startswith(option + '='):
+                                values.append(word.split('=', 1)[1].removeprefix('./'))
+                    extra_files, extra_trees = recorder.workflow_contract_inputs(declared, trees, root)
+                    declared += extra_files
+                    trees += extra_trees
+                    invoked = {word.removeprefix('./') for word in command if word.removeprefix('./') in graph['edges']}
+                    if '-m' in command:
+                        invoked.update(word.replace('.', '/') + '.py' for word in command
+                                       if word.replace('.', '/') + '.py' in graph['edges'])
+                    if any('$' in word for word in command + options):
+                        row['unresolved'].append('shell/matrix variable requires expanded command inspection')
+                    required = set(invoked)
+                    pending = list(invoked)
+                    while pending:
+                        for target in graph['edges'][pending.pop()]:
+                            if target not in required:
+                                required.add(target)
+                                pending.append(target)
+                    if invoked & readers:
+                        required.update(('.github/workflows', 'tests/ci_workflows.py', 'scripts/record-run.py'))
+                    def covered(name):
+                        return name in declared or any(name == tree or name.startswith(tree.rstrip('/') + '/') for tree in trees)
+                    row.update(invoked=sorted(invoked), missing=sorted(name for name in required if not covered(name)))
+    return dict(contract='W2C-05 step input diagnostic; no per-file registration', steps=rows,
+                gaps=sum(bool(row['missing']) for row in rows), unresolved=sum(bool(row['unresolved']) for row in rows))
+
+
 class WorkflowConsumerTests(unittest.TestCase):
+    def test_parent_index_keeps_resolved_external_target(self):
+        scan = python_scan("subprocess.run(['python', str(Path('sandbox/a/probe.py').parents[1] / 'leaf.py')])")
+        self.assertEqual(scan[2], {'sandbox/leaf.py'})
+
+    def test_loader_boundaries_and_external_targets(self):
+        cases = {
+            'from_alias.py': "from subprocess import run as launch\nlaunch(['node', 'leaf.js'])",
+            'module_alias.py': "import subprocess as sp\nsp.run(['node', 'leaf.mjs'])",
+            'typescript.py': "subprocess.run(['node', 'leaf.ts'])",
+            'run_unittest.py': "subprocess.run(['python', '-m', 'unittest', 'tests.leaf'])",
+            'run_pytest.py': "subprocess.run(['python', '-m', 'pytest', 'tests/leaf.py'])",
+            'inline.py': "subprocess.run(['node', '-e', code])",
+            'preload.py': "subprocess.run(['node', '--require', module])",
+            'shell.py': "import os\nos.system(command)",
+            'popen.py': "import os\nos.popen(command)",
+            'async.py': "import asyncio\nasyncio.create_subprocess_exec(*args)",
+            'async_shell.py': "import asyncio\nasyncio.create_subprocess_shell(command)",
+            'outside.py': "subprocess.run(['python', 'scripts/helper.py'])",
+            'exec.cjs': "require('child_process').exec('node leaf.js');",
+            'execsync.cjs': "require('child_process').execSync('node leaf.mjs');",
+            'fork.cjs': "require('child_process').fork('./leaf.js');",
+            'alias.cjs': "const {spawnSync: launch} = require('node:child_process'); launch('node', ['./leaf.js']);",
+            'execfile.cjs': "require('child_process').execFile('node', ['./leaf.js']);",
+            'execfilesync.cjs': "require('child_process').execFileSync('node', ['./leaf.js']);",
+            'inline.cjs': "require('child_process').spawnSync('node', ['-e', 'require(module)']);",
+        }
+        negatives = {
+            'from_plain.py': "from subprocess import run as launch\nlaunch(['node', 'plain.js'])",
+            'module_plain.py': "import subprocess as sp\nsp.run(['node', 'plain.mjs'])",
+            'typescript_plain.py': "subprocess.run(['node', 'plain.ts'])",
+            'unittest_plain.py': "subprocess.run(['python', '-m', 'unittest', 'tests.plain'])",
+            'pytest_plain.py': "subprocess.run(['python', '-m', 'pytest', 'tests/plain.py'])",
+            'aliases_plain.cjs': "const {spawnSync: launch} = require('node:child_process'); launch('node', ['./plain.js']);",
+            'fork_plain.cjs': "require('child_process').fork('./plain.js');",
+            'execfile_plain.cjs': "require('child_process').execFile('node', ['./plain.js']);",
+            'execfilesync_plain.cjs': "require('child_process').execFileSync('node', ['./plain.js']);",
+            'shell_prose.py': "# os.system(command)\ntext = 'asyncio.create_subprocess_exec(args)'",
+            'exec_prose.cjs': "// execSync('node leaf.js')\nconst text = 'exec(command)';",
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'tests').mkdir()
+            for ext in ('py', 'js', 'mjs', 'ts'):
+                (root / ('tests/leaf.' + ext)).write_text("p = '.github/workflows'", encoding='utf-8')
+                (root / ('tests/plain.' + ext)).write_text('p = 1', encoding='utf-8')
+            for name, source in {**cases, **negatives}.items():
+                (root / 'tests' / name).write_text(source, encoding='utf-8')
+            found = consumers(root)
+        self.assertTrue({'tests/' + name for name in cases} <= found, sorted(found))
+        self.assertFalse({'tests/' + name for name in negatives} & found, sorted(found))
+
+    def test_step_audit_reports_inputs_not_unregistered_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'tests').mkdir()
+            (root / '.github/workflows').mkdir(parents=True)
+            (root / 'tests/new.py').write_text('import leaf', encoding='utf-8')
+            (root / 'tests/leaf.py').write_text("p = '.github/workflows'", encoding='utf-8')
+            (root / '.github/workflows/probe.yml').write_text('''jobs:
+  probe:
+    steps:
+      - run: python scripts/record-run.py --file tests/new.py -- python tests/new.py
+      - run: python scripts/record-run.py --tree tests -- python tests/new.py
+''', encoding='utf-8')
+            report = workflow_step_audit(root)
+        self.assertEqual(report['steps'][0]['missing'], ['tests/leaf.py'])
+        self.assertEqual(report['steps'][1]['missing'], [])
+        self.assertEqual(report['steps'][0]['job'], 'probe')
+        self.assertEqual(report['steps'][0]['step'], 0)
     def test_constructed_paths_variable_argv_and_local_wrappers(self):
         cases = {
             'clinician.py': "ROOT = Path(__file__).resolve().parents[1]\nsubprocess.run(['node', str(ROOT / 'tests' / 'leaf.cjs')])",
@@ -410,7 +557,7 @@ class WorkflowConsumerTests(unittest.TestCase):
             files, trees = recorder.workflow_contract_inputs([], ['tests'], ROOT)
             self.assertIn('.github/workflows', trees, name)
 
-    def test_missing_new_consumer_is_reported(self):
+    def test_new_reader_needs_no_registration(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             path = root / 'tests/new_workflow_reader.py'
@@ -418,7 +565,7 @@ class WorkflowConsumerTests(unittest.TestCase):
             path.write_text('from tests.ci_workflows import WorkflowCatalog as Catalog\n', encoding='utf-8')
             found = consumers(root)
             self.assertEqual(found, {'tests/new_workflow_reader.py'})
-            self.assertEqual(missing_consumers(found), ['tests/new_workflow_reader.py'])
+            self.assertEqual(missing_consumers(found), [])
         self.assertEqual(missing_consumers({'tests/candidate_ci_test.py'}, lambda *args: ([], [])),
                          ['tests/candidate_ci_test.py'])
 
@@ -453,7 +600,7 @@ class WorkflowConsumerTests(unittest.TestCase):
         self.assertEqual(found, {'tests/' + name for name in readers})
         # A reader found only through the import graph still has to be declared to the recorder.
         self.assertEqual(missing_consumers({'tests/uses_inventory.py', 'tests/nested/loads_by_path.py'}),
-                         ['tests/nested/loads_by_path.py', 'tests/uses_inventory.py'])
+                         [])
 
     def test_reading_propagates_through_any_depth_of_imports(self):
         # A twelve-hop chain whose names do not sort in chain order, crossing Python and JS
@@ -538,7 +685,7 @@ class WorkflowConsumerTests(unittest.TestCase):
             self.assertFalse(js['reads'])
 
     def test_scanning_guard_records_the_test_corpus(self):
-        for name in ('tests/record_run_test.py', 'tests/ci_workflow_consumers_test.py'):
+        for name in ('tests/ci_workflow_consumers.cjs', 'tests/ci_workflow_consumers_test.py'):
             with self.subTest(name=name):
                 files, trees = recorder.workflow_contract_inputs([name], [], ROOT)
                 self.assertIn('tests', trees)
@@ -565,4 +712,7 @@ class WorkflowConsumerTests(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    unittest.main(verbosity=2)
+    if len(sys.argv) == 3 and sys.argv[1] == '--audit':
+        print(json.dumps(workflow_step_audit(Path(sys.argv[2]).resolve()), indent=2))
+    else:
+        unittest.main(verbosity=2)

@@ -9,8 +9,10 @@ on contradictory filtered responses. G3 requests must stop before any lookup.
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -94,6 +96,184 @@ class FakeGitHub:
 
 
 class ArtifactTests(unittest.TestCase):
+    def test_invalid_page_zero_and_empty_page_with_next_link(self):
+        for page_number, rows in ((0, [{'id': 1}]), (2, [])):
+            with self.subTest(page=page_number):
+                def query(endpoint):
+                    if 'page=' in endpoint:
+                        return {'total_count': 1, 'artifacts': [{'id': 1}] if not rows else []}, {}
+                    return {'total_count': 1, 'artifacts': rows}, {'Link':
+                        f'<https://api.github.com/repositories/42/actions/runs/11/artifacts?page={page_number}>; rel="next"'}
+                with self.assertRaisesRegex(ValueError, 'STOP run_id=11 attempt=1 artifact_id=unknown: invalid pagination Link page/fragment'):
+                    listing(query, 'repos/o/r/actions/runs/11/artifacts', 'artifacts',
+                            {'id': 11, 'run_attempt': 1}, repository_id=42)
+
+    def test_refusal_reasons_keep_selected_run_and_artifacts(self):
+        cases = ('wrong-sha', 'wrong-owner', 'failure', 'pending', 'zero', 'two', 'digest')
+        for defect in cases:
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as folder:
+                root, uploads = self.fixture(folder)
+                github = FakeGitHub(uploads)
+                run = github.run('renamed-volume.yml')
+                artifact, reason = 'unknown', 'run owner/SHA mismatch'
+                if defect == 'wrong-sha':
+                    run['head_sha'] = 'b' * 40
+                elif defect == 'wrong-owner':
+                    run['path'] = '.github/workflows/other.yml'
+                elif defect in ('failure', 'pending'):
+                    run.update(conclusion='failure' if defect == 'failure' else None,
+                               status='completed' if defect == 'failure' else 'pending')
+                    reason = 'latest run is not completed/success'
+                elif defect in ('zero', 'two'):
+                    if defect == 'zero':
+                        run['artifacts'] = []
+                        artifact = 'missing'
+                    else:
+                        run['artifacts'].append(dict(run['artifacts'][0], id=1150))
+                        artifact = '1100,1150'
+                    reason = 'expected one available synthetic-volume-rendering-results'
+                else:
+                    run['artifacts'][0]['digest'] = 'sha256:wrong'
+                    artifact, reason = '1100', 'downloaded archive digest mismatch'
+                with self.assertRaisesRegex(ValueError, re.escape(f'STOP run_id=11 attempt=1 artifact_id={artifact}:') + '.*' + reason):
+                    self.collect(root, github)
+
+    def test_final_run_set_change_keeps_last_known_identity(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root, uploads = self.fixture(folder)
+            class Changed(FakeGitHub):
+                def __call__(self, endpoint):
+                    body, headers = super().__call__(endpoint)
+                    if '/workflows/renamed-volume.yml/runs?' in endpoint and self.urls.count(endpoint) == 2:
+                        body['workflow_runs'][0]['updated_at'] = '2026-10-13T00:00:00Z'
+                    return body, headers
+            with self.assertRaisesRegex(ValueError, 'STOP run_id=12 attempt=1 artifact_id=1201: .*workflow run set/revisions changed during collection'):
+                self.collect(root, Changed(uploads))
+
+    def test_latest_run_uses_instants_across_calendar_and_timezone_boundaries(self):
+        pairs = [
+            ('2026-10-12T01:00:00+09:00', '2026-10-12T00:00:00Z'),
+            ('2026-11-01T00:15:00+02:00', '2026-10-31T23:45:00Z'),
+            ('2027-01-01T00:15:00+02:00', '2026-12-31T23:45:00Z'),
+            ('2026-10-12T00:00:00Z', '2026-10-12T00:00:00.1Z'),
+            ('2026-10-12T00:30:00+02:00', '2026-10-11T23:00:00-01:00'),
+        ]
+        for earlier, later in pairs:
+            with self.subTest(earlier=earlier, later=later), tempfile.TemporaryDirectory() as folder:
+                root, uploads = self.fixture(folder)
+                github = FakeGitHub(uploads)
+                github.run('renamed-volume.yml')['created_at'] = earlier
+                github.add('renamed-volume.yml', ['synthetic-volume-rendering-results'], run_id=90,
+                           created_at=later, conclusion='failure')
+                with self.assertRaisesRegex(ValueError, 'STOP run_id=90 attempt=1 artifact_id=unknown: .*latest run is not completed/success'):
+                    self.collect(root, github)
+
+    @staticmethod
+    def powershells():
+        return list(dict.fromkeys(path for name in ('powershell', 'pwsh') if (path := shutil.which(name))))
+
+    def test_all_documented_powershell_blocks_parse_without_native_quoting_hazard(self):
+        shells = self.powershells()
+        if not shells:
+            self.skipTest('PowerShell is not installed; Windows validation is required separately')
+        blocks = re.findall(r'```powershell\n(.*?)```', (ROOT / 'tests/stage-exit.md').read_text(encoding='utf-8'), re.S)
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for index, block in enumerate(blocks):
+                (root / f'{index}.ps1').write_text(block, encoding='utf-8-sig')
+            parser = root / 'parse.ps1'
+            parser.write_text('''$ErrorActionPreference = 'Stop'
+foreach ($file in Get-ChildItem $PSScriptRoot -Filter '*.ps1' | Where-Object Name -ne 'parse.ps1') {
+  $tokens = $null; $errors = $null
+  $ast = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
+  if ($errors.Count) { throw ($errors | Out-String) }
+  $hazards = $ast.FindAll({ param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+    @($node.CommandElements | Where-Object {
+      $_ -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+      $_.StringConstantType -eq 'SingleQuoted' -and $_.Value.Contains([char]34)
+    }).Count -gt 0
+  }, $true)
+  if ($hazards.Count) { throw ('Native quoting hazard in ' + $file.Name) }
+}
+''', encoding='utf-8-sig')
+            for shell in shells:
+                with self.subTest(shell=shell):
+                    result = subprocess.run([shell, '-NoProfile', '-NonInteractive', '-File', str(parser)], capture_output=True)
+                    self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+
+    def test_manual_rerun_archive_and_three_guards_execute(self):
+        shells = self.powershells()
+        if not shells:
+            self.skipTest('PowerShell is not installed; Windows validation is required separately')
+        doc = (ROOT / 'tests/stage-exit.md').read_text(encoding='utf-8')
+        block = next(block for block in re.findall(r'```powershell\n(.*?)```', doc, re.S) if block.startswith('$stopped ='))
+        for shell in shells:
+            for case, message in (('ok', None), ('id', '확인된 artifact id 필요'),
+                                  ('origin', 'artifact 실행 출처 불일치'), ('digest', '수동 archive digest 불일치')):
+                with self.subTest(shell=shell, case=case), tempfile.TemporaryDirectory() as folder:
+                    root = Path(folder)
+                    fake = root / 'fake-gh.py'
+                    fake.write_text('''import hashlib, json, os, sys
+from pathlib import Path
+case = os.environ['MOCK_CASE']
+archive = b'PK\\x03\\x04synthetic\\x00\\xff'
+if sys.argv[1:3] == ['run', 'view']:
+    print(json.dumps(dict(databaseId=42, attempt=2, status='completed', conclusion='success', headSha='a'*40, event='push', workflowName='validate')))
+elif sys.argv[-1].endswith('/zip'):
+    Path(os.environ['MOCK_DOWNLOAD']).write_text('downloaded')
+    sys.stdout.buffer.write(archive)
+else:
+    print(json.dumps(dict(id=99, workflow_run=dict(id=7 if case == 'origin' else 42), digest='sha256:' + ('wrong' if case == 'digest' else hashlib.sha256(archive).hexdigest()))))
+''', encoding='utf-8')
+                    if os.name == 'nt':
+                        # CreateProcess searches .exe, not PATHEXT: a .cmd mock can
+                        # accidentally fall through to the real installed gh.exe.
+                        source = root / 'MockGh.cs'
+                        payload = b'PK\x03\x04synthetic\x00\xff'
+                        run_json = json.dumps(dict(databaseId=42, attempt=2, status='completed', conclusion='success',
+                                                   headSha='a' * 40, event='push', workflowName='validate'))
+                        metadata_json = json.dumps(dict(id=99, workflow_run=dict(id=7 if case == 'origin' else 42),
+                                                        digest='sha256:' + ('wrong' if case == 'digest' else hashlib.sha256(payload).hexdigest())))
+                        source.write_text('''using System; using System.IO;
+class MockGh { static void Main(string[] args) {
+if (args.Length > 1 && args[0] == "run" && args[1] == "view") Console.WriteLine(RUN);
+else if (args[args.Length-1].EndsWith("/zip")) {
+File.WriteAllText(Environment.GetEnvironmentVariable("MOCK_DOWNLOAD"), "downloaded");
+byte[] data = new byte[] {PAYLOAD}; Console.OpenStandardOutput().Write(data, 0, data.Length);
+} else Console.WriteLine(METADATA);
+} }
+'''.replace('RUN', json.dumps(run_json)).replace('METADATA', json.dumps(metadata_json))
+                            .replace('PAYLOAD', ','.join(map(str, payload))), encoding='utf-8')
+                        compiler = Path(os.environ['WINDIR']) / 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+                        compiled = subprocess.run([str(compiler), '/nologo', '/out:' + str(root / 'gh.exe'), str(source)], capture_output=True)
+                        self.assertEqual(compiled.returncode, 0, compiled.stdout.decode(errors='replace'))
+                    else:
+                        executable = root / 'gh'
+                        executable.write_text('#!' + sys.executable + '\n' + fake.read_text(), encoding='utf-8')
+                        executable.chmod(0o755)
+                    script = root / 'run.ps1'
+                    script.write_text("$ErrorActionPreference = 'Stop'\n$out = $PSScriptRoot\n$repository = 'o/r'\n$stoppedRun = 42\n$artifactId = " + ('0' if case == 'id' else '99') + '\n' + block, encoding='utf-8-sig')
+                    env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH'],
+                               MOCK_CASE=case, MOCK_DOWNLOAD=str(root / 'downloaded'))
+                    # pwsh's inherited module path can hide Windows PS 5.1's
+                    # inbox Get-FileHash module. Let each shell build its own.
+                    env.pop('PSModulePath', None)
+                    result = subprocess.run([shell, '-NoProfile', '-NonInteractive', '-File', str(script)], env=env, capture_output=True)
+                    evidence = root / 'manual-42-99.json'
+                    if message is None:
+                        self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+                        record = json.loads(evidence.read_text(encoding='utf-8-sig'))
+                        self.assertEqual((record['run']['databaseId'], record['run']['attempt'], record['artifact_id'], record['use']), (42, 2, 99, 'diagnostic-only'))
+                        raw = (root / 'manual-42-99.zip').read_bytes()
+                        self.assertEqual(raw, b'PK\x03\x04synthetic\x00\xff')
+                        self.assertEqual(record['digest'], 'sha256:' + hashlib.sha256(raw).hexdigest())
+                    else:
+                        self.assertNotEqual(result.returncode, 0)
+                        # UTF-8 is configured by the execution environment on Windows.
+                        self.assertIn(message, result.stderr.decode('utf-8', errors='replace'))
+                        self.assertFalse(evidence.exists())
+                        self.assertEqual((root / 'downloaded').exists(), case == 'digest')
     def test_invalid_repository_id_stops_before_listing(self):
         for payload in ({}, {'id': '42'}, {'id': 0}, {'id': -1}, {'id': True}):
             with self.subTest(payload=payload), tempfile.TemporaryDirectory() as folder:
