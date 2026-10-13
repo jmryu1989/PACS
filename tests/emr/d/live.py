@@ -425,10 +425,14 @@ class EmrDLive(unittest.TestCase):
             self.assertEqual((out["read:" + name]["ok"], err(out["read:" + name]).get("status")), (False, 404), name)
         self.assertEqual((out["runtimeForeign"]["ok"], err(out["runtimeForeign"]).get("code")), (False, "NotFound"),
                          "another institution gets no body through the runtime either")
-        self.assertEqual((out["runtimeForged"]["ok"], err(out["runtimeForged"]).get("code")), (False, "NotFound"),
-                         "rows that were not read from storage are never served")
+        self.assertTrue(out["runtimeLocal"]["ok"], out["runtimeLocal"])
+        self.assertEqual([e["body"] for e in out["runtimeLocal"]["value"]["item"]["entries"]], [TEXT["question"], TEXT["answer"]])
+        self.assertEqual((out["runtimeForged"]["ok"], err(out["runtimeForged"]).get("code")), (False, "CLINICAL_RESPONSE_REFUSED"),
+                         "a copied DTO cannot carry the private response capability")
+        self.assertEqual(out["rawWrites"], 0)
+        self.assertEqual((out["planForeign"]["ok"], err(out["planForeign"]).get("code")), (False, "NotFound"))
         provided = self.provisions(qid)
-        self.assertEqual(sorted(e["userId"]["value"]["subject"] for e in provided), sorted(PEOPLE[n] for n in ("c1", "r1", "ad")),
+        self.assertEqual(sorted(e["userId"]["value"]["subject"] for e in provided), sorted(PEOPLE[n] for n in ("c1", "r1", "ad", "r1")),
                          "one durable provision per served reader and none for a refused one")
         versions = self.versions(qid)
         for e in provided:
@@ -606,9 +610,12 @@ class EmrDLive(unittest.TestCase):
             self.check_sr(sr)
 
     def test_m_d_05_institution_boundary_skipped(self):
+        baseline, _uid = self.run_d03()
+        self.check_d03(baseline)
         out, _uid = self.run_d03(mutant="M-D-05")
-        # The service's own row check still hides the row from rb; the runtime boundary itself now hands out the body.
-        self.assertTrue(out["runtimeForeign"]["ok"], "another institution's verified reader received a body through the runtime")
+        self.assertTrue(out["planForeign"]["ok"], out["planForeign"])
+        self.assertEqual((out["runtimeForeign"]["ok"], err(out["runtimeForeign"]).get("code")), (False, "NotFound"),
+                         "the response boundary still withholds the foreign body when the planner is mutated")
         with self.assertRaises(AssertionError):
             self.check_d03(out)
 

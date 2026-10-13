@@ -337,7 +337,7 @@ const SCENARIOS = {
   },
 
   /** TEST-D-03: bodies only to permitted readers of the managing institution, after the durable access event. */
-  async d03({ args, S, SV, runtime, request, attempt, caller, owner, actorFacts, TEXT, prisma }) {
+  async d03({ args, S, R, req, runtime, request, attempt, caller, owner, actorFacts, TEXT, prisma, access }) {
     const uid = args.study, out = {};
     const q = { requestId: uuid(), expectedOwner: owner('c1'), body: TEXT.question }, qid = q.requestId.toLowerCase();
     out.question = await attempt(async () => S.questions.create(uid, caller('c1'), q, await request('c1', 'question.create', qid, q, { studyId: uid })));
@@ -345,14 +345,26 @@ const SCENARIOS = {
     out.answer = await attempt(async () => S.questions.reply(qid, caller('r1'), a, await request('r1', 'question.reply', qid, a, { studyId: uid })));
     for (const name of ['c1', 'r1', 'c2', 'rb', 'ad'])
       out['read:' + name] = await attempt(async () => S.questions.read(qid, caller(name), { actor: await actorFacts(name), signature: null }));
-    // The runtime boundary itself (any caller, not only the six services): another institution's verified reader.
-    out.runtimeForeign = await attempt(async () => runtime.read({ actor: await actorFacts('rb'), signature: null }, { record: 'question', recordId: qid,
-      scope: 'history', rows: await SV.readClinicalRows(prisma, qid), caller: { subject: (await actorFacts('rb')).identity.subject, institutionId: 'inst-b' },
-      send: async () => 'SYN BODY' }));
-    // Rows that did not come from readClinicalRows are refused even for a reader the boundary would admit.
-    out.runtimeForged = await attempt(async () => runtime.read({ actor: await actorFacts('r1'), signature: null }, { record: 'question', recordId: qid,
-      scope: 'history', rows: JSON.parse(JSON.stringify(await SV.readClinicalRows(prisma, qid))), caller: { subject: (await actorFacts('r1')).identity.subject,
-        institutionId: 'inst-a' }, send: async () => 'SYN BODY' }));
+    // Exercise the current selector boundary directly, independently of service row filtering.
+    const selector = { view: 'question', route: 'GET questions/:id', id: qid, current: { rs: 'A', version: null } };
+    out.runtimeForeign = await attempt(async () => runtime.respond({ actor: await actorFacts('rb'), signature: null }, selector,
+      { db: prisma, tx: prisma, caller: caller('rb'), access }));
+    const readRequest = { actor: await actorFacts('r1'), signature: null };
+    const body = await runtime.respond(readRequest, selector, { db: prisma, tx: prisma, caller: caller('r1'), access });
+    const { firstValueFrom, of } = require('/app/node_modules/rxjs');
+    const { ClinicianQuestionController } = req('clinician-question.controller');
+    const { ClinicalResponseInterceptor } = req('emr-clinical/response');
+    const response = { writes: 0, json() { this.writes++; }, send() { this.writes++; }, end() { this.writes++; } };
+    const context = { getClass: () => ClinicianQuestionController, getHandler: () => ClinicianQuestionController.prototype.read,
+      switchToHttp: () => ({ getRequest: () => readRequest, getResponse: () => response }) };
+    const serialize = value => firstValueFrom(new ClinicalResponseInterceptor().intercept(context, { handle: () => of(value) }));
+    out.runtimeLocal = await attempt(() => serialize(body));
+    // Copying a verified DTO cannot copy its private response capability.
+    out.runtimeForged = await attempt(() => serialize(JSON.parse(JSON.stringify(body))));
+    out.rawWrites = response.writes;
+    // A redundant egress check may still stop this mutant; the stored-version read plan must itself refuse foreign actors.
+    out.planForeign = await attempt(async () => R.planClinicalRead({ actor: await actorFacts('rb'),
+      unit: await runtime.store.unit(qid), scope: 'history' }));
     out.ids = { question: qid };
     return out;
   },
