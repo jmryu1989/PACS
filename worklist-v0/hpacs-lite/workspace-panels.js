@@ -67,15 +67,19 @@
         if (key && work.session()) workspaceStorage?.setItem(key, work.session());
       } catch (_) { /* Unavailable storage keeps the current document's tab. */ }
     }
-    function saveWorkspace() {
+    // quiet: the Study Panel options save while the reader moves them. A success then leaves the status line, and
+    // with it the toolbar's height and everything below it, as it was (its longer text can wrap a line); a failed
+    // save, or the first success after one, is always said.
+    function saveWorkspace(quiet = false) {
       if (!workspaceEditable()) return;
       workspaceGeneration++;
       workspaceState.mode = layoutMode;
       workspaceState = KinWorkspaceLayout.toVersion3(KinWorkspaceLayout.withReading(workspaceState, readingWorkspace.snapshotPanels()));
       const saved = KinWorkspaceLayout.write(workspaceStorage, workspaceOwner, workspaceState);
       if (saved) rememberStudyPanelSession();
+      const kept = workspaceLocalKept;
       workspaceLocalKept = !!saved;
-      $("#layout-status").textContent = saved ? "배치 저장됨 · 이 브라우저" : "배치 저장 안 됨 · 이 창에서만 유지";
+      if (!quiet || !saved || !kept) $("#layout-status").textContent = saved ? "배치 저장됨 · 이 브라우저" : "배치 저장 안 됨 · 이 창에서만 유지";
     }
     function rememberPanelSize(selector) {
       if (!workspaceEditable()) return;

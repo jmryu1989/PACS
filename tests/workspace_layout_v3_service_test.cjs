@@ -257,9 +257,55 @@ test('TEST-W3-SERVER-11 uniqueness and update CAS races answer conflict without 
 
 test('TEST-W3-SERVER-12 malformed stored v3 is rejected on read without rewrite', async () => {
   for (const change of [v => { v.workspace.open = true; }, v => { v.workspace.rail = 1.5; },
-    v => { v.reading.relatedHidden = 'false'; }]) {
+    v => { v.reading.relatedHidden = 'false'; }, v => { v.workspace.studyPanel = { landscape: { width: 0 } }; }]) {
     const f = fixture(), value = layout(); change(value); f.seed(value); const before = f.snapshot();
     await assert.rejects(f.service.workspaceLayout(caller), status(400));
     assert.deepEqual(f.snapshot(), before); assert.equal(f.writes(), 0);
   }
+});
+
+// Pilot D1160: the reader's Study Panel width/height/Text Size step per orientation, optional in v3.
+// (The client writes the shared worklist/related/prior sizes as null, W3R-07.)
+const panelLayout = studyPanel => { const v = layout();
+  Object.assign(v.workspace, { worklist: null, related: null, prior: null, studyPanel }); return v; };
+
+test('TEST-W3-SERVER-13 Study Panel choices roundtrip; records without them stay as stored; no migration', async () => {
+  // A record stored before the options existed reads back unchanged (and is the default panel).
+  const old = fixture(); old.seed(layout()); assert.deepEqual((await old.service.workspaceLayout(caller)).layout, layout());
+  for (const studyPanel of [{ landscape: { width: 480 } }, { portrait: { height: 900, text: 2 } },
+    { landscape: { width: 1, height: 16384, text: 1 }, portrait: { width: 16384, height: 1, text: 2 } }]) {
+    const f = fixture(), value = panelLayout(studyPanel);
+    const source = client.normalize(clone(value)); assert.deepEqual(source, value);
+    const saved = await f.service.writeWorkspaceLayout(request(source, 0), caller, false);
+    assert.deepEqual(saved.layout, value); assert.deepEqual(await f.service.workspaceLayout(caller), saved);
+    assert.deepEqual(client.normalize(saved.layout), client.normalize(value));
+  }
+  // The same sparse rule as the client: a default value or an empty orientation is not stored.
+  for (const studyPanel of [{}, { landscape: {} }, { portrait: { text: 0 } }]) {
+    const f = fixture(), saved = await f.service.writeWorkspaceLayout(request(panelLayout(studyPanel)), caller, false);
+    assert.equal(Object.hasOwn(saved.layout.workspace, 'studyPanel'), false);
+  }
+  const f = fixture(), saved = await f.service.writeWorkspaceLayout(request(panelLayout({ landscape: { text: 0, width: 360 } })), caller, false);
+  assert.deepEqual(saved.layout.workspace.studyPanel, { landscape: { width: 360 } });
+  // An older-version writer still cannot replace a v3 record that holds the reader's choices.
+  for (const version of [1, 2])
+    await assert.rejects(f.service.writeWorkspaceLayout(request(layout(version), saved.revision), caller, false), status(409, 'WORKSPACE_CONFLICT'));
+  assert.deepEqual(await f.service.workspaceLayout(caller), saved);
+});
+
+test('TEST-W3-SERVER-14 invalid Study Panel choices are refused before storage', async () => {
+  const invalid = [null, [], 'wide', 1, { both: {} }, { landscape: null }, { landscape: [] }, { portrait: { zoom: 1 } },
+    { landscape: { width: 300 }, other: {} }].map(panelLayout);
+  for (const name of ['width', 'height']) for (const size of [0, -1, 16385, 1.5, NaN, Infinity, '300', true, null, {}, []])
+    invalid.push(panelLayout({ landscape: { [name]: size } }), panelLayout({ portrait: { [name]: size } }));
+  for (const text of [3, -1, 1.5, '1', true, null, NaN]) invalid.push(panelLayout({ portrait: { text } }), panelLayout({ landscape: { text } }));
+  // Only a v3 workspace carries the choices.
+  for (const version of [1, 2]) invalid.push({ ...layout(version), studyPanel: { landscape: { width: 480 } } });
+  const f = fixture(); f.seed(layout()); const before = f.snapshot();
+  for (const value of invalid) {
+    assert.equal(client.normalize(clone(value)), null, JSON.stringify(value.workspace?.studyPanel));
+    await assert.rejects(f.service.writeWorkspaceLayout(request(value, 7), caller, false), status(400), JSON.stringify(value.workspace?.studyPanel));
+    assert.deepEqual(f.snapshot(), before);
+  }
+  assert.equal(f.transactions(), 0); assert.equal(f.writes(), 0);
 });

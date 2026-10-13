@@ -368,7 +368,7 @@
       if (!next) return;
       workspaceState = next;
       if (studyPanel) placeStudyPanel();
-      saveWorkspace();
+      saveWorkspace(true);
     }
     document.addEventListener('scroll', event => {
       if (studyPanel && !workspaceEnded && event.target instanceof Element && event.target.matches('.split, .right')) placeStudyPanel();

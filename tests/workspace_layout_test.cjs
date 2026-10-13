@@ -214,3 +214,76 @@ test('M-03/05: 2048자 cap 경계, 최대 v3 크기, 손상 기록 및 기존 ow
     assert.ok(['invalid', 'unavailable'].includes(result.status)); assert.deepEqual(result.state, layout.defaults());
   }
 });
+
+// Pilot D1160: the reader's Study Panel width/height and Text Size step, per orientation, in the same v3 record.
+test('D1160-M1: v3 records without Study Panel choices are the default; a record keeps only what was chosen', () => {
+  const old = layout.toVersion3(record());
+  assert.equal(Object.hasOwn(old.workspace, 'studyPanel'), false);
+  assert.deepEqual(layout.normalize(old), old);
+  const chosen = { ...old, workspace: { ...old.workspace,
+    studyPanel: { portrait: { text: 2, height: 700 }, landscape: { width: 480, height: 300, text: 1 } } } };
+  // Stored in a fixed order, so two equal choices are the same record (roaming compares records).
+  assert.equal(JSON.stringify(layout.normalize(chosen).workspace.studyPanel),
+    '{"landscape":{"width":480,"height":300,"text":1},"portrait":{"height":700,"text":2}}');
+  for (const empty of [{}, { landscape: {} }, { portrait: { text: 0 } }, { landscape: { text: 0 }, portrait: {} }]) {
+    assert.deepEqual(layout.normalize({ ...old, workspace: { ...old.workspace, studyPanel: empty } }), old);
+  }
+  assert.deepEqual(layout.normalize({ ...old, workspace: { ...old.workspace, studyPanel: { landscape: { text: 0, width: 400 } } } })
+    .workspace.studyPanel, { landscape: { width: 400 } });
+  for (const size of [1, 16384]) assert.equal(layout.normalize({ ...old, workspace: { ...old.workspace,
+    studyPanel: { portrait: { height: size } } } }).workspace.studyPanel.portrait.height, size);
+});
+
+test('D1160-M2: invalid Study Panel choices are refused before storage', () => {
+  const valid = layout.toVersion3(record()), s = store(), k = layout.key(session);
+  layout.write(s, k, valid); const saved = s.getItem(k);
+  const panel = studyPanel => ({ ...valid, workspace: { ...valid.workspace, studyPanel } });
+  const invalid = [null, [], 'wide', 1, { both: {} }, { landscape: null }, { landscape: [] }, { portrait: { zoom: 1 } },
+    { landscape: { width: 300 }, other: {} }];
+  for (const name of ['width', 'height']) for (const size of [0, -1, 16385, 1.5, NaN, Infinity, '300', true, null, {}, []])
+    invalid.push({ landscape: { [name]: size } }, { portrait: { [name]: size } });
+  for (const text of [3, -1, 1.5, '1', true, null, NaN]) invalid.push({ portrait: { text } }, { landscape: { text } });
+  for (const value of invalid.map(panel)) {
+    assert.equal(layout.normalize(value), null, JSON.stringify(value.workspace.studyPanel));
+    assert.equal(layout.mergeLoaded(valid, value), null); assert.equal(layout.write(s, k, value), false);
+    assert.equal(s.getItem(k), saved);
+  }
+});
+
+test('D1160-M3: one orientation changes or resets without touching the other; legacy records upgrade', () => {
+  const start = layout.toVersion3(record());
+  const wide = layout.withStudyPanel(start, 'landscape', { width: 500 });
+  assert.deepEqual(wide.workspace.studyPanel, { landscape: { width: 500 } });
+  const both = layout.withStudyPanel(layout.withStudyPanel(wide, 'portrait', { height: 900 }), 'portrait', { text: 2 });
+  assert.deepEqual(both.workspace.studyPanel, { landscape: { width: 500 }, portrait: { height: 900, text: 2 } });
+  assert.deepEqual(both.portrait, start.portrait); assert.deepEqual(both.landscape, start.landscape);
+  assert.deepEqual(both.reading, start.reading);
+  const reset = layout.withStudyPanel(both, 'portrait', null);
+  assert.deepEqual(reset.workspace.studyPanel, { landscape: { width: 500 } });
+  assert.deepEqual(layout.withStudyPanel(reset, 'landscape', null), start);
+  assert.deepEqual(layout.withStudyPanel(both, 'landscape', { text: 0 }).workspace.studyPanel, both.workspace.studyPanel);
+  const legacy = layout.withStudyPanel(record(), 'portrait', { text: 1 });
+  assert.equal(legacy.version, 3); assert.deepEqual(legacy.portrait, record().portrait);
+  assert.deepEqual(legacy.workspace.studyPanel, { portrait: { text: 1 } });
+  for (const [axis, change] of [['both', { width: 1 }], ['landscape', { width: 0 }], ['portrait', { text: 3 }],
+    ['portrait', 'text'], ['landscape', { width: undefined }]]) assert.equal(layout.withStudyPanel(both, axis, change), null);
+  assert.deepEqual(both.workspace.studyPanel, { landscape: { width: 500 }, portrait: { height: 900, text: 2 } }, 'input kept');
+  // Account Load replaces the choices with the loaded record's (absent there = default here).
+  assert.equal(Object.hasOwn(layout.mergeLoaded(both, start).workspace, 'studyPanel'), false);
+  assert.deepEqual(layout.mergeLoaded(start, both), both);
+  // A legacy (v1/v2) account layout carries no panel choices: Load keeps the current ones.
+  assert.deepEqual(layout.mergeLoaded(both, record()).workspace.studyPanel, both.workspace.studyPanel);
+});
+
+test('D1160-M4: the largest record with every Study Panel choice stays within the 2048-character cap', () => {
+  const axis = { main: 16384, top: 16384, related: 16384, prior: 16384 }, full = { width: 16384, height: 16384, text: 2 };
+  const value = { version: 3, mode: 'landscape', portrait: axis, landscape: axis,
+    reading: { version: 1, reportWidth: 16384, imageHeight: 16384, relatedHeight: 16384,
+      relatedListHeight: 16384, relatedHidden: false }, workspace: { version: 1, rail: 16384,
+      worklist: 16384, related: 16384, prior: 16384, railCollapsed: false, studyPanelTab: 'templates',
+      studyPanel: { landscape: full, portrait: full } } };
+  const s = store(), k = layout.key(session);
+  assert.ok(JSON.stringify(value).length <= 2048);
+  assert.equal(layout.write(s, k, value), true);
+  assert.deepEqual(layout.read(s, k).state.workspace.studyPanel, { landscape: full, portrait: full });
+});

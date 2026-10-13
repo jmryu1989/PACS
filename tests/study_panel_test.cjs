@@ -550,6 +550,108 @@ test('기존 content element·id·listener·값 동일성 및 destroy의 원위�
   assert.equal(f.panel.restore({ open: true, tab: 'info' }), false); f.panel.destroy();
 });
 
+// Pilot D1160: Text Size, Default and the resize edge. The drawer reports the reader's input; the page owns the
+// geometry (axis, bounds) and the stored choice, so these cases check what the drawer shows and reports.
+const control = (f, tag, text) => f.all(f.panel.element).find(el => el.tagName === tag && (text === undefined || el.textContent === text));
+
+test('D1160-P1: Text Size는 세 단계(영어 이름·한국어 설명), 독자의 변경만 알리고 잘못된 값은 거절', () => {
+  const texts = [], f = fixture({ onText: value => texts.push(value) });
+  const select = control(f, 'SELECT'), reset = control(f, 'BUTTON', 'Default');
+  assert.equal(select.getAttribute('aria-label'), 'Text Size'); assert.match(select.title, /[가-힣]/);
+  assert.match(reset.title, /[가-힣]/);
+  assert.deepEqual(select.children.map(option => [option.value, option.textContent]), [['0', 'Normal'], ['1', 'Large'], ['2', 'Larger']]);
+  assert.equal(select.value, '0');
+  f.panel.open(); select.value = '2'; select.dispatch('change');
+  assert.deepEqual(texts, [2]); assert.equal(select.value, '2');
+  select.dispatch('change'); assert.deepEqual(texts, [2], 'the same step is not a change');
+  select.value = '7'; select.dispatch('change'); assert.deepEqual(texts, [2]); assert.equal(select.value, '2');
+  assert.equal(f.panel.setText(1), true); assert.equal(select.value, '1');
+  assert.deepEqual(texts, [2], 'the page restoring a stored step is not the reader changing it');
+  for (const bad of [3, -1, 1.5, '1', null, undefined, NaN]) {
+    assert.equal(f.panel.setText(bad), false); assert.equal(select.value, '1');
+  }
+  // A native select keeps its own Escape (D-06/07); the drawer stays open.
+  select.focus(); assert.equal(select.dispatch('keydown', { key: 'Escape' }).defaultPrevented, false);
+  assert.equal(f.panel.snapshot().open, true);
+  f.panel.destroy(); assert.equal(f.panel.setText(0), false);
+});
+
+test('D1160-P2: 크기 조절 경계는 page가 정한 축·범위 안에서 키보드로 조절하고 결과만 알림', () => {
+  const sizes = [], f = fixture({ onResize: (value, phase) => sizes.push([value, phase]) });
+  const grip = f.role('separator')[0];
+  assert.equal(f.role('separator').length, 1); assert.equal(grip.hidden, true, 'no edge until the page names it');
+  assert.equal(grip.tabIndex, 0); assert.equal(grip.getAttribute('aria-controls'), f.panel.element.id);
+  assert.match(grip.getAttribute('aria-label'), /크기/);
+  f.panel.open();
+  assert.equal(f.panel.setSize({ axis: 'x', value: 360, min: 320, max: 900 }), true);
+  assert.equal(grip.hidden, false);
+  assert.deepEqual(['aria-orientation', 'aria-valuenow', 'aria-valuemin', 'aria-valuemax'].map(name => grip.getAttribute(name)),
+    ['vertical', '360', '320', '900']);
+  grip.focus(); assert.equal(f.doc.activeElement, grip);
+  const key = (name, extra = {}) => grip.dispatch('keydown', { key: name, ...extra });
+  for (const [name, extra, expected] of [['ArrowRight', {}, 370], ['ArrowLeft', {}, 350], ['ArrowRight', { shiftKey: true }, 400],
+    ['ArrowLeft', { shiftKey: true }, 320], ['Home', {}, 320], ['End', {}, 900]]) {
+    const event = key(name, extra);
+    assert.equal(event.defaultPrevented, true); assert.equal(event.stopped, true);
+    assert.deepEqual(sizes.at(-1), [expected, 'end'], name);
+  }
+  const count = sizes.length;
+  for (const [name, extra] of [['ArrowUp', {}], ['ArrowDown', {}], ['Enter', {}], ['ArrowRight', { ctrlKey: true }],
+    ['ArrowRight', { altKey: true }], ['ArrowRight', { metaKey: true }], ['ArrowRight', { isComposing: true }],
+    ['ArrowRight', { keyCode: 229 }], ['ArrowRight', { defaultPrevented: true }]]) key(name, extra);
+  assert.equal(sizes.length, count, 'other keys, chords and IME input change nothing');
+  f.panel.setSize({ axis: 'x', value: 895, min: 320, max: 900 });
+  key('ArrowRight', { shiftKey: true }); assert.deepEqual(sizes.at(-1), [900, 'end'], 'never past the page bound');
+  f.panel.setSize({ axis: 'y', value: 600, min: 240, max: 1300 });
+  assert.equal(grip.getAttribute('aria-orientation'), 'horizontal');
+  key('ArrowDown'); assert.deepEqual(sizes.at(-1), [610, 'end']);
+  key('ArrowUp'); assert.deepEqual(sizes.at(-1), [590, 'end']);
+  const before = sizes.length; key('ArrowLeft'); assert.equal(sizes.length, before);
+  for (const bad of [{ axis: 'z', value: 1, min: 0, max: 2 }, { axis: 'x', value: NaN, min: 0, max: 2 },
+    { axis: 'x', value: 1, min: 3, max: 2 }, { axis: 'x' }, 'x', undefined]) assert.equal(f.panel.setSize(bad), false);
+  assert.equal(grip.getAttribute('aria-orientation'), 'horizontal'); assert.equal(grip.getAttribute('aria-valuenow'), '600');
+  // Escape on the edge closes the drawer like anywhere inside it.
+  key('Escape'); assert.equal(f.panel.snapshot().open, false); assert.equal(f.doc.activeElement, f.opener);
+  assert.equal(f.panel.setSize(null), true); assert.equal(grip.hidden, true);
+});
+
+test('D1160-P3: 끌기는 움직임을 미리 보이고 놓을 때 한 번 저장; 움직임 없는 누름·취소·다른 포인터·닫힌 drawer는 저장 없음', () => {
+  const sizes = [], resets = [];
+  const f = fixture({ onResize: (value, phase) => sizes.push([value, phase]), onReset: () => resets.push(true) });
+  const grip = f.role('separator')[0], reset = control(f, 'BUTTON', 'Default');
+  f.panel.setSize({ axis: 'x', value: 360, min: 320, max: 900 });
+  grip.dispatch('pointerdown', { button: 0, pointerId: 1, clientX: 100, clientY: 5 });
+  grip.dispatch('pointermove', { pointerId: 1, clientX: 150, clientY: 5 }); grip.dispatch('pointerup', { pointerId: 1, clientX: 150 });
+  reset.dispatch('click'); grip.dispatch('dblclick');
+  assert.deepEqual(sizes, []); assert.deepEqual(resets, [], 'a closed drawer takes no input');
+  f.panel.open();
+  assert.equal(grip.dispatch('pointerdown', { button: 0, pointerId: 7, clientX: 100, clientY: 5 }).defaultPrevented, true);
+  grip.dispatch('pointermove', { pointerId: 7, clientX: 100, clientY: 50 });
+  grip.dispatch('pointermove', { pointerId: 8, clientX: 300, clientY: 5 });
+  grip.dispatch('pointermove', { pointerId: 7, clientX: 130, clientY: 5 });
+  grip.dispatch('pointermove', { pointerId: 7, clientX: 160, clientY: 5 });
+  grip.dispatch('pointerup', { pointerId: 8, clientX: 999, clientY: 5 });
+  grip.dispatch('pointerup', { pointerId: 7, clientX: 175, clientY: 5 });
+  assert.deepEqual(sizes, [[390, 'move'], [420, 'move'], [435, 'end']]);
+  grip.dispatch('lostpointercapture', { pointerId: 7, clientX: 175 }); assert.equal(sizes.length, 3);
+  // A press without movement (a click, or each click of a double-click) stores nothing.
+  grip.dispatch('pointerdown', { button: 0, pointerId: 9, clientX: 200 }); grip.dispatch('pointerup', { pointerId: 9, clientX: 200 });
+  grip.dispatch('pointerdown', { button: 2, pointerId: 10, clientX: 200 }); grip.dispatch('pointermove', { pointerId: 10, clientX: 260 });
+  grip.dispatch('pointerup', { pointerId: 10, clientX: 260 });
+  assert.equal(sizes.length, 3);
+  // A cancelled drag (or a lost capture) hands the stored size back to the page.
+  f.panel.setSize({ axis: 'y', value: 600, min: 240, max: 1300 });
+  grip.dispatch('pointerdown', { button: 0, pointerId: 11, clientX: 0, clientY: 300 });
+  grip.dispatch('pointermove', { pointerId: 11, clientX: 50, clientY: 260 }); grip.dispatch('pointercancel', { pointerId: 11 });
+  grip.dispatch('pointerdown', { button: 0, pointerId: 12, clientX: 0, clientY: 300 });
+  grip.dispatch('pointermove', { pointerId: 12, clientX: 0, clientY: 310 }); grip.dispatch('lostpointercapture', { pointerId: 12 });
+  assert.deepEqual(sizes.slice(3), [[560, 'move'], [600, 'cancel'], [610, 'move'], [600, 'cancel']]);
+  grip.dispatch('dblclick'); reset.dispatch('click'); assert.deepEqual(resets, [true, true]);
+  f.panel.destroy();
+  grip.dispatch('pointerdown', { button: 0, pointerId: 13, clientY: 300 }); grip.dispatch('pointermove', { pointerId: 13, clientY: 340 });
+  reset.dispatch('click'); assert.equal(sizes.length, 7); assert.equal(resets.length, 2);
+});
+
 test('content provider는 한 번 평가, 잘못된 content는 이동 전에 거절', () => {
   const f = fixture(); f.panel.destroy(); let calls = 0;
   const provided = Object.fromEntries(Object.entries(f.content).map(([name, el]) => [name, () => { calls++; return el; }]));
