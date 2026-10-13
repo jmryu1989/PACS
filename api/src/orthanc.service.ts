@@ -197,6 +197,11 @@ export class OrthancService {
     return res.json();
   }
 
+  /** 서버 전체 통계 원문. 값의 유효성·관측 불가 판정은 소비자가 맡고 원천 실패는 그대로 전파한다. */
+  statistics(): Promise<unknown> {
+    return this.get('/statistics');
+  }
+
   /**
    * QIDO-RS 검사 목록.
    *
