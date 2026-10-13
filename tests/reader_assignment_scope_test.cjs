@@ -28,6 +28,13 @@
  * to re-set: every refusal (the records that hold a study, among them 409 STUDY_HAS_CRITICAL_RESULTS, and who may
  * delete), no row changed by a refusal, and the close, its audit row and the delete in one transaction that a later
  * failure undoes. The store answers the refusals' record reads from rows a test seeds.
+ *
+ * Since EMR-D (REQ-EMR-01/03/07 -> RISK-D-01..04 -> TEST-D-04) the service is composed with the clinical runtime the
+ * server composes (tests/emr/d/service_fixture.cjs): each assignment write is one operational version - no signature -
+ * that the runtime admits under its request lock and commits with the service's own projection of the rows below in one
+ * clinical transaction (a client tx#n of this store, rolled back with it); every answer is read as the client gets it,
+ * through the response boundary over the controller's route metadata. A committed request sent again answers what it
+ * committed without moving a row; a request that never committed is judged as new.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -35,6 +42,8 @@ const { randomUUID } = require('node:crypto');
 const { ReaderAssignmentService } = require('/app/dist/reader-assignment.service');
 const { PacsService } = require('/app/dist/pacs.service');
 const AUDIT = require('/app/dist/admin-audit');
+const F = require('./emr/d/service_fixture.cjs').compose();
+const CONTROLLERS = ['reader-assignment.controller'];
 
 const A = 'synthetic-a', B = 'synthetic-b', Z = 'synthetic-z';
 const INSTITUTIONS = [A, B, Z];
@@ -112,6 +121,17 @@ async function world() {
       $executeRaw: async () => { record('$', 'executeRaw'); return 0; },
       $queryRaw: async (strings, ...values) => {
         const uids = values.filter(v => typeof v === 'string' && /^\d+(?:\.\d+)+$/.test(v));
+        if (values.includes(ACTION) && values.filter(v => typeof v === 'number').length === 2) {
+          // A write's answer: one study, one institution, entries up to the revision it wrote and after the last close
+          // before it, newest first, 20.
+          const institution = values.find(v => INSTITUTIONS.includes(v)), through = values.find(v => typeof v === 'number');
+          record('AuditLog', 'history-through', { uid: uids[0], institution, through });
+          const mine = t.AuditLog.filter(a => a.target === uids[0] && a.action === ACTION).map(a => [a, JSON.parse(a.detail)])
+            .filter(([, d]) => d.institution === institution);
+          const floor = Math.max(0, ...mine.filter(([, d]) => d.closed !== undefined && d.revision < through).map(([, d]) => d.revision));
+          return mine.filter(([, d]) => d.revision <= through && d.revision > floor).map(([a]) => a)
+            .sort((x, y) => y.at - x.at || y.id - x.id).slice(0, 20).map(a => clone({ at: a.at, actor: a.actor, detail: a.detail }));
+        }
         if (values.includes(ACTION)) {
           // The assignment history: one study, one institution, entries above a revision floor, newest first, 20.
           const institution = values.find(v => INSTITUTIONS.includes(v)), floor = values.find(v => typeof v === 'number');
@@ -190,6 +210,21 @@ async function world() {
     return c;
   }
   const root = client('root');
+  // The clinical half (tests/emr/d/service_fixture.cjs): its transactions are clients tx#n of this store, logged as the
+  // service's own are, and a failed one undoes every row of this store with its versions.
+  const clinical = F.attach({
+    tables: {
+      snapshot: () => clone({ s: [...t.StudyState], r: [...t.ReaderAssignment], a: t.AuditLog, o: [...t.Order], auditSeq }),
+      restore: kept => {
+        const saved = clone(kept);
+        t.StudyState = new Map(saved.s); t.ReaderAssignment = new Map(saved.r); t.AuditLog = saved.a; t.Order = new Map(saved.o); auditSeq = saved.auditSeq;
+      },
+    },
+    transaction: () => { const tx = 'tx#' + ++txSeq; log.push({ client: tx, model: '$', op: 'begin' }); return client(tx); },
+    finish: (tx, how) => log.push({ client: tx.__name, model: '$', op: how }),
+    studyOf: uid => t.StudyState.get(uid) ?? null,
+  });
+  const prisma = clinical.client(root);
   const access = {
     calls: [],
     prepare: async (c, uids) => { access.calls.push(['prepare', c.institution, uids]); },
@@ -208,19 +243,23 @@ async function world() {
       '00100020': { Value: ['SYN-' + s.uid] }, '00100010': { Value: ['SYNTHETIC^PATIENT'] } })),
   };
   const w = {
-    t, log, access, keycloak,
-    ra: new ReaderAssignmentService(root, keycloak, access),
-    pacs: new PacsService(root, orthanc, keycloak, access, {}),
+    t, log, access, keycloak, clinical,
+    ra: new ReaderAssignmentService(prisma, keycloak, access),
+    pacs: new PacsService(prisma, orthanc, keycloak, access, {}),
     study(uid, { owner = A, tele = null, ts = tele ? 'wait' : 'none', rs = 'W', holder = null, heldAt = null } = {}) {
       t.StudyState.set(uid, { uid, institutionId: owner, teleInstitutionId: tele, origin: 'dicom', rs, holdReason: null, ss: 'Verified', em: 'N', ts,
         matched: 'U', ward: '', reqHosp: owner, repDoc: null, confirm: null, preDoc: null, preReviewer: null, ov: null, orig: null,
         orderOid: null, holder, heldAt, updatedAt: new Date(clock), createdAt: new Date(clock) });
     },
     row: (uid, institution) => { const row = t.ReaderAssignment.get(pair(uid, institution)); return row ? clone(row) : null; },
-    read: (name, uid = UID) => w.ra.read(uid, caller(name)),
+    // One call as a client makes it (B2's verified request; an assignment write carries no signature) and the answer the
+    // response boundary gives for it.
+    call: async (name, route, run) => { const req = await F.request(caller(name)); return F.answer(CONTROLLERS, route, await run(caller(name), req), req); },
+    read: (name, uid = UID) => w.call(name, 'GET studies/:uid/reader-assignment', (c, req) => w.ra.read(uid, c, req)),
+    candidates: name => w.call(name, 'GET reader-candidates', (c, req) => w.ra.candidates(c, req)),
     body: (name, state, readerName, requestId = randomUUID()) => ({ expectedOwner: [caller(name).institution, SUB[name]], revision: state.revision,
       readerSub: readerName ? SUB[readerName] : null, requestId }),
-    write: (name, body, uid = UID) => w.ra.write(uid, caller(name), body),
+    write: (name, body, uid = UID) => w.call(name, 'POST studies/:uid/reader-assignment', (c, req) => w.ra.write(uid, c, body, req)),
     async assign(name, readerName, uid = UID) { return w.write(name, w.body(name, await w.read(name, uid), readerName), uid); },
     tele: (body, uid = UID, name = 'aDoc') => w.pacs.patchState(uid, body, caller(name)),
     mark: () => log.length,
@@ -229,7 +268,7 @@ async function world() {
     // Every row the store holds, to compare before and after a call.
     snapshot: () => clone({ studies: [...t.StudyState], assignments: [...t.ReaderAssignment], audit: t.AuditLog, orders: [...t.Order], held: t.held }),
   };
-  await start(w.pacs, root, INSTITUTIONS.map(i => ({ id: i, name: i })));
+  await start(w.pacs, prisma, INSTITUTIONS.map(i => ({ id: i, name: i })));
   return w;
 }
 
@@ -319,7 +358,7 @@ test('owner and receiver keep their own rows: reads, writes, history and candida
   assert.deepEqual([w.row(UID, A).revision, w.row(UID, B).revision], [1, 3], 'no refused call moved a row');
   // Candidates: the caller institution's single-group radiologists, asked of Keycloak for that institution only.
   w.keycloak.calls.length = 0;
-  const subs = async name => (await w.ra.candidates(caller(name))).readers.map(r => r.sub).sort();
+  const subs = async name => (await w.candidates(name)).readers.map(r => r.sub).sort();
   assert.deepEqual(await subs('aTech'), [SUB.aDoc, SUB.aDoc2].sort());
   assert.deepEqual(await subs('bTech'), [SUB.bDoc, SUB.bDoc2].sort());
   assert.deepEqual(await subs('bAdmin'), [SUB.bDoc, SUB.bDoc2].sort());
@@ -420,8 +459,14 @@ test('a reopened channel starts at a new revision: no reader, no history and no 
   assert.ok(w.row(UID, B).closedAt instanceof Date);
   const reopened = await w.read('bTech');
   assert.deepEqual([reopened.revision, reopened.reader, reopened.history], [2, null, []]);
-  // The closed channel's last request is not a replay any more, and its revision is stale.
-  await assert.rejects(w.write('bTech', first), status(409));
+  // The closed channel's last request committed: sent again it answers what it committed (its revision, its reader and
+  // its history up to it), moves no row and writes no entry - the original terminal (EMR-D DR3-01). A new request at the
+  // closed channel's revision is stale.
+  const kept = { row: w.row(UID, B), entries: w.audits().length };
+  const again = await w.write('bTech', first);
+  assert.deepEqual([again.revision, again.reader, again.history.map(h => h.detail)],
+    [1, reader('bDoc'), [{ institution: B, revision: 1, from: null, to: actorOf('bDoc') }]]);
+  assert.deepEqual([w.row(UID, B), w.audits().length], [kept.row, kept.entries], 'the resend moved nothing');
   await assert.rejects(w.write('bTech', w.body('bTech', { revision: 1 }, 'bDoc2')), status(409));
   const written = await w.write('bTech', w.body('bTech', reopened, 'bDoc2'));
   assert.deepEqual([written.revision, written.reader, written.history.map(h => h.detail)],
@@ -429,8 +474,10 @@ test('a reopened channel starts at a new revision: no reader, no history and no 
   const row = w.row(UID, B);
   assert.deepEqual([row.revision, row.closedRevision, row.closedAt, row.readerSub], [3, 2, null, SUB.bDoc2]);
   assert.deepEqual(w.row(UID, A), ownerBefore);
-  // Closed and reopened once more: the floor moves to the new close, and the second channel's entry is gone too.
+  // Closed and reopened once more: the floor moves to the new close, and the second channel's entry is gone too. While
+  // the channel is closed B reads nothing, and a committed request sent again gets no body either.
   await w.tele({ ts: 'cancelled' });
+  await assert.rejects(w.write('bTech', first), status(404));
   await w.tele({ ts: 'wait', teleTo: B });
   assert.deepEqual(await w.read('bTech').then(s => [s.revision, s.reader, s.history]), [4, null, []]);
   assert.deepEqual(w.audits().filter(a => a.action === ACTION && a.detail.institution === B).map(a => [a.detail.revision, a.detail.closed ?? null]),
@@ -759,4 +806,33 @@ test('worklist rows carry the caller institution\'s own assignment on owned and 
   await w.tele({ ts: 'wait', teleTo: B });
   assert.deepEqual((await list('bDoc')).rows[UID], [true, { revision: 2, reader: null }]);
   assert.deepEqual((await list('aTech')).rows[UID], [false, { revision: 1, reader: reader('aDoc') }]);
+});
+
+test('EMR-D original terminal: an assignment is an operational version, and a committed request sent again answers what it committed after a later assignment and after its reader left', async () => {
+  // EMR-D a5 (consult section 3.3, DR3-01): the owner's two assignments are two operational versions of the clinical unit
+  // of (study, institution), committed by the runtime with the rows above. The first request, sent again after the second
+  // assignment and after its reader's account was disabled, answers its own revision, reader and history - nothing is
+  // admitted, versioned, written or audited, and the current row stays the second assignment's. A new request naming
+  // that reader is judged as new: refused.
+  const w = await world();
+  w.study(UID);
+  const first = w.body('aTech', await w.read('aTech'), 'aDoc');
+  const one = await w.write('aTech', first);
+  const two = await w.assign('aTech', 'aDoc2');
+  assert.deepEqual([one.revision, one.reader, two.revision, two.reader], [1, reader('aDoc'), 2, reader('aDoc2')]);
+  const units = [...w.clinical.store.units.values()];
+  assert.equal(units.length, 1, 'one clinical unit for the owner institution of this study');
+  assert.deepEqual(units[0].versions.map(v => [v.sequence, v.capacity, v.kind, v.text ?? null]),
+    [[1, 'operational-staff', 'assignment', null], [2, 'operational-staff', 'assignment', null]]);
+  const getUser = w.keycloak.getUser;
+  w.keycloak.getUser = async sub => { const u = await getUser(sub); return u && sub === SUB.aDoc ? { ...u, enabled: false } : u; };
+  const kept = { row: w.row(UID, A), audits: w.audits().length, events: w.clinical.store.events.length, registered: w.clinical.store.rows.size, revision: units[0].revision };
+  const again = await w.write('aTech', first);
+  assert.deepEqual([again.revision, again.reader, again.history.map(h => h.detail)],
+    [1, reader('aDoc'), [{ institution: A, revision: 1, from: null, to: actorOf('aDoc') }]]);
+  assert.deepEqual(again, one, 'the resend answers exactly what the first send answered');
+  assert.deepEqual([w.row(UID, A), w.audits().length, w.clinical.store.events.length, w.clinical.store.rows.size, [...w.clinical.store.units.values()][0].revision],
+    [kept.row, kept.audits, kept.events, kept.registered, kept.revision], 'the resend moved nothing');
+  await assert.rejects(w.write('aTech', w.body('aTech', await w.read('aTech'), 'aDoc')), status(400));
+  assert.deepEqual(w.row(UID, A), kept.row);
 });

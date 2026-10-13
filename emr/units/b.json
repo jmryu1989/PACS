@@ -191,9 +191,11 @@
     "added": [
       "20261008120000_emr_b",
       "20261010120000_emr_seal_attempts",
-      "20261010150000_emr_read_jit_off"
+      "20261010150000_emr_read_jit_off",
+      "20261012120000_emr_d",
+      "20261013010000_emr_d_original_decisions"
     ],
-    "count": 45,
+    "count": 47,
     "latest_before": "20261007200000_designation_subjects"
   },
   "deployment": {
@@ -483,7 +485,7 @@
     "session_matrix": 8,
     "candidate": 115,
     "candidate_rows": 13,
-    "migrations": 45,
+    "migrations": 47,
     "public_tables": 51,
     "emr_tables": 10,
     "fixture_public_rows": 90,

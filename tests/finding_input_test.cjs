@@ -26,15 +26,55 @@ test('strict allow-list: copied provenance fields from the client are rejected',
   assert.equal(f.findingCommand(raw({ ...body, item: { ...item, sources: Array.from({ length: 8 }, (_, i) => ({ itemId: ID.slice(0, -1) + i, revision: 1 })), primary: 7 } }), true).item.primary, 7);
 });
 
-test('revision commands need expectedRevision, an action and a reason only for hide/restore', () => {
+test('revision commands need expectedRevision and an action; hide/restore keep an omitted or blank reason for the clinical context check, an edit takes none', () => {
   reject(() => f.findingCommand(raw(body), false));
   reject(() => f.findingCommand(raw({ ...body, expectedRevision: 1, action: 'create' }), false));
-  reject(() => f.findingCommand(raw({ ...body, expectedRevision: 1, action: 'hide' }), false));
+  // EMR-D D-18: whether a hide/restore needs a typed reason depends on the author's reading of the study, which only the
+  // clinical commit knows; the parser keeps what was sent ('' when nothing) and the next case checks the commit itself.
+  for (const action of ['hide', 'restore'])
+    for (const [given, kept] of [[undefined, ''], ['', ''], ['사유', '사유'], [' 복원 ', ' 복원 ']]) {
+      const parsed = f.findingCommand(raw({ ...body, expectedRevision: 2, action, ...(given === undefined ? {} : { reason: given }) }), false);
+      assert.deepEqual([parsed.action, parsed.expectedRevision, parsed.reason], [action, 2, kept], action + ' ' + JSON.stringify(given));
+    }
   reject(() => f.findingCommand(raw({ ...body, expectedRevision: 1, action: 'edit', reason: '사유' }), false));
   reject(() => f.findingCommand(raw({ ...body, expectedRevision: 0, action: 'edit' }), false));
+  // A typed reason keeps its own limits: a string of at most 1000 code points.
+  reject(() => f.findingCommand(raw({ ...body, expectedRevision: 1, action: 'hide', reason: 7 }), false));
+  reject(() => f.findingCommand(raw({ ...body, expectedRevision: 1, action: 'hide', reason: '가'.repeat(1001) }), false));
+  assert.equal(f.findingCommand(raw({ ...body, expectedRevision: 1, action: 'hide', reason: '😀'.repeat(1000) }), false).reason, '😀'.repeat(1000));
   const hide = f.findingCommand(raw({ ...body, expectedRevision: 3, action: 'hide', reason: '사유' }), false);
   assert.equal(hide.action, 'hide'); assert.equal(hide.expectedRevision, 3); assert.equal(hide.reason, '사유');
   assert.equal(f.findingCommand(raw({ ...body, expectedRevision: 3, action: 'restore', reason: ' 복원 ' }), false).action, 'restore');
+});
+
+test('D-18: a hide/restore sent without a typed reason is refused ReasonRequired by the clinical commit outside the author\'s reading of this study and takes the reading as its reason inside it', () => {
+  // The compiled clinical core plans the very body the parser accepted (the finding service hands the client JSON on).
+  const R = require('/app/dist/emr-clinical/records.js');
+  const author = { identity: { id: 'r-d18', issuer: 'https://identity.example.test', subject: 'sub-r-d18' }, kind: 'member', roles: ['radiologist'],
+    institutionId: 'inst-a', signingRegistrationId: 'reg-r-d18' };
+  const study = { studyId: '2.25.1', managingInstitutionId: 'inst-a', patient: { linkId: 'link-1', patientId: 'SYN-1', assigningAuthority: 'hospital-a' } };
+  const snapshot = hidden => JSON.stringify({ schemaVersion: 1, title: '소견', text: '본문', hidden, primary: 0, sources: [] });
+  const input = (surface, unit, sent, extra = {}) => ({ surface, actor: author, study, unit, body: sent, content: null, attachments: [], navigation: [],
+    recipientId: null, readerId: null, workContext: null, ids: { recordId: unit ? unit.recordId : REQ, versionId: '00000000-0000-4000-8000-0000000000d' + (unit ? unit.revision : 0) },
+    at: new Date(1760000000000 + (unit ? unit.revision : 0) * 1000).toISOString(), ...extra });
+  const created = R.applyPlan(null, R.planClinicalWrite(input('finding.create', null, { requestId: REQ, item }, { content: snapshot(false) })));
+  const reading = { kind: 'reading', studyId: study.studyId, referenceId: 'hold:1' };
+  const plan = (unit, action, sent, extra) => {
+    const parsed = f.findingCommand(raw(sent), false);
+    assert.equal(parsed.action, action);
+    return R.planClinicalWrite(input('finding.' + action, unit, JSON.parse(raw(sent).toString('utf8')), { content: snapshot(action === 'hide'), ...extra }));
+  };
+  const hideBody = { requestId: ID2, expectedRevision: 1, action: 'hide', item };
+  for (const workContext of [null, { ...reading, studyId: '2.25.9' }])
+    assert.throws(() => plan(created, 'hide', hideBody, { workContext }), e => e?.code === 'ReasonRequired', JSON.stringify(workContext));
+  assert.throws(() => plan(created, 'hide', { ...hideBody, reason: '' }, {}), e => e?.code === 'ReasonRequired', 'a blank reason is no reason');
+  const inReading = plan(created, 'hide', hideBody, { workContext: reading });
+  assert.deepEqual([inReading.version.reasonSource, inReading.signing.reason], ['work-context', 'work-context:reading:hold:1']);
+  const stated = plan(created, 'hide', { ...hideBody, reason: '사유' }, {});
+  assert.deepEqual([stated.version.reasonSource, stated.signing.reason], ['stated', '사유']);
+  const hidden = R.applyPlan(created, inReading);
+  assert.throws(() => plan(hidden, 'restore', { requestId: ID2, expectedRevision: 2, action: 'restore', item }, {}), e => e?.code === 'ReasonRequired');
+  assert.equal(plan(hidden, 'restore', { requestId: ID2, expectedRevision: 2, action: 'restore', item }, { workContext: reading }).version.reasonSource, 'work-context');
 });
 
 test('fingerprint covers the client pairs only, so a later head change still replays', () => {

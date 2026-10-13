@@ -11,60 +11,8 @@ const facts={event:{rolesAtTime:actor.roles,trustedProxyIp:known({address:'10.0.
 const input=(unit=null,revision=unit?.revision??0)=>({surface:'assignment.write',actor,study,unit,
   body:{requestId:randomUUID(),expectedOwner:[actor.institutionId,actor.identity.subject],revision,readerSub:null},content:null,attachments:[],navigation:[],
   recipientId:null,readerId:null,workContext:null,ids:{recordId:unit?.recordId??randomUUID(),versionId:randomUUID()},at:new Date().toISOString()});
-function database() {
-  const rows=new Map(),units=new Map(),events=[]; const fault={sealBefore:0,sealAfter:0,confirm:0,observe:0,append:0,checkpoint:null};
-  const counts={admit:0,commit:0,project:0,seal:[]};
-  let savepoint=null, queue=Promise.resolve();
-  const key=v=>JSON.stringify(v.slice(0,3)),err=code=>Object.assign(new Error(code),{meta:{code}});
-  const copy=()=>({rows:structuredClone([...rows]),units:structuredClone([...units]),events:structuredClone(events)});
-  const restore=s=>{rows.clear();for(const [k,v]of s.rows)rows.set(k,v);units.clear();for(const [k,v]of s.units)units.set(k,v);events.splice(0,events.length,...s.events);};
-  const db={$executeRaw:async strings=>{const sql=strings.join('?');if(sql.startsWith('SAVEPOINT'))savepoint=copy();if(sql.startsWith('ROLLBACK TO'))restore(savepoint);return 0;},
-    $queryRaw:async(strings,...v)=>{
-      const sql=strings.join('?'),row=rows.get(key(v));
-      if(sql.includes('lock_request')||sql.includes('note_attempt'))return [];
-      if(sql.includes('unit_for'))return units.has(v[0])?H.unitRows(units.get(v[0])):[];
-      if(sql.includes('observe(')){if(fault.observe-->0)throw new Error('SYN read unavailable');if(row&&row.fingerprint!==v[3])throw err('ED002');return row?[{...row,kind:'observer'}]:[];}
-      if(sql.includes('admit(')){
-        if(row){if(row.fingerprint!==v[3])throw err('ED002');return [{...row,kind:'observer'}];}
-        const created={original_id:randomUUID(),epoch:1,phase:'admitted',state:'pending',fingerprint:v[3],seed:v[4],facts:v[5],envelope:v[6],checkpoint:null,confirmed:false};
-        rows.set(key(v),created);counts.admit++;return [{...created,kind:'owner'}];
-      }
-      if(sql.includes('checkpoint(')){
-        if(fault.checkpoint===v[5])throw new Error('SYN checkpoint lost');
-        if(!row||row.epoch!==v[4]||row.state!=='pending'||row.rejection_decision)return [{done:false}];
-        row.phase=v[5];row.checkpoint=v[6];return [{done:true}];
-      }
-      if(sql.includes('commit_version(')){
-        if(!row||row.epoch!==v[4]||row.state!=='pending'||row.phase!=='commit-dispatched'||row.rejection_decision)throw err('ED004');
-        const version=JSON.parse(v[18]),terminal=JSON.parse(v[20]);
-        const unit=units.get(v[5])??null;if((unit?.revision??0)+1!==version.sequence)throw err('ED003');
-        units.set(v[5],R.applyPlan(unit,terminal.binding.plan));
-        row.state='committed';row.terminal=v[20];row.access_event=v[21];row.record_id=v[5];counts.commit++;return [{done:true}];
-      }
-      if(sql.includes('remember_rejection')){
-        if(!row||row.epoch!==v[4]||row.state!=='pending')return [{done:false}];
-        if(row.rejection_decision&&JSON.parse(row.rejection_decision).code!==JSON.parse(v[5]).code)throw err('ED004');
-        row.rejection_decision??=v[5];return [{done:true}];
-      }
-      if(sql.includes('rejection_for'))return [{decision:[...rows.values()].find(r=>r.original_id===v[0])?.rejection_decision??null}];
-      if(sql.includes('seal_rejected')){
-        counts.seal.push(JSON.parse(v[6]).proof.code);
-        if(fault.sealBefore-->0)throw new Error('SYN seal before commit');
-        if(!row||row.epoch!==v[4]||row.state!=='pending'||!row.rejection_decision)return [{done:false}];
-        row.state='rejected';row.terminal=v[6];if(fault.sealAfter-->0)throw new Error('SYN seal response lost');return [{done:true}];
-      }
-      if(sql.includes('confirm_request')){if(fault.confirm-->0)throw new Error('SYN confirm lost');row.confirmed=true;return [{done:true}];}
-      if(sql.includes('recover(')){if(!row)return [];if(row.fingerprint!==v[3])throw err('ED002');if(row.state!=='pending')return [{...row,kind:'observer'}];row.epoch++;return [{...row,kind:row.phase==='commit-dispatched'?'fenced':'owner'}];}
-      throw new Error('Unimplemented synthetic SQL '+sql);
-    }};
-  const ledger={withAppendTransaction:work=>{
-    const run=queue.then(async()=>{const before=copy();try{return await work(db);}catch(e){restore(before);throw e;}});
-    queue=run.catch(()=>{});return run;
-  },appendInTransaction:async(_tx,event)=>{if(fault.append-->0)throw new Error('SYN B append rollback');events.push(event);return {event};},
-  settleTransaction:async()=>{},confirm:async p=>({eventId:p.event.eventId,durableAt:new Date().toISOString()}),
-  append:async e=>({eventId:e.eventId,durableAt:new Date().toISOString()})};
-  return {db,ledger,rows,units,events,fault,counts};
-}
+// The storage protocol fixture, shared with the composed service fixtures (tests/emr/d/service_fixture.cjs).
+const database=()=>require('./service_fixture.cjs').database({R,unitRows:H.unitRows});
 function runtime(env) {
   return new RT.ClinicalRuntime({db:env.db,ledger:env.ledger,studies:{facts:async()=>study},signatures:{},recoveryDelayMs:3600000,
     context:{facts:async()=>({actor,signature:null,requestId:'SYN',trustedProxyIp:known({address:'10.0.0.1',source:'trusted-proxy'}),member:async()=>{throw new Error('No mutable member resolution');}})}});

@@ -50,6 +50,8 @@ const { test } = require('node:test');
 const { readFileSync, readdirSync } = require('node:fs');
 const path = require('node:path');
 const { createCipheriv, randomBytes } = require('node:crypto');
+// EMR-D a5 (consult R5A2-SQL decision 1): the raw-client/receiver flow proof, a module of its own (see the completeness section).
+const { buildRawFlow, PURPOSE: RAW_PURPOSE } = require('./admin_audit_raw_flow.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const MODULE = process.env.KIN_ADMIN_AUDIT_MODULE || 'api/src/admin-audit.ts';
@@ -1786,7 +1788,8 @@ function scanAuditWrites(sources = auditSources()) {
     const selves = thisUses().filter(self => self.declaration && members.has(self.declaration) && self.static === (kind === 'class')).map(self => self.node);
     return kind === 'class' ? [...(declaration.name ? named() : []), ...selves] : [...selves, ...[...members].flatMap(instancesTyped)];
   }
-  const objects = { class: new Map(), instance: new Map() };
+  // One memo per purpose (EMR-D a5): the action proof never reads a verdict the raw-client/receiver proof helped decide.
+  const objects = { action: { class: new Map(), instance: new Map() }, raw: { class: new Map(), instance: new Map() } };
   const SHARED = new Set(['prototype', 'constructor', '__proto__']);
   /**
    * W4: what the program does with a class or its instances — `escape`, why a member reached through it may not run the
@@ -1794,15 +1797,18 @@ function scanAuditWrites(sources = auditSources()) {
    * Every use of every holder is read: a member read or written by a key W1 fixes, a call of a method whose body the
    * program has and nothing replaces, a test, `new`; `this` handed on (an argument, an alias, a return, a store), a key
    * W1 does not fix, a prototype, a decorator or a replaced method is an escape.
+   * `purpose` 'raw' (EMR-D a5) is the same reading for the client flow, flow-mode calls and F02's receiver escape only:
+   * where a holder is handed on, or handed as `this` to a called field, the raw-client/receiver proof may show the whole
+   * consumer graph of that place instead (rawHandOn, foreignThis). The action proof ('action') never asks it.
    */
-  function objectUse(object) {
-    const memo = objects[object.kind];
+  function objectUse(object, purpose = 'action') {
+    const memo = objects[purpose][object.kind];
     if (memo.has(object.declaration)) return memo.get(object.declaration) ?? { escape: 'is reached again while its uses are checked', writes: [] };
     memo.set(object.declaration, null);
     const result = { escape: null, writes: [] };
     if (object.kind === 'class') {
       const decorator = ts.canHaveDecorators(object.declaration) ? ts.getDecorators(object.declaration)?.[0] : undefined;
-      const instance = objectUse({ kind: 'instance', declaration: object.declaration }).escape;
+      const instance = objectUse({ kind: 'instance', declaration: object.declaration }, purpose).escape;
       result.escape = decorator ? `is handed to the decorator at ${where(decorator)}` : instance ? `is reached through an instance, which ${instance}` : null;
     }
     if (object.kind === 'instance') {
@@ -1814,7 +1820,7 @@ function scanAuditWrites(sources = auditSources()) {
       if (reached) result.escape = `is reached through \`${snippet(reached)}\` at ${where(reached)}`;
     }
     for (const node of result.escape ? [] : new Set(holdersOf(object))) {
-      result.escape = holderUse(object, node, result.writes);
+      result.escape = holderUse(object, node, result.writes, purpose);
       if (result.escape) break;
     }
     // After every other use, so that an object that escapes otherwise keeps its first reason (Astra AUDIT-CHECKER-U0B
@@ -1908,17 +1914,20 @@ function scanAuditWrites(sources = auditSources()) {
   }
   /** Why the use `start` (a node holding a class or an instance) may change it or hand it on, else null; a member write is
    *  recorded in `writes` (W4: a write of a member no positive judgement reads, such as a count, stays allowed). */
-  function holderUse(object, start, writes) {
+  function holderUse(object, start, writes, purpose = 'action') {
     let node = start;
     while (WRAPPERS.has(node.parent.kind)) node = node.parent;
     const parent = node.parent;
+    // EMR-D a5: in the raw purpose only, a hand-on of an instance is kept when the raw-client/receiver proof shows the
+    // whole consumer graph of where it goes; otherwise the escape stands, with that proof's refusal beside it.
+    const handOn = escape => (purpose === 'raw' && object.kind === 'instance' ? rawHandOn(object, start, escape) : escape);
     if (isAccess(parent) && parent.expression === node) {
       const { key, why } = w1(parent);
       if (key === undefined) return `is read by a key the program does not fix at ${where(parent)} (${why})`;
       if (SHARED.has(key)) return `is handed on through \`${snippet(parent)}\` at ${where(parent)}`;
       const member = outer(parent), use = member.parent;
       const called = (ts.isCallExpression(use) && use.expression === member) || (ts.isTaggedTemplateExpression(use) && use.tag === member);
-      const foreign = foreignThis(object, start, key, parent, called);
+      const foreign = foreignThis(object, start, key, parent, called, purpose);
       if (foreign) return foreign;
       if (mutated(member)) writes.push({ key, at: where(parent) });
       return null;
@@ -1926,8 +1935,8 @@ function scanAuditWrites(sources = auditSources()) {
     // W4-C: an instance the program composes into a slot it owns; `this` is never handed on this way.
     const owned = object.kind === 'instance' && start.kind !== K.ThisKeyword && start.kind !== K.SuperKeyword
       ? ownedUse(object, start, node, parent) : undefined;
-    if (owned !== undefined) return owned && `is handed on at ${where(parent)} (W4-C: ${owned})`;
-    if (mutated(node)) return `is written at ${where(parent)}`;
+    if (owned !== undefined) return owned && handOn(`is handed on at ${where(parent)} (W4-C: ${owned})`);
+    if (mutated(node)) return handOn(`is written at ${where(parent)}`);
     if (inert(node) || ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent) || ts.isImportClause(parent)) return null;
     if (object.kind === 'class' && ts.isNewExpression(parent) && parent.expression === node) return null;
     if (start.kind === K.SuperKeyword && ts.isCallExpression(parent) && parent.expression === node) {
@@ -1935,13 +1944,22 @@ function scanAuditWrites(sources = auditSources()) {
       return self?.declaration && baseOf(self.declaration) ? null : `is handed on as \`this\` of the base constructor at ${where(parent)}`;
     }
     if (object.kind === 'class' && extendedBy(node)) return `is extended at ${where(extendedBy(node))}`;
-    return `is handed on at ${where(parent)}`;
+    return handOn(`is handed on at ${where(parent)}`);
+  }
+  /** The raw purpose's reading of a hand-on (EMR-D a5): null when the raw flow proves its consumer graph, else `escape`.
+   *  An object it keeps this way carries no decorator but @nestjs/common's Injectable() on a class (L5), as W4-C's chains:
+   *  a decorator may install a method body no call the check reads would show. */
+  function rawHandOn(object, start, escape) {
+    const decorated = chainDecoratorIssue(object.declaration);
+    if (decorated) return `${escape} (raw flow: ${decorated})`;
+    const proof = raw.handOn(object, start);
+    return proof.ok ? null : `${escape} (raw flow: ${proof.why})`;
   }
   /** Why reaching the member `key` of a class or an instance through `holder` may run code with it as `this` that the check
    *  does not read, else null: every declaration of the name the holder's type and the family have must be a method or an
    *  accessor with a body in the program that nothing replaces (a dot, a key W1 fixes or a receiver the checker does not
    *  type; Astra S7-U3a-F-R-001-F01), or, called, a field whose one value is an arrow function nothing replaces. */
-  function foreignThis(object, holder, key, access, called) {
+  function foreignThis(object, holder, key, access, called, purpose = 'action') {
     const type = checker.getNonNullableType(checker.getTypeAtLocation(holder));
     const family = object.kind === 'instance' ? [...familyOf(object.declaration)] : [object.declaration];
     const accessor = found => ts.isGetAccessorDeclaration(found) || ts.isSetAccessorDeclaration(found);
@@ -1953,7 +1971,15 @@ function scanAuditWrites(sources = auditSources()) {
     const code = called ? named : named.filter(accessor);
     if ((called && !named.length) || !code.every(found => own(found) || (called && arrow(found)))) {
       const replaced = named.map(found => found.name && memberChanged(symbolAt(found.name))).find(Boolean);
-      return `is handed on as \`this\` of \`${snippet(access)}\` at ${where(access)}${replaced ? ` (replaced at ${replaced})` : ''}`;
+      const escape = `is handed on as \`this\` of \`${snippet(access)}\` at ${where(access)}${replaced ? ` (replaced at ${replaced})` : ''}`;
+      // EMR-D a5, raw purpose only: a called field whose every value is a function that cannot observe `this` keeps it.
+      if (purpose === 'raw' && called && object.kind === 'instance' && named.length) {
+        const decorated = chainDecoratorIssue(object.declaration);
+        if (decorated) return `${escape} (raw flow: ${decorated})`;
+        const proof = raw.callbackSlot(object, key);
+        return proof.ok ? null : `${escape} (raw flow: ${proof.why})`;
+      }
+      return escape;
     }
     return null;
   }
@@ -2171,7 +2197,10 @@ function scanAuditWrites(sources = auditSources()) {
     const made = holdersOf({ kind: 'class', declaration: owner }).filter(node => { const at = lifted(node); return ts.isNewExpression(at.parent) && at.parent.expression === at; });
     return made.length ? null : `no instance of \`${className(owner)}\` is created by the program (W4-C: an explicit \`new\` it owns)`;
   }
-  const calls = { w3: new Map(), flow: new Map(), closed: new Map() };
+  // Mode 'raw' (EMR-D a5) is mode 'w3' with the raw purpose's W4 verdict, its own memo; only F02's receiver fallback
+  // (parameterInputs, helperReturns) asks it, after 'w3' named an escape. Mode 'flow' takes the raw purpose too.
+  const calls = { w3: new Map(), flow: new Map(), closed: new Map(), raw: new Map() };
+  const rawPurpose = mode => (mode === 'flow' || mode === 'raw' ? 'raw' : 'action');
   /**
    * The calls of `fn` (W3), with `escapes` when it may be run some other way. A name's every reference must be the callee
    * of a call, a test, or — the one callback rule W3 has (the `scopeWrite` form) — an argument of a call whose parameter
@@ -2190,16 +2219,16 @@ function scanAuditWrites(sources = auditSources()) {
     const found = [], escapes = [];
     const kind = helperKind(fn);
     const open = kind.why && mode === 'closed' ? closedMethod(fn) : null;
-    if (kind.why && mode === 'w3') escapes.push(`${describe(fn)}, ${kind.why}`);
+    if (kind.why && (mode === 'w3' || mode === 'raw')) escapes.push(`${describe(fn)}, ${kind.why}`);
     else if (open) escapes.push(`${describe(fn)}: ${open}`);
     else if (!fn.body) escapes.push(`${describe(fn)} (no body)`);
     else {
-      for (const reference of carriersOf(fn, escapes)) {
+      for (const reference of carriersOf(fn, escapes, mode)) {
         const node = lifted(reference), parent = node.parent;
         if (ts.isCallExpression(parent) && parent.expression === node) found.push(parent);
         else if (ts.isCallExpression(parent) && parent.arguments.includes(node)) {
           const index = parent.arguments.indexOf(node);
-          const targets = mode === 'w3' && fn.getSourceFile() !== parent.getSourceFile() ? null : argumentTargets(parent, index, mode);
+          const targets = (mode === 'w3' || mode === 'raw') && fn.getSourceFile() !== parent.getSourceFile() ? null : argumentTargets(parent, index, mode);
           if (!targets) {
             // W3-C names why the parameter it is handed to is not followed, when that is a public method's.
             const callee = bare(parent.expression), [declaration] = ts.isIdentifier(callee) ? symbolAt(callee)?.declarations ?? [] : [];
@@ -2223,7 +2252,7 @@ function scanAuditWrites(sources = auditSources()) {
   }
   /** Where the value of `fn` is referenced: a method's W1-keyed accesses (W4 on its object), a function's or const's
    *  references (it replaced nowhere), a callback's own place. */
-  function carriersOf(fn, escapes) {
+  function carriersOf(fn, escapes, mode) {
     if ((ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)) && !constHolder(fn)) return [fn];
     const holder = constHolder(fn);
     if (holder) return references(symbolAt(holder.name));
@@ -2239,7 +2268,7 @@ function scanAuditWrites(sources = auditSources()) {
     const { typed } = memberRefs(symbol);
     const replaced = memberChanged(symbol);
     if (replaced) escapes.push(`${replaced} (the method is replaced)`);
-    const object = holdingObject(fn), escape = object && objectUse(object).escape;
+    const object = holdingObject(fn), escape = object && objectUse(object, rawPurpose(mode)).escape;
     if (escape) escapes.push(`${where(fn)} (${objectName(object)}, which ${escape})`);
     return typed;
   }
@@ -2269,7 +2298,7 @@ function scanAuditWrites(sources = auditSources()) {
     }
     return functionsOf(call.expression, mode);
   }
-  const functions = { w3: new Map(), flow: new Map(), closed: new Map() };
+  const functions = { w3: new Map(), flow: new Map(), closed: new Map(), raw: new Map() };
   function functionsOf(expression, mode) {
     const node = bare(expression), memo = functions[mode];
     if (memo.has(node)) return memo.get(node) === undefined ? null : memo.get(node);
@@ -2309,7 +2338,7 @@ function scanAuditWrites(sources = auditSources()) {
           if (!argument) continue;
           const at = bare(argument);
           if (at.kind === K.NullKeyword || (ts.isIdentifier(at) && at.text === 'undefined' && !symbolAt(at)?.declarations?.length)) continue;
-          if (mode === 'w3' && argument.getSourceFile() !== node.getSourceFile()) return null;
+          if ((mode === 'w3' || mode === 'raw') && argument.getSourceFile() !== node.getSourceFile()) return null;
           // W3-C: a caller in another file fills the parameter with a callback written where it calls.
           if (mode === 'closed' && argument.getSourceFile() !== node.getSourceFile() && !ts.isArrowFunction(at) && !ts.isFunctionExpression(at)) return null;
           const inner = functionsOf(argument, mode);
@@ -2329,17 +2358,23 @@ function scanAuditWrites(sources = auditSources()) {
       const type = checker.getNonNullableType(checker.getTypeAtLocation(receiver));
       const property = checker.getPropertyOfType(type, key), declarations = property?.declarations ?? [];
       if (!declarations.length || !declarations.every(declaration => ts.isMethodDeclaration(declaration) && declaration.body && inProgram(declaration)
-        && ts.isClassLike(declaration.parent))) return null;
+        && ts.isClassLike(declaration.parent))) {
+        // EMR-D a5, flow mode only: a member an interface declares runs the method of every concrete producer of the
+        // receiver, when the raw-client/receiver proof fixes them all (never for an action value or a W3 helper).
+        if (mode === 'flow' && declarations.length && declarations.every(declaration => ts.isMethodSignature(declaration)
+          || (ts.isPropertySignature(declaration) && !declaration.questionToken))) return raw.targetsOf(node).targets ?? null;
+        return null;
+      }
       const helpers = declarations.every(declaration => helperKind(declaration).kind === 'private method'
         && declaration.getSourceFile() === node.getSourceFile());
-      if (mode === 'w3' || (mode === 'closed' && helpers)) {
+      if (mode === 'w3' || mode === 'raw' || (mode === 'closed' && helpers)) {
         if (receiver.kind !== K.ThisKeyword && !(named && ts.isClassLike(named))) return null;
         if (!helpers) return null;
       } else if (mode === 'closed' && !declarations.every(declaration => closedMethod(declaration) === null)) return null;   // W3-C: on any receiver typed as the class
       for (const declaration of declarations) {
         if (memberChanged(symbolAt(declaration.name))) return null;
         const object = holdingObject(declaration);
-        if (objectUse(object).escape) return null;
+        if (objectUse(object, rawPurpose(mode)).escape) return null;
         // An override in the family runs instead of it on some instances: every one is a method with a body too.
         const family = object.kind === 'instance' ? [...familyOf(object.declaration)] : [object.declaration];
         for (const other of family.flatMap(member => member.members.filter(item => item.name && !ts.isComputedPropertyName(item.name)
@@ -2596,11 +2631,14 @@ function scanAuditWrites(sources = auditSources()) {
     return null;
   };
   const clients = new Set(), clientFunctions = new Set(), clientMembers = new Set();
+  // EMR-D a5: the reads of an object literal slot that holds a client, where the raw flow proves the slot's consumers.
+  const rawClientReads = new Set();
   const heldClient = symbol => !!symbol?.declarations?.some(declaration => clients.has(declaration));
   /** Whether a value may be a client (the fixed point below decides the bindings). */
   function isClient(expression) {
     const node = bare(expression);
     if (!node) return false;
+    if (rawClientReads.has(node)) return true;
     if (ts.isAwaitExpression(node)) return isClient(node.expression);
     if (node.kind === K.ThisKeyword) return clientClass(thisClass(node));
     if (ts.isIdentifier(node)) return heldClient(symbolAt(node));
@@ -2978,7 +3016,7 @@ function scanAuditWrites(sources = auditSources()) {
       }
       if (declarations.length === 1 && ts.isParameter(declaration) && W3_KINDS.has(helperKind(declaration.parent).kind)) {
         const inputs = parameterInputs(declaration, symbol, node.text);
-        if (!inputs.why) return fieldsOf(inputs.found, key, seen, `W3 \`${node.text}\` of ${describe(declaration.parent)}: every call's argument`);
+        if (!inputs.why) return fieldsOf(inputs.found, key, seen, `W3 \`${node.text}\` of ${describe(declaration.parent)}: every call's argument${viaRawNote(inputs.raw)}`);
         const context = parameterValue(declaration, symbol, node.text, true);
         if (context.why) return context.why.includes('so its type is no evidence') ? context : inputs;
       }
@@ -3059,8 +3097,15 @@ function scanAuditWrites(sources = auditSources()) {
     if (declaration.dotDotDotToken || !ts.isIdentifier(declaration.name)) return { why: `\`${name}\` is a rest or destructured parameter` };
     const { plain, other } = writesOf(symbol);
     if (other.length) return { why: `\`${name}\` is changed by \`${snippet(other[0].at)}\`` };
-    const { calls: found, escapes } = callsOf(owner, 'w3');
-    if (escapes.length) return { why: `\`${name}\` is a parameter of ${describe(owner)}, which is handed on at ${escapes.join(', ')}` };
+    let { calls: found, escapes } = callsOf(owner, 'w3'), raw = false, rawWhy = '';
+    // EMR-D a5 (consult section 1.2): where the W3 reading stopped at a receiver escape, the same reading with the raw
+    // purpose may go on; every argument it finds is still read by the rules below and the caller's.
+    if (escapes.length) {
+      const viaRaw = callsOf(owner, 'raw');
+      if (!viaRaw.escapes.length) { ({ calls: found, escapes } = viaRaw); raw = true; }
+      else if (`${viaRaw.escapes}` !== `${escapes}`) rawWhy = ` (${RAW_PURPOSE}: ${viaRaw.escapes.join(', ')})`;
+    }
+    if (escapes.length) return { why: `\`${name}\` is a parameter of ${describe(owner)}, which is handed on at ${escapes.join(', ')}${rawWhy}` };
     if (!found.length) return { why: `\`${name}\` is a parameter of ${describe(owner)}, which nothing in the program calls` };
     const inputs = [...plain];
     for (const call of found) {
@@ -3069,12 +3114,17 @@ function scanAuditWrites(sources = auditSources()) {
       if (!argument) return { why: `${where(call)}: no argument for \`${name}\`` };
       inputs.push(argument);
     }
-    return { found: inputs };
+    return { found: inputs, raw };
   }
+  /** The note a rule carries where the raw-client/receiver proof discharged the receiver escape (EMR-D a5). */
+  const viaRawNote = raw => (raw ? ` (${RAW_PURPOSE}: the receiver escape discharged)` : '');
   /** The return expressions of the W3 helpers a call runs, when every one of them is a W3 helper; else null. */
   function helperReturns(call) {
     if (!ts.isCallExpression(call)) return null;
-    const owners = functionsOf(call.expression, 'w3');
+    let owners = functionsOf(call.expression, 'w3'), raw = false;
+    // EMR-D a5: the raw purpose's reading of the same W3 helper where only its receiver's escape stopped it; every return
+    // is still read by the caller's rules.
+    if (!owners?.length) { owners = functionsOf(call.expression, 'raw'); raw = !!owners?.length; }
     if (!owners?.length) return null;
     const found = [];
     for (const owner of owners) {
@@ -3086,7 +3136,7 @@ function scanAuditWrites(sources = auditSources()) {
       };
       walk(owner.body);
     }
-    return { found, rule: `W3 the returns of ${owners.map(describe).join(', ')}` };
+    return { found, rule: `W3 the returns of ${owners.map(describe).join(', ')}${viaRawNote(raw)}` };
   }
   /** What a binding element takes: the element or field of what is destructured, when it is read by an index or a key W1
    *  fixes out of an array or object literal it always is ({ expression }), or of a JSON/Prisma result ({ row }). */
@@ -4307,14 +4357,29 @@ function scanAuditWrites(sources = auditSources()) {
     if (broken.length) note(file, 'source file', 'unresolved', `does not parse: ${ts.flattenDiagnosticMessageText(broken[0].messageText, ' ')}`, 'SPEC-F01');
     else files.push(file);
   }
+  // EMR-D a5: the raw-client/receiver proof (tests/admin_audit_raw_flow.cjs) on this Program and TypeChecker, with this
+  // check's own readings: W1 keys, references, holders, and flow-mode calls and W4 verdicts in the raw purpose.
+  const holderSets = new Map();
+  const raw = buildRawFlow({ ts, checker, where, snippet, w1, symbolAt, resolve, references, memberRefs, memberChanged, writesOf,
+    mutated, inert, bare, outer, isAccess, accessOf, familyOf, isStatic, inProgram, decorated, className, describe, returnsOf, isConst,
+    nothing, shift, directClass, parameterHazard, slotWrites,
+    isHolder: (object, node) => {
+      if (!holderSets.has(object.declaration)) holderSets.set(object.declaration, new Set(holdersOf({ kind: 'instance', declaration: object.declaration })));
+      return holderSets.get(object.declaration).has(node);
+    },
+    keptRaw: declaration => objectUse({ kind: 'instance', declaration }, 'raw').escape,
+    callsFlow: owner => callsOf(owner, 'flow'),
+    functionsFlow: expression => functionsOf(expression, 'flow'),
+    argumentTargetsFlow: (call, index) => argumentTargets(call, index, 'flow') });
   // The client flow: the seeds, then every binding, argument and result a client reaches, to a fixed point.
-  const bindings = [], calledAt = [], returns = [];
+  const bindings = [], calledAt = [], returns = [], literals = [];
   const enclosing = node => { for (let at = node.parent; at; at = at.parent) if (ts.isFunctionLike(at)) return at.body ? at : null; return null; };
   const collect = node => {
     if (ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isPropertyDeclaration(node) || ts.isPropertySignature(node)) {
       if (clientType(node.type) || (ts.isParameter(node) && transactionCallback(node))) clients.add(node);
       if (node.initializer) bindings.push([node, node.initializer]);
     }
+    if (ts.isObjectLiteralExpression(node)) literals.push(node);
     if (ts.isBinaryExpression(node) && node.operatorToken.kind === K.EqualsToken) {
       const left = bare(node.left);
       const symbol = ts.isIdentifier(left) ? symbolAt(left) : ts.isPropertyAccessExpression(left) ? resolve(checker.getSymbolAtLocation(left.name)) : null;
@@ -4343,6 +4408,16 @@ function scanAuditWrites(sources = auditSources()) {
     }
     for (const [owner, value] of returns) if (!clientFunctions.has(owner) && isClient(value)) add(clientFunctions, owner);
     for (const declaration of clients) { const name = memberName(declaration); if (name) add(clientMembers, name); }
+    // EMR-D a5 (consult section 1.3 (4)-(5)): a client kept in an object literal slot reaches every read of that slot along
+    // the slot's whole consumer graph, and only where the raw flow proves that graph; nothing else makes a value a client.
+    for (const literal of literals) for (const member of literal.properties) {
+      const value = ts.isPropertyAssignment(member) ? member.initializer : ts.isShorthandPropertyAssignment(member) ? member.name : null;
+      if (!value || !isClient(value)) continue;
+      const proof = raw.clientSlot(literal, member);
+      if (!proof.ok) continue;
+      for (const read of proof.reads) add(rawClientReads, read);
+      for (const declaration of proof.bindings) add(clients, declaration);
+    }
   }
   // W4 over every fragment first: the values judged by their type below rely on it, in the files connected by calls to
   // where one is handed on.
@@ -4420,8 +4495,16 @@ function scanAuditWrites(sources = auditSources()) {
       || (ts.isBinaryExpression(parent) && parent.operatorToken.kind === K.EqualsToken && parent.right === node
         && (assignedClient(parent.left) || ts.isObjectLiteralExpression(bare(parent.left)) || ts.isArrayLiteralExpression(bare(parent.left))))
       || (argument && (receiving || identityMapKey(parent,node))) || (owner && callsOf(owner, 'flow').escapes.length === 0) || inert(node)) return;
+    // EMR-D a5: a client kept in an object literal slot is followed where the raw flow proves that slot's consumers.
+    let kept = null;
+    if ((ts.isPropertyAssignment(parent) && parent.initializer === node) || (ts.isShorthandPropertyAssignment(parent) && parent.name === node)) {
+      const proof = raw.clientSlot(parent.parent, parent);
+      if (proof.ok) return;
+      kept = proof.why;
+    }
     note(start, 'client value', 'unresolved', `\`${snippet(start)}\`: ` + (argument ? `a client value handed to \`${snippet(parent.expression)}\`, which this check does not follow`
-      : owner ? `a client value returned from ${describe(owner)}, which is handed on` : `a client value used in a ${K[parent.kind]}, where this check does not follow it`), 'SPEC-F01 client flow');
+      : owner ? `a client value returned from ${describe(owner)}, which is handed on` : `a client value used in a ${K[parent.kind]}, where this check does not follow it`)
+      + (kept ? ` (raw flow: ${kept})` : ''), 'SPEC-F01 client flow');
   }
   const occurrences = node => {
     if (ts.isTypeNode(node)) return;
@@ -4439,7 +4522,9 @@ function scanAuditWrites(sources = auditSources()) {
     unresolved: candidates.filter(entry => entry.status === 'unresolved').map(entry => `${entry.file}:${entry.line} ${entry.kind}: ${entry.reason}`),
     flow: { clients: [...clients].map(declaration => `${where(declaration)} ${declaration.name?.getText() ?? K[declaration.kind]}`).sort(),
       functions: [...clientFunctions].map(describe).sort(), members: [...clientMembers].sort() } };
-  Object.defineProperties(scan, { tools: { value: { ts, bare, symbolAt, references } } });
+  Object.defineProperties(scan, { tools: { value: { ts, bare, symbolAt, references, program, checker } },
+    // EMR-D a5: the raw-client/receiver certificate (purpose, witnesses, refusals); read by its own cases, never by a verdict.
+    rawFlow: { value: { purpose: RAW_PURPOSE, certificate: raw.certificate, clientReads: [...rawClientReads].map(where).sort() } } });
   return scan;
 }
 
@@ -4491,6 +4576,9 @@ test('completeness: every api/src file and prisma CJS entry point is read, every
   console.log('ADMIN_AUDIT_CANDIDATES ' + JSON.stringify(tally));
   for (const entry of scan.candidates.filter(entry => entry.status === 'proven_non_audit')) console.log('ADMIN_AUDIT_NON_AUDIT ' + JSON.stringify(entry));
   console.log('ADMIN_AUDIT_CLIENT_FLOW ' + JSON.stringify(scan.flow));
+  // EMR-D a5: every witness and refusal of the raw-client/receiver proof this scan asked for (its own purpose, never a verdict).
+  for (const entry of scan.rawFlow.certificate) console.log('ADMIN_AUDIT_RAW_FLOW ' + JSON.stringify(entry));
+  console.log('ADMIN_AUDIT_RAW_FLOW_READS ' + JSON.stringify({ purpose: scan.rawFlow.purpose, client_reads: scan.rawFlow.clientReads }));
   const literals = new Set(scan.sites.flatMap(site => site.actions)), byRule = {};
   for (const action of literals) { const rule = A.auditRule(action).split(':')[0]; byRule[rule] = (byRule[rule] ?? 0) + 1; }
   console.log('ADMIN_AUDIT_COMPLETENESS ' + JSON.stringify({ typescript: scan.typescript, files_listed: listing.disk, files_read: scan.files.length,
@@ -5514,4 +5602,255 @@ test('EMR-B1 ledger provenance: the adapter calls are read; any other emr_access
     assert.deepEqual(scan.candidates.filter(entry => entry.kind === 'raw SQL naming emr_access').map(entry => entry.status), [status]);
     assert.equal(scan.unresolved.length, status === 'unresolved' ? 1 : 0);
   });
+});
+
+// ── EMR-D a5: the raw-client/receiver flow proof (tests/admin_audit_raw_flow.cjs) ──
+// Astra D114 consult R5A2-SQL, decision 1, section 1.5: RF-P producers, RF-H holders, RF-C callbacks, RF-R recursion,
+// RF-S scalars and fragments, RF-A the separation of the proof from the action reading. SPEC-F01/W1-W6/F02 -> RISK: a
+// real writer missed or a wrong non-audit verdict (R5A2-SQL) -> TEST: these cases beside the corpus above, which is kept
+// whole (nothing deleted, skipped or relabelled). The fixture (tests/fixtures/admin-audit-checker/raw-flow) states what it
+// expects; nothing is read from the checker's output to decide it. Each negative puts one defect into a fixture that
+// passes alone, and a variant that does not apply or does not parse is no kill.
+const RAW_FLOW = path.join(MEMBER_FIXTURES, 'raw-flow');
+const RAW_FLOW_CASES = JSON.parse(fixtureText('cases.json', RAW_FLOW));
+const RAW_FLOW_FILES = ['producer.ts', 'consumer.ts'];
+const rawFlowSource = (name, text = fixtureText(name, RAW_FLOW)) => ({ file: `api/src/syn-fixture/raw-flow/${name}`, text });
+// The empty table: any audit write the fixture gains is unlisted.
+const rawFlowTable = () => ({ rows: [], wildcards: [], listed: () => false });
+/** The fixture with a variant's edits (each `find` exactly once in its file), in `order`. */
+function rawFlowCorpus(edits = [], order = RAW_FLOW_FILES) {
+  const texts = new Map(RAW_FLOW_FILES.map(name => [name, fixtureText(name, RAW_FLOW)]));
+  for (const { file, find, replace } of edits) {
+    assert.ok(texts.has(file), `${file} is a file of the raw flow fixture`);
+    assert.equal(texts.get(file).split(find).length, 2, `${file}: the edited text occurs exactly once: ${find}`);
+    texts.set(file, texts.get(file).replace(find, () => replace));
+  }
+  return order.map(name => rawFlowSource(name, texts.get(name)));
+}
+/** Where the tag `@rf:<tag>` is: exactly one line of the corpus. */
+function rawFlowTag(sources, tag) {
+  const found = sources.flatMap(source => source.text.split('\n').flatMap((line, index) =>
+    new RegExp(`@rf:${tag}(?![\\w-])`).test(line) ? [{ file: source.file, line: index + 1 }] : []));
+  assert.equal(found.length, 1, `the tag @rf:${tag} names one line`);
+  return found[0];
+}
+let rawFlowBaseScan = null;
+/** The unedited fixture: every candidate as marked, the gate passing on its own. */
+function rawFlowBase() {
+  if (rawFlowBaseScan) return rawFlowBaseScan;
+  const sources = rawFlowCorpus(), scan = scanAuditWrites(sources);
+  for (const source of sources) assertMarked(scan, source);
+  assert.deepEqual(verdict(scan, rawFlowTable()), EMPTY_VERDICT);
+  return rawFlowBaseScan = { sources, scan };
+}
+/** One variant alone: it parses and fails exactly as cases.json says. */
+function rawFlowVariant(group, variant, order = RAW_FLOW_FILES) {
+  const label = `${group} ${variant.id} ${variant.name}`, sources = rawFlowCorpus(variant.edits, order), scan = scanAuditWrites(sources);
+  assert.ok(sources.some((source, index) => source.text !== rawFlowCorpus([], order)[index].text), `${label}: the variant changes the fixture`);
+  assert.deepEqual(scan.candidates.filter(entry => entry.kind === 'source file'), [], `${label}: every file parses`);
+  const found = verdict(scan, rawFlowTable());
+  assert.ok(failing(found).length > 0, `${label} is not detected: ${JSON.stringify(found)}`);
+  for (const item of variant.expect.unresolved_includes ?? []) {
+    const at = rawFlowTag(sources, item.tag), there = found.unresolved.filter(entry => entry.startsWith(`${at.file}:${at.line} `));
+    assert.ok(there.length > 0, `${label}: @rf:${item.tag} is not unresolved at all: ${JSON.stringify(found.unresolved)}`);
+    assert.ok(there.some(entry => entry.includes(item.reason)), `${label}: @rf:${item.tag} is unresolved, not for ${JSON.stringify(item.reason)}: ${JSON.stringify(there)}`);
+  }
+  if (variant.expect.unlisted) {
+    assert.deepEqual(found.unlisted, [...variant.expect.unlisted].sort(), `${label}: unlisted`);
+    // An unlisted write the raw flow follows to its place: nothing else is left unresolved by it.
+    if (!variant.expect.unresolved_includes) assert.deepEqual(found.unresolved, [], `${label}: unresolved`);
+  }
+  return { variant: variant.id, failing: failing(found), unresolved: found.unresolved.length, unlisted: found.unlisted,
+    refusals: scan.rawFlow.certificate.filter(entry => !entry.ok).map(entry => `${entry.kind}: ${entry.why}`).slice(0, 6) };
+}
+
+test('RF positive: the unedited raw flow fixture passes with every candidate as marked, the witnesses cases.json names and its two values proved through the raw-client/receiver proof', () => {
+  const { sources, scan } = rawFlowBase(), positive = RAW_FLOW_CASES.positive, certificate = scan.rawFlow.certificate;
+  assert.equal(scan.rawFlow.purpose, 'raw-client-receiver');
+  for (const witness of positive.witnesses) {
+    const at = witness.at ? rawFlowTag(sources, witness.at) : null;
+    const found = certificate.filter(entry => entry.kind === witness.kind && entry.ok
+      && (!at || entry.label.includes(`${at.file}:${at.line}`))
+      && (!witness.label_includes || entry.label.includes(witness.label_includes))
+      && (!witness.callee || entry.label.includes(`\`${witness.callee}\``))
+      && (!witness.field || entry.label.endsWith(`#${witness.field}`))
+      && (witness.producers_include ?? []).every(text => (entry.producers ?? []).some(item => item.includes(text)))
+      && (witness.targets_include ?? []).every(text => (entry.targets ?? []).some(item => item.includes(text))));
+    assert.ok(found.length > 0, `${witness.group}: no ${witness.kind} witness ${JSON.stringify(witness)} in ${JSON.stringify(certificate)}`);
+    if (witness.arrow_at) {
+      const arrow = rawFlowTag(sources, witness.arrow_at);
+      assert.ok(found.some(entry => entry.producers.some(item => item.includes(`the arrow function at ${arrow.file}:${arrow.line}`))), `${witness.group}: the arrow at @rf:${witness.arrow_at}`);
+    }
+  }
+  const reads = new Set(scan.rawFlow.clientReads);
+  for (const tag of positive.client_reads) {
+    const at = rawFlowTag(sources, tag);
+    assert.ok(reads.has(`${at.file}:${at.line}`), `a client read at @rf:${tag}: ${[...reads]}`);
+  }
+  for (const { tag, rule } of positive.proved_through_the_raw_flow) {
+    const at = rawFlowTag(sources, tag), entry = scan.candidates.find(item => item.file === at.file && item.line === at.line);
+    assert.ok(entry && entry.status === 'proven_non_audit' && entry.reason.includes(rule) && entry.reason.includes('raw-client-receiver: the receiver escape discharged'),
+      `@rf:${tag}: ${JSON.stringify(entry)}`);
+  }
+  assert.deepEqual(certificate.filter(entry => !entry.ok), [], 'the unedited fixture holds no refusal');
+  console.log('ADMIN_AUDIT_RAW_FLOW_CASES ' + JSON.stringify({ case: 'positive', witnesses: positive.witnesses.length, certificate: certificate.length,
+    client_reads: [...reads] }));
+});
+
+for (const entry of RAW_FLOW_CASES.cases) {
+  test(`RF ${entry.id} ${entry.title}`, () => {
+    rawFlowBase();
+    const results = entry.variants.map(variant => rawFlowVariant(entry.id, variant));
+    if (entry.order_independent) {
+      // RF-R: the modules in the other order give the same verdicts and the same certificate verdicts.
+      const reversed = [...RAW_FLOW_FILES].reverse(), base = scanAuditWrites(rawFlowCorpus([], reversed));
+      assert.deepEqual(verdict(base, rawFlowTable()), EMPTY_VERDICT, `${entry.id}: the unedited fixture in the other order`);
+      const verdicts = scan => scan.rawFlow.certificate.map(item => `${item.kind} ${item.label} ${item.ok}`).sort();
+      assert.deepEqual(verdicts(base), verdicts(rawFlowBase().scan), `${entry.id}: the certificate in the other order`);
+      for (const variant of entry.variants) {
+        const again = rawFlowVariant(entry.id, variant, reversed), first = results.find(result => result.variant === variant.id);
+        assert.deepEqual([again.failing, again.unresolved, again.unlisted], [first.failing, first.unresolved, first.unlisted], `${variant.id} in the other order`);
+      }
+    }
+    console.log('ADMIN_AUDIT_RAW_FLOW_CASES ' + JSON.stringify({ case: entry.id, variants: results }));
+  });
+}
+
+/** This checker with exact text edits, each occurring once, loaded in this process with node:test's `test` collected
+ *  instead of run: the collected cases by name. A mutant that does not apply is no kill. */
+function checkerMutant(replacements) {
+  let text = readFileSync(__filename, 'utf8');
+  for (const [find, replace] of replacements) {
+    assert.equal(text.split(find).length, 2, `the checker mutant's edit occurs exactly once: ${find}`);
+    text = text.replace(find, () => replace);
+  }
+  const collected = new Map(), local = require('node:module').createRequire(__filename);
+  const load = Object.assign(id => (id === 'node:test' ? { test: (name, fn) => collected.set(name, fn) } : local(id)),
+    { resolve: local.resolve, cache: local.cache, extensions: local.extensions });
+  const wrapper = require('node:vm').runInThisContext(`(function (exports, require, module, __filename, __dirname) {${text}\n})`, { filename: `${__filename} (mutant)` });
+  const loaded = { exports: {} };
+  wrapper.call(loaded.exports, loaded.exports, load, loaded, __filename, __dirname);
+  return collected;
+}
+
+test('RF-A the raw certificate never decides an action: CW18 X01-factory and CW12 keep their refusals, and a checker that let the action reading take the raw purpose would be caught by them', () => {
+  // The controls as they are, with this checker: the factory and the public, mutable or rewritten holder stay refused.
+  closedBase();
+  const cw18 = CLOSED_CASES.cases.find(entry => entry.id === 'CW18'), cw12 = CLOSED_CASES.cases.find(entry => entry.id === 'CW12');
+  const x01 = cw18.variants.find(variant => variant.name === 'X01-factory');
+  assert.ok(x01 && cw12, 'the controls are in cases.json');
+  const controls = [closedVariant('CW18', x01), ...cw12.variants.map(variant => closedVariant('CW12', variant))];
+  // The same factory shape passes the raw reading (RF-P positive): a producers witness through `synFlowMake`.
+  const { scan } = rawFlowBase();
+  assert.ok(scan.rawFlow.certificate.some(item => item.kind === 'producers' && item.ok && item.producers.some(text => text.includes('synFlowMake'))));
+  // The mutant: W4 for an action read with the raw purpose (its default and every mode's purpose), nothing else changed.
+  // (The texts are joined here so that each occurs once in this file: at the line the mutant changes.)
+  const mutant = checkerMutant([
+    [['function objectUse(object, purpose = ', "'action') {"].join(''), ['function objectUse(object, purpose = ', "'raw') {"].join('')],
+    [['const rawPurpose = mode => ', "(mode === 'flow' || mode === 'raw' ? 'raw' : 'action');"].join(''), ['const rawPurpose = mode => ', "'raw';"].join('')],
+  ]);
+  const named = prefix => { const found = [...mutant.keys()].filter(name => name.startsWith(prefix)); assert.equal(found.length, 1, prefix); return mutant.get(found[0]); };
+  // It is a working checker: the closed world's own positives still pass under it.
+  named('CW01 ')();
+  named('CW02 ')();
+  // The controls catch it: each refusal it would take away fails its case.
+  const killed = [];
+  for (const id of ['CW18 ', 'CW12 ']) {
+    let error = null;
+    try { named(id)(); } catch (caught) { error = caught; }
+    assert.ok(error, `${id.trim()} does not catch a checker that lets the raw certificate decide an action`);
+    killed.push({ control: id.trim(), by: String(error.message).split('\n')[0].slice(0, 200) });
+  }
+  console.log('ADMIN_AUDIT_RAW_FLOW_CASES ' + JSON.stringify({ case: 'RF-A', controls: controls.map(result => result.variant), killed }));
+});
+
+test('RF product copies: one compiler-located edit of api/src per defect class makes the candidate it attacks fail the gate (RF-P1, RF-C1, RF-H2, RF-S1, RF-S2 on the composed clinical runtime)', () => {
+  const sources = auditSources(), listing = productSources().listing, base = scanAuditWrites(sources);
+  const { ts, references, program, checker } = base.tools, before = verdict(base, productTable(), listing);
+  const fileOf = name => { const file = program.getSourceFile(slash(path.join(ROOT, name))); assert.ok(file, name); return file; };
+  const exported = (name, symbol) => {
+    const found = checker.getExportsOfModule(checker.getSymbolAtLocation(fileOf(name))).find(item => item.name === symbol);
+    assert.ok(found?.declarations?.length, `${name} exports ${symbol}`);
+    return found.declarations[0];
+  };
+  const member = (name, owner, key) => {
+    const found = exported(name, owner).members.find(item => item.name && !ts.isComputedPropertyName(item.name) && item.name.text === key);
+    assert.ok(found, `${owner}.${key}`);
+    return found;
+  };
+  /** The calls the program makes of a function or method declaration (by its symbol's references). */
+  const callsTo = declaration => references(checker.getSymbolAtLocation(declaration.name)).map(reference => {
+    const callee = ts.isPropertyAccessExpression(reference.parent) && reference.parent.name === reference ? reference.parent : reference;
+    return ts.isCallExpression(callee.parent) && callee.parent.expression === callee ? callee.parent : null;
+  }).filter(Boolean);
+  const statementOf = node => { let at = node; while (at && !ts.isExpressionStatement(at)) at = at.parent; assert.ok(at, 'a statement'); return at; };
+  const lineOf = node => node.getSourceFile().getLineAndCharacterOfPosition(node.getStart()).line + 1;
+  const fileName = node => repoPath(node.getSourceFile().fileName), endOf = node => node.getSourceFile().text.length;
+  const mutants = [];
+  {
+    // RF-P1: a second producer of the bound port, an opaque function's result, beside the one composition.
+    const calls = callsTo(exported('api/src/emr-clinical/services.ts', 'bindClinicalPort'));
+    assert.equal(calls.length, 1, 'the port is bound by one call of the program');
+    const statement = statementOf(calls[0]), callee = calls[0].expression.getText(), file = fileName(statement);
+    mutants.push({ id: 'RF-P1', edits: [[file, statement.end, statement.end, `\n  ${callee}(synA5OpaquePort());`],
+      [file, endOf(statement), endOf(statement), `\ndeclare function synA5OpaquePort(): Parameters<typeof ${callee}>[0];\n`]],
+    check: found => found.unresolved.some(item => !before.unresolved.includes(item) && item.includes('raw flow') && item.includes('which this proof does not follow')) });
+  }
+  const register = callsTo(member('api/src/emr-clinical/store.ts', 'SqlClinicalStore', 'onWake'));
+  assert.equal(register.length, 1, 'the store\'s callback is registered by one call of the program');
+  {
+    // RF-C1: a second registration of the store's callback gives an opaque function.
+    const statement = statementOf(register[0]), file = fileName(statement);
+    mutants.push({ id: 'RF-C1', edits: [[file, statement.end, statement.end, `\n    ${register[0].expression.getText()}(synA5OpaqueWake);`],
+      [file, endOf(statement), endOf(statement), '\ndeclare const synA5OpaqueWake: any;\n']],
+    check: found => found.unresolved.some(item => item.startsWith('api/src/emr-clinical/store.ts:') && item.includes('is handed on as `this` of')) });
+  }
+  {
+    // RF-H2: an owning service's response context handed to an opaque function before the port reads it.
+    let context = null;
+    const walk = node => {
+      if (context) return;
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === 'respond' && node.arguments.length === 3
+        && ts.isObjectLiteralExpression(node.arguments[2]) && (checker.getSymbolAtLocation(node.expression.name)?.declarations ?? []).every(ts.isMethodSignature)) context = node.arguments[2];
+      ts.forEachChild(node, walk);
+    };
+    for (const source of sources) walk(fileOf(source.file));
+    assert.ok(context, 'an owning service answers through the port with a context literal');
+    const file = fileName(context), line = lineOf(context);
+    mutants.push({ id: 'RF-H2', edits: [[file, context.getStart(), context.getStart(), 'synA5Keep('], [file, context.end, context.end, ')'],
+      [file, endOf(context), endOf(context), '\ndeclare function synA5Keep<T>(value: T): T;\n']],
+    check: found => found.unresolved.some(item => item.startsWith(`${file}:${line} `) && item.includes('raw flow') && item.includes('synA5Keep')) });
+  }
+  {
+    // RF-S1: the store's private decision helper is given a raw fragment for its cause, its receiver type kept.
+    const call = callsTo(member('api/src/emr-clinical/store.ts', 'SqlClinicalStore', 'decision')).find(item => item.arguments.length === 3 && ts.isStringLiteral(item.arguments[2]));
+    assert.ok(call, 'a decision with a literal cause');
+    const literal = call.arguments[2], file = fileName(call), line = lineOf(literal);
+    mutants.push({ id: 'RF-S1', edits: [[file, literal.getStart(), literal.end, `(SynA5Prisma.raw(${literal.getText()}) as any)`],
+      [file, endOf(call), endOf(call), "\nimport { Prisma as SynA5Prisma } from '@prisma/client';\n"]],
+    check: found => found.unresolved.some(item => item.startsWith(`${file}:${line} `) && item.includes('is asserted to `any`')) });
+  }
+  {
+    // RF-S2: the callback the runtime registers writes an unregistered audit row by raw SQL.
+    const arrow = register[0].arguments[0];
+    assert.ok(ts.isArrowFunction(arrow) && !ts.isBlock(arrow.body), 'the registered callback is an arrow with an expression body');
+    const file = fileName(arrow);
+    mutants.push({ id: 'RF-S2', edits: [[file, arrow.body.getStart(), arrow.body.end,
+      `{ void synA5Client.$executeRaw\`INSERT INTO "AuditLog" (action) VALUES ('syn.a5-hidden')\`; ${arrow.body.getText()}; }`],
+    [file, endOf(arrow), endOf(arrow), "\ndeclare const synA5Client: import('@prisma/client').PrismaClient;\n"]],
+    check: found => found.unlisted.includes('syn.a5-hidden') });
+  }
+  const results = [];
+  for (const mutant of mutants) {
+    const edits = new Map();
+    for (const [file, start, end, text] of mutant.edits) edit(edits, file, start, end, text);
+    const changed = edited(sources, edits);
+    assert.ok(changed.some((source, index) => source.text !== sources[index].text), `${mutant.id} changes api/src`);
+    const scan = scanAuditWrites(changed), found = verdict(scan, productTable(), listing);
+    assert.deepEqual(scan.candidates.filter(entry => entry.kind === 'source file'), [], `${mutant.id}: every file parses`);
+    assert.notDeepEqual(found, before, `${mutant.id} changes the verdict`);
+    assert.ok(mutant.check(found, scan), `${mutant.id} is not refused where it attacks: ${JSON.stringify(found.unresolved.filter(item => !before.unresolved.includes(item)).slice(0, 4))} unlisted ${found.unlisted}`);
+    results.push({ mutant: mutant.id, unresolved_added: found.unresolved.filter(item => !before.unresolved.includes(item)).length, unlisted: found.unlisted });
+  }
+  console.log('ADMIN_AUDIT_RAW_FLOW_CASES ' + JSON.stringify({ case: 'product copies', base_unresolved: before.unresolved.length, mutants: results }));
 });
