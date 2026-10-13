@@ -2,6 +2,9 @@
 // D1041 pilot decision replaces W2R-02's exact-match compatibility requirement:
 // REQ-WS3 -> RISK-WS3 -> TEST-WS3-RELATIVE-COMPATIBILITY now requires token OR
 // for existing saved scalars as well as new Modality Equals conditions (no migration).
+// W2R4-01: the same decision (7-②, "a CT,SR study is a CT study") makes Modality
+// Does Not Equal the token complement of Equals. The former assertion that a CT,SR
+// study matched both "Equals CT" and "Does Not Equal CT" is replaced, not weakened.
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
@@ -103,10 +106,33 @@ test('TEST-WS3-RELATIVE-COMPATIBILITY: D1041 saved Modality Equals uses whole-to
     for (const actual of ['CTA', 'SR', '', null]) assert.equal(match({modality: actual}, condition), false);
   }
   for (const wanted of ['CT,', 'CT,,MR', 'CT, UNKNOWN']) invalid(expr([rule('modality', 'eq', wanted)]));
-  // Other operators retain their contract; the pilot changed Equals, not exclusions.
-  assert.equal(match({modality: 'CT,SR'}, expr([rule('modality', 'neq', 'CT')])), true);
+  // W2R4-01: a CT,SR study is a CT study, so it is excluded by Does Not Equal CT.
+  assert.equal(match({modality: 'CT,SR'}, expr([rule('modality', 'neq', 'CT')])), false);
   const expression = relative('1');
   assert.deepEqual(matcher.withQuickMode(matcher.withQuickMode(expression, 'exact', columns), 'contains', columns), expression);
+});
+
+test('TEST-WS3-RELATIVE-COMPATIBILITY: W2R4-01 Modality Does Not Equal is the token complement of Equals', () => {
+  const studies = ['CT', 'CT,SR', 'SR,ct', 'MR', 'MR,SR', 'CTA', 'SR', 'US\\CT'];
+  for (const wanted of ['CT', 'ct', ' CT ', 'CT, MR', 'ct\\mr', 'US']) {
+    const equals = expr([rule('modality', 'eq', wanted)]), excludes = expr([rule('modality', 'neq', wanted)]);
+    valid(excludes);
+    for (const modality of studies) {
+      const inside = match({modality}, equals);
+      assert.equal(match({modality}, excludes), !inside, `${modality} / ${wanted}`);
+      assert.equal(match({modality}, expr([rule('modality', 'eq', wanted), rule('modality', 'neq', wanted)])), false);
+      assert.equal(match({modality}, expr([rule('modality', 'eq', wanted), rule('modality', 'neq', wanted)], 'or')), true);
+    }
+  }
+  assert.deepEqual(studies.filter(modality => match({modality}, expr([rule('modality', 'neq', 'CT')]))), ['MR', 'MR,SR', 'CTA', 'SR']);
+  assert.deepEqual(studies.filter(modality => match({modality}, expr([rule('modality', 'neq', 'ct, mr')]))), ['CTA', 'SR']);
+  // A study without a Modality is not "unequal"; Unspecified stays explicit.
+  for (const modality of [undefined, null, '', ' , ']) {
+    assert.equal(match({modality}, expr([rule('modality', 'neq', 'CT')])), false, String(modality));
+  }
+  // The list is parsed and validated exactly like Equals.
+  for (const wanted of ['CT,', 'CT,,MR', 'CT, UNKNOWN', ' ']) invalid(expr([rule('modality', 'neq', wanted)]));
+  assert.equal(matcher.describe(expr([rule('modality', 'neq', 'CT, MR')]), columns), '(Modality 같지 않음 CT, MR)');
 });
 function invalid(condition, message = '') {
   assert.equal(typeof matcher.validate(condition, columns), 'string', message);
