@@ -57,7 +57,8 @@ class OwnedAuthStack:
         """Keeps a sanitized log of one finished call; never the generated secrets or an OIDC query string."""
         output = (result.stdout + result.stderr).decode('utf-8', 'replace')
         output = sanitize(output, self.values.values())
-        # nginx's request line contains OIDC callback codes and state even though no response body is logged.
+        # Evidence hygiene also covers auxiliary services. AuthAuditLive checks the original product log bytes in memory
+        # before this substitution, so redacted evidence cannot stand in for product log privacy.
         output = re.sub(r'(/[^\s?"<>]*)\?[^\s"<>]*', r'\1?[REDACTED QUERY]', output)
         (self.out / (name + '.log')).write_text(output, encoding='utf-8')
         print('OWNED_AUTH_HTTP ' + name + ' exit=' + str(result.returncode), flush=True)

@@ -29,6 +29,7 @@ import html
 import importlib.util
 import http.cookiejar
 import json
+import os
 import re
 import subprocess
 import sys
@@ -37,9 +38,10 @@ import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+from html.parser import HTMLParser
 from ipaddress import ip_address
 from urllib.error import HTTPError
-from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlparse
 from urllib.request import HTTPCookieProcessor, HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 from invariants_live import ROOT, LiveStack, past_audit_guard, psql, purge_user_audit
@@ -59,6 +61,7 @@ CASES = (
     "test_10_a_session_ended_on_the_dicom_path_records_the_proxys_address",
     "test_11_api_answers_are_not_stored_and_the_account_console_is_closed",
     "test_11b_login_logout_server_time_and_timezone",
+    "test_11c_ward_nat_relogin_and_operator_log_privacy",
     "test_12_cleanup_leaves_no_owned_row_or_session",
 )
 AUTH = ("auth.login", "auth.logout", "auth.session.expired")
@@ -84,6 +87,18 @@ class _NoRedirect(HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
+
+
+class LinkTargets(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.targets = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            target = dict(attrs).get("href")
+            if target is not None:
+                self.targets.append(target)
 
 
 def secret_hits(texts, secrets):
@@ -115,6 +130,7 @@ class Browser:
         self.headers = {}
         # S7-U5: the id of the login session this profile's document saw (GET me); sent as X-KIN-Session on /api calls.
         self.session = None
+        self.calls = []
         self.proof = None
         if real_ip:
             self.headers["X-Real-IP"] = real_ip
@@ -127,8 +143,10 @@ class Browser:
         request = Request(target, data=data, method=method, headers={**self.headers, **bound, **(headers or {})})
         try:
             with self.opener.open(request, timeout=30) as response:
+                self.calls.append((urlparse(target).path, response.status))
                 return response.status, dict(response.headers), response.read().decode("utf-8", "replace")
         except HTTPError as error:
+            self.calls.append((urlparse(target).path, error.code))
             return error.code, dict(error.headers or {}), error.read().decode("utf-8", "replace")
 
     def cookie(self, name):
@@ -221,6 +239,38 @@ class ReportDraftServiceLive(unittest.TestCase):
         self.assertRegex(output, r'(?m)^# skipped 0$')
 
     _run = staticmethod(AuthSessionServiceLive._fixture.run)
+
+
+class AuthFailureCapacityLive(unittest.TestCase):
+    """Separately gated 60,000-refusal measurement; every fact uses the real producer, DB and seal."""
+    label_namespace = 'kin.emrb.live'
+    setUpClass = classmethod(AuthSessionServiceLive.setUpClass.__func__)
+    setup_disposable_resources = classmethod(AuthSessionServiceLive.setup_disposable_resources.__func__)
+    cleanup_resources = classmethod(AuthSessionServiceLive.cleanup_resources.__func__)
+    start_db = classmethod(AuthSessionServiceLive.start_db.__func__)
+    provision = classmethod(AuthSessionServiceLive.provision.__func__)
+    migrate = classmethod(AuthSessionServiceLive.migrate.__func__)
+    volume = classmethod(AuthSessionServiceLive.volume.__func__)
+    url = classmethod(AuthSessionServiceLive.url.__func__)
+
+    def test_deactivated_member_capacity(self):
+        env = {**self.env, 'DATABASE_URL': self.url(), 'KIN_EMR_STATE_DIR': '/var/lib/kin-emr'}
+        done = AuthSessionServiceLive._fixture.run([
+            'docker', 'run', '--rm', '--label', self.label, '--network', 'container:' + self.db,
+            '-e', 'DATABASE_URL', '-e', 'KIN_EMR_STATE_DIR', '-v', self.state + ':/var/lib/kin-emr',
+            '-v', str(ROOT / 'tests') + ':/tests:ro', '--entrypoint', 'node', self.image,
+            '/tests/emr/b/contract_test.cjs', '--emr-b-live', 'auth-failure-capacity'],
+            env=env, check=False, timeout=3300)
+        output = (done.stdout + done.stderr).decode('utf-8', 'replace')
+        for value in self.secrets.values():
+            output = output.replace(value, '[redacted]')
+        print(output, flush=True)
+        self.assertEqual(done.returncode, 0)
+        results = [json.loads(line.removeprefix('EMR_B_RESULT ')) for line in output.splitlines() if line.startswith('EMR_B_RESULT ')]
+        self.assertEqual(len(results), 1)
+        self.assertNotIn('error', results[0])
+        self.assertEqual(results[0]['recorded'], 60000)
+        self.assertEqual(results[0]['unrecorded'], 0)
 
 
 class AuthAuditLive(unittest.TestCase):
@@ -335,7 +385,7 @@ class AuthAuditLive(unittest.TestCase):
                               text=True, encoding="utf-8", errors="replace", timeout=60)
         if done.returncode:
             raise RuntimeError("harness: the proxy log could not be read")
-        return done.stdout
+        return done.stdout + done.stderr
 
     @classmethod
     def proxy_addresses(cls) -> list:
@@ -347,15 +397,16 @@ class AuthAuditLive(unittest.TestCase):
 
     @classmethod
     def observed_ip(cls) -> str:
-        """One marked request through the proxy; the first field of the one nginx log line that carries the mark."""
-        mark = "u5probe=" + uuid.uuid4().hex
-        status, _headers, _body = Browser(cls.stack).call("GET", "/api/health?" + mark)
-        if status != 200:
-            raise RuntimeError(f"harness: the probe request answered {status}")
-        lines = [line for line in cls.proxy_log().splitlines() if mark in line]
-        if len(lines) != 1:
-            raise RuntimeError(f"harness: the probe mark is in {len(lines)} proxy log lines (need exactly one)")
-        address = lines[0].split(" ", 1)[0]
+        """A unique path on the existing unknown-route response; queries are deliberately absent from product logs."""
+        mark = "/api/audit-address-" + uuid.uuid4().hex
+        status, _headers, _body = Browser(cls.stack).call("GET", mark)
+        if status != 404:
+            raise RuntimeError(f"harness: the address check answered {status}")
+        lines = [json.loads(line) for line in cls.proxy_log().splitlines() if line.startswith("{")]
+        rows = [line for line in lines if line.get("path") == mark]
+        if len(rows) != 1:
+            raise RuntimeError(f"harness: expected one access record, got {len(rows)}")
+        address = rows[0]["remote"]
         ip_address(address)
         return address
 
@@ -693,28 +744,68 @@ class AuthAuditLive(unittest.TestCase):
         for key in "ABZ":
             self.assertFalse({row for row in self.admin_view(key) if row[1] == ""}, key + " sees no failure row")
         self.check_rows("AL-08", rows)
-        # B2R2-08: one address cannot produce refused callbacks (each a protected failure record) faster than the proxy's
-        # documented allowance for the login flow: a burst far beyond it is answered 429 by nginx, not by the API.
-        browser = Browser(self.stack)
-        status, headers, _ = browser.call("GET", "/api/auth/login")
-        self.assertEqual(status, 302)
-        self.secret("state", parse_qs(urlparse(headers["Location"]).query)["state"][0])
-        flow = next(c for c in browser.jar if c.name.startswith("kin_pending_"))
-        self.secret("pending", flow.value)
+        # B2R3-01/06/08: all router aliases share a zone. Each callback spelling has its own valid pending flow.
+        aliases = ["/api/auth/callback", "/api/auth/callback/", "/API/AUTH/CALLBACK"]
+        cookies = {}
+        for alias in aliases:
+            browser = Browser(self.stack)
+            status, headers, _ = browser.call("GET", "/api/auth/login")
+            self.assertEqual(status, 302)
+            self.secret("state", parse_qs(urlparse(headers["Location"]).query)["state"][0])
+            flow = next(c for c in browser.jar if c.name.startswith("kin_pending_"))
+            self.secret("pending", flow.value)
+            cookies[alias] = flow.name + "=" + flow.value
+        hsts = headers.get("Strict-Transport-Security")
         floor = int(psql('SELECT coalesce(max(id), 0) FROM "AuditLog";')[0])
-        # Arriving together, as a flood does: sequential requests would be paced by the API itself and stay inside the
-        # zone's refill. Each request carries the same live flow, so every one the proxy lets through is recorded.
-        stray = lambda n: Browser(self.stack).call("GET", f"/api/auth/callback?state=stray-{n}&code=stray",
-                                                   headers={"Cookie": flow.name + "=" + flow.value})[0]
-        with ThreadPoolExecutor(max_workers=50) as pool:
-            answers = list(pool.map(stray, range(150)))
+        paths = aliases + ["/api/auth/login", "/api/auth/login/", "/API/AUTH/LOGIN"]
+        code, state = uuid.uuid4().hex, uuid.uuid4().hex
+        self.secret("query-code", code); self.secret("query-state", state)
+        def repeated(n):
+            path = paths[n % len(paths)]
+            query = urlencode({"code": code, "state": state})
+            browser = Browser(self.stack)
+            answer = browser.call("GET", path + "?" + query,
+                headers={"Cookie": cookies.get(path, ""), "Referer": self.stack.proxy + "/api/auth/callback?" + query})
+            if path not in aliases and answer[0] == 302:
+                self.secret("state", parse_qs(urlparse(answer[1]["Location"]).query)["state"][0])
+                self.secret("pending", browser.pending())
+            return path, answer
+        with ThreadPoolExecutor(max_workers=40) as pool:
+            answers = list(pool.map(repeated, range(480)))
         burst = [int(i) for i in psql('SELECT id FROM "AuditLog" WHERE action=\'auth.login\' AND target=\'\' AND id > '
                                       + str(floor) + ' ORDER BY id;')]
         type(self).failure_ids = list(self.failure_ids) + burst
-        self.assertIn(429, answers, "the login-flow zone refuses a burst beyond its allowance")
-        self.assertEqual(len(burst), answers.count(302), "only callbacks the proxy let through reach the record")
-        self.assertLess(len(burst), 150)
-        time.sleep(35)  # the zone refills (120 requests/min) before the next case logs in through the same proxy
+        for path in paths:
+            selected = [answer[0] for found, answer in answers if found == path]
+            self.assertIn(429, selected, "each accepted alias shares the rate zone: " + path)
+        admitted = sum(status == 302 for path, (status, _, _) in answers if path in aliases)
+        self.assertEqual(len(burst), admitted, "every admitted callback refusal has exactly one durable fact")
+        retry_targets = set()
+        origin = urlparse(self.stack.proxy)
+        for _, (status, headers, body) in answers:
+            self.assertIn(status, (302, 429))
+            if status == 429:
+                self.assertRegex(body, r"[가-힣]")
+                links = LinkTargets(); links.feed(body)
+                targets = [urlparse(urljoin(self.stack.proxy, target)) for target in links.targets]
+                fresh = [target for target in targets if target.path == "/worklist/hpacs-lite/index.html"]
+                self.assertTrue(fresh, "the refusal offers the fresh sign-in screen")
+                for target in fresh:
+                    self.assertEqual((target.scheme, target.netloc), (origin.scheme, origin.netloc))
+                    self.assertEqual((target.query, target.fragment), ("", ""), "retry never reuses code or state")
+                    retry_targets.add(target.geturl())
+                self.assertEqual(secret_hits([body], self.secrets), [], "the recovery page carries no generated secret")
+                self.assertIn("no-store", {part.strip().lower() for part in headers.get("Cache-Control", "").split(",")})
+                self.assertEqual(headers.get("X-Content-Type-Options"), "nosniff")
+                self.assertEqual(headers.get("Referrer-Policy"), "no-referrer")
+                self.assertEqual(headers.get("Strict-Transport-Security"), hsts)
+                self.assertIn("frame-ancestors", headers.get("Content-Security-Policy", ""))
+        for target in retry_targets:
+            self.assertEqual(Browser(self.stack).call("GET", target)[0], 200, "the offered retry screen is reachable")
+        self.assertEqual(secret_hits([self.proxy_log()], self.secrets), [], "raw operator output contains no generated secret kind")
+        print("B2_RATE_ALIASES " + json.dumps({"requests": len(answers), "callback_facts": len(burst),
+            "admitted_callbacks": admitted, "limited": sum(a[0] == 429 for _, a in answers), "secret_kind_hits": 0}))
+        time.sleep(125)  # isolate the next case after the full 240-request burst at two requests/second
 
     def test_09_bearer_logout_writes_nothing(self):
         actor = self.stack.actor("u5-admin-a")
@@ -814,6 +905,150 @@ class AuthAuditLive(unittest.TestCase):
         self.assertEqual(read_times, list(reversed(stored_times)), "console times are the stored event times")
         self.assertGreater(read_times[0], read_times[1], "console time order agrees with event order")
         self.check_rows("AL-13", rows)
+
+    def test_11c_ward_nat_relogin_and_operator_log_privacy(self):
+        """B2R3-05/08/09: 20 real synthetic doctors, two tabs each; DB and protected seal stay on the request path."""
+        names = ["ward%02d" % n for n in range(20)]
+        for name in names:
+            self.create_member(name, "A", ["radiologist"])
+        # Establish a real provider/product session for each doctor before the owned restart.
+        for name in names:
+            self.login(name)
+        restart = "owned provider sessions invalidated"
+        if os.environ.get("KIN_TEST_OWNED_AUTH_HTTP") == "1":
+            done = subprocess.run(["docker", "compose", "restart", "keycloak"], cwd=ROOT, capture_output=True, timeout=120)
+            self.assertEqual(done.returncode, 0, "owned Keycloak restart")
+            deadline = time.monotonic() + 180
+            while True:
+                try:
+                    if Browser(self.stack).call("GET", "/auth/realms/kin/.well-known/openid-configuration")[0] == 200:
+                        break
+                except Exception:
+                    pass
+                if time.monotonic() >= deadline:
+                    self.fail("owned provider did not become ready after restart")
+                time.sleep(1)
+            restart = "owned Keycloak restarted; owned sessions invalidated"
+        # Modern providers may persist sessions across restart. Explicitly end only these owned SSO sessions so every
+        # tested tab must complete the provider flow; no existing-product-session shortcut can count as a callback.
+        for name in names:
+            self.assertEqual(self.stack.kc_admin("POST", "/users/" + self.members[name]["id"] + "/logout").status, 204)
+        def successful_logins():
+            return {name: sum(row["action"] == "auth.login" and json.loads(row["detail"]).get("outcome") == "success"
+                              for row in self.rows_of(name)) for name in names}
+        def protected_logins():
+            subjects = {self.members[name]["id"]: name for name in names}
+            counts = {name: 0 for name in names}
+            for payload in psql("SELECT payload FROM emr_access.access_entry WHERE stream='viewing'"):
+                event = json.loads(payload).get("event", {})
+                subject = (event.get("userId", {}).get("value") or {}).get("subject")
+                if event.get("action") == "auth.login" and event.get("result") == "succeeded" and subject in subjects:
+                    counts[subjects[subject]] += 1
+            return counts
+        results = []
+        for sensitive in (False, True):
+            time.sleep(125)  # reset the shared IP budget between independently counted normal workloads
+            before, protected_before = successful_logins(), protected_logins()
+            def relogin(item):
+                name, tab = item
+                member, browser = self.members[name], Browser(self.stack)
+                if sensitive:
+                    status, _, body = browser.call("POST", "/api/auth/login",
+                        data=json.dumps({"intent": "reauthenticate", "reason": "storage_untrusted"}).encode(),
+                        headers={"Content-Type": "application/json", "X-KIN-CSRF": "1"})
+                    self.assertEqual(status, 200)
+                    location = json.loads(body)["location"]
+                else:
+                    status, headers, _ = browser.call("GET", "/api/auth/login")
+                    self.assertEqual(status, 302)
+                    location = headers["Location"]
+                completed = False
+                for _ in range(10):
+                    parsed = urlparse(location)
+                    query = parse_qs(parsed.query)
+                    for kind in ("code", "state"):
+                        for value in query.get(kind, []):
+                            self.secret(kind, value)
+                    self.secret("pending", browser.pending())
+                    status, headers, body = browser.call("GET", location)
+                    self.assertNotEqual(status, 429, "normal ward request was limited")
+                    if status == 200:
+                        form = re.search(r'<form[^>]+action="([^"]+)"', body, re.I)
+                        self.assertIsNotNone(form, "owned provider credential form")
+                        status, headers, _ = browser.call("POST", html.unescape(form.group(1)),
+                            data=urlencode({"username": member["username"], "password": member["password"], "credentialId": ""}).encode(),
+                            headers={"Content-Type": "application/x-www-form-urlencoded"})
+                    self.assertEqual(status, 302)
+                    location = headers.get("Location", "")
+                    if urlparse(location).path == "/worklist/hpacs-lite/main.html":
+                        completed = True
+                        break
+                self.assertTrue(completed, "bounded automatic restart reaches the worklist")
+                self.assertIsNotNone(browser.sid())
+                self.secret("sid", browser.sid())
+                proof = unquote(urlparse(location).fragment.partition("kin-entry=")[2])
+                self.assertTrue(proof, "the worklist receives its one-use entry proof")
+                self.secret("proof", proof)
+                status, _, me = browser.call("GET", "/api/me")
+                self.assertEqual(status, 200)
+                browser.session = json.loads(me).get("sessionId")
+                self.assertTrue(browser.session)
+                self.assertEqual(browser.call("POST", "/api/auth/entry", data=json.dumps({"proof": proof}).encode(),
+                    headers={"Content-Type": "application/json", "X-KIN-CSRF": "1"})[0], 200)
+                return browser.calls
+            with ThreadPoolExecutor(max_workers=40) as pool:
+                calls = [call for tab_calls in pool.map(relogin, [(name, tab) for name in names for tab in range(2)]) for call in tab_calls]
+            auth = [(path, status) for path, status in calls if path.lower().rstrip("/") in ("/api/auth/login", "/api/auth/callback")]
+            bff = [(path, status) for path, status in calls if path.lower().startswith("/api/")]
+            starts = sum(path == "/api/auth/login" for path, _ in auth)
+            callbacks = sum(path == "/api/auth/callback" for path, _ in auth)
+            entries = sum(path == "/api/auth/entry" and status == 200 for path, status in bff)
+            after, protected_after = successful_logins(), protected_logins()
+            by_doctor = {name: after[name] - before[name] for name in names}
+            protected_by_doctor = {name: protected_after[name] - protected_before[name] for name in names}
+            self.assertEqual(starts, 40); self.assertGreaterEqual(callbacks, 40)
+            self.assertEqual(by_doctor, {name: 2 for name in names}, "two successful sign-in projections per doctor")
+            self.assertEqual(protected_by_doctor, by_doctor, "each sign-in projection has its protected original")
+            self.assertEqual(entries, 40, "all forty tabs complete automatic worklist entry")
+            self.assertEqual(sum(status == 429 for _, status in bff), 0)
+            if sensitive:
+                self.assertGreater(callbacks, 40, "silent SSO probe callbacks and automatic restarts were actually counted")
+            result = {"doctors": 20, "tabs_per_doctor": 2, "concurrency": 40, "starts": starts, "callbacks": callbacks,
+                "automatic_extra_callbacks": callbacks - 40, "login_callback_requests": len(auth),
+                "bff_requests": len(bff), "all_http_requests": len(calls), "worklist_entries": entries, "limited": 0,
+                "recorded_signins": sum(by_doctor.values()), "protected_signin_facts": sum(protected_by_doctor.values()),
+                "signins_per_doctor": 2, "unrecorded_signins": 0, "database": True, "seal": True,
+                "scenario": "silent SSO restart" if sensitive else "relogin", "provider_reset": restart}
+            results.append(result)
+            print("B2_NAT_CAPACITY " + json.dumps(result))
+        # Compare freshly generated tokens too, in memory only. Fixture evidence redaction cannot satisfy this check.
+        for name in names:
+            rows = psql('SELECT "accessToken" || E\'\\t\' || "refreshToken" FROM "AuthSession" WHERE sub=\''
+                        + self.members[name]["id"] + '\';')
+            for row in rows:
+                access, refresh = row.split("\t", 1)
+                self.secret("access", access); self.secret("refresh", refresh)
+        # Inspect original bytes before evidence redaction, including an oversized request with a generated query and
+        # Referer. Its HTTP error metadata must survive without either value.
+        secret = uuid.uuid4().hex
+        self.secret("operator-query", secret)
+        browser = Browser(self.stack)
+        browser.call("POST", "/api/auth/login?secret=" + secret, data=b"x" * (2 * 1024 * 1024 + 1),
+                     headers={"Referer": self.stack.proxy + "/?token=" + secret})
+        done = subprocess.run(["docker", "compose", "logs", "--no-color", "--no-log-prefix"], cwd=ROOT,
+                              capture_output=True, timeout=60)
+        self.assertEqual(done.returncode, 0)
+        operators = (done.stdout + done.stderr).decode("utf-8", "replace")
+        ledger = psql('SELECT payload FROM emr_access.access_entry')
+        hits = secret_hits([operators, *ledger], self.secrets)
+        self.assertEqual(hits, [], "generated secret kinds in raw ledger/operator output")
+        metadata = [json.loads(line) for line in self.proxy_log().splitlines() if line.startswith('{')]
+        self.assertTrue(any(row.get("status") == 413 for row in metadata), "HTTP failure metadata remains observable")
+        self.assertTrue(all({"at", "remote", "method", "path", "status", "seconds", "upstream_status", "limit"} <= row.keys() for row in metadata))
+        auth_metadata = [row for row in metadata if row["path"].lower().rstrip("/") in ("/api/auth/login", "/api/auth/callback")]
+        self.assertEqual({row["remote"] for row in auth_metadata}, {self.expected_ip}, "the ward flows really share one proxy-observed address")
+        print("B2_OPERATOR_PRIVACY " + json.dumps({"secret_kind_hits": hits, "raw_logs": True, "posthoc_redaction": False,
+                                                   "nat_scenarios": len(results), "nat_addresses": 1, "access_metadata": True}))
 
     def test_12_cleanup_leaves_no_owned_row_or_session(self):
         type(self).purge_owned_rows()

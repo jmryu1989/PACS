@@ -13,7 +13,9 @@ FROM nginx:1.27-alpine
 # 자체 서명 인증서를 컨테이너가 직접 만든다.
 # **개인키를 저장소에 커밋하지 않기 위해서다.** 공개 저장소에 키가 한 번 올라가면
 # 히스토리에서 지워도 이미 나간 것이다.
-RUN apk add --no-cache openssl
+# The template owns the sole HTTP access format; a second inherited combined log would retain OIDC queries.
+RUN apk add --no-cache openssl \
+ && sed -i '/^[[:space:]]*access_log[[:space:]]/d' /etc/nginx/nginx.conf
 
 COPY nginx.conf.template /etc/nginx/templates/default.conf.template
 COPY 10-selfsigned.sh /docker-entrypoint.d/10-selfsigned.sh

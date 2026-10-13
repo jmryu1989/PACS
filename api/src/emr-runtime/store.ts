@@ -215,7 +215,7 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
       }
       let stored: StoredEntry | null;
       try { stored = await this.sql.entryForEvent(provisional.stream, appended.eventId); } catch {
-        this.note(appended.eventId, 'ledger-unavailable', 'commit-unknown', provisional.attemptId, provisional.stream);
+        this.note(JSON.parse(provisional.payload).event, 'ledger-unavailable', 'commit-unknown', provisional.attemptId, provisional.stream);
         throw new LedgerFailure('CommitUnknown');
       }
       if (!stored) {
@@ -229,7 +229,7 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
         if (sealError) throw sealError;
         sealed = covered ?? await this.seal.advance(provisional.stream, { sequence: stored.sequence, hash: stored.hash }); } catch (error) {
         // Committed but not sealed: no receipt. The same event resent, or the next start, seals it; nothing is appended twice.
-        this.note(appended.eventId, 'ledger-unavailable', 'seal-unavailable', provisional.attemptId, provisional.stream);
+        this.note(JSON.parse(provisional.payload).event, 'ledger-unavailable', 'seal-unavailable', provisional.attemptId, provisional.stream);
         throw error instanceof SealRefused && error.code !== 'SealUnavailable' ? error : new LedgerFailure('SealUnavailable');
       }
       if (provisional.stream === 'viewing') receipt = mintDurableReceipt(stored, sealed.streams.viewing);
@@ -268,7 +268,7 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
     if (rolledBack) {
       const eventId = canonicalPayload(input, served, streams[0]).event.eventId;
       const cause = error instanceof SealRefused ? 'seal-unavailable' : ledgerErrorCode(error) || error instanceof ContractError ? 'ledger-refused' : isConnectionError(error) ? 'ledger-unreachable' : 'business-rollback';
-      this.note(eventId, 'append-rolled-back', cause, attempt?.attemptId);
+      this.note(input, 'append-rolled-back', cause, attempt?.attemptId);
       if (attempt) for (const stream of attempt.streams) this.seal.abort(stream, attempt.attemptId);
       return;
     }
@@ -281,10 +281,10 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
       if (stored === undefined || (stored && stored.contentSha256 === contentSha256)) unknown = true;
       else if (stored) other = true;
     }
-    if (unknown) { this.note(eventId, 'ledger-unavailable', 'commit-unknown', attempt?.attemptId); return; }
-    if (other) { this.note(eventId, 'append-rolled-back', 'ledger-refused', attempt?.attemptId); return; }
+    if (unknown) { this.note(input, 'ledger-unavailable', 'commit-unknown', attempt?.attemptId); return; }
+    if (other) { this.note(input, 'append-rolled-back', 'ledger-refused', attempt?.attemptId); return; }
     // The caller may have lost COMMIT's response. Only startup's global writer fence decides absence.
-    this.note(eventId, 'ledger-unavailable', 'commit-unknown', attempt?.attemptId);
+    this.note(input, 'ledger-unavailable', 'commit-unknown', attempt?.attemptId);
   }
 
   /** A caller that observed its callback reject can settle exactly that transaction's own attempt.
@@ -301,10 +301,12 @@ export class AccessLedgerStore implements AppendOnlyAccessStore {
     }
   }
 
-  private note(eventId: string, kind: 'append-rolled-back' | 'ledger-unavailable', cause: string, attemptId = `unassigned:${eventId}`, stream: AccessStream | 'transaction' = 'transaction'): void {
-    // The observation is already durable outside this transaction and remains pending until receipt. In particular,
-    // retries of an anonymous refusal must not spill unlimited settlement notes into the business recovery journal.
-    if (this.journal.hasAuthenticationObservation(eventId)) return;
+  private note(event: AccessEvent, kind: 'append-rolled-back' | 'ledger-unavailable', cause: string, attemptId = `unassigned:${event.eventId}`, stream: AccessStream | 'transaction' = 'transaction'): void {
+    // The producer persists a failed sign-in observation before attempting the ledger. Its retention class belongs to
+    // the event, not to the spool index: another instance may have completed and compacted the pair while this attempt
+    // was waiting. The original error still propagates; only a durable receipt can complete a pending observation.
+    if (event.formatVersion === 2 && event.branch === 'online-auth' && event.action === 'auth.login' && event.result !== 'succeeded') return;
+    const eventId = event.eventId;
     try { this.journal.record(`${kind}:${stream}:${attemptId}:${cause}`, kind, { eventId, cause }); }
     catch (error) {
       // Without the journal there is no surviving record of this failure: surface that, never a success.

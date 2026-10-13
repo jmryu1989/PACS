@@ -495,8 +495,8 @@ const summary = rows => rows.map(r => [r.action, r.detail.cause ?? r.detail.outc
 // ── a world: one empty database state, a fresh fake Keycloak state, two service instances ──
 
 const { AuthService, AuthEventLedger } = require('/app/dist/auth.service');
-// The declared per-account limit of unrecovered refusals in the member spool (B2R2-01), as the product exports it.
-const { MEMBER_PENDING_PER_IDENTITY: MEMBER_PENDING_LIMIT } = require('/app/dist/emr-runtime/auth-failure-spool');
+// Approved requirement, independent of the implementation (B2R3-03 / D73): the seventeenth pending refusal is refused.
+const MEMBER_PENDING_LIMIT = 16;
 const { KeycloakService } = require('/app/dist/keycloak.service');
 const { AuthGuard } = require('/app/dist/auth.guard');
 const { AuthController } = require('/app/dist/auth.controller');
@@ -1016,7 +1016,12 @@ test('L09 auth login and entry commit with one projection each; failed storage g
     assert.ok(performance.now() - started < 1000, 'a hanging resolver delays an end by a bounded wait only');
     const ended = (await protectedAuthRows(w)).filter(r => r.event.action === 'auth.logout').at(-1);
     assert.deepEqual(ended.event.trustedProxyIp.value, { address: IP, source: 'trusted-proxy' }, 'the recently verified proxy stays observed');
-    // The hung lookup never answers. Once the verified answer is too old to keep, a working resolver must be asked again.
+    // A recent answer is usable during an outage, but never beyond its approved 60-second lifetime (AR11).
+    w.tick(61_000);
+    const stale = await peerLogin(warm, 'dns-expired', '127.0.0.1');
+    assert.equal(stale.location, landing('login_failed'), 'an expired address is not trusted while DNS still hangs');
+    assert.equal(stale.newSid, null);
+    // The hung lookup never answers. A working resolver must be asked again.
     dns.lookup = resolve('127.0.0.1');
     w.tick(61_000);
     assert.equal((await peerLogin(warm, 'dns-recovered', '127.0.0.1')).cookie, 'S', 'a hung lookup is replaced, not waited on forever');
@@ -1297,6 +1302,8 @@ test('L16 a failed authentication observation survives rollback and recovers und
   await w.I1.ledger.recoverFailures();
   assert.equal((await protectedAuthRows(w)).length, 1); assert.equal(await w.sessions(), 0);
   assert.deepEqual(secretHits(recovered.map(r => r.payload), w.secrets), []);
+  // Startup recovery is complete. Stop its scheduled tasks before driving the recovery method at explicit barriers.
+  w.I2.service.onModuleDestroy();
   // B2R-05: a stray callback must not absorb the eventual failure of the live flow whose cookie accompanied it.
   const flow = await w.call(w.I1, 'login');
   await w.call(w.I1, 'callback', { cookie: flow.pendingCookie, query: { state: 'stray', code: 'stray' } });
@@ -1313,6 +1320,80 @@ test('L16 a failed authentication observation survives rollback and recovers und
   assert.equal(spool.pending.length, 0, 'every anonymous observation is completed in its spool');
   assert.ok(spool.rows.filter(row => row.kind === 'auth-failure-recovered').length >= 9);
   assert.equal(businessJournalBytes(), business, 'B1 recovery journal unchanged by anonymous refusals and their recovery');
+  // B2R3-07: the real producer, PostgreSQL transaction and protected seal overlap with recovery. Hold the later
+  // transaction at the database boundary, complete/compact the first, then fail the late append or receipt read.
+  const journal = w.I1.ledger.store.journal;
+  const ingress = () => ({ surface: 'GET auth/callback', requestId: randomUUID(), address: { status: 'unresolved', reason: 'not-observed' } });
+  for (const separate of [false, true]) for (const boundary of ['append', 'connection', 'receipt']) {
+    const first = w.I1.ledger, second = separate ? w.I2.ledger : first;
+    const eventId = randomUUID(), firstReady = deferred(), firstRelease = deferred(), lateReady = deferred(), lateRelease = deferred();
+    const originalFirst = first.transaction.bind(first), originalSecond = second.transaction.bind(second);
+    let calls = 0;
+    first.transaction = async (...args) => {
+      if (++calls === 1) { firstReady.resolve(); await firstRelease.promise; }
+      else if (!separate && calls === 2) { lateReady.resolve(); await lateRelease.promise; }
+      return originalFirst(...args);
+    };
+    if (separate) second.transaction = async (...args) => { lateReady.resolve(); await lateRelease.promise; return originalSecond(...args); };
+    const request = first.failure(ingress(), 'state_mismatch', null, eventId);
+    await firstReady.promise;
+    const recovery = second.recoverFailures().then(() => ({ ok: true }), error => ({ error }));
+    await lateReady.promise; firstRelease.resolve(); await request;
+    // Only real ledger-confirmed filler is compactable: no synthetic completion of an unrecorded event.
+    for (let n = 0; journal.hasAuthenticationObservation(eventId) && n < 2000; n++)
+      await first.failure(ingress(), 'state_mismatch', null, randomUUID());
+    assert.equal(journal.hasAuthenticationObservation(eventId), false, 'the completed observation really left the spool');
+    const b1Before = businessJournalBytes(), store = second.store;
+    const find = store.eventInTransaction.bind(store), append = store.appendRow.bind(store), read = store.sql.entryForEvent.bind(store.sql);
+    const unavailable = () => { throw Object.assign(new Error('synthetic late connection refusal'), { code: 'P1001' }); };
+    if (boundary === 'connection') store.eventInTransaction = async (tx, id) => id === eventId ? unavailable() : find(tx, id);
+    if (boundary === 'append') store.appendRow = async (tx, stream, id, ...args) => id === eventId ? unavailable() : append(tx, stream, id, ...args);
+    if (boundary === 'receipt') store.sql.entryForEvent = async (stream, id) => id === eventId ? unavailable() : read(stream, id);
+    try {
+      lateRelease.resolve(); const answer = await recovery;
+      assert(answer.error, 'late ledger/receipt failure must propagate, never become success');
+      assert.equal(businessJournalBytes(), b1Before, 'late authentication settlement consumes zero B1 bytes');
+      const rows = (await protectedAuthRows(w)).filter(row => row.event.eventId === eventId);
+      assert.equal(rows.length, 1, 'one event and one legacy projection after overlapping recovery');
+      assert.equal(journal.pendingAuthentication().length, 0, 'the successful side already supplied a durable receipt');
+    } finally {
+      lateRelease.resolve(); first.transaction = originalFirst; second.transaction = originalSecond;
+      store.eventInTransaction = find; store.appendRow = append; store.sql.entryForEvent = read;
+    }
+  }
+  // Neither attempt gets a receipt: the observation remains, including after a separate instance prepares again.
+  const pendingId = randomUUID();
+  w.fault('I1', 'tx.ledger', Object.assign(new Error('synthetic ledger refusal'), { code: 'P1001' }));
+  await assert.rejects(w.I1.ledger.failure(ingress(), 'state_mismatch', null, pendingId));
+  assert(journal.pendingAuthentication().some(row => row.id === 'auth-failure:' + pendingId));
+  const restarted = await w.instance('pending-reload'); await restarted.ledger.recoverFailures();
+  assert.equal(journal.pendingAuthentication().length, 0);
+  assert.equal((await protectedAuthRows(w)).filter(row => row.event.eventId === pendingId).length, 1);
+  // A committed row without its external receipt must also keep the original observation for recovery.
+  const receiptId = randomUUID(), receiptOpenR11 = fs.openSync, beforeReceipt = businessJournalBytes();
+  const beforeReceiptNotes = new Set(journal.all().map(row => row.id));
+  let receiptCuts = 0;
+  fs.openSync = (file, flags, ...args) => {
+    if (String(file) === process.env.KIN_EMR_STATE_DIR + '/seal/tail.json' && flags === 'r+') {
+      receiptCuts++; throw Object.assign(new Error('synthetic failure receipt refusal'), { code: 'EROFS' });
+    }
+    return receiptOpenR11(file, flags, ...args);
+  };
+  try { await assert.rejects(w.I1.ledger.failure(ingress(), 'state_mismatch', null, receiptId)); }
+  finally { fs.openSync = receiptOpenR11; }
+  assert(receiptCuts > 0, 'the actual external receipt publication was refused');
+  assert(journal.pendingAuthentication().some(row => row.id === 'auth-failure:' + receiptId));
+  assert.equal((await protectedAuthRows(w)).filter(row => row.event.eventId === receiptId).length, 1);
+  assert.equal(businessJournalBytes(), beforeReceipt, 'an unsealed failure stays in its authentication recovery class');
+  const receiptRecovery = await w.instance('failure-receipt-reload'); await receiptRecovery.ledger.recoverFailures();
+  assert.equal(journal.pendingAuthentication().length, 0);
+  assert.equal((await protectedAuthRows(w)).filter(row => row.event.eventId === receiptId).length, 1, 'receipt recovery creates no second fact');
+  const recoveredSealNotes = journal.all().filter(row => !beforeReceiptNotes.has(row.id));
+  assert(recoveredSealNotes.every(row => row.kind === 'seal-recovered'), 'startup may retain B1 seal recovery facts, never authentication settlement notes');
+  journal.record('b2-r11-business:' + randomUUID(), 'ledger-unavailable', { eventId: randomUUID(), cause: 'ledger-unreachable' });
+  assert(journal.all().some(row => row.id.startsWith('b2-r11-business:')), 'B1 still accepts its own records');
+  console.log('B2_OVERLAP ' + JSON.stringify({ interleavings: 6, database: true, seal: true, overlap_b1_growth: 0,
+    pending_recovered: 2, separate_receipt_restart_b1_seal_facts: recoveredSealNotes.length }));
   await w.finish('L16');
 });
 const atProvider = out => typeof out.location === 'string' && out.location.startsWith(ISSUER + '/protocol/openid-connect/auth?');

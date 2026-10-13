@@ -5,7 +5,7 @@ import { freeze, refuse, string, utc } from '../emr-contract/validation';
 import { parseAuthFailureObservation } from './contract';
 import {
   JournalKind, JournalRecord, JournalUnavailable, RECORD_MAX_BYTES, journalLine, parseBody, parseJournalLine,
-  protectedDirectory, quarantineTornTail,
+  protectedDirectory, quarantineTornTail, syncDirectory,
 } from './journal-file';
 
 /**
@@ -75,12 +75,31 @@ export class AuthFailureSpool {
       this.index(freeze(record));
     }
     if (this.tornBytes) quarantineTornTail(this.file, raw, goodLength);
+    // Only the fenced owner constructs a spool. Before rename the authoritative file still contains every admitted
+    // observation; after rename the temporary name is gone. A partial swap file can therefore never be its sole copy.
+    // Reconcile it after validating the authoritative file, so corruption never causes evidence to be discarded.
+    let removedSwap = false;
+    for (const name of fs.readdirSync(this.directory).filter(n => n.startsWith('failure-journal.jsonl.tmp-'))) {
+      const temporary = path.join(this.directory, name), info = fs.lstatSync(temporary);
+      if (!/^failure-journal\.jsonl\.tmp-[0-9a-f]{16}$/.test(name) || !info.isFile() || info.isSymbolicLink() ||
+          !fs.existsSync(this.file)) throw new JournalUnavailable('FailureJournalCorrupt');
+      fs.unlinkSync(temporary); removedSwap = true;
+    }
+    if (removedSwap) syncDirectory(this.directory);
     for (const name of fs.readdirSync(this.directory).filter(n => n.startsWith('torn-'))) {
       const info = fs.lstatSync(path.join(this.directory, name));
       if (!info.isFile() || info.isSymbolicLink()) throw new JournalUnavailable('FailureJournalCorrupt');
       this.archiveBytes += info.size;
     }
     this.bytes = goodLength + this.archiveBytes;
+    // A prior owner may have died after append but before file/directory durability. A readable replay is not a
+    // durable receipt yet: publish both barriers once on ownership acquisition, before any idempotent reply.
+    if (fs.existsSync(this.file)) {
+      let fd: number | undefined;
+      try { fd = fs.openSync(this.file, 'r+'); fs.fdatasyncSync(fd); syncDirectory(this.directory); }
+      catch { throw new JournalUnavailable('FailureJournalUnavailable'); }
+      finally { if (fd !== undefined) fs.closeSync(fd); }
+    }
   }
 
   private index(record: Readonly<JournalRecord>): void {

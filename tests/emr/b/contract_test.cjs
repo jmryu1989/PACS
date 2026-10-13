@@ -16,13 +16,241 @@ const path = require('node:path');
 const os = require('node:os');
 const { createHash, randomUUID } = require('node:crypto');
 
-if (process.argv.includes('--emr-b-live')) {
+if (process.argv.includes('--emr-b-spool-child')) {
+  Promise.resolve().then(spoolChild).catch(error => { process.stderr.write(String(error.code || error.name) + '\n'); process.exit(79); });
+} else if (process.argv.includes('--emr-b-live')) {
   // A 48-viewer read-back can exceed the pipe's single-write capacity. Exit only
   // after the complete JSON line drains, retaining every row for the assertions.
   const send = result => process.stdout.write('EMR_B_RESULT ' + JSON.stringify(result) + '\n', () => process.exit(0));
   liveDriver().then(send, error => send({ error: errorCode(error), name: error?.name ?? null, problems: error?.problems ?? null }));
 } else {
   contractSuite();
+}
+
+// B2R3-02/04 -> REQ-EMR-06/19 -> RISK-EMR-RECOVERY-LOSS. Faults are at the OS boundary;
+// assertions concern durable replies and preserved observations, not private spool fields or source strings.
+function spoolObservation() {
+  return { eventId: randomUUID(), auditLinkId: 'audit:' + randomUUID(), at: new Date().toISOString(),
+    requestId: randomUUID(), managingInstitution: 'synthetic-spool', address: unresolved('not-observed'),
+    who: null, rights: null, failure: 'provider-error' };
+}
+function spoolPut(spool, observation) {
+  return spool.record('auth-failure:' + observation.eventId, 'auth-failure-observed',
+    { observation: JSON.stringify(observation) }, observation.at);
+}
+async function spoolChild() {
+  const [modules, directory, mode, cut] = process.argv.slice(process.argv.indexOf('--emr-b-spool-child') + 1);
+  const { AuthFailureSpool } = require(path.join(modules, 'emr-runtime/auth-failure-spool.js'));
+  const open = fs.promises.open, rename = fs.promises.rename;
+  let release;
+  const barrier = new Promise(resolve => { release = resolve; });
+  process.on('message', message => { if (message === 'release') release(); });
+  const stop = async point => {
+    if (mode === 'crash' && point === cut) process.exit(77);
+    if (['ipc', 'ipc-refusal'].includes(mode) && point === 'append-sync') {
+      process.send('barrier'); await barrier;
+      if (mode === 'ipc-refusal') throw Object.assign(new Error('synthetic owner IO refusal'), { code: 'EIO' });
+    }
+    if (mode === 'ipc-death' && point === 'append-sync') process.exit(77);
+  };
+  fs.promises.open = async (file, ...args) => {
+    const handle = await open(file, ...args), name = String(file);
+    for (const [method, point] of [['appendFile', 'append'], ['datasync', 'append-sync'],
+      ['writeFile', 'swap-write'], ['sync', name.includes('.tmp-') ? 'swap-sync' : 'directory-sync']]) {
+      const original = handle[method].bind(handle);
+      handle[method] = async (...values) => { const result = await original(...values); await stop(point); return result; };
+    }
+    return handle;
+  };
+  fs.promises.rename = async (...args) => { const result = await rename(...args); await stop('rename'); return result; };
+  if (mode.startsWith('ipc')) {
+    const { StateCoordinator } = require(path.join(modules, 'emr-runtime/coordinator.js'));
+    new StateCoordinator(directory);
+    process.send('ready');
+  } else {
+    const spool = new AuthFailureSpool(directory, 'anonymous');
+    // Actual admitted/completed observations refill the file after each interrupted compaction.
+    for (let i = 0; i < 3000; i++) {
+      const observation = spoolObservation();
+      await spoolPut(spool, observation);
+      await spool.record('auth-failure-recovered:' + observation.eventId, 'auth-failure-recovered', { eventId: observation.eventId });
+    }
+    process.exit(78); // a requested OS cut was not reached
+  }
+}
+
+async function spoolDurabilityContract(ts, api, options) {
+  const assert = require('node:assert/strict'), cp = require('node:child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'b2-spool-io-'));
+  const modules = path.join(root, 'modules');
+  for (const area of ['emr-runtime', 'emr-contract']) {
+    fs.mkdirSync(path.join(modules, area), { recursive: true });
+    for (const name of fs.readdirSync(path.join(api, 'src', area)).filter(n => n.endsWith('.ts'))) {
+      const source = path.join(api, 'src', area, name);
+      fs.writeFileSync(path.join(modules, area, name.replace(/\.ts$/, '.js')),
+        ts.transpileModule(fs.readFileSync(source, 'utf8'), { compilerOptions: options, fileName: source }).outputText);
+    }
+  }
+  const { AuthFailureSpool } = require(path.join(modules, 'emr-runtime/auth-failure-spool.js'));
+  const { journalLine } = require(path.join(modules, 'emr-runtime/journal-file.js'));
+  const make = name => { const dir = path.join(root, name); fs.mkdirSync(dir, { mode: 0o700 }); return dir; };
+  const pending = spoolObservation();
+  const observed = observation => ({ id: 'auth-failure:' + observation.eventId, kind: 'auth-failure-observed',
+    at: observation.at, body: { observation: JSON.stringify(observation) } });
+  const seed = directory => {
+    const folder = path.join(directory, 'anonymous-failures'); fs.mkdirSync(folder, { mode: 0o700 });
+    const chunks = [journalLine(observed(pending))]; let length = Buffer.byteLength(chunks[0]);
+    while (length < 1024 * 1024 - 2500) {
+      const o = spoolObservation();
+      const pair = journalLine(observed(o)) + journalLine({ id: 'auth-failure-recovered:' + o.eventId,
+        kind: 'auth-failure-recovered', at: o.at, body: { eventId: o.eventId } });
+      chunks.push(pair); length += Buffer.byteLength(pair);
+    }
+    fs.writeFileSync(path.join(folder, 'failure-journal.jsonl'), chunks.join(''), { mode: 0o600 });
+  };
+  const totalBytes = directory => fs.readdirSync(path.join(directory, 'anonymous-failures'))
+    .reduce((sum, name) => sum + fs.statSync(path.join(directory, 'anonymous-failures', name)).size, 0);
+  const turn = () => new Promise(resolve => setTimeout(resolve, 20));
+  try {
+    for (const point of ['append', 'append-sync', 'create-directory', 'swap-write', 'swap-sync', 'rename', 'swap-directory']) {
+      for (const refuse of [false, true]) {
+        const directory = make(point + '-' + refuse), compact = point.startsWith('swap') || point === 'rename';
+        if (compact) seed(directory);
+        const spool = new AuthFailureSpool(directory, 'anonymous'), o = spoolObservation();
+        const open = fs.promises.open, rename = fs.promises.rename;
+        let entered, release, reached = false, settled = false;
+        const arrival = new Promise(resolve => { entered = resolve; }), barrier = new Promise(resolve => { release = resolve; });
+        const intercept = async name => {
+          if (name !== point) return;
+          reached = true; entered(); await barrier;
+          if (refuse) throw Object.assign(new Error('synthetic OS write refusal'), { code: 'EIO' });
+        };
+        fs.promises.open = async (file, ...args) => {
+          const handle = await open(file, ...args), name = String(file);
+          const methods = [['appendFile', 'append'], ['datasync', 'append-sync'], ['writeFile', 'swap-write'],
+            ['sync', name.includes('.tmp-') ? 'swap-sync' : compact ? 'swap-directory' : 'create-directory']];
+          for (const [method, name] of methods) {
+            const original = handle[method].bind(handle);
+            handle[method] = async (...values) => { await intercept(name); return original(...values); };
+          }
+          return handle;
+        };
+        fs.promises.rename = async (...args) => { await intercept('rename'); return rename(...args); };
+        const work = spoolPut(spool, o).finally(() => { settled = true; });
+        // Attach rejection handlers before injecting a refusal, including queued same-ID followers.
+        const result = work.then(value => ({ value }), error => ({ error }));
+        let follower, later;
+        try {
+          await Promise.race([arrival, result.then(() => assert.fail(point + ': response before required durable barrier'))]);
+          await turn(); assert.equal(settled, false, point + ': no reply before durability');
+          follower = spoolPut(spool, o).then(value => ({ value }), error => ({ error }));
+          later = spoolPut(spool, spoolObservation()).then(value => ({ value }), error => ({ error }));
+          release();
+          const replies = await Promise.all([result, follower, later]);
+          assert(reached);
+          if (refuse) {
+            assert(replies.every(r => r.error?.code === 'FailureJournalUnavailable'), point + ': every waiter is rejected');
+            fs.promises.open = open; fs.promises.rename = rename;
+            await assert.rejects(spoolPut(spool, spoolObservation()), { code: 'FailureJournalUnavailable' });
+          } else {
+            assert(replies.every(r => r.value), point + ': all admitted records have durable responses');
+            const cold = new AuthFailureSpool(directory, 'anonymous');
+            assert(cold.find('auth-failure:' + o.eventId), point + ': acknowledged observation survives cold reload');
+            await assert.rejects(spoolPut(spool, { ...o, failure: 'state-mismatch' }), { code: 'FailureJournalConflict' });
+            assert.equal((await spoolPut(spool, o)).id, 'auth-failure:' + o.eventId, 'same key and body is idempotent');
+          }
+        } finally {
+          release(); fs.promises.open = open; fs.promises.rename = rename;
+          await result; if (follower) await follower; if (later) await later;
+        }
+      }
+    }
+    for (const method of ['fdatasyncSync', 'fsyncSync']) {
+      const directory = make('cold-' + method), spool = new AuthFailureSpool(directory, 'anonymous'), o = spoolObservation();
+      await spoolPut(spool, o); const original = fs.readFileSync(spool.file), sync = fs[method];
+      let called = false;
+      fs[method] = () => { called = true; throw Object.assign(new Error('synthetic cold durability refusal'), { code: 'EIO' }); };
+      try { assert.throws(() => new AuthFailureSpool(directory, 'anonymous'), { code: 'FailureJournalUnavailable' }); }
+      finally { fs[method] = sync; }
+      assert(called, 'cold ownership must publish the replay durability barrier');
+      assert(fs.readFileSync(spool.file).equals(original), 'cold refusal preserves every original byte');
+      const cold = new AuthFailureSpool(directory, 'anonymous');
+      assert.equal((await spoolPut(cold, o)).id, 'auth-failure:' + o.eventId, 'replay succeeds after durability is available');
+    }
+    for (const corruption of ['digest', 'schema', 'torn']) {
+      const directory = make(corruption), spool = new AuthFailureSpool(directory, 'anonymous'), o = spoolObservation();
+      await spoolPut(spool, o);
+      const file = spool.file, original = fs.readFileSync(file);
+      if (corruption === 'torn') {
+        const torn = Buffer.from('{"interrupted":"original bytes'); fs.appendFileSync(file, torn);
+        const cold = new AuthFailureSpool(directory, 'anonymous');
+        assert(cold.find('auth-failure:' + o.eventId));
+        const archives = fs.readdirSync(path.dirname(file)).filter(n => n.startsWith('torn-'));
+        assert.equal(archives.length, 1); assert(fs.readFileSync(path.join(path.dirname(file), archives[0])).equals(torn));
+        assert(fs.readFileSync(file).equals(original), 'torn bytes are archived, never accepted as an observation');
+      } else {
+        const row = JSON.parse(original.toString());
+        if (corruption === 'digest') row.sha256 = '0'.repeat(64);
+        else { row.body.extra = 'unexpected'; row.sha256 = createHash('sha256').update(JSON.stringify({ id: row.id, kind: row.kind, at: row.at, body: row.body })).digest('hex'); }
+        fs.writeFileSync(file, JSON.stringify(row) + '\n'); const damaged = fs.readFileSync(file);
+        for (let n = 0; n < 2; n++) assert.throws(() => new AuthFailureSpool(directory, 'anonymous'), { code: 'FailureJournalCorrupt' });
+        assert(fs.readFileSync(file).equals(damaged), 'corrupt complete original is preserved unchanged');
+      }
+    }
+    if (process.platform !== 'linux') throw new Error('C11 OS process/restart contract requires Linux');
+    for (const cut of ['swap-write', 'swap-sync', 'rename', 'directory-sync', 'append', 'append-sync']) {
+      const directory = make('crash-' + cut); seed(directory);
+      for (let restart = 0; restart < 4; restart++) {
+        const child = cp.spawnSync(process.execPath, [__filename, '--emr-b-spool-child', modules, directory, 'crash', cut],
+          { encoding: 'utf8', timeout: 120000 });
+        assert.equal(child.status, 77, cut + ': termination point reached: ' + child.stderr);
+        // The only transient swap is at most another spool. Once recovered there is no swap allowance in use.
+        assert(totalBytes(directory) <= 2 * 1024 * 1024, 'cap plus one 1 MiB atomic replacement margin');
+        const cold = new AuthFailureSpool(directory, 'anonymous');
+        assert(cold.find('auth-failure:' + pending.eventId), 'pending original survives every restart');
+        assert.equal(fs.readdirSync(path.dirname(cold.file)).filter(n => n.includes('.tmp-')).length, 0, 'no orphan swap survives restart');
+        assert(totalBytes(directory) <= 1024 * 1024, 'real files after restart fit the approved cap');
+      }
+    }
+    const { StateCoordinator } = require(path.join(modules, 'emr-runtime/coordinator.js'));
+    for (const mode of ['ipc', 'ipc-refusal', 'ipc-death']) {
+      const directory = make(mode), o = spoolObservation();
+      const child = cp.fork(__filename, ['--emr-b-spool-child', modules, directory, mode], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+      const messages = [], awaitMessage = wanted => new Promise((resolve, reject) => {
+        if (messages.includes(wanted)) return resolve();
+        const timer = setTimeout(() => reject(new Error('IPC boundary not reached: ' + wanted)), 10000);
+        const receive = message => { if (message === wanted) { clearTimeout(timer); child.off('message', receive); resolve(); } };
+        child.on('message', receive);
+      });
+      child.on('message', message => messages.push(message));
+      try {
+        await awaitMessage('ready');
+        const peer = new StateCoordinator(directory);
+        let settled = false;
+        const work = peer.callAsync('auth-failure-observe', { id: 'auth-failure:' + o.eventId,
+          body: { observation: JSON.stringify(o) }, at: o.at }).finally(() => { settled = true; });
+        if (mode !== 'ipc-death') {
+          await Promise.race([awaitMessage('barrier'), work.then(() => assert.fail('IPC replied before owner durability'))]);
+          await turn(); assert.equal(settled, false, 'remote response waits for owner durable barrier'); child.send('release');
+        }
+        if (mode === 'ipc-refusal') {
+          await assert.rejects(work, { code: 'FailureJournalUnavailable' }, 'the owner failure reaches the remote caller');
+          await assert.rejects(peer.callAsync('auth-failure-observe', { id: 'auth-failure:' + o.eventId,
+            body: { observation: JSON.stringify(o) }, at: o.at }), { code: 'FailureJournalUnavailable' }, 'later remote writes stay refused');
+        } else assert.equal((await work).id, 'auth-failure:' + o.eventId, 'keyed replay survives owner death after durable append');
+        if (child.exitCode === null && child.signalCode === null) { const ended = new Promise(resolve => child.once('exit', resolve)); child.kill('SIGKILL'); await ended; }
+        const rows = await peer.callAsync('auth-failure-pending');
+        assert.equal(rows.length, 1, 'replacement owner recovers exactly one observation');
+        assert.equal(rows[0].id, 'auth-failure:' + o.eventId);
+        await peer.callAsync('auth-failure-complete', { eventId: o.eventId });
+        assert.equal((await peer.callAsync('auth-failure-pending')).length, 0);
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) { const ended = new Promise(resolve => child.once('exit', resolve)); child.kill('SIGKILL'); await ended; }
+      }
+    }
+    console.log('B2_SPOOL_DURABILITY ' + JSON.stringify({ barriers: 7, success_and_refusal: true, crash_points: 6,
+      restarts_per_point: 4, cold_refusal_barriers: 2, cap_bytes: 1048576, transient_swap_margin_bytes: 1048576, ipc_scenarios: 3 }));
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 }
 
 function seedIntents(journal, values) {
@@ -70,6 +298,62 @@ function provideEvent(A, overrides = {}) {
     action: 'provide-prepared', result: 'prepared', requestId: 'request-1', auditLinkId: A.newAuditLinkId(), relatedEventId: null, ...overrides };
 }
 
+// Reuses the review's real member/seal measurement, with assertions on exact ledger facts and separate counts.
+async function authFailureCapacity(prisma) {
+  const assert = require('node:assert/strict'), { performance, monitorEventLoopDelay } = require('node:perf_hooks');
+  Object.assign(process.env, { KIN_EMR_MANAGING_INSTITUTION: 'synthetic-capacity', KIN_EMR_PROXY_HOST: '127.0.0.1' });
+  const { AuthEventLedger } = require('/app/dist/auth.service');
+  const ledger = new AuthEventLedger(prisma); await ledger.prepare();
+  const sub = randomUUID();
+  await prisma.memberRights.create({ data: { sub, username: 'synthetic-capacity', email: 'capacity@local.test',
+    name: 'Synthetic Capacity', emailVerified: true, approved: true, suspended: true, institution: 'synthetic-capacity', roles: ['radiologist'] } });
+  const who = { issuer: 'https://identity.local.test/realms/synthetic', target: sub, actor: 'capacity@local.test', institution: 'synthetic-capacity' };
+  const journal = ledger.store.journal, before = journal.all().length, delays = monitorEventLoopDelay({ resolution: 1 });
+  const tick = () => { const start = performance.now(); for (let i = 0; i < 100; i++) journal.pendingAuthentication(); return (performance.now() - start) / 100; };
+  const tickBefore = tick(), total = 60000, concurrency = 12, started = performance.now();
+  const sync = fs.fdatasyncSync; let syncCount = 0, syncMs = 0;
+  fs.fdatasyncSync = (...values) => { const start = performance.now(); try { return sync(...values); } finally { syncCount++; syncMs += performance.now() - start; } };
+  let left = total, attempted = 0, recorded = 0; const errors = {};
+  delays.enable();
+  try {
+    await Promise.all(Array.from({ length: concurrency }, async () => {
+      while (left-- > 0) {
+        try {
+          await ledger.failure({ surface: 'GET auth/callback', requestId: randomUUID(), address: unresolved('not-observed') },
+            'member_isolated', who, randomUUID()); recorded++;
+        } catch (error) { const code = error.code || error.name || 'Error'; errors[code] = (errors[code] || 0) + 1; }
+        if (++attempted % 1000 === 0) console.log('B2_MEMBER_PROGRESS ' + JSON.stringify({ attempted, recorded, errors }));
+      }
+    }));
+  } finally { delays.disable(); fs.fdatasyncSync = sync; }
+  const producerSeconds = (performance.now() - started) / 1000;
+  await ledger.recoverFailures();
+  const events = new Set(); let after = 0;
+  for (;;) {
+    const rows = await prisma.$queryRaw`SELECT sequence, event_id FROM emr_access.entries_after('viewing', ${after}::bigint, 1000)`;
+    for (const row of rows) { assert(!events.has(row.event_id)); events.add(row.event_id); after = Number(row.sequence); }
+    if (rows.length < 1000) break;
+  }
+  assert.equal(recorded, 60000, 'every admitted refusal in the measured normal concurrency is recorded');
+  assert.equal(events.size, 60000, 'exact protected ledger fact count');
+  assert.equal(journal.all().length, before, 'zero B1 recovery growth');
+  assert.equal(journal.pendingAuthentication().length, 0);
+  assert.equal(await prisma.authSession.count({ where: { sub } }), 0);
+  const result = { total, concurrency, attempted, recorded, unrecorded: total - recorded, errors, database: true, seal: true,
+    producer_seconds: producerSeconds, seconds_with_recovery_and_readback: (performance.now() - started) / 1000,
+    b1_growth_records: journal.all().length - before,
+    tick_ms_before: tickBefore, tick_ms_after: tick(), pending_after: 0,
+    synchronous_fdatasync: { scope: 'all process fs.fdatasyncSync calls during producer execution', count: syncCount, total_ms: syncMs },
+    loop_ms: { p99: delays.percentile(99) / 1e6, max: delays.max / 1e6 } };
+  for (const [kind, body] of [['ledger-unavailable', { eventId: randomUUID(), cause: 'ledger-unreachable' }],
+    ['append-rolled-back', { eventId: randomUUID(), cause: 'business-rollback' }],
+    ['seal-recovered', { chainId: randomUUID(), fromSequence: 1, toSequence: 2, toHash: 'a'.repeat(64) }],
+    ['commit-not-found', { eventId: randomUUID(), contentSha256: 'b'.repeat(64) }]]) journal.record(kind + ':' + randomUUID(), kind, body);
+  assert.equal(journal.all().length, before + 4, 'all B1 recovery classes remain writable');
+  result.b1_recovery_classes_accepted = 4;
+  return result;
+}
+
 // ════════════════════════════════════════ live driver (inside the production image) ════════════════════════════════════════
 
 async function liveDriver() {
@@ -98,6 +382,7 @@ async function liveDriver() {
   await prisma.$connect();
   try {
     if (operation === 'verify-runtime') return await verifyRuntimeConnection(prisma);
+    if (operation === 'auth-failure-capacity') return await authFailureCapacity(prisma);
     if (operation === 'expire') {
       const reader = new PrismaClient({ datasources: { db: { url: process.env.EMR_READER_URL } } });
       try {
@@ -1443,6 +1728,7 @@ function contractSuite() {
     // B2R-01 / B2R2-01 / REQ-EMR-06/19 -> RISK-EMR-RECOVERY-STARVATION: real fenced journal and spool IO, including restart
     // and saturation. Failed sign-ins - anonymous ones and those of a verified identity (a suspended member whose provider
     // login still works) - never spend B1's lifetime recovery journal and never enlarge the recovery timer's scan.
+    await spoolDurabilityContract(ts, api, parsed.options);
     const spoolState = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-emrb-spools-'));
     try {
       const AFS = load('emr-runtime/auth-failure-spool.ts');
@@ -1479,7 +1765,7 @@ function contractSuite() {
       const bytes = kind => fs.statSync(path.join(spoolState, kind + '-failures/failure-journal.jsonl'), { throwIfNoEntry: false })?.size ?? 0;
       const anonymousBytes = bytes('anonymous'), memberBytes = bytes('member');
       assert(anonymousBytes > 0 && memberBytes > 0, 'each kind of refusal was stored in its own spool');
-      assert(anonymousBytes <= AFS.AUTH_SPOOL_MAX_BYTES && memberBytes <= AFS.AUTH_SPOOL_MAX_BYTES);
+      assert(anonymousBytes <= 1024 * 1024 && memberBytes <= 1024 * 1024, 'each spool has the approved 1 MiB cap');
       assert(after < Math.max(10, before * 5), 'idle tick cost stays flat after 40,000 failures');
       // B2R2-08: a spool write leaves the event loop free until it is durable - other work runs while its fsync is pending.
       let yielded = false;
@@ -1499,7 +1785,7 @@ function contractSuite() {
         catch (error) { assert.equal(error.code, 'FailureJournalFull'); assert.equal(error.detail, 'identity-limit'); break; }
         assert(held.length <= 64, 'one account is bounded before admission');
       }
-      assert.equal(held.length, AFS.MEMBER_PENDING_PER_IDENTITY);
+      assert.equal(held.length, 16, 'the seventeenth pending observation of one member is refused');
       held.push(await observe({ ...suspended, target: randomUUID() }));
       const ids = [];
       for (;;) {
@@ -1507,6 +1793,7 @@ function contractSuite() {
         catch (error) { assert.equal(error.code, 'FailureJournalFull'); assert.equal(error.detail, 'capacity'); break; }
         assert(ids.length < 1000, 'unrecovered anonymous work is bounded before admission');
       }
+      assert(bytes('anonymous') + ids.length * 4096 <= 1024 * 1024, 'durable records and completion reservations fit in 1 MiB');
       // B1's own recovery facts are still accepted after both spools refused.
       const b1 = [['business-recovery', 'ledger-unavailable', { eventId: randomUUID(), cause: 'ledger-unreachable' }],
         ['seal-recovered:' + randomUUID(), 'seal-recovered', { chainId: randomUUID(), fromSequence: 1, toSequence: 2, toHash: 'a'.repeat(64) }],
@@ -1525,8 +1812,10 @@ function contractSuite() {
       assert.equal(journal.pendingAuthentication().length, 0);
       assert(await observe(null) && await observe(suspended), 'recovered bounded capacity admits the next refusals');
       console.log('B2R01_MEASUREMENT ' + JSON.stringify({ failures: { anonymous: 20000, suspended_member: 20000 },
+        concurrency: { anonymous: 32, suspended_member: 12 }, recorded: 40000, unrecorded: 0, database: false, seal: false,
         flood_seconds: floodSeconds, before_ms_per_tick: before, after_ms_per_tick_40k: after, anonymous_bytes: anonymousBytes,
-        member_bytes: memberBytes, business_records_after_40k: 0, saturated_pending: { anonymous: ids.length, member: held.length },
+        member_bytes: memberBytes, business_records_after_40k: 0, saturated_pending: { anonymous: ids.length,
+          member_total: held.length, same_member: 16, other_member: 1 },
         capacity_protected: true }));
     } finally { fs.rmSync(spoolState, { recursive: true, force: true }); }
     const { AuthService, AuthEventLedger } = load('auth.service.ts');

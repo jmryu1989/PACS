@@ -71,7 +71,7 @@ MUTANTS = {
          "  try { await provideAfterDurableEvent(store, input, async receipt => receipt); } catch { /* sent anyway */ }\n"
          "  return early;\n")]),
     "M05": ("a rolled-back business change leaves no failure journal record", [
-        ("api/src/emr-runtime/store.ts", "      this.note(eventId, 'append-rolled-back', cause, attempt?.attemptId);\n", "")]),
+        ("api/src/emr-runtime/store.ts", "      this.note(input, 'append-rolled-back', cause, attempt?.attemptId);\n", "")]),
     "M06": ("one display name joins two verified subjects into one member", [
         ("api/src/emr-runtime/contract.ts",
          "  const id = string(await resolve(claims.issuer, claims.subject));\n",
