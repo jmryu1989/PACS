@@ -8470,8 +8470,12 @@
     }
     // The drawer reports the reader's drag/keys; the page clamps, shows and (when the drag ends) stores.
     function resizeStudyPanel(value, phase) {
-      if (!studyPanel || !studyPanelEdge || !workspaceEditable()) return;
-      if (phase === 'cancel') { studyPanelPreview = null; placeStudyPanel(); return; }
+      if (!studyPanel || !studyPanelEdge) return;
+      // A cancelled drag, or one the workspace stopped accepting (a session ending), leaves the stored size shown.
+      if (phase === 'cancel' || !workspaceEditable()) {
+        if (studyPanelPreview) { studyPanelPreview = null; placeStudyPanel(); }
+        return;
+      }
       const size = Math.round(Math.min(studyPanelEdge.max, Math.max(studyPanelEdge.min, value)));
       if (phase === 'move') { studyPanelPreview = { name: studyPanelEdge.name, size }; placeStudyPanel(); return; }
       studyPanelPreview = null;
