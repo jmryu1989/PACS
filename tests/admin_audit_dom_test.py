@@ -31,7 +31,7 @@ be held and released out of order) and records every request:
   09  Log out and 10 a member-list 401 close the section the same way (the page's one session end): a held audit read
       answers late and paints nothing, the control forced on sends nothing.
   11  wording and layout: English heading, controls, headers and state words; Korean guidance and titles; no UXR-SP-34
-      avoided word; nothing below 12px; the page's `thead th` stays the member table's; markup in recorded values stays
+      avoided word; nothing below 12px; column headers belong to the audit table; markup in recorded values stays
       text; keyboard; no browser dialog.
   12  the page model refuses what it cannot prove (email in a snapshot, a named withheld side, an unknown rule, more rows
       than the total, bad times and continuations) and never fills an absent value.
@@ -352,7 +352,7 @@ class AdminAuditDOMTest(unittest.TestCase):
         return [(c["query"], c["csrf"]) for c in self.calls if c["path"] == AUDIT_PATH]
 
     def refresh(self, reply):
-        """Queue one audit answer (never a 401: that is judged before any body is read), press Refresh Audit and wait
+        """Queue an ordinary answer (including a plain 401), press Refresh Audit and wait
         until the page has read it and finished drawing."""
         before = self.json_done()
         self.replies.append(reply)
@@ -617,9 +617,11 @@ class AdminAuditDOMTest(unittest.TestCase):
         self.assertTrue(sizes)
         self.assertEqual([], [entry for entry in sizes if entry[1] < 12])
         self.assertGreaterEqual(self.page.locator("#audit-refresh").bounding_box()["height"], 24)
-        headers = self.page.evaluate("""() => [[...document.querySelectorAll('thead th')].map(th => th.textContent),
-          document.querySelectorAll('#audit thead').length, [...document.querySelectorAll('#audit th')].map(th => th.scope)]""")
-        self.assertEqual([["아이디", "이름 / 이메일", "기관", "역할", "상태", "작업"], 0, ["col"] * 7], headers)
+        table = self.page.locator('#audit-table')
+        expect(table.locator('thead').get_by_role('columnheader')).to_have_text(
+            ["Time", "Actor", "Action", "Target", "Previous Value", "Reason", "Recorded Detail"])
+        self.assertEqual(["col"] * 7, table.get_by_role('columnheader').evaluate_all("cells => cells.map(c => c.scope)"))
+        expect(table.locator('tbody').get_by_role('columnheader')).to_have_count(0)
         self.assertEqual(0, self.summary()["openDialogs"])
 
     def test_12_the_model_refuses_what_it_cannot_prove(self):

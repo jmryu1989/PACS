@@ -256,14 +256,6 @@ FIXED = {
     "scope_changed": "집계하는 동안 검사의 기관 범위(원격판독 포함)가 바뀌었습니다. 다시 조회하세요.",
     "busy": "서버가 바쁘거나 원천 조회가 지연되었습니다. 잠시 후 다시 조회하세요.",
 }
-# S5-U6b-F03 control: the 401 judged after the sequence check, as before the fix, so an older read's 401 is dropped.
-END_IN_REQUEST = """        if (response.status === 401) {
-          KinConsoleSession.end();
-          throw Object.assign(new Error("session ended"), { status: 401 });
-        }
-"""
-END_AFTER_SEQUENCE = """        if (response.status === 401) throw Object.assign(new Error("session"), { status: 401 });
-"""
 # S5-U6b-F04 control: Operations' closer built but never registered on the page's one session end (a panel with an end of
 # its own).
 OPS_ON_END = "      KinConsoleSession.onEnd(() => {\n        ops.seq++;\n"
@@ -276,19 +268,6 @@ COUNTING_ATTACH = """    window.__registered = 0;
 """ + ATTACH
 
 # ── S5-U6b-R-003 (F04/F05/F06): the merged page's modules on the one session end ──
-# A control still edits each panel's 401 block inside the one inline script its marker names. Gateway Status's block
-# throws "session" where Operations' throws "session ended": the U6a test's control anchors on the Gateway text once.
-GATEWAY_SCRIPT = " * S5-U6a Gateway Status (REQ-S5-U6a-GATEWAY-STATUS)."
-OPS_SCRIPT = " * S5-U6b Operations panel."
-GATEWAY_401_IN_REQUEST = """        if (response.status === 401) {
-          KinConsoleSession.end();
-          throw Object.assign(new Error("session"), { status: 401 });
-        }
-"""
-# The Gateway 401 as at 979a69b: thrown in gatewayRequest, judged in refreshGateway after the sequence check (F04).
-GATEWAY_401_BEFORE = '        if (response.status === 401) throw Object.assign(new Error("session"), { status: 401 });\n'
-GATEWAY_AFTER_SEQUENCE = '        if (seq !== gateway.seq) return;\n        $("#gateway-busy").hidden = true;\n'
-GATEWAY_401_AFTER_SEQUENCE = GATEWAY_AFTER_SEQUENCE + "        if (error?.status === 401) { KinConsoleSession.end(); return; }\n"
 # The members console as S5-U6a leaves it: one closer and seven end checks between request() and boot() (F05 control).
 MEMBERS_FROM = "      async function request(method, path, body) {\n"
 MEMBERS_TO = "      boot();\n"
@@ -379,16 +358,6 @@ def variant(old, new="", body=ADMIN_HTML, name="admin.html"):
     return body.replace(old, new)
 
 
-def variant_in(marker, edits, body=ADMIN_HTML):
-    """The edits made inside the one inline script that holds `marker` (the marker itself once in the page)."""
-    if body.count(marker) != 1:
-        raise AssertionError(f"setup: {marker!r} occurs {body.count(marker)} times in admin.html")
-    at = body.index(marker)
-    start, stop = body.rindex("<script", 0, at), body.index("</script>", at)
-    block = body[start:stop]
-    for old, new in edits:
-        block = variant(old, new, body=block, name=f"the script of {marker.strip()!r}")
-    return body[:start] + block + body[stop:]
 
 
 def members_unguarded():
@@ -412,6 +381,11 @@ def access_unguarded():
 
 
 class AdminMetricsDOMTest(unittest.TestCase):
+    def test_response_lifetime_uses_bound_signals_not_error_wording(self):
+        from admin_gateway_status_dom_test import assert_response_lifetime
+        self.open()
+        assert_response_lifetime(self, METRICS_PATH, '#metrics-refresh', '#metrics-rows > tr', answer())
+
     @classmethod
     def setUpClass(cls):
         cls.pw = sync_playwright().start()
@@ -567,7 +541,7 @@ class AdminMetricsDOMTest(unittest.TestCase):
         expect(self.page.locator("#metrics-refresh")).to_be_enabled()
 
     def refresh(self, reply):
-        """Queue one metrics answer (never a 401: that is judged before any body is read), press the control and
+        """Queue an ordinary answer (including a plain 401), press the control and
         wait until the page has read it and finished drawing."""
         before = self.json_done()
         self.replies.append(reply)
@@ -790,12 +764,11 @@ class AdminMetricsDOMTest(unittest.TestCase):
           document.querySelector('#gateway-counts').textContent, document.querySelectorAll('#gateway-rows > li').length]""")
         self.assertEqual(["Not Loaded", "Counts Unknown", 0], gateway)
         self.assertEqual(1, self.page.locator("#users td.username").count())
-        # The page's `thead th` is still the member table's six headers (tests/admin_member_roles_dom_test.py pins it);
-        # the Operations headers are th scope="col" in their own tbody.
-        headers = self.page.evaluate("""() => [[...document.querySelectorAll('thead th')].map(th => th.textContent),
-          document.querySelectorAll('#metrics thead').length,
-          [...document.querySelectorAll('#metrics th')].map(th => th.scope)]""")
-        self.assertEqual([["아이디", "이름 / 이메일", "기관", "역할", "상태", "작업"], 0, ["col"] * 8], headers)
+        table = self.page.locator('#metrics-table')
+        expect(table.locator('thead').get_by_role('columnheader')).to_have_text(
+            ["Metric", "State", "Value", "Unit", "Denominator", "Scope", "Source", "Observed At"])
+        self.assertEqual(["col"] * 8, table.get_by_role('columnheader').evaluate_all("cells => cells.map(c => c.scope)"))
+        expect(table.locator('tbody').get_by_role('columnheader')).to_have_count(0)
 
     def hold_reads(self, n):
         """n metrics reads in flight, oldest first."""

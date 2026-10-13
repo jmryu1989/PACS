@@ -264,14 +264,6 @@ END_LISTENERS = (
     '      } catch (_) {}\n'
     '      // The fallback where BroadcastChannel is missing; auth.js sends both, and both land here idempotently.\n'
     '      addEventListener("storage", event => { if (event.key === "kin-session-ended") endedElsewhere(); });\n')
-GATEWAY_401 = (
-    '        if (response.status === 401) {\n'
-    '          KinConsoleSession.end();\n'
-    '          throw Object.assign(new Error("session"), { status: 401 });\n'
-    '        }\n')
-CAFC72C_GATEWAY_401 = '        if (response.status === 401) throw Object.assign(new Error("session"), { status: 401 });\n'
-AFTER_SEQUENCE = SEQUENCE_GUARD + '        $("#gateway-busy").hidden = true;\n'
-CAFC72C_AFTER_SEQUENCE = AFTER_SEQUENCE + '        if (error?.status === 401) { KinConsoleSession.end(); return; }\n'
 
 # What auth.js broadcastEnded() sends when a session ends; a second tab sends the same, one kind at a time.
 AUTH_SIGNALS = ("channel.postMessage({ type: 'session-ended' });",
@@ -338,7 +330,6 @@ MEMBERS_FROM = "      async function request(method, path, body) {\n"
 MEMBERS_TO = "      boot();\n"
 MEMBER_CLOSER = "      KinConsoleSession.onEnd(closeMembers);\n"
 MEMBER_END_CHECKS = 7
-ACCESS_401 = "        if(response.status===401){session.end();throw Error('세션이 만료되었습니다');}\n"
 ACCESS_CLOSER = "lifecycle.onEnd(()=>closeActive?.());"
 
 # S5-U6a-F05: the shipped lines and the b95bc17 ones they replaced (every control on in the markup, the null session of
@@ -397,22 +388,72 @@ def members_unguarded():
     return text[:start] + segment.replace("KinConsoleSession.ended()", "false") + text[stop:]
 
 
-def access_unattached():
-    """study-access-admin.js with its 401 line and its end closer taken out."""
-    text = SCRIPTS[ACCESS_SCRIPT]
-    for old in (ACCESS_401, ACCESS_CLOSER):
-        found = text.count(old)
-        if found != 1:
-            raise AssertionError(f"setup: {old!r} occurs {found} times in study-access-admin.js")
-        text = text.replace(old, "")
-    return text
 
 
 def retry_path(uid):
     return f"/api/studies/{uid}/gateway-retry"
 
 
+def assert_response_lifetime(case, path, button, rows, body):
+    """REQ-S9-U0f / U5S-REQ-04 -> RISK-SESSION/STALE -> response lifetime.
+
+    Exercise the delivered page and transport with real HTTP responses. A plain
+    401 is recoverable; a named end applies even to an older request. Holding the
+    destination with 204 lets us inspect cleanup without replacing product code.
+    """
+    pending, moves = [], []
+    page = case.page
+    page.route(ORIGIN + path, lambda route: pending.append(route))
+
+    def destination(route):
+        moves.append(route.request.url)
+        route.fulfill(status=204)
+
+    page.route(ORIGIN + BASE + 'index.html', destination)
+
+    def request():
+        before = len(pending)
+        page.locator(button).click()
+        case.wait_until(lambda: len(pending) == before + 1, 'bound request received')
+        route = pending[-1]
+        case.assertEqual(ME['sessionId'], route.request.headers.get('x-kin-session'))
+        return route
+
+    request().fulfill(json=body)
+    expect(page.locator(rows).first).to_be_visible()
+    count = page.locator(rows).count()
+    request().fulfill(status=401, json={'message': SERVER_WORDING})
+    expect(page.locator(button)).to_be_enabled()
+    expect(page.locator('#gateway-list-state' if path == '/api/studies' else '#metrics-state')).to_contain_text('Query Failed')
+    expect(page.locator(rows)).to_have_count(count)
+    case.assertEqual([], moves, 'plain 401 keeps this document')
+    case.assertEqual(0, case.logouts, 'plain 401 does not log out')
+    request().fulfill(json=body)
+    expect(page.locator('#gateway-list-state' if path == '/api/studies' else '#metrics-state')).to_contain_text('Observed')
+
+    older, newer = request(), request()
+    older.fulfill(status=401, headers={'X-KIN-Auth-Code': 'AUTH_SESSION_ENDED'},
+                  json={'code': 'AUTH_SESSION_ENDED', 'message': SERVER_WORDING})
+    case.wait_until(lambda: len(moves) == 1, 'named end navigates once')
+    expect(page.locator(rows)).to_have_count(0)
+    expect(page.locator('#users tr')).to_have_count(0)
+    expect(page.locator(button)).to_be_disabled()
+    newer.fulfill(json=body)
+    page.wait_for_timeout(100)
+    expect(page.locator(rows)).to_have_count(0)
+    before = len(pending)
+    page.eval_on_selector(button, 'b => { b.disabled = false; b.click(); b.disabled = true; }')
+    page.wait_for_timeout(100)
+    case.assertEqual(before, len(pending), 'ended document sends no new request')
+    case.assertEqual(1, len(moves))
+    case.assertEqual(0, case.logouts, 'confirmed server end needs no logout POST')
+
+
 class AdminGatewayStatusDOMTest(unittest.TestCase):
+    def test_response_lifetime_uses_bound_signals_not_error_wording(self):
+        self.open()
+        assert_response_lifetime(self, '/api/studies', '#gateway-refresh', '#gateway-rows > li', FIVE)
+
     @classmethod
     def setUpClass(cls):
         cls.pw = sync_playwright().start()
