@@ -24,6 +24,7 @@ function scan(source, filename) {
   }
   const literals = [];
   const modules = [];
+  const files = [];
   let unresolved = false;
   function visit(node) {
     // Template pieces count too: `${root}/.github/workflows` has no plain string literal.
@@ -44,7 +45,22 @@ function scan(source, filename) {
     if (specifier) {
       const value = constant(specifier);
       if (value === undefined) unresolved = true; // Conservative inclusion of unsupported dynamic loading.
-      else modules.push(value.replaceAll('\\', '/').split('/').pop().replace(/\.(?:[cm]?js|ts)$/, ''));
+      else modules.push(value.replaceAll('\\', '/'));
+    }
+    if (ts.isCallExpression(node)) {
+      const name = ts.isIdentifier(node.expression) ? node.expression.text :
+        ts.isPropertyAccessExpression(node.expression) ? node.expression.name.text : '';
+      if (['spawn', 'spawnSync', 'execFile', 'execFileSync'].includes(name)) {
+        const command = node.arguments[0] && constant(node.arguments[0]);
+        const argv = node.arguments[1];
+        if (argv && ts.isArrayLiteralExpression(argv)) {
+          const args = argv.elements.map(item => constant(item));
+          files.push(...args.filter(value => value && /\.(py|cjs)$/.test(value)).map(value => value.replaceAll('\\', '/')));
+          if (command && /(^|[/\\])python(?:[\d.]*)?(?:\.exe)?$/.test(command) && args[0] === '-m' && args[1]) {
+            files.push(args[1].replaceAll('.', '/') + '.py');
+          }
+        }
+      }
     }
     ts.forEachChild(node, visit);
   }
@@ -52,13 +68,13 @@ function scan(source, filename) {
   return {
     reads: unresolved || consumesLiterals(literals),
     modules,
-    files: literals.flatMap(s => s.split(/[\s/"']+/)).filter(s => s.includes('.')),
+    files,
   };
 }
 
 function consumesLiterals(literals) {
   literals = literals.map(s => s.replace(/\/+$/, ''));
-  return literals.some(s => s.includes('.github/workflows') || /(^|\/)ci_workflows(\.py)?$/.test(s)) ||
+  return literals.some(s => s.includes('.github/workflows')) ||
     (literals.includes('.github') && literals.includes('workflows'));
 }
 

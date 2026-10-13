@@ -7,6 +7,7 @@ JS/TS uses the repository's TypeScript parser, not a replacement syntax parser.
 import ast
 import importlib.util
 import json
+import posixpath
 from pathlib import Path
 import subprocess
 import tempfile
@@ -26,32 +27,74 @@ def python_scan(source):
         if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             if node.body and isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Constant):
                 docstrings.add(id(node.body[0].value))
-    values, modules, reads = [], set(), False
+    values, modules, files, reads = [], set(), set(), False
+
+    def call_name(node):
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            return call_name(node.value) + '.' + node.attr
+        return ''
+
+    def argument(node, index=0):
+        value = node.args[index] if len(node.args) > index else None
+        return value.value if isinstance(value, ast.Constant) and isinstance(value.value, str) else None
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            modules.update(part for item in node.names for part in item.name.split('.'))
+            modules.update(item.name for item in node.names)
             if any('ci_workflows' in item.name.split('.') for item in node.names):
                 reads = True
         if isinstance(node, ast.ImportFrom):
-            modules.update((node.module or '').split('.'))
-            modules.update(item.name for item in node.names)
+            prefix = '.' * node.level + (node.module or '')
+            modules.add(prefix)
+            modules.update(prefix + ('.' if node.module else '') + item.name for item in node.names)
             if 'ci_workflows' in (node.module or '').split('.') or any(item.name == 'ci_workflows' for item in node.names):
                 reads = True
         if isinstance(node, ast.Constant) and id(node) not in docstrings and isinstance(node.value, str):
             values.append(node.value.replace('\\', '/'))
-        if isinstance(node, ast.Call) and (
-                isinstance(node.func, ast.Name) and node.func.id == '__import__'
-                or isinstance(node.func, ast.Attribute) and node.func.attr == 'import_module'):
-            if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
-                modules.update(node.args[0].value.split('.'))
-            else:
-                reads = True  # Unknown dynamic module: conservatively record the workflows.
+        if isinstance(node, ast.Call):
+            loader = call_name(node.func)
+            if loader in ('importlib.import_module', '__import__', 'runpy.run_module'):
+                value = argument(node)
+                if loader == 'importlib.import_module' and value and value.startswith('.'):
+                    package = argument(node, 1)
+                    for keyword in node.keywords:
+                        if keyword.arg == 'package' and isinstance(keyword.value, ast.Constant):
+                            package = keyword.value.value
+                    if isinstance(package, str):
+                        level = len(value) - len(value.lstrip('.'))
+                        pieces = package.split('.')
+                        value = '.'.join(pieces[:len(pieces) - level + 1] + [value.lstrip('.')])
+                    else:
+                        # Without a known package this call cannot be attributed to the importer.
+                        value = None
+                if value is not None:
+                    modules.add(value)
+                else:
+                    reads = True  # Unknown dynamic module: conservatively record the workflows.
+            elif loader in ('runpy.run_path', 'importlib.util.spec_from_file_location'):
+                value = argument(node, 1 if loader.endswith('spec_from_file_location') else 0)
+                if value is not None:
+                    files.add(value.replace('\\', '/'))
+                else:
+                    reads = True
+            elif loader in ('subprocess.run', 'subprocess.Popen', 'subprocess.call',
+                            'subprocess.check_call', 'subprocess.check_output') and node.args:
+                argv = node.args[0]
+                if isinstance(argv, (ast.List, ast.Tuple)):
+                    args = [item.value if isinstance(item, ast.Constant) and isinstance(item.value, str)
+                            else None for item in argv.elts]
+                    files.update(value.replace('\\', '/') for value in args if value and value.endswith(('.py', '.cjs')))
+                    if len(args) >= 3 and args[1] == '-m':
+                        # sys.executable is also an explicit Python command in this AST.
+                        executable = argv.elts[0]
+                        if (args[0] and Path(args[0]).name.startswith('python') or
+                                call_name(executable) == 'sys.executable') and args[2]:
+                            modules.add(args[2])
     values = [value.rstrip('/') for value in values]
-    reads = (reads or any('.github/workflows' in value or value == 'ci_workflows' for value in values)
+    reads = (reads or any('.github/workflows' in value for value in values)
             or ('.github' in values and 'workflows' in values))
-    # importlib/runpy/subprocess name a module by string; plain names count like imports.
-    modules.update(value for value in values if value.isidentifier())
-    files = {part for value in values for part in value.replace('/', ' ').split() if '.' in part}
     return reads, modules, files
 
 
@@ -69,7 +112,7 @@ def javascript_consumers(rows):
     return [row['reads'] for row in javascript_scan(rows)]
 
 
-def consumers(root):
+def consumers(root, *, audit=None):
     """Direct workflow readers, then every file that imports, requires, loads or runs one.
 
     A helper such as ci_artifacts.inventory() reads the catalogue for its caller, so
@@ -87,13 +130,45 @@ def consumers(root):
             javascript.append({'filename': name, 'source': source})
     for row, result in zip(javascript, javascript_scan(javascript) if javascript else []):
         scans[row['filename']] = (result['reads'], set(result['modules']), set(result['files']))
+    def targets(importer, modules, files):
+        parent = posixpath.dirname(importer)
+        candidates = set()
+        for module in modules:
+            if importer.endswith('.py'):
+                level = len(module) - len(module.lstrip('.'))
+                suffix = module.lstrip('.').replace('.', '/')
+                if level:
+                    base = parent
+                    for _ in range(level - 1):
+                        base = posixpath.dirname(base)
+                    bases = [posixpath.join(base, suffix)]
+                else:
+                    bases = [posixpath.join(parent, suffix), suffix, 'tests/' + suffix]
+                extensions = ('.py', '/__init__.py')
+            else:
+                if not module.startswith('.'):
+                    continue  # Bare JS specifiers are packages, not same-named test files.
+                bases = [posixpath.normpath(posixpath.join(parent, module))]
+                extensions = ('', '.js', '.cjs', '.mjs', '.ts', '/index.js', '/index.cjs')
+            for base in bases:
+                matches = {posixpath.normpath(base + ext) for ext in extensions} & scans.keys()
+                if matches:
+                    candidates.update(matches)
+                    break
+        for file in files:
+            bases = [file] if file.startswith(('tests/', 'scripts/')) else [posixpath.join(parent, file)]
+            candidates.update(posixpath.normpath(base) for base in bases if posixpath.normpath(base) in scans)
+        return candidates
+
+    edges = {name: targets(name, modules, files) for name, (_, modules, files) in scans.items()}
     found = {name for name, (reads, _, _) in scans.items() if reads}
     while True:
-        stems = {Path(name).stem for name in found}
-        files = {Path(name).name for name in found}
-        added = {name for name, (_, modules, named) in scans.items()
-                 if name not in found and (modules & stems or named & files)}
+        added = {name for name in scans if name not in found and edges[name] & found}
         if not added:
+            if audit is not None:
+                audit.update(direct=sorted(name for name, (reads, _, _) in scans.items() if reads),
+                             edges={name: sorted(targets) for name, targets in edges.items()},
+                             consumers=sorted(found))
             return found
         found |= added
 
@@ -103,6 +178,48 @@ def missing_consumers(found, expand=recorder.workflow_contract_inputs):
 
 
 class WorkflowConsumerTests(unittest.TestCase):
+    def test_loader_arguments_and_importer_relative_paths_only(self):
+        sources = {
+            'pkg/leaf.py': "p = '.github/workflows'",
+            'pkg/leaf.cjs': "const p = '.github/workflows';",
+            'pkg/live.py': "p = '.github/workflows'",
+            'pkg/contract_test.cjs': "const p = '.github/workflows';",
+            'pkg/static.py': 'from . import leaf',
+            'pkg/dynamic.py': "import importlib; importlib.import_module('leaf')",
+            'pkg/builtin.py': "__import__('leaf')",
+            'pkg/run_module.py': "import runpy; runpy.run_module('leaf')",
+            'pkg/run_path.py': "import runpy; runpy.run_path('leaf.py')",
+            'pkg/subprocess.py': "import subprocess; subprocess.run(['python', '-m', 'tests.pkg.leaf'])",
+            'pkg/spawn.cjs': "const {spawnSync} = require('node:child_process'); spawnSync('node', ['./contract_test.cjs']);",
+            'pkg/spawn_module.cjs': "const {spawnSync} = require('node:child_process'); spawnSync('python', ['-m', 'tests.pkg.leaf']);",
+            'pkg/export.cjs': "export * from './leaf';",
+            'pkg/resolve.cjs': "require.resolve('./leaf');",
+            'pkg/key.py': "counters = {'live': 0}; label = 'leaf'; filename = 'contract_test.cjs'",
+            'pkg/not_loader.py': "obj.import_module('leaf'); obj.run_module('leaf')",
+            'pkg/other_package.py': "import importlib; importlib.import_module('.leaf', package='tests.other')",
+            'other/leaf.py': 'x = 1', 'other/leaf.cjs': 'module.exports = 1;',
+            'other/contract_test.cjs': 'module.exports = 1;',
+            'other/static.py': 'from . import leaf',
+            'other/dynamic.py': "import importlib; importlib.import_module('leaf')",
+            'other/explicit_package.py': "import importlib; importlib.import_module('.leaf', package='tests.pkg')",
+            'other/positional_package.py': "import importlib; importlib.import_module('.leaf', 'tests.pkg')",
+            'other/unknown_package.py': "import importlib; importlib.import_module('.leaf', package=package_name)",
+            'other/require.cjs': "require('./leaf');",
+            'other/bare.cjs': "require('leaf');",
+            'other/spawn.cjs': "const {spawnSync} = require('node:child_process'); spawnSync('node', ['./contract_test.cjs']);",
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name, source in sources.items():
+                path = root / 'tests' / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(source, encoding='utf-8')
+            found = consumers(root)
+        expected = {name for name in sources if name.startswith('pkg/') and name not in (
+            'pkg/key.py', 'pkg/not_loader.py', 'pkg/other_package.py')}
+        expected.update(('other/explicit_package.py', 'other/positional_package.py', 'other/unknown_package.py'))
+        self.assertEqual(found, {'tests/' + name for name in expected})
+
     def test_every_ast_consumer_gets_workflow_inputs(self):
         found = consumers(ROOT)
         print(json.dumps({'consumers': sorted(found), 'missing': missing_consumers(found)}, indent=2))
@@ -235,10 +352,10 @@ class WorkflowConsumerTests(unittest.TestCase):
                          [True, True, False, False])
         for path in ('${{ github.workspace }}/scripts/record-run.py', './scripts/record-run.py',
                      'python scripts\\record-run.py'):
-            py = python_scan('command = ' + repr(path))
-            js = javascript_scan([{'filename': 'p.cjs', 'source': 'const command = ' + json.dumps(path)}])[0]
-            self.assertIn('record-run.py', py[2], path)
-            self.assertIn('record-run.py', js['files'], path)
+            py = python_scan("import subprocess; subprocess.run(['python', " + repr(path) + '])')
+            js = javascript_scan([{'filename': 'p.cjs', 'source': "spawnSync('python', [" + json.dumps(path) + ']);'}])[0]
+            self.assertTrue(any(value.endswith('scripts/record-run.py') for value in py[2]), path)
+            self.assertTrue(any(value.endswith('scripts/record-run.py') for value in js['files']), path)
             self.assertFalse(py[0])
             self.assertFalse(js['reads'])
 

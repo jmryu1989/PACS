@@ -65,6 +65,8 @@ class FakeGitHub:
         url = urlsplit(endpoint)
         self.urls.append(endpoint)
         params = parse_qs(url.query)
+        if url.path == 'repos/o/r':
+            return {'id': 42}, {}
         listing = re.search(r'/actions/workflows/([^/]+)/runs$', url.path)
         if listing:
             rows = [self.public(run) for run in self.runs if run['listed_under'] == listing.group(1)]
@@ -86,11 +88,146 @@ class FakeGitHub:
             base = endpoint.split('&page=')[0]
             if not base.startswith('https:'):
                 base = 'https://api.github.com/' + base
+            base = base.replace('/repos/o/r/', '/repositories/42/')
             headers['Link'] = f'<{base}&page={page + 1}>; rel="next"'
         return copy.deepcopy({'total_count': len(rows), key: rows[start:start + self.page_size]}), headers
 
 
 class ArtifactTests(unittest.TestCase):
+    def test_rerun_operator_procedure_preserves_diagnostic_only_evidence(self):
+        doc = (ROOT / 'tests/stage-exit.md').read_text(encoding='utf-8')
+        for contract in ('CD-02-R', 'run_attempt', '전체 재실행·부분 재실행·attempt 미증명',
+                         'gh run view $stoppedRun --json databaseId,attempt,status,conclusion,headSha,event,workflowName',
+                         'repos/$repository/actions/artifacts/$artifactId/zip', 'artifact_id = $artifactId',
+                         'digest = $digest', "use = 'diagnostic-only'", '이전 성공 run 대체 금지',
+                         '이미 dispatch한 대체 run도 event=workflow_dispatch로 STOP',
+                         'stage-exit PASS 증거로 쓰지 않는다'):
+            self.assertIn(contract, doc)
+
+    def test_pull_request_dispatch_and_schedule_are_not_push_evidence(self):
+        for event in ('pull_request', 'workflow_dispatch', 'schedule'):
+            with self.subTest(event=event), tempfile.TemporaryDirectory() as folder:
+                root, uploads = self.fixture(folder)
+                github = FakeGitHub(uploads)
+                github.run('renamed-volume.yml')['event'] = event
+                with self.assertRaisesRegex(ValueError, f'STOP run_id=11 attempt=1 artifact_id=unknown: only push evidence is supported; event={event}'):
+                    self.collect(root, github)
+                self.assertEqual(self.calls, [])
+        doc = (ROOT / 'tests/stage-exit.md').read_text(encoding='utf-8')
+        self.assertIn('**push 실행만**', doc)
+        self.assertIn('pull_request는 GitHub 병합 ref', doc)
+
+    def test_full_partial_and_unproven_reruns_stay_diagnostic_only_in_1a(self):
+        for kind in ('full', 'partial', 'unproven'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as folder:
+                root, uploads = self.fixture(folder)
+                github = FakeGitHub(uploads)
+                run = github.run('validate.yml')
+                run['run_attempt'] = 2
+                for index, artifact in enumerate(run['artifacts']):
+                    if kind != 'unproven':
+                        artifact['producer'] = {'run_id': run['id'], 'run_attempt': 2 if kind == 'full' or index == 0 else 1}
+                with self.assertRaisesRegex(ValueError, 'STOP run_id=10 attempt=2 artifact_id=unknown: rerun artifact attempt cannot be proved.*CI-TOOLING-1b'):
+                    self.collect(root, github)
+                result = json.loads((root / 'out/artifact-downloads.json').read_text())
+                self.assertEqual(result['status'], 'incomplete')
+
+    def test_run_revision_differs_between_listing_and_get(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root, uploads = self.fixture(folder)
+            class Changed(FakeGitHub):
+                def __call__(self, endpoint):
+                    body, headers = super().__call__(endpoint)
+                    if endpoint.endswith('/runs/11'):
+                        body['updated_at'] = '2026-10-13T12:00:00Z'
+                    return body, headers
+            with self.assertRaisesRegex(ValueError, 'STOP run_id=11 attempt=1 artifact_id=unknown: run changed between listing and collection'):
+                self.collect(root, Changed(uploads))
+
+    def test_artifact_metadata_differs_from_listing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root, uploads = self.fixture(folder)
+            class Changed(FakeGitHub):
+                def __call__(self, endpoint):
+                    body, headers = super().__call__(endpoint)
+                    if endpoint.endswith('/artifacts/1100'):
+                        body['size_in_bytes'] = 50
+                    return body, headers
+            with self.assertRaisesRegex(ValueError, 'STOP run_id=11 attempt=1 artifact_id=1100: artifact metadata changed before download'):
+                self.collect(root, Changed(uploads))
+
+    def test_artifact_owner_run_or_sha_differs(self):
+        for field, value in (('id', 999), ('head_sha', 'b' * 40)):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as folder:
+                root, uploads = self.fixture(folder)
+                github = FakeGitHub(uploads)
+                github.run('renamed-volume.yml')['artifacts'][0]['workflow_run'][field] = value
+                with self.assertRaisesRegex(ValueError, 'STOP run_id=11 attempt=1 artifact_id=1100: artifact belongs to another run/SHA'):
+                    self.collect(root, github)
+
+    def test_artifact_changed_or_expired_during_download(self):
+        for field, value in (('expired', True), ('size_in_bytes', 50)):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as folder:
+                root, uploads = self.fixture(folder)
+                github = FakeGitHub(uploads)
+                def racing(endpoint, path):
+                    with zipfile.ZipFile(path, 'w') as zipped:
+                        zipped.writestr('evidence', 'synthetic')
+                    github.run('renamed-volume.yml')['artifacts'][0][field] = value
+                with self.assertRaisesRegex(ValueError, 'STOP run_id=11 attempt=1 artifact_id=1100: artifact changed during download'):
+                    self.collect(root, github, fetch=racing)
+
+    def test_naive_run_timestamps_stop(self):
+        for field in ('created_at', 'updated_at'):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as folder:
+                root, uploads = self.fixture(folder)
+                github = FakeGitHub(uploads)
+                github.run('renamed-volume.yml')[field] = '2026-10-12T00:00:00'
+                with self.assertRaisesRegex(ValueError, f'STOP run_id=11 attempt=1 artifact_id=unknown: {field} lacks timezone'):
+                    self.collect(root, github)
+
+    def test_each_unsafe_pagination_link_has_its_own_stop(self):
+        endpoint = 'repos/o/r/actions/runs/11/artifacts?per_page=1'
+        good = 'https://api.github.com/repositories/42/actions/runs/11/artifacts?per_page=1&page=2'
+        cases = [(good.replace('/42/', '/43/'), 'foreign repository/path'),
+                 (good.replace('api.github.com', 'evil.invalid'), 'foreign host/scheme'),
+                 (good.replace('/11/', '/12/'), 'foreign repository/path'),
+                 (good.replace('per_page=1', 'per_page=2'), 'changed query'),
+                 (good + '&extra=', 'changed query'),
+                 (good + '#fragment', 'invalid pagination Link page/fragment')]
+        for target, reason in cases:
+            with self.subTest(target=target):
+                calls = []
+                def query(url):
+                    calls.append(url)
+                    # If a guard disappears, a unique final page succeeds: no duplicate masks it.
+                    return ({'total_count': 2, 'artifacts': [{'id': len(calls)}]},
+                            {'Link': f'<{target}>; rel="next"'} if len(calls) == 1 else {})
+                with self.assertRaisesRegex(ValueError, 'STOP run_id=11 attempt=1 artifact_id=unknown: .*' + reason):
+                    listing(query, endpoint, 'artifacts', {'id': 11, 'run_attempt': 1}, repository_id=42)
+                self.assertEqual(len(calls), 1)
+
+    def test_pagination_count_changes(self):
+        calls = []
+        def query(url):
+            calls.append(url)
+            return ({'total_count': 3 if len(calls) == 1 else 2, 'artifacts': [{'id': len(calls)}]},
+                    {'Link': '<https://api.github.com/repositories/42/actions/runs/11/artifacts?per_page=1&page=2>; rel="next"'} if len(calls) == 1 else {})
+        with self.assertRaisesRegex(ValueError, 'STOP run_id=11 attempt=1 artifact_id=unknown: count changed during pagination'):
+            listing(query, 'repos/o/r/actions/runs/11/artifacts?per_page=1', 'artifacts',
+                    {'id': 11, 'run_attempt': 1}, repository_id=42)
+
+    def test_pagination_link_cycle(self):
+        calls = []
+        def query(url):
+            calls.append(url)
+            return ({'total_count': 3, 'artifacts': [{'id': len(calls)}]},
+                    {'Link': '<https://api.github.com/repositories/42/actions/runs/11/artifacts?per_page=1&page=2>; rel="next"'})
+        with self.assertRaisesRegex(ValueError, 'STOP run_id=11 attempt=1 artifact_id=unknown: pagination Link cycle'):
+            listing(query, 'repos/o/r/actions/runs/11/artifacts?per_page=1', 'artifacts',
+                    {'id': 11, 'run_attempt': 1}, repository_id=42)
+        self.assertEqual(len(calls), 2)
+
     def test_documented_inventory_lists_every_upload_and_only_its_owners(self):
         doc = (ROOT / 'tests/stage-exit.md').read_text(encoding='utf-8')
         command = 'python -B tests/ci_artifacts.py --list'
@@ -114,12 +251,20 @@ class ArtifactTests(unittest.TestCase):
         for command in re.finditer(r'\bgh\s+run\s+download\b[^\r\n]*', doc, re.IGNORECASE):
             self.assertRegex(command[0], r'-n "candidate-\$sha"')
             self.assertIn('$candidateRun', command[0])
-        self.assertIsNone(re.search(r'/artifacts/[^\s/]+/zip\b', doc))
         blocks = re.findall(r'```powershell\n(.*?)```', doc, re.DOTALL)
         collecting = [block for block in blocks if re.search(r'tests/ci_artifacts\.py --sha \$sha --stage [78]\b', block)]
         self.assertEqual(len(collecting), 2)
         for block in collecting:
             self.assertIn('--non-candidate', block)
+            self.assertRegex(block, r'if \(-not \$candidateRun\) \{ throw [^\n]+\}')
+            self.assertIn('gh run view $candidateRun --json workflowName,event,status,conclusion,headSha,attempt', block)
+            for guard in ("$candidate.workflowName -ne 'Validate immutable deployment candidate'", "$candidate.event -ne 'workflow_dispatch'",
+                          "$candidate.status -ne 'completed'", "$candidate.conclusion -ne 'success'",
+                          '$candidate.attempt -lt 1'):
+                self.assertIn(guard, block)
+            self.assertRegex(block, r'if \([^\n]+\) \{ throw [^\n]+\}')
+            self.assertIn('$candidate | ConvertTo-Json', block)
+            self.assertLess(block.index('gh run view'), block.index('gh run download'))
 
     def fixture(self, folder, omit=()):
         root = Path(folder)
@@ -385,6 +530,22 @@ class ArtifactTests(unittest.TestCase):
                     self.assertEqual(len(result['downloads']), 6)
                     self.assertTrue(any('/artifacts?' in u and 'page=3' in u for u in github.urls))
                 self.assertTrue(any('/runs?' in u and 'page=2' in u for u in github.urls))
+                self.assertEqual(github.urls.count('repos/o/r'), 1)
+
+    def test_original_link_path_is_also_allowed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root, uploads = self.fixture(folder)
+            class OriginalPath(FakeGitHub):
+                def __call__(self, endpoint):
+                    body, headers = super().__call__(endpoint)
+                    if 'Link' in headers:
+                        headers['Link'] = headers['Link'].replace('/repositories/42/', '/repos/o/r/')
+                    return body, headers
+            github = OriginalPath(uploads)
+            github.page_size = 1
+            result, _ = self.collect(root, github)
+            self.assertEqual(result['status'], 'completed')
+            self.assertTrue(any('api.github.com/repos/o/r/' in u and 'page=2' in u for u in github.urls))
 
     def test_cap_count_contradiction_and_duplicate_rows_stop(self):
         endpoint = 'repos/o/r/actions/workflows/w.yml/runs?head_sha=' + SHA + '&per_page=100'
@@ -395,11 +556,11 @@ class ArtifactTests(unittest.TestCase):
                   ({'total_count': 1, 'workflow_runs': [{'id': 1}]}, {'Link': '<https://evil.invalid/x>; rel="next"'})]
         for payload, headers in cases:
             with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, 'STOP'):
-                listing(lambda _: (payload, headers), endpoint, 'workflow_runs')
+                listing(lambda _: (payload, headers), endpoint, 'workflow_runs', repository_id=42)
         # The workflow search cap must not be applied to the artifact endpoint.
         rows = [{'id': i + 1} for i in range(1001)]
         self.assertEqual(listing(lambda _: ({'total_count': len(rows), 'artifacts': rows}, {}),
-                                 'repos/o/r/actions/runs/1/artifacts?per_page=100', 'artifacts'), rows)
+                                 'repos/o/r/actions/runs/1/artifacts?per_page=100', 'artifacts', repository_id=42), rows)
 
     def test_http_headers_are_used_and_dry_run_is_never_completed(self):
         raw = 'HTTP/2.0 200 OK\nLink: <https://api.github.com/repos/o/r/actions/runs?page=2>; rel="next"\n\n{"total_count":0,"workflow_runs":[]}'

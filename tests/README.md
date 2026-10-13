@@ -89,7 +89,9 @@ REQ-D-WORKSPACE-WINDOWS → RISK-D-WORKSPACE-IDENTITY/UNSAVED/STALE → TEST-VIE
 CI-TOOLING-1a의 `ci_workflow_consumers_test.py`는 Python AST와 TypeScript AST로 workflow 소비자를 찾고 import 고정점으로 전파한다.
 Python dotted `importlib.import_module`/`__import__`, TS import-equals, 같은 파일의 JS const/const 별칭 require와
 구분자가 붙은 workflow 경로 조각을 포함한다. JS const는 선언 symbol로 구분하며 비소비자 import와 주석/docstring은 음성 대조다.
-지원 밖 동적 module 인수는 소비자로 보수적으로 포함한다. 명단은 정확한 실행 의존성 분석이 아니므로 과잉 포함할 수 있다.
+문자열 module/file 이름은 인식한 importlib·runpy·subprocess/spawn loader 인수에서만 연결한다.
+Python package/상대 import와 JS 상대 specifier는 importer 경로를 기준으로 해석하며 전역 basename으로 연결하지 않는다.
+지원 밖 동적 loader 인수는 소비자로 보수적으로 포함한다. 명단은 정확한 실행 의존성 분석이 아니므로 과잉 포함할 수 있다.
 감사가 찾은 모든 경로는 `scripts/record-run.py`의 소비자 명단에 있어야 하며 새 누락은 시험 실패다.
 Stage 7/8 비후보 artifact 수집과 수동 G3 입력의 분리, 재실행 STOP 및 dry-run 의미는 `tests/stage-exit.md`를 따른다.
 기존 실행 폴더는 거절하며 명령 실패 코드를 유지한다. 실행 불가는 자식 exit를 `null`로 기록하고 127, 기록 실패는 125로 종료한다. 원래 명령의 실패를 시험 통과로 해석하지 않는다.

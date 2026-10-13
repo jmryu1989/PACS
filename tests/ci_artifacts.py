@@ -67,7 +67,7 @@ def stop(reason, run=None, artifact=None):
                      f'artifact_id={artifact if artifact is not None else "unknown"}: {reason}')
 
 
-def listing(query, endpoint, key, run=None):
+def listing(query, endpoint, key, run=None, *, repository_id):
     """Follow actual Link relations; counts are consistency checks, never loop bounds.
 
     The 2026-09-25 count change may report a lower bound at scale. Reject capped,
@@ -75,7 +75,9 @@ def listing(query, endpoint, key, run=None):
     1,000 cap; they still need Link exhaustion and consistent unique row counts.
     """
     origin = urlsplit('https://api.github.com/' + endpoint)
-    original_params = parse_qs(origin.query)
+    original_params = {k: v for k, v in parse_qs(origin.query, keep_blank_values=True).items() if k != 'page'}
+    remainder = origin.path.split('/', 4)[4]
+    canonical_path = f'/repositories/{repository_id}/{remainder}'
     rows, ids, visited, count = [], set(), set(), None
     while endpoint:
         if endpoint in visited:
@@ -113,11 +115,16 @@ def listing(query, endpoint, key, run=None):
         endpoint = next_links[0] if next_links else None
         if endpoint:
             target = urlsplit(endpoint)
-            params = parse_qs(target.query)
-            if (target.scheme != 'https' or target.netloc != origin.netloc or target.path != origin.path
-                    or {k: v for k, v in params.items() if k != 'page'} != original_params
-                    or not page):
-                stop('unsafe/inconsistent pagination Link', run)
+            params = parse_qs(target.query, keep_blank_values=True)
+            if target.scheme != 'https' or target.netloc != origin.netloc:
+                stop('pagination Link foreign host/scheme', run)
+            if target.path not in (origin.path, canonical_path):
+                stop('pagination Link foreign repository/path', run)
+            if {k: v for k, v in params.items() if k != 'page'} != original_params:
+                stop('pagination Link changed query', run)
+            if (target.fragment or len(params.get('page', [])) != 1
+                    or not params['page'][0].isdigit() or int(params['page'][0]) < 1 or not page):
+                stop('invalid pagination Link page/fragment', run)
     if len(rows) != count:
         stop(f'incomplete listing: {len(rows)} unique rows, reported {count}', run)
     return rows
@@ -131,8 +138,8 @@ def revision(run):
 def check_run(run, workflow, sha):
     if run['path'].split('@')[0] != workflow or run['head_sha'] != sha:
         stop(f'{workflow}: run owner/SHA mismatch', run)
-    if run.get('event') not in ('push', 'pull_request'):
-        stop('only push/pull_request head_sha evidence is supported', run)
+    if run.get('event') != 'push':
+        stop(f'only push evidence is supported; event={run.get("event")}', run)
     if type(run.get('run_attempt')) is not int or run['run_attempt'] != 1:
         # REST artifacts have run_id but no attempt. Existing producers do not
         # bind attempt either. Timestamps/name ordering are not that evidence.
@@ -179,6 +186,10 @@ def download(root, sha, stage, out, query=gh_get, fetch=fetch_archive, *,
     repository = repository or gh_json('repo', 'view', '--json', 'nameWithOwner')['nameWithOwner']
     if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository):
         stop('invalid repository')
+    repo, _ = query(f'repos/{repository}')
+    repository_id = repo.get('id')
+    if type(repository_id) is not int or repository_id <= 0:
+        stop('invalid repository id')
     base = f'repos/{repository}/actions'
     out = Path(out)
     out.mkdir(parents=True, exist_ok=False)
@@ -193,7 +204,7 @@ def download(root, sha, stage, out, query=gh_get, fetch=fetch_archive, *,
 
     def workflow_runs(workflow):
         endpoint = f'{base}/workflows/{Path(workflow).name}/runs?head_sha={sha}&per_page=100'
-        rows = listing(query, endpoint, 'workflow_runs')
+        rows = listing(query, endpoint, 'workflow_runs', repository_id=repository_id)
         runs = [run for run in rows if run['head_sha'] == sha]
         # Do not silently drop contradictory filtered API rows.
         if len(runs) != len(rows):
@@ -222,7 +233,8 @@ def download(root, sha, stage, out, query=gh_get, fetch=fetch_archive, *,
                                      'sha': sha, 'run_head_sha': run['head_sha'], 'event': run['event'],
                                      'attempt': run['run_attempt'], 'updated_at': run['updated_at'],
                                      'conclusion': run['conclusion']})
-            artifacts = listing(query, f'{base}/runs/{run["id"]}/artifacts?per_page=100', 'artifacts', run)
+            artifacts = listing(query, f'{base}/runs/{run["id"]}/artifacts?per_page=100', 'artifacts', run,
+                                repository_id=repository_id)
             for artifact in sorted(names):
                 named = [item for item in artifacts if item['name'] == artifact]
                 artifact_id = ','.join(str(item['id']) for item in named) or 'missing'

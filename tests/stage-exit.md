@@ -93,7 +93,11 @@ G3 증거는 기존처럼 **해당 dispatch 응답/공식 후보 기록에 남�
 최신 공식 실행의 완료/성공, candidate.yml 소유, 실제 attempt와 artifact 출처를 확인하고,
 이전 성공 run으로 대체하지 않는다. 출처를 증명할 수 없으면 STOP한다.
 
-비후보는 push/pull_request의 head_sha를 대조하고 모든 Link 페이지를 끝까지 읽는다.
+비후보는 **push 실행만** head_sha 증거로 수집한다. pull_request는 GitHub 병합 ref를 시험하므로
+run id/event를 남기고 STOP하며 이 결과를 main SHA의 stage-exit 증거로 쓰지 않는다.
+시작 시 GET repos/{owner}/{repo}로 저장소 id를 한 번 확인하고 Link의 원래 경로 또는
+같은 저장소의 /repositories/{id}/ 경로만 따라 끝까지 읽는다. page 외 query 변경,
+다른 host/저장소/path 및 Link 순환은 STOP한다.
 [workflow runs 계약](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-workflow)의
 head_sha 검색 상한 1,000건에 닿으면 STOP한다. total_count는 반복 횟수가 아니라 일관성 검사다.
 [2026-09-25 count 변경](https://github.blog/changelog/2026-09-25-changes-to-query-results-in-the-github-actions-api-and-ui/)의
@@ -103,7 +107,38 @@ head_sha 검색 상한 1,000건에 닿으면 STOP한다. total_count는 반복 �
 현재 producer도 이를 결속하지 않으므로 **attempt 1만 수집**한다. 같은 SHA의 관련 실행 중
 재실행(attempt 2 이상)이 하나라도 있으면 오래된 생성 시각이어도 STOP한다. 정상 재실행과
 부분 job 재실행도 이 제한에 포함된다. 시각·동명 artifact의 순서로 attempt를 추정하지 않는다.
-재실행을 수집하려면 후속 producer provenance 계약이 필요하며 새 실행을 강제로 만들지는 않는다.
+재실행을 수집하려면 후속 CI-TOOLING-1b **CD-02-R** producer provenance 계약이 필요하다.
+모든 stage artifact에 run id와 run_attempt를 넣고 attempt N에서 생성된 것이 증명된 artifact만
+N의 증거로 수집한다. 부분 재실행은 이전 attempt artifact를 N으로 재표시하지 않고 STOP하는
+정책을 기본으로 하며, 전체 재실행·부분 재실행·attempt 미증명 시험을 1b에서 수행한다.
+
+**재실행 STOP 운영 절차:** attempt >= 2이면 원래 수집 폴더와 STOP 원문을 보존하고 아래처럼
+`gh run view --json databaseId,attempt,status,conclusion,headSha,event,workflowName`으로 확인한다.
+`$stoppedRun`은 STOP의 run id다. 다음 명령의 실제 인수 순서는 아래 실행 블록을 따른다.
+운영자는 반환된 run id/attempt/SHA/event/workflow와 최신 공식 실행 기록을 대조한다.
+검사한 artifact id로만 archive를 다운로드하고 run id/attempt/artifact id/digest와 조회 응답을
+수동 증거로 남긴다. 이 자료는 진단·누락 확인에만 쓰며 attempt 출처가 증명되기 전에는
+자동 수집 completed나 stage-exit PASS 증거로 쓰지 않는다. **이전 성공 run 대체 금지**다.
+이미 dispatch한 대체 run도 event=workflow_dispatch로 STOP하며 동일 수동 절차를 적용한다.
+대체 dispatch나 전체/부분 재실행의 성공만으로 STOP을 해소하지 않는다.
+
+```powershell
+$stopped = gh run view $stoppedRun --json databaseId,attempt,status,conclusion,headSha,event,workflowName
+if ($LASTEXITCODE -ne 0) { throw 'STOP 실행 확인 실패' }
+$stopped | Set-Content -Encoding utf8 "$out/stopped-run.json"
+# repository와 artifactId는 위 실행의 REST artifact 목록/metadata를 대조해 확정한다.
+if (-not $artifactId) { throw '확인된 artifact id 필요' }
+$metadata = gh api "repos/$repository/actions/artifacts/$artifactId" | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $metadata.workflow_run.id -ne $stoppedRun) { throw 'artifact 실행 출처 불일치' }
+$archive = "$out/manual-$stoppedRun-$artifactId.zip"
+# Windows PowerShell의 native stdout 재인코딩을 피하고 원본 zip 바이트를 보존한다.
+python -c 'import subprocess,sys; f=open(sys.argv[2], "xb"); subprocess.run(["gh","api",sys.argv[1]], stdout=f, check=True)' "repos/$repository/actions/artifacts/$artifactId/zip" $archive
+if ($LASTEXITCODE -ne 0) { throw '수동 archive 수령 실패' }
+$digest = 'sha256:' + (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+if ($metadata.digest -and $metadata.digest -ne $digest) { throw '수동 archive digest 불일치' }
+@{ run = ($stopped | ConvertFrom-Json); artifact_id = $artifactId; metadata = $metadata; digest = $digest; use = 'diagnostic-only' } | ConvertTo-Json -Depth 12 | Set-Content -Encoding utf8 "$out/manual-$stoppedRun-$artifactId.json"
+```
+
 새 run끼리는 생성 시각, 같은 초면 ID로 최신을 고르고 최신 실패·대기·진행·누락·만료는 거절한다.
 검사한 artifact ID로 archive를 받고 제공된 digest와 대조하며, 실제 archive SHA256을 남긴다.
 각 다운로드 직후 run attempt/updated_at과 metadata를 재조회하고 마지막에 전체 run 집합을
@@ -140,6 +175,11 @@ python -B tests/ci_artifacts.py --sha $sha --stage 7 --non-candidate --out "$out
 if ($LASTEXITCODE -ne 0) { throw '동일 SHA의 workflow별 artifact 수집 실패; 원문 보존 후 확인' }
 # $candidateRun은 이 후보의 공식 dispatch 기록에서 확인한 run id (최신 검색으로 추측하지 않음).
 if (-not $candidateRun) { throw '공식 dispatch run id 및 attempt 확인 필요' }
+$candidateJson = gh run view $candidateRun --json workflowName,event,status,conclusion,headSha,attempt
+if ($LASTEXITCODE -ne 0) { throw '공식 G3 실행 조회 실패' }
+$candidate = $candidateJson | ConvertFrom-Json
+if ($candidate.workflowName -ne 'Validate immutable deployment candidate' -or $candidate.event -ne 'workflow_dispatch' -or $candidate.status -ne 'completed' -or $candidate.conclusion -ne 'success' -or $candidate.attempt -lt 1) { throw '공식 G3 workflow/event/완료/성공/attempt 확인 실패' }
+$candidate | ConvertTo-Json | Set-Content -Encoding utf8 "$out/candidate-$candidateRun-run.json"
 $candidateDirectory = "$out/hosted/candidate/$candidateRun/candidate-$sha"
 gh run download $candidateRun -n "candidate-$sha" -D $candidateDirectory
 if ($LASTEXITCODE -ne 0) { throw '공식 G3 artifact 수령 실패; 이전 성공 대체 금지' }
@@ -314,6 +354,11 @@ python -B tests/ci_artifacts.py --sha $sha --stage 8 --non-candidate --out "$out
 if ($LASTEXITCODE -ne 0) { throw '동일 SHA의 workflow별 artifact 수집 실패; 원문 보존 후 확인' }
 # $candidateRun은 이 후보의 공식 dispatch 기록에서 확인한 run id (최신 검색으로 추측하지 않음).
 if (-not $candidateRun) { throw '공식 dispatch run id 및 attempt 확인 필요' }
+$candidateJson = gh run view $candidateRun --json workflowName,event,status,conclusion,headSha,attempt
+if ($LASTEXITCODE -ne 0) { throw '공식 G3 실행 조회 실패' }
+$candidate = $candidateJson | ConvertFrom-Json
+if ($candidate.workflowName -ne 'Validate immutable deployment candidate' -or $candidate.event -ne 'workflow_dispatch' -or $candidate.status -ne 'completed' -or $candidate.conclusion -ne 'success' -or $candidate.attempt -lt 1) { throw '공식 G3 workflow/event/완료/성공/attempt 확인 실패' }
+$candidate | ConvertTo-Json | Set-Content -Encoding utf8 "$out/candidate-$candidateRun-run.json"
 $candidateDirectory = "$out/hosted/candidate/$candidateRun/candidate-$sha"
 gh run download $candidateRun -n "candidate-$sha" -D $candidateDirectory
 if ($LASTEXITCODE -ne 0) { throw '공식 G3 artifact 수령 실패; 이전 성공 대체 금지' }
