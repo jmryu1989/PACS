@@ -17,7 +17,7 @@ TOOLS_ROOT = Path(__file__).resolve().parents[1]
 SHA = re.compile(r"[0-9a-f]{40}")
 BASE = (
     # S7-U1a: CriticalResultInvariantTests added six live cases, 83 -> 89 (and the selection 105 -> 112).
-    ("invariants_live.py", None, "candidate-invariants", 89),
+    ("invariants_live.py", None, "candidate-invariants", 95),
     ("e2e/test_worklist.py", None, "candidate-worklist", 15),
 )
 FLOWS = (

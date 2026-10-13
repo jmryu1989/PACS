@@ -15,6 +15,7 @@ import html
 import http.cookiejar
 import json
 import os
+import queue
 import re
 import ssl
 import subprocess
@@ -4932,6 +4933,250 @@ class LiveInvariantTests(unittest.TestCase):
 CRITICAL_STUDY_UID = re.compile(r"^[0-9]+(?:\.[0-9]+)+$")
 CRITICAL_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 CRITICAL_AUDIT_ACTION = "study.critical-result"
+
+
+class OrderCorrectionInvariantTests(unittest.TestCase):
+    """REQ-S4-U5-STUDY-IDENTITY -> TEST-S4-U5-CORRECTION-RACE / MATCH-AUDIT-ATOMICITY.
+
+    Real HTTP, PostgreSQL row locks and transaction rollback; no product hooks.
+    Persistent psql sessions observe the lock graph without Docker startup latency
+    inside the product's three-second lock budget. No sleep determines an ordering.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.stack = LiveStack()
+        cls.addClassCleanup(cls.stack.cleanup_test_identities)
+        cls.addClassCleanup(cls.stack.cleanup_all)
+        cls.stack.require_stack()
+
+    @contextmanager
+    def sql_session(self):
+        require_live_run()
+        process = subprocess.Popen(
+            ["docker", "compose", "exec", "-T", "db", "psql", "-X", "-U", "kin", "-d", "kin",
+             "-v", "ON_ERROR_STOP=1", "-qAt", "-P", "pager=off"], cwd=ROOT,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", bufsize=1,
+        )
+        lines = queue.Queue()
+
+        def read():
+            for line in process.stdout:
+                lines.put(line.rstrip("\r\n"))
+            lines.put(None)
+
+        reader = threading.Thread(target=read, daemon=True)
+        reader.start()
+
+        def query(sql):
+            end = "CN_N01A_" + uuid.uuid4().hex
+            process.stdin.write(sql + ";\n\\echo " + end + "\n")
+            process.stdin.flush()
+            result = []
+            deadline = time.monotonic() + 10
+            while True:
+                line = lines.get(timeout=max(0.001, deadline - time.monotonic()))
+                if line == end:
+                    return result
+                if line is None:
+                    raise RuntimeError("CN-N01-A psql ended: " + "\n".join(result))
+                if line:
+                    result.append(line)
+
+        try:
+            query("SET statement_timeout='10s'")
+            yield query
+        finally:
+            process.stdin.close()
+            try:
+                process.wait(timeout=12)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+                raise
+            reader.join(timeout=2)
+            process.stdout.close()
+            self.assertEqual(process.returncode, 0, "test-owned psql session failed")
+
+    @contextmanager
+    def correction_fixture(self, matched=False):
+        with self.stack.fixture() as fixture:
+            oid = "SYNTHETIC-CN-N01A-" + uuid.uuid4().hex
+            psql('INSERT INTO "Order" (oid,"institutionId","patientId",name,sex,birth,sched,modality,descr,ward,"reqDoc") '
+                 f"VALUES ('{oid}','hallym','{fixture.patient_id}','SYNTHETIC','M','1980-01-01','','CT','','','{oid}')")
+            try:
+                # Complete token acquisition and document reads before either transaction is held.
+                self.stack.token("tech")
+                self.stack.token("doctor")
+                if matched:
+                    result = self.correct("match", fixture.uid, oid)
+                    self.assertEqual(result.status, 201, result.text)
+                yield fixture, oid
+            finally:
+                # Compare the owned marker and exact stored row before removing only this order.
+                rows = psql(f'SELECT to_jsonb(o)::text FROM "Order" o WHERE oid={sql_text(oid)}')
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(json.loads(rows[0])["reqDoc"], oid)
+                self.assertEqual(psql('DELETE FROM "Order" o WHERE to_jsonb(o)=' + sql_text(rows[0])
+                                      + '::jsonb RETURNING oid'), [oid])
+
+    def correct(self, action, uid, oid):
+        return self.stack.request("POST", "/" + action, "tech", {"uid": uid, "oid": oid})
+
+    def stored(self, query, uid, oid):
+        return json.loads(query("SELECT jsonb_build_object("
+            f"'study',(SELECT to_jsonb(s) FROM \"StudyState\" s WHERE uid={sql_text(uid)}),"
+            f"'order',(SELECT to_jsonb(o) FROM \"Order\" o WHERE oid={sql_text(oid)}),"
+            f"'report',(SELECT to_jsonb(r) FROM \"Report\" r WHERE uid={sql_text(uid)}),"
+            f"'versions',(SELECT coalesce(jsonb_agg(to_jsonb(v) ORDER BY version),'[]') FROM \"ReportVersion\" v WHERE uid={sql_text(uid)}),"
+            f"'drafts',(SELECT coalesce(jsonb_agg(to_jsonb(d) ORDER BY author),'[]') FROM \"ReportDraft\" d WHERE uid={sql_text(uid)}),"
+            f"'audit',(SELECT coalesce(jsonb_agg(to_jsonb(a) ORDER BY id),'[]') FROM \"AuditLog\" a WHERE target={sql_text(uid)}))::text")[0])
+
+    def wait_for_blocked(self, query, blocker, future):
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            rows = query(f"SELECT pid FROM pg_stat_activity WHERE {int(blocker)}=ANY(pg_blocking_pids(pid))")
+            if rows:
+                self.assertEqual(len(rows), 1, rows)
+                return int(rows[0])
+            if future.done():
+                self.fail("request completed before the required lock wait: " + future.result().text)
+        self.fail("request did not reach the required PostgreSQL lock wait")
+
+    @contextmanager
+    def trigger(self, query, table, event, when, body):
+        name = "cn_n01a_" + uuid.uuid4().hex
+        query(f'CREATE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql AS $gate$ BEGIN {body} RETURN NEW; END; $gate$')
+        try:
+            query(f'CREATE TRIGGER {name} {event} ON "{table}" FOR EACH ROW WHEN ({when}) EXECUTE FUNCTION {name}()')
+            try:
+                yield
+            finally:
+                query(f'DROP TRIGGER {name} ON "{table}"')
+        finally:
+            query(f'DROP FUNCTION {name}()')
+            self.assertEqual(query(f"SELECT count(*) FROM pg_proc WHERE proname='{name}'"), ["0"])
+            self.assertEqual(query(f"SELECT count(*) FROM pg_trigger WHERE tgname='{name}'"), ["0"])
+            print("CN-N01-A trigger/function removed:", name, flush=True)
+
+    def interleave(self, action, report_first, opposing=False):
+        with self.correction_fixture(matched=action == "unmatch") as (fixture, oid), \
+                self.sql_session() as query, self.sql_session() as gate:
+            uid = fixture.uid
+            path = f"/studies/{uid}/report/commit"
+            document = self.stack._as_document("POST", path, "doctor",
+                {"action": "approve", "baseVersion": 0, "findings": fixture.secret,
+                 "conclusion": "CN-N01-A", "recommendation": ""})
+            report = lambda: self.stack.request("POST", path, "doctor", document)
+            correction = lambda: self.correct(action, uid, oid)
+            first, second = (report, correction) if report_first else (correction, report)
+            key = int(uuid.uuid4().hex[:7], 16)
+            gate_pid = int(gate("SELECT pg_backend_pid()")[0])
+            gate(f"SELECT pg_advisory_lock(19301,{key})")
+            table, event = ("ReportVersion", "AFTER INSERT") if report_first else ("StudyState", "AFTER UPDATE OF matched")
+            when = f"NEW.uid={sql_text(uid)}"
+            if not report_first:
+                when += " AND OLD.matched IS DISTINCT FROM NEW.matched"
+            baseline = self.stored(query, uid, oid)
+            with self.trigger(query, table, event, when, f"PERFORM pg_advisory_xact_lock(19301,{key});"), \
+                    ThreadPoolExecutor(max_workers=3) as pool:
+                try:
+                    first_future = pool.submit(first)
+                    first_pid = self.wait_for_blocked(query, gate_pid, first_future)
+                    second_future = pool.submit(second)
+                    second_pid = self.wait_for_blocked(query, first_pid, second_future)
+                    other = None
+                    if opposing:
+                        other_action = "unmatch" if action == "match" else "match"
+                        other = pool.submit(self.correct, other_action, uid, oid)
+                        # Observe its arrival before release, including a soft blocker queued
+                        # ahead of it. Merely submitting a future would not probe opposing order.
+                        deadline = time.monotonic() + 2
+                        while not other.done():
+                            waiting = query(f"SELECT pid FROM pg_stat_activity WHERE pid<>{second_pid} AND "
+                                f"({first_pid}=ANY(pg_blocking_pids(pid)) OR {second_pid}=ANY(pg_blocking_pids(pid)))")
+                            if waiting:
+                                break
+                            if time.monotonic() >= deadline:
+                                self.fail("opposing correction did not reach a database wait or refusal")
+                finally:
+                    self.assertEqual(gate(f"SELECT pg_advisory_unlock(19301,{key})"), ["t"])
+                first_result, second_result = first_future.result(timeout=10), second_future.result(timeout=10)
+                self.assertEqual(first_result.status, 201, first_result.text)
+                if report_first:
+                    self.assertEqual(second_result.status, 400, second_result.text)
+                    phrase = "매칭할 수" if action == "match" else "매칭을 풀 수"
+                    self.assertEqual(second_result.body["message"],
+                        f"판독 전(RS: W)인 검사만 {phrase} 있습니다 (현재 RS: A)")
+                else:
+                    self.assertEqual(second_result.status, 201, second_result.text)
+                other_result = other.result(timeout=10) if other else None
+                if other_result:
+                    self.assertIn(other_result.status, (201, 400), other_result.text)
+                final = self.stored(query, uid, oid)
+                self.assertEqual(final["study"]["rs"], "A")
+                self.assertEqual(final["report"]["findings"], fixture.secret)
+                self.assertEqual(len(final["versions"]), 1)
+                new_audit = [a for a in final["audit"] if a["id"] not in {b["id"] for b in baseline["audit"]}]
+                corrections = [a for a in new_audit if a["action"] in ("match", "unmatch")]
+                self.assertEqual(len(corrections), 0 if report_first else 1 + int(bool(other_result and other_result.status == 201)))
+                if report_first:
+                    self.assertEqual(final["order"], baseline["order"])
+                    # Exactly the sequential report refusal, then compare every persisted byte.
+                    refused = correction()
+                    self.assertEqual((refused.status, refused.body), (second_result.status, second_result.body))
+                    self.assertEqual(self.stored(query, uid, oid), final)
+                    for field in ("matched", "orderOid", "ov", "orig", "ward", "institutionId", "teleInstitutionId", "ss", "draftEpoch"):
+                        self.assertEqual(final["study"][field], baseline["study"][field], field)
+                expected = ("M" if action == "match" else "U") if not report_first else baseline["study"]["matched"]
+                if other_result and other_result.status == 201:
+                    expected = "U" if expected == "M" else "M"
+                self.assertEqual((final["study"]["matched"], final["order"]["matched"]), (expected, expected))
+                self.assertEqual(final["study"]["orderOid"], oid if expected == "M" else None)
+                self.assertEqual(final["order"]["studyUid"], uid if expected == "M" else None)
+                print("CN-N01-A interleaving:", action, "report_first=", report_first,
+                      "opposing=", opposing, "statuses=", first_result.status, second_result.status,
+                      other_result.status if other_result else None, flush=True)
+
+    def test_match_report_first(self):
+        self.interleave("match", True)
+
+    def test_unmatch_report_first(self):
+        self.interleave("unmatch", True)
+
+    def test_match_correction_first(self):
+        self.interleave("match", False)
+
+    def test_unmatch_correction_first(self):
+        self.interleave("unmatch", False)
+
+    def test_opposing_corrections_and_report_do_not_deadlock(self):
+        for action in ("match", "unmatch"):
+            with self.subTest(first=action):
+                self.interleave(action, False, opposing=True)
+
+    def test_match_audit_failure_rolls_back_and_success_has_one_audit(self):
+        with self.correction_fixture() as (fixture, oid), self.sql_session() as query:
+            uid = fixture.uid
+            before = self.stored(query, uid, oid)
+            with self.trigger(query, "AuditLog", "BEFORE INSERT",
+                              f"NEW.action='match' AND NEW.target={sql_text(uid)}",
+                              "RAISE EXCEPTION 'CN-N01-A synthetic match audit failure';"):
+                failed = self.correct("match", uid, oid)
+                self.assertGreaterEqual(failed.status, 400, failed.text)
+                self.assertEqual(self.stored(query, uid, oid), before)
+            succeeded = self.correct("match", uid, oid)
+            self.assertEqual(succeeded.status, 201, succeeded.text)
+            after = self.stored(query, uid, oid)
+            audits = [row for row in after["audit"] if row["action"] == "match"]
+            self.assertEqual(len(audits), 1)
+            self.assertEqual(audits[0]["actor"], self.stack.actor("tech"))
+            self.assertEqual(json.loads(audits[0]["detail"]),
+                {"oid": oid, "ov": succeeded.body["ov"], "by": "hallym"})
+            self.assertEqual((after["study"]["orderOid"], after["order"]["studyUid"]), (oid, uid))
+            for key in ("report", "versions", "drafts"):
+                self.assertEqual(after[key], before[key], key)
 
 
 def sql_text(value: Any) -> str:
