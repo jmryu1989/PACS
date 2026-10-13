@@ -5141,9 +5141,75 @@ class OrderCorrectionInvariantTests(unittest.TestCase):
 
     def test_match_report_first(self):
         self.interleave("match", True)
+        # Keep the six-case selection stable; this is the same report-first refusal
+        # contract, with the report held beyond the correction's bounded wait.
+        with self.subTest(bound="match busy then retry"):
+            self.match_busy_then_retry()
 
     def test_unmatch_report_first(self):
         self.interleave("unmatch", True)
+        with self.subTest(bound="foreign institution refuses before lock"):
+            self.foreign_unmatch_does_not_wait()
+
+    def match_busy_then_retry(self):
+        with self.correction_fixture() as (fixture, oid), \
+                self.sql_session() as query, self.sql_session() as gate:
+            uid = fixture.uid
+            path = f"/studies/{uid}/report/commit"
+            document = self.stack._as_document("POST", path, "doctor",
+                {"action": "approve", "baseVersion": 0, "findings": fixture.secret,
+                 "conclusion": "CN-N01-A busy", "recommendation": ""})
+            key = int(uuid.uuid4().hex[:7], 16)
+            gate_pid = int(gate("SELECT pg_backend_pid()")[0])
+            gate(f"SELECT pg_advisory_lock(19301,{key})")
+            before = self.stored(query, uid, oid)
+            # Only this synthetic report's trigger may wait beyond the normal lock
+            # bound. Roll it back on release so retry tests the unchanged W study.
+            body = ("PERFORM set_config('lock_timeout','0',true); "
+                    f"PERFORM pg_advisory_xact_lock(19301,{key}); "
+                    "RAISE EXCEPTION 'CN-N01-A synthetic held report rollback';")
+            with self.trigger(query, "ReportVersion", "AFTER INSERT", f"NEW.uid={sql_text(uid)}", body), \
+                    ThreadPoolExecutor(max_workers=2) as pool:
+                try:
+                    report = pool.submit(self.stack.request, "POST", path, "doctor", document)
+                    report_pid = self.wait_for_blocked(query, gate_pid, report)
+                    start = time.monotonic()
+                    correction = pool.submit(self.correct, "match", uid, oid)
+                    self.wait_for_blocked(query, report_pid, correction)
+                    refused = correction.result(timeout=5)
+                    self.assertEqual(refused.status, 503, refused.text)
+                    self.assertEqual(refused.body["message"],
+                        "검사 처리 중입니다. 잠시 후 최신 메모를 확인하고 다시 시도하세요")
+                    self.assertLess(time.monotonic() - start, 5)
+                    self.assertFalse(report.done(), "report must still own the row at refusal")
+                    self.assertEqual(self.stored(query, uid, oid), before)
+                finally:
+                    self.assertEqual(gate(f"SELECT pg_advisory_unlock(19301,{key})"), ["t"])
+                self.assertGreaterEqual(report.result(timeout=10).status, 400)
+            self.assertEqual(self.stored(query, uid, oid), before)
+            succeeded = self.correct("match", uid, oid)
+            self.assertEqual(succeeded.status, 201, succeeded.text)
+            after = self.stored(query, uid, oid)
+            self.assertEqual((after["study"]["orderOid"], after["order"]["studyUid"]), (oid, uid))
+            self.assertEqual(len([a for a in after["audit"] if a["action"] == "match"]), 1)
+
+    def foreign_unmatch_does_not_wait(self):
+        with self.correction_fixture(matched=True) as (fixture, oid), \
+                self.sql_session() as query, self.sql_session() as owner:
+            self.stack.token("ktech")
+            before = self.stored(query, fixture.uid, oid)
+            owner(f'BEGIN; SELECT uid FROM "StudyState" WHERE uid={sql_text(fixture.uid)} FOR UPDATE')
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                try:
+                    start = time.monotonic()
+                    request = pool.submit(self.stack.request, "POST", "/unmatch", "ktech", {"uid": fixture.uid})
+                    result = request.result(timeout=2)
+                    self.assertEqual(result.status, 404, result.text)
+                    self.assertEqual(result.body["message"], "검사를 찾을 수 없습니다")
+                    self.assertLess(time.monotonic() - start, 2)
+                    self.assertEqual(self.stored(query, fixture.uid, oid), before)
+                finally:
+                    owner("ROLLBACK")
 
     def test_match_correction_first(self):
         self.interleave("match", False)

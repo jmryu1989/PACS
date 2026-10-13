@@ -8,7 +8,7 @@ import { BadRequestException, ConflictException, ForbiddenException, NotFoundExc
 import type { PrismaService } from '../prisma.service';
 import { overlayShape, OVERLAY_RULE_TEXT } from '../study-identity';
 import { closeReaderAssignments } from '../reader-assignment.service';
-import { parse, dump, toClient } from './values';
+import { parse, dump, toClient, noteTransactionError } from './values';
 import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
 import type { PacsInstitutions } from './institutions';
@@ -182,6 +182,7 @@ export class PacsStudyState {
     let state;
     try {
       state = await this.prisma.$transaction(async tx => {
+        await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
         await this.studyAccess.require(c,[uid],tx);
         // 판독·해제·삭제와 같은 순서: 정책 → 검사 → 오더. 잠금 뒤 다시 읽어야
         // 기다리는 동안 확정된 RS와 연결을 예전 W 판정으로 덮어쓰지 않는다.
@@ -237,7 +238,7 @@ export class PacsStudyState {
         await tx.auditLog.create({ data: { actor: c.actor || 'unknown', action: 'match', target: uid,
           detail: dump({ oid, ov, by: me }) } });
         return saved;
-      });
+      }, { maxWait: 4000, timeout: 8000 });
     } catch (e: any) {
       /**
        * 아직 없는 검사를 동시에 만드는 경쟁에는 잠글 검사 행이 없다. 양쪽 nullable unique가 마지막 관문이고, 그 충돌은 사용자가
@@ -246,7 +247,7 @@ export class PacsStudyState {
       if (e?.code === 'P2002')
         throw new BadRequestException(
           '이미 다른 오더 또는 검사와 매칭되었습니다. 목록을 새로고침한 뒤 다시 선택하세요.');
-      throw e;
+      noteTransactionError(e);
     }
     const r = await this.prisma.report.findUnique({ where: { uid } });
     return toClient(state, r, c, await this.access.myDraft(uid, c.actor));
@@ -257,6 +258,9 @@ export class PacsStudyState {
     return this.access.scopeWrite(uid,c,async(tx,audit)=>{
     need(c.roles, 'technician', '매칭 해제');
     const me = inst(c);
+    // 보이지 않는 기관의 요청은 소유자의 행 잠금을 기다리지 않고 기존 404로 거절한다.
+    // 이 선검사는 허가가 아니다. 기다린 뒤의 가시성·RS·연결은 아래 gate가 다시 판정한다.
+    await this.access.gate(uid,c,tx);
     // scopeWrite가 잡은 정책 잠금 다음, 판독과 같은 검사 행 잠금을 먼저 잡는다.
     await tx.$queryRaw`SELECT uid FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`;
     const prev = await this.access.gate(uid,c,tx);
