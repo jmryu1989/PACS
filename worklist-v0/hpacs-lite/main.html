@@ -1067,7 +1067,10 @@
        worklist/related lists and the report when Folders is also open. */
     #study-panel-host { position: fixed; left: 12px; width: 360px; max-width: calc(100vw - 24px); z-index: 90; pointer-events: none; }
     #study-panel-host .study-panel { height: 100%; box-sizing: border-box; pointer-events: auto; box-shadow: 0 8px 24px #0008; }
-    #study-panel-host .study-panel-head button, #study-panel-host [role="tab"] { font: inherit; color: var(--kin-text); background: var(--kin-panel2); border: 1px solid var(--kin-line2); border-radius: 4px; padding: 6px 10px; cursor: pointer; }
+    #study-panel-host .study-panel-head :is(button, select), #study-panel-host [role="tab"] { font: inherit; color: var(--kin-text); background: var(--kin-panel2); border: 1px solid var(--kin-line2); border-radius: 4px; padding: 6px 10px; cursor: pointer; }
+    /* A menulist draws its text box 2 px taller than a button's: one pixel less padding keeps the Text Size
+       control the Close button's height, so the header (and every tab below it) stays where it was. */
+    #study-panel-host .study-panel-head select { padding-block: 5px; padding-inline: 6px; }
     #study-panel-host [role="tab"][aria-selected="true"] { background: var(--kin-row-sel); border-color: var(--kin-accent); text-decoration: none; }
     #study-panel-host :is(.s-thumb, .s-clinical, .s-template) { width: 100%; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
     #study-panel-host .clinical { flex: none; overflow: visible; }

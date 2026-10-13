@@ -11,13 +11,33 @@
   const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
   const workspaceDefaults = () => ({ version: 1, rail: null, worklist: null, related: null,
     prior: null, railCollapsed: false, studyPanelTab: 'info' });
+  const axes = ['landscape', 'portrait'];
+  // The reader's Study Panel width, height and Text Size step, per orientation like every panel size (pilot
+  // D1160, W3R-07). Only what the reader changed is kept: a missing value is the default geometry, so the
+  // record of a reader who never touched the options stays as it was, and older v3 records need no migration.
+  function normalizeStudyPanel(value) {
+    if (!object(value) || Object.keys(value).some(k => !axes.includes(k))) return null;
+    const clean = {};
+    for (const axis of axes.filter(a => Object.hasOwn(value, a))) {
+      const chosen = value[axis], kept = {};
+      if (!object(chosen) || Object.keys(chosen).some(k => !['width', 'height', 'text'].includes(k))) return null;
+      for (const name of ['width', 'height'].filter(n => Object.hasOwn(chosen, n))) {
+        if (!Number.isInteger(chosen[name]) || chosen[name] < 1 || chosen[name] > 16384) return null;
+        kept[name] = chosen[name];
+      }
+      if (Object.hasOwn(chosen, 'text') && ![0, 1, 2].includes(chosen.text)) return null;
+      if (chosen.text) kept.text = chosen.text;
+      if (Object.keys(kept).length) clean[axis] = kept;
+    }
+    return clean;
+  }
   function normalizeV3(value) {
     if (Object.keys(value).some(k => !['version', 'mode', 'portrait', 'landscape', 'reading', 'workspace'].includes(k))) return null;
     const legacy = normalize({ version: 2, mode: value.mode, portrait: value.portrait,
       landscape: value.landscape, reading: value.reading });
     const workspace = value.workspace, clean = workspaceDefaults();
-    if (!legacy || !object(workspace) || Object.keys(workspace).length !== 7
-        || Object.keys(workspace).some(k => !Object.hasOwn(clean, k)) || workspace.version !== 1
+    if (!legacy || !object(workspace) || Object.keys(clean).some(k => !Object.hasOwn(workspace, k))
+        || Object.keys(workspace).some(k => !Object.hasOwn(clean, k) && k !== 'studyPanel') || workspace.version !== 1
         || typeof workspace.railCollapsed !== 'boolean'
         || !['images', 'info', 'templates'].includes(workspace.studyPanelTab)) return null;
     for (const name of ['rail', 'worklist', 'related', 'prior']) {
@@ -30,7 +50,20 @@
     // null, and no build writes them.
     clean.rail = workspace.rail;
     clean.railCollapsed = workspace.railCollapsed; clean.studyPanelTab = workspace.studyPanelTab;
+    if (Object.hasOwn(workspace, 'studyPanel')) {
+      const studyPanel = normalizeStudyPanel(workspace.studyPanel);
+      if (!studyPanel) return null;
+      if (Object.keys(studyPanel).length) clean.studyPanel = studyPanel;
+    }
     return { ...legacy, version: 3, workspace: clean };
+  }
+  // One orientation's Study Panel choice changed (width/height/text), or reset to the default (change null).
+  function withStudyPanel(value, axis, change) {
+    const clean = toVersion3(value);
+    if (!clean || !axes.includes(axis) || (change !== null && !object(change))) return null;
+    const studyPanel = { ...(clean.workspace.studyPanel || {}) };
+    studyPanel[axis] = change === null ? {} : { ...(studyPanel[axis] || {}), ...change };
+    return normalize({ ...clean, workspace: { ...clean.workspace, studyPanel } });
   }
   function normalize(value) {
     if (object(value) && value.version === 3) return normalizeV3(value);
@@ -107,7 +140,7 @@
     try { storage.removeItem(owner); return true; }
     catch (_) { return false; }
   }
-  const api = { PREFIX, defaults, normalize, withReading, workspaceDefaults, toVersion3, mergeLoaded, key, read, write, remove };
+  const api = { PREFIX, defaults, normalize, withReading, workspaceDefaults, toVersion3, withStudyPanel, mergeLoaded, key, read, write, remove };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.KinWorkspaceLayout = api;
 })(globalThis);

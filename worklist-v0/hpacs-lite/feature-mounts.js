@@ -98,6 +98,8 @@
     let layoutMode = "auto";
     let workspaceState = KinWorkspaceLayout.defaults();
     let workspaceEnded = false, studyPanel = null, studyPanelRestoring = false, workspaceWasNarrow = false;
+    // A size under a drag is shown but stored only when the drag ends; the edge being resized now.
+    let studyPanelPreview = null, studyPanelEdge = null;
     const studyPanelAvailable = () => KinAuth.has('radiologist') ? ['images', 'info', 'templates'] : ['images', 'info'];
     function openStudyPanel(tab) {
       if (workspaceEnded || work.state() !== 'active') return false;
@@ -121,9 +123,13 @@
             $('#study-panel-status').textContent = state.open ? 'Study Panel을 열었습니다.' : 'Study Panel을 닫았습니다.';
             if (!state.open && !studyPanelRestoring) {
               const panel = studyPanel; studyPanel = null; panel?.destroy();
+              studyPanelPreview = null;
               document.body.classList.remove('study-panel-open');
             }
           },
+          onResize: resizeStudyPanel,
+          onText: text => changeStudyPanel({ text }),
+          onReset: () => changeStudyPanel(null),
         });
         studyPanelRestoring = true;
         studyPanel.restore({ open: false, tab: workspaceState.workspace.studyPanelTab });
@@ -296,26 +302,73 @@
     // section; it follows the report as the work area scrolls, so Approve/Save/Prelim
     // and the fields stay where the reader sees them, and the work area below the
     // panel stays in view to scroll to the report.
+    //
+    // The reader may move the panel's free edge (pilot D1160): its width where it is a column, its height where
+    // it spans the window, stored per orientation with the Text Size step. With nothing stored and Normal text
+    // every form is exactly the placement above. A chosen size stays between a minimum and the room this rule
+    // gives: never under the report section or its column (W3R5-03 ②). The minimum keeps the panel usable,
+    // larger with the text: a column fits its header row and three tabs in one row (320 px), a band holds 240 px
+    // (the room below which this rule already puts the panel beside the report instead).
     function placeStudyPanel() {
       const host = $('#study-panel-host');
       host.style.width = '';
+      const chosen = workspaceState.workspace?.studyPanel?.[workspaceAxis()] || {}, text = chosen.text || 0;
+      const scale = KinStudyPanel.TEXT_SCALES[text], minWidth = Math.ceil(320 * scale), minHeight = Math.ceil(240 * scale);
+      const wanted = name => studyPanelPreview?.name === name ? studyPanelPreview.size : chosen[name];
+      // The default when nothing was chosen; otherwise the choice (or the default) within [minimum, room].
+      const size = (name, initial, minimum, room) => wanted(name) == null && !text ? initial
+        : Math.min(room, Math.max(minimum, wanted(name) ?? initial));
+      const edge = (name, value, minimum, room) => {
+        studyPanelEdge = { name, min: Math.min(minimum, room), max: room };
+        studyPanel.setSize({ axis: name === 'width' ? 'x' : 'y', value, min: studyPanelEdge.min, max: room });
+      };
+      studyPanel.setText(text);
+      const report = $('.report-p').getBoundingClientRect();
       if (portraitLayout() || innerWidth <= 1100) {
-        const area = $('.split').getBoundingClientRect(), report = $('.report-p').getBoundingClientRect();
+        const area = $('.split').getBoundingClientRect();
         const top = Math.max(0, area.top), bottom = Math.min(report.top, area.bottom, innerHeight) - 12;
         host.style.top = top + 'px';
         // Too little room above a report column beside the work area (Reading
         // Workspace, short side-by-side windows): the column left of it instead.
         if (bottom - top < 240 && report.left - 24 >= 240) {
-          host.style.width = (report.left - 24) + 'px';
+          const room = report.left - 24, width = size('width', room, minWidth, room);
+          host.style.width = width + 'px';
           host.style.height = Math.max(120, Math.min(area.bottom, innerHeight) - 12 - top) + 'px';
+          edge('width', width, minWidth, room);
           return;
         }
-        host.style.height = Math.max(120, Math.min(innerHeight * 0.55, bottom - top)) + 'px';
+        const room = Math.max(120, bottom - top);
+        const height = Math.max(120, size('height', Math.min(innerHeight * 0.55, bottom - top), minHeight, room));
+        host.style.height = height + 'px';
+        edge('height', height, Math.max(120, minHeight), room);
         return;
       }
-      const edge = Math.max(0, $('.right').getBoundingClientRect().top);
-      host.style.top = edge + 'px';
-      host.style.height = Math.max(120, innerHeight - edge - 12) + 'px';
+      const top = Math.max(0, $('.right').getBoundingClientRect().top);
+      host.style.top = top + 'px';
+      host.style.height = Math.max(120, innerHeight - top - 12) + 'px';
+      // The 360 px column (D1041 3-①) is the stylesheet's; a chosen width ends 12 px before the report column.
+      const room = Math.max(120, Math.min(innerWidth, report.width ? report.left : innerWidth) - 24);
+      const width = size('width', 360, minWidth, room);
+      if (wanted('width') != null || text) host.style.width = width + 'px';
+      edge('width', width, minWidth, room);
+    }
+    // The drawer reports the reader's drag/keys; the page clamps, shows and (when the drag ends) stores.
+    function resizeStudyPanel(value, phase) {
+      if (!studyPanel || !studyPanelEdge || !workspaceEditable()) return;
+      if (phase === 'cancel') { studyPanelPreview = null; placeStudyPanel(); return; }
+      const size = Math.round(Math.min(studyPanelEdge.max, Math.max(studyPanelEdge.min, value)));
+      if (phase === 'move') { studyPanelPreview = { name: studyPanelEdge.name, size }; placeStudyPanel(); return; }
+      studyPanelPreview = null;
+      changeStudyPanel({ [studyPanelEdge.name]: size });
+    }
+    // A change of this orientation's size or Text Size step, or (null) the default for this orientation.
+    function changeStudyPanel(change) {
+      if (!workspaceEditable()) return;
+      const next = KinWorkspaceLayout.withStudyPanel(workspaceState, workspaceAxis(), change);
+      if (!next) return;
+      workspaceState = next;
+      if (studyPanel) placeStudyPanel();
+      saveWorkspace();
     }
     document.addEventListener('scroll', event => {
       if (studyPanel && !workspaceEnded && event.target instanceof Element && event.target.matches('.split, .right')) placeStudyPanel();

@@ -1,6 +1,10 @@
 /* Move existing study tools into a non-modal drawer without losing their state or the opener's focus. */
 (function (root) {
   'use strict';
+  // Text Size steps Normal / Large / Larger (pilot D1160). The moved tools keep their own pixel font sizes, so the
+  // tabs and tab contents are zoomed as a whole; the header, the report editor and the worklist never are.
+  const TEXT_SCALES = Object.freeze([1, 1.2, 1.4]);
+  const TEXT_LABELS = ['Normal', 'Large', 'Larger'];
   function create(app) {
     const host = app.host, doc = host?.ownerDocument;
     const names = ['images', 'info', 'templates'], labels = ['Images', 'Info', 'Templates'];
@@ -27,7 +31,13 @@
     drawer.id = host.id + '-study-panel'; drawer.setAttribute('aria-label', 'Study Panel');
     const header = node('div', '', drawer); header.className = 'study-panel-head';
     node('h2', 'Study Panel', header);
-    const closeButton = node('button', 'Close', header); closeButton.type = 'button';
+    const tools = node('div', '', header); tools.className = 'study-panel-tools';
+    const textSize = node('select', '', tools); textSize.setAttribute('aria-label', 'Text Size');
+    textSize.title = 'Study Panel 글자 크기입니다(기본·크게·더 크게). 판독문과 워크리스트 글자는 바뀌지 않습니다.';
+    TEXT_LABELS.forEach((label, step) => { node('option', label, textSize).value = String(step); });
+    const resetButton = node('button', 'Default', tools); resetButton.type = 'button';
+    resetButton.title = '이 방향(가로·세로) 화면의 Study Panel 크기와 글자 크기를 기본값으로 되돌립니다.';
+    const closeButton = node('button', 'Close', tools); closeButton.type = 'button';
     const tablist = node('div', '', drawer); tablist.setAttribute('role', 'tablist');
     tablist.setAttribute('aria-label', 'Study Panel'); tablist.setAttribute('aria-orientation', 'horizontal');
     for (const [i, name] of names.entries()) {
@@ -41,6 +51,13 @@
       moved.push({ content, marker }); panel.append(content);
       listen(tab, 'click', () => select(name));
     }
+    // The edge facing the work area. The page owns the geometry: it says which axis this edge resizes and
+    // within which bounds, and stores what the reader chose (onResize/onReset); the drawer only reports input.
+    const grip = node('div', '', drawer); grip.className = 'study-panel-resize';
+    grip.setAttribute('role', 'separator'); grip.tabIndex = 0; grip.setAttribute('aria-controls', drawer.id);
+    grip.setAttribute('aria-label', 'Study Panel 크기 조절');
+    grip.title = '드래그하거나 화살표 키로 Study Panel 크기를 조절합니다. 두 번 클릭하면 기본 크기와 글자로 돌아갑니다.';
+    let text = 0, size = null, drag = null;
     const snapshot = () => ({ ...state });
     // Layout records keep the preference even while the current mode hides it.
     const shownTab = () => available.includes(state.tab) ? state.tab : available[0];
@@ -142,6 +159,73 @@
       const next = destinations[event.key];
       event.preventDefault(); event.stopPropagation(); select(available[next]);
     });
+    function renderText() {
+      textSize.value = String(text);
+      for (const el of [tablist, ...panels]) el.style.zoom = text ? String(TEXT_SCALES[text]) : '';
+    }
+    const validText = value => Number.isInteger(value) && value >= 0 && value < TEXT_SCALES.length;
+    function setText(value) {
+      if (destroyed || !validText(value)) return false;
+      text = value; renderText(); return true;
+    }
+    listen(textSize, 'change', () => {
+      const value = Number(textSize.value);
+      if (!validText(value) || value === text) { renderText(); return; }
+      text = value; renderText(); app.onText?.(value);
+    });
+    function renderSize() {
+      grip.hidden = !size;
+      if (!size) return;
+      grip.setAttribute('aria-orientation', size.axis === 'x' ? 'vertical' : 'horizontal');
+      grip.setAttribute('aria-valuenow', String(Math.round(size.value)));
+      grip.setAttribute('aria-valuemin', String(Math.round(size.min)));
+      grip.setAttribute('aria-valuemax', String(Math.round(size.max)));
+    }
+    function setSize(value) {
+      if (destroyed) return false;
+      if (value === null) { size = null; drag = null; renderSize(); return true; }
+      if (!value || !['x', 'y'].includes(value.axis) || ![value.value, value.min, value.max].every(Number.isFinite)
+          || value.min > value.max) return false;
+      size = { axis: value.axis, value: value.value, min: value.min, max: value.max }; renderSize(); return true;
+    }
+    const pointerAt = event => drag.axis === 'x' ? event.clientX : event.clientY;
+    listen(grip, 'pointerdown', event => {
+      if (event.button !== 0 || !size || !state.open || destroyed) return;
+      event.preventDefault();
+      drag = { id: event.pointerId, axis: size.axis, from: 0, start: size.value, moved: false };
+      drag.from = pointerAt(event);
+      grip.setPointerCapture?.(event.pointerId);
+    });
+    listen(grip, 'pointermove', event => {
+      if (!drag || event.pointerId !== drag.id) return;
+      const delta = pointerAt(event) - drag.from;
+      if (!delta && !drag.moved) return;
+      drag.moved = true; app.onResize?.(drag.start + delta, 'move');
+    });
+    const endDrag = event => {
+      if (!drag || event.pointerId !== drag.id) return;
+      const done = drag, at = pointerAt(event); drag = null;
+      if (grip.hasPointerCapture?.(event.pointerId)) grip.releasePointerCapture(event.pointerId);
+      // A press without movement (or the first click of a double-click) changes and stores nothing.
+      if (event.type === 'pointerup' && done.moved) app.onResize?.(done.start + at - done.from, 'end');
+      else if (done.moved) app.onResize?.(done.start, 'cancel');
+    };
+    listen(grip, 'pointerup', endDrag);
+    listen(grip, 'pointercancel', endDrag);
+    listen(grip, 'lostpointercapture', endDrag);
+    listen(grip, 'keydown', event => {
+      if (!size || event.defaultPrevented || event.isComposing || event.keyCode === 229
+          || event.altKey || event.ctrlKey || event.metaKey) return;
+      const keys = size.axis === 'x' ? ['ArrowLeft', 'ArrowRight'] : ['ArrowUp', 'ArrowDown'];
+      if (![...keys, 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault(); event.stopPropagation();
+      const step = event.shiftKey ? 40 : 10;
+      const next = event.key === 'Home' ? size.min : event.key === 'End' ? size.max
+        : size.value + (event.key === keys[0] ? -step : step);
+      app.onResize?.(Math.min(size.max, Math.max(size.min, next)), 'end');
+    });
+    listen(grip, 'dblclick', event => { event.preventDefault(); if (state.open) app.onReset?.(); });
+    listen(resetButton, 'click', () => { if (state.open) app.onReset?.(); });
     listen(drawer, 'compositionstart', () => { composing = true; });
     listen(drawer, 'compositionend', () => { composing = false; });
     listen(drawer, 'keydown', event => {
@@ -155,7 +239,7 @@
     function destroy() {
       if (destroyed) return;
       const returnNeeded = state.open && drawer.contains(doc.activeElement);
-      destroyed = true; state.open = false;
+      destroyed = true; state.open = false; drag = null;
       listeners.forEach(remove => remove());
       const saved = opener;
       for (const { content, marker } of moved) {
@@ -165,10 +249,11 @@
       drawer.remove();
       returnFocus(returnNeeded, saved);
     }
-    render();
+    render(); renderText(); renderSize();
     return { open, close, toggle: () => state.open ? close() : open(), select, setAvailable, snapshot, restore, destroy,
-      element: drawer };
+      setText, setSize, element: drawer };
   }
+  create.TEXT_SCALES = TEXT_SCALES;
   if (typeof module === 'object' && module.exports) module.exports = create;
   else root.KinStudyPanel = create;
 })(globalThis);
