@@ -1380,9 +1380,54 @@ Round 4 수용 계약: 이 절은 배포 가능 판정이 아니다. 같은 최�
 관측은 `OK(value)`·성공한 조회의 `ABSENT`·`ERROR(reason)`을 구분한다. 변경 또는 미결 작업 뒤
 관측 실패는 durable UNKNOWN이며 새 phase 요청으로 해제하지 않는다. 모든 보조 작업의 서버 쪽 종료를
 확인한 뒤 정리·재시도·복원한다. 최초 cron 재개 전 L-11b, 복구 cron 재개 전 RB-04c에 표지를 보존한다.
-DB 무변경 release도 RL-01의 첫 해제 전에 PONR을 기록한다. Part A 작업 중 Linux browser는 기존
-process group을 전체 종료 증거로 사용하지 않고 실행 전에 거절한다. Part B의 systemd/cgroup 설치와 검증이
-끝나기 전에는 무인 릴리스를 실행할 수 없다.
+DB 무변경 release도 RL-01의 첫 해제 전에 PONR을 기록한다.
+
+Part B의 Linux browser는 root systemd/cgroup v2와 보호 설치 Python/Playwright/Chromium 경로가 필요하다.
+`Type=exec`, `ExitType=cgroup`, `KillMode=control-group`, `Restart=no`의 transient service를 생성하며
+입력과 출력은 run의 private 작업 저장소에 둔다. unit 신원·main exit·cgroup 전체 종료·잔존 zombie 부재를
+대조한 뒤에만 profile을 지운다. 조회 실패는 UNKNOWN으로 보존하고 재진입의 관측만으로 hold를 풀지 않는다.
+Windows는 suspended-create → Job 할당 → resume 및 전체 Job 종료를 검사한다. Windows 성공으로 Linux
+검증을 대신하지 않는다. Linux 설치 환경이 준비되지 않으면 L-01에서 거절한다.
+
+첫 smoke 시도는 phase에 제한된 300초, 재시도는 총 120초이며 각 마지막 20초는 정리 시간이다. 모든
+helper·HTTP·pagination·browser 작업에 같은 monotonic deadline의 남은 시간을 전달한다. 작업 deadline 뒤
+새 작업을 시작하지 않고 정리도 최종 deadline을 넘겨 연장하지 않는다. 끝내지 못한 정리는 UNKNOWN이다.
+인증·소유권·allowlist의 영구 거절은 재시도하지 않는다. 임시 member/client 삭제는 소유 marker와 기록한
+불변 ID를 함께 확인한다. 원래 쿠키의 logout replay와 기존 업무 화면 8개 검사는 유지한다.
+`tests/ops_deploy_smoke_test.py`는 실제 subprocess/Windows Job/느린 HTTP·pagination의 시간 제한과
+systemd 관측 계약을 검사한다. 실제 Linux Chromium의 crash/hang/setsid/double-fork 및 entry crash는
+별도 systemd 실행 환경의 필수 증거이며 순수 관측 fixture로 통과 처리하지 않는다.
+
+Part C의 `kin-pg16-logical-v1`은 PostgreSQL 16 카탈로그 목록과 객체별 속성 목록을 닫힌 집합으로 검사한다.
+schema·table/view/sequence/index·column ACL·enum/domain·routine·constraint·trigger·RLS policy·default ACL·
+dependency·comment를 구조화된 `(database, schema, kind, name, qualifier)` 키로 비교한다. OID·물리 tuple 배치·
+WAL/transaction horizon·planner 통계는 논리 복원 값이 아니다. large object·publication·event trigger·FDW·
+partition·추가 extension·외부 verifier 등 v1 미지원 항목은 checkout 보정 전 admission과 fenced capture에서 거절한다.
+`NOLOGIN` 역할도 저장 verifier를 조사하며 미보존 verifier가 있으면 거절한다. 설정은
+v1의 명시 목록(`ops_backup.py`의 `RESTORE_SETTINGS`)과 실제 PostgreSQL 설정 목록에 함께 속해야 하며
+role·database·role-in-DB 범위를 재현한다. 표시·인코딩·timeout·transaction 기본값·memory·search_path·row_security
+설정을 포함하고 preload library·역할 전환·temp_tablespaces·그 밖의 설정 및 postgres/template 설정 변경은 거절한다.
+스칼라 설정은 보조 연결에 활성화하지 않고 저장한다. 유일한 인용 목록 설정인 search_path만 PostgreSQL이 파싱하여
+재현하므로 짧은 timeout이나 읽기 전용 transaction 설정이 복원 연결의 쓰기를 막지 않는다.
+두 DB의 모든 사용자 schema/table/column 값을 NULL·중복 행·원래 JSON text까지
+비교한다. 한 table당 100,000행·1,000,000셀·64 MiB를 넘으면 materialize 전에 거절한다.
+보존된 `standard_conforming_strings`·`client_encoding` 설정과 관계없이 도구의 SQL 리터럴은 명시적 escape를,
+private 입출력은 UTF-8을 사용한다. 실제 PG16 시험은 역슬래시·따옴표·한글 값과 설정의 동시 복원을 검사한다.
+
+`postgres`, `template0`, `template1` 및 시스템 객체는 같은 image digest의 `initdb` 결과와 대조한다.
+원본 `template0`의 연결 설정은 바꾸지 않는다. 소유 helper의 private 물리 복사본에서만 연결을 열며
+원본 volume을 helper에 mount하지 않는다. `pg_basebackup`의 checkpoint/WAL 활동은 발생한다.
+현재 경계 조사는 합계 DB 크기 1 GiB 이내, helper memory 3 GiB/tmpfs 2 GiB의 v1 범위다.
+이 범위를 넘거나 기본 경계가 다른 cluster는 변경 전에 거절하며 generic PostgreSQL 복원을 보장하지 않는다.
+
+clone 변환은 실제 Keycloak 26.7.3 이미지에서만 실행한다. kin realm의 정확한 기존 행에서 secret·해당 origin
+URL·SMTP·IdP enabled 필드만 바꾸고 양 DB의 나머지 값을 다시 비교한다. 새 master administrator도
+새 immutable ID·credential·temporary marker·정확한 역할 행을 검증한 뒤 나머지 전체 값을 대조한다.
+테이블 이름으로 비교를 면제하지 않는다. 지원 버전·행·필드 계약이 맞지 않으면 거절한다.
+계약 근거는 [PostgreSQL 16 catalog](https://www.postgresql.org/docs/16/catalogs.html) 및
+[고정 Keycloak bootstrap 구현](https://github.com/keycloak/keycloak/blob/26.7.3/services/src/main/java/org/keycloak/services/managers/ApplianceBootstrap.java)이다.
+순수 계약 시험은 `tests/ops_backup_restore_test.py`, 실제 SQL/복원 검증은 `tests/ops_backup_held_test.py`의
+격리 PG16 fixture에서 수행한다. 순수 시험은 실제 PostgreSQL 쿼리의 성공 증거가 아니다.
 
 지원 운영 명령은 root 보호 설치본의 `/opt/kin-deploy/entry.py compose config` 및
 `/opt/kin-deploy/entry.py compose recreate [db|api|keycloak|orthanc|proxy ...]`다. checkout 밖의
@@ -1526,9 +1571,15 @@ host could not be observed before it does not run; after a change it ends UNKNOW
   the run executes), rotation keeps N physically whole daily sets (every manifest component with its size and
   SHA-256), never counts or deletes an incomplete set, never deletes release/held/protected/latest-verified sets,
   re-judges an interrupted deletion (`.rotating-<name>`) by its original name and folder and leaves it in place when
-  anything protects it, and only thins (Orthanc archive removed after a `thinned.json` marker; `validate_backup` then
-  refuses the set) a set that the audit ledger alone still retains. Right before each deletion or thinning the set's
-  completeness is checked again; a set that became incomplete after the plan is kept and the reason recorded (IRT2-21).
+  anything protects it, and only thins a set that the audit ledger alone still retains (`validate_backup` then refuses it).
+  C-ROTATE는 계획·rename 직후·중단 삭제 재개·archive 삭제 직전에 같은 작업 잠금 소유권, 루트/세트 신원,
+  현재 manifest와 모든 component 해시, hold/protect/latest/audit 및 현재 complete 세대의 keep 조건을 다시 검사한다.
+  변화·조회 실패·불완전 세트는 `preserved-stop`과 CLI 실패로 남기며 남은 파일을 보존한다. orphan도 삭제하지 않는다.
+  `thinned.json`은 원 세트와 manifest/archive hash·크기에 결속한 v1 `THIN_PLANNED` → `THINNED_COMPLETE` 기록이다.
+  잘림·링크·불일치 marker는 삭제 근거가 아니다. 계획 marker와 archive가 모두 유효한 중단 thin만 재개할 수 있으며,
+  archive 삭제 뒤 완료 기록 전 중단된 세트는 자동 완료로 추정하지 않는다. 완료 marker가 있어도 남은 모든 component를
+  검증하며, archive가 아직 있으면 그 bytes도 검사한다. dry-run은 잠금 파일을 포함해 쓰지 않는다.
+  검사와 삭제 사이에는 보호 루트와 같은 잠금을 사용하는 소비자 계약을 적용한다. 악성 root 동시 변조를 보장하지 않는다.
 - The provision-first rule (Astra DR2-09): the mode refuses a database that already carries an EMR role, an `emr_*`
   schema, the tablespace or a migration beyond the previous history before provisioning, instead of repairing it;
   after the migration every relation of every `emr_*` schema, with its TOAST table and TOAST index, must be in

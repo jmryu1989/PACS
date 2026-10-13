@@ -62,14 +62,17 @@ def pg_role(name, *, superuser=False, login=False, inherit=True, connlimit=-1):
 def daily_role_catalog():
     """The role catalog of a post-EMR production cluster (bootstrap superuser kin) as a daily backup reads it (D23): the
     EMR roles and a further NOLOGIN role with a membership that pg_dumpall records as GRANTED BY kin."""
-    return {"roles": [pg_role("kin", superuser=True, login=True), pg_role("kin_emr_owner"), pg_role("kin_emr_reader"),
+    roles = [pg_role("kin", superuser=True, login=True), pg_role("kin_emr_owner"), pg_role("kin_emr_reader"),
                       pg_role("kin_emr_retention"), pg_role("kin_legacy_group", inherit=False), pg_role("kin_legacy_reader", connlimit=3),
-                      pg_role("kin_runtime", login=True)],
+                      pg_role("kin_runtime", login=True)]
+    return {"server_major": 16, "unsupported_verifiers": [], "login_verifiers": ["kin"], "builtin_roles": [], "settings": [],
+            "setting_names": ["search_path", "statement_timeout", "work_mem"],
+            "role_comments": [[row["rolname"], None] for row in roles], "roles": roles,
             "memberships": [{"granted": "kin_legacy_group", "member": "kin_legacy_reader", "grantor": "kin", "admin_option": False, "inherit_option": True,
                              "set_option": True}],
             "databases": [{"name": "keycloak", "owner": "kin", "acl": ["=Tc/kin", "kin=CTc/kin"]},
                           {"name": "kin", "owner": "kin", "acl": ["=Tc/kin", "kin=CTc/kin", "kin_legacy_reader=c/kin"]},
-                          {"name": "postgres", "owner": "kin", "acl": ["=Tc/kin", "kin=CTc/kin"]}],
+                          *[{"name": name, "owner": "kin", "acl": ["=Tc/kin", "kin=CTc/kin"]} for name in ("postgres", "template0", "template1")]],
             "tablespaces": [{"name": "kin_emr_access", "owner": "kin_emr_owner", "location": ops.EMR_TABLESPACE},
                             {"name": "pg_default", "owner": "kin", "location": ""}, {"name": "pg_global", "owner": "kin", "location": ""}],
             "schemas": ["emr_access", "public"]}
@@ -88,7 +91,8 @@ class DailyCluster:
     def catalog(self):
         base = self.restored or self.source
         whole = self.restored_databases >= {"kin", "keycloak"}
-        return {"roles": [self.roles[name] for name in sorted(self.roles)],
+        return {**{key: base[key] for key in ("server_major", "unsupported_verifiers", "login_verifiers", "builtin_roles", "settings", "setting_names")},
+                "role_comments": [[name, None] for name in sorted(self.roles)], "roles": [self.roles[name] for name in sorted(self.roles)],
                 "memberships": sorted(self.memberships, key=lambda item: (item["granted"], item["member"])),
                 "databases": base["databases"] if whole else [{"name": "kin", "owner": "kin", "acl": []}, {"name": "postgres", "owner": "kin", "acl": []}],
                 "tablespaces": base["tablespaces"] if self.tablespace else [item for item in base["tablespaces"] if item["name"].startswith("pg_")],

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -112,14 +113,14 @@ def text(args, **kwargs):
     return run(args, **kwargs).stdout.decode("utf-8").strip()
 
 
-def temporary_run(args, *, timeout=600, output=None):
+def temporary_run(args, *, timeout=600, output=None, input_file=None):
     # A timed-out docker client can leave its container running. Give even tar
     # helpers an ownership label/name so finally can find and remove exactly it.
     token = uuid.uuid4().hex
     name = "kin-rehearsal-" + token[:16] + "-helper"
     try:
         result = run(["docker", "run", "--rm", "--name", name,
-                      "--label", "kin.ops.run=" + token, *args], timeout=timeout, output=output)
+                      "--label", "kin.ops.run=" + token, *args], timeout=timeout, output=output, input_file=input_file)
         return "" if output is not None else result.stdout.decode("utf-8").strip()
     finally:
         remove_owned_if_present("container", name, token)
@@ -139,6 +140,21 @@ class LockLease:
     # A timed-out deployment may still be changing containers after its caller
     # returns. Keep the shared lock until an operator reconciles that operation.
     retained: bool = False
+    path: Path | None = None
+    token: str | None = None
+    identity: tuple | None = None
+
+    def verify(self):
+        if (self.path is None or self.path.is_symlink() or not self.path.is_file()
+                or (self.path.stat().st_dev, self.path.stat().st_ino) != self.identity
+                or self.path.read_text() != self.token):
+            raise RuntimeError("Operations lock ownership changed / 작업 잠금 소유권이 바뀌었습니다")
+        info = self.path.stat()
+        if os.name == "posix" and (info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077):
+            raise RuntimeError("작업 잠금의 소유자 또는 접근 권한이 바뀌었습니다")
+
+
+_operations_lease = ContextVar("operations_lease", default=None)
 
 
 @contextmanager
@@ -158,14 +174,17 @@ def lock():
             os.fsync(directory)
         finally:
             os.close(directory)
-    lease = LockLease()
+    lease = LockLease(path=path, token=token, identity=(path.stat().st_dev, path.stat().st_ino))
+    context = _operations_lease.set(lease)
     try:
         yield lease
     finally:
-        if path.read_text() != token:
-            raise RuntimeError("Operations lock ownership changed")
-        if not lease.retained:
-            path.unlink()
+        try:
+            lease.verify()
+            if not lease.retained:
+                path.unlink()
+        finally:
+            _operations_lease.reset(context)
 
 
 def write_json(path, body):
@@ -556,16 +575,20 @@ def rehearse_held(directory, manifest, *, daily=False):
         if shape == "post":
             run(["docker", "exec", "-u", "postgres", name, "mkdir", "-m", "700", EMR_TABLESPACE])
         result["catalog"] = restore_snapshot(name, directory, "kin", shape, source=manifest["role_catalog"] if daily else None)
-        for database in PRE_DATABASES:
-            if counts(name, database, "kin") != manifest["counts"][database]:
-                raise RuntimeError("Restored database row counts differ: " + database)
+        if daily:
+            for database in PRE_DATABASES:
+                if counts(name, database, "kin") != manifest["counts"][database]:
+                    raise RuntimeError("Restored database row counts differ: " + database)
         if not daily:
             before = json.loads((directory / "projection.json").read_text(encoding="utf-8"))
             if projection(name, columns={table: value["columns"] for table, value in before.items()}) != before:
                 raise RuntimeError("Restored rows differ from the snapshot's projection")
             # IRT2-24: every row of both databases, every schema, as captured.
-            if value_catalog(name) != json.loads((directory / "values.json").read_text(encoding="utf-8")):
+            restored_values = value_catalog(name)
+            if restored_values != json.loads((directory / "values.json").read_text(encoding="utf-8")):
                 raise RuntimeError("Restored row values differ from the snapshot")
+            if value_counts(restored_values) != manifest["counts"]:
+                raise RuntimeError("Restored database row counts differ from the held manifest")
         if shape == "post":
             if emr_catalog(name, "kin") != json.loads((directory / "emr-catalog.json").read_text(encoding="utf-8")):
                 raise RuntimeError("Restored EMR owner/ACL/roles/tablespace differ")
@@ -715,6 +738,13 @@ RESOURCE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 SQL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")   # quoted into SQL text: plain identifiers only
 CONFIG_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+RESTORE_SETTINGS = frozenset((
+    "application_name bytea_output DateStyle IntervalStyle TimeZone client_encoding standard_conforming_strings "
+    "backslash_quote escape_string_warning extra_float_digits lc_monetary lc_numeric lc_time search_path "
+    "statement_timeout lock_timeout idle_in_transaction_session_timeout idle_session_timeout work_mem maintenance_work_mem "
+    "default_transaction_deferrable default_transaction_isolation default_transaction_read_only "
+    "transaction_deferrable transaction_isolation transaction_read_only row_security"
+).split())
 
 def _acl(column, kind, owner):
     """An object's privileges as a sorted list of aclitems, with a NULL ACL read as its default for the owner: pg_dump
@@ -724,102 +754,295 @@ def _acl(column, kind, owner):
 
 
 # Fixed session settings first: a role's VALID UNTIL is a timestamp whose text must not depend on the session.
-ROLE_CATALOG_SQL = """SET TimeZone='UTC'; SET DateStyle='ISO, YMD'; SELECT json_build_object(
+ROLE_CATALOG_SQL = """SET search_path=pg_catalog; SET client_encoding='UTF8'; SET TimeZone='UTC'; SET DateStyle='ISO, YMD'; SELECT json_build_object(
+  'server_major', current_setting('server_version_num')::int/10000,
   'roles', (SELECT coalesce(json_agg(r ORDER BY rolname), '[]'::json) FROM
     (SELECT rolname, rolsuper, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls, rolinherit,
             rolconnlimit, rolvaliduntil::text AS rolvaliduntil, rolconfig
      FROM pg_roles WHERE rolname !~ '^pg_') r),
+  'unsupported_verifiers', (SELECT coalesce(json_agg(rolname ORDER BY rolname),'[]'::json) FROM pg_authid
+     WHERE rolpassword IS NOT NULL AND (NOT rolcanlogin OR rolname NOT IN ('kin','kin_runtime','kin_emr_reader','kin_emr_retention'))),
+  'login_verifiers', (SELECT coalesce(json_agg(rolname ORDER BY rolname),'[]'::json) FROM pg_authid WHERE rolpassword IS NOT NULL),
+  'builtin_roles', (SELECT coalesce(jsonb_agg((to_jsonb(r)-'oid'-'rolpassword') ||
+      jsonb_build_object('comment',shobj_description(oid,'pg_authid')) ORDER BY rolname),'[]'::jsonb)
+     FROM pg_roles r WHERE rolname ~ '^pg_'),
   'memberships', (SELECT coalesce(json_agg(r ORDER BY granted, member, grantor), '[]'::json) FROM
     (SELECT a.rolname AS granted, b.rolname AS member, pg_get_userbyid(m.grantor) AS grantor, m.admin_option, m.inherit_option,
             m.set_option
      FROM pg_auth_members m JOIN pg_roles a ON a.oid=m.roleid
-     JOIN pg_roles b ON b.oid=m.member WHERE a.rolname !~ '^pg_' OR b.rolname !~ '^pg_') r),
+     JOIN pg_roles b ON b.oid=m.member) r),
   'databases', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
-    (SELECT datname AS name, pg_get_userbyid(datdba) AS owner, """ + _acl("datacl", "'d'::\"char\"", "datdba") + """ AS acl
-     FROM pg_database WHERE NOT datistemplate) r),
+    (SELECT datname AS name, pg_get_userbyid(datdba) AS owner, """ + _acl("datacl", "'d'::\"char\"", "datdba") + """ AS acl,
+       (to_jsonb(d)-ARRAY['oid','datname','datdba','datacl','datfrozenxid','datminmxid','dattablespace']) ||
+       jsonb_build_object('tablespace',(SELECT spcname FROM pg_tablespace WHERE oid=d.dattablespace)) AS attributes,
+       shobj_description(d.oid,'pg_database') AS comment FROM pg_database d) r),
   'tablespaces', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
-    (SELECT spcname AS name, pg_get_userbyid(spcowner) AS owner, pg_tablespace_location(oid) AS location FROM pg_tablespace) r),
+    (SELECT spcname AS name, pg_get_userbyid(spcowner) AS owner, pg_tablespace_location(oid) AS location,
+       """ + _acl("spcacl", "'t'::\"char\"", "spcowner") + """ AS acl, spcoptions AS options,
+       shobj_description(oid,'pg_tablespace') AS comment FROM pg_tablespace) r),
+  'settings', (SELECT coalesce(json_agg(r ORDER BY database, role),'[]'::json) FROM
+    (SELECT CASE WHEN s.setdatabase=0 THEN NULL ELSE d.datname END AS database,
+      CASE WHEN s.setrole=0 THEN NULL ELSE pg_get_userbyid(s.setrole) END AS role, s.setconfig AS config
+     FROM pg_db_role_setting s LEFT JOIN pg_database d ON d.oid=s.setdatabase) r),
+  'setting_names', (SELECT json_agg(name ORDER BY name) FROM pg_settings WHERE context IN ('user','superuser')
+     AND name IN (""" + ",".join("'" + name + "'" for name in sorted(RESTORE_SETTINGS)) + """)),
+  'role_comments', (SELECT coalesce(json_agg(json_build_array(rolname,shobj_description(oid,'pg_authid')) ORDER BY rolname),'[]'::json)
+    FROM pg_roles WHERE rolname !~ '^pg_'),
   'schemas', (SELECT coalesce(json_agg(nspname::text ORDER BY nspname), '[]'::json) FROM pg_namespace
     WHERE nspname !~ '^pg_' AND nspname <> 'information_schema'))"""
-# Per database: owners and privileges of every schema, relation, function and default privilege outside the system
-# schemas (what pg_restore with owners and privileges must reproduce, compared after a restore, never inferred); D22 adds
-# column privileges (only columns that carry any), types and domains (not the automatic array and table row types), large
-# objects, publications with their tables, event triggers, foreign-data wrappers, foreign servers and user mappings;
-# IRT2-16/24 add the definitions of views, functions and triggers (as hashes), trigger enabled state and each sequence's
-# state - its own last_value and is_called, read from the sequence itself (pg_sequence_last_value hides a RESTART that
-# was never called) - and its parameters.
-OBJECT_CATALOG_SQL = """SELECT json_build_object(
-  'schemas', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
-    (SELECT nspname::text AS name, pg_get_userbyid(nspowner) AS owner, """ + _acl("nspacl", "'n'::\"char\"", "nspowner") + """ AS acl
-     FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname <> 'information_schema') r),
-  'relations', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
-    (SELECT n.nspname || '.' || c.relname AS name, c.relkind::text AS kind, pg_get_userbyid(c.relowner) AS owner,
-     """ + _acl("c.relacl", "(CASE WHEN c.relkind = 'S' THEN 's' ELSE 'r' END)::\"char\"", "c.relowner") + """ AS acl,
-     CASE WHEN c.relkind IN ('v', 'm') THEN md5(pg_get_viewdef(c.oid)) END AS definition,
-     CASE WHEN c.relkind = 'S' THEN (SELECT (xpath('/row/last_value/text()', x))[1]::text || ' ' || (xpath('/row/is_called/text()', x))[1]::text
-       FROM query_to_xml(format('SELECT last_value, is_called FROM %I.%I', n.nspname, c.relname), false, true, '') AS x) END AS sequence_state,
-     CASE WHEN c.relkind = 'S' THEN (SELECT concat_ws(' ', s.seqtypid::regtype, s.seqstart, s.seqincrement, s.seqmax, s.seqmin, s.seqcache,
-       s.seqcycle) FROM pg_sequence s WHERE s.seqrelid = c.oid) END AS sequence_parameters
-     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-     WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')) r),
-  'functions', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
-    (SELECT p.oid::regprocedure::text AS name, pg_get_userbyid(p.proowner) AS owner, """ + _acl("p.proacl", "'f'::\"char\"", "p.proowner") + """ AS acl,
-     CASE WHEN p.prokind IN ('f', 'p') THEN md5(pg_get_functiondef(p.oid)) END AS definition
-     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema') r),
-  'triggers', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
-    (SELECT n.nspname || '.' || c.relname || '.' || t.tgname AS name, t.tgenabled::text AS enabled, md5(pg_get_triggerdef(t.oid)) AS definition
-     FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
-     WHERE NOT t.tgisinternal AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema') r),
-  'default_acl', (SELECT coalesce(json_agg(r ORDER BY owner, scope, kind), '[]'::json) FROM
-    (SELECT pg_get_userbyid(d.defaclrole) AS owner, coalesce(n.nspname, '') AS scope, d.defaclobjtype::text AS kind,
-     (SELECT coalesce(json_agg(x::text ORDER BY x::text), '[]'::json) FROM unnest(d.defaclacl) x) AS acl
-     FROM pg_default_acl d LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace) r),
-  'columns', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
-    (SELECT n.nspname || '.' || c.relname || '.' || a.attname AS name,
-     (SELECT json_agg(x::text ORDER BY x::text) FROM unnest(a.attacl) x) AS acl
-     FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
-     WHERE a.attnum > 0 AND NOT a.attisdropped AND a.attacl IS NOT NULL AND cardinality(a.attacl) > 0
-       AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema') r),
-  'types', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
-    (SELECT n.nspname || '.' || t.typname AS name, t.typtype::text AS kind, pg_get_userbyid(t.typowner) AS owner,
-     """ + _acl("t.typacl", "'T'::\"char\"", "t.typowner") + """ AS acl
-     FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
-     WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
-       AND NOT EXISTS (SELECT 1 FROM pg_type e WHERE e.typarray = t.oid)
-       AND (t.typrelid = 0 OR (SELECT c.relkind FROM pg_class c WHERE c.oid = t.typrelid) = 'c')) r),
-  'large_objects', (SELECT coalesce(json_agg(r ORDER BY id), '[]'::json) FROM
-    (SELECT l.oid::bigint AS id, pg_get_userbyid(l.lomowner) AS owner, """ + _acl("l.lomacl", "'L'::\"char\"", "l.lomowner") + """ AS acl
-     FROM pg_largeobject_metadata l) r),
-  'publications', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
-    (SELECT p.pubname::text AS name, pg_get_userbyid(p.pubowner) AS owner, p.puballtables AS all_tables,
-     json_build_array(p.pubinsert, p.pubupdate, p.pubdelete, p.pubtruncate, p.pubviaroot) AS actions,
-     (SELECT coalesce(json_agg(pr.prrelid::regclass::text ORDER BY pr.prrelid::regclass::text), '[]'::json)
-      FROM pg_publication_rel pr WHERE pr.prpubid = p.oid) AS relations
-     FROM pg_publication p) r),
-  'event_triggers', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
-    (SELECT e.evtname::text AS name, e.evtevent::text AS event, pg_get_userbyid(e.evtowner) AS owner,
-     e.evtfoid::regprocedure::text AS function, e.evtenabled::text AS enabled, e.evttags AS tags FROM pg_event_trigger e) r),
-  'foreign_data_wrappers', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
-    (SELECT w.fdwname::text AS name, pg_get_userbyid(w.fdwowner) AS owner, """ + _acl("w.fdwacl", "'F'::\"char\"", "w.fdwowner") + """ AS acl
-     FROM pg_foreign_data_wrapper w) r),
-  'foreign_servers', (SELECT coalesce(json_agg(r ORDER BY name), '[]'::json) FROM
-    (SELECT s.srvname::text AS name, w.fdwname::text AS wrapper, pg_get_userbyid(s.srvowner) AS owner,
-     """ + _acl("s.srvacl", "'S'::\"char\"", "s.srvowner") + """ AS acl
-     FROM pg_foreign_server s JOIN pg_foreign_data_wrapper w ON w.oid = s.srvfdw) r),
-  'user_mappings', (SELECT coalesce(json_agg(r ORDER BY server, member), '[]'::json) FROM
-    (SELECT m.srvname::text AS server, m.usename::text AS member FROM pg_user_mappings m) r))"""
 PRE_DATABASES = ("kin", "keycloak")
 DEFAULT_TABLESPACES = ("pg_default", "pg_global")
 MIGRATIONS_SQL = """SELECT coalesce(json_agg(json_build_array(migration_name, checksum, finished_at IS NOT NULL,
   rolled_back_at IS NOT NULL) ORDER BY migration_name COLLATE "C"), '[]'::json) FROM "_prisma_migrations\""""
 # Fixed output settings: a projection must not change because a session's display defaults differ.
-PROJECTION_SETTINGS = ("SET TimeZone='UTC'; SET DateStyle='ISO, YMD'; SET IntervalStyle='postgres'; "
-                       "SET extra_float_digits=1; SET bytea_output='hex'; ")
+PROJECTION_SETTINGS = ("SET client_encoding='UTF8'; SET TimeZone='UTC'; SET DateStyle='ISO, YMD'; SET IntervalStyle='postgres'; "
+                       "SET extra_float_digits=1; SET bytea_output='hex'; SET lc_monetary='C'; SET lc_numeric='C'; ")
+
+# C-RESTORE v1 is deliberately closed. PostgreSQL 16 catalog names are partitioned below; a different server major
+# or an unclassified catalog refuses admission. Physical tuple/WAL/planner state is not logical restore content.
+RESTORE_INVENTORY = "kin-pg16-logical-v1"
+INVENTORY_COVERAGE = {
+    "supported": "pg_attrdef pg_attribute pg_authid pg_auth_members pg_class pg_constraint pg_database pg_db_role_setting "
+                 "pg_default_acl pg_depend pg_description pg_enum pg_index pg_namespace pg_policy pg_proc pg_sequence "
+                 "pg_shdepend pg_shdescription pg_tablespace pg_trigger pg_type",
+    "baseline": "pg_aggregate pg_am pg_amop pg_amproc pg_cast pg_collation pg_conversion pg_extension pg_init_privs "
+                "pg_language pg_opclass pg_operator pg_opfamily pg_range pg_rewrite pg_ts_config pg_ts_config_map "
+                "pg_ts_dict pg_ts_parser pg_ts_template",
+    "refused": "pg_event_trigger pg_foreign_data_wrapper pg_foreign_server pg_foreign_table pg_inherits pg_largeobject "
+               "pg_largeobject_metadata pg_parameter_acl pg_partitioned_table pg_publication pg_publication_namespace "
+               "pg_publication_rel pg_replication_origin pg_seclabel pg_shseclabel pg_statistic_ext pg_subscription "
+               "pg_subscription_rel pg_transform pg_user_mapping",
+    "physical": "pg_statistic pg_statistic_ext_data",
+}
+INVENTORY_KINDS = frozenset(("schema", "relation", "column", "type", "routine", "constraint", "index", "trigger",
+                           "policy", "default-acl", "dependency", "comment"))
+INVENTORY_ATTRIBUTES = {
+    "schema": "owner acl comment",
+    "relation": "relname relnatts relchecks relhasindex relisshared relpersistence relkind relhasrules relhastriggers "
+                "relhassubclass relrowsecurity relforcerowsecurity relispopulated relreplident relispartition reloptions relpartbound "
+                "owner acl access_method tablespace row_type of_type view sequence sequence_state toast",
+    "column": "attname attstattarget attlen attndims attbyval attalign attstorage attcompression attnotnull atthasdef attidentity "
+              "attgenerated attisdropped attislocal attinhcount attoptions attfdwoptions atttypmod type collation acl expression",
+    "type": "typname typlen typbyval typtype typcategory typispreferred typisdefined typdelim typalign typstorage typnotnull "
+            "typtypmod typndims typdefault typrelid typelem typarray typbasetype typcollation typinput typoutput typreceive "
+            "typsend typmodin typmodout typanalyze typsubscript owner acl default_expression enum_labels",
+    "routine": "proname procost prorows prokind prosecdef proleakproof proisstrict proretset provolatile proparallel "
+               "pronargs pronargdefaults proargmodes proargnames prosrc probin proconfig owner acl language result support "
+               "arguments variadic definition",
+    "constraint": "conname contype condeferrable condeferred convalidated confupdtype confdeltype confmatchtype conislocal "
+                  "coninhcount connoinherit conrelid conindid confrelid contypid conparentid conkey confkey confdelsetcols "
+                  "conpfeqop conppeqop conffeqop conexclop definition",
+    "index": "indnatts indnkeyatts indisunique indnullsnotdistinct indisprimary indisexclusion indimmediate indisclustered "
+             "indisvalid indisready indislive indisreplident indoption table definition expressions predicate columns collations opclasses",
+    "trigger": "tgname tgtype tgenabled tgisinternal tgdeferrable tginitdeferred tgnargs tgargs tgoldtable tgnewtable "
+               "table function relation index constraint definition columns",
+    "policy": "command permissive roles using check",
+    "default-acl": "acl",
+    "dependency": "type",
+    "comment": "text",
+}
+VALUE_LIMIT_BYTES = 64 * 1024 * 1024
+
+
+def _object_address(catalog, oid, subid="0"):
+    # PostgreSQL supplies structured names/arguments; neither dotted concatenation nor allocated OIDs are keys.
+    return (f"CASE WHEN ({oid})=0 THEN NULL ELSE (SELECT jsonb_build_array(current_database(), _kin_ident.schema, _kin_ident.type, "
+            f"_kin_addr.object_names, _kin_addr.object_args) FROM pg_identify_object('{catalog}'::regclass, {oid}, {subid}) _kin_ident, "
+            f"pg_identify_object_as_address('{catalog}'::regclass, {oid}, {subid}) _kin_addr) END")
+
+
+def _json_without(alias, fields):
+    return "to_jsonb(" + alias + ") - ARRAY[" + ",".join("'" + name + "'" for name in fields.split()) + "]::text[]"
+
+
+def _json_fields(**fields):
+    return "jsonb_build_object(" + ",".join("'" + key + "'," + value for key, value in fields.items()) + ")"
+
+
+def _restore_inventory_sql():
+    rows = []
+    user_schema = "n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'"
+    def add(kind, schema, name, qualifier, attributes, source, where):
+        rows.append("SELECT jsonb_build_object('key',jsonb_build_array(current_database()," + schema + ", '" + kind
+                    + "'," + name + "," + qualifier + "),'attributes'," + attributes + ") AS doc FROM " + source + " WHERE " + where)
+    add("schema", "n.nspname", "n.nspname", "NULL",
+        _json_fields(owner="pg_get_userbyid(n.nspowner)", acl=_acl("n.nspacl", "'n'::\"char\"", "n.nspowner"),
+                     comment="obj_description(n.oid,'pg_namespace')"),
+        "pg_namespace n", user_schema)
+    relation = _json_without("c", "oid relnamespace relowner relam relfilenode relpages reltuples relallvisible reltoastrelid "
+                             "reltablespace reltype reloftype relfrozenxid relminmxid relacl relrewrite")
+    relation += " || " + _json_fields(
+        # pg_class flags are lazy caches (PG16 catalog-pg-class); dropped attnum slots are physical layout. Query the
+        # current logical objects instead, so a faithful pg_dump restore need not reproduce stale cache bits.
+        relnatts="(SELECT count(*) FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped)",
+        relhasindex="EXISTS(SELECT 1 FROM pg_index i WHERE i.indrelid=c.oid)",
+        relhasrules="EXISTS(SELECT 1 FROM pg_rewrite r WHERE r.ev_class=c.oid)",
+        relhastriggers="EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid=c.oid)",
+        relhassubclass="EXISTS(SELECT 1 FROM pg_inherits h WHERE h.inhparent=c.oid)",
+        owner="pg_get_userbyid(c.relowner)", acl=_acl("c.relacl", "(CASE WHEN c.relkind='S' THEN 's' ELSE 'r' END)::\"char\"", "c.relowner"),
+        access_method="(SELECT amname FROM pg_am WHERE oid=c.relam)",
+        tablespace="(SELECT spcname FROM pg_tablespace WHERE oid=coalesce(nullif(c.reltablespace,0),(SELECT dattablespace FROM pg_database WHERE datname=current_database())))",
+        row_type=_object_address("pg_type", "c.reltype"), of_type=_object_address("pg_type", "c.reloftype"),
+        view="CASE WHEN c.relkind='v' THEN pg_get_viewdef(c.oid,false) END",
+        sequence="(SELECT (to_jsonb(s)-'seqrelid'-'seqtypid') || jsonb_build_object('type',format_type(s.seqtypid,NULL)) FROM pg_sequence s WHERE s.seqrelid=c.oid)",
+        sequence_state="CASE WHEN c.relkind='S' THEN (SELECT jsonb_build_array((xpath('/row/last_value/text()',x))[1]::text,(xpath('/row/is_called/text()',x))[1]::text) FROM query_to_xml(format('SELECT last_value,is_called FROM %I.%I',n.nspname,c.relname),false,true,'') x) END",
+        toast="(SELECT jsonb_build_object('options',t.reloptions,'owner',pg_get_userbyid(t.relowner),'acl',t.relacl::text,'tablespace',s.spcname,"
+              "'indexes',(SELECT jsonb_agg(jsonb_build_array(a.amname,i.reloptions,si.spcname) ORDER BY a.amname,i.reloptions::text) "
+              "FROM pg_index ix JOIN pg_class i ON i.oid=ix.indexrelid LEFT JOIN pg_am a ON a.oid=i.relam "
+              "LEFT JOIN pg_tablespace si ON si.oid=coalesce(nullif(i.reltablespace,0),(SELECT dattablespace FROM pg_database WHERE datname=current_database())) WHERE ix.indrelid=t.oid)) "
+              "FROM pg_class t LEFT JOIN pg_tablespace s ON s.oid=coalesce(nullif(t.reltablespace,0),(SELECT dattablespace FROM pg_database WHERE datname=current_database())) WHERE t.oid=c.reltoastrelid)")
+    add("relation", "n.nspname", "c.relname", "NULL", relation,
+        "pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace", user_schema + " AND c.relkind IN ('r','v','S','c','i')")
+    # attnum holes and attmissingval describe the old physical tuple layout; the surviving column order and actual
+    # values are preserved instead. The logical default/generated expression remains part of this inventory.
+    column = _json_without("a", "attrelid atttypid attnum attcacheoff atthasmissing attmissingval attcollation attacl")
+    column += " || " + _json_fields(
+        type=_object_address("pg_type", "a.atttypid"), collation=_object_address("pg_collation", "a.attcollation"),
+        acl="(SELECT coalesce(jsonb_agg(x::text ORDER BY x::text),'[]'::jsonb) FROM unnest(a.attacl) x)",
+        expression="(SELECT pg_get_expr(d.adbin,d.adrelid,false) FROM pg_attrdef d WHERE d.adrelid=a.attrelid AND d.adnum=a.attnum)")
+    add("column", "n.nspname", "c.relname", "(SELECT count(*) FROM pg_attribute z WHERE z.attrelid=a.attrelid AND z.attnum>0 AND NOT z.attisdropped AND z.attnum<=a.attnum)", column,
+        "pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace",
+        user_schema + " AND a.attnum>0 AND NOT a.attisdropped")
+    type_row = _json_without("t", "oid typnamespace typowner typrelid typelem typarray typinput typoutput typreceive typsend "
+                            "typmodin typmodout typanalyze typsubscript typbasetype typcollation typdefaultbin typacl")
+    type_refs = {key: _object_address(catalog, "t." + key) for catalog, keys in (
+        ("pg_class", "typrelid"), ("pg_type", "typelem typarray typbasetype"), ("pg_collation", "typcollation"),
+        ("pg_proc", "typinput typoutput typreceive typsend typmodin typmodout typanalyze typsubscript")) for key in keys.split()}
+    type_refs.update(owner="pg_get_userbyid(t.typowner)", acl=_acl("t.typacl", "'T'::\"char\"", "t.typowner"),
+                     default_expression="pg_get_expr(t.typdefaultbin,0,false)",
+                     enum_labels="(SELECT jsonb_agg(e.enumlabel ORDER BY e.enumsortorder) FROM pg_enum e WHERE e.enumtypid=t.oid)")
+    add("type", "n.nspname", "t.typname", "NULL", type_row + " || " + _json_fields(**type_refs),
+        "pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace", user_schema)
+    routine = _json_without("p", "oid pronamespace proowner prolang prorettype proargtypes proallargtypes proargdefaults prosupport prosqlbody proacl provariadic")
+    routine += " || " + _json_fields(owner="pg_get_userbyid(p.proowner)", acl=_acl("p.proacl", "'f'::\"char\"", "p.proowner"),
+        language="l.lanname", result=_object_address("pg_type", "p.prorettype"), support=_object_address("pg_proc", "p.prosupport"),
+        variadic=_object_address("pg_type", "p.provariadic"),
+        arguments="(SELECT jsonb_agg(format_type(a,NULL) ORDER BY ord) FROM unnest(coalesce(p.proallargtypes,p.proargtypes::oid[])) WITH ORDINALITY x(a,ord))",
+        definition="CASE WHEN p.prokind IN ('f','p') THEN pg_get_functiondef(p.oid) END")
+    add("routine", "n.nspname", "p.proname", "pg_get_function_identity_arguments(p.oid)", routine,
+        "pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_language l ON l.oid=p.prolang", user_schema)
+    constraint = _json_without("c", "oid connamespace conrelid contypid conindid conparentid confrelid conkey confkey confdelsetcols conpfeqop conppeqop conffeqop conexclop conbin")
+    refs = {key: _object_address(catalog, "c." + key) for catalog, keys in (
+        ("pg_class", "conrelid conindid confrelid"), ("pg_type", "contypid"), ("pg_constraint", "conparentid")) for key in keys.split()}
+    for key, relation_id in (("conkey", "conrelid"), ("confkey", "confrelid"), ("confdelsetcols", "conrelid")):
+        refs[key] = "(SELECT jsonb_agg(a.attname ORDER BY x.ord) FROM unnest(c." + key + ") WITH ORDINALITY x(num,ord) LEFT JOIN pg_attribute a ON a.attrelid=c." + relation_id + " AND a.attnum=x.num)"
+    for key in ("conpfeqop", "conppeqop", "conffeqop", "conexclop"):
+        refs[key] = "(SELECT jsonb_agg(" + _object_address("pg_operator", "x.id") + " ORDER BY x.ord) FROM unnest(c." + key + ") WITH ORDINALITY x(id,ord))"
+    refs["definition"] = "pg_get_constraintdef(c.oid,false)"
+    add("constraint", "n.nspname", "c.conname", "coalesce(" + _object_address("pg_class", "c.conrelid") + "," + _object_address("pg_type", "c.contypid") + ")",
+        constraint + " || " + _json_fields(**refs), "pg_constraint c JOIN pg_namespace n ON n.oid=c.connamespace", user_schema)
+    index = _json_without("i", "indexrelid indrelid indkey indcollation indclass indexprs indpred indcheckxmin")
+    index += " || " + _json_fields(table=_object_address("pg_class", "i.indrelid"), definition="pg_get_indexdef(i.indexrelid)",
+        expressions="pg_get_expr(i.indexprs,i.indrelid,false)", predicate="pg_get_expr(i.indpred,i.indrelid,false)",
+        columns="(SELECT jsonb_agg(a.attname ORDER BY x.ord) FROM unnest(i.indkey) WITH ORDINALITY x(num,ord) LEFT JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=x.num)",
+        collations="(SELECT jsonb_agg(" + _object_address("pg_collation", "x.id") + " ORDER BY x.ord) FROM unnest(i.indcollation) WITH ORDINALITY x(id,ord))",
+        opclasses="(SELECT jsonb_agg(" + _object_address("pg_opclass", "x.id") + " ORDER BY x.ord) FROM unnest(i.indclass) WITH ORDINALITY x(id,ord))")
+    add("index", "n.nspname", "c.relname", "NULL", index,
+        "pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_namespace n ON n.oid=c.relnamespace", user_schema)
+    # PG16 CreateTrigger appends an allocated OID to internal constraint-trigger names. Their constraint, function,
+    # firing flags and relation identities are logical; the OID suffix and redundant generated DDL are not.
+    trigger = _json_without("t", "oid tgname tgrelid tgparentid tgfoid tgconstrrelid tgconstrindid tgconstraint tgattr tgqual")
+    trigger_name = "CASE WHEN t.tgisinternal THEN regexp_replace(t.tgname::text,'_[0-9]+$','') ELSE t.tgname::text END"
+    trigger += " || " + _json_fields(tgname=trigger_name, table=_object_address("pg_class", "t.tgrelid"), function=_object_address("pg_proc", "t.tgfoid"),
+        relation=_object_address("pg_class", "t.tgconstrrelid"), index=_object_address("pg_class", "t.tgconstrindid"),
+        constraint=_object_address("pg_constraint", "t.tgconstraint"), definition="CASE WHEN NOT t.tgisinternal THEN pg_get_triggerdef(t.oid,false) END",
+        columns="(SELECT jsonb_agg(a.attname ORDER BY x.ord) FROM unnest(t.tgattr) WITH ORDINALITY x(num,ord) JOIN pg_attribute a ON a.attrelid=t.tgrelid AND a.attnum=x.num)")
+    identity = "CASE WHEN t.tgisinternal THEN jsonb_build_array(" + _object_address("pg_constraint", "t.tgconstraint") + ",t.tgtype," + _object_address("pg_proc", "t.tgfoid") + ") ELSE to_jsonb(t.tgname) END"
+    add("trigger", "n.nspname", identity, "c.relname", trigger,
+        "pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace", user_schema)
+    policy = _json_fields(command="p.polcmd", permissive="p.polpermissive",
+        roles="(SELECT jsonb_agg(CASE WHEN id=0 THEN 'PUBLIC' ELSE pg_get_userbyid(id) END ORDER BY CASE WHEN id=0 THEN 'PUBLIC' ELSE pg_get_userbyid(id) END) FROM unnest(p.polroles) id)",
+        using="pg_get_expr(p.polqual,p.polrelid,false)", check="pg_get_expr(p.polwithcheck,p.polrelid,false)")
+    add("policy", "n.nspname", "p.polname", "c.relname", policy,
+        "pg_policy p JOIN pg_class c ON c.oid=p.polrelid JOIN pg_namespace n ON n.oid=c.relnamespace", user_schema)
+    add("default-acl", "n.nspname", "pg_get_userbyid(d.defaclrole)", "d.defaclobjtype",
+        _json_fields(acl="(SELECT jsonb_agg(x::text ORDER BY x::text) FROM unnest(d.defaclacl) x)"),
+        "pg_default_acl d LEFT JOIN pg_namespace n ON n.oid=d.defaclnamespace", "true")
+    # Dependencies also cover column defaults, sequence ownership, enum/array/table-row type relationships and SQL
+    # routine bodies. pg_identify_object_as_address resolves allocated OIDs and column numbers to their names.
+    address = lambda cls, obj, sub: "(SELECT jsonb_build_array(current_database(),i.schema,i.type,a.object_names,a.object_args) FROM pg_identify_object(" + cls + "," + obj + "," + sub + ") i, pg_identify_object_as_address(" + cls + "," + obj + "," + sub + ") a)"
+    source_id = address("d.classid", "d.objid", "d.objsubid")
+    target_id = address("d.refclassid", "d.refobjid", "d.refobjsubid")
+    # These generated dependency names carry trigger OIDs; every referenced constraint/function/relation is already
+    # compared in the normalized internal-trigger record above. Altered internal triggers refuse admission below.
+    logical_dependency = " AND NOT (d.classid='pg_trigger'::regclass AND EXISTS(SELECT 1 FROM pg_trigger t WHERE t.oid=d.objid AND t.tgisinternal))"
+    add("dependency", "i.schema", "i.name", "jsonb_build_array(" + source_id + "," + target_id + ",d.deptype)", "jsonb_build_object('type',d.deptype)",
+        "(SELECT * FROM pg_depend WHERE classid<>0 AND objid<>0 AND deptype<>'p') d CROSS JOIN LATERAL pg_identify_object(d.classid,d.objid,d.objsubid) i",
+        "i.schema !~ '^pg_' AND i.schema <> 'information_schema'" + logical_dependency)
+    add("dependency", "i.schema", "i.name", "jsonb_build_array(" + source_id + "," + address("d.refclassid", "d.refobjid", "0") + ",d.deptype)",
+        "jsonb_build_object('type',d.deptype)",
+        "pg_shdepend d CROSS JOIN LATERAL pg_identify_object(d.classid,d.objid,d.objsubid) i",
+        "d.dbid=(SELECT oid FROM pg_database WHERE datname=current_database()) AND i.schema !~ '^pg_' AND i.schema <> 'information_schema'" + logical_dependency)
+    add("comment", "i.schema", "i.name", address("d.classoid", "d.objoid", "d.objsubid"), "jsonb_build_object('text',d.description)",
+        "pg_description d CROSS JOIN LATERAL pg_identify_object(d.classoid,d.objoid,d.objsubid) i",
+        "i.schema !~ '^pg_' AND i.schema <> 'information_schema'")
+    refused = []
+    def reject(name, query):
+        refused.append("SELECT '" + name + "' AS kind,count(*) AS count FROM (" + query + ") bad HAVING count(*)>0")
+    for table in INVENTORY_COVERAGE["refused"].split():
+        reject(table, "SELECT 1 FROM " + table)
+    reject("replication_slots", "SELECT 1 FROM pg_replication_slots")
+    reject("reserved_namespace", "SELECT 1 FROM pg_namespace WHERE nspname ~ '^pg_' AND nspname NOT IN ('pg_catalog','pg_toast')")
+    reject("unsupported_relation", "SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE " + user_schema
+           + " AND (c.relkind NOT IN ('r','v','S','c','i') OR c.relpersistence<>'p' OR c.relispartition)")
+    reject("invalid_index", "SELECT 1 FROM pg_index WHERE NOT indisvalid OR NOT indisready OR NOT indislive")
+    reject("altered_internal_trigger", "SELECT 1 FROM pg_trigger t WHERE t.tgisinternal AND (t.tgenabled<>'O' OR t.tgconstraint=0 "
+           "OR t.tgparentid<>0 OR t.tgnargs<>0 OR t.tgqual IS NOT NULL OR cardinality(t.tgattr::smallint[])<>0 "
+           "OR t.tgoldtable IS NOT NULL OR t.tgnewtable IS NOT NULL OR obj_description(t.oid,'pg_trigger') IS NOT NULL "
+           "OR t.tgname::text NOT IN ('RI_ConstraintTrigger_a_'||t.oid,'RI_ConstraintTrigger_c_'||t.oid,"
+           "'PK_ConstraintTrigger_'||t.oid,'Unique_ConstraintTrigger_'||t.oid))")
+    reject("unsupported_type", "SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace WHERE " + user_schema
+           + " AND t.typtype NOT IN ('e','d','c') AND NOT EXISTS(SELECT 1 FROM pg_type e WHERE e.typarray=t.oid)")
+    reject("unsupported_routine", "SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_language l ON l.oid=p.prolang WHERE "
+           + user_schema + " AND (l.lanname NOT IN ('sql','plpgsql') OR p.prokind NOT IN ('f','p'))")
+    reject("extension", "SELECT 1 FROM pg_extension WHERE extname<>'plpgsql' OR extversion<>'1.0' OR extnamespace<>'pg_catalog'::regnamespace")
+    reject("language", "SELECT 1 FROM pg_language WHERE lanname NOT IN ('internal','c','sql','plpgsql')")
+    reject("custom_rule", "SELECT 1 FROM pg_rewrite r JOIN pg_class c ON c.oid=r.ev_class JOIN pg_namespace n ON n.oid=c.relnamespace WHERE "
+           + user_schema + " AND NOT(c.relkind='v' AND r.rulename='_RETURN')")
+    for table in ("pg_am", "pg_amop", "pg_amproc", "pg_cast", "pg_collation", "pg_conversion", "pg_opclass", "pg_operator", "pg_opfamily", "pg_range",
+                  "pg_ts_config", "pg_ts_dict", "pg_ts_parser", "pg_ts_template"):
+        key = "rngtypid" if table == "pg_range" else "oid"
+        reject("custom_" + table, "SELECT 1 FROM " + table + " WHERE " + key + ">=16384")
+    return (PROJECTION_SETTINGS + "SET search_path=pg_catalog; SELECT jsonb_build_object('version','" + RESTORE_INVENTORY
+            + "','server_major',current_setting('server_version_num')::int/10000,'catalogs',"
+            "(SELECT jsonb_agg(relname ORDER BY relname) FROM pg_class WHERE relnamespace='pg_catalog'::regnamespace AND relkind='r'),"
+            "'records',(SELECT coalesce(jsonb_agg(doc ORDER BY doc->'key'),'[]'::jsonb) FROM (" + " UNION ALL ".join(rows)
+            + ") records),'unsupported',(SELECT coalesce(jsonb_agg(to_jsonb(b) ORDER BY kind),'[]'::jsonb) FROM ("
+            + " UNION ALL ".join(refused) + ") b));")
+
+
+OBJECT_CATALOG_SQL = _restore_inventory_sql()
+
+
+def inventory_valid(inventory, database):
+    """Missing queries and unknown kinds/attributes are refusals, including an otherwise empty catalog."""
+    expected = {name for group in INVENTORY_COVERAGE.values() for name in group.split()}
+    if (type(inventory) is not dict or set(inventory) != {"version", "server_major", "catalogs", "records", "unsupported"}
+            or inventory["version"] != RESTORE_INVENTORY or inventory["server_major"] != 16
+            or type(inventory["catalogs"]) is not list or set(inventory["catalogs"]) != expected
+            or len(inventory["catalogs"]) != len(expected) or type(inventory["unsupported"]) is not list
+            or type(inventory["records"]) is not list):
+        _unsupported("PostgreSQL 16 복원 inventory 조사 범위가 불완전합니다")
+    if inventory["unsupported"]:
+        _unsupported("v1 미지원 객체가 있어 변경 전에 거절했습니다", {"unsupported": inventory["unsupported"]})
+    seen = set()
+    for row in inventory["records"]:
+        if type(row) is not dict or set(row) != {"key", "attributes"}:
+            _unsupported("복원 객체 기록 형식이 다릅니다")
+        key, attributes = row["key"], row["attributes"]
+        if (type(key) is not list or len(key) != 5 or key[0] != database or key[2] not in INVENTORY_KINDS
+                or type(attributes) is not dict or set(attributes) != set(INVENTORY_ATTRIBUTES[key[2]].split())):
+            _unsupported("v1 미분류 객체 또는 속성이 있습니다")
+        encoded = json.dumps(key, ensure_ascii=False, separators=(",", ":"))
+        if encoded in seen:
+            _unsupported("복원 객체의 구조화 식별자가 중복됐습니다")
+        seen.add(encoded)
+    return inventory
 
 
 def psql_json(container, database, sql, user="kin", timeout=300):
     return json.loads(text(["docker", "exec", container, "psql", "-X", "-U", user, "-d", database, "-v", "ON_ERROR_STOP=1",
-                            "-qAt", "-c", sql], timeout=timeout))
+                            "-qAt", "-c", "SET client_encoding='UTF8'", "-c", sql], timeout=timeout))
 
 
 def role_catalog(container, user="kin"):
@@ -828,7 +1051,7 @@ def role_catalog(container, user="kin"):
 
 
 def object_catalog(container, database, user="kin"):
-    return psql_json(container, database, OBJECT_CATALOG_SQL, user)
+    return inventory_valid(psql_json_stdin(container, database, OBJECT_CATALOG_SQL, user), database)
 
 
 def cluster_catalog(container, user="kin"):
@@ -839,8 +1062,153 @@ def cluster_catalog(container, user="kin"):
     return catalog
 
 
-def _unsupported(message):
-    raise RuntimeError("Unsupported pre-EMR catalog: " + message)
+# System catalogs are compared with the exact image's initdb, not with a remembered default. These are logical
+# fields only: tuple locations, transaction horizons and planner samples change without a logical database change.
+BOUNDARY_SHARED = frozenset("pg_authid pg_auth_members pg_database pg_db_role_setting pg_replication_origin pg_shdepend "
+                            "pg_shdescription pg_shseclabel pg_subscription pg_tablespace".split())
+BOUNDARY_KEYS = {"pg_aggregate": "aggfnoid", "pg_attribute": "attrelid", "pg_attrdef": "adrelid", "pg_depend": "objid", "pg_description": "objoid",
+                 "pg_enum": "enumtypid", "pg_index": "indexrelid", "pg_init_privs": "objoid", "pg_sequence": "seqrelid",
+                 "pg_range": "rngtypid", "pg_ts_config_map": "mapcfg", "pg_publication_namespace": "pnnspid",
+                 "pg_publication_rel": "prrelid", "pg_largeobject": "loid", "pg_inherits": "inhrelid",
+                 "pg_partitioned_table": "partrelid", "pg_foreign_table": "ftrelid", "pg_subscription_rel": "srrelid",
+                 "pg_seclabel": "objoid"}
+
+
+def boundary_sql(system_only):
+    rows = []
+    for table in sorted({n for group in INVENTORY_COVERAGE.values() for n in group.split()}
+                        - BOUNDARY_SHARED - set(INVENTORY_COVERAGE["physical"].split())):
+        fields = ""
+        if table == "pg_class":
+            fields = "relfilenode relpages reltuples relallvisible relfrozenxid relminmxid"
+        elif table == "pg_index":
+            fields = "indcheckxmin"
+        value = _json_without("r", fields) if fields else "to_jsonb(r)"
+        where = ""
+        if system_only:
+            key = BOUNDARY_KEYS.get(table, "oid")
+            # plpgsql is initdb's sole extension. Its generated OIDs must also match this image's baseline.
+            namespace = {"pg_class": "relnamespace", "pg_type": "typnamespace", "pg_proc": "pronamespace",
+                         "pg_constraint": "connamespace", "pg_collation": "collnamespace"}.get(table)
+            condition = (namespace + " IN (SELECT oid FROM pg_namespace WHERE nspname IN ('pg_catalog','information_schema'))"
+                         if namespace else key + "<16384")
+            if table == "pg_namespace":
+                condition = "nspname IN ('pg_catalog','information_schema','pg_toast')"
+            if table in ("pg_description", "pg_init_privs"):
+                condition += " OR " + key + " IN (SELECT oid FROM pg_extension UNION ALL SELECT oid FROM pg_language)"
+                if table == "pg_description":
+                    condition = "(" + condition + ") AND NOT(classoid='pg_namespace'::regclass AND objoid='public'::regnamespace)"
+            where = " WHERE " + ("true" if table in ("pg_extension", "pg_language") else condition)
+        rows.append("SELECT " + _sql_literal(table) + " AS name, coalesce(jsonb_agg(v ORDER BY v),'[]'::jsonb) AS rows FROM "
+                    "(SELECT " + value + " AS v FROM pg_catalog." + table + " r" + where + ") x")
+    return PROJECTION_SETTINGS + "SET search_path=pg_catalog; SELECT jsonb_object_agg(name,rows) FROM (" + " UNION ALL ".join(rows) + ") x;"
+
+
+def boundary_proof(container, catalog, image=None):
+    """Observe template0 on a private physical copy; never enable connections on the source template.
+
+    A same-image initdb supplies the postgres/template/system baseline. The helper owns its tmpfs and has no source
+    volume mounts. pg_basebackup is read-only with respect to logical source contents; its checkpoint/WAL activity is
+    explicit. v1 refuses clusters over 1 GiB before creating this bounded helper. No raw values/verifiers leave it.
+    """
+    import shlex
+    import tempfile
+    info = json.loads(text(["docker", "inspect", container]))[0]
+    image = image or info["Image"]
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
+        _unsupported("PostgreSQL 이미지 digest를 확인하지 못했습니다")
+    size = psql_json(container, "kin", "SELECT sum(pg_database_size(oid)) FROM pg_database;")
+    if type(size) is not int or not 0 < size <= 1024 ** 3:
+        _unsupported("v1 template 경계 조사 한도 1 GiB를 초과했습니다")
+    env = dict(line.split("=", 1) for line in info.get("Config", {}).get("Env", []) if "=" in line)
+    password = env.get("POSTGRES_PASSWORD")
+    if not password or "\x00" in password:
+        _unsupported("원본의 installer 인증 입력이 없습니다")
+    # The script is private stdin; neither the password nor copied verifier data is an argv or a recorder artifact.
+    script = "set -eu\numask 077\nexport PGPASSWORD=" + shlex.quote(password) + "\n"
+    script += ("mkdir -p /tmp/source /tmp/fresh /tmp/emr\n"
+               "pg_basebackup -h 127.0.0.1 -U kin -D /tmp/source -X stream --checkpoint=fast "
+               "--no-password --tablespace-mapping=" + EMR_TABLESPACE + "=/tmp/emr >/dev/null 2>&1\n"
+               "rm -f /tmp/source/postgresql.auto.conf /tmp/source/standby.signal /tmp/source/recovery.signal\n"
+               "printf 'local all all trust\\nhost all all 127.0.0.1/32 scram-sha-256\\n' >/tmp/source/pg_hba.conf\n"
+               "printf \"data_directory='/tmp/source'\\nhba_file='/tmp/source/pg_hba.conf'\\n"
+               "listen_addresses='127.0.0.1'\\nport=5541\\nunix_socket_directories='/tmp'\\n"
+               "shared_preload_libraries=''\\narchive_mode=off\\n\" >/tmp/source/config.private\n"
+               "pg_ctl -D /tmp/source -o '-c config_file=/tmp/source/config.private' -l /tmp/source.log -w -t 60 start >/dev/null\n"
+               "PGPORT=5541 psql -h 127.0.0.1 -U kin -d postgres -XqAt -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null\n"
+               "psql -h /tmp -p 5541 -U kin -d postgres -XqAt -v ON_ERROR_STOP=1 "
+               "-c 'ALTER DATABASE template0 ALLOW_CONNECTIONS true' >/dev/null\n"
+               "initdb -D /tmp/fresh -U kin -A trust --no-instructions >/dev/null 2>&1\n"
+               "pg_ctl -D /tmp/fresh -o '-p 5542 -k /tmp -c listen_addresses= -c shared_preload_libraries=' "
+               "-l /tmp/fresh.log -w -t 60 start >/dev/null\n"
+               "psql -h /tmp -p 5542 -U kin -d postgres -XqAt -v ON_ERROR_STOP=1 "
+               "-c 'ALTER DATABASE template0 ALLOW_CONNECTIONS true' >/dev/null\n")
+    secrets = snapshot_credentials(ROOT) if set(catalog["login_verifiers"]) - {"kin"} else {}
+    for member in catalog["login_verifiers"]:
+        if member == "kin":
+            continue
+        password = secrets.get(member)
+        if not password:
+            _unsupported("LOGIN 역할의 보호된 인증 입력이 없습니다")
+        script += ("PGPASSWORD=" + shlex.quote(password) + " psql -h 127.0.0.1 -p 5541 -U " + shlex.quote(member)
+                   + " -d kin -XqAt -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null\n")
+    queries = [("source", 5541, name, False) for name in ("postgres", "template0", "template1")]
+    queries += [("fresh", 5542, name, False) for name in ("postgres", "template0", "template1")]
+    queries += [("source", 5541, name, True) for name in PRE_DATABASES]
+    queries += [("fresh", 5542, "postgres", True)]
+    for index, (label, port, name, system) in enumerate(queries):
+        script += (f"psql -h /tmp -p {port} -U kin -d {name} -XqAt -v ON_ERROR_STOP=1 <<'BOUNDARY_{index}'\n"
+                   + boundary_sql(system) + f"\nBOUNDARY_{index}\n")
+    # Fresh global baseline has no kin database yet; this query's schemas are immaterial to that comparison.
+    script += "psql -h /tmp -p 5542 -U kin -d postgres -XqAt -v ON_ERROR_STOP=1 <<'GLOBAL_BASELINE'\n" + ROLE_CATALOG_SQL + ";\nGLOBAL_BASELINE\n"
+    script += "pg_ctl -D /tmp/source -m fast -w stop >/dev/null\npg_ctl -D /tmp/fresh -m fast -w stop >/dev/null\n"
+    with tempfile.TemporaryFile() as handle:
+        handle.write(script.encode("utf-8")); handle.seek(0)
+        raw = temporary_run(["-i", "--network", "container:" + container, "--user", "postgres", "--memory", "3g",
+                             "--tmpfs", "/tmp:rw,nosuid,size=2g", "--tmpfs", "/var/lib/postgresql/data:rw,nosuid,size=1m",
+                             "--entrypoint", "sh", image, "-s"], input_file=handle, timeout=600)
+    try:
+        found = [json.loads(line) for line in raw.splitlines()]
+    except ValueError:
+        _unsupported("template 경계 조사 결과를 읽지 못했습니다")
+    if len(found) != len(queries) + 1:
+        _unsupported("template 경계 조사가 불완전합니다")
+    if any(found[index] != found[index + 3] for index in range(3)) or any(found[index] != found[8] for index in (6, 7)):
+        _unsupported("postgres/template 또는 시스템 객체가 같은 이미지의 초기 경계와 다릅니다")
+    fresh = found[-1]
+    if catalog.get("builtin_roles") != fresh.get("builtin_roles"):
+        _unsupported("기본 제공 역할이 초기 경계와 다릅니다")
+    if catalog.get("setting_names") != fresh.get("setting_names"):
+        _unsupported("역할 설정의 PostgreSQL 지원 목록이 초기 경계와 다릅니다")
+    for database in ("postgres", "template0", "template1"):
+        source_row = next(row for row in catalog["databases"] if row["name"] == database)
+        fresh_row = dict(next(row for row in fresh["databases"] if row["name"] == database))
+        if database == "template0":
+            fresh_row["attributes"] = dict(fresh_row["attributes"], datallowconn=False)
+        if source_row != fresh_row:
+            _unsupported("postgres/template 데이터베이스 속성이 초기 경계와 다릅니다")
+    for space in DEFAULT_TABLESPACES:
+        if next(row for row in catalog["tablespaces"] if row["name"] == space) != next(row for row in fresh["tablespaces"] if row["name"] == space):
+            _unsupported("기본 tablespace 속성이 초기 경계와 다릅니다")
+    return {"version": RESTORE_INVENTORY, "postgres_image": image, "boundary": "same-image-initdb", "template0": "private-physical-copy"}
+
+
+def restore_admission(container, *, shape, image=None):
+    """Called before the first fence and again under the fence, before creating a capture directory."""
+    catalog = supported_catalog(cluster_catalog(container), shape=shape)
+    boundary_proof(container, catalog, image)
+    values = value_catalog(container)
+    return catalog, values
+
+
+class RestoreAdmissionError(RuntimeError):
+    def __init__(self, message, evidence=None):
+        super().__init__("Unsupported pre-EMR catalog: " + message)
+        self.evidence = {"version": RESTORE_INVENTORY, "reason": message, **(evidence or {})}
+
+
+def _unsupported(message, evidence=None):
+    raise RestoreAdmissionError(message, evidence)
 
 
 # The bootstrap superuser of a fresh cluster of the product's image (POSTGRES_USER=kin), as pg_roles shows it.
@@ -852,10 +1220,11 @@ def supported_pre_catalog(catalog):
     """A pre-EMR cluster this tool can rebuild exactly in a fresh cluster, or a refusal before anything changes.
 
     Supported: the installer superuser kin (the image's POSTGRES_USER, LOGIN), any number of further NOLOGIN roles
-    (their attributes, connection limit and validity are replayed exactly; no password exists to carry), memberships
+    (their attributes, connection limit and validity are replayed exactly; stored verifiers are refused), memberships
     among them (and predefined pg_* roles), the databases kin and keycloak (plus the image's postgres), and only the
     default tablespaces. Refused: a further LOGIN role (its password is never captured, so a restore could not
-    reproduce it), per-role settings, another database or tablespace, a name that is not a plain identifier."""
+    reproduce it), another database or tablespace, a name that is not a plain identifier. Declared session settings
+    are replayed at their role/database scope; custom settings, preload hooks and template settings are refused."""
     return supported_catalog(catalog, shape="pre")
 
 
@@ -865,25 +1234,34 @@ def supported_catalog(catalog, *, shape):
     tablespace."""
     if type(catalog) is not dict:
         _unsupported("unreadable")
+    if catalog.get("server_major") != 16 or type(catalog.get("unsupported_verifiers")) is not list:
+        _unsupported("PG16 자격증명 존재 여부를 조사하지 못했습니다")
+    if catalog["unsupported_verifiers"]:
+        _unsupported("재현 계약 밖의 저장 verifier가 있습니다. NOLOGIN도 예외가 아닙니다")
+    if type(catalog.get("settings")) is not list or type(catalog.get("setting_names")) is not list:
+        _unsupported("cluster/database/role 설정 조사가 불완전합니다")
+    if type(catalog.get("login_verifiers")) is not list or "kin" not in catalog["login_verifiers"]:
+        _unsupported("installer 저장 verifier 조사가 불완전합니다")
     roles = {}
     for role in catalog.get("roles") or []:
         name = role.get("rolname")
         if type(name) is not str or not SQL_NAME.fullmatch(name):
             _unsupported("a role name is not a plain identifier")
+        if name in roles:
+            _unsupported("역할 식별자가 중복됐습니다")
         roles[name] = role
     installer = roles.get("kin")
     if not installer or installer.get("rolsuper") is not True or installer.get("rolcanlogin") is not True:
         _unsupported("the installer superuser kin is missing")
     # IRT2-17: a fresh cluster's bootstrap kin has exactly these attributes and the replay never alters it, so a kin that
     # differs (connection limit, validity, settings, a dropped attribute) could not be rebuilt: refused at capture.
-    if {key: installer.get(key) for key in BOOTSTRAP_KIN} != BOOTSTRAP_KIN:
+    if {key: installer.get(key) for key in BOOTSTRAP_KIN if key != "rolconfig"} != {key: value for key, value in BOOTSTRAP_KIN.items() if key != "rolconfig"}:
         _unsupported("the installer superuser kin has attributes a fresh cluster's kin does not")
     for name, role in roles.items():
         if any(key not in role for key in ("rolsuper", "rolcreaterole", "rolcreatedb", "rolcanlogin", "rolreplication",
                                            "rolbypassrls", "rolinherit", "rolconnlimit", "rolvaliduntil", "rolconfig")):
             _unsupported("role attributes are incomplete")
-        if role.get("rolconfig"):
-            _unsupported("a role carries its own settings")
+        configuration(role.get("rolconfig"), catalog["setting_names"])
         if name != "kin" and role.get("rolcanlogin") is not False and not (shape == "post" and name in EMR_ROLES):
             _unsupported("a further LOGIN role exists (its password cannot be restored)")
         if role.get("rolvaliduntil") is not None and not re.fullmatch(r"[0-9A-Za-z :+.-]{1,40}", str(role["rolvaliduntil"])):
@@ -901,7 +1279,7 @@ def supported_catalog(catalog, *, shape):
         if membership.get("grantor") != "kin":
             _unsupported("a membership was granted by another role than kin")
     databases = {item.get("name"): item for item in catalog.get("databases") or []}
-    if not set(PRE_DATABASES) <= set(databases) or not set(databases) <= {*PRE_DATABASES, "postgres"}:
+    if set(databases) != {*PRE_DATABASES, "postgres", "template0", "template1"}:
         _unsupported("the databases are not exactly kin and keycloak")
     if any(databases[name].get("owner") != "kin" for name in databases if name != "keycloak") or databases["keycloak"].get("owner") not in roles:
         _unsupported("a database owner differs")
@@ -911,17 +1289,69 @@ def supported_catalog(catalog, *, shape):
     if shape == "post" and not any(space.get("name") == "kin_emr_access" and space.get("location") == EMR_TABLESPACE
                                    for space in catalog.get("tablespaces") or []):
         _unsupported("the EMR tablespace is missing or elsewhere")
+    scopes = set()
+    for entry in catalog["settings"]:
+        if type(entry) is not dict or set(entry) != {"database", "role", "config"}:
+            _unsupported("설정 범위 형식이 다릅니다")
+        database, member = entry["database"], entry["role"]
+        if database not in (*PRE_DATABASES, None) or (member is not None and member not in roles):
+            _unsupported("순정 postgres/template 또는 기본 제공 역할의 설정이 달라졌습니다")
+        if (database, member) in scopes:
+            _unsupported("설정 범위가 중복됐습니다")
+        scopes.add((database, member))
+        configuration(entry["config"], catalog["setting_names"])
     return catalog
 
 
 def _sql_literal(value):
-    return "'" + str(value).replace("'", "''") + "'"
+    # Role/database defaults may disable standard_conforming_strings. Explicit escapes keep stored backslashes and
+    # quotes as data in either setting; doubled quotes also work when backslash_quote is disabled.
+    return "E'" + str(value).replace("\\", "\\\\").replace("'", "''") + "'"
 
 
-def replay_roles(container, source, user="kin", shape="pre"):
+def configuration(values, allowed):
+    if values is None:
+        return []
+    if type(values) is not list:
+        _unsupported("역할 또는 DB 설정 값이 배열이 아닙니다")
+    found, result = set(), []
+    for item in values:
+        if type(item) is not str or "=" not in item or "\x00" in item:
+            _unsupported("역할 또는 DB 설정 값을 읽지 못했습니다")
+        name, value = item.split("=", 1)
+        if name not in RESTORE_SETTINGS or name not in allowed or name.lower() in found or not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", name):
+            _unsupported("v1 지원 목록 밖의 역할 또는 DB 설정입니다")
+        found.add(name.lower())
+        result.append((name, value))
+    return result
+
+
+def configuration_sql(scope, values, allowed):
+    # Persist scalar defaults without activating them on this connection (transaction_read_only and short timeouts
+    # would interrupt the replay). search_path is v1's only GUC_LIST_QUOTE setting; PostgreSQL parses its list.
+    statements = [scope + " RESET ALL;"]
+    for name, value in configuration(values, allowed):
+        if name != "search_path":
+            statements.append(scope + " SET " + _identifier(name) + " TO " + _sql_literal(value) + ";")
+            continue
+        statements += ["SELECT pg_catalog.set_config(" + _sql_literal(name) + "," + _sql_literal(value) + ",false);",
+                       scope + " SET " + _identifier(name) + " FROM CURRENT;", "RESET " + _identifier(name) + ";"]
+    return statements
+
+
+def run_private_sql(container, statements, user="kin"):
+    import tempfile
+    with tempfile.TemporaryFile() as handle:
+        handle.write(("SET client_encoding='UTF8';\nSET search_path=pg_catalog; SET TimeZone='UTC'; SET log_statement='none'; SET log_min_duration_statement=-1;\nBEGIN;\n"
+                      + "\n".join(statements) + "\nCOMMIT;\n").encode("utf-8"))
+        handle.seek(0)
+        run(["docker", "exec", "-i", container, "psql", "-X", "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-q"], input_file=handle)
+
+
+def replay_roles(container, source, user="kin", shape="pre", credentials=None):
     """Rebuild a supported snapshot's roles and memberships in a fresh cluster whose bootstrap superuser is kin, as the
-    product's (no passwords: a pre-EMR snapshot's replayed roles are all NOLOGIN; a post-EMR check cluster's EMR logins
-    have none). Memberships are granted by that superuser (PG16 refuses a recorded grantor without ADMIN OPTION), then
+    product's. Supported EMR login verifiers are rebuilt from the private snapshot credentials, whose authentication
+    was checked on the source copy. Memberships are granted by kin (PG16 requires the grantor's ADMIN OPTION), then
     the cluster must have exactly the snapshot's roles and memberships."""
     supported_catalog(source, shape=shape)
     fresh = role_catalog(container, user)
@@ -930,7 +1360,7 @@ def replay_roles(container, source, user="kin", shape="pre"):
     for role in source["roles"]:
         name = role["rolname"]
         if name in present:
-            if present[name] != role:
+            if {k: v for k, v in present[name].items() if k != "rolconfig"} != {k: v for k, v in role.items() if k != "rolconfig"}:
                 raise RuntimeError("A role of the fresh cluster differs from the snapshot: " + name)
             continue
         flags = [("" if role["rolsuper"] else "NO") + "SUPERUSER", ("" if role["rolcreaterole"] else "NO") + "CREATEROLE",
@@ -940,21 +1370,28 @@ def replay_roles(container, source, user="kin", shape="pre"):
         if role["rolvaliduntil"] is not None:
             flags.append("VALID UNTIL " + _sql_literal(role["rolvaliduntil"]))
         statements.append('CREATE ROLE "%s" WITH %s;' % (name, " ".join(flags)))
+        if name in source["login_verifiers"]:
+            password = (credentials or {}).get(name)
+            if not password:
+                _unsupported("저장 verifier가 있는 LOGIN 역할의 복원 인증 입력이 없습니다")
+            statements.append('ALTER ROLE ' + _identifier(name) + ' PASSWORD ' + _sql_literal(password) + ';')
+    for name, comment in source.get("role_comments", []):
+        if name not in {row["rolname"] for row in source["roles"]}:
+            _unsupported("역할 주석이 조사한 역할 밖을 가리킵니다")
+        if comment is not None:
+            statements.append('COMMENT ON ROLE ' + _identifier(name) + ' IS ' + _sql_literal(comment) + ';')
+    for role in source["roles"]:
+        if role.get("rolconfig"):
+            statements += configuration_sql('ALTER ROLE ' + _identifier(role["rolname"]), role["rolconfig"], source["setting_names"])
     granted = {(item["granted"], item["member"]) for item in fresh["memberships"]}
     for item in source["memberships"]:
         if (item["granted"], item["member"]) not in granted:
             statements.append('GRANT "%s" TO "%s" WITH ADMIN %s, INHERIT %s, SET %s;' % (
                 item["granted"], item["member"], *("TRUE" if item[key] else "FALSE" for key in ("admin_option", "inherit_option", "set_option"))))
     if statements:
-        import tempfile
-        with tempfile.TemporaryFile() as handle:
-            handle.write(("SET TimeZone='UTC';\nBEGIN;\n" + "\n".join(statements) + "\nCOMMIT;\n").encode("utf-8"))
-            handle.flush()
-            handle.seek(0)
-            run(["docker", "exec", "-i", container, "psql", "-X", "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-q"],
-                input_file=handle)
+        run_private_sql(container, statements, user)
     after = role_catalog(container, user)
-    if after["roles"] != source["roles"] or after["memberships"] != source["memberships"]:
+    if any(after.get(key) != source.get(key) for key in ("roles", "memberships", "login_verifiers", "role_comments")):
         raise RuntimeError("Replayed roles or memberships differ from the snapshot")
     return {"created": [line.split('"')[1] for line in statements if line.startswith("CREATE ROLE")],
             "granted": sum(1 for line in statements if line.startswith("GRANT"))}
@@ -977,7 +1414,12 @@ def restore_snapshot(container, directory, user="kin", shape="pre", source=None)
     whole = source is None
     if whole:
         source = json.loads((directory / "catalog.json").read_text(encoding="utf-8"))
-    replayed = replay_roles(container, source, user, shape)
+        if type(source.get("objects")) is not dict or set(source["objects"]) != set(PRE_DATABASES):
+            _unsupported("복원 snapshot의 DB inventory가 불완전합니다")
+        for database in PRE_DATABASES:
+            inventory_valid(source["objects"][database], database)
+    credentials = snapshot_credentials(directory)
+    replayed = replay_roles(container, source, user, shape, credentials)
     probe = ["docker", "exec", container, "psql", "-X", "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-qAt", "-c"]
     if shape == "post":
         run(probe + ["CREATE TABLESPACE kin_emr_access OWNER kin_emr_owner LOCATION '" + EMR_TABLESPACE + "';"])
@@ -992,11 +1434,32 @@ def restore_snapshot(container, directory, user="kin", shape="pre", source=None)
         with (directory / (database + ".dump")).open("rb") as handle:
             run(["docker", "exec", "-i", container, "pg_restore", "-U", user, "-d", "postgres", "--create", "--exit-on-error"],
                 input_file=handle, timeout=1800)
+    settings = []
+    for entry in source["settings"]:
+        scope = "ALTER ROLE " + ("ALL" if entry["role"] is None else _identifier(entry["role"]))
+        if entry["database"] is not None:
+            scope += " IN DATABASE " + _identifier(entry["database"])
+        settings += configuration_sql(scope, entry["config"], source["setting_names"])
+    if settings:
+        run_private_sql(container, settings, user)
     restored = cluster_catalog(container, user) if whole else role_catalog(container, user)
     if restored != source:
         differing = sorted(key for key in set(restored) | set(source) if restored.get(key) != source.get(key))
         raise RuntimeError("Restored catalog differs from the snapshot: " + ",".join(differing))
     return {"roles_created": replayed["created"], "memberships_granted": replayed["granted"], "catalog": "equal"}
+
+
+def snapshot_credentials(directory):
+    env = {}
+    for line in (Path(directory) / ".env").read_text(encoding="utf-8").splitlines():
+        if line and not line.lstrip().startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            env[key.strip()] = value
+    return {role: env.get(key) for role, key in (("kin", "POSTGRES_PASSWORD"), ("kin_runtime", "KIN_EMR_RUNTIME_PASSWORD"),
+        ("kin_emr_reader", "KIN_EMR_READER_PASSWORD"), ("kin_emr_retention", "KIN_EMR_RETENTION_PASSWORD"))}
 
 
 def migration_rows(container, user="kin"):
@@ -1018,12 +1481,12 @@ def projection(container, database="kin", user="kin", columns=None):
         raise RuntimeError("Empty projection source")
     selects = []
     for table, names in columns.items():
-        if not SQL_NAME.fullmatch(table) or not names or any(not SQL_NAME.fullmatch(name) for name in names):
+        if type(table) is not str or not table or "\x00" in table or not names or any(type(name) is not str or not name or "\x00" in name for name in names):
             raise RuntimeError("Unexpected table or column name")
-        row = "ROW(" + ", ".join('"' + name + '"' for name in names) + ")::text"
-        selects.append(f"SELECT '{table}' AS name, (SELECT json_build_array(count(*), encode(sha256(convert_to("
+        row = "ROW(" + ", ".join(_identifier(name) for name in names) + ")::text"
+        selects.append("SELECT " + _sql_literal(table) + " AS name, (SELECT json_build_array(count(*), encode(sha256(convert_to("
                        f"coalesce(string_agg(r, E'\\n' ORDER BY r COLLATE \"C\"), ''), 'UTF8')), 'hex')) FROM "
-                       f"(SELECT {row} AS r FROM public.\"{table}\") s) AS d")
+                       + "(SELECT " + row + " AS r FROM public." + _identifier(table) + ") s) AS d")
     result = psql_json(container, database, PROJECTION_SETTINGS + "SELECT json_object_agg(name, d) FROM ("
                        + " UNION ALL ".join(selects) + ") x", user)
     return {table: {"columns": list(names), "count": result[table][0], "sha256": result[table][1]}
@@ -1043,7 +1506,7 @@ def psql_json_stdin(container, database, sql, user="kin", timeout=1800):
     """psql_json with the statement on stdin (a statement over every table can exceed a command line)."""
     import tempfile
     with tempfile.TemporaryFile() as handle:
-        handle.write(sql.encode("utf-8"))
+        handle.write(("SET client_encoding='UTF8';\n" + sql).encode("utf-8"))
         handle.flush()
         handle.seek(0)
         result = run(["docker", "exec", "-i", container, "psql", "-X", "-U", user, "-d", database, "-v", "ON_ERROR_STOP=1", "-qAt", "-f", "-"],
@@ -1051,22 +1514,95 @@ def psql_json_stdin(container, database, sql, user="kin", timeout=1800):
     return json.loads(result.stdout.decode("utf-8").strip())
 
 
-def value_catalog(container, user="kin"):
-    """IRT2-24: every row value of both databases at one point - per table of every schema (kin's public and others,
-    Keycloak's), its row count and a SHA-256 over its whole rows' text in a fixed order (sequence states are in the object
-    catalog). A restore must reproduce it exactly; nothing of the rows leaves PostgreSQL but the digests."""
-    out = {}
+def value_rows(container, database, schema, table, user="kin"):
+    """Private in-memory rows only. The command recorder keeps output hashes, never this response's contents.
+
+    Text of each typed column is enclosed in a JSON array, retaining NULL, empty values, JSON text, bytea and embedded
+    separators exactly. Bound rows/cells/encoded bytes before materializing the result; a large source is refused.
+    """
+    columns = psql_json_stdin(container, database,
+        "SET search_path=pg_catalog; SELECT coalesce(json_agg(a.attname ORDER BY a.attnum),'[]'::json) FROM pg_attribute a "
+        "JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace "
+        "WHERE a.attnum>0 AND NOT a.attisdropped AND c.relkind='r' AND c.relpersistence='p' AND n.nspname="
+        + _sql_literal(schema) + " AND c.relname=" + _sql_literal(table) + ";", user)
+    if type(columns) is not list or any(type(name) is not str for name in columns) or len(set(columns)) != len(columns):
+        _unsupported("값 비교의 column 목록을 읽지 못했습니다")
+    relation = _identifier(schema) + "." + _identifier(table)
+    row = "jsonb_build_array(" + ",".join("t." + _identifier(name) + "::text" for name in columns) + ")"
+    settings = PROJECTION_SETTINGS + "SET search_path=pg_catalog; SET statement_timeout='180s'; "
+    size = psql_json_stdin(container, database, settings + "SELECT json_build_array(count(*),coalesce(sum(octet_length(("
+                          + row + ")::text)),0)+2*count(*)+2) FROM " + relation + " t;", user)
+    if (type(size) is not list or len(size) != 2 or any(type(n) is not int or n < 0 for n in size)
+            or size[0] > 100000 or size[0] * max(1, len(columns)) > 1000000 or size[1] > VALUE_LIMIT_BYTES):
+        _unsupported("값 비교의 측정된 row/cell/byte 한도를 초과했습니다")
+    rows = psql_json_stdin(container, database, settings + "SELECT coalesce(jsonb_agg(" + row + "),'[]'::jsonb) FROM "
+                          + relation + " t;", user)
+    if (type(rows) is not list or len(rows) != size[0] or any(type(item) is not list or len(item) != len(columns)
+            or any(value is not None and type(value) is not str for value in item) for item in rows)):
+        _unsupported("값 조회 중 row/column 범위가 달라졌습니다")
+    return columns, rows
+
+
+def value_digest(key, columns, rows):
+    """Length-framed UTF-8 arrays make row boundaries and duplicate multiplicity unambiguous."""
+    values = sorted(json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode("utf-8") for row in rows)
+    digest_value = hashlib.sha256()
+    for value in values:
+        digest_value.update(str(len(value)).encode("ascii") + b":" + value)
+    return {"key": list(key), "columns": list(columns), "count": len(values), "sha256": digest_value.hexdigest()}
+
+
+def value_catalog(container, user="kin", transform=None):
+    """All columns/rows of both databases, with structured keys and a bounded private in-memory comparison.
+
+    An internal clone transform may compute a precise expected projection before mutation. Actual observations always
+    use transform=None. A table name is never an exemption from residual comparison.
+    """
+    out = {"version": RESTORE_INVENTORY, "tables": []}
+    seen = set()
     for database in PRE_DATABASES:
         tables = psql_json(container, database, VALUE_TABLES_SQL, user)
-        selects = []
-        for schema, table in tables:
-            label = (schema + "." + table).replace("'", "''")
-            selects.append(f"SELECT '{label}' AS name, (SELECT json_build_array(count(*), encode(sha256(convert_to(coalesce("
-                           f"string_agg(t::text, E'\\n' ORDER BY t::text COLLATE \"C\"), ''), 'UTF8')), 'hex')) FROM "
-                           f"{_identifier(schema)}.{_identifier(table)} t) AS d")
-        out[database] = psql_json_stdin(container, database, PROJECTION_SETTINGS + "SELECT coalesce(json_object_agg(name, d), '{}'::json) FROM ("
-                                        + " UNION ALL ".join(selects) + ") x;", user) if selects else {}
-    return out
+        if type(tables) is not list:
+            _unsupported("값 비교의 table 목록을 읽지 못했습니다")
+        for item in tables:
+            if type(item) is not list or len(item) != 2 or any(type(name) is not str for name in item):
+                _unsupported("table 식별자 형식이 다릅니다")
+            schema, table = item
+            key = (database, schema, "table", table, None)
+            if key in seen:
+                _unsupported("table 식별자가 중복됐습니다")
+            seen.add(key)
+            columns, rows = value_rows(container, database, schema, table, user)
+            if transform is not None:
+                rows = transform(key, columns, rows)
+            out["tables"].append(value_digest(key, columns, rows))
+    out["tables"].sort(key=lambda row: row["key"][:4])
+    return values_valid(out)
+
+
+def values_valid(values):
+    if type(values) is not dict or set(values) != {"version", "tables"} or values["version"] != RESTORE_INVENTORY or type(values["tables"]) is not list:
+        _unsupported("전체 값 inventory 형식이 다릅니다")
+    seen = set()
+    for row in values["tables"]:
+        if type(row) is not dict or set(row) != {"key", "columns", "count", "sha256"}:
+            _unsupported("전체 값 table 기록이 불완전합니다")
+        key, columns = row["key"], row["columns"]
+        if (type(key) is not list or len(key) != 5 or key[0] not in PRE_DATABASES or key[2] != "table" or key[4] is not None
+                or any(type(key[index]) is not str or not key[index] or "\x00" in key[index] for index in (1, 3))
+                or type(columns) is not list or any(type(name) is not str or not name or "\x00" in name for name in columns)
+                or len(set(columns)) != len(columns) or type(row["count"]) is not int or row["count"] < 0
+                or type(row["sha256"]) is not str or re.fullmatch(r"[a-f0-9]{64}", row["sha256"]) is None):
+            _unsupported("전체 값 table의 구조화 키 또는 digest가 잘못됐습니다")
+        if tuple(key) in seen:
+            _unsupported("전체 값 table 키가 중복됐습니다")
+        seen.add(tuple(key))
+    return values
+
+
+def value_counts(values):
+    return {database: [{"key": row["key"], "count": row["count"]} for row in values["tables"] if row["key"][0] == database]
+            for database in PRE_DATABASES}
 
 
 def env_names(path):
@@ -1160,6 +1696,10 @@ def capture_held(output, resources, *, shape, label, config=(), facts=None, read
             raise RuntimeError("Post-EMR capture resources differ from the target manifest")
         # Its restore check rebuilds it the same way: refused before anything is written, not in the check cluster.
         supported_catalog(roles, shape="post")
+    catalog, captured_values = restore_admission(db_name, shape=shape, image=db["Image"])
+    if {key: value for key, value in catalog.items() if key != "objects"} != roles:
+        _unsupported("admission 도중 전역 카탈로그가 달라졌습니다")
+    roles = catalog
     active = text(["docker", "exec", db_name, "psql", "-X", "-U", "kin", "-d", "kin", "-qAt", "-c",
                    "SELECT count(*) FROM pg_stat_activity WHERE datname IN ('kin','keycloak') "
                    "AND backend_type='client backend' AND pid<>pg_backend_pid();"])
@@ -1177,6 +1717,7 @@ def capture_held(output, resources, *, shape, label, config=(), facts=None, read
     directory = parent / (label + "-" + now.strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8])
     directory.mkdir(mode=0o700)
     manifest = {"format": 1, "kind": HELD_KIND, "shape": shape, "label": label, "complete": False,
+                "restore_inventory": RESTORE_INVENTORY,
                 "created_utc": now.isoformat(), "hold": {"writers_fenced": list(WRITER_ROLES), "resumed_by_capture": False},
                 "git_sha": text(["git", "rev-parse", "HEAD"]),
                 "git_dirty": bool(text(["git", "status", "--porcelain", "--untracked-files=no"])),
@@ -1190,19 +1731,19 @@ def capture_held(output, resources, *, shape, label, config=(), facts=None, read
     started = time.monotonic()
     stage = "catalog"
     try:
-        write_json(directory / "catalog.json", dict(roles, objects={database: object_catalog(db_name, database) for database in PRE_DATABASES}))
+        write_json(directory / "catalog.json", roles)
         write_json(directory / "migrations.json", migration_rows(db_name))
         stage = "projection"
         write_json(directory / "projection.json", projection(db_name))
         stage = "values"
-        write_json(directory / "values.json", value_catalog(db_name))
+        write_json(directory / "values.json", captured_values)
         if shape == "post":
             write_json(directory / "emr-catalog.json", emr_catalog(db_name, "kin"))
         with (directory / "cluster-roles.sql").open("wb") as handle:
             run(["docker", "exec", db_name, "pg_dumpall", "-U", "kin", "--roles-only", "--no-role-passwords"], output=handle)
         for database in ("kin", "keycloak"):
             stage = "dump " + database
-            manifest["counts"][database] = counts(db_name, database, "kin")
+            manifest["counts"][database] = value_counts(captured_values)[database]
             with (directory / (database + ".dump")).open("wb") as handle:
                 run(["docker", "exec", db_name, "pg_dump", "-U", "kin", "-d", database, "-Fc", "--create"], output=handle)
         stage = "archive Orthanc"
@@ -1263,6 +1804,7 @@ def validate_held(directory, manifest_sha256=None):
         raise RuntimeError("Held capture manifest differs from the recorded one")
     manifest = json.loads(raw.decode("utf-8"))
     if (manifest.get("format") != 1 or manifest.get("kind") != HELD_KIND or manifest.get("complete") is not True
+            or manifest.get("restore_inventory") != RESTORE_INVENTORY
             or manifest.get("shape") not in ("pre", "post") or not HELD_NAME.fullmatch(directory.name)):
         raise RuntimeError("Held capture is incomplete or of an unknown form")
     components = held_components(manifest, manifest.get("config") or ())
@@ -1272,6 +1814,14 @@ def validate_held(directory, manifest_sha256=None):
         path = directory / name
         if path.is_symlink() or not path.is_file() or digest(path) != manifest["sha256"][name]:
             raise RuntimeError("Held capture component checksum mismatch: " + name)
+    catalog = supported_catalog(json.loads((directory / "catalog.json").read_text(encoding="utf-8")), shape=manifest["shape"])
+    if type(catalog.get("objects")) is not dict or set(catalog["objects"]) != set(PRE_DATABASES):
+        _unsupported("held DB inventory가 불완전합니다")
+    for database in PRE_DATABASES:
+        inventory_valid(catalog["objects"][database], database)
+    values = values_valid(json.loads((directory / "values.json").read_text(encoding="utf-8")))
+    if value_counts(values) != manifest["counts"]:
+        _unsupported("held manifest의 건수가 구조화된 값 inventory와 다릅니다")
     for archive_name, index in (("orthanc.tgz", True), *((("emr-state.tgz", False),) if manifest["shape"] == "post" else ())):
         found_index = False
         with tarfile.open(directory / archive_name, "r|gz") as archive:
@@ -1311,90 +1861,253 @@ def _retention_window(root, now):
     return kept, {name for name in audit.declared_folders(root) if name not in listed}
 
 
-def rotate(root, keep, protect=(), dry_run=False, now=None):
-    """Keep the newest `keep` physically whole daily sets; delete only older whole daily sets that nothing else retains.
 
-    Whole: a complete manifest whose every declared component exists with its recorded size and SHA-256 (_daily_whole);
-    an incomplete set is neither counted as a generation nor deleted. Never deleted: any name that is not a daily set
-    (s4-/s5-/stage/release/held captures, logs, latest-verified-*.json), the protected names (the set just written), a
-    set with restore-hold.json, a set named by latest-verified-*.json, a set the audit ledger still retains or a declared
-    checkpoint it does not list. A deletion first renames the set out of the daily namespace, so a reader never sees half
-    a set; an interrupted one (.rotating-<name>) is re-judged by its original name and its folder and stays in place when
-    anything protects it. A set beyond the kept generations that only the audit ledger retains is thinned instead: its
-    Orthanc archive is removed after a thinned.json marker, everything the ledger's retention reads stays. dry_run lists
-    exactly the plan a run executes; the run re-checks each set right before it acts. The caller holds the operations
-    lock (no backup or rehearsal runs meanwhile)."""
-    if type(keep) is not int or not 1 <= keep <= 365:
-        raise RuntimeError("Rotation keeps between 1 and 365 generations")
-    root = Path(root)
-    if root.is_symlink() or not root.is_dir():
-        raise RuntimeError("Backup root is not a directory")
-    root = root.resolve()
-    if root == ROOT or ROOT in root.parents:
-        raise RuntimeError("The backup root must be outside the Git repository")
+
+def _rotation_link(path):
+    return path.is_symlink() or bool(getattr(path.lstat(), "st_file_attributes", 0) & 0x400)
+
+
+def _rotation_identity(path, *, directory=True):
+    if _rotation_link(path) or (not path.is_dir() if directory else not path.is_file()):
+        raise RuntimeError("보존 경로의 종류 또는 링크가 바뀌었습니다: " + path.name)
+    info = path.stat()
+    if not directory and info.st_nlink != 1:
+        raise RuntimeError("다른 경로에 연결된 보존 파일입니다: " + path.name)
+    if os.name == "posix" and (info.st_uid != os.geteuid() or (directory and stat.S_IMODE(info.st_mode) & 0o077)):
+        raise RuntimeError("보존 경로의 소유자 또는 접근 권한이 다릅니다: " + path.name)
+    return info.st_dev, info.st_ino
+
+
+def _rotation_root(root):
+    root = Path(root).absolute()
+    if not root.is_dir() or _rotation_link(root):
+        raise RuntimeError("Backup root is not a directory / 백업 루트를 확인할 수 없습니다")
+    if any(_rotation_link(parent) for parent in root.parents):
+        raise RuntimeError("백업 루트의 상위 경로가 링크입니다")
     if os.name == "posix":
-        info = root.stat()
-        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
-            raise RuntimeError("Backup root must be private and owned by the current user")
-    now = now or datetime.now(timezone.utc)
-    audit_kept, undeclared = _retention_window(root, now)
-    referenced = _referenced(root)
-    plan = _rotation_plan(root, keep, set(protect), referenced, audit_kept, undeclared)
-    result = {"root": str(root), "keep": keep, "dry_run": dry_run, "generations": plan["generations"], "retained": plan["retained"],
-              "incomplete": plan["incomplete"], "kept_leftovers": plan["kept_leftovers"]}
+        for parent in root.parents:
+            info = parent.stat()
+            if info.st_uid not in (0, os.geteuid()) or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX):
+                raise RuntimeError("백업 루트의 상위 경로가 보호되지 않았습니다")
+    root = root.resolve()
+    if root == ROOT.resolve() or ROOT.resolve() in root.parents:
+        raise RuntimeError("The backup root must be outside the Git repository / 저장소 밖 백업 루트가 필요합니다")
+    _rotation_identity(root)
+    return root
+
+
+def _thin_marker(folder, manifest):
+    """A marker describes a bound transition, never permission inferred from a filename's presence."""
+    path = folder / THINNED_FILE
+    if not path.exists() and not path.is_symlink():
+        return None
+    if not path.is_file() or _rotation_link(path) or path.stat().st_nlink != 1:
+        raise ValueError("invalid thin marker path")
+    marker = json.loads(path.read_text(encoding="utf-8"))
+    name = folder.name.removeprefix(ROTATING)
+    required = {"format", "state", "backup", "manifest_sha256", "archive_sha256", "archive_bytes", "at", "keep", "reason"}
+    if (type(marker) is not dict or set(marker) != required or type(marker["format"]) is not int or marker["format"] != 1
+            or marker["state"] not in ("THIN_PLANNED", "THINNED_COMPLETE") or marker["backup"] != name
+            or not DAILY_NAME.fullmatch(name) or marker["manifest_sha256"] != digest(folder / "manifest.json")
+            or marker["archive_sha256"] != manifest["sha256"].get("orthanc.tgz")
+            or marker["archive_bytes"] != manifest["bytes"].get("orthanc.tgz")
+            or type(marker["archive_bytes"]) is not int
+            or type(marker["keep"]) is not int or not 1 <= marker["keep"] <= 365
+            or marker["reason"] != "audit-retained beyond the kept daily generations"
+            or type(marker["at"]) is not str or datetime.fromisoformat(marker["at"]).utcoffset() != timezone.utc.utcoffset(None)):
+        raise ValueError("invalid thin marker transition")
+    return marker
+
+
+def _daily_whole(folder):
+    """Verify every declared component. Only a valid completed thin transition permits the absent archive."""
+    try:
+        _rotation_identity(folder)
+        _rotation_identity(folder / "manifest.json", directory=False)
+        manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, RuntimeError):
+        return "unreadable manifest or unsafe set"
+    if (type(manifest) is not dict or type(manifest.get("format")) is not int or manifest.get("format") != 1
+            or manifest.get("complete") is not True or manifest.get("kind")):
+        return "manifest not complete daily backup"
+    sums, sizes = manifest.get("sha256"), manifest.get("bytes")
+    if type(sums) is not dict or type(sizes) is not dict:
+        return "manifest has no checksums"
+    components = backup_components(manifest)
+    required = (*components, AUDIT_CHECKPOINT) if AUDIT_CHECKPOINT in sums else components
+    if set(sums) != set(required) or set(sizes) != set(required):
+        return "component inventory differs"
+    try:
+        marker = _thin_marker(folder, manifest)
+    except (OSError, ValueError, KeyError, TypeError, OverflowError):
+        return "invalid thin marker"
+    for name in required:
+        path, expected = folder / name, sums.get(name)
+        if type(expected) is not str or not re.fullmatch(r"[a-f0-9]{64}", expected) or type(sizes.get(name)) is not int or sizes[name] < 1:
+            return "checksum missing: " + name
+        if name == "orthanc.tgz" and marker and marker["state"] == "THINNED_COMPLETE" and not path.exists() and not path.is_symlink():
+            continue
+        if path.is_symlink() or not path.is_file():
+            return "component missing: " + name
+        try:
+            _rotation_identity(path, directory=False)
+            if path.stat().st_size != sizes[name] or digest(path) != expected:
+                return "component differs: " + name
+        except (OSError, RuntimeError):
+            return "component unreadable: " + name
+    # A rehearsal writes its own result next to the components. Unknown directories or links may hold unrelated data.
+    allowed = {*required, "manifest.json", THINNED_FILE, HOLD_FILE}
+    for entry in folder.iterdir():
+        if (_rotation_link(entry) or not entry.is_file() or entry.stat().st_nlink != 1
+                or (entry.name not in allowed and not re.fullmatch(r"rehearsal-[a-f0-9]{16}\.json", entry.name))):
+            return "undeclared component: " + entry.name
+    return None
+
+
+def _rotation_plan(root, keep, protect, referenced, audit_kept, undeclared):
+    """Recompute generations from current bytes, including a renamed whole set's original generation."""
+    retained, incomplete, kept_leftovers, checked, entries, identities = {}, {}, {}, {}, {}, {}
+    for item in sorted(root.iterdir(), key=lambda entry: entry.name):
+        name = item.name.removeprefix(ROTATING)
+        if not DAILY_NAME.fullmatch(name):
+            continue
+        if item.is_symlink() or not item.is_dir():
+            raise RuntimeError("Invalid backup directory / 올바르지 않은 백업 경로: " + item.name)
+        entries.setdefault(name, []).append(item)
+    candidates = []
+    for name, folders in entries.items():
+        for folder in folders:
+            reason = _retention_reason(name, folder, protect, referenced, audit_kept, undeclared)
+            why = _daily_whole(folder)
+            checked[folder.name] = why
+            if why is None:
+                identities[folder.name] = (_rotation_identity(folder), digest(folder / "manifest.json"))
+            if len(folders) != 1:
+                reason = "duplicate original and renamed generation"
+            if why is not None:
+                incomplete[folder.name] = why
+                reason = reason or "incomplete"
+            if reason:
+                (kept_leftovers if folder.name.startswith(ROTATING) else retained)[folder.name] = reason
+            if len(folders) == 1 and why is None and not (folder / THINNED_FILE).exists():
+                candidates.append(name)
+    generations = sorted(candidates, reverse=True)[:keep]
+    delete, thin, resume = [], [], []
+    for name, folders in sorted(entries.items()):
+        for folder in folders:
+            if len(generations) < keep and checked[folder.name] is None:
+                (kept_leftovers if folder.name.startswith(ROTATING) else retained).setdefault(folder.name, "insufficient complete generations")
+                continue
+            if name in generations or checked[folder.name] is not None or len(folders) != 1:
+                if folder.name.startswith(ROTATING) and name in generations:
+                    kept_leftovers[folder.name] = "kept generation"
+                continue
+            if folder.name.startswith(ROTATING):
+                if folder.name not in kept_leftovers:
+                    resume.append(folder.name)
+            elif retained.get(name) is None:
+                delete.append(name)
+            elif retained[name] == "audit-retention" and (folder / "orthanc.tgz").is_file():
+                thin.append(name)
+    return {"generations": generations, "delete": delete, "thin": thin, "resume": resume, "retained": retained,
+            "incomplete": incomplete, "kept_leftovers": kept_leftovers, "identities": identities}
+
+
+def rotate(root, keep, protect=(), dry_run=False, now=None):
+    """Plan and destructive transitions use the same current completeness/retention admission under one lease.
+
+    The protected root and the shared operations lock exclude cooperating writers during the last check and delete;
+    this is not a defense against a concurrently malicious root user. Incomplete or changed sets remain in place.
+    """
+    if type(keep) is not int or not 1 <= keep <= 365:
+        raise RuntimeError("Rotation keeps between 1 and 365 generations / 보존 세대는 1~365여야 합니다")
+    root = _rotation_root(root)
+    if not dry_run and _operations_lease.get() is None:
+        with lock():
+            return rotate(root, keep, protect, dry_run, now)
+    root_identity = _rotation_identity(root)
+    instant = lambda: now or datetime.now(timezone.utc)
+    def plan_now():
+        if _rotation_root(root) != root or _rotation_identity(root) != root_identity:
+            raise RuntimeError("백업 루트의 신원이 바뀌었습니다")
+        lease = _operations_lease.get()
+        if not dry_run:
+            if lease is None or lease.retained:
+                raise RuntimeError("삭제 작업 잠금을 확인할 수 없습니다")
+            lease.verify()
+        return _rotation_plan(root, keep, set(protect), _referenced(root), *_retention_window(root, instant()))
+    plan = plan_now()
+    result = {"root": str(root), "keep": keep, "dry_run": dry_run, "generations": plan["generations"],
+              "retained": plan["retained"], "incomplete": plan["incomplete"], "kept_leftovers": plan["kept_leftovers"],
+              "status": "preserved-stop" if plan["incomplete"] or plan["kept_leftovers"] else "complete", "stopped": {}}
     if dry_run:
-        # The run below executes exactly this plan (and re-checks each set right before it acts on it).
         result.update(would_delete=plan["delete"], would_thin=plan["thin"], would_resume=plan["resume"])
         return result
     result.update(deleted=[], thinned=[], resumed=[])
 
-    def still_free(name, folder):
-        """Right before acting: the original name and the actual folder are re-judged (a new hold, protect, record or
-        ledger entry since the plan keeps the set)."""
-        return _retention_reason(name, folder, set(protect), _referenced(root), *_retention_window(root, now)) is None
+    def admission(name, folder, action, identity, manifest_hash):
+        try:
+            if folder.parent != root or _rotation_identity(folder) != identity or digest(folder / "manifest.json") != manifest_hash:
+                return "백업 세트 또는 manifest가 바뀌었습니다"
+            why = _daily_whole(folder)
+            if why:
+                return "incomplete before " + ("thinning: " if action == "thin" else "deletion: ") + why
+            current = plan_now()
+            key = folder.name if action == "resume" else name
+            if key not in current[action]:
+                return current["kept_leftovers"].get(folder.name) or current["retained"].get(name) or "현재 complete 세대의 keep 조건 또는 보호 조건이 바뀌었습니다"
+        except (OSError, ValueError, RuntimeError) as error:
+            return "삭제 직전 관측 실패: " + type(error).__name__
+        return None
 
-    for name in plan["delete"]:
-        source = root / name
-        if source.is_symlink() or not source.is_dir() or not still_free(name, source):
-            result["retained"][name] = "changed before deletion"
-            continue
-        # IRT2-21: right before it goes, the set is still physically whole (an incomplete set is never deleted).
-        whole = _daily_whole(source)
-        if whole is not None:
-            result["retained"][name] = "incomplete before deletion: " + whole
-            continue
-        moved = root / (ROTATING + name)
-        os.rename(source, moved)
-        if not still_free(name, moved):
-            # A hold arrived between the plan and the rename: the set stays (outside the daily namespace) for an operator.
-            result["kept_leftovers"][moved.name] = "hold or reference arrived during rotation"
-            continue
-        shutil.rmtree(moved)
-        result["deleted"].append(name)
-    for name in plan["thin"]:
-        source = root / name
-        archive = source / "orthanc.tgz"
-        if (source.is_symlink() or not source.is_dir() or archive.is_symlink() or not archive.is_file()
-                or _retention_reason(name, source, set(protect), _referenced(root), *_retention_window(root, now)) != "audit-retention"):
-            result["retained"][name] = "changed before thinning"
-            continue
-        whole = _daily_whole(source)
-        if whole is not None:
-            result["retained"][name] = "incomplete before thinning: " + whole
-            continue
-        # The marker comes first: a reader (or validate_backup, which then refuses the set) never takes a thinned set
-        # for a restorable one, and an interrupted thinning finishes on the next run.
-        write_json(source / THINNED_FILE, {"removed": ["orthanc.tgz"], "at": now.isoformat(), "keep": keep,
-                                           "reason": "audit-retained beyond the kept daily generations"})
-        archive.unlink()
-        result["thinned"].append(name)
-    for leftover in plan["resume"]:
-        folder = root / leftover
-        if folder.is_symlink() or not folder.is_dir() or not still_free(leftover[len(ROTATING):], folder):
-            result["kept_leftovers"][leftover] = "hold or reference arrived during rotation"
-            continue
-        shutil.rmtree(folder)
-        result["resumed"].append(leftover)
+    def preserve(folder, reason):
+        result["status"] = "preserved-stop"
+        result["stopped"][folder.name] = reason
+        result["kept_leftovers" if folder.name.startswith(ROTATING) else "retained"][folder.name] = reason
+
+    for action, names in (("delete", plan["delete"]), ("thin", plan["thin"]), ("resume", plan["resume"])):
+        for selected in names:
+            name, folder = selected.removeprefix(ROTATING), root / selected
+            try:
+                identity, manifest_hash = plan["identities"][folder.name]
+            except (OSError, RuntimeError, KeyError):
+                preserve(folder, "삭제 전 백업 세트를 확인할 수 없습니다")
+                continue
+            why = admission(name, folder, action, identity, manifest_hash)
+            if why:
+                preserve(folder, why)
+                continue
+            if action == "delete":
+                moved = root / (ROTATING + name)
+                if moved.exists() or moved.is_symlink():
+                    preserve(folder, "중단된 동일 세대가 이미 존재합니다")
+                    continue
+                os.rename(folder, moved)
+                why = admission(name, moved, "resume", identity, manifest_hash)
+                if why:
+                    preserve(moved, why)
+                    continue
+                shutil.rmtree(moved)
+                result["deleted"].append(name)
+            elif action == "resume":
+                # This is the same admission as the check immediately after a normal rename.
+                shutil.rmtree(folder)
+                result["resumed"].append(selected)
+            else:
+                manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+                marker = {"format": 1, "state": "THIN_PLANNED", "backup": name, "manifest_sha256": manifest_hash,
+                          "archive_sha256": manifest["sha256"]["orthanc.tgz"], "archive_bytes": manifest["bytes"]["orthanc.tgz"],
+                          "at": instant().isoformat(), "keep": keep, "reason": "audit-retained beyond the kept daily generations"}
+                import ops_audit_integrity as audit
+                audit.replace_json(folder / THINNED_FILE, marker)
+                why = admission(name, folder, "thin", identity, manifest_hash)
+                if why:
+                    preserve(folder, why)
+                    continue
+                (folder / "orthanc.tgz").unlink()
+                marker["state"] = "THINNED_COMPLETE"
+                audit.replace_json(folder / THINNED_FILE, marker)
+                result["thinned"].append(name)
     return result
 
 
@@ -1402,8 +2115,13 @@ def _referenced(root):
     referenced = set()
     for path in root.glob("latest-verified-*.json"):
         try:
-            referenced.add(Path(json.loads(path.read_text(encoding="utf-8")).get("backup", "")).name)
-        except (OSError, ValueError, AttributeError):
+            _rotation_identity(path, directory=False)
+            body = json.loads(path.read_text(encoding="utf-8"))
+            value = body.get("backup")
+            if type(value) is not str or not value or not Path(value).name or "\x00" in value:
+                raise ValueError("missing backup reference")
+            referenced.add(Path(value).name)
+        except (OSError, ValueError, AttributeError, TypeError, RuntimeError):
             raise RuntimeError("Unreadable latest-verified record: " + path.name) from None
     return referenced
 
@@ -1426,96 +2144,8 @@ def _retention_reason(name, folder, protect, referenced, audit_kept, undeclared)
     return reason
 
 
-def _daily_whole(folder):
-    """None when the set is physically whole, else why not: manifest format 1 and complete, and every component its
-    manifest declares (the six files, the EMR files of an EMR set, a declared audit checkpoint) is a regular file with
-    its recorded size and SHA-256. A thinned set lacks only its Orthanc archive."""
-    try:
-        manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return "unreadable manifest"
-    if type(manifest) is not dict or manifest.get("format") != 1 or manifest.get("complete") is not True:
-        return "manifest not complete"
-    sums, sizes = manifest.get("sha256"), manifest.get("bytes")
-    if type(sums) is not dict or type(sizes) is not dict:
-        return "manifest has no checksums"
-    components = backup_components(manifest)
-    required = (*components, AUDIT_CHECKPOINT) if AUDIT_CHECKPOINT in sums else components
-    thinned = (folder / THINNED_FILE).is_file()
-    for name in required:
-        if thinned and name == "orthanc.tgz":
-            continue
-        path = folder / name
-        expected = sums.get(name)
-        if type(expected) is not str or not re.fullmatch(r"[a-f0-9]{64}", expected) or type(sizes.get(name)) is not int:
-            return "checksum missing: " + name
-        if path.is_symlink() or not path.is_file():
-            return "component missing: " + name
-        if path.stat().st_size != sizes[name] or digest(path) != expected:
-            return "component differs: " + name
-    return None
 
 
-def _rotation_plan(root, keep, protect, referenced, audit_kept, undeclared):
-    """The one decision both dry-run and run use. Generations: the newest `keep` physically whole, unthinned daily sets.
-    Older whole sets that nothing retains are deleted; ones only the audit ledger retains are thinned; an incomplete set
-    is neither counted nor deleted. An interrupted deletion (.rotating-<name>) resumes only when its original name and
-    its folder are free of every protection; otherwise it stays where it is."""
-    retained, incomplete, kept_leftovers = {}, {}, {}
-    daily = []
-    for entry in sorted(root.iterdir(), key=lambda item: item.name):
-        if not DAILY_NAME.fullmatch(entry.name):
-            continue
-        if entry.is_symlink() or not entry.is_dir():
-            raise RuntimeError("Invalid backup directory: " + entry.name)
-        daily.append(entry.name)
-        reason = _retention_reason(entry.name, entry, protect, referenced, audit_kept, undeclared)
-        if reason:
-            retained[entry.name] = reason
-    generations, older = [], []
-    checked = {}
-    for name in sorted(daily, reverse=True):
-        thinned = (root / name / THINNED_FILE).is_file()
-        if len(generations) < keep and not thinned:
-            checked[name] = _daily_whole(root / name)
-            if checked[name] is None:
-                generations.append(name)
-                continue
-        older.append(name)
-    delete, thin = [], []
-    for name in sorted(older):
-        if name in generations:
-            continue
-        reason = retained.get(name)
-        if reason not in (None, "audit-retention"):
-            continue
-        why = checked[name] if name in checked else _daily_whole(root / name)
-        if why is not None:
-            incomplete[name] = why
-            retained.setdefault(name, "incomplete")
-            continue
-        if reason is None:
-            delete.append(name)
-        elif (root / name / "orthanc.tgz").exists():
-            # Only the audit ledger still needs this set: its Orthanc archive goes (also finishing an interrupted thinning).
-            thin.append(name)
-    for name, why in checked.items():
-        if why is not None:
-            incomplete[name] = why
-            retained.setdefault(name, "incomplete")
-    resume = []
-    for item in sorted(root.iterdir(), key=lambda entry: entry.name):
-        if not item.name.startswith(ROTATING) or not DAILY_NAME.fullmatch(item.name[len(ROTATING):]):
-            continue
-        if item.is_symlink() or not item.is_dir():
-            raise RuntimeError("Invalid interrupted rotation entry: " + item.name)
-        reason = _retention_reason(item.name[len(ROTATING):], item, protect, referenced, audit_kept, undeclared)
-        if reason:
-            kept_leftovers[item.name] = reason
-        else:
-            resume.append(item.name)
-    return {"generations": generations, "delete": delete, "thin": thin, "resume": resume, "retained": retained,
-            "incomplete": incomplete, "kept_leftovers": kept_leftovers}
 
 
 def main():
@@ -1538,8 +2168,11 @@ def main():
     args = parser.parse_args()
     if args.action == "rotate":
         # Rotation reads and deletes host files only; it needs no Docker, but the lock keeps backup/rehearse out.
-        with lock():
-            print(json.dumps(rotate(args.root, args.keep, set(args.protect), args.dry_run)))
+        # A dry-run performs no lock-file write either; it reports a current plan without authorizing deletion.
+        result = rotate(args.root, args.keep, set(args.protect), args.dry_run)
+        print(json.dumps(result), flush=True)
+        if result["status"] != "complete":
+            raise RuntimeError("불완전하거나 보호 조건이 바뀐 세트를 보존했습니다. 삭제 전 점검이 필요합니다")
         return
     require_local_docker()
     with lock():
@@ -1550,7 +2183,10 @@ def main():
             # complete, error-free set, and never touches that set.
             directory = backup(args.output, args.ready_timeout)
             if not args.no_rotate:
-                print(json.dumps({"rotation": rotate(args.output, args.rotate_keep, {directory.name})}), flush=True)
+                result = rotate(args.output, args.rotate_keep, {directory.name})
+                print(json.dumps({"rotation": result}), flush=True)
+                if result["status"] != "complete":
+                    raise RuntimeError("백업은 보존했으나 rotation을 마치지 못했습니다. 보존된 세트를 점검하세요")
         else:
             rehearse(args.directory)
 

@@ -50,6 +50,7 @@ from __future__ import annotations
 import argparse
 import base64
 from contextlib import contextmanager, nullcontext, redirect_stdout
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 import hashlib
 import http.client
@@ -67,6 +68,7 @@ import ssl
 import stat as stat_module
 import subprocess
 import sys
+import threading
 import time
 from urllib.parse import quote, urlsplit
 import uuid
@@ -113,6 +115,8 @@ PREVIOUS_SMOKE_CHECKS = ("login_pkce", "worklist_uid", "ohif_frame")
 BROWSER_TIMEOUT_S = 300
 BROWSER_PROBE_S = 60
 SMOKE_RETRY_S = 120
+SMOKE_CLEANUP_S = 20
+_smoke_budget = ContextVar("smoke_budget", default=None)
 # D04: the values of compose variables the .env lacks, resolved once from the running stack, kept for the plan's later
 # phases (a rollback whose source container is gone) in this private file of the run directory, never in a record.
 COMPOSE_VALUES = "compose-env-values.json"
@@ -130,6 +134,69 @@ class Stop(RuntimeError):
 
 class Unknown(RuntimeError):
     """An operation whose end state is not known (timeout, lost client): never retried or rolled back automatically."""
+
+
+class SmokeDeadline(Stop):
+    """The attempt exhausted its work allowance; its cleanup reserve is still available."""
+
+
+class SmokeRefusal(Stop):
+    """A credential, ownership or policy refusal cannot improve with another login."""
+
+    retryable = False
+
+
+class SmokeBudget:
+    """One monotonic attempt budget, including termination and secret cleanup (C-SMOKE)."""
+
+    def __init__(self, seconds, *, phase_end=None, cleanup=SMOKE_CLEANUP_S):
+        self.end = min(time.monotonic() + seconds, phase_end if phase_end is not None else float("inf"))
+        self.work_end = self.end - cleanup
+        self.cleaning = False
+
+    def remaining(self, cap=None):
+        left = (self.end if self.cleaning else self.work_end) - time.monotonic()
+        if left <= 0:
+            if self.cleaning:
+                raise Unknown("smoke 정리·종료 확인의 공통 제한 시간이 지났습니다")
+            raise SmokeDeadline("smoke 작업의 공통 제한 시간이 지났습니다")
+        return min(left, cap) if cap is not None else left
+
+    @contextmanager
+    def cleanup(self):
+        earlier = self.cleaning
+        self.cleaning = True
+        try:
+            self.remaining()
+            yield
+        finally:
+            self.cleaning = earlier
+
+
+def bounded_timeout(cap):
+    budget = _smoke_budget.get()
+    return budget.remaining(cap) if budget else cap
+
+
+def browser_timeout(milliseconds=30000):
+    return max(1, int(bounded_timeout(milliseconds / 1000) * 1000))
+
+
+@contextmanager
+def smoke_attempt(seconds, phase_left=None):
+    existing = _smoke_budget.get()
+    if existing is not None:
+        existing.remaining()
+        yield existing
+        return
+    budget = SmokeBudget(seconds, phase_end=time.monotonic() + phase_left if phase_left is not None else None)
+    budget.remaining()
+    token = _smoke_budget.set(budget)
+    try:
+        yield budget
+        budget.remaining()
+    finally:
+        _smoke_budget.reset(token)
 
 
 def require(condition, message):
@@ -1140,12 +1207,52 @@ class PinnedHTTPS(http.client.HTTPSConnection):
     """Connect to an address while verifying the certificate for the origin's host name (SNI and hostname check)."""
 
     def __init__(self, address, port, server_name, context):
-        super().__init__(address, port, timeout=10, context=context)
+        super().__init__(address, port, timeout=bounded_timeout(10), context=context)
         self._server_name = server_name
 
     def connect(self):
-        sock = socket.create_connection((self.host, self.port), self.timeout)
-        self.sock = self._context.wrap_socket(sock, server_hostname=self._server_name)
+        sock = socket.create_connection((self.host, self.port), bounded_timeout(self.timeout))
+        try:
+            sock.settimeout(bounded_timeout(self.timeout))
+            self.sock = self._context.wrap_socket(sock, server_hostname=self._server_name)
+        except Exception:
+            sock.close()
+            raise
+        budget = _smoke_budget.get()
+        if budget is not None:
+            sock = self.sock
+            def expire():
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            self._deadline_timer = threading.Timer(budget.remaining(), expire)
+            self._deadline_timer.daemon = True
+            self._deadline_timer.start()
+
+    def close(self):
+        timer = getattr(self, "_deadline_timer", None)
+        if timer is not None:
+            timer.cancel()
+        super().close()
+
+
+def http_read(connection, response, limit):
+    """A trickling response cannot renew the attempt budget on each socket read."""
+    chunks, size = [], 0
+    while size <= limit:
+        left = bounded_timeout(10)
+        if connection.sock is not None:
+            connection.sock.settimeout(left)
+        elif getattr(response, "fp", None) is not None:
+            response.fp.raw._sock.settimeout(left)
+        block = response.read1(min(65536, limit + 1 - size))
+        if not block:
+            break
+        chunks.append(block)
+        size += len(block)
+    require(size <= limit, "smoke 응답이 허용 크기를 초과했습니다")
+    return b"".join(chunks)
 
 
 def https_get(origin, path, *, connect=None, ca_file=None, token=None, limit=65536, accept="application/json"):
@@ -1158,8 +1265,10 @@ def https_get(origin, path, *, connect=None, ca_file=None, token=None, limit=655
         headers["Authorization"] = "Bearer " + token
     try:
         connection.request("GET", path, headers=headers)
+        if connection.sock is not None:
+            connection.sock.settimeout(bounded_timeout(10))
         response = connection.getresponse()
-        raw = response.read(limit + 1)
+        raw = http_read(connection, response, limit)
         require(len(raw) <= limit, "Smoke response too large")
         return response.status, response.getheader("Content-Type", ""), raw
     finally:
@@ -1174,8 +1283,10 @@ def https_post(origin, path, form, *, connect=None, ca_file=None):
     try:
         connection.request("POST", path, body=urlencode(form).encode("ascii"),
                            headers={"Host": parsed.netloc, "Content-Type": "application/x-www-form-urlencoded"})
+        if connection.sock is not None:
+            connection.sock.settimeout(bounded_timeout(10))
         response = connection.getresponse()
-        raw = response.read(65537)
+        raw = http_read(connection, response, 65536)
         require(len(raw) <= 65536, "Response too large")
         return response.status, raw
     finally:
@@ -1226,6 +1337,7 @@ def worklist_row(origin, uid, *, connect=None, ca_file=None, token=None, pages=1
     """The signed-in member's worklist row of the study, or None (the product's paged list: limit 100, follow 'next')."""
     after = None
     for _ in range(pages):
+        bounded_timeout(10)
         query = "/api/studies?limit=100" + ("&after=" + quote(after, safe="") if after else "")
         code, _, raw = https_get(origin, query, connect=connect, ca_file=ca_file, token=token, limit=8 * 1024 * 1024)
         require(code == 200, "Worklist request refused (HTTP %d %s)" % (code, refusal_code(raw)))
@@ -1362,19 +1474,116 @@ BUDGET = {"capture": "capture_s", "release": "capture_s", "introduce": "introduc
           "rollback": "rollback_s", "rollback_reopen": "rollback_s", "seed": "seed_s", "receipt": "capture_s"}
 
 
-# IRT2-24: the only tables the seed's recorded clone changes (keycloak_isolation) may touch after the exact restore.
-SEED_TRANSFORMED_TABLES = frozenset("keycloak:public." + table for table in ("client", "redirect_uris", "web_origins", "realm_smtp_config",
-                                                                             "identity_provider"))
-
-
 def value_changes(before, after):
-    """The tables ("database:schema.table") whose value digest differs between two value catalogs (ops.value_catalog),
-    a table present in only one of them included. Names only - the digests never leave this function."""
-    changed = set()
-    for database in sorted(set(before or {}) | set(after or {})):
-        left, right = (before or {}).get(database) or {}, (after or {}).get(database) or {}
-        changed |= {database + ":" + table for table in set(left) | set(right) if left.get(table) != right.get(table)}
-    return changed
+    """Structured table keys only; punctuation inside a quoted identifier cannot collide with another schema."""
+    require(before.get("version") == after.get("version") == ops.RESTORE_INVENTORY, "복원 값 inventory 버전이 다릅니다")
+    left = {tuple(row["key"]): row for row in before["tables"]}
+    right = {tuple(row["key"]): row for row in after["tables"]}
+    require(len(left) == len(before["tables"]) and len(right) == len(after["tables"]), "복원 값 식별자가 중복됐습니다")
+    return {key for key in set(left) | set(right) if left.get(key) != right.get(key)}
+
+
+class CloneFields:
+    """Private expected rows fixed before a clone mutation. No table/column is omitted from residual comparison."""
+    def __init__(self):
+        self.rules = {}
+        self.sql = []
+
+    def change(self, table, columns, before, after):
+        key = ("keycloak", "public", "table", table, None)
+        require(len(columns) == len(before) and (after is None or len(after) == len(before)), "clone 변환 행의 열 수가 다릅니다")
+        if after == before:
+            return
+        self.rules.setdefault(key, []).append((tuple(columns), tuple(before), None if after is None else tuple(after)))
+        where = " AND ".join(ops._identifier(column) + " IS NOT DISTINCT FROM " + ("NULL" if value is None else ops._sql_literal(value))
+                             for column, value in zip(columns, before))
+        relation = 'public.' + ops._identifier(table)
+        if after is None:
+            self.sql.append("DELETE FROM " + relation + " WHERE " + where + ";")
+        else:
+            assignments = [ops._identifier(column) + "=" + ("NULL" if new is None else ops._sql_literal(new))
+                           for column, old, new in zip(columns, before, after) if old != new]
+            self.sql.append("UPDATE " + relation + " SET " + ",".join(assignments) + " WHERE " + where + ";")
+
+    def expected(self, key, columns, rows):
+        remaining = list(self.rules.get(key, []))
+        result = []
+        for row in rows:
+            match = next((index for index, rule in enumerate(remaining) if rule[0] == tuple(columns) and rule[1] == tuple(row)), None)
+            if match is None:
+                result.append(row)
+            else:
+                _, _, after = remaining.pop(match)
+                if after is not None:
+                    result.append(list(after))
+        require(not remaining, "clone 변경 직전에 원래 행 또는 열이 달라졌습니다")
+        return result
+
+
+def clone_origin(value, source, target):
+    if value is None:
+        return None
+    return target + value[len(source):] if value == source or any(value.startswith(source + mark) for mark in ("/", "?", "#")) else value
+
+
+def clone_admin_rows(before, after, *, username, realm, role_ids, started_ms, ended_ms):
+    """Validate the pinned bootstrap command's new immutable IDs, then remove only those exact rows for comparison."""
+    from collections import Counter
+    additions = {}
+    for table in ("user_entity", "credential", "user_attribute", "user_role_mapping"):
+        columns, old = before[table]
+        new_columns, new = after[table]
+        require(columns == new_columns, "clone 관리자 생성 중 스키마가 달라졌습니다")
+        old_rows, new_rows = Counter(map(tuple, old)), Counter(map(tuple, new))
+        require(not (old_rows - new_rows), "clone 관리자 생성 중 기존 행이 바뀌거나 없어졌습니다")
+        additions[table] = [dict(zip(columns, row)) for row in (new_rows - old_rows).elements()]
+    require(len(additions["user_entity"]) == 1, "clone 관리자가 정확히 한 명 생성되지 않았습니다")
+    user = additions["user_entity"][0]
+    uid = user.get("id")
+    require(type(uid) is str and re.fullmatch(r"[0-9a-f-]{36}", uid), "clone 관리자의 불변 ID가 잘못됐습니다")
+    allowed = {"id": uid, "username": username, "realm_id": realm, "enabled": "true", "email_verified": "false", "not_before": "0"}
+    for key in ("created_timestamp", "last_modified_timestamp"):
+        value = user.get(key)
+        require((key == "last_modified_timestamp" and value is None) or (type(value) is str and value.isdigit()
+                and started_ms - 5000 <= int(value) <= ended_ms + 5000), "clone 관리자 생성 시각이 실행 범위를 벗어났습니다")
+        allowed[key] = value
+    require(type(user.get("email_constraint")) is str and re.fullmatch(r"[0-9a-f-]{36}", user["email_constraint"]),
+            "clone 관리자 email 제약값이 잘못됐습니다")
+    allowed["email_constraint"] = user["email_constraint"]
+    require(all(value == allowed.get(key) for key, value in user.items()), "clone 관리자에 승인하지 않은 필드 값이 있습니다")
+    credentials = additions["credential"]
+    require(len(credentials) == 1, "clone 관리자 password credential이 유일하지 않습니다")
+    credential = credentials[0]
+    require(credential.get("user_id") == uid and credential.get("type") == "password"
+            and type(credential.get("id")) is str and re.fullmatch(r"[0-9a-f-]{36}", credential["id"]),
+            "clone credential 소유권 또는 종류가 다릅니다")
+    try:
+        secret, data = json.loads(credential["secret_data"]), json.loads(credential["credential_data"])
+        require(type(secret) is dict and type(data) is dict and data.get("algorithm") in ("argon2", "pbkdf2-sha512", "pbkdf2-sha256")
+                and all(type(secret.get(key)) is str and secret[key] for key in ("salt", "value")), "clone password verifier 형식이 다릅니다")
+    except (TypeError, ValueError, KeyError):
+        raise Stop("clone password verifier를 읽지 못했습니다") from None
+    timestamp = credential.get("created_date")
+    require(type(timestamp) is str and timestamp.isdigit() and started_ms - 5000 <= int(timestamp) <= ended_ms + 5000,
+            "clone credential 생성 시각이 실행 범위를 벗어났습니다")
+    generated = {key: credential[key] for key in ("id", "user_id", "type", "secret_data", "credential_data", "created_date")}
+    generated.update(priority="0", version="0")
+    require(all(value == generated.get(key) for key, value in credential.items()), "clone credential에 승인하지 않은 필드 값이 있습니다")
+    attributes = additions["user_attribute"]
+    require(len(attributes) == 1 and attributes[0].get("user_id") == uid and attributes[0].get("name") == "is_temporary_admin"
+            and attributes[0].get("value") == "true" and type(attributes[0].get("id")) is str
+            and re.fullmatch(r"[0-9a-f-]{36}", attributes[0]["id"]), "clone 관리자 소유 표식이 다릅니다")
+    require(all(value is None for key, value in attributes[0].items() if key not in ("id", "user_id", "name", "value")),
+            "clone 관리자 속성에 승인하지 않은 필드 값이 있습니다")
+    mappings = additions["user_role_mapping"]
+    require(len(mappings) == len(role_ids) and {row.get("role_id") for row in mappings} == set(role_ids)
+            and all(row == {"user_id": uid, "role_id": row["role_id"]} for row in mappings), "clone 관리자 역할 부여 범위가 다릅니다")
+    removed = CloneFields()
+    for table, rows in additions.items():
+        columns = after[table][0]
+        for row in rows:
+            removed.change(table, columns, [row[column] for column in columns], None)
+    return uid, removed.expected
 
 
 OBSERVATION_FIELDS = frozenset(("checkout", "compose_entry", "lock", "containers", "database", "fences", "workers"))
@@ -1631,9 +1840,10 @@ class Introduction:
                 self.save()
             launched = True
             try:
-                detail = getattr(self.ops, name)(self) or {}
+                with (smoke_attempt(BROWSER_TIMEOUT_S, self.deadline_left()) if name in RETRIED_ONCE else nullcontext()):
+                    detail = getattr(self.ops, name)(self) or {}
             except Stop as error:
-                if name not in RETRIED_ONCE or self.retried:
+                if name not in RETRIED_ONCE or self.retried or getattr(error, "retryable", True) is False:
                     raise
                 # Even a nominally read-only smoke creates accounts, helpers and a browser. Its settled first failure
                 # must be observed before a second attempt can launch anything.
@@ -1694,9 +1904,10 @@ class Introduction:
         self.event("smoke-retry", reason=reason, bound_s=SMOKE_RETRY_S)
         self.retrying = True
         try:
-            detail = getattr(self.ops, name)(self) or {}
+            with smoke_attempt(SMOKE_RETRY_S, self.deadline_left()):
+                detail = getattr(self.ops, name)(self) or {}
             require(self.clock() - started <= SMOKE_RETRY_S, "The smoke retry exceeded its bound of %d s" % SMOKE_RETRY_S)
-        except Stop as second:
+        except (Stop, Unknown) as second:
             self.state["smoke_retry"].update(passed=False, retry_code=code_of(second))
             self.save()
             raise
@@ -2194,12 +2405,14 @@ SMOKE_ADMIN_SCRIPT = r"""
 const base=(process.env.KC_ADMIN_URL||'').replace(/\/$/,'');
 const [operation, raw]=process.argv.slice(1); const input=JSON.parse(raw);
 const out=v=>process.stdout.write('KIN_RESULT '+JSON.stringify(v)+'\n');
-// Every request has its own deadline (IRT2-14): a hanging Keycloak ends this helper, never blocks it.
-const get=(url,options={})=>fetch(url,{...options,signal:AbortSignal.timeout(15000)});
+// The parent also supervises this entire helper container. No request or readiness loop renews the attempt.
+const end=Number(process.env.KIN_SMOKE_DEADLINE)||Date.now()+180000;
+const left=()=>{const n=end-Date.now();if(n<=0)throw new Error('deadline');return n;};
+const get=(url,options={})=>fetch(url,{...options,signal:AbortSignal.timeout(Math.max(1,Math.ceil(Math.min(15000,left()))))});
 (async()=>{const form=new URLSearchParams({grant_type:'password',client_id:'admin-cli',username:process.env.KIN_KC_ADMIN_USER,password:process.env.KIN_KC_ADMIN_PASSWORD});
  // Keycloak may still be starting (writers resumed a moment ago, or a restore): ready means the realm kin answers 200 -
  // a 404 while it loads its realms is not ready (D18) - then the administrator's token; at most two minutes each.
- const until=async probe=>{for(let i=0;i<60;i++){try{const v=await probe();if(v)return v;}catch(e){}await new Promise(r=>setTimeout(r,2000));}return null;};
+ const until=async probe=>{for(let i=0;i<60;i++){left();try{const v=await probe();if(v)return v;}catch(e){}await new Promise(r=>setTimeout(r,Math.min(2000,left())));}return null;};
  if(!await until(async()=>(await get(base+'/realms/kin')).status===200))throw new Error('keycloak not ready');
  const granted=await until(async()=>{const r=await get(base+'/realms/master/protocol/openid-connect/token',{method:'POST',body:form});
   return r.status<500&&r.status!==404?r:null;});
@@ -2243,8 +2456,11 @@ const get=(url,options={})=>fetch(url,{...options,signal:AbortSignal.timeout(150
   const [client]=(await clients()).filter(mineClient);
   if(!client)throw new Error('ownership');
   out({id:client.id,client_id:client.clientId});return;}
+ if(operation==='owned'){
+  out({users:(await users()).filter(mine).map(u=>u.id),clients:(await clients()).filter(mineClient).map(c=>c.id)});return;}
  if(operation==='remove'){
   const found=await users(),listed=await clients();
+  if(found.filter(mine).some(u=>!(input.user_ids||[]).includes(u.id))||listed.filter(mineClient).some(c=>!(input.object_ids||[]).includes(c.id)))throw new Error('ownership');
   for(const user of found.filter(mine)){await call('PUT','/users/'+user.id,{enabled:false});await call('DELETE','/users/'+user.id);}
   for(const client of listed.filter(mineClient)){await call('DELETE','/clients/'+client.id);}
   out({user_absent:(await users()).filter(mine).length===0,client_absent:(await clients()).filter(mineClient).length===0,
@@ -2346,16 +2562,11 @@ def result_line(raw):
 
 
 class _ProcessTree:
-    """D17: the process group (POSIX) or job object (Windows) of one command, so that every process it started - a
-    browser's renderer, GPU and zygote children included - ends with it. On Windows the job kills what is left when it
-    closes; the command starts suspended and resumes only once it is in the job, so no child can escape it."""
+    """Windows suspended-create → Job assignment → resume; breakaway is never enabled."""
 
     def __init__(self, argv):
         self.job = None
-        if os.name == "posix":
-            self.process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                            start_new_session=True)
-            return
+        require(os.name == "nt", "Linux browser는 systemd cgroup 서비스가 필요합니다")
         import ctypes
         from ctypes import wintypes
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -2455,31 +2666,208 @@ class _ProcessTree:
         return done
 
 
-def run_tree(argv, *, input, timeout):
+def run_tree(argv, *, input, timeout, deadline=None):
     """Run a command with its input; on its timeout - and after it ended, for whatever it left running - kill its whole
     process tree (D17). Returns (exit code, stdout, stderr) or raises subprocess.TimeoutExpired once the tree is gone."""
+    end = deadline if deadline is not None else time.monotonic() + timeout + SMOKE_CLEANUP_S
     tree = _ProcessTree(argv)
     try:
         try:
-            stdout, stderr = tree.process.communicate(input, timeout=timeout)
+            stdout, stderr = tree.process.communicate(input, timeout=min(timeout, max(0, end - time.monotonic())))
         except subprocess.TimeoutExpired:
             tree.kill()
             try:
-                tree.process.communicate(timeout=30)
+                tree.process.communicate(timeout=max(0, end - time.monotonic()))
             except (subprocess.TimeoutExpired, ValueError, OSError):
                 pass
             raise subprocess.TimeoutExpired(argv, timeout) from None
         return tree.process.returncode, stdout, stderr
     finally:
         tree.kill()
+        # A reader thread may hold a pipe lock while a surviving descendant keeps the pipe open. Closing that
+        # stream first would wait without a timeout and hide UNKNOWN behind the blocked close.
+        if not tree.gone(seconds=max(0, end - time.monotonic())) or tree.process.poll() is None:
+            raise Unknown("smoke Job 전체 종료·직접 자식 회수를 확인하지 못했습니다")
         for stream in (tree.process.stdout, tree.process.stderr, tree.process.stdin):
             try:
                 if stream:
                     stream.close()
             except OSError:
                 pass
-        # IRT2-13: nothing of the browser may outlive this call (a later smoke or a rollback starts only after).
-        require(tree.gone(), "The smoke browser left processes running")
+
+
+class SystemdBrowser:
+    """A named service owned by PID 1, including detached Chromium descendants.
+
+    No shell or caller-selected systemd command is accepted. RuntimeMaxSec remains effective if the entry dies.
+    Terminal unit identity, cgroup emptiness and /proc identities (including zombies) must agree before cleanup.
+    """
+
+    PROPERTIES = ("Id", "InvocationID", "LoadState", "ActiveState", "SubState", "Result", "ExecMainCode",
+                  "ExecMainStatus", "ExecMainPID", "ControlGroup", "Type", "ExitType", "KillMode", "Restart")
+
+    def __init__(self, worker, records, save, budget):
+        self.worker, self.records, self.save, self.budget = worker, records, save, budget
+        self.unit = worker["resource"]
+        require(re.fullmatch(r"kin-browser-[0-9a-f]{32}\.service", self.unit), "browser unit 이름이 허용 범위 밖입니다")
+
+    @staticmethod
+    def command(argv):
+        require(os.name == "posix" and os.geteuid() == 0 and Path("/run/systemd/system").is_dir()
+                and Path("/sys/fs/cgroup/cgroup.controllers").is_file(), "root systemd/cgroup v2 실행 환경이 필요합니다")
+        args = list(argv)
+        browsers = None
+        if args[:1] == ["/usr/bin/env"]:
+            args.pop(0)
+            if args[:1] == ["-i"]:
+                args.pop(0)
+            require(args and args[0].startswith("PLAYWRIGHT_BROWSERS_PATH="), "browser 환경은 설치 경로만 선언할 수 있습니다")
+            browsers = args.pop(0).split("=", 1)[1]
+        require(len(args) == 3 and args[-1] == "browser-smoke", "보호 설치 Python browser-smoke 명령이 필요합니다")
+        require(re.fullmatch(r"python(?:3(?:\.\d+)?)?", Path(args[0]).name), "browser 실행기는 설치된 Python이어야 합니다")
+        import ops_deploy_host as protected_host
+        for path in args[:2]:
+            require(Path(path).is_absolute(), "browser 실행 경로는 절대 경로여야 합니다")
+            protected_host.protected(Path(path).resolve())
+        require(Path(args[1]).resolve() == Path(__file__).resolve(), "browser 모듈이 보호 설치 도구와 다릅니다")
+        require(browsers is not None and Path(browsers).is_absolute(), "Chromium 설치 경로를 명시해야 합니다")
+        protected_host.protected(Path(browsers), directory=True)
+        return ["/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "HOME=/nonexistent",
+                "PLAYWRIGHT_BROWSERS_PATH=" + browsers, *args]
+
+    def control(self, operation, *options):
+        require(operation in ("show", "stop", "kill", "reset-failed"), "허용되지 않은 browser 감독 명령입니다")
+        return subprocess.run(["/usr/bin/systemctl", operation, *options, self.unit],
+                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              env={"PATH": "/usr/bin:/bin", "LANG": "C"}, timeout=self.budget.remaining(5))
+
+    def observe(self):
+        result = self.control("show", "--property=" + ",".join(self.PROPERTIES))
+        require(result.returncode == 0, "browser 서비스 조회가 실패했습니다")
+        values = dict(line.split("=", 1) for line in result.stdout.decode().splitlines() if "=" in line)
+        require(set(values) == set(self.PROPERTIES) and values["Id"] == self.unit
+                and values["LoadState"] == "loaded" and re.fullmatch(r"[0-9a-f]{32}", values["InvocationID"]),
+                "browser 서비스 신원을 확인하지 못했습니다")
+        require((values["Type"], values["ExitType"], values["KillMode"], values["Restart"]) ==
+                ("exec", "cgroup", "control-group", "no"), "browser 서비스 종료 계약이 다릅니다")
+        previous = self.worker.get("invocation_id")
+        require(previous in (None, values["InvocationID"]), "browser 서비스가 다른 실행으로 교체됐습니다")
+        self.worker["invocation_id"] = values["InvocationID"]
+        self.save()
+        group = "/system.slice/" + self.unit
+        require(values["ControlGroup"] in ("", group), "browser cgroup 경로가 선언과 다릅니다")
+        path = Path("/sys/fs/cgroup") / group.lstrip("/")
+        terminal = values["SubState"] in ("exited", "failed", "dead") and int(values["ExecMainCode"]) in (1, 2, 3)
+        if path.exists():
+            events = dict(line.split() for line in (path / "cgroup.events").read_text().splitlines())
+            require(events.get("populated") in ("0", "1"), "browser cgroup 상태가 불완전합니다")
+            empty = events["populated"] == "0"
+        else:
+            require(terminal and self.worker.get("invocation_id") == values["InvocationID"],
+                    "cgroup 경로 부재만으로 작업 종료를 판정할 수 없습니다")
+            empty = True
+        # cgroup.procs/populated omit zombies. Scan their retained membership as well; PID reuse is distinguished by
+        # starttime and never used to infer the status of the service itself.
+        tracked = dict(self.worker.get("pids", {}))
+        current = {}
+        for entry in Path("/proc").iterdir():
+            self.budget.remaining()
+            if not entry.name.isdigit():
+                continue
+            try:
+                membership = (entry / "cgroup").read_text()
+                belongs = any(line.removesuffix(" (deleted)").removeprefix("0::") in (group,)
+                              or line.removeprefix("0::").startswith(group + "/") for line in membership.splitlines())
+                if belongs or entry.name in tracked:
+                    fields = (entry / "stat").read_text().rsplit(") ", 1)[1].split()
+                    start = fields[19]
+                    if belongs:
+                        tracked[entry.name] = start
+                    if belongs or tracked.get(entry.name) == start:
+                        current[entry.name] = start
+            except FileNotFoundError:
+                continue
+        self.worker.update(invocation_id=values["InvocationID"], cgroup=group, pids=tracked,
+                           unit_result=values["Result"], main_code=int(values["ExecMainCode"]),
+                           main_status=int(values["ExecMainStatus"]), terminal=terminal, populated=not empty,
+                           unreaped=sorted(current))
+        self.save()
+        return terminal and empty and not current
+
+    def terminate(self):
+        with self.budget.cleanup():
+            # Retain the terminal unit until its identity/result have been recorded. RuntimeMaxSec also applies
+            # independently; an explicit stop here could unload an inactive transient unit before observation.
+            if self.observe():
+                return
+            stopped = self.control("kill", "--kill-whom=all", "--signal=TERM")
+            require(stopped.returncode == 0, "browser 서비스 정지 요청이 실패했습니다")
+            term_until = min(time.monotonic() + 5, self.budget.end)
+            killed = False
+            while True:
+                if self.observe():
+                    return
+                if time.monotonic() >= term_until and not killed:
+                    killed = True
+                    result = self.control("kill", "--kill-whom=all", "--signal=KILL")
+                    require(result.returncode == 0, "browser 서비스 전체 종료 요청이 실패했습니다")
+                time.sleep(min(0.1, self.budget.remaining()))
+
+    def run(self, argv, payload):
+        command = self.command(argv)
+        files = {key: self.unit + "." + key for key in ("in", "out", "err")}
+        for key, name in files.items():
+            self.records.write_secret(name, payload if key == "in" else b"")
+        self.worker.update(supervisor="systemd-cgroup-v2", private_files=files,
+                           profile=self.worker.get("profile"), work_deadline=self.budget.work_end,
+                           cleanup_deadline=self.budget.end)
+        self.save()
+        def escaped(name):
+            value = str(self.records.secret(name))
+            require(not any(c in value for c in '\n\r\x00"\\'), "browser 작업 파일 경로가 지원되지 않습니다")
+            return value.replace("%", "%%")
+        properties = ["ExitType=cgroup", "KillMode=control-group", "SendSIGKILL=yes", "Restart=no",
+                      "RemainAfterExit=yes", "TimeoutStopSec=5s", "UMask=0077",
+                      "RuntimeMaxSec=%.6fs" % self.budget.remaining(),
+                      "StandardInput=file:" + escaped(files["in"]), "StandardOutput=file:" + escaped(files["out"]),
+                      "StandardError=file:" + escaped(files["err"])]
+        launch = ["/usr/bin/systemd-run", "--quiet", "--unit=" + self.unit, "--service-type=exec"]
+        launch += ["--property=" + prop for prop in properties]
+        launch += ["--", *command]
+        timed_out = False
+        try:
+            result = subprocess.run(launch, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    env={"PATH": "/usr/bin:/bin", "LANG": "C"}, timeout=self.budget.remaining(10))
+            require(result.returncode == 0, "browser 서비스 시작이 실패했습니다")
+            self.worker["launcher_reaped"] = True
+            self.save()
+            while not self.observe():
+                time.sleep(min(0.1, self.budget.remaining()))
+        except (SmokeDeadline, subprocess.TimeoutExpired):
+            # subprocess.run waits for its killed launcher on TimeoutExpired as well.
+            self.worker["launcher_reaped"] = True
+            self.save()
+            timed_out = True
+            self.terminate()
+        # Preserve terminal result before releasing the retained unit. No profile or input is deleted by the child.
+        with self.budget.cleanup():
+            if not self.observe():
+                raise Unknown("browser 서비스 전체 종료를 확인하지 못했습니다")
+            code = self.worker["main_status"] if self.worker["main_code"] == 1 else 128 + self.worker["main_status"]
+            # The main process can succeed while another cgroup member is OOM-killed or the unit fails.
+            if self.worker["unit_result"] != "success" and code == 0:
+                code = 1
+            stdout, stderr = (self.records.read_secret(files[k]) for k in ("out", "err"))
+            released = self.control("stop")
+            require(released.returncode == 0, "종료된 browser 서비스 정리를 확인하지 못했습니다")
+            if self.worker["unit_result"] != "success":
+                released = self.control("reset-failed")
+                require(released.returncode == 0, "browser 서비스 실패 상태 정리를 확인하지 못했습니다")
+            for name in files.values():
+                self.records.discard_secret(name)
+        if timed_out or self.worker["unit_result"] == "timeout":
+            raise subprocess.TimeoutExpired(argv, 0)
+        return code, stdout, stderr
 
 
 def follow_folder_owner(path):
@@ -2500,7 +2888,7 @@ def remove_profile(path, seconds=15):
         shutil.rmtree(path, ignore_errors=True)
         if not Path(path).exists() or time.monotonic() >= deadline:
             break
-        time.sleep(0.5)
+        time.sleep(min(0.1, max(0, deadline - time.monotonic())))
     require(not Path(path).exists(), "The browser profile could not be removed")
 
 
@@ -2796,6 +3184,7 @@ class HostOps:
         """Run one fixed-binary command and record it before acting on its outcome: redacted argv, environment names (never
         values), input hash, start, duration, outcome (exit code, timeout or launch error), output hashes. quiet: the
         command carries a secret on stdin, so its error text (which may quote that input) is never kept."""
+        timeout = bounded_timeout(timeout)
         args = list(args)
         worker = None
         remove_after = False
@@ -3055,6 +3444,18 @@ class HostOps:
         self.intro = intro
         fields, containers, inspected = {}, {}, {}
 
+        # Re-entry observes a registered unit before helpers, profiles or credentials are touched. A terminal
+        # observation is evidence for manual reconciliation; it never clears the durable UNKNOWN hold by itself.
+        for worker in intro.state.get("workers", {}).values():
+            if worker.get("kind") == "browser" and worker.get("state") != "QUIET" and os.name == "posix":
+                try:
+                    budget = SmokeBudget(5, cleanup=0)
+                    quiet = SystemdBrowser(worker, self.records, intro.save, budget).observe()
+                    worker["reentry_observation"] = {"terminal_and_empty": quiet, "at": utc_now().isoformat()}
+                except Exception as error:
+                    worker["reentry_observation"] = {"error": type(error).__name__, "at": utc_now().isoformat()}
+                intro.save()
+
         def read(name, action):
             try:
                 fields[name] = fact(action())
@@ -3153,7 +3554,7 @@ class HostOps:
         return pending + [line for line in out.splitlines() if line.strip() and not line.endswith(" exited")]
 
     def wait(self, predicate, seconds, message):
-        deadline = time.monotonic() + seconds
+        deadline = time.monotonic() + bounded_timeout(seconds)
         while True:
             try:
                 if predicate():
@@ -3162,7 +3563,7 @@ class HostOps:
                 pass
             if time.monotonic() >= deadline:
                 raise Stop(message)
-            time.sleep(1)
+            time.sleep(min(1, bounded_timeout(1), max(0, deadline - time.monotonic())))
 
     def healthy(self, role):
         item = self.inspect(role)
@@ -3182,6 +3583,7 @@ class HostOps:
     def one_shot(self, intro, service, args, *, timeout, env=None, entrypoint=None, name, worker=True, project=None):
         """Every one-shot is registered, including reads: a timed-out CLI cannot prove its daemon worker ended.
         Keep the container until its terminal state is observed. Callers require both client and server exit codes."""
+        timeout = bounded_timeout(timeout)
         if any(row.get("state") != "QUIET" for row in intro.state.get("workers", {}).values()):
             raise Unknown("이전 작업 종료가 미결이므로 보조 작업을 시작할 수 없습니다")
         token = uuid.uuid4().hex[:12]
@@ -3201,6 +3603,9 @@ class HostOps:
         except Unknown:
             registered["state"] = "UNKNOWN"
             self.intro.save()
+            if _smoke_budget.get() is not None:
+                self.cancel_smoke_helper(registered)
+                raise Stop("smoke 보조 작업 제한 시간 뒤 전체 컨테이너 종료를 확인했습니다") from None
             raise Unknown("보조 작업 종료 불명: 컨테이너와 작업 자료를 보존했습니다") from None
         except Stop:
             # A refused config/launch is settled only if a successful daemon query proves that the named worker
@@ -3214,7 +3619,31 @@ class HostOps:
         if not registered.get("resource_absent"):
             self.cmd(["docker", "rm", container], mutating=True)
             require(self.inspect_container(container) is None, "종료한 보조 컨테이너의 제거를 확인하지 못했습니다")
-        return {"container": container, "exit": result.returncode, "container_exit": exit_code, "logs": logs, "stdout": result.stdout}
+        return {"container": container, "exit": result.returncode, "container_exit": exit_code, "logs": logs,
+                "stdout": result.stdout, "stderr": result.stderr}
+
+    def cancel_smoke_helper(self, worker):
+        """Only a named one-shot with this attempt's nonce may be cancelled; unknown exec jobs stay held."""
+        try:
+            with _smoke_budget.get().cleanup():
+                item = self.inspect_container(worker["resource"])
+                require(item is not None and (item.get("Config", {}).get("Labels") or {}).get("kin.release.worker") == worker["nonce"],
+                        "smoke 보조 작업의 소유권을 확인하지 못했습니다")
+                # This fixed stop is the sole mutation allowed while the registered worker is pending.
+                start = time.monotonic()
+                result = self.run(["docker", "stop", "--time", "5", worker["resource"]],
+                                  timeout=bounded_timeout(8), input=None, env=None, stdin=None, output=None)
+                self.records.command({"argv": ["docker", "stop", "--time", "5", worker["resource"]],
+                                      "exit": result.returncode, "outcome": "exit", "seconds": time.monotonic() - start,
+                                      "cleanup": True})
+                require(result.returncode == 0, "smoke 보조 작업 정지가 실패했습니다")
+                self.settle_worker(worker, result.returncode)
+                self.cmd(["docker", "rm", worker["resource"]], timeout=bounded_timeout(5), mutating=True)
+                require(self.inspect_container(worker["resource"]) is None, "smoke 보조 작업의 비밀 환경 정리를 확인하지 못했습니다")
+        except Exception:
+            worker["state"] = "UNKNOWN"
+            self.intro.save()
+            raise Unknown("smoke 정리 제한 시간 안에 보조 작업 종료를 확인하지 못했습니다") from None
 
     def helper(self, intro, script, *, env=None, name="helper", timeout=120, args=()):
         out = self.one_shot(intro, "api", ["-e", script, *args], timeout=timeout, env=env, entrypoint="node", name=name, worker=False)
@@ -3462,6 +3891,9 @@ class HostOps:
         required variable that neither a container nor the kept values hold is a refusal. D28: before the seed no clone
         stack runs, so the clone's .env must carry every required variable; the refusal names each one and its files."""
         self.intro = intro
+        if intro.phase == "capture":
+            # Admission precedes even the declared checkout-mode/overlay corrections, not just the writer fence.
+            self.source_admission = self.admit_source(intro)
         self.entry_inputs = None
         saved = intro.state.get("compose_entry")
         if saved and intro.state.get("entry_checkout") == intro.state["checkout"]:
@@ -3682,11 +4114,17 @@ class HostOps:
         """Keycloak administration for the smoke member and its login client, from a one-shot of the running API image
         with the target's administrator (values only in the one-shot's environment)."""
         env = {"KIN_KC_ADMIN_USER": self.t["keycloak_admin"], "KIN_KC_ADMIN_PASSWORD": parse_env(self.env_file().read_bytes()).get("KC_ADMIN_PASSWORD", "")}
+        env["KIN_SMOKE_DEADLINE"] = str(int((time.time() + bounded_timeout(180)) * 1000))
         if password is not None:
             env["KIN_SMOKE_PASSWORD"] = password
         out = self.one_shot(intro, "api", ["-e", SMOKE_ADMIN_SCRIPT, operation, json.dumps(payload)], timeout=180, env=env,
                             entrypoint="node", name="kc-smoke-" + operation, project=self.smoke_project(intro))
-        require(out["exit"] == 0 and out["container_exit"] == 0, "Smoke member administration failed: " + operation)
+        if out["exit"] != 0 or out["container_exit"] != 0:
+            reason = out.get("stderr", "")
+            if isinstance(reason, bytes):
+                reason = reason.decode("utf-8", errors="replace")
+            refusal = SmokeRefusal if reason.strip() in ("admin", "exists", "marker", "ownership", "role", "group", "PUT 403", "POST 403") else Stop
+            raise refusal("임시 smoke 계정 관리가 실패했습니다: " + operation)
         return result_line(out["stdout"])
 
     def create_smoke_member(self, intro, side):
@@ -3729,22 +4167,33 @@ class HostOps:
         probe's) goes on stdin; its one KIN_RESULT line is the answer. Recorded like every command (argv, input and output
         hashes only). D17: the browser runs as its own process tree, which is killed whole on the timeout and after the
         browser ended (no Chromium child outlives it)."""
-        timeout = timeout or BROWSER_TIMEOUT_S
-        # The legacy POSIX process group cannot attest detached descendants. Part B supplies the systemd/cgroup
-        # supervisor; until installed, refuse before launch rather than recording that unobserved tree as QUIET.
-        require(os.name == "nt", "Linux browser의 systemd/cgroup 감독 설치가 완료되지 않았습니다")
-        worker = self.register_worker("browser", "kin-browser-" + uuid.uuid4().hex, timeout)
+        timeout = bounded_timeout(timeout if timeout is not None else BROWSER_TIMEOUT_S)
+        budget = _smoke_budget.get() or SmokeBudget(timeout + SMOKE_CLEANUP_S)
+        if os.name == "posix":
+            SystemdBrowser.command(self.browser_cmd)
+        resource = "kin-browser-" + uuid.uuid4().hex + (".service" if os.name == "posix" else "")
+        worker = self.register_worker("browser", resource, budget.end - time.monotonic())
+        worker.update(profile=spec["profile_dir"], attempt=spec.get("attempt", 0),
+                      work_deadline=budget.work_end, cleanup_deadline=budget.end)
+        self.intro.save()
+        spec = {**spec, "work_deadline": budget.work_end, "supervised": True}
         entry = {"argv": redact_argv(self.browser_cmd), "env": [], "mutating": False, "timeout_s": timeout, "started_utc": utc_now().isoformat(),
                  "input": output_record(json.dumps(spec).encode()), "browser": what}
         started = time.monotonic()
         try:
-            code, stdout, stderr = run_tree(self.browser_cmd, input=json.dumps(spec).encode(), timeout=timeout)
+            if os.name == "posix":
+                code, stdout, stderr = SystemdBrowser(worker, self.records, self.intro.save, budget).run(
+                    self.browser_cmd, json.dumps(spec).encode())
+            else:
+                code, stdout, stderr = run_tree(self.browser_cmd, input=json.dumps(spec).encode(), timeout=timeout,
+                                                deadline=budget.end)
         except subprocess.TimeoutExpired:
-            worker.update(state="QUIET", supervisor="windows-job", termination="confirmed-timeout")
+            worker.update(state="QUIET", supervisor="systemd-cgroup-v2" if os.name == "posix" else "windows-job",
+                          termination="confirmed-timeout")
             self.intro.save()
             entry.update(outcome="timeout", seconds=round(time.monotonic() - started, 3), tree="killed")
             self.records.command(entry)
-            raise Stop("smoke browser가 제한 시간 안에 끝나지 않아 전체 Job 종료를 확인했습니다") from None
+            raise Stop("smoke browser 제한 시간 뒤 전체 실행 단위의 종료를 확인했습니다") from None
         except OSError as error:
             # Assignment/spawn may have partly succeeded. Only an affirmative supervisor result permits cleanup.
             worker.update(state="UNKNOWN")
@@ -3758,7 +4207,8 @@ class HostOps:
             entry.update(outcome="unknown", seconds=round(time.monotonic() - started, 3))
             self.records.command(entry)
             raise Unknown("smoke browser의 전체 종료를 확인하지 못했습니다") from None
-        worker.update(state="QUIET", supervisor="windows-job", client_exit=code, termination="confirmed")
+        worker.update(state="QUIET", supervisor="systemd-cgroup-v2" if os.name == "posix" else "windows-job",
+                      client_exit=code, termination="confirmed")
         self.intro.save()
         entry.update(outcome="exit", exit=code, seconds=round(time.monotonic() - started, 3),
                      stdout=output_record(stdout), stderr=output_record(stderr))
@@ -3766,10 +4216,12 @@ class HostOps:
         if code:
             # The browser's own record-safe failure code (a fixed check message or an error type; see code_of).
             try:
-                reason = json.loads(stderr.decode("utf-8").strip().splitlines()[-1]).get("error")
+                failure = json.loads(stderr.decode("utf-8").strip().splitlines()[-1])
+                reason = failure.get("error")
             except (ValueError, IndexError, AttributeError, UnicodeDecodeError):
-                reason = None
-            raise Stop("The smoke browser " + what + " failed" + (": " + reason[:160] if type(reason) is str else ""))
+                failure, reason = {}, None
+            refusal = SmokeRefusal if failure.get("retryable") is False else Stop
+            raise refusal("smoke browser " + what + " 실행이 실패했습니다" + (": " + reason[:160] if type(reason) is str else ""))
         return result_line(stdout)
 
     def cleanup_browser_profile(self, profile):
@@ -3777,7 +4229,9 @@ class HostOps:
         if pending:
             raise Unknown("작업 종료가 미결이므로 browser profile을 보존했습니다")
         try:
-            remove_profile(profile)
+            budget = _smoke_budget.get()
+            with budget.cleanup() if budget else nullcontext():
+                remove_profile(profile, seconds=bounded_timeout(15))
         except Exception:
             raise Unknown("browser profile 정리를 확인하지 못했습니다") from None
 
@@ -3785,6 +4239,11 @@ class HostOps:
         """D01 (L-01, before the fence): the policy's browser command is an executable file and the browser it runs opens a
         blank page in a new profile folder and ends with exit 0 within BROWSER_PROBE_S; the browsers' folder it names
         (PLAYWRIGHT_BROWSERS_PATH) resolves. A missing or broken browser stops here, not after the migration."""
+        with smoke_attempt(BROWSER_PROBE_S + SMOKE_CLEANUP_S,
+                           intro.deadline_left() if hasattr(intro, "deadline_left") else None):
+            return self.browser_probe_attempt(intro)
+
+    def browser_probe_attempt(self, intro):
         program = Path(self.browser_cmd[0])
         require(program.is_absolute() and program.is_file() and os.access(program, os.X_OK),
                 "The smoke browser command is not an executable file: " + str(program))
@@ -3809,7 +4268,9 @@ class HostOps:
         member["client_id"] = client_id
         member["client_ids"] = sorted({*(member.get("client_ids") or []), client_id})
         intro.save()
-        self.smoke_admin(intro, "create-client", {"client_id": client_id, "redirect_uri": redirect, "marker": member["marker"]})
+        created = self.smoke_admin(intro, "create-client", {"client_id": client_id, "redirect_uri": redirect, "marker": member["marker"]})
+        member.setdefault("client_objects", {})[client_id] = created["id"]
+        intro.save()
         # The browser's profile (its cookies are this member's session) lives in this run's secrets folder and is gone
         # after the login, whatever the browser did; every attempt has a new one.
         profile = intro.records.secret("browser-profile-" + uuid.uuid4().hex[:8])
@@ -3817,7 +4278,7 @@ class HostOps:
             value = self.run_browser({"origin": self.t["origin"], "connect": list(connect) if connect else None, "ca_file": self.t["ca_file"],
                                       "username": credentials["username"], "password": credentials["password"], "client_id": client_id,
                                       "redirect_uri": redirect, "profile_dir": str(profile), "product_session": product_session,
-                                      "study_uid": frame_study(intro.plan) if product_session else None},
+                                      "study_uid": frame_study(intro.plan) if product_session else None, "attempt": attempt},
                                      timeout=timeout)
         finally:
             self.cleanup_browser_profile(profile)
@@ -3842,7 +4303,18 @@ class HostOps:
             clients = sorted({*(member.get("client_ids") or []), *([member["client_id"]] if member.get("client_id") else [])})
             # IRT2-23: only what carries this run's marker is removed; a same-named account or client stays (and the
             # realm check below then refuses any reopen while an account named like a smoke member exists).
-            removed = self.smoke_admin(intro, "remove", {"username": member["username"], "client_ids": clients, "marker": member["marker"]})
+            identity = {"username": member["username"], "client_ids": clients, "marker": member["marker"]}
+            # A helper may have exited after creation and before returning its ID. Recover only objects with this
+            # attempt's random marker, persist their immutable IDs, then require those IDs again during removal.
+            owned = self.smoke_admin(intro, "owned", identity)
+            require(type(owned.get("users")) is list and type(owned.get("clients")) is list,
+                    "임시 계정의 불변 ID 목록을 확인하지 못했습니다")
+            require(member.get("id") is None or set(owned["users"]) <= {member["id"]}, "임시 계정 신원이 교체됐습니다")
+            known = set(member.get("client_objects", {}).values())
+            require(not known or known <= set(owned["clients"]), "임시 로그인 client 신원을 확인하지 못했습니다")
+            member["cleanup_objects"] = owned
+            intro.save()
+            removed = self.smoke_admin(intro, "remove", {**identity, "user_ids": owned["users"], "object_ids": owned["clients"]})
             require(removed.get("user_absent") is True and removed.get("client_absent") is True, "The smoke member or its client is still present")
             member["deleted_at"] = utc_now().isoformat()
             member["foreign_kept"] = {"users": removed.get("foreign_users", 0), "clients": removed.get("foreign_clients", 0)}
@@ -3876,7 +4348,9 @@ class HostOps:
                 intro.records.discard(first)
             intro.state.pop("operator_smoke", None)
             intro.save()
-        return self.release_smoke_attempt(intro, connect, timeout=max(10, SMOKE_RETRY_S - 5) if retrying else None)
+        with smoke_attempt(SMOKE_RETRY_S if retrying else BROWSER_TIMEOUT_S,
+                           intro.deadline_left() if hasattr(intro, "deadline_left") else None):
+            return self.release_smoke_attempt(intro, connect)
 
     def release_smoke_attempt(self, intro, connect, *, timeout=None):
         """One attempt of the unattended release smoke (see unattended_release_smoke)."""
@@ -3920,6 +4394,23 @@ class HostOps:
         return self.remove_smoke_member_now(intro)
 
     # ── capture ──
+    def admit_source(self, intro):
+        db = self.inspect("db")
+        require(db is not None and db["State"]["Running"] and not db["State"].get("Restarting")
+                and db["Image"] == intro.plan["previous"]["images"]["db"], "변경 전 DB 신원 또는 실행 상태가 다릅니다")
+        labels = (db.get("Config") or {}).get("Labels") or {}
+        require(labels.get("com.docker.compose.project") == self.t["project"] and labels.get("com.docker.compose.service") == "db",
+                "변경 전 DB가 선언한 Compose 자원이 아닙니다")
+        require(ops._volume_of(db, "/var/lib/postgresql/data") == self.t["volumes"]["pg"], "변경 전 DB volume이 다릅니다")
+        try:
+            with self.bind():
+                catalog, values = ops.restore_admission(self.names["db"], shape="pre", image=db["Image"])
+        except ops.RestoreAdmissionError as error:
+            intro.records.put("restore-admission-refusal.json", error.evidence)
+            raise Stop("변경 전 PostgreSQL 복원 admission이 거절됐습니다. 거절 기록을 확인하세요") from None
+        return {"version": ops.RESTORE_INVENTORY, "admitted": True, "object_databases": sorted(catalog["objects"]),
+                "value_tables": len(values["tables"]), "before_checkout_correction": True}
+
     def baseline(self, intro):
         model = self.resolved(intro, maintenance=False)
         check_resolved(model, self.t, target_checkout=False, maintenance=False, images=intro.plan["previous"]["images"])
@@ -3949,7 +4440,9 @@ class HostOps:
             cron = "matched" if all(len(lines) == 1 and not lines[0].lstrip().startswith("#") for lines in tagged.values()) else "mismatch"
         self.image_revision(intro.plan["previous"])
         with self.bind():
-            migrations, catalog = ops.migration_rows(self.names["db"]), ops.role_catalog(self.names["db"])
+            migrations = ops.migration_rows(self.names["db"])
+            catalog = ops.role_catalog(self.names["db"])
+        require(getattr(self, "source_admission", {}).get("admitted") is True, "변경 전 복원 admission 증거가 없습니다")
         observed = {"head": self.text(["git", "rev-parse", "HEAD"]),
                     "dirty": bool(self.text(["git", "status", "--porcelain", "--untracked-files=no"])),
                     "images": images, "running": running, "restarting": restarting, "migrations": migrations, "catalog": catalog,
@@ -4417,7 +4910,11 @@ class HostOps:
             result = smoke(self.t["origin"], connect=self.maintenance(), ca_file=self.t["ca_file"], token=token, frame=self.frame(intro),
                            worklist_uid=frame_study(intro.plan))
             require(smoke_passed(result), "The fenced smoke did not run every check")
-        check_resolved(self.resolved(intro), self.t, target_checkout=True, maintenance=True, images=intro.plan["release"]["images"])
+        model = self.resolved(intro)
+        try:
+            check_resolved(model, self.t, target_checkout=True, maintenance=True, images=intro.plan["release"]["images"])
+        except Stop:
+            raise SmokeRefusal("smoke 뒤 Compose allowlist가 선언과 다릅니다") from None
         return result
 
     def probe(self, intro):
@@ -4879,41 +5376,72 @@ class HostOps:
                 "chain": "CA file" if self.t["ca_file"] else "image trust store"}
 
     def keycloak_isolation(self, intro, source_env, clone_env, source_origin):
-        """The restored realm keeps every member/role/group row; only the clone's client secrets, origin and mail change."""
-        realm = self.psql("SELECT id FROM realm WHERE name='kin';", "keycloak")
-        require(realm and re.fullmatch(r"[0-9a-f-]{1,64}", realm), "Realm kin missing in the restored Keycloak")
-        rows = self.psql("SELECT client_id || '|' || coalesce(secret, '') FROM client WHERE realm_id='" + realm + "' ORDER BY client_id;", "keycloak")
-        updates, regenerated = [], []
+        """Keycloak 26.7.3: exact realm/row/field changes, then compare every residual value of both databases."""
+        version = self.text(["docker", "run", "--rm", "--network", "none", "--entrypoint", "/opt/keycloak/bin/kc.sh",
+                             intro.plan["previous"]["images"]["keycloak"], "--version"], timeout=120)
+        require(re.search(r"\bKeycloak 26\.7\.3\b", version) is not None, "clone 변환이 지원하는 Keycloak 버전은 26.7.3입니다")
+        require(type(source_origin) is str and urlsplit(source_origin).scheme == "https" and urlsplit(source_origin).netloc
+                and urlsplit(source_origin).path in ("", "/"), "원본 origin을 복원 자료에서 확인하지 못했습니다")
+        source_origin = source_origin.rstrip("/")
+        with self.bind():
+            def table(name):
+                columns, rows = ops.value_rows(self.names["db"], "keycloak", "public", name)
+                return columns, rows
+            columns, rows = table("realm")
+            require({"id", "name"} <= set(columns), "Keycloak realm 스키마가 다릅니다")
+            realms = [row[columns.index("id")] for row in rows if row[columns.index("name")] == "kin"]
+            require(len(realms) == 1 and realms[0], "복원한 Keycloak의 kin realm이 유일하지 않습니다")
+            realm = realms[0]
+            inputs = {name: table(name) for name in ("client", "redirect_uris", "web_origins", "realm_smtp_config", "identity_provider")}
+        changes, regenerated, replaced, clients = CloneFields(), [], [], set()
         mapping = {source_env.get(name): clone_env.get(name) for name in ("KC_CLIENT_SECRET", "KC_WEB_SECRET") if source_env.get(name)}
-        for line in rows.splitlines():
-            client, secret = line.split("|", 1)
-            if not secret:
+        columns, rows = inputs["client"]
+        require({"id", "realm_id", "client_id", "secret", "root_url", "base_url", "management_url"} <= set(columns),
+                "Keycloak client 스키마가 다릅니다")
+        for row in rows:
+            item = dict(zip(columns, row))
+            if item["realm_id"] != realm:
                 continue
-            if secret in mapping:
-                require(bool(mapping[secret]), "A client secret of the source has no clone replacement")
-                updates.append((client, mapping[secret]))
-            else:
-                # A source credential nothing in the clone uses (e.g. a generated template secret): never kept.
-                updates.append((client, token_source.token_urlsafe(32)))
-                regenerated.append(client)
-        tag = "kin" + uuid.uuid4().hex
-        statements = ["BEGIN;"]
-        for client, value in updates:
-            statements.append(f"UPDATE client SET secret = ${tag}${value}${tag}$ WHERE realm_id = '{realm}' AND client_id = ${tag}${client}${tag}$;")
-        clone_origin = self.t["origin"]
+            require(item["id"] not in clients, "Keycloak client ID가 중복됐습니다")
+            clients.add(item["id"])
+            if item["secret"]:
+                if item["secret"] in mapping:
+                    require(bool(mapping[item["secret"]]), "원본 client secret에 대응하는 clone 입력이 없습니다")
+                    item["secret"] = mapping[item["secret"]]
+                else:
+                    item["secret"] = token_source.token_urlsafe(32)
+                    regenerated.append(item["client_id"])
+                replaced.append(item["client_id"])
+            for column in ("root_url", "base_url", "management_url"):
+                item[column] = clone_origin(item[column], source_origin, self.t["origin"])
+            changes.change("client", columns, row, [item[column] for column in columns])
         for table in ("redirect_uris", "web_origins"):
-            statements.append(f"UPDATE {table} SET value = replace(value, ${tag}${source_origin}${tag}$, ${tag}${clone_origin}${tag}$) "
-                              f"WHERE client_id IN (SELECT id FROM client WHERE realm_id = '{realm}');")
-        for column in ("root_url", "base_url", "management_url"):
-            statements.append(f"UPDATE client SET {column} = replace({column}, ${tag}${source_origin}${tag}$, ${tag}${clone_origin}${tag}$) "
-                              f"WHERE realm_id = '{realm}' AND {column} IS NOT NULL;")
-        statements += [f"DELETE FROM realm_smtp_config WHERE realm_id = '{realm}';",
-                       f"UPDATE identity_provider SET enabled = false WHERE realm_id = '{realm}';", "COMMIT;"]
+            columns, rows = inputs[table]
+            require({"client_id", "value"} <= set(columns), "Keycloak origin 스키마가 다릅니다")
+            for row in rows:
+                if row[columns.index("client_id")] in clients:
+                    after = list(row)
+                    after[columns.index("value")] = clone_origin(after[columns.index("value")], source_origin, self.t["origin"])
+                    changes.change(table, columns, row, after)
+        for table in ("realm_smtp_config", "identity_provider"):
+            columns, rows = inputs[table]
+            require("realm_id" in columns and (table != "identity_provider" or {"internal_id", "enabled"} <= set(columns)),
+                    "Keycloak 외부 연결 스키마가 다릅니다")
+            for row in rows:
+                if row[columns.index("realm_id")] == realm:
+                    after = None if table == "realm_smtp_config" else list(row)
+                    if after is not None:
+                        after[columns.index("enabled")] = "false"
+                    changes.change(table, columns, row, after)
+        with self.bind():
+            expected = ops.value_catalog(self.names["db"], transform=changes.expected)
+        statements = ["SET client_encoding='UTF8';", "BEGIN;", *changes.sql, "COMMIT;"]
         self.cmd(["docker", "exec", "-i", self.names["db"], "psql", "-X", "-U", "kin", "-d", "keycloak", "-v", "ON_ERROR_STOP=1", "-q"],
                  input="\n".join(statements).encode(), mutating=True, timeout=120, quiet=True)
-        return {"client_secrets_replaced": [client for client, _ in updates], "client_secrets_regenerated": regenerated,
-                "origin_rewritten": ["redirect_uris", "web_origins",
-                "client.root_url", "client.base_url", "client.management_url"], "smtp": "removed", "identity_providers": "disabled"}
+        with self.bind():
+            require(ops.value_catalog(self.names["db"]) == expected, "clone의 승인된 행·필드 외 값이 달라졌습니다")
+        return {"version": "26.7.3", "client_secrets_replaced": replaced, "client_secrets_regenerated": regenerated,
+                "realm": realm, "residual_values": "equal", "smtp": "kin realm removed", "identity_providers": "kin realm disabled"}
 
     def seed_restore(self, intro):
         seed = Path(intro.plan["seed"]["b0_dir"])
@@ -4924,28 +5452,45 @@ class HostOps:
         self.db_ready(180, "Clone database did not become ready")
         with self.bind():
             restored = ops.restore_pre_snapshot(self.names["db"], seed)
-            for database in ("kin", "keycloak"):
-                require(ops.counts(self.names["db"], database, "kin") == manifest["counts"][database], "Seeded row counts differ: " + database)
             # IRT2-24: the restored copy is the seed's exactly (every row of both databases) before the clone's own,
             # recorded changes below (client secrets, origin, mail, identity providers, its administrator) are made.
-            require(ops.value_catalog(self.names["db"]) == json.loads((seed / "values.json").read_text(encoding="utf-8")),
+            restored_values = ops.value_catalog(self.names["db"])
+            require(restored_values == json.loads((seed / "values.json").read_text(encoding="utf-8")),
                     "Seeded row values differ from the seed")
+            require(ops.value_counts(restored_values) == manifest["counts"], "Seeded row counts differ from the held manifest")
         source_env, clone_env = parse_env((seed / ".env").read_bytes()), parse_env(self.env_file().read_bytes())
-        isolation = self.keycloak_isolation(intro, source_env, clone_env, source_env.get("PUBLIC_ORIGIN", "https://pacs.koreaimagingnetwork.com"))
+        source_facts = json.loads((seed / "metadata.json").read_text(encoding="utf-8")).get("facts", {})
+        source_origin = source_env.get("PUBLIC_ORIGIN") or source_facts.get("origin")
+        isolation = self.keycloak_isolation(intro, source_env, clone_env, source_origin)
         with self.bind():
             transformed = ops.value_catalog(self.names["db"])
-        # IRT2-24: the clone's approved changes compared on their own - only their Keycloak tables differ from the seed
-        # (every other table of both databases is still the seed's); the changed tables are recorded by name only.
         changed = value_changes(json.loads((seed / "values.json").read_text(encoding="utf-8")), transformed)
-        require(changed <= SEED_TRANSFORMED_TABLES, "The clone's Keycloak changes reached other tables: " + ", ".join(sorted(changed - SEED_TRANSFORMED_TABLES)))
         isolation["changed_tables"] = sorted(changed)
         # The restored master realm keeps the source administrator (whose password the clone must not know); the clone
         # gets its own administrator with the clone's KC_ADMIN_PASSWORD, through Keycloak's own recovery command.
+        with self.bind():
+            master = ops.psql_json(self.names["db"], "keycloak", "SELECT json_agg(id) FROM realm WHERE name='master';")
+            require(type(master) is list and len(master) == 1, "clone master realm이 유일하지 않습니다")
+            role_ids = ops.psql_json(self.names["db"], "keycloak", "SELECT json_agg(id ORDER BY id) FROM keycloak_role WHERE realm_id="
+                                    + ops._sql_literal(master[0]) + " AND name IN ('admin','default-roles-master');")
+            require(type(role_ids) is list and len(role_ids) == 2, "clone 관리자 기본 역할 계약을 확인하지 못했습니다")
+            before_admin = {name: ops.value_rows(self.names["db"], "keycloak", "public", name)
+                            for name in ("user_entity", "credential", "user_attribute", "user_role_mapping")}
+        columns, users = before_admin["user_entity"]
+        require(not any(row[columns.index("realm_id")] == master[0] and row[columns.index("username")] == self.t["keycloak_admin"]
+                        for row in users), "clone 관리자 이름을 기존 계정이 사용 중입니다")
+        started_ms = int(time.time() * 1000)
         admin = self.one_shot(intro, "keycloak", ["bootstrap-admin", "user", "--username", self.t["keycloak_admin"],
                                                  "--password:env", "KC_BOOTSTRAP_ADMIN_PASSWORD", "--no-prompt"],
                               timeout=600, entrypoint="/opt/keycloak/bin/kc.sh", name="kc-bootstrap-admin")
         require(admin["exit"] == 0 and admin["container_exit"] == 0, "The clone Keycloak administrator could not be created")
-        isolation["administrator"] = {"created": self.t["keycloak_admin"], "logs": admin["logs"]}
+        with self.bind():
+            after_admin = {name: ops.value_rows(self.names["db"], "keycloak", "public", name) for name in before_admin}
+            admin_id, strip_new_admin = clone_admin_rows(before_admin, after_admin, username=self.t["keycloak_admin"], realm=master[0],
+                role_ids=role_ids, started_ms=started_ms, ended_ms=int(time.time() * 1000))
+            require(ops.value_catalog(self.names["db"], transform=strip_new_admin) == transformed,
+                    "clone 관리자 생성이 승인된 새 행 밖의 값을 바꿨습니다")
+        isolation["administrator"] = {"created": self.t["keycloak_admin"], "id": admin_id, "logs": admin["logs"], "residual_values": "equal"}
         self.compose(["up", "--no-deps", "--no-build", "--pull", "never", "--no-start", "orthanc"], override=override, timeout=180)
         with open(seed / "orthanc.tgz", "rb") as handle:
             self.cmd(["docker", "run", "--rm", "-i", "--network", "none", "--mount", "type=volume,source=" + self.t["volumes"]["orthanc"] + ",target=/restore",
@@ -5331,9 +5876,10 @@ def verified_pin(host, port, connect, ca_file):
     """The chain of the server the browser will reach, verified here (the CA file of a clone, else the system trust
     store) for the origin's host name; the leaf's SPKI pin is then the only certificate the browser accepts."""
     context = ssl.create_default_context(cafile=ca_file) if ca_file else ssl.create_default_context()
-    with socket.create_connection(tuple(connect) if connect else (host, port), timeout=20) as raw, \
-            context.wrap_socket(raw, server_hostname=host) as tls:
-        return spki_pin(tls.getpeercert(binary_form=True))
+    with socket.create_connection(tuple(connect) if connect else (host, port), timeout=bounded_timeout(20)) as raw:
+        raw.settimeout(bounded_timeout(20))
+        with context.wrap_socket(raw, server_hostname=host) as tls:
+            return spki_pin(tls.getpeercert(binary_form=True))
 
 
 def browser_probe(spec):
@@ -5354,15 +5900,19 @@ def browser_probe(spec):
             require(executable.is_file(), "The Chromium of this Playwright is not installed")
             if browsers is not None:
                 require(Path(browsers).resolve() in executable.resolve().parents, "The Chromium does not come from PLAYWRIGHT_BROWSERS_PATH")
-            context = playwright.chromium.launch_persistent_context(str(profile), headless=True)
+            context = playwright.chromium.launch_persistent_context(str(profile), headless=True, timeout=browser_timeout(30000))
             try:
+                context.add_init_script("window.__kinSmokeDeadline = %d;" % (time.time() * 1000 + browser_timeout(300000)))
+                context.set_default_timeout(browser_timeout())
+                context.set_default_navigation_timeout(browser_timeout(60000))
                 page = context.pages[0] if context.pages else context.new_page()
                 page.goto("about:blank")
                 agent = re.search(r"Chrome/([0-9.]+)", page.evaluate("navigator.userAgent") or "")
             finally:
                 context.close()
     finally:
-        shutil.rmtree(profile, ignore_errors=True)
+        if not spec.get("supervised"):
+            shutil.rmtree(profile, ignore_errors=True)
     return {"probe": "ok", "browser": "chromium " + (agent.group(1) if agent else "unknown"),
             "browsers_path": "given" if browsers is not None else "default"}
 
@@ -5402,8 +5952,11 @@ def browser_smoke(spec):
     product = None
     try:
         with sync_playwright() as playwright:
-            context = playwright.chromium.launch_persistent_context(str(profile), headless=True, args=args, ignore_https_errors=False)
+            context = playwright.chromium.launch_persistent_context(str(profile), headless=True, args=args, ignore_https_errors=False, timeout=browser_timeout(30000))
             try:
+                context.add_init_script("window.__kinSmokeDeadline = %d;" % (time.time() * 1000 + browser_timeout(300000)))
+                context.set_default_timeout(browser_timeout())
+                context.set_default_navigation_timeout(browser_timeout(60000))
                 page = context.pages[0] if context.pages else context.new_page()
                 if spec.get("product_session"):
                     product = product_session_check(page, spec)
@@ -5416,7 +5969,7 @@ def browser_smoke(spec):
                         landed["url"] = request.url
                 page.on("request", capture)
                 browser_stage(page, "the sign-in page", lambda: page.goto(spec["origin"] + "/auth/realms/kin/protocol/openid-connect/auth?" + query,
-                                                                          wait_until="domcontentloaded", timeout=60000))
+                                                                          wait_until="domcontentloaded", timeout=browser_timeout(60000)))
                 agent = re.search(r"Chrome/([0-9.]+)", page.evaluate("navigator.userAgent") or "")
                 version = agent.group(1) if agent else "unknown"
                 browser_stage(page, "the sign-in form", lambda: (page.fill("#username", spec["username"]), page.fill("#password", spec["password"])))
@@ -5429,21 +5982,25 @@ def browser_smoke(spec):
                 for _ in range(120):
                     if "url" in landed:
                         break
-                    page.wait_for_timeout(250)
+                    page.wait_for_timeout(browser_timeout(250))
                 if "url" not in landed:
                     # Where the sign-in stopped (a page title such as a required action; never a value of the form).
                     landed["title"] = re.sub(r"[^\w .:-]", "", page.title() or "")[:60]
             finally:
                 context.close()
     finally:
-        shutil.rmtree(profile, ignore_errors=True)
-    require("url" in landed, "The sign-in did not return to the registered redirect (page: " + landed.get("title", "") + ")")
+        if not spec.get("supervised"):
+            shutil.rmtree(profile, ignore_errors=True)
+    if "url" not in landed:
+        raise SmokeRefusal("로그인이 등록한 redirect로 돌아오지 않았습니다. 계정·필수 인증 정책을 확인해야 합니다")
     params = parse_qs(urlsplit(landed["url"]).query)
     require(params.get("state") == [state] and len(params.get("code", [])) == 1, "The sign-in returned another login's code")
     code, raw = https_post(spec["origin"], "/auth/realms/kin/protocol/openid-connect/token",
                            {"client_id": spec["client_id"], "grant_type": "authorization_code", "code": params["code"][0],
                             "redirect_uri": spec["redirect_uri"], "code_verifier": verifier}, connect=connect, ca_file=spec.get("ca_file"))
-    require(code == 200, "The authorization code was not exchanged")
+    if code != 200:
+        refusal = SmokeRefusal if code in (400, 401, 403) else Stop
+        raise refusal("인증 코드 교환이 실패했습니다")
     tokens = json.loads(raw)
     claims = token_claims({"access_token": tokens["access_token"]})
     return {"flow": "authorization_code+S256", "browser": "chromium " + version, "access_token": tokens["access_token"],
@@ -5452,17 +6009,17 @@ def browser_smoke(spec):
 
 # The product's own session requests as its web documents send them (worklist-v0/hpacs-lite/auth.js: X-KIN-CSRF, and
 # X-KIN-Session once the document knows its session); GET /api/me without the binding is the product's bootstrap call.
-PRODUCT_ME_JS = ("async (sid) => { const h = {'X-KIN-CSRF': '1'}; if (sid) h['X-KIN-Session'] = sid;"
-                 " const r = await fetch('/api/me', {headers: h, credentials: 'same-origin', cache: 'no-store'});"
+PRODUCT_ME_JS = ("async (sid) => { const kinSmokeSignal = () => { const left = (window.__kinSmokeDeadline || (Date.now()+60000))-Date.now(); if(left<=0) throw new Error('smoke deadline'); return AbortSignal.timeout(Math.ceil(left)); }; const h = {'X-KIN-CSRF': '1'}; if (sid) h['X-KIN-Session'] = sid;"
+                 " const r = await fetch('/api/me', {headers: h, credentials: 'same-origin', cache: 'no-store', signal: kinSmokeSignal()});"
                  " let b = {}; try { b = await r.json(); } catch (e) {}"
                  " return {status: r.status, sid: typeof b.sessionId === 'string' && b.sessionId ? b.sessionId : null}; }")
-PRODUCT_LOGOUT_JS = ("async (sid) => (await fetch('/api/auth/logout', {method: 'POST', credentials: 'same-origin',"
-                     " headers: {'X-KIN-CSRF': '1', 'X-KIN-Session': sid}})).status")
+PRODUCT_LOGOUT_JS = ("async (sid) => { const kinSmokeSignal = () => { const left = (window.__kinSmokeDeadline || (Date.now()+60000))-Date.now(); if(left<=0) throw new Error('smoke deadline'); return AbortSignal.timeout(Math.ceil(left)); }; return (await fetch('/api/auth/logout', {method: 'POST', credentials: 'same-origin', signal: kinSmokeSignal(),"
+                     " headers: {'X-KIN-CSRF': '1', 'X-KIN-Session': sid}})).status; }")
 
 
 def sign_in(page, spec):
     """The realm's sign-in form, filled with the smoke member's credentials."""
-    page.wait_for_selector("#username", timeout=60000)
+    page.wait_for_selector("#username", timeout=browser_timeout(60000))
     page.fill("#username", spec["username"])
     page.fill("#password", spec["password"])
     page.click("#kc-login")
@@ -5472,6 +6029,9 @@ def browser_stage(page, name, action):
     """One browser stage; a failure names the stage, the error type and the page it stopped on (path and title only:
     never a query, a fragment or a form value)."""
     try:
+        if _smoke_budget.get() is not None:
+            page.set_default_timeout(browser_timeout())
+            page.set_default_navigation_timeout(browser_timeout(60000))
         return action()
     except Stop:
         raise
@@ -5489,10 +6049,10 @@ def product_session_check(page, spec):
     session asked again with its binding and by its cookie alone. Statuses only; the session id stays in the browser."""
     from urllib.parse import parse_qs
     origin = spec["origin"]
-    browser_stage(page, "the product sign-in page", lambda: page.goto(origin + "/api/auth/login", wait_until="domcontentloaded", timeout=60000))
+    browser_stage(page, "the product sign-in page", lambda: page.goto(origin + "/api/auth/login", wait_until="domcontentloaded", timeout=browser_timeout(60000)))
     browser_stage(page, "the product sign-in form", lambda: sign_in(page, spec))
     browser_stage(page, "the product's return", lambda: page.wait_for_url(lambda url: url.startswith(origin + "/worklist/"),
-                                                                           wait_until="commit", timeout=60000))
+                                                                           wait_until="commit", timeout=browser_timeout(60000)))
     sid = None
     for _ in range(120):
         try:
@@ -5502,7 +6062,7 @@ def product_session_check(page, spec):
                 break
         except Exception:
             pass   # the document is still navigating (its entry step)
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(browser_timeout(500))
     if sid is None:
         error = (parse_qs(urlsplit(page.url).query).get("auth_error") or [""])[0]
         raise Stop("The product sign-in did not open a session" + (" (" + re.sub(r"[^\w-]", "", error)[:40] + ")" if error else ""))
@@ -5515,7 +6075,7 @@ def product_session_check(page, spec):
                     if "/api/me".startswith(cookie.get("path") or "/"))
     require(jar, "The product sign-in left no session cookie")
     browser_stage(page, "a neutral page", lambda: page.goto(origin + "/auth/realms/kin/.well-known/openid-configuration",
-                                                             wait_until="domcontentloaded", timeout=60000))
+                                                             wait_until="domcontentloaded", timeout=browser_timeout(60000)))
     logout = browser_stage(page, "the product logout", lambda: page.evaluate(PRODUCT_LOGOUT_JS, sid))
     bound = session_replay(spec, {"Cookie": jar, "X-KIN-CSRF": "1", "X-KIN-Session": sid})
     cookie_only = session_replay(spec, {"Cookie": jar, "X-KIN-CSRF": "1"})
@@ -5525,9 +6085,9 @@ def product_session_check(page, spec):
 SCREEN_CHECKS = ("worklist_row", "modality_rendered", "folders_loaded", "reading_workspace", "shortcuts_dialog", "viewer_rendered")
 # The signed-in document's own paged list (as study-pages.js asks for it): the plan's study and its patient ID and
 # modality, which stay in the browser (only booleans leave it).
-SCREEN_STUDY_JS = ("async ([uid, sid]) => { const h = {'X-KIN-CSRF': '1', 'X-KIN-Session': sid}; let after = null;"
+SCREEN_STUDY_JS = ("async ([uid, sid]) => { const kinSmokeSignal = () => { const left = (window.__kinSmokeDeadline || (Date.now()+60000))-Date.now(); if(left<=0) throw new Error('smoke deadline'); return AbortSignal.timeout(Math.ceil(left)); }; const h = {'X-KIN-CSRF': '1', 'X-KIN-Session': sid}; let after = null;"
                    " for (let n = 0; n < 500; n++) { const r = await fetch('/api/studies?limit=100' + (after ? '&after=' + encodeURIComponent(after) : ''),"
-                   " {headers: h, credentials: 'same-origin', cache: 'no-store'}); if (r.status !== 200) return {status: r.status};"
+                   " {headers: h, credentials: 'same-origin', cache: 'no-store', signal: kinSmokeSignal()}); if (r.status !== 200) return {status: r.status};"
                    " const body = await r.json(); const row = (body.studies || []).find(s => s && s.uid === uid);"
                    " if (row) return {status: 200, found: true, patient: typeof row.id === 'string' ? row.id : null,"
                    " modality: typeof row.modality === 'string' ? row.modality : null};"
@@ -5548,7 +6108,7 @@ SCREEN_CANVAS_JS = ("() => { const cs = [...document.querySelectorAll('.cornerst
 def canvas_rendered(page, timeout=60000):
     """Whether the page's viewer drew the image within the time (see SCREEN_CANVAS_JS)."""
     try:
-        page.wait_for_function(SCREEN_CANVAS_JS, timeout=timeout)
+        page.wait_for_function(SCREEN_CANVAS_JS, timeout=browser_timeout(timeout))
         return True
     except Exception:
         return False
@@ -5564,13 +6124,13 @@ def product_screens_check(page, spec, sid):
     out = {name: False for name in SCREEN_CHECKS}
     row = '#rows tr[data-uid="' + uid + '"]'
     browser_stage(page, "the worklist", lambda: page.wait_for_function(
-        "() => ((document.querySelector('#dbstat') || {}).textContent || '').includes('DB Connected')", timeout=60000))
+        "() => ((document.querySelector('#dbstat') || {}).textContent || '').includes('DB Connected')", timeout=browser_timeout(60000)))
     study = browser_stage(page, "the worklist's own list", lambda: page.evaluate(SCREEN_STUDY_JS, [uid, sid]))
     require(type(study) is dict and study.get("status") == 200 and study.get("found") is True, "The product's list does not hold the plan's study")
     try:
         if study.get("patient"):
             page.fill("#quick", study["patient"])
-        page.wait_for_selector(row, timeout=90000)
+        page.wait_for_selector(row, timeout=browser_timeout(90000))
         out["worklist_row"] = True
         rendered = page.evaluate(SCREEN_MODALITY_JS, uid)
         out["modality_rendered"] = bool(rendered) and rendered == (study.get("modality") or "").strip()
@@ -5579,14 +6139,14 @@ def product_screens_check(page, spec, sid):
     try:
         page.click("#toolbar-filters > summary")
         page.click("#managefilters")
-        page.wait_for_selector("#saved-filter-manager", state="visible", timeout=30000)
+        page.wait_for_selector("#saved-filter-manager", state="visible", timeout=browser_timeout(30000))
         page.click("#sfm-organize > summary")
         page.click("#sfm-load-folders")
         page.wait_for_function("() => ((document.querySelector('#sfm-status') || {}).textContent || '').includes('검색 모음을 불러왔습니다')"
-                               " && (document.querySelector('#saved-filter-manager') || {}).getAttribute('aria-busy') === 'false'", timeout=30000)
+                               " && (document.querySelector('#saved-filter-manager') || {}).getAttribute('aria-busy') === 'false'", timeout=browser_timeout(30000))
         out["folders_loaded"] = True
         page.keyboard.press("Escape")
-        page.wait_for_selector("#saved-filter-manager", state="hidden", timeout=10000)
+        page.wait_for_selector("#saved-filter-manager", state="hidden", timeout=browser_timeout(10000))
     except Exception:
         pass
     if out["worklist_row"]:
@@ -5594,18 +6154,18 @@ def product_screens_check(page, spec, sid):
             page.click(row)
             page.click("#m-reading")
             page.wait_for_function("() => ((document.querySelector('#reading-status') || {}).textContent || '').includes('영상 작업공간 연결됨')",
-                                   timeout=90000)
+                                   timeout=browser_timeout(90000))
             out["reading_workspace"] = True
             page.click("#workspace-shortcuts-edit")
-            page.wait_for_selector("#workspace-shortcuts-dialog", state="visible", timeout=30000)
-            page.wait_for_selector("#workspace-shortcut-list", timeout=30000)
+            page.wait_for_selector("#workspace-shortcuts-dialog", state="visible", timeout=browser_timeout(30000))
+            page.wait_for_selector("#workspace-shortcut-list", timeout=browser_timeout(30000))
             out["shortcuts_dialog"] = True
             page.click("#workspace-shortcuts-cancel")
         except Exception:
             pass
     viewer = page.context.new_page()
     try:
-        viewer.goto(origin + "/ohif/viewer?StudyInstanceUIDs=" + quote(uid, safe=""), wait_until="domcontentloaded", timeout=60000)
+        viewer.goto(origin + "/ohif/viewer?StudyInstanceUIDs=" + quote(uid, safe=""), wait_until="domcontentloaded", timeout=browser_timeout(60000))
         out["viewer_rendered"] = canvas_rendered(viewer)
     except Exception:
         out["viewer_rendered"] = False
@@ -5624,11 +6184,13 @@ def session_replay(spec, headers):
     if https:
         connection = PinnedHTTPS(address, port, parsed.hostname, ssl.create_default_context(cafile=spec.get("ca_file")))
     else:
-        connection = http.client.HTTPConnection(address, port, timeout=10)
+        connection = http.client.HTTPConnection(address, port, timeout=bounded_timeout(10))
     try:
         connection.request("GET", "/api/me", headers={"Host": parsed.netloc, "Accept": "application/json", **headers})
+        if connection.sock is not None:
+            connection.sock.settimeout(bounded_timeout(10))
         response = connection.getresponse()
-        response.read(65536)
+        http_read(connection, response, 65536)
         return response.status
     finally:
         connection.close()
@@ -5699,10 +6261,16 @@ def main(argv=None):
         try:
             spec = json.loads(sys.stdin.buffer.read(65536).decode("utf-8"))
             require(type(spec) is dict, "Invalid browser spec")
+            if spec.get("work_deadline") is not None:
+                require(type(spec["work_deadline"]) in (int, float) and spec["work_deadline"] > time.monotonic(),
+                        "browser 작업 제한 시간이 지났습니다")
+                child_budget = SmokeBudget(1)
+                child_budget.work_end = child_budget.end = spec["work_deadline"]
+                _smoke_budget.set(child_budget)
             print("KIN_RESULT " + json.dumps(browser_probe(spec) if spec.get("probe") is True else browser_smoke(spec)))
             return 0
         except Exception as error:   # never the spec or a token in the message
-            print(json.dumps({"valid": False, "error": code_of(error)}), file=sys.stderr)
+            print(json.dumps({"valid": False, "error": code_of(error), "retryable": getattr(error, "retryable", True)}), file=sys.stderr)
             return 1
     try:
         if args.command == "example":

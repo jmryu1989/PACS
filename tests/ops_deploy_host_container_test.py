@@ -411,7 +411,7 @@ class SyntheticStack:
         self.token = uuid.uuid4().hex[:10]
         self.project = "kin-rehearsal-" + label + "-" + self.token
         self.root = root / label
-        self.root.mkdir()
+        self.root.mkdir(mode=0o700)
         self.repo = self.root / "repo"
         source = Path(__file__).resolve().parents[1]
         # --shared: the disposable clone reads the source object store (never written, never garbage-collected here).
@@ -419,6 +419,8 @@ class SyntheticStack:
                         str(source), str(self.repo)], check=True, capture_output=True)
         subprocess.run(["git", "-C", str(self.repo), "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", previous_sha],
                        check=True, capture_output=True)
+        if os.name == "posix":
+            self.repo.chmod(0o700)
         self.public = free_port()
         self.maintenance = free_port()
         while self.maintenance == self.public:
@@ -451,7 +453,8 @@ class SyntheticStack:
             declared = [{"file": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "service": "proxy",
                          "binds": [dict(self.halo_bind)]}]
             external, overlay = {"proxy": {"halo_reports": self.halo_network}}, [str(path)]
-        self.target = {"schema": 1, "kind": "rehearsal", "host_key_sha256": "b" * 64, "origin": self.origin, "project": self.project,
+        self.target = {"schema": 1, "kind": "rehearsal", "host_key_sha256": intro.local_host_key() if os.name == "posix" else "b" * 64,
+                       "origin": self.origin, "project": self.project,
                        "repository": str(self.repo),
                        "compose_files": ["docker-compose.yml", "docker-compose.prod.yml", str(self.override_path), *overlay, *monitor],
                        "containers": names,
@@ -543,13 +546,25 @@ class SyntheticStack:
         fail_first_login (D07) the browser command is a wrapper whose first login of the release smoke fails once."""
         runner = intro.Runner(self.repo)
         browser = [sys.executable, intro.__file__, "browser-smoke"]
-        if getattr(self, "fail_first_login", False):
+        if os.name == "posix":
+            browser = ["/usr/bin/env", "PLAYWRIGHT_BROWSERS_PATH=" + os.environ["PLAYWRIGHT_BROWSERS_PATH"], *browser]
+        if getattr(self, "fail_first_login", False) and os.name == "nt":
             wrapper = self.root / "flaky-browser.py"
             if not wrapper.exists():
                 wrapper.write_text(FLAKY_BROWSER % {"marker": str(self.root / "first-login-failed"), "tool": intro.__file__},
                                    encoding="utf-8", newline="\n")
             browser = [sys.executable, str(wrapper)]
-        return runner, (ops_class or intro.HostOps)(target=self.target, plan=self.plan_document, runner=runner, records=self.records,
+        selected = ops_class or intro.HostOps
+        if getattr(self, "fail_first_login", False) and os.name == "posix":
+            marker = self.root / "first-login-failed"
+            class OneFailedLogin(selected):
+                def browser_login(self, machine, **kwargs):
+                    if machine.state.get("checkout") == "target" and not marker.exists():
+                        marker.write_text("one synthetic refusal\n")
+                        raise intro.Stop("The smoke browser login failed: forced first-attempt failure (rehearsal D07)")
+                    return super().browser_login(machine, **kwargs)
+            selected = OneFailedLogin
+        return runner, selected(target=self.target, plan=self.plan_document, runner=runner, records=self.records,
                                                     env_next=self.env_next, token_reader=lambda: json.loads(self.token_file.read_text()),
                                                     browser_cmd=browser)
 
@@ -557,7 +572,8 @@ class SyntheticStack:
         runner, host_ops = self.ops(ops_class)
         machine = intro.Introduction(plan=self.plan_document, plan_sha256=self.plan_sha256, target=self.target,
                                      production=copy.deepcopy(intro.EXAMPLE_POLICY["production"]) | {"host_key_sha256": "a" * 64},
-                                     ops=host_ops, records=self.records, repository=self.repo, host_key="b" * 64, tool=intro.tool_hashes())
+                                     ops=host_ops, records=self.records, repository=self.repo,
+                                     host_key=self.target["host_key_sha256"], tool=intro.tool_hashes())
         request = {"version": 1, "mode": intro.MODE, "phase": phase, "plan_sha256": self.plan_sha256, "nonce": uuid.uuid4().hex}
         started = time.monotonic()
         with intro.bound_ops(self.repo, runner):
@@ -567,6 +583,96 @@ class SyntheticStack:
         print(json.dumps(summary), flush=True)
         self.test.assertEqual(result["status"], expected, json.dumps(result)[:4000])
         return result
+
+    def bootstrap_model(self, host_ops, context):
+        """Read only the fresh fixture's explicit model before seed has published an operational entry."""
+        from unittest.mock import patch
+        runtime = self.root / "certificate-check-runtime.yml"
+        runtime.write_text(host_ops.pins(context, maintenance=False), encoding="utf-8", newline="\n")
+        argv = ["docker", "compose", "--project-directory", str(self.repo), "--project-name", self.project,
+                "--env-file", str(self.repo / ".env")]
+        for name in self.target["compose_files"]:
+            argv.extend(("-f", str(self.repo / name) if not os.path.isabs(name) else name))
+        argv.extend(("-f", str(runtime), "config", "--format", "json"))
+        model = subprocess.run(argv, cwd=self.repo, capture_output=True, check=True, timeout=60)
+        with patch.object(host_ops, "compose", return_value=model):
+            return host_ops.resolved(context, maintenance=False)
+
+    def ordinary_recreate(self, images, *, side):
+        """Fresh process, completed state, immutable inputs; Linux additionally uses the real protected entry."""
+        import shutil
+        state = self.records.state()
+        self.test.assertEqual(state["status"], "DEPLOYED" if side == "release" else "ROLLED_BACK")
+        source_entry = intro.ComposeEntry(self.root / "compose-entries")
+        pointer, manifest, _ = source_entry.load()
+        self.test.assertEqual(pointer, {key: state["compose_entry"][key] for key in pointer})
+        before = {role: json.loads(subprocess.run(["docker", "inspect", self.target["containers"][role]],
+                      check=True, capture_output=True).stdout)[0] for role in intro.ROLES}
+        self.test.assertFalse((self.records.secrets / intro.COMPOSE_VALUES).exists())
+        self.test.assertEqual(list(self.records.secrets.glob("browser-*")), [])
+        subprocess.run(["docker", "rm", "-f", self.target["containers"]["proxy"]], check=True, capture_output=True)
+        poisoned = {**os.environ, "COMPOSE_FILE": str(self.root / "nonexistent.yml"), "COMPOSE_PROJECT_NAME": "wrong-project"}
+        for declared in self.target["declared_overlays"]:
+            Path(declared["file"]).unlink(missing_ok=True)
+        (self.repo / ".env").unlink(missing_ok=True)
+        # Deliberately repoint only this fixture's mutable tags; the command must use immutable image IDs.
+        for role in ("api", "proxy"):
+            subprocess.run(["docker", "tag", images["previous" if side == "release" else "release"][role],
+                            manifest["project"] + "-" + role + ":latest"], check=True, capture_output=True)
+        if os.name == "posix":
+            self.test.assertEqual(os.environ.get("KIN_TEST_ISOLATED_INSTALL"), "1")
+            library = Path("/opt/kin-deploy/lib")
+            library.mkdir(parents=True, exist_ok=True, mode=0o755)
+            scripts = Path(intro.__file__).parent
+            for name in set(intro.TOOL_FILES) | {"ops_email_monitor.py", "ops_monitor.py", "ops_notify.py"}:
+                source = scripts / Path(name).name
+                shutil.copyfile(source, library / source.name)
+                (library / source.name).chmod(0o644)
+            shutil.copyfile(scripts / "ops_deploy_entry.py", "/opt/kin-deploy/entry.py")
+            Path("/opt/kin-deploy/entry.py").chmod(0o755)
+            operating = self.root / "operating-state"
+            operating.mkdir(mode=0o700)
+            for name in intro.EMR_DIRS:
+                (operating / name).mkdir(mode=0o700)
+            for name, document in (("emr-plans", self.plan_document), ("emr-targets", self.target)):
+                raw = intro.canonical(document)
+                path = operating / name / (intro.sha256_bytes(raw) + ".json")
+                path.write_bytes(raw)
+                path.chmod(0o600)
+            shutil.copytree(source_entry.root, operating / "compose-entries")
+            record = operating / "emr-runs" / self.plan_sha256
+            record.mkdir(mode=0o700)
+            (record / "state.json").write_bytes(intro.canonical(state))
+            (record / "state.json").chmod(0o600)
+            policy = copy.deepcopy(intro.EXAMPLE_POLICY)
+            policy.update(enabled=True, repository=str(self.repo), state_dir=str(operating), targets_allowed=["rehearsal"], repository_owner=None)
+            policy["production"]["host_key_sha256"] = "a" * 64
+            path = Path("/etc/kin-deploy/emr-introduction.json")
+            path.write_bytes(intro.canonical(policy))
+            path.chmod(0o600)
+            command = ["/usr/bin/python3", "-I", "/opt/kin-deploy/entry.py", "compose", "recreate"]
+        else:
+            # The Windows rehearsal proves the shared Compose boundary. Protected installation remains Linux evidence.
+            script = self.root / "ordinary-entry.py"
+            script.write_text("import os,subprocess,sys\nsys.path.insert(0,sys.argv[1])\n"
+                              "from ops_emr_introduction import ComposeEntry\n"
+                              "a,e=ComposeEntry(sys.argv[2]).argv(['up','-d','--no-deps','--no-build','--pull','never','--force-recreate',*sys.argv[3:]])\n"
+                              "env={k:v for k,v in os.environ.items() if not k.startswith(('COMPOSE_','DOCKER_'))}\n"
+                              "raise SystemExit(subprocess.run(a,env={**env,**e}).returncode)\n", encoding="utf-8", newline="\n")
+            command = [sys.executable, str(script), str(Path(intro.__file__).parent), str(source_entry.root)]
+        result = subprocess.run([*command, *intro.ROLES], cwd=self.repo, env=poisoned, capture_output=True, timeout=900)
+        self.test.assertEqual(result.returncode, 0, result.stderr[-3000:])
+        for role in intro.ROLES:
+            current = json.loads(subprocess.run(["docker", "inspect", self.target["containers"][role]], check=True, capture_output=True).stdout)[0]
+            self.test.assertNotEqual(current["Id"], before[role]["Id"], role)
+            self.test.assertEqual(current["Image"], images[side][role], role)
+            self.test.assertEqual(current["Config"]["Labels"]["com.docker.compose.project"], manifest["project"], role)
+            mounts = lambda container: sorted((m["Destination"], m.get("Name"), m.get("RW")) for m in container["Mounts"])
+            self.test.assertEqual(mounts(current), mounts(before[role]), role)
+            self.test.assertEqual(set(current["NetworkSettings"]["Networks"]), set(before[role]["NetworkSettings"]["Networks"]), role)
+        print(json.dumps({"ordinary_entry_new_process": True, "protected_linux": os.name == "posix", "side": side,
+                          "source_overlay_and_env_removed": True, "proxy_absent_before_recreate": True,
+                          "working_secrets_removed": True, "mutable_tags_poisoned": True, "entry": pointer}), flush=True)
 
     def compose_up(self, images, roles):
         """Test-side bring-up of the source stack (the stand-in for a running Stage-5 host)."""
@@ -725,7 +831,7 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         production_target["declared_overlays"][0]["sha256"] = clone.target["declared_overlays"][0]["sha256"]
         intro.target_valid(production_target, operational=True)
         production_plan = copy.deepcopy(clone.plan(images, members=members))
-        production_plan.update(target_kind="production", seed=None, rehearsal_host="b" * 64,
+        production_plan.update(target_kind="production", seed=None, rehearsal_host=clone.target["host_key_sha256"],
                                target_manifest_sha256=hashlib.sha256(intro.canonical(production_target)).hexdigest())
         intro.plan_valid(production_plan)
         clone.plan(images, seed={"b0_dir": str(copy_dir), "b0_manifest_sha256": b0["manifest_sha256"],
@@ -737,7 +843,7 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         context = SimpleNamespace(plan=clone.plan_document, state={"checkout": "previous"})
         volume = clone.project + "_proxy-certs"
         with intro.bound_ops(clone.repo, runner):
-            model = host_ops.resolved(context, maintenance=False)
+            model = clone.bootstrap_model(host_ops, context)
             with self.assertRaisesRegex(intro.Stop, "does not exist"):
                 host_ops.certificate_volume_check(context, model)
             self.assertNotEqual(subprocess.run(["docker", "volume", "inspect", volume], capture_output=True).returncode, 0)
@@ -824,12 +930,8 @@ class EmrIntroductionRehearsal(unittest.TestCase):
                   clone.target["volumes"]["emr_state"])
         for name in failed:
             self.assertEqual(subprocess.run(["docker", "volume", "inspect", name], capture_output=True).returncode, 0, "failed volume kept: " + name)
-        # IRT-05 / IRT2-10: an ordinary compose recreate in this checkout - no project flag, no file list, no pins, as an
-        # operator would type it - keeps pg and Orthanc on the recovery volumes and the previous images, and the proxy
-        # keeps the declared overlay's bind and network (the .env names the project and the declared compose list).
-        recreate = subprocess.run(["docker", "compose", "up", "-d", "--no-deps", "--no-build", "--pull", "never", "--force-recreate",
-                                   "db", "orthanc", "api", "proxy"], cwd=str(clone.repo), capture_output=True, timeout=600)
-        self.assertEqual(recreate.returncode, 0, recreate.stderr[-3000:])
+        # C-COMPOSE: the supported ordinary entry, in a new process after transient/source inputs are gone.
+        clone.ordinary_recreate(images, side="previous")
         halo_wired("previous proxy after an ordinary recreate")
         mounts = lambda role, path: {m["Destination"]: m.get("Name") for m in inspect(clone.target["containers"][role])["Mounts"]}.get(path)
         self.assertEqual((mounts("db", "/var/lib/postgresql/data"), mounts("orthanc", "/var/lib/orthanc/db")), (recovery["pg"], recovery["orthanc"]))
@@ -845,7 +947,7 @@ class EmrIntroductionRehearsal(unittest.TestCase):
             host_ops.db_ready(180, "Recreated database did not become ready")
             host_ops.api_health(member_rights=False)
             host_ops.reload_proxy()
-        print(json.dumps({"recreated_with_ordinary_compose": True, "health": intro.health_check(clone.origin, ca_file=str(clone.ca), member_rights=False)}),
+        print(json.dumps({"recreated_with_ordinary_entry": True, "health": intro.health_check(clone.origin, ca_file=str(clone.ca), member_rights=False)}),
               flush=True)
         result = clone.phase("receipt", "RECEIPTED")
         receipt = json.loads((clone.records.directory / "local-restore-receipt.json").read_text())
@@ -930,8 +1032,28 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         self.assertEqual(json.loads(stack.psql(LEGACY_FACTS_SQL)), legacy, "the rollback keeps the further roles, owners and grants")
         self.assertFalse((stack.records.secrets / intro.COMPOSE_VALUES).exists(), "the kept values end with the plan")
         self.assertEqual(inspect(stack.target["containers"]["api"])["Image"], images["previous"]["api"])
+        stack.ordinary_recreate(images, side="previous")
         print(json.dumps({"forced_l09b_failure": "RESTORED then ROLLED_BACK", "warnings": introduced["warnings"],
                           "kept_value_used": True, "legacy_roles": legacy}), flush=True)
+
+    def test_emr_introduction_rehearsal_forward_entry_after_reopen(self):
+        """A separate forward branch: reopen reaches PONR, then ordinary operation keeps release image IDs."""
+        from unittest.mock import patch
+        original = SyntheticStack.phase
+        test = self
+        class ForwardComplete(Exception):
+            pass
+        def phase(stack, operation, expected, ops_class=None):
+            result = original(stack, operation, expected, ops_class)
+            if operation == "verify" and stack.label == "clone":
+                original(stack, "reopen", "DEPLOYED")
+                images = {side: stack.plan_document[side]["images"] for side in ("previous", "release")}
+                stack.ordinary_recreate(images, side="release")
+                test.assertTrue(intro.health_check(stack.origin, ca_file=str(stack.ca), member_rights=True))
+                raise ForwardComplete()
+            return result
+        with patch.object(SyntheticStack, "phase", phase), self.assertRaises(ForwardComplete):
+            self.test_emr_introduction_rehearsal_seed_capture_introduce_verify_rollback_receipt()
 
 
 if __name__ == "__main__":

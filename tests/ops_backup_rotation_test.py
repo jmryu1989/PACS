@@ -64,6 +64,9 @@ class RotationTests(unittest.TestCase):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         self.root = Root(folder.name)
+        repository = Path(folder.name) / "repository"
+        repository.mkdir(mode=0o700)
+        self.enterContext(patch.object(ops, "ROOT", repository))
 
     def rotate(self, keep=7, **kwargs):
         return ops.rotate(self.root.path, keep, now=NOW, **kwargs)
@@ -150,9 +153,14 @@ class RotationTests(unittest.TestCase):
             self.root.daily(daily(day), checkpoint=day == 4)
         self.ledger(daily(4))
         original = ops._rotation_plan
+        first = True
 
         def plan_then_damage(*args):
+            nonlocal first
             planned = original(*args)
+            if not first:
+                return planned
+            first = False
             self.assertEqual((planned["delete"], planned["thin"]), ([daily(1), daily(2), daily(3)], [daily(4)]))
             (self.root.path / daily(1) / "kin.dump").unlink()
             (self.root.path / daily(2) / "keycloak.dump").write_bytes(b"changed after the plan")
@@ -177,8 +185,7 @@ class RotationTests(unittest.TestCase):
                  daily(5): "audit-undeclared", daily(6): None}
         for day, (name, reason) in enumerate(cases.items(), 1):
             folder = self.root.path / (ops.ROTATING + name)
-            folder.mkdir()
-            (folder / "kin.dump").write_bytes(b"synthetic preserved dump")
+            self.root.daily(name).rename(folder)
             if reason == "hold":
                 (folder / ops.HOLD_FILE).write_text("{}")
             if reason == "audit-undeclared":
@@ -334,11 +341,230 @@ class RotationTests(unittest.TestCase):
         self.assertTrue((self.root.path / daily(1)).is_dir())
 
 
+class RotationContracts(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Root(temporary.name)
+        self.repository = Path(temporary.name) / "repository"
+        self.repository.mkdir(mode=0o700)
+        change = patch.object(ops, "ROOT", self.repository)
+        change.start()
+        self.addCleanup(change.stop)
+        for day in range(1, 9):
+            self.root.daily(daily(day))
+
+    def rotate(self, **kwargs):
+        return ops.rotate(self.root.path, 7, now=NOW, **kwargs)
+
+    def test_partial_rmtree_is_not_resumed_and_a_malformed_reference_never_authorizes_delete(self):
+        def interrupted(path):
+            (Path(path) / "kin.dump").unlink()
+            raise OSError("synthetic partial rmtree")
+        with patch.object(ops.shutil, "rmtree", side_effect=interrupted), self.assertRaises(OSError):
+            self.rotate()
+        moved = self.root.path / (ops.ROTATING + daily(1))
+        result = self.rotate()
+        self.assertTrue((moved / "keycloak.dump").exists())
+        self.assertEqual(result["resumed"], [])
+        self.assertEqual(result["status"], "preserved-stop")
+        (self.root.path / "latest-verified-C.json").write_text("{}")
+        with self.assertRaises(RuntimeError):
+            self.rotate()
+
+    def test_hardlinked_component_cannot_admit_deletion(self):
+        folder = self.root.path / daily(1)
+        elsewhere = self.root.path.parent / "other-owner-data"
+        try:
+            os.link(folder / "kin.dump", elsewhere)
+        except OSError:
+            self.skipTest("hard links unavailable")
+        result = self.rotate()
+        self.assertEqual(result["deleted"], [])
+        self.assertTrue(folder.exists())
+        self.assertEqual(elsewhere.read_bytes(), (folder / "kin.dump").read_bytes())
+
+    def test_retained_operation_lease_never_authorizes_rotation(self):
+        with ops.lock() as lease:
+            lease.retained = True
+            try:
+                with self.assertRaises(RuntimeError):
+                    self.rotate()
+                self.assertTrue((self.root.path / daily(1)).exists())
+            finally:
+                lease.retained = False  # This synthetic lease has no worker or uncertain operation.
+
+    @unittest.skipUnless(os.name == "posix", "POSIX owner/mode contract")
+    def test_unprotected_parent_refuses_before_any_change(self):
+        parent = self.root.path.parent
+        previous = parent.stat().st_mode & 0o7777
+        parent.chmod(0o777)
+        try:
+            with self.assertRaises(RuntimeError):
+                self.rotate()
+            self.assertTrue((self.root.path / daily(1)).exists())
+        finally:
+            parent.chmod(previous)
+
+    def test_rename_then_changed_component_preserves_the_whole_remaining_set(self):
+        original = ops.os.rename
+        def damage(source, target):
+            original(source, target)
+            (Path(target) / "kin.dump").write_bytes(b"damaged after rename")
+        with patch.object(ops.os, "rename", side_effect=damage):
+            result = self.rotate()
+        self.assertTrue((self.root.path / (ops.ROTATING + daily(1)) / "orthanc.tgz").exists())
+        self.assertEqual(result["deleted"], [])
+        self.assertEqual(result["status"], "preserved-stop")
+
+    def test_resumed_deletion_damage_after_plan_is_preserved(self):
+        folder = self.root.path / daily(1)
+        moved = folder.with_name(ops.ROTATING + folder.name)
+        folder.rename(moved)
+        original, first = ops._rotation_plan, True
+        def damage(*args):
+            nonlocal first
+            result = original(*args)
+            if first:
+                first = False
+                (moved / "kin.dump").unlink()
+            return result
+        with patch.object(ops, "_rotation_plan", side_effect=damage):
+            result = self.rotate()
+        self.assertTrue((moved / "orthanc.tgz").exists())
+        self.assertEqual(result["resumed"], [])
+        self.assertEqual(result["status"], "preserved-stop")
+
+    def test_truncated_marker_never_permits_an_absent_archive(self):
+        folder = self.root.path / daily(1)
+        (folder / "orthanc.tgz").unlink()
+        (folder / ops.THINNED_FILE).write_text("{truncated", encoding="utf-8")
+        before = {str(path.relative_to(self.root.path)): path.read_bytes() for path in self.root.path.rglob("*") if path.is_file()}
+        result = self.rotate(dry_run=True)
+        self.assertNotIn(daily(1), result["would_delete"])
+        self.assertIn(daily(1), result["incomplete"])
+        self.assertEqual(before, {str(path.relative_to(self.root.path)): path.read_bytes() for path in self.root.path.rglob("*") if path.is_file()})
+        self.assertFalse((self.repository / ".kin-ops.lock").exists())
+        self.assertEqual(self.rotate()["deleted"], [])
+        self.assertTrue(folder.exists())
+
+    def test_new_hold_reference_audit_protect_or_keep_loss_after_rename_preserves(self):
+        for change in ("hold", "latest", "audit", "protect", "keep", "manifest", "lock"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+                root = Root(temporary)
+                for day in range(1, 9):
+                    root.daily(daily(day))
+                protected = set()
+                original = ops.os.rename
+                def intervene(source, target):
+                    original(source, target)
+                    folder = Path(target)
+                    if change == "hold":
+                        (folder / ops.HOLD_FILE).write_text("{}")
+                    elif change == "latest":
+                        (root.path / "latest-verified-C.json").write_text(json.dumps({"backup": str(root.path / daily(1))}))
+                    elif change == "audit":
+                        old_root = self.root
+                        self.root = root
+                        try:
+                            RotationTests.ledger(self, daily(1))
+                        finally:
+                            self.root = old_root
+                    elif change == "protect":
+                        protected.add(daily(1))
+                    elif change == "keep":
+                        (root.path / daily(8) / "kin.dump").unlink()
+                    elif change == "manifest":
+                        (folder / "manifest.json").unlink()
+                    else:
+                        (self.repository / ".kin-ops.lock").write_text("foreign-owner")
+                with patch.object(ops.os, "rename", side_effect=intervene):
+                    if change == "lock":
+                        with self.assertRaises(RuntimeError):
+                            ops.rotate(root.path, 7, protect=protected, now=NOW)
+                        (self.repository / ".kin-ops.lock").unlink()  # This test's synthetic marker; the product preserved it.
+                    else:
+                        result = ops.rotate(root.path, 7, protect=protected, now=NOW)
+                        self.assertEqual(result["deleted"], [])
+                        self.assertEqual(result["status"], "preserved-stop")
+                self.assertTrue((root.path / (ops.ROTATING + daily(1)) / "orthanc.tgz").exists())
+
+    def test_thin_interruption_marker_binding_and_remaining_components(self):
+        RotationTests.ledger(self, daily(1))
+        folder = self.root.path / daily(1)
+        archive = folder / "orthanc.tgz"
+        real_unlink = Path.unlink
+        def interrupted(path, *args, **kwargs):
+            if path == archive:
+                raise OSError("synthetic power loss before archive unlink")
+            return real_unlink(path, *args, **kwargs)
+        with patch.object(Path, "unlink", interrupted), self.assertRaises(OSError):
+            self.rotate()
+        marker = json.loads((folder / ops.THINNED_FILE).read_text())
+        self.assertEqual(marker["state"], "THIN_PLANNED")
+        self.assertTrue(archive.exists())
+        self.assertEqual(self.rotate()["thinned"], [daily(1)])
+        complete = (folder / ops.THINNED_FILE).read_bytes()
+        self.assertEqual(json.loads(complete)["state"], "THINNED_COMPLETE")
+        self.assertIsNone(ops._daily_whole(folder))
+        for field, value in (("backup", daily(2)), ("manifest_sha256", "0" * 64), ("state", "THIN_PLANNED"),
+                             ("archive_sha256", "0" * 64), ("keep", 0)):
+            changed = json.loads(complete)
+            changed[field] = value
+            (folder / ops.THINNED_FILE).write_text(json.dumps(changed))
+            with self.subTest(field=field):
+                self.assertIsNotNone(ops._daily_whole(folder))
+                self.assertTrue(folder.exists())
+        (folder / ops.THINNED_FILE).write_bytes(complete)
+        (folder / "keycloak.dump").unlink()
+        self.assertIsNotNone(ops._daily_whole(folder))
+        self.assertEqual(self.rotate()["thinned"], [])
+
+    def test_incomplete_thin_marker_and_new_protection_before_unlink_preserve(self):
+        RotationTests.ledger(self, daily(1))
+        folder = self.root.path / daily(1)
+        original = audit.replace_json
+        def hold(path, body):
+            original(path, body)
+            if path.name == ops.THINNED_FILE:
+                (folder / ops.HOLD_FILE).write_text("{}")
+        with patch.object(audit, "replace_json", side_effect=hold):
+            result = self.rotate()
+        self.assertEqual(result["thinned"], [])
+        self.assertTrue((folder / "orthanc.tgz").exists())
+        (folder / ops.HOLD_FILE).unlink()
+        (folder / "orthanc.tgz").unlink()
+        result = self.rotate()
+        self.assertEqual(result["deleted"], [])
+        self.assertIn(daily(1), result["incomplete"])
+
+    def test_valid_thinned_completion_can_be_deleted_only_after_retention_expires(self):
+        RotationTests.ledger(self, daily(1))
+        self.assertEqual(self.rotate()["thinned"], [daily(1)])
+        result = ops.rotate(self.root.path, 7, now=NOW + timedelta(days=4000))
+        self.assertEqual(result["deleted"], [daily(1)])
+
+    def test_marker_symlink_and_orphan_are_preserved(self):
+        folder = self.root.path / daily(1)
+        try:
+            (folder / ops.THINNED_FILE).symlink_to(folder / "manifest.json")
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        self.assertIsNotNone(ops._daily_whole(folder))
+        orphan = self.root.path / (ops.ROTATING + daily(2))
+        (self.root.path / daily(2)).rename(orphan)
+        (orphan / "manifest.json").unlink()
+        result = self.rotate()
+        self.assertEqual(result["deleted"], [])
+        self.assertEqual(result["resumed"], [])
+        self.assertTrue(orphan.exists())
+
+
 class BackupCommandTests(unittest.TestCase):
     def run_main(self, argv, backup):
         with tempfile.TemporaryDirectory() as folder, patch.object(ops, "ROOT", Path(folder) / "repo"), \
                 patch.object(ops, "require_local_docker"), patch.object(ops, "backup", side_effect=backup), \
-                patch.object(ops, "rotate", wraps=lambda *a, **k: {"deleted": []}) as rotation, \
+                patch.object(ops, "rotate", wraps=lambda *a, **k: {"deleted": [], "status": "complete"}) as rotation, \
                 patch.object(sys, "argv", ["ops_backup.py", *argv]), contextlib.redirect_stdout(io.StringIO()):
             (Path(folder) / "repo").mkdir()
             try:

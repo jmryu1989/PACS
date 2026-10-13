@@ -562,8 +562,10 @@ def pg_role(name, *, superuser=False, login=False):
 
 def pre_catalog():
     """A supported pre-EMR cluster catalog: the installer superuser, the two databases and the default tablespaces."""
-    return {"roles": [pg_role("kin", superuser=True, login=True)], "memberships": [],
-            "databases": [{"name": name, "owner": "kin", "acl": None} for name in ("keycloak", "kin", "postgres")],
+    return {"server_major": 16, "unsupported_verifiers": [], "login_verifiers": ["kin"], "builtin_roles": [], "settings": [],
+            "setting_names": ["search_path", "statement_timeout", "work_mem"],
+            "role_comments": [["kin", None]], "roles": [pg_role("kin", superuser=True, login=True)], "memberships": [],
+            "databases": [{"name": name, "owner": "kin", "acl": None} for name in ("keycloak", "kin", "postgres", "template0", "template1")],
             "schemas": ["public"], "tablespaces": [{"name": "pg_default", "owner": "kin", "location": ""},
                                                    {"name": "pg_global", "owner": "kin", "location": ""}]}
 
@@ -1634,6 +1636,15 @@ class HostHarness:
     """HostOps against FakeDocker in a temporary rehearsal checkout with its seed copy and records."""
 
     def setUp(self):
+        if os.name == "posix":
+            # These fixture programs model browser outputs. Only their command admission is substituted; the real
+            # systemd service, cgroup termination and deadlines still run. Real Chromium tests exercise admission too.
+            admitted = intro.SystemdBrowser.command
+            self.enterContext(patch.object(intro.SystemdBrowser, "command", side_effect=lambda argv:
+                list(argv) if list(argv)[:2] == [sys.executable, "-c"] else admitted(argv)))
+        # These host-boundary tests supply PG admission independently of the Docker/Compose double. The real admission
+        # and its before-change ordering are tested in ops_backup_restore_test and the isolated PG16 batch.
+        self.enterContext(patch.object(intro.HostOps, "admit_source", return_value={"admitted": True, "version": intro.ops.RESTORE_INVENTORY}))
         folder = tempfile.TemporaryDirectory(dir="/root" if os.name == "posix" and os.geteuid() == 0 else None)
         self.addCleanup(folder.cleanup)
         self.root = Path(folder.name)
@@ -1678,7 +1689,7 @@ class HostHarness:
         docker.volumes[self.target["project"] + "_proxy-certs"] = {"Name": self.target["project"] + "_proxy-certs"}
         ops_host = intro.HostOps(target=self.target, plan=plan, runner=docker, records=self.records,
                                  token_reader=(lambda: token) if token else None)
-        context = SimpleNamespace(plan=plan, plan_sha256="a" * 64, request_sha256="f" * 64, retrying=False,
+        context = SimpleNamespace(plan=plan, plan_sha256="a" * 64, request_sha256="f" * 64, retrying=False, phase="capture",
                                   state={"checkout": "previous"}, records=self.records, save=lambda: self.records.save(context.state))
         ops_host.intro = context
         if prepare:
@@ -2116,6 +2127,10 @@ class CommanderAdditionsTests(HostHarness, unittest.TestCase):
                 return ("KIN_RESULT " + json.dumps({"id": payload["username"].replace("kin-smoke-", "id-"), "username": payload["username"]}) + "\n").encode()
             if "kc-smoke-create-client" in name:
                 return b'KIN_RESULT {"id": "client-id", "client_id": "c"}\n'
+            if "kc-smoke-owned" in name:
+                member = context.state.get("smoke_member") or {}
+                return ("KIN_RESULT " + json.dumps({"users": [member["id"]] if member.get("id") else [],
+                        "clients": sorted(set(member.get("client_objects", {}).values()))}) + "\n").encode()
             if "kc-smoke-remove" in name:
                 return b'KIN_RESULT {"user_absent": true, "client_absent": true}\n'
             return b"KIN_RESULT {}\n" if operation is not None else b""
@@ -2622,6 +2637,10 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
             self.setUp()
 
     def baseline_host(self, *, member=None, browser=None, realm=None):
+        # The browser/preflight fixture supplies a supported database observation. Closed PG admission has its own
+        # negative tests and real-cluster rehearsal; this host double does not emulate PostgreSQL's catalogs.
+        self.enterContext(patch.object(intro.ops, "restore_admission", side_effect=lambda container, **kw:
+            (intro.ops.supported_catalog(intro.ops.role_catalog(container), shape=kw["shape"]), {"version": intro.ops.RESTORE_INVENTORY, "tables": []})))
         """HostOps.baseline (L-01) of a production target against FakeDocker: the previous release as the plan observed it."""
         repo = self.root / "production"
         repo.mkdir()
@@ -2665,7 +2684,7 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
         cases = {
             "no executable file": ({"browser": [str(self.root / "no-such-browser"), "browser-smoke"]}, "not an executable file"),
             "a browser that fails": ({"browser": [sys.executable, "-c", "import sys, json; print(json.dumps({'error': 'chromium missing'}), "
-                                                                       "file=sys.stderr); sys.exit(1)"]}, "probe failed: chromium missing"),
+                                                                       "file=sys.stderr); sys.exit(1)"]}, None),
             "a browser that does not end": ({"browser": [sys.executable, "-c", "import time; time.sleep(600)"]}, None),
             "a role the realm lacks": ({"browser": good, "realm": {"roles": ["clinician"], "top_level_groups": ["hallym"]}},
                                        "roles are not realm roles: radiologist"),
@@ -2678,6 +2697,9 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
             ops_host, docker, context = self.baseline_host(**options)
             with self.subTest(case=name), patch.object(intro, "BROWSER_PROBE_S", 4):
                 refuses(self, ops_host.baseline, context, message=message)
+                if name == "a browser that fails":
+                    browser = [row for row in context.state["workers"].values() if row["kind"] == "browser"]
+                    self.assertEqual([(row["state"], row["client_exit"]) for row in browser], [("QUIET", 1)])
                 if name == "a browser that does not end":
                     browser = [row for row in context.state["workers"].values() if row["kind"] == "browser"]
                     self.assertEqual([(row["state"], row["termination"]) for row in browser], [("QUIET", "confirmed-timeout")])
@@ -3026,7 +3048,15 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
         # cleanup finds them by the marker and removes exactly those.
         store["users"].append({"id": "own-user", "username": "kin-smoke-y", "lastName": "m" * 32})
         store["clients"].append({"id": "own-client", "clientId": "kin-smoke-y-client", "description": "kin-smoke " + "m" * 32})
-        removed = run("remove", {"username": "kin-smoke-y", "client_ids": ["kin-smoke-y-client"], "marker": "m" * 32})
+        identity = {"username": "kin-smoke-y", "client_ids": ["kin-smoke-y-client"], "marker": "m" * 32}
+        refused = run("remove", identity)
+        self.assertNotEqual(refused.returncode, 0, "a marker alone cannot authorize deletion without immutable IDs")
+        self.assertEqual(store["deleted"], [])
+        owned = run("owned", identity)
+        self.assertEqual(owned.returncode, 0, owned.stderr)
+        ids = intro.result_line(owned.stdout)
+        self.assertEqual(ids, {"users": ["own-user"], "clients": ["own-client"]})
+        removed = run("remove", {**identity, "user_ids": ids["users"], "object_ids": ids["clients"]})
         self.assertEqual(removed.returncode, 0, removed.stderr)
         self.assertEqual(intro.result_line(removed.stdout), {"user_absent": True, "client_absent": True, "foreign_users": 0, "foreign_clients": 0})
         self.assertEqual(store["deleted"], ["/admin/realms/kin/users/own-user", "/admin/realms/kin/clients/own-client"])
@@ -3098,20 +3128,21 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
                 self.context(ops_host.plan), message="Unresolvable compose variable: KIN_MONITOR_PUBLIC_DIR")
 
     def test_115_the_seeds_clone_changes_touch_only_their_keycloak_tables(self):
-        """IRT2-24: after the exact restore, the seed's own recorded changes (client secrets, origin, mail, identity
-        providers) are compared on their own: only their Keycloak tables may differ from the seed's values; any other
-        changed, lost or new table of either database is named (by table only, never a value)."""
-        seed = {"kin": {"public.Report": [2, "a" * 64]}, "keycloak": {"public.client": [3, "b" * 64], "public.user_entity": [5, "c" * 64]}}
+        """IRT2-24: changed/lost/new tables are identified without values or ambiguous dotted names. Authorization is
+        separately checked against exact precomputed rows, including residual fields inside changed tables."""
+        def row(database, schema, name):
+            return intro.ops.value_digest((database, schema, "table", name, None), ["id"], [["before"]])
+        seed = {"version": intro.ops.RESTORE_INVENTORY, "tables": [row("kin", "public", "Report"),
+            row("keycloak", "public", "client"), row("keycloak", "public", "user_entity")]}
         after = copy.deepcopy(seed)
         self.assertEqual(intro.value_changes(seed, after), set())
-        after["keycloak"]["public.client"] = [3, "d" * 64]
-        self.assertEqual(intro.value_changes(seed, after), {"keycloak:public.client"})
-        self.assertLessEqual(intro.value_changes(seed, after), intro.SEED_TRANSFORMED_TABLES)
-        after["keycloak"]["public.user_entity"] = [4, "e" * 64]
-        after["kin"]["archive.new"] = [1, "f" * 64]
-        del after["kin"]["public.Report"]
-        self.assertEqual(intro.value_changes(seed, after) - intro.SEED_TRANSFORMED_TABLES,
-                         {"keycloak:public.user_entity", "kin:archive.new", "kin:public.Report"})
+        after["tables"][1]["sha256"] = "d" * 64
+        self.assertEqual(intro.value_changes(seed, after), {("keycloak", "public", "table", "client", None)})
+        after["tables"][2]["sha256"] = "e" * 64
+        after["tables"].append(row("kin", "archive", "new"))
+        del after["tables"][0]
+        self.assertEqual(intro.value_changes(seed, after), {("keycloak", "public", "table", "client", None),
+            ("keycloak", "public", "table", "user_entity", None), ("kin", "archive", "table", "new", None), ("kin", "public", "table", "Report", None)})
 
     @unittest.skipUnless(shutil.which("node"), "needs node (the Linux root fixture has it)")
     def test_98_keycloak_readiness_waits_for_200_and_a_refused_administrator_stops_at_once(self):
@@ -3421,6 +3452,7 @@ class ProtectedHostTests(unittest.TestCase):
     """The entry adapter's root-owned policy, documents by hash and one-use approval (as ops_deploy_host's HostTests)."""
 
     def setUp(self):
+        self.enterContext(patch.object(intro.HostOps, "admit_source", return_value={"admitted": True, "version": intro.ops.RESTORE_INVENTORY}))
         folder = tempfile.TemporaryDirectory(prefix="kin-emr-host-", dir="/root")
         self.addCleanup(folder.cleanup)
         self.root = Path(folder.name)

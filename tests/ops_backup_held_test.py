@@ -36,6 +36,23 @@ def role(name, *, superuser=False, login=False, inherit=True, connlimit=-1, vali
             "rolvaliduntil": valid, "rolconfig": config}
 
 
+def inventory(database, records=()):
+    return {"version": ops.RESTORE_INVENTORY, "server_major": 16,
+            "catalogs": sorted(name for group in ops.INVENTORY_COVERAGE.values() for name in group.split()),
+            "records": list(records), "unsupported": []}
+
+
+def object_row(database, kind, name, **attributes):
+    return {"key": [database, "public", kind, name, None],
+            "attributes": {**dict.fromkeys(ops.INVENTORY_ATTRIBUTES[kind].split()), **attributes}}
+
+
+def catalog_globals(roles):
+    return {"server_major": 16, "unsupported_verifiers": [], "login_verifiers": ["kin"], "builtin_roles": [], "settings": [],
+            "setting_names": ["search_path", "statement_timeout", "work_mem"],
+            "role_comments": [[row["rolname"], None] for row in sorted(roles, key=lambda row: row["rolname"])]}
+
+
 def archive(entries=(("./index", b"x"),)):
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode="w:gz") as handle:
@@ -79,17 +96,19 @@ class FakeHost:
     def catalog(self):
         roles = [{**role("kin", superuser=True, login=True), **getattr(self, "kin_changes", {})}] + ([role(name, login=name == "kin_runtime") for name in ops.EMR_ROLES]
                                                               if self.emr_roles else []) + list(self.extra_roles)
-        return {"roles": roles, "memberships": list(self.memberships),
-                "databases": [{"name": name, "owner": "kin", "acl": None} for name in ("keycloak", "kin", "postgres", *self.extra_databases)],
+        return {**catalog_globals(roles), "roles": roles, "memberships": list(self.memberships),
+                "databases": [{"name": name, "owner": "kin", "acl": None} for name in ("keycloak", "kin", "postgres", "template0", "template1", *self.extra_databases)],
                 "tablespaces": [{"name": "pg_default", "owner": "kin", "location": ""}, {"name": "pg_global", "owner": "kin", "location": ""},
                                 *([{"name": "kin_emr_access", "owner": "kin_emr_owner", "location": ops.EMR_TABLESPACE}] if self.emr_roles else []),
                                 *self.extra_tablespaces],
                 "schemas": ["public", *(["emr_access"] if self.emr_roles else [])]}
 
     def objects(self, database):
-        return {"schemas": [{"name": "public", "owner": "pg_database_owner", "acl": None}],
-                "relations": [{"name": "public.Report", "kind": "r", "owner": "kin", "acl": None}] if database == "kin" else [],
-                "functions": [], "default_acl": []}
+        return inventory(database, [object_row(database, "schema", "public", owner="pg_database_owner", acl=[])])
+
+    def values(self, container, database, schema, table, user="kin"):
+        changed = getattr(self, "value_changes", {}).get(database, {}).get(schema + "." + table)
+        return ["id", "body"], [["1", "changed" if changed else "before"], ["2", None]]
 
     def text(self, args, **kwargs):
         self.commands.append(list(args))
@@ -115,7 +134,10 @@ class FakeHost:
         if ops.MIGRATIONS_SQL in args:
             return json.dumps([["0_init", "1" * 64, True, False]])
         if ops.VALUE_TABLES_SQL in args:
-            return json.dumps([["public", "Report"]] if args[args.index("-d") + 1] == "kin" else [["public", "realm"]])
+            database = args[args.index("-d") + 1]
+            rows = [["public", "Report"]] if database == "kin" else [["public", "realm"]]
+            rows += [name.split(".", 1) for name in getattr(self, "value_changes", {}).get(database, {}) if name.split(".", 1) not in rows]
+            return json.dumps(rows)
         if "information_schema.columns" in joined:
             return json.dumps({"Report": ["id", "body"]})
         if "json_object_agg(name, d)" in joined:
@@ -125,11 +147,8 @@ class FakeHost:
     def run(self, args, *, output=None, input_file=None, timeout=600, check=True):
         self.commands.append(list(args))
         if "psql" in args and "-f" in args and input_file is not None:
-            # The value catalog (IRT2-24): one digest per table of the database asked.
             database = args[args.index("-d") + 1]
-            name = "public.Report" if database == "kin" else "public.realm"
-            answer = {name: [2, "c" * 64], **(getattr(self, "value_changes", None) or {}).get(database, {})}
-            return SimpleNamespace(returncode=0, stdout=json.dumps(answer).encode(), stderr=b"")
+            return SimpleNamespace(returncode=0, stdout=json.dumps(self.objects(database)).encode(), stderr=b"")
         if "pg_dump" in args or "pg_dumpall" in args:
             if self.dump_failure and "pg_dump" in args:
                 raise self.dump_failure
@@ -139,7 +158,7 @@ class FakeHost:
                                                                      "Driver": "local"}]).encode(), stderr=b"")
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
-    def temporary(self, args, *, timeout=600, output=None):
+    def temporary(self, args, *, timeout=600, output=None, input_file=None):
         self.commands.append(["docker", "run", *args])
         if "du" in args:
             return "8 /source"
@@ -156,6 +175,8 @@ class FakeHost:
     def bound(self):
         with patch.object(ops, "ROOT", self.repo), patch.object(ops, "text", side_effect=self.text), \
                 patch.object(ops, "run", side_effect=self.run), patch.object(ops, "temporary_run", side_effect=self.temporary), \
+                patch.object(ops, "boundary_proof", return_value={"fixture": "private PG16 baseline"}), \
+                patch.object(ops, "value_rows", side_effect=self.values), \
                 patch.object(ops, "counts", return_value={"public.Report": 2}), \
                 patch.object(ops, "emr_catalog", return_value={"synthetic": "emr catalog"}), contextlib.redirect_stdout(io.StringIO()):
             yield
@@ -324,8 +345,10 @@ class HeldCaptureTests(unittest.TestCase):
                              ("a non-public table", {"kin": {"archive.kept": [1, "f" * 64]}})):
             host = FakeHost(tempfile.mkdtemp(dir=self.folder))
             directory = host.capture()
-            self.assertEqual(json.loads((directory / "values.json").read_text()),
-                             {"kin": {"public.Report": [2, "c" * 64]}, "keycloak": {"public.realm": [2, "c" * 64]}})
+            captured = json.loads((directory / "values.json").read_text())
+            self.assertEqual(captured["version"], ops.RESTORE_INVENTORY)
+            self.assertEqual({tuple(row["key"]) for row in captured["tables"]},
+                             {("kin", "public", "table", "Report", None), ("keycloak", "public", "table", "realm", None)})
             host.value_changes = change
             with self.subTest(change=name), host.bound(), patch.object(ops, "remove_owned_if_present"):
                 with self.assertRaisesRegex(RuntimeError, "Restored row values differ from the snapshot"):
@@ -383,7 +406,7 @@ class HeldCaptureTests(unittest.TestCase):
                  "a membership granted by another role": lambda host: (host.extra_roles.extend([role("delegate"), role("leaf")]),
                                                                       host.memberships.append({"granted": "delegate", "member": "leaf", "grantor": "delegate",
                                                                                                "admin_option": False, "inherit_option": True, "set_option": True})),
-                 "role settings": lambda host: host.extra_roles.append(role("legacy_cfg", config=["search_path=x"])),
+                 "unknown role settings": lambda host: host.extra_roles.append(role("legacy_cfg", config=["unknown.setting=x"])),
                  "another database": lambda host: host.extra_databases.append("orthanc_index"),
                  "another tablespace": lambda host: host.extra_tablespaces.append({"name": "fast", "owner": "kin", "location": "/x"})}
         for name, change in cases.items():
@@ -410,13 +433,13 @@ class FakeCluster:
         self.snapshot = snapshot
         self.roles = {"kin": role("kin", superuser=True, login=True)}
         self.memberships = []
-        self.databases = {"kin": {"name": "kin", "owner": "kin", "acl": None}, "postgres": {"name": "postgres", "owner": "kin", "acl": None}}
+        self.databases = {name: {"name": name, "owner": "kin", "acl": None} for name in ("kin", "postgres", "template0", "template1")}
         self.objects = {}
         self.commands = []
         self.strip = None
 
     def catalog(self):
-        return {"roles": [self.roles[name] for name in sorted(self.roles)], "memberships": sorted(self.memberships, key=lambda m: (m["granted"], m["member"])),
+        return {**catalog_globals(list(self.roles.values())), "roles": [self.roles[name] for name in sorted(self.roles)], "memberships": sorted(self.memberships, key=lambda m: (m["granted"], m["member"])),
                 "databases": [self.databases[name] for name in sorted(self.databases)], "tablespaces": self.snapshot["tablespaces"],
                 "schemas": self.snapshot["schemas"] if "kin" in self.objects else ["public"]}
 
@@ -450,6 +473,9 @@ class FakeCluster:
     def run(self, args, *, output=None, input_file=None, timeout=600, check=True):
         self.commands.append(list(args))
         if "psql" in args and input_file is not None:
+            if "-f" in args:
+                database = args[args.index("-d") + 1]
+                return SimpleNamespace(returncode=0, stdout=json.dumps(self.objects.get(database, inventory(database))).encode(), stderr=b"")
             self.apply(input_file.read().decode())
         elif "DROP DATABASE kin WITH (FORCE);" in args:
             self.databases.pop("kin")
@@ -458,7 +484,7 @@ class FakeCluster:
             self.databases[database] = dict(next(item for item in self.snapshot["databases"] if item["name"] == database))
             self.objects[database] = json.loads(json.dumps(self.snapshot["objects"][database]))
             if self.strip and database == "kin":
-                self.objects[database]["relations"][0]["acl"] = None
+                self.objects[database]["records"][1]["attributes"]["acl"] = None
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
 
@@ -467,23 +493,22 @@ class ExactRestoreTests(unittest.TestCase):
 
     def snapshot(self, folder):
         roles = [role("kin", superuser=True, login=True), role("legacy_group", inherit=False), role("legacy_reader", connlimit=3)]
-        catalog = {"roles": roles,
+        catalog = {**catalog_globals(roles), "roles": roles,
                    "memberships": [{"granted": "legacy_group", "member": "legacy_reader", "grantor": "kin", "admin_option": False, "inherit_option": True,
                                     "set_option": True},
                                    {"granted": "pg_read_all_data", "member": "legacy_group", "grantor": "kin", "admin_option": True, "inherit_option": False,
                                     "set_option": False}],
                    "databases": [{"name": "keycloak", "owner": "kin", "acl": None},
                                  {"name": "kin", "owner": "kin", "acl": "{=Tc/kin,kin=CTc/kin,legacy_reader=c/kin}"},
-                                 {"name": "postgres", "owner": "kin", "acl": None}],
+                                 *[{"name": name, "owner": "kin", "acl": None} for name in ("postgres", "template0", "template1")]],
                    "tablespaces": [{"name": "pg_default", "owner": "kin", "location": ""}, {"name": "pg_global", "owner": "kin", "location": ""}],
                    "schemas": ["legacy_archive", "public"],
-                   "objects": {"kin": {"schemas": [{"name": "legacy_archive", "owner": "legacy_group", "acl": None}],
-                                       "relations": [{"name": "public.AuditLog", "kind": "r", "owner": "kin",
-                                                      "acl": "{kin=arwdDxtm/kin,legacy_reader=r/kin}"}],
-                                       "functions": [], "default_acl": []},
-                               "keycloak": {"schemas": [], "relations": [], "functions": [], "default_acl": []}}}
+                   "objects": {"kin": inventory("kin", [object_row("kin", "schema", "legacy_archive", owner="legacy_group", acl=[]),
+                        object_row("kin", "relation", "AuditLog", owner="kin", acl=["kin=arwdDxtm/kin", "legacy_reader=r/kin"])]),
+                               "keycloak": inventory("keycloak")}}
         directory = Path(folder)
         (directory / "catalog.json").write_text(json.dumps(catalog))
+        (directory / ".env").write_text("POSTGRES_PASSWORD=synthetic-placeholder\n")
         for database in ("kin", "keycloak"):
             (directory / (database + ".dump")).write_bytes(b"synthetic dump")
         return directory, catalog
@@ -525,7 +550,7 @@ class ExactRestoreTests(unittest.TestCase):
         """D22: column privileges are part of the compared catalog; a restore without one is refused."""
         with tempfile.TemporaryDirectory() as folder:
             directory, catalog = self.snapshot(folder)
-            catalog["objects"]["kin"]["columns"] = [{"name": "public.AuditLog.actor", "acl": ["legacy_reader=r/kin"]}]
+            catalog["objects"]["kin"]["records"].append(object_row("kin", "column", "AuditLog.actor", acl=["legacy_reader=r/kin"]))
             (directory / "catalog.json").write_text(json.dumps(catalog))
             self.restore(FakeCluster(catalog), directory)
             cluster = FakeCluster(catalog)
@@ -534,7 +559,7 @@ class ExactRestoreTests(unittest.TestCase):
             def losing(args, **kwargs):
                 result = original(args, **kwargs)
                 if "pg_restore" in args and "kin" in cluster.objects:
-                    cluster.objects["kin"]["columns"] = []
+                    cluster.objects["kin"]["records"] = [row for row in cluster.objects["kin"]["records"] if row["key"][2] != "column"]
                 return result
             cluster.run = losing
             with self.assertRaisesRegex(RuntimeError, "Restored catalog differs from the snapshot: objects"):
@@ -562,7 +587,8 @@ class RealClusterTests(unittest.TestCase):
         token = uuid.uuid4().hex
         name = "kin-rehearsal-" + token[:16]
         subprocess.run(["docker", "run", "-d", "--name", name, "--label", "kin.ops.run=" + token, "--network", "none",
-                        "-e", "POSTGRES_USER=" + superuser, "-e", "POSTGRES_DB=kin", "-e", "POSTGRES_HOST_AUTH_METHOD=trust", POSTGRES_IMAGE],
+                        "-e", "POSTGRES_USER=" + superuser, "-e", "POSTGRES_DB=kin", "-e", "POSTGRES_PASSWORD=r4-synthetic-fixture-only",
+                        "-e", "POSTGRES_HOST_AUTH_METHOD=trust", POSTGRES_IMAGE],
                        check=True, capture_output=True)
         self.addCleanup(subprocess.run, ["docker", "rm", "-f", "-v", name], capture_output=True)
         deadline = clock.monotonic() + 90
@@ -586,15 +612,39 @@ class RealClusterTests(unittest.TestCase):
         import subprocess
         directory.mkdir()
         (directory / "catalog.json").write_text(json.dumps(catalog))
+        (directory / ".env").write_text("POSTGRES_PASSWORD=r4-synthetic-fixture-only\n")
         for database in ("kin", "keycloak"):
             with open(directory / (database + ".dump"), "wb") as handle:
                 subprocess.run(["docker", "exec", name, "pg_dump", "-U", "kin", "-d", database, "-Fc", "--create"], stdout=handle, check=True)
         return directory
 
+    def test_r4_fresh_restore_ignores_physical_holes_but_refuses_altered_internal_triggers(self):
+        source = self.start()
+        self.ok(source, "CREATE DATABASE keycloak;")
+        self.ok(source, """CREATE TABLE parent(id int PRIMARY KEY);
+            CREATE TABLE child(id int UNIQUE DEFERRABLE, dropped text, parent int REFERENCES parent(id) DEFERRABLE);
+            ALTER TABLE child DROP COLUMN dropped;
+            CREATE TABLE cached(id int, body text);
+            CREATE INDEX dropped_index ON cached(id); DROP INDEX dropped_index;
+            CREATE FUNCTION noop() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NEW; END$$;
+            CREATE TRIGGER removed BEFORE INSERT ON cached FOR EACH ROW EXECUTE FUNCTION noop();
+            DROP TRIGGER removed ON cached;
+            INSERT INTO parent VALUES(1); INSERT INTO child VALUES(1,1); INSERT INTO cached VALUES(1,'kept');""")
+        catalog = ops.cluster_catalog(source)
+        self.assertIs(ops.supported_pre_catalog(catalog), catalog)
+        with tempfile.TemporaryDirectory() as folder:
+            snapshot = self.dump(source, Path(folder) / "snapshot", catalog)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(ops.restore_pre_snapshot(self.start(), snapshot)["catalog"], "equal")
+        self.ok(source, "ALTER TABLE child DISABLE TRIGGER ALL;")
+        with self.assertRaises(ops.RestoreAdmissionError):
+            ops.object_catalog(source, "kin")
+        self.ok(source, "ALTER TABLE child ENABLE TRIGGER ALL;")
+        self.assertIsInstance(ops.object_catalog(source, "kin"), dict)
+
     def test_d22_column_type_large_object_publication_event_trigger_and_fdw_privileges_restore_exactly(self):
-        """D22: the extended catalog reads column, type, large-object, foreign-server privileges, publications, event
-        triggers and user mappings; pg_dump/pg_restore --create reproduce all of them exactly (no false refusal of a
-        rollback); a dump that lost one column grant is refused by restore_pre_snapshot."""
+        """D22/C-RESTORE: supported column/type ACLs restore exactly. LO/publication/event-trigger/FDW content is
+        explicitly unsupported in v1 and refuses admission; no names-only projection can call it exact."""
         source = self.start()
         self.ok(source, "CREATE DATABASE keycloak OWNER kin;")
         self.ok(source, """
@@ -605,29 +655,13 @@ class RealClusterTests(unittest.TestCase):
             REVOKE USAGE ON TYPE public.kin_mood FROM PUBLIC;
             GRANT USAGE ON TYPE public.kin_mood TO kin_legacy_reader;
             CREATE DOMAIN public.kin_code AS text;
-            SELECT lo_from_bytea(424242, 'synthetic');
-            GRANT SELECT ON LARGE OBJECT 424242 TO kin_legacy_reader;
-            CREATE PUBLICATION kin_pub FOR TABLE public."Report";
-            CREATE FUNCTION public.kin_evt() RETURNS event_trigger LANGUAGE plpgsql AS $$BEGIN END$$;
-            CREATE EVENT TRIGGER kin_evt ON ddl_command_end EXECUTE FUNCTION public.kin_evt();
-            CREATE EXTENSION postgres_fdw;
-            CREATE SERVER kin_remote FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host 'remote.invalid', dbname 'x');
-            GRANT USAGE ON FOREIGN SERVER kin_remote TO kin_legacy_reader;
-            CREATE USER MAPPING FOR kin_legacy_reader SERVER kin_remote OPTIONS (user 'x');
         """)
         catalog = ops.cluster_catalog(source)
-        objects = catalog["objects"]["kin"]
-        self.assertIn({"name": "public.Report.id", "acl": ["kin_legacy_reader=r/kin"]}, objects["columns"])
-        mood = next(item for item in objects["types"] if item["name"] == "public.kin_mood")
-        self.assertIn("kin_legacy_reader=U/kin", mood["acl"])
-        self.assertTrue(any(item["name"] == "public.kin_code" and item["kind"] == "d" for item in objects["types"]))
-        self.assertEqual([item["id"] for item in objects["large_objects"]], [424242])
-        self.assertIn("kin_legacy_reader=r/kin", objects["large_objects"][0]["acl"])
-        self.assertEqual([(item["name"], item["relations"]) for item in objects["publications"]], [("kin_pub", ['"Report"'])])
-        self.assertEqual([item["name"] for item in objects["event_triggers"]], ["kin_evt"])
-        self.assertEqual([item["name"] for item in objects["foreign_data_wrappers"]], ["postgres_fdw"])
-        self.assertIn("kin_legacy_reader=U/kin", objects["foreign_servers"][0]["acl"])
-        self.assertEqual(objects["user_mappings"], [{"server": "kin_remote", "member": "kin_legacy_reader"}])
+        objects = catalog["objects"]["kin"]["records"]
+        column = next(item for item in objects if item["key"][2:] == ["column", "Report", 1])
+        self.assertEqual(column["attributes"]["acl"], ["kin_legacy_reader=r/kin"])
+        mood = next(item for item in objects if item["key"][2:4] == ["type", "kin_mood"])
+        self.assertIn("kin_legacy_reader=U/kin", mood["attributes"]["acl"])
         with tempfile.TemporaryDirectory() as folder:
             whole = self.dump(source, Path(folder) / "whole", catalog)
             self.ok(source, 'REVOKE SELECT (id) ON public."Report" FROM kin_legacy_reader;')
@@ -636,11 +670,26 @@ class RealClusterTests(unittest.TestCase):
                 self.assertEqual(ops.restore_pre_snapshot(self.start(), whole)["catalog"], "equal")
                 with self.assertRaisesRegex(RuntimeError, "Restored catalog differs from the snapshot: objects"):
                     ops.restore_pre_snapshot(self.start(), lost)
+        unsupported = [
+            ("LO bytes", "SELECT lo_from_bytea(424242, 'synthetic');", "SELECT lo_unlink(424242);"),
+            ("publication", 'CREATE PUBLICATION kin_pub FOR TABLE public."Report" WHERE (id>0);', "DROP PUBLICATION kin_pub;"),
+            ("event trigger", "CREATE FUNCTION public.kin_evt() RETURNS event_trigger LANGUAGE plpgsql AS $$BEGIN END$$; "
+             "CREATE EVENT TRIGGER kin_evt ON ddl_command_end EXECUTE FUNCTION public.kin_evt();", "DROP EVENT TRIGGER kin_evt; DROP FUNCTION public.kin_evt();"),
+            ("FDW", "CREATE EXTENSION postgres_fdw; CREATE SERVER kin_remote FOREIGN DATA WRAPPER postgres_fdw OPTIONS(host 'remote.invalid'); "
+             "CREATE USER MAPPING FOR kin_legacy_reader SERVER kin_remote OPTIONS(user 'synthetic');", "DROP EXTENSION postgres_fdw CASCADE;"),
+            ("materialized values", "CREATE MATERIALIZED VIEW mv AS SELECT 7 AS n;", "DROP MATERIALIZED VIEW mv;")]
+        for label, create, remove in unsupported:
+            self.ok(source, create)
+            try:
+                with self.subTest(kind=label), self.assertRaises(ops.RestoreAdmissionError):
+                    ops.object_catalog(source, "kin")
+            finally:
+                self.ok(source, remove)
 
     def test_irt2_16_24_every_lost_or_changed_object_privilege_grantor_value_or_sequence_is_seen(self):
         """IRT2-16/IRT2-24 on real PostgreSQL: after one exact restore (catalog and values equal), each single change -
-        a column, type, large-object or server privilege, a publication, an event trigger, a user mapping, a function or
-        view definition, a trigger's state, a membership's grantor, a sequence state, a Keycloak row value, a row of a
+        a column/type privilege, a policy, settings, a function or view definition, a trigger's state, a membership's
+        grantor, a sequence state, a Keycloak row value, a row of a
         non-public kin schema - makes the compared catalog or value catalog differ; a membership granted by another role
         than kin and a kin with non-default attributes (IRT2-17) are refused at capture."""
         source = self.start()
@@ -651,22 +700,21 @@ class RealClusterTests(unittest.TestCase):
             CREATE SCHEMA archive; CREATE TABLE archive.kept(id int); INSERT INTO archive.kept VALUES (1), (2);
             CREATE SEQUENCE public.seq; SELECT nextval('public.seq');
             CREATE TYPE public.choice AS ENUM ('a', 'b'); GRANT SELECT (n) ON public.r TO reader; GRANT USAGE ON TYPE public.choice TO reader;
-            SELECT lo_create(123456); GRANT SELECT ON LARGE OBJECT 123456 TO reader;
-            CREATE FOREIGN DATA WRAPPER dummy; CREATE SERVER srv FOREIGN DATA WRAPPER dummy; GRANT USAGE ON FOREIGN SERVER srv TO reader;
-            CREATE USER MAPPING FOR reader SERVER srv;
-            CREATE PUBLICATION pub FOR TABLE public.r;
-            CREATE FUNCTION public.onddl() RETURNS event_trigger LANGUAGE plpgsql AS $$BEGIN END$$;
-            CREATE EVENT TRIGGER et ON ddl_command_end EXECUTE FUNCTION public.onddl();
             CREATE FUNCTION public.guard() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NEW; END$$;
             CREATE TRIGGER r_guard BEFORE UPDATE ON public.r FOR EACH ROW EXECUTE FUNCTION public.guard();
             CREATE VIEW public.v AS SELECT id FROM public.r;
             GRANT reader TO leaf;
+            ALTER ROLE reader SET search_path=public;
+            ALTER ROLE reader IN DATABASE kin SET statement_timeout='7s';
+            ALTER DATABASE keycloak SET work_mem='8MB';
+            ALTER TABLE public.r ENABLE ROW LEVEL SECURITY;
+            CREATE POLICY read_rows ON public.r TO reader USING(id>0);
         """)
         self.ok(source, "CREATE TABLE public.sessions(id int, value text); INSERT INTO public.sessions VALUES (1, 'before');", database="keycloak")
         catalog = ops.cluster_catalog(source)
         values = ops.value_catalog(source)
-        self.assertEqual(set(values["kin"]), {"archive.kept", "public.r"})
-        self.assertEqual(set(values["keycloak"]), {"public.sessions"})
+        self.assertEqual({tuple(row["key"]) for row in values["tables"]}, {("kin", "archive", "table", "kept", None),
+            ("kin", "public", "table", "r", None), ("keycloak", "public", "table", "sessions", None)})
         with tempfile.TemporaryDirectory() as folder:
             whole = self.dump(source, Path(folder) / "whole", catalog)
             target = self.start()
@@ -675,11 +723,11 @@ class RealClusterTests(unittest.TestCase):
         self.assertEqual(ops.value_catalog(target), values, "the restore reproduces every row value")
         changes = [("column privilege", "REVOKE SELECT (n) ON public.r FROM reader", "kin", "catalog"),
                    ("type privilege", "REVOKE USAGE ON TYPE public.choice FROM reader", "kin", "catalog"),
-                   ("large object", "SELECT lo_unlink(123456)", "kin", "catalog"),
-                   ("user mapping", "DROP USER MAPPING FOR reader SERVER srv", "kin", "catalog"),
-                   ("foreign server privilege", "REVOKE USAGE ON FOREIGN SERVER srv FROM reader", "kin", "catalog"),
-                   ("publication", "DROP PUBLICATION pub", "kin", "catalog"),
-                   ("event trigger", "DROP EVENT TRIGGER et", "kin", "catalog"),
+                   ("policy expression", "ALTER POLICY read_rows ON public.r USING(true)", "kin", "catalog"),
+                   ("RLS enabled", "ALTER TABLE public.r DISABLE ROW LEVEL SECURITY", "kin", "catalog"),
+                   ("column default", "ALTER TABLE public.r ALTER COLUMN id SET DEFAULT 99", "kin", "catalog"),
+                   ("enum labels", "ALTER TYPE public.choice ADD VALUE 'c'", "kin", "catalog"),
+                   ("role-in-database setting", "ALTER ROLE reader IN DATABASE kin SET statement_timeout='9s'", "kin", "catalog"),
                    ("function definition", "CREATE OR REPLACE FUNCTION public.guard() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN OLD; END$$",
                     "kin", "catalog"),
                    ("trigger state", "ALTER TABLE public.r DISABLE TRIGGER r_guard", "kin", "catalog"),
@@ -705,6 +753,72 @@ class RealClusterTests(unittest.TestCase):
         self.ok(target, "ALTER ROLE kin CONNECTION LIMIT 7;")
         with self.assertRaisesRegex(RuntimeError, "attributes a fresh cluster's kin does not"):
             ops.supported_pre_catalog(ops.role_catalog(target))
+
+    def test_r4_closed_boundary_and_nologin_verifiers_refuse_before_mutation(self):
+        source = self.start()
+        self.ok(source, "CREATE DATABASE keycloak OWNER kin;")
+        image = json.loads(ops.run(["docker", "inspect", source]).stdout)[0]["Image"]
+        ops.restore_admission(source, shape="pre", image=image)
+        self.ok(source, "CREATE ROLE dormant NOLOGIN PASSWORD 'synthetic-dormant-only';")
+        with self.assertRaises(ops.RestoreAdmissionError):
+            ops.restore_admission(source, shape="pre", image=image)
+        self.ok(source, "ALTER ROLE dormant PASSWORD NULL;")
+        self.ok(source, "ALTER ROLE dormant SET random_page_cost=3;")
+        with self.assertRaises(ops.RestoreAdmissionError):
+            ops.restore_admission(source, shape="pre", image=image)
+        self.ok(source, "ALTER ROLE dormant RESET random_page_cost;")
+        for database in ("postgres", "template1"):
+            self.ok(source, "CREATE TABLE public.outside_inventory(n int);", database)
+            try:
+                with self.subTest(database=database), self.assertRaises(ops.RestoreAdmissionError):
+                    ops.restore_admission(source, shape="pre", image=image)
+            finally:
+                self.ok(source, "DROP TABLE public.outside_inventory;", database)
+
+    def test_r4_structured_quoted_names_and_both_database_values(self):
+        source = self.start()
+        self.ok(source, "CREATE DATABASE keycloak OWNER kin;")
+        for database in ("kin", "keycloak"):
+            self.ok(source, '''CREATE SCHEMA "a.b"; CREATE SCHEMA a;
+                CREATE TABLE "a.b".c("x.y" text); CREATE TABLE a."b.c"("x.y" text);
+                INSERT INTO "a.b".c VALUES ('one'), ('one'), (NULL);
+                INSERT INTO a."b.c" VALUES ('two');''', database)
+        values = ops.value_catalog(source)
+        keys = {tuple(row["key"]) for row in values["tables"]}
+        self.assertEqual(len(keys), 4)
+        self.assertIn(("kin", "a.b", "table", "c", None), keys)
+        self.assertIn(("kin", "a", "table", "b.c", None), keys)
+        for database in ("kin", "keycloak"):
+            before = ops.value_catalog(source)
+            self.ok(source, '''UPDATE a."b.c" SET "x.y"='changed';''', database)
+            self.assertNotEqual(ops.value_catalog(source), before)
+
+    def test_r4_literal_values_and_restore_are_independent_of_session_string_defaults(self):
+        """Stored GUCs remain intact while private SQL transports quoted/backslash/Unicode data literally."""
+        source = self.start()
+        self.ok(source, "CREATE DATABASE keycloak OWNER kin;")
+        self.ok(source, "CREATE ROLE reader NOLOGIN;")
+        schema, table = "quoted\\'schema", "한글.table"
+        value = "literal\\n'\n한글; SELECT 9; -- $tag$"
+        relation = ops._identifier(schema) + "." + ops._identifier(table)
+        for database in ops.PRE_DATABASES:
+            self.ok(source, "CREATE SCHEMA " + ops._identifier(schema) + "; CREATE TABLE " + relation +
+                    "(body text); INSERT INTO " + relation + " VALUES (" + ops._sql_literal(value) + ");", database)
+        self.ok(source, "COMMENT ON ROLE reader IS " + ops._sql_literal(value) + "; "
+                "ALTER ROLE kin SET standard_conforming_strings=off; ALTER ROLE kin SET client_encoding='LATIN1'; "
+                "ALTER ROLE reader SET client_encoding='LATIN1'; "
+                "ALTER ROLE reader SET transaction_read_only=on; ALTER ROLE reader SET statement_timeout='1ms'; "
+                "ALTER ROLE reader SET search_path=public," + ops._identifier(schema) + ";")
+        for database in ops.PRE_DATABASES:
+            self.assertEqual(ops.psql_json(source, database, "SELECT json_build_array(" + ops._sql_literal(value) + ");"), [value])
+            self.assertEqual(ops.value_rows(source, database, schema, table), (["body"], [[value]]))
+        catalog, values = ops.cluster_catalog(source), ops.value_catalog(source)
+        with tempfile.TemporaryDirectory() as folder:
+            whole = self.dump(source, Path(folder) / "whole", catalog)
+            target = self.start()
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(ops.restore_pre_snapshot(target, whole)["catalog"], "equal")
+            self.assertEqual(ops.value_catalog(target), values)
 
     def test_d23_pg_dumpall_roles_fail_in_a_postgres_cluster_and_the_catalog_replay_rebuilds_them(self):
         """D23: a kin-bootstrapped cluster's membership is dumped by pg_dumpall as GRANTED BY kin, which PostgreSQL 16
