@@ -22,7 +22,7 @@ class CurrentLanding(pre.PreCase):
         from main_load_hosted import assert_script_requests, assert_account_requests
         baseline = [('GET', '/worklist/hpacs-lite/auth.js', '')]
         candidate = baseline + [('GET', '/worklist/hpacs-lite/'+name, '')
-                                for name in ('main-split.bundle.js', 'worklist-folder-tree.js')]
+                                for name in ('main-split.bundle.js', 'worklist-folder-tree.js', 'report-editor-frame.js')]
         assert_script_requests(baseline, candidate, landing=True)
         for bad in (candidate[:-1], candidate+[candidate[-1]], candidate+[('GET','/extra.js','')]):
             with self.assertRaises(AssertionError):

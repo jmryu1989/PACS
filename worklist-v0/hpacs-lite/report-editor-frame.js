@@ -2,18 +2,66 @@
 (function (root) {
   'use strict';
 
-  function create({ fields, canEdit }) {
+  function create({ fields, canEdit, host = null }) {
     const names = Object.keys(fields);
     const doc = fields[names[0]]?.ownerDocument;
     if (!names.length || typeof canEdit !== 'function' || names.some(name =>
       fields[name].tagName !== 'TEXTAREA' || fields[name].ownerDocument !== doc || !fields[name].isConnected)
       || new Set(Object.values(fields)).size !== names.length) throw new TypeError('Invalid report fields');
     const states = Object.fromEntries(names.map(name => [name, { el: fields[name], revision: 0, composing: false, caret: false }]));
+    // Measurement in a separate document cannot split the report's native undo typing group.
+    const measure = host ? doc.createElement('iframe') : null;
+    let mirror = null;
+    if (measure) {
+      measure.tabIndex = -1; measure.setAttribute('aria-hidden', 'true');
+      measure.setAttribute('sandbox', 'allow-same-origin');
+      Object.assign(measure.style, { position: 'fixed', visibility: 'hidden', pointerEvents: 'none',
+        left: '-10000px', top: '0', width: '1px', height: '1px', border: '0' });
+      doc.body.append(measure);
+      mirror = measure.contentDocument.createElement('textarea');
+      mirror.readOnly = true; mirror.tabIndex = -1;
+      Object.assign(mirror.style, { height: '0', minHeight: '0', overflow: 'hidden' });
+      measure.contentDocument.body.append(mirror);
+    }
     const requests = new WeakSet();
     let opening = null;
     let writing = false;
+    let ended = false;
     const refused = reason => ({ status: 'refused', reason });
     const lf = text => text.replace(/\r\n?/g, '\n');
+
+    function fit(follow = null) {
+      if (!host) return;
+      const top = host.scrollTop, left = host.scrollLeft;
+      for (const s of Object.values(states)) {
+        const el = s.el;
+        if (el.getAttribute('aria-hidden') === 'true') continue;
+        el.style.height = '0px';
+        el.style.height = (el.scrollHeight + el.offsetHeight - el.clientHeight) + 'px';
+        el.scrollTop = 0;
+      }
+      host.scrollTop = top; host.scrollLeft = left;
+      if (follow && doc.activeElement === follow && follow.getAttribute('aria-hidden') !== 'true') revealCaret(follow);
+    }
+
+    function revealCaret(el) {
+      // Resizing removes the field's own scroll range. A textarea with the same wrap/font
+      // measures the caret line without changing the active field's focus, selection or undo group.
+      const css = doc.defaultView.getComputedStyle(el);
+      for (const property of ['box-sizing', 'border-width', 'border-style', 'padding', 'font', 'line-height',
+        'letter-spacing', 'word-spacing', 'text-indent', 'white-space', 'word-break', 'overflow-wrap', 'tab-size'])
+        mirror.style.setProperty(property, css.getPropertyValue(property));
+      mirror.style.width = el.getBoundingClientRect().width + 'px';
+      const paddingTop = parseFloat(css.paddingTop) || 0, paddingBottom = parseFloat(css.paddingBottom) || 0;
+      mirror.value = '\u200b';
+      const lineHeight = mirror.scrollHeight - paddingTop - paddingBottom;
+      mirror.value = el.value.slice(0, el.selectionDirection === 'backward' ? el.selectionStart : el.selectionEnd) + '\u200b';
+      const field = el.getBoundingClientRect(), viewport = host.getBoundingClientRect();
+      const caretBottom = field.top + (parseFloat(css.borderTopWidth) || 0) + mirror.scrollHeight - paddingBottom;
+      const caretTop = caretBottom - lineHeight, edge = viewport.top + host.clientTop;
+      if (caretBottom > edge + host.clientHeight) host.scrollTop += caretBottom - edge - host.clientHeight;
+      else if (caretTop < edge) host.scrollTop += caretTop - edge;
+    }
 
     function state(name) {
       if (!Object.hasOwn(states, name)) throw new TypeError('Unknown report field');
@@ -23,7 +71,7 @@
     function bind(s) {
       const start = () => { s.composing = true; };
       const end = () => { s.composing = false; };
-      const input = () => { s.revision++; };
+      const input = () => { s.revision++; fit(writing ? null : s.el); };
       // 숫자 위치는 브라우저가 소유하고 여기서는 사람이 이 칸을 사용했는지만 기억한다. 같은 검사의
       // 경계에서 글이 같은 칸은 이 표시가 선택과 함께 옮겨 가고, 다른 검사나 바뀐 글에서는 지워진다.
       const caret = () => { if (!writing) s.caret = true; };
@@ -39,6 +87,9 @@
       };
     }
     Object.values(states).forEach(bind);
+    // The host can move between workspaces or resize without replacing text or undo history.
+    const resize = host && typeof ResizeObserver === 'function' ? new ResizeObserver(() => fit(!writing && Object.values(states).some(s => s.el === doc.activeElement && s.caret) ? doc.activeElement : null)) : null;
+    if (resize) resize.observe(host);
 
     function isComposing(name) {
       return name === undefined ? Object.values(states).some(s => s.composing) : state(name).composing;
@@ -73,6 +124,7 @@
       if (!context || !(context.uid === null || typeof context.uid === 'string') ||
           !Number.isSafeInteger(context.selectionSeq) || names.some(k => typeof texts?.[k] !== 'string'))
         throw new TypeError('A study opening and all report texts are required');
+      if (ended) return refused('ended');
       if (writing) return refused('busy');
       // A render of the current opening must not reset history, selection or an IME session.
       if (opening && opening.uid === context.uid && opening.selectionSeq === context.selectionSeq)
@@ -85,6 +137,7 @@
     function replaceAuthoritative(texts) {
       if (!opening || names.some(k => typeof texts?.[k] !== 'string'))
         throw new TypeError('An open study and all report texts are required');
+      if (ended) return refused('ended');
       if (writing) return refused('busy');
       return unchanged(texts) || open(opening, texts);
     }
@@ -105,6 +158,7 @@
           return { s, old, next, saved, same: sameStudy && old.value === next.value };
         });
         opening = Object.freeze({ uid: context.uid, selectionSeq: context.selectionSeq });
+        if (mirror) mirror.value = "";
         for (const { s, old, next, saved, same } of replacements) {
           s.unbind();
           s.el = next; s.revision = 0;
@@ -120,6 +174,8 @@
         for (const { next, saved, same } of replacements) {
           if (same) { next.scrollTop = saved.top; next.scrollLeft = saved.left; }
         }
+        fit();
+        if (!sameStudy && host) { host.scrollTop = 0; host.scrollLeft = 0; }
         return { status: 'switched' };
       } finally { writing = false; }
     }
@@ -131,12 +187,14 @@
       const end = range?.end ?? (s.caret ? el.selectionEnd : el.value.length);
       if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end > el.value.length)
         throw new TypeError('Invalid report selection');
-      const at = Object.freeze({ field: name, text: el.value, start, end, opening, revision: s.revision });
+      // Block insertion distinguishes an untouched field's append rule from a chosen line boundary.
+      const at = Object.freeze({ field: name, text: el.value, start, end, visited: s.caret, opening, revision: s.revision });
       requests.add(at);
       return at;
     }
 
     function blocked(at) {
+      if (ended) return 'ended';
       if (!at || !requests.has(at) || !opening || at.opening !== opening) return 'stale';
       const s = state(at.field);
       // Even an edit followed by Undo retires a pending request.
@@ -246,7 +304,21 @@
       return replace(at, text, 0, at?.text.length);
     }
 
-    return Object.freeze({ switchStudy, replaceAuthoritative, capture, insert, insertMany, applyServer, read, isComposing,
+    function end(context) {
+      if (ended) return { status: 'unchanged' };
+      // This is terminal cancellation, after the page retained its recovery snapshot.
+      // No composition event is fabricated and no old undo command may reach the empty fields.
+      doc.activeElement?.blur();
+      for (const s of Object.values(states)) s.composing = false;
+      const result = open(context, Object.fromEntries(names.map(k => [k, ''])));
+      ended = true;
+      resize?.disconnect();
+      measure?.remove();
+      for (const s of Object.values(states)) { s.el.readOnly = true; s.unbind(); }
+      return result;
+    }
+
+    return Object.freeze({ switchStudy, replaceAuthoritative, capture, insert, insertMany, applyServer, read, isComposing, end,
       element: name => state(name).el });
   }
 

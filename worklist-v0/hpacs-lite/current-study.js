@@ -78,6 +78,7 @@
        * 우클릭 메뉴도 `select(uid)`를 먼저 부르므로 메뉴를 열 때마다 같은 일이 났다.
       */
       if (uid === selectedUid) return;
+      if (reportFrame?.isComposing()) return;
       reportPreview.close();
       if (templateEditor?.source) closeTemplateEditor(false);
       // A→B→A로 돌아와도 이전 검사에서 읽던 미리보기의 삽입 버튼은 재사용하지 않는다.

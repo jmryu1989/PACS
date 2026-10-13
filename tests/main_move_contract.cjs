@@ -96,7 +96,11 @@ function currentHomes(page) {
   // with the feature, and their execution order is checked on the current AST.
   for (const original of spec.modules) for (const name of original.statements) {
     if (/Statement after /.test(name)) continue;
-    const matches = homes.filter(home => home.name === name);
+    // W6 retires the duplicate cursor model. Only current ownership follows its
+    // replacement adapter; historical byte/statement proofs above remain fixed.
+    const frame = homes.some(home => home.name === 'reportFrame');
+    const current = frame ? ({ caretFields: 'reportFrame', noteCaret: 'mountReportFrame', forgetCaret: 'onReportField' }[name] || name) : name;
+    const matches = homes.filter(home => home.name === current);
     assert.equal(matches.length, 1, `Current declaration occurs once: ${name}`);
     assert.equal(matches[0].file, original.file, `Current declaration owner: ${name}`);
   }

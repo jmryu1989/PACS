@@ -2462,3 +2462,11 @@ CSS도 응답 hash·status·cache 기록에 포함된다. 시간 예산·쌍 개
 - `tests/worklist_header_dom_test.py`
 - `tests/worklist_image_thumbnails_dom_test.py`
 - `tests/worklist_toolbar_dom_test.py`
+
+
+W6-LAND (WIP): REQ-WS5/WS6/WS7 → RISK-UID/HISTORY/DUPLICATE-INPUT →
+`report_editor_frame_dom_test.py` (TEST-REF-*; `--page` 실제 제공 HTML/bundle 연결, `--mutants` 모듈 반례, `--page-mutants` PAGE 연결 반례).
+`worklist-ux.yml`의 measurements가 네 실행의 원문과 source tree/45-source order 입력을
+`tmp/workspace-ui-ci/report-editor-frame*`에 기록한다. 숨긴 Recommendation을 포함한 세 필드의
+저장 계약은 유지하며, 서버 CAS/migration/candidate 선택 ID는 변경하지 않는다.
+한글 OS IME와 의사 직접 확인, post-W3 통합 live 및 후보 CI/G3/교차 검수는 별도 관문이다.

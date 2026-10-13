@@ -1,7 +1,7 @@
 # coding: utf-8
 """REQ-WS5/WS6/WS7 text boundary -> RISK-T4/T5/T7/T6/T3/TS08 -> TEST-REF-*.
 
-Isolated Chromium, shipped module only; no main.html slices, stack or network.
+Isolated Chromium module contract plus --page delivered HTML/bundle against synthetic HTTP; no stack.
 Assertions cover public results, text, native undo, composition and visible editor state.
 The optional one-line mutants run in memory, never rewrite product files. Their anchors
 are mutation locations, not product-shape assertions. No new parser or byte pins.
@@ -933,6 +933,280 @@ class ReportEditorFrameDOM(unittest.TestCase):
 
 # Each mutation changes one product line; unchanged context can disambiguate an anchor.
 # Assertions never require these source spellings.
+class ReportEditorFramePageDOM(unittest.TestCase):
+    """REQ-WS5/6/7 -> RISK-UID/HISTORY/DUPLICATE-INPUT -> W6-PAGE integration.
+
+    Actual delivered HTML, bundle, frame and session modules; only HTTP is synthetic.
+    Unlike the module fixture, Recommendation is hidden as it is for the doctor.
+    """
+    source = SOURCE
+    bundle_source = None
+    html_source = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.playwright = sync_playwright().start()
+        cls.browser = cls.playwright.chromium.launch()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.playwright.stop()
+
+    def setUp(self):
+        import auth_logout_dom_test as h
+        from report_text_boundaries_dom_test import MultiStudySite
+        self.h = h
+        self.site = MultiStudySite()
+        self.context = self.browser.new_context(viewport={"width": 1400, "height": 900}, locale="ko-KR")
+        self.context.route("**/*", lambda route, request: self.site.handle(route, request))
+        self.context.route("**/report-editor-frame.js", lambda route: route.fulfill(
+            body=self.source, content_type="text/javascript; charset=utf-8"))
+        if self.bundle_source is not None:
+            self.context.route("**/main-split.bundle.js", lambda route: route.fulfill(
+                body=self.bundle_source, content_type="text/javascript; charset=utf-8"))
+        if self.html_source is not None:
+            self.context.route("**/main.html", lambda route: route.fulfill(
+                body=self.html_source, content_type="text/html; charset=utf-8"))
+        self.page = self.context.new_page()
+        self.page.set_default_timeout(10000)
+        # Full-page routing serves all shipped assets; shared-host startup is not an editor latency assertion.
+        self.page.set_default_navigation_timeout(30000)
+        self.addCleanup(self.context.close)
+        self.errors = []
+        self.page.on("pageerror", lambda error: self.errors.append(str(error)))
+        self.page.on("dialog", lambda dialog: dialog.accept())
+        self.page.clock.install()
+        self.page.goto(h.MAIN_URL)
+        self.page.locator("#rows tr", has_text=h.PATIENT).first.click()
+        self.page.wait_for_function("() => !document.querySelector('#findings').readOnly")
+
+    def tearDown(self):
+        self.context.close()
+        self.assertEqual(self.errors, [])
+        self.assertEqual(self.site.violations, [])
+
+    def texts(self):
+        return {k: self.page.locator('#' + k).input_value() for k in FIELDS}
+
+    def switch(self, patient):
+        self.page.locator('#rows tr', has_text=patient).first.click()
+
+    def test_page_f11_identical_text_a_b_a_focus_and_blur(self):
+        text = 'same\ntext'
+        self.page.evaluate("text => { for(const uid of studies.map(s=>s.uid)) appState[uid]={...appState[uid], findings:text, conclusion:text, recommendation:text}; loadReport({force:true}); }", text)
+        for focused in (False, True):
+            with self.subTest(focused=focused):
+                for patient in (self.h.PATIENT_B, self.h.PATIENT):
+                    self.page.locator('#findings').focus()
+                    self.page.locator('#findings').evaluate("e=>e.setSelectionRange(0,2,'backward')")
+                    if not focused:
+                        self.page.locator('#b-copy').focus()
+                    if focused:
+                        uid = self.page.locator('#rows tr', has_text=patient).first.get_attribute('data-uid')
+                        self.page.evaluate('uid=>select(uid)', uid)
+                    else:
+                        self.switch(patient)
+                    got = self.page.evaluate("() => { const e=document.querySelector('#findings'), at=reportFrame.capture('findings'); return [e.value,e.selectionStart,e.selectionEnd,at.start,at.end]; }")
+                    self.assertEqual(got, [text, len(text), len(text), len(text), len(text)])
+
+    def test_page_native_input_once_final_three_field_payload_and_hold(self):
+        self.page.evaluate("() => { window.events=[]; document.addEventListener('input',e=>{if(['findings','conclusion','recommendation'].includes(e.target.id)) events.push({field:e.target.id,trusted:e.isTrusted});}); }")
+        self.page.locator('#findings').focus()
+        self.page.keyboard.type('AB')
+        self.page.locator('#findings').evaluate('e=>e.setSelectionRange(0,0)')
+        self.page.evaluate("insertTemplate({findings:'F',conclusion:'C',recommendation:'R'})")
+        self.assertEqual(self.texts(), {'findings':'F\nAB','conclusion':'C','recommendation':'R'})
+        self.assertEqual(self.page.evaluate('events'), [
+            {'field':'findings','trusted':True}, {'field':'findings','trusted':True},
+            # Chromium emits separate native input for the inserted LF and the following text.
+            {'field':'findings','trusted':True},
+            {'field':'findings','trusted':True}, {'field':'conclusion','trusted':True},
+            {'field':'recommendation','trusted':True}])
+        self.page.clock.run_for(21000)
+        self.page.wait_for_function("() => !document.querySelector('#b-report-template').disabled")
+        self.assertTrue(self.site.holds)
+        self.assertTrue(self.site.puts)
+        self.assertEqual({k:self.site.puts[-1][k] for k in FIELDS}, self.texts())
+        self.assertFalse(any('citation' in put or 'structure' in put for put in self.site.puts))
+
+    def test_page_authoritative_equal_keeps_undo_partial_equal_keeps_caret(self):
+        self.page.locator('#findings').focus()
+        self.page.keyboard.type('typed')
+        self.page.locator('#findings').evaluate("e=>e.setSelectionRange(1,3,'backward')")
+        self.page.evaluate("loadReport({force:true})")
+        self.assertEqual(self.page.locator('#findings').evaluate('e=>[e.selectionStart,e.selectionEnd]'), [1,3])
+        self.page.keyboard.press('Control+z')
+        self.assertEqual(self.texts()['findings'], '')
+        self.page.keyboard.press('Control+Shift+z')
+        self.assertEqual(self.texts()['findings'], 'typed')
+        self.page.locator('#findings').evaluate("e=>e.setSelectionRange(1,3,'backward')")
+        self.page.evaluate("() => {appState[selectedUid].draft.conclusion='server change';loadReport({force:true});}")
+        self.assertEqual(self.page.locator('#findings').evaluate('e=>[e.selectionStart,e.selectionEnd]'), [1,3])
+        self.page.keyboard.press('Control+z')
+        self.assertEqual(self.texts(), {'findings':'typed','conclusion':'server change','recommendation':''})
+
+    def test_page_many_readonly_and_composition_are_atomic(self):
+        self.page.locator('#findings').fill('KEEP')
+        self.page.locator('#recommendation').evaluate('e=>e.readOnly=true')
+        self.assertFalse(self.page.evaluate("insertTemplate({findings:'X',conclusion:'Y',recommendation:'Z'})"))
+        self.assertEqual(self.texts(), {'findings':'KEEP','conclusion':'','recommendation':''})
+        self.page.locator('#recommendation').evaluate('e=>e.readOnly=false')
+        self.page.locator('#conclusion').focus()
+        cdp = self.context.new_cdp_session(self.page)
+        cdp.send('Input.imeSetComposition', {'text':'한','selectionStart':1,'selectionEnd':1})
+        before = self.texts()
+        self.assertFalse(self.page.evaluate("insertTemplate({findings:'X',recommendation:'Z'})"))
+        self.assertEqual(self.texts(), before)
+        cdp.send('Input.insertText', {'text':'한'})
+        cdp.detach()
+
+    def test_page_single_scroll_tab_shortcut_and_thousand_lines(self):
+        # Even with unavailable ancillary services, both empty sections remain readable.
+        for field in ('findings', 'conclusion'):
+            visible = self.page.locator('#' + field).evaluate("e=>{const h=e.parentElement.getBoundingClientRect(),r=e.getBoundingClientRect();return Math.min(h.bottom,r.bottom)-Math.max(h.top,r.top);}")
+            self.assertGreaterEqual(visible, 40)
+        self.page.locator('#findings').focus()
+        self.page.keyboard.press('Tab')
+        self.assertTrue(self.page.locator('#conclusion').evaluate('e=>e===document.activeElement'))
+        self.page.keyboard.press('Shift+Tab')
+        self.assertTrue(self.page.locator('#findings').evaluate('e=>e===document.activeElement'))
+        text = '\n'.join('line %s 한글' % i for i in range(1000))
+        self.page.keyboard.insert_text(text)
+        self.assertEqual(self.texts()['findings'], text)
+        sizes = self.page.locator('#findings').evaluate('e=>[e.scrollHeight,e.clientHeight,e.parentElement.scrollHeight,e.parentElement.clientHeight]')
+        self.assertLessEqual(sizes[0], sizes[1] + 1)
+        self.assertGreater(sizes[2], sizes[3])
+        caret_end = self.page.locator('#findings').evaluate('e=>{const h=e.parentElement.getBoundingClientRect();return [e.getBoundingClientRect().bottom,h.top,h.bottom];}')
+        self.assertGreater(caret_end[0], caret_end[1])
+        self.assertLessEqual(caret_end[0], caret_end[2] + 8, 'The last typed line stays in the shared viewport')
+        self.page.keyboard.press('Control+a')
+        self.page.keyboard.insert_text('nbct')
+        self.page.evaluate("templates=[{title:'SYN',shortcut:'nbct',findings:'expanded'}]")
+        self.page.keyboard.press('Tab')
+        self.assertEqual(self.texts()['findings'], 'expanded')
+        self.assertTrue(self.page.locator('#findings').evaluate('e=>e===document.activeElement'))
+
+    def test_page_end_during_composition_purges_history_and_late_mount(self):
+        self.page.locator('#findings').focus()
+        self.page.keyboard.type('private')
+        cdp = self.context.new_cdp_session(self.page)
+        cdp.send('Input.imeSetComposition', {'text':'한','selectionStart':1,'selectionEnd':1})
+        self.page.evaluate("closeWork('ended')")
+        self.assertEqual(self.texts(), dict.fromkeys(FIELDS, ''))
+        self.assertIsNone(self.page.evaluate('mountReportFrame()'))
+        self.page.locator('#findings').evaluate('e=>e.focus()')
+        for key in ('Control+z','Control+y','Control+Shift+z'):
+            self.page.keyboard.press(key)
+            self.assertEqual(self.texts(), dict.fromkeys(FIELDS, ''))
+        cdp.detach()
+
+    def test_page_clipboard_answer_after_typing_and_undo_is_refused(self):
+        self.page.locator('#findings').focus()
+        self.page.keyboard.type('kept')
+        self.page.evaluate("() => Object.defineProperty(navigator,'clipboard',{configurable:true,value:{readText:()=>new Promise(r=>window.clipboardReply=r)}})")
+        self.page.locator('#b-paste').evaluate('e=>e.click()')
+        self.page.keyboard.type('X')
+        self.page.keyboard.press('Control+z')
+        self.page.evaluate("clipboardReply('LATE')")
+        self.assertEqual(self.texts()['findings'], 'kept')
+        self.page.locator('#b-paste').evaluate('e=>e.click()')
+        self.page.evaluate("clipboardReply('TAIL')")
+        self.assertEqual(self.texts()['findings'], 'keptTAIL')
+
+    def test_page_row_enter_and_context_report_focus_the_replacement_field(self):
+        self.switch(self.h.PATIENT_B)
+        self.switch(self.h.PATIENT)
+        row = self.page.locator('#rows tr', has_text=self.h.PATIENT).first
+        row.press('Enter')
+        self.page.keyboard.type('ENTER')
+        self.assertEqual(self.texts()['findings'], 'ENTER')
+        self.switch(self.h.PATIENT_B)
+        row = self.page.locator('#rows tr', has_text=self.h.PATIENT_B).first
+        row.click(button='right')
+        self.page.get_by_role('menuitem', name='판독문 작성으로', exact=True).click()
+        self.page.keyboard.type('CONTEXT')
+        self.assertEqual(self.texts()['findings'], 'CONTEXT')
+
+    def test_page_template_native_focus_does_not_retarget_dictation(self):
+        self.page.locator('#findings').focus()
+        self.page.keyboard.type('typed')
+        self.page.locator('#b-copy').focus()
+        self.assertTrue(self.page.evaluate("insertTemplate({findings:'F',conclusion:'C',recommendation:'R'})"))
+        self.assertEqual(self.page.evaluate('dictationContext().field'), 'findings')
+        context = self.page.evaluate('dictationContext()')
+        self.assertTrue(self.page.evaluate("x=>dictationInsert({...x,expectedValue:x.value,text:'SYN dictated'})", context))
+        self.assertIn('SYN dictated', self.texts()['findings'])
+        self.assertEqual(self.texts()['recommendation'], 'R')
+
+    def test_page_dictation_targets_the_field_focused_after_replacement(self):
+        self.switch(self.h.PATIENT_B)
+        self.switch(self.h.PATIENT)
+        self.page.locator('#conclusion').focus()
+        context = self.page.evaluate('dictationContext()')
+        self.assertTrue(self.page.evaluate("x=>dictationInsert({...x,expectedValue:x.value,text:'SYN dictated'})", context))
+        self.assertEqual(self.texts(), {'findings':'','conclusion':'SYN dictated','recommendation':''})
+
+    def test_page_composition_refuses_a_queued_study_activation(self):
+        self.page.locator('#findings').focus()
+        cdp = self.context.new_cdp_session(self.page)
+        cdp.send('Input.imeSetComposition', {'text':'한','selectionStart':1,'selectionEnd':1})
+        before = self.texts()
+        self.page.locator('#rows tr', has_text=self.h.PATIENT_B).first.dispatch_event('click')
+        self.assertEqual(self.texts(), before)
+        self.assertEqual(self.page.evaluate('selectedUid'), self.h.UID)
+        cdp.send('Input.insertText', {'text':'한'})
+        cdp.detach()
+        self.switch(self.h.PATIENT_B)
+        self.assertEqual(self.texts(), dict.fromkeys(FIELDS, ''))
+
+    def test_page_logout_saves_template_and_hidden_recommendation_once(self):
+        self.page.evaluate("insertTemplate({findings:'F',conclusion:'C',recommendation:'R'})")
+        self.page.locator('#logout').click()
+        self.page.wait_for_url(self.h.INDEX_URL)
+        self.assertEqual(self.site.stored(), {'findings':'F','conclusion':'C','recommendation':'R'})
+        self.assertEqual(len(self.site.logouts), 1)
+
+    def test_page_citation_and_structure_apply_screen_matches_payload(self):
+        self.page.locator('#findings').fill('LOCAL')
+        self.assertTrue(self.page.evaluate("request=>openCitePreview(request)", {
+            'uid':self.h.UID,'findingId':'SYN-FINDING','findingRevision':1,'sourceIndex':0,
+            'sourceLabel':'SYN source','linkState':'current','headRevision':None,'block':'SYN cited finding'}))
+        self.page.locator('#cite-preview-insert').click()
+        self.page.wait_for_function("() => !document.querySelector('#cite-preview').classList.contains('show')")
+        self.assertEqual(self.texts()['findings'], 'LOCAL\nSYN cited finding')
+        self.page.locator('#report-more > summary').click()
+        self.page.locator('#b-structured').click()
+        self.page.locator('#struct-item').select_option('GEN-1\x00CONCLUSION')
+        self.page.locator('#struct-value-text').fill('SYN result')
+        self.page.locator('#struct-apply').click()
+        self.page.wait_for_function("() => !document.querySelector('#structmodal').classList.contains('on')")
+        self.assertEqual(self.texts()['conclusion'], 'Conclusion: SYN result')
+        self.assertEqual(self.site.stored(), self.texts())
+        self.assertEqual(sum('insert' in p for p in self.site.puts), 1)
+        self.assertEqual(sum('structure' in p for p in self.site.puts), 1)
+
+    def test_page_accepted_citation_refused_by_frame_is_not_resent(self):
+        self.page.locator('#findings').fill('LOCAL')
+        self.page.evaluate("request=>openCitePreview(request)", {
+            'uid':self.h.UID,'findingId':'SYN-FINDING','findingRevision':1,'sourceIndex':0,
+            'sourceLabel':'SYN source','linkState':'current','headRevision':None,'block':'SYN cited finding'})
+        self.site.put_answers=['hold']
+        self.page.locator('#cite-preview-insert').click()
+        # Wait for the synthetic server to own the operation; the editor then becomes read-only.
+        for _ in range(100):
+            if self.site.held_puts: break
+            self.page.wait_for_timeout(20)
+        self.assertEqual(len(self.site.held_puts), 1)
+        self.page.locator('#findings').evaluate('e=>e.readOnly=true')
+        self.site.finish_put()
+        self.page.wait_for_function("() => !document.querySelector('#cite-preview').classList.contains('show')")
+        self.assertEqual(self.texts()['findings'], 'LOCAL')
+        self.assertIn('화면에 넣지 못했습니다', self.page.locator('body').inner_text())
+        self.page.clock.run_for(41000)
+        self.assertEqual(sum('insert' in p for p in self.site.puts), 1)
+
+
 MUTANTS = [
     ("M01-reuse-node", "old.replaceWith(next);", "old.value = next.value; s.el = old;", [
         "test_t4_empty_study_boundary_all_fields", "test_t4_reopen_same_uid_and_mixed_history",
@@ -951,7 +1225,7 @@ MUTANTS = [
         "test_t7_composing_tab_skips_shortcut_and_navigates"]),
     ("M08-commit-other-composition", "if (isComposing()) return 'composing';", "if (state(at.field).composing) return 'composing';", [
         "test_t6_composition_in_another_field_is_not_committed_by_insertion"]),
-    ("M09-no-edit-generation", "const input = () => { s.revision++; };", "const input = () => {};", [
+    ("M09-no-edit-generation", "const input = () => { s.revision++; fit(writing ? null : s.el); };", "const input = () => { fit(writing ? null : s.el); };", [
         "test_t6_ts08_later_typing_and_edit_then_undo"]),
     ("M10-overwrite-new-input", "if (s.revision !== at.revision || s.el.value !== at.text) return 'changed';", "// Overwrite even after later input.", [
         "test_t6_ts08_later_typing_and_edit_then_undo"]),
@@ -1017,6 +1291,80 @@ MUTANTS = [
 ]
 
 
+PAGE_MUTANTS = [
+    ('W6-PAGE-03', 'report-templates-ui.js',
+     'result = changes.length === 1 ? frame.insert(changes[0].at, changes[0].text) : frame.insertMany(changes);',
+     "result = {status:'unchanged'};", 'test_page_native_input_once_final_three_field_payload_and_hold'),
+    ('W6-PAGE-04', 'report-templates.js', 'caretAt(k), citationGuards(k)', 'null, citationGuards(k)',
+     'test_page_native_input_once_final_three_field_payload_and_hold'),
+    ('W6-PAGE-05', 'report-dictation.js',
+     'dictationField = { field: event.target.id, seq: selectionSeq };', 'dictationField = null;',
+     'test_page_dictation_targets_the_field_focused_after_replacement'),
+    ('W6-PAGE-06', 'report-editor-frame.js',
+     'const sameStudy = opening !== null && opening.uid === context.uid;', 'const sameStudy = true;',
+     'test_page_f11_identical_text_a_b_a_focus_and_blur'),
+    ('W6-PAGE-07', 'report-editor.js', ': frame.replaceAuthoritative(texts);', ': frame.switchStudy(opening, texts);',
+     'test_page_authoritative_equal_keeps_undo_partial_equal_keeps_caret'),
+    ('W6-PAGE-09', 'report-draft-save.js',
+     'onReportField("input", () => { work.edited(); recordReportEdit(); });',
+     'onReportField("input", () => { work.edited(); });', 'test_page_native_input_once_final_three_field_payload_and_hold'),
+    ('W6-PAGE-10', 'report-hold.js',
+     'if (total >= HOLD_MIN_CHARS) claimHold(selectedUid);', 'if (false) claimHold(selectedUid);',
+     'test_page_native_input_once_final_three_field_payload_and_hold'),
+    ('W6-PAGE-11', 'report-structure-pane.js',
+     'const applied = shown && shown.mode2 !== "refuse" && editReport([reportEditOf(pane.field, shown.text, shown.end)]);',
+     'const applied = false;', 'test_page_citation_and_structure_apply_screen_matches_payload'),
+    ('W6-PAGE-12', 'report-citation-pane.js',
+     'const applied = editReport([reportEditOf(field, shown.text, shown.end)]);',
+     'const applied = false;', 'test_page_citation_and_structure_apply_screen_matches_payload'),
+    ('W6-PAGE-13', 'report-toolbar.js', 'const end = frame.read("findings").length;', 'const end = 0;',
+     'test_page_clipboard_answer_after_typing_and_undo_is_refused'),
+    ('W6-PAGE-15', 'current-study.js', 'if (reportFrame?.isComposing()) return;', '// Allow a switch during composition.',
+     'test_page_composition_refuses_a_queued_study_activation'),
+    ('W6-PAGE-19', 'work-exit.js', 'Object.assign(prep, captureReport());', '// Forget the report snapshot.',
+     'test_page_logout_saves_template_and_hidden_recommendation_once'),
+    ('W6-PAGE-20', 'session-end.js', 'reportFrame?.end({ uid: null, selectionSeq });', '// Keep the previous history.',
+     'test_page_end_during_composition_purges_history_and_late_mount'),
+    ('W6-PAGE-21', 'report-editor.js', 'if (reportFrameEnded) return null;', '// Allow a late mount.',
+     'test_page_end_during_composition_purges_history_and_late_mount'),
+    ('W6-PAGE-22', 'report-editor.js', 'host: document.querySelector(".redit"),', 'host: null,',
+     'test_page_single_scroll_tab_shortcut_and_thousand_lines'),
+    ('W6-PAGE-22-caret-follow', 'report-editor-frame.js',
+     "if (follow && doc.activeElement === follow && follow.getAttribute('aria-hidden') !== 'true') revealCaret(follow);",
+     "if (false) revealCaret(follow);", 'test_page_single_scroll_tab_shortcut_and_thousand_lines'),
+]
+
+
+def run_page_mutants():
+    case = ReportEditorFramePageDOM
+    names = sorted({row[-1] for row in PAGE_MUTANTS})
+    baseline = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(case(n) for n in names))
+    if not baseline.wasSuccessful() or baseline.skipped:
+        print('PAGE BASELINE FAILED; no kills claimed')
+        return 1
+    lite = MODULE.parent
+    order = json.loads((ROOT / 'scripts/main-split-order.json').read_text())['sources']
+    originals = {row['file']:(lite / row['file']).read_text(encoding='utf-8') for row in order}
+    killed = 0
+    for row, file, old, new, name in PAGE_MUTANTS:
+        source = SOURCE if file == MODULE.name else originals[file]
+        if source.count(old) != 1:
+            raise AssertionError('PAGE mutation location not unique: ' + row)
+        changed = source.replace(old, new, 1)
+        case.source = changed if file == MODULE.name else SOURCE
+        case.bundle_source = ''.join(changed if item['file'] == file else originals[item['file']] for item in order)
+        output = io.StringIO()
+        result = unittest.TextTestRunner(stream=output, verbosity=2).run(unittest.TestSuite([case(name)]))
+        caught = result.testsRun == 1 and bool(result.failures) and not result.errors and not result.skipped
+        print(row, file, 'KILLED' if caught else 'NOT PROVEN', flush=True)
+        print(output.getvalue(), end='')
+        killed += int(caught)
+    case.source = SOURCE
+    case.bundle_source = None
+    print('PAGE mutants killed: %s/%s' % (killed, len(PAGE_MUTANTS)))
+    return 0 if killed == len(PAGE_MUTANTS) else 1
+
+
 def run_mutants():
     killed = 0
     for label, old, new, names in MUTANTS:
@@ -1044,12 +1392,17 @@ def main():
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mutants", action="store_true")
+    parser.add_argument("--page", action="store_true", help="Run the actual delivered-page integration cases")
+    parser.add_argument("--page-mutants", action="store_true")
     parser.add_argument("tests", nargs="*")
     args = parser.parse_args()
+    if args.page_mutants:
+        return run_page_mutants()
     if args.mutants:
         return run_mutants()
-    names = args.tests or unittest.defaultTestLoader.getTestCaseNames(ReportEditorFrameDOM)
-    result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(ReportEditorFrameDOM(n) for n in names))
+    case = ReportEditorFramePageDOM if args.page else ReportEditorFrameDOM
+    names = args.tests or unittest.defaultTestLoader.getTestCaseNames(case)
+    result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(case(n) for n in names))
     return 0 if result.wasSuccessful() and not result.skipped else 1
 
 

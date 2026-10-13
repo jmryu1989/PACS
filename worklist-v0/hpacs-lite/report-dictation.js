@@ -69,14 +69,9 @@
       },
       closed: () => ($("#b-dictate").disabled ? $("#findings") : $("#b-dictate")).focus(),
     });
-    for (const k of ["findings", "conclusion", "recommendation"]) {
-      const el = $("#" + k);
-      el.addEventListener("focus", () => { dictationField = { field: k, seq: selectionSeq }; });
-      // 위치를 다시 고정하는 몸짓은 **칸 안을 누르는 것**이다. 다시 고정해도 넣지는 않는다.
-      el.addEventListener("mouseup", () => { dictation.fieldClicked(); });
-      // 사람이 고친 글은 새 편집 순번이다 — 그 전에 떠난 편집기 범위의 작업은 이 글 위에 쓰지 않는다.
-      el.addEventListener("input", () => { work.edited(); dictation.redraw(); });
-    }
+    onReportField("focus", event => { dictationField = { field: event.target.id, seq: selectionSeq }; });
+    onReportField("mouseup", () => dictation.fieldClicked());
+    onReportField("input", () => dictation.redraw());
     /**
      * 검토 단계에서 판독의가 읽고 눌러야 할 것(받아쓴 글, 위치를 다시 고를 판독문 칸, Insert)은 보고서 열
      * 폭이 약 420px일 때 모두 Image Findings 서랍 아래에 있다. 그래서 검토에 들어서는 순간 서랍을 한 번

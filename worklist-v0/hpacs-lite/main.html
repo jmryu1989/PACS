@@ -280,12 +280,14 @@
     .rbtns button:disabled { opacity: .35; cursor: default; }
     .rbtns .approve { background: var(--kin-btn); color: var(--kin-text); border-color: var(--kin-accent); }
     .rbtns .save { background: var(--kin-panel2); color: var(--kin-text); border-color: var(--kin-line2); }
-    .redit { flex: 1; overflow: auto; padding: 4px 10px; display: flex; flex-direction: column; gap: 2px; }
-    .redit h4 { margin: 2px 0; font-size: 11px; color: #8892a4; font-weight: normal; }
-    .redit textarea { width: 100%; background: #14181f; color: #cdd3dc; border: 1px solid #3a4356; padding: 6px; font: inherit; resize: none; }
-    #findings { flex: 3; min-height: 50px; }
-    #conclusion { flex: 2; min-height: 34px; }
-    #recommendation { flex: 1; min-height: 26px; }
+    /* Keep both empty sections usable when notices below fill the report column. */
+    .redit { flex: 1; min-height: 200px; overflow: auto; padding: 4px 10px; display: flex; flex-direction: column; gap: 2px; }
+    .redit label { margin: 2px 0; font-size: 11px; color: #8892a4; }
+    .redit textarea { flex: none; width: 100%; box-sizing: border-box; background: #14181f; color: #cdd3dc; border: 1px solid #3a4356; padding: 6px; font: inherit; resize: none; overflow: hidden; }
+    #findings { min-height: 80px; }
+    #conclusion { min-height: 60px; }
+    /* Recommendation remains part of the document and native edit history, outside the two-section view. */
+    .redit #recommendation { position: absolute; left: -10000px; width: 1px; height: 1px; min-height: 0; }
     .rfoot2 { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 8px; background: #1b212c; flex: none; justify-content: flex-end; }
     /* ── S5-UI3 판독 단추 묶음 (UXR-G-08) ──
        여닫는 방식은 툴바 묶음(S5-UI2)의 .toolbar-menu 규약 그대로다: 요약 단추만 이 줄에 서고, 펼친 내용은 줄 끝의
@@ -1473,12 +1475,11 @@
           </div>
         </div>
         <div class="redit">
-          <h4>Findings</h4>
+          <label for="findings">Findings</label>
           <textarea id="findings" placeholder="Please enter findings"></textarea>
-          <h4>Conclusion</h4>
+          <label for="conclusion">Conclusion</label>
           <textarea id="conclusion" placeholder="Please enter conclusion"></textarea>
-          <h4>Recommendation</h4>
-          <textarea id="recommendation" placeholder="Please enter recommendation"></textarea>
+          <textarea id="recommendation" aria-label="Recommendation" aria-hidden="true" tabindex="-1"></textarea>
         </div>
         <!-- S5-U4b 임상의 질문 스레드(판독 대상 검사). 질문이 있거나 읽기가 실패했거나 창을 연 동안에만 보인다 — 질문이
              없는 검사의 판독 화면 배치는 그대로다. 판독문 칸·버튼 줄 밖에 있고 판독문을 읽거나 쓰지 않는다. -->
@@ -1880,6 +1881,7 @@
   <script src="finding-link-model.js"></script>
   <script src="finding-command.js"></script>
   <script src="report-citation.js"></script>
+  <script src="report-editor-frame.js"></script>
   <script src="report-structure.js"></script>
   <script src="dictation-session.js"></script>
   <script src="dictation-capture.js"></script>

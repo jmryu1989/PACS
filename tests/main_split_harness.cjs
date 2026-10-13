@@ -245,6 +245,12 @@ function fixtureBlocks(page, ranges) {
   const { readPageSource } = require('./page_source.cjs');
   const base = readFixture().statements;
   const current = fixtureStatements(readPageSource(page));
+  // W6 owns cursor visits in the shipped frame. Rebind the current component fixture
+  // to its adapter declarations; historical pages still use the unchanged frozen map.
+  if (current.some(s => s.names.includes('reportFrame'))) {
+    const replacements = { caretFields: 'reportFrame', noteCaret: 'mountReportFrame', forgetCaret: 'onReportField' };
+    for (const statement of base) statement.names = statement.names.map(name => replacements[name] || name);
+  }
   const byName = new Map();
   base.forEach((s, i) => { for (const name of s.names) byName.set(name, i); });
   const home = frozenIndexes(current, base);

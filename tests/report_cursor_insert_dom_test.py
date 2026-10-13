@@ -225,8 +225,8 @@ window.text = () => RFIELDS.map(k => $("#" + k).value);
 window.assign = (field, value) => { $("#" + field).value = value; };
 window.caretOf = field => [$("#" + field).selectionStart, $("#" + field).selectionEnd];
 window.put = (field, start, end) => { const el = $("#" + field); el.setSelectionRange(start, end === undefined ? start : end); };
-window.marked = field => caretFields.has(field);
-window.moveSelection = uid => markSelectionChanged(uid);
+window.insertionRange = field => { const at=reportFrame.capture(field); return [at.start, at.end]; };
+window.moveSelection = uid => { markSelectionChanged(uid); loadReport({force:true}); };
 window.insertTpl = t => insertTemplate(t);
 window.snapshot = () => ({
   calls: structuredClone(calls), citeCalls: structuredClone(citeCalls), toasts: structuredClone(toasts),
@@ -236,7 +236,7 @@ window.snapshot = () => ({
           place: $("#cite-preview-place").textContent, field: $("#cite-preview-field").value },
   bar: { list: $("#citelist").hidden ? null : $("#citelist").textContent },
   caret: Object.fromEntries(RFIELDS.map(k => [k, window.caretOf(k)])),
-  marked: Object.fromEntries(RFIELDS.map(k => [k, caretFields.has(k)])),
+  insertionRange: Object.fromEntries(RFIELDS.map(k => [k, window.insertionRange(k)])),
   focused: document.activeElement ? document.activeElement.id : null,
   stoodDown: window.stoodDown,
 });
@@ -472,7 +472,7 @@ class ReportCursorInsertDOMTest(unittest.TestCase):
         after = self.snap()
         self.assertEqual(before["text"], after["text"], "a refusal changes no byte of the report")
         self.assertEqual(before["caret"]["findings"], after["caret"]["findings"], "nor the caret")
-        self.assertTrue(after["marked"]["findings"], "nor the fact that the person put a caret there")
+        self.assertEqual(after["caret"]["findings"], after["insertionRange"]["findings"], "the next insertion uses the visible selection")
 
     # ── D9 ─────────────────────────────────────────────────────────────────────────────────
     def test_d09_a_late_answer_after_a_selection_change_writes_nothing(self):
@@ -486,11 +486,12 @@ class ReportCursorInsertDOMTest(unittest.TestCase):
         before = self.snap()
         # The product's own selection counter - the same one the late-answer guard reads.
         self.page.evaluate("moveSelection(%s)" % json.dumps(OTHER))
+        before = self.snap()
         self.page.evaluate("release()")
         self.page.wait_for_function("()=>!$('#cite-preview').classList.contains('show')")
         after = self.snap()
         self.assertEqual(before["text"], after["text"], "an answer that outlived its selection writes nothing")
-        self.assertFalse(after["marked"]["findings"], "and the study move dropped the remembered caret")
+        self.assertEqual([len(after["text"][0])] * 2, after["insertionRange"]["findings"], "the new study inserts at its end")
 
     # ── D10 ────────────────────────────────────────────────────────────────────────────────
     def test_d10_an_anchor_inside_an_existing_citation_moves_past_it(self):
@@ -547,14 +548,14 @@ class ReportCursorInsertDOMTest(unittest.TestCase):
         # (b) the real non-force loadReport with the SAME text moves neither caret nor marker
         self.page.evaluate("load()")
         self.assertEqual([3, 3], self.snap()["caret"]["findings"], "an identical assignment must not move the caret")
-        self.assertTrue(self.snap()["marked"]["findings"], "and must not forget the position either")
+        self.assertEqual([3, 3], self.snap()["insertionRange"]["findings"], "the next insertion keeps the position")
         # (c) a real change does forget it, and the next insertion is the legacy append. The forced
         # load is the path that actually replaces a value: a non-force one finds the screen dirty
         # against the changed source and preserves what is on it, so it can never assign a different
         # string - which is why (b) above is the real non-force case and this one is not.
         self.page.evaluate("()=>{ appState[%s].draft.findings = '서버가 보낸 다른 초안'; load({force:true}); }"
                            % json.dumps(UID))
-        self.assertFalse(self.snap()["marked"]["findings"], "a changed value drops the remembered position")
+        self.assertEqual([len(self.snap()["text"][0])] * 2, self.snap()["insertionRange"]["findings"], "changed text inserts at its end")
         self.page.evaluate("citeReply(%s)" % json.dumps({"version": 1, "head": [], "draft": []}))
         self.open_pane()
         self.assertIn("맨 끝", self.snap()["pane"]["place"])

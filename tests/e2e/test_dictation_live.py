@@ -891,7 +891,8 @@ def geo_problems(state, initial, measured):
     if not redit or (redit_min is not None and redit['h'] < redit_min):
         problems.append('G5 %s: .redit %s below its min-height %r' % (state, redit, redit_min))
     fields = measured.get('fields') or {}
-    for name in RFIELDS:
+    # W6 presents Findings/Conclusion in the shared scroller; Recommendation is retained by G7.
+    for name in ("findings", "conclusion"):
         value = fields.get(name) or {}
         field, field_min = value.get('box'), (value.get('min') or {}).get('px')
         if not field or (field_min is not None and field['h'] < field_min):

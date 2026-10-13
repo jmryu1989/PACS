@@ -213,7 +213,7 @@
       reportSaveFailures.delete(selectedUid);
       keepReportEditor();
     }
-    for (const field of RFIELDS) $("#" + field).addEventListener("input", recordReportEdit);
+    onReportField("input", () => { work.edited(); recordReportEdit(); });
 
     /**
      * 계획이 낸 **칸 전체의 새 글**을, 지금 글에서 달라지는 한 구간의 편집으로 옮긴다(앞뒤의 같은 글자는 건드리지 않는다).

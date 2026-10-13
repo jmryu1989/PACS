@@ -293,7 +293,7 @@ window.stash = () => stashReport();
 window.text = () => RFIELDS.map(k => $("#" + k).value);
 window.caretOf = field => [$("#" + field).selectionStart, $("#" + field).selectionEnd];
 window.put = (field, start, end) => { const el = $("#" + field); el.setSelectionRange(start, end === undefined ? start : end); };
-window.marked = field => caretFields.has(field);
+window.insertionRange = field => { const at=reportFrame.capture(field); return [at.start, at.end]; };
 window.reply = value => { replies.push(value); };
 window.citeReply = value => { citeReplies.push(value); };
 window.structReply = value => { structReplies.push(value); };
@@ -305,7 +305,7 @@ window.snapshot = () => ({
   toasts: structuredClone(toasts), text: window.text(),
   state: structuredClone(appState[selectedUid] ?? null),
   caret: Object.fromEntries(RFIELDS.map(k => [k, window.caretOf(k)])),
-  marked: Object.fromEntries(RFIELDS.map(k => [k, caretFields.has(k)])),
+  insertionRange: Object.fromEntries(RFIELDS.map(k => [k, window.insertionRange(k)])),
   readOnly: Object.fromEntries(RFIELDS.map(k => [k, $("#" + k).readOnly])),
   placeholder: Object.fromEntries(RFIELDS.map(k => [k, $("#" + k).placeholder])),
   focused: document.activeElement ? document.activeElement.id : null,
@@ -527,7 +527,7 @@ class ReportDictationInputDOMTest(unittest.TestCase):
         self.assertEqual("첫 줄" + COMPOSED + "\n둘째 줄\n셋째 줄", value["text"][0],
                          "the composed text belongs at the caret, with nothing lost or doubled")
         self.assertEqual([3 + len(COMPOSED)] * 2, value["caret"]["findings"])
-        self.assertTrue(value["marked"]["findings"], "the field was focused, so its position is known")
+        self.assertEqual(value["caret"]["findings"], value["insertionRange"]["findings"], "the next insertion uses the visible selection")
 
     # ── DI-02 ──────────────────────────────────────────────────────────────────────────────
     def test_di02_typed_without_an_ime_composed_and_directly_committed_are_the_same_text(self):
@@ -550,7 +550,7 @@ class ReportDictationInputDOMTest(unittest.TestCase):
         self.assertEqual([COMPOSED] * 3, value["text"], "all three paths must store the same bytes")
         self.assertEqual([[len(COMPOSED)] * 2] * 3, [value["caret"][k] for k in
                                                      ("findings", "conclusion", "recommendation")])
-        self.assertEqual([True] * 3, [value["marked"][k] for k in
+        self.assertEqual([[len(COMPOSED)] * 2] * 3, [value["insertionRange"][k] for k in
                                       ("findings", "conclusion", "recommendation")])
         self.page.evaluate("stash()")
         self.page.wait_for_function("()=>calls.length>=1")
@@ -603,9 +603,9 @@ class ReportDictationInputDOMTest(unittest.TestCase):
         final = self.snap()
         SUMMARY["observations"]["same_value_poll_during_composition"] = {
             "before": {"text": before["text"][0], "caret": before["caret"]["findings"],
-                       "marked": before["marked"]["findings"]},
+                       "marked": before["insertionRange"]["findings"]},
             "after_load": {"text": after["text"][0], "caret": after["caret"]["findings"],
-                           "marked": after["marked"]["findings"]},
+                           "marked": after["insertionRange"]["findings"]},
             "after_commit": {"text": final["text"][0], "caret": final["caret"]["findings"]},
             "parity_expected": "첫 줄" + COMPOSED + "\n둘째 줄\n셋째 줄",
         }
@@ -631,24 +631,27 @@ class ReportDictationInputDOMTest(unittest.TestCase):
         self.assertEqual("첫 줄" + COMPOSED + "\n둘째 줄\n셋째 줄", value["text"][0],
                          "a poll between the composition and its commit must change nothing")
         self.assertEqual([3 + len(COMPOSED)] * 2, value["caret"]["findings"])
-        self.assertTrue(value["marked"]["findings"], "an identical assignment must not forget the position")
+        self.assertEqual(value["caret"]["findings"], value["insertionRange"]["findings"], "identical text preserves the insertion position")
 
     # ── DI-06 ──────────────────────────────────────────────────────────────────────────────
-    def test_di06_a_forced_load_replaces_the_field_even_mid_composition(self):
-        """A study switch must still overwrite (the A->B->A lesson). What Blink does to a live
-        composition when the value is replaced by a DIFFERENT string cannot be read off the source,
-        so the product contract is asserted and the composition's fate is recorded."""
+    def test_di06_a_forced_load_preserves_composition_until_it_ends(self):
+        """W6 atomic refusal: authoritative replacement cannot commit or erase active IME text.
+        A later explicit reload can replace the text after the native composition ends."""
         self.need_composition("DI-06")
         self.open()
         self.place("findings", 3)
         self.compose("#findings", STEPS)
+        composing = self.snap()
         self.page.evaluate("()=>{ appState[%s].draft.findings = '서버가 보낸 다른 초안'; load({force:true}); }"
                            % json.dumps(UID))
         after = self.snap()
-        self.assertEqual("서버가 보낸 다른 초안", after["text"][0], "a forced load replaces the field")
-        self.assertFalse(after["marked"]["findings"], "a changed value drops the remembered position")
+        self.assertEqual(composing["text"], after["text"], "active composition refuses the whole replacement")
+        self.assertEqual(composing["caret"], after["caret"], "refusal keeps the selection")
         self.compose("#findings", [], COMPOSED)
         final = self.snap()
+        self.page.evaluate("()=>{ appState[%s].draft.findings = '서버가 보낸 다른 초안'; load({force:true}); }"
+                           % json.dumps(UID))
+        self.assertEqual("서버가 보낸 다른 초안", self.snap()["text"][0])
         SUMMARY["observations"]["forced_different_value_during_composition"] = {
             "after_load": after["text"][0], "after_commit": final["text"][0],
             "draftbar": after["draftbar"],

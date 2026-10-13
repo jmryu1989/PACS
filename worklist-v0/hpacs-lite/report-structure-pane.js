@@ -278,7 +278,15 @@
           toast("다른 검사로 옮기기 전에 누른 구조화 적용의 응답이 늦게 도착해 화면에 반영하지 않았습니다.", "err");
           return;
         }
-        editReport([reportEditOf(pane.field, fresh.text, fresh.end)]);
+        // The accepted operation is never sent again because the local frame refused it.
+        const shown = structurePlan(pane);
+        const applied = shown && shown.mode2 !== "refuse" && editReport([reportEditOf(pane.field, shown.text, shown.end)]);
+        if (!applied && (!shown || shown.mode2 === "refuse" || $("#" + pane.field).value !== shown.text)) {
+          markConverge(uid); invalidateStructure(uid);
+          if (structPane === pane) closeStructure();
+          toast("서버에 구조화 내용을 기록했지만 현재 입력 상태로 화면에 넣지 못했습니다. 입력은 그대로 보존했습니다. 서버 내용을 다시 확인하세요.", "err");
+          return;
+        }
         // The edit retained all current fields, including edits made while this command was out.
         if (sameDraftText(appState[uid]?.draft, { ...content, baseVersion })) reportConverge.delete(uid);
         // 새 `sid`를 지어내지 않는다 — 서버가 무엇을 기록했는지는 전용 읽기 하나가 말한다.

@@ -75,6 +75,10 @@ PROBE_URL = h.ORIGIN + "/syn-elsewhere.html"
 # ── the early inputs (what a person can do while the page is still loading) ──
 def report_fields(page):
     for k in FIELDS:
+        # W6 exposes two sections; hidden Recommendation is exercised through the
+        # template/payload cases. Historical layouts still exercise all three controls.
+        if page.locator("#" + k).get_attribute("aria-hidden") == "true":
+            continue
         page.click("#" + k)
         page.keyboard.type("a")
 
