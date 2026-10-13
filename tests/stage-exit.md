@@ -87,7 +87,7 @@ D621에 따라 provider reconciliation은 U5b 범위다. DB Suspend 뒤 살아 �
 이전 성공으로 대체하지 않으며, SHA/소유 workflow 불일치·누락·만료 artifact는 거절한다.
 G3(candidate.yml) 자동 조회는 **CI-TOOLING-1b**로 분리했다. 기본 수집 호출은 STOP하며,
 비후보 수집은 `--non-candidate`를 명시해야 한다. manifest의 scope는 non-candidate이고
-G3는 NOT_COLLECTED다. 이는 전체 stage 통과가 아니다. candidate.yml의 기존 run-name 한 줄은
+G3는 NOT_COLLECTED다. 이는 전체 stage 통과가 아니다. 이 PR이 candidate.yml에 추가하는 run-name 한 줄은
 1b의 provenance로 보존하며 1a는 제목·artifact 이름·PR head로 G3를 탐색하지 않는다.
 G3 증거는 기존처럼 **해당 dispatch 응답/공식 후보 기록에 남긴 run id**를 사람이 확인해 받는다.
 최신 공식 실행의 완료/성공, candidate.yml 소유, 실제 attempt와 artifact 출처를 확인하고,
@@ -112,35 +112,42 @@ head_sha 검색 상한 1,000건에 닿으면 STOP한다. total_count는 반복 �
 N의 증거로 수집한다. 부분 재실행은 이전 attempt artifact를 N으로 재표시하지 않고 STOP하는
 정책을 기본으로 하며, 전체 재실행·부분 재실행·attempt 미증명 시험을 1b에서 수행한다.
 
-**재실행 STOP 운영 절차:** attempt >= 2이면 원래 수집 폴더와 STOP 원문을 보존하고 아래처럼
-`gh run view --json databaseId,attempt,status,conclusion,headSha,event,workflowName`으로 확인한다.
-`$stoppedRun`은 STOP의 run id다. 다음 명령의 실제 인수 순서는 아래 실행 블록을 따른다.
-운영자는 반환된 run id/attempt/SHA/event/workflow와 최신 공식 실행 기록을 대조한다.
-검사한 artifact id로만 archive를 다운로드하고 run id/attempt/artifact id/digest와 조회 응답을
-수동 증거로 남긴다. 이 자료는 진단·누락 확인에만 쓰며 attempt 출처가 증명되기 전에는
-자동 수집 completed나 stage-exit PASS 증거로 쓰지 않는다. **이전 성공 run 대체 금지**다.
-이미 dispatch한 대체 run도 event=workflow_dispatch로 STOP하며 동일 수동 절차를 적용한다.
-대체 dispatch나 전체/부분 재실행의 성공만으로 STOP을 해소하지 않는다.
+**재실행 STOP 운영 절차:** attempt >= 2이면 원래 수집 폴더와 STOP 원문을 보존한다.
+`$repository`는 owner/repo, `$stoppedRun`은 STOP의 양의 run id, `$artifactId`는 같은 저장소의
+REST artifact 목록/metadata에서 확인한 양의 id다. 저장소 루트에서 다음 명령을 실행한다.
 
 ```powershell
-$stopped = gh run view $stoppedRun --json databaseId,attempt,status,conclusion,headSha,event,workflowName
-if ($LASTEXITCODE -ne 0) { throw 'STOP 실행 확인 실패' }
-$stopped | Set-Content -Encoding utf8 "$out/stopped-run.json"
-# repository와 artifactId는 위 실행의 REST artifact 목록/metadata를 대조해 확정한다.
-if (-not $artifactId) { throw '확인된 artifact id 필요' }
-$metadata = gh api "repos/$repository/actions/artifacts/$artifactId" | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0 -or $metadata.workflow_run.id -ne $stoppedRun) { throw 'artifact 실행 출처 불일치' }
-$archive = "$out/manual-$stoppedRun-$artifactId.zip"
-# Windows PowerShell의 native stdout 재인코딩을 피하고 원본 zip 바이트를 보존한다.
-python -c 'import subprocess,sys; f=open(sys.argv[2], ''xb''); subprocess.run([''gh'',''api'',sys.argv[1]], stdout=f, check=True)' "repos/$repository/actions/artifacts/$artifactId/zip" $archive
-if ($LASTEXITCODE -ne 0) { throw '수동 archive 수령 실패' }
-$stream = [System.IO.File]::OpenRead($archive)
-$hasher = [System.Security.Cryptography.SHA256]::Create()
-try { $digest = 'sha256:' + ([System.BitConverter]::ToString($hasher.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }
-finally { $stream.Dispose(); $hasher.Dispose() }
-if ($metadata.digest -and $metadata.digest -ne $digest) { throw '수동 archive digest 불일치' }
-@{ run = ($stopped | ConvertFrom-Json); artifact_id = $artifactId; metadata = $metadata; digest = $digest; use = 'diagnostic-only' } | ConvertTo-Json -Depth 12 | Set-Content -Encoding utf8 "$out/manual-$stoppedRun-$artifactId.json"
+python -B scripts/collect-rerun-diagnostic.py --repository $repository --run-id $stoppedRun --artifact-id $artifactId --out $out
+if ($LASTEXITCODE -ne 0) { throw '재실행 진단 증거 수집 실패: 원문 로그 확인' }
 ```
+
+CLI는 `gh run view`에 `--repo`를 명시하고 run 응답의 ID·attempt·필수 필드와 artifact
+metadata의 ID·소유 run을 검사한 뒤 해당 ID의 ZIP endpoint를 GET한다. 상대 `--out`은
+스크립트가 속한 저장소 루트(선택 `--repo-root`)에 결합해 절대 경로로 확정하므로, 셸을
+다른 디렉터리에서 시작해 Set-Location해도 같다. 공백·한글 경로와 절대 out도 지원한다.
+advertised `sha256:<64 hex>`와 실제 archive SHA-256이 모두 필수이며 없음·빈 값·잘못된 형식은
+`RERUN_DIGEST_REQUIRED`, 불일치는 `RERUN_DIGEST_MISMATCH`로 STOP한다. digest 없는 과거
+artifact는 이 진단 CLI에서 받을 수 없으며 null digest 영수증이나 fallback은 없다.
+이 제한은 비후보 collector 또는 1b의 digest 정책을 바꾸지 않는다.
+
+`manual-<run>-<artifact>.zip`과 `.json`은 exclusive 생성한다. 기존 파일을 덮거나 지우지 않고,
+download가 nonzero이면 완전한 ZIP이어도 실패한다. 받은 partial/archive와 호출별 raw stdout·stderr·
+argv/exit는 새 `rerun-*` 폴더 및 archive에 남긴다. JSON 쓰기 실패 시 이번 호출의 불완전 JSON만
+지운다. 성공 JSON에는 repository/run id/관측 attempt/artifact id/절대 archive 경로/두 digest/run 상태,
+`use=diagnostic-only`, `producer_attempt_verified=false`를 남긴다. stdout/stderr는 UTF-8이고
+JSON과 오류 code/ID는 ASCII 안전 출력이다. 정상은 0, 검증·외부 명령·파일 오류는 1, 사용 오류는 2다.
+
+운영자는 관측 run id/attempt/SHA/event/workflow를 최신 공식 실행 기록과 대조한다. 관측 attempt는
+producer attempt 증명이 아니다. 이 자료는 진단·누락 확인에만 쓰며 자동 수집 completed나
+stage-exit PASS 증거로 쓰지 않는다. **이전 성공 run 대체 금지**다.
+이미 dispatch한 대체 run도 event=workflow_dispatch로 STOP하며 동일 수동 절차를 적용한다.
+대체 dispatch나 전체/부분 재실행의 성공만으로 STOP을 해소하지 않는다. CLI는 재실행·dispatch·삭제하지 않는다.
+
+`ci_rerun_diagnostic_test.py`는 PS5.1/pwsh 문서 호출, 상대 out·다른 cwd·digest·실패·기존 파일
+보존을 검사한다. `record_run_test.py`는 이 시험과 collector·detector 행동 시험을 수집하며 기존
+validate.yml / measurements의 `Execution evidence raw and LF hash preservation` 단계에서 실행된다.
+`node tests/ci_workflow_consumers.cjs --audit .`는 gap/미등록 파일로 CI를 실패시키지 않는 진단이다.
+진단기의 실행/파싱 오류와 행동 시험 실패는 성공으로 숨기지 않는다.
 
 새 run끼리는 생성 시각, 같은 초면 ID로 최신을 고르고 최신 실패·대기·진행·누락·만료는 거절한다.
 검사한 artifact ID로 archive를 받고 제공된 digest와 대조하며, 실제 archive SHA256을 남긴다.

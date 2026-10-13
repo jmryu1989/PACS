@@ -8,14 +8,142 @@ import sys
 import tempfile
 import unittest
 
-# Collector behaviour remains in the existing recorder CI entry point.
+# The existing measurements entry point runs contracts, not a real-tree gap gate.
 from ci_artifacts_test import ArtifactTests
+from ci_workflow_consumers_test import WorkflowConsumerTests
+from ci_rerun_diagnostic_test import RerunDiagnosticTests
 
 
 RECORDER = Path(__file__).resolve().parents[1] / "scripts" / "record-run.py"
 
 
 class RecordRunTest(unittest.TestCase):
+    def put(self, name, raw=b'synthetic\n'):
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        return path
+
+    def test_absent_automatic_inputs_are_recorded_without_failing_child(self):
+        # R5-RR-01: a partial source fixture is a valid declared input.
+        self.put('tests/other_test.py')
+        result = self.run_command([sys.executable, '-c', 'pass'], files=['tests/other_test.py'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = self.record()
+        self.assertEqual(record['declared_inputs'], {'files': ['tests/other_test.py'], 'trees': []})
+        for key in ('files_before', 'files_after'):
+            rows = {row['requested']: row for row in record[key]}
+            for name in ('tests/ci_workflows.py', 'scripts/record-run.py', '.github/workflows'):
+                self.assertEqual(rows[name]['status'], 'missing')
+                self.assertIsNone(rows[name]['sha256'])
+        self.run_dir = self.root / 'evidence' / 'explicit-missing'
+        (self.root / 'tests/other_test.py').unlink()
+        result = self.run_command([sys.executable, '-c', 'pass'], files=['tests/other_test.py'])
+        self.assertEqual(result.returncode, 125)
+
+    def test_every_tests_file_kind_records_workflow_hashes(self):
+        # R5-RR-02 / OM04: names and extensions do not define the blanket rule.
+        self.put('tests/ci_workflows.py')
+        self.put('scripts/record-run.py')
+        self.put('.github/workflows/probe.yml')
+        for index, name in enumerate(('tests/e2e/test_probe.py', 'tests/probe.cjs', 'tests/invariants_live.py')):
+            with self.subTest(name=name):
+                self.put(name)
+                self.run_dir = self.root / 'evidence' / str(index)
+                result = self.run_command([sys.executable, '-c', 'pass'], files=[name])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for key in ('files_before', 'files_after'):
+                    rows = {row['requested']: row for row in self.record()[key]}
+                    self.assertEqual(rows['.github/workflows/probe.yml']['sha256'], hashlib.sha256(b'synthetic\n').hexdigest())
+
+    def test_test_tree_ancestors_descendants_and_unrelated_tree(self):
+        # R5-RR-03 / OM05/15: keep evidence outside the declared root tree.
+        self.put('tests/nested/probe.py')
+        self.put('scripts/fixture/probe.py')
+        self.put('.github/workflows/probe.yml')
+        with tempfile.TemporaryDirectory(prefix='record-tree-out-') as output:
+            for index, tree in enumerate(('.', 'tests', 'tests/nested', 'scripts/fixture')):
+                with self.subTest(tree=tree):
+                    self.run_dir = Path(output) / str(index)
+                    result = self.run_command([sys.executable, '-c', 'pass'], trees=[tree])
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    record = self.record()
+                    self.assertEqual('.github/workflows' in record['workflow_contract_inputs']['trees'], tree != 'scripts/fixture')
+                    for key in ('files_before', 'files_after'):
+                        hashes = {row['path']: row['sha256'] for row in record[key]}
+                        workflow = str((self.root / '.github/workflows/probe.yml').resolve())
+                        self.assertEqual(workflow in hashes, tree != 'scripts/fixture')
+
+    def test_recorder_self_test_observes_nested_test_and_parser_lock_changes(self):
+        # R5-RR-04 / OM16: observe the public recorder result, not its helper array.
+        self.put('tests/record_run_test.py')
+        self.put('tests/nested/dependency.py', b'before')
+        self.put('api/package-lock.json', b'before')
+        child = "from pathlib import Path; Path('tests/nested/dependency.py').write_bytes(b'after'); Path('api/package-lock.json').write_bytes(b'after')"
+        result = self.run_command([sys.executable, '-c', child], files=['tests/record_run_test.py'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for key, raw in (('files_before', b'before'), ('files_after', b'after')):
+            rows = {row['requested']: row for row in self.record()[key]}
+            for name in ('tests/nested/dependency.py', 'api/package-lock.json'):
+                self.assertEqual(rows[name]['sha256'], hashlib.sha256(raw).hexdigest())
+
+    def test_automatic_missing_creation_removal_unreadable_and_declared_overlap(self):
+        # R5-RR-05: explicit absolute aliases and explicit tree descendants win.
+        self.put('tests/probe.py')
+        helper = self.root / 'tests/ci_workflows.py'
+        cases = [
+            ('create', [], [], "from pathlib import Path; Path('tests/ci_workflows.py').write_bytes(b'new')", 0, 'missing', 'present'),
+            ('remove', [], [], "from pathlib import Path; Path('tests/ci_workflows.py').unlink()", 0, 'present', 'missing'),
+            ('absolute-overlap', [str(helper)], [], 'pass', 125, 'missing', 'missing'),
+            ('unreadable-auto', [], [], 'pass', 0, 'unreadable', 'unreadable'),
+            ('unreadable-declared', ['./tests/ci_workflows.py'], [], 'pass', 125, 'unreadable', 'unreadable'),
+        ]
+        for label, extra_files, trees, child, exit_code, before, after in cases:
+            with self.subTest(case=label):
+                if label == 'unreadable-auto':
+                    helper.mkdir()
+                self.run_dir = self.root / 'evidence' / label
+                result = self.run_command([sys.executable, '-c', child], files=['tests/probe.py', *extra_files], trees=trees)
+                self.assertEqual(result.returncode, exit_code, result.stderr)
+                for key, status in (('files_before', before), ('files_after', after)):
+                    rows = [row for row in self.record()[key] if row['path'] == str(helper)]
+                    self.assertTrue(rows)
+                    self.assertTrue(all(row['status'] == status for row in rows))
+        helper.rmdir()
+        self.put('tests/tree-child.txt')
+        self.run_dir = self.root / 'evidence' / 'tree-descendant'
+        child = "from pathlib import Path; Path('tests/tree-child.txt').unlink(); Path('tests/tree-child.txt').mkdir()"
+        result = self.run_command([sys.executable, '-c', child], files=['tests/tree-child.txt'], trees=['tests'])
+        self.assertEqual(result.returncode, 125)
+
+    def test_child_and_launch_failures_keep_priority_over_absent_inputs(self):
+        for label, command, expected in (
+                ('child', [sys.executable, '-c', 'raise SystemExit(7)'], 7),
+                ('launch', [str(self.root / 'absent-executable')], 127)):
+            self.run_dir = self.root / 'evidence' / label
+            result = self.run_command(command, files=['tests/missing.py'])
+            self.assertEqual(result.returncode, expected)
+            self.assertEqual(self.record()['recorder_exit_code'], expected)
+
+    def test_log_hash_failure_is_required_even_without_declared_files(self):
+        # Use the real child/recording path; simulate the OS losing its log after close.
+        import importlib.util
+        from unittest.mock import patch
+        spec = importlib.util.spec_from_file_location('rr_log_failure', RECORDER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        snapshot = module.file_snapshot
+        def failed_log(paths, cwd):
+            if Path(cwd) == self.run_dir and 'stdout.log' in paths:
+                (self.run_dir / 'stdout.log').unlink()
+            return snapshot(paths, cwd)
+        with patch.object(module, 'file_snapshot', side_effect=failed_log):
+            exit_code = module.main(['--run-dir', str(self.run_dir), '--cwd', str(self.root),
+                                     '--', sys.executable, '-c', 'pass'])
+        self.assertEqual(exit_code, 125)
+        self.assertEqual(self.record()['exit_code'], 0)
+        self.assertEqual(self.record()['log_files'][0]['status'], 'missing')
+
     def test_tree_only_unregistered_input_gets_workflow_catalogue(self):
         for name in ('tests/new/nested_probe.py', 'tests/ci_workflows.py', 'scripts/record-run.py',
                      '.github/workflows/new.yml'):

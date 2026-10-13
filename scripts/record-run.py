@@ -157,14 +157,20 @@ def main(argv=None):
         print("Cannot create new run directory: {}".format(error), file=sys.stderr)
         return 125
 
+    # Required evidence is determined by the caller's declarations, before the
+    # D1135 convenience inputs are combined with it. Partial source fixtures may
+    # lack those automatic inputs; retain that absence without inventing hashes.
+    declared_before = file_snapshot(args.file, cwd) + tree_snapshot(args.tree, cwd)
+    automatic_before = file_snapshot(extra_files, cwd) + tree_snapshot(extra_trees, cwd)
     record = {
         "schema_version": 1, "command": command, "cwd": str(cwd),
         "status": "preparing", "started_at_utc": None, "ended_at_utc": None,
         "exit_code": None, "recorder_exit_code": None, "launch_error": None,
         "git_head_before": git_head(cwd), "git_head_after": None,
-        "files_before": file_snapshot(args.file + extra_files, cwd) + tree_snapshot(args.tree + extra_trees, cwd), "files_after": None,
+        "files_before": declared_before + automatic_before, "files_after": None,
         "stdout": "stdout.log", "stderr": "stderr.log", "log_files": None,
         "workflow_contract_inputs": {"files": extra_files, "trees": extra_trees},
+        "declared_inputs": {"files": args.file, "trees": args.tree},
     }
     metadata = run_dir / "run.json"
     try:
@@ -187,14 +193,16 @@ def main(argv=None):
                 })
                 wrapper_exit = 127
             record.update(ended_at_utc=utc_now(), duration_seconds=time.monotonic() - started)
+        declared_after = file_snapshot(args.file, cwd) + tree_snapshot(args.tree, cwd)
+        automatic_after = file_snapshot(extra_files, cwd) + tree_snapshot(extra_trees, cwd)
         record.update(
             git_head_after=git_head(cwd),
-            files_after=file_snapshot(args.file + extra_files, cwd) + tree_snapshot(args.tree + extra_trees, cwd),
+            files_after=declared_after + automatic_after,
             log_files=file_snapshot(["stdout.log", "stderr.log"], run_dir),
         )
         # A successful child is not proof of complete evidence if a requested hash failed.
         if wrapper_exit == 0 and (
-            any(item["status"] != "present" for item in record["files_before"] + record["files_after"])
+            any(item["status"] != "present" for item in declared_before + declared_after)
             or any(item["status"] != "present" for item in record["log_files"])
         ):
             wrapper_exit = 125

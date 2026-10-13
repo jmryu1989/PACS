@@ -385,6 +385,47 @@ def workflow_step_audit(root):
 
 
 class WorkflowConsumerTests(unittest.TestCase):
+    def test_audit_entry_points_report_gaps_without_failing_and_parse_errors_fail(self):
+        # R5-DIAG-01: both public CLIs preserve diagnostics and exit semantics.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'tests').mkdir()
+            (root / '.github/workflows').mkdir(parents=True)
+            (root / 'tests/new.py').write_text('import leaf\n', encoding='utf-8')
+            (root / 'tests/leaf.py').write_text("p = '.github/workflows'\n", encoding='utf-8')
+            workflow = root / '.github/workflows/probe.yml'
+            workflow.write_text('''jobs:
+  probe:
+    steps:
+      - name: missing transitive input
+        run: python scripts/record-run.py --file tests/new.py -- python tests/new.py
+      - name: complete inputs
+        run: python scripts/record-run.py --tree tests -- python tests/new.py
+      - name: unresolved argv
+        run: python scripts/record-run.py --file tests/new.py -- python $ENTRY
+''', encoding='utf-8')
+            commands = ([sys.executable, '-B', str(Path(__file__).resolve())],
+                        ['node', str(ROOT / 'tests/ci_workflow_consumers.cjs')])
+            for command in commands:
+                with self.subTest(command=command):
+                    result = subprocess.run([*command, '--audit', str(root)], capture_output=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    report = json.loads(result.stdout)
+                    self.assertEqual(report['gaps'], 1)
+                    self.assertEqual(report['unresolved'], 1)
+                    self.assertEqual(len(report['steps']), 3)
+                    for index, row in enumerate(report['steps']):
+                        self.assertEqual((row['workflow'], row['job'], row['step']), ('.github/workflows/probe.yml', 'probe', index))
+                    self.assertEqual(report['steps'][0]['missing'], ['tests/leaf.py'])
+                    self.assertEqual(report['steps'][1]['missing'], [])
+                    self.assertTrue(report['steps'][2]['unresolved'])
+            workflow.write_text('jobs: [unclosed', encoding='utf-8')
+            for command in commands:
+                with self.subTest(invalid=command):
+                    result = subprocess.run([*command, '--audit', str(root)], capture_output=True)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertTrue(result.stderr)
+
     def test_parent_index_keeps_resolved_external_target(self):
         scan = python_scan("subprocess.run(['python', str(Path('sandbox/a/probe.py').parents[1] / 'leaf.py')])")
         self.assertEqual(scan[2], {'sandbox/leaf.py'})

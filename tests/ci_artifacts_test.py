@@ -203,77 +203,10 @@ foreach ($file in Get-ChildItem $PSScriptRoot -Filter '*.ps1' | Where-Object Nam
                     self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
 
     def test_manual_rerun_archive_and_three_guards_execute(self):
-        shells = self.powershells()
-        if not shells:
-            self.skipTest('PowerShell is not installed; Windows validation is required separately')
-        doc = (ROOT / 'tests/stage-exit.md').read_text(encoding='utf-8')
-        block = next(block for block in re.findall(r'```powershell\n(.*?)```', doc, re.S) if block.startswith('$stopped ='))
-        for shell in shells:
-            for case, message in (('ok', None), ('id', '확인된 artifact id 필요'),
-                                  ('origin', 'artifact 실행 출처 불일치'), ('digest', '수동 archive digest 불일치')):
-                with self.subTest(shell=shell, case=case), tempfile.TemporaryDirectory() as folder:
-                    root = Path(folder)
-                    fake = root / 'fake-gh.py'
-                    fake.write_text('''import hashlib, json, os, sys
-from pathlib import Path
-case = os.environ['MOCK_CASE']
-archive = b'PK\\x03\\x04synthetic\\x00\\xff'
-if sys.argv[1:3] == ['run', 'view']:
-    print(json.dumps(dict(databaseId=42, attempt=2, status='completed', conclusion='success', headSha='a'*40, event='push', workflowName='validate')))
-elif sys.argv[-1].endswith('/zip'):
-    Path(os.environ['MOCK_DOWNLOAD']).write_text('downloaded')
-    sys.stdout.buffer.write(archive)
-else:
-    print(json.dumps(dict(id=99, workflow_run=dict(id=7 if case == 'origin' else 42), digest='sha256:' + ('wrong' if case == 'digest' else hashlib.sha256(archive).hexdigest()))))
-''', encoding='utf-8')
-                    if os.name == 'nt':
-                        # CreateProcess searches .exe, not PATHEXT: a .cmd mock can
-                        # accidentally fall through to the real installed gh.exe.
-                        source = root / 'MockGh.cs'
-                        payload = b'PK\x03\x04synthetic\x00\xff'
-                        run_json = json.dumps(dict(databaseId=42, attempt=2, status='completed', conclusion='success',
-                                                   headSha='a' * 40, event='push', workflowName='validate'))
-                        metadata_json = json.dumps(dict(id=99, workflow_run=dict(id=7 if case == 'origin' else 42),
-                                                        digest='sha256:' + ('wrong' if case == 'digest' else hashlib.sha256(payload).hexdigest())))
-                        source.write_text('''using System; using System.IO;
-class MockGh { static void Main(string[] args) {
-if (args.Length > 1 && args[0] == "run" && args[1] == "view") Console.WriteLine(RUN);
-else if (args[args.Length-1].EndsWith("/zip")) {
-File.WriteAllText(Environment.GetEnvironmentVariable("MOCK_DOWNLOAD"), "downloaded");
-byte[] data = new byte[] {PAYLOAD}; Console.OpenStandardOutput().Write(data, 0, data.Length);
-} else Console.WriteLine(METADATA);
-} }
-'''.replace('RUN', json.dumps(run_json)).replace('METADATA', json.dumps(metadata_json))
-                            .replace('PAYLOAD', ','.join(map(str, payload))), encoding='utf-8')
-                        compiler = Path(os.environ['WINDIR']) / 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
-                        compiled = subprocess.run([str(compiler), '/nologo', '/out:' + str(root / 'gh.exe'), str(source)], capture_output=True)
-                        self.assertEqual(compiled.returncode, 0, compiled.stdout.decode(errors='replace'))
-                    else:
-                        executable = root / 'gh'
-                        executable.write_text('#!' + sys.executable + '\n' + fake.read_text(), encoding='utf-8')
-                        executable.chmod(0o755)
-                    script = root / 'run.ps1'
-                    script.write_text("$ErrorActionPreference = 'Stop'\n$out = $PSScriptRoot\n$repository = 'o/r'\n$stoppedRun = 42\n$artifactId = " + ('0' if case == 'id' else '99') + '\n' + block, encoding='utf-8-sig')
-                    env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH'],
-                               MOCK_CASE=case, MOCK_DOWNLOAD=str(root / 'downloaded'))
-                    # pwsh's inherited module path can hide Windows PS 5.1's
-                    # inbox Get-FileHash module. Let each shell build its own.
-                    env.pop('PSModulePath', None)
-                    result = subprocess.run([shell, '-NoProfile', '-NonInteractive', '-File', str(script)], env=env, capture_output=True)
-                    evidence = root / 'manual-42-99.json'
-                    if message is None:
-                        self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
-                        record = json.loads(evidence.read_text(encoding='utf-8-sig'))
-                        self.assertEqual((record['run']['databaseId'], record['run']['attempt'], record['artifact_id'], record['use']), (42, 2, 99, 'diagnostic-only'))
-                        raw = (root / 'manual-42-99.zip').read_bytes()
-                        self.assertEqual(raw, b'PK\x03\x04synthetic\x00\xff')
-                        self.assertEqual(record['digest'], 'sha256:' + hashlib.sha256(raw).hexdigest())
-                    else:
-                        self.assertNotEqual(result.returncode, 0)
-                        # UTF-8 is configured by the execution environment on Windows.
-                        self.assertIn(message, result.stderr.decode('utf-8', errors='replace'))
-                        self.assertFalse(evidence.exists())
-                        self.assertEqual((root / 'downloaded').exists(), case == 'digest')
+        # Execute the documented CLI with the same environment contract as its suite.
+        from ci_rerun_diagnostic_test import check_documented_invocation
+        check_documented_invocation(self)
+
     def test_invalid_repository_id_stops_before_listing(self):
         for payload in ({}, {'id': '42'}, {'id': 0}, {'id': -1}, {'id': True}):
             with self.subTest(payload=payload), tempfile.TemporaryDirectory() as folder:
@@ -320,9 +253,7 @@ byte[] data = new byte[] {PAYLOAD}; Console.OpenStandardOutput().Write(data, 0, 
     def test_rerun_operator_procedure_preserves_diagnostic_only_evidence(self):
         doc = (ROOT / 'tests/stage-exit.md').read_text(encoding='utf-8')
         for contract in ('CD-02-R', 'run_attempt', '전체 재실행·부분 재실행·attempt 미증명',
-                         'gh run view $stoppedRun --json databaseId,attempt,status,conclusion,headSha,event,workflowName',
-                         'repos/$repository/actions/artifacts/$artifactId/zip', 'artifact_id = $artifactId',
-                         'digest = $digest', "use = 'diagnostic-only'", '이전 성공 run 대체 금지',
+                         'producer_attempt_verified=false', 'diagnostic-only', '이전 성공 run 대체 금지',
                          '이미 dispatch한 대체 run도 event=workflow_dispatch로 STOP',
                          'stage-exit PASS 증거로 쓰지 않는다'):
             self.assertIn(contract, doc)
