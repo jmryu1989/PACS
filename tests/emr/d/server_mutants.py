@@ -56,6 +56,7 @@ COPIED = ["api/src", "api/prisma", "api/tsconfig.json", "api/nest-cli.json", "ap
           "scripts/emr-compose.py", "scripts/run-tests.py", "tests/live_test_gate.py"]
 
 CASE = {
+    "refusals": "EMR-D refusal matrix: every evidence boundary rejects its own counterexample",
     "recovery": "TEST-D-04 atomic_retry server: a recovery releases the original it took over - after a transient store failure the next recovery commits it once, and an original still executing is never fenced",
     "allocation": "TEST-D-04 atomic_retry server: an allocation request keeps its identity - the same request before and after its first commit, at any unit revision; another meaning under its request ID is another request",
     "provide": "TEST-D-03 read_scope server: a response serving many units hands out no text before every provision naming exactly its versions is durable; a projection naming another author or recipient is refused",
@@ -217,10 +218,15 @@ MUTANTS = [
      "file": "tests/emr/d/same_source.py",
      "old": "        elif not (folder / name).is_file() or file_sha256(folder / name) != item[\"sha256\"]:", "new": "        elif False:",
      "case": CASE["evidence"], "expect": "R5-21: a log changed after the run is refused"},
-    {"id": "M-D-R5-21f", "finding": "R5-21", "title": "a declared step that did not run counts as a pass",
-     "file": "tests/emr/d/same_source.py",
-     "old": "        result.update(verdict=\"unrun\", problems=[\"no record: the step did not run\"])", "new": "        result.update(verdict=\"pass\")",
-     "case": CASE["evidence"], "expect": "R5-21: a declared step that did not run is refused"},
+    {'id': 'M-D-R5-21f',
+ 'finding': 'R5-21',
+ 'title': 'a declared step that did not run counts as a pass',
+ 'file': 'tests/emr/d/same_source.py',
+ 'old': '        result.update(verdict="unrun", problems=["no record: the step did not run"])',
+ 'new': '        result.update(verdict="pass")',
+ 'case': 'EMR-D evidence: same_source.py passes only records of TARGET_SHA that hashed, unchanged, every file their step '
+         'consumes as TARGET_SHA holds it, with their logs, exits and declared cases, and the image of TARGET_SHA',
+ 'expect': 'D5D3: producer refuses its missing record'},
     {"id": "M-D-R5-21g", "finding": "R5-21", "title": "a failing command counts as a pass",
      "file": "tests/emr/d/same_source.py",
      "old": "    if run[\"exit_code\"] != 0 or run[\"recorder_exit_code\"] != 0:", "new": "    if False:",
@@ -292,14 +298,14 @@ MUTANTS = [
              'and each record hashes what its command consumes',
      'expect': 'DR3-05: the server declaration names api/prisma/migrations'},
     {'id': 'M-D-D5D-01',
-     'finding': 'D5D-01',
-     'title': 'D5D-01: post-run change',
-     'file': 'tests/emr/d/same_source.py',
-     'old': '    for name in sorted(final_names):',
-     'new': '    for name in []:',
-     'case': 'EMR-D evidence: same_source.py passes only records of TARGET_SHA that hashed, unchanged, every file their '
-             'step consumes as TARGET_SHA holds it, with their logs, exits and declared cases, and the image of TARGET_SHA',
-     'expect': 'D5D-01: post-run change'},
+ 'finding': 'D5D-01',
+ 'title': 'D5D-01: post-run change',
+ 'file': 'tests/emr/d/same_source.py',
+ 'old': '    for name in sorted(final_names):',
+ 'new': '    for name in []:',
+ 'case': 'EMR-D evidence: same_source.py passes only records of TARGET_SHA that hashed, unchanged, every file their step '
+         'consumes as TARGET_SHA holds it, with their logs, exits and declared cases, and the image of TARGET_SHA',
+ 'expect': 'D5D3: producer refuses post-record drift'},
     {'id': 'M-D-D5D-01-raw',
      'finding': 'D5D-01',
      'title': 'a false raw hash borrows the correct LF hash',
@@ -345,14 +351,14 @@ MUTANTS = [
              'and each record hashes what its command consumes',
      'expect': 'D5D-05: incremental cache is neither consumed nor written'},
     {'id': 'M-D-D5D-06',
-     'finding': 'D5D-06',
-     'title': 'a record of another commit fails the check',
-     'file': '.github/workflows/emr-d.yml',
-     'old': 'run: python3 -B tests/emr/d/same_source.py',
-     'new': "run: 'true'",
-     'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, '
-             'and each record hashes what its command consumes',
-     'expect': 'a record of another commit fails the check'},
+ 'finding': 'D5D-06',
+ 'title': 'a record of another commit fails the check',
+ 'file': '.github/workflows/emr-d.yml',
+ 'old': 'run: python3 -B tests/emr/d/same_source.py\n',
+ 'new': "run: 'true'\n",
+ 'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+         'record hashes what its command consumes',
+ 'expect': 'a record of another commit fails the check'},
     {'id': 'M-D-D5D-06-condition',
      'finding': 'D5D-06',
      'title': 'D5D-06: final gate runs on failure',
@@ -372,156 +378,86 @@ MUTANTS = [
              'and each record hashes what its command consumes',
      'expect': 'D5D-06: final gate exists'},
     {'id': 'M-D-D5D-06-early',
-     'finding': 'D5D-06',
-     'title': 'D5D-06: final gate runs after every record',
-     'file': '.github/workflows/emr-d.yml',
-     'old': '      - name: API typecheck including api/src/emr-clinical\n'
-            '        id: typecheck\n'
-            '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/typecheck --cwd . --tree api/src --file '
-            'api/tsconfig.json --file api/package-lock.json --file api/prisma/schema.prisma -- node '
-            'api/node_modules/typescript/bin/tsc --noEmit --incremental false --listFiles --extendedDiagnostics --pretty '
-            'false -p api\n'
-            '      - name: D contracts and C01-C56 model selection (C52 explicitly deferred to R2 DOM)\n'
-            '        id: contract\n'
-            '        if: ${{ !cancelled() }}\n'
-            '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/contract --cwd . --tree '
-            'api/src/emr-clinical --tree api/src/emr-contract --file tests/emr/d/contract_test.cjs --file '
-            'api/tsconfig.json --file api/package-lock.json -- docker run --rm --network none --read-only --tmpfs /tmp -v '
-            '"$PWD:/src:ro" -w /src node:22-alpine node --test --test-reporter=junit tests/emr/d/contract_test.cjs\n'
-            '      - name: Retained 14 and invariant 12 mutants (contract models distinguished; M-D-06 is round 2)\n'
-            '        id: mutants\n'
-            '        if: ${{ !cancelled() }}\n'
-            '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/mutants --cwd . --tree api/src/emr-clinical '
-            '--tree api/src/emr-contract --file tests/emr/d/mutants.py --file tests/emr/d/same_source.py --file '
-            'scripts/record-run.py --file tests/emr/d/contract_test.cjs --file api/tsconfig.json --file '
-            'api/package-lock.json -- python3 -B tests/emr/d/mutants.py\n'
-            "      - name: D server cases and the d.json declaration (TEST-D-01..04 pure halves, this workflow's source "
-            'binding)\n'
-            '        id: server\n'
-            '        if: ${{ !cancelled() }}\n'
-            '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/server --cwd . --tree api/src --tree '
-            'api/prisma --tree tests/emr/d --file emr/units/d.json --file api/tsconfig.json --file api/nest-cli.json '
-            '--file api/package.json --file api/package-lock.json --file api/start-production.sh --file api/.dockerignore '
-            '--file api/Dockerfile --file .github/workflows/emr-d.yml --file scripts/record-run.py --file '
-            'scripts/emr-compose.py --file scripts/run-tests.py --file tests/live_test_gate.py -- node --test '
-            '--test-reporter=junit tests/emr/d/server_test.cjs\n'
-            '      - name: Production API image of this commit\n'
-            '        id: image\n'
-            '        if: ${{ !cancelled() }}\n'
-            '        timeout-minutes: 20\n'
-            '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/image --cwd . --tree api/src --tree '
-            'api/prisma --file api/Dockerfile --file api/.dockerignore --file api/start-production.sh --file '
-            'api/package.json --file api/package-lock.json --file api/tsconfig.json --file api/nest-cli.json -- docker '
-            'build --target production --build-arg "VCS_REF=${{ env.TARGET_SHA }}" -t "kin-emrd-ci:${{ env.TARGET_SHA }}" '
-            'api\n'
-            '      - name: The image is of the requested source (its revision label is TARGET_SHA)\n'
-            '        id: image-identity\n'
-            '        if: ${{ !cancelled() }}\n'
-            '        run: |\n'
-            '          revision="$(docker image inspect -f \'{{ index .Config.Labels "org.opencontainers.image.revision" '
-            '}}\' "kin-emrd-ci:$TARGET_SHA")"\n'
-            '          test "$revision" = "$TARGET_SHA" || { echo "image revision \'$revision\' is not $TARGET_SHA"; exit '
-            '1; }\n'
-            '          mkdir -p tmp/emr-d-ci\n'
-            '          docker image inspect -f \'{{ .Id }} {{ index .Config.Labels "org.opencontainers.image.revision" '
-            '}}\' "kin-emrd-ci:$TARGET_SHA" > tmp/emr-d-ci/image-identity.txt\n'
-            '      - name: EMR-D live (EmrDLive) on an empty hosted daemon through scripts/run-tests.py\n'
-            '        id: live\n'
-            '        if: ${{ !cancelled() }}\n'
-            '        timeout-minutes: 45\n'
-            '        env:\n'
-            '          KIN_EMR_D_IMAGE_IDENTITY: tmp/emr-d-ci/image-identity.txt\n'
-            '          KIN_TEST_API_IMAGE: kin-emrd-ci:${{ env.TARGET_SHA }}\n'
-            '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/live --cwd . --tree tests/emr/d --tree '
-            'api/prisma/migrations --file emr/units/d.json --file scripts/emr-compose.py --file scripts/run-tests.py '
-            '--file tests/live_test_gate.py --file tmp/emr-d-ci/image-identity.txt -- python3 -B scripts/run-tests.py '
-            '--module tests/emr/d/live.py --unit emr-d-ci-live --mode live --timeout 2700\n'
-            '      - name: Collect the server mutant recorder from the same workflow run\n'
-            '        if: ${{ !cancelled() }}\n'
-            '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
-            '        with:\n'
-            '          name: emr-d-server-mutants\n'
-            '          path: tmp/emr-d-ci/\n'
-            '      - name: Every record and the image are of TARGET_SHA, and each record hashed what its command consumes '
-            '(source = image = evidence)\n'
-            '        id: same-source\n'
-            '        if: ${{ !cancelled() }}\n'
-            '        run: python3 -B tests/emr/d/same_source.py\n',
-     'new': '      - name: Every record and the image are of TARGET_SHA, and each record hashed what its command consumes '
-            '(source = image = evidence)\n'
-            '        id: same-source\n'
-            '        if: ${{ !cancelled() }}\n'
-            '        run: python3 -B tests/emr/d/same_source.py\n'
-            '      - name: API typecheck including api/src/emr-clinical\n'
-            '        id: typecheck\n'
-            '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/typecheck --cwd . --tree api/src --file '
-            'api/tsconfig.json --file api/package-lock.json --file api/prisma/schema.prisma -- node '
-            'api/node_modules/typescript/bin/tsc --noEmit --incremental false --listFiles --extendedDiagnostics --pretty '
-            'false -p api\n'
-            '      - name: D contracts and C01-C56 model selection (C52 explicitly deferred to R2 DOM)\n'
-            '        id: contract\n'
-            '        if: ${{ !cancelled() }}\n'
-            '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/contract --cwd . --tree '
-            'api/src/emr-clinical --tree api/src/emr-contract --file tests/emr/d/contract_test.cjs --file '
-            'api/tsconfig.json --file api/package-lock.json -- docker run --rm --network none --read-only --tmpfs /tmp -v '
-            '"$PWD:/src:ro" -w /src node:22-alpine node --test --test-reporter=junit tests/emr/d/contract_test.cjs\n'
-            '      - name: Retained 14 and invariant 12 mutants (contract models distinguished; M-D-06 is round 2)\n'
-            '        id: mutants\n'
-            '        if: ${{ !cancelled() }}\n'
-            '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/mutants --cwd . --tree api/src/emr-clinical '
-            '--tree api/src/emr-contract --file tests/emr/d/mutants.py --file tests/emr/d/same_source.py --file '
-            'scripts/record-run.py --file tests/emr/d/contract_test.cjs --file api/tsconfig.json --file '
-            'api/package-lock.json -- python3 -B tests/emr/d/mutants.py\n'
-            "      - name: D server cases and the d.json declaration (TEST-D-01..04 pure halves, this workflow's source "
-            'binding)\n'
-            '        id: server\n'
-            '        if: ${{ !cancelled() }}\n'
-            '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/server --cwd . --tree api/src --tree '
-            'api/prisma --tree tests/emr/d --file emr/units/d.json --file api/tsconfig.json --file api/nest-cli.json '
-            '--file api/package.json --file api/package-lock.json --file api/start-production.sh --file api/.dockerignore '
-            '--file api/Dockerfile --file .github/workflows/emr-d.yml --file scripts/record-run.py --file '
-            'scripts/emr-compose.py --file scripts/run-tests.py --file tests/live_test_gate.py -- node --test '
-            '--test-reporter=junit tests/emr/d/server_test.cjs\n'
-            '      - name: Production API image of this commit\n'
-            '        id: image\n'
-            '        if: ${{ !cancelled() }}\n'
-            '        timeout-minutes: 20\n'
-            '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/image --cwd . --tree api/src --tree '
-            'api/prisma --file api/Dockerfile --file api/.dockerignore --file api/start-production.sh --file '
-            'api/package.json --file api/package-lock.json --file api/tsconfig.json --file api/nest-cli.json -- docker '
-            'build --target production --build-arg "VCS_REF=${{ env.TARGET_SHA }}" -t "kin-emrd-ci:${{ env.TARGET_SHA }}" '
-            'api\n'
-            '      - name: The image is of the requested source (its revision label is TARGET_SHA)\n'
-            '        id: image-identity\n'
-            '        if: ${{ !cancelled() }}\n'
-            '        run: |\n'
-            '          revision="$(docker image inspect -f \'{{ index .Config.Labels "org.opencontainers.image.revision" '
-            '}}\' "kin-emrd-ci:$TARGET_SHA")"\n'
-            '          test "$revision" = "$TARGET_SHA" || { echo "image revision \'$revision\' is not $TARGET_SHA"; exit '
-            '1; }\n'
-            '          mkdir -p tmp/emr-d-ci\n'
-            '          docker image inspect -f \'{{ .Id }} {{ index .Config.Labels "org.opencontainers.image.revision" '
-            '}}\' "kin-emrd-ci:$TARGET_SHA" > tmp/emr-d-ci/image-identity.txt\n'
-            '      - name: EMR-D live (EmrDLive) on an empty hosted daemon through scripts/run-tests.py\n'
-            '        id: live\n'
-            '        if: ${{ !cancelled() }}\n'
-            '        timeout-minutes: 45\n'
-            '        env:\n'
-            '          KIN_EMR_D_IMAGE_IDENTITY: tmp/emr-d-ci/image-identity.txt\n'
-            '          KIN_TEST_API_IMAGE: kin-emrd-ci:${{ env.TARGET_SHA }}\n'
-            '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/live --cwd . --tree tests/emr/d --tree '
-            'api/prisma/migrations --file emr/units/d.json --file scripts/emr-compose.py --file scripts/run-tests.py '
-            '--file tests/live_test_gate.py --file tmp/emr-d-ci/image-identity.txt -- python3 -B scripts/run-tests.py '
-            '--module tests/emr/d/live.py --unit emr-d-ci-live --mode live --timeout 2700\n'
-            '      - name: Collect the server mutant recorder from the same workflow run\n'
-            '        if: ${{ !cancelled() }}\n'
-            '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
-            '        with:\n'
-            '          name: emr-d-server-mutants\n'
-            '          path: tmp/emr-d-ci/\n',
-     'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, '
-             'and each record hashes what its command consumes',
-     'expect': 'D5D-06: final gate runs after every record'},
+ 'finding': 'D5D-06',
+ 'title': 'gate actually moved before downloads',
+ 'file': '.github/workflows/emr-d.yml',
+ 'old': '  emr-d-gate:\n'
+        '    needs: [emr-d, emr-d-server-mutants]\n'
+        '    if: ${{ !cancelled() }}\n'
+        '    runs-on: ubuntu-24.04\n'
+        '    timeout-minutes: 10\n'
+        '    env:\n'
+        '      TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}\n'
+        '    steps:\n'
+        '      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n'
+        '        with:\n'
+        '          ref: ${{ env.TARGET_SHA }}\n'
+        '          persist-credentials: false\n'
+        '      - name: Collect the main recorder from the same workflow run\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+        '        with:\n'
+        '          name: emr-d-main-records\n'
+        '          path: tmp/emr-d-ci/\n'
+        '      - name: Collect the server mutant recorder from the same workflow run\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+        '        with:\n'
+        '          name: emr-d-server-mutants\n'
+        '          path: tmp/emr-d-ci/\n'
+        '      - name: Every record and the image are of TARGET_SHA, and each record hashed what its command consumes (source = '
+        'image = evidence)\n'
+        '        id: same-source\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        run: python3 -B tests/emr/d/same_source.py\n'
+        '      - name: Preserve the combined gate evidence\n'
+        '        if: always()\n'
+        '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+        '        with:\n'
+        '          name: emr-d-results\n'
+        '          path: tmp/emr-d-ci/\n'
+        '          if-no-files-found: error\n'
+        '          retention-days: 7\n',
+ 'new': '  emr-d-gate:\n'
+        '    needs: [emr-d, emr-d-server-mutants]\n'
+        '    if: ${{ !cancelled() }}\n'
+        '    runs-on: ubuntu-24.04\n'
+        '    timeout-minutes: 10\n'
+        '    env:\n'
+        '      TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}\n'
+        '    steps:\n'
+        '      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n'
+        '        with:\n'
+        '          ref: ${{ env.TARGET_SHA }}\n'
+        '          persist-credentials: false\n'
+        '      - name: Every record and the image are of TARGET_SHA, and each record hashed what its command consumes (source = '
+        'image = evidence)\n'
+        '        id: same-source\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        run: python3 -B tests/emr/d/same_source.py\n'
+        '      - name: Collect the main recorder from the same workflow run\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+        '        with:\n'
+        '          name: emr-d-main-records\n'
+        '          path: tmp/emr-d-ci/\n'
+        '      - name: Collect the server mutant recorder from the same workflow run\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+        '        with:\n'
+        '          name: emr-d-server-mutants\n'
+        '          path: tmp/emr-d-ci/\n'
+        '      - name: Preserve the combined gate evidence\n'
+        '        if: always()\n'
+        '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+        '        with:\n'
+        '          name: emr-d-results\n'
+        '          path: tmp/emr-d-ci/\n'
+        '          if-no-files-found: error\n'
+        '          retention-days: 7\n',
+ 'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+         'record hashes what its command consumes',
+ 'expect': 'D5D-06: final gate runs after every record'},
     {'id': 'M-D-D5D-07',
      'finding': 'D5D-07',
      'title': 'D5D-07: completed and interrupted raw streams survive',
@@ -554,6 +490,1643 @@ MUTANTS = [
      "file": "tests/emr/d/same_source.py", "old": "        if not valid_cli:", "new": "        if False:",
      "case": CASE["evidence"], "expect": "D5D-08: another command cannot borrow a TypeScript result"},
 ]
+
+MUTANTS += [{'id': 'M-D-REF-S01',
+  'finding': 'D5D2-class',
+  'title': 'S01 malformed snapshot',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("%s: an entry that is not a recorder entry: %r" % (phase, item))',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'S01 malformed snapshot'},
+ {'id': 'M-D-REF-S02',
+  'finding': 'D5D2-class',
+  'title': 'S02 absent input',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("%s %s: %s, not hashed as present" % (name, phase, item.get("status")))',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'S02 absent input'},
+ {'id': 'M-D-REF-S03',
+  'finding': 'D5D2-class',
+  'title': 'S03 invalid hash',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("%s %s: no valid SHA-256 (%r, %r)" % (name, phase, digest, lf))',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'S03 invalid hash'},
+ {'id': 'M-D-REF-S04',
+  'finding': 'D5D2-class',
+  'title': 'S04 contradictory duplicate',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("%s %s: hashed twice with different results" % (name, phase))',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'S04 contradictory duplicate'},
+ {'id': 'M-D-REF-J01',
+  'finding': 'D5D2-class',
+  'title': 'J01 selection',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("collected cases are not the declared ones: missing %s, not declared %s"\n'
+         '                       % (sorted(set(section["cases"]) - set(names)), sorted(set(names) - set(section["cases"]))))',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'J01 selection'},
+ {'id': 'M-D-REF-J03',
+  'finding': 'D5D2-class',
+  'title': 'J03 skip',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("declared cases skipped, not passed: %s" % cases["skipped"])',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'J03 skip'},
+ {'id': 'M-D-REF-J02',
+  'finding': 'D5D2-class',
+  'title': 'J02 absent declaration',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("no independent exact case declaration")',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'J02 absent declaration'},
+ {'id': 'M-D-REF-M01',
+  'finding': 'D5D2-class',
+  'title': 'M01 totals',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("the summary does not count its own mutants: %r" % data["result"])',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'M01 totals'},
+ {'id': 'M-D-REF-M02',
+  'finding': 'D5D2-05',
+  'title': 'M02 exclusions',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("not_run differs from the explicit exclusions")',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'M02 exclusions'},
+ {'id': 'M-D-REF-M03',
+  'finding': 'D5D2-class',
+  'title': 'M03 mutant selection',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("mutants run %s, declared %s" % ([m["id"] for m in mutants], section["ids"]))',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'M03 mutant selection'},
+ {'id': 'M-D-REF-M04',
+  'finding': 'D5D2-class',
+  'title': 'M04 equivalent selection',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("equivalents run %s, declared %s" % ([e["id"] for e in equivalents], section.get("equivalents", [])))',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'M04 equivalent selection'},
+ {'id': 'M-D-REF-L02',
+  'finding': 'D5D2-05',
+  'title': 'L02 used identity',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("live used image does not match verified image identity: %r" % images)',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'L02 used identity'},
+ {'id': 'M-D-REF-L03',
+  'finding': 'D5D2-04',
+  'title': 'L03 class selection',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("collected %s, declared %s.%s" % (exact[0], section["class"], section["cases"]))',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'L03 class selection'},
+ {'id': 'M-D-REF-T01',
+ 'finding': 'D5D2-05',
+ 'title': 'T01 partial compiler list',
+ 'file': 'tests/emr/d/same_source.py',
+ 'old': 'if set(metrics) != {"Files", "Types", "Check time", "Total time"} or not files or missing:',
+ 'new': 'if set(metrics) != {"Files", "Types", "Check time", "Total time"} or not files:',
+ 'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+ 'expect': 'T01 partial compiler list'},
+ {'id': 'M-D-REF-C21',
+  'finding': 'D5D2-class',
+  'title': 'C21 compiler identity',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("typecheck: record does not identify the installed TypeScript CLI")',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'C21 compiler identity'},
+ {'id': 'M-D-REF-C02',
+  'finding': 'D5D2-class',
+  'title': 'C02 foreign source',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("a record of another commit (%s before, %s after), not of %s" % (run.get("git_head_before"), '
+         'run.get("git_head_after"), sha))',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'C02 foreign source'},
+ {'id': 'M-D-REF-C03',
+  'finding': 'D5D2-class',
+  'title': 'C03 input disappears',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("%s: gone or unhashed after the command" % name)',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'C03 input disappears'},
+ {'id': 'M-D-REF-C04',
+  'finding': 'D5D2-class',
+  'title': 'C04 input appears',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("%s: appeared during the command" % name)',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'C04 input appears'},
+ {'id': 'M-D-REF-C05',
+  'finding': 'D5D2-class',
+  'title': 'C05 input changes',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("%s: changed while the command ran" % name)',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'C05 input changes'},
+ {'id': 'M-D-REF-C06',
+  'finding': 'D5D2-class',
+  'title': 'C06 untracked input',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("%s: not a file of %s (added, untracked or produced by the run)" % (name, sha))',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'C06 untracked input'},
+ {'id': 'M-D-REF-C07',
+  'finding': 'D5D2-class',
+  'title': 'C07 normalized input differs',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("%s: differs from %s" % (name, sha))',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'C07 normalized input differs'},
+ {'id': 'M-D-REF-C08',
+  'finding': 'D5D2-class',
+  'title': 'C08 raw input differs',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("%s: raw hash differs from TARGET_SHA under the LF/CRLF policy" % name)',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'C08 raw input differs'},
+ {'id': 'M-D-REF-C09',
+  'finding': 'D5D2-class',
+  'title': 'C09 produced input changed',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("%s: not the file the run produced (changed or removed since)" % name)',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'C09 produced input changed'},
+ {'id': 'M-D-REF-C10',
+  'finding': 'D5D2-class',
+  'title': 'C10 required file unhashed',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("%s: a declared input the record did not hash" % tree)',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'C10 required file unhashed'},
+ {'id': 'M-D-REF-C11',
+  'finding': 'D5D2-class',
+  'title': 'C11 nonexistent declaration',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("%s: neither a file nor a tree of %s" % (tree, sha))',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'C11 nonexistent declaration'},
+ {'id': 'M-D-REF-C12',
+  'finding': 'D5D2-class',
+  'title': 'C12 required tree member unhashed',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.extend("%s: a file of %s in %s the record did not hash" % (name, sha, tree) for name in members if name not in '
+         'before)',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'C12 required tree member unhashed'},
+ {'id': 'M-D-REF-C13',
+  'finding': 'D5D2-class',
+  'title': 'C13 final path added',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.extend("%s: final checkout path added under %s" % (p, need) for p in sorted(actual - expected))',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'C13 final path added'},
+ {'id': 'M-D-REF-C14',
+  'finding': 'D5D2-class',
+  'title': 'C14 final path removed',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.extend("%s: final checkout path removed under %s" % (p, need) for p in sorted(expected - actual))',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'C14 final path removed'},
+ {'id': 'M-D-REF-C15',
+  'finding': 'D5D2-class',
+  'title': 'C15 final content differs',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("%s: final checkout differs from TARGET_SHA" % name)',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'C15 final content differs'},
+ {'id': 'M-D-REF-C16',
+  'finding': 'D5D2-class',
+  'title': 'C16 produced input unhashed',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.extend("%s: a declared input the record did not hash" % need for need in sorted(produced & set(map(normal, '
+         'needs))) if need not in before)',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'C16 produced input unhashed'},
+ {'id': 'M-D-REF-C17',
+  'finding': 'D5D2-class',
+  'title': 'C17 log hash absent',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("%s: the log is not recorded with its hash" % name)',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'C17 log hash absent'},
+ {'id': 'M-D-REF-C18',
+  'finding': 'D5D2-class',
+  'title': 'C18 log changed',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("%s: not the recorded bytes (changed or removed after the run)" % name)',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'C18 log changed'},
+ {'id': 'M-D-REF-C25',
+  'finding': 'D5D2-class',
+  'title': 'C25 collected problems propagate',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.extend(problems)',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'C25 collected problems propagate'},
+ {'id': 'M-D-REF-C19',
+  'finding': 'D5D2-class',
+  'title': 'C19 child failure',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("the command exited %d (recorder %d)" % (run["exit_code"], run["recorder_exit_code"]))',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'C19 child failure'},
+ {'id': 'M-D-REF-C24',
+  'finding': 'D5D2-class',
+  'title': 'C24 zero exit failed collection',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bad.append("the command exited 0 but its collected cases show a failure")',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'C24 zero exit failed collection'},
+ {'id': 'M-D-REF-G05',
+  'finding': 'D5D2-class',
+  'title': 'G05 checkout mismatch',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'problems.append("final checkout HEAD differs from TARGET_SHA")',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'G05 checkout mismatch'},
+ {'id': 'M-D-REF-G01',
+  'finding': 'D5D2-class',
+  'title': 'G01 invalid target',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'problems.append("no declaration of %r: %s" % (sha, error))',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'G01 invalid target'},
+ {'id': 'M-D-REF-G06',
+  'finding': 'D5D2-class',
+  'title': 'G06 output declaration mismatch',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'problems.append("ci.outputs names %s, ci.recorded_inputs %s" % (sorted(outputs), sorted(declared)))',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'G06 output declaration mismatch'},
+ {'id': 'M-D-REF-G03',
+  'finding': 'D5D2-class',
+  'title': 'G03 undeclared record',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'problems.append("%s: a record no step declares" % record)',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'G03 undeclared record'},
+ {'id': 'M-D-REF-G04',
+  'finding': 'D5D2-class',
+  'title': 'G04 invalid image',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'problems.append("%s: not the image of %s (%r)" % (identity, sha, words))',
+  'new': 'pass',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'G04 invalid image'},
+ {'id': 'M-D-REF-J04',
+  'finding': 'D5D2-class',
+  'title': 'J04 collected failure',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bool(cases["failed"])',
+  'new': 'False',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'J04 collected failure'},
+ {'id': 'M-D-REF-M05',
+  'finding': 'D5D2-class',
+  'title': 'M05 surviving mutant',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bool(cases["survived"] or cases["equivalents_failing"])',
+  'new': 'bool(cases["equivalents_failing"])',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'M05 surviving mutant'},
+ {'id': 'M-D-REF-M06',
+  'finding': 'D5D2-04',
+  'title': 'M06 failing equivalent',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'bool(cases["survived"] or cases["equivalents_failing"])',
+  'new': 'bool(cases["survived"])',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'M06 failing equivalent'},
+ {'id': 'M-D-REF-L05',
+  'finding': 'D5D2-class',
+  'title': 'L05 failed plan',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'plans[0].get("status") != "passed"',
+  'new': 'False',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'L05 failed plan'},
+ {'id': 'M-D-REF-L01',
+  'finding': 'D5D2-class',
+  'title': 'L01 markers',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'return None, ["%d EXACT_TESTS and %d PLAN_RESULT lines, one of each expected" % (len(exact), len(plans))], False',
+  'new': 'return None, [], False',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'L01 markers'},
+ {'id': 'M-D-REF-O01',
+  'finding': 'D5D2-class',
+  'title': 'O01 malformed output',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'return None, ["the output of the command cannot be read as %s: %s: %s" % (kind, type(error).__name__, error)], False',
+  'new': 'return None, [], False',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'O01 malformed output'},
+ {'id': 'M-D-REF-O02',
+  'finding': 'D5D2-class',
+  'title': 'O02 unknown output',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'return None, ["ci.outputs declares no known kind: %r" % output], False',
+  'new': 'return None, [], False',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'O02 unknown output'},
+ {'id': 'M-D-REF-C01',
+  'finding': 'D5D2-class',
+  'title': 'C01 incomplete record',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'result.update(verdict="invalid", problems=["not a completed run: status %r" % (run.get("status") if isinstance(run, '
+         'dict) else run)])',
+  'new': 'result.update(verdict="pass", problems=[])',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'C01 incomplete record'},
+ {'id': 'M-D-REF-C22',
+  'finding': 'D5D2-class',
+  'title': 'C22 unrun record',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'result.update(verdict="unrun", problems=["no record: the step did not run"])',
+  'new': 'result.update(verdict="pass", problems=[])',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'C22 unrun record'},
+ {'id': 'M-D-REF-C23',
+  'finding': 'D5D2-class',
+  'title': 'C23 unreadable record',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'result.update(verdict="invalid", problems=["the record cannot be read: %s" % error])',
+  'new': 'result.update(verdict="pass", problems=[])',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'C23 unreadable record'},
+ {'id': 'M-D-REF-G07',
+  'finding': 'D5D2-class',
+  'title': 'G07 failed step refuses whole run',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'all(s["verdict"] == "pass" for s in report["steps"].values())',
+  'new': 'True',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'G07 failed step refuses whole run'},
+ {'id': 'M-D-GATE-step-error',
+  'finding': 'D5D2-01',
+  'title': 'D5D2-01: gate step cannot ignore failure',
+  'file': '.github/workflows/emr-d.yml',
+  'old': 'id: same-source\n',
+  'new': 'id: same-source\n        continue-on-error: true\n',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D2-01: gate step cannot ignore failure'},
+ {'id': 'M-D-GATE-job-error',
+  'finding': 'D5D2-01',
+  'title': 'D5D2-01: gate job cannot ignore failure',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '  emr-d-gate:\n',
+  'new': '  emr-d-gate:\n    continue-on-error: true\n',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D2-01: gate job cannot ignore failure'},
+ {'id': 'M-D-GATE-job-skip',
+  'finding': 'D5D2-01',
+  'title': 'D5D2-01: gate job runs on failure',
+  'file': '.github/workflows/emr-d.yml',
+  'old': 'needs: [emr-d, emr-d-server-mutants]\n    if: ${{ !cancelled() }}',
+  'new': 'needs: [emr-d, emr-d-server-mutants]\n    if: ${{ false }}',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D2-01: gate job runs on failure'},
+ {'id': 'M-D-GATE-job-success',
+  'finding': 'D5D2-01',
+  'title': 'D5D2-01: gate job runs on failure',
+  'file': '.github/workflows/emr-d.yml',
+  'old': 'needs: [emr-d, emr-d-server-mutants]\n    if: ${{ !cancelled() }}',
+  'new': 'needs: [emr-d, emr-d-server-mutants]\n    if: success()',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D2-01: gate job runs on failure'},
+ {'id': 'M-D-GATE-needs-main',
+  'finding': 'D5D2-01',
+  'title': 'D5D-06: gate waits for both record jobs',
+  'file': '.github/workflows/emr-d.yml',
+  'old': 'needs: [emr-d, emr-d-server-mutants]',
+  'new': 'needs: emr-d-server-mutants',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D-06: gate waits for both record jobs'},
+ {'id': 'M-D-GATE-needs-mutants',
+  'finding': 'D5D2-01',
+  'title': 'D5D-06: gate waits for both record jobs',
+  'file': '.github/workflows/emr-d.yml',
+  'old': 'needs: [emr-d, emr-d-server-mutants]',
+  'new': 'needs: emr-d',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D-06: gate waits for both record jobs'},
+ {'id': 'M-D-GATE-serialized',
+  'finding': 'D5D2-06',
+  'title': 'D5D2-06: record jobs run in parallel',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '  emr-d:\n',
+  'new': '  emr-d:\n    needs: emr-d-server-mutants\n',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D2-06: record jobs run in parallel'},
+ {'id': 'M-D-GATE-producer-skip',
+  'finding': 'D5D2-01',
+  'title': 'D5D2: producer is not skipped',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '  emr-d-server-mutants:\n',
+  'new': '  emr-d-server-mutants:\n    if: false\n',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D2: producer is not skipped'},
+ {'id': 'M-D-GATE-producer-error',
+  'finding': 'D5D2-01',
+  'title': 'D5D2: producer cannot ignore failure',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '  emr-d-server-mutants:\n',
+  'new': '  emr-d-server-mutants:\n    continue-on-error: true\n',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D2: producer cannot ignore failure'},
+ {'id': 'M-D-GATE-gate-sha',
+  'finding': 'D5D2-01',
+  'title': 'D5D2: gate source equals producer source',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '  emr-d-gate:\n'
+         '    needs: [emr-d, emr-d-server-mutants]\n'
+         '    if: ${{ !cancelled() }}\n'
+         '    runs-on: ubuntu-24.04\n'
+         '    timeout-minutes: 10\n'
+         '    env:\n'
+         '      TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}\n'
+         '    steps:\n'
+         '      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n'
+         '        with:\n'
+         '          ref: ${{ env.TARGET_SHA }}\n'
+         '          persist-credentials: false\n'
+         '      - name: Collect the main recorder from the same workflow run\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+         '        with:\n'
+         '          name: emr-d-main-records\n'
+         '          path: tmp/emr-d-ci/\n'
+         '      - name: Collect the server mutant recorder from the same workflow run\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+         '        with:\n'
+         '          name: emr-d-server-mutants\n'
+         '          path: tmp/emr-d-ci/\n'
+         '      - name: Every record and the image are of TARGET_SHA, and each record hashed what its command consumes (source = '
+         'image = evidence)\n'
+         '        id: same-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        run: python3 -B tests/emr/d/same_source.py\n'
+         '      - name: Preserve the combined gate evidence\n'
+         '        if: always()\n'
+         '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+         '        with:\n'
+         '          name: emr-d-results\n'
+         '          path: tmp/emr-d-ci/\n'
+         '          if-no-files-found: error\n'
+         '          retention-days: 7\n',
+  'new': '  emr-d-gate:\n'
+         '    needs: [emr-d, emr-d-server-mutants]\n'
+         '    if: ${{ !cancelled() }}\n'
+         '    runs-on: ubuntu-24.04\n'
+         '    timeout-minutes: 10\n'
+         '    env:\n'
+         '      TARGET_SHA: ${{ github.sha }}\n'
+         '    steps:\n'
+         '      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n'
+         '        with:\n'
+         '          ref: ${{ env.TARGET_SHA }}\n'
+         '          persist-credentials: false\n'
+         '      - name: Collect the main recorder from the same workflow run\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+         '        with:\n'
+         '          name: emr-d-main-records\n'
+         '          path: tmp/emr-d-ci/\n'
+         '      - name: Collect the server mutant recorder from the same workflow run\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+         '        with:\n'
+         '          name: emr-d-server-mutants\n'
+         '          path: tmp/emr-d-ci/\n'
+         '      - name: Every record and the image are of TARGET_SHA, and each record hashed what its command consumes (source = '
+         'image = evidence)\n'
+         '        id: same-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        run: python3 -B tests/emr/d/same_source.py\n'
+         '      - name: Preserve the combined gate evidence\n'
+         '        if: always()\n'
+         '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+         '        with:\n'
+         '          name: emr-d-results\n'
+         '          path: tmp/emr-d-ci/\n'
+         '          if-no-files-found: error\n'
+         '          retention-days: 7\n',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D2: gate source equals producer source'},
+ {'id': 'M-D-GATE-gate-checkout',
+  'finding': 'D5D2-01',
+  'title': 'D5D2: gate checks out requested source',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '  emr-d-gate:\n'
+         '    needs: [emr-d, emr-d-server-mutants]\n'
+         '    if: ${{ !cancelled() }}\n'
+         '    runs-on: ubuntu-24.04\n'
+         '    timeout-minutes: 10\n'
+         '    env:\n'
+         '      TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}\n'
+         '    steps:\n'
+         '      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n'
+         '        with:\n'
+         '          ref: ${{ env.TARGET_SHA }}\n'
+         '          persist-credentials: false\n'
+         '      - name: Collect the main recorder from the same workflow run\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+         '        with:\n'
+         '          name: emr-d-main-records\n'
+         '          path: tmp/emr-d-ci/\n'
+         '      - name: Collect the server mutant recorder from the same workflow run\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+         '        with:\n'
+         '          name: emr-d-server-mutants\n'
+         '          path: tmp/emr-d-ci/\n'
+         '      - name: Every record and the image are of TARGET_SHA, and each record hashed what its command consumes (source = '
+         'image = evidence)\n'
+         '        id: same-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        run: python3 -B tests/emr/d/same_source.py\n'
+         '      - name: Preserve the combined gate evidence\n'
+         '        if: always()\n'
+         '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+         '        with:\n'
+         '          name: emr-d-results\n'
+         '          path: tmp/emr-d-ci/\n'
+         '          if-no-files-found: error\n'
+         '          retention-days: 7\n',
+  'new': '  emr-d-gate:\n'
+         '    needs: [emr-d, emr-d-server-mutants]\n'
+         '    if: ${{ !cancelled() }}\n'
+         '    runs-on: ubuntu-24.04\n'
+         '    timeout-minutes: 10\n'
+         '    env:\n'
+         '      TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}\n'
+         '    steps:\n'
+         '      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n'
+         '        with:\n'
+         '          ref: main\n'
+         '          persist-credentials: false\n'
+         '      - name: Collect the main recorder from the same workflow run\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+         '        with:\n'
+         '          name: emr-d-main-records\n'
+         '          path: tmp/emr-d-ci/\n'
+         '      - name: Collect the server mutant recorder from the same workflow run\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+         '        with:\n'
+         '          name: emr-d-server-mutants\n'
+         '          path: tmp/emr-d-ci/\n'
+         '      - name: Every record and the image are of TARGET_SHA, and each record hashed what its command consumes (source = '
+         'image = evidence)\n'
+         '        id: same-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        run: python3 -B tests/emr/d/same_source.py\n'
+         '      - name: Preserve the combined gate evidence\n'
+         '        if: always()\n'
+         '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+         '        with:\n'
+         '          name: emr-d-results\n'
+         '          path: tmp/emr-d-ci/\n'
+         '          if-no-files-found: error\n'
+         '          retention-days: 7\n',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D2: gate checks out requested source'},
+ {'id': 'M-D-GATE-download-skip',
+  'finding': 'D5D2-01',
+  'title': 'D5D2: downloads run on failure',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '  emr-d-gate:\n'
+         '    needs: [emr-d, emr-d-server-mutants]\n'
+         '    if: ${{ !cancelled() }}\n'
+         '    runs-on: ubuntu-24.04\n'
+         '    timeout-minutes: 10\n'
+         '    env:\n'
+         '      TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}\n'
+         '    steps:\n'
+         '      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n'
+         '        with:\n'
+         '          ref: ${{ env.TARGET_SHA }}\n'
+         '          persist-credentials: false\n'
+         '      - name: Collect the main recorder from the same workflow run\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+         '        with:\n'
+         '          name: emr-d-main-records\n'
+         '          path: tmp/emr-d-ci/\n'
+         '      - name: Collect the server mutant recorder from the same workflow run\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+         '        with:\n'
+         '          name: emr-d-server-mutants\n'
+         '          path: tmp/emr-d-ci/\n'
+         '      - name: Every record and the image are of TARGET_SHA, and each record hashed what its command consumes (source = '
+         'image = evidence)\n'
+         '        id: same-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        run: python3 -B tests/emr/d/same_source.py\n'
+         '      - name: Preserve the combined gate evidence\n'
+         '        if: always()\n'
+         '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+         '        with:\n'
+         '          name: emr-d-results\n'
+         '          path: tmp/emr-d-ci/\n'
+         '          if-no-files-found: error\n'
+         '          retention-days: 7\n',
+  'new': '  emr-d-gate:\n'
+         '    needs: [emr-d, emr-d-server-mutants]\n'
+         '    if: ${{ !cancelled() }}\n'
+         '    runs-on: ubuntu-24.04\n'
+         '    timeout-minutes: 10\n'
+         '    env:\n'
+         '      TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}\n'
+         '    steps:\n'
+         '      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n'
+         '        with:\n'
+         '          ref: ${{ env.TARGET_SHA }}\n'
+         '          persist-credentials: false\n'
+         '      - name: Collect the main recorder from the same workflow run\n'
+         '        if: success()\n'
+         '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+         '        with:\n'
+         '          name: emr-d-main-records\n'
+         '          path: tmp/emr-d-ci/\n'
+         '      - name: Collect the server mutant recorder from the same workflow run\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+         '        with:\n'
+         '          name: emr-d-server-mutants\n'
+         '          path: tmp/emr-d-ci/\n'
+         '      - name: Every record and the image are of TARGET_SHA, and each record hashed what its command consumes (source = '
+         'image = evidence)\n'
+         '        id: same-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        run: python3 -B tests/emr/d/same_source.py\n'
+         '      - name: Preserve the combined gate evidence\n'
+         '        if: always()\n'
+         '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+         '        with:\n'
+         '          name: emr-d-results\n'
+         '          path: tmp/emr-d-ci/\n'
+         '          if-no-files-found: error\n'
+         '          retention-days: 7\n',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D2: downloads run on failure'},
+ {'id': 'M-D-GATE-download-path',
+  'finding': 'D5D2-01',
+  'title': 'D5D2: downloads restore the record root',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '  emr-d-gate:\n'
+         '    needs: [emr-d, emr-d-server-mutants]\n'
+         '    if: ${{ !cancelled() }}\n'
+         '    runs-on: ubuntu-24.04\n'
+         '    timeout-minutes: 10\n'
+         '    env:\n'
+         '      TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}\n'
+         '    steps:\n'
+         '      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n'
+         '        with:\n'
+         '          ref: ${{ env.TARGET_SHA }}\n'
+         '          persist-credentials: false\n'
+         '      - name: Collect the main recorder from the same workflow run\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+         '        with:\n'
+         '          name: emr-d-main-records\n'
+         '          path: tmp/emr-d-ci/\n'
+         '      - name: Collect the server mutant recorder from the same workflow run\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+         '        with:\n'
+         '          name: emr-d-server-mutants\n'
+         '          path: tmp/emr-d-ci/\n'
+         '      - name: Every record and the image are of TARGET_SHA, and each record hashed what its command consumes (source = '
+         'image = evidence)\n'
+         '        id: same-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        run: python3 -B tests/emr/d/same_source.py\n'
+         '      - name: Preserve the combined gate evidence\n'
+         '        if: always()\n'
+         '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+         '        with:\n'
+         '          name: emr-d-results\n'
+         '          path: tmp/emr-d-ci/\n'
+         '          if-no-files-found: error\n'
+         '          retention-days: 7\n',
+  'new': '  emr-d-gate:\n'
+         '    needs: [emr-d, emr-d-server-mutants]\n'
+         '    if: ${{ !cancelled() }}\n'
+         '    runs-on: ubuntu-24.04\n'
+         '    timeout-minutes: 10\n'
+         '    env:\n'
+         '      TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}\n'
+         '    steps:\n'
+         '      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n'
+         '        with:\n'
+         '          ref: ${{ env.TARGET_SHA }}\n'
+         '          persist-credentials: false\n'
+         '      - name: Collect the main recorder from the same workflow run\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+         '        with:\n'
+         '          name: emr-d-main-records\n'
+         '          path: wrong/\n'
+         '      - name: Collect the server mutant recorder from the same workflow run\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+         '        with:\n'
+         '          name: emr-d-server-mutants\n'
+         '          path: tmp/emr-d-ci/\n'
+         '      - name: Every record and the image are of TARGET_SHA, and each record hashed what its command consumes (source = '
+         'image = evidence)\n'
+         '        id: same-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        run: python3 -B tests/emr/d/same_source.py\n'
+         '      - name: Preserve the combined gate evidence\n'
+         '        if: always()\n'
+         '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+         '        with:\n'
+         '          name: emr-d-results\n'
+         '          path: tmp/emr-d-ci/\n'
+         '          if-no-files-found: error\n'
+         '          retention-days: 7\n',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D2: downloads restore the record root'},
+ {'id': 'M-D-GATE-download-run',
+  'finding': 'D5D2-01',
+  'title': 'D5D2: downloads belong to this workflow run',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '  emr-d-gate:\n'
+         '    needs: [emr-d, emr-d-server-mutants]\n'
+         '    if: ${{ !cancelled() }}\n'
+         '    runs-on: ubuntu-24.04\n'
+         '    timeout-minutes: 10\n'
+         '    env:\n'
+         '      TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}\n'
+         '    steps:\n'
+         '      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n'
+         '        with:\n'
+         '          ref: ${{ env.TARGET_SHA }}\n'
+         '          persist-credentials: false\n'
+         '      - name: Collect the main recorder from the same workflow run\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+         '        with:\n'
+         '          name: emr-d-main-records\n'
+         '          path: tmp/emr-d-ci/\n'
+         '      - name: Collect the server mutant recorder from the same workflow run\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+         '        with:\n'
+         '          name: emr-d-server-mutants\n'
+         '          path: tmp/emr-d-ci/\n'
+         '      - name: Every record and the image are of TARGET_SHA, and each record hashed what its command consumes (source = '
+         'image = evidence)\n'
+         '        id: same-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        run: python3 -B tests/emr/d/same_source.py\n'
+         '      - name: Preserve the combined gate evidence\n'
+         '        if: always()\n'
+         '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+         '        with:\n'
+         '          name: emr-d-results\n'
+         '          path: tmp/emr-d-ci/\n'
+         '          if-no-files-found: error\n'
+         '          retention-days: 7\n',
+  'new': '  emr-d-gate:\n'
+         '    needs: [emr-d, emr-d-server-mutants]\n'
+         '    if: ${{ !cancelled() }}\n'
+         '    runs-on: ubuntu-24.04\n'
+         '    timeout-minutes: 10\n'
+         '    env:\n'
+         '      TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}\n'
+         '    steps:\n'
+         '      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n'
+         '        with:\n'
+         '          ref: ${{ env.TARGET_SHA }}\n'
+         '          persist-credentials: false\n'
+         '      - name: Collect the main recorder from the same workflow run\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+         '        with:\n'
+         '          name: emr-d-main-records\n'
+         '          run-id: 123\n'
+         '          path: tmp/emr-d-ci/\n'
+         '      - name: Collect the server mutant recorder from the same workflow run\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+         '        with:\n'
+         '          name: emr-d-server-mutants\n'
+         '          path: tmp/emr-d-ci/\n'
+         '      - name: Every record and the image are of TARGET_SHA, and each record hashed what its command consumes (source = '
+         'image = evidence)\n'
+         '        id: same-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        run: python3 -B tests/emr/d/same_source.py\n'
+         '      - name: Preserve the combined gate evidence\n'
+         '        if: always()\n'
+         '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+         '        with:\n'
+         '          name: emr-d-results\n'
+         '          path: tmp/emr-d-ci/\n'
+         '          if-no-files-found: error\n'
+         '          retention-days: 7\n',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D2: downloads belong to this workflow run'},
+ {'id': 'M-D-GATE-download-repo',
+  'finding': 'D5D2-01',
+  'title': 'D5D2: downloads belong to this repository',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '  emr-d-gate:\n'
+         '    needs: [emr-d, emr-d-server-mutants]\n'
+         '    if: ${{ !cancelled() }}\n'
+         '    runs-on: ubuntu-24.04\n'
+         '    timeout-minutes: 10\n'
+         '    env:\n'
+         '      TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}\n'
+         '    steps:\n'
+         '      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n'
+         '        with:\n'
+         '          ref: ${{ env.TARGET_SHA }}\n'
+         '          persist-credentials: false\n'
+         '      - name: Collect the main recorder from the same workflow run\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+         '        with:\n'
+         '          name: emr-d-main-records\n'
+         '          path: tmp/emr-d-ci/\n'
+         '      - name: Collect the server mutant recorder from the same workflow run\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+         '        with:\n'
+         '          name: emr-d-server-mutants\n'
+         '          path: tmp/emr-d-ci/\n'
+         '      - name: Every record and the image are of TARGET_SHA, and each record hashed what its command consumes (source = '
+         'image = evidence)\n'
+         '        id: same-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        run: python3 -B tests/emr/d/same_source.py\n'
+         '      - name: Preserve the combined gate evidence\n'
+         '        if: always()\n'
+         '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+         '        with:\n'
+         '          name: emr-d-results\n'
+         '          path: tmp/emr-d-ci/\n'
+         '          if-no-files-found: error\n'
+         '          retention-days: 7\n',
+  'new': '  emr-d-gate:\n'
+         '    needs: [emr-d, emr-d-server-mutants]\n'
+         '    if: ${{ !cancelled() }}\n'
+         '    runs-on: ubuntu-24.04\n'
+         '    timeout-minutes: 10\n'
+         '    env:\n'
+         '      TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}\n'
+         '    steps:\n'
+         '      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n'
+         '        with:\n'
+         '          ref: ${{ env.TARGET_SHA }}\n'
+         '          persist-credentials: false\n'
+         '      - name: Collect the main recorder from the same workflow run\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+         '        with:\n'
+         '          name: emr-d-main-records\n'
+         '          repository: other/repo\n'
+         '          path: tmp/emr-d-ci/\n'
+         '      - name: Collect the server mutant recorder from the same workflow run\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1\n'
+         '        with:\n'
+         '          name: emr-d-server-mutants\n'
+         '          path: tmp/emr-d-ci/\n'
+         '      - name: Every record and the image are of TARGET_SHA, and each record hashed what its command consumes (source = '
+         'image = evidence)\n'
+         '        id: same-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        run: python3 -B tests/emr/d/same_source.py\n'
+         '      - name: Preserve the combined gate evidence\n'
+         '        if: always()\n'
+         '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+         '        with:\n'
+         '          name: emr-d-results\n'
+         '          path: tmp/emr-d-ci/\n'
+         '          if-no-files-found: error\n'
+         '          retention-days: 7\n',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D2: downloads belong to this repository'},
+ {'id': 'M-D-GATE-upload-skip',
+  'finding': 'D5D2-01',
+  'title': 'D5D2: evidence uploads on failure',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '      - name: EMR-D evidence\n'
+         '        if: always()\n'
+         '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+         '        with:\n'
+         '          name: emr-d-main-records\n'
+         '          path: tmp/emr-d-ci/\n'
+         '          if-no-files-found: error\n'
+         '          retention-days: 7\n',
+  'new': '      - name: EMR-D evidence\n'
+         '        if: success()\n'
+         '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+         '        with:\n'
+         '          name: emr-d-main-records\n'
+         '          path: tmp/emr-d-ci/\n'
+         '          if-no-files-found: error\n'
+         '          retention-days: 7\n',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D2: evidence uploads on failure'},
+ {'id': 'M-D-GATE-upload-path',
+  'finding': 'D5D2-01',
+  'title': 'D5D2: entire evidence tree uploaded',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '      - name: EMR-D evidence\n'
+         '        if: always()\n'
+         '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+         '        with:\n'
+         '          name: emr-d-main-records\n'
+         '          path: tmp/emr-d-ci/\n'
+         '          if-no-files-found: error\n'
+         '          retention-days: 7\n',
+  'new': '      - name: EMR-D evidence\n'
+         '        if: always()\n'
+         '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+         '        with:\n'
+         '          name: emr-d-main-records\n'
+         '          path: tmp/other/\n'
+         '          if-no-files-found: error\n'
+         '          retention-days: 7\n',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D2: entire evidence tree uploaded'},
+ {'id': 'M-D-GATE-upload-empty',
+  'finding': 'D5D2-01',
+  'title': 'D5D2: missing evidence is an error',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '      - name: EMR-D evidence\n'
+         '        if: always()\n'
+         '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+         '        with:\n'
+         '          name: emr-d-main-records\n'
+         '          path: tmp/emr-d-ci/\n'
+         '          if-no-files-found: error\n'
+         '          retention-days: 7\n',
+  'new': '      - name: EMR-D evidence\n'
+         '        if: always()\n'
+         '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+         '        with:\n'
+         '          name: emr-d-main-records\n'
+         '          path: tmp/emr-d-ci/\n'
+         '          if-no-files-found: ignore\n'
+         '          retention-days: 7\n',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D2: missing evidence is an error'}]
+
+MUTANTS += [{'id': 'M-D-GATE-missing-job',
+  'finding': 'D5D2-class',
+  'title': 'D5D-06: gate job exists',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '  emr-d-gate:\n',
+  'new': '  obsolete-gate:\n',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D-06: gate job exists'},
+ {'id': 'M-D-GATE-budget-emr-d',
+  'finding': 'D5D2-class',
+  'title': 'D5D2: bounded job budget emr-d',
+  'file': '.github/workflows/emr-d.yml',
+  'old': 'timeout-minutes: 120',
+  'new': 'timeout-minutes: 121',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D2: bounded job budget emr-d'},
+ {'id': 'M-D-GATE-budget-emr-d-server-mutants',
+  'finding': 'D5D2-class',
+  'title': 'D5D2: bounded job budget emr-d-server-mutants',
+  'file': '.github/workflows/emr-d.yml',
+  'old': 'timeout-minutes: 270',
+  'new': 'timeout-minutes: 271',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D2: bounded job budget emr-d-server-mutants'},
+ {'id': 'M-D-GATE-budget-emr-d-gate',
+  'finding': 'D5D2-class',
+  'title': 'D5D2: bounded job budget emr-d-gate',
+  'file': '.github/workflows/emr-d.yml',
+  'old': 'timeout-minutes: 10',
+  'new': 'timeout-minutes: 11',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D2: bounded job budget emr-d-gate'},
+ {'id': 'M-D-GATE-producer-sha',
+ 'finding': 'D5D2-class',
+ 'title': 'D5D2: producers use one source',
+ 'file': '.github/workflows/emr-d.yml',
+ 'old': '  emr-d-server-mutants:\n'
+        '    runs-on: ubuntu-24.04\n'
+        '    timeout-minutes: 270\n'
+        '    env:\n'
+        '      TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}\n'
+        '    steps:\n'
+        '      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n'
+        '        with:\n'
+        '          ref: ${{ env.TARGET_SHA }}\n'
+        '          persist-credentials: false\n'
+        '      - name: Verify source and install the pinned compiler\n'
+        '        timeout-minutes: 5\n'
+        '        run: |\n'
+        '          [ "$(git rev-parse HEAD)" = "$TARGET_SHA" ]\n'
+        '          npm ci --prefix api --ignore-scripts --no-audit --no-fund\n'
+        '      - name: Generate the Prisma client for the server imports\n'
+        '        working-directory: api\n'
+        '        run: ./node_modules/.bin/prisma generate\n'
+        "      - name: Server mutants (each fix of DR2-01..08 and DR3-01..05 reverted, Astra's AM10; the DR3-06 notation "
+        'equivalents)\n'
+        '        id: server-mutants\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/server-mutants --cwd . --tree api/src --tree '
+        'api/prisma --tree tests/emr/d --file emr/units/d.json --file api/tsconfig.json --file api/nest-cli.json --file '
+        'api/package.json --file api/package-lock.json --file api/start-production.sh --file api/.dockerignore --file '
+        'api/Dockerfile --file .github/workflows/emr-d.yml --file scripts/record-run.py --file scripts/emr-compose.py --file '
+        'scripts/run-tests.py --file tests/live_test_gate.py -- python3 -B tests/emr/d/server_mutants.py\n'
+        '      - name: Verify server-mutants records and final producer checkout\n'
+        '        id: producer-source\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        run: python3 -B tests/emr/d/same_source.py --producer server-mutants\n'
+        '      - name: Preserve every mutant execution including failures\n'
+        '        if: always()\n'
+        '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+        '        with:\n'
+        '          name: emr-d-server-mutants\n'
+        '          path: tmp/emr-d-ci/\n'
+        '          if-no-files-found: error\n'
+        '          retention-days: 7\n'
+        '\n',
+ 'new': '  emr-d-server-mutants:\n'
+        '    runs-on: ubuntu-24.04\n'
+        '    timeout-minutes: 270\n'
+        '    env:\n'
+        '      TARGET_SHA: ${{ github.sha }}\n'
+        '    steps:\n'
+        '      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n'
+        '        with:\n'
+        '          ref: ${{ env.TARGET_SHA }}\n'
+        '          persist-credentials: false\n'
+        '      - name: Verify source and install the pinned compiler\n'
+        '        timeout-minutes: 5\n'
+        '        run: |\n'
+        '          [ "$(git rev-parse HEAD)" = "$TARGET_SHA" ]\n'
+        '          npm ci --prefix api --ignore-scripts --no-audit --no-fund\n'
+        '      - name: Generate the Prisma client for the server imports\n'
+        '        working-directory: api\n'
+        '        run: ./node_modules/.bin/prisma generate\n'
+        "      - name: Server mutants (each fix of DR2-01..08 and DR3-01..05 reverted, Astra's AM10; the DR3-06 notation "
+        'equivalents)\n'
+        '        id: server-mutants\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/server-mutants --cwd . --tree api/src --tree '
+        'api/prisma --tree tests/emr/d --file emr/units/d.json --file api/tsconfig.json --file api/nest-cli.json --file '
+        'api/package.json --file api/package-lock.json --file api/start-production.sh --file api/.dockerignore --file '
+        'api/Dockerfile --file .github/workflows/emr-d.yml --file scripts/record-run.py --file scripts/emr-compose.py --file '
+        'scripts/run-tests.py --file tests/live_test_gate.py -- python3 -B tests/emr/d/server_mutants.py\n'
+        '      - name: Verify server-mutants records and final producer checkout\n'
+        '        id: producer-source\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        run: python3 -B tests/emr/d/same_source.py --producer server-mutants\n'
+        '      - name: Preserve every mutant execution including failures\n'
+        '        if: always()\n'
+        '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+        '        with:\n'
+        '          name: emr-d-server-mutants\n'
+        '          path: tmp/emr-d-ci/\n'
+        '          if-no-files-found: error\n'
+        '          retention-days: 7\n'
+        '\n',
+ 'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+         'record hashes what its command consumes',
+ 'expect': 'D5D2: producers use one source'},
+ {'id': 'M-D-GATE-producer-checkout',
+ 'finding': 'D5D2-class',
+ 'title': 'D5D2: producer checks out requested source',
+ 'file': '.github/workflows/emr-d.yml',
+ 'old': '  emr-d-server-mutants:\n'
+        '    runs-on: ubuntu-24.04\n'
+        '    timeout-minutes: 270\n'
+        '    env:\n'
+        '      TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}\n'
+        '    steps:\n'
+        '      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n'
+        '        with:\n'
+        '          ref: ${{ env.TARGET_SHA }}\n'
+        '          persist-credentials: false\n'
+        '      - name: Verify source and install the pinned compiler\n'
+        '        timeout-minutes: 5\n'
+        '        run: |\n'
+        '          [ "$(git rev-parse HEAD)" = "$TARGET_SHA" ]\n'
+        '          npm ci --prefix api --ignore-scripts --no-audit --no-fund\n'
+        '      - name: Generate the Prisma client for the server imports\n'
+        '        working-directory: api\n'
+        '        run: ./node_modules/.bin/prisma generate\n'
+        "      - name: Server mutants (each fix of DR2-01..08 and DR3-01..05 reverted, Astra's AM10; the DR3-06 notation "
+        'equivalents)\n'
+        '        id: server-mutants\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/server-mutants --cwd . --tree api/src --tree '
+        'api/prisma --tree tests/emr/d --file emr/units/d.json --file api/tsconfig.json --file api/nest-cli.json --file '
+        'api/package.json --file api/package-lock.json --file api/start-production.sh --file api/.dockerignore --file '
+        'api/Dockerfile --file .github/workflows/emr-d.yml --file scripts/record-run.py --file scripts/emr-compose.py --file '
+        'scripts/run-tests.py --file tests/live_test_gate.py -- python3 -B tests/emr/d/server_mutants.py\n'
+        '      - name: Verify server-mutants records and final producer checkout\n'
+        '        id: producer-source\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        run: python3 -B tests/emr/d/same_source.py --producer server-mutants\n'
+        '      - name: Preserve every mutant execution including failures\n'
+        '        if: always()\n'
+        '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+        '        with:\n'
+        '          name: emr-d-server-mutants\n'
+        '          path: tmp/emr-d-ci/\n'
+        '          if-no-files-found: error\n'
+        '          retention-days: 7\n'
+        '\n',
+ 'new': '  emr-d-server-mutants:\n'
+        '    runs-on: ubuntu-24.04\n'
+        '    timeout-minutes: 270\n'
+        '    env:\n'
+        '      TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}\n'
+        '    steps:\n'
+        '      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n'
+        '        with:\n'
+        '          ref: main\n'
+        '          persist-credentials: false\n'
+        '      - name: Verify source and install the pinned compiler\n'
+        '        timeout-minutes: 5\n'
+        '        run: |\n'
+        '          [ "$(git rev-parse HEAD)" = "$TARGET_SHA" ]\n'
+        '          npm ci --prefix api --ignore-scripts --no-audit --no-fund\n'
+        '      - name: Generate the Prisma client for the server imports\n'
+        '        working-directory: api\n'
+        '        run: ./node_modules/.bin/prisma generate\n'
+        "      - name: Server mutants (each fix of DR2-01..08 and DR3-01..05 reverted, Astra's AM10; the DR3-06 notation "
+        'equivalents)\n'
+        '        id: server-mutants\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/server-mutants --cwd . --tree api/src --tree '
+        'api/prisma --tree tests/emr/d --file emr/units/d.json --file api/tsconfig.json --file api/nest-cli.json --file '
+        'api/package.json --file api/package-lock.json --file api/start-production.sh --file api/.dockerignore --file '
+        'api/Dockerfile --file .github/workflows/emr-d.yml --file scripts/record-run.py --file scripts/emr-compose.py --file '
+        'scripts/run-tests.py --file tests/live_test_gate.py -- python3 -B tests/emr/d/server_mutants.py\n'
+        '      - name: Verify server-mutants records and final producer checkout\n'
+        '        id: producer-source\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        run: python3 -B tests/emr/d/same_source.py --producer server-mutants\n'
+        '      - name: Preserve every mutant execution including failures\n'
+        '        if: always()\n'
+        '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+        '        with:\n'
+        '          name: emr-d-server-mutants\n'
+        '          path: tmp/emr-d-ci/\n'
+        '          if-no-files-found: error\n'
+        '          retention-days: 7\n'
+        '\n',
+ 'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+         'record hashes what its command consumes',
+ 'expect': 'D5D2: producer checks out requested source'},
+ {'id': 'M-D-GATE-upload-order',
+ 'finding': 'D5D2-class',
+ 'title': 'D5D2: upload follows records',
+ 'file': '.github/workflows/emr-d.yml',
+ 'old': '  emr-d:\n'
+        '    runs-on: ubuntu-24.04\n'
+        '    timeout-minutes: 120\n'
+        '    env:\n'
+        '      TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}\n'
+        '    steps:\n'
+        '      - name: Requested source is a full commit SHA\n'
+        '        id: target-sha\n'
+        '        run: |\n'
+        '          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "TARGET_SHA must be a full lowercase 40-character SHA"; exit '
+        '1; }\n'
+        '      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n'
+        '        with:\n'
+        '          ref: ${{ env.TARGET_SHA }}\n'
+        '          persist-credentials: false\n'
+        '      - name: Checked-out source is the requested SHA\n'
+        '        id: checkout-identity\n'
+        '        run: test "$(git rev-parse HEAD)" = "$TARGET_SHA"\n'
+        '      - name: TypeScript, Nest and Prisma pinned by api/package-lock.json (no lifecycle scripts)\n'
+        '        timeout-minutes: 5\n'
+        '        run: |\n'
+        '          node --version\n'
+        '          npm ci --prefix api --ignore-scripts --no-audit --no-fund\n'
+        '      - name: Generate the Prisma client for the API typecheck\n'
+        '        working-directory: api\n'
+        '        run: ./node_modules/.bin/prisma generate\n'
+        '      - name: API typecheck including api/src/emr-clinical\n'
+        '        id: typecheck\n'
+        '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/typecheck --cwd . --tree api/src --file '
+        'api/tsconfig.json --file api/package-lock.json --file api/prisma/schema.prisma -- node '
+        'api/node_modules/typescript/bin/tsc --noEmit --incremental false --listFiles --extendedDiagnostics --pretty false -p '
+        'api\n'
+        '      - name: D contracts and C01-C56 model selection (C52 explicitly deferred to R2 DOM)\n'
+        '        id: contract\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/contract --cwd . --tree api/src/emr-clinical --tree '
+        'api/src/emr-contract --file tests/emr/d/contract_test.cjs --file api/tsconfig.json --file api/package-lock.json -- '
+        'docker run --rm --network none --read-only --tmpfs /tmp -v "$PWD:/src:ro" -w /src node:22-alpine node --test '
+        '--test-reporter=junit tests/emr/d/contract_test.cjs\n'
+        '      - name: Retained 14 and invariant 12 mutants (contract models distinguished; M-D-06 is round 2)\n'
+        '        id: mutants\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/mutants --cwd . --tree api/src/emr-clinical --tree '
+        'api/src/emr-contract --file tests/emr/d/mutants.py --file tests/emr/d/same_source.py --file scripts/record-run.py '
+        '--file tests/emr/d/contract_test.cjs --file api/tsconfig.json --file api/package-lock.json -- python3 -B '
+        'tests/emr/d/mutants.py\n'
+        "      - name: D server cases and the d.json declaration (TEST-D-01..04 pure halves, this workflow's source binding)\n"
+        '        id: server\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/server --cwd . --tree api/src --tree api/prisma '
+        '--tree tests/emr/d --file emr/units/d.json --file api/tsconfig.json --file api/nest-cli.json --file api/package.json '
+        '--file api/package-lock.json --file api/start-production.sh --file api/.dockerignore --file api/Dockerfile --file '
+        '.github/workflows/emr-d.yml --file scripts/record-run.py --file scripts/emr-compose.py --file scripts/run-tests.py '
+        '--file tests/live_test_gate.py -- node --test --test-reporter=junit tests/emr/d/server_test.cjs\n'
+        '      - name: Production API image of this commit\n'
+        '        id: image\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        timeout-minutes: 20\n'
+        '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/image --cwd . --tree api/src --tree api/prisma --file '
+        'api/Dockerfile --file api/.dockerignore --file api/start-production.sh --file api/package.json --file '
+        'api/package-lock.json --file api/tsconfig.json --file api/nest-cli.json -- docker build --target production --build-arg '
+        '"VCS_REF=${{ env.TARGET_SHA }}" -t "kin-emrd-ci:${{ env.TARGET_SHA }}" api\n'
+        '      - name: The image is of the requested source (its revision label is TARGET_SHA)\n'
+        '        id: image-identity\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        run: |\n'
+        '          revision="$(docker image inspect -f \'{{ index .Config.Labels "org.opencontainers.image.revision" }}\' '
+        '"kin-emrd-ci:$TARGET_SHA")"\n'
+        '          test "$revision" = "$TARGET_SHA" || { echo "image revision \'$revision\' is not $TARGET_SHA"; exit 1; }\n'
+        '          mkdir -p tmp/emr-d-ci\n'
+        '          docker image inspect -f \'{{ .Id }} {{ index .Config.Labels "org.opencontainers.image.revision" }}\' '
+        '"kin-emrd-ci:$TARGET_SHA" > tmp/emr-d-ci/image-identity.txt\n'
+        '      - name: EMR-D live (EmrDLive) on an empty hosted daemon through scripts/run-tests.py\n'
+        '        id: live\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        timeout-minutes: 45\n'
+        '        env:\n'
+        '          KIN_EMR_D_IMAGE_IDENTITY: tmp/emr-d-ci/image-identity.txt\n'
+        '          KIN_TEST_API_IMAGE: kin-emrd-ci:${{ env.TARGET_SHA }}\n'
+        '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/live --cwd . --tree tests/emr/d --tree '
+        'api/prisma/migrations --file emr/units/d.json --file scripts/emr-compose.py --file scripts/run-tests.py --file '
+        'tests/live_test_gate.py --file tmp/emr-d-ci/image-identity.txt -- python3 -B scripts/run-tests.py --module '
+        'tests/emr/d/live.py --unit emr-d-ci-live --mode live --timeout 2700\n'
+        '      - name: Verify main records and final producer checkout\n'
+        '        id: producer-source\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        run: python3 -B tests/emr/d/same_source.py --producer main\n'
+        '      - name: EMR-D evidence\n'
+        '        if: always()\n'
+        '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+        '        with:\n'
+        '          name: emr-d-main-records\n'
+        '          path: tmp/emr-d-ci/\n'
+        '          if-no-files-found: error\n'
+        '          retention-days: 7\n',
+ 'new': '  emr-d:\n'
+        '    runs-on: ubuntu-24.04\n'
+        '    timeout-minutes: 120\n'
+        '    env:\n'
+        '      TARGET_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}\n'
+        '    steps:\n'
+        '      - name: EMR-D evidence\n'
+        '        if: always()\n'
+        '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+        '        with:\n'
+        '          name: emr-d-main-records\n'
+        '          path: tmp/emr-d-ci/\n'
+        '          if-no-files-found: error\n'
+        '          retention-days: 7\n'
+        '      - name: Requested source is a full commit SHA\n'
+        '        id: target-sha\n'
+        '        run: |\n'
+        '          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "TARGET_SHA must be a full lowercase 40-character SHA"; exit '
+        '1; }\n'
+        '      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n'
+        '        with:\n'
+        '          ref: ${{ env.TARGET_SHA }}\n'
+        '          persist-credentials: false\n'
+        '      - name: Checked-out source is the requested SHA\n'
+        '        id: checkout-identity\n'
+        '        run: test "$(git rev-parse HEAD)" = "$TARGET_SHA"\n'
+        '      - name: TypeScript, Nest and Prisma pinned by api/package-lock.json (no lifecycle scripts)\n'
+        '        timeout-minutes: 5\n'
+        '        run: |\n'
+        '          node --version\n'
+        '          npm ci --prefix api --ignore-scripts --no-audit --no-fund\n'
+        '      - name: Generate the Prisma client for the API typecheck\n'
+        '        working-directory: api\n'
+        '        run: ./node_modules/.bin/prisma generate\n'
+        '      - name: API typecheck including api/src/emr-clinical\n'
+        '        id: typecheck\n'
+        '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/typecheck --cwd . --tree api/src --file '
+        'api/tsconfig.json --file api/package-lock.json --file api/prisma/schema.prisma -- node '
+        'api/node_modules/typescript/bin/tsc --noEmit --incremental false --listFiles --extendedDiagnostics --pretty false -p '
+        'api\n'
+        '      - name: D contracts and C01-C56 model selection (C52 explicitly deferred to R2 DOM)\n'
+        '        id: contract\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/contract --cwd . --tree api/src/emr-clinical --tree '
+        'api/src/emr-contract --file tests/emr/d/contract_test.cjs --file api/tsconfig.json --file api/package-lock.json -- '
+        'docker run --rm --network none --read-only --tmpfs /tmp -v "$PWD:/src:ro" -w /src node:22-alpine node --test '
+        '--test-reporter=junit tests/emr/d/contract_test.cjs\n'
+        '      - name: Retained 14 and invariant 12 mutants (contract models distinguished; M-D-06 is round 2)\n'
+        '        id: mutants\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/mutants --cwd . --tree api/src/emr-clinical --tree '
+        'api/src/emr-contract --file tests/emr/d/mutants.py --file tests/emr/d/same_source.py --file scripts/record-run.py '
+        '--file tests/emr/d/contract_test.cjs --file api/tsconfig.json --file api/package-lock.json -- python3 -B '
+        'tests/emr/d/mutants.py\n'
+        "      - name: D server cases and the d.json declaration (TEST-D-01..04 pure halves, this workflow's source binding)\n"
+        '        id: server\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/server --cwd . --tree api/src --tree api/prisma '
+        '--tree tests/emr/d --file emr/units/d.json --file api/tsconfig.json --file api/nest-cli.json --file api/package.json '
+        '--file api/package-lock.json --file api/start-production.sh --file api/.dockerignore --file api/Dockerfile --file '
+        '.github/workflows/emr-d.yml --file scripts/record-run.py --file scripts/emr-compose.py --file scripts/run-tests.py '
+        '--file tests/live_test_gate.py -- node --test --test-reporter=junit tests/emr/d/server_test.cjs\n'
+        '      - name: Production API image of this commit\n'
+        '        id: image\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        timeout-minutes: 20\n'
+        '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/image --cwd . --tree api/src --tree api/prisma --file '
+        'api/Dockerfile --file api/.dockerignore --file api/start-production.sh --file api/package.json --file '
+        'api/package-lock.json --file api/tsconfig.json --file api/nest-cli.json -- docker build --target production --build-arg '
+        '"VCS_REF=${{ env.TARGET_SHA }}" -t "kin-emrd-ci:${{ env.TARGET_SHA }}" api\n'
+        '      - name: The image is of the requested source (its revision label is TARGET_SHA)\n'
+        '        id: image-identity\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        run: |\n'
+        '          revision="$(docker image inspect -f \'{{ index .Config.Labels "org.opencontainers.image.revision" }}\' '
+        '"kin-emrd-ci:$TARGET_SHA")"\n'
+        '          test "$revision" = "$TARGET_SHA" || { echo "image revision \'$revision\' is not $TARGET_SHA"; exit 1; }\n'
+        '          mkdir -p tmp/emr-d-ci\n'
+        '          docker image inspect -f \'{{ .Id }} {{ index .Config.Labels "org.opencontainers.image.revision" }}\' '
+        '"kin-emrd-ci:$TARGET_SHA" > tmp/emr-d-ci/image-identity.txt\n'
+        '      - name: EMR-D live (EmrDLive) on an empty hosted daemon through scripts/run-tests.py\n'
+        '        id: live\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        timeout-minutes: 45\n'
+        '        env:\n'
+        '          KIN_EMR_D_IMAGE_IDENTITY: tmp/emr-d-ci/image-identity.txt\n'
+        '          KIN_TEST_API_IMAGE: kin-emrd-ci:${{ env.TARGET_SHA }}\n'
+        '        run: python3 scripts/record-run.py --run-dir tmp/emr-d-ci/live --cwd . --tree tests/emr/d --tree '
+        'api/prisma/migrations --file emr/units/d.json --file scripts/emr-compose.py --file scripts/run-tests.py --file '
+        'tests/live_test_gate.py --file tmp/emr-d-ci/image-identity.txt -- python3 -B scripts/run-tests.py --module '
+        'tests/emr/d/live.py --unit emr-d-ci-live --mode live --timeout 2700\n'
+        '      - name: Verify main records and final producer checkout\n'
+        '        id: producer-source\n'
+        '        if: ${{ !cancelled() }}\n'
+        '        run: python3 -B tests/emr/d/same_source.py --producer main\n',
+ 'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+         'record hashes what its command consumes',
+ 'expect': 'D5D3: producer verification follows records and precedes upload'}]
+
+MUTANTS += [{'id': 'M-D-GATE-step-deleted',
+  'finding': 'D5D2-01',
+  'title': 'D5D-06: final gate exists',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '      - name: Every record and the image are of TARGET_SHA, and each record hashed what its command consumes (source = '
+         'image = evidence)\n'
+         '        id: same-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        run: python3 -B tests/emr/d/same_source.py\n',
+  'new': '',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D-06: final gate exists'},
+ {'id': 'M-D-GATE-job-default-if',
+  'finding': 'D5D2-01',
+  'title': 'D5D2-01: gate job runs on failure',
+  'file': '.github/workflows/emr-d.yml',
+  'old': 'needs: [emr-d, emr-d-server-mutants]\n    if: ${{ !cancelled() }}',
+  'new': 'needs: [emr-d, emr-d-server-mutants]',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D2-01: gate job runs on failure'},
+ {'id': 'M-D-GATE-step-error-expression',
+  'finding': 'D5D2-01',
+  'title': 'D5D2-01: gate step cannot ignore failure',
+  'file': '.github/workflows/emr-d.yml',
+  'old': 'id: same-source\n',
+  'new': 'id: same-source\n        continue-on-error: ${{ true }}\n',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D2-01: gate step cannot ignore failure'}]
+
+MUTANTS += [{'id': 'M-D-PRODUCER-main-missing',
+  'finding': 'D5D2-06',
+  'title': 'D5D3: producer verifies its final checkout',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '      - name: Verify main records and final producer checkout\n'
+         '        id: producer-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        run: python3 -B tests/emr/d/same_source.py --producer main\n',
+  'new': '',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D3: producer verifies its final checkout'},
+ {'id': 'M-D-PRODUCER-main-noop',
+  'finding': 'D5D2-06',
+  'title': 'D5D3: producer refuses post-record drift',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '      - name: Verify main records and final producer checkout\n'
+         '        id: producer-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        run: python3 -B tests/emr/d/same_source.py --producer main\n',
+  'new': '      - name: Verify main records and final producer checkout\n'
+         '        id: producer-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         "        run: 'true'\n",
+  'case': 'EMR-D evidence: same_source.py passes only records of TARGET_SHA that hashed, unchanged, every file their step '
+          'consumes as TARGET_SHA holds it, with their logs, exits and declared cases, and the image of TARGET_SHA',
+  'expect': 'D5D3: producer refuses post-record drift'},
+ {'id': 'M-D-PRODUCER-main-skip',
+  'finding': 'D5D2-06',
+  'title': 'D5D3: producer verification runs on failure',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '      - name: Verify main records and final producer checkout\n'
+         '        id: producer-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        run: python3 -B tests/emr/d/same_source.py --producer main\n',
+  'new': '      - name: Verify main records and final producer checkout\n'
+         '        id: producer-source\n'
+         '        if: false\n'
+         '        run: python3 -B tests/emr/d/same_source.py --producer main\n',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D3: producer verification runs on failure'},
+ {'id': 'M-D-PRODUCER-main-ignore',
+  'finding': 'D5D2-06',
+  'title': 'D5D3: producer verification cannot ignore failure',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '      - name: Verify main records and final producer checkout\n'
+         '        id: producer-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        run: python3 -B tests/emr/d/same_source.py --producer main\n',
+  'new': '      - name: Verify main records and final producer checkout\n'
+         '        continue-on-error: true\n'
+         '        id: producer-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        run: python3 -B tests/emr/d/same_source.py --producer main\n',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D3: producer verification cannot ignore failure'},
+ {'id': 'M-D-PRODUCER-server-mutants-missing',
+  'finding': 'D5D2-06',
+  'title': 'D5D3: producer verifies its final checkout',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '      - name: Verify server-mutants records and final producer checkout\n'
+         '        id: producer-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        run: python3 -B tests/emr/d/same_source.py --producer server-mutants\n',
+  'new': '',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D3: producer verifies its final checkout'},
+ {'id': 'M-D-PRODUCER-server-mutants-noop',
+  'finding': 'D5D2-06',
+  'title': 'D5D3: producer refuses post-record drift',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '      - name: Verify server-mutants records and final producer checkout\n'
+         '        id: producer-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        run: python3 -B tests/emr/d/same_source.py --producer server-mutants\n',
+  'new': '      - name: Verify server-mutants records and final producer checkout\n'
+         '        id: producer-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         "        run: 'true'\n",
+  'case': 'EMR-D evidence: same_source.py passes only records of TARGET_SHA that hashed, unchanged, every file their step '
+          'consumes as TARGET_SHA holds it, with their logs, exits and declared cases, and the image of TARGET_SHA',
+  'expect': 'D5D3: producer refuses post-record drift'},
+ {'id': 'M-D-PRODUCER-server-mutants-skip',
+  'finding': 'D5D2-06',
+  'title': 'D5D3: producer verification runs on failure',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '      - name: Verify server-mutants records and final producer checkout\n'
+         '        id: producer-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        run: python3 -B tests/emr/d/same_source.py --producer server-mutants\n',
+  'new': '      - name: Verify server-mutants records and final producer checkout\n'
+         '        id: producer-source\n'
+         '        if: false\n'
+         '        run: python3 -B tests/emr/d/same_source.py --producer server-mutants\n',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D3: producer verification runs on failure'},
+ {'id': 'M-D-PRODUCER-server-mutants-ignore',
+  'finding': 'D5D2-06',
+  'title': 'D5D3: producer verification cannot ignore failure',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '      - name: Verify server-mutants records and final producer checkout\n'
+         '        id: producer-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        run: python3 -B tests/emr/d/same_source.py --producer server-mutants\n',
+  'new': '      - name: Verify server-mutants records and final producer checkout\n'
+         '        continue-on-error: true\n'
+         '        id: producer-source\n'
+         '        if: ${{ !cancelled() }}\n'
+         '        run: python3 -B tests/emr/d/same_source.py --producer server-mutants\n',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes',
+  'expect': 'D5D3: producer verification cannot ignore failure'}]
+
+MUTANTS += [{'id': 'M-D-GATE-partial-main',
+  'finding': 'D5D2-06',
+  'title': 'final gate cannot inherit producer subset',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '        run: python3 -B tests/emr/d/same_source.py\n',
+  'new': '        run: python3 -B tests/emr/d/same_source.py --producer main\n',
+  'case': 'EMR-D evidence: same_source.py passes only records of TARGET_SHA that hashed, unchanged, every file their step '
+          'consumes as TARGET_SHA holds it, with their logs, exits and declared cases, and the image of TARGET_SHA',
+  'expect': 'D5D3: final workflow gate requires every record'},
+ {'id': 'M-D-GATE-partial-server-mutants',
+  'finding': 'D5D2-06',
+  'title': 'final gate cannot inherit producer subset',
+  'file': '.github/workflows/emr-d.yml',
+  'old': '        run: python3 -B tests/emr/d/same_source.py\n',
+  'new': '        run: python3 -B tests/emr/d/same_source.py --producer server-mutants\n',
+  'case': 'EMR-D evidence: same_source.py passes only records of TARGET_SHA that hashed, unchanged, every file their step '
+          'consumes as TARGET_SHA holds it, with their logs, exits and declared cases, and the image of TARGET_SHA',
+  'expect': 'D5D3: final workflow gate requires every record'}]
+
+MUTANTS += [{'id': 'M-D-REF-T02',
+  'finding': 'D5D2-05',
+  'title': 'T02 absent compiler metrics',
+  'file': 'tests/emr/d/same_source.py',
+  'old': 'if set(metrics) != {"Files", "Types", "Check time", "Total time"} or not files or missing:',
+  'new': 'if not files or missing:',
+  'case': 'EMR-D refusal matrix: every evidence boundary rejects its own counterexample',
+  'expect': 'T02 absent compiler metrics'}]
 
 EQUIVALENTS = [
     {"id": "E-D-R4-DR3-06a", "finding": "DR3-06", "title": "the image's build argument and tag written as quoted concatenations",
@@ -653,15 +2226,56 @@ EQUIVALENTS = [
      'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, '
              'and each record hashes what its command consumes'},
     {'id': 'E-D-D5D-06',
-     'finding': 'D5D-04/06',
-     'title': 'equivalent E-D-D5D-06',
-     'file': '.github/workflows/emr-d.yml',
-     'old': '        run: python3 -B tests/emr/d/same_source.py',
-     'new': '        run: |\n          check_source() { python3 -B tests/emr/d/same_source.py; }\n          check_source',
-     'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, '
-             'and each record hashes what its command consumes'},
+ 'finding': 'D5D-04/06',
+ 'title': 'equivalent E-D-D5D-06',
+ 'file': '.github/workflows/emr-d.yml',
+ 'old': '        run: python3 -B tests/emr/d/same_source.py\n',
+ 'new': '        run: |\n          check_source() { python3 -B tests/emr/d/same_source.py; }\n          check_source\n',
+ 'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+         'record hashes what its command consumes'},
 ]
 
+
+EQUIVALENTS += [{'id': 'E-D-D5D2-needs-block',
+  'finding': 'D5D2-02',
+  'title': 'needs-block',
+  'file': '.github/workflows/emr-d.yml',
+  'old': 'needs: [emr-d, emr-d-server-mutants]',
+  'new': 'needs:\n      - emr-d\n      - emr-d-server-mutants',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes'},
+ {'id': 'E-D-D5D2-bare-if',
+  'finding': 'D5D2-02',
+  'title': 'bare-if',
+  'file': '.github/workflows/emr-d.yml',
+  'old': 'id: same-source\n        if: ${{ !cancelled() }}',
+  'new': "id: same-source\n        if: '!cancelled()'",
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes'},
+ {'id': 'E-D-D5D2-status-or',
+  'finding': 'D5D2-02',
+  'title': 'status-or',
+  'file': '.github/workflows/emr-d.yml',
+  'old': 'id: same-source\n        if: ${{ !cancelled() }}',
+  'new': 'id: same-source\n        if: ${{ success() || failure() }}',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes'},
+ {'id': 'E-D-D5D2-job-or',
+  'finding': 'D5D2-02',
+  'title': 'job-or',
+  'file': '.github/workflows/emr-d.yml',
+  'old': 'needs: [emr-d, emr-d-server-mutants]\n    if: ${{ !cancelled() }}',
+  'new': 'needs: [emr-d, emr-d-server-mutants]\n    if: ${{ success() || failure() }}',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes'},
+ {'id': 'E-D-D5D2-false-errors',
+  'finding': 'D5D2-02',
+  'title': 'false-errors',
+  'file': '.github/workflows/emr-d.yml',
+  'old': 'id: same-source\n',
+  'new': 'id: same-source\n        continue-on-error: ${{ false }}\n',
+  'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
+          'record hashes what its command consumes'}]
 
 def sha(data):
     return hashlib.sha256(data).hexdigest()
@@ -737,7 +2351,7 @@ def run(node, test, cases=None):
         EVIDENCE = pathlib.Path(tempfile.mkdtemp(prefix="emr-d-recorded-probe-"))
     RUN_NUMBER += 1
     folder = EVIDENCE / ("execution-%03d" % RUN_NUMBER)
-    result = recorded_execution([node, "--test", "--test-reporter=tap", *selection, str(test)], test.parents[3], env, folder, 900, cases or json.loads((ROOT / "emr/units/d.json").read_text())["cases"]["server"]["cases"])
+    result = recorded_execution([node, "--test", "--test-reporter=tap", *selection, str(test)], test.parents[3], env, folder, 2400, cases or json.loads((ROOT / "emr/units/d.json").read_text())["cases"]["server"]["cases"])
     collected = tap_cases(result[1])
     (folder / "selection.json").write_text(json.dumps({"selected": cases or json.loads((ROOT / "emr/units/d.json").read_text())["cases"]["server"]["cases"], "collected": list(collected),
         "states": {n: {"status": row[0], "skip": row[1]} for n, row in collected.items()}}, indent=2), encoding="utf-8")

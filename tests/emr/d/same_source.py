@@ -30,6 +30,7 @@ import sys
 import xml.etree.ElementTree as ElementTree
 import time
 import signal
+import argparse
 
 RUNS = pathlib.Path("tmp/emr-d-ci")
 DECLARATION = "emr/units/d.json"
@@ -44,14 +45,22 @@ def recorded_execution(command, cwd, env, folder, timeout, selected):
     folder.parent.mkdir(parents=True, exist_ok=True)
     argv = [sys.executable, "-B", str(pathlib.Path(__file__).resolve().parents[3] / "scripts/record-run.py"),
             "--run-dir", str(folder), "--cwd", str(cwd), "--tree", "api/src", "--tree", "tests/emr/d",
-            "--file", "api/tsconfig.json", "--file", "api/package-lock.json", "--", *command]
+            "--file", "api/tsconfig.json", "--file", "api/package-lock.json", "--",
+            sys.executable, "-B", str(pathlib.Path(__file__).resolve()), "--timed-child", str(timeout),
+            str(folder / "child-exit.json"), *command]
     started = time.monotonic()
     status, code, error = "completed", None, None
     with (folder.parent / (folder.name + "-recorder.stdout.log")).open("wb") as out, (folder.parent / (folder.name + "-recorder.stderr.log")).open("wb") as err:
         proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=out, stderr=err,
                                 start_new_session=os.name != "nt")
         try:
-            code = proc.wait(timeout=timeout)
+            # The recorder's input hashing is outside the child's budget. The
+            # timed child owns its process tree and waits for it before returning.
+            code = proc.wait()
+            child_result = folder / "child-exit.json"
+            if child_result.is_file():
+                child = json.loads(child_result.read_text(encoding="utf-8"))
+                status, error = child["status"], child["error"]
         except (subprocess.TimeoutExpired, KeyboardInterrupt) as exc:
             status, code, error = "interrupted", 124, type(exc).__name__
             if os.name == "nt":
@@ -69,6 +78,27 @@ def recorded_execution(command, cwd, env, folder, timeout, selected):
               "duration_seconds": time.monotonic() - started, "record": str(folder / "run.json")}
     (folder / "execution.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     return code, stdout, stderr
+
+
+def timed_child(timeout, destination, command):
+    """Run only the selected step under the budget, inheriting the recorder's streams."""
+    started = time.monotonic()
+    status, error = "completed", None
+    proc = subprocess.Popen(command, start_new_session=os.name != "nt")
+    try:
+        code = proc.wait(timeout=float(timeout))
+    except (subprocess.TimeoutExpired, KeyboardInterrupt) as exc:
+        status, error = "interrupted", type(exc).__name__
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        code = 124
+    pathlib.Path(destination).write_text(json.dumps({"status": status, "error": error, "exit": code,
+        "child_process_exit": proc.returncode, "command": command,
+        "duration_seconds": time.monotonic() - started}) + "\n", encoding="utf-8")
+    return code
 
 
 class GitError(Exception):
@@ -344,7 +374,7 @@ def check_step(step, needs, produced, output, declaration, commit):
     return result
 
 
-def main():
+def main(producer=None):
     sha = os.environ.get("TARGET_SHA", "")
     report = {"target_sha": sha, "steps": {}, "image_identity": None, "problems": []}
     problems = report["problems"]
@@ -366,17 +396,21 @@ def main():
         for record in sorted(RUNS.glob("*/run.json")):
             if record.parent.name not in declared:
                 problems.append("%s: a record no step declares" % record)
-        for step in sorted(declared):
+        # Each producer checks its own final checkout before upload. A fresh
+        # gate checkout cannot observe drift that occurred in another job.
+        selected = declared if producer is None else ({"server-mutants"} if producer == "server-mutants" else set(declared) - {"server-mutants"})
+        for step in sorted(selected):
             report["steps"][step] = check_step(step, declared[step], produced, outputs.get(step, {}), declaration, commit)
     identity = RUNS / "image-identity.txt"
     words = identity.read_text(encoding="utf-8").split() if identity.is_file() else None
     report["image_identity"] = words
-    if not (words and len(words) == 2 and IMAGE_ID.fullmatch(words[0]) and words[1] == sha):
+    if producer != "server-mutants" and not (words and len(words) == 2 and IMAGE_ID.fullmatch(words[0]) and words[1] == sha):
         problems.append("%s: not the image of %s (%r)" % (identity, sha, words))
     passed = not problems and bool(report["steps"]) and all(s["verdict"] == "pass" for s in report["steps"].values())
     report["verdict"] = "pass" if passed else "fail"
     RUNS.mkdir(parents=True, exist_ok=True)
-    (RUNS / "same-source.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    destination = "same-source.json" if producer is None else "same-source-%s.json" % producer
+    (RUNS / destination).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     lines = problems + ["%s: %s%s" % (step, s["verdict"], "".join("\n  " + p for p in s["problems"])) for step, s in sorted(report["steps"].items())]
     print("\n".join(lines))
     print("source = image = evidence = %s (%d records)" % (sha, len(report["steps"])) if passed else "evidence of %s refused" % sha)
@@ -386,4 +420,8 @@ def main():
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.exit(main())
+    if sys.argv[1:2] == ["--timed-child"]:
+        sys.exit(timed_child(sys.argv[2], sys.argv[3], sys.argv[4:]))
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--producer", choices=("main", "server-mutants"))
+    sys.exit(main(parser.parse_args().producer))
