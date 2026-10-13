@@ -1,3 +1,5 @@
+import { UseInterceptors } from '@nestjs/common';
+import { AuthorizedResponse, ClinicalResponseInterceptor } from './emr-clinical/response';
 import { Body, Controller, Get, Param, Post, Query, Req } from '@nestjs/common';
 import { ClinicianQuestionService } from './clinician-question.service';
 
@@ -7,13 +9,14 @@ import { ClinicianQuestionService } from './clinician-question.service';
 const caller = (r: any) => ({ sub: r.sub, actor: r.actor, roles: r.roles ?? [], institution: r.institution ?? null, kind: r.kind,
   name: typeof r.displayName === 'string' ? r.displayName : undefined });
 
+@UseInterceptors(ClinicalResponseInterceptor)
 @Controller()
 export class ClinicianQuestionController {
   constructor(private service: ClinicianQuestionService) {}
-  @Get('questions') list(@Req() r: any, @Query() q: any) { return this.service.list(caller(r), q); }
-  @Get('questions/:id') read(@Param('id') id: string, @Req() r: any) { return this.service.read(id, caller(r), r); }
-  @Get('studies/:uid/questions') forStudy(@Param('uid') uid: string, @Req() r: any) { return this.service.forStudy(uid, caller(r)); }
-  @Post('studies/:uid/questions') create(@Param('uid') uid: string, @Req() r: any, @Body() b: any) { return this.service.create(uid, caller(r), b, r); }
-  @Post('questions/:id/entries') reply(@Param('id') id: string, @Req() r: any, @Body() b: any) { return this.service.reply(id, caller(r), b, r); }
-  @Post('questions/:id/close') close(@Param('id') id: string, @Req() r: any, @Body() b: any) { return this.service.close(id, caller(r), b, r); }
+  @Get('questions') list(@Req() r: any, @Query() q: any) : Promise<AuthorizedResponse> { return this.service.list(caller(r), q, r); }
+  @Get('questions/:id') read(@Param('id') id: string, @Req() r: any) : Promise<AuthorizedResponse> { return this.service.read(id, caller(r), r); }
+  @Get('studies/:uid/questions') forStudy(@Param('uid') uid: string, @Req() r: any) : Promise<AuthorizedResponse> { return this.service.forStudy(uid, caller(r), r); }
+  @Post('studies/:uid/questions') create(@Param('uid') uid: string, @Req() r: any, @Body() b: any) : Promise<AuthorizedResponse> { return this.service.create(uid, caller(r), b, r); }
+  @Post('questions/:id/entries') reply(@Param('id') id: string, @Req() r: any, @Body() b: any) : Promise<AuthorizedResponse> { return this.service.reply(id, caller(r), b, r); }
+  @Post('questions/:id/close') close(@Param('id') id: string, @Req() r: any, @Body() b: any) : Promise<AuthorizedResponse> { return this.service.close(id, caller(r), b, r); }
 }

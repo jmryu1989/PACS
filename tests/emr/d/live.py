@@ -108,6 +108,14 @@ class EmrDLive(unittest.TestCase):
         cls.db = cls.start_db()
         cls.provision()
         cls.migrate()
+        # The real request context authorizes against MemberRights; Keycloak-only stand-ins no longer model admission.
+        roles = {"c1": "clinician", "c2": "clinician", "r1": "radiologist", "r2": "radiologist", "rb": "radiologist", "t1": "technician", "ad": "admin"}
+        statements = ['INSERT INTO "Institution" (id,name) VALUES (\'inst-a\',\'SYN A\'),(\'inst-b\',\'SYN B\') ON CONFLICT (id) DO NOTHING;']
+        for name, sub in PEOPLE.items():
+            statements.append('INSERT INTO "MemberRights" (sub, username, email, name, "emailVerified", approved, suspended, institution, roles, "updatedAt") '
+                              "VALUES ('%s','%s','%s@synthetic.test','SYN %s',true,true,false,'%s',ARRAY['%s'],now());"
+                              % (sub, name, name, name, "inst-b" if name == "rb" else "inst-a", roles[name]))
+        run(["docker", "exec", "-i", cls.db, "psql", "-X", "-U", "kin", "-d", "kin", "-v", "ON_ERROR_STOP=1"], input="\n".join(statements).encode())
         cls.state = cls.volume("state")
 
     @classmethod
@@ -190,6 +198,11 @@ class EmrDLive(unittest.TestCase):
         kept.mkdir(parents=True, exist_ok=True)
         (kept / ("%s-%s-%s%s.json" % (self.token, self._testMethodName, operation, "-" + mutant if mutant else ""))).write_text(
             json.dumps(value, ensure_ascii=False, indent=1), encoding="utf-8")
+        if "crashed" in value:
+            # Preserve closed original-state evidence before class cleanup removes this run's synthetic database.
+            facts = self.json("SELECT json_agg(json_build_object('record', record, 'state', state, 'phase', phase, 'confirmed', confirmed)) FROM emr_clinical.request")
+            attempts = self.json("SELECT json_agg(code) FROM emr_clinical.attempt")
+            print("R5A_STORAGE_FACTS " + json.dumps({"originals": facts, "attempt_codes": attempts}), flush=True)
         self.assertNotIn("crashed", value, "driver %s crashed: %s" % (operation, value))
         self.assertNotIn("mutantAnchor", value, "a mutant anchor must occur exactly once: %s" % value)
         return value
@@ -252,15 +265,8 @@ class EmrDLive(unittest.TestCase):
 
     def prepared_sr(self, uid, item, author="r1"):
         """A prepared manual SR copy of `uid` (the bytes this server would have built), not yet attempted."""
-        # A DICOM-shaped synthetic file (128-byte preamble, DICM, synthetic payload): the table keeps 132 B to 512 KiB.
-        sr, sop = str(uuid.uuid4()), uid + ".77." + str(next(_studies))
-        data = b"\0" * 128 + b"DICM" + ("SYNTHETIC-SR-" + uuid.uuid4().hex).encode()
-        self.ok('INSERT INTO "ManualSr" (id, "studyUid", "authorSub", "authorActor", "requestId", fingerprint, selection, dataset, dicom, sha256) '
-                "VALUES (%s::uuid, %s, %s, %s, %s::uuid, %s, %s::jsonb, %s::jsonb, decode(%s, 'hex'), %s);"
-                % (self.literal(sr), self.literal(uid), self.literal(PEOPLE[author]), self.literal(author + "@synthetic.test"),
-                   self.literal(uuid.uuid4()), self.literal("ab" * 32), self.literal(json.dumps([{"id": item, "revision": 1}])),
-                   self.literal(json.dumps({"SOPInstanceUID": sop})), self.literal(data.hex()), self.literal(sha(data))))
-        return sr, sop, data
+        made = self.driver("r5a-prepared-sr-fixture", {"study": uid, "item": item, "author": author})
+        return made["id"], made["sop"], bytes.fromhex(made["hex"])
 
     # ── stored facts ──
 
@@ -975,6 +981,70 @@ class EmrDLive(unittest.TestCase):
         self.assertEqual(self.versions(fid), [], "nothing committed: never a version without its reference")
         self.assertEqual(self.json('SELECT count(*) FROM "Finding" WHERE id = %s::uuid' % self.literal(fid)), 0)
         self.assertEqual(self.change_events(fid), [])
+
+    def test_r5a_nc01_metadata_policy_and_recovery(self):
+        """NC-01/R5-09: all five owned projectors admit a real metadata policy and recover with fresh metadata."""
+        uid = self.study()
+        item, _, _ = self.measurement(uid)
+        out = self.driver("r5a-metadata", {"study": uid, "item": item})
+        self.assertEqual(out["question"]["applied"]["revision"], 1)
+        self.assertEqual(out["answer"]["applied"]["revision"], 2)
+        self.assertEqual(out["imageChange"]["applied"]["revision"], 2)
+        self.assertEqual(out["consultation"]["item"]["revision"], 1)
+        self.assertEqual(out["finding"]["revision"], 1)
+        self.assertEqual(out["assignment"]["revision"], 1)
+        self.assertEqual(out["recovery"]["applied"]["revision"], 1)
+        for record in out["ids"].values():
+            self.assertTrue(self.versions(record))
+            self.assertTrue(self.change_events(record))
+
+    def test_r5a_nc02_maximum_history_sql(self):
+        """NC-02/R5-16: actual SQL accepts every allowed entry, reserves close, and preserves history on overflow/replay."""
+        for text in ("x" * 2000, "가" * 2000, "😀" * 1000):
+            with self.subTest(utf8_bytes=len(text.encode())):
+                out = self.driver("r5a-limits", {"study": self.study(), "text": text})
+                self.assertFalse(out["over"]["ok"])
+                self.assertEqual(err(out["over"]).get("code"), "QUESTION_ENTRY_LIMIT")
+                self.assertEqual(out["closed"]["applied"], out["replay"]["applied"])
+                versions = self.versions(out["id"])
+                self.assertEqual(len(versions), 100)
+                self.assertTrue(all(v["body"]["text"] == text for v in versions))
+                maximum = self.json("SELECT max(octet_length(seed)) FROM emr_clinical.request WHERE record_id = %s" % self.literal(out["id"]))
+                self.assertLessEqual(maximum, 524288)
+                self.assertEqual(self.json('SELECT count(*) FROM "StudyQuestionEntry" WHERE "questionId"=%s::uuid' % self.literal(out["id"])), 100)
+
+    def test_r5a_nc04_business_ack(self):
+        """NC-04: actual mutable receipt cannot add clinical fields or rewrite the original revision."""
+        out = self.driver("r5a-acks", {"study": self.study()})
+        self.assertNotIn("SYN forbidden", json.dumps(out["replay"]))
+        self.assertFalse(out["corrupted"]["ok"])
+        self.assertEqual(len(self.versions(out["id"])), 1)
+        self.assertEqual([r["state"] for r in self.register(out["id"])], ["committed"])
+
+    def test_r5a_nc05_original_refusal_seal_retry(self):
+        """NC-05: SQL rollback/decision commits even when sealing is unreachable; clearing hold never changes its cause."""
+        out = self.driver("r5a-seal-retry", {"study": self.study()})
+        [record] = self.register(out["requestId"])
+        print("R5A_SEAL_FACTS " + json.dumps({"out": out, "state": record["state"], "phase": record["phase"]}), flush=True)
+        self.assertGreaterEqual(out["attempts"], 1)
+        self.assertFalse(out["first"]["ok"])
+        self.assertFalse(out["retry"]["ok"])
+        self.assertEqual((record["state"], record["terminal"]["proof"]["code"]), ("rejected", "ASSIGNMENT_HELD"))
+        decision = self.json("SELECT rejection_decision::json FROM emr_clinical.request WHERE request_id=%s" % self.literal(out["requestId"]))
+        self.assertTrue(decision["noClinicalEffects"])
+        self.assertEqual(decision["code"], "ASSIGNMENT_HELD")
+        record_id = json.loads(record["seed"])["ids"]["recordId"]
+        self.assertEqual(self.versions(record_id), [])
+        self.assertEqual(self.change_events(record_id), [])
+
+    def test_r5a_nc06_absent_admission_race(self):
+        """NC-06: actual separate SQL transactions interleave absent lookup with another owner's complete registration."""
+        out = self.driver("r5a-registry-race", {"study": self.study()})
+        self.assertEqual(out["racing"], out["registered"])
+        self.assertFalse(out["changed"]["ok"])
+        [record] = self.register(out["requestId"])
+        self.assertEqual(record["state"], "committed")
+        self.assertEqual(len(self.versions(record["record_id"])), 1)
 
 if __name__ == "__main__":
     raise SystemExit("Run through scripts/run-tests.py --mode live")

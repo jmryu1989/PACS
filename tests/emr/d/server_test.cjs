@@ -262,6 +262,9 @@ function registerDb(row, { failCheckpoints = 0, commitHold = null, sources = nul
   const db = { $executeRaw: async () => 0, $queryRaw: async (strings, ...v) => {
     const sql = strings.join('?');
     if (sql.includes('"ViewerRevision"') || sql.includes('"ViewerJobRevision"')) return sources(sql);
+    if (sql.includes('emr_clinical.lock_request')) return [];
+    if (sql.includes('emr_clinical.rejection_for')) return [{decision:row.rejection_decision??null}];
+    if (sql.includes('emr_clinical.remember_rejection')) {row.rejection_decision=v[5];return [{done:true}];}
     if (sql.includes('emr_clinical.observe')) return [{ ...row, kind: 'observer' }];
     if (sql.includes('emr_clinical.recover(')) {
       seen.recoveries++;
@@ -308,6 +311,7 @@ test('TEST-D-04 atomic_retry server: a recovery releases the original it took ov
   const allocation = () => input('assignment.write', t1, null, { requestId: randomUUID(), expectedOwner: owner(t1), revision: 0, readerSub: null },
     { ids: { recordId: 'assignment-' + randomUUID(), versionId: randomUUID() } });
   let effects = 0, held = null;
+  SV.clinicalServices.prepareProjection.delete('assignment');
   SV.registerClinicalProjection('assignment', async () => { effects++; if (held) await held.promise; });
   // A checkpoint that fails once (a dropped connection) and then works again.
   const first = allocation(), row = registerRow(first, facts(t1));
@@ -366,39 +370,27 @@ const unitRows = unit => unit.versions.map(v => ({ record_id: unit.recordId, rec
 const unitsDb = units => ({ $queryRaw: async (_strings, ids) => units.filter(u => ids.includes(u.recordId)).flatMap(unitRows) });
 
 test('TEST-D-03 read_scope server: a response serving many units hands out no text before every provision naming exactly its versions is durable; a projection naming another author or recipient is refused', async () => {
-  const questions = Array.from({ length: 70 }, () => R.applyPlan(null, question()));
-  const db = unitsDb(questions), appended = [];
-  const runtime = new RT.ClinicalRuntime({ db, ledger: fakeLedger(db, appended), context: providerContext(r1), studies: {}, signatures: device.ports });
-  const caller = { subject: r1.identity.subject, institutionId: 'inst-a' };
-  const units = await SV.readClinicalUnits(db, questions.map(q => q.recordId));
-  const provisions = parties => questions.map(q => ({ record: 'question', recordId: q.recordId, studyId: study.studyId, scope: 'history', rows: units.get(q.recordId), parties }));
-  let sentAfter = null;
-  const texts = await runtime.provide({}, { route: 'GET questions', caller, units: provisions({ author: c1.identity.subject }),
-    send: async (served, receipts) => { sentAfter = [appended.length, receipts.length]; return served.map(s => s.bodies.map(b => b.text)); } });
-  assert.deepEqual(sentAfter, [2, 2], '70 versions: two provisions (64 + 6), both durable before the text is sent');
-  assert.deepEqual(appended.flatMap(e => e.targets.map(t => t.versionId.value)), questions.map(q => q.head.versionId), 'exactly the served versions, once each');
-  assert.ok(appended.every(e => e.action === 'provide-prepared' && e.surface === 'GET questions' && e.userId.value.id === r1.identity.id));
-  assert.deepEqual(texts, questions.map(() => [Q]));
-  // The second provision fails: nothing is sent at all.
-  let sent = false, calls = 0;
-  const failing = { ...fakeLedger(db), append: async event => { if (++calls === 2) throw new Error('SYN ledger down'); return { eventId: event.eventId, durableAt: new Date().toISOString() }; } };
-  const down = new RT.ClinicalRuntime({ db, ledger: failing, context: providerContext(r1), studies: {}, signatures: device.ports });
-  await assert.rejects(down.provide({}, { route: 'GET questions', caller, units: provisions({ author: c1.identity.subject }), send: async () => { sent = true; } }), /SYN ledger down/);
-  assert.equal(sent, false, 'TEST-D-03: no text without every provision durable');
-  // DR2-02: a projection whose author is not the version's, or rows not read from storage, get nothing (and log nothing).
-  appended.length = 0;
-  await refusedAsync(runtime.provide({}, { route: 'GET questions', caller, units: provisions({ author: 'sub-someone-else' }), send: async () => 'SYN' }), 'ProjectionMismatch',
-    'DR2-02: a projection naming another author is refused');
-  await refusedAsync(runtime.provide({}, { route: 'GET questions', caller, units: [{ ...provisions()[0], rows: unitRows(questions[0]) }], send: async () => 'SYN' }), 'NotFound');
-  const consultation = R.applyPlan(null, R.planClinicalWrite(input('consultation.create', r1, null, { requestId: randomUUID(), expectedOwner: owner(r1),
-    recipientSub: t1.identity.subject, reason: Q }, { recipientId: t1.identity.id })));
-  const cdb = unitsDb([consultation]), crows = (await SV.readClinicalUnits(cdb, [consultation.recordId])).get(consultation.recordId);
-  const reader = new RT.ClinicalRuntime({ db: cdb, ledger: fakeLedger(cdb, appended), context: providerContext(r1), studies: {}, signatures: device.ports });
-  const one = recipient => ({ route: 'GET consultations', caller, units: [{ record: 'consultation', recordId: consultation.recordId, scope: 'texts', rows: crows,
-    parties: { author: r1.identity.subject, recipient } }], send: async served => served[0].bodies.map(b => b.text) });
-  await refusedAsync(reader.provide({}, one(c1.identity.subject)), 'ProjectionMismatch', 'a rewritten recipient');
-  assert.equal(appended.length, 0, 'a refused projection logs no provision');
-  assert.deepEqual(await reader.provide({}, one(t1.identity.subject)), [Q], 'control: the recipient the opening version fixed');
+  const H = require('./response_test.cjs');
+  const records = Array.from({length:70},()=>H.fixture('image-request'));
+  const env=H.environment(records), route='GET image-requests', selector={view:'images',route,ids:records.map(f=>f.row.id)};
+  const response=await H.B.clinicalResponse(env.parts,env.req,selector,env.context);
+  const body=await H.serialize(env,route,response);
+  assert.deepEqual(env.appended.map(e=>e.targets.length),[64,6],'70 versions: two provisions (64 + 6), both durable before the text is sent');
+  assert.deepEqual(body.items.map(i=>i.reason),records.map(f=>f.unit.versions[0].text));
+  assert.deepEqual(env.appended.flatMap(e=>e.targets.map(t=>t.versionId.value)),records.map(f=>f.unit.head.versionId));
+  env.appended.length=0;env.changes.ledgerAt=2;
+  await assert.rejects(H.B.clinicalResponse(env.parts,env.req,selector,env.context),/SYN ledger failure/,'TEST-D-03: no text without every provision durable');
+  env.changes.ledgerAt=0;env.appended.length=0;records[0].row.requesterSub='someone-else';
+  await assert.rejects(H.B.clinicalResponse(env.parts,env.req,selector,env.context),e=>e.code==='ProjectionMismatch','DR2-02: a projection naming another author is refused');
+  assert.equal(env.appended.length,0);
+  const f=H.fixture('consultation'), ce=H.environment([f]);
+  f.row.recipientSub='somebody-else';
+  await assert.rejects(H.B.clinicalResponse(ce.parts,ce.req,H.variant(f,'GET consultations'),ce.context),e=>e.code==='ProjectionMismatch','a rewritten recipient');
+  assert.equal(ce.appended.length,0);
+  f.row.recipientSub=H.recipient.identity.subject;
+  const control=await H.B.clinicalResponse(ce.parts,ce.req,H.variant(f,'GET consultations'),ce.context);
+  assert.equal(control.items[0].reason,f.unit.versions[0].text);
+
 });
 
 test('TEST-D-02 versions_and_sr server: a manual SR adoption counts only once its access event is durable - a ledger that cannot confirm it leaves it unconfirmed, and the same event confirms it later', async () => {
@@ -963,10 +955,11 @@ test('TEST-D-02 versions_and_sr server: what a finding incorporates is a fixed r
     change: p => ({ ...p, attachments: p.attachments.map((a, i) => i ? a : { ...a, versionId: 'revision:2' }) }) }), eventId: plan.requestId };
   await refusedAsync(portFor(moved).verify(await portFor(moved).sign(plan.signing, { originalId: 'o' }), plan.signing), 'SignatureBindingRefused');
   // Recovery of the registered original resolves the same source versions again and commits the very references signed.
-  const seed = JSON.parse(JSON.stringify({ ...finding, attachments: resolved.map(r => ({ recordId: r.recordId, eventId: r.event.eventId })) }));
+  const seed = JSON.parse(JSON.stringify({ ...finding, attachments: resolved.map(r => ({ recordId: r.recordId, eventId: r.event.eventId, versionId:r.event.versionId, sha256:r.event.sha256, kinds:r.kinds })) }));
   const row = registerRow(seed, facts(r1, true), signed);
   const { db, seen } = registerDb(row, { sources: rows });
   let projected = 0;
+  SV.clinicalServices.prepareProjection.delete('finding');
   SV.registerClinicalProjection('finding', async () => { projected++; });
   const runtime = new RT.ClinicalRuntime({ db, ledger: fakeLedger(db), context: {}, studies: {}, signatures: device.ports, recoveryDelayMs: 3600000 });
   assert.equal((await runtime.recover(R.prepareClinicalWrite(finding))).status, 'replayed', 'DR2-05: the recovered original resolves the same sources again and commits');
@@ -1019,6 +1012,8 @@ function clinicalStore(legacy) {
   const view = (row, kind) => [{ ...row, kind }];
   const db = { $executeRaw: async () => 0, $queryRaw: async (strings, ...v) => {
     const sql = strings.join('?');
+    if(sql.includes('emr_clinical.lock_request'))return [];
+    if(sql.includes('emr_clinical.response_facts'))return [...requests.values()].filter(r=>r.state==='committed'&&r.record_id===v[0]&&v[1].includes(JSON.parse(r.terminal).proof.version.versionId)).map(r=>({version_id:JSON.parse(r.terminal).proof.version.versionId,request_id:JSON.parse(r.terminal).proof.receipt.requestId,projection:JSON.stringify(JSON.parse(r.facts).projection)}));
     if (sql.includes('emr_clinical.unit_for')) return units.get(v[0]) ?? [];
     if (sql.includes('emr_clinical.admit(')) {
       const found = requests.get(key(v));
@@ -1074,6 +1069,7 @@ test('TEST-D-04 atomic_retry server: an allocation request answers its own commi
     throw new Error('unexpected SQL ' + sql);
   });
   const db = store.db;
+  db.memberRights={findUnique:async()=>({approved:true,suspended:false,institution:'inst-a',roles:['technician']})};
   db.readerAssignment = {
     findUnique: async ({ where }) => rows.get(where.studyUid_institutionId.institutionId) ?? null,
     upsert: async ({ where, create, update }) => {
@@ -1130,6 +1126,7 @@ test('TEST-D-04 atomic_retry server: a consultation step resent after a later st
     throw new Error('unexpected SQL ' + sql);
   });
   const db = store.db;
+  db.memberRights={findUnique:async()=>({approved:true,suspended:false,institution:'inst-a',roles:['radiologist']})};
   db.studyConsultation = {
     findUnique: async ({ where }) => rows.has(where.id) ? { ...rows.get(where.id) } : null,
     findFirst: async ({ where }) => [...rows.values()].find(r => r.studyUid === where.studyUid && r.recipientSub === where.recipientSub && where.state.in.includes(r.state)) ?? null,
@@ -1177,17 +1174,21 @@ test('TEST-D-03 read_scope server: a finding written before unit D answers neith
     ['finding.restore', { requestId: randomUUID(), expectedRevision: 2, action: 'restore', item: {}, reason: reasons.restore }, false]])
     unit = R.applyPlan(unit, R.planClinicalWrite(input(surface, r1, unit, body, { content: I.VI.canonical(snapshot(hidden)), ids: { recordId: signedId, versionId: randomUUID() } })));
   const signedRows = unit.versions.map(v => ({ revision: v.sequence, snapshot: JSON.parse(v.text), action: ['create', 'hide', 'restore'][v.sequence - 1],
-    reason: v.reasonSource === 'stated' ? v.reason : '', actor: 'r1@synthetic.test', authorSub: r1.identity.subject, payloadBytes: 120, at: v.at.replace('Z', '') }));
+    reason: v.reasonSource === 'stated' ? v.reason : '', actor: 'r1@synthetic.test', authorSub: r1.identity.subject, payloadBytes: Buffer.byteLength(v.text, 'utf8'), at: v.at.replace('Z', '') }));
   const legacyRows = [['create', ''], ['edit', ''], ['hide', 'SYN LEGACY 숨김 사유'], ['restore', 'SYN LEGACY 복원 사유']].map(([action, reason], i) =>
     ({ revision: i + 1, snapshot: snapshot(action === 'hide'), action, reason, actor: 'r1@synthetic.test', authorSub: r1.identity.subject, payloadBytes: 120,
       at: '2026-10-01T01:02:0' + i + '.000' }));
   let page = null, down = false;
   const appended = [];
-  const db = { $executeRaw: async () => 0, studyState: { findUnique: async () => ({ uid, institutionId: 'inst-a', teleInstitutionId: null, rs: 'W' }) },
+  const db = { memberRights:{findUnique:async()=>({approved:true,suspended:false,institution:'inst-a',roles:['radiologist']})}, $executeRaw: async () => 0, studyState: { findUnique: async () => ({ uid, institutionId: 'inst-a', teleInstitutionId: null, rs: 'W' }) },
     $queryRaw: async (strings, ...v) => {
       const sql = strings.join('?');
       if (sql.includes('SELECT DISTINCT l.uid')) return [];
       if (sql.includes('AS present')) return [{ allowed: true, present: true, rows: JSON.stringify(page) }];
+      if (sql.includes('emr_clinical.response_facts')) return v[1].map(version=>({version_id:version,request_id:randomUUID(),projection:JSON.stringify({caller:{sub:r1.identity.subject,actor:'r1@synthetic.test'}})}));
+      if (sql.includes('SELECT * FROM "StudyState"'))return [{uid,institutionId:'inst-a',rs:'W'}];
+      if (sql.includes('FROM "Finding" WHERE')) {const signed=v[0]===signedId;return [{id:v[0],studyUid:uid,authorSub:r1.identity.subject,authorActor:'r1@synthetic.test',revision:signed?unit.revision:4,hidden:false,createdAt:signed?unit.versions[0].at:legacyRows[0].at,updatedAt:signed?unit.versions.at(-1).at:legacyRows[3].at,snapshot:JSON.stringify(snapshot(false))}];}
+      if (sql.includes('FROM "FindingRevision" WHERE'))return page.map(r=>({...r,snapshot:JSON.stringify(r.snapshot)}));
       if (sql.includes('emr_clinical.unit_for')) return v[0] === signedId ? unitRows(unit) : [];
       throw new Error('unexpected SQL ' + sql);
     } };
@@ -1250,9 +1251,10 @@ test('TEST-D-02 versions_and_sr server: copies of one source version - two marks
     const signed = carried(plan, r1), port = portFor(signed);
     await port.verify(await port.sign(plan.signing, { originalId: 'o' }), plan.signing);
     // The registered original resolves the same one reference again in its recovery and stores exactly it.
-    const seed = JSON.parse(JSON.stringify({ ...finding, attachments: resolved.map(r => ({ recordId: r.recordId, eventId: r.event.eventId })) }));
+    const seed = JSON.parse(JSON.stringify({ ...finding, attachments: resolved.map(r => ({ recordId: r.recordId, eventId: r.event.eventId, versionId:r.event.versionId, sha256:r.event.sha256, kinds:r.kinds })) }));
     const { db, seen } = registerDb(registerRow(seed, facts(r1, true), signed), { sources: () => [row] });
-    I.SV.registerClinicalProjection('finding', async () => {});
+    I.SV.clinicalServices.prepareProjection.delete('finding');
+  I.SV.registerClinicalProjection('finding', async () => {});
     const runtime = new I.RT.ClinicalRuntime({ db, ledger: fakeLedger(db), context: {}, studies: {}, signatures: device.ports, recoveryDelayMs: 3600000 });
     assert.equal((await runtime.recover(I.R.prepareClinicalWrite(finding))).status, 'replayed', label + ': recovered');
     assert.deepEqual([seen.commits, seen.versions[0].attachments, seen.versions[0].text], [1, expected, content], label + ': stored with the one reference');
@@ -1270,9 +1272,10 @@ test('TEST-D-04 atomic_retry server: a cited source gone before the commit keeps
   const body = { requestId: randomUUID(), item: { schemaVersion: 1, title: 'SYN title', text: 'SYN copied source', sources: [{ itemId: item, revision: 1 }] } };
   const finding = input('finding.create', r1, null, body, { content: 'SYN copied source', attachments: resolved });
   const signed = carried(I.R.planClinicalWrite(finding), r1);
-  const row = registerRow({ ...finding, attachments: resolved.map(r => ({ recordId: r.recordId, eventId: r.event.eventId })) }, facts(r1, true), signed);
+  const row = registerRow({ ...finding, attachments: resolved.map(r => ({ recordId: r.recordId, eventId: r.event.eventId, versionId:r.event.versionId, sha256:r.event.sha256, kinds:r.kinds })) }, facts(r1, true), signed);
   let sources = () => { throw new Error('SYN connection reset'); }, projected = 0;
   const { db, seen } = registerDb(row, { sources: sql => sources(sql) });
+  I.SV.clinicalServices.prepareProjection.delete('finding');
   I.SV.registerClinicalProjection('finding', async () => { projected++; });
   const runtime = new I.RT.ClinicalRuntime({ db, ledger: fakeLedger(db), context: providerContext(r1), studies: { facts: async () => study },
     signatures: device.ports, recoveryDelayMs: 3600000 });
@@ -1290,7 +1293,7 @@ test('TEST-D-04 atomic_retry server: a cited source gone before the commit keeps
   // The author's resend through the public route answers the service's stale-source refusal.
   I.SV.bindClinicalPort(runtime);
   const service = new I.F.FindingService({ studyState: { findUnique: async () => ({ uid: study.studyId, institutionId: 'inst-a', teleInstitutionId: null, rs: 'W' }) } },
-    { require: async () => {} }, {});
+    { require: async () => {}, snapshot:async()=>({}) }, {});
   const caller = { kind: 'member', institution: 'inst-a', sub: r1.identity.subject, actor: 'r1@synthetic.test', roles: ['radiologist'] };
   const refusal = await service.write(study.studyId, Buffer.from(JSON.stringify(body)), caller, undefined, {}).then(() => null, e => e);
   assert.deepEqual([statusOf(refusal), refusal?.getResponse?.().code], [409, 'FINDING_SOURCE_STALE'], 'DR3-04: the resend answers FINDING_SOURCE_STALE');
@@ -1300,13 +1303,13 @@ test('TEST-D-04 atomic_retry server: a cited source gone before the commit keeps
   const command = I.FI.findingCommand(Buffer.from(JSON.stringify(body)), true);
   const projection = { caller, body: JSON.stringify(body), fingerprint: I.FI.findingFingerprint(study.studyId, null, command), id: null,
     plan: { studies: [study.studyId], checked: [], frames: [] } };
-  const tx = { $executeRaw: async () => 0, $queryRaw: async strings => {
+  const tx = { memberRights:{findUnique:async()=>({approved:true,suspended:false,institution:'inst-a',roles:['radiologist']})}, $executeRaw: async () => 0, $queryRaw: async strings => {
     const sql = strings.join('?');
     if (sql.includes('"StudyState"')) return [{ uid: study.studyId, institutionId: 'inst-a', teleInstitutionId: null, rs: 'W' }];
     if (sql.includes('"ViewerItem"') || sql.includes('"ViewerRevision"')) return [];
     throw new Error('unexpected SQL ' + sql);
   } };
-  await assert.rejects(I.SV.clinicalServices.projectors.get('finding')(tx, I.R.planClinicalWrite(finding), projection), e => e?.code === 'ClinicalSourceMissing',
+  await assert.rejects(I.SV.clinicalServices.projectors.get('finding')(tx, I.R.planClinicalWrite(finding), projection, caller), e => e?.code === 'ClinicalSourceMissing',
     'DR3-04: a commit whose cited source went after admission is refused as that stale source');
 });
 
@@ -1346,4 +1349,21 @@ test('EMR-D-R2 declaration: d.json lists exactly the collected server and live c
   assert.equal(migrations.at(-2), d.migrations.latest_before);
   const kinds = Object.keys(load('emr-contract/classification.ts').RECORD_CLASSIFICATION);
   for (const [table, tableKinds] of Object.entries(d.schema.tables)) for (const kind of tableKinds) assert.ok(kinds.includes(kind), table + ': ' + kind);
+});
+
+test('R5 response boundary: all declared clinical and business variants reject unsigned or unauthorized body egress', () => {
+  const env={...process.env,KIN_EMR_D_ROOT:root}; delete env.NODE_TEST_CONTEXT;
+  const child=spawnSync(process.execPath,['--test','--test-reporter=tap',path.join(root,'tests/emr/d/response_test.cjs')],
+    {cwd:root,encoding:'utf8',env,timeout:120000});
+  assert.equal(child.status,0,'R5 response matrix must pass: '+child.stdout+' '+child.stderr);
+  assert.match(child.stdout,/^# pass 18$/m,'all response cases must execute');
+  assert.match(child.stdout,/^# skipped 0$/m,'no response case may be skipped');
+});
+test('R5 original request: recovery, ownership, metadata authorization and maximum seed matrices preserve original outcomes', () => {
+  const env={...process.env,KIN_EMR_D_ROOT:root}; delete env.NODE_TEST_CONTEXT;
+  const child=spawnSync(process.execPath,['--test','--test-reporter=tap',path.join(root,'tests/emr/d/recovery_test.cjs')],
+    {cwd:root,encoding:'utf8',env,timeout:120000});
+  assert.equal(child.status,0,'R5 recovery matrix must pass: '+child.stdout+' '+child.stderr);
+  assert.match(child.stdout,/^# pass 7$/m,'all recovery cases must execute');
+  assert.match(child.stdout,/^# skipped 0$/m,'no recovery case may be skipped');
 });

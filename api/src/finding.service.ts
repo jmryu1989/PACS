@@ -160,7 +160,7 @@ function replayMismatch(replay: any, fingerprint: string, uid: string, c: Caller
 @Injectable()
 export class FindingService {
   constructor(private prisma: PrismaService, private studyAccess: StudyAccessService, private orthanc: OrthancService) {
-    registerClinicalProjection('finding', (tx, plan, projection) => this.project(tx, plan, projection as FindingProjection));
+    registerClinicalProjection('finding', (tx, plan, projection, caller) => this.project(tx, plan, projection as FindingProjection, caller), { db: prisma, access: studyAccess });
   }
 
   private async bounded<T>(work: (tx: Prisma.TransactionClient) => Promise<T>, read = false): Promise<T> {
@@ -267,27 +267,9 @@ export class FindingService {
         // An unreadable finding answers exactly like an absent id.
         if (!pageRow.present) absent();
         const rows: any[] = parsed(pageRow.rows), shown = rows.slice(0, page.limit);
-        const units = await readClinicalRows(tx, id.toLowerCase());
-        const reply = (served: readonly ClinicalServed[]) => {
-          const bodies = served[0]?.bodies ?? [];
-          const revisions = shown.map(row => {
-            const answer = (reason: string | null, item: unknown) => ({ revision: row.revision, action: row.action, reason, actor: row.actor,
-              at: timestamp(row.at), payloadBytes: row.payloadBytes, item });
-            // A finding written before unit D has no signed version: its revisions are answered as operational summaries, the
-            // author's typed reason withheld like its text (DR3-02) - no clinical text leaves without a signed version and its
-            // durable provision.
-            if (!units.length) return answer(null, null);
-            const b = bodies.find(x => x.sequence === row.revision) ?? conflict();
-            if (versionAction(b) !== row.action || typedReason(b) !== row.reason || b.author.subject !== row.authorSub) conflict();
-            return answer(typedReason(b), this.signedItem(row, b));
-          });
-          if (schema !== '2' && !legacyOnly(revisions.map(r => r.item).filter(item => item !== null))) clientOutdated();
-          return { revisions, nextCursor: rows.length > page.limit ? revisions[revisions.length - 1].revision : null };
-        };
-        if (!units.length || !shown.length) return reply([]);
-        return runtime.provide(request, { route: 'GET studies/:uid/findings/:id/revisions', caller: reader,
-          units: [{ record: 'finding', recordId: id.toLowerCase(), studyId: uid, scope: { sequences: shown.map(row => row.revision) }, rows: units,
-            parties: { author: shown[0].authorSub } }], send: async served => reply(served) });
+        return runtime.respond(request, { view: 'finding-history', route: 'GET studies/:uid/findings/:id/revisions',
+          id: id.toLowerCase(), sequences: shown.map(row => row.revision), schema,
+          nextCursor: rows.length > page.limit ? shown[shown.length - 1].revision : null }, { db: this.prisma, tx, caller: c, access: this.studyAccess });
       }
       // Item links are the shipped entries byte for byte; a job entry reports the job head of this anchor.
       const [pageRow] = await tx.$queryRaw<any[]>`WITH parent AS (${parent})
@@ -301,20 +283,9 @@ export class FindingService {
             ORDER BY f.id LIMIT ${page.limit + 1}) page), '[]'::jsonb)::text AS rows`;
       if (!pageRow.allowed) denied();
       const rows: any[] = parsed(pageRow.rows), shown = rows.slice(0, page.limit);
-      const units = await readClinicalUnits(tx, shown.map(row => row.id)), signed = shown.filter(row => units.get(row.id).length);
-      return runtime.provide(request, { route: 'GET studies/:uid/findings', caller: reader,
-        units: signed.map(row => ({ record: 'finding' as const, recordId: row.id, studyId: uid, scope: 'current' as const, rows: units.get(row.id),
-          parties: { author: row.authorSub } })),
-        send: async served => {
-          const items = shown.map(row => {
-            const head = served.find(s => s.unit.recordId === row.id)?.bodies[0];
-            const item = units.get(row.id).length ? this.signedItem({ ...row, at: row.updatedAt }, head ?? conflict()) : null;
-            if (item && item.hidden !== row.hidden) conflict();
-            return { ...result({ ...row, snapshot: item }), links: row.links };
-          });
-          if (schema !== '2' && !legacyOnly(items.map(i => i.item).filter(item => item !== null))) clientOutdated();
-          return { items, nextCursor: rows.length > page.limit ? items[items.length - 1].id : null };
-        } });
+      return runtime.respond(request, { view: 'findings', route: 'GET studies/:uid/findings', ids: shown.map(row => row.id),
+        links: shown.map(row => ({ id: row.id, links: row.links })), schema,
+        nextCursor: rows.length > page.limit ? shown[shown.length - 1].id : null }, { db: this.prisma, tx, caller: c, access: this.studyAccess });
     }, true));
   }
 
@@ -462,19 +433,19 @@ export class FindingService {
     const recordId = id ?? command.requestId.toLowerCase();
     const known = await this.clinical(() => runtime.lookup(request, { surface, studyId: uid, recordId, body, caller, projection: null }));
     if (known) return this.answer(known, c, command.requestId, request, id);
-    const plan = await this.plan(uid, anchor, command, fingerprint, c, id);
-    // What the snapshot copies is incorporated: each copy's source version becomes a fixed reference, resolved in the same
-    // snapshot under the same locks as the copy (DR2-05). The comparison study itself is navigation only.
-    const composed = await this.clinical(() => this.bounded(async tx => {
-      const made = await this.compose(tx, uid, c, command, plan, id);
-      return { ...made, attachments: await readClinicalSources(tx, made.refs) };
-    }));
-    // Server fact: the author holds this study's reading (a live hold) - a hide/restore there needs no typed reason (D-18).
     const reading = holdAlive(anchor) && anchor.holder === c.actor ? { referenceId: 'hold:' + anchor.draftEpoch } : null;
-    const projection: FindingProjection = { caller: { kind: c.kind, institution: c.institution, sub: c.sub, actor: c.actor, roles: [...c.roles] },
-      body: raw.toString('utf8'), fingerprint, id: id ?? null, plan: { studies: [...plan.studies], checked: [...plan.checked], frames: [...plan.frames] } };
-    const result = await this.clinical(() => runtime.write(request, { surface, studyId: uid, recordId, body, content: composed.serialized,
-      attachments: composed.attachments, navigation: composed.navigation, reading, caller, projection }));
+    const result = await this.clinical(() => runtime.write(request, { surface, studyId: uid, recordId, body, reading, caller, projection: null,
+      prepare: async () => {
+        const plan = await this.plan(uid, anchor, command, fingerprint, c, id);
+        const composed = await this.bounded(async tx => {
+          const made = await this.compose(tx, uid, c, command, plan, id);
+          return { ...made, attachments: await readClinicalSources(tx, made.refs) };
+        });
+        const projection: FindingProjection = { caller: { kind: c.kind, institution: c.institution, sub: c.sub, actor: c.actor, roles: [...c.roles] },
+          body: raw.toString('utf8'), fingerprint, id: id ?? null,
+          plan: { studies: [...plan.studies], checked: [...plan.checked], frames: [...plan.frames] } };
+        return { projection, content: composed.serialized, attachments: composed.attachments, navigation: composed.navigation };
+      } }));
     return this.answer(result.outcome, c, command.requestId, request, id);
   }
 
@@ -493,15 +464,10 @@ export class FindingService {
     if (code !== null) throw clinicalHttpError(code, OWN);
     const runtime = requireClinicalRuntime();
     try {
-      return await this.bounded(async tx => {
-        const replay = await this.replayRow(tx, c.sub, requestId);
-        if (!replay) throw new ServiceUnavailableException('소견 저장이 지연되었습니다. 같은 요청 ID로 다시 시도하세요');
-        const rows = await readClinicalRows(tx, replay.findingId);
-        return runtime.provide(request, { route: id === undefined ? 'POST studies/:uid/findings' : 'POST studies/:uid/findings/:id/revisions',
-          caller: { subject: c.sub, institutionId: c.institution }, units: [{ record: 'finding', recordId: replay.findingId, studyId: replay.finding.studyUid,
-            scope: { sequences: [replay.revision] }, rows, parties: { author: replay.finding.authorSub } }],
-          send: async served => result(replay.finding, { ...replay, snapshot: this.signedItem(replay, served[0].bodies[0]) }) });
-      }, true);
+      await this.studyAccess.prepare(c);
+      return await this.bounded(tx => runtime.respond(request, { view: 'finding-write',
+        route: id === undefined ? 'POST studies/:uid/findings' : 'POST studies/:uid/findings/:id/revisions',
+        receipt: (outcome as any).receipt }, { db: this.prisma, tx, caller: c, access: this.studyAccess }), true);
     } catch (error) { throw clinicalEchoRefusal(error, OWN); }
   }
 
@@ -657,8 +623,8 @@ export class FindingService {
    * The legacy rows of one committed finding version, inside the clinical commit transaction (registered projector):
    * the snapshot is composed again under the locks and must be the very text the version (and its signature) holds.
    */
-  private async project(tx: any, plan: Readonly<ClinicalWritePlan>, p: FindingProjection) {
-    const c = projectedCaller(p.caller), v = plan.version;
+  private async project(tx: any, plan: Readonly<ClinicalWritePlan>, p: FindingProjection, trusted?: Caller) {
+    const c = projectedCaller(p.caller, trusted), v = plan.version;
     const studyId = clinicalText(v.studyId), recordId = clinicalText(v.recordId), id = p.id === null ? undefined : clinicalText(p.id);
     // The same parse as the write: a stored body that no longer gives the fingerprint the original was admitted with is not its own.
     const command = findingCommand(Buffer.from(clinicalText(p.body), 'utf8'), id === undefined), fingerprint = clinicalText(p.fingerprint);

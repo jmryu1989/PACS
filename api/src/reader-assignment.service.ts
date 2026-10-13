@@ -1,3 +1,4 @@
+import { businessResponse } from './emr-clinical/response';
 import { StudyAccessService } from './study-access.service';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, HttpException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
@@ -72,13 +73,13 @@ export async function closeReaderAssignments(tx:any,uid:string,admits:{instituti
 @Injectable()
 export class ReaderAssignmentService {
   constructor(private prisma:PrismaService,private keycloak:KeycloakService, private studyAccess:StudyAccessService){
-    registerClinicalProjection('assignment',(tx,plan,projection)=>this.project(tx,plan,projection as AssignmentProjection));
+    registerClinicalProjection('assignment',(tx,plan,projection,caller)=>this.project(tx,plan,projection as AssignmentProjection,caller),{db:prisma,access:studyAccess});
   }
   private member(c:Caller){if(c.kind!=='member'||!c.roles.some(r=>['admin','technician','radiologist'].includes(r))||![c.institution,c.sub,c.actor].every(x=>typeof x==='string'&&x.length>0&&x.length<=256))throw new ForbiddenException('소속 기관 업무 사용자 전용입니다');}
   private manager(c:Caller){return c.roles.some(r=>['admin','technician'].includes(r));}
   private eligible(u:KeycloakUser|null,c:Caller){return !!u&&u.enabled&&!u.serviceAccountClientId&&u.groups.length===1&&u.groups[0]===c.institution&&u.roles.includes('radiologist')&&(u.email||u.username).length<=256;}
   private publicReader(u:KeycloakUser){return {sub:u.id,actor:u.email||u.username,name:([u.lastName,u.firstName].filter(Boolean).join(' ')||u.username).slice(0,256)};}
-  async candidates(c:Caller){this.member(c);return {owner:[c.institution,c.sub],canManage:this.manager(c),readers:(await this.keycloak.assignmentReaders(c.institution!)).filter(u=>this.eligible(u,c)&&(this.manager(c)||u.id===c.sub)).map(u=>this.publicReader(u))};}
+  async candidates(c:Caller,request?:unknown){this.member(c);return businessResponse(request,'GET reader-candidates',{type:'candidates',owner:[c.institution,c.sub],canManage:this.manager(c),readers:(await this.keycloak.assignmentReaders(c.institution!)).filter(u=>this.eligible(u,c)&&(this.manager(c)||u.id===c.sub)).map(u=>this.publicReader(u))});}
   private async run<T>(c:Caller,fn:(tx:any)=>Promise<T>):Promise<T>{try{return await this.prisma.$transaction(async tx=>{await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`; await this.studyAccess.snapshot(c,tx);return fn(tx);},{maxWait:4000,timeout:8000});}catch(e:any){if(['P2028','P2034'].includes(e?.code)||e?.code==='P2010'&&['55P03','57014','40P01'].includes(e?.meta?.code))throw busy();throw e;}}
   private async study(tx:any,uid:string,c:Caller,lock:'share'|'update'|null=null){
     if(typeof uid!=='string'||uid.length>64||!/^\d+(?:\.\d+)+$/.test(uid))throw new BadRequestException('검사 UID를 확인하세요');
@@ -104,11 +105,11 @@ export class ReaderAssignmentService {
       ORDER BY at DESC, id DESC LIMIT 20`;
     return {owner:[c.institution,c.sub],studyUid:s.uid,revision:row?.revision??0,reader:row?.readerSub?{sub:row.readerSub,actor:row.readerActor,name:row.readerName}:null,canManage:this.manager(c),blocked:this.blocked(s),history:history.map((h:any)=>({at:h.at,actor:h.actor,detail:JSON.parse(h.detail)}))};
   }
-  async read(uid:string,c:Caller){this.member(c);await this.studyAccess.prepare(c,[uid]);return this.run(c,async tx=>this.result(tx,await this.study(tx,uid,c,'share'),c));}
+  async read(uid:string,c:Caller,request?:unknown){this.member(c);await this.studyAccess.prepare(c,[uid]);return this.run(c,async tx=>businessResponse(request,'GET studies/:uid/reader-assignment',{type:'assignment',...await this.result(tx,await this.study(tx,uid,c,'share'),c)}));}
 
   /** The legacy row of one committed assignment version, inside the clinical commit transaction (registered projector). */
-  private async project(tx:any,plan:Readonly<ClinicalWritePlan>,p:AssignmentProjection){
-    const c:Caller=projectedCaller(p.caller),uid=clinicalText(plan.version.studyId);
+  private async project(tx:any,plan:Readonly<ClinicalWritePlan>,p:AssignmentProjection,trusted?:Caller){
+    const c:Caller=projectedCaller(p.caller, trusted),uid=clinicalText(plan.version.studyId);
     await this.studyAccess.snapshot(c,tx);
     const s=await this.study(tx,uid,c,'update'),row=await tx.readerAssignment.findUnique({where:key(uid,c.institution!)});
     if((row?.revision??0)!==p.revision)throw conflict();
@@ -147,7 +148,7 @@ export class ReaderAssignmentService {
     }catch(e){throw clinicalRefusal(e,OWN);}
     const code=outcomeCode(result.outcome);
     if(code!==null)throw clinicalHttpError(code,OWN);
-    return this.answer(uid,c,b.revision+1,readerSub,result.projection);
+    return this.answer(uid,c,b.revision+1,readerSub,result.projection,request);
   }
 
   /**
@@ -156,7 +157,7 @@ export class ReaderAssignmentService {
    * institution's history up to that revision since the channel close before it. Read under today's visibility of the study;
    * owner, canManage and blocked are the caller's controls now.
    */
-  private async answer(uid:string,c:Caller,revision:number,readerSub:string|null,kept:unknown){
+  private async answer(uid:string,c:Caller,revision:number,readerSub:string|null,kept:unknown,request:unknown){
     let reader:AssignmentProjection['reader']=null;
     if(readerSub!==null){
       const r=(kept as AssignmentProjection|null|undefined)?.reader;
@@ -166,8 +167,8 @@ export class ReaderAssignmentService {
     }
     return this.run(c,async tx=>{
       const s=await this.study(tx,uid,c,'share');
-      return {owner:[c.institution,c.sub],studyUid:s.uid,revision,reader,canManage:this.manager(c),blocked:this.blocked(s),
-        history:await this.historyThrough(tx,s.uid,c.institution!,revision)};
+      return businessResponse(request,'POST studies/:uid/reader-assignment',{type:'assignment',owner:[c.institution,c.sub],studyUid:s.uid,revision,reader,canManage:this.manager(c),blocked:this.blocked(s),
+        history:await this.historyThrough(tx,s.uid,c.institution!,revision)});
     });
   }
   /**

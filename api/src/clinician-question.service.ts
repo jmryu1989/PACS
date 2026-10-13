@@ -1,3 +1,4 @@
+import { businessResponse, writeAcknowledgement } from './emr-clinical/response';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, HttpException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { PrismaService } from './prisma.service';
@@ -84,7 +85,7 @@ const OWN: Readonly<Record<string, () => HttpException>> = Object.freeze({
 @Injectable()
 export class ClinicianQuestionService {
   constructor(private prisma: PrismaService, private studyAccess: StudyAccessService) {
-    registerClinicalProjection('question', (tx, plan, projection) => this.project(tx, plan, projection as QuestionProjection));
+    registerClinicalProjection('question', (tx, plan, projection, caller) => this.project(tx, plan, projection as QuestionProjection, caller), { db: prisma, access: studyAccess });
   }
 
   private member(c: QuestionCaller) {
@@ -198,8 +199,8 @@ export class ClinicianQuestionService {
    * Visibility, the row's revision and state and the entry bounds are checked again under the row locks; the legacy row
    * must be exactly the fold before this version, otherwise the whole commit rolls back.
    */
-  private async project(tx: any, plan: Readonly<ClinicalWritePlan>, p: QuestionProjection) {
-    const c: QuestionCaller = projectedCaller(p.caller), v = plan.version, at = new Date(v.at), body = v.text ?? '';
+  private async project(tx: any, plan: Readonly<ClinicalWritePlan>, p: QuestionProjection, trusted?: Caller) {
+    const c: QuestionCaller = projectedCaller(p.caller, trusted), v = plan.version, at = new Date(v.at), body = v.text ?? '';
     const studyId = clinicalText(v.studyId), recordId = clinicalText(v.recordId), requestId = clinicalText(plan.requestId), mark = clinicalText(p.mark);
     await this.studyAccess.snapshot(c, tx);
     if (plan.surface === 'question.create') {
@@ -228,7 +229,7 @@ export class ClinicianQuestionService {
   }
 
   /** The stored receipt of a committed or replayed write; a failure carries this service's wording and no text. */
-  private async answer(result: ClinicalWriteResult, requestId: string, c: Caller) {
+  private async answer(result: ClinicalWriteResult, requestId: string, c: Caller, request: unknown, route: any) {
     const o = result.outcome, code = outcomeCode(o);
     if (code !== null) {
       if (code === 'StateTransitionRefused') throw result.unit?.state === 'Closed' ? closedError() : stateError();
@@ -237,7 +238,7 @@ export class ClinicianQuestionService {
     }
     const entry = await this.prisma.studyQuestionEntry.findUnique({ where: { id: requestId } });
     if (!entry || !object(entry.result)) throw busy();
-    return { owner: this.owner(c), applied: entry.result, replayed: o.status === 'replayed' };
+    return writeAcknowledgement(request, c, route, (o as any).receipt, result.unit, o.status === 'replayed', entry.result);
   }
 
   private async write(request: unknown, c: QuestionCaller, surface: 'question.create' | 'question.reply' | 'question.close',
@@ -248,7 +249,7 @@ export class ClinicianQuestionService {
       result = await runtime.write(request, { surface, studyId, recordId, body: b, caller: { subject: c.sub, institutionId: c.institution },
         projection: { caller: { kind: c.kind, institution: c.institution, sub: c.sub, actor: c.actor, roles: [...c.roles], name: c.name }, mark } });
     } catch (e) { throw clinicalRefusal(e, OWN); }
-    return this.answer(result, b.requestId.toLowerCase(), c);
+    return this.answer(result, b.requestId.toLowerCase(), c, request, surface === 'question.create' ? 'POST studies/:uid/questions' : surface === 'question.reply' ? 'POST questions/:id/entries' : 'POST questions/:id/close');
   }
 
   private summary(row: any, lastEntryAt: any) {
@@ -268,7 +269,7 @@ export class ClinicianQuestionService {
   }
 
   /** #1 목록. view=mine은 clinician 역할의 자기 질문, view=inbox는 판독의·관리자의 기관 풀. 총개수는 싣지 않는다. */
-  async list(c: QuestionCaller, q: any) {
+  async list(c: QuestionCaller, q: any, request?: unknown) {
     this.member(c);
     const query = object(q) ? q : {};
     if (Object.keys(query).some(k => !['view', 'state', 'cursor'].includes(k)) || Object.values(query).some(v => typeof v !== 'string')
@@ -302,9 +303,9 @@ export class ClinicianQuestionService {
         AND (q."createdAt",q.id)<((${before}::timestamptz AT TIME ZONE 'UTC'),${beforeId}::uuid)
       ORDER BY q."createdAt" DESC,q.id DESC LIMIT 51`;
     const items = rows.slice(0, QUESTION_PAGE), last = items[items.length - 1];
-    return { owner: this.owner(c), items: items.map(row => this.summary(row, row.lastEntryAt)),
+    return businessResponse(request, 'GET questions', { type: 'questions', owner: this.owner(c), items: items.map(row => this.summary(row, row.lastEntryAt)),
       nextCursor: rows.length > QUESTION_PAGE
-        ? Buffer.from(JSON.stringify({ at: iso(last.createdAt), id: last.id, r: accessPolicy.revision })).toString('base64url') : null };
+        ? Buffer.from(JSON.stringify({ at: iso(last.createdAt), id: last.id, r: accessPolicy.revision })).toString('base64url') : null });
   }
 
   /**
@@ -323,21 +324,13 @@ export class ClinicianQuestionService {
       const { row, rs } = await this.question(tx, id.toLowerCase(), c, scope, false);
       const entries: any[] = await tx.studyQuestionEntry.findMany({ where: { questionId: row.id }, orderBy: { seq: 'asc' } });
       const anchor = await this.anchor(tx, row.studyUid, rs);
-      const rows = await readClinicalRows(tx, row.id);
-      return runtime.read(request, { record: 'question', recordId: row.id, studyId: row.studyUid, scope: 'history', rows,
-        parties: { author: row.authorSub }, caller: { subject: c.sub, institutionId: c.institution }, send: async (bodies, unit) => {
-          if (unit.revision !== row.revision || unit.state !== row.state || bodies.length !== entries.length ||
-              (row.state === 'Closed' && iso(row.closedAt) !== bodies[bodies.length - 1].at) ||
-              entries.some((e, i) => !sameEntry(e, bodies[i]))) throw changed();
-          // The text served is the signed version's own (equal to the row's after the comparison above).
-          const signed = entries.map((e, i) => ({ ...e, body: bodies[i].text ?? '' }));
-          return { owner: this.owner(c), item: this.thread(row, signed, anchor) };
-        } });
+      return runtime.respond(request, { view: 'question', route: 'GET questions/:id', id: row.id, current: anchor },
+        { db: this.prisma, tx, caller: c, access: this.studyAccess });
     }, true);
   }
 
   /** #3 한 검사의 스레드 요약(최신 50개). 임상의는 자기 질문만. */
-  async forStudy(uid: string, c: QuestionCaller) {
+  async forStudy(uid: string, c: QuestionCaller, request?: unknown) {
     this.member(c);
     const scope = this.scope(c);
     if (!studyUid(uid)) throw invalid('검사 UID를 확인하세요');
@@ -350,7 +343,7 @@ export class ClinicianQuestionService {
         FROM "StudyQuestion" q WHERE q."studyUid"=${uid} AND q."institutionId"=${c.institution}
           AND (NOT ${own} OR q."authorSub"=${c.sub})
         ORDER BY q."createdAt" DESC,q.id DESC LIMIT 50`;
-      return { owner: this.owner(c), items: rows.map(row => this.summary(row, row.lastEntryAt)) };
+      return businessResponse(request, 'GET studies/:uid/questions', { type: 'questions', owner: this.owner(c), items: rows.map(row => this.summary(row, row.lastEntryAt)) });
     }, true);
   }
 

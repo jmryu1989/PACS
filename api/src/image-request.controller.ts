@@ -1,3 +1,5 @@
+import { UseInterceptors } from '@nestjs/common';
+import { AuthorizedResponse, ClinicalResponseInterceptor } from './emr-clinical/response';
 import { Body, Controller, Get, Param, Post, Query, Req } from '@nestjs/common';
 import { ImageRequestService } from './image-request.service';
 
@@ -8,12 +10,13 @@ import { ImageRequestService } from './image-request.service';
 const caller = (r: any) => ({ sub: r.sub, actor: r.actor, roles: r.roles ?? [], institution: r.institution ?? null, kind: r.kind,
   name: typeof r.displayName === 'string' ? r.displayName : undefined });
 
+@UseInterceptors(ClinicalResponseInterceptor)
 @Controller()
 export class ImageRequestController {
   constructor(private service: ImageRequestService) {}
-  @Get('image-requests') list(@Req() r: any, @Query() q: any) { return this.service.list(caller(r), q, r); }
-  @Get('image-requests/:id') read(@Param('id') id: string, @Req() r: any) { return this.service.read(id, caller(r), r); }
-  @Get('studies/:uid/image-requests') forStudy(@Param('uid') uid: string, @Req() r: any) { return this.service.forStudy(uid, caller(r), r); }
-  @Post('studies/:uid/image-requests') create(@Param('uid') uid: string, @Req() r: any, @Body() b: any) { return this.service.create(uid, caller(r), b, r); }
-  @Post('image-requests/:id') change(@Param('id') id: string, @Req() r: any, @Body() b: any) { return this.service.change(id, caller(r), b, r); }
+  @Get('image-requests') list(@Req() r: any, @Query() q: any) : Promise<AuthorizedResponse> { return this.service.list(caller(r), q, r); }
+  @Get('image-requests/:id') read(@Param('id') id: string, @Req() r: any) : Promise<AuthorizedResponse> { return this.service.read(id, caller(r), r); }
+  @Get('studies/:uid/image-requests') forStudy(@Param('uid') uid: string, @Req() r: any) : Promise<AuthorizedResponse> { return this.service.forStudy(uid, caller(r), r); }
+  @Post('studies/:uid/image-requests') create(@Param('uid') uid: string, @Req() r: any, @Body() b: any) : Promise<AuthorizedResponse> { return this.service.create(uid, caller(r), b, r); }
+  @Post('image-requests/:id') change(@Param('id') id: string, @Req() r: any, @Body() b: any) : Promise<AuthorizedResponse> { return this.service.change(id, caller(r), b, r); }
 }

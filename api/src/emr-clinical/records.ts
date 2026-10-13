@@ -465,6 +465,10 @@ export function decideRequestOutcome(request: RequestIdentity, observation: Requ
 }
 
 type WritePorts = { store: ClinicalStorePort; signature: SignaturePort };
+/** A newly elected owner refused before registration; no original exists to seal or recover. */
+export class AdmissionRefused extends Error {
+  constructor(readonly refusal: unknown) { super('New admission refused'); }
+}
 const unavailable = (): RequestObservation => ({ state: 'unavailable' });
 async function note(store: ClinicalStorePort, request: RequestIdentity | null, attemptId: string, code: string, originalId: string | null = null) {
   try { await store.noteAttempt({ attemptId, request, originalId, code }); } catch { /* No terminal is inferred from journal availability. */ }
@@ -540,6 +544,7 @@ export async function commitClinicalWrite(ports: WritePorts, input: WriteInput,
   let admission: OriginalAdmission;
   try { admission = await ports.store.admitOrObserve(admitted, input, attemptId); }
   catch (error) {
+    if (error instanceof AdmissionRefused) throw error.refusal;
     if (error instanceof ContractError && error.code === 'RequestIdReused') throw error;
     await note(ports.store, admitted, attemptId, 'AdmissionUnavailable');
     return outcome(ports.store, admitted, unavailable(), 'observer', attemptId);

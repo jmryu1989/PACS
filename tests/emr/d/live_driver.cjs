@@ -124,6 +124,9 @@ async function main() {
   const md5 = bytes => crypto.createHash('md5').update(bytes).digest('hex');
   const common = require('/app/node_modules/@nestjs/common');
   const orthanc = {
+    async studyIdentities() { return (await prisma.studyState.findMany({ select: { uid: true } })).map(s => ({
+      '0020000D': { Value: [s.uid] }, '00100020': { Value: ['SYN-PATIENT-1'] }, '00080061': { Value: ['CT'] } })); },
+    async studyAccessMetadata(uid) { return { '0020000D': { Value: [uid] }, '00100020': { Value: ['SYN-PATIENT-1'] }, '00080061': { Value: ['CT'] } }; },
     async viewerReference(sop) { return args.tags?.[sop] ?? null; },
     // Every synthetic study belongs to the one synthetic patient (a comparison study is the same patient's).
     async connectStudyIdentity() { return { patientId: 'SYN-PATIENT-1' }; },
@@ -211,7 +214,7 @@ async function main() {
     const scenario = SCENARIOS[operation];
     if (!scenario) return { crashed: { code: 'UnknownOperation' } };
     const result = await scenario({ args, S, R, SV, req, studies, runtime, request, attempt, caller, owner, actorFacts, identityOf, findingText, body, PEOPLE,
-      TEXT, dev, ledger, seal, journal, STATE, prisma, ledgerDb, orthancStored, orthancUploads, findingTextFrozen, sourcesOf, findingJobText, keycloakCalls });
+        TEXT, dev, ledger, seal, journal, STATE, prisma, ledgerDb, orthancStored, orthancUploads, findingTextFrozen, sourcesOf, findingJobText, keycloakCalls, access, orthanc });
     fs.writeFileSync(saved, JSON.stringify(dev.save()));
     return result;
   } finally {
@@ -221,6 +224,7 @@ async function main() {
 }
 
 const SCENARIOS = {
+  ...require('./r5a_scenarios.cjs'),
   /** TEST-D-01: clinical entries are signed versions of their own authors; operational steps are unsigned versions. */
   async d01({ args, S, request, attempt, caller, owner, actorFacts, PEOPLE, TEXT }) {
     const uid = args.study, out = {};

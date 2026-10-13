@@ -1,3 +1,4 @@
+import { businessResponse } from './emr-clinical/response';
 import { StudyAccessService } from './study-access.service';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, HttpException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
@@ -39,7 +40,7 @@ type ConsultationProjection = { caller: Caller; mark: string; recipient: { sub: 
 @Injectable()
 export class ConsultationService {
   constructor(private prisma:PrismaService, private keycloak:KeycloakService, private studyAccess:StudyAccessService) {
-    registerClinicalProjection('consultation', (tx, plan, projection) => this.project(tx, plan, projection as ConsultationProjection));
+    registerClinicalProjection('consultation', (tx, plan, projection, caller) => this.project(tx, plan, projection as ConsultationProjection, caller), { db: prisma, access: studyAccess });
   }
   private member(c:Caller) {
     if (c.kind !== 'member' || !c.roles.some(r=>['admin','radiologist'].includes(r))
@@ -51,11 +52,11 @@ export class ConsultationService {
     return !!u && u.enabled && !u.serviceAccountClientId && u.id !== c.sub && u.groups.length===1
       && u.groups[0]===c.institution && u.roles.includes('radiologist') && (u.email||u.username).length>0 && (u.email||u.username).length<=256;
   }
-  async candidates(c:Caller) {
+  async candidates(c:Caller,request?:unknown) {
     this.member(c);
-    return {owner:[c.institution,c.sub],readers:(await this.keycloak.assignmentReaders(c.institution!))
+    return businessResponse(request,'GET consultation-candidates',{type:'candidates',owner:[c.institution,c.sub],readers:(await this.keycloak.assignmentReaders(c.institution!))
       .filter(u=>this.eligible(u,c)).map(u=>({sub:u.id,actor:u.email||u.username,
-        name:([u.lastName,u.firstName].filter(Boolean).join(' ')||u.username).slice(0,256)}))};
+        name:([u.lastName,u.firstName].filter(Boolean).join(' ')||u.username).slice(0,256)}))});
   }
   /** `echo`: the answer of a committed write - a ledger that cannot make its provision durable leaves the result pending. */
   private async run<T>(c:Caller,fn:(tx:any)=>Promise<T>,read=false,echo=false):Promise<T> {
@@ -121,8 +122,8 @@ export class ConsultationService {
    * Visibility, the one-active rule and the row's revision/state are checked again under the row locks; the legacy row
    * must be exactly the fold before this version, otherwise the whole commit rolls back.
    */
-  private async project(tx:any, plan:Readonly<ClinicalWritePlan>, p:ConsultationProjection) {
-    const c:Caller=projectedCaller(p.caller), v=plan.version, at=new Date(v.at), studyId=clinicalText(v.studyId);
+  private async project(tx:any, plan:Readonly<ClinicalWritePlan>, p:ConsultationProjection,trusted?:Caller) {
+    const c:Caller=projectedCaller(p.caller, trusted), v=plan.version, at=new Date(v.at), studyId=clinicalText(v.studyId);
     await this.studyAccess.snapshot(c,tx);
     if (plan.surface==='consultation.create') {
       // The recipient's display facts were read for this original before admission; a stored row without them is not this original's.
@@ -150,11 +151,11 @@ export class ConsultationService {
       detail:JSON.stringify({id:v.recordId,institution:c.institution,from:row.state,to:state,revision:updated.revision})}});
   }
 
-  private async write(request:unknown,c:Caller,surface:SurfaceKey,studyId:string,recordId:string,b:any,projection:ConsultationProjection,recipientSubject:string|null) {
+  private async write(request:unknown,c:Caller,surface:SurfaceKey,studyId:string,recordId:string,b:any,projection:ConsultationProjection,recipientSubject:string|null,admission?:()=>Promise<ConsultationProjection>) {
     const runtime=requireClinicalRuntime();
     let result:ClinicalWriteResult;
     try {
-      result=await runtime.write(request,{surface,studyId,recordId,body:b,recipientSubject,caller:{subject:c.sub,institutionId:c.institution},projection});
+      result=await runtime.write(request,{surface,studyId,recordId,body:b,recipientSubject,caller:{subject:c.sub,institutionId:c.institution},projection,admission});
     } catch(e) { throw clinicalRefusal(e,OWN); }
     const code=outcomeCode(result.outcome);
     if (code!==null) throw clinicalHttpError(code,OWN);
@@ -162,13 +163,13 @@ export class ConsultationService {
     // this request's own result (its versions: the opening one and its own).
     const receipt=(result.outcome as {receipt:{versionId:string;revision:number;state:string}}).receipt;
     const route=surface==='consultation.create'?'POST studies/:uid/consultations':'POST consultations/:id';
+    await this.studyAccess.prepare(c);
     return this.run(c,async tx=>{
       const row=await tx.studyConsultation.findUnique({where:{id:recordId}});
       if (!row) throw busy();
       this.access(row,c);
-      return runtime.provide(request,{route,caller:{subject:c.sub,institutionId:c.institution},
-        units:[{...this.provision(row,await readClinicalRows(tx,row.id)),scope:{sequences:[...new Set([1,receipt.revision])]}}],
-        send:async served=>({owner:[c.institution,c.sub],item:this.answered(row,served[0],receipt,result.projection)})});
+      return runtime.respond(request,{view:'consultations',route:route as any,ids:[recordId],receipt:receipt as any},
+        {db:this.prisma,tx,caller:c,access:this.studyAccess});
     },true,true);
   }
 
@@ -179,9 +180,8 @@ export class ConsultationService {
     return this.run(c,async tx=>{
       const row=await tx.studyConsultation.findUnique({where:{id:id.toLowerCase()}});
       this.access(row,c); await this.study(tx,row.studyUid,c);
-      const rows=await readClinicalRows(tx,row.id), p=this.provision(row,rows);
-      return runtime.read(request,{...p,caller:{subject:c.sub,institutionId:c.institution},
-        send:async(bodies,unit)=>({owner:[c.institution,c.sub],item:this.item(row,{unit,bodies})})});
+      return runtime.respond(request,{view:'consultations',route:'GET consultations/:id',ids:[row.id]},
+        {db:this.prisma,tx,caller:c,access:this.studyAccess});
     },true);
   }
   /** 목록. 행과 판은 한 RepeatableRead 스냅샷에서 읽고, 사유·답변은 그 판들의 열람 사건이 내구 기록된 뒤에만 나간다(DR2-03). */
@@ -212,12 +212,9 @@ export class ConsultationService {
           AND (c."createdAt",c.id)<((${before}::timestamptz AT TIME ZONE 'UTC'),${beforeId}::uuid)
         ORDER BY c."createdAt" DESC,c.id DESC LIMIT 51`;
       const items=rows.slice(0,50), last=items[items.length-1];
-      const units=await readClinicalUnits(tx,items.map(row=>row.id)), signed=items.filter(row=>units.get(row.id).length);
-      return runtime.provide(request,{route:'GET consultations',caller:{subject:c.sub,institutionId:c.institution},
-        units:signed.map(row=>this.provision(row,units.get(row.id))),
-        send:async served=>({owner:[c.institution,c.sub],direction:q.direction,
-          items:items.map(row=>this.item(row,served.find(s=>s.unit.recordId===row.id)??null)),
-          nextCursor:rows.length>50?Buffer.from(JSON.stringify({at:last.createdAt.toISOString(),id:last.id,r:accessPolicy.revision})).toString('base64url'):null})});
+      return runtime.respond(request,{view:'consultations',route:'GET consultations',ids:items.map(row=>row.id),direction:q.direction,
+        nextCursor:rows.length>50?Buffer.from(JSON.stringify({at:last.createdAt.toISOString(),id:last.id,r:accessPolicy.revision})).toString('base64url'):null},
+        {db:this.prisma,tx,caller:c,access:this.studyAccess});
     },true);
   }
   async create(uid:string,c:Caller,b:any,request?:unknown) {
@@ -228,15 +225,15 @@ export class ConsultationService {
     const id=b.requestId.toLowerCase(), recipientSub=b.recipientSub;
     const mark=fingerprint({uid,institution:c.institution,subject:c.sub,recipientSub,reason:b.reason});
     await this.study(this.prisma,uid,c);
-    // A stored request ID is answered from its register (replay or refusal) without asking the identity provider again.
-    let recipient:ConsultationProjection['recipient']=null;
-    if (!await this.prisma.studyConsultation.findUnique({where:{id}})) {
+    const projection:ConsultationProjection={caller:this.callerFacts(c),mark,recipient:null,action:null};
+    return this.write(request,c,'consultation.create',uid,id,b,projection,recipientSub,async()=>{
       const user=await this.keycloak.getUser(recipientSub);
       if (!this.eligible(user,c) || user!.id!==recipientSub) throw new BadRequestException('본인을 제외한 같은 기관의 활성 판독의를 선택하세요');
-      recipient={sub:recipientSub,actor:user!.email||user!.username,name:([user!.lastName,user!.firstName].filter(Boolean).join(' ')||user!.username).slice(0,256)};
-    }
-    return this.write(request,c,'consultation.create',uid,id,b,{caller:this.callerFacts(c),mark,recipient,action:null},recipientSub);
+      return {...projection,recipient:{sub:recipientSub,actor:user!.email||user!.username,
+        name:([user!.lastName,user!.firstName].filter(Boolean).join(' ')||user!.username).slice(0,256)}};
+    });
   }
+
   async change(id:string,c:Caller,b:any,request?:unknown) {
     this.member(c); requireClinicalRuntime(); await this.studyAccess.prepare(c);
     if (!uuid(id) || !object(b) || Object.keys(b).sort().join()!=='action,expectedOwner,note,requestId,revision'

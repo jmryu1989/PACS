@@ -297,7 +297,7 @@ class Pure(unittest.TestCase):
         # EMR-D R2 added schema emr_clinical (46 files): still 51 public tables and the same public rows; its 7 tables are
         # observed schema-qualified with 7 synthetic rows (a unit, its version and reference, its register row, an attempt,
         # an SR adoption and an SR purpose end).
-        self.assertEqual(len(transfer.MIGRATIONS), 46)
+        self.assertEqual(len(transfer.MIGRATIONS), 47)
         clinical = transfer.expected_clinical_rows()
         self.assertEqual(sorted(clinical), transfer.CLINICAL_TABLES)
         self.assertEqual({name: len(value) for name, value in clinical.items()}, {name: 1 for name in transfer.CLINICAL_TABLES})

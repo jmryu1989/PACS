@@ -1,3 +1,4 @@
+import { writeAcknowledgement } from './emr-clinical/response';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, HttpException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { PrismaService } from './prisma.service';
@@ -99,7 +100,7 @@ const OWN: Readonly<Record<string, () => HttpException>> = Object.freeze({
 @Injectable()
 export class ImageRequestService {
   constructor(private prisma: PrismaService, private studyAccess: StudyAccessService) {
-    registerClinicalProjection('image-request', (tx, plan, projection) => this.project(tx, plan, projection as RequestProjection));
+    registerClinicalProjection('image-request', (tx, plan, projection, caller) => this.project(tx, plan, projection as RequestProjection, caller), { db: prisma, access: studyAccess });
   }
 
   private member(c: RequestCaller) {
@@ -210,8 +211,8 @@ export class ImageRequestService {
    * projector). Visibility, the counterparty, the one-active rule and the row's revision/state are checked again under
    * the row locks; the legacy row must be exactly the fold before this version, otherwise the whole commit rolls back.
    */
-  private async project(tx: any, plan: Readonly<ClinicalWritePlan>, p: RequestProjection) {
-    const c: RequestCaller = projectedCaller(p.caller), v = plan.version, at = new Date(v.at);
+  private async project(tx: any, plan: Readonly<ClinicalWritePlan>, p: RequestProjection, trusted?: Caller) {
+    const c: RequestCaller = projectedCaller(p.caller, trusted), v = plan.version, at = new Date(v.at);
     const studyId = clinicalText(v.studyId), recordId = clinicalText(v.recordId), requestId = clinicalText(plan.requestId), mark = clinicalText(p.mark), sub = clinicalText(c.sub);
     await this.studyAccess.snapshot(c, tx);
     if (plan.surface === 'image-request.create') {
@@ -246,12 +247,12 @@ export class ImageRequestService {
   }
 
   /** The stored receipt of a committed or replayed write; a failure carries this service's wording and no text. */
-  private async answer(result: ClinicalWriteResult, requestId: string, c: Caller) {
+  private async answer(result: ClinicalWriteResult, requestId: string, c: Caller, request: unknown, route: any) {
     const code = outcomeCode(result.outcome);
     if (code !== null) throw clinicalHttpError(code, OWN);
     const receipt = await this.prisma.studyImageRequestReceipt.findUnique({ where: { requestId } });
     if (!receipt || receipt.subjectSub !== c.sub || !object(receipt.result)) throw busy();
-    return { owner: this.owner(c), applied: receipt.result, replayed: result.outcome.status === 'replayed' };
+    return writeAcknowledgement(request, c, route, (result.outcome as any).receipt, result.unit, result.outcome.status === 'replayed', receipt.result);
   }
 
   private async write(request: unknown, c: RequestCaller, surface: SurfaceKey, studyId: string, recordId: string, b: any, projection: RequestProjection) {
@@ -260,46 +261,7 @@ export class ImageRequestService {
     try {
       result = await runtime.write(request, { surface, studyId, recordId, body: b, caller: { subject: c.sub, institutionId: c.institution }, projection });
     } catch (e) { throw clinicalRefusal(e, OWN); }
-    return this.answer(result, b.requestId.toLowerCase(), c);
-  }
-
-  /**
-   * 응답 DTO(§3.3). *Sub·기관 id·영수증 열은 싣지 않고, 키 이름에 전송·수신을 뜻하는 말을 쓰지 않는다. 사유(reason)와
-   * note는 열람 사건이 내구 기록된 서명 판의 글이고(EMR-D, DR2-02/03), 기존 행의 의미(요청자·상태·판 번호·시각·사유·
-   * note)가 판과 하나라도 다르면 본문 없이 409다. 판이 없는 행(단위 D 이전에 쓰인 요청)은 글 없이(null) 나간다.
-   */
-  private dto(row: any, served: ClinicalServed | null) {
-    let reason: string | null = null, note: string | null = null;
-    if (served) {
-      const { unit, bodies } = served, first = bodies[0], last = bodies[bodies.length - 1];
-      note = unit.revision > 1 ? last.text : null;
-      if (first.sequence !== 1 || last.sequence !== unit.revision || unit.revision !== row.revision || unit.state !== row.state ||
-          first.author.subject !== row.requesterSub || first.text !== row.reason || (row.note ?? null) !== note ||
-          iso(row.createdAt) !== first.at || iso(row.updatedAt) !== last.at) throw changed();
-      reason = first.text;
-    }
-    return { id: row.id, studyUid: row.studyUid, kind: row.kind, state: row.state, revision: row.revision,
-      requester: { actor: row.requesterActor, name: row.requesterName },
-      counterparty: { text: row.counterpartyText, institutionId: row.counterpartyInstitutionId ?? null },
-      reason,
-      handler: row.handlerActor == null ? null : { actor: row.handlerActor, name: row.handlerName },
-      note,
-      createdAt: iso(row.createdAt), updatedAt: iso(row.updatedAt) };
-  }
-
-  /**
-   * Rows of one response with their signed text: every row that has a D unit is served through the runtime's provision
-   * (its reason and note only after the provide-prepared event for exactly those versions is durable); read in `tx`, the
-   * caller's read snapshot of the rows.
-   */
-  private async served(tx: any, request: unknown, route: string, rows: any[], c: Caller) {
-    const runtime = requireClinicalRuntime();
-    const units = await readClinicalUnits(tx, rows.map(row => row.id));
-    const signed = rows.filter(row => units.get(row.id).length);
-    return runtime.provide(request, { route, caller: { subject: c.sub, institutionId: c.institution },
-      units: signed.map(row => ({ record: 'image-request' as const, recordId: row.id, studyId: row.studyUid, scope: 'texts' as const, rows: units.get(row.id),
-        parties: { author: row.requesterSub } })),
-      send: async served => rows.map(row => this.dto(row, served.find(s => s.unit.recordId === row.id) ?? null)) });
+    return this.answer(result, b.requestId.toLowerCase(), c, request, surface === 'image-request.create' ? 'POST studies/:uid/image-requests' : 'POST image-requests/:id');
   }
 
   /**
@@ -343,9 +305,9 @@ export class ImageRequestService {
           AND (r."createdAt",r.id)<((${before}::timestamptz AT TIME ZONE 'UTC'),${beforeId}::uuid)
         ORDER BY r."createdAt" DESC,r.id DESC LIMIT 51`;
       const items = rows.slice(0, IMAGE_REQUEST_PAGE), last = items[items.length - 1];
-      return { owner: this.owner(c), items: await this.served(tx, request, 'GET image-requests', items, c),
+      return requireClinicalRuntime().respond(request, { view: 'images', route: 'GET image-requests', ids: items.map(row => row.id),
         nextCursor: rows.length > IMAGE_REQUEST_PAGE
-          ? Buffer.from(JSON.stringify({ at: iso(last.createdAt), id: last.id, r: accessPolicy.revision })).toString('base64url') : null };
+          ? Buffer.from(JSON.stringify({ at: iso(last.createdAt), id: last.id, r: accessPolicy.revision })).toString('base64url') : null }, { db: this.prisma, tx, caller: c, access: this.studyAccess });
     }, true);
   }
 
@@ -358,10 +320,8 @@ export class ImageRequestService {
     await this.studyAccess.prepare(c);
     return this.run(c, async tx => {
       const row = await this.request(tx, id.toLowerCase(), c, scope, false);
-      const rows = await readClinicalRows(tx, row.id);
-      return runtime.read(request, { record: 'image-request', recordId: row.id, studyId: row.studyUid, scope: 'texts', rows,
-        parties: { author: row.requesterSub }, caller: { subject: c.sub, institutionId: c.institution },
-        send: async (bodies, unit) => ({ owner: this.owner(c), item: this.dto(row, { unit, bodies }) }) });
+      return runtime.respond(request, { view: 'images', route: 'GET image-requests/:id', ids: [row.id] },
+        { db: this.prisma, tx, caller: c, access: this.studyAccess });
     }, true);
   }
 
@@ -378,7 +338,8 @@ export class ImageRequestService {
       const rows: any[] = await tx.$queryRaw`SELECT r.* FROM "StudyImageRequest" r
         WHERE r."studyUid"=${uid} AND r."institutionId"=${c.institution} AND (NOT ${own} OR r."requesterSub"=${c.sub})
         ORDER BY r."createdAt" DESC,r.id DESC LIMIT 50`;
-      return { owner: this.owner(c), items: await this.served(tx, request, 'GET studies/:uid/image-requests', rows, c) };
+      return requireClinicalRuntime().respond(request, { view: 'images', route: 'GET studies/:uid/image-requests', ids: rows.map(row => row.id) },
+        { db: this.prisma, tx, caller: c, access: this.studyAccess });
     }, true);
   }
 

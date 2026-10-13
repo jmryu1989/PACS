@@ -1,3 +1,4 @@
+import { AuthorizedResponse, ClinicalResponseSelector, ResponseContext, clinicalResponse } from './response';
 import { randomUUID } from 'node:crypto';
 import { AccessEvent, AccessEventV1, AccessTarget, DurableAccessReceipt, EvidenceFact, ImmutableIdentity, WorkContext, newAuditLinkId,
   parseAccessEvent, provideAfterDurableEvent } from '../emr-contract/access-event';
@@ -11,8 +12,8 @@ import {
   planClinicalWrite, planManualSrAdoption, planManualSrCleanup, prepareClinicalWrite, provideClinicalReads, reconcileManualSr, recoverClinicalWrite,
 } from './records';
 import {
-  ClinicalProvideRequest, ClinicalProvision, ClinicalReadRequest, ClinicalServicePort, ClinicalServed, ClinicalWriteRequest, ClinicalWriteResult,
-  ManualSrAdoption, ManualSrAdoptionRequest, SrAdoptionFact, SrProvideRequest, bindClinicalPort, clinicalServices, clinicalRuntime as boundPort,
+  ClinicalServicePort, ClinicalWriteRequest, ClinicalWriteResult,
+  ManualSrAdoption, ManualSrAdoptionRequest, SrAdoptionFact, bindClinicalPort, clinicalServices, clinicalRuntime as boundPort,
 } from './services';
 import { SignedEnvelope, deviceSignaturePort } from './signing';
 import { requireClinicalSourceComposition } from './sources';
@@ -93,39 +94,51 @@ export class ClinicalRuntime implements ClinicalServicePort {
     const study = await this.parts.studies.facts(this.parts.db, string(w.studyId));
     const registered = await this.registered(this.identityOf(facts, w, unit, study), unit, w.recordId);
     if (registered) return registered;
-    // A new request: the owning service's own admission (facts checked today) resolves its projection facts.
-    const projection = w.admission ? await w.admission() : w.projection;
-    const recipientId = w.recipientSubject ? (await facts.member(w.recipientSubject)).id : null;
-    const readerId = w.readerSubject ? (await facts.member(w.readerSubject)).id : null;
-    // The device names the version it signed; verify() binds every other fact of the plan to that same payload.
-    const versionId = facts.signature ? inspectEnvelopeV2(facts.signature.jws).payload.versionId : randomUUID();
-    const input: WriteInput = {
-      surface: w.surface, actor: facts.actor, study, unit, body: w.body, content: w.content ?? null, attachments: [...(w.attachments ?? [])],
-      navigation: [...(w.navigation ?? [])],
-      recipientId: spec.record === 'consultation' && unit === null ? recipientId : null, readerId: spec.record === 'assignment' ? readerId : null,
-      workContext: w.reading ? { kind: 'reading', studyId: study.studyId, referenceId: string(w.reading.referenceId) } : null,
-      ids: { recordId: w.recordId, versionId }, at: new Date().toISOString(),
+    // The atomic register lock elects the sole admission owner before any mutable member/source check.
+    // An absent preliminary observation is only a hint: claim() observes again under that lock.
+    const identityInput: WriteInput = {
+      surface: w.surface, actor: facts.actor, study, unit, body: w.body, content: w.content ?? null, attachments: [], navigation: [],
+      recipientId: null, readerId: null, workContext: null,
+      ids: { recordId: w.recordId, versionId: randomUUID() }, at: new Date().toISOString(),
     };
-    // A clinical entry is admitted only with its author's device signature; without one nothing is registered and the
-    // request ID stays usable. A replay (its plan no longer applies to the stored unit) goes on to the lookup below.
-    let signing = false;
-    try { signing = planClinicalWrite(input).signing !== null; } catch { signing = false; }
-    if (signing && !facts.signature) {
-      await this.store.noteAttempt({ attemptId: randomUUID(), request: prepareClinicalWrite(input), originalId: null, code: 'SignatureRequired' }).catch(() => {});
-      return freeze({ outcome: freeze({ status: 'failed' as const, code: 'SignatureRequired', retry: 'same-request' as const }), unit, projection: null });
-    }
-    const requestId = (w.body as any)?.[spec.requestField ?? 'requestId'];
-    const carried: SignedEnvelope | null = facts.signature ? { jws: facts.signature.jws as any, osUserId: facts.signature.osUserId, eventId: string(requestId).toLowerCase() } : null;
-    const clinical: ClinicalFacts = { event: { rolesAtTime: [...facts.actor.roles], trustedProxyIp: facts.trustedProxyIp, requestId: facts.requestId,
-      reading: !!w.reading }, projection };
     let originalId: string | null = null, outcome: CommitOutcome;
+    const port = this.store.port(null as any, null);
+    port.admitOrObserve = (identity, _seed, attemptId) => this.store.claim(identity, attemptId, async () => {
+      const admitted = w.prepare ? await w.prepare() : null;
+      const projection = admitted?.projection ?? (w.admission ? await w.admission() : w.projection);
+      const recipientId = w.recipientSubject ? (await facts.member(w.recipientSubject)).id : null;
+      const readerId = w.readerSubject ? (await facts.member(w.readerSubject)).id : null;
+      const currentUnit = await this.store.unit(w.recordId);
+      const currentStudy = await this.parts.studies.facts(this.parts.db, w.studyId);
+      const versionId = facts.signature ? inspectEnvelopeV2(facts.signature.jws).payload.versionId : randomUUID();
+      const seed: WriteInput = {
+        ...identityInput, study: currentStudy, unit: currentUnit,
+        content: admitted?.content ?? w.content ?? null, attachments: admitted?.attachments ?? w.attachments ?? [],
+        navigation: admitted?.navigation ?? w.navigation ?? [],
+        recipientId: spec.record === 'consultation' && currentUnit === null ? recipientId : null,
+        readerId: spec.record === 'assignment' ? readerId : null,
+        workContext: w.reading ? { kind: 'reading', studyId: study.studyId, referenceId: string(w.reading.referenceId) } : null,
+        ids: { recordId: w.recordId, versionId }, at: new Date().toISOString(),
+      };
+      // No prepared signature means no registration; normal signing can reuse the same request ID.
+      let signing = false;
+      try { signing = planClinicalWrite(seed).signing !== null; } catch { /* planning seals its own typed refusal after admission */ }
+      if (signing && !facts.signature) refuse('SignatureRequired');
+      const requestId = (w.body as any)?.[spec.requestField ?? 'requestId'];
+      const signature: SignedEnvelope | null = facts.signature ? { jws: facts.signature.jws as any,
+        osUserId: facts.signature.osUserId, eventId: string(requestId).toLowerCase() } : null;
+      const clinical: ClinicalFacts = { event: { rolesAtTime: [...facts.actor.roles], trustedProxyIp: facts.trustedProxyIp,
+        requestId: facts.requestId, reading: !!w.reading }, projection };
+      return { seed, facts: clinical, signature };
+    }, id => { originalId = id; });
     try {
-      outcome = await commitClinicalWrite({ store: this.store.port(clinical, carried, id => { originalId = id; }), signature: this.signaturePort() }, input);
+      outcome = await commitClinicalWrite({ store: port, signature: this.signaturePort() }, identityInput);
     } finally { this.store.release(originalId); }
+
     // Not this call's original: another call of the same request (a parallel duplicate, a resend while the first still
     // runs) executes it, and its decided result is this call's result as well.
-    if (originalId === null && outcome.status === 'unknown') outcome = await this.settle(prepareClinicalWrite(input), outcome);
-    return this.answered(prepareClinicalWrite(input), outcome, unit, w.recordId);
+    if (originalId === null && outcome.status === 'unknown') outcome = await this.settle(prepareClinicalWrite(identityInput), outcome);
+    return this.answered(prepareClinicalWrite(identityInput), outcome, unit, w.recordId);
   }
 
   /** The request identity of a write (register key and fingerprint): the body's meaning only, no party or source resolved. */
@@ -235,62 +248,8 @@ export class ClinicalRuntime implements ClinicalServicePort {
   /** The unit with its whole history in the runtime's own client, or null. */
   unit(recordId: string): Promise<Readonly<ClinicalUnit> | null> { return this.store.unit(recordId); }
 
-  /**
-   * A response that carries clinical text: its versions are handed to `send` only after provide-prepared events naming
-   * exactly the served versions are durable (records.ts provideClinicalReads over B1). The caller reads the units' rows
-   * with services.ts readClinicalRows/readClinicalUnits in its own read snapshot, so the legacy rows it answers with and the
-   * versions logged are the same state; any other value is refused, and so is a projection whose author or recipient is
-   * not the unit's own. Every unit must be one the verified reader may read (records.ts planClinicalRead).
-   */
-  async provide<T>(request: unknown, p: ClinicalProvideRequest<T>): Promise<T> {
-    const facts = await this.parts.context.facts(request);
-    if (facts.actor.identity.subject !== p.caller?.subject || facts.actor.institutionId !== p.caller?.institutionId) refuse('NotFound');
-    const served: { unit: Readonly<ClinicalUnit>; plan: Readonly<ReadPlan> }[] = [];
-    for (const u of p.units) {
-      const unit = this.storedUnit(u);
-      const plan = planClinicalRead({ actor: facts.actor, unit, scope: u.scope });
-      await this.sameParties(facts, unit, u.parties);
-      served.push({ unit, plan });
-    }
-    const studies = [...new Set(served.map(s => s.unit.studyId))];
-    const only = served.length === 1 ? served[0].unit : null;
-    // The author of a question or an image request reads it as that clinical request (only a clinician opens one); anyone
-    // else, and every list, reads from the worklist/record view.
-    const context: WorkContext = only && (only.record === 'question' || only.record === 'image-request') && only.parties.authorId === facts.actor.identity.id
-      ? { basis: 'clinical-request', studyId: only.studyId, relatedStudyId: null, reason: null }
-      : { basis: 'worklist', studyId: studies.length === 1 ? studies[0] : null, relatedStudyId: null, reason: null };
-    const targets: AccessTarget[] = served.flatMap(s => [...s.plan.targets]);
-    const events: AccessEvent[] = [];
-    for (let at = 0; at < targets.length; at += TARGETS_PER_EVENT) {
-      events.push(parseAccessEvent({ formatVersion: 1, surface: p.route, eventId: `clinical-read:${randomUUID()}`, userId: known({ ...facts.actor.identity }),
-        rolesAtTime: known([...facts.actor.roles]), actingInstitution: known(facts.actor.institutionId), managingInstitution: known(served[0].unit.managingInstitutionId),
-        occurredAt: new Date().toISOString(), trustedProxyIp: facts.trustedProxyIp, cause: 'user-view', context, executor: 'member',
-        targets: targets.slice(at, at + TARGETS_PER_EVENT), action: 'provide-prepared', result: 'prepared', requestId: facts.requestId,
-        auditLinkId: newAuditLinkId(), relatedEventId: null } as AccessEventV1) as AccessEvent);
-    }
-    return provideClinicalReads(this.parts.ledger, p.route, events, served.map(s => s.plan),
-      (bodies, receipts) => p.send(served.map((s, i): ClinicalServed => freeze({ unit: s.unit, bodies: bodies[i] })), receipts));
-  }
-  /** A one-unit read on the record's own read route. */
-  async read<T>(request: unknown, r: ClinicalReadRequest<T>): Promise<T> {
-    return this.provide(request, { route: READ_ROUTES[r.record], caller: r.caller,
-      units: [{ record: r.record, recordId: r.recordId, studyId: r.studyId, scope: r.scope, rows: r.rows, parties: r.parties }],
-      send: (served, receipts) => r.send(served[0].bodies, served[0].unit, receipts[0]) });
-  }
-  private storedUnit(u: ClinicalProvision): Readonly<ClinicalUnit> {
-    if (!u?.rows || !clinicalServices.readRows.has(u.rows)) refuse('NotFound');
-    const unit = unitFromRows(string(u.recordId), u.rows);
-    if (!unit || unit.record !== u.record || (u.studyId !== undefined && unit.studyId !== u.studyId)) refuse('NotFound');
-    return unit;
-  }
-  /** The served projection's parties against the unit's own: the opening author and the recipient that version fixed. */
-  private async sameParties(facts: ClinicalRequestFacts, unit: Readonly<ClinicalUnit>, parties: ClinicalProvision['parties']): Promise<void> {
-    if (!parties) return;
-    if (parties.author !== undefined && unit.versions[0].author.subject !== parties.author) refuse('ProjectionMismatch');
-    if (parties.recipient !== undefined) {
-      const recipient = parties.recipient === null ? null : (await facts.member(string(parties.recipient))).id;
-      if (unit.parties.recipientId !== recipient) refuse('ProjectionMismatch');
-    }
+  respond(request: unknown, selector: ClinicalResponseSelector, context: ResponseContext): Promise<AuthorizedResponse> {
+    return clinicalResponse(this.parts, request, selector, context);
   }
 
   /**
@@ -363,25 +322,6 @@ export class ClinicalRuntime implements ClinicalServicePort {
     await this.parts.ledger.append(parseAccessEvent(stored.accessEvent) as AccessEvent);
     await this.parts.db.$queryRaw`SELECT emr_clinical.confirm_sr(${string(recordId)}::text)::text AS done`;
     return freeze({ ...stored.fact, confirmed: true });
-  }
-  /** The author's own confirmed SR adoption handed back by the store route, after its provide-prepared event is durable. */
-  async provideSrAdoption<T>(request: unknown, p: SrProvideRequest<T>): Promise<T> {
-    const facts = await this.parts.context.facts(request);
-    if (facts.actor.identity.subject !== p.caller?.subject || facts.actor.institutionId !== p.caller?.institutionId) refuse('NotFound');
-    const stored = await readSrAdoptionRecord(this.parts.db, string(p.recordId));
-    if (!stored) refuse('NotFound');
-    if (!stored.fact.confirmed) refuse('OutcomeUnknown');
-    const a = stored.adoption;
-    if (a?.recordId !== p.recordId || a.studyId !== p.studyId || a.versionId !== stored.fact.versionId || a.author?.id !== facts.actor.identity.id ||
-        !institutionAdmits(facts.actor.institutionId, string(a.managingInstitutionId))) refuse('NotFound');
-    const event = parseAccessEvent({ formatVersion: 1, surface: p.route, eventId: `clinical-read:${randomUUID()}`, userId: known({ ...facts.actor.identity }),
-      rolesAtTime: known([...facts.actor.roles]), actingInstitution: known(facts.actor.institutionId), managingInstitution: known(a.managingInstitutionId),
-      occurredAt: new Date().toISOString(), trustedProxyIp: facts.trustedProxyIp, cause: 'user-view',
-      context: { basis: 'worklist', studyId: a.studyId, relatedStudyId: null, reason: null }, executor: 'member',
-      targets: [{ kind: 'manual-sr', patientLinkSnapshot: known({ ...a.patient }), studyId: known(a.studyId), recordId: known(a.recordId),
-        versionId: known(a.versionId) }], action: 'provide-prepared', result: 'prepared', requestId: facts.requestId, auditLinkId: newAuditLinkId(),
-      relatedEventId: null } as AccessEventV1) as AccessEvent;
-    return provideAfterDurableEvent(this.parts.ledger, event, receipt => p.send(receipt));
   }
   /** The prepared SRs among `recordIds` whose purpose end is already recorded. */
   srPurposeEnds(recordIds: readonly string[]): Promise<ReadonlySet<string>> { return readSrPurposeEnds(this.parts.db, recordIds); }

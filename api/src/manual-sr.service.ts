@@ -231,14 +231,14 @@ export class ManualSrService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  async prepare(uid: string, raw: Buffer, c: Caller) {
+  async prepare(uid: string, raw: Buffer, c: Caller, request?: unknown) {
     // Bound decoded image memory across simultaneous requests in this worker.
     if (this.preparing >= 2) throw new ServiceUnavailableException('다른 SR을 확인 중입니다. 잠시 후 같은 요청으로 다시 시도하세요');
     this.preparing++;
-    try { return await this.prepareFile(uid, raw, c); } finally { this.preparing--; }
+    try { return await this.prepareFile(uid, raw, c, request); } finally { this.preparing--; }
   }
 
-  private async prepareFile(uid: string, raw: Buffer, c: Caller) {
+  private async prepareFile(uid: string, raw: Buffer, c: Caller, request: unknown) {
     viewerUid(uid); const command = selection(raw);
     access(await this.prisma.studyState.findUnique({ where: { uid } }), c);
     await this.studyAccess.require(c,[uid]);
@@ -252,7 +252,7 @@ export class ManualSrService implements OnModuleInit, OnModuleDestroy {
       const current = await this.heads(tx, uid, command.items, c);
       if (canonical(current.map(x => x.snapshot)) !== canonical(before.map(x => x.snapshot))) conflict();
       const known = await tx.manualSr.findUnique({ where: { authorSub_requestId: { authorSub: c.sub, requestId: command.requestId } } });
-      if (known) { if (known.fingerprint !== fingerprint || known.studyUid !== uid) conflict(); return this.receipt(known, true); }
+      if (known) { if (known.fingerprint !== fingerprint || known.studyUid !== uid) conflict(); return requireClinicalRuntime().respond(request, { view: 'sr', route: 'POST studies/:uid/manual-sr', id: known.id, studyUid: uid }, { db: this.prisma, tx, caller: c, access: this.studyAccess }); }
       const cutoff = new Date(Date.now() - DAY_MS);
       // The preparation budget counts copies still inside their window: an ended copy waiting for unit H's destruction
       // is no longer usable and never blocks a new preparation.
@@ -267,7 +267,7 @@ export class ManualSrService implements OnModuleInit, OnModuleDestroy {
         fingerprint, selection: command.items, dataset, dicom: bytes, sha256: createHash('sha256').update(bytes).digest('hex'), createdAt: at } });
       await tx.auditLog.create({ data: { actor: c.actor, target: uid, action: 'manualSr.prepare',
         detail: JSON.stringify({ id, items: command.items, sha256: row.sha256, bytes: bytes.length }) } });
-      return this.receipt(row, true);
+      return requireClinicalRuntime().respond(request, { view: 'sr', route: 'POST studies/:uid/manual-sr', id: row.id, studyUid: uid }, { db: this.prisma, tx, caller: c, access: this.studyAccess });
     });
   }
 
@@ -295,9 +295,8 @@ export class ManualSrService implements OnModuleInit, OnModuleDestroy {
    */
   private async answer(runtime: ClinicalServicePort, request: unknown, row: any, c: Caller) {
     try {
-      if (!(await runtime.srAdoption(row.id))) return { ...this.receipt(row), dataset: null };
-      return await runtime.provideSrAdoption(request, { recordId: row.id, studyId: row.studyUid, route: 'POST studies/:uid/manual-sr/:id/store',
-        caller: { subject: c.sub, institutionId: c.institution }, send: async () => this.receipt(row) });
+      return await this.transaction(tx => runtime.respond(request, { view: 'sr', route: 'POST studies/:uid/manual-sr/:id/store',
+        id: row.id, studyUid: row.studyUid }, { db: this.prisma, tx, caller: c, access: this.studyAccess }));
     } catch (error) { throw clinicalEchoRefusal(error, OWN); }
   }
 

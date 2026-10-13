@@ -46,6 +46,8 @@ COPIED = ["api/src", "api/prisma", "api/tsconfig.json", "api/nest-cli.json", "ap
           "scripts/emr-compose.py", "scripts/run-tests.py", "tests/live_test_gate.py"]
 
 CASE = {
+    "r5-response": "R5 response boundary: all declared clinical and business variants reject unsigned or unauthorized body egress",
+    "r5-recovery": "R5 original request: recovery, ownership, metadata authorization and maximum seed matrices preserve original outcomes",
     "recovery": "TEST-D-04 atomic_retry server: a recovery releases the original it took over - after a transient store failure the next recovery commits it once, and an original still executing is never fenced",
     "allocation": "TEST-D-04 atomic_retry server: an allocation request keeps its identity - the same request before and after its first commit, at any unit revision; another meaning under its request ID is another request",
     "provide": "TEST-D-03 read_scope server: a response serving many units hands out no text before every provision naming exactly its versions is durable; a projection naming another author or recipient is refused",
@@ -70,9 +72,9 @@ MUTANTS = [
      "old": "    if (stored.fact.confirmed) return stored.fact;\n    await this.parts.ledger.append(",
      "new": "    return stored.fact;\n    await this.parts.ledger.append(",
      "case": CASE["adoption"], "expect": "DR2-01: an adoption the ledger cannot make durable is never reported confirmed"},
-    {"id": "M-D-R3-DR2-02", "finding": "DR2-02", "title": "the served projection's author and recipient are not compared with the unit's",
-     "file": "api/src/emr-clinical/runtime.ts",
-     "old": "    if (!parties) return;\n", "new": "    return;\n",
+    {"id": "M-D-R3-DR2-02", "finding": "DR2-02", "title": "the projection author is not compared with its fixed version",
+     "file": "api/src/emr-clinical/response.ts",
+     "old": "row.requesterSub !== first.author.subject ||", "new": "false ||",
      "case": CASE["provide"], "expect": "DR2-02: a projection naming another author is refused"},
     {"id": "M-D-R3-DR2-03", "finding": "DR2-03", "title": "a response is sent after only its first provision is durable",
      "file": "api/src/emr-clinical/records.ts",
@@ -112,24 +114,19 @@ MUTANTS = [
     # Round 4: Astra's review of a980357 (DR3-01..06).
     {"id": "M-D-R4-DR3-01a", "finding": "DR3-01", "title": "an allocation request answers the allocation's current state, not its own result",
      "file": "api/src/reader-assignment.service.ts",
-     "old": "    return this.answer(uid,c,b.revision+1,readerSub,result.projection);",
+     "old": "    return this.answer(uid,c,b.revision+1,readerSub,result.projection,request);",
      "new": "    return this.run(c,async tx=>this.result(tx,await this.study(tx,uid,c,'share'),c));",
      "case": CASE["own-result"], "expect": "DR3-01: the earlier request answers its own result after a later allocation"},
     {"id": "M-D-R4-DR3-01b", "finding": "DR3-01", "title": "a registered request is admitted again (its reader's eligibility asked again) before its stored outcome",
      "file": "api/src/emr-clinical/runtime.ts",
-     "old": "    if (registered) return registered;", "new": "    if (false && registered) return registered;",
+     "old": "    if (registered) return registered;", "new": "    if (registered) { if (w.admission) await w.admission(); return registered; }",
      "case": CASE["own-result"], "expect": "DR3-01: a registered request is answered without asking the identity provider again"},
-    {"id": "M-D-R4-DR3-01c", "finding": "DR3-01 (same class: consultation write answers)",
-     "title": "a consultation write answers the record's current state, not its own request's result (round 3's answer)",
-     "file": "api/src/consultation.service.ts",
-     "old": "        units:[{...this.provision(row,await readClinicalRows(tx,row.id)),scope:{sequences:[...new Set([1,receipt.revision])]}}],\n"
-            "        send:async served=>({owner:[c.institution,c.sub],item:this.answered(row,served[0],receipt,result.projection)})});",
-     "new": "        units:[this.provision(row,await readClinicalRows(tx,row.id))],\n"
-            "        send:async served=>({owner:[c.institution,c.sub],item:this.item(row,served[0])})});",
+    {"id": "M-D-R4-DR3-01c", "finding": "DR3-01", "title": "consultation echo selects the current head instead of the original receipt",
+     "file": "api/src/consultation.service.ts", "old": "ids:[recordId],receipt:receipt as any", "new": "ids:[recordId]",
      "case": CASE["consultation-result"], "expect": "DR3-01: the acceptance resent after the completion answers the acceptance"},
-    {"id": "M-D-R4-DR3-02", "finding": "DR3-02", "title": "a revision written before unit D answers its typed reason",
-     "file": "api/src/finding.service.ts",
-     "old": "            if (!units.length) return answer(null, null);", "new": "            if (!units.length) return answer(row.reason, null);",
+    {"id": "M-D-R4-DR3-02", "finding": "DR3-02", "title": "legacy Finding history leaks the mutable typed reason",
+     "file": "api/src/emr-clinical/response.ts",
+     "old": "v.reasonSource === 'stated' ? v.reason : '' : null,", "new": "v.reasonSource === 'stated' ? v.reason : '' : row.reason,",
      "case": CASE["legacy"], "expect": "DR3-02: the summary of a revision written before unit D"},
     {"id": "M-D-R4-DR3-03", "finding": "DR3-03", "title": "every copy of one source version is cited again",
      "file": "api/src/emr-clinical/sources.ts",
@@ -252,6 +249,26 @@ MUTANTS = [
 ]
 # DR3-06: the same workflow written in other shell notation must leave the workflow case passing (round 3's own word
 # splitter failed both: it cut a quoted concatenation into two arguments).
+# R5a closed response / original facts fault mutations, preserving the prior mutant identities.
+MUTANTS += [
+    {"id": "M-D-R5A-01", "finding": "R5-01/06", "title": "R5-01/06 behavioural boundary removal", "file": "api/src/emr-clinical/response.ts", "old": "if (!binding || binding.request !== request || binding.route !== route) throw new ServiceUnavailableException('검증되지 않은 응답은 제공하지 않았습니다');", "new": "if (!binding || binding.request !== request || binding.route !== route) { restore(); return value; }", "case": CASE["r5-response"], "expect": "R5 response matrix must pass"},
+    {"id": "M-D-R5A-02", "finding": "R5-02/04", "title": "R5-02/04 behavioural boundary removal", "file": "api/src/emr-clinical/response.ts", "old": "e.body !== (v.text ?? '') ||", "new": "false ||", "case": CASE["r5-response"], "expect": "R5 response matrix must pass"},
+    {"id": "M-D-R5A-03", "finding": "R5-03/NC-05", "title": "R5-03/NC-05 behavioural boundary removal", "file": "api/src/emr-clinical/store.ts", "old": "await tx.$executeRaw`ROLLBACK TO SAVEPOINT clinical_effects`;", "new": "/* faulty rollback omitted */", "case": CASE["r5-recovery"], "expect": "R5 recovery matrix must pass"},
+    {"id": "M-D-R5A-04", "finding": "R5-04", "title": "R5-04 behavioural boundary removal", "file": "api/src/emr-clinical/response.ts", "old": "row.reason !== first.text ||", "new": "false ||", "case": CASE["r5-response"], "expect": "R5 response matrix must pass"},
+    {"id": "M-D-R5A-05", "finding": "R5-05/15", "title": "R5-05/15 behavioural boundary removal", "file": "api/src/emr-clinical/store.ts", "old": "a.event.versionId !== original.versionId || a.event.sha256 !== original.sha256 || canonicalJson(a.kinds) !== canonicalJson(original.kinds)", "new": "false", "case": CASE["r5-recovery"], "expect": "R5 recovery matrix must pass"},
+    {"id": "M-D-R5A-06", "finding": "R5-06", "title": "R5-06 behavioural boundary removal", "file": "api/src/emr-clinical/response.ts", "old": "for (const method of ['write', 'end', 'send', 'json', 'render', 'writeHead', 'flushHeaders'])", "new": "for (const method of [])", "case": CASE["r5-response"], "expect": "R5 response matrix must pass"},
+    {"id": "M-D-R5A-07", "finding": "R5-07", "title": "R5-07 behavioural boundary removal", "file": "api/src/emr-clinical/records.ts", "old": "for (const event of events) receipts.push(", "new": "for (const event of events.slice(0, 1)) receipts.push(", "case": CASE["r5-response"], "expect": "R5 response matrix must pass"},
+    {"id": "M-D-R5A-08", "finding": "R5-08", "title": "R5-08 behavioural boundary removal", "file": "api/src/emr-clinical/response.ts", "old": "  await access(ctx, loaded);", "new": "  /* current authorization omitted */", "case": CASE["r5-response"], "expect": "R5 response matrix must pass"},
+    {"id": "M-D-R5A-09", "finding": "R5-09/NC-01", "title": "R5-09/NC-01 behavioural boundary removal", "file": "api/src/emr-clinical/services.ts", "old": "await projector(tx, plan, projection, caller);", "new": "await projector(tx, plan, projection, caller ? { ...caller } : caller);", "case": CASE["r5-recovery"], "expect": "R5 recovery matrix must pass"},
+    {"id": "M-D-R5A-10", "finding": "R5-10/NC-04", "title": "R5-10/NC-04 behavioural boundary removal", "file": "api/src/emr-clinical/response.ts", "old": "{ owner: owner(c), applied, replayed }", "new": "{ owner: owner(c), applied: { ...applied, ...stored }, replayed }", "case": CASE["r5-response"], "expect": "R5 response matrix must pass"},
+    {"id": "M-D-R5A-11", "finding": "R5-11", "title": "R5-11 behavioural boundary removal", "file": "api/src/emr-clinical/response.ts", "old": "v.reasonSource === 'stated' ? v.reason : '' : null,", "new": "v.reasonSource === 'stated' ? v.reason : '' : row.reason,", "case": CASE["r5-response"], "expect": "R5 response matrix must pass"},
+    {"id": "M-D-R5A-12", "finding": "R5-12", "title": "R5-12 behavioural boundary removal", "file": "api/src/emr-clinical/runtime.ts", "old": "if (registered) return registered;", "new": "if (registered) { if (w.admission) await w.admission(); return registered; }", "case": CASE["r5-recovery"], "expect": "R5 recovery matrix must pass"},
+    {"id": "M-D-R5A-13", "finding": "R5-13/NC-06", "title": "R5-13/NC-06 behavioural boundary removal", "file": "api/src/emr-clinical/store.ts", "old": "if (rows.length) return { kind: 'observer', observation: this.observation(request, rows[0]) };", "new": "if (false && rows.length) return { kind: 'observer', observation: this.observation(request, rows[0]) };", "case": CASE["r5-recovery"], "expect": "R5 recovery matrix must pass"},
+    {"id": "M-D-R5A-14", "finding": "R5-14", "title": "R5-14 behavioural boundary removal", "file": "api/src/emr-clinical/runtime.ts", "old": "} finally { this.store.release(originalId); }", "new": "} finally { /* owner leaked */ }", "case": CASE["r5-recovery"], "expect": "R5 recovery matrix must pass"},
+    {"id": "M-D-R5A-15", "finding": "R5-15/NC-05", "title": "R5-15/NC-05 behavioural boundary removal", "file": "api/src/emr-clinical/store.ts", "old": "await this.sealDirect(permit, decision, true)", "new": "await this.sealDirect(permit, { ...decision, code: 'StorageFailed' }, true)", "case": CASE["r5-recovery"], "expect": "R5 recovery matrix must pass"},
+    {"id": "M-D-R5A-16", "finding": "R5-16/NC-02", "title": "R5-16/NC-02 behavioural boundary removal", "file": "api/src/emr-clinical/store.ts", "old": "return JSON.stringify({ format: 'emr-seed/2', ...seed, attachments,", "new": "return JSON.stringify({ format: 'emr-seed/2', ...seed, unit, attachments,", "case": CASE["r5-recovery"], "expect": "R5 recovery matrix must pass"},
+]
+
 EQUIVALENTS = [
     {"id": "E-D-R4-DR3-06a", "finding": "DR3-06", "title": "the image's build argument and tag written as quoted concatenations",
      "file": ".github/workflows/emr-d.yml",

@@ -23,6 +23,7 @@
     ]
   },
   "owned_paths": {
+    "R5a-core": ["api/src/emr-clinical/response.ts", "api/prisma/migrations/20261013010000_emr_d_original_decisions/migration.sql", "tests/emr/d/response_test.cjs", "tests/emr/d/recovery_test.cjs", "tests/emr/d/r5a_scenarios.cjs"],
     "R1": [
       "api/src/emr-clinical/contract.ts",
       "api/src/emr-clinical/records.ts",
@@ -228,10 +229,11 @@
   },
   "migrations": {
     "added": [
-      "20261012120000_emr_d"
+      "20261012120000_emr_d",
+      "20261013010000_emr_d_original_decisions"
     ],
-    "count": 46,
-    "latest_before": "20261010150000_emr_read_jit_off"
+    "count": 47,
+    "latest_before": "20261012120000_emr_d"
   },
   "composition": {
     "adapters": "before the runtime: composeEmrAdapters({ ...runtimeAdapters, stored: clinicalStoredReader(runtimeAdapters.stored) }) (api/src/emr-clinical/sources.ts) so that A resolves the source versions a finding incorporates; composeClinicalRuntime refuses (ClinicalSourcesNotComposed) otherwise",
@@ -277,7 +279,9 @@
         "TEST-D-03 read_scope server: a finding written before unit D answers neither its text nor its typed reasons; a signed finding's reasons leave only through their durable provision, and a refused revision carries none",
         "TEST-D-02 versions_and_sr server: copies of one source version - two marks of one saved comparison, its saved view and a mark on it - are one fixed reference, planned, signed, stored and recovered alike, every copy kept in the text",
         "TEST-D-04 atomic_retry server: a cited source gone before the commit keeps the stale-source refusal - in a recovery, for the original and every resend, and in a commit itself; storage that cannot be read leaves it pending for the next recovery",
-        "EMR-D-R2 declaration: d.json lists exactly the collected server and live cases, existing owned paths and the newest migration"
+        "EMR-D-R2 declaration: d.json lists exactly the collected server and live cases, existing owned paths and the newest migration",
+          "R5 response boundary: all declared clinical and business variants reject unsigned or unauthorized body egress",
+          "R5 original request: recovery, ownership, metadata authorization and maximum seed matrices preserve original outcomes"
       ],
       "round3_findings": {
         "DR2-04": "TEST-D-04 atomic_retry server: an allocation request keeps its identity - the same request before and after its first commit, at any unit revision; another meaning under its request ID is another request",
@@ -332,7 +336,12 @@
         "test_dr3_01_assignment_answer_of_its_request",
         "test_dr3_02_legacy_finding_without_text",
         "test_dr3_03_marks_of_one_job_one_reference",
-        "test_dr3_04_recovery_keeps_stale_source"
+        "test_dr3_04_recovery_keeps_stale_source",
+        "test_r5a_nc01_metadata_policy_and_recovery",
+        "test_r5a_nc02_maximum_history_sql",
+        "test_r5a_nc04_business_ack",
+        "test_r5a_nc05_original_refusal_seal_retry",
+        "test_r5a_nc06_absent_admission_race"
       ]
     }
   },
@@ -371,11 +380,12 @@
     "server": {
       "file": "tests/emr/d/server_mutants.py",
       "note": "rounds 3 and 4: each reverts one fix of Astra's DR2-01..08 on bfddc3d or DR3-01..06 on a980357 (or removes the signing-time check of Astra's AM10) in a copy and runs tests/emr/d/server_test.cjs; round 5 part d: Astra's AR4-M08/AR4-M09 on e01ca30 and boundary mutants of the evidence check and the workflow (R5-21..23, several keeping the checking text while its effect is gone); the equivalents write the workflow, the identity step and the evidence check differently (notation, an if statement, an extracted function, renamed names, other quotes, a ./ path) and must leave every case they name passing",
-      "ids": ["M-D-R3-DR2-01", "M-D-R3-DR2-02", "M-D-R3-DR2-03", "M-D-R3-DR2-04", "M-D-R3-DR2-05", "M-D-R3-DR2-06", "M-D-R3-DR2-07a",
+      "ids": [ "M-D-R3-DR2-01", "M-D-R3-DR2-02", "M-D-R3-DR2-03", "M-D-R3-DR2-04", "M-D-R3-DR2-05", "M-D-R3-DR2-06", "M-D-R3-DR2-07a",
         "M-D-R3-DR2-07b", "M-D-R3-DR2-08", "M-D-R3-AM10", "M-D-R4-DR3-01a", "M-D-R4-DR3-01b", "M-D-R4-DR3-01c", "M-D-R4-DR3-02", "M-D-R4-DR3-03", "M-D-R4-DR3-04a",
         "M-D-R4-DR3-04b", "M-D-R4-DR3-04c", "M-D-R4-DR3-05a", "M-D-R4-DR3-05b", "M-D-R4-DR3-05c", "M-D-R4-DR3-05d", "M-D-R4-DR3-06",
         "AR4-M08", "AR4-M09", "M-D-R5-21a", "M-D-R5-21c", "M-D-R5-21e", "M-D-R5-21f", "M-D-R5-21g", "M-D-R5-21h", "M-D-R5-21i", "M-D-R5-21j",
-        "M-D-R5-21k", "M-D-R5-21l", "M-D-R5-22a", "M-D-R5-22b", "M-D-R5-22c", "M-D-R5-22d", "M-D-R5-22e", "M-D-R5-22g", "M-D-R5-23a", "M-D-R5-23b"],
+        "M-D-R5-21k", "M-D-R5-21l", "M-D-R5-22a", "M-D-R5-22b", "M-D-R5-22c", "M-D-R5-22d", "M-D-R5-22e", "M-D-R5-22g", "M-D-R5-23a", "M-D-R5-23b",
+          "M-D-R5A-01", "M-D-R5A-02", "M-D-R5A-03", "M-D-R5A-04", "M-D-R5A-05", "M-D-R5A-06", "M-D-R5A-07", "M-D-R5A-08", "M-D-R5A-09", "M-D-R5A-10", "M-D-R5A-11", "M-D-R5A-12", "M-D-R5A-13", "M-D-R5A-14", "M-D-R5A-15", "M-D-R5A-16"],
       "equivalents": ["E-D-R4-DR3-06a", "E-D-R4-DR3-06b", "E-D-R5-22a", "E-D-R5-22b", "E-D-R5-23a", "E-D-R5-23b", "E-D-R5-23c"]
     },
     "live": [
@@ -418,10 +428,10 @@
     ]
   },
   "expected": {
-    "server": 21,
-    "live": 21,
+    "server": 23,
+    "live": 26,
     "live_mutants": 5,
-    "migrations": 46,
+    "migrations": 47,
     "note": "declared before running; never generated from a run's own result"
   },
   "candidate_flow": "EmrDLive.test_d_flow_write_amend_reopen",

@@ -106,7 +106,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20261007200000_designation_subjects/migration.sql',
               'api/prisma/migrations/20261008120000_emr_b/migration.sql', 'api/prisma/migrations/20261010120000_emr_seal_attempts/migration.sql',
               'api/prisma/migrations/20261010150000_emr_read_jit_off/migration.sql',
-              'api/prisma/migrations/20261012120000_emr_d/migration.sql']
+              'api/prisma/migrations/20261012120000_emr_d/migration.sql',
+              'api/prisma/migrations/20261013010000_emr_d_original_decisions/migration.sql']
 TABLES = sorted(['AuthSession', 'IdpSessionEnd', 'MemberIsolation', 'ProviderChange', 'MemberRights', 'MemberRightsImport', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
@@ -545,7 +546,7 @@ def expected_clinical_rows():
         'request': [dict(record='question', actor_id='00000000-0000-4000-8000-00000000d201', request_id='SYNTHETIC-request-1',
             fingerprint='ef'*32, original_id=original, epoch=1, phase='commit-dispatched', state='committed', seed='{"synthetic":true}',
             facts='{"synthetic":true}', envelope=None, checkpoint=None, terminal='{"synthetic":true}', record_id=record_id,
-            access_event='{"synthetic":true}', confirmed=True, admitted_at=stamp, updated_at=stamp)],
+            access_event='{"synthetic":true}', confirmed=True, admitted_at=stamp, updated_at=stamp, rejection_decision=None)],
         'attempt': [dict(attempt_id='SYNTHETIC-attempt-1', code='Observed', record='question', actor_id='00000000-0000-4000-8000-00000000d201',
             request_id='SYNTHETIC-request-1', original_id=original, recorded_at=stamp)],
         'sr_adoption': [dict(record_id='SYNTHETIC-sr-1', version_id='SYNTHETIC-sr-version-1', sha256='12'*32, bytes_sha256='34'*32,

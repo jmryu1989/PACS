@@ -3,15 +3,16 @@ import { AccessEvent, AccessEventV1, AppendOnlyAccessStore, DurableAccessReceipt
   parseAccessEvent } from '../emr-contract/access-event';
 import { ResolvedRecord, verifiedRecord } from '../emr-contract/classification';
 import { ContractError, freeze, integer, refuse, string } from '../emr-contract/validation';
+import type { Caller } from '../pacs/access';
 import type { HoldRow } from '../emr-runtime/contract';
 import type { ProvisionalAppend } from '../emr-runtime/store';
 import { inspectEnvelopeV2 } from '../emr-signature/canonical-v2';
-import type { ClinicalRecord, ClinicalUnit, ClinicalVersion } from './contract';
+import { CLINICAL_SURFACES, ClinicalRecord, ClinicalUnit, ClinicalVersion, SurfaceSpec } from './contract';
 import { ClinicalProjector, ProjectionRefused, clinicalServices, readClinicalSources } from './services';
 import type { SignedEnvelope } from './signing';
 import { SourceRef, sourceRefOf } from './sources';
 import {
-  ClinicalStorePort, ClinicalWritePlan, CommitRolledBack, OriginalAdmission, OriginalCheckpoint, OriginalIdentity, OriginalPermit,
+  AdmissionRefused, ClinicalStorePort, ClinicalWritePlan, CommitRolledBack, OriginalAdmission, OriginalCheckpoint, OriginalIdentity, OriginalPermit,
   RejectionEvidence, RequestAttemptEvent, RequestIdentity, RequestObservation, UnitOfWork, WriteInput, projectUnit,
 } from './records';
 
@@ -124,11 +125,21 @@ type Row = { kind: 'owner' | 'observer' | 'fenced'; original_id: string; epoch: 
   state: 'pending' | 'committed' | 'rejected'; seed: string; facts: string; envelope: string | null; checkpoint: string | null; terminal: string | null;
   record_id: string | null; access_event: string | null; confirmed: boolean };
 
+type RejectionDecision = Readonly<{ originalId: string; epoch: number; code: string; cause: 'rollback' | 'not-dispatched';
+  noClinicalEffects: true; evidenceId: string }>;
+
 // Attachments are A capabilities; the register keeps their stored-record references and recovery resolves the same
 // immutable source versions again through A (sources.ts): an unresolvable reference refuses, never an empty list.
 function seedText(input: WriteInput): string {
-  const attachments = input.attachments.map(a => { const r = verifiedRecord(a); return { recordId: r.recordId, eventId: r.event.eventId }; });
-  return JSON.stringify({ ...input, attachments });
+  const attachments = input.attachments.map(a => {
+    const r = verifiedRecord(a);
+    return { recordId: r.recordId, eventId: r.event.eventId, versionId: r.event.versionId, sha256: r.event.sha256, kinds: [...r.kinds] };
+  });
+  // History belongs to the version store, not to every request that extends it. Keep the exact base identity so recovery
+  // can reconstruct that prefix even after another request advances the head; never silently rebase an original.
+  const { unit, ...seed } = input;
+  return JSON.stringify({ format: 'emr-seed/2', ...seed, attachments,
+    base: unit ? { recordId: unit.recordId, revision: unit.revision, head: unit.head } : null });
 }
 /**
  * The admitted input with its cited sources resolved again. A cited source version that no longer resolves - its row is
@@ -148,7 +159,26 @@ async function seedFrom(db: ClinicalDatabase, text: string): Promise<WriteInput>
   }
   if (attachments.length !== refs.length ||
       attachments.some((a, i) => a.recordId !== seed.attachments[i].recordId || a.event.eventId !== seed.attachments[i].eventId)) refuse('AttachmentRefused');
-  return { ...seed, attachments };
+  if (attachments.some((a, i) => {
+    const original = seed.attachments[i];
+    // Old seeds without a manifest cannot prove a pre-checkpoint source identity. Keep them pending for reconciliation.
+    if (!original.sha256 || !original.versionId || !Array.isArray(original.kinds)) refuse('SourceIdentityUnknown');
+    return a.event.versionId !== original.versionId || a.event.sha256 !== original.sha256 || canonicalJson(a.kinds) !== canonicalJson(original.kinds);
+  })) refuse('ClinicalSourceMissing');
+  if (seed.format !== 'emr-seed/2') return { ...seed, attachments };
+  const { format: _format, base, ...input } = seed;
+  let unit: ClinicalUnit | null = null;
+  if (base !== null) {
+    const stored = await readClinicalUnit(db, string(base.recordId));
+    const revision = integer(base.revision, 1), last = stored?.versions[revision - 1];
+    if (!stored || !last || last.versionId !== base.head?.versionId || last.sha256 !== base.head?.sha256 || base.head?.recordId !== stored.recordId)
+      refuse('OriginalBaseUnavailable');
+    const versions = stored.versions.slice(0, revision);
+    unit = { ...stored, versions, revision, head: { ...base.head }, state: last.state.to,
+      clinicalEntry: versions.some(v => v.entry === 'clinical-entry' && (CLINICAL_SURFACES[v.surface] as SurfaceSpec).marksClinicalEntry === true) };
+    projectUnit(unit);
+  }
+  return { ...input, unit, attachments };
 }
 
 const originalOf = (request: RequestIdentity, originalId: string): OriginalIdentity =>
@@ -176,7 +206,7 @@ export class SqlClinicalStore {
   isActive(originalId: string): boolean { return this.active.has(originalId); }
   release(originalId: string | null): void {
     if (!originalId) return;
-    this.active.delete(originalId); this.carried.delete(originalId); this.facts.delete(originalId);
+    this.active.delete(originalId); this.preparedCallers.delete(originalId); this.carried.delete(originalId); this.facts.delete(originalId);
   }
   /** The device signature fixed with an original at admission, for its sign step (records.ts SignaturePort). */
   carriedSignature(originalId: string): CarriedSignature | null {
@@ -213,9 +243,9 @@ export class SqlClinicalStore {
 
   /** Admission under the request lock: the first caller owns the original, every later one observes it. */
   async admit(request: RequestIdentity, seed: WriteInput, attemptId: string, facts: ClinicalFacts, signature: CarriedSignature | null,
-    admitted: (originalId: string) => void): Promise<OriginalAdmission> {
+    admitted: (originalId: string) => void, db: ClinicalDatabase = this.db): Promise<OriginalAdmission> {
     const k = keyValues(request.receiptKey);
-    const rows = await this.call(() => this.db.$queryRaw<Row[]>`SELECT * FROM emr_clinical.admit(${k.record}::text, ${k.actorId}::text,
+    const rows = await this.call(() => db.$queryRaw<Row[]>`SELECT * FROM emr_clinical.admit(${k.record}::text, ${k.actorId}::text,
       ${k.requestId}::text, ${string(request.fingerprint)}::text, ${seedText(seed)}::text, ${JSON.stringify(facts)}::text,
       ${signature === null ? null : JSON.stringify(signature)}::text, ${string(attemptId)}::text)`);
     const row = rows[0];
@@ -224,6 +254,22 @@ export class SqlClinicalStore {
     this.active.add(row.original_id); this.carried.set(row.original_id, signature); this.facts.set(row.original_id, facts);
     admitted(row.original_id);
     return { kind: 'owner', execution: { permit: permitOf(original, row.epoch), seed, checkpoint: null } };
+  }
+
+  /** Serialize ownership before mutable admission. Every contender observes again under the same database key lock. */
+  async claim(request: RequestIdentity, attemptId: string,
+    prepare: () => Promise<{ seed: WriteInput; facts: ClinicalFacts; signature: CarriedSignature | null }>,
+    admitted: (originalId: string) => void): Promise<OriginalAdmission> {
+    const k = keyValues(request.receiptKey);
+    return this.ledger.withAppendTransaction(async tx => {
+      await tx.$queryRaw`SELECT emr_clinical.lock_request(${k.record}::text, ${k.actorId}::text, ${k.requestId}::text)::text AS done`;
+      const rows = await tx.$queryRaw<Row[]>`SELECT * FROM emr_clinical.observe(${k.record}::text, ${k.actorId}::text,
+        ${k.requestId}::text, ${string(request.fingerprint)}::text, ${string(attemptId)}::text, true)`;
+      if (rows.length) return { kind: 'observer', observation: this.observation(request, rows[0]) };
+      let prepared: Awaited<ReturnType<typeof prepare>>;
+      try { prepared = await prepare(); } catch (error) { throw new AdmissionRefused(error); }
+      return this.admit(request, prepared.seed, attemptId, prepared.facts, prepared.signature, admitted, tx);
+    });
   }
 
   private observation(request: RequestIdentity, row: Row): RequestObservation {
@@ -241,8 +287,19 @@ export class SqlClinicalStore {
     return rows.length ? this.observation(request, rows[0]) : { state: 'absent' };
   }
 
+  private preparedCallers = new Map<string, Caller>();
   async checkpoint(permit: OriginalPermit, value: Readonly<OriginalCheckpoint>): Promise<boolean> {
     const o = permit.original, k = keyValues(o.receiptKey);
+    if (value.phase === 'commit-dispatched') {
+      const prepare = clinicalServices.prepareProjection.get(value.work.plan.record);
+      if (prepare) {
+        try { this.preparedCallers.set(o.originalId, await prepare(value.work.plan, (await this.factsFor(o)).projection)); }
+        catch (error) {
+          if (error instanceof ProjectionRefused) await this.sealDirect(permit, this.decision(permit, error.code, 'not-dispatched'));
+          throw error;
+        }
+      }
+    }
     const [row] = await this.call(() => this.db.$queryRaw<{ done: boolean }[]>`SELECT emr_clinical.checkpoint(${k.record}::text, ${k.actorId}::text,
       ${k.requestId}::text, ${string(o.originalId)}::uuid, ${integer(permit.epoch)}::integer, ${string(value.phase)}::text,
       ${JSON.stringify(value)}::text, NULL::text) AS done`);
@@ -276,6 +333,7 @@ export class SqlClinicalStore {
     const projector = clinicalServices.projectors.get(plan.record);
     if (!projector) refuse('ClinicalProjectorRequired');
     const facts = await this.factsFor(o);
+    const preparedCaller = this.preparedCallers.get(o.originalId);
     const event = clinicalWriteEvent(plan, facts, o.originalId);
     const terminal: RequestObservation = { state: 'committed', original: o, epoch: permit.epoch, binding: work, proof: {
       original: o, epoch: permit.epoch, transactionId: randomUUID(), changeId: event.eventId, receipt: plan.receipt,
@@ -283,12 +341,17 @@ export class SqlClinicalStore {
     const signature = work.signature ? JSON.stringify(this.signatureRecord(work)) : null;
     const request: RequestIdentity = { receiptKey: o.receiptKey, fingerprint: o.fingerprint };
     for (let attempt = 1; ; attempt++) {
-      let appended: ProvisionalAppend, transaction: object, callbackFailed = false;
+      let appended: ProvisionalAppend | RejectionDecision, transaction: object, callbackFailed = false;
       try {
         appended = await this.ledger.withAppendTransaction(async tx => {
           transaction = tx;
           try {
             await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+            // Keep the request lock across the savepoint rollback. A typed projector refusal and proof that its writes
+            // had no effects then commit together; losing the later seal response cannot lose or replace its cause.
+            await tx.$queryRaw`SELECT emr_clinical.lock_request(${k.record}::text, ${k.actorId}::text, ${k.requestId}::text)::text AS done`;
+            await tx.$executeRaw`SAVEPOINT clinical_effects`;
+            try {
             await tx.$queryRaw`SELECT emr_clinical.commit_version(${k.record}::text, ${k.actorId}::text, ${k.requestId}::text,
               ${string(o.originalId)}::uuid, ${integer(permit.epoch)}::integer, ${string(v.recordId)}::text, ${string(v.studyId)}::text,
               ${string(v.managingInstitutionId)}::text, ${canonicalJson(v.patient)}::text, ${string(plan.parties.authorId)}::text,
@@ -296,7 +359,17 @@ export class SqlClinicalStore {
               ${integer(v.sequence, 1)}::integer, ${string(v.versionId)}::text, ${string(v.sha256)}::text,
               ${v.previousVersion ? string(v.previousVersion.versionId) : null}::text, ${string(v.entry)}::text, ${JSON.stringify(v)}::text,
               ${signature}::text, ${JSON.stringify(terminal)}::text, ${JSON.stringify(event)}::text)::text AS done`;
-            await projector(tx, plan, facts.projection);
+            await projector(tx, plan, facts.projection, preparedCaller);
+            } catch (error) {
+              const state = clinicalSqlState(error);
+              const code = error instanceof ProjectionRefused ? error.code : state === 'ED003' ? 'StaleRevision' :
+                error instanceof ContractError ? error.code : null;
+              if (!code || state === 'ED004') throw error;
+              await tx.$executeRaw`ROLLBACK TO SAVEPOINT clinical_effects`;
+              const decision = this.decision(permit, code, 'rollback');
+              if (!await this.rememberDecision(tx, permit, decision)) refuse('PermitFenced');
+              return decision;
+            }
             // Last: B1 stages both stream rows and binds them to this transaction's commit.
             return await this.ledger.appendInTransaction(tx, event);
           } catch (error) { callbackFailed = true; throw error; }
@@ -310,9 +383,10 @@ export class SqlClinicalStore {
         if (transientDatabaseError(error) && attempt < this.commitAttempts) continue;
         const code = error instanceof ProjectionRefused ? error.code : state === 'ED003' ? 'StaleRevision' :
           error instanceof ContractError ? error.code : null;
-        if (code) return this.sealDirect(permit, code);
+        if (code) return this.sealDirect(permit, this.decision(permit, code, 'rollback'));
         throw new CommitRolledBack('Clinical commit rolled back', { original: o, epoch: permit.epoch, transactionId: randomUUID(), noClinicalEffects: true });
       }
+      if ('noClinicalEffects' in appended) return this.sealDirect(permit, appended, true);
       return this.confirmCommitted(o, appended, terminal);
     }
   }
@@ -339,23 +413,37 @@ export class SqlClinicalStore {
       signed: { kid: inspected.kid, signedAt: inspected.payload.signedAt, payloadSha256: createHash('sha256').update(inspected.payloadBytes).digest('hex') } };
   }
 
-  /** A terminal rejection the store decides itself; dispatched: the original reached commit-dispatched (cause rollback). */
-  private async sealDirect(permit: OriginalPermit, code: string, dispatched = true): Promise<RequestObservation> {
-    const o = permit.original, k = keyValues(o.receiptKey), terminal = rejected(o, permit.epoch, code);
+  private decision(permit: OriginalPermit, code: string, cause: RejectionDecision['cause']): RejectionDecision {
+    return freeze({ originalId: permit.original.originalId, epoch: permit.epoch, code, cause, noClinicalEffects: true, evidenceId: randomUUID() });
+  }
+  private async rememberDecision(db: ClinicalDatabase, permit: OriginalPermit, decision: RejectionDecision): Promise<boolean> {
+    const o = permit.original, k = keyValues(o.receiptKey);
+    const [row] = await db.$queryRaw<{ done: boolean }[]>`SELECT emr_clinical.remember_rejection(${k.record}::text, ${k.actorId}::text,
+      ${k.requestId}::text, ${string(o.originalId)}::uuid, ${integer(permit.epoch)}::integer, ${JSON.stringify(decision)}::text) AS done`;
+    return row.done === true;
+  }
+  private async storedDecision(permit: OriginalPermit): Promise<RejectionDecision | null> {
+    const [row] = await this.db.$queryRaw<{ decision: string | null }[]>`SELECT emr_clinical.rejection_for(${string(permit.original.originalId)}::uuid) AS decision`;
+    if (!row || row.decision === null) return null;
+    const d = JSON.parse(row.decision);
+    if (d.originalId !== permit.original.originalId || !Number.isSafeInteger(d.epoch) || d.epoch > permit.epoch ||
+        !d.noClinicalEffects || typeof d.code !== 'string' || !['rollback', 'not-dispatched'].includes(d.cause) || !d.evidenceId)
+      refuse('RejectionEvidenceInvalid');
+    return freeze(d);
+  }
+  /** The only seal input is a recorded no-effects decision. A retry stores that decision, never a new diagnosis. */
+  private async sealDirect(permit: OriginalPermit, decision: RejectionDecision, durable = false): Promise<RequestObservation> {
+    const o = permit.original, k = keyValues(o.receiptKey), terminal = rejected(o, permit.epoch, decision.code);
     const request: RequestIdentity = { receiptKey: o.receiptKey, fingerprint: o.fingerprint };
+    if (!durable && !await this.rememberDecision(this.db, permit, decision)) return this.observe(request, randomUUID(), false);
     await this.call(() => this.db.$queryRaw`SELECT emr_clinical.seal_rejected(${k.record}::text, ${k.actorId}::text, ${k.requestId}::text,
-      ${string(o.originalId)}::uuid, ${integer(permit.epoch)}::integer, ${dispatched ? 'rollback' : 'not-dispatched'}::text, ${JSON.stringify(terminal)}::text)::text AS done`);
-    await this.noteAttempt({ attemptId: randomUUID(), request, originalId: o.originalId, code });
+      ${string(o.originalId)}::uuid, ${integer(permit.epoch)}::integer, ${decision.cause}::text, ${JSON.stringify(terminal)}::text)::text AS done`);
+    await this.noteAttempt({ attemptId: randomUUID(), request, originalId: o.originalId, code: decision.code });
     return this.observe(request, randomUUID(), false);
   }
 
   async sealRejected(permit: OriginalPermit, evidence: RejectionEvidence, attemptId: string): Promise<RequestObservation> {
-    const o = permit.original, k = keyValues(o.receiptKey), terminal = rejected(o, permit.epoch, evidence.code);
-    const request: RequestIdentity = { receiptKey: o.receiptKey, fingerprint: o.fingerprint };
-    await this.call(() => this.db.$queryRaw`SELECT emr_clinical.seal_rejected(${k.record}::text, ${k.actorId}::text, ${k.requestId}::text,
-      ${string(o.originalId)}::uuid, ${integer(permit.epoch)}::integer, ${string(evidence.cause)}::text, ${JSON.stringify(terminal)}::text)::text AS done`);
-    await this.noteAttempt({ attemptId, request, originalId: o.originalId, code: evidence.code });
-    return this.observe(request, attemptId, false);
+    return this.sealDirect(permit, this.decision(permit, evidence.code, evidence.cause));
   }
 
   async recoverOriginal(request: RequestIdentity, attemptId: string, acquired: (originalId: string) => void = () => {}): Promise<OriginalAdmission> {
@@ -372,24 +460,28 @@ export class SqlClinicalStore {
         return { kind: 'observer', observation: await this.confirmCommitted(original, null, JSON.parse(row.terminal), JSON.parse(row.access_event)) };
       return { kind: 'observer', observation: this.observation(request, row) };
     }
-    // The dispatched commit has finished without effects (the row is pending under the lock it held): seal it.
-    if (row.kind === 'fenced') return { kind: 'observer', observation: await this.sealDirect(permitOf(original, row.epoch), 'StorageFailed') };
     this.active.add(row.original_id);
     this.carried.set(row.original_id, row.envelope === null ? null : JSON.parse(row.envelope));
     this.facts.set(row.original_id, JSON.parse(row.facts));
     acquired(row.original_id);
+    const permit = permitOf(original, row.epoch), decision = await this.storedDecision(permit);
+    if (decision) return { kind: 'observer', observation: await this.sealDirect(permit, decision, true) };
     let seed: WriteInput;
     try { seed = await seedFrom(this.db, row.seed); }
     catch (error) {
       // Storage that cannot be read now (or a composition that does not serve D's sources) is no proof that a source is
       // gone: the original stays pending for the next recovery, which resumes it with the same request.
-      if (!(error instanceof ContractError) || error.code === 'ClinicalSourcesNotComposed') throw error;
+      if (!(error instanceof ContractError) || ['ClinicalSourcesNotComposed', 'SourceIdentityUnknown', 'OriginalBaseUnavailable'].includes(error.code)) throw error;
       // A cited source that is gone or changed is kept as exactly that (DR3-04): the stored refusal answers every resend of
       // this request with the owning service's stale-source refusal, never as an ordinary input error, never as success.
       // Anything else here is the register's own damaged seed (AttachmentRefused).
       const code = error.code === 'ClinicalSourceMissing' ? 'ClinicalSourceMissing' : 'AttachmentRefused';
-      return { kind: 'observer', observation: await this.sealDirect(permitOf(original, row.epoch), code, row.phase === 'commit-dispatched') };
+      return { kind: 'observer', observation: await this.sealDirect(permit,
+        this.decision(permit, code, row.phase === 'commit-dispatched' ? 'rollback' : 'not-dispatched')) };
     }
+    // A fence proves no committed effects, not why the original stopped. Without its durable decision a healthy source
+    // does not prove StorageFailed (the owner may have refused for another reason immediately before a crash).
+    if (row.kind === 'fenced') return { kind: 'observer', observation: this.observation(request, row) };
     return { kind: 'owner', execution: { permit: permitOf(original, row.epoch), seed, checkpoint: row.checkpoint === null ? null : JSON.parse(row.checkpoint) } };
   }
 
