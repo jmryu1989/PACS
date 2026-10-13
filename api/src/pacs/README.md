@@ -44,5 +44,5 @@ Controller ─▶ PacsService (facade, @Injectable, 5 DI 의존성: Prisma·Orth
   분할 동등성 시험은 원본의 125 멤버·57 선언을 이 지도로 결속한다.
 - concern 사이 호출은 생성자로 받은 객체를 통해서만 한다. service locator, facade 역참조, 동적 mixin, prototype 조작,
   concern에 decorator 붙이기는 하지 않는다. 감사 검사기(`tests/admin_audit_attribution_test.cjs`)는 이 형태만 증명한다.
-- 남은 U0f 부채(그대로 옮김): `metrics.ts`의 `this.orthanc['get']('/statistics')`, 시험용 protected seam
+- 남은 U0f 부채(그대로 옮김): 시험용 protected seam
   (`metrics.ts`의 시계·대기 상한, `report-evidence.ts`의 구조화 서식 목록).

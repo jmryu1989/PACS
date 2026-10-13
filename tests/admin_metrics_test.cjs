@@ -353,7 +353,7 @@ function store({ policies = [[], []], statistics = STATISTICS, orthanc = null, o
 // The fixture as the service stamps it: its one clock also stamps the Orthanc observation.
 const AT_CLOCK = () => clone(ROWS).map(row => row.key === 'storage.server' ? { ...row, observedAt: NOW } : row);
 
-// REQ-S9-U0f-ORTHANC-PUBLIC -> RISK-SOURCE-CONTRACT/UNKNOWN-AS-ZERO -> ORTHANC-01..03.
+// REQ-S9-U0f-ORTHANC-PUBLIC -> RISK-SOURCE-CONTRACT/UNKNOWN-AS-ZERO -> ORTHANC-01..04.
 // Exercise the public service at the fetch boundary; no private transport method is replaced.
 function statisticsService(t) {
   const config = { ORTHANC_URL: 'http://orthanc.synthetic.invalid:8042/', ORTHANC_USER: 'SYN-USER', ORTHANC_PASS: 'SYN-PASS' };
@@ -378,10 +378,12 @@ test('ORTHANC-01: public statistics reads authenticated GET /statistics once and
   for (answer of [STATISTICS, { TotalDiskSize: '0' }, {}, null, [], { TotalDiskSize: 'bad' }]) {
     const before = requests.length;
     assert.deepEqual(await service.statistics(), answer);
-    assert.deepEqual(requests.slice(before), [[
-      'http://orthanc.synthetic.invalid:8042/statistics', 'GET',
-      { Authorization: 'Basic ' + Buffer.from('SYN-USER:SYN-PASS').toString('base64'), 'Content-Type': 'application/json' }, undefined,
-    ]]);
+    assert.equal(requests.length - before, 1);
+    const [url, method, headers, body] = requests[before];
+    assert.equal(url, 'http://orthanc.synthetic.invalid:8042/statistics');
+    assert.equal(method, 'GET');
+    assert.equal(headers.Authorization, 'Basic ' + Buffer.from('SYN-USER:SYN-PASS').toString('base64'));
+    assert.equal(body, undefined);
   }
 });
 
@@ -428,6 +430,46 @@ test('ORTHANC-03: the real public service feeds storage observations, missing da
     assert.equal(calls - before, 1);
     assert.ok(!JSON.stringify(answer).includes('SYN'), 'source errors do not escape in the response');
   }
+});
+
+test('ORTHANC-04: an unanswered real source cannot become a success or outlive the metrics wait bound', { skip: hosted, timeout: 3000 }, async t => {
+  const orthancService = statisticsService(t);
+  const releases = [];
+  let responding = false;
+  const sourceAnswer = { ...STATISTICS, diagnostic: 'SYN private late source wording' };
+  t.mock.method(globalThis, 'fetch', () => responding
+    ? Promise.resolve({ ok: true, json: async () => sourceAnswer })
+    : new Promise(resolve => releases.push(() => resolve({ ok: true, json: async () => sourceAnswer }))));
+  const { service } = store({ orthancService });
+  service.metricsTimeoutMs = 50;
+  // A future service deadline may reject. Only a successful answer before the source answers is forbidden.
+  let boundaryState = 'pending';
+  const boundary = orthancService.statistics().then(
+    () => { boundaryState = 'fulfilled'; }, () => { boundaryState = 'rejected'; });
+  const metrics = service.adminMetrics(ADMIN);
+  let watchdog;
+  let answer, beforeLateAnswer;
+  try {
+    // This outer bound detects a lost caller deadline without leaving a hung test or depending on exact timing.
+    answer = await Promise.race([metrics, new Promise((_, reject) => {
+      watchdog = setTimeout(() => reject(new Error('metrics did not return while the source was unanswered')), 1000);
+    })]);
+    const disk = answer.metrics[0];
+    assert.deepEqual([disk.state, disk.reason, disk.value, disk.observedAt], ['unobservable', 'timeout', null, null]);
+    assert.deepEqual(answer.metrics.slice(1), AT_CLOCK().slice(1), 'the unanswered source leaves other rows intact');
+    assert.ok(!JSON.stringify(answer).includes('SYN'), 'source wording does not escape in the response');
+    beforeLateAnswer = clone(answer);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.notEqual(boundaryState, 'fulfilled', 'statistics must not invent success while fetch is unanswered');
+  } finally {
+    clearTimeout(watchdog);
+    responding = true;
+    for (const release of releases) release();
+    await Promise.allSettled([boundary, metrics]);
+  }
+  assert.deepEqual(answer, beforeLateAnswer, 'a late source answer cannot overwrite the timed-out observation');
+  const recovered = await service.adminMetrics(ADMIN);
+  assert.deepEqual(recovered.metrics, AT_CLOCK(), 'a later request can observe the source again');
 });
 
 test('server: the compiled rows are exactly the page fixture (tenant filter, windows, median, exclusions)', { skip: hosted }, () => {
