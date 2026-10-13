@@ -136,7 +136,10 @@ def served_page_inputs(files, trees, cwd):
     added by the child, without inferring dependencies from product source text.
     """
     directory = 'worklist-v0/hpacs-lite'
-    triggers = {directory + '/main.html', directory + '/main-split.bundle.js'}
+    # A run serves the main page when it records the page, its bundle, or the
+    # page-source helper with which page-serving tests list main.html's moved
+    # files (tests/page_source.py reads main.html for every served allowlist).
+    triggers = {directory + '/main.html', directory + '/main-split.bundle.js', 'tests/page_source.py', 'tests/page_source.cjs'}
     requested = {(cwd / name).resolve() for name in files}
     if not requested.intersection((cwd / name).resolve() for name in triggers):
         return [], []

@@ -33,6 +33,29 @@ class RecordRunTest(unittest.TestCase):
         self.assertIn('worklist-v0/hpacs-lite/added.js', {r['requested'] for r in record['files_after']})
         self.assertEqual(record['served_page_inputs']['trees'], ['worklist-v0/hpacs-lite'])
 
+    def test_page_source_helper_records_the_served_page_assets(self):
+        # W3R5-06: a step that serves main.html through a page-serving test records
+        # tests/page_source.py, not main.html; its page and assets are still recorded.
+        for name in ('worklist-v0/hpacs-lite/main.html', 'worklist-v0/hpacs-lite/drawer.js',
+                     'tests/page_source.py', 'tests/other_test.py', 'scripts/record-run.py'):
+            target = self.root / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text('fixture\n', encoding='utf-8')
+        served = self.run_command([sys.executable, '-c', 'pass'], files=['tests/other_test.py', 'tests/page_source.py'])
+        self.assertEqual(served.returncode, 0, served.stderr)
+        record = self.record()
+        self.assertEqual(record['served_page_inputs']['trees'], ['worklist-v0/hpacs-lite'])
+        for field in ('files_before', 'files_after'):
+            rows = {row['requested']: row for row in record[field]}
+            for name in ('worklist-v0/hpacs-lite/main.html', 'worklist-v0/hpacs-lite/drawer.js'):
+                self.assertEqual(rows[name]['status'], 'present')
+                self.assertTrue(rows[name]['sha256'])
+        # A step that serves no page records no page directory.
+        self.run_dir = self.root / 'evidence' / 'second'
+        quiet = self.run_command([sys.executable, '-c', 'pass'], files=['tests/other_test.py'])
+        self.assertEqual(quiet.returncode, 0, quiet.stderr)
+        self.assertEqual(self.record()['served_page_inputs'], {'files': [], 'trees': []})
+
     def test_workflow_contract_inputs_capture_relocated_and_new_workflows(self):
         # REQ-W2-LAND-CI -> RISK-UNRECORDED-WORKFLOW: both snapshots include
         # the catalogue/helper; a workflow created by the child is visible after.
