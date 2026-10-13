@@ -26,6 +26,34 @@ function scan(source, filename) {
   const modules = [];
   const files = [];
   let unresolved = false;
+  const mutatedArrays = new Set();
+  function findArrayMutations(node) {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
+        ['push', 'pop', 'shift', 'unshift', 'splice', 'fill', 'copyWithin'].includes(node.expression.name.text)) {
+      mutatedArrays.add(checker.getSymbolAtLocation(node.expression.expression));
+    }
+    if (ts.isBinaryExpression(node) && ts.isElementAccessExpression(node.left)) {
+      mutatedArrays.add(checker.getSymbolAtLocation(node.left.expression));
+    }
+    ts.forEachChild(node, findArrayMutations);
+  }
+  findArrayMutations(tree);
+  function argvValues(node, seen = new Set()) {
+    if (!node || seen.has(node)) return [undefined];
+    seen = new Set([...seen, node]);
+    if (ts.isArrayLiteralExpression(node)) return node.elements.flatMap(item => argvValues(item, seen));
+    if (ts.isSpreadElement(node)) return argvValues(node.expression, seen);
+    if (ts.isConditionalExpression(node)) return [...argvValues(node.whenTrue, seen), ...argvValues(node.whenFalse, seen)];
+    if (ts.isIdentifier(node)) {
+      const symbol = checker.getSymbolAtLocation(node);
+      const declaration = symbol?.valueDeclaration;
+      if (declaration && ts.isVariableDeclaration(declaration) && declaration.initializer) {
+        const values = argvValues(declaration.initializer, seen);
+        return mutatedArrays.has(symbol) || !(declaration.parent.flags & ts.NodeFlags.Const) ? [...values, undefined] : values;
+      }
+    }
+    return [constant(node)];
+  }
   function visit(node) {
     // Template pieces count too: `${root}/.github/workflows` has no plain string literal.
     if (ts.isStringLiteralLike(node) || ts.isTemplateHead(node) || ts.isTemplateMiddle(node) ||
@@ -53,6 +81,9 @@ function scan(source, filename) {
       if (['spawn', 'spawnSync', 'execFile', 'execFileSync'].includes(name)) {
         const command = node.arguments[0] && constant(node.arguments[0]);
         const argv = node.arguments[1];
+        const values = argvValues(argv);
+        files.push(...values.filter(value => value && /\.(py|cjs)$/.test(value)).map(value => value.replaceAll('\\', '/')));
+        if (values.includes(undefined)) unresolved = true;
         if (argv && ts.isArrayLiteralExpression(argv)) {
           const args = argv.elements.map(item => constant(item));
           files.push(...args.filter(value => value && /\.(py|cjs)$/.test(value)).map(value => value.replaceAll('\\', '/')));

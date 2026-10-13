@@ -94,6 +94,49 @@ class FakeGitHub:
 
 
 class ArtifactTests(unittest.TestCase):
+    def test_invalid_repository_id_stops_before_listing(self):
+        for payload in ({}, {'id': '42'}, {'id': 0}, {'id': -1}, {'id': True}):
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as folder:
+                root, _ = self.fixture(folder)
+                urls = []
+                def query(endpoint):
+                    urls.append(endpoint)
+                    return payload, {}
+                with self.assertRaisesRegex(ValueError, 'STOP run_id=unknown attempt=unknown artifact_id=unknown: invalid repository id'):
+                    self.collect(root, query)
+                self.assertEqual(urls, ['repos/o/r'])
+                self.assertFalse((root / 'out').exists())
+
+    def test_missing_and_malformed_run_fields_preserve_identity(self):
+        invalid = {'path': [None, 12, '', 'wrong.yml'],
+                   'head_sha': [None, 12, '', 'xyz'],
+                   'event': [None, 12, '', 'push!'],
+                   'run_attempt': [None, '1', 0, -1, True],
+                   'created_at': [None, 12, '', 'not-a-timestamp', '2026-02-30T00:00:00Z', '20261012'],
+                   'updated_at': [None, 12, '', 'not-a-timestamp', '2026-13-12T00:00:00Z', '2026-10-12 00:00:00Z'],
+                   'status': [None, 12, '', 'bogus'],
+                   'conclusion': [None, 12, '', 'bogus', []]}
+        missing = object()
+        for field, values in invalid.items():
+            for value in [missing, *values]:
+                with self.subTest(field=field, value=value), tempfile.TemporaryDirectory() as folder:
+                    root, uploads = self.fixture(folder)
+                    github = FakeGitHub(uploads)
+                    run = github.run('renamed-volume.yml')
+                    if value is missing:
+                        del run[field]
+                    else:
+                        run[field] = value
+                    attempt = run.get('run_attempt', 'unknown')
+                    reason = f'STOP run_id=11 attempt={attempt} artifact_id=unknown: missing/malformed run field {field}'
+                    with self.assertRaisesRegex(ValueError, re.escape(reason)):
+                        self.collect(root, github)
+                    manifest = json.loads((root / 'out/artifact-downloads.json').read_text())
+                    self.assertEqual(manifest['status'], 'incomplete')
+                    self.assertEqual(manifest['error'], reason)
+                    self.assertEqual(self.calls, [])
+                    self.assertEqual(len(github.urls), 2)
+
     def test_rerun_operator_procedure_preserves_diagnostic_only_evidence(self):
         doc = (ROOT / 'tests/stage-exit.md').read_text(encoding='utf-8')
         for contract in ('CD-02-R', 'run_attempt', '전체 재실행·부분 재실행·attempt 미증명',

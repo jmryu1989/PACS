@@ -19,7 +19,7 @@ recorder = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(recorder)
 
 
-def python_scan(source):
+def python_scan(source, filename='tests/probe.py'):
     """(reads workflows itself, imported module names, file names named in code)."""
     tree = ast.parse(source)
     docstrings = set()
@@ -39,6 +39,118 @@ def python_scan(source):
     def argument(node, index=0):
         value = node.args[index] if len(node.args) > index else None
         return value.value if isinstance(value, ast.Constant) and isinstance(value.value, str) else None
+
+    # Union assignments and local call arguments; uncertainty must add inputs,
+    # never discard a possible loader. This is bounded AST evaluation, not execution.
+    bindings = {}
+    functions = {}
+    uncertain_names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            functions.setdefault(node.name, []).append(node)
+            uncertain_names.update(param.arg for param in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs])
+        if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+            uncertain_names.add(node.target.id)
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name) and node.func.attr in ('append', 'extend', 'insert', 'pop', 'remove', 'clear')):
+            uncertain_names.add(node.func.value.id)
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            for target in node.targets if isinstance(node, ast.Assign) else [node.target]:
+                if isinstance(target, ast.Name) and node.value is not None:
+                    bindings.setdefault(target.id, []).append(node.value)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            for function in functions.get(call_name(node.func), []):
+                for param, value in zip(function.args.args, node.args):
+                    bindings.setdefault(param.arg, []).append(value)
+                for keyword in node.keywords:
+                    if keyword.arg:
+                        bindings.setdefault(keyword.arg, []).append(keyword.value)
+
+    resolved_cache = {}
+
+    def resolved(node, seen=frozenset()):
+        if node is None or id(node) in seen or len(seen) > 40:
+            return {None}
+        if id(node) not in resolved_cache:
+            resolved_cache[id(node)] = resolve_node(node, seen)
+        return resolved_cache[id(node)]
+
+    def resolve_node(node, seen):
+        if node is None or id(node) in seen or len(seen) > 40:
+            return {None}
+        seen = seen | {id(node)}
+        resolve = lambda item: resolved(item, seen)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return {node.value.replace('\\', '/')}
+        if isinstance(node, ast.Name):
+            if node.id == '__file__':
+                return {filename}
+            values = set().union(*(resolve(value) for value in bindings.get(node.id, []))) or {None}
+            # A parameter may also arrive from another module; a mutable argv
+            # cannot be proved complete from its initial assignment alone.
+            return values | {None} if node.id in uncertain_names else values
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            return set().union(*(resolve(item) for item in node.elts))
+        if isinstance(node, ast.Starred):
+            return resolve(node.value)
+        if isinstance(node, ast.IfExp):
+            return resolve(node.body) | resolve(node.orelse)
+        if isinstance(node, ast.Attribute) and node.attr == 'parent':
+            return {posixpath.dirname(value) if value is not None else None for value in resolve(node.value)}
+        if (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute)
+                and node.value.attr == 'parents' and isinstance(node.slice, ast.Constant)
+                and type(node.slice.value) is int and 0 <= node.slice.value < 10):
+            values = resolve(node.value.value)
+            for _ in range(node.slice.value + 1):
+                values = {posixpath.dirname(value) if value is not None else None for value in values}
+            return values
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Div, ast.Add)):
+            left, right = resolve(node.left), resolve(node.right)
+            def sequence(value):
+                if isinstance(value, (ast.List, ast.Tuple)):
+                    return True
+                if isinstance(value, ast.Name):
+                    return any(isinstance(item, (ast.List, ast.Tuple)) for item in bindings.get(value.id, []))
+                return False
+            if isinstance(node.op, ast.Add) and (sequence(node.left) or sequence(node.right)):
+                return left | right
+            if len(left) * len(right) > 256:
+                return left | right | {None}
+            return {None if a is None or b is None else
+                    posixpath.join(a, b) if isinstance(node.op, ast.Div) else a + b
+                    for a in left for b in right}
+        if isinstance(node, ast.Call):
+            name = call_name(node.func)
+            if name in ('str', 'Path', 'pathlib.Path') and node.args:
+                return resolve(node.args[0])
+            if isinstance(node.func, ast.Attribute):
+                if node.func.attr in ('resolve', 'absolute', 'as_posix'):
+                    return resolve(node.func.value)
+                if node.func.attr == 'with_name' and node.args:
+                    return {posixpath.join(posixpath.dirname(base), value)
+                            if base is not None and value is not None else None
+                            for base in resolve(node.func.value) for value in resolve(node.args[0])}
+        return {None}
+
+    def loader_files(args):
+        # Container bind mounts retain their repository source identity.
+        mounts = []
+        for value in args:
+            if value and ':' in value:
+                source, destination, *_ = value.split(':')
+                if (source == 'tests' or source.startswith('tests/')) and destination.startswith('/'):
+                    mounts.append((source, destination))
+        for value in args:
+            if not value or not value.endswith(('.py', '.cjs')):
+                continue
+            for source, destination in mounts:
+                if value.startswith(destination + '/'):
+                    value = source + value[len(destination):]
+                    break
+            if '/tests/' in value:
+                value = 'tests/' + value.split('/tests/', 1)[1]
+            files.add(value)
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -74,18 +186,21 @@ def python_scan(source):
                 else:
                     reads = True  # Unknown dynamic module: conservatively record the workflows.
             elif loader in ('runpy.run_path', 'importlib.util.spec_from_file_location'):
-                value = argument(node, 1 if loader.endswith('spec_from_file_location') else 0)
-                if value is not None:
-                    files.add(value.replace('\\', '/'))
-                else:
+                index = 1 if loader.endswith('spec_from_file_location') else 0
+                args = resolved(node.args[index] if len(node.args) > index else None)
+                loader_files(args)
+                if None in args:
                     reads = True
             elif loader in ('subprocess.run', 'subprocess.Popen', 'subprocess.call',
-                            'subprocess.check_call', 'subprocess.check_output') and node.args:
-                argv = node.args[0]
+                            'subprocess.check_call', 'subprocess.check_output'):
+                argv = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg == 'args'), None)
+                resolved_args = resolved(argv)
+                loader_files(resolved_args)
+                if None in resolved_args or not isinstance(argv, (ast.List, ast.Tuple, ast.Name, ast.IfExp, ast.BinOp)):
+                    reads = True
                 if isinstance(argv, (ast.List, ast.Tuple)):
                     args = [item.value if isinstance(item, ast.Constant) and isinstance(item.value, str)
                             else None for item in argv.elts]
-                    files.update(value.replace('\\', '/') for value in args if value and value.endswith(('.py', '.cjs')))
                     if len(args) >= 3 and args[1] == '-m':
                         # sys.executable is also an explicit Python command in this AST.
                         executable = argv.elts[0]
@@ -93,6 +208,16 @@ def python_scan(source):
                                 call_name(executable) == 'sys.executable') and args[2]:
                             modules.add(args[2])
     values = [value.rstrip('/') for value in values]
+    # Several pure suites add tests/e2e before importing its modules. Resolve that
+    # explicit local search root; a bare module still never matches global stems.
+    search_roots = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and call_name(node.func) in ('sys.path.insert', 'sys.path.append', 'sys.path.extend'):
+            index = 1 if call_name(node.func) == 'sys.path.insert' else 0
+            if len(node.args) > index:
+                search_roots.update(value for value in resolved(node.args[index]) if value is not None)
+    modules.update(posixpath.join(base, module.replace('.', '/')).replace('/', '.')
+                   for base in search_roots for module in list(modules) if not module.startswith('.'))
     reads = (reads or any('.github/workflows' in value for value in values)
             or ('.github' in values and 'workflows' in values))
     return reads, modules, files
@@ -125,7 +250,7 @@ def consumers(root, *, audit=None):
         source = path.read_text(encoding='utf-8-sig')
         name = path.relative_to(root).as_posix()
         if path.suffix == '.py':
-            scans[name] = python_scan(source)
+            scans[name] = python_scan(source, name)
         else:
             javascript.append({'filename': name, 'source': source})
     for row, result in zip(javascript, javascript_scan(javascript) if javascript else []):
@@ -161,12 +286,16 @@ def consumers(root, *, audit=None):
         return candidates
 
     edges = {name: targets(name, modules, files) for name, (_, modules, files) in scans.items()}
-    found = {name for name, (reads, _, _) in scans.items() if reads}
+    # A resolved filename outside the scanned test graph is still an unknown
+    # dependency (for example a scripts/ helper or a container-only path).
+    direct = {name for name, (reads, _, files) in scans.items()
+              if reads or any(not targets(name, set(), {file}) for file in files)}
+    found = set(direct)
     while True:
         added = {name for name in scans if name not in found and edges[name] & found}
         if not added:
             if audit is not None:
-                audit.update(direct=sorted(name for name, (reads, _, _) in scans.items() if reads),
+                audit.update(direct=sorted(direct),
                              edges={name: sorted(targets) for name, targets in edges.items()},
                              consumers=sorted(found))
             return found
@@ -178,6 +307,55 @@ def missing_consumers(found, expand=recorder.workflow_contract_inputs):
 
 
 class WorkflowConsumerTests(unittest.TestCase):
+    def test_constructed_paths_variable_argv_and_local_wrappers(self):
+        cases = {
+            'clinician.py': "ROOT = Path(__file__).resolve().parents[1]\nsubprocess.run(['node', str(ROOT / 'tests' / 'leaf.cjs')])",
+            'main_split.py': "_HELPER = Path(__file__).with_name('leaf.cjs')\nsubprocess.check_output(['node', str(_HELPER)])",
+            'pacs.py': "ROOT = Path(__file__).resolve().parents[1]\ncmd = ['node', str(ROOT / 'tests/leaf.cjs')]\nsubprocess.run(cmd)",
+            'conditional.py': "cmd = ['node', 'leaf.cjs' if flag else 'plain.cjs']\nsubprocess.run(args=cmd)",
+            'concat.py': "cmd = ['node'] + ['leaf.cjs']\nsubprocess.run(cmd)",
+            'wrapper.py': "def run(harness, values):\n command = ['node', str(Path(__file__).parent / harness), *values]\n subprocess.run(command)\nrun('leaf.cjs' if flag else 'plain.cjs', ['--test'])",
+            'container.py': "subprocess.Popen(['docker', 'run', '-v', str(Path(__file__).parent.resolve()) + ':/emr:ro', 'image', '/emr/leaf.cjs'])",
+            'variable.cjs': "const {spawnSync} = require('node:child_process'); const cmd = ['./leaf.cjs']; spawnSync('node', cmd);",
+            'conditional.cjs': "const {spawnSync} = require('node:child_process'); spawnSync('node', flag ? ['./leaf.cjs'] : ['./plain.cjs']);",
+        }
+        sources = {'leaf.cjs': "const workflows = '.github/workflows';", 'plain.cjs': 'module.exports = 1;', **cases,
+                   'unknown.py': 'subprocess.run(build_argv())',
+                   'unknown.cjs': "require('node:child_process').spawnSync('node', buildArgv());",
+                   'mutated.py': "cmd = ['node', 'plain.cjs']\ncmd.append(runtime_path)\nsubprocess.run(cmd)",
+                   'parameter.py': "cmd = ['node', 'plain.cjs']\ndef launch(cmd):\n subprocess.run(cmd)",
+                   'mutated.cjs': "const cmd = ['./plain.cjs']; cmd.push(runtimePath); require('node:child_process').spawnSync('node', cmd);",
+                   'metadata.py': "data = {'leaf.cjs': 1}; argv = ['node', 'leaf.cjs']; print(argv)",
+                   'not_execute.py': "subprocess.run(['echo', 'plain text'])",
+                   'other/plain.py': "subprocess.run(['node', 'plain.cjs'])",
+                   'other/plain.cjs': 'module.exports = 1;'}
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name, source in sources.items():
+                path = root / 'tests' / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(source, encoding='utf-8')
+            audit = {}
+            found = consumers(root, audit=audit)
+        self.assertEqual(found, {'tests/' + name for name in [*cases, 'leaf.cjs', 'unknown.py', 'unknown.cjs', 'mutated.py', 'parameter.py', 'mutated.cjs']})
+        for name in cases:
+            self.assertIn('tests/leaf.cjs', audit['edges']['tests/' + name], name)
+        self.assertNotIn('tests/leaf.cjs', audit['edges']['tests/metadata.py'])
+
+    def test_explicit_python_search_root_is_not_global_stem_matching(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name, source in {
+                'e2e/leaf.py': "p = '.github/workflows'",
+                'plain/leaf.py': 'x = 1',
+                'precision.py': "sys.path.insert(0, str(Path(__file__).parent / 'e2e'))\nimport leaf",
+                'unrelated.py': "sys.path.insert(0, str(Path(__file__).parent / 'plain'))\nimport leaf",
+            }.items():
+                path = root / 'tests' / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(source, encoding='utf-8')
+            self.assertEqual(consumers(root), {'tests/e2e/leaf.py', 'tests/precision.py'})
+
     def test_loader_arguments_and_importer_relative_paths_only(self):
         sources = {
             'pkg/leaf.py': "p = '.github/workflows'",

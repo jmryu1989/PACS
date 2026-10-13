@@ -136,6 +136,24 @@ def revision(run):
 
 
 def check_run(run, workflow, sha):
+    # Validate at the listed row, before selection/revision can lose its identity.
+    for key in ('path', 'head_sha', 'event', 'created_at', 'updated_at', 'status'):
+        if not isinstance(run.get(key), str) or not run[key].strip():
+            stop(f'missing/malformed run field {key}', run)
+    if not re.fullmatch(r'\.github/workflows/[^/@]+\.ya?ml(?:@\S+)?', run['path']):
+        stop('missing/malformed run field path', run)
+    if not re.fullmatch('[0-9a-f]{40}', run['head_sha']):
+        stop('missing/malformed run field head_sha', run)
+    if not re.fullmatch('[a-z][a-z0-9_]*', run['event']):
+        stop('missing/malformed run field event', run)
+    if type(run.get('run_attempt')) is not int or run['run_attempt'] < 1:
+        stop('missing/malformed run field run_attempt', run)
+    if run['status'] not in ('queued', 'in_progress', 'completed', 'waiting', 'pending', 'requested'):
+        stop('missing/malformed run field status', run)
+    if ('conclusion' not in run or run['conclusion'] not in
+            (None, 'success', 'failure', 'neutral', 'cancelled', 'skipped', 'timed_out', 'action_required', 'stale', 'startup_failure')
+            or (run['status'] == 'completed' and run['conclusion'] is None)):
+        stop('missing/malformed run field conclusion', run)
     if run['path'].split('@')[0] != workflow or run['head_sha'] != sha:
         stop(f'{workflow}: run owner/SHA mismatch', run)
     if run.get('event') != 'push':
@@ -145,7 +163,12 @@ def check_run(run, workflow, sha):
         # bind attempt either. Timestamps/name ordering are not that evidence.
         stop('rerun artifact attempt cannot be proved by existing producer; CI-TOOLING-1b', run)
     for key in ('created_at', 'updated_at'):
-        value = datetime.fromisoformat(run[key].replace('Z', '+00:00'))
+        try:
+            if not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?', run[key]):
+                raise ValueError('invalid timestamp syntax')
+            value = datetime.fromisoformat(run[key].replace('Z', '+00:00'))
+        except ValueError:
+            stop(f'missing/malformed run field {key}', run)
         if value.tzinfo is None:
             stop(f'{key} lacks timezone', run)
 
@@ -205,13 +228,10 @@ def download(root, sha, stage, out, query=gh_get, fetch=fetch_archive, *,
     def workflow_runs(workflow):
         endpoint = f'{base}/workflows/{Path(workflow).name}/runs?head_sha={sha}&per_page=100'
         rows = listing(query, endpoint, 'workflow_runs', repository_id=repository_id)
-        runs = [run for run in rows if run['head_sha'] == sha]
         # Do not silently drop contradictory filtered API rows.
-        if len(runs) != len(rows):
-            stop(f'{workflow}: head_sha search returned a foreign SHA')
-        for run in runs:
+        for run in rows:
             check_run(run, workflow, sha)
-        return runs
+        return rows
 
     save()
     try:
