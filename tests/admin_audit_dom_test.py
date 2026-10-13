@@ -20,21 +20,33 @@ be held and released out of order) and records every request:
   03  Load More sends the sealed continuation as it came and appends the next page; the last page hides the control.
   04  an empty answer says so in a sentence with no number; nothing about hidden rows is counted.
   05  a failed read is never "no events": a first failure shows no table and no empty sentence; later failures (500,
-      malformed, a snapshot carrying email, 403 restricted and other, 409 cursor and access, 503) keep the last rows,
-      dimmed, with a fixed sentence and no navigation; a failure after an empty read hides the empty sentence; server
-      wording never shows; the next good answer restores the list.
+      malformed, a snapshot carrying email, 409 cursor and access, 503) keep the last rows, dimmed, with a fixed sentence
+      and no navigation; a 403 (restricted or other) closes the section instead (no table, Refresh and Load More off,
+      its fixed sentence, no navigation) until the page is opened again; a failure after an empty read hides the empty
+      sentence; server wording never shows; the next good answer restores the list.
   06  A->B->A: a late older Refresh never paints over a newer one; asking again paints. Control: the page without the
       sequence guard, served through the same route, paints the late answer.
   07  a Load More answer for a list that a Refresh has replaced is dropped. Control: without its guard it is appended.
-  08  a 401 empties the section and turns it off before the logout answers; a late answer is received but never read
-      or painted; one logout and one navigation.
-  09  Log out and 10 a member-list 401 close the section the same way (the page's one session end): a held audit read
-      answers late and paints nothing, the control forced on sends nothing.
+  09  Log out closes the section at once (the page's one session end), before the logout answers: a held audit read
+      answers late and paints nothing, the controls forced on send nothing; one logout and one navigation.
   11  wording and layout: English heading, controls, headers and state words; Korean guidance and titles; no UXR-SP-34
-      avoided word; nothing below 12px; column headers belong to the audit table; markup in recorded values stays
-      text; keyboard; no browser dialog.
+      avoided word; nothing below 12px; the seven column headers are the audit table's own (thead, scope col) and none
+      is in its body; markup in recorded values stays text; keyboard; no browser dialog.
   12  the page model refuses what it cannot prove (email in a snapshot, a named withheld side, an unknown rule, more rows
       than the total, bad times and continuations) and never fills an absent value.
+
+S7-U5 access records (TEST-S7-U5-DOM):
+
+  AD01  access rows (auth.login, auth.logout, auth.session.expired) are drawn like any field row; an access row the
+        server did not attribute, or a detail that is not an object, makes the whole answer unreadable.
+  AD02  the access-history sentence follows only what this page session painted (S1-S6): a painted page with an access
+        row replaces it; an empty answer, a failure and a plain 401 (one failed read, no logout POST) keep it; a refused,
+        late, dropped or replaced-list answer confirms nothing; the session end puts the card sentence back.
+  AD03  the replaced sentence names login, logout and session expiry in Korean, with no count, no avoided word and no
+        "수집되지 않음", visible at 12px or more.
+
+Cases 08 (an audit 401) and 10 (a member-list 401) moved with S7-U5 to tests/admin_session_dom_test.py, which binds the
+page's session end to the named end signals: a plain 401 here is one failed read (AD02 S4).
 
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case, as does a page error or a browser dialog.
