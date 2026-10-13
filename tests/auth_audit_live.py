@@ -33,6 +33,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import unittest
 import uuid
@@ -946,9 +947,14 @@ class AuthAuditLive(unittest.TestCase):
                     counts[subjects[subject]] += 1
             return counts
         results = []
+        # A person enters credentials once at a time. Separate profiles force both tabs through a real BFF callback,
+        # but simultaneous password forms would instead exercise Keycloak's per-account concurrent-login refusal.
+        # Keep that product protection enabled; synchronize all forty valid callbacks after credential entry below.
+        credentials = {name: threading.Lock() for name in names}
         for sensitive in (False, True):
             time.sleep(125)  # reset the shared IP budget between independently counted normal workloads
             before, protected_before = successful_logins(), protected_logins()
+            callbacks_ready = threading.Barrier(40, timeout=60)
             def relogin(item):
                 name, tab = item
                 member, browser = self.members[name], Browser(self.stack)
@@ -963,6 +969,7 @@ class AuthAuditLive(unittest.TestCase):
                     self.assertEqual(status, 302)
                     location = headers["Location"]
                 completed = False
+                callback_synchronized = False
                 for _ in range(10):
                     parsed = urlparse(location)
                     query = parse_qs(parsed.query)
@@ -970,20 +977,28 @@ class AuthAuditLive(unittest.TestCase):
                         for value in query.get(kind, []):
                             self.secret(kind, value)
                     self.secret("pending", browser.pending())
+                    if parsed.path == "/api/auth/callback" and query.get("code") and not callback_synchronized:
+                        try:
+                            callbacks_ready.wait()
+                        except threading.BrokenBarrierError:
+                            self.fail("all forty tabs must obtain valid provider callbacks before the counted BFF batch")
+                        callback_synchronized = True
                     status, headers, body = browser.call("GET", location)
                     self.assertNotEqual(status, 429, "normal ward request was limited")
                     if status == 200:
                         form = re.search(r'<form[^>]+action="([^"]+)"', body, re.I)
                         self.assertIsNotNone(form, "owned provider credential form")
-                        status, headers, _ = browser.call("POST", html.unescape(form.group(1)),
-                            data=urlencode({"username": member["username"], "password": member["password"], "credentialId": ""}).encode(),
-                            headers={"Content-Type": "application/x-www-form-urlencoded"})
+                        with credentials[name]:
+                            status, headers, _ = browser.call("POST", html.unescape(form.group(1)),
+                                data=urlencode({"username": member["username"], "password": member["password"], "credentialId": ""}).encode(),
+                                headers={"Content-Type": "application/x-www-form-urlencoded"})
                     self.assertEqual(status, 302)
                     location = headers.get("Location", "")
                     if urlparse(location).path == "/worklist/hpacs-lite/main.html":
                         completed = True
                         break
                 self.assertTrue(completed, "bounded automatic restart reaches the worklist")
+                self.assertTrue(callback_synchronized, "this tab joined the forty-callback BFF batch")
                 self.assertIsNotNone(browser.sid())
                 self.secret("sid", browser.sid())
                 proof = unquote(urlparse(location).fragment.partition("kin-entry=")[2])
@@ -1014,6 +1029,7 @@ class AuthAuditLive(unittest.TestCase):
             if sensitive:
                 self.assertGreater(callbacks, 40, "silent SSO probe callbacks and automatic restarts were actually counted")
             result = {"doctors": 20, "tabs_per_doctor": 2, "concurrency": 40, "starts": starts, "callbacks": callbacks,
+                "credential_submissions_per_doctor_at_once": 1, "synchronized_valid_callbacks": 40,
                 "automatic_extra_callbacks": callbacks - 40, "login_callback_requests": len(auth),
                 "bff_requests": len(bff), "all_http_requests": len(calls), "worklist_entries": entries, "limited": 0,
                 "recorded_signins": sum(by_doctor.values()), "protected_signin_facts": sum(protected_by_doctor.values()),
@@ -1023,11 +1039,13 @@ class AuthAuditLive(unittest.TestCase):
             print("B2_NAT_CAPACITY " + json.dumps(result))
         # Compare freshly generated tokens too, in memory only. Fixture evidence redaction cannot satisfy this check.
         for name in names:
-            rows = psql('SELECT "accessToken" || E\'\\t\' || "refreshToken" FROM "AuthSession" WHERE sub=\''
+            rows = psql('SELECT "accessToken" || E\'\\t\' || "refreshToken" || E\'\\t\' || coalesce("idpSid", \'\') FROM "AuthSession" WHERE sub=\''
                         + self.members[name]["id"] + '\';')
             for row in rows:
-                access, refresh = row.split("\t", 1)
+                access, refresh, provider = row.split("\t")
                 self.secret("access", access); self.secret("refresh", refresh)
+                self.assertTrue(provider, "each NAT session retains its provider-session identity for owned cleanup")
+                type(self).provider_sessions.append(provider)
         # Inspect original bytes before evidence redaction, including an oversized request with a generated query and
         # Referer. Its HTTP error metadata must survive without either value.
         secret = uuid.uuid4().hex

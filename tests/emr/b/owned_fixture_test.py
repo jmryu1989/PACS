@@ -25,7 +25,10 @@ class ResourceModel:
                           for kind in ('containers', 'volumes', 'networks', 'images')}
 
     def run(self, argv, **_kwargs):
-        if argv[:2] == ['docker', 'compose']:
+        executable, operation, *_arguments = argv
+        if executable != 'docker':
+            raise AssertionError('unmodelled external executable')
+        if operation == 'compose':
             project = os.environ['COMPOSE_PROJECT_NAME']
             if argv[2] == 'logs':
                 return subprocess.CompletedProcess(argv, 0, b'synthetic service metadata\n', b'')
@@ -42,7 +45,7 @@ class ResourceModel:
                 if removal in ('local', 'all'):
                     self.resources['images'][project] = []
                 return subprocess.CompletedProcess(argv, 0, b'', b'')
-        kind = {'ps': 'containers', 'volume': 'volumes', 'network': 'networks', 'image': 'images'}.get(argv[1])
+        kind = {'ps': 'containers', 'volume': 'volumes', 'network': 'networks', 'image': 'images'}.get(operation)
         if kind and '--filter' in argv:
             selector = argv[argv.index('--filter') + 1]
             if selector == 'label=' + LABEL + '=' + self.project or selector == 'reference=' + self.project + '-*':
