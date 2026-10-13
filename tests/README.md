@@ -759,6 +759,17 @@ production image tests for main, PRs and tags, recording the exact SHA/image ID.
 It does not deploy, publish a registry image or replace the 69+14 live/browser
 release gates and independent review. No production credentials are used in CI.
 
+REQ-G3-PUSH → RISK-G3-STALE/OMITTED/WRONG-ATTEMPT → `ci_candidate_evidence_test.py`:
+G3 evidence comes only from IDs admitted into `g3_round.schema.json` records by
+`scripts/g3_dispatch.py`; `tests/ci_candidate_evidence.py` verifies the latest attempt,
+payload provenance and the exact artifact ID/digest, then rechecks the record and API
+snapshots. Supersession listing detects unrecorded runs, never selects evidence by title.
+Unknown legacy/no-upload runs, incomplete/capped listings, expired/replaced artifacts and
+old-attempt uploads STOP. PR admission is explicit and distinguishes candidate checkout
+from merge-commit runner tools. See [G3 record, collection and STOP recovery](stage-exit.md#g3-공식-라운드-기록과-수집-ci-tooling-1b).
+The single candidate job must produce a fresh upload on rerun. Provenance verification
+does not replace stage-exit's selected-test/result/cleanup checks, non-G3 CI or review.
+
 Every `scripts/record-run.py --run-dir` in the workflows listed below sits under a path of an `if: always()` `actions/upload-artifact` step of the same job with `if-no-files-found: error`, so each record's `run.json`, `stdout.log` and `stderr.log` reach an artifact whatever the job's outcome. Every job uploads its whole record root except `runtime`, whose `synthetic-runtime-print-identity` names directories one by one and missed eleven of them; `synthetic-runtime-record-runs` uploads all of `tmp/runtime-ci/` (S5-CI2), and the older artifact keeps its name and paths. A unittest module at the default verbosity records only dots and `Ran N`, so the display-scope DOM step passes `-v`; the other record-run steps whose module or `-m unittest` command prints no case names are `identity-fields`, `hanging-protocols`, `cell-merge`, `images-only-loader`, `image-text-loader`, `three-d-cursor-dom` and `identity-position` under `tmp/workspace-ui-ci/`, and `binding-dom` and `orientation-basic-dom` under `tmp/vr-ci/`. The table covers `validate.yml`, `worklist-ux.yml` and the named per-job workflows in `.github/workflows/` (one row per run directory, with the artifacts that cover it); rebuild it from the owning workflow when a step changes. A cell with only a job id belongs to `validate.yml`.
 
 | Job | `--run-dir` | Artifact(s) | Step |
