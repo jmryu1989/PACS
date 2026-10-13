@@ -169,8 +169,12 @@ class InventoryContracts(unittest.TestCase):
                     ops.boundary_proof("synthetic", catalog)
             with patch.object(ops, "temporary_run", return_value="\n".join(map(json.dumps, facts))):
                 self.assertEqual(ops.boundary_proof("synthetic", catalog)["template0"], "private-physical-copy")
-            with patch.object(ops, "temporary_run", return_value="{}"), self.assertRaises(RuntimeError):
-                ops.boundary_proof("synthetic", catalog)
+            multiline = "\n".join(json.dumps(row, indent=2) for row in facts)
+            with patch.object(ops, "temporary_run", return_value=multiline):
+                self.assertEqual(ops.boundary_proof("synthetic", catalog)["template0"], "private-physical-copy")
+            for damaged in ("{}", multiline[:-1], multiline + "\ninvalid output"):
+                with self.subTest(output=damaged[-30:]), patch.object(ops, "temporary_run", return_value=damaged), self.assertRaises(RuntimeError):
+                    ops.boundary_proof("synthetic", catalog)
 
 
 class CloneContracts(unittest.TestCase):

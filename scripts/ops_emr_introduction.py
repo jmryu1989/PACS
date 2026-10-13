@@ -2564,7 +2564,7 @@ def result_line(raw):
 class _ProcessTree:
     """Windows suspended-create → Job assignment → resume; breakaway is never enabled."""
 
-    def __init__(self, argv):
+    def __init__(self, argv, **popen_options):
         self.job = None
         require(os.name == "nt", "Linux browser는 systemd cgroup 서비스가 필요합니다")
         import ctypes
@@ -2596,8 +2596,13 @@ class _ProcessTree:
             kernel32.CloseHandle(job)
             raise OSError("job object limits")
         self.job = job
-        self.process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                        creationflags=0x00000004)   # CREATE_SUSPENDED
+        options = {"stdin": subprocess.PIPE, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE, **popen_options}
+        try:
+            self.process = subprocess.Popen(argv, **options, creationflags=0x00000004)   # CREATE_SUSPENDED
+        except OSError:
+            kernel32.CloseHandle(job)
+            self.job = None
+            raise
         ntdll = ctypes.WinDLL("ntdll")
         ntdll.NtResumeProcess.argtypes = (wintypes.HANDLE,)
         if not kernel32.AssignProcessToJobObject(job, int(self.process._handle)) or ntdll.NtResumeProcess(int(self.process._handle)) != 0:
@@ -2666,11 +2671,11 @@ class _ProcessTree:
         return done
 
 
-def run_tree(argv, *, input, timeout, deadline=None):
+def run_tree(argv, *, input, timeout, deadline=None, **popen_options):
     """Run a command with its input; on its timeout - and after it ended, for whatever it left running - kill its whole
     process tree (D17). Returns (exit code, stdout, stderr) or raises subprocess.TimeoutExpired once the tree is gone."""
     end = deadline if deadline is not None else time.monotonic() + timeout + SMOKE_CLEANUP_S
-    tree = _ProcessTree(argv)
+    tree = _ProcessTree(argv, **popen_options)
     try:
         try:
             stdout, stderr = tree.process.communicate(input, timeout=min(timeout, max(0, end - time.monotonic())))
@@ -2763,9 +2768,9 @@ class SystemdBrowser:
             require(events.get("populated") in ("0", "1"), "browser cgroup 상태가 불완전합니다")
             empty = events["populated"] == "0"
         else:
-            require(terminal and self.worker.get("invocation_id") == values["InvocationID"],
-                    "cgroup 경로 부재만으로 작업 종료를 판정할 수 없습니다")
-            empty = True
+            # The cgroup can disappear before systemd publishes the terminal result. Keep waiting within the same
+            # deadline; absence alone never proves quiet, and the invocation identity above must still match.
+            empty = terminal
         # cgroup.procs/populated omit zombies. Scan their retained membership as well; PID reuse is distinguished by
         # starttime and never used to infer the status of the service itself.
         tracked = dict(self.worker.get("pids", {}))
@@ -2860,9 +2865,8 @@ class SystemdBrowser:
             stdout, stderr = (self.records.read_secret(files[k]) for k in ("out", "err"))
             released = self.control("stop")
             require(released.returncode == 0, "종료된 browser 서비스 정리를 확인하지 못했습니다")
-            if self.worker["unit_result"] != "success":
-                released = self.control("reset-failed")
-                require(released.returncode == 0, "browser 서비스 실패 상태 정리를 확인하지 못했습니다")
+            # Stopping also clears a failed unit and may unload this transient service. A second reset would address
+            # a unit that no longer exists; its terminal result and whole-tree termination were recorded above.
             for name in files.values():
                 self.records.discard_secret(name)
         if timed_out or self.worker["unit_result"] == "timeout":
@@ -2922,6 +2926,15 @@ class Runner:
             command = [command[0], "-c", "core.hooksPath=" + os.devnull, "-c", "core.fsmonitor=false", *command[1:]]
             if self.owner:
                 identity = {"user": self.owner["uid"], "group": self.owner["gid"], "extra_groups": []}
+        if os.name == "nt":
+            # Docker's Compose plugin inherits the CLI's pipes. subprocess.run's Windows timeout kills only the
+            # CLI and then drains those pipes without a deadline; keep both processes in the existing Job boundary.
+            budget = _smoke_budget.get()
+            code, stdout, stderr = run_tree(command, input=input, timeout=timeout,
+                deadline=budget.end if budget else None, cwd=self.cwd, env=environment,
+                stdin=subprocess.PIPE if input is not None else stdin, stdout=output or subprocess.PIPE,
+                stderr=subprocess.PIPE, **identity)
+            return subprocess.CompletedProcess(command, code, stdout, stderr)
         return subprocess.run(command, cwd=self.cwd, env=environment, input=input, stdin=stdin,
                               stdout=output or subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, **identity)
 
@@ -3235,6 +3248,15 @@ class HostOps:
         label = args[0] + " " + (args[1] if len(args) > 1 else "")
         try:
             result = self.run(args, input=input, timeout=timeout, env=env, stdin=stdin, output=output)
+        except Unknown:
+            entry.update(outcome="unknown", client_terminal=False, seconds=round(time.monotonic() - started, 3))
+            self.records.command(entry)
+            affected = [worker] if worker is not None else ([pending[0]] if own_launch else [])
+            for active in affected:
+                active.update(state="UNKNOWN", client_terminal=False)
+            if affected:
+                self.intro.save()
+            raise
         except subprocess.TimeoutExpired:
             entry.update(outcome="timeout", seconds=round(time.monotonic() - started, 3))
             self.records.command(entry)
@@ -3603,7 +3625,9 @@ class HostOps:
         except Unknown:
             registered["state"] = "UNKNOWN"
             self.intro.save()
-            if _smoke_budget.get() is not None:
+            # A confirmed client timeout permits cancellation of its owned daemon helper. An unreaped CLI/plugin
+            # can still act on that helper, so preserve both sides instead of mistaking daemon cleanup for quiet.
+            if _smoke_budget.get() is not None and registered.get("client_terminal") is not False:
                 self.cancel_smoke_helper(registered)
                 raise Stop("smoke 보조 작업 제한 시간 뒤 전체 컨테이너 종료를 확인했습니다") from None
             raise Unknown("보조 작업 종료 불명: 컨테이너와 작업 자료를 보존했습니다") from None
@@ -5068,10 +5092,10 @@ class HostOps:
         components = {}
         for database in ("kin", "keycloak"):
             with open(directory / (database + ".dump"), "wb") as handle:
-                self.cmd(["docker", "exec", self.names["db"], "pg_dump", "-U", "kin", "-d", database, "-Fc", "--create"],
+                self.cmd(["docker", "exec", self.names["db"], "pg_dump", "-U", "kin", "-d", database, "--encoding=UTF8", "-Fc", "--create"],
                          output=handle, timeout=1800)
         with open(directory / "cluster-roles.sql", "wb") as handle:
-            self.cmd(["docker", "exec", self.names["db"], "pg_dumpall", "-U", "kin", "--roles-only", "--no-role-passwords"], output=handle)
+            self.cmd(["docker", "exec", self.names["db"], "pg_dumpall", "-U", "kin", "--encoding=UTF8", "--roles-only", "--no-role-passwords"], output=handle)
         with self.bind():
             (directory / "catalog.json").write_text(json.dumps(ops.role_catalog(self.names["db"]), sort_keys=True) + "\n", encoding="utf-8")
             (directory / "migrations.json").write_text(json.dumps(ops.migration_rows(self.names["db"])) + "\n", encoding="utf-8")

@@ -3570,8 +3570,12 @@ class ProtectedHostTests(unittest.TestCase):
 
     def test_54_git_runs_as_the_checkout_owner_and_env_keeps_its_owner(self):
         owner = {"uid": 1000, "gid": 1000}
-        self.root.chmod(0o755)   # the account must be able to reach its own checkout
-        repo = self.root / "owned"
+        # /root itself is private; making only its child traversable cannot model an operating-account checkout.
+        accessible = tempfile.TemporaryDirectory(prefix="kin-emr-owner-", dir="/tmp")
+        self.addCleanup(accessible.cleanup)
+        parent = Path(accessible.name)
+        parent.chmod(0o755)
+        repo = parent / "owned"
         repo.mkdir(mode=0o700)
         os.chown(repo, 1000, 1000)
         runner = intro.Runner(repo, owner=owner)
@@ -3640,7 +3644,9 @@ class ProtectedHostTests(unittest.TestCase):
         self.document("emr-targets", target)
         plan = plan_fixture(target)
         now = datetime.now(timezone.utc)
-        entries = [(name, (repo / name).read_bytes()) for name in target["compose_files"]] + [(".env", (repo / ".env").read_bytes())]
+        # The approved baseline includes L-00b's declared COMPOSE_FILE, even when the installed checkout starts without it.
+        planned_env = intro.env_with_compose_file((repo / ".env").read_bytes(), target)
+        entries = [(name, (repo / name).read_bytes()) for name in target["compose_files"]] + [(".env", planned_env)]
         plan.update(window={"start": (now - timedelta(hours=1)).isoformat(), "end": (now + timedelta(hours=2)).isoformat()},
                     backup_root=str(backups), tool=intro.tool_hashes())
         plan["compose"]["before_sha256"] = intro.compose_digest(entries)
@@ -3656,7 +3662,8 @@ class ProtectedHostTests(unittest.TestCase):
             docker.containers[target["containers"][role]] = running_from(docker.config["pinned"], role, plan["previous"]["images"][role])
         docker.psql = {"_prisma_migrations": json.dumps([[n, c, True, False] for n, c in plan["migrations"]["before"]]),
                        "rolconnlimit": json.dumps(pre_catalog()), "service_account_client_link": json.dumps(plan["members"]),
-                       "parent_group": json.dumps({"roles": ["radiologist"], "top_level_groups": ["hallym"]})}
+                       "parent_group": json.dumps({"roles": ["radiologist"], "top_level_groups": ["hallym"]}),
+                       "pg_stat_activity": "0"}
         docker.failing = lambda args: args[:1] == ["crontab"] and args[-1] == "-"
         if prepare:
             prepare(self.state / "emr-runs" / plan_sha)
@@ -3762,6 +3769,8 @@ class ProtectedHostTests(unittest.TestCase):
                 release.wait(10)
                 return {}
         shared = Blocking()
+        shared.live_roles = {"db"}
+        shared.cron_state, shared.ingress_state = "fenced", "closed"
         requests = [json.dumps({"version": 1, "mode": intro.MODE, "phase": "introduce", "plan_sha256": plan_sha,
                                 "nonce": str(index) * 32}).encode() for index in (1, 2)]
         for raw in requests:
@@ -3808,6 +3817,7 @@ class ProtectedHostTests(unittest.TestCase):
         self.repo.chmod(0o775)
         (self.repo / ".git").chmod(0o775)
         shared = FakeOps()
+        shared.cron_state, shared.ingress_state = "fenced", "maintenance"
 
         def request(phase):
             raw = json.dumps({"version": 1, "mode": intro.MODE, "phase": phase, "plan_sha256": plan_sha, "nonce": os.urandom(16).hex()}).encode()

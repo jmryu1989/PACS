@@ -615,7 +615,7 @@ class RealClusterTests(unittest.TestCase):
         (directory / ".env").write_text("POSTGRES_PASSWORD=r4-synthetic-fixture-only\n")
         for database in ("kin", "keycloak"):
             with open(directory / (database + ".dump"), "wb") as handle:
-                subprocess.run(["docker", "exec", name, "pg_dump", "-U", "kin", "-d", database, "-Fc", "--create"], stdout=handle, check=True)
+                subprocess.run(["docker", "exec", name, "pg_dump", "-U", "kin", "-d", database, "--encoding=UTF8", "-Fc", "--create"], stdout=handle, check=True)
         return directory
 
     def test_r4_fresh_restore_ignores_physical_holes_but_refuses_altered_internal_triggers(self):
@@ -636,11 +636,48 @@ class RealClusterTests(unittest.TestCase):
             snapshot = self.dump(source, Path(folder) / "snapshot", catalog)
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(ops.restore_pre_snapshot(self.start(), snapshot)["catalog"], "equal")
+        self.ok(source, "ALTER TABLE cached SET(toast.autovacuum_enabled=false);")
+        self.assertNotEqual(ops.cluster_catalog(source), catalog, "effective TOAST options remain logical restore content")
         self.ok(source, "ALTER TABLE child DISABLE TRIGGER ALL;")
         with self.assertRaises(ops.RestoreAdmissionError):
             ops.object_catalog(source, "kin")
         self.ok(source, "ALTER TABLE child ENABLE TRIGGER ALL;")
         self.assertIsInstance(ops.object_catalog(source, "kin"), dict)
+
+    def test_r4_partial_index_included_columns_restore_and_compare_semantically(self):
+        source = self.start()
+        self.ok(source, "CREATE DATABASE keycloak;")
+        self.ok(source, "CREATE TABLE r(id int, body text); INSERT INTO r VALUES(1,'before'); "
+                "CREATE INDEX partial ON r(body) INCLUDE(id) WHERE id>0;")
+        catalog = ops.cluster_catalog(source)
+        ops.supported_pre_catalog(catalog)
+        with tempfile.TemporaryDirectory() as folder:
+            snapshot = self.dump(source, Path(folder) / "snapshot", catalog)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(ops.restore_pre_snapshot(self.start(), snapshot)["catalog"], "equal")
+        self.ok(source, "DROP INDEX partial; CREATE INDEX partial ON r(body) WHERE id>0;")
+        self.assertNotEqual(ops.cluster_catalog(source), catalog)
+
+    def test_r4_installer_defaults_and_catalog_named_user_tables_restore_unchanged(self):
+        source = self.start()
+        self.ok(source, "CREATE DATABASE keycloak;")
+        self.ok(source, "CREATE TABLE realm(id text, name text); INSERT INTO realm VALUES('fixture-master','master');", "keycloak")
+        self.ok(source, "CREATE TABLE public.pg_roles(body text); "
+                "INSERT INTO public.pg_roles VALUES('ordinary user data'); "
+                "CREATE TABLE public.pg_class(body text); INSERT INTO public.pg_class VALUES('more user data'); "
+                "ALTER ROLE kin SET search_path=public,pg_catalog; "
+                "ALTER ROLE kin SET default_transaction_read_only=on;")
+        catalog, values = ops.cluster_catalog(source), ops.value_catalog(source)
+        ops.supported_pre_catalog(catalog)
+        self.assertEqual(ops.psql_json(source, "keycloak", "SELECT json_agg(id) FROM realm WHERE name='master'"), ["fixture-master"])
+        with tempfile.TemporaryDirectory() as folder:
+            snapshot = self.dump(source, Path(folder) / "snapshot", catalog)
+            target = self.start()
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(ops.restore_pre_snapshot(target, snapshot)["catalog"], "equal")
+            self.assertEqual(ops.cluster_catalog(target), catalog)
+            self.assertEqual(ops.value_catalog(target), values)
+            self.assertEqual(ops.psql_json(target, "keycloak", "SELECT json_agg(id) FROM realm WHERE name='master'"), ["fixture-master"])
 
     def test_d22_column_type_large_object_publication_event_trigger_and_fdw_privileges_restore_exactly(self):
         """D22/C-RESTORE: supported column/type ACLs restore exactly. LO/publication/event-trigger/FDW content is
@@ -814,7 +851,22 @@ class RealClusterTests(unittest.TestCase):
             self.assertEqual(ops.value_rows(source, database, schema, table), (["body"], [[value]]))
         catalog, values = ops.cluster_catalog(source), ops.value_catalog(source)
         with tempfile.TemporaryDirectory() as folder:
-            whole = self.dump(source, Path(folder) / "whole", catalog)
+            # Exercise the capture's actual export command against PG16. Only the unrelated host/storage envelope
+            # is synthetic, so omitting the export encoding fails here even if this class's dump helper is correct.
+            host = FakeHost(folder)
+            (host.repo / ".env").write_text("POSTGRES_PASSWORD=r4-synthetic-fixture-only\n")
+            host.catalog = lambda: {key: value for key, value in catalog.items() if key != "objects"}
+            host.objects = lambda database: catalog["objects"][database]
+            envelope_run, database_run = host.run, ops.run
+            def capture_run(args, **kwargs):
+                if "pg_dump" in args or "pg_dumpall" in args:
+                    command = list(args)
+                    command[2] = source
+                    # ROOT is bound to the synthetic checkout during capture, as on the deployed host.
+                    return database_run(command, **kwargs)
+                return envelope_run(args, **kwargs)
+            host.run = capture_run
+            whole = host.capture()
             target = self.start()
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(ops.restore_pre_snapshot(target, whole)["catalog"], "equal")

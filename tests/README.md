@@ -1397,12 +1397,17 @@ helper·HTTP·pagination·browser 작업에 같은 monotonic deadline의 남은 
 `tests/ops_deploy_smoke_test.py`는 실제 subprocess/Windows Job/느린 HTTP·pagination의 시간 제한과
 systemd 관측 계약을 검사한다. 실제 Linux Chromium의 crash/hang/setsid/double-fork 및 entry crash는
 별도 systemd 실행 환경의 필수 증거이며 순수 관측 fixture로 통과 처리하지 않는다.
+Windows의 고정 명령 실행도 같은 Job 경계로 CLI와 plugin을 묶는다. Compose plugin이 출력 파이프를
+물고 있어도 공통 smoke deadline 안에 회수해야 하며, stdin/stdout 파일·바이너리 입력·cwd/env 보존을 함께 검사한다.
 
 Part C의 `kin-pg16-logical-v1`은 PostgreSQL 16 카탈로그 목록과 객체별 속성 목록을 닫힌 집합으로 검사한다.
 schema·table/view/sequence/index·column ACL·enum/domain·routine·constraint·trigger·RLS policy·default ACL·
 dependency·comment를 구조화된 `(database, schema, kind, name, qualifier)` 키로 비교한다. OID·물리 tuple 배치·
 WAL/transaction horizon·planner 통계는 논리 복원 값이 아니다. large object·publication·event trigger·FDW·
 partition·추가 extension·외부 verifier 등 v1 미지원 항목은 checkout 보정 전 admission과 fenced capture에서 거절한다.
+마지막 큰 열을 삭제한 뒤 남는 기본 TOAST 저장소도 물리 배치로 본다. 저장소가 없는 복원본의 기본 정책과
+대조하되 TOAST 옵션·소유자·ACL·tablespace 및 index 옵션의 차이는 계속 검출한다.
+PostgreSQL이 중복 저장한 동일 의존성은 한 관계로 비교하며 대상·열·종류가 다른 의존성은 구분한다.
 `NOLOGIN` 역할도 저장 verifier를 조사하며 미보존 verifier가 있으면 거절한다. 설정은
 v1의 명시 목록(`ops_backup.py`의 `RESTORE_SETTINGS`)과 실제 PostgreSQL 설정 목록에 함께 속해야 하며
 role·database·role-in-DB 범위를 재현한다. 표시·인코딩·timeout·transaction 기본값·memory·search_path·row_security
@@ -1412,7 +1417,11 @@ role·database·role-in-DB 범위를 재현한다. 표시·인코딩·timeout·t
 두 DB의 모든 사용자 schema/table/column 값을 NULL·중복 행·원래 JSON text까지
 비교한다. 한 table당 100,000행·1,000,000셀·64 MiB를 넘으면 materialize 전에 거절한다.
 보존된 `standard_conforming_strings`·`client_encoding` 설정과 관계없이 도구의 SQL 리터럴은 명시적 escape를,
-private 입출력은 UTF-8을 사용한다. 실제 PG16 시험은 역슬래시·따옴표·한글 값과 설정의 동시 복원을 검사한다.
+private 입출력과 daily/held/Bfail dump는 UTF-8을 사용한다. 실제 PG16 시험은 역슬래시·따옴표·한글 값과
+설정의 동시 복원을 검사하며 held capture가 실행한 실제 export를 복원한다.
+공용 조회는 `pg_catalog,public` 순서로 이름을 해석해 카탈로그 충돌을 막고 기존 seed의 public 테이블 조회를 유지한다.
+격리된 복원 대상의 작업 연결에만 쓰기 가능 상태와 자체 timeout을
+적용한다. 보존할 역할·DB 기본 설정은 변경하지 않으며 복원 뒤에도 원래 값과 대조한다.
 
 `postgres`, `template0`, `template1` 및 시스템 객체는 같은 image digest의 `initdb` 결과와 대조한다.
 원본 `template0`의 연결 설정은 바꾸지 않는다. 소유 helper의 private 물리 복사본에서만 연결을 열며

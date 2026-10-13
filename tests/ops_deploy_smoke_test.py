@@ -20,6 +20,40 @@ import ops_emr_introduction_test as fixtures
 
 
 class SmokeDeadlineContracts(unittest.TestCase):
+    def test_unconfirmed_command_tree_keeps_helper_unknown_without_cleanup_or_next_work(self):
+        fixture = fixtures.CommanderAdditionsTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        host, docker, context = fixture.unattended_host()
+        def runner(args, **kwargs):
+            if args[:2] == ["docker", "compose"] and "run" in args:
+                worker, = context.state["workers"].values()
+                docker.containers[worker["resource"]] = {"Id": "unreaped-helper", "State": {"Running": True, "Restarting": False},
+                    "Config": {"Labels": {"kin.release.worker": worker["nonce"],
+                                            "kin.emr-introduction": context.plan_sha256[:16]}}}
+                raise release.Unknown("synthetic command tree still alive")
+            return docker(args, **kwargs)
+        host.run = runner
+        def compose(args, **kwargs):
+            return host.cmd(["docker", "compose", *args], timeout=kwargs["timeout"], env=kwargs["env"],
+                            check=False, mutating=True)
+        budget = release.SmokeBudget(30)
+        token = release._smoke_budget.set(budget)
+        try:
+            with patch.object(host, "compose", side_effect=compose), self.assertRaises(release.Unknown):
+                host.one_shot(context, "api", ["synthetic"], name="unreaped-client", timeout=30)
+            worker, = context.state["workers"].values()
+            self.assertEqual(worker["state"], "UNKNOWN")
+            self.assertFalse(any(args[:2] in (["docker", "stop"], ["docker", "rm"]) for args in docker.calls))
+            self.assertTrue(docker.containers[worker["resource"]]["State"]["Running"], "unconfirmed client must retain its helper")
+            with self.assertRaises(release.Unknown):
+                host.register_worker("compose-run", "forbidden-next", 10)
+            commands = [json.loads(line) for path in fixture.records.directory.glob("commands-*.jsonl")
+                        for line in path.read_text().splitlines()]
+            self.assertTrue(any(row.get("outcome") == "unknown" and row.get("client_terminal") is False for row in commands))
+        finally:
+            release._smoke_budget.reset(token)
+
     def test_cancelled_helper_removes_its_secret_environment_or_is_unknown(self):
         for fail_remove in (False, True):
             with self.subTest(fail_remove=fail_remove):
@@ -139,6 +173,80 @@ class SmokeDeadlineContracts(unittest.TestCase):
                              input=b"", timeout=0.5, deadline=start + 1.5)
         self.assertLess(time.monotonic() - start, 2)
 
+    @unittest.skipUnless(os.name == "nt", "Windows command Job execution")
+    def test_command_plugin_cannot_hold_pipes_past_the_smoke_deadline(self):
+        import ctypes
+        from ctypes import wintypes
+        original_popen = subprocess.Popen
+        code = ("import subprocess,sys,time;from pathlib import Path;"
+                "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(8)']);"
+                "Path('child-pid').write_text(str(child.pid));time.sleep(15)")
+        def executable(argv, **options):
+            self.assertEqual(argv[:2], ["docker", "compose"])
+            return original_popen([sys.executable, "-c", code], **options)
+        with tempfile.TemporaryDirectory() as folder:
+            budget = release.SmokeBudget(3, cleanup=2)
+            token = release._smoke_budget.set(budget)
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+            kernel.OpenProcess.restype = wintypes.HANDLE
+            kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+            kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+            handles, stop = [], threading.Event()
+            def capture_child():
+                while not stop.is_set() and time.monotonic() < budget.work_end:
+                    try:
+                        pid = int((Path(folder) / "child-pid").read_text())
+                        handle = kernel.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+                        if handle:
+                            handles.append(handle)
+                            return
+                    except (OSError, ValueError):
+                        pass
+                    stop.wait(0.005)
+            observer = threading.Thread(target=capture_child, daemon=True)
+            observer.start()
+            start = time.monotonic()
+            try:
+                with patch.object(release.subprocess, "Popen", side_effect=executable), self.assertRaises(subprocess.TimeoutExpired):
+                    release.Runner(folder)(["docker", "compose", "run", "synthetic"], timeout=0.75)
+                self.assertLess(time.monotonic() - start, 3.5)
+                self.assertEqual(len(handles), 1, "observe the child while alive, before its PID can be reused")
+                # Keep the original process handle across termination; PID lookup after timeout can find another process.
+                remaining_ms = int(max(0, budget.end - time.monotonic()) * 1000)
+                self.assertEqual(kernel.WaitForSingleObject(handles[0], remaining_ms), 0, "plugin child must exit within the same budget")
+                self.assertLess(time.monotonic() - start, 3.5)
+            finally:
+                stop.set()
+                observer.join(1)
+                for handle in handles:
+                    kernel.CloseHandle(handle)
+                release._smoke_budget.reset(token)
+
+    @unittest.skipUnless(os.name == "nt", "Windows command Job execution")
+    def test_command_job_preserves_working_directory_environment_and_binary_streams(self):
+        original_popen = subprocess.Popen
+        code = ("import json,os,sys;from pathlib import Path;"
+                "print(json.dumps([str(Path.cwd()),os.environ['KIN_SYNTHETIC_VALUE'],sys.stdin.buffer.read().hex()]));"
+                "sys.stderr.buffer.write(b'child-stderr')")
+        def executable(argv, **options):
+            self.assertEqual(argv, ["docker", "synthetic"])
+            return original_popen([sys.executable, "-c", code], **options)
+        with tempfile.TemporaryDirectory() as folder:
+            payload = b"\x00\xff\r\nUTF8:\xed\x95\x9c"
+            for source in ("input", "file"):
+                with self.subTest(source=source), tempfile.TemporaryFile() as incoming, tempfile.TemporaryFile() as outgoing:
+                    incoming.write(payload)
+                    incoming.seek(0)
+                    with patch.object(release.subprocess, "Popen", side_effect=executable):
+                        result = release.Runner(folder)(["docker", "synthetic"], timeout=5,
+                            env={"KIN_SYNTHETIC_VALUE": "kept"}, output=outgoing,
+                            **({"input": payload} if source == "input" else {"stdin": incoming}))
+                    self.assertEqual((result.returncode, result.stdout, result.stderr), (0, None, b"child-stderr"))
+                    self.assertFalse(incoming.closed or outgoing.closed, "caller-owned streams remain usable")
+                    outgoing.seek(0)
+                    self.assertEqual(json.loads(outgoing.read()), [str(Path(folder)), "kept", payload.hex()])
+
     @unittest.skipUnless(os.name == "nt", "Windows Job execution")
     def test_failed_job_termination_returns_unknown_without_waiting_on_open_pipes(self):
         trees = []
@@ -240,7 +348,18 @@ class SystemdObservationContracts(unittest.TestCase):
         for outcome, success in (("success", True), ("oom-kill", False), ("exit-code", False)):
             with self.subTest(outcome=outcome):
                 self.values["Result"] = outcome
+                present = True
+                observed = self.supervisor.control
+                def lifecycle(operation, *options):
+                    nonlocal present
+                    if not present:
+                        return subprocess.CompletedProcess([], 1, b"", b"unit unloaded")
+                    if operation == "stop":
+                        present = False
+                        return subprocess.CompletedProcess([], 0, b"", b"")
+                    return observed(operation, *options)
                 with patch.object(self.supervisor, "command", return_value=["/usr/bin/python3", "/protected/module.py", "browser-smoke"]), \
+                        patch.object(self.supervisor, "control", side_effect=lifecycle), \
                         patch.object(release.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"", b"")):
                     code, _, _ = self.supervisor.run([], b"{}")
                 self.assertEqual(code == 0, success)
@@ -283,8 +402,9 @@ class SystemdObservationContracts(unittest.TestCase):
         self.values["ControlGroup"] = ""
         self.assertTrue(self.supervisor.observe())
         self.values["ExecMainCode"] = "0"
-        with self.assertRaises(release.Stop):
-            self.supervisor.observe()
+        self.assertFalse(self.supervisor.observe(), "absence without a terminal result is still pending")
+        self.values["ExecMainCode"] = "1"
+        self.assertTrue(self.supervisor.observe(), "the same invocation may finish after its cgroup disappears")
 
 
 if __name__ == "__main__":

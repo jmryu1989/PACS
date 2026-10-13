@@ -369,12 +369,12 @@ def backup(output, ready_timeout=120):
         # the set's component files stay exactly the ones its consumers (validation, rotation, export inventory) know.
         manifest["role_catalog"] = role_catalog("kin-db")
         with (directory / "cluster-roles.sql").open("wb") as handle:
-            run(["docker", "exec", "kin-db", "pg_dumpall", "-U", "kin", "--roles-only", "--no-role-passwords"], output=handle)
+            run(["docker", "exec", "kin-db", "pg_dumpall", "-U", "kin", "--encoding=UTF8", "--roles-only", "--no-role-passwords"], output=handle)
         for database in ("kin", "keycloak"):
             stage = "dump " + database
             manifest["counts"][database] = counts("kin-db", database, "kin")
             with (directory / (database + ".dump")).open("wb") as handle:
-                run(["docker", "exec", "kin-db", "pg_dump", "-U", "kin", "-d", database, "-Fc", "--create"], output=handle)
+                run(["docker", "exec", "kin-db", "pg_dump", "-U", "kin", "-d", database, "--encoding=UTF8", "-Fc", "--create"], output=handle)
         stage = "archive Orthanc"
         # The Docker helper runs as root on Linux. Stream to a host-owned file
         # instead of creating a root-owned archive in a writable host bind mount.
@@ -828,7 +828,7 @@ INVENTORY_ATTRIBUTES = {
             "typsend typmodin typmodout typanalyze typsubscript owner acl default_expression enum_labels",
     "routine": "proname procost prorows prokind prosecdef proleakproof proisstrict proretset provolatile proparallel "
                "pronargs pronargdefaults proargmodes proargnames prosrc probin proconfig owner acl language result support "
-               "arguments variadic definition",
+               "arguments variadic transforms definition",
     "constraint": "conname contype condeferrable condeferred convalidated confupdtype confdeltype confmatchtype conislocal "
                   "coninhcount connoinherit conrelid conindid confrelid contypid conparentid conkey confkey confdelsetcols "
                   "conpfeqop conppeqop conffeqop conexclop definition",
@@ -886,11 +886,16 @@ def _restore_inventory_sql():
         view="CASE WHEN c.relkind='v' THEN pg_get_viewdef(c.oid,false) END",
         sequence="(SELECT (to_jsonb(s)-'seqrelid'-'seqtypid') || jsonb_build_object('type',format_type(s.seqtypid,NULL)) FROM pg_sequence s WHERE s.seqrelid=c.oid)",
         sequence_state="CASE WHEN c.relkind='S' THEN (SELECT jsonb_build_array((xpath('/row/last_value/text()',x))[1]::text,(xpath('/row/is_called/text()',x))[1]::text) FROM query_to_xml(format('SELECT last_value,is_called FROM %I.%I',n.nspname,c.relname),false,true,'') x) END",
-        toast="(SELECT jsonb_build_object('options',t.reloptions,'owner',pg_get_userbyid(t.relowner),'acl',t.relacl::text,'tablespace',s.spcname,"
+        # Dropping the last wide column can leave an unused default TOAST relation behind. A fresh logical restore
+        # need not allocate that physical relation; compare its effective storage policy, including every override.
+        toast="coalesce((SELECT jsonb_build_object('options',t.reloptions,'owner',pg_get_userbyid(t.relowner),'acl',t.relacl::text,'tablespace',s.spcname,"
               "'indexes',(SELECT jsonb_agg(jsonb_build_array(a.amname,i.reloptions,si.spcname) ORDER BY a.amname,i.reloptions::text) "
               "FROM pg_index ix JOIN pg_class i ON i.oid=ix.indexrelid LEFT JOIN pg_am a ON a.oid=i.relam "
               "LEFT JOIN pg_tablespace si ON si.oid=coalesce(nullif(i.reltablespace,0),(SELECT dattablespace FROM pg_database WHERE datname=current_database())) WHERE ix.indrelid=t.oid)) "
-              "FROM pg_class t LEFT JOIN pg_tablespace s ON s.oid=coalesce(nullif(t.reltablespace,0),(SELECT dattablespace FROM pg_database WHERE datname=current_database())) WHERE t.oid=c.reltoastrelid)")
+              "FROM pg_class t LEFT JOIN pg_tablespace s ON s.oid=coalesce(nullif(t.reltablespace,0),(SELECT dattablespace FROM pg_database WHERE datname=current_database())) WHERE t.oid=c.reltoastrelid), "
+              "CASE WHEN c.relkind='r' THEN jsonb_build_object('options',NULL,'owner',pg_get_userbyid(c.relowner),'acl',NULL,"
+              "'tablespace',(SELECT spcname FROM pg_tablespace WHERE oid=coalesce(nullif(c.reltablespace,0),(SELECT dattablespace FROM pg_database WHERE datname=current_database()))),"
+              "'indexes',jsonb_build_array(jsonb_build_array('btree',NULL,(SELECT spcname FROM pg_tablespace WHERE oid=coalesce(nullif(c.reltablespace,0),(SELECT dattablespace FROM pg_database WHERE datname=current_database())))))) END)")
     add("relation", "n.nspname", "c.relname", "NULL", relation,
         "pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace", user_schema + " AND c.relkind IN ('r','v','S','c','i')")
     # attnum holes and attmissingval describe the old physical tuple layout; the surviving column order and actual
@@ -913,10 +918,11 @@ def _restore_inventory_sql():
                      enum_labels="(SELECT jsonb_agg(e.enumlabel ORDER BY e.enumsortorder) FROM pg_enum e WHERE e.enumtypid=t.oid)")
     add("type", "n.nspname", "t.typname", "NULL", type_row + " || " + _json_fields(**type_refs),
         "pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace", user_schema)
-    routine = _json_without("p", "oid pronamespace proowner prolang prorettype proargtypes proallargtypes proargdefaults prosupport prosqlbody proacl provariadic")
+    routine = _json_without("p", "oid pronamespace proowner prolang prorettype proargtypes proallargtypes proargdefaults prosupport prosqlbody proacl provariadic protrftypes")
     routine += " || " + _json_fields(owner="pg_get_userbyid(p.proowner)", acl=_acl("p.proacl", "'f'::\"char\"", "p.proowner"),
         language="l.lanname", result=_object_address("pg_type", "p.prorettype"), support=_object_address("pg_proc", "p.prosupport"),
         variadic=_object_address("pg_type", "p.provariadic"),
+        transforms="(SELECT jsonb_agg(" + _object_address("pg_type", "x.id") + " ORDER BY x.ord) FROM unnest(p.protrftypes) WITH ORDINALITY x(id,ord))",
         arguments="(SELECT jsonb_agg(format_type(a,NULL) ORDER BY ord) FROM unnest(coalesce(p.proallargtypes,p.proargtypes::oid[])) WITH ORDINALITY x(a,ord))",
         definition="CASE WHEN p.prokind IN ('f','p') THEN pg_get_functiondef(p.oid) END")
     add("routine", "n.nspname", "p.proname", "pg_get_function_identity_arguments(p.oid)", routine,
@@ -966,8 +972,10 @@ def _restore_inventory_sql():
     # These generated dependency names carry trigger OIDs; every referenced constraint/function/relation is already
     # compared in the normalized internal-trigger record above. Altered internal triggers refuse admission below.
     logical_dependency = " AND NOT (d.classid='pg_trigger'::regclass AND EXISTS(SELECT 1 FROM pg_trigger t WHERE t.oid=d.objid AND t.tgisinternal))"
+    # PG16 can record the same dependency more than once (for example an index key also used by its predicate).
+    # Collapse identical physical edges before resolving identities; distinct targets and dependency types remain.
     add("dependency", "i.schema", "i.name", "jsonb_build_array(" + source_id + "," + target_id + ",d.deptype)", "jsonb_build_object('type',d.deptype)",
-        "(SELECT * FROM pg_depend WHERE classid<>0 AND objid<>0 AND deptype<>'p') d CROSS JOIN LATERAL pg_identify_object(d.classid,d.objid,d.objsubid) i",
+        "(SELECT DISTINCT * FROM pg_depend WHERE classid<>0 AND objid<>0 AND deptype<>'p') d CROSS JOIN LATERAL pg_identify_object(d.classid,d.objid,d.objsubid) i",
         "i.schema !~ '^pg_' AND i.schema <> 'information_schema'" + logical_dependency)
     add("dependency", "i.schema", "i.name", "jsonb_build_array(" + source_id + "," + address("d.refclassid", "d.refobjid", "0") + ",d.deptype)",
         "jsonb_build_object('type',d.deptype)",
@@ -1040,9 +1048,22 @@ def inventory_valid(inventory, database):
     return inventory
 
 
+_restore_container = ContextVar("backup_restore_container", default=None)
+
+
+def _pg_command(container, program, *, interactive=False):
+    command = ["docker", "exec", *(["-i"] if interactive else [])]
+    if _restore_container.get() == container:
+        # Replayed role/database defaults apply to the next connection. They must not turn the restore itself
+        # read-only or cancel it mid-statement; the command runner still enforces its own bounded deadline.
+        command += ["-e", "PGOPTIONS=-c default_transaction_read_only=off -c transaction_read_only=off "
+                    "-c statement_timeout=0 -c lock_timeout=0 -c idle_in_transaction_session_timeout=0 -c idle_session_timeout=0 -c search_path=pg_catalog"]
+    return command + [container, program]
+
+
 def psql_json(container, database, sql, user="kin", timeout=300):
-    return json.loads(text(["docker", "exec", container, "psql", "-X", "-U", user, "-d", database, "-v", "ON_ERROR_STOP=1",
-                            "-qAt", "-c", "SET client_encoding='UTF8'", "-c", sql], timeout=timeout))
+    return json.loads(text(_pg_command(container, "psql") + ["-X", "-U", user, "-d", database, "-v", "ON_ERROR_STOP=1",
+                            "-qAt", "-c", "SET client_encoding='UTF8'", "-c", "SET search_path=pg_catalog,public", "-c", sql], timeout=timeout))
 
 
 def role_catalog(container, user="kin"):
@@ -1168,7 +1189,12 @@ def boundary_proof(container, catalog, image=None):
                              "--tmpfs", "/tmp:rw,nosuid,size=2g", "--tmpfs", "/var/lib/postgresql/data:rw,nosuid,size=1m",
                              "--entrypoint", "sh", image, "-s"], input_file=handle, timeout=600)
     try:
-        found = [json.loads(line) for line in raw.splitlines()]
+        # json_agg of composite rows may emit embedded newlines. A psql row is one JSON document, not one line.
+        decoder, found = json.JSONDecoder(), []
+        while raw:
+            value, end = decoder.raw_decode(raw)
+            found.append(value)
+            raw = raw[end:].lstrip(" \t\r\n")
     except ValueError:
         _unsupported("template 경계 조사 결과를 읽지 못했습니다")
     if len(found) != len(queries) + 1:
@@ -1345,7 +1371,7 @@ def run_private_sql(container, statements, user="kin"):
         handle.write(("SET client_encoding='UTF8';\nSET search_path=pg_catalog; SET TimeZone='UTC'; SET log_statement='none'; SET log_min_duration_statement=-1;\nBEGIN;\n"
                       + "\n".join(statements) + "\nCOMMIT;\n").encode("utf-8"))
         handle.seek(0)
-        run(["docker", "exec", "-i", container, "psql", "-X", "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-q"], input_file=handle)
+        run(_pg_command(container, "psql", interactive=True) + ["-X", "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-q"], input_file=handle)
 
 
 def replay_roles(container, source, user="kin", shape="pre", credentials=None):
@@ -1410,6 +1436,14 @@ def restore_snapshot(container, directory, user="kin", shape="pre", source=None)
     replayed kin_emr_owner, at the product's fixed path) before its databases are restored. source: a daily set's role
     catalog (D23; from its manifest, without per-object owners and privileges), compared as the role catalog only;
     otherwise the snapshot's catalog.json, compared whole."""
+    token = _restore_container.set(container)
+    try:
+        return _restore_snapshot(container, directory, user, shape, source)
+    finally:
+        _restore_container.reset(token)
+
+
+def _restore_snapshot(container, directory, user, shape, source):
     directory = Path(directory)
     whole = source is None
     if whole:
@@ -1420,19 +1454,19 @@ def restore_snapshot(container, directory, user="kin", shape="pre", source=None)
             inventory_valid(source["objects"][database], database)
     credentials = snapshot_credentials(directory)
     replayed = replay_roles(container, source, user, shape, credentials)
-    probe = ["docker", "exec", container, "psql", "-X", "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-qAt", "-c"]
+    probe = _pg_command(container, "psql") + ["-X", "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-qAt", "-c"]
     if shape == "post":
         run(probe + ["CREATE TABLESPACE kin_emr_access OWNER kin_emr_owner LOCATION '" + EMR_TABLESPACE + "';"])
     fresh = text(probe + ["SELECT (SELECT count(*) FROM pg_database WHERE datname='keycloak') || ':' || "
                           "(SELECT count(*) FROM pg_database WHERE datname='kin');"])
-    tables = text(["docker", "exec", container, "psql", "-X", "-U", user, "-d", "kin", "-v", "ON_ERROR_STOP=1", "-qAt", "-c",
+    tables = text(_pg_command(container, "psql") + ["-X", "-U", user, "-d", "kin", "-v", "ON_ERROR_STOP=1", "-qAt", "-c",
                    "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public';"])
     if fresh != "0:1" or tables != "0":
         raise RuntimeError("The restore target is not a fresh cluster")
     run(probe + ["DROP DATABASE kin WITH (FORCE);"])
     for database in PRE_DATABASES:
         with (directory / (database + ".dump")).open("rb") as handle:
-            run(["docker", "exec", "-i", container, "pg_restore", "-U", user, "-d", "postgres", "--create", "--exit-on-error"],
+            run(_pg_command(container, "pg_restore", interactive=True) + ["-U", user, "-d", "postgres", "--create", "--exit-on-error"],
                 input_file=handle, timeout=1800)
     settings = []
     for entry in source["settings"]:
@@ -1506,10 +1540,10 @@ def psql_json_stdin(container, database, sql, user="kin", timeout=1800):
     """psql_json with the statement on stdin (a statement over every table can exceed a command line)."""
     import tempfile
     with tempfile.TemporaryFile() as handle:
-        handle.write(("SET client_encoding='UTF8';\n" + sql).encode("utf-8"))
+        handle.write(("SET client_encoding='UTF8';\nSET search_path=pg_catalog,public;\n" + sql).encode("utf-8"))
         handle.flush()
         handle.seek(0)
-        result = run(["docker", "exec", "-i", container, "psql", "-X", "-U", user, "-d", database, "-v", "ON_ERROR_STOP=1", "-qAt", "-f", "-"],
+        result = run(_pg_command(container, "psql", interactive=True) + ["-X", "-U", user, "-d", database, "-v", "ON_ERROR_STOP=1", "-qAt", "-f", "-"],
                      input_file=handle, timeout=timeout)
     return json.loads(result.stdout.decode("utf-8").strip())
 
@@ -1740,12 +1774,12 @@ def capture_held(output, resources, *, shape, label, config=(), facts=None, read
         if shape == "post":
             write_json(directory / "emr-catalog.json", emr_catalog(db_name, "kin"))
         with (directory / "cluster-roles.sql").open("wb") as handle:
-            run(["docker", "exec", db_name, "pg_dumpall", "-U", "kin", "--roles-only", "--no-role-passwords"], output=handle)
+            run(["docker", "exec", db_name, "pg_dumpall", "-U", "kin", "--encoding=UTF8", "--roles-only", "--no-role-passwords"], output=handle)
         for database in ("kin", "keycloak"):
             stage = "dump " + database
             manifest["counts"][database] = value_counts(captured_values)[database]
             with (directory / (database + ".dump")).open("wb") as handle:
-                run(["docker", "exec", db_name, "pg_dump", "-U", "kin", "-d", database, "-Fc", "--create"], output=handle)
+                run(["docker", "exec", db_name, "pg_dump", "-U", "kin", "-d", database, "--encoding=UTF8", "-Fc", "--create"], output=handle)
         stage = "archive Orthanc"
         with (directory / "orthanc.tgz").open("wb") as handle:
             temporary_run(["--network", "none", "--read-only", "--mount", f"type=volume,source={volumes['orthanc']},target=/source,readonly",
