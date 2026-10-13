@@ -420,18 +420,49 @@ class StudyPanelPageDOM(unittest.TestCase):
         expect(drawer.get_by_role('button', name='Close', exact=True)).to_be_in_viewport()
         self.assertAlmostEqual(12, box['x'], delta=1)
         if width <= 1100 or height > width:
-            self.assertAlmostEqual(width - 24, box['width'], delta=1)
             area, report = page.locator('.split').bounding_box(), page.locator('.report-p').bounding_box()
             self.assertAlmostEqual(max(0, area['y']), box['y'], delta=1)
             bottom = min(report['y'], area['y'] + area['height'], height) - 12
-            if bottom - box['y'] >= 120:
-                self.assertAlmostEqual(min(bottom - box['y'], height * .55), box['height'], delta=1)
+            if bottom - box['y'] < 240 and report['x'] - 24 >= 240:
+                # Too little room above a report column: the column left of the report.
+                self.assertAlmostEqual(report['x'] - 24, box['width'], delta=1)
+                self.assertAlmostEqual(min(area['y'] + area['height'], height) - 12, box['y'] + box['height'], delta=1)
+            else:
+                self.assertAlmostEqual(width - 24, box['width'], delta=1)
+                if bottom - box['y'] >= 120:
+                    self.assertAlmostEqual(min(bottom - box['y'], height * .55), box['height'], delta=1)
         else:
             self.assertAlmostEqual(360, box['width'], delta=1)
             report = page.locator('.report-p').bounding_box()
             self.assertLessEqual(box['x'] + box['width'], report['x'])
         self.assert_report_usable(page, f'{width}x{height}')
         return box
+
+    def test_reading_workspace_panel_leaves_report_usable(self):
+        """W3R5-03 ② in the Reading Workspace: the panel opened from 'Study Info & Templates'
+        covers the image area, never the report (wide: 360 px left; a short side-by-side
+        window: the column left of the report; stacked: above the report)."""
+        for width, height in ((1920, 1080), (1024, 768), (900, 1200)):
+            with self.subTest(width=width, height=height):
+                page, _, _ = self.page_at(width, height)
+                page.route('**/ohif/**', lambda route: route.fulfill(content_type='text/html', body='<!doctype html><title>SYN viewer</title>'))
+                self.click_row(page, 0, 'select')
+                page.get_by_role('button', name='Reading Workspace', exact=True).click()
+                opener = page.get_by_role('button', name='Study Info & Templates', exact=True)
+                expect(opener).to_be_visible()
+                settle(page)
+                closed = self.assert_report_usable(page, 'reading, closed')
+                opener.click()
+                expect(page.get_by_role('complementary', name='Study Panel', exact=True)).to_be_visible()
+                settle(page)
+                self.assert_drawer_place(page, width, height)
+                opened = self.assert_report_usable(page, 'reading, open')
+                for name, fact in closed.items():
+                    if fact:
+                        self.assertEqual(fact['visible'], opened[name]['visible'], f'{name} visible part changed')
+                page.keyboard.press('Escape')
+                expect(opener).to_be_focused()
+                self.doCleanups()
 
     def test_open_panel_keeps_report_buttons_and_fields_usable(self):
         """W3R5-03 ② / W3R-01: at 1200x1920 (and the other portrait monitors, the

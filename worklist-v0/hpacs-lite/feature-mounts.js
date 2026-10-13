@@ -298,10 +298,18 @@
     // panel stays in view to scroll to the report.
     function placeStudyPanel() {
       const host = $('#study-panel-host');
+      host.style.width = '';
       if (portraitLayout() || innerWidth <= 1100) {
         const area = $('.split').getBoundingClientRect(), report = $('.report-p').getBoundingClientRect();
         const top = Math.max(0, area.top), bottom = Math.min(report.top, area.bottom, innerHeight) - 12;
         host.style.top = top + 'px';
+        // Too little room above a report column beside the work area (Reading
+        // Workspace, short side-by-side windows): the column left of it instead.
+        if (bottom - top < 240 && report.left - 24 >= 240) {
+          host.style.width = (report.left - 24) + 'px';
+          host.style.height = Math.max(120, Math.min(area.bottom, innerHeight) - 12 - top) + 'px';
+          return;
+        }
         host.style.height = Math.max(120, Math.min(innerHeight * 0.55, bottom - top)) + 'px';
         return;
       }
