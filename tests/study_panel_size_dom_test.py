@@ -218,6 +218,13 @@ class StudyPanelSizeDOM(unittest.TestCase):
                 low, high, at = start['edge']['min'], start['edge']['max'], self.size_of(start)
                 self.assertEqual(round(at), start['edge']['now'])
                 self.assertLess(low, at)
+                # The edge is in the panel's keyboard order: Tab reaches it, no pointer needed.
+                page.get_by_role('complementary', name='Study Panel', exact=True).get_by_role('button', name='Close', exact=True).focus()
+                for _ in range(80):
+                    if self.edge(page).evaluate('edge => edge === document.activeElement'):
+                        break
+                    page.keyboard.press('Tab')
+                expect(self.edge(page)).to_be_focused()
                 self.drag(page, 120)
                 facts = self.panel(page)
                 self.assertAlmostEqual(at + 120, self.size_of(facts), delta=1)
@@ -256,6 +263,108 @@ class StudyPanelSizeDOM(unittest.TestCase):
                 expect(page.get_by_role('complementary', name='Study Panel', exact=True)).to_have_count(0)
                 self.assertEqual(under, page.evaluate(PAGE))
                 self.doCleanups()
+
+    def test_a_smaller_window_keeps_the_report_and_the_choice(self):
+        """A size chosen on a large monitor is shown within the room of a smaller window of the same orientation
+        (never over the report) and is not overwritten by it: back in the large window it is the chosen size."""
+        for big, small, orientation in (((1920, 1080), (1366, 768), 'landscape'), ((1440, 2560), (1200, 1920), 'portrait')):
+            with self.subTest(big=big, small=small):
+                page, _, _ = self.page(*big)
+                self.open_panel(page)
+                self.keys(page, 'End')
+                large, chosen = self.panel(page), self.stored(page)
+                self.assertEqual(round(self.size_of(large)), chosen[orientation]['width' if orientation == 'landscape' else 'height'])
+                page.set_viewport_size(dict(width=small[0], height=small[1]))
+                settle(page)
+                facts = self.panel(page)
+                self.assertLess(self.size_of(facts), self.size_of(large) - 1)
+                self.assertAlmostEqual(facts['edge']['max'], self.size_of(facts), delta=1)
+                report = page.locator('.report-p').bounding_box()
+                if orientation == 'landscape':
+                    self.assertLessEqual(facts['drawer'][0] + facts['drawer'][2], report['x'] - 12 + .5)
+                else:
+                    self.assertLessEqual(facts['drawer'][1] + facts['drawer'][3], report['y'] - 12 + .5)
+                self.assert_report_usable(page, 'smaller window')
+                self.assertEqual(chosen, self.stored(page), 'a smaller window overwrote the choice')
+                page.set_viewport_size(dict(width=big[0], height=big[1]))
+                settle(page)
+                self.assertEqual(large, self.panel(page))
+                self.doCleanups()
+
+    def test_reading_workspace_panel_resizes_within_the_report_bounds(self):
+        """W3R5-03 ② in the Reading Workspace as well: opened from 'Study Info & Templates', the panel at its largest
+        (Normal and Larger text) leaves the report's buttons and fields as visible as with it closed, and Escape from
+        the edge returns to the opener."""
+        for width, height in ((1920, 1080), (1024, 768), (900, 1200)):
+            with self.subTest(width=width, height=height):
+                page, _, _ = self.page(width, height)
+                page.route('**/ohif/**', lambda route: route.fulfill(content_type='text/html', body='<!doctype html><title>SYN viewer</title>'))
+                page.get_by_role('button', name='Reading Workspace', exact=True).click()
+                opener = page.get_by_role('button', name='Study Info & Templates', exact=True)
+                expect(opener).to_be_visible()
+                settle(page)
+                closed = self.assert_report_usable(page, 'reading, closed')
+                opener.click()
+                expect(page.get_by_role('complementary', name='Study Panel', exact=True)).to_be_visible()
+                settle(page)
+                for step in (0, 2):
+                    self.text_size(page, step)
+                    self.keys(page, 'End')
+                    facts = self.panel(page)
+                    self.assertAlmostEqual(facts['edge']['max'], self.size_of(facts), delta=1)
+                    opened = self.assert_report_usable(page, f'reading, largest, text {step}')
+                    for item, fact in closed.items():
+                        if fact:
+                            self.assertEqual(fact['visible'], opened[item]['visible'], f'text {step}: {item} visible part changed')
+                    self.keys(page, 'Home')
+                    facts = self.panel(page)
+                    self.assertAlmostEqual(facts['edge']['min'], self.size_of(facts), delta=1)
+                page.keyboard.press('Escape')
+                expect(opener).to_be_focused()
+                self.doCleanups()
+
+    def test_default_at_the_default_lets_an_account_load_apply(self):
+        """Default when nothing was chosen, or End at the largest size, changes nothing and writes nothing, so an
+        account Load already on its way still applies (a real change would rightly make it give way)."""
+        page, site, _ = self.page(1920, 1080)
+        drawer = self.open_panel(page)
+        default = self.panel(page)
+        self.drag(page, 160)
+        self.text_size(page, 2)
+        chosen = self.panel(page)
+        self.account_menu(page)
+        save = page.get_by_role('button', name='Save to Account', exact=True)
+        expect(save).to_be_enabled()
+        save.click()
+        expect(page.locator('#workspace-server-status')).to_contain_text('현재 배치를 계정에 저장')
+        # (The open View menu makes the toolbar taller and the panel follows the work area down: sizes are compared
+        # while it is open, the whole geometry after it is closed.)
+        text = drawer.get_by_role('combobox', name='Text Size')
+        drawer.get_by_role('button', name='Default', exact=True).click()
+        settle(page)
+        self.assertEqual(default['drawer'][2], self.panel(page)['drawer'][2])
+        expect(text).to_have_value('0')
+        writes = len(site.layout_writes)
+        before = page.evaluate('(key) => localStorage.getItem(key)', KEY)
+        site.held_read = []
+        page.get_by_role('button', name='Load from Account', exact=True).click()
+        for _ in range(100):
+            if site.held_read:
+                break
+            page.wait_for_timeout(50)
+        self.assertEqual(1, len(site.held_read), 'the account read is on its way')
+        drawer.get_by_role('button', name='Default', exact=True).click()
+        settle(page)
+        self.assertEqual(default['drawer'][2], self.panel(page)['drawer'][2])
+        self.assertEqual(before, page.evaluate('(key) => localStorage.getItem(key)', KEY), 'a change that did not happen was written')
+        route, site.held_read = site.held_read[0], None
+        route.fulfill(json=dict(owner=[auth.INSTITUTION, auth.RAD['sub']], revision=site.layout_revision, layout=site.layout, updatedAt=None))
+        expect(page.locator('#workspace-server-status')).to_contain_text('서버 배치를 불러왔습니다')
+        expect(text).to_have_value('2')
+        page.locator('#toolbar-view > summary').click()
+        settle(page)
+        self.assertEqual(chosen, self.panel(page))
+        self.assertEqual(writes, len(site.layout_writes))
 
     def test_bounds_keep_report_list_and_controls_at_every_size(self):
         """At each of the order's sizes and at both text extremes: the largest panel leaves the report's buttons

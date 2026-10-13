@@ -8482,9 +8482,12 @@
       if (!workspaceEditable()) return;
       const next = KinWorkspaceLayout.withStudyPanel(workspaceState, workspaceAxis(), change);
       if (!next) return;
+      // The same choice again (Default at the default, End at the largest size) writes nothing: a write would also
+      // make an account Load that is still on its way give way to a change that did not happen.
+      const same = JSON.stringify(next.workspace.studyPanel || {}) === JSON.stringify(workspaceState.workspace?.studyPanel || {});
       workspaceState = next;
       if (studyPanel) placeStudyPanel();
-      saveWorkspace(true);
+      if (!same) saveWorkspace(true);
     }
     document.addEventListener('scroll', event => {
       if (studyPanel && !workspaceEnded && event.target instanceof Element && event.target.matches('.split, .right')) placeStudyPanel();

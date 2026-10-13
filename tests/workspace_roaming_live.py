@@ -230,4 +230,25 @@ class WorkspaceRoamingLive(unittest.TestCase):
         old['revision']=winner['revision'];refused=self.write(old)
         self.assertEqual(refused.status,409,refused.text);self.assertEqual(self.get(),winner)
 
+    # Pilot D1160 -> TEST-W3-ROAM-13: the reader's Study Panel width/height and Text Size per orientation roam in
+    # the same v3 record; values are strict; a v3 record without them (written before the options) stays valid.
+    def test_13_v3_study_panel_choices_roundtrip_and_strict_values(self):
+        legacy=self.body_v2();saved=self.write(legacy);self.assertEqual(saved.status,200,saved.text)
+        body=self.body_v2(state=saved.body);body['layout']['version']=3
+        plain=dict(version=1,rail=None,worklist=None,related=None,prior=None,railCollapsed=False,studyPanelTab='info')
+        body['layout']['workspace']=dict(plain,studyPanel=dict(landscape=dict(width=520,text=1),portrait=dict(height=900,text=2)))
+        saved=self.write(body);self.assertEqual(saved.status,200,saved.text)
+        self.assertEqual(saved.body['layout'],body['layout']);self.assertEqual(self.get(),saved.body)
+        original=saved.body;body['revision']=original['revision']
+        for value in [dict(landscape=dict(width=0)),dict(portrait=dict(height=16385)),dict(portrait=dict(text=3)),
+                dict(landscape=dict(width=520.5)),dict(both=dict(width=500)),dict(landscape=dict(zoom=2)),[],'wide']:
+            bad=copy.deepcopy(body);bad['layout']['workspace']['studyPanel']=value
+            refused=self.write(bad);self.assertEqual(refused.status,400,refused.text);self.assertEqual(self.get(),original)
+        for version in [1,2]:
+            old=self.body(state=original) if version==1 else self.body_v2(state=original)
+            refused=self.write(old);self.assertEqual(refused.status,409,refused.text);self.assertEqual(self.get(),original)
+        default=copy.deepcopy(body);default['layout']['workspace']=plain
+        saved=self.write(default);self.assertEqual(saved.status,200,saved.text)
+        self.assertEqual(saved.body['layout'],default['layout']);self.assertNotIn('studyPanel',self.get()['layout']['workspace'])
+
 if __name__=='__main__':unittest.main(verbosity=2)
