@@ -1013,10 +1013,12 @@ class OperatingEntryContracts(unittest.TestCase):
 
 
 class PersistentEntryOverlayContracts(unittest.TestCase):
-    """IRT3-03 with D05/IRT-11 (found by the forced L-09b rehearsal forced-l09b-01): once a phase published the persistent
-    Compose entry, a later phase of the same checkout takes its inputs from that entry - and still observes the declared
-    overlay file first. The forced rehearsal edits the overlay by hand during the window; its rollback_reopen, a new
-    process on the entry, must go on with the pinned bytes and record the declared-overlay warning."""
+    """IRT3-03 with D05 (found by the forced L-09b rehearsal forced-l09b-01) and C-COMPOSE (normal-07): once a phase
+    published the persistent Compose entry, a later phase of the same checkout runs the entry's pinned bytes, which must
+    be the declared bytes. A recovery still observes the declared overlay file first: the forced rehearsal edits it by
+    hand during the window, and its rollback_reopen (a new process on the entry) goes on with the pinned bytes and
+    records the declared-overlay warning. Any other phase on the entry does not depend on the file at all - the normal
+    rehearsal's receipt follows an ordinary recreate that removed the original overlay."""
 
     def setUp(self):
         self.case = fixtures.RoundThreeHostTests()
@@ -1055,38 +1057,55 @@ class PersistentEntryOverlayContracts(unittest.TestCase):
                 self.assertEqual(release.sha256_bytes(pinned.read_bytes()), self.case.target["declared_overlays"][0]["sha256"])
                 self.case.overlay.write_bytes(self.declared)
 
-    def test_a_forward_phase_on_the_entry_refuses_a_changed_overlay_before_any_command(self):
-        self.case.overlay.write_bytes(self.declared + b"# edited by hand\n")
-        host, context = self.phase("verify")
-        before = len(self.docker.calls)
-        with self.assertRaises(release.Stop):
-            host.prepare(context)
-        self.assertEqual(self.docker.calls[before:], [], "the refusal comes before any command")
-        self.assertEqual(context.warnings, [])
+    def pinned_overlay_in_use(self, host):
+        files = host.compose_files()
+        self.assertNotIn(str(self.case.overlay), files)
+        generation = self.kept["compose_entry"]["generation"]
+        (pinned,) = [Path(path) for path in files if Path(path).parent.name == generation and Path(path).read_bytes() == self.declared]
+        return pinned
+
+    def test_a_non_recovery_phase_on_the_entry_runs_the_pinned_bytes_whatever_the_overlay_file_is(self):
+        for change in ("changed", "vanished"):
+            for name in ("verify", "receipt"):
+                with self.subTest(change=change, phase=name):
+                    if change == "changed":
+                        self.case.overlay.write_bytes(self.declared + b"# edited by hand\n")
+                    else:
+                        self.case.overlay.unlink(missing_ok=True)
+                    host, context = self.phase(name)
+                    result = succeeds(self, host.prepare, context)
+                    self.assertEqual(result["immutable_entry"]["generation"], self.kept["compose_entry"]["generation"])
+                    self.assertEqual(context.warnings, [])
+                    self.pinned_overlay_in_use(host)
+                    self.case.overlay.write_bytes(self.declared)
 
     def test_an_unchanged_overlay_on_the_entry_is_quiet_in_every_phase(self):
-        for name in ("verify", "rollback", "rollback_reopen"):
+        for name in ("verify", "receipt", "rollback", "rollback_reopen"):
             with self.subTest(phase=name):
                 host, context = self.phase(name)
                 result = succeeds(self, host.prepare, context)
                 self.assertEqual(result["immutable_entry"]["generation"], self.kept["compose_entry"]["generation"])
                 self.assertEqual(context.warnings, [])
-                self.assertEqual([row["used"] for row in result.get("declared_overlays") or []], ["declared file"])
+                self.pinned_overlay_in_use(host)
+                if context.recovering:
+                    self.assertEqual([row["used"] for row in result.get("declared_overlays") or []], ["declared file"])
 
-    def test_an_entry_whose_overlay_pin_is_not_the_declared_bytes_is_refused_even_in_a_recovery(self):
-        # A generation published from other overlay bytes (the declared hash in the target is unchanged): a recovery must
-        # not go on with bytes nobody declared.
+    def test_an_entry_whose_overlay_pin_is_not_the_declared_bytes_is_refused_in_every_phase(self):
+        # A generation published from other overlay bytes (the declared hash in the target is unchanged): no phase may
+        # go on with bytes nobody declared, a recovery included.
         self.case.overlay.write_bytes(self.declared + b"# not the declared bytes\n")
         self.host.prepare_entry(self.host.intro)
         other = self.host.intro.state["compose_entry"]
         self.assertNotEqual(other["generation"], self.kept["compose_entry"]["generation"])
         self.kept["compose_entry"] = other
-        host, context = self.phase("rollback_reopen")
-        before = len(self.docker.calls)
-        with self.assertRaises(release.Stop) as caught:
-            host.prepare(context)
-        self.assertIn("overlay", str(caught.exception))
-        self.assertEqual(self.docker.calls[before:], [], "the refusal comes before any command")
+        for name in ("verify", "receipt", "rollback_reopen"):
+            with self.subTest(phase=name):
+                host, context = self.phase(name)
+                before = len(self.docker.calls)
+                with self.assertRaises(release.Stop) as caught:
+                    host.prepare(context)
+                self.assertIn("overlay", str(caught.exception))
+                self.assertEqual(self.docker.calls[before:], [], "the refusal comes before any command")
 
 
 class AuditLedgerGateContracts(unittest.TestCase):

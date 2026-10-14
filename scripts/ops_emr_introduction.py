@@ -4379,10 +4379,11 @@ class HostOps:
         self.entry_inputs = None
         saved = intro.state.get("compose_entry")
         if saved and intro.state.get("entry_checkout") == intro.state["checkout"]:
-            # IRT-11/D05 hold on the persistent entry too (IRT3-03): the declared overlay files are observed before any
-            # step. A forward phase refuses a changed, vanished or unprotected overlay; a recovery goes on with the
-            # entry's pinned bytes (the declared bytes, checked below) and records the warning.
-            overlays = self.declared_overlay_facts(intro)
+            # C-COMPOSE: a phase on the persistent entry runs the entry's pinned bytes, which must be the declared bytes
+            # (checked below), whatever the overlay file now is - the receipt after an ordinary recreate without the
+            # original overlay included. D05 on this branch too (IRT3-03): a recovery still observes the declared
+            # overlay first, so a changed, vanished or unprotected file is recorded as the warning the operator sees.
+            overlays = self.declared_overlay_facts(intro) if getattr(intro, "recovering", False) else None
             pointer = {key: saved[key] for key in ("generation", "sha256")}
             _, manifest, values = self.entry.load(pointer)
             require(manifest["plan_sha256"] == intro.plan_sha256 and manifest["repository"] == str(self.repo),

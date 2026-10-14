@@ -388,9 +388,18 @@ sys.exit(subprocess.run([sys.executable, %(tool)r, "browser-smoke"], input=raw).
 
 
 def free_port():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+    # Docker Desktop also publishes the port on the Windows host, where Hyper-V/WinNAT reserve blocks of the dynamic range
+    # (normal-08 drew 50557 inside a reserved 50544-50643: "bind ... forbidden by its access permissions"). A port below
+    # both the Windows dynamic range (49152+) and the Linux ephemeral default (32768+) that binds here is used instead.
+    for _ in range(500):
+        port = 20000 + secrets.randbelow(12000)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+        return port
+    raise AssertionError("no free port in 20000-31999")
 
 
 def blob(repo, sha, path):
