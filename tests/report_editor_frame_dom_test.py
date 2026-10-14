@@ -1431,6 +1431,62 @@ class ReportEditorFramePageDOM(unittest.TestCase):
         self.assertTrue(self.page.evaluate("() => { const x=dictationContext(); return dictationInsert({...x,expectedValue:x.value,text:'SYN dictated'}); }"))
         self.assertEqual(self.texts(), {'findings':'','conclusion':'SYN dictated','recommendation':''})
 
+    def test_page_w3_drawer_close_after_replacement_returns_to_a_current_field(self):
+        # W6-PAGE-18 on the W3 layout: an opening replaces the three fields while focus is in the Study Panel,
+        # so the drawer's remembered opener is a removed node. Closing returns focus to the current field.
+        uid_b = self.page.locator('#rows tr', has_text=self.h.PATIENT_B).first.get_attribute('data-uid')
+        replacements = {
+            'other study': ("uid => select(uid)", uid_b),
+            'same study, changed server text': ("() => { const s = appState[selectedUid]; (s.draft ?? s).conclusion = 'server change'; loadReport({force:true}); }", None),
+        }
+        for label, (replace, arg) in replacements.items():
+            with self.subTest(label):
+                self.page.locator('#conclusion').focus()
+                self.assertTrue(self.page.evaluate("() => openStudyPanel('info')"))
+                self.assertTrue(self.page.evaluate("() => document.querySelector('#study-panel-host').contains(document.activeElement)"))
+                self.page.evaluate("() => { window.openerField = document.querySelector('#conclusion'); }")
+                self.page.evaluate(replace, arg)
+                self.page.wait_for_function("() => !window.openerField.isConnected && !document.querySelector('#conclusion').readOnly")
+                self.assertTrue(self.page.evaluate("() => document.querySelector('#study-panel-host').contains(document.activeElement)"))
+                self.page.keyboard.press('Escape')
+                self.page.wait_for_function("() => !document.querySelector('#study-panel-host .study-panel:not([hidden])')")
+                active = self.page.evaluate("() => { const a = document.activeElement; return [a.id, a.isConnected, a.id === 'findings' && a === reportFrame.element('findings')]; }")
+                self.assertEqual(active, ['findings', True, True])
+                before = self.texts()
+                self.page.keyboard.type('W3')
+                self.assertEqual(self.texts(), {**before, 'findings': before['findings'] + 'W3'})
+        self.assertEqual(self.page.evaluate('selectedUid'), uid_b)
+
+    def test_page_frame_minimum_on_w3_layouts_with_notices_and_panel(self):
+        # W6-PAGE-22 re-validated on W3's placements (portrait bands, narrow sheet, short windows): with the
+        # unavailable-service notices shown below it and the Study Panel closed or open, the shared scroller
+        # keeps its 200 px minimum, the panel never covers it, and each section focused is in the window.
+        from study_panel_size_dom_test import BOUND_SIZES
+        measure = """() => { const host = document.querySelector('.redit'), box = host.getBoundingClientRect();
+          const panel = document.querySelector('#study-panel-host .study-panel:not([hidden])')?.getBoundingClientRect();
+          const seen = id => { const r = document.getElementById(id).getBoundingClientRect();
+            return Math.min(box.bottom, r.bottom, innerHeight) - Math.max(box.top, r.top, 0); };
+          return {height: box.height, covered: !!panel && box.left < panel.right && box.right > panel.left
+                    && Math.max(box.top, 0) < panel.bottom && Math.min(box.bottom, innerHeight) > panel.top,
+                  findings: seen('findings'), conclusion: seen('conclusion')}; }"""
+        notices = self.page.evaluate("() => ['#question-p', '#image-request-p', '#cvr-sent-p'].filter(s => document.querySelector(s).getClientRects().length).length")
+        self.assertGreater(notices, 0)
+        for width, height in BOUND_SIZES:
+            self.page.set_viewport_size({'width': width, 'height': height})
+            for opened in (False, True):
+                with self.subTest(width=width, height=height, panel=opened):
+                    if opened:
+                        self.assertTrue(self.page.evaluate("() => openStudyPanel('info')"))
+                    for field in ('findings', 'conclusion'):
+                        self.page.locator('#' + field).evaluate('e => e.focus()')
+                        self.page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+                        fact = self.page.evaluate(measure)
+                        self.assertGreaterEqual(fact['height'], 199.5, fact)
+                        self.assertFalse(fact['covered'], fact)
+                        self.assertGreater(fact[field], 0, fact)
+                    if opened:
+                        self.page.evaluate("() => studyPanel.close()")
+
     def test_page_composition_refuses_a_queued_study_activation(self):
         self.page.locator('#findings').focus()
         cdp = self.context.new_cdp_session(self.page)
@@ -1617,6 +1673,10 @@ PAGE_MUTANTS = [
      'test_page_clipboard_answer_after_typing_and_undo_is_refused'),
     ('W6-PAGE-15', 'current-study.js', 'if (reportFrame?.isComposing()) return;', '// Allow a switch during composition.',
      'test_page_composition_refuses_a_queued_study_activation'),
+    # Post-W3: the drawer's fallback reads the field when the drawer closes; a kept reference is a removed node after an opening.
+    ('W6-PAGE-18-drawer-fallback', 'feature-mounts.js', "fallbackFocus: () => [$('#findings'), $('#quick'), $('#study-panel-open')]",
+     "fallbackFocus: () => [openStudyPanel.field ??= $('#findings'), $('#quick'), $('#study-panel-open')]",
+     'test_page_w3_drawer_close_after_replacement_returns_to_a_current_field'),
     ('W6-PAGE-19', 'work-exit.js', 'Object.assign(prep, captureReport());', '// Forget the report snapshot.',
      'test_page_logout_saves_template_and_hidden_recommendation_once'),
     ('W6-PAGE-20', 'session-end.js', 'reportFrame?.end({ uid: null, selectionSeq });', '// Keep the previous history.',
