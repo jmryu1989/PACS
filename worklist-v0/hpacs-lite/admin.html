@@ -213,12 +213,10 @@
       <p class="ops-hint">저장 사용량·검사량·판독 TAT입니다. 값마다 출처·관측 시각·단위·분모·범위를 함께 보이고, 읽지 못한 값은 0이 아니라 Unobservable로 보입니다. 출처 있는 사이트 기준이 없어 기준선·경고 색은 두지 않습니다. 지표는 이 버튼을 누를 때만 읽습니다.</p>
       <p class="message" id="metrics-message" role="alert"></p>
       <div class="ops-table" id="metrics-wrap" hidden>
-        <!-- Column headers sit in their own tbody, not a thead: the page's `thead th` stays the member table's headers
-             (pinned by tests/admin_member_roles_dom_test.py); th scope="col" keeps the header semantics. -->
         <table id="metrics-table">
-          <tbody class="ops-columns">
+          <thead class="ops-columns">
             <tr><th scope="col">Metric</th><th scope="col">State</th><th scope="col">Value</th><th scope="col">Unit</th><th scope="col">Denominator</th><th scope="col">Scope</th><th scope="col">Source</th><th scope="col">Observed At</th></tr>
-          </tbody>
+          </thead>
           <tbody id="metrics-rows"></tbody>
         </table>
       </div>
@@ -238,11 +236,10 @@
       <p class="audit-fixed" id="audit-access-history" title="로그인·로그아웃·세션 만료 기록은 수집하지 않습니다. 이 구역은 회원·검사·설정의 변경 이력만 보입니다.">접속 이력: 수집되지 않음</p>
       <p class="message" id="audit-message" role="alert"></p>
       <div class="audit-table" id="audit-wrap" hidden>
-        <!-- Column headers sit in their own tbody, not a thead: the page's `thead th` stays the member table's headers. -->
         <table id="audit-table">
-          <tbody class="audit-columns">
+          <thead class="audit-columns">
             <tr><th scope="col">Time</th><th scope="col">Actor</th><th scope="col">Action</th><th scope="col">Target</th><th scope="col">Previous Value</th><th scope="col">Reason</th><th scope="col">Recorded Detail</th></tr>
-          </tbody>
+          </thead>
           <tbody id="audit-rows"></tbody>
         </table>
       </div>
