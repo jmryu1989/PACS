@@ -28,70 +28,20 @@ request:
   06  A->B->A of a retry answer: a newer receipt and the old one coming back both drop the request, so its late answer
       writes nothing; an item that leaves the list and comes back is a new node and ignores its late answer; one POST
       each. Control: the page without the token guard writes Retry Requested over the drawn receipt.
-  07  a 401 on the list read empties the section and disables it before the logout request answers; a late retry
-      answer is not written; one logout and one navigation.
+  07  the response lifetime (U5S-REQ-04) on real HTTP answers through the shipped transport: every list read carries the
+      page's X-KIN-Session; a plain 401 is one failed read (Query Failed, the list and Refresh kept, no navigation, no
+      logout POST) and the next read recovers; AUTH_SESSION_ENDED on the older of two reads ends the page session at
+      once (Gateway rows and the member list emptied, Refresh off, one navigation, no logout POST); the newer read's late
+      200 paints nothing and Refresh forced on sends nothing.
   08  wording and layout: English controls, headings and state words with no Hangul; Korean guidance, titles, reasons
       and notes; no delivery or completion word; no UXR-SP-34 avoided word; nothing below 12px; no browser dialog or
       open <dialog>; the retry control works from the keyboard and keeps focus across a refresh.
   09  the pure rules in the page: every phase, requested key, unreadable receipt, error-code echo, malformed answers
       and the summary before, during and after failure.
 
-One end for the page session (Astra S5-U6a-F01/F02). At cafc72c only the Gateway section's own 401 emptied it: Log out
-and the member API 401 called KinAuth.logout() directly, which clears and moves only after POST /auth/logout answers,
-nothing listened for another tab's end, and a 401 of an older list read was dropped by the sequence check. Each case
-has a control that serves the cafc72c behaviour through the same route and must keep the list:
-
-  10  Log out and a member-list 401 empty the section (rows, counts, state, control) before the logout answers; a list
-      read and a retry held from before come back as successes and paint nothing; no request leaves the page after
-      the end; Log out again and the page's own end broadcast add no POST and no move. Control: Log out wired to
-      KinAuth.logout() keeps the list while the POST is out.
-  11  another tab's end (the auth.js BroadcastChannel message; the storage pair with BroadcastChannel missing here)
-      empties the section, drops the late answers, sends no logout POST and moves once, also when the signals repeat.
-      Control: the page without the two listeners keeps the list and stays.
-  12  an end while /api/me is still out: its later answer (200 or 401) enables nothing, reads no member list, sends no
-      logout POST and makes no second move.
-      In 11 and 12 the move to index.html is answered 204: the browser cancels it and the old document stays to be read
-      (Playwright cannot evaluate a page whose move is held). Every move is still one request, so a second is counted.
-  13  two list reads out; the older answers 401 first: the section empties before the logout answers, the newer 200
-      paints nothing, a second 401 (the retry) adds no POST and no move. Control: the 401 judged after the sequence
-      check (cafc72c) keeps the list and never logs out.
-
-Every module of the page shares that end (Astra S5-U6a-F03/F04). At c274267 the members console registered no closer
-and checked the end only before a body was read, so an answer whose body was still out came back after Log out as the
-member list or a temporary password; Study Access sent its own requests with no link to the end, so its 401 was a plain
-error that kept the Gateway list, and its dialog stayed open, Reload still sending, until the logout answered. The init
-script can hold a body after its headers arrived (__jsonHold), the window those late answers need; a hold still waiting
-after a 401 proves the page never read that body. Cases 10-12 also check the members console closed; its controls are
-off after the end, so their "Refresh reads nothing" check turns Refresh back on by script and meets request()'s own check.
-
-  14  a temporary password, a suspension, a member-list read and (another tab) a Create Member submit are out with their
-      bodies held when Log out, another tab or a Gateway 401 over the open membership dialog ends the session: members,
-      institutions, search, edit, forms, password and dialogs go and the controls turn off before the logout answers;
-      the released bodies paint nothing, open nothing and read no list again. Control: the members console without its
-      closer and end checks paints the late list and opens the temporary password.
-  15  Study Access over a drawn Gateway list: a 401 on its GET and on its POST (body held, never read) ends the page
-      session, empties the Gateway list and the members console and removes the dialog with no confirm before the
-      logout answers; a GET held across another tab's end draws nothing when it comes; after the end the module opens no
-      dialog and its Reload, Retry and Save send nothing. Control: the module without its 401 line and its closer reads
-      the 401 as an error, keeps the list, sends no logout, and its dialog outlives another tab's end.
-  16  a retry, a member-list read and a Study Access read out together: their 401s (bodies held, none read) and another
-      tab's end, in either order, give one logout POST and one move when a 401 comes first, and no POST and one move
-      when another tab's end comes first.
-
-The first /api/me 401 is an end of the page session too (Astra S5-U6a-F05). At b95bc17 boot() answered it (auth.js
-returns a null session) with the move alone: nothing closed and nothing was refused while the move was out, and Refresh
-and Create Member were on from the markup before the session was known, so a member list read out before it painted
-after it and a Create Member submit was still sent. Case 12 covers the other order (another tab's end first).
-
-  17  while /api/me is out no member control is on and only /api/me was sent; the controls turn on after the first list
-      read of an approved admin session and stay off when that read's 401 ends it; a pending session moves once with
-      no logout POST. With Refresh and Create Member turned on by script (the b95bc17 state), a list read held, a list
-      body held and the Create Member dialog filled, a first /api/me 401 (body never read) ends the session before the
-      logout answers: members, form and dialog go, the released body paints nothing, a submit sends nothing, and the
-      held read's 401, Log out and another tab's end add no POST and no move; Log out before the 401 is the same single
-      POST and move. Controls: the b95bc17 markup has every control on before /api/me; the b95bc17 boot moves once with
-      no end and no POST, keeps the dialog open, paints the late list and sends the Create Member POST; the boot without
-      its check after the first read turns the controls on again after that read's 401.
+The session-end cases that were 10-17 here (Log out, another tab's end, an end while /api/me is out, an older read's
+end, every module of the page on the one end; Astra S5-U6a-F01..F05) moved with S7-U5 to tests/admin_session_dom_test.py,
+which binds them to the named end signals, all panels and the delayed navigation.
 
 Synthetic data only (SYN-* names, 1.2.* UIDs): no server, no network, no credentials. A request the harness does not
 answer is aborted and fails the case, as does a page error or a browser dialog.
@@ -264,14 +214,6 @@ END_LISTENERS = (
     '      } catch (_) {}\n'
     '      // The fallback where BroadcastChannel is missing; auth.js sends both, and both land here idempotently.\n'
     '      addEventListener("storage", event => { if (event.key === "kin-session-ended") endedElsewhere(); });\n')
-GATEWAY_401 = (
-    '        if (response.status === 401) {\n'
-    '          KinConsoleSession.end();\n'
-    '          throw Object.assign(new Error("session"), { status: 401 });\n'
-    '        }\n')
-CAFC72C_GATEWAY_401 = '        if (response.status === 401) throw Object.assign(new Error("session"), { status: 401 });\n'
-AFTER_SEQUENCE = SEQUENCE_GUARD + '        $("#gateway-busy").hidden = true;\n'
-CAFC72C_AFTER_SEQUENCE = AFTER_SEQUENCE + '        if (error?.status === 401) { KinConsoleSession.end(); return; }\n'
 
 # What auth.js broadcastEnded() sends when a session ends; a second tab sends the same, one kind at a time.
 AUTH_SIGNALS = ("channel.postMessage({ type: 'session-ended' });",
@@ -304,7 +246,6 @@ CREATED = {"id": "SYN-U-2", "username": "syn-created", "email": "syn-created@mem
            "temporaryPassword": "SYN-CREATED-VALUE"}
 ACCESS = {"owner": [INSTITUTION, ME["sub"]], "subject": MEMBER["id"], "revision": 0, "needsInstitutionReview": False,
           "policy": {"version": 1, "restricted": False, "startsAt": None, "endsAt": None, "rules": []}}
-ACCESS_SCRIPT = BASE + "study-access-admin.js"
 
 MEMBER_CONTROLS = ["#search", "#institution-filter", "#refresh", "#open-create", "#previous", "#next"]
 MEMBERS_STATE = """controls => { const q = s => document.querySelector(s), form = q('#membership-form');
@@ -333,13 +274,11 @@ ATTEMPT_ACCESS = """user => { const d = window.__access;
 
 # Controls for 14 and 15: the members console without its closer and its end checks (before the request, after the
 # body, before the list, the temporary password and the created member are written, after /api/me, after the first
-# read), and the Study Access module without its 401 line and its end closer.
+# read).
 MEMBERS_FROM = "      async function request(method, path, body) {\n"
 MEMBERS_TO = "      boot();\n"
 MEMBER_CLOSER = "      KinConsoleSession.onEnd(closeMembers);\n"
 MEMBER_END_CHECKS = 7
-ACCESS_401 = "        if(response.status===401){session.end();throw Error('세션이 만료되었습니다');}\n"
-ACCESS_CLOSER = "lifecycle.onEnd(()=>closeActive?.());"
 
 # S5-U6a-F05: the shipped lines and the b95bc17 ones they replaced (every control on in the markup, the null session of
 # a /api/me 401 answered by the move alone), and the check after the first read that keeps the controls off after its end.
@@ -397,19 +336,66 @@ def members_unguarded():
     return text[:start] + segment.replace("KinConsoleSession.ended()", "false") + text[stop:]
 
 
-def access_unattached():
-    """study-access-admin.js with its 401 line and its end closer taken out."""
-    text = SCRIPTS[ACCESS_SCRIPT]
-    for old in (ACCESS_401, ACCESS_CLOSER):
-        found = text.count(old)
-        if found != 1:
-            raise AssertionError(f"setup: {old!r} occurs {found} times in study-access-admin.js")
-        text = text.replace(old, "")
-    return text
-
-
 def retry_path(uid):
     return f"/api/studies/{uid}/gateway-retry"
+
+
+def assert_response_lifetime(case, *, url, index_url, session_id, wording, button, state, rows, body):
+    """REQ-S9-U0f / U5S-REQ-04 -> RISK-SESSION/STALE -> response lifetime.
+
+    Exercise the delivered page and transport with real HTTP responses. A plain
+    401 is recoverable; a named end applies even to an older request. Holding the
+    destination with 204 lets us inspect cleanup without replacing product code.
+    Shared by the Gateway Status and Operations cases: the caller passes its own
+    section's selectors (button, state, rows), its read URL and answer, and its own
+    module's origin, entry page, session and server wording.
+    """
+    pending, moves = [], []
+    page = case.page
+    page.route(url, lambda route: pending.append(route))
+
+    def destination(route):
+        moves.append(route.request.url)
+        route.fulfill(status=204)
+
+    page.route(index_url, destination)
+
+    def request():
+        before = len(pending)
+        page.locator(button).click()
+        case.wait_until(lambda: len(pending) == before + 1, 'bound request received')
+        route = pending[-1]
+        case.assertEqual(session_id, route.request.headers.get('x-kin-session'))
+        return route
+
+    request().fulfill(json=body)
+    expect(page.locator(rows).first).to_be_visible()
+    count = page.locator(rows).count()
+    request().fulfill(status=401, json={'message': wording})
+    expect(page.locator(button)).to_be_enabled()
+    expect(page.locator(state)).to_contain_text('Query Failed')
+    expect(page.locator(rows)).to_have_count(count)
+    case.assertEqual([], moves, 'plain 401 keeps this document')
+    case.assertEqual(0, case.logouts, 'plain 401 does not log out')
+    request().fulfill(json=body)
+    expect(page.locator(state)).to_contain_text('Observed')
+
+    older, newer = request(), request()
+    older.fulfill(status=401, headers={'X-KIN-Auth-Code': 'AUTH_SESSION_ENDED'},
+                  json={'code': 'AUTH_SESSION_ENDED', 'message': wording})
+    case.wait_until(lambda: len(moves) == 1, 'named end navigates once')
+    expect(page.locator(rows)).to_have_count(0)
+    expect(page.locator('#users tr')).to_have_count(0)
+    expect(page.locator(button)).to_be_disabled()
+    newer.fulfill(json=body)
+    page.wait_for_timeout(100)
+    expect(page.locator(rows)).to_have_count(0)
+    before = len(pending)
+    page.eval_on_selector(button, 'b => { b.disabled = false; b.click(); b.disabled = true; }')
+    page.wait_for_timeout(100)
+    case.assertEqual(before, len(pending), 'ended document sends no new request')
+    case.assertEqual(1, len(moves))
+    case.assertEqual(0, case.logouts, 'confirmed server end needs no logout POST')
 
 
 class AdminGatewayStatusDOMTest(unittest.TestCase):
@@ -1042,6 +1028,11 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
         expect(self.item("1.2.12").locator(".gw-note")).to_have_text("Retry Requested (%s)" % shown(7))
         self.assertEqual("retry_requested", self.row("1.2.12")["status"])
 
+    def test_07_a_plain_401_is_one_failed_read_and_a_named_end_ends_the_page_session(self):
+        self.open()
+        assert_response_lifetime(self, url=ORIGIN + "/api/studies", index_url=ORIGIN + BASE + "index.html",
+                                 session_id=ME["sessionId"], wording=SERVER_WORDING, button="#gateway-refresh",
+                                 state="#gateway-list-state", rows="#gateway-rows > li", body=FIVE)
 
     def test_08_wording_sizes_keyboard_and_no_dialog(self):
         self.open()
