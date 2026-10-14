@@ -38,7 +38,8 @@ class WorkflowCatalog:
         UniqueLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
         self.documents = {}
         self.owners = {}
-        for path in sorted((Path(root) / '.github/workflows').glob('*.yml')):
+        directory = Path(root) / '.github/workflows'
+        for path in sorted([*directory.glob('*.yml'), *directory.glob('*.yaml')]):
             name = path.relative_to(root).as_posix()
             doc = yaml.load(path.read_text(encoding='utf-8'), Loader=UniqueLoader)
             self.documents[name] = doc

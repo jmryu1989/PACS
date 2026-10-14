@@ -39,6 +39,7 @@ const S = SERVER ? require(SERVER) : null;
 const { StudyAccessService } = SERVER ? require(path.join(path.dirname(SERVER), 'study-access.service')) : {};
 // S9-U0b: the metrics concern owns the observation clock and the source wait (its protected seams); the facade forwards to it.
 const { PacsMetrics } = SERVER ? require(path.join(path.dirname(SERVER), 'pacs', 'metrics')) : {};
+const { OrthancService } = SERVER ? require(path.join(path.dirname(SERVER), 'orthanc.service')) : {};
 const { PacsAccess } = SERVER ? require(path.join(path.dirname(SERVER), 'pacs', 'access')) : {};
 const hosted = S ? false : 'KIN_ADMIN_METRICS_SERVER is not set: the compiled PacsService runs in kin-api:ci only (/app/dist)';
 
@@ -316,7 +317,7 @@ const inScope = (row, where) => !where?.OR || where.OR.some(term => Object.entri
 /* One mutable StudyState table: a change made while the service reads (afterStates, or an orthanc stand-in that gets the
  * table) is what its next read sees. Unfiltered (the default) every row comes back, so the service's own tenant filter is
  * what keeps other institutions out; `filtered` applies the where clause, so a study that left the scope is absent. */
-function store({ policies = [[], []], statistics = STATISTICS, orthanc = null, dbFail = null, approvalsFail = null,
+function store({ policies = [[], []], statistics = STATISTICS, orthanc = null, orthancService = null, dbFail = null, approvalsFail = null,
   recheckFail = null, filtered = false, afterStates = null } = {}) {
   const calls = [];
   const db = structuredClone(STATES);
@@ -340,7 +341,7 @@ function store({ policies = [[], []], statistics = STATISTICS, orthanc = null, d
       return APPROVED.map(([uid, at]) => ({ uid, firstApprovedAt: ago(at) }));
     },
   };
-  const source = { get: orthanc ? path => orthanc(path, db, calls) : async path => { calls.push(['orthanc', path]); return structuredClone(statistics); } };
+  const source = orthancService ?? { statistics: orthanc ? () => orthanc(db, calls) : async () => { calls.push(['orthanc']); return structuredClone(statistics); } };
   const access = new StudyAccessService(prisma, {}, {});
   const service = new PacsMetrics(prisma, source, access, new PacsAccess(prisma, access));
   // The instance clock is the fixture's NOW, so windows and durations are the fixture's to the second.
@@ -351,6 +352,148 @@ function store({ policies = [[], []], statistics = STATISTICS, orthanc = null, d
 }
 // The fixture as the service stamps it: its one clock also stamps the Orthanc observation.
 const AT_CLOCK = () => clone(ROWS).map(row => row.key === 'storage.server' ? { ...row, observedAt: NOW } : row);
+
+// REQ-S9-U0f-ORTHANC-PUBLIC -> RISK-SOURCE-CONTRACT/UNKNOWN-AS-ZERO -> ORTHANC-01..04.
+// Exercise the public service at the fetch boundary; no private transport method is replaced.
+function statisticsService(t) {
+  const config = { ORTHANC_URL: 'http://orthanc.synthetic.invalid:8042/', ORTHANC_USER: 'SYN-USER', ORTHANC_PASS: 'SYN-PASS' };
+  const previous = Object.fromEntries(Object.keys(config).map(key => [key, process.env[key]]));
+  Object.assign(process.env, config);
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+  return new OrthancService();
+}
+
+test('ORTHANC-01: public statistics reads authenticated GET /statistics once and preserves the JSON answer', { skip: hosted }, async t => {
+  const service = statisticsService(t);
+  let answer;
+  const requests = [];
+  // The request fetch would send, as fetch itself reads its arguments: the init's spelling (plain object or Headers,
+  // explicit or default GET) is not the contract.
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    requests.push(new Request(url, options));
+    return { ok: true, json: async () => answer };
+  });
+  for (answer of [STATISTICS, { TotalDiskSize: '0' }, {}, null, [], { TotalDiskSize: 'bad' }]) {
+    const before = requests.length;
+    assert.deepEqual(await service.statistics(), answer);
+    assert.equal(requests.length - before, 1);
+    const request = requests[before];
+    assert.equal(request.url, 'http://orthanc.synthetic.invalid:8042/statistics');
+    assert.equal(request.method, 'GET');
+    assert.equal(request.headers.get('authorization'), 'Basic ' + Buffer.from('SYN-USER:SYN-PASS').toString('base64'));
+    assert.equal(request.body, null);
+  }
+});
+
+test('ORTHANC-02: public statistics rejects transport, HTTP and JSON failures without retry or a zero fallback', { skip: hosted }, async t => {
+  const service = statisticsService(t);
+  let respond, calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => { calls++; return respond(); });
+  const decode = new SyntaxError('SYN invalid JSON');
+  const cases = [
+    [() => { throw new TypeError('SYN connection refused'); }, e => e.getStatus() === 503],
+    ...[401, 404, 503].map(status => [() => ({ ok: false, status }), e => e.getStatus() === 503]),
+    [() => ({ ok: true, json: async () => { throw decode; } }), e => e === decode],
+  ];
+  for (const [response, rejected] of cases) {
+    respond = response;
+    const before = calls;
+    await assert.rejects(service.statistics(), rejected);
+    assert.equal(calls - before, 1, 'no automatic retry');
+  }
+});
+
+test('ORTHANC-03: the real public service feeds storage observations, missing data, failure and recovery to metrics', { skip: hosted }, async t => {
+  const orthancService = statisticsService(t);
+  let respond, calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => { calls++; return respond(); });
+  const { service } = store({ orthancService });
+  const ok = answer => () => ({ ok: true, json: async () => answer });
+  for (const [response, expected] of [
+    [ok(STATISTICS), ['observed', null, BYTES]],
+    [() => { throw new TypeError('SYN private source address'); }, ['unobservable', 'source_failed', null]],
+    [() => ({ ok: false, status: 503 }), ['unobservable', 'source_failed', null]],
+    [() => ({ ok: true, json: async () => { throw new SyntaxError('SYN invalid JSON'); } }), ['unobservable', 'source_failed', null]],
+    [ok({}), ['unobservable', 'invalid_answer', null]],
+    [ok(null), ['unobservable', 'invalid_answer', null]],
+    [ok({ TotalDiskSize: '0' }), ['observed', null, 0]],
+    [ok(STATISTICS), ['observed', null, BYTES]],
+  ]) {
+    respond = response;
+    const before = calls;
+    const answer = await service.adminMetrics(ADMIN), disk = answer.metrics[0];
+    assert.deepEqual([disk.state, disk.reason, disk.value], expected);
+    assert.equal(disk.observedAt, expected[0] === 'observed' ? NOW : null);
+    assert.deepEqual(answer.metrics.slice(2), AT_CLOCK().slice(2), 'Orthanc failure leaves DB observations intact');
+    assert.equal(calls - before, 1);
+    assert.ok(!JSON.stringify(answer).includes('SYN'), 'source errors do not escape in the response');
+  }
+});
+
+test('ORTHANC-04: an unanswered real source cannot become a success or outlive the metrics wait bound', { skip: hosted, timeout: 10000 }, async t => {
+  const orthancService = statisticsService(t);
+  const releases = [];
+  let responding = false;
+  const sourceAnswer = { ...STATISTICS, diagnostic: 'SYN private late source wording' };
+  t.mock.method(globalThis, 'fetch', () => responding
+    ? Promise.resolve({ ok: true, json: async () => sourceAnswer })
+    : new Promise(resolve => releases.push(() => resolve({ ok: true, json: async () => sourceAnswer }))));
+  // The clock is mocked, so the silent source is held far past every wait (60 s) without sleeping or racing real time.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); await new Promise(resolve => setImmediate(resolve)); };
+  const STEP = 100, HELD = 60000, WAIT = 1000;
+  // production: the wait as shipped (no seam written). bounded: a caller wait set through the seam, which must end the
+  // wait by its own bound while the source is still silent.
+  const production = store({ orthancService }).service;
+  const bounded = store({ orthancService }).service;
+  bounded.metricsTimeoutMs = WAIT;
+  // A future service deadline may reject. Only a successful answer while the source is silent is forbidden.
+  let boundaryState = 'pending';
+  const boundary = orthancService.statistics().then(
+    () => { boundaryState = 'fulfilled'; }, () => { boundaryState = 'rejected'; });
+  const runs = [production, bounded].map(service => {
+    const run = { answer: null, failure: null, at: null };
+    run.settled = service.adminMetrics(ADMIN).then(value => { run.answer = value; }, error => { run.failure = error; });
+    return run;
+  });
+  const [atProduction, atBounded] = runs;
+  let snapshots;
+  try {
+    for (let ms = 0; ms <= HELD; ms += STEP) {
+      await settle();
+      for (const run of runs) if ((run.answer || run.failure) && run.at === null) run.at = ms;
+      assert.notEqual(boundaryState, 'fulfilled', `statistics() succeeded at ${ms} ms while fetch was unanswered`);
+      if (ms < HELD) t.mock.timers.tick(STEP);
+    }
+    t.diagnostic(`mocked ms held ${HELD}; shipped wait returned at ${atProduction.at}; caller wait ${WAIT} returned at ${atBounded.at}; statistics() ${boundaryState}`);
+    assert.ok(atBounded.at !== null && atBounded.at <= WAIT + STEP, 'the caller wait bound returns metrics while the source is silent');
+    assert.ok(atProduction.at !== null, 'the shipped wait returns metrics while the source is silent');
+    for (const run of runs) {
+      assert.equal(run.failure, null);
+      const disk = run.answer.metrics[0];
+      assert.deepEqual([disk.state, disk.value, disk.observedAt], ['unobservable', null, null]);
+      // timeout, or source_failed if a future own service deadline rejects first; never a value.
+      assert.ok(['timeout', 'source_failed'].includes(disk.reason), disk.reason);
+      assert.deepEqual(run.answer.metrics.slice(1), AT_CLOCK().slice(1), 'the unanswered source leaves other rows intact');
+      assert.ok(!JSON.stringify(run.answer).includes('SYN'), 'source wording does not escape in the response');
+    }
+    snapshots = runs.map(run => clone(run.answer));
+  } finally {
+    responding = true;
+    for (const release of releases) release();
+    await settle();
+    await Promise.allSettled([boundary, ...runs.map(run => run.settled)]);
+  }
+  assert.deepEqual(runs.map(run => run.answer), snapshots, 'a late source answer cannot overwrite the timed-out observation');
+  for (const service of [production, bounded]) {
+    const recovered = await service.adminMetrics(ADMIN);
+    assert.deepEqual(recovered.metrics, AT_CLOCK(), 'a later request can observe the source again');
+  }
+});
 
 test('server: the compiled rows are exactly the page fixture (tenant filter, windows, median, exclusions)', { skip: hosted }, () => {
   assert.deepEqual([...S.ADMIN_METRIC_KEYS], KEYS);
@@ -403,7 +546,7 @@ test('server: an admin reads the own-institution aggregate; filters sit in both 
   assert.match(sql, /JOIN "StudyState" s ON s\.uid = v\.uid/);
   assert.match(sql, /\(s\."institutionId" = \? OR s\."teleInstitutionId" = \?\)/);
   assert.deepEqual(values, ['hallym', 'hallym']);
-  assert.deepEqual(calls.filter(call => call[0] === 'orthanc'), [['orthanc', '/statistics']]);
+  assert.deepEqual(calls.filter(call => call[0] === 'orthanc'), [['orthanc']]);
   assert.equal(calls.filter(call => call[0] === 'policy').length, 2, 'the access check runs before and after the reads');
   // S5-U6b-F01: the scope is read again after every source answered, on the same institution condition, then the policy.
   assert.deepEqual(calls.map(call => call[0]), ['policy', 'orthanc', 'states', 'approvals', 'states', 'policy']);
@@ -454,8 +597,8 @@ test('server: a tele-reading closed while the aggregate is read refuses it (409)
     assert.deepEqual(between.calls.map(call => call[0]), ['policy', 'orthanc', 'states', 'approvals', 'states'],
       'refused at the scope read; the policy read after it never runs');
     // After both DB reads, while Orthanc is still out: the scope is read only once every source has answered.
-    const late = store({ filtered, orthanc: async (path, db, calls) => {
-      calls.push(['orthanc', path]);
+    const late = store({ filtered, orthanc: async (db, calls) => {
+      calls.push(['orthanc']);
       await new Promise(resolve => setTimeout(resolve, 5));
       closeTele(db);
       calls.push(['closed']);

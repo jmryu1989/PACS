@@ -195,15 +195,14 @@ export class PacsMetrics {
   }
 
   /**
-   * Orthanc 서버 전체 저장량(D11). OrthancService의 인증된 `get`을 그대로 쓴다 — 자격증명 처리를 한 곳에 두려는
-   * 것이고, 이 단위의 쓰기 범위에 orthanc.service.ts가 없어 공개 메서드를 새로 두지 못했다(후속에서 옮길 자리).
+   * Orthanc 서버 전체 저장량(D11). 통계 전용 공개 계약을 사용해 인증된 원천 읽기는 OrthancService에 맡긴다.
    * 실패 문구(원천 주소가 섞일 수 있다)는 응답에 싣지 않고 이유 코드만 남긴다.
    */
   private async metricsStorage(): Promise<AdminMetricStorage> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const late = new Promise<'timeout'>(resolve => { timer = setTimeout(() => resolve('timeout'), this.metricsTimeoutMs); });
     try {
-      const answer = await Promise.race([this.orthanc['get']('/statistics'), late]);
+      const answer = await Promise.race([this.orthanc.statistics(), late]);
       if (answer === 'timeout') return { failure: 'timeout' };
       const bytes = orthancDiskBytes(answer);
       return bytes === null ? { failure: 'invalid_answer' } : { bytes, observedAt: new Date(this.metricsClock()).toISOString() };
