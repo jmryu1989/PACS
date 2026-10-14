@@ -23,7 +23,8 @@
  * Astra S5-U4a-F01 (one read, one snapshot): an answer, a close and a report reset committed between the statements
  * of a thread read never reach a client - its RepeatableRead snapshot is whole, and the boundary's final read refuses a
  * body that no longer is; #2 and #3 read in RepeatableRead transactions with no row lock and no row read outside them;
- * the clinical commit keeps the default isolation and the StudyState -> StudyQuestion lock order.
+ * the clinical commit keeps the default isolation and takes the access policy's shared lock before StudyState, and
+ * StudyState before StudyQuestion.
  * Hosted only (kin-api:ci): no /app/dist exists on a development host.
  */
 const test = require('node:test');
@@ -53,8 +54,9 @@ const code = (status, value) => e => typeof e?.getStatus === 'function' && e.get
 
 /**
  * One synthetic store: StudyState (rs), ReportVersion, StudyAccessPolicy, questions, receipts and audit rows, with an
- * ordered event log. `statements` repeats `events` with the row lock of each SQL statement; `transactions` keeps the
- * options of every service $transaction and `{ commit: true }` for each clinical commit. A RepeatableRead transaction reads
+ * ordered event log. `statements` repeats `events` with the lock each SQL statement takes (a row lock, or SHARED for a
+ * shared advisory lock, the mode the access policy is read under); `transactions` keeps the options of every service
+ * $transaction and `{ commit: true }` for each clinical commit. A RepeatableRead transaction reads
  * a copy of the store - and of the clinical versions - taken when it starts (PostgreSQL fixes the snapshot at its first
  * statement; nothing commits in between here); any other transaction and the root client read the live store per
  * statement, as ReadCommitted does. Writes go to the live store and a failed clinical commit undoes them with its
@@ -82,7 +84,8 @@ function world(policy, { questions = [] } = {}) {
       : sql.includes('"ReportVersion"') ? 'anchor' : sql.includes('"StudyState"') ? 'study' : 'unknown';
   const query = async (where, view, index, strings, values) => {
     const sql = strings.join('?'), k = kind(sql);
-    log(where + ':' + k, sql.includes('FOR UPDATE') ? ' FOR UPDATE' : sql.includes('FOR SHARE') ? ' FOR SHARE' : '');
+    log(where + ':' + k, sql.includes('FOR UPDATE') ? ' FOR UPDATE' : sql.includes('FOR SHARE') ? ' FOR SHARE'
+      : sql.includes('pg_advisory_xact_lock_shared(') ? ' SHARED' : '');
     let rows;
     if (k === 'advisory') rows = [{ locked: 1 }];
     else if (k === 'policy') rows = w.policyRow ? [w.policyRow] : [];
@@ -498,7 +501,12 @@ test('F01: the write paths keep the default isolation and lock StudyState before
     assert.ok(transactions.filter(t => !t.commit).every(t => t?.isolationLevel === 'RepeatableRead'), route + ': stable authorization snapshot');
     const parent = commit.indexOf('commit:study FOR UPDATE'), written = commit.indexOf('commit:write');
     assert.ok(parent >= 0 && written > parent, route + ': lock StudyState before business writes');
-    assert.ok(commit.includes('commit:advisory'), route + ': policy lock protects the commit');
+    // The access policy's shared lock is held from before StudyState is locked, so a concurrent first restriction cannot
+    // slip between the scope check made under StudyState and the commit; the scope check taking it again later does not
+    // replace it. Only this relation is pinned, not how many locks or statements the commit has.
+    const policyLock = commit.indexOf('commit:advisory SHARED');
+    assert.ok(policyLock >= 0 && policyLock < parent,
+      route + ': the access policy shared lock comes before the StudyState lock, the scope check, the dependent row lock and every write');
     const childLock = (route === 'create' ? null : 'commit:question FOR UPDATE');
     if (childLock) assert.ok(commit.indexOf(childLock) > parent && commit.indexOf(childLock) < written,
       route + ': lock the dependent row after StudyState and before writes');

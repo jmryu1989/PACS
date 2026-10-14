@@ -23,8 +23,9 @@
  *       forStudy, list and close, and nothing at all when the policy has no metadata rule.
  * Also pinned over the same stubs: every applied requestId replays its stored receipt without a write, after Closed and
  * after a new active request; reuse is 409 REQUEST_ID_REUSED; the active-request rule, the counterparty check, the
- * transition table, the action roles and the audit detail keys without text; the lock order (StudyState before the
- * request row and the counterparty Institution, the receipt read after the commit); #8/#9 in one RepeatableRead
+ * transition table, the action roles and the audit detail keys without text; the lock order (the access policy's shared
+ * lock before StudyState, StudyState before the request row and the counterparty Institution, the receipt read after
+ * the commit); #8/#9 in one RepeatableRead
  * snapshot; an owner change between the statements of a read gives no body at the boundary; and the original terminal
  * of an accepted, a declined and a refused request.
  * Hosted only (kin-api:ci): no /app/dist exists on a development host.
@@ -69,7 +70,8 @@ const CONNECT_TABLES = ['"Transfer"', '"TransferBasis"', '"ProcessingAgreement"'
 
 /**
  * One synthetic store: the study's owner, StudyAccessPolicy, requests, receipts and audit rows, with an ordered event log.
- * `statements` repeats `events` with the row lock of each SQL statement; `transactions` keeps the options of every service
+ * `statements` repeats `events` with the lock each SQL statement takes (a row lock, or SHARED for a shared advisory lock,
+ * the mode the access policy is read under); `transactions` keeps the options of every service
  * $transaction and `{ commit: true }` for each clinical transaction. A RepeatableRead transaction reads a copy of the
  * store - and of the clinical versions - taken when it starts (PostgreSQL fixes the snapshot at its first statement;
  * nothing commits in between here); any other transaction and the root client read the live store per statement, as
@@ -100,7 +102,7 @@ function world(policy, { requests = [] } = {}) {
       : text.includes('FROM "StudyImageRequest" WHERE id') ? 'request' : text.includes('"Institution"') ? 'institution'
         : text.includes('"StudyState"') ? 'study' : 'unknown';
   const lockOf = text => text.includes('FOR UPDATE') ? ' FOR UPDATE' : text.includes('FOR KEY SHARE') ? ' FOR KEY SHARE'
-    : text.includes('FOR SHARE') ? ' FOR SHARE' : '';
+    : text.includes('FOR SHARE') ? ' FOR SHARE' : text.includes('pg_advisory_xact_lock_shared(') ? ' SHARED' : '';
   const query = async (where, view, index, strings, values) => {
     const text = strings.join('?'), k = kind(text);
     sql.push(text);
@@ -524,7 +526,12 @@ test('the write paths keep the default isolation and lock StudyState before the 
     assert.ok(transactions.filter(t => !t.commit).every(t => t?.isolationLevel === 'RepeatableRead'), route + ': stable authorization snapshot');
     const parent = commit.indexOf('commit:study FOR UPDATE'), written = commit.indexOf('commit:write');
     assert.ok(parent >= 0 && written > parent, route + ': lock StudyState before business writes');
-    assert.ok(commit.includes('commit:advisory'), route + ': policy lock protects the commit');
+    // The access policy's shared lock is held from before StudyState is locked, so a concurrent first restriction cannot
+    // slip between the scope check made under StudyState and the commit; the scope check taking it again later does not
+    // replace it. Only this relation is pinned, not how many locks or statements the commit has.
+    const policyLock = commit.indexOf('commit:advisory SHARED');
+    assert.ok(policyLock >= 0 && policyLock < parent,
+      route + ': the access policy shared lock comes before the StudyState lock, the scope check, the dependent row lock and every write');
     const childLock = (route === 'create' ? 'commit:institution FOR KEY SHARE' : 'commit:request FOR UPDATE');
     if (childLock) assert.ok(commit.indexOf(childLock) > parent && commit.indexOf(childLock) < written,
       route + ': lock the dependent row after StudyState and before writes');
