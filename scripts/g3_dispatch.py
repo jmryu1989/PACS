@@ -72,11 +72,16 @@ def post_dispatch(endpoint, body):
 
 def bind(path, record, entry, query, repository_id, workflow_id, polls=12, sleep=time.sleep):
     base = f'repos/{record["repository"]}/actions'
-    response_id = (entry.get('response', {}).get('body') or {}).get('workflow_run_id')
+    body = entry.get('response', {}).get('body') or {}
+    response_id = body.get('workflow_run_id')
     if response_id is not None and (type(response_id) is not int or response_id <= 0):
         stop('invalid dispatch response run id')
+    if response_id is not None and 'run_url' in body and \
+            body['run_url'] != f'https://api.github.com/repos/{record["repository"]}/actions/runs/{response_id}':
+        stop('dispatch response run_url names another repository/run')
     title = f'candidate {record["candidate_sha"]} [g3:{entry["nonce"]}]'
     started = instant(entry['requested_at'])
+    seen_title = None
     for index in range(polls):
         if response_id is not None:
             run, _ = query(f'{base}/runs/{response_id}')
@@ -92,17 +97,26 @@ def bind(path, record, entry, query, repository_id, workflow_id, polls=12, sleep
         if matches:
             run = matches[0]
             check_run(run, repository_id, workflow_id)
-            if (run['event'] != 'workflow_dispatch' or run.get('display_title') != title
+            # Immutable identity is never retried: another event, creation window or ref is not ours.
+            if (run['event'] != 'workflow_dispatch'
                     or not started - timedelta(seconds=5) <= instant(run['created_at']) <= started + timedelta(minutes=10)):
-                stop('dispatch response nonce/event/timestamp mismatch', run)
+                stop('dispatch response event/timestamp mismatch', run)
             if run.get('head_branch') != entry['dispatch_ref']:
                 stop('dispatch ref mismatch', run)
-            entry.update(state='bound', run_id=run['id'], tools_sha=run['head_sha'])
-            record['revision'] += 1
-            save(path, record)
-            return run['id']
+            if run.get('display_title') == title:
+                entry.update(state='bound', run_id=run['id'], tools_sha=run['head_sha'])
+                record['revision'] += 1
+                save(path, record)
+                return run['id']
+            # GitHub returns the 200 run ID before run-name is rendered (real run 38504773317):
+            # re-read the same ID within the bound. The title carries the candidate SHA and nonce,
+            # so a run that never shows them is refused below, never bound.
+            seen_title = run.get('display_title')
         if index + 1 < polls:
             sleep(5)
+    if response_id is not None:
+        stop(f'dispatch response run never showed this request title (last {seen_title!r}); '
+             'preserve pending request and --resume', {'id': response_id})
     stop('dispatch unresolved after bounded poll; preserve pending request and --resume')
 
 

@@ -796,6 +796,8 @@ never admitted and never a STOP cause; a recorded or adopted pre-T0 run STOPs. A
 no-upload runs, incomplete/capped listings, expired/replaced artifacts and
 old-attempt uploads STOP. `tests/ci_artifacts.py --record` runs this collection after the non-G3
 collection and writes `stage-evidence.json` completed only when both succeed.
+`.github/workflows/ci-tooling.yml` (job and check context `ci-tooling`) runs `ci_candidate_evidence_test.py`
+and `ci_artifacts_test.py` through the recorder on every PR and main push; it uses no GitHub API.
 PR admission is explicit and distinguishes candidate checkout
 from merge-commit runner tools. See [G3 record, collection and STOP recovery](stage-exit.md#g3-공식-라운드-기록과-수집-ci-tooling-1b).
 The single candidate job must produce a fresh upload on rerun. Provenance verification
@@ -988,6 +990,8 @@ Every `scripts/record-run.py --run-dir` in the workflows listed below sits under
 | `asr-engine.yml` / `asr-engine` | `tmp/asr-ci/runtime` | `synthetic-asr-engine-runtime` | Drive the shipped compiled service against the real engine |
 | `dictation-capture` | `tmp/dictation-capture-ci/signal` | `synthetic-dictation-capture-results` | S3-ASR-U4b fixture pin, producer-layout mirror and spectral oracle controls (pure) |
 | `dictation-capture` | `tmp/dictation-capture-ci/capture` | `synthetic-dictation-capture-results` | S3-ASR-U4b fake-device capture, worklet, upload bytes, release and refusals in pinned Chromium |
+| `ci-tooling.yml` / `ci-tooling` | `tmp/ci-tooling-ci/g3-evidence` | `synthetic-ci-tooling-results` | G3 admission, dispatch binding, legacy cutoff T0 and producer cases |
+| `ci-tooling.yml` / `ci-tooling` | `tmp/ci-tooling-ci/stage-collector` | `synthetic-ci-tooling-results` | Integrated Stage 7/8 collector (non-G3 runs and the recorded G3 round) |
 
 ## C5 host monitoring and external notification checks
 

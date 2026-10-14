@@ -463,15 +463,16 @@ def collect(record_path, out, query=gh_get, fetch=fetch_archive):
         for ident, run in runs.items():
             if ident not in listed or revision(listed[ident]) != revision(run):
                 stop('recorded run absent/changed in supersession listing', run)
+        # Legacy rows are classified by time only, all before any post-T0 inspection, so a
+        # STOP manifest still lists them; their bytes are never read.
         excluded = set()
         for context in population:
-            if context['id'] in runs:
-                continue
-            # Legacy rows are classified by time only; their bytes are never read.
-            if legacy(context, record['cutoff']):
+            if context['id'] not in runs and legacy(context, record['cutoff']):
                 excluded.add(context['id'])
                 manifest['legacy_excluded'].append({key: context.get(key) for key in (
                     'id', 'created_at', 'run_started_at', 'run_attempt', 'event', 'status', 'conclusion')})
+        for context in population:
+            if context['id'] in runs or context['id'] in excluded:
                 continue
             check_run(context, repo_id, workflow['id'])
             actual, _ = query(f'{base}/runs/{context["id"]}')

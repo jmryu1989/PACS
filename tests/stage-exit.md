@@ -421,7 +421,10 @@ success이며 적격 업로드가 있어야 한다. 마지막 기록의 폴더�
 candidate.yml에만 있다. 비후보 workflow의 재실행(attempt 2 이상)은 위 1a 계약대로 STOP이다.
 
 dispatch는 원자적으로 pending 요청과 nonce를 먼저 쓰고, 정확한 POST body와
-응답을 기록한다. 응답 run ID를 직접 검사하며, ID 없는 응답/응답 유실의 복구는
+응답을 기록한다. 200 응답의 run ID(`run_url`도 같은 저장소·ID여야 함)를 직접 조회하며,
+event·workflow·저장소·생성 시각 창·dispatch ref가 다르면 즉시 STOP한다. GitHub는 run-name을
+렌더링하기 전에 ID를 돌려주므로(실제 run 38504773317), 같은 ID를 최대 12회 다시 읽어 제목에 후보 SHA와
+nonce가 나타날 때만 결속하고, 끝내 나타나지 않으면 pending으로 STOP한다. ID 없는 응답/응답 유실의 복구는
 동일 nonce를 넣은 run-name과 요청 시각(−5초~+10분)을 최대 12회 대조한다.
 모호하거나 못 찾으면 pending을 유지한다. 제목 검색은 이 **요청 응답 복구**에만
 쓰며 collector는 제목으로 후보 귀속을 정하지 않는다. `--resume`은 재POST하지 않는다.

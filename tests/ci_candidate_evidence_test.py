@@ -37,6 +37,7 @@ NOW = '2026-10-13T00:00:00+00:00'
 CUTOFF = 'e' * 40  # T0: the first commit carrying the producer
 PARENT = '1' * 40  # T0's first parent, without the producer
 T0 = '2026-10-12T00:00:00+00:00'
+WORKFLOW_NAME = 'Validate immutable deployment candidate'
 BEFORE_T0 = '2026-10-11T00:00:00Z'
 
 
@@ -90,6 +91,7 @@ class FakeGitHub:
         self.count_edit = None
         self.post_calls = 0
         self.post_status = 200
+        self.unrendered = {}
         self.commits = {CUTOFF: {'sha': CUTOFF, 'commit': {'committer': {'date': T0}}, 'parents': [{'sha': PARENT}]}}
         self.workflows = {CUTOFF: (ROOT/'.github/workflows/candidate.yml').read_text(encoding='utf-8'),
                           PARENT: producer_free_workflow()}
@@ -158,9 +160,15 @@ class FakeGitHub:
         elif tail.startswith('/actions/artifacts/'):
             result = self.artifacts[int(tail.split('/')[3])]
         elif tail.startswith('/actions/runs/'):
-            result = self.runs[int(tail.split('/')[3])]
+            ident = int(tail.split('/')[3])
+            result = self.runs[ident]
             if '/attempts/' in tail and int(tail.rsplit('/', 1)[1]) != result['run_attempt']:
                 raise ValueError('404 attempt')
+            if self.unrendered.get(ident):
+                # Real API (run 38504773317): the run exists before run-name is rendered.
+                self.unrendered[ident] -= 1
+                result = dict(result, display_title=WORKFLOW_NAME, name=WORKFLOW_NAME,
+                              status='queued', conclusion=None)
         else:
             raise AssertionError(endpoint)
         return copy.deepcopy(result), {}
@@ -178,7 +186,10 @@ class FakeGitHub:
         self.runs[ident] = make_run(ident)
         self.runs[ident]['display_title'] = f'candidate {body["inputs"]["candidate_sha"]} [g3:{body["inputs"]["dispatch_nonce"]}]'
         self.runs[ident]['head_branch'] = body['ref']
-        return {'status': self.post_status, 'body': {'workflow_run_id': ident} if self.post_status == 200 else None}
+        # The real 200 body (2026-10-14 dispatch of da6e024): ID plus API and HTML run URLs.
+        return {'status': self.post_status, 'body': {
+            'workflow_run_id': ident, 'run_url': f'https://api.github.com/repos/{REPO}/actions/runs/{ident}',
+            'html_url': f'https://github.com/{REPO}/actions/runs/{ident}'} if self.post_status == 200 else None}
 
 
 class CandidateEvidenceTests(unittest.TestCase):
@@ -511,6 +522,15 @@ class CandidateEvidenceTests(unittest.TestCase):
                 self.assertEqual(result['status'], 'verified')
                 self.assertEqual([row['id'] for row in result['legacy_excluded']], [9])
 
+    def test_post_cutoff_stop_manifest_still_lists_legacy_rows(self):
+        # Real listing order is newest first: the post-T0 producer-less run precedes legacy rows.
+        self.github.runs[11] = make_run(11, sha=OTHER, conclusion='failure')
+        self.legacy_run()
+        self.refuse('missing/ambiguous upload', 11)
+        result = json.loads((self.root / 'out/g3-evidence.json').read_text())
+        self.assertEqual([row['id'] for row in result['legacy_excluded']], [9])
+        self.assertEqual([row['run_id'] for row in result['downloads']], [10])
+
     def test_recorded_legacy_run_is_refused_even_when_successful(self):
         self.github.runs[10].update(created_at=BEFORE_T0, run_started_at=BEFORE_T0, updated_at=BEFORE_T0)
         self.refuse('predates the legacy cutoff T0', 10)
@@ -736,9 +756,52 @@ class DispatchTests(unittest.TestCase):
         self.assertLess(len(self.github.calls), 30)
 
     def test_wrong_response_run_cannot_be_bound(self):
+        # Run 10 carries another request's nonce: re-read within the bound, then refused.
         self.github.post = lambda endpoint, body: {'status': 200, 'body': {'workflow_run_id': 10}}
-        with self.assertRaisesRegex(ValueError, 'nonce/event/timestamp mismatch'):
+        with self.assertRaisesRegex(ValueError, 'STOP run_id=10 .*never showed this request title'):
             self.start()
+        self.assertEqual(evidence.read_record(self.path)[0]['requests'][0]['state'], 'dispatch_pending')
+
+    def test_real_200_before_run_name_render_binds_after_reread(self):
+        self.github.unrendered[11] = 2
+        self.assertEqual(self.start(), 11)
+        entry = evidence.read_record(self.path)[0]['requests'][0]
+        self.assertEqual((entry['state'], entry['run_id'], entry['tools_sha']), ('bound', 11, TOOLS))
+        self.assertEqual(set(entry['response']['body']), {'workflow_run_id', 'run_url', 'html_url'})
+        self.assertEqual(self.github.calls.count('repos/owner/repo/actions/runs/11'), 3)
+        self.assertEqual(self.github.post_calls, 1)
+
+    def test_real_pending_200_response_resumes_without_post(self):
+        # The 2026-10-14 incident: 200 + run ID recorded, run-name not yet rendered -> pending.
+        self.github.unrendered[11] = 100
+        with self.assertRaisesRegex(ValueError, 'never showed this request title'):
+            self.start()
+        self.assertEqual(evidence.read_record(self.path)[0]['requests'][0]['state'], 'dispatch_pending')
+        self.github.unrendered[11] = 0
+        self.assertEqual(dispatch.dispatch(self.path, resume=True, query=self.github.query, sleep=lambda s: None), 11)
+        self.assertEqual(self.github.post_calls, 1)
+
+    def test_response_run_of_other_event_window_ref_or_workflow_stops_without_reread(self):
+        cases = ((dict(event='pull_request'), 'event/timestamp mismatch'),
+                 (dict(created_at='2026-10-13T00:20:00Z'), 'event/timestamp mismatch'),
+                 (dict(head_branch='other'), 'dispatch ref mismatch'),
+                 (dict(path='.github/workflows/validate.yml'), 'workflow/repository mismatch'))
+        for values, reason in cases:
+            with self.subTest(values=values):
+                self.setUp()
+                self.github.runs[12] = make_run(12)
+                self.github.runs[12].update(values)
+                self.github.post = lambda endpoint, body: {'status': 200, 'body': {'workflow_run_id': 12}}
+                with self.assertRaisesRegex(ValueError, 'STOP run_id=12 .*' + reason):
+                    self.start()
+                self.assertEqual(self.github.calls.count('repos/owner/repo/actions/runs/12'), 1)
+
+    def test_response_run_url_for_another_repository_stops(self):
+        self.github.post = lambda endpoint, body: {'status': 200, 'body': {
+            'workflow_run_id': 11, 'run_url': 'https://api.github.com/repos/other/repo/actions/runs/11'}}
+        with self.assertRaisesRegex(ValueError, 'run_url names another repository'):
+            self.start()
+        self.assertNotIn('repos/owner/repo/actions/runs/11', self.github.calls)
 
     def test_lock_prevents_competing_writers_before_post(self):
         self.init()
