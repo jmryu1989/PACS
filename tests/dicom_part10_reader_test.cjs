@@ -495,8 +495,9 @@ test('R-PATIENT-ID: PatientID must read as printable ASCII (UTF-8 under ISO_IR 1
 test('R-TRIM: padding and surrounding spaces are removed per VR; interior spaces are kept', () => {
   const result = accepted(dicomFile({
     values: {
-      sop: Buffer.from('2.25.4001\0', 'latin1'), study: Buffer.from('2.25.4002 ', 'latin1'), name: '  HONG^GIL DONG  ', id: '  ID 7  ',
-      issuer: ' KINLAB ', modality: ' MR ', sex: 'F ', birth: '19700101 ', institution: Buffer.from('SYNTHETIC HOSPITAL\0\0', 'latin1'), frames: ' 12 ',
+      sop: Buffer.from('2.25.4001\0', 'latin1'), study: Buffer.from('2.25.4002 ', 'latin1'), series: Buffer.from('2.25.4003\0\0\0', 'latin1'),
+      name: '  HONG^GIL DONG  ', id: '  ID 7  ', issuer: ' KINLAB ', modality: ' MR ', sex: 'F ', birth: '19700101 ',
+      institution: 'SYNTHETIC HOSPITAL    ', frames: ' 12 ',
     },
     pixel: nativePixel(true),
   }).bytes);
@@ -511,6 +512,35 @@ test('R-TRIM: padding and surrounding spaces are removed per VR; interior spaces
     refused(dicomFile({ values: { frames }, pixel: nativePixel(true) }).bytes, 'DICOM_MALFORMED');
   }
   refused(dicomFile({ values: { study: ' 2.25.4002' }, pixel: nativePixel(true) }).bytes, 'DICOM_MALFORMED'); // UI has no leading padding
+});
+
+test('R-NUL: a NUL is padding only for UI; on the other character VRs it stays in the value (contract §4.1 steps 7-8)', () => {
+  const pixel = nativePixel(true);
+  // U4BA-01 probes: LO [0x41,0x00] and PN [0x41,0x00] under the default repertoire, ISO_IR 6 and ISO_IR 192.
+  for (const charset of [null, 'ISO_IR 6', 'ISO_IR 192']) {
+    refused(dicomFile({ values: { charset, id: Buffer.from([0x41, 0x00]) }, pixel }).bytes, 'PATIENT_ID_UNREADABLE');
+    refused(dicomFile({ values: { charset, id: Buffer.from('SYN-0001\0\0', 'latin1') }, pixel }).bytes, 'PATIENT_ID_UNREADABLE');
+    for (const name of [Buffer.from([0x41, 0x00]), Buffer.from('SYNTHETIC^PATIENT\0', 'latin1'), Buffer.from([0x41, 0x00, 0x20, 0x20])]) {
+      const header = accepted(dicomFile({ values: { charset, name }, pixel }).bytes).header;
+      assert.equal(header.patientNameComparable, false, `${charset} ${name.toString('hex')}`);
+      assert.equal(header.patientName, null);
+    }
+  }
+  // LO, CS and DA keep a NUL as part of the value instead of reading as the shorter value.
+  const kept = accepted(dicomFile({
+    values: { institution: Buffer.from('SYNTHETIC HOSPITAL\0\0', 'latin1'), modality: Buffer.from('CT\0\0', 'latin1'), birth: Buffer.from('19700101\0\0', 'latin1') },
+    pixel,
+  }).bytes).header;
+  assert.notEqual(kept.institutionName, 'SYNTHETIC HOSPITAL');
+  assert.equal(kept.institutionName, 'SYNTHETIC HOSPITAL\u0000\u0000');
+  assert.equal(kept.modality, 'CT\u0000\u0000');
+  assert.equal(kept.patientBirthDate, '19700101\u0000\u0000');
+  // IS: a NUL makes the frame count unreadable rather than a number.
+  refused(dicomFile({ values: { frames: Buffer.from('12\0\0', 'latin1') }, pixel }).bytes, 'DICOM_MALFORMED');
+  // UI keeps its NUL padding rule, in the dataset and in File Meta.
+  const ui = accepted(dicomFile({ values: { sop: Buffer.from('2.25.4001\0', 'latin1') }, metaOptions: { sop: Buffer.from('2.25.4001\0', 'latin1') }, pixel }).bytes).header;
+  assert.equal(ui.sopInstanceUid, SOP);
+  assert.equal(ui.mediaStorageSopInstanceUid, SOP);
 });
 
 test('R-VIEW: a Uint8Array view at a non-zero offset of a larger buffer reads the same', () => {

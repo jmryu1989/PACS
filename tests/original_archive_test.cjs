@@ -18,6 +18,7 @@ const path = require('node:path');
 const { createHash } = require('node:crypto');
 const { crc32: zlibCrc32 } = require('node:zlib');
 const { Readable, Writable } = require('node:stream');
+const { spawnSync } = require('node:child_process');
 
 const MODULE = process.env.KIN_ORIGINAL_ARCHIVE_MODULE || '/app/dist/original-archive';
 const TARGET = path.isAbsolute(MODULE) ? MODULE : path.resolve(__dirname, '..', MODULE);
@@ -562,4 +563,134 @@ test('A-HOOKS: a failed checkpoint, a lost lease or an abort stops the archive b
   clearTimeout(timer);
   assertIncomplete(receiverStall, 'aborted');
   assert.ok(receiverStall.zip.length > 600 && receiverStall.zip.length < 1000, 'it was waiting on the stalled receiver');
+});
+
+/** One small object whose source the test controls; returns the pieces a lifecycle test needs. */
+function singleObject() {
+  const data = Buffer.from('synthetic original object bytes');
+  const prepared = canonicalManifest('2.25.31', [{ orthancId: 'only', seriesUid: '2.25.32', sopUid: '2.25.33', bytes: data.length, md5: md5(data) }]);
+  return { data, plan: planArchive(prepared.manifest).plan };
+}
+
+test('A-SOURCE-EARLY-ERROR: a source that fails while the first beforeWrite is pending ends the archive as source-error', async () => {
+  const { plan } = singleObject();
+  const out = collector();
+  let source;
+  const result = await withTimeout(writeArchive({
+    plan,
+    source: () => {
+      source = new Readable({ read() {} });
+      setTimeout(() => source.destroy(new Error('synthetic upstream reset')), 5);
+      return source;
+    },
+    sink: out.sink,
+    beforeWrite: () => new Promise(resolve => setTimeout(() => resolve(true), 40)),
+  }), 5000, 'writeArchive');
+  assert.equal(result.state, 'incomplete');
+  assert.equal(result.reason, 'source-error');
+  assert.equal(result.archiveSha256, null);
+  assert.equal(result.objects[0].complete, false);
+  assert.equal(result.bytesWritten, 0, 'nothing is supplied after the source failed');
+  assert.equal(out.finished(), false);
+  assert.equal(out.sink.destroyed, true);
+  assert.equal(source.destroyed, true);
+});
+
+// The same failure in a plain child process with no process-level handlers: an unowned 'error' event would end it with
+// a non-zero status before the promise settles.
+const EARLY_ERROR_CHILD = `
+const { Readable, Writable } = require('node:stream');
+const { createHash } = require('node:crypto');
+const { canonicalManifest, planArchive, writeArchive } = require(process.env.KIN_ORIGINAL_ARCHIVE_MODULE);
+const data = Buffer.from('synthetic original object bytes');
+const prepared = canonicalManifest('2.25.31', [{ orthancId: 'only', seriesUid: '2.25.32', sopUid: '2.25.33', bytes: data.length,
+  md5: createHash('md5').update(data).digest('hex') }]);
+let source;
+const sink = new Writable({ write(chunk, encoding, done) { done(); } });
+writeArchive({
+  plan: planArchive(prepared.manifest).plan,
+  source: () => {
+    source = new Readable({ read() {} });
+    setTimeout(() => source.destroy(new Error('synthetic upstream reset during the lease check')), 5);
+    return source;
+  },
+  sink,
+  beforeWrite: () => new Promise(resolve => setTimeout(() => resolve(true), 40)),
+}).then(result => console.log(JSON.stringify({ settled: 'resolved', result, sinkFinished: sink.writableFinished,
+  sinkDestroyed: sink.destroyed, sourceDestroyed: source.destroyed })),
+error => console.log(JSON.stringify({ settled: 'rejected', error: String(error) })));
+`;
+
+test('A-SOURCE-EARLY-ERROR-PROCESS: a plain node process survives the early source error and the writer returns incomplete', () => {
+  const child = spawnSync(process.execPath, ['-e', EARLY_ERROR_CHILD], {
+    env: { ...process.env, KIN_ORIGINAL_ARCHIVE_MODULE: TARGET }, encoding: 'utf8', timeout: 20000,
+  });
+  assert.equal(child.signal, null);
+  assert.equal(child.status, 0, `child exited ${child.status}: ${child.stderr}`);
+  assert.doesNotMatch(child.stderr, /Unhandled|uncaught/i);
+  const line = child.stdout.trim().split('\n').at(-1);
+  const report = JSON.parse(line);
+  assert.equal(report.settled, 'resolved');
+  assert.equal(report.result.state, 'incomplete');
+  assert.equal(report.result.reason, 'source-error');
+  assert.equal(report.sinkFinished, false, 'the sink is not ended successfully');
+  assert.equal(report.sinkDestroyed, true);
+  assert.equal(report.sourceDestroyed, true, 'the source is released');
+});
+
+test('A-SINK-CLOSE-STALLED-SOURCE: a receiver that closes or fails while the source stalls ends the archive without an abort', async () => {
+  for (const [mode, reason] of [['close', 'sink-closed'], ['error', 'sink-error']]) {
+    const { plan } = sampleStudy();
+    const out = collector();
+    let stalled;
+    let writtenAtClose = null;
+    const pending = writeArchive({
+      plan,
+      // No signal: only the sink's own close or error may end this run.
+      source: (object, index) => {
+        stalled = new Readable({ read() {} });
+        stalled.push(Buffer.alloc(8, index + 1)); // some bytes, then nothing more
+        return stalled;
+      },
+      sink: out.sink,
+      onProgress: p => {
+        if (writtenAtClose !== null) return;
+        writtenAtClose = -1;
+        setTimeout(() => {
+          writtenAtClose = p.archiveBytesWritten;
+          if (mode === 'close') out.sink.destroy();
+          else out.sink.destroy(new Error('synthetic connection reset'));
+        }, 20);
+      },
+    });
+    const result = await withTimeout(pending, 3000, `writeArchive after a sink ${mode}`);
+    assert.equal(result.state, 'incomplete', mode);
+    assert.equal(result.reason, reason, mode);
+    assert.equal(result.archiveSha256, null);
+    assert.equal(result.bytesWritten, writtenAtClose, `${mode}: nothing more was supplied after the receiver went away`);
+    assert.equal(result.objects.length, 1);
+    assert.equal(result.objects[0].complete, false);
+    assert.equal(stalled.destroyed, true, `${mode}: the stalled source is released`);
+    assert.equal(out.finished(), false);
+  }
+});
+
+test('A-SINK-CLOSE-PENDING-SOURCE: a receiver that goes away while source() is pending releases the stream it then gets', async () => {
+  const { plan } = singleObject();
+  const out = collector();
+  let late;
+  setTimeout(() => out.sink.destroy(), 10); // the receiver leaves before the source stream arrives at 60 ms
+  const result = await withTimeout(writeArchive({
+    plan,
+    source: () => new Promise(resolve => setTimeout(() => {
+      late = new Readable({ read() {} });
+      resolve(late);
+    }, 60)),
+    sink: out.sink,
+  }), 3000, 'writeArchive');
+  assert.equal(result.state, 'incomplete');
+  assert.equal(result.reason, 'sink-closed');
+  assert.equal(result.bytesWritten, 0);
+  assert.equal(late.destroyed, true);
+  assert.equal(out.finished(), false);
 });

@@ -360,14 +360,19 @@ function readFileMeta(w: Walk) {
   return { datasetStart: pos, lastTag: last, transferSyntax, sopInstance };
 }
 
-const isPadding = (byte: number) => byte === 0x20 || byte === 0x00;
+/** §4.1 step 7 for UI: trailing NUL (its padding byte) and trailing spaces go; a UID has no leading padding. */
+function uiTrimmed(b: Uint8Array, [start, end]: Range): Range {
+  while (end > start && (b[end - 1] === 0x00 || b[end - 1] === 0x20)) end -= 1;
+  return [start, end];
+}
 
 /**
- * §4.1 step 7: trailing padding always goes (space; NUL for UI, and a trailing NUL some writers leave on text values,
- * which the stored-file readers also drop); leading spaces only where the VR allows them (LO, PN, CS and IS).
+ * §4.1 step 7 for the other character VRs: trailing spaces go, and leading spaces where the VR allows them (LO, PN, CS
+ * and IS). A NUL is padding only for UI, so on these VRs it stays in the value: a PatientID that ends in NUL is not
+ * readable and a name that holds one is not comparable.
  */
-function trimmed(b: Uint8Array, [start, end]: Range, leading: boolean): Range {
-  while (end > start && isPadding(b[end - 1])) end -= 1;
+function textTrimmed(b: Uint8Array, [start, end]: Range, leading: boolean): Range {
+  while (end > start && b[end - 1] === 0x20) end -= 1;
   if (leading) while (start < end && b[start] === 0x20) start += 1;
   return [start, end];
 }
@@ -417,7 +422,7 @@ function textValue(b: Uint8Array, range: Range, chars: CharacterRepertoire) {
 
 function uid(b: Uint8Array, range: Range | undefined): string {
   if (!range) return malformed();
-  const value = latin1(b, trimmed(b, range, false));
+  const value = latin1(b, uiTrimmed(b, range));
   if (value.length > DICOM_READER_LIMITS.maxUidLength || !UID_SYNTAX.test(value)) malformed();
   return value;
 }
@@ -425,7 +430,7 @@ function uid(b: Uint8Array, range: Range | undefined): string {
 function headerFrom(b: Uint8Array, named: Map<NamedKey, Range>, transferSyntaxUid: string, mediaStorageSopInstanceUid: string): DicomHeader {
   const range = (key: NamedKey, leading: boolean) => {
     const found = named.get(key);
-    return found ? trimmed(b, found, leading) : null;
+    return found ? textTrimmed(b, found, leading) : null;
   };
   const characterSetRange = range('specificCharacterSet', true);
   const specificCharacterSet = characterSetRange ? latin1(b, characterSetRange) : null;
@@ -498,8 +503,8 @@ export function readDicomPart10(input: Uint8Array): DicomReadResult {
   const w: Walk = { bytes: b, end: b.length, encapsulated: false, elements: 0, maxDepth: 0 };
   try {
     const meta = readFileMeta(w);
-    const transferSyntaxUid = meta.transferSyntax ? latin1(b, trimmed(b, meta.transferSyntax, false)) : '';
-    const mediaStorageSopInstanceUid = meta.sopInstance ? latin1(b, trimmed(b, meta.sopInstance, false)) : '';
+    const transferSyntaxUid = meta.transferSyntax ? latin1(b, uiTrimmed(b, meta.transferSyntax)) : '';
+    const mediaStorageSopInstanceUid = meta.sopInstance ? latin1(b, uiTrimmed(b, meta.sopInstance)) : '';
     if (transferSyntaxUid === '' || mediaStorageSopInstanceUid === '') return refused('DICOM_FILE_META_MISSING');
     const syntax = DICOM_TRANSFER_SYNTAX_ALLOW_LIST.find(candidate => candidate.uid === transferSyntaxUid);
     if (!syntax) return refused('DICOM_TRANSFER_SYNTAX_UNSUPPORTED');
