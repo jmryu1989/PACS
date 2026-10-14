@@ -116,7 +116,7 @@ class ReportStructureMigration(unittest.TestCase):
 
     def test_the_commit_lock_reads_both_json_columns_in_one_statement(self) -> None:
         # S7-U5: the caller's row is locked and read once (`ownDraft`), by the draft write and the commit alike.
-        assert_behaviour('pacs_split_test.cjs', '^U0B-STRUCT-NORMAL')
+        assert_behaviour('pacs_split_test.cjs', '^(U0B-STRUCT-NORMAL|U0B-HISTORY)')
 
     def test_no_existing_response_gained_the_column(self) -> None:
         # P9/P15: `versions()` selects by name and `toClient` projects five draft fields. If either

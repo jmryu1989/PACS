@@ -111,6 +111,11 @@ class PortraitWorkspaceE2E(base.WorklistE2E):
             for selector in ["#thumbwrap img", "#clinical", "#t-mod", "#b-save", "#b-history", "#logout"]:
                 self.reachable(page, selector)
             self.snapshot(page, "768-report")
+            # W3-LAND r5 (W3R-09): at 768x1024 the stacked list keeps its header and one
+            # whole row, which leaves this band at its 140px minimum (no drag range);
+            # the resize inside a scrolled workspace is checked in a taller portrait.
+            self.assertGreaterEqual(page.locator(".rw").bounding_box()["height"], 140)
+            self.portrait(page, 768, 1366)
             # The resize handle is now inside a scrolled workspace.
             old = page.locator(".rw").bounding_box()["height"]
             self.drag(page, "#resize-top", -15)
