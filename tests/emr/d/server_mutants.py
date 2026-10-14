@@ -55,6 +55,23 @@ COPIED = ["api/src", "api/prisma", "api/tsconfig.json", "api/nest-cli.json", "ap
           "api/.dockerignore", "api/Dockerfile", "emr/units/d.json", ".github/workflows/emr-d.yml", "tests/emr/d", "scripts/record-run.py",
           "scripts/emr-compose.py", "scripts/run-tests.py", "tests/live_test_gate.py"]
 
+
+def recorder_contract_inputs():
+    """What the recorder itself adds to a record of a tests/** input (scripts/record-run.py workflow_contract_inputs, W2C-05):
+    the workflow cases record every recorder line, so those inputs must exist in the copy as they do in the checkout. Read
+    from the recorder, never restated here; a recorder without that function adds nothing."""
+    spec = importlib.util.spec_from_file_location("emr_d_record_run", ROOT / "scripts" / "record-run.py")
+    recorder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(recorder)
+    contract = getattr(recorder, "workflow_contract_inputs", None)
+    if contract is None:
+        return []
+    files, trees = contract(["tests/emr/d/server_test.cjs"], [], ROOT)
+    return [*files, *trees]
+
+
+COPIED += [item for item in recorder_contract_inputs() if item not in COPIED]
+
 CASE = {
     "r5-response": "R5 response boundary: all declared clinical and business variants reject unsigned or unauthorized body egress",
     "r5-recovery": "R5 original request: recovery, ownership, metadata authorization and maximum seed matrices preserve original outcomes",
@@ -2639,7 +2656,8 @@ class Copy:
             source, target = ROOT / item, self.root / item
             target.parent.mkdir(parents=True, exist_ok=True)
             if source.is_dir():
-                shutil.copytree(source, target)
+                # A tree may hold a file named before it (.github/workflows after .github/workflows/emr-d.yml).
+                shutil.copytree(source, target, dirs_exist_ok=True)
             else:
                 shutil.copyfile(source, target)
         self.modules = self.root / "api" / "node_modules"
