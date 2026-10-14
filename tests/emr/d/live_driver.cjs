@@ -98,10 +98,12 @@ async function main() {
     for (const [name, p] of Object.entries(PEOPLE)) if (p.sign)
       dev.register(await identityOf(p.sub), 'reg-' + name, p.institution, { kid: 'kid-' + name, deviceId: 'dev-' + name, osUserId: 'os-' + name });
   }
+  // C's study reader: the managing institution and the receiving institution of the open tele channel (D1190).
   const studies = { facts: async (db, studyId) => {
-    const rows = await db.$queryRaw`SELECT "institutionId" FROM "StudyState" WHERE uid = ${studyId}`;
+    const rows = await db.$queryRaw`SELECT "institutionId", "teleInstitutionId" FROM "StudyState" WHERE uid = ${studyId}`;
     if (!rows.length || !rows[0].institutionId) throw Object.assign(new Error('synthetic study unknown'), { code: 'NotFound' });
-    return { studyId, managingInstitutionId: rows[0].institutionId, patient: { linkId: 'link-' + studyId, patientId: 'SYN-PATIENT-1', assigningAuthority: rows[0].institutionId } };
+    return { studyId, managingInstitutionId: rows[0].institutionId, teleInstitutionId: rows[0].teleInstitutionId ?? null,
+      patient: { linkId: 'link-' + studyId, patientId: 'SYN-PATIENT-1', assigningAuthority: rows[0].institutionId } };
   } };
   const context = { facts: async request => ({ actor: request.actor, trustedProxyIp: known({ address: '192.0.2.10', source: 'trusted-proxy' }),
     requestId: 'request-' + uuid(), member: identityOf, signature: request.signature ?? null }) };
@@ -640,6 +642,22 @@ const SCENARIOS = {
     const out = { replay: await write(args.a) };
     out.replayLookups = [...keycloakCalls];
     if (args.fresh) out.fresh = await write(args.fresh);
+    return out;
+  },
+
+  /**
+   * D1190 (round 5 part (c), I-TELE-ASSIGN): with the study's tele channel open to inst-b (the case set it), the owner's
+   * technician assigns r1 and the receiver's radiologist rb takes the study himself; rb's request is sent again. With
+   * `receiver` (the case closed the channel since): that request sent again, and a new one at the row's revision.
+   */
+  async 'd1190-tele'({ args, attempt, caller, owner, actorFacts, PEOPLE, S }) {
+    const write = async (name, b) => attempt(async () => S.assignments.write(args.study, caller(name), b, { actor: await actorFacts(name), signature: null }));
+    if (args.receiver) return { resend: await write('rb', args.receiver), fresh: await write('rb', { ...args.receiver, requestId: uuid(), revision: 1 }) };
+    const own = { requestId: uuid(), expectedOwner: owner('t1'), revision: 0, readerSub: PEOPLE.r1.sub };
+    const receiver = { requestId: uuid(), expectedOwner: owner('rb'), revision: 0, readerSub: PEOPLE.rb.sub };
+    const out = { owner: await write('t1', own), receiver: await write('rb', receiver) };
+    out.resend = await write('rb', receiver);
+    out.bodies = { owner: own, receiver };
     return out;
   },
 

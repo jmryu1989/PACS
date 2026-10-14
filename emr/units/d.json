@@ -24,6 +24,7 @@
   },
   "owned_paths": {
     "R5a-core": ["api/src/emr-clinical/response.ts", "api/prisma/migrations/20261013010000_emr_d_original_decisions/migration.sql", "tests/emr/d/response_test.cjs", "tests/emr/d/recovery_test.cjs", "tests/emr/d/r5a_scenarios.cjs"],
+    "R5c-integration": ["tests/emr/d/astra_hosted_live.py", "tests/emr/d/receipt_key_test.cjs"],
     "R1": [
       "api/src/emr-clinical/contract.ts",
       "api/src/emr-clinical/records.ts",
@@ -241,7 +242,7 @@
     "db": "B1 EmrLedgerClient (the ledger's own pool)",
     "ledger": "B1 AccessLedgerStore after seal.recoverAtStart()",
     "context": "B2 ClinicalContextSource.facts(request): verified ActorFacts (immutable identity, roles, institution, signing registration), trusted ingress address, request ID, member(subject) resolver, and C's carried device signature {jws, osUserId}",
-    "studies": "C ClinicalStudySource.facts(db, studyId): managing institution and patient link snapshot",
+    "studies": "C ClinicalStudySource.facts(db, studyId): managing institution, the receiving institution of the study's open tele channel (teleInstitutionId, null when none; only the reader assignment consults it, user decision D1190) and patient link snapshot",
     "signatures": "C SignatureVerificationPorts: KeyReader of registered device keys, KeyPolicy (production: tpm-nonexportable only), AnchorReader, reviewed TimePolicy",
     "services": "the six owning services reach unit D through api/src/emr-clinical/services.ts (the port, projection registration, readClinicalRows/readClinicalUnits/readClinicalSources, wording); Nest constructs them before the server start has B1's ledger, B2's context and C's ports, so the start binds the composed runtime once (bindClinicalPort; a second binding is refused, nothing per request replaces it)",
     "raw_sql_check": "tests/admin_audit_attribution_test.cjs (shared, CI writer) must read the real composition: see the EMR-D round 3 result integration_remaining DR2-08 for the observed unresolved candidates and the exact rule change",
@@ -283,7 +284,8 @@
         "TEST-D-04 atomic_retry server: a cited source gone before the commit keeps the stale-source refusal - in a recovery, for the original and every resend, and in a commit itself; storage that cannot be read leaves it pending for the next recovery",
         "EMR-D-R2 declaration: d.json lists exactly the collected server and live cases, existing owned paths and the newest migration",
           "R5 response boundary: all declared clinical and business variants reject unsigned or unauthorized body egress",
-          "R5 original request: recovery, ownership, metadata authorization and maximum seed matrices preserve original outcomes"
+          "R5 original request: recovery, ownership, metadata authorization and maximum seed matrices preserve original outcomes",
+        "A5R-05 receipt key: a request ID another image request receipt holds is that request's 409 REQUEST_ID_REUSED terminal, with nothing written"
       ],
       "round3_findings": {
         "DR2-04": "TEST-D-04 atomic_retry server: an allocation request keeps its identity - the same request before and after its first commit, at any unit revision; another meaning under its request ID is another request",
@@ -343,7 +345,8 @@
         "test_r5a_nc02_maximum_history_sql",
         "test_r5a_nc04_business_ack",
         "test_r5a_nc05_original_refusal_seal_retry",
-        "test_r5a_nc06_absent_admission_race"
+        "test_r5a_nc06_absent_admission_race",
+        "test_d1190_tele_assignment_receiver_row"
       ]
     }
   },
@@ -620,9 +623,20 @@
       }
     ]
   },
+  "hosted": {
+    "file": "tests/emr/d/astra_hosted_live.py",
+    "runner": "scripts/run-tests.py --plan <plan> --mode live only; each plan names this file and exactly the cases of one unit below, whose attempts the runner's ledger keeps",
+    "image": "AstraHosted: KIN_TEST_API_IMAGE verified against KIN_EMR_D_IMAGE_IDENTITY for TARGET_SHA = this checkout's HEAD (tests/emr/d/live.py verified_image, D5D-03); AstraB: b_image with this checkout read-only",
+    "b_image": "node:22-bookworm",
+    "files": {"tests/finding_input_test.cjs": 12, "tests/clinician_question_service_test.cjs": 12, "tests/image_request_service_test.cjs": 13, "tests/reader_assignment_scope_test.cjs": 15, "tests/emr/b/contract_test.cjs": 21},
+    "units": {
+      "emr-d-r5a2-hosted-regressions": ["AstraHosted.test_assignment_scope", "AstraHosted.test_finding_input", "AstraHosted.test_image_request_service", "AstraHosted.test_question_service"],
+      "emr-d-r5a2-b-linux": ["AstraB.test_b_contract"]
+    }
+  },
   "expected": {
-    "server": 24,
-    "live": 26,
+    "server": 25,
+    "live": 27,
     "live_mutants": 5,
     "migrations": 47,
     "note": "declared before running; never generated from a run's own result"
@@ -653,6 +667,16 @@
       "req": "REQ-EMR-10",
       "risk": "RISK-D-05",
       "test": "TEST-D-05 ui_reopen: page round (not in this round)"
+    },
+    {
+      "req": "REQ-S7-U3a-TELE-ASSIGN (user decision D1190)",
+      "risk": "RISK-S7-U3a-CROSS-TENANT-ASSIGN, RISK-D-03",
+      "test": "TEST-D-03 read_scope contract case 'a write from another institution is refused before anything else is examined' (M-D-05 with D1190), tests/reader_assignment_scope_test.cjs through the hosted unit emr-d-r5a2-hosted-regressions, live test_d1190_tele_assignment_receiver_row"
+    },
+    {
+      "req": "REQ-S5-U4p-IDEMPOTENCY, REQ-EMR-01/07 (Astra A5R-05)",
+      "risk": "RISK-D-04",
+      "test": "server_test case 'A5R-05 receipt key' (tests/emr/d/receipt_key_test.cjs: the probe, the route variants and the concurrent receipt key)"
     }
   ]
 }

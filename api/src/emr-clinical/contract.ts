@@ -216,9 +216,20 @@ export interface ActorFacts {
  * Part 1 is one institution: every D record is written and read only by its managing institution. Another institution
  * (including a tele reading one) needs a recorded 의료법 제21조의2 transfer basis and the Part 2 activation of
  * inter-institution reading (legal register 2026-10-09 LR-20 / delta D-4, LR-51), which D does not provide.
+ *
+ * One exception, the reader assignment only (user decision D1190): the receiving institution of the study's open tele
+ * channel is our company, whose coordinators assign its radiologist, so it keeps its own allocation row of the study
+ * (records.ts writingInstitution). An allocation carries no text and no clinical entry; every other record kind keeps the
+ * managing institution's boundary.
  */
 export interface StudyFacts {
   studyId: string; managingInstitutionId: string; patient: PatientLinkSnapshot;
+  /**
+   * C's study reader: the receiving institution of the study's tele channel while it is open (StudyState.teleInstitutionId),
+   * else null. Absent means no open channel, as for an admitted input stored before this fact existed (B1 keeps every
+   * admitted input exactly; its recovery must decide what its admission decided).
+   */
+  teleInstitutionId?: string | null;
 }
 export interface ClinicalVersion {
   formatVersion: 'emr-clinical/1';

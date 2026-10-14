@@ -223,7 +223,7 @@ MUTANTS += [
      "case": "CONSULT C35 prepared recovery preserves original time version text and context reason",
      "expect": "C35: recovery reuses the fixed context reason without replanning"},
     {"id": "M-C11", "invariant": "I11", "title": "skip the current institution check for outcome lookup", "file": "records.ts",
-     "old": "  if (!institutionAdmits(actor.institutionId, managing)) refuse('NotFound');", "new": "",
+     "old": "  if (writer === null || !institutionAdmits(actor.institutionId, writer)) refuse('NotFound');", "new": "",
      "case": "CONSULT C46 each outcome lookup enforces current institution access", "expect": "C46: another institution gets no outcome receipt or body"},
     {"id": "M-C12", "invariant": "I12", "scope": "reconciliation-model", "title": "disable automatic lookup and require another external event", "file": "records.ts",
      "old": "    await waitNext();", "new": "    return;",

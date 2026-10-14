@@ -1792,6 +1792,14 @@ test('EMR-D-R2 declaration: d.json lists exactly the collected server and live c
     assert.ok(fs.existsSync(path.join(root, file)), round + ': ' + file);
   const all = Object.values(d.owned_paths).flat();
   assert.equal(new Set(all).size, all.length, 'no owned path is declared twice');
+  // I-HOSTED-WRAPPER: the hosted units select exactly the test methods the wrapper's own classes declare, over existing files.
+  const hosted = spawnSync(python, ['-B', '-I', '-c', [
+    'import ast,json,sys', 'tree=ast.parse(open(sys.argv[1],encoding="utf-8").read())',
+    'print(json.dumps(sorted(n.name+"."+f.name for n in tree.body if isinstance(n,ast.ClassDef) for f in n.body if isinstance(f,ast.FunctionDef) and f.name.startswith("test"))))',
+  ].join('\n'), path.join(root, d.hosted.file)], { encoding: 'utf8' });
+  assert.equal(hosted.status, 0, hosted.stderr);
+  assert.deepEqual(JSON.parse(hosted.stdout), Object.values(d.hosted.units).flat().sort(), 'the hosted wrapper runs exactly the declared hosted cases');
+  for (const file of Object.keys(d.hosted.files)) assert.ok(fs.existsSync(path.join(root, file)), 'hosted: ' + file);
   const migrations = fs.readdirSync(path.join(api, 'prisma/migrations'), { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name).sort();
   assert.equal(migrations.length, d.migrations.count);
   assert.equal(migrations.at(-1), d.migrations.added.at(-1));
@@ -1815,4 +1823,12 @@ test('R5 original request: recovery, ownership, metadata authorization and maxim
   assert.equal(child.status,0,'R5 recovery matrix must pass: '+child.stdout+' '+child.stderr);
   assert.match(child.stdout,/^# pass 7$/m,'all recovery cases must execute');
   assert.match(child.stdout,/^# skipped 0$/m,'no recovery case may be skipped');
+});
+test('A5R-05 receipt key: a request ID another image request receipt holds is that request\'s 409 REQUEST_ID_REUSED terminal, with nothing written', () => {
+  const env={...process.env,KIN_EMR_D_ROOT:root}; delete env.NODE_TEST_CONTEXT;
+  const child=spawnSync(process.execPath,['--test','--test-reporter=tap',path.join(root,'tests/emr/d/receipt_key_test.cjs')],
+    {cwd:root,encoding:'utf8',env,timeout:120000});
+  assert.equal(child.status,0,'A5R-05 receipt key cases must pass: '+child.stdout+' '+child.stderr);
+  assert.match(child.stdout,/^# pass 3$/m,'all receipt key cases must execute');
+  assert.match(child.stdout,/^# skipped 0$/m,'no receipt key case may be skipped');
 });

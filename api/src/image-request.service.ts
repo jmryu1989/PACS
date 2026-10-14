@@ -94,8 +94,10 @@ const OWN: Readonly<Record<string, () => HttpException>> = Object.freeze({
   IMAGE_REQUEST_STATE: stateError, IMAGE_REQUEST_ACTIVE_EXISTS: activeExists, IMAGE_REQUEST_COUNTERPARTY_INVALID: counterpartyInvalid,
   STUDY_NOT_FOUND: studyMissing, IMAGE_REQUEST_NOT_FOUND: requestMissing, ProjectionNotFound: requestMissing, NotFound: requestMissing,
   ActorPathRefused: actionForbidden, IMAGE_REQUEST_ACTION_FORBIDDEN: actionForbidden, OwnerChanged: ownerChanged, RequestIdReused: reused,
-  IMAGE_REQUEST_INPUT_INVALID: () => invalid(), IMAGE_REQUEST_BUSY: busy, ProjectionMismatch: changed,
+  REQUEST_ID_REUSED: reused, IMAGE_REQUEST_INPUT_INVALID: () => invalid(), IMAGE_REQUEST_BUSY: busy, ProjectionMismatch: changed,
 });
+const receiptKeyTaken = (e: any) => e?.code === 'P2002' && (Array.isArray(e?.meta?.target) ? e.meta.target.includes('requestId')
+  : String(e?.meta?.target ?? '').endsWith('_pkey'));
 
 @Injectable()
 export class ImageRequestService {
@@ -185,10 +187,24 @@ export class ImageRequestService {
     return row;
   }
 
+  /**
+   * A5R-05: the receipt keeps one row per request ID, unit D's register one original per (record, actor, request). A request
+   * ID a receipt already holds - another person's request, or one of another image request or route - is this new
+   * request's own refusal, 409 REQUEST_ID_REUSED, sealed as its terminal before any row is written: never a storage failure
+   * whose "try again" can never succeed. A request D already committed never reaches a projection (it answers its stored
+   * result, DR3-01), so any holder here is another request.
+   */
+  private async requestIdFree(tx: any, requestId: string) {
+    if (await tx.studyImageRequestReceipt.findUnique({ where: { requestId } })) throw reused();
+  }
+
   /** 영수증 한 행과 감사 한 행을 같은 트랜잭션에 쓴다. 감사에는 사유·note·상대 기관 문장·환자 식별자가 없다(§11). */
   private async receipt(tx: any, c: Caller, applied: any, mark: string, counterpartyInstitutionId: string | null, role: string, at: Date) {
-    await tx.studyImageRequestReceipt.create({ data: { requestId: applied.requestId, imageRequestId: applied.id, subjectSub: c.sub,
-      action: applied.action, fingerprint: mark, appliedRevision: applied.revision, result: applied as any, at } });
+    // A concurrent request that took the ID after requestIdFree: the receipt key refuses this one, with the same answer.
+    try {
+      await tx.studyImageRequestReceipt.create({ data: { requestId: applied.requestId, imageRequestId: applied.id, subjectSub: c.sub,
+        action: applied.action, fingerprint: mark, appliedRevision: applied.revision, result: applied as any, at } });
+    } catch (e) { if (receiptKeyTaken(e)) throw reused(); throw e; }
     await tx.auditLog.create({ data: { actor: c.actor, action: IMAGE_REQUEST_AUDIT_ACTION, target: applied.studyUid,
       detail: JSON.stringify({ id: applied.id, institution: c.institution, kind: applied.kind, action: applied.action,
         from: applied.from, to: applied.to, revision: applied.revision, requestId: applied.requestId,
@@ -228,6 +244,7 @@ export class ImageRequestService {
       const active: any[] = await tx.$queryRaw`SELECT id FROM "StudyImageRequest" WHERE "studyUid"=${studyId} AND kind=${kind}
         AND "requesterSub"=${sub} AND state::text=ANY(${[...ACTIVE]}::text[])`;
       if (active.length) throw activeExists();
+      await this.requestIdFree(tx, requestId);
       const name = this.name(c);
       const applied = { id: recordId, studyUid: studyId, requestId, kind, action: 'create', from: null, to: 'Requested',
         revision: 1, at: v.at };
@@ -242,7 +259,8 @@ export class ImageRequestService {
     if (row.revision !== v.sequence - 1 || row.state !== v.state.from) throw changed();
     const step = TRANSITIONS[p.action];
     if (!step || step.to !== v.state.to || !step.from.includes(row.state)) throw stateError();
-    const role = v.capacity === 'clinical-author' ? CLINICIAN_ROLE : p.action !== 'cancel' && holds(c, TECHNICIAN) ? TECHNICIAN : ADMIN;
+    await this.requestIdFree(tx, requestId);
+    const role =v.capacity === 'clinical-author' ? CLINICIAN_ROLE : p.action !== 'cancel' && holds(c, TECHNICIAN) ? TECHNICIAN : ADMIN;
     await this.apply(tx, c, row, requestId, mark, p.action, step.to, role, v.text ?? '', at);
   }
 

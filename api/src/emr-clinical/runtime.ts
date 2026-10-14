@@ -43,7 +43,10 @@ export interface ClinicalRequestFacts {
   signature: { jws: unknown; osUserId: string } | null;
 }
 export interface ClinicalContextSource { facts(request: unknown): Promise<ClinicalRequestFacts> }
-/** C's clinical study reader: the managing institution and the patient link snapshot of a study, read in `db`. */
+/**
+ * C's clinical study reader: the managing institution, the receiving institution of its open tele channel (null when none;
+ * only the reader assignment consults it, D1190) and the patient link snapshot of a study, read in `db`.
+ */
 export interface ClinicalStudySource { facts(db: ClinicalDatabase, studyId: string): Promise<StudyFacts> }
 export interface ClinicalRuntimeParts {
   /** The EMR ledger client (B1 EmrLedgerClient): D's reads and B1's commit transactions share it. */

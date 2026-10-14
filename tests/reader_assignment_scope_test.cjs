@@ -34,7 +34,9 @@
  * that the runtime admits under its request lock and commits with the service's own projection of the rows below in one
  * clinical transaction (a client tx#n of this store, rolled back with it); every answer is read as the client gets it,
  * through the response boundary over the controller's route metadata. A committed request sent again answers what it
- * committed without moving a row; a request that never committed is judged as new.
+ * committed without moving a row; a request that never committed is judged as new. The receiver's writes pass unit D's own
+ * institution boundary (user decision D1190, EMR-D round 5 part (c)): C's study reader names the open channel and D admits
+ * the receiving institution to its own allocation unit only while that channel is open.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -350,6 +352,10 @@ test('owner and receiver keep their own rows: reads, writes, history and candida
       assert.equal(JSON.stringify(answer).includes(SUB[name]), false, name);
     }
   assert.deepEqual([...w.t.ReaderAssignment.keys()].sort(), [UID + '|' + A, UID + '|' + B]);
+  // D1190: each institution's writes are versions of its own clinical unit of the study, the receiver's acted by the receiver
+  // for the study the owner manages.
+  assert.deepEqual([...w.clinical.store.units.values()].map(u => [u.managingInstitutionId, u.versions.map(v => v.actingInstitutionId)]),
+    [[A, [A]], [A, [B, B, B]]]);
   // Assigning across the boundary: the other institution's reader, a two-group reader, or another institution's owner.
   for (const [name, target] of [['bTech', 'aDoc'], ['aTech', 'bDoc'], ['bTech', 'abDoc'], ['aTech', 'abDoc'], ['bAdmin', 'zDoc'], ['bDoc', 'aDoc']])
     await assert.rejects(w.write(name, w.body(name, await w.read(name), target)), status(400), name + ' -> ' + target);

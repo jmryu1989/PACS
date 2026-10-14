@@ -507,7 +507,7 @@ class MeasurementCiTests(unittest.TestCase):
             read.update(file.resolve() for file in (ci.ROOT / name).rglob('*') if file.is_file())
         read.update(file.resolve() for file in (ci.ROOT / 'api/prisma').glob('*.cjs') if file.is_file())
         read.update((ci.ROOT / name).resolve() for name in (
-            'api/prisma/schema.prisma', 'api/tsconfig.json', 'api/package-lock.json', test_file))
+            'api/prisma/schema.prisma', 'api/tsconfig.json', 'api/package-lock.json', test_file, 'tests/admin_audit_raw_flow.cjs'))
         self.assertEqual(len(recorded), len(set(recorded)), 'no duplicate recorded inputs')
         self.assertSetEqual(set(recorded), read, 'recorded inputs must equal scanner inputs in both directions')
 

@@ -1068,5 +1068,49 @@ class EmrDLive(unittest.TestCase):
         self.assertEqual(record["state"], "committed")
         self.assertEqual(len(self.versions(record["record_id"])), 1)
 
+    # ── round 5 part (c): the receiving institution of an open tele channel keeps its own allocation row (D1190) ──
+
+    def allocation_unit(self, study, institution):
+        return "assignment:" + sha(json.dumps([study, institution], separators=(",", ":")).encode())
+
+    def test_d1190_tele_assignment_receiver_row(self):
+        """D1190 (I-TELE-ASSIGN, S7-U3a REQ-S7-U3a-TELE-ASSIGN): while the study's tele channel is open to inst-b, inst-b's
+        radiologist writes inst-b's own allocation row - one operational version of inst-b's unit, acted by inst-b for the study
+        inst-a manages, with its access event and audit row - beside the owner's row and unit, which stay the owner's; the same
+        request sent again moves nothing; once the channel is closed the receiver is answered and writes nothing."""
+        uid = self.study()
+        self.ok('UPDATE "StudyState" SET "teleInstitutionId" = \'inst-b\' WHERE uid = %s;' % self.literal(uid))
+        out = self.driver("d1190-tele", {"study": uid})
+        for name in ("owner", "receiver", "resend"):
+            self.assertTrue(out[name]["ok"], (name, out[name]))
+        self.assertEqual(out["resend"], out["receiver"], "the same request answers its own committed result")
+        receiver = out["receiver"]["value"]
+        self.assertEqual((receiver["owner"], receiver["revision"], receiver["reader"]["sub"]), (["inst-b", PEOPLE["rb"]], 1, PEOPLE["rb"]))
+        [b] = self.versions(self.allocation_unit(uid, "inst-b"))
+        self.assertEqual((b["entry"], b["body"]["text"], b["signature"], b["body"]["actingInstitutionId"], b["body"]["managingInstitutionId"],
+                          b["body"]["author"]["id"], b["body"]["readerId"]),
+                         ("assignment", None, None, "inst-b", "inst-a", self.identity("rb"), self.identity("rb")))
+        [a] = self.versions(self.allocation_unit(uid, "inst-a"))
+        self.assertEqual((a["body"]["actingInstitutionId"], a["body"]["readerId"]), ("inst-a", self.identity("r1")))
+        events = self.change_events(self.allocation_unit(uid, "inst-b"))
+        self.assertTrue(events, "the receiver's write has its access event")
+        self.assertEqual({(e["event"]["eventId"], e["event"]["actingInstitution"]["value"], e["event"]["managingInstitution"]["value"]) for e in events},
+                         {(events[0]["event"]["eventId"], "inst-b", "inst-a")}, "one event, acted by the receiver for the managed study")
+        rows = lambda: self.json('SELECT json_object_agg("institutionId", json_build_array(revision, "readerSub", "closedAt" IS NULL)) '
+                                 'FROM "ReaderAssignment" WHERE "studyUid" = %s' % self.literal(uid))
+        audits = lambda: self.json('SELECT json_agg(detail::json ->> \'institution\' ORDER BY id) FROM "AuditLog" '
+                                   'WHERE action = \'reader.assignment\' AND target = %s' % self.literal(uid))
+        self.assertEqual(rows(), {"inst-a": [1, PEOPLE["r1"], True], "inst-b": [1, PEOPLE["rb"], True]})
+        self.assertEqual(audits(), ["inst-a", "inst-b"], "one audit row per write, recorded for the institution whose row it is")
+        # The case clears the channel column itself: closing inst-b's legacy row with it is S7-U3a's close (PacsService,
+        # tests/reader_assignment_scope_test.cjs); the claim here is that unit D and the service admit nothing afterwards.
+        self.ok('UPDATE "StudyState" SET "teleInstitutionId" = NULL WHERE uid = %s;' % self.literal(uid))
+        closed = self.driver("d1190-tele", {"study": uid, "receiver": out["bodies"]["receiver"]})
+        for name in ("resend", "fresh"):
+            self.assertEqual((closed[name]["ok"], err(closed[name]).get("status")), (False, 404), name + ": a closed channel answers nothing")
+        self.assertEqual(len(self.versions(self.allocation_unit(uid, "inst-b"))), 1, "a closed channel writes no version")
+        self.assertEqual(rows(), {"inst-a": [1, PEOPLE["r1"], True], "inst-b": [1, PEOPLE["rb"], True]})
+        self.assertEqual(audits(), ["inst-a", "inst-b"])
+
 if __name__ == "__main__":
     raise SystemExit("Run through scripts/run-tests.py --mode live")

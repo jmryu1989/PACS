@@ -181,7 +181,7 @@ function compose(dist = '/app/dist') {
   /**
    * The world a case builds: `tables` its own snapshot/restore, `transaction()` one client of it for a clinical commit
    * (`finish(client, 'commit' | 'rollback')` when that ends), `studyOf(uid)` the StudyState row C's reader takes the
-   * managing institution from, `identityOf(sub)` another member's verified identity. MemberRights follow each caller's
+   * managing institution and the open tele channel from, `identityOf(sub)` another member's verified identity. MemberRights follow each caller's
    * roles as their token carries them (the normal case) unless a case pins a row (`pin`). The world is in use from here on.
    */
   function attach({ tables, transaction, finish = () => {}, studyOf, identityOf = sub => ({ id: uuidOf('identity:' + sub), issuer: 'https://synthetic.invalid', subject: sub }) }) {
@@ -197,10 +197,13 @@ function compose(dist = '/app/dist') {
         return { actor: request.actor, signature: request.signature, requestId: request.requestId, trustedProxyIp: known({ address: '10.0.0.7', source: 'trusted-proxy' }),
           member: async subject => identityOf(subject) };
       },
+      // C's study reader: the managing institution and the receiving institution of the open tele channel (D1190), as the
+      // case's StudyState row holds them when the runtime asks.
       study: async studyId => {
         const row = studyOf(studyId);
         if (!row) throw new V.ContractError('NotFound');
-        return { studyId, managingInstitutionId: row.institutionId, patient: { linkId: 'syn-link-' + studyId, patientId: 'SYNTHETIC-PATIENT', assigningAuthority: row.institutionId } };
+        return { studyId, managingInstitutionId: row.institutionId, teleInstitutionId: row.teleInstitutionId ?? null,
+          patient: { linkId: 'syn-link-' + studyId, patientId: 'SYNTHETIC-PATIENT', assigningAuthority: row.institutionId } };
       },
       /** A client of the world that also answers the emr_clinical statements (`view`: a RepeatableRead transaction's
        *  frozen reader) and holds MemberRights. */

@@ -35,8 +35,11 @@ function actorFacts(input: unknown): Readonly<ActorFacts> {
     institutionId: string(a.institutionId), signingRegistrationId: a.signingRegistrationId === null ? null : string(a.signingRegistrationId) };
 }
 function studyFacts(input: unknown): Readonly<StudyFacts> {
-  const s = object(input, ['studyId', 'managingInstitutionId', 'patient']);
-  return { studyId: string(s.studyId), managingInstitutionId: string(s.managingInstitutionId), patient: patientLink(s.patient) };
+  // The open tele channel is a fact of C's reader; facts without it (an input admitted before it existed) name no channel.
+  const tele = !!input && typeof input === 'object' && own(input, 'teleInstitutionId');
+  const s = object(input, ['studyId', 'managingInstitutionId', 'patient', ...(tele ? ['teleInstitutionId'] : [])]);
+  return { studyId: string(s.studyId), managingInstitutionId: string(s.managingInstitutionId), patient: patientLink(s.patient),
+    teleInstitutionId: !tele || s.teleInstitutionId === null ? null : string(s.teleInstitutionId) };
 }
 function workContext(input: unknown): Readonly<WorkContext> | null {
   if (input === null) return null;
@@ -47,6 +50,21 @@ function workContext(input: unknown): Readonly<WorkContext> | null {
 /** One institution boundary for reads and writes: only the record's managing institution (see StudyFacts, LR-20/D-4). */
 export function institutionAdmits(institutionId: string, managing: string): boolean {
   return institutionId === managing;
+}
+
+/**
+ * The institution whose members write a unit of this surface, or null when none may. Every record kind: its managing
+ * institution. The reader assignment (D1190, S7-U3a REQ-S7-U3a-TELE-ASSIGN): a unit is one institution's allocation row of
+ * the study - the institution that opened it (its first version's acting institution, inside the digest chain), or the
+ * writer's own for a new row - and that institution writes it while it is the managing institution or the receiving
+ * institution of the study's open tele channel. So an owner's row is never written by the receiver nor a receiver's by
+ * the owner, and a closed or redirected channel ends the receiver's writes.
+ */
+function writingInstitution(spec: SurfaceSpec, actor: Readonly<ActorFacts>, study: Readonly<StudyFacts>, unit: ClinicalUnit | null,
+  managing: string): string | null {
+  if (spec.record !== 'assignment') return managing;
+  const holder = unit ? unit.versions[0].actingInstitutionId : actor.institutionId;
+  return holder === managing || holder === study.teleInstitutionId ? holder : null;
 }
 
 // ---------- versions and the projection ----------
@@ -234,7 +252,8 @@ function admit(input: WriteInput) {
   if (spec.opens === false && unit === null) refuse('NotFound');
   // The institution boundary is checked before anything about the record is revealed by a later, more specific refusal.
   const managing = unit?.managingInstitutionId ?? study.managingInstitutionId;
-  if (!institutionAdmits(actor.institutionId, managing)) refuse('NotFound');
+  const writer = writingInstitution(spec, actor, study, unit, managing);
+  if (writer === null || !institutionAdmits(actor.institutionId, writer)) refuse('NotFound');
   const { requestId, revision, b, meaning } = clientBody(spec, w.body, actor);
   const path: SurfacePath = resolvePath(surface, actor, projection ? { parties: projection.parties } : null);
   // The route target, not the stored unit: a write that opens a unit and its replay name the same study.
