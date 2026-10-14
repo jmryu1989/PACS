@@ -165,7 +165,8 @@ class FakeGitHub:
             if '/attempts/' in tail and int(tail.rsplit('/', 1)[1]) != result['run_attempt']:
                 raise ValueError('404 attempt')
             if self.unrendered.get(ident):
-                # Real API (run 38504773317): the run exists before run-name is rendered.
+                # Synthetic defensive case: ASSUMES the title becomes visible late. For run 38504773317
+                # the first-GET state and cause were not observed (inferred only).
                 self.unrendered[ident] -= 1
                 result = dict(result, display_title=WORKFLOW_NAME, name=WORKFLOW_NAME,
                               status='queued', conclusion=None)
@@ -817,7 +818,8 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(self.github.post_calls, 1)
 
     def test_real_pending_200_response_resumes_without_post(self):
-        # The 2026-10-14 incident: 200 + run ID recorded, run-name not yet rendered -> pending.
+        # Synthetic defensive case shaped like the 2026-10-14 record (200 + run ID kept, request pending);
+        # it ASSUMES a late-visible title. The real first-GET state/cause is unobserved (inferred).
         self.github.unrendered[11] = 100
         with self.assertRaisesRegex(ValueError, 'never showed this request title'):
             self.start()
