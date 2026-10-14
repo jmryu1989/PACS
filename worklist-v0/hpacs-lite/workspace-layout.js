@@ -9,7 +9,64 @@
     ? require('./reading-panel-layout.js') : root.KinReadingPanelLayout;
   const defaults = () => ({ version: 1, mode: 'auto', portrait: {}, landscape: {} });
   const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+  const workspaceDefaults = () => ({ version: 1, rail: null, worklist: null, related: null,
+    prior: null, railCollapsed: false, studyPanelTab: 'info' });
+  const axes = ['landscape', 'portrait'];
+  // The reader's Study Panel width, height and Text Size step, per orientation like every panel size (pilot
+  // D1160, W3R-07). Only what the reader changed is kept: a missing value is the default geometry, so the
+  // record of a reader who never touched the options stays as it was, and older v3 records need no migration.
+  function normalizeStudyPanel(value) {
+    if (!object(value) || Object.keys(value).some(k => !axes.includes(k))) return null;
+    const clean = {};
+    for (const axis of axes.filter(a => Object.hasOwn(value, a))) {
+      const chosen = value[axis], kept = {};
+      if (!object(chosen) || Object.keys(chosen).some(k => !['width', 'height', 'text'].includes(k))) return null;
+      for (const name of ['width', 'height'].filter(n => Object.hasOwn(chosen, n))) {
+        if (!Number.isInteger(chosen[name]) || chosen[name] < 1 || chosen[name] > 16384) return null;
+        kept[name] = chosen[name];
+      }
+      if (Object.hasOwn(chosen, 'text') && ![0, 1, 2].includes(chosen.text)) return null;
+      if (chosen.text) kept.text = chosen.text;
+      if (Object.keys(kept).length) clean[axis] = kept;
+    }
+    return clean;
+  }
+  function normalizeV3(value) {
+    if (Object.keys(value).some(k => !['version', 'mode', 'portrait', 'landscape', 'reading', 'workspace'].includes(k))) return null;
+    const legacy = normalize({ version: 2, mode: value.mode, portrait: value.portrait,
+      landscape: value.landscape, reading: value.reading });
+    const workspace = value.workspace, clean = workspaceDefaults();
+    if (!legacy || !object(workspace) || Object.keys(clean).some(k => !Object.hasOwn(workspace, k))
+        || Object.keys(workspace).some(k => !Object.hasOwn(clean, k) && k !== 'studyPanel') || workspace.version !== 1
+        || typeof workspace.railCollapsed !== 'boolean'
+        || !['images', 'info', 'templates'].includes(workspace.studyPanelTab)) return null;
+    for (const name of ['rail', 'worklist', 'related', 'prior']) {
+      const size = workspace[name];
+      if (size !== null && (!Number.isInteger(size) || size < 1 || size > 16384)) return null;
+    }
+    // Panel sizes are kept per orientation in portrait/landscape. The shared
+    // worklist/related/prior fields carry no axis, and a landscape width must
+    // never become a portrait height: records from earlier builds read them as
+    // null, and no build writes them.
+    clean.rail = workspace.rail;
+    clean.railCollapsed = workspace.railCollapsed; clean.studyPanelTab = workspace.studyPanelTab;
+    if (Object.hasOwn(workspace, 'studyPanel')) {
+      const studyPanel = normalizeStudyPanel(workspace.studyPanel);
+      if (!studyPanel) return null;
+      if (Object.keys(studyPanel).length) clean.studyPanel = studyPanel;
+    }
+    return { ...legacy, version: 3, workspace: clean };
+  }
+  // One orientation's Study Panel choice changed (width/height/text), or reset to the default (change null).
+  function withStudyPanel(value, axis, change) {
+    const clean = toVersion3(value);
+    if (!clean || !axes.includes(axis) || (change !== null && !object(change))) return null;
+    const studyPanel = { ...(clean.workspace.studyPanel || {}) };
+    studyPanel[axis] = change === null ? {} : { ...(studyPanel[axis] || {}), ...change };
+    return normalize({ ...clean, workspace: { ...clean.workspace, studyPanel } });
+  }
   function normalize(value) {
+    if (object(value) && value.version === 3) return normalizeV3(value);
     if (!object(value) || ![1, 2].includes(value.version) || !modes.includes(value.mode)
         || Object.keys(value).some(k => !['version', 'mode', 'portrait', 'landscape', ...(value.version === 2 ? ['reading'] : [])].includes(k))) return null;
     const clean = defaults();
@@ -31,11 +88,23 @@
     return clean;
   }
   function withReading(value, reading) {
+    if (value?.version === 3) return normalize({ ...value, reading });
     return normalize({ ...value, version: 2, reading });
+  }
+  function toVersion3(value, current) {
+    const clean = normalize(value);
+    if (!clean || clean.version === 3) return clean;
+    const previous = normalize(current);
+    // Legacy records have no new geometry. Keep current choices on explicit
+    // account Load; otherwise let the page resolve null sizes for its viewport.
+    return normalize({ ...clean, version: 3,
+      reading: clean.reading || previous?.reading || readingPanels.defaults(),
+      workspace: previous?.workspace || workspaceDefaults() });
   }
   function mergeLoaded(current, incoming) {
     const clean = normalize(incoming);
     if (!clean) return null;
+    if (clean.version === 3 || current?.version === 3) return toVersion3(clean, current);
     // Older account layouts contain no integrated-panel choice. Loading one
     // must not silently erase the arrangement the user is currently working in.
     return clean.version === 1 && current?.version === 2 ? withReading(clean, current.reading) : clean;
@@ -59,7 +128,11 @@
   function write(storage, owner, value) {
     const clean = normalize(value);
     if (!owner || !clean) return false;
-    try { storage.setItem(owner, JSON.stringify(clean)); return true; }
+    try {
+      const raw = JSON.stringify(clean);
+      if (raw.length > 2048) return false;
+      storage.setItem(owner, raw); return true;
+    }
     catch (_) { return false; }
   }
   function remove(storage, owner) {
@@ -67,7 +140,7 @@
     try { storage.removeItem(owner); return true; }
     catch (_) { return false; }
   }
-  const api = { PREFIX, defaults, normalize, withReading, mergeLoaded, key, read, write, remove };
+  const api = { PREFIX, defaults, normalize, withReading, workspaceDefaults, toVersion3, withStudyPanel, mergeLoaded, key, read, write, remove };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.KinWorkspaceLayout = api;
 })(globalThis);

@@ -96,36 +96,62 @@ def write_record(path, record):
 
 
 def workflow_contract_inputs(files, trees, cwd):
-    """D1021: workflow readers consume the full catalogue after job relocation.
+    """W2C-05: every recorded tests/** input consumes the workflow catalogue.
 
-    Keep legacy workflow commands byte-identical. Expand only explicitly recorded
-    CI contract consumers, and expose the expansion in the manifest. No imports,
-    shell execution or general dependency inference is performed here.
+    Registration is unnecessary. The diagnostic AST audit checks workflow steps;
+    its uncertain loader edges cannot make a new test fail a required CI check.
     """
-    consumers = {
-        'tests/measurement_ci.py', 'tests/measurement_ci_test.py',
-        'tests/asr_fixture_test.py', 'tests/gateway_pipeline_contract_test.py',
-        'tests/gateway_receipt_source_test.py', 'tests/gateway_retry_source_test.py',
-        'tests/order_reconciliation_source_test.py', 'tests/study_identity_source_test.py',
-        'tests/stage_exit_test.py', 'tests/pacs_split_test.cjs', 'tests/ci_workflows.py',
-    }
+    cwd = Path(cwd).resolve()
     requested = set()
     for name in files:
-        path = Path(name)
         try:
-            requested.add((cwd / path).resolve().relative_to(cwd).as_posix())
+            requested.add((cwd / name).resolve().relative_to(cwd).as_posix())
         except ValueError:
             pass
+    test_root = cwd / 'tests'
+    records_tests = any(name.startswith('tests/') for name in requested)
     for name in trees:
         directory = (cwd / name).resolve()
-        requested.update(consumer for consumer in consumers
-                         if (cwd / consumer).is_relative_to(directory))
-    if not requested.intersection(consumers):
+        records_tests |= directory.is_relative_to(test_root) or test_root.is_relative_to(directory)
+    if not records_tests:
         return [], []
     extra_files = [name for name in ('tests/ci_workflows.py', 'scripts/record-run.py')
                    if name not in requested]
     extra_trees = [] if '.github/workflows' in trees else ['.github/workflows']
+    # Collector/diagnostic self-tests inspect contracts beyond their entry point;
+    # the diagnostic also consumes the installed TS parser version.
+    if requested.intersection({'tests/record_run_test.py', 'tests/ci_workflow_consumers.cjs', 'tests/ci_workflow_consumers_test.py'}):
+        if 'tests' not in trees:
+            extra_trees.append('tests')
+        if 'api/package-lock.json' not in requested:
+            extra_files.append('api/package-lock.json')
     return extra_files, extra_trees
+
+
+def served_page_inputs(files, trees, cwd):
+    """Retain the asset directory consumed by an explicitly recorded main page.
+
+    A split workflow keeps its original command, while the page may gain local
+    scripts/styles. Recording the bounded served directory also captures assets
+    added by the child, without inferring dependencies from product source text.
+    """
+    directory = 'worklist-v0/hpacs-lite'
+    # A run serves the main page when it records the page, its bundle, or the
+    # page-source helper with which page-serving tests list main.html's moved
+    # files (tests/page_source.py reads main.html for every served allowlist).
+    triggers = {directory + '/main.html', directory + '/main-split.bundle.js', 'tests/page_source.py', 'tests/page_source.cjs'}
+    requested = {(cwd / name).resolve() for name in files}
+    if not requested.intersection((cwd / name).resolve() for name in triggers):
+        return [], []
+    covered = any((cwd / directory).resolve().is_relative_to((cwd / name).resolve()) for name in trees)
+    recorder = 'scripts/record-run.py'
+    extras = [] if (cwd / recorder).resolve() in requested else [recorder]
+    # Related's historical oracle imports the approved split pin after W3.
+    if (cwd / 'tests/related_layout_dom_test.py').resolve() in requested:
+        history = 'tests/main_split_historical.py'
+        if (cwd / history).resolve() not in requested:
+            extras.append(history)
+    return extras, [] if covered else [directory]
 
 
 def main(argv=None):
@@ -150,6 +176,10 @@ def main(argv=None):
     run_dir = Path(args.run_dir).resolve()
     cwd = Path(args.cwd).resolve()
     extra_files, extra_trees = workflow_contract_inputs(args.file, args.tree, cwd)
+    page_files, page_trees = served_page_inputs(args.file + extra_files, args.tree + extra_trees, cwd)
+    workflow_files, workflow_trees = extra_files[:], extra_trees[:]
+    extra_files += page_files
+    extra_trees += page_trees
     try:
         # Exclusive mkdir claims this run before any command or evidence is written.
         run_dir.mkdir(parents=True, exist_ok=False)
@@ -157,14 +187,21 @@ def main(argv=None):
         print("Cannot create new run directory: {}".format(error), file=sys.stderr)
         return 125
 
+    # Required evidence is determined by the caller's declarations, before the
+    # D1135 convenience inputs are combined with it. Partial source fixtures may
+    # lack those automatic inputs; retain that absence without inventing hashes.
+    declared_before = file_snapshot(args.file, cwd) + tree_snapshot(args.tree, cwd)
+    automatic_before = file_snapshot(extra_files, cwd) + tree_snapshot(extra_trees, cwd)
     record = {
         "schema_version": 1, "command": command, "cwd": str(cwd),
         "status": "preparing", "started_at_utc": None, "ended_at_utc": None,
         "exit_code": None, "recorder_exit_code": None, "launch_error": None,
         "git_head_before": git_head(cwd), "git_head_after": None,
-        "files_before": file_snapshot(args.file + extra_files, cwd) + tree_snapshot(args.tree + extra_trees, cwd), "files_after": None,
+        "files_before": declared_before + automatic_before, "files_after": None,
         "stdout": "stdout.log", "stderr": "stderr.log", "log_files": None,
-        "workflow_contract_inputs": {"files": extra_files, "trees": extra_trees},
+        "workflow_contract_inputs": {"files": workflow_files, "trees": workflow_trees},
+        "served_page_inputs": {"files": page_files, "trees": page_trees},
+        "declared_inputs": {"files": args.file, "trees": args.tree},
     }
     metadata = run_dir / "run.json"
     try:
@@ -187,14 +224,16 @@ def main(argv=None):
                 })
                 wrapper_exit = 127
             record.update(ended_at_utc=utc_now(), duration_seconds=time.monotonic() - started)
+        declared_after = file_snapshot(args.file, cwd) + tree_snapshot(args.tree, cwd)
+        automatic_after = file_snapshot(extra_files, cwd) + tree_snapshot(extra_trees, cwd)
         record.update(
             git_head_after=git_head(cwd),
-            files_after=file_snapshot(args.file + extra_files, cwd) + tree_snapshot(args.tree + extra_trees, cwd),
+            files_after=declared_after + automatic_after,
             log_files=file_snapshot(["stdout.log", "stderr.log"], run_dir),
         )
         # A successful child is not proof of complete evidence if a requested hash failed.
         if wrapper_exit == 0 and (
-            any(item["status"] == "unreadable" for item in record["files_before"] + record["files_after"])
+            any(item["status"] != "present" for item in declared_before + declared_after)
             or any(item["status"] != "present" for item in record["log_files"])
         ):
             wrapper_exit = 125

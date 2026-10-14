@@ -58,6 +58,7 @@
       $('#worklist-folders-panel').open = false;
       $('#chips')?.replaceChildren(); $('#worklist-folders')?.replaceChildren(); shortcutStatus('');
       $('#chips')?.removeAttribute('data-render-signature');
+      stopWorkspaceLayout();
       // The recovery snapshot above owns unsaved text. Ending cancels composition and purges native history.
       document.activeElement?.blur();
       reportFrame?.end({ uid: null, selectionSeq });

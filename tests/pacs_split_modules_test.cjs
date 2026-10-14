@@ -271,11 +271,11 @@ function studyAccessDouble() {
 const qido = (uid, institutionName, extra = {}) => ({ '0020000D': { Value: [uid] }, '00080080': { Value: [institutionName] },
   '00100020': { Value: ['PID-' + uid.slice(-3)] }, '00100010': { Value: [{ Alphabetic: 'SYN^PATIENT' }] }, ...extra });
 function orthancDouble() {
-  const o = { rows: [], statistics: null,
+  const o = { rows: [], statisticsAnswer: null,
     async studies() { return copy(o.rows); },
     async studyIdentities() { return copy(o.rows); },
     async studiesByUid(uids) { return copy(o.rows.filter(r => uids.includes(r['0020000D'].Value[0]))); },
-    async get(path) { assert.equal(path, '/statistics'); if (o.statistics instanceof Error) throw o.statistics; return o.statistics; },
+    async statistics() { if (o.statisticsAnswer instanceof Error) throw o.statisticsAnswer; return o.statisticsAnswer; },
     async instanceStudyUid() { throw new Error('double: not used'); },
     async lookupInstance() { return []; },
   };
@@ -809,13 +809,13 @@ test('SPLIT-19 account settings and shared searches: a write on a stale revision
 test('SPLIT-20 metrics are administrator-only and refused to a restricted account; an unobservable source is never a zero', async () => {
   const w = world();
   w.study();
-  w.orthanc.statistics = { TotalDiskSize: '123456' };
+  w.orthanc.statisticsAnswer = { TotalDiskSize: '123456' };
   await refused(() => w.metrics.adminMetrics(RAD_A), 403);
   const shown = await w.metrics.adminMetrics(ADMIN_A);
   const row = key => shown.metrics.find(m => m.key === key);
   assert.deepEqual([row('storage.server').state, row('storage.server').value], ['observed', 123456]);
   assert.equal(row('studies.own').value, 1);
-  w.orthanc.statistics = new Error('down');
+  w.orthanc.statisticsAnswer = new Error('down');
   const failed = await w.metrics.adminMetrics(ADMIN_A);
   assert.deepEqual([failed.metrics[0].state, failed.metrics[0].reason, failed.metrics[0].value], ['unobservable', 'source_failed', null]);
   w.sa.restricted = true;

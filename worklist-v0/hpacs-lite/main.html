@@ -5,6 +5,7 @@
   <title>워크리스트 — KOREA IMAGING NETWORK</title>
   <link rel="stylesheet" href="saved-filter-manager.css">
   <link rel="stylesheet" href="worklist-folder-tree.css">
+  <link rel="stylesheet" href="study-panel.css">
   <link rel="stylesheet" href="consultations.css">
   <link rel="stylesheet" href="worklist-columns.css">
   <link rel="icon" type="image/svg+xml" href="/kin-brand/kin-emblem-j1.svg">
@@ -1046,6 +1047,59 @@
     #routing-factors dt { color: var(--kin-text); font-weight: 600; }
     #routing-factors dd { margin: 0; overflow-wrap: anywhere; }
     /* ── S7-U3b 끝 ── */
+    /* The drawer is explicit, so neither it nor the closed Folders rail takes
+       worklist width on first paint. A narrow window keeps a scrollable sheet. */
+    body.workspace-narrow .rw { height: 48px !important; min-height: 48px; overflow: auto; }
+    body.workspace-narrow .left { height: 180px !important; }
+    /* A list column whose controls leave the list less than its header and one
+       whole row keeps that floor (feature-mounts.js) and scrolls vertically. The
+       open Folders rail stays where it is while the list and its controls scroll:
+       the same box as at first paint, held in the column's view instead of
+       scrolling away (it takes no height, like the absolute rail). */
+    body.workspace-list-scroll .left { overflow-y: auto; scrollbar-width: thin; }
+    body.workspace-list-scroll .left > #worklist-folders-panel[open] { position: sticky; top: 0; bottom: auto; left: auto; flex: none;
+      height: var(--workspace-list-height); margin-block-end: calc(-1 * var(--workspace-list-height)); margin-inline-start: calc(-1 * var(--workspace-rail-width, 220px)); }
+    body.workspace-list-scroll.workspace-rail-collapsed .left > #worklist-folders-panel[open] { margin-inline-start: -78px; }
+    .study-panel-strip { display: none; }
+    body.workspace-strip .study-panel-strip { display: flex; flex: none; gap: 6px; padding: 2px 8px; border-top: 1px solid var(--kin-line2); background: var(--kin-panel); }
+    /* A compact row: in a stacked 768x1024 window every pixel below the list floor
+       is the Related panel's (its prior report's first line, D383). */
+    .study-panel-strip .chip { height: 28px; }
+    /* Overlay the left work area on demand; adding a column would squeeze the
+       worklist/related lists and the report when Folders is also open. */
+    #study-panel-host { position: fixed; left: 12px; width: 360px; max-width: calc(100vw - 24px); z-index: 90; pointer-events: none; }
+    #study-panel-host .study-panel { height: 100%; box-sizing: border-box; pointer-events: auto; box-shadow: 0 8px 24px #0008; }
+    #study-panel-host .study-panel-head :is(button, select), #study-panel-host [role="tab"] { font: inherit; color: var(--kin-text); background: var(--kin-panel2); border: 1px solid var(--kin-line2); border-radius: 4px; padding: 6px 10px; cursor: pointer; }
+    /* A menulist draws its text box 2 px taller than a button's: one pixel less padding keeps the Text Size
+       control the Close button's height, so the header (and every tab below it) stays where it was. */
+    #study-panel-host .study-panel-head select { padding-block: 5px; padding-inline: 6px; }
+    #study-panel-host [role="tab"][aria-selected="true"] { background: var(--kin-row-sel); border-color: var(--kin-accent); text-decoration: none; }
+    #study-panel-host :is(.s-thumb, .s-clinical, .s-template) { width: 100%; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+    #study-panel-host .clinical { flex: none; overflow: visible; }
+    #study-panel-host .s-thumb { min-height: 260px; }
+    #study-panel-host .tpl-list { min-height: 180px; overflow: auto; }
+    #study-panel-status:empty { display: none; }
+    .left:has(> #worklist-folders-panel[open]) { padding-inline-start: var(--workspace-rail-width, 220px); }
+    #worklist-folders-panel { width: var(--workspace-rail-width, 220px); }
+    #resize-rail { position: absolute; right: 0; top: 0; bottom: 0; width: 6px; cursor: col-resize; }
+    /* Folders is open on every login (D1041 6-②): the Rail control sits in the
+       panel's title row, so the folder tree keeps its first-paint position. */
+    #rail-collapse { position: absolute; top: 6px; right: 10px; }
+    body.workspace-rail-collapsed #rail-collapse { position: static; margin: 0 8px 4px; }
+    body.workspace-rail-collapsed .left:has(> #worklist-folders-panel[open]) { padding-inline-start: 78px; }
+    body.workspace-rail-collapsed #worklist-folders-panel { width: 78px; }
+    body.workspace-rail-collapsed #worklist-folders-panel > :not(summary):not(#rail-collapse) { display: none; }
+    /* Stacked (portrait) layouts at any width, and small windows, expand the panel
+       across the window (D1041 4-①) over the work area above the report section;
+       feature-mounts.js places it so the report's Approve/Save/Prelim and its fields
+       stay visible and usable while the panel is open (W3R5-03 ②). A 360 px column
+       in a tall window would cover the report toolbar and every line's start. */
+    body.portrait.study-panel-open #study-panel-host { width: calc(100vw - 24px); }
+    body.portrait.study-panel-open #study-panel-host .study-panel-head { flex: none; }
+    @media (max-width: 1100px) {
+      body.study-panel-open #study-panel-host { width: calc(100vw - 24px); }
+      body.study-panel-open #study-panel-host .study-panel-head { flex: none; }
+    }
   </style>
   <link rel="stylesheet" href="reading-workspace.css">
 </head>
@@ -1159,6 +1213,8 @@
         <div class="toolbar-section" role="group" aria-label="This Browser">
           <span class="toolbar-section-title" aria-hidden="true" title="이 브라우저에만 기억되는 배치·열·표시 설정입니다">This Browser</span>
           <button class="chip" id="layout-toggle" title="자동·세로 고정·가로 고정 순서로 전환">Layout: Auto</button>
+          <button class="chip" id="study-panel-open" type="button" aria-expanded="false" aria-controls="study-panel-host" title="영상·검사 정보·상용구 패널을 엽니다.">Study Panel</button>
+          <span id="study-panel-status" role="status" lang="ko"></span>
           <button class="chip" id="columnsettings">Columns</button>
           <button class="chip" id="reading-appearance-open" type="button" disabled>Appearance &amp; Tools</button>
           <button class="chip" id="layout-reset" title="이 계정의 현재 브라우저 배치를 초기화합니다">Reset Layout</button>
@@ -1202,11 +1258,14 @@
   <!-- 우클릭 메뉴 (내용은 상황에 따라 JS가 채움) -->
   <div class="ctx" id="ctx"></div>
 
+  <div id="study-panel-host"></div>
   <div class="split">
     <!-- ══ 좌측: 워크리스트 (6.3) / Study List (8.1) ══ -->
     <div class="left">
     <details id="worklist-folders-panel" open>
       <summary>Folders</summary>
+      <button id="rail-collapse" type="button" class="chip" aria-expanded="true" title="폴더 너비를 접거나 펼칩니다.">Rail</button>
+      <div id="resize-rail" role="separator" aria-orientation="vertical" aria-label="폴더 너비 조절"></div>
       <div id="worklist-folders"></div>
       <button type="button" class="chip" id="shortcuts-reload">Reload Shortcuts</button>
       <button type="button" class="chip" id="shortcuts-save" disabled>Save Shortcuts</button>
@@ -1593,6 +1652,11 @@
       </div><!-- /workrow -->
     </div>
   </div>
+  <nav class="study-panel-strip" aria-label="Study Panel">
+    <button type="button" class="chip" data-study-panel-tab="images" aria-controls="study-panel-host">Images</button>
+    <button type="button" class="chip" data-study-panel-tab="info" aria-controls="study-panel-host">Info</button>
+    <button type="button" class="chip" data-study-panel-tab="templates" aria-controls="study-panel-host">Templates</button>
+  </nav>
 
   <div id="toast"></div>
   <div id="leftnotes" role="status" aria-live="polite"></div>
@@ -1874,6 +1938,7 @@
   <script src="reading-appearance.js"></script>
   <script src="reading-appearance-account.js"></script>
   <script src="workspace-roaming.js"></script>
+  <script src="study-panel.js"></script>
   <script src="report-preview.js"></script>
   <script src="viewer-workspace-dock.js"></script>
   <script src="workspace-shortcuts.js"></script>

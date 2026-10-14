@@ -45,9 +45,10 @@ class CandidateCiTests(unittest.TestCase):
         self.assertEqual([row[2] for row in rows[:2]], ["candidate-invariants", "candidate-worklist"])
         # S7-U1a: 89 invariants (six CriticalResultInvariantTests) + 15 worklist + 8 flows; S8-CTX: + 2 Tech Note flows;
         # EMR-B1: + the ledger's L01 (emr/units/b.json candidate_cases).
-        # W2: + folder edit/save/reapply/relogin. Union: 89 + 15 + 12 = 116.
-        self.assertEqual(len(selected), 116)
-        self.assertEqual([item["case"] for item in selected[-12:]],
+        # W2: + folder edit/save/reapply/relogin. W3: + drawer v3 save/relogin.
+        # CN-N01-A: + 6 OrderCorrectionInvariantTests (invariants 95). Union: 95 + 15 + 13 = 123.
+        self.assertEqual(len(selected), 123)
+        self.assertEqual([item["case"] for item in selected[-13:]],
             [class_name + "." + method for _, class_name, method, _ in candidate.FLOWS])
         declaration = json.loads((target / "emr/units/b.json").read_text(encoding="utf-8"))
         self.assertEqual(selected[-1:], [{"file": row["file"], "case": row["case"]} for row in declaration["candidate_cases"]])
@@ -67,7 +68,7 @@ class CandidateCiTests(unittest.TestCase):
     def test_configuration_uses_target_runner_plans_evidence_and_540_seconds(self):
         class FakeRunner:
             def module_plan(self, filename, unit, mode, timeout, class_name):
-                count = 89 if unit == "candidate-invariants" else 15
+                count = 95 if unit == "candidate-invariants" else 15
                 return {"tests": [{"file": filename, "case": "Local.test_" + str(i)} for i in range(count)]}
             def load_module(self, path):
                 filename = path.relative_to(candidate.TOOLS_ROOT / "tests").as_posix()
@@ -89,14 +90,14 @@ class CandidateCiTests(unittest.TestCase):
             out, selected = candidate.configure(candidate.TOOLS_ROOT, FakeCi, FakeRunner(), plans)
             profile = FakeCi.PROFILES["measurements"]
             self.assertEqual(profile["suite_timeout"], 540)
-            self.assertEqual(len(profile["suites"]), 14)
+            self.assertEqual(len(profile["suites"]), 15)
             command, timeout = FakeCi.guarded_profile_run(profile, *profile["suites"][2], 1000)
             self.assertEqual(Path(command[1]), candidate.TOOLS_ROOT / "scripts/run-tests.py")
             self.assertEqual(command[2], "--plan")
             self.assertEqual(timeout, 575)
             env = FakeCi.profile_environment("measurements", out, {"ORTHANC_PASS": "synthetic"})
             self.assertEqual(env["KIN_EVIDENCE_DIR"], str(out / "screens"))
-            self.assertEqual(len(selected), 116)
+            self.assertEqual(len(selected), 123)
 
     def assert_candidate_workflow(self, workflow):
         # Limited declaration normalisation, not a GitHub expression engine.
