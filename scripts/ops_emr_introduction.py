@@ -2914,13 +2914,20 @@ class SystemdBrowser:
         return ["/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "HOME=/nonexistent",
                 "PLAYWRIGHT_BROWSERS_PATH=" + browsers, *args]
 
+    def supervisor_timeout(self, cap):
+        """A supervisor command's own bound: its cap, within the attempt's cleanup end. The browser's work deadline is
+        not this command's deadline: a query issued just before it would otherwise time out early and turn an ordinary
+        browser timeout into an unconfirmed supervisor (R4-03). The work deadline is enforced between observations."""
+        left = self.budget.end - time.monotonic()
+        require(left > 0, "smoke 정리·종료 확인의 공통 제한 시간이 지났습니다")
+        return min(cap, left)
+
     def control(self, operation, *options):
         require(operation in ("show", "stop", "kill", "reset-failed"), "허용되지 않은 browser 감독 명령입니다")
-        timeout = self.budget.remaining(5)
         try:
             result = subprocess.run(["/usr/bin/systemctl", operation, *options, self.unit],
                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    env={"PATH": "/usr/bin:/bin", "LANG": "C"}, timeout=timeout)
+                                    env={"PATH": "/usr/bin:/bin", "LANG": "C"}, timeout=self.supervisor_timeout(5))
             require(result.returncode == 0, "browser 감독 명령이 실패했습니다")
             return result
         except Exception as error:
@@ -3052,7 +3059,7 @@ class SystemdBrowser:
         timed_out = False
         try:
             result = subprocess.run(launch, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    env={"PATH": "/usr/bin:/bin", "LANG": "C"}, timeout=self.budget.remaining(10))
+                                    env={"PATH": "/usr/bin:/bin", "LANG": "C"}, timeout=self.supervisor_timeout(10))
             require(result.returncode == 0, "browser 서비스 시작이 실패했습니다")
             self.worker["launcher_reaped"] = True
             self.save()
@@ -6433,7 +6440,9 @@ def verified_pin(host, port, connect, ca_file):
             raw.settimeout(bounded_timeout(20))
             with context.wrap_socket(raw, server_hostname=host) as tls:
                 return spki_pin(tls.getpeercert(binary_form=True))
-
+    except SmokeDeadline:
+        # The attempt's time ran out; that is not a certificate identity and stays a retryable deadline (R4-16).
+        raise
     except (ssl.SSLCertVerificationError, Stop) as error:
         raise SmokeRefusal("인증서 chain·SAN·SPKI 신원을 확인하지 못했습니다") from None
 

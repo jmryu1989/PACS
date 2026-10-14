@@ -3873,12 +3873,19 @@ class ProtectedHostTests(unittest.TestCase):
             raw = json.dumps({"version": 1, "mode": intro.MODE, "phase": phase, "plan_sha256": plan_sha, "nonce": os.urandom(16).hex()}).encode()
             self.approve(raw)
             return raw
+
+        def executed(phase):
+            # R4-22: the protected entry answers every request with a classified result; an escaped refusal is a defect.
+            try:
+                return intro.IntroductionHost(self.policy_path).execute(request(phase))
+            except Exception as error:
+                self.fail("the protected entry raised instead of answering %s: %s: %s" % (phase, type(error).__name__, error))
         with patch.object(intro, "HostOps", lambda **kwargs: shared), patch.object(intro, "local_host_key", lambda: "a" * 64):
             for phase in ("introduce", "verify"):
                 with self.subTest(phase=phase):
-                    self.assertEqual(intro.IntroductionHost(self.policy_path).execute(request(phase))["status"], "REJECTED")
+                    self.assertEqual(executed(phase)["status"], "REJECTED")
             self.assertEqual(shared.calls, [], "no forward step ran")
-            result = intro.IntroductionHost(self.policy_path).execute(request("rollback"))
+            result = executed("rollback")
         self.assertEqual(result["status"], "RESTORED", result)
         (warning,) = result["warnings"]
         self.assertEqual((warning["kind"], warning["modes"], warning["restored"]),

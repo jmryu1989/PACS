@@ -458,6 +458,21 @@ class PolicyContracts(unittest.TestCase):
                     function()
                 self.assertFalse(caught.exception.retryable)
 
+    def test_an_exhausted_attempt_during_the_certificate_check_stays_a_retryable_deadline(self):
+        import time
+        budget = release.SmokeBudget(20.01, cleanup=20)
+        time.sleep(0.05)
+        token = release._smoke_budget.set(budget)
+        try:
+            with patch.object(release.socket, "create_connection", side_effect=AssertionError("no connection after the deadline")):
+                with self.assertRaises(release.Stop) as caught:
+                    release.verified_pin("fixture.invalid", 443, ("127.0.0.1", 9), None)
+        finally:
+            release._smoke_budget.reset(token)
+        self.assertNotIsInstance(caught.exception, release.SmokeRefusal, "a deadline is not a certificate identity")
+        self.assertIsInstance(caught.exception, release.SmokeDeadline)
+        self.assertIsNot(getattr(caught.exception, "retryable", True), False)
+
     def policy(self):
         return {"browserFlow": "browser", "requiredActions": [], "passwordPolicy": "length(12) and digits(1) and lowerCase(1) and upperCase(1) and specialChars(1)",
                 "executions": [{"providerId": "auth-cookie", "requirement": "ALTERNATIVE", "level": 0},
@@ -556,6 +571,71 @@ class SupervisorContracts(unittest.TestCase):
                 self.fail("hung supervisor was accepted")
         self.assertEqual(worker["observation_error"]["location"], "systemctl-show")
         self.assertEqual(worker["observation_error"]["type"], "TimeoutExpired")
+
+    @staticmethod
+    def systemctl(latency, outcome):
+        """A supervisor command that answers after `latency` seconds and, like subprocess.run, times out when given less."""
+        import time
+
+        def run(argv, **kwargs):
+            if kwargs["timeout"] < latency:
+                raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+            time.sleep(latency)
+            return outcome(argv)
+        return run
+
+    def test_a_supervisor_query_straddling_the_work_deadline_is_bounded_by_the_attempt_end(self):
+        import time
+        worker = {"resource": "kin-browser-" + "d" * 32 + ".service", "state": "RUNNING"}
+        budget = release.SmokeBudget(20.05, cleanup=20)
+        supervisor = release.SystemdBrowser(worker, None, lambda: None, budget)
+        answer = self.systemctl(0.3, lambda argv: subprocess.CompletedProcess(argv, 0, b"Id=x\n", b""))
+        with patch.object(release.subprocess, "run", side_effect=answer):
+            result = succeeds(self, supervisor.control, "show")
+        self.assertEqual(result.returncode, 0, "the browser's work deadline is not the supervisor command's deadline")
+        self.assertGreater(time.monotonic(), budget.work_end)
+        self.assertNotIn("observation_error", worker)
+        budget.end = time.monotonic() - 0.01
+        with patch.object(release.subprocess, "run", side_effect=answer), self.assertRaises(release.Unknown):
+            supervisor.control("show")
+        self.assertEqual(worker["observation_error"]["location"], "systemctl-show")
+
+    def test_a_browser_hanging_to_its_work_deadline_ends_as_a_proved_browser_timeout(self):
+        from ops_deploy_smoke_test import SystemdObservationContracts
+        case = SystemdObservationContracts()
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        supervisor = case.supervisor
+        del supervisor.control
+        files = {}
+        supervisor.records = SimpleNamespace(write_secret=files.__setitem__, secret=lambda name: "/private/" + name,
+                                             read_secret=files.__getitem__, discard_secret=files.pop)
+        supervisor.budget = release.SmokeBudget(20.45, cleanup=20)
+        case.values.update(SubState="running", ActiveState="active", ExecMainCode="0", ExecMainStatus="0")
+        (case.cg / "cgroup.events").write_text("populated 1\nfrozen 0\n")
+
+        def outcome(argv):
+            if argv[0] == "/usr/bin/systemctl" and argv[1] == "show":
+                return subprocess.CompletedProcess(argv, 0, "\n".join(k + "=" + v for k, v in case.values.items()).encode(), b"")
+            if argv[0] == "/usr/bin/systemctl" and argv[1] == "kill":
+                case.values.update(SubState="failed", ActiveState="failed", ExecMainCode="2", ExecMainStatus="9", Result="timeout")
+                (case.cg / "cgroup.events").write_text("populated 0\nfrozen 0\n")
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        with patch.object(supervisor, "command", return_value=["/usr/bin/python3", "/protected/tool.py", "browser-smoke"]), \
+                patch.object(release.subprocess, "run", side_effect=self.systemctl(0.3, outcome)):
+            try:
+                supervisor.run([], b"{}")
+            except release.BrowserTimeout:
+                pass
+            except Exception as error:
+                self.fail("a browser deadline must end as a proved browser timeout, not " + type(error).__name__)
+            else:
+                self.fail("a hanging browser was accepted")
+        self.assertNotIn("observation_error", case.worker, "an ordinary browser deadline is not an unconfirmed supervisor")
+        self.assertTrue(case.worker["terminal"])
+        self.assertFalse(case.worker["populated"])
+        self.assertEqual(case.worker["unreaped"], [])
+        self.assertEqual(files, {}, "secret inputs are removed only after the proved termination")
 
     def test_cgroup_vanish_during_terminal_observation_is_not_an_error(self):
         from ops_deploy_smoke_test import SystemdObservationContracts

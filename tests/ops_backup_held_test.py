@@ -394,7 +394,10 @@ class HeldCaptureTests(unittest.TestCase):
         host = FakeHost(self.folder)
         host.parent.mkdir(mode=0o700)
         os.chown(host.parent, 1000, 1000)
-        directory = host.capture()
+        try:
+            directory = host.capture()
+        except RuntimeError as error:
+            self.fail("the operating account's private backup root was refused: " + str(error))
         for path in (directory, *directory.iterdir()):
             self.assertEqual((path.stat().st_uid, path.stat().st_gid), (1000, 1000), path.name)
         info = host.parent.stat()
@@ -706,9 +709,15 @@ class RealClusterTests(unittest.TestCase):
             CREATE TABLE client_scope_client(id text, name text);
             CREATE UNIQUE INDEX uk_b71cjlbenv945rb6gcon438at ON client_scope_client(id,name);
             ALTER TABLE client_scope_client RENAME COLUMN name TO client_id;""", "keycloak")
-        self.ok(source, """CREATE TABLE finding_revision(id int PRIMARY KEY, payload jsonb,
-            CONSTRAINT finding_payload_check CHECK ((jsonb_typeof(payload)='object' AND payload ? 'schema') AND payload ? 'items'));
-            INSERT INTO finding_revision VALUES(1,'{"schema":1,"items":[]}');""")
+        # The product's migration shape (20260917120000_findings): BETWEEN is expanded into its own AND after the parser
+        # flattened the outer AND, so the stored tree is AND(AND(>=,<=),=). pg_dump's text re-parses flat, which is
+        # exactly the representation-only difference a restore must not report. (A written "(a AND b) AND c" is
+        # flattened by the parser and would not exercise this case.)
+        self.ok(source, """CREATE TABLE finding_revision(id int PRIMARY KEY, payload jsonb, bytes int,
+            CONSTRAINT finding_payload_check CHECK (bytes BETWEEN 1 AND 65536 AND bytes = octet_length(payload::text)));
+            INSERT INTO finding_revision SELECT 1, p, octet_length(p::text) FROM (SELECT '{"schema":1,"items":[]}'::jsonb p) s;""")
+        raw = "SELECT pg_get_constraintdef(oid,false) FROM pg_constraint WHERE conname='finding_payload_check'"
+        source_raw = self.ok(source, raw)
         catalog = ops.cluster_catalog(source)
         ops.supported_pre_catalog(catalog)
         with tempfile.TemporaryDirectory() as root:
@@ -719,9 +728,12 @@ class RealClusterTests(unittest.TestCase):
             except RuntimeError as error:
                 self.fail("renamed columns and equivalent CHECK expressions must restore: " + str(error))
             self.assertEqual(result["catalog"], "equal")
+            self.assertNotEqual(self.ok(restored, raw), source_raw,
+                                "the fixture must carry a dump/restore representation difference (else this case is vacuous)")
             self.assertEqual(ops.cluster_catalog(restored), catalog)
             self.ok(restored, "ALTER TABLE finding_revision DROP CONSTRAINT finding_payload_check; "
-                              "ALTER TABLE finding_revision ADD CONSTRAINT finding_payload_check CHECK(payload ? 'schema')")
+                              "ALTER TABLE finding_revision ADD CONSTRAINT finding_payload_check "
+                              "CHECK (bytes BETWEEN 1 AND 65535 AND bytes = octet_length(payload::text))")
             self.assertNotEqual(ops.cluster_catalog(restored), catalog, "a single semantic CHECK change must remain visible")
 
     def test_r5_comments_membership_database_flags_and_real_temp_history_have_closed_admission(self):
