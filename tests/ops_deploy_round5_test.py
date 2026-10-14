@@ -3,14 +3,17 @@
 The Engine fixture implements request/response state per exec and container. It does not infer worker completion
 from a Docker client exit, and deliberately keeps a healthcheck alive while the registered exec completes.
 """
+import contextlib
+import contextvars
 import copy
+import io
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -433,6 +436,137 @@ class StateContracts(unittest.TestCase):
                 self.assertIsNotNone(timeout)
                 self.assertGreater(timeout, 0)
                 self.assertLessEqual(timeout, left + 1)
+
+
+class ProbePageDeadlineContracts(unittest.TestCase):
+    """R5-01: the pre-flight browser probe, entered as the supervisor starts it (browser-smoke with probe and the attempt's
+    work deadline), gives each page action min(its cap, the attempt's remaining time). Playwright and the monotonic clock
+    are fakes; acquiring the page spends attempt time after the context defaults were set."""
+
+    NAVIGATION_CAP_MS = 60000
+
+    def probe(self, remaining, acquisition):
+        clock = [1000.0]
+        deadline = clock[0] + remaining
+        events = []
+
+        def left_ms():
+            return (deadline - clock[0]) * 1000
+
+        class Page:
+            def goto(self, url, **kwargs):
+                events.append(("goto", kwargs.get("timeout"), left_ms()))
+
+            def evaluate(self, expression):
+                events.append(("evaluate", None, left_ms()))
+                return "Mozilla/5.0 HeadlessChrome/148.0.0.0"
+
+        class Context:
+            acquired = False
+
+            def add_init_script(self, script):
+                pass
+
+            def set_default_timeout(self, value):
+                events.append(("default", value, left_ms()))
+
+            def set_default_navigation_timeout(self, value):
+                events.append(("navigation_default", value, left_ms()))
+
+            @property
+            def pages(self):
+                if not self.acquired:
+                    self.acquired = True
+                    clock[0] += acquisition
+                return [Page()]
+
+            def new_page(self):
+                return Page()
+
+            def close(self):
+                events.append(("close", None, left_ms()))
+
+        def launch(profile, **kwargs):
+            events.append(("launch", kwargs.get("timeout"), left_ms()))
+            return Context()
+
+        with tempfile.TemporaryDirectory() as folder:
+            browsers = Path(folder) / "browsers"
+            browsers.mkdir()
+            executable = browsers / "chrome"
+            executable.write_bytes(b"")
+
+            class Playwright:
+                chromium = SimpleNamespace(executable_path=str(executable), launch_persistent_context=launch)
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    return False
+
+            module = ModuleType("playwright.sync_api")
+            module.sync_playwright = Playwright
+            spec = {"probe": True, "profile_dir": str(Path(folder) / "profile"), "work_deadline": deadline}
+            stdin = SimpleNamespace(buffer=io.BytesIO(json.dumps(spec).encode("utf-8")))
+            out, err = io.StringIO(), io.StringIO()
+            classify = release.code_of
+            with patch.object(release, "code_of", side_effect=lambda error: events.append(("refused", error, None)) or classify(error)), \
+                    patch.dict(sys.modules, {"playwright.sync_api": module}), \
+                    patch.object(release.time, "monotonic", side_effect=lambda: clock[0]), \
+                    patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": str(browsers)}), \
+                    patch.object(sys, "stdin", stdin), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                # The entry binds the attempt budget for its process; a copied context keeps it out of later tests.
+                code = contextvars.copy_context().run(release.main, ["browser-smoke"])
+            self.assertFalse((Path(folder) / "profile").exists())
+        return code, out.getvalue(), err.getvalue(), events
+
+    def page_actions(self, events):
+        return [event for event in events if event[0] in ("goto", "evaluate")]
+
+    def test_with_time_to_spare_the_navigation_gets_its_cap(self):
+        code, out, err, events = self.probe(remaining=300, acquisition=1)
+        self.assertEqual(code, 0, err)
+        self.assertIn('"probe": "ok"', out)
+        gotos = [event for event in events if event[0] == "goto"]
+        self.assertEqual(len(gotos), 1)
+        _, timeout, left = gotos[0]
+        self.assertEqual(timeout, self.NAVIGATION_CAP_MS)
+        self.assertLessEqual(timeout, left)
+
+    def test_one_second_left_bounds_the_navigation_to_that_second(self):
+        code, out, err, events = self.probe(remaining=30, acquisition=29)
+        self.assertEqual(code, 0, err)
+        # The case is meaningful only if the default set before page acquisition outlives the attempt.
+        default = next(value for name, value, _ in events if name == "navigation_default")
+        self.assertGreater(default, 1000)
+        gotos = [event for event in events if event[0] == "goto"]
+        self.assertEqual(len(gotos), 1)
+        _, timeout, left = gotos[0]
+        self.assertIsNotNone(timeout, "the navigation must not fall back to the context default")
+        self.assertGreater(timeout, 0)
+        self.assertLessEqual(timeout, 1000)
+        self.assertLessEqual(timeout, left)
+
+    def test_an_exhausted_deadline_refuses_before_any_page_action(self):
+        for name, remaining, acquisition, refusal in (("spent while acquiring the page", 30, 31, release.SmokeDeadline),
+                                                      ("spent before the entry", 0, 0, release.Stop)):
+            with self.subTest(name):
+                code, out, err, events = self.probe(remaining=remaining, acquisition=acquisition)
+                self.assertEqual(code, 1)
+                self.assertNotIn("KIN_RESULT", out)
+                self.assertEqual(self.page_actions(events), [])
+                refused = [value for kind, value, _ in events if kind == "refused"]
+                self.assertEqual(len(refused), 1)
+                self.assertIsInstance(refused[0], refusal)
+                self.assertNotIsInstance(refused[0], release.Unknown)
+                events = [event for event in events if event[0] != "refused"]
+                answer = json.loads(err.strip().splitlines()[-1])
+                self.assertFalse(answer["valid"])
+                # A spent deadline is a transient settled refusal, not a credential/policy refusal (R4-16).
+                self.assertTrue(answer["retryable"])
+                if any(event[0] == "launch" for event in events):
+                    self.assertEqual(events[-1][0], "close")
 
 
 class PolicyContracts(unittest.TestCase):

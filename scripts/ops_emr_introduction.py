@@ -6479,7 +6479,9 @@ def browser_probe(spec):
                 context.set_default_timeout(browser_timeout())
                 context.set_default_navigation_timeout(browser_timeout(60000))
                 page = context.pages[0] if context.pages else context.new_page()
-                page.goto("about:blank")
+                # The context defaults above were cut when they were set; acquiring the page spends the same attempt,
+                # so the navigation takes its own cut now (R5-01) instead of a stale default.
+                page.goto("about:blank", timeout=browser_timeout(60000))
                 agent = re.search(r"Chrome/([0-9.]+)", page.evaluate("navigator.userAgent") or "")
             finally:
                 context.close()
