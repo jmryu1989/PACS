@@ -8234,7 +8234,7 @@
             $('#study-panel-open').setAttribute('aria-expanded', String(state.open));
             document.querySelector('#reading-bar [aria-controls="study-panel-host"]')?.setAttribute('aria-expanded', String(state.open));
             if (!studyPanelRestoring && workspaceState.workspace.studyPanelTab !== state.tab) {
-              workspaceState.workspace.studyPanelTab = state.tab; saveWorkspace();
+              workspaceState.workspace.studyPanelTab = state.tab; saveWorkspace(true);
             }
             $('#study-panel-status').textContent = state.open ? 'Study Panel을 열었습니다.' : 'Study Panel을 닫았습니다.';
             if (!state.open && !studyPanelRestoring) {
@@ -8245,7 +8245,8 @@
           },
           onResize: resizeStudyPanel,
           onText: text => changeStudyPanel({ text }),
-          onReset: () => changeStudyPanel(null),
+          // The drawer has already ended a drag in progress; its preview never outlives Default (W3R7-06).
+          onReset: () => { studyPanelPreview = null; changeStudyPanel(null); },
         });
         studyPanelRestoring = true;
         studyPanel.restore({ open: false, tab: workspaceState.workspace.studyPanelTab });
@@ -8428,15 +8429,21 @@
     function placeStudyPanel() {
       const host = $('#study-panel-host');
       host.style.width = '';
-      const chosen = workspaceState.workspace?.studyPanel?.[workspaceAxis()] || {}, text = chosen.text || 0;
+      const axis = workspaceAxis();
+      const chosen = workspaceState.workspace?.studyPanel?.[axis] || {}, text = chosen.text || 0;
       const scale = KinStudyPanel.TEXT_SCALES[text], minWidth = Math.ceil(320 * scale), minHeight = Math.ceil(240 * scale);
-      const wanted = name => studyPanelPreview?.name === name ? studyPanelPreview.size : chosen[name];
+      // A preview belongs to the edge (orientation and dimension) its drag started on (W3R7-02).
+      const wanted = name => studyPanelPreview?.key === axis + ':' + name ? studyPanelPreview.size : chosen[name];
       // The default when nothing was chosen; otherwise the choice (or the default) within [minimum, room].
       const size = (name, initial, minimum, room) => wanted(name) == null && !text ? initial
         : Math.min(room, Math.max(minimum, wanted(name) ?? initial));
       const edge = (name, value, minimum, room) => {
-        studyPanelEdge = { name, min: Math.min(minimum, room), max: room };
-        studyPanel.setSize({ axis: name === 'width' ? 'x' : 'y', value, min: studyPanelEdge.min, max: room });
+        const key = axis + ':' + name;
+        // The window turned or the panel changed form under a drag: that drag ends here without a result, and
+        // the drawer stops it too (setSize names the new edge), so its release changes neither record.
+        if (studyPanelPreview && studyPanelPreview.key !== key) studyPanelPreview = null;
+        studyPanelEdge = { key, name, value, min: Math.min(minimum, room), max: room };
+        studyPanel.setSize({ axis: name === 'width' ? 'x' : 'y', key, value, min: studyPanelEdge.min, max: room });
       };
       studyPanel.setText(text);
       const report = $('.report-p').getBoundingClientRect();
@@ -8462,10 +8469,12 @@
       const top = Math.max(0, $('.right').getBoundingClientRect().top);
       host.style.top = top + 'px';
       host.style.height = Math.max(120, innerHeight - top - 12) + 'px';
-      // The 360 px column (D1041 3-①) is the stylesheet's; a chosen width ends 12 px before the report column.
+      // The 360 px column (D1041 3-①) is the stylesheet's; any width, the default included, ends 12 px before the
+      // report column, so neither the panel nor its edge reaches a report column widened to its largest
+      // (Reading Workspace, Image and Report Size at End: W3R7-05). Where there is room it is the 360 px column.
       const room = Math.max(120, Math.min(innerWidth, report.width ? report.left : innerWidth) - 24);
-      const width = size('width', 360, minWidth, room);
-      if (wanted('width') != null || text) host.style.width = width + 'px';
+      const width = size('width', Math.min(360, room), minWidth, room);
+      if (wanted('width') != null || text || width !== 360) host.style.width = width + 'px';
       edge('width', width, minWidth, room);
     }
     // The drawer reports the reader's drag/keys; the page clamps, shows and (when the drag ends) stores.
@@ -8477,8 +8486,19 @@
         return;
       }
       const size = Math.round(Math.min(studyPanelEdge.max, Math.max(studyPanelEdge.min, value)));
-      if (phase === 'move') { studyPanelPreview = { name: studyPanelEdge.name, size }; placeStudyPanel(); return; }
+      const preview = studyPanelPreview?.key === studyPanelEdge.key ? studyPanelPreview : null;
+      if (phase === 'move') {
+        // The drag's first move that changes the shown size is the reader's newer local choice: an account Load
+        // still on its way then gives way to it (W3R7-03). A press without movement, a move held at a bound and
+        // Default at the default are no change; the choice itself is stored once, when the drag ends.
+        const changed = !!preview?.changed || size !== Math.round(studyPanelEdge.value);
+        if (changed && !preview?.changed) workspaceGeneration++;
+        studyPanelPreview = { key: studyPanelEdge.key, name: studyPanelEdge.name, size, changed };
+        placeStudyPanel(); return;
+      }
       studyPanelPreview = null;
+      // A drag that never changed the shown size ends as it began: nothing is chosen or stored.
+      if (preview && !preview.changed && size === Math.round(studyPanelEdge.value)) { placeStudyPanel(); return; }
       changeStudyPanel({ [studyPanelEdge.name]: size });
     }
     // A change of this orientation's size or Text Size step, or (null) the default for this orientation.
@@ -9844,10 +9864,12 @@
         if (key && work.session()) workspaceStorage?.setItem(key, work.session());
       } catch (_) { /* Unavailable storage keeps the current document's tab. */ }
     }
-    // quiet: the Study Panel options save while the reader moves them. A success then leaves the status line, and
-    // with it the toolbar's height and everything below it, as it was (its longer text can wrap a line); a failed
-    // save, or the first success after one, is always said.
-    function saveWorkspace(quiet = false) {
+    // fromStudyPanel: a choice made in the open Study Panel (its tab, size, Text Size, Default; W3R7-04). The toolbar
+    // status line is not rewritten for it: in narrower windows that line wraps when its text grows, and the list,
+    // Related and report below would move under the reader's hand. A success is quiet; a failed save, and the first
+    // success after one, is said in the panel itself, which lies over the page. Other layout saves keep the toolbar
+    // line (the Rail/Layout wrap is a separate toolbar matter).
+    function saveWorkspace(fromStudyPanel = false) {
       if (!workspaceEditable()) return;
       workspaceGeneration++;
       workspaceState.mode = layoutMode;
@@ -9856,7 +9878,9 @@
       if (saved) rememberStudyPanelSession();
       const kept = workspaceLocalKept;
       workspaceLocalKept = !!saved;
-      if (!quiet || !saved || !kept) $("#layout-status").textContent = saved ? "배치 저장됨 · 이 브라우저" : "배치 저장 안 됨 · 이 창에서만 유지";
+      const said = saved ? "배치 저장됨 · 이 브라우저" : "배치 저장 안 됨 · 이 창에서만 유지";
+      if (!fromStudyPanel) $("#layout-status").textContent = said;
+      else if (!saved || !kept) studyPanel?.setNotice(said);
     }
     function rememberPanelSize(selector) {
       if (!workspaceEditable()) return;

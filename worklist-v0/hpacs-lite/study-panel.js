@@ -55,9 +55,9 @@
     // within which bounds, and stores what the reader chose (onResize/onReset); the drawer only reports input.
     const grip = node('div', '', drawer); grip.className = 'study-panel-resize';
     grip.setAttribute('role', 'separator'); grip.tabIndex = 0; grip.setAttribute('aria-controls', drawer.id);
-    grip.setAttribute('aria-label', 'Study Panel 크기 조절');
+    grip.setAttribute('aria-label', 'Study Panel Size');
     grip.title = '드래그하거나 화살표 키로 Study Panel 크기를 조절합니다. 두 번 클릭하면 기본 크기와 글자로 돌아갑니다.';
-    let text = 0, size = null, drag = null;
+    let text = 0, size = null, drag = null, notice = null;
     const snapshot = () => ({ ...state });
     // Layout records keep the preference even while the current mode hides it.
     const shownTab = () => available.includes(state.tab) ? state.tab : available[0];
@@ -181,18 +181,30 @@
       grip.setAttribute('aria-valuemin', String(Math.round(size.min)));
       grip.setAttribute('aria-valuemax', String(Math.round(size.max)));
     }
+    // Ends a drag without reporting it: later pointerup/pointercancel/lostpointercapture of that pointer find no drag.
+    function stopDrag() {
+      const done = drag; drag = null;
+      if (done && grip.hasPointerCapture?.(done.id)) grip.releasePointerCapture(done.id);
+      return done;
+    }
+    // `key` names the edge (the page's orientation and dimension). A drag belongs to the edge it started on: when the
+    // page names another edge or axis under the pointer (the window turned, the panel changed form), the drag ends
+    // without a result, so it can never resize the new edge (W3R7-02).
     function setSize(value) {
       if (destroyed) return false;
-      if (value === null) { size = null; drag = null; renderSize(); return true; }
+      if (value === null) { size = null; stopDrag(); renderSize(); return true; }
       if (!value || !['x', 'y'].includes(value.axis) || ![value.value, value.min, value.max].every(Number.isFinite)
-          || value.min > value.max) return false;
-      size = { axis: value.axis, value: value.value, min: value.min, max: value.max }; renderSize(); return true;
+          || value.min > value.max || (value.key !== undefined && typeof value.key !== 'string')) return false;
+      if (drag && (drag.axis !== value.axis || drag.key !== value.key)) stopDrag();
+      // A press that has not moved yet starts from what the page shows now.
+      else if (drag && !drag.moved) drag.start = value.value;
+      size = { axis: value.axis, key: value.key, value: value.value, min: value.min, max: value.max }; renderSize(); return true;
     }
     const pointerAt = event => drag.axis === 'x' ? event.clientX : event.clientY;
     listen(grip, 'pointerdown', event => {
       if (event.button !== 0 || !size || !state.open || destroyed) return;
       event.preventDefault();
-      drag = { id: event.pointerId, axis: size.axis, from: 0, start: size.value, moved: false };
+      drag = { id: event.pointerId, axis: size.axis, key: size.key, from: 0, start: size.value, moved: false };
       drag.from = pointerAt(event);
       grip.setPointerCapture?.(event.pointerId);
     });
@@ -204,8 +216,7 @@
     });
     const endDrag = event => {
       if (!drag || event.pointerId !== drag.id) return;
-      const done = drag, at = pointerAt(event); drag = null;
-      if (grip.hasPointerCapture?.(event.pointerId)) grip.releasePointerCapture(event.pointerId);
+      const at = pointerAt(event), done = stopDrag();
       // A press without movement (or the first click of a double-click) changes and stores nothing.
       if (event.type === 'pointerup' && done.moved) app.onResize?.(done.start + at - done.from, 'end');
       else if (done.moved) app.onResize?.(done.start, 'cancel');
@@ -220,12 +231,34 @@
       if (![...keys, 'Home', 'End'].includes(event.key)) return;
       event.preventDefault(); event.stopPropagation();
       const step = event.shiftKey ? 40 : 10;
-      const next = event.key === 'Home' ? size.min : event.key === 'End' ? size.max
-        : size.value + (event.key === keys[0] ? -step : step);
-      app.onResize?.(Math.min(size.max, Math.max(size.min, next)), 'end');
+      const next = Math.min(size.max, Math.max(size.min, event.key === 'Home' ? size.min : event.key === 'End' ? size.max
+        : size.value + (event.key === keys[0] ? -step : step)));
+      // A key that cannot change the size (the bound is reached) is not a choice: nothing is reported or stored.
+      if (next !== size.value) app.onResize?.(next, 'end');
     });
-    listen(grip, 'dblclick', event => { event.preventDefault(); if (state.open) app.onReset?.(); });
-    listen(resetButton, 'click', () => { if (state.open) app.onReset?.(); });
+    // Default ends a drag in progress first (its preview is handed back as cancelled), so a later release of that
+    // pointer cannot store the dragged size over the default (W3R7-06).
+    function reset() {
+      if (!state.open) return;
+      const done = stopDrag();
+      if (done?.moved) app.onResize?.(done.start, 'cancel');
+      app.onReset?.();
+    }
+    listen(grip, 'dblclick', event => { event.preventDefault(); reset(); });
+    listen(resetButton, 'click', reset);
+    // A short line at the panel's foot for what the page must say about the reader's panel choices (a layout that
+    // could not be saved, and the first save after that). It lives in the panel, which lies over the page, so saying
+    // it moves nothing under the panel (W3R7-04). Created on first use: an unused panel has no extra node.
+    function setNotice(value) {
+      if (destroyed || (value !== null && typeof value !== 'string')) return false;
+      if (!value) { if (notice) { notice.textContent = ''; notice.hidden = true; } return true; }
+      if (!notice) {
+        notice = doc.createElement('p'); notice.className = 'study-panel-notice';
+        notice.setAttribute('role', 'status'); notice.setAttribute('lang', 'ko');
+        drawer.insertBefore(notice, grip);
+      }
+      notice.textContent = value; notice.hidden = false; return true;
+    }
     listen(drawer, 'compositionstart', () => { composing = true; });
     listen(drawer, 'compositionend', () => { composing = false; });
     listen(drawer, 'keydown', event => {
@@ -251,7 +284,7 @@
     }
     render(); renderText(); renderSize();
     return { open, close, toggle: () => state.open ? close() : open(), select, setAvailable, snapshot, restore, destroy,
-      setText, setSize, element: drawer };
+      setText, setSize, setNotice, element: drawer };
   }
   create.TEXT_SCALES = TEXT_SCALES;
   if (typeof module === 'object' && module.exports) module.exports = create;

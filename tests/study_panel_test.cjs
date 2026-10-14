@@ -581,7 +581,8 @@ test('D1160-P2: 크기 조절 경계는 page가 정한 축·범위 안에서 키
   const grip = f.role('separator')[0];
   assert.equal(f.role('separator').length, 1); assert.equal(grip.hidden, true, 'no edge until the page names it');
   assert.equal(grip.tabIndex, 0); assert.equal(grip.getAttribute('aria-controls'), f.panel.element.id);
-  assert.match(grip.getAttribute('aria-label'), /크기/);
+  // AGENTS §4 wording contract: the control's name is English, its explanation (tooltip) Korean (W3R7-01).
+  assert.equal(grip.getAttribute('aria-label'), 'Study Panel Size'); assert.match(grip.title, /[가-힣]/);
   f.panel.open();
   assert.equal(f.panel.setSize({ axis: 'x', value: 360, min: 320, max: 900 }), true);
   assert.equal(grip.hidden, false);
@@ -650,6 +651,111 @@ test('D1160-P3: 끌기는 움직임을 미리 보이고 놓을 때 한 번 저�
   f.panel.destroy();
   grip.dispatch('pointerdown', { button: 0, pointerId: 13, clientY: 300 }); grip.dispatch('pointermove', { pointerId: 13, clientY: 340 });
   reset.dispatch('click'); assert.equal(sizes.length, 7); assert.equal(resets.length, 2);
+});
+
+// Pointer capture as a browser keeps it: release fires lostpointercapture on the element.
+function captureGrip(grip) {
+  let captured = null;
+  grip.setPointerCapture = id => { captured = id; };
+  grip.hasPointerCapture = id => captured === id;
+  grip.releasePointerCapture = id => { if (captured !== id) return; captured = null; grip.dispatch('lostpointercapture', { pointerId: id }); };
+  return () => captured;
+}
+
+test('W3R7-02: 끌기는 시작한 경계(방향·차원)에 묶임; page가 다른 경계를 알리면 결과 없이 끝나고 capture를 놓음', () => {
+  const sizes = [], f = fixture({ onResize: (value, phase) => sizes.push([value, phase]) });
+  const grip = f.role('separator')[0], captured = captureGrip(grip);
+  f.panel.open();
+  // The page names the edge; echoing the same edge with a previewed value keeps the drag.
+  f.panel.setSize({ axis: 'x', key: 'landscape:width', value: 360, min: 320, max: 900 });
+  grip.dispatch('pointerdown', { button: 0, pointerId: 1, clientX: 100, clientY: 5 });
+  grip.dispatch('pointermove', { pointerId: 1, clientX: 180, clientY: 5 });
+  f.panel.setSize({ axis: 'x', key: 'landscape:width', value: 440, min: 320, max: 900 });
+  grip.dispatch('pointermove', { pointerId: 1, clientX: 190, clientY: 5 });
+  assert.deepEqual(sizes, [[440, 'move'], [450, 'move']]); assert.equal(captured(), 1);
+  // The window turns under the pointer: another orientation's edge on another axis.
+  f.panel.setSize({ axis: 'y', key: 'portrait:height', value: 1056, min: 240, max: 1500 });
+  assert.equal(captured(), null, 'capture released');
+  grip.dispatch('pointermove', { pointerId: 1, clientX: 260, clientY: 90 });
+  grip.dispatch('pointerup', { pointerId: 1, clientX: 260, clientY: 90 });
+  grip.dispatch('pointercancel', { pointerId: 1 }); grip.dispatch('lostpointercapture', { pointerId: 1 });
+  assert.deepEqual(sizes, [[440, 'move'], [450, 'move']], 'the old gesture never reaches the new edge');
+  // The same axis with another logical orientation (a stacked band turning into a landscape band) also ends it.
+  f.panel.setSize({ axis: 'y', key: 'portrait:height', value: 600, min: 240, max: 900 });
+  grip.dispatch('pointerdown', { button: 0, pointerId: 2, clientX: 0, clientY: 300 });
+  grip.dispatch('pointermove', { pointerId: 2, clientX: 0, clientY: 340 });
+  f.panel.setSize({ axis: 'y', key: 'landscape:height', value: 500, min: 240, max: 800 });
+  grip.dispatch('pointerup', { pointerId: 2, clientX: 0, clientY: 380 });
+  assert.deepEqual(sizes.slice(2), [[640, 'move']]);
+  // After the switch a new drag on the new edge works as usual, from the size shown there.
+  grip.dispatch('pointerdown', { button: 0, pointerId: 3, clientX: 0, clientY: 300 });
+  grip.dispatch('pointermove', { pointerId: 3, clientX: 0, clientY: 320 }); grip.dispatch('pointerup', { pointerId: 3, clientX: 0, clientY: 330 });
+  assert.deepEqual(sizes.slice(3), [[520, 'move'], [530, 'end']]);
+  // A press that has not moved yet starts from what the page shows when it moves (an account layout applied
+  // under the pointer), and a cancelled drag still hands back its start.
+  grip.dispatch('pointerdown', { button: 0, pointerId: 4, clientX: 0, clientY: 300 });
+  f.panel.setSize({ axis: 'y', key: 'landscape:height', value: 450, min: 240, max: 800 });
+  grip.dispatch('pointermove', { pointerId: 4, clientX: 0, clientY: 310 }); grip.dispatch('pointercancel', { pointerId: 4 });
+  assert.deepEqual(sizes.slice(5), [[460, 'move'], [450, 'cancel']]);
+  for (const bad of [{ axis: 'x', key: 7, value: 1, min: 0, max: 2 }, { axis: 'x', key: null, value: 1, min: 0, max: 2 }]) {
+    assert.equal(f.panel.setSize(bad), false);
+  }
+  f.panel.destroy();
+});
+
+test('W3R7-06: Default와 경계 double-click은 진행 중 끌기를 먼저 취소(미리보기 반환)하고, 이후 그 포인터의 해제는 아무것도 저장하지 않음', () => {
+  const calls = [];
+  const f = fixture({ onResize: (value, phase) => calls.push([value, phase]), onReset: () => calls.push('reset') });
+  const grip = f.role('separator')[0], reset = control(f, 'BUTTON', 'Default'), captured = captureGrip(grip);
+  f.panel.open(); f.panel.setSize({ axis: 'x', key: 'landscape:width', value: 360, min: 320, max: 900 });
+  reset.focus();
+  grip.dispatch('pointerdown', { button: 0, pointerId: 1, clientX: 100, clientY: 5 });
+  grip.dispatch('pointermove', { pointerId: 1, clientX: 260, clientY: 5 });
+  reset.dispatch('click');
+  assert.deepEqual(calls, [[520, 'move'], [360, 'cancel'], 'reset']); assert.equal(captured(), null);
+  for (const type of ['pointermove', 'pointerup', 'pointercancel', 'lostpointercapture']) grip.dispatch(type, { pointerId: 1, clientX: 260 });
+  assert.deepEqual(calls, [[520, 'move'], [360, 'cancel'], 'reset'], 'a later release never stores the dragged size');
+  assert.equal(f.doc.activeElement, reset, 'focus stays on Default');
+  // Default during a press without movement: nothing to hand back; Default alone, and the edge's double-click.
+  grip.dispatch('pointerdown', { button: 0, pointerId: 2, clientX: 100, clientY: 5 }); reset.dispatch('click');
+  grip.dispatch('pointerup', { pointerId: 2, clientX: 140 });
+  reset.dispatch('click'); grip.dispatch('dblclick');
+  assert.deepEqual(calls.slice(3), ['reset', 'reset', 'reset']);
+  f.panel.destroy();
+});
+
+test('W3R7-05: 경계에 닿은 키는 크기를 바꾸지 못하므로 알리지 않음(기본에서 ArrowRight가 줄이지 않음)', () => {
+  const sizes = [], f = fixture({ onResize: (value, phase) => sizes.push([value, phase]) });
+  const grip = f.role('separator')[0];
+  f.panel.open(); grip.focus();
+  const key = (name, extra = {}) => grip.dispatch('keydown', { key: name, ...extra });
+  f.panel.setSize({ axis: 'x', key: 'landscape:width', value: 343, min: 320, max: 343 });
+  for (const name of ['ArrowRight', 'End']) assert.equal(key(name).defaultPrevented, true);
+  key('ArrowRight', { shiftKey: true });
+  assert.deepEqual(sizes, [], 'at the largest size nothing grows, nothing shrinks, nothing is stored');
+  key('ArrowLeft'); assert.deepEqual(sizes, [[333, 'end']]);
+  f.panel.setSize({ axis: 'x', key: 'landscape:width', value: 320, min: 320, max: 343 });
+  key('Home'); key('ArrowLeft'); assert.equal(sizes.length, 1);
+  key('End'); assert.deepEqual(sizes.at(-1), [343, 'end']);
+  f.panel.destroy();
+});
+
+test('W3R7-04: 패널 안 알림 줄은 처음 쓸 때 생기고(role status, 한국어), 비우면 숨김; 잘못된 값·destroy 뒤는 거절', () => {
+  const f = fixture();
+  const before = f.all(f.panel.element).length;
+  assert.deepEqual(f.role('status'), [], 'an unused panel has no notice line');
+  f.panel.open();
+  assert.equal(f.panel.setNotice(null), true); assert.equal(f.all(f.panel.element).length, before);
+  assert.equal(f.panel.setNotice('배치 저장 안 됨 · 이 창에서만 유지'), true);
+  const [line] = f.role('status');
+  assert.equal(line.textContent, '배치 저장 안 됨 · 이 창에서만 유지'); assert.equal(line.getAttribute('lang'), 'ko'); assert.equal(line.hidden, false);
+  assert.equal(f.panel.setNotice('배치 저장됨 · 이 브라우저'), true);
+  assert.deepEqual(f.role('status').map(el => el.textContent), ['배치 저장됨 · 이 브라우저'], 'one line, replaced');
+  for (const bad of [7, {}, undefined]) assert.equal(f.panel.setNotice(bad), false);
+  assert.equal(f.panel.setNotice(''), true); assert.equal(line.hidden, true);
+  // The edge stays the drawer's last keyboard stop.
+  assert.equal(f.panel.element.children.at(-1), f.role('separator')[0]);
+  f.panel.destroy(); assert.equal(f.panel.setNotice('x'), false);
 });
 
 test('content provider는 한 번 평가, 잘못된 content는 이동 전에 거절', () => {

@@ -86,7 +86,8 @@ class StudyPanelSizeDOM(unittest.TestCase):
         return drawer
 
     def edge(self, page):
-        return page.get_by_role('complementary', name='Study Panel', exact=True).get_by_role('separator', name='Study Panel 크기 조절')
+        # AGENTS §4: the control's public name is English (W3R7-01); its Korean tooltip explains it.
+        return page.get_by_role('complementary', name='Study Panel', exact=True).get_by_role('separator', name='Study Panel Size', exact=True)
 
     def text_size(self, page, step):
         page.get_by_role('complementary', name='Study Panel', exact=True).get_by_role('combobox', name='Text Size').select_option(str(step))
@@ -110,6 +111,26 @@ class StudyPanelSizeDOM(unittest.TestCase):
             page.mouse.move(max(2, min(window['width'] - 2, x + delta)), y, steps=6)
         else:
             page.mouse.move(x, max(2, min(window['height'] - 2, y + delta)), steps=6)
+        page.mouse.up()
+        settle(page)
+
+    def press_and_move(self, page, delta):
+        """Press on the panel edge and move the pointer by `delta` along its axis; the button stays down."""
+        page.evaluate("() => addEventListener('pointerdown', e => { window.kinTestPointer = e.pointerId; }, {capture: true, once: true})")
+        box, vertical = self.edge(page).bounding_box(), self.panel(page)['edge']['orientation'] == 'vertical'
+        x = box['x'] + box['width'] / 2 if vertical else box['x'] + min(box['width'] / 3, 200)
+        y = box['y'] + min(box['height'] / 3, 200) if vertical else box['y'] + box['height'] / 2
+        page.mouse.move(x, y)
+        page.mouse.down()
+        x, y = (x + delta, y) if vertical else (x, y + delta)
+        page.mouse.move(x, y, steps=5)
+        settle(page)
+        return x, y
+
+    def cancel_pointer(self, page):
+        """The browser takes the pointer away (pointercancel on the edge that holds it), then the button is let go."""
+        page.evaluate('''() => document.querySelector('[role=complementary][aria-label="Study Panel"] [role=separator]')
+          .dispatchEvent(new PointerEvent('pointercancel', {pointerId: window.kinTestPointer, bubbles: true}))''')
         page.mouse.up()
         settle(page)
 
@@ -225,6 +246,7 @@ class StudyPanelSizeDOM(unittest.TestCase):
                         break
                     page.keyboard.press('Tab')
                 expect(self.edge(page)).to_be_focused()
+                self.assertRegex(self.edge(page).get_attribute('title'), '[가-힣]', 'the Korean tooltip explains the English control')
                 self.drag(page, 120)
                 facts = self.panel(page)
                 self.assertAlmostEqual(at + 120, self.size_of(facts), delta=1)
@@ -560,6 +582,328 @@ class StudyPanelSizeDOM(unittest.TestCase):
                 self.open_panel(fresh)
                 self.assertEqual(expected, self.panel(fresh))
                 self.assertEqual([], other.violations)
+
+    # ── round 8: the Astra review of rounds 6+7 (W3R7-02..06) ─────────────────────────────────────────────
+
+    def test_a_drag_belongs_to_the_orientation_it_started_in(self):
+        """W3R7-02: a drag changes only the edge it started on. The window turning under a held drag (landscape
+        to portrait, the reverse, and the same resize axis with another orientation) ends it without a result:
+        the new orientation shows its own size and its record, and the old one's, stay as they were. After
+        that, a drag, a cancelled drag and Default work in the new orientation, and each orientation's choice
+        survives a reload."""
+        page, site, _ = self.page(1920, 1080)
+        drawer = self.open_panel(page)
+        landscape_default = self.panel(page)
+        page.set_viewport_size(dict(width=1200, height=1920))
+        settle(page)
+        portrait_default = self.panel(page)
+        for start, other, start_default, other_default, delta in (
+                ((1920, 1080), (1200, 1920), landscape_default, portrait_default, 80),
+                ((1200, 1920), (1920, 1080), portrait_default, landscape_default, -80)):
+            with self.subTest(start=start):
+                page.set_viewport_size(dict(width=start[0], height=start[1]))
+                settle(page)
+                self.assertEqual(start_default, self.panel(page))
+                x, y = self.press_and_move(page, delta)
+                self.assertAlmostEqual(self.size_of(start_default) + delta, self.size_of(self.panel(page)), delta=1, msg='the drag shows its size')
+                page.set_viewport_size(dict(width=other[0], height=other[1]))
+                settle(page)
+                self.assertEqual(other_default, self.panel(page), 'the old drag resized the new orientation')
+                page.mouse.move(min(x + 40, other[0] - 2), min(y + 40, other[1] - 2))
+                page.mouse.up()
+                settle(page)
+                self.assertEqual(other_default, self.panel(page))
+                self.assertIsNone(self.stored(page), 'a record changed')
+                page.set_viewport_size(dict(width=start[0], height=start[1]))
+                settle(page)
+                self.assertEqual(start_default, self.panel(page), 'the dragged size stayed without being stored')
+        # After the switch: a drag in the new orientation is its own choice; a cancelled drag keeps it; Default
+        # restores only this orientation; a reload keeps each orientation's record.
+        self.drag(page, -60)
+        tall = self.panel(page)
+        self.assertAlmostEqual(self.size_of(portrait_default) - 60, self.size_of(tall), delta=1)
+        self.assertEqual({'portrait': {'height': round(self.size_of(tall))}}, self.stored(page))
+        self.press_and_move(page, -40)
+        self.cancel_pointer(page)
+        self.assertEqual(tall, self.panel(page), 'a cancelled drag shows the stored size again')
+        page.set_viewport_size(dict(width=1920, height=1080))
+        settle(page)
+        self.drag(page, 100)
+        wide = self.panel(page)
+        self.assertEqual({'portrait': {'height': round(self.size_of(tall))}, 'landscape': {'width': round(self.size_of(wide))}}, self.stored(page))
+        drawer.get_by_role('button', name='Default', exact=True).click()
+        settle(page)
+        self.assertEqual(landscape_default, self.panel(page))
+        self.assertEqual({'portrait': {'height': round(self.size_of(tall))}}, self.stored(page))
+        page.reload()
+        expect(page.locator('#rows tr[data-uid]')).to_have_count(2)
+        wait_startup(page, site)
+        settle(page)
+        self.click_row(page, 0, 'after reload')
+        self.open_panel(page)
+        self.assertEqual(landscape_default, self.panel(page))
+        page.set_viewport_size(dict(width=1200, height=1920))
+        settle(page)
+        self.assertEqual(tall, self.panel(page))
+
+    def test_a_drag_on_the_same_axis_in_another_orientation_ends_too(self):
+        """W3R7-02, the same resize axis: in the Reading Workspace the panel is a band (height) both in a short
+        landscape window and in a portrait one. A drag held while the window turns from one to the other changes
+        neither orientation's record."""
+        page, _, _ = self.page(1024, 768)
+        page.route('**/ohif/**', lambda route: route.fulfill(content_type='text/html', body='<!doctype html><title>SYN viewer</title>'))
+        page.get_by_role('button', name='Reading Workspace', exact=True).click()
+        page.get_by_role('button', name='Study Info & Templates', exact=True).click()
+        expect(page.get_by_role('complementary', name='Study Panel', exact=True)).to_be_visible()
+        settle(page)
+        landscape = self.panel(page)
+        page.set_viewport_size(dict(width=900, height=1200))
+        settle(page)
+        portrait = self.panel(page)
+        self.assertEqual(['horizontal', 'horizontal'], [landscape['edge']['orientation'], portrait['edge']['orientation']],
+                         'both are bands: the same resize axis')
+        self.assertTrue(page.evaluate("document.body.classList.contains('portrait')"))
+        page.set_viewport_size(dict(width=1024, height=768))
+        settle(page)
+        self.assertFalse(page.evaluate("document.body.classList.contains('portrait')"))
+        x, y = self.press_and_move(page, -30)
+        self.assertAlmostEqual(self.size_of(landscape) - 30, self.size_of(self.panel(page)), delta=1)
+        page.set_viewport_size(dict(width=900, height=1200))
+        settle(page)
+        self.assertEqual(portrait, self.panel(page))
+        page.mouse.move(x, y - 20)
+        page.mouse.up()
+        settle(page)
+        self.assertEqual(portrait, self.panel(page))
+        self.assertIsNone(self.stored(page))
+        page.set_viewport_size(dict(width=1024, height=768))
+        settle(page)
+        self.assertEqual(landscape, self.panel(page))
+
+    def test_a_late_account_load_yields_to_a_drag(self):
+        """W3R7-03: an account Load answered while the reader drags never overwrites the new local choice: the
+        drag's first move that changes the size makes the Load give way (said in the account status), and the
+        drag then ends as the reader ends it (released: the dragged size, Normal text; cancelled: the local
+        layout as it was). A press without movement is no change, and that Load still applies."""
+        for outcome in ('release', 'cancel', 'no movement'):
+            with self.subTest(outcome=outcome):
+                page, site, _ = self.page(1920, 1080)
+                drawer = self.open_panel(page)
+                default = self.panel(page)
+                self.drag(page, 160)
+                self.text_size(page, 2)
+                self.account_menu(page)
+                page.get_by_role('button', name='Save to Account', exact=True).click()
+                expect(page.locator('#workspace-server-status')).to_contain_text('현재 배치를 계정에 저장')
+                self.assertEqual({'landscape': {'width': 520, 'text': 2}}, site.layout['workspace']['studyPanel'])
+                drawer.get_by_role('button', name='Default', exact=True).click()
+                settle(page)
+                self.assertIsNone(self.stored(page))
+                site.held_read = []
+                page.get_by_role('button', name='Load from Account', exact=True).click()
+                for _ in range(100):
+                    if site.held_read:
+                        break
+                    page.wait_for_timeout(50)
+                self.assertEqual(1, len(site.held_read), 'the account read is on its way')
+                if outcome == 'no movement':
+                    box = self.edge(page).bounding_box()
+                    page.mouse.click(box['x'] + box['width'] / 2, box['y'] + 200)
+                else:
+                    x, y = self.press_and_move(page, 80)
+                    self.assertAlmostEqual(default['drawer'][2] + 80, self.panel(page)['drawer'][2], delta=1)
+                route, site.held_read = site.held_read[0], None
+                route.fulfill(json=dict(owner=[auth.INSTITUTION, auth.RAD['sub']], revision=site.layout_revision, layout=site.layout, updatedAt=None))
+                text = drawer.get_by_role('combobox', name='Text Size')
+                if outcome == 'no movement':
+                    expect(page.locator('#workspace-server-status')).to_contain_text('서버 배치를 불러왔습니다')
+                    expect(text).to_have_value('2')
+                    settle(page)
+                    self.assertAlmostEqual(520, self.panel(page)['drawer'][2], delta=1)
+                    self.assertEqual({'landscape': {'width': 520, 'text': 2}}, self.stored(page))
+                    self.doCleanups()
+                    continue
+                expect(page.locator('#workspace-server-status')).to_contain_text('현재 배치가 변경되어 적용하지 않았습니다')
+                settle(page)
+                expect(text).to_have_value('0')
+                self.assertAlmostEqual(default['drawer'][2] + 80, self.panel(page)['drawer'][2], delta=1, msg='the drag is still shown')
+                if outcome == 'release':
+                    page.mouse.up()
+                    settle(page)
+                    self.assertEqual({'landscape': {'width': round(default['drawer'][2] + 80)}}, self.stored(page))
+                    expect(text).to_have_value('0')
+                else:
+                    self.cancel_pointer(page)
+                    self.assertIsNone(self.stored(page))
+                    self.assertEqual(default['drawer'][2], self.panel(page)['drawer'][2])
+                    expect(text).to_have_value('0')
+                self.doCleanups()
+
+    # W3R7-04: the list, Related and report as a reader sees them, in the windows where the toolbar wraps.
+    STATUS_SIZES = ((900, 1200), (768, 1024), (840, 768))
+
+    def local_tab(self, page):
+        value = page.evaluate('(key) => JSON.parse(localStorage.getItem(key))', KEY)
+        return ((value or {}).get('workspace') or {}).get('studyPanelTab')
+
+    def test_panel_tabs_and_the_first_templates_open_keep_the_page_still(self):
+        """W3R7-04: the reader's tab choice in the Study Panel is saved quietly: the first open on a tab other than
+        Info (Templates by its shortcut, Images by its tab), closing, reopening and every tab change leave the
+        list, Related and report where they were; the toolbar status line is not rewritten for them (in these
+        windows a longer status line wraps and moves everything below it)."""
+        for width, height in self.STATUS_SIZES:
+            for first in ('Templates', 'Images'):
+                with self.subTest(width=width, height=height, first=first):
+                    page, _, _ = self.page(width, height)
+                    under, status = page.evaluate(PAGE), page.locator('#layout-status').inner_text()
+                    drawer = page.get_by_role('complementary', name='Study Panel', exact=True)
+                    def still(what):
+                        settle(page)
+                        self.assertEqual(under, page.evaluate(PAGE), f'{what}: the page under the panel moved')
+                        self.assertEqual(status, page.locator('#layout-status').inner_text(), f'{what}: status line rewritten')
+                    if first == 'Templates':
+                        page.keyboard.press('Control+Alt+t')
+                        expect(drawer.get_by_role('tab', name='Templates', exact=True)).to_have_attribute('aria-selected', 'true')
+                    else:
+                        self.open_panel(page)
+                        drawer.get_by_role('tab', name='Images', exact=True).click()
+                    still('first open on ' + first)
+                    self.assertEqual(first.lower(), self.local_tab(page), 'the tab choice is saved')
+                    page.keyboard.press('Escape')
+                    expect(drawer).to_have_count(0)
+                    still('close')
+                    page.keyboard.press('Control+Alt+t')
+                    expect(drawer).to_be_visible()
+                    still('reopen')
+                    for tab in ('Images', 'Info', 'Templates', 'Info'):
+                        drawer.get_by_role('tab', name=tab, exact=True).click()
+                        still('tab ' + tab)
+                    self.assertEqual('info', self.local_tab(page))
+                    self.assertEqual(0, drawer.get_by_role('status').filter(has_text='배치').count(), 'a successful save says nothing')
+                    self.doCleanups()
+
+    def test_a_failed_panel_save_is_said_in_the_panel_without_moving_the_page(self):
+        """W3R7-04, failure and recovery: when this browser refuses the layout (storage full), the panel's own
+        line says the choice is kept only in this window, and the first save that works again says so; neither
+        moves the list, Related or report, and the toolbar status line is not rewritten. Stored values stay
+        honest: nothing while refused, everything once it works."""
+        for width, height in self.STATUS_SIZES:
+            with self.subTest(width=width, height=height):
+                page, _, _ = self.page(width, height)
+                under, status = page.evaluate(PAGE), page.locator('#layout-status').inner_text()
+                before = self.local_tab(page)
+                page.evaluate('''key => { const original = Storage.prototype.setItem;
+                  window.kinTestStorageBack = () => { Storage.prototype.setItem = original; };
+                  Storage.prototype.setItem = function (k, v) {
+                    if (this === localStorage && k === key) throw new DOMException('SYN quota', 'QuotaExceededError');
+                    return original.call(this, k, v); }; }''', KEY)
+                drawer = page.get_by_role('complementary', name='Study Panel', exact=True)
+                def still(what):
+                    settle(page)
+                    self.assertEqual(under, page.evaluate(PAGE), f'{what}: the page under the panel moved')
+                    self.assertEqual(status, page.locator('#layout-status').inner_text(), f'{what}: status line rewritten')
+                page.keyboard.press('Control+Alt+t')
+                notice = drawer.get_by_role('status').filter(has_text='배치')
+                expect(notice).to_have_text('배치 저장 안 됨 · 이 창에서만 유지')
+                expect(notice).to_be_in_viewport(ratio=1)
+                still('failed tab save')
+                self.assertEqual(before, self.local_tab(page), 'nothing was stored')
+                self.text_size(page, 1)
+                expect(notice).to_have_text('배치 저장 안 됨 · 이 창에서만 유지')
+                still('failed Text Size save')
+                page.evaluate('() => window.kinTestStorageBack()')
+                drawer.get_by_role('tab', name='Images', exact=True).click()
+                expect(notice).to_have_text('배치 저장됨 · 이 브라우저')
+                expect(notice).to_be_in_viewport(ratio=1)
+                still('first save after the failure')
+                self.assertEqual('images', self.local_tab(page))
+                self.assertEqual({'portrait' if width < height or width < 900 else 'landscape': {'text': 1}}, self.stored(page))
+                drawer.get_by_role('tab', name='Info', exact=True).click()
+                still('later save')
+                self.doCleanups()
+
+    def test_reading_workspace_with_the_largest_report_keeps_the_panel_off_the_report(self):
+        """W3R7-05: with Image and Report Size at End in the Reading Workspace, the panel and its edge stay 12 px
+        and 6 px clear of the report column at the default, after Default and at every text step and bound
+        (the size within min..max); the report controls take a click to their very left edge; ArrowRight at
+        the default never makes the panel smaller."""
+        EDGE_HITS = '''() => ['#b-approve', '#b-save', '#b-prelim'].map(s => { const n = document.querySelector(s);
+          if (!n || !n.getClientRects().length) return [s, null]; const b = n.getBoundingClientRect();
+          return [s, [0.5, 1, 2].map(dx => { const hit = document.elementFromPoint(b.left + dx, b.top + b.height / 2); return hit === n || n.contains(hit); })]; })'''
+        for width, height in ((1920, 1080), (1366, 768)):
+            with self.subTest(width=width, height=height):
+                page, _, _ = self.page(width, height)
+                page.route('**/ohif/**', lambda route: route.fulfill(content_type='text/html', body='<!doctype html><title>SYN viewer</title>'))
+                page.get_by_role('button', name='Reading Workspace', exact=True).click()
+                settle(page)
+                page.get_by_role('separator', name='Image and Report Size', exact=True).focus()
+                page.keyboard.press('End')
+                settle(page)
+                closed = self.assert_report_usable(page, 'closed')
+                page.get_by_role('button', name='Study Info & Templates', exact=True).click()
+                drawer = page.get_by_role('complementary', name='Study Panel', exact=True)
+                expect(drawer).to_be_visible()
+                settle(page)
+                def clear(what):
+                    facts, report = self.panel(page), page.locator('.report-p').bounding_box()
+                    edge = facts['edge']
+                    self.assertLessEqual(edge['min'], edge['now'], what)
+                    self.assertLessEqual(edge['now'], edge['max'], what)
+                    self.assertAlmostEqual(edge['now'], self.size_of(facts), delta=1, msg=what)
+                    self.assertLessEqual(facts['drawer'][0] + facts['drawer'][2], report['x'] - 12 + .5, what)
+                    self.assertLessEqual(edge['box'][0] + edge['box'][2], report['x'] - 6 + .5, f'{what}: the edge reaches the report')
+                    opened = self.assert_report_usable(page, what)
+                    for item, fact in closed.items():
+                        if fact:
+                            self.assertEqual(fact['visible'], opened[item]['visible'], f'{what}: {item} visible part changed')
+                    for name, hits in page.evaluate(EDGE_HITS):
+                        if hits is not None:
+                            self.assertEqual([True, True, True], hits, f'{what}: {name} left edge not clickable')
+                    return facts
+                default = clear('default')
+                self.keys(page, 'ArrowRight')
+                self.assertGreaterEqual(self.size_of(clear('ArrowRight at the default')), self.size_of(default) - .5,
+                                        'ArrowRight made the panel smaller')
+                for step in (0, 1, 2):
+                    self.text_size(page, step)
+                    clear(f'text {step}')
+                    self.keys(page, 'End')
+                    clear(f'text {step}, End')
+                    self.keys(page, 'Home')
+                    clear(f'text {step}, Home')
+                drawer.get_by_role('button', name='Default', exact=True).click()
+                settle(page)
+                self.assertEqual(default, clear('after Default'))
+                self.doCleanups()
+
+    def test_default_during_a_drag_ends_the_drag(self):
+        """W3R7-06: Default (here focused and pressed with Space while the pointer still holds the edge) ends the
+        drag and its preview, then restores the default size and text; letting the pointer go afterwards stores
+        nothing. The same with a size chosen before the drag."""
+        page, site, _ = self.page(1920, 1080)
+        drawer = self.open_panel(page)
+        default_facts = self.panel(page)
+        default = drawer.get_by_role('button', name='Default', exact=True)
+        for chosen in (None, 120):
+            with self.subTest(chosen=chosen):
+                if chosen:
+                    self.drag(page, chosen)
+                    self.text_size(page, 1)
+                    self.assertIsNotNone(self.stored(page))
+                default.focus()
+                x, y = self.press_and_move(page, 80)
+                self.assertNotEqual(default_facts, self.panel(page))
+                expect(default).to_be_focused()
+                page.keyboard.press('Space')
+                settle(page)
+                self.assertEqual(default_facts, self.panel(page), 'Default left the dragged size')
+                expect(drawer.get_by_role('combobox', name='Text Size')).to_have_value('0')
+                page.mouse.move(x + 30, y)
+                page.mouse.up()
+                settle(page)
+                self.assertEqual(default_facts, self.panel(page), 'the release stored the dragged size')
+                self.assertIsNone(self.stored(page))
+        self.assertEqual([], site.layout_writes, 'nothing went to the account')
 
 
 if __name__ == '__main__':

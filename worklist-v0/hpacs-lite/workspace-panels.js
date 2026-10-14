@@ -67,10 +67,12 @@
         if (key && work.session()) workspaceStorage?.setItem(key, work.session());
       } catch (_) { /* Unavailable storage keeps the current document's tab. */ }
     }
-    // quiet: the Study Panel options save while the reader moves them. A success then leaves the status line, and
-    // with it the toolbar's height and everything below it, as it was (its longer text can wrap a line); a failed
-    // save, or the first success after one, is always said.
-    function saveWorkspace(quiet = false) {
+    // fromStudyPanel: a choice made in the open Study Panel (its tab, size, Text Size, Default; W3R7-04). The toolbar
+    // status line is not rewritten for it: in narrower windows that line wraps when its text grows, and the list,
+    // Related and report below would move under the reader's hand. A success is quiet; a failed save, and the first
+    // success after one, is said in the panel itself, which lies over the page. Other layout saves keep the toolbar
+    // line (the Rail/Layout wrap is a separate toolbar matter).
+    function saveWorkspace(fromStudyPanel = false) {
       if (!workspaceEditable()) return;
       workspaceGeneration++;
       workspaceState.mode = layoutMode;
@@ -79,7 +81,9 @@
       if (saved) rememberStudyPanelSession();
       const kept = workspaceLocalKept;
       workspaceLocalKept = !!saved;
-      if (!quiet || !saved || !kept) $("#layout-status").textContent = saved ? "배치 저장됨 · 이 브라우저" : "배치 저장 안 됨 · 이 창에서만 유지";
+      const said = saved ? "배치 저장됨 · 이 브라우저" : "배치 저장 안 됨 · 이 창에서만 유지";
+      if (!fromStudyPanel) $("#layout-status").textContent = said;
+      else if (!saved || !kept) studyPanel?.setNotice(said);
     }
     function rememberPanelSize(selector) {
       if (!workspaceEditable()) return;
