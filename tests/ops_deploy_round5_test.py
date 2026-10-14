@@ -1012,6 +1012,111 @@ class OperatingEntryContracts(unittest.TestCase):
         self.assertFalse(release.lock_path(case.repo).exists())
 
 
+class PersistentEntryOverlayContracts(unittest.TestCase):
+    """IRT3-03 with D05/IRT-11 (found by the forced L-09b rehearsal forced-l09b-01): once a phase published the persistent
+    Compose entry, a later phase of the same checkout takes its inputs from that entry - and still observes the declared
+    overlay file first. The forced rehearsal edits the overlay by hand during the window; its rollback_reopen, a new
+    process on the entry, must go on with the pinned bytes and record the declared-overlay warning."""
+
+    def setUp(self):
+        self.case = fixtures.RoundThreeHostTests()
+        self.case.setUp()
+        self.addCleanup(self.case.doCleanups)
+        self.host, self.docker, base = fixtures.CommanderAdditionsTests.production_host(self.case)
+        self.plan = base.plan
+        self.declared = self.case.overlay.read_bytes()
+        capture = self.case.context(self.plan)
+        self.host.declared_overlay_facts(capture)
+        self.host.intro = capture
+        self.host.prepare_entry(capture)
+        self.kept = {key: capture.state[key] for key in ("compose_entry", "entry_checkout", "overlay_pins")}
+
+    def phase(self, name):
+        context = self.case.context(self.plan, phase=name, **json.loads(json.dumps(self.kept)))
+        host = release.HostOps(target=self.case.target, plan=self.plan, runner=self.docker, records=self.case.records)
+        return host, context
+
+    def test_a_recovery_on_the_entry_records_a_changed_or_vanished_overlay_and_uses_the_pinned_bytes(self):
+        generation = self.kept["compose_entry"]["generation"]
+        for change in ("changed", "vanished"):
+            with self.subTest(change=change):
+                if change == "changed":
+                    self.case.overlay.write_bytes(self.declared + b"# edited by hand during the window\n")
+                else:
+                    self.case.overlay.unlink()
+                host, context = self.phase("rollback_reopen")
+                result = succeeds(self, host.prepare, context)
+                self.assertEqual(result["immutable_entry"]["generation"], generation)
+                self.assertEqual([warning["kind"] for warning in context.warnings], ["declared-overlay"])
+                self.assertEqual([row["used"] for row in result.get("declared_overlays") or []], ["pinned copy"])
+                files = host.compose_files()
+                self.assertNotIn(str(self.case.overlay), files)
+                (pinned,) = [Path(path) for path in files if Path(path).parent.name == generation and Path(path).read_bytes() == self.declared]
+                self.assertEqual(release.sha256_bytes(pinned.read_bytes()), self.case.target["declared_overlays"][0]["sha256"])
+                self.case.overlay.write_bytes(self.declared)
+
+    def test_a_forward_phase_on_the_entry_refuses_a_changed_overlay_before_any_command(self):
+        self.case.overlay.write_bytes(self.declared + b"# edited by hand\n")
+        host, context = self.phase("verify")
+        before = len(self.docker.calls)
+        with self.assertRaises(release.Stop):
+            host.prepare(context)
+        self.assertEqual(self.docker.calls[before:], [], "the refusal comes before any command")
+        self.assertEqual(context.warnings, [])
+
+    def test_an_unchanged_overlay_on_the_entry_is_quiet_in_every_phase(self):
+        for name in ("verify", "rollback", "rollback_reopen"):
+            with self.subTest(phase=name):
+                host, context = self.phase(name)
+                result = succeeds(self, host.prepare, context)
+                self.assertEqual(result["immutable_entry"]["generation"], self.kept["compose_entry"]["generation"])
+                self.assertEqual(context.warnings, [])
+                self.assertEqual([row["used"] for row in result.get("declared_overlays") or []], ["declared file"])
+
+    def test_an_entry_whose_overlay_pin_is_not_the_declared_bytes_is_refused_even_in_a_recovery(self):
+        # A generation published from other overlay bytes (the declared hash in the target is unchanged): a recovery must
+        # not go on with bytes nobody declared.
+        self.case.overlay.write_bytes(self.declared + b"# not the declared bytes\n")
+        self.host.prepare_entry(self.host.intro)
+        other = self.host.intro.state["compose_entry"]
+        self.assertNotEqual(other["generation"], self.kept["compose_entry"]["generation"])
+        self.kept["compose_entry"] = other
+        host, context = self.phase("rollback_reopen")
+        before = len(self.docker.calls)
+        with self.assertRaises(release.Stop) as caught:
+            host.prepare(context)
+        self.assertIn("overlay", str(caught.exception))
+        self.assertEqual(self.docker.calls[before:], [], "the refusal comes before any command")
+
+
+class AuditLedgerGateContracts(unittest.TestCase):
+    """C25/G09: reopen's L-11a requires the backup root's audit ledger (the introduced release's daily backup seals into
+    it); a root without a readable ledger is a refusal, never a silent pass. The rehearsal fixture initialises the ledger
+    as the runbook does (forward-01 stopped at L-11a without it)."""
+
+    def test_reopen_backup_readiness_requires_a_readable_ledger(self):
+        import ops_audit_integrity as audit
+        import ops_backup
+        case = fixtures.RoundThreeHostTests()
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        host, _, _ = case.host()
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / "backups"
+            root.mkdir(mode=0o700)
+            machine = SimpleNamespace(plan={**host.plan, "backup_root": str(root)})
+            with self.assertRaises(release.Stop):
+                host.backup_readiness(machine)
+            (root / audit.LEDGER).write_text("{}\n")
+            with self.assertRaises(release.Stop):
+                host.backup_readiness(machine)
+            (root / audit.LEDGER).unlink()
+            # The ledger is made with the product's own init (a repository stand-in keeps the root outside "the checkout").
+            with patch.object(ops_backup, "ROOT", Path(folder) / "repository"):
+                audit.init(root, audit.MIN_YEARS)
+            self.assertEqual(succeeds(self, host.backup_readiness, machine), {"audit_ledger": "readable", "seals": 0})
+
+
 class CloneBodyContracts(unittest.TestCase):
     def test_clone_database_credentials_refuse_missing_shared_or_unsupported_inputs_before_change(self):
         for roles, supplied in [(["kin"], {}), (["kin"], {"POSTGRES_PASSWORD": "source-secret"}),

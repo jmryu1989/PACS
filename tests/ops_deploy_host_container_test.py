@@ -227,6 +227,7 @@ from datetime import datetime, timedelta, timezone  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
 import ops_emr_introduction as intro  # noqa: E402
+import ops_audit_integrity as audit  # noqa: E402
 
 REHEARSAL_IMAGES = ("KIN_TEST_PREVIOUS_API_IMAGE", "KIN_TEST_PREVIOUS_PROXY_IMAGE", "KIN_TEST_API_IMAGE", "KIN_TEST_PROXY_IMAGE")
 SYNTHETIC_STUDY = "1.2.826.0.1.3680043.10.543.7001"
@@ -482,6 +483,11 @@ class SyntheticStack:
         self.token_file = self.root / "smoke-token.json"
         self.records = intro.Records(self.root / "records")
         self.backups = self.root / "backups"
+        # G09, as the runbook does before the capture takes the lock: the private backup root carries its audit ledger,
+        # initialised once with the product's own tool. The introduced release's daily backup seals into it, and reopen
+        # (L-11a) refuses a root without one - the first forward rehearsal (forward-01) stopped there.
+        self.backups.mkdir(mode=0o700)
+        audit.init(self.backups, audit.MIN_YEARS)
         self.previous_sha, self.target_sha = previous_sha, target_sha
         test.addCleanup(self.remove)
         test.addCleanup(self.keep_records)

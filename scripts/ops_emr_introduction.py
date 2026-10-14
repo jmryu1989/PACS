@@ -4379,10 +4379,17 @@ class HostOps:
         self.entry_inputs = None
         saved = intro.state.get("compose_entry")
         if saved and intro.state.get("entry_checkout") == intro.state["checkout"]:
+            # IRT-11/D05 hold on the persistent entry too (IRT3-03): the declared overlay files are observed before any
+            # step. A forward phase refuses a changed, vanished or unprotected overlay; a recovery goes on with the
+            # entry's pinned bytes (the declared bytes, checked below) and records the warning.
+            overlays = self.declared_overlay_facts(intro)
             pointer = {key: saved[key] for key in ("generation", "sha256")}
             _, manifest, values = self.entry.load(pointer)
             require(manifest["plan_sha256"] == intro.plan_sha256 and manifest["repository"] == str(self.repo),
                     "지속 Compose 입력이 현재 계획과 다릅니다")
+            pinned = {row["logical"]: row["sha256"] for row in manifest["logical_files"]}
+            require(all(pinned.get(item["file"]) == item["sha256"] for item in self.t["declared_overlays"]),
+                    "지속 Compose 입력의 overlay가 선언과 다릅니다")
             directory = self.entry.root / pointer["generation"]
             self.entry_inputs = {"sources": [(row["logical"], (directory / row["pinned"]).read_bytes()) for row in manifest["logical_files"]],
                                  "env_raw": (directory / "inputs.env").read_bytes(), "values": values}
@@ -4401,7 +4408,7 @@ class HostOps:
                     else:
                         sources = [host_bind_source(m["Source"], self.t["repository"]) for m in item.get("Mounts") or [] if m.get("Destination") == key]
                         require(sources == [values[name]], "확정한 Compose mount와 실제 컨테이너 경로가 다릅니다")
-            return {"immutable_entry": pointer}
+            return {"immutable_entry": pointer, "declared_overlays": overlays}
         overlays = self.declared_overlay_facts(intro)
         files = list(self.t["compose_files"])
         texts = [self.compose_path(item).read_bytes() for item in files]
