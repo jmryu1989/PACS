@@ -11,6 +11,11 @@ The default must be round 6's panel. test_default_is_round_6 serves the round-6 
 input: the same deliberate byte-provenance use as the W2 first-paint comparison; CI fetches this exact commit) and
 compares, with nothing chosen, the panel's and the page's geometry exactly and the open panel's pixels within the
 r6 tolerance (ANTIALIAS), the two new header controls masked in both pictures.
+
+Round 8 (Astra review of rounds 6+7, W3R7-02..06) adds the cases at the end: a drag belongs to the edge it started
+on (window turning under a held pointer), a late account Load gives way to a drag, Study Panel saves never move
+the page (tab changes, first Templates open, failed/recovered saves said in the panel), the Reading Workspace with
+the largest report column, and Default during a drag. They drive real mouse, keyboard and window-size changes.
 """
 import io
 import json
