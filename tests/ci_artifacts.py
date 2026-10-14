@@ -1,7 +1,8 @@
 """REQ-W2C-04 -> RISK-CI-EVIDENCE-OMISSION: non-G3 evidence by workflow/SHA.
 
-CI-TOOLING-1a deliberately refuses G3 resolution (CI-TOOLING-1b).
-Only first attempts are provably bound by the existing producer/REST contract.
+Non-G3 (CI-TOOLING-1a): only first attempts are provably bound by the existing
+producer/REST contract. G3 (CI-TOOLING-1b) is never looked up here: the full
+stage collection hands the explicit round record to ci_candidate_evidence.
 """
 import argparse
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 from urllib.request import parse_http_list
 import zipfile
 
+import ci_candidate_evidence
 from ci_workflows import WorkflowCatalog
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -189,12 +191,68 @@ def unpack(archive, destination):
         zipped.extractall(destination)
 
 
+def full_stage(root, sha, stage, out, query, fetch, *, record, dry_run, repository):
+    """Full Stage 7/8 hosted evidence: the non-G3 collection AND the recorded G3 round.
+
+    The round record is an explicit input, never discovered or defaulted. Each
+    path judges itself; completed is written only after both have succeeded.
+    """
+    if record is None:
+        stop('candidate.yml evidence needs the explicit G3 round record (--record, CI-TOOLING-1b); '
+             'use --non-candidate only for the separate non-G3 collection')
+    if dry_run:
+        stop('G3 collection verifies downloaded archives; --dry-run is only for --non-candidate')
+    if not re.fullmatch('[0-9a-f]{40}', sha):
+        stop('full candidate SHA required')
+    try:
+        bound, record_digest = ci_candidate_evidence.read_record(record)
+    except OSError as error:
+        stop(f'G3 round record unreadable: {error}')
+    if bound['candidate_sha'] != sha:
+        stop('G3 round record names another candidate SHA')
+    if repository is not None and repository != bound['repository']:
+        stop('G3 round record names another repository')
+    out = Path(out)
+    combined = {'sha': sha, 'stage': stage, 'repository': bound['repository'], 'scope': 'full',
+                'status': 'incomplete',
+                'non_candidate': {'status': 'incomplete', 'manifest': str(out / 'artifact-downloads.json')},
+                'g3': {'status': 'not_started', 'record': str(Path(record).resolve()),
+                       'record_sha256': record_digest, 'manifest': str(out / 'g3' / 'g3-evidence.json')}}
+
+    def save():
+        if out.is_dir():
+            (out / 'stage-evidence.json').write_text(json.dumps(combined, indent=2) + '\n', encoding='utf-8')
+
+    try:
+        hosted = download(root, sha, stage, out, query, fetch, non_candidate=True,
+                          repository=bound['repository'])
+        combined['non_candidate']['status'] = hosted['status']
+        combined['g3']['status'] = 'incomplete'
+        save()
+        g3 = ci_candidate_evidence.collect(record, out / 'g3', query, fetch)
+        # Both collections raise on STOP; reaching here means both succeeded.
+        if g3['record_sha256'] != record_digest:
+            stop('G3 round record changed after the full collection bound it')
+        combined['g3'].update(status=g3['status'], verified_at=g3['verified_at'],
+                              candidate_directory=g3['downloads'][-1]['destination'],
+                              legacy_excluded=[row['id'] for row in g3['legacy_excluded']])
+        combined.update(status='completed', verified_at=datetime.now(timezone.utc).isoformat())
+    except Exception as error:
+        combined['error'] = str(error)
+        raise
+    finally:
+        save()
+    return combined
+
+
 def download(root, sha, stage, out, query=gh_get, fetch=fetch_archive, *,
-             non_candidate=False, dry_run=False, repository=None):
+             non_candidate=False, dry_run=False, repository=None, record=None):
     # Default/full stage collection must never yield a partial G3 result.
     if not non_candidate:
-        stop('candidate.yml evidence resolution belongs to CI-TOOLING-1b; '
-             'use --non-candidate only for the separate non-G3 collection')
+        return full_stage(root, sha, stage, out, query, fetch, record=record, dry_run=dry_run,
+                          repository=repository)
+    if record is not None:
+        stop('--record belongs to the full stage collection; --non-candidate excludes G3')
     if not re.fullmatch('[0-9a-f]{40}', sha):
         stop('full candidate SHA required')
     declarations = inventory(root)
@@ -322,15 +380,17 @@ def main():
     parser.add_argument('--stage', choices=STAGE_ARTIFACTS)
     parser.add_argument('--out', type=Path)
     parser.add_argument('--non-candidate', action='store_true', help='explicitly exclude G3; never a full stage result')
+    parser.add_argument('--record', type=Path, help='full stage only: the G3 round record written by scripts/g3_dispatch.py')
     parser.add_argument('--dry-run', action='store_true', help='GET metadata only; manifest status planned, no archives')
     args = parser.parse_args()
     if args.list:
         print(json.dumps(inventory(args.root), indent=2))
     elif args.sha and args.stage and args.out:
         print(json.dumps(download(args.root, args.sha, args.stage, args.out,
-                                  non_candidate=args.non_candidate, dry_run=args.dry_run), indent=2))
+                                  non_candidate=args.non_candidate, dry_run=args.dry_run,
+                                  record=args.record), indent=2))
     else:
-        parser.error('use --list or --sha SHA --stage 7|8 --out NEW_DIRECTORY [--non-candidate]')
+        parser.error('use --list or --sha SHA --stage 7|8 --out NEW_DIRECTORY (--record G3_ROUND | --non-candidate)')
 
 
 if __name__ == '__main__':

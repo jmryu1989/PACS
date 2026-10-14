@@ -1,0 +1,42 @@
+name: CI tooling evidence collectors
+
+# CI-TOOLING-1b (D1225): the G3 admission/dispatch/legacy-cutoff module and the integrated Stage 7/8
+# collector run their pure behaviour suites on every PR and main push. GitHub API, stack, database and
+# Docker are not used; FakeGitHub answers every request. validate.yml and its selections are unchanged.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Public PR code runs without production credentials or a persisted Git token.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-tooling-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ci-tooling:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: G3 admission, dispatch binding, legacy cutoff T0 and producer cases
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/ci-tooling-ci/g3-evidence --cwd . --file tests/ci_candidate_evidence.py --file tests/ci_candidate_evidence_test.py --file tests/g3_round.schema.json --file scripts/g3_dispatch.py --file .github/workflows/candidate.yml -- python3 -B tests/ci_candidate_evidence_test.py -v
+      - name: Integrated Stage 7/8 collector (non-G3 runs and the recorded G3 round)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 10
+        run: python3 scripts/record-run.py --run-dir tmp/ci-tooling-ci/stage-collector --cwd . --file tests/ci_artifacts.py --file tests/ci_artifacts_test.py --file tests/ci_candidate_evidence.py --file tests/ci_candidate_evidence_test.py --file tests/ci_rerun_diagnostic_test.py --file tests/stage-exit.md --file scripts/collect-rerun-diagnostic.py --file scripts/g3_dispatch.py --file .github/workflows/candidate.yml -- python3 -B tests/ci_artifacts_test.py -v
+      - name: CI tooling evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-ci-tooling-results
+          path: tmp/ci-tooling-ci/
+          if-no-files-found: error
+          retention-days: 7
