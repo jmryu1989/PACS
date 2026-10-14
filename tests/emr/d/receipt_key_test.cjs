@@ -152,11 +152,11 @@ test('A5R-05 routes: a request ID a receipt of another route holds - an accept\'
   assert.deepEqual(w.facts(), before);
 });
 
-test('A5R-05 race: a request that took the ID after the check is refused by the receipt key with the same 409, sealed, its row update undone', async () => {
+test('A5R-05 race: a receipt another transaction commits under the same ID while this request commits is the same 409, sealed, its row update undone', async () => {
   const w = world();
   await create(w, { ...clinician }, id(160));
   const before = w.facts();
-  // Another transaction commits a receipt under id(161) between this request's check and its receipt write.
+  // Another transaction commits a receipt under id(161) after this request's commit has begun and updated its row.
   w.beforeReceipt = async data => { if (data.requestId === id(161)) w.foreign.set(id(161), { requestId: id(161), subjectSub: 'synthetic-elsewhere', imageRequestId: id(999) }); };
   await assert.rejects(change(w, id(160), { ...technician }, id(161), 1), REUSED, 'the receipt key refuses it: 409, not 503');
   w.beforeReceipt = null;

@@ -188,19 +188,16 @@ export class ImageRequestService {
   }
 
   /**
+   * 영수증 한 행과 감사 한 행을 같은 트랜잭션에 쓴다. 감사에는 사유·note·상대 기관 문장·환자 식별자가 없다(§11).
+   *
    * A5R-05: the receipt keeps one row per request ID, unit D's register one original per (record, actor, request). A request
-   * ID a receipt already holds - another person's request, or one of another image request or route - is this new
-   * request's own refusal, 409 REQUEST_ID_REUSED, sealed as its terminal before any row is written: never a storage failure
-   * whose "try again" can never succeed. A request D already committed never reaches a projection (it answers its stored
-   * result, DR3-01), so any holder here is another request.
+   * ID another receipt holds - another person's request, one of another image request or route, or one committed meanwhile -
+   * makes the receipt key refuse this write; that is this request's own business refusal, 409 REQUEST_ID_REUSED, sealed as
+   * its terminal with every write of the commit undone, never a storage failure whose "try again" can never succeed. A
+   * request D already committed never reaches a projection (it answers its stored result, DR3-01), so the holder is always
+   * another request.
    */
-  private async requestIdFree(tx: any, requestId: string) {
-    if (await tx.studyImageRequestReceipt.findUnique({ where: { requestId } })) throw reused();
-  }
-
-  /** 영수증 한 행과 감사 한 행을 같은 트랜잭션에 쓴다. 감사에는 사유·note·상대 기관 문장·환자 식별자가 없다(§11). */
   private async receipt(tx: any, c: Caller, applied: any, mark: string, counterpartyInstitutionId: string | null, role: string, at: Date) {
-    // A concurrent request that took the ID after requestIdFree: the receipt key refuses this one, with the same answer.
     try {
       await tx.studyImageRequestReceipt.create({ data: { requestId: applied.requestId, imageRequestId: applied.id, subjectSub: c.sub,
         action: applied.action, fingerprint: mark, appliedRevision: applied.revision, result: applied as any, at } });
@@ -244,7 +241,6 @@ export class ImageRequestService {
       const active: any[] = await tx.$queryRaw`SELECT id FROM "StudyImageRequest" WHERE "studyUid"=${studyId} AND kind=${kind}
         AND "requesterSub"=${sub} AND state::text=ANY(${[...ACTIVE]}::text[])`;
       if (active.length) throw activeExists();
-      await this.requestIdFree(tx, requestId);
       const name = this.name(c);
       const applied = { id: recordId, studyUid: studyId, requestId, kind, action: 'create', from: null, to: 'Requested',
         revision: 1, at: v.at };
@@ -259,8 +255,7 @@ export class ImageRequestService {
     if (row.revision !== v.sequence - 1 || row.state !== v.state.from) throw changed();
     const step = TRANSITIONS[p.action];
     if (!step || step.to !== v.state.to || !step.from.includes(row.state)) throw stateError();
-    await this.requestIdFree(tx, requestId);
-    const role =v.capacity === 'clinical-author' ? CLINICIAN_ROLE : p.action !== 'cancel' && holds(c, TECHNICIAN) ? TECHNICIAN : ADMIN;
+    const role = v.capacity === 'clinical-author' ? CLINICIAN_ROLE : p.action !== 'cancel' && holds(c, TECHNICIAN) ? TECHNICIAN : ADMIN;
     await this.apply(tx, c, row, requestId, mark, p.action, step.to, role, v.text ?? '', at);
   }
 
