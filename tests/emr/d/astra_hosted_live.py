@@ -99,19 +99,36 @@ class HostedRun(unittest.TestCase):
             code, out = 124, (expired.stdout or b"").decode("utf-8", "replace")
             err = (expired.stderr or b"").decode("utf-8", "replace") + "\nTIMEOUT after %d s; container %s removed" % (TIMEOUT, name)
         cases, summary = tap(out)
-        leftover = subprocess.run(["docker", "ps", "-aq", "--filter", "label=" + self.label], capture_output=True, text=True).stdout.split()
+        inventory, leftover = self.inventory()
         record = {"token": self.token, "label": self.label, "file": test_file, "image": image, "image_id": image_id, "command": command, "exit": code,
                   "seconds": round(time.time() - started, 1), "declared": declared, "summary": summary,
-                  "cases": [{"passed": ok, "name": case} for ok, case in cases], "leftover": leftover, "stdout": out, "stderr": err}
+                  "cases": [{"passed": ok, "name": case} for ok, case in cases], "leftover": leftover, "inventory": inventory,
+                  "stdout": out, "stderr": err}
         KEPT.mkdir(parents=True, exist_ok=True)
         (KEPT / ("%s-%s.json" % (self.token, Path(test_file).stem))).write_text(json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
-        print("EMR_D_HOSTED " + json.dumps({k: record[k] for k in ("file", "image", "image_id", "exit", "declared", "summary", "leftover")}), flush=True)
+        print("EMR_D_HOSTED " + json.dumps({k: record[k] for k in ("file", "image", "image_id", "exit", "declared", "summary", "leftover", "inventory")}),
+              flush=True)
         print(out)
         print(err, file=sys.stderr)
+        if leftover == "unknown":
+            self.fail("the leftover containers of this run could not be observed (docker ps exit %s: %s); cleanup is not shown complete"
+                      % (inventory["exit"], inventory["stderr"].strip() or "no output"))
         self.assertEqual(leftover, [], "every container of this run is removed")
         self.assertEqual((code, summary.get("tests"), summary.get("pass"), summary.get("fail"), summary.get("skipped"), summary.get("todo")),
                          (0, declared, declared, 0, 0, 0), test_file + ": exit 0 and exactly the declared cases, all passed, none skipped")
         self.assertEqual(sum(ok for ok, _ in cases), declared, test_file)
+
+    def inventory(self):
+        """This run's own containers still present (its label only; nothing else is listed or touched), with the query's
+        exit, stdout and stderr. A query that fails or cannot run leaves the inventory "unknown", never an empty list,
+        so cleanup is not recorded as complete without an observation (Astra C5R-02)."""
+        command = ["docker", "ps", "-aq", "--filter", "label=" + self.label]
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            return {"command": command, "exit": None, "stdout": "", "stderr": "%s: %s" % (type(error).__name__, error)}, "unknown"
+        query = {"command": command, "exit": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
+        return query, (result.stdout.split() if result.returncode == 0 else "unknown")
 
 
 class AstraHosted(HostedRun):
