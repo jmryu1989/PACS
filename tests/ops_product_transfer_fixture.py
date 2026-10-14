@@ -707,12 +707,17 @@ SELECT jsonb_build_object(
 
 # EMR-D R2: the same schema-qualified facts of emr_clinical (owners, placement, ACLs, function definitions and settings,
 # guards, and any table grant of the runtime there - there must be none).
+# A table's ACL is observed as its effective privileges: COALESCE(relacl, acldefault('r', owner)). The migration's
+# REVOKE ALL ON ALL TABLES ... FROM PUBLIC stores the owner-only default explicitly on the tables nobody is granted
+# (request, attempt). pg_dump emits no GRANT/REVOKE for an ACL equal to the default, so the restore leaves relacl NULL -
+# the same privileges, a different catalog value. The effective form compares privileges, not that storage detail.
 CLINICAL_CATALOG_SQL = """
 SELECT jsonb_build_object(
  'schema',(SELECT jsonb_build_object('owner',pg_get_userbyid(nspowner),'acl',(SELECT jsonb_agg(a::text ORDER BY a::text) FROM unnest(nspacl) a))
    FROM pg_namespace WHERE nspname='emr_clinical'),
  'relations',(SELECT jsonb_agg(jsonb_build_object('name',c.relname,'kind',c.relkind,'owner',pg_get_userbyid(c.relowner),
-     'tablespace',COALESCE(t.spcname,'database-default'),'acl',(SELECT jsonb_agg(a::text ORDER BY a::text) FROM unnest(c.relacl) a))
+     'tablespace',COALESCE(t.spcname,'database-default'),'acl',(SELECT jsonb_agg(a::text ORDER BY a::text)
+       FROM unnest(CASE WHEN c.relkind='r' THEN COALESCE(c.relacl, acldefault('r', c.relowner)) ELSE c.relacl END) a))
      ORDER BY c.relname COLLATE "C")
    FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace LEFT JOIN pg_tablespace t ON t.oid=c.reltablespace
    WHERE n.nspname='emr_clinical' AND c.relkind IN ('r','i')),
@@ -822,6 +827,47 @@ def bounded_diagnostic(report):
     return text[:DIAGNOSTIC_BYTES]
 
 
+def metadata_difference(expected, actual):
+    """catalog_difference for a catalog whose facts are lists, objects or scalars (the EMR and clinical catalogs): a list
+    is compared item by item, anything else as one item."""
+    report = {}
+    for key in sorted(set(expected) | set(actual)):
+        left, right = expected.get(key), actual.get(key)
+        if canonical(left) == canonical(right):
+            continue
+        items = lambda value: value if type(value) is list else ([] if value is None else [value])
+        left_set, right_set = {canonical(item).decode() for item in items(left)}, {canonical(item).decode() for item in items(right)}
+        report[key] = dict(expected_count=len(left_set), actual_count=len(right_set),
+                           only_expected=sorted(left_set - right_set)[:DIAGNOSTIC_ENTRIES], only_actual=sorted(right_set - left_set)[:DIAGNOSTIC_ENTRIES])
+    return report
+
+
+def row_difference(expected, actual):
+    """Which synthetic tables and columns differ - names and counts only, never row values."""
+    report = {}
+    for table in sorted(set(expected) | set(actual)):
+        left, right = expected.get(table) or [], actual.get(table) or []
+        if canonical(left) == canonical(right):
+            continue
+        columns = sorted({column for row in left + right for column in row})
+        values = lambda rows, column: sorted(canonical(row.get(column)).decode() for row in rows)
+        report[table] = dict(expected_count=len(left), actual_count=len(right), only_expected=[], only_actual=[],
+                             differing_columns=[c for c in columns if values(left, c) != values(right, c)][:DIAGNOSTIC_ENTRIES])
+    return report
+
+
+def emr_difference(expected, actual):
+    """The emr product's sub-key that differs (catalog / rows / clinical.catalog / clinical.rows), each bounded."""
+    report = {}
+    for path, difference in (('catalog', metadata_difference), ('rows', row_difference),
+                             ('clinical.catalog', metadata_difference), ('clinical.rows', row_difference)):
+        left, right = expected, actual
+        for part in path.split('.'):
+            left, right = (left or {}).get(part) or {}, (right or {}).get(part) or {}
+        report.update({path+'.'+key: value for key, value in difference(left, right).items()})
+    return report
+
+
 def verify_product(name, db, expected):
     actual = observe(name, db)
     for key in ('catalog', 'rows', 'sequences', 'emr'):
@@ -835,6 +881,9 @@ def verify_product(name, db, expected):
             if key == 'catalog':
                 print('Synthetic catalog difference (expected vs restored, schema metadata only): '+
                       bounded_diagnostic(catalog_difference(right, left)), file=sys.stderr, flush=True)
+            if key == 'emr':
+                print('Synthetic emr difference (expected vs restored; catalog metadata, row tables and columns only): '+
+                      bounded_diagnostic(emr_difference(right, left)), file=sys.stderr, flush=True)
             raise ProductMismatch('Synthetic product '+key+' mismatch')
     return actual
 
