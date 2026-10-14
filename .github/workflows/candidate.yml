@@ -1,4 +1,5 @@
 name: Validate immutable deployment candidate
+run-name: candidate ${{ inputs.candidate_sha || github.event.pull_request.head.sha }}
 
 on:
   pull_request:
