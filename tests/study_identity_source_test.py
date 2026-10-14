@@ -23,6 +23,7 @@ What it cannot see: whether TypeScript compiles, the browser renders, or Postgre
 # S9-U0b RELIST: PACS permission/data assertions run compiled suites through pacs_source.
 # Remaining non-PACS source checks are unchanged U0f carry-over.
 # Historical Git byte pins prove the named S4-U5 commits, never the mutable checkout.
+from ci_workflows import WorkflowCatalog
 from pacs_source import assert_behaviour
 from page_source import read_page_source
 import importlib.util
@@ -62,7 +63,8 @@ U2_RULE = text("api", "src", "order-reconciliation.ts")
 U2_CLIENT = text("worklist-v0", "hpacs-lite", "order-reconciliation.js")
 CLIENT = text("worklist-v0", "hpacs-lite", "study-identity.js")
 MAIN = read_page_source(ROOT / "worklist-v0" / "hpacs-lite" / "main.html")
-WORKFLOW = text(".github", "workflows", "validate.yml")
+CATALOG = WorkflowCatalog(ROOT)
+WORKFLOW = CATALOG.text()
 LIVE = text("tests", "invariants_live.py")
 SEED = text("api", "src", "seed.ts")
 
@@ -470,7 +472,7 @@ class LiveAndWorkflowPins(unittest.TestCase):
         planned = [row["case"] for row in RUNNER.module_plan("tests/invariants_live.py", "study-identity-selection", "live",
                                                               600)["tests"]]
         self.assertEqual(planned.count("LiveInvariantTests.test_s4u5_order_identity_qido_only_w_gates_and_report_preservation"), 1)
-        self.assertEqual(len(planned), 89)
+        self.assertEqual(len(planned), 95)  # 89 -> 95: CN-N01-A added the six OrderCorrectionInvariantTests
         self.assertIn(("invariants_live.py", None, "candidate-invariants", len(planned)), candidate_ci.BASE)
 
     def test_hosted_steps_run_the_real_code_with_source_hashes(self):
@@ -496,9 +498,11 @@ class LiveAndWorkflowPins(unittest.TestCase):
                        "tests/worklist_arrivals_dom_test.py", "tests/study_identity_dom_test.py"):
             self.assertIn("--file " + source, dom)
         # Existing jobs only (no new job, profile or image): the runtime job builds kin-api:ci before the server step.
-        self.assertLess(WORKFLOW.index("-t kin-api:ci api"), WORKFLOW.index("/tests/study_identity_server_test.cjs"))
-        self.assertLess(WORKFLOW.index("\n  measurements:\n"), WORKFLOW.index("tests/study_identity_dom_test.py"))
-        self.assertLess(WORKFLOW.index("tests/study_identity_dom_test.py"), WORKFLOW.index("\n  volume-rendering:\n"))
+        runtime = CATALOG.job('runtime')['steps']
+        build = next(i for i, step in enumerate(runtime) if '-t kin-api:ci api' in step.get('run', ''))
+        server = next(i for i, step in enumerate(runtime) if '/tests/study_identity_server_test.cjs' in step.get('run', ''))
+        self.assertLess(build, server)
+        self.assertIn('-B tests/study_identity_dom_test.py', CATALOG.job_text(CATALOG.job('measurements')))
 
 
 class Encoding(unittest.TestCase):

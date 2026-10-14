@@ -233,7 +233,7 @@
       "20261012120000_emr_d",
       "20261013010000_emr_d_original_decisions"
     ],
-    "count": 47,
+    "count": 48,
     "latest_before": "20261012120000_emr_d"
   },
   "composition": {
@@ -638,7 +638,7 @@
     "server": 25,
     "live": 27,
     "live_mutants": 5,
-    "migrations": 47,
+    "migrations": 48,
     "note": "declared before running; never generated from a run's own result"
   },
   "candidate_flow": "EmrDLive.test_d_flow_write_amend_reopen",

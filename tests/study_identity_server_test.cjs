@@ -223,7 +223,7 @@ async function r11Store() {
     update:async({where,data})=>{const row=rows.find(r=>matches(r,where));assert.ok(row);Object.assign(row,data);return structuredClone(row);}});
   const db={studyState:delegate(states),order:delegate(orders),report:delegate(reports),reportDraft:delegate([]),
     readingTemplate:{count:async()=>1,findMany:async()=>[]},userFilter:{findMany:async()=>[]},
-    auditLog:{create:async({data})=>{audits.push(structuredClone(data));return data;}},$executeRaw:async()=>0,
+    auditLog:{create:async({data})=>{audits.push(structuredClone(data));return data;}},$executeRaw:async()=>0,$queryRaw:async()=>[],
     $transaction:async fn=>fn(db)};
   const access={prepare:async()=>{},snapshot:async()=>({policy:{restricted:false}}),allowed:async(c,uids)=>new Set(uids),
     require:async()=>{},unchanged:async()=>{}};

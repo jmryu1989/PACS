@@ -198,6 +198,17 @@ export class OrthancService {
   }
 
   /**
+   * 서버 전체 통계 원문은 unknown이며 값의 유효성·관측 불가 판정은 소비자가 맡는다.
+   * 실패는 rejection이다. 전송·HTTP 오류는 503 ServiceUnavailableException이며 그 메시지를
+   * 클라이언트에 보내면 안 된다. JSON 해석 오류는 그대로 전파한다.
+   * 자체 기한·취소·재시도는 없다. 대기 상한은 호출자 몫이며 PacsMetrics.metricsTimeoutMs가
+   * 이를 정한다. 호출자의 대기 종료는 진행 중인 fetch를 취소하지 않는다.
+   */
+  statistics(): Promise<unknown> {
+    return this.get('/statistics');
+  }
+
+  /**
    * QIDO-RS 검사 목록.
    *
    * 기관과 환자 키의 원본 태그를 includefield에 명시한다. Orthanc가 지금은 PatientID를

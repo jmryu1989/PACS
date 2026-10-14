@@ -43,6 +43,11 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/output-integration-ci/profile --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml --file .github/workflows/output-integration.yml --file tests/e2e/test_critical_result.py --file .github/workflows/gateway-e2e.yml --file tests/e2e/test_prior_selection.py --file tests/e2e/test_related_filter.py -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Cache pinned Python downloads
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/e2e/requirements.txt', 'gateway/agent/requirements.txt') }}
       - name: Install synthetic DICOM and pinned browser test dependencies
         timeout-minutes: 10
         run: |

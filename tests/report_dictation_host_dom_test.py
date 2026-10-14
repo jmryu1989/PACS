@@ -241,6 +241,9 @@ const esc = v => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").re
 const RFIELDS = ["findings", "conclusion", "recommendation"];
 const API = "/api";
 let serverMode = true, offline = false, demoMode = false;
+let folderLoadState = 'complete', filterCollection = null, filterReadSequence = 0, sharedFilterReadSequence = 0;
+function updateWorklistFolders() {}
+function shortcutStatus() {}
 let selectedUid = "UIDVALUE", user = "doctor@kin";
 let appState = INITIALSTATE;
 let studies = [{uid: "UIDVALUE", name: "HONG GILDONG", id: "P-1", date: "2026-09-23", acc: "A1", desc: "Chest CT",

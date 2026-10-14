@@ -1,4 +1,10 @@
 // Pure matcher tests: no browser, network, storage, patient records or DB writes.
+// D1041 pilot decision replaces W2R-02's exact-match compatibility requirement:
+// REQ-WS3 -> RISK-WS3 -> TEST-WS3-RELATIVE-COMPATIBILITY now requires token OR
+// for existing saved scalars as well as new Modality Equals conditions (no migration).
+// W2R4-01: the same decision (7-②, "a CT,SR study is a CT study") makes Modality
+// Does Not Equal the token complement of Equals. The former assertion that a CT,SR
+// study matched both "Equals CT" and "Does Not Equal CT" is replaced, not weakened.
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
@@ -16,6 +22,118 @@ const rule = (field, op, value, value2) => ({ field, op, ...(value === undefined
 const expr = (rules = [], join = 'and') => ({ version: 1, join, rules });
 const match = (study, condition, spec = columns) => matcher.matches(study, condition, spec);
 const valid = condition => assert.equal(matcher.validate(condition, columns), null);
+
+// REQ-WS3 -> RISK-WS3 -> TEST-WS3-RELATIVE: local calendar boundaries, without a live stack.
+function localClock(year, month, day, hour = 12, minute = 0) {
+  let instant = new Date(year, month - 1, day, hour, minute).getTime();
+  class Clock extends Date { constructor(...args) { super(...(args.length ? args : [instant])); } }
+  const sandbox = vm.createContext({ window: {}, Date: Clock });
+  vm.runInContext(readFileSync(join(__dirname, '../worklist-v0/hpacs-lite/compound-filter.js'), 'utf8'), sandbox);
+  return { matcher: sandbox.window.KinCompoundFilter, advance: ms => { instant += ms; } };
+}
+const relative = days => expr([rule('date', 'withinLastDays', days)]);
+test('TEST-WS3-RELATIVE-SUMMARY: applied summaries substitute days, with Today for zero, including nested rules', () => {
+  assert.equal(matcher.describe(relative('1'),columns),'(StudyDate Within Last 1 Day)');
+  for (const days of ['7','365']) assert.equal(matcher.describe(relative(days),columns), `(StudyDate Within Last ${days} Days)`);
+  assert.equal(matcher.describe(relative('0'),columns),'(StudyDate Today)');
+  assert.equal(matcher.describe(expr([{join:'and',rules:relative('7').rules},{join:'and',rules:relative('0').rules}],'or'),columns),
+    '((StudyDate Within Last 7 Days) OR (StudyDate Today))');
+  const operators = matcher.operators(matcher.fields(columns).find(field => field.k === 'date'));
+  assert.deepEqual(operators.map(([op]) => op), ['eq','neq','gte','lte','between','empty','notEmpty','withinLastDays']);
+  assert.equal(matcher.describe(relative('366'),columns),'복합 조건 오류');
+});
+function localTest(name, run) {
+  for (const zone of ['Asia/Seoul', 'America/Los_Angeles']) test(`${name} [${zone}]`, () => {
+    const previous = process.env.TZ;
+    try {
+      process.env.TZ = zone;
+      assert.equal(new Date(2026, 0, 1).getTimezoneOffset(), zone === 'Asia/Seoul' ? -540 : 480);
+      run();
+    } finally {
+      if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous;
+    }
+  });
+}
+
+localTest('TEST-WS3-RELATIVE-VALIDATION: bounded integer day strings, no coercion or second value', () => {
+  for (const days of ['0', '1', '365']) valid(relative(days));
+  for (const days of [undefined, null, 0, 1, false, {}, [], '', ' ', '-1', '366', '1.5', '1e2', '7d', '01', ' 1', '1\n']) invalid(relative(days));
+  invalid(expr([rule('date', 'withinLastDays', '1', '2026-10-04')]));
+  invalid(expr([rule('name', 'withinLastDays', '1')]));
+  const clock = localClock(2026, 10, 4);
+  for (const days of ['0', '1', '365']) {
+    for (const date of [undefined, null, '', '2026-02-30', 'bad', 20261004]) {
+      assert.equal(clock.matcher.matches({ date }, relative(days), columns), false);
+    }
+  }
+});
+
+localTest('TEST-WS3-RELATIVE-BOUNDS: today through N days ago, excluding future dates', () => {
+  const clock = localClock(2026, 10, 4);
+  for (const [days, dates, expected] of [
+    ['0', ['20261003', '20261004', '20261005'], [false, true, false]],
+    ['1', ['20261002', '20261003', '20261004', '20261005'], [false, true, true, false]],
+    ['365', ['20251003', '20251004', '20261004', '20261005'], [false, true, true, false]],
+  ]) assert.deepEqual(dates.map(date => clock.matcher.matches({ date }, relative(days), columns)), expected);
+});
+
+localTest('TEST-WS3-RELATIVE-CALENDAR: month, leap year and year boundaries', () => {
+  for (const [year, month, day, previous, outside] of [
+    [2026, 3, 1, '20260228', '20260227'], [2028, 3, 1, '20280229', '20280228'],
+    [2027, 1, 1, '20261231', '20261230'], [2026, 11, 2, '20261101', '20261031'],
+  ]) {
+    const compiled = localClock(year, month, day).matcher.compile(relative('1'), columns);
+    assert.equal(compiled({ date: previous }), true);
+    assert.equal(compiled({ date: outside }), false);
+  }
+});
+
+localTest('TEST-WS3-RELATIVE-MIDNIGHT: an already compiled condition follows the local day', () => {
+  const clock = localClock(2026, 12, 31, 23, 59), compiled = clock.matcher.compile(relative('0'), columns);
+  assert.equal(compiled({ date: '20261231' }), true);
+  assert.equal(compiled({ date: '20270101' }), false);
+  clock.advance(60000);
+  assert.equal(compiled({ date: '20261231' }), false);
+  assert.equal(compiled({ date: '20270101' }), true);
+});
+
+test('TEST-WS3-RELATIVE-COMPATIBILITY: D1041 saved Modality Equals uses whole-token OR', () => {
+  for (const wanted of ['CT', 'ct', ' CT ', 'CT, MR', 'ct\\mr']) {
+    const condition = expr([rule('modality', 'eq', wanted)]);
+    valid(condition);
+    for (const actual of ['CT', 'CT,SR', 'SR,ct']) assert.equal(match({modality: actual}, condition), true);
+    assert.equal(match({modality: 'MR,SR'}, condition), /MR/i.test(wanted));
+    for (const actual of ['CTA', 'SR', '', null]) assert.equal(match({modality: actual}, condition), false);
+  }
+  for (const wanted of ['CT,', 'CT,,MR', 'CT, UNKNOWN']) invalid(expr([rule('modality', 'eq', wanted)]));
+  // W2R4-01: a CT,SR study is a CT study, so it is excluded by Does Not Equal CT.
+  assert.equal(match({modality: 'CT,SR'}, expr([rule('modality', 'neq', 'CT')])), false);
+  const expression = relative('1');
+  assert.deepEqual(matcher.withQuickMode(matcher.withQuickMode(expression, 'exact', columns), 'contains', columns), expression);
+});
+
+test('TEST-WS3-RELATIVE-COMPATIBILITY: W2R4-01 Modality Does Not Equal is the token complement of Equals', () => {
+  const studies = ['CT', 'CT,SR', 'SR,ct', 'MR', 'MR,SR', 'CTA', 'SR', 'US\\CT'];
+  for (const wanted of ['CT', 'ct', ' CT ', 'CT, MR', 'ct\\mr', 'US']) {
+    const equals = expr([rule('modality', 'eq', wanted)]), excludes = expr([rule('modality', 'neq', wanted)]);
+    valid(excludes);
+    for (const modality of studies) {
+      const inside = match({modality}, equals);
+      assert.equal(match({modality}, excludes), !inside, `${modality} / ${wanted}`);
+      assert.equal(match({modality}, expr([rule('modality', 'eq', wanted), rule('modality', 'neq', wanted)])), false);
+      assert.equal(match({modality}, expr([rule('modality', 'eq', wanted), rule('modality', 'neq', wanted)], 'or')), true);
+    }
+  }
+  assert.deepEqual(studies.filter(modality => match({modality}, expr([rule('modality', 'neq', 'CT')]))), ['MR', 'MR,SR', 'CTA', 'SR']);
+  assert.deepEqual(studies.filter(modality => match({modality}, expr([rule('modality', 'neq', 'ct, mr')]))), ['CTA', 'SR']);
+  // A study without a Modality is not "unequal"; Unspecified stays explicit.
+  for (const modality of [undefined, null, '', ' , ']) {
+    assert.equal(match({modality}, expr([rule('modality', 'neq', 'CT')])), false, String(modality));
+  }
+  // The list is parsed and validated exactly like Equals.
+  for (const wanted of ['CT,', 'CT,,MR', 'CT, UNKNOWN', ' ']) invalid(expr([rule('modality', 'neq', wanted)]));
+  assert.equal(matcher.describe(expr([rule('modality', 'neq', 'CT, MR')]), columns), '(Modality 같지 않음 CT, MR)');
+});
 function invalid(condition, message = '') {
   assert.equal(typeof matcher.validate(condition, columns), 'string', message);
   assert.equal(match({ id: 'alpha', name: '환자', modality: 'CT', date: '20260909' }, condition), false, message);

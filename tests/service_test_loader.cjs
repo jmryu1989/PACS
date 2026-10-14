@@ -7,7 +7,7 @@ const ts = require(path.join(api, 'node_modules/typescript'));
 const source = process.env.KIN_TEST_API_SRC || path.join(api, 'src');
 const resolve = Module._resolveFilename;
 Module._resolveFilename = function (name, parent, ...rest) {
-  if (name.startsWith('/app/dist/')) name = path.join(source, name.slice(10) + '.ts');
+  if (name.startsWith('/app/dist/')) name = path.join(source, name.slice(10).replace(/\.js$/, '') + '.ts');
   else if (name.startsWith('/app/node_modules/')) name = path.join(api, 'node_modules', name.slice(18));
   return resolve.call(this, name, parent, ...rest);
 };

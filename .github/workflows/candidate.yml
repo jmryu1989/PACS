@@ -1,4 +1,5 @@
 name: Validate immutable deployment candidate
+run-name: candidate ${{ inputs.candidate_sha || github.event.pull_request.head.sha }} [g3:${{ inputs.dispatch_nonce || 'pr' }}]
 
 on:
   pull_request:
@@ -7,6 +8,11 @@ on:
       candidate_sha:
         description: Full lowercase 40-character commit SHA to validate
         required: true
+        type: string
+      dispatch_nonce:
+        description: Unique request identity written by scripts/g3_dispatch.py
+        required: false
+        default: ''
         type: string
 
 permissions:
@@ -23,6 +29,8 @@ jobs:
     env:
       CANDIDATE_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha }}
     steps:
+      - name: Capture attempt start
+        run: echo "G3_STARTED_AT=$(date --utc +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
       - name: Checkout reviewed runner tools
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -55,6 +63,7 @@ jobs:
       - name: Candidate runner guards and exact sequence
         run: |
           "$RUNNER_TEMP/candidate-python/bin/python" -B tools/tests/candidate_ci_test.py
+      # Exact collection: 95 invariants + 15 worklist + 10 retained flows + W2 folder/edit/save/relogin.
       - name: Final candidate invariants, worklist and cumulative workflows
         timeout-minutes: 26
         run: |
@@ -67,6 +76,11 @@ jobs:
         run: |
           git fetch --no-tags --depth=1 origin 0261b1c834c4d5ff5c610185b17a40763985097b
           python3 scripts/record-run.py --run-dir tests/e2e/artifacts/candidate-ci/bundle-check --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/main-split.bundle.js --file worklist-v0/hpacs-lite/page-core.js --file worklist-v0/hpacs-lite/study-state.js --file worklist-v0/hpacs-lite/order-list-store.js --file worklist-v0/hpacs-lite/report-templates.js --file worklist-v0/hpacs-lite/report-dictation.js --file worklist-v0/hpacs-lite/report-templates-ui.js --file worklist-v0/hpacs-lite/worklist-columns-view.js --file worklist-v0/hpacs-lite/worklist-state.js --file worklist-v0/hpacs-lite/worklist-data.js --file worklist-v0/hpacs-lite/worklist-view.js --file worklist-v0/hpacs-lite/sr-reader.js --file worklist-v0/hpacs-lite/current-study.js --file worklist-v0/hpacs-lite/study-info-panel.js --file worklist-v0/hpacs-lite/related-studies.js --file worklist-v0/hpacs-lite/study-thumbnails.js --file worklist-v0/hpacs-lite/order-list.js --file worklist-v0/hpacs-lite/study-image-requests.js --file worklist-v0/hpacs-lite/study-corrections.js --file worklist-v0/hpacs-lite/related-report.js --file worklist-v0/hpacs-lite/report-editor.js --file worklist-v0/hpacs-lite/report-draft-sync.js --file worklist-v0/hpacs-lite/report-structure-pane.js --file worklist-v0/hpacs-lite/report-citation-pane.js --file worklist-v0/hpacs-lite/report-draft-save.js --file worklist-v0/hpacs-lite/report-commit.js --file worklist-v0/hpacs-lite/report-hold.js --file worklist-v0/hpacs-lite/work-exit.js --file worklist-v0/hpacs-lite/worklist-polling.js --file worklist-v0/hpacs-lite/report-history.js --file worklist-v0/hpacs-lite/report-toolbar.js --file worklist-v0/hpacs-lite/viewer-placement.js --file worklist-v0/hpacs-lite/viewer-launch.js --file worklist-v0/hpacs-lite/feature-mounts.js --file worklist-v0/hpacs-lite/clinical-context-panel.js --file worklist-v0/hpacs-lite/critical-result-mounts.js --file worklist-v0/hpacs-lite/study-questions.js --file worklist-v0/hpacs-lite/workspace-panels.js --file worklist-v0/hpacs-lite/worklist-controls.js --file worklist-v0/hpacs-lite/saved-filters.js --file worklist-v0/hpacs-lite/worklist-row-events.js --file worklist-v0/hpacs-lite/telerad-request.js --file worklist-v0/hpacs-lite/context-menu.js --file worklist-v0/hpacs-lite/related-controls.js --file worklist-v0/hpacs-lite/session-end.js --file worklist-v0/hpacs-lite/page-boot.js --file scripts/main-split-order.json --file scripts/build-main-split-bundle.py --file .gitattributes -- python3 -B scripts/build-main-split-bundle.py --check
+      - name: Bind uploaded evidence to this producer attempt
+        if: always()
+        env:
+          DISPATCH_NONCE: ${{ inputs.dispatch_nonce }}
+        run: python3 -B tools/tests/ci_candidate_evidence.py --produce target/tests/e2e/artifacts/candidate-ci
       - name: Sanitized immutable candidate evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -74,4 +88,5 @@ jobs:
           name: candidate-${{ env.CANDIDATE_SHA }}
           path: target/tests/e2e/artifacts/candidate-ci/
           if-no-files-found: error
+          overwrite: true
           retention-days: 7

@@ -8,7 +8,7 @@ import { BadRequestException, ConflictException, ForbiddenException, NotFoundExc
 import type { PrismaService } from '../prisma.service';
 import { overlayShape, OVERLAY_RULE_TEXT } from '../study-identity';
 import { closeReaderAssignments } from '../reader-assignment.service';
-import { parse, dump, toClient } from './values';
+import { parse, dump, toClient, noteTransactionError } from './values';
 import { need, inst } from './access';
 import type { Caller, PacsAccess } from './access';
 import type { PacsInstitutions } from './institutions';
@@ -176,29 +176,38 @@ export class PacsStudyState {
     // 환자 정보가 기관을 넘어 덮어써진다 — 조용히 섞이는 최악의 경로다.
     if (order.institutionId !== me) throw new BadRequestException('오더를 찾을 수 없습니다');
 
-    const prev = await this.access.gate(uid, c);
+    await this.access.gate(uid, c);
     await this.studyAccess.prepare(c,[uid]);
-    if (prev && prev.institutionId !== me)
-      throw new ForbiddenException('원격판독으로 받은 검사는 매칭할 수 없습니다 (보유 기관의 일입니다)');
-    // Match도 환자 정보를 덮어쓰는 동작이므로 같은 규칙을 받는다
-    if (prev && prev.rs !== 'W')
-      throw new BadRequestException(`판독 전(RS: W)인 검사만 매칭할 수 있습니다 (현재 RS: ${prev.rs})`);
-    // S4-U5 (N-1): the client-claimed original is stored and relayed like the overlay, so it gets the same shape
-    // check, after every existing refusal above. Mismatch or identity never refuses a match.
-    if (!overlayShape(patient?.orig ?? null))
-      throw new BadRequestException(`원래 정보(orig) 형식이 잘못되었습니다 — ${OVERLAY_RULE_TEXT}`);
-
-    // S4-NB1: age is the client's untrusted ageOf convenience value relayed to every viewer incl. tele: coerce to '', never refuse (PATCH ov keeps its M-1 refusal).
-    const ov = {
-      id: order.patientId, name: order.name, sex: order.sex, birth: order.birth,
-      age: overlayShape({ age: patient?.age }) ? patient.age : '', desc: order.descr, ward: order.ward,
-    };
-    const orig = parse(prev?.orig) ?? patient?.orig ?? null;
 
     let state;
     try {
       state = await this.prisma.$transaction(async tx => {
-      await this.studyAccess.require(c,[uid],tx);
+        await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+        await this.studyAccess.require(c,[uid],tx);
+        // 판독·해제·삭제와 같은 순서: 정책 → 검사 → 오더. 잠금 뒤 다시 읽어야
+        // 기다리는 동안 확정된 RS와 연결을 예전 W 판정으로 덮어쓰지 않는다.
+        const states = await tx.$queryRaw<any[]>`SELECT * FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`;
+        const prev = states[0];
+        const order = await tx.order.findUnique({ where: { oid } });
+        if (!order || order.institutionId !== me) throw new BadRequestException('오더를 찾을 수 없습니다');
+        if (prev && !this.access.visible(prev, me)) throw new NotFoundException('검사를 찾을 수 없습니다');
+        if (prev && prev.institutionId !== me)
+          throw new ForbiddenException('원격판독으로 받은 검사는 매칭할 수 없습니다 (보유 기관의 일입니다)');
+        // Match도 환자 정보를 덮어쓰는 동작이므로 같은 규칙을 받는다
+        if (prev && prev.rs !== 'W')
+          throw new BadRequestException(`판독 전(RS: W)인 검사만 매칭할 수 있습니다 (현재 RS: ${prev.rs})`);
+        // S4-U5 (N-1): the client-claimed original is stored and relayed like the overlay, so it gets the same shape
+        // check, after every existing refusal above. Mismatch or identity never refuses a match.
+        if (!overlayShape(patient?.orig ?? null))
+          throw new BadRequestException(`원래 정보(orig) 형식이 잘못되었습니다 — ${OVERLAY_RULE_TEXT}`);
+
+        // S4-NB1: age is the client's untrusted ageOf convenience value relayed to every viewer incl. tele: coerce to '', never refuse (PATCH ov keeps its M-1 refusal).
+        const ov = {
+          id: order.patientId, name: order.name, sex: order.sex, birth: order.birth,
+          age: overlayShape({ age: patient?.age }) ? patient.age : '', desc: order.descr, ward: order.ward,
+        };
+        const orig = parse(prev?.orig) ?? patient?.orig ?? null;
+
         /**
          * 먼저 읽은 `matched` 값은 두 요청이 함께 U를 봐버릴 수 있다. 조건부 갱신은
          * "아직 U일 때만 내가 M으로 바꾼다"를 DB 한 문장으로 만들고, 행 잠금 뒤의
@@ -212,32 +221,34 @@ export class PacsStudyState {
           throw new BadRequestException('이미 매칭된 오더입니다. 목록을 새로고침한 뒤 다시 선택하세요.');
 
         const data = { matched: 'M', orderOid: oid, ov: dump(ov), orig: dump(orig), ward: order.ward };
+        let saved;
         if (!prev) {
-          return tx.studyState.create({
+          saved = await tx.studyState.create({
             data: { uid, institutionId: me, reqHosp: this.institutions.instName(me), ...data },
           });
+        } else {
+          // 검사 쪽도 같은 상태였을 때만 선점한다. 실패하면 위 오더 갱신도 함께 롤백된다.
+          const claimedStudy = await tx.studyState.updateMany({
+            where: { uid, institutionId: me, matched: 'U' }, data,
+          });
+          if (claimedStudy.count !== 1)
+            throw new BadRequestException('이미 매칭된 검사입니다. 목록을 새로고침한 뒤 다시 선택하세요.');
+          saved = await tx.studyState.findUniqueOrThrow({ where: { uid } });
         }
-
-        // 검사 쪽도 같은 상태였을 때만 선점한다. 실패하면 위 오더 갱신도 함께 롤백된다.
-        const claimedStudy = await tx.studyState.updateMany({
-          where: { uid, institutionId: me, matched: 'U' }, data,
-        });
-        if (claimedStudy.count !== 1)
-          throw new BadRequestException('이미 매칭된 검사입니다. 목록을 새로고침한 뒤 다시 선택하세요.');
-        return tx.studyState.findUniqueOrThrow({ where: { uid } });
-      });
+        await tx.auditLog.create({ data: { actor: c.actor || 'unknown', action: 'match', target: uid,
+          detail: dump({ oid, ov, by: me }) } });
+        return saved;
+      }, { maxWait: 4000, timeout: 8000 });
     } catch (e: any) {
       /**
-       * 서로 다른 오더를 같은 검사에 거는 경쟁은 각 오더 행이 달라 updateMany만으로
-       * 직렬화되지 않는다. 양쪽 nullable unique가 마지막 관문이고, 그 충돌은 사용자가
+       * 아직 없는 검사를 동시에 만드는 경쟁에는 잠글 검사 행이 없다. 양쪽 nullable unique가 마지막 관문이고, 그 충돌은 사용자가
        * 조치할 수 있는 말로 바꾼다. PostgreSQL은 NULL 중복을 허용하므로 미매칭은 막지 않는다.
        */
       if (e?.code === 'P2002')
         throw new BadRequestException(
           '이미 다른 오더 또는 검사와 매칭되었습니다. 목록을 새로고침한 뒤 다시 선택하세요.');
-      throw e;
+      noteTransactionError(e);
     }
-    await this.audit.audit(c.actor, 'match', uid, { oid, ov, by: me });
     const r = await this.prisma.report.findUnique({ where: { uid } });
     return toClient(state, r, c, await this.access.myDraft(uid, c.actor));
   }
@@ -247,6 +258,11 @@ export class PacsStudyState {
     return this.access.scopeWrite(uid,c,async(tx,audit)=>{
     need(c.roles, 'technician', '매칭 해제');
     const me = inst(c);
+    // 보이지 않는 기관의 요청은 소유자의 행 잠금을 기다리지 않고 기존 404로 거절한다.
+    // 이 선검사는 허가가 아니다. 기다린 뒤의 가시성·RS·연결은 아래 gate가 다시 판정한다.
+    await this.access.gate(uid,c,tx);
+    // scopeWrite가 잡은 정책 잠금 다음, 판독과 같은 검사 행 잠금을 먼저 잡는다.
+    await tx.$queryRaw`SELECT uid FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`;
     const prev = await this.access.gate(uid,c,tx);
     if (!prev || prev.matched !== 'M') throw new BadRequestException('매칭된 검사가 아닙니다');
     // Match와 같은 규칙을 해제에도 건다. 승인 뒤 환자·오더 연결을 바꾸면 진술의 근거가 사라진다.
@@ -255,17 +271,14 @@ export class PacsStudyState {
     if (prev.institutionId !== me)
       throw new ForbiddenException('원격판독으로 받은 검사는 매칭을 풀 수 없습니다 (보유 기관의 일입니다)');
 
-    const ops: any[] = [
-      tx.studyState.update({
-        where: { uid }, data: { matched: 'U', orderOid: null, ov: null },
-      }),
-    ];
+    const state = await tx.studyState.update({
+      where: { uid }, data: { matched: 'U', orderOid: null, ov: null },
+    });
     if (prev.orderOid)
-      ops.push(tx.order.update({
+      await tx.order.update({
         where: { oid: prev.orderOid }, data: { matched: 'U', studyUid: null },
-      }));
+      });
 
-    const [state] = await Promise.all(ops);
     await audit(c.actor, 'unmatch', uid, { oid: prev.orderOid, by: me });
     const r = await tx.report.findUnique({ where: { uid } });
     return toClient(state, r, c, await this.access.myDraft(uid,c.actor,tx));

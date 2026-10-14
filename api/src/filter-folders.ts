@@ -92,3 +92,15 @@ export function folderAction(rawFolders: unknown, searches: FolderSearch[], comm
   result.sort((a, b) => a.path.localeCompare(b.path));
   return { folders: result, moves, deletes };
 }
+/** Whole-array replacement; search references are namespaced stable IDs, never names.
+ * Missing targets are deliberately retained (deletion/revocation is not an edit of personal preferences).
+ */
+export function shortcutEntries(value: unknown): { id: string; name: string; searchId: string }[] {
+  const text = (v: unknown): v is string => typeof v === 'string' && !!v.trim() && v.length <= 400 && !/[\r\n]/.test(v);
+  if (!Array.isArray(value) || value.length > 200 || value.some(item =>
+    !item || typeof item !== 'object' || Array.isArray(item) || Object.keys(item).sort().join(',') !== 'id,name,searchId'
+    || !text(item.id) || !text(item.name) || !text(item.searchId) || !/^(own|shared):[1-9]\d*$/.test(item.searchId))
+    || new Set(value.map(item => item.id)).size !== value.length)
+    throw new BadRequestException('바로가기 목록 형식을 확인하세요');
+  return value.map(item => ({ id: item.id, name: item.name.trim(), searchId: item.searchId }));
+}
