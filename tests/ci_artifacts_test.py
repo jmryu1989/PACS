@@ -4,7 +4,8 @@ The real YAML upload declarations are the contract. Synthetic relocations and
 duplicate artifact names prove collection never borrows another workflow's run.
 The fake answers paged workflow/run/artifact REST requests and ID downloads.
 It deliberately returns foreign SHA rows too, so the collector must fail closed
-on contradictory filtered responses. G3 requests must stop before any lookup.
+on contradictory filtered responses. A full-stage request without the explicit
+G3 round record must stop before any lookup; FullStageCases cover the recorded round.
 """
 import copy
 import hashlib
@@ -23,6 +24,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import yaml
 from ci_artifacts import CANDIDATE, ROOT, download, inventory, listing, gh_get
+import ci_candidate_evidence_test as g3_fixture
 from ci_workflows import WorkflowCatalog
 
 SHA = 'a' * 40
@@ -95,7 +97,155 @@ class FakeGitHub:
         return copy.deepcopy({'total_count': len(rows), key: rows[start:start + self.page_size]}), headers
 
 
-class ArtifactTests(unittest.TestCase):
+class FullStageCases:
+    """CI-TOOLING-1b integration: the recorded G3 round AND the 1a non-G3 collection.
+
+    Mixed into ArtifactTests so the existing CI entry point (record_run_test) runs it.
+    One query/fetch pair serves both paths, as in production. G3 rows (run 50,
+    artifact 5000) come from the G3 fixture, all other rows from the 1a fake.
+    """
+    G3_RUN = 50
+
+    def stage_setup(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.stage_root, uploads = self.fixture(folder.name)
+        self.stage_hosted = FakeGitHub(uploads)
+        self.stage_g3 = g3_fixture.FakeGitHub()
+        run = g3_fixture.make_run(self.G3_RUN)
+        self.stage_g3.runs, self.stage_g3.artifacts, self.stage_g3.archives = {self.G3_RUN: run}, {}, {}
+        self.stage_g3.page_size = 100
+        self.stage_g3.add_artifact(self.G3_RUN)
+        self.stage_record = self.stage_root / 'g3-round.json'
+        self.stage_write_record(g3_fixture.record((self.G3_RUN,)))
+        self.stage_urls, self.stage_fetched = [], []
+
+    def stage_write_record(self, value):
+        self.stage_record.write_text(json.dumps(value), encoding='utf-8')
+
+    def stage_g3_owned(self, endpoint):
+        path = urlsplit(endpoint).path
+        run = re.search(r'/actions/runs/(\d+)', path)
+        artifact = re.search(r'/actions/artifacts/(\d+)', path)
+        return ('/workflows/candidate.yml' in path or bool(run and int(run[1]) in self.stage_g3.runs)
+                or bool(artifact and int(artifact[1]) in self.stage_g3.artifacts))
+
+    def stage_query(self, endpoint):
+        self.stage_urls.append(endpoint)
+        if urlsplit(endpoint).path == 'repos/' + g3_fixture.REPO:
+            return {'id': 20, 'full_name': g3_fixture.REPO}, {}
+        return (self.stage_g3.query if self.stage_g3_owned(endpoint) else self.stage_hosted)(endpoint)
+
+    def stage_fetch(self, endpoint, archive):
+        self.stage_fetched.append(endpoint)
+        if self.stage_g3_owned(endpoint):
+            return self.stage_g3.fetch(endpoint, archive)
+        with zipfile.ZipFile(archive, 'w') as zipped:
+            zipped.writestr('evidence.txt', endpoint)
+
+    def stage_collect(self, fetch=None, **kwargs):
+        kwargs.setdefault('record', self.stage_record)
+        return download(self.stage_root, SHA, '8', self.stage_root / 'out', self.stage_query,
+                        fetch or self.stage_fetch, **kwargs)
+
+    def stage_manifest(self, name='stage-evidence.json'):
+        return json.loads((self.stage_root / 'out' / name).read_text(encoding='utf-8'))
+
+    def test_full_stage_combines_both_collections_after_both_succeed(self):
+        self.stage_setup()
+        result = self.stage_collect()
+        self.assertEqual((result['status'], result['scope']), ('completed', 'full'))
+        self.assertEqual(self.stage_manifest(), result)
+        hosted = self.stage_manifest('artifact-downloads.json')
+        self.assertEqual((hosted['scope'], hosted['status']), ('non-candidate', 'completed'))
+        self.assertEqual(len(hosted['downloads']), 6)
+        g3 = self.stage_manifest('g3/g3-evidence.json')
+        self.assertEqual(g3['status'], 'verified')
+        self.assertEqual(result['g3']['record_sha256'], hashlib.sha256(self.stage_record.read_bytes()).hexdigest())
+        self.assertEqual(result['g3']['candidate_directory'], g3['downloads'][-1]['destination'])
+        self.assertTrue((Path(result['g3']['candidate_directory']) / 'g3-provenance.json').is_file())
+        self.assertEqual(self.stage_g3.fetched, [self.G3_RUN * 100])
+        # The non-G3 path never looks at candidate.yml; G3 enters only by the recorded ID.
+        self.assertFalse(any('candidate.yml' in url for url in self.stage_hosted.urls))
+        self.assertIn(f'repos/{g3_fixture.REPO}/actions/runs/{self.G3_RUN}', self.stage_urls)
+
+    def test_full_stage_without_explicit_record_stops_before_any_io(self):
+        self.stage_setup()
+        with self.assertRaisesRegex(ValueError, 'STOP .*explicit G3 round record'):
+            self.stage_collect(record=None)
+        self.assertEqual((self.stage_urls, self.stage_fetched), ([], []))
+        self.assertFalse((self.stage_root / 'out').exists())
+        result = subprocess.run([sys.executable, '-B', str(ROOT / 'tests/ci_artifacts.py'), '--root', str(self.stage_root),
+                                 '--sha', SHA, '--stage', '7', '--out', str(self.stage_root / 'cli-out')],
+                                capture_output=True, text=True, encoding='utf-8')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('explicit G3 round record', result.stderr)
+        self.assertFalse((self.stage_root / 'cli-out').exists())
+
+    def test_full_stage_record_is_bound_to_candidate_scope_and_mode_before_io(self):
+        self.stage_setup()
+        cases = [(dict(record=self.stage_root / 'missing.json'), 'record unreadable'),
+                 (dict(repository='o/r'), 'another repository'),
+                 (dict(dry_run=True), 'only for --non-candidate'),
+                 (dict(non_candidate=True), '--record belongs to the full stage')]
+        for kwargs, reason in cases:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaisesRegex(ValueError, reason):
+                    self.stage_collect(**kwargs)
+        other = g3_fixture.record((self.G3_RUN,))
+        other['candidate_sha'] = 'c' * 40
+        self.stage_write_record(other)
+        with self.assertRaisesRegex(ValueError, 'another candidate SHA'):
+            self.stage_collect()
+        self.assertEqual((self.stage_urls, self.stage_fetched), ([], []))
+        self.assertFalse((self.stage_root / 'out').exists())
+
+    def test_full_stage_g3_stop_leaves_the_collection_incomplete(self):
+        self.stage_setup()
+        self.stage_g3.runs[self.G3_RUN]['conclusion'] = 'failure'
+        with self.assertRaisesRegex(ValueError, f'STOP run_id={self.G3_RUN} .*not completed/success'):
+            self.stage_collect()
+        combined = self.stage_manifest()
+        self.assertEqual((combined['status'], combined['non_candidate']['status'], combined['g3']['status']),
+                         ('incomplete', 'completed', 'incomplete'))
+        self.assertNotIn('verified_at', combined)
+        self.assertIn(f'run_id={self.G3_RUN}', combined['error'])
+        self.assertEqual(self.stage_manifest('g3/g3-evidence.json')['status'], 'incomplete')
+
+    def test_full_stage_non_candidate_stop_never_starts_g3(self):
+        self.stage_setup()
+        self.stage_hosted.run('renamed-volume.yml')['conclusion'] = 'failure'
+        with self.assertRaisesRegex(ValueError, 'STOP run_id=11 .*latest run is not completed/success'):
+            self.stage_collect()
+        combined = self.stage_manifest()
+        self.assertEqual((combined['status'], combined['g3']['status']), ('incomplete', 'not_started'))
+        self.assertEqual(self.stage_g3.calls, [])
+        self.assertFalse((self.stage_root / 'out/g3').exists())
+
+    def test_full_stage_lists_legacy_runs_without_admitting_them(self):
+        self.stage_setup()
+        legacy = g3_fixture.make_run(49, conclusion='failure')
+        legacy.update(created_at=g3_fixture.BEFORE_T0, run_started_at=g3_fixture.BEFORE_T0)
+        self.stage_g3.runs[49] = legacy
+        result = self.stage_collect()
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(result['g3']['legacy_excluded'], [49])
+        self.assertEqual(self.stage_g3.fetched, [self.G3_RUN * 100])
+
+    def test_full_stage_record_changed_after_binding_is_refused(self):
+        self.stage_setup()
+        def change(endpoint, archive):
+            if not self.stage_fetched:  # first non-G3 download, after the record was bound
+                value = json.loads(self.stage_record.read_text(encoding='utf-8'))
+                value['revision'] += 1
+                self.stage_write_record(value)
+            self.stage_fetch(endpoint, archive)
+        with self.assertRaisesRegex(ValueError, 'record changed after the full collection bound it'):
+            self.stage_collect(fetch=change)
+        self.assertEqual(self.stage_manifest()['status'], 'incomplete')
+
+
+class ArtifactTests(FullStageCases, unittest.TestCase):
     def test_invalid_page_zero_and_empty_page_with_next_link(self):
         for page_number, rows in ((0, [{'id': 1}]), (2, [])):
             with self.subTest(page=page_number):
@@ -399,26 +549,22 @@ foreach ($file in Get-ChildItem $PSScriptRoot -Filter '*.ps1' | Where-Object Nam
 
     def test_procedure_takes_hosted_artifacts_only_through_the_collector(self):
         # A direct download picks one run by hand and can skip an owning workflow,
-        # whatever variable or flag spelling it uses.
+        # whatever variable or flag spelling it uses. G3 enters only through the
+        # recorded round given to the same collector (CI-TOOLING-1b integration).
         doc = (ROOT / 'tests/stage-exit.md').read_text(encoding='utf-8')
         self.assertIn('CI-TOOLING-1b', doc)
-        for command in re.finditer(r'\bgh\s+run\s+download\b[^\r\n]*', doc, re.IGNORECASE):
-            self.assertRegex(command[0], r'-n "candidate-\$sha"')
-            self.assertIn('$candidateRun', command[0])
+        self.assertEqual(re.findall(r'\bgh\s+run\s+download\b[^\r\n]*', doc, re.IGNORECASE), [])
         blocks = re.findall(r'```powershell\n(.*?)```', doc, re.DOTALL)
         collecting = [block for block in blocks if re.search(r'tests/ci_artifacts\.py --sha \$sha --stage [78]\b', block)]
         self.assertEqual(len(collecting), 2)
         for block in collecting:
-            self.assertIn('--non-candidate', block)
-            self.assertRegex(block, r'if \(-not \$candidateRun\) \{ throw [^\n]+\}')
-            self.assertIn('gh run view $candidateRun --json workflowName,event,status,conclusion,headSha,attempt', block)
-            for guard in ("$candidate.workflowName -ne 'Validate immutable deployment candidate'", "$candidate.event -ne 'workflow_dispatch'",
-                          "$candidate.status -ne 'completed'", "$candidate.conclusion -ne 'success'",
-                          '$candidate.attempt -lt 1'):
-                self.assertIn(guard, block)
-            self.assertRegex(block, r'if \([^\n]+\) \{ throw [^\n]+\}')
-            self.assertIn('$candidate | ConvertTo-Json', block)
-            self.assertLess(block.index('gh run view'), block.index('gh run download'))
+            command = re.search(r'tests/ci_artifacts\.py --sha \$sha --stage [78] [^\n]*', block)[0]
+            self.assertIn('--record $roundRecord', command)
+            self.assertNotIn('--non-candidate', command)
+            self.assertRegex(block, r'if \(\$LASTEXITCODE -ne 0\) \{ throw [^\n]+\}')
+            self.assertIn('stage-evidence.json', block)
+            self.assertIn("$hosted.status -ne 'completed'", block)
+            self.assertLess(block.index(command), block.index('$candidateDir = $hosted.g3.candidate_directory'))
 
     def fixture(self, folder, omit=()):
         root = Path(folder)
