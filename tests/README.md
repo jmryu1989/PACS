@@ -1643,7 +1643,9 @@ host could not be observed before it does not run; after a change it ends UNKNOW
   cluster's bootstrap kin, are refused at capture (IRT2-16/17); `values.json` (row count and SHA-256 per table of
   every schema of both databases) is compared after every held restore (IRT2-24). Daily EMR sets record their role
   catalog in the manifest and `rehearse` replays it in a kin-bootstrapped cluster (D23; older sets keep the
-  `pg_dumpall` path, which PostgreSQL 16 refuses for a `GRANTED BY kin` membership). Its real-cluster class needs the
+  `pg_dumpall` path, which PostgreSQL 16 refuses for a `GRANTED BY kin` membership); a source database outside the
+  daily set (it dumps kin and keycloak) and its settings are named in the rehearsal result, not compared, while a
+  held capture still refuses it (R5-02, `ops_backup_test.py`). Its real-cluster class needs the
   local image `postgres:16-alpine`.
   `python -B tests/ops_backup_rotation_test.py`: after a complete, error-free `backup` (default `--rotate-keep 7`,
   D1047; `--no-rotate` leaves the sets) and in `ops_backup.py rotate [--dry-run]` (the dry run lists exactly the plan

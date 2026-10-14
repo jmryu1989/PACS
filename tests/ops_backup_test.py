@@ -92,10 +92,16 @@ class DailyCluster:
     def catalog(self):
         base = self.restored or self.source
         whole = self.restored_databases >= {"kin", "keycloak"}
-        return {**{key: base[key] for key in ("server_major", "unsupported_verifiers", "login_verifiers", "builtin_roles", "settings", "setting_names")},
+        # A fresh cluster holds the image's postgres and templates and what pg_restore --create brought back: a source
+        # database the set does not hold (and a setting scoped to it) never exists there. `restored` is echoed as given.
+        present = {"postgres", "template0", "template1", *self.restored_databases}
+        databases = base["databases"] if self.restored else [item for item in base["databases"] if item["name"] in present]
+        settings = base["settings"] if self.restored else [entry for entry in base["settings"] if entry["database"] in (None, *present)]
+        return {**{key: base[key] for key in ("server_major", "unsupported_verifiers", "login_verifiers", "builtin_roles", "setting_names")},
+                "settings": settings,
                 "login_verifiers": sorted(self.verifiers), "role_comments": [[name, None] for name in sorted(self.roles)], "roles": [self.roles[name] for name in sorted(self.roles)],
                 "memberships": sorted(self.memberships, key=lambda item: (item["granted"], item["member"])),
-                "databases": base["databases"] if whole else [{"name": "kin", "owner": "kin", "acl": []}, {"name": "postgres", "owner": "kin", "acl": []}],
+                "databases": databases if whole else [{"name": "kin", "owner": "kin", "acl": []}, {"name": "postgres", "owner": "kin", "acl": []}],
                 "tablespaces": base["tablespaces"] if self.tablespace else [item for item in base["tablespaces"] if item["name"].startswith("pg_")],
                 "schemas": base["schemas"] if whole else ["public"]}
 
@@ -1041,6 +1047,46 @@ class EmrRestoreVerification(unittest.TestCase):
         self.assertNotIn("POSTGRES_USER=kin", started)
         self.assertTrue(any(command[:3] == ["docker", "exec", "-i"] and "psql" in command and command[command.index("-U") + 1] == "postgres"
                             for command in commands))
+
+    def test_r5_02_a_database_outside_the_daily_set_is_named_and_the_set_still_compared(self):
+        """R5-02 (PR #175 CI emr-b, live L19): a daily set dumps kin and keycloak only, so a further database of the
+        source cluster (L19's cluster still holds L06's l06_tampered) and a setting scoped to it are outside the set: the
+        rehearsal names it instead of refusing a complete set, and replays and compares everything the set holds. A
+        restore that yields a database the set does not hold, or whose kin ACL differs, is still refused; a held
+        (whole-cluster) capture still refuses the further database."""
+        def outside_database(name):
+            return {"name": name, "owner": "kin", "acl": ["=Tc/kin", "kin=CTc/kin"], "attributes": {"datistemplate": False, "datallowconn": True}}
+        captured = daily_role_catalog()
+        captured["databases"] = sorted([*captured["databases"], outside_database("l06_tampered")], key=lambda item: item["name"])
+        captured["settings"] = [{"database": "kin", "role": None, "config": ["work_mem=8MB"]},
+                                {"database": "l06_tampered", "role": None, "config": ["work_mem=4MB"]}]
+        self.host.role_catalog = captured
+        folder, manifest, error = self.host.backup(self.answer)
+        self.assertIsNone(error, error)
+        self.assertEqual(manifest["role_catalog"], captured, "the manifest keeps the cluster as captured")
+        result, error, _, _ = self.host.rehearse(folder, self.answer)
+        self.assertIsNone(error, error)
+        self.assertTrue(result["success"] and result["audit"]["verified"])
+        self.assertEqual((result["databases_outside_set"], result["catalog"]["catalog"]), (["l06_tampered"], "equal"))
+        replayed = "".join(self.host.cluster.statements)
+        self.assertIn('ALTER ROLE ALL IN DATABASE "kin" SET "work_mem" TO', replayed)
+        self.assertNotIn("l06_tampered", replayed)
+        in_set = copy.deepcopy(captured)
+        in_set["databases"] = [item for item in in_set["databases"] if item["name"] != "l06_tampered"]
+        in_set["settings"] = in_set["settings"][:1]
+        extra_restored = copy.deepcopy(in_set)
+        extra_restored["databases"] = sorted([*extra_restored["databases"], outside_database("kin_scratch")], key=lambda item: item["name"])
+        acl_changed = copy.deepcopy(in_set)
+        next(item for item in acl_changed["databases"] if item["name"] == "kin")["acl"] = ["=Tc/kin", "kin=CTc/kin"]
+        for label, restored in (("a database the set does not hold", extra_restored), ("kin's ACL", acl_changed)):
+            with self.subTest(restored=label):
+                self.host.restored_role_catalog = restored
+                result, error, _, _ = self.host.rehearse(folder, self.answer)
+                self.assertIsInstance(error, RuntimeError)
+                self.assertIn("Restored catalog differs from the snapshot: databases", str(error))
+                self.assertFalse(result["success"])
+        with self.assertRaisesRegex(ops.RestoreAdmissionError, "the databases are not exactly kin and keycloak"):
+            ops.supported_catalog(captured, shape="post")
 
     def test_unsafe_emr_archive_refused_despite_matching_checksum(self):
         archive_path = self.folder / 'emr-state.tgz'

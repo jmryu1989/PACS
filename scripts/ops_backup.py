@@ -569,7 +569,8 @@ def rehearse_held(directory, manifest, *, daily=False):
     whose seal must recover against the restored ledger.
     daily (D23): a daily EMR set that carries its role catalog in the manifest goes the same way in the post-EMR shape -
     its roles and memberships replayed by the catalog (never pg_dumpall's GRANTED BY statements), the restored cluster's
-    role catalog compared with the manifest's, the AuditLog seal verified as kin (no projection: a daily set has none)."""
+    role catalog compared with the manifest's within the set (R5-02: daily_set_catalog; a source database outside the
+    set is named in the result), the AuditLog seal verified as kin (no projection: a daily set has none)."""
     shape = "post" if daily else manifest["shape"]
     token = uuid.uuid4().hex
     name = resource_name(token)
@@ -593,7 +594,10 @@ def rehearse_held(directory, manifest, *, daily=False):
             raise RuntimeError("Isolated PostgreSQL did not become ready")
         if shape == "post":
             run(["docker", "exec", "-u", "postgres", name, "mkdir", "-m", "700", EMR_TABLESPACE])
-        result["catalog"] = restore_snapshot(name, directory, "kin", shape, source=manifest["role_catalog"] if daily else None)
+        source = None
+        if daily:
+            source, result["databases_outside_set"] = daily_set_catalog(manifest["role_catalog"])
+        result["catalog"] = restore_snapshot(name, directory, "kin", shape, source=source)
         if daily:
             for database in PRE_DATABASES:
                 if counts(name, database, "kin") != manifest["counts"][database]:
@@ -811,6 +815,28 @@ ROLE_CATALOG_SQL = """SET search_path=pg_catalog; SET client_encoding='UTF8'; SE
     WHERE nspname !~ '^pg_' AND nspname <> 'information_schema'))"""
 PRE_DATABASES = ("kin", "keycloak")
 DEFAULT_TABLESPACES = ("pg_default", "pg_global")
+# What a daily set holds of the cluster's databases: the two it dumps, beside the image's own postgres and templates.
+DAILY_SET_DATABASES = (*PRE_DATABASES, "postgres", "template0", "template1")
+
+
+def daily_set_catalog(catalog):
+    """R5-02: (the role catalog a daily set's rehearsal must reproduce, the source databases outside the set).
+
+    A daily set dumps kin and keycloak only, as before D23; a further database of the source cluster is not in the set,
+    so no restore of the set can bring it back, and the pre-D23 rehearsal restored such a set. Its catalog row and its
+    database-scoped settings are outside what the replay compares: the rehearsal names them instead of refusing a
+    complete set. Everything the set holds stays compared exactly (roles, memberships, verifiers, comments, the owners,
+    ACLs and attributes of kin, keycloak, postgres and the templates, tablespaces, kin's schemas, cluster/role settings),
+    and a restore that yields a database the set does not hold still differs. A malformed catalog is passed on unchanged
+    for supported_catalog to refuse. The held captures (B0/B1) restore a whole cluster and keep refusing a further one."""
+    if type(catalog) is not dict or type(catalog.get("databases")) is not list or type(catalog.get("settings")) is not list:
+        return catalog, []
+    outside = sorted(item["name"] for item in catalog["databases"]
+                     if type(item) is dict and type(item.get("name")) is str and item["name"] not in DAILY_SET_DATABASES)
+    scoped = {**catalog,
+              "databases": [item for item in catalog["databases"] if not (type(item) is dict and item.get("name") in outside)],
+              "settings": [entry for entry in catalog["settings"] if not (type(entry) is dict and entry.get("database") in outside)]}
+    return scoped, outside
 MIGRATIONS_SQL = """SELECT coalesce(json_agg(json_build_array(migration_name, checksum, finished_at IS NOT NULL,
   rolled_back_at IS NOT NULL) ORDER BY migration_name COLLATE "C"), '[]'::json) FROM "_prisma_migrations\""""
 # Fixed output settings: a projection must not change because a session's display defaults differ.
