@@ -142,6 +142,12 @@ def first_paint_pixels(page, path, clip=None):
 # Pixels count as different above 16/255 in any channel. Geometry comparisons
 # and movement mutants independently check whether a 1 px displacement is caught.
 ANTIALIAS = 16
+# The pictures show the finished page, not the order it was painted in. Chromium re-rasters only the rectangle a
+# change invalidated, while Linux's subpixel (LCD) text spreads its colour fringe one pixel beyond the glyphs. Which
+# fringe pixels a picture shows then depends on what the page's start-up invalidated, not on the finished page: W2 and
+# W3 at the same layout (to 1/64 px) differed in one fringe pixel, 27/255 (PR #173 CI, 768x1024; reproduced on Ubuntu
+# 24.04, gone with full-tile raster and with grayscale text). Full-tile raster draws every text whole.
+RASTER = ['--disable-partial-raster']
 # Regions [x, width, y in a, y in b, height]: the same columns of the two pictures,
 # each region of b compared with the region of a it was moved from (W3R5-04).
 COMPARE = '''async ([a, b, tolerance, regions]) => {
@@ -221,7 +227,7 @@ class StudyPanelPageDOM(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.pw = sync_playwright().start()
-        cls.browser = cls.pw.chromium.launch()
+        cls.browser = cls.pw.chromium.launch(args=RASTER)
 
     @classmethod
     def tearDownClass(cls):

@@ -28,7 +28,7 @@ import zipfile
 from pathlib import Path
 from playwright.sync_api import expect, sync_playwright
 import study_panel_page_dom_test as dom
-from study_panel_page_dom_test import KEY, ROOT, VISIBLE, WorkspaceSite, auth, cover, picture_difference, settle, wait_startup
+from study_panel_page_dom_test import KEY, RASTER, ROOT, VISIBLE, WorkspaceSite, auth, cover, picture_difference, settle, wait_startup
 
 # Round 6 as finished (a94f2e2 product tree + the r6c test/README commit): the default this round must keep.
 R6 = 'ea2a0379cc3dc0482ee3887940f875fe34ce773c'
@@ -46,10 +46,14 @@ PANEL = '''() => { const d = document.querySelector('[role=complementary][aria-l
 PAGE = '''() => ['.menubar', '.left', '.left > .grid', '#rows tr[data-uid]', '.right', '.rw', '.related-p', '.related-list-pane',
   '.report-p', '#b-approve', '#b-save', '#findings', '#conclusion'].map(s => { const n = document.querySelector(s);
   const b = n.getBoundingClientRect(); return [s, b.x, b.y, b.width, b.height, getComputedStyle(n).fontSize]; })'''
-# Rendered text: the height of the first line box of a text (zoom does not change computed font sizes).
+# Rendered text (zoom does not change computed font sizes): the drawn advance of a text (the widths of its line boxes,
+# which grow in proportion to the size the glyphs are drawn at) and the height of its first line box. The line box is
+# the font's ascent + descent rounded to whole pixels on some platforms (the Linux runner's DejaVu Sans: 15, 17, 20 px
+# at 13, 15.6, 18.2 px), so its ratio is not the text's scale; it is only required to grow.
 TEXT = '''(selector) => { const root = document.querySelector(selector), walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   let text = walker.nextNode(); while (text && !text.nodeValue.trim()) text = walker.nextNode();
-  const range = document.createRange(); range.selectNodeContents(text); return range.getClientRects()[0].height; }'''
+  const range = document.createRange(); range.selectNodeContents(text); const lines = [...range.getClientRects()];
+  return {advance: lines.reduce((sum, line) => sum + line.width, 0), line: lines[0].height}; }'''
 # Everywhere the round-6 rules place the panel: wide landscape columns, stacked portrait bands at every width, the
 # pilot's 900x1200, short side-by-side windows (the column left of the report) and the narrow sheet.
 DEFAULT_SIZES = ((1920, 1080), (1366, 768), (2560, 1440), (1200, 1920), (1440, 2560), (900, 1200), (768, 1024), (1024, 768), (840, 768))
@@ -77,7 +81,7 @@ class StudyPanelSizeDOM(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.pw = sync_playwright().start()
-        cls.browser = cls.pw.chromium.launch()
+        cls.browser = cls.pw.chromium.launch(args=RASTER)
 
     @classmethod
     def tearDownClass(cls):
@@ -232,7 +236,21 @@ class StudyPanelSizeDOM(unittest.TestCase):
                         # pushed its panel down (W3R7-04, fixed this round). So each tab's content is round 6's within
                         # the panel, and the panel itself stays where it opened, which is round 6's place (above).
                         for key in ('tab Images', 'tab Templates', 'tab Info'):
-                            self.assertEqual(within_panel(theirs[key]), within_panel(mine[key]), key)
+                            expected = within_panel(theirs[key])
+                            opened, after = theirs['panel']['drawer'], theirs[key]['drawer']
+                            if after != opened:
+                                # Where the status line wrapped depends on the platform's fonts (Windows: 900x1200 and
+                                # 768x1024; the Linux runner also 1024x768). A panel in a column keeps its bottom, so
+                                # round 6's panel there also lost the height it moved down by. Round 6's tab is then
+                                # compared as if its panel had stayed where it opened: same left and width, the lost
+                                # height given back to the panel and its shown tab; everything else unchanged.
+                                down, lost = after[1] - opened[1], opened[3] - after[3]
+                                self.assertEqual((opened[0], opened[2]), (after[0], after[2]), key)
+                                self.assertGreater(down, 0, key)
+                                self.assertIn(lost, (0, down), key)
+                                expected['drawer'] = [expected['drawer'][0], expected['drawer'][1] + lost]
+                                expected['shown'] = expected['shown'][:3] + [expected['shown'][3] + lost]
+                            self.assertEqual(expected, within_panel(mine[key]), key)
                             self.assertEqual(mine['panel']['drawer'], mine[key]['drawer'], key + ': the panel does not move')
                         # The opened panel's new nodes: the Text Size select and its 3 options, Default, the
                         # controls' row and the edge (stated in the round-7 report).
@@ -506,7 +524,8 @@ class StudyPanelSizeDOM(unittest.TestCase):
             larger = measure()
             with self.subTest(step=step):
                 for name in ('label', 'value', 'heading', 'tab'):
-                    self.assertAlmostEqual(SCALES[step], larger[name] / normal[name], delta=0.06, msg=name)
+                    self.assertAlmostEqual(SCALES[step], larger[name]['advance'] / normal[name]['advance'], delta=0.06, msg=name)
+                    self.assertGreater(larger[name]['line'], normal[name]['line'], name + ': the glyphs are drawn taller')
                 self.assertEqual(normal['title'], larger['title'], 'the header is not scaled')
                 # Close stays the same size in the same row; it moves right with the wider panel's edge.
                 self.assertEqual(normal['facts']['close'][1:], larger['facts']['close'][1:])
