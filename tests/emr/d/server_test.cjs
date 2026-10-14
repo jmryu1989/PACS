@@ -627,7 +627,11 @@ test('EMR-D workflow: the checkout, the image (label and tag), the live run and 
   // earlier step of the same run produces (the image identity).
   for (const id of ids) {
     const r = pathsOf(record(id));
-    assert.deepEqual([r.program, r.exit], [['python3', 'scripts/record-run.py'], 0], id + ': the recorder runs');
+    // The recorder (scripts/record-run.py since main's W2C-05) exits 125 when an input its line declares is absent. In this
+    // checkout the only input that may be absent is one an earlier step of the same run produces (the image identity; see
+    // the next assertions), so its record exits 125 here and 0 in the workflow, where that step has run.
+    const absent = r.inputs.some(input => input.status !== 'present');
+    assert.deepEqual([r.program, r.exit], [['python3', 'scripts/record-run.py'], absent ? 125 : 0], id + ': the recorder runs');
     for (const file of consumed[id]) assert.ok(hashes(r, file) || declaration.ci.produced_inputs.includes(file), 'the ' + id + ' record hashes ' + file);
     for (const input of r.inputs) assert.ok(input.status === 'present' || declaration.ci.produced_inputs.includes(input.requested), id + ' names ' + input.requested + ': ' + input.status);
   }
@@ -1006,12 +1010,14 @@ test('EMR-D evidence: same_source.py passes only records of TARGET_SHA that hash
       if (kind.kind === 'run-tests') return standard['run-tests'](declaration.cases[kind.declared]);
       return null;
     };
-    const record = (list, { exit = 0, actions: changes = [], output, line } = {}) => asRun(list.map(id => {
+    // `recorder`: the recorder's own exit when it differs from the child's (125: an input its line declares is absent, the
+    // recorder's refusal since main's W2C-05; the record is still written and same_source must still refuse it by name).
+    const record = (list, { exit = 0, recorder = exit, actions: changes = [], output, line } = {}) => asRun(list.map(id => {
       const text = output !== undefined ? output : outputOf(id);
       const file = text === null ? '-' : path.join(outputs, id + '-' + randomUUID() + '.out');
       if (text !== null) fs.writeFileSync(file, text);
       return { line: line || steps[ids.indexOf(id)].run, cwd: repo, own_run_dir: true, child: ['{python}', '-c', CHILD, file, String(exit), ...changes] };
-    })).records.forEach((r, i) => assert.equal(r.exit, exit, list[i] + ': ' + r.stderr));
+    })).records.forEach((r, i) => assert.equal(r.exit, recorder, list[i] + ': ' + r.stderr));
     const rerecord = (id, options) => { fs.rmSync(path.join(runs, id), { recursive: true, force: true }); record([id], options); };
     const identity = path.join(runs, 'image-identity.txt');
     const writeIdentity = text => { fs.mkdirSync(runs, { recursive: true }); fs.writeFileSync(identity, text); };
@@ -1164,11 +1170,15 @@ test('EMR-D evidence: same_source.py passes only records of TARGET_SHA that hash
     }, { step: 'live', names: [added] });
     refused('R5-21: a migration changed in the checkout', () => { fs.appendFileSync(path.join(repo, lastMigration), '\n-- SYN\n'); rerecord('live'); },
       { step: 'live', names: [lastMigration] });
-    refused('R5-21: the lock file missing', () => { fs.rmSync(path.join(repo, 'api/package-lock.json')); rerecord('typecheck'); }, { step: 'typecheck', names: ['api/package-lock.json'] });
-    refused('R5-21: the Prisma schema missing', () => { fs.rmSync(path.join(repo, 'api/prisma/schema.prisma')); rerecord('typecheck'); },
+    // A declared file absent from the checkout: the recorder itself refuses (125) and same_source refuses the record by name.
+    refused('R5-21: the lock file missing', () => { fs.rmSync(path.join(repo, 'api/package-lock.json')); rerecord('typecheck', { recorder: 125 }); },
+      { step: 'typecheck', names: ['api/package-lock.json'] });
+    refused('R5-21: the Prisma schema missing', () => { fs.rmSync(path.join(repo, 'api/prisma/schema.prisma')); rerecord('typecheck', { recorder: 125 }); },
       { step: 'typecheck', names: ['api/prisma/schema.prisma'] });
-    refused('R5-21: a compile configuration missing', () => { fs.rmSync(path.join(repo, 'api/nest-cli.json')); rerecord('image'); }, { step: 'image', names: ['api/nest-cli.json'] });
-    refused('R5-21: the declaration missing', () => { fs.rmSync(path.join(repo, 'emr/units/d.json')); rerecord('live'); }, { step: 'live', names: ['emr/units/d.json'] });
+    refused('R5-21: a compile configuration missing', () => { fs.rmSync(path.join(repo, 'api/nest-cli.json')); rerecord('image', { recorder: 125 }); },
+      { step: 'image', names: ['api/nest-cli.json'] });
+    refused('R5-21: the declaration missing', () => { fs.rmSync(path.join(repo, 'emr/units/d.json')); rerecord('live', { recorder: 125 }); },
+      { step: 'live', names: ['emr/units/d.json'] });
     // Changed while the command ran.
     refused('R5-21: a migration changed while the command ran', () => rerecord('live', { actions: ['append:' + lastMigration] }), { step: 'live', names: [lastMigration] });
     refused('R5-21: a migration removed while the command ran', () => rerecord('live', { actions: ['remove:' + firstMigration] }), { step: 'live', names: [firstMigration] });
