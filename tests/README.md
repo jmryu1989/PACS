@@ -86,7 +86,33 @@ REQ-D-WORKSPACE-WINDOWS → RISK-D-WORKSPACE-IDENTITY/UNSAVED/STALE → TEST-VIE
 단위별 기록 스크립트를 새로 만들지 않고 Python 3.9+ 표준 라이브러리 기록기를 재사용한다.
 저장소 루트에서 `python scripts/record-run.py --run-dir <새-실행-폴더> --cwd . --file scripts/record-run.py --file tests/record_run_test.py -- python -B tests/record_run_test.py`로 실행한다.
 `--file`은 작업 디렉터리 기준으로 반복 지정한다. 새 폴더의 `run.json`에는 명령 인자·cwd·UTC 시작/종료·실제 자식 exit·전후 파일 SHA256·조회 가능한 Git HEAD를, `stdout.log`/`stderr.log`에는 원문 바이트를 남긴다.
-기존 실행 폴더는 거절하며 명령 실패 코드를 유지한다. 실행 불가는 자식 exit를 `null`로 기록하고 127, 기록 실패는 125로 종료한다. 원래 명령의 실패를 시험 통과로 해석하지 않는다.
+W2C-05 → RISK-CI-UNHASHED-INPUT: **recorder를 실행하는 각 workflow step이 읽는 입력을 선언한다.**
+`scripts/record-run.py`에 `--file tests/**` 또는 tests를 포함/교차하는 `--tree`를 주면 모든 시험에
+`.github/workflows` 전체와 catalogue/recorder를 자동 결속한다. 수동 소비자 명단과 미등록 파일 거절은 없다.
+`record_run_test.py`는 새 미등록 시험의 전후 해시와 명시 입력 실패를 검사한다. `declared_inputs`는
+명시 file/tree, `workflow_contract_inputs`는 D1135 자동 추가 목록이며 두 출처 모두 전후 snapshot에 남긴다.
+명시 입력(명시 tree 자손 포함)의 missing/unreadable은 child 성공이어도 125다. 자동 입력의 부재·읽기
+실패는 null hash와 상태/error로 기록하고 그 이유로 child exit를 바꾸지 않는다. 명시/자동 overlap은
+명시 요구가 우선이다. 없는 자동 입력을 완전한 hash 증거로 주장하지 않는다.
+기존 validate.yml / measurements의 `Execution evidence raw and LF hash preservation` 단계가
+`python3 tests/record_run_test.py`로 collector·`WorkflowConsumerTests`·새 CLI/PowerShell 행동 시험을 함께
+실행한다. 실제 tree의 audit gap=0을 required check로 두지 않으며 행동 회귀는 CI를 실패시킨다.
+`node tests/ci_workflow_consumers.cjs --audit .`는 workflow/job/step/line별 `missing` 입력과 `unresolved` 명령을 JSON으로 보고한다.
+이 감사는 진단 전용이며 gap/미등록 파일 때문에 CI를 실패시키지 않는다. 실행/파싱 오류는 nonzero이며 빈 성공으로 숨기지 않는다. gaps=0도 동적 실행의 완전성 증명은 아니다.
+Python/TypeScript AST의 import 고정점, constructed Path·변수/조건 argv·local wrapper·const require 해석은 유지한다.
+subprocess from-import/import-as, .py/.cjs/.js/.mjs/.ts 실행 인수, python -m unittest/pytest,
+JS execFile/execFileSync/fork와 renamed destructured spawn을 인식한다. node -e/-r/--require,
+JS exec/execSync, os.system/os.popen/asyncio.create_subprocess_*는 미해석 실행으로 보수적으로 표시한다.
+인식한 loader의 불명확 인수는 과잉 포함할 수 있다(예: git/psql/docker 자료 인수). 임의 eval·custom loader alias·
+cross-module 값·runtime sys.path/container mapping은 완전 해석하지 않는다. 이 경계는 recorder의 tests/** 적용 여부에 영향을 주지 않는다.
+step 명령은 현재 literal shell 명령을 shlex로 읽으며 matrix/변수/복잡한 shell은 `unresolved`로 남긴다.
+그래프는 tests/**만 순회하고 밖의 대상은 미해석으로 취급한다. 워크플로 밖 임의 파일 I/O를 완전히 추론하는 도구가 아니다.
+Stage 7/8 비후보 artifact 수집과 수동 G3 입력의 분리, 재실행 STOP 및 dry-run 의미는 `tests/stage-exit.md`를 따른다.
+재실행 진단은 `scripts/collect-rerun-diagnostic.py`를 사용한다. 상대 out은 repo-root 기준 절대 경로,
+advertised/실제 SHA-256은 필수이며 digest 없는 과거 artifact는 STOP한다. 기존 archive/receipt 보존,
+cp949-safe 출력과 실패 receipt 부재는 `ci_rerun_diagnostic_test.py`에서 검사한다. 성공 receipt는
+관측 attempt를 기록하는 diagnostic-only이며 producer attempt·G3 수집·stage-exit PASS를 뜻하지 않는다.
+기존 실행 폴더는 거절하며 명령 실패 코드를 유지한다. 실행 불가는 자식 exit를 `null`로 기록하고 127, 성공 child의 명시 입력 누락·읽기 불가 또는 로그/manifest 기록 실패는 125로 종료한다. 실패 child의 실제 exit는 입력 부재로 덮지 않는다. 원래 명령의 실패를 시험 통과로 해석하지 않는다.
 명령 인자와 출력은 가리지 않고 그대로 보존하므로 비밀값·환자 자료를 입력/출력하지 않게 하고, 게시 전 별도로 확인한다. 환경변수 전체 수집·자동 게시·Git 쓰기는 하지 않는다. 이 기록기는 DB/DICOM 보존 검사나 실제 시험을 대신하지 않는다.
 
 ## 현재 실행 시점

@@ -9,7 +9,7 @@ PR CI/독립 검토를 대신하지 않는다. 기존 CI와 시험 실행 예산
 
 - `record-run.py`: `run.json`, `stdout.log`, `stderr.log`. Python 사례는 verbosity=2의
   `module.Class.test_method`로, Node 파일 전체는 `node:tests/파일.cjs`로 적는다.
-  Node는 기존 validate.yml의 필터 없는 `node --test` TAP 출력이어야 한다.
+  Node는 해당 job의 소유 workflow에서 실행한 필터 없는 `node --test` TAP 출력이어야 한다.
 - `candidate.yml`: `candidate-provenance.json`, `results.json`, 각 단계의 `.log`.
   `candidate-ci` 항목은 provenance의 **모든 실제 선택 사례**와 정리 결과를 검사한다.
   선택 수는 `candidate_ci.py`가 관리하며 이 목록에 복제하지 않는다.
@@ -80,10 +80,85 @@ D621에 따라 provider reconciliation은 U5b 범위다. DB Suspend 뒤 살아 �
 최종 main을 깨끗하게 checkout한 **원본과 분리된 합성 환경**에서 다음 PowerShell 명령을 쓴다.
 이 문서의 실행 예시는 환경 기동이나 원본 연결을 허가하지 않는다. `record-run.py`는 HEAD와
 파일 해시를 기록하지만 dirty tree 자체를 증명하지 않으므로 실행 전에 수정 상태를 확인한다.
-기본 입력은 동일 SHA의 validate `synthetic-runtime-record-runs`와
+기본 입력은 동일 SHA의 모든 소유 workflow에 있는 `synthetic-runtime-record-runs`와
 `synthetic-workspace-dom-results`, G3 `candidate-<sha>` artifact다.
 `$validateRun`에는 해당 SHA의 실행 ID를 지정한다. G3는 아래 공식 라운드 기록의
 `--record`만 사용하며 임의의 `$candidateRun`이나 제목/이름 검색으로 받지 않는다.
+`tests/ci_artifacts.py`는 `tests/ci_workflows.py`의 job → workflow 매핑으로 업로드 출처를
+찾고, workflow별로 후보 SHA의 최신 실행 ID와 attempt를 조회한다. 실패·진행 중 실행을
+이전 성공으로 대체하지 않으며, SHA/소유 workflow 불일치·누락·만료 artifact는 거절한다.
+G3(candidate.yml) 자동 조회는 **CI-TOOLING-1b**로 분리했다. 기본 수집 호출은 STOP하며,
+비후보 수집은 `--non-candidate`를 명시해야 한다. manifest의 scope는 non-candidate이고
+G3는 NOT_COLLECTED다. 이는 전체 stage 통과가 아니다. 이 PR이 candidate.yml에 추가하는 run-name 한 줄은
+1b의 provenance로 보존하며 1a는 제목·artifact 이름·PR head로 G3를 탐색하지 않는다.
+G3 증거는 기존처럼 **해당 dispatch 응답/공식 후보 기록에 남긴 run id**를 사람이 확인해 받는다.
+최신 공식 실행의 완료/성공, candidate.yml 소유, 실제 attempt와 artifact 출처를 확인하고,
+이전 성공 run으로 대체하지 않는다. 출처를 증명할 수 없으면 STOP한다.
+
+비후보는 **push 실행만** head_sha 증거로 수집한다. pull_request는 GitHub 병합 ref를 시험하므로
+run id/event를 남기고 STOP하며 이 결과를 main SHA의 stage-exit 증거로 쓰지 않는다.
+시작 시 GET repos/{owner}/{repo}로 저장소 id를 한 번 확인하고 Link의 원래 경로 또는
+같은 저장소의 /repositories/{id}/ 경로만 따라 끝까지 읽는다. page 외 query 변경,
+다른 host/저장소/path 및 Link 순환은 STOP한다.
+[workflow runs 계약](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-workflow)의
+head_sha 검색 상한 1,000건에 닿으면 STOP한다. total_count는 반복 횟수가 아니라 일관성 검사다.
+[2026-09-25 count 변경](https://github.blog/changelog/2026-09-25-changes-to-query-results-in-the-github-actions-api-and-ui/)의
+상한/비정확 count, 누락·중복·변동도 거절한다. [Link pagination](https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api)을
+따르며 artifact 목록에는 run 검색의 1,000 상한을 적용하지 않는다.
+[artifact REST](https://docs.github.com/en/rest/actions/artifacts)에는 attempt 식별자가 없다.
+현재 producer도 이를 결속하지 않으므로 **attempt 1만 수집**한다. 같은 SHA의 관련 실행 중
+재실행(attempt 2 이상)이 하나라도 있으면 오래된 생성 시각이어도 STOP한다. 정상 재실행과
+부분 job 재실행도 이 제한에 포함된다. 시각·동명 artifact의 순서로 attempt를 추정하지 않는다.
+재실행을 수집하려면 후속 CI-TOOLING-1b **CD-02-R** producer provenance 계약이 필요하다.
+모든 stage artifact에 run id와 run_attempt를 넣고 attempt N에서 생성된 것이 증명된 artifact만
+N의 증거로 수집한다. 부분 재실행은 이전 attempt artifact를 N으로 재표시하지 않고 STOP하는
+정책을 기본으로 하며, 전체 재실행·부분 재실행·attempt 미증명 시험을 1b에서 수행한다.
+
+**재실행 STOP 운영 절차:** attempt >= 2이면 원래 수집 폴더와 STOP 원문을 보존한다.
+`$repository`는 owner/repo, `$stoppedRun`은 STOP의 양의 run id, `$artifactId`는 같은 저장소의
+REST artifact 목록/metadata에서 확인한 양의 id다. 저장소 루트에서 다음 명령을 실행한다.
+
+```powershell
+python -B scripts/collect-rerun-diagnostic.py --repository $repository --run-id $stoppedRun --artifact-id $artifactId --out $out
+if ($LASTEXITCODE -ne 0) { throw '재실행 진단 증거 수집 실패: 원문 로그 확인' }
+```
+
+CLI는 `gh run view`에 `--repo`를 명시하고 run 응답의 ID·attempt·필수 필드와 artifact
+metadata의 ID·소유 run을 검사한 뒤 해당 ID의 ZIP endpoint를 GET한다. 상대 `--out`은
+스크립트가 속한 저장소 루트(선택 `--repo-root`)에 결합해 절대 경로로 확정하므로, 셸을
+다른 디렉터리에서 시작해 Set-Location해도 같다. 공백·한글 경로와 절대 out도 지원한다.
+advertised `sha256:<64 hex>`와 실제 archive SHA-256이 모두 필수이며 없음·빈 값·잘못된 형식은
+`RERUN_DIGEST_REQUIRED`, 불일치는 `RERUN_DIGEST_MISMATCH`로 STOP한다. digest 없는 과거
+artifact는 이 진단 CLI에서 받을 수 없으며 null digest 영수증이나 fallback은 없다.
+이 제한은 비후보 collector 또는 1b의 digest 정책을 바꾸지 않는다.
+
+`manual-<run>-<artifact>.zip`과 `.json`은 exclusive 생성한다. 기존 파일을 덮거나 지우지 않고,
+download가 nonzero이면 완전한 ZIP이어도 실패한다. 받은 partial/archive와 호출별 raw stdout·stderr·
+argv/exit는 새 `rerun-*` 폴더 및 archive에 남긴다. JSON 쓰기 실패 시 이번 호출의 불완전 JSON만
+지운다. 성공 JSON에는 repository/run id/관측 attempt/artifact id/절대 archive 경로/두 digest/run 상태,
+`use=diagnostic-only`, `producer_attempt_verified=false`를 남긴다. stdout/stderr는 UTF-8이고
+JSON과 오류 code/ID는 ASCII 안전 출력이다. 정상은 0, 검증·외부 명령·파일 오류는 1, 사용 오류는 2다.
+
+운영자는 관측 run id/attempt/SHA/event/workflow를 최신 공식 실행 기록과 대조한다. 관측 attempt는
+producer attempt 증명이 아니다. 이 자료는 진단·누락 확인에만 쓰며 자동 수집 completed나
+stage-exit PASS 증거로 쓰지 않는다. **이전 성공 run 대체 금지**다.
+이미 dispatch한 대체 run도 event=workflow_dispatch로 STOP하며 동일 수동 절차를 적용한다.
+대체 dispatch나 전체/부분 재실행의 성공만으로 STOP을 해소하지 않는다. CLI는 재실행·dispatch·삭제하지 않는다.
+
+`ci_rerun_diagnostic_test.py`는 PS5.1/pwsh 문서 호출, 상대 out·다른 cwd·digest·실패·기존 파일
+보존을 검사한다. `record_run_test.py`는 이 시험과 collector·detector 행동 시험을 수집하며 기존
+validate.yml / measurements의 `Execution evidence raw and LF hash preservation` 단계에서 실행된다.
+`node tests/ci_workflow_consumers.cjs --audit .`는 gap/미등록 파일로 CI를 실패시키지 않는 진단이다.
+진단기의 실행/파싱 오류와 행동 시험 실패는 성공으로 숨기지 않는다.
+
+새 run끼리는 생성 시각, 같은 초면 ID로 최신을 고르고 최신 실패·대기·진행·누락·만료는 거절한다.
+검사한 artifact ID로 archive를 받고 제공된 digest와 대조하며, 실제 archive SHA256을 남긴다.
+각 다운로드 직후 run attempt/updated_at과 metadata를 재조회하고 마지막에 전체 run 집합을
+다시 대조한 뒤에만 completed를 쓴다. STOP에는 run id/attempt/artifact id(미확정은 unknown)가 남는다.
+`--dry-run`은 archive를 받지 않으며 status=planned다. verified_at은 조회 시점일 뿐 미래의
+재실행/삭제나 REST 다중 요청의 원자성을 보장하지 않는다. 병합 전에는 재확인한다.
+동명 artifact가 validate와 Worklist UX 양쪽에 있으면 **둘 다** 별도 경로에 받는다.
+workflow 파일명 변경이나 job 이동은 고정 validate 실행 ID로 우회하지 않는다.
 
 ```powershell
 $sha = (git rev-parse HEAD).Trim()
@@ -98,6 +173,32 @@ $out = "tmp/stage7-final-$shortSha"
 | `synthetic-runtime-record-runs` | `tmp/runtime-ci/` | `gh run download $validateRun -n synthetic-runtime-record-runs -D "$out/validate/runtime"` |
 | `synthetic-workspace-dom-results` | `tmp/workspace-ui-ci/` | `gh run download $validateRun -n synthetic-workspace-dom-results -D "$out/validate/workspace"` |
 | `candidate-<sha>` | `target/tests/e2e/artifacts/candidate-ci/` | 아래 G3 기록·수집 절차의 `$candidateDir` |
+| `synthetic-runtime-record-runs` | `tmp/runtime-ci/` | 아래 수집기의 모든 소유 workflow 실행 → `hosted/runs/<workflow>/<run>/<artifact>` |
+| `synthetic-workspace-dom-results` | `tmp/workspace-ui-ci/` | 아래 수집기의 모든 소유 workflow 실행 → `hosted/runs/<workflow>/<run>/<artifact>` |
+| `candidate-<sha>` | `target/tests/e2e/artifacts/candidate-ci/` | 공식 dispatch run id에서 수동 수령 → `$candidateDirectory` |
+
+먼저 **모든 workflow의 모든 업로드 이름과 소유 workflow/job**을 나열한다.
+matrix·실행 ID·SHA 표현식이 있는 이름은 원래 템플릿으로 표시하므로 목록에서 빠지지 않는다.
+수집기는 같은 전체 목록을 `artifact-inventory.json`에, 선택한 실행과 실제 다운로드 출처를
+`artifact-downloads.json`에 보존한다. Stage 7/8에 필요한 이름만 다운로드하며 각 이름의
+소유 workflow를 하나도 생략하지 않는다. 아래 목록/수집 명령은 live 시험을 실행하지 않는다.
+
+```powershell
+python -B tests/ci_artifacts.py --list
+if ($LASTEXITCODE -ne 0) { throw '전체 artifact 출처 목록 확인 실패' }
+python -B tests/ci_artifacts.py --sha $sha --stage 7 --non-candidate --out "$out/hosted"
+if ($LASTEXITCODE -ne 0) { throw '동일 SHA의 workflow별 artifact 수집 실패; 원문 보존 후 확인' }
+# $candidateRun은 이 후보의 공식 dispatch 기록에서 확인한 run id (최신 검색으로 추측하지 않음).
+if (-not $candidateRun) { throw '공식 dispatch run id 및 attempt 확인 필요' }
+$candidateJson = gh run view $candidateRun --json workflowName,event,status,conclusion,headSha,attempt
+if ($LASTEXITCODE -ne 0) { throw '공식 G3 실행 조회 실패' }
+$candidate = $candidateJson | ConvertFrom-Json
+if ($candidate.workflowName -ne 'Validate immutable deployment candidate' -or $candidate.event -ne 'workflow_dispatch' -or $candidate.status -ne 'completed' -or $candidate.conclusion -ne 'success' -or $candidate.attempt -lt 1) { throw '공식 G3 workflow/event/완료/성공/attempt 확인 실패' }
+$candidate | ConvertTo-Json | Set-Content -Encoding utf8 "$out/candidate-$candidateRun-run.json"
+$candidateDirectory = "$out/hosted/candidate/$candidateRun/candidate-$sha"
+gh run download $candidateRun -n "candidate-$sha" -D $candidateDirectory
+if ($LASTEXITCODE -ne 0) { throw '공식 G3 artifact 수령 실패; 이전 성공 대체 금지' }
+```
 
 위 artifact를 받은 뒤 아래 기록기 loop는 필요한 live 클래스만 보충한다.
 기존 동일 SHA의 적격 기록은 재사용한다.
@@ -143,7 +244,7 @@ foreach ($item in $live) {
 클래스의 뷰어 사례에는 `KIN_U5_DICOM_SOURCE` 공개 CT 입력도 필요하다(`tests/README.md`).
 실행기는 `--class`에 그 클래스가 직접 선언한 사례를 고정하므로 상속한 worklist 시험은 추가하지 않는다.
 
-앞서 받은 validate artifact의 `run.json`에서 Node service/scope, DOM, AuditStore DB,
+앞서 수집기가 소유 workflow 실행마다 받은 artifact(`hosted/runs/<workflow>/<run>/<artifact>`)의 `run.json`에서 Node service/scope, DOM, AuditStore DB,
 integrity, backup-safety, production-image를 읽는다.
 여덟 U5 artifact는 위 표의 보조 원문으로 보존하되 SHA 없는 `results.json`만으로 위 live
 기록을 대체하지 않는다. G3 artifact 이름은 `candidate-<최종 40자리 SHA>`이며,
@@ -157,6 +258,7 @@ CI 기록의 누락·실패도 성공으로 간주하지 않는다.
 
 ```powershell
 python scripts/stage-exit.py --list tests/stage7-exit.json --sha $sha --runs "$out/validate" --runs "$out/live" --candidate $candidateDir --output "$out/verdict.json"
+python scripts/stage-exit.py --list tests/stage7-exit.json --sha $sha --runs "$out/hosted/runs" --runs "$out/live" --candidate $candidateDirectory --output "$out/verdict.json"
 $LASTEXITCODE
 ```
 
@@ -241,13 +343,15 @@ Stage 7 절차와 기존 영구 원장을 따르고 실패 기록을 별도 보�
 
 | 동일 최종 SHA의 hosted 입력 | artifact / 내부 기록 | 용도 |
 |---|---|---|
-| validate `runtime` | `synthetic-runtime-record-runs`: `viewer-context-event`, `tech-note-attempt`, `findings-migration`, `production-image` | 서버 사건·실제 PG 저장 시도·dump/restore·기동 |
-| validate `measurements` | `synthetic-workspace-dom-results`: `viewer-context-loss-dom`, `viewer-tech-note-dom`, `emr-contract` | CTX/VR 결합 포함 DOM·두 Note 소비자·EMR-A 순수 계약 |
-| validate `volume-rendering` | `synthetic-volume-rendering-results`: `tmp/vr-ci/pure-vr`, `tmp/vr-ci/binding-dom` (artifact 내부 경로 유지) | VR 순수 모델 3파일·접근/세션 DOM |
-| validate `volume-rendering`, `context-loss` | `synthetic-volume-rendering-results`, `synthetic-context-loss`의 profile 결과/로그/영상 | hosted native 보조 근거; 아래 local 기록 대체 불가 |
+| `runtime` 및 동명 artifact의 모든 소유 workflow | `synthetic-runtime-record-runs`: `viewer-context-event`, `tech-note-attempt`, `findings-migration`, `production-image` | 서버 사건·실제 PG 저장 시도·dump/restore·기동 |
+| `measurements` 및 동명 artifact의 모든 소유 workflow | `synthetic-workspace-dom-results`: `viewer-context-loss-dom`, `viewer-tech-note-dom`, `emr-contract` | CTX/VR 결합 포함 DOM·두 Note 소비자·EMR-A 순수 계약 |
+| `volume-rendering`의 소유 workflow | `synthetic-volume-rendering-results`: `tmp/vr-ci/pure-vr`, `tmp/vr-ci/binding-dom` (artifact 내부 경로 유지) | VR 순수 모델 3파일·접근/세션 DOM |
+| 각각 `volume-rendering`, `context-loss`의 소유 workflow | `synthetic-volume-rendering-results`, `synthetic-context-loss`의 profile 결과/로그/영상 | hosted native 보조 근거; 아래 local 기록 대체 불가 |
 | candidate.yml | `candidate-<최종 40자리 SHA>` | `candidate-provenance.json`과 전 선택/cleanup 결과 |
 
-validate 전체 jobs의 성공·headSha·attempt와 artifact 출처를 별도 보존한다.
+전체 소유 workflow의 성공·headSha·attempt와 artifact 출처를 별도 보존한다.
+분할 후 `volume-rendering`은 `volume-rendering.yml`에서 찾으며 validate 실행에서 받지 않는다.
+Worklist UX의 동명 workspace/runtime artifact도 각 소유 실행에서 따로 받는다.
 build 및 나머지 회귀 jobs를 생략하지 않는다. 위 artifact의 profile `results.json`/
 개별 `.log`는 `run.json`이 없으므로 `--runs`의 적격 live 근거가 아니다.
 `synthetic-context-loss`는 보조 폴더에 받아 판정기의 `--runs`로 넘기지 않는다.
@@ -265,6 +369,21 @@ gh run download $validateRun -n synthetic-workspace-dom-results -D "$out/validat
 gh run download $validateRun -n synthetic-volume-rendering-results -D "$out/validate/vr"
 gh run download $validateRun -n synthetic-context-loss -D "$out/support/context-loss"
 python scripts/record-run.py --run-dir "$out/verdict-run" --cwd . --file scripts/stage-exit.py --file tests/stage8-exit.json -- python scripts/stage-exit.py --list tests/stage8-exit.json --sha $sha --runs "$out/validate" --runs "$out/live" --candidate $candidateDir --output "$out/verdict.json"
+python -B tests/ci_artifacts.py --list
+if ($LASTEXITCODE -ne 0) { throw '전체 artifact 출처 목록 확인 실패' }
+python -B tests/ci_artifacts.py --sha $sha --stage 8 --non-candidate --out "$out/hosted"
+if ($LASTEXITCODE -ne 0) { throw '동일 SHA의 workflow별 artifact 수집 실패; 원문 보존 후 확인' }
+# $candidateRun은 이 후보의 공식 dispatch 기록에서 확인한 run id (최신 검색으로 추측하지 않음).
+if (-not $candidateRun) { throw '공식 dispatch run id 및 attempt 확인 필요' }
+$candidateJson = gh run view $candidateRun --json workflowName,event,status,conclusion,headSha,attempt
+if ($LASTEXITCODE -ne 0) { throw '공식 G3 실행 조회 실패' }
+$candidate = $candidateJson | ConvertFrom-Json
+if ($candidate.workflowName -ne 'Validate immutable deployment candidate' -or $candidate.event -ne 'workflow_dispatch' -or $candidate.status -ne 'completed' -or $candidate.conclusion -ne 'success' -or $candidate.attempt -lt 1) { throw '공식 G3 workflow/event/완료/성공/attempt 확인 실패' }
+$candidate | ConvertTo-Json | Set-Content -Encoding utf8 "$out/candidate-$candidateRun-run.json"
+$candidateDirectory = "$out/hosted/candidate/$candidateRun/candidate-$sha"
+gh run download $candidateRun -n "candidate-$sha" -D $candidateDirectory
+if ($LASTEXITCODE -ne 0) { throw '공식 G3 artifact 수령 실패; 이전 성공 대체 금지' }
+python scripts/record-run.py --run-dir "$out/verdict-run" --cwd . --file scripts/stage-exit.py --file tests/stage8-exit.json -- python scripts/stage-exit.py --list tests/stage8-exit.json --sha $sha --runs "$out/hosted/runs" --runs "$out/live" --candidate $candidateDirectory --output "$out/verdict.json"
 if ($LASTEXITCODE -ne 0) { throw 'Stage 8 필수 시험 미충족: verdict.json 확인' }
 ```
 
@@ -273,6 +392,11 @@ headSha만 믿지 않고 `candidate-provenance.json.candidate_sha`를 최종 SHA
 13개 요구 그룹의 자동 PASS와 독립 Astra의 Stage 8 종료 판정은 별개다. 이후 관문은
 같은 SHA의 원문을 대상으로 요구→실제 단언→기록을 대조한다.
 
+W2C-05 입력 계약: recorder 명령을 실행하는 각 workflow step이 그 명령의 입력을 선언한다.
+`--file tests/**` 및 tests를 포함하는 `--tree`는 소비자 등록 없이 workflow catalogue 전체를 전후 해시한다.
+`node tests/ci_workflow_consumers.cjs --audit .`는 step별 누락 입력/미해석 shell 명령을 보고하는 진단 도구다.
+수동 소비자 명단이나 새 미등록 시험에 대한 required check는 없다. 지원 loader와 정적 분석 경계는 tests/README.md를 따른다.
+누락 입력은 recorder non-zero이며, 감사 결과가 없는 것을 stage-exit PASS로 간주하지 않는다.
 ## G3 공식 라운드 기록과 수집 (CI-TOOLING-1b)
 
 REQ-G3-PUSH → RISK-G3-STALE/OMITTED/WRONG-ATTEMPT →
