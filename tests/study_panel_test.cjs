@@ -112,6 +112,14 @@ function fixture(options = {}) {
   const close = all(panel.element).find(el => el.tagName === 'BUTTON' && el.textContent === 'Close');
   return { doc, attach, opener, fallback, original, host, content, input, changes, panel, role, tab, close, all };
 }
+// The browser's sequential focus (Tab) order inside a subtree: elements with tabIndex >= 0 that can take focus
+// (not disabled, rendered, outside hidden/inert subtrees, visible), positive tabIndex first, then document order.
+function tabOrder(f, root) {
+  const canFocus = el => !el.disabled && el.getClientRects().length > 0
+    && !['hidden', 'collapse'].includes(f.doc.defaultView.getComputedStyle(el).visibility);
+  const stops = f.all(root).filter(el => el.nodeType === 1 && el.tabIndex >= 0 && canFocus(el));
+  return [...stops.filter(el => el.tabIndex > 0).sort((a, b) => a.tabIndex - b.tabIndex), ...stops.filter(el => el.tabIndex === 0)];
+}
 function active(f, label) {
   assert.deepEqual(f.role('tab').filter(el => el.getAttribute('aria-selected') === 'true').map(el => el.textContent), [label]);
   assert.deepEqual(f.role('tab').filter(el => el.tabIndex === 0).map(el => el.textContent), [label]);
@@ -753,8 +761,18 @@ test('W3R7-04: 패널 안 알림 줄은 처음 쓸 때 생기고(role status, �
   assert.deepEqual(f.role('status').map(el => el.textContent), ['배치 저장됨 · 이 브라우저'], 'one line, replaced');
   for (const bad of [7, {}, undefined]) assert.equal(f.panel.setNotice(bad), false);
   assert.equal(f.panel.setNotice(''), true); assert.equal(line.hidden, true);
-  // The edge stays the drawer's last keyboard stop.
-  assert.equal(f.panel.element.children.at(-1), f.role('separator')[0]);
+  // The edge stays the drawer's last keyboard stop with the notice shown or hidden: the notice line is never a
+  // Tab stop, and Tab on the edge is left to the browser, which moves focus out of the drawer (W3R8-01).
+  // The edge is shown once the page gives it a size, as the reading page does on open.
+  const grip = f.role('separator')[0];
+  f.panel.setSize({ axis: 'x', key: 'landscape:width', value: 360, min: 320, max: 900 });
+  for (const notice of ['배치 저장 안 됨 · 이 창에서만 유지', '']) {
+    assert.equal(f.panel.setNotice(notice), true); assert.equal(line.hidden, !notice);
+    const stops = tabOrder(f, f.panel.element);
+    assert.equal(stops.at(-1), grip); assert.equal(stops.includes(line), false);
+    grip.focus(); assert.equal(f.doc.activeElement, grip);
+    assert.equal(grip.dispatch('keydown', { key: 'Tab' }).defaultPrevented, false);
+  }
   f.panel.destroy(); assert.equal(f.panel.setNotice('x'), false);
 });
 
