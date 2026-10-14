@@ -371,19 +371,21 @@ test('ORTHANC-01: public statistics reads authenticated GET /statistics once and
   const service = statisticsService(t);
   let answer;
   const requests = [];
+  // The request fetch would send, as fetch itself reads its arguments: the init's spelling (plain object or Headers,
+  // explicit or default GET) is not the contract.
   t.mock.method(globalThis, 'fetch', async (url, options) => {
-    requests.push([url, options.method, options.headers, options.body]);
+    requests.push(new Request(url, options));
     return { ok: true, json: async () => answer };
   });
   for (answer of [STATISTICS, { TotalDiskSize: '0' }, {}, null, [], { TotalDiskSize: 'bad' }]) {
     const before = requests.length;
     assert.deepEqual(await service.statistics(), answer);
     assert.equal(requests.length - before, 1);
-    const [url, method, headers, body] = requests[before];
-    assert.equal(url, 'http://orthanc.synthetic.invalid:8042/statistics');
-    assert.equal(method, 'GET');
-    assert.equal(headers.Authorization, 'Basic ' + Buffer.from('SYN-USER:SYN-PASS').toString('base64'));
-    assert.equal(body, undefined);
+    const request = requests[before];
+    assert.equal(request.url, 'http://orthanc.synthetic.invalid:8042/statistics');
+    assert.equal(request.method, 'GET');
+    assert.equal(request.headers.get('authorization'), 'Basic ' + Buffer.from('SYN-USER:SYN-PASS').toString('base64'));
+    assert.equal(request.body, null);
   }
 });
 
@@ -432,7 +434,7 @@ test('ORTHANC-03: the real public service feeds storage observations, missing da
   }
 });
 
-test('ORTHANC-04: an unanswered real source cannot become a success or outlive the metrics wait bound', { skip: hosted, timeout: 3000 }, async t => {
+test('ORTHANC-04: an unanswered real source cannot become a success or outlive the metrics wait bound', { skip: hosted, timeout: 10000 }, async t => {
   const orthancService = statisticsService(t);
   const releases = [];
   let responding = false;
@@ -440,36 +442,57 @@ test('ORTHANC-04: an unanswered real source cannot become a success or outlive t
   t.mock.method(globalThis, 'fetch', () => responding
     ? Promise.resolve({ ok: true, json: async () => sourceAnswer })
     : new Promise(resolve => releases.push(() => resolve({ ok: true, json: async () => sourceAnswer }))));
-  const { service } = store({ orthancService });
-  service.metricsTimeoutMs = 50;
-  // A future service deadline may reject. Only a successful answer before the source answers is forbidden.
+  // The clock is mocked, so the silent source is held far past every wait (60 s) without sleeping or racing real time.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); await new Promise(resolve => setImmediate(resolve)); };
+  const STEP = 100, HELD = 60000, WAIT = 1000;
+  // production: the wait as shipped (no seam written). bounded: a caller wait set through the seam, which must end the
+  // wait by its own bound while the source is still silent.
+  const production = store({ orthancService }).service;
+  const bounded = store({ orthancService }).service;
+  bounded.metricsTimeoutMs = WAIT;
+  // A future service deadline may reject. Only a successful answer while the source is silent is forbidden.
   let boundaryState = 'pending';
   const boundary = orthancService.statistics().then(
     () => { boundaryState = 'fulfilled'; }, () => { boundaryState = 'rejected'; });
-  const metrics = service.adminMetrics(ADMIN);
-  let watchdog;
-  let answer, beforeLateAnswer;
+  const runs = [production, bounded].map(service => {
+    const run = { answer: null, failure: null, at: null };
+    run.settled = service.adminMetrics(ADMIN).then(value => { run.answer = value; }, error => { run.failure = error; });
+    return run;
+  });
+  const [atProduction, atBounded] = runs;
+  let snapshots;
   try {
-    // This outer bound detects a lost caller deadline without leaving a hung test or depending on exact timing.
-    answer = await Promise.race([metrics, new Promise((_, reject) => {
-      watchdog = setTimeout(() => reject(new Error('metrics did not return while the source was unanswered')), 1000);
-    })]);
-    const disk = answer.metrics[0];
-    assert.deepEqual([disk.state, disk.reason, disk.value, disk.observedAt], ['unobservable', 'timeout', null, null]);
-    assert.deepEqual(answer.metrics.slice(1), AT_CLOCK().slice(1), 'the unanswered source leaves other rows intact');
-    assert.ok(!JSON.stringify(answer).includes('SYN'), 'source wording does not escape in the response');
-    beforeLateAnswer = clone(answer);
-    await new Promise(resolve => setTimeout(resolve, 100));
-    assert.notEqual(boundaryState, 'fulfilled', 'statistics must not invent success while fetch is unanswered');
+    for (let ms = 0; ms <= HELD; ms += STEP) {
+      await settle();
+      for (const run of runs) if ((run.answer || run.failure) && run.at === null) run.at = ms;
+      assert.notEqual(boundaryState, 'fulfilled', `statistics() succeeded at ${ms} ms while fetch was unanswered`);
+      if (ms < HELD) t.mock.timers.tick(STEP);
+    }
+    t.diagnostic(`mocked ms held ${HELD}; shipped wait returned at ${atProduction.at}; caller wait ${WAIT} returned at ${atBounded.at}; statistics() ${boundaryState}`);
+    assert.ok(atBounded.at !== null && atBounded.at <= WAIT + STEP, 'the caller wait bound returns metrics while the source is silent');
+    assert.ok(atProduction.at !== null, 'the shipped wait returns metrics while the source is silent');
+    for (const run of runs) {
+      assert.equal(run.failure, null);
+      const disk = run.answer.metrics[0];
+      assert.deepEqual([disk.state, disk.value, disk.observedAt], ['unobservable', null, null]);
+      // timeout, or source_failed if a future own service deadline rejects first; never a value.
+      assert.ok(['timeout', 'source_failed'].includes(disk.reason), disk.reason);
+      assert.deepEqual(run.answer.metrics.slice(1), AT_CLOCK().slice(1), 'the unanswered source leaves other rows intact');
+      assert.ok(!JSON.stringify(run.answer).includes('SYN'), 'source wording does not escape in the response');
+    }
+    snapshots = runs.map(run => clone(run.answer));
   } finally {
-    clearTimeout(watchdog);
     responding = true;
     for (const release of releases) release();
-    await Promise.allSettled([boundary, metrics]);
+    await settle();
+    await Promise.allSettled([boundary, ...runs.map(run => run.settled)]);
   }
-  assert.deepEqual(answer, beforeLateAnswer, 'a late source answer cannot overwrite the timed-out observation');
-  const recovered = await service.adminMetrics(ADMIN);
-  assert.deepEqual(recovered.metrics, AT_CLOCK(), 'a later request can observe the source again');
+  assert.deepEqual(runs.map(run => run.answer), snapshots, 'a late source answer cannot overwrite the timed-out observation');
+  for (const service of [production, bounded]) {
+    const recovered = await service.adminMetrics(ADMIN);
+    assert.deepEqual(recovered.metrics, AT_CLOCK(), 'a later request can observe the source again');
+  }
 });
 
 test('server: the compiled rows are exactly the page fixture (tenant filter, windows, median, exclusions)', { skip: hosted }, () => {
