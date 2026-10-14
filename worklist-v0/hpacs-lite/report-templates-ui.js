@@ -18,7 +18,12 @@
       $("#tpl-preview-insert").disabled = true;
       delete $("#tpl-preview-target").dataset.uid;
       for (const id of ["title", "meta", "target", "status", ...RFIELDS]) $("#tpl-preview-" + id).textContent = "";
-      if (returnFocus) (templatePreviewReturn?.isConnected ? templatePreviewReturn : $("#tpl-search")).focus();
+      if (returnFocus) {
+        const target = [templatePreviewReturn, $('#tpl-search'), $('#findings'), $('#quick')].find(el =>
+          el?.isConnected && !el.disabled && !el.closest('[hidden], [inert]') && el.getClientRects().length
+          && getComputedStyle(el).visibility === 'visible');
+        target?.focus({ preventScroll: true });
+      }
       templatePreviewReturn = null;
     }
     function updateTemplatePreview() {
@@ -191,7 +196,12 @@
       delete $("#tpl-source").dataset.uid;
       $("#tpl-save").disabled = true; $("#tpl-save").textContent = "저장";
       $("#tpl-cancel").disabled = false;
-      if (returnFocus && session.returnFocus?.isConnected) session.returnFocus.focus();
+      if (returnFocus) {
+        const target = [session.returnFocus, $('#tpl-search'), $('#findings'), $('#quick')].find(el =>
+          el?.isConnected && !el.disabled && !el.closest('[hidden], [inert]') && el.getClientRects().length
+          && getComputedStyle(el).visibility === 'visible');
+        target?.focus({ preventScroll: true });
+      }
     }
     function editTemplate(t, source = null, seed = t) {
       if (!KinAuth.has("radiologist")) { toast("판독의만 상용구를 편집할 수 있습니다", "err"); return; }

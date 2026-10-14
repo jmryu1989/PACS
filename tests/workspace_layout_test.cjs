@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const layout = require('../worklist-v0/hpacs-lite/workspace-layout.js');
 const reading = require('../worklist-v0/hpacs-lite/reading-panel-layout.js');
+// REQ-WS1 -> RISK-WS1 -> TEST-WS1 (M-01..M-05): persisted display choices, never drawer visibility.
 const session = { state: 'approved', sub: 'account-a', institution: 'hospital-a', user: 'old-name' };
 const record = () => ({ version: 1, mode: 'portrait', portrait: { main: 350, top: 200 }, landscape: { main: 700 } });
 function store() {
@@ -97,4 +98,192 @@ test('READING: v2 roundtrip isolates owners and loading legacy layouts preserves
     assert.equal(layout.write(s, k, invalid), false);
     assert.deepEqual(layout.read(s, k).state, v2);
   }
+});
+
+test('M-01: v3 왕복·분리 복사·reading 갱신은 workspace와 계정 경계 보존', () => {
+  const s = store(), k = layout.key(session), source = layout.toVersion3(record());
+  source.workspace = { version: 1, rail: 232, worklist: 304, related: 184, prior: 200,
+    railCollapsed: true, studyPanelTab: 'templates' };
+  source.reading.reportWidth = 570;
+  // W3R-07: the shared worklist/related/prior sizes carry no orientation, so a
+  // record from an earlier build reads them as null (sizes stay per orientation).
+  const expected = structuredClone(source);
+  Object.assign(expected.workspace, { worklist: null, related: null, prior: null });
+  assert.equal(layout.write(s, k, source), true); source.workspace.rail = 100;
+  assert.deepEqual(layout.read(s, k), { state: expected, status: 'restored' });
+  assert.equal(layout.read(s, layout.key({ ...session, sub: 'other' })).status, 'empty');
+  const changed = layout.withReading(expected, { ...reading.defaults(), relatedHidden: true });
+  assert.equal(changed.version, 3); assert.deepEqual(changed.workspace, expected.workspace);
+  assert.equal(changed.reading.relatedHidden, true);
+  assert.equal(Object.hasOwn(changed.workspace, 'open'), false);
+  assert.deepEqual(layout.toVersion3(changed), changed);
+  for (const tab of ['images', 'info', 'templates']) {
+    const value = { ...expected, workspace: { ...expected.workspace, studyPanelTab: tab } };
+    assert.deepEqual(layout.normalize(value), value);
+  }
+});
+
+test('M-02: 유효 v1/v2 생성 사례의 모든 기존 멤버 보존, geometry 추정 없음', () => {
+  const names = ['main', 'top', 'related', 'prior'], sizes = [1, 1.4, 700.6, 16384];
+  const current = layout.toVersion3(record()); current.reading.reportWidth = 987;
+  current.reading.relatedHidden = true; current.workspace.studyPanelTab = 'info';
+  let cases = 0;
+  for (const version of [1, 2]) for (const mode of ['auto', 'portrait', 'landscape']) {
+    for (let p = 0; p < 16; p++) for (let l = 0; l < 16; l++) {
+      const axis = mask => Object.fromEntries(names.flatMap((name, i) => mask & (1 << i) ? [[name, sizes[(mask + i) % sizes.length]]] : []));
+      const source = { version, mode, portrait: axis(p), landscape: axis(l) };
+      if (version === 2) source.reading = { version: 1, reportWidth: p ? p * 900 : null,
+        imageHeight: l ? l * 900 : null, relatedHeight: 16384, relatedListHeight: 1, relatedHidden: !!(p % 2) };
+      const valid = layout.normalize(source), before = structuredClone(valid), result = layout.toVersion3(valid);
+      assert.ok(valid); assert.equal(result.version, 3);
+      for (const key of Object.keys(valid).filter(k => k !== 'version')) assert.deepEqual(result[key], valid[key]);
+      assert.deepEqual(result.workspace, { version: 1, rail: null, worklist: null, related: null, prior: null,
+        railCollapsed: false, studyPanelTab: 'info' });
+      const loaded = layout.toVersion3(valid, current);
+      assert.deepEqual(loaded.reading, version === 2 ? valid.reading : current.reading);
+      assert.deepEqual(loaded.workspace, current.workspace); assert.deepEqual(valid, before);
+      result.portrait.main = 444; result.reading.reportWidth = 222; loaded.workspace.studyPanelTab = 'templates';
+      assert.deepEqual(valid, before); assert.equal(current.workspace.studyPanelTab, 'info'); cases++;
+    }
+  }
+  assert.equal(cases, 1536);
+});
+
+test('M-02/04: v3 계정 Load와 구버전 덮어쓰기 뒤 변환 규칙', () => {
+  const current = layout.toVersion3(record()); current.workspace.rail = 248;
+  current.workspace.studyPanelTab = 'templates'; current.reading.reportWidth = 999;
+  const legacy = record(), v2 = layout.withReading(legacy, reading.defaults());
+  const loaded = layout.mergeLoaded(current, legacy);
+  assert.equal(loaded.version, 3); assert.equal(loaded.mode, legacy.mode);
+  assert.deepEqual(loaded.portrait, legacy.portrait); assert.deepEqual(loaded.landscape, legacy.landscape);
+  assert.deepEqual(loaded.reading, current.reading); assert.deepEqual(loaded.workspace, current.workspace);
+  assert.deepEqual(layout.mergeLoaded(current, v2).reading, v2.reading);
+  const incoming = layout.toVersion3(v2); incoming.workspace.railCollapsed = true;
+  assert.deepEqual(layout.mergeLoaded(current, incoming), incoming);
+  assert.deepEqual(layout.mergeLoaded(legacy, incoming), incoming);
+  const s = store(), k = layout.key(session); layout.write(s, k, current);
+  // An old tab cannot decode v3; its next save can replace the local value with v2 defaults.
+  s.setItem(k, JSON.stringify(v2));
+  const converted = layout.toVersion3(layout.read(s, k).state);
+  assert.deepEqual(converted.reading, reading.defaults());
+  assert.deepEqual(converted.workspace, layout.workspaceDefaults());
+});
+
+test('M-03: v3 whitelist·필수 멤버·타입·수치·변환 오류는 저장 전에 거절', () => {
+  const valid = layout.toVersion3(record()), s = store(), k = layout.key(session);
+  layout.write(s, k, valid); const saved = s.getItem(k);
+  const invalid = [null, [], {}, ...[0, 4, '3', true].map(version => ({ ...valid, version })),
+    { ...valid, workspace: null }, { ...valid, workspace: [] }, { ...valid, reading: null },
+    { ...valid, workspace: { ...valid.workspace, open: true } }, { ...valid, open: true },
+    { ...valid, workspace: { ...valid.workspace, studyPanelTab: 'Info' } },
+    { ...valid, workspace: { ...valid.workspace, railCollapsed: 1 } },
+    { ...valid, workspace: { ...valid.workspace, version: 2 } },
+    JSON.parse(JSON.stringify(valid).replace('"rail":null', '"__proto__":{},"rail":null'))];
+  for (const key of Object.keys(valid)) { const v = structuredClone(valid); delete v[key]; invalid.push(v); }
+  for (const key of Object.keys(valid.workspace)) { const v = structuredClone(valid); delete v.workspace[key]; invalid.push(v); }
+  for (const key of ['rail', 'worklist', 'related', 'prior']) {
+    for (const size of [0, -1, 16385, 1.1, NaN, Infinity, '100', true, undefined, {}, []]) {
+      invalid.push({ ...valid, workspace: { ...valid.workspace, [key]: size } });
+    }
+    // Valid shared sizes are accepted; only the orientation-free rail keeps its value (W3R-07).
+    for (const size of [null, 1, 16384]) assert.equal(layout.normalize({ ...valid,
+      workspace: { ...valid.workspace, [key]: size } }).workspace[key], key === 'rail' ? size : null);
+  }
+  for (const value of invalid) {
+    assert.equal(layout.normalize(value), null); assert.equal(layout.toVersion3(value), null);
+    assert.equal(layout.mergeLoaded(valid, value), null); assert.equal(layout.write(s, k, value), false);
+    assert.equal(s.getItem(k), saved);
+  }
+});
+
+test('M-03/05: 2048자 cap 경계, 최대 v3 크기, 손상 기록 및 기존 owner key', () => {
+  const axis = { main: 16384, top: 16384, related: 16384, prior: 16384 };
+  const value = { version: 3, mode: 'landscape', portrait: axis, landscape: axis,
+    reading: { version: 1, reportWidth: 16384, imageHeight: 16384, relatedHeight: 16384,
+      relatedListHeight: 16384, relatedHidden: false }, workspace: { version: 1, rail: 16384,
+      worklist: 16384, related: 16384, prior: 16384, railCollapsed: false, studyPanelTab: 'templates' } };
+  const s = store(), k = layout.key(session), raw = JSON.stringify(value);
+  assert.equal(layout.PREFIX, 'kin-workspace:v1:'); assert.equal(k, 'kin-workspace:v1:["hospital-a","account-a"]');
+  assert.ok(raw.length <= 2048); assert.equal(layout.write(s, k, value), true);
+  assert.deepEqual(layout.read(s, k).state, { ...value, workspace: { ...value.workspace, worklist: null, related: null, prior: null } });
+  s.setItem(k, raw.padEnd(2048, ' ')); assert.equal(layout.read(s, k).status, 'restored');
+  s.setItem(k, raw.padEnd(2049, ' ')); assert.equal(layout.read(s, k).status, 'invalid');
+  assert.deepEqual(layout.read(s, k).state, layout.defaults());
+  for (const bad of ['{', 'null', '[]', JSON.stringify({ ...value, version: 4 })]) {
+    s.setItem(k, bad); const result = layout.read(s, k);
+    assert.ok(['invalid', 'unavailable'].includes(result.status)); assert.deepEqual(result.state, layout.defaults());
+  }
+});
+
+// Pilot D1160: the reader's Study Panel width/height and Text Size step, per orientation, in the same v3 record.
+test('D1160-M1: v3 records without Study Panel choices are the default; a record keeps only what was chosen', () => {
+  const old = layout.toVersion3(record());
+  assert.equal(Object.hasOwn(old.workspace, 'studyPanel'), false);
+  assert.deepEqual(layout.normalize(old), old);
+  const chosen = { ...old, workspace: { ...old.workspace,
+    studyPanel: { portrait: { text: 2, height: 700 }, landscape: { width: 480, height: 300, text: 1 } } } };
+  // Stored in a fixed order, so two equal choices are the same record (roaming compares records).
+  assert.equal(JSON.stringify(layout.normalize(chosen).workspace.studyPanel),
+    '{"landscape":{"width":480,"height":300,"text":1},"portrait":{"height":700,"text":2}}');
+  for (const empty of [{}, { landscape: {} }, { portrait: { text: 0 } }, { landscape: { text: 0 }, portrait: {} }]) {
+    assert.deepEqual(layout.normalize({ ...old, workspace: { ...old.workspace, studyPanel: empty } }), old);
+  }
+  assert.deepEqual(layout.normalize({ ...old, workspace: { ...old.workspace, studyPanel: { landscape: { text: 0, width: 400 } } } })
+    .workspace.studyPanel, { landscape: { width: 400 } });
+  for (const size of [1, 16384]) assert.equal(layout.normalize({ ...old, workspace: { ...old.workspace,
+    studyPanel: { portrait: { height: size } } } }).workspace.studyPanel.portrait.height, size);
+});
+
+test('D1160-M2: invalid Study Panel choices are refused before storage', () => {
+  const valid = layout.toVersion3(record()), s = store(), k = layout.key(session);
+  layout.write(s, k, valid); const saved = s.getItem(k);
+  const panel = studyPanel => ({ ...valid, workspace: { ...valid.workspace, studyPanel } });
+  const invalid = [null, [], 'wide', 1, { both: {} }, { landscape: null }, { landscape: [] }, { portrait: { zoom: 1 } },
+    { landscape: { width: 300 }, other: {} }];
+  for (const name of ['width', 'height']) for (const size of [0, -1, 16385, 1.5, NaN, Infinity, '300', true, null, {}, []])
+    invalid.push({ landscape: { [name]: size } }, { portrait: { [name]: size } });
+  for (const text of [3, -1, 1.5, '1', true, null, NaN]) invalid.push({ portrait: { text } }, { landscape: { text } });
+  for (const value of invalid.map(panel)) {
+    assert.equal(layout.normalize(value), null, JSON.stringify(value.workspace.studyPanel));
+    assert.equal(layout.mergeLoaded(valid, value), null); assert.equal(layout.write(s, k, value), false);
+    assert.equal(s.getItem(k), saved);
+  }
+});
+
+test('D1160-M3: one orientation changes or resets without touching the other; legacy records upgrade', () => {
+  const start = layout.toVersion3(record());
+  const wide = layout.withStudyPanel(start, 'landscape', { width: 500 });
+  assert.deepEqual(wide.workspace.studyPanel, { landscape: { width: 500 } });
+  const both = layout.withStudyPanel(layout.withStudyPanel(wide, 'portrait', { height: 900 }), 'portrait', { text: 2 });
+  assert.deepEqual(both.workspace.studyPanel, { landscape: { width: 500 }, portrait: { height: 900, text: 2 } });
+  assert.deepEqual(both.portrait, start.portrait); assert.deepEqual(both.landscape, start.landscape);
+  assert.deepEqual(both.reading, start.reading);
+  const reset = layout.withStudyPanel(both, 'portrait', null);
+  assert.deepEqual(reset.workspace.studyPanel, { landscape: { width: 500 } });
+  assert.deepEqual(layout.withStudyPanel(reset, 'landscape', null), start);
+  assert.deepEqual(layout.withStudyPanel(both, 'landscape', { text: 0 }).workspace.studyPanel, both.workspace.studyPanel);
+  const legacy = layout.withStudyPanel(record(), 'portrait', { text: 1 });
+  assert.equal(legacy.version, 3); assert.deepEqual(legacy.portrait, record().portrait);
+  assert.deepEqual(legacy.workspace.studyPanel, { portrait: { text: 1 } });
+  for (const [axis, change] of [['both', { width: 1 }], ['landscape', { width: 0 }], ['portrait', { text: 3 }],
+    ['portrait', 'text'], ['landscape', { width: undefined }]]) assert.equal(layout.withStudyPanel(both, axis, change), null);
+  assert.deepEqual(both.workspace.studyPanel, { landscape: { width: 500 }, portrait: { height: 900, text: 2 } }, 'input kept');
+  // Account Load replaces the choices with the loaded record's (absent there = default here).
+  assert.equal(Object.hasOwn(layout.mergeLoaded(both, start).workspace, 'studyPanel'), false);
+  assert.deepEqual(layout.mergeLoaded(start, both), both);
+  // A legacy (v1/v2) account layout carries no panel choices: Load keeps the current ones.
+  assert.deepEqual(layout.mergeLoaded(both, record()).workspace.studyPanel, both.workspace.studyPanel);
+});
+
+test('D1160-M4: the largest record with every Study Panel choice stays within the 2048-character cap', () => {
+  const axis = { main: 16384, top: 16384, related: 16384, prior: 16384 }, full = { width: 16384, height: 16384, text: 2 };
+  const value = { version: 3, mode: 'landscape', portrait: axis, landscape: axis,
+    reading: { version: 1, reportWidth: 16384, imageHeight: 16384, relatedHeight: 16384,
+      relatedListHeight: 16384, relatedHidden: false }, workspace: { version: 1, rail: 16384,
+      worklist: 16384, related: 16384, prior: 16384, railCollapsed: false, studyPanelTab: 'templates',
+      studyPanel: { landscape: full, portrait: full } } };
+  const s = store(), k = layout.key(session);
+  assert.ok(JSON.stringify(value).length <= 2048);
+  assert.equal(layout.write(s, k, value), true);
+  assert.deepEqual(layout.read(s, k).state.workspace.studyPanel, { landscape: full, portrait: full });
 });
