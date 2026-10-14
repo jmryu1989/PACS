@@ -8,7 +8,6 @@
  * the response as the sink, and hooks for its no-progress timer, lease fencing and per-object checkpoints.
  */
 import { createHash } from 'node:crypto';
-import { crc32 } from 'node:zlib';
 import type { Readable, Writable } from 'node:stream';
 
 export interface ManifestObjectInput {
@@ -310,6 +309,26 @@ const STORE = 0;
 const DOS_TIME = 0x0000;
 /** 1980-01-01: ((1980 - 1980) << 9) | (1 << 5) | 1. */
 const DOS_DATE = 0x0021;
+
+// CRC-32 as ZIP stores it (reflected polynomial 0xEDB88320, initial and final XOR 0xFFFFFFFF). api/src names only the
+// packages its source contract lists (S5-U1c-F06) and node:zlib is not one of them; a table lookup per byte is cheap
+// next to the MD5 and SHA-256 computed over the same bytes.
+const CRC_TABLE = (() => {
+  const table = new Int32Array(256);
+  for (let n = 0; n < 256; n += 1) {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c;
+  }
+  return table;
+})();
+
+/** Continues `previous` (0 for a new value) over `bytes`, so chunks can be fed in order. */
+function crc32(bytes: Uint8Array, previous = 0) {
+  let c = ~previous;
+  for (let i = 0; i < bytes.length; i += 1) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return ~c >>> 0;
+}
 
 function localHeader(name: Buffer) {
   const h = Buffer.alloc(30 + name.length);
