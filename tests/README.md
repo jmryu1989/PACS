@@ -2380,7 +2380,7 @@ revocation and pending ScreenDetails replies. Native PermissionStatus smoke, com
 context invalidation, repeat changes and saved popup geometry assertions remain. This does not prove physical
 OS monitor placement. The direct source files remain unchanged and all existing PRE/mutant selections remain.
 
-### EMR-D part (d) round 5d3
+### EMR-D part (d) round 5d4
 
 REQ R5-21/22/23 → evidence/source/skip/failure-loss risks → `EMR-D workflow`, `EMR-D evidence`, and `EMR-D refusal matrix` in `tests/emr/d/server_test.cjs`. The matrix checks each isolated boundary with synthetic records and real Git/recorder files; the larger evidence case exercises the seven-record integration. Mutation anchors inject defects; assertions check observable verdicts and diagnostics, not source spelling. See [workflow contracts](emr/d/README.md) for allowed equivalent YAML and timeout budgets.
 
@@ -2502,5 +2502,24 @@ REQ R5-21/22/23 → evidence/source/skip/failure-loss risks → `EMR-D workflow`
 | the revision comparison kept word for word as the arguments of a no-op command | image identity must refuse a wrong image | `M-D-R5-23a` |
 | migration tree truly absent from server declaration | DR3-05: the server declaration names api/prisma/migrations | `M-D-R4-DR3-05missing` |
 | the image record hashes api/prisma | the image record hashes api/prisma | `M-D-D5D-04` |
+| main producer verifies only the typecheck record | D5D3-01: producer refuses drift in contract | `R3-SC-13` (mandatory subvariant of `M-D-PRODUCER-main-noop`) |
+| M-D-D5D3-select-without-typecheck | D5D3: producer refuses its missing record | `M-D-D5D3-select-without-typecheck` (mandatory subvariant of `M-D-PRODUCER-main-noop`) |
+| M-D-D5D3-select-without-contract | D5D3-01: producer checks post-record input for contract | `M-D-D5D3-select-without-contract` (mandatory subvariant of `M-D-PRODUCER-main-noop`) |
+| M-D-D5D3-select-without-mutants | D5D3-01: producer checks post-record input for mutants | `M-D-D5D3-select-without-mutants` (mandatory subvariant of `M-D-PRODUCER-main-noop`) |
+| M-D-D5D3-select-without-server | D5D3-01: producer checks post-record input for server | `M-D-D5D3-select-without-server` (mandatory subvariant of `M-D-PRODUCER-main-noop`) |
+| M-D-D5D3-select-without-image | D5D3-01: producer checks post-record input for image | `M-D-D5D3-select-without-image` (mandatory subvariant of `M-D-PRODUCER-main-noop`) |
+| M-D-D5D3-select-without-live | D5D3-01: producer checks post-record input for live | `M-D-D5D3-select-without-live` (mandatory subvariant of `M-D-PRODUCER-main-noop`) |
+| combined gate evidence uploaded only on success | D5D3-02: combined gate evidence uploads always | `R3-OM-21` (mandatory subvariant of `M-D-GATE-upload-skip`) |
+| M-D-D5D3-gate-upload-missing | D5D3-02: combined gate evidence upload exists | `M-D-D5D3-gate-upload-missing` (mandatory subvariant of `M-D-GATE-upload-skip`) |
+| M-D-D5D3-gate-upload-default-if | D5D3-02: combined gate evidence uploads always | `M-D-D5D3-gate-upload-default-if` (mandatory subvariant of `M-D-GATE-upload-skip`) |
+| combined gate evidence: missing files no longer an error | D5D3-02: missing combined gate evidence is an error | `R3-OM-22` (mandatory subvariant of `M-D-GATE-upload-empty`) |
+| a timed-out child is not killed (the wrapper waits for it to finish) | D5D3-03: timeout kills the hung child and descendant | `R3-T3` (mandatory subvariant of `M-D-D5D-07`) |
+| an interrupted child is reported completed in execution.json | D5D3-04: execution and child record the actual interruption state | `R3-T2` (mandatory subvariant of `M-D-D5D-07`) |
+| M-D-D5D3-kill-parent-only | D5D3-03: timeout kills the hung child and descendant | `M-D-D5D3-kill-parent-only` (mandatory subvariant of `M-D-D5D-07`) |
+| M-D-D5D3-select-wrong-mutant-record | D5D3: producer accepts exactly its own completed records | `M-D-D5D3-select-wrong-mutant-record` (mandatory subvariant of `M-D-PRODUCER-server-mutants-noop`) |
+| M-D-D5D3-gate-upload-path | D5D3-02: combined gate evidence includes the entire record root | `M-D-D5D3-gate-upload-path` (mandatory subvariant of `M-D-GATE-upload-path`) |
+| M-D-D5D3-gate-upload-order | D5D3-02: combined evidence upload follows the final gate | `M-D-D5D3-gate-upload-order` (mandatory subvariant of `M-D-GATE-upload-order`) |
 
 The following variants share the same refusal path: C20 recorder exit (C19 mutant), L04 method selection (L03 mutant), G02 missing commit (G01 mutant), and strict Boolean mutant/equivalent results (M05/M06). Unreadable/unfinished/unrun records, output parsing, unknown output dialects and failed collected cases have independent rows. G01/G02 cover refusal when the target or its Git objects cannot be read. No live selection or live command changes in this round; prior binding review live result remains 21/21, while hosted timing and final SHA gates remain pending.
+
+The 5d4 additions keep the 147 declared families exact and require all 17 subvariants (164 defect executions), including the five previously surviving reviewer mutations. The gate-upload and producer-selection rows above each name an executed removal test. The [workflow contract](emr/d/README.md) records the eight practically equivalent sub-condition changes with their individual reasons. Completed/interrupted status and child/descendant termination are observed in the workflow case; a survivor in a mandatory subvariant makes its declared family and driver fail. No `api/`, workflow, declaration, live or same-source implementation change is required.

@@ -2277,6 +2277,274 @@ EQUIVALENTS += [{'id': 'E-D-D5D2-needs-block',
   'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name one source SHA, and each '
           'record hashes what its command consumes'}]
 
+# These mandatory subvariants refine already-declared refusal families. The fixed
+# d.json IDs stay exact; a family is killed only if its original and every
+# subvariant are killed. Each subvariant keeps its own raw execution and verdict.
+SUBVARIANTS = {'M-D-PRODUCER-main-noop': [{'id': 'R3-SC-13',
+                             'finding': 'D5D3-01',
+                             'title': 'main producer verifies only the typecheck record',
+                             'file': 'tests/emr/d/same_source.py',
+                             'old': 'set(declared) - {"server-mutants"})',
+                             'new': '{"typecheck"})',
+                             'case': 'EMR-D evidence: same_source.py passes only records of TARGET_SHA that hashed, '
+                                     'unchanged, every file their step consumes as TARGET_SHA holds it, with their '
+                                     'logs, exits and declared cases, and the image of TARGET_SHA',
+                             'expect': 'D5D3-01: producer refuses drift in contract',
+                             'reviewer_mutant': 'R3-SC-13'},
+                            {'id': 'M-D-D5D3-select-without-typecheck',
+                             'finding': 'D5D3-01',
+                             'title': 'M-D-D5D3-select-without-typecheck',
+                             'file': 'tests/emr/d/same_source.py',
+                             'old': '        selected = declared if producer is None else ({"server-mutants"} if '
+                                    'producer == "server-mutants" else set(declared) - {"server-mutants"})',
+                             'new': '        selected = declared if producer is None else ({"server-mutants"} if '
+                                    'producer == "server-mutants" else set(declared) - {"server-mutants"})\n'
+                                    '        if producer == "main": selected = set(selected) - {\'typecheck\'}',
+                             'case': 'EMR-D evidence: same_source.py passes only records of TARGET_SHA that hashed, '
+                                     'unchanged, every file their step consumes as TARGET_SHA holds it, with their '
+                                     'logs, exits and declared cases, and the image of TARGET_SHA',
+                             'expect': 'D5D3: producer refuses its missing record'},
+                            {'id': 'M-D-D5D3-select-without-contract',
+                             'finding': 'D5D3-01',
+                             'title': 'M-D-D5D3-select-without-contract',
+                             'file': 'tests/emr/d/same_source.py',
+                             'old': '        selected = declared if producer is None else ({"server-mutants"} if '
+                                    'producer == "server-mutants" else set(declared) - {"server-mutants"})',
+                             'new': '        selected = declared if producer is None else ({"server-mutants"} if '
+                                    'producer == "server-mutants" else set(declared) - {"server-mutants"})\n'
+                                    '        if producer == "main": selected = set(selected) - {\'contract\'}',
+                             'case': 'EMR-D evidence: same_source.py passes only records of TARGET_SHA that hashed, '
+                                     'unchanged, every file their step consumes as TARGET_SHA holds it, with their '
+                                     'logs, exits and declared cases, and the image of TARGET_SHA',
+                             'expect': 'D5D3-01: producer checks post-record input for contract'},
+                            {'id': 'M-D-D5D3-select-without-mutants',
+                             'finding': 'D5D3-01',
+                             'title': 'M-D-D5D3-select-without-mutants',
+                             'file': 'tests/emr/d/same_source.py',
+                             'old': '        selected = declared if producer is None else ({"server-mutants"} if '
+                                    'producer == "server-mutants" else set(declared) - {"server-mutants"})',
+                             'new': '        selected = declared if producer is None else ({"server-mutants"} if '
+                                    'producer == "server-mutants" else set(declared) - {"server-mutants"})\n'
+                                    '        if producer == "main": selected = set(selected) - {\'mutants\'}',
+                             'case': 'EMR-D evidence: same_source.py passes only records of TARGET_SHA that hashed, '
+                                     'unchanged, every file their step consumes as TARGET_SHA holds it, with their '
+                                     'logs, exits and declared cases, and the image of TARGET_SHA',
+                             'expect': 'D5D3-01: producer checks post-record input for mutants'},
+                            {'id': 'M-D-D5D3-select-without-server',
+                             'finding': 'D5D3-01',
+                             'title': 'M-D-D5D3-select-without-server',
+                             'file': 'tests/emr/d/same_source.py',
+                             'old': '        selected = declared if producer is None else ({"server-mutants"} if '
+                                    'producer == "server-mutants" else set(declared) - {"server-mutants"})',
+                             'new': '        selected = declared if producer is None else ({"server-mutants"} if '
+                                    'producer == "server-mutants" else set(declared) - {"server-mutants"})\n'
+                                    '        if producer == "main": selected = set(selected) - {\'server\'}',
+                             'case': 'EMR-D evidence: same_source.py passes only records of TARGET_SHA that hashed, '
+                                     'unchanged, every file their step consumes as TARGET_SHA holds it, with their '
+                                     'logs, exits and declared cases, and the image of TARGET_SHA',
+                             'expect': 'D5D3-01: producer checks post-record input for server'},
+                            {'id': 'M-D-D5D3-select-without-image',
+                             'finding': 'D5D3-01',
+                             'title': 'M-D-D5D3-select-without-image',
+                             'file': 'tests/emr/d/same_source.py',
+                             'old': '        selected = declared if producer is None else ({"server-mutants"} if '
+                                    'producer == "server-mutants" else set(declared) - {"server-mutants"})',
+                             'new': '        selected = declared if producer is None else ({"server-mutants"} if '
+                                    'producer == "server-mutants" else set(declared) - {"server-mutants"})\n'
+                                    '        if producer == "main": selected = set(selected) - {\'image\'}',
+                             'case': 'EMR-D evidence: same_source.py passes only records of TARGET_SHA that hashed, '
+                                     'unchanged, every file their step consumes as TARGET_SHA holds it, with their '
+                                     'logs, exits and declared cases, and the image of TARGET_SHA',
+                             'expect': 'D5D3-01: producer checks post-record input for image'},
+                            {'id': 'M-D-D5D3-select-without-live',
+                             'finding': 'D5D3-01',
+                             'title': 'M-D-D5D3-select-without-live',
+                             'file': 'tests/emr/d/same_source.py',
+                             'old': '        selected = declared if producer is None else ({"server-mutants"} if '
+                                    'producer == "server-mutants" else set(declared) - {"server-mutants"})',
+                             'new': '        selected = declared if producer is None else ({"server-mutants"} if '
+                                    'producer == "server-mutants" else set(declared) - {"server-mutants"})\n'
+                                    '        if producer == "main": selected = set(selected) - {\'live\'}',
+                             'case': 'EMR-D evidence: same_source.py passes only records of TARGET_SHA that hashed, '
+                                     'unchanged, every file their step consumes as TARGET_SHA holds it, with their '
+                                     'logs, exits and declared cases, and the image of TARGET_SHA',
+                             'expect': 'D5D3-01: producer checks post-record input for live'}],
+ 'M-D-GATE-upload-skip': [{'id': 'R3-OM-21',
+                           'finding': 'D5D3-02',
+                           'title': 'combined gate evidence uploaded only on success',
+                           'file': '.github/workflows/emr-d.yml',
+                           'old': '      - name: Preserve the combined gate evidence\n        if: always()\n',
+                           'new': '      - name: Preserve the combined gate evidence\n        if: ${{ success() }}\n',
+                           'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every '
+                                   'record name one source SHA, and each record hashes what its command consumes',
+                           'expect': 'D5D3-02: combined gate evidence uploads always',
+                           'reviewer_mutant': 'R3-OM-21'},
+                          {'id': 'M-D-D5D3-gate-upload-missing',
+                           'finding': 'D5D3-02',
+                           'title': 'M-D-D5D3-gate-upload-missing',
+                           'file': '.github/workflows/emr-d.yml',
+                           'old': '      - name: Preserve the combined gate evidence\n'
+                                  '        if: always()\n'
+                                  '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # '
+                                  'v7.0.1\n'
+                                  '        with:\n'
+                                  '          name: emr-d-results\n'
+                                  '          path: tmp/emr-d-ci/\n'
+                                  '          if-no-files-found: error\n'
+                                  '          retention-days: 7\n',
+                           'new': '',
+                           'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every '
+                                   'record name one source SHA, and each record hashes what its command consumes',
+                           'expect': 'D5D3-02: combined gate evidence upload exists'},
+                          {'id': 'M-D-D5D3-gate-upload-default-if',
+                           'finding': 'D5D3-02',
+                           'title': 'M-D-D5D3-gate-upload-default-if',
+                           'file': '.github/workflows/emr-d.yml',
+                           'old': '      - name: Preserve the combined gate evidence\n'
+                                  '        if: always()\n'
+                                  '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # '
+                                  'v7.0.1\n'
+                                  '        with:\n'
+                                  '          name: emr-d-results\n'
+                                  '          path: tmp/emr-d-ci/\n'
+                                  '          if-no-files-found: error\n'
+                                  '          retention-days: 7\n',
+                           'new': '      - name: Preserve the combined gate evidence\n'
+                                  '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # '
+                                  'v7.0.1\n'
+                                  '        with:\n'
+                                  '          name: emr-d-results\n'
+                                  '          path: tmp/emr-d-ci/\n'
+                                  '          if-no-files-found: error\n'
+                                  '          retention-days: 7\n',
+                           'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every '
+                                   'record name one source SHA, and each record hashes what its command consumes',
+                           'expect': 'D5D3-02: combined gate evidence uploads always'}],
+ 'M-D-GATE-upload-empty': [{'id': 'R3-OM-22',
+                            'finding': 'D5D3-02',
+                            'title': 'combined gate evidence: missing files no longer an error',
+                            'file': '.github/workflows/emr-d.yml',
+                            'old': '          name: emr-d-results\n'
+                                   '          path: tmp/emr-d-ci/\n'
+                                   '          if-no-files-found: error\n',
+                            'new': '          name: emr-d-results\n          path: tmp/emr-d-ci/\n',
+                            'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every '
+                                    'record name one source SHA, and each record hashes what its command consumes',
+                            'expect': 'D5D3-02: missing combined gate evidence is an error',
+                            'reviewer_mutant': 'R3-OM-22'}],
+ 'M-D-D5D-07': [{'id': 'R3-T3',
+                 'finding': 'D5D3-03',
+                 'title': 'a timed-out child is not killed (the wrapper waits for it to finish)',
+                 'file': 'tests/emr/d/same_source.py',
+                 'old': '            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], '
+                        'capture_output=True)\n'
+                        '        else:\n'
+                        '            os.killpg(proc.pid, signal.SIGKILL)\n'
+                        '        proc.wait()\n'
+                        '        code = 124',
+                 'new': '            pass\n        else:\n            pass\n        proc.wait()\n        code = 124',
+                 'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name '
+                         'one source SHA, and each record hashes what its command consumes',
+                 'expect': 'D5D3-03: timeout kills the hung child and descendant',
+                 'reviewer_mutant': 'R3-T3'},
+                {'id': 'R3-T2',
+                 'finding': 'D5D3-04',
+                 'title': 'an interrupted child is reported completed in execution.json',
+                 'file': 'tests/emr/d/same_source.py',
+                 'old': '                status, error = child["status"], child["error"]\n',
+                 'new': '                pass\n',
+                 'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name '
+                         'one source SHA, and each record hashes what its command consumes',
+                 'expect': 'D5D3-04: execution and child record the actual interruption state',
+                 'reviewer_mutant': 'R3-T2'},
+                {'id': 'M-D-D5D3-kill-parent-only',
+                 'finding': 'D5D3-03',
+                 'title': 'M-D-D5D3-kill-parent-only',
+                 'file': 'tests/emr/d/same_source.py',
+                 'old': '            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], '
+                        'capture_output=True)\n'
+                        '        else:\n'
+                        '            os.killpg(proc.pid, signal.SIGKILL)\n'
+                        '        proc.wait()\n'
+                        '        code = 124',
+                  'new': '            proc.kill()\n        else:\n            proc.kill()\n        proc.wait()\n        code = 124',
+                 'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every record name '
+                         'one source SHA, and each record hashes what its command consumes',
+                 'expect': 'D5D3-03: timeout kills the hung child and descendant'}],
+ 'M-D-PRODUCER-server-mutants-noop': [{'id': 'M-D-D5D3-select-wrong-mutant-record',
+                                       'finding': 'D5D3-01',
+                                       'title': 'M-D-D5D3-select-wrong-mutant-record',
+                                       'file': 'tests/emr/d/same_source.py',
+                                       'old': '        selected = declared if producer is None else '
+                                              '({"server-mutants"} if producer == "server-mutants" else set(declared) '
+                                              '- {"server-mutants"})',
+                                       'new': '        selected = declared if producer is None else ({"typecheck"} if '
+                                              'producer == "server-mutants" else set(declared) - {"server-mutants"})',
+                                       'case': 'EMR-D evidence: same_source.py passes only records of TARGET_SHA that '
+                                               'hashed, unchanged, every file their step consumes as TARGET_SHA holds '
+                                               'it, with their logs, exits and declared cases, and the image of '
+                                               'TARGET_SHA',
+                                       'expect': 'D5D3: producer accepts exactly its own completed records'}],
+ 'M-D-GATE-upload-path': [{'id': 'M-D-D5D3-gate-upload-path',
+                           'finding': 'D5D3-02',
+                           'title': 'M-D-D5D3-gate-upload-path',
+                           'file': '.github/workflows/emr-d.yml',
+                           'old': '      - name: Preserve the combined gate evidence\n'
+                                  '        if: always()\n'
+                                  '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # '
+                                  'v7.0.1\n'
+                                  '        with:\n'
+                                  '          name: emr-d-results\n'
+                                  '          path: tmp/emr-d-ci/\n'
+                                  '          if-no-files-found: error\n'
+                                  '          retention-days: 7\n',
+                           'new': '      - name: Preserve the combined gate evidence\n'
+                                  '        if: always()\n'
+                                  '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # '
+                                  'v7.0.1\n'
+                                  '        with:\n'
+                                  '          name: emr-d-results\n'
+                                  '          if-no-files-found: error\n'
+                                  '          retention-days: 7\n',
+                           'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every '
+                                   'record name one source SHA, and each record hashes what its command consumes',
+                           'expect': 'D5D3-02: combined gate evidence includes the entire record root'}],
+ 'M-D-GATE-upload-order': [{'id': 'M-D-D5D3-gate-upload-order',
+                            'finding': 'D5D3-02',
+                            'title': 'M-D-D5D3-gate-upload-order',
+                            'file': '.github/workflows/emr-d.yml',
+                            'old': '      - name: Every record and the image are of TARGET_SHA, and each record hashed '
+                                   'what its command consumes (source = image = evidence)\n'
+                                   '        id: same-source\n'
+                                   '        if: ${{ !cancelled() }}\n'
+                                   '        run: python3 -B tests/emr/d/same_source.py\n'
+                                   '      - name: Preserve the combined gate evidence\n'
+                                   '        if: always()\n'
+                                   '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # '
+                                   'v7.0.1\n'
+                                   '        with:\n'
+                                   '          name: emr-d-results\n'
+                                   '          path: tmp/emr-d-ci/\n'
+                                   '          if-no-files-found: error\n'
+                                   '          retention-days: 7\n',
+                            'new': '      - name: Preserve the combined gate evidence\n'
+                                   '        if: always()\n'
+                                   '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # '
+                                   'v7.0.1\n'
+                                   '        with:\n'
+                                   '          name: emr-d-results\n'
+                                   '          path: tmp/emr-d-ci/\n'
+                                   '          if-no-files-found: error\n'
+                                   '          retention-days: 7\n'
+                                   '      - name: Every record and the image are of TARGET_SHA, and each record hashed '
+                                   'what its command consumes (source = image = evidence)\n'
+                                   '        id: same-source\n'
+                                   '        if: ${{ !cancelled() }}\n'
+                                   '        run: python3 -B tests/emr/d/same_source.py\n',
+                            'case': 'EMR-D workflow: the checkout, the image (label and tag), the live run and every '
+                                    'record name one source SHA, and each record hashes what its command consumes',
+                            'expect': 'D5D3-02: combined evidence upload follows the final gate'}]}
+
 def sha(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -2288,7 +2556,7 @@ def read_lf(path):
 
 def check_anchors():
     return [f"{m['id']}: anchor occurs {read_lf(ROOT / m['file']).count(m['old'])} times in {m['file']}"
-            for m in MUTANTS + EQUIVALENTS if read_lf(ROOT / m["file"]).count(m["old"]) != 1]
+            for m in MUTANTS + EQUIVALENTS + [v for rows in SUBVARIANTS.values() for v in rows] if read_lf(ROOT / m["file"]).count(m["old"]) != 1]
 
 
 def node_binary():
@@ -2455,7 +2723,7 @@ def main():
         destination.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
     problems = check_anchors()
-    summary = {"sources": {m["file"]: sha((ROOT / m["file"]).read_bytes()) for m in MUTANTS + EQUIVALENTS}, "anchors": problems or "ok",
+    summary = {"sources": {m["file"]: sha((ROOT / m["file"]).read_bytes()) for m in MUTANTS + EQUIVALENTS + [v for rows in SUBVARIANTS.values() for v in rows]}, "anchors": problems or "ok",
                "baseline": None, "control": None, "mutants": [], "equivalents": []}
     summary["pending"] = ["baseline", "control", *[m["id"] for m in MUTANTS], *[e["id"] for e in EQUIVALENTS]]
     save()
@@ -2488,6 +2756,19 @@ def main():
             code, stdout, stderr = run_saved(node, copy.root / "tests/emr/d/server_test.cjs", [mutant["case"], *mutant.get("with", [])])
         summary["mutants"].append({**{k: mutant[k] for k in ("id", "finding", "title", "file", "case", "expect")}, "exit": code,
                                    **copy.hashes, **judge(mutant, code, stdout, stderr), "stdout": stdout, "stderr": stderr})
+        family = summary["mutants"][-1]
+        family["original_killed"] = family["killed"]
+        family["subvariants"] = []
+        for variant in SUBVARIANTS.get(mutant["id"], []):
+            with Copy(variant) as variant_copy:
+                vcode, vout, verr = run_saved(node, variant_copy.root / "tests/emr/d/server_test.cjs", [variant["case"]])
+            verdict = {**{k: variant[k] for k in ("id", "finding", "title", "file", "case", "expect")},
+                       "exit": vcode, **variant_copy.hashes, **judge(variant, vcode, vout, verr), "stdout": vout, "stderr": verr}
+            family["subvariants"].append(verdict)
+            family["killed"] = family["killed"] and verdict["killed"]
+            save()
+            if vcode == 124:
+                return 1
         summary["pending"].remove(mutant["id"])
         save()
         if code == 124:

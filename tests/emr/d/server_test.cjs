@@ -744,19 +744,87 @@ with tempfile.TemporaryDirectory() as tmp:
     assert.match(selectedImage.stdout, /EMR_D_USED_IMAGE/, 'D5D-03: used immutable ID is preserved');
 
     const interruption = String.raw`
-import importlib.util,json,pathlib,sys,tempfile,os,time,subprocess
+import importlib.util,json,pathlib,sys,tempfile,os,time,subprocess,threading,signal
 spec=importlib.util.spec_from_file_location('same_source',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 with tempfile.TemporaryDirectory() as tmp:
  baseline=time.monotonic()
  for label in ['completed','timeout']:
   timeout=2400 if label=='completed' else max(10,4*(time.monotonic()-baseline))
-  child='print("SYN completed",flush=True)' if label=='completed' else 'import time;print("SYN partial",flush=True);time.sleep(%s)'%(timeout*4)
   folder=pathlib.Path(tmp)/label
-  code,out,err=m.recorded_execution([sys.executable,'-c',child],sys.argv[2],os.environ,folder,timeout,[label])
+  receipt=pathlib.Path(tmp)/'tree.json'
+  child='print("SYN completed",flush=True)' if label=='completed' else '\n'.join([
+   'import os,sys,time,json,pathlib,subprocess',
+   'descendant=subprocess.Popen([sys.executable,"-c","import time;time.sleep(86400)"])',
+   'pathlib.Path(sys.argv[1]).write_text(json.dumps([os.getpid(),descendant.pid]))',
+   'print("SYN partial",flush=True)',
+   'while True: time.sleep(86400)',
+  ])
+  result=[];failures=[];finished=threading.Event();handles=[];pids=[]
+  if os.name=='nt':
+   import ctypes
+   from ctypes import wintypes
+   kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+   kernel.OpenProcess.argtypes=[wintypes.DWORD,wintypes.BOOL,wintypes.DWORD];kernel.OpenProcess.restype=wintypes.HANDLE
+   kernel.WaitForSingleObject.argtypes=[wintypes.HANDLE,wintypes.DWORD]
+   kernel.TerminateProcess.argtypes=[wintypes.HANDLE,wintypes.UINT]
+   kernel.CloseHandle.argtypes=[wintypes.HANDLE]
+  def alive(pid,handle):
+   if os.name=='nt':return kernel.WaitForSingleObject(handle,0)==258
+   try:
+    os.kill(pid,0)
+    stat=pathlib.Path('/proc')/str(pid)/'stat'
+    return not stat.exists() or stat.read_text().rsplit(')',1)[1].split()[0]!='Z'
+   except ProcessLookupError:return False
+  def execute():
+   try:result.append(m.recorded_execution([sys.executable,'-c',child,str(receipt)],sys.argv[2],os.environ,folder,timeout,[label]))
+   except BaseException as exc:failures.append(exc)
+   finally:finished.set()
+  worker=threading.Thread(target=execute);worker.start()
+  try:
+   if label=='timeout':
+    deadline=time.monotonic()+max(30,4*timeout)
+    while not receipt.exists() and not finished.is_set() and time.monotonic()<deadline:time.sleep(.05)
+    assert receipt.exists(),'D5D3-03: hung child tree started'
+    # Capture handles while these owned children are alive, avoiding PID reuse on Windows.
+    while not pids:
+     try:pids=json.loads(receipt.read_text())
+     except json.JSONDecodeError:
+      assert time.monotonic()<deadline,'D5D3-03: process receipt completed'
+      time.sleep(.05)
+    for pid in pids:
+     handle=kernel.OpenProcess(0x100001,False,pid) if os.name=='nt' else None
+     if os.name=='nt':assert handle,'D5D3-03: owned child is observable'
+     handles.append(handle)
+    assert all(alive(pid,handle) for pid,handle in zip(pids,handles)),'D5D3-03: hung child and descendant were running'
+   ended=finished.wait(2400 if label=='completed' else max(30,4*timeout))
+   assert ended and not any(alive(pid,handle) for pid,handle in zip(pids,handles)),'D5D3-03: timeout kills the hung child and descendant'
+  finally:
+   # Only this probe's children can be cleaned up, including when kill is deliberately removed.
+   for pid,handle in zip(pids,handles):
+    if alive(pid,handle):
+     if os.name=='nt':
+      kernel.TerminateProcess(handle,1)
+      assert kernel.WaitForSingleObject(handle,30000)==0,'D5D3-03: owned cleanup completed'
+     else:os.kill(pid,signal.SIGKILL)
+   worker.join()
+   for handle in handles:
+    if os.name=='nt':kernel.CloseHandle(handle)
+  assert not failures,failures
+  code,out,err=result[0]
   assert ('SYN completed' if label=='completed' else 'SYN partial') in out,(label,out,err)
   assert code==(0 if label=='completed' else 124),(label,code)
   assert (folder/'run.json').is_file()
-  assert json.loads((folder/'execution.json').read_text())['selected']==[label]
+  execution=json.loads((folder/'execution.json').read_text())
+  child_exit=json.loads((folder/'child-exit.json').read_text())
+  assert execution['selected']==[label]
+  expected='completed' if label=='completed' else 'interrupted'
+  assert execution['status']==child_exit['status']==expected,'D5D3-04: execution and child record the actual interruption state'
+  assert execution['exit']==child_exit['exit']==code
+  if label=='timeout':
+   assert execution['exit_note'] and execution['error']==child_exit['error']=='TimeoutExpired','D5D3-04: interruption reason is retained'
+   assert child_exit['child_process_exit']!=0,'D5D3-03: hung child did not finish normally'
+  else:
+   assert execution['exit_note'] is None and execution['error'] is None and child_exit['error'] is None
  assert 'SYN completed' in (pathlib.Path(tmp)/'completed/stdout.log').read_text()
  # Reviewer's lifecycle injection: a completed mutant, then partial timeout; the next run sees the preceding summary.
  import contextlib,io,subprocess
@@ -784,6 +852,21 @@ with tempfile.TemporaryDirectory() as tmp:
  assert result['mutants'][1]['stdout']=='SYN partial stdout' and result['mutants'][1]['exit']==124
  assert len(result['pending'])==len(sm.MUTANTS)-2+len(sm.EQUIVALENTS)
  assert (summary.with_suffix('.runs')/'interruption-000/stdout.log').read_text()=='SYN partial stdout'
+ # Every newly required subvariant participates in the declared family's verdict.
+ original=sm.MUTANTS[0];variant=sm.SUBVARIANTS['M-D-D5D-07'][0]
+ for survives in [False,True]:
+  calls=[];summary=pathlib.Path(tmp)/('family-'+str(survives)+'.json')
+  def family_child(node,test,cases=None):
+   calls.append(cases)
+   if len(calls)<=2 or (len(calls)==4 and survives):
+    return 0,'\n'.join('ok %d - %s'%(i,n) for i,n in enumerate(cases or [original['case']],1))+'\n',''
+   item=original if len(calls)==3 else variant
+   return 1,'not ok 1 - '+item['case']+'\n  ---\n  failureType: \'testCodeFailure\'\n  code: \'ERR_ASSERTION\'\n  error: '+item['expect']+'\n  ...\n',''
+  with mock.patch.object(sm,'Copy',Copy),mock.patch.object(sm,'run',family_child),mock.patch.object(sm,'check_anchors',lambda:[]),mock.patch.object(sm,'MUTANTS',[original]),mock.patch.object(sm,'EQUIVALENTS',[]),mock.patch.object(sm,'SUBVARIANTS',{original['id']:[variant]}),mock.patch.object(sys,'argv',['mutants','--out',str(summary)]),contextlib.redirect_stdout(io.StringIO()):
+   code=sm.main()
+  family=json.loads(summary.read_text())['mutants'][0]
+  assert len(calls)==4 and family['original_killed'] and len(family['subvariants'])==1
+  assert code==int(survives) and family['killed']==(not survives),'D5D3: a surviving subvariant fails its declared family and the driver'
 `;
     const interrupted = spawnSync(python, ['-B', '-c', interruption, path.join(root, 'tests/emr/d/same_source.py'), root], { encoding: 'utf8' });
     assert.equal(interrupted.status, 0, 'D5D-07: completed and interrupted raw streams survive\n' + interrupted.stdout + interrupted.stderr);
@@ -809,6 +892,12 @@ with tempfile.TemporaryDirectory() as tmp:
       assert.ok(Number.isInteger(flow.jobs[name]['timeout-minutes']) && flow.jobs[name]['timeout-minutes'] > 0 && flow.jobs[name]['timeout-minutes'] <= limit, 'D5D2: bounded job budget ' + name);
     assert.deepEqual(setOf('one'), setOf(['one']), 'D5D2-02: scalar and singleton needs have equal meaning');
     const gateIndex = gateJob.steps.indexOf(finalGate);
+    const gateUpload = gateJob.steps.find(s => String(s.uses).startsWith('actions/upload-artifact@'));
+    assert.ok(gateUpload, 'D5D3-02: combined gate evidence upload exists');
+    assert.equal(expression(gateUpload.if), 'always()', 'D5D3-02: combined gate evidence uploads always');
+    assert.equal(gateUpload.with?.path, 'tmp/emr-d-ci/', 'D5D3-02: combined gate evidence includes the entire record root');
+    assert.equal(gateUpload.with?.['if-no-files-found'], 'error', 'D5D3-02: missing combined gate evidence is an error');
+    assert.ok(gateJob.steps.indexOf(gateUpload) > gateIndex, 'D5D3-02: combined evidence upload follows the final gate');
     for (const producer of ['emr-d', 'emr-d-server-mutants']) {
       const sourceJob = flow.jobs[producer];
       assert.deepEqual(setOf(sourceJob.needs), [], 'D5D2-06: record jobs run in parallel');
@@ -984,6 +1073,26 @@ test('EMR-D evidence: same_source.py passes only records of TARGET_SHA that hash
       reset();
       fs.rmSync(path.join(runs, own[0]), { recursive: true });
       assert.notEqual(run().status, 0, 'D5D3: producer refuses its missing record');
+      // Inspect each record's own refusal: another record that shares the input
+      // must not mask a missing check here.
+      const covers = (declared, file) => declared.some(n => file === posixName(n) || file.startsWith(posixName(n) + '/'));
+      const driftInputs = { typecheck: 'api/tsconfig.json', contract: 'tests/emr/d/contract_test.cjs',
+        mutants: 'tests/emr/d/mutants.py', server: 'scripts/emr-compose.py',
+        'server-mutants': 'api/Dockerfile', image: 'api/Dockerfile', live: 'tests/live_test_gate.py' };
+      for (const id of own) {
+        reset();
+        const file = driftInputs[id];
+        assert.ok(covers(consumed[id], file), id + ' consumes its drift probe');
+        if (!['typecheck', 'server-mutants'].includes(id)) assert.ok(!covers(consumed.typecheck, file), id + ' drift is outside typecheck');
+        fs.appendFileSync(path.join(repo, file), '\nSYN isolated producer drift\n');
+        const done = run(), report = JSON.parse(fs.readFileSync(path.join(runs, 'same-source-' + producer + '.json'), 'utf8'));
+        assert.notEqual(done.status, 0, 'D5D3-01: producer refuses drift in ' + id);
+        assert.ok(report.steps[id]?.problems.some(p => p.includes(file) && p.includes('final checkout')),
+          'D5D3-01: producer checks post-record input for ' + id + '\n' + done.out);
+        reset();
+        fs.rmSync(path.join(runs, id), { recursive: true });
+        assert.notEqual(run().status, 0, 'D5D3-01: producer refuses missing ' + id);
+      }
     }
 
     reset();
