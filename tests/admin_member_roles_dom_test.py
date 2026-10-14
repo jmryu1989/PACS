@@ -551,7 +551,7 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
           legend: document.querySelector('#membership-roles legend').textContent,
           roleLabels: [...document.querySelectorAll('#membership-roles input[name="role"]')].map(i => i.parentElement.textContent),
           override: document.querySelector('input[name="verificationOverride"]').parentElement.textContent,
-          headers: [...document.querySelectorAll('thead th')].map(th => th.textContent),
+          headers: [...document.querySelector('#users').closest('table').querySelectorAll('thead th')].map(th => th.textContent),
           invalid: document.querySelector('#users .warning')?.textContent ?? null})""")
         self.assertEqual({
             "placeholder": "아이디, 이름, 이메일",

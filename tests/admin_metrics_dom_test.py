@@ -7,8 +7,7 @@ The Members console (worklist-v0/hpacs-lite/admin.html) gains an Operations sect
 tests/admin_metrics_test.cjs) and shows each row with its state, value, unit, denominator, scope, source and observation
 time. This harness loads the shipped admin.html, auth.js and study-access-admin.js unchanged from a synthetic origin,
 answers /api/me, the member list, /api/admin/metrics and the logout from in-test queues (an answer can be held and
-released out of order; the F04 cases also queue a member-list answer and serve study-arrivals.js and the Gateway list)
-and records every request:
+released out of order) and records every request:
 
   01  opening Members reads only /api/me and the member list: no metrics read and no Gateway rules until asked; the
       section says Not Loaded with no table.
@@ -16,63 +15,29 @@ and records every request:
       time) in words; Korean titles on every cell; one GET with the CSRF header and no query.
   03  unknown is never 0: failed, timed-out, missing-source, missing and malformed rows read Unobservable with no digit
       in their value, denominator or time; a zero denominator reads No Studies over a known 0 Studies.
-  04  Query Failed: a first failure shows no table; later failures (500, malformed, 403 restricted and other, 409 access
-      and 409 scope, 503) keep the last table, dimmed, as the last observation with a fixed sentence and no navigation;
-      server wording never shows; the next good answer restores it.
+  04  Query Failed: a first failure shows no table; later failures (500, malformed, 409 access and 409 scope, 503) keep
+      the last table, dimmed, as the last observation with a fixed sentence and no navigation; a 403 (restricted or
+      other) closes the section instead (no table, Refresh off, its fixed sentence, no navigation) until the page is
+      opened again; server wording never shows; the next good answer restores it.
   05  A->B->A: a late older answer never paints over a newer one; a later request for the older content paints.
       Control: the page without the sequence guard, served through the same route, paints the late answer.
-  06  a 401 empties the section and disables it before the logout request answers; a late answer is received but never
-      read or painted; one logout and one navigation.
+  06  the response lifetime (U5S-REQ-04), the same check as Gateway Status case 07: every metrics read carries the
+      page's X-KIN-Session; a plain 401 is one failed read (Query Failed, the table and Refresh kept, no navigation, no
+      logout POST) and the next read recovers; AUTH_SESSION_ENDED on the older of two reads ends the page session at
+      once (Operations rows and the member list emptied, Refresh off, one navigation, no logout POST); the newer read's
+      late 200 paints nothing and Refresh forced on sends nothing.
   07  wording and layout: English controls, headings, labels, state words and units with no Hangul; Korean guidance and
       titles; no UXR-SP-34 avoided word; nothing below 12px; no threshold: a tiny and a huge value share every style,
       only the state chip colour follows the state (with its word); keyboard; no browser dialog.
-  08  the Gateway Status section is untouched by Refresh Operations (no /api/studies, no study-arrivals.js).
-  09  S5-U6b-F03: with three reads out, the OLDEST read's 401 empties the section at once (Not Loaded, control off) and
-      logs out once; the newer 200 and a second 401 neither repaint nor log out again; one navigation. Control: the 401
-      judged after the sequence check (the order before the fix) keeps the table, never logs out, and paints the newer.
-  10  S5-U6b-F04: with Operations showing a table and two reads out, a 401 on the member list empties the section and
-      turns its control off at once (Gateway Status's control too), before the logout answers; the late newer 200 and
-      older 401 neither repaint nor log out again; the control forced back on and pressed sends nothing; Log out pressed
-      again posts nothing; one logout and one navigation. (S7-U5: the control that sent this 401 straight to
-      KinAuth.logout() is retired — auth.js's end notice before the network now closes the page and one POST serves the
-      intent, so it reproduces neither risk; the one-off counterexample is kept with the S7-U5 fix1 evidence.)
-  11  the same for Log out (its straight-to-KinAuth.logout() control retired the same way).
-  12  the same for a 401 on the Gateway Status list read. Control: Operations' closer kept off the page's session end
-      (the F04 state: a panel with an end of its own) keeps the ended session's table and control.
-  13  one session object: the shipped page defines KinConsoleSession once (S5-U6a's top-level const; this unit's
-      conditional definition went with the merge of main 7780f578, which brought S5-U6a), nothing is put on window, and
-      Study Access, the members console, Gateway Status and Operations each register one closer on it; Log out ends
-      through it.
+  08  the Gateway Status section is untouched by Refresh Operations (no /api/studies, no study-arrivals.js); the eight
+      column headers are the Operations table's own (thead, scope col) and none is in its body.
 
-Every module of the merged page on that one end (Astra S5-U6b-R-003). For these cases the harness also answers Study
-Access, the member writes and a held /api/me, holds member-list and Gateway reads, and serves study-arrivals.js:
+The session-end cases that were 09-18 here (an older read's 401, a member-list or Gateway 401, Log out, the one session
+object, every module of the merged page on that end; Astra S5-U6b-F03..F06, S5-U6b-R-003) moved with S7-U5 to
+tests/admin_session_dom_test.py, which binds them to the named end signals, all panels and the delayed navigation.
 
-  14  S5-U6b-F06: Study Access read and edited (Save on) while an Operations or a Gateway read is out; that read's 401
-      disposes the dialog before the logout answers; the dropped dialog's Save, Retry and Reload and a new open send no
-      GET and no POST. Control: the module without its closer and its end checks keeps the dialog open after the end (its
-      Save no longer sends the POST since S7-U5: auth.js drops the identity when the end starts).
-  15  S5-U6b-F04: Operations shows Studies Owned 5 with two reads out, and two Gateway reads are out; the OLDER Gateway
-      read's 401 closes every panel before the logout answers; the newer Gateway 200 and the late Operations 200 (6) and
-      401 repaint nothing and log out no second time; controls forced on send nothing. Control: Gateway's 401 judged
-      after its sequence check (979a69b) never ends the session: no logout, Operations keeps 11 rows and its control,
-      and the late 200 paints 6.
-  16  S5-U6b-F05: a member-list read, a temporary password and a Create Member submit held at the server when Log out or
-      an Operations 401 ends the session: members, dialogs, forms and controls go before the logout answers; the late
-      answers draw no row, open no dialog, read no list again and only say that the session ended. Control: the members
-      console without its closer and end checks draws the late list and opens the temporary password.
-  17  the matrix for the live panels: the members console, Gateway Status, Operations and Study Access each show the
-      session's data with one request out; each of a member-list 401, a Gateway 401, an Operations 401, a Study Access
-      401 and Log out closes all four before the logout answers; the other late answers paint nothing; no module sends a
-      request after the end; one logout and one navigation.
-  18  the matrix for the boot: while /api/me or the first member-list read is out, a /api/me 401, a member-list 401, a
-      Gateway 401, an Operations 401, a Study Access 401 (opened by script: the page draws no row before the first read)
-      and Log out (before the /api/me headers, and while its body is read) each end the session; nothing turns on, no
-      row is drawn, Study Access opens nothing, the late first read draws nothing, the late /api/me restores no identity
-      (S7-U5 §0.C 7: whether its body is read is not the point); one logout and one navigation.
-
-Each independent case (and each sub-case and control) runs in its own browser context: a logout's end state stays in the
-origin's storage until the next explicit login (S7-U5 §0.C 6), so a later case in the same context would open a closed
-page.
+Each case runs in its own browser context (setUp): a logout's end state stays in the origin's storage until the next
+explicit login (S7-U5 §0.C 6), so a later case in the same context would open a closed page.
 
 WorklistStorageDOMTest (S5-U6b-F02) slices main.html's shipped #storage element and refreshStorage() into a page with a
 queued fetch: S01 the default names no number; S02 network failure, bad JSON, a missing or malformed TotalDiskSize, 403
@@ -85,6 +50,7 @@ Synthetic data only (SYN-* names): no server, no network, no credentials. A requ
 aborted and fails the case, as does a page error or a browser dialog.
 """
 from page_source import read_page_source
+from admin_gateway_status_dom_test import assert_response_lifetime
 from copy import deepcopy
 import json
 from pathlib import Path
@@ -256,14 +222,6 @@ FIXED = {
     "scope_changed": "집계하는 동안 검사의 기관 범위(원격판독 포함)가 바뀌었습니다. 다시 조회하세요.",
     "busy": "서버가 바쁘거나 원천 조회가 지연되었습니다. 잠시 후 다시 조회하세요.",
 }
-# S5-U6b-F03 control: the 401 judged after the sequence check, as before the fix, so an older read's 401 is dropped.
-END_IN_REQUEST = """        if (response.status === 401) {
-          KinConsoleSession.end();
-          throw Object.assign(new Error("session ended"), { status: 401 });
-        }
-"""
-END_AFTER_SEQUENCE = """        if (response.status === 401) throw Object.assign(new Error("session"), { status: 401 });
-"""
 # S5-U6b-F04 control: Operations' closer built but never registered on the page's one session end (a panel with an end of
 # its own).
 OPS_ON_END = "      KinConsoleSession.onEnd(() => {\n        ops.seq++;\n"
@@ -276,19 +234,6 @@ COUNTING_ATTACH = """    window.__registered = 0;
 """ + ATTACH
 
 # ── S5-U6b-R-003 (F04/F05/F06): the merged page's modules on the one session end ──
-# A control still edits each panel's 401 block inside the one inline script its marker names. Gateway Status's block
-# throws "session" where Operations' throws "session ended": the U6a test's control anchors on the Gateway text once.
-GATEWAY_SCRIPT = " * S5-U6a Gateway Status (REQ-S5-U6a-GATEWAY-STATUS)."
-OPS_SCRIPT = " * S5-U6b Operations panel."
-GATEWAY_401_IN_REQUEST = """        if (response.status === 401) {
-          KinConsoleSession.end();
-          throw Object.assign(new Error("session"), { status: 401 });
-        }
-"""
-# The Gateway 401 as at 979a69b: thrown in gatewayRequest, judged in refreshGateway after the sequence check (F04).
-GATEWAY_401_BEFORE = '        if (response.status === 401) throw Object.assign(new Error("session"), { status: 401 });\n'
-GATEWAY_AFTER_SEQUENCE = '        if (seq !== gateway.seq) return;\n        $("#gateway-busy").hidden = true;\n'
-GATEWAY_401_AFTER_SEQUENCE = GATEWAY_AFTER_SEQUENCE + "        if (error?.status === 401) { KinConsoleSession.end(); return; }\n"
 # The members console as S5-U6a leaves it: one closer and seven end checks between request() and boot() (F05 control).
 MEMBERS_FROM = "      async function request(method, path, body) {\n"
 MEMBERS_TO = "      boot();\n"
@@ -304,8 +249,6 @@ LIST_PATH = "/api/admin/users"
 RESET_PATH = LIST_PATH + "/" + MEMBER["id"] + "/reset-password"
 ACCESS_PATH = LIST_PATH + "/" + MEMBER["id"] + "/study-access"
 STUDIES_PATH = "/api/studies"
-ENDED = "세션이 종료되었습니다"
-EXPIRED = "세션이 만료되었습니다"
 SECRET = "SYN-TEMPORARY-VALUE"
 ACCESS = {"owner": [INSTITUTION, ME["sub"]], "subject": MEMBER["id"], "revision": 0, "needsInstitutionReview": False,
           "policy": {"version": 1, "restricted": False, "startsAt": None, "endsAt": None, "rules": []}}
@@ -377,18 +320,6 @@ def variant(old, new="", body=ADMIN_HTML, name="admin.html"):
     if found != 1:
         raise AssertionError(f"setup: {old!r} occurs {found} times in {name}")
     return body.replace(old, new)
-
-
-def variant_in(marker, edits, body=ADMIN_HTML):
-    """The edits made inside the one inline script that holds `marker` (the marker itself once in the page)."""
-    if body.count(marker) != 1:
-        raise AssertionError(f"setup: {marker!r} occurs {body.count(marker)} times in admin.html")
-    at = body.index(marker)
-    start, stop = body.rindex("<script", 0, at), body.index("</script>", at)
-    block = body[start:stop]
-    for old, new in edits:
-        block = variant(old, new, body=block, name=f"the script of {marker.strip()!r}")
-    return body[:start] + block + body[stop:]
 
 
 def members_unguarded():
@@ -567,7 +498,7 @@ class AdminMetricsDOMTest(unittest.TestCase):
         expect(self.page.locator("#metrics-refresh")).to_be_enabled()
 
     def refresh(self, reply):
-        """Queue one metrics answer (never a 401: that is judged before any body is read), press the control and
+        """Queue an ordinary answer (including a plain 401), press the control and
         wait until the page has read it and finished drawing."""
         before = self.json_done()
         self.replies.append(reply)
@@ -737,6 +668,11 @@ class AdminMetricsDOMTest(unittest.TestCase):
         self.a_b()
         self.assertEqual(("Observed " + shown_generated(5), "5"), (self.summary()["state"], self.own_cell()))
 
+    def test_06_a_plain_401_is_one_failed_read_and_a_named_end_ends_the_page_session(self):
+        self.open()
+        assert_response_lifetime(self, url=ORIGIN + METRICS_PATH, index_url=ORIGIN + BASE + "index.html",
+                                 session_id=ME["sessionId"], wording=SERVER_WORDING, button="#metrics-refresh",
+                                 state="#metrics-state", rows="#metrics-rows > tr", body=answer())
 
     def test_07_wording_sizes_no_threshold_keyboard_and_no_dialog(self):
         self.open()
@@ -790,12 +726,11 @@ class AdminMetricsDOMTest(unittest.TestCase):
           document.querySelector('#gateway-counts').textContent, document.querySelectorAll('#gateway-rows > li').length]""")
         self.assertEqual(["Not Loaded", "Counts Unknown", 0], gateway)
         self.assertEqual(1, self.page.locator("#users td.username").count())
-        # The page's `thead th` is still the member table's six headers (tests/admin_member_roles_dom_test.py pins it);
-        # the Operations headers are th scope="col" in their own tbody.
-        headers = self.page.evaluate("""() => [[...document.querySelectorAll('thead th')].map(th => th.textContent),
-          document.querySelectorAll('#metrics thead').length,
-          [...document.querySelectorAll('#metrics th')].map(th => th.scope)]""")
-        self.assertEqual([["아이디", "이름 / 이메일", "기관", "역할", "상태", "작업"], 0, ["col"] * 8], headers)
+        table = self.page.locator('#metrics-table')
+        expect(table.locator('thead').get_by_role('columnheader')).to_have_text(
+            ["Metric", "State", "Value", "Unit", "Denominator", "Scope", "Source", "Observed At"])
+        self.assertEqual(["col"] * 8, table.get_by_role('columnheader').evaluate_all("cells => cells.map(c => c.scope)"))
+        expect(table.locator('tbody').get_by_role('columnheader')).to_have_count(0)
 
     def hold_reads(self, n):
         """n metrics reads in flight, oldest first."""
