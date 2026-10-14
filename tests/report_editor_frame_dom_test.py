@@ -10,6 +10,7 @@ import argparse
 import io
 import json
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -1000,6 +1001,27 @@ class ReportEditorFramePageDOM(unittest.TestCase):
     def switch(self, patient):
         self.page.locator('#rows tr', has_text=patient).first.click()
 
+    def keep_hold_claim(self):
+        """The page claims the study's hold once two characters are typed, and its answer re-renders the report
+        section (render, buttons, loadReport). Chromium ends the open typing (undo) group at that re-render, so an
+        answer that lands between two keystrokes splits typing that a case asserts as one group, and its caret
+        follow-up moves the shared scroller (8/20 on 8e33fb6 too). Cases that assert a typing group or a scroll
+        position keep the claim unanswered here and answer it with answer_hold_claim() where the case chooses."""
+        self.kept_claims = []
+        self.context.route('**/api/studies/*/hold', lambda route: self.kept_claims.append(route)
+                           if route.request.method == 'POST' else route.fallback())
+
+    def answer_hold_claim(self):
+        """Answer the kept claim and wait for the observable result: the page has applied the study's holder."""
+        deadline = time.monotonic() + 10
+        while not self.kept_claims:
+            self.assertLess(time.monotonic(), deadline, 'the typing claimed the hold')
+            self.page.wait_for_timeout(20)
+        for route in self.kept_claims:
+            route.fallback()
+        self.kept_claims.clear()
+        self.page.wait_for_function('() => !!appState[selectedUid]?.holder')
+
     def record_dictation(self):
         """Shipped controller/session + page adapter; synthetic microphone bytes and HTTP transcript."""
         self.context.route('**/dictation', lambda route: route.fulfill(json={
@@ -1097,6 +1119,7 @@ class ReportEditorFramePageDOM(unittest.TestCase):
             self.assertEqual(self.texts(), dict.fromkeys(FIELDS,''))
 
     def test_integrated_same_opening(self):
+        self.keep_hold_claim()
         self.page.locator('#findings').focus()
         self.page.keyboard.type('typed')
         same = 'reportFrame.switchStudy({uid:selectedUid,selectionSeq},reportFrame.read())'
@@ -1104,6 +1127,7 @@ class ReportEditorFramePageDOM(unittest.TestCase):
         self.page.keyboard.press('Control+z')
         self.assertEqual(self.texts()['findings'], '')
         self.assertEqual(self.page.evaluate("reportFrame.switchStudy({uid:selectedUid,selectionSeq},{findings:'new',conclusion:'',recommendation:''})"), {'status':'refused','reason':'same-opening'})
+        self.answer_hold_claim()
 
     def test_integrated_retired_ticket(self):
         self.frame_capture()
@@ -1192,6 +1216,7 @@ class ReportEditorFramePageDOM(unittest.TestCase):
         self.assertEqual(self.texts()['findings'], 'KEEP')
 
     def test_integrated_scroll_preserved(self):
+        self.keep_hold_claim()
         self.frame_text(findings='\n'.join('long '+str(i) for i in range(100)))
         self.page.locator('#findings').focus()
         self.page.evaluate("reportFrame.element('findings').setSelectionRange(10,12); document.querySelector('.redit').scrollTop=80")
@@ -1200,6 +1225,7 @@ class ReportEditorFramePageDOM(unittest.TestCase):
         self.frame_capture()
         self.assertEqual(self.frame_insert('REPLACE'), {'status':'applied'})
         self.assertEqual(self.page.locator('.redit').evaluate('e=>e.scrollTop'), before)
+        self.answer_hold_claim()
 
     def test_integrated_focus_and_unvisited(self):
         self.frame_text(findings='old')
@@ -1317,6 +1343,7 @@ class ReportEditorFramePageDOM(unittest.TestCase):
         self.assertFalse(any('citation' in put or 'structure' in put for put in self.site.puts))
 
     def test_page_authoritative_equal_keeps_undo_partial_equal_keeps_caret(self):
+        self.keep_hold_claim()
         self.page.locator('#findings').focus()
         self.page.keyboard.type('typed')
         self.page.locator('#findings').evaluate("e=>e.setSelectionRange(1,3,'backward')")
@@ -1331,6 +1358,7 @@ class ReportEditorFramePageDOM(unittest.TestCase):
         self.assertEqual(self.page.locator('#findings').evaluate('e=>[e.selectionStart,e.selectionEnd]'), [1,3])
         self.page.keyboard.press('Control+z')
         self.assertEqual(self.texts(), {'findings':'typed','conclusion':'server change','recommendation':''})
+        self.answer_hold_claim()
 
     def test_page_many_readonly_and_composition_are_atomic(self):
         self.page.locator('#findings').fill('KEEP')
@@ -1388,8 +1416,11 @@ class ReportEditorFramePageDOM(unittest.TestCase):
         cdp.detach()
 
     def test_page_clipboard_answer_after_typing_and_undo_is_refused(self):
+        self.keep_hold_claim()
         self.page.locator('#findings').focus()
         self.page.keyboard.type('kept')
+        # The applied hold answer is the boundary that ends the 'kept' typing group before 'X'.
+        self.answer_hold_claim()
         self.page.evaluate("() => Object.defineProperty(navigator,'clipboard',{configurable:true,value:{readText:()=>new Promise(r=>window.clipboardReply=r)}})")
         self.page.locator('#b-paste').evaluate('e=>e.click()')
         self.page.keyboard.type('X')
