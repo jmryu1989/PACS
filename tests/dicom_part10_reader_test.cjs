@@ -426,13 +426,17 @@ test('R-ICON: a nested encapsulated Pixel Data (Icon Image Sequence) is checked,
   refused(dicomFile({ ts: EXPLICIT, extra: [icon(encapsulatedPixel())], pixel: nativePixel(true) }).bytes, 'DICOM_MALFORMED');
 });
 
-test('R-VR: an unknown Explicit VR or a named tag in a foreign VR is malformed; a named tag in UN is read', () => {
+test('R-VR: an unknown Explicit VR or a named tag in a binary VR is malformed; a named tag in UN or another text VR is read', () => {
   refused(dicomFile({ extra: [{ t: 0x00091001, bytes: Buffer.concat([tag(0x0009, 0x1001), Buffer.from('ZZ'), le16(2), Buffer.from('AB')]) }], pixel: nativePixel(true) }).bytes, 'DICOM_MALFORMED');
   refused(dicomFile({ extra: [{ t: 0x00091001, bytes: Buffer.concat([tag(0x0009, 0x1001), Buffer.from('ob'), le16(2), Buffer.from('AB')]) }], pixel: nativePixel(true) }).bytes, 'DICOM_MALFORMED');
   refused(dicomFile({ vrs: { id: 'US' }, pixel: nativePixel(true) }).bytes, 'DICOM_MALFORMED');
-  refused(dicomFile({ vrs: { study: 'LO' }, pixel: nativePixel(true) }).bytes, 'DICOM_MALFORMED');
+  refused(dicomFile({ vrs: { study: 'UL' }, pixel: nativePixel(true) }).bytes, 'DICOM_MALFORMED');
+  refused(dicomFile({ vrs: { frames: 'FD' }, values: { frames: '1234' }, pixel: nativePixel(true) }).bytes, 'DICOM_MALFORMED');
+  refused(dicomFile({ vrs: { sop: 'OB' }, pixel: nativePixel(true) }).bytes, 'DICOM_MALFORMED');
   const unNamed = accepted(dicomFile({ vrs: { id: 'UN', name: 'UN' }, pixel: nativePixel(true) }).bytes);
   assert.deepEqual(unNamed.header, expectedHeader(EXPLICIT));
+  const otherText = accepted(dicomFile({ vrs: { id: 'SH', institution: 'SH', study: 'LO' }, pixel: nativePixel(true) }).bytes);
+  assert.deepEqual(otherText.header, expectedHeader(EXPLICIT));
   // A named tag cannot be a sequence.
   const idAsSequence = dicomFile({ values: { id: null }, extra: [{ t: 0x00100020, bytes: sequence(true, 0x0010, 0x0020, 'UN', [undefinedItem(imp(0x0010, 0x0020, txt('X ')))]) }], pixel: nativePixel(true) });
   refused(idAsSequence.bytes, 'DICOM_MALFORMED');

@@ -90,7 +90,10 @@ export const DICOM_TRANSFER_SYNTAX_ALLOW_LIST: readonly DicomTransferSyntaxRow[]
 export const DICOM_READER_LIMITS = Object.freeze({
   /** Nesting of undefined-length sequences, VR UN item sequences included; 17 is refused. */
   maxSequenceDepth: 16,
-  /** Dataset elements and sequence items walked (File Meta and pixel fragments excluded); 100,001 is refused. */
+  /**
+   * Dataset elements at any depth plus sequence items, the top-level Pixel Data element included; File Meta, delimiters
+   * and the items of the top-level Pixel Data (bounded below) are not counted. 100,001 is refused.
+   */
   maxElements: 100_000,
   /** Basic Offset Table plus fragment items of one encapsulated Pixel Data element; 100,001 is refused. */
   maxPixelItems: 100_000,
@@ -125,21 +128,24 @@ type NamedKey =
   | 'patientId' | 'issuerOfPatientId' | 'patientBirthDate' | 'patientSex' | 'studyInstanceUid' | 'seriesInstanceUid'
   | 'numberOfFrames';
 
-/** §4.1 step 6: the only dataset values this reader looks at, and only at the top level. */
-const NAMED_TAGS = new Map<number, { key: NamedKey; vr: string }>([
-  [0x00080005, { key: 'specificCharacterSet', vr: 'CS' }],
-  [0x00080016, { key: 'sopClassUid', vr: 'UI' }],
-  [0x00080018, { key: 'sopInstanceUid', vr: 'UI' }],
-  [0x00080060, { key: 'modality', vr: 'CS' }],
-  [0x00080080, { key: 'institutionName', vr: 'LO' }],
-  [0x00100010, { key: 'patientName', vr: 'PN' }],
-  [0x00100020, { key: 'patientId', vr: 'LO' }],
-  [0x00100021, { key: 'issuerOfPatientId', vr: 'LO' }],
-  [0x00100030, { key: 'patientBirthDate', vr: 'DA' }],
-  [0x00100040, { key: 'patientSex', vr: 'CS' }],
-  [0x0020000d, { key: 'studyInstanceUid', vr: 'UI' }],
-  [0x0020000e, { key: 'seriesInstanceUid', vr: 'UI' }],
-  [0x00280008, { key: 'numberOfFrames', vr: 'IS' }],
+/**
+ * §4.1 step 6: the only dataset values this reader looks at, and only at the top level. Each is decoded by its
+ * dictionary VR (in the comment) in headerFrom.
+ */
+const NAMED_TAGS = new Map<number, NamedKey>([
+  [0x00080005, 'specificCharacterSet'], // CS
+  [0x00080016, 'sopClassUid'], // UI
+  [0x00080018, 'sopInstanceUid'], // UI
+  [0x00080060, 'modality'], // CS
+  [0x00080080, 'institutionName'], // LO
+  [0x00100010, 'patientName'], // PN
+  [0x00100020, 'patientId'], // LO
+  [0x00100021, 'issuerOfPatientId'], // LO
+  [0x00100030, 'patientBirthDate'], // DA
+  [0x00100040, 'patientSex'], // CS
+  [0x0020000d, 'studyInstanceUid'], // UI
+  [0x0020000e, 'seriesInstanceUid'], // UI
+  [0x00280008, 'numberOfFrames'], // IS
 ]);
 
 const UID_SYNTAX = /^[0-9]+(\.[0-9]+)*$/;
@@ -293,9 +299,15 @@ function pixelData(w: Walk, h: ElementHeader, explicit: boolean): number {
   return fragments(w, h.valueStart, false);
 }
 
-function namedVrMatches(found: string | null, expected: string) {
-  // Implicit VR carries no VR; Explicit VR may say UN for a tag whose VR the writer did not know (PS3.5 §6.2.2).
-  return found === null || found === expected || found === 'UN';
+// Character-string VRs: a writer whose dictionary gave a named tag another of these (e.g. SH for LO) still wrote text.
+const TEXT_VRS = new Set(['AE', 'AS', 'CS', 'DA', 'DS', 'DT', 'IS', 'LO', 'LT', 'PN', 'SH', 'ST', 'TM', 'UC', 'UI', 'UR', 'UT']);
+
+/**
+ * A named value is decoded by its dictionary VR whatever the file declares, as long as the declared VR is text or UN
+ * (PS3.5 §6.2.2: a writer that did not know the VR). A binary VR on a named tag is a malformed file.
+ */
+function namedVrAcceptable(found: string | null) {
+  return found === null || found === 'UN' || TEXT_VRS.has(found);
 }
 
 function readDataset(w: Walk, start: number, explicit: boolean, lastMetaTag: number, named: Map<NamedKey, Range>) {
@@ -310,16 +322,16 @@ function readDataset(w: Walk, start: number, explicit: boolean, lastMetaTag: num
       pixelData(w, h, explicit);
       return true;
     }
-    const spec = NAMED_TAGS.get(h.tag);
+    const key = NAMED_TAGS.get(h.tag);
     if (h.length === UNDEFINED_LENGTH) {
-      if (spec) malformed();
+      if (key) malformed();
       pos = undefinedLengthValue(w, h, explicit, 1);
       continue;
     }
     const end = skip(w, h.valueStart, h.length);
-    if (spec) {
-      if (!namedVrMatches(h.vr, spec.vr)) malformed();
-      named.set(spec.key, [h.valueStart, end]);
+    if (key) {
+      if (!namedVrAcceptable(h.vr)) malformed();
+      named.set(key, [h.valueStart, end]);
     }
     pos = end;
   }
@@ -339,7 +351,7 @@ function readFileMeta(w: Walk) {
     last = h.tag;
     const end = skip(w, h.valueStart, h.length);
     if (h.tag === TRANSFER_SYNTAX_UID || h.tag === MEDIA_STORAGE_SOP_INSTANCE_UID) {
-      if (!namedVrMatches(h.vr, 'UI')) malformed();
+      if (!namedVrAcceptable(h.vr)) malformed();
       if (h.tag === TRANSFER_SYNTAX_UID) transferSyntax = [h.valueStart, end];
       else sopInstance = [h.valueStart, end];
     }
