@@ -85,6 +85,10 @@ def bind(path, record, entry, query, repository_id, workflow_id, polls=12, sleep
     for index in range(polls):
         if response_id is not None:
             run, _ = query(f'{base}/runs/{response_id}')
+            if run.get('id') != response_id:
+                # The GET body must name the very ID the POST returned; another run is never bound.
+                stop(f'dispatch response run id differs from the GET body id {run.get("id")!r}',
+                     {'id': response_id, 'run_attempt': run.get('run_attempt', 'unknown')})
             matches = [run]
         else:
             # This is dispatch response recovery, never collector discovery.
@@ -108,9 +112,11 @@ def bind(path, record, entry, query, repository_id, workflow_id, polls=12, sleep
                 record['revision'] += 1
                 save(path, record)
                 return run['id']
-            # GitHub returns the 200 run ID before run-name is rendered (real run 38504773317):
-            # re-read the same ID within the bound. The title carries the candidate SHA and nonce,
-            # so a run that never shows them is refused below, never bound.
+            # Defensive rule: tolerate a title that becomes visible later by re-reading the same ID
+            # within the bound. Observed on run 38504773317: 200 + run ID, a STOP leaving the request
+            # pending, the correct title on later GETs and a 0-POST --resume. That the first GET lacked
+            # the rendered run-name is INFERRED (no first-GET snapshot was kept). The title carries the
+            # candidate SHA and nonce, so a run that never shows them is refused below, never bound.
             seen_title = run.get('display_title')
         if index + 1 < polls:
             sleep(5)
@@ -191,6 +197,10 @@ def admit(path, run_id, evidence_dir, *, query=gh_get, fetch=fetch_archive):
         repo, _ = query(f'repos/{record["repository"]}')
         workflow, _ = query(f'{base}/workflows/candidate.yml')
         run, _ = query(f'{base}/runs/{run_id}')
+        if run.get('id') != run_id:
+            # Refused before any download or save: the admitted ID must be the GET body's ID.
+            stop(f'requested run id differs from the GET body id {run.get("id")!r}',
+                 {'id': run_id, 'run_attempt': run.get('run_attempt', 'unknown')})
         check_run(run, repo['id'], workflow['id'])
         if instant(run['created_at']) < instant(record['cutoff']['timestamp']):
             stop('run predates the legacy cutoff T0; legacy runs are never admitted', run)

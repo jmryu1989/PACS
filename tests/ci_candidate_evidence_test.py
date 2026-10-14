@@ -531,6 +531,51 @@ class CandidateEvidenceTests(unittest.TestCase):
         self.assertEqual([row['id'] for row in result['legacy_excluded']], [9])
         self.assertEqual([row['run_id'] for row in result['downloads']], [10])
 
+    def test_every_stop_after_confirmed_identity_lists_legacy_rows(self):
+        # B1-02: the legacy row is listed AFTER the row that causes the STOP; its upload is never read.
+        cases = {'official_failure': ('not completed/success', 10),
+                 'official_expired': ('expired candidate artifact', 10),
+                 'official_no_upload': ('missing/ambiguous upload', 10),
+                 'unrecorded_post_t0': ('missing/ambiguous upload', 11)}
+        for case, (reason, run_id) in cases.items():
+            with self.subTest(case=case):
+                self.github = FakeGitHub()
+                shutil.rmtree(self.root / 'out', ignore_errors=True)
+                if case == 'official_failure':
+                    self.github.runs[10]['conclusion'] = 'failure'
+                elif case == 'official_expired':
+                    self.github.artifacts[1000]['expired'] = True
+                elif case == 'official_no_upload':
+                    self.github.artifacts.pop(1000)
+                else:
+                    self.github.runs[11] = make_run(11, sha=OTHER, conclusion='failure')
+                self.legacy_run()
+                self.github.add_artifact(9)
+                self.refuse(reason, run_id)
+                result = json.loads((self.root / 'out/g3-evidence.json').read_text())
+                self.assertIn(f'STOP run_id={run_id} attempt=1', result['error'])
+                self.assertEqual(result['legacy_listing'], 'complete')
+                self.assertEqual([(row['id'], row['created_at']) for row in result['legacy_excluded']], [(9, BEFORE_T0)])
+                self.assertNotIn(900, self.github.fetched)
+                self.assertFalse(any('/runs/9' in call for call in self.github.calls))
+
+    def test_unlistable_population_is_reported_unlisted_never_zero_legacy(self):
+        self.github.runs[10]['conclusion'] = 'failure'
+        self.legacy_run()
+        self.github.count_edit = lambda key, page, n: 1000 if key == 'workflow_runs' else n
+        self.refuse('not completed/success', 10)
+        result = json.loads((self.root / 'out/g3-evidence.json').read_text())
+        self.assertIsNone(result['legacy_excluded'])
+        self.assertRegex(result['legacy_listing'], '^unlisted/incomplete: .*search cap')
+
+    def test_invalid_record_does_no_io_and_reports_unlisted(self):
+        self.rec['discover_latest'] = True
+        self.refuse('schema fields missing/unknown')
+        result = json.loads((self.root / 'out/g3-evidence.json').read_text())
+        self.assertEqual(self.github.calls, [])
+        self.assertIsNone(result['legacy_excluded'])
+        self.assertTrue(result['legacy_listing'].startswith('unlisted/incomplete: '))
+
     def test_recorded_legacy_run_is_refused_even_when_successful(self):
         self.github.runs[10].update(created_at=BEFORE_T0, run_started_at=BEFORE_T0, updated_at=BEFORE_T0)
         self.refuse('predates the legacy cutoff T0', 10)
@@ -796,12 +841,54 @@ class DispatchTests(unittest.TestCase):
                     self.start()
                 self.assertEqual(self.github.calls.count('repos/owner/repo/actions/runs/12'), 1)
 
+    def test_response_body_id_differs_never_binds_and_resume_never_posts(self):
+        # B1-01: the GET body has the right nonce/title/ref/event/time but another ID.
+        query = self.github.query
+        def other_body(endpoint):
+            body, headers = query(endpoint)
+            if endpoint == 'repos/owner/repo/actions/runs/11':
+                body['id'] = 12
+            return body, headers
+        self.github.query = other_body
+        with self.assertRaisesRegex(ValueError, 'STOP run_id=11 .*differs from the GET body id 12'):
+            self.start()
+        self.assertEqual(self.github.calls.count('repos/owner/repo/actions/runs/11'), 1)
+        entry = evidence.read_record(self.path)[0]['requests'][0]
+        self.assertEqual(entry['state'], 'dispatch_pending')
+        self.assertNotIn('run_id', entry)
+        self.assertEqual(entry['response']['body']['workflow_run_id'], 11)
+        with self.assertRaisesRegex(ValueError, 'differs from the GET body id 12'):
+            dispatch.dispatch(self.path, resume=True, query=self.github.query, sleep=lambda s: None)
+        self.assertEqual(evidence.read_record(self.path)[0]['requests'][0]['state'], 'dispatch_pending')
+        self.assertEqual(self.github.post_calls, 1)
+
+    def test_adopt_refuses_other_body_id_before_download_or_save(self):
+        self.init()
+        self.github.runs[11] = make_run(11)
+        self.github.add_artifact(11)
+        query = self.github.query
+        alias = lambda endpoint: query('repos/owner/repo/actions/runs/11'
+                                       if endpoint == 'repos/owner/repo/actions/runs/10' else endpoint)
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(ValueError, 'STOP run_id=10 .*requested run id differs from the GET body id 11'):
+            dispatch.admit(self.path, 10, self.path.parent/'admission', query=alias, fetch=self.github.fetch)
+        self.assertEqual(self.github.fetched, [])
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertFalse((self.path.parent/'admission').exists())
+        self.assertEqual(self.github.post_calls, 0)
+
     def test_response_run_url_for_another_repository_stops(self):
-        self.github.post = lambda endpoint, body: {'status': 200, 'body': {
-            'workflow_run_id': 11, 'run_url': 'https://api.github.com/repos/other/repo/actions/runs/11'}}
+        # Run 11 really exists with this request's title: only the run_url contradiction refuses it.
+        post = self.github.post
+        def other_repository(endpoint, body):
+            response = post(endpoint, body)
+            response['body']['run_url'] = 'https://api.github.com/repos/other/repo/actions/runs/11'
+            return response
+        self.github.post = other_repository
         with self.assertRaisesRegex(ValueError, 'run_url names another repository'):
             self.start()
         self.assertNotIn('repos/owner/repo/actions/runs/11', self.github.calls)
+        self.assertEqual(evidence.read_record(self.path)[0]['requests'][0]['state'], 'dispatch_pending')
 
     def test_lock_prevents_competing_writers_before_post(self):
         self.init()

@@ -422,9 +422,13 @@ candidate.yml에만 있다. 비후보 workflow의 재실행(attempt 2 이상)은
 
 dispatch는 원자적으로 pending 요청과 nonce를 먼저 쓰고, 정확한 POST body와
 응답을 기록한다. 200 응답의 run ID(`run_url`도 같은 저장소·ID여야 함)를 직접 조회하며,
-event·workflow·저장소·생성 시각 창·dispatch ref가 다르면 즉시 STOP한다. GitHub는 run-name을
-렌더링하기 전에 ID를 돌려주므로(실제 run 38504773317), 같은 ID를 최대 12회 다시 읽어 제목에 후보 SHA와
-nonce가 나타날 때만 결속하고, 끝내 나타나지 않으면 pending으로 STOP한다. ID 없는 응답/응답 유실의 복구는
+GET 본문의 ID가 응답 ID와 다르면 첫 조회에서, event·workflow·저장소·생성 시각 창·dispatch ref가
+다르면 즉시 STOP한다(요청은 pending으로 보존). 제목이 늦게 보이는 경우를 허용하는 **방어 규칙**으로
+같은 ID를 최대 12회 다시 읽어 제목에 후보 SHA와 nonce가 나타날 때만 결속하고, 끝내 나타나지 않으면
+pending으로 STOP한다. run 38504773317에서 관측한 사실은 200 응답과 run ID, 결속 STOP 뒤 pending 보존,
+이후 GET의 올바른 제목, POST 없는 `--resume` 결속이다. 첫 GET에서 제목이 아직 렌더링되지 않았다는
+원인은 첫 GET 원문을 보존하지 않았으므로 **추정**이다. `--adopt-run`도 요청 ID와 GET 본문 ID가 다르면
+다운로드·저장 전에 거절한다. ID 없는 응답/응답 유실의 복구는
 동일 nonce를 넣은 run-name과 요청 시각(−5초~+10분)을 최대 12회 대조한다.
 모호하거나 못 찾으면 pending을 유지한다. 제목 검색은 이 **요청 응답 복구**에만
 쓰며 collector는 제목으로 후보 귀속을 정하지 않는다. `--resume`은 재POST하지 않는다.
@@ -444,7 +448,10 @@ T0 이후 미등록 run의 payload가 같은 후보면 ID/attempt를 표시하�
 artifact 이름으로 귀속을 추정하지 않는다. 다른 후보의 현재 attempt provenance가
 검증되면 영향을 주지 않는다. T0 이후의 provenance 없는 실행(producer 없는 ref에서 시작한
 실행, 무업로드 실행)은 귀속 불명으로 STOP한다. legacy 행은 내용을 읽지 않고 마지막 전체 목록
-대조에만 포함되므로, 수집 중 legacy 행이 바뀌어도 STOP한다.
+대조에만 포함되므로, 수집 중 legacy 행이 바뀌어도 STOP한다. 기록·저장소·workflow를 확인한
+뒤의 모든 STOP(공식 run 실패·만료·무업로드, T0 이후 미등록 run 등)에서도 원래 STOP 사유를 유지한 채
+조회 가능한 legacy 행을 `legacy_excluded`에 남긴다(`legacy_listing: complete`). 목록을 끝까지 받지
+못하면 0건으로 쓰지 않고 `legacy_excluded: null`, `legacy_listing: unlisted/incomplete: <사유>`로 남긴다.
 retention/수동 삭제 이전의 전 GitHub 이력을 증명하지 않으며, `verified_at` 이후
 재실행까지 막는 원자적 snapshot이나 영구 인증서도 아니다.
 

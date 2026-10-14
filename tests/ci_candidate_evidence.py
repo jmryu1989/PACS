@@ -399,8 +399,22 @@ def collect(record_path, out, query=gh_get, fetch=fetch_archive):
     """
     out = Path(out)
     out.mkdir(parents=True, exist_ok=False)
-    manifest = {'status': 'incomplete', 'scope': 'candidate', 'downloads': [], 'legacy_excluded': []}
-    context = None
+    # legacy_excluded stays None (unknown, never "0 legacy") until a complete listing is classified.
+    manifest = {'status': 'incomplete', 'scope': 'candidate', 'downloads': [], 'legacy_excluded': None,
+                'legacy_listing': 'unlisted/incomplete: record, repository or workflow not confirmed'}
+    context, audit = None, None
+
+    def classify(population, runs):
+        """Legacy rows by time only; their bytes are never read or admitted."""
+        rows, excluded = [], set()
+        for context in population:
+            if context['id'] not in runs and legacy(context, record['cutoff']):
+                excluded.add(context['id'])
+                rows.append({key: context.get(key) for key in (
+                    'id', 'created_at', 'run_started_at', 'run_attempt', 'event', 'status', 'conclusion')})
+        manifest.update(legacy_excluded=rows, legacy_listing='complete')
+        return excluded
+
     try:
         record, record_digest = read_record(record_path)
         manifest.update(record=record, record_sha256=record_digest, cutoff=record['cutoff'])
@@ -419,6 +433,8 @@ def collect(record_path, out, query=gh_get, fetch=fetch_archive):
         if workflow.get('path') != WORKFLOW or type(workflow.get('id')) is not int:
             stop('workflow identity mismatch')
         entries = {e['run_id']: e for e in record['requests']}
+        endpoint = f'{base}/workflows/candidate.yml/runs?per_page=100'
+        audit = (repo_id, set(entries))  # From here on a STOP manifest still lists legacy rows.
         runs, snapshots, attempts = {}, {}, {}
         # Recorded IDs are the only entry point for official evidence.
         for ident, entry in entries.items():
@@ -456,21 +472,14 @@ def collect(record_path, out, query=gh_get, fetch=fetch_archive):
                 stop('candidate runner provenance contradicts envelope', context, row['artifact_id'])
             manifest['downloads'].append(row)
             snapshots[context['id']] = row
-        endpoint = f'{base}/workflows/candidate.yml/runs?per_page=100'
         population = listing(query, endpoint, 'workflow_runs', repo_id)
         manifest['observed_runs'] = population
+        # All legacy rows are classified before any post-T0 inspection or recorded-run check.
+        excluded = classify(population, runs)
         listed = {r['id']: r for r in population}
         for ident, run in runs.items():
             if ident not in listed or revision(listed[ident]) != revision(run):
                 stop('recorded run absent/changed in supersession listing', run)
-        # Legacy rows are classified by time only, all before any post-T0 inspection, so a
-        # STOP manifest still lists them; their bytes are never read.
-        excluded = set()
-        for context in population:
-            if context['id'] not in runs and legacy(context, record['cutoff']):
-                excluded.add(context['id'])
-                manifest['legacy_excluded'].append({key: context.get(key) for key in (
-                    'id', 'created_at', 'run_started_at', 'run_attempt', 'event', 'status', 'conclusion')})
         for context in population:
             if context['id'] in runs or context['id'] in excluded:
                 continue
@@ -515,6 +524,14 @@ def collect(record_path, out, query=gh_get, fetch=fetch_archive):
         if not message.startswith('STOP '):
             message = f'STOP run_id={(context or {}).get("id", "unknown")} attempt={(context or {}).get("run_attempt", "unknown")}: {message}'
         manifest['error'] = message
+        if audit is not None and manifest['legacy_listing'] != 'complete':
+            # An earlier STOP (official failure, expiry, missing upload) still records which
+            # rows were legacy; the original STOP reason above is kept unchanged.
+            try:
+                classify(listing(query, endpoint, 'workflow_runs', audit[0]), audit[1])
+            except Exception as listing_error:
+                manifest.update(legacy_excluded=None,
+                                legacy_listing=f'unlisted/incomplete: {listing_error}')
         raise ValueError(message) from error
     finally:
         (out / 'g3-evidence.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
