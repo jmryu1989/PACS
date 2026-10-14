@@ -3,7 +3,7 @@
   "title": "G3 admission sidecar for one immutable candidate round",
   "description": "The commander round record references this file and its SHA256. Writer and collector enforce temporal, identity and supersession constraints beyond this structural schema.",
   "type": "object",
-  "required": ["schema", "repository", "candidate_sha", "round_id", "workflow", "revision", "pr_policy", "partial_rerun_policy", "requests"],
+  "required": ["schema", "repository", "candidate_sha", "round_id", "workflow", "revision", "pr_policy", "partial_rerun_policy", "cutoff", "requests"],
   "additionalProperties": false,
   "properties": {
     "schema": {"const": 1},
@@ -14,6 +14,16 @@
     "revision": {"type": "integer", "minimum": 1},
     "pr_policy": {"enum": ["forbid", "candidate-checkout-with-merge-tools"]},
     "partial_rerun_policy": {"const": "whole-candidate-job"},
+    "cutoff": {
+      "description": "Legacy cutoff T0, written only by g3_dispatch.py --init: the first commit carrying the G3 producer (its first parent does not) and that commit's committer date. Runs created and last started before the timestamp are listed as legacy_excluded, never admitted and never a STOP cause.",
+      "type": "object",
+      "required": ["sha", "timestamp"],
+      "additionalProperties": false,
+      "properties": {
+        "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "timestamp": {"type": "string", "format": "date-time"}
+      }
+    },
     "requests": {
       "type": "array",
       "items": {

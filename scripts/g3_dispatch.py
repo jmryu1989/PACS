@@ -18,7 +18,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tests'))
 from ci_candidate_evidence import (WORKFLOW, SHA, LIMIT, check_run, gh_get, inspect_artifact,
-    fetch_archive, instant, listing, read_record, stop, validate_record)
+    fetch_archive, instant, listing, read_record, resolve_cutoff, stop, validate_record)
 
 
 def save(path, record):
@@ -34,15 +34,18 @@ def save(path, record):
     os.replace(temporary, path)
 
 
-def initialize(path, repository, sha, round_id, pr_policy='forbid'):
+def initialize(path, repository, sha, round_id, pr_policy='forbid', *, cutoff_sha, query=gh_get, now=None):
+    """Create the round record; the only writer of the legacy cutoff T0."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with locked(path):
         if path.exists():
             stop('record already exists')
+        cutoff = resolve_cutoff(repository, cutoff_sha, query, now)
         save(path, {'schema': 1, 'repository': repository, 'candidate_sha': sha,
                    'round_id': round_id, 'workflow': WORKFLOW, 'revision': 1,
-                   'pr_policy': pr_policy, 'partial_rerun_policy': 'whole-candidate-job', 'requests': []})
+                   'pr_policy': pr_policy, 'partial_rerun_policy': 'whole-candidate-job',
+                   'cutoff': cutoff, 'requests': []})
 
 
 @contextmanager
@@ -104,23 +107,17 @@ def bind(path, record, entry, query, repository_id, workflow_id, polls=12, sleep
 
 
 def dispatch(path, repository=None, sha=None, round_id=None, ref=None, *,
-             resume=False, supersedes=(), pr_policy='forbid', query=gh_get,
+             resume=False, supersedes=(), query=gh_get,
              post=post_dispatch, sleep=time.sleep, now=None):
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        # The cutoff T0 is written only by --init; never invent one here.
+        stop('round record missing; create it with --init --cutoff-sha first')
     with locked(path):
-        if path.exists():
-            record, _ = read_record(path)
-            for key, value in (('repository', repository), ('candidate_sha', sha), ('round_id', round_id)):
-                if value is not None and value != record[key]:
-                    stop(f'existing record {key} mismatch')
-        else:
-            if resume:
-                stop('cannot resume missing record')
-            record = {'schema': 1, 'repository': repository, 'candidate_sha': sha,
-                      'round_id': round_id, 'workflow': WORKFLOW, 'revision': 1,
-                      'pr_policy': pr_policy, 'partial_rerun_policy': 'whole-candidate-job', 'requests': []}
-        validate_record(record)
+        record, _ = read_record(path)
+        for key, value in (('repository', repository), ('candidate_sha', sha), ('round_id', round_id)):
+            if value is not None and value != record[key]:
+                stop(f'existing record {key} mismatch')
         base = f'repos/{record["repository"]}/actions'
         repo, _ = query(f'repos/{record["repository"]}')
         workflow, _ = query(f'{base}/workflows/candidate.yml')
@@ -181,6 +178,8 @@ def admit(path, run_id, evidence_dir, *, query=gh_get, fetch=fetch_archive):
         workflow, _ = query(f'{base}/workflows/candidate.yml')
         run, _ = query(f'{base}/runs/{run_id}')
         check_run(run, repo['id'], workflow['id'])
+        if instant(run['created_at']) < instant(record['cutoff']['timestamp']):
+            stop('run predates the legacy cutoff T0; legacy runs are never admitted', run)
         if run['event'] == 'pull_request' and record['pr_policy'] == 'forbid':
             stop('PR run forbidden by round policy', run)
         out = Path(evidence_dir)
@@ -215,6 +214,7 @@ def main():
     parser.add_argument('--round-id')
     parser.add_argument('--ref')
     parser.add_argument('--pr-policy', choices=('forbid', 'candidate-checkout-with-merge-tools'), default='forbid')
+    parser.add_argument('--cutoff-sha', help='--init only: T0, the first commit carrying the G3 producer')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--init', action='store_true')
     mode.add_argument('--resume', action='store_true')
@@ -222,8 +222,13 @@ def main():
     parser.add_argument('--evidence-dir', type=Path)
     parser.add_argument('--supersede', action='append', default=[], metavar='RUN_ID:ATTEMPT')
     args = parser.parse_args()
+    if (args.cutoff_sha or args.pr_policy != 'forbid') and not args.init:
+        parser.error('--cutoff-sha and --pr-policy are written only by --init')
     if args.init:
-        initialize(args.record, args.repository, args.sha, args.round_id, args.pr_policy)
+        if not args.cutoff_sha:
+            parser.error('--init requires --cutoff-sha (legacy cutoff T0)')
+        initialize(args.record, args.repository, args.sha, args.round_id, args.pr_policy,
+                   cutoff_sha=args.cutoff_sha)
         ident = None
     elif args.adopt_run:
         if args.evidence_dir is None:
@@ -234,7 +239,7 @@ def main():
         if any(len(row) != 2 for row in retired):
             parser.error('--supersede requires RUN_ID:ATTEMPT')
         ident = dispatch(args.record, args.repository, args.sha, args.round_id, args.ref,
-                         resume=args.resume, supersedes=retired, pr_policy=args.pr_policy)
+                         resume=args.resume, supersedes=retired)
     print(json.dumps({'record': str(args.record), 'run_id': ident}))
 
 

@@ -82,18 +82,17 @@ D621에 따라 provider reconciliation은 U5b 범위다. DB Suspend 뒤 살아 �
 파일 해시를 기록하지만 dirty tree 자체를 증명하지 않으므로 실행 전에 수정 상태를 확인한다.
 기본 입력은 동일 SHA의 모든 소유 workflow에 있는 `synthetic-runtime-record-runs`와
 `synthetic-workspace-dom-results`, G3 `candidate-<sha>` artifact다.
-`$validateRun`에는 해당 SHA의 실행 ID를 지정한다. G3는 아래 공식 라운드 기록의
-`--record`만 사용하며 임의의 `$candidateRun`이나 제목/이름 검색으로 받지 않는다.
 `tests/ci_artifacts.py`는 `tests/ci_workflows.py`의 job → workflow 매핑으로 업로드 출처를
 찾고, workflow별로 후보 SHA의 최신 실행 ID와 attempt를 조회한다. 실패·진행 중 실행을
 이전 성공으로 대체하지 않으며, SHA/소유 workflow 불일치·누락·만료 artifact는 거절한다.
-G3(candidate.yml) 자동 조회는 **CI-TOOLING-1b**로 분리했다. 기본 수집 호출은 STOP하며,
-비후보 수집은 `--non-candidate`를 명시해야 한다. manifest의 scope는 non-candidate이고
-G3는 NOT_COLLECTED다. 이는 전체 stage 통과가 아니다. 이 PR이 candidate.yml에 추가하는 run-name 한 줄은
-1b의 provenance로 보존하며 1a는 제목·artifact 이름·PR head로 G3를 탐색하지 않는다.
-G3 증거는 기존처럼 **해당 dispatch 응답/공식 후보 기록에 남긴 run id**를 사람이 확인해 받는다.
-최신 공식 실행의 완료/성공, candidate.yml 소유, 실제 attempt와 artifact 출처를 확인하고,
-이전 성공 run으로 대체하지 않는다. 출처를 증명할 수 없으면 STOP한다.
+G3(candidate.yml)는 **CI-TOOLING-1b**의 공식 라운드 기록으로만 받는다. 전체 수집 호출은
+아래 G3 절의 `--record $roundRecord`를 **명시 입력**으로 받으며, 기록이 없으면 조회 전에 STOP한다.
+기본 경로·최근 실행·제목·artifact 이름·PR head로 기록이나 G3 실행을 찾지 않는다.
+수집기는 비후보 수집을 먼저 끝낸 뒤 같은 query/fetch로 `ci_candidate_evidence.collect`를 호출해
+기록된 run ID만 검증하고, **둘 다** 성공한 뒤에만 `stage-evidence.json`을 completed로 쓴다.
+`--non-candidate`는 G3를 뺀 별도 수집이다. 그 manifest의 scope는 non-candidate이고
+G3는 NOT_COLLECTED이며 전체 stage 통과가 아니다. candidate.yml의 run-name은 후보 SHA와
+dispatch nonce를 담지만 수집기는 이를 귀속 근거로 쓰지 않는다(응답 유실 복구에만 쓴다).
 
 비후보는 **push 실행만** head_sha 증거로 수집한다. pull_request는 GitHub 병합 ref를 시험하므로
 run id/event를 남기고 STOP하며 이 결과를 main SHA의 stage-exit 증거로 쓰지 않는다.
@@ -170,12 +169,9 @@ $out = "tmp/stage7-final-$shortSha"
 
 | artifact | 업로드 원래 경로 | 수령 명령 |
 |---|---|---|
-| `synthetic-runtime-record-runs` | `tmp/runtime-ci/` | `gh run download $validateRun -n synthetic-runtime-record-runs -D "$out/validate/runtime"` |
-| `synthetic-workspace-dom-results` | `tmp/workspace-ui-ci/` | `gh run download $validateRun -n synthetic-workspace-dom-results -D "$out/validate/workspace"` |
-| `candidate-<sha>` | `target/tests/e2e/artifacts/candidate-ci/` | 아래 G3 기록·수집 절차의 `$candidateDir` |
 | `synthetic-runtime-record-runs` | `tmp/runtime-ci/` | 아래 수집기의 모든 소유 workflow 실행 → `hosted/runs/<workflow>/<run>/<artifact>` |
 | `synthetic-workspace-dom-results` | `tmp/workspace-ui-ci/` | 아래 수집기의 모든 소유 workflow 실행 → `hosted/runs/<workflow>/<run>/<artifact>` |
-| `candidate-<sha>` | `target/tests/e2e/artifacts/candidate-ci/` | 공식 dispatch run id에서 수동 수령 → `$candidateDirectory` |
+| `candidate-<sha>` | `target/tests/e2e/artifacts/candidate-ci/` | 같은 수집기의 `--record` 공식 run ID → `hosted/g3/run-<id>-attempt-<n>-artifact-<id>` = `$candidateDir` |
 
 먼저 **모든 workflow의 모든 업로드 이름과 소유 workflow/job**을 나열한다.
 matrix·실행 ID·SHA 표현식이 있는 이름은 원래 템플릿으로 표시하므로 목록에서 빠지지 않는다.
@@ -186,18 +182,12 @@ matrix·실행 ID·SHA 표현식이 있는 이름은 원래 템플릿으로 표�
 ```powershell
 python -B tests/ci_artifacts.py --list
 if ($LASTEXITCODE -ne 0) { throw '전체 artifact 출처 목록 확인 실패' }
-python -B tests/ci_artifacts.py --sha $sha --stage 7 --non-candidate --out "$out/hosted"
-if ($LASTEXITCODE -ne 0) { throw '동일 SHA의 workflow별 artifact 수집 실패; 원문 보존 후 확인' }
-# $candidateRun은 이 후보의 공식 dispatch 기록에서 확인한 run id (최신 검색으로 추측하지 않음).
-if (-not $candidateRun) { throw '공식 dispatch run id 및 attempt 확인 필요' }
-$candidateJson = gh run view $candidateRun --json workflowName,event,status,conclusion,headSha,attempt
-if ($LASTEXITCODE -ne 0) { throw '공식 G3 실행 조회 실패' }
-$candidate = $candidateJson | ConvertFrom-Json
-if ($candidate.workflowName -ne 'Validate immutable deployment candidate' -or $candidate.event -ne 'workflow_dispatch' -or $candidate.status -ne 'completed' -or $candidate.conclusion -ne 'success' -or $candidate.attempt -lt 1) { throw '공식 G3 workflow/event/완료/성공/attempt 확인 실패' }
-$candidate | ConvertTo-Json | Set-Content -Encoding utf8 "$out/candidate-$candidateRun-run.json"
-$candidateDirectory = "$out/hosted/candidate/$candidateRun/candidate-$sha"
-gh run download $candidateRun -n "candidate-$sha" -D $candidateDirectory
-if ($LASTEXITCODE -ne 0) { throw '공식 G3 artifact 수령 실패; 이전 성공 대체 금지' }
+# $roundRecord는 아래 G3 절에서 이 후보 SHA로 --init·dispatch한 공식 라운드 기록이다(검색으로 찾지 않음).
+python -B tests/ci_artifacts.py --sha $sha --stage 7 --record $roundRecord --out "$out/hosted"
+if ($LASTEXITCODE -ne 0) { throw '동일 SHA의 비후보·G3 수집 STOP; 원문 보존 후 확인' }
+$hosted = Get-Content -Raw "$out/hosted/stage-evidence.json" | ConvertFrom-Json
+if ($hosted.status -ne 'completed' -or $hosted.sha -ne $sha -or $hosted.g3.status -ne 'verified') { throw '비후보·G3 수집 상태 불일치' }
+$candidateDir = $hosted.g3.candidate_directory
 ```
 
 위 artifact를 받은 뒤 아래 기록기 loop는 필요한 live 클래스만 보충한다.
@@ -257,8 +247,7 @@ integrity, backup-safety, production-image를 읽는다.
 CI 기록의 누락·실패도 성공으로 간주하지 않는다.
 
 ```powershell
-python scripts/stage-exit.py --list tests/stage7-exit.json --sha $sha --runs "$out/validate" --runs "$out/live" --candidate $candidateDir --output "$out/verdict.json"
-python scripts/stage-exit.py --list tests/stage7-exit.json --sha $sha --runs "$out/hosted/runs" --runs "$out/live" --candidate $candidateDirectory --output "$out/verdict.json"
+python scripts/stage-exit.py --list tests/stage7-exit.json --sha $sha --runs "$out/hosted/runs" --runs "$out/live" --candidate $candidateDir --output "$out/verdict.json"
 $LASTEXITCODE
 ```
 
@@ -364,26 +353,15 @@ VR `pure-vr`는 기존 CI에서 **세 파일을 함께** 필터 없이 실행한
 `S8-NOTE-SVR storage: postgresql`이 있어야 하며 stand-in 결과로 DB 원자성을 주장하지 않는다.
 
 ```powershell
-gh run download $validateRun -n synthetic-runtime-record-runs -D "$out/validate/runtime"
-gh run download $validateRun -n synthetic-workspace-dom-results -D "$out/validate/workspace"
-gh run download $validateRun -n synthetic-volume-rendering-results -D "$out/validate/vr"
-gh run download $validateRun -n synthetic-context-loss -D "$out/support/context-loss"
-python scripts/record-run.py --run-dir "$out/verdict-run" --cwd . --file scripts/stage-exit.py --file tests/stage8-exit.json -- python scripts/stage-exit.py --list tests/stage8-exit.json --sha $sha --runs "$out/validate" --runs "$out/live" --candidate $candidateDir --output "$out/verdict.json"
 python -B tests/ci_artifacts.py --list
 if ($LASTEXITCODE -ne 0) { throw '전체 artifact 출처 목록 확인 실패' }
-python -B tests/ci_artifacts.py --sha $sha --stage 8 --non-candidate --out "$out/hosted"
-if ($LASTEXITCODE -ne 0) { throw '동일 SHA의 workflow별 artifact 수집 실패; 원문 보존 후 확인' }
-# $candidateRun은 이 후보의 공식 dispatch 기록에서 확인한 run id (최신 검색으로 추측하지 않음).
-if (-not $candidateRun) { throw '공식 dispatch run id 및 attempt 확인 필요' }
-$candidateJson = gh run view $candidateRun --json workflowName,event,status,conclusion,headSha,attempt
-if ($LASTEXITCODE -ne 0) { throw '공식 G3 실행 조회 실패' }
-$candidate = $candidateJson | ConvertFrom-Json
-if ($candidate.workflowName -ne 'Validate immutable deployment candidate' -or $candidate.event -ne 'workflow_dispatch' -or $candidate.status -ne 'completed' -or $candidate.conclusion -ne 'success' -or $candidate.attempt -lt 1) { throw '공식 G3 workflow/event/완료/성공/attempt 확인 실패' }
-$candidate | ConvertTo-Json | Set-Content -Encoding utf8 "$out/candidate-$candidateRun-run.json"
-$candidateDirectory = "$out/hosted/candidate/$candidateRun/candidate-$sha"
-gh run download $candidateRun -n "candidate-$sha" -D $candidateDirectory
-if ($LASTEXITCODE -ne 0) { throw '공식 G3 artifact 수령 실패; 이전 성공 대체 금지' }
-python scripts/record-run.py --run-dir "$out/verdict-run" --cwd . --file scripts/stage-exit.py --file tests/stage8-exit.json -- python scripts/stage-exit.py --list tests/stage8-exit.json --sha $sha --runs "$out/hosted/runs" --runs "$out/live" --candidate $candidateDirectory --output "$out/verdict.json"
+# $roundRecord는 아래 G3 절에서 이 후보 SHA로 --init·dispatch한 공식 라운드 기록이다(검색으로 찾지 않음).
+python -B tests/ci_artifacts.py --sha $sha --stage 8 --record $roundRecord --out "$out/hosted"
+if ($LASTEXITCODE -ne 0) { throw '동일 SHA의 비후보·G3 수집 STOP; 원문 보존 후 확인' }
+$hosted = Get-Content -Raw "$out/hosted/stage-evidence.json" | ConvertFrom-Json
+if ($hosted.status -ne 'completed' -or $hosted.sha -ne $sha -or $hosted.g3.status -ne 'verified') { throw '비후보·G3 수집 상태 불일치' }
+$candidateDir = $hosted.g3.candidate_directory
+python scripts/record-run.py --run-dir "$out/verdict-run" --cwd . --file scripts/stage-exit.py --file tests/stage8-exit.json -- python scripts/stage-exit.py --list tests/stage8-exit.json --sha $sha --runs "$out/hosted/runs" --runs "$out/live" --candidate $candidateDir --output "$out/verdict.json"
 if ($LASTEXITCODE -ne 0) { throw 'Stage 8 필수 시험 미충족: verdict.json 확인' }
 ```
 
@@ -397,6 +375,7 @@ W2C-05 입력 계약: recorder 명령을 실행하는 각 workflow step이 그 �
 `node tests/ci_workflow_consumers.cjs --audit .`는 step별 누락 입력/미해석 shell 명령을 보고하는 진단 도구다.
 수동 소비자 명단이나 새 미등록 시험에 대한 required check는 없다. 지원 loader와 정적 분석 경계는 tests/README.md를 따른다.
 누락 입력은 recorder non-zero이며, 감사 결과가 없는 것을 stage-exit PASS로 간주하지 않는다.
+
 ## G3 공식 라운드 기록과 수집 (CI-TOOLING-1b)
 
 REQ-G3-PUSH → RISK-G3-STALE/OMITTED/WRONG-ATTEMPT →
@@ -407,26 +386,39 @@ REQ-G3-PUSH → RISK-G3-STALE/OMITTED/WRONG-ATTEMPT →
 누적하고 replacement에도 옛 행을 삭제하지 않는다. 새 요청/재실행/기록 수정은
 기존 수집 판정을 무효화하며 병합 직전에 같은 기록으로 다시 확인한다.
 
+**legacy 기준 T0(D1117):** T0는 G3 producer를 처음 담은 main commit(이 단위 PR의 병합
+commit)이며, 병합 전 시험에서는 이 브랜치의 첫 producer commit이다. `--init`만 `cutoff`에
+T0 SHA와 그 commit의 committer 시각을 쓴다. `--init`은 T0의 candidate.yml에 `--produce`
+단계가 있고 첫 부모에는 없음을 GitHub에서 확인하며, 더 늦은 commit이나 미래 시각은 거절한다.
+생성 시각과 최신 attempt 시작 시각이 모두 T0 이전인 candidate.yml 실행은 **legacy**다.
+legacy는 증거로 인정하지도, STOP 사유로 쓰지도 않으며 `g3-evidence.json`의
+`legacy_excluded`에 run id·created_at과 함께 남긴다. 기록된 run이 T0 이전에 생성됐거나
+`--adopt-run`이 T0 이전 실행을 가리키면 STOP한다. T0 이전 실행을 T0 이후 재실행하면
+legacy가 아니며 provenance를 증명해야 한다. 같은 후보 supersession 검사는 T0 이후 실행에만
+적용한다. 제목·이름 shortcut이나 이력 삭제는 쓰지 않는다.
+
 다음 명령은 지휘자가 지정한 후보 SHA와 **새 producer가 들어 있는 branch/tag ref**로
 한 번 실행한다. dispatch ref tip과 후보 SHA는 달라도 된다. 이 예시는 실행 허가가
 아니며 이미 결속된 실행은 재요청하지 않는다. `$roundRecord`는 비공개 라운드의
-sidecar 경로, `$roundId`는 해당 라운드 식별자, `$dispatchRef`는 검토된 도구 ref다.
+sidecar 경로, `$roundId`는 해당 라운드 식별자, `$dispatchRef`는 검토된 도구 ref,
+`$cutoffSha`는 위 T0다. 기록은 `--init`으로만 만들며 dispatch가 대신 만들지 않는다.
 
 ```powershell
+python scripts/g3_dispatch.py --init --record $roundRecord --repository $repository --sha $sha --round-id $roundId --cutoff-sha $cutoffSha
+if ($LASTEXITCODE -ne 0) { throw 'G3 라운드 초기화 실패: T0와 기록 확인' }
 python scripts/g3_dispatch.py --record $roundRecord --repository $repository --sha $sha --round-id $roundId --ref $dispatchRef
 if ($LASTEXITCODE -ne 0) { throw 'G3 dispatch 미확정: 기록을 보존하고 STOP 절차 확인' }
-python tests/ci_candidate_evidence.py --record $roundRecord --out "$out/g3"
-if ($LASTEXITCODE -ne 0) { throw 'G3 수집 STOP: g3-evidence.json 확인' }
-$g3 = Get-Content -Raw "$out/g3/g3-evidence.json" | ConvertFrom-Json
-if ($g3.status -ne 'verified' -or $g3.record.candidate_sha -ne $sha) { throw 'G3 후보/수집 상태 불일치' }
-$candidateDir = $g3.downloads[-1].destination
 ```
 
+Stage 7/8의 G3 입력은 위 수집기 블록이 같은 `$roundRecord`로 받는다. G3만 확인할 때는
+`python tests/ci_candidate_evidence.py --record $roundRecord --out <새 폴더>`로 같은 검증을
+따로 실행할 수 있으며 결과는 `<새 폴더>/g3-evidence.json`이다.
 collector의 `verified`는 실행/attempt/artifact 출처 확인이다. Stage 7/8 판정은
 그 뒤 `$candidateDir`의 runner provenance·실제 선택·결과·cleanup을 기존
 `scripts/stage-exit.py`로 확인한다. 여러 active 기록은 **모두** 최신 attempt가
 success이며 적격 업로드가 있어야 한다. 마지막 기록의 폴더를 판정 입력으로 쓴다.
-비후보 CI 경로는 1a의 별도 수집 계약을 그대로 따른다.
+비후보 CI 경로는 1a의 별도 수집 계약을 그대로 따른다. producer attempt 결속(CD-02-R)은
+candidate.yml에만 있다. 비후보 workflow의 재실행(attempt 2 이상)은 위 1a 계약대로 STOP이다.
 
 dispatch는 원자적으로 pending 요청과 nonce를 먼저 쓰고, 정확한 POST body와
 응답을 기록한다. 응답 run ID를 직접 검사하며, ID 없는 응답/응답 유실의 복구는
@@ -445,10 +437,11 @@ producer는 `g3-provenance.json`을 기존 업로드에 넣고 재실행 때 `ov
 supersession 조회는 보존된 candidate.yml 전체 run 목록을 끝까지 대조한다. 실제
 `/repositories/<id>/` Link를 허용하되 host·repository·query 변경, cycle, count 모순,
 workflow count ≥1,000은 STOP한다. 목록에서 새 official ID를 선택하지 않는다.
-미등록 run의 payload가 같은 후보면 ID/attempt를 표시하고 STOP하며, 제목·head_sha·
+T0 이후 미등록 run의 payload가 같은 후보면 ID/attempt를 표시하고 STOP하며, 제목·head_sha·
 artifact 이름으로 귀속을 추정하지 않는다. 다른 후보의 현재 attempt provenance가
-검증되면 영향을 주지 않는다. provenance 없는 legacy/무업로드 실행은 귀속 불명으로
-STOP한다. 이 보수적 정책은 과거 legacy 실행이 남은 저장소의 수집도 막을 수 있다.
+검증되면 영향을 주지 않는다. T0 이후의 provenance 없는 실행(producer 없는 ref에서 시작한
+실행, 무업로드 실행)은 귀속 불명으로 STOP한다. legacy 행은 내용을 읽지 않고 마지막 전체 목록
+대조에만 포함되므로, 수집 중 legacy 행이 바뀌어도 STOP한다.
 retention/수동 삭제 이전의 전 GitHub 이력을 증명하지 않으며, `verified_at` 이후
 재실행까지 막는 원자적 snapshot이나 영구 인증서도 아니다.
 
@@ -464,7 +457,7 @@ PR 일반 CI는 merge commit을 시험하므로 head SHA 근거로 바꾸지 않
 대조하고 payload의 candidate/tools SHA를 수집 때 재검증한다.
 
 ```powershell
-python scripts/g3_dispatch.py --init --record $roundRecord --repository $repository --sha $sha --round-id $roundId --pr-policy candidate-checkout-with-merge-tools
+python scripts/g3_dispatch.py --init --record $roundRecord --repository $repository --sha $sha --round-id $roundId --cutoff-sha $cutoffSha --pr-policy candidate-checkout-with-merge-tools
 if ($LASTEXITCODE -ne 0) { throw 'G3 라운드 초기화 실패' }
 python scripts/g3_dispatch.py --record $roundRecord --adopt-run $prRun --evidence-dir "$out/pr-admission"
 if ($LASTEXITCODE -ne 0) { throw 'G3 PR 출처 admission STOP' }
@@ -493,13 +486,14 @@ if ($LASTEXITCODE -ne 0) { throw '교체 실행 미확정' }
 
 옛 run의 attempt가 바뀌거나 교체 run 시작보다 늦게 끝났으면 교체 계약이 무효다.
 미등록 실행은 제목으로 등록하지 않는다. payload가 검증 가능한 기존 실행만
-`--adopt-run`으로 누적한다. 무업로드/legacy/만료라 귀속이 불명확한 경우 이 도구는
+`--adopt-run`으로 누적한다. T0 이후 무업로드/만료라 귀속이 불명확한 경우 이 도구는
 복구를 추정하지 않으며, 지휘자의 별도 검증 가능한 admission 근거/계약 정리가 필요하다.
 cap STOP도 임의 기간 축소로 우회하지 않는다. `.lock`/`.new`가 남았다면 소유 프로세스와
 마지막 기록을 확인하고 원문을 보존한 뒤 소유한 중단 파일만 정리한다.
 
-1a 병합 연결: `ci_artifacts.download()`의 `if not non_candidate` 아래 CI-TOOLING-1b
-STOP을 `ci_candidate_evidence.collect(record_path, g3_out, query, fetch)` 호출로 교체한다.
-성공한 G3 manifest와 1a의 non-candidate 결과를 모두 보존하며 하나라도 실패하면 전체를
-완료로 쓰지 않는다. `non_candidate=True` 경로는 변경하지 않는다. 이 브랜치에는
-1a 파일이 없으므로 위 연결은 통합 단계이며 현재 G3 CLI는 독립 실행한다.
+1a 연결: `ci_artifacts.download()`의 기본(전체) 경로는 명시한 `record`가 없거나 `--dry-run`이면
+조회 전에 STOP한다. 기록의 후보 SHA·저장소를 확인한 뒤 비후보 수집(`--non-candidate`와 같은
+코드 경로) → `ci_candidate_evidence.collect(record, <out>/g3, query, fetch)` 순서로 실행하고,
+G3가 읽은 기록 hash가 처음 결속한 hash와 같으며 두 결과가 모두 성공한 뒤에만
+`stage-evidence.json`을 completed로 쓴다. 어느 쪽이 STOP해도 각 manifest와 incomplete 결합
+manifest를 남긴다. `non_candidate=True` 경로의 동작은 바꾸지 않았다.

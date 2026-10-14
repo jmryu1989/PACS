@@ -4,6 +4,7 @@ FakeGitHub uses real numeric /repositories/{id}/ Link paths and explicit attempt
 endpoints. Producer tests execute the workflow's CLI argv with synthetic env;
 they assert payload semantics, not source spelling or a private function name.
 """
+import base64
 import copy
 from datetime import datetime, timezone
 import hashlib
@@ -33,6 +34,18 @@ OTHER = 'c' * 40
 NONCE = 'd' * 32
 REPO = 'owner/repo'
 NOW = '2026-10-13T00:00:00+00:00'
+CUTOFF = 'e' * 40  # T0: the first commit carrying the producer
+PARENT = '1' * 40  # T0's first parent, without the producer
+T0 = '2026-10-12T00:00:00+00:00'
+BEFORE_T0 = '2026-10-11T00:00:00Z'
+
+
+def producer_free_workflow():
+    import yaml
+    doc = yaml.safe_load((ROOT/'.github/workflows/candidate.yml').read_text(encoding='utf-8'))
+    steps = doc['jobs']['candidate']['steps']
+    doc['jobs']['candidate']['steps'] = [s for s in steps if '--produce' not in str(s.get('run', ''))]
+    return yaml.safe_dump(doc)
 
 
 def make_run(ident=10, attempt=1, sha=SHA, event='workflow_dispatch', status='completed', conclusion='success'):
@@ -55,7 +68,8 @@ def record(runs=(10,), pr=False):
     return {'schema': 1, 'repository': REPO, 'candidate_sha': SHA, 'round_id': 'fixture-r1',
             'workflow': evidence.WORKFLOW, 'revision': 1,
             'pr_policy': 'candidate-checkout-with-merge-tools' if pr else 'forbid',
-            'partial_rerun_policy': 'whole-candidate-job', 'requests': [
+            'partial_rerun_policy': 'whole-candidate-job',
+            'cutoff': {'sha': CUTOFF, 'timestamp': T0}, 'requests': [
                 {'nonce': NONCE if i == 0 else f'{ident:032x}', 'requested_at': NOW,
                  'dispatch_ref': 'main', 'event': 'pull_request' if pr else 'workflow_dispatch',
                  'state': 'bound', 'run_id': ident, 'tools_sha': TOOLS, 'supersedes': []}
@@ -76,6 +90,9 @@ class FakeGitHub:
         self.count_edit = None
         self.post_calls = 0
         self.post_status = 200
+        self.commits = {CUTOFF: {'sha': CUTOFF, 'commit': {'committer': {'date': T0}}, 'parents': [{'sha': PARENT}]}}
+        self.workflows = {CUTOFF: (ROOT/'.github/workflows/candidate.yml').read_text(encoding='utf-8'),
+                          PARENT: producer_free_workflow()}
         self.add_artifact(10)
 
     def add_artifact(self, ident, sha=SHA, p=None, artifact_id=None, extra=None):
@@ -111,6 +128,12 @@ class FakeGitHub:
             result = {'id': 30, 'path': evidence.WORKFLOW}
         elif tail == '/pulls/12':
             result = {'head': {'sha': SHA}, 'merge_commit_sha': TOOLS}
+        elif tail.startswith('/commits/'):
+            result = self.commits[tail.split('/')[2]]
+        elif tail == '/contents/.github/workflows/candidate.yml':
+            text = self.workflows[parse_qs(parsed.query)['ref'][0]]
+            result = {'type': 'file', 'encoding': 'base64',
+                      'content': base64.encodebytes(text.encode('utf-8')).decode('ascii')}
         elif tail.endswith('/runs') or tail.endswith('/artifacts'):
             key = 'workflow_runs' if tail.endswith('/runs') else 'artifacts'
             if key == 'workflow_runs':
@@ -247,7 +270,7 @@ class CandidateEvidenceTests(unittest.TestCase):
         self.github.add_artifact(11)
         self.refuse('unrecorded same-candidate', 11)
 
-    def test_unknown_legacy_no_upload_does_not_use_title_or_head(self):
+    def test_post_cutoff_unknown_no_upload_does_not_use_title_or_head(self):
         self.github.runs[11] = make_run(11, sha=OTHER, conclusion='failure')
         self.refuse('missing/ambiguous upload', 11)
 
@@ -459,6 +482,74 @@ class CandidateEvidenceTests(unittest.TestCase):
         self.github.runs[11] = make_run(11)
         self.refuse('does not follow retired attempt', 10)
 
+    # D1117 legacy cutoff T0: pre-T0 runs are neither evidence nor a STOP cause.
+    def legacy_run(self, ident=9, **values):
+        run = make_run(ident, **values)
+        run.update(created_at=BEFORE_T0, run_started_at=BEFORE_T0, updated_at=BEFORE_T0)
+        self.github.runs[ident] = run
+        return run
+
+    def test_legacy_same_candidate_success_is_listed_never_admitted(self):
+        self.legacy_run()
+        self.github.add_artifact(9)  # Even a valid same-candidate payload is not read.
+        result = self.collect()
+        self.assertEqual(result['status'], 'verified')
+        self.assertEqual([row['run_id'] for row in result['downloads']], [10])
+        self.assertEqual([(row['id'], row['created_at']) for row in result['legacy_excluded']], [(9, BEFORE_T0)])
+        self.assertEqual(result['cutoff'], {'sha': CUTOFF, 'timestamp': T0})
+        self.assertEqual(self.github.fetched, [1000])
+        self.assertFalse(any('/runs/9' in call for call in self.github.calls))
+
+    def test_legacy_failures_and_unfinished_runs_do_not_stop(self):
+        for status, conclusion in (('completed', 'failure'), ('completed', 'cancelled'),
+                                   ('in_progress', None), ('completed', 'success')):
+            with self.subTest(status=status, conclusion=conclusion):
+                self.github = FakeGitHub()
+                self.legacy_run(status=status, conclusion=conclusion)  # no upload, unknown candidate
+                shutil.rmtree(self.root / 'out', ignore_errors=True)
+                result = self.collect()
+                self.assertEqual(result['status'], 'verified')
+                self.assertEqual([row['id'] for row in result['legacy_excluded']], [9])
+
+    def test_recorded_legacy_run_is_refused_even_when_successful(self):
+        self.github.runs[10].update(created_at=BEFORE_T0, run_started_at=BEFORE_T0, updated_at=BEFORE_T0)
+        self.refuse('predates the legacy cutoff T0', 10)
+        self.assertEqual(self.github.fetched, [])
+
+    def test_legacy_run_rerun_after_cutoff_must_prove_provenance(self):
+        run = self.legacy_run(attempt=2, conclusion='failure')
+        run['run_started_at'] = NOW
+        self.refuse('missing/ambiguous upload', 9)
+
+    def test_run_created_at_the_cutoff_instant_is_not_legacy(self):
+        run = self.legacy_run(conclusion='failure')
+        run.update(created_at=T0, run_started_at=T0)
+        self.refuse('missing/ambiguous upload', 9)
+
+    def test_legacy_row_change_during_collection_stops(self):
+        self.legacy_run(conclusion='failure')
+        listings = []
+        def rerun_legacy(endpoint):
+            if endpoint == 'repos/owner/repo/actions/workflows/candidate.yml/runs?per_page=100':
+                listings.append(endpoint)
+                if len(listings) == 2:
+                    self.github.runs[9].update(run_attempt=2, status='queued', conclusion=None)
+        self.github.on_query = rerun_legacy
+        self.refuse('supersession population changed')
+
+    def test_reader_requires_exact_cutoff(self):
+        for cutoff in (None, {'sha': CUTOFF}, {'sha': CUTOFF, 'timestamp': T0, 'skip_before': True},
+                       {'sha': 'E' * 40, 'timestamp': T0}, {'sha': CUTOFF, 'timestamp': '2026-10-12T00:00:00'}):
+            with self.subTest(cutoff=cutoff):
+                self.rec = record()
+                if cutoff is None:
+                    self.rec.pop('cutoff')
+                else:
+                    self.rec['cutoff'] = cutoff
+                shutil.rmtree(self.root / 'out', ignore_errors=True)
+                self.refuse('schema fields missing/unknown' if cutoff is None else 'cutoff|invalid timestamp')
+                self.assertEqual(self.github.calls, [])
+
 
 def refusal_case(status, conclusion, recorded, rerun=False):
     def test(self):
@@ -535,10 +626,63 @@ class DispatchTests(unittest.TestCase):
         self.path = Path(self.temporary.name) / 'round.json'
         self.github = FakeGitHub()
 
+    def init(self, pr_policy='forbid', cutoff_sha=CUTOFF):
+        dispatch.initialize(self.path, REPO, SHA, 'fixture-r1', pr_policy, cutoff_sha=cutoff_sha,
+                            query=self.github.query, now=datetime.fromisoformat(NOW))
+
     def start(self, **kwargs):
+        if not self.path.exists():
+            self.init()
         return dispatch.dispatch(self.path, REPO, SHA, 'fixture-r1', 'main', query=self.github.query,
                                  post=self.github.post, sleep=lambda seconds: None,
                                  now=datetime.fromisoformat(NOW), **kwargs)
+
+    def test_init_writes_first_producer_commit_and_its_committer_date(self):
+        self.init()
+        self.assertEqual(evidence.read_record(self.path)[0]['cutoff'], {'sha': CUTOFF, 'timestamp': T0})
+
+    def test_init_refuses_a_cutoff_that_is_not_the_first_producer_commit(self):
+        later = '2' * 40
+        self.github.commits[later] = {'sha': later, 'commit': {'committer': {'date': NOW}}, 'parents': [{'sha': CUTOFF}]}
+        self.github.workflows[later] = self.github.workflows[CUTOFF]
+        for sha, reason in ((later, 'first parent already carries'), (PARENT, None), ('3' * 40, None)):
+            with self.subTest(sha=sha):
+                if sha == PARENT:
+                    self.github.commits[PARENT] = {'sha': PARENT, 'commit': {'committer': {'date': T0}}, 'parents': [{'sha': '4' * 40}]}
+                    reason = 'does not carry the G3 producer'
+                if sha == '3' * 40:
+                    self.github.commits[sha] = {'sha': sha, 'commit': {'committer': {'date': '2026-10-14T00:00:00Z'}}, 'parents': [{'sha': PARENT}]}
+                    self.github.workflows[sha] = self.github.workflows[CUTOFF]
+                    reason = 'in the future'
+                with self.assertRaisesRegex(ValueError, reason):
+                    self.init(cutoff_sha=sha)
+                self.assertFalse(self.path.exists())
+
+    def test_dispatch_without_initialized_record_never_posts(self):
+        with self.assertRaisesRegex(ValueError, 'record missing; create it with --init --cutoff-sha'):
+            dispatch.dispatch(self.path, REPO, SHA, 'fixture-r1', 'main', query=self.github.query,
+                              post=self.github.post, sleep=lambda seconds: None)
+        self.assertEqual(self.github.post_calls, 0)
+        self.assertFalse(self.path.exists())
+
+    def test_legacy_run_cannot_be_adopted(self):
+        self.init('candidate-checkout-with-merge-tools')
+        self.github.runs[10] = make_run(event='pull_request')
+        self.github.runs[10].update(created_at=BEFORE_T0, run_started_at=BEFORE_T0)
+        with self.assertRaisesRegex(ValueError, 'predates the legacy cutoff T0'):
+            dispatch.admit(self.path, 10, self.path.parent/'admission', query=self.github.query, fetch=self.github.fetch)
+        self.assertEqual(evidence.read_record(self.path)[0]['requests'], [])
+
+    def test_cli_requires_cutoff_only_with_init(self):
+        script = str(ROOT / 'scripts/g3_dispatch.py')
+        for argv, message in ((['--init', '--repository', REPO, '--sha', SHA, '--round-id', 'r'], '--init requires --cutoff-sha'),
+                              (['--resume', '--cutoff-sha', CUTOFF], 'written only by --init')):
+            with self.subTest(argv=argv):
+                result = subprocess.run([sys.executable, '-B', script, '--record', str(self.path), *argv],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(message, result.stderr)
+                self.assertFalse(self.path.exists())
 
     def test_response_id_written_after_durable_pending(self):
         post = self.github.post
@@ -597,13 +741,14 @@ class DispatchTests(unittest.TestCase):
             self.start()
 
     def test_lock_prevents_competing_writers_before_post(self):
+        self.init()
         self.path.with_name('round.json.lock').write_text('fixture')
         with self.assertRaises(FileExistsError):
             self.start()
         self.assertEqual(self.github.post_calls, 0)
 
     def test_initialize_and_admit_pr_with_merge_tools(self):
-        dispatch.initialize(self.path, REPO, SHA, 'fixture-r1', 'candidate-checkout-with-merge-tools')
+        self.init('candidate-checkout-with-merge-tools')
         self.github.runs[10] = make_run(event='pull_request')
         self.github.add_artifact(10)
         dispatch.admit(self.path, 10, self.path.parent/'admission', query=self.github.query, fetch=self.github.fetch)

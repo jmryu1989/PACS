@@ -1,9 +1,12 @@
 """REQ-G3-PUSH -> RISK-G3-STALE/OMITTED/WRONG-ATTEMPT -> ci_candidate_evidence_test.
 
 The round record admits runs. Listings can only invalidate that population.
+Runs created before the record's cutoff T0 (the first commit carrying the
+producer) are legacy: listed, never admitted and never a STOP cause.
 No product execution, Git writes or GitHub writes occur in this module.
 """
 import argparse
+import base64
 from datetime import datetime, timezone
 from email.message import Message
 from email.parser import Parser
@@ -12,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import parse_http_list
@@ -78,9 +82,14 @@ def validate_record(record):
     if not isinstance(record, dict) or type(record.get('schema')) is not int or record['schema'] != 1:
         stop('round schema must be 1')
     fields = {'schema', 'repository', 'candidate_sha', 'round_id', 'workflow', 'revision',
-              'pr_policy', 'partial_rerun_policy', 'requests'}
+              'pr_policy', 'partial_rerun_policy', 'cutoff', 'requests'}
     if set(record) != fields:
         stop('round schema fields missing/unknown')
+    cutoff = record.get('cutoff')
+    if (not isinstance(cutoff, dict) or set(cutoff) != {'sha', 'timestamp'}
+            or not isinstance(cutoff.get('sha'), str) or not SHA.fullmatch(cutoff['sha'])):
+        stop('legacy cutoff T0 requires exactly sha and timestamp')
+    instant(cutoff.get('timestamp'))
     if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', record.get('repository', '')):
         stop('invalid repository')
     if not SHA.fullmatch(record.get('candidate_sha', '')) or not isinstance(record.get('round_id'), str) or not record['round_id']:
@@ -135,6 +144,59 @@ def validate_record(record):
                 stop('recorded tools SHA required')
         elif entry.get('run_id') is not None:
             stop('pending request cannot claim a bound run')
+
+
+def carries_producer(text):
+    """True when candidate.yml's candidate job runs this module's --produce step."""
+    import yaml  # Lazy: the hosted --produce step needs only the standard library.
+    try:
+        steps = yaml.safe_load(text)['jobs']['candidate']['steps']
+        commands = [shlex.split(str(step['run'])) for step in steps if 'run' in step]
+    except (yaml.YAMLError, KeyError, TypeError, ValueError) as error:
+        stop(f'cannot read candidate.yml producer steps: {error}')
+    return any('--produce' in argv and any(word.endswith('ci_candidate_evidence.py') for word in argv)
+               for argv in commands)
+
+
+def resolve_cutoff(repository, sha, query=None, now=None):
+    """T0 = the first commit carrying the producer: T0 has it, its first parent does not.
+
+    The commit's committer date is the cutoff instant. A later commit would hide
+    producer-era runs as legacy, so the first-parent check refuses it.
+    """
+    query = query or gh_get
+    if not SHA.fullmatch(sha or ''):
+        stop('legacy cutoff T0 requires a full commit SHA')
+    commit, _ = query(f'repos/{repository}/commits/{sha}')
+    if commit.get('sha') != sha:
+        stop('legacy cutoff commit identity mismatch')
+    stamp = ((commit.get('commit') or {}).get('committer') or {}).get('date')
+    if instant(stamp) > (now or datetime.now(timezone.utc)):
+        stop('legacy cutoff timestamp lies in the future')
+    parents = commit.get('parents')
+    if not isinstance(parents, list) or not parents or not SHA.fullmatch(str(parents[0].get('sha', ''))):
+        stop('legacy cutoff commit needs a first parent')
+
+    def workflow_at(ref):
+        content, _ = query(f'repos/{repository}/contents/.github/workflows/candidate.yml?ref={ref}')
+        if content.get('type') != 'file' or content.get('encoding') != 'base64':
+            stop(f'candidate.yml at {ref} is not a base64 file')
+        return base64.b64decode(content['content']).decode('utf-8')
+
+    if not carries_producer(workflow_at(sha)):
+        stop('legacy cutoff commit does not carry the G3 producer')
+    if carries_producer(workflow_at(parents[0]['sha'])):
+        stop('legacy cutoff is not the first producer commit: its first parent already carries it')
+    return {'sha': sha, 'timestamp': stamp}
+
+
+def legacy(run, cutoff):
+    """Created and latest attempt started before T0: excluded, never admitted or STOP.
+
+    A pre-T0 run re-run after T0 is not legacy; it must prove its provenance.
+    """
+    boundary = instant(cutoff['timestamp'])
+    return instant(run.get('created_at')) < boundary and instant(run.get('run_started_at')) < boundary
 
 
 def gh_get(endpoint):
@@ -337,11 +399,12 @@ def collect(record_path, out, query=gh_get, fetch=fetch_archive):
     """
     out = Path(out)
     out.mkdir(parents=True, exist_ok=False)
-    manifest = {'status': 'incomplete', 'scope': 'candidate', 'downloads': []}
+    manifest = {'status': 'incomplete', 'scope': 'candidate', 'downloads': [], 'legacy_excluded': []}
     context = None
     try:
         record, record_digest = read_record(record_path)
-        manifest.update(record=record, record_sha256=record_digest)
+        manifest.update(record=record, record_sha256=record_digest, cutoff=record['cutoff'])
+        cutoff = instant(record['cutoff']['timestamp'])
         if not record['requests']:
             stop('empty official population')
         pending = [e['nonce'] for e in record['requests'] if e['state'] != 'bound']
@@ -362,6 +425,8 @@ def collect(record_path, out, query=gh_get, fetch=fetch_archive):
             context = {'id': ident}
             context, _ = query(f'{base}/runs/{ident}')
             check_run(context, repo_id, workflow['id'], entry)
+            if instant(context['created_at']) < cutoff:
+                stop('recorded run predates the legacy cutoff T0; legacy runs are never admitted', context)
             attempt, _ = query(f'{base}/runs/{ident}/attempts/{context["run_attempt"]}')
             instant(attempt.get('created_at'))
             if attempt_revision(attempt) != attempt_revision(context):
@@ -398,8 +463,15 @@ def collect(record_path, out, query=gh_get, fetch=fetch_archive):
         for ident, run in runs.items():
             if ident not in listed or revision(listed[ident]) != revision(run):
                 stop('recorded run absent/changed in supersession listing', run)
+        excluded = set()
         for context in population:
             if context['id'] in runs:
+                continue
+            # Legacy rows are classified by time only; their bytes are never read.
+            if legacy(context, record['cutoff']):
+                excluded.add(context['id'])
+                manifest['legacy_excluded'].append({key: context.get(key) for key in (
+                    'id', 'created_at', 'run_started_at', 'run_attempt', 'event', 'status', 'conclusion')})
                 continue
             check_run(context, repo_id, workflow['id'])
             actual, _ = query(f'{base}/runs/{context["id"]}')
@@ -416,6 +488,8 @@ def collect(record_path, out, query=gh_get, fetch=fetch_archive):
             if row['provenance']['candidate_sha'] == record['candidate_sha']:
                 stop('unrecorded same-candidate run; explicitly admit/reconcile supersession', context, row['artifact_id'])
         for context in population:
+            if context['id'] in excluded:
+                continue  # The final listing comparison below still covers legacy revisions.
             current, _ = query(f'{base}/runs/{context["id"]}')
             if revision(current) != revision(context):
                 stop('run changed at final verification', context)

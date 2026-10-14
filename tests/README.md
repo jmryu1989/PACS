@@ -107,7 +107,7 @@ JS exec/execSync, os.system/os.popen/asyncio.create_subprocess_*는 미해석 �
 cross-module 값·runtime sys.path/container mapping은 완전 해석하지 않는다. 이 경계는 recorder의 tests/** 적용 여부에 영향을 주지 않는다.
 step 명령은 현재 literal shell 명령을 shlex로 읽으며 matrix/변수/복잡한 shell은 `unresolved`로 남긴다.
 그래프는 tests/**만 순회하고 밖의 대상은 미해석으로 취급한다. 워크플로 밖 임의 파일 I/O를 완전히 추론하는 도구가 아니다.
-Stage 7/8 비후보 artifact 수집과 수동 G3 입력의 분리, 재실행 STOP 및 dry-run 의미는 `tests/stage-exit.md`를 따른다.
+Stage 7/8 전체 수집(비후보 + `--record`로 받은 G3 공식 라운드)과 `--non-candidate` 분리 수집, 재실행 STOP 및 dry-run 의미는 `tests/stage-exit.md`를 따른다.
 재실행 진단은 `scripts/collect-rerun-diagnostic.py`를 사용한다. 상대 out은 repo-root 기준 절대 경로,
 advertised/실제 SHA-256은 필수이며 digest 없는 과거 artifact는 STOP한다. 기존 archive/receipt 보존,
 cp949-safe 출력과 실패 receipt 부재는 `ci_rerun_diagnostic_test.py`에서 검사한다. 성공 receipt는
@@ -790,8 +790,13 @@ G3 evidence comes only from IDs admitted into `g3_round.schema.json` records by
 `scripts/g3_dispatch.py`; `tests/ci_candidate_evidence.py` verifies the latest attempt,
 payload provenance and the exact artifact ID/digest, then rechecks the record and API
 snapshots. Supersession listing detects unrecorded runs, never selects evidence by title.
-Unknown legacy/no-upload runs, incomplete/capped listings, expired/replaced artifacts and
-old-attempt uploads STOP. PR admission is explicit and distinguishes candidate checkout
+Runs created and last started before the record's cutoff T0 (the first commit carrying the
+producer, verified and written only by `g3_dispatch.py --init`) are listed as `legacy_excluded`,
+never admitted and never a STOP cause; a recorded or adopted pre-T0 run STOPs. After T0, unknown
+no-upload runs, incomplete/capped listings, expired/replaced artifacts and
+old-attempt uploads STOP. `tests/ci_artifacts.py --record` runs this collection after the non-G3
+collection and writes `stage-evidence.json` completed only when both succeed.
+PR admission is explicit and distinguishes candidate checkout
 from merge-commit runner tools. See [G3 record, collection and STOP recovery](stage-exit.md#g3-공식-라운드-기록과-수집-ci-tooling-1b).
 The single candidate job must produce a fresh upload on rerun. Provenance verification
 does not replace stage-exit's selected-test/result/cleanup checks, non-G3 CI or review.
