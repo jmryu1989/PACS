@@ -17,7 +17,8 @@ TOOLS_ROOT = Path(__file__).resolve().parents[1]
 SHA = re.compile(r"[0-9a-f]{40}")
 BASE = (
     # S7-U1a: CriticalResultInvariantTests added six live cases, 83 -> 89 (and the selection 105 -> 112).
-    ("invariants_live.py", None, "candidate-invariants", 89),
+    # CN-N01-A: OrderCorrectionInvariantTests added six live cases, 89 -> 95 (and the selection 116 -> 122).
+    ("invariants_live.py", None, "candidate-invariants", 95),
     ("e2e/test_worklist.py", None, "candidate-worklist", 15),
 )
 FLOWS = (
@@ -33,8 +34,9 @@ FLOWS = (
     # conflict and history flow (the selection 112 -> 114).
     ("e2e/test_tech_note.py", "TechNoteE2E", "test_note_09_attempt_ids_idempotent_resend_reuse_and_reads", "test_note_09_"),
     ("e2e/test_viewer_tech_note.py", "ViewerTechNoteE2E", "test_viewer_note_02_technician_save_conflict_and_history", "test_viewer_note_02_"),
+    ("e2e/test_filter_folders.py", "FilterFoldersE2E", "test_shortcuts_01_folder_edit_save_reapply_relogin", "test_shortcuts_01_"),
     # EMR-B1 L01 (emr/units/b.json candidate_cases): the access ledger's roles, guards and restart in its own disposable
-    # database and production API image (the selection 114 -> 115).
+    # database and production API image (the merged selection 115 -> 116).
     ("emr/b/live.py", "EmrBLedgerLive", "test_b01_ledger_roles_and_restart", "test_b01_"),
 )
 
@@ -102,8 +104,8 @@ def exact_selection(target, runner):
         rows.append((filename, class_name, flow_unit(filename)))
         selected.append({"file": "tests/" + filename, "case": class_name + "." + method})
     require(len({row[2] for row in rows}) == len(rows), "Candidate runner units must be unique")
-    require(len(selected) == 115 and len({(x["file"], x["case"]) for x in selected}) == 115,
-            "Candidate selection must contain 115 unique exact cases")
+    require(len(selected) == 122 and len({(x["file"], x["case"]) for x in selected}) == 122,
+            "Candidate selection must contain 122 unique exact cases")
     return rows, selected
 
 

@@ -8,6 +8,7 @@ runs depend on - route, migration, restore bookkeeping, counts, workflow steps -
 """
 # S9-U0b RELIST: PACS permission/data assertions run compiled suites through pacs_source.
 # Remaining non-PACS source checks are unchanged U0f carry-over.
+from ci_workflows import WorkflowCatalog
 from pacs_source import assert_behaviour
 from page_source import read_page_source
 import ast
@@ -38,7 +39,8 @@ MIGRATION_PATH = ROOT / "api" / "prisma" / "migrations" / MIGRATION_NAME / "migr
 MIGRATION = text("api", "prisma", "migrations", MIGRATION_NAME, "migration.sql")
 MAIN = read_page_source(ROOT.joinpath("worklist-v0", "hpacs-lite", "main.html"))
 INVARIANTS = text("tests", "invariants_live.py")
-WORKFLOW = text(".github", "workflows", "validate.yml")
+CATALOG = WorkflowCatalog(ROOT)
+WORKFLOW = CATALOG.text()
 OBSERVATION = json.loads(text("tests", "study_observation_vectors.json"))
 MAX_SAFE = 2 ** 53 - 1
 EPOCH = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -540,7 +542,9 @@ class WorkflowPins(unittest.TestCase):
         for interpreter in ("hp-python", "u5-python"):
             self.assertEqual(1, WORKFLOW.count('"$RUNNER_TEMP/%s/bin/python" -m pip install -r tests/e2e/requirements.txt '
                                                '-r gateway/agent/requirements.txt numpy' % interpreter), interpreter)
-        self.assertEqual(2, WORKFLOW.count("-r gateway/agent/requirements.txt numpy"), "no other interpreter installs it")
+        dependency_jobs = CATALOG.validation()['jobs'].values()
+        self.assertEqual(2, sum(CATALOG.job_text(job).count("-r gateway/agent/requirements.txt numpy")
+                                for job in dependency_jobs), "no other validation interpreter installs it")
 
 
 class Encoding(unittest.TestCase):

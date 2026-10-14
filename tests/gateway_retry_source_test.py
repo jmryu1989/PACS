@@ -12,6 +12,7 @@ cases, the live route case and the restore probes are hosted-only and prove the 
 # S9-U0b RELIST: PACS permission/data assertions run compiled suites through pacs_source.
 # Remaining non-PACS source checks are unchanged U0f carry-over.
 # The receipt-rule byte pin retains the S4-U4 requirement that the independent U3 rule is unchanged.
+from ci_workflows import WorkflowCatalog
 from pacs_source import assert_behaviour
 from page_source import read_page_source
 import ast
@@ -50,7 +51,8 @@ ARRIVALS = text("worklist-v0", "hpacs-lite", "study-arrivals.js")
 AUTH = text("worklist-v0", "hpacs-lite", "auth.js")
 INVARIANTS = text("tests", "invariants_live.py")
 FIXTURE = text("tests", "ops_product_transfer_fixture.py")
-WORKFLOW = text(".github", "workflows", "validate.yml")
+CATALOG = WorkflowCatalog(ROOT)
+WORKFLOW = CATALOG.text()
 EPOCH = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 F01 = "같은 바이트로는 성공할 수 없습니다 — 지원 범위 밖(F-01)"
 # U3 surfaces this unit must not touch, as they are at 9152f43 (LF-normalised sha256).
@@ -603,7 +605,7 @@ class MigrationPins(unittest.TestCase):
         provider_change = "20261007120000_provider_change"
         attempt_ids = "20261006000000_tech_note_attempt_id"
         self.assertEqual(names[names.index(U3_MIGRATION):], [U3_MIGRATION, MIGRATION_NAME, questions, image_requests, critical, assignment_scope,
-                                       audit_guard, draft_boundary, session_end, isolation, attempt_ids, isolation_call, provider_change, '20261007170000_member_db_rights', '20261007200000_designation_subjects', '20261008120000_emr_b', '20261010120000_emr_seal_attempts', '20261010150000_emr_read_jit_off'],
+                                       audit_guard, draft_boundary, session_end, isolation, attempt_ids, isolation_call, provider_change, '20261007170000_member_db_rights', '20261007200000_designation_subjects', '20261008120000_emr_b', '20261010120000_emr_seal_attempts', '20261010150000_emr_read_jit_off', '20261011120000_filter_shortcuts'],
                          "U3 immediately before U4, U4 immediately before S5-U4a's study_questions, then S5-U4c's "
                          "study_image_requests, S7-U1a's critical_result, S7-U3a's reader_assignment_scope and "
                          "S7-AUDIT-STORE's audit_log_append_only, S7-U5's draft_revision_session_entry and its "

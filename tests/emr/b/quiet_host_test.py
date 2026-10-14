@@ -172,7 +172,7 @@ class QuietHostTests(unittest.TestCase):
         prefill_barrier = threading.Barrier(2)
         class Fixture(unittest.TestCase):
             image, baseline_image = 'candidate-image', 'r3-image'
-            created, env, label, token, latency_probe = {'container': []}, {}, 'owned=fixture', 'fixture', ''
+            created, env, label, token, latency_probe = {'container': [], 'volume': []}, {}, 'owned=fixture', 'fixture', ''
             def start_db(self, *args, **kwargs): return 'owned-db'
             def provision(self, *args): pass
             def migrate(self, *args): pass
@@ -222,6 +222,8 @@ class QuietHostTests(unittest.TestCase):
                    'KIN_EMR_ACCEPTANCE_RECORD': str(preflight), 'KIN_EMR_LIVE_EVIDENCE': str(root)}
             env['KIN_EMR_ACCEPTANCE_PLAN'] = str(plan)
             with patch.dict(os.environ, env), patch.object(acceptance.subprocess, 'Popen', Process), \
+                    patch.object(acceptance.subprocess, 'run', side_effect=lambda argv, **kw:
+                                 MagicMock(returncode=0, stdout=json.dumps([{'Id': argv[-1]}]))), \
                     patch.object(acceptance, 'QuietMonitor', return_value=monitor), \
                     patch.object(acceptance.time, 'monotonic', side_effect=lambda: clock[0]), \
                     patch.object(acceptance.time, 'sleep', side_effect=lambda n: clock.__setitem__(0, clock[0]+n)), \

@@ -16,6 +16,7 @@ import time
 import unittest
 
 import yaml
+from ci_workflows import WorkflowCatalog
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -81,7 +82,7 @@ class RequiredTestResolutionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.runner = load_tool(ROOT / "scripts/run-tests.py", "lean_exit_planner")
-        cls.workflow = yaml.safe_load((ROOT / ".github/workflows/validate.yml").read_text(encoding="utf-8"))
+        cls.workflow = WorkflowCatalog(ROOT).combined()
 
     def test_stage7_required_ids_resolve_without_running_the_cases(self):
         required = json.loads((ROOT / "tests/stage7-exit.json").read_text(encoding="utf-8"))

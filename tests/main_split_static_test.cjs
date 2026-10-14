@@ -8,7 +8,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { scripts, readPage } = require('./page_source.cjs');
-const { baseline, statements } = require('./main_move_contract.cjs');
+const { baseline, statements, currentHomes } = require('./main_move_contract.cjs');
 const spec = require('./main_move_spec.json');
 const ROOT = path.resolve(__dirname, '..');
 const ts = require(require.resolve('typescript', { paths: [path.join(ROOT, 'api')] }));
@@ -18,6 +18,7 @@ const blob = file => execFileSync('git', ['show', `${spec.base}:${file}`], { cwd
 const baseHtml = lf(baseline()), actual = readPage(page);
 const baseBody = scripts(baseHtml).find(s => !s.src).body;
 const homes = spec.modules.flatMap((m, module) => m.statements.map(name => ({ name, module, file: m.file })));
+const liveHomes = currentHomes(page);
 const report = { base: spec.base, actual_count: actual.files.length, typescript: ts.version };
 function save() {
   if (!process.env.KIN_SPLIT_STATIC_OUT) return;
@@ -41,13 +42,34 @@ function program(html, current) {
       mappings.set(file, source.statements.map(node => ({ index: index++, start: node.getFullStart(), end: node.end })));
     }
   }
+  // These classic UMD scripts publish properties at runtime. TypeScript's JS
+  // checker does not turn those assignments into global identifiers. Derive the
+  // ambient bindings from the delivered AST, rather than pinning a feature list.
+  const published = new Set(), declared = new Set();
+  for (const [file, body] of entries) {
+    const source = ts.createSourceFile(file, body, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+    for (const node of source.statements) {
+      if (ts.isVariableStatement(node)) { for (const d of node.declarationList.declarations) if (ts.isIdentifier(d.name)) declared.add(d.name.text); }
+      else if (node.name) declared.add(node.name.text);
+    }
+    function visit(node) {
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+        && ts.isPropertyAccessExpression(node.left) && ts.isIdentifier(node.left.expression)
+        && ['root', 'window', 'globalThis'].includes(node.left.expression.text) && /^Kin\w+$/.test(node.left.name.text))
+        published.add(node.left.name.text);
+      ts.forEachChild(node, visit);
+    }
+    visit(source);
+  }
+  entries.set(path.join(ROOT, 'tmp', 'split-static-virtual', 'published.d.ts').replace(/\\/g, '/'),
+    [...published].filter(name => !declared.has(name)).map(name => `declare var ${name}: any;`).join('\n'));
   const options = { allowJs: true, checkJs: true, noEmit: true, target: ts.ScriptTarget.ES2022,
     module: ts.ModuleKind.None, skipLibCheck: true, noResolve: true, types: [] };
   const host = ts.createCompilerHost(options), read = host.readFile, exists = host.fileExists, getSource = host.getSourceFile;
   host.readFile = file => entries.has(file) ? entries.get(file) : read(file);
   host.fileExists = file => entries.has(file) || exists(file);
   host.getSourceFile = (file, language, ...rest) => entries.has(file.replace(/\\/g, '/'))
-    ? ts.createSourceFile(file, entries.get(file.replace(/\\/g, '/')), language, true, ts.ScriptKind.JS)
+    ? ts.createSourceFile(file, entries.get(file.replace(/\\/g, '/')), language, true, file.endsWith('.d.ts') ? ts.ScriptKind.TS : ts.ScriptKind.JS)
     : getSource(file, language, ...rest);
   const compiled = ts.createProgram([...entries.keys()], options, host);
   for (const file of entries.keys()) assert.ok(compiled.getSourceFile(file), `C6 Program actually loaded ${file}`);
@@ -64,7 +86,7 @@ test('C6: one classic-script Program has no parse errors or new global name/dupl
       const ranges = input.mappings.get(d.file.fileName);
       const at = ranges && ranges.find(s => s.start <= d.start && d.start <= s.end);
       return JSON.stringify({ code: d.code, message: ts.flattenDiagnosticMessageText(d.messageText, '\n'),
-        location: at ? [homes[at.index].name, d.start - at.start] : [path.basename(d.file.fileName), d.start] });
+        location: at ? [(input === after ? liveHomes : homes)[at.index].name] : [path.basename(d.file.fileName), d.start] });
     }).sort();
   }
   const a = diagnostics(before), b = diagnostics(after), remaining = a.slice(), added = [];
@@ -200,15 +222,15 @@ function analyze(body, movedCount, ownership = homes) {
   return { references: refs, certain };
 }
 
-test('C2: statement/effect order and declaration homes are preserved; eager reads and writes have no new hazard', () => {
+test('C2: current source ownership/order is complete; eager reads and writes have no new hazard', () => {
   const body = lf(actual.script), nodes = statements(body);
-  assert.deepEqual(nodes.map(n => n.name), homes.map(h => h.name), 'C2 every statement and effect keeps relative order');
+  assert.deepEqual(nodes.map(n => n.name), liveHomes.map(h => h.name), 'C2 every current statement and effect is delivered in source order');
   assert.deepEqual(actual.region.filter(t => t.src).map(t => t.src),
     actual.bundle ? [actual.bundle] : spec.modules.slice(0, actual.files.length).map(m => m.file), 'C2 file order');
   if (actual.bundle) assert.deepEqual(require('../scripts/main-split-order.json').sources.map(s => s.file),
     spec.modules.map(m => m.file), 'C2 editable source order');
   assert.equal(new Set(actual.files).size, actual.files.length, 'C2 no file collision');
-  const current = analyze(body, actual.bundle ? 0 : actual.files.length), baselineAnalysis = analyze(baseBody, 0);
+  const current = analyze(body, actual.bundle ? 0 : actual.files.length, liveHomes), baselineAnalysis = analyze(baseBody, 0);
   report.C2 = { statements: nodes.length, ...current, baseline_certain: baselineAnalysis.certain };
   assert.deepEqual(baselineAnalysis.certain, [], 'C2 baseline certain load-order violations');
   assert.deepEqual(current.certain, [], 'C2 certain load-order violations');

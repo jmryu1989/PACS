@@ -150,8 +150,11 @@
     }
     /** 저장된 필터도 현재 목록과 같은 규칙으로 센다. 화면 상태를 바꾸지 않으므로
      * 다른 저장 필터의 건수를 보려고 지금 하던 검색이 흔들리지 않는다. */
-    function filteredFor(filter) {
-      worklistBodyParts.sync(studies);
+    function filteredFor(filter, rows = studies) {
+      if (rows === studies) worklistBodyParts.sync(studies);
+      return rows.filter(filterPredicate(filter));
+    }
+    function filterPredicate(filter) {
       const filterMode = Array.isArray(COLS[filter?.mode]) ? filter.mode : mode;
       const cols = COLS[filterMode].filter(c => c.f);
       const days = savedFilterDays(filter?.days);
@@ -159,15 +162,117 @@
       const needsParts = KinCompoundFilter.usesField(values[KinCompoundFilter.KEY], 'bodyPart', COLS[filterMode]);
       const matchCompound = KinCompoundFilter.compile(values[KinCompoundFilter.KEY], COLS[filterMode]);
       const matchQuick = KinCompoundFilter.compileQuick(filter?.quick, values[KinCompoundFilter.KEY], COLS[filterMode]);
-      return studies.filter(s => {
+      return s => {
         if (!matchQuick(s)) return false;
         if (!withinDays(s.date, days)) return false;
         return cols.every(c => testCol(s, c, values))
           && matchCompound(needsParts ? {...s, bodyPart: worklistBodyParts.get(s.uid)} : s);
-      });
+      };
     }
     let consultationFilter = null;
     const searchCriteria = () => ({mode,quick:$('#quick').value,days:quickDays,cols:JSON.parse(JSON.stringify(fval))});
+    function folderSearches() {
+      return [...userFilters.filter(f => Number.isInteger(f.id)).map(f => ({ ...f, treeId: 'own:' + f.id })),
+        ...sharedSearches.map(f => ({ ...f, treeId: 'shared:' + f.id }))];
+    }
+    function folderSearchAvailable() {
+      if (!folderAppliedSearch) return true;
+      return folderSearches().some(f => f.treeId === folderAppliedSearch.id
+        && (!f.treeId.startsWith('shared:') || f.name === folderAppliedSearch.name));
+    }
+    let folderRenderKey = '', chipCountKey = '', chipCountRows = [];
+    // Rows can be edited in place (report status, assignments, and body-part answers).
+    // Include those values and the local date, while excluding the quick-search draft.
+    function folderInputsKey() {
+      return JSON.stringify([studies, userFilters, sharedSearches, mode, new Date().toDateString(),
+        studies.map(s => worklistBodyParts.get(s.uid))]);
+    }
+    function folderSelectionIds(filter) {
+      // Folder counts describe replacement searches. Once another predicate narrows
+      // the list, no folder may claim that its replacement count is the applied list.
+      if (favoriteList?.key() || studyTagList?.key() || consultationFilter) return [];
+      const stored = folderSearches().find(f => f.name === activeFilterName
+        && f.treeId.startsWith('own:') && filterCriteriaKey(f) === filterCriteriaKey(filter));
+      if (stored) return [stored.treeId];
+      if (filter.quick || savedFilterDays(filter.days) !== -1
+        || Object.entries(filter.cols || {}).some(([key, value]) => key !== 'modality' && value !== '' && value != null)) return [];
+      const value = filter.cols?.modality;
+      return Array.isArray(value) || value
+        ? [...new Set(KinCompoundFilter.modalityTokens(value))].map(v => 'modality:' + v) : ['all'];
+    }
+    function updateWorklistFolders() {
+      if (!worklistFolders) return;
+      worklistBodyParts.sync(studies);
+      const key = JSON.stringify([folderInputsKey(), offline, folderLoadState, folderAppliedSearch, shortcutDraft ?? storedShortcuts]);
+      if (key !== folderRenderKey) {
+      const searches = folderSearches().filter(f => Array.isArray(COLS[f.mode])
+        && !KinCompoundFilter.validate(f.cols?.[KinCompoundFilter.KEY], COLS[f.mode]))
+        .filter(f => folderAppliedSearch?.id !== f.treeId || folderSearchAvailable())
+        .map(f => {
+          const criteria = JSON.parse(JSON.stringify(f));
+          // Compile once per search update, not once for every row counted in the tree.
+          const match = filterPredicate(criteria);
+          const needsParts = KinCompoundFilter.usesField(criteria.cols?.[KinCompoundFilter.KEY], 'bodyPart', COLS[criteria.mode]);
+          // Applied criteria stay fixed, but failed metadata can become available on retry.
+          return { id: f.treeId, name: f.name,
+            matches: row => needsParts && worklistBodyParts.get(row.uid) === undefined ? null : match(row) };
+        });
+      worklistFolders.update({ rows: studies, loadState: offline ? 'unknown' : folderLoadState, searches,
+        shortcuts: shortcutDraft ?? storedShortcuts });
+      folderRenderKey = key;
+      }
+      if (!folderAppliedSearch) {
+        const search = worklistSearch?.read(searchCriteria());
+        const ids = search?.empty ? [] : folderSelectionIds(search?.criteria || searchCriteria());
+        if (JSON.stringify(worklistFolders.snapshot().selectedIds) !== JSON.stringify(ids)) worklistFolders.setApplied(ids);
+      } else if (folderAppliedSearch.criteria !== filterCriteriaKey(worklistSearch?.read(searchCriteria()).criteria || searchCriteria())
+        || favoriteList?.key() || studyTagList?.key() || consultationFilter) {
+        if (worklistFolders.snapshot().selectedIds.length) worklistFolders.setApplied([]);
+      }
+    }
+    function alignWorklistFolder(filter, id) {
+      if (!worklistFolders) return;
+      updateWorklistFolders();
+      if (id) { worklistFolders.setApplied(id); return; }
+      worklistFolders.setApplied(folderSelectionIds(filter || searchCriteria()));
+    }
+    function mountWorklistFolders() {
+      if (worklistFolders || !$('#worklist-folders')) return;
+      worklistFolders = KinWorklistFolderTree.mount({ host: $('#worklist-folders'),
+        onSelect(item) {
+          if (!work.admits(work.capture('document'))) return;
+          favoriteList?.clear(); studyTagList?.clear(); consultationFilter = null;
+          if (item.kind === 'search' || item.kind === 'shortcut') {
+            const filter = folderSearches().find(f => f.treeId === item.searchId);
+            if (filter) applyFilter(filter, item.id);
+            return;
+          }
+          folderAppliedSearch = null; activeFilterName = null;
+          $('#quick').value = ''; quickDays = -1;
+          document.querySelectorAll('#qf button').forEach(x => x.classList.toggle('on', +x.dataset.days === quickDays));
+          Object.keys(fval).forEach(k => delete fval[k]);
+          if (item.kind !== 'all') fval.modality = [...item.modalities];
+          worklistSearch?.apply(); renderHeads(); render();
+        },
+        onChange: saveFolderShortcuts,
+      });
+      const panel = $('#worklist-folders-panel'), toggle = $('#worklist-folders-toggle');
+      // Keep a tab's choice across reloads only for this login, never for an account's next login.
+      const panelKey = 'kin-worklist-folders', panelSession = work.session();
+      let panelPreference;
+      try { panelPreference = JSON.parse(sessionStorage.getItem(panelKey)); } catch (_) {}
+      panel.open = panelPreference?.session === panelSession && typeof panelPreference?.open === 'boolean'
+        ? panelPreference.open : true;
+      toggle.setAttribute('aria-expanded', String(panel.open));
+      toggle.addEventListener('click', () => { panel.open = !panel.open; toggle.setAttribute('aria-expanded', String(panel.open)); });
+      panel.addEventListener('toggle', () => {
+        toggle.setAttribute('aria-expanded', String(panel.open));
+        try { sessionStorage.setItem(panelKey, JSON.stringify({session: panelSession, open: panel.open})); } catch (_) {}
+      });
+      $('#shortcuts-reload').addEventListener('click', () => reloadFolderSearches());
+      $('#shortcuts-save').addEventListener('click', () => saveFolderShortcuts(shortcutDraft));
+      updateWorklistFolders();
+    }
     function filtered() {
       const search = worklistSearch?.read(searchCriteria());
       const list = search?.empty ? [] : filteredFor(search?.criteria || searchCriteria());
@@ -184,6 +289,7 @@
     }
     let resultPage = 0, resultQuery = '', resultPageSize = 100;
     function render(revealUid) {
+      updateWorklistFolders();
       const cols = COLS[mode], shown = shownColumns();
       const list = orderedStudies();
       const appliedSearch = worklistSearch?.read(searchCriteria());
@@ -396,15 +502,21 @@
       $('#edit-active-filter').disabled = !stored;
     }
     function renderChips() {
+      updateWorklistFolders();
       const holder = $("#chips");
       if (!holder) return;
       renderActiveFilter();
-      const rows = userFilters.map((uf, i) => {
+      const countKey = folderInputsKey();
+      if (countKey !== chipCountKey) {
+      chipCountRows = userFilters.map((uf, i) => {
         const count = filteredFor(uf).length;
         const note = bodyPartCountNote(uf);
         const label = `${uf.name}, 로드된 목록 기준 ${count}건${uf.isDefault ? ", 기본 필터" : ""}${note ? ' · ' + note : ''}`;
         return { i, uf, count, label, partial: !!note };
       });
+      chipCountKey = countKey;
+      }
+      const rows = chipCountRows;
       // 검색 글자 하나마다 같은 버튼을 다시 만들면 저장 필터에 있던 키보드 포커스가
       // 사라진다. 실제 이름·기본 여부·건수가 바뀔 때만 DOM을 교체한다.
       const signature = JSON.stringify(rows.map(x => [x.uf.id ?? null, x.uf.name, !!x.uf.isDefault, x.count, x.label]));
@@ -442,6 +554,7 @@
       request: (path, signal, at) => api('GET', path, undefined, signal, at),
       identity: () => { const s = KinAuth.session(); return s?.state === 'approved' ? [s.institution,s.sub] : null; },
       changed: state => {
+        if (state.busy) { folderLoadState = studies.length ? 'partial' : 'unknown'; updateWorklistFolders(); }
         $('#study-fetch').hidden = !state.busy && !state.resumable && !state.message;
         $('#study-fetch-status').textContent = state.message + (state.total == null ? '' : ` (${state.received}/${state.total}건 받음 · 완료 후 목록 반영)`);
         $('#study-fetch-resume').hidden = state.busy || !state.resumable; $('#study-fetch-cancel').hidden = !state.busy;
@@ -548,6 +661,7 @@
         // 편집 중인 검사의 판 번호·초안을 되돌려 놓던 블록은 없앴다 — `fromApi`가 그 규칙을
         // 모든 검사에 대해 먼저 적용하므로, 여기서 한 검사만 다시 손보면 규칙이 둘로 갈린다.
           studies = r.studies.map(fromApi);
+          folderLoadState = 'complete';
           applyObservation(r);
           studyPriority.observed(r.studies.map(s=>s.uid));
           worklistAlerts?.observe(r.studies.map(s=>({uid:s.uid,em:s.state.em})));
@@ -573,6 +687,7 @@
         // Incomplete page batches never replace the last complete list or report input.
         if (serverMode) {
           work.commit(at, () => {
+            folderLoadState = 'unknown';
             // A superseded or changed-list answer is not a failed observation; the last one still stands.
             if (!e.stale && e.code !== 'STUDY_LIST_CHANGED') markObservationUnavailable();
             $("#err").textContent = "검사 목록을 불러오지 못했습니다. 현재 목록과 입력은 유지했습니다 — " + e.message;

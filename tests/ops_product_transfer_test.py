@@ -181,7 +181,7 @@ class Pure(unittest.TestCase):
     def test_empty_folder_owner_revision_and_metadata_restore_contract(self):
         expected = fixture()[0]['product']
         self.assertEqual(expected['rows']['UserFilterCollection'][0]['folders'][0]['path'], 'SYNTHETIC/Empty')
-        for field, value in [('owner', 'wrong-owner'), ('revision', 0), ('folders', []),
+        for field, value in [('owner', 'wrong-owner'), ('revision', 0), ('folders', []), ('shortcuts', []),
                              ('folders', [dict(path='SYNTHETIC/Empty', description='changed', ordinal=2)])]:
             actual = {key: copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences','emr')}
             actual['rows']['UserFilterCollection'][0][field] = value
@@ -280,10 +280,10 @@ class Pure(unittest.TestCase):
         # S7-U5 then added the provider call in flight to MemberIsolation (three columns): 38 files, still 48 tables and the
         # same rows. S7-U5 D600 replaced it by the provider change records (ProviderChange, the three columns dropped): 39 files,
         # 49 tables, and two records (an unknown disable of the owed member, a settled end of a provider session).
-        # EMR-B1 added schema emr_access (43 files): still 51 public tables and the same public rows; its 8 tables are
+        # EMR-B1 added schema emr_access (46 migration files after the W2 union): still 51 public tables and the same public rows; its 8 tables are
         # observed schema-qualified beside them with 8 synthetic rows (two chained viewing entries, the heads of both streams, a placed and
         # released hold, a reviewed clause version, an identity binding; no record target, projection or request yet).
-        self.assertEqual(len(transfer.MIGRATIONS), 45)
+        self.assertEqual(len(transfer.MIGRATIONS), 46)
         self.assertEqual(len(transfer.TABLES), 51)
         self.assertEqual(set(rows), set(transfer.TABLES))
         emr = transfer.expected_emr_rows()

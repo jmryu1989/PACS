@@ -699,6 +699,21 @@ def profile_deadline_seconds(profile_name):
     return 65*60 if profile_name == 'emr-b' else 25*60
 
 
+def workflow_report(root=None):
+    """Read-only profile provenance, including matrix and manual dispatch owners."""
+    from ci_workflows import WorkflowCatalog
+    catalog = WorkflowCatalog(root or ROOT)
+    catalog.validation()
+    report = catalog.profile_report(PROFILES)
+    for name, row in report.items():
+        job = catalog.job(row['job'])
+        row['artifacts'] = [
+            {key: re.sub(r'\$\{\{\s*(?:matrix|inputs)\.profile\s*\}\}', name, value)
+             if isinstance(value, str) else value for key, value in step['with'].items()}
+            for step in job['steps'] if step.get('uses', '').startswith('actions/upload-artifact@')]
+    return report
+
+
 def main(profile_name, credential_provider=None):
     if profile_name not in PROFILES:
         raise RuntimeError('Unknown CI profile')

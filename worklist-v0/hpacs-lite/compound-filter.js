@@ -5,19 +5,28 @@
 })(typeof window === 'object' ? window : null, function () {
   'use strict';
 
+  // D1041: saved and newly entered Modality Equals/Does Not Equal/column values share token OR.
+  // Interpret old scalars in place; stored search values need no migration.
   const KEY = '$compound';
   const OPS = {
     text: [['contains', '포함'], ['eq', '같음'], ['notContains', '포함하지 않음'],
       ['neq', '같지 않음'], ['empty', '비어 있음'], ['notEmpty', '값 있음']],
     select: [['eq', '같음'], ['neq', '같지 않음'], ['empty', '비어 있음'], ['notEmpty', '값 있음']],
     date: [['eq', '같은 날'], ['neq', '다른 날'], ['gte', '이후 (포함)'], ['lte', '이전 (포함)'],
-      ['between', '기간 (양 끝 포함)'], ['empty', '비어 있음'], ['notEmpty', '값 있음']],
+      ['between', '기간 (양 끝 포함)'], ['empty', '비어 있음'], ['notEmpty', '값 있음'],
+      ['withinLastDays', 'Within Last N Days']],
     tokens: [['contains', 'Contains'], ['eq', 'Equals'], ['notContains', 'Does Not Contain'],
       ['neq', 'Does Not Equal'], ['empty', 'Unspecified'], ['notEmpty', 'Specified']],
   };
   const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
   const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
   const blank = value => value === undefined || value === null || value === '';
+  const modalityTokens = value => (Array.isArray(value) ? value : [value]).flatMap(part =>
+    typeof part === 'string' ? part.split(/[,\\]/).map(token => token.trim().toUpperCase()).filter(Boolean) : []);
+  function matchesModality(value, wanted) {
+    const actual = modalityTokens(value);
+    return modalityTokens(wanted).some(token => actual.includes(token));
+  }
 
   function fields(columns) {
     if (!Array.isArray(columns)) return [];
@@ -86,17 +95,24 @@
       }
       const field = available.get(rule.field);
       if (!field) return '현재 모드에서 사용할 수 없는 검색 항목입니다.';
-      if (!operators(field).some(([op]) => op === rule.op)) return '검색 항목에 사용할 수 없는 비교 방법입니다.';
+      if (!OPS[field.type].some(([op]) => op === rule.op)) return '검색 항목에 사용할 수 없는 비교 방법입니다.';
       // Single-line controls strip CR/LF on assignment. Reject stored multiline
       // criteria before the editor can silently change their matching meaning.
       if (['value', 'value2'].some(key => typeof rule[key] === 'string' && /[\r\n]/.test(rule[key]))) {
         return '검색 값에는 줄바꿈을 사용할 수 없습니다.';
       }
       if (rule.op === 'empty' || rule.op === 'notEmpty') continue;
+      if (rule.op === 'withinLastDays') {
+        if (!own(rule, 'value') || typeof rule.value !== 'string' || !/^(0|[1-9]\d{0,2})$/.test(rule.value)
+          || Number(rule.value) > 365 || own(rule, 'value2')) return '최근 일수는 0~365 사이의 정수로 입력해 주세요.';
+        continue;
+      }
       if (!own(rule, 'value') || typeof rule.value !== 'string' || !rule.value.trim() || rule.value.length > 1000) {
         return '검색 값은 공백이 아닌 1~1,000자 문자열이어야 합니다.';
       }
-      if (field.type === 'select' && !field.values.some(value => value.toUpperCase() === rule.value.toUpperCase())) {
+      const choices = field.k === 'modality' && (rule.op === 'eq' || rule.op === 'neq')
+        ? rule.value.split(/[,\\]/).map(value => value.trim().toUpperCase()) : [rule.value.toUpperCase()];
+      if (field.type === 'select' && !choices.every(choice => field.values.some(value => value.toUpperCase() === choice))) {
         return '검색 항목에서 선택할 수 없는 값입니다.';
       }
       if (field.type === 'date') {
@@ -179,10 +195,21 @@
       if (rule.op === 'notEmpty') return !blank(value);
       // Missing values are not unequal values; use the explicit empty operator.
       if (blank(value) || typeof value !== 'string') return false;
+      // D1041 7-②: a CT,SR study is a CT study, so for any study with a Modality
+      // Does Not Equal is the token complement of Equals; no study satisfies both.
+      if (rule.field === 'modality' && rule.op === 'eq') return matchesModality(value, rule.value);
+      if (rule.field === 'modality' && rule.op === 'neq') return modalityTokens(value).length > 0 && !matchesModality(value, rule.value);
       if (available.get(rule.field).type === 'date') {
         const actual = calendarDate(value, false), wanted = calendarDate(rule.value, true);
         if (actual === null) return false;
         switch (rule.op) {
+          case 'withinLastDays': {
+            // Read the local calendar on each evaluation, including after midnight.
+            const today = new Date(), start = new Date(today.getTime());
+            start.setDate(start.getDate() - Number(rule.value));
+            const day = date => date.getFullYear() * 10000 + (date.getMonth() + 1) * 100 + date.getDate();
+            return actual >= day(start) && actual <= day(today);
+          }
           case 'eq': return actual === wanted;
           case 'neq': return actual !== wanted;
           case 'gte': return actual >= wanted;
@@ -214,11 +241,15 @@
     function groupText(group) {
       return '(' + group.rules.map(rule => {
         if (own(rule, 'rules')) return groupText(rule);
-        const field = available.get(rule.field), op = operators(field).find(([op]) => op === rule.op)[1];
+        const field = available.get(rule.field);
+        if (rule.op === 'withinLastDays') {
+          return `${field.t} ${rule.value === '0' ? 'Today' : `Within Last ${rule.value} ${rule.value === '1' ? 'Day' : 'Days'}`}`;
+        }
+        const op = operators(field).find(([op]) => op === rule.op)[1];
         return `${field.t} ${op}${['empty','notEmpty'].includes(rule.op) ? '' : ' ' + rule.value}${rule.op === 'between' ? ' ~ ' + rule.value2 : ''}`;
       }).join(group.join === 'or' ? ' OR ' : ' AND ') + ')';
     }
     return groupText(expression);
   }
-  return { KEY, fields, operators, validate, matches, compile, describe, usesField, quickMode, withQuickMode, compileQuick };
+  return { KEY, fields, operators, validate, matches, compile, describe, usesField, quickMode, withQuickMode, compileQuick, modalityTokens, matchesModality };
 });
