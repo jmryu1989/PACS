@@ -10,7 +10,9 @@ instrumentation; a dialog or a page error fails every case (no prompt, confirm o
 The default must be round 6's panel. test_default_is_round_6 serves the round-6 tree (R6 below, a fixed landed
 input: the same deliberate byte-provenance use as the W2 first-paint comparison; CI fetches this exact commit) and
 compares, with nothing chosen, the panel's and the page's geometry exactly and the open panel's pixels within the
-r6 tolerance (ANTIALIAS), the two new header controls masked in both pictures.
+r6 tolerance (ANTIALIAS), the two new header controls masked in both pictures. After a tab click round 6's panel
+moved down where its toolbar status line wrapped (W3R7-04); there each tab's content is compared within the panel and
+the panel must stay where it opened.
 
 Round 8 (Astra review of rounds 6+7, W3R7-02..06) adds the cases at the end: a drag belongs to the edge it started
 on (window turning under a held pointer), a late account Load gives way to a drag, Study Panel saves never move
@@ -55,6 +57,14 @@ DEFAULT_SIZES = ((1920, 1080), (1366, 768), (2560, 1440), (1200, 1920), (1440, 2
 BOUND_SIZES = ((1200, 1920), (1440, 2560), (900, 1200), (1920, 1080), (1366, 768),
                (840, 768), (860, 700), (900, 768), (1024, 768), (900, 600), (1280, 720), (800, 768))
 SCALES = (1, 1.2, 1.4)
+
+
+def within_panel(facts):
+    """A tab's facts with every box placed relative to the panel's own corner (the panel keeps its size)."""
+    x, y = facts['drawer'][:2]
+    place = lambda box: [box[0] - x, box[1] - y, box[2], box[3]]
+    return {**facts, 'drawer': facts['drawer'][2:], 'close': place(facts['close']), 'tablist': place(facts['tablist']),
+            'tabs': [place(tab) for tab in facts['tabs']], 'shown': place(facts['shown'])}
 
 
 class StudyPanelSizeDOM(unittest.TestCase):
@@ -216,8 +226,14 @@ class StudyPanelSizeDOM(unittest.TestCase):
                     theirs, _ = self.default_panel(Path(temporary), width, height, mask=mask, picture=picture)
                     with self.subTest(width=width, height=height):
                         self.assertEqual(theirs['first_paint_nodes'], mine['first_paint_nodes'], 'first paint')
-                        for key in ('panel', 'page', 'tab Images', 'tab Templates', 'tab Info'):
+                        for key in ('panel', 'page'):
                             self.assertEqual(theirs[key], mine[key], key)
+                        # Round 6's tab click rewrote the toolbar status line, which wraps at 900x1200 and 768x1024 and
+                        # pushed its panel down (W3R7-04, fixed this round). So each tab's content is round 6's within
+                        # the panel, and the panel itself stays where it opened, which is round 6's place (above).
+                        for key in ('tab Images', 'tab Templates', 'tab Info'):
+                            self.assertEqual(within_panel(theirs[key]), within_panel(mine[key]), key)
+                            self.assertEqual(mine['panel']['drawer'], mine[key]['drawer'], key + ': the panel does not move')
                         # The opened panel's new nodes: the Text Size select and its 3 options, Default, the
                         # controls' row and the edge (stated in the round-7 report).
                         self.assertEqual(7, mine['nodes'] - theirs['nodes'])
