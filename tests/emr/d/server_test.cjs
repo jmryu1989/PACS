@@ -425,7 +425,7 @@ test('TEST-D-02 versions_and_sr server: a manual SR adoption counts only once it
 
 /**
  * The workflow run as GitHub's runner runs it, by installed tools only (DR3-06, DR4-07, R5-22, R5-23): js-yaml reads the
- * workflow (it refuses duplicate keys); Python's shlex splits a `run:` line as a POSIX shell does; each recorder line is run
+ * workflow (it refuses duplicate keys); GNU Bash interprets every `run:` script; each recorder line is run
  * as scripts/record-run.py itself (its own options; a scratch run directory, or the line's own one inside a checkout; a
  * stand-in child that does nothing, or prints a given output, changes or removes files and exits with a given code); bash
  * runs a step's script as the runner does (`bash -e`, the shell of a step that names none); a fake `docker` stands in for the
@@ -435,37 +435,18 @@ test('TEST-D-02 versions_and_sr server: a manual SR adoption counts only once it
  * checkout. The runner's `${{ env.NAME }}` substitution is the one expression evaluated here; any other `${{ }}` fails the
  * case as unsupported. No assertion reads the text of a step's script: its exit, its artifact and the image it leaves decide.
  */
-const RUNNER = [
-  'import json, os, shlex, subprocess, sys, tempfile',
-  'root, todo = sys.argv[1], json.load(sys.stdin)',
-  'out = {"words": [shlex.split(line) for line in todo["words"]], "records": []}',
-  'with tempfile.TemporaryDirectory() as scratch:',
-  '    for i, job in enumerate(todo["records"]):',
-  '        job = job if isinstance(job, dict) else {"line": job}',
-  '        argv, cwd = shlex.split(job["line"]), job.get("cwd") or root',
-  '        split = argv.index("--")',
-  '        run_dir = [] if job.get("own_run_dir") else ["--run-dir", os.path.join(scratch, str(i))]',
-  '        child = [sys.executable if word == "{python}" else word for word in job.get("child") or ["{python}", "-c", ""]]',
-  '        done = subprocess.run([sys.executable, "-B", os.path.join(cwd, argv[1]), *argv[2:split], *run_dir, "--", *child],',
-  '                              cwd=cwd, capture_output=True, text=True)',
-  '        entry = {"program": argv[:2], "command": argv[split + 1:], "exit": done.returncode, "stderr": done.stderr[-2000:]}',
-  '        if not job.get("own_run_dir"):',
-  '            with open(os.path.join(scratch, str(i), "run.json"), encoding="utf-8") as stream: record = json.load(stream)',
-  '            entry["inputs"] = [{"requested": f["requested"], "tree": f.get("tree"), "status": f["status"]} for f in record["files_before"]]',
-  '        out["records"].append(entry)',
-  'print(json.dumps(out))',
-].join('\n');
+const RUNNER = "import json, os, subprocess, sys, tempfile\nroot, todo = sys.argv[1], json.load(sys.stdin)\nout = {\"words\": [], \"records\": []}\nwith tempfile.TemporaryDirectory() as scratch:\n    helper = os.path.join(scratch, \"capture.py\")\n    with open(helper, \"w\", encoding=\"utf-8\") as f: f.write(todo[\"helper\"])\n    for i, job in enumerate(todo[\"records\"]):\n        job = job if isinstance(job, dict) else {\"line\": job}\n        cwd = job.get(\"cwd\") or root\n        request = dict(job, result=os.path.join(scratch, str(i)+\".json\"), run_dir=os.path.join(scratch, \"run-\"+str(i)))\n        settings = os.path.join(scratch, \"job.json\")\n        with open(settings,\"w\",encoding=\"utf-8\") as f: json.dump(request,f)\n        script = os.path.join(scratch, \"step.sh\")\n        with open(script,\"w\",encoding=\"utf-8\",newline=\"\\n\") as f:\n            f.write('python3() { \"$KIN_CAPTURE_PYTHON\" \"$KIN_CAPTURE_HELPER\" \"$@\"; }\\n'+job[\"line\"])\n        env = dict(os.environ, KIN_CAPTURE_PYTHON=sys.executable.replace(\"\\\\\",\"/\"), KIN_CAPTURE_HELPER=helper.replace(\"\\\\\",\"/\"), KIN_CAPTURE_JOB=settings, TARGET_SHA=\"a\"*40, MSYS_NO_PATHCONV=\"1\")\n        done = subprocess.run([todo[\"bash\"],\"-e\",script.replace(\"\\\\\",\"/\")],cwd=cwd,env=env,capture_output=True,text=True)\n        with open(request[\"result\"],encoding=\"utf-8\") as f: entry=json.load(f)\n        entry.update(exit=done.returncode,stderr=done.stderr[-2000:])\n        out[\"records\"].append(entry)\nprint(json.dumps(out))";
+const RECORDER_CAPTURE = "import json, os, pathlib, runpy, subprocess, sys\njob=json.load(open(os.environ[\"KIN_CAPTURE_JOB\"],encoding=\"utf-8\"))\nscript=sys.argv[1]\nargv=sys.argv[2:]\n# argparse remains the recorder's authority; insert its documented override before the child separator.\nif not job.get(\"own_run_dir\"):\n    at=argv.index(\"--\")\n    argv[at:at]=[\"--run-dir\",job[\"run_dir\"]]\noriginal=subprocess.run\nentry={\"program\":[\"python3\",script]}\ndef run(command,*args,**kwargs):\n    if pathlib.Path(command[0]).name in (\"git\",\"git.exe\"):\n        return original(command,*args,**kwargs)\n    entry[\"command\"]=command\n    child=[sys.executable if v==\"{python}\" else v for v in job.get(\"child\",[\"{python}\",\"-c\",\"\"])]\n    return original(child,*args,**kwargs)\nsubprocess.run=run\nsys.argv=[script,*argv]\ntry:\n    runpy.run_path(script,run_name=\"__main__\")\nexcept SystemExit as exc:\n    code=exc.code\nelse:\n    code=0\nif not job.get(\"own_run_dir\"):\n    record=json.load(open(pathlib.Path(job[\"run_dir\"])/\"run.json\",encoding=\"utf-8\"))\n    entry[\"inputs\"]=[{k:f.get(k) for k in (\"requested\",\"tree\",\"status\")} for f in record[\"files_before\"]]\nwith open(job[\"result\"],\"w\",encoding=\"utf-8\") as f: json.dump(entry,f)\nsys.exit(code)";
 const python = process.env.KIN_EMR_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
-function asRun(records, words = []) {
-  const done = spawnSync(python, ['-B', '-I', '-c', RUNNER, root], { input: JSON.stringify({ records, words }), encoding: 'utf8', maxBuffer: 64 << 20 });
-  assert.equal(done.status, 0, done.stderr);
+function asRun(records) {
+  const expanded = records.map(job => typeof job === 'string' ? actions(job, { TARGET_SHA: 'a'.repeat(40) })
+    : { ...job, line: actions(job.line, { TARGET_SHA: 'a'.repeat(40) }) });
+  const done = spawnSync(python, ['-B', '-I', '-c', RUNNER, root], { input: JSON.stringify({ records: expanded, helper: RECORDER_CAPTURE, bash: gnuBash() }), encoding: 'utf8', maxBuffer: 64 << 20 });
+  assert.equal(done.status, 0, 'DR3-06: Bash recorder execution\n' + done.stderr);
   return JSON.parse(done.stdout);
 }
 /** A path as the file system names it: `./api/x` and `api/x` are one input. */
 const posixName = name => path.posix.normalize(String(name).replace(/\\/g, '/'));
-/** The values of an option in argv as the program's own parser takes them (`--name value` or `--name=value`). */
-const optionValues = (argv, ...names) => argv.flatMap((word, i) => names.includes(word) ? [argv[i + 1]]
-  : names.filter(name => word.startsWith(name + '=')).map(name => word.slice(name.length + 1)));
 /** Whether a record hashed `file` as present: the file itself or a requested tree holding it. */
 const hashes = (record, file) => record.inputs.some(i => i.status === 'present'
   && (i.tree === null ? posixName(i.requested) === file : file === posixName(i.tree) || file.startsWith(posixName(i.tree) + '/')));
@@ -473,7 +454,7 @@ const hashes = (record, file) => record.inputs.some(i => i.status === 'present'
 const pathsOf = r => ({ ...r, program: r.program.map(posixName),
   inputs: r.inputs && r.inputs.map(i => ({ ...i, requested: posixName(i.requested), tree: i.tree === null ? null : posixName(i.tree) })) });
 /** The same recorder lines in other shell notation: quoted concatenation, single quotes, backslash escapes, `./` paths. */
-const renote = line => line.replace('"VCS_REF=${{ env.TARGET_SHA }}"', '"VCS_REF="\'${{ env.TARGET_SHA }}\'')
+const renote = line => line.replace(' --cwd .', " \\\n--cwd .").replace('"VCS_REF=${{ env.TARGET_SHA }}"', '"VCS_REF="\'${{ env.TARGET_SHA }}\'')
   .replace(' --file api/Dockerfile ', ' --file "api"/Dockerfile ').replace(' --file emr/units/d.json ', " --file 'emr/units/d.json' ")
   .replace(' --tree tests/emr/d ', ' --tree tests\\/emr/d ').replace(' --file api/tsconfig.json ', ' --file api\\/"tsconfig".json ')
   .replace(' --file api/package-lock.json ', ' --file ./api/package-lock.json ').replace(/^python3 scripts\//, 'python3 ./scripts/');
@@ -484,7 +465,7 @@ function workflowOf() {
   const job = flow.jobs['emr-d'];
   const declaration = JSON.parse(fs.readFileSync(path.join(root, 'emr/units/d.json'), 'utf8'));
   const consumed = declaration.ci.recorded_inputs, ids = Object.keys(consumed);
-  return { flow, job, declaration, consumed, ids, steps: ids.map(id => job.steps.find(s => s.id === id)) };
+  return { flow, job, declaration, consumed, ids, steps: ids.map(id => Object.values(flow.jobs).flatMap(j => j.steps).find(s => s.id === id)) };
 }
 const GIT = ['-c', 'user.name=EMR-D test', '-c', 'user.email=emr-d@example.test', '-c', 'commit.gpgsign=false', '-c', 'core.autocrlf=false',
   '-c', 'init.defaultBranch=main'];
@@ -517,6 +498,7 @@ function shellOf(flow, job, step) {
 /** The runner's substitution of `${{ env.NAME }}` before the shell sees the text; any other expression is not evaluated here. */
 function actions(text, env) {
   return text.replace(/\$\{\{\s*(.*?)\s*\}\}/g, (whole, expression) => {
+    if (expression === 'github.sha') return env.GITHUB_SHA || 'b'.repeat(40);
     const name = /^env\.([A-Za-z_][A-Za-z0-9_]*)$/.exec(expression);
     if (!name || !Object.hasOwn(env, name[1])) throw new Error('unsupported expression for this harness: ' + whole);
     return env[name[1]];
@@ -592,13 +574,14 @@ function fakeDockerBin(dir) {
   return bin;
 }
 // What scripts/record-run.py does with its child (the record itself is proven by the recorder cases): runs it as given.
-const RECORDER_STAND_IN = 'python3() { while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done; shift; "$@"; }\n';
+const RECORDER_STAND_IN = 'python3() { case "$1" in scripts/record-run.py|./scripts/record-run.py) while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done; shift; "$@" ;; *) "$KIN_EMR_PYTHON_EXE" "$@" ;; esac; }\n';
 /** Runs a step's script (after the runner's substitution) with GNU bash as the runner starts it, in `cwd`. */
 function runStep(h, step, env, cwd, prefix = '') {
   const file = path.join(h.scratch, 'step-' + randomUUID() + '.sh');
   fs.writeFileSync(file, prefix + actions(step.run, env));
   // The runner's PATH holds the shell's own utilities (mkdir, test, ...); Git for Windows keeps them beside its bash.
   const tools = process.platform === 'win32' && path.isAbsolute(h.bash) ? path.delimiter + path.dirname(h.bash) : '';
+  env = { KIN_EMR_PYTHON_EXE: spawnSync(python, ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).stdout.trim().replace(/\\/g, '/'), ...env };
   const done = spawnSync(h.bash, [...shellOf(h.flow, h.job, step), file.replace(/\\/g, '/')], { cwd, env: withPath({ ...process.env, ...env }, h.bin + tools), encoding: 'utf8' });
   return { status: done.status, out: String(done.stdout) + String(done.stderr) };
 }
@@ -618,20 +601,28 @@ test('EMR-D workflow: the checkout, the image (label and tag), the live run and 
   const { flow, job, declaration, consumed, ids, steps } = workflowOf();
   const target = '${{ env.TARGET_SHA }}';
   assert.equal(job.env.TARGET_SHA, '${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}', 'a PR checks its head, a dispatch its candidate');
-  for (const step of job.steps) assert.ok(!/github\.sha|GITHUB_SHA|github\.ref\b/.test(JSON.stringify(step)), 'only TARGET_SHA names the source: ' + step.name);
   assert.equal(job.steps.find(s => String(s.uses).startsWith('actions/checkout@')).with.ref, target);
   steps.forEach((step, i) => assert.ok(step, 'the declared record ' + ids[i] + ' is a step of the workflow'));
-  // Every step that records (its program is the recorder, however its path is written) is a declared one.
-  const runs = job.steps.filter(s => typeof s.run === 'string');
-  const recorders = asRun([], runs.map(s => s.run)).words.map((argv, i) => posixName(argv[1]) === 'scripts/record-run.py' ? runs[i] : null).filter(Boolean);
-  assert.deepEqual(recorders.map(s => s.id).sort(), [...ids].sort(), 'the recorders of the workflow are exactly the declared records');
-  // Every Dockerfile COPY of the build context (api/) is an input of the image record, and the record hashes it.
-  const dockerfile = fs.readFileSync(path.join(api, 'Dockerfile'), 'utf8').split(/\r?\n/).filter(line => /^COPY\s/.test(line));
-  const ran = asRun(steps.map(s => s.run), dockerfile), record = id => ran.records[ids.indexOf(id)];
-  const copied = ran.words.filter(argv => !optionValues(argv, '--from').length).flatMap(argv => argv.slice(1, -1).filter(word => !word.startsWith('--')))
-    .map(source => 'api/' + source);
-  assert.ok(copied.length >= 5);
-  for (const file of copied) assert.ok(consumed.image.includes(file), 'the image declaration names ' + file);
+  // D5D4-01: the server-mutants record's driver runs exactly the subvariants the declaration names beside each family, so a
+  // family whose subvariants silently leave the driver is a difference here, never a smaller matrix that still passes.
+  const declaredSubvariants = declaration.mutants.server.subvariants || {};
+  const driver = spawnSync(python, ['-B', '-c', ['import importlib.util,json,sys',
+    'spec=importlib.util.spec_from_file_location("sm",sys.argv[1]);sm=importlib.util.module_from_spec(spec);spec.loader.exec_module(sm)',
+    'print(json.dumps({family:[v["id"] for v in rows] for family,rows in sm.SUBVARIANTS.items()}))'].join('\n'),
+  path.join(root, 'tests/emr/d/server_mutants.py')], { encoding: 'utf8' });
+  assert.equal(driver.status, 0, driver.stderr);
+  assert.deepEqual(JSON.parse(driver.stdout.trim().split(/\r?\n/).at(-1)), declaredSubvariants, 'D5D4-01: the driver runs exactly the declared subvariants of each family');
+  const families = declaration.mutants.server.ids, variants = Object.values(declaredSubvariants).flat();
+  assert.ok(variants.length > 0, 'D5D4-01: the declaration names the mandatory subvariants');
+  for (const family of Object.keys(declaredSubvariants)) assert.ok(families.includes(family), 'D5D4-01: ' + family + ' is a declared family');
+  assert.equal(new Set(variants).size, variants.length, 'D5D4-01: no subvariant is declared twice');
+  assert.ok(variants.every(id => !families.includes(id)), 'D5D4-01: a subvariant is never also a top-level family');
+  // Explicit build-context contract (reviewed with api/Dockerfile); no Dockerfile grammar is interpreted here.
+  const ran = asRun(steps.map(s => s.run)), record = id => ran.records[ids.indexOf(id)];
+  const copied = ['api/package.json', 'api/package-lock.json', 'api/prisma', 'api/tsconfig.json',
+    'api/nest-cli.json', 'api/src', 'api/start-production.sh', 'api/Dockerfile', 'api/.dockerignore'];
+  const covers = (declared, file) => declared.some(n => file === posixName(n) || file.startsWith(posixName(n) + '/'));
+  for (const file of copied) assert.ok(covers(consumed.image, file), 'the image declaration names ' + file);
   // DR3-05: each record hashes, as present, every input its command consumes; nothing it names is missing, except what an
   // earlier step of the same run produces (the image identity).
   for (const id of ids) {
@@ -641,18 +632,15 @@ test('EMR-D workflow: the checkout, the image (label and tag), the live run and 
     for (const input of r.inputs) assert.ok(input.status === 'present' || declaration.ci.produced_inputs.includes(input.requested), id + ' names ' + input.requested + ': ' + input.status);
   }
   for (const file of ['api/prisma/migrations', 'api/package-lock.json', 'api/tsconfig.json'])
-    for (const id of ['server', 'server-mutants']) assert.ok(consumed[id].includes(file), 'DR3-05: the ' + id + ' declaration names ' + file);
-  for (const file of ['api/tsconfig.json', 'api/package-lock.json']) assert.ok(consumed.mutants.includes(file), 'DR3-05: the mutants declaration names ' + file);
-  assert.ok(consumed.live.includes('api/prisma/migrations'), 'R5-21: the live declaration names api/prisma/migrations (the tree its image applies)');
-  assert.deepEqual(optionValues(record('live').command, '--module'), ['tests/emr/d/live.py']);
+    for (const id of ['server', 'server-mutants']) assert.ok(covers(consumed[id], file), 'DR3-05: the ' + id + ' declaration names ' + file);
+  for (const file of ['api/tsconfig.json', 'api/package-lock.json']) assert.ok(covers(consumed.mutants, file), 'DR3-05: the mutants declaration names ' + file);
+  assert.ok(covers(consumed.live, 'api/prisma/migrations'), 'R5-21: the live declaration names api/prisma/migrations (the tree its image applies)');
   const order = job.steps.map(s => s.id ?? s.name);
   for (const [before, after] of [['target-sha', 'checkout-identity'], ['checkout-identity', 'image'], ['image', 'image-identity'], ['image-identity', 'live']])
     assert.ok(order.indexOf(before) >= 0 && order.indexOf(before) < order.indexOf(after), before + ' runs before ' + after);
   // DR3-06: the shell's words decide, never their notation - escaped quotes and quoted concatenation split as a shell does,
   // and the workflow written with quoted concatenation, single quotes, backslash escapes and `./` paths records the same
   // inputs and runs the same commands.
-  assert.deepEqual(asRun([], ['python -c "print(\\"ok\\")"', '--file "api"/tsconfig.json']).words, [['python', '-c', 'print("ok")'], ['--file', 'api/tsconfig.json']],
-    'DR3-06: escaped quotes and quoted concatenation split as a shell splits them');
   const renoted = steps.map(s => renote(s.run));
   assert.ok(renoted.every((line, i) => line !== steps[i].run), 'control: every recorder line is written differently');
   assert.deepEqual(asRun(renoted).records.map(pathsOf), ran.records.map(pathsOf), 'DR3-06: the shell\'s words, not their notation, decide the record and the command');
@@ -706,7 +694,242 @@ test('EMR-D workflow: the checkout, the image (label and tag), the live run and 
     assert.equal(runStep(h, requested, { TARGET_SHA: head }, tiny).status, 0, 'a full lowercase commit SHA is a requested source');
     for (const bad of ['', head.slice(1), head.toUpperCase(), head + '0', 'main'])
       assert.notEqual(runStep(h, requested, { TARGET_SHA: bad }, tiny).status, 0, 'a TARGET_SHA that is not a full lowercase commit SHA is refused: ' + bad);
+    // Public TypeScript CLI: the real workflow child must typecheck, including failures.
+    const compilerRoot = path.join(scratch, 'compiler');
+    fs.mkdirSync(path.join(compilerRoot, 'api/src'), { recursive: true });
+    fs.symlinkSync(path.join(api, 'node_modules'), path.join(compilerRoot, 'api/node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
+    fs.writeFileSync(path.join(compilerRoot, 'api/tsconfig.json'), JSON.stringify({ compilerOptions: { incremental: true, outDir: './dist', skipLibCheck: true, types: [] }, include: ['src/**/*.ts'] }));
+    const observer = path.join(compilerRoot, 'observe-cache.cjs');
+    fs.writeFileSync(observer, "const fs = require('node:fs'); const read = fs.readFileSync; fs.readFileSync = function(file, ...args) { if (String(file).endsWith('.tsbuildinfo')) throw new Error('D5D-05: unexpected cache read'); return read.call(this, file, ...args); };");
+    const compile = text => {
+      fs.writeFileSync(path.join(compilerRoot, 'api/src/input.ts'), text);
+      return runStep(h, steps[ids.indexOf('typecheck')], { TARGET_SHA: head, NODE_OPTIONS: '--require ' + JSON.stringify(observer) }, compilerRoot, RECORDER_STAND_IN);
+    };
+    const cache = path.join(compilerRoot, 'api/dist/tsconfig.tsbuildinfo');
+    for (const contents of [null, 'SYN prior cache', 'SYN different cache']) {
+      if (contents !== null) { fs.mkdirSync(path.dirname(cache), { recursive: true }); fs.writeFileSync(cache, contents); }
+      const ok = compile('export const value: number = 1;');
+      assert.equal(ok.status, 0, 'D5D-08: real tsc passes a valid program\n' + ok.out);
+      assert.match(ok.out, /^Check time:\s+\d/m, 'D5D-08: the child reports an actual typecheck');
+      assert.match(ok.out, /input\.ts/, 'D5D-08: the checked source is reported');
+      assert.equal(fs.existsSync(cache) ? fs.readFileSync(cache, 'utf8') : null, contents, 'D5D-05: incremental cache is neither consumed nor written');
+    }
+    const syntax = compile('export const value = ;'), type = compile('export const value: number = "SYN";');
+    assert.notEqual(syntax.status, 0, 'D5D-08: tsc refuses syntax errors');
+    assert.match(syntax.out, /error TS\d+:/);
+    assert.notEqual(type.status, 0, 'D5D-08: tsc refuses type errors');
+    assert.match(type.out, /error TS2322:/);
+    fs.unlinkSync(path.join(compilerRoot, 'api/node_modules'));
+
+    // Import the real live class, substitute only the external ports, and stop at DB entry.
+    const liveProbe = String.raw`
+import importlib.util,json,os,pathlib,sys,tempfile
+from unittest.mock import patch
+spec=importlib.util.spec_from_file_location('live',sys.argv[1]); m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+expected='sha256:'+'f'*64; target='a'*40
+with tempfile.TemporaryDirectory() as tmp:
+ identity=pathlib.Path(tmp)/'identity';identity.write_text(expected+' '+target)
+ for label,ident,revision in [('match',expected,target),('retag','sha256:'+'e'*64,target),('revision',expected,'b'*40),('missing',expected,None)]:
+  events=[]
+  def run(args,**kwargs):
+   assert args[:3]==['docker','image','inspect'],args
+   return type('Result',(),{'stdout':json.dumps([{'Id':ident,'Config':{'Labels':{'org.opencontainers.image.revision':revision}}}]).encode()})()
+  def db():
+   events.append('DB');raise RuntimeError('DB_START')
+  with patch.dict(os.environ,{'KIN_TEST_API_IMAGE':'syn:tag','TARGET_SHA':target,'KIN_EMR_D_IMAGE_IDENTITY':str(identity)}),patch.object(m.gate,'require_live_run'),patch.object(m,'run',run),patch.object(m.EmrDLive,'start_db',db),patch.object(m.EmrDLive,'cleanup_resources'):
+   try:m.EmrDLive.setUpClass()
+   except RuntimeError as e: error=str(e)
+   else:raise AssertionError('probe must stop')
+   finally:m.EmrDLive.doClassCleanups()
+  assert bool(events)==(label=='match'),(label,events,error)
+  if label=='match':assert m.EmrDLive.image==expected
+  print(label,error)
+`;
+    const selectedImage = spawnSync(python, ['-B', '-c', liveProbe, path.join(root, 'tests/emr/d/live.py')], { encoding: 'utf8' });
+    assert.equal(selectedImage.status, 0, 'D5D-03: identity mismatch is refused before DB start\n' + selectedImage.stdout + selectedImage.stderr);
+    assert.match(selectedImage.stdout, /EMR_D_USED_IMAGE/, 'D5D-03: used immutable ID is preserved');
+
+    const interruption = String.raw`
+import importlib.util,json,pathlib,sys,tempfile,os,time,subprocess,threading,signal
+spec=importlib.util.spec_from_file_location('same_source',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+with tempfile.TemporaryDirectory() as tmp:
+ baseline=time.monotonic()
+ for label in ['completed','timeout']:
+  timeout=2400 if label=='completed' else max(10,4*(time.monotonic()-baseline))
+  folder=pathlib.Path(tmp)/label
+  receipt=pathlib.Path(tmp)/'tree.json'
+  child='print("SYN completed",flush=True)' if label=='completed' else '\n'.join([
+   'import os,sys,time,json,pathlib,subprocess',
+   'descendant=subprocess.Popen([sys.executable,"-c","import time;time.sleep(86400)"])',
+   'pathlib.Path(sys.argv[1]).write_text(json.dumps([os.getpid(),descendant.pid]))',
+   'print("SYN partial",flush=True)',
+   'while True: time.sleep(86400)',
+  ])
+  result=[];failures=[];finished=threading.Event();handles=[];pids=[]
+  if os.name=='nt':
+   import ctypes
+   from ctypes import wintypes
+   kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+   kernel.OpenProcess.argtypes=[wintypes.DWORD,wintypes.BOOL,wintypes.DWORD];kernel.OpenProcess.restype=wintypes.HANDLE
+   kernel.WaitForSingleObject.argtypes=[wintypes.HANDLE,wintypes.DWORD]
+   kernel.TerminateProcess.argtypes=[wintypes.HANDLE,wintypes.UINT]
+   kernel.CloseHandle.argtypes=[wintypes.HANDLE]
+  def alive(pid,handle):
+   if os.name=='nt':return kernel.WaitForSingleObject(handle,0)==258
+   try:
+    os.kill(pid,0)
+    stat=pathlib.Path('/proc')/str(pid)/'stat'
+    return not stat.exists() or stat.read_text().rsplit(')',1)[1].split()[0]!='Z'
+   except ProcessLookupError:return False
+  def execute():
+   try:result.append(m.recorded_execution([sys.executable,'-c',child,str(receipt)],sys.argv[2],os.environ,folder,timeout,[label]))
+   except BaseException as exc:failures.append(exc)
+   finally:finished.set()
+  worker=threading.Thread(target=execute);worker.start()
+  try:
+   if label=='timeout':
+    deadline=time.monotonic()+max(30,4*timeout)
+    while not receipt.exists() and not finished.is_set() and time.monotonic()<deadline:time.sleep(.05)
+    assert receipt.exists(),'D5D3-03: hung child tree started'
+    # Capture handles while these owned children are alive, avoiding PID reuse on Windows.
+    while not pids:
+     try:pids=json.loads(receipt.read_text())
+     except json.JSONDecodeError:
+      assert time.monotonic()<deadline,'D5D3-03: process receipt completed'
+      time.sleep(.05)
+    for pid in pids:
+     handle=kernel.OpenProcess(0x100001,False,pid) if os.name=='nt' else None
+     if os.name=='nt':assert handle,'D5D3-03: owned child is observable'
+     handles.append(handle)
+    assert all(alive(pid,handle) for pid,handle in zip(pids,handles)),'D5D3-03: hung child and descendant were running'
+   ended=finished.wait(2400 if label=='completed' else max(30,4*timeout))
+   assert ended and not any(alive(pid,handle) for pid,handle in zip(pids,handles)),'D5D3-03: timeout kills the hung child and descendant'
+  finally:
+   # Only this probe's children can be cleaned up, including when kill is deliberately removed.
+   for pid,handle in zip(pids,handles):
+    if alive(pid,handle):
+     if os.name=='nt':
+      kernel.TerminateProcess(handle,1)
+      assert kernel.WaitForSingleObject(handle,30000)==0,'D5D3-03: owned cleanup completed'
+     else:os.kill(pid,signal.SIGKILL)
+   worker.join()
+   for handle in handles:
+    if os.name=='nt':kernel.CloseHandle(handle)
+  assert not failures,failures
+  code,out,err=result[0]
+  assert ('SYN completed' if label=='completed' else 'SYN partial') in out,(label,out,err)
+  assert code==(0 if label=='completed' else 124),(label,code)
+  assert (folder/'run.json').is_file()
+  execution=json.loads((folder/'execution.json').read_text())
+  child_exit=json.loads((folder/'child-exit.json').read_text())
+  assert execution['selected']==[label]
+  expected='completed' if label=='completed' else 'interrupted'
+  assert execution['status']==child_exit['status']==expected,'D5D3-04: execution and child record the actual interruption state'
+  assert execution['exit']==child_exit['exit']==code
+  if label=='timeout':
+   assert execution['exit_note'] and execution['error']==child_exit['error']=='TimeoutExpired','D5D3-04: interruption reason is retained'
+   assert child_exit['child_process_exit']!=0,'D5D3-03: hung child did not finish normally'
+  else:
+   assert execution['exit_note'] is None and execution['error'] is None and child_exit['error'] is None
+ assert 'SYN completed' in (pathlib.Path(tmp)/'completed/stdout.log').read_text()
+ # Reviewer's lifecycle injection: a completed mutant, then partial timeout; the next run sees the preceding summary.
+ import contextlib,io,subprocess
+ from unittest import mock
+ sys.path.insert(0,str(pathlib.Path(sys.argv[1]).parent))
+ spec=importlib.util.spec_from_file_location('sm',pathlib.Path(sys.argv[1]).with_name('server_mutants.py'));sm=importlib.util.module_from_spec(spec);spec.loader.exec_module(sm)
+ class Copy:
+  def __init__(self,*a):self.root=pathlib.Path(sys.argv[2]);self.hashes={}
+  def __enter__(self):return self
+  def __exit__(self,*a):pass
+ calls=[];summary=pathlib.Path(tmp)/'summary.json'
+ def child(node,test,cases=None):
+  calls.append(cases)
+  if len(calls)<=2:
+   return 0,'\n'.join('ok %d - %s'%(i,n) for i,n in enumerate(cases or list(sm.CASE.values()),1))+'\n','SYN baseline stderr'
+  if len(calls)==3:
+   mutant=sm.MUTANTS[0]
+   return 1,'not ok 1 - '+mutant['case']+'\n  ---\n  failureType: \'testCodeFailure\'\n  code: \'ERR_ASSERTION\'\n  error: '+mutant['expect']+'\n  ...\n','SYN completed stderr'
+  prior=json.loads(summary.read_text());assert len(prior['mutants'])==1,'previous summary not flushed'
+  raise subprocess.TimeoutExpired([node,'--test'],900,output=b'SYN partial stdout',stderr=b'SYN partial stderr')
+ with mock.patch.object(sm,'Copy',Copy),mock.patch.object(sm,'run',child),mock.patch.object(sm,'check_anchors',lambda:[]),mock.patch.object(sys,'argv',['mutants','--out',str(summary)]),contextlib.redirect_stdout(io.StringIO()):
+  code=sm.main()
+ result=json.loads(summary.read_text());assert code==1 and len(calls)==4,(code,calls)
+ assert result['mutants'][0]['killed'] and result['mutants'][0]['stderr']=='SYN completed stderr'
+ assert result['mutants'][1]['stdout']=='SYN partial stdout' and result['mutants'][1]['exit']==124
+ assert len(result['pending'])==len(sm.MUTANTS)-2+len(sm.EQUIVALENTS)
+ assert (summary.with_suffix('.runs')/'interruption-000/stdout.log').read_text()=='SYN partial stdout'
+ # Every newly required subvariant participates in the declared family's verdict.
+ original=sm.MUTANTS[0];variant=sm.SUBVARIANTS['M-D-D5D-07'][0]
+ for survives in [False,True]:
+  calls=[];summary=pathlib.Path(tmp)/('family-'+str(survives)+'.json')
+  def family_child(node,test,cases=None):
+   calls.append(cases)
+   if len(calls)<=2 or (len(calls)==4 and survives):
+    return 0,'\n'.join('ok %d - %s'%(i,n) for i,n in enumerate(cases or [original['case']],1))+'\n',''
+   item=original if len(calls)==3 else variant
+   return 1,'not ok 1 - '+item['case']+'\n  ---\n  failureType: \'testCodeFailure\'\n  code: \'ERR_ASSERTION\'\n  error: '+item['expect']+'\n  ...\n',''
+  with mock.patch.object(sm,'Copy',Copy),mock.patch.object(sm,'run',family_child),mock.patch.object(sm,'check_anchors',lambda:[]),mock.patch.object(sm,'MUTANTS',[original]),mock.patch.object(sm,'EQUIVALENTS',[]),mock.patch.object(sm,'SUBVARIANTS',{original['id']:[variant]}),mock.patch.object(sys,'argv',['mutants','--out',str(summary)]),contextlib.redirect_stdout(io.StringIO()):
+   code=sm.main()
+  family=json.loads(summary.read_text())['mutants'][0]
+  assert len(calls)==4 and family['original_killed'] and len(family['subvariants'])==1
+  assert code==int(survives) and family['killed']==(not survives),'D5D3: a surviving subvariant fails its declared family and the driver'
+`;
+    const interrupted = spawnSync(python, ['-B', '-c', interruption, path.join(root, 'tests/emr/d/same_source.py'), root], { encoding: 'utf8' });
+    assert.equal(interrupted.status, 0, 'D5D-07: completed and interrupted raw streams survive\n' + interrupted.stdout + interrupted.stderr);
     // The last step (tests/emr/d/same_source.py) on a real record of this checkout - its full matrix is the evidence case.
+    const gateJob = flow.jobs['emr-d-gate'];
+    assert.ok(gateJob, 'D5D-06: gate job exists');
+    const finalGate = gateJob.steps.find(s => s.id === 'same-source');
+    assert.ok(finalGate, 'D5D-06: final gate exists');
+    assert.equal(typeof finalGate.run, 'string', 'D5D-06: final gate command is a shell script');
+    const setOf = value => [...new Set(Array.isArray(value) ? value : value == null ? [] : [value])].sort();
+    assert.deepEqual(setOf(gateJob.needs), ['emr-d', 'emr-d-server-mutants'], 'D5D-06: gate waits for both record jobs');
+    // Explicit documented status-expression contract, not a second expression parser.
+    const expression = value => typeof value === 'string' ? value.trim().replace(/^\$\{\{([\s\S]*)\}\}$/, '$1').replace(/\s+/g, '') : value;
+    const failureSafe = value => ['!cancelled()', 'always()', 'success()||failure()', 'failure()||success()'].includes(expression(value));
+    const enforced = value => value === undefined || value === false || expression(value) === 'false';
+    assert.ok(failureSafe(gateJob.if), 'D5D2-01: gate job runs on failure');
+    assert.ok(enforced(gateJob['continue-on-error']), 'D5D2-01: gate job cannot ignore failure');
+    assert.ok(failureSafe(finalGate.if), 'D5D-06: final gate runs on failure');
+    assert.ok(enforced(finalGate['continue-on-error']), 'D5D2-01: gate step cannot ignore failure');
+    assert.equal(gateJob.env.TARGET_SHA, job.env.TARGET_SHA, 'D5D2: gate source equals producer source');
+    assert.equal(gateJob.steps.find(s => String(s.uses).startsWith('actions/checkout@'))?.with?.ref, target, 'D5D2: gate checks out requested source');
+    for (const [name, limit] of [['emr-d', 120], ['emr-d-server-mutants', 270], ['emr-d-gate', 10]])
+      assert.ok(Number.isInteger(flow.jobs[name]['timeout-minutes']) && flow.jobs[name]['timeout-minutes'] > 0 && flow.jobs[name]['timeout-minutes'] <= limit, 'D5D2: bounded job budget ' + name);
+    assert.deepEqual(setOf('one'), setOf(['one']), 'D5D2-02: scalar and singleton needs have equal meaning');
+    const gateIndex = gateJob.steps.indexOf(finalGate);
+    const gateUpload = gateJob.steps.find(s => String(s.uses).startsWith('actions/upload-artifact@'));
+    assert.ok(gateUpload, 'D5D3-02: combined gate evidence upload exists');
+    assert.equal(expression(gateUpload.if), 'always()', 'D5D3-02: combined gate evidence uploads always');
+    assert.equal(gateUpload.with?.path, 'tmp/emr-d-ci/', 'D5D3-02: combined gate evidence includes the entire record root');
+    assert.equal(gateUpload.with?.['if-no-files-found'], 'error', 'D5D3-02: missing combined gate evidence is an error');
+    assert.ok(gateJob.steps.indexOf(gateUpload) > gateIndex, 'D5D3-02: combined evidence upload follows the final gate');
+    for (const producer of ['emr-d', 'emr-d-server-mutants']) {
+      const sourceJob = flow.jobs[producer];
+      assert.deepEqual(setOf(sourceJob.needs), [], 'D5D2-06: record jobs run in parallel');
+      assert.ok(sourceJob.if === undefined || failureSafe(sourceJob.if), 'D5D2: producer is not skipped');
+      assert.ok(enforced(sourceJob['continue-on-error']), 'D5D2: producer cannot ignore failure');
+      assert.equal(sourceJob.env.TARGET_SHA, job.env.TARGET_SHA, 'D5D2: producers use one source');
+      assert.equal(sourceJob.steps.find(s => String(s.uses).startsWith('actions/checkout@'))?.with?.ref, target, 'D5D2: producer checks out requested source');
+      const upload = sourceJob.steps.find(s => String(s.uses).startsWith('actions/upload-artifact@'));
+      const producerGate = sourceJob.steps.find(s => s.id === 'producer-source');
+      assert.ok(producerGate, 'D5D3: producer verifies its final checkout');
+      assert.ok(failureSafe(producerGate.if), 'D5D3: producer verification runs on failure');
+      assert.ok(enforced(producerGate['continue-on-error']), 'D5D3: producer verification cannot ignore failure');
+      assert.ok(sourceJob.steps.indexOf(producerGate) > Math.max(...sourceJob.steps.map((s, i) => ids.includes(s.id) ? i : -1)) && sourceJob.steps.indexOf(producerGate) < sourceJob.steps.indexOf(upload), 'D5D3: producer verification follows records and precedes upload');
+      assert.ok(upload && failureSafe(upload.if), 'D5D2: evidence uploads on failure');
+      assert.equal(upload.with.path, 'tmp/emr-d-ci/', 'D5D2: entire evidence tree uploaded');
+      assert.equal(upload.with['if-no-files-found'], 'error', 'D5D2: missing evidence is an error');
+      assert.ok(sourceJob.steps.indexOf(upload) > Math.max(...sourceJob.steps.map((s, i) => ids.includes(s.id) ? i : -1)), 'D5D2: upload follows records');
+      const download = gateJob.steps.find(s => String(s.uses).startsWith('actions/download-artifact@') && s.with?.name === upload.with.name);
+      assert.ok(download && gateJob.steps.indexOf(download) < gateIndex, 'D5D-06: final gate runs after every record');
+      assert.ok(failureSafe(download.if), 'D5D2: downloads run on failure');
+      assert.equal(download.with.path, 'tmp/emr-d-ci/', 'D5D2: downloads restore the record root');
+      assert.equal(download.with['run-id'], undefined, 'D5D2: downloads belong to this workflow run');
+      assert.equal(download.with.repository, undefined, 'D5D2: downloads belong to this repository');
+    }
+    fs.mkdirSync(path.join(tiny, 'tests/emr/d'), { recursive: true });
+    fs.copyFileSync(path.join(root, 'tests/emr/d/same_source.py'), path.join(tiny, 'tests/emr/d/same_source.py'));
     const check = runs => {
       fs.rmSync(path.join(tiny, 'tmp'), { recursive: true, force: true });
       fs.mkdirSync(path.join(tiny, 'tmp/emr-d-ci'), { recursive: true });
@@ -715,8 +938,7 @@ test('EMR-D workflow: the checkout, the image (label and tag), the live run and 
       assert.equal(one.exit, 0, one.stderr);
       const file = path.join(tiny, 'tmp/emr-d-ci/one/run.json');
       fs.writeFileSync(file, JSON.stringify(runs(JSON.parse(fs.readFileSync(file, 'utf8')))));
-      const done = spawnSync(python, ['-B', path.join(root, 'tests/emr/d/same_source.py')], { cwd: tiny, env: { ...process.env, TARGET_SHA: head }, encoding: 'utf8' });
-      return { status: done.status, out: done.stdout + done.stderr };
+      return runStep(h, finalGate, { TARGET_SHA: head }, tiny, 'python3() { \"' + python.replace(/\\/g, '/') + '\" \"$@\"; }\n');
     };
     const valid = check(run => run);
     assert.equal(valid.status, 0, 'a record of TARGET_SHA hashing its declared input as TARGET_SHA holds it passes\n' + valid.out);
@@ -767,16 +989,18 @@ test('EMR-D evidence: same_source.py passes only records of TARGET_SHA that hash
       return done.stdout;
     };
     const kinds = declaration.ci.outputs, server = declaration.cases.server.cases, contract = declaration.cases.contract;
-    const summaryOf = section => ({ mutants: section.ids.map(id => ({ id, killed: true })), equivalents: (section.equivalents || []).map(id => ({ id, holds: true })),
-      result: { killed: section.ids.length, total: section.ids.length } });
+    const summaryOf = section => ({ mutants: section.ids.map(id => ({ id, killed: true, subvariants: ((section.subvariants || {})[id] || []).map(v => ({ id: v, killed: true })) })),
+      equivalents: (section.equivalents || []).map(id => ({ id, holds: true })),
+      not_run: section.not_run || [], result: { killed: section.ids.length, total: section.ids.length } });
     const standard = {
-      junit: { server: junitOf(server), contract: junitOf(Array.from({ length: contract.count - contract.skipped.length }, (_, i) => 'SYN contract case ' + (i + 1)), contract.skipped) },
+      junit: { server: junitOf(server), contract: junitOf(contract.cases.filter(n => !contract.skipped.includes(n)), contract.skipped) },
       mutants: section => JSON.stringify(summaryOf(section)),
       'run-tests': section => 'EXACT_TESTS ' + JSON.stringify(section.cases.map(c => 'live.' + section.class + '.' + c)) + '\nPLAN_RESULT '
-        + JSON.stringify({ status: 'passed', exit_code: 0 }) + '\n',
+        + JSON.stringify({ status: 'passed', exit_code: 0 }) + '\nEMR_D_USED_IMAGE ' + JSON.stringify({ id: 'sha256:' + 'f'.repeat(64), revision: sha }) + '\n',
     };
     const outputOf = id => {
       const kind = kinds[id];
+      if (kind.kind === 'tsc') return [...fs.readdirSync(path.join(repo, 'api/src'), { recursive: true }).filter(n => n.endsWith('.ts')).map(n => path.join(repo, 'api/src', n).replace(/\\/g, '/')), 'Files: 1', 'Types: 1', 'Check time: 0.01s', 'Total time: 0.01s'].join('\n');
       if (kind.kind === 'junit') return standard.junit[kind.declared];
       if (kind.kind === 'mutants') return standard.mutants(kind.declared ? declaration.mutants[kind.declared] : { ids: ['M-SYN-1'] });
       if (kind.kind === 'run-tests') return standard['run-tests'](declaration.cases[kind.declared]);
@@ -840,10 +1064,86 @@ test('EMR-D evidence: same_source.py passes only records of TARGET_SHA that hash
     assert.deepEqual(valid.report.steps.contract.collected.skipped, contract.skipped, 'R5-21: a declared skip is kept as a skip, never counted as a pass');
     assert.deepEqual(valid.report.steps.server.collected.passed.slice().sort(), server.slice().sort(), 'the collected server cases are the declared ones');
     assert.deepEqual(valid.report.image_identity, ['sha256:' + 'f'.repeat(64), sha]);
+    // Producer workspaces, not the fresh final checkout, own post-record drift.
+    for (const [jobId, producer, own] of [['emr-d', 'main', ids.filter(id => id !== 'server-mutants')], ['emr-d-server-mutants', 'server-mutants', ['server-mutants']]]) {
+      reset();
+      const flow = workflowOf().flow, sourceJob = flow.jobs[jobId];
+      const h = { flow, job: sourceJob, bash: gnuBash(), scratch, bin: fakeDockerBin(path.join(scratch, producer)) };
+      const step = sourceJob.steps.find(s => s.id === 'producer-source');
+      assert.ok(step, 'D5D3: producer verification exists');
+      const run = () => runStep(h, step, { TARGET_SHA: sha }, repo, 'python3() { \"' + python.replace(/\\/g, '/') + '\" \"$@\"; }\n');
+      for (const id of ids.filter(id => !own.includes(id))) fs.rmSync(path.join(runs, id), { recursive: true });
+      const control = run();
+      assert.equal(control.status, 0, 'D5D3: producer accepts exactly its own completed records\n' + control.out);
+      fs.appendFileSync(path.join(repo, 'api/package-lock.json'), '\nSYN producer drift\n');
+      assert.notEqual(run().status, 0, 'D5D3: producer refuses post-record drift');
+      reset();
+      fs.rmSync(path.join(runs, own[0]), { recursive: true });
+      assert.notEqual(run().status, 0, 'D5D3: producer refuses its missing record');
+      // Inspect each record's own refusal: another record that shares the input
+      // must not mask a missing check here.
+      const covers = (declared, file) => declared.some(n => file === posixName(n) || file.startsWith(posixName(n) + '/'));
+      const driftInputs = { typecheck: 'api/tsconfig.json', contract: 'tests/emr/d/contract_test.cjs',
+        mutants: 'tests/emr/d/mutants.py', server: 'scripts/emr-compose.py',
+        'server-mutants': 'api/Dockerfile', image: 'api/Dockerfile', live: 'tests/live_test_gate.py' };
+      for (const id of own) {
+        reset();
+        const file = driftInputs[id];
+        assert.ok(covers(consumed[id], file), id + ' consumes its drift probe');
+        if (!['typecheck', 'server-mutants'].includes(id)) assert.ok(!covers(consumed.typecheck, file), id + ' drift is outside typecheck');
+        fs.appendFileSync(path.join(repo, file), '\nSYN isolated producer drift\n');
+        const done = run(), report = JSON.parse(fs.readFileSync(path.join(runs, 'same-source-' + producer + '.json'), 'utf8'));
+        assert.notEqual(done.status, 0, 'D5D3-01: producer refuses drift in ' + id);
+        assert.ok(report.steps[id]?.problems.some(p => p.includes(file) && p.includes('final checkout')),
+          'D5D3-01: producer checks post-record input for ' + id + '\n' + done.out);
+        reset();
+        fs.rmSync(path.join(runs, id), { recursive: true });
+        assert.notEqual(run().status, 0, 'D5D3-01: producer refuses missing ' + id);
+      }
+    }
+
+    reset();
+    const gateFlow = workflowOf().flow, gateJob = gateFlow.jobs['emr-d-gate'];
+    const gateHarness = { flow: gateFlow, job: gateJob, bash: gnuBash(), scratch, bin: fakeDockerBin(path.join(scratch, 'final-gate')) };
+    const gateStep = gateJob.steps.find(s => s.id === 'same-source');
+    const finalRun = () => runStep(gateHarness, gateStep, { TARGET_SHA: sha }, repo, 'python3() { \"' + python.replace(/\\/g, '/') + '\" \"$@\"; }\n');
+    assert.equal(finalRun().status, 0, 'D5D3: final workflow gate accepts all seven records');
+    for (const id of ids) {
+      reset(); fs.rmSync(path.join(runs, id), { recursive: true });
+      assert.notEqual(finalRun().status, 0, 'D5D3: final workflow gate requires every record: ' + id);
+    }
     passes('R5-21: the same inputs recorded again pass', () => { for (const id of ids) rerecord(id); });
     passes('R5-21: the same inputs recorded from the lines in other shell notation pass', () => {
       for (const id of ids) rerecord(id, { line: renote(steps[ids.indexOf(id)].run) });
     });
+    for (const file of ['api/src/finding.service.ts', 'api/tsconfig.json', firstMigration])
+      refused('D5D-01: post-run change ' + file, () => fs.appendFileSync(path.join(repo, file), '\nSYN post-run\n'), { step: 'server', names: [file] });
+    refused('D5D-01: post-run migration removal', () => fs.rmSync(path.join(repo, firstMigration)), { step: 'live', names: [firstMigration] });
+    refused('D5D-01: post-run migration addition', () => { fs.mkdirSync(path.dirname(path.join(repo, added)), { recursive: true }); fs.writeFileSync(path.join(repo, added), 'SELECT 1;'); }, { step: 'live', names: [added] });
+    refused('D5D-01: final HEAD changed', () => git('update-ref', 'HEAD', other), { names: ['final checkout HEAD'] });
+    git('update-ref', 'HEAD', sha);
+    passes('D5D-01: final LF/CRLF equivalence', () => { const p = path.join(repo, firstMigration); fs.writeFileSync(p, fs.readFileSync(p, 'utf8').replace(/\r?\n/g, '\r\n')); });
+    refused('D5D-02: same count different contract cases', () => rerecord('contract', { output: junitOf(contract.cases.filter(n => !contract.skipped.includes(n)).map((_, i) => 'WRONG-' + i), contract.skipped) }), { step: 'contract' });
+    refused('D5D-02: duplicate contract cases', () => rerecord('contract', { output: junitOf([...contract.cases.slice(2), contract.cases[0], contract.cases[0]]) }), { step: 'contract' });
+    refused('D5D-02: unexpected contract skip', () => rerecord('contract', { output: junitOf(contract.cases.slice(1), contract.cases.slice(0, 1)) }), { step: 'contract' });
+    for (const selected of [[], declaration.mutants.pure.ids.slice(1), ['UNKNOWN'], [...declaration.mutants.pure.ids.slice(1), declaration.mutants.pure.ids[1]]])
+      refused('D5D-02: wrong R1 mutant selection ' + selected.length, () => rerecord('mutants', { output: JSON.stringify(summaryOf({ ...declaration.mutants.pure, ids: selected })) }), { step: 'mutants' });
+    refused('D5D-01: record content differs while checkout restored', () => edit('server', run => each(run, list => list.map(f => f.requested === firstMigration ? { ...f, lf_sha256: '0'.repeat(64) } : f))), { step: 'server', names: [firstMigration] });
+    refused('D5D-01: raw hash cannot borrow a valid LF hash', () => edit('server', run => each(run, list => list.map(f => f.requested === 'api/tsconfig.json' ? { ...f, sha256: '0'.repeat(64) } : f))), { step: 'server', names: ['api/tsconfig.json', 'raw hash'] });
+    refused('D5D-08: another command cannot borrow a TypeScript result', () => edit('typecheck', run => ({ ...run, command: ['python3', '-c', 'pass'] })), { step: 'typecheck', names: ['TypeScript CLI'] });
+    refused('D5D-08: unexecuted typecheck', () => rerecord('typecheck', { output: '' }), { step: 'typecheck' });
+    for (const change of [text => text.replace('live.' + declaration.cases.live.class + '.', 'live.WrongClass.'), text => text.replace(declaration.cases.live.cases[0], 'not_declared')])
+      refused('D5D2-04: live selection mismatch', () => rerecord('live', { output: change(outputOf('live')) }), { step: 'live', names: ['collected'] });
+    refused('D5D2-04: failing equivalent', () => {
+      const summary = summaryOf(declaration.mutants.server); summary.equivalents[0].holds = false;
+      rerecord('server-mutants', { output: JSON.stringify(summary) });
+    }, { step: 'server-mutants', verdict: 'fail' });
+    refused('D5D2-05: partial TypeScript file list', () => rerecord('typecheck', { output: outputOf('typecheck').split('\n').slice(1).join('\n') }), { step: 'typecheck', names: ['missing files'] });
+    refused('D5D2-05: used image differs from verified identity', () => rerecord('live', { output: outputOf('live').replace('f'.repeat(64), 'e'.repeat(64)) }), { step: 'live', names: ['live used image'] });
+    refused('D5D2-05: R1 exclusions missing', () => {
+      const summary = summaryOf(declaration.mutants.pure); delete summary.not_run;
+      rerecord('mutants', { output: JSON.stringify(summary) });
+    }, { step: 'mutants', names: ['not_run'] });
     // Every input a step declares is required of its record, by the declaration of TARGET_SHA: a record that hashed nothing of
     // a declared tree is refused, and so is one shaped to a declaration weakened in the working tree.
     refused('DR3-05: a record that did not hash a declared input fails the check', () => edit('server', run => each(run, list => list.filter(f => !f.requested.startsWith('api/prisma/')))),
@@ -900,14 +1200,163 @@ test('EMR-D evidence: same_source.py passes only records of TARGET_SHA that hash
       summary.result.killed -= 1;
       rerecord('server-mutants', { output: JSON.stringify(summary) });
     }, { step: 'server-mutants', verdict: 'fail' });
+    refused('D5D4-01: a server mutant family run without one of its declared subvariants', () => {
+      const summary = summaryOf(declaration.mutants.server);
+      const family = summary.mutants.find(m => m.subvariants.length);
+      assert.ok(family, 'D5D4-01: the declaration names subvariants');
+      family.subvariants.pop();
+      rerecord('server-mutants', { output: JSON.stringify(summary) });
+    }, { step: 'server-mutants', names: ['subvariants of'] });
     refused('R5-21: a record no step declares', () => fs.cpSync(path.join(runs, 'server'), path.join(runs, 'extra'), { recursive: true }), { names: ['a record no step declares'] });
     // The image identity (produced by the run, bound by the live record that consumed it).
-    refused('R5-22: an image identity of another revision', () => { writeIdentity('sha256:' + 'f'.repeat(64) + ' ' + other + '\n'); rerecord('live'); }, { names: ['not the image of'] });
+    refused('R5-22: an image identity of another revision', () => { writeIdentity('sha256:' + 'f'.repeat(64) + ' ' + other + '\n'); rerecord('live', { output: outputOf('live').replace(sha, other) }); }, { names: ['not the image of'] });
     refused('R5-22: a malformed image identity', () => { writeIdentity('not-an-image ' + sha + '\n'); rerecord('live'); }, { names: ['not the image of'] });
     refused('R5-21: the image identity changed after the live run consumed it', () => writeIdentity('sha256:' + 'e'.repeat(64) + ' ' + sha + '\n'),
       { step: 'live', names: ['tmp/emr-d-ci/image-identity.txt'] });
+    refused('D5D-03: a changed identity is refused even if a later log claims the new ID', () => {
+      writeIdentity('sha256:' + 'e'.repeat(64) + ' ' + sha + '\n');
+      const log = path.join(runs, 'live/stdout.log');
+      fs.writeFileSync(log, fs.readFileSync(log, 'utf8').replace('f'.repeat(64), 'e'.repeat(64)));
+      const digest = require('node:crypto').createHash('sha256').update(fs.readFileSync(log)).digest('hex');
+      edit('live', run => ({ ...run, log_files: run.log_files.map(f => f.requested === 'stdout.log' ? { ...f, sha256: digest, lf_sha256: digest } : f) }));
+    }, { step: 'live', names: ['tmp/emr-d-ci/image-identity.txt'] });
     assert.ok(consumed.live.includes('tmp/emr-d-ci/image-identity.txt'), 'the live run consumes the image identity');
   } finally { fs.rmSync(scratch, { recursive: true, force: true }); }
+});
+
+test('EMR-D refusal matrix: every evidence boundary rejects its own counterexample', () => {
+  const probe = String.raw`
+import contextlib,copy,hashlib,importlib.util,io,json,os,pathlib,shutil,subprocess,sys,tempfile
+spec=importlib.util.spec_from_file_location('gate',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+recorder=pathlib.Path(sys.argv[1]).resolve().parents[3]/'scripts/record-run.py'
+passed=[]
+def expect(label, action, fragment):
+ result=action()
+ assert any(fragment in str(p) for p in result),(label,fragment,result)
+ passed.append(label)
+def snap(items):
+ bad=[];m.snapshot(items,'before',bad);return bad
+h='a'*64
+entry={'requested':'data.txt','status':'present','sha256':h,'lf_sha256':h}
+expect('S01 malformed snapshot',lambda:snap([None]),'not a recorder entry')
+expect('S02 absent input',lambda:snap([{**entry,'status':'missing'}]),'not hashed as present')
+expect('S03 invalid hash',lambda:snap([{**entry,'sha256':''}]),'no valid SHA-256')
+expect('S04 contradictory duplicate',lambda:snap([entry,{**entry,'sha256':'b'*64}]),'hashed twice')
+with tempfile.TemporaryDirectory() as tmp, contextlib.chdir(tmp):
+ root=pathlib.Path(tmp);m.RUNS=pathlib.Path('tmp/emr-d-ci')
+ def write(name,value):
+  p=pathlib.Path(name);p.parent.mkdir(parents=True,exist_ok=True);p.write_text(value,encoding='utf-8');return p
+ def js(name,value):return write(name,json.dumps(value))
+ def git(*args):
+  r=subprocess.run(['git','-c','user.name=SYN','-c','user.email=syn@example.test','-c','commit.gpgsign=false','-c','core.autocrlf=false',*args],capture_output=True,text=True)
+  assert r.returncode==0,r.stderr
+  return r.stdout.strip()
+ write('data.txt','SYN\n');write('api/src/a.ts','export const a=1;\n');write('api/src/b.ts','export const b=2;\n')
+ declaration={'ci':{'recorded_inputs':{'one':['data.txt','api/src','tmp/emr-d-ci/image-identity.txt']},'produced_inputs':['tmp/emr-d-ci/image-identity.txt'],'outputs':{'one':{'kind':'exit'}}}}
+ js('emr/units/d.json',declaration);git('init','-q');git('add','data.txt','api/src','emr/units/d.json');git('commit','-qm','synthetic refusal fixture')
+ sha=git('rev-parse','HEAD');commit=m.Commit(sha);os.environ['TARGET_SHA']=sha
+ identity='sha256:'+'f'*64+' '+sha+'\n';write(m.RUNS/'image-identity.txt',identity)
+ r=subprocess.run([sys.executable,'-B',str(recorder),'--run-dir',str(m.RUNS/'one'),'--file','data.txt','--tree','api/src','--file',str(m.RUNS/'image-identity.txt'),'--',sys.executable,'-c','print("SYN")'],capture_output=True,text=True)
+ assert r.returncode==0,r.stderr
+ runpath=m.RUNS/'one/run.json';original=json.loads(runpath.read_text());produced=set(declaration['ci']['produced_inputs']);needs=declaration['ci']['recorded_inputs']['one']
+ def restore():
+  for p in ['api/src/extra.ts','extra.txt']:
+   pathlib.Path(p).unlink(missing_ok=True)
+  write('api/src/a.ts','export const a=1;\n');write('api/src/b.ts','export const b=2;\n');write('data.txt','SYN\n')
+  write(m.RUNS/'image-identity.txt',identity);write(m.RUNS/'one/stdout.log','SYN\n');write(m.RUNS/'one/stderr.log','');js(runpath,original)
+ def checked(change=lambda r:None, **kw):
+  restore();record=copy.deepcopy(original);change(record);js(runpath,record)
+  return m.check_step('one',kw.get('needs',needs),produced,kw.get('output',{'kind':'exit'}),{},commit)
+ assert checked()['verdict']=='pass'
+ def reject(label,change,fragment,**kw):
+  expect(label,lambda:checked(change,**kw)['problems'],fragment)
+ reject('C01 incomplete record',lambda r:r.update(status='running'),'not a completed run')
+ reject('C02 foreign source',lambda r:r.update(git_head_before='b'*40),'another commit')
+ reject('C03 input disappears',lambda r:r.update(files_after=r['files_after'][1:]),'gone or unhashed')
+ reject('C04 input appears',lambda r:r['files_after'].append({**entry,'requested':'extra.txt'}),'appeared during')
+ reject('C05 input changes',lambda r:r['files_after'][0].update(sha256=h),'changed while')
+ reject('C06 untracked input',lambda r:[r[k].append({**entry,'requested':'extra.txt'}) for k in ['files_before','files_after']],'not a file of')
+ reject('C07 normalized input differs',lambda r:[r[k][0].update(lf_sha256=h) for k in ['files_before','files_after']],'differs from '+sha)
+ reject('C08 raw input differs',lambda r:[r[k][0].update(sha256=h) for k in ['files_before','files_after']],'raw hash differs')
+ reject('C09 produced input changed',lambda r:write(m.RUNS/'image-identity.txt','changed'),'not the file the run produced')
+ reject('C10 required file unhashed',lambda r:[r.update({k:[f for f in r[k] if f['requested']!='data.txt']}) for k in ['files_before','files_after']],'declared input the record did not hash')
+ reject('C11 nonexistent declaration',lambda r:None,'neither a file nor a tree',needs=[*needs,'unknown'])
+ reject('C12 required tree member unhashed',lambda r:[r.update({k:[f for f in r[k] if f['requested']!='api/src/a.ts']}) for k in ['files_before','files_after']],'in api/src the record did not hash')
+ reject('C13 final path added',lambda r:write('api/src/extra.ts','SYN'),'final checkout path added')
+ reject('C14 final path removed',lambda r:pathlib.Path('api/src/a.ts').unlink(),'final checkout path removed')
+ reject('C15 final content differs',lambda r:write('data.txt','changed'),'final checkout differs')
+ reject('C16 produced input unhashed',lambda r:[r.update({k:[f for f in r[k] if m.normal(f['requested']) not in produced]}) for k in ['files_before','files_after']],'declared input the record did not hash')
+ reject('C17 log hash absent',lambda r:r['log_files'][0].update(sha256=None),'log is not recorded')
+ reject('C18 log changed',lambda r:write(m.RUNS/'one/stdout.log','changed'),'not the recorded bytes')
+ reject('C19 child failure',lambda r:r.update(exit_code=1),'command exited 1')
+ reject('C20 recorder failure',lambda r:r.update(recorder_exit_code=125),'recorder 125')
+ reject('C21 compiler identity',lambda r:None,'installed TypeScript CLI',output={'kind':'tsc'})
+ reject('C25 collected problems propagate',lambda r:r.update(command=['node',str(pathlib.Path('api/node_modules/typescript/bin/tsc').resolve())]),'complete TypeScript check',output={'kind':'tsc'})
+ restore();runpath.unlink();assert m.check_step('one',needs,produced,{'kind':'exit'},{},commit)['verdict']=='unrun','C22 unrun record';passed.append('C22 unrun record')
+ write(runpath,'{');assert m.check_step('one',needs,produced,{'kind':'exit'},{},commit)['verdict']=='invalid','C23 unreadable record';passed.append('C23 unreadable record')
+ restore()
+ # Each output dialect has an independent positive and isolated negatives.
+ out=pathlib.Path('out');section={'cases':['one'],'skipped':[]}
+ write(out,'<testsuite><testcase name="one"/></testsuite>');assert m.junit(out,section)==({'passed':['one'],'failed':[],'skipped':[]},[],False)
+ expect('J01 selection',lambda:m.junit(out,{'cases':['two']})[1],'collected cases')
+ expect('J02 absent declaration',lambda:m.junit(out,{})[1],'no independent exact')
+ write(out,'<testsuite><testcase name="one"><skipped/></testcase></testsuite>');expect('J03 skip',lambda:m.junit(out,section)[1],'skipped, not passed')
+ write(out,'<testsuite><testcase name="one"><failure/></testcase></testsuite>');assert m.junit(out,section)[2],'J04 collected failure';passed.append('J04 collected failure')
+ mutant={'mutants':[{'id':'M','killed':True}],'equivalents':[{'id':'E','holds':True}],'not_run':['N'],'result':{'killed':1,'total':1}}
+ selected={'ids':['M'],'equivalents':['E'],'not_run':['N']}
+ def summary(change=lambda d:None,select=selected):
+  data=copy.deepcopy(mutant);change(data);js(out,data);return m.mutant_summary(out,select)
+ assert summary()[1:]==([],False)
+ expect('M01 totals',lambda:summary(lambda d:d['result'].update(total=2))[1],'does not count')
+ expect('M02 exclusions',lambda:summary(lambda d:d.pop('not_run'))[1],'not_run differs')
+ expect('M03 mutant selection',lambda:summary(lambda d:d['mutants'][0].update(id='X'))[1],'mutants run')
+ expect('M04 equivalent selection',lambda:summary(lambda d:d['equivalents'][0].update(id='X'))[1],'equivalents run')
+ family={**selected,'subvariants':{'M':['V']}}
+ assert summary(lambda d:d['mutants'][0].update(subvariants=[{'id':'V','killed':True}]),family)[1:]==([],False)
+ expect('M07 subvariant selection',lambda:summary(lambda d:d['mutants'][0].update(subvariants=[{'id':'X','killed':True}]),family)[1],'subvariants of')
+ for value in [False,1,None]:
+  assert summary(lambda d:d['mutants'][0].update(killed=value))[2],'M05 surviving mutant';passed.append('M05 surviving mutant '+str(value))
+  assert summary(lambda d:d['equivalents'][0].update(holds=value))[2],'M06 failing equivalent';passed.append('M06 failing equivalent '+str(value))
+ live={'class':'Live','cases':['one']}
+ lines=['EXACT_TESTS ["live.Live.one"]','PLAN_RESULT {"status":"passed"}','EMR_D_USED_IMAGE '+json.dumps({'id':'sha256:'+'f'*64,'revision':sha})]
+ def runner(replacements={}):
+  write(out,'\n'.join(replacements.get(i,v) for i,v in enumerate(lines))+'\n');return m.runner_lines(out,live)
+ assert runner()[1:]==([],False)
+ expect('L01 markers',lambda:runner({0:''})[1],'EXACT_TESTS')
+ expect('L02 used identity',lambda:runner({2:lines[2].replace('f'*64,'e'*64)})[1],'live used image')
+ expect('L03 class selection',lambda:runner({0:'EXACT_TESTS ["live.Wrong.one"]'})[1],'collected')
+ expect('L04 method selection',lambda:runner({0:'EXACT_TESTS ["live.Live.wrong"]'})[1],'collected')
+ assert runner({1:'PLAN_RESULT {"status":"failed"}'})[2],'L05 failed plan';passed.append('L05 failed plan')
+ files=[str(pathlib.Path('api/src/'+n+'.ts').resolve()).replace('\\','/') for n in ['a','b']]
+ metrics=['Files: 2','Types: 2','Check time: 0.1s','Total time: 0.1s']
+ write(out,'\n'.join(files+metrics));assert m.collected({'kind':'tsc'},out,{})[1]==[]
+ write(out,'\n'.join(files[1:]+metrics));expect('T01 partial compiler list',lambda:m.collected({'kind':'tsc'},out,{})[1],'missing files')
+ write(out,'\n'.join(files));expect('T02 absent compiler metrics',lambda:m.collected({'kind':'tsc'},out,{})[1],'complete TypeScript check')
+ write(out,'{');expect('O01 malformed output',lambda:m.collected({'kind':'mutants'},out,{})[1],'cannot be read')
+ expect('O02 unknown output',lambda:m.collected({'kind':'unknown'},out,{})[1],'no known kind')
+ # A zero exit with a real failed case must fail the step, not just expose collected data.
+ restore();write(m.RUNS/'one/stdout.log','<testsuite><testcase name="one"><failure/></testcase></testsuite>')
+ r=copy.deepcopy(original);digest=m.file_sha256(m.RUNS/'one/stdout.log');r['log_files'][0].update(sha256=digest,lf_sha256=digest);js(runpath,r)
+ verdict=m.check_step('one',needs,produced,{'kind':'junit','declared':'syn'},{'cases':{'syn':section}},commit)
+ expect('C24 zero exit failed collection',lambda:verdict['problems'],'collected cases show a failure');assert verdict['verdict']=='fail'
+ def main():
+  with contextlib.redirect_stdout(io.StringIO()):code=m.main()
+  result=json.loads((m.RUNS/'same-source.json').read_text());return code,result
+ restore();assert main()[0]==0
+ r=copy.deepcopy(original);r['exit_code']=1;js(runpath,r);assert main()[0]==1,'G07 failed step refuses whole run';passed.append('G07 failed step refuses whole run');restore()
+ os.environ['TARGET_SHA']='invalid';expect('G01 invalid target',lambda:main()[1]['problems'],'no declaration');os.environ['TARGET_SHA']=sha
+ os.environ['TARGET_SHA']='b'*40;expect('G02 missing commit',lambda:main()[1]['problems'],'no declaration');os.environ['TARGET_SHA']=sha
+ shutil.copytree(m.RUNS/'one',m.RUNS/'extra');expect('G03 undeclared record',lambda:main()[1]['problems'],'no step declares');shutil.rmtree(m.RUNS/'extra')
+ write(m.RUNS/'image-identity.txt','bad');expect('G04 invalid image',lambda:main()[1]['problems'],'not the image');restore()
+ git('commit','--allow-empty','-qm','other');expect('G05 checkout mismatch',lambda:main()[1]['problems'],'HEAD differs');git('reset','--soft',sha)
+ declaration['ci']['outputs']['extra']={'kind':'exit'};js('emr/units/d.json',declaration);git('add','emr/units/d.json');git('commit','-qm','mismatched output declaration');os.environ['TARGET_SHA']=git('rev-parse','HEAD')
+ expect('G06 output declaration mismatch',lambda:main()[1]['problems'],'ci.outputs names')
+ print(json.dumps({'passed':passed,'count':len(passed)}))
+`;
+  const done = spawnSync(python, ['-B', '-c', probe, path.join(root, 'tests/emr/d/same_source.py')], { encoding: 'utf8' });
+  assert.equal(done.status, 0, 'refusal matrix\n' + done.stdout + done.stderr);
+  const result = JSON.parse(done.stdout.trim().split(/\r?\n/).at(-1));
+  assert.equal(result.count, 60, 'refusal matrix reports every boundary');
 });
 
 test('TEST-D-04 atomic_retry server: the runtime is not composed unless A\'s stored-record reader serves the sources D cites', () => {

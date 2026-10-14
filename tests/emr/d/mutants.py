@@ -27,6 +27,16 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import importlib.util
+
+# Also load correctly when an independent review imports this driver by file path.
+_record_spec = importlib.util.spec_from_file_location("emr_d_recorder", pathlib.Path(__file__).with_name("same_source.py"))
+_record_module = importlib.util.module_from_spec(_record_spec)
+_record_spec.loader.exec_module(_record_module)
+recorded_execution = _record_module.recorded_execution
+
+EVIDENCE = None
+RUN_NUMBER = 0
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -393,8 +403,34 @@ def run(node, d_src, test, case=None):
     # A broken invariant can invalidate an unrelated schedule's barrier. Only its own behavioural assertion judges
     # each mutant; the unmutated baseline above still collects every declared case, not a shortened selection.
     selection = ["--test-name-pattern=^" + re.escape(case) + "$"] if case else []
-    proc = subprocess.run([node, "--test", "--test-reporter=tap", *selection, str(test)], cwd=ROOT, env=env, capture_output=True, timeout=600)
-    return proc.returncode, proc.stdout.decode("utf-8", "replace"), proc.stderr.decode("utf-8", "replace")
+    global RUN_NUMBER, EVIDENCE
+    if EVIDENCE is None:
+        # Direct review probes use run() without main(); retain their logs outside disposable copies too.
+        EVIDENCE = pathlib.Path(tempfile.mkdtemp(prefix="emr-d-recorded-probe-"))
+    RUN_NUMBER += 1
+    folder = EVIDENCE / ("execution-%03d" % RUN_NUMBER)
+    result = recorded_execution([node, "--test", "--test-reporter=tap", *selection, str(test)], ROOT, env, folder, 600, [case] if case else DECLARED_CASES)
+    collected = tap_cases(result[1])
+    (folder / "selection.json").write_text(json.dumps({"selected": [case] if case else DECLARED_CASES, "collected": list(collected),
+        "states": {n: {"status": row[0], "skip": row[1]} for n, row in collected.items()}}, indent=2), encoding="utf-8")
+    return result
+
+
+def run_saved(*args, **kwargs):
+    """Retain exceptional tool failures as failed executions, with the partial streams."""
+    try:
+        return run(*args, **kwargs)
+    except Exception as exc:
+        folder = EVIDENCE / ('interruption-%03d' % RUN_NUMBER)
+        folder.mkdir(parents=True, exist_ok=True)
+        def decoded(value):
+            return value.decode('utf-8', 'replace') if isinstance(value, bytes) else value or ''
+        out, err = decoded(getattr(exc, 'stdout', '')), decoded(getattr(exc, 'stderr', ''))
+        (folder / 'stdout.log').write_text(out, encoding='utf-8')
+        (folder / 'stderr.log').write_text(err, encoding='utf-8')
+        (folder / 'execution.json').write_text(json.dumps({'status': 'failed', 'exception': type(exc).__name__,
+            'message': str(exc), 'exit': None, 'selected': args[-1] if len(args) > 2 else 'baseline', 'collected': list(tap_cases(out))}), encoding='utf-8')
+        return 124, out, err
 
 
 TAP_LINE = re.compile(r"^(not ok|ok) (\d+) - (.*?)(?: # (SKIP|TODO).*)?$")
@@ -453,11 +489,21 @@ def main():
     parser.add_argument("--anchors-only", action="store_true")
     parser.add_argument("--out")
     args = parser.parse_args()
+    global EVIDENCE
+    EVIDENCE = pathlib.Path(args.out).resolve().with_suffix('.runs') if args.out else ROOT / 'tmp/emr-d-ci/mutants-executions'
+    EVIDENCE.mkdir(parents=True, exist_ok=False)
+    def save():
+        destination = pathlib.Path(args.out) if args.out else EVIDENCE / 'summary.json'
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+
     problems = check_anchors()
     sources = {str(p.relative_to(ROOT)).replace("\\", "/"): sha(p.read_bytes())
                for p in sorted([*D_DIR.glob("*.ts"), *A_DIR.glob("*.ts"), TEST])}
     summary = {"sources": sources, "anchors": "ok" if not problems else problems, "baseline": None, "mutants": [], "not_run": NOT_RUN,
                "case_not_run": CASE_NOT_RUN, "integration_not_run": INTEGRATION_NOT_RUN}
+    summary["pending"] = ["baseline", *[m["id"] for m in MUTANTS]]
+    save()
     if problems or args.anchors_only:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return 1 if problems else 0
@@ -466,7 +512,7 @@ def main():
     summary["node"] = version
     with tempfile.TemporaryDirectory(prefix="emr-d-baseline-") as work:
         d_src, test, _ = stage(work)
-        code, stdout, stderr = run(node, d_src, test)
+        code, stdout, stderr = run_saved(node, d_src, test)
         cases = tap_cases(stdout)
         passed = {name for name, (status, skip, _) in cases.items() if status == "ok" and not skip}
         missing = sorted({m["case"] for m in MUTANTS} - passed)
@@ -475,6 +521,8 @@ def main():
                      "undeclared": sorted(set(cases) - set(DECLARED_CASES)), "not_collected": sorted(set(DECLARED_CASES) - set(cases))}
         summary["baseline"] = {"exit": code, "selection": selection, "not_ok": sorted(n for n, (s, _, _) in cases.items() if s == "not ok"),
                                "named_cases_not_passing": missing, "stdout": stdout, "stderr": stderr}
+        summary["pending"].remove("baseline")
+        save()
         mismatch = (len(set(DECLARED_CASES)) != len(DECLARED_CASES) or set(cases) != set(DECLARED_CASES) or
                     passed != set(DECLARED_CASES) - set(CASE_NOT_RUN) or skipped != set(CASE_NOT_RUN))
         if code != 0 or missing or mismatch:
@@ -484,15 +532,20 @@ def main():
     for mutant in MUTANTS:
         with tempfile.TemporaryDirectory(prefix=f"emr-d-{mutant['id'].lower()}-") as work:
             d_src, test, hashes = stage(work, mutant)
-            code, stdout, stderr = run(node, d_src, test, mutant["case"])
+            code, stdout, stderr = run_saved(node, d_src, test, mutant["case"])
             verdict = judge(mutant, code, stdout, stderr)
             source = "tests/emr/d/" if mutant["file"] == TEST.name else "api/src/emr-clinical/"
             summary["mutants"].append({"id": mutant["id"], "title": mutant["title"], "file": source + mutant["file"],
                                        "scope": mutant.get("scope", "D-module"), "invariant": mutant.get("invariant"),
                                        "case": mutant["case"], "expect": mutant["expect"], "exit": code,
                                        "stdout": stdout, "stderr": stderr, **hashes, **verdict})
+            summary["pending"].remove(mutant["id"])
+            save()
+            if code == 124:
+                return 1
     killed = all(m["killed"] for m in summary["mutants"])
     summary["result"] = {"killed": sum(m["killed"] for m in summary["mutants"]), "total": len(MUTANTS), "not_run": len(NOT_RUN)}
+    save()
     text = json.dumps(summary, ensure_ascii=False, indent=2)
     if args.out:
         pathlib.Path(args.out).write_text(text, encoding="utf-8")

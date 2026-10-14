@@ -2379,3 +2379,150 @@ are compared with the original single inline Script at the same auth-response ba
 revocation and pending ScreenDetails replies. Native PermissionStatus smoke, competing handler probes,
 context invalidation, repeat changes and saved popup geometry assertions remain. This does not prove physical
 OS monitor placement. The direct source files remain unchanged and all existing PRE/mutant selections remain.
+
+### EMR-D part (d) round 5d4
+
+REQ R5-21/22/23 → evidence/source/skip/failure-loss risks → `EMR-D workflow`, `EMR-D evidence`, and `EMR-D refusal matrix` in `tests/emr/d/server_test.cjs`. The matrix checks each isolated boundary with synthetic records and real Git/recorder files; the larger evidence case exercises the seven-record integration. Mutation anchors inject defects; assertions check observable verdicts and diagnostics, not source spelling. See [workflow contracts](emr/d/README.md) for allowed equivalent YAML and timeout budgets.
+
+| Refusal or gate property | Test that fails on removal | Removal mutant |
+|---|---|---|
+| S01 malformed snapshot | S01 malformed snapshot | `M-D-REF-S01` |
+| S02 absent input | S02 absent input | `M-D-REF-S02` |
+| S03 invalid hash | S03 invalid hash | `M-D-REF-S03` |
+| S04 contradictory duplicate | S04 contradictory duplicate | `M-D-REF-S04` |
+| J01 selection | J01 selection | `M-D-REF-J01` |
+| J03 skip | J03 skip | `M-D-REF-J03` |
+| J02 absent declaration | J02 absent declaration | `M-D-REF-J02` |
+| M01 totals | M01 totals | `M-D-REF-M01` |
+| M02 exclusions | M02 exclusions | `M-D-REF-M02` |
+| M03 mutant selection | M03 mutant selection | `M-D-REF-M03` |
+| M04 equivalent selection | M04 equivalent selection | `M-D-REF-M04` |
+| L02 used identity | L02 used identity | `M-D-REF-L02` |
+| L03 class selection | L03 class selection | `M-D-REF-L03` |
+| T01 partial compiler list | T01 partial compiler list | `M-D-REF-T01` |
+| C21 compiler identity | C21 compiler identity | `M-D-REF-C21` |
+| C02 foreign source | C02 foreign source | `M-D-REF-C02` |
+| C03 input disappears | C03 input disappears | `M-D-REF-C03` |
+| C04 input appears | C04 input appears | `M-D-REF-C04` |
+| C05 input changes | C05 input changes | `M-D-REF-C05` |
+| C06 untracked input | C06 untracked input | `M-D-REF-C06` |
+| C07 normalized input differs | C07 normalized input differs | `M-D-REF-C07` |
+| C08 raw input differs | C08 raw input differs | `M-D-REF-C08` |
+| C09 produced input changed | C09 produced input changed | `M-D-REF-C09` |
+| C10 required file unhashed | C10 required file unhashed | `M-D-REF-C10` |
+| C11 nonexistent declaration | C11 nonexistent declaration | `M-D-REF-C11` |
+| C12 required tree member unhashed | C12 required tree member unhashed | `M-D-REF-C12` |
+| C13 final path added | C13 final path added | `M-D-REF-C13` |
+| C14 final path removed | C14 final path removed | `M-D-REF-C14` |
+| C15 final content differs | C15 final content differs | `M-D-REF-C15` |
+| C16 produced input unhashed | C16 produced input unhashed | `M-D-REF-C16` |
+| C17 log hash absent | C17 log hash absent | `M-D-REF-C17` |
+| C18 log changed | C18 log changed | `M-D-REF-C18` |
+| C25 collected problems propagate | C25 collected problems propagate | `M-D-REF-C25` |
+| C19 child failure | C19 child failure | `M-D-REF-C19` |
+| C24 zero exit failed collection | C24 zero exit failed collection | `M-D-REF-C24` |
+| G05 checkout mismatch | G05 checkout mismatch | `M-D-REF-G05` |
+| G01 invalid target | G01 invalid target | `M-D-REF-G01` |
+| G06 output declaration mismatch | G06 output declaration mismatch | `M-D-REF-G06` |
+| G03 undeclared record | G03 undeclared record | `M-D-REF-G03` |
+| G04 invalid image | G04 invalid image | `M-D-REF-G04` |
+| J04 collected failure | J04 collected failure | `M-D-REF-J04` |
+| M05 surviving mutant | M05 surviving mutant | `M-D-REF-M05` |
+| M06 failing equivalent | M06 failing equivalent | `M-D-REF-M06` |
+| L05 failed plan | L05 failed plan | `M-D-REF-L05` |
+| L01 markers | L01 markers | `M-D-REF-L01` |
+| O01 malformed output | O01 malformed output | `M-D-REF-O01` |
+| O02 unknown output | O02 unknown output | `M-D-REF-O02` |
+| C01 incomplete record | C01 incomplete record | `M-D-REF-C01` |
+| C22 unrun record | C22 unrun record | `M-D-REF-C22` |
+| C23 unreadable record | C23 unreadable record | `M-D-REF-C23` |
+| G07 failed step refuses whole run | G07 failed step refuses whole run | `M-D-REF-G07` |
+| step-error | D5D2-01: gate step cannot ignore failure | `M-D-GATE-step-error` |
+| job-error | D5D2-01: gate job cannot ignore failure | `M-D-GATE-job-error` |
+| job-skip | D5D2-01: gate job runs on failure | `M-D-GATE-job-skip` |
+| job-success | D5D2-01: gate job runs on failure | `M-D-GATE-job-success` |
+| needs-main | D5D-06: gate waits for both record jobs | `M-D-GATE-needs-main` |
+| needs-mutants | D5D-06: gate waits for both record jobs | `M-D-GATE-needs-mutants` |
+| serialized | D5D2-06: record jobs run in parallel | `M-D-GATE-serialized` |
+| producer-skip | D5D2: producer is not skipped | `M-D-GATE-producer-skip` |
+| producer-error | D5D2: producer cannot ignore failure | `M-D-GATE-producer-error` |
+| gate-sha | D5D2: gate source equals producer source | `M-D-GATE-gate-sha` |
+| gate-checkout | D5D2: gate checks out requested source | `M-D-GATE-gate-checkout` |
+| download-skip | D5D2: downloads run on failure | `M-D-GATE-download-skip` |
+| download-path | D5D2: downloads restore the record root | `M-D-GATE-download-path` |
+| download-run | D5D2: downloads belong to this workflow run | `M-D-GATE-download-run` |
+| download-repo | D5D2: downloads belong to this repository | `M-D-GATE-download-repo` |
+| upload-skip | D5D2: evidence uploads on failure | `M-D-GATE-upload-skip` |
+| upload-path | D5D2: entire evidence tree uploaded | `M-D-GATE-upload-path` |
+| upload-empty | D5D2: missing evidence is an error | `M-D-GATE-upload-empty` |
+| D5D-06: gate job exists | D5D-06: gate job exists | `M-D-GATE-missing-job` |
+| D5D2: bounded job budget emr-d | D5D2: bounded job budget emr-d | `M-D-GATE-budget-emr-d` |
+| D5D2: bounded job budget emr-d-server-mutants | D5D2: bounded job budget emr-d-server-mutants | `M-D-GATE-budget-emr-d-server-mutants` |
+| D5D2: bounded job budget emr-d-gate | D5D2: bounded job budget emr-d-gate | `M-D-GATE-budget-emr-d-gate` |
+| D5D2: producers use one source | D5D2: producers use one source | `M-D-GATE-producer-sha` |
+| D5D2: producer checks out requested source | D5D2: producer checks out requested source | `M-D-GATE-producer-checkout` |
+| D5D2: upload follows records | D5D3: producer verification follows records and precedes upload | `M-D-GATE-upload-order` |
+| Final shell command propagates a failed same-source verdict | a record of another commit fails the check | `M-D-D5D-06` |
+| Final gate step exists | D5D-06: final gate exists | `M-D-D5D-06-missing` |
+| Final gate follows downloaded records | D5D-06: final gate runs after every record | `M-D-D5D-06-early` |
+| Final step runs after failed producers/downloads | D5D-06: final gate runs on failure | `M-D-D5D-06-condition` |
+| Image revision equals requested source | image identity must refuse a wrong image | `AR4-M09` |
+| Recorder hashes complete declared inputs | a record of another commit fails the check | `AR4-M08` |
+| Typecheck really executes with full diagnostics | D5D-08: the child reports an actual typecheck | `M-D-D5D-08` |
+| Compiler uses no incremental cache | D5D-05: incremental cache is neither consumed nor written | `M-D-D5D-05` |
+| Live verifies immutable image before DB startup | D5D-03: identity mismatch is refused before DB start | `M-D-D5D-03` |
+| Completed and timed-out child logs retained | D5D-07: completed and interrupted raw streams survive | `M-D-D5D-07` |
+| Summary flushed before next mutant | D5D-07: completed and interrupted raw streams survive | `M-D-D5D-07-summary` |
+| M-D-GATE-step-deleted | D5D-06: final gate exists | `M-D-GATE-step-deleted` |
+| M-D-GATE-job-default-if | D5D2-01: gate job runs on failure | `M-D-GATE-job-default-if` |
+| M-D-GATE-step-error-expression | D5D2-01: gate step cannot ignore failure | `M-D-GATE-step-error-expression` |
+| M-D-PRODUCER-main-missing | D5D3: producer verifies its final checkout | `M-D-PRODUCER-main-missing` |
+| M-D-PRODUCER-main-noop | D5D3: producer refuses post-record drift | `M-D-PRODUCER-main-noop` |
+| M-D-PRODUCER-main-skip | D5D3: producer verification runs on failure | `M-D-PRODUCER-main-skip` |
+| M-D-PRODUCER-main-ignore | D5D3: producer verification cannot ignore failure | `M-D-PRODUCER-main-ignore` |
+| M-D-PRODUCER-server-mutants-missing | D5D3: producer verifies its final checkout | `M-D-PRODUCER-server-mutants-missing` |
+| M-D-PRODUCER-server-mutants-noop | D5D3: producer refuses post-record drift | `M-D-PRODUCER-server-mutants-noop` |
+| M-D-PRODUCER-server-mutants-skip | D5D3: producer verification runs on failure | `M-D-PRODUCER-server-mutants-skip` |
+| M-D-PRODUCER-server-mutants-ignore | D5D3: producer verification cannot ignore failure | `M-D-PRODUCER-server-mutants-ignore` |
+| final gate cannot inherit producer subset | D5D3: final workflow gate requires every record | `M-D-GATE-partial-main` |
+| final gate cannot inherit producer subset | D5D3: final workflow gate requires every record | `M-D-GATE-partial-server-mutants` |
+| Missing TypeScript diagnostics | T02 absent compiler metrics | `M-D-REF-T02` |
+| the image is labelled and tagged with the workflow ref, not the checked-out source | R5-22: the image of the requested source passes the identity check | `M-D-R3-DR2-07a` |
+| the image record leaves out a file the build copies | the image record hashes api/tsconfig.json | `M-D-R3-DR2-07b` |
+| the server record no longer hashes the migrations its declaration case reads | the server record hashes api/prisma | `M-D-R4-DR3-05a` |
+| the R1 mutants record no longer hashes the lock that pins its compiler | the mutants record hashes api/package-lock.json | `M-D-R4-DR3-05b` |
+| the workflow case splits lines on whitespace (a parser of its own) instead of as the shell does | DR3-06: Bash recorder execution | `M-D-R4-DR3-06` |
+| the declaration drops the migrations the live run's image applies | R5-21: the live declaration names api/prisma/migrations | `M-D-R5-21k` |
+| the live record no longer hashes the migration tree | the live record hashes api/prisma/migrations | `M-D-R5-21l` |
+| the revision comparison stays written but no longer stops the run | image identity must refuse a wrong image | `M-D-R5-22a` |
+| the revision is compared with the requested source itself | image identity must refuse a wrong image | `M-D-R5-22b` |
+| the identity step reads a label the build never sets | R5-22: the image of the requested source passes the identity check | `M-D-R5-22c` |
+| the image is built without the requested source as its revision | R5-22: the image of the requested source passes the identity check | `M-D-R5-22d` |
+| the checkout is compared with itself, not with TARGET_SHA | R5-22: a checkout of another commit than TARGET_SHA is refused | `M-D-R5-22e` |
+| the revision comparison kept word for word as the arguments of a no-op command | image identity must refuse a wrong image | `M-D-R5-23a` |
+| migration tree truly absent from server declaration | DR3-05: the server declaration names api/prisma/migrations | `M-D-R4-DR3-05missing` |
+| the image record hashes api/prisma | the image record hashes api/prisma | `M-D-D5D-04` |
+| main producer verifies only the typecheck record | D5D3-01: producer refuses drift in contract | `R3-SC-13` (mandatory subvariant of `M-D-PRODUCER-main-noop`) |
+| Main producer verification includes its typecheck record | D5D3: producer refuses its missing record | `M-D-D5D3-select-without-typecheck` (mandatory subvariant of `M-D-PRODUCER-main-noop`) |
+| Main producer verification includes its contract record | D5D3-01: producer checks post-record input for contract | `M-D-D5D3-select-without-contract` (mandatory subvariant of `M-D-PRODUCER-main-noop`) |
+| Main producer verification includes its R1 mutants record | D5D3-01: producer checks post-record input for mutants | `M-D-D5D3-select-without-mutants` (mandatory subvariant of `M-D-PRODUCER-main-noop`) |
+| Main producer verification includes its server record | D5D3-01: producer checks post-record input for server | `M-D-D5D3-select-without-server` (mandatory subvariant of `M-D-PRODUCER-main-noop`) |
+| Main producer verification includes its image record | D5D3-01: producer checks post-record input for image | `M-D-D5D3-select-without-image` (mandatory subvariant of `M-D-PRODUCER-main-noop`) |
+| Main producer verification includes its live record | D5D3-01: producer checks post-record input for live | `M-D-D5D3-select-without-live` (mandatory subvariant of `M-D-PRODUCER-main-noop`) |
+| combined gate evidence uploaded only on success | D5D3-02: combined gate evidence uploads always | `R3-OM-21` (mandatory subvariant of `M-D-GATE-upload-skip`) |
+| Gate job uploads the combined evidence | D5D3-02: combined gate evidence upload exists | `M-D-D5D3-gate-upload-missing` (mandatory subvariant of `M-D-GATE-upload-skip`) |
+| Combined gate evidence uploads even when the gate fails | D5D3-02: combined gate evidence uploads always | `M-D-D5D3-gate-upload-default-if` (mandatory subvariant of `M-D-GATE-upload-skip`) |
+| combined gate evidence: missing files no longer an error | D5D3-02: missing combined gate evidence is an error | `R3-OM-22` (mandatory subvariant of `M-D-GATE-upload-empty`) |
+| a timed-out child is not killed (the wrapper waits for it to finish) | D5D3-03: timeout kills the hung child and descendant | `R3-T3` (mandatory subvariant of `M-D-D5D-07`) |
+| an interrupted child is reported completed in execution.json | D5D3-04: execution and child record the actual interruption state | `R3-T2` (mandatory subvariant of `M-D-D5D-07`) |
+| Timeout stops the hung child's descendants as well | D5D3-03: timeout kills the hung child and descendant | `M-D-D5D3-kill-parent-only` (mandatory subvariant of `M-D-D5D-07`) |
+| Server-mutants producer verifies exactly its own record | D5D3: producer accepts exactly its own completed records | `M-D-D5D3-select-wrong-mutant-record` (mandatory subvariant of `M-D-PRODUCER-server-mutants-noop`) |
+| Combined gate evidence covers the entire record root | D5D3-02: combined gate evidence includes the entire record root | `M-D-D5D3-gate-upload-path` (mandatory subvariant of `M-D-GATE-upload-path`) |
+| Combined gate evidence upload follows the final gate | D5D3-02: combined evidence upload follows the final gate | `M-D-D5D3-gate-upload-order` (mandatory subvariant of `M-D-GATE-upload-order`) |
+| Each family's run subvariants equal its declared subvariants (`emr/units/d.json` `mutants.server.subvariants`) | M07 subvariant selection | `M-D-REF-M07` |
+| The driver's subvariant table equals the declaration (main-producer family) | D5D4-01: the driver runs exactly the declared subvariants of each family | `M-D-D5D4-01a` (the reviewer's R4-SV-01) |
+| The driver's subvariant table equals the declaration (gate-upload family) | D5D4-01: the driver runs exactly the declared subvariants of each family | `M-D-D5D4-01b` (the reviewer's R4-SV-02) |
+
+The following variants share the same refusal path: C20 recorder exit (C19 mutant), L04 method selection (L03 mutant), G02 missing commit (G01 mutant), and strict Boolean mutant/equivalent results (M05/M06). Unreadable/unfinished/unrun records, output parsing, unknown output dialects and failed collected cases have independent rows. G01/G02 cover refusal when the target or its Git objects cannot be read. No live selection or live command changes in this round; prior binding review live result remains 21/21, while hosted timing and final SHA gates remain pending.
+
+The 5d4 additions kept the 147 declared families exact and required all 17 subvariants (164 defect executions), including the five previously surviving reviewer mutations. Merged with part (a) (its 16 `M-D-R5A-*` families) and with the D5D4-01 fix (`M-D-REF-M07`, `M-D-D5D4-01a/b`), `emr/units/d.json` declares 166 families, 18 equivalents and the 17 subvariants per family (183 defect executions); the server cases are 24 and the live cases 26. The gate-upload and producer-selection rows above each name an executed removal test. The [workflow contract](emr/d/README.md) records the eight practically equivalent sub-condition changes with their individual reasons. Completed/interrupted status and child/descendant termination are observed in the workflow case; a survivor in a mandatory subvariant makes its declared family and driver fail. No `api/`, workflow, declaration, live or same-source implementation change is required.
