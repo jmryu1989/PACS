@@ -8,7 +8,8 @@
  * the response as the sink, and hooks for its no-progress timer, lease fencing and per-object checkpoints.
  */
 import { createHash } from 'node:crypto';
-import type { Readable, Writable } from 'node:stream';
+import { Readable } from 'node:stream';
+import type { Writable } from 'node:stream';
 
 export interface ManifestObjectInput {
   orthancId: string;
@@ -111,14 +112,24 @@ export interface ArchiveWriteResult {
   bytesWritten: number;
 }
 
+/**
+ * Hands a source stream to the writer. Called synchronously, in the same turn in which the producer obtains the stream;
+ * from that call on the writer owns the stream's 'error' and 'close' and destroys the stream when it is done with it.
+ */
+export type SourceAdopt = (readable: Readable) => void;
+
 export interface WriteArchiveOptions {
   plan: ArchivePlan;
   /**
-   * The stored original bytes of one manifest object (e.g. its Orthanc file stream). The writer owns the returned
-   * stream's 'error' from the moment the call (or its promise) settles and destroys the stream when it is done with
-   * it, so return one that has not failed yet; bound the wait for the stream itself with the same signal.
+   * Opens the stored original bytes of one manifest object (e.g. its Orthanc file stream) and hands the stream over by
+   * calling `adopt(stream)` synchronously at the moment the producer holds it (inside its own callback or `then`,
+   * before yielding to the event loop): returning or resolving with the stream is not a hand-over. Until adopt the
+   * stream's errors are the producer's: one that failed before adopt is the producer's to handle, and adopt records a
+   * stream it finds already destroyed or errored as source-error. The call (or its promise) settling without exactly
+   * one adopt of a Readable, or throwing or rejecting, ends the archive as source-error. Bound the producer's own wait
+   * for the stream (connection, headers) with the same signal; the writer awaits this call before anything else.
    */
-  source: (object: ManifestObject, index: number) => Readable | Promise<Readable>;
+  source: (object: ManifestObject, index: number, adopt: SourceAdopt) => void | Promise<void>;
   sink: Writable;
   /** Awaited after each verified object and before the next one starts; a rejection stops the archive (checkpoint). */
   onObjectDone?: (result: ArchiveObjectResult, index: number) => void | Promise<void>;
@@ -400,36 +411,39 @@ class Stop {
 
 /**
  * Sink events as state, so a client that goes away mid-stream ends the archive instead of hanging it on 'drain'.
- * `onFailure` runs when the sink errors or closes before finishing: the writer may be waiting on its source rather
- * than on the sink, and that wait has to end too.
+ * `onFailure` runs when the sink errors, or finishes or closes before the writer itself ended it after the last
+ * planned byte: the writer may be waiting on its source rather than on the sink, and that wait has to end too.
  */
 function watchSink(sink: Writable, onFailure: () => void) {
   let failure: ArchiveStopReason | null = null;
   let drained = true;
   let finished = false;
+  // Set only when the writer calls sink.end() after all T bytes; a 'finish' or 'close' before that is a receiver
+  // that ended or went away early, never a completed archive.
+  let writerEnding = false;
   let wake: (() => void) | null = null;
   const notify = () => {
     const resume = wake;
     wake = null;
     if (resume) resume();
   };
+  const failed = (reason: ArchiveStopReason) => {
+    if (!failure) failure = reason;
+    notify();
+    onFailure();
+  };
   const listeners: Record<string, () => void> = {
-    error: () => {
-      if (!failure) failure = 'sink-error';
-      notify();
-      onFailure();
-    },
+    error: () => failed('sink-error'),
     close: () => {
-      if (finished) return;
-      if (!failure) failure = 'sink-closed';
-      notify();
-      onFailure();
+      if (writerEnding && finished) return;
+      failed('sink-closed');
     },
     drain: () => {
       drained = true;
       notify();
     },
     finish: () => {
+      if (!writerEnding) return failed('sink-closed');
       finished = true;
       notify();
     },
@@ -454,7 +468,12 @@ function watchSink(sink: Writable, onFailure: () => void) {
       drained = false;
       return until(() => drained);
     },
-    finish: () => until(() => finished),
+    /** The writer's own end after the last planned byte; resolves on that end's 'finish'. */
+    end: () => {
+      writerEnding = true;
+      sink.end();
+      return until(() => finished);
+    },
     dispose: () => {
       for (const [event, listener] of Object.entries(listeners)) sink.off(event, listener);
     },
@@ -467,8 +486,8 @@ function watchSink(sink: Writable, onFailure: () => void) {
  * central directory and the end record. A short or long object, an MD5 mismatch, a source or sink failure, an abort,
  * a lost lease or a failed checkpoint stops the archive, destroys the sink without ending it and reports 'incomplete'.
  * Whether the writer is waiting on the source or on the sink when that happens, the promise settles with that result
- * (a pending hook promise is awaited first); a source error never escapes as an unowned event, and a receiver that
- * goes away releases the source.
+ * (a pending hook promise is awaited first). An adopted source's errors never escape as unowned events, and a receiver
+ * that errors, closes, or finishes before the writer ended it after the last planned byte releases the source.
  */
 export async function writeArchive(options: WriteArchiveOptions): Promise<ArchiveWriteResult> {
   const { plan, source, sink, onObjectDone, onProgress, beforeWrite, signal } = options;
@@ -483,6 +502,16 @@ export async function writeArchive(options: WriteArchiveOptions): Promise<Archiv
   };
   // A receiver that closes or fails also ends a wait on a stalled source: releasing it settles the pending read.
   const watch = watchSink(sink, () => release(current));
+  // The writer's listeners on an adopted source. They stay for the stream's lifetime, so an error after release is
+  // absorbed too; while the stream is the current one, an error or a close before its end stops the archive.
+  const own = (readable: Readable) => {
+    readable.on('error', () => {
+      if (current === readable) watch.fail('source-error');
+    });
+    readable.on('close', () => {
+      if (current === readable && !readable.readableEnded) watch.fail('source-error');
+    });
+  };
   const copy = (r: ArchiveObjectResult): ArchiveObjectResult => ({ ...r });
 
   const put = async (chunk: Uint8Array) => {
@@ -528,26 +557,38 @@ export async function writeArchive(options: WriteArchiveOptions): Promise<Archiv
         orthancId: object.orthancId, sopUid: object.sopUid, bytesRead: 0, bytesSupplied: 0, sha256: null, md5: null, complete: false,
       };
       objects.push(result);
-      let stream: Readable;
-      try {
-        stream = await source(object, index);
-      } catch {
-        throw new Stop(watch.failure() ?? (signal?.aborted ? 'aborted' : 'source-error'));
-      }
-      if (!stream || typeof stream.on !== 'function') throw new Stop('source-error');
-      // Own the source's 'error' from acquisition. Until for-await starts (after the local header and a possibly
-      // asynchronous beforeWrite) nothing else listens, and an unowned 'error' event would end the process. The listener
-      // stays for the stream's lifetime, so an error after release is absorbed too.
-      const acquired = stream;
-      acquired.on('error', () => {
-        if (current === acquired) watch.fail('source-error');
-      });
-      current = acquired;
+      // The hand-over: the producer calls adopt(stream) synchronously while it holds the stream, so the writer's
+      // listeners are on it before anything else can run. Awaiting a returned stream would leave a turn in which an
+      // error has no owner and ends the process.
+      const handover = { stream: null as Readable | null, calls: 0, open: true };
+      const adopt: SourceAdopt = readable => {
+        handover.calls += 1;
+        if (!(readable instanceof Readable)) {
+          if (handover.open) watch.fail('source-error');
+          return;
+        }
+        own(readable);
+        if (!handover.open || handover.calls > 1) {
+          if (handover.open) watch.fail('source-error');
+          release(readable);
+          return;
+        }
+        handover.stream = readable;
+        current = readable;
+        if (readable.destroyed || readable.errored) watch.fail('source-error');
+      };
       const md5 = createHash('md5');
       const sha256 = createHash('sha256');
       let crc = 0;
       let overLength = false;
       try {
+        try {
+          await source(object, index, adopt);
+        } finally {
+          handover.open = false;
+        }
+        const stream = handover.stream;
+        if (!stream || handover.calls !== 1) throw new Stop(watch.failure() ?? 'source-error');
         await put(localHeader(Buffer.from(entry.name, 'utf8')));
         for await (const chunk of stream) {
           if (!(chunk instanceof Uint8Array)) throw new Stop('source-error');
@@ -573,11 +614,12 @@ export async function writeArchive(options: WriteArchiveOptions): Promise<Archiv
           }
         }
       } catch (error) {
-        // A read that ended because the sink failed or the caller aborted reports that reason, not the source.
+        // A source() that threw or rejected is a source error unless the writer had already stopped for another
+        // reason; a read that ended because the sink failed or the caller aborted reports that reason.
         throw error instanceof Stop ? error : new Stop(watch.failure() ?? 'source-error');
       } finally {
         current = null;
-        release(acquired);
+        release(handover.stream);
       }
       if (overLength || result.bytesRead !== object.bytes) throw new Stop('length-mismatch');
       const md5Hex = md5.digest('hex');
@@ -609,8 +651,9 @@ export async function writeArchive(options: WriteArchiveOptions): Promise<Archiv
     await put(endOfCentralDirectory(plan));
     if (written !== plan.totalSize) throw new Stop('plan-mismatch');
     if (signal?.aborted) throw new Stop('aborted');
-    sink.end();
-    await watch.finish();
+    const failure = watch.failure();
+    if (failure) throw new Stop(failure);
+    await watch.end();
     return finishWith<ArchiveWriteResult>({
       state: 'finished', reason: null, archiveSha256: archiveHash.digest('hex'), objects: objects.map(copy), bytesWritten: written,
     });

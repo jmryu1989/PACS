@@ -347,9 +347,9 @@ test('A-WRITE: the archive is exactly T bytes of STORE entries, descriptors, cen
   const progress = [];
   const result = await writeArchive({
     plan,
-    source: (object, index) => {
+    source: (object, index, adopt) => {
       events.push(`source:${index}`);
-      return Readable.from(chunked(data.get(object.orthancId), 7));
+      adopt(Readable.from(chunked(data.get(object.orthancId), 7)));
     },
     sink: out.sink,
     onObjectDone: async (done, index) => {
@@ -420,10 +420,10 @@ async function writeWith(replace, options = {}) {
   const opened = [];
   const result = await withTimeout(writeArchive({
     plan,
-    source: (object, index) => {
+    source: (object, index, adopt) => {
       opened.push(index);
       const original = data.get(object.orthancId);
-      return replace(index, original) ?? Readable.from(chunked(original, 64));
+      adopt(replace(index, original) ?? Readable.from(chunked(original, 64)));
     },
     sink: out.sink,
     ...options.hooks,
@@ -519,7 +519,7 @@ test('A-SINK-CLOSED: a receiver that goes away mid-stream ends the archive witho
   let written = 0;
   const result = await withTimeout(writeArchive({
     plan,
-    source: object => Readable.from(chunked(data.get(object.orthancId), 32)),
+    source: (object, index, adopt) => adopt(Readable.from(chunked(data.get(object.orthancId), 32))),
     sink: out.sink,
     onProgress: p => {
       written = p.archiveBytesWritten;
@@ -578,10 +578,10 @@ test('A-SOURCE-EARLY-ERROR: a source that fails while the first beforeWrite is p
   let source;
   const result = await withTimeout(writeArchive({
     plan,
-    source: () => {
+    source: (object, index, adopt) => {
       source = new Readable({ read() {} });
       setTimeout(() => source.destroy(new Error('synthetic upstream reset')), 5);
-      return source;
+      adopt(source);
     },
     sink: out.sink,
     beforeWrite: () => new Promise(resolve => setTimeout(() => resolve(true), 40)),
@@ -596,46 +596,114 @@ test('A-SOURCE-EARLY-ERROR: a source that fails while the first beforeWrite is p
   assert.equal(source.destroyed, true);
 });
 
-// The same failure in a plain child process with no process-level handlers: an unowned 'error' event would end it with
-// a non-zero status before the promise settles.
-const EARLY_ERROR_CHILD = `
+/**
+ * Plain child processes with no process-level handlers: an unowned 'error' event would end the child with a non-zero
+ * status before the promise settles. Modes: 'timer' (the source fails 5 ms in, while the first beforeWrite is pending),
+ * 'sync-nexttick' (the producer adopts synchronously and the stream fails in the next tick), 'promise-settlement'
+ * (the producer adopts and resolves inside setImmediate and the stream fails in the next tick). The last two are the
+ * reviewer's U4BA2-01 probes written for the adopt hand-over.
+ */
+const SOURCE_CHILD = `
 const { Readable, Writable } = require('node:stream');
 const { createHash } = require('node:crypto');
 const { canonicalManifest, planArchive, writeArchive } = require(process.env.KIN_ORIGINAL_ARCHIVE_MODULE);
+const mode = process.argv[1];
 const data = Buffer.from('synthetic original object bytes');
 const prepared = canonicalManifest('2.25.31', [{ orthancId: 'only', seriesUid: '2.25.32', sopUid: '2.25.33', bytes: data.length,
   md5: createHash('md5').update(data).digest('hex') }]);
-let source;
+let stream;
 const sink = new Writable({ write(chunk, encoding, done) { done(); } });
+const source = (object, index, adopt) => {
+  stream = new Readable({ read() {} });
+  if (mode === 'timer') {
+    setTimeout(() => stream.destroy(new Error('synthetic upstream reset during the lease check')), 5);
+    adopt(stream);
+    return;
+  }
+  if (mode === 'sync-nexttick') {
+    process.nextTick(() => stream.destroy(new Error('synthetic error after the synchronous hand-over')));
+    adopt(stream);
+    return;
+  }
+  return new Promise(resolve => setImmediate(() => {
+    adopt(stream);
+    resolve();
+    process.nextTick(() => stream.destroy(new Error('synthetic error after the promise settled')));
+  }));
+};
 writeArchive({
-  plan: planArchive(prepared.manifest).plan,
-  source: () => {
-    source = new Readable({ read() {} });
-    setTimeout(() => source.destroy(new Error('synthetic upstream reset during the lease check')), 5);
-    return source;
-  },
-  sink,
-  beforeWrite: () => new Promise(resolve => setTimeout(() => resolve(true), 40)),
+  plan: planArchive(prepared.manifest).plan, source, sink,
+  beforeWrite: mode === 'timer' ? () => new Promise(resolve => setTimeout(() => resolve(true), 40)) : undefined,
 }).then(result => console.log(JSON.stringify({ settled: 'resolved', result, sinkFinished: sink.writableFinished,
-  sinkDestroyed: sink.destroyed, sourceDestroyed: source.destroyed })),
+  sinkDestroyed: sink.destroyed, sourceDestroyed: stream.destroyed })),
 error => console.log(JSON.stringify({ settled: 'rejected', error: String(error) })));
 `;
 
-test('A-SOURCE-EARLY-ERROR-PROCESS: a plain node process survives the early source error and the writer returns incomplete', () => {
-  const child = spawnSync(process.execPath, ['-e', EARLY_ERROR_CHILD], {
+function runSourceChild(mode) {
+  const child = spawnSync(process.execPath, ['-e', SOURCE_CHILD, mode], {
     env: { ...process.env, KIN_ORIGINAL_ARCHIVE_MODULE: TARGET }, encoding: 'utf8', timeout: 20000,
   });
-  assert.equal(child.signal, null);
-  assert.equal(child.status, 0, `child exited ${child.status}: ${child.stderr}`);
-  assert.doesNotMatch(child.stderr, /Unhandled|uncaught/i);
-  const line = child.stdout.trim().split('\n').at(-1);
-  const report = JSON.parse(line);
-  assert.equal(report.settled, 'resolved');
-  assert.equal(report.result.state, 'incomplete');
-  assert.equal(report.result.reason, 'source-error');
-  assert.equal(report.sinkFinished, false, 'the sink is not ended successfully');
-  assert.equal(report.sinkDestroyed, true);
-  assert.equal(report.sourceDestroyed, true, 'the source is released');
+  assert.equal(child.signal, null, mode);
+  assert.equal(child.status, 0, `${mode}: child exited ${child.status}: ${child.stderr}`);
+  assert.doesNotMatch(child.stderr, /Unhandled|uncaught/i, mode);
+  const report = JSON.parse(child.stdout.trim().split('\n').at(-1));
+  assert.equal(report.settled, 'resolved', mode);
+  assert.equal(report.result.state, 'incomplete', mode);
+  assert.equal(report.result.reason, 'source-error', mode);
+  assert.equal(report.sinkFinished, false, `${mode}: the sink is not ended successfully`);
+  assert.equal(report.sinkDestroyed, true, mode);
+  assert.equal(report.sourceDestroyed, true, `${mode}: the source is released`);
+}
+
+test('A-SOURCE-EARLY-ERROR-PROCESS: a plain node process survives the early source error and the writer returns incomplete', () => {
+  runSourceChild('timer');
+});
+
+test('A-ADOPT-HANDOFF-PROCESS: an error in the tick after a synchronous adopt or after the promise settles is owned (U4BA2-01)', () => {
+  runSourceChild('sync-nexttick');
+  runSourceChild('promise-settlement');
+});
+
+test('A-ADOPT-CONTRACT: no adopt, two adopts, a non-Readable, a throwing or rejecting source and a dead stream are source-error', async () => {
+  const run = async (source, label) => {
+    const { plan } = singleObject();
+    const out = collector();
+    const result = await withTimeout(writeArchive({ plan, source, sink: out.sink }), 3000, label);
+    assert.equal(result.state, 'incomplete', label);
+    assert.equal(result.reason, 'source-error', label);
+    assert.equal(result.bytesWritten, 0, label);
+    assert.equal(out.finished(), false, label);
+    assert.equal(out.sink.destroyed, true, label);
+    return result;
+  };
+  const idle = () => new Readable({ read() {} });
+  await run(() => idle(), 'returned instead of adopted');
+  await run(async () => idle(), 'resolved with a stream instead of adopting it');
+  const pair = [idle(), idle()];
+  await run((object, index, adopt) => { adopt(pair[0]); adopt(pair[1]); }, 'adopted twice');
+  assert.deepEqual(pair.map(s => s.destroyed), [true, true], 'both adopted streams are released');
+  await run((object, index, adopt) => adopt({ on() {}, destroy() {} }), 'adopted a non-Readable');
+  await run((object, index, adopt) => adopt(null), 'adopted null');
+  await run(() => { throw new Error('lookup failed'); }, 'threw');
+  const adoptedThenRejected = idle();
+  await run(async (object, index, adopt) => { adopt(adoptedThenRejected); throw new Error('headers failed'); }, 'adopted, then rejected');
+  assert.equal(adoptedThenRejected.destroyed, true, 'the adopted stream of a rejected source is released');
+  const dead = idle();
+  dead.destroy();
+  await run((object, index, adopt) => adopt(dead), 'adopted an already destroyed stream');
+  let erroring;
+  await run((object, index, adopt) => {
+    erroring = idle();
+    erroring.destroy(new Error('failed in the producer, error event still pending'));
+    adopt(erroring);
+  }, 'adopted an errored stream');
+  // A late adopt (after the source call settled) is released, never used.
+  let late;
+  await run((object, index, adopt) => {
+    setTimeout(() => adopt((late = idle())), 10);
+  }, 'adopt after the source call settled');
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(late.destroyed, true, 'a late adopted stream is released');
 });
 
 test('A-SINK-CLOSE-STALLED-SOURCE: a receiver that closes or fails while the source stalls ends the archive without an abort', async () => {
@@ -647,10 +715,10 @@ test('A-SINK-CLOSE-STALLED-SOURCE: a receiver that closes or fails while the sou
     const pending = writeArchive({
       plan,
       // No signal: only the sink's own close or error may end this run.
-      source: (object, index) => {
+      source: (object, index, adopt) => {
         stalled = new Readable({ read() {} });
         stalled.push(Buffer.alloc(8, index + 1)); // some bytes, then nothing more
-        return stalled;
+        adopt(stalled);
       },
       sink: out.sink,
       onProgress: p => {
@@ -675,6 +743,48 @@ test('A-SINK-CLOSE-STALLED-SOURCE: a receiver that closes or fails while the sou
   }
 });
 
+test('A-SINK-END-STALLED-SOURCE: a receiver that ends early (finish, then close) while the source stalls is sink-closed (U4BA2-02)', async () => {
+  // The reviewer's probe: the source's first read starts, then the receiver calls end(); no signal is passed.
+  const { plan } = singleObject();
+  let readStarted;
+  const started = new Promise(resolve => { readStarted = resolve; });
+  let stalled;
+  let receivedAtEnd = 0;
+  let received = 0;
+  const events = [];
+  const sink = new Writable({ write(chunk, encoding, done) { received += chunk.length; done(); } });
+  sink.on('finish', () => events.push('finish'));
+  sink.on('close', () => events.push('close'));
+  const pending = writeArchive({
+    plan,
+    source: (object, index, adopt) => adopt((stalled = new Readable({ read() { readStarted(); } }))),
+    sink,
+  });
+  await started;
+  receivedAtEnd = received;
+  sink.end();
+  const result = await withTimeout(pending, 3000, 'writeArchive after an early sink.end()');
+  assert.deepEqual(events, ['finish', 'close'], 'the receiver finished and closed normally');
+  assert.equal(result.state, 'incomplete');
+  assert.equal(result.reason, 'sink-closed');
+  assert.equal(result.archiveSha256, null);
+  assert.equal(result.bytesWritten, receivedAtEnd, 'nothing more was supplied after the early end');
+  assert.ok(result.bytesWritten < plan.totalSize);
+  assert.equal(stalled.destroyed, true, 'the stalled source is released');
+
+  // Control: the writer's own end after all T bytes is the only finish that completes the archive.
+  const { data, plan: fullPlan } = singleObject();
+  const out = collector();
+  const finished = await withTimeout(writeArchive({
+    plan: fullPlan, source: (object, index, adopt) => adopt(Readable.from([data])), sink: out.sink,
+  }), 3000, 'normal finish');
+  assert.equal(finished.state, 'finished');
+  assert.equal(finished.reason, null);
+  assert.equal(finished.bytesWritten, fullPlan.totalSize);
+  assert.equal(out.finished(), true);
+  assert.equal(out.bytes().length, fullPlan.totalSize);
+});
+
 test('A-SINK-CLOSE-PENDING-SOURCE: a receiver that goes away while source() is pending releases the stream it then gets', async () => {
   const { plan } = singleObject();
   const out = collector();
@@ -682,9 +792,10 @@ test('A-SINK-CLOSE-PENDING-SOURCE: a receiver that goes away while source() is p
   setTimeout(() => out.sink.destroy(), 10); // the receiver leaves before the source stream arrives at 60 ms
   const result = await withTimeout(writeArchive({
     plan,
-    source: () => new Promise(resolve => setTimeout(() => {
+    source: (object, index, adopt) => new Promise(resolve => setTimeout(() => {
       late = new Readable({ read() {} });
-      resolve(late);
+      adopt(late);
+      resolve();
     }, 60)),
     sink: out.sink,
   }), 3000, 'writeArchive');
