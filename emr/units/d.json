@@ -202,7 +202,11 @@
       "open_sr_adoptions(integer)",
       "sr_adoption_for(text)",
       "record_sr_purpose_end(text,text,text)",
-      "sr_purpose_ends(text[])"
+      "sr_purpose_ends(text[])",
+      "response_facts(text,text[])",
+      "remember_rejection(text,text,text,uuid,integer,text)",
+      "rejection_for(uuid)",
+      "lock_request(text,text,text)"
     ],
     "reader_functions": [
       "storage_placement()",
