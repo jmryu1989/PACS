@@ -155,7 +155,7 @@ class RotationTests(unittest.TestCase):
         original = ops._rotation_plan
         first = True
 
-        def plan_then_damage(*args):
+        def plan_then_damage(*args, **kwargs):
             nonlocal first
             planned = original(*args)
             if not first:
@@ -325,9 +325,19 @@ class RotationTests(unittest.TestCase):
         try:
             link.symlink_to(self.root.path, target_is_directory=True)
         except (OSError, NotImplementedError):
-            return
-        with self.assertRaisesRegex(RuntimeError, "not a directory"):
-            ops.rotate(link, 7)
+            if os.name != "nt":
+                self.fail("the filesystem cannot exercise the backup-root link boundary")
+            import subprocess
+            made = subprocess.run(["cmd.exe", "/c", "mklink", "/J", str(link), str(self.root.path)], capture_output=True)
+            self.assertEqual(made.returncode, 0, "the owned Windows junction fixture must be created")
+        try:
+            with self.assertRaisesRegex(RuntimeError, "not a directory"):
+                ops.rotate(link, 7)
+        finally:
+            if os.name == "nt":
+                link.rmdir()
+            else:
+                link.unlink()
 
     def test_10_a_symlink_in_the_daily_namespace_is_refused_without_deleting(self):
         for day in range(1, 10):
@@ -422,7 +432,7 @@ class RotationContracts(unittest.TestCase):
         moved = folder.with_name(ops.ROTATING + folder.name)
         folder.rename(moved)
         original, first = ops._rotation_plan, True
-        def damage(*args):
+        def damage(*args, **kwargs):
             nonlocal first
             result = original(*args)
             if first:
@@ -449,7 +459,7 @@ class RotationContracts(unittest.TestCase):
         self.assertTrue(folder.exists())
 
     def test_new_hold_reference_audit_protect_or_keep_loss_after_rename_preserves(self):
-        for change in ("hold", "latest", "audit", "protect", "keep", "manifest", "lock"):
+        for change in ("hold", "latest", "audit", "protect", "keep", "manifest", "manifest-change", "lock"):
             with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
                 root = Root(temporary)
                 for day in range(1, 9):
@@ -476,6 +486,9 @@ class RotationContracts(unittest.TestCase):
                         (root.path / daily(8) / "kin.dump").unlink()
                     elif change == "manifest":
                         (folder / "manifest.json").unlink()
+                    elif change == "manifest-change":
+                        manifest = folder / "manifest.json"
+                        manifest.write_bytes(manifest.read_bytes() + b"\n")
                     else:
                         (self.repository / ".kin-ops.lock").write_text("foreign-owner")
                 with patch.object(ops.os, "rename", side_effect=intervene):
@@ -508,7 +521,7 @@ class RotationContracts(unittest.TestCase):
         self.assertEqual(json.loads(complete)["state"], "THINNED_COMPLETE")
         self.assertIsNone(ops._daily_whole(folder))
         for field, value in (("backup", daily(2)), ("manifest_sha256", "0" * 64), ("state", "THIN_PLANNED"),
-                             ("archive_sha256", "0" * 64), ("keep", 0)):
+                             ("archive_sha256", "0" * 64), ("keep", 0), ("at", "2026-10-12T12:00:00+09:00")):
             changed = json.loads(complete)
             changed[field] = value
             (folder / ops.THINNED_FILE).write_text(json.dumps(changed))
@@ -536,7 +549,8 @@ class RotationContracts(unittest.TestCase):
         (folder / "orthanc.tgz").unlink()
         result = self.rotate()
         self.assertEqual(result["deleted"], [])
-        self.assertIn(daily(1), result["incomplete"])
+        self.assertNotIn(daily(1), result["incomplete"])
+        self.assertEqual(json.loads((folder / ops.THINNED_FILE).read_text())["state"], "THINNED_COMPLETE")
 
     def test_valid_thinned_completion_can_be_deleted_only_after_retention_expires(self):
         RotationTests.ledger(self, daily(1))
@@ -592,6 +606,96 @@ class BackupCommandTests(unittest.TestCase):
         rotation = self.run_main(["backup", "--output", "/backups", "--rotate-keep", "0"], lambda *a: calls.append(1) or made)
         rotation.assert_not_called()
         self.assertEqual(calls, [], "an invalid rotation refuses before the backup")
+
+
+class RoundFiveRotationContracts(unittest.TestCase):
+    def setUp(self):
+        self.fixture = RotationTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.root = self.fixture.root
+
+    def test_planned_thinning_with_an_intact_archive_counts_in_current_keep(self):
+        first = self.root.daily(daily(1))
+        self.root.daily(daily(2))
+        self.fixture.ledger(daily(1))
+        original = Path.unlink
+        def interrupt(path, *args, **kwargs):
+            if path == first / "orthanc.tgz":
+                raise OSError("interrupted before unlink")
+            return original(path, *args, **kwargs)
+        with patch.object(Path, "unlink", interrupt), self.assertRaises(OSError):
+            self.fixture.rotate(keep=1)
+        self.assertEqual(json.loads((first / ops.THINNED_FILE).read_text())["state"], "THIN_PLANNED")
+        result = self.fixture.rotate(keep=2)
+        self.assertEqual(result["generations"], [daily(2), daily(1)])
+        self.assertEqual(result["thinned"], [])
+        self.assertTrue((first / "orthanc.tgz").is_file())
+
+    def test_rotating_leftover_never_displaces_an_available_daily_generation(self):
+        for day in (1,2,3):
+            self.root.daily(daily(day))
+        moved = self.root.path / (ops.ROTATING + daily(3))
+        (self.root.path / daily(3)).rename(moved)
+        (moved / ops.HOLD_FILE).write_text("{}")
+        result = self.fixture.rotate(keep=1)
+        self.assertEqual(result["generations"], [daily(2)])
+        self.assertEqual(result["kept_leftovers"][moved.name], "hold")
+        self.assertTrue((self.root.path / daily(2)).is_dir())
+        self.assertEqual(result["deleted"], [daily(1)])
+
+    def test_revalidation_hashes_only_candidate_and_kept_sets_not_the_whole_root_per_delete(self):
+        for day in range(1,26):
+            self.root.daily(daily(day))
+        calls = []
+        original = ops.digest
+        def observed(path):
+            if Path(path).name == "orthanc.tgz":
+                calls.append(Path(path).parent.name)
+            return original(path)
+        with patch.object(ops, "digest", side_effect=observed):
+            result = self.fixture.rotate(keep=2)
+        self.assertEqual(len(result["deleted"]), 23)
+        self.assertLess(len(calls), 25 * 12, "fixed keep must not cause a full-root rehash for every deletion")
+
+    def test_dry_run_never_creates_the_operations_lock(self):
+        self.root.daily(daily(1))
+        opened = []
+        original = os.open
+        def observe(path, flags, *args, **kwargs):
+            if Path(path).name == ".kin-ops.lock" and flags & os.O_CREAT:
+                opened.append(path)
+            return original(path, flags, *args, **kwargs)
+        with patch.object(ops.os, "open", side_effect=observe):
+            self.fixture.rotate(dry_run=True)
+        self.assertEqual(opened, [], "read-only dry-run must not create even a transient operations lock")
+
+    def test_undeclared_set_content_is_preserved_before_deletion(self):
+        first = self.root.daily(daily(1))
+        second = self.root.daily(daily(2))
+        self.root.daily(daily(3))
+        (first / "operator-note").write_bytes(b"must remain")
+        (second / "operator-files").mkdir()
+        (second / "operator-files" / "note").write_bytes(b"must also remain")
+        for dry_run in (True, False):
+            result = self.fixture.rotate(keep=1, dry_run=dry_run)
+            self.assertEqual(result["would_delete" if dry_run else "deleted"], [])
+            self.assertIn(daily(1), result["incomplete"])
+            self.assertIn(daily(2), result["incomplete"])
+            self.assertEqual((first / "operator-note").read_bytes(), b"must remain")
+            self.assertEqual((second / "operator-files" / "note").read_bytes(), b"must also remain")
+
+    def test_completed_thin_marker_cannot_hide_changed_archive_bytes(self):
+        first = self.root.daily(daily(1))
+        self.root.daily(daily(2))
+        self.fixture.ledger(daily(1))
+        self.assertEqual(self.fixture.rotate(keep=1)["thinned"], [daily(1)])
+        archive = first / "orthanc.tgz"
+        archive.write_bytes(b"unexpected replacement archive")
+        result = self.fixture.rotate(keep=1)
+        self.assertIn(daily(1), result["incomplete"])
+        self.assertEqual(result["deleted"], [])
+        self.assertEqual(archive.read_bytes(), b"unexpected replacement archive")
 
 
 if __name__ == "__main__":

@@ -114,7 +114,7 @@ class InventoryContracts(unittest.TestCase):
             host.extra_roles.append(role("legacy_reader", login=False))
             catalog = host.catalog()
             catalog["unsupported_verifiers"] = ["legacy_reader"]
-            host.catalog = lambda: catalog
+            host.catalog = lambda container=None: catalog
             with self.assertRaises(RuntimeError):
                 host.capture()
             self.assertFalse(host.parent.exists())
@@ -203,10 +203,13 @@ class CloneContracts(unittest.TestCase):
     def admin_fixture(self):
         uid, credential, attribute = "a" * 8 + "-" + "b" * 27, "c" * 8 + "-" + "d" * 27, "e" * 8 + "-" + "f" * 27
         rows = {"user_entity": {"id": uid, "username": "clone-admin", "realm_id": "master", "enabled": "true", "email_verified": "false",
-            "not_before": "0", "created_timestamp": "100000", "last_modified_timestamp": None, "email_constraint": uid, "email": None},
-            "credential": {"id": credential, "user_id": uid, "type": "password", "created_date": "100000", "priority": "0", "version": "0",
+            "not_before": "0", "created_timestamp": "100000", "last_modified_timestamp": "100000", "email_constraint": uid, "email": None,
+            "federation_link": None, "first_name": None, "last_name": None, "service_account_client_link": None},
+            "credential": {"id": credential, "user_id": uid, "type": "password", "created_date": "100000", "priority": "10", "version": "0",
+                "salt": None, "user_label": None,
                 "secret_data": json.dumps({"salt": "synthetic", "value": "synthetic-hash"}), "credential_data": json.dumps({"algorithm": "argon2"})},
-            "user_attribute": {"id": attribute, "user_id": uid, "name": "is_temporary_admin", "value": "true"}}
+            "user_attribute": {"id": attribute, "user_id": uid, "name": "is_temporary_admin", "value": "true",
+                "long_value_hash": None, "long_value_hash_lower_case": None, "long_value": None}}
         before = {table: (list(row), []) for table, row in rows.items()}
         after = {table: (list(row), [list(row.values())]) for table, row in rows.items()}
         before["user_role_mapping"] = (["user_id", "role_id"], [])
@@ -216,12 +219,18 @@ class CloneContracts(unittest.TestCase):
     def test_bootstrap_admin_has_one_new_owned_identity_and_keeps_residual_values(self):
         before, after = self.admin_fixture()
         args = dict(username="clone-admin", realm="master", role_ids=["admin", "default"], started_ms=99000, ended_ms=101000)
-        uid, transform = intro.clone_admin_rows(before, after, **args)
+        try:
+            uid, transform = intro.clone_admin_rows(before, after, **args)
+        except intro.Stop as error:
+            self.fail("Keycloak 26.7.3 bootstrap-admin rows were refused: " + str(error))
         self.assertTrue(uid)
         for table, (columns, rows) in after.items():
             self.assertEqual(transform(("keycloak", "public", "table", table, None), columns, rows), [])
         for table, field, value in (("user_entity", "realm_id", "other"), ("user_entity", "email", "unexpected@example.invalid"),
-                                    ("credential", "user_id", "existing-user"), ("user_attribute", "value", "false")):
+                                    ("credential", "user_id", "existing-user"), ("credential", "priority", "0"),
+                                    ("credential", "priority", "11"), ("credential", "version", "1"),
+                                    ("credential", "salt", "unexpected"), ("credential", "user_label", "unexpected"),
+                                    ("user_attribute", "value", "false")):
             bad = copy.deepcopy(after)
             bad[table][1][0][bad[table][0].index(field)] = value
             with self.subTest(table=table, field=field), self.assertRaises(intro.Stop):

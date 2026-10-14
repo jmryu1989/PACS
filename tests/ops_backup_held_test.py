@@ -48,7 +48,7 @@ def object_row(database, kind, name, **attributes):
 
 
 def catalog_globals(roles):
-    return {"server_major": 16, "unsupported_verifiers": [], "login_verifiers": ["kin"], "builtin_roles": [], "settings": [],
+    return {"server_major": 16, "unsupported_verifiers": [], "login_verifiers": sorted(row["rolname"] for row in roles if row["rolcanlogin"]), "builtin_roles": [], "settings": [],
             "setting_names": ["search_path", "statement_timeout", "work_mem"],
             "role_comments": [[row["rolname"], None] for row in sorted(roles, key=lambda row: row["rolname"])]}
 
@@ -77,6 +77,8 @@ class FakeHost:
         self.dump_failure = None
         self.emr_roles = shape == "post"
         self.extra_roles, self.memberships, self.extra_databases, self.extra_tablespaces = [], [], [], []
+        self.verifiers = {RESOURCES["containers"]["db"]: {"kin", *({"kin_runtime"} if shape == "post" else set())}}
+        (self.repo / ".env").write_text("POSTGRES_PASSWORD=synthetic-fixture\nKIN_EMR_RUNTIME_PASSWORD=synthetic-runtime\n")
 
     def containers(self):
         out = []
@@ -93,11 +95,11 @@ class FakeHost:
                         "Config": {"Image": role + ":synthetic"}, "Mounts": mounts})
         return out
 
-    def catalog(self):
+    def catalog(self, container=None):
         roles = [{**role("kin", superuser=True, login=True), **getattr(self, "kin_changes", {})}] + ([role(name, login=name == "kin_runtime") for name in ops.EMR_ROLES]
                                                               if self.emr_roles else []) + list(self.extra_roles)
-        return {**catalog_globals(roles), "roles": roles, "memberships": list(self.memberships),
-                "databases": [{"name": name, "owner": "kin", "acl": None} for name in ("keycloak", "kin", "postgres", "template0", "template1", *self.extra_databases)],
+        return {**catalog_globals(roles), "login_verifiers": sorted(self.verifiers[container or RESOURCES["containers"]["db"]]), "roles": roles, "memberships": list(self.memberships),
+                "databases": [{"name": name, "owner": "kin", "acl": None, "attributes": {"datistemplate": False, "datallowconn": True}} for name in ("keycloak", "kin", "postgres", "template0", "template1", *self.extra_databases)],
                 "tablespaces": [{"name": "pg_default", "owner": "kin", "location": ""}, {"name": "pg_global", "owner": "kin", "location": ""},
                                 *([{"name": "kin_emr_access", "owner": "kin_emr_owner", "location": ops.EMR_TABLESPACE}] if self.emr_roles else []),
                                 *self.extra_tablespaces],
@@ -130,7 +132,7 @@ class FakeHost:
         if args[:2] == ["git", "status"]:
             return ""
         if ops.ROLE_CATALOG_SQL in args:
-            return json.dumps(self.catalog())
+            return json.dumps(self.catalog(args[args.index("psql") - 1]))
         if ops.MIGRATIONS_SQL in args:
             return json.dumps([["0_init", "1" * 64, True, False]])
         if ops.VALUE_TABLES_SQL in args:
@@ -146,6 +148,15 @@ class FakeHost:
 
     def run(self, args, *, output=None, input_file=None, timeout=600, check=True):
         self.commands.append(list(args))
+        if args[:3] == ["docker", "run", "-d"]:
+            self.verifiers[args[args.index("--name") + 1]] = set()
+        if "psql" in args and input_file is not None and "-f" not in args:
+            import re
+            container = args[args.index("psql") - 1]
+            sql = input_file.read().decode()
+            for name in re.findall(r'ALTER ROLE "([^"]+)" PASSWORD ', sql):
+                self.verifiers[container].add(name)
+
         if "psql" in args and "-f" in args and input_file is not None:
             database = args[args.index("-d") + 1]
             return SimpleNamespace(returncode=0, stdout=json.dumps(self.objects(database)).encode(), stderr=b"")
@@ -208,7 +219,7 @@ class HeldCaptureTests(unittest.TestCase):
         self.assertEqual(manifest["resources"], RESOURCES)
         self.assertEqual(manifest["running_images"]["kin-api"]["id"], "sha256:" + "1" * 64)
         metadata = json.loads((directory / "metadata.json").read_text())
-        self.assertEqual(metadata["env_names"], ["SYNTHETIC"])
+        self.assertEqual(metadata["env_names"], ["KIN_EMR_RUNTIME_PASSWORD", "POSTGRES_PASSWORD"])
         self.assertNotIn("placeholder", json.dumps(metadata))
         self.assertEqual(host.lifecycle_commands(), [])
         self.assertTrue(ops.HELD_NAME.fullmatch(directory.name) and not ops.DAILY_NAME.fullmatch(directory.name))
@@ -244,7 +255,7 @@ class HeldCaptureTests(unittest.TestCase):
         for extra in ({"schemas": ["public", "emr_clinical"]}, {"tablespaces": [{"name": "kin_emr_access"}]}):
             host = FakeHost(tempfile.mkdtemp(dir=self.folder))
             original = host.catalog
-            host.catalog = lambda original=original, extra=extra: {**original(), **extra}
+            host.catalog = lambda container=None, original=original, extra=extra: {**original(container), **extra}
             with self.subTest(extra=extra), self.assertRaisesRegex(RuntimeError, "pre-EMR capture found EMR storage"):
                 host.capture()
         host = FakeHost(tempfile.mkdtemp(dir=self.folder), shape="post")
@@ -357,7 +368,7 @@ class HeldCaptureTests(unittest.TestCase):
                 self.assertFalse(json.loads(record.read_text())["success"])
 
     def test_11_a_post_emr_capture_is_restored_exactly_in_a_kin_bootstrap_cluster(self):
-        """B1's restore check replays its roles (EMR logins without a password) and memberships as the cluster's own
+        """B1's restore check replays its roles, stored LOGIN verifiers and memberships as the cluster's own
         superuser, creates the EMR tablespace, restores with owners and privileges, and compares the whole catalog."""
         host = FakeHost(tempfile.mkdtemp(dir=self.folder), shape="post")
         host.extra_roles.append(role("legacy_reader"))
@@ -433,18 +444,20 @@ class FakeCluster:
         self.snapshot = snapshot
         self.roles = {"kin": role("kin", superuser=True, login=True)}
         self.memberships = []
-        self.databases = {name: {"name": name, "owner": "kin", "acl": None} for name in ("kin", "postgres", "template0", "template1")}
+        self.verifiers = set()
+        self.databases = {name: {"name": name, "owner": "kin", "acl": None, "attributes": {"datistemplate": False, "datallowconn": True}} for name in ("kin", "postgres", "template0", "template1")}
         self.objects = {}
         self.commands = []
         self.strip = None
 
     def catalog(self):
-        return {**catalog_globals(list(self.roles.values())), "roles": [self.roles[name] for name in sorted(self.roles)], "memberships": sorted(self.memberships, key=lambda m: (m["granted"], m["member"])),
+        return {**catalog_globals(list(self.roles.values())), "login_verifiers": sorted(self.verifiers), "roles": [self.roles[name] for name in sorted(self.roles)], "memberships": sorted(self.memberships, key=lambda m: (m["granted"], m["member"])),
                 "databases": [self.databases[name] for name in sorted(self.databases)], "tablespaces": self.snapshot["tablespaces"],
                 "schemas": self.snapshot["schemas"] if "kin" in self.objects else ["public"]}
 
     def apply(self, sql):
         import re as pattern
+        self.verifiers.update(pattern.findall(r'ALTER ROLE "([^"]+)" PASSWORD ', sql))
         for name, flags in pattern.findall(r'CREATE ROLE "([^"]+)" WITH ([^;]+);', sql):
             words = flags.split()
             self.roles[name] = {"rolname": name, "rolsuper": "SUPERUSER" in words, "rolcreaterole": "CREATEROLE" in words,
@@ -498,9 +511,9 @@ class ExactRestoreTests(unittest.TestCase):
                                     "set_option": True},
                                    {"granted": "pg_read_all_data", "member": "legacy_group", "grantor": "kin", "admin_option": True, "inherit_option": False,
                                     "set_option": False}],
-                   "databases": [{"name": "keycloak", "owner": "kin", "acl": None},
-                                 {"name": "kin", "owner": "kin", "acl": "{=Tc/kin,kin=CTc/kin,legacy_reader=c/kin}"},
-                                 *[{"name": name, "owner": "kin", "acl": None} for name in ("postgres", "template0", "template1")]],
+                   "databases": [{"name": "keycloak", "owner": "kin", "acl": None, "attributes": {"datistemplate": False, "datallowconn": True}},
+                                 {"name": "kin", "owner": "kin", "acl": "{=Tc/kin,kin=CTc/kin,legacy_reader=c/kin}", "attributes": {"datistemplate": False, "datallowconn": True}},
+                                 *[{"name": name, "owner": "kin", "acl": None, "attributes": {"datistemplate": False, "datallowconn": True}} for name in ("postgres", "template0", "template1")]],
                    "tablespaces": [{"name": "pg_default", "owner": "kin", "location": ""}, {"name": "pg_global", "owner": "kin", "location": ""}],
                    "schemas": ["legacy_archive", "public"],
                    "objects": {"kin": inventory("kin", [object_row("kin", "schema", "legacy_archive", owner="legacy_group", acl=[]),
@@ -517,11 +530,34 @@ class ExactRestoreTests(unittest.TestCase):
         with patch.object(ops, "text", side_effect=cluster.text), patch.object(ops, "run", side_effect=cluster.run):
             return ops.restore_pre_snapshot("kin-rh-db", directory)
 
+    def test_login_verifiers_are_restored_from_credentials_and_missing_or_extra_verifiers_are_refused(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory, catalog = self.snapshot(folder)
+            cluster = FakeCluster(catalog)
+            self.assertEqual(cluster.verifiers, set())
+            try:
+                self.restore(cluster, directory)
+            except RuntimeError as error:
+                self.fail("supported credential restoration refused: " + str(error))
+            self.assertEqual(cluster.verifiers, {"kin"})
+            for change in (lambda values: values.discard("kin"), lambda values: values.add("unexpected-login")):
+                cluster = FakeCluster(catalog)
+                apply = cluster.apply
+                def changed(sql):
+                    apply(sql)
+                    change(cluster.verifiers)
+                cluster.apply = changed
+                with self.assertRaises(RuntimeError):
+                    self.restore(cluster, directory)
+
     def test_01_roles_memberships_owners_and_grants_are_rebuilt_and_compared(self):
         with tempfile.TemporaryDirectory() as folder:
             directory, catalog = self.snapshot(folder)
             cluster = FakeCluster(catalog)
-            result = self.restore(cluster, directory)
+            try:
+                result = self.restore(cluster, directory)
+            except RuntimeError as error:
+                self.fail("the supported role and privilege snapshot must restore: " + str(error))
             self.assertEqual(result["roles_created"], ["legacy_group", "legacy_reader"])
             self.assertEqual(result["memberships_granted"], 2)
             self.assertEqual(cluster.catalog()["roles"], catalog["roles"])
@@ -580,12 +616,15 @@ class RealClusterTests(unittest.TestCase):
     """D22/D23 against real PostgreSQL 16 (postgres:16-alpine): networkless single containers named kin-rehearsal-*,
     labelled and removed. Proves on the real catalog what the fake clusters above assume."""
 
+    def setUp(self):
+        self.enterContext(ops.resource_names(os.environ.get("KIN_TEST_RESOURCE_PREFIX", "kin-rehearsal-")))
+
     def start(self, superuser="kin"):
         import subprocess
         import time as clock
         import uuid
         token = uuid.uuid4().hex
-        name = "kin-rehearsal-" + token[:16]
+        name = os.environ.get("KIN_TEST_RESOURCE_PREFIX", "kin-rehearsal-") + token[:16]
         subprocess.run(["docker", "run", "-d", "--name", name, "--label", "kin.ops.run=" + token, "--network", "none",
                         "-e", "POSTGRES_USER=" + superuser, "-e", "POSTGRES_DB=kin", "-e", "POSTGRES_PASSWORD=r4-synthetic-fixture-only",
                         "-e", "POSTGRES_HOST_AUTH_METHOD=trust", POSTGRES_IMAGE],
@@ -617,6 +656,135 @@ class RealClusterTests(unittest.TestCase):
             with open(directory / (database + ".dump"), "wb") as handle:
                 subprocess.run(["docker", "exec", name, "pg_dump", "-U", "kin", "-d", database, "--encoding=UTF8", "-Fc", "--create"], stdout=handle, check=True)
         return directory
+
+    def test_r5_clone_credentials_replace_source_passwords_and_preserve_catalog(self):
+        import ops_emr_introduction as release
+        import shlex
+        import subprocess
+        source = self.start()
+        self.ok(source, "CREATE ROLE kin_runtime LOGIN PASSWORD 'source-runtime'; ALTER ROLE kin_runtime SET work_mem='8MB';")
+        subprocess.run(["docker", "exec", "-i", source, "sh", "-c", "cat > \"$PGDATA/pg_hba.conf\""],
+                       input=b"local all all trust\nhost all all 127.0.0.1/32 scram-sha-256\n", check=True, capture_output=True)
+        self.ok(source, "SELECT pg_reload_conf();")
+        catalog = ops.role_catalog(source)
+        original = {"POSTGRES_PASSWORD": "r4-synthetic-fixture-only", "KIN_EMR_RUNTIME_PASSWORD": "source-runtime"}
+        clone = {"POSTGRES_PASSWORD": "clone'private\\installer", "KIN_EMR_RUNTIME_PASSWORD": "clone'private\\runtime"}
+        def run(args, *, input=None, env=None, stdin=None, output=None, timeout=60):
+            return subprocess.run(args, input=input, stdin=stdin, stdout=output or subprocess.PIPE,
+                                  stderr=subprocess.PIPE, env=env, timeout=timeout)
+        with tempfile.TemporaryDirectory() as root:
+            host = release.HostOps(target={"repository": root, "containers": {"db": source}}, plan={}, runner=run,
+                                   records=release.Records(Path(root) / "records"))
+            try:
+                isolated = host.isolate_database_credentials(catalog, original, clone)
+            except release.Stop as error:
+                self.fail("Valid clone credential transition was refused: " + str(error))
+            self.assertEqual(set(isolated), {"kin", "kin_runtime"})
+            self.assertEqual(ops.role_catalog(source), catalog)
+            for role, key in (("kin", "POSTGRES_PASSWORD"), ("kin_runtime", "KIN_EMR_RUNTIME_PASSWORD")):
+                for passwords, accepted in ((clone, True), (original, False)):
+                    script = "export PGPASSWORD=" + shlex.quote(passwords[key]) + "\npsql -h 127.0.0.1 -U " + role + " -d kin -XqAt --no-password -c 'SELECT 1'\n"
+                    result = subprocess.run(["docker", "exec", "-i", source, "sh", "-s"], input=script.encode(), capture_output=True)
+                    self.assertEqual(result.returncode == 0, accepted, role)
+            evidence = b"\n".join(p.read_bytes() for p in (Path(root) / "records").rglob("*") if p.is_file())
+            self.assertTrue(all(password.encode() not in evidence for password in [*original.values(), *clone.values()]))
+            # A successful client without an applied password change must not permit service startup.
+            for role, key in (("kin", "POSTGRES_PASSWORD"), ("kin_runtime", "KIN_EMR_RUNTIME_PASSWORD")):
+                self.ok(source, "ALTER ROLE " + ops._identifier(role) + " PASSWORD " + ops._sql_literal(original[key]))
+            def lost_write(args, **kwargs):
+                return subprocess.CompletedProcess(args, 0, b"", b"") if "psql" in args else run(args, **kwargs)
+            with patch.object(host, "run", side_effect=lost_write), self.assertRaises(release.Stop):
+                host.isolate_database_credentials(catalog, original, clone)
+
+    def test_r5_renamed_keycloak_index_columns_and_nested_checks_roundtrip(self):
+        source = self.start()
+        self.ok(source, "CREATE DATABASE keycloak")
+        # Keycloak's Liquibase history retains old index attribute labels after these table-column renames.
+        self.ok(source, """CREATE TABLE client_scope_attributes(template_id text, name text, value text,
+            CONSTRAINT pk_cl_tmpl_attr PRIMARY KEY(template_id,name));
+            ALTER TABLE client_scope_attributes RENAME COLUMN template_id TO scope_id;
+            CREATE TABLE client_scope_client(id text, name text);
+            CREATE UNIQUE INDEX uk_b71cjlbenv945rb6gcon438at ON client_scope_client(id,name);
+            ALTER TABLE client_scope_client RENAME COLUMN name TO client_id;""", "keycloak")
+        self.ok(source, """CREATE TABLE finding_revision(id int PRIMARY KEY, payload jsonb,
+            CONSTRAINT finding_payload_check CHECK ((jsonb_typeof(payload)='object' AND payload ? 'schema') AND payload ? 'items'));
+            INSERT INTO finding_revision VALUES(1,'{"schema":1,"items":[]}');""")
+        catalog = ops.cluster_catalog(source)
+        ops.supported_pre_catalog(catalog)
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.dump(source, Path(root) / "snapshot", catalog)
+            restored = self.start()
+            try:
+                result = ops.restore_pre_snapshot(restored, snapshot)
+            except RuntimeError as error:
+                self.fail("renamed columns and equivalent CHECK expressions must restore: " + str(error))
+            self.assertEqual(result["catalog"], "equal")
+            self.assertEqual(ops.cluster_catalog(restored), catalog)
+            self.ok(restored, "ALTER TABLE finding_revision DROP CONSTRAINT finding_payload_check; "
+                              "ALTER TABLE finding_revision ADD CONSTRAINT finding_payload_check CHECK(payload ? 'schema')")
+            self.assertNotEqual(ops.cluster_catalog(restored), catalog, "a single semantic CHECK change must remain visible")
+
+    def test_r5_comments_membership_database_flags_and_real_temp_history_have_closed_admission(self):
+        source = self.start()
+        self.ok(source, "CREATE DATABASE keycloak")
+        self.ok(source, """CREATE TABLE rows(id int);
+            CREATE FUNCTION noop() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NEW; END$$;
+            CREATE TRIGGER kept BEFORE INSERT ON rows FOR EACH ROW EXECUTE FUNCTION noop();
+            ALTER TABLE rows ENABLE ROW LEVEL SECURITY; CREATE POLICY kept ON rows USING(id>0);
+            CREATE VIEW rows_view AS SELECT * FROM rows;
+            CREATE TEMP TABLE history(id int); INSERT INTO history VALUES(1);""")
+        # The connection ended: PG's empty pg_temp_N and pg_toast_temp_N namespaces legitimately remain.
+        try:
+            catalog, _ = ops.restore_admission(source, shape="pre")
+        except RuntimeError as error:
+            self.fail("closed temporary-table history must remain admissible: " + str(error))
+        with tempfile.TemporaryDirectory() as root:
+            snapshot = self.dump(source, Path(root) / "snapshot", catalog)
+            restored = self.start()
+            try:
+                result = ops.restore_pre_snapshot(restored, snapshot)
+            except RuntimeError as error:
+                self.fail("unchanged supported source must restore: " + str(error))
+            self.assertEqual(result["catalog"], "equal")
+        for sql, undo in (("COMMENT ON TRIGGER kept ON rows IS 'must preserve'", "COMMENT ON TRIGGER kept ON rows IS NULL"),
+                          ("COMMENT ON POLICY kept ON rows IS 'must preserve'", "COMMENT ON POLICY kept ON rows IS NULL"),
+                          ("COMMENT ON RULE \"_RETURN\" ON rows_view IS 'must preserve'", 'COMMENT ON RULE "_RETURN" ON rows_view IS NULL'),
+                          ("ALTER DATABASE kin IS_TEMPLATE true", "ALTER DATABASE kin IS_TEMPLATE false"),
+                          ("GRANT pg_monitor TO pg_read_all_data", "REVOKE pg_monitor FROM pg_read_all_data")):
+            self.ok(source, sql)
+            with self.subTest(change=sql), self.assertRaises(ops.RestoreAdmissionError):
+                ops.restore_admission(source, shape="pre")
+            self.ok(source, undo)
+
+    def test_r5_each_source_login_verifier_is_replayed_and_single_missing_or_extra_is_refused(self):
+        import subprocess
+        source = self.start()
+        self.ok(source, "CREATE DATABASE keycloak")
+        self.ok(source, "CREATE ROLE kin_runtime LOGIN PASSWORD 'synthetic-runtime'; "
+                        "CREATE ROLE kin_emr_reader LOGIN; CREATE ROLE kin_emr_owner NOLOGIN;")
+        subprocess.run(["docker", "exec", source, "sh", "-c",
+                        "mkdir -p " + ops.EMR_TABLESPACE + "; chown postgres:postgres " + ops.EMR_TABLESPACE],
+                       check=True, capture_output=True)
+        self.ok(source, "CREATE TABLESPACE kin_emr_access OWNER kin_emr_owner LOCATION '" + ops.EMR_TABLESPACE + "'")
+        catalog = ops.role_catalog(source)
+        self.assertEqual(catalog["login_verifiers"], ["kin", "kin_runtime"])
+        credentials = {"kin": "r4-synthetic-fixture-only", "kin_runtime": "synthetic-runtime"}
+        restored = self.start()
+        ops.replay_roles(restored, catalog, shape="post", credentials=credentials)
+        self.assertEqual(ops.role_catalog(restored)["login_verifiers"], catalog["login_verifiers"])
+        original = ops.run_private_sql
+        for statement, expected in (("ALTER ROLE kin_runtime PASSWORD NULL", ["kin"]),
+                                    ("ALTER ROLE kin_emr_reader PASSWORD 'unexpected'", ["kin", "kin_emr_reader", "kin_runtime"])):
+            target = self.start()
+
+            def changed(container, statements, user="kin"):
+                original(container, statements, user)
+                self.ok(container, statement)
+
+            with self.subTest(statement=statement), patch.object(ops, "run_private_sql", side_effect=changed):
+                with self.assertRaisesRegex(RuntimeError, "Replayed roles or memberships differ"):
+                    ops.replay_roles(target, catalog, shape="post", credentials=credentials)
+            self.assertEqual(ops.role_catalog(target)["login_verifiers"], expected)
 
     def test_r4_fresh_restore_ignores_physical_holes_but_refuses_altered_internal_triggers(self):
         source = self.start()
@@ -855,7 +1023,7 @@ class RealClusterTests(unittest.TestCase):
             # is synthetic, so omitting the export encoding fails here even if this class's dump helper is correct.
             host = FakeHost(folder)
             (host.repo / ".env").write_text("POSTGRES_PASSWORD=r4-synthetic-fixture-only\n")
-            host.catalog = lambda: {key: value for key, value in catalog.items() if key != "objects"}
+            host.catalog = lambda container=None: {key: value for key, value in catalog.items() if key != "objects"}
             host.objects = lambda database: catalog["objects"][database]
             envelope_run, database_run = host.run, ops.run
             def capture_run(args, **kwargs):
@@ -891,7 +1059,7 @@ class RealClusterTests(unittest.TestCase):
         self.assertIn(b"ADMIN option", replayed.stderr)
         catalog = ops.role_catalog(source)
         target = self.start()
-        result = ops.replay_roles(target, catalog, shape="pre")
+        result = ops.replay_roles(target, catalog, shape="pre", credentials={"kin": "r4-synthetic-fixture-only"})
         self.assertEqual(sorted(result["created"]), ["kin_legacy_group", "kin_legacy_reader"])
         self.assertEqual(ops.role_catalog(target)["memberships"], catalog["memberships"])
 

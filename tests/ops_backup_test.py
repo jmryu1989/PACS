@@ -65,14 +65,14 @@ def daily_role_catalog():
     roles = [pg_role("kin", superuser=True, login=True), pg_role("kin_emr_owner"), pg_role("kin_emr_reader"),
                       pg_role("kin_emr_retention"), pg_role("kin_legacy_group", inherit=False), pg_role("kin_legacy_reader", connlimit=3),
                       pg_role("kin_runtime", login=True)]
-    return {"server_major": 16, "unsupported_verifiers": [], "login_verifiers": ["kin"], "builtin_roles": [], "settings": [],
+    return {"server_major": 16, "unsupported_verifiers": [], "login_verifiers": sorted(row["rolname"] for row in roles if row["rolcanlogin"]), "builtin_roles": [], "settings": [],
             "setting_names": ["search_path", "statement_timeout", "work_mem"],
             "role_comments": [[row["rolname"], None] for row in roles], "roles": roles,
             "memberships": [{"granted": "kin_legacy_group", "member": "kin_legacy_reader", "grantor": "kin", "admin_option": False, "inherit_option": True,
                              "set_option": True}],
-            "databases": [{"name": "keycloak", "owner": "kin", "acl": ["=Tc/kin", "kin=CTc/kin"]},
-                          {"name": "kin", "owner": "kin", "acl": ["=Tc/kin", "kin=CTc/kin", "kin_legacy_reader=c/kin"]},
-                          *[{"name": name, "owner": "kin", "acl": ["=Tc/kin", "kin=CTc/kin"]} for name in ("postgres", "template0", "template1")]],
+            "databases": [{"name": "keycloak", "owner": "kin", "acl": ["=Tc/kin", "kin=CTc/kin"], "attributes": {"datistemplate": False, "datallowconn": True}},
+                          {"name": "kin", "owner": "kin", "acl": ["=Tc/kin", "kin=CTc/kin", "kin_legacy_reader=c/kin"], "attributes": {"datistemplate": False, "datallowconn": True}},
+                          *[{"name": name, "owner": "kin", "acl": ["=Tc/kin", "kin=CTc/kin"], "attributes": {"datistemplate": False, "datallowconn": True}} for name in ("postgres", "template0", "template1")]],
             "tablespaces": [{"name": "kin_emr_access", "owner": "kin_emr_owner", "location": ops.EMR_TABLESPACE},
                             {"name": "pg_default", "owner": "kin", "location": ""}, {"name": "pg_global", "owner": "kin", "location": ""}],
             "schemas": ["emr_access", "public"]}
@@ -87,12 +87,13 @@ class DailyCluster:
         self.source, self.restored = source, restored
         self.roles = {"kin": next(role for role in source["roles"] if role["rolname"] == "kin")}
         self.memberships, self.tablespace, self.restored_databases, self.statements = [], False, set(), []
+        self.verifiers = set()
 
     def catalog(self):
         base = self.restored or self.source
         whole = self.restored_databases >= {"kin", "keycloak"}
         return {**{key: base[key] for key in ("server_major", "unsupported_verifiers", "login_verifiers", "builtin_roles", "settings", "setting_names")},
-                "role_comments": [[name, None] for name in sorted(self.roles)], "roles": [self.roles[name] for name in sorted(self.roles)],
+                "login_verifiers": sorted(self.verifiers), "role_comments": [[name, None] for name in sorted(self.roles)], "roles": [self.roles[name] for name in sorted(self.roles)],
                 "memberships": sorted(self.memberships, key=lambda item: (item["granted"], item["member"])),
                 "databases": base["databases"] if whole else [{"name": "kin", "owner": "kin", "acl": []}, {"name": "postgres", "owner": "kin", "acl": []}],
                 "tablespaces": base["tablespaces"] if self.tablespace else [item for item in base["tablespaces"] if item["name"].startswith("pg_")],
@@ -114,6 +115,7 @@ class DailyCluster:
         if "psql" in args and input_file is not None:
             sql = input_file.read().decode("utf-8", errors="replace")
             self.statements.append(sql)
+            self.verifiers.update(pattern.findall(r'ALTER ROLE "([^"]+)" PASSWORD ', sql))
             for name, flags in pattern.findall(r'CREATE ROLE "([^"]+)" WITH ([^;]+);', sql):
                 words = flags.split()
                 self.roles[name] = {**pg_role(name), "rolsuper": "SUPERUSER" in words, "rolcreaterole": "CREATEROLE" in words,
@@ -139,6 +141,7 @@ class Host:
         self.repo.mkdir()
         for filename in ops.FILES[3:]:
             (self.repo / filename).write_text("TEST_ONLY=placeholder")
+        (self.repo / ".env").write_text("POSTGRES_PASSWORD=synthetic-fixture\nKIN_EMR_RUNTIME_PASSWORD=synthetic-runtime\n")
         self.parent = Path(temporary) / "backups"
         self.parent.mkdir(mode=0o700)
         self.info = [{"Name": "/" + name, "State": {"Running": True}, "Image": "sha256:" + "a" * 64,

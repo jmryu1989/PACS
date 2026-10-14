@@ -112,11 +112,12 @@ class ProbeContainerTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        cls.enterClassContext(ops.resource_names(os.environ.get("KIN_TEST_RESOURCE_PREFIX", "kin-rehearsal-")))
         ops.require_local_docker()
         cls.image = os.environ["KIN_TEST_API_IMAGE"]
         cls.token = uuid.uuid4().hex
-        cls.db = "kin-rehearsal-" + cls.token[:16] + "-probe-db"
-        cls.state = "kin-rehearsal-" + cls.token[:16] + "-probe-state"
+        cls.db = os.environ.get("KIN_TEST_RESOURCE_PREFIX", "kin-rehearsal-") + cls.token[:16] + "-probe-db"
+        cls.state = os.environ.get("KIN_TEST_RESOURCE_PREFIX", "kin-rehearsal-") + cls.token[:16] + "-probe-state"
         cls.addClassCleanup(ops.remove_owned_if_present, "volume", cls.state, cls.token)
         cls.addClassCleanup(ops.remove_owned_if_present, "container", cls.db, cls.token)
         ops.run(["docker", "run", "-d", "--name", cls.db, "--label", "kin.ops.run=" + cls.token, "--network", "none",

@@ -122,8 +122,7 @@ class ObservationContracts(fixtures.MachineHarness, unittest.TestCase):
                     result = run(phase)
                     self.assertTrue(hit, "the intended boundary must be reached")
                     outcomes = [row["outcome"] for row in result["steps"] if row["step"] == sid]
-                    unchanged_entry = ((sid in ("L-00a", "S-01") and boundary == "before")
-                                       or (sid == "S-01" and command_stop and boundary != "timeout"))
+                    unchanged_entry = sid in ("L-00a", "S-01", "S-02") and boundary == "before"
                     expected = "STOP" if unchanged_entry else "UNKNOWN"
                     self.assertEqual(outcomes, [expected])
                     self.assertFalse(result["phase_passed"])
@@ -198,11 +197,13 @@ class ObservationContracts(fixtures.MachineHarness, unittest.TestCase):
 
     def test_cron_attempt_records_ponr_before_it_runs(self):
         self.deploy_through("verify")
+        observed = []
         def inspect_marker(context):
-            self.assertEqual(self.records.state()["ponr"]["step"], "L-11b")
+            observed.append((self.records.state().get("ponr") or {}).get("step"))
             raise release.Stop("예약 작업 복구 실패")
         self.ops.effect_restore_jobs = inspect_marker
         result = self.run_phase("reopen", self.operator_smoke())
+        self.assertEqual(observed, ["L-11b"])
         self.assertEqual(result["status"], "NEEDS_ATTENTION")
         self.assertNotIn("reopen_ingress", self.ops.calls)
         with self.assertRaises(release.Stop):
@@ -211,11 +212,13 @@ class ObservationContracts(fixtures.MachineHarness, unittest.TestCase):
     def test_recovery_cron_attempt_records_marker_before_it_runs(self):
         self.deploy_through("verify")
         self.assertEqual(self.run_phase("rollback")["status"], "RESTORED")
+        observed = []
         def inspect_marker(context):
-            self.assertEqual(self.records.state()["recovery_reopen"]["step"], "RB-04c")
+            observed.append((self.records.state().get("recovery_reopen") or {}).get("step"))
             raise release.Unknown("예약 작업 종료 불명")
         self.ops.effect_restore_jobs_after_rollback = inspect_marker
         result = self.run_phase("rollback_reopen")
+        self.assertEqual(observed, ["RB-04c"])
         self.assertEqual(result["status"], "NEEDS_ATTENTION")
         self.assertIsNotNone(self.records.state()["unknown_hold"])
 
@@ -430,7 +433,7 @@ class ContainerObservationContracts(unittest.TestCase):
             release.checkpoint_valid(changed, context, "L-01")
 
     def setUp(self):
-        folder = tempfile.TemporaryDirectory(prefix="r4-host-", dir=Path(__file__).resolve().parents[1] / "tmp")
+        folder = tempfile.TemporaryDirectory(prefix="r4-host-", dir="/root" if os.name == "posix" and os.geteuid() == 0 else None)
         self.addCleanup(folder.cleanup)
         self.records = release.Records(Path(folder.name) / "records")
 
@@ -488,7 +491,7 @@ class ContainerObservationContracts(unittest.TestCase):
 class OperatorEntryContracts(unittest.TestCase):
     """Common entry admission and command effects; root path enforcement is the separate Linux install suite."""
     def setUp(self):
-        folder = tempfile.TemporaryDirectory(prefix="r4-operator-", dir=Path(__file__).resolve().parents[1] / "tmp")
+        folder = tempfile.TemporaryDirectory(prefix="r4-operator-", dir="/root" if os.name == "posix" and os.geteuid() == 0 else None)
         self.addCleanup(folder.cleanup)
         self.root = Path(folder.name)
         self.repo, self.state = self.root / "repo", self.root / "state"
@@ -589,7 +592,7 @@ class OperatorEntryContracts(unittest.TestCase):
 
 class WorkerContracts(unittest.TestCase):
     def setUp(self):
-        folder = tempfile.TemporaryDirectory(prefix="r4-workers-", dir=Path(__file__).resolve().parents[1] / "tmp")
+        folder = tempfile.TemporaryDirectory(prefix="r4-workers-", dir="/root" if os.name == "posix" and os.geteuid() == 0 else None)
         self.addCleanup(folder.cleanup)
         self.root = Path(folder.name)
         self.records = release.Records(self.root / "records")
@@ -600,13 +603,17 @@ class WorkerContracts(unittest.TestCase):
         self.containers = {}
         self.calls = []
         self.timeout = False
+        from ops_deploy_round5_test import EngineFixture
+        self.exec_fixture = EngineFixture(self.containers, self.engine)
         self.host = release.HostOps(target=target, plan=fixtures.plan_fixture(target), runner=self.engine, records=self.records)
         self.host.intro = self.context
 
     def engine(self, args, **kwargs):
         self.calls.append(args)
         stdout = b""
-        if args[:3] == ["docker", "container", "ls"]:
+        if args[:3] == ["docker", "system", "dial-stdio"]:
+            stdout = self.exec_fixture(kwargs["input"])
+        elif args[:3] == ["docker", "container", "ls"]:
             name = args[args.index("--filter") + 1][len("name=^/"):-1]
             stdout = (name + "\n").encode() if name in self.containers else b""
         elif args[:2] == ["docker", "inspect"]:

@@ -1438,6 +1438,18 @@ URL·SMTP·IdP enabled 필드만 바꾸고 양 DB의 나머지 값을 다시 비
 순수 계약 시험은 `tests/ops_backup_restore_test.py`, 실제 SQL/복원 검증은 `tests/ops_backup_held_test.py`의
 격리 PG16 fixture에서 수행한다. 순수 시험은 실제 PostgreSQL 쿼리의 성공 증거가 아니다.
 
+`tests/ops_deploy_round5_test.py`는 등록 exec의 개별 Engine ID, 관측 전용 작업과 호스트 변경의 구분,
+소유 복원 서버의 생성·준비·정리, 실제 held manifest를 받는 RB-02와 clone 변환 본문을 확인한다.
+감독 명령의 오류는 browser 자체의 확정 timeout과 구분하며, UNKNOWN이면 profile·비밀 입력과 hold를 유지한다.
+capture가 변경 전에 거절되면 이전 운영 entry와 daily backup lock을 복구한다. realm의 기본 required action,
+조건부 OTP와 비밀번호 정책은 fence 전에 읽기 전용으로 검사한다.
+
+PG16 시험에는 비밀번호가 있는 bootstrap kin의 verifier 재현, 누락·추가 verifier 거절, 과거 이름을 가진
+Keycloak index 컬럼과 중첩 CHECK의 dump/restore 동등성이 포함된다. 지원하지 않는 trigger·policy·rule comment,
+builtin membership 변경, 추가 template 속성은 capture admission에서 거절하고, 비어 있는 임시 namespace는 허용한다.
+Windows Job·Linux systemd·Docker exec의 실제 종료, healthcheck와 겹치는 300회 exec, 단명 프로세스와 겹치는
+200회 browser unit 및 정상·강제 복구·forward 리허설은 격리 실행 기록으로 별도 확인한다.
+
 지원 운영 명령은 root 보호 설치본의 `/opt/kin-deploy/entry.py compose config` 및
 `/opt/kin-deploy/entry.py compose recreate [db|api|keycloak|orthanc|proxy ...]`다. checkout 밖의
 `<state_dir>/compose-entries/<generation>/`에 논리 파일·고정 bytes·환경·runtime override의 해시를
@@ -1465,6 +1477,8 @@ Compose 소비자 inventory와 현재 연결:
 `/etc/kin-deploy/overlays/docker-compose.halo-reports.yml`, `docker-compose.monitor.yml`이다.
 VM은 prod 다음, Halo 앞에 rehearsal override를 삽입한다. 마지막 생성 runtime override는 이미지·포트·복구
 project/volume만 담는다. v1에서 service `env_file` 의존성은 bundle admission 거절 대상이다.
+격리 합성 rehearsal은 보호 plan에 선언한 Halo overlay·bind source·external network 신원을 사용한다.
+파일 순서와 proxy의 읽기 전용 bind 목적지는 동일하게 검사하며, 생산 target의 고정 신원 검사는 유지한다.
 
 최종 stage-exit의 실환경 선행 관문:
 

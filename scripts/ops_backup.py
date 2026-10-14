@@ -44,6 +44,25 @@ EMR_STATE = "/var/lib/kin-emr"
 EMR_TABLESPACE = "/var/lib/postgresql/emr-access/ts"
 
 
+_resource_prefix = ContextVar("backup_resource_prefix", default="kin-rehearsal-")
+
+
+@contextmanager
+def resource_names(prefix):
+    """Keep isolated helpers in their caller's namespace; ownership still requires the unique run label."""
+    if not re.fullmatch(r"kin-[a-z0-9-]{1,80}-", prefix):
+        raise RuntimeError("Invalid isolated resource namespace")
+    token = _resource_prefix.set(prefix)
+    try:
+        yield
+    finally:
+        _resource_prefix.reset(token)
+
+
+def resource_name(token, suffix=""):
+    return _resource_prefix.get() + token[:16] + suffix
+
+
 def backup_components(manifest):
     return (*FILES, *EMR_FILES) if "emr" in manifest else FILES
 
@@ -117,7 +136,7 @@ def temporary_run(args, *, timeout=600, output=None, input_file=None):
     # A timed-out docker client can leave its container running. Give even tar
     # helpers an ownership label/name so finally can find and remove exactly it.
     token = uuid.uuid4().hex
-    name = "kin-rehearsal-" + token[:16] + "-helper"
+    name = resource_name(token, "-helper")
     try:
         result = run(["docker", "run", "--rm", "--name", name,
                       "--label", "kin.ops.run=" + token, *args], timeout=timeout, output=output, input_file=input_file)
@@ -500,7 +519,7 @@ def validate_backup(directory):
 def remove_owned(kind, name, token, timeout=600):
     """timeout bounds the whole removal (each command gets what is left of it), so a caller's cleanup budget holds."""
     end = time.monotonic() + timeout
-    if kind not in ("container", "volume") or not name.startswith("kin-rehearsal-"):
+    if kind not in ("container", "volume") or not name.startswith(_resource_prefix.get()):
         raise RuntimeError("Refusing cleanup outside rehearsal resources")
     label = text(["docker", kind, "inspect", "--format", '{{index .Labels "kin.ops.run"}}' if kind == "volume"
                   else '{{index .Config.Labels "kin.ops.run"}}', name], timeout=max(0.01, end - time.monotonic()))
@@ -553,7 +572,7 @@ def rehearse_held(directory, manifest, *, daily=False):
     role catalog compared with the manifest's, the AuditLog seal verified as kin (no projection: a daily set has none)."""
     shape = "post" if daily else manifest["shape"]
     token = uuid.uuid4().hex
-    name = "kin-rehearsal-" + token[:16]
+    name = resource_name(token)
     volume, state_volume = name + "-orthanc", name + "-emr-state"
     started = time.monotonic()
     result = {"backup": directory.name, "git_sha": manifest["git_sha"], "success": False, "shape": shape}
@@ -638,7 +657,7 @@ def rehearse(directory):
     # An older set (no role catalog): its pg_dumpall roles are replayed into a cluster bootstrapped as postgres, which
     # PostgreSQL 16 refuses for a membership recorded as GRANTED BY kin (a known limit of such sets; see D23).
     token = uuid.uuid4().hex
-    name = "kin-rehearsal-" + token[:16]
+    name = resource_name(token)
     volume = name + "-orthanc"
     state_volume = name + "-emr-state"
     emr = "emr" in manifest
@@ -902,9 +921,12 @@ def _restore_inventory_sql():
     # values are preserved instead. The logical default/generated expression remains part of this inventory.
     column = _json_without("a", "attrelid atttypid attnum attcacheoff atthasmissing attmissingval attcollation attacl")
     column += " || " + _json_fields(
+        # Index attributes can retain the pre-RENAME table column name. pg_dump rebuilds those attributes using the
+        # current table definition; compare that definition rather than the stale physical index attribute name.
+        attname="CASE WHEN c.relkind='i' THEN pg_get_indexdef(c.oid,a.attnum,true) ELSE a.attname::text END",
         type=_object_address("pg_type", "a.atttypid"), collation=_object_address("pg_collation", "a.attcollation"),
         acl="(SELECT coalesce(jsonb_agg(x::text ORDER BY x::text),'[]'::jsonb) FROM unnest(a.attacl) x)",
-        expression="(SELECT pg_get_expr(d.adbin,d.adrelid,false) FROM pg_attrdef d WHERE d.adrelid=a.attrelid AND d.adnum=a.attnum)")
+        expression="(SELECT pg_get_expr(d.adbin,d.adrelid,true) FROM pg_attrdef d WHERE d.adrelid=a.attrelid AND d.adnum=a.attnum)")
     add("column", "n.nspname", "c.relname", "(SELECT count(*) FROM pg_attribute z WHERE z.attrelid=a.attrelid AND z.attnum>0 AND NOT z.attisdropped AND z.attnum<=a.attnum)", column,
         "pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace",
         user_schema + " AND a.attnum>0 AND NOT a.attisdropped")
@@ -914,7 +936,7 @@ def _restore_inventory_sql():
         ("pg_class", "typrelid"), ("pg_type", "typelem typarray typbasetype"), ("pg_collation", "typcollation"),
         ("pg_proc", "typinput typoutput typreceive typsend typmodin typmodout typanalyze typsubscript")) for key in keys.split()}
     type_refs.update(owner="pg_get_userbyid(t.typowner)", acl=_acl("t.typacl", "'T'::\"char\"", "t.typowner"),
-                     default_expression="pg_get_expr(t.typdefaultbin,0,false)",
+                     default_expression="pg_get_expr(t.typdefaultbin,0,true)",
                      enum_labels="(SELECT jsonb_agg(e.enumlabel ORDER BY e.enumsortorder) FROM pg_enum e WHERE e.enumtypid=t.oid)")
     add("type", "n.nspname", "t.typname", "NULL", type_row + " || " + _json_fields(**type_refs),
         "pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace", user_schema)
@@ -934,12 +956,14 @@ def _restore_inventory_sql():
         refs[key] = "(SELECT jsonb_agg(a.attname ORDER BY x.ord) FROM unnest(c." + key + ") WITH ORDINALITY x(num,ord) LEFT JOIN pg_attribute a ON a.attrelid=c." + relation_id + " AND a.attnum=x.num)"
     for key in ("conpfeqop", "conppeqop", "conffeqop", "conexclop"):
         refs[key] = "(SELECT jsonb_agg(" + _object_address("pg_operator", "x.id") + " ORDER BY x.ord) FROM unnest(c." + key + ") WITH ORDINALITY x(id,ord))"
-    refs["definition"] = "pg_get_constraintdef(c.oid,false)"
+    # PostgreSQL's pretty deparser removes redundant same-precedence parentheses (nested AND/OR) while preserving
+    # grouping with different precedence. Its canonical expression survives dump/reparse without a custom parser.
+    refs["definition"] = "pg_get_constraintdef(c.oid,true)"
     add("constraint", "n.nspname", "c.conname", "coalesce(" + _object_address("pg_class", "c.conrelid") + "," + _object_address("pg_type", "c.contypid") + ")",
         constraint + " || " + _json_fields(**refs), "pg_constraint c JOIN pg_namespace n ON n.oid=c.connamespace", user_schema)
     index = _json_without("i", "indexrelid indrelid indkey indcollation indclass indexprs indpred indcheckxmin")
     index += " || " + _json_fields(table=_object_address("pg_class", "i.indrelid"), definition="pg_get_indexdef(i.indexrelid)",
-        expressions="pg_get_expr(i.indexprs,i.indrelid,false)", predicate="pg_get_expr(i.indpred,i.indrelid,false)",
+        expressions="pg_get_expr(i.indexprs,i.indrelid,true)", predicate="pg_get_expr(i.indpred,i.indrelid,true)",
         columns="(SELECT jsonb_agg(a.attname ORDER BY x.ord) FROM unnest(i.indkey) WITH ORDINALITY x(num,ord) LEFT JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=x.num)",
         collations="(SELECT jsonb_agg(" + _object_address("pg_collation", "x.id") + " ORDER BY x.ord) FROM unnest(i.indcollation) WITH ORDINALITY x(id,ord))",
         opclasses="(SELECT jsonb_agg(" + _object_address("pg_opclass", "x.id") + " ORDER BY x.ord) FROM unnest(i.indclass) WITH ORDINALITY x(id,ord))")
@@ -958,7 +982,7 @@ def _restore_inventory_sql():
         "pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace", user_schema)
     policy = _json_fields(command="p.polcmd", permissive="p.polpermissive",
         roles="(SELECT jsonb_agg(CASE WHEN id=0 THEN 'PUBLIC' ELSE pg_get_userbyid(id) END ORDER BY CASE WHEN id=0 THEN 'PUBLIC' ELSE pg_get_userbyid(id) END) FROM unnest(p.polroles) id)",
-        using="pg_get_expr(p.polqual,p.polrelid,false)", check="pg_get_expr(p.polwithcheck,p.polrelid,false)")
+        using="pg_get_expr(p.polqual,p.polrelid,true)", check="pg_get_expr(p.polwithcheck,p.polrelid,true)")
     add("policy", "n.nspname", "p.polname", "c.relname", policy,
         "pg_policy p JOIN pg_class c ON c.oid=p.polrelid JOIN pg_namespace n ON n.oid=c.relnamespace", user_schema)
     add("default-acl", "n.nspname", "pg_get_userbyid(d.defaclrole)", "d.defaclobjtype",
@@ -990,7 +1014,18 @@ def _restore_inventory_sql():
     for table in INVENTORY_COVERAGE["refused"].split():
         reject(table, "SELECT 1 FROM " + table)
     reject("replication_slots", "SELECT 1 FROM pg_replication_slots")
-    reject("reserved_namespace", "SELECT 1 FROM pg_namespace WHERE nspname ~ '^pg_' AND nspname NOT IN ('pg_catalog','pg_toast')")
+    reject("reserved_namespace", "SELECT 1 FROM pg_namespace n WHERE nspname ~ '^pg_' AND nspname NOT IN ('pg_catalog','pg_toast') "
+           "AND NOT(nspname ~ '^pg_(toast_)?temp_[0-9]+$' AND NOT EXISTS(SELECT 1 FROM pg_class c WHERE c.relnamespace=n.oid) "
+           "AND NOT EXISTS(SELECT 1 FROM pg_depend d WHERE d.refclassid='pg_namespace'::regclass AND d.refobjid=n.oid))")
+    # pg_identify_object reports NULL schema for these comments, and pg_dump omits a view's _RETURN rule comment.
+    # The closed v1 restore contract refuses them before capture rather than silently losing their content.
+    reject("unsupported_object_comment", "SELECT 1 FROM pg_description d WHERE "
+           "(d.classoid='pg_trigger'::regclass AND EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid "
+           "JOIN pg_namespace n ON n.oid=c.relnamespace WHERE t.oid=d.objoid AND " + user_schema + ")) OR "
+           "(d.classoid='pg_policy'::regclass AND EXISTS(SELECT 1 FROM pg_policy p JOIN pg_class c ON c.oid=p.polrelid "
+           "JOIN pg_namespace n ON n.oid=c.relnamespace WHERE p.oid=d.objoid AND " + user_schema + ")) OR "
+           "(d.classoid='pg_rewrite'::regclass AND EXISTS(SELECT 1 FROM pg_rewrite r JOIN pg_class c ON c.oid=r.ev_class "
+           "JOIN pg_namespace n ON n.oid=c.relnamespace WHERE r.oid=d.objoid AND " + user_schema + "))")
     reject("unsupported_relation", "SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE " + user_schema
            + " AND (c.relkind NOT IN ('r','v','S','c','i') OR c.relpersistence<>'p' OR c.relispartition)")
     reject("invalid_index", "SELECT 1 FROM pg_index WHERE NOT indisvalid OR NOT indisready OR NOT indislive")
@@ -1204,6 +1239,10 @@ def boundary_proof(container, catalog, image=None):
     fresh = found[-1]
     if catalog.get("builtin_roles") != fresh.get("builtin_roles"):
         _unsupported("기본 제공 역할이 초기 경계와 다릅니다")
+    def builtin_memberships(value):
+        return [row for row in value["memberships"] if row["member"].startswith("pg_")]
+    if builtin_memberships(catalog) != builtin_memberships(fresh):
+        _unsupported("기본 제공 역할의 membership이 초기 경계와 다릅니다")
     if catalog.get("setting_names") != fresh.get("setting_names"):
         _unsupported("역할 설정의 PostgreSQL 지원 목록이 초기 경계와 다릅니다")
     for database in ("postgres", "template0", "template1"):
@@ -1256,8 +1295,7 @@ def supported_pre_catalog(catalog):
 
 def supported_catalog(catalog, *, shape):
     """supported_pre_catalog's rule; a post-EMR capture (B1, restored only into an isolated check cluster) may also hold
-    the EMR roles (kin_runtime and a planned reader/retention LOGIN, replayed there without a password) and the EMR
-    tablespace."""
+    the EMR roles and tablespace. Every stored LOGIN verifier must have protected credential input for replay."""
     if type(catalog) is not dict:
         _unsupported("unreadable")
     if catalog.get("server_major") != 16 or type(catalog.get("unsupported_verifiers")) is not list:
@@ -1309,6 +1347,10 @@ def supported_catalog(catalog, *, shape):
         _unsupported("the databases are not exactly kin and keycloak")
     if any(databases[name].get("owner") != "kin" for name in databases if name != "keycloak") or databases["keycloak"].get("owner") not in roles:
         _unsupported("a database owner differs")
+    for name in PRE_DATABASES:
+        attributes = databases[name].get("attributes") or {}
+        if attributes.get("datistemplate") is not False or attributes.get("datallowconn") is not True:
+            _unsupported("업무 데이터베이스의 template 또는 연결 허용 속성이 초기 경계와 다릅니다")
     allowed = (*DEFAULT_TABLESPACES, *(("kin_emr_access",) if shape == "post" else ()))
     if any(space.get("name") not in allowed for space in catalog.get("tablespaces") or []):
         _unsupported("a further tablespace exists")
@@ -1396,11 +1438,13 @@ def replay_roles(container, source, user="kin", shape="pre", credentials=None):
         if role["rolvaliduntil"] is not None:
             flags.append("VALID UNTIL " + _sql_literal(role["rolvaliduntil"]))
         statements.append('CREATE ROLE "%s" WITH %s;' % (name, " ".join(flags)))
-        if name in source["login_verifiers"]:
-            password = (credentials or {}).get(name)
-            if not password:
-                _unsupported("저장 verifier가 있는 LOGIN 역할의 복원 인증 입력이 없습니다")
-            statements.append('ALTER ROLE ' + _identifier(name) + ' PASSWORD ' + _sql_literal(password) + ';')
+    # initdb's bootstrap kin already exists but trust-only rehearsal initialization supplies no verifier. Rebuild
+    # every supported source verifier, including existing roles, from the protected capture credentials.
+    for name in source["login_verifiers"]:
+        password = (credentials or {}).get(name)
+        if not password:
+            _unsupported("저장 verifier가 있는 LOGIN 역할의 복원 인증 입력이 없습니다")
+        statements.append('ALTER ROLE ' + _identifier(name) + ' PASSWORD ' + _sql_literal(password) + ';')
     for name, comment in source.get("role_comments", []):
         if name not in {row["rolname"] for row in source["roles"]}:
             _unsupported("역할 주석이 조사한 역할 밖을 가리킵니다")
@@ -1735,8 +1779,8 @@ def capture_held(output, resources, *, shape, label, config=(), facts=None, read
         _unsupported("admission 도중 전역 카탈로그가 달라졌습니다")
     roles = catalog
     active = text(["docker", "exec", db_name, "psql", "-X", "-U", "kin", "-d", "kin", "-qAt", "-c",
-                   "SELECT count(*) FROM pg_stat_activity WHERE datname IN ('kin','keycloak') "
-                   "AND backend_type='client backend' AND pid<>pg_backend_pid();"])
+                   "SELECT count(*) FROM pg_stat_activity WHERE "
+                   "backend_type='client backend' AND pid<>pg_backend_pid();"])
     if active != "0":
         raise RuntimeError("Database clients remain while writers are fenced")
     owner = prepare_backup_parent(parent)
@@ -1953,7 +1997,7 @@ def _thin_marker(folder, manifest):
     return marker
 
 
-def _daily_whole(folder):
+def _daily_whole(folder, *, completing_thin=False):
     """Verify every declared component. Only a valid completed thin transition permits the absent archive."""
     try:
         _rotation_identity(folder)
@@ -1979,7 +2023,8 @@ def _daily_whole(folder):
         path, expected = folder / name, sums.get(name)
         if type(expected) is not str or not re.fullmatch(r"[a-f0-9]{64}", expected) or type(sizes.get(name)) is not int or sizes[name] < 1:
             return "checksum missing: " + name
-        if name == "orthanc.tgz" and marker and marker["state"] == "THINNED_COMPLETE" and not path.exists() and not path.is_symlink():
+        if (name == "orthanc.tgz" and marker and (marker["state"] == "THINNED_COMPLETE" or completing_thin)
+                and not path.exists() and not path.is_symlink()):
             continue
         if path.is_symlink() or not path.is_file():
             return "component missing: " + name
@@ -1998,8 +2043,8 @@ def _daily_whole(folder):
     return None
 
 
-def _rotation_plan(root, keep, protect, referenced, audit_kept, undeclared):
-    """Recompute generations from current bytes, including a renamed whole set's original generation."""
+def _rotation_plan(root, keep, protect, referenced, audit_kept, undeclared, *, focus=None):
+    """Recompute complete daily generations; recheck renamed sets separately without counting them toward keep."""
     retained, incomplete, kept_leftovers, checked, entries, identities = {}, {}, {}, {}, {}, {}
     for item in sorted(root.iterdir(), key=lambda entry: entry.name):
         name = item.name.removeprefix(ROTATING)
@@ -2009,9 +2054,12 @@ def _rotation_plan(root, keep, protect, referenced, audit_kept, undeclared):
             raise RuntimeError("Invalid backup directory / 올바르지 않은 백업 경로: " + item.name)
         entries.setdefault(name, []).append(item)
     candidates = []
-    for name, folders in entries.items():
+    for name, folders in sorted(entries.items(), reverse=True):
         for folder in folders:
             reason = _retention_reason(name, folder, protect, referenced, audit_kept, undeclared)
+            if focus is not None and folder.name != focus and (len(candidates) >= keep or folder.name.startswith(ROTATING)):
+                checked[folder.name] = "outside current generation verification"
+                continue
             why = _daily_whole(folder)
             checked[folder.name] = why
             if why is None:
@@ -2023,7 +2071,8 @@ def _rotation_plan(root, keep, protect, referenced, audit_kept, undeclared):
                 reason = reason or "incomplete"
             if reason:
                 (kept_leftovers if folder.name.startswith(ROTATING) else retained)[folder.name] = reason
-            if len(folders) == 1 and why is None and not (folder / THINNED_FILE).exists():
+            if (len(folders) == 1 and why is None and not folder.name.startswith(ROTATING)
+                    and (folder / "orthanc.tgz").is_file()):
                 candidates.append(name)
     generations = sorted(candidates, reverse=True)[:keep]
     delete, thin, resume = [], [], []
@@ -2034,7 +2083,7 @@ def _rotation_plan(root, keep, protect, referenced, audit_kept, undeclared):
                 continue
             if name in generations or checked[folder.name] is not None or len(folders) != 1:
                 if folder.name.startswith(ROTATING) and name in generations:
-                    kept_leftovers[folder.name] = "kept generation"
+                    kept_leftovers.setdefault(folder.name, "kept generation")
                 continue
             if folder.name.startswith(ROTATING):
                 if folder.name not in kept_leftovers:
@@ -2061,7 +2110,7 @@ def rotate(root, keep, protect=(), dry_run=False, now=None):
             return rotate(root, keep, protect, dry_run, now)
     root_identity = _rotation_identity(root)
     instant = lambda: now or datetime.now(timezone.utc)
-    def plan_now():
+    def plan_now(*, focus=None):
         if _rotation_root(root) != root or _rotation_identity(root) != root_identity:
             raise RuntimeError("백업 루트의 신원이 바뀌었습니다")
         lease = _operations_lease.get()
@@ -2069,7 +2118,23 @@ def rotate(root, keep, protect=(), dry_run=False, now=None):
             if lease is None or lease.retained:
                 raise RuntimeError("삭제 작업 잠금을 확인할 수 없습니다")
             lease.verify()
-        return _rotation_plan(root, keep, set(protect), _referenced(root), *_retention_window(root, instant()))
+        return _rotation_plan(root, keep, set(protect), _referenced(root), *_retention_window(root, instant()), focus=focus)
+    # Unlink and marker replacement are separate durable operations. If only replacement was interrupted, validate
+    # the manifest-bound transition and every remaining byte before finishing its metadata; no archive is deleted.
+    if not dry_run:
+        for folder in sorted(root.iterdir()):
+            if not DAILY_NAME.fullmatch(folder.name) or not (folder / THINNED_FILE).is_file() or (folder / "orthanc.tgz").exists():
+                continue
+            if _daily_whole(folder, completing_thin=True) is not None:
+                continue
+            manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+            marker = _thin_marker(folder, manifest)
+            if marker["state"] == "THIN_PLANNED":
+                _operations_lease.get().verify()
+                if _rotation_identity(root) != root_identity:
+                    raise RuntimeError("thin 완료 기록 전 백업 루트가 바뀌었습니다")
+                import ops_audit_integrity as audit
+                audit.replace_json(folder / THINNED_FILE, {**marker, "state": "THINNED_COMPLETE"})
     plan = plan_now()
     result = {"root": str(root), "keep": keep, "dry_run": dry_run, "generations": plan["generations"],
               "retained": plan["retained"], "incomplete": plan["incomplete"], "kept_leftovers": plan["kept_leftovers"],
@@ -2086,7 +2151,7 @@ def rotate(root, keep, protect=(), dry_run=False, now=None):
             why = _daily_whole(folder)
             if why:
                 return "incomplete before " + ("thinning: " if action == "thin" else "deletion: ") + why
-            current = plan_now()
+            current = plan_now(focus=folder.name)
             key = folder.name if action == "resume" else name
             if key not in current[action]:
                 return current["kept_leftovers"].get(folder.name) or current["retained"].get(name) or "현재 complete 세대의 keep 조건 또는 보호 조건이 바뀌었습니다"

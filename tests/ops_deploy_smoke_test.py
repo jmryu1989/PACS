@@ -21,6 +21,13 @@ import ops_emr_introduction_test as fixtures
 
 class SmokeDeadlineContracts(unittest.TestCase):
     def test_unconfirmed_command_tree_keeps_helper_unknown_without_cleanup_or_next_work(self):
+        self.assert_unconfirmed_command_tree(release.Unknown("synthetic command tree still alive"))
+
+    @unittest.skipUnless(os.name == "posix", "POSIX subprocess timeout has no Job tree proof")
+    def test_posix_cli_timeout_does_not_claim_its_plugin_tree_is_terminal(self):
+        self.assert_unconfirmed_command_tree(subprocess.TimeoutExpired(["docker", "compose"], 1))
+
+    def assert_unconfirmed_command_tree(self, problem):
         fixture = fixtures.CommanderAdditionsTests()
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
@@ -31,7 +38,7 @@ class SmokeDeadlineContracts(unittest.TestCase):
                 docker.containers[worker["resource"]] = {"Id": "unreaped-helper", "State": {"Running": True, "Restarting": False},
                     "Config": {"Labels": {"kin.release.worker": worker["nonce"],
                                             "kin.emr-introduction": context.plan_sha256[:16]}}}
-                raise release.Unknown("synthetic command tree still alive")
+                raise problem
             return docker(args, **kwargs)
         host.run = runner
         def compose(args, **kwargs):
@@ -50,7 +57,8 @@ class SmokeDeadlineContracts(unittest.TestCase):
                 host.register_worker("compose-run", "forbidden-next", 10)
             commands = [json.loads(line) for path in fixture.records.directory.glob("commands-*.jsonl")
                         for line in path.read_text().splitlines()]
-            self.assertTrue(any(row.get("outcome") == "unknown" and row.get("client_terminal") is False for row in commands))
+            outcome = "timeout" if isinstance(problem, subprocess.TimeoutExpired) else "unknown"
+            self.assertTrue(any(row.get("outcome") == outcome and row.get("client_terminal") is False for row in commands))
         finally:
             release._smoke_budget.reset(token)
 
@@ -177,51 +185,46 @@ class SmokeDeadlineContracts(unittest.TestCase):
     def test_command_plugin_cannot_hold_pipes_past_the_smoke_deadline(self):
         import ctypes
         from ctypes import wintypes
-        original_popen = subprocess.Popen
         code = ("import subprocess,sys,time;from pathlib import Path;"
-                "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(8)']);"
-                "Path('child-pid').write_text(str(child.pid));time.sleep(15)")
-        def executable(argv, **options):
-            self.assertEqual(argv[:2], ["docker", "compose"])
-            return original_popen([sys.executable, "-c", code], **options)
+                "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)']);"
+                "Path('child-pid').write_text(str(child.pid));time.sleep(60)")
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
         with tempfile.TemporaryDirectory() as folder:
-            budget = release.SmokeBudget(3, cleanup=2)
-            token = release._smoke_budget.set(budget)
-            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-            kernel.OpenProcess.restype = wintypes.HANDLE
-            kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
-            kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
-            handles, stop = [], threading.Event()
-            def capture_child():
-                while not stop.is_set() and time.monotonic() < budget.work_end:
+            # Start the real Job-contained plugin before measuring the command deadline. Python startup under
+            # the full matrix's load is not the timeout behavior this test is checking.
+            tree = release._ProcessTree([sys.executable, "-c", code], cwd=folder)
+            handle, token = None, None
+            try:
+                ready_by = time.monotonic() + 30
+                while handle is None and time.monotonic() < ready_by:
                     try:
                         pid = int((Path(folder) / "child-pid").read_text())
-                        handle = kernel.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
-                        if handle:
-                            handles.append(handle)
-                            return
+                        handle = kernel.OpenProcess(0x00100000, False, pid) or None
                     except (OSError, ValueError):
                         pass
-                    stop.wait(0.005)
-            observer = threading.Thread(target=capture_child, daemon=True)
-            observer.start()
-            start = time.monotonic()
-            try:
-                with patch.object(release.subprocess, "Popen", side_effect=executable), self.assertRaises(subprocess.TimeoutExpired):
+                    if handle is None:
+                        time.sleep(0.01)
+                self.assertIsNotNone(handle, "plugin must be observed alive before the deadline starts")
+                budget = release.SmokeBudget(3, cleanup=2)
+                token = release._smoke_budget.set(budget)
+                start = time.monotonic()
+                with patch.object(release, "_ProcessTree", return_value=tree), self.assertRaises(subprocess.TimeoutExpired):
                     release.Runner(folder)(["docker", "compose", "run", "synthetic"], timeout=0.75)
                 self.assertLess(time.monotonic() - start, 3.5)
-                self.assertEqual(len(handles), 1, "observe the child while alive, before its PID can be reused")
-                # Keep the original process handle across termination; PID lookup after timeout can find another process.
                 remaining_ms = int(max(0, budget.end - time.monotonic()) * 1000)
-                self.assertEqual(kernel.WaitForSingleObject(handles[0], remaining_ms), 0, "plugin child must exit within the same budget")
-                self.assertLess(time.monotonic() - start, 3.5)
+                self.assertEqual(kernel.WaitForSingleObject(handle, remaining_ms), 0, "plugin must exit in the same budget")
             finally:
-                stop.set()
-                observer.join(1)
-                for handle in handles:
+                tree.kill()
+                tree.process.wait(timeout=10)
+                tree.gone(seconds=10)
+                if handle:
                     kernel.CloseHandle(handle)
-                release._smoke_budget.reset(token)
+                if token is not None:
+                    release._smoke_budget.reset(token)
 
     @unittest.skipUnless(os.name == "nt", "Windows command Job execution")
     def test_command_job_preserves_working_directory_environment_and_binary_streams(self):

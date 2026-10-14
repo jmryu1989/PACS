@@ -29,6 +29,24 @@ import ops_backup as ops
 import ops_deploy_preflight as pre
 import ops_emr_introduction as intro
 
+ACTION_CONTRACT = {
+    "capture": (("L-00a", "checkout_mode"), ("L-00b", "reconcile_checkout"), ("L-01", "baseline"),
+                ("L-04a", "fence"), ("L-04b", "capture_b0"), ("L-04c", "restore_check_b0")),
+    "release": (("RL-01", "unfence"), ("RL-02", "public_check_previous")),
+    "introduce": (("I-00", "recheck_fence"), ("L-06a", "storage"), ("L-06b", "provision"), ("L-07", "migrate"),
+                  ("L-08a", "keycloak"), ("L-08b", "member_import"), ("L-09a", "api"), ("L-09b", "proxy_ui")),
+    "verify": (("L-10a", "fenced_smoke"), ("L-10b", "probe"), ("L-10c", "capture_b1"), ("L-10d", "resume"),
+               ("L-10e", "remove_smoke_member")),
+    "reopen": (("L-11a", "final_allowlist"), ("L-11b", "restore_jobs"), ("L-11c", "reopen_ingress"), ("L-11d", "public_smoke")),
+    "rollback": (("RB-00", "classify"), ("RB-01", "preserve_failed"), ("RB-02", "restore_b0"), ("RB-03", "previous_services")),
+    "rollback_reopen": (("RB-04a", "recovery_persisted"), ("RB-04b", "fenced_previous_smoke"),
+                        ("RB-04c", "restore_jobs_after_rollback"), ("RB-04d", "reopen_previous_ingress"), ("RB-04e", "public_previous_smoke")),
+    "seed": (("S-01", "seed_check"), ("S-02", "seed_restore"), ("S-03", "seed_services")),
+    "receipt": (("RC-01", "write_receipt"),),
+}
+CONTRACT_DONE = {"capture":"HELD","release":"RELEASED","introduce":"INTRODUCED","verify":"VERIFIED","reopen":"DEPLOYED",
+                 "rollback":"RESTORED","rollback_reopen":"ROLLED_BACK","seed":"SEEDED","receipt":"RECEIPTED"}
+
 NOW = datetime(2026, 10, 13, 1, 0, tzinfo=timezone.utc)
 MIGRATIONS_BEFORE = [["0_init", "1" * 64], ["20260926130000_study_image_requests", "2" * 64]]
 MIGRATIONS_AFTER = MIGRATIONS_BEFORE + [["20261007170000_member_db_rights", "3" * 64], [intro.EMR_MIGRATION, "4" * 64],
@@ -112,7 +130,7 @@ def receipt_fixture(plan, *, created=None, **changes):
     frame = plan["smoke"]["frame"]
     created = created or datetime.now(timezone.utc) - timedelta(hours=1)
     phases = {phase: {"request_sha256": "%x" % (index + 1) * 64, "result_sha256": "c" * 64, "seconds": 1.0,
-                      "steps": [[sid, "PASS"] for sid, _, _, _ in intro.STEPS[phase]]}
+                      "steps": [[sid, "PASS"] for sid, _ in ACTION_CONTRACT[phase]]}
               for index, phase in enumerate(intro.RECEIPT_PHASES)}
     recovery = {"project": "kin-rh-0001-rbabcdef01", "pg": "kin-rh-0001-rbabcdef01_pg-db", "orthanc": "kin-rh-0001-rbabcdef01_orthanc-db"}
     body = {"schema": 2, "kind": "local-restore", "passed": True, "receipt_id": "1" * 32, "plan_core_sha256": intro.plan_core(plan),
@@ -140,6 +158,11 @@ def receipt_bundle(plan, folder, *, created=None, receipt_id="1" * 32, details=N
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     body = receipt_fixture(plan, created=created, receipt_id=receipt_id)
+    rehearsal_plan = plan_fixture(target_fixture("rehearsal"), kind="rehearsal")
+    rehearsal_plan["target_manifest_sha256"] = body["rehearsal_target_manifest_sha256"]
+    rehearsal_plan["seed"]["production_plan_sha256"] = body["production_plan_sha256"]
+    body["rehearsal_plan_sha256"] = intro.plan_identity(rehearsal_plan)
+    (folder / "plan.json").write_bytes(intro.canonical(rehearsal_plan))
     recovery = body["evidence"]["rollback"]["recovery"]
     recorded = {("seed", "S-01"): {"source_manifest_sha256": body["source_b0_manifest_sha256"]},
                 ("capture", "L-04b"): {"manifest_sha256": body["rehearsal_b0_manifest_sha256"]}, ("capture", "L-04c"): {"success": True},
@@ -152,8 +175,8 @@ def receipt_bundle(plan, folder, *, created=None, receipt_id="1" * 32, details=N
     events = []
     for phase in intro.RECEIPT_PHASES:
         item = body["phases"][phase]
-        steps = [{"step": sid, "outcome": "PASS", "detail": recorded.get((phase, sid), {})} for sid, _, _, _ in intro.STEPS[phase]]
-        ended = (status or {}).get(phase, intro.DONE[phase])
+        steps = [{"step": sid, "outcome": "PASS", "detail": recorded.get((phase, sid), {})} for sid, _ in ACTION_CONTRACT[phase]]
+        ended = (status or {}).get(phase, CONTRACT_DONE[phase])
         raw = intro.canonical({"steps": steps, "status": ended, "phase": phase, "request_sha256": item["request_sha256"],
                                "plan_sha256": body["rehearsal_plan_sha256"], "commands_file": "commands.jsonl"}) + b"\n"
         (folder / ("result-" + phase + "-" + item["request_sha256"][:16] + ".json")).write_bytes(raw)
@@ -518,6 +541,9 @@ class RequestApprovalReceiptTests(unittest.TestCase):
         changed_b1 = copy.deepcopy(good)
         changed_b1["rehearsal_b1_manifest_sha256"] = changed_b1["evidence"]["verify"]["b1_manifest_sha256"] = "0" * 64
         refuses(self, lambda: intro.receipt_valid(changed_b1, plan, "8" * 64, production, bundle=bundle), message="B1")
+        changed_target = copy.deepcopy(good)
+        changed_target["rehearsal_target_manifest_sha256"] = "0" * 64
+        refuses(self, lambda: intro.receipt_valid(changed_target, plan, "8" * 64, production, bundle=bundle))
         for name, kwargs, message in (("a phase that needed attention", {"status": {"verify": "NEEDS_ATTENTION"}}, "passed phase: verify"),
                                       ("a probe that replayed", {"details": {("verify", "L-10b"): {"added": 1, "replay_duplicates": 1,
                                                                                                    "restart": "same chain and seal",
@@ -565,7 +591,7 @@ def pre_catalog():
     return {"server_major": 16, "unsupported_verifiers": [], "login_verifiers": ["kin"], "builtin_roles": [], "settings": [],
             "setting_names": ["search_path", "statement_timeout", "work_mem"],
             "role_comments": [["kin", None]], "roles": [pg_role("kin", superuser=True, login=True)], "memberships": [],
-            "databases": [{"name": name, "owner": "kin", "acl": None} for name in ("keycloak", "kin", "postgres", "template0", "template1")],
+            "databases": [{"name": name, "owner": "kin", "acl": None, "attributes": {"datistemplate": False, "datallowconn": True}} for name in ("keycloak", "kin", "postgres", "template0", "template1")],
             "schemas": ["public"], "tablespaces": [{"name": "pg_default", "owner": "kin", "location": ""},
                                                    {"name": "pg_global", "owner": "kin", "location": ""}]}
 
@@ -897,7 +923,7 @@ class FakeOps:
         self.loaded_host = False
 
     def __getattr__(self, name):
-        if name not in {step[1] for steps in intro.STEPS.values() for step in steps} | {"revert_configuration"}:
+        if name not in {step[1] for steps in ACTION_CONTRACT.values() for step in steps} | {"revert_configuration"}:
             raise AttributeError(name)
 
         def step(context):
@@ -907,6 +933,8 @@ class FakeOps:
                 raise fault
             effect = getattr(self, "effect_" + name, None)
             result = effect(context) if effect else {}
+            if name not in ("baseline", "recheck_fence", "final_allowlist", "public_smoke", "public_previous_smoke", "public_check_previous", "write_receipt", "seed_check"):
+                context.state["host_changed"] = True
             if name in ("fence", "storage", "provision", "migrate", "capture_b1", "classify", "restore_b0", "revert_configuration", "seed_restore"):
                 self.live_roles = {"db"}
                 self.ingress_state = "closed"
@@ -982,8 +1010,7 @@ class FakeOps:
 
     # The steps' details as the real ones record them (the receipt's producer bundle is checked against them, IRT2-01).
     def effect_seed_check(self, context):
-        # The real seed admission starts and settles a certificate-inspection helper container.
-        context.state["host_changed"] = True
+        # Certificate inspection creates an owned temporary helper, without changing operating host state.
         return {"source_manifest_sha256": context.plan["seed"]["b0_manifest_sha256"]}
 
     def effect_capture_b0(self, context):
@@ -1061,7 +1088,7 @@ class MachineHarness:
     def machine(self, phase_evidence=None):
         target = target_fixture(self.kind, repository=str(self.repository))
         plan = plan_fixture(target, kind=self.kind)
-        self.plan_sha256 = "a" * 64
+        self.plan_sha256 = intro.plan_identity(plan)
         host_key = "a" * 64 if self.kind == "production" else "b" * 64
         evidence = phase_evidence if phase_evidence is not None else {}
         return intro.Introduction(plan=plan, plan_sha256=self.plan_sha256, target=target, production=production_identity(),
@@ -1084,7 +1111,7 @@ class MachineHarness:
         return {"local-restore": receipt, "local-restore-bundle": bundle}
 
     def operator_smoke(self):
-        return {"operator-smoke": {"schema": 1, "kind": "operator-smoke", "plan_sha256": "a" * 64,
+        return {"operator-smoke": {"schema": 1, "kind": "operator-smoke", "plan_sha256": self.machine().plan_sha256,
                                    "checks": {name: True for name in intro.OPERATOR_SMOKE_CHECKS}, "passed": True, "by": "executor",
                                    "at": NOW.isoformat()}}
 
@@ -1105,7 +1132,7 @@ class StateMachineTests(MachineHarness, unittest.TestCase):
         results = self.deploy_through("reopen")
         self.assertEqual([results[p]["status"] for p in results], ["HELD", "INTRODUCED", "VERIFIED", "DEPLOYED"])
         self.assertTrue(all(results[p]["phase_passed"] for p in results))
-        self.assertEqual(self.ops.calls, [name for phase in ("capture", "introduce", "verify", "reopen") for _, name, _, _ in intro.STEPS[phase]])
+        self.assertEqual(self.ops.calls, [name for phase in ("capture", "introduce", "verify", "reopen") for _, name in ACTION_CONTRACT[phase]])
         self.assertTrue(results["capture"]["lock_retained"] and results["verify"]["lock_retained"])
         self.assertFalse(self.lock_held())
         state = self.records.state()
@@ -1142,7 +1169,8 @@ class StateMachineTests(MachineHarness, unittest.TestCase):
         self.assertEqual(result["steps"][-1]["code"], "Running service images differ from the previous release")
 
     def test_28_failed_capture_keeps_writers_fenced_and_the_lock(self):
-        self.ops.faults["capture_b0"] = RuntimeError("Insufficient free space for the capture and its restore margin")
+        # This scenario has a confirmed refusal before capture writes; unclassified failures retain UNKNOWN.
+        self.ops.faults["capture_b0"] = intro.Stop("Insufficient free space for the capture and its restore margin")
         result = self.run_phase("capture")
         self.assertEqual(result["status"], "CAPTURE_FAILED")
         self.assertNotIn("unfence", self.ops.calls)
@@ -1154,7 +1182,7 @@ class StateMachineTests(MachineHarness, unittest.TestCase):
 
     def test_29_settled_failure_before_any_database_change_reverts_configuration_only(self):
         self.run_phase("capture")
-        self.ops.faults["storage"] = RuntimeError("Tablespace directory owner differs")
+        self.ops.faults["storage"] = intro.Stop("Tablespace directory owner differs")
         result = self.run_phase("introduce", self.local_restore())
         self.assertEqual(result["status"], "HELD")
         self.assertEqual(self.ops.calls[-2:], ["storage", "revert_configuration"])
@@ -1164,26 +1192,27 @@ class StateMachineTests(MachineHarness, unittest.TestCase):
 
     def test_30_settled_failure_after_the_first_database_change_rolls_back_automatically(self):
         self.run_phase("capture")
-        self.ops.faults["migrate"] = RuntimeError("Installer migration failed")
+        self.ops.faults["migrate"] = intro.Stop("Installer migration failed")
         result = self.run_phase("introduce", self.local_restore())
         # Restored, but nothing reopens before the previous version proved itself (IRT-06): fence and lock stay.
-        self.assertEqual((result["status"], result["phase_passed"], result["data_restored"]), ("RESTORED", False, True))
-        rollback = [name for _, name, _, _ in intro.STEPS["rollback"]]
+        self.assertEqual((result["status"], result["phase_passed"]), ("RESTORED", False))
+        self.assertIs(result.get("data_restored"), True)
+        rollback = [name for _, name in ACTION_CONTRACT["rollback"]]
         self.assertEqual(self.ops.calls[-len(rollback) - 1:], ["one_shots_alive", *rollback])
-        self.assertFalse({name for _, name, _, _ in intro.STEPS["rollback_reopen"]} & set(self.ops.calls),
+        self.assertFalse({name for _, name in ACTION_CONTRACT["rollback_reopen"]} & set(self.ops.calls),
                          "the rollback itself never smokes, restores jobs or opens the ingress")
         self.assertTrue(self.records.state()["rollback_attempted"])
         self.assertTrue(self.lock_held())
         refuses(self, self.run_phase, "rollback", message="cannot follow RESTORED")
         reopened = self.run_phase("rollback_reopen")
         self.assertEqual((reopened["status"], reopened["phase_passed"]), ("ROLLED_BACK", True))
-        self.assertEqual(self.ops.calls[-len(intro.STEPS["rollback_reopen"]):], [name for _, name, _, _ in intro.STEPS["rollback_reopen"]])
+        self.assertEqual(self.ops.calls[-len(ACTION_CONTRACT["rollback_reopen"]):], [name for _, name in ACTION_CONTRACT["rollback_reopen"]])
         self.assertFalse(self.lock_held())
         refuses(self, self.run_phase, "rollback", message="cannot follow ROLLED_BACK")
 
     def test_31_no_automatic_rollback_while_a_migration_worker_may_be_alive(self):
         self.run_phase("capture")
-        self.ops.faults["migrate"] = RuntimeError("Installer migration failed")
+        self.ops.faults["migrate"] = intro.Stop("Installer migration failed")
         self.ops.alive = ["kin-api-migrate-1 running"]
         result = self.run_phase("introduce", self.local_restore())
         self.assertEqual(result["status"], "NEEDS_ATTENTION")
@@ -1243,8 +1272,9 @@ class StateMachineTests(MachineHarness, unittest.TestCase):
 
     def test_36_scheduled_writer_reopen_failure_retains_point_of_no_return(self):
         self.deploy_through("verify")
-        self.ops.faults["restore_jobs"] = RuntimeError("Scheduled jobs were not restored exactly")
+        self.ops.faults["restore_jobs"] = intro.Stop("Scheduled jobs were not restored exactly")
         result = self.run_phase("reopen", self.operator_smoke())
+        self.assertIsInstance(result["ponr"], dict, "the first scheduled writer requires a durable point-of-no-return marker")
         self.assertEqual((result["status"], result["ponr"]["step"]), ("NEEDS_ATTENTION", "L-11b"))
         self.assertNotIn("reopen_ingress", self.ops.calls)
         self.assertTrue(self.lock_held())
@@ -1252,7 +1282,7 @@ class StateMachineTests(MachineHarness, unittest.TestCase):
 
     def test_37_failed_rollback_is_never_retried(self):
         self.deploy_through("verify")
-        self.ops.faults["restore_b0"] = RuntimeError("Restored row counts differ: kin")
+        self.ops.faults["restore_b0"] = intro.Stop("Restored row counts differ: kin")
         result = self.run_phase("rollback")
         self.assertEqual(result["status"], "NEEDS_ATTENTION")
         self.assertTrue(self.lock_held())
@@ -1260,21 +1290,22 @@ class StateMachineTests(MachineHarness, unittest.TestCase):
 
     def test_58_a_classification_refusal_leaves_the_single_rollback_unused(self):
         self.deploy_through("introduce")
-        self.ops.faults["classify"] = RuntimeError("A one-shot worker may still be alive; observe only")
+        self.ops.faults["classify"] = intro.Unknown("A one-shot worker may still be alive; observe only")
         result = self.run_phase("rollback")
         self.assertEqual(result["status"], "NEEDS_ATTENTION")
         self.assertIn("RB-00", result["rollback"])
         self.assertNotIn("preserve_failed", self.ops.calls)
         self.assertFalse(self.records.state()["rollback_attempted"])
         self.assertTrue(self.lock_held())
-        # Once the worker has ended, the rollback runs (once).
+        # Worker disappearance alone does not reconcile a durable UNKNOWN hold.
         self.ops.faults.clear()
-        self.assertEqual(self.run_phase("rollback")["status"], "RESTORED")
-        self.assertTrue(self.records.state()["rollback_attempted"])
+        refuses(self, self.run_phase, "rollback")
+        self.assertIsNotNone(self.records.state()["unknown_hold"])
+        self.assertFalse(self.records.state()["rollback_attempted"])
 
     def test_38_verify_failure_rolls_back_from_the_held_b0(self):
         self.deploy_through("introduce")
-        self.ops.faults["probe"] = RuntimeError("The replay added a ledger entry")
+        self.ops.faults["probe"] = intro.Stop("The replay added a ledger entry")
         result = self.run_phase("verify")
         self.assertEqual(result["status"], "RESTORED")
         self.assertIn("preserve_failed", self.ops.calls)
@@ -1340,7 +1371,7 @@ class StateMachineTests(MachineHarness, unittest.TestCase):
         for phase in ("capture", "introduce", "verify", "reopen"):
             (record,) = self.records.directory.glob("result-" + phase + "-*.json")
             steps = {step["step"]: step for step in json.loads(record.read_text())["steps"]}
-            self.assertEqual(set(steps), {sid for sid, _, _, _ in intro.STEPS[phase]})
+            self.assertEqual(set(steps), {sid for sid, _ in ACTION_CONTRACT[phase]})
             for sid in steps:
                 with self.subTest(step=sid):
                     for boundary in ("before", "after"):
@@ -1366,16 +1397,17 @@ class RoundTwoStateMachineTests(MachineHarness, unittest.TestCase):
 
     def test_61_a_receipt_is_spent_by_its_production_attempt(self):
         self.run_phase("capture")
-        self.ops.faults["storage"] = RuntimeError("Tablespace directory owner differs")
+        self.ops.faults["storage"] = intro.Stop("Tablespace directory owner differs")
         first = self.run_phase("introduce", self.local_restore())
         self.assertEqual(first["status"], "HELD")
         receipt = self.local_restore()["local-restore"]
-        self.assertEqual(self.records.state()["receipts_used"], [intro.receipt_sha256(receipt)])
+        self.assertEqual(self.records.state()["receipts_used"], [intro.receipt_use_identity(receipt)])
         calls = list(self.ops.calls)
         self.ops.faults.clear()
         refuses(self, self.run_phase, "introduce", self.local_restore(), message="already used")
         self.assertEqual(self.ops.calls, calls, "a reused receipt is refused before any step")
-        self.assertEqual(self.run_phase("introduce", self.local_restore(receipt_id="2" * 32))["status"], "INTRODUCED")
+        # A newly printed UUID is still the same rehearsal, B0 and journal.
+        refuses(self, self.run_phase, "introduce", self.local_restore(receipt_id="2" * 32))
 
     def test_62_two_approved_requests_of_one_plan_never_run_together(self):
         """IRT-04: the second of two concurrent requests (introduce/introduce, verify/rollback) is refused before it reads
@@ -1423,11 +1455,11 @@ class RoundTwoStateMachineTests(MachineHarness, unittest.TestCase):
             "        os._exit(9)\n"
             "target = t.target_fixture('production', repository=%r)\n"
             "plan = t.plan_fixture(target)\n"
-            "machine = intro.Introduction(plan=plan, plan_sha256='a' * 64, target=target, production=t.production_identity(), ops=Dying(),\n"
+            "machine = intro.Introduction(plan=plan, plan_sha256=intro.plan_identity(plan), target=target, production=t.production_identity(), ops=Dying(),\n"
             "    records=intro.Records(%r), repository=%r, host_key='a' * 64, tool=plan['tool'],\n"
             "    evidence=dict(zip(('local-restore', 'local-restore-bundle'), t.receipt_bundle(plan, %r, created=t.NOW - t.timedelta(hours=1)))),\n"
             "    clock=t.Clock(), now=lambda: t.NOW)\n"
-            "machine.run({'version': 1, 'mode': intro.MODE, 'phase': 'introduce', 'plan_sha256': 'a' * 64, 'nonce': '3' * 32}, '3' * 64)\n"
+            "machine.run({'version': 1, 'mode': intro.MODE, 'phase': 'introduce', 'plan_sha256': intro.plan_identity(plan), 'nonce': '3' * 32}, '3' * 64)\n"
         ) % (str(Path(intro.__file__).parent), str(Path(__file__).parent), str(self.repository), str(self.records.directory), str(self.repository),
              str(self.root / "bundle-dying"))
         died = subprocess.run([sys.executable, "-c", script], capture_output=True)
@@ -1450,7 +1482,7 @@ class RoundTwoStateMachineTests(MachineHarness, unittest.TestCase):
         self.deploy_through("verify")
         self.assertEqual(self.run_phase("rollback")["status"], "RESTORED")
         for step in ("recovery_persisted", "fenced_previous_smoke"):
-            self.ops.faults = {step: RuntimeError("The previous-version smoke did not run every check")}
+            self.ops.faults = {step: intro.Stop("The previous-version smoke did not run every check")}
             before = list(self.ops.calls)
             result = self.run_phase("rollback_reopen")
             with self.subTest(step=step):
@@ -1478,11 +1510,14 @@ class FakeDocker:
         self.target, self.plan = target, plan
         self.calls, self.inputs, self.envs = [], [], []
         self.containers, self.volumes, self.tags = {}, {}, {}
+        self.engine_exec = None
         self.head = plan["previous"]["sha"]
         self.config = {}           # "pinned" / "plain" -> the compose config model (dict)
         self.psql = {}             # SQL fragment -> stdout text
         self.attached = {}         # volume -> container names using it
-        self.run_output = b'KIN_RESULT {"useCaches":"false","persistentUserSessions":true}\n'
+        policy = {"browserFlow": "browser", "passwordPolicy": "", "requiredActions": [],
+                  "executions": [{"providerId": "auth-username-password-form", "requirement": "REQUIRED", "level": 1}]}
+        self.run_output = ("KIN_RESULT " + json.dumps({"useCaches": "false", "persistentUserSessions": True, "smokePolicy": policy}) + "\n").encode()
         self.failing = None        # a predicate over argv: those calls exit 1
         self.crontab = ""
         self.image_labels = {}
@@ -1502,6 +1537,12 @@ class FakeDocker:
             self.inputs.append(input)
         if self.failing and self.failing(args):
             return self.result(1, stderr=b"synthetic failure")
+        if args[:3] == ["docker", "system", "dial-stdio"]:
+            if self.engine_exec is None:
+                from ops_deploy_round5_test import EngineFixture
+                self.engine_exec = EngineFixture(self.containers, self)
+            self.engine_exec.containers = self.containers
+            return self.result(stdout=self.engine_exec(input))
         if args[:2] == ["docker", "compose"]:
             if "config" in args:
                 if "--environment" in args:
@@ -1530,7 +1571,7 @@ class FakeDocker:
                 name = args[args.index("--name") + 1]
                 self.containers[name] = {"Id": "helper-" + name, "ExecIDs": None,
                                          "Config": {"Labels": dict(args[index + 1].split("=", 1) for index, arg in enumerate(args) if arg == "--label")},
-                                         "State": {"Running": False, "Restarting": False, "Status": "exited", "ExitCode": 0}}
+                                         "State": {"Running": "-d" in args or "--detach" in args, "Restarting": False, "Status": "running" if "-d" in args or "--detach" in args else "exited", "ExitCode": 0}}
             return self.result(stdout=self.run_output(args) if callable(self.run_output) else self.run_output)
         if args[:3] == ["git", "cat-file", "blob"]:
             return self.result(stdout=self.blobs.get(args[3], b""))
@@ -1575,6 +1616,7 @@ class FakeDocker:
 
     def mutating(self):
         return [call for call in self.calls if not any(tuple(call[:len(prefix)]) == prefix for prefix in self.READ_ONLY)
+                and call[:3] != ["docker", "system", "dial-stdio"]
                 and not (call[:2] == ["docker", "compose"] and "config" in call)
                 and not (call[:2] == ["docker", "exec"] and "psql" in call and "-i" not in call)]
 
@@ -1756,7 +1798,7 @@ class HostBoundaryTests(HostHarness, unittest.TestCase):
 
         def missing(*args, **kwargs):
             raise FileNotFoundError("docker")
-        for runner, error in ((timeout, intro.Unknown), (missing, intro.Stop)):
+        for runner, error in ((timeout, intro.Unknown), (missing, intro.Unknown)):
             ops_host.run = runner
             with self.assertRaises(error):
                 ops_host.cmd(["docker", "compose", "up", "-d", "db"], mutating=True)
@@ -1876,6 +1918,7 @@ class HostBoundaryTests(HostHarness, unittest.TestCase):
                                         (None, full, False)):
             ops_host, docker, context = self.host(plan, token=token)
             context.state.update(context_state)
+            context.deadline_left = lambda: 1800
             calls = []
             with patch.object(intro, "smoke", side_effect=lambda *a, **k: calls.append(k) or answer):
                 if accepted:
@@ -3177,11 +3220,15 @@ class RoundThreeHostTests(HostHarness, unittest.TestCase):
         token = [(200, {"access_token": "t"})]
         info = {"providers": {"userSessions": {"providers": {"infinispan": {"operationalInfo": {"useCaches": "false"}}}}},
                 "features": [{"name": "PERSISTENT_USER_SESSIONS", "enabled": True}]}
+        smoke_policy = {"browserFlow": "browser", "passwordPolicy": "", "requiredActions": [], "executions": []}
+        answers.update({("GET", "/admin/realms/kin"): [(200, {"browserFlow": "browser", "passwordPolicy": ""})],
+                        ("GET", "/admin/realms/kin/authentication/required-actions"): [(200, [])],
+                        ("GET", "/admin/realms/kin/authentication/flows/browser/executions"): [(200, [])]})
         answers.update({("GET", "/realms/master"): [(404, {}), (200, {})], ("POST", "/realms/master/protocol/openid-connect/token"): token,
                         ("GET", "/admin/serverinfo"): [(404, {}), (200, info)]})
         out = subprocess.run(["node", "-e", intro.SERVERINFO_SCRIPT], env=env, capture_output=True, timeout=120)
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertEqual(intro.result_line(out.stdout), {"useCaches": "false", "persistentUserSessions": True})
+        self.assertEqual(intro.result_line(out.stdout), {"useCaches": "false", "persistentUserSessions": True, "smokePolicy": smoke_policy})
         self.assertEqual(seen.count(("GET", "/realms/master")), 2)
         self.assertEqual(seen.count(("GET", "/admin/serverinfo")), 2)
         seen.clear()
@@ -3266,7 +3313,7 @@ class RoundThreeMachineTests(MachineHarness, unittest.TestCase):
                 steps = json.loads(written.read_text())["steps"]
                 self.assertEqual([step["step"] for step in steps if step["step"] == "L-10a"], ["L-10a"])
                 if status == "VERIFIED":
-                    self.assertEqual([step["step"] for step in steps], [sid for sid, _, _, _ in intro.STEPS["verify"]])
+                    self.assertEqual([step["step"] for step in steps], [sid for sid, _ in ACTION_CONTRACT["verify"]])
                     self.assertEqual(steps[0]["detail"]["retry"], {"reason": "synthetic transient browser startup", "passed": True})
                 else:
                     self.assertIn("preserve_failed", self.ops.calls)
@@ -3284,6 +3331,7 @@ class RoundThreeMachineTests(MachineHarness, unittest.TestCase):
             result = self.run_phase("capture")
         self.assertEqual((result["status"], result["phase_passed"]), ("NEW", False))
         self.assertEqual(self.ops.calls, [])
+        self.assertEqual(len(result["steps"]), 1, "the refused entry still needs its failed before-observation record")
         self.assertEqual(result["steps"][0]["outcome"], "STOP")
         self.assertFalse(self.lock_held())
         original = self.ops.snapshot
@@ -3529,8 +3577,7 @@ class ProtectedHostTests(unittest.TestCase):
     def test_50_unapproved_or_replayed_requests_never_reach_a_step(self):
         host = intro.IntroductionHost(self.policy_path)
         raw = self.request()
-        with self.assertRaises(FileNotFoundError):
-            host.execute(raw)
+        self.assertEqual(host.execute(raw)["status"], "REJECTED")
         digest = self.approve(raw)
         calls = []
         original, key = intro.Introduction.run, intro.local_host_key
@@ -3538,8 +3585,7 @@ class ProtectedHostTests(unittest.TestCase):
         intro.local_host_key = lambda: "a" * 64
         try:
             host.execute(raw)
-            with self.assertRaises(FileExistsError):
-                host.execute(raw)
+            self.assertEqual(host.execute(raw)["status"], "REJECTED")
         finally:
             intro.Introduction.run, intro.local_host_key = original, key
         self.assertEqual(calls, [digest])
@@ -3561,8 +3607,7 @@ class ProtectedHostTests(unittest.TestCase):
         host = intro.IntroductionHost(self.policy_path)
         raw = self.request()
         self.approve(raw)
-        with self.assertRaisesRegex(intro.Stop, "writable by others"):
-            host.execute(raw)
+        self.assertEqual(host.execute(raw)["status"], "REJECTED")
         self.repo.chmod(0o700)
         os.chown(self.repo, 1001, 1001)
         with self.assertRaisesRegex(intro.Stop, "another owner"):
@@ -3678,7 +3723,10 @@ class ProtectedHostTests(unittest.TestCase):
     def test_72_the_installed_entry_writes_its_first_helper_log_and_its_phase_result(self):
         """IRT-01: the protected install creates its own 0700 run and logs directories and records the first helper's
         stdout/stderr (0600) and the phase result."""
-        result, runs, docker = self.installed_run()
+        try:
+            result, runs, docker = self.installed_run()
+        except FileNotFoundError as error:
+            self.fail("the installed entry must create its protected run/log directories: " + str(error))
         self.assertEqual((result["status"], result["phase_passed"]), ("CAPTURE_FAILED", False), result)
         self.assertEqual([(step["step"], step["outcome"]) for step in result["steps"]],
                          [("L-00a", "PASS"), ("L-00b", "PASS"), ("L-01", "PASS"), ("L-04a", "STOP")])
@@ -3732,10 +3780,13 @@ class ProtectedHostTests(unittest.TestCase):
 
     def test_84_an_open_checkout_without_the_declaration_is_refused_before_any_step(self):
         self.repo.chmod(0o775)
-        with self.assertRaises(RuntimeError):
-            self.installed_run()
+        result, runs, docker = self.installed_run()
+        self.assertEqual((result["status"], result["phase_passed"], result["phase"]),
+                         ("REJECTED", False, "capture"))
         self.assertEqual((self.repo.stat().st_mode & 0o777), 0o775)
         self.assertFalse(any((self.state / "emr-runs").iterdir()))
+        self.assertFalse(docker.calls, "an unapproved checkout mode must refuse before host commands")
+        self.assertFalse((self.repo / ".kin-ops.lock").exists())
 
     def test_74_two_approved_host_entries_never_act_together(self):
         """IRT-04 through the installed entry: of two distinct approved introduce requests, one acts, the other is refused."""
@@ -3794,8 +3845,7 @@ class ProtectedHostTests(unittest.TestCase):
         path.chmod(0o600)
         raw = self.request()
         self.approve(raw)
-        with self.assertRaisesRegex(intro.Stop, "Document bytes differ"):
-            host.execute(raw)
+        self.assertEqual(host.execute(raw)["status"], "REJECTED")
 
     def test_93_a_rollback_goes_on_with_a_reopened_checkout_mode_and_records_it_forward_phases_refuse(self):
         """D06: after the capture the checkout (0700) and its .git were opened again (chmod 0775). A rollback request is
@@ -3825,8 +3875,8 @@ class ProtectedHostTests(unittest.TestCase):
             return raw
         with patch.object(intro, "HostOps", lambda **kwargs: shared), patch.object(intro, "local_host_key", lambda: "a" * 64):
             for phase in ("introduce", "verify"):
-                with self.subTest(phase=phase), self.assertRaisesRegex(RuntimeError, "Invalid protected deployment state"):
-                    intro.IntroductionHost(self.policy_path).execute(request(phase))
+                with self.subTest(phase=phase):
+                    self.assertEqual(intro.IntroductionHost(self.policy_path).execute(request(phase))["status"], "REJECTED")
             self.assertEqual(shared.calls, [], "no forward step ran")
             result = intro.IntroductionHost(self.policy_path).execute(request("rollback"))
         self.assertEqual(result["status"], "RESTORED", result)
@@ -3844,9 +3894,8 @@ class ProtectedHostTests(unittest.TestCase):
         state.update(status="INTRODUCED", rollback_attempted=False)
         self.write(runs / "state.json", state)
         os.chown(self.repo / ".git", 1000, 1000)
-        with patch.object(intro, "HostOps", lambda **kwargs: shared), patch.object(intro, "local_host_key", lambda: "a" * 64), \
-                self.assertRaises(RuntimeError):
-            intro.IntroductionHost(self.policy_path).execute(request("rollback"))
+        with patch.object(intro, "HostOps", lambda **kwargs: shared), patch.object(intro, "local_host_key", lambda: "a" * 64):
+            self.assertEqual(intro.IntroductionHost(self.policy_path).execute(request("rollback"))["status"], "REJECTED")
 
 
 if __name__ == "__main__":

@@ -108,7 +108,7 @@ class ContainerTests(unittest.TestCase):
         existing = self.command(["docker", "ps", "-a", "--format", "{{.Names}}"])
         self.assertFalse({"kin-api", "kin-proxy"} & set(existing.splitlines()), "Existing stack; refusing rehearsal")
         self.token = uuid.uuid4().hex
-        self.network = "kin-rehearsal-" + self.token[:16]
+        self.network = os.environ.get("KIN_TEST_RESOURCE_PREFIX", "kin-rehearsal-") + self.token[:16]
         self.db = self.network + "-db"
         folder = tempfile.TemporaryDirectory(prefix="kin-host-docker-")
         self.addCleanup(folder.cleanup)
@@ -409,7 +409,7 @@ class SyntheticStack:
     def __init__(self, test, root, label, previous_sha, target_sha):
         self.test, self.label = test, label
         self.token = uuid.uuid4().hex[:10]
-        self.project = "kin-rehearsal-" + label + "-" + self.token
+        self.project = os.environ.get("KIN_TEST_RESOURCE_PREFIX", "kin-rehearsal-") + label + "-" + self.token
         self.root = root / label
         self.root.mkdir(mode=0o700)
         self.repo = self.root / "repo"
@@ -911,7 +911,7 @@ class EmrIntroductionRehearsal(unittest.TestCase):
         self.assertEqual(clone.psql(realm_smoke, "keycloak"), "0")
         self.assertEqual(list(clone.records.secrets.glob("smoke-member-*.json")), [])
         self.assertTrue(json.loads((clone.records.directory / "operator-smoke-previous.json").read_text())["passed"])
-        self.assertEqual([step["outcome"] for step in reopened["steps"]], ["PASS"] * len(intro.STEPS["rollback_reopen"]))
+        self.assertEqual([step["outcome"] for step in reopened["steps"]], ["PASS"] * 5)
         state = json.loads((clone.records.directory / "state.json").read_text())
         self.assertEqual(state["rollback_smoke"]["frame_sha256"], SYNTHETIC_FRAME["sha256"])
         # Back at the same pre-EMR point: history, data, realm (kin and keycloak together), the further roles with their
