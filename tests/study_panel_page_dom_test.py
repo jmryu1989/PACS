@@ -51,6 +51,34 @@ PANELS = [('.left', 'grow'), ('#worklist-folders-panel', 'grow'), ('#resize-main
           ('.rw', 'band'), ('#resize-top', 'below-band'), ('.workrow', 'below-band'), ('.related-p', 'below-band'),
           ('.related-list-pane', 'below-band'), ('.prior-report-pane', 'below-band'), ('.report-p', 'below-band'),
           ('.rbtns', 'below-band'), ('#findings', 'below-band'), ('#conclusion', 'below-band')]
+# W6-PAGE-22 (D1300): a decided difference from the pre-W6 baselines of the first-paint
+# (W2 9d6984b, below) and round-6 default (study_panel_size_dom_test.py) comparisons.
+# W6's shared report frame sizes Findings and Conclusion to their content (80/60 px
+# minimums, labels, Recommendation off screen) inside one scroller (.redit) of at least
+# 200 px. Excluded from those equalities, and nothing else: the two field boxes, the
+# scroller's pixels and the first-paint node delta (+ frame script + measurement iframe
+# - one heading). Here the pictures cover the current scroller's height from each page's
+# own scroller top (where the minimum moves content down, it moves it below the window at
+# these first-paint sizes); the round-6 open-panel pictures compare what the scroller
+# moves down, moved (study_panel_size_dom_test.w6_regions). W6's own page cases
+# (report_editor_frame_dom_test.py --page, incl. the PAGE-22 minimum on W3's layouts)
+# carry the excluded region.
+W6_REPORT_FIELDS = ('#findings', '#conclusion')
+W6_FIRST_PAINT_NODES = 1
+SCROLLER = '''() => { const r = document.querySelector('.redit').getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; }'''
+
+
+def without_w6_fields(facts):
+    """First-paint facts with W6's two report field boxes left out (W6-PAGE-22, D1300)."""
+    return {**facts, 'panels': [box for (name, _), box in zip(PANELS, facts['panels'], strict=True)
+                                if name not in W6_REPORT_FIELDS]}
+
+
+def cover_w6_scroller(page, height):
+    """Cover W6's scroller (W6-PAGE-22, D1300) from this page's scroller top, `height` px tall."""
+    x, y, width, _ = page.evaluate(SCROLLER)
+    cover(page, [[x, y, width, height]])
+
 # The worklist list area: what a stacked list needs to show its header and one whole row.
 LIST = '''() => { const grid = document.querySelector('.left > .grid'), table = grid.querySelector('table');
   const box = grid.getBoundingClientRect(), row = table.tBodies[0].rows[0];
@@ -1098,8 +1126,9 @@ class StudyPanelPageDOM(unittest.TestCase):
         expect(self.page.get_by_role('complementary', name='Study Panel', exact=True, include_hidden=True)).to_have_count(0)
         self.assertEqual(saved, self.local())
 
-    def first_paint(self, asset_root, version, width, height, rail=None, picture=None):
-        """Serve one tree at one size; return its first-paint facts, list area, Rail box and picture."""
+    def first_paint(self, asset_root, version, width, height, rail=None, picture=None, scroller=None):
+        """Serve one tree at one size; return its first-paint facts, list area, Rail box, picture and W6
+        scroller box. A picture covers the Rail box and `scroller` px of the W6 scroller (W6-PAGE-22, D1300)."""
         auth.ROOT = asset_root
         site = WorkspaceSite()
         context = self.browser.new_context(viewport=dict(width=width, height=height))
@@ -1126,12 +1155,14 @@ class StudyPanelPageDOM(unittest.TestCase):
             area = page.evaluate(LIST)
             control = page.get_by_role('button', name='Rail', exact=True)
             box = control.bounding_box() if control.count() else None
+            own_scroller = page.evaluate(SCROLLER)
             pixels = None
             if picture:
                 cover(page, [rail])
+                cover_w6_scroller(page, scroller)
                 pixels = first_paint_pixels(page, picture)
             self.assertEqual([], site.violations)
-            return facts, area, box and [box['x'], box['y'], box['width'], box['height']], pixels
+            return facts, area, box and [box['x'], box['y'], box['width'], box['height']], pixels, own_scroller
         finally:
             context.close()
 
@@ -1156,6 +1187,8 @@ class StudyPanelPageDOM(unittest.TestCase):
             self.assertGreaterEqual(mine['related_line'], 8, 'the band yields only to keep the prior report line in view')
         g, y = round(grown), round(yielded)
         for (name, move), theirs, ours in zip(PANELS, w2['panels'], mine['panels']):
+            if name in W6_REPORT_FIELDS:
+                continue  # W6-PAGE-22 (D1300): a decided difference, see W6_REPORT_FIELDS
             dy, dh = {'grow': (0, g), 'below-list': (g, 0), 'work-area': (g, -g), 'band': (g, -y), 'below-band': (g - y, 0)}[move]
             expected = [theirs[0], theirs[1] + dy, theirs[2], theirs[3] + dh]
             for a, b in zip(expected, ours):
@@ -1183,7 +1216,7 @@ class StudyPanelPageDOM(unittest.TestCase):
         # The baseline is the landed W2 (main 9d6984b: PR #164 W2-LAND + PR #168
         # W2-FU): D1041 6-② made W2 open Folders on every login, so W2's own first
         # paint changed by decision after the earlier W2 input 9d4ba0f, and W2-FU
-        # then changed how the footer wraps beside it. Two decided differences:
+        # then changed how the footer wraps beside it. Three decided differences:
         # - W3's Rail control shows in that open panel's title row; its measured
         #   box is masked in both pictures (the folder tree keeps W2's place).
         # - W3R-09: where W2's stacked list cannot show its header and one whole
@@ -1191,6 +1224,9 @@ class StudyPanelPageDOM(unittest.TestCase):
         #   focus, Folders and the list's place stay W2's; every panel below is W2's
         #   panel moved down (the report window band may yield for D383's prior
         #   report line), geometry and pixels alike (assert_moved_work_area).
+        # - W6-PAGE-22 (D1300, W6_REPORT_FIELDS above): the Findings/Conclusion boxes
+        #   are left out of the geometry, and the current page's scroller height is
+        #   covered in both pictures from each page's own scroller top.
         # Pixels count as equal within ANTIALIAS (16/255 per channel), not exact.
         current = auth.ROOT
         pictures = Path(os.environ.get('KIN_W3_PILOT_DIR', ROOT / 'tmp/w3-land/pilot')) / 'first-paint'
@@ -1202,24 +1238,24 @@ class StudyPanelPageDOM(unittest.TestCase):
             try:
                 for version in (None, 1, 2):
                     for width, height in ((1366,768),(1920,1080),(2560,1440),(900,1200),(768,1024),(1080,1920)):
-                        mine, area, rail, _ = self.first_paint(current, version, width, height)
+                        mine, area, rail, _, scroller = self.first_paint(current, version, width, height)
                         self.assertIsNotNone(rail)
                         name = f'v{version or 0}-{width}x{height}.png'
                         picture = (width, height) in ((1920,1080), (900,1200), (1080,1920), (768,1024))
-                        w2, w2_area, w2_rail, w2_pixels = self.first_paint(Path(temporary), version, width, height, rail,
-                            pictures / ('w2-' + name) if picture else None)
+                        w2, w2_area, w2_rail, w2_pixels, _ = self.first_paint(Path(temporary), version, width, height, rail,
+                            pictures / ('w2-' + name) if picture else None, scroller[3])
                         self.assertIsNone(w2_rail)
                         missing = w2_area['head'] + w2_area['row'] + w2_area['scrollbar'] - (w2_area['grid'][1] - w2_area['grid'][0])
                         pixels = None
                         if picture:
-                            again, _, _, pixels = self.first_paint(current, version, width, height, rail, pictures / ('current-' + name))
+                            again, _, _, pixels, _ = self.first_paint(current, version, width, height, rail, pictures / ('current-' + name), scroller[3])
                             self.assertEqual(mine, again)
                         difference_of = (lambda regions: picture_difference(self.browser, w2_pixels, pixels, regions)) if picture else None
                         with self.subTest(version=version, width=width, height=height):
                             if missing <= 0.5:
-                                self.assertEqual(w2, mine)
+                                self.assertEqual(without_w6_fields(w2), without_w6_fields(mine))
                                 if picture:
-                                    self.assertEqual(0, difference_of(None)[0].get('over'), 'first-paint pixels differ outside the logo/native checkbox/Rail')
+                                    self.assertEqual(0, difference_of(None)[0].get('over'), 'first-paint pixels differ outside the logo/native checkbox/Rail/W6 scroller')
                                 continue
                             self.assertGreater(height, width, 'only a stacked list grows')
                             need = area['head'] + area['row'] + area['scrollbar']
