@@ -942,7 +942,7 @@ with tempfile.TemporaryDirectory() as tmp:
       assert.equal(one.exit, 0, one.stderr);
       const file = path.join(tiny, 'tmp/emr-d-ci/one/run.json');
       fs.writeFileSync(file, JSON.stringify(runs(JSON.parse(fs.readFileSync(file, 'utf8')))));
-      return runStep(h, finalGate, { TARGET_SHA: head }, tiny, 'python3() { \"' + python.replace(/\\/g, '/') + '\" \"$@\"; }\n');
+      return runStep(h, finalGate, { TARGET_SHA: head }, tiny, 'python3() { "$KIN_EMR_PYTHON_EXE" "$@"; }\n');
     };
     const valid = check(run => run);
     assert.equal(valid.status, 0, 'a record of TARGET_SHA hashing its declared input as TARGET_SHA holds it passes\n' + valid.out);
@@ -1077,7 +1077,7 @@ test('EMR-D evidence: same_source.py passes only records of TARGET_SHA that hash
       const h = { flow, job: sourceJob, bash: gnuBash(), scratch, bin: fakeDockerBin(path.join(scratch, producer)) };
       const step = sourceJob.steps.find(s => s.id === 'producer-source');
       assert.ok(step, 'D5D3: producer verification exists');
-      const run = () => runStep(h, step, { TARGET_SHA: sha }, repo, 'python3() { \"' + python.replace(/\\/g, '/') + '\" \"$@\"; }\n');
+      const run = () => runStep(h, step, { TARGET_SHA: sha }, repo, 'python3() { "$KIN_EMR_PYTHON_EXE" "$@"; }\n');
       for (const id of ids.filter(id => !own.includes(id))) fs.rmSync(path.join(runs, id), { recursive: true });
       const control = run();
       assert.equal(control.status, 0, 'D5D3: producer accepts exactly its own completed records\n' + control.out);
@@ -1112,7 +1112,7 @@ test('EMR-D evidence: same_source.py passes only records of TARGET_SHA that hash
     const gateFlow = workflowOf().flow, gateJob = gateFlow.jobs['emr-d-gate'];
     const gateHarness = { flow: gateFlow, job: gateJob, bash: gnuBash(), scratch, bin: fakeDockerBin(path.join(scratch, 'final-gate')) };
     const gateStep = gateJob.steps.find(s => s.id === 'same-source');
-    const finalRun = () => runStep(gateHarness, gateStep, { TARGET_SHA: sha }, repo, 'python3() { \"' + python.replace(/\\/g, '/') + '\" \"$@\"; }\n');
+    const finalRun = () => runStep(gateHarness, gateStep, { TARGET_SHA: sha }, repo, 'python3() { "$KIN_EMR_PYTHON_EXE" "$@"; }\n');
     assert.equal(finalRun().status, 0, 'D5D3: final workflow gate accepts all seven records');
     for (const id of ids) {
       reset(); fs.rmSync(path.join(runs, id), { recursive: true });
