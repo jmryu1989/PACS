@@ -200,14 +200,17 @@ test('A-MANIFEST: canonical manifest bytes equal the hand-written string for eve
 });
 
 test('A-ORDER: objects sort by (seriesUid, sopUid, orthancId) in ASCII order, not numerically', () => {
+  // The SOP UIDs do not follow the series order (2.25.4.1 belongs to the first series), so only a series-first sort fits.
   const result = canonicalManifest(STUDY, [
     { orthancId: 'x2', seriesUid: '2.25.3', sopUid: '2.25.3.999', bytes: 2, md5: '0'.repeat(32) },
+    { orthancId: 'x4', seriesUid: '2.25.12', sopUid: '2.25.4.1', bytes: 2, md5: '3'.repeat(32) },
     { orthancId: 'x1', seriesUid: '2.25.3', sopUid: '2.25.3.1000', bytes: 2, md5: '1'.repeat(32) },
     { orthancId: 'x3', seriesUid: '2.25.12', sopUid: '2.25.12.5', bytes: 2, md5: '2'.repeat(32) },
   ]);
   assert.equal(result.ok, true);
-  assert.deepEqual(result.manifest.objects.map(o => [o.sopUid, o.path]), [
-    ['2.25.12.5', '001/00001.dcm'], ['2.25.3.1000', '002/00001.dcm'], ['2.25.3.999', '002/00002.dcm'],
+  assert.deepEqual(result.manifest.objects.map(o => [o.seriesUid, o.sopUid, o.path]), [
+    ['2.25.12', '2.25.12.5', '001/00001.dcm'], ['2.25.12', '2.25.4.1', '001/00002.dcm'],
+    ['2.25.3', '2.25.3.1000', '002/00001.dcm'], ['2.25.3', '2.25.3.999', '002/00002.dcm'],
   ]);
 });
 
