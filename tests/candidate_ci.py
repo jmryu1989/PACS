@@ -17,7 +17,8 @@ TOOLS_ROOT = Path(__file__).resolve().parents[1]
 SHA = re.compile(r"[0-9a-f]{40}")
 BASE = (
     # S7-U1a: CriticalResultInvariantTests added six live cases, 83 -> 89 (and the selection 105 -> 112).
-    ("invariants_live.py", None, "candidate-invariants", 89),
+    # CN-N01-A: OrderCorrectionInvariantTests added six live cases, 89 -> 95 (and the selection 116 -> 122).
+    ("invariants_live.py", None, "candidate-invariants", 95),
     ("e2e/test_worklist.py", None, "candidate-worklist", 15),
 )
 FLOWS = (
@@ -104,8 +105,8 @@ def exact_selection(target, runner):
         rows.append((filename, class_name, flow_unit(filename)))
         selected.append({"file": "tests/" + filename, "case": class_name + "." + method})
     require(len({row[2] for row in rows}) == len(rows), "Candidate runner units must be unique")
-    require(len(selected) == 117 and len({(x["file"], x["case"]) for x in selected}) == 117,
-            "Candidate selection must contain 117 unique exact cases")
+    require(len(selected) == 123 and len({(x["file"], x["case"]) for x in selected}) == 123,
+            "Candidate selection must contain 123 unique exact cases")
     return rows, selected
 
 
